@@ -118,7 +118,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
                "static_parameters" => %{"warnings_as_errors" => true},
                "timeout_budget_param" => "timeout",
                "timeout_budget_source" => "budgets.wall_clock_ms",
-               "timeout_max_ms" => 600_000
+               "timeout_max_ms" => 1_200_000
              }
 
       assert default["review_strategy"] == %{

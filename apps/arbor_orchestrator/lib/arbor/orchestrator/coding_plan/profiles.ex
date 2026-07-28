@@ -13,10 +13,10 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
   @template_version "coding-change-v1"
   @contract_profile_ids Plan.profile_ids()
   # Shared Shell spawn-capable ceilings — must not drift above unit admission.
-  # `:standard` is the default for ordinary Mix / security_regression paths.
+  # `:standard` remains for security_regression contained stages.
   @spawn_capable_max_timeout_ms Arbor.Shell.spawn_capable_max_timeout_ms()
-  # `:intensive` is reviewed only for cross_app contained validation stages
-  # (per-operation Mix child ceiling; hard max 1_200_000 ms).
+  # `:intensive` is reviewed for default Mix.Compile and cross_app contained
+  # validation stages (per-operation Mix child ceiling; hard max 1_200_000 ms).
   @spawn_capable_intensive_max_timeout_ms (case Arbor.Shell.spawn_capable_max_timeout_ms(
                                                   :intensive
                                                 ) do
@@ -1908,7 +1908,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                   "static_parameters" => %{"warnings_as_errors" => true},
                   "timeout_budget_param" => "timeout",
                   "timeout_budget_source" => "budgets.wall_clock_ms",
-                  "timeout_max_ms" => @spawn_capable_max_timeout_ms
+                  # Intensive Shell profile: Mix.Compile system-owned containment.
+                  "timeout_max_ms" => @spawn_capable_intensive_max_timeout_ms
                 },
                 "review_strategy" => @binding_council_review,
                 "semantic_policy" =>

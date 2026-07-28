@@ -85,13 +85,15 @@ defmodule Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifierTest do
          "path" => config.worktree_path,
          "exit_code" => 0,
          "passed" => true,
+         "reason" => nil,
          "stdout" => stdout,
          "stderr" => stderr,
          "feedback" => feedback,
          "feedback_json" => Jason.encode!(feedback),
          "validated_tree_oid" =>
            Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifierTest.candidate_tree_oid(),
-         "validated_head" => String.duplicate("b", 40)
+         "validated_head" => String.duplicate("b", 40),
+         "termination" => nil
        }}
     end
 

@@ -1208,7 +1208,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert validate["action"] == "mix_compile"
     assert validate["context_keys"] == "path,workspace_id"
     assert validate["param.warnings_as_errors"] == true
-    assert validate["param.timeout"] == 600_000
+    assert validate["param.timeout"] == 900_000
   end
 
   test "security regression compiles exact reviewed-tree bindings with a plan-bounded timeout",

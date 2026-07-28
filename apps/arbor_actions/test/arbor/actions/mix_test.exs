@@ -55,9 +55,146 @@ defmodule Arbor.Actions.MixTest do
       assert result.path == project_path
       assert result.exit_code == 0
       assert result.passed == true
+      assert result.reason == nil
+      assert result.termination == nil
       assert result.feedback["exit_code"] == 0
       assert result.feedback["passed"]
       assert Jason.decode!(result.feedback_json) == result.feedback
+    end
+
+    test "selects system-owned intensive containment for spawn-capable compile", %{
+      project_path: project_path,
+      fixture: fixture
+    } do
+      Arbor.Actions.TestMixShell.clear_last_invocation()
+
+      assert {:ok, _result} =
+               MixAction.Compile.run(
+                 %{
+                   path: project_path,
+                   workspace_id: fixture.lease.workspace_id,
+                   warnings_as_errors: true
+                 },
+                 fixture.context
+               )
+
+      invocation = Arbor.Actions.TestMixShell.last_invocation()
+      assert Keyword.fetch!(invocation.opts, :resource_profile) == :intensive
+    end
+
+    test "Compile.run projects capacity reason/envelope from exact Shell termination flags",
+         %{
+           project_path: project_path,
+           fixture: fixture
+         } do
+      Arbor.Actions.TestMixShell.clear_last_invocation()
+      Arbor.Actions.TestMixShell.clear_canned_spawn_result()
+
+      # Trusted Shell flags present: Compile.run itself must project capacity,
+      # not only helper-level shell_capacity_termination?/termination_envelope.
+      Arbor.Actions.TestMixShell.set_canned_spawn_result(%{
+        exit_code: 137,
+        stdout: "container killed near child deadline",
+        stderr: "",
+        timed_out: false,
+        killed: true,
+        output_limit_exceeded: false,
+        cancelled: false,
+        output_truncated: false
+      })
+
+      try do
+        assert {:ok, result} =
+                 MixAction.Compile.run(
+                   %{
+                     path: project_path,
+                     workspace_id: fixture.lease.workspace_id,
+                     warnings_as_errors: true
+                   },
+                   fixture.context
+                 )
+
+        invocation = Arbor.Actions.TestMixShell.last_invocation()
+        assert Keyword.fetch!(invocation.opts, :resource_profile) == :intensive
+
+        assert result.exit_code == 137
+        assert result.passed == false
+        assert result.reason == "validation_capacity_exceeded"
+
+        assert result.termination == %{
+                 "timed_out" => false,
+                 "killed" => true,
+                 "output_limit_exceeded" => false,
+                 "cancelled" => false
+               }
+
+        refute result.feedback["passed"]
+        assert result.feedback["exit_code"] == 137
+        assert Jason.decode!(result.feedback_json) == result.feedback
+        assert {:ok, _json} = Jason.encode(result)
+      after
+        Arbor.Actions.TestMixShell.clear_canned_spawn_result()
+        Arbor.Actions.TestMixShell.clear_last_invocation()
+      end
+    end
+
+    test "Compile.run keeps unflagged exit_code 137 as compile_failed despite OOM/timeout text",
+         %{
+           project_path: project_path,
+           fixture: fixture
+         } do
+      Arbor.Actions.TestMixShell.clear_last_invocation()
+      Arbor.Actions.TestMixShell.clear_canned_spawn_result()
+
+      # Observed ambiguity: exit 137 with every trusted termination flag false.
+      # Misleading timeout/OOM text must not invent capacity classification.
+      Arbor.Actions.TestMixShell.set_canned_spawn_result(%{
+        exit_code: 137,
+        stdout: "Killed: out of memory / OOM killer",
+        stderr: "error: compile timed out waiting for BEAM",
+        timed_out: false,
+        killed: false,
+        output_limit_exceeded: false,
+        cancelled: false,
+        output_truncated: false
+      })
+
+      try do
+        assert {:ok, result} =
+                 MixAction.Compile.run(
+                   %{
+                     path: project_path,
+                     workspace_id: fixture.lease.workspace_id,
+                     warnings_as_errors: true
+                   },
+                   fixture.context
+                 )
+
+        invocation = Arbor.Actions.TestMixShell.last_invocation()
+        assert Keyword.fetch!(invocation.opts, :resource_profile) == :intensive
+
+        assert result.exit_code == 137
+        assert result.passed == false
+        # No capacity: ordinary compile failure surface only.
+        assert result.reason == nil
+        assert result.termination == nil
+        refute result.feedback["passed"]
+        assert result.feedback["exit_code"] == 137
+
+        # Explicitly restate the no-heuristic contract on the observed exit.
+        refute MixAction.shell_capacity_termination?(%{
+                 exit_code: 137,
+                 stdout: result.stdout,
+                 stderr: result.stderr,
+                 timed_out: false,
+                 killed: false,
+                 output_limit_exceeded: false,
+                 cancelled: false
+               })
+      after
+        Arbor.Actions.TestMixShell.clear_canned_spawn_result()
+        Arbor.Actions.TestMixShell.clear_last_invocation()
+      end
     end
 
     test "exposes Jido action metadata" do

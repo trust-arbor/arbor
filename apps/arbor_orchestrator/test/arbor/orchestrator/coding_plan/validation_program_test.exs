@@ -19,7 +19,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationProgramTest do
            "result_adapter" => "mix_compile_v1",
            "context_keys" => ["path", "workspace_id"],
            "static_parameters" => %{
-             "timeout" => 600_000,
+             "timeout" => 900_000,
              "warnings_as_errors" => true
            }
          }},
@@ -62,7 +62,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationProgramTest do
     test "derives per-operation and aggregate timeouts from the reviewed wall-clock budget" do
       cases = [
         {"default", 120_000, %{"timeout" => 120_000, "warnings_as_errors" => true}},
-        {"default", 900_000, %{"timeout" => 600_000, "warnings_as_errors" => true}},
+        {"default", 900_000, %{"timeout" => 900_000, "warnings_as_errors" => true}},
+        {"default", 1_500_000, %{"timeout" => 1_200_000, "warnings_as_errors" => true}},
         {"security_regression", 900_000, %{"timeout" => 600_000}},
         {"cross_app", 120_000, %{"timeout" => 120_000, "test_stage_timeout" => 120_000}},
         {"cross_app", 1_500_000, %{"timeout" => 1_200_000, "test_stage_timeout" => 1_500_000}},
@@ -204,7 +205,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationProgramTest do
           "action" => "mix_compile",
           "context_keys" => "path,workspace_id",
           "output_prefix" => "validation",
-          "param.timeout" => 600_000,
+          "param.timeout" => 900_000,
           "param.warnings_as_errors" => true
         },
         "cross_app" => %{

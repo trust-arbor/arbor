@@ -2,7 +2,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCore do
   @moduledoc false
 
   alias Arbor.Contracts.Coding.{Diagnostic, ValidationCapacityHandoff, VerificationReport}
-  alias Arbor.Orchestrator.CodingPlan.ValidationProgram
+  alias Arbor.Orchestrator.CodingPlan.{ValidationCapacityTerminal, ValidationProgram}
 
   @max_raw_output_bytes 16_777_216
   @max_feedback_json_bytes 1_048_576
@@ -14,6 +14,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCore do
 
   @default_fields ~w[
     path exit_code passed stdout stderr feedback feedback_json validated_tree_oid validated_head
+    reason termination
   ]a
   @compile_feedback_fields ~w[
     exit_code passed stdout_excerpt stderr_excerpt stdout_truncated stderr_truncated
@@ -144,14 +145,20 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCore do
          true <- bounded_text?(values.path, 4_096),
          true <- valid_exit_code?(values.exit_code),
          true <- is_boolean(values.passed),
-         true <- values.passed == (values.exit_code == 0),
          true <- bounded_binary?(values.stdout, @max_raw_output_bytes),
          true <- bounded_binary?(values.stderr, @max_raw_output_bytes),
          {:ok, feedback} <-
            normalize_compile_feedback(values.feedback, values.passed, values.exit_code),
          true <- bounded_binary?(values.feedback_json, @max_feedback_json_bytes),
          true <- valid_oid?(values.validated_tree_oid),
-         true <- valid_oid?(values.validated_head) do
+         true <- valid_oid?(values.validated_head),
+         {:ok, capacity} <-
+           normalize_default_capacity(
+             values.reason,
+             values.termination,
+             values.passed,
+             values.exit_code
+           ) do
       evidence = %{
         "adapter" => "mix_compile_v1",
         "candidate_tree_oid" => values.validated_tree_oid,
@@ -161,21 +168,55 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCore do
         "feedback" => feedback
       }
 
-      assessment = %{
-        status: if(values.passed, do: "passed", else: "failed"),
-        gates: [
-          if(values.passed,
-            do: {:passed, "validation_passed"},
-            else: {:blocked, "compile_failed"}
-          )
-        ]
-      }
+      {evidence, assessment} =
+        case capacity do
+          nil ->
+            {evidence,
+             %{
+               status: if(values.passed, do: "passed", else: "failed"),
+               gates: [
+                 if(values.passed,
+                   do: {:passed, "validation_passed"},
+                   else: {:blocked, "compile_failed"}
+                 )
+               ]
+             }}
+
+          termination ->
+            {evidence
+             |> Map.put("reason", "validation_capacity_exceeded")
+             |> Map.put("termination", termination),
+             %{
+               status: "blocked",
+               gates: [{:blocked, "validation_capacity_exceeded"}]
+             }}
+        end
 
       {:ok, evidence, assessment}
     else
       _other -> :error
     end
   end
+
+  # Capacity evidence is projected only from exact Shell termination flags on
+  # Mix.Compile. Ordinary nonzero compile exits keep reason/termination nil and
+  # assess as compile_failed.
+  defp normalize_default_capacity(nil, nil, passed, exit_code)
+       when is_boolean(passed) and is_integer(exit_code) do
+    if passed == (exit_code == 0), do: {:ok, nil}, else: :error
+  end
+
+  defp normalize_default_capacity(
+         "validation_capacity_exceeded",
+         termination,
+         false,
+         exit_code
+       )
+       when is_integer(exit_code) do
+    ValidationCapacityTerminal.normalize_termination(termination)
+  end
+
+  defp normalize_default_capacity(_reason, _termination, _passed, _exit_code), do: :error
 
   defp normalize_compile_feedback(feedback, passed, exit_code) do
     with {:ok, values} <- exact_string_object(feedback, @compile_feedback_fields),

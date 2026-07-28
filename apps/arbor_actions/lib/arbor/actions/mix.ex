@@ -147,13 +147,14 @@ defmodule Arbor.Actions.Mix do
   end
 
   @doc false
-  def compile_feedback(%{exit_code: exit_code, stdout: stdout, stderr: stderr}) do
+  def compile_feedback(%{exit_code: exit_code, stdout: stdout, stderr: stderr} = result) do
     stdout = stdout || ""
     stderr = stderr || ""
+    capacity? = shell_capacity_termination?(result)
 
     %{
       "exit_code" => exit_code,
-      "passed" => exit_code == 0,
+      "passed" => exit_code == 0 and not capacity?,
       "stdout_excerpt" => bounded_excerpt(stdout),
       "stderr_excerpt" => bounded_excerpt(stderr),
       "stdout_truncated" => String.length(stdout) > @compile_feedback_text_limit,
@@ -161,6 +162,38 @@ defmodule Arbor.Actions.Mix do
       "stdout_sha256" => sha256(stdout),
       "stderr_sha256" => sha256(stderr)
     }
+  end
+
+  @doc """
+  True only when Shell reports an exact capacity-termination flag.
+
+  Never classifies from exit codes or stdout/stderr text. Used by default-profile
+  Mix.Compile to project `validation_capacity_exceeded` without mistaking ordinary
+  nonzero compile exits for infrastructure capacity.
+  """
+  @spec shell_capacity_termination?(term()) :: boolean()
+  def shell_capacity_termination?(result) when is_map(result) do
+    shell_flag?(result, :timed_out) or shell_flag?(result, :killed) or
+      shell_flag?(result, :output_limit_exceeded) or shell_flag?(result, :cancelled)
+  end
+
+  def shell_capacity_termination?(_result), do: false
+
+  @doc """
+  Closed, JSON-clean termination envelope from exact Shell boolean flags.
+  """
+  @spec termination_envelope(map()) :: %{required(String.t()) => boolean()}
+  def termination_envelope(result) when is_map(result) do
+    %{
+      "timed_out" => shell_flag?(result, :timed_out),
+      "killed" => shell_flag?(result, :killed),
+      "output_limit_exceeded" => shell_flag?(result, :output_limit_exceeded),
+      "cancelled" => shell_flag?(result, :cancelled)
+    }
+  end
+
+  defp shell_flag?(result, key) when is_atom(key) do
+    Map.get(result, key) == true or Map.get(result, Atom.to_string(key)) == true
   end
 
   defp bounded_excerpt(text) do
@@ -2699,22 +2732,39 @@ defmodule Arbor.Actions.Mix do
       Actions.emit_started(__MODULE__, params)
 
       args = build_args(params)
-      opts = MixAction.timeout_opts(params) ++ [bind_committable_tree: true]
+
+      # System-owned intensive containment for default-profile compile validation.
+      # Not caller-controlled; Shell validates the closed profile atom.
+      opts =
+        MixAction.timeout_opts(params) ++
+          [bind_committable_tree: true, resource_profile: :intensive]
 
       case MixAction.run_with_required_workspace(path, args, params, context || %{}, opts) do
         {:ok, result} ->
+          capacity? = MixAction.shell_capacity_termination?(result)
           feedback = MixAction.compile_feedback(result)
+          passed = result.exit_code == 0 and not capacity?
 
           output = %{
             path: path,
             exit_code: result.exit_code,
-            passed: result.exit_code == 0,
+            passed: passed,
+            reason:
+              if(capacity?,
+                do: "validation_capacity_exceeded",
+                else: nil
+              ),
             stdout: result.stdout,
             stderr: result.stderr,
             feedback: feedback,
             feedback_json: Jason.encode!(feedback),
             validated_tree_oid: Map.get(result, :validated_tree_oid),
-            validated_head: Map.get(result, :validated_head)
+            validated_head: Map.get(result, :validated_head),
+            termination:
+              if(capacity?,
+                do: MixAction.termination_envelope(result),
+                else: nil
+              )
           }
 
           Actions.emit_completed(__MODULE__, %{path: path, passed: output.passed})

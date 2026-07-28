@@ -380,6 +380,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerifierTest do
       path: @worktree,
       exit_code: 0,
       passed: true,
+      reason: nil,
       stdout: "compile output",
       stderr: "",
       feedback: %{
@@ -394,7 +395,8 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerifierTest do
       },
       feedback_json: "ignored feedback json",
       validated_tree_oid: validated_tree_oid,
-      validated_head: @head
+      validated_head: @head,
+      termination: nil
     }
   end
 

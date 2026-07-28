@@ -1141,6 +1141,23 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     ]
   end
 
+  defp default_capacity_validation_fixture do
+    [
+      %{
+        "path" => "/owner/worktree",
+        "exit_code" => 137,
+        "passed" => false,
+        "reason" => "validation_capacity_exceeded",
+        "termination" => %{
+          "timed_out" => false,
+          "killed" => true,
+          "output_limit_exceeded" => false,
+          "cancelled" => false
+        }
+      }
+    ]
+  end
+
   defp sha256(value) do
     Base.encode16(:crypto.hash(:sha256, value), case: :lower)
   end
@@ -1180,12 +1197,14 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       "path" => "/owner/worktree",
       "exit_code" => 0,
       "passed" => true,
+      "reason" => nil,
       "stdout" => "compile output",
       "stderr" => "",
       "feedback" => Map.delete(validation_check(), "reason"),
       "feedback_json" => "ignored raw feedback",
       "validated_tree_oid" => @verification_tree_oid,
-      "validated_head" => @verification_head_oid
+      "validated_head" => @verification_head_oid,
+      "termination" => nil
     }
   end
 
@@ -4890,6 +4909,20 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
 
       assert {:ok, _finalized} =
                CodingTaskExecutor.finalize_task("agent_1", valid, [], valid_context())
+
+      default_capacity =
+        finalize_result(root)
+        |> Map.put("status", "validation_capacity_exceeded")
+        |> Map.put("canonical_status", "validation_capacity_exceeded")
+        |> Map.put("outcome", terminal_outcome("validation_capacity_exceeded"))
+        |> Map.put("validation", default_capacity_validation_fixture())
+
+      assert {:ok, finalized_default} =
+               CodingTaskExecutor.finalize_task("agent_1", default_capacity, [], valid_context())
+
+      assert [report] = finalized_default["validation"]
+      assert report["reason"] == "validation_capacity_exceeded"
+      assert report["termination"]["killed"] == true
 
       mismatched =
         valid

@@ -854,6 +854,38 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
         :validation_hard_fail ->
           {:error, "mix compile crashed"}
 
+        :validation_capacity_exceeded ->
+          feedback = %{
+            "exit_code" => 137,
+            "passed" => false,
+            "stdout_excerpt" => "bounded capacity stdout",
+            "stderr_excerpt" => "bounded capacity stderr",
+            "stdout_truncated" => false,
+            "stderr_truncated" => false,
+            "stdout_sha256" => String.duplicate("a", 64),
+            "stderr_sha256" => String.duplicate("b", 64)
+          }
+
+          {:ok,
+           %{
+             path: "/tmp/ws_fixture_1",
+             exit_code: 137,
+             passed: false,
+             reason: "validation_capacity_exceeded",
+             stdout: "RAW_CAPACITY_STDOUT_SENTINEL",
+             stderr: "RAW_CAPACITY_STDERR_SENTINEL",
+             feedback: feedback,
+             feedback_json: Jason.encode!(feedback),
+             validated_tree_oid: String.duplicate("a", 40),
+             validated_head: String.duplicate("b", 40),
+             termination: %{
+               "timed_out" => false,
+               "killed" => true,
+               "output_limit_exceeded" => false,
+               "cancelled" => false
+             }
+           }}
+
         _ ->
           passed =
             case {scenario, n} do
@@ -893,10 +925,12 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
              path: "/tmp/ws_fixture_1",
              exit_code: if(passed, do: 0, else: 1),
              passed: passed,
+             reason: nil,
              stdout: stdout,
              stderr: stderr,
              feedback: feedback,
-             feedback_json: Jason.encode!(feedback)
+             feedback_json: Jason.encode!(feedback),
+             termination: nil
            }}
       end
     end
@@ -2234,6 +2268,37 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert Enum.at(prompts, 1) =~ "ONLY one valid JSON object and no prose or Markdown"
       refute Enum.at(prompts, 1) =~ "ONLY one JSON object"
       refute called?(calls, "coding_reviewed_commit")
+    end
+
+    test "default validation capacity exceeds without rework and retains workspace" do
+      assert {{:ok, result}, calls} = run_fixture(:validation_capacity_exceeded)
+      assert result.context["status"] == "validation_capacity_exceeded"
+      assert result.context["validation.reason"] == "validation_capacity_exceeded"
+      assert result.context["validation.passed"] == false
+
+      assert result.context["validation.termination"] == %{
+               "timed_out" => false,
+               "killed" => true,
+               "output_limit_exceeded" => false,
+               "cancelled" => false
+             }
+
+      # Infrastructure capacity is not a worker validation failure: one validate,
+      # zero validation-rework sends/counter increments, worker close, retain.
+      assert Enum.count(calls, fn {n, _} -> n == "mix_compile" end) == 1
+      assert Enum.count(calls, fn {n, _} -> n == "acp_send_message" end) == 1
+      assert_single_worker_session(calls, 1)
+      assert result.context["validation_rework_count"] in [nil, "0", 0]
+      assert result.context["total_rework_count"] in [nil, "0", 0]
+      refute "inc_validation_rework_count" in result.completed_nodes
+      refute "inc_validation_total_rework_count" in result.completed_nodes
+      refute "build_validation_rework_prompt" in result.completed_nodes
+      refute "mark_validation_rework_kind" in result.completed_nodes
+      refute called?(calls, "coding_reviewed_commit")
+      assert "status_validation_capacity_exceeded" in result.completed_nodes
+      assert "close_worker" in result.completed_nodes
+      assert_release_mode(calls, "retain")
+      assert_closed_and_released(calls)
     end
 
     test "repeated council rework exhausts only the review retry" do

@@ -74,46 +74,68 @@ defmodule Arbor.Actions.TestMixShell do
         deps_snapshot: deps_snapshot
       })
 
-      # Optional test-only: sleep for the full allocated child timeout then
-      # return success without running Mix. Proves postflight budget reserve
-      # when a child consumes its entire timeout. Not production behavior.
-      if Process.get({__MODULE__, :consume_full_timeout}) == true do
-        timeout = Keyword.get(opts, :timeout, 0)
+      # Optional test-only: return a trusted canned Shell result (with exact
+      # termination flags) without running Mix. Used to prove Mix.Compile
+      # capacity projection from flags, not exit-code heuristics.
+      case Process.get({__MODULE__, :canned_spawn_result}) do
+        canned when is_map(canned) ->
+          Process.delete({__MODULE__, :canned_spawn_result})
 
-        if is_integer(timeout) and timeout > 0 do
-          Process.sleep(timeout)
-        end
+          {:ok,
+           canned
+           |> Map.put_new(:duration_ms, System.monotonic_time(:millisecond) - started_at)
+           |> Map.put_new(:stdout, Map.get(canned, :stdout, ""))
+           |> Map.put_new(:stderr, Map.get(canned, :stderr, ""))
+           |> Map.put_new(:timed_out, false)
+           |> Map.put_new(:killed, false)
+           |> Map.put_new(:output_truncated, false)
+           |> Map.put_new(:output_limit_exceeded, false)
+           |> Map.put_new(:cancelled, false)}
 
-        {:ok,
-         %{
-           exit_code: 0,
-           stdout: "test-mix-shell: consumed full child timeout\n",
-           stderr: "",
-           duration_ms: System.monotonic_time(:millisecond) - started_at,
-           timed_out: false,
-           killed: false,
-           output_truncated: false,
-           output_limit_exceeded: false
-         }}
-      else
-        case System.cmd(wrapper, args,
-               cd: cwd,
-               env: env,
-               stderr_to_stdout: true
-             ) do
-          {output, exit_code} ->
+        _ ->
+          # Optional test-only: sleep for the full allocated child timeout then
+          # return success without running Mix. Proves postflight budget reserve
+          # when a child consumes its entire timeout. Not production behavior.
+          if Process.get({__MODULE__, :consume_full_timeout}) == true do
+            timeout = Keyword.get(opts, :timeout, 0)
+
+            if is_integer(timeout) and timeout > 0 do
+              Process.sleep(timeout)
+            end
+
             {:ok,
              %{
-               exit_code: exit_code,
-               stdout: output,
+               exit_code: 0,
+               stdout: "test-mix-shell: consumed full child timeout\n",
                stderr: "",
                duration_ms: System.monotonic_time(:millisecond) - started_at,
                timed_out: false,
                killed: false,
                output_truncated: false,
-               output_limit_exceeded: false
+               output_limit_exceeded: false,
+               cancelled: false
              }}
-        end
+          else
+            case System.cmd(wrapper, args,
+                   cd: cwd,
+                   env: env,
+                   stderr_to_stdout: true
+                 ) do
+              {output, exit_code} ->
+                {:ok,
+                 %{
+                   exit_code: exit_code,
+                   stdout: output,
+                   stderr: "",
+                   duration_ms: System.monotonic_time(:millisecond) - started_at,
+                   timed_out: false,
+                   killed: false,
+                   output_truncated: false,
+                   output_limit_exceeded: false,
+                   cancelled: false
+                 }}
+            end
+          end
       end
     end
   end
@@ -145,6 +167,15 @@ defmodule Arbor.Actions.TestMixShell do
 
   @doc false
   def clear_consume_full_timeout, do: Process.delete({__MODULE__, :consume_full_timeout})
+
+  @doc false
+  def set_canned_spawn_result(result) when is_map(result) do
+    Process.put({__MODULE__, :canned_spawn_result}, result)
+    :ok
+  end
+
+  @doc false
+  def clear_canned_spawn_result, do: Process.delete({__MODULE__, :canned_spawn_result})
 
   defp maybe_mutate_worktree(cwd) when is_binary(cwd) do
     case Process.get({__MODULE__, :mutate_worktree}) do

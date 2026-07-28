@@ -86,6 +86,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCoreTest do
 
   test "capacity, timeout, and closed security setup reasons are blocked" do
     cases = [
+      {"default", default_capacity_result(), "validation_capacity_exceeded"},
       {"cross_app", cross_capacity_result(), "validation_capacity_exceeded"},
       {"cross_app", cross_timeout_result(), "tests_timed_out"},
       {"security_regression", security_result("candidate_setup_failed"),
@@ -114,6 +115,32 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCoreTest do
 
     extra = put_in(result, [:test, "capacity_handoff", "authority"], "forbidden")
     assert_invalid_evidence("cross_app", extra)
+
+    default = default_capacity_result()
+    assert {:ok, %{"status" => "blocked"}} = verify("default", default)
+
+    # Exit-code / output-text heuristics must not invent capacity.
+    assert_invalid_evidence(
+      "default",
+      default_result(exit_code: 137)
+      |> Map.put(:reason, "validation_capacity_exceeded")
+      |> Map.put(:termination, nil)
+    )
+
+    assert_invalid_evidence(
+      "default",
+      Map.put(default, :termination, Map.put(default.termination, "timed_out", "true"))
+    )
+
+    assert_invalid_evidence(
+      "default",
+      Map.put(default, :termination, %{
+        "timed_out" => false,
+        "killed" => false,
+        "output_limit_exceeded" => false,
+        "cancelled" => false
+      })
+    )
   end
 
   test "atom producer returns and recursively string-keyed Engine projections digest identically" do
@@ -372,13 +399,30 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCoreTest do
       path: "/owner/worktree",
       exit_code: exit_code,
       passed: passed,
+      reason: nil,
       stdout: "compile output",
       stderr: "",
       feedback: raw_feedback(passed, exit_code),
       feedback_json: "ignored feedback json",
       validated_tree_oid: @sha1,
-      validated_head: @candidate_commit
+      validated_head: @candidate_commit,
+      termination: nil
     }
+  end
+
+  defp default_capacity_result do
+    default_result(exit_code: 137)
+    |> Map.merge(%{
+      passed: false,
+      reason: "validation_capacity_exceeded",
+      feedback: raw_feedback(false, 137),
+      termination: %{
+        "timed_out" => false,
+        "killed" => true,
+        "output_limit_exceeded" => false,
+        "cancelled" => false
+      }
+    })
   end
 
   defp raw_feedback(passed, exit_code) do
