@@ -230,7 +230,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
 
     prompt_mutations =
       for {node_id, fragment} <- [
-            {"build_design_envelope_repair_prompt", "exactly two string fields"},
+            {"build_design_envelope_repair_prompt", "exactly one string field"},
             {"build_validation_rework_prompt", "{ctx.coding_plan_work_packet_json}"},
             {"build_review_rework_prompt", "{ctx.accepted_design_request_id}"},
             {"build_operator_rework_prompt", "{ctx.accepted_design_evidence_json}"}

@@ -365,8 +365,8 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
             design =
               "Fixture design attempt #{attempt}: update the owned module and run focused tests."
 
-            digest = "sha256:" <> (:crypto.hash(:sha256, design) |> Base.encode16(case: :lower))
-            envelope = Jason.encode!(%{"design" => design, "design_digest" => digest})
+            # Worker supplies design only; Arbor owns and computes design_digest.
+            envelope = Jason.encode!(%{"design" => design})
 
             if scenario == :design_streamed_duplicate_envelope do
               "I inspected the task and will now return the required payload." <>

@@ -322,7 +322,7 @@ digraph CodingChangeV1 {
     type="transform",
     transform="template",
     source_key="task",
-    expression="DESIGN phase only. Task: {value}. Do not edit files and do not create commits. Return a design checkpoint envelope.",
+    expression="DESIGN phase only. Task: {value}. Do not edit files and do not create commits. Return ONLY one valid JSON object with exactly one string field: {\"design\":\"the exact design text\"}. Arbor computes the digest after admission.",
     output_key="prompt"
   ]
 
@@ -364,7 +364,7 @@ digraph CodingChangeV1 {
     type="transform",
     transform="template",
     source_key="task",
-    expression="DESIGN envelope repair only. Task: {value}. Do not edit files and do not create commits. Return the prior design as a valid design checkpoint envelope.",
+    expression="DESIGN envelope repair only. Task: {value}. Do not edit files and do not create commits. Return ONLY one valid JSON object with exactly one string field: {\"design\":\"the exact design text\"}. Arbor computes the digest after admission.",
     output_key="prompt"
   ]
 
@@ -548,7 +548,7 @@ digraph CodingChangeV1 {
     type="transform",
     transform="template",
     source_key="task",
-    expression="DESIGN rework only. Task: {value}. Operator note: {ctx.approval_note}. Do not edit files and do not create commits. Return a corrected design checkpoint envelope.",
+    expression="DESIGN rework only. Task: {value}. Operator note: {ctx.approval_note}. Do not edit files and do not create commits. Return ONLY one valid JSON object with exactly one string field: {\"design\":\"the exact corrected design text\"}. Arbor computes the digest after admission.",
     output_key="prompt"
   ]
 

@@ -2537,7 +2537,9 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
            "{ctx.coding_plan_work_packet_json}",
            "MUST NOT edit",
            "MUST NOT create commits",
-           "design_digest"
+           "exactly one string field",
+           "{\"design\":",
+           "Arbor computes the digest after admission"
          ]},
         {"build_design_envelope_repair_prompt",
          [
@@ -2547,8 +2549,9 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
            "{ctx.design_attempt}",
            "MUST NOT edit",
            "MUST NOT create commits",
-           "exactly two string fields",
-           "design_digest"
+           "exactly one string field",
+           "{\"design\":",
+           "Arbor computes the digest after admission"
          ]},
         {"build_design_rework_prompt",
          [
@@ -2558,7 +2561,9 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
            "{ctx.approval_note}",
            "MUST NOT edit",
            "MUST NOT create commits",
-           "design_digest"
+           "exactly one string field",
+           "{\"design\":",
+           "Arbor computes the digest after admission"
          ]},
         {"build_implement_prompt",
          [

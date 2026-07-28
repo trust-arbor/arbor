@@ -892,9 +892,9 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
       "Produce a concrete implementation design satisfying that packet. " <>
       "You MUST NOT edit, create, delete, or rename files; MUST NOT run commands that modify " <>
       "the worktree; and MUST NOT create commits or otherwise change HEAD. " <>
-      "Return ONLY one valid JSON object with exactly two string fields: " <>
-      "{\"design\":\"the exact design text\",\"design_digest\":\"sha256:<64 lowercase hex>\"}. " <>
-      "design_digest MUST be the SHA-256 of the exact UTF-8 bytes of the design field."
+      "Return ONLY one valid JSON object with exactly one string field: " <>
+      "{\"design\":\"the exact design text\"}. " <>
+      "Arbor computes the digest after admission."
   end
 
   defp design_rework_prompt do
@@ -904,9 +904,9 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
       "Correct the design to satisfy the packet and operator note. " <>
       "You MUST NOT edit, create, delete, or rename files; MUST NOT run commands that modify " <>
       "the worktree; and MUST NOT create commits or otherwise change HEAD. " <>
-      "Return ONLY one valid JSON object with exactly two string fields: " <>
-      "{\"design\":\"the exact corrected design text\",\"design_digest\":\"sha256:<64 lowercase hex>\"}. " <>
-      "design_digest MUST be the SHA-256 of the exact UTF-8 bytes of the design field."
+      "Return ONLY one valid JSON object with exactly one string field: " <>
+      "{\"design\":\"the exact corrected design text\"}. " <>
+      "Arbor computes the digest after admission."
   end
 
   defp design_envelope_repair_prompt do
@@ -916,9 +916,9 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
       "Design attempt: {ctx.design_attempt}. Preserve the preceding design's meaning; repair " <>
       "only its terminal envelope. You MUST NOT edit, create, delete, or rename files; MUST " <>
       "NOT run commands that modify the worktree; and MUST NOT create commits or otherwise " <>
-      "change HEAD. Return ONLY one valid JSON object with exactly two string fields: " <>
-      "{\"design\":\"the exact design text\",\"design_digest\":\"sha256:<64 lowercase hex>\"}. " <>
-      "design_digest MUST be the SHA-256 of the exact UTF-8 bytes of the design field."
+      "change HEAD. Return ONLY one valid JSON object with exactly one string field: " <>
+      "{\"design\":\"the exact design text\"}. " <>
+      "Arbor computes the digest after admission."
   end
 
   defp approved_implementation_prompt do
