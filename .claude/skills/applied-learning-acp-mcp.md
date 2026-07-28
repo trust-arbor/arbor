@@ -616,3 +616,15 @@ when the packet values are identical. Construct the exact packet and call
 digest mismatch is a typed plan-admission failure and should consume no worker
 resources (found 2026-07-28 while dispatching the security-regression
 attestation preflight correction).
+
+<!-- applied-learning: preflight-security-regression-selectors-before-reviewer-egress -->
+<a id="applied-learning-preflight-security-regression-selectors-before-reviewer-egress"></a>
+**Preflight security-regression selectors before reviewer egress.** For a bound
+`security_regression` review, materialize the exact candidate commit and prove
+every sorted, bounded test path exists in that commit before calling any council
+provider. Return only a bounded path-aware admission reason; discard the
+preflight material and rematerialize after a keep verdict so the final
+attestation still binds the reviewed diff. A missing selector is an Arbor
+readiness defect, not something reviewers should spend tokens discovering
+(found 2026-07-28 after a delegated security-regression candidate selected a
+test absent from its commit).

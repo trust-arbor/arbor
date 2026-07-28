@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-07-28",
-  "entry_count": 554,
+  "entry_count": 558,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -6746,8 +6746,60 @@
       "source_incident": "found 2026-07-28 while dispatching the security-regression attestation preflight correction).",
       "content_sha256": "1d9f48f7318c4d38fd86675120a484c68a37e63c9af0a97a3819186b75d903ec",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 555,
+      "source_kind": "post-migration",
+      "slug": "preflight-security-regression-selectors-before-reviewer-egress",
+      "title": "Preflight security-regression selectors before reviewer egress.",
+      "topic": "acp-mcp",
+      "destination": ".claude/skills/applied-learning-acp-mcp.md",
+      "anchor": "applied-learning-preflight-security-regression-selectors-before-reviewer-egress",
+      "source_date": "2026-07-28",
+      "source_incident": "found 2026-07-28 after a delegated security-regression candidate selected a test absent from its commit).",
+      "content_sha256": "cd9cc79eaec7efa4886b942bfd25b148498e8171e7835a7083110907ad1e5d94",
+      "always_loaded": false
+    },
+    {
+      "source_ordinal": 556,
+      "source_kind": "post-migration",
+      "slug": "recompile-the-live-runtime-after-integrating-action-or-handler-beams",
+      "title": "Recompile the live runtime after integrating action or handler BEAMs.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-recompile-the-live-runtime-after-integrating-action-or-handler-beams",
+      "source_date": "2026-07-28",
+      "source_incident": "found 2026-07-28 before the validation-capacity coding canary).",
+      "content_sha256": "7e15b29a4b0155ae01fdf98d0f33a7c6ef12869d4db72090a94e448d4cef542e",
+      "always_loaded": false
+    },
+    {
+      "source_ordinal": 557,
+      "source_kind": "post-migration",
+      "slug": "cancellation-tests-must-synchronize-on-the-cancellable-phase",
+      "title": "Cancellation tests must synchronize on the cancellable phase.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-cancellation-tests-must-synchronize-on-the-cancellable-phase",
+      "source_date": "2026-07-28",
+      "source_incident": "found 2026-07-28 when an independently reviewed candidate crossed a brittle two-second startup assertion).",
+      "content_sha256": "de358cff37fe563f0ea44bf903b479bbd3a116fcf597bb8b3ab0e41b9e0050db",
+      "always_loaded": false
+    },
+    {
+      "source_ordinal": 558,
+      "source_kind": "post-migration",
+      "slug": "classify-validation-capacity-only-from-trusted-shell-termination-flags",
+      "title": "Classify validation capacity only from trusted Shell termination flags.",
+      "topic": "shell-containment",
+      "destination": ".claude/skills/applied-learning-shell-containment.md",
+      "anchor": "applied-learning-classify-validation-capacity-only-from-trusted-shell-termination-flags",
+      "source_date": "2026-07-28",
+      "source_incident": "found 2026-07-28 after a default compile hit its exact stage deadline and was incorrectly treated as a code defect).",
+      "content_sha256": "ef83eab6006ed78adfebd315e757ab3ab4fc92a436108042e17977b9da54724b",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 93
+  "post_migration_entry_count": 97
 }

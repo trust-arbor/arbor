@@ -544,3 +544,25 @@ raises instead of assigning the comprehension. Use `@items (for ... do ...
 end)` or an `Enum` pipeline expression; compile the touched module before
 treating formatter success as syntax validation (found 2026-07-28 while adding
 the executable coding-profile declaration guard).
+
+<!-- applied-learning: recompile-the-live-runtime-after-integrating-action-or-handler-beams -->
+<a id="applied-learning-recompile-the-live-runtime-after-integrating-action-or-handler-beams"></a>
+**Recompile the live runtime after integrating action or handler BEAMs.** Coding
+plans bind the loaded action catalog and handler identities before execution, so
+source integration alone does not update a long-running node. An
+`action_catalog_invalid` readiness terminal is the correct fail-closed signal
+for loaded/on-disk drift, not a worker defect or a reason to rework the
+candidate. Run the supported `./bin/mix arbor.recompile`, verify loaded
+identities, and restart only when the supported reload cannot converge (found
+2026-07-28 before the validation-capacity coding canary).
+
+<!-- applied-learning: cancellation-tests-must-synchronize-on-the-cancellable-phase -->
+<a id="applied-learning-cancellation-tests-must-synchronize-on-the-cancellable-phase"></a>
+**Cancellation tests must synchronize on the cancellable phase.** A coding
+executor can spend variable time constructing an execution manifest and hashing
+loaded BEAM identities before its runner starts. Wait for the runner-start
+message with a realistic bounded timeout, distinguish an early owner result
+from a startup timeout, and only then kill the owner and assert linked-child
+termination. A short fixed delay tests code-server scheduling rather than
+cancellation semantics (found 2026-07-28 when an independently reviewed
+candidate crossed a brittle two-second startup assertion).

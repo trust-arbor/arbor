@@ -203,3 +203,14 @@ before disconnect; keep hard/inactivity recovery reply-first when the session mu
 <!-- applied-learning: the-working-grok-no-shell-boundary-is-an-attested-arbor-owned-profile -->
 <a id="applied-learning-the-working-grok-no-shell-boundary-is-an-attested-arbor-owned-profile"></a>
 **The working Grok no-shell boundary is an attested Arbor-owned profile.** Stage a private `0600` `--agent-profile` with exact bytes, path, type, and mode attested at launch and reconnect; expose native file tools while disallowing `run_terminal_cmd`, `task`, `get_task_output`, and `kill_task`. The proof must be capability-backed and include both a denied terminal marker and a successful native edit (found 2026-07-19 during Grok ACP containment work).
+
+<!-- applied-learning: classify-validation-capacity-only-from-trusted-shell-termination-flags -->
+<a id="applied-learning-classify-validation-capacity-only-from-trusted-shell-termination-flags"></a>
+**Classify validation capacity only from trusted Shell termination flags.** Exit
+137 is ambiguous and can be produced by the program itself; output text is
+candidate-controlled. Project `validation_capacity_exceeded` only when Shell
+sets an exact boolean timeout, kill, output-limit, or cancellation flag, carry a
+closed JSON-clean termination envelope, and otherwise preserve the ordinary
+compile failure. Route trusted capacity terminals directly to owner recovery
+without consuming worker rework (found 2026-07-28 after a default compile hit
+its exact stage deadline and was incorrectly treated as a code defect).
