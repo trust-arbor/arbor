@@ -123,17 +123,18 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     refute_received {:mix_invocation, _}
   end
 
-  test "structural capacity admission hands off the complete suffix before launch", %{
+  test "ceiling-sum exceeding stage budget still launches the first child", %{
     worktree: worktree
   } do
     parent = self()
     mkdir_app_tests!(worktree, ["alpha", "beta"])
 
-    Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, args, _opts ->
-      send(parent, {:unexpected_mix_invocation, args})
-      flunk("structurally impossible plan must not launch a child")
+    Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, args, opts ->
+      send(parent, {:mix_invocation, args, opts})
+      {:ok, %{exit_code: 0, stdout: "ok", stderr: "", timed_out: false}}
     end)
 
+    # 2 app batches * 5_000 ceiling > 5_000 stage budget, but residual > 0.
     check =
       Shell.run_app_tests(
         worktree,
@@ -142,12 +143,39 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
         5_000
       )
 
+    assert check["passed"] == true
+    assert_receive {:mix_invocation, ["test", "--" | _paths], opts}
+    assert Keyword.get(opts, :timeout) == 5_000
+    assert_receive {:mix_invocation, ["test", "--" | _], _}
+  end
+
+  test "exhausted residual before first child hands off structurally without launch", %{
+    worktree: worktree
+  } do
+    parent = self()
+    mkdir_app_tests!(worktree, ["alpha", "beta"])
+
+    Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, args, _opts ->
+      send(parent, {:unexpected_mix_invocation, args})
+      flunk("exhausted residual must not launch a child")
+    end)
+
+    # test_stage_timeout 0 => available residual 0 before first child.
+    check =
+      Shell.run_app_tests(
+        worktree,
+        ["apps/alpha/test", "apps/beta/test"],
+        5_000,
+        0
+      )
+
     assert check["reason"] == "validation_capacity_exceeded"
+    assert check["capacity_handoff"]["schema_version"] == 2
     assert check["capacity_handoff"]["phase"] == "structural"
-    assert check["capacity_handoff"]["available_budget_ms"] == 5_000
-    assert check["capacity_handoff"]["required_budget_ms"] == 10_000
+    assert check["capacity_handoff"]["available_budget_ms"] == 0
     assert check["capacity_handoff"]["completed_batch_count"] == 0
     assert check["capacity_handoff"]["unstarted_file_count"] == 2
+    refute Map.has_key?(check["capacity_handoff"], "required_budget_ms")
     assert {:ok, _} = Jason.encode(check)
     refute_received {:unexpected_mix_invocation, _}
   end
@@ -183,9 +211,12 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
 
     refute check["passed"]
     assert check["reason"] == "validation_capacity_exceeded"
+    assert check["capacity_handoff"]["schema_version"] == 2
     assert check["capacity_handoff"]["phase"] == "runtime"
+    assert check["capacity_handoff"]["available_budget_ms"] == 0
     assert check["capacity_handoff"]["completed_batch_count"] == 1
     assert check["capacity_handoff"]["unstarted_batch_count"] == 1
+    refute Map.has_key?(check["capacity_handoff"], "required_budget_ms")
     assert check["stdout_excerpt"] == ""
 
     assert check["capacity_handoff"]["unstarted_batches"] == [
@@ -459,7 +490,10 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
 
     refute check["passed"]
     assert check["reason"] == "validation_capacity_exceeded"
+    assert check["capacity_handoff"]["schema_version"] == 2
     assert check["capacity_handoff"]["phase"] == "runtime"
+    assert check["capacity_handoff"]["available_budget_ms"] == 0
+    refute Map.has_key?(check["capacity_handoff"], "required_budget_ms")
 
     assert check["capacity_handoff"]["unstarted_batches"] == [
              %{

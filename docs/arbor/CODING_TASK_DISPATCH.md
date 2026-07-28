@@ -353,15 +353,31 @@ existing error path and one-shot uncertain-send recovery. Callers that omit
 `failure_mode` retain the original `{:error, reason}` action contract.
 
 `validation_capacity_exceeded` is a distinct infrastructure handoff, not a
-worker validation failure. It means the complete exact-file batch plan cannot
-fit the reviewed aggregate validation budget, either before the first child or
-after completed children consume the remaining budget. The workflow bypasses
-validation and total rework counters, closes the worker, and retains the
-workspace. `validation[0].test.capacity_handoff` is a closed, bounded descriptor
-whose ordered batch labels and SHA-256 digests bind the exact unstarted
-inventory without copying raw paths into the terminal artifact; an authorized
-operator or CI job can reconstruct those paths from the retained workspace and
-verify the digest chain.
+worker validation failure. Cross-app focused tests run **sequentially under one
+shared absolute aggregate deadline**. Each Mix child is capped by
+`min(intensive per-operation ceiling, remaining aggregate budget)`. Admission
+starts the first reviewed batch whenever residual aggregate budget is
+positive — per-batch timeout ceilings are **never** multiplied by batch count
+as a predicted total duration.
+
+A capacity handoff is emitted only when residual budget is exhausted
+(`available_budget_ms == 0`):
+
+- **structural** — residual is already 0 before the first child launches
+- **runtime** — the shared deadline expires after a completed prefix, leaving
+  an exact unstarted suffix
+
+The workflow bypasses validation and total rework counters, closes the worker,
+and retains the workspace. Live `validation[0].test.capacity_handoff` is schema
+**v2**: a closed, bounded descriptor whose ordered batch labels, counts, and
+SHA-256 digests bind the exact unstarted inventory without copying raw paths
+into the terminal artifact and without encoding ceiling products as required
+duration. An authorized operator or CI job can reconstruct paths from the
+retained workspace and verify the digest chain. Callers that already read
+historical schema-v1 handoffs (which recorded a product-bearing
+`required_budget_ms`) can validate them with the explicit archive-only
+verifier. Arbor does not currently expose an integrated terminal archive reader
+for that helper; live normalize/finalize/write paths accept v2 only.
 
 ## Post-integration settlement
 

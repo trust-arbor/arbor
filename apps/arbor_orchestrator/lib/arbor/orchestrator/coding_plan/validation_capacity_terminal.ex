@@ -4,6 +4,10 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationCapacityTerminal do
   # Shared terminal capacity normalization/validation for coding results.
   # Accepts the default Mix.Compile termination envelope and the existing
   # CrossApp batch handoff without conflating the two shapes.
+  #
+  # Live write/finalize/normalize paths accept schema-v2 handoffs only.
+  # Callers that already hold historical schema-v1 evidence may verify it
+  # explicitly via `verify_archived_capacity_handoff/1`; no live path calls it.
 
   alias Arbor.Contracts.Coding.ValidationCapacityHandoff
 
@@ -102,6 +106,38 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationCapacityTerminal do
   @doc "Return true only for a closed, capacity-bearing default termination envelope."
   @spec valid_termination?(term()) :: boolean()
   def valid_termination?(termination), do: match?({:ok, _}, normalize_termination(termination))
+
+  @doc """
+  Explicit verification of a capacity handoff read from historical storage.
+
+  Schema v2 uses the live normalize path. Schema v1 uses the archive-only
+  contract API. Any other version or shape fails closed. This helper does not
+  read storage itself and is not used by live write, finalize, or candidate
+  verification paths.
+  """
+  @spec verify_archived_capacity_handoff(term()) :: {:ok, map()} | :error
+  def verify_archived_capacity_handoff(handoff) when is_map(handoff) and not is_struct(handoff) do
+    case Map.get(handoff, "schema_version") || Map.get(handoff, :schema_version) do
+      2 ->
+        case ValidationCapacityHandoff.normalize(handoff) do
+          {:ok, normalized} -> {:ok, normalized}
+          {:error, _} -> :error
+        end
+
+      1 ->
+        case ValidationCapacityHandoff.normalize_archived_v1(handoff) do
+          {:ok, normalized} -> {:ok, normalized}
+          {:error, _} -> :error
+        end
+
+      _other ->
+        :error
+    end
+  rescue
+    _ -> :error
+  end
+
+  def verify_archived_capacity_handoff(_handoff), do: :error
 
   defp normalize_capacity_validation(validation) do
     with [report] when is_map(report) and not is_struct(report) <- validation,

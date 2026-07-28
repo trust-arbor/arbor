@@ -110,7 +110,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCoreTest do
     assert {:ok, report} = verify("cross_app", result)
     assert report["status"] == "blocked"
 
-    tampered = put_in(result, [:test, "capacity_handoff", "required_budget_ms"], 2_000)
+    tampered = put_in(result, [:test, "capacity_handoff", "available_budget_ms"], 1)
     assert_invalid_evidence("cross_app", tampered)
 
     extra = put_in(result, [:test, "capacity_handoff", "authority"], "forbidden")
@@ -558,7 +558,6 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCoreTest do
         "phase" => "structural",
         "available_budget_ms" => 0,
         "per_batch_budget_ms" => 1_000,
-        "required_budget_ms" => 1_000,
         "completed_batch_count" => 0,
         "completed_file_count" => 0,
         "unstarted_batch_count" => 1,

@@ -1372,7 +1372,7 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
              Core.next_test_step(10_000, forged_split, 10_000)
   end
 
-  test "structural admission binds the exact ordered unstarted inventory" do
+  test "many-batch plan whose ceiling product exceeds residual still admits" do
     files = [
       "apps/alpha/test/a_test.exs",
       "apps/alpha/test/b_test.exs",
@@ -1380,13 +1380,26 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
     ]
 
     assert {:ok, batches} = Core.partition_test_batches(files)
-    assert {:capacity_exceeded, check} = Core.admit_test_batches(batches, 1_000, 1_000)
+    # 2 batches * 5_000 ceiling = 10_000 > available 5_000, but residual > 0.
+    assert :ok = Core.admit_test_batches(batches, 5_000, 5_000)
+  end
+
+  test "zero residual before first child binds structural unstarted inventory" do
+    files = [
+      "apps/alpha/test/a_test.exs",
+      "apps/alpha/test/b_test.exs",
+      "apps/beta/test/c_test.exs"
+    ]
+
+    assert {:ok, batches} = Core.partition_test_batches(files)
+    assert {:capacity_exceeded, check} = Core.admit_test_batches(batches, 0, 1_000)
 
     assert check["reason"] == "validation_capacity_exceeded"
     handoff = check["capacity_handoff"]
+    assert handoff["schema_version"] == 2
     assert handoff["phase"] == "structural"
-    assert handoff["available_budget_ms"] == 1_000
-    assert handoff["required_budget_ms"] == length(batches) * 1_000
+    assert handoff["available_budget_ms"] == 0
+    refute Map.has_key?(handoff, "required_budget_ms")
     assert handoff["completed_batch_count"] == 0
     assert handoff["completed_file_count"] == 0
     assert handoff["unstarted_batch_count"] == length(batches)
@@ -1394,11 +1407,39 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
     assert Enum.all?(handoff["unstarted_batches"], &(not Map.has_key?(&1, "paths")))
     assert handoff["per_batch_budget_ms"] == 1_000
 
-    assert handoff["required_budget_ms"] ==
-             handoff["unstarted_batch_count"] * handoff["per_batch_budget_ms"]
-
     assert Arbor.Contracts.Coding.ValidationCapacityHandoff.valid?(handoff)
     assert {:ok, _} = Jason.encode(check)
+  end
+
+  test "capacity_handoff/5 rejects positive residual and binds runtime suffix" do
+    # Cross-app roots force multiple batches so a completed prefix leaves a suffix.
+    files = [
+      "apps/alpha/test/a1_test.exs",
+      "apps/beta/test/b1_test.exs",
+      "apps/gamma/test/g1_test.exs"
+    ]
+
+    assert {:ok, batches} = Core.partition_test_batches(files)
+    assert length(batches) >= 2
+    [first | rest] = batches
+
+    assert {:error, :invalid_capacity_handoff} =
+             Core.capacity_handoff(:runtime, 1, 1_000, [first], rest)
+
+    assert {:ok, check} = Core.capacity_handoff(:runtime, 0, 1_000, [first], rest)
+    handoff = check["capacity_handoff"]
+    assert handoff["schema_version"] == 2
+    assert handoff["phase"] == "runtime"
+    assert handoff["available_budget_ms"] == 0
+    assert handoff["completed_batch_count"] == 1
+    assert handoff["unstarted_batch_count"] == length(rest)
+    refute Map.has_key?(handoff, "required_budget_ms")
+    assert Arbor.Contracts.Coding.ValidationCapacityHandoff.valid?(handoff)
+  end
+
+  test "malformed batch plan fails closed at admission" do
+    assert {:error, :invalid_test_batch_plan} =
+             Core.admit_test_batches([%{not: :a_batch}], 10_000, 1_000)
   end
 
   defp signed_batch(paths, index, total) do

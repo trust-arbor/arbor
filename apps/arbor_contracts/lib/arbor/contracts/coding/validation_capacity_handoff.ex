@@ -2,6 +2,16 @@ defmodule Arbor.Contracts.Coding.ValidationCapacityHandoff do
   @moduledoc """
   Closed, bounded evidence for a coding-validation capacity handoff.
 
+  The handoff means residual aggregate budget cannot start the next exact batch
+  under the shared sequential deadline. `per_batch_budget_ms` is the intensive
+  **child timeout ceiling**, not a predicted or required total duration.
+
+  Live write/normalize path is schema **v2 only**. Historical schema-v1
+  evidence (which encoded ceiling products as `required_budget_ms`) can be
+  verified only through the explicit `normalize_archived_v1/1` API by callers
+  that already hold archived evidence — never through generic `new/1`,
+  `normalize/1`, or `valid?/1`.
+
   The handoff binds the exact ordered unstarted inventory through per-batch
   path digests and a recomputable ordered-plan digest. Filenames remain in the
   retained workspace and authorized inventory; they are intentionally absent
@@ -10,9 +20,24 @@ defmodule Arbor.Contracts.Coding.ValidationCapacityHandoff do
 
   use TypedStruct
 
-  @schema_version 1
+  @schema_version 2
+  @archived_schema_version 1
   @phases ~w(structural runtime)
   @fields [
+    :schema_version,
+    :phase,
+    :available_budget_ms,
+    :per_batch_budget_ms,
+    :completed_batch_count,
+    :completed_file_count,
+    :unstarted_batch_count,
+    :unstarted_file_count,
+    :total_batch_count,
+    :total_file_count,
+    :ordered_plan_sha256,
+    :unstarted_batches
+  ]
+  @archived_v1_fields [
     :schema_version,
     :phase,
     :available_budget_ms,
@@ -43,13 +68,12 @@ defmodule Arbor.Contracts.Coding.ValidationCapacityHandoff do
   @sha256_regex ~r/\A[0-9a-f]{64}\z/
 
   typedstruct enforce: true do
-    @typedoc "Bounded, authority-free validation capacity evidence."
+    @typedoc "Bounded, authority-free validation capacity evidence (live schema v2)."
 
     field(:schema_version, pos_integer())
     field(:phase, String.t())
     field(:available_budget_ms, non_neg_integer())
     field(:per_batch_budget_ms, pos_integer())
-    field(:required_budget_ms, pos_integer())
     field(:completed_batch_count, non_neg_integer())
     field(:completed_file_count, non_neg_integer())
     field(:unstarted_batch_count, pos_integer())
@@ -60,16 +84,135 @@ defmodule Arbor.Contracts.Coding.ValidationCapacityHandoff do
     field(:unstarted_batches, [map()])
   end
 
-  @doc "Return the accepted capacity-handoff schema version."
+  @doc "Return the live write schema version (v2)."
   @spec schema_version() :: pos_integer()
   def schema_version, do: @schema_version
 
-  @doc "Construct and validate a closed capacity handoff descriptor."
+  @doc "Construct and validate a closed live capacity handoff descriptor (schema v2 only)."
   @spec new(map() | keyword()) :: {:ok, t()} | {:error, term()}
   def new(attrs) do
-    with {:ok, attrs} <- normalize_object(attrs, @fields, :invalid_capacity_handoff),
+    with {:ok, attrs} <-
+           normalize_object(attrs, @archived_v1_fields, :invalid_capacity_handoff),
+         :ok <- require_all_fields(attrs, [:schema_version]),
+         :ok <- validate_live_schema_version(attrs.schema_version),
+         :ok <- reject_archived_v1_fields(attrs),
          :ok <- require_all_fields(attrs, @fields),
-         :ok <- validate_schema_version(attrs.schema_version),
+         {:ok, phase} <- enum(attrs.phase, @phases, :phase),
+         {:ok, available} <-
+           bounded_integer(attrs.available_budget_ms, :available_budget_ms, @max_budget_ms),
+         {:ok, per_batch} <-
+           bounded_positive_integer(
+             attrs.per_batch_budget_ms,
+             :per_batch_budget_ms,
+             @max_operation_timeout_ms
+           ),
+         {:ok, completed_batches} <-
+           bounded_integer(attrs.completed_batch_count, :completed_batch_count, @max_batch_count),
+         {:ok, completed_files} <-
+           bounded_integer(attrs.completed_file_count, :completed_file_count, @max_file_count),
+         {:ok, unstarted_batch_count} <-
+           bounded_positive_integer(
+             attrs.unstarted_batch_count,
+             :unstarted_batch_count,
+             @max_batch_count
+           ),
+         {:ok, unstarted_file_count} <-
+           bounded_positive_integer(
+             attrs.unstarted_file_count,
+             :unstarted_file_count,
+             @max_file_count
+           ),
+         {:ok, total_batch_count} <-
+           bounded_positive_integer(attrs.total_batch_count, :total_batch_count, @max_batch_count),
+         {:ok, total_file_count} <-
+           bounded_positive_integer(attrs.total_file_count, :total_file_count, @max_file_count),
+         {:ok, ordered_plan_sha256} <- digest(attrs.ordered_plan_sha256, :ordered_plan_sha256),
+         {:ok, batches} <- normalize_batches(attrs.unstarted_batches),
+         :ok <-
+           validate_v2_invariants(
+             phase,
+             available,
+             completed_batches,
+             completed_files,
+             unstarted_batch_count,
+             unstarted_file_count,
+             total_batch_count,
+             total_file_count,
+             batches
+           ),
+         true <- ordered_plan_sha256 == digest_for_normalized_batches(batches) do
+      descriptor = %__MODULE__{
+        schema_version: @schema_version,
+        phase: phase,
+        available_budget_ms: available,
+        per_batch_budget_ms: per_batch,
+        completed_batch_count: completed_batches,
+        completed_file_count: completed_files,
+        unstarted_batch_count: unstarted_batch_count,
+        unstarted_file_count: unstarted_file_count,
+        total_batch_count: total_batch_count,
+        total_file_count: total_file_count,
+        ordered_plan_sha256: ordered_plan_sha256,
+        unstarted_batches: batches
+      }
+
+      if byte_size(Jason.encode!(to_map(descriptor))) <= @max_json_bytes do
+        {:ok, descriptor}
+      else
+        {:error, {:invalid_capacity_handoff, :too_large}}
+      end
+    else
+      false -> {:error, {:invalid_capacity_handoff, :ordered_plan_digest_mismatch}}
+      {:error, _reason} = error -> error
+    end
+  rescue
+    _ -> {:error, {:invalid_capacity_handoff, :malformed}}
+  catch
+    _, _ -> {:error, {:invalid_capacity_handoff, :malformed}}
+  end
+
+  @doc "Return the canonical closed string-keyed JSON representation (live v2)."
+  @spec to_map(t()) :: %{required(String.t()) => term()}
+  def to_map(%__MODULE__{} = descriptor) do
+    %{
+      "schema_version" => descriptor.schema_version,
+      "phase" => descriptor.phase,
+      "available_budget_ms" => descriptor.available_budget_ms,
+      "per_batch_budget_ms" => descriptor.per_batch_budget_ms,
+      "completed_batch_count" => descriptor.completed_batch_count,
+      "completed_file_count" => descriptor.completed_file_count,
+      "unstarted_batch_count" => descriptor.unstarted_batch_count,
+      "unstarted_file_count" => descriptor.unstarted_file_count,
+      "total_batch_count" => descriptor.total_batch_count,
+      "total_file_count" => descriptor.total_file_count,
+      "ordered_plan_sha256" => descriptor.ordered_plan_sha256,
+      "unstarted_batches" => Enum.map(descriptor.unstarted_batches, &batch_to_map/1)
+    }
+  end
+
+  @doc "Normalize a live capacity handoff (schema v2 only) to its canonical JSON map."
+  @spec normalize(map() | keyword()) :: {:ok, map()} | {:error, term()}
+  def normalize(attrs) do
+    with {:ok, descriptor} <- new(attrs), do: {:ok, to_map(descriptor)}
+  end
+
+  @doc "Return true only for a complete, valid live (schema v2) capacity handoff."
+  @spec valid?(term()) :: boolean()
+  def valid?(%__MODULE__{} = descriptor), do: match?({:ok, _}, new(to_map(descriptor)))
+  def valid?(attrs) when is_map(attrs) or is_list(attrs), do: match?({:ok, _}, new(attrs))
+  def valid?(_attrs), do: false
+
+  @doc """
+  Normalize already-archived schema-v1 capacity evidence (archive-read only).
+
+  Accepts only valid historical v1 shapes with legacy product invariants.
+  Does not upgrade to v2. Not for live write, finalize, or candidate verification.
+  """
+  @spec normalize_archived_v1(map() | keyword()) :: {:ok, map()} | {:error, term()}
+  def normalize_archived_v1(attrs) do
+    with {:ok, attrs} <- normalize_object(attrs, @archived_v1_fields, :invalid_capacity_handoff),
+         :ok <- require_all_fields(attrs, @archived_v1_fields),
+         :ok <- validate_archived_schema_version(attrs.schema_version),
          {:ok, phase} <- enum(attrs.phase, @phases, :phase),
          {:ok, available} <-
            bounded_integer(attrs.available_budget_ms, :available_budget_ms, @max_budget_ms),
@@ -104,7 +247,7 @@ defmodule Arbor.Contracts.Coding.ValidationCapacityHandoff do
          {:ok, ordered_plan_sha256} <- digest(attrs.ordered_plan_sha256, :ordered_plan_sha256),
          {:ok, batches} <- normalize_batches(attrs.unstarted_batches),
          :ok <-
-           validate_invariants(
+           validate_v1_invariants(
              phase,
              available,
              per_batch,
@@ -118,24 +261,24 @@ defmodule Arbor.Contracts.Coding.ValidationCapacityHandoff do
              batches
            ),
          true <- ordered_plan_sha256 == digest_for_normalized_batches(batches) do
-      descriptor = %__MODULE__{
-        schema_version: @schema_version,
-        phase: phase,
-        available_budget_ms: available,
-        per_batch_budget_ms: per_batch,
-        required_budget_ms: required,
-        completed_batch_count: completed_batches,
-        completed_file_count: completed_files,
-        unstarted_batch_count: unstarted_batch_count,
-        unstarted_file_count: unstarted_file_count,
-        total_batch_count: total_batch_count,
-        total_file_count: total_file_count,
-        ordered_plan_sha256: ordered_plan_sha256,
-        unstarted_batches: batches
+      map = %{
+        "schema_version" => @archived_schema_version,
+        "phase" => phase,
+        "available_budget_ms" => available,
+        "per_batch_budget_ms" => per_batch,
+        "required_budget_ms" => required,
+        "completed_batch_count" => completed_batches,
+        "completed_file_count" => completed_files,
+        "unstarted_batch_count" => unstarted_batch_count,
+        "unstarted_file_count" => unstarted_file_count,
+        "total_batch_count" => total_batch_count,
+        "total_file_count" => total_file_count,
+        "ordered_plan_sha256" => ordered_plan_sha256,
+        "unstarted_batches" => Enum.map(batches, &batch_to_map/1)
       }
 
-      if byte_size(Jason.encode!(to_map(descriptor))) <= @max_json_bytes do
-        {:ok, descriptor}
+      if byte_size(Jason.encode!(map)) <= @max_json_bytes do
+        {:ok, map}
       else
         {:error, {:invalid_capacity_handoff, :too_large}}
       end
@@ -149,37 +292,12 @@ defmodule Arbor.Contracts.Coding.ValidationCapacityHandoff do
     _, _ -> {:error, {:invalid_capacity_handoff, :malformed}}
   end
 
-  @doc "Return the canonical closed string-keyed JSON representation."
-  @spec to_map(t()) :: %{required(String.t()) => term()}
-  def to_map(%__MODULE__{} = descriptor) do
-    %{
-      "schema_version" => descriptor.schema_version,
-      "phase" => descriptor.phase,
-      "available_budget_ms" => descriptor.available_budget_ms,
-      "per_batch_budget_ms" => descriptor.per_batch_budget_ms,
-      "required_budget_ms" => descriptor.required_budget_ms,
-      "completed_batch_count" => descriptor.completed_batch_count,
-      "completed_file_count" => descriptor.completed_file_count,
-      "unstarted_batch_count" => descriptor.unstarted_batch_count,
-      "unstarted_file_count" => descriptor.unstarted_file_count,
-      "total_batch_count" => descriptor.total_batch_count,
-      "total_file_count" => descriptor.total_file_count,
-      "ordered_plan_sha256" => descriptor.ordered_plan_sha256,
-      "unstarted_batches" => Enum.map(descriptor.unstarted_batches, &batch_to_map/1)
-    }
-  end
+  @doc "Return true only for complete, valid historical schema-v1 capacity evidence."
+  @spec valid_archived_v1?(term()) :: boolean()
+  def valid_archived_v1?(attrs) when is_map(attrs) or is_list(attrs),
+    do: match?({:ok, _}, normalize_archived_v1(attrs))
 
-  @doc "Normalize a capacity handoff directly to its canonical JSON map."
-  @spec normalize(map() | keyword()) :: {:ok, map()} | {:error, term()}
-  def normalize(attrs) do
-    with {:ok, descriptor} <- new(attrs), do: {:ok, to_map(descriptor)}
-  end
-
-  @doc "Return true only for a complete, valid capacity handoff."
-  @spec valid?(term()) :: boolean()
-  def valid?(%__MODULE__{} = descriptor), do: match?({:ok, _}, new(to_map(descriptor)))
-  def valid?(attrs) when is_map(attrs) or is_list(attrs), do: match?({:ok, _}, new(attrs))
-  def valid?(_attrs), do: false
+  def valid_archived_v1?(_attrs), do: false
 
   @doc "Compute the canonical ordered-plan digest for compact batch descriptors."
   @spec ordered_plan_digest([map()]) :: {:ok, String.t()} | {:error, term()}
@@ -194,7 +312,50 @@ defmodule Arbor.Contracts.Coding.ValidationCapacityHandoff do
   def ordered_plan_digest(_batches),
     do: {:error, {:invalid_capacity_handoff, :malformed_batches}}
 
-  defp validate_invariants(
+  defp validate_v2_invariants(
+         phase,
+         available,
+         completed_batches,
+         completed_files,
+         unstarted_batch_count,
+         unstarted_file_count,
+         total_batch_count,
+         total_file_count,
+         batches
+       ) do
+    batch_counts = Enum.map(batches, & &1.count)
+
+    cond do
+      available != 0 ->
+        {:error, {:invalid_capacity_handoff, :available_budget_nonzero}}
+
+      phase == "structural" and (completed_batches != 0 or completed_files != 0) ->
+        {:error, {:invalid_capacity_handoff, :structural_completed_counts}}
+
+      completed_batches + unstarted_batch_count != total_batch_count ->
+        {:error, {:invalid_capacity_handoff, :batch_count_mismatch}}
+
+      completed_files + unstarted_file_count != total_file_count ->
+        {:error, {:invalid_capacity_handoff, :file_count_mismatch}}
+
+      length(batches) != unstarted_batch_count ->
+        {:error, {:invalid_capacity_handoff, :unstarted_batch_count_mismatch}}
+
+      Enum.sum(batch_counts) != unstarted_file_count ->
+        {:error, {:invalid_capacity_handoff, :unstarted_file_count_mismatch}}
+
+      Enum.any?(batches, &(&1.total != total_batch_count)) ->
+        {:error, {:invalid_capacity_handoff, :batch_total_mismatch}}
+
+      not contiguous_suffix?(batches, completed_batches, total_batch_count) ->
+        {:error, {:invalid_capacity_handoff, :batch_index_mismatch}}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp validate_v1_invariants(
          phase,
          available,
          per_batch,
@@ -383,8 +544,21 @@ defmodule Arbor.Contracts.Coding.ValidationCapacityHandoff do
     end
   end
 
-  defp validate_schema_version(@schema_version), do: :ok
-  defp validate_schema_version(_), do: {:error, {:invalid_capacity_handoff, :schema_version}}
+  defp validate_live_schema_version(@schema_version), do: :ok
+
+  defp validate_live_schema_version(_),
+    do: {:error, {:invalid_capacity_handoff, :schema_version}}
+
+  defp reject_archived_v1_fields(attrs) do
+    if Map.has_key?(attrs, :required_budget_ms),
+      do: {:error, {:invalid_capacity_handoff, :unknown_key}},
+      else: :ok
+  end
+
+  defp validate_archived_schema_version(@archived_schema_version), do: :ok
+
+  defp validate_archived_schema_version(_),
+    do: {:error, {:invalid_capacity_handoff, :schema_version}}
 
   defp enum(value, allowed, field) when is_atom(value),
     do: enum(Atom.to_string(value), allowed, field)

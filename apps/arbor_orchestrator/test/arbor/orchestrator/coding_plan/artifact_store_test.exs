@@ -4,7 +4,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
   import Bitwise
 
   alias Arbor.Contracts.Coding.{TaskTerminalEnvelope, ValidationCapacityHandoff}
-  alias Arbor.Orchestrator.CodingPlan.{ArtifactStore, OutcomeMapper}
+  alias Arbor.Orchestrator.CodingPlan.{ArtifactStore, OutcomeMapper, ValidationCapacityTerminal}
 
   @compilation_seal_filename ".coding-compilation-seal.json"
   @compilation_publication_barrier_key {ArtifactStore, :compilation_publication_barrier}
@@ -1182,6 +1182,85 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
              ArtifactStore.archive_terminal_evidence(root, "task_coding_capacity", mismatched, [])
   end
 
+  test "archive-read verifies historical schema-v1 handoffs; live write rejects them", %{
+    root: root
+  } do
+    File.mkdir_p!(root)
+    inventory_sha256 = String.duplicate("a", 64)
+
+    batch = %{
+      "index" => 1,
+      "total" => 1,
+      "count" => 1,
+      "label" => "batch-1-of-1-n1-#{inventory_sha256}",
+      "inventory_sha256" => inventory_sha256
+    }
+
+    {:ok, ordered_plan_sha256} = ValidationCapacityHandoff.ordered_plan_digest([batch])
+
+    v1_handoff = %{
+      "schema_version" => 1,
+      "phase" => "structural",
+      "available_budget_ms" => 1_000,
+      "per_batch_budget_ms" => 1_200_000,
+      "required_budget_ms" => 1_200_000,
+      "completed_batch_count" => 0,
+      "completed_file_count" => 0,
+      "unstarted_batch_count" => 1,
+      "unstarted_file_count" => 1,
+      "total_batch_count" => 1,
+      "total_file_count" => 1,
+      "ordered_plan_sha256" => ordered_plan_sha256,
+      "unstarted_batches" => [batch]
+    }
+
+    # Archive-read boundary accepts historical v1.
+    assert {:ok, archived} =
+             ValidationCapacityTerminal.verify_archived_capacity_handoff(v1_handoff)
+
+    assert archived["schema_version"] == 1
+    assert archived["required_budget_ms"] == 1_200_000
+
+    # Live normalize/write path rejects v1 (no dual escape).
+    assert {:error, {:invalid_capacity_handoff, :schema_version}} =
+             ValidationCapacityHandoff.normalize(v1_handoff)
+
+    result =
+      terminal_result(root)
+      |> Map.put("status", "validation_capacity_exceeded")
+      |> Map.put("canonical_status", "validation_capacity_exceeded")
+      |> Map.put(
+        "outcome",
+        terminal_outcome(
+          "validation_capacity_exceeded",
+          "requires_input",
+          "validation",
+          "validator",
+          "after_external_change"
+        )
+      )
+      |> Map.put("validation", [
+        %{
+          "passed" => false,
+          "reason" => "validation_capacity_exceeded",
+          "test" => %{
+            "passed" => false,
+            "reason" => "validation_capacity_exceeded",
+            "capacity_handoff" => v1_handoff
+          }
+        }
+      ])
+
+    assert {:error, {:invalid_terminal_result, :capacity_handoff}} =
+             ArtifactStore.archive_terminal_evidence(root, "task_coding_capacity_v1", result, [])
+
+    # Tampered historical v1 fails archive-read as well.
+    assert :error =
+             ValidationCapacityTerminal.verify_archived_capacity_handoff(
+               Map.put(v1_handoff, "required_budget_ms", 1)
+             )
+  end
+
   test "normalizes terminal lifecycle descriptors and rejects authority-bearing artifacts", %{
     root: root
   } do
@@ -1625,11 +1704,10 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
     per_batch_budget_ms = 1_200_000
 
     handoff = %{
-      "schema_version" => 1,
+      "schema_version" => 2,
       "phase" => "structural",
-      "available_budget_ms" => 1_000,
+      "available_budget_ms" => 0,
       "per_batch_budget_ms" => per_batch_budget_ms,
-      "required_budget_ms" => batch_count * per_batch_budget_ms,
       "completed_batch_count" => 0,
       "completed_file_count" => 0,
       "unstarted_batch_count" => batch_count,

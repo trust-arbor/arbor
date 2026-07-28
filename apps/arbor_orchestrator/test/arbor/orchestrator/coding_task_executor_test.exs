@@ -1113,11 +1113,10 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     {:ok, ordered_plan_sha256} = ValidationCapacityHandoff.ordered_plan_digest([batch])
 
     handoff = %{
-      "schema_version" => 1,
+      "schema_version" => 2,
       "phase" => "structural",
-      "available_budget_ms" => 1_000,
+      "available_budget_ms" => 0,
       "per_batch_budget_ms" => 1_200_000,
-      "required_budget_ms" => 1_200_000,
       "completed_batch_count" => 0,
       "completed_file_count" => 0,
       "unstarted_batch_count" => 1,

@@ -560,13 +560,11 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
         # Budget already exhausted — do not launch this or any later child.
         # Preserve the exact unstarted suffix for the operator/CI handoff.
         completed_batches = Enum.take(all_batches, batch.index - 1)
-        required_ms = length(remaining_batches) * operation_timeout
 
         case Core.capacity_handoff(
                :runtime,
                0,
                operation_timeout,
-               required_ms,
                completed_batches,
                remaining_batches
              ) do
@@ -604,13 +602,11 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
             if app_result.passed do
               if remaining_after <= 0 and rest != [] do
                 completed_batches = Enum.take(all_batches, batch.index)
-                required_ms = length(rest) * operation_timeout
 
                 case Core.capacity_handoff(
                        :runtime,
                        0,
                        operation_timeout,
-                       required_ms,
                        completed_batches,
                        rest
                      ) do

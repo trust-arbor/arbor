@@ -5,6 +5,11 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   The imperative shell supplies changed files and parsed app metadata. This module
   decides the affected-app closure and formats JSON-clean validation evidence
   without filesystem, process, clock, or registry operations.
+
+  Test-stage admission is residual-budget based: a positive aggregate remainder
+  starts the first exact batch under one shared deadline. Per-batch intensive
+  ceilings are never multiplied as a predicted total duration. Capacity handoffs
+  emit schema-v2 evidence with `available_budget_ms == 0` only.
   """
 
   alias Arbor.Contracts.Coding.ValidationCapacityHandoff
@@ -518,19 +523,18 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   end
 
   @doc """
-  Conservative admission check for the complete reviewed batch plan.
+  Residual-budget admission for the complete reviewed batch plan.
 
-  Every admitted batch receives up to the operation ceiling. If that complete
-  worst-case plan cannot fit the aggregate stage budget, the caller must hand
-  off before launching a child rather than knowingly starting a partial plan.
+  Batches run sequentially under one shared aggregate deadline. Each child is
+  capped by `min(operation_timeout_ms, remaining_ms)`. Admission therefore
+  checks only whether residual budget can start the first child — never whether
+  `batch_count * per-batch ceiling` fits the aggregate as a predicted total.
   """
-  @spec admit_test_batches([test_batch()], pos_integer(), pos_integer()) ::
+  @spec admit_test_batches([test_batch()], integer(), pos_integer()) ::
           :ok | {:capacity_exceeded, map()} | {:error, term()}
   def admit_test_batches(batches, available_ms, operation_timeout_ms)
       when is_list(batches) and is_integer(available_ms) and
              is_integer(operation_timeout_ms) and operation_timeout_ms > 0 do
-    required_ms = length(batches) * operation_timeout_ms
-
     cond do
       batches == [] ->
         :ok
@@ -538,18 +542,12 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
       not valid_remaining_batches?(batches) ->
         {:error, :invalid_test_batch_plan}
 
-      required_ms <= available_ms ->
+      available_ms > 0 ->
         :ok
 
       true ->
-        case capacity_handoff(
-               :structural,
-               available_ms,
-               operation_timeout_ms,
-               required_ms,
-               [],
-               batches
-             ) do
+        # Residual exhausted before the first child — structural handoff.
+        case capacity_handoff(:structural, 0, operation_timeout_ms, [], batches) do
           {:ok, check} -> {:capacity_exceeded, check}
           {:error, reason} -> {:error, reason}
         end
@@ -562,15 +560,14 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   @doc """
   Build the bounded, JSON-clean handoff check for an unstarted batch suffix.
 
-  Batch paths are already admitted and normalized by partition_test_batches/1.
-  The descriptor therefore binds the exact ordered suffix while retaining only
-  deterministic labels, counts, and digests. Retained workspace and authorized
-  inventory can reconstruct filenames; terminal evidence never carries them.
+  Residual available budget on a handoff is always 0: any positive remainder is
+  executable via `next_test_step/3`. Batch paths are already admitted and
+  normalized by partition_test_batches/1. The descriptor binds the exact ordered
+  suffix with deterministic labels, counts, and digests only.
   """
   @spec capacity_handoff(
           :structural | :runtime,
           integer(),
-          pos_integer(),
           pos_integer(),
           [test_batch()],
           [test_batch()]
@@ -579,47 +576,52 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
         phase,
         available_ms,
         per_batch_budget_ms,
-        required_ms,
         completed_batches,
         unstarted_batches
       )
       when phase in [:structural, :runtime] and is_integer(available_ms) and
              is_integer(per_batch_budget_ms) and per_batch_budget_ms > 0 and
-             is_integer(required_ms) and required_ms > 0 and is_list(completed_batches) and
-             is_list(unstarted_batches) do
-    with :ok <- validate_capacity_batches(completed_batches, unstarted_batches),
-         all_batches <- completed_batches ++ unstarted_batches,
-         completed_files <- Enum.sum(Enum.map(completed_batches, & &1.count)),
-         unstarted_files <- Enum.sum(Enum.map(unstarted_batches, & &1.count)),
-         compact_batches <- Enum.map(unstarted_batches, &capacity_batch/1),
-         {:ok, ordered_plan_sha256} <-
-           ValidationCapacityHandoff.ordered_plan_digest(compact_batches),
-         {:ok, handoff} <-
-           ValidationCapacityHandoff.new(%{
-             "schema_version" => ValidationCapacityHandoff.schema_version(),
-             "phase" => Atom.to_string(phase),
-             "available_budget_ms" => max(available_ms, 0),
-             "per_batch_budget_ms" => per_batch_budget_ms,
-             "required_budget_ms" => required_ms,
-             "completed_batch_count" => length(completed_batches),
-             "completed_file_count" => completed_files,
-             "unstarted_batch_count" => length(unstarted_batches),
-             "unstarted_file_count" => unstarted_files,
-             "total_batch_count" => length(all_batches),
-             "total_file_count" => completed_files + unstarted_files,
-             "ordered_plan_sha256" => ordered_plan_sha256,
-             "unstarted_batches" => compact_batches
-           }) do
-      check =
-        completed_check(
-          %{"passed" => false, "exit_code" => nil},
-          reason: "validation_capacity_exceeded"
-        )
-        |> Map.put("capacity_handoff", ValidationCapacityHandoff.to_map(handoff))
+             is_list(completed_batches) and is_list(unstarted_batches) do
+    cond do
+      available_ms > 0 ->
+        # Positive residual must execute, not hand off.
+        {:error, :invalid_capacity_handoff}
 
-      {:ok, check}
-    else
-      {:error, _reason} = error -> error
+      true ->
+        with :ok <- validate_capacity_batches(completed_batches, unstarted_batches),
+             all_batches <- completed_batches ++ unstarted_batches,
+             completed_files <- Enum.sum(Enum.map(completed_batches, & &1.count)),
+             unstarted_files <- Enum.sum(Enum.map(unstarted_batches, & &1.count)),
+             compact_batches <- Enum.map(unstarted_batches, &capacity_batch/1),
+             {:ok, ordered_plan_sha256} <-
+               ValidationCapacityHandoff.ordered_plan_digest(compact_batches),
+             {:ok, handoff} <-
+               ValidationCapacityHandoff.new(%{
+                 "schema_version" => ValidationCapacityHandoff.schema_version(),
+                 "phase" => Atom.to_string(phase),
+                 # Exhausted residual is always normalized to 0 (never negative).
+                 "available_budget_ms" => 0,
+                 "per_batch_budget_ms" => per_batch_budget_ms,
+                 "completed_batch_count" => length(completed_batches),
+                 "completed_file_count" => completed_files,
+                 "unstarted_batch_count" => length(unstarted_batches),
+                 "unstarted_file_count" => unstarted_files,
+                 "total_batch_count" => length(all_batches),
+                 "total_file_count" => completed_files + unstarted_files,
+                 "ordered_plan_sha256" => ordered_plan_sha256,
+                 "unstarted_batches" => compact_batches
+               }) do
+          check =
+            completed_check(
+              %{"passed" => false, "exit_code" => nil},
+              reason: "validation_capacity_exceeded"
+            )
+            |> Map.put("capacity_handoff", ValidationCapacityHandoff.to_map(handoff))
+
+          {:ok, check}
+        else
+          {:error, _reason} = error -> error
+        end
     end
   end
 
@@ -627,7 +629,6 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
         _phase,
         _available_ms,
         _per_batch_budget_ms,
-        _required_ms,
         _completed_batches,
         _unstarted_batches
       ),

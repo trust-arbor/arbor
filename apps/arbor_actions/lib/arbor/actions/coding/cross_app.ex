@@ -20,12 +20,15 @@ defmodule Arbor.Actions.Coding.CrossApp.Validate do
   2. xref graph evidence (does not claim zero cycles)
   3. explicit `MIX_ENV=test` compile with `--warnings-as-errors`
   4. focused per-file tests under an aggregate monotonic budget that starts
-     only after the test-environment compile succeeds. Each Mix child is
-     capped by the intensive Shell spawn-capable ceiling (profile-aware,
-     hard max 1_200_000 ms) and receives exactly one exact inventory file.
-     The aggregate test-stage budget is a separate reviewed ceiling
-     (hard max 4_200_000 ms), further bounded by the coding plan wall clock
-     at compile time. Exact inventory is preserved; tags are never excluded.
+     only after the test-environment compile succeeds. Batches run
+     sequentially under one shared absolute deadline. Each Mix child is
+     capped by `min(intensive Shell ceiling, remaining aggregate budget)`
+     (profile-aware, hard max 1_200_000 ms per child). Admission starts the
+     first batch whenever residual aggregate budget is positive — per-batch
+     ceilings are never summed as a predicted total duration. The aggregate
+     test-stage budget is a separate reviewed ceiling (hard max 4_200_000 ms),
+     further bounded by the coding plan wall clock at compile time. Exact
+     inventory is preserved; tags are never excluded.
 
   Domain failures return `{:ok, %{passed: false, ...}}` so the DOT rework
   branch can run; authority/setup/execution failures return `{:error, reason}`.
