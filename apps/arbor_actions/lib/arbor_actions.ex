@@ -89,7 +89,8 @@ defmodule Arbor.Actions do
 
   @max_reconciliation_principal_bytes 256
   @validation_resource_id_re ~r/\Avalidation_[0-9a-f]{32}\z/
-  @reconciliation_apply_uri_prefix "arbor://coding/reconciliation/apply/validation_resource/"
+  @live_workspace_id_re ~r/\Aws_[0-9a-f]{32}\z/
+  @reconciliation_apply_uri_base "arbor://coding/reconciliation/apply/"
 
   @approval_preview_limit 500
   @reviewed_pipelines %{
@@ -243,13 +244,19 @@ defmodule Arbor.Actions do
     do: {:error, :invalid_coding_resource_inventory_options}
 
   @doc """
-  Apply one source-owned coding reconciliation decision for validation resources.
+  Apply one source-owned coding reconciliation decision.
 
   Authority is an independently verified `%AuthContext{}` plus an exact
-  capability for
-  `arbor://coding/reconciliation/apply/validation_resource/<resource_id>`.
+  capability for the resource-typed apply URI:
+
+  * `arbor://coding/reconciliation/apply/validation_resource/<resource_id>`
+  * `arbor://coding/reconciliation/apply/live_workspace_lease/<workspace_id>`
+
   Reconciliation decision evidence is never bearer authority. This slice
-  supports only `validation_resource` + `settle` + `terminal_active_resource`.
+  supports only:
+
+  * `validation_resource` + `settle` + `terminal_active_resource`
+  * `live_workspace_lease` + `settle` + `terminal_active_resource`
   """
   @spec apply_coding_reconciliation_decision(AuthContext.t(), map() | keyword() | term()) ::
           {:ok, map()} | {:error, term()}
@@ -260,16 +267,29 @@ defmodule Arbor.Actions do
          {:ok, decision_map} <- normalize_reconciliation_decision(decision),
          :ok <- require_supported_reconciliation_decision(decision_map),
          :ok <- require_consistent_reconciliation_identity(decision_map),
-         :ok <- require_canonical_validation_resource_id(decision_map["resource_id"]),
-         uri = @reconciliation_apply_uri_prefix <> decision_map["resource_id"],
+         :ok <- require_canonical_reconciliation_resource_id(decision_map),
+         {:ok, uri} <- reconciliation_apply_uri(decision_map),
          :ok <- authorize_reconciliation_apply(principal_id, uri, signed_request) do
-      WorkspaceLeaseRegistry.compare_and_settle_validation_resource(
-        %{
-          "resource_id" => decision_map["resource_id"],
-          "expected_identity" => decision_map["expected_identity"]
-        },
-        server: Config.workspace_lease_registry_server()
-      )
+      settle_fields = %{
+        "resource_id" => decision_map["resource_id"],
+        "expected_identity" => decision_map["expected_identity"]
+      }
+
+      server_opts = [server: Config.workspace_lease_registry_server()]
+
+      case decision_map["resource_type"] do
+        "validation_resource" ->
+          WorkspaceLeaseRegistry.compare_and_settle_validation_resource(
+            settle_fields,
+            server_opts
+          )
+
+        "live_workspace_lease" ->
+          WorkspaceLeaseRegistry.compare_and_settle_live_workspace_lease(
+            settle_fields,
+            server_opts
+          )
+      end
     end
   rescue
     _ -> {:error, :reconciliation_apply_failed}
@@ -322,6 +342,13 @@ defmodule Arbor.Actions do
        }),
        do: :ok
 
+  defp require_supported_reconciliation_decision(%{
+         "resource_type" => "live_workspace_lease",
+         "decision" => "settle",
+         "reason" => "terminal_active_resource"
+       }),
+       do: :ok
+
   defp require_supported_reconciliation_decision(decision_map) when is_map(decision_map) do
     {:error,
      {:unsupported_reconciliation_apply,
@@ -353,6 +380,21 @@ defmodule Arbor.Actions do
   defp require_consistent_reconciliation_identity(_decision),
     do: {:error, :inconsistent_reconciliation_decision_identity}
 
+  defp require_canonical_reconciliation_resource_id(%{
+         "resource_type" => "validation_resource",
+         "resource_id" => resource_id
+       }),
+       do: require_canonical_validation_resource_id(resource_id)
+
+  defp require_canonical_reconciliation_resource_id(%{
+         "resource_type" => "live_workspace_lease",
+         "resource_id" => resource_id
+       }),
+       do: require_canonical_live_workspace_id(resource_id)
+
+  defp require_canonical_reconciliation_resource_id(_decision),
+    do: {:error, :invalid_reconciliation_resource_id}
+
   defp require_canonical_validation_resource_id(resource_id)
        when is_binary(resource_id) do
     if Regex.match?(@validation_resource_id_re, resource_id) and
@@ -365,6 +407,36 @@ defmodule Arbor.Actions do
 
   defp require_canonical_validation_resource_id(_resource_id),
     do: {:error, :invalid_validation_resource_id}
+
+  defp require_canonical_live_workspace_id(workspace_id) when is_binary(workspace_id) do
+    if Regex.match?(@live_workspace_id_re, workspace_id) and
+         not String.contains?(workspace_id, "/") do
+      :ok
+    else
+      {:error, :invalid_live_workspace_id}
+    end
+  end
+
+  defp require_canonical_live_workspace_id(_workspace_id),
+    do: {:error, :invalid_live_workspace_id}
+
+  defp reconciliation_apply_uri(%{
+         "resource_type" => "validation_resource",
+         "resource_id" => resource_id
+       })
+       when is_binary(resource_id) do
+    {:ok, @reconciliation_apply_uri_base <> "validation_resource/" <> resource_id}
+  end
+
+  defp reconciliation_apply_uri(%{
+         "resource_type" => "live_workspace_lease",
+         "resource_id" => resource_id
+       })
+       when is_binary(resource_id) do
+    {:ok, @reconciliation_apply_uri_base <> "live_workspace_lease/" <> resource_id}
+  end
+
+  defp reconciliation_apply_uri(_decision), do: {:error, :unsupported_reconciliation_apply}
 
   defp authorize_reconciliation_apply(principal_id, uri, signed_request) do
     security = Config.security_module()

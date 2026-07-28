@@ -316,6 +316,280 @@ defmodule Arbor.Actions.Coding.ReconciliationApplyTest do
     assert match?(%SignedRequest{agent_id: ^principal}, Keyword.get(opts, :signed_request))
   end
 
+  test "authorized exact-match live lease settlement removes the workspace and is fully absent",
+       %{tmp_dir: tmp_dir} do
+    fixture = leased_project(tmp_dir)
+    {lease, expected_identity} = live_identity(fixture)
+    worktree_path = lease.worktree_path
+    auth = verified_auth("agent_live_apply_ok")
+    decision = live_settle_decision(lease.workspace_id, expected_identity)
+
+    assert File.dir?(worktree_path)
+
+    assert {:ok, receipt} = Actions.apply_coding_reconciliation_decision(auth, decision)
+    assert receipt["outcome"] == "settled"
+    assert receipt["resource_type"] == "live_workspace_lease"
+    assert receipt["resource_id"] == lease.workspace_id
+    assert receipt["active"] == false
+    assert receipt["status"] == "removed"
+    refute Map.has_key?(receipt, "worktree_path")
+    refute Map.has_key?(receipt, "cleanup_identity")
+
+    state = :sys.get_state(WorkspaceLeaseRegistry)
+    refute Map.has_key?(state.leases, lease.workspace_id)
+    refute Map.has_key?(state.retained_by_id, lease.workspace_id)
+    refute Map.has_key?(state.retention_blockers, lease.workspace_id)
+    refute File.exists?(worktree_path)
+  end
+
+  test "authorize uses exact live_workspace_lease apply URI", %{tmp_dir: tmp_dir} do
+    fixture = leased_project(tmp_dir)
+    {lease, expected_identity} = live_identity(fixture)
+    principal = "agent_live_apply_uri"
+    auth = verified_auth(principal)
+    decision = live_settle_decision(lease.workspace_id, expected_identity)
+    Application.put_env(:arbor_actions, :security_module, RecordingSecurity)
+
+    assert {:ok, _receipt} = Actions.apply_coding_reconciliation_decision(auth, decision)
+
+    assert_received {:authorize_called, ^principal, uri, opts}
+
+    assert uri ==
+             "arbor://coding/reconciliation/apply/live_workspace_lease/" <> lease.workspace_id
+
+    assert Keyword.get(opts, :verify_identity) == false
+    assert match?(%SignedRequest{agent_id: ^principal}, Keyword.get(opts, :signed_request))
+  end
+
+  test "live unauthorized and pending-approval fail closed without mutation", %{tmp_dir: tmp_dir} do
+    fixture = leased_project(tmp_dir)
+    {lease, expected_identity} = live_identity(fixture)
+    auth = verified_auth("agent_live_apply_denied")
+    decision = live_settle_decision(lease.workspace_id, expected_identity)
+
+    Application.put_env(:arbor_actions, :security_module, DenySecurity)
+
+    assert {:error, {:unauthorized, :denied}} =
+             Actions.apply_coding_reconciliation_decision(auth, decision)
+
+    assert Map.has_key?(:sys.get_state(WorkspaceLeaseRegistry).leases, lease.workspace_id)
+
+    Application.put_env(:arbor_actions, :security_module, PendingSecurity)
+
+    assert {:error, {:unauthorized, {:pending_approval, "proposal_test_1"}}} =
+             Actions.apply_coding_reconciliation_decision(auth, decision)
+
+    assert Map.has_key?(:sys.get_state(WorkspaceLeaseRegistry).leases, lease.workspace_id)
+
+    Application.put_env(:arbor_actions, :security_module, WeirdSecurity)
+
+    assert {:error, {:unauthorized, {:unexpected_authz_result, :not_a_valid_authz_result}}} =
+             Actions.apply_coding_reconciliation_decision(auth, decision)
+
+    assert Map.has_key?(:sys.get_state(WorkspaceLeaseRegistry).leases, lease.workspace_id)
+  end
+
+  test "security regression: live apply rejects unverified caller auth", %{tmp_dir: tmp_dir} do
+    fixture = leased_project(tmp_dir)
+    {lease, expected_identity} = live_identity(fixture)
+    decision = live_settle_decision(lease.workspace_id, expected_identity)
+    Application.put_env(:arbor_actions, :security_module, RecordingSecurity)
+
+    forged = %{
+      identity_verified: true,
+      principal_id: "agent_live_forged",
+      signed_request: %{agent_id: "agent_live_forged"}
+    }
+
+    assert {:error, :invalid_reconciliation_caller_auth} =
+             Actions.apply_coding_reconciliation_decision(forged, decision)
+
+    refute_received {:authorize_called, _, _, _}
+    assert Map.has_key?(:sys.get_state(WorkspaceLeaseRegistry).leases, lease.workspace_id)
+  end
+
+  test "live current-state drift conflicts without mutation", %{tmp_dir: tmp_dir} do
+    fixture = leased_project(tmp_dir)
+    {lease, expected_identity} = live_identity(fixture)
+    auth = verified_auth("agent_live_apply_drift")
+    decision = live_settle_decision(lease.workspace_id, expected_identity)
+
+    :sys.replace_state(WorkspaceLeaseRegistry, fn state ->
+      current = Map.fetch!(state.leases, lease.workspace_id)
+      updated = Map.put(current, :owner_death_retry_count, 3)
+
+      %{state | leases: Map.put(state.leases, lease.workspace_id, updated)}
+    end)
+
+    assert {:error, {:reconciliation_identity_conflict, conflict}} =
+             Actions.apply_coding_reconciliation_decision(auth, decision)
+
+    assert conflict["resource_id"] == lease.workspace_id
+    assert conflict["current_identity"]["retry_count"] == 3
+    assert Map.has_key?(:sys.get_state(WorkspaceLeaseRegistry).leases, lease.workspace_id)
+  end
+
+  test "live journal uncertainty fails closed without mutation", %{tmp_dir: tmp_dir} do
+    fixture = leased_project(tmp_dir)
+    {lease, expected_identity} = live_identity(fixture)
+    auth = verified_auth("agent_live_apply_journal")
+    decision = live_settle_decision(lease.workspace_id, expected_identity)
+
+    previous_journal = :sys.get_state(WorkspaceLeaseRegistry).retention_journal
+
+    on_exit(fn ->
+      :sys.replace_state(WorkspaceLeaseRegistry, fn state ->
+        %{state | retention_journal: previous_journal}
+      end)
+    end)
+
+    :sys.replace_state(WorkspaceLeaseRegistry, fn state ->
+      journal = Map.get(state, :retention_journal, %{})
+      %{state | retention_journal: Map.put(journal, :status, :poisoned)}
+    end)
+
+    assert {:error, :retention_journal_unavailable} =
+             Actions.apply_coding_reconciliation_decision(auth, decision)
+
+    assert Map.has_key?(:sys.get_state(WorkspaceLeaseRegistry).leases, lease.workspace_id)
+  end
+
+  test "live cleanup failure preserves source-owner error and leaves residue", %{tmp_dir: tmp_dir} do
+    fixture = leased_project(tmp_dir)
+    {_resource, _validation_identity} = acquire_validation(fixture, cleanup_failures: 1)
+    {lease, expected_identity} = live_identity(fixture)
+    auth = verified_auth("agent_live_apply_cleanup_fail")
+    decision = live_settle_decision(lease.workspace_id, expected_identity)
+
+    assert {:error, :validation_resource_cleanup_failed} =
+             Actions.apply_coding_reconciliation_decision(auth, decision)
+
+    state = :sys.get_state(WorkspaceLeaseRegistry)
+    assert Map.has_key?(state.leases, lease.workspace_id)
+  end
+
+  test "live ok-with-residue fails closed as settlement_residue", %{tmp_dir: tmp_dir} do
+    fixture = leased_project(tmp_dir)
+    {lease, expected_identity} = live_identity(fixture)
+    auth = verified_auth("agent_live_apply_residue")
+    decision = live_settle_decision(lease.workspace_id, expected_identity)
+    workspace_id = lease.workspace_id
+
+    on_exit(fn ->
+      :sys.replace_state(WorkspaceLeaseRegistry, fn state ->
+        %{
+          state
+          | retained_by_id: Map.delete(state.retained_by_id, workspace_id),
+            retention_blockers: Map.delete(state.retention_blockers, workspace_id)
+        }
+      end)
+    end)
+
+    # Inject retained residue for the same workspace id so remove can drop the
+    # live lease while leaving non-live residue — models marker-delete retry
+    # residue without claiming settled.
+    :sys.replace_state(WorkspaceLeaseRegistry, fn state ->
+      residue = %{
+        workspace_id: workspace_id,
+        task_id: fixture.context.task_id,
+        principal_id: fixture.context.agent_id,
+        lifecycle: :retained,
+        dormant: false
+      }
+
+      %{state | retained_by_id: Map.put(state.retained_by_id, workspace_id, residue)}
+    end)
+
+    assert {:error, :settlement_residue} =
+             Actions.apply_coding_reconciliation_decision(auth, decision)
+
+    state = :sys.get_state(WorkspaceLeaseRegistry)
+    refute Map.has_key?(state.leases, workspace_id)
+    assert Map.has_key?(state.retained_by_id, workspace_id)
+  end
+
+  test "live retained-only resource is not already_absent", %{tmp_dir: tmp_dir} do
+    fixture = leased_project(tmp_dir)
+    {lease, expected_identity} = live_identity(fixture)
+    auth = verified_auth("agent_live_apply_retained")
+    decision = live_settle_decision(lease.workspace_id, expected_identity)
+    workspace_id = lease.workspace_id
+
+    on_exit(fn ->
+      :sys.replace_state(WorkspaceLeaseRegistry, fn state ->
+        %{
+          state
+          | retained_by_id: Map.delete(state.retained_by_id, workspace_id),
+            retention_blockers: Map.delete(state.retention_blockers, workspace_id)
+        }
+      end)
+    end)
+
+    :sys.replace_state(WorkspaceLeaseRegistry, fn state ->
+      current = Map.fetch!(state.leases, workspace_id)
+      residue = Map.put(current, :lifecycle, :retained)
+
+      %{
+        state
+        | leases: Map.delete(state.leases, workspace_id),
+          retained_by_id: Map.put(state.retained_by_id, workspace_id, residue)
+      }
+    end)
+
+    assert {:error, :not_live_workspace_lease} =
+             Actions.apply_coding_reconciliation_decision(auth, decision)
+
+    state = :sys.get_state(WorkspaceLeaseRegistry)
+    refute Map.has_key?(state.leases, workspace_id)
+    assert Map.has_key?(state.retained_by_id, workspace_id)
+  end
+
+  test "repeated live already-absent settlement is idempotent after exact settle", %{
+    tmp_dir: tmp_dir
+  } do
+    fixture = leased_project(tmp_dir)
+    {lease, expected_identity} = live_identity(fixture)
+    auth = verified_auth("agent_live_apply_absent")
+    decision = live_settle_decision(lease.workspace_id, expected_identity)
+
+    assert {:ok, first} = Actions.apply_coding_reconciliation_decision(auth, decision)
+    assert first["outcome"] == "settled"
+
+    assert {:ok, second} = Actions.apply_coding_reconciliation_decision(auth, decision)
+    assert second["outcome"] == "already_absent"
+    assert second["resource_id"] == lease.workspace_id
+    assert second["active"] == false
+
+    assert {:ok, third} = Actions.apply_coding_reconciliation_decision(auth, decision)
+    assert third == second
+  end
+
+  test "live unsupported type/decision/reason and bad id fail closed", %{tmp_dir: tmp_dir} do
+    fixture = leased_project(tmp_dir)
+    {lease, expected_identity} = live_identity(fixture)
+    auth = verified_auth("agent_live_apply_reject")
+    base = live_settle_decision(lease.workspace_id, expected_identity)
+
+    for {patch, expected_detail} <- live_unsupported_cases(base) do
+      decision = deep_merge(base, patch)
+
+      assert {:error, {:unsupported_reconciliation_apply, detail}} =
+               Actions.apply_coding_reconciliation_decision(auth, decision)
+
+      assert detail == expected_detail
+    end
+
+    bad_id =
+      base
+      |> Map.put("resource_id", "ws_NOT_HEX")
+      |> put_in(["expected_identity", "resource_id"], "ws_NOT_HEX")
+
+    assert {:error, :invalid_live_workspace_id} =
+             Actions.apply_coding_reconciliation_decision(auth, bad_id)
+
+    assert Map.has_key?(:sys.get_state(WorkspaceLeaseRegistry).leases, lease.workspace_id)
+  end
+
   defp leased_project(tmp_dir) do
     repo =
       create_base_project(Path.join(tmp_dir, "repo-#{System.unique_integer([:positive])}"))
@@ -420,16 +694,51 @@ defmodule Arbor.Actions.Coding.ReconciliationApplyTest do
     ReconciliationDecision.to_map(decision)
   end
 
+  defp live_identity(fixture) do
+    state = :sys.get_state(WorkspaceLeaseRegistry)
+    lease = Map.fetch!(state.leases, fixture.lease.workspace_id)
+
+    assert {:ok, expected_identity} =
+             WorkspaceReconciliationProjection.live_comparison_identity(
+               state,
+               lease.workspace_id
+             )
+
+    {fixture.lease, expected_identity}
+  end
+
+  defp live_settle_decision(workspace_id, expected_identity) do
+    {:ok, decision} =
+      ReconciliationDecision.new(%{
+        "schema_version" => 1,
+        "resource_type" => "live_workspace_lease",
+        "resource_id" => workspace_id,
+        "task_id" => expected_identity["task_id"],
+        "principal_id" => expected_identity["principal_id"],
+        "decision" => "settle",
+        "reason" => "terminal_active_resource",
+        "expected_identity" => expected_identity,
+        "evidence" => %{
+          "task_presence" => "observed",
+          "task_state" => "done",
+          "owner_status" => "dead",
+          "journal_status" => "complete"
+        }
+      })
+
+    ReconciliationDecision.to_map(decision)
+  end
+
   defp unsupported_cases(base) do
     [
       {
         %{
-          "resource_type" => "live_workspace_lease",
+          "resource_type" => "retained_workspace_record",
           "expected_identity" =>
-            Map.put(base["expected_identity"], "resource_type", "live_workspace_lease")
+            Map.put(base["expected_identity"], "resource_type", "retained_workspace_record")
         },
         %{
-          "resource_type" => "live_workspace_lease",
+          "resource_type" => "retained_workspace_record",
           "decision" => "settle",
           "reason" => "terminal_active_resource"
         }
@@ -446,6 +755,39 @@ defmodule Arbor.Actions.Coding.ReconciliationApplyTest do
         %{"reason" => "live_task_owner_alive"},
         %{
           "resource_type" => "validation_resource",
+          "decision" => "settle",
+          "reason" => "live_task_owner_alive"
+        }
+      }
+    ]
+  end
+
+  defp live_unsupported_cases(base) do
+    [
+      {
+        %{
+          "resource_type" => "retained_workspace_record",
+          "expected_identity" =>
+            Map.put(base["expected_identity"], "resource_type", "retained_workspace_record")
+        },
+        %{
+          "resource_type" => "retained_workspace_record",
+          "decision" => "settle",
+          "reason" => "terminal_active_resource"
+        }
+      },
+      {
+        %{"decision" => "keep"},
+        %{
+          "resource_type" => "live_workspace_lease",
+          "decision" => "keep",
+          "reason" => "terminal_active_resource"
+        }
+      },
+      {
+        %{"reason" => "live_task_owner_alive"},
+        %{
+          "resource_type" => "live_workspace_lease",
           "decision" => "settle",
           "reason" => "live_task_owner_alive"
         }

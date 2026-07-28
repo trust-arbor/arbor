@@ -542,6 +542,37 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     do: {:error, :invalid_reconciliation_settle_fields}
 
   @doc false
+  @spec compare_and_settle_live_workspace_lease(map(), keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def compare_and_settle_live_workspace_lease(decision_fields, opts \\ [])
+
+  def compare_and_settle_live_workspace_lease(decision_fields, opts)
+      when is_map(decision_fields) and is_list(opts) do
+    resource_id =
+      Map.get(decision_fields, "resource_id") || Map.get(decision_fields, :resource_id)
+
+    expected_identity =
+      Map.get(decision_fields, "expected_identity") ||
+        Map.get(decision_fields, :expected_identity)
+
+    if is_binary(resource_id) and is_map(expected_identity) and not is_struct(expected_identity) do
+      call(
+        {:compare_and_settle_live_workspace_lease,
+         %{
+           "resource_id" => resource_id,
+           "expected_identity" => expected_identity
+         }},
+        opts
+      )
+    else
+      {:error, :invalid_reconciliation_settle_fields}
+    end
+  end
+
+  def compare_and_settle_live_workspace_lease(_decision_fields, _opts),
+    do: {:error, :invalid_reconciliation_settle_fields}
+
+  @doc false
   @spec validation_resources(String.t(), map() | keyword()) ::
           {:ok, [map()]} | {:error, term()}
   def validation_resources(workspace_id, opts \\ %{}) when is_binary(workspace_id) do
@@ -1189,6 +1220,32 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
             :absent ->
               {:reply, {:ok, reconciliation_already_absent_receipt(resource_id)}, state}
           end
+      end
+    else
+      {:reply, {:error, :invalid_reconciliation_settle_fields}, state}
+    end
+  end
+
+  def handle_call(
+        {:compare_and_settle_live_workspace_lease, fields},
+        _from,
+        state
+      )
+      when is_map(fields) do
+    workspace_id = Map.get(fields, "resource_id")
+    expected_identity = Map.get(fields, "expected_identity")
+
+    if is_binary(workspace_id) and is_map(expected_identity) and not is_struct(expected_identity) do
+      case ensure_journal_inventory_known(state) do
+        :ok ->
+          compare_and_settle_live_workspace_lease_after_journal(
+            state,
+            workspace_id,
+            expected_identity
+          )
+
+        {:error, reason} ->
+          {:reply, {:error, reason}, state}
       end
     else
       {:reply, {:error, :invalid_reconciliation_settle_fields}, state}
@@ -2407,6 +2464,93 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       "active" => false,
       "status" => "removed"
     }
+  end
+
+  defp live_reconciliation_already_absent_receipt(workspace_id) do
+    %{
+      "schema_version" => 1,
+      "resource_type" => "live_workspace_lease",
+      "resource_id" => workspace_id,
+      "outcome" => "already_absent",
+      "active" => false
+    }
+  end
+
+  defp live_reconciliation_settled_receipt(workspace_id) do
+    %{
+      "schema_version" => 1,
+      "resource_type" => "live_workspace_lease",
+      "resource_id" => workspace_id,
+      "outcome" => "settled",
+      "active" => false,
+      "status" => "removed"
+    }
+  end
+
+  defp compare_and_settle_live_workspace_lease_after_journal(
+         state,
+         workspace_id,
+         expected_identity
+       ) do
+    case Map.fetch(state.leases, workspace_id) do
+      :error ->
+        reply_live_lease_absent(state, workspace_id)
+
+      {:ok, lease} ->
+        case WorkspaceReconciliationProjection.live_comparison_identity(state, workspace_id) do
+          {:ok, ^expected_identity} ->
+            confirm_live_workspace_settlement(
+              settle_active_lease_for_task(state, lease),
+              workspace_id
+            )
+
+          {:ok, current_identity} ->
+            {:reply,
+             {:error,
+              {:reconciliation_identity_conflict,
+               %{
+                 "resource_id" => workspace_id,
+                 "current_identity" => current_identity
+               }}}, state}
+
+          {:error, :current_identity_unavailable} ->
+            {:reply, {:error, :current_identity_unavailable}, state}
+
+          :absent ->
+            reply_live_lease_absent(state, workspace_id)
+        end
+    end
+  end
+
+  defp reply_live_lease_absent(state, workspace_id) do
+    if non_live_workspace_residue?(state, workspace_id) do
+      {:reply, {:error, :not_live_workspace_lease}, state}
+    else
+      {:reply, {:ok, live_reconciliation_already_absent_receipt(workspace_id)}, state}
+    end
+  end
+
+  defp non_live_workspace_residue?(state, workspace_id) do
+    Map.has_key?(state.retained_by_id, workspace_id) or
+      Map.has_key?(state.retention_blockers, workspace_id)
+  end
+
+  defp confirm_live_workspace_settlement({:ok, returned_state}, workspace_id) do
+    if fully_absent_workspace?(returned_state, workspace_id) do
+      {:reply, {:ok, live_reconciliation_settled_receipt(workspace_id)}, returned_state}
+    else
+      {:reply, {:error, :settlement_residue}, returned_state}
+    end
+  end
+
+  defp confirm_live_workspace_settlement({:error, reason, returned_state}, _workspace_id) do
+    {:reply, {:error, reason}, returned_state}
+  end
+
+  defp fully_absent_workspace?(state, workspace_id) do
+    not Map.has_key?(state.leases, workspace_id) and
+      not Map.has_key?(state.retained_by_id, workspace_id) and
+      not Map.has_key?(state.retention_blockers, workspace_id)
   end
 
   defp cleanup_workspace_validation_resources(state, workspace_id) do
