@@ -13,6 +13,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
   @schema_version 1
   @max_tasks 1_000
   @max_resources 1_000
+  @max_acp_sessions 1_000
   @max_json_bytes 1_000_000
   # Match the producer collection bounds; the document byte limit remains
   # the independent protection against large records.
@@ -22,7 +23,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
     "live_workspace_lease" => 0,
     "retained_workspace_record" => 1,
     "validation_resource" => 2,
-    "quarantine" => 3
+    "quarantine" => 3,
+    "acp_managed_session" => 4
   }
   @task_states ~w(running waiting_approval done failed cancelled)
   @terminal_states ~w(done failed cancelled)
@@ -37,6 +39,14 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
     branch_provenance lifecycle active cleanup_armed dormant retry_state expires_at discard_phase
     cleanup_state source quarantine_reason evidence_count
   )
+  @source_acp_session_fields ~w(
+    worker_session_id provider_session_id provider model status pooled return_to_pool
+    task_id principal_id owner_present owner_alive session_alive close_cleanup_in_progress
+  )
+  @acp_count_fields ~w(
+    observed matching returned filtered_out truncated malformed duplicates quarantined
+    quarantine_returned quarantine_truncated
+  )
   @scope_fields ~w(task_id principal_id agent_id state)
 
   @type state :: %{
@@ -44,6 +54,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
           required(:scope) => map(),
           required(:task_inventory) => map(),
           required(:resource_inventory) => map(),
+          required(:acp_session_inventory) => map(),
           required(:observation_digest) => map()
         }
 
@@ -51,21 +62,40 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
   @spec new(map() | keyword()) :: {:ok, state()} | {:error, term()}
   def new(attrs) when is_map(attrs) or is_list(attrs) do
     with {:ok, attrs} <-
-           normalize_object(attrs, ~w(task_inventory resource_inventory observed_at scope)),
+           normalize_object(
+             attrs,
+             ~w(task_inventory resource_inventory acp_session_inventory observed_at scope)
+           ),
          {:ok, task_inventory} <- normalize_task_inventory(fetch(attrs, "task_inventory")),
          {:ok, resource_inventory} <-
            normalize_resource_inventory(fetch(attrs, "resource_inventory")),
+         {:ok, acp_session_inventory} <-
+           normalize_acp_session_inventory(
+             fetch(attrs, "acp_session_inventory"),
+             resource_inventory["filters"]
+           ),
          :ok <-
-           validate_scope_consistency(task_inventory["filters"], resource_inventory["filters"]),
-         :ok <- no_truncation(task_inventory, resource_inventory),
+           validate_scope_consistency(
+             task_inventory["filters"],
+             resource_inventory["filters"],
+             acp_session_inventory["filters"]
+           ),
+         :ok <- no_truncation(task_inventory, resource_inventory, acp_session_inventory),
          {:ok, observed_at} <- normalize_observed_at(fetch(attrs, "observed_at")),
          {:ok, scope} <-
-           normalize_scope(fetch(attrs, "scope"), task_inventory, resource_inventory),
-         {:ok, observation_digest} <- observation_digest(task_inventory, resource_inventory),
+           normalize_scope(
+             fetch(attrs, "scope"),
+             task_inventory,
+             resource_inventory,
+             acp_session_inventory
+           ),
+         {:ok, observation_digest} <-
+           observation_digest(task_inventory, resource_inventory, acp_session_inventory),
          :ok <-
            bounded_document?(%{
              "task_inventory" => task_inventory,
-             "resource_inventory" => resource_inventory
+             "resource_inventory" => resource_inventory,
+             "acp_session_inventory" => acp_session_inventory
            }) do
       {:ok,
        %{
@@ -73,6 +103,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
          scope: scope,
          task_inventory: task_inventory,
          resource_inventory: resource_inventory,
+         acp_session_inventory: acp_session_inventory,
          observation_digest: observation_digest
        }}
     end
@@ -91,14 +122,26 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
         scope: scope,
         task_inventory: task_inventory,
         resource_inventory: resource_inventory,
+        acp_session_inventory: acp_session_inventory,
         observation_digest: observation_digest
       }) do
     task_index = Map.new(task_inventory["tasks"], &{&1["task_id"], &1})
     journal_status = resource_inventory["journal"]["status"]
 
+    workspace_decisions =
+      Enum.map(
+        resource_inventory["resources"],
+        &decide(&1, task_index, journal_status, observed_at)
+      )
+
+    acp_decisions =
+      Enum.map(
+        acp_session_inventory["sessions"],
+        &decide_acp_session(&1, task_index, journal_status)
+      )
+
     decisions =
-      resource_inventory["resources"]
-      |> Enum.map(&decide(&1, task_index, journal_status, observed_at))
+      (workspace_decisions ++ acp_decisions)
       |> Enum.sort_by(&decision_sort_key/1)
 
     {:ok,
@@ -133,12 +176,25 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
   def show(_reduced), do: {:error, :malformed_manifest}
 
   @doc "Reconcile observations and return `{manifest, manifest_sha256}`."
-  @spec reconcile(map() | keyword(), map() | keyword(), term(), map() | keyword()) ::
+  @spec reconcile(
+          map() | keyword(),
+          map() | keyword(),
+          term(),
+          map() | keyword(),
+          map() | keyword() | nil
+        ) ::
           {:ok, map(), String.t()} | {:error, term()}
-  def reconcile(task_inventory, resource_inventory, observed_at, scope \\ %{}) do
+  def reconcile(
+        task_inventory,
+        resource_inventory,
+        observed_at,
+        scope \\ %{},
+        acp_session_inventory \\ nil
+      ) do
     attrs = %{
       "task_inventory" => task_inventory,
       "resource_inventory" => resource_inventory,
+      "acp_session_inventory" => acp_session_inventory,
       "observed_at" => observed_at,
       "scope" => scope
     }
@@ -153,6 +209,37 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
     _ -> {:error, :malformed_observation}
   catch
     _, _ -> {:error, :malformed_observation}
+  end
+
+  @doc false
+  @spec empty_acp_inventory() :: map()
+  def empty_acp_inventory, do: empty_acp_inventory_for(%{"task_id" => nil, "principal_id" => nil})
+
+  defp empty_acp_inventory_for(filters) do
+    %{
+      "schema_version" => @schema_version,
+      "storage" => %{"durability" => "volatile"},
+      "filters" => %{
+        "task_id" => filters["task_id"],
+        "principal_id" => filters["principal_id"]
+      },
+      "max_items" => @max_acp_sessions,
+      "truncated" => false,
+      "counts" => %{
+        "observed" => 0,
+        "matching" => 0,
+        "returned" => 0,
+        "filtered_out" => 0,
+        "truncated" => 0,
+        "malformed" => 0,
+        "duplicates" => 0,
+        "quarantined" => 0,
+        "quarantine_returned" => 0,
+        "quarantine_truncated" => 0
+      },
+      "sessions" => [],
+      "quarantine" => []
+    }
   end
 
   defp normalize_task_inventory(inventory) when is_map(inventory) and not is_struct(inventory) do
@@ -203,6 +290,183 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
   end
 
   defp normalize_resource_inventory(_inventory), do: {:error, :malformed_resource_inventory}
+
+  defp normalize_acp_session_inventory(nil, resource_filters),
+    do:
+      normalize_acp_session_inventory(
+        empty_acp_inventory_for(resource_filters),
+        resource_filters
+      )
+
+  defp normalize_acp_session_inventory(inventory, _resource_filters)
+       when is_map(inventory) and not is_struct(inventory) do
+    with {:ok, inventory} <-
+           object(
+             inventory,
+             ~w(schema_version storage filters max_items truncated counts sessions quarantine)
+           ),
+         :ok <-
+           exact(
+             inventory,
+             ~w(schema_version storage filters max_items truncated counts sessions quarantine)
+           ),
+         :ok <- version(inventory["schema_version"]),
+         :ok <- exact(inventory["storage"], ~w(durability)),
+         :ok <- value(inventory["storage"]["durability"], "volatile"),
+         {:ok, filters} <- normalize_acp_filters(inventory["filters"]),
+         :ok <- positive_count(inventory["max_items"], @max_acp_sessions),
+         :ok <- boolean_value(inventory["truncated"]),
+         {:ok, counts} <- normalize_acp_counts(inventory["counts"]),
+         {:ok, sessions} <- normalize_acp_sessions(inventory["sessions"], counts["returned"]),
+         :ok <- normalize_acp_quarantine(inventory["quarantine"], counts),
+         :ok <- validate_acp_filter_membership(sessions, filters),
+         :ok <- validate_acp_count_invariants(counts, length(sessions)) do
+      {:ok,
+       %{
+         inventory
+         | "filters" => filters,
+           "counts" => counts,
+           "sessions" => sessions,
+           "quarantine" => []
+       }}
+    end
+  end
+
+  defp normalize_acp_session_inventory(_inventory, _resource_filters),
+    do: {:error, :malformed_acp_session_inventory}
+
+  defp normalize_acp_filters(filters) when is_map(filters) do
+    with {:ok, filters} <- object(filters, ~w(task_id principal_id)),
+         :ok <- exact(filters, ~w(task_id principal_id)),
+         :ok <- optional_id(filters["task_id"]),
+         :ok <- optional_id(filters["principal_id"]) do
+      {:ok, filters}
+    end
+  end
+
+  defp normalize_acp_filters(_filters), do: {:error, :malformed_acp_filters}
+
+  defp normalize_acp_counts(counts) when is_map(counts) do
+    with {:ok, counts} <- object(counts, @acp_count_fields),
+         :ok <- exact(counts, @acp_count_fields),
+         :ok <- count_at_most(counts["observed"], @max_acp_sessions),
+         :ok <- count_at_most(counts["matching"], @max_acp_sessions),
+         :ok <- count_at_most(counts["returned"], @max_acp_sessions),
+         :ok <- count_at_most(counts["filtered_out"], @max_acp_sessions),
+         :ok <- count_at_most(counts["truncated"], @max_acp_sessions),
+         :ok <- count_at_most(counts["malformed"], @max_acp_sessions),
+         :ok <- count_at_most(counts["duplicates"], @max_acp_sessions),
+         :ok <- count_at_most(counts["quarantined"], @max_acp_sessions),
+         :ok <- count_at_most(counts["quarantine_returned"], @max_acp_sessions),
+         :ok <- count_at_most(counts["quarantine_truncated"], @max_acp_sessions) do
+      {:ok, counts}
+    end
+  end
+
+  defp normalize_acp_counts(_counts), do: {:error, :malformed_acp_counts}
+
+  defp validate_acp_count_invariants(counts, returned) do
+    if counts["returned"] == returned and
+         counts["truncated"] == 0 and
+         counts["malformed"] == 0 and
+         counts["duplicates"] == 0 and
+         counts["quarantined"] == 0 and
+         counts["quarantine_returned"] == 0 and
+         counts["quarantine_truncated"] == 0 and
+         counts["matching"] == counts["returned"] + counts["truncated"] and
+         counts["observed"] ==
+           counts["malformed"] + counts["duplicates"] + counts["filtered_out"] +
+             counts["matching"],
+       do: :ok,
+       else: {:error, :inconsistent_acp_counts}
+  end
+
+  defp normalize_acp_quarantine(quarantine, counts) when is_list(quarantine) do
+    if quarantine == [] and counts["quarantined"] == 0 and
+         counts["quarantine_returned"] == 0 and counts["quarantine_truncated"] == 0,
+       do: :ok,
+       else: {:error, :malformed_acp_quarantine}
+  end
+
+  defp normalize_acp_quarantine(_quarantine, _counts),
+    do: {:error, :malformed_acp_quarantine}
+
+  defp normalize_acp_sessions(sessions, returned) when is_list(sessions) do
+    if length(sessions) <= @max_acp_sessions and length(sessions) == returned do
+      with {:ok, normalized} <- normalize_acp_session_entries(sessions),
+           :ok <- reject_duplicate_ids(normalized, "worker_session_id"),
+           :ok <- reject_duplicate_provider_sessions(normalized) do
+        {:ok, Enum.sort_by(normalized, &acp_session_sort_key/1)}
+      end
+    else
+      {:error, :malformed_acp_sessions}
+    end
+  end
+
+  defp normalize_acp_sessions(_sessions, _returned), do: {:error, :malformed_acp_sessions}
+
+  defp normalize_acp_session_entries(sessions) do
+    Enum.reduce_while(sessions, {:ok, []}, fn session, {:ok, acc} ->
+      case normalize_acp_session(session) do
+        {:ok, session} -> {:cont, {:ok, [session | acc]}}
+        error -> {:halt, error}
+      end
+    end)
+    |> reverse_ok()
+  end
+
+  defp normalize_acp_session(session) when is_map(session) and not is_struct(session) do
+    with {:ok, session} <- object(session, @source_acp_session_fields),
+         :ok <- exact(session, @source_acp_session_fields),
+         {:ok, worker_session_id} <- acp_id(session["worker_session_id"]),
+         :ok <- optional_acp_text(session["provider_session_id"]),
+         :ok <- acp_text(session["provider"]),
+         :ok <- optional_acp_text(session["model"]),
+         :ok <- acp_text(session["status"]),
+         :ok <- boolean_value(session["pooled"]),
+         :ok <- boolean_value(session["return_to_pool"]),
+         :ok <- optional_acp_id(session["task_id"]),
+         :ok <- optional_acp_id(session["principal_id"]),
+         :ok <- boolean_value(session["owner_present"]),
+         :ok <- boolean_value(session["owner_alive"]),
+         :ok <- boolean_value(session["session_alive"]),
+         :ok <- boolean_value(session["close_cleanup_in_progress"]),
+         :ok <- valid_acp_session_state(session) do
+      {:ok, Map.put(session, "worker_session_id", worker_session_id)}
+    end
+  end
+
+  defp normalize_acp_session(_session), do: {:error, :malformed_acp_session}
+
+  defp validate_acp_filter_membership(sessions, filters) do
+    if Enum.all?(sessions, fn session ->
+         (is_nil(filters["task_id"]) or session["task_id"] == filters["task_id"]) and
+           (is_nil(filters["principal_id"]) or
+              session["principal_id"] == filters["principal_id"])
+       end),
+       do: :ok,
+       else: {:error, :inconsistent_acp_filters}
+  end
+
+  defp valid_acp_session_state(%{
+         "owner_present" => false,
+         "owner_alive" => true
+       }),
+       do: {:error, :inconsistent_acp_liveness}
+
+  defp valid_acp_session_state(%{
+         "close_cleanup_in_progress" => true,
+         "status" => status
+       })
+       when status != "closing",
+       do: {:error, :inconsistent_acp_close_state}
+
+  defp valid_acp_session_state(_session), do: :ok
+
+  defp acp_session_sort_key(session) do
+    {session["worker_session_id"], session["provider"] || "",
+     session["provider_session_id"] || ""}
+  end
 
   defp normalize_task_counts(counts) when is_map(counts) do
     with {:ok, counts} <-
@@ -569,6 +833,90 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
     }
   end
 
+  defp decide_acp_session(session, task_index, journal_status) do
+    task_id = session["task_id"]
+    principal_id = session["principal_id"]
+    task = Map.get(task_index, task_id)
+    owner_status = acp_owner_status(session, task)
+    task_state = if is_map(task), do: task["state"], else: nil
+
+    {decision, reason} =
+      cond do
+        is_nil(task_id) or is_nil(principal_id) ->
+          {"quarantine", "missing_task_or_principal_provenance"}
+
+        is_nil(task) ->
+          {"quarantine", "missing_task"}
+
+        task_state in @live_states and owner_status == "live" ->
+          {"keep", "live_task_owner_alive"}
+
+        task_state in @live_states ->
+          {"retry", "live_task_owner_dead"}
+
+        task_state in @terminal_states ->
+          {"settle", "terminal_active_resource"}
+
+        true ->
+          {"quarantine", "ambiguous_provenance"}
+      end
+
+    %{
+      "schema_version" => @schema_version,
+      "resource_type" => "acp_managed_session",
+      "resource_id" => session["worker_session_id"],
+      "task_id" => task_id,
+      "principal_id" => principal_id,
+      "decision" => decision,
+      "reason" => reason,
+      "expected_identity" => acp_expected_identity(session),
+      "evidence" => %{
+        "task_presence" => if(is_map(task), do: "observed", else: "absent"),
+        "task_state" => task_state,
+        "owner_status" => owner_status,
+        "journal_status" => journal_status
+      }
+    }
+  end
+
+  defp acp_expected_identity(session) do
+    %{
+      "resource_type" => "acp_managed_session",
+      "resource_id" => session["worker_session_id"],
+      "worker_session_id" => session["worker_session_id"],
+      "provider_session_id" => session["provider_session_id"],
+      "provider" => session["provider"],
+      "model" => session["model"],
+      "status" => session["status"],
+      "pooled" => session["pooled"],
+      "return_to_pool" => session["return_to_pool"],
+      "task_id" => session["task_id"],
+      "principal_id" => session["principal_id"],
+      "owner_present" => session["owner_present"],
+      "owner_alive" => session["owner_alive"],
+      "session_alive" => session["session_alive"],
+      "close_cleanup_in_progress" => session["close_cleanup_in_progress"]
+    }
+  end
+
+  defp acp_owner_status(session, task) do
+    session_owner_status =
+      cond do
+        session["owner_present"] == true and session["owner_alive"] == true and
+          session["session_alive"] == true and
+            session["close_cleanup_in_progress"] == false ->
+          "live"
+
+        session["owner_present"] == false ->
+          "absent"
+
+        true ->
+          "dead"
+      end
+
+    if is_map(task) and owner_status(task) != "live", do: "dead", else: session_owner_status
+  end
+
   defp owner_status(nil), do: "absent"
 
   defp owner_status(task) do
@@ -610,10 +958,15 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
      resource["resource_id"]}
   end
 
-  defp observation_digest(tasks, resources) do
+  defp observation_digest(tasks, resources, acp_sessions) do
     task_digest = sha256(canonical_json(tasks))
     resource_digest = sha256(canonical_json(resources))
-    source = %{"task_inventory" => tasks, "resource_inventory" => resources}
+
+    source = %{
+      "task_inventory" => tasks,
+      "resource_inventory" => resources,
+      "acp_session_inventory" => acp_sessions
+    }
 
     {:ok,
      %{
@@ -623,19 +976,20 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
      }}
   end
 
-  defp normalize_scope(nil, task_inventory, resource_inventory),
+  defp normalize_scope(nil, task_inventory, resource_inventory, acp_session_inventory),
     do:
       normalize_scope(
-        effective_scope(task_inventory, resource_inventory),
+        effective_scope(task_inventory, resource_inventory, acp_session_inventory),
         task_inventory,
-        resource_inventory
+        resource_inventory,
+        acp_session_inventory
       )
 
-  defp normalize_scope(scope, task_inventory, resource_inventory)
+  defp normalize_scope(scope, task_inventory, resource_inventory, acp_session_inventory)
        when is_map(scope) and map_size(scope) == 0,
-       do: normalize_scope(nil, task_inventory, resource_inventory)
+       do: normalize_scope(nil, task_inventory, resource_inventory, acp_session_inventory)
 
-  defp normalize_scope(scope, task_inventory, resource_inventory)
+  defp normalize_scope(scope, task_inventory, resource_inventory, acp_session_inventory)
        when is_list(scope) or is_map(scope) do
     with {:ok, scope} <- normalize_object(scope, @scope_fields),
          {:ok, task_id} <- optional_id_result(scope["task_id"]),
@@ -649,7 +1003,9 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
            "state" => state
          },
          :ok <-
-           if(normalized == effective_scope(task_inventory, resource_inventory),
+           if(
+             normalized ==
+               effective_scope(task_inventory, resource_inventory, acp_session_inventory),
              do: :ok,
              else: {:error, :inconsistent_scope}
            ) do
@@ -657,22 +1013,24 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
     end
   end
 
-  defp normalize_scope(_scope, _task_inventory, _resource_inventory),
+  defp normalize_scope(_scope, _task_inventory, _resource_inventory, _acp_session_inventory),
     do: {:error, :malformed_scope}
 
-  defp effective_scope(task_inventory, resource_inventory) do
+  defp effective_scope(task_inventory, resource_inventory, acp_session_inventory) do
     task_filters = task_inventory["filters"]
     resource_filters = resource_inventory["filters"]
+    acp_filters = acp_session_inventory["filters"]
 
     %{
-      "task_id" => resource_filters["task_id"] || task_filters["task_id"],
-      "principal_id" => resource_filters["principal_id"],
+      "task_id" =>
+        resource_filters["task_id"] || acp_filters["task_id"] || task_filters["task_id"],
+      "principal_id" => resource_filters["principal_id"] || acp_filters["principal_id"],
       "agent_id" => nil,
       "state" => nil
     }
   end
 
-  defp validate_scope_consistency(task_filters, resource_filters) do
+  defp validate_scope_consistency(task_filters, resource_filters, acp_filters) do
     cond do
       not is_nil(task_filters["agent_id"]) ->
         {:error, :unsupported_task_scope}
@@ -682,6 +1040,12 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
 
       not is_nil(task_filters["task_id"]) and
           task_filters["task_id"] != resource_filters["task_id"] ->
+        {:error, :inconsistent_scope}
+
+      acp_filters["task_id"] != resource_filters["task_id"] ->
+        {:error, :inconsistent_scope}
+
+      acp_filters["principal_id"] != resource_filters["principal_id"] ->
         {:error, :inconsistent_scope}
 
       true ->
@@ -704,16 +1068,23 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
 
   defp normalize_observed_at(_value), do: {:error, :invalid_observed_at}
 
-  defp no_truncation(task_inventory, resource_inventory) do
+  defp no_truncation(task_inventory, resource_inventory, acp_session_inventory) do
     cond do
-      task_inventory["truncated"] or resource_inventory["truncated"] ->
+      task_inventory["truncated"] or resource_inventory["truncated"] or
+          acp_session_inventory["truncated"] ->
         {:error, :truncated_observation}
 
-      task_inventory["counts"]["truncated"] > 0 or resource_inventory["counts"]["truncated"] > 0 ->
+      task_inventory["counts"]["truncated"] > 0 or resource_inventory["counts"]["truncated"] > 0 or
+          acp_session_inventory["counts"]["truncated"] > 0 ->
         {:error, :truncated_observation}
 
       task_inventory["counts"]["malformed"] > 0 ->
         {:error, :malformed_task_inventory}
+
+      acp_session_inventory["counts"]["malformed"] > 0 or
+        acp_session_inventory["counts"]["duplicates"] > 0 or
+          acp_session_inventory["counts"]["quarantined"] > 0 ->
+        {:error, :malformed_acp_session_inventory}
 
       true ->
         :ok
@@ -820,6 +1191,33 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
   defp optional_id_result(nil), do: {:ok, nil}
   defp optional_id_result(value), do: required_id(value)
 
+  # These mirror Arbor.AI.AcpManaged.SessionRegistry's JSON projection boundary.
+  defp acp_id(value)
+       when is_binary(value) and byte_size(value) > 0 and byte_size(value) <= 256 do
+    if String.valid?(value) and String.trim(value) == value and
+         not String.match?(value, ~r/[\x00-\x1F\x7F]/),
+       do: {:ok, value},
+       else: {:error, :invalid_acp_id}
+  end
+
+  defp acp_id(_value), do: {:error, :invalid_acp_id}
+
+  defp optional_acp_id(nil), do: :ok
+
+  defp optional_acp_id(value),
+    do: if(match?({:ok, _}, acp_id(value)), do: :ok, else: {:error, :invalid_acp_id})
+
+  defp acp_text(value) when is_binary(value) and byte_size(value) <= 256 do
+    if String.valid?(value) and not String.contains?(value, <<0>>),
+      do: :ok,
+      else: {:error, :invalid_acp_text}
+  end
+
+  defp acp_text(_value), do: {:error, :invalid_acp_text}
+
+  defp optional_acp_text(nil), do: :ok
+  defp optional_acp_text(value), do: acp_text(value)
+
   defp enum_value(value, allowed),
     do: if(Enum.member?(allowed, value), do: :ok, else: {:error, :invalid_enum})
 
@@ -893,6 +1291,20 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
     if length(Enum.uniq_by(entries, & &1[key])) == length(entries),
       do: :ok,
       else: {:error, {:duplicate, key}}
+  end
+
+  defp reject_duplicate_provider_sessions(entries) do
+    identities =
+      Enum.flat_map(entries, fn session ->
+        case session["provider_session_id"] do
+          nil -> []
+          provider_session_id -> [{session["provider"], provider_session_id}]
+        end
+      end)
+
+    if length(Enum.uniq(identities)) == length(identities),
+      do: :ok,
+      else: {:error, {:duplicate, "provider_session_id"}}
   end
 
   defp reject_duplicate_identities(entries) do

@@ -136,6 +136,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationTest do
       observations()
       |> put_in(["task_inventory", "filters", "task_id"], "task-1")
       |> put_in(["resource_inventory", "filters", "task_id"], "task-1")
+      |> put_in(["acp_sessions", "filters", "task_id"], "task-1")
     )
 
     Process.put({Clock, :values}, [@observed_at, @persisted_at])
@@ -194,6 +195,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationTest do
       |> put_in(["task_inventory", "filters", "task_id"], "task-1")
       |> put_in(["resource_inventory", "filters", "task_id"], "task-1")
       |> put_in(["resource_inventory", "filters", "principal_id"], "principal-1")
+      |> put_in(["acp_sessions", "filters", "task_id"], "task-1")
+      |> put_in(["acp_sessions", "filters", "principal_id"], "principal-1")
 
     Application.put_env(:arbor_orchestrator, :coding_reconciliation_observer_module, nil)
 
@@ -254,6 +257,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationTest do
   end
 
   test "unavailable, truncated, duplicate, or quarantined supplementary evidence fails closed" do
+    root = Arbor.Orchestrator.coding_pipeline_logs_root()
+
     for transform <- [
           &Map.delete(&1, "acp_sessions"),
           &put_in(&1, ["acp_sessions", "truncated"], true),
@@ -261,12 +266,92 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationTest do
           &put_in(&1, ["pending_approvals", "counts", "quarantined"], 1),
           &put_in(&1, ["resource_inventory", "journal", "quarantined"], true)
         ] do
+      before = artifact_paths(root)
       Process.put({Observer, :observations}, transform.(observations()))
       Process.put({Clock, :values}, [@observed_at, @persisted_at])
 
       assert {:error, _reason} =
                Reconciliation.dry_run(caller_id: "operator-1")
+
+      assert artifact_paths(root) == before
     end
+  end
+
+  test "incomplete ACP inventory fails before manifest persistence" do
+    root = Arbor.Orchestrator.coding_pipeline_logs_root()
+    before = artifact_paths(root)
+
+    incomplete =
+      observations()
+      |> put_in(["acp_sessions", "counts", "returned"], 1)
+      |> put_in(["acp_sessions", "sessions"], [])
+
+    Process.put({Observer, :observations}, incomplete)
+    Process.put({Clock, :values}, [@observed_at, @persisted_at])
+
+    assert {:error, :invalid_or_incomplete_supplementary_inventory} =
+             Reconciliation.dry_run(caller_id: "operator-1")
+
+    assert artifact_paths(root) == before
+  end
+
+  test "valid ACP sessions produce digest-bound decisions through dry-run" do
+    Process.put(
+      {Observer, :observations},
+      observations()
+      |> Map.put(
+        "task_inventory",
+        task_inventory([
+          task("task-1", "running", true),
+          task("task-dead", "running", false)
+        ])
+      )
+      |> Map.put(
+        "acp_sessions",
+        acp_session_inventory([
+          acp_session("worker-b", "task-dead", "principal-1",
+            owner_present: true,
+            owner_alive: false
+          ),
+          acp_session("worker-a", "task-1", "principal-1", owner_alive: true)
+        ])
+      )
+    )
+
+    Process.put({Clock, :values}, [@observed_at, @persisted_at])
+
+    assert {:ok, result} = Reconciliation.dry_run(caller_id: "operator-1")
+
+    decisions = result["manifest"]["decisions"]
+    by_id = Map.new(decisions, &{&1["resource_id"], &1})
+
+    assert by_id["resource-1"]["resource_type"] == "live_workspace_lease"
+    assert by_id["resource-1"]["decision"] == "keep"
+    assert by_id["worker-a"]["resource_type"] == "acp_managed_session"
+    assert by_id["worker-a"]["decision"] == "keep"
+    assert by_id["worker-a"]["reason"] == "live_task_owner_alive"
+    assert by_id["worker-b"]["decision"] == "retry"
+    assert by_id["worker-b"]["reason"] == "live_task_owner_dead"
+
+    assert by_id["worker-a"]["expected_identity"]["owner_present"] == true
+    assert by_id["worker-a"]["expected_identity"]["owner_alive"] == true
+    assert by_id["worker-a"]["expected_identity"]["session_alive"] == true
+    assert by_id["worker-a"]["expected_identity"]["close_cleanup_in_progress"] == false
+    assert by_id["worker-a"]["expected_identity"]["worker_session_id"] == "worker-a"
+
+    # Workspace decisions sort before ACP (resource_order 0 then 4).
+    assert Enum.map(decisions, & &1["resource_id"]) == [
+             "resource-1",
+             "worker-a",
+             "worker-b"
+           ]
+
+    assert result["manifest"]["counts"]["resources"] == 3
+    assert result["manifest"]["counts"]["keep"] == 2
+    assert result["manifest"]["counts"]["retry"] == 1
+    assert result["supplementary_evidence"]["acp_sessions"]["counts"]["returned"] == 2
+    assert String.match?(result["manifest_sha256"], ~r/\A[0-9a-f]{64}\z/)
+    refute Map.has_key?(result, "apply")
   end
 
   test "scope mismatch is rejected by the pure core before persistence" do
@@ -287,26 +372,30 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationTest do
     %{
       "task_inventory" => task_inventory(),
       "resource_inventory" => resource_inventory(),
-      "acp_sessions" => supplementary_inventory(),
-      "pending_approvals" => supplementary_inventory()
+      "acp_sessions" => acp_session_inventory([]),
+      "pending_approvals" => pending_approval_inventory()
     }
   end
 
-  defp task_inventory do
-    task = %{
-      "task_id" => "task-1",
+  defp task(task_id, state, owner_alive) do
+    %{
+      "task_id" => task_id,
       "agent_id" => "agent-1",
-      "state" => "running",
+      "state" => state,
       "current_step" => "coding",
       "waiting_on" => nil,
       "started_at" => "2026-07-22T16:00:00Z",
       "updated_at" => @observed_at,
       "completed_at" => nil,
-      "owner_process" => %{"present" => true, "alive" => true},
+      "owner_process" => %{"present" => owner_alive, "alive" => owner_alive},
       "control_counts" => %{"closed" => 0, "open" => 0},
       "evidence_present" => false,
       "artifacts_present" => false
     }
+  end
+
+  defp task_inventory(tasks \\ nil) do
+    tasks = tasks || [task("task-1", "running", true)]
 
     %{
       "schema_version" => 1,
@@ -315,14 +404,14 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationTest do
       "max_items" => 64,
       "truncated" => false,
       "counts" => %{
-        "observed" => 1,
-        "matching" => 1,
-        "returned" => 1,
+        "observed" => length(tasks),
+        "matching" => length(tasks),
+        "returned" => length(tasks),
         "filtered_out" => 0,
         "truncated" => 0,
         "malformed" => 0
       },
-      "tasks" => [task]
+      "tasks" => tasks
     }
   end
 
@@ -370,7 +459,50 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationTest do
     }
   end
 
-  defp supplementary_inventory do
+  defp acp_session(worker_session_id, task_id, principal_id, overrides) do
+    %{
+      "worker_session_id" => worker_session_id,
+      "provider_session_id" => "provider-#{worker_session_id}",
+      "provider" => "test",
+      "model" => "model-1",
+      "status" => "ready",
+      "pooled" => false,
+      "return_to_pool" => false,
+      "task_id" => task_id,
+      "principal_id" => principal_id,
+      "owner_present" => true,
+      "owner_alive" => true,
+      "session_alive" => true,
+      "close_cleanup_in_progress" => false
+    }
+    |> Map.merge(Map.new(overrides, fn {key, value} -> {to_string(key), value} end))
+  end
+
+  defp acp_session_inventory(sessions) do
+    %{
+      "schema_version" => 1,
+      "storage" => %{"durability" => "volatile"},
+      "filters" => %{"task_id" => nil, "principal_id" => nil},
+      "max_items" => 64,
+      "truncated" => false,
+      "counts" => %{
+        "observed" => length(sessions),
+        "matching" => length(sessions),
+        "returned" => length(sessions),
+        "filtered_out" => 0,
+        "truncated" => 0,
+        "malformed" => 0,
+        "duplicates" => 0,
+        "quarantined" => 0,
+        "quarantine_returned" => 0,
+        "quarantine_truncated" => 0
+      },
+      "sessions" => sessions,
+      "quarantine" => []
+    }
+  end
+
+  defp pending_approval_inventory do
     %{
       "schema_version" => 1,
       "storage" => %{"durability" => "volatile"},
@@ -386,8 +518,14 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationTest do
         "backend_omitted" => 0,
         "quarantine_truncated" => 0
       },
-      "sessions" => [],
       "approvals" => []
     }
+  end
+
+  defp artifact_paths(root) do
+    root
+    |> Path.join("coding-reconciliation/**/*")
+    |> Path.wildcard()
+    |> Enum.sort()
   end
 end

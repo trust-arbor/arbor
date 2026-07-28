@@ -204,6 +204,15 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCoreTest do
 
     assert manifest["scope"]["task_id"] == "task-1"
 
+    assert {:error, :inconsistent_scope} =
+             ReconciliationCore.reconcile(
+               scoped_tasks,
+               scoped_resources,
+               @observed_at,
+               %{},
+               ReconciliationCore.empty_acp_inventory()
+             )
+
     assert {:ok, _manifest, _digest} =
              ReconciliationCore.reconcile(task_inventory, scoped_resources, @observed_at)
 
@@ -333,6 +342,416 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCoreTest do
     refute String.contains?(encoded, "pid")
     refute String.contains?(encoded, "secret")
     assert String.match?(manifest["observation_digest"]["source_sha256"], ~r/\A[0-9a-f]{64}\z/)
+  end
+
+  test "classifies ACP managed sessions fail-closed with exact identity binding" do
+    tasks = [
+      task("task-live", "running", true),
+      task("task-dead", "running", false),
+      task("task-terminal", "done", false)
+    ]
+
+    sessions = [
+      acp_session("acp-keep", "task-live", "principal-1", owner_present: true, owner_alive: true),
+      acp_session("acp-retry", "task-dead", "principal-1"),
+      acp_session("acp-owner-dead", "task-live", "principal-1",
+        owner_present: true,
+        owner_alive: false
+      ),
+      acp_session("acp-session-dead", "task-live", "principal-1", session_alive: false),
+      acp_session("acp-closing", "task-live", "principal-1",
+        status: "closing",
+        close_cleanup_in_progress: true
+      ),
+      acp_session("acp-settle", "task-terminal", "principal-1",
+        owner_present: false,
+        owner_alive: false
+      ),
+      acp_session("acp-missing-task", "task-missing", "principal-1"),
+      acp_session("acp-missing-principal", "task-live", nil),
+      acp_session("acp-missing-task-id", nil, "principal-1")
+    ]
+
+    assert {:ok, manifest, digest} =
+             ReconciliationCore.reconcile(
+               task_inventory(tasks),
+               resource_inventory([]),
+               @observed_at,
+               %{},
+               acp_session_inventory(sessions)
+             )
+
+    decisions = Map.new(manifest["decisions"], &{&1["resource_id"], &1})
+
+    assert decisions["acp-keep"]["decision"] == "keep"
+    assert decisions["acp-keep"]["reason"] == "live_task_owner_alive"
+    assert decisions["acp-retry"]["decision"] == "retry"
+    assert decisions["acp-retry"]["reason"] == "live_task_owner_dead"
+    assert decisions["acp-owner-dead"]["decision"] == "retry"
+    assert decisions["acp-owner-dead"]["reason"] == "live_task_owner_dead"
+    assert decisions["acp-session-dead"]["decision"] == "retry"
+    assert decisions["acp-session-dead"]["reason"] == "live_task_owner_dead"
+    assert decisions["acp-closing"]["decision"] == "retry"
+    assert decisions["acp-closing"]["reason"] == "live_task_owner_dead"
+    assert decisions["acp-settle"]["decision"] == "settle"
+    assert decisions["acp-settle"]["reason"] == "terminal_active_resource"
+    assert decisions["acp-missing-task"]["reason"] == "missing_task"
+
+    assert decisions["acp-missing-principal"]["reason"] ==
+             "missing_task_or_principal_provenance"
+
+    assert decisions["acp-missing-task-id"]["reason"] == "missing_task_or_principal_provenance"
+    assert manifest["counts"]["remove"] == 0
+    refute Enum.any?(manifest["decisions"], &(&1["decision"] == "remove"))
+
+    identity = decisions["acp-keep"]["expected_identity"]
+
+    assert identity == %{
+             "resource_type" => "acp_managed_session",
+             "resource_id" => "acp-keep",
+             "worker_session_id" => "acp-keep",
+             "provider_session_id" => "provider-acp-keep",
+             "provider" => "test",
+             "model" => "model-1",
+             "status" => "ready",
+             "pooled" => false,
+             "return_to_pool" => false,
+             "task_id" => "task-live",
+             "principal_id" => "principal-1",
+             "owner_present" => true,
+             "owner_alive" => true,
+             "session_alive" => true,
+             "close_cleanup_in_progress" => false
+           }
+
+    assert String.match?(digest, ~r/\A[0-9a-f]{64}\z/)
+  end
+
+  test "accepts every bounded text value emitted by the ACP inventory producer" do
+    session =
+      acp_session("worker-1", "task-1", "principal-1",
+        provider_session_id: "",
+        provider: "",
+        model: "\n",
+        status: "\t"
+      )
+
+    assert {:ok, manifest, _digest} =
+             ReconciliationCore.reconcile(
+               task_inventory([task("task-1", "running", true)]),
+               resource_inventory([]),
+               @observed_at,
+               %{},
+               acp_session_inventory([session])
+             )
+
+    identity = hd(manifest["decisions"])["expected_identity"]
+    assert identity["provider_session_id"] == ""
+    assert identity["provider"] == ""
+    assert identity["model"] == "\n"
+    assert identity["status"] == "\t"
+  end
+
+  test "ACP session decisions are deterministic across input order" do
+    tasks = [task("task-live", "running", true), task("task-dead", "running", false)]
+
+    sessions = [
+      acp_session("worker-b", "task-dead", "principal-1", owner_alive: false),
+      acp_session("worker-a", "task-live", "principal-1", owner_alive: true)
+    ]
+
+    first =
+      ReconciliationCore.reconcile(
+        task_inventory(tasks),
+        resource_inventory([]),
+        @observed_at,
+        %{},
+        acp_session_inventory(sessions)
+      )
+
+    second =
+      ReconciliationCore.reconcile(
+        task_inventory(tasks),
+        resource_inventory([]),
+        @observed_at,
+        %{},
+        acp_session_inventory(Enum.reverse(sessions))
+      )
+
+    assert first == second
+    {:ok, manifest, _digest} = first
+
+    assert Enum.map(manifest["decisions"], & &1["resource_id"]) == [
+             "worker-a",
+             "worker-b"
+           ]
+  end
+
+  test "ACP identity field drift changes source and manifest digests" do
+    tasks = [task("task-live", "running", true)]
+    resources = resource_inventory([])
+    base_session = acp_session("worker-1", "task-live", "principal-1")
+    drifted_session = Map.put(base_session, "owner_alive", false)
+
+    assert {:ok, base_manifest, base_digest} =
+             ReconciliationCore.reconcile(
+               task_inventory(tasks),
+               resources,
+               @observed_at,
+               %{},
+               acp_session_inventory([base_session])
+             )
+
+    assert {:ok, drifted_manifest, drifted_digest} =
+             ReconciliationCore.reconcile(
+               task_inventory(tasks),
+               resources,
+               @observed_at,
+               %{},
+               acp_session_inventory([drifted_session])
+             )
+
+    assert base_manifest["observation_digest"]["task_inventory_sha256"] ==
+             drifted_manifest["observation_digest"]["task_inventory_sha256"]
+
+    assert base_manifest["observation_digest"]["resource_inventory_sha256"] ==
+             drifted_manifest["observation_digest"]["resource_inventory_sha256"]
+
+    assert base_manifest["observation_digest"]["source_sha256"] !=
+             drifted_manifest["observation_digest"]["source_sha256"]
+
+    assert base_digest != drifted_digest
+
+    assert hd(base_manifest["decisions"])["expected_identity"]["owner_alive"] == true
+    assert hd(drifted_manifest["decisions"])["expected_identity"]["owner_alive"] == false
+    assert hd(base_manifest["decisions"])["decision"] == "keep"
+    assert hd(drifted_manifest["decisions"])["decision"] == "retry"
+  end
+
+  test "rejects truncated, malformed, duplicate, and quarantined ACP inventories" do
+    tasks = task_inventory([task("task-1", "running", true)])
+    resources = resource_inventory([])
+    valid = acp_session_inventory([acp_session("worker-1", "task-1", "principal-1")])
+
+    assert {:error, :truncated_observation} =
+             ReconciliationCore.reconcile(
+               tasks,
+               resources,
+               @observed_at,
+               %{},
+               Map.put(valid, "truncated", true)
+             )
+
+    assert {:error, :inconsistent_acp_counts} =
+             ReconciliationCore.reconcile(
+               tasks,
+               resources,
+               @observed_at,
+               %{},
+               valid
+               |> put_in(["counts", "observed"], 2)
+               |> put_in(["counts", "matching"], 2)
+               |> put_in(["counts", "truncated"], 1)
+             )
+
+    assert {:error, :inconsistent_acp_counts} =
+             ReconciliationCore.reconcile(
+               tasks,
+               resources,
+               @observed_at,
+               %{},
+               valid
+               |> put_in(["counts", "observed"], 2)
+               |> put_in(["counts", "malformed"], 1)
+               |> put_in(["counts", "matching"], 1)
+             )
+
+    assert {:error, :malformed_acp_quarantine} =
+             ReconciliationCore.reconcile(
+               tasks,
+               resources,
+               @observed_at,
+               %{},
+               valid
+               |> put_in(["counts", "observed"], 2)
+               |> put_in(["counts", "duplicates"], 1)
+               |> put_in(["counts", "quarantined"], 1)
+               |> put_in(["counts", "matching"], 1)
+             )
+
+    assert {:error, :malformed_acp_sessions} =
+             ReconciliationCore.reconcile(
+               tasks,
+               resources,
+               @observed_at,
+               %{},
+               valid
+               |> put_in(["counts", "returned"], 0)
+               |> put_in(["counts", "matching"], 0)
+               |> put_in(["counts", "observed"], 0)
+             )
+
+    assert {:error, {:duplicate, "worker_session_id"}} =
+             ReconciliationCore.reconcile(
+               tasks,
+               resources,
+               @observed_at,
+               %{},
+               acp_session_inventory([
+                 acp_session("same", "task-1", "principal-1"),
+                 acp_session("same", "task-1", "principal-1")
+               ])
+             )
+
+    assert {:error, {:duplicate, "provider_session_id"}} =
+             ReconciliationCore.reconcile(
+               tasks,
+               resources,
+               @observed_at,
+               %{},
+               acp_session_inventory([
+                 acp_session("worker-1", "task-1", "principal-1",
+                   provider_session_id: "provider-shared"
+                 ),
+                 acp_session("worker-2", "task-1", "principal-1",
+                   provider_session_id: "provider-shared"
+                 )
+               ])
+             )
+
+    assert {:error, :closed_object} =
+             ReconciliationCore.reconcile(
+               tasks,
+               resources,
+               @observed_at,
+               %{},
+               Map.put(valid, "opaque", true)
+             )
+
+    assert {:error, :field_set} =
+             ReconciliationCore.reconcile(
+               tasks,
+               resources,
+               @observed_at,
+               %{},
+               acp_session_inventory([
+                 acp_session("worker-1", "task-1", "principal-1")
+                 |> Map.delete("owner_alive")
+               ])
+             )
+
+    assert {:error, :inconsistent_acp_filters} =
+             ReconciliationCore.reconcile(
+               tasks,
+               resources,
+               @observed_at,
+               %{},
+               put_in(valid, ["filters", "task_id"], "other-task")
+             )
+
+    assert {:error, :invalid_acp_id} =
+             ReconciliationCore.reconcile(
+               tasks,
+               resources,
+               @observed_at,
+               %{},
+               acp_session_inventory([
+                 acp_session(" worker-1", "task-1", "principal-1")
+               ])
+             )
+
+    assert {:error, :inconsistent_acp_liveness} =
+             ReconciliationCore.reconcile(
+               tasks,
+               resources,
+               @observed_at,
+               %{},
+               acp_session_inventory([
+                 acp_session("worker-1", "task-1", "principal-1",
+                   owner_present: false,
+                   owner_alive: true
+                 )
+               ])
+             )
+
+    assert {:error, :inconsistent_acp_close_state} =
+             ReconciliationCore.reconcile(
+               tasks,
+               resources,
+               @observed_at,
+               %{},
+               acp_session_inventory([
+                 acp_session("worker-1", "task-1", "principal-1", close_cleanup_in_progress: true)
+               ])
+             )
+  end
+
+  test "empty ACP inventory participates in source digest without decisions" do
+    tasks = task_inventory([task("task-1", "running", true)])
+
+    resources =
+      resource_inventory([resource("live_workspace_lease", "resource-1", "task-1", "principal")])
+
+    assert {:ok, with_default, default_digest} =
+             ReconciliationCore.reconcile(tasks, resources, @observed_at)
+
+    assert {:ok, with_empty, empty_digest} =
+             ReconciliationCore.reconcile(
+               tasks,
+               resources,
+               @observed_at,
+               %{},
+               ReconciliationCore.empty_acp_inventory()
+             )
+
+    assert with_default == with_empty
+    assert default_digest == empty_digest
+    assert length(with_empty["decisions"]) == 1
+    assert hd(with_empty["decisions"])["resource_type"] == "live_workspace_lease"
+    assert String.match?(with_empty["observation_digest"]["source_sha256"], ~r/\A[0-9a-f]{64}\z/)
+  end
+
+  defp acp_session(worker_session_id, task_id, principal_id, overrides \\ []) do
+    %{
+      "worker_session_id" => worker_session_id,
+      "provider_session_id" => "provider-#{worker_session_id}",
+      "provider" => "test",
+      "model" => "model-1",
+      "status" => "ready",
+      "pooled" => false,
+      "return_to_pool" => false,
+      "task_id" => task_id,
+      "principal_id" => principal_id,
+      "owner_present" => true,
+      "owner_alive" => true,
+      "session_alive" => true,
+      "close_cleanup_in_progress" => false
+    }
+    |> Map.merge(Map.new(overrides, fn {key, value} -> {to_string(key), value} end))
+  end
+
+  defp acp_session_inventory(sessions) do
+    %{
+      "schema_version" => 1,
+      "storage" => %{"durability" => "volatile"},
+      "filters" => %{"task_id" => nil, "principal_id" => nil},
+      "max_items" => 1_000,
+      "truncated" => false,
+      "counts" => %{
+        "observed" => length(sessions),
+        "matching" => length(sessions),
+        "returned" => length(sessions),
+        "filtered_out" => 0,
+        "truncated" => 0,
+        "malformed" => 0,
+        "duplicates" => 0,
+        "quarantined" => 0,
+        "quarantine_returned" => 0,
+        "quarantine_truncated" => 0
+      },
+      "sessions" => sessions,
+      "quarantine" => []
+    }
   end
 
   defp task(task_id, state, owner_alive, overrides \\ []) do

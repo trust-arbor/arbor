@@ -30,13 +30,14 @@ defmodule Arbor.Orchestrator.CodingPlan.Reconciliation do
          {:ok, observations} <- collect_observations(opts),
          {:ok, task_inventory} <- required_inventory(observations, :task_inventory),
          {:ok, resource_inventory} <- required_inventory(observations, :resource_inventory),
-         {:ok, supplementary} <- supplementary_evidence(observations),
+         {:ok, acp_inventory, supplementary} <- supplementary_evidence(observations),
          {:ok, manifest, manifest_sha256} <-
            ReconciliationCore.reconcile(
              task_inventory,
              resource_inventory,
              opts.observed_at,
-             scope(opts)
+             scope(opts),
+             acp_inventory
            ),
          {:ok, exact_manifest_sha256} <- ReconciliationManifest.digest(manifest),
          true <- exact_manifest_sha256 == manifest_sha256,
@@ -310,13 +311,26 @@ defmodule Arbor.Orchestrator.CodingPlan.Reconciliation do
   end
 
   defp supplementary_evidence(observations) do
-    with {:ok, acp} <- supplementary_inventory(observations, "acp_sessions"),
+    with {:ok, acp} <- acp_session_inventory(observations),
          {:ok, approvals} <- supplementary_inventory(observations, "pending_approvals") do
-      {:ok,
+      {:ok, acp,
        %{
          "acp_sessions" => summarize_inventory("acp_sessions", acp),
          "pending_approvals" => summarize_inventory("pending_approvals", approvals)
        }}
+    end
+  end
+
+  defp acp_session_inventory(observations) do
+    case Map.get(observations, "acp_sessions") do
+      inventory when is_map(inventory) ->
+        with :ok <- validate_supplementary_inventory(inventory),
+             :ok <- validate_acp_session_inventory(inventory) do
+          {:ok, inventory}
+        end
+
+      _ ->
+        {:error, {:reconciliation_inventory_unavailable, "acp_sessions"}}
     end
   end
 
@@ -348,6 +362,18 @@ defmodule Arbor.Orchestrator.CodingPlan.Reconciliation do
       :ok
     else
       _ -> {:error, :invalid_or_incomplete_supplementary_inventory}
+    end
+  end
+
+  defp validate_acp_session_inventory(inventory) do
+    counts = Map.get(inventory, "counts", %{})
+    sessions = Map.get(inventory, "sessions")
+
+    if is_list(sessions) and Map.get(counts, "returned") == length(sessions) and
+         Map.get(counts, "truncated", 0) == 0 do
+      :ok
+    else
+      {:error, :invalid_or_incomplete_supplementary_inventory}
     end
   end
 

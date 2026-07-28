@@ -4,7 +4,11 @@ defmodule Arbor.Contracts.Coding.ReconciliationDecision do
   use TypedStruct
 
   @schema_version 1
-  @resource_types ~w(live_workspace_lease retained_workspace_record validation_resource quarantine)
+  @workspace_resource_types ~w(
+    live_workspace_lease retained_workspace_record validation_resource quarantine
+  )
+  @acp_resource_type "acp_managed_session"
+  @resource_types @workspace_resource_types ++ [@acp_resource_type]
   @decisions ~w(keep retry settle quarantine remove)
   @reasons ~w(
     existing_quarantine
@@ -20,7 +24,7 @@ defmodule Arbor.Contracts.Coding.ReconciliationDecision do
     dormant_resource
     retry_exhausted
   )
-  @expected_identity_fields [
+  @workspace_expected_identity_fields [
     :resource_type,
     :resource_id,
     :task_id,
@@ -34,6 +38,23 @@ defmodule Arbor.Contracts.Coding.ReconciliationDecision do
     :retry_count,
     :retry_limit,
     :expires_at
+  ]
+  @acp_expected_identity_fields [
+    :resource_type,
+    :resource_id,
+    :worker_session_id,
+    :provider_session_id,
+    :provider,
+    :model,
+    :status,
+    :pooled,
+    :return_to_pool,
+    :task_id,
+    :principal_id,
+    :owner_present,
+    :owner_alive,
+    :session_alive,
+    :close_cleanup_in_progress
   ]
   @evidence_fields [:task_presence, :task_state, :owner_status, :journal_status]
   @max_id_bytes 256
@@ -74,7 +95,14 @@ defmodule Arbor.Contracts.Coding.ReconciliationDecision do
          {:ok, principal_id} <- optional_id(attrs.principal_id, :principal_id),
          {:ok, decision} <- enum(attrs.decision, @decisions, :decision),
          {:ok, reason} <- enum(attrs.reason, @reasons, :reason),
-         {:ok, expected_identity} <- normalize_identity(attrs.expected_identity),
+         {:ok, expected_identity} <-
+           normalize_identity(
+             attrs.expected_identity,
+             resource_type,
+             resource_id,
+             task_id,
+             principal_id
+           ),
          {:ok, evidence} <- normalize_evidence(attrs.evidence) do
       {:ok,
        %__MODULE__{
@@ -134,10 +162,67 @@ defmodule Arbor.Contracts.Coding.ReconciliationDecision do
     ]
   end
 
-  defp normalize_identity(value) when is_map(value) and not is_struct(value) do
-    with {:ok, attrs} <- normalize_object(value, @expected_identity_fields, :invalid_identity),
-         :ok <- exact_identity_fields(attrs),
-         {:ok, resource_type} <- enum(attrs.resource_type, @resource_types, :resource_type),
+  defp normalize_identity(value, resource_type, resource_id, outer_task_id, outer_principal_id)
+       when is_map(value) and not is_struct(value) and resource_type == @acp_resource_type do
+    with {:ok, attrs} <-
+           normalize_object(value, @acp_expected_identity_fields, :invalid_identity),
+         :ok <- exact_identity_fields(attrs, @acp_expected_identity_fields),
+         {:ok, identity_type} <- enum(attrs.resource_type, [@acp_resource_type], :resource_type),
+         true <- identity_type == resource_type,
+         {:ok, identity_resource_id} <- source_id(attrs.resource_id, :resource_id),
+         true <- identity_resource_id == resource_id,
+         {:ok, worker_session_id} <- source_id(attrs.worker_session_id, :worker_session_id),
+         true <- identity_resource_id == worker_session_id,
+         {:ok, provider_session_id} <-
+           optional_source_text(attrs.provider_session_id, :provider_session_id),
+         {:ok, provider} <- source_text(attrs.provider, :provider),
+         {:ok, model} <- optional_source_text(attrs.model, :model),
+         {:ok, status} <- source_text(attrs.status, :status),
+         {:ok, pooled} <- boolean(attrs.pooled, :pooled),
+         {:ok, return_to_pool} <- boolean(attrs.return_to_pool, :return_to_pool),
+         {:ok, task_id} <- optional_source_id(attrs.task_id, :task_id),
+         true <- task_id == outer_task_id,
+         {:ok, principal_id} <- optional_source_id(attrs.principal_id, :principal_id),
+         true <- principal_id == outer_principal_id,
+         {:ok, owner_present} <- boolean(attrs.owner_present, :owner_present),
+         {:ok, owner_alive} <- boolean(attrs.owner_alive, :owner_alive),
+         {:ok, session_alive} <- boolean(attrs.session_alive, :session_alive),
+         {:ok, close_cleanup_in_progress} <-
+           boolean(attrs.close_cleanup_in_progress, :close_cleanup_in_progress),
+         :ok <-
+           valid_acp_session_state(owner_present, owner_alive, status, close_cleanup_in_progress) do
+      {:ok,
+       %{
+         "resource_type" => identity_type,
+         "resource_id" => identity_resource_id,
+         "worker_session_id" => worker_session_id,
+         "provider_session_id" => provider_session_id,
+         "provider" => provider,
+         "model" => model,
+         "status" => status,
+         "pooled" => pooled,
+         "return_to_pool" => return_to_pool,
+         "task_id" => task_id,
+         "principal_id" => principal_id,
+         "owner_present" => owner_present,
+         "owner_alive" => owner_alive,
+         "session_alive" => session_alive,
+         "close_cleanup_in_progress" => close_cleanup_in_progress
+       }}
+    else
+      false -> {:error, {:invalid_field, "expected_identity"}}
+      error -> error
+    end
+  end
+
+  defp normalize_identity(value, resource_type, _resource_id, _task_id, _principal_id)
+       when is_map(value) and not is_struct(value) and resource_type in @workspace_resource_types do
+    with {:ok, attrs} <-
+           normalize_object(value, @workspace_expected_identity_fields, :invalid_identity),
+         :ok <- exact_identity_fields(attrs, @workspace_expected_identity_fields),
+         {:ok, identity_type} <-
+           enum(attrs.resource_type, @workspace_resource_types, :resource_type),
+         true <- identity_type == resource_type,
          {:ok, resource_id} <- bounded_id(attrs.resource_id, :resource_id),
          {:ok, task_id} <- optional_id(attrs.task_id, :task_id),
          {:ok, principal_id} <- optional_id(attrs.principal_id, :principal_id),
@@ -152,7 +237,7 @@ defmodule Arbor.Contracts.Coding.ReconciliationDecision do
          {:ok, expires_at} <- optional_timestamp(attrs.expires_at, :expires_at) do
       {:ok,
        %{
-         "resource_type" => resource_type,
+         "resource_type" => identity_type,
          "resource_id" => resource_id,
          "task_id" => task_id,
          "principal_id" => principal_id,
@@ -166,10 +251,14 @@ defmodule Arbor.Contracts.Coding.ReconciliationDecision do
          "retry_limit" => retry_limit,
          "expires_at" => expires_at
        }}
+    else
+      false -> {:error, {:invalid_field, "expected_identity"}}
+      error -> error
     end
   end
 
-  defp normalize_identity(_value), do: {:error, {:invalid_field, "expected_identity"}}
+  defp normalize_identity(_value, _resource_type, _resource_id, _task_id, _principal_id),
+    do: {:error, {:invalid_field, "expected_identity"}}
 
   defp normalize_evidence(value) when is_map(value) and not is_struct(value) do
     with {:ok, attrs} <- normalize_object(value, @evidence_fields, :invalid_evidence),
@@ -250,8 +339,6 @@ defmodule Arbor.Contracts.Coding.ReconciliationDecision do
     if Enum.all?(required, &Map.has_key?(attrs, &1)), do: :ok, else: {:error, :missing_field}
   end
 
-  defp exact_identity_fields(attrs), do: exact_identity_fields(attrs, @expected_identity_fields)
-
   defp exact_identity_fields(attrs, fields) do
     if Map.keys(attrs) |> Enum.sort() == fields |> Enum.sort(),
       do: :ok,
@@ -286,6 +373,51 @@ defmodule Arbor.Contracts.Coding.ReconciliationDecision do
 
   defp optional_text(nil, _field), do: {:ok, nil}
   defp optional_text(value, field), do: bounded_id(value, field)
+
+  defp source_id(value, field)
+       when is_binary(value) and byte_size(value) > 0 and byte_size(value) <= @max_id_bytes do
+    if String.valid?(value) and String.trim(value) == value and
+         not String.match?(value, ~r/[\x00-\x1F\x7F]/),
+       do: {:ok, value},
+       else: {:error, {:invalid_field, Atom.to_string(field)}}
+  end
+
+  defp source_id(_value, field), do: {:error, {:invalid_field, Atom.to_string(field)}}
+
+  defp optional_source_id(nil, _field), do: {:ok, nil}
+  defp optional_source_id(value, field), do: source_id(value, field)
+
+  defp source_text(value, field)
+       when is_binary(value) and byte_size(value) <= @max_id_bytes do
+    if String.valid?(value) and not String.contains?(value, <<0>>),
+      do: {:ok, value},
+      else: {:error, {:invalid_field, Atom.to_string(field)}}
+  end
+
+  defp source_text(_value, field), do: {:error, {:invalid_field, Atom.to_string(field)}}
+
+  defp optional_source_text(nil, _field), do: {:ok, nil}
+  defp optional_source_text(value, field), do: source_text(value, field)
+
+  defp valid_acp_session_state(false, true, _status, _close_cleanup_in_progress),
+    do: {:error, {:invalid_field, "owner_alive"}}
+
+  defp valid_acp_session_state(
+         _owner_present,
+         _owner_alive,
+         status,
+         true
+       )
+       when status != "closing",
+       do: {:error, {:invalid_field, "close_cleanup_in_progress"}}
+
+  defp valid_acp_session_state(
+         _owner_present,
+         _owner_alive,
+         _status,
+         _close_cleanup_in_progress
+       ),
+       do: :ok
 
   defp boolean(value, _field) when is_boolean(value), do: {:ok, value}
   defp boolean(_value, field), do: {:error, {:invalid_field, Atom.to_string(field)}}
