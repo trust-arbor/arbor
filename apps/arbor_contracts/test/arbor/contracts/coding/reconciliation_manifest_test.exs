@@ -205,7 +205,9 @@ defmodule Arbor.Contracts.Coding.ReconciliationManifestTest do
   end
 
   test "accepts closed pending_approval identity and mixed manifests" do
-    assert {:ok, approval_decision} = ReconciliationDecision.new(valid_pending_approval_decision())
+    assert {:ok, approval_decision} =
+             ReconciliationDecision.new(valid_pending_approval_decision())
+
     approval_map = ReconciliationDecision.to_map(approval_decision)
 
     assert approval_map["resource_type"] == "pending_approval"
@@ -254,6 +256,29 @@ defmodule Arbor.Contracts.Coding.ReconciliationManifestTest do
              ReconciliationDecision.new(
                update_in(base, ["expected_identity"], &Map.delete(&1, "approval_id"))
              )
+
+    mixed_aliases =
+      update_in(base, ["expected_identity"], fn identity ->
+        Map.put(identity, :approval_id, identity["approval_id"])
+      end)
+
+    assert {:error, _} = ReconciliationDecision.new(mixed_aliases)
+  end
+
+  test "admits the combined decision-source ceiling within a bounded manifest" do
+    decisions =
+      Enum.map(1..3_000, fn index ->
+        resource_id = "lease-#{index}"
+
+        valid_decision()
+        |> Map.put("resource_id", resource_id)
+        |> put_in(["expected_identity", "resource_id"], resource_id)
+      end)
+
+    assert {:ok, manifest} =
+             ReconciliationManifest.new(valid_manifest(decisions, 3_000, 3_000, 0, 0, 0))
+
+    assert length(ReconciliationManifest.to_map(manifest)["decisions"]) == 3_000
   end
 
   test "rejects unknown fields, malformed evidence, paths, and oversized decisions" do
@@ -271,10 +296,10 @@ defmodule Arbor.Contracts.Coding.ReconciliationManifestTest do
     manifest = valid_manifest([decision], 1, 0, 0, 0, 0)
     assert {:error, _} = ReconciliationManifest.new(Map.put(manifest, "authority", "operator"))
 
-    oversized = List.duplicate(decision, 1_001)
+    oversized = List.duplicate(decision, 3_001)
 
     assert {:error, _} =
-             ReconciliationManifest.new(valid_manifest(oversized, 1_001, 1_001, 0, 0, 0))
+             ReconciliationManifest.new(valid_manifest(oversized, 3_001, 3_001, 0, 0, 0))
   end
 
   defp valid_decision, do: @legacy_workspace_decision

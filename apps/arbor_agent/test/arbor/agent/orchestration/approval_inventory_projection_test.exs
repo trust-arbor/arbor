@@ -235,6 +235,33 @@ defmodule Arbor.Agent.Orchestration.ApprovalInventoryProjectionTest do
     assert inventory["counts"]["quarantined"] == 1
   end
 
+  test "security regression: quarantines malformed source ownership ids" do
+    Process.put(
+      {Consensus, :pending},
+      [
+        consensus("bad-agent", " agent-a", "task-a"),
+        consensus("bad-principal", "agent-a", "task-a", metadata: %{principal_id: "principal\n"})
+      ]
+    )
+
+    Process.put(
+      {Comms, :pending},
+      [interaction("bad-approver", "agent-b", "task-b", "human\t", [])]
+    )
+
+    assert {:ok, inventory} =
+             inventory(
+               caller_id: "operator",
+               consensus_module: Consensus,
+               interaction_router: Comms,
+               security_module: Security
+             )
+
+    assert inventory["approvals"] == []
+    assert inventory["counts"]["malformed"] == 3
+    assert inventory["counts"]["quarantined"] == 3
+  end
+
   test "backend overrun is explicitly bounded" do
     Process.put(
       {Consensus, :pending},

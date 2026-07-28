@@ -127,6 +127,15 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationTest do
     assert_receive {:authorized, "operator-1", "arbor://coding/reconciliation/read", :read,
                     verify_identity: false}
 
+    assert_receive {:observed,
+                    [
+                      caller_id: "operator-1",
+                      task_id: nil,
+                      principal_id: nil,
+                      max_items: 64,
+                      pending_approval_principal_scope: :subject
+                    ]}
+
     refute_received {:mutation, _}
   end
 

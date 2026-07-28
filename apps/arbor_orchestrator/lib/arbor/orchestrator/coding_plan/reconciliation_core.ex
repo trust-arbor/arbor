@@ -491,19 +491,17 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
 
   defp normalize_approval_bounds(_bounds), do: {:error, :malformed_pending_approval_inventory}
 
-  defp normalize_approval_filters(filters, resource_filters) when is_map(filters) do
+  defp normalize_approval_filters(filters, _resource_filters) when is_map(filters) do
     with {:ok, filters} <-
            object(filters, ~w(task_id agent_id principal_id principal_scope resource_uri)),
          :ok <- exact(filters, ~w(task_id agent_id principal_id principal_scope resource_uri)),
-         :ok <- optional_id(filters["task_id"]),
-         :ok <- optional_id(filters["agent_id"]),
-         :ok <- optional_id(filters["principal_id"]),
+         :ok <- optional_approval_source_id(filters["task_id"]),
+         :ok <- optional_approval_source_id(filters["agent_id"]),
+         :ok <- optional_approval_source_id(filters["principal_id"]),
          true <- filters["principal_scope"] == "subject",
          true <- is_nil(filters["agent_id"]),
          true <- is_nil(filters["resource_uri"]),
-         :ok <- optional_resource_uri_value(filters["resource_uri"]),
-         true <- filters["task_id"] == resource_filters["task_id"],
-         true <- filters["principal_id"] == resource_filters["principal_id"] do
+         :ok <- optional_resource_uri_value(filters["resource_uri"]) do
       {:ok, filters}
     else
       false -> {:error, :inconsistent_approval_filters}
@@ -615,20 +613,23 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
     with {:ok, approval} <- object(approval, @source_approval_fields),
          :ok <- exact(approval, @source_approval_fields),
          {:ok, approval_id} <- required_approval_text(approval["approval_id"]),
-         {:ok, source} <- enum_value_result(approval["source"], PendingApprovalResourceId.sources()),
+         {:ok, source} <-
+           enum_value_result(approval["source"], PendingApprovalResourceId.sources()),
          {:ok, resource_id} <- PendingApprovalResourceId.resource_id(source, approval_id),
          true <- approval["resource_id"] == resource_id,
-         :ok <- optional_id(approval["task_id"]),
-         :ok <- optional_id(approval["agent_id"]),
-         :ok <- optional_id(approval["principal_id"]),
-         :ok <- optional_id(approval["approver_id"]),
+         :ok <- optional_approval_source_id(approval["task_id"]),
+         :ok <- optional_approval_source_id(approval["agent_id"]),
+         :ok <- optional_approval_source_id(approval["principal_id"]),
+         :ok <- optional_approval_source_id(approval["approver_id"]),
          :ok <- optional_resource_uri_value(approval["resource_uri"]),
          :ok <- optional_approval_text(approval["action"]),
          :ok <- enum_value(approval["status"], @pending_approval_statuses),
          :ok <- optional_timestamp_value(approval["created_at"]) do
       {:ok, Map.put(approval, "resource_id", resource_id)}
     else
-      false -> {:error, :malformed_pending_approval_inventory}
+      false ->
+        {:error, :malformed_pending_approval_inventory}
+
       {:error, :invalid_pending_approval_resource_id} ->
         {:error, :malformed_pending_approval_inventory}
 
@@ -1271,6 +1272,9 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
         is_nil(task) ->
           {"quarantine", "missing_task"}
 
+        not is_nil(approval["agent_id"]) and approval["agent_id"] != task["agent_id"] ->
+          {"quarantine", "ambiguous_provenance"}
+
         task_state in @live_states and owner_status == "live" ->
           {"keep", "live_task_owner_alive"}
 
@@ -1366,6 +1370,17 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
       "quarantine" => Map.get(frequencies, "quarantine", 0),
       "remove" => Map.get(frequencies, "remove", 0)
     }
+  end
+
+  defp decision_sort_key(
+         %{
+           "resource_type" => "pending_approval",
+           "expected_identity" => identity
+         } = decision
+       ) do
+    {Map.fetch!(@resource_order, "pending_approval"), "pending_approval", identity["approval_id"],
+     identity["source"], decision["resource_id"], decision["task_id"] || "",
+     decision["principal_id"] || ""}
   end
 
   defp decision_sort_key(decision) do
@@ -1701,6 +1716,18 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
 
   defp optional_acp_id(value),
     do: if(match?({:ok, _}, acp_id(value)), do: :ok, else: {:error, :invalid_acp_id})
+
+  defp optional_approval_source_id(nil), do: :ok
+
+  defp optional_approval_source_id(value)
+       when is_binary(value) and byte_size(value) > 0 and byte_size(value) <= 256 do
+    if String.valid?(value) and String.trim(value) == value and
+         not String.match?(value, ~r/[\x00-\x1F\x7F]/),
+       do: :ok,
+       else: {:error, :invalid_approval_source_id}
+  end
+
+  defp optional_approval_source_id(_value), do: {:error, :invalid_approval_source_id}
 
   defp acp_text(value) when is_binary(value) and byte_size(value) <= 256 do
     if String.valid?(value) and not String.contains?(value, <<0>>),

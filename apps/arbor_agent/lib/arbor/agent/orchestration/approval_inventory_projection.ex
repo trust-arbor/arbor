@@ -140,9 +140,9 @@ defmodule Arbor.Agent.Orchestration.ApprovalInventoryProjection do
   defp project_approval(source, %PendingApproval{} = approval, task_id) do
     with {:ok, approval_id} <- required_string(approval.id, @max_id_bytes),
          {:ok, task_id} <- optional_task_id(task_id),
-         {:ok, agent_id} <- optional_string(approval.agent_id, @max_id_bytes),
-         {:ok, principal_id} <- optional_string(approval.principal_id, @max_id_bytes),
-         {:ok, approver_id} <- optional_string(approval.approver_id, @max_id_bytes),
+         {:ok, agent_id} <- optional_source_id(approval.agent_id),
+         {:ok, principal_id} <- optional_source_id(approval.principal_id),
+         {:ok, approver_id} <- optional_source_id(approval.approver_id),
          {:ok, resource_uri} <- optional_resource_uri(approval.resource_uri),
          {:ok, action} <- optional_value_string(approval.action, @max_id_bytes),
          {:ok, status} <- status_string(approval.status),
@@ -232,6 +232,18 @@ defmodule Arbor.Agent.Orchestration.ApprovalInventoryProjection do
   end
 
   defp optional_string(_value, _max_bytes), do: :error
+
+  defp optional_source_id(nil), do: {:ok, nil}
+
+  defp optional_source_id(value)
+       when is_binary(value) and byte_size(value) > 0 and byte_size(value) <= @max_id_bytes do
+    if String.valid?(value) and String.trim(value) == value and
+         not String.match?(value, ~r/[\x00-\x1F\x7F]/),
+       do: {:ok, value},
+       else: :error
+  end
+
+  defp optional_source_id(_value), do: :error
 
   defp optional_value_string(nil, _max_bytes), do: {:ok, nil}
 

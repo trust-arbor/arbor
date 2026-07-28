@@ -725,7 +725,10 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCoreTest do
       pending_approval("settle-c", "consensus", "task-terminal", "principal-1"),
       pending_approval("missing-task", "consensus", "task-missing", "principal-1"),
       pending_approval("missing-principal", "consensus", "task-live", nil),
-      pending_approval("missing-task-id", "consensus", nil, "principal-1")
+      pending_approval("missing-task-id", "consensus", nil, "principal-1"),
+      pending_approval("wrong-agent", "consensus", "task-live", "principal-1",
+        agent_id: "agent-2"
+      )
     ]
 
     assert {:ok, manifest, digest} =
@@ -752,6 +755,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCoreTest do
              "missing_task_or_principal_provenance"
 
     assert decisions["missing-task-id"]["reason"] == "missing_task_or_principal_provenance"
+    assert decisions["wrong-agent"]["decision"] == "quarantine"
+    assert decisions["wrong-agent"]["reason"] == "ambiguous_provenance"
 
     identity = decisions["keep-a"]["expected_identity"]
     {:ok, resource_id} = PendingApprovalResourceId.resource_id("consensus", "keep-a")
@@ -810,6 +815,30 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCoreTest do
              "a-approval",
              "z-approval"
            ]
+  end
+
+  test "accepts the pending approval producer ceiling within the manifest bound" do
+    tasks = task_inventory([task("task-live", "running", true)])
+
+    approvals =
+      Enum.map(
+        1..1_000,
+        &pending_approval("approval-#{&1}", "consensus", "task-live", "principal-1")
+      )
+
+    assert {:ok, manifest, digest} =
+             ReconciliationCore.reconcile(
+               tasks,
+               resource_inventory([]),
+               @observed_at,
+               %{},
+               nil,
+               pending_approval_inventory(approvals)
+             )
+
+    assert length(manifest["decisions"]) == 1_000
+    assert manifest["counts"]["resources"] == 1_000
+    assert String.match?(digest, ~r/\A[0-9a-f]{64}\z/)
   end
 
   test "rejects incomplete or narrowed pending approval inventories" do

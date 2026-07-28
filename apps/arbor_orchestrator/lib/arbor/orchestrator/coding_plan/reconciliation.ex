@@ -208,7 +208,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Reconciliation do
       caller_id: opts.caller_id,
       task_id: opts.task_id,
       principal_id: opts.principal_id,
-      max_items: opts.max_items
+      max_items: opts.max_items,
+      pending_approval_principal_scope: :subject
     ]
   end
 
@@ -390,7 +391,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Reconciliation do
     end
   end
 
-  defp validate_pending_approval_inventory(inventory, opts) do
+  defp validate_pending_approval_inventory(inventory, _opts) do
     counts = Map.get(inventory, "counts", %{})
     filters = Map.get(inventory, "filters", %{})
     approvals = Map.get(inventory, "approvals")
@@ -400,8 +401,6 @@ defmodule Arbor.Orchestrator.CodingPlan.Reconciliation do
          true <- Map.get(counts, "truncated", 0) == 0,
          true <- Map.get(counts, "backend_omitted", 0) == 0,
          true <- Map.get(filters, "principal_scope") == "subject",
-         true <- Map.get(filters, "task_id") == opts.task_id,
-         true <- Map.get(filters, "principal_id") == opts.principal_id,
          true <- is_nil(Map.get(filters, "agent_id")),
          true <- is_nil(Map.get(filters, "resource_uri")) do
       :ok
