@@ -4196,11 +4196,21 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
                run_with_context(%{
                  "status" => "pipeline_error",
                  "error" => "worker_provider_account_exhausted",
-                 "worker_failure_reason" => stable_reason
+                 "worker_failure_reason" => stable_reason,
+                 "worker_provider_session_id" => "",
+                 "worker_msg" => %{
+                   "delivery_status" => "provider_account_exhausted",
+                   "stop_reason" => "",
+                   "session_id" => "provider-session-from-failed-message"
+                 }
                })
 
       assert detail["error"] == "worker_provider_account_exhausted"
       assert detail["failure_reason"] == stable_reason
+      assert detail["worker_provider_session_id"] == "provider-session-from-failed-message"
+
+      assert detail["outcome"]["provider_session_id"] ==
+               "provider-session-from-failed-message"
     end
 
     test "pipeline_error omits invalid worker provider account exhaustion reasons" do

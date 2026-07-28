@@ -978,27 +978,37 @@ defmodule Arbor.Actions.Acp do
           # Preserve the ACP stop_reason fact. Never default missing/blank values
           # to "end_turn" — owner graphs must gate on an explicit trusted end_turn.
           # Cumulative usage is authoritative from owner-bound managed status when
-          # present; raw response top-level usage is only a fallback. Do not parse
-          # provider-specific `_meta` here — AcpSession already accumulated it.
-          project_send_result(
+          # present; raw response top-level usage is only a fallback. The raw
+          # response remains available here so bounded adapter attestations can
+          # reject provider failures that arrived in a nominal success envelope.
+          project_send_response(
             response,
             transcript_opts,
-            maybe_add_delivery_status(
-              %{
-                text: map_get(response, :text) || map_get(response, "text") || "",
-                stop_reason: normalize_stop_reason(response),
-                session_id: provider_session_id(response, status),
-                context_pressure:
-                  map_get(status, :context_pressure) ||
-                    map_get(status, "context_pressure") || false,
-                usage: project_managed_usage(status, response)
-              },
-              failure_mode
-            )
+            %{
+              text: map_get(response, :text) || map_get(response, "text") || "",
+              stop_reason: normalize_stop_reason(response),
+              session_id: provider_session_id(response, status),
+              context_pressure:
+                map_get(status, :context_pressure) ||
+                  map_get(status, "context_pressure") || false,
+              usage: project_managed_usage(status, response)
+            },
+            failure_mode
           )
 
         {:error, reason} ->
-          format_send_error(reason, failure_mode)
+          fallback_session_id =
+            if failure_mode == :delivery_receipt and
+                 match?(
+                   {:provider_account_exhausted, _status},
+                   Arbor.Actions.Acp.DeliveryFailure.classify(reason)
+                 ) do
+              provider_session_id(%{}, managed_status(worker_session_id, context))
+            else
+              ""
+            end
+
+          format_send_error(reason, failure_mode, fallback_session_id)
       end
     end
 
@@ -1019,20 +1029,17 @@ defmodule Arbor.Actions.Acp do
       # credo:disable-for-next-line Credo.Check.Refactor.Apply
       case apply(Acp.ai_module(), :acp_send_message, [pid, get_param(params, :prompt), opts]) do
         {:ok, response} ->
-          project_send_result(
+          project_send_response(
             response,
             transcript_opts,
-            maybe_add_delivery_status(
-              %{
-                text: map_get(response, :text) || map_get(response, "text") || "",
-                stop_reason: normalize_stop_reason(response),
-                session_id:
-                  map_get(response, :session_id) || map_get(response, "session_id") || "",
-                context_pressure: Acp.check_context_pressure(pid),
-                usage: plain_usage_map(response) || %{}
-              },
-              failure_mode
-            )
+            %{
+              text: map_get(response, :text) || map_get(response, "text") || "",
+              stop_reason: normalize_stop_reason(response),
+              session_id: map_get(response, :session_id) || map_get(response, "session_id") || "",
+              context_pressure: Acp.check_context_pressure(pid),
+              usage: plain_usage_map(response) || %{}
+            },
+            failure_mode
           )
 
         {:error, reason} ->
@@ -1040,27 +1047,91 @@ defmodule Arbor.Actions.Acp do
       end
     end
 
-    defp format_send_error(reason, :delivery_receipt) do
+    defp format_send_error(reason, failure_mode),
+      do: format_send_error(reason, failure_mode, "")
+
+    defp format_send_error(reason, :delivery_receipt, fallback_session_id) do
       case Arbor.Actions.Acp.DeliveryFailure.classify(reason) do
-        {:provider_account_exhausted, http_status} ->
-          {:ok,
-           %{
-             delivery_status: "provider_account_exhausted",
-             failure_reason:
-               "ACP provider account credits exhausted or monthly spending limit reached (HTTP #{http_status})",
-             text: "",
-             stop_reason: "",
-             session_id: "",
-             context_pressure: false,
-             usage: %{}
-           }}
+        {:provider_account_exhausted, _http_status} = classification ->
+          typed_session_id = Arbor.Actions.Acp.DeliveryFailure.provider_session_id(reason)
+
+          base = %{
+            session_id:
+              Enum.find(
+                [typed_session_id, fallback_session_id],
+                "",
+                &valid_provider_session_id?/1
+              )
+          }
+
+          format_response_failure(classification, :delivery_receipt, base)
 
         :other ->
           {:error, Acp.format_error(reason)}
       end
     end
 
-    defp format_send_error(reason, :error), do: {:error, Acp.format_error(reason)}
+    defp format_send_error(reason, :error, _fallback_session_id),
+      do: {:error, Acp.format_error(reason)}
+
+    defp project_send_response(response, transcript_opts, base, failure_mode) do
+      case Arbor.Actions.Acp.DeliveryFailure.classify_response(response) do
+        :other ->
+          project_send_result(
+            response,
+            transcript_opts,
+            maybe_add_delivery_status(base, failure_mode)
+          )
+
+        classification ->
+          base = maybe_put_failure_session_id(base, response)
+
+          case format_response_failure(classification, failure_mode, base) do
+            {:ok, receipt} -> project_send_result(response, transcript_opts, receipt)
+            {:error, _reason} = error -> error
+          end
+      end
+    end
+
+    defp format_response_failure(
+           {:provider_account_exhausted, http_status},
+           :delivery_receipt,
+           base
+         ) do
+      {:ok,
+       %{
+         delivery_status: "provider_account_exhausted",
+         failure_reason:
+           "ACP provider account credits exhausted or monthly spending limit reached (HTTP #{http_status})",
+         text: "",
+         stop_reason: "",
+         session_id: map_get(base, :session_id) || "",
+         context_pressure: false,
+         usage: %{}
+       }}
+    end
+
+    defp format_response_failure(
+           {:acp_protocol_failure, _evidence} = failure,
+           _failure_mode,
+           _base
+         ),
+         do: {:error, Acp.format_error(failure)}
+
+    defp format_response_failure(classification, :error, _base),
+      do: {:error, Acp.format_error(classification)}
+
+    defp maybe_put_failure_session_id(%{session_id: session_id} = base, _response)
+         when is_binary(session_id) and session_id != "",
+         do: base
+
+    defp maybe_put_failure_session_id(base, response) do
+      Map.put(
+        base,
+        :session_id,
+        Arbor.Actions.Acp.DeliveryFailure.response_provider_session_id(response)
+      )
+    end
 
     defp maybe_add_delivery_status(base, :delivery_receipt),
       do: Map.put(base, :delivery_status, "delivered")
@@ -1161,8 +1232,14 @@ defmodule Arbor.Actions.Acp do
         map_get(status, :session_id),
         map_get(status, "session_id")
       ]
-      |> Enum.find("", &(is_binary(&1) and &1 != ""))
+      |> Enum.find("", &valid_provider_session_id?/1)
     end
+
+    defp valid_provider_session_id?(session_id)
+         when is_binary(session_id) and session_id != "" and byte_size(session_id) <= 256,
+         do: String.valid?(session_id)
+
+    defp valid_provider_session_id?(_session_id), do: false
 
     defp get_param(params, key), do: Acp.param(params, key)
 

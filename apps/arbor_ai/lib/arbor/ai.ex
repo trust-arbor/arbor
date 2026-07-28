@@ -45,6 +45,7 @@ defmodule Arbor.AI do
   @behaviour Arbor.Contracts.API.Embedding
 
   alias Arbor.AI.{
+    AcpPromptFailure,
     AcpSession,
     Backends.OllamaEmbedding,
     Backends.OpenAIEmbedding,
@@ -835,6 +836,11 @@ defmodule Arbor.AI do
   def acp_send_message(session, content, opts \\ []) do
     AcpSession.send_message(session, content, opts)
   end
+
+  @doc false
+  @spec classify_acp_prompt_failure(term()) ::
+          AcpPromptFailure.failure() | :none
+  def classify_acp_prompt_failure(result), do: AcpPromptFailure.classify(result)
 
   @doc """
   Resume an existing ACP session by session ID.

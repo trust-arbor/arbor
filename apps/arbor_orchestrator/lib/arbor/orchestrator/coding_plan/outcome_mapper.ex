@@ -205,11 +205,21 @@ defmodule Arbor.Orchestrator.CodingPlan.OutcomeMapper do
   end
 
   defp optional_string(map, keys) do
-    case Enum.find_value(keys, fn key -> lookup(map, key) end) do
-      nil -> {:ok, nil}
-      value when is_binary(value) -> {:ok, blank_to_nil(value)}
-      _ -> {:error, :malformed_evidence}
-    end
+    Enum.reduce_while(keys, {:ok, nil}, fn key, _acc ->
+      case lookup(map, key) do
+        nil ->
+          {:cont, {:ok, nil}}
+
+        value when is_binary(value) ->
+          case blank_to_nil(value) do
+            nil -> {:cont, {:ok, nil}}
+            value -> {:halt, {:ok, value}}
+          end
+
+        _other ->
+          {:halt, {:error, :malformed_evidence}}
+      end
+    end)
   end
 
   defp optional_delivery_state(evidence) do

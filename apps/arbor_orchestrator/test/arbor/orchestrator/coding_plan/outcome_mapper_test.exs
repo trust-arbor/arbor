@@ -88,6 +88,18 @@ defmodule Arbor.Orchestrator.CodingPlan.OutcomeMapperTest do
     assert outcome["code"] == "worker_provider_account_exhausted"
   end
 
+  test "blank projected provider session falls back to the worker message" do
+    evidence =
+      completed_evidence()
+      |> Map.put("worker_provider_session_id", "")
+      |> put_in(["worker_msg", "session_id"], "provider-session-from-message")
+
+    assert {:ok, outcome} =
+             OutcomeMapper.map_pipeline_error("worker_provider_account_exhausted", evidence)
+
+    assert outcome["provider_session_id"] == "provider-session-from-message"
+  end
+
   test "requested and confirmed model mismatch remains distinct" do
     evidence = put_in(completed_evidence(), ["worker_status", "model"], "confirmed-model")
 

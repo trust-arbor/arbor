@@ -189,6 +189,49 @@ defmodule Arbor.AI.AcpTaskControlTest do
     )
   end
 
+  defp claude_spend_limit_result do
+    text =
+      "You've hit your monthly spend limit · raise it at claude.ai/settings/usage?from=cc_cli_limit_message"
+
+    raw_result = %{
+      "type" => "result",
+      "subtype" => "success",
+      "is_error" => true,
+      "terminal_reason" => "api_error",
+      "api_error_status" => 429,
+      "stop_reason" => "stop_sequence",
+      "session_id" => "claude-provider-session",
+      "total_cost_usd" => 0,
+      "usage" => %{
+        "input_tokens" => 0,
+        "output_tokens" => 0,
+        "cache_read_input_tokens" => 0,
+        "cache_creation_input_tokens" => 0
+      },
+      "result" => text
+    }
+
+    state = %ExMCP.ACP.Adapters.ClaudeSDK{
+      pending_prompt_id: "prompt-spend-limit",
+      session_id: "claude-provider-session"
+    }
+
+    {messages, [], _state} =
+      ExMCP.ACP.Adapters.ClaudeSDK.Mapper.reduce_message(raw_result, state)
+
+    response =
+      messages
+      |> Enum.find(&(&1["id"] == "prompt-spend-limit"))
+      |> Map.fetch!("result")
+
+    update =
+      messages
+      |> Enum.find(&(get_in(&1, ["params", "update", "sessionUpdate"]) == "agent_message_chunk"))
+      |> get_in(["params", "update"])
+
+    {response, update, text}
+  end
+
   defp subscribe_to_task_control_signals do
     test_pid = self()
 
@@ -440,6 +483,74 @@ defmodule Arbor.AI.AcpTaskControlTest do
              "partial"
 
     assert {:error, :provider_failed} = Task.await(caller)
+  end
+
+  test "security regression: reassembled Claude spend exhaustion is captured as provider error" do
+    session = start_session()
+
+    caller =
+      Task.async(fn ->
+        AcpSession.send_message(session, "will-hit-spend-limit", capture_opts(:ok))
+      end)
+
+    assert_receive {:prompt_started, worker, _client, "same-session", "will-hit-spend-limit"}
+    {result, update, text} = claude_spend_limit_result()
+
+    send(session, {
+      :acp_session_update,
+      "same-session",
+      update
+    })
+
+    send(worker, {:release, {:ok, result}})
+
+    reason =
+      {:provider_account_exhausted,
+       %{
+         provider: "claude",
+         http_status: 429,
+         provider_session_id: "claude-provider-session"
+       }}
+
+    assert_receive {:transcript_sink_turn, _sink_worker, turn}
+    assert turn["terminal"]["status"] == "provider_error"
+    assert turn["terminal"]["response"]["text"] == text
+    assert turn["terminal"]["error"]["text"] == inspect(reason)
+    assert turn["terminal"]["stop_reason"]["text"] == "end_turn"
+    assert turn["continuity"]["provider_session_id"]["text"] == "claude-provider-session"
+    assert {:error, ^reason} = Task.await(caller)
+    assert %{status: :error, session_id: "same-session"} = AcpSession.status(session)
+  end
+
+  test "security regression: unattested Claude spend exhaustion fails closed" do
+    session = start_session()
+
+    caller =
+      Task.async(fn ->
+        AcpSession.send_message(session, "will-hit-unattested-limit", capture_opts(:ok))
+      end)
+
+    assert_receive {:prompt_started, worker, _client, "same-session", "will-hit-unattested-limit"}
+
+    {result, update, text} = claude_spend_limit_result()
+    result = Map.delete(result, "_meta")
+
+    send(session, {:acp_session_update, "same-session", update})
+    send(worker, {:release, {:ok, result}})
+
+    reason =
+      {:acp_protocol_failure,
+       %{
+         provider: "claude",
+         reason: :unattested_provider_account_exhaustion
+       }}
+
+    assert_receive {:transcript_sink_turn, _sink_worker, turn}
+    assert turn["terminal"]["status"] == "provider_error"
+    assert turn["terminal"]["response"]["text"] == text
+    assert turn["terminal"]["error"]["text"] == inspect(reason)
+    assert turn["terminal"]["stop_reason"]["text"] == "end_turn"
+    assert {:error, ^reason} = Task.await(caller)
   end
 
   test "hard timeout captures the prompt and stream tail before replying" do

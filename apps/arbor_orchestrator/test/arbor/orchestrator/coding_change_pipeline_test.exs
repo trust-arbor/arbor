@@ -7,7 +7,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
   use ExUnit.Case, async: false
 
   alias Arbor.Contracts.Coding.{Plan, WorkPacket}
-  alias Arbor.Orchestrator.CodingPlan.Compiler
+  alias Arbor.Orchestrator.CodingPlan.{BudgetPolicy, Compiler}
 
   @moduletag :fast
   @moduletag :coding_change_pipeline
@@ -1300,6 +1300,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
         "session.task_id" => "task_fixture",
         "session.run_deadline_unix_ms" => @fixture_run_deadline_unix_ms
       }
+      |> Map.merge(fixture_budget_values())
       |> Map.merge(initial_overrides)
 
     opts = [
@@ -1315,6 +1316,14 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
     Process.put(:coding_change_validation_captures, snapshot.validation_captures)
     calls = snapshot.calls
     {result, calls}
+  end
+
+  defp fixture_budget_values do
+    {:ok, allocation} = BudgetPolicy.allocate(900_000, 900_000)
+
+    Map.new(allocation, fn {key, value} ->
+      {"coding_budget.#{key}", value}
+    end)
   end
 
   defp run_compiled_v2_fixture(scenario, checkpoint_policy, plan_overrides \\ %{}) do
@@ -1536,7 +1545,13 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
            }
 
     assert await_args["request_id"] == "irq_design_fixture_#{attempt}"
-    assert open_args["timeout"] === plan.budgets["inactivity_timeout_ms"]
+
+    assert open_args["timeout"] ===
+             min(
+               plan.budgets["inactivity_timeout_ms"],
+               fixture_budget_values()["coding_budget.approval_ms"]
+             )
+
     refute Map.has_key?(await_args, "timeout")
     assert open_args["run_deadline_unix_ms"] == @fixture_run_deadline_unix_ms
     assert await_args["run_deadline_unix_ms"] == @fixture_run_deadline_unix_ms

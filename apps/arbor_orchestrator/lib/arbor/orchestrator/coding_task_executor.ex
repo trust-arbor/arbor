@@ -2408,6 +2408,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
            clean
            |> build_coding_payload(status, legacy)
            |> Map.put("outcome", outcome)
+           |> put_outcome_provider_session_id(outcome)
            |> maybe_put_verification_report(verification_report)
            |> maybe_put_validation_failure(engine_result)}
         else
@@ -2893,7 +2894,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
       "workspace_id" => context_get(context, "workspace_id"),
       "worker_provider" => worker_provider,
       "worker_session_id" => context_get(context, "worker_session_id"),
-      "worker_provider_session_id" => context_get(context, "worker_provider_session_id"),
+      "worker_provider_session_id" => outcome["provider_session_id"],
       "outcome" => outcome
     }
     |> Map.merge(workspace_release_projection(context))
@@ -2913,6 +2914,13 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   # which is meant for malformed evidence and marks retry "none".
   defp pipeline_error_outcome_code("pipeline_timeout"), do: "pipeline_error"
   defp pipeline_error_outcome_code(error_code), do: error_code
+
+  defp put_outcome_provider_session_id(payload, %{"provider_session_id" => session_id})
+       when is_binary(session_id) and session_id != "" do
+    Map.put(payload, "worker_provider_session_id", session_id)
+  end
+
+  defp put_outcome_provider_session_id(payload, _outcome), do: payload
 
   defp maybe_put_pipeline_timeout_evidence(detail, "pipeline_timeout", context) do
     detail

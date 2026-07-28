@@ -1047,7 +1047,7 @@ defmodule Arbor.Actions.AcpTest do
 
       assert receipt.text == ""
       assert receipt.stop_reason == ""
-      assert receipt.session_id == ""
+      assert receipt.session_id == "provider_sess_1"
       assert receipt.context_pressure == false
       assert receipt.usage == %{}
       assert {:ok, _json} = Jason.encode(receipt)
@@ -1079,6 +1079,118 @@ defmodule Arbor.Actions.AcpTest do
       assert receipt.failure_reason =~ "(HTTP 402)"
       assert receipt.text == ""
       assert receipt.usage == %{}
+      assert_receive {:legacy_send, ^session, "continue", _opts}
+    end
+
+    test "security regression: provider-attested Claude spend exhaustion is not a successful turn" do
+      install_fake_ai()
+
+      :persistent_term.put(
+        {FakeAI, :send_result},
+        {:ok, claude_spend_limit_response()}
+      )
+
+      assert {:ok, receipt} =
+               Acp.SendMessage.run(
+                 %{
+                   worker_session_id: "acp_worker_claude_spend_limit",
+                   prompt: "continue",
+                   failure_mode: "delivery_receipt"
+                 },
+                 %{}
+               )
+
+      assert receipt.delivery_status == "provider_account_exhausted"
+
+      assert receipt.failure_reason ==
+               "ACP provider account credits exhausted or monthly spending limit reached (HTTP 429)"
+
+      assert receipt.text == ""
+      assert receipt.stop_reason == ""
+      assert receipt.session_id == "provider_sess_1"
+      assert receipt.context_pressure == false
+      assert receipt.usage == %{}
+
+      assert {:error, error} =
+               Acp.SendMessage.run(
+                 %{
+                   worker_session_id: "acp_worker_claude_spend_limit",
+                   prompt: "continue"
+                 },
+                 %{}
+               )
+
+      assert error == "ACP error: {:provider_account_exhausted, 429}"
+    end
+
+    test "security regression: Claude spend-limit text without adapter attestation fails closed" do
+      install_fake_ai()
+
+      response =
+        claude_spend_limit_response()
+        |> Map.delete("_meta")
+
+      :persistent_term.put({FakeAI, :send_result}, {:ok, response})
+
+      assert {:error, error} =
+               Acp.SendMessage.run(
+                 %{
+                   worker_session_id: "acp_worker_unattested_spend_limit",
+                   prompt: "continue",
+                   failure_mode: "delivery_receipt"
+                 },
+                 %{}
+               )
+
+      assert error =~ "acp_protocol_failure"
+      assert error =~ "unattested_provider_account_exhaustion"
+
+      positive_usage =
+        put_in(
+          claude_spend_limit_response(),
+          ["usage", "outputTokens"],
+          1
+        )
+
+      :persistent_term.put({FakeAI, :send_result}, {:ok, positive_usage})
+
+      assert {:error, error} =
+               Acp.SendMessage.run(
+                 %{
+                   worker_session_id: "acp_worker_model_spoof",
+                   prompt: "continue",
+                   failure_mode: "delivery_receipt"
+                 },
+                 %{}
+               )
+
+      assert error =~ "acp_protocol_failure"
+      assert error =~ "unattested_provider_account_exhaustion"
+    end
+
+    test "provider-attested Claude spend exhaustion applies consistently to the legacy path" do
+      install_fake_ai()
+      session = spawn(fn -> Process.sleep(:infinity) end)
+      on_exit(fn -> Process.exit(session, :kill) end)
+
+      :persistent_term.put(
+        {FakeAI, :send_result},
+        {:ok, claude_spend_limit_response()}
+      )
+
+      assert {:ok, receipt} =
+               Acp.SendMessage.run(
+                 %{
+                   session_pid: session,
+                   prompt: "continue",
+                   failure_mode: "delivery_receipt"
+                 },
+                 %{}
+               )
+
+      assert receipt.delivery_status == "provider_account_exhausted"
+      assert receipt.failure_reason =~ "(HTTP 429)"
+      assert receipt.session_id == "claude-provider-session"
       assert_receive {:legacy_send, ^session, "continue", _opts}
     end
 
@@ -2128,6 +2240,30 @@ defmodule Arbor.Actions.AcpTest do
     Application.put_env(:arbor_actions, :ai_module, FakeAI)
     :persistent_term.put({FakeAI, :parent}, self())
     :ok
+  end
+
+  defp claude_spend_limit_response do
+    text =
+      "You've hit your monthly spend limit · raise it at claude.ai/settings/usage?from=cc_cli_limit_message"
+
+    %{
+      "text" => text,
+      "stopReason" => "end_turn",
+      "usage" => %{
+        "inputTokens" => 0,
+        "outputTokens" => 0,
+        "cacheReadTokens" => 0,
+        "cacheCreationTokens" => 0
+      },
+      "_meta" => %{
+        "ex_mcp.claude_sdk" => %{
+          "text" => text,
+          "sessionId" => "claude-provider-session",
+          "totalCostUsd" => 0,
+          "resultSubtype" => "success"
+        }
+      }
+    }
   end
 
   defp json_clean?(term) do

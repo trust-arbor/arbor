@@ -66,6 +66,7 @@ defmodule Arbor.AI.AcpSession do
   alias Arbor.AI.AcpSession.Config
   alias Arbor.AI.AcpSession.GrokSandbox
   alias Arbor.AI.AcpSession.RuntimeHome
+  alias Arbor.AI.AcpPromptFailure
   alias Arbor.AI.AcpTranscript
   alias Arbor.AI.OwnedOperation
 
@@ -2530,7 +2531,22 @@ defmodule Arbor.AI.AcpSession do
          max(completed_at, System.monotonic_time(:millisecond)),
          prompt.deadline_ms
        ) do
-      complete_durable_prompt_success(prompt, result, state)
+      case AcpPromptFailure.classify(result) do
+        :none ->
+          complete_durable_prompt_success(prompt, result, state)
+
+        reason ->
+          demonitor_owner(prompt.caller_ref)
+
+          complete_prompt_error(
+            prompt,
+            :provider_error,
+            reason,
+            {:error, reason},
+            result,
+            state
+          )
+      end
     else
       timeout_prompt(:timeout, prompt, empty_prompt_timers(), state)
     end
@@ -2614,7 +2630,11 @@ defmodule Arbor.AI.AcpSession do
   end
 
   defp complete_prompt_error(prompt, terminal_status, reason, reply, state) do
-    case capture_prompt_turn(prompt, terminal_status, nil, reason, state) do
+    complete_prompt_error(prompt, terminal_status, reason, reply, nil, state)
+  end
+
+  defp complete_prompt_error(prompt, terminal_status, reason, reply, result, state) do
+    case capture_prompt_turn(prompt, terminal_status, result, reason, state) do
       {:ok, _descriptor} ->
         settlement_failure =
           case terminal_status do
@@ -2653,7 +2673,7 @@ defmodule Arbor.AI.AcpSession do
       error: capture_error(error),
       stop_reason: prompt_stop_reason(result),
       provider: state.provider,
-      provider_session_id: state.session_id || state.last_session_id,
+      provider_session_id: prompt_provider_session_id(error, state),
       stream_tail: state.stream_tail || AcpTranscript.empty_stream_tail(),
       captured_at: DateTime.utc_now() |> DateTime.truncate(:millisecond) |> DateTime.to_iso8601()
     }
@@ -2662,6 +2682,17 @@ defmodule Arbor.AI.AcpSession do
       run_transcript_sink(capture, turn)
     end
   end
+
+  defp prompt_provider_session_id(
+         {_kind, %{provider_session_id: session_id}},
+         _state
+       )
+       when is_binary(session_id) and session_id != "" and byte_size(session_id) <= 256 do
+    if String.valid?(session_id), do: session_id, else: ""
+  end
+
+  defp prompt_provider_session_id(_error, state),
+    do: state.session_id || state.last_session_id
 
   defp run_transcript_sink(capture, turn) do
     result =
