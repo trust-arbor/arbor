@@ -2338,15 +2338,24 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     end)
   end
 
-  test "confirmation retries are bounded and exhaustion terminalizes delivery_unconfirmed", %{
-    supervisor: supervisor
-  } do
+  test "operational confirmation errors are bounded and exhaustion terminalizes delivery_unconfirmed",
+       %{
+         supervisor: supervisor
+       } do
     fresh_steer_call_counter()
 
+    # Call 1 (initial delivery) accepts as queued; every confirmation call
+    # after that returns a genuinely ambiguous operational result (not an
+    # explicit still-queued observation), which is the case this budget
+    # exists to bound.
     Application.put_env(
       :arbor_agent,
       :task_store_test_steer,
-      {:steer_fn, fn _ -> {:ok, :queued, :next_stage} end}
+      {:steer_fn,
+       fn
+         1 -> {:ok, :queued, :next_stage}
+         _ -> {:error, :transport_down}
+       end}
     )
 
     store =
@@ -2370,6 +2379,55 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     # 1 initial + 3 confirmations = 4 total calls; no more after exhaustion
     count = steer_call_count_for(control["control_id"])
     assert count == 4
+  end
+
+  test "still-queued confirmations can exceed the operational confirmation-error budget and later deliver",
+       %{
+         supervisor: supervisor
+       } do
+    fresh_steer_call_counter()
+
+    # Calls 1-5 (initial delivery + 4 confirmation cycles) all report the
+    # authoritative still-queued signal a managed ACP control can legitimately
+    # hold for many minutes while the same-session provider prompt runs; call
+    # 6 finally reports delivered. max_steering_confirmations is set below the
+    # number of still-queued confirmation observations (4 > 2) to prove those
+    # observations do not spend the operational-failure budget: under the old
+    # shared-budget behavior this would have terminalized as
+    # delivery_unconfirmed well before delivery.
+    Application.put_env(
+      :arbor_agent,
+      :task_store_test_steer,
+      {:steer_fn,
+       fn
+         n when n <= 5 -> {:ok, :queued, :next_stage}
+         _ -> {:ok, :next_stage}
+       end}
+    )
+
+    store =
+      start_configured_steering_store(supervisor,
+        steer_confirmation_delay_ms: 5,
+        max_steering_confirmations: 2
+      )
+
+    assert {:ok, task_id} = TaskStore.dispatch("agent_1", "work", name: store)
+    assert_receive {:steering_executor_started, _pid, "agent_1", "work", _}
+
+    assert {:ok, control} = TaskStore.steer(task_id, "queued for a long time", name: store)
+    assert control["status"] == "queued"
+
+    assert_eventually(fn ->
+      updated = get_control(store, task_id, control["control_id"])
+      assert updated["status"] == "delivered"
+      assert updated["delivered_at"] != nil
+      assert updated["error"] == nil
+    end)
+
+    # 1 initial + 4 still-queued confirmations + 1 delivered confirmation = 6
+    # calls, well past the 2-attempt operational budget that would otherwise
+    # have terminalized this control as delivery_unconfirmed.
+    assert steer_call_count_for(control["control_id"]) == 6
   end
 
   test "positive-nondelivery replays are bounded and exhaustion terminalizes delivery_unconfirmed",

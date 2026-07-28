@@ -57,6 +57,10 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   @default_max_steer_retry_delay_ms 5_000
   @default_max_controls_per_task 100
   @default_max_steer_retries 7
+  # Bounds only genuine operational confirmation ambiguity (callback
+  # exception/exit/timeout, see `defer_confirmation/4`). Explicit still-queued
+  # observations do not spend this budget — see "Queued-confirmation
+  # lifecycle" below.
   @default_max_steering_confirmations 5
   @default_max_steering_replays 3
   @default_adoption_timeout_ms 120_000
@@ -215,14 +219,22 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   mode}`) controls are later **confirmed** by calling `steer_task/3` again
   with the same control (stable `control_id` and immutable steering payload;
   bookkeeping fields such as `status`/`error`/`delivered_at` may differ).
-  Only explicit delivered confirmation sets `delivered_at`. Positive
+  Only explicit delivered confirmation sets `delivered_at`. A repeated
+  explicit `{:ok, :queued, mode}` during confirmation is an authoritative
+  still-in-flight signal, not an operational failure (e.g. a managed ACP
+  control can legitimately stay queued for many minutes while the
+  same-session provider prompt runs): it remains pending and keeps polling at
+  a bounded exponential backoff indefinitely, and never spends the
+  `max_steering_confirmations` budget or terminalizes on its own. Positive
   `:not_delivered` during confirmation clears accepted ownership and
-  triggers a bounded same-ID replay; `:delivery_unknown`/`:cancelled`
-  terminalize immediately as `"delivery_unconfirmed"` whether returned during
-  initial delivery, confirmation, or replay. If a task fails or is cancelled
-  before an accepted control is confirmed delivered, the control enters the
-  terminal `"delivery_unconfirmed"` state. Initial delivery, confirmation,
-  and replay budgets are independent; FIFO ordering is enforced by the store.
+  triggers a bounded same-ID replay; `:delivery_unknown`/`:cancelled`, and
+  any genuine operational ambiguity (callback exception/exit/timeout) once
+  `max_steering_confirmations` is exhausted, terminalize immediately as
+  `"delivery_unconfirmed"` whether returned during initial delivery,
+  confirmation, or replay. If a task fails or is cancelled before an
+  accepted control is confirmed delivered, the control enters the terminal
+  `"delivery_unconfirmed"` state. Initial delivery, confirmation-error, and
+  replay budgets are independent; FIFO ordering is enforced by the store.
 
   ## Hot-state upgrade compatibility
 
@@ -371,6 +383,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
           control_retries: %{},
           accepted_control_ids: MapSet.new(),
           confirmation_retries: %{},
+          queued_confirmations: %{},
           replay_counts: %{},
           cancel_turn: Keyword.get(opts, :cancel_turn)
         }
@@ -977,14 +990,14 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   # Fail-closed lazy normalization for running task records hot-loaded from a
   # pre-upgrade code revision. A TaskStore process whose code was replaced
   # while tasks were in flight can hold records created by the old code, which
-  # lack :confirmation_retries / :replay_counts (and in older revisions,
-  # :accepted_control_ids / :control_retries / :controls). The first
-  # post-upgrade delivery/confirmation/terminal-reconciliation work would
-  # crash on the missing keys (KeyError / BadMapError). This materializes the
-  # maps with empty defaults so FIFO and budgets are not weakened, and
-  # terminalizes any legacy accepted queued controls as delivery_unconfirmed
-  # with a bounded explicit diagnostic so they cannot block later controls
-  # indefinitely or manufacture a delivery ACK.
+  # lack :confirmation_retries / :queued_confirmations / :replay_counts (and
+  # in older revisions, :accepted_control_ids / :control_retries / :controls).
+  # The first post-upgrade delivery/confirmation/terminal-reconciliation work
+  # would crash on the missing keys (KeyError / BadMapError). This
+  # materializes the maps with empty defaults so FIFO and budgets are not
+  # weakened, and terminalizes any legacy accepted queued controls as
+  # delivery_unconfirmed with a bounded explicit diagnostic so they cannot
+  # block later controls indefinitely or manufacture a delivery ACK.
   defp ensure_task_record_shape(state, task_id) do
     case Map.fetch(state.tasks, task_id) do
       {:ok, record} ->
@@ -1010,6 +1023,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
       |> Map.put_new(:control_retries, %{})
       |> Map.put_new(:accepted_control_ids, MapSet.new())
       |> Map.put_new(:confirmation_retries, %{})
+      |> Map.put_new(:queued_confirmations, %{})
       |> Map.put_new(:replay_counts, %{})
 
     if pre_upgrade and record.state == :running do
@@ -1244,6 +1258,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
       ids -> MapSet.put(ids, control_id)
     end)
     |> update_in([:tasks, task_id, :confirmation_retries], &Map.put(&1, control_id, 0))
+    |> update_in([:tasks, task_id, :queued_confirmations], &Map.put(&1, control_id, 0))
   end
 
   defp advance_mailbox(state, task_id) do
@@ -1261,6 +1276,15 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
 
   # ---------------------------------------------------------------------------
   # Queued-confirmation lifecycle
+  #
+  # Two independent, separately-tracked counters gate this cycle:
+  #   * `queued_confirmations` — count of explicit still-queued observations
+  #     (`{:ok, :queued, mode}`). Authoritative, not an error; only drives
+  #     backoff delay and never terminalizes the control.
+  #   * `confirmation_retries` — count of genuine operational ambiguity
+  #     (`{:confirm_deferred, _}`: callback exception/exit/timeout or any
+  #     other unrecognized result). Bounded by `max_steering_confirmations`;
+  #     exhausting it terminalizes as `"delivery_unconfirmed"`.
   # ---------------------------------------------------------------------------
 
   defp maybe_schedule_confirmation(state, task_id, control_id) do
@@ -1367,29 +1391,37 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     end
   end
 
+  # An explicit `{:ok, :queued, mode}` during confirmation is an authoritative
+  # in-flight signal from the executor, not an operational failure: a managed
+  # ACP control can legitimately stay queued for many minutes while the
+  # same-session provider prompt runs. It must never spend the bounded
+  # `max_steering_confirmations` operational-failure budget (see
+  # `defer_confirmation/4`) and must never terminalize on its own — only a
+  # real delivery-negative result, a confirmation error, or the task itself
+  # reaching a terminal state can end it. Polling continues indefinitely at
+  # the same capped exponential backoff schedule used for operational
+  # retries, tracked in a separate counter (`queued_confirmations`) so
+  # repeated still-queued observations cannot exhaust or interact with the
+  # operational-failure budget.
   defp schedule_next_confirmation(state, task_id, control_id) do
     record = Map.fetch!(state.tasks, task_id)
-    attempts = Map.get(record.confirmation_retries, control_id, 0) + 1
+    attempts = Map.get(record.queued_confirmations, control_id, 0) + 1
 
-    max_confirmations =
-      Map.get(state, :max_steering_confirmations, @default_max_steering_confirmations)
+    state =
+      update_in(
+        state,
+        [:tasks, task_id, :queued_confirmations],
+        &Map.put(&1, control_id, attempts)
+      )
 
-    if attempts < max_confirmations do
-      state =
-        update_in(
-          state,
-          [:tasks, task_id, :confirmation_retries],
-          &Map.put(&1, control_id, attempts)
-        )
-
-      schedule_confirmation(state, task_id, control_id, attempts)
-    else
-      state
-      |> terminalize_as_unconfirmed(task_id, control_id, "confirmation_retries_exhausted")
-      |> advance_confirmation(task_id)
-    end
+    schedule_confirmation(state, task_id, control_id, attempts)
   end
 
+  # Genuine operational ambiguity during confirmation (callback exception,
+  # exit, timeout, or any other unrecognized result — never an explicit
+  # still-queued observation, see `schedule_next_confirmation/3`). Bounded by
+  # `max_steering_confirmations` via `confirmation_retries` so a control stuck
+  # in a real error loop still terminalizes.
   defp defer_confirmation(state, task_id, control_id, error) do
     record = Map.fetch!(state.tasks, task_id)
     attempts = Map.get(record.confirmation_retries, control_id, 0) + 1
@@ -1475,8 +1507,8 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   # the next eligible accepted control so it is not stranded behind a terminal
   # or in-flight predecessor. If the just-delivered control re-accepted as
   # queued, maybe_schedule_confirmation already scheduled its confirmation and
-  # we must not create a duplicate timer (which would double-spend confirmation
-  # budget on a :still_queued cycle).
+  # we must not create a duplicate timer (which would double-poll the same
+  # control and create unbounded mailbox pressure).
   defp advance_confirmation_after_delivery(state, task_id, control_id) do
     case Map.fetch(state.tasks, task_id) do
       {:ok, record} ->
