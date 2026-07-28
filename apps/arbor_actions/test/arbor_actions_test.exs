@@ -82,6 +82,10 @@ defmodule Arbor.ActionsTest do
     end
   end
 
+  test "coding design admission limit is exposed through the public facade" do
+    assert Actions.coding_design_max_bytes() == 16_384
+  end
+
   describe "runtime_descriptor/1" do
     test "binds exact Jido name, module, loaded BEAM, resource, and egress declarations" do
       module = Arbor.Actions.File.Read

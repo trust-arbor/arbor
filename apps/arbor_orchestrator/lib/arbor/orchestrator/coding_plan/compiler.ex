@@ -890,6 +890,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
     "DESIGN PHASE ONLY. Exact reviewed task: {value}. " <>
       "Frozen canonical work packet JSON: {ctx.coding_plan_work_packet_json}. " <>
       "Produce a concrete implementation design satisfying that packet. " <>
+      design_size_instruction() <>
       "You MUST NOT edit, create, delete, or rename files; MUST NOT run commands that modify " <>
       "the worktree; and MUST NOT create commits or otherwise change HEAD. " <>
       "Return ONLY one valid JSON object with exactly one string field: " <>
@@ -902,6 +903,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
       "Frozen canonical work packet JSON: {ctx.coding_plan_work_packet_json}. " <>
       "Design attempt: {ctx.design_attempt}. Operator correction note: {ctx.approval_note}. " <>
       "Correct the design to satisfy the packet and operator note. " <>
+      design_size_instruction() <>
       "You MUST NOT edit, create, delete, or rename files; MUST NOT run commands that modify " <>
       "the worktree; and MUST NOT create commits or otherwise change HEAD. " <>
       "Return ONLY one valid JSON object with exactly one string field: " <>
@@ -913,12 +915,20 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
     "DESIGN ENVELOPE REPAIR ONLY. Your preceding response could not be admitted as the " <>
       "required checkpoint envelope. Exact reviewed task: {value}. " <>
       "Frozen canonical work packet JSON: {ctx.coding_plan_work_packet_json}. " <>
-      "Design attempt: {ctx.design_attempt}. Preserve the preceding design's meaning; repair " <>
-      "only its terminal envelope. You MUST NOT edit, create, delete, or rename files; MUST " <>
+      "Design attempt: {ctx.design_attempt}. Preserve the preceding design's meaning while " <>
+      "correcting every admission defect: remove prose outside the JSON object, use only the " <>
+      "required field, and condense an oversized design. " <>
+      design_size_instruction() <>
+      "You MUST NOT edit, create, delete, or rename files; MUST " <>
       "NOT run commands that modify the worktree; and MUST NOT create commits or otherwise " <>
       "change HEAD. Return ONLY one valid JSON object with exactly one string field: " <>
       "{\"design\":\"the exact design text\"}. " <>
       "Arbor computes the digest after admission."
+  end
+
+  defp design_size_instruction do
+    "Keep the decoded design text at or below 12,000 UTF-8 bytes; the hard admission limit " <>
+      "is #{Arbor.Actions.coding_design_max_bytes()} bytes. "
   end
 
   defp approved_implementation_prompt do

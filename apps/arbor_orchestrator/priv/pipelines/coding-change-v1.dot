@@ -322,7 +322,7 @@ digraph CodingChangeV1 {
     type="transform",
     transform="template",
     source_key="task",
-    expression="DESIGN phase only. Task: {value}. Do not edit files and do not create commits. Return ONLY one valid JSON object with exactly one string field: {\"design\":\"the exact design text\"}. Arbor computes the digest after admission.",
+    expression="DESIGN phase only. Task: {value}. Keep the decoded design text at or below 12,000 UTF-8 bytes; the hard admission limit is 16384 bytes. Do not edit files and do not create commits. Return ONLY one valid JSON object with exactly one string field: {\"design\":\"the exact design text\"}. Arbor computes the digest after admission.",
     output_key="prompt"
   ]
 
@@ -364,7 +364,7 @@ digraph CodingChangeV1 {
     type="transform",
     transform="template",
     source_key="task",
-    expression="DESIGN envelope repair only. Task: {value}. Do not edit files and do not create commits. Return ONLY one valid JSON object with exactly one string field: {\"design\":\"the exact design text\"}. Arbor computes the digest after admission.",
+    expression="DESIGN envelope repair only. Task: {value}. Preserve the preceding design's meaning while correcting every admission defect: remove prose outside the JSON object, use only the required field, and condense an oversized design. Keep the decoded design text at or below 12,000 UTF-8 bytes; the hard admission limit is 16384 bytes. Do not edit files and do not create commits. Return ONLY one valid JSON object with exactly one string field: {\"design\":\"the exact design text\"}. Arbor computes the digest after admission.",
     output_key="prompt"
   ]
 
@@ -548,7 +548,7 @@ digraph CodingChangeV1 {
     type="transform",
     transform="template",
     source_key="task",
-    expression="DESIGN rework only. Task: {value}. Operator note: {ctx.approval_note}. Do not edit files and do not create commits. Return ONLY one valid JSON object with exactly one string field: {\"design\":\"the exact corrected design text\"}. Arbor computes the digest after admission.",
+    expression="DESIGN rework only. Task: {value}. Operator note: {ctx.approval_note}. Keep the decoded design text at or below 12,000 UTF-8 bytes; the hard admission limit is 16384 bytes. Do not edit files and do not create commits. Return ONLY one valid JSON object with exactly one string field: {\"design\":\"the exact corrected design text\"}. Arbor computes the digest after admission.",
     output_key="prompt"
   ]
 

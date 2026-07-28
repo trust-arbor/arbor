@@ -567,3 +567,15 @@ Reject malformed identities and later drift, leave other providers untouched,
 and make fake clients model the transient-to-durable transition rather than a
 single static ID (found 2026-07-28 after recovery tried to resume
 `claude_sdk_179` instead of Claude's persisted UUID).
+
+<!-- applied-learning: repair-prompts-must-cover-every-admission-defect-the-retry-can-correct -->
+<a id="applied-learning-repair-prompts-must-cover-every-admission-defect-the-retry-can-correct"></a>
+**Repair prompts must cover every admission defect the retry can correct.** A
+generic instruction to preserve content and repair only its envelope cannot
+recover when the decoded payload itself exceeds a bounded contract. State the
+closed schema, exact hard limit, and a conservative target, and explicitly
+permit condensation when size is one possible rejection reason. Regress an
+oversized first turn through the same worker session to a bounded admitted
+repair; a malformed-JSON-only fixture does not prove size recovery (found
+2026-07-28 after Grok reduced a 23,806-byte design only to 20,382 bytes because
+the repair prompt never disclosed Arbor's 16,384-byte limit).

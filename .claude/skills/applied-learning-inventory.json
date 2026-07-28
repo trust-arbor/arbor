@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-07-28",
-  "entry_count": 549,
+  "entry_count": 550,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -6681,8 +6681,21 @@
       "source_incident": "found 2026-07-28 after recovery tried to resume `claude_sdk_179` instead of Claude's persisted UUID).",
       "content_sha256": "b444776684009129e2b273dbf234e3ad4b00d1ce7012f0212f52127a5a2cb3f3",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 550,
+      "source_kind": "post-migration",
+      "slug": "repair-prompts-must-cover-every-admission-defect-the-retry-can-correct",
+      "title": "Repair prompts must cover every admission defect the retry can correct.",
+      "topic": "acp-mcp",
+      "destination": ".claude/skills/applied-learning-acp-mcp.md",
+      "anchor": "applied-learning-repair-prompts-must-cover-every-admission-defect-the-retry-can-correct",
+      "source_date": "2026-07-28",
+      "source_incident": "found 2026-07-28 after Grok reduced a 23,806-byte design only to 20,382 bytes because the repair prompt never disclosed Arbor's 16,384-byte limit).",
+      "content_sha256": "f4c70444b4075d96930cf8852c20ab3fe16dcb4cb8b03e9fb5324c6d652842ce",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 88
+  "post_migration_entry_count": 89
 }

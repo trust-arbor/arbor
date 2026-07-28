@@ -346,6 +346,11 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
           {:malformed_design_then_valid_repair, 0} ->
             "this is not a design checkpoint envelope"
 
+          {:oversized_design_then_bounded_repair, 0} ->
+            Jason.encode!(%{
+              "design" => String.duplicate("x", Arbor.Actions.coding_design_max_bytes() + 1)
+            })
+
           {:design_repair_mutates_workspace, 0} ->
             "this is not a design checkpoint envelope"
 
@@ -356,6 +361,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
             attempt =
               case {scenario, n} do
                 {:malformed_design_then_valid_repair, _} -> 1
+                {:oversized_design_then_bounded_repair, _} -> 1
                 {:design_repair_mutates_workspace, _} -> 1
                 {:protocol_repair_then_design_rework, 1} -> 1
                 {:protocol_repair_then_design_rework, 3} -> 2
@@ -793,6 +799,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
                :design_timeout,
                :malformed_design_output,
                :malformed_design_then_valid_repair,
+               :oversized_design_then_bounded_repair,
                :protocol_repair_then_design_rework,
                :design_streamed_duplicate_envelope
              ] ->
@@ -1837,6 +1844,28 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       [await_args] = action_calls(calls, "coding_design_checkpoint_await")
       assert_design_checkpoint_identity(open_args, await_args, plan, compilation, 1)
       assert length(action_calls(calls, "acp_close_session")) == 1
+      assert_single_worker_session(calls, 3)
+      assert_close_after_last_send_before_release(calls)
+      assert_closed_and_released(calls)
+    end
+
+    test "oversized design is repaired with the admitted size contract in the same session" do
+      assert {{:ok, result}, calls, _plan, _compilation} =
+               run_compiled_v2_fixture(:oversized_design_then_bounded_repair, "design_required")
+
+      assert result.context["status"] == "change_committed"
+      assert result.context["accepted_design"] == fixture_design(1)
+      assert result.context["design_attempt"] == 1
+      assert result.context["design_envelope_retry_count"] == 1
+
+      [initial_prompt, repair_prompt, implementation_prompt] = action_prompts(calls)
+      assert initial_prompt =~ "12,000 UTF-8 bytes"
+      assert initial_prompt =~ "hard admission limit is 16384 bytes"
+      assert repair_prompt =~ "condense an oversized design"
+      assert repair_prompt =~ "hard admission limit is 16384 bytes"
+      assert implementation_prompt =~ "IMPLEMENTATION PHASE"
+
+      assert length(action_calls(calls, "coding_design_envelope_parse")) == 2
       assert_single_worker_session(calls, 3)
       assert_close_after_last_send_before_release(calls)
       assert_closed_and_released(calls)

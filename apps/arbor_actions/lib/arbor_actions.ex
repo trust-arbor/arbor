@@ -73,7 +73,7 @@ defmodule Arbor.Actions do
   See individual action modules for detailed documentation.
   """
 
-  alias Arbor.Actions.Coding.{Workspace, WorkspaceLeaseRegistry}
+  alias Arbor.Actions.Coding.{DesignCheckpoint, Workspace, WorkspaceLeaseRegistry}
   alias Arbor.Actions.Coding.CodingResourceInventory
   alias Arbor.Actions.Coding.ToolchainIdentityCore
   alias Arbor.Actions.Egress
@@ -180,6 +180,10 @@ defmodule Arbor.Actions do
 
   def coding_worktree_path(_base_dir, _branch_name),
     do: {:error, :invalid_coding_worktree_input}
+
+  @doc "Return the maximum admitted UTF-8 byte size for a coding design checkpoint."
+  @spec coding_design_max_bytes() :: pos_integer()
+  def coding_design_max_bytes, do: DesignCheckpoint.max_design_bytes()
 
   @doc """
   Settle every coding workspace lease owned by an exact task+principal pair.

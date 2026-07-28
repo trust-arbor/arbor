@@ -229,7 +229,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
   test "template stays within reviewed DOT source, node, and edge ceilings", ctx do
     graph = parse!(ctx.template_source)
 
-    assert byte_size(ctx.template_source) == 80_033
+    assert byte_size(ctx.template_source) == 80_521
     assert map_size(graph.nodes) == 233
     assert length(graph.edges) == 337
     assert byte_size(ctx.template_source) <= 262_144
@@ -415,6 +415,11 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert design_prompt =~ packet_json
     assert design_prompt =~ "MUST NOT edit"
     assert design_prompt =~ "MUST NOT create commits"
+    assert design_prompt =~ "12,000 UTF-8 bytes"
+
+    assert design_prompt =~
+             "hard admission limit is #{Arbor.Actions.coding_design_max_bytes()} bytes"
+
     assert design_prompt =~ "exactly one string field"
     assert design_prompt =~ ~s({"design":)
     assert design_prompt =~ "Arbor computes the digest after admission"
@@ -434,6 +439,12 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert repair_prompt =~ "DESIGN ENVELOPE REPAIR ONLY"
     assert repair_prompt =~ packet_json
     assert repair_prompt =~ "Design attempt: 1"
+    assert repair_prompt =~ "condense an oversized design"
+    assert repair_prompt =~ "12,000 UTF-8 bytes"
+
+    assert repair_prompt =~
+             "hard admission limit is #{Arbor.Actions.coding_design_max_bytes()} bytes"
+
     assert repair_prompt =~ "exactly one string field"
     assert repair_prompt =~ ~s({"design":)
     assert repair_prompt =~ "Arbor computes the digest after admission"
@@ -446,6 +457,11 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
 
     rework_expression = node_attrs(graph, "build_design_rework_prompt")["expression"]
     assert rework_expression =~ "DESIGN REWORK PHASE ONLY"
+    assert rework_expression =~ "12,000 UTF-8 bytes"
+
+    assert rework_expression =~
+             "hard admission limit is #{Arbor.Actions.coding_design_max_bytes()} bytes"
+
     assert rework_expression =~ "exactly one string field"
     assert rework_expression =~ ~s({"design":)
     assert rework_expression =~ "Arbor computes the digest after admission"
