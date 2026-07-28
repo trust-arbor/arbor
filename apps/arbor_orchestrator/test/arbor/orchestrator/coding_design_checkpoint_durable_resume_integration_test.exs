@@ -1,92 +1,65 @@
 defmodule Arbor.Orchestrator.CodingDesignCheckpointDurableResumeIntegrationTest do
   @moduledoc """
-  Real-boundary crash/recovery proof for the Coding Plan v2 design checkpoint.
+  Phase C same-node BEAM-restart durability proof for Coding Plan v2 design checkpoints.
 
-  The backend attests `:node_restart`, but this topology exercises run-owner
-  death plus a Comms application restart on one BEAM. It does not simulate a
-  BEAM node restart, network partition, host failure, or storage failover.
+  Topology:
+  - Controller ExUnit node owns `CentralStore` (journal, engine checkpoint, Comms).
+  - One LocalCluster member runs Open/Await against that store.
+  - The entire member BEAM is killed, then a fresh LocalCluster with the **same
+    prefix** boots a replacement with the same node atom and a new BEAM.
+  - Replacement rehydrates before public pending exposure, races public response
+    against the restored absolute-deadline timeout, and resumes at Await only.
+
+  Explicit non-claims: network partition, cross-node takeover, storage failover,
+  host durability. Postgres is unused.
+
+  Run: `./bin/mix test path/to/this_file.exs --include distributed`
   """
 
   use ExUnit.Case, async: false
 
+  @moduletag :distributed
   @moduletag :integration
   @moduletag :security_regression
-  @moduletag timeout: 120_000
+  @moduletag :slow
+  @moduletag timeout: 180_000
 
   alias Arbor.Contracts.Coding.{Plan, WorkPacket}
   alias Arbor.Orchestrator
   alias Arbor.Orchestrator.ActionsExecutor
   alias Arbor.Orchestrator.CodingPlan.Compiler
+  alias Arbor.Orchestrator.L4ClusterRecoverySupport, as: Support
   alias Arbor.Orchestrator.L4ClusterRecoverySupport.CentralStore
-  alias Arbor.Orchestrator.L4ClusterRecoverySupport.NodeRestartProxy
   alias Arbor.Orchestrator.PipelineStatus
-  alias Arbor.Orchestrator.RunJournal
   alias Arbor.Orchestrator.RunLifecycle.Record
 
   @open_action_name "coding_design_checkpoint_open"
   @await_action_name "coding_design_checkpoint_await"
+  @owner_timeout_ms 20_000
+  @support_file Path.expand("../../../support/l4_cluster_recovery_support.ex", __DIR__)
 
-  defmodule DeliveryAdapter do
-    @moduledoc false
-    @behaviour Arbor.Contracts.Comms.ChannelAdapter
+  setup_all do
+    started_distribution? = not Node.alive?()
 
-    @impl true
-    def send_interaction(channel_metadata, interaction) do
-      send(
-        Map.fetch!(channel_metadata, :test_pid),
-        {:durable_design_checkpoint_delivery, interaction}
-      )
+    if started_distribution? do
+      assert :ok = LocalCluster.start()
 
-      :ok
+      on_exit(fn ->
+        assert :ok = LocalCluster.stop()
+      end)
     end
-
-    @impl true
-    def parse_response(_raw), do: :not_interaction
-
-    @impl true
-    def channel_kind, do: :dashboard
-  end
-
-  setup do
-    ensure_security_and_trust_started!()
-
-    saved = %{
-      checkpoints: Application.get_env(:arbor_orchestrator, :engine_checkpoints, :__unset__),
-      durable_store: Application.get_env(:arbor_comms, :durable_interaction_store, :__unset__),
-      durable_dispatch:
-        Application.get_env(:arbor_comms, :durable_interaction_dispatch, :__unset__),
-      adapters: Application.get_env(:arbor_comms, :interaction_adapters, :__unset__),
-      signal: Application.get_env(:arbor_comms, :signal, :__unset__),
-      policy_enforcer: Application.get_env(:arbor_trust, :policy_enforcer_enabled, :__unset__),
-      approval_guard: Application.get_env(:arbor_trust, :approval_guard_enabled, :__unset__)
-    }
-
-    Application.put_env(:arbor_trust, :policy_enforcer_enabled, true)
-    Application.put_env(:arbor_trust, :approval_guard_enabled, true)
-
-    on_exit(fn ->
-      restore_env(:arbor_orchestrator, :engine_checkpoints, saved.checkpoints)
-      restore_env(:arbor_comms, :durable_interaction_store, saved.durable_store)
-      restore_env(:arbor_comms, :durable_interaction_dispatch, saved.durable_dispatch)
-      restore_env(:arbor_comms, :interaction_adapters, saved.adapters)
-      restore_env(:arbor_comms, :signal, saved.signal)
-      restore_env(:arbor_trust, :policy_enforcer_enabled, saved.policy_enforcer)
-      restore_env(:arbor_trust, :approval_guard_enabled, saved.approval_guard)
-      restart_comms_safely()
-    end)
 
     :ok
   end
 
-  test "security regression: crash after durable Open resumes only Await with exact authority" do
+  test "security regression: same-node BEAM restart rehydrates design checkpoint at Await" do
     suffix = System.unique_integer([:positive, :monotonic])
+    prefix = "dckpt_#{suffix}_"
     controller_name = :"design_checkpoint_central_#{suffix}"
     journal_store = :"design_checkpoint_journal_#{suffix}"
     checkpoint_store = :"design_checkpoint_engine_checkpoint_#{suffix}"
     comms_store = :"design_checkpoint_comms_#{suffix}"
-    journal_name = :"design_checkpoint_run_journal_#{suffix}"
-    journal_table = :"design_checkpoint_run_hot_#{suffix}"
-    run_id = "design_checkpoint_durable_resume_#{suffix}"
+    run_id = "design_checkpoint_beam_restart_#{suffix}"
     task_id = "coding-task-#{suffix}"
     agent_id = "agent_design_checkpoint_#{suffix}"
     operator_id = "operator_design_checkpoint_#{suffix}"
@@ -101,43 +74,29 @@ defmodule Arbor.Orchestrator.CodingDesignCheckpointDurableResumeIntegrationTest 
     repo_root = repo_root()
     logs_root = tmp_root("logs", suffix)
     dot_root = tmp_root("dot", suffix)
+    recovery_root = tmp_root("recovery", suffix)
     dot_path = Path.join(dot_root, "durable-design-checkpoint.dot")
+    parent = self()
 
     start_supervised!(
       {CentralStore,
        name: controller_name,
-       parent: self(),
+       parent: parent,
        hold_store: journal_store,
        hold_on: :completed_progress,
        hold_node: "open_design_checkpoint"}
     )
 
-    on_exit(fn -> safe_release_hold(controller_name) end)
-
-    backend_opts = [controller_name: controller_name, controller_node: node()]
-
-    start_supervised!(
-      {RunJournal,
-       name: journal_name,
-       ets_table: journal_table,
-       backend: NodeRestartProxy,
-       store_name: journal_store,
-       backend_opts: backend_opts}
-    )
-
-    configure_engine_checkpoints!(checkpoint_store, backend_opts)
-    configure_comms!(comms_store, backend_opts, operator_id)
-    restart_comms!()
-    assert_eventually(&Arbor.Comms.durable_ready?/0)
-    track_operator!(operator_id)
+    on_exit(fn ->
+      safe_release_hold(controller_name)
+      File.rm_rf(logs_root)
+      File.rm_rf(dot_root)
+      File.rm_rf(recovery_root)
+    end)
 
     {plan, compilation} = compile_v2_plan!(repo_root, design)
     assert plan.version == 2
     assert plan.work_packet["checkpoint_policy"] == "design_required"
-    assert compilation.initial_values["coding_plan_work_packet"] == plan.work_packet
-
-    assert compilation.initial_values["coding_plan_work_packet_digest"] ==
-             plan.work_packet_digest
 
     initial_values =
       Map.merge(compilation.initial_values, %{
@@ -156,50 +115,62 @@ defmodule Arbor.Orchestrator.CodingDesignCheckpointDurableResumeIntegrationTest 
         "design_digest" => design_digest
       })
 
-    dot = design_checkpoint_dot()
     File.mkdir_p!(dot_root)
-    File.write!(dot_path, dot)
-    assert {:ok, parsed} = Orchestrator.parse(dot)
+    File.mkdir_p!(logs_root)
+    File.mkdir_p!(recovery_root)
+    File.write!(dot_path, design_checkpoint_dot())
+    assert {:ok, parsed} = Orchestrator.parse(design_checkpoint_dot())
     assert {:ok, _compiled} = Arbor.Orchestrator.IR.Compiler.compile(parsed)
 
-    exact_action_resources = grant_exact_action_authority!(agent_id, task_id)
-    assert_exact_trust_authority!(agent_id, task_id, exact_action_resources)
-    trace_design_actions!()
+    peer_opts =
+      peer_opts(prefix, %{
+        controller_name: controller_name,
+        journal_store: journal_store,
+        checkpoint_store: checkpoint_store,
+        comms_store: comms_store,
+        operator_id: operator_id,
+        agent_id: agent_id,
+        task_id: task_id,
+        recovery_root: recovery_root
+      })
 
-    on_exit(fn ->
-      untrace_design_actions()
-      safe_untrack_operator(operator_id)
-      Arbor.Orchestrator.TestCapabilities.revoke_all(agent_id)
-      Arbor.Trust.delete_trust_profile(agent_id)
-      PipelineStatus.delete(run_id)
-      File.rm_rf(logs_root)
-      File.rm_rf(dot_root)
-    end)
+    {:ok, cluster} = start_cluster(prefix)
+    on_exit(fn -> safe_stop_cluster(cluster) end)
 
-    parent = self()
+    {:ok, [owner]} = LocalCluster.nodes(cluster)
+    assert :ok = :erpc.call(owner, Support, :prepare_design_checkpoint_peer!, [peer_opts], 90_000)
+    assert true = :erpc.call(owner, Arbor.Comms, :durable_ready?, [], 5_000)
+    assert_peer_authority!(owner, agent_id, task_id)
 
-    {engine_pid, engine_monitor} =
-      spawn_monitor(fn ->
-        :erlang.trace(self(), true, [:call, {:tracer, parent}])
+    assert {:ok, _holder} =
+             :erpc.call(owner, Support, :start_presence_holder!, [operator_id, parent], 10_000)
 
-        result =
-          Orchestrator.run_file(dot_path,
-            run_id: run_id,
-            logs_root: logs_root,
-            journal_opts: [server: journal_name],
-            identity_private_key: identity_private_key,
-            resumable: true,
-            initial_values: initial_values,
-            actions_executor: ActionsExecutor
-          )
+    run_opts = [
+      run_id: run_id,
+      logs_root: logs_root,
+      identity_private_key: identity_private_key,
+      resumable: true,
+      agent_id: agent_id,
+      execution_principal: agent_id,
+      initial_values: initial_values,
+      actions_executor: ActionsExecutor
+    ]
 
-        send(parent, {:initial_design_checkpoint_run_finished, self(), result})
-      end)
+    assert {:ok, engine_pid} =
+             :erpc.call(
+               owner,
+               Support,
+               :start_design_run_async,
+               [dot_path, run_opts, parent],
+               10_000
+             )
+
+    assert_receive {:l4_engine_started, ^owner, ^engine_pid}, 10_000
 
     assert_receive {:trace, ^engine_pid, :call,
                     {Arbor.Actions, :authorize_and_execute,
                      [^agent_id, open_action_module, open_params, _]}},
-                   10_000
+                   30_000
 
     assert_action_name!(open_action_module, @open_action_name)
 
@@ -217,7 +188,7 @@ defmodule Arbor.Orchestrator.CodingDesignCheckpointDurableResumeIntegrationTest 
       run_deadline_unix_ms
     )
 
-    assert_receive {:durable_design_checkpoint_delivery, interaction}, 10_000
+    assert_receive {:durable_design_checkpoint_delivery, interaction}, 30_000
     request_id = interaction.request_id
     assert String.match?(request_id, ~r/^irq_design_[0-9a-f]{64}$/)
     assert interaction.agent_id == agent_id
@@ -230,7 +201,7 @@ defmodule Arbor.Orchestrator.CodingDesignCheckpointDurableResumeIntegrationTest 
     assert interaction.metadata["design_attempt"] == design_attempt
     assert interaction.metadata["design_digest"] == design_digest
 
-    assert_receive {:l4_store_held, :completed_progress, held}, 10_000
+    assert_receive {:l4_store_held, :completed_progress, held}, 30_000
     assert held.logical == journal_store
     assert held.effect["node_id"] == "open_design_checkpoint"
     assert held.effect["status"] == "completed"
@@ -239,25 +210,22 @@ defmodule Arbor.Orchestrator.CodingDesignCheckpointDurableResumeIntegrationTest 
     assert CentralStore.has_key?(
              controller_name,
              checkpoint_store,
-             "checkpoint:#{run_id}"
+             Support.checkpoint_key(run_id)
            )
 
-    assert {:ok, receipt} =
-             Arbor.Comms.request_durable_interaction(interaction,
-               owner_deadline_unix_ms: run_deadline_unix_ms
-             )
+    assert CentralStore.has_key?(controller_name, comms_store, request_id)
 
-    assert receipt.request_id == request_id
-    assert is_binary(receipt.operation_id)
-    assert receipt.operation_id != ""
-    assert receipt.owner_deadline_unix_ms == run_deadline_unix_ms
+    checkpoint_path = Path.join(logs_root, "checkpoint.json")
+    assert File.exists?(checkpoint_path)
+    File.rm!(checkpoint_path)
+    refute File.exists?(checkpoint_path)
 
     assert :ok = CentralStore.release_hold(controller_name)
 
     assert_receive {:trace, ^engine_pid, :call,
                     {Arbor.Actions, :authorize_and_execute,
                      [^agent_id, await_action_module, await_params, _]}},
-                   10_000
+                   30_000
 
     assert_action_name!(await_action_module, @await_action_name)
 
@@ -276,84 +244,247 @@ defmodule Arbor.Orchestrator.CodingDesignCheckpointDurableResumeIntegrationTest 
     )
 
     assert await_params.request_id == request_id
-    assert await_params.operation_id == receipt.operation_id
-    assert await_params.owner_deadline_unix_ms == run_deadline_unix_ms
+    assert is_binary(await_params.operation_id)
+    assert await_params.operation_id != ""
+    owner_deadline_unix_ms = await_params.owner_deadline_unix_ms
+    assert owner_deadline_unix_ms < run_deadline_unix_ms
+    assert owner_deadline_unix_ms > System.system_time(:millisecond)
     assert await_params.evidence["request_id"] == request_id
-    assert Process.alive?(engine_pid)
-    refute_receive {:initial_design_checkpoint_run_finished, ^engine_pid, _}, 50
+    operation_id = await_params.operation_id
+    evidence = await_params.evidence
 
-    Process.exit(engine_pid, :kill)
-    assert_receive {:DOWN, ^engine_monitor, :process, ^engine_pid, :killed}, 5_000
-    refute Process.alive?(engine_pid)
+    assert {:ok, before_restart} =
+             CentralStore.get(controller_name, comms_store, request_id)
 
-    interrupted =
-      assert_eventually_value(fn ->
-        case PipelineStatus.get_record(run_id, server: journal_name) do
-          %Record{status: :interrupted} = record -> {:ok, record}
-          _other -> :retry
-        end
-      end)
+    assert before_restart.data["status"] == "pending"
+    assert before_restart.data["operation_id"] == operation_id
+    assert before_restart.data["owner_deadline_unix_ms"] == owner_deadline_unix_ms
+    assert before_restart.data["terminal"] == nil
 
-    assert "open_design_checkpoint" in interrupted.completed_nodes
-    refute "await_design_checkpoint" in interrupted.completed_nodes
-    assert Enum.any?(Arbor.Comms.pending_interactions(), &(&1.request_id == request_id))
+    refute_receive {:l4_engine_finished, ^owner, ^engine_pid, _}, 50
+
+    # Kill the whole original BEAM (not Application.stop / process kill only).
+    engine_ref = Process.monitor(engine_pid)
+    assert :ok = LocalCluster.stop(cluster)
+
+    assert_receive {:DOWN, ^engine_ref, :process, ^engine_pid, _}, 15_000
+
+    assert :ok =
+             Support.await_until(15_000, fn ->
+               if owner in Node.list() do
+                 {:error, :still_visible}
+               else
+                 :ok
+               end
+             end)
+
+    # Fresh LocalCluster with the same prefix → same node atom, new BEAM.
+    {:ok, replacement_cluster} = start_cluster(prefix)
+    on_exit(fn -> safe_stop_cluster(replacement_cluster) end)
+
+    {:ok, [replacement]} = LocalCluster.nodes(replacement_cluster)
+    assert replacement == owner
+
+    assert :ok =
+             :erpc.call(
+               replacement,
+               Support,
+               :prepare_design_checkpoint_peer!,
+               [peer_opts],
+               90_000
+             )
+
+    # Application startup returns only after durable hydration is authoritative.
+    assert true = :erpc.call(replacement, Arbor.Comms, :durable_ready?, [], 5_000)
+    assert_peer_authority!(replacement, agent_id, task_id)
+
+    pending =
+      :erpc.call(replacement, Arbor.Comms, :pending_interactions, [], 5_000)
+
+    assert [%{request_id: ^request_id}] = Enum.filter(pending, &(&1.request_id == request_id))
+
+    assert {:ok, after_restart} =
+             CentralStore.get(controller_name, comms_store, request_id)
+
+    assert after_restart.data["status"] == "pending"
+    assert after_restart.data["operation_id"] == operation_id
+    assert after_restart.data["owner_deadline_unix_ms"] == owner_deadline_unix_ms
+    assert after_restart.data["interaction"] == before_restart.data["interaction"]
+    assert after_restart.data["terminal"] == nil
+
+    assert {:ok, _holder2} =
+             :erpc.call(
+               replacement,
+               Support,
+               :start_presence_holder!,
+               [operator_id, parent],
+               10_000
+             )
+
+    refute_receive {:durable_design_checkpoint_delivery, _}, 100
 
     approval_metadata = %{
       "decision" => "approve",
-      "operation_id" => receipt.operation_id,
-      "evidence" => await_params.evidence
+      "operation_id" => operation_id,
+      "evidence" => evidence
     }
 
-    assert :ok =
-             Arbor.Comms.respond_to_interaction(request_id, :approved, approval_metadata)
+    # Submit at the restored deadline. Either the public response or the
+    # authority-owned deadline CAS may win; the durable record decides.
+    responder =
+      Task.async(fn ->
+        remaining = max(owner_deadline_unix_ms - System.system_time(:millisecond), 0)
+        Process.sleep(remaining)
 
-    assert {:ok, %{response: :approved, metadata: ^approval_metadata}} =
-             Arbor.Comms.get_interaction_response(request_id)
+        :erpc.call(
+          replacement,
+          Arbor.Comms,
+          :respond_to_interaction,
+          [request_id, :approved, approval_metadata],
+          10_000
+        )
+      end)
 
-    assert :ok = Arbor.Comms.untrack_presence(self(), operator_id, :dashboard)
-    restart_comms!()
-    assert_eventually(&Arbor.Comms.durable_ready?/0)
-    track_operator!(operator_id)
+    terminal_record =
+      assert_eventually_value(
+        fn ->
+          case CentralStore.get(controller_name, comms_store, request_id) do
+            {:ok, %{data: %{"status" => status}} = record}
+            when status in ["responded", "abandoned"] ->
+              {:ok, record}
 
-    assert {:ok, %{response: :approved, metadata: ^approval_metadata}} =
-             Arbor.Comms.get_interaction_response(request_id)
+            _ ->
+              :retry
+          end
+        end,
+        @owner_timeout_ms + 10_000
+      )
 
-    refute Enum.any?(Arbor.Comms.pending_interactions(), &(&1.request_id == request_id))
-    refute_receive {:durable_design_checkpoint_delivery, _}, 150
+    response_result = Task.await(responder, 10_000)
+    terminal_status = terminal_record.data["status"]
+    first_terminal = terminal_record.data["terminal"]
 
-    publish_for_public_resume!(interrupted)
+    {checkpoint_outcome, terminal_atom} =
+      case terminal_status do
+        "responded" ->
+          assert response_result == :ok
+          assert first_terminal["response"] == %{"kind" => "approved"}
+          assert first_terminal["metadata"] == approval_metadata
+          {"approve", :responded}
+
+        "abandoned" ->
+          assert response_result == {:error, {:already_terminal, :abandoned}}
+          assert first_terminal["response"] == nil
+          {"timeout", :abandoned}
+      end
+
+    # Late competing settlement cannot change the first terminal.
+    late =
+      :erpc.call(
+        replacement,
+        Arbor.Comms,
+        :respond_to_interaction,
+        [request_id, :rejected, %{"duplicate" => true}],
+        10_000
+      )
+
+    assert late == {:error, {:already_terminal, terminal_atom}}
+
+    assert {:ok, after_late_response} =
+             CentralStore.get(controller_name, comms_store, request_id)
+
+    assert after_late_response == terminal_record
+    assert after_late_response.data["terminal"] == first_terminal
+
+    assert {:ok, [^request_id]} = CentralStore.list(controller_name, comms_store)
+
+    refute Enum.any?(
+             :erpc.call(replacement, Arbor.Comms, :pending_interactions, [], 5_000),
+             &(&1.request_id == request_id)
+           )
+
+    # Lifecycle rehydrates to claimable interrupted with Open completed only.
+    interrupted =
+      assert_eventually_value(
+        fn ->
+          case :erpc.call(replacement, PipelineStatus, :get_record, [run_id], 5_000) do
+            %Record{status: :interrupted} = record ->
+              if "open_design_checkpoint" in (record.completed_nodes || []) and
+                   "await_design_checkpoint" not in (record.completed_nodes || []) do
+                {:ok, record}
+              else
+                :retry
+              end
+
+            _other ->
+              :retry
+          end
+        end,
+        30_000
+      )
+
+    assert "open_design_checkpoint" in interrupted.completed_nodes
+    refute "await_design_checkpoint" in interrupted.completed_nodes
+
+    assert {:ok, resumable} =
+             :erpc.call(replacement, Orchestrator, :list_resumable, [], 10_000)
+
+    assert Enum.any?(resumable, &(&1.run_id == run_id))
+
+    resume_parent = self()
+
+    resume_opts = [
+      identity_private_key: identity_private_key,
+      agent_id: agent_id,
+      execution_principal: agent_id,
+      actions_executor: ActionsExecutor
+    ]
 
     resume_task =
       Task.async(fn ->
-        :erlang.trace(self(), true, [:call, {:tracer, parent}])
-
-        Orchestrator.resume(run_id,
-          identity_private_key: identity_private_key,
-          actions_executor: ActionsExecutor
+        :erpc.call(
+          replacement,
+          Support,
+          :resume_design_run,
+          [run_id, resume_opts, resume_parent],
+          60_000
         )
       end)
 
     assert_receive {:trace, resume_pid, :call,
                     {Arbor.Actions, :authorize_and_execute,
                      [^agent_id, resumed_action_module, resumed_params, _]}},
-                   10_000
+                   30_000
 
-    assert resume_pid == resume_task.pid
+    assert node(resume_pid) == replacement
     assert_action_name!(resumed_action_module, @await_action_name)
-
-    assert resumed_params == await_params
     assert resumed_params.request_id == request_id
-    assert resumed_params.operation_id == receipt.operation_id
-    assert resumed_params.owner_deadline_unix_ms == run_deadline_unix_ms
+    assert resumed_params.operation_id == operation_id
+    assert resumed_params.owner_deadline_unix_ms == owner_deadline_unix_ms
+    assert resumed_params.evidence == evidence
 
-    assert {:ok, result} = Task.await(resume_task, 10_000)
+    assert_exact_design_input!(
+      resumed_params,
+      plan,
+      compilation.plan_fingerprint,
+      task_id,
+      workspace_id,
+      worker_session_id,
+      provider_session_id,
+      design_attempt,
+      design,
+      design_digest,
+      run_deadline_unix_ms
+    )
+
+    assert {:ok, result} = Task.await(resume_task, 60_000)
     assert result.context["accepted_design_request_id"] == request_id
-    assert result.context["accepted_design_evidence"] == await_params.evidence
-    assert result.context["design_checkpoint.checkpoint_outcome"] == "approve"
+    assert result.context["accepted_design_evidence"] == evidence
+    assert result.context["design_checkpoint.checkpoint_outcome"] == checkpoint_outcome
     assert result.context["session.run_deadline_unix_ms"] == run_deadline_unix_ms
 
     assert result.context["design_checkpoint_open.owner_deadline_unix_ms"] ==
-             run_deadline_unix_ms
+             owner_deadline_unix_ms
 
     assert result.context["accepted_design_evidence"]["packet_digest"] ==
              plan.work_packet_digest
@@ -367,10 +498,46 @@ defmodule Arbor.Orchestrator.CodingDesignCheckpointDurableResumeIntegrationTest 
     assert result.context["accepted_design_evidence"]["design_attempt"] == design_attempt
     assert result.context["accepted_design_evidence"]["design_digest"] == design_digest
 
+    # No Open replay and no second adapter delivery after the original Open.
     refute_receive {:durable_design_checkpoint_delivery, _}, 150
 
-    refute_receive {:trace, ^resume_pid, :call, {Arbor.Actions, :authorize_and_execute, _}},
+    refute_receive {:trace, ^resume_pid, :call,
+                    {Arbor.Actions, :authorize_and_execute,
+                     [^agent_id, ^open_action_module, _, _]}},
                    100
+  end
+
+  defp peer_opts(prefix, ctx) do
+    [
+      controller_name: ctx.controller_name,
+      controller_node: Node.self(),
+      journal_store: ctx.journal_store,
+      checkpoint_store: ctx.checkpoint_store,
+      comms_store: ctx.comms_store,
+      operator_id: ctx.operator_id,
+      agent_id: ctx.agent_id,
+      task_id: ctx.task_id,
+      durability_class: :node_restart,
+      recovery_enabled: false,
+      recovery_root: ctx.recovery_root,
+      cluster_prefix: prefix
+    ]
+  end
+
+  defp start_cluster(prefix) do
+    LocalCluster.start_link(1,
+      prefix: prefix,
+      applications: [],
+      files: [@support_file]
+    )
+  end
+
+  defp safe_stop_cluster(cluster) do
+    try do
+      LocalCluster.stop(cluster)
+    catch
+      :exit, _ -> :ok
+    end
   end
 
   defp compile_v2_plan!(repo_root, design) do
@@ -378,14 +545,16 @@ defmodule Arbor.Orchestrator.CodingDesignCheckpointDurableResumeIntegrationTest 
       "version" => WorkPacket.schema_version(),
       "success_criteria" => [
         "Open is durable before Await",
+        "same-node BEAM restart rehydrates exact authority",
         "resume observes the exact terminal authority"
       ],
-      "non_goals" => ["network partition proof"],
-      "constraints" => ["use production action boundaries"],
+      "non_goals" => ["network partition proof", "cross-node takeover"],
+      "constraints" => ["use production action boundaries", "LocalCluster same-prefix restart"],
       "architecture_refs" => [
-        "apps/arbor_actions/lib/arbor/actions/coding/design_checkpoint.ex"
+        "apps/arbor_actions/lib/arbor/actions/coding/design_checkpoint.ex",
+        "apps/arbor_orchestrator/test/support/l4_cluster_recovery_support.ex"
       ],
-      "required_evidence" => ["one adapter delivery", "no Open replay"],
+      "required_evidence" => ["one adapter delivery", "no Open replay", "same node atom"],
       "checkpoint_policy" => "design_required"
     }
 
@@ -430,7 +599,7 @@ defmodule Arbor.Orchestrator.CodingDesignCheckpointDurableResumeIntegrationTest 
         target="action",
         action="coding_design_checkpoint_open",
         context_keys="work_packet,packet_digest,session.task_id,task,plan_fingerprint,coding_plan_fingerprint,workspace_id,worker_session_id,worker_provider_session_id,design_attempt,design,design_digest,session.run_deadline_unix_ms",
-        param.timeout=600000,
+        param.timeout=#{@owner_timeout_ms},
         output_prefix="design_checkpoint_open",
         max_retries="0"
       ]
@@ -498,176 +667,45 @@ defmodule Arbor.Orchestrator.CodingDesignCheckpointDurableResumeIntegrationTest 
     assert params.run_deadline_unix_ms == run_deadline_unix_ms
   end
 
-  defp grant_exact_action_authority!(agent_id, task_id) do
-    resources =
-      Enum.map([@open_action_name, @await_action_name], fn action_name ->
-        assert {:ok, resource} = Arbor.Actions.tool_name_to_canonical_uri(action_name)
-        resource
-      end)
-
-    assert resources == [
-             "arbor://action/coding/design_checkpoint/open",
-             "arbor://action/coding/design_checkpoint/await"
-           ]
-
-    Enum.each(resources, fn resource ->
-      assert {:ok, _capability} =
-               Arbor.Security.grant(
-                 principal: agent_id,
-                 resource: resource,
-                 task_id: task_id
-               )
-    end)
-
-    assert {:ok, _profile} =
-             Arbor.Trust.ensure_trust_profile(agent_id,
-               baseline: :block,
-               rules: Map.new(resources, &{&1, :allow})
-             )
-
-    resources
-  end
-
-  defp assert_exact_trust_authority!(agent_id, task_id, resources) do
-    Enum.each(resources, fn resource ->
-      assert :allow = Arbor.Trust.effective_mode(agent_id, resource)
-      assert :auto = Arbor.Trust.confirmation_mode(agent_id, resource)
-
-      assert {:ok, :authorized} =
-               Arbor.Trust.authorize(agent_id, resource, :execute, task_id: task_id)
-    end)
-
-    assert {:ok, capabilities} = Arbor.Security.list_capabilities(agent_id)
-
-    assert capabilities
-           |> Enum.map(& &1.resource_uri)
-           |> Enum.sort() == Enum.sort(resources)
-  end
-
-  defp configure_engine_checkpoints!(store_name, backend_opts) do
-    Application.put_env(:arbor_orchestrator, :engine_checkpoints,
-      store: NodeRestartProxy,
-      store_name: store_name,
-      store_opts: backend_opts,
-      start_store: false,
-      store_child_opts: [],
-      durability_class: :node_restart
-    )
-  end
-
-  defp configure_comms!(store_name, backend_opts, operator_id) do
-    Application.put_env(:arbor_comms, :durable_interaction_store,
-      backend: NodeRestartProxy,
-      namespace: store_name,
-      opts: backend_opts,
-      max_data_bytes: 65_536,
-      max_items: 32
-    )
-
-    Application.put_env(:arbor_comms, :durable_interaction_dispatch,
-      sweep_interval_ms: 25,
-      startup_delay_ms: 10,
-      batch_size: 16,
-      retry_base_ms: 10,
-      retry_max_ms: 50,
-      send_timeout_ms: 1_000,
-      max_concurrency: 2
-    )
-
-    Application.put_env(:arbor_comms, :interaction_adapters, %{
-      dashboard: DeliveryAdapter
-    })
-
-    signal =
-      Application.get_env(:arbor_comms, :signal, [])
-      |> Keyword.put(:enabled, false)
-      |> Keyword.put(:interaction_user_id, operator_id)
-
-    Application.put_env(:arbor_comms, :signal, signal)
-  end
-
-  defp track_operator!(operator_id) do
-    case Arbor.Comms.track_presence(self(), operator_id, :dashboard, %{test_pid: self()}) do
-      {:ok, _ref} -> :ok
-      {:error, {:already_tracked, pid, _topic, :dashboard}} when pid == self() -> :ok
-    end
-  end
-
-  defp publish_for_public_resume!(%Record{} = interrupted) do
-    published = %Record{
-      interrupted
-      | status: :interrupted,
-        failure_reason: nil,
-        finished_at: nil,
-        duration_ms: nil,
-        owner_node: nil
-    }
-
-    assert :ok = PipelineStatus.put(published)
-  end
-
-  defp trace_design_actions! do
-    :erlang.trace_pattern({Arbor.Actions, :authorize_and_execute, 4}, true, [])
-  end
-
-  defp untrace_design_actions do
-    :erlang.trace_pattern({Arbor.Actions, :authorize_and_execute, 4}, false, [])
-  end
-
   defp assert_action_name!(action_module, expected_name) do
     assert {:ok, %{"name" => ^expected_name}} = Arbor.Actions.runtime_descriptor(action_module)
   end
 
-  defp ensure_security_and_trust_started! do
-    ensure_started(Arbor.Security.Identity.Registry)
-    ensure_started(Arbor.Security.Identity.NonceCache)
-    ensure_started(Arbor.Security.SystemAuthority)
-    ensure_started(Arbor.Security.CapabilityStore)
-    ensure_started(Arbor.Security.Reflex.Registry)
-    ensure_started(Arbor.Security.Constraint.RateLimiter)
-    ensure_started(Arbor.Trust.EventStore)
-    ensure_started(Arbor.Trust.Store)
+  defp assert_peer_authority!(peer, agent_id, task_id) do
+    open_resource = "arbor://action/coding/design_checkpoint/open"
+    await_resource = "arbor://action/coding/design_checkpoint/await"
 
-    ensure_started(Arbor.Trust.Manager,
-      circuit_breaker: false,
-      decay: false,
-      event_store: true
-    )
+    assert {:ok, capabilities} =
+             :erpc.call(peer, Arbor.Security, :list_capabilities, [agent_id], 5_000)
+
+    assert capabilities
+           |> Enum.map(&{&1.resource_uri, &1.task_id})
+           |> Enum.sort() ==
+             Enum.sort([
+               {open_resource, task_id},
+               {await_resource, task_id},
+               {"arbor://orchestrator/execute/**", nil}
+             ])
+
+    Enum.each([open_resource, await_resource], fn resource ->
+      assert :allow =
+               :erpc.call(peer, Arbor.Trust, :effective_mode, [agent_id, resource], 5_000)
+
+      assert :auto =
+               :erpc.call(peer, Arbor.Trust, :confirmation_mode, [agent_id, resource], 5_000)
+
+      assert {:ok, :authorized} =
+               :erpc.call(
+                 peer,
+                 Arbor.Trust,
+                 :authorize,
+                 [agent_id, resource, :execute, [task_id: task_id]],
+                 5_000
+               )
+    end)
   end
 
-  defp ensure_started(module, opts \\ []) do
-    unless Process.whereis(module) do
-      start_supervised!({module, opts})
-    end
-  end
-
-  defp restart_comms! do
-    stop_comms()
-    assert {:ok, _started} = Application.ensure_all_started(:arbor_comms)
-  end
-
-  defp restart_comms_safely do
-    stop_comms()
-    _ = Application.ensure_all_started(:arbor_comms)
-    :ok
-  end
-
-  defp stop_comms do
-    case Application.stop(:arbor_comms) do
-      :ok -> :ok
-      {:error, {:not_started, :arbor_comms}} -> :ok
-    end
-  end
-
-  defp assert_eventually(fun, timeout_ms \\ 5_000) do
-    assert :ok ==
-             assert_eventually_value(
-               fn -> if fun.(), do: {:ok, :ok}, else: :retry end,
-               timeout_ms
-             )
-  end
-
-  defp assert_eventually_value(fun, timeout_ms \\ 5_000) do
+  defp assert_eventually_value(fun, timeout_ms) do
     deadline = System.monotonic_time(:millisecond) + timeout_ms
     do_assert_eventually_value(fun, deadline)
   end
@@ -683,7 +721,7 @@ defmodule Arbor.Orchestrator.CodingDesignCheckpointDurableResumeIntegrationTest 
         else
           receive do
           after
-            10 -> do_assert_eventually_value(fun, deadline)
+            20 -> do_assert_eventually_value(fun, deadline)
           end
         end
     end
@@ -696,17 +734,6 @@ defmodule Arbor.Orchestrator.CodingDesignCheckpointDurableResumeIntegrationTest 
       :exit, _reason -> :ok
     end
   end
-
-  defp safe_untrack_operator(operator_id) do
-    try do
-      Arbor.Comms.untrack_presence(self(), operator_id, :dashboard)
-    catch
-      :exit, _reason -> :ok
-    end
-  end
-
-  defp restore_env(app, key, :__unset__), do: Application.delete_env(app, key)
-  defp restore_env(app, key, value), do: Application.put_env(app, key, value)
 
   defp repo_root do
     cwd = File.cwd!() |> Path.expand()

@@ -489,6 +489,27 @@ defmodule Arbor.Orchestrator.L4ClusterRecoverySupport do
     def durability_class(_opts), do: :node_restart
   end
 
+  defmodule DesignCheckpointDeliveryAdapter do
+    @moduledoc false
+    @behaviour Arbor.Contracts.Comms.ChannelAdapter
+
+    @impl true
+    def send_interaction(channel_metadata, interaction) do
+      send(
+        Map.fetch!(channel_metadata, :test_pid),
+        {:durable_design_checkpoint_delivery, interaction}
+      )
+
+      :ok
+    end
+
+    @impl true
+    def parse_response(_raw), do: :not_interaction
+
+    @impl true
+    def channel_kind, do: :dashboard
+  end
+
   # ---------------------------------------------------------------------------
   # Side-effecting handler (test-only)
   # ---------------------------------------------------------------------------
@@ -656,6 +677,25 @@ defmodule Arbor.Orchestrator.L4ClusterRecoverySupport do
   end
 
   def grant_agent_system! do
+    with :ok <- ensure_capability_store_started!() do
+      {:ok, cap} =
+        Capability.new(
+          resource_uri: "arbor://orchestrator/execute/**",
+          principal_id: "agent_system",
+          delegation_depth: 0,
+          constraints: %{},
+          metadata: %{test: true, l4_cluster: true}
+        )
+
+      case CapabilityStore.put(cap) do
+        {:ok, _} -> :ok
+        :ok -> :ok
+        other -> other
+      end
+    end
+  end
+
+  def ensure_capability_store_started! do
     case CapabilityStore.start_link([]) do
       {:ok, pid} ->
         # This setup runs inside a short-lived :erpc worker. Keep the test store
@@ -668,21 +708,6 @@ defmodule Arbor.Orchestrator.L4ClusterRecoverySupport do
 
       other ->
         other
-    end
-
-    {:ok, cap} =
-      Capability.new(
-        resource_uri: "arbor://orchestrator/execute/**",
-        principal_id: "agent_system",
-        delegation_depth: 0,
-        constraints: %{},
-        metadata: %{test: true, l4_cluster: true}
-      )
-
-    case CapabilityStore.put(cap) do
-      {:ok, _} -> :ok
-      :ok -> :ok
-      other -> other
     end
   end
 
@@ -703,6 +728,236 @@ defmodule Arbor.Orchestrator.L4ClusterRecoverySupport do
          :ok <- grant_agent_system!(),
          :ok <- register_side_handler!() do
       :ok
+    end
+  end
+
+  @doc """
+  Configure node-restart Comms durable interactions against the controller store.
+  """
+  def configure_comms!(opts) when is_list(opts) do
+    controller_name = Keyword.fetch!(opts, :controller_name)
+    controller_node = Keyword.fetch!(opts, :controller_node)
+    comms_store = Keyword.fetch!(opts, :comms_store)
+    operator_id = Keyword.fetch!(opts, :operator_id)
+
+    Application.put_env(:arbor_comms, :durable_interaction_store,
+      backend: NodeRestartProxy,
+      namespace: comms_store,
+      opts: [
+        controller_name: controller_name,
+        controller_node: controller_node
+      ],
+      max_data_bytes: 65_536,
+      max_items: 32
+    )
+
+    Application.put_env(:arbor_comms, :durable_interaction_dispatch,
+      sweep_interval_ms: 25,
+      startup_delay_ms: 10,
+      batch_size: 16,
+      retry_base_ms: 10,
+      retry_max_ms: 50,
+      send_timeout_ms: 1_000,
+      max_concurrency: 2
+    )
+
+    Application.put_env(:arbor_comms, :interaction_adapters, %{
+      dashboard: DesignCheckpointDeliveryAdapter
+    })
+
+    signal =
+      Application.get_env(:arbor_comms, :signal, [])
+      |> Keyword.put(:enabled, false)
+      |> Keyword.put(:interaction_user_id, operator_id)
+
+    Application.put_env(:arbor_comms, :signal, signal)
+    Application.put_env(:arbor_trust, :policy_enforcer_enabled, true)
+    Application.put_env(:arbor_trust, :approval_guard_enabled, true)
+    :ok
+  end
+
+  @doc """
+  Prepare a LocalCluster peer for Coding Plan v2 design-checkpoint durability proofs.
+  """
+  def prepare_design_checkpoint_peer!(opts) when is_list(opts) do
+    with :ok <- configure_orchestrator!(opts),
+         :ok <- configure_comms!(opts),
+         :ok <- start_comms_app!(),
+         :ok <- start_orchestrator_app!(),
+         :ok <- ensure_capability_store_started!(),
+         :ok <- ensure_design_checkpoint_trust_started!(),
+         :ok <- grant_design_checkpoint_authority!(opts) do
+      :ok
+    end
+  end
+
+  def start_comms_app! do
+    case Application.ensure_all_started(:arbor_comms) do
+      {:ok, _apps} -> :ok
+      {:error, reason} -> {:error, {:comms_start_failed, reason}}
+    end
+  end
+
+  def ensure_design_checkpoint_trust_started! do
+    with :ok <- ensure_unlinked_child(Arbor.Trust.EventStore, []),
+         :ok <- ensure_unlinked_child(Arbor.Trust.Store, []),
+         :ok <-
+           ensure_unlinked_child(Arbor.Trust.Manager,
+             circuit_breaker: false,
+             decay: false,
+             event_store: true
+           ) do
+      :ok
+    end
+  end
+
+  defp ensure_unlinked_child(module, opts) do
+    case module.start_link(opts) do
+      {:ok, pid} ->
+        # Peer setup runs in a short-lived :erpc worker.
+        Process.unlink(pid)
+        :ok
+
+      {:error, {:already_started, _}} ->
+        :ok
+
+      other ->
+        other
+    end
+  end
+
+  @doc """
+  Grant exact design-checkpoint action URIs plus orchestrator execute for the agent.
+  """
+  def grant_design_checkpoint_authority!(opts) when is_list(opts) do
+    agent_id = Keyword.fetch!(opts, :agent_id)
+    task_id = Keyword.fetch!(opts, :task_id)
+
+    grants = [
+      {"arbor://action/coding/design_checkpoint/open", task_id},
+      {"arbor://action/coding/design_checkpoint/await", task_id},
+      {"arbor://orchestrator/execute/**", nil}
+    ]
+
+    Enum.each(grants, fn {resource_uri, capability_task_id} ->
+      {:ok, cap} =
+        Capability.new(
+          resource_uri: resource_uri,
+          principal_id: agent_id,
+          delegation_depth: 0,
+          constraints: %{},
+          task_id: capability_task_id,
+          metadata: %{test: true, design_checkpoint: true, task_id: task_id}
+        )
+
+      case CapabilityStore.put(cap) do
+        {:ok, _} -> :ok
+        :ok -> :ok
+        other -> throw({:grant_failed, resource_uri, other})
+      end
+    end)
+
+    action_rules =
+      Map.new(
+        [
+          "arbor://action/coding/design_checkpoint/open",
+          "arbor://action/coding/design_checkpoint/await"
+        ],
+        &{&1, :allow}
+      )
+
+    case Arbor.Trust.ensure_trust_profile(agent_id, baseline: :block, rules: action_rules) do
+      {:ok, _profile} -> :ok
+      :ok -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  catch
+    {:grant_failed, resource_uri, reason} ->
+      {:error, {:grant_failed, resource_uri, reason}}
+  end
+
+  @doc """
+  Hold a stable PresenceTracker registration whose deliveries report to `delivery_pid`.
+  """
+  def start_presence_holder!(operator_id, delivery_pid)
+      when is_binary(operator_id) and is_pid(delivery_pid) do
+    holder =
+      spawn(fn ->
+        receive do
+          :stop_presence_holder -> :ok
+        end
+      end)
+
+    case Arbor.Comms.track_presence(holder, operator_id, :dashboard, %{test_pid: delivery_pid}) do
+      {:ok, _ref} ->
+        {:ok, holder}
+
+      {:error, {:already_tracked, ^holder, _topic, :dashboard}} ->
+        {:ok, holder}
+
+      {:error, reason} ->
+        Process.exit(holder, :kill)
+        {:error, reason}
+    end
+  end
+
+  @doc """
+  Spawn a design-checkpoint `run_file/2` with call tracing to `report_to`.
+  """
+  def start_design_run_async(dot_path, run_opts, report_to)
+      when is_binary(dot_path) and is_list(run_opts) and is_pid(report_to) do
+    pid =
+      spawn(fn ->
+        tracer = start_trace_forwarder(report_to)
+        :erlang.trace_pattern({Arbor.Actions, :authorize_and_execute, 4}, true, [])
+        :erlang.trace(self(), true, [:call, {:tracer, tracer}])
+        send(report_to, {:l4_engine_started, node(), self()})
+
+        result =
+          try do
+            Arbor.Orchestrator.run_file(dot_path, run_opts)
+          catch
+            kind, reason ->
+              {:error, {kind, reason}}
+          end
+
+        :erlang.trace(self(), false, [:call])
+        send(tracer, :stop)
+        send(report_to, {:l4_engine_finished, node(), self(), result})
+      end)
+
+    {:ok, pid}
+  end
+
+  @doc """
+  Resume a design-checkpoint run while tracing exact action invocations.
+  """
+  def resume_design_run(run_id, resume_opts, report_to)
+      when is_binary(run_id) and is_list(resume_opts) and is_pid(report_to) do
+    tracer = start_trace_forwarder(report_to)
+    :erlang.trace_pattern({Arbor.Actions, :authorize_and_execute, 4}, true, [])
+    :erlang.trace(self(), true, [:call, {:tracer, tracer}])
+
+    try do
+      Arbor.Orchestrator.resume(run_id, resume_opts)
+    after
+      :erlang.trace(self(), false, [:call])
+      send(tracer, :stop)
+    end
+  end
+
+  defp start_trace_forwarder(report_to) do
+    spawn(fn -> forward_traces(report_to) end)
+  end
+
+  defp forward_traces(report_to) do
+    receive do
+      :stop ->
+        :ok
+
+      message ->
+        send(report_to, message)
+        forward_traces(report_to)
     end
   end
 
