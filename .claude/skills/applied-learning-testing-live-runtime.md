@@ -535,3 +535,12 @@ when a runtime `Enum.find!/2` error survived compile-only candidate validation).
 when the module omitted the requested tag. Evidence admission must verify that
 the expected module/tests were selected, not merely the process exit code or
 zero-failure count (found 2026-07-28 during the Phase C delegated-work canary).
+
+<!-- applied-learning: parenthesize-do-block-expressions-assigned-to-module-attributes -->
+<a id="applied-learning-parenthesize-do-block-expressions-assigned-to-module-attributes"></a>
+**Parenthesize do-block expressions assigned to module attributes.** In Elixir,
+`@items for ... do ... end` binds the block to the module-attribute macro and
+raises instead of assigning the comprehension. Use `@items (for ... do ...
+end)` or an `Enum` pipeline expression; compile the touched module before
+treating formatter success as syntax validation (found 2026-07-28 while adding
+the executable coding-profile declaration guard).

@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-07-28",
-  "entry_count": 543,
+  "entry_count": 544,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -6603,8 +6603,21 @@
       "source_incident": "found 2026-07-28 when adoption completed in `TaskStore` after ExMCP had already returned an empty HTTP 500).",
       "content_sha256": "2ec14889bc7088093d8a350cc6931c765de140bdd20cd6553b0c00530bf4f063",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 544,
+      "source_kind": "post-migration",
+      "slug": "parenthesize-do-block-expressions-assigned-to-module-attributes",
+      "title": "Parenthesize do-block expressions assigned to module attributes.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-parenthesize-do-block-expressions-assigned-to-module-attributes",
+      "source_date": "2026-07-28",
+      "source_incident": "found 2026-07-28 while adding the executable coding-profile declaration guard).",
+      "content_sha256": "9eab8a02d066871724abc12ee3ccae56f1bc6af0d5856556505a5708cea94be7",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 82
+  "post_migration_entry_count": 83
 }
