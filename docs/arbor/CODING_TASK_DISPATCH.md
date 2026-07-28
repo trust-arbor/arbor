@@ -363,6 +363,27 @@ inventory without copying raw paths into the terminal artifact; an authorized
 operator or CI job can reconstruct those paths from the retained workspace and
 verify the digest chain.
 
+## Post-integration settlement
+
+`arbor_adopt_task_change` settles an already integrated successful coding
+result. It is deliberately not a Git merge command:
+
+1. Inspect the terminal result and independently integrate the reviewed
+   candidate into the intended destination by fast-forward, cherry-pick, squash,
+   or the repository's normal merge system.
+2. Call `arbor_adopt_task_change` with the original `task_id` and the destination
+   ref that now contains the change.
+3. Arbor proves ancestry or bounded patch equivalence, archives immutable
+   adoption evidence, and retires only the exact task-owned workspace and
+   branch resources.
+
+Calling settlement before integration fails as not adopted. A slow proof may
+return `settlement_status: "pending"` before ExMCP's fixed `tools/call`
+deadline; poll `arbor_task_result` until its adoption evidence becomes settled
+or failed. The mutation remains owned and exactly once inside `TaskStore`.
+Repeating the same task, destination, and result fingerprint coalesces with that
+owner; it does not start a second adoption.
+
 ## Default execution path
 
 Structured `coding_change` dispatch runs the **compiled DOT pipeline** by
