@@ -567,6 +567,135 @@ defmodule Arbor.Orchestrator.Dot.ParserTest do
       assert map_size(graph.nodes) == 2
       assert length(graph.edges) == 1
     end
+
+    test "quoted attribute text preserves URI-shaped // sequences" do
+      url = "https://example.com/docs/path?q=1"
+      arbor_uri = "arbor://action/coding/review/submit"
+
+      dot = """
+      digraph UriAttrs {
+        task [
+          prompt="See #{url} and #{arbor_uri}",
+          expression="{\\"ref\\":\\"#{url}\\"}"
+        ]
+        // real comment must still be stripped
+        done [shape=Msquare]
+        task -> done
+      }
+      """
+
+      assert {:ok, graph} = Parser.parse(dot)
+      assert graph.nodes["task"].attrs["prompt"] == "See #{url} and #{arbor_uri}"
+      assert graph.nodes["task"].attrs["expression"] == ~s({"ref":"#{url}"})
+      assert Map.has_key?(graph.nodes, "done")
+    end
+
+    test "quoted attribute text preserves block-comment-marker-like sequences" do
+      glob = "apps/**/*.{ex,exs}"
+      note = "keep /* not a comment */ and // still quoted"
+
+      dot = """
+      digraph Blockish {
+        task [prompt="glob=#{glob}; note=#{note}"]
+        /* genuine multi-line
+           block comment */
+        done [shape=Msquare]
+        task -> done
+      }
+      """
+
+      assert {:ok, graph} = Parser.parse(dot)
+      assert graph.nodes["task"].attrs["prompt"] == "glob=#{glob}; note=#{note}"
+      assert Map.has_key?(graph.nodes, "done")
+    end
+
+    test "escaped quotes do not reopen comment scanning inside strings" do
+      dot = ~S"""
+      digraph Escaped {
+        task [prompt="say \"see https://example.com // still inside\" done"]
+        // outside comment
+        done [shape=Msquare]
+        task -> done
+      }
+      """
+
+      assert {:ok, graph} = Parser.parse(dot)
+
+      assert graph.nodes["task"].attrs["prompt"] ==
+               ~s(say "see https://example.com // still inside" done)
+
+      assert Map.has_key?(graph.nodes, "done")
+    end
+
+    test "escaped backslash adjacent to escaped quote keeps // and /* inside the string" do
+      # DOT source `\\\"` is one escaped backslash then one escaped quote, so the
+      # following // and /* remain inside the quoted attribute (scanner parity
+      # beyond a lone `\"`).
+      dot = ~S"""
+      digraph EscCombo {
+        task [prompt="path\\\"//not-comment and /* still quoted */ end"]
+        // real outside comment
+        done [shape=Msquare]
+        task -> done
+      }
+      """
+
+      assert {:ok, graph} = Parser.parse(dot)
+
+      # Value is one backslash + one quote, then the comment-marker-like text.
+      assert graph.nodes["task"].attrs["prompt"] ==
+               ~S(path\"//not-comment and /* still quoted */ end)
+
+      assert Map.has_key?(graph.nodes, "done")
+    end
+
+    test "escaped backslash before closing quote ends the string so // is a real comment" do
+      # DOT source `\\"` is one escaped backslash then a real closer; trailing
+      # // must be stripped as a comment, not absorbed into the attribute.
+      dot = ~S"""
+      digraph EscEnd {
+        task [prompt="path\\"] // real comment after closed string
+        done [shape=Msquare]
+        task -> done
+      }
+      """
+
+      assert {:ok, graph} = Parser.parse(dot)
+      assert graph.nodes["task"].attrs["prompt"] == "path\\"
+      assert Map.has_key?(graph.nodes, "done")
+    end
+
+    test "unterminated block comment fails closed with a deterministic error" do
+      # Old regex left an unclosed `/*` intact (later parse failure). The
+      # quote-aware scanner must not silently strip-to-EOF either.
+      dot = """
+      digraph Unclosed {
+        start [shape=Mdiamond]
+        /* this block comment never closes
+        done [shape=Msquare]
+        start -> done
+      }
+      """
+
+      assert {:error, "unterminated block comment"} = Parser.parse(dot)
+
+      assert {:error, "unterminated block comment"} =
+               Parser.parse(dot, accumulate_errors: true)
+    end
+
+    test "inline comment after a quoted URI attribute is still stripped" do
+      dot = """
+      digraph AfterQuoted {
+        task [prompt="https://example.com/a"] // trailing real comment
+        done [shape=Msquare]
+        task -> done
+      }
+      """
+
+      assert {:ok, graph} = Parser.parse(dot)
+      assert graph.nodes["task"].attrs["prompt"] == "https://example.com/a"
+      assert map_size(graph.nodes) == 2
+    end
   end
 
   # ── 10. string escapes ───────────────────────────────────────────────

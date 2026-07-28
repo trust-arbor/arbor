@@ -226,6 +226,63 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert {:ok, ^compilation} = Compilation.validate(compilation, plan)
   end
 
+  test "URI-shaped work-packet text survives compile parse and strict canonical DOT", ctx do
+    packet = %{
+      "version" => 1,
+      "success_criteria" => [
+        "preserve https://example.com/docs/coding-plan#work-packet in frozen packet JSON",
+        "focused tests pass"
+      ],
+      "non_goals" => ["execution authority"],
+      "constraints" => [
+        "do not truncate URI text containing // or /* sequences",
+        "retain http://localhost:4000/health and apps/**/*.{ex,exs} /* not a comment */"
+      ],
+      "architecture_refs" => [
+        "docs/arbor/CODING_TASK_DISPATCH.md",
+        "apps/arbor_orchestrator/lib/arbor/orchestrator/dot/parser.ex"
+      ],
+      "required_evidence" => [
+        "expression retains arbor://action/coding/review/submit and https:// references verbatim"
+      ],
+      "checkpoint_policy" => "direct"
+    }
+
+    {:ok, digest} = WorkPacket.digest(packet)
+
+    plan =
+      plan!(%{
+        "version" => 2,
+        "work_packet" => packet,
+        "work_packet_digest" => digest
+      })
+
+    assert {:ok, packet_json} = WorkPacket.canonical_bytes(plan.work_packet)
+    assert packet_json =~ "https://example.com"
+    assert packet_json =~ "arbor://action/coding/review/submit"
+    assert packet_json =~ "/* not a comment */"
+
+    # Compile re-parses generated DOT and enforces DotSerializer round-trip
+    # equality (`:generated_dot_not_canonical` on drift). URI markers in the
+    # frozen packet expression must not be mistaken for comments.
+    assert {:ok, compilation} = compile(plan, ctx)
+    graph = parse!(compilation.dot_source)
+
+    frozen = node_attrs(graph, "freeze_coding_plan_work_packet_json")["expression"]
+    assert frozen == packet_json
+    assert frozen =~ "https://example.com/docs/coding-plan#work-packet"
+    assert frozen =~ "http://localhost:4000/health"
+    assert frozen =~ "arbor://action/coding/review/submit"
+    assert frozen =~ "/* not a comment */"
+
+    assert compilation.initial_values["coding_plan_work_packet"] == plan.work_packet
+    assert {:ok, ^compilation} = Compilation.validate(compilation, plan)
+
+    # Strict generated-DOT canonicality: serialize(parse(source)) == source
+    assert DotSerializer.serialize(graph) == compilation.dot_source
+    assert compilation.graph_hash == sha256(compilation.dot_source)
+  end
+
   test "template stays within reviewed DOT source, node, and edge ceilings", ctx do
     graph = parse!(ctx.template_source)
 

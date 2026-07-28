@@ -12,7 +12,8 @@ defmodule Arbor.Orchestrator.Dot.Parser do
   - bare attributes (`[nullable]` → `%{"nullable" => "true"}`)
   - qualified/dotted keys (`manager.actions="observe"`)
   - full string escapes (`\\n`, `\\t`, `\\\\`, `\\"`)
-  - `//` and `/* */` comments
+  - quote-aware `//` and `/* */` comments (markers inside double-quoted
+    attribute text are preserved; escapes like `\\"` are respected)
   - duration parsing utility
   - line-number tracking in error messages
   - error accumulation mode (`accumulate_errors: true`)
@@ -63,37 +64,36 @@ defmodule Arbor.Orchestrator.Dot.Parser do
   def parse(source, opts \\ []) when is_binary(source) do
     accumulate = Keyword.get(opts, :accumulate_errors, false)
 
-    processed =
-      source
-      |> strip_comments()
-      |> String.trim_trailing()
+    with {:ok, processed} <- strip_comments(source) do
+      processed = String.trim_trailing(processed)
 
-    case parse_digraph(processed, accumulate) do
-      {:ok, state} ->
-        # Reject (or warn about) anything after the outer closing `}`.
-        # The parser used to silently drop trailing content, which lets
-        # LLM-generated DOTs hide a partial follow-up, a hallucinated
-        # second graph, or a stray statement — and the operator never
-        # knows the pipeline they meant to run isn't the one that ran.
-        trailing = String.trim(state.rest)
+      case parse_digraph(processed, accumulate) do
+        {:ok, state} ->
+          # Reject (or warn about) anything after the outer closing `}`.
+          # The parser used to silently drop trailing content, which lets
+          # LLM-generated DOTs hide a partial follow-up, a hallucinated
+          # second graph, or a stray statement — and the operator never
+          # knows the pipeline they meant to run isn't the one that ran.
+          trailing = String.trim(state.rest)
 
-        cond do
-          trailing == "" and accumulate and state.errors != [] ->
-            {:ok, build_graph(state), Enum.reverse(state.errors)}
+          cond do
+            trailing == "" and accumulate and state.errors != [] ->
+              {:ok, build_graph(state), Enum.reverse(state.errors)}
 
-          trailing == "" ->
-            {:ok, build_graph(state)}
+            trailing == "" ->
+              {:ok, build_graph(state)}
 
-          accumulate ->
-            warning = "trailing content after digraph close: #{trailing_preview(trailing)}"
-            {:ok, build_graph(state), Enum.reverse([warning | state.errors])}
+            accumulate ->
+              warning = "trailing content after digraph close: #{trailing_preview(trailing)}"
+              {:ok, build_graph(state), Enum.reverse([warning | state.errors])}
 
-          true ->
-            {:error, "trailing content after digraph close: #{trailing_preview(trailing)}"}
-        end
+            true ->
+              {:error, "trailing content after digraph close: #{trailing_preview(trailing)}"}
+          end
 
-      {:error, _} = err ->
-        err
+        {:error, _} = err ->
+          err
+      end
     end
   end
 
@@ -131,17 +131,90 @@ defmodule Arbor.Orchestrator.Dot.Parser do
 
   # ── Comment Stripping ────────────────────────────────────────────
 
-  defp strip_comments(source) do
-    source
-    |> replace_block_comments()
-    |> String.replace(~r/\/\/.*$/m, "")
+  # Quote-aware scanner: `//` and `/* */` markers inside double-quoted
+  # attribute text (URIs, JSON, globs, etc.) must not be treated as comments.
+  # Escapes inside quotes are respected so `\"` does not end the string early
+  # and `\\` + `\"` keeps both the backslash and quote inside the string.
+  # Block-comment bodies are replaced with an equal number of newlines so
+  # downstream line numbers stay stable. Unterminated `/*` fails closed with
+  # a deterministic error (do not silently strip to EOF).
+  defp strip_comments(source) when is_binary(source) do
+    case do_strip_comments(source, [], :code) do
+      {:ok, acc} -> {:ok, acc |> Enum.reverse() |> IO.iodata_to_binary()}
+      {:error, _} = err -> err
+    end
   end
 
-  # Replace block comments with equivalent newlines to preserve line numbers
-  defp replace_block_comments(source) do
-    Regex.replace(~r/\/\*[\s\S]*?\*\//, source, fn match ->
-      String.duplicate("\n", count_newlines(match))
-    end)
+  defp do_strip_comments("", acc, _state), do: {:ok, acc}
+
+  # ── code (outside quotes) ────────────────────────────────────────
+
+  defp do_strip_comments(<<"\"", rest::binary>>, acc, :code) do
+    do_strip_comments(rest, ["\"" | acc], :string)
+  end
+
+  defp do_strip_comments(<<"//", rest::binary>>, acc, :code) do
+    do_strip_comments(skip_line_comment(rest), acc, :code)
+  end
+
+  defp do_strip_comments(<<"/*", rest::binary>>, acc, :code) do
+    case skip_block_comment(rest, 0) do
+      {:ok, rest, newlines} ->
+        do_strip_comments(rest, [String.duplicate("\n", newlines) | acc], :code)
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  defp do_strip_comments(<<ch::utf8, rest::binary>>, acc, :code) do
+    do_strip_comments(rest, [<<ch::utf8>> | acc], :code)
+  end
+
+  # ── string (inside double quotes) ────────────────────────────────
+
+  # Escaped char stays inside the string; preserve both bytes exactly.
+  # This covers `\"`, `\\`, and adjacent forms like `\\\"` (backslash then
+  # escaped quote) so comment markers after those sequences remain quoted.
+  defp do_strip_comments(<<"\\", ch::utf8, rest::binary>>, acc, :string) do
+    do_strip_comments(rest, [<<ch::utf8>>, "\\" | acc], :string)
+  end
+
+  # Trailing lone backslash at EOF.
+  defp do_strip_comments(<<"\\", rest::binary>>, acc, :string) do
+    do_strip_comments(rest, ["\\" | acc], :string)
+  end
+
+  defp do_strip_comments(<<"\"", rest::binary>>, acc, :string) do
+    do_strip_comments(rest, ["\"" | acc], :code)
+  end
+
+  defp do_strip_comments(<<ch::utf8, rest::binary>>, acc, :string) do
+    do_strip_comments(rest, [<<ch::utf8>> | acc], :string)
+  end
+
+  defp skip_line_comment(<<"\n", rest::binary>>), do: <<"\n", rest::binary>>
+  defp skip_line_comment(<<"\r\n", rest::binary>>), do: <<"\r\n", rest::binary>>
+  defp skip_line_comment(<<"\r", rest::binary>>), do: <<"\r", rest::binary>>
+  defp skip_line_comment(""), do: ""
+
+  defp skip_line_comment(<<_ch::utf8, rest::binary>>), do: skip_line_comment(rest)
+
+  # Fail closed: never silently accept or truncate an unclosed `/*`.
+  defp skip_block_comment("", _newlines), do: {:error, "unterminated block comment"}
+
+  defp skip_block_comment(<<"*/", rest::binary>>, newlines), do: {:ok, rest, newlines}
+
+  defp skip_block_comment(<<"\n", rest::binary>>, newlines) do
+    skip_block_comment(rest, newlines + 1)
+  end
+
+  defp skip_block_comment(<<"\r\n", rest::binary>>, newlines) do
+    skip_block_comment(rest, newlines + 1)
+  end
+
+  defp skip_block_comment(<<_ch::utf8, rest::binary>>, newlines) do
+    skip_block_comment(rest, newlines)
   end
 
   # ── Top-Level: digraph ───────────────────────────────────────────
