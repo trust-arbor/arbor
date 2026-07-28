@@ -104,7 +104,12 @@ defmodule Arbor.Actions.Coding.ReconciliationApplyTest do
 
     assert {:ok, receipt} = Actions.apply_coding_reconciliation_decision(auth, decision)
     assert receipt["outcome"] == "settled"
-    refute Map.has_key?(:sys.get_state(WorkspaceLeaseRegistry).validation_resources, resource.resource_id)
+
+    refute Map.has_key?(
+             :sys.get_state(WorkspaceLeaseRegistry).validation_resources,
+             resource.resource_id
+           )
+
     refute File.exists?(root_path)
   end
 
@@ -215,8 +220,7 @@ defmodule Arbor.Actions.Coding.ReconciliationApplyTest do
 
       %{
         state
-        | validation_resources:
-            Map.put(state.validation_resources, resource.resource_id, updated)
+        | validation_resources: Map.put(state.validation_resources, resource.resource_id, updated)
       }
     end)
 
@@ -314,9 +318,7 @@ defmodule Arbor.Actions.Coding.ReconciliationApplyTest do
 
   defp leased_project(tmp_dir) do
     repo =
-      create_base_project(
-        Path.join(tmp_dir, "repo-#{System.unique_integer([:positive])}")
-      )
+      create_base_project(Path.join(tmp_dir, "repo-#{System.unique_integer([:positive])}"))
 
     task_id = "task_reconciliation_apply_#{System.unique_integer([:positive])}"
     principal_id = "agent_reconciliation_apply_#{System.unique_integer([:positive])}"

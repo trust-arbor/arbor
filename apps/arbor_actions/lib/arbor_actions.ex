@@ -277,13 +277,11 @@ defmodule Arbor.Actions do
     _, _ -> {:error, :reconciliation_apply_failed}
   end
 
-  defp admit_reconciliation_caller_auth(
-         %AuthContext{
-           identity_verified: true,
-           principal_id: principal_id,
-           signed_request: %SignedRequest{agent_id: principal_id} = signed_request
-         }
-       )
+  defp admit_reconciliation_caller_auth(%AuthContext{
+         identity_verified: true,
+         principal_id: principal_id,
+         signed_request: %SignedRequest{agent_id: principal_id} = signed_request
+       })
        when is_binary(principal_id) do
     if valid_reconciliation_principal_id?(principal_id) do
       {:ok, principal_id, signed_request}
