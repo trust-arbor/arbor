@@ -266,6 +266,7 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
     )
   end
 
+  @tag :phase_d_security_regression
   test "reviewed candidate-pass/base-fail evidence is detached, one-shot, and cleaned", %{
     tmp_dir: tmp_dir
   } do
@@ -1538,6 +1539,7 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
     assert beam_result.base.test_failures == 1
   end
 
+  @tag :phase_d_security_regression
   test "post-review HEAD replacement and selected-test blob replacement are denied before spawn",
        %{tmp_dir: tmp_dir} do
     fixture = leased_project(tmp_dir, valid_module())

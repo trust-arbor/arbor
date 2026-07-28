@@ -52,6 +52,21 @@ jobs:
           ./bin/mix test apps/arbor_commands/test/mix/tasks/arbor.coding.check_production_path_test.exs --timeout 120000
           ./bin/mix test apps/arbor_commands/test/arbor/commands/coding_readiness_record_replay_canary_test.exs --timeout 540000
 
+      - name: Phase D coding-DOT maintainability (hermetic)
+        run: |
+          ./bin/mix test apps/arbor_orchestrator/test/arbor/orchestrator/coding_plan/semantic_preflight_test.exs --timeout 120000
+          ./bin/mix test apps/arbor_orchestrator/test/arbor/orchestrator/coding_plan/compiler_test.exs --timeout 120000
+          ./bin/mix test apps/arbor_orchestrator/test/arbor/orchestrator/coding_plan/facade_test.exs --timeout 120000
+          ./bin/mix test apps/arbor_orchestrator/test/arbor/orchestrator/coding_plan/action_catalog_test.exs --timeout 120000
+          ./bin/mix test apps/arbor_orchestrator/test/arbor/orchestrator/coding_plan/execution_manifest_security_regression_test.exs --timeout 120000
+          ./bin/mix test apps/arbor_orchestrator/test/arbor/orchestrator/coding_plan/profiles_test.exs --timeout 120000
+          ./bin/mix test apps/arbor_orchestrator/test/arbor/orchestrator/coding_plan/validation_program_test.exs --timeout 120000
+          ./bin/mix test apps/arbor_orchestrator/test/arbor/orchestrator/coding_plan/outcome_mapper_test.exs --timeout 120000
+          ./bin/mix test apps/arbor_security/test/arbor/security/uri_registry_test.exs --timeout 120000
+          ./bin/mix test apps/arbor_actions/test/arbor/actions/security/uri_inventory_test.exs --timeout 120000
+          ./bin/mix test apps/arbor_orchestrator/test/arbor/orchestrator/coding_security_regression_pipeline_test.exs --timeout 120000
+          ./bin/mix test apps/arbor_actions/test/arbor/actions/coding/security_regression_test.exs --only phase_d_security_regression --timeout 180000
+
       - name: Setup test database
         run: mix ecto.create -r Arbor.Persistence.Repo && mix ecto.migrate -r Arbor.Persistence.Repo
         continue-on-error: true

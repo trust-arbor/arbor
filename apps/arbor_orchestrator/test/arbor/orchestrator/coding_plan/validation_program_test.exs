@@ -95,10 +95,12 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationProgramTest do
         %{},
         Map.delete(default, "action"),
         Map.delete(default, "context_keys"),
+        Map.delete(default, "timeout_budget_param"),
         Map.put(default, "context_keys", ["workspace_id", "path"]),
         Map.put(default, "result_adapter", "cross_app_v1"),
         Map.put(default, "result_adapter", "unreviewed_adapter"),
         Map.put(default, "static_parameters", %{}),
+        Map.put(default, "timeout_budget_param", "stage_timeout"),
         Map.put(default, "timeout_budget_source", "unreviewed.budget"),
         Map.put(default, "extra_authority", true)
       ]
@@ -113,6 +115,56 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationProgramTest do
                  Map.put(default, "action", "unreviewed_validate"),
                  %{"wall_clock_ms" => 900_000}
                )
+    end
+
+    test "resolves canonical action, adapter, context keys, and timeout budget param from Profiles" do
+      for profile_id <- @executable_ids do
+        assert {:ok, profile} = Profiles.fetch_executable(profile_id)
+        strategy = profile["validation_strategy"]
+
+        assert is_binary(strategy["action"])
+        assert is_binary(strategy["result_adapter"])
+        assert is_list(strategy["context_keys"]) and strategy["context_keys"] != []
+        assert strategy["timeout_budget_param"] in ["timeout", "stage_timeout"]
+
+        assert {:ok, program} =
+                 ValidationProgram.build(strategy, %{"wall_clock_ms" => 900_000})
+
+        # ValidationProgram must not invent ownership fields; it only materializes
+        # the executable profile's reviewed declarations into a closed program.
+        assert program["profile_id"] == profile["id"]
+        assert program["action"] == strategy["action"]
+        assert program["result_adapter"] == strategy["result_adapter"]
+        assert program["context_keys"] == strategy["context_keys"]
+        assert :ok = ValidationProgram.validate(program)
+
+        assert {:ok, attrs} = ValidationProgram.project_onto(program, %{})
+        assert attrs["action"] == strategy["action"]
+        assert attrs["context_keys"] == Enum.join(strategy["context_keys"], ",")
+        assert attrs["timeout_budget.param"] == strategy["timeout_budget_param"]
+      end
+    end
+
+    test "rejects cross-profile and field-level ownership drift" do
+      default = strategy!("default")
+      security = strategy!("security_regression")
+
+      drifted = [
+        Map.put(default, "action", security["action"]),
+        Map.put(default, "result_adapter", security["result_adapter"]),
+        Map.put(default, "context_keys", security["context_keys"]),
+        Map.put(default, "timeout_budget_param", security["timeout_budget_param"]),
+        Map.put(security, "timeout_budget_param", "timeout"),
+        Map.put(security, "context_keys", ["workspace_id"])
+      ]
+
+      for strategy <- drifted do
+        assert {:error, reason} =
+                 ValidationProgram.build(strategy, %{"wall_clock_ms" => 900_000})
+
+        assert reason == :invalid_validation_strategy or
+                 match?({:unsupported_validation_strategy, _}, reason)
+      end
     end
 
     test "rejects malformed reviewed budget inputs" do
@@ -183,11 +235,10 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationProgramTest do
         assert attrs["target"] == "action"
         assert attrs["max_retries"] == "0"
 
+        assert {:ok, profile} = Profiles.fetch_executable(profile_id)
+
         assert attrs["timeout_budget.param"] ==
-                 if(profile_id in ["cross_app", "security_regression"],
-                   do: "stage_timeout",
-                   else: "timeout"
-                 )
+                 profile["validation_strategy"]["timeout_budget_param"]
 
         refute Map.has_key?(attrs, "param.unreviewed")
         refute Map.has_key?(attrs, "arg.legacy")
@@ -201,6 +252,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationProgramTest do
       invalid_programs = [
         Map.put(program, "version", 2),
         Map.put(program, "profile_id", "cross_app"),
+        Map.put(program, "action", "coding_security_regression_validate"),
         Map.put(program, "result_adapter", "cross_app_v1"),
         Map.put(program, "context_keys", ["workspace_id"]),
         put_in(program, ["static_parameters", "timeout"], 600_001),

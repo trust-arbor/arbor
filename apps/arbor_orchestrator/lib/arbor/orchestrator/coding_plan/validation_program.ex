@@ -5,31 +5,16 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationProgram do
   A validation program is pure JSON-clean data. It selects one existing Jido
   action and describes its context bindings, result adapter, and static
   parameters; it does not execute or adapt action results.
+
+  Executable CodingPlan profile descriptors are the sole owner of each
+  validation action, result adapter, context-key set, and timeout-budget
+  parameter. This module resolves and validates those fields from the
+  canonical profile and fails closed on any drift.
   """
 
   alias Arbor.Orchestrator.CodingPlan.Profiles
 
   @version 1
-  @selection_by_profile %{
-    "cross_app" => %{
-      "action" => "coding_cross_app_validate",
-      "result_adapter" => "cross_app_v1"
-    },
-    "default" => %{
-      "action" => "mix_compile",
-      "result_adapter" => "mix_compile_v1"
-    },
-    "security_regression" => %{
-      "action" => "coding_security_regression_validate",
-      "result_adapter" => "security_regression_v1"
-    }
-  }
-  @profile_ids_by_action Map.new(@selection_by_profile, fn {profile_id, selection} ->
-                           {selection["action"], profile_id}
-                         end)
-  @result_adapters @selection_by_profile
-                   |> Map.values()
-                   |> Enum.map(& &1["result_adapter"])
   @descriptor_keys Enum.sort(~w[
                      action
                      context_keys
@@ -92,12 +77,14 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationProgram do
   @spec project_onto(descriptor(), map()) ::
           {:ok, %{String.t() => term()}} | {:error, :invalid_validation_program}
   def project_onto(program, attrs) when is_map(attrs) and not is_struct(attrs) do
-    with :ok <- validate(program) do
+    with :ok <- validate(program),
+         {:ok, strategy} <- canonical_strategy(program["profile_id"]),
+         param when is_binary(param) <- strategy["timeout_budget_param"] do
       controlled_attrs =
         %{
           "action" => program["action"],
           "context_keys" => Enum.join(program["context_keys"], ","),
-          "output_prefix" => result_prefix(program["result_adapter"])
+          "output_prefix" => "validation"
         }
         |> put_static_parameters(program["static_parameters"])
 
@@ -106,9 +93,11 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationProgram do
         |> Enum.reject(fn {key, _value} -> static_parameter_attr?(key) end)
         |> Map.new()
         |> Map.merge(controlled_attrs)
-        |> Map.put("timeout_budget.param", timeout_budget_param(program["profile_id"]))
+        |> Map.put("timeout_budget.param", param)
 
       {:ok, attrs}
+    else
+      _other -> {:error, :invalid_validation_program}
     end
   end
 
@@ -120,15 +109,16 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationProgram do
     with true <- Enum.sort(Map.keys(program)) == @descriptor_keys,
          @version <- program["version"],
          profile_id when is_binary(profile_id) <- program["profile_id"],
+         {:ok, strategy} <- canonical_strategy(profile_id),
          action when is_binary(action) <- program["action"],
-         ^profile_id <- Map.get(@profile_ids_by_action, action),
+         ^action <- strategy["action"],
          adapter when is_binary(adapter) <- program["result_adapter"],
-         true <- valid_selection?(profile_id, action, adapter),
+         ^adapter <- strategy["result_adapter"],
          context_keys when is_list(context_keys) <- program["context_keys"],
-         true <- valid_context_keys?(profile_id, context_keys),
+         true <- context_keys == strategy["context_keys"],
          static_parameters when is_map(static_parameters) and not is_struct(static_parameters) <-
            program["static_parameters"],
-         true <- valid_static_parameters?(profile_id, static_parameters),
+         true <- valid_static_parameters?(strategy, static_parameters),
          {:ok, _encoded} <- Jason.encode(program) do
       :ok
     else
@@ -139,7 +129,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationProgram do
   def validate(_program), do: {:error, :invalid_validation_program}
 
   defp profile_id_for_strategy(%{"action" => action}) when is_binary(action) do
-    case Map.fetch(@profile_ids_by_action, action) do
+    case executable_profile_id_for_action(action) do
       {:ok, profile_id} -> {:ok, profile_id}
       :error -> {:error, {:unsupported_validation_strategy, action}}
     end
@@ -149,6 +139,17 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationProgram do
     do: {:error, {:unsupported_validation_strategy, enforcement}}
 
   defp profile_id_for_strategy(_strategy), do: {:error, :invalid_validation_strategy}
+
+  defp executable_profile_id_for_action(action) do
+    Profiles.all()
+    |> Enum.filter(& &1["executable"])
+    |> Enum.find_value(:error, fn profile ->
+      case profile["validation_strategy"] do
+        %{"action" => ^action} -> {:ok, profile["id"]}
+        _other -> nil
+      end
+    end)
+  end
 
   defp canonical_strategy(profile_id) do
     case Profiles.fetch_executable(profile_id) do
@@ -173,72 +174,54 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationProgram do
   defp maybe_put_test_stage_timeout(parameters, timeout_ms),
     do: Map.put(parameters, "test_stage_timeout", timeout_ms)
 
-  defp timeout_budget_param(profile_id)
-       when profile_id in ["cross_app", "security_regression"],
-       do: "stage_timeout"
+  defp valid_static_parameters?(strategy, params)
+       when is_map(strategy) and is_map(params) and not is_struct(params) do
+    base = strategy["static_parameters"]
 
-  defp timeout_budget_param(_profile_id), do: "timeout"
+    if is_map(base) and not is_struct(base) do
+      timeout_ms = Map.get(params, "timeout")
+      has_test_stage? = Map.has_key?(strategy, "test_stage_timeout_max_ms")
 
-  defp valid_context_keys?("default", context_keys),
-    do: context_keys == ["path", "workspace_id"]
+      if has_test_stage? do
+        test_stage_timeout_ms = Map.get(params, "test_stage_timeout")
+        expected_keys = MapSet.new(Map.keys(base) ++ ["timeout", "test_stage_timeout"])
 
-  defp valid_context_keys?("cross_app", context_keys), do: context_keys == ["workspace_id"]
+        MapSet.new(Map.keys(params)) == expected_keys and
+          Map.drop(params, ["timeout", "test_stage_timeout"]) == base and
+          valid_compound_timeouts?(strategy, timeout_ms, test_stage_timeout_ms)
+      else
+        expected_keys = MapSet.new(Map.keys(base) ++ ["timeout"])
 
-  defp valid_context_keys?("security_regression", context_keys),
-    do: context_keys == ["review_attestation_id"]
-
-  defp valid_context_keys?(_profile_id, _context_keys), do: false
-
-  defp valid_selection?(profile_id, action, adapter) do
-    Map.get(@selection_by_profile, profile_id) == %{
-      "action" => action,
-      "result_adapter" => adapter
-    }
-  end
-
-  defp valid_static_parameters?(
-         "default",
-         %{"timeout" => timeout_ms, "warnings_as_errors" => true} = params
-       )
-       when map_size(params) == 2,
-       do: valid_timeout?("default", timeout_ms)
-
-  defp valid_static_parameters?("security_regression", %{"timeout" => timeout_ms} = params)
-       when map_size(params) == 1,
-       do: valid_timeout?("security_regression", timeout_ms)
-
-  defp valid_static_parameters?(
-         "cross_app",
-         %{"test_stage_timeout" => test_stage_timeout_ms, "timeout" => timeout_ms} = params
-       )
-       when map_size(params) == 2 do
-    case canonical_strategy("cross_app") do
-      {:ok, strategy} ->
-        timeout_max_ms = strategy["timeout_max_ms"]
-        test_stage_timeout_max_ms = strategy["test_stage_timeout_max_ms"]
-
-        is_integer(timeout_ms) and timeout_ms > 0 and timeout_ms <= timeout_max_ms and
-          is_integer(test_stage_timeout_ms) and test_stage_timeout_ms >= timeout_ms and
-          test_stage_timeout_ms <= test_stage_timeout_max_ms and
-          (timeout_ms == timeout_max_ms or test_stage_timeout_ms == timeout_ms)
-
-      _error ->
-        false
+        MapSet.new(Map.keys(params)) == expected_keys and
+          Map.drop(params, ["timeout"]) == base and
+          valid_timeout?(strategy, timeout_ms)
+      end
+    else
+      false
     end
   end
 
-  defp valid_static_parameters?(_profile_id, _parameters), do: false
+  defp valid_static_parameters?(_strategy, _params), do: false
 
-  defp valid_timeout?(profile_id, timeout_ms) when is_integer(timeout_ms) and timeout_ms > 0 do
-    case canonical_strategy(profile_id) do
-      {:ok, strategy} -> timeout_ms <= strategy["timeout_max_ms"]
-      _error -> false
-    end
+  defp valid_timeout?(strategy, timeout_ms)
+       when is_integer(timeout_ms) and timeout_ms > 0 do
+    timeout_max_ms = strategy["timeout_max_ms"]
+    is_integer(timeout_max_ms) and timeout_max_ms > 0 and timeout_ms <= timeout_max_ms
   end
 
-  defp valid_timeout?(_profile_id, _timeout_ms), do: false
+  defp valid_timeout?(_strategy, _timeout_ms), do: false
 
-  defp result_prefix(adapter) when adapter in @result_adapters, do: "validation"
+  defp valid_compound_timeouts?(strategy, timeout_ms, test_stage_timeout_ms) do
+    timeout_max_ms = strategy["timeout_max_ms"]
+    test_stage_timeout_max_ms = strategy["test_stage_timeout_max_ms"]
+
+    is_integer(timeout_ms) and timeout_ms > 0 and is_integer(timeout_max_ms) and
+      timeout_max_ms > 0 and timeout_ms <= timeout_max_ms and
+      is_integer(test_stage_timeout_ms) and test_stage_timeout_ms >= timeout_ms and
+      is_integer(test_stage_timeout_max_ms) and test_stage_timeout_max_ms > 0 and
+      test_stage_timeout_ms <= test_stage_timeout_max_ms and
+      (timeout_ms == timeout_max_ms or test_stage_timeout_ms == timeout_ms)
+  end
 
   defp put_static_parameters(attrs, parameters) do
     parameters

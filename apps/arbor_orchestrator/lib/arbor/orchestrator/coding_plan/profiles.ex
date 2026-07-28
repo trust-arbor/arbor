@@ -1906,6 +1906,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                   "context_keys" => ["path", "workspace_id"],
                   "result_adapter" => "mix_compile_v1",
                   "static_parameters" => %{"warnings_as_errors" => true},
+                  "timeout_budget_param" => "timeout",
                   "timeout_budget_source" => "budgets.wall_clock_ms",
                   "timeout_max_ms" => @spawn_capable_max_timeout_ms
                 },
@@ -1932,6 +1933,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                   "context_keys" => ["review_attestation_id"],
                   "result_adapter" => "security_regression_v1",
                   "static_parameters" => %{},
+                  "timeout_budget_param" => "stage_timeout",
                   "timeout_budget_source" => "budgets.wall_clock_ms",
                   "timeout_max_ms" => @spawn_capable_max_timeout_ms,
                   "two_revision" => true
@@ -2028,6 +2030,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                   "context_keys" => ["workspace_id"],
                   "result_adapter" => "cross_app_v1",
                   "static_parameters" => %{},
+                  "timeout_budget_param" => "stage_timeout",
                   "timeout_budget_source" => "budgets.wall_clock_ms",
                   # Intensive Shell profile: per-op child ceiling only.
                   "timeout_max_ms" => @spawn_capable_intensive_max_timeout_ms,
@@ -2083,12 +2086,68 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
 
   @profiles_by_id Map.new(@profiles, &{&1["id"], &1})
   @registry_profile_ids Enum.map(@profiles, & &1["id"])
+  @timeout_budget_params MapSet.new(["timeout", "stage_timeout"])
 
   unless Enum.sort(@registry_profile_ids) == @contract_profile_ids do
     raise CompileError,
       description:
         "coding profile registry drift: contract=#{inspect(@contract_profile_ids)} " <>
           "registry=#{inspect(@registry_profile_ids)}"
+  end
+
+  @executable_validation_declarations @profiles
+                                      |> Enum.filter(& &1["executable"])
+                                      |> Enum.map(fn profile ->
+                                        strategy = profile["validation_strategy"]
+
+                                        owned? =
+                                          is_map(strategy) and
+                                            is_binary(strategy["action"]) and
+                                            is_binary(strategy["result_adapter"]) and
+                                            is_list(strategy["context_keys"]) and
+                                            strategy["context_keys"] != [] and
+                                            Enum.all?(strategy["context_keys"], &is_binary/1) and
+                                            is_map(strategy["static_parameters"]) and
+                                            not is_struct(strategy["static_parameters"]) and
+                                            MapSet.member?(
+                                              @timeout_budget_params,
+                                              strategy["timeout_budget_param"]
+                                            )
+
+                                        {profile["id"], strategy["action"], owned?}
+                                      end)
+
+  unless Enum.all?(@executable_validation_declarations, fn {_id, _action, owned?} ->
+           owned?
+         end) do
+    bad_ids =
+      @executable_validation_declarations
+      |> Enum.reject(fn {_id, _action, owned?} -> owned? end)
+      |> Enum.map(&elem(&1, 0))
+
+    raise CompileError,
+      description:
+        "executable coding profiles must own action, result_adapter, context_keys, " <>
+          "static_parameters, and timeout_budget_param: #{inspect(bad_ids)}"
+  end
+
+  @executable_validation_actions Enum.map(
+                                   @executable_validation_declarations,
+                                   &elem(&1, 1)
+                                 )
+
+  unless Enum.uniq(@executable_validation_actions) == @executable_validation_actions do
+    duplicate_actions =
+      @executable_validation_actions
+      |> Enum.frequencies()
+      |> Enum.filter(fn {_action, count} -> count > 1 end)
+      |> Enum.map(&elem(&1, 0))
+      |> Enum.sort()
+
+    raise CompileError,
+      description:
+        "executable coding profile validation actions must be unique: " <>
+          inspect(duplicate_actions)
   end
 
   @type json_value ::

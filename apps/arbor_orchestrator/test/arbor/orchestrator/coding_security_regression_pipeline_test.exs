@@ -2,10 +2,11 @@ defmodule Arbor.Orchestrator.CodingSecurityRegressionPipelineTest do
   use ExUnit.Case, async: false
 
   alias Arbor.Contracts.Coding.Plan
-  alias Arbor.Orchestrator.CodingPlan.{ActionCatalog, Compiler}
+  alias Arbor.Orchestrator.CodingPlan.{ActionCatalog, BudgetPolicy, Compiler}
 
   @moduletag :fast
   @moduletag :coding_change_pipeline
+  @fixture_run_deadline_unix_ms 4_102_444_800_000
 
   @action_modules [
     Arbor.Actions.Acp.StartSession,
@@ -522,6 +523,7 @@ defmodule Arbor.Orchestrator.CodingSecurityRegressionPipelineTest do
 
     assert validator_args == %{
              "review_attestation_id" => "attestation-1",
+             "stage_timeout" => fixture_budget_values(900_000)["coding_budget.validation_ms"],
              "timeout" => 600_000
            }
 
@@ -716,8 +718,10 @@ defmodule Arbor.Orchestrator.CodingSecurityRegressionPipelineTest do
     initial_values =
       Map.merge(compilation.initial_values, %{
         "session.agent_id" => "agent-security-fixture",
-        "session.task_id" => "task-security-fixture"
+        "session.task_id" => "task-security-fixture",
+        "session.run_deadline_unix_ms" => @fixture_run_deadline_unix_ms
       })
+      |> Map.merge(fixture_budget_values(plan.budgets["wall_clock_ms"]))
       |> Map.merge(initial_overrides)
 
     result =
@@ -733,6 +737,14 @@ defmodule Arbor.Orchestrator.CodingSecurityRegressionPipelineTest do
     Process.put(:coding_security_validation_captures, snapshot.validation_captures)
     calls = snapshot.calls
     {result, calls}
+  end
+
+  defp fixture_budget_values(wall_clock_ms) do
+    {:ok, allocation} = BudgetPolicy.allocate(wall_clock_ms, wall_clock_ms)
+
+    Map.new(allocation, fn {key, value} ->
+      {"coding_budget.#{key}", value}
+    end)
   end
 
   defp calls_for(calls, action), do: Enum.filter(calls, fn {name, _args} -> name == action end)

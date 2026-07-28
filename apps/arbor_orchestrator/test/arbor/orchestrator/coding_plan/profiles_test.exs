@@ -41,6 +41,27 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
       assert Profiles.known_ids() == Plan.profile_ids()
     end
 
+    test "executable profiles own complete action-unique validation declarations" do
+      strategies =
+        for profile_id <- @executable_ids do
+          assert {:ok, profile} = Profiles.fetch_executable(profile_id)
+          profile["validation_strategy"]
+        end
+
+      actions = Enum.map(strategies, & &1["action"])
+      assert actions == Enum.uniq(actions)
+
+      for strategy <- strategies do
+        assert is_binary(strategy["action"])
+        assert is_binary(strategy["result_adapter"])
+        assert is_list(strategy["context_keys"]) and strategy["context_keys"] != []
+        assert Enum.all?(strategy["context_keys"], &is_binary/1)
+        assert is_map(strategy["static_parameters"])
+        refute is_struct(strategy["static_parameters"])
+        assert strategy["timeout_budget_param"] in ["timeout", "stage_timeout"]
+      end
+    end
+
     test "executable profiles pin repair prompt executable attrs as a subset" do
       expected_attrs = %{
         "type" => "transform",
@@ -95,6 +116,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
                "context_keys" => ["path", "workspace_id"],
                "result_adapter" => "mix_compile_v1",
                "static_parameters" => %{"warnings_as_errors" => true},
+               "timeout_budget_param" => "timeout",
                "timeout_budget_source" => "budgets.wall_clock_ms",
                "timeout_max_ms" => 600_000
              }
@@ -127,6 +149,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
                "context_keys" => ["review_attestation_id"],
                "result_adapter" => "security_regression_v1",
                "static_parameters" => %{},
+               "timeout_budget_param" => "stage_timeout",
                "timeout_budget_source" => "budgets.wall_clock_ms",
                "timeout_max_ms" => 600_000,
                "two_revision" => true
@@ -222,6 +245,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
                "context_keys" => ["workspace_id"],
                "result_adapter" => "cross_app_v1",
                "static_parameters" => %{},
+               "timeout_budget_param" => "stage_timeout",
                "timeout_budget_source" => "budgets.wall_clock_ms",
                "timeout_max_ms" => intensive_ceiling,
                "test_stage_timeout_budget_source" => "budgets.wall_clock_ms",
