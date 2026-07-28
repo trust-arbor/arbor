@@ -112,9 +112,11 @@ defmodule Arbor.Security.UriRegistry do
     "arbor://agent/task/steer",
     "arbor://agent/task/adopt",
 
-    # Coding reconciliation is read-only in this slice. Apply authority is
-    # intentionally absent until source-owned CAS identities exist.
+    # Coding reconciliation read path. Source-owned CAS apply is registered
+    # for validation_resource only; global Orchestrator/Mix --apply stays
+    # disabled until every source resource kind has equivalent owner-side proof.
     "arbor://coding/reconciliation/read",
+    "arbor://coding/reconciliation/apply",
 
     # Comms facade
     "arbor://comms/send",

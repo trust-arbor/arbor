@@ -76,14 +76,20 @@ defmodule Arbor.Actions do
   alias Arbor.Actions.Coding.{DesignCheckpoint, Workspace, WorkspaceLeaseRegistry}
   alias Arbor.Actions.Coding.CodingResourceInventory
   alias Arbor.Actions.Coding.ToolchainIdentityCore
+  alias Arbor.Actions.Config
   alias Arbor.Actions.Egress
   alias Arbor.Actions.TaintEnforcement
   alias Arbor.Actions.TaintEvents
   alias Arbor.Common.{SafePath, SensitiveData}
+  alias Arbor.Contracts.Coding.ReconciliationDecision
   alias Arbor.Contracts.Security.CapabilityProfile
   alias Arbor.Contracts.Security.Classification
   alias Arbor.Contracts.Security.{AuthContext, SignedRequest}
   alias Arbor.Signals
+
+  @max_reconciliation_principal_bytes 256
+  @validation_resource_id_re ~r/\Avalidation_[0-9a-f]{32}\z/
+  @reconciliation_apply_uri_prefix "arbor://coding/reconciliation/apply/validation_resource/"
 
   @approval_preview_limit 500
   @reviewed_pipelines %{
@@ -235,6 +241,170 @@ defmodule Arbor.Actions do
 
   def coding_resource_inventory(_opts),
     do: {:error, :invalid_coding_resource_inventory_options}
+
+  @doc """
+  Apply one source-owned coding reconciliation decision for validation resources.
+
+  Authority is an independently verified `%AuthContext{}` plus an exact
+  capability for
+  `arbor://coding/reconciliation/apply/validation_resource/<resource_id>`.
+  Reconciliation decision evidence is never bearer authority. This slice
+  supports only `validation_resource` + `settle` + `terminal_active_resource`.
+  """
+  @spec apply_coding_reconciliation_decision(AuthContext.t(), map() | keyword() | term()) ::
+          {:ok, map()} | {:error, term()}
+  def apply_coding_reconciliation_decision(caller_auth, decision)
+
+  def apply_coding_reconciliation_decision(caller_auth, decision) do
+    with {:ok, principal_id, signed_request} <- admit_reconciliation_caller_auth(caller_auth),
+         {:ok, decision_map} <- normalize_reconciliation_decision(decision),
+         :ok <- require_supported_reconciliation_decision(decision_map),
+         :ok <- require_consistent_reconciliation_identity(decision_map),
+         :ok <- require_canonical_validation_resource_id(decision_map["resource_id"]),
+         uri = @reconciliation_apply_uri_prefix <> decision_map["resource_id"],
+         :ok <- authorize_reconciliation_apply(principal_id, uri, signed_request) do
+      WorkspaceLeaseRegistry.compare_and_settle_validation_resource(
+        %{
+          "resource_id" => decision_map["resource_id"],
+          "expected_identity" => decision_map["expected_identity"]
+        },
+        server: Config.workspace_lease_registry_server()
+      )
+    end
+  rescue
+    _ -> {:error, :reconciliation_apply_failed}
+  catch
+    _, _ -> {:error, :reconciliation_apply_failed}
+  end
+
+  defp admit_reconciliation_caller_auth(
+         %AuthContext{
+           identity_verified: true,
+           principal_id: principal_id,
+           signed_request: %SignedRequest{agent_id: principal_id} = signed_request
+         }
+       )
+       when is_binary(principal_id) do
+    if valid_reconciliation_principal_id?(principal_id) do
+      {:ok, principal_id, signed_request}
+    else
+      {:error, :invalid_reconciliation_caller_auth}
+    end
+  end
+
+  defp admit_reconciliation_caller_auth(_caller_auth),
+    do: {:error, :invalid_reconciliation_caller_auth}
+
+  defp valid_reconciliation_principal_id?(value)
+       when is_binary(value) and byte_size(value) > 0 and
+              byte_size(value) <= @max_reconciliation_principal_bytes do
+    String.valid?(value) and String.trim(value) != "" and not String.contains?(value, <<0>>)
+  end
+
+  defp valid_reconciliation_principal_id?(_value), do: false
+
+  defp normalize_reconciliation_decision(%ReconciliationDecision{} = decision) do
+    normalize_reconciliation_decision(ReconciliationDecision.to_map(decision))
+  end
+
+  defp normalize_reconciliation_decision(attrs) when is_map(attrs) or is_list(attrs) do
+    case ReconciliationDecision.new(attrs) do
+      {:ok, decision} -> {:ok, ReconciliationDecision.to_map(decision)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp normalize_reconciliation_decision(_attrs),
+    do: {:error, {:invalid_reconciliation_decision, :malformed}}
+
+  defp require_supported_reconciliation_decision(%{
+         "resource_type" => "validation_resource",
+         "decision" => "settle",
+         "reason" => "terminal_active_resource"
+       }),
+       do: :ok
+
+  defp require_supported_reconciliation_decision(decision_map) when is_map(decision_map) do
+    {:error,
+     {:unsupported_reconciliation_apply,
+      %{
+        "resource_type" => Map.get(decision_map, "resource_type"),
+        "decision" => Map.get(decision_map, "decision"),
+        "reason" => Map.get(decision_map, "reason")
+      }}}
+  end
+
+  defp require_consistent_reconciliation_identity(%{
+         "resource_type" => resource_type,
+         "resource_id" => resource_id,
+         "task_id" => task_id,
+         "principal_id" => principal_id,
+         "expected_identity" => expected
+       })
+       when is_map(expected) do
+    if Map.get(expected, "resource_type") == resource_type and
+         Map.get(expected, "resource_id") == resource_id and
+         Map.get(expected, "task_id") == task_id and
+         Map.get(expected, "principal_id") == principal_id do
+      :ok
+    else
+      {:error, :inconsistent_reconciliation_decision_identity}
+    end
+  end
+
+  defp require_consistent_reconciliation_identity(_decision),
+    do: {:error, :inconsistent_reconciliation_decision_identity}
+
+  defp require_canonical_validation_resource_id(resource_id)
+       when is_binary(resource_id) do
+    if Regex.match?(@validation_resource_id_re, resource_id) and
+         not String.contains?(resource_id, "/") do
+      :ok
+    else
+      {:error, :invalid_validation_resource_id}
+    end
+  end
+
+  defp require_canonical_validation_resource_id(_resource_id),
+    do: {:error, :invalid_validation_resource_id}
+
+  defp authorize_reconciliation_apply(principal_id, uri, signed_request) do
+    security = Config.security_module()
+
+    if is_atom(security) and Code.ensure_loaded?(security) and
+         function_exported?(security, :authorize, 4) do
+      result =
+        try do
+          security.authorize(principal_id, uri, :execute,
+            verify_identity: false,
+            signed_request: signed_request
+          )
+        rescue
+          error -> {:unexpected_authz_result, error}
+        catch
+          kind, reason -> {:unexpected_authz_result, {kind, reason}}
+        end
+
+      case result do
+        {:ok, :authorized} ->
+          :ok
+
+        {:ok, :pending_approval, proposal_id} ->
+          {:error, {:unauthorized, {:pending_approval, proposal_id}}}
+
+        {:error, reason} ->
+          {:error, {:unauthorized, reason}}
+
+        {:unexpected_authz_result, detail} ->
+          {:error, {:unauthorized, {:unexpected_authz_result, detail}}}
+
+        other ->
+          {:error, {:unauthorized, {:unexpected_authz_result, other}}}
+      end
+    else
+      {:error, :reconciliation_security_unavailable}
+    end
+  end
 
   @doc """
   Reactivate one retained workspace using exact task and principal lineage.

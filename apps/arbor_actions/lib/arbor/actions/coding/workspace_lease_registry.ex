@@ -511,6 +511,37 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   end
 
   @doc false
+  @spec compare_and_settle_validation_resource(map(), keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def compare_and_settle_validation_resource(decision_fields, opts \\ [])
+
+  def compare_and_settle_validation_resource(decision_fields, opts)
+      when is_map(decision_fields) and is_list(opts) do
+    resource_id =
+      Map.get(decision_fields, "resource_id") || Map.get(decision_fields, :resource_id)
+
+    expected_identity =
+      Map.get(decision_fields, "expected_identity") ||
+        Map.get(decision_fields, :expected_identity)
+
+    if is_binary(resource_id) and is_map(expected_identity) and not is_struct(expected_identity) do
+      call(
+        {:compare_and_settle_validation_resource,
+         %{
+           "resource_id" => resource_id,
+           "expected_identity" => expected_identity
+         }},
+        opts
+      )
+    else
+      {:error, :invalid_reconciliation_settle_fields}
+    end
+  end
+
+  def compare_and_settle_validation_resource(_decision_fields, _opts),
+    do: {:error, :invalid_reconciliation_settle_fields}
+
+  @doc false
   @spec validation_resources(String.t(), map() | keyword()) ::
           {:ok, [map()]} | {:error, term()}
   def validation_resources(workspace_id, opts \\ %{}) when is_binary(workspace_id) do
@@ -1103,6 +1134,64 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
           {:error, reason} ->
             {:reply, {:error, reason}, state}
         end
+    end
+  end
+
+  def handle_call(
+        {:compare_and_settle_validation_resource, fields},
+        _from,
+        state
+      )
+      when is_map(fields) do
+    resource_id = Map.get(fields, "resource_id")
+    expected_identity = Map.get(fields, "expected_identity")
+
+    if is_binary(resource_id) and is_map(expected_identity) and not is_struct(expected_identity) do
+      case Map.fetch(state.validation_resources, resource_id) do
+        :error ->
+          {:reply, {:ok, reconciliation_already_absent_receipt(resource_id)}, state}
+
+        {:ok, resource} ->
+          case WorkspaceReconciliationProjection.validation_comparison_identity(
+                 state,
+                 resource_id
+               ) do
+            {:ok, ^expected_identity} ->
+              {result, next_state} = do_release_validation_resource(state, resource)
+
+              next_state =
+                complete_owner_death_validation_cleanup(
+                  next_state,
+                  resource.workspace_id,
+                  result
+                )
+
+              case result do
+                {:ok, _release} ->
+                  {:reply, {:ok, reconciliation_settled_receipt(resource_id)}, next_state}
+
+                {:error, reason} ->
+                  {:reply, {:error, reason}, next_state}
+              end
+
+            {:ok, current_identity} ->
+              {:reply,
+               {:error,
+                {:reconciliation_identity_conflict,
+                 %{
+                   "resource_id" => resource_id,
+                   "current_identity" => current_identity
+                 }}}, state}
+
+            {:error, :current_identity_unavailable} ->
+              {:reply, {:error, :current_identity_unavailable}, state}
+
+            :absent ->
+              {:reply, {:ok, reconciliation_already_absent_receipt(resource_id)}, state}
+          end
+      end
+    else
+      {:reply, {:error, :invalid_reconciliation_settle_fields}, state}
     end
   end
 
@@ -2297,6 +2386,27 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       {:error, state} ->
         {{:error, :validation_resource_cleanup_failed}, state}
     end
+  end
+
+  defp reconciliation_already_absent_receipt(resource_id) do
+    %{
+      "schema_version" => 1,
+      "resource_type" => "validation_resource",
+      "resource_id" => resource_id,
+      "outcome" => "already_absent",
+      "active" => false
+    }
+  end
+
+  defp reconciliation_settled_receipt(resource_id) do
+    %{
+      "schema_version" => 1,
+      "resource_type" => "validation_resource",
+      "resource_id" => resource_id,
+      "outcome" => "settled",
+      "active" => false,
+      "status" => "removed"
+    }
   end
 
   defp cleanup_workspace_validation_resources(state, workspace_id) do

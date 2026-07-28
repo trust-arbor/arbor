@@ -24,6 +24,31 @@ defmodule Arbor.Actions.Coding.WorkspaceReconciliationProjection do
   }
 
   @doc false
+  @spec validation_comparison_identity(map(), String.t()) ::
+          {:ok, map()} | {:error, :current_identity_unavailable} | :absent
+  def validation_comparison_identity(state, resource_id)
+      when is_map(state) and is_binary(resource_id) do
+    case Map.get(Map.get(state, :validation_resources, %{}), resource_id) do
+      nil ->
+        :absent
+
+      record when is_map(record) ->
+        workspace_join = workspace_join_index(state)
+
+        case project_validation(record, workspace_join, state) do
+          {:ok, resource} -> {:ok, expected_identity(resource)}
+          :quarantine -> {:error, :current_identity_unavailable}
+        end
+
+      _other ->
+        {:error, :current_identity_unavailable}
+    end
+  end
+
+  def validation_comparison_identity(_state, _resource_id),
+    do: {:error, :current_identity_unavailable}
+
+  @doc false
   @spec from_registry_state(map(), String.t() | nil, String.t() | nil, pos_integer()) :: map()
   def from_registry_state(state, task_id, principal_id, max_items)
       when is_map(state) and is_integer(max_items) and max_items > 0 do
@@ -226,6 +251,33 @@ defmodule Arbor.Actions.Coding.WorkspaceReconciliationProjection do
   end
 
   defp project_validation(_record, _workspace_join, _state), do: :quarantine
+
+  defp workspace_join_index(state) do
+    {live, _live_quarantine} = project_collection(state, :leases, :live)
+    {retained, _retained_quarantine} = project_collection(state, :retained_by_id, :retained)
+    {blockers, _blocker_quarantine} = project_collection(state, :retention_blockers, :retained)
+    join_index(live ++ retained ++ blockers)
+  end
+
+  defp expected_identity(resource) when is_map(resource) do
+    retry_state = resource["retry_state"] || %{}
+
+    %{
+      "resource_type" => resource["resource_type"],
+      "resource_id" => resource["resource_id"],
+      "task_id" => resource["task_id"],
+      "principal_id" => resource["principal_id"],
+      "lifecycle" => resource["lifecycle"],
+      "active" => resource["active"],
+      "ownership" => resource["ownership"],
+      "branch_provenance" => resource["branch_provenance"],
+      "cleanup_armed" => resource["cleanup_armed"] || false,
+      "dormant" => resource["dormant"] || retry_state["dormant"] || false,
+      "retry_count" => retry_state["count"] || 0,
+      "retry_limit" => retry_state["limit"] || 0,
+      "expires_at" => resource["expires_at"]
+    }
+  end
 
   defp join_index(resources) do
     Enum.reduce(resources, %{}, fn resource, acc ->

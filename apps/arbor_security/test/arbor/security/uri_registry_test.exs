@@ -38,6 +38,26 @@ defmodule Arbor.Security.UriRegistryTest do
 
       assert UriRegistry.registered?("arbor://coding/reconciliation/read/task_1")
       refute UriRegistry.registered?("arbor://coding/reconciliation/reader/task_1")
+
+      assert UriRegistry.registered?(
+               "arbor://coding/reconciliation/apply/validation_resource/validation_" <>
+                 String.duplicate("a", 32)
+             )
+
+      refute UriRegistry.registered?(
+               "arbor://coding/reconciliation/applyx/validation_resource/validation_" <>
+                 String.duplicate("a", 32)
+             )
+
+      refute UriRegistry.registered?(
+               "arbor://coding/reconciliation/application/validation_resource/validation_" <>
+                 String.duplicate("a", 32)
+             )
+
+      refute UriRegistry.registered?(
+               "arbor://coding/reconciliation/applyer/validation_resource/validation_" <>
+                 String.duplicate("a", 32)
+             )
     end
 
     test "supports trailing-slash canonical prefixes" do

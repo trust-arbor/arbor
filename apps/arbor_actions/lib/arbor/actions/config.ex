@@ -164,6 +164,34 @@ defmodule Arbor.Actions.Config do
   end
 
   @doc """
+  Public Security facade used by source-boundary authorization.
+
+  Production defaults to `Arbor.Security`. Tests may configure a trusted named
+  module via `:security_module`. Actions never accept a security module from
+  untrusted parameters — only this operator/test Application env seam.
+  """
+  @spec security_module() :: module()
+  def security_module do
+    Application.get_env(:arbor_actions, :security_module, Arbor.Security)
+  end
+
+  @doc """
+  Workspace lease registry GenServer name/server used by coding facades.
+
+  Production defaults to `Arbor.Actions.Coding.WorkspaceLeaseRegistry`.
+  Focused tests may inject a private named registry through
+  `:workspace_lease_registry_server`. Never accepted from action parameters.
+  """
+  @spec workspace_lease_registry_server() :: GenServer.server()
+  def workspace_lease_registry_server do
+    Application.get_env(
+      :arbor_actions,
+      :workspace_lease_registry_server,
+      Arbor.Actions.Coding.WorkspaceLeaseRegistry
+    )
+  end
+
+  @doc """
   Public Shell facade used by the schema-bounded Mix actions.
 
   Production defaults to `Arbor.Shell`. Tests may configure a trusted named
