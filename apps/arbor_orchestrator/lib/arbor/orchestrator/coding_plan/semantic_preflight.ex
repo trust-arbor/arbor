@@ -179,6 +179,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
         |> check_forbidden_authority(graph)
         |> check_forbidden_denial_bypass_attrs(graph)
         |> check_immutable_context_writers(graph)
+        |> check_terminal_timeout_budget_bindings(graph, policy)
         |> check_worker_continuity_bindings(graph, worker_continuity, checkpoint.policy)
         |> check_worker_recovery_bindings(
           graph,
@@ -2160,6 +2161,53 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       String.starts_with?(right, left <> ".")
   end
 
+  defp check_terminal_timeout_budget_bindings(errors, graph, policy) do
+    validation_param =
+      if policy["validation_profile"] in ["cross_app", "security_regression"],
+        do: "stage_timeout",
+        else: "timeout"
+
+    expected = [
+      {"open_design_checkpoint", "coding_budget.approval_ms",
+       "coding_budget.worker_completion_reserve_ms", "timeout"},
+      {"validate", "coding_budget.validation_ms",
+       "coding_budget.validation_completion_reserve_ms", validation_param},
+      {"commit_change", "coding_budget.approval_ms",
+       "coding_budget.approval_completion_reserve_ms", "timeout"},
+      {"review_change", "coding_budget.review_ms", "coding_budget.review_completion_reserve_ms",
+       "timeout"}
+    ]
+
+    Enum.reduce(expected, errors, fn {node_id, cap_key, reserve_key, param}, acc ->
+      required = %{
+        "timeout_budget.deadline_key" => "session.run_deadline_unix_ms",
+        "timeout_budget.cap_key" => cap_key,
+        "timeout_budget.reserve_key" => reserve_key,
+        "timeout_budget.param" => param
+      }
+
+      case Map.get(graph.nodes, node_id) do
+        %{attrs: attrs} ->
+          actual = Map.take(attrs, Map.keys(required))
+
+          if actual == required do
+            acc
+          else
+            [
+              error("terminal_timeout_budget_binding_mismatch", node_id, %{
+                "expected" => required,
+                "actual" => actual
+              })
+              | acc
+            ]
+          end
+
+        _other ->
+          acc
+      end
+    end)
+  end
+
   defp check_design_checkpoint_bindings(errors, graph, checkpoint, rework_max_cycles) do
     context_keys =
       "work_packet,packet_digest,session.task_id,task,plan_fingerprint," <>
@@ -2260,6 +2308,10 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
          "action" => "coding_design_checkpoint_open",
          "context_keys" => context_keys,
          "param.timeout" => checkpoint.timeout_ms,
+         "timeout_budget.deadline_key" => "session.run_deadline_unix_ms",
+         "timeout_budget.cap_key" => "coding_budget.approval_ms",
+         "timeout_budget.reserve_key" => "coding_budget.worker_completion_reserve_ms",
+         "timeout_budget.param" => "timeout",
          "output_prefix" => "design_checkpoint_open",
          "max_retries" => "0"
        }},

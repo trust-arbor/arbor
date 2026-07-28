@@ -14,6 +14,7 @@ defmodule Arbor.Actions.Coding.SecurityRegression.CoreTest do
 
     assert input.review_attestation_id == "review_attestation_opaque"
     assert input.timeout == 10_000
+    assert input.stage_timeout == nil
 
     assert {:ok, %{timeout: 300_000}} =
              Core.new(%{review_attestation_id: "review_attestation_opaque"})
@@ -51,6 +52,26 @@ defmodule Arbor.Actions.Coding.SecurityRegression.CoreTest do
                workspace_id: "ws_opaque",
                review_attestation_id: "review_attestation_opaque"
              })
+  end
+
+  test "accepts a bounded aggregate stage timeout and preserves legacy nil" do
+    assert {:ok, %{stage_timeout: 12_000}} =
+             Core.new(%{
+               review_attestation_id: "review_attestation_opaque",
+               stage_timeout: "12000"
+             })
+
+    assert Core.maximum_stage_timeout() == Core.maximum_timeout()
+  end
+
+  test "rejects invalid or oversized aggregate stage timeouts" do
+    for invalid <- [0, -1, "0", "-1", Integer.to_string(Core.maximum_stage_timeout() + 1)] do
+      assert {:error, :invalid_stage_timeout} =
+               Core.new(%{
+                 review_attestation_id: "review_attestation_opaque",
+                 stage_timeout: invalid
+               })
+    end
   end
 
   test "validates the formatter artifact against an exact schema" do

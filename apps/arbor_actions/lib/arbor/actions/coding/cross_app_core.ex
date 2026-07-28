@@ -32,7 +32,8 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   # min(this, plan wall_clock) at compile time.
   @default_test_stage_timeout 300_000
   @maximum_test_stage_timeout 4_200_000
-  @allowed_param_keys [:workspace_id, :timeout, :test_stage_timeout]
+  @maximum_stage_timeout @maximum_test_stage_timeout
+  @allowed_param_keys [:workspace_id, :timeout, :stage_timeout, :test_stage_timeout]
   @allowed_param_string_keys Enum.map(@allowed_param_keys, &Atom.to_string/1)
 
   @max_changed_files 2_000
@@ -93,6 +94,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   @type input :: %{
           workspace_id: String.t(),
           timeout: pos_integer(),
+          stage_timeout: pos_integer() | nil,
           test_stage_timeout: pos_integer()
         }
 
@@ -162,12 +164,14 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
     with :ok <- validate_param_keys(params),
          {:ok, workspace_id} <- validate_workspace_id(param(params, :workspace_id)),
          {:ok, timeout} <- validate_timeout(param(params, :timeout)),
+         {:ok, stage_timeout} <- validate_stage_timeout(param(params, :stage_timeout)),
          {:ok, test_stage_timeout} <-
            validate_test_stage_timeout(param(params, :test_stage_timeout)) do
       {:ok,
        %{
          workspace_id: workspace_id,
          timeout: timeout,
+         stage_timeout: stage_timeout,
          test_stage_timeout: test_stage_timeout
        }}
     end
@@ -295,6 +299,9 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
 
   @doc false
   def maximum_test_stage_timeout, do: @maximum_test_stage_timeout
+
+  @doc false
+  def maximum_stage_timeout, do: @maximum_stage_timeout
 
   @doc false
   def max_expanded_test_files, do: @max_expanded_test_files
@@ -1534,6 +1541,27 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   end
 
   defp validate_timeout(_timeout), do: {:error, :invalid_timeout}
+
+  defp validate_stage_timeout(nil), do: {:ok, nil}
+
+  defp validate_stage_timeout(timeout)
+       when is_integer(timeout) and timeout >= @minimum_timeout and
+              timeout <= @maximum_stage_timeout,
+       do: {:ok, timeout}
+
+  defp validate_stage_timeout(timeout) when is_binary(timeout) do
+    case Integer.parse(timeout) do
+      {parsed, ""} ->
+        if Integer.to_string(parsed) == timeout,
+          do: validate_stage_timeout(parsed),
+          else: {:error, :invalid_stage_timeout}
+
+      _other ->
+        {:error, :invalid_stage_timeout}
+    end
+  end
+
+  defp validate_stage_timeout(_timeout), do: {:error, :invalid_stage_timeout}
 
   defp validate_test_stage_timeout(nil), do: {:ok, @default_test_stage_timeout}
 

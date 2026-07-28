@@ -182,6 +182,13 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationProgramTest do
         assert attrs["type"] == "exec"
         assert attrs["target"] == "action"
         assert attrs["max_retries"] == "0"
+
+        assert attrs["timeout_budget.param"] ==
+                 if(profile_id in ["cross_app", "security_regression"],
+                   do: "stage_timeout",
+                   else: "timeout"
+                 )
+
         refute Map.has_key?(attrs, "param.unreviewed")
         refute Map.has_key?(attrs, "arg.legacy")
       end

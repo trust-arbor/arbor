@@ -409,6 +409,10 @@ digraph CodingChangeV1 {
     action="coding_design_checkpoint_open",
     context_keys="work_packet,packet_digest,session.task_id,task,plan_fingerprint,coding_plan_fingerprint,workspace_id,worker_session_id,worker_provider_session_id,design_attempt,design,design_digest,session.run_deadline_unix_ms",
     param.timeout=300000,
+    timeout_budget.deadline_key="session.run_deadline_unix_ms",
+    timeout_budget.cap_key="coding_budget.approval_ms",
+    timeout_budget.reserve_key="coding_budget.worker_completion_reserve_ms",
+    timeout_budget.param="timeout",
     output_prefix="design_checkpoint_open",
     max_retries="0"
   ]
@@ -876,6 +880,10 @@ digraph CodingChangeV1 {
     action="mix_compile",
     context_keys="path,workspace_id",
     param.warnings_as_errors="true",
+    timeout_budget.deadline_key="session.run_deadline_unix_ms",
+    timeout_budget.cap_key="coding_budget.validation_ms",
+    timeout_budget.reserve_key="coding_budget.validation_completion_reserve_ms",
+    timeout_budget.param="timeout",
     output_prefix="validation",
     max_retries="0"
   ]
@@ -981,6 +989,10 @@ digraph CodingChangeV1 {
     action="coding_reviewed_commit",
     context_keys="path,message,workspace_dirty,head_commit,workspace_id,expected_workspace_fingerprint,expected_tree_oid,prior_commit",
     param.all="true",
+    timeout_budget.deadline_key="session.run_deadline_unix_ms",
+    timeout_budget.cap_key="coding_budget.approval_ms",
+    timeout_budget.reserve_key="coding_budget.approval_completion_reserve_ms",
+    timeout_budget.param="timeout",
     output_prefix="commit",
     max_retries="0"
   ]
@@ -1199,6 +1211,10 @@ digraph CodingChangeV1 {
     target="action",
     action="council_review_change",
     context_keys="diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash,review_cycle,finding_ledger,prior_candidate_commit,delta_diff,delta_files,delta_ranges",
+    timeout_budget.deadline_key="session.run_deadline_unix_ms",
+    timeout_budget.cap_key="coding_budget.review_ms",
+    timeout_budget.reserve_key="coding_budget.review_completion_reserve_ms",
+    timeout_budget.param="timeout",
     output_prefix="review",
     max_retries="0"
   ]

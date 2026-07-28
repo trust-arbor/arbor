@@ -612,6 +612,146 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     refute_received {:mix_invocation, _, _, _}
   end
 
+  test "whole-validation deadline caps each pre-test child from one monotonic budget", %{
+    worktree: worktree
+  } do
+    parent = self()
+    mkdir_app_tests!(worktree, ["alpha"])
+    {:ok, clock_agent} = Agent.start_link(fn -> 0 end)
+
+    on_exit(fn ->
+      if Process.alive?(clock_agent), do: Agent.stop(clock_agent)
+    end)
+
+    Application.put_env(:arbor_actions, :cross_app_monotonic_ms, fn ->
+      Agent.get(clock_agent, & &1)
+    end)
+
+    Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, args, opts ->
+      now = Agent.get(clock_agent, & &1)
+      send(parent, {:mix_invocation, args, opts, now})
+
+      case args do
+        ["compile", "--warnings-as-errors"] ->
+          Agent.update(clock_agent, &(&1 + 1_000))
+          {:ok, %{exit_code: 0, stdout: "compile ok", stderr: "", timed_out: false}}
+
+        ["xref", "graph"] ->
+          {:ok, %{exit_code: 1, stdout: "xref failed", stderr: "", timed_out: false}}
+
+        other ->
+          flunk("unexpected mix invocation: #{inspect(other)}")
+      end
+    end)
+
+    assert {:ok, checks} =
+             Shell.run_validation_checks(
+               worktree,
+               ["apps/alpha/test"],
+               10_000,
+               20_000,
+               5_000,
+               %{id: "res"}
+             )
+
+    assert checks.compile["passed"]
+    refute checks.xref["passed"]
+
+    assert_receive {:mix_invocation, ["compile", "--warnings-as-errors"], compile_opts, 0}
+    assert Keyword.get(compile_opts, :timeout) == 5_000
+
+    assert_receive {:mix_invocation, ["xref", "graph"], xref_opts, 1_000}
+    assert Keyword.get(xref_opts, :timeout) == 4_000
+    refute_received {:mix_invocation, _, _, _}
+  end
+
+  test "whole-validation deadline rejects an overrun immediately after a child", %{
+    worktree: worktree
+  } do
+    parent = self()
+    mkdir_app_tests!(worktree, ["alpha"])
+    {:ok, clock_agent} = Agent.start_link(fn -> 0 end)
+
+    on_exit(fn ->
+      if Process.alive?(clock_agent), do: Agent.stop(clock_agent)
+    end)
+
+    Application.put_env(:arbor_actions, :cross_app_monotonic_ms, fn ->
+      Agent.get(clock_agent, & &1)
+    end)
+
+    Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, args, opts ->
+      send(parent, {:mix_invocation, args, opts})
+      Agent.update(clock_agent, fn _ -> 5_000 end)
+      {:ok, %{exit_code: 0, stdout: "late success", stderr: "", timed_out: false}}
+    end)
+
+    assert {:error, {:validation_stage_timeout, :compile}} =
+             Shell.run_validation_checks(
+               worktree,
+               ["apps/alpha/test"],
+               10_000,
+               20_000,
+               5_000,
+               %{id: "res"}
+             )
+
+    assert_receive {:mix_invocation, ["compile", "--warnings-as-errors"], opts}
+    assert Keyword.get(opts, :timeout) == 5_000
+    refute_received {:mix_invocation, _, _}
+  end
+
+  test "whole-validation deadline marks a success-shaped final test overrun as timed out", %{
+    worktree: worktree
+  } do
+    parent = self()
+    mkdir_app_tests!(worktree, ["alpha"])
+    {:ok, clock_agent} = Agent.start_link(fn -> 0 end)
+
+    on_exit(fn ->
+      if Process.alive?(clock_agent), do: Agent.stop(clock_agent)
+    end)
+
+    Application.put_env(:arbor_actions, :cross_app_monotonic_ms, fn ->
+      Agent.get(clock_agent, & &1)
+    end)
+
+    Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, args, opts ->
+      send(parent, {:mix_invocation, args, opts})
+
+      case args do
+        ["compile", "--warnings-as-errors"] ->
+          {:ok, %{exit_code: 0, stdout: "compile ok", stderr: "", timed_out: false}}
+
+        ["xref", "graph"] ->
+          {:ok, %{exit_code: 0, stdout: "xref ok", stderr: "", timed_out: false}}
+
+        ["test", "--", "apps/alpha/test/alpha_test.exs"] ->
+          Agent.update(clock_agent, fn _ -> 5_000 end)
+          {:ok, %{exit_code: 0, stdout: "late test success", stderr: "", timed_out: false}}
+
+        other ->
+          flunk("unexpected mix invocation: #{inspect(other)}")
+      end
+    end)
+
+    assert {:ok, checks} =
+             Shell.run_validation_checks(
+               worktree,
+               ["apps/alpha/test"],
+               5_000,
+               20_000,
+               5_000,
+               %{id: "res"}
+             )
+
+    refute checks.test["passed"]
+    assert checks.test["reason"] == "tests_timed_out"
+
+    assert_receive {:mix_invocation, ["test", "--", "apps/alpha/test/alpha_test.exs"], test_opts}
+    assert Keyword.get(test_opts, :timeout) == 5_000
+  end
+
   test "operation timeout above 600000 reaches Mix execution with resource_profile intensive", %{
     worktree: worktree
   } do

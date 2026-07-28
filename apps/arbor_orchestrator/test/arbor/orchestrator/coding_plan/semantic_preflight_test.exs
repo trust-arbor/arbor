@@ -1294,6 +1294,73 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     )
   end
 
+  test "terminal timeout budget bindings are immutable reviewed graph controls", ctx do
+    assert {:ok, compilation} = compile(plan!(), ctx)
+    graph = compiled_graph!(compilation.dot_source)
+    assert {:ok, profile} = Profiles.fetch_executable("default")
+
+    mutations = [
+      {"open_design_checkpoint", "timeout_budget.deadline_key", "attacker.deadline"},
+      {"open_design_checkpoint", "timeout_budget.cap_key", "coding_budget.review_ms"},
+      {"open_design_checkpoint", "timeout_budget.reserve_key", "coding_budget.cleanup_ms"},
+      {"open_design_checkpoint", "timeout_budget.param", "stage_timeout"},
+      {"validate", "timeout_budget.deadline_key", "attacker.deadline"},
+      {"validate", "timeout_budget.cap_key", "coding_budget.approval_ms"},
+      {"validate", "timeout_budget.reserve_key", "coding_budget.cleanup_ms"},
+      {"validate", "timeout_budget.param", "stage_timeout"},
+      {"commit_change", "timeout_budget.deadline_key", "attacker.deadline"},
+      {"commit_change", "timeout_budget.cap_key", "coding_budget.review_ms"},
+      {"commit_change", "timeout_budget.reserve_key", "coding_budget.cleanup_ms"},
+      {"commit_change", "timeout_budget.param", "stage_timeout"},
+      {"review_change", "timeout_budget.deadline_key", "attacker.deadline"},
+      {"review_change", "timeout_budget.cap_key", "coding_budget.approval_ms"},
+      {"review_change", "timeout_budget.reserve_key", "coding_budget.cleanup_ms"},
+      {"review_change", "timeout_budget.param", "stage_timeout"}
+    ]
+
+    for {node_id, attr, replacement} <- mutations do
+      mutated =
+        update_in(graph.nodes[node_id].attrs, fn attrs ->
+          Map.put(attrs, attr, replacement)
+        end)
+
+      assert {:error, {:semantic_preflight_failed, errors}} =
+               preflight(mutated, profile["semantic_policy"], review_profile: "binding")
+
+      assert Enum.any?(errors, fn error ->
+               error["code"] == "terminal_timeout_budget_binding_mismatch" and
+                 error["node_id"] == node_id
+             end)
+    end
+  end
+
+  test "compound validation profiles pin the aggregate stage timeout target", ctx do
+    for {plan, profile_id, opts} <- [
+          {plan!(%{"validation_profile" => "cross_app"}), "cross_app",
+           [validation_test_stage_timeout_ms: 900_000]},
+          {security_plan!(), "security_regression", []}
+        ] do
+      assert {:ok, compilation} = compile(plan, ctx)
+      graph = compiled_graph!(compilation.dot_source)
+      assert graph.nodes["validate"].attrs["timeout_budget.param"] == "stage_timeout"
+      assert {:ok, profile} = Profiles.fetch_executable(profile_id)
+
+      mutated =
+        update_in(
+          graph.nodes["validate"].attrs,
+          &Map.put(&1, "timeout_budget.param", "timeout")
+        )
+
+      assert {:error, {:semantic_preflight_failed, errors}} =
+               preflight(mutated, profile["semantic_policy"], [review_profile: "binding"] ++ opts)
+
+      assert Enum.any?(errors, fn error ->
+               error["code"] == "terminal_timeout_budget_binding_mismatch" and
+                 error["node_id"] == "validate"
+             end)
+    end
+  end
+
   test "security regression: one good and one bad approval deny branch fails closed", ctx do
     bypassed =
       inject_edge(

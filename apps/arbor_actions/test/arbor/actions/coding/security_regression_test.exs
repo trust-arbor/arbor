@@ -51,6 +51,13 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
 
   setup do
     Arbor.Actions.TestLinuxBaselineMaterializer.reset_seams()
+
+    previous_clock = Application.get_env(:arbor_actions, :security_regression_monotonic_ms)
+
+    on_exit(fn ->
+      restore_env(:security_regression_monotonic_ms, previous_clock)
+    end)
+
     :ok
   end
 
@@ -137,6 +144,126 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
         Application.put_env(:arbor_actions, :security_regression_mix_runner, suite_runner)
       end
     end
+  end
+
+  test "aggregate stage timeout caps both revision child timeouts", %{tmp_dir: tmp_dir} do
+    fixture = regression_fixture(tmp_dir)
+    parent = self()
+    {:ok, clock_agent} = Agent.start_link(fn -> 0 end)
+
+    Application.put_env(:arbor_actions, :security_regression_monotonic_ms, fn ->
+      Agent.get(clock_agent, & &1)
+    end)
+
+    with_security_regression_runner(
+      fn path, args, opts ->
+        send(
+          parent,
+          {:stage_timeout_invocation, Keyword.get(opts, :validation_revision),
+           Keyword.get(opts, :timeout)}
+        )
+
+        if Keyword.get(opts, :validation_revision) == :candidate do
+          Agent.update(clock_agent, &(&1 + 100))
+        end
+
+        Arbor.Actions.SecurityRegressionTestMixRunner.run(path, args, opts)
+      end,
+      fn ->
+        params =
+          fixture
+          |> attested_params(["test/security_regression_test.exs"])
+          |> Map.put(:stage_timeout, 3_000)
+
+        assert {:ok, result} = Validate.run(params, fixture.context)
+        assert result.passed
+        assert_receive {:stage_timeout_invocation, :candidate, candidate_timeout}, 5_000
+        assert_receive {:stage_timeout_invocation, :base, base_timeout}, 5_000
+        assert candidate_timeout == 3_000
+        assert base_timeout == 2_900
+      end
+    )
+  end
+
+  test "aggregate stage exhaustion after candidate prevents base admission", %{tmp_dir: tmp_dir} do
+    fixture = regression_fixture(tmp_dir)
+    parent = self()
+    {:ok, clock_agent} = Agent.start_link(fn -> 0 end)
+
+    Application.put_env(:arbor_actions, :security_regression_monotonic_ms, fn ->
+      Agent.get(clock_agent, & &1)
+    end)
+
+    with_security_regression_runner(
+      fn path, args, opts ->
+        send(parent, {:stage_timeout_revision, Keyword.get(opts, :validation_revision)})
+
+        if Keyword.get(opts, :validation_revision) == :candidate do
+          Agent.update(clock_agent, fn _ -> 3_000 end)
+        end
+
+        Arbor.Actions.SecurityRegressionTestMixRunner.run(path, args, opts)
+      end,
+      fn ->
+        params =
+          fixture
+          |> attested_params(["test/security_regression_test.exs"])
+          |> Map.put(:stage_timeout, 3_000)
+
+        assert {:ok, result} = Validate.run(params, fixture.context)
+        refute result.passed
+        assert result.reason == "candidate_timeout"
+        assert_receive {:stage_timeout_revision, :candidate}, 5_000
+        refute_receive {:stage_timeout_revision, :base}, 100
+
+        assert {:ok, []} =
+                 WorkspaceLeaseRegistry.validation_resources(
+                   fixture.lease.workspace_id,
+                   fixture.context
+                 )
+      end
+    )
+  end
+
+  test "final child overrun returns typed base timeout and cleans resources", %{tmp_dir: tmp_dir} do
+    fixture = regression_fixture(tmp_dir)
+    parent = self()
+    {:ok, clock_agent} = Agent.start_link(fn -> 0 end)
+
+    Application.put_env(:arbor_actions, :security_regression_monotonic_ms, fn ->
+      Agent.get(clock_agent, & &1)
+    end)
+
+    with_security_regression_runner(
+      fn path, args, opts ->
+        revision = Keyword.get(opts, :validation_revision)
+        send(parent, {:final_stage_timeout_revision, revision})
+
+        if revision == :base do
+          Agent.update(clock_agent, fn _ -> 3_000 end)
+        end
+
+        Arbor.Actions.SecurityRegressionTestMixRunner.run(path, args, opts)
+      end,
+      fn ->
+        params =
+          fixture
+          |> attested_params(["test/security_regression_test.exs"])
+          |> Map.put(:stage_timeout, 3_000)
+
+        assert {:ok, result} = Validate.run(params, fixture.context)
+        refute result.passed
+        assert result.reason == "base_timeout"
+        assert_receive {:final_stage_timeout_revision, :candidate}, 5_000
+        assert_receive {:final_stage_timeout_revision, :base}, 5_000
+
+        assert {:ok, []} =
+                 WorkspaceLeaseRegistry.validation_resources(
+                   fixture.lease.workspace_id,
+                   fixture.context
+                 )
+      end
+    )
   end
 
   test "reviewed candidate-pass/base-fail evidence is detached, one-shot, and cleaned", %{
@@ -2181,6 +2308,43 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
       ) == {:error, :not_found}
     end)
   end
+
+  defp regression_fixture(tmp_dir) do
+    fixture =
+      leased_project(tmp_dir, "defmodule Tiny.Security do\n  def allow_guest?, do: true\nend\n")
+
+    write_candidate_module(
+      fixture,
+      "defmodule Tiny.Security do\n  def allow_guest?, do: false\nend\n"
+    )
+
+    write_candidate_test(fixture, "test/security_regression_test.exs", """
+    defmodule Tiny.SecurityRegressionTest do
+      use ExUnit.Case
+      test "guest remains denied", do: refute(Tiny.Security.allow_guest?())
+    end
+    """)
+
+    fixture
+  end
+
+  defp with_security_regression_runner(runner, fun) do
+    previous_runner = Application.get_env(:arbor_actions, :security_regression_mix_runner)
+    Application.put_env(:arbor_actions, :security_regression_mix_runner, runner)
+
+    try do
+      fun.()
+    after
+      if is_nil(previous_runner) do
+        Application.delete_env(:arbor_actions, :security_regression_mix_runner)
+      else
+        Application.put_env(:arbor_actions, :security_regression_mix_runner, previous_runner)
+      end
+    end
+  end
+
+  defp restore_env(key, nil), do: Application.delete_env(:arbor_actions, key)
+  defp restore_env(key, value), do: Application.put_env(:arbor_actions, key, value)
 
   defp attested_params(fixture, test_paths) do
     {:ok, material} =

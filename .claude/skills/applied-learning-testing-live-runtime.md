@@ -483,3 +483,14 @@ node (found 2026-07-20 while launching the Phase 6 r10 benchmark).
 <!-- applied-learning: aggregate-tests-must-own-dependency-availability-and-global-process-lifecycle -->
 <a id="applied-learning-aggregate-tests-must-own-dependency-availability-and-global-process-lifecycle"></a>
 **Aggregate tests must own dependency availability and globally named process lifecycle.** Umbrella order can leave an optional service running even when an app-local run exercises its unavailable fallback, and a linked named process can outlive one test long enough to race the next setup. Inject the intended available or unavailable dependency explicitly, restore global config from an `async: false` module, and start test-owned named processes under `start_supervised!/1` so teardown is synchronous. Never use the accidental absence of a globally registered service as a fixture (found 2026-07-24 after the aggregate software-factory gate exposed Trust-dependent Gateway decisions and a dispatcher `:already_started` race).
+
+<!-- applied-learning: optional-deadline-controls-must-preserve-legacy-clock-sampling-order -->
+<a id="applied-learning-optional-deadline-controls-must-preserve-legacy-clock-sampling-order"></a>
+**Optional deadline controls must preserve legacy clock sampling order.** Adding an
+earlier monotonic-clock read only for a new optional whole-operation deadline can
+consume an injected test sample and change the established stage deadline. The
+result is a behavioral regression even when the new option is absent, such as
+moving a CrossApp capacity failure from runtime handoff to structural admission.
+Derive optional deadlines without perturbing legacy samples when the option is
+unset, and regress the nil/default path with the exact existing clock sequence
+(found 2026-07-27 while adding terminal-gate budget projection).

@@ -30,6 +30,7 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Shell do
   @spec run(Core.input(), map()) :: {:ok, map()} | {:error, term()}
   def run(input, context) when is_map(input) and is_map(context) do
     caller = caller_context(context)
+    stage_deadline = stage_deadline(input.stage_timeout)
 
     with {:ok, claim} <-
            WorkspaceLeaseRegistry.claim_review_attestation(input.review_attestation_id, caller) do
@@ -44,7 +45,8 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Shell do
         })
 
       result =
-        with {:ok, evidence} <- guarded_execute(resource, execution_input, caller),
+        with {:ok, evidence} <-
+               guarded_execute(resource, execution_input, caller, stage_deadline),
              {:ok, finalized_material} <-
                WorkspaceLeaseRegistry.finalize_review_attestation(
                  input.review_attestation_id,
@@ -76,9 +78,9 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Shell do
 
   def run(_input, _context), do: {:error, :invalid_security_regression_input}
 
-  defp guarded_execute(resource, input, caller) do
+  defp guarded_execute(resource, input, caller, stage_deadline) do
     try do
-      execute(resource, input, caller)
+      execute(resource, input, caller, stage_deadline)
     rescue
       _error -> {:error, :security_regression_execution_failed}
     catch
@@ -86,14 +88,15 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Shell do
     end
   end
 
-  defp execute(resource, input, caller) do
+  defp execute(resource, input, caller, stage_deadline) do
     with {:ok, sources} <- stage_sources(resource, input.test_paths),
          :ok <- verify_attested_sources(sources, input.material.selected_tests),
          {:ok, candidate_fingerprint} <-
            workspace_fingerprint(resource.candidate_path, resource.root_path, "candidate"),
          {:ok, candidate, stable_fingerprint} <-
-           run_candidate(resource, input, sources, candidate_fingerprint),
-         {:ok, base} <- run_base_if_needed(resource, input, sources, candidate, caller) do
+           run_candidate(resource, input, sources, candidate_fingerprint, stage_deadline),
+         {:ok, base} <-
+           run_base_if_needed(resource, input, sources, candidate, caller, stage_deadline) do
       {:ok,
        Core.show(%{
          base_commit: resource.base_commit,
@@ -118,7 +121,7 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Shell do
     })
   end
 
-  defp run_candidate(resource, input, sources, candidate_fingerprint) do
+  defp run_candidate(resource, input, sources, candidate_fingerprint, stage_deadline) do
     case validate_test_helpers(resource.candidate_path, input.test_paths) do
       :ok ->
         with :ok <- verify_sources(resource.candidate_path, sources),
@@ -127,37 +130,26 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Shell do
                  revision_runner_path(resource, :candidate),
                  formatter_module_name(resource.resource_id)
                ) do
-          leg =
-            run_leg(
-              resource.candidate_path,
-              resource.candidate_build_path,
-              resource.candidate_result_path,
-              revision_runner_path(resource, :candidate),
-              input,
-              resource
-            )
+          with {:ok, timeout} <- timeout_for_child(input.timeout, stage_deadline) do
+            leg =
+              run_leg(
+                resource.candidate_path,
+                resource.candidate_build_path,
+                resource.candidate_result_path,
+                revision_runner_path(resource, :candidate),
+                input,
+                resource,
+                timeout
+              )
 
-          with :ok <- verify_sources(resource.candidate_path, sources),
-               {:ok, after_fingerprint} <-
-                 workspace_fingerprint(
-                   resource.candidate_path,
-                   resource.root_path,
-                   "candidate"
-                 ) do
-            stable_leg =
-              if after_fingerprint == candidate_fingerprint do
-                leg
-              else
-                %{leg | status: :source_changed}
-              end
-
-            {:ok, stable_leg, candidate_fingerprint}
+            if stage_exhausted?(stage_deadline) do
+              {:ok, timed_out_leg(leg), candidate_fingerprint}
+            else
+              finish_candidate(resource, sources, candidate_fingerprint, leg)
+            end
           else
-            {:error, :candidate_source_changed} ->
-              {:ok, %{leg | status: :source_changed}, candidate_fingerprint}
-
-            {:error, reason} ->
-              {:error, reason}
+            {:error, :stage_timeout} ->
+              {:ok, Core.incomplete_leg(:stage_timeout, %{}, nil, true), candidate_fingerprint}
           end
         else
           {:error, :candidate_source_changed} ->
@@ -175,38 +167,63 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Shell do
     end
   end
 
-  defp run_base_if_needed(resource, input, sources, candidate, caller) do
+  defp finish_candidate(resource, sources, candidate_fingerprint, leg) do
+    with :ok <- verify_sources(resource.candidate_path, sources),
+         {:ok, after_fingerprint} <-
+           workspace_fingerprint(resource.candidate_path, resource.root_path, "candidate") do
+      stable_leg =
+        if after_fingerprint == candidate_fingerprint do
+          leg
+        else
+          %{leg | status: :source_changed}
+        end
+
+      {:ok, stable_leg, candidate_fingerprint}
+    else
+      {:error, :candidate_source_changed} ->
+        {:ok, %{leg | status: :source_changed}, candidate_fingerprint}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp run_base_if_needed(resource, input, sources, candidate, caller, stage_deadline) do
     case Core.candidate_gate(candidate) do
-      :ok -> run_base(resource, input, sources, caller)
+      :ok -> run_base(resource, input, sources, caller, stage_deadline)
       {:error, _reason} -> {:ok, Core.not_run_leg()}
     end
   end
 
-  defp run_base(resource, input, sources, caller) do
-    case WorkspaceLeaseRegistry.create_validation_snapshot(resource.resource_id, caller) do
-      {:ok, snapshot} ->
-        with :ok <- verify_exact_head(snapshot.base_worktree_path, snapshot.base_commit),
-             :ok <- overlay_sources(snapshot.base_worktree_path, sources),
-             {:ok, before_fingerprint} <-
-               workspace_fingerprint(snapshot.base_worktree_path, snapshot.root_path, "base") do
-          run_base_suite(snapshot, input, before_fingerprint)
-        else
-          {:error, :overlay_failed} ->
-            {:ok, Core.incomplete_leg(:overlay_failed)}
+  defp run_base(resource, input, sources, caller, stage_deadline) do
+    if stage_exhausted?(stage_deadline) do
+      {:ok, Core.incomplete_leg(:stage_timeout, %{}, nil, true)}
+    else
+      case WorkspaceLeaseRegistry.create_validation_snapshot(resource.resource_id, caller) do
+        {:ok, snapshot} ->
+          with :ok <- verify_exact_head(snapshot.base_worktree_path, snapshot.base_commit),
+               :ok <- overlay_sources(snapshot.base_worktree_path, sources),
+               {:ok, before_fingerprint} <-
+                 workspace_fingerprint(snapshot.base_worktree_path, snapshot.root_path, "base") do
+            run_base_suite(snapshot, input, before_fingerprint, stage_deadline)
+          else
+            {:error, :overlay_failed} ->
+              {:ok, Core.incomplete_leg(:overlay_failed)}
 
-          {:error, reason} when reason in [:base_commit_changed, :fingerprint_failed] ->
-            {:ok, Core.incomplete_leg(:snapshot_failed)}
+            {:error, reason} when reason in [:base_commit_changed, :fingerprint_failed] ->
+              {:ok, Core.incomplete_leg(:snapshot_failed)}
 
-          {:error, reason} ->
-            {:error, reason}
-        end
+            {:error, reason} ->
+              {:error, reason}
+          end
 
-      {:error, _reason} ->
-        {:ok, Core.incomplete_leg(:snapshot_failed)}
+        {:error, _reason} ->
+          {:ok, Core.incomplete_leg(:snapshot_failed)}
+      end
     end
   end
 
-  defp run_base_suite(snapshot, input, before_fingerprint) do
+  defp run_base_suite(snapshot, input, before_fingerprint, stage_deadline) do
     case validate_test_helpers(snapshot.base_worktree_path, input.test_paths) do
       :ok ->
         with :ok <-
@@ -214,27 +231,41 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Shell do
                  revision_runner_path(snapshot, :base),
                  formatter_module_name(snapshot.resource_id)
                ) do
-          leg =
-            run_leg(
-              snapshot.base_worktree_path,
-              snapshot.base_build_path,
-              snapshot.base_result_path,
-              revision_runner_path(snapshot, :base),
-              input,
-              snapshot
-            )
+          with {:ok, timeout} <- timeout_for_child(input.timeout, stage_deadline) do
+            leg =
+              run_leg(
+                snapshot.base_worktree_path,
+                snapshot.base_build_path,
+                snapshot.base_result_path,
+                revision_runner_path(snapshot, :base),
+                input,
+                snapshot,
+                timeout
+              )
 
-          with :ok <- verify_exact_head(snapshot.base_worktree_path, snapshot.base_commit),
-               {:ok, after_fingerprint} <-
-                 workspace_fingerprint(snapshot.base_worktree_path, snapshot.root_path, "base") do
-            if after_fingerprint == before_fingerprint do
-              {:ok, leg}
+            if stage_exhausted?(stage_deadline) do
+              {:ok, timed_out_leg(leg)}
             else
-              {:ok, Core.incomplete_leg(:snapshot_failed, Map.get(leg, :diagnostic, %{}))}
+              with :ok <- verify_exact_head(snapshot.base_worktree_path, snapshot.base_commit),
+                   {:ok, after_fingerprint} <-
+                     workspace_fingerprint(
+                       snapshot.base_worktree_path,
+                       snapshot.root_path,
+                       "base"
+                     ) do
+                if after_fingerprint == before_fingerprint do
+                  {:ok, leg}
+                else
+                  {:ok, Core.incomplete_leg(:snapshot_failed, Map.get(leg, :diagnostic, %{}))}
+                end
+              else
+                {:error, _reason} ->
+                  {:ok, Core.incomplete_leg(:snapshot_failed, Map.get(leg, :diagnostic, %{}))}
+              end
             end
           else
-            {:error, _reason} ->
-              {:ok, Core.incomplete_leg(:snapshot_failed, Map.get(leg, :diagnostic, %{}))}
+            {:error, :stage_timeout} ->
+              {:ok, Core.incomplete_leg(:stage_timeout, %{}, nil, true)}
           end
         end
 
@@ -246,7 +277,7 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Shell do
     end
   end
 
-  defp run_leg(root, build_path, result_path, runner_path, input, resource) do
+  defp run_leg(root, build_path, result_path, runner_path, input, resource, timeout) do
     _ = File.rm(result_path)
 
     # Owner-issued host paths only. Shell rewrites runner/result to fixed guest
@@ -258,7 +289,7 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Shell do
     # MIX_ENV only on the safe surface; private HOME/TMP/build/deps come from
     # the validation resource.
     opts = [
-      timeout: input.timeout,
+      timeout: timeout,
       validation_resource: resource,
       validation_revision: revision,
       env: %{"MIX_ENV" => "test"}
@@ -296,6 +327,35 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Shell do
       {:error, reason} ->
         Core.incomplete_leg(:execution_failed, diagnostic_for_error(reason, resource))
     end
+  end
+
+  defp stage_deadline(nil), do: nil
+
+  defp stage_deadline(stage_timeout),
+    do: monotonic_ms() + stage_timeout
+
+  defp timeout_for_child(timeout, nil), do: {:ok, timeout}
+
+  defp timeout_for_child(timeout, deadline) do
+    remaining = deadline - monotonic_ms()
+
+    if remaining > 0, do: {:ok, min(timeout, remaining)}, else: {:error, :stage_timeout}
+  end
+
+  defp stage_exhausted?(nil), do: false
+
+  defp stage_exhausted?(deadline),
+    do: monotonic_ms() >= deadline
+
+  defp timed_out_leg(leg), do: %{leg | timed_out: true}
+
+  defp monotonic_ms do
+    clock =
+      Application.get_env(:arbor_actions, :security_regression_monotonic_ms, fn ->
+        System.monotonic_time(:millisecond)
+      end)
+
+    clock.()
   end
 
   # Production default is MixAction.run_mix/3. Tests may install a hermetic

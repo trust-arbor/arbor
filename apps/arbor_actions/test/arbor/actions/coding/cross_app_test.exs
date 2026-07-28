@@ -54,29 +54,33 @@ defmodule Arbor.Actions.Coding.CrossAppTest do
              "arbor://action/coding/cross_app/validate"
   end
 
-  test "closed action input accepts timeout and test_stage_timeout only" do
-    # Action schema declares the dual budgets as control parameters.
+  test "closed action input accepts only the reviewed timeout controls" do
+    # Action schema declares the per-child and aggregate budgets as controls.
     schema_keys = Keyword.keys(Validate.schema())
 
     assert :workspace_id in schema_keys
     assert :timeout in schema_keys
+    assert :stage_timeout in schema_keys
     assert :test_stage_timeout in schema_keys
 
-    # Closed Core surface: only workspace_id, timeout, test_stage_timeout.
+    # Closed Core surface: only workspace_id and the three timeout controls.
     assert {:ok, input} =
              Arbor.Actions.Coding.CrossApp.Core.new(%{
                workspace_id: "ws_closed",
                timeout: 10_000,
+               stage_timeout: 15_000,
                test_stage_timeout: 20_000
              })
 
     assert input.timeout == 10_000
+    assert input.stage_timeout == 15_000
     assert input.test_stage_timeout == 20_000
 
     assert {:error, :unsupported_parameter} =
              Arbor.Actions.Coding.CrossApp.Core.new(%{
                workspace_id: "ws_closed",
                timeout: 10_000,
+               stage_timeout: 15_000,
                test_stage_timeout: 20_000,
                extra: true
              })
@@ -95,6 +99,12 @@ defmodule Arbor.Actions.Coding.CrossAppTest do
              })
 
     assert Arbor.Actions.cross_app_maximum_test_stage_timeout_ms() == 4_200_000
+
+    assert {:error, :invalid_stage_timeout} =
+             Arbor.Actions.Coding.CrossApp.Core.new(%{
+               workspace_id: "ws_closed",
+               stage_timeout: 4_200_001
+             })
 
     # cross_app binds the intensive Shell ceiling (1_200_000) for per-op only;
     # values above the standard 600_000 ms path are accepted and fail only

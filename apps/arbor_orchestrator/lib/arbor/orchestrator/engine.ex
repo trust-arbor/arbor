@@ -1845,7 +1845,16 @@ defmodule Arbor.Orchestrator.Engine do
 
     csv = split_csv_attr(attrs, "context_keys")
 
-    case Enum.uniq(single ++ csv) do
+    timeout_budget_keys =
+      ~w(
+        timeout_budget.deadline_key
+        timeout_budget.cap_key
+        timeout_budget.reserve_key
+      )
+      |> Enum.map(&Map.get(attrs, &1))
+      |> Enum.filter(&(is_binary(&1) and &1 != ""))
+
+    case Enum.uniq(single ++ csv ++ timeout_budget_keys) do
       [] -> ["last_response"]
       explicit -> explicit
     end

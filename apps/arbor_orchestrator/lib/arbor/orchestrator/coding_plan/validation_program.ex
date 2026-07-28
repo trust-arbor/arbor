@@ -106,6 +106,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationProgram do
         |> Enum.reject(fn {key, _value} -> static_parameter_attr?(key) end)
         |> Map.new()
         |> Map.merge(controlled_attrs)
+        |> Map.put("timeout_budget.param", timeout_budget_param(program["profile_id"]))
 
       {:ok, attrs}
     end
@@ -171,6 +172,12 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationProgram do
 
   defp maybe_put_test_stage_timeout(parameters, timeout_ms),
     do: Map.put(parameters, "test_stage_timeout", timeout_ms)
+
+  defp timeout_budget_param(profile_id)
+       when profile_id in ["cross_app", "security_regression"],
+       do: "stage_timeout"
+
+  defp timeout_budget_param(_profile_id), do: "timeout"
 
   defp valid_context_keys?("default", context_keys),
     do: context_keys == ["path", "workspace_id"]

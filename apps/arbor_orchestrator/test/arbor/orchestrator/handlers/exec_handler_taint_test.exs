@@ -313,4 +313,164 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandlerTaintTest do
       assert outcome.output_taint == nil
     end
   end
+
+  describe "terminal action timeout budgets" do
+    test "caps a requested timeout without passing budget metadata to the action" do
+      context =
+        Context.new(%{
+          "session.run_deadline_unix_ms" => System.system_time(:millisecond) + 60_000,
+          "coding_budget.validation_ms" => 5_000,
+          "coding_budget.validation_completion_reserve_ms" => 10_000
+        })
+
+      node =
+        action_node(%{
+          "action" => "mix.compile",
+          "param.timeout" => 9_000,
+          "timeout_budget.deadline_key" => "session.run_deadline_unix_ms",
+          "timeout_budget.cap_key" => "coding_budget.validation_ms",
+          "timeout_budget.reserve_key" => "coding_budget.validation_completion_reserve_ms"
+        })
+
+      outcome = ExecHandler.execute(node, context, graph(), opts())
+
+      assert outcome.status == :success
+      assert_received {:stub_execute, "mix.compile", %{"timeout" => 5_000} = args, _, _}
+      refute Map.has_key?(args, "session.run_deadline_unix_ms")
+      refute Map.has_key?(args, "coding_budget.validation_ms")
+      refute Map.has_key?(args, "coding_budget.validation_completion_reserve_ms")
+    end
+
+    test "uses the remaining deadline and supports a custom action timeout parameter" do
+      now = System.system_time(:millisecond)
+
+      context =
+        Context.new(%{
+          "session.run_deadline_unix_ms" => now + 10_000,
+          "coding_budget.validation_ms" => 20_000,
+          "coding_budget.validation_completion_reserve_ms" => 2_000
+        })
+
+      node =
+        action_node(%{
+          "action" => "coding.cross_app.validate",
+          "timeout_budget.deadline_key" => "session.run_deadline_unix_ms",
+          "timeout_budget.cap_key" => "coding_budget.validation_ms",
+          "timeout_budget.reserve_key" => "coding_budget.validation_completion_reserve_ms",
+          "timeout_budget.param" => "stage_timeout"
+        })
+
+      outcome = ExecHandler.execute(node, context, graph(), opts())
+
+      assert outcome.status == :success
+
+      assert_received {:stub_execute, "coding.cross_app.validate",
+                       %{"stage_timeout" => effective_timeout}, _, _}
+
+      assert effective_timeout > 0
+      assert effective_timeout <= 8_000
+    end
+
+    test "does not extend a shorter static action timeout" do
+      context =
+        Context.new(%{
+          "session.run_deadline_unix_ms" => System.system_time(:millisecond) + 60_000,
+          "coding_budget.approval_ms" => 30_000,
+          "coding_budget.approval_completion_reserve_ms" => 10_000
+        })
+
+      node =
+        action_node(%{
+          "action" => "coding.reviewed_commit",
+          "param.timeout" => 1_200,
+          "timeout_budget.deadline_key" => "session.run_deadline_unix_ms",
+          "timeout_budget.cap_key" => "coding_budget.approval_ms",
+          "timeout_budget.reserve_key" => "coding_budget.approval_completion_reserve_ms",
+          "timeout_budget.param" => "timeout"
+        })
+
+      assert ExecHandler.execute(node, context, graph(), opts()).status == :success
+      assert_received {:stub_execute, "coding.reviewed_commit", %{"timeout" => 1_200}, _, _}
+    end
+
+    test "partial bindings and malformed or exhausted context fail before execution" do
+      valid_context =
+        Context.new(%{
+          "session.run_deadline_unix_ms" => System.system_time(:millisecond) + 60_000,
+          "coding_budget.validation_ms" => 5_000,
+          "coding_budget.validation_completion_reserve_ms" => 10_000
+        })
+
+      partial =
+        action_node(%{
+          "action" => "mix.compile",
+          "timeout_budget.deadline_key" => "session.run_deadline_unix_ms",
+          "timeout_budget.cap_key" => "coding_budget.validation_ms"
+        })
+
+      assert ExecHandler.execute(partial, valid_context, graph(), opts()).status == :fail
+      refute_received {:stub_execute, _, _, _, _}
+
+      attrs = %{
+        "action" => "mix.compile",
+        "timeout_budget.deadline_key" => "session.run_deadline_unix_ms",
+        "timeout_budget.cap_key" => "coding_budget.validation_ms",
+        "timeout_budget.reserve_key" => "coding_budget.validation_completion_reserve_ms"
+      }
+
+      malformed =
+        Context.new(%{
+          "session.run_deadline_unix_ms" => System.system_time(:millisecond) + 60_000,
+          "coding_budget.validation_ms" => 0,
+          "coding_budget.validation_completion_reserve_ms" => 10_000
+        })
+
+      malformed_outcome =
+        ExecHandler.execute(action_node(attrs), malformed, graph(), opts())
+
+      assert malformed_outcome.status == :fail
+      refute_received {:stub_execute, _, _, _, _}
+
+      exhausted =
+        Context.new(%{
+          "session.run_deadline_unix_ms" => System.system_time(:millisecond) - 1,
+          "coding_budget.validation_ms" => 5_000,
+          "coding_budget.validation_completion_reserve_ms" => 0
+        })
+
+      exhausted_outcome =
+        ExecHandler.execute(action_node(attrs), exhausted, graph(), opts())
+
+      assert exhausted_outcome.status == :fail
+      assert exhausted_outcome.failure_reason =~ "budget_exhausted"
+      refute_received {:stub_execute, _, _, _, _}
+    end
+
+    test "projected timeout inherits the worst budget-source taint" do
+      context =
+        Context.new(%{
+          "session.run_deadline_unix_ms" => System.system_time(:millisecond) + 60_000,
+          "coding_budget.review_ms" => 5_000,
+          "coding_budget.review_completion_reserve_ms" => 10_000
+        })
+        |> Context.record_output_taint(["session.run_deadline_unix_ms"], :trusted)
+        |> Context.record_output_taint(["coding_budget.review_ms"], :untrusted)
+
+      node =
+        action_node(%{
+          "action" => "council.review_change",
+          "timeout_budget.deadline_key" => "session.run_deadline_unix_ms",
+          "timeout_budget.cap_key" => "coding_budget.review_ms",
+          "timeout_budget.reserve_key" => "coding_budget.review_completion_reserve_ms"
+        })
+
+      assert ExecHandler.execute(node, context, graph(), opts()).status == :success
+      assert_received {:stub_execute, _, %{"timeout" => 5_000}, _, exec_opts}
+
+      assert %{"timeout" => %TaintStruct{level: :untrusted}} =
+               Keyword.fetch!(exec_opts, :param_taint)
+
+      assert Keyword.fetch!(exec_opts, :taint).level == :untrusted
+    end
+  end
 end

@@ -5,19 +5,21 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
 
   @moduletag :fast
 
-  test "accepts only bounded workspace_id, optional timeout, and test_stage_timeout" do
+  test "accepts only bounded workspace_id and validation timeout controls" do
     assert {:ok, input} =
              Core.new(%{
                workspace_id: "ws_opaque",
                timeout: 10_000,
+               stage_timeout: 15_000,
                test_stage_timeout: 20_000
              })
 
     assert input.workspace_id == "ws_opaque"
     assert input.timeout == 10_000
+    assert input.stage_timeout == 15_000
     assert input.test_stage_timeout == 20_000
 
-    assert {:ok, %{timeout: 300_000, test_stage_timeout: 300_000}} =
+    assert {:ok, %{timeout: 300_000, stage_timeout: nil, test_stage_timeout: 300_000}} =
              Core.new(%{workspace_id: "ws_opaque"})
 
     assert {:ok, intensive_ceiling} = Arbor.Shell.spawn_capable_max_timeout_ms(:intensive)
@@ -67,6 +69,14 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
 
     assert {:error, :invalid_test_stage_timeout} =
              Core.new(%{workspace_id: "ws_opaque", test_stage_timeout: "999"})
+
+    assert {:ok, %{stage_timeout: 4_200_000}} =
+             Core.new(%{workspace_id: "ws_opaque", stage_timeout: "4200000"})
+
+    for invalid <- [999, 4_200_001, "04200000", "4200000ms"] do
+      assert {:error, :invalid_stage_timeout} =
+               Core.new(%{workspace_id: "ws_opaque", stage_timeout: invalid})
+    end
 
     assert {:error, :unsupported_parameter} =
              Core.new(%{workspace_id: "ws_opaque", path: "/tmp/repo"})

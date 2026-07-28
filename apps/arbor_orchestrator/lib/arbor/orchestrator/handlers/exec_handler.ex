@@ -23,6 +23,13 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
       names fail closed before execution. Per-parameter taint is keyed by the
       same flat action parameter names while still reading provenance from the
       exact source context keys.
+    - `timeout_budget.deadline_key`, `timeout_budget.cap_key`, and
+      `timeout_budget.reserve_key` — an all-or-none binding from context to an
+      action-owned timeout. The handler caps the requested timeout by both the
+      stage cap and the owner deadline minus the completion reserve.
+    - `timeout_budget.param` — optional flat target parameter name; defaults to
+      `timeout`. Compound actions can bind an aggregate control such as
+      `stage_timeout` while retaining ownership of child cleanup.
     - All attributes from the delegated handler are supported
   """
 
@@ -37,6 +44,14 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
     ShellHandler,
     ToolHandler
   }
+
+  @timeout_budget_attrs ~w(
+    timeout_budget.deadline_key
+    timeout_budget.cap_key
+    timeout_budget.reserve_key
+  )
+  @timeout_budget_param_attr "timeout_budget.param"
+  @action_param_name ~r/\A[a-z][a-z0-9_]*\z/
 
   @impl true
   def execute(node, context, graph, opts) do
@@ -355,21 +370,28 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
   # exact source key. Duplicate normalized parameter names fail closed.
   defp build_action_args(node_id, attrs, context) do
     attr_args = parse_attr_args(node_id, attrs)
-    source_keys = consumed_context_keys(attrs)
+    source_keys = action_context_keys(attrs)
 
-    case resolve_context_params(node_id, source_keys, context, attr_args) do
-      {:ok, context_args, param_taint} ->
-        {:ok, Map.merge(attr_args, context_args), param_taint}
-
-      {:error, _reason} = error ->
-        error
+    with {:ok, context_args, param_taint} <-
+           resolve_context_params(node_id, source_keys, context, attr_args),
+         {:ok, action_args, param_taint} <-
+           apply_timeout_budget(
+             attrs,
+             context,
+             Map.merge(attr_args, context_args),
+             param_taint
+           ) do
+      {:ok, action_args, param_taint}
     end
   end
 
-  # The context keys whose values are interpolated into this action's params.
-  # These are the only runtime-tainted inputs (static arg.*/param.* attrs are
-  # author-written and trusted).
+  # Context values consumed either as direct action params or as timeout-budget
+  # controls. Static arg.*/param.* attrs are author-written and trusted.
   defp consumed_context_keys(attrs) do
+    Enum.uniq(action_context_keys(attrs) ++ timeout_budget_source_keys(attrs))
+  end
+
+  defp action_context_keys(attrs) do
     case Map.get(attrs, "context_keys") do
       nil ->
         []
@@ -381,6 +403,75 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
         |> Enum.reject(&(&1 == ""))
     end
   end
+
+  defp timeout_budget_source_keys(attrs) do
+    @timeout_budget_attrs
+    |> Enum.map(&Map.get(attrs, &1))
+    |> Enum.filter(&(is_binary(&1) and &1 != ""))
+  end
+
+  defp apply_timeout_budget(attrs, context, action_args, param_taint) do
+    bindings = Enum.map(@timeout_budget_attrs, &Map.get(attrs, &1))
+
+    cond do
+      Enum.all?(bindings, &is_nil/1) and is_nil(Map.get(attrs, @timeout_budget_param_attr)) ->
+        {:ok, action_args, param_taint}
+
+      Enum.all?(bindings, &(is_binary(&1) and &1 != "")) ->
+        apply_bound_timeout_budget(attrs, context, action_args, param_taint, bindings)
+
+      true ->
+        {:error, :invalid_timeout_budget_attrs}
+    end
+  end
+
+  defp apply_bound_timeout_budget(
+         attrs,
+         context,
+         action_args,
+         param_taint,
+         [deadline_key, cap_key, reserve_key] = source_keys
+       ) do
+    param_name = Map.get(attrs, @timeout_budget_param_attr, "timeout")
+    cap_ms = Context.get(context, cap_key)
+
+    with true <- valid_action_param_name?(param_name),
+         true <- is_integer(cap_ms) and cap_ms > 0,
+         {:ok, requested_timeout_ms} <-
+           requested_timeout(action_args, param_name, cap_ms),
+         {:ok, effective_timeout_ms} <-
+           Arbor.Orchestrator.CodingPlan.DeadlineBudget.cap(
+             min(requested_timeout_ms, cap_ms),
+             Context.get(context, deadline_key),
+             Context.get(context, reserve_key),
+             System.system_time(:millisecond)
+           ) do
+      timeout_taint =
+        Context.combine([
+          Map.get(param_taint, param_name),
+          Context.worst_taint(context, source_keys)
+        ])
+
+      {:ok, Map.put(action_args, param_name, effective_timeout_ms),
+       Map.put(param_taint, param_name, timeout_taint)}
+    else
+      false -> {:error, :invalid_timeout_budget_metadata}
+      {:error, reason} -> {:error, {:timeout_budget, reason}}
+    end
+  end
+
+  defp requested_timeout(action_args, param_name, cap_ms) do
+    case Map.get(action_args, param_name) do
+      nil -> {:ok, cap_ms}
+      timeout_ms when is_integer(timeout_ms) and timeout_ms > 0 -> {:ok, timeout_ms}
+      _other -> {:error, :invalid_budget_metadata}
+    end
+  end
+
+  defp valid_action_param_name?(name) when is_binary(name) and byte_size(name) <= 64,
+    do: Regex.match?(@action_param_name, name)
+
+  defp valid_action_param_name?(_name), do: false
 
   defp resolve_context_params(node_id, source_keys, context, attr_args) do
     Enum.reduce_while(source_keys, {:ok, %{}, %{}, MapSet.new()}, fn source_key,
@@ -442,6 +533,16 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
     "duplicate action parameter #{inspect(param_name)} from context key #{inspect(source_key)}; " <>
       "each context_keys entry must normalize to a distinct flat parameter name"
   end
+
+  defp format_context_keys_error(:invalid_timeout_budget_attrs),
+    do:
+      "timeout budget attributes must be absent or provide deadline_key, cap_key, and reserve_key"
+
+  defp format_context_keys_error(:invalid_timeout_budget_metadata),
+    do: "timeout budget context metadata or target parameter is invalid"
+
+  defp format_context_keys_error({:timeout_budget, reason}),
+    do: "timeout budget rejected action execution: #{inspect(reason)}"
 
   defp format_context_keys_error(reason), do: inspect(reason)
 

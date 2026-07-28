@@ -229,7 +229,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
   test "template stays within reviewed DOT source, node, and edge ceilings", ctx do
     graph = parse!(ctx.template_source)
 
-    assert byte_size(ctx.template_source) == 78_788
+    assert byte_size(ctx.template_source) == 79_726
     assert map_size(graph.nodes) == 233
     assert length(graph.edges) == 337
     assert byte_size(ctx.template_source) <= 262_144
@@ -865,6 +865,58 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert node_attrs(graph, "validate")["param.warnings_as_errors"] == true
     assert node_attrs(graph, "review_change")["action"] == "council_review_change"
 
+    assert node_attrs(graph, "open_design_checkpoint")
+           |> Map.take([
+             "timeout_budget.deadline_key",
+             "timeout_budget.cap_key",
+             "timeout_budget.reserve_key",
+             "timeout_budget.param"
+           ]) == %{
+             "timeout_budget.deadline_key" => "session.run_deadline_unix_ms",
+             "timeout_budget.cap_key" => "coding_budget.approval_ms",
+             "timeout_budget.reserve_key" => "coding_budget.worker_completion_reserve_ms",
+             "timeout_budget.param" => "timeout"
+           }
+
+    assert node_attrs(graph, "validate")
+           |> Map.take([
+             "timeout_budget.deadline_key",
+             "timeout_budget.cap_key",
+             "timeout_budget.reserve_key",
+             "timeout_budget.param"
+           ]) == %{
+             "timeout_budget.deadline_key" => "session.run_deadline_unix_ms",
+             "timeout_budget.cap_key" => "coding_budget.validation_ms",
+             "timeout_budget.reserve_key" => "coding_budget.validation_completion_reserve_ms",
+             "timeout_budget.param" => "timeout"
+           }
+
+    assert node_attrs(graph, "commit_change")
+           |> Map.take([
+             "timeout_budget.deadline_key",
+             "timeout_budget.cap_key",
+             "timeout_budget.reserve_key",
+             "timeout_budget.param"
+           ]) == %{
+             "timeout_budget.deadline_key" => "session.run_deadline_unix_ms",
+             "timeout_budget.cap_key" => "coding_budget.approval_ms",
+             "timeout_budget.reserve_key" => "coding_budget.approval_completion_reserve_ms",
+             "timeout_budget.param" => "timeout"
+           }
+
+    assert node_attrs(graph, "review_change")
+           |> Map.take([
+             "timeout_budget.deadline_key",
+             "timeout_budget.cap_key",
+             "timeout_budget.reserve_key",
+             "timeout_budget.param"
+           ]) == %{
+             "timeout_budget.deadline_key" => "session.run_deadline_unix_ms",
+             "timeout_budget.cap_key" => "coding_budget.review_ms",
+             "timeout_budget.reserve_key" => "coding_budget.review_completion_reserve_ms",
+             "timeout_budget.param" => "timeout"
+           }
+
     assert node_attrs(graph, "init_review_cycle") == %{
              "type" => "transform",
              "transform" => "json_extract",
@@ -1089,6 +1141,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert validate["action"] == "coding_security_regression_validate"
     assert validate["context_keys"] == "review_attestation_id"
     assert validate["param.timeout"] == 600_000
+    assert validate["timeout_budget.param"] == "stage_timeout"
     refute Map.has_key?(validate, "param.warnings_as_errors")
     refute validate["context_keys"] =~ "path"
     refute validate["context_keys"] =~ "test_paths"
@@ -1209,6 +1262,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     # with default wall-clock 900_000.
     assert validate["param.timeout"] == 900_000
     assert validate["param.test_stage_timeout"] == 900_000
+    assert validate["timeout_budget.param"] == "stage_timeout"
     refute validate["context_keys"] =~ "path"
     refute validate["context_keys"] =~ "test_paths"
     assert_validation_capture_topology(graph, "prep_validation_path")

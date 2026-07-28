@@ -12,7 +12,7 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Validate do
   @moduledoc """
   Validate focused tests against the immutable tree reviewed by the council.
 
-  The action accepts only an opaque review attestation id and bounded timeout.
+  The action accepts only an opaque review attestation id and bounded timeouts.
   The registry claims the one-shot token before the shell can spawn code, then
   supplies the authoritative workspace, revisions, tests, and profile.
   """
@@ -31,6 +31,10 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Validate do
       timeout: [
         type: :non_neg_integer,
         doc: "Per-revision timeout in milliseconds (1,000 to 600,000)"
+      ],
+      stage_timeout: [
+        type: :non_neg_integer,
+        doc: "Aggregate candidate-and-base timeout in milliseconds (1 to 600,000)"
       ]
     ]
 
@@ -41,7 +45,8 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Validate do
   def taint_roles do
     %{
       review_attestation_id: :control,
-      timeout: :control
+      timeout: :control,
+      stage_timeout: :control
     }
   end
 

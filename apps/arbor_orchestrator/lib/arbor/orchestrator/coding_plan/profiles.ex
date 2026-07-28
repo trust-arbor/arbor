@@ -1262,6 +1262,12 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                                        "target" => "action",
                                        "action" => "council_review_change",
                                        "context_keys" => @review_context_keys,
+                                       "timeout_budget.deadline_key" =>
+                                         "session.run_deadline_unix_ms",
+                                       "timeout_budget.cap_key" => "coding_budget.review_ms",
+                                       "timeout_budget.reserve_key" =>
+                                         "coding_budget.review_completion_reserve_ms",
+                                       "timeout_budget.param" => "timeout",
                                        "output_prefix" => "review",
                                        "max_retries" => "0"
                                      }

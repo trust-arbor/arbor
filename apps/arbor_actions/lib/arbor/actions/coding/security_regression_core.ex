@@ -11,7 +11,7 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Core do
   @minimum_timeout 1_000
   # Derived from Shell spawn-capable ceiling so action limits cannot exceed admission.
   @maximum_timeout Arbor.Shell.spawn_capable_max_timeout_ms()
-  @allowed_param_keys [:review_attestation_id, :timeout]
+  @allowed_param_keys [:review_attestation_id, :timeout, :stage_timeout]
   @allowed_param_string_keys Enum.map(@allowed_param_keys, &Atom.to_string/1)
 
   @artifact_tag :arbor_security_regression_ex_unit
@@ -33,7 +33,8 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Core do
   @typedoc "A normalized, side-effect-free action input."
   @type input :: %{
           review_attestation_id: String.t(),
-          timeout: pos_integer()
+          timeout: pos_integer(),
+          stage_timeout: pos_integer() | nil
         }
 
   @doc false
@@ -42,17 +43,22 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Core do
   @doc false
   def maximum_timeout, do: @maximum_timeout
 
+  @doc false
+  def maximum_stage_timeout, do: @maximum_timeout
+
   @doc "Construct and validate the action's deliberately narrow input surface."
   @spec new(map()) :: {:ok, input()} | {:error, atom()}
   def new(params) when is_map(params) do
     with :ok <- validate_param_keys(params),
          {:ok, review_attestation_id} <-
            validate_review_attestation_id(param(params, :review_attestation_id)),
-         {:ok, timeout} <- validate_timeout(param(params, :timeout)) do
+         {:ok, timeout} <- validate_timeout(param(params, :timeout)),
+         {:ok, stage_timeout} <- validate_stage_timeout(param(params, :stage_timeout)) do
       {:ok,
        %{
          review_attestation_id: review_attestation_id,
-         timeout: timeout
+         timeout: timeout,
+         stage_timeout: stage_timeout
        }}
     end
   end
@@ -247,6 +253,27 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Core do
   end
 
   defp validate_timeout(_timeout), do: {:error, :invalid_timeout}
+
+  defp validate_stage_timeout(nil), do: {:ok, nil}
+
+  defp validate_stage_timeout(stage_timeout)
+       when is_integer(stage_timeout) and stage_timeout > 0 and
+              stage_timeout <= @maximum_timeout,
+       do: {:ok, stage_timeout}
+
+  defp validate_stage_timeout(stage_timeout) when is_binary(stage_timeout) do
+    case Integer.parse(stage_timeout) do
+      {parsed, ""} ->
+        if Integer.to_string(parsed) == stage_timeout,
+          do: validate_stage_timeout(parsed),
+          else: {:error, :invalid_stage_timeout}
+
+      _other ->
+        {:error, :invalid_stage_timeout}
+    end
+  end
+
+  defp validate_stage_timeout(_stage_timeout), do: {:error, :invalid_stage_timeout}
 
   defp param(params, key) do
     case Map.fetch(params, key) do

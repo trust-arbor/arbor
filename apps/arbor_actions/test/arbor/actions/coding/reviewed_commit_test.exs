@@ -239,7 +239,8 @@ defmodule Arbor.Actions.Coding.ReviewedCommitTest do
       |> build_context(build_signer(agent_id))
       |> Map.put(:approval_timeout_ms, 250)
 
-    task = Task.async(fn -> ReviewedCommit.run(dirty_params(repo, head), context) end)
+    params = Map.put(dirty_params(repo, head), :timeout, 3_000)
+    task = Task.async(fn -> ReviewedCommit.run(params, context) end)
     request = await_pending_request(agent_id)
 
     assert {:error, "approval timed out"} = Task.await(task, 5_000)
@@ -258,6 +259,42 @@ defmodule Arbor.Actions.Coding.ReviewedCommitTest do
 
     assert :not_found = Arbor.Comms.get_interaction_response(request.request_id)
     assert {:ok, ^head} = git_head(repo)
+  end
+
+  test "action timeout can shorten but cannot widen the owner approval ceiling" do
+    {repo, head} = init_dirty_repo!()
+    agent_id = unique_agent("short_action_timeout")
+    grant_git_commit!(agent_id)
+    context = build_context(agent_id, build_signer(agent_id))
+    params = Map.put(dirty_params(repo, head), :timeout, 100)
+
+    task = Task.async(fn -> ReviewedCommit.run(params, context) end)
+    request = await_pending_request(agent_id)
+
+    assert {:error, "approval timed out"} = Task.await(task, 5_000)
+    assert {:ok, ^head} = git_head(repo)
+
+    assert {:error, {:already_terminal, :abandoned}} =
+             Arbor.Comms.respond_to_interaction(request.request_id, :approved, %{
+               decision: :approve
+             })
+  end
+
+  test "malformed action timeout fails before opening an approval" do
+    {repo, head} = init_dirty_repo!()
+    agent_id = unique_agent("invalid_action_timeout")
+    grant_git_commit!(agent_id)
+    context = build_context(agent_id, build_signer(agent_id))
+
+    assert {:error, "approval timeout is invalid"} =
+             ReviewedCommit.run(Map.put(dirty_params(repo, head), :timeout, 0), context)
+
+    assert {:ok, ^head} = git_head(repo)
+
+    refute Enum.any?(
+             Arbor.Comms.InteractionRouter.pending(),
+             &(&1.agent_id == agent_id)
+           )
   end
 
   test "security regression: deny never mutates git and returns approval_denied payload" do

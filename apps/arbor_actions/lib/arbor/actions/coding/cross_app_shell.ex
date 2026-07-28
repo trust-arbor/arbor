@@ -36,7 +36,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
   @spec run(Core.input(), map()) :: {:ok, map()} | {:error, term()}
   def run(input, context) when is_map(input) and is_map(context) do
     try do
-      do_run(input, context)
+      do_run(input, context, stage_deadline(Map.get(input, :stage_timeout)))
     catch
       {:execution_error, reason} -> {:error, reason}
     end
@@ -58,7 +58,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
   def run_app_tests(worktree_path, test_paths, operation_timeout, test_stage_timeout)
       when is_binary(worktree_path) and is_list(test_paths) and is_integer(operation_timeout) and
              is_integer(test_stage_timeout) do
-    run_tests(worktree_path, test_paths, operation_timeout, test_stage_timeout, nil)
+    run_tests(worktree_path, test_paths, operation_timeout, test_stage_timeout, nil, nil)
   end
 
   @doc false
@@ -113,13 +113,49 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
     selection = %{test_paths: test_paths}
 
     try do
-      run_checks(worktree_path, selection, operation_timeout, test_stage_timeout, resource)
+      run_checks(worktree_path, selection, operation_timeout, test_stage_timeout, nil, resource)
     catch
       {:execution_error, reason} -> {:error, reason}
     end
   end
 
-  defp do_run(input, context) do
+  @doc false
+  @spec run_validation_checks(
+          String.t(),
+          [String.t()],
+          pos_integer(),
+          pos_integer(),
+          pos_integer(),
+          map() | nil
+        ) :: {:ok, map()} | {:error, term()}
+  def run_validation_checks(
+        worktree_path,
+        test_paths,
+        operation_timeout,
+        test_stage_timeout,
+        stage_timeout,
+        resource
+      )
+      when is_binary(worktree_path) and is_list(test_paths) and is_integer(operation_timeout) and
+             is_integer(test_stage_timeout) and is_integer(stage_timeout) and
+             (is_map(resource) or is_nil(resource)) do
+    selection = %{test_paths: test_paths}
+
+    try do
+      run_checks(
+        worktree_path,
+        selection,
+        operation_timeout,
+        test_stage_timeout,
+        stage_deadline(stage_timeout),
+        resource
+      )
+    catch
+      {:execution_error, reason} -> {:error, reason}
+    end
+  end
+
+  defp do_run(input, context, validation_deadline) do
     with {:ok, lease} <- resolve_lease(input.workspace_id, context),
          {:ok, worktree_path, base_commit} <- lease_paths(lease),
          {:ok, changed_files} <- list_changed_files(worktree_path, base_commit),
@@ -140,11 +176,11 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
                  selection,
                  input.timeout,
                  input.test_stage_timeout,
+                 validation_deadline,
                  resource
                )
              end,
-             # Resource setup is bound by the per-operation ceiling, not aggregate stage.
-             timeout: input.timeout
+             validation_resource_opts(input.timeout, validation_deadline)
            ),
          {:ok, after_binding} <- MixAction.committable_tree_binding(worktree_path),
          :ok <- assert_validation_tree_stable(before_binding, after_binding) do
@@ -271,14 +307,22 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
     end
   end
 
-  defp run_checks(worktree_path, selection, operation_timeout, test_stage_timeout, resource) do
-    compile = run_compile(worktree_path, operation_timeout, resource)
+  defp run_checks(
+         worktree_path,
+         selection,
+         operation_timeout,
+         test_stage_timeout,
+         validation_deadline,
+         resource
+       ) do
+    compile = run_compile(worktree_path, operation_timeout, validation_deadline, resource)
 
     if compile["passed"] do
-      xref = run_xref(worktree_path, operation_timeout, resource)
+      xref = run_xref(worktree_path, operation_timeout, validation_deadline, resource)
 
       if xref["passed"] do
-        test_compile = run_test_compile(worktree_path, operation_timeout, resource)
+        test_compile =
+          run_test_compile(worktree_path, operation_timeout, validation_deadline, resource)
 
         test =
           if test_compile["passed"] do
@@ -288,6 +332,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
               selection.test_paths,
               operation_timeout,
               test_stage_timeout,
+              validation_deadline,
               resource
             )
           else
@@ -315,10 +360,14 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
     end
   end
 
-  defp run_compile(path, timeout, resource) do
-    case run_mix(path, ["compile", "--warnings-as-errors"],
-           timeout: timeout,
-           validation_resource: resource
+  defp run_compile(path, timeout, validation_deadline, resource) do
+    case run_bounded_mix(
+           path,
+           ["compile", "--warnings-as-errors"],
+           [validation_resource: resource],
+           timeout,
+           validation_deadline,
+           :compile
          ) do
       {:ok, result} ->
         Core.completed_check(Core.feedback_from_result(result))
@@ -328,10 +377,17 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
     end
   end
 
-  defp run_xref(path, timeout, resource) do
+  defp run_xref(path, timeout, validation_deadline, resource) do
     # Evidence only — do not pass --fail-above; this repository has baseline
     # compile-connected cycles. Zero-cycle validation is not claimed.
-    case run_mix(path, ["xref", "graph"], timeout: timeout, validation_resource: resource) do
+    case run_bounded_mix(
+           path,
+           ["xref", "graph"],
+           [validation_resource: resource],
+           timeout,
+           validation_deadline,
+           :xref
+         ) do
       {:ok, result} ->
         exit_code = Map.get(result, :exit_code) || Map.get(result, "exit_code")
 
@@ -344,13 +400,16 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
     end
   end
 
-  defp run_test_compile(path, timeout, resource) do
+  defp run_test_compile(path, timeout, validation_deadline, resource) do
     # Explicit MIX_ENV=test compile before the aggregate app-test deadline starts.
     # Owner-controlled safe env only; same per-operation timeout as other stages.
-    case run_mix(path, ["compile", "--warnings-as-errors"],
-           timeout: timeout,
-           validation_resource: resource,
-           env: %{"MIX_ENV" => "test"}
+    case run_bounded_mix(
+           path,
+           ["compile", "--warnings-as-errors"],
+           [validation_resource: resource, env: %{"MIX_ENV" => "test"}],
+           timeout,
+           validation_deadline,
+           :test_compile
          ) do
       {:ok, result} ->
         feedback = Core.feedback_from_result(result)
@@ -365,11 +424,25 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
     end
   end
 
-  defp run_tests(_path, [], _operation_timeout, _test_stage_timeout, _resource) do
+  defp run_tests(
+         _path,
+         [],
+         _operation_timeout,
+         _test_stage_timeout,
+         _validation_deadline,
+         _resource
+       ) do
     Core.empty_pass_check("no_affected_app_tests")
   end
 
-  defp run_tests(path, test_paths, operation_timeout, test_stage_timeout, resource)
+  defp run_tests(
+         path,
+         test_paths,
+         operation_timeout,
+         test_stage_timeout,
+         validation_deadline,
+         resource
+       )
        when is_list(test_paths) do
     case expand_test_files(path, test_paths) do
       {:ok, []} ->
@@ -381,11 +454,15 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
             Core.empty_pass_check("no_existing_test_files")
 
           {:ok, batches} ->
-            case Core.admit_test_batches(batches, test_stage_timeout, operation_timeout) do
+            {available_ms, validation_test_deadline} =
+              validation_test_budget(test_stage_timeout, validation_deadline)
+
+            case Core.admit_test_batches(batches, available_ms, operation_timeout) do
               :ok ->
                 # One shared absolute monotonic deadline for the whole test
-                # stage — not N× timeout and not one process per file.
-                deadline = monotonic_ms() + test_stage_timeout
+                # stage, additionally capped by the whole-validation deadline.
+                deadline =
+                  validation_test_deadline || monotonic_ms() + test_stage_timeout
 
                 run_tests_sequential(
                   path,
@@ -418,6 +495,50 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
         throw({:execution_error, {:test_file_enumeration_failed, reason}})
     end
   end
+
+  defp run_bounded_mix(path, args, opts, operation_timeout, validation_deadline, stage) do
+    timeout = remaining_stage_timeout!(operation_timeout, validation_deadline, stage)
+    result = run_mix(path, args, Keyword.put(opts, :timeout, timeout))
+    assert_stage_deadline!(validation_deadline, stage)
+    result
+  end
+
+  defp remaining_stage_timeout!(operation_timeout, nil, _stage), do: operation_timeout
+
+  defp remaining_stage_timeout!(operation_timeout, deadline, stage)
+       when is_integer(operation_timeout) and is_integer(deadline) do
+    case deadline - monotonic_ms() do
+      remaining when remaining > 0 -> min(operation_timeout, remaining)
+      _exhausted -> throw({:execution_error, {:validation_stage_timeout, stage}})
+    end
+  end
+
+  defp assert_stage_deadline!(nil, _stage), do: :ok
+
+  defp assert_stage_deadline!(deadline, stage) when is_integer(deadline) do
+    if deadline - monotonic_ms() > 0 do
+      :ok
+    else
+      throw({:execution_error, {:validation_stage_timeout, stage}})
+    end
+  end
+
+  defp stage_deadline(nil), do: nil
+  defp stage_deadline(timeout) when is_integer(timeout), do: monotonic_ms() + timeout
+
+  defp validation_test_budget(test_stage_timeout, nil), do: {test_stage_timeout, nil}
+
+  defp validation_test_budget(test_stage_timeout, validation_deadline)
+       when is_integer(validation_deadline) do
+    now = monotonic_ms()
+    deadline = min(now + test_stage_timeout, validation_deadline)
+    {max(deadline - now, 0), deadline}
+  end
+
+  defp validation_resource_opts(timeout, nil), do: [timeout: timeout]
+
+  defp validation_resource_opts(timeout, validation_deadline),
+    do: [timeout: timeout, deadline_ms: validation_deadline]
 
   defp run_tests_sequential(
          worktree_path,

@@ -48,6 +48,11 @@ defmodule Arbor.Actions.Coding.CrossApp.Validate do
         doc:
           "Per-operation Mix process timeout in milliseconds (1,000 to 1,200,000 under intensive)"
       ],
+      stage_timeout: [
+        type: :non_neg_integer,
+        doc:
+          "Optional whole-validation timeout in milliseconds (1,000 to 4,200,000); caps every contained stage without widening per-operation limits"
+      ],
       test_stage_timeout: [
         type: :non_neg_integer,
         doc:
@@ -63,6 +68,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Validate do
     %{
       workspace_id: :control,
       timeout: :control,
+      stage_timeout: :control,
       test_stage_timeout: :control
     }
   end

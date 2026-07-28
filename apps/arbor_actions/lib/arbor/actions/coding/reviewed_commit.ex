@@ -117,6 +117,10 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
         type: :boolean,
         default: false,
         doc: "Allow empty commits (dirty path only)"
+      ],
+      timeout: [
+        type: :non_neg_integer,
+        doc: "Operator approval wait timeout, bounded again by Engine control"
       ]
     ]
 
@@ -147,7 +151,8 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
       workspace_id: :control,
       prior_commit: :control,
       all: :control,
-      allow_empty: :control
+      allow_empty: :control,
+      timeout: :control
     }
   end
 
@@ -170,7 +175,8 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
     prior_commit = prior_commit(params)
 
     result =
-      with :ok <- verify_workspace_binding(path, workspace_id, context),
+      with {:ok, approval_timeout_ms} <- approval_timeout(params, context),
+           :ok <- verify_workspace_binding(path, workspace_id, context),
            # Lease/path authority first — only then probe tree/fingerprint/Git.
            {:ok, bindings} <- resolve_candidate_bindings(path, params),
            git_params = git_commit_params(path, message, params, bindings),
@@ -217,7 +223,8 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
               path,
               workspace_id,
               prior_commit,
-              bindings
+              bindings,
+              approval_timeout_ms
             )
 
           {:error, reason} ->
@@ -299,10 +306,11 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
          path,
          workspace_id,
          prior_commit,
-         bindings
+         bindings,
+         approval_timeout_ms
        ) do
     with {:ok, request_id} <- ApprovalAnswer.validate_request_id(request_id),
-         {:ok, decision} <- await_decision(agent_id, request_id, context),
+         {:ok, decision} <- await_decision(agent_id, request_id, approval_timeout_ms),
          :ok <- verify_workspace_binding(path, workspace_id, context),
          :ok <-
            reject_ambiguous_dirty_advanced_head(
@@ -340,9 +348,7 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
     end
   end
 
-  defp await_decision(agent_id, request_id, context) do
-    timeout = approval_timeout(context)
-
+  defp await_decision(agent_id, request_id, timeout) do
     cond do
       interaction_request?(request_id) ->
         await_interaction(agent_id, request_id, timeout)
@@ -1008,22 +1014,43 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
     Map.get(context, key) || Map.get(context, Atom.to_string(key))
   end
 
-  defp approval_timeout(context) do
-    case context_value(context, :approval_timeout_ms) do
-      n when is_integer(n) and n > 0 ->
-        n
+  defp approval_timeout(params, context) do
+    engine_timeout =
+      case context_value(context, :approval_timeout_ms) do
+        n when is_integer(n) and n > 0 ->
+          n
 
-      _ ->
-        Application.get_env(
-          :arbor_actions,
-          :approval_timeout_ms,
-          Application.get_env(
-            :arbor_orchestrator,
-            :approval_timeout_ms,
-            @default_approval_timeout
-          )
-        )
+        _ ->
+          configured_approval_timeout()
+      end
+
+    case Map.get(params, :timeout) || Map.get(params, "timeout") do
+      nil ->
+        {:ok, engine_timeout}
+
+      requested when is_integer(requested) and requested > 0 ->
+        {:ok, min(requested, engine_timeout)}
+
+      _other ->
+        {:error, :invalid_approval_timeout}
     end
+  end
+
+  defp configured_approval_timeout do
+    configured =
+      Application.get_env(
+        :arbor_actions,
+        :approval_timeout_ms,
+        Application.get_env(
+          :arbor_orchestrator,
+          :approval_timeout_ms,
+          @default_approval_timeout
+        )
+      )
+
+    if is_integer(configured) and configured > 0,
+      do: configured,
+      else: @default_approval_timeout
   end
 
   defp truthy?(v) when v in [true, "true", "1", 1], do: true
@@ -1037,6 +1064,7 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
   defp maybe_put(opts, k, v), do: Keyword.put(opts, k, v)
 
   defp format_error(:timeout), do: "approval timed out"
+  defp format_error(:invalid_approval_timeout), do: "approval timeout is invalid"
   defp format_error(:missing_agent_id), do: "approval wait requires agent_id"
   defp format_error(:missing_expected_head_commit), do: "expected_head_commit is required"
   defp format_error(:invalid_expected_head_commit), do: "expected_head_commit is invalid"
