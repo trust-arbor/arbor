@@ -139,6 +139,9 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   @max_metric_usage_encoded_bytes 16_384
   @max_validation_failure_reason_bytes 512
   @max_pipeline_failure_reason_bytes 512
+  @max_workspace_recovery_items 16
+  @max_workspace_recovery_string_bytes 512
+  @workspace_recovery_resource_types ~w(retained_workspace_record live_workspace_lease)
 
   @pipeline_error_failure_nodes %{
     "worker_recovery_send_failed" => "retry_recovered_send"
@@ -2234,9 +2237,29 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
 
           nil ->
             _ = Task.shutdown(task, :brutal_kill)
-            {:error, {:pipeline_timeout, timeout}}
+            {:ok, synthesize_pipeline_timeout_result(opts, timeout)}
         end
     end
+  end
+
+  # The owned Engine task was killed before it could reach a terminal node, so
+  # there is no real Engine result to adapt. Synthesizing a canonical
+  # pipeline-error Engine-like result routes the timeout through the same
+  # adapt_result/pipeline_error_detail path as every other pipeline_error,
+  # instead of surfacing a raw {:error, {:pipeline_timeout, _}} that TaskStore
+  # would collapse to the generic, evidence-free "task_runner_failed".
+  defp synthesize_pipeline_timeout_result(opts, timeout) do
+    task_id = Keyword.get(opts, :task_id)
+    agent_id = Keyword.get(opts, :agent_id)
+
+    %{
+      context: %{
+        "status" => "pipeline_error",
+        "error" => "pipeline_timeout",
+        "pipeline_timeout_ms" => timeout,
+        "workspace_recovery" => workspace_recovery_locator(task_id, agent_id)
+      }
+    }
   end
 
   defp capture_runner_result(fun) do
@@ -2342,7 +2365,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
              CandidateVerificationCore.verify(
                program,
                candidate_tree_oid,
-               Map.get(clean_context, "validation"),
+               terminal_validation_evidence(clean_context),
                observed_at
              ),
            :ok <-
@@ -2355,6 +2378,23 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
       end
     else
       {:ok, nil}
+    end
+  end
+
+  # The final checkpoint context is flat (`validation.passed`, `validation.exit_code`,
+  # `validation.validated_tree_oid`, etc.) with no nested `validation` map — only the
+  # public "validation" result projection already reconstructed it via
+  # extract_prefixed_map/2. Terminal verification must use the same reconstruction so a
+  # legitimate flat-evidence terminal doesn't fail adaptation for lack of a bare
+  # "validation" key.
+  defp terminal_validation_evidence(clean_context) do
+    case Map.get(clean_context, "validation") do
+      value when is_map(value) and not is_struct(value) ->
+        value
+
+      _other ->
+        context_get(clean_context, "validation.result") ||
+          extract_prefixed_map(clean_context, "validation.")
     end
   end
 
@@ -2776,7 +2816,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
 
     {:ok, outcome} =
       OutcomeMapper.map_pipeline_error(
-        error_code,
+        pipeline_error_outcome_code(error_code),
         context,
         requested_model: requested_model,
         worker_provider: worker_provider
@@ -2798,6 +2838,40 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
       error_code,
       context
     )
+    |> maybe_put_pipeline_timeout_evidence(error_code, context)
+  end
+
+  # A synthesized pipeline timeout is not a registered DOT pipeline_error
+  # code (no graph node ever reported it), so it is mapped to the generic,
+  # already-registered "pipeline_error" outcome (retryable in a new session)
+  # rather than falling through OutcomeMapper's unregistered-code fallback,
+  # which is meant for malformed evidence and marks retry "none".
+  defp pipeline_error_outcome_code("pipeline_timeout"), do: "pipeline_error"
+  defp pipeline_error_outcome_code(error_code), do: error_code
+
+  defp maybe_put_pipeline_timeout_evidence(detail, "pipeline_timeout", context) do
+    detail
+    |> maybe_put_pipeline_timeout_ms(context)
+    |> maybe_put_workspace_recovery(context)
+  end
+
+  defp maybe_put_pipeline_timeout_evidence(detail, _error_code, _context), do: detail
+
+  defp maybe_put_pipeline_timeout_ms(detail, context) do
+    case context_get(context, "pipeline_timeout_ms") do
+      ms when is_integer(ms) and ms > 0 -> Map.put(detail, "pipeline_timeout_ms", ms)
+      _other -> detail
+    end
+  end
+
+  defp maybe_put_workspace_recovery(detail, context) do
+    case context_get(context, "workspace_recovery") do
+      recovery when is_map(recovery) and not is_struct(recovery) and map_size(recovery) > 0 ->
+        Map.put(detail, "workspace_recovery", recovery)
+
+      _other ->
+        detail
+    end
   end
 
   defp maybe_put_pipeline_failure_reason(detail, "pipeline_error", engine_result) do
@@ -3086,6 +3160,120 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   end
 
   defp nested_get(_map, _key), do: nil
+
+  # ===========================================================================
+  # Workspace recovery lookup (pipeline timeout evidence only)
+  # ===========================================================================
+
+  # A pipeline timeout kills the owned Engine task before it can report
+  # workspace state, so evidence must come from the public reconciliation
+  # resource facade using only the exact task_id/principal_id this executor
+  # already owns. The lookup is best-effort and always bounded: a missing
+  # facade, an unmatched task/principal, or any exception yields a
+  # deterministic locator instead of raising or fabricating a path.
+  defp workspace_recovery_locator(task_id, agent_id)
+       when is_binary(task_id) and is_binary(agent_id) do
+    facade = Config.coding_reconciliation_resource_facade()
+
+    if is_atom(facade) and Code.ensure_loaded?(facade) and
+         function_exported?(facade, :coding_resource_inventory, 1) do
+      lookup_workspace_recovery_resource(facade, task_id, agent_id)
+    else
+      pending_workspace_recovery_locator(task_id, agent_id, "unavailable")
+    end
+  rescue
+    _exception -> pending_workspace_recovery_locator(task_id, agent_id, "unavailable")
+  catch
+    _kind, _reason -> pending_workspace_recovery_locator(task_id, agent_id, "unavailable")
+  end
+
+  defp workspace_recovery_locator(task_id, agent_id) do
+    pending_workspace_recovery_locator(task_id, agent_id, "unavailable")
+  end
+
+  defp lookup_workspace_recovery_resource(facade, task_id, agent_id) do
+    opts = [task_id: task_id, principal_id: agent_id, max_items: @max_workspace_recovery_items]
+
+    case apply(facade, :coding_resource_inventory, [opts]) do
+      {:ok, inventory} when is_map(inventory) and not is_struct(inventory) ->
+        case select_workspace_recovery_resource(inventory, task_id, agent_id) do
+          {:ok, resource} -> matched_workspace_recovery_locator(task_id, agent_id, resource)
+          :not_found -> pending_workspace_recovery_locator(task_id, agent_id, "not_found")
+        end
+
+      _other ->
+        pending_workspace_recovery_locator(task_id, agent_id, "unavailable")
+    end
+  rescue
+    _exception -> pending_workspace_recovery_locator(task_id, agent_id, "unavailable")
+  catch
+    _kind, _reason -> pending_workspace_recovery_locator(task_id, agent_id, "unavailable")
+  end
+
+  defp select_workspace_recovery_resource(inventory, task_id, agent_id) do
+    resources = Map.get(inventory, "resources")
+
+    candidates =
+      if is_list(resources) do
+        Enum.filter(resources, fn resource ->
+          is_map(resource) and not is_struct(resource) and
+            Map.get(resource, "task_id") == task_id and
+            Map.get(resource, "principal_id") == agent_id and
+            Map.get(resource, "resource_type") in @workspace_recovery_resource_types
+        end)
+      else
+        []
+      end
+
+    case Enum.sort_by(candidates, &workspace_recovery_priority/1) do
+      [best | _rest] -> {:ok, best}
+      [] -> :not_found
+    end
+  end
+
+  defp workspace_recovery_priority(%{"resource_type" => "retained_workspace_record"}), do: 0
+  defp workspace_recovery_priority(_resource), do: 1
+
+  defp matched_workspace_recovery_locator(task_id, agent_id, resource) do
+    %{
+      "lookup_status" => "matched",
+      "task_id" => task_id,
+      "principal_id" => agent_id,
+      "workspace_id" => bounded_recovery_string(Map.get(resource, "workspace_id")),
+      "resource_type" => bounded_recovery_string(Map.get(resource, "resource_type")),
+      "lifecycle" => bounded_recovery_string(Map.get(resource, "lifecycle")),
+      "branch" => bounded_recovery_string(Map.get(resource, "branch")),
+      "repo_path" => bounded_recovery_string(Map.get(resource, "repo_path")),
+      "worktree_path" => bounded_recovery_string(Map.get(resource, "worktree_path")),
+      "base_commit" => bounded_recovery_string(Map.get(resource, "base_commit")),
+      "candidate_commit" => bounded_recovery_string(Map.get(resource, "candidate_commit")),
+      "expires_at" => bounded_recovery_string(Map.get(resource, "expires_at"))
+    }
+    |> reject_nil_values()
+  end
+
+  defp pending_workspace_recovery_locator(task_id, agent_id, lookup_status) do
+    %{
+      "lookup_status" => lookup_status,
+      "task_id" => task_id,
+      "principal_id" => agent_id
+    }
+  end
+
+  # Bounded to the same limit TaskTerminalEnvelope enforces on evidence
+  # strings so an oversized value is omitted here, never silently truncated
+  # downstream into an unusable path or identifier.
+  defp bounded_recovery_string(value) when is_binary(value) do
+    if String.valid?(value) and byte_size(value) > 0 and
+         byte_size(value) <= @max_workspace_recovery_string_bytes and
+         not String.contains?(value, <<0>>) do
+      value
+    else
+      nil
+    end
+  end
+
+  defp bounded_recovery_string(_value), do: nil
 
   # ===========================================================================
   # Progress / cancel helpers

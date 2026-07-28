@@ -707,6 +707,18 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     end
   end
 
+  defmodule FakeReconciliationResourceFacade do
+    @moduledoc false
+
+    def coding_resource_inventory(opts) do
+      case Process.get(:coding_reconciliation_resource_inventory_reply) do
+        nil -> {:ok, %{"resources" => []}}
+        fun when is_function(fun, 1) -> fun.(opts)
+        reply -> reply
+      end
+    end
+  end
+
   defmodule FakePipelineStatus do
     @moduledoc false
     def get(run_id) do
@@ -758,6 +770,8 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       coding_plan_compiler: Application.get_env(:arbor_orchestrator, :coding_plan_compiler),
       coding_plan_artifact_store:
         Application.get_env(:arbor_orchestrator, :coding_plan_artifact_store),
+      coding_reconciliation_resource_facade:
+        Application.get_env(:arbor_orchestrator, :coding_reconciliation_resource_facade),
       coding_readiness_observer_module:
         Application.get_env(:arbor_orchestrator, :coding_readiness_observer_module),
       coding_repo_roots: Application.get_env(:arbor_orchestrator, :coding_repo_roots),
@@ -850,6 +864,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     Process.delete(:coding_abandoned_runs)
     Process.delete(:coding_task_control_calls)
     Process.delete(:coding_task_control_reply)
+    Process.delete(:coding_reconciliation_resource_inventory_reply)
 
     for key <- [
           :security_available,
@@ -872,6 +887,12 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       restore(:coding_approval_timeout_ms, originals.coding_approval_timeout_ms)
       restore(:coding_plan_compiler, originals.coding_plan_compiler)
       restore(:coding_plan_artifact_store, originals.coding_plan_artifact_store)
+
+      restore(
+        :coding_reconciliation_resource_facade,
+        originals.coding_reconciliation_resource_facade
+      )
+
       restore(:coding_readiness_observer_module, originals.coding_readiness_observer_module)
       restore(:coding_repo_roots, originals.coding_repo_roots)
       restore(:coding_worktree_roots, originals.coding_worktree_roots)
@@ -1192,6 +1213,17 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       "council_decision_digest" => @verification_other_digest,
       "feedback_json" => "ignored raw feedback"
     }
+  end
+
+  # Mirrors the real checkpoint context shape: one level of node-result key
+  # flattening (`validation.<field>`), no bare nested "validation" map. Nested
+  # substructures (e.g. "feedback") stay as unflattened map values, matching
+  # how the Engine flattens only the top-level keys of a node's result.
+  defp flat_validation_context(action_result) do
+    action_result
+    |> Enum.map(fn {key, value} -> {"validation." <> key, value} end)
+    |> Map.new()
+    |> Map.put("validation", nil)
   end
 
   defp validation_check(overrides \\ %{}) do
@@ -2268,12 +2300,15 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     test "threads and enforces a supplied pipeline timeout" do
       Application.put_env(:arbor_orchestrator, :coding_pipeline_runner, SlowRunner)
 
-      assert {:error, {:pipeline_timeout, 20}} =
+      assert {:error, {:pipeline_error, detail}} =
                CodingTaskExecutor.run(
                  "agent_1",
                  valid_task(),
                  valid_context(%{"timeout" => 20})
                )
+
+      assert detail["error"] == "pipeline_timeout"
+      assert detail["pipeline_timeout_ms"] == 20
 
       assert_receive {:slow_runner_started, runner_pid, opts, links}
       assert opts[:timeout] == 20
@@ -2323,14 +2358,191 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       Process.delete(:coding_executor_closed_authorities)
       Application.put_env(:arbor_orchestrator, :coding_pipeline_runner, SlowRunner)
 
-      assert {:error, {:pipeline_timeout, 20}} =
+      assert {:error, {:pipeline_error, timeout_detail}} =
                CodingTaskExecutor.run(
                  "agent_1",
                  valid_task(),
                  valid_context(%{"timeout" => 20})
                )
 
+      assert timeout_detail["error"] == "pipeline_timeout"
       assert length(Process.get(:coding_executor_closed_authorities, [])) == 1
+    end
+
+    test "security regression: an opaque non-timeout runner error still collapses to a raw error" do
+      Application.put_env(
+        :arbor_orchestrator,
+        :coding_executor_runner_reply,
+        {:error, :some_unstructured_runner_failure}
+      )
+
+      # Arbitrary executor/runner errors must keep bypassing the structured
+      # pipeline_error path entirely, so TaskStore's boundary still collapses
+      # them to the generic "task_runner_failed" outer code.
+      assert {:error, :some_unstructured_runner_failure} =
+               CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+    end
+
+    test "pipeline timeout preserves matched retained-workspace recovery evidence" do
+      Application.put_env(:arbor_orchestrator, :coding_pipeline_runner, SlowRunner)
+
+      Application.put_env(
+        :arbor_orchestrator,
+        :coding_reconciliation_resource_facade,
+        FakeReconciliationResourceFacade
+      )
+
+      Process.put(:coding_reconciliation_resource_inventory_reply, fn opts ->
+        assert Keyword.get(opts, :task_id) == "task_coding_1"
+        assert Keyword.get(opts, :principal_id) == "agent_1"
+
+        {:ok,
+         %{
+           "resources" => [
+             %{
+               "resource_type" => "retained_workspace_record",
+               "task_id" => "task_coding_1",
+               "principal_id" => "agent_1",
+               "workspace_id" => "ws_retained_1",
+               "branch" => "arbor/coding-agent/retained",
+               "repo_path" => "/tmp/coding-recovery/retained-repo",
+               "worktree_path" => "/tmp/coding-recovery/retained-worktree",
+               "base_commit" => "base-commit-sha",
+               "candidate_commit" => nil,
+               "lifecycle" => "retained",
+               "expires_at" => "2026-07-22T18:00:00Z"
+             }
+           ]
+         }}
+      end)
+
+      assert {:error, {:pipeline_error, detail}} =
+               CodingTaskExecutor.run(
+                 "agent_1",
+                 valid_task(),
+                 valid_context(%{"timeout" => 20})
+               )
+
+      assert detail["status"] == "pipeline_error"
+      assert detail["error"] == "pipeline_timeout"
+      assert detail["pipeline_timeout_ms"] == 20
+      assert detail["outcome"]["code"] == "pipeline_error"
+      assert detail["outcome"]["retry"] == "new_session"
+
+      assert detail["workspace_recovery"] == %{
+               "lookup_status" => "matched",
+               "task_id" => "task_coding_1",
+               "principal_id" => "agent_1",
+               "workspace_id" => "ws_retained_1",
+               "resource_type" => "retained_workspace_record",
+               "lifecycle" => "retained",
+               "branch" => "arbor/coding-agent/retained",
+               "repo_path" => "/tmp/coding-recovery/retained-repo",
+               "worktree_path" => "/tmp/coding-recovery/retained-worktree",
+               "base_commit" => "base-commit-sha",
+               "expires_at" => "2026-07-22T18:00:00Z"
+             }
+    end
+
+    test "pipeline timeout with no matching resource emits a deterministic not-found locator" do
+      Application.put_env(:arbor_orchestrator, :coding_pipeline_runner, SlowRunner)
+
+      Application.put_env(
+        :arbor_orchestrator,
+        :coding_reconciliation_resource_facade,
+        FakeReconciliationResourceFacade
+      )
+
+      Process.put(:coding_reconciliation_resource_inventory_reply, {:ok, %{"resources" => []}})
+
+      assert {:error, {:pipeline_error, detail}} =
+               CodingTaskExecutor.run(
+                 "agent_1",
+                 valid_task(),
+                 valid_context(%{"timeout" => 20})
+               )
+
+      assert detail["error"] == "pipeline_timeout"
+
+      assert detail["workspace_recovery"] == %{
+               "lookup_status" => "not_found",
+               "task_id" => "task_coding_1",
+               "principal_id" => "agent_1"
+             }
+    end
+
+    test "pipeline timeout with an unavailable resource lookup emits a bounded locator, never a fabricated path" do
+      Application.put_env(:arbor_orchestrator, :coding_pipeline_runner, SlowRunner)
+
+      Application.put_env(
+        :arbor_orchestrator,
+        :coding_reconciliation_resource_facade,
+        FakeReconciliationResourceFacade
+      )
+
+      Process.put(
+        :coding_reconciliation_resource_inventory_reply,
+        {:error, :registry_unavailable}
+      )
+
+      assert {:error, {:pipeline_error, detail}} =
+               CodingTaskExecutor.run(
+                 "agent_1",
+                 valid_task(),
+                 valid_context(%{"timeout" => 20})
+               )
+
+      assert detail["workspace_recovery"] == %{
+               "lookup_status" => "unavailable",
+               "task_id" => "task_coding_1",
+               "principal_id" => "agent_1"
+             }
+    end
+
+    test "pipeline timeout omits an oversized recovery path instead of truncating it" do
+      Application.put_env(:arbor_orchestrator, :coding_pipeline_runner, SlowRunner)
+
+      Application.put_env(
+        :arbor_orchestrator,
+        :coding_reconciliation_resource_facade,
+        FakeReconciliationResourceFacade
+      )
+
+      Process.put(
+        :coding_reconciliation_resource_inventory_reply,
+        {:ok,
+         %{
+           "resources" => [
+             %{
+               "resource_type" => "live_workspace_lease",
+               "task_id" => "task_coding_1",
+               "principal_id" => "agent_1",
+               "workspace_id" => "ws_live_1",
+               "branch" => "arbor/coding-agent/live",
+               "repo_path" => String.duplicate("x", 600),
+               "worktree_path" => "/tmp/coding-recovery/live-worktree",
+               "base_commit" => "base-commit-sha",
+               "lifecycle" => "active",
+               "expires_at" => nil
+             }
+           ]
+         }}
+      )
+
+      assert {:error, {:pipeline_error, detail}} =
+               CodingTaskExecutor.run(
+                 "agent_1",
+                 valid_task(),
+                 valid_context(%{"timeout" => 20})
+               )
+
+      recovery = detail["workspace_recovery"]
+      assert recovery["lookup_status"] == "matched"
+      assert recovery["resource_type"] == "live_workspace_lease"
+      assert recovery["worktree_path"] == "/tmp/coding-recovery/live-worktree"
+      refute Map.has_key?(recovery, "repo_path")
+      refute Map.has_key?(recovery, "expires_at")
+      refute Map.has_key?(recovery, "candidate_commit")
     end
 
     test "uses the smaller of plan wall-clock and context timeouts" do
@@ -3260,6 +3472,25 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert result["status"] == "change_committed"
       assert result["canonical_status"] == "change_committed"
       assert result["verification_report"]["status"] == "passed"
+    end
+
+    test "security regression: accepts a success terminal whose validation evidence is flat checkpoint context, not a nested map" do
+      validation = validation_result("default")
+
+      flat_overrides =
+        Map.merge(%{"status" => "change_committed"}, flat_validation_context(validation))
+
+      assert {:ok, result} =
+               run_with_profile_verification("default", validation, flat_overrides)
+
+      assert result["status"] == "change_committed"
+      assert result["canonical_status"] == "change_committed"
+      assert result["verification_report"]["status"] == "passed"
+
+      assert result["verification_report"]["candidate_ref"] ==
+               "git-tree:" <> @verification_tree_oid
+
+      assert result["validation"] == [validation]
     end
 
     test "accepts passed verification for later approval and review terminals" do
