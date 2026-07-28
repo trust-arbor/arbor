@@ -2,7 +2,15 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
   use ExUnit.Case, async: true
 
   alias Arbor.Contracts.Coding.{Plan, WorkPacket}
-  alias Arbor.Orchestrator.CodingPlan.{ActionCatalog, Compiler, Profiles, SemanticPreflight}
+
+  alias Arbor.Orchestrator.CodingPlan.{
+    ActionCatalog,
+    Compiler,
+    Profiles,
+    SemanticPreflight,
+    ValidationProgram
+  }
+
   alias Arbor.Orchestrator.Dot.Parser
   alias Arbor.Orchestrator.IR.Compiler, as: IRCompiler
 
@@ -55,8 +63,13 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     assert :ok =
              preflight(graph, profile["semantic_policy"], review_profile: "binding")
 
+    expected_timeout = graph.nodes["validate"].attrs["param.timeout"]
+
     wrong_timeout =
-      update_in(graph.nodes["validate"].attrs, &Map.put(&1, "param.timeout", 599_999))
+      update_in(
+        graph.nodes["validate"].attrs,
+        &Map.put(&1, "param.timeout", expected_timeout - 1)
+      )
 
     assert {:error, {:semantic_preflight_failed, timeout_errors}} =
              preflight(wrong_timeout, profile["semantic_policy"], review_profile: "binding")
@@ -2311,8 +2324,29 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
       policy,
       opts
       |> Keyword.put_new(:rework_max_cycles, 2)
-      |> Keyword.put_new(:validation_timeout_ms, 600_000)
+      |> Keyword.put_new_lazy(:validation_timeout_ms, fn -> validation_timeout_ms(policy) end)
     )
+  end
+
+  defp validation_timeout_ms(policy) do
+    profile_id =
+      if is_map(policy), do: Map.get(policy, "validation_profile", "default"), else: "default"
+
+    with {:ok, profile} <- Profiles.fetch_executable(profile_id),
+         {:ok, program} <-
+           ValidationProgram.build(profile["validation_strategy"], plan!().budgets),
+         timeout when is_integer(timeout) and timeout > 0 <-
+           get_in(program, ["static_parameters", "timeout"]) do
+      timeout
+    else
+      _other -> default_validation_timeout_ms!()
+    end
+  end
+
+  defp default_validation_timeout_ms! do
+    {:ok, profile} = Profiles.fetch_executable("default")
+    {:ok, program} = ValidationProgram.build(profile["validation_strategy"], plan!().budgets)
+    get_in(program, ["static_parameters", "timeout"])
   end
 
   defp has_edge?(graph, from, to, condition) do
