@@ -213,6 +213,11 @@ defmodule Arbor.Agent.OrchestrationTest do
       )
     end
 
+    def adoption_status(task_id, destination_ref, opts) do
+      send(self(), {:task_adoption_status, task_id, destination_ref, opts})
+      Process.get({__MODULE__, :adoption_status_result}, {:ok, :not_started})
+    end
+
     def cancel(task_id, opts) do
       send(self(), {:task_cancel, task_id, opts})
 
@@ -1721,6 +1726,65 @@ defmodule Arbor.Agent.OrchestrationTest do
 
       assert_received {:task_adopt, "task_1", "refs/heads/reviewed", opts}
       assert opts[:caller_id] == "human_1"
+    end
+
+    test "reconciles a bounded wait timeout to TaskStore's pending settlement" do
+      outcome = task_terminal_outcome("no_changes")
+      Process.put({FakeTaskStore, :status_result}, {:ok, task_status(:done, outcome)})
+      Process.put({FakeTaskStore, :adopt_result}, {:error, :task_adoption_wait_timeout})
+      Process.put({FakeTaskStore, :adoption_status_result}, {:ok, :pending})
+
+      opts = [
+        caller_id: "human_1",
+        task_store: FakeTaskStore,
+        security_module: FakeSecurity,
+        adoption_wait_timeout_ms: 25,
+        adoption_status_timeout_ms: 10,
+        reconcile_adoption_timeout: true
+      ]
+
+      assert {:ok,
+              %{
+                task_id: "task_1",
+                destination_ref: "refs/heads/reviewed",
+                settlement_status: :pending
+              }} =
+               Orchestration.adopt_task_change("task_1", "refs/heads/reviewed", opts)
+
+      assert_received {:task_adopt, "task_1", "refs/heads/reviewed", store_opts}
+      assert store_opts[:adoption_wait_timeout_ms] == 25
+      assert store_opts[:adoption_status_timeout_ms] == 10
+
+      assert_received {:task_adoption_status, "task_1", "refs/heads/reviewed", ^store_opts}
+    end
+
+    test "returns a settlement that wins the timeout reconciliation race" do
+      outcome = task_terminal_outcome("no_changes")
+      Process.put({FakeTaskStore, :status_result}, {:ok, task_status(:done, outcome)})
+      Process.put({FakeTaskStore, :adopt_result}, {:error, :task_adoption_wait_timeout})
+
+      Process.put(
+        {FakeTaskStore, :adoption_status_result},
+        {:ok,
+         {:settled,
+          %{
+            result_type: :coding_change,
+            payload: %{destination_ref: "refs/heads/reviewed", outcome: outcome}
+          }}}
+      )
+
+      assert {:ok, result} =
+               Orchestration.adopt_task_change(
+                 "task_1",
+                 "refs/heads/reviewed",
+                 caller_id: "human_1",
+                 task_store: FakeTaskStore,
+                 security_module: FakeSecurity,
+                 reconcile_adoption_timeout: true
+               )
+
+      assert result.payload.destination_ref == "refs/heads/reviewed"
+      assert result.payload.outcome == outcome
     end
 
     test "does not adopt failed or cancelled terminal envelopes" do

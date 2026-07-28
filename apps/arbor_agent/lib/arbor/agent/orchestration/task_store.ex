@@ -34,7 +34,9 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   terminal steering reconciliation but before publishing success, and failure or
   timeout fails the outer task so required evidence is never silently omitted.
 
-  A configured executor may also implement `adopt_task/4`. TaskStore serializes
+  A configured executor may also implement `adopt_task/4`. This is a
+  post-external-integration proof and settlement step; it does not merge,
+  cherry-pick, or otherwise integrate the candidate. TaskStore serializes
   adoption admission and commit, but runs the potentially slow callback under
   the task supervisor so status and result reads remain available. Adoption is
   eligible only for successful terminal JSON-clean tasks; callback errors leave
@@ -65,8 +67,10 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   @default_max_steering_replays 3
   @default_adoption_timeout_ms 120_000
   @default_adoption_wait_timeout_ms 30_000
+  @default_adoption_status_timeout_ms 500
   @max_adoption_timeout_ms 300_000
   @max_adoption_wait_timeout_ms 120_000
+  @max_adoption_status_timeout_ms 2_000
   @max_adoption_waiters 32
   @max_steering_message_bytes 4_000
   @max_destination_ref_bytes 256
@@ -180,13 +184,17 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   end
 
   @doc """
-  Adopt a successful terminal task into a bounded destination reference.
+  Prove and settle an already externally integrated terminal task change.
 
   The executor callback runs asynchronously under TaskStore ownership. This
   call waits a bounded amount of time (`:adoption_wait_timeout_ms`, default
   #{@default_adoption_wait_timeout_ms} ms) for the owned operation to settle.
   Timing out the caller does not cancel an adoption that TaskStore already
-  admitted; callers can inspect `result/2` for its eventual committed state.
+  admitted; callers can inspect `adoption_status/3` and `result/2` for its
+  eventual committed state.
+
+  This operation does not perform the external merge, cherry-pick, or other
+  integration represented by `destination_ref`.
   """
   @spec adopt(task_id(), String.t(), keyword() | map()) :: {:ok, map()} | {:error, term()}
   def adopt(task_id, destination_ref, opts \\ []) do
@@ -201,6 +209,32 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
         )
       catch
         :exit, {:timeout, _call} -> {:error, :task_adoption_wait_timeout}
+      end
+    end
+  end
+
+  @doc """
+  Return TaskStore's authoritative state for one post-integration settlement.
+
+  The result is `:pending` while the exact TaskStore-owned callback is active,
+  `{:settled, result}` after successful settlement, `{:failed, reason}` after a
+  failed attempt, or `:not_started` when no matching attempt was admitted.
+  """
+  @spec adoption_status(task_id(), String.t(), keyword() | map()) ::
+          {:ok, :pending | :not_started | {:settled, map()} | {:failed, String.t()}}
+          | {:error, term()}
+  def adoption_status(task_id, destination_ref, opts \\ []) do
+    with {:ok, %{"destination_ref" => destination_ref}} <-
+           normalize_adoption_request(destination_ref),
+         {:ok, timeout_ms} <- adoption_status_timeout(opts) do
+      try do
+        GenServer.call(
+          store_name(opts),
+          {:adoption_status, task_id, destination_ref},
+          timeout_ms
+        )
+      catch
+        :exit, {:timeout, _call} -> {:error, :task_adoption_status_timeout}
       end
     end
   end
@@ -381,6 +415,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
           adoption_security_module: Keyword.get(opts, :adoption_security_module, Arbor.Security),
           adoption_capability_revoke: Keyword.get(opts, :adoption_capability_revoke),
           adoption_destination_ref: nil,
+          adoption_last_error: nil,
           # Closed scalar only — executable keys are never retained on the record.
           approval_cleanup_descriptor:
             normalize_approval_cleanup_descriptor(Keyword.get(opts, :approval_cleanup_descriptor)),
@@ -471,6 +506,21 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
 
         :error ->
           {:error, :not_found}
+      end
+
+    {:reply, reply, state}
+  end
+
+  def handle_call({:adoption_status, task_id, destination_ref}, _from, state) do
+    state = ensure_adoption_state_shape(state)
+
+    reply =
+      case normalize_adoption_request(destination_ref) do
+        {:ok, %{"destination_ref" => ^destination_ref}} ->
+          adoption_status_reply(state, task_id, destination_ref)
+
+        _invalid ->
+          {:error, :invalid_destination_ref}
       end
 
     {:reply, reply, state}
@@ -2074,6 +2124,58 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     })
   end
 
+  defp adoption_status_reply(state, task_id, destination_ref) do
+    case Map.fetch(state.tasks, task_id) do
+      {:ok, record} ->
+        adoption_status_for_record(
+          record,
+          Map.get(state.adoptions, task_id),
+          destination_ref
+        )
+
+      :error ->
+        {:error, :not_found}
+    end
+  end
+
+  defp adoption_status_for_record(record, operation, destination_ref) do
+    settled_destination = Map.get(record, :adoption_destination_ref)
+    failed_reason = matching_adoption_failure(record, destination_ref)
+
+    cond do
+      settled_destination == destination_ref ->
+        {:ok, {:settled, record.result}}
+
+      is_binary(settled_destination) ->
+        {:error, :task_already_adopted}
+
+      is_map(operation) and get_in(operation, [:request, "destination_ref"]) == destination_ref ->
+        {:ok, :pending}
+
+      is_map(operation) ->
+        {:error, :task_adoption_in_progress}
+
+      is_binary(failed_reason) ->
+        {:ok, {:failed, failed_reason}}
+
+      true ->
+        {:ok, :not_started}
+    end
+  end
+
+  defp matching_adoption_failure(record, destination_ref) do
+    with %{request: request, result_fingerprint: result_fingerprint, reason: reason}
+         when is_binary(reason) <- Map.get(record, :adoption_last_error),
+         {:ok, expected_request} <- normalize_adoption_request(destination_ref),
+         true <- request == expected_request,
+         {:ok, raw_result} <- finalized_raw_result(record),
+         true <- adoption_result_fingerprint(raw_result) == result_fingerprint do
+      reason
+    else
+      _no_matching_snapshot -> nil
+    end
+  end
+
   defp begin_adoption(state, task_id, destination_ref, from) do
     case Map.fetch(state.tasks, task_id) do
       {:ok, record} ->
@@ -2190,6 +2292,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
 
         next_state =
           state
+          |> put_in([:tasks, task_id, :adoption_last_error], nil)
           |> put_in([:adoptions, task_id], operation)
           |> put_in([:adoption_refs, task.ref], task_id)
 
@@ -2290,21 +2393,41 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
         record
         |> Map.put(:result, normalize_result(updated_raw_result))
         |> Map.put(:adoption_destination_ref, operation.request["destination_ref"])
+        |> Map.put(:adoption_last_error, nil)
         |> Map.put(:updated_at, DateTime.utc_now())
         |> revoke_adoption_capability()
 
       {{:ok, updated_record.result}, put_in(state.tasks[task_id], updated_record)}
     else
       :error ->
-        adoption_commit_error(state, :task_adoption_state_changed)
+        adoption_commit_error(state, task_id, operation, :task_adoption_state_changed)
 
       {:error, reason} ->
-        adoption_commit_error(state, reason)
+        adoption_commit_error(state, task_id, operation, reason)
     end
   end
 
-  defp adoption_commit_error(state, reason) do
-    {{:error, {:task_adoption_failed, bounded_error(reason)}}, state}
+  defp adoption_commit_error(state, task_id, operation, reason) do
+    bounded_reason = bounded_error(reason)
+
+    state =
+      update_in(state.tasks, fn tasks ->
+        case Map.fetch(tasks, task_id) do
+          {:ok, record} ->
+            last_error = %{
+              request: operation.request,
+              result_fingerprint: operation.result_fingerprint,
+              reason: bounded_reason
+            }
+
+            Map.put(tasks, task_id, Map.put(record, :adoption_last_error, last_error))
+
+          :error ->
+            tasks
+        end
+      end)
+
+    {{:error, {:task_adoption_failed, bounded_reason}}, state}
   end
 
   defp validate_adoption_snapshot(
@@ -2838,6 +2961,18 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
 
       _invalid ->
         {:error, :invalid_adoption_wait_timeout}
+    end
+  end
+
+  defp adoption_status_timeout(opts) do
+    case opt(opts, :adoption_status_timeout_ms, @default_adoption_status_timeout_ms) do
+      timeout_ms
+      when is_integer(timeout_ms) and timeout_ms > 0 and
+             timeout_ms <= @max_adoption_status_timeout_ms ->
+        {:ok, timeout_ms}
+
+      _invalid ->
+        {:error, :invalid_adoption_status_timeout}
     end
   end
 

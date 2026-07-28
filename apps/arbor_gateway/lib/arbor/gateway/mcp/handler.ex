@@ -24,6 +24,12 @@ defmodule Arbor.Gateway.MCP.Handler do
 
   @server_name "arbor"
   @server_version "0.1.0"
+  # ExMCP 1.0.0-rc.4 hardcodes a 10-second GenServer.call for tools/call.
+  # Leave enough response budget for facade preflight and the authoritative
+  # TaskStore adoption-status reconciliation after a bounded settlement wait.
+  @default_mcp_adoption_wait_timeout_ms 5_000
+  @max_mcp_adoption_wait_timeout_ms 5_000
+  @mcp_adoption_status_timeout_ms 500
 
   # Owner-bound ACP lifecycle actions. Managed ACP sessions are tied to the
   # calling process; standalone arbor_run runs in a short-lived ExMCP handler
@@ -388,7 +394,11 @@ defmodule Arbor.Gateway.MCP.Handler do
       },
       %{
         name: "arbor_adopt_task_change",
-        description: "Adopt a successful terminal task change into a destination reference.",
+        description:
+          "After an external merge or cherry-pick has integrated a successful terminal " <>
+            "task change, verify that the destination contains it and settle the retained " <>
+            "candidate evidence. This tool does not integrate the change. Slow proof " <>
+            "settlement can return settlement_status=pending; poll arbor_task_result.",
         inputSchema: %{
           type: "object",
           properties: %{
@@ -400,7 +410,8 @@ defmodule Arbor.Gateway.MCP.Handler do
               type: "string",
               minLength: 1,
               maxLength: 256,
-              description: "Destination reference for the successful task change"
+              description:
+                "Reference that already contains the externally integrated successful change"
             }
           },
           required: ["task_id", "destination_ref"]
@@ -719,12 +730,31 @@ defmodule Arbor.Gateway.MCP.Handler do
            call_orchestration(:adopt_task_change, [
              task_id,
              destination_ref,
-             [caller_id: caller_id]
+             [
+               caller_id: caller_id,
+               adoption_wait_timeout_ms: mcp_adoption_wait_timeout_ms(),
+               adoption_status_timeout_ms: @mcp_adoption_status_timeout_ms,
+               reconcile_adoption_timeout: true
+             ]
            ]) do
       {:ok, %{"ok" => true, "task_id" => task_id, "result" => result}}
     else
       {:error, reason} -> {:error, format_tool_error(reason)}
       other -> {:error, format_tool_error(other)}
+    end
+  end
+
+  defp mcp_adoption_wait_timeout_ms do
+    case Application.get_env(
+           :arbor_gateway,
+           :mcp_adoption_wait_timeout_ms,
+           @default_mcp_adoption_wait_timeout_ms
+         ) do
+      timeout_ms when is_integer(timeout_ms) and timeout_ms > 0 ->
+        min(timeout_ms, @max_mcp_adoption_wait_timeout_ms)
+
+      _invalid ->
+        @default_mcp_adoption_wait_timeout_ms
     end
   end
 

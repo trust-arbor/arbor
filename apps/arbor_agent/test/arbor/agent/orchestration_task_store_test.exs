@@ -939,6 +939,9 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
                     %{"destination_ref" => "refs/heads/reviewed"}, %{"task_id" => ^task_id},
                     callback_pid}
 
+    assert {:ok, :pending} =
+             TaskStore.adoption_status(task_id, "refs/heads/reviewed", name: store)
+
     second =
       Task.async(fn ->
         TaskStore.adopt(task_id, "refs/heads/reviewed",
@@ -994,6 +997,9 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
                adoption_wait_timeout_ms: 500
              )
 
+    assert {:ok, {:settled, ^adopted_result}} =
+             TaskStore.adoption_status(task_id, "refs/heads/reviewed", name: store)
+
     assert {:error, :task_already_adopted} =
              TaskStore.adopt(task_id, "refs/heads/other",
                name: store,
@@ -1024,6 +1030,11 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     assert {:error, :task_adoption_wait_timeout} = Task.await(caller, 500)
     assert Map.has_key?(:sys.get_state(store).adoptions, task_id)
 
+    assert {:ok, :pending} =
+             TaskStore.adoption_status(task_id, "refs/heads/reviewed", name: store)
+
+    refute_receive {:adopt_task_called, _, _, _, _, _}, 50
+
     send(
       callback_pid,
       {:finish_adoption, {:ok, Map.put(raw_result, "adopted", request["destination_ref"])}}
@@ -1035,6 +1046,10 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
       refute Map.has_key?(:sys.get_state(store).adoptions, task_id)
     end)
 
+    assert {:ok, {:settled, settled_result}} =
+             TaskStore.adoption_status(task_id, "refs/heads/reviewed", name: store)
+
+    assert settled_result.raw["adopted"] == "refs/heads/reviewed"
     assert_receive {:revoke_adoption_capability, "cap_adopt_wait_timeout"}
   end
 
@@ -1102,6 +1117,9 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     assert_eventually(fn ->
       refute Map.has_key?(:sys.get_state(store).adoptions, task_id)
     end)
+
+    assert {:ok, :not_started} =
+             TaskStore.adoption_status(task_id, "refs/heads/reviewed", name: store)
 
     assert {:ok, ^prior_result} = TaskStore.result(task_id, name: store)
     assert :sys.get_state(store).tasks[task_id].adoption_cap_id == "cap_adopt_queued_timeout"
@@ -1273,6 +1291,12 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
 
     assert {:error, {:task_adoption_failed, ":destination_busy"}} =
              TaskStore.adopt(task_id, "refs/heads/reviewed", name: store)
+
+    assert {:ok, {:failed, ":destination_busy"}} =
+             TaskStore.adoption_status(task_id, "refs/heads/reviewed", name: store)
+
+    assert {:ok, :not_started} =
+             TaskStore.adoption_status(task_id, "refs/heads/other", name: store)
 
     assert {:ok, prior_result} = TaskStore.result(task_id, name: store)
     assert prior_result.raw["finalized"] == true

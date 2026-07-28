@@ -215,11 +215,18 @@ defmodule Arbor.Agent.Orchestration do
   end
 
   @doc """
-  Adopt a successful terminal task change into a destination reference.
+  Prove and settle an already externally integrated terminal task change.
 
   Authorization checks the exact task scope first, followed by the target agent
   and global adoption capability. The destination reference is normalized before
-  it crosses into TaskStore.
+  it crosses into TaskStore. This operation does not merge or cherry-pick the
+  candidate; the caller must integrate it into `destination_ref` first.
+
+  HTTP control planes may set `:reconcile_adoption_timeout` after choosing an
+  `:adoption_wait_timeout_ms` below their own response timeout. If the bounded
+  wait expires, the facade queries TaskStore's authoritative operation state and
+  returns a `"pending"` settlement receipt instead of losing the transport
+  response. TaskStore remains the sole owner of settlement.
   """
   @spec adopt_task_change(String.t(), String.t(), keyword() | map()) ::
           {:ok, map()} | {:error, term()}
@@ -230,11 +237,19 @@ defmodule Arbor.Agent.Orchestration do
          :ok <- authorize_task_adopt(opts, caller_id, status),
          {:ok, destination_ref} <- normalize_destination_ref(destination_ref),
          :ok <- ensure_successful_task(status),
+         store_module = task_store_module(opts),
+         store_opts = task_store_opts(opts),
          store_result <-
-           opts
-           |> task_store_module()
-           |> apply_if_exported(:adopt, [task_id, destination_ref, task_store_opts(opts)]),
-         {:ok, result} <- normalize_task_adopt_result(store_result) do
+           apply_if_exported(store_module, :adopt, [task_id, destination_ref, store_opts]),
+         {:ok, result} <-
+           normalize_task_adopt_result(
+             store_result,
+             task_id,
+             destination_ref,
+             store_module,
+             store_opts,
+             opts
+           ) do
       {:ok, result}
     end
   end
@@ -1827,7 +1842,85 @@ defmodule Arbor.Agent.Orchestration do
   defp normalize_task_steer_result(:module_unavailable), do: {:error, :task_store_unavailable}
   defp normalize_task_steer_result(other), do: {:error, {:unexpected_task_store_result, other}}
 
-  defp normalize_task_adopt_result({:ok, result}) do
+  defp normalize_task_adopt_result(
+         {:error, :task_adoption_wait_timeout},
+         task_id,
+         destination_ref,
+         store_module,
+         store_opts,
+         opts
+       ) do
+    if opt(opts, :reconcile_adoption_timeout, false) == true do
+      store_module
+      |> apply_if_exported(:adoption_status, [task_id, destination_ref, store_opts])
+      |> normalize_task_adoption_reconciliation(task_id, destination_ref)
+    else
+      {:error, :task_adoption_wait_timeout}
+    end
+  end
+
+  defp normalize_task_adopt_result(
+         result,
+         _task_id,
+         _destination_ref,
+         _store_module,
+         _store_opts,
+         _opts
+       ),
+       do: normalize_settled_task_adopt_result(result)
+
+  defp normalize_task_adoption_reconciliation(
+         {:ok, :pending},
+         task_id,
+         destination_ref
+       ) do
+    {:ok,
+     %{
+       task_id: task_id,
+       destination_ref: destination_ref,
+       settlement_status: :pending
+     }}
+  end
+
+  defp normalize_task_adoption_reconciliation(
+         {:ok, {:settled, result}},
+         _task_id,
+         _destination_ref
+       ),
+       do: normalize_settled_task_adopt_result({:ok, result})
+
+  defp normalize_task_adoption_reconciliation(
+         {:ok, {:failed, reason}},
+         _task_id,
+         _destination_ref
+       ),
+       do: {:error, {:task_adoption_failed, reason}}
+
+  defp normalize_task_adoption_reconciliation(
+         {:ok, :not_started},
+         _task_id,
+         _destination_ref
+       ),
+       do: {:error, :task_adoption_not_admitted}
+
+  defp normalize_task_adoption_reconciliation(
+         {:error, _reason} = error,
+         _task_id,
+         _destination_ref
+       ),
+       do: error
+
+  defp normalize_task_adoption_reconciliation(
+         :module_unavailable,
+         _task_id,
+         _destination_ref
+       ),
+       do: {:error, :task_store_unavailable}
+
+  defp normalize_task_adoption_reconciliation(other, _task_id, _destination_ref),
+    do: {:error, {:unexpected_task_adoption_status, other}}
+
+  defp normalize_settled_task_adopt_result({:ok, result}) do
     case normalize_terminal_envelope_result(result) do
       {:ok, _envelope} -> {:error, :task_not_adoptable}
       {:error, reason} -> {:error, reason}
@@ -1835,9 +1928,13 @@ defmodule Arbor.Agent.Orchestration do
     end
   end
 
-  defp normalize_task_adopt_result({:error, _} = error), do: error
-  defp normalize_task_adopt_result(:module_unavailable), do: {:error, :task_store_unavailable}
-  defp normalize_task_adopt_result(other), do: {:error, {:unexpected_task_store_result, other}}
+  defp normalize_settled_task_adopt_result({:error, _} = error), do: error
+
+  defp normalize_settled_task_adopt_result(:module_unavailable),
+    do: {:error, :task_store_unavailable}
+
+  defp normalize_settled_task_adopt_result(other),
+    do: {:error, {:unexpected_task_store_result, other}}
 
   defp normalize_task_state(state)
        when state in [:running, :waiting_approval, :done, :failed, :cancelled],

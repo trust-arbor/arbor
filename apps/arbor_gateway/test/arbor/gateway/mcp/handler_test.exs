@@ -99,7 +99,30 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
 
     def adopt_task_change(task_id, destination_ref, opts) do
       send(self(), {:adopt_task_change, task_id, destination_ref, opts})
-      {:ok, %{result_type: :coding_change, payload: %{destination_ref: destination_ref}}}
+
+      Process.get(
+        {__MODULE__, :adopt_result},
+        {:ok, %{result_type: :coding_change, payload: %{destination_ref: destination_ref}}}
+      )
+    end
+  end
+
+  defmodule SlowAdoptionOrchestration do
+    def adopt_task_change(task_id, destination_ref, opts) do
+      test_pid = Application.fetch_env!(:arbor_gateway, :slow_adoption_test_pid)
+      send(test_pid, {:slow_adoption_called, task_id, destination_ref, opts})
+
+      # Without the Gateway's bounded wait option this exceeds ExMCP's hardcoded
+      # 10-second tools/call timeout and reproduces the empty HTTP 500.
+      wait_ms = Keyword.get(opts, :adoption_wait_timeout_ms, 10_100)
+      Process.sleep(wait_ms + 10)
+
+      {:ok,
+       %{
+         task_id: task_id,
+         destination_ref: destination_ref,
+         settlement_status: :pending
+       }}
     end
   end
 
@@ -126,6 +149,7 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
     Process.delete({FakeOrchestration, :result_result})
     Process.delete({FakeOrchestration, :cancel_result})
     Process.delete({FakeOrchestration, :steer_result})
+    Process.delete({FakeOrchestration, :adopt_result})
 
     {:ok, state: %{}}
   end
@@ -225,6 +249,20 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
         assert is_map(tool.inputSchema)
         assert tool.inputSchema.type == "object"
       end
+    end
+
+    test "adoption tool states that external integration must already be complete", %{
+      state: state
+    } do
+      {:ok, tools, _, _} = Handler.handle_list_tools(nil, state)
+      tool = Enum.find(tools, &(&1.name == "arbor_adopt_task_change"))
+
+      assert tool.description =~ "After an external merge or cherry-pick"
+      assert tool.description =~ "does not integrate the change"
+      assert tool.description =~ "settlement_status=pending"
+
+      assert tool.inputSchema.properties.destination_ref.description =~
+               "already contains the externally integrated"
     end
 
     test "arbor_help requires 'action' parameter", %{state: state} do
@@ -707,6 +745,93 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
 
       assert_received {:adopt_task_change, "task_1", "refs/heads/reviewed", opts}
       assert opts[:caller_id] == "human_1"
+      assert opts[:adoption_wait_timeout_ms] == 5_000
+      assert opts[:adoption_status_timeout_ms] == 500
+      assert opts[:reconcile_adoption_timeout] == true
+    end
+
+    test "adoption response budget remains below ExMCP's tools/call timeout", %{state: state} do
+      previous_wait = Application.get_env(:arbor_gateway, :mcp_adoption_wait_timeout_ms)
+      Application.put_env(:arbor_gateway, :mcp_adoption_wait_timeout_ms, 30_000)
+      on_exit(fn -> restore_env(:mcp_adoption_wait_timeout_ms, previous_wait) end)
+      Process.put(:arbor_authenticated_agent_id, "human_1")
+
+      assert {:ok, %{content: [%{type: "text"}]}, _state} =
+               Handler.handle_call_tool(
+                 "arbor_adopt_task_change",
+                 %{"task_id" => "task_1", "destination_ref" => "refs/heads/reviewed"},
+                 state
+               )
+
+      assert_received {:adopt_task_change, "task_1", "refs/heads/reviewed", opts}
+      assert opts[:adoption_wait_timeout_ms] == 5_000
+      assert opts[:adoption_status_timeout_ms] == 500
+    end
+
+    test "slow adoption returns a pending MCP response before ExMCP's tools/call timeout" do
+      previous_module = Application.get_env(:arbor_gateway, :orchestration_module)
+      previous_wait = Application.get_env(:arbor_gateway, :mcp_adoption_wait_timeout_ms)
+      previous_test_pid = Application.get_env(:arbor_gateway, :slow_adoption_test_pid)
+
+      Application.put_env(
+        :arbor_gateway,
+        :orchestration_module,
+        SlowAdoptionOrchestration
+      )
+
+      Application.put_env(:arbor_gateway, :mcp_adoption_wait_timeout_ms, 25)
+      Application.put_env(:arbor_gateway, :slow_adoption_test_pid, self())
+
+      on_exit(fn ->
+        restore_env(:orchestration_module, previous_module)
+        restore_env(:mcp_adoption_wait_timeout_ms, previous_wait)
+        restore_env(:slow_adoption_test_pid, previous_test_pid)
+      end)
+
+      request = %{
+        "jsonrpc" => "2.0",
+        "id" => 42,
+        "method" => "tools/call",
+        "params" => %{
+          "name" => "arbor_adopt_task_change",
+          "arguments" => %{
+            "task_id" => "task_slow_adoption",
+            "destination_ref" => "refs/heads/main"
+          }
+        }
+      }
+
+      started_ms = System.monotonic_time(:millisecond)
+
+      response =
+        request
+        |> ExMCP.MessageProcessor.new(transport: :http)
+        |> ExMCP.MessageProcessor.process(%{
+          handler: Handler,
+          handler_opts: [authenticated_agent_id: "human_1"],
+          server_info: %{name: "arbor", version: "test"}
+        })
+        |> Map.fetch!(:response)
+
+      elapsed_ms = System.monotonic_time(:millisecond) - started_ms
+
+      assert elapsed_ms < 1_000
+
+      assert_receive {:slow_adoption_called, "task_slow_adoption", "refs/heads/main", opts}
+      assert opts[:adoption_wait_timeout_ms] == 25
+      assert opts[:reconcile_adoption_timeout] == true
+
+      assert %{"result" => %{"content" => [%{"text" => text}]}} = response
+
+      assert %{
+               "ok" => true,
+               "task_id" => "task_slow_adoption",
+               "result" => %{
+                 "destination_ref" => "refs/heads/main",
+                 "settlement_status" => "pending",
+                 "task_id" => "task_slow_adoption"
+               }
+             } = Jason.decode!(text)
     end
   end
 
@@ -1337,6 +1462,9 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
              "Overview component leaks a specific agent_id and memory count — M8 regression"
     end
   end
+
+  defp restore_env(key, nil), do: Application.delete_env(:arbor_gateway, key)
+  defp restore_env(key, value), do: Application.put_env(:arbor_gateway, key, value)
 
   defp task_outcome(code) do
     {:ok, outcome} = Arbor.Contracts.Coding.TaskOutcome.from_code(code)
