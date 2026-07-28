@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-07-28",
-  "entry_count": 550,
+  "entry_count": 551,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -6694,8 +6694,21 @@
       "source_incident": "found 2026-07-28 after Grok reduced a 23,806-byte design only to 20,382 bytes because the repair prompt never disclosed Arbor's 16,384-byte limit).",
       "content_sha256": "f4c70444b4075d96930cf8852c20ab3fe16dcb4cb8b03e9fb5324c6d652842ce",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 551,
+      "source_kind": "post-migration",
+      "slug": "aggregate-payload-bounds-must-compose-from-admitted-component-bounds",
+      "title": "Aggregate payload bounds must compose from admitted component bounds.",
+      "topic": "acp-mcp",
+      "destination": ".claude/skills/applied-learning-acp-mcp.md",
+      "anchor": "applied-learning-aggregate-payload-bounds-must-compose-from-admitted-component-bounds",
+      "source_date": "2026-07-28",
+      "source_incident": "found 2026-07-28 when a valid 14,324-byte Grok design parsed successfully but design-checkpoint Open rejected its packet-composed description as too large).",
+      "content_sha256": "a1544afaf741070b863b52a2c603cc3b7b30f36d8421c993b2cc96037f7234f9",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 89
+  "post_migration_entry_count": 90
 }

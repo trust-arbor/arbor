@@ -15,8 +15,14 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint do
   @max_design_bytes 16_384
   @max_terminal_response_bytes 65_536
   @max_json_scan_attempts 128
-  @max_description_bytes 16_384
-  @max_metadata_bytes 32_768
+  # Aggregate bounds must admit every value already accepted by the component
+  # contracts. Description uses raw packet/task/design bytes; metadata may
+  # JSON-escape each accepted task/design byte as a six-byte `\u00xx` sequence
+  # and carries bounded identity fields.
+  @max_description_bytes WorkPacket.max_packet_bytes() + @max_task_bytes + @max_design_bytes +
+                           4_096
+  @max_metadata_bytes WorkPacket.max_packet_bytes() +
+                        6 * (@max_task_bytes + @max_design_bytes) + 16_384
   @default_timeout 60_000
   @max_timeout 3_600_000
   @request_prefix "irq_design_"

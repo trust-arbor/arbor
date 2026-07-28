@@ -313,7 +313,7 @@ defmodule Arbor.Actions.Coding.DesignCheckpointTest do
     refute_received {:request_durable_interaction, _, _}
   end
 
-  test "Open fails closed when exact design evidence exceeds durable bounds", ctx do
+  test "Open fails closed when exact design evidence exceeds its field bound", ctx do
     oversized_design = String.duplicate("x", DesignCheckpoint.max_design_bytes() + 1)
 
     assert {:error, :design_checkpoint_design_too_large} =
@@ -326,15 +326,71 @@ defmodule Arbor.Actions.Coding.DesignCheckpointTest do
                ctx.context
              )
 
-    bounded_design = String.duplicate("x", DesignCheckpoint.max_design_bytes())
+    refute_received {:request_durable_interaction, _, _}
+  end
 
-    assert {:error, :design_checkpoint_description_too_large} =
+  test "Open composes task and design values at their admitted field bounds", ctx do
+    bounded_design = String.duplicate("x", DesignCheckpoint.max_design_bytes())
+    bounded_task = String.duplicate("t", 16_384)
+
+    assert {:ok, opened} =
              Open.run(
-               %{ctx.params | design: bounded_design, design_digest: digest(bounded_design)},
+               %{
+                 ctx.params
+                 | task: bounded_task,
+                   design: bounded_design,
+                   design_digest: digest(bounded_design)
+               },
                ctx.context
              )
 
-    refute_received {:request_durable_interaction, _, _}
+    assert opened["checkpoint_outcome"] == "pending"
+
+    assert_received {:request_durable_interaction, interaction, _opts}
+    assert interaction.description =~ bounded_task
+    assert interaction.description =~ bounded_design
+    assert byte_size(interaction.description) > 32_768
+
+    assert {:ok, encoded_metadata} = Jason.encode(interaction.metadata)
+    assert byte_size(encoded_metadata) > 32_768
+  end
+
+  test "Open composes admitted fields through worst-case metadata JSON expansion", ctx do
+    max_text = String.duplicate("p", WorkPacket.max_text_bytes())
+
+    large_packet = %{
+      ctx.params.work_packet
+      | "success_criteria" => List.duplicate(max_text, WorkPacket.max_list_items()),
+        "non_goals" => List.duplicate(max_text, 16)
+    }
+
+    {:ok, large_packet_digest} = WorkPacket.digest(large_packet)
+    escaped_task = String.duplicate(<<1>>, 16_384)
+    escaped_design = String.duplicate(<<1>>, DesignCheckpoint.max_design_bytes())
+
+    assert {:ok, opened} =
+             Open.run(
+               %{
+                 ctx.params
+                 | work_packet: large_packet,
+                   packet_digest: large_packet_digest,
+                   task: escaped_task,
+                   design: escaped_design,
+                   design_digest: digest(escaped_design)
+               },
+               ctx.context
+             )
+
+    assert opened["checkpoint_outcome"] == "pending"
+
+    assert_received {:request_durable_interaction, interaction, _opts}
+    assert {:ok, encoded_metadata} = Jason.encode(interaction.metadata)
+
+    insufficient_two_x_bound =
+      WorkPacket.max_packet_bytes() +
+        2 * (16_384 + DesignCheckpoint.max_design_bytes()) + 16_384
+
+    assert byte_size(encoded_metadata) > insufficient_two_x_bound
   end
 
   test "Open requires a bounded task and a strict compiled plan fingerprint", ctx do

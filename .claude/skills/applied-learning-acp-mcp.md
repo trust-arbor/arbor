@@ -579,3 +579,15 @@ oversized first turn through the same worker session to a bounded admitted
 repair; a malformed-JSON-only fixture does not prove size recovery (found
 2026-07-28 after Grok reduced a 23,806-byte design only to 20,382 bytes because
 the repair prompt never disclosed Arbor's 16,384-byte limit).
+
+<!-- applied-learning: aggregate-payload-bounds-must-compose-from-admitted-component-bounds -->
+<a id="applied-learning-aggregate-payload-bounds-must-compose-from-admitted-component-bounds"></a>
+**Aggregate payload bounds must compose from admitted component bounds.** If a
+contract accepts a 16 KB design and 256 KB work packet, a later interaction
+cannot concatenate packet, task, and design into an independently chosen 16 KB
+description or 32 KB metadata cap. Derive aggregate ceilings from the public
+component maxima plus explicit serialization overhead, then pass maximum
+admitted component values through the real public operation. Per-field tests
+alone miss the downstream contradiction (found 2026-07-28 when a valid
+14,324-byte Grok design parsed successfully but design-checkpoint Open rejected
+its packet-composed description as too large).
