@@ -620,3 +620,13 @@ array expansion such as `${(@f)...}` for trusted line-delimited paths, or a
 NUL-delimited producer and consumer for arbitrary filenames, then verify the
 tool actually inspected the intended file count (found 2026-07-28 during the
 Phase F scoped formatting check).
+
+<!-- applied-learning: use-canonical-macos-temp-paths-for-rebar-backed-isolated-builds -->
+<a id="applied-learning-use-canonical-macos-temp-paths-for-rebar-backed-isolated-builds"></a>
+**Use canonical macOS temp paths for rebar-backed isolated builds.** On macOS,
+`/tmp` resolves to `/private/tmp`; using a noncanonical `/tmp/...` value for
+`MIX_BUILD_PATH` can make rebar dependency symlinks resolve through inconsistent
+roots and fail valid dependency includes such as `yamerl`. Put isolated build
+artifacts under the canonical `/private/tmp/...` path, keep `MIX_DEPS_PATH`
+explicit, and let the worktree itself remain under either spelling (found
+2026-07-29 while independently validating the interaction-wait candidate).

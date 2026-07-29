@@ -4,6 +4,15 @@ Read this when dispatching, steering, approving, resuming, or reviewing delegate
 
 ## Retained Applied Learning
 
+<!-- applied-learning: build-structured-coding-work-packet-digests-with-the-contract-helper -->
+<a id="applied-learning-build-structured-coding-work-packet-digests-with-the-contract-helper"></a>
+**Build structured coding WorkPacket digests with the contract helper.**
+`Arbor.Contracts.Coding.WorkPacket.digest/1` serializes fields in the contract's
+canonical order; generic lexicographic JSON key sorting produces a different
+digest even when every value is identical, so coding preflight correctly rejects
+it as `digest_mismatch`. Normalize the packet, call the helper, and relay that
+exact digest (found 2026-07-29 redispatching the interaction-wait correction).
+
 <!-- applied-learning: never-mutate-a-delegated-worktree-after-owner-inspection-has-pinned-its-validation-fingerprint -->
 <a id="applied-learning-never-mutate-a-delegated-worktree-after-owner-inspection-has-pinned-its-validation-fingerprint"></a>
 **Never mutate a delegated worktree after owner inspection has pinned its

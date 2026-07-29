@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-07-29",
-  "entry_count": 580,
+  "entry_count": 582,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -7084,8 +7084,34 @@
       "source_incident": "found 2026-07-29 after the historical arbitrary 12,000-byte CodingPlan advice rejected a valid 17,585-byte design).",
       "content_sha256": "01016c19934643474ce29070d59f433f08a1a01acb8f246b719cafab87b98caa",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 581,
+      "source_kind": "post-migration",
+      "slug": "build-structured-coding-work-packet-digests-with-the-contract-helper",
+      "title": "Build structured coding WorkPacket digests with the contract helper.",
+      "topic": "acp-mcp",
+      "destination": ".claude/skills/applied-learning-acp-mcp.md",
+      "anchor": "applied-learning-build-structured-coding-work-packet-digests-with-the-contract-helper",
+      "source_date": "2026-07-29",
+      "source_incident": "found 2026-07-29 redispatching the interaction-wait correction).",
+      "content_sha256": "c30f6eb9f4a01f45bc3b4a087d0f56900bad59ebe7fbd8b96124dd0980cd84ae",
+      "always_loaded": false
+    },
+    {
+      "source_ordinal": 582,
+      "source_kind": "post-migration",
+      "slug": "use-canonical-macos-temp-paths-for-rebar-backed-isolated-builds",
+      "title": "Use canonical macOS temp paths for rebar-backed isolated builds.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-use-canonical-macos-temp-paths-for-rebar-backed-isolated-builds",
+      "source_date": "2026-07-29",
+      "source_incident": "found 2026-07-29 while independently validating the interaction-wait candidate).",
+      "content_sha256": "a3f6dee88aa5aa2d8a417408de86f98f84ec036603cc2088dbeb042af5f403b9",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 119
+  "post_migration_entry_count": 121
 }
