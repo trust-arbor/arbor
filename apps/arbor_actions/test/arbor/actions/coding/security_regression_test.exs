@@ -190,6 +190,7 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
   test "aggregate stage exhaustion after candidate prevents base admission", %{tmp_dir: tmp_dir} do
     fixture = regression_fixture(tmp_dir)
     parent = self()
+    stage_timeout = 30_000
     {:ok, clock_agent} = Agent.start_link(fn -> 0 end)
 
     Application.put_env(:arbor_actions, :security_regression_monotonic_ms, fn ->
@@ -201,7 +202,7 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
         send(parent, {:stage_timeout_revision, Keyword.get(opts, :validation_revision)})
 
         if Keyword.get(opts, :validation_revision) == :candidate do
-          Agent.update(clock_agent, fn _ -> 3_000 end)
+          Agent.update(clock_agent, fn _ -> stage_timeout end)
         end
 
         Arbor.Actions.SecurityRegressionTestMixRunner.run(path, args, opts)
@@ -210,7 +211,7 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
         params =
           fixture
           |> attested_params(["test/security_regression_test.exs"])
-          |> Map.put(:stage_timeout, 3_000)
+          |> Map.put(:stage_timeout, stage_timeout)
 
         assert {:ok, result} = Validate.run(params, fixture.context)
         refute result.passed
@@ -230,6 +231,7 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
   test "final child overrun returns typed base timeout and cleans resources", %{tmp_dir: tmp_dir} do
     fixture = regression_fixture(tmp_dir)
     parent = self()
+    stage_timeout = 30_000
     {:ok, clock_agent} = Agent.start_link(fn -> 0 end)
 
     Application.put_env(:arbor_actions, :security_regression_monotonic_ms, fn ->
@@ -242,7 +244,7 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
         send(parent, {:final_stage_timeout_revision, revision})
 
         if revision == :base do
-          Agent.update(clock_agent, fn _ -> 3_000 end)
+          Agent.update(clock_agent, fn _ -> stage_timeout end)
         end
 
         Arbor.Actions.SecurityRegressionTestMixRunner.run(path, args, opts)
@@ -251,7 +253,7 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
         params =
           fixture
           |> attested_params(["test/security_regression_test.exs"])
-          |> Map.put(:stage_timeout, 3_000)
+          |> Map.put(:stage_timeout, stage_timeout)
 
         assert {:ok, result} = Validate.run(params, fixture.context)
         refute result.passed
