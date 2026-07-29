@@ -5,7 +5,8 @@ defmodule Arbor.Contracts.Coding.ReconciliationManifestTest do
     AppleContainerUnitIdentity,
     PendingApprovalResourceId,
     ReconciliationDecision,
-    ReconciliationManifest
+    ReconciliationManifest,
+    RetainedWorkspaceIdentity
   }
 
   @moduletag :fast
@@ -101,6 +102,10 @@ defmodule Arbor.Contracts.Coding.ReconciliationManifestTest do
   end
 
   test "legacy workspace version-1 manifest normalizes and digests identically" do
+    assert {:ok, manifest} = ReconciliationManifest.new(@legacy_workspace_manifest)
+    assert manifest.schema_version == 1
+    assert ReconciliationManifest.to_map(manifest) == @legacy_workspace_manifest
+
     assert {:ok, normalized} = ReconciliationManifest.normalize(@legacy_workspace_manifest)
     assert normalized == @legacy_workspace_manifest
     assert {:ok, digest} = ReconciliationManifest.digest(@legacy_workspace_manifest)
@@ -110,6 +115,62 @@ defmodule Arbor.Contracts.Coding.ReconciliationManifestTest do
 
     assert {:ok, decision_map} = ReconciliationDecision.normalize(@legacy_workspace_decision)
     assert decision_map == @legacy_workspace_decision
+
+    assert {:ok, decision} = ReconciliationDecision.new(@legacy_workspace_decision)
+    assert decision.schema_version == 1
+    assert ReconciliationDecision.to_map(decision) == @legacy_workspace_decision
+  end
+
+  test "latest contracts emit version 2 while archived version 1 remains stable" do
+    assert ReconciliationDecision.schema_version() == 2
+    assert ReconciliationManifest.schema_version() == 2
+
+    assert {:ok, decision} = ReconciliationDecision.new(current_retained_decision())
+    assert decision.schema_version == 2
+
+    assert {:ok, manifest} =
+             ReconciliationManifest.new(
+               valid_manifest([ReconciliationDecision.to_map(decision)], 1, 0, 0, 1, 0, 2)
+             )
+
+    assert ReconciliationManifest.to_map(manifest)["schema_version"] == 2
+    assert hd(ReconciliationManifest.to_map(manifest)["decisions"])["schema_version"] == 2
+  end
+
+  test "version 1 rejects version-2 retained proof while version 2 admits proof and legacy audit identity" do
+    proof = retained_proof()
+
+    assert {:error, _} =
+             ReconciliationDecision.new(
+               @legacy_workspace_decision
+               |> Map.put("resource_type", "retained_workspace_record")
+               |> Map.put("resource_id", "retained-1")
+               |> Map.put("expected_identity", proof)
+             )
+
+    assert {:ok, proof_decision} = ReconciliationDecision.new(current_retained_decision())
+    assert proof_decision.expected_identity["identity_version"] == 2
+
+    legacy_v2 =
+      current_retained_decision()
+      |> Map.put("expected_identity", retained_legacy_identity())
+
+    assert {:ok, legacy_decision} = ReconciliationDecision.new(legacy_v2)
+    refute Map.has_key?(legacy_decision.expected_identity, "identity_version")
+  end
+
+  test "manifest requires all nested decisions to match its version" do
+    legacy = @legacy_workspace_decision
+    current = current_retained_decision()
+
+    assert {:error, _} =
+             ReconciliationManifest.new(valid_manifest([legacy, current], 2, 2, 0, 0, 0, 1))
+
+    assert {:error, _} =
+             ReconciliationManifest.new(valid_manifest([current, legacy], 2, 2, 0, 0, 0, 2))
+
+    assert {:ok, _} = ReconciliationManifest.new(valid_manifest([legacy], 1, 1, 0, 0, 0, 1))
+    assert {:ok, _} = ReconciliationManifest.new(valid_manifest([current], 1, 0, 0, 1, 0, 2))
   end
 
   test "accepts closed acp_managed_session identity and mixed manifests" do
@@ -436,9 +497,61 @@ defmodule Arbor.Contracts.Coding.ReconciliationManifestTest do
     }
   end
 
-  defp valid_manifest(decisions, resources, keep, retry, settle, quarantine) do
+  defp current_retained_decision do
     %{
-      "schema_version" => 1,
+      "schema_version" => ReconciliationDecision.schema_version(),
+      "resource_type" => "retained_workspace_record",
+      "resource_id" => "retained-1",
+      "task_id" => "task-1",
+      "principal_id" => "principal-1",
+      "decision" => "settle",
+      "reason" => "retained_expired",
+      "expected_identity" => retained_proof(),
+      "evidence" => %{
+        "task_presence" => "observed",
+        "task_state" => "done",
+        "owner_status" => "dead",
+        "journal_status" => "complete"
+      }
+    }
+  end
+
+  defp retained_legacy_identity do
+    %{
+      "resource_type" => "retained_workspace_record",
+      "resource_id" => "retained-1",
+      "task_id" => "task-1",
+      "principal_id" => "principal-1",
+      "lifecycle" => "retained",
+      "active" => false,
+      "ownership" => "owned",
+      "branch_provenance" => "created",
+      "cleanup_armed" => false,
+      "dormant" => false,
+      "retry_count" => 0,
+      "retry_limit" => 3,
+      "expires_at" => "2026-07-22T17:00:00Z"
+    }
+  end
+
+  defp retained_proof do
+    retained_legacy_identity()
+    |> Map.merge(%{
+      "identity_version" => RetainedWorkspaceIdentity.identity_version(),
+      "proof_status" => "complete",
+      "marker_source" => "disabled",
+      "workspace_digest" => String.duplicate("a", 64),
+      "marker_digest" => nil,
+      "repository_digest" => String.duplicate("b", 64),
+      "branch_observation" => %{"status" => "present", "oid" => String.duplicate("c", 40)},
+      "discard_phase" => nil,
+      "settlement_tip" => nil
+    })
+  end
+
+  defp valid_manifest(decisions, resources, keep, retry, settle, quarantine, version \\ 1) do
+    %{
+      "schema_version" => version,
       "observed_at" => "2026-07-22T17:00:00Z",
       "scope" => %{"task_id" => nil, "principal_id" => nil, "agent_id" => nil, "state" => nil},
       "observation_digest" => %{

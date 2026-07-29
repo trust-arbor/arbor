@@ -10,11 +10,12 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
 
   alias Arbor.Contracts.Coding.AppleContainerUnitIdentity
   alias Arbor.Contracts.Coding.PendingApprovalResourceId
+  alias Arbor.Contracts.Coding.ReconciliationDecision
   alias Arbor.Contracts.Coding.ReconciliationManifest
   alias Arbor.Contracts.Coding.RetainedWorkspaceIdentity
   alias Arbor.Contracts.Security.CapabilityUri
 
-  @schema_version 1
+  @source_schema_version 1
   @max_tasks 1_000
   @max_resources 1_000
   @max_acp_sessions 1_000
@@ -218,7 +219,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
 
     {:ok,
      %{
-       "schema_version" => @schema_version,
+       "schema_version" => ReconciliationManifest.schema_version(),
        "observed_at" => observed_at,
        "scope" => scope,
        "observation_digest" => observation_digest,
@@ -305,7 +306,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
 
   defp empty_acp_inventory_for(filters) do
     %{
-      "schema_version" => @schema_version,
+      "schema_version" => @source_schema_version,
       "storage" => %{"durability" => "volatile"},
       "filters" => %{
         "task_id" => filters["task_id"],
@@ -332,7 +333,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
 
   defp empty_pending_approval_inventory_for(filters) do
     %{
-      "schema_version" => @schema_version,
+      "schema_version" => @source_schema_version,
       "storage" => %{
         "durability" => "volatile",
         "authority" => "approval_backends",
@@ -1240,6 +1241,11 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
   defp normalize_retained_source_identity(%{"resource_type" => "retained_workspace_record"}),
     do: {:error, :malformed_retained_source_identity}
 
+  defp normalize_retained_source_identity(%{"expected_identity" => nil}), do: :ok
+
+  defp normalize_retained_source_identity(%{"expected_identity" => _identity}),
+    do: {:error, :malformed_resource}
+
   defp normalize_retained_source_identity(_resource), do: :ok
 
   defp optional_fields(resource) do
@@ -1337,7 +1343,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
       end
 
     %{
-      "schema_version" => @schema_version,
+      "schema_version" => ReconciliationDecision.schema_version(),
       "resource_type" => type,
       "resource_id" => resource["resource_id"],
       "task_id" => task_id,
@@ -1424,7 +1430,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
       end
 
     %{
-      "schema_version" => @schema_version,
+      "schema_version" => ReconciliationDecision.schema_version(),
       "resource_type" => "acp_managed_session",
       "resource_id" => session["worker_session_id"],
       "task_id" => task_id,
@@ -1493,7 +1499,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
       end
 
     %{
-      "schema_version" => @schema_version,
+      "schema_version" => ReconciliationDecision.schema_version(),
       "resource_type" => "pending_approval",
       "resource_id" => approval["resource_id"],
       "task_id" => task_id,
@@ -1539,7 +1545,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
       end
 
     %{
-      "schema_version" => @schema_version,
+      "schema_version" => ReconciliationDecision.schema_version(),
       "resource_type" => "apple_container_unit",
       "resource_id" => unit["resource_id"],
       "task_id" => task_id,
@@ -1934,7 +1940,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
   defp required_exact(map, fields) when is_map(map),
     do: if(Enum.all?(fields, &Map.has_key?(map, &1)), do: :ok, else: {:error, :missing_field})
 
-  defp version(@schema_version), do: :ok
+  defp version(@source_schema_version), do: :ok
   defp version(_), do: {:error, :unsupported_schema_version}
 
   defp value(actual, actual), do: :ok

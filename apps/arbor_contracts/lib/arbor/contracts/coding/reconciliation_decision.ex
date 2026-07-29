@@ -7,7 +7,9 @@ defmodule Arbor.Contracts.Coding.ReconciliationDecision do
   alias Arbor.Contracts.Coding.PendingApprovalIdentity
   alias Arbor.Contracts.Coding.RetainedWorkspaceIdentity
 
-  @schema_version 1
+  @legacy_schema_version 1
+  @schema_version 2
+  @supported_schema_versions [@legacy_schema_version, @schema_version]
   @workspace_resource_types ~w(
     live_workspace_lease retained_workspace_record validation_resource quarantine
   )
@@ -99,7 +101,7 @@ defmodule Arbor.Contracts.Coding.ReconciliationDecision do
   def new(attrs) do
     with {:ok, attrs} <- normalize_object(attrs, fields(), :invalid_reconciliation_decision),
          :ok <- require_fields(attrs),
-         :ok <- exact_version(attrs.schema_version),
+         {:ok, schema_version} <- exact_version(attrs.schema_version),
          {:ok, resource_type} <- enum(attrs.resource_type, @resource_types, :resource_type),
          {:ok, resource_id} <- bounded_id(attrs.resource_id, :resource_id),
          {:ok, task_id} <- optional_id(attrs.task_id, :task_id),
@@ -109,6 +111,7 @@ defmodule Arbor.Contracts.Coding.ReconciliationDecision do
          {:ok, expected_identity} <-
            normalize_identity(
              attrs.expected_identity,
+             schema_version,
              resource_type,
              resource_id,
              task_id,
@@ -117,7 +120,7 @@ defmodule Arbor.Contracts.Coding.ReconciliationDecision do
          {:ok, evidence} <- normalize_evidence(attrs.evidence) do
       {:ok,
        %__MODULE__{
-         schema_version: @schema_version,
+         schema_version: schema_version,
          resource_type: resource_type,
          resource_id: resource_id,
          task_id: task_id,
@@ -173,7 +176,14 @@ defmodule Arbor.Contracts.Coding.ReconciliationDecision do
     ]
   end
 
-  defp normalize_identity(value, resource_type, resource_id, outer_task_id, outer_principal_id)
+  defp normalize_identity(
+         value,
+         _schema_version,
+         resource_type,
+         resource_id,
+         outer_task_id,
+         outer_principal_id
+       )
        when is_map(value) and not is_struct(value) and resource_type == @acp_resource_type do
     with {:ok, attrs} <-
            normalize_object(value, @acp_expected_identity_fields, :invalid_identity),
@@ -226,7 +236,14 @@ defmodule Arbor.Contracts.Coding.ReconciliationDecision do
     end
   end
 
-  defp normalize_identity(value, resource_type, resource_id, outer_task_id, outer_principal_id)
+  defp normalize_identity(
+         value,
+         _schema_version,
+         resource_type,
+         resource_id,
+         outer_task_id,
+         outer_principal_id
+       )
        when is_map(value) and not is_struct(value) and
               resource_type == @pending_approval_resource_type do
     with {:ok, identity} <- PendingApprovalIdentity.normalize(value),
@@ -241,7 +258,14 @@ defmodule Arbor.Contracts.Coding.ReconciliationDecision do
     end
   end
 
-  defp normalize_identity(value, resource_type, resource_id, outer_task_id, outer_principal_id)
+  defp normalize_identity(
+         value,
+         _schema_version,
+         resource_type,
+         resource_id,
+         outer_task_id,
+         outer_principal_id
+       )
        when is_map(value) and not is_struct(value) and
               resource_type == @apple_container_unit_resource_type do
     with {:ok, identity} <- AppleContainerUnitIdentity.normalize(value),
@@ -256,9 +280,17 @@ defmodule Arbor.Contracts.Coding.ReconciliationDecision do
     end
   end
 
-  defp normalize_identity(value, "retained_workspace_record", resource_id, task_id, principal_id)
+  defp normalize_identity(
+         value,
+         schema_version,
+         "retained_workspace_record",
+         resource_id,
+         task_id,
+         principal_id
+       )
        when is_map(value) and not is_struct(value) do
     with {:ok, identity} <- RetainedWorkspaceIdentity.normalize(value),
+         :ok <- retained_identity_version(schema_version, identity),
          true <- identity["resource_id"] == resource_id,
          true <- identity["task_id"] == task_id,
          true <- identity["principal_id"] == principal_id do
@@ -269,7 +301,14 @@ defmodule Arbor.Contracts.Coding.ReconciliationDecision do
     end
   end
 
-  defp normalize_identity(value, resource_type, _resource_id, _task_id, _principal_id)
+  defp normalize_identity(
+         value,
+         _schema_version,
+         resource_type,
+         _resource_id,
+         _task_id,
+         _principal_id
+       )
        when is_map(value) and not is_struct(value) and resource_type in @workspace_resource_types do
     with {:ok, attrs} <-
            normalize_object(value, @workspace_expected_identity_fields, :invalid_identity),
@@ -311,8 +350,26 @@ defmodule Arbor.Contracts.Coding.ReconciliationDecision do
     end
   end
 
-  defp normalize_identity(_value, _resource_type, _resource_id, _task_id, _principal_id),
-    do: {:error, {:invalid_field, "expected_identity"}}
+  defp normalize_identity(
+         _value,
+         _schema_version,
+         _resource_type,
+         _resource_id,
+         _task_id,
+         _principal_id
+       ),
+       do: {:error, {:invalid_field, "expected_identity"}}
+
+  # Version 1 manifests predate retained source proofs. Keeping their nested
+  # identity closed preserves archived v1 bytes and prevents a v2 proof from
+  # being misrepresented by an outer v1 envelope.
+  defp retained_identity_version(@legacy_schema_version, identity) do
+    if Map.has_key?(identity, "identity_version"),
+      do: {:error, {:invalid_field, "expected_identity"}},
+      else: :ok
+  end
+
+  defp retained_identity_version(@schema_version, _identity), do: :ok
 
   defp normalize_evidence(value) when is_map(value) and not is_struct(value) do
     with {:ok, attrs} <- normalize_object(value, @evidence_fields, :invalid_evidence),
@@ -399,7 +456,7 @@ defmodule Arbor.Contracts.Coding.ReconciliationDecision do
       else: {:error, :field_set}
   end
 
-  defp exact_version(@schema_version), do: :ok
+  defp exact_version(version) when version in @supported_schema_versions, do: {:ok, version}
   defp exact_version(_), do: {:error, {:invalid_field, "schema_version"}}
 
   defp enum(value, allowed, field) do

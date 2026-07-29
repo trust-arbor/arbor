@@ -2,10 +2,43 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCoreTest do
   use ExUnit.Case, async: true
 
   alias Arbor.Contracts.Coding.PendingApprovalResourceId
+  alias Arbor.Contracts.Coding.{ReconciliationDecision, ReconciliationManifest}
   alias Arbor.Orchestrator.CodingPlan.ReconciliationCore
 
   @moduletag :fast
   @observed_at "2026-07-22T17:00:00Z"
+
+  test "emits version-2 manifests and decisions while source inventories remain version 1" do
+    assert ReconciliationCore.empty_acp_inventory()["schema_version"] == 1
+    assert ReconciliationCore.empty_pending_approval_inventory()["schema_version"] == 1
+
+    assert {:ok, manifest, _digest} =
+             ReconciliationCore.reconcile(
+               task_inventory([task("task-1", "running", true)]),
+               resource_inventory([
+                 resource("live_workspace_lease", "lease-1", "task-1", "principal-1")
+               ]),
+               @observed_at
+             )
+
+    assert ReconciliationManifest.schema_version() == 2
+    assert ReconciliationDecision.schema_version() == 2
+    assert manifest["schema_version"] == 2
+    assert hd(manifest["decisions"])["schema_version"] == 2
+  end
+
+  test "rejects expected_identity on non-retained source resources" do
+    resource =
+      resource("live_workspace_lease", "lease-1", "task-1", "principal-1")
+      |> Map.put("expected_identity", %{"ignored" => true})
+
+    assert {:error, :malformed_resource} =
+             ReconciliationCore.reconcile(
+               task_inventory([task("task-1", "running", true)]),
+               resource_inventory([resource]),
+               @observed_at
+             )
+  end
 
   test "applies every conservative first-slice rule and never emits remove" do
     tasks = [

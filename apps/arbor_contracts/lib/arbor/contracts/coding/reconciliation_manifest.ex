@@ -5,7 +5,9 @@ defmodule Arbor.Contracts.Coding.ReconciliationManifest do
 
   alias Arbor.Contracts.Coding.ReconciliationDecision
 
-  @schema_version 1
+  @legacy_schema_version 1
+  @schema_version 2
+  @supported_schema_versions [@legacy_schema_version, @schema_version]
   @fields [:schema_version, :observed_at, :scope, :observation_digest, :decisions, :counts]
   @scope_fields [:task_id, :principal_id, :agent_id, :state]
   @digest_fields [:task_inventory_sha256, :resource_inventory_sha256, :source_sha256]
@@ -36,15 +38,15 @@ defmodule Arbor.Contracts.Coding.ReconciliationManifest do
   def new(attrs) do
     with {:ok, attrs} <- normalize_object(attrs, @fields, :invalid_reconciliation_manifest),
          :ok <- require_fields(attrs),
-         :ok <- exact_version(attrs.schema_version),
+         {:ok, schema_version} <- exact_version(attrs.schema_version),
          {:ok, observed_at} <- timestamp(attrs.observed_at),
          {:ok, scope} <- normalize_scope(attrs.scope),
          {:ok, observation_digest} <- normalize_digest(attrs.observation_digest),
-         {:ok, decisions} <- normalize_decisions(attrs.decisions),
+         {:ok, decisions} <- normalize_decisions(attrs.decisions, schema_version),
          {:ok, counts} <- normalize_counts(attrs.counts),
          :ok <- validate_counts(counts, decisions),
          manifest = %__MODULE__{
-           schema_version: @schema_version,
+           schema_version: schema_version,
            observed_at: observed_at,
            scope: scope,
            observation_digest: observation_digest,
@@ -98,7 +100,7 @@ defmodule Arbor.Contracts.Coding.ReconciliationManifest do
 
   def digest(_attrs), do: {:error, {:invalid_reconciliation_manifest, :malformed}}
 
-  defp normalize_decisions(value) when is_list(value) do
+  defp normalize_decisions(value, manifest_version) when is_list(value) do
     entries = Enum.take(value, @max_decisions + 1)
 
     if length(entries) > @max_decisions do
@@ -106,15 +108,22 @@ defmodule Arbor.Contracts.Coding.ReconciliationManifest do
     else
       Enum.reduce_while(entries, {:ok, []}, fn entry, {:ok, acc} ->
         case ReconciliationDecision.new(entry) do
-          {:ok, decision} -> {:cont, {:ok, [ReconciliationDecision.to_map(decision) | acc]}}
-          {:error, _} -> {:halt, {:error, {:invalid_reconciliation_manifest, :decision}}}
+          {:ok, %{schema_version: ^manifest_version} = decision} ->
+            {:cont, {:ok, [ReconciliationDecision.to_map(decision) | acc]}}
+
+          {:ok, _decision} ->
+            {:halt, {:error, {:invalid_reconciliation_manifest, :decision_version}}}
+
+          {:error, _} ->
+            {:halt, {:error, {:invalid_reconciliation_manifest, :decision}}}
         end
       end)
       |> reverse_ok()
     end
   end
 
-  defp normalize_decisions(_value), do: {:error, {:invalid_reconciliation_manifest, :decisions}}
+  defp normalize_decisions(_value, _manifest_version),
+    do: {:error, {:invalid_reconciliation_manifest, :decisions}}
 
   defp normalize_scope(value) when is_map(value) and not is_struct(value) do
     with {:ok, attrs} <- normalize_object(value, @scope_fields, :invalid_scope),
@@ -249,7 +258,7 @@ defmodule Arbor.Contracts.Coding.ReconciliationManifest do
       else: {:error, :field_set}
   end
 
-  defp exact_version(@schema_version), do: :ok
+  defp exact_version(version) when version in @supported_schema_versions, do: {:ok, version}
   defp exact_version(_), do: {:error, {:invalid_field, "schema_version"}}
 
   defp timestamp(value) when is_binary(value) and byte_size(value) <= @max_timestamp_bytes do
