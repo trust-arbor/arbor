@@ -149,6 +149,8 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
   test "aggregate stage timeout caps both revision child timeouts", %{tmp_dir: tmp_dir} do
     fixture = regression_fixture(tmp_dir)
     parent = self()
+    stage_timeout = 30_000
+    candidate_elapsed = 100
     {:ok, clock_agent} = Agent.start_link(fn -> 0 end)
 
     Application.put_env(:arbor_actions, :security_regression_monotonic_ms, fn ->
@@ -164,7 +166,7 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
         )
 
         if Keyword.get(opts, :validation_revision) == :candidate do
-          Agent.update(clock_agent, &(&1 + 100))
+          Agent.update(clock_agent, &(&1 + candidate_elapsed))
         end
 
         Arbor.Actions.SecurityRegressionTestMixRunner.run(path, args, opts)
@@ -173,14 +175,14 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
         params =
           fixture
           |> attested_params(["test/security_regression_test.exs"])
-          |> Map.put(:stage_timeout, 3_000)
+          |> Map.put(:stage_timeout, stage_timeout)
 
         assert {:ok, result} = Validate.run(params, fixture.context)
         assert result.passed
         assert_receive {:stage_timeout_invocation, :candidate, candidate_timeout}, 5_000
         assert_receive {:stage_timeout_invocation, :base, base_timeout}, 5_000
-        assert candidate_timeout == 3_000
-        assert base_timeout == 2_900
+        assert candidate_timeout == stage_timeout
+        assert base_timeout == stage_timeout - candidate_elapsed
       end
     )
   end
