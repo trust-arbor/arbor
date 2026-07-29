@@ -49,6 +49,11 @@ defmodule Arbor.Security.UriRegistryTest do
                  String.duplicate("a", 64)
              )
 
+      assert UriRegistry.registered?(
+               "arbor://coding/reconciliation/apply/apple_container_unit/acu_v1_" <>
+                 String.duplicate("a", 32)
+             )
+
       refute UriRegistry.registered?(
                "arbor://coding/reconciliation/applyx/validation_resource/validation_" <>
                  String.duplicate("a", 32)

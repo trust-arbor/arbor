@@ -8,6 +8,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
   decide whether a validated manifest is still current before applying it.
   """
 
+  alias Arbor.Contracts.Coding.AppleContainerUnitIdentity
   alias Arbor.Contracts.Coding.PendingApprovalResourceId
   alias Arbor.Contracts.Coding.ReconciliationManifest
   alias Arbor.Contracts.Security.CapabilityUri
@@ -17,6 +18,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
   @max_resources 1_000
   @max_acp_sessions 1_000
   @max_approvals 1_000
+  @max_apple_container_units 1_000
   @max_json_bytes 1_000_000
   # Match the producer collection bounds; the document byte limit remains
   # the independent protection against large records.
@@ -28,7 +30,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
     "validation_resource" => 2,
     "quarantine" => 3,
     "acp_managed_session" => 4,
-    "pending_approval" => 5
+    "pending_approval" => 5,
+    "apple_container_unit" => 6
   }
   @task_states ~w(running waiting_approval done failed cancelled)
   @terminal_states ~w(done failed cancelled)
@@ -69,6 +72,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
           required(:resource_inventory) => map(),
           required(:acp_session_inventory) => map(),
           required(:pending_approval_inventory) => map(),
+          required(:apple_container_unit_inventory) => map(),
           required(:observation_digest) => map()
         }
 
@@ -80,9 +84,10 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
              attrs,
              ~w(
                task_inventory resource_inventory acp_session_inventory
-               pending_approval_inventory observed_at scope
+               pending_approval_inventory apple_container_unit_inventory observed_at scope
              )
            ),
+         apple_container_unit_inventory_input = fetch(attrs, "apple_container_unit_inventory"),
          {:ok, task_inventory} <- normalize_task_inventory(fetch(attrs, "task_inventory")),
          {:ok, resource_inventory} <-
            normalize_resource_inventory(fetch(attrs, "resource_inventory")),
@@ -96,19 +101,27 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
              fetch(attrs, "pending_approval_inventory"),
              resource_inventory["filters"]
            ),
+         {:ok, apple_container_unit_inventory} <-
+           normalize_apple_container_unit_inventory(
+             apple_container_unit_inventory_input,
+             resource_inventory["filters"]
+           ),
          :ok <-
            validate_scope_consistency(
              task_inventory["filters"],
              resource_inventory["filters"],
              acp_session_inventory["filters"],
-             pending_approval_inventory["filters"]
+             pending_approval_inventory["filters"],
+             apple_container_unit_inventory,
+             is_nil(apple_container_unit_inventory_input)
            ),
          :ok <-
            no_truncation(
              task_inventory,
              resource_inventory,
              acp_session_inventory,
-             pending_approval_inventory
+             pending_approval_inventory,
+             apple_container_unit_inventory
            ),
          {:ok, observed_at} <- normalize_observed_at(fetch(attrs, "observed_at")),
          {:ok, scope} <-
@@ -117,21 +130,24 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
              task_inventory,
              resource_inventory,
              acp_session_inventory,
-             pending_approval_inventory
+             pending_approval_inventory,
+             apple_container_unit_inventory
            ),
          {:ok, observation_digest} <-
            observation_digest(
              task_inventory,
              resource_inventory,
              acp_session_inventory,
-             pending_approval_inventory
+             pending_approval_inventory,
+             apple_container_unit_inventory
            ),
          :ok <-
            bounded_document?(%{
              "task_inventory" => task_inventory,
              "resource_inventory" => resource_inventory,
              "acp_session_inventory" => acp_session_inventory,
-             "pending_approval_inventory" => pending_approval_inventory
+             "pending_approval_inventory" => pending_approval_inventory,
+             "apple_container_unit_inventory" => apple_container_unit_inventory
            }) do
       {:ok,
        %{
@@ -141,6 +157,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
          resource_inventory: resource_inventory,
          acp_session_inventory: acp_session_inventory,
          pending_approval_inventory: pending_approval_inventory,
+         apple_container_unit_inventory: apple_container_unit_inventory,
          observation_digest: observation_digest
        }}
     end
@@ -161,6 +178,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
         resource_inventory: resource_inventory,
         acp_session_inventory: acp_session_inventory,
         pending_approval_inventory: pending_approval_inventory,
+        apple_container_unit_inventory: apple_container_unit_inventory,
         observation_digest: observation_digest
       }) do
     task_index = Map.new(task_inventory["tasks"], &{&1["task_id"], &1})
@@ -184,8 +202,17 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
         &decide_pending_approval(&1, task_index, journal_status)
       )
 
+    apple_container_unit_decisions =
+      Enum.map(
+        apple_container_unit_inventory["items"],
+        &decide_apple_container_unit(&1, task_index, journal_status)
+      )
+
     decisions =
-      (workspace_decisions ++ acp_decisions ++ approval_decisions)
+      (workspace_decisions ++
+         acp_decisions ++
+         approval_decisions ++
+         apple_container_unit_decisions)
       |> Enum.sort_by(&decision_sort_key/1)
 
     {:ok,
@@ -226,6 +253,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
           term(),
           map() | keyword(),
           map() | keyword() | nil,
+          map() | keyword() | nil,
           map() | keyword() | nil
         ) ::
           {:ok, map(), String.t()} | {:error, term()}
@@ -235,13 +263,15 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
         observed_at,
         scope \\ %{},
         acp_session_inventory \\ nil,
-        pending_approval_inventory \\ nil
+        pending_approval_inventory \\ nil,
+        apple_container_unit_inventory \\ nil
       ) do
     attrs = %{
       "task_inventory" => task_inventory,
       "resource_inventory" => resource_inventory,
       "acp_session_inventory" => acp_session_inventory,
       "pending_approval_inventory" => pending_approval_inventory,
+      "apple_container_unit_inventory" => apple_container_unit_inventory,
       "observed_at" => observed_at,
       "scope" => scope
     }
@@ -266,6 +296,11 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
   @spec empty_pending_approval_inventory() :: map()
   def empty_pending_approval_inventory,
     do: empty_pending_approval_inventory_for(%{"task_id" => nil, "principal_id" => nil})
+
+  @doc false
+  @spec empty_apple_container_unit_inventory() :: map()
+  def empty_apple_container_unit_inventory,
+    do: empty_apple_container_unit_inventory_for(%{"task_id" => nil, "principal_id" => nil})
 
   defp empty_acp_inventory_for(filters) do
     %{
@@ -331,6 +366,22 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
       },
       "truncated" => false,
       "approvals" => []
+    }
+  end
+
+  defp empty_apple_container_unit_inventory_for(filters) do
+    %{
+      "status" => "complete",
+      "filter" =>
+        if(is_nil(filters["task_id"]) and is_nil(filters["principal_id"]),
+          do: "global",
+          else: "scoped"
+        ),
+      "matched_count" => 0,
+      "returned_count" => 0,
+      "max_items" => @max_apple_container_units,
+      "truncated" => false,
+      "items" => []
     }
   end
 
@@ -479,6 +530,122 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
 
   defp normalize_pending_approval_inventory(_inventory, _resource_filters),
     do: {:error, :malformed_pending_approval_inventory}
+
+  defp normalize_apple_container_unit_inventory(nil, resource_filters),
+    do:
+      normalize_apple_container_unit_inventory(
+        empty_apple_container_unit_inventory_for(resource_filters),
+        resource_filters
+      )
+
+  defp normalize_apple_container_unit_inventory(inventory, resource_filters)
+       when is_map(inventory) and not is_struct(inventory) do
+    with {:ok, inventory} <-
+           object(
+             inventory,
+             ~w(status filter matched_count returned_count max_items truncated items)
+           ),
+         :ok <-
+           exact(
+             inventory,
+             ~w(status filter matched_count returned_count max_items truncated items)
+           ),
+         :ok <- value(inventory["status"], "complete"),
+         :ok <- enum_value(inventory["filter"], ~w(global scoped)),
+         :ok <- positive_count(inventory["max_items"], @max_apple_container_units),
+         :ok <- boolean_value(inventory["truncated"]),
+         :ok <- validate_complete_apple_container_inventory(inventory["truncated"]),
+         :ok <-
+           bounded_observation_count(inventory["matched_count"], @max_apple_container_units * 2),
+         :ok <- bounded_observation_count(inventory["returned_count"], @max_apple_container_units),
+         {:ok, items} <- normalize_apple_container_unit_items(inventory["items"]),
+         :ok <- validate_apple_container_unit_invariants(inventory, items),
+         :ok <- validate_apple_container_unit_filter(inventory["filter"], items, resource_filters) do
+      {:ok, Map.put(inventory, "items", items)}
+    else
+      error -> error
+    end
+  end
+
+  defp normalize_apple_container_unit_inventory(_inventory, _resource_filters),
+    do: {:error, :malformed_apple_container_unit_inventory}
+
+  defp normalize_apple_container_unit_items(items) when is_list(items) do
+    if length(items) <= @max_apple_container_units do
+      with {:ok, normalized} <- normalize_apple_container_unit_entries(items),
+           :ok <- reject_duplicate_ids(normalized, "resource_id"),
+           :ok <- reject_duplicate_ids(normalized, "unit_name"),
+           :ok <- reject_duplicate_ids(normalized, "execution_id"),
+           sorted = Enum.sort_by(normalized, &apple_container_unit_sort_key/1),
+           true <- sorted == normalized do
+        {:ok, normalized}
+      else
+        false -> {:error, :nondeterministic_apple_container_unit_order}
+        error -> error
+      end
+    else
+      {:error, :malformed_apple_container_unit_items}
+    end
+  end
+
+  defp normalize_apple_container_unit_items(_items),
+    do: {:error, :malformed_apple_container_unit_items}
+
+  defp normalize_apple_container_unit_entries(items) when is_list(items) do
+    Enum.reduce_while(items, {:ok, []}, fn item, {:ok, acc} ->
+      case item do
+        item when is_map(item) and not is_struct(item) ->
+          case AppleContainerUnitIdentity.normalize(item) do
+            {:ok, identity} ->
+              if identity["resource_type"] == "apple_container_unit" do
+                {:cont, {:ok, [identity | acc]}}
+              else
+                {:halt, {:error, :malformed_apple_container_unit_identity}}
+              end
+
+            _ ->
+              {:halt, {:error, :malformed_apple_container_unit_identity}}
+          end
+
+        _ ->
+          {:halt, {:error, :malformed_apple_container_unit_identity}}
+      end
+    end)
+    |> reverse_ok()
+  end
+
+  defp validate_apple_container_unit_invariants(inventory, items) do
+    if inventory["matched_count"] == inventory["returned_count"] and
+         inventory["returned_count"] == length(items),
+       do: :ok,
+       else: {:error, :inconsistent_apple_container_unit_counts}
+  end
+
+  defp validate_complete_apple_container_inventory(false), do: :ok
+
+  defp validate_complete_apple_container_inventory(true),
+    do: {:error, :truncated_apple_container_unit_inventory}
+
+  defp validate_apple_container_unit_filter("global", _items, _resource_filters), do: :ok
+
+  defp validate_apple_container_unit_filter("scoped", items, resource_filters) do
+    task_id = resource_filters["task_id"]
+    principal_id = resource_filters["principal_id"]
+
+    if is_binary(task_id) and is_binary(principal_id) and
+         Enum.all?(items, fn item ->
+           item["owner_status"] == "known" and item["task_id"] == task_id and
+             item["principal_id"] == principal_id
+         end),
+       do: :ok,
+       else: if(items == [], do: :ok, else: {:error, :inconsistent_scope})
+  end
+
+  defp validate_apple_container_unit_filter(_filter, _items, _resource_filters),
+    do: {:error, :malformed_apple_container_unit_filter}
+
+  defp apple_container_unit_sort_key(item),
+    do: {item["resource_id"], item["unit_name"], item["execution_id"]}
 
   defp normalize_approval_bounds(bounds) when is_map(bounds) do
     with {:ok, bounds} <- object(bounds, ~w(max_items max_backend_entries)),
@@ -1306,6 +1473,52 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
     }
   end
 
+  defp decide_apple_container_unit(unit, task_index, journal_status) do
+    task_id = unit["task_id"]
+    principal_id = unit["principal_id"]
+    task = Map.get(task_index, task_id)
+    task_state = if is_map(task), do: task["state"], else: nil
+    owner_status = if is_map(task), do: owner_status(task), else: "absent"
+
+    {decision, reason} =
+      cond do
+        unit["owner_status"] != "known" or is_nil(task_id) or is_nil(principal_id) ->
+          {"quarantine", "missing_task_or_principal_provenance"}
+
+        is_nil(task) ->
+          {"quarantine", "missing_task"}
+
+        task_state in @live_states and owner_status == "live" ->
+          {"keep", "live_task_owner_alive"}
+
+        task_state in @live_states ->
+          {"retry", "live_task_owner_dead"}
+
+        task_state in @terminal_states ->
+          {"settle", "terminal_active_resource"}
+
+        true ->
+          {"quarantine", "ambiguous_provenance"}
+      end
+
+    %{
+      "schema_version" => @schema_version,
+      "resource_type" => "apple_container_unit",
+      "resource_id" => unit["resource_id"],
+      "task_id" => task_id,
+      "principal_id" => principal_id,
+      "decision" => decision,
+      "reason" => reason,
+      "expected_identity" => unit,
+      "evidence" => %{
+        "task_presence" => if(is_map(task), do: "observed", else: "absent"),
+        "task_state" => task_state,
+        "owner_status" => owner_status,
+        "journal_status" => journal_status
+      }
+    }
+  end
+
   defp pending_approval_expected_identity(approval) do
     %{
       "resource_type" => "pending_approval",
@@ -1393,7 +1606,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
      resource["resource_id"]}
   end
 
-  defp observation_digest(tasks, resources, acp_sessions, approvals) do
+  defp observation_digest(tasks, resources, acp_sessions, approvals, apple_container_units) do
     task_digest = sha256(canonical_json(tasks))
     resource_digest = sha256(canonical_json(resources))
 
@@ -1401,7 +1614,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
       "task_inventory" => tasks,
       "resource_inventory" => resources,
       "acp_session_inventory" => acp_sessions,
-      "pending_approval_inventory" => approvals
+      "pending_approval_inventory" => approvals,
+      "apple_container_unit_inventory" => apple_container_units
     }
 
     {:ok,
@@ -1417,7 +1631,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
          task_inventory,
          resource_inventory,
          acp_session_inventory,
-         pending_approval_inventory
+         pending_approval_inventory,
+         apple_container_unit_inventory
        ),
        do:
          normalize_scope(
@@ -1425,12 +1640,14 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
              task_inventory,
              resource_inventory,
              acp_session_inventory,
-             pending_approval_inventory
+             pending_approval_inventory,
+             apple_container_unit_inventory
            ),
            task_inventory,
            resource_inventory,
            acp_session_inventory,
-           pending_approval_inventory
+           pending_approval_inventory,
+           apple_container_unit_inventory
          )
 
   defp normalize_scope(
@@ -1438,7 +1655,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
          task_inventory,
          resource_inventory,
          acp_session_inventory,
-         pending_approval_inventory
+         pending_approval_inventory,
+         apple_container_unit_inventory
        )
        when is_map(scope) and map_size(scope) == 0,
        do:
@@ -1447,7 +1665,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
            task_inventory,
            resource_inventory,
            acp_session_inventory,
-           pending_approval_inventory
+           pending_approval_inventory,
+           apple_container_unit_inventory
          )
 
   defp normalize_scope(
@@ -1455,7 +1674,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
          task_inventory,
          resource_inventory,
          acp_session_inventory,
-         pending_approval_inventory
+         pending_approval_inventory,
+         apple_container_unit_inventory
        )
        when is_list(scope) or is_map(scope) do
     with {:ok, scope} <- normalize_object(scope, @scope_fields),
@@ -1476,7 +1696,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
                  task_inventory,
                  resource_inventory,
                  acp_session_inventory,
-                 pending_approval_inventory
+                 pending_approval_inventory,
+                 apple_container_unit_inventory
                ),
              do: :ok,
              else: {:error, :inconsistent_scope}
@@ -1490,7 +1711,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
          _task_inventory,
          _resource_inventory,
          _acp_session_inventory,
-         _pending_approval_inventory
+         _pending_approval_inventory,
+         _apple_container_unit_inventory
        ),
        do: {:error, :malformed_scope}
 
@@ -1498,7 +1720,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
          task_inventory,
          resource_inventory,
          acp_session_inventory,
-         pending_approval_inventory
+         pending_approval_inventory,
+         _apple_container_unit_inventory
        ) do
     task_filters = task_inventory["filters"]
     resource_filters = resource_inventory["filters"]
@@ -1521,7 +1744,9 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
          task_filters,
          resource_filters,
          acp_filters,
-         approval_filters
+         approval_filters,
+         apple_container_unit_inventory,
+         apple_inventory_omitted
        ) do
     cond do
       not is_nil(task_filters["agent_id"]) ->
@@ -1544,6 +1769,18 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
         {:error, :inconsistent_scope}
 
       approval_filters["principal_id"] != resource_filters["principal_id"] ->
+        {:error, :inconsistent_scope}
+
+      apple_container_unit_inventory["filter"] == "global" and
+        not apple_inventory_omitted and
+          (not is_nil(resource_filters["task_id"]) or
+             not is_nil(resource_filters["principal_id"])) ->
+        {:error, :inconsistent_scope}
+
+      apple_container_unit_inventory["filter"] == "scoped" and
+        not apple_inventory_omitted and
+          (is_nil(resource_filters["task_id"]) or
+             is_nil(resource_filters["principal_id"])) ->
         {:error, :inconsistent_scope}
 
       true ->
@@ -1570,16 +1807,22 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
          task_inventory,
          resource_inventory,
          acp_session_inventory,
-         pending_approval_inventory
+         pending_approval_inventory,
+         apple_container_unit_inventory
        ) do
     cond do
       task_inventory["truncated"] or resource_inventory["truncated"] or
-        acp_session_inventory["truncated"] or pending_approval_inventory["truncated"] ->
+        acp_session_inventory["truncated"] or pending_approval_inventory["truncated"] or
+          apple_container_unit_inventory["truncated"] ->
         {:error, :truncated_observation}
 
       task_inventory["counts"]["truncated"] > 0 or resource_inventory["counts"]["truncated"] > 0 or
         acp_session_inventory["counts"]["truncated"] > 0 or
           pending_approval_inventory["counts"]["truncated"] > 0 ->
+        {:error, :truncated_observation}
+
+      apple_container_unit_inventory["matched_count"] !=
+          apple_container_unit_inventory["returned_count"] ->
         {:error, :truncated_observation}
 
       task_inventory["counts"]["malformed"] > 0 ->
@@ -1673,6 +1916,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
         do: :ok,
         else: {:error, :invalid_count}
       )
+
+  defp bounded_observation_count(value, max), do: count_at_most(value, max)
 
   defp optional_count(nil), do: :ok
   defp optional_count(value), do: count_at_most(value, 1_000_000)

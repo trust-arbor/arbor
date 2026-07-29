@@ -197,6 +197,12 @@ defmodule Arbor.Actions.Config do
     Application.get_env(:arbor_actions, :comms_module, Arbor.Comms)
   end
 
+  @doc "Trusted public Shell facade used by Apple Container reconciliation settlement."
+  @spec coding_reconciliation_shell_module() :: module()
+  def coding_reconciliation_shell_module do
+    Application.get_env(:arbor_actions, :coding_reconciliation_shell_module, Arbor.Shell)
+  end
+
   @doc """
   Workspace lease registry GenServer name/server used by coding facades.
 

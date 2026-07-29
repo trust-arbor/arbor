@@ -258,6 +258,7 @@ defmodule Arbor.Orchestrator.Config do
   @default_coding_reconciliation_resource_facade Arbor.Actions
   @default_coding_reconciliation_acp_facade Arbor.AI
   @default_coding_reconciliation_approval_facade Arbor.Agent.Orchestration
+  @default_coding_reconciliation_shell_facade Arbor.Shell
   @default_coding_reconciliation_artifact_store Arbor.Orchestrator.CodingPlan.ArtifactStore
   @default_coding_reconciliation_observer nil
   @default_coding_readiness_observer_module nil
@@ -418,6 +419,16 @@ defmodule Arbor.Orchestrator.Config do
       @app,
       :coding_reconciliation_approval_facade,
       @default_coding_reconciliation_approval_facade
+    )
+  end
+
+  @doc "Trusted public Shell facade used to read Apple Container unit evidence."
+  @spec coding_reconciliation_shell_facade() :: module()
+  def coding_reconciliation_shell_facade do
+    Application.get_env(
+      @app,
+      :coding_reconciliation_shell_facade,
+      @default_coding_reconciliation_shell_facade
     )
   end
 

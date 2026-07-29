@@ -10,9 +10,10 @@ defmodule Arbor.Contracts.Coding.ReconciliationManifest do
   @scope_fields [:task_id, :principal_id, :agent_id, :state]
   @digest_fields [:task_inventory_sha256, :resource_inventory_sha256, :source_sha256]
   @count_fields [:resources, :keep, :retry, :settle, :quarantine, :remove]
-  # Workspace, managed ACP, and pending-approval inventories each admit 1,000
-  # entries. The manifest must represent their combined decision ceiling.
-  @max_decisions 3_000
+  # Workspace, managed ACP, pending-approval, and Apple Container inventories
+  # each admit 1,000 entries. The manifest must represent their combined
+  # decision ceiling.
+  @max_decisions 4_000
   @max_json_bytes 4_000_000
   @max_timestamp_bytes 64
 

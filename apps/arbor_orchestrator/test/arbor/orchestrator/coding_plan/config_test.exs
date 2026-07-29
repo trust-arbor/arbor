@@ -15,7 +15,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ConfigTest do
     :coding_plan_compiler,
     :coding_plan_artifact_store,
     :coding_reconciliation_observer_module,
-    :coding_reconciliation_clock
+    :coding_reconciliation_clock,
+    :coding_reconciliation_shell_facade
   ]
 
   setup do
@@ -56,5 +57,6 @@ defmodule Arbor.Orchestrator.CodingPlan.ConfigTest do
   test "reconciliation observation and clock seams are not public data options" do
     refute is_map(Config.coding_reconciliation_observer_module())
     assert Config.coding_reconciliation_clock() == nil
+    assert Config.coding_reconciliation_shell_facade() == Arbor.Shell
   end
 end

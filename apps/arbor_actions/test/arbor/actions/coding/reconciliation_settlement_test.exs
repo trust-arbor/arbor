@@ -156,6 +156,29 @@ defmodule Arbor.Actions.Coding.ReconciliationApplyTest do
     end
   end
 
+  defmodule RecordingAppleContainerShell do
+    def compare_and_settle_apple_container_unit(fields) do
+      send(self(), {:apple_container_settle_called, fields})
+      {:ok, %{"outcome" => "settled", "resource_id" => fields["resource_id"]}}
+    end
+  end
+
+  defmodule ErrorAppleContainerShell do
+    def compare_and_settle_apple_container_unit(_fields), do: {:error, :source_conflict}
+  end
+
+  defmodule AlreadyAbsentAppleContainerShell do
+    def compare_and_settle_apple_container_unit(fields) do
+      {:ok,
+       %{"outcome" => "already_absent", "resource_id" => fields["resource_id"], "active" => false}}
+    end
+  end
+
+  defmodule ArityTwoAppleContainerShell do
+    def compare_and_settle_apple_container_unit(_fields, _opts),
+      do: {:ok, %{"outcome" => "wrong"}}
+  end
+
   setup_all do
     previous_shell = Application.get_env(:arbor_actions, :mix_shell_module)
     Application.put_env(:arbor_actions, :mix_shell_module, Arbor.Actions.TestMixShell)
@@ -174,6 +197,9 @@ defmodule Arbor.Actions.Coding.ReconciliationApplyTest do
     previous_consensus = Application.get_env(:arbor_actions, :consensus_module)
     previous_comms = Application.get_env(:arbor_actions, :comms_module)
 
+    previous_apple_shell =
+      Application.get_env(:arbor_actions, :coding_reconciliation_shell_module)
+
     Application.delete_env(:arbor_actions, :workspace_lease_registry_server)
     Application.put_env(:arbor_actions, :security_module, AllowSecurity)
     Application.delete_env(:arbor_actions, :ai_module)
@@ -187,6 +213,7 @@ defmodule Arbor.Actions.Coding.ReconciliationApplyTest do
       restore_env(:ai_module, previous_ai)
       restore_env(:consensus_module, previous_consensus)
       restore_env(:comms_module, previous_comms)
+      restore_env(:coding_reconciliation_shell_module, previous_apple_shell)
     end)
 
     :ok
@@ -1985,6 +2012,101 @@ defmodule Arbor.Actions.Coding.ReconciliationApplyTest do
     refute_received {:consensus_settle_called, _}
   end
 
+  test "Apple Container settlement authorizes exact URI before exact Shell dispatch" do
+    {resource_id, expected, decision} = apple_container_decision()
+    principal = "agent_apple_apply"
+    auth = verified_auth(principal)
+    Application.put_env(:arbor_actions, :security_module, RecordingSecurity)
+
+    Application.put_env(
+      :arbor_actions,
+      :coding_reconciliation_shell_module,
+      RecordingAppleContainerShell
+    )
+
+    assert {:ok, receipt} = Actions.apply_coding_reconciliation_decision(auth, decision)
+    assert receipt == %{"outcome" => "settled", "resource_id" => resource_id}
+    assert_receive {:authorize_called, ^principal, uri, opts}
+    assert uri == "arbor://coding/reconciliation/apply/apple_container_unit/" <> resource_id
+    assert Keyword.get(opts, :verify_identity) == false
+    assert_receive {:apple_container_settle_called, fields}
+    assert fields == %{"resource_id" => resource_id, "expected_identity" => expected}
+  end
+
+  test "Apple Container settlement fails closed for deny, ask, canonical mismatch, and unavailable facade" do
+    {_resource_id, _expected, decision} = apple_container_decision()
+    auth = verified_auth("agent_apple_reject")
+
+    Application.put_env(:arbor_actions, :security_module, DenySecurity)
+
+    Application.put_env(
+      :arbor_actions,
+      :coding_reconciliation_shell_module,
+      RecordingAppleContainerShell
+    )
+
+    assert {:error, {:unauthorized, :denied}} =
+             Actions.apply_coding_reconciliation_decision(auth, decision)
+
+    refute_received {:apple_container_settle_called, _}
+
+    Application.put_env(:arbor_actions, :security_module, PendingSecurity)
+
+    assert {:error, {:unauthorized, {:pending_approval, "proposal_test_1"}}} =
+             Actions.apply_coding_reconciliation_decision(auth, decision)
+
+    refute_received {:apple_container_settle_called, _}
+
+    bad =
+      put_in(
+        decision,
+        ["expected_identity", "resource_id"],
+        "acu_v1_" <> String.duplicate("d", 32)
+      )
+
+    assert {:error, _} = Actions.apply_coding_reconciliation_decision(auth, bad)
+    refute_received {:apple_container_settle_called, _}
+
+    Application.put_env(:arbor_actions, :security_module, AllowSecurity)
+
+    Application.put_env(
+      :arbor_actions,
+      :coding_reconciliation_shell_module,
+      ArityTwoAppleContainerShell
+    )
+
+    assert {:error, :reconciliation_shell_unavailable} =
+             Actions.apply_coding_reconciliation_decision(auth, decision)
+  end
+
+  test "Apple Container settlement propagates source errors and receipts unchanged" do
+    {resource_id, _expected, decision} = apple_container_decision()
+    auth = verified_auth("agent_apple_source")
+
+    Application.put_env(
+      :arbor_actions,
+      :coding_reconciliation_shell_module,
+      ErrorAppleContainerShell
+    )
+
+    assert {:error, :source_conflict} =
+             Actions.apply_coding_reconciliation_decision(auth, decision)
+
+    Application.put_env(
+      :arbor_actions,
+      :coding_reconciliation_shell_module,
+      AlreadyAbsentAppleContainerShell
+    )
+
+    assert {:ok, receipt} = Actions.apply_coding_reconciliation_decision(auth, decision)
+
+    assert receipt == %{
+             "outcome" => "already_absent",
+             "resource_id" => resource_id,
+             "active" => false
+           }
+  end
+
   test "security regression: unauthorized pending_approval never calls backends" do
     {_id, _expected, decision} = pending_approval_decision("consensus", "prop_denied")
     auth = verified_auth("agent_pa_denied")
@@ -2114,6 +2236,45 @@ defmodule Arbor.Actions.Coding.ReconciliationApplyTest do
           "task_presence" => "observed",
           "task_state" => "done",
           "owner_status" => "dead",
+          "journal_status" => "complete"
+        }
+      })
+
+    {resource_id, expected, ReconciliationDecision.to_map(decision)}
+  end
+
+  defp apple_container_decision do
+    suffix = String.duplicate("c", 32)
+    resource_id = "acu_v1_" <> suffix
+
+    expected = %{
+      "resource_type" => "apple_container_unit",
+      "resource_id" => resource_id,
+      "unit_name" => "arbor-v1-" <> suffix,
+      "execution_id" => "exec-c",
+      "reserved_at_ms" => 100,
+      "owner_status" => "known",
+      "validation_resource_id" => "validation_" <> suffix,
+      "workspace_id" => "ws_" <> suffix,
+      "task_id" => "task-apple",
+      "principal_id" => "principal-apple",
+      "source_record_digest" => String.duplicate("b", 64)
+    }
+
+    {:ok, decision} =
+      ReconciliationDecision.new(%{
+        "schema_version" => 1,
+        "resource_type" => "apple_container_unit",
+        "resource_id" => resource_id,
+        "task_id" => "task-apple",
+        "principal_id" => "principal-apple",
+        "decision" => "settle",
+        "reason" => "terminal_active_resource",
+        "expected_identity" => expected,
+        "evidence" => %{
+          "task_presence" => "observed",
+          "task_state" => "done",
+          "owner_status" => "live",
           "journal_status" => "complete"
         }
       })

@@ -30,8 +30,9 @@ defmodule Arbor.Orchestrator.CodingPlan.Reconciliation do
          {:ok, observations} <- collect_observations(opts),
          {:ok, task_inventory} <- required_inventory(observations, :task_inventory),
          {:ok, resource_inventory} <- required_inventory(observations, :resource_inventory),
+         {:ok, apple_container_units} <- required_inventory(observations, :apple_container_units),
          {:ok, acp_inventory, approval_inventory, supplementary} <-
-           collect_required_evidence(observations, opts),
+           collect_required_evidence(observations, opts, apple_container_units),
          {:ok, manifest, manifest_sha256} <-
            ReconciliationCore.reconcile(
              task_inventory,
@@ -39,7 +40,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Reconciliation do
              opts.observed_at,
              scope(opts),
              acp_inventory,
-             approval_inventory
+             approval_inventory,
+             apple_container_units
            ),
          {:ok, exact_manifest_sha256} <- ReconciliationManifest.digest(manifest),
          true <- exact_manifest_sha256 == manifest_sha256,
@@ -80,6 +82,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Reconciliation do
       with {:ok, caller_id} <- required_id(Keyword.get(opts, :caller_id), :caller_id),
            {:ok, task_id} <- optional_id(Keyword.get(opts, :task_id), :task_id),
            {:ok, principal_id} <- optional_id(Keyword.get(opts, :principal_id), :principal_id),
+           :ok <- validate_scope_shape(task_id, principal_id),
            {:ok, max_items} <- max_items(Keyword.get(opts, :max_items, 64)) do
         {:ok,
          %{
@@ -105,6 +108,15 @@ defmodule Arbor.Orchestrator.CodingPlan.Reconciliation do
 
   defp optional_id(nil, _field), do: {:ok, nil}
   defp optional_id(value, field), do: required_id(value, field)
+
+  defp validate_scope_shape(nil, nil), do: :ok
+
+  defp validate_scope_shape(task_id, principal_id)
+       when is_binary(task_id) and is_binary(principal_id),
+       do: :ok
+
+  defp validate_scope_shape(_task_id, _principal_id),
+    do: {:error, :invalid_reconciliation_scope}
 
   defp valid_id?(value) do
     byte_size(value) <= @max_id_bytes and String.valid?(value) and String.trim(value) == value and
@@ -256,13 +268,20 @@ defmodule Arbor.Orchestrator.CodingPlan.Reconciliation do
              Config.coding_reconciliation_approval_facade(),
              :pending_approval_inventory,
              approval_opts
+           ),
+         {:ok, apple_container_units} <-
+           call_facade(
+             Config.coding_reconciliation_shell_facade(),
+             :apple_container_unit_inventory,
+             resource_opts
            ) do
       {:ok,
        %{
          "task_inventory" => task_inventory,
          "resource_inventory" => resource_inventory,
          "acp_sessions" => acp_sessions,
-         "pending_approvals" => pending_approvals
+         "pending_approvals" => pending_approvals,
+         "apple_container_units" => apple_container_units
        }}
     end
   end
@@ -321,13 +340,38 @@ defmodule Arbor.Orchestrator.CodingPlan.Reconciliation do
     end
   end
 
-  defp collect_required_evidence(observations, opts) do
+  defp validate_required_inventory(:apple_container_units, inventory) do
+    keys = Map.keys(inventory) |> Enum.sort()
+
+    if keys == ~w(filter items matched_count max_items returned_count status truncated) and
+         inventory["status"] == "complete" and inventory["filter"] in ~w(global scoped) and
+         is_integer(inventory["matched_count"]) and inventory["matched_count"] >= 0 and
+         inventory["matched_count"] <= @max_items * 2 and
+         is_integer(inventory["returned_count"]) and inventory["returned_count"] >= 0 and
+         inventory["returned_count"] <= @max_items and
+         is_integer(inventory["max_items"]) and inventory["max_items"] in 1..@max_items and
+         inventory["truncated"] == false and is_list(inventory["items"]) and
+         inventory["matched_count"] == inventory["returned_count"] and
+         inventory["returned_count"] == length(inventory["items"]) do
+      :ok
+    else
+      {:error, :invalid_or_incomplete_apple_container_unit_inventory}
+    end
+  end
+
+  defp collect_required_evidence(observations, opts, apple_container_units) do
     with {:ok, acp} <- acp_session_inventory(observations),
-         {:ok, approvals} <- pending_approval_inventory(observations, opts) do
+         {:ok, approvals} <- pending_approval_inventory(observations, opts),
+         {:ok, apple} <-
+           required_inventory(
+             %{"apple_container_units" => apple_container_units},
+             :apple_container_units
+           ) do
       {:ok, acp, approvals,
        %{
          "acp_sessions" => summarize_inventory("acp_sessions", acp),
-         "pending_approvals" => summarize_inventory("pending_approvals", approvals)
+         "pending_approvals" => summarize_inventory("pending_approvals", approvals),
+         "apple_container_units" => summarize_apple_container_inventory(apple)
        }}
     end
   end
@@ -423,6 +467,19 @@ defmodule Arbor.Orchestrator.CodingPlan.Reconciliation do
       "kind" => kind,
       "inventory_sha256" => sha256(canonical_json(inventory)),
       "counts" => inventory["counts"]
+    }
+  end
+
+  defp summarize_apple_container_inventory(inventory) do
+    %{
+      "kind" => "apple_container_units",
+      "inventory_sha256" => sha256(canonical_json(inventory)),
+      "status" => inventory["status"],
+      "filter" => inventory["filter"],
+      "matched_count" => inventory["matched_count"],
+      "returned_count" => inventory["returned_count"],
+      "max_items" => inventory["max_items"],
+      "truncated" => inventory["truncated"]
     }
   end
 

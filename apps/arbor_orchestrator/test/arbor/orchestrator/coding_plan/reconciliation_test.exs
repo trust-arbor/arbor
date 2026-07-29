@@ -62,6 +62,13 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationTest do
     end
   end
 
+  defmodule ShellFacade do
+    def apple_container_unit_inventory(opts) do
+      send(self(), {:shell_facade_opts, opts})
+      {:ok, Process.get({__MODULE__, :inventory})}
+    end
+  end
+
   setup do
     root =
       Path.join(System.tmp_dir!(), "coding_reconciliation_#{System.unique_integer([:positive])}")
@@ -75,7 +82,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationTest do
       :coding_reconciliation_task_facade,
       :coding_reconciliation_resource_facade,
       :coding_reconciliation_acp_facade,
-      :coding_reconciliation_approval_facade
+      :coding_reconciliation_approval_facade,
+      :coding_reconciliation_shell_facade
     ]
 
     previous = Map.new(keys, &{&1, Application.get_env(:arbor_orchestrator, &1)})
@@ -145,8 +153,12 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationTest do
       observations()
       |> put_in(["task_inventory", "filters", "task_id"], "task-1")
       |> put_in(["resource_inventory", "filters", "task_id"], "task-1")
+      |> put_in(["resource_inventory", "filters", "principal_id"], "principal-1")
       |> put_in(["acp_sessions", "filters", "task_id"], "task-1")
+      |> put_in(["acp_sessions", "filters", "principal_id"], "principal-1")
       |> put_in(["pending_approvals", "filters", "task_id"], "task-1")
+      |> put_in(["pending_approvals", "filters", "principal_id"], "principal-1")
+      |> put_in(["apple_container_units", "filter"], "scoped")
     )
 
     Process.put({Clock, :values}, [@observed_at, @persisted_at])
@@ -154,7 +166,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationTest do
     assert {:ok, _result} =
              Reconciliation.dry_run(
                caller_id: "operator-1",
-               task_id: "task-1"
+               task_id: "task-1",
+               principal_id: "principal-1"
              )
 
     assert_receive {:authorized, "operator-1", "arbor://coding/reconciliation/read/task-1", :read,
@@ -183,6 +196,14 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationTest do
              Reconciliation.dry_run(caller_id: "operator-1", observed_at: @observed_at)
   end
 
+  test "public dry-run rejects one-sided task and principal scopes" do
+    assert {:error, :invalid_reconciliation_scope} =
+             Reconciliation.dry_run(caller_id: "operator-1", task_id: "task-1")
+
+    assert {:error, :invalid_reconciliation_scope} =
+             Reconciliation.dry_run(caller_id: "operator-1", principal_id: "principal-1")
+  end
+
   test "public orchestrator facade cannot select observation or clock seams" do
     assert {:error, :invalid_reconciliation_options} =
              Arbor.Orchestrator.reconcile_coding_resources(
@@ -209,6 +230,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationTest do
       |> put_in(["acp_sessions", "filters", "principal_id"], "principal-1")
       |> put_in(["pending_approvals", "filters", "task_id"], "task-1")
       |> put_in(["pending_approvals", "filters", "principal_id"], "principal-1")
+      |> put_in(["apple_container_units", "filter"], "scoped")
 
     Application.put_env(:arbor_orchestrator, :coding_reconciliation_observer_module, nil)
 
@@ -232,10 +254,13 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationTest do
       ApprovalFacade
     )
 
+    Application.put_env(:arbor_orchestrator, :coding_reconciliation_shell_facade, ShellFacade)
+
     Process.put({TaskFacade, :inventory}, scoped_observations["task_inventory"])
     Process.put({ResourceFacade, :inventory}, scoped_observations["resource_inventory"])
     Process.put({AcpFacade, :inventory}, scoped_observations["acp_sessions"])
     Process.put({ApprovalFacade, :inventory}, scoped_observations["pending_approvals"])
+    Process.put({ShellFacade, :inventory}, scoped_observations["apple_container_units"])
     Process.put({Clock, :values}, [@observed_at, @persisted_at])
 
     assert {:ok, _result} =
@@ -267,6 +292,47 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationTest do
                       max_items: 64,
                       principal_scope: :subject
                     ]}
+
+    assert_receive {:shell_facade_opts,
+                    [task_id: "task-1", principal_id: "principal-1", max_items: 64]}
+  end
+
+  test "public facade collection fails closed on disabled Apple Container inventory" do
+    Application.put_env(:arbor_orchestrator, :coding_reconciliation_observer_module, nil)
+    Application.put_env(:arbor_orchestrator, :coding_reconciliation_task_facade, TaskFacade)
+
+    Application.put_env(
+      :arbor_orchestrator,
+      :coding_reconciliation_resource_facade,
+      ResourceFacade
+    )
+
+    Application.put_env(:arbor_orchestrator, :coding_reconciliation_acp_facade, AcpFacade)
+
+    Application.put_env(
+      :arbor_orchestrator,
+      :coding_reconciliation_approval_facade,
+      ApprovalFacade
+    )
+
+    Application.put_env(:arbor_orchestrator, :coding_reconciliation_shell_facade, ShellFacade)
+
+    observations = observations()
+    Process.put({TaskFacade, :inventory}, observations["task_inventory"])
+    Process.put({ResourceFacade, :inventory}, observations["resource_inventory"])
+    Process.put({AcpFacade, :inventory}, observations["acp_sessions"])
+    Process.put({ApprovalFacade, :inventory}, observations["pending_approvals"])
+
+    Process.put(
+      {ShellFacade, :inventory},
+      observations["apple_container_units"]
+      |> Map.put("status", "disabled")
+    )
+
+    Process.put({Clock, :values}, [@observed_at, @persisted_at])
+
+    assert {:error, :invalid_or_incomplete_apple_container_unit_inventory} =
+             Reconciliation.dry_run(caller_id: "operator-1")
   end
 
   test "unavailable, truncated, duplicate, or quarantined supplementary evidence fails closed" do
@@ -440,7 +506,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationTest do
       "task_inventory" => task_inventory(),
       "resource_inventory" => resource_inventory(),
       "acp_sessions" => acp_session_inventory([]),
-      "pending_approvals" => pending_approval_inventory()
+      "pending_approvals" => pending_approval_inventory(),
+      "apple_container_units" => apple_container_unit_inventory()
     }
   end
 
@@ -603,6 +670,18 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationTest do
         "interaction" => %{"observed" => 0, "omitted" => 0, "truncated" => false}
       },
       "approvals" => approvals
+    }
+  end
+
+  defp apple_container_unit_inventory do
+    %{
+      "status" => "complete",
+      "filter" => "global",
+      "matched_count" => 0,
+      "returned_count" => 0,
+      "max_items" => 64,
+      "truncated" => false,
+      "items" => []
     }
   end
 

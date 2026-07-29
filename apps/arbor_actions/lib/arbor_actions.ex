@@ -82,6 +82,7 @@ defmodule Arbor.Actions do
   alias Arbor.Actions.TaintEvents
   alias Arbor.Common.{SafePath, SensitiveData}
   alias Arbor.Contracts.Coding.PendingApprovalResourceId
+  alias Arbor.Contracts.Coding.AppleContainerUnitIdentity
   alias Arbor.Contracts.Coding.ReconciliationDecision
   alias Arbor.Contracts.Security.CapabilityProfile
   alias Arbor.Contracts.Security.Classification
@@ -256,6 +257,7 @@ defmodule Arbor.Actions do
   * `arbor://coding/reconciliation/apply/retained_workspace_record/<workspace_id>`
   * `arbor://coding/reconciliation/apply/acp_managed_session/<worker_session_id>`
   * `arbor://coding/reconciliation/apply/pending_approval/<resource_id>`
+  * `arbor://coding/reconciliation/apply/apple_container_unit/<resource_id>`
 
   Reconciliation decision evidence is never bearer authority. This slice
   supports only:
@@ -265,6 +267,7 @@ defmodule Arbor.Actions do
   * `retained_workspace_record` + `settle` + `retained_expired`
   * `acp_managed_session` + `settle` + `terminal_active_resource`
   * `pending_approval` + `settle` + `terminal_active_resource`
+  * `apple_container_unit` + `settle` + `terminal_active_resource`
   """
   @spec apply_coding_reconciliation_decision(AuthContext.t(), map() | keyword() | term()) ::
           {:ok, map()} | {:error, term()}
@@ -309,6 +312,9 @@ defmodule Arbor.Actions do
 
         "pending_approval" ->
           apply_pending_approval_settlement(settle_fields)
+
+        "apple_container_unit" ->
+          apply_apple_container_unit_settlement(settle_fields)
       end
     end
   rescue
@@ -358,6 +364,17 @@ defmodule Arbor.Actions do
     end
   end
 
+  defp apply_apple_container_unit_settlement(settle_fields) when is_map(settle_fields) do
+    shell = Config.coding_reconciliation_shell_module()
+
+    if is_atom(shell) and Code.ensure_loaded?(shell) and
+         function_exported?(shell, :compare_and_settle_apple_container_unit, 1) do
+      shell.compare_and_settle_apple_container_unit(settle_fields)
+    else
+      {:error, :reconciliation_shell_unavailable}
+    end
+  end
+
   defp admit_reconciliation_caller_auth(%AuthContext{
          identity_verified: true,
          principal_id: principal_id,
@@ -398,6 +415,13 @@ defmodule Arbor.Actions do
 
   defp require_supported_reconciliation_decision(%{
          "resource_type" => "validation_resource",
+         "decision" => "settle",
+         "reason" => "terminal_active_resource"
+       }),
+       do: :ok
+
+  defp require_supported_reconciliation_decision(%{
+         "resource_type" => "apple_container_unit",
          "decision" => "settle",
          "reason" => "terminal_active_resource"
        }),
@@ -492,6 +516,20 @@ defmodule Arbor.Actions do
        }),
        do: require_canonical_pending_approval_resource_id(resource_id)
 
+  defp require_canonical_reconciliation_resource_id(%{
+         "resource_type" => "apple_container_unit",
+         "resource_id" => resource_id,
+         "expected_identity" => expected_identity
+       }) do
+    case AppleContainerUnitIdentity.normalize_settle_fields(%{
+           "resource_id" => resource_id,
+           "expected_identity" => expected_identity
+         }) do
+      {:ok, ^resource_id, _identity} -> :ok
+      _ -> {:error, :invalid_apple_container_unit_resource_id}
+    end
+  end
+
   defp require_canonical_reconciliation_resource_id(_decision),
     do: {:error, :invalid_reconciliation_resource_id}
 
@@ -583,6 +621,14 @@ defmodule Arbor.Actions do
        })
        when is_binary(resource_id) do
     {:ok, @reconciliation_apply_uri_base <> "pending_approval/" <> resource_id}
+  end
+
+  defp reconciliation_apply_uri(%{
+         "resource_type" => "apple_container_unit",
+         "resource_id" => resource_id
+       })
+       when is_binary(resource_id) do
+    {:ok, @reconciliation_apply_uri_base <> "apple_container_unit/" <> resource_id}
   end
 
   defp reconciliation_apply_uri(_decision), do: {:error, :unsupported_reconciliation_apply}

@@ -2,6 +2,7 @@ defmodule Arbor.Contracts.Coding.ReconciliationManifestTest do
   use ExUnit.Case, async: true
 
   alias Arbor.Contracts.Coding.{
+    AppleContainerUnitIdentity,
     PendingApprovalResourceId,
     ReconciliationDecision,
     ReconciliationManifest
@@ -265,9 +266,38 @@ defmodule Arbor.Contracts.Coding.ReconciliationManifestTest do
     assert {:error, _} = ReconciliationDecision.new(mixed_aliases)
   end
 
+  test "accepts known and owner-unknown Apple Container identities and binds outer lineage" do
+    known = apple_container_decision()
+    assert {:ok, decision} = ReconciliationDecision.new(known)
+
+    assert ReconciliationDecision.to_map(decision)["expected_identity"] ==
+             known["expected_identity"]
+
+    unknown =
+      known
+      |> Map.put("task_id", nil)
+      |> Map.put("principal_id", nil)
+      |> Map.put("decision", "quarantine")
+      |> Map.put("reason", "missing_task_or_principal_provenance")
+      |> put_in(["expected_identity", "owner_status"], "unknown")
+      |> put_in(["expected_identity", "validation_resource_id"], nil)
+      |> put_in(["expected_identity", "workspace_id"], nil)
+      |> put_in(["expected_identity", "task_id"], nil)
+      |> put_in(["expected_identity", "principal_id"], nil)
+
+    assert {:ok, _unknown_decision} = ReconciliationDecision.new(unknown)
+
+    assert {:error, _} =
+             ReconciliationDecision.new(
+               put_in(known, ["expected_identity", "task_id"], "other-task")
+             )
+
+    assert AppleContainerUnitIdentity.resource_type() == "apple_container_unit"
+  end
+
   test "admits the combined decision-source ceiling within a bounded manifest" do
     decisions =
-      Enum.map(1..3_000, fn index ->
+      Enum.map(1..4_000, fn index ->
         resource_id = "lease-#{index}"
 
         valid_decision()
@@ -276,9 +306,9 @@ defmodule Arbor.Contracts.Coding.ReconciliationManifestTest do
       end)
 
     assert {:ok, manifest} =
-             ReconciliationManifest.new(valid_manifest(decisions, 3_000, 3_000, 0, 0, 0))
+             ReconciliationManifest.new(valid_manifest(decisions, 4_000, 4_000, 0, 0, 0))
 
-    assert length(ReconciliationManifest.to_map(manifest)["decisions"]) == 3_000
+    assert length(ReconciliationManifest.to_map(manifest)["decisions"]) == 4_000
   end
 
   test "rejects unknown fields, malformed evidence, paths, and oversized decisions" do
@@ -296,13 +326,46 @@ defmodule Arbor.Contracts.Coding.ReconciliationManifestTest do
     manifest = valid_manifest([decision], 1, 0, 0, 0, 0)
     assert {:error, _} = ReconciliationManifest.new(Map.put(manifest, "authority", "operator"))
 
-    oversized = List.duplicate(decision, 3_001)
+    oversized = List.duplicate(decision, 4_001)
 
     assert {:error, _} =
-             ReconciliationManifest.new(valid_manifest(oversized, 3_001, 3_001, 0, 0, 0))
+             ReconciliationManifest.new(valid_manifest(oversized, 4_001, 4_001, 0, 0, 0))
   end
 
   defp valid_decision, do: @legacy_workspace_decision
+
+  defp apple_container_decision do
+    suffix = String.duplicate("a", 32)
+
+    %{
+      "schema_version" => 1,
+      "resource_type" => "apple_container_unit",
+      "resource_id" => "acu_v1_" <> suffix,
+      "task_id" => "task-1",
+      "principal_id" => "principal-1",
+      "decision" => "keep",
+      "reason" => "live_task_owner_alive",
+      "expected_identity" => %{
+        "resource_type" => "apple_container_unit",
+        "resource_id" => "acu_v1_" <> suffix,
+        "unit_name" => "arbor-v1-" <> suffix,
+        "execution_id" => "exec-1",
+        "reserved_at_ms" => 100,
+        "owner_status" => "known",
+        "validation_resource_id" => "validation_" <> suffix,
+        "workspace_id" => "ws_" <> suffix,
+        "task_id" => "task-1",
+        "principal_id" => "principal-1",
+        "source_record_digest" => String.duplicate("b", 64)
+      },
+      "evidence" => %{
+        "task_presence" => "observed",
+        "task_state" => "running",
+        "owner_status" => "live",
+        "journal_status" => "complete"
+      }
+    }
+  end
 
   defp valid_acp_decision do
     %{

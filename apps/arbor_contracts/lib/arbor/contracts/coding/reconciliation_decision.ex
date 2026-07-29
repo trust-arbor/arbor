@@ -3,6 +3,7 @@ defmodule Arbor.Contracts.Coding.ReconciliationDecision do
 
   use TypedStruct
 
+  alias Arbor.Contracts.Coding.AppleContainerUnitIdentity
   alias Arbor.Contracts.Coding.PendingApprovalIdentity
 
   @schema_version 1
@@ -11,8 +12,13 @@ defmodule Arbor.Contracts.Coding.ReconciliationDecision do
   )
   @acp_resource_type "acp_managed_session"
   @pending_approval_resource_type "pending_approval"
+  @apple_container_unit_resource_type "apple_container_unit"
   @resource_types @workspace_resource_types ++
-                    [@acp_resource_type, @pending_approval_resource_type]
+                    [
+                      @acp_resource_type,
+                      @pending_approval_resource_type,
+                      @apple_container_unit_resource_type
+                    ]
   @decisions ~w(keep retry settle quarantine remove)
   @reasons ~w(
     existing_quarantine
@@ -223,6 +229,21 @@ defmodule Arbor.Contracts.Coding.ReconciliationDecision do
        when is_map(value) and not is_struct(value) and
               resource_type == @pending_approval_resource_type do
     with {:ok, identity} <- PendingApprovalIdentity.normalize(value),
+         true <- identity["resource_type"] == resource_type,
+         true <- identity["resource_id"] == resource_id,
+         true <- identity["task_id"] == outer_task_id,
+         true <- identity["principal_id"] == outer_principal_id do
+      {:ok, identity}
+    else
+      false -> {:error, {:invalid_field, "expected_identity"}}
+      error -> error
+    end
+  end
+
+  defp normalize_identity(value, resource_type, resource_id, outer_task_id, outer_principal_id)
+       when is_map(value) and not is_struct(value) and
+              resource_type == @apple_container_unit_resource_type do
+    with {:ok, identity} <- AppleContainerUnitIdentity.normalize(value),
          true <- identity["resource_type"] == resource_type,
          true <- identity["resource_id"] == resource_id,
          true <- identity["task_id"] == outer_task_id,

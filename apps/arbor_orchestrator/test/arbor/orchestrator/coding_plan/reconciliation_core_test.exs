@@ -937,6 +937,185 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCoreTest do
     assert hd(with_empty["decisions"])["resource_type"] == "live_workspace_lease"
   end
 
+  test "Apple Container units classify by task liveness, provenance, and terminal state" do
+    tasks =
+      task_inventory([
+        task("task-terminal", "done", false),
+        task("task-live-dead", "running", false),
+        task("task-live", "running", true)
+      ])
+
+    inventory =
+      apple_container_unit_inventory([
+        apple_unit("a", "task-terminal", "principal-1"),
+        apple_unit("b", "task-live-dead", "principal-1"),
+        apple_unit("c", "task-live", "principal-1"),
+        apple_unit("d", nil, nil,
+          owner_status: "unknown",
+          validation_resource_id: nil,
+          workspace_id: nil
+        )
+      ])
+
+    assert {:ok, manifest, _digest} =
+             ReconciliationCore.reconcile(
+               tasks,
+               resource_inventory([]),
+               @observed_at,
+               %{},
+               nil,
+               nil,
+               inventory
+             )
+
+    decisions = Map.new(manifest["decisions"], &{&1["resource_id"], &1})
+    assert decisions["acu_v1_" <> String.duplicate("a", 32)]["decision"] == "settle"
+    assert decisions["acu_v1_" <> String.duplicate("b", 32)]["reason"] == "live_task_owner_dead"
+    assert decisions["acu_v1_" <> String.duplicate("c", 32)]["reason"] == "live_task_owner_alive"
+    assert decisions["acu_v1_" <> String.duplicate("d", 32)]["decision"] == "quarantine"
+  end
+
+  test "accepts an Apple Container inventory scoped to the exact resource filters" do
+    tasks =
+      put_in(task_inventory([task("task-1", "running", true)]), ["filters", "task_id"], "task-1")
+
+    resources =
+      resource_inventory([])
+      |> put_in(["filters"], %{"task_id" => "task-1", "principal_id" => "principal-1"})
+
+    acp_sessions =
+      ReconciliationCore.empty_acp_inventory()
+      |> put_in(["filters"], %{"task_id" => "task-1", "principal_id" => "principal-1"})
+
+    approvals =
+      ReconciliationCore.empty_pending_approval_inventory()
+      |> put_in(["filters", "task_id"], "task-1")
+      |> put_in(["filters", "principal_id"], "principal-1")
+
+    inventory =
+      apple_container_unit_inventory([apple_unit("a", "task-1", "principal-1")], "scoped")
+
+    assert {:ok, manifest, _digest} =
+             ReconciliationCore.reconcile(
+               tasks,
+               resources,
+               @observed_at,
+               %{"task_id" => "task-1", "principal_id" => "principal-1"},
+               acp_sessions,
+               approvals,
+               inventory
+             )
+
+    assert [%{"resource_type" => "apple_container_unit", "decision" => "keep"}] =
+             Enum.filter(manifest["decisions"], &(&1["resource_type"] == "apple_container_unit"))
+  end
+
+  test "Apple Container inventory rejects malformed, duplicate, wrong-type, truncated, and scope data" do
+    valid = apple_container_unit_inventory([apple_unit("a", "task-1", "principal-1")])
+
+    for invalid <- [
+          put_in(valid, ["items", Access.at(0), "resource_type"], "wrong"),
+          update_in(valid, ["items"], fn [item] -> [Map.delete(item, "resource_type")] end),
+          put_in(valid, ["items", Access.at(0), "source_record_digest"], "bad"),
+          put_in(valid, ["status"], "disabled"),
+          put_in(valid, ["truncated"], true),
+          put_in(valid, ["filter"], "scoped")
+        ] do
+      assert {:error, _} =
+               ReconciliationCore.reconcile(
+                 task_inventory([task("task-1", "running", true)]),
+                 resource_inventory([]),
+                 @observed_at,
+                 %{},
+                 nil,
+                 nil,
+                 invalid
+               )
+    end
+
+    duplicate =
+      apple_container_unit_inventory([
+        apple_unit("a", "task-1", "principal-1"),
+        apple_unit("a", "task-1", "principal-1")
+      ])
+
+    assert {:error, _} =
+             ReconciliationCore.reconcile(
+               task_inventory([task("task-1", "running", true)]),
+               resource_inventory([]),
+               @observed_at,
+               %{},
+               nil,
+               nil,
+               duplicate
+             )
+
+    for duplicate_field <- ["unit_name", "execution_id"] do
+      second = apple_unit("b", "task-1", "principal-1")
+
+      duplicate_pair =
+        apple_container_unit_inventory([apple_unit("a", "task-1", "principal-1"), second])
+
+      duplicate_pair =
+        put_in(
+          duplicate_pair,
+          ["items", Access.at(1), duplicate_field],
+          duplicate_pair["items"] |> hd() |> Map.fetch!(duplicate_field)
+        )
+
+      assert {:error, _} =
+               ReconciliationCore.reconcile(
+                 task_inventory([task("task-1", "running", true)]),
+                 resource_inventory([]),
+                 @observed_at,
+                 %{},
+                 nil,
+                 nil,
+                 duplicate_pair
+               )
+    end
+
+    malformed = put_in(valid, ["items"], [:not_a_map])
+
+    assert {:error, _} =
+             ReconciliationCore.reconcile(
+               task_inventory([task("task-1", "running", true)]),
+               resource_inventory([]),
+               @observed_at,
+               %{},
+               nil,
+               nil,
+               malformed
+             )
+  end
+
+  test "Apple source digest changes when a unit identity changes" do
+    base = apple_container_unit_inventory([apple_unit("a", "task-1", "principal-1")])
+
+    drifted =
+      put_in(base, ["items", Access.at(0), "source_record_digest"], String.duplicate("c", 64))
+
+    args = [
+      task_inventory([task("task-1", "running", true)]),
+      resource_inventory([]),
+      @observed_at,
+      %{},
+      nil,
+      nil
+    ]
+
+    assert {:ok, base_manifest, base_digest} =
+             apply(ReconciliationCore, :reconcile, args ++ [base])
+
+    assert {:ok, drifted_manifest, drifted_digest} =
+             apply(ReconciliationCore, :reconcile, args ++ [drifted])
+
+    assert base_manifest["observation_digest"]["source_sha256"] !=
+             drifted_manifest["observation_digest"]["source_sha256"]
+
+    assert base_digest != drifted_digest
+  end
+
   test "approval identity drift changes source and manifest digests" do
     tasks = [task("task-live", "running", true)]
     resources = resource_inventory([])
@@ -988,6 +1167,37 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCoreTest do
       "created_at" => "2026-07-22T12:00:00Z"
     }
     |> Map.merge(Map.new(overrides, fn {key, value} -> {to_string(key), value} end))
+  end
+
+  defp apple_unit(letter, task_id, principal_id, overrides \\ []) do
+    suffix = String.duplicate(letter, 32)
+
+    %{
+      "resource_type" => "apple_container_unit",
+      "resource_id" => "acu_v1_" <> suffix,
+      "unit_name" => "arbor-v1-" <> suffix,
+      "execution_id" => "exec-" <> letter,
+      "reserved_at_ms" => 100,
+      "owner_status" => "known",
+      "validation_resource_id" => "validation_" <> suffix,
+      "workspace_id" => "ws_" <> suffix,
+      "task_id" => task_id,
+      "principal_id" => principal_id,
+      "source_record_digest" => String.duplicate("b", 64)
+    }
+    |> Map.merge(Map.new(overrides, fn {key, value} -> {to_string(key), value} end))
+  end
+
+  defp apple_container_unit_inventory(items, filter \\ "global") do
+    %{
+      "status" => "complete",
+      "filter" => filter,
+      "matched_count" => length(items),
+      "returned_count" => length(items),
+      "max_items" => 1_000,
+      "truncated" => false,
+      "items" => Enum.sort_by(items, &{&1["resource_id"], &1["unit_name"], &1["execution_id"]})
+    }
   end
 
   defp pending_approval_inventory(approvals) do
