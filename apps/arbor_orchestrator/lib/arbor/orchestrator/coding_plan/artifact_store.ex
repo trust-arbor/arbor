@@ -77,6 +77,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
 
   alias Arbor.Contracts.Coding.{
     BranchLifecycleDescriptor,
+    DesignArtifactDescriptor,
     ReconciliationManifest,
     TaskEvidenceDescriptor,
     VerificationReport,
@@ -268,6 +269,77 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
   catch
     kind, reason -> {:error, {:adoption_evidence_throw, {kind, reason}}}
   end
+
+  @doc """
+  Archive the exact admitted CodingPlan v2 design text as an immutable artifact.
+
+  Filename is fixed as `coding-design-attempt-<attempt>.txt` and never incorporates
+  plan or design text. Body size authority is solely
+  `DesignArtifactDescriptor.max_bytes/0`.
+  """
+  @spec archive_design_artifact(String.t(), String.t(), pos_integer(), binary()) ::
+          {:ok, map()} | {:error, term()}
+  def archive_design_artifact(root, task_id, design_attempt, design)
+      when is_binary(root) and is_binary(task_id) and is_integer(design_attempt) and
+             is_binary(design) do
+    max_bytes = DesignArtifactDescriptor.max_bytes()
+
+    with {:ok, root} <- normalize_existing_root(root),
+         :ok <- validate_terminal_task_id(task_id),
+         :ok <- validate_design_attempt(design_attempt),
+         :ok <- validate_design_body(design, max_bytes),
+         path = design_artifact_path(root, design_attempt),
+         :ok <- validate_design_artifact_path(root, path),
+         :ok <- immutable_write_design(path, design, root),
+         {:ok, descriptor} <-
+           verify_design_artifact_file(path, root, task_id, design_attempt, design) do
+      {:ok, descriptor}
+    end
+  rescue
+    _ -> {:error, :design_artifact_archive_error}
+  catch
+    _, _ -> {:error, :design_artifact_archive_error}
+  end
+
+  def archive_design_artifact(_root, _task_id, _design_attempt, _design),
+    do: {:error, :invalid_design_artifact_input}
+
+  @doc """
+  Read and re-verify an immutable design artifact against a closed descriptor.
+
+  Fail-closed for missing, replaced, path-escaped, wrong-task, wrong-attempt,
+  or digest-mismatched artifacts.
+  """
+  @spec read_design_artifact(String.t(), String.t(), map()) ::
+          {:ok, binary()} | {:error, term()}
+  def read_design_artifact(root, task_id, descriptor_input)
+      when is_binary(root) and is_binary(task_id) and is_map(descriptor_input) do
+    with {:ok, root} <- normalize_existing_root(root),
+         :ok <- validate_terminal_task_id(task_id),
+         {:ok, descriptor} <- DesignArtifactDescriptor.normalize(descriptor_input),
+         true <- descriptor["task_id"] == task_id,
+         path = descriptor["path"],
+         :ok <- validate_design_artifact_path(root, path),
+         expected_path = design_artifact_path(root, descriptor["design_attempt"]),
+         true <- path == expected_path,
+         {:ok, design} <-
+           read_design_artifact_file(path, root, DesignArtifactDescriptor.max_bytes()),
+         true <- byte_size(design) == descriptor["byte_size"],
+         true <- sha256(design) == descriptor["sha256"] do
+      {:ok, design}
+    else
+      false -> {:error, :design_artifact_unavailable}
+      {:error, _reason} = error -> error
+      _ -> {:error, :design_artifact_unavailable}
+    end
+  rescue
+    _ -> {:error, :design_artifact_unavailable}
+  catch
+    _, _ -> {:error, :design_artifact_unavailable}
+  end
+
+  def read_design_artifact(_root, _task_id, _descriptor),
+    do: {:error, :invalid_design_artifact_input}
 
   @doc "Append one source-captured ACP turn under this artifact root."
   @spec append_transcript_turn(String.t(), String.t(), map()) ::
@@ -1782,5 +1854,128 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
   defp temporary_path(path) do
     suffix = System.unique_integer([:positive, :monotonic])
     Path.join(Path.dirname(path), ".#{Path.basename(path)}.tmp-#{suffix}")
+  end
+
+  defp design_artifact_path(root, design_attempt)
+       when is_binary(root) and is_integer(design_attempt) and design_attempt > 0 do
+    Path.join(root, "coding-design-attempt-#{design_attempt}.txt")
+  end
+
+  defp validate_design_attempt(attempt)
+       when is_integer(attempt) and attempt > 0 and attempt <= 1_000_000,
+       do: :ok
+
+  defp validate_design_attempt(_attempt), do: {:error, :invalid_design_attempt}
+
+  defp validate_design_body(design, max_bytes)
+       when is_binary(design) and byte_size(design) > 0 and byte_size(design) <= max_bytes do
+    if String.valid?(design) and String.trim(design) != "" and not String.contains?(design, <<0>>) do
+      :ok
+    else
+      {:error, :invalid_design_body}
+    end
+  end
+
+  defp validate_design_body(design, max_bytes)
+       when is_binary(design) and byte_size(design) > max_bytes,
+       do: {:error, :design_body_too_large}
+
+  defp validate_design_body(_design, _max_bytes), do: {:error, :invalid_design_body}
+
+  defp validate_design_artifact_path(root, path) when is_binary(root) and is_binary(path) do
+    with true <- String.starts_with?(path, "/"),
+         true <- Path.expand(path) == path,
+         true <- Path.dirname(path) == root,
+         true <- SafePath.within?(path, root),
+         true <- String.starts_with?(Path.basename(path), "coding-design-attempt-"),
+         true <- String.ends_with?(Path.basename(path), ".txt") do
+      :ok
+    else
+      _ -> {:error, :design_artifact_path_escaped}
+    end
+  rescue
+    _ -> {:error, :design_artifact_path_escaped}
+  end
+
+  defp validate_design_artifact_path(_root, _path), do: {:error, :design_artifact_path_escaped}
+
+  defp immutable_write_design(path, content, root) do
+    case File.lstat(path) do
+      {:error, :enoent} ->
+        immutable_atomic_write_design(path, content, root)
+
+      {:ok, %File.Stat{type: :regular, mode: mode}} ->
+        with true <- Bitwise.band(mode, 0o777) == 0o600,
+             {:ok, existing} <- File.read(path),
+             true <- existing == content do
+          :ok
+        else
+          false -> {:error, :design_artifact_conflict}
+          {:error, reason} -> {:error, {:design_artifact_unreadable, reason}}
+        end
+
+      {:ok, %File.Stat{type: :symlink}} ->
+        {:error, :design_artifact_symlink}
+
+      {:ok, _other} ->
+        {:error, :invalid_design_artifact_file}
+
+      {:error, reason} ->
+        {:error, {:design_artifact_unavailable, reason}}
+    end
+  end
+
+  defp immutable_atomic_write_design(path, content, root) do
+    temporary_path = temporary_path(path)
+
+    try do
+      with :ok <- validate_design_artifact_path(root, path),
+           :ok <- write_secure_temp(temporary_path, content),
+           :ok <- File.ln(temporary_path, path) do
+        :ok
+      else
+        {:error, :eexist} -> immutable_write_design(path, content, root)
+        {:error, reason} -> {:error, {:write_design_artifact_failed, reason}}
+      end
+    after
+      File.rm(temporary_path)
+    end
+  end
+
+  defp verify_design_artifact_file(path, root, task_id, design_attempt, expected_design) do
+    with {:ok, design} <-
+           read_design_artifact_file(path, root, DesignArtifactDescriptor.max_bytes()),
+         true <- design == expected_design,
+         digest = sha256(design),
+         attrs = %{
+           "path" => path,
+           "sha256" => digest,
+           "byte_size" => byte_size(design),
+           "schema_version" => DesignArtifactDescriptor.schema_version(),
+           "task_id" => task_id,
+           "design_attempt" => design_attempt
+         },
+         {:ok, descriptor} <- DesignArtifactDescriptor.normalize(attrs) do
+      {:ok, descriptor}
+    else
+      false -> {:error, :design_artifact_verify_failed}
+      {:error, _reason} = error -> error
+      _ -> {:error, :design_artifact_verify_failed}
+    end
+  end
+
+  defp read_design_artifact_file(path, root, max_bytes) do
+    with :ok <- validate_design_artifact_path(root, path),
+         {:ok, %File.Stat{type: :regular, mode: mode, size: size}} <- File.lstat(path),
+         true <- Bitwise.band(mode, 0o777) == 0o600,
+         true <- is_integer(size) and size > 0 and size <= max_bytes,
+         {:ok, canonical} <- SafePath.resolve_real(path),
+         true <- canonical == path and SafePath.within?(canonical, root),
+         {:ok, content} <- File.read(canonical),
+         true <- byte_size(content) == size do
+      {:ok, content}
+    else
+      _ -> {:error, :design_artifact_unavailable}
+    end
   end
 end

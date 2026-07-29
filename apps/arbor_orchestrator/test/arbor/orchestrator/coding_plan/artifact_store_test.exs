@@ -1633,6 +1633,88 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
              )
   end
 
+  test "archives design artifacts as mode-0600 immutable files and admits 17585 bytes", %{
+    root: root
+  } do
+    alias Arbor.Contracts.Coding.DesignArtifactDescriptor
+
+    File.mkdir_p!(root)
+    design = String.duplicate("d", 17_585)
+    task_id = "task_design_1"
+
+    assert {:ok, descriptor} = ArtifactStore.archive_design_artifact(root, task_id, 1, design)
+    assert DesignArtifactDescriptor.valid?(descriptor)
+    assert descriptor["byte_size"] == 17_585
+    assert descriptor["task_id"] == task_id
+    assert descriptor["design_attempt"] == 1
+    assert {:ok, canonical_root} = Arbor.Common.SafePath.resolve_real(root)
+    assert descriptor["path"] == Path.join(canonical_root, "coding-design-attempt-1.txt")
+
+    assert {:ok, %File.Stat{type: :regular, mode: mode}} = File.lstat(descriptor["path"])
+    assert (mode &&& 0o777) == 0o600
+    assert File.read!(descriptor["path"]) == design
+
+    # Idempotent same content
+    assert {:ok, ^descriptor} = ArtifactStore.archive_design_artifact(root, task_id, 1, design)
+
+    # Conflict on different content
+    assert {:error, :design_artifact_conflict} =
+             ArtifactStore.archive_design_artifact(root, task_id, 1, design <> "x")
+
+    assert {:ok, ^design} = ArtifactStore.read_design_artifact(root, task_id, descriptor)
+  end
+
+  test "design artifact read fails closed on missing, replaced, escaped, wrong task/attempt", %{
+    root: root
+  } do
+    alias Arbor.Contracts.Coding.DesignArtifactDescriptor
+
+    File.mkdir_p!(root)
+    design = "exact design text"
+    task_id = "task_design_2"
+
+    assert {:ok, descriptor} = ArtifactStore.archive_design_artifact(root, task_id, 2, design)
+
+    File.rm!(descriptor["path"])
+
+    assert {:error, :design_artifact_unavailable} =
+             ArtifactStore.read_design_artifact(root, task_id, descriptor)
+
+    assert {:ok, descriptor} = ArtifactStore.archive_design_artifact(root, task_id, 2, design)
+    File.rm!(descriptor["path"])
+    File.write!(descriptor["path"], "replaced")
+    File.chmod!(descriptor["path"], 0o600)
+
+    assert {:error, :design_artifact_unavailable} =
+             ArtifactStore.read_design_artifact(root, task_id, descriptor)
+
+    assert {:ok, descriptor} = ArtifactStore.archive_design_artifact(root, task_id, 3, design)
+
+    escaped =
+      descriptor
+      |> Map.put("path", "/etc/passwd")
+      |> Map.put(
+        "sha256",
+        Base.encode16(:crypto.hash(:sha256, "x"), case: :lower)
+      )
+
+    assert {:error, reason} = ArtifactStore.read_design_artifact(root, task_id, escaped)
+    assert reason in [:design_artifact_path_escaped, :design_artifact_unavailable]
+
+    assert {:error, :design_artifact_unavailable} =
+             ArtifactStore.read_design_artifact(root, "wrong-task", descriptor)
+
+    wrong_attempt = Map.put(descriptor, "design_attempt", 99)
+
+    assert {:error, :design_artifact_unavailable} =
+             ArtifactStore.read_design_artifact(root, task_id, wrong_attempt)
+
+    oversized = String.duplicate("x", DesignArtifactDescriptor.max_bytes() + 1)
+
+    assert {:error, :design_body_too_large} =
+             ArtifactStore.archive_design_artifact(root, task_id, 4, oversized)
+  end
+
   defp plan_fixture do
     %{
       "version" => 1,

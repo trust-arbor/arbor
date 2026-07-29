@@ -22,8 +22,10 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
     coding_workspace_committed_change
     coding_workspace_recovery_summary
     coding_design_envelope_parse
+    coding_design_artifact_capture
     coding_design_checkpoint_open
     coding_design_checkpoint_await
+    coding_design_artifact_load
     acp_start_session
     acp_send_message
     acp_session_status
@@ -159,11 +161,17 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
         "coding_design_envelope_parse" ->
           Arbor.Actions.Coding.DesignCheckpoint.Parse.run(args, %{})
 
+        "coding_design_artifact_capture" ->
+          design_artifact_capture_response(args, state)
+
         "coding_design_checkpoint_open" ->
           design_checkpoint_open_response(args)
 
         "coding_design_checkpoint_await" ->
           design_checkpoint_await_response(scenario, args)
+
+        "coding_design_artifact_load" ->
+          design_artifact_load_response(args, state)
 
         "acp_session_status" ->
           n = Map.get(counters, :status, 0)
@@ -404,6 +412,54 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
          owner_deadline_unix_ms: run_deadline - 100,
          evidence: %{}
        }}
+    end
+
+    defp design_artifact_capture_response(args, state) do
+      design = Map.get(args, "design") || Map.get(args, :design)
+      design_digest = Map.get(args, "design_digest") || Map.get(args, :design_digest)
+      task_id = Map.get(args, "task_id") || Map.get(args, :task_id)
+      attempt = Map.get(args, "design_attempt") || Map.get(args, :design_attempt)
+
+      descriptor = %{
+        "path" => "/tmp/coding-design-attempt-#{attempt}.txt",
+        "sha256" => String.replace_prefix(design_digest, "sha256:", ""),
+        "byte_size" => byte_size(design),
+        "schema_version" => 1,
+        "task_id" => task_id,
+        "design_attempt" => attempt
+      }
+
+      Agent.update(state, fn current ->
+        %{
+          current
+          | design_artifacts: Map.put(current.design_artifacts, attempt, {descriptor, design})
+        }
+      end)
+
+      {:ok,
+       %{
+         design_artifact: descriptor,
+         design_digest: design_digest,
+         byte_size: byte_size(design)
+       }}
+    end
+
+    defp design_artifact_load_response(args, state) do
+      attempt = Map.get(args, "design_attempt") || Map.get(args, :design_attempt)
+      supplied = Map.get(args, "design_artifact") || Map.get(args, :design_artifact)
+
+      case Agent.get(state, &Map.get(&1.design_artifacts, attempt)) do
+        {^supplied, design} ->
+          {:ok,
+           %{
+             design: design,
+             design_digest: Map.get(args, "design_digest") || Map.get(args, :design_digest),
+             design_artifact: supplied
+           }}
+
+        _other ->
+          {:error, "design artifact unavailable"}
+      end
     end
 
     defp design_checkpoint_await_response(scenario, args) do
@@ -1312,7 +1368,14 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
   defp run_fixture(scenario, initial_overrides \\ %{}, dot_source \\ load_dot()) do
     {:ok, state} =
       Agent.start_link(fn ->
-        %{scenario: scenario, calls: [], counters: %{}, mutations: 0, validation_captures: []}
+        %{
+          scenario: scenario,
+          calls: [],
+          counters: %{},
+          mutations: 0,
+          validation_captures: [],
+          design_artifacts: %{}
+        }
       end)
 
     Process.put(:coding_change_fake_state, state)
@@ -1550,6 +1613,17 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
     "sha256:" <> (:crypto.hash(:sha256, fixture_design(attempt)) |> Base.encode16(case: :lower))
   end
 
+  defp fixture_design_artifact(attempt) do
+    %{
+      "path" => "/tmp/coding-design-attempt-#{attempt}.txt",
+      "sha256" => String.replace_prefix(fixture_design_digest(attempt), "sha256:", ""),
+      "byte_size" => byte_size(fixture_design(attempt)),
+      "schema_version" => 1,
+      "task_id" => "task_fixture",
+      "design_attempt" => attempt
+    }
+  end
+
   defp assert_design_checkpoint_identity(open_args, await_args, plan, compilation, attempt) do
     identity_keys = ~w(
       work_packet
@@ -1562,12 +1636,14 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       worker_session_id
       worker_provider_session_id
       design_attempt
-      design
+      design_artifact
       design_digest
       run_deadline_unix_ms
     )
 
     assert Map.take(await_args, identity_keys) == Map.take(open_args, identity_keys)
+    refute Map.has_key?(open_args, "design")
+    refute Map.has_key?(await_args, "design")
 
     assert Map.take(open_args, identity_keys) == %{
              "work_packet" => plan.work_packet,
@@ -1580,7 +1656,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
              "worker_session_id" => "acp_worker_fixture_1",
              "worker_provider_session_id" => "sess_1",
              "design_attempt" => attempt,
-             "design" => fixture_design(attempt),
+             "design_artifact" => fixture_design_artifact(attempt),
              "design_digest" => fixture_design_digest(attempt),
              "run_deadline_unix_ms" => @fixture_run_deadline_unix_ms
            }
@@ -1893,10 +1969,16 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert result.context["design_envelope_retry_count"] == 1
 
       [initial_prompt, repair_prompt, implementation_prompt] = action_prompts(calls)
-      assert initial_prompt =~ "12,000 UTF-8 bytes"
-      assert initial_prompt =~ "hard admission limit is 16384 bytes"
+      refute initial_prompt =~ "12,000 UTF-8 bytes"
+
+      assert initial_prompt =~
+               "hard admission limit is #{Arbor.Actions.coding_design_max_bytes()} bytes"
+
       assert repair_prompt =~ "condense an oversized design"
-      assert repair_prompt =~ "hard admission limit is 16384 bytes"
+
+      assert repair_prompt =~
+               "hard admission limit is #{Arbor.Actions.coding_design_max_bytes()} bytes"
+
       assert implementation_prompt =~ "IMPLEMENTATION PHASE"
 
       assert length(action_calls(calls, "coding_design_envelope_parse")) == 2

@@ -138,6 +138,76 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandlerExecutionIdTest do
     assert {:ok, _json} = Jason.encode(outcome.context_updates)
   end
 
+  test "forwards trusted design artifact boundaries only as process-local executor opts" do
+    sink =
+      {Arbor.Orchestrator.CodingPlan.ArtifactStore, :archive_design_artifact, ["/tmp", "t"]}
+
+    source =
+      {Arbor.Orchestrator.CodingPlan.ArtifactStore, :read_design_artifact, ["/tmp", "t"]}
+
+    node =
+      action_node(%{
+        "action" => "coding_design_artifact_capture",
+        "arg.design" => "reviewed design",
+        "arg.design_digest" => "sha256:" <> String.duplicate("a", 64),
+        "arg.task_id" => "t",
+        "arg.design_attempt" => "1"
+      })
+
+    outcome =
+      ExecHandler.execute(
+        node,
+        Context.new(),
+        graph(),
+        base_opts(design_artifact_sink: sink, design_artifact_source: source)
+      )
+
+    assert outcome.status == :success
+
+    assert_received {:stub_execute, "coding_design_artifact_capture", args, _workdir,
+                     executor_opts}
+
+    assert Keyword.fetch!(executor_opts, :design_artifact_sink) == sink
+    assert Keyword.fetch!(executor_opts, :design_artifact_source) == source
+    refute Map.has_key?(args, "design_artifact_sink")
+    refute Map.has_key?(args, "design_artifact_source")
+    refute Map.has_key?(outcome.context_updates, "design_artifact_sink")
+    refute Map.has_key?(outcome.context_updates, "design_artifact_source")
+    assert {:ok, _json} = Jason.encode(outcome.context_updates)
+  end
+
+  test "malformed design artifact boundary becomes a bounded process-local sentinel" do
+    node =
+      action_node(%{
+        "action" => "coding_design_artifact_load",
+        "arg.design_artifact" => %{},
+        "arg.design_digest" => "sha256:" <> String.duplicate("a", 64),
+        "arg.task_id" => "t",
+        "arg.design_attempt" => "1"
+      })
+
+    outcome =
+      ExecHandler.execute(
+        node,
+        Context.new(),
+        graph(),
+        base_opts(design_artifact_source: %{callback: fn -> :unsafe end})
+      )
+
+    assert outcome.status == :success
+
+    assert_received {:stub_execute, "coding_design_artifact_load", args, _workdir, executor_opts}
+
+    assert Keyword.fetch!(executor_opts, :design_artifact_boundary_error) ==
+             :invalid_trusted_design_artifact_boundary
+
+    refute Keyword.has_key?(executor_opts, :design_artifact_source)
+    refute Map.has_key?(args, "design_artifact_source")
+    refute Map.has_key?(args, "design_artifact_boundary_error")
+    refute inspect(outcome.context_updates) =~ "callback"
+    assert {:ok, _json} = Jason.encode(outcome.context_updates)
+  end
+
   test "security regression: malformed sink fails through ExecHandler and ActionsExecutor" do
     for module <- [
           Arbor.Security.Identity.Registry,

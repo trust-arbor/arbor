@@ -363,6 +363,7 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
                 # Never derived here; omit when the owner did not supply one.
                 |> maybe_put_context(:execution_id, Keyword.get(opts, :execution_id))
                 |> maybe_put_acp_transcript_capture(action_module, opts)
+                |> maybe_put_design_artifact_boundary(action_module, opts)
                 # Engine-pinned graph execution may resolve pipeline_internal actions.
                 |> Map.put(:allow_pipeline_internal, true)
                 |> maybe_put_file_workspace(action_module, workdir)
@@ -1349,6 +1350,95 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
   end
 
   defp maybe_put_acp_transcript_capture(context, _action_module, _opts), do: context
+
+  # Capture needs the trusted sink; Await and Load need the trusted source.
+  # Never accept module/function/args from plan data, action params, or worker output.
+  defp maybe_put_design_artifact_boundary(
+         context,
+         Arbor.Actions.Coding.DesignCheckpoint.Capture,
+         opts
+       ) do
+    context
+    |> put_design_artifact_boundary_error(opts)
+    |> put_design_artifact_sink(opts)
+    |> put_design_artifact_source(opts, optional?: true)
+  end
+
+  defp maybe_put_design_artifact_boundary(
+         context,
+         Arbor.Actions.Coding.DesignCheckpoint.Await,
+         opts
+       ) do
+    context
+    |> put_design_artifact_boundary_error(opts)
+    |> put_design_artifact_source(opts, optional?: false)
+  end
+
+  defp maybe_put_design_artifact_boundary(
+         context,
+         Arbor.Actions.Coding.DesignCheckpoint.Load,
+         opts
+       ) do
+    context
+    |> put_design_artifact_boundary_error(opts)
+    |> put_design_artifact_source(opts, optional?: false)
+  end
+
+  defp maybe_put_design_artifact_boundary(context, _action_module, _opts), do: context
+
+  defp put_design_artifact_boundary_error(context, opts) do
+    case Keyword.get(opts, :design_artifact_boundary_error) do
+      nil -> context
+      error -> Map.put(context, :design_artifact_boundary_error, error)
+    end
+  end
+
+  defp put_design_artifact_sink(context, opts) do
+    case Keyword.get(opts, :design_artifact_sink) do
+      {module, function, fixed_args}
+      when is_atom(module) and is_atom(function) and is_list(fixed_args) ->
+        Map.put(context, :design_artifact_sink, {module, function, fixed_args})
+
+      nil ->
+        Map.put(
+          context,
+          :design_artifact_boundary_error,
+          :invalid_trusted_design_artifact_boundary
+        )
+
+      _ ->
+        Map.put(
+          context,
+          :design_artifact_boundary_error,
+          :invalid_trusted_design_artifact_boundary
+        )
+    end
+  end
+
+  defp put_design_artifact_source(context, opts, optional?: optional?) do
+    case Keyword.get(opts, :design_artifact_source) do
+      {module, function, fixed_args}
+      when is_atom(module) and is_atom(function) and is_list(fixed_args) ->
+        Map.put(context, :design_artifact_source, {module, function, fixed_args})
+
+      nil when optional? ->
+        context
+
+      nil ->
+        Map.put(
+          context,
+          :design_artifact_boundary_error,
+          :invalid_trusted_design_artifact_boundary
+        )
+
+      _ ->
+        Map.put(
+          context,
+          :design_artifact_boundary_error,
+          :invalid_trusted_design_artifact_boundary
+        )
+    end
+  end
 
   defp maybe_put_context(context, _key, nil), do: context
   defp maybe_put_context(context, _key, ""), do: context

@@ -958,8 +958,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
   end
 
   defp design_size_instruction do
-    "Keep the decoded design text at or below 12,000 UTF-8 bytes; the hard admission limit " <>
-      "is #{Arbor.Actions.coding_design_max_bytes()} bytes. "
+    "The hard admission limit is #{Arbor.Actions.coding_design_max_bytes()} bytes. "
   end
 
   defp approved_implementation_prompt do

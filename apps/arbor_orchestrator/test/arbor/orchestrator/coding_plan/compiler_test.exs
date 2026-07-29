@@ -30,8 +30,10 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     Arbor.Actions.Coding.Workspace.CommittedChange,
     Arbor.Actions.Coding.Workspace.RecoverySummary,
     Arbor.Actions.Coding.DesignCheckpoint.Parse,
+    Arbor.Actions.Coding.DesignCheckpoint.Capture,
     Arbor.Actions.Coding.DesignCheckpoint.Open,
     Arbor.Actions.Coding.DesignCheckpoint.Await,
+    Arbor.Actions.Coding.DesignCheckpoint.Load,
     Arbor.Actions.Coding.SecurityRegression.Validate,
     Arbor.Actions.Coding.CrossApp.Validate,
     Arbor.Actions.Coding.ReviewTree.Read,
@@ -286,9 +288,9 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
   test "template stays within reviewed DOT source, node, and edge ceilings", ctx do
     graph = parse!(ctx.template_source)
 
-    assert byte_size(ctx.template_source) == 80_521
-    assert map_size(graph.nodes) == 233
-    assert length(graph.edges) == 337
+    assert byte_size(ctx.template_source) == 81_456
+    assert map_size(graph.nodes) == 236
+    assert length(graph.edges) == 342
     assert byte_size(ctx.template_source) <= 262_144
     assert map_size(graph.nodes) <= 256
     assert length(graph.edges) <= 512
@@ -460,8 +462,17 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert open["context_keys"] ==
              "work_packet,packet_digest,session.task_id,task,plan_fingerprint," <>
                "coding_plan_fingerprint,workspace_id,worker_session_id," <>
-               "worker_provider_session_id,design_attempt,design,design_digest," <>
+               "worker_provider_session_id,design_attempt,design_artifact,design_digest," <>
                "session.run_deadline_unix_ms"
+
+    assert node_attrs(graph, "capture_design_artifact")["action"] ==
+             "coding_design_artifact_capture"
+
+    assert node_attrs(graph, "load_design_artifact")["action"] ==
+             "coding_design_artifact_load"
+
+    assert node_attrs(graph, "hoist_accepted_design")["source_key"] ==
+             "design_artifact_load.design"
 
     assert open["param.timeout"] ==
              min(
@@ -494,7 +505,8 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert design_prompt =~ packet_json
     assert design_prompt =~ "MUST NOT edit"
     assert design_prompt =~ "MUST NOT create commits"
-    assert design_prompt =~ "12,000 UTF-8 bytes"
+    refute design_prompt =~ "12,000 UTF-8 bytes"
+    assert design_prompt =~ "hard admission limit"
 
     assert design_prompt =~
              "hard admission limit is #{Arbor.Actions.coding_design_max_bytes()} bytes"
@@ -519,7 +531,8 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert repair_prompt =~ packet_json
     assert repair_prompt =~ "Design attempt: 1"
     assert repair_prompt =~ "condense an oversized design"
-    assert repair_prompt =~ "12,000 UTF-8 bytes"
+    refute repair_prompt =~ "12,000 UTF-8 bytes"
+    assert repair_prompt =~ "hard admission limit"
 
     assert repair_prompt =~
              "hard admission limit is #{Arbor.Actions.coding_design_max_bytes()} bytes"
@@ -536,7 +549,8 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
 
     rework_expression = node_attrs(graph, "build_design_rework_prompt")["expression"]
     assert rework_expression =~ "DESIGN REWORK PHASE ONLY"
-    assert rework_expression =~ "12,000 UTF-8 bytes"
+    refute rework_expression =~ "12,000 UTF-8 bytes"
+    assert rework_expression =~ "hard admission limit"
 
     assert rework_expression =~
              "hard admission limit is #{Arbor.Actions.coding_design_max_bytes()} bytes"
@@ -666,7 +680,10 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
              graph,
              "route_design_checkpoint_outcome",
              "context.design_checkpoint.checkpoint_outcome=approve"
-           ) == "hoist_accepted_design_evidence"
+           ) == "load_design_artifact"
+
+    assert edge_target(graph, "load_design_artifact", "outcome=success") ==
+             "hoist_accepted_design_evidence"
 
     assert edge_target(
              graph,

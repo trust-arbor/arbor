@@ -8,11 +8,12 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint do
   authority supplied by a caller.
   """
 
+  alias Arbor.Contracts.Coding.DesignArtifactDescriptor
   alias Arbor.Contracts.Coding.WorkPacket
 
+  @max_design_bytes DesignArtifactDescriptor.max_bytes()
   @max_identifier_bytes 256
   @max_task_bytes 16_384
-  @max_design_bytes 16_384
   @max_terminal_response_bytes 65_536
   @max_json_scan_attempts 128
   # Operator-facing description is short prose only. Exact work packet, task,
@@ -24,7 +25,9 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint do
   @max_timeout 3_600_000
   @request_prefix "irq_design_"
   @design_envelope_keys ~w(design design_digest)
-  @evidence_keys ~w(
+  # Legacy inline evidence — request_id algorithm is byte-for-byte stable when
+  # `design_artifact` is absent.
+  @legacy_evidence_keys ~w(
     task_id
     task
     plan_fingerprint
@@ -34,6 +37,19 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint do
     design_attempt
     packet_digest
     design
+    design_digest
+  )
+  # Artifact-backed evidence — durable path carries descriptor + digest only.
+  @artifact_evidence_keys ~w(
+    task_id
+    task
+    plan_fingerprint
+    workspace_id
+    worker_session_id
+    provider_session_id
+    design_attempt
+    packet_digest
+    design_artifact
     design_digest
   )
 
@@ -51,6 +67,56 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint do
 
   @doc false
   def build_binding(params, context) when is_map(params) and is_map(context) do
+    with {:ok, common} <- build_common_binding(params, context),
+         {:ok, design_fields, path} <- design_evidence_fields(params, context) do
+      base_evidence =
+        Map.merge(
+          %{
+            "task_id" => common.task_id,
+            "task" => common.task,
+            "plan_fingerprint" => common.plan_fingerprint,
+            "workspace_id" => common.workspace_id,
+            "worker_session_id" => common.worker_session_id,
+            "provider_session_id" => common.provider_session_id,
+            "design_attempt" => common.design_attempt,
+            "packet_digest" => common.packet_digest
+          },
+          design_fields
+        )
+
+      with {:ok, request_id} <- request_id(base_evidence),
+           {:ok, description} <-
+             description(
+               common.task_id,
+               common.design_attempt,
+               common.packet_digest,
+               design_fields["design_digest"]
+             ),
+           {:ok, metadata} <- metadata(base_evidence, common.packet) do
+        {:ok,
+         %{
+           agent_id: context_agent_id(params, context),
+           task_id: common.task_id,
+           design_attempt: common.design_attempt,
+           packet: common.packet,
+           path: path,
+           base_evidence: base_evidence,
+           evidence: Map.put(base_evidence, "request_id", request_id),
+           request_id: request_id,
+           description: description,
+           metadata: metadata,
+           design_digest: design_fields["design_digest"],
+           design_artifact: Map.get(design_fields, "design_artifact"),
+           design: Map.get(design_fields, "design")
+         }}
+      end
+    end
+  end
+
+  def build_binding(_params, _context), do: {:error, :invalid_design_checkpoint_input}
+
+  @doc false
+  def build_common_binding(params, context) when is_map(params) and is_map(context) do
     with {:ok, work_packet_input} <- required(params, context, :work_packet, :work_packet),
          {:ok, packet} <- normalize_work_packet(work_packet_input),
          :ok <- require_design_policy(packet),
@@ -62,44 +128,23 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint do
          {:ok, workspace_id} <- required_identifier(params, context, :workspace_id),
          {:ok, worker_session_id} <- required_worker_session(params, context),
          {:ok, provider_session_id} <- optional_identifier(params, context, :provider_session_id),
-         {:ok, design_attempt} <- required_attempt(params, context),
-         {:ok, %{"design" => design, "design_digest" => design_digest}} <-
-           validate_design_envelope(
-             value(params, context, :design),
-             value(params, context, :design_digest)
-           ) do
-      base_evidence = %{
-        "task_id" => task_id,
-        "task" => task,
-        "plan_fingerprint" => plan_fingerprint,
-        "workspace_id" => workspace_id,
-        "worker_session_id" => worker_session_id,
-        "provider_session_id" => provider_session_id,
-        "design_attempt" => design_attempt,
-        "packet_digest" => packet_digest,
-        "design" => design,
-        "design_digest" => design_digest
-      }
-
-      with {:ok, request_id} <- request_id(base_evidence),
-           {:ok, description} <-
-             description(task_id, design_attempt, packet_digest, design_digest),
-           {:ok, metadata} <- metadata(base_evidence, packet) do
-        {:ok,
-         %{
-           agent_id: context_agent_id(params, context),
-           packet: packet,
-           base_evidence: base_evidence,
-           evidence: Map.put(base_evidence, "request_id", request_id),
-           request_id: request_id,
-           description: description,
-           metadata: metadata
-         }}
-      end
+         {:ok, design_attempt} <- required_attempt(params, context) do
+      {:ok,
+       %{
+         packet: packet,
+         packet_digest: packet_digest,
+         task_id: task_id,
+         task: task,
+         plan_fingerprint: plan_fingerprint,
+         workspace_id: workspace_id,
+         worker_session_id: worker_session_id,
+         provider_session_id: provider_session_id,
+         design_attempt: design_attempt
+       }}
     end
   end
 
-  def build_binding(_params, _context), do: {:error, :invalid_design_checkpoint_input}
+  def build_common_binding(_params, _context), do: {:error, :invalid_design_checkpoint_input}
 
   # Validate and normalize the exact design evidence shared by Parse and Open.
   @doc false
@@ -109,6 +154,212 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint do
       {:ok, %{"design" => design, "design_digest" => design_digest}}
     end
   end
+
+  @doc false
+  def validate_design_artifact_envelope(descriptor_input, supplied_digest) do
+    with {:ok, descriptor} <- DesignArtifactDescriptor.normalize(descriptor_input),
+         {:ok, design_digest} <- validate_artifact_design_digest(supplied_digest, descriptor) do
+      {:ok, %{"design_artifact" => descriptor, "design_digest" => design_digest}}
+    end
+  end
+
+  # Fail-closed verify + load through the trusted source. Used by Await
+  # (before any terminal outcome) and Load (implementation handoff). Capture
+  # uses the same consistency checks after archive.
+  @doc false
+  def verify_design_artifact(context, binding, descriptor_input, design_digest)
+      when is_map(context) and is_map(binding) do
+    with {:ok, descriptor} <- DesignArtifactDescriptor.normalize(descriptor_input),
+         {:ok, fixed_task_id} <- fixed_task_id_from_source(context),
+         :ok <- match_task_id(descriptor["task_id"], fixed_task_id, binding),
+         :ok <- match_design_attempt(descriptor["design_attempt"], binding),
+         :ok <- match_descriptor_digest(descriptor, design_digest),
+         {:ok, source} <- design_artifact_source(context),
+         {:ok, design} <- call_design_artifact_source(source, descriptor),
+         :ok <- match_loaded_design(design, descriptor, design_digest) do
+      {:ok, design}
+    end
+  end
+
+  def verify_design_artifact(_context, _binding, _descriptor, _design_digest),
+    do: {:error, :invalid_design_artifact_verify_input}
+
+  @doc false
+  def design_artifact_sink(context) when is_map(context) do
+    with :ok <- design_artifact_boundary_ready(context) do
+      case Map.get(context, :design_artifact_sink) || Map.get(context, "design_artifact_sink") do
+        {module, function, fixed_args} = sink
+        when is_atom(module) and is_atom(function) and is_list(fixed_args) ->
+          {:ok, sink}
+
+        nil ->
+          {:error, :invalid_trusted_design_artifact_boundary}
+
+        _ ->
+          {:error, :invalid_trusted_design_artifact_boundary}
+      end
+    end
+  end
+
+  def design_artifact_sink(_context), do: {:error, :invalid_trusted_design_artifact_boundary}
+
+  @doc false
+  def design_artifact_source(context) when is_map(context) do
+    with :ok <- design_artifact_boundary_ready(context) do
+      case Map.get(context, :design_artifact_source) || Map.get(context, "design_artifact_source") do
+        {module, function, fixed_args} = source
+        when is_atom(module) and is_atom(function) and is_list(fixed_args) ->
+          {:ok, source}
+
+        nil ->
+          {:error, :invalid_trusted_design_artifact_boundary}
+
+        _ ->
+          {:error, :invalid_trusted_design_artifact_boundary}
+      end
+    end
+  end
+
+  def design_artifact_source(_context), do: {:error, :invalid_trusted_design_artifact_boundary}
+
+  defp design_artifact_boundary_ready(context) do
+    case Map.get(context, :design_artifact_boundary_error) ||
+           Map.get(context, "design_artifact_boundary_error") do
+      nil -> :ok
+      _error -> {:error, :invalid_trusted_design_artifact_boundary}
+    end
+  end
+
+  @doc false
+  def call_design_artifact_sink({module, function, fixed_args}, design_attempt, design)
+      when is_atom(module) and is_atom(function) and is_list(fixed_args) and
+             is_integer(design_attempt) and is_binary(design) do
+    apply(module, function, fixed_args ++ [design_attempt, design])
+  rescue
+    UndefinedFunctionError -> {:error, :design_artifact_sink_unavailable}
+    _ -> {:error, :design_artifact_sink_failed}
+  catch
+    :exit, _ -> {:error, :design_artifact_sink_unavailable}
+    _, _ -> {:error, :design_artifact_sink_failed}
+  end
+
+  def call_design_artifact_sink(_sink, _design_attempt, _design),
+    do: {:error, :invalid_trusted_design_artifact_boundary}
+
+  @doc false
+  def call_design_artifact_source({module, function, fixed_args}, descriptor)
+      when is_atom(module) and is_atom(function) and is_list(fixed_args) and is_map(descriptor) do
+    apply(module, function, fixed_args ++ [descriptor])
+  rescue
+    UndefinedFunctionError -> {:error, :design_artifact_source_unavailable}
+    _ -> {:error, :design_artifact_source_failed}
+  catch
+    :exit, _ -> {:error, :design_artifact_source_unavailable}
+    _, _ -> {:error, :design_artifact_source_failed}
+  end
+
+  def call_design_artifact_source(_source, _descriptor),
+    do: {:error, :invalid_trusted_design_artifact_boundary}
+
+  @doc false
+  def computed_design_digest(design) when is_binary(design),
+    do: "sha256:" <> (:crypto.hash(:sha256, design) |> Base.encode16(case: :lower))
+
+  def computed_design_digest(_design), do: nil
+
+  defp design_evidence_fields(params, context) do
+    design_input = value(params, context, :design)
+    artifact_input = value(params, context, :design_artifact)
+    digest_input = value(params, context, :design_digest)
+
+    cond do
+      not is_nil(artifact_input) and not is_nil(design_input) ->
+        {:error, :design_checkpoint_mixed_evidence_shape}
+
+      not is_nil(artifact_input) ->
+        with {:ok, fields} <- validate_design_artifact_envelope(artifact_input, digest_input) do
+          {:ok, fields, :artifact}
+        end
+
+      true ->
+        with {:ok, fields} <- validate_design_envelope(design_input, digest_input) do
+          {:ok, fields, :legacy}
+        end
+    end
+  end
+
+  defp fixed_task_id_from_source(context) do
+    with {:ok, {_module, _function, fixed_args}} <- design_artifact_source(context) do
+      case fixed_args do
+        [_root, task_id] when is_binary(task_id) and task_id != "" ->
+          {:ok, task_id}
+
+        _ ->
+          {:error, :invalid_trusted_design_artifact_boundary}
+      end
+    end
+  end
+
+  defp match_task_id(descriptor_task_id, fixed_task_id, binding) do
+    binding_task_id = binding[:task_id] || binding["task_id"]
+
+    cond do
+      descriptor_task_id !== fixed_task_id ->
+        {:error, :design_artifact_task_id_mismatch}
+
+      binding_task_id !== fixed_task_id ->
+        {:error, :design_artifact_task_id_mismatch}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp match_design_attempt(descriptor_attempt, binding) do
+    binding_attempt = binding[:design_attempt] || binding["design_attempt"]
+
+    if descriptor_attempt === binding_attempt,
+      do: :ok,
+      else: {:error, :design_artifact_attempt_mismatch}
+  end
+
+  defp match_descriptor_digest(descriptor, design_digest) when is_binary(design_digest) do
+    expected = "sha256:" <> descriptor["sha256"]
+
+    if design_digest === expected and descriptor["byte_size"] > 0,
+      do: :ok,
+      else: {:error, :design_artifact_digest_mismatch}
+  end
+
+  defp match_descriptor_digest(_descriptor, _design_digest),
+    do: {:error, :design_artifact_digest_mismatch}
+
+  defp match_loaded_design(design, descriptor, design_digest) when is_binary(design) do
+    with {:ok, ^design} <- validate_design(design),
+         true <- byte_size(design) == descriptor["byte_size"],
+         true <- computed_design_digest(design) == design_digest,
+         true <-
+           :crypto.hash(:sha256, design) |> Base.encode16(case: :lower) == descriptor["sha256"] do
+      :ok
+    else
+      false -> {:error, :design_artifact_digest_mismatch}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp match_loaded_design(_design, _descriptor, _design_digest),
+    do: {:error, :design_artifact_load_failed}
+
+  defp validate_artifact_design_digest(supplied, descriptor) when is_map(descriptor) do
+    expected = "sha256:" <> descriptor["sha256"]
+
+    if is_binary(supplied) and supplied === expected,
+      do: {:ok, expected},
+      else: {:error, :design_digest_mismatch}
+  end
+
+  defp validate_artifact_design_digest(_supplied, _descriptor),
+    do: {:error, :design_digest_mismatch}
 
   # Server-owned digest admission: the caller supplies only `design`, and
   # Arbor computes the sha256 digest itself from the exact admitted bytes.
@@ -159,9 +410,25 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint do
 
   @doc false
   def canonical_evidence(evidence) when is_map(evidence) do
-    if Enum.all?(@evidence_keys, &Map.has_key?(evidence, &1)) do
+    cond do
+      Map.has_key?(evidence, "design_artifact") and Map.has_key?(evidence, "design") ->
+        {:error, :design_checkpoint_mixed_evidence_shape}
+
+      Map.has_key?(evidence, "design_artifact") ->
+        encode_canonical_evidence(evidence, @artifact_evidence_keys)
+
+      true ->
+        encode_canonical_evidence(evidence, @legacy_evidence_keys)
+    end
+  end
+
+  @doc false
+  def canonical_evidence(_evidence), do: {:error, :design_checkpoint_evidence_not_map}
+
+  defp encode_canonical_evidence(evidence, keys) do
+    if Enum.all?(keys, &Map.has_key?(evidence, &1)) do
       ordered =
-        @evidence_keys
+        keys
         |> Enum.map(&{&1, Map.fetch!(evidence, &1)})
         |> Jason.OrderedObject.new()
 
@@ -173,9 +440,6 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint do
       {:error, :design_checkpoint_evidence_incomplete}
     end
   end
-
-  @doc false
-  def canonical_evidence(_evidence), do: {:error, :design_checkpoint_evidence_not_map}
 
   @doc false
   def normalize_response(response, metadata, request_id, evidence)
@@ -480,7 +744,8 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint do
   end
 
   defp validate_design(value)
-       when is_binary(value) and byte_size(value) > 0 and byte_size(value) <= @max_design_bytes do
+       when is_binary(value) and byte_size(value) > 0 and
+              byte_size(value) <= @max_design_bytes do
     cond do
       not String.valid?(value) ->
         {:error, :design_checkpoint_design_invalid_utf8}
@@ -496,8 +761,9 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint do
     end
   end
 
-  defp validate_design(value) when is_binary(value) and byte_size(value) > @max_design_bytes,
-    do: {:error, :design_checkpoint_design_too_large}
+  defp validate_design(value)
+       when is_binary(value) and byte_size(value) > @max_design_bytes,
+       do: {:error, :design_checkpoint_design_too_large}
 
   defp validate_design(_value), do: {:error, :design_checkpoint_design_required}
 
@@ -508,9 +774,6 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint do
       do: {:ok, expected},
       else: {:error, :design_digest_mismatch}
   end
-
-  defp computed_design_digest(design),
-    do: "sha256:" <> (:crypto.hash(:sha256, design) |> Base.encode16(case: :lower))
 
   # Short operator prose only. Exact work packet, task, plan fingerprint, and
   # design remain in metadata and bind the deterministic request id.
@@ -554,6 +817,8 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint do
          :ok <- optional_equal(metadata, :design_attempt, evidence["design_attempt"]),
          :ok <- optional_equal(metadata, :packet_digest, evidence["packet_digest"]),
          :ok <- optional_equal(metadata, :design_digest, evidence["design_digest"]),
+         :ok <- optional_equal(metadata, :design, evidence["design"]),
+         :ok <- optional_equal(metadata, :design_artifact, evidence["design_artifact"]),
          :ok <- optional_nested_evidence(metadata, request_id, evidence) do
       :ok
     end
@@ -810,6 +1075,240 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint.Parse do
   def run(_params, _context), do: {:error, :design_envelope_text_required}
 end
 
+defmodule Arbor.Actions.Coding.DesignCheckpoint.Capture do
+  @moduledoc """
+  Persist the exact admitted design as an immutable task-owned artifact.
+
+  Uses only the executor-installed trusted sink. Action params never supply
+  store module/function/root authority.
+  """
+
+  use Jido.Action,
+    name: "coding_design_artifact_capture",
+    description: "Archive the exact coding design as a task-owned artifact",
+    category: "coding",
+    tags: ["coding", "design_checkpoint", "artifact", "pipeline_internal"],
+    schema: [
+      design: [type: :string, required: true, doc: "Exact admitted design text"],
+      design_digest: [type: :string, required: true, doc: "Exact sha256: design digest"],
+      task_id: [type: :string, required: true, doc: "Coding task identity"],
+      design_attempt: [type: :integer, required: true, doc: "One-based design attempt"]
+    ]
+
+  alias Arbor.Actions.Coding.DesignCheckpoint
+  alias Arbor.Contracts.Coding.DesignArtifactDescriptor
+
+  def taint_roles do
+    %{
+      design: :data,
+      design_digest: :control,
+      task_id: :control,
+      design_attempt: :control
+    }
+  end
+
+  def effect_class, do: :local_write
+  def execution_idempotency, do: :idempotent_with_key
+
+  @impl true
+  def run(params, context) when is_map(params) and is_map(context) do
+    with {:ok, design, design_digest} <- admitted_design(params, context),
+         {:ok, task_id} <- required_task_id(params, context),
+         {:ok, design_attempt} <- required_attempt(params, context),
+         {:ok, sink} <- DesignCheckpoint.design_artifact_sink(context),
+         {:ok, fixed_task_id} <- fixed_task_id(sink),
+         :ok <- match_task_id(task_id, fixed_task_id),
+         {:ok, descriptor} <-
+           DesignCheckpoint.call_design_artifact_sink(sink, design_attempt, design),
+         {:ok, descriptor} <- DesignArtifactDescriptor.normalize(descriptor),
+         :ok <- match_descriptor(descriptor, fixed_task_id, design_attempt, design_digest),
+         :ok <- maybe_reverify(context, descriptor, design_digest, fixed_task_id, design_attempt) do
+      {:ok,
+       %{
+         "design_artifact" => descriptor,
+         "design_digest" => design_digest,
+         "byte_size" => descriptor["byte_size"]
+       }}
+    else
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  def run(_params, _context), do: {:error, :invalid_design_artifact_capture_input}
+
+  defp admitted_design(params, context) do
+    design = Map.get(params, :design) || Map.get(params, "design") || Map.get(context, :design)
+    digest = Map.get(params, :design_digest) || Map.get(params, "design_digest")
+
+    case DesignCheckpoint.validate_design_envelope(design, digest) do
+      {:ok, %{"design" => design, "design_digest" => design_digest}} ->
+        {:ok, design, design_digest}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp required_task_id(params, context) do
+    case Map.get(params, :task_id) || Map.get(params, "task_id") || Map.get(context, :task_id) ||
+           Map.get(context, "task_id") || Map.get(context, "session.task_id") do
+      task_id when is_binary(task_id) and task_id != "" -> {:ok, task_id}
+      _ -> {:error, {:design_checkpoint_identifier_required, "task_id"}}
+    end
+  end
+
+  defp required_attempt(params, context) do
+    case Map.get(params, :design_attempt) || Map.get(params, "design_attempt") ||
+           Map.get(context, :design_attempt) || Map.get(context, "design_attempt") do
+      value when is_integer(value) and value > 0 and value <= 1_000_000 -> {:ok, value}
+      _ -> {:error, :design_checkpoint_attempt_invalid}
+    end
+  end
+
+  defp fixed_task_id({_module, _function, [_root, task_id]})
+       when is_binary(task_id) and task_id != "",
+       do: {:ok, task_id}
+
+  defp fixed_task_id(_sink), do: {:error, :invalid_trusted_design_artifact_boundary}
+
+  defp match_task_id(task_id, task_id), do: :ok
+  defp match_task_id(_task_id, _fixed), do: {:error, :design_artifact_task_id_mismatch}
+
+  defp match_descriptor(descriptor, task_id, design_attempt, design_digest) do
+    expected_digest = "sha256:" <> descriptor["sha256"]
+
+    cond do
+      descriptor["task_id"] !== task_id ->
+        {:error, :design_artifact_task_id_mismatch}
+
+      descriptor["design_attempt"] !== design_attempt ->
+        {:error, :design_artifact_attempt_mismatch}
+
+      design_digest !== expected_digest ->
+        {:error, :design_artifact_digest_mismatch}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp maybe_reverify(context, descriptor, design_digest, task_id, design_attempt) do
+    case DesignCheckpoint.design_artifact_source(context) do
+      {:ok, _source} ->
+        binding = %{task_id: task_id, design_attempt: design_attempt}
+
+        case DesignCheckpoint.verify_design_artifact(
+               context,
+               binding,
+               descriptor,
+               design_digest
+             ) do
+          {:ok, _design} -> :ok
+          {:error, reason} -> {:error, reason}
+        end
+
+      {:error, :invalid_trusted_design_artifact_boundary} ->
+        :ok
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+end
+
+defmodule Arbor.Actions.Coding.DesignCheckpoint.Load do
+  @moduledoc """
+  Load and re-verify the exact design artifact for implementation handoff.
+
+  Fail-closed: missing, tampered, path-escaped, wrong-task, wrong-attempt, or
+  digest-mismatched artifacts cannot be loaded.
+  """
+
+  use Jido.Action,
+    name: "coding_design_artifact_load",
+    description: "Load the verified coding design artifact for implementation",
+    category: "coding",
+    tags: ["coding", "design_checkpoint", "artifact", "pipeline_internal"],
+    schema: [
+      design_artifact: [
+        type: :map,
+        required: true,
+        doc: "Closed design artifact descriptor"
+      ],
+      design_digest: [type: :string, required: true, doc: "Exact sha256: design digest"],
+      task_id: [type: :string, required: true, doc: "Coding task identity"],
+      design_attempt: [type: :integer, required: true, doc: "One-based design attempt"]
+    ]
+
+  alias Arbor.Actions.Coding.DesignCheckpoint
+
+  def taint_roles do
+    %{
+      design_artifact: :control,
+      design_digest: :control,
+      task_id: :control,
+      design_attempt: :control
+    }
+  end
+
+  def effect_class, do: :read
+  def execution_idempotency, do: :read_only
+
+  @impl true
+  def run(params, context) when is_map(params) and is_map(context) do
+    with {:ok, descriptor} <- descriptor_input(params, context),
+         {:ok, design_digest} <- design_digest_input(params, context),
+         {:ok, task_id} <- required_task_id(params, context),
+         {:ok, design_attempt} <- required_attempt(params, context),
+         binding = %{task_id: task_id, design_attempt: design_attempt},
+         {:ok, design} <-
+           DesignCheckpoint.verify_design_artifact(context, binding, descriptor, design_digest) do
+      {:ok,
+       %{
+         "design" => design,
+         "design_digest" => design_digest,
+         "design_artifact" => descriptor
+       }}
+    else
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  def run(_params, _context), do: {:error, :invalid_design_artifact_load_input}
+
+  defp descriptor_input(params, context) do
+    case Map.get(params, :design_artifact) || Map.get(params, "design_artifact") ||
+           Map.get(context, :design_artifact) || Map.get(context, "design_artifact") do
+      descriptor when is_map(descriptor) -> {:ok, descriptor}
+      _ -> {:error, :design_artifact_descriptor_required}
+    end
+  end
+
+  defp design_digest_input(params, context) do
+    case Map.get(params, :design_digest) || Map.get(params, "design_digest") ||
+           Map.get(context, :design_digest) || Map.get(context, "design_digest") do
+      digest when is_binary(digest) -> {:ok, digest}
+      _ -> {:error, :design_digest_mismatch}
+    end
+  end
+
+  defp required_task_id(params, context) do
+    case Map.get(params, :task_id) || Map.get(params, "task_id") || Map.get(context, :task_id) ||
+           Map.get(context, "task_id") || Map.get(context, "session.task_id") do
+      task_id when is_binary(task_id) and task_id != "" -> {:ok, task_id}
+      _ -> {:error, {:design_checkpoint_identifier_required, "task_id"}}
+    end
+  end
+
+  defp required_attempt(params, context) do
+    case Map.get(params, :design_attempt) || Map.get(params, "design_attempt") ||
+           Map.get(context, :design_attempt) || Map.get(context, "design_attempt") do
+      value when is_integer(value) and value > 0 and value <= 1_000_000 -> {:ok, value}
+      _ -> {:error, :design_checkpoint_attempt_invalid}
+    end
+  end
+end
+
 defmodule Arbor.Actions.Coding.DesignCheckpoint.Open do
   @moduledoc """
   Open a durable, operator-facing design approval for a CodingPlan v2 task.
@@ -841,7 +1340,16 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint.Open do
       provider_session_id: [type: :string, required: false, doc: "Provider session id alias"],
       worker_provider_session_id: [type: :string, required: false, doc: "Provider session id"],
       design_attempt: [type: :integer, required: true, doc: "One-based design attempt"],
-      design: [type: :string, required: true, doc: "Exact worker design text"],
+      design: [
+        type: :string,
+        required: false,
+        doc: "Legacy inline design text when design_artifact is absent"
+      ],
+      design_artifact: [
+        type: :map,
+        required: false,
+        doc: "Closed design artifact descriptor for the artifact-backed path"
+      ],
       design_digest: [type: :string, required: true, doc: "Exact sha256: design digest"],
       agent_id: [type: :string, required: false, doc: "Owning agent identity"],
       run_deadline_unix_ms: [
@@ -874,6 +1382,7 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint.Open do
       worker_provider_session_id: :control,
       design_attempt: :control,
       design: :data,
+      design_artifact: :control,
       design_digest: :control,
       agent_id: :control,
       run_deadline_unix_ms: :control,
@@ -1035,7 +1544,16 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint.Await do
       provider_session_id: [type: :string, required: false, doc: "Provider session id alias"],
       worker_provider_session_id: [type: :string, required: false, doc: "Provider session id"],
       design_attempt: [type: :integer, required: true, doc: "One-based design attempt"],
-      design: [type: :string, required: true, doc: "Exact worker design text"],
+      design: [
+        type: :string,
+        required: false,
+        doc: "Legacy inline design text when design_artifact is absent"
+      ],
+      design_artifact: [
+        type: :map,
+        required: false,
+        doc: "Closed design artifact descriptor for the artifact-backed path"
+      ],
       design_digest: [type: :string, required: true, doc: "Exact sha256: design digest"],
       agent_id: [type: :string, required: false, doc: "Owning agent identity"],
       operation_id: [
@@ -1075,6 +1593,7 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint.Await do
       worker_provider_session_id: :control,
       design_attempt: :control,
       design: :data,
+      design_artifact: :control,
       design_digest: :control,
       agent_id: :control,
       operation_id: :control,
@@ -1099,7 +1618,8 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint.Await do
          :ok <- same_evidence(supplied_evidence, binding.evidence),
          {:ok, owner_deadline_unix_ms} <- supplied_owner_deadline(params, context),
          {:ok, run_deadline_unix_ms} <- run_deadline_unix_ms(params, context),
-         :ok <- within_owner_deadline(owner_deadline_unix_ms, run_deadline_unix_ms) do
+         :ok <- within_owner_deadline(owner_deadline_unix_ms, run_deadline_unix_ms),
+         :ok <- verify_artifact_before_terminal(binding, context) do
       await(binding, agent_id, operation_id, owner_deadline_unix_ms, context)
     else
       {:error, reason} -> {:error, reason}
@@ -1107,6 +1627,21 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint.Await do
   end
 
   def run(_params, _context), do: {:error, :invalid_design_checkpoint_input}
+
+  # Artifact path: fail-closed verify before any approve/rework/deny/timeout.
+  defp verify_artifact_before_terminal(%{path: :artifact} = binding, context) do
+    case DesignCheckpoint.verify_design_artifact(
+           context,
+           binding,
+           binding.design_artifact,
+           binding.design_digest
+         ) do
+      {:ok, _design} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp verify_artifact_before_terminal(_binding, _context), do: :ok
 
   defp supplied_request_id(params, context) do
     case Map.get(params, :request_id) || Map.get(params, "request_id") ||

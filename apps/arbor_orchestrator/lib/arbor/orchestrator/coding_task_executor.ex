@@ -2018,6 +2018,16 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
             :append_transcript_turn,
             [logs_root, task_id]
           },
+          design_artifact_sink: {
+            ArtifactStore,
+            :archive_design_artifact,
+            [logs_root, task_id]
+          },
+          design_artifact_source: {
+            ArtifactStore,
+            :read_design_artifact,
+            [logs_root, task_id]
+          },
           graph_hash: compilation.graph_hash,
           execution_manifest: compilation.execution_manifest,
           execution_manifest_digest: compilation.execution_manifest_digest,

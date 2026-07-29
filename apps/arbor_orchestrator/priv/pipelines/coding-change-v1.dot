@@ -322,7 +322,7 @@ digraph CodingChangeV1 {
     type="transform",
     transform="template",
     source_key="task",
-    expression="DESIGN phase only. Task: {value}. Keep the decoded design text at or below 12,000 UTF-8 bytes; the hard admission limit is 16384 bytes. Do not edit files and do not create commits. Return ONLY one valid JSON object with exactly one string field: {\"design\":\"the exact design text\"}. Arbor computes the digest after admission.",
+    expression="DESIGN phase only. Task: {value}. The hard admission limit is enforced by Arbor. Do not edit files and do not create commits. Return ONLY one valid JSON object with exactly one string field: {\"design\":\"the exact design text\"}. Arbor computes the digest after admission.",
     output_key="prompt"
   ]
 
@@ -364,7 +364,7 @@ digraph CodingChangeV1 {
     type="transform",
     transform="template",
     source_key="task",
-    expression="DESIGN envelope repair only. Task: {value}. Preserve the preceding design's meaning while correcting every admission defect: remove prose outside the JSON object, use only the required field, and condense an oversized design. Keep the decoded design text at or below 12,000 UTF-8 bytes; the hard admission limit is 16384 bytes. Do not edit files and do not create commits. Return ONLY one valid JSON object with exactly one string field: {\"design\":\"the exact design text\"}. Arbor computes the digest after admission.",
+    expression="DESIGN envelope repair only. Task: {value}. Preserve the preceding design's meaning while correcting every admission defect: remove prose outside the JSON object, use only the required field, and condense an oversized design. The hard admission limit is enforced by Arbor. Do not edit files and do not create commits. Return ONLY one valid JSON object with exactly one string field: {\"design\":\"the exact design text\"}. Arbor computes the digest after admission.",
     output_key="prompt"
   ]
 
@@ -380,6 +380,22 @@ digraph CodingChangeV1 {
     transform="identity",
     source_key="design_response.design_digest",
     output_key="design_digest"
+  ]
+
+  capture_design_artifact [
+    type="exec",
+    target="action",
+    action="coding_design_artifact_capture",
+    context_keys="design,design_digest,session.task_id,design_attempt",
+    output_prefix="design_artifact_capture",
+    max_retries="0"
+  ]
+
+  hoist_design_artifact [
+    type="transform",
+    transform="identity",
+    source_key="design_artifact_capture.design_artifact",
+    output_key="design_artifact"
   ]
 
   prep_checkpoint_work_packet [
@@ -407,7 +423,7 @@ digraph CodingChangeV1 {
     type="exec",
     target="action",
     action="coding_design_checkpoint_open",
-    context_keys="work_packet,packet_digest,session.task_id,task,plan_fingerprint,coding_plan_fingerprint,workspace_id,worker_session_id,worker_provider_session_id,design_attempt,design,design_digest,session.run_deadline_unix_ms",
+    context_keys="work_packet,packet_digest,session.task_id,task,plan_fingerprint,coding_plan_fingerprint,workspace_id,worker_session_id,worker_provider_session_id,design_attempt,design_artifact,design_digest,session.run_deadline_unix_ms",
     param.timeout=300000,
     timeout_budget.deadline_key="session.run_deadline_unix_ms",
     timeout_budget.cap_key="coding_budget.approval_ms",
@@ -428,7 +444,7 @@ digraph CodingChangeV1 {
     type="exec",
     target="action",
     action="coding_design_checkpoint_await",
-    context_keys="request_id,design_checkpoint_open.operation_id,design_checkpoint_open.owner_deadline_unix_ms,design_checkpoint_open.evidence,work_packet,packet_digest,session.task_id,task,plan_fingerprint,coding_plan_fingerprint,workspace_id,worker_session_id,worker_provider_session_id,design_attempt,design,design_digest,session.run_deadline_unix_ms",
+    context_keys="request_id,design_checkpoint_open.operation_id,design_checkpoint_open.owner_deadline_unix_ms,design_checkpoint_open.evidence,work_packet,packet_digest,session.task_id,task,plan_fingerprint,coding_plan_fingerprint,workspace_id,worker_session_id,worker_provider_session_id,design_attempt,design_artifact,design_digest,session.run_deadline_unix_ms",
     output_prefix="design_checkpoint",
     max_retries="0"
   ]
@@ -437,6 +453,15 @@ digraph CodingChangeV1 {
     type="branch",
     shape=diamond,
     fan_out="false"
+  ]
+
+  load_design_artifact [
+    type="exec",
+    target="action",
+    action="coding_design_artifact_load",
+    context_keys="design_artifact,design_digest,session.task_id,design_attempt",
+    output_prefix="design_artifact_load",
+    max_retries="0"
   ]
 
   hoist_accepted_design_evidence [
@@ -449,7 +474,7 @@ digraph CodingChangeV1 {
   hoist_accepted_design [
     type="transform",
     transform="identity",
-    source_key="design",
+    source_key="design_artifact_load.design",
     output_key="accepted_design"
   ]
 
@@ -548,7 +573,7 @@ digraph CodingChangeV1 {
     type="transform",
     transform="template",
     source_key="task",
-    expression="DESIGN rework only. Task: {value}. Operator note: {ctx.approval_note}. Keep the decoded design text at or below 12,000 UTF-8 bytes; the hard admission limit is 16384 bytes. Do not edit files and do not create commits. Return ONLY one valid JSON object with exactly one string field: {\"design\":\"the exact corrected design text\"}. Arbor computes the digest after admission.",
+    expression="DESIGN rework only. Task: {value}. Operator note: {ctx.approval_note}. The hard admission limit is enforced by Arbor. Do not edit files and do not create commits. Return ONLY one valid JSON object with exactly one string field: {\"design\":\"the exact corrected design text\"}. Arbor computes the digest after admission.",
     output_key="prompt"
   ]
 
@@ -1970,7 +1995,10 @@ digraph CodingChangeV1 {
   extract_design -> error_design_response_invalid [condition="outcome=fail"]
   extract_design -> extract_design_digest [condition="outcome=success"]
   extract_design_digest -> error_design_response_invalid [condition="outcome=fail"]
-  extract_design_digest -> prep_checkpoint_work_packet [condition="outcome=success"]
+  extract_design_digest -> capture_design_artifact [condition="outcome=success"]
+  capture_design_artifact -> error_design_response_invalid [condition="outcome=fail"]
+  capture_design_artifact -> hoist_design_artifact [condition="outcome=success"]
+  hoist_design_artifact -> prep_checkpoint_work_packet
   prep_checkpoint_work_packet -> prep_checkpoint_packet_digest
   prep_checkpoint_packet_digest -> prep_checkpoint_plan_fingerprint
   prep_checkpoint_plan_fingerprint -> open_design_checkpoint
@@ -1983,11 +2011,13 @@ digraph CodingChangeV1 {
   await_design_checkpoint -> error_design_checkpoint_await_failed [condition="outcome=fail"]
   await_design_checkpoint -> route_design_checkpoint_outcome [condition="outcome=success"]
 
-  route_design_checkpoint_outcome -> hoist_accepted_design_evidence [condition="context.design_checkpoint.checkpoint_outcome=approve"]
+  route_design_checkpoint_outcome -> load_design_artifact [condition="context.design_checkpoint.checkpoint_outcome=approve"]
   route_design_checkpoint_outcome -> hoist_design_decision_request_id [condition="context.design_checkpoint.checkpoint_outcome=rework"]
   route_design_checkpoint_outcome -> hoist_design_decision_request_id [condition="context.design_checkpoint.checkpoint_outcome=deny"]
   route_design_checkpoint_outcome -> error_design_checkpoint_timeout [condition="context.design_checkpoint.checkpoint_outcome=timeout"]
   route_design_checkpoint_outcome -> error_design_checkpoint_outcome_invalid
+  load_design_artifact -> error_design_checkpoint_await_failed [condition="outcome=fail"]
+  load_design_artifact -> hoist_accepted_design_evidence [condition="outcome=success"]
 
   // Approval freezes exact evidence, switches the shared worker phase, builds
   // an implementation prompt, and captures a fresh baseline before reusing the

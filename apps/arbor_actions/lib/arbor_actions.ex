@@ -2021,8 +2021,10 @@ defmodule Arbor.Actions do
       ],
       coding: [
         Arbor.Actions.Coding.DesignCheckpoint.Parse,
+        Arbor.Actions.Coding.DesignCheckpoint.Capture,
         Arbor.Actions.Coding.DesignCheckpoint.Open,
         Arbor.Actions.Coding.DesignCheckpoint.Await,
+        Arbor.Actions.Coding.DesignCheckpoint.Load,
         Arbor.Actions.Coding.ReviewedCommit,
         Arbor.Actions.Coding.SecurityRegression.Validate,
         Arbor.Actions.Coding.CrossApp.Validate,
@@ -3058,9 +3060,12 @@ defmodule Arbor.Actions do
     # Pipeline-internal coding gates and transforms (not ordinary LLM tools).
     Arbor.Actions.Coding.DesignCheckpoint.Parse =>
       "arbor://action/coding/design_checkpoint/parse",
+    Arbor.Actions.Coding.DesignCheckpoint.Capture =>
+      "arbor://action/coding/design_checkpoint/capture",
     Arbor.Actions.Coding.DesignCheckpoint.Open => "arbor://action/coding/design_checkpoint/open",
     Arbor.Actions.Coding.DesignCheckpoint.Await =>
       "arbor://action/coding/design_checkpoint/await",
+    Arbor.Actions.Coding.DesignCheckpoint.Load => "arbor://action/coding/design_checkpoint/load",
     Arbor.Actions.Coding.ReviewedCommit => "arbor://action/coding/reviewed_commit",
     Arbor.Actions.Coding.SecurityRegression.Validate =>
       "arbor://action/coding/security_regression/validate",

@@ -27,8 +27,10 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     Arbor.Actions.Coding.Workspace.CommittedChange,
     Arbor.Actions.Coding.Workspace.RecoverySummary,
     Arbor.Actions.Coding.DesignCheckpoint.Parse,
+    Arbor.Actions.Coding.DesignCheckpoint.Capture,
     Arbor.Actions.Coding.DesignCheckpoint.Open,
     Arbor.Actions.Coding.DesignCheckpoint.Await,
+    Arbor.Actions.Coding.DesignCheckpoint.Load,
     Arbor.Actions.Coding.SecurityRegression.Validate,
     Arbor.Actions.Coding.CrossApp.Validate,
     Arbor.Actions.Mix.Compile,
@@ -123,9 +125,18 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     assert graph.nodes["open_design_checkpoint"].attrs["context_keys"] =~
              "session.run_deadline_unix_ms"
 
+    assert graph.nodes["open_design_checkpoint"].attrs["context_keys"] =~ "design_artifact"
+    refute graph.nodes["open_design_checkpoint"].attrs["context_keys"] =~ ",design,"
+    refute graph.nodes["open_design_checkpoint"].attrs["context_keys"] =~ "design_attempt,design,"
+
     assert graph.nodes["await_design_checkpoint"].attrs["context_keys"] =~
              "design_checkpoint_open.operation_id,design_checkpoint_open.owner_deadline_unix_ms," <>
                "design_checkpoint_open.evidence"
+
+    assert graph.nodes["capture_design_artifact"].attrs["action"] ==
+             "coding_design_artifact_capture"
+
+    assert graph.nodes["load_design_artifact"].attrs["action"] == "coding_design_artifact_load"
 
     assert :ok =
              preflight(graph, profile["semantic_policy"],

@@ -2268,6 +2268,14 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
                opts[:transcript_sink]
 
       assert sink_root == opts[:logs_root]
+
+      assert {ArtifactStore, :archive_design_artifact, [design_root, "task_abc"]} =
+               opts[:design_artifact_sink]
+
+      assert {ArtifactStore, :read_design_artifact, [^design_root, "task_abc"]} =
+               opts[:design_artifact_source]
+
+      assert design_root == opts[:logs_root]
       assert opts[:timeout] == 900_000
       assert opts[:approval_timeout_ms] == 300_000
       assert opts[:graph_hash] == artifacts["graph_hash"]

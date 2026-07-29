@@ -83,7 +83,10 @@ defmodule Arbor.ActionsTest do
   end
 
   test "coding design admission limit is exposed through the public facade" do
-    assert Actions.coding_design_max_bytes() == 16_384
+    assert Actions.coding_design_max_bytes() ==
+             Arbor.Contracts.Coding.DesignArtifactDescriptor.max_bytes()
+
+    assert Actions.coding_design_max_bytes() == 32_768
   end
 
   describe "runtime_descriptor/1" do

@@ -2235,7 +2235,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     context_keys =
       "work_packet,packet_digest,session.task_id,task,plan_fingerprint," <>
         "coding_plan_fingerprint,workspace_id,worker_session_id," <>
-        "worker_provider_session_id,design_attempt,design,design_digest," <>
+        "worker_provider_session_id,design_attempt,design_artifact,design_digest," <>
         "session.run_deadline_unix_ms"
 
     expected_nodes = [
@@ -2301,6 +2301,31 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
          "action" => "coding_design_envelope_parse",
          "context_keys" => "worker_msg.text",
          "output_prefix" => "design_response",
+         "max_retries" => "0"
+       }},
+      {"capture_design_artifact",
+       %{
+         "type" => "exec",
+         "target" => "action",
+         "action" => "coding_design_artifact_capture",
+         "context_keys" => "design,design_digest,session.task_id,design_attempt",
+         "output_prefix" => "design_artifact_capture",
+         "max_retries" => "0"
+       }},
+      {"hoist_design_artifact",
+       %{
+         "type" => "transform",
+         "transform" => "identity",
+         "source_key" => "design_artifact_capture.design_artifact",
+         "output_key" => "design_artifact"
+       }},
+      {"load_design_artifact",
+       %{
+         "type" => "exec",
+         "target" => "action",
+         "action" => "coding_design_artifact_load",
+         "context_keys" => "design_artifact,design_digest,session.task_id,design_attempt",
+         "output_prefix" => "design_artifact_load",
          "max_retries" => "0"
        }},
       {"prep_checkpoint_work_packet",
@@ -2390,7 +2415,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
        %{
          "type" => "transform",
          "transform" => "identity",
-         "source_key" => "design",
+         "source_key" => "design_artifact_load.design",
          "output_key" => "accepted_design"
        }},
       {"hoist_accepted_design_digest",
@@ -2455,6 +2480,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
         exact_action? =
           expected["action"] in [
             "coding_design_envelope_parse",
+            "coding_design_artifact_capture",
+            "coding_design_artifact_load",
             "coding_design_checkpoint_open",
             "coding_design_checkpoint_await"
           ]
@@ -2487,6 +2514,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       "accepted_design_request_id" => ["hoist_accepted_design_request_id"],
       "coding_plan_work_packet_json" => ["freeze_coding_plan_work_packet_json"],
       "design" => ["extract_design"],
+      "design_artifact" => ["hoist_design_artifact"],
       "design_attempt" => ["inc_design_attempt", "init_design_attempt"],
       "design_digest" => ["extract_design_digest"],
       "design_envelope_retry_count" => [
@@ -2558,7 +2586,6 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
            "DESIGN PHASE ONLY",
            "{value}",
            "{ctx.coding_plan_work_packet_json}",
-           "12,000 UTF-8 bytes",
            "hard admission limit",
            "MUST NOT edit",
            "MUST NOT create commits",
@@ -2573,7 +2600,6 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
            "{ctx.coding_plan_work_packet_json}",
            "{ctx.design_attempt}",
            "condense an oversized design",
-           "12,000 UTF-8 bytes",
            "hard admission limit",
            "MUST NOT edit",
            "MUST NOT create commits",
@@ -2587,7 +2613,6 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
            "{value}",
            "{ctx.coding_plan_work_packet_json}",
            "{ctx.approval_note}",
-           "12,000 UTF-8 bytes",
            "hard admission limit",
            "MUST NOT edit",
            "MUST NOT create commits",
@@ -2764,8 +2789,14 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       {"extract_design_digest",
        [
          {"error_design_response_invalid", "outcome=fail"},
-         {"prep_checkpoint_work_packet", "outcome=success"}
+         {"capture_design_artifact", "outcome=success"}
        ]},
+      {"capture_design_artifact",
+       [
+         {"error_design_response_invalid", "outcome=fail"},
+         {"hoist_design_artifact", "outcome=success"}
+       ]},
+      {"hoist_design_artifact", [{"prep_checkpoint_work_packet", nil}]},
       {"prep_checkpoint_work_packet", [{"prep_checkpoint_packet_digest", nil}]},
       {"prep_checkpoint_packet_digest", [{"prep_checkpoint_plan_fingerprint", nil}]},
       {"prep_checkpoint_plan_fingerprint", [{"open_design_checkpoint", nil}]},
@@ -2782,8 +2813,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
        ]},
       {"route_design_checkpoint_outcome",
        [
-         {"hoist_accepted_design_evidence",
-          "context.design_checkpoint.checkpoint_outcome=approve"},
+         {"load_design_artifact", "context.design_checkpoint.checkpoint_outcome=approve"},
          {"hoist_design_decision_request_id",
           "context.design_checkpoint.checkpoint_outcome=rework"},
          {"hoist_design_decision_request_id",
@@ -2791,6 +2821,11 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
          {"error_design_checkpoint_timeout",
           "context.design_checkpoint.checkpoint_outcome=timeout"},
          {"error_design_checkpoint_outcome_invalid", nil}
+       ]},
+      {"load_design_artifact",
+       [
+         {"error_design_checkpoint_await_failed", "outcome=fail"},
+         {"hoist_accepted_design_evidence", "outcome=success"}
        ]},
       {"hoist_accepted_design_evidence", [{"hoist_accepted_design", nil}]},
       {"hoist_accepted_design", [{"hoist_accepted_design_digest", nil}]},
@@ -2996,6 +3031,13 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
           reachable,
           dominators,
           "design_checkpoint_approval_gate"
+        )
+        |> require_dominates(
+          "load_design_artifact",
+          "mark_implementation_phase",
+          reachable,
+          dominators,
+          "design_checkpoint_load_gate"
         )
         |> require_dominates(
           "hoist_accepted_design_evidence",

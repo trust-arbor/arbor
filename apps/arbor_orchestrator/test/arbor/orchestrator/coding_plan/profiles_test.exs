@@ -165,6 +165,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
 
       assert "mix_compile" in default["required_actions"]
       assert "coding_design_envelope_parse" in default["required_actions"]
+      assert "coding_design_artifact_capture" in default["required_actions"]
+      assert "coding_design_artifact_load" in default["required_actions"]
       assert "coding_design_checkpoint_open" in default["required_actions"]
       assert "coding_design_checkpoint_await" in default["required_actions"]
       assert "coding_workspace_inspect" in default["required_actions"]
@@ -177,11 +179,14 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
       for node <- ~w[
             await_design_checkpoint
             build_design_envelope_repair_prompt
+            capture_design_artifact
             check_design_envelope_retry_budget
             check_design_workspace_unchanged
+            hoist_design_artifact
             inc_design_envelope_retry_count
             init_design_attempt
             init_design_envelope_retry_count
+            load_design_artifact
             open_design_checkpoint
             parse_design_response
             reset_design_envelope_retry_count

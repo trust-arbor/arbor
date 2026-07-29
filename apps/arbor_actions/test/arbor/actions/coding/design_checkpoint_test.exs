@@ -400,7 +400,7 @@ defmodule Arbor.Actions.Coding.DesignCheckpointTest do
     # Individually admitted task/design field bounds still exceed the durable
     # metadata aggregate ceiling when combined. Aggregate authority is only the
     # public Comms validator — not an action-local size copy.
-    bounded_design = String.duplicate("x", DesignCheckpoint.max_design_bytes())
+    bounded_design = String.duplicate("x", DesignCheckpoint.max_task_bytes())
     bounded_task = String.duplicate("t", DesignCheckpoint.max_task_bytes())
 
     assert {:error, {:invalid_durable_interaction, :json_value_too_large}} =
@@ -428,7 +428,7 @@ defmodule Arbor.Actions.Coding.DesignCheckpointTest do
 
     {:ok, large_packet_digest} = WorkPacket.digest(large_packet)
     escaped_task = String.duplicate(<<1>>, DesignCheckpoint.max_task_bytes())
-    escaped_design = String.duplicate(<<1>>, DesignCheckpoint.max_design_bytes())
+    escaped_design = String.duplicate(<<1>>, DesignCheckpoint.max_task_bytes())
 
     assert {:error, {:invalid_durable_interaction, :json_value_too_large}} =
              Open.run(
@@ -791,20 +791,29 @@ defmodule Arbor.Actions.Coding.DesignCheckpointTest do
   end
 
   test "catalogs canonical internal actions without exposing them" do
+    alias Arbor.Actions.Coding.DesignCheckpoint.{Capture, Load}
+
     assert Parse in Arbor.Actions.list_actions()[:coding]
+    assert Capture in Arbor.Actions.list_actions()[:coding]
     assert Open in Arbor.Actions.list_actions()[:coding]
     assert Await in Arbor.Actions.list_actions()[:coding]
+    assert Load in Arbor.Actions.list_actions()[:coding]
     assert Parse.effect_class() == :read
     assert Parse.execution_idempotency() == :read_only
     assert Open.effect_class() == :network_egress
     assert Await.effect_class() == :read
     assert Await.execution_idempotency() == :read_only
     assert Arbor.Actions.pipeline_internal_action?(Parse)
+    assert Arbor.Actions.pipeline_internal_action?(Capture)
     assert Arbor.Actions.pipeline_internal_action?(Open)
     assert Arbor.Actions.pipeline_internal_action?(Await)
+    assert Arbor.Actions.pipeline_internal_action?(Load)
 
     assert Arbor.Actions.canonical_uri_for(Parse, %{}) ==
              "arbor://action/coding/design_checkpoint/parse"
+
+    assert Arbor.Actions.canonical_uri_for(Capture, %{}) ==
+             "arbor://action/coding/design_checkpoint/capture"
 
     assert Arbor.Actions.canonical_uri_for(Open, %{}) ==
              "arbor://action/coding/design_checkpoint/open"
@@ -812,9 +821,320 @@ defmodule Arbor.Actions.Coding.DesignCheckpointTest do
     assert Arbor.Actions.canonical_uri_for(Await, %{}) ==
              "arbor://action/coding/design_checkpoint/await"
 
+    assert Arbor.Actions.canonical_uri_for(Load, %{}) ==
+             "arbor://action/coding/design_checkpoint/load"
+
     refute Parse in Arbor.Actions.exposed_actions()
+    refute Capture in Arbor.Actions.exposed_actions()
     refute Open in Arbor.Actions.exposed_actions()
     refute Await in Arbor.Actions.exposed_actions()
+    refute Load in Arbor.Actions.exposed_actions()
+  end
+
+  test "max_design_bytes is the contract sole authority and admits 17585 bytes" do
+    alias Arbor.Contracts.Coding.DesignArtifactDescriptor
+
+    assert DesignCheckpoint.max_design_bytes() == DesignArtifactDescriptor.max_bytes()
+    assert DesignCheckpoint.max_design_bytes() == 32_768
+
+    large = String.duplicate("d", 17_585)
+    assert {:ok, envelope} = Parse.run(%{text: Jason.encode!(%{"design" => large})}, %{})
+    assert byte_size(envelope["design"]) == 17_585
+    assert envelope["design_digest"] == digest(large)
+  end
+
+  test "legacy inline request_id stays stable when design_artifact is absent", ctx do
+    assert {:ok, binding} = DesignCheckpoint.build_binding(ctx.params, ctx.context)
+    assert {:ok, again} = DesignCheckpoint.build_binding(ctx.params, ctx.context)
+    assert binding.request_id == again.request_id
+
+    assert binding.request_id ==
+             "irq_design_b57c153c2738dc97c00f95d90f9d8ee8d5119156e7091af3f9a062525ff6d45e"
+
+    assert Map.has_key?(binding.evidence, "design")
+    refute Map.has_key?(binding.evidence, "design_artifact")
+  end
+
+  test "artifact path Open metadata has descriptor and digest but not design text", ctx do
+    alias Arbor.Actions.Coding.DesignCheckpoint.{Capture, Load}
+    root = tmp_root()
+    task_id = ctx.params.task_id
+    design = ctx.params.design
+    design_digest = ctx.params.design_digest
+
+    context =
+      Map.merge(ctx.context, %{
+        design_artifact_sink: {__MODULE__.FakeArtifactStore, :archive, [root, task_id]},
+        design_artifact_source: {__MODULE__.FakeArtifactStore, :read, [root, task_id]}
+      })
+
+    assert {:ok, captured} =
+             Capture.run(
+               %{
+                 design: design,
+                 design_digest: design_digest,
+                 task_id: task_id,
+                 design_attempt: 1
+               },
+               context
+             )
+
+    descriptor = captured["design_artifact"]
+    refute is_nil(descriptor)
+
+    open_params =
+      ctx.params
+      |> Map.delete(:design)
+      |> Map.put(:design_artifact, descriptor)
+      |> Map.put(:design_digest, design_digest)
+
+    assert {:ok, opened} = Open.run(open_params, context)
+    assert opened["evidence"]["design_artifact"] == descriptor
+    assert opened["evidence"]["design_digest"] == design_digest
+    refute Map.has_key?(opened["evidence"], "design")
+
+    assert_received {:request_durable_interaction, interaction, _}
+    assert interaction.metadata["design_artifact"] == descriptor
+    assert interaction.metadata["design_digest"] == design_digest
+    refute Map.has_key?(interaction.metadata, "design")
+    refute Jason.encode!(interaction.metadata) =~ design
+    assert :ok = Arbor.Comms.validate_durable_interaction_payload(interaction)
+
+    Process.put(:await_result, {:ok, :approved, %{}})
+
+    assert {:ok, awaited} =
+             Await.run(await_params(open_params, opened), context)
+
+    assert awaited["checkpoint_outcome"] == "approve"
+
+    assert {:ok, loaded} =
+             Load.run(
+               %{
+                 design_artifact: descriptor,
+                 design_digest: design_digest,
+                 task_id: task_id,
+                 design_attempt: 1
+               },
+               context
+             )
+
+    assert loaded["design"] == design
+  after
+    Process.delete(:await_result)
+    Process.delete(:persisted_durable_receipt)
+  end
+
+  test "Await fail-closed never returns terminal outcomes for bad artifacts", ctx do
+    alias Arbor.Actions.Coding.DesignCheckpoint.Capture
+    root = tmp_root()
+    task_id = ctx.params.task_id
+    design = ctx.params.design
+    design_digest = ctx.params.design_digest
+
+    context =
+      Map.merge(ctx.context, %{
+        design_artifact_sink: {__MODULE__.FakeArtifactStore, :archive, [root, task_id]},
+        design_artifact_source: {__MODULE__.FakeArtifactStore, :read, [root, task_id]}
+      })
+
+    assert {:ok, captured} =
+             Capture.run(
+               %{
+                 design: design,
+                 design_digest: design_digest,
+                 task_id: task_id,
+                 design_attempt: 1
+               },
+               context
+             )
+
+    descriptor = captured["design_artifact"]
+
+    open_params =
+      ctx.params
+      |> Map.delete(:design)
+      |> Map.put(:design_artifact, descriptor)
+      |> Map.put(:design_digest, design_digest)
+
+    assert {:ok, opened} = Open.run(open_params, context)
+    base = await_params(open_params, opened)
+
+    # Missing artifact
+    File.rm!(descriptor["path"])
+    Process.put(:await_result, {:ok, :approved, %{}})
+
+    assert {:error, _reason} = Await.run(base, context)
+    refute_received {:await_durable_interaction_response, _, _, _}
+
+    # Re-archive then tamper bytes
+    assert {:ok, _} =
+             Capture.run(
+               %{
+                 design: design,
+                 design_digest: design_digest,
+                 task_id: task_id,
+                 design_attempt: 1
+               },
+               context
+             )
+
+    File.chmod!(descriptor["path"], 0o600)
+    File.write!(descriptor["path"], design <> "tampered")
+    # immutable write may reject overwrite; force replace for tamper simulation
+    File.rm!(descriptor["path"])
+    File.write!(descriptor["path"], design <> "tampered")
+    File.chmod!(descriptor["path"], 0o600)
+
+    for await_result <- [
+          {:ok, :approved, %{}},
+          {:ok, {:rework, "note"}, %{}},
+          {:ok, {:deny, "no"}, %{}},
+          {:error, :timeout}
+        ] do
+      Process.put(:await_result, await_result)
+      assert {:error, _reason} = Await.run(base, context)
+    end
+
+    refute_received {:await_durable_interaction_response, _, _, _}
+
+    # Wrong task_id in binding vs fixed source
+    wrong_task_context =
+      Map.put(
+        context,
+        :design_artifact_source,
+        {__MODULE__.FakeArtifactStore, :read, [root, "other-task"]}
+      )
+
+    assert {:error, :design_artifact_task_id_mismatch} =
+             Await.run(base, wrong_task_context)
+
+    # Path escape
+    escaped = Map.put(descriptor, "path", "/etc/passwd")
+
+    assert {:error, _} =
+             DesignCheckpoint.verify_design_artifact(
+               context,
+               %{task_id: task_id, design_attempt: 1},
+               escaped,
+               design_digest
+             )
+
+    assert {:error, :design_artifact_task_id_mismatch} =
+             DesignCheckpoint.verify_design_artifact(
+               context,
+               %{design_attempt: 1},
+               descriptor,
+               design_digest
+             )
+  after
+    Process.delete(:await_result)
+    Process.delete(:persisted_durable_receipt)
+  end
+
+  test "Capture rejects task_id that disagrees with executor-fixed identity", ctx do
+    alias Arbor.Actions.Coding.DesignCheckpoint.Capture
+    root = tmp_root()
+
+    context =
+      Map.merge(ctx.context, %{
+        design_artifact_sink: {__MODULE__.FakeArtifactStore, :archive, [root, ctx.params.task_id]}
+      })
+
+    assert {:error, :design_artifact_task_id_mismatch} =
+             Capture.run(
+               %{
+                 design: ctx.params.design,
+                 design_digest: ctx.params.design_digest,
+                 task_id: "attacker-task",
+                 design_attempt: 1
+               },
+               context
+             )
+  end
+
+  defmodule FakeArtifactStore do
+    alias Arbor.Contracts.Coding.DesignArtifactDescriptor
+
+    def archive(root, task_id, design_attempt, design) do
+      File.mkdir_p!(root)
+      path = Path.join(root, "coding-design-attempt-#{design_attempt}.txt")
+      tmp = path <> ".tmp-#{System.unique_integer([:positive])}"
+
+      case File.open(tmp, [:write, :binary, :exclusive], fn device ->
+             with :ok <- File.chmod(tmp, 0o600),
+                  :ok <- IO.binwrite(device, design) do
+               :ok
+             end
+           end) do
+        {:ok, :ok} ->
+          case File.ln(tmp, path) do
+            :ok ->
+              File.rm(tmp)
+              build_descriptor(path, task_id, design_attempt, design)
+
+            {:error, :eexist} ->
+              File.rm(tmp)
+
+              case File.read(path) do
+                {:ok, ^design} -> build_descriptor(path, task_id, design_attempt, design)
+                {:ok, _} -> {:error, :design_artifact_conflict}
+                {:error, reason} -> {:error, reason}
+              end
+
+            {:error, reason} ->
+              File.rm(tmp)
+              {:error, reason}
+          end
+
+        {:ok, {:error, reason}} ->
+          File.rm(tmp)
+          {:error, reason}
+
+        {:error, reason} ->
+          File.rm(tmp)
+          {:error, reason}
+      end
+    end
+
+    def read(root, task_id, descriptor) do
+      with {:ok, normalized} <- DesignArtifactDescriptor.normalize(descriptor),
+           true <- normalized["task_id"] == task_id,
+           path = normalized["path"],
+           true <- Path.dirname(path) == Path.expand(root),
+           {:ok, %File.Stat{type: :regular, mode: mode}} <- File.lstat(path),
+           true <- Bitwise.band(mode, 0o777) == 0o600,
+           {:ok, body} <- File.read(path),
+           true <- byte_size(body) == normalized["byte_size"],
+           true <-
+             Base.encode16(:crypto.hash(:sha256, body), case: :lower) == normalized["sha256"] do
+        {:ok, body}
+      else
+        _ -> {:error, :design_artifact_unavailable}
+      end
+    end
+
+    defp build_descriptor(path, task_id, design_attempt, design) do
+      DesignArtifactDescriptor.normalize(%{
+        "path" => Path.expand(path),
+        "sha256" => Base.encode16(:crypto.hash(:sha256, design), case: :lower),
+        "byte_size" => byte_size(design),
+        "schema_version" => 1,
+        "task_id" => task_id,
+        "design_attempt" => design_attempt
+      })
+    end
+  end
+
+  defp tmp_root do
+    path =
+      Path.join(
+        System.tmp_dir!(),
+        "design_checkpoint_artifact_#{System.unique_integer([:positive])}"
+      )
+
+    File.mkdir_p!(path)
+    on_exit(fn -> File.rm_rf(path) end)
+    Path.expand(path)
   end
 
   defp await_params(params, opened) do

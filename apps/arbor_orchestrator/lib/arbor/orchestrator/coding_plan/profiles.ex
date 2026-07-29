@@ -85,6 +85,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                     error_design_modified_workspace
                     error_design_response_invalid
                     error_design_worker_phase_invalid
+                    capture_design_artifact
                     extract_design
                     extract_design_digest
                     format_accepted_design_evidence
@@ -94,9 +95,11 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                     hoist_accepted_design_digest
                     hoist_accepted_design_evidence
                     hoist_accepted_design_request_id
+                    hoist_design_artifact
                     hoist_design_checkpoint_request_id
                     hoist_design_decision_note
                     hoist_design_decision_request_id
+                    load_design_artifact
                     parse_design_response
                     hoist_review_cycle
                     hoist_review_disposition
@@ -219,6 +222,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                              coding_workspace_acquire
                              coding_workspace_committed_change
                              coding_design_envelope_parse
+                             coding_design_artifact_capture
+                             coding_design_artifact_load
                              coding_design_checkpoint_await
                              coding_design_checkpoint_open
                              coding_workspace_inspect
@@ -286,6 +291,20 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                                   "node_id" => "await_design_checkpoint",
                                   "action" => "coding_design_checkpoint_await",
                                   "required_dominators" => [],
+                                  "review_required_dominators" => [],
+                                  "required_dominator_sets" => []
+                                },
+                                %{
+                                  "node_id" => "capture_design_artifact",
+                                  "action" => "coding_design_artifact_capture",
+                                  "required_dominators" => [],
+                                  "review_required_dominators" => [],
+                                  "required_dominator_sets" => []
+                                },
+                                %{
+                                  "node_id" => "load_design_artifact",
+                                  "action" => "coding_design_artifact_load",
+                                  "required_dominators" => ["await_design_checkpoint"],
                                   "review_required_dominators" => [],
                                   "required_dominator_sets" => []
                                 },

@@ -237,6 +237,98 @@ defmodule Arbor.Orchestrator.ActionsExecutorTest do
       refute Map.has_key?(file_context, :transcript_sink)
       refute Map.has_key?(file_context, :transcript_execution_id)
     end
+
+    test "threads design artifact boundaries only into the exact checkpoint actions" do
+      :erlang.trace_pattern({Arbor.Actions, :authorize_and_execute, 4}, true, [])
+
+      on_exit(fn ->
+        :erlang.trace_pattern({Arbor.Actions, :authorize_and_execute, 4}, false, [])
+      end)
+
+      tracer = self()
+      sink = {__MODULE__, :archive_design, ["/tmp", "task-test"]}
+      source = {__MODULE__, :read_design, ["/tmp", "task-test"]}
+
+      Task.async(fn ->
+        :erlang.trace(self(), true, [:call, {:tracer, tracer}])
+
+        ActionsExecutor.execute(
+          "coding_design_artifact_capture",
+          %{
+            "design" => "reviewed design",
+            "design_digest" => "sha256:" <> String.duplicate("a", 64),
+            "task_id" => "task-test",
+            "design_attempt" => 1
+          },
+          ".",
+          design_artifact_sink: sink,
+          design_artifact_source: source
+        )
+      end)
+      |> Task.await()
+
+      assert_receive {:trace, _pid, :call,
+                      {Arbor.Actions, :authorize_and_execute,
+                       [
+                         _agent_id,
+                         Arbor.Actions.Coding.DesignCheckpoint.Capture,
+                         _params,
+                         capture_context
+                       ]}}
+
+      assert capture_context.design_artifact_sink == sink
+      assert capture_context.design_artifact_source == source
+
+      Task.async(fn ->
+        :erlang.trace(self(), true, [:call, {:tracer, tracer}])
+
+        ActionsExecutor.execute(
+          "coding_design_artifact_load",
+          %{
+            "design_artifact" => %{},
+            "design_digest" => "sha256:" <> String.duplicate("a", 64),
+            "task_id" => "task-test",
+            "design_attempt" => 1
+          },
+          ".",
+          design_artifact_sink: sink,
+          design_artifact_source: source
+        )
+      end)
+      |> Task.await()
+
+      assert_receive {:trace, _pid, :call,
+                      {Arbor.Actions, :authorize_and_execute,
+                       [
+                         _agent_id,
+                         Arbor.Actions.Coding.DesignCheckpoint.Load,
+                         _params,
+                         load_context
+                       ]}}
+
+      refute Map.has_key?(load_context, :design_artifact_sink)
+      assert load_context.design_artifact_source == source
+
+      Task.async(fn ->
+        :erlang.trace(self(), true, [:call, {:tracer, tracer}])
+
+        ActionsExecutor.execute(
+          "file.read",
+          %{"path" => "mix.exs"},
+          ".",
+          design_artifact_sink: sink,
+          design_artifact_source: source
+        )
+      end)
+      |> Task.await()
+
+      assert_receive {:trace, _pid, :call,
+                      {Arbor.Actions, :authorize_and_execute,
+                       [_agent_id, Arbor.Actions.File.Read, _params, file_context]}}
+
+      refute Map.has_key?(file_context, :design_artifact_sink)
+      refute Map.has_key?(file_context, :design_artifact_source)
+    end
   end
 
   describe "normalize_name/1" do
