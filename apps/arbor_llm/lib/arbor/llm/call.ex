@@ -52,8 +52,8 @@ defmodule Arbor.LLM.Call do
 
   @doc """
   Construct a fresh call. Stamps `metadata.started_at` for downstream
-  plugs that need wall-clock timing and a bounded, non-secret event ID for
-  per-invocation observations.
+  plugs that need wall-clock timing and a bounded, cryptographically stable
+  event ID for per-invocation observations.
   """
   @spec new(operation(), tuple()) :: t()
   def new(operation, request) when is_atom(operation) and is_tuple(request) do
@@ -89,7 +89,5 @@ defmodule Arbor.LLM.Call do
     %{call | assigns: Map.put(assigns, key, value)}
   end
 
-  defp new_event_id do
-    "llm-" <> Integer.to_string(:erlang.unique_integer([:positive]))
-  end
+  defp new_event_id, do: Arbor.Identifiers.generate_id("llm_")
 end

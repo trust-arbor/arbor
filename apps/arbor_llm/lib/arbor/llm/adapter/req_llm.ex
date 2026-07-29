@@ -126,10 +126,13 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   def complete(_request, _opts), do: {:error, :invalid_req_llm_completion_request}
 
   defp do_complete(request, opts) do
+    {usage_context, opts} = pop_provider_usage_context(opts)
+
     with {:ok, model_spec} <- build_model_spec(request),
          messages <- translate_messages(request.messages),
          {:ok, req_opts} <- validated_req_opts(request, opts),
-         {:ok, %ReqLLM.Response{} = resp} <- call_req_llm(model_spec, messages, req_opts) do
+         {:ok, %ReqLLM.Response{} = resp} <-
+           call_req_llm(model_spec, messages, req_opts, usage_context) do
       {:ok, translate_response(resp, request)}
     end
   end
@@ -144,10 +147,13 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
          {:ok, receipt} <- Deadline.receipt(opts) do
       Deadline.run(
         fn ->
+          {usage_context, opts} = pop_provider_usage_context(opts)
+
           with {:ok, model_spec} <- build_model_spec(request),
                messages <- translate_messages(request.messages),
                {:ok, req_opts} <- validated_stream_opts(request, opts),
-               pipeline_call = run_pipeline_call(:stream, {model_spec, messages, req_opts}),
+               pipeline_call =
+                 run_pipeline_call(:stream, {model_spec, messages, req_opts}, usage_context),
                {:ok, %BoundedStream{stream: stream}} <- pipeline_call.result do
             translated = Stream.map(stream, &translate_bounded_stream_chunk/1)
 
@@ -230,11 +236,13 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
     # (process_stream is synchronous, so all deltas have arrived by the time it
     # returns) and restore the full reasoning below.
     collector = self()
+    {usage_context, opts} = pop_provider_usage_context(opts)
 
     with {:ok, model_spec} <- build_model_spec(request),
          messages <- translate_messages(request.messages),
          {:ok, req_opts} <- validated_stream_opts(request, opts),
-         pipeline_call = run_pipeline_call(:stream, {model_spec, messages, req_opts}),
+         pipeline_call =
+           run_pipeline_call(:stream, {model_spec, messages, req_opts}, usage_context),
          {:ok, %BoundedStream{} = stream_response} <-
            pipeline_call.result,
          {:ok, %ReqLLM.Response{} = resp} <-
@@ -333,8 +341,10 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   end
 
   defp do_embed(arbor_provider, model_spec, texts, opts) do
+    {usage_context, opts} = pop_provider_usage_context(opts)
+
     with {:ok, req_opts} <- validated_embed_opts(arbor_provider, opts) do
-      case call_req_llm_embed(model_spec, texts, req_opts) do
+      case call_req_llm_embed(model_spec, texts, req_opts, usage_context) do
         {:ok, indexed, usage} when is_list(indexed) ->
           case Boundary.embedding_response_with_indices(
                  %{indexed_embeddings: indexed, usage: usage || %{}},
@@ -383,12 +393,13 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
     |> maybe_merge(:max_response_bytes, Keyword.get(opts, :max_response_bytes))
   end
 
-  defp call_req_llm_embed(%LLMDB.Model{} = model, texts, opts) do
-    run_pipeline(:embed_local, {model, texts, opts})
+  defp call_req_llm_embed(%LLMDB.Model{} = model, texts, opts, usage_context) do
+    run_pipeline(:embed_local, {model, texts, opts}, usage_context)
   end
 
-  defp call_req_llm_embed(model_spec, texts, opts) when is_binary(model_spec) do
-    run_pipeline(:embed_cloud, {model_spec, texts, opts})
+  defp call_req_llm_embed(model_spec, texts, opts, usage_context)
+       when is_binary(model_spec) do
+    run_pipeline(:embed_cloud, {model_spec, texts, opts}, usage_context)
   end
 
   defp dimensions_of([first | _]) when is_list(first), do: length(first)
@@ -720,6 +731,9 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   end
 
   defp validated_req_opts(request, opts) do
+    # Strip private attribution before any provider option assembly.
+    opts = Keyword.delete(opts, :provider_usage_context)
+
     request
     |> build_req_opts(opts)
     |> validate_base_url_opt(request.provider)
@@ -735,6 +749,8 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   end
 
   defp validated_embed_opts(arbor_provider, opts) do
+    opts = Keyword.delete(opts, :provider_usage_context)
+
     arbor_provider
     |> build_embed_opts(opts)
     |> validate_base_url_opt(arbor_provider)
@@ -949,8 +965,8 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
 
   # ── Dispatch ────────────────────────────────────────────────────────
 
-  defp call_req_llm(model_spec, messages, opts) do
-    run_pipeline(:complete, {model_spec, messages, opts})
+  defp call_req_llm(model_spec, messages, opts, usage_context) do
+    run_pipeline(:complete, {model_spec, messages, opts}, usage_context)
   end
 
   # Single entry point for all four dispatch operations. Each call
@@ -959,14 +975,51 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   # no upstream plug short-circuited. The pipeline is configurable
   # so tests can swap in record-only, replay-only, or transparent
   # variants without touching the adapter.
-  defp run_pipeline(operation, request) do
-    run_pipeline_call(operation, request) |> Map.fetch!(:result)
+  defp run_pipeline(operation, request, usage_context) do
+    run_pipeline_call(operation, request, usage_context) |> Map.fetch!(:result)
   end
 
-  defp run_pipeline_call(operation, request) do
+  # Private provider_usage_context is merged into Call metadata only — never
+  # into the request tuple that Dispatch forwards to ReqLLM.
+  defp run_pipeline_call(operation, request, usage_context) do
     operation
     |> Call.new(request)
+    |> maybe_put_provider_usage_context(usage_context)
     |> Pipeline.through(pipeline())
+  end
+
+  defp pop_provider_usage_context(opts) when is_list(opts) do
+    case Keyword.pop(opts, :provider_usage_context) do
+      {context, rest} when is_map(context) and not is_struct(context) ->
+        {normalize_provider_usage_context(context), rest}
+
+      {_other, rest} ->
+        {nil, rest}
+    end
+  end
+
+  defp normalize_provider_usage_context(context) do
+    Enum.reduce([:principal_id, :task_id, :goal_id, :correlation_id], %{}, fn key, acc ->
+      value = Map.get(context, key) || Map.get(context, Atom.to_string(key))
+
+      if is_binary(value) and byte_size(value) > 0 and byte_size(value) <= 128 and
+           String.valid?(value) and String.trim(value) == value and
+           not String.contains?(value, <<0>>) do
+        Map.put(acc, key, value)
+      else
+        acc
+      end
+    end)
+    |> case do
+      empty when map_size(empty) == 0 -> nil
+      normalized -> normalized
+    end
+  end
+
+  defp maybe_put_provider_usage_context(call, nil), do: call
+
+  defp maybe_put_provider_usage_context(call, context) when is_map(context) do
+    Call.put_metadata(call, context)
   end
 
   defp pipeline do

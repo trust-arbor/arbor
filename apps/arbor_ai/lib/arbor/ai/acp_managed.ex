@@ -63,8 +63,17 @@ defmodule Arbor.AI.AcpManaged do
            Arbor.AI.Timeout.start_deadline(opts, @default_operation_timeout_ms),
          {:ok, registry_opts, _remaining} <- Arbor.AI.Timeout.remaining(opts),
          {:ok, resolved} <- SessionRegistry.resolve(worker_session_id, registry_opts),
-         {:ok, operation_opts, _remaining} <- Arbor.AI.Timeout.remaining(opts),
-         operation_opts = session_operation_opts(operation_opts) do
+         {:ok, operation_opts, _remaining} <- Arbor.AI.Timeout.remaining(opts) do
+      # Optional goal/correlation may arrive from a trusted managed/action
+      # boundary. Task/principal authority is rebuilt from the registry entry
+      # after stripping caller-controlled owner fields.
+      optional_scope = Keyword.take(operation_opts, [:goal_id, :correlation_id])
+
+      operation_opts =
+        operation_opts
+        |> session_operation_opts()
+        |> attach_usage_context(resolved, optional_scope)
+
       safe_send_message(resolved, content, operation_opts)
     end
   end
@@ -926,8 +935,43 @@ defmodule Arbor.AI.AcpManaged do
       :session_module,
       :pool_module,
       :supervisor,
-      :create_session
+      :create_session,
+      :goal_id,
+      :correlation_id,
+      :usage_context
     ])
+  end
+
+  # Closed per-send usage context from owner-bound registry resolve. Never
+  # trusts caller task/principal; optional goal/correlation only when already
+  # supplied as bounded managed opts.
+  defp attach_usage_context(opts, resolved, optional_scope)
+       when is_list(opts) and is_map(resolved) and is_list(optional_scope) do
+    context =
+      %{}
+      |> put_closed_usage_id(:task_id, Map.get(resolved, :task_id))
+      |> put_closed_usage_id(:principal_id, Map.get(resolved, :principal_id))
+      |> put_closed_usage_id(:goal_id, Keyword.get(optional_scope, :goal_id))
+      |> put_closed_usage_id(:correlation_id, Keyword.get(optional_scope, :correlation_id))
+
+    if map_size(context) == 0 do
+      opts
+    else
+      Keyword.put(opts, :usage_context, context)
+    end
+  end
+
+  defp put_closed_usage_id(context, _key, value)
+       when not is_binary(value) or value == "",
+       do: context
+
+  defp put_closed_usage_id(context, key, value) when is_binary(value) do
+    if String.valid?(value) and String.trim(value) == value and byte_size(value) <= 256 and
+         not String.contains?(value, <<0>>) do
+      Map.put(context, key, value)
+    else
+      context
+    end
   end
 
   defp min_timeout(:infinity, timeout), do: timeout

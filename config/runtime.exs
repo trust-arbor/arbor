@@ -456,6 +456,17 @@ if daily_budget = System.get_env("ARBOR_DAILY_BUDGET") do
   end
 end
 
+# Durable provider usage ledger target for ordinary runtime (dev/prod).
+# Tests leave this unset and inject an explicit ETS target per call/process.
+if config_env() != :test do
+  config :arbor_ai,
+    provider_usage_ledger_target: [
+      name: :arbor_ai_provider_usage,
+      backend: Arbor.Persistence.EventLog.Ecto,
+      opts: []
+    ]
+end
+
 # ============================================================================
 # Brave Search API (jido_browser)
 # ============================================================================

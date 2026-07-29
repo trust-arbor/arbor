@@ -919,4 +919,239 @@ defmodule Arbor.AI.Runtime.DispatchTest do
       }
     end
   end
+
+  describe "dispatch/2 — provider_usage_context strip / Arbor-only re-add" do
+    defmodule CapturingRuntime do
+      @moduledoc false
+      @behaviour Arbor.AI.Runtime
+
+      alias Arbor.Contracts.AI.RuntimeProfile
+      alias Arbor.LLM.Response
+
+      @impl true
+      def prepare(req, opts) do
+        send(self(), {:runtime_prepare, req.runtime, opts})
+        {:ok, req}
+      end
+
+      @impl true
+      def execute(req, _cb, opts) do
+        send(self(), {:runtime_execute, req.runtime, opts})
+
+        {:ok,
+         %Response{
+           text: "ok",
+           finish_reason: :stop,
+           usage: %{input_tokens: 0, output_tokens: 0, total_tokens: 0},
+           raw: %{runtime: req.runtime}
+         }}
+      end
+
+      @impl true
+      def profile do
+        {:ok, p} =
+          RuntimeProfile.new(%{
+            runtime_id: :capturing,
+            display_name: "capturing",
+            owns_model_loop: false,
+            owns_thread_history: false,
+            supports_jido_actions: false,
+            supports_action_hooks: false,
+            supports_native_tools: false,
+            runs_context_engine: false,
+            exposes_compaction_data: false,
+            unsupported_features: []
+          })
+
+        p
+      end
+    end
+
+    defmodule FailingThenCaptureRuntime do
+      @moduledoc false
+      @behaviour Arbor.AI.Runtime
+
+      alias Arbor.Contracts.AI.RuntimeProfile
+
+      @impl true
+      def prepare(req, opts) do
+        send(self(), {:runtime_prepare, req.runtime, opts})
+        {:ok, req}
+      end
+
+      @impl true
+      def execute(req, _cb, opts) do
+        send(self(), {:runtime_execute, req.runtime, opts})
+        {:error, :timeout}
+      end
+
+      @impl true
+      def profile do
+        {:ok, p} =
+          RuntimeProfile.new(%{
+            runtime_id: :failing_capture,
+            display_name: "failing capture",
+            owns_model_loop: false,
+            owns_thread_history: false,
+            supports_jido_actions: false,
+            supports_action_hooks: false,
+            supports_native_tools: false,
+            runs_context_engine: false,
+            exposes_compaction_data: false,
+            unsupported_features: []
+          })
+
+        p
+      end
+    end
+
+    setup do
+      original = Application.get_env(:arbor_ai, :runtime_registry, %{})
+
+      on_exit(fn ->
+        Application.put_env(:arbor_ai, :runtime_registry, original)
+      end)
+
+      :ok
+    end
+
+    test "Arbor runtime receives provider_usage_context; ACP does not (including fallback)" do
+      Application.put_env(:arbor_ai, :runtime_registry, %{
+        arbor: FailingThenCaptureRuntime,
+        acp: CapturingRuntime
+      })
+
+      usage_ctx = %{principal_id: "agent_x", task_id: "task_x", correlation_id: "run_x"}
+      request = build_request("claude-opus-4-6")
+
+      assert {:ok, _} =
+               Dispatch.dispatch(request,
+                 policy: %{fallback_chain: [%{runtime: :acp}]},
+                 provider_usage_context: usage_ctx
+               )
+
+      assert_receive {:runtime_prepare, :arbor, arbor_prepare_opts}
+      assert_receive {:runtime_execute, :arbor, arbor_execute_opts}
+      assert Keyword.get(arbor_prepare_opts, :provider_usage_context) == usage_ctx
+      assert Keyword.get(arbor_execute_opts, :provider_usage_context) == usage_ctx
+
+      assert_receive {:runtime_prepare, :acp, acp_prepare_opts}
+      assert_receive {:runtime_execute, :acp, acp_execute_opts}
+      refute Keyword.has_key?(acp_prepare_opts, :provider_usage_context)
+      refute Keyword.has_key?(acp_execute_opts, :provider_usage_context)
+    end
+
+    test "non-Arbor primary never receives provider_usage_context" do
+      Application.put_env(:arbor_ai, :runtime_registry, %{
+        arbor: CapturingRuntime,
+        acp: CapturingRuntime
+      })
+
+      usage_ctx = %{principal_id: "agent_y"}
+      request = build_request("claude-opus-4-6")
+
+      assert {:ok, _} =
+               Dispatch.dispatch(request,
+                 policy: %{default_runtime: :acp},
+                 provider_usage_context: usage_ctx
+               )
+
+      assert_receive {:runtime_prepare, :acp, opts}
+      refute Keyword.has_key?(opts, :provider_usage_context)
+      assert_receive {:runtime_execute, :acp, exec_opts}
+      refute Keyword.has_key?(exec_opts, :provider_usage_context)
+    end
+
+    test "provider-route Arbor primary receives provider_usage_context; ACP fallback does not" do
+      Application.put_env(:arbor_ai, :runtime_registry, %{
+        arbor: FailingThenCaptureRuntime,
+        acp: CapturingRuntime
+      })
+
+      usage_ctx = %{principal_id: "agent_route", task_id: "task_route"}
+      # Reuse ProviderRouter helpers from the router describe (same module defp).
+      primary = usage_route_model("primary", :provider_a, "wire-primary", :arbor)
+      fallback = usage_route_model("fallback", :provider_b, "wire-fallback", :acp)
+
+      assert {:ok, _} =
+               Dispatch.dispatch(build_request("ignored"),
+                 provider_route_input: usage_provider_route_input([fallback, primary]),
+                 route_authorizer: fn _ -> :allow end,
+                 provider_usage_context: usage_ctx
+               )
+
+      assert_receive {:runtime_prepare, :arbor, arbor_prepare_opts}
+      assert_receive {:runtime_execute, :arbor, arbor_execute_opts}
+      assert Keyword.get(arbor_prepare_opts, :provider_usage_context) == usage_ctx
+      assert Keyword.get(arbor_execute_opts, :provider_usage_context) == usage_ctx
+
+      assert_receive {:runtime_prepare, :acp, acp_prepare_opts}
+      assert_receive {:runtime_execute, :acp, acp_execute_opts}
+      refute Keyword.has_key?(acp_prepare_opts, :provider_usage_context)
+      refute Keyword.has_key?(acp_execute_opts, :provider_usage_context)
+    end
+
+    test "provider-route non-Arbor primary never receives provider_usage_context" do
+      Application.put_env(:arbor_ai, :runtime_registry, %{
+        arbor: CapturingRuntime,
+        acp: CapturingRuntime
+      })
+
+      usage_ctx = %{principal_id: "agent_route_acp"}
+      primary = usage_route_model("primary", :provider_b, "wire-acp", :acp)
+
+      assert {:ok, _} =
+               Dispatch.dispatch(build_request("ignored"),
+                 provider_route_input: usage_provider_route_input([primary]),
+                 route_authorizer: fn _ -> :allow end,
+                 provider_usage_context: usage_ctx
+               )
+
+      assert_receive {:runtime_prepare, :acp, opts}
+      refute Keyword.has_key?(opts, :provider_usage_context)
+      assert_receive {:runtime_execute, :acp, exec_opts}
+      refute Keyword.has_key?(exec_opts, :provider_usage_context)
+    end
+  end
+
+  # Shared ProviderRouter fixtures for usage-context route tests.
+  defp usage_provider_route_input(catalog) do
+    %{
+      task_class: "default",
+      task_registry: %{"default" => %{requirements: %{}}},
+      catalog: catalog,
+      scoreboard:
+        Enum.map(catalog, fn model ->
+          provider = hd(model.providers)
+
+          %{
+            model: model.canonical_id,
+            provider: Atom.to_string(provider.id),
+            runtime: provider.runtimes |> hd() |> Atom.to_string(),
+            score: if(model.canonical_id == "primary", do: 1.0, else: 0.5)
+          }
+        end),
+      observations: [],
+      budgets: [],
+      now: ~U[2026-07-22 22:00:00Z],
+      policy: %{}
+    }
+  end
+
+  defp usage_route_model(canonical_id, provider, ref, runtime) do
+    %Arbor.Contracts.LLM.ModelEntry{
+      canonical_id: canonical_id,
+      providers: [
+        %Arbor.Contracts.LLM.ProviderEntry{
+          id: provider,
+          ref: ref,
+          auth: :none,
+          runtimes: [runtime]
+        }
+      ],
+      family: :test,
+      context_window: 100_000,
+      max_output_tokens: 4_000
+    }
+  end
 end

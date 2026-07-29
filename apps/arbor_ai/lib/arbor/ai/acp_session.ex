@@ -113,6 +113,8 @@ defmodule Arbor.AI.AcpSession do
     :runtime_home_cleanup,
     :mcp_servers,
     :startup_error,
+    # Immutable init-snapshotted ledger: {:target, target} | {:error, reason}
+    :usage_ledger,
     status: :starting,
     accumulated_text: "",
     stream_tail: nil,
@@ -144,6 +146,9 @@ defmodule Arbor.AI.AcpSession do
   - `:name` — GenServer name registration (optional)
   - `:agent_id` — Arbor agent ID for security integration (optional)
   - `:adapter_opts` — additional adapter-specific options (optional)
+  - `:provider_usage_ledger_target` — init-only closed durable ledger target
+    (tests). Snapshotted at init; never accepted from per-send opts. When
+    absent, snapshots `Config.provider_usage_ledger_target/0` once.
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do
@@ -366,8 +371,11 @@ defmodule Arbor.AI.AcpSession do
     provider = Keyword.fetch!(opts, :provider)
 
     with {:ok, mcp_servers} <- normalize_bound_mcp_servers(Keyword.get(opts, :mcp_servers)),
-         :ok <- Config.validate_requested_model(provider, Keyword.get(opts, :model)) do
+         :ok <- Config.validate_requested_model(provider, Keyword.get(opts, :model)),
+         {:ok, usage_ledger} <- resolve_usage_ledger(opts) do
       {owner, owner_monitor} = monitor_owner(Keyword.get(opts, :owner))
+      # Drop ledger target from retained opts so it cannot leak into client launch.
+      session_opts = drop_usage_ledger_opts(opts)
 
       state = %__MODULE__{
         provider: provider,
@@ -376,9 +384,10 @@ defmodule Arbor.AI.AcpSession do
         owner_monitor: owner_monitor,
         stream_callback: Keyword.get(opts, :stream_callback),
         mcp_servers: mcp_servers,
-        workspace: workspace_plan(opts),
+        workspace: workspace_plan(session_opts),
         status: :starting,
-        opts: opts
+        opts: session_opts,
+        usage_ledger: usage_ledger
       }
 
       {:ok, state, {:continue, :start_client}}
@@ -552,10 +561,13 @@ defmodule Arbor.AI.AcpSession do
   defp do_create_session(opts, state) do
     cwd = resolve_cwd(opts, state.opts, state.workspace)
     opts = bind_mcp_servers(opts, state.mcp_servers)
+    # Strip private usage/ledger/attribution keys before any provider RPC.
+    # Keep original opts for OwnedOperation/Timeout deadline control.
+    provider_opts = sanitize_provider_facing_opts(opts)
 
     result =
       OwnedOperation.run(
-        fn -> new_acp_session(state.client, cwd, opts) end,
+        fn -> new_acp_session(state.client, cwd, provider_opts) end,
         opts,
         :timeout
       )
@@ -566,7 +578,7 @@ defmodule Arbor.AI.AcpSession do
           :ok ->
             case provider_session_id(session_info) do
               {:ok, session_id} ->
-                create_session_with_id(session_info, session_id, opts, state)
+                create_session_with_id(session_info, session_id, provider_opts, state)
 
               {:error, reason} ->
                 new_state = %{state | status: :error, session_id: nil, last_session_id: nil}
@@ -632,12 +644,13 @@ defmodule Arbor.AI.AcpSession do
   defp do_resume_session(session_id, opts, state) do
     cwd = resolve_cwd(opts, state.opts, state.workspace)
     opts = bind_mcp_servers(opts, state.mcp_servers)
+    provider_opts = sanitize_provider_facing_opts(opts)
 
     result =
       OwnedOperation.run(
         fn ->
           # credo:disable-for-next-line Credo.Check.Refactor.Apply
-          apply(acp_client_module(), :load_session, [state.client, session_id, cwd, opts])
+          apply(acp_client_module(), :load_session, [state.client, session_id, cwd, provider_opts])
         end,
         opts,
         :timeout
@@ -653,7 +666,7 @@ defmodule Arbor.AI.AcpSession do
                    state.client,
                    session_id,
                    state.model,
-                   opts
+                   provider_opts
                  ) do
               :ok ->
                 new_state = %{
@@ -1502,31 +1515,362 @@ defmodule Arbor.AI.AcpSession do
   defp checked_add_tokens(current, _delta) when is_integer(current), do: current
   defp checked_add_tokens(_current, _delta), do: 0
 
-  # -- Cost Attribution --
+  # -- Cost Attribution (durable ProviderUsageEvent then BudgetTracker) --
 
-  defp maybe_report_usage(state, result) do
-    if Code.ensure_loaded?(Arbor.AI.BudgetTracker) and
-         Process.whereis(Arbor.AI.BudgetTracker) != nil do
-      usage = extract_prompt_usage(result)
-      model = state.model || "unknown"
+  # Strict ledger parse: require a present usage map and both token fields.
+  # Missing or malformed usage emits no ledger fact (never invent zero-token events).
+  defp strict_prompt_usage(result) when is_map(result) do
+    case prompt_usage_map(result) do
+      usage when is_map(usage) and map_size(usage) > 0 ->
+        with {:ok, input} <-
+               present_usage_token(usage, ["input_tokens", :input_tokens, "inputTokens"]),
+             {:ok, output} <-
+               present_usage_token(usage, ["output_tokens", :output_tokens, "outputTokens"]),
+             {:ok, total} <- optional_total_tokens(usage, input, output),
+             {:ok, cached} <- optional_cached_tokens(usage, input),
+             {:ok, subscription_units} <- optional_subscription_units(usage) do
+          {:ok,
+           %{
+             input_tokens: input,
+             output_tokens: output,
+             total_tokens: total,
+             cached_tokens: cached,
+             subscription_usage_units: subscription_units
+           }}
+        else
+          _ -> :missing
+        end
 
-      try do
-        # credo:disable-for-next-line Credo.Check.Refactor.Apply
-        apply(Arbor.AI.BudgetTracker, :record_usage, [
-          provider_to_backend(state.provider),
-          %{
-            model: model,
-            input_tokens: usage.input_tokens,
-            output_tokens: usage.output_tokens
-          }
-        ])
-      rescue
-        _ -> :ok
-      catch
-        _kind, _reason -> :ok
+      _ ->
+        :missing
+    end
+  end
+
+  defp strict_prompt_usage(_), do: :missing
+
+  defp present_usage_token(usage, keys) when is_map(usage) do
+    case fetch_usage_token(usage, keys) do
+      {:ok, value} -> {:ok, value}
+      _ -> :error
+    end
+  end
+
+  defp fetch_usage_token(usage, keys) when is_map(usage) do
+    Enum.reduce_while(keys, :missing, fn key, _acc ->
+      case Map.fetch(usage, key) do
+        {:ok, value} when is_integer(value) and value >= 0 and value <= 1_000_000_000 ->
+          {:halt, {:ok, value}}
+
+        {:ok, _invalid} ->
+          {:halt, :invalid}
+
+        :error ->
+          {:cont, :missing}
+      end
+    end)
+  end
+
+  defp optional_total_tokens(usage, input, output) do
+    case fetch_usage_token(usage, ["total_tokens", :total_tokens, "totalTokens"]) do
+      {:ok, total} when total >= input + output -> {:ok, total}
+      :missing -> {:ok, input + output}
+      _ -> :error
+    end
+  end
+
+  defp optional_cached_tokens(usage, input) do
+    case fetch_usage_token(usage, [
+           "cached_tokens",
+           :cached_tokens,
+           "cache_read_tokens",
+           :cache_read_tokens,
+           "cachedTokens"
+         ]) do
+      {:ok, cached} when cached <= input -> {:ok, cached}
+      :missing -> {:ok, 0}
+      _ -> :error
+    end
+  end
+
+  # Only admit subscription units when the provider supplies an authoritative field.
+  # Never copy token totals into subscription_usage_units.
+  # Bound before any float conversion (ProviderUsageEvent / ControlPlaneSupport
+  # ceiling): do not `value * 1.0` on an unbounded nonnegative integer — bignums
+  # can raise before a later clamp.
+  # Matches Arbor.Contracts.LLM.ControlPlaneSupport.nonnegative_number/2.
+  @max_subscription_usage_units_int 1_000_000_000_000_000_000
+  @max_subscription_usage_units_float 1.0e18
+
+  defp optional_subscription_units(usage) when is_map(usage) do
+    keys = [
+      "subscription_usage_units",
+      :subscription_usage_units,
+      "subscriptionUsageUnits"
+    ]
+
+    case Enum.reduce_while(keys, :missing, fn key, _acc ->
+           case Map.fetch(usage, key) do
+             {:ok, value}
+             when is_integer(value) and value >= 0 and
+                    value <= @max_subscription_usage_units_int ->
+               # Preserve bounded integer; do not force float conversion.
+               {:halt, {:ok, value}}
+
+             {:ok, value}
+             when is_float(value) and value >= 0.0 and value == value and
+                    value <= @max_subscription_usage_units_float ->
+               {:halt, {:ok, value}}
+
+             {:ok, _invalid} ->
+               {:halt, :invalid}
+
+             :error ->
+               {:cont, :missing}
+           end
+         end) do
+      {:ok, units} -> {:ok, units}
+      :missing -> {:ok, nil}
+      :invalid -> :error
+    end
+  end
+
+  # Missing/malformed usage short-circuits before any ledger-state consult.
+  # An unset or failing snapshotted ledger must not emit admission-failure
+  # observations for prompts that never produced authoritative usage.
+  defp maybe_record_provider_usage(prompt, result, state) do
+    with {:ok, usage} <- strict_prompt_usage(result),
+         {:ok, event} <- build_acp_provider_usage_event(prompt, usage, state) do
+      # Only after a strict event exists do we consult immutable ledger state.
+      case usage_ledger_opts(state) do
+        {:error, reason} ->
+          observe_acp_usage_failure(prompt, reason)
+          :ok
+
+        ledger_opts when is_list(ledger_opts) ->
+          case Arbor.AI.record_provider_usage(event, ledger_opts) do
+            {:ok, _receipt} ->
+              project_acp_budget(state, event, usage)
+
+            {:error, reason} ->
+              observe_acp_usage_failure(prompt, reason)
+              :ok
+
+            _ ->
+              observe_acp_usage_failure(prompt, :unavailable)
+              :ok
+          end
+      end
+    else
+      :missing ->
+        # No authoritative usage — silent; never a ledger failure observation.
+        :ok
+
+      {:error, reason} ->
+        # Malformed usage is not a ledger admission failure; observe only the
+        # usage-parse/build reason (never because ledger was unset).
+        observe_acp_usage_failure(prompt, reason)
+        :ok
+
+      _ ->
+        observe_acp_usage_failure(prompt, :unavailable)
+        :ok
+    end
+  rescue
+    _ ->
+      observe_acp_usage_failure(prompt, :exception)
+      :ok
+  catch
+    _kind, _reason ->
+      observe_acp_usage_failure(prompt, :exception)
+      :ok
+  end
+
+  # Immutable init-snapshotted ledger — never rereads Application/Config.
+  defp usage_ledger_opts(%{usage_ledger: {:target, target}}), do: [target: target]
+  defp usage_ledger_opts(%{usage_ledger: {:error, reason}}), do: {:error, reason}
+  defp usage_ledger_opts(_state), do: {:error, :unavailable}
+
+  defp resolve_usage_ledger(opts) when is_list(opts) do
+    if Keyword.has_key?(opts, :provider_usage_ledger_target) do
+      case Arbor.AI.Config.normalize_provider_usage_ledger_target(
+             Keyword.get(opts, :provider_usage_ledger_target)
+           ) do
+        {:ok, target} -> {:ok, {:target, target}}
+        {:error, reason} -> {:error, reason}
+      end
+    else
+      case Arbor.AI.Config.provider_usage_ledger_target() do
+        {:ok, target} -> {:ok, {:target, target}}
+        {:error, reason} -> {:ok, {:error, classify_acp_usage_reason(reason)}}
       end
     end
   end
+
+  defp drop_usage_ledger_opts(opts) when is_list(opts) do
+    Keyword.drop(opts, [
+      :provider_usage_ledger_target,
+      :usage_ledger_target,
+      :usage_ledger,
+      :provider_usage_recorder
+    ])
+  end
+
+  # Closed strip of private usage/attribution keys before any ACP client RPC
+  # (new_session / load_session / prompt / model-select control opts). Preserves
+  # timeout/deadline and other Timeout/OwnedOperation control keys.
+  defp sanitize_provider_facing_opts(opts) when is_list(opts) do
+    opts
+    |> drop_transcript_capture_opts()
+    |> drop_usage_attribution_opts()
+  end
+
+  defp build_acp_provider_usage_event(prompt, usage, state) do
+    provider = acp_provider_string(state.provider)
+    model = safe_usage_model(state.model)
+    event_id = Map.get(prompt, :usage_event_id) || mint_prompt_usage_event_id(prompt)
+
+    attrs =
+      %{
+        version: 1,
+        event_id: event_id,
+        provider: provider,
+        source: "acp",
+        runtime: "acp",
+        model_id: model,
+        operation: "acp_prompt",
+        occurred_at:
+          DateTime.utc_now() |> DateTime.truncate(:millisecond) |> DateTime.to_iso8601(),
+        input_tokens: usage.input_tokens,
+        output_tokens: usage.output_tokens,
+        total_tokens: usage.total_tokens,
+        cached_tokens: usage.cached_tokens
+      }
+      |> maybe_put_usage_attr(:subscription_usage_units, usage.subscription_usage_units)
+      |> put_usage_context_attrs(Map.get(prompt, :usage_context))
+
+    case Arbor.Contracts.LLM.ProviderUsageEvent.normalize(attrs) do
+      {:ok, event} -> {:ok, event}
+      {:error, reason} -> {:error, classify_acp_usage_reason(reason)}
+      _ -> {:error, :unavailable}
+    end
+  end
+
+  # Stable per-prompt ID: hash of durable transcript capture identity when
+  # available, otherwise a crypto random id. Not claimed as cross-invocation
+  # semantic dedupe beyond exact event-id replay.
+  defp put_prompt_usage_event_id(prompt) when is_map(prompt) do
+    Map.put(prompt, :usage_event_id, mint_prompt_usage_event_id(prompt))
+  end
+
+  defp mint_prompt_usage_event_id(prompt) when is_map(prompt) do
+    case {Map.get(prompt, :transcript_capture), Map.get(prompt, :capture_index)} do
+      {%{execution_id: exec_id}, index}
+      when is_binary(exec_id) and byte_size(exec_id) > 0 and byte_size(exec_id) <= 512 and
+             is_integer(index) and index >= 0 and index <= 1_000_000 ->
+        digest =
+          :crypto.hash(:sha256, ["acp_prompt|", exec_id, "|", Integer.to_string(index)])
+
+        "acp_" <> Base.encode16(binary_part(digest, 0, 16), case: :lower)
+
+      _ ->
+        Arbor.Identifiers.generate_id("acp_")
+    end
+  end
+
+  defp mint_prompt_usage_event_id(_prompt), do: Arbor.Identifiers.generate_id("acp_")
+
+  defp put_usage_context_attrs(attrs, context) when is_map(context) do
+    Enum.reduce([:principal_id, :task_id, :goal_id, :correlation_id], attrs, fn key, acc ->
+      case Map.get(context, key) || Map.get(context, Atom.to_string(key)) do
+        value when is_binary(value) and value != "" -> Map.put(acc, key, value)
+        _ -> acc
+      end
+    end)
+  end
+
+  defp put_usage_context_attrs(attrs, _context), do: attrs
+
+  defp maybe_put_usage_attr(attrs, _key, nil), do: attrs
+  defp maybe_put_usage_attr(attrs, key, value), do: Map.put(attrs, key, value)
+
+  defp project_acp_budget(state, event, usage) do
+    if Application.get_env(:arbor_ai, :enable_budget_tracking, true) and
+         Code.ensure_loaded?(Arbor.AI.BudgetTracker) and
+         Process.whereis(Arbor.AI.BudgetTracker) != nil do
+      # credo:disable-for-next-line Credo.Check.Refactor.Apply
+      apply(Arbor.AI.BudgetTracker, :record_usage, [
+        provider_to_backend(state.provider),
+        %{
+          event_id: event["event_id"],
+          model: event["model_id"],
+          input_tokens: usage.input_tokens,
+          output_tokens: usage.output_tokens
+        }
+      ])
+    else
+      :ok
+    end
+  rescue
+    _ -> :ok
+  catch
+    _kind, _reason -> :ok
+  end
+
+  defp observe_acp_usage_failure(prompt, reason) do
+    Logger.warning("acp provider usage admission failed",
+      event_id: Map.get(prompt, :usage_event_id),
+      prompt_kind: closed_prompt_kind(Map.get(prompt, :prompt_kind)),
+      reason: classify_acp_usage_reason(reason)
+    )
+
+    :ok
+  rescue
+    _ -> :ok
+  end
+
+  defp closed_prompt_kind(kind) when kind in ["initial", "task_control"], do: kind
+  defp closed_prompt_kind(_), do: "unknown"
+
+  defp classify_acp_usage_reason(reason) when is_atom(reason) do
+    if reason in [
+         :provider_usage_ledger_target_unset,
+         :invalid_provider_usage_ledger_target,
+         :event_identity_conflict,
+         :append_indeterminate,
+         :backend_unavailable,
+         :invalid_options,
+         :exception,
+         :unavailable,
+         :malformed
+       ] do
+      reason
+    else
+      :unavailable
+    end
+  end
+
+  defp classify_acp_usage_reason({:append_indeterminate, _}), do: :append_indeterminate
+  defp classify_acp_usage_reason(_), do: :unavailable
+
+  defp acp_provider_string(:claude), do: "anthropic"
+  defp acp_provider_string(:codex), do: "openai"
+  defp acp_provider_string(:gemini), do: "google"
+  # Canonical ledger provider source for the Grok CLI is xai; BudgetTracker
+  # projection keeps :grok via provider_to_backend/1.
+  defp acp_provider_string(:grok), do: "xai"
+
+  defp acp_provider_string(provider) when is_atom(provider),
+    do: safe_usage_model(Atom.to_string(provider))
+
+  defp acp_provider_string(provider) when is_binary(provider), do: safe_usage_model(provider)
+  defp acp_provider_string(_provider), do: "unknown"
+
+  defp safe_usage_model(value)
+       when is_binary(value) and byte_size(value) > 0 and byte_size(value) <= 128 do
+    if String.valid?(value) and String.trim(value) == value, do: value, else: "unknown"
+  end
+
+  defp safe_usage_model(_value), do: "unknown"
 
   defp provider_to_backend(:claude), do: :anthropic
   defp provider_to_backend(:codex), do: :openai
@@ -1621,7 +1965,11 @@ defmodule Arbor.AI.AcpSession do
 
   defp reconnect_client(state, session_pid, client_opts, cwd, operation_opts) do
     client_opts = configure_client_opts(client_opts, session_pid, state.opts, cwd)
-    lifecycle_opts = bind_mcp_servers(operation_opts, state.mcp_servers)
+
+    lifecycle_opts =
+      operation_opts
+      |> bind_mcp_servers(state.mcp_servers)
+      |> sanitize_provider_facing_opts()
 
     with {:ok, client} <- start_acp_client(client_opts) do
       # credo:disable-for-next-line Credo.Check.Refactor.Apply
@@ -1848,6 +2196,9 @@ defmodule Arbor.AI.AcpSession do
   defp do_send_message(content, opts, from, state) do
     with {:ok, opts, hard_timeout} <- Arbor.AI.Timeout.remaining(opts),
          {:ok, deadline_ms} <- Arbor.AI.Timeout.deadline(opts) do
+      # Ledger target is init-only — never accept or forward from per-send opts.
+      opts = drop_usage_ledger_opts(opts)
+      {usage_context, opts} = pop_usage_context(opts)
       capture = transcript_capture(opts)
       state = prepare_prompt_capture(%{state | status: :busy}, capture)
       inactivity_timeout = inactivity_timeout(opts)
@@ -1868,8 +2219,10 @@ defmodule Arbor.AI.AcpSession do
           prompt_kind: "initial",
           capture_index: 0,
           transcript_capture: capture,
+          usage_context: usage_context,
           deadline_ms: deadline_ms
         })
+        |> put_prompt_usage_event_id()
 
       timers =
         start_prompt_timers(prompt.ref,
@@ -2638,6 +2991,8 @@ defmodule Arbor.AI.AcpSession do
           |> accumulate_usage(result)
           |> mark_task_control_delivered(prompt)
 
+        # Report only after transcript durability succeeds, before follow-up chain.
+        maybe_record_provider_usage(prompt, result, new_state)
         continue_after_durable_prompt(prompt, result, new_state)
 
       {:error, reason} ->
@@ -2653,7 +3008,6 @@ defmodule Arbor.AI.AcpSession do
 
     case next_queued_task_control(state) do
       {:none, state} ->
-        maybe_report_usage(state, result)
         emit_signal(:acp_session_completed, state, %{result: summarize_result(result)})
         demonitor_owner(prompt.caller_ref)
         {:reply, {:ok, result}, clear_prompt_capture(%{state | status: :ready})}
@@ -2677,8 +3031,10 @@ defmodule Arbor.AI.AcpSession do
                 prompt_kind: "task_control",
                 capture_index: prompt.capture_index + 1,
                 transcript_capture: prompt.transcript_capture,
+                usage_context: Map.get(prompt, :usage_context),
                 deadline_ms: prompt.deadline_ms
               })
+              |> put_prompt_usage_event_id()
 
             follow_up_timers =
               start_prompt_timers(follow_up.ref,
@@ -3236,8 +3592,50 @@ defmodule Arbor.AI.AcpSession do
   defp prompt_client_opts(opts, hard_timeout) do
     opts
     |> Keyword.delete(:inactivity_timeout_ms)
-    |> drop_transcript_capture_opts()
+    |> sanitize_provider_facing_opts()
     |> Keyword.put(:timeout, hard_timeout)
+  end
+
+  defp pop_usage_context(opts) when is_list(opts) do
+    case Keyword.pop(opts, :usage_context) do
+      {context, rest} when is_map(context) and not is_struct(context) ->
+        {normalize_usage_context(context), drop_usage_attribution_opts(rest)}
+
+      {_other, rest} ->
+        {nil, drop_usage_attribution_opts(rest)}
+    end
+  end
+
+  defp normalize_usage_context(context) do
+    Enum.reduce([:principal_id, :task_id, :goal_id, :correlation_id], %{}, fn key, acc ->
+      value = Map.get(context, key) || Map.get(context, Atom.to_string(key))
+
+      if is_binary(value) and value != "" and String.valid?(value) and
+           String.trim(value) == value and byte_size(value) <= 256 and
+           not String.contains?(value, <<0>>) do
+        Map.put(acc, key, value)
+      else
+        acc
+      end
+    end)
+    |> case do
+      empty when map_size(empty) == 0 -> nil
+      normalized -> normalized
+    end
+  end
+
+  defp drop_usage_attribution_opts(opts) when is_list(opts) do
+    opts
+    |> Keyword.drop([
+      :usage_context,
+      :provider_usage_context,
+      :task_id,
+      :principal_id,
+      :agent_id,
+      :goal_id,
+      :correlation_id
+    ])
+    |> drop_usage_ledger_opts()
   end
 
   defp inactivity_timeout(opts) do
@@ -3390,8 +3788,7 @@ defmodule Arbor.AI.AcpSession do
         process_cwd_with_log()
 
     new_opts = bind_mcp_servers(opts, state.mcp_servers)
-
-    provider_opts = drop_transcript_capture_opts(new_opts)
+    provider_opts = sanitize_provider_facing_opts(new_opts)
 
     result =
       OwnedOperation.run(
@@ -3409,7 +3806,7 @@ defmodule Arbor.AI.AcpSession do
                  state.client,
                  sid,
                  state.model,
-                 opts
+                 provider_opts
                ) do
           {:ok, %{state | session_id: sid, last_session_id: sid}}
         end

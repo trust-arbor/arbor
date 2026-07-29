@@ -1037,6 +1037,29 @@ defmodule Arbor.LLM.Adapter.ReqLLMTest do
     }
   end
 
+  describe "provider_usage_context privacy" do
+    test "build_req_opts never forwards private attribution into provider options" do
+      req = %Request{provider: "openai", model: "gpt-4", temperature: 0.2}
+
+      opts =
+        Adapter.build_req_opts(req,
+          provider_usage_context: %{
+            principal_id: "agent_secret",
+            task_id: "task_secret",
+            correlation_id: "corr_secret"
+          },
+          max_response_bytes: 4_096
+        )
+
+      refute Keyword.has_key?(opts, :provider_usage_context)
+      refute Keyword.has_key?(opts, :principal_id)
+      refute Keyword.has_key?(opts, :task_id)
+      refute Keyword.has_key?(opts, :correlation_id)
+      assert Keyword.get(opts, :temperature) == 0.2
+      assert Keyword.get(opts, :max_response_bytes) == 4_096
+    end
+  end
+
   # ── Helpers ─────────────────────────────────────────────────────────
 
   defp build_req_llm_response(text, opts \\ []) do

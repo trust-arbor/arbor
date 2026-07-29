@@ -1065,9 +1065,69 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
   defp empty_assistant?(_), do: false
 
   defp build_call_opts(node, opts) do
-    case parse_int(Map.get(node.attrs, "timeout"), nil) do
+    opts =
+      case parse_int(Map.get(node.attrs, "timeout"), nil) do
+        nil -> opts
+        timeout_ms -> Keyword.put(opts, :timeout, timeout_ms)
+      end
+
+    put_trusted_provider_usage_context(opts)
+  end
+
+  # Private attribution for ReqLLM Usage telemetry. Built only from immutable
+  # RunAuthorization principal/task plus run_id correlation — never from
+  # caller-controlled node attrs or a prior caller-supplied context map.
+  # Any caller-supplied :provider_usage_context is deleted first, then a
+  # trusted map is re-derived and re-added. Stripped before external provider
+  # options by the ReqLLM adapter.
+  defp put_trusted_provider_usage_context(opts) when is_list(opts) do
+    opts = Keyword.delete(opts, :provider_usage_context)
+
+    case build_provider_usage_context(opts) do
       nil -> opts
-      timeout_ms -> Keyword.put(opts, :timeout, timeout_ms)
+      context -> Keyword.put(opts, :provider_usage_context, context)
+    end
+  end
+
+  defp build_provider_usage_context(opts) when is_list(opts) do
+    context =
+      case Keyword.get(opts, :run_authorization) do
+        %RunAuthorization{} = authority ->
+          %{}
+          |> maybe_put_usage_id(:principal_id, authority.execution_principal)
+          |> maybe_put_usage_id(:task_id, authority.task_id)
+          |> maybe_put_usage_id(:correlation_id, Keyword.get(opts, :run_id))
+
+        _ ->
+          maybe_put_usage_id(%{}, :correlation_id, Keyword.get(opts, :run_id))
+      end
+
+    if map_size(context) == 0, do: nil, else: context
+  end
+
+  defp maybe_put_usage_id(map, _key, nil), do: map
+  defp maybe_put_usage_id(map, _key, ""), do: map
+
+  defp maybe_put_usage_id(map, key, value)
+       when is_binary(value) and byte_size(value) > 0 and byte_size(value) <= 128 do
+    if String.valid?(value) and String.trim(value) == value and
+         not String.contains?(value, <<0>>) do
+      Map.put(map, key, value)
+    else
+      map
+    end
+  end
+
+  defp maybe_put_usage_id(map, _key, _value), do: map
+
+  defp maybe_put_provider_usage_context(opts, handler_opts) do
+    # Drop any caller- or earlier-path-supplied context, then re-derive from
+    # handler authority only so tool-loop opts cannot smuggle attribution.
+    opts = Keyword.delete(opts, :provider_usage_context)
+
+    case build_provider_usage_context(handler_opts) do
+      nil -> opts
+      context -> Keyword.put(opts, :provider_usage_context, context)
     end
   end
 
@@ -1123,6 +1183,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
             |> maybe_put_terminal_tools(terminal_tools)
             |> Keyword.merge(credential_opts)
             |> Keyword.merge(authority_opts)
+            |> maybe_put_provider_usage_context(opts)
             |> maybe_add_stream_callback(on_stream)
 
           # Phase 4+ (B4): wrap ToolLoop in a fallback loop so per-agent

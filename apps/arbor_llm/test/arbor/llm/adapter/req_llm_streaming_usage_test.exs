@@ -21,6 +21,23 @@ defmodule Arbor.LLM.Adapter.ReqLLMStreamingUsageTest do
         {:pipeline_event_id, call.metadata.event_id}
       )
 
+      send(
+        Application.fetch_env!(:arbor_llm, :streaming_usage_test_pid),
+        {:pipeline_metadata, call.metadata}
+      )
+
+      # Prove private attribution is not on the request opts tuple.
+      case call.request do
+        {_model, _messages, opts} when is_list(opts) ->
+          send(
+            Application.fetch_env!(:arbor_llm, :streaming_usage_test_pid),
+            {:pipeline_request_opts, opts}
+          )
+
+        _ ->
+          :ok
+      end
+
       %{
         call
         | result:
@@ -102,25 +119,48 @@ defmodule Arbor.LLM.Adapter.ReqLLMStreamingUsageTest do
     test_pid = self()
     callback = fn event -> send(test_pid, {:callback, event}) end
 
-    assert {:ok, response} = Adapter.complete_streaming(request, callback)
+    assert {:ok, response} =
+             Adapter.complete_streaming(request, callback,
+               provider_usage_context: %{
+                 principal_id: "agent_from_auth",
+                 task_id: "task_from_auth",
+                 correlation_id: "run_from_engine"
+               }
+             )
+
     assert response.text == "answer"
     assert response.usage.input_tokens == 4
     assert response.usage.output_tokens == 3
 
     assert_receive {:callback, %Arbor.LLM.StreamEvent{type: :delta, data: %{text: "answer"}}}
     assert_receive {:pipeline_event_id, event_id}
+    assert_receive {:pipeline_metadata, pipeline_meta}
+    assert pipeline_meta.principal_id == "agent_from_auth"
+    assert pipeline_meta.task_id == "task_from_auth"
+    assert pipeline_meta.correlation_id == "run_from_engine"
+
+    assert_receive {:pipeline_request_opts, req_opts}
+    refute Keyword.has_key?(req_opts, :provider_usage_context)
+    refute Keyword.has_key?(req_opts, :principal_id)
+    refute Keyword.has_key?(req_opts, :task_id)
 
     assert_receive {:usage_event, @event, measurements, metadata}
     assert measurements == %{count: 1, input: 4, output: 3, total: 7, cached: 0}
 
-    assert metadata == %{
-             event_id: event_id,
-             source: :req_llm,
-             operation: :complete,
-             provider: "openai",
-             model: "gpt-4",
-             usage_status: :authoritative
-           }
+    assert metadata.event_id == event_id
+    assert metadata.source == :req_llm
+    assert metadata.operation == :complete
+    assert metadata.provider == "openai"
+    assert metadata.model == "gpt-4"
+    assert metadata.usage_status == :authoritative
+    assert metadata.event["event_id"] == event_id
+    assert metadata.event["runtime"] == "arbor"
+    assert metadata.event["operation"] == "complete"
+    assert metadata.event["input_tokens"] == 4
+    assert metadata.event["output_tokens"] == 3
+    assert metadata.event["principal_id"] == "agent_from_auth"
+    assert metadata.event["task_id"] == "task_from_auth"
+    assert metadata.event["correlation_id"] == "run_from_engine"
 
     refute_receive {:usage_event, @event, _, _}, 50
   end
@@ -183,14 +223,15 @@ defmodule Arbor.LLM.Adapter.ReqLLMStreamingUsageTest do
     assert_receive {:usage_event, @event, measurements, metadata}
     assert measurements == %{count: 1, input: 4, output: 3, total: 7, cached: 0}
 
-    assert metadata == %{
-             event_id: event_id,
-             source: :req_llm,
-             operation: :complete,
-             provider: "openai",
-             model: "gpt-4",
-             usage_status: :authoritative
-           }
+    assert metadata.event_id == event_id
+    assert metadata.source == :req_llm
+    assert metadata.operation == :complete
+    assert metadata.provider == "openai"
+    assert metadata.model == "gpt-4"
+    assert metadata.usage_status == :authoritative
+    assert metadata.event["event_id"] == event_id
+    assert metadata.event["input_tokens"] == 4
+    assert metadata.event["output_tokens"] == 3
 
     # Exactly once for this collection.
     refute_receive {:usage_event, @event, _, _}, 50

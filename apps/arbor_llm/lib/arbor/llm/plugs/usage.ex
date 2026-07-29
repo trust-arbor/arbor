@@ -28,6 +28,8 @@ defmodule Arbor.LLM.Plugs.Usage do
 
   use Arbor.LLM.Plug
 
+  alias Arbor.Contracts.LLM.ProviderUsageEvent
+  alias Arbor.Identifiers
   alias Arbor.LLM.Call
   alias Arbor.LLM.Plugs.Usage.AccountedStream
   alias Arbor.LLM.Response
@@ -37,7 +39,9 @@ defmodule Arbor.LLM.Plugs.Usage do
   @max_token_count 1_000_000_000
   @max_cost_usd 1_000_000.0
   @max_string_bytes 128
+  @max_event_id_bytes 64
   @recognized_operations [:complete, :embed_cloud, :embed_local]
+  @attribution_keys [:principal_id, :task_id, :goal_id, :correlation_id]
 
   @impl Arbor.LLM.Plug
   def call(%Call{halted: true} = call), do: call
@@ -51,12 +55,11 @@ defmodule Arbor.LLM.Plugs.Usage do
       {measurements, usage_status} = extract_usage(operation, result)
       {provider, model} = model_identity(operation, call.request)
 
-      emit_usage(
-        measurements,
-        %{event_id: event_id, provider: provider, model: model},
-        operation,
-        usage_status
-      )
+      provenance =
+        %{event_id: event_id, provider: provider, model: model}
+        |> Map.merge(attribution_from_metadata(metadata))
+
+      emit_usage(measurements, provenance, operation, usage_status)
 
       Call.put_metadata(call, %{event_id: event_id, usage_emitted: true})
     end
@@ -84,6 +87,7 @@ defmodule Arbor.LLM.Plugs.Usage do
       # provenance map that holds it; no global table or process ownership.
       finalize_gate: new_finalize_gate()
     }
+    |> Map.merge(attribution_from_metadata(metadata))
   end
 
   @doc false
@@ -249,7 +253,11 @@ defmodule Arbor.LLM.Plugs.Usage do
   end
 
   defp emit_usage(measurements, provenance, operation, usage_status \\ :authoritative) do
-    emit(
+    event_id = bounded_event_id(Map.get(provenance, :event_id, new_event_id()))
+    provider = safe_string(Map.get(provenance, :provider, "unknown"))
+    model = safe_string(Map.get(provenance, :model, "unknown"))
+
+    measurements_payload =
       %{
         count: 1,
         input: measurements.input,
@@ -257,16 +265,106 @@ defmodule Arbor.LLM.Plugs.Usage do
         total: measurements.total,
         cached: measurements.cached
       }
-      |> maybe_put_cost(measurements),
+      |> maybe_put_cost(measurements)
+
+    base_metadata = %{
+      event_id: event_id,
+      source: :req_llm,
+      operation: operation,
+      provider: provider,
+      model: model,
+      usage_status: usage_status
+    }
+
+    metadata =
+      case usage_status do
+        :authoritative ->
+          case build_canonical_event(
+                 measurements,
+                 provenance,
+                 operation,
+                 event_id,
+                 provider,
+                 model
+               ) do
+            {:ok, event} ->
+              Map.merge(base_metadata, %{usage_status: :authoritative, event: event})
+
+            _ ->
+              # Fail closed: never claim authoritative without a contract-valid map.
+              Map.put(base_metadata, :usage_status, :invalid)
+          end
+
+        other ->
+          Map.put(base_metadata, :usage_status, other)
+      end
+
+    emit(measurements_payload, metadata)
+  end
+
+  defp build_canonical_event(measurements, provenance, operation, event_id, provider, model) do
+    attrs =
       %{
-        event_id: bounded_event_id(Map.get(provenance, :event_id, new_event_id())),
-        source: :req_llm,
-        operation: operation,
-        provider: safe_string(Map.get(provenance, :provider, "unknown")),
-        model: safe_string(Map.get(provenance, :model, "unknown")),
-        usage_status: usage_status
+        version: 1,
+        event_id: event_id,
+        provider: provider,
+        source: "req_llm",
+        runtime: "arbor",
+        model_id: model,
+        operation: Atom.to_string(operation),
+        occurred_at: occurrence_time(),
+        input_tokens: measurements.input,
+        output_tokens: measurements.output,
+        total_tokens: measurements.total,
+        cached_tokens: measurements.cached
       }
-    )
+      |> maybe_put_attr(:marginal_api_cost_usd, Map.get(measurements, :cost))
+      |> put_optional_attribution(provenance)
+
+    ProviderUsageEvent.normalize(attrs)
+  end
+
+  defp put_optional_attribution(attrs, provenance) when is_map(provenance) do
+    Enum.reduce(@attribution_keys, attrs, fn key, acc ->
+      case Map.get(provenance, key) do
+        value when is_binary(value) and byte_size(value) > 0 and byte_size(value) <= 128 ->
+          if String.valid?(value) and String.trim(value) == value do
+            Map.put(acc, key, value)
+          else
+            acc
+          end
+
+        _ ->
+          acc
+      end
+    end)
+  end
+
+  defp put_optional_attribution(attrs, _provenance), do: attrs
+
+  defp attribution_from_metadata(metadata) when is_map(metadata) do
+    Enum.reduce(@attribution_keys, %{}, fn key, acc ->
+      case Map.get(metadata, key) do
+        value when is_binary(value) and byte_size(value) > 0 and byte_size(value) <= 128 ->
+          if String.valid?(value) and String.trim(value) == value do
+            Map.put(acc, key, value)
+          else
+            acc
+          end
+
+        _ ->
+          acc
+      end
+    end)
+  end
+
+  defp attribution_from_metadata(_metadata), do: %{}
+
+  defp maybe_put_attr(map, _key, nil), do: map
+  defp maybe_put_attr(map, key, value), do: Map.put(map, key, value)
+
+  defp occurrence_time do
+    DateTime.utc_now() |> DateTime.truncate(:millisecond) |> DateTime.to_iso8601()
   end
 
   defp usage_map(:complete, {:ok, %ReqLLM.Response{stream?: false} = response}) do
@@ -412,12 +510,12 @@ defmodule Arbor.LLM.Plugs.Usage do
   defp safe_string(_value), do: "unknown"
 
   defp bounded_event_id(value)
-       when is_binary(value) and byte_size(value) > 0 and byte_size(value) <= 64,
+       when is_binary(value) and byte_size(value) > 0 and byte_size(value) <= @max_event_id_bytes,
        do: value
 
   defp bounded_event_id(_value), do: new_event_id()
 
-  defp new_event_id, do: "llm-" <> Integer.to_string(:erlang.unique_integer([:positive]))
+  defp new_event_id, do: Identifiers.generate_id("llm_")
 
   defp emit(measurements, metadata) do
     :telemetry.execute([:arbor, :llm, :usage], measurements, metadata)

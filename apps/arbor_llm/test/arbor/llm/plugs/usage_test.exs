@@ -56,6 +56,20 @@ defmodule Arbor.LLM.Plugs.UsageTest do
     assert metadata.usage_status == :authoritative
     assert is_binary(metadata.event_id)
     assert byte_size(metadata.event_id) <= 64
+    assert String.starts_with?(metadata.event_id, "llm_")
+    assert is_map(metadata.event)
+    assert metadata.event["event_id"] == metadata.event_id
+    assert metadata.event["source"] == "req_llm"
+    assert metadata.event["runtime"] == "arbor"
+    assert metadata.event["provider"] == "openai"
+    assert metadata.event["model_id"] == "gpt-4"
+    assert metadata.event["operation"] == "complete"
+    assert metadata.event["input_tokens"] == 11
+    assert metadata.event["output_tokens"] == 7
+    assert metadata.event["total_tokens"] == 18
+    assert metadata.event["cached_tokens"] == 2
+    assert metadata.event["marginal_api_cost_usd"] == 0.42
+    refute Map.has_key?(metadata.event, "subscription_usage_units")
     assert call.metadata.usage_emitted
   end
 
@@ -67,6 +81,9 @@ defmodule Arbor.LLM.Plugs.UsageTest do
       assert_receive {:usage_event, @event, %{input: 5, output: 0, total: 5, cached: 0}, metadata}
       assert metadata.operation == unquote(operation)
       assert metadata.usage_status == :authoritative
+      assert metadata.event["operation"] == Atom.to_string(unquote(operation))
+      assert metadata.event["input_tokens"] == 5
+      assert metadata.event["output_tokens"] == 0
     end
   end
 
@@ -105,14 +122,16 @@ defmodule Arbor.LLM.Plugs.UsageTest do
 
     assert_receive {:usage_event, @event, %{input: 4, output: 3, total: 7}, metadata}
 
-    assert metadata == %{
-             event_id: event_id,
-             source: :req_llm,
-             operation: :complete,
-             provider: "openai",
-             model: "gpt-4",
-             usage_status: :authoritative
-           }
+    assert metadata.event_id == event_id
+    assert metadata.source == :req_llm
+    assert metadata.operation == :complete
+    assert metadata.provider == "openai"
+    assert metadata.model == "gpt-4"
+    assert metadata.usage_status == :authoritative
+    assert metadata.event["event_id"] == event_id
+    assert metadata.event["operation"] == "complete"
+    assert metadata.event["input_tokens"] == 4
+    assert metadata.event["output_tokens"] == 3
 
     assert state.usage_finalized?
     assert state.usage_emitted?
@@ -271,6 +290,7 @@ defmodule Arbor.LLM.Plugs.UsageTest do
     assert Enum.sort(Map.keys(measurements)) == [:cached, :count, :input, :output, :total]
 
     assert Map.keys(metadata) |> Enum.sort() == [
+             :event,
              :event_id,
              :model,
              :operation,
@@ -280,6 +300,41 @@ defmodule Arbor.LLM.Plugs.UsageTest do
            ]
 
     refute :erlang.term_to_binary({measurements, metadata}) =~ prompt
+  end
+
+  test "optional attribution from call metadata is bounded and never in request opts" do
+    request_opts = [temperature: 0.1, private_should_not_matter: true]
+
+    call =
+      Call.new(:complete, {model(), [%{role: :user, content: "hi"}], request_opts})
+      |> Call.put_metadata(%{
+        principal_id: "agent_abc",
+        task_id: "task_123",
+        goal_id: "goal_1",
+        correlation_id: "corr_1"
+      })
+      |> Map.put(:result, {:ok, response(%{input_tokens: 2, output_tokens: 1, total_tokens: 3})})
+
+    Usage.call(call)
+    assert_receive {:usage_event, @event, _measurements, metadata}
+
+    assert metadata.event["principal_id"] == "agent_abc"
+    assert metadata.event["task_id"] == "task_123"
+    assert metadata.event["goal_id"] == "goal_1"
+    assert metadata.event["correlation_id"] == "corr_1"
+
+    {_model, _messages, opts} = call.request
+    refute Keyword.has_key?(opts, :principal_id)
+    refute Keyword.has_key?(opts, :task_id)
+    refute Keyword.has_key?(opts, :goal_id)
+    refute Keyword.has_key?(opts, :correlation_id)
+  end
+
+  test "non-authoritative diagnostics omit the canonical event map" do
+    Usage.call(build_call(:complete, {:ok, response(%{})}))
+    assert_receive {:usage_event, @event, _measurements, metadata}
+    assert metadata.usage_status == :missing
+    refute Map.has_key?(metadata, :event)
   end
 
   defp build_call(operation, result, model \\ model()) do

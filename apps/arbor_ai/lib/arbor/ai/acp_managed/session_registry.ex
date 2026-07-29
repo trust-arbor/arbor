@@ -1283,7 +1283,10 @@ defmodule Arbor.AI.AcpManaged.SessionRegistry do
       session_id: entry.session_id,
       status: entry.status,
       pooled: entry.pooled,
-      return_to_pool: entry.return_to_pool
+      return_to_pool: entry.return_to_pool,
+      # Owner-bound scope for managed usage attribution only (not a public view).
+      task_id: entry.task_id,
+      principal_id: entry.principal_id
     }
   end
 

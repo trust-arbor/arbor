@@ -55,6 +55,8 @@ defmodule Arbor.AI.Runtime.Dispatch do
     :arbor_executed_route,
     :"arbor.executed_route"
   ]
+  # Private attribution for ReqLLM Usage — never forwarded to non-Arbor runtimes.
+  @private_usage_opt :provider_usage_context
 
   @type dispatch_opts :: [
           client: Client.t() | nil,
@@ -212,14 +214,7 @@ defmodule Arbor.AI.Runtime.Dispatch do
            emit_selected(route.model_entry, selection, request, route_extra_meta(extra_meta)),
          {:ok, runtime_module} <- exact_runtime_module(route.runtime),
          rewritten <- rewrite_routed_request(request, route),
-         runtime_opts <-
-           Keyword.drop(opts, [
-             :policy,
-             :telemetry_metadata,
-             :callbacks,
-             :provider_route_input,
-             :route_authorizer
-           ]),
+         runtime_opts <- runtime_opts_for(route.runtime, opts),
          {:ok, prepared} <- runtime_module.prepare(rewritten, runtime_opts),
          {:ok, %Response{} = response} <-
            execute_routed_runtime(runtime_module, prepared, callbacks, runtime_opts) do
@@ -311,11 +306,33 @@ defmodule Arbor.AI.Runtime.Dispatch do
       rewritten = rewrite_request(request, selection, model_entry)
 
       runtime_module = RuntimeRegistry.lookup(selection.runtime)
-      runtime_opts = Keyword.drop(opts, [:policy, :telemetry_metadata, :callbacks])
+      runtime_opts = runtime_opts_for(selection.runtime, opts)
 
       with {:ok, prepared} <- runtime_module.prepare(rewritten, runtime_opts) do
         runtime_module.execute(prepared, callbacks, runtime_opts)
       end
+    end
+  end
+
+  # Strip private attribution from generic runtime opts; re-add only for Arbor.
+  # Re-derived from the original attempt opts each primary/fallback attempt so
+  # a prior non-Arbor attempt cannot leak the key into the next runtime.
+  defp runtime_opts_for(runtime, opts) when is_list(opts) do
+    {ctx, rest} = Keyword.pop(opts, @private_usage_opt)
+
+    rest =
+      Keyword.drop(rest, [
+        :policy,
+        :telemetry_metadata,
+        :callbacks,
+        :provider_route_input,
+        :route_authorizer
+      ])
+
+    if runtime == :arbor and is_map(ctx) and not is_struct(ctx) do
+      Keyword.put(rest, @private_usage_opt, ctx)
+    else
+      rest
     end
   end
 
