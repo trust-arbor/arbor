@@ -54,6 +54,7 @@ defmodule Arbor.AI do
     Config,
     LLMTrace,
     ProviderControlPlane,
+    ProviderUsageLedger,
     SessionReader,
     SystemPromptBuilder,
     ToolSignals,
@@ -921,6 +922,39 @@ defmodule Arbor.AI do
           | {:error, :unavailable | :malformed}
   def provider_budget_snapshots(opts \\ []) do
     ProviderControlPlane.snapshots(opts)
+  end
+
+  @doc """
+  Persist one validated provider usage fact to the durable daily ledger.
+
+  Writes exactly one canonical event into the UTC daily stream
+  `provider_usage:v1:YYYY-MM-DD` with type `arbor.provider_usage.v1`. Exact
+  replay of the same `event_id` and payload is idempotent; reuse of that ID
+  with changed content returns `:event_identity_conflict`.
+
+  Options:
+  - `:target` — closed per-call ledger target for isolated tests
+  - `:append_timeout_ms` — forwarded to the persistence append path
+  """
+  @spec record_provider_usage(term(), keyword()) :: {:ok, map()} | {:error, term()}
+  def record_provider_usage(attrs, opts \\ []) do
+    ProviderUsageLedger.record_provider_usage(attrs, opts)
+  end
+
+  @doc """
+  Project one UTC daily provider usage aggregate with bounded provider buckets.
+
+  Performs bounded forward paging from event number 1 and returns a JSON-clean
+  aggregate. Nil cost or subscription units increment the corresponding unknown
+  counters and are never treated as known free usage.
+
+  Options:
+  - `:target` — closed per-call ledger target for isolated tests
+  - `:page_size`, `:max_events`, `:max_providers` — closed positive bounds
+  """
+  @spec provider_usage_daily(term(), keyword()) :: {:ok, map()} | {:error, term()}
+  def provider_usage_daily(date, opts \\ []) do
+    ProviderUsageLedger.provider_usage_daily(date, opts)
   end
 
   @doc """
