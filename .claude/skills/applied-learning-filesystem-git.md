@@ -336,3 +336,15 @@ ordinary line diff. When an edited source file unexpectedly becomes binary, insp
 its NUL count and force the intended language escape to remain textual; review the
 result with `git diff --text` before accepting it (found 2026-07-28 when a Claude ACP
 edit converted an Elixir invalid-input fixture into a literal NUL).
+
+<!-- applied-learning: verify-requested-deletions-are-git-deletions-not-empty-tracked-files -->
+<a id="applied-learning-verify-requested-deletions-are-git-deletions-not-empty-tracked-files"></a>
+**Verify requested deletions are Git deletions, not empty tracked files.** An
+agent editor can implement "remove this module" by truncating a tracked source
+file to zero bytes. Compilation may still pass because an empty source file is
+valid, while the dead path remains in the repository. Before approving the
+commit gate, require `git status --short` to report `D` for every requested
+deletion and verify the committed summary records delete mode; preserve a
+useful dirty candidate in a separate salvage worktree before correcting it
+(found 2026-07-29 when the inert Engine Budget middleware and its test were
+emptied rather than deleted).

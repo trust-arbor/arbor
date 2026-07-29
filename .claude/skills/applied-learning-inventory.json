@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-07-29",
-  "entry_count": 584,
+  "entry_count": 586,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -7136,8 +7136,34 @@
       "source_incident": "found 2026-07-29 reviewing a delegated design checkpoint).",
       "content_sha256": "c4a905bc1c719637691bf13db809f1edb3f17b8650cc25fd4b027396d2ce2dc3",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 585,
+      "source_kind": "post-migration",
+      "slug": "distinguish-plan-capacity-from-operation-owned-timeout-ceilings",
+      "title": "Distinguish plan capacity from operation-owned timeout ceilings.",
+      "topic": "acp-mcp",
+      "destination": ".claude/skills/applied-learning-acp-mcp.md",
+      "anchor": "applied-learning-distinguish-plan-capacity-from-operation-owned-timeout-ceilings",
+      "source_date": "2026-07-29",
+      "source_incident": "found 2026-07-29 when a 90-minute provider-observation plan passed design generation but failed `coding_design_checkpoint_open` with `:invalid_design_checkpoint_timeout`).",
+      "content_sha256": "448e030bddd5d05567ee694acc1de9de106333c0791fb01a54cefb13bd8d309d",
+      "always_loaded": false
+    },
+    {
+      "source_ordinal": 586,
+      "source_kind": "post-migration",
+      "slug": "verify-requested-deletions-are-git-deletions-not-empty-tracked-files",
+      "title": "Verify requested deletions are Git deletions, not empty tracked files.",
+      "topic": "filesystem-git",
+      "destination": ".claude/skills/applied-learning-filesystem-git.md",
+      "anchor": "applied-learning-verify-requested-deletions-are-git-deletions-not-empty-tracked-files",
+      "source_date": "2026-07-29",
+      "source_incident": "found 2026-07-29 when the inert Engine Budget middleware and its test were emptied rather than deleted).",
+      "content_sha256": "7a50c8dda75c267995ad116e27f6d630038b962fe655dd59f6b84a36491ce79c",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 123
+  "post_migration_entry_count": 125
 }

@@ -745,3 +745,17 @@ descriptor plus digest through bounded durable interactions. Keep transport
 envelope limits separate, and verify the artifact before every terminal decision
 and implementation handoff (found 2026-07-29 after the historical arbitrary
 12,000-byte CodingPlan advice rejected a valid 17,585-byte design).
+
+<!-- applied-learning: distinguish-plan-capacity-from-operation-owned-timeout-ceilings -->
+<a id="applied-learning-distinguish-plan-capacity-from-operation-owned-timeout-ceilings"></a>
+**Distinguish plan capacity from operation-owned timeout ceilings.** A long
+coding plan's interaction wait is available stage capacity, not necessarily a
+valid timeout request for every action. When a missing request defaults to that
+capacity, deadline clamping can still leave a value above the action's hard
+maximum and make an otherwise healthy plan fail closed. Bind the action-owned
+reviewed maximum as the requested timeout, then let plan capacity, owner
+deadline, and completion reserve only shrink it; regress the full
+producer-to-consumer path with a plan whose wall clock exceeds the action
+maximum (found 2026-07-29 when a 90-minute provider-observation plan passed
+design generation but failed `coding_design_checkpoint_open` with
+`:invalid_design_checkpoint_timeout`).
