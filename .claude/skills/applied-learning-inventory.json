@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-07-29",
-  "entry_count": 579,
+  "entry_count": 580,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -7071,8 +7071,21 @@
       "source_incident": "found 2026-07-29 when Claude SDK responses doubled every coding design envelope).",
       "content_sha256": "63e77ffada4975616b7aac35141d29d9a24438f6a557315fe5f93bfa8d0d2779",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 580,
+      "source_kind": "post-migration",
+      "slug": "replace-advisory-payload-caps-with-one-artifact-backed-contract",
+      "title": "Replace advisory payload caps with one artifact-backed contract.",
+      "topic": "acp-mcp",
+      "destination": ".claude/skills/applied-learning-acp-mcp.md",
+      "anchor": "applied-learning-replace-advisory-payload-caps-with-one-artifact-backed-contract",
+      "source_date": "2026-07-29",
+      "source_incident": "found 2026-07-29 after the historical arbitrary 12,000-byte CodingPlan advice rejected a valid 17,585-byte design).",
+      "content_sha256": "01016c19934643474ce29070d59f433f08a1a01acb8f246b719cafab87b98caa",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 118
+  "post_migration_entry_count": 119
 }

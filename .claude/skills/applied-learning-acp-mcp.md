@@ -705,3 +705,14 @@ generic chunk accumulator; do not guess by splitting repeated halves. Regress
 the exact delta-plus-full-message sequence because ordinary streaming tests will
 not expose the duplication (found 2026-07-29 when Claude SDK responses doubled
 every coding design envelope).
+
+<!-- applied-learning: replace-advisory-payload-caps-with-one-artifact-backed-contract -->
+<a id="applied-learning-replace-advisory-payload-caps-with-one-artifact-backed-contract"></a>
+**Replace advisory payload caps with one artifact-backed contract.** When a
+complete design does not fit an approval metadata envelope, do not impose a
+smaller prose-only ceiling. Give the design body one reviewed contract limit,
+archive its exact bytes under task-and-attempt ownership, and pass only a closed
+descriptor plus digest through bounded durable interactions. Keep transport
+envelope limits separate, and verify the artifact before every terminal decision
+and implementation handoff (found 2026-07-29 after the historical arbitrary
+12,000-byte CodingPlan advice rejected a valid 17,585-byte design).
