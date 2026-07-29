@@ -2408,11 +2408,6 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinatorTest do
           Coordinator.await_execution_settled(@execution_id, pid)
         end)
 
-      unit_task =
-        Task.async(fn ->
-          Coordinator.compare_and_settle_apple_container_unit(settle_fields(rec), pid)
-        end)
-
       assert_receive {:barrier_started, _}, 1_000
       assert_receive {:settlement_started, _}, 1_000
 
@@ -2425,6 +2420,20 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinatorTest do
 
       pending = FakeWorker.drain_pending()
       [{^worker, {receipt_ref, _caller}}] = Map.to_list(pending)
+
+      unit_task =
+        Task.async(fn ->
+          Coordinator.compare_and_settle_apple_container_unit(settle_fields(rec), pid)
+        end)
+
+      eventually!(fn ->
+        state = :sys.get_state(pid)
+
+        map_size(state.apple_unit_settlements) == 1 and
+          map_size(state.pending_apple_unit_settlement_admissions) == 0 and
+          state.apple_unit_settlements |> Map.values() |> hd() |> Map.get(:observed)
+      end)
+
       :ok = Snapshot.set({:ok, []})
       assert :ok = FakeWorker.emit_drain(worker, @execution_id, receipt_ref)
 
@@ -2439,12 +2448,95 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinatorTest do
       assert :ok = Task.await(barrier_task, 5_000)
       assert :ok = Task.await(settle_task, 5_000)
       assert {:ok, receipt} = Task.await(unit_task, 5_000)
-      # The unit waiter arrived during the barrier, after exact unit
-      # observation had closed; the final global proof therefore returns the
-      # idempotent absence outcome.
-      assert receipt["outcome"] == "already_absent"
+      assert receipt["outcome"] == "settled"
       assert receipt["active"] == false
       assert map_size(:sys.get_state(pid).execution_waiters) == 0
+    end
+
+    test "shutdown admission rejects stale identity before independent barrier cleanup", %{
+      holder: holder
+    } do
+      worker = spawn_worker()
+      rec = record()
+      :ok = FakeJournal.reset(entries: [rec])
+      :ok = Snapshot.set({:ok, [worker]})
+      :ok = FakeReconciler.reset(phase: "ready", recover_all_mode: :hold)
+
+      :ok =
+        FakeWorker.register_worker(worker,
+          execution_id: @execution_id,
+          journal_record: rec
+        )
+
+      pid = start_coord!(holder)
+      await_ready(pid)
+
+      barrier_task =
+        Task.async(fn -> Coordinator.prepare_durable_shutdown(pid) end)
+
+      eventually!(fn -> :sys.get_state(pid).phase == :preparing_shutdown end)
+      eventually!(fn -> map_size(FakeWorker.drain_pending()) == 1 end)
+
+      stale = settle_fields(rec, %{"source_record_digest" => String.duplicate("c", 64)})
+
+      assert {:error, {:reconciliation_identity_conflict, conflict}} =
+               Coordinator.compare_and_settle_apple_container_unit(stale, pid)
+
+      assert conflict["resource_id"] == stale["resource_id"]
+      refute String.contains?(inspect(conflict), @token)
+      assert map_size(:sys.get_state(pid).apple_unit_settlements) == 0
+      assert map_size(:sys.get_state(pid).pending_apple_unit_settlement_admissions) == 0
+
+      [{^worker, {receipt_ref, _caller}}] = Map.to_list(FakeWorker.drain_pending())
+      :ok = Snapshot.set({:ok, []})
+      :ok = FakeWorker.emit_drain(worker, @execution_id, receipt_ref)
+      eventually!(fn -> map_size(FakeReconciler.recover_all_pending()) == 1 end)
+
+      [{all_ref, _}] = Map.to_list(FakeReconciler.recover_all_pending())
+      :ok = FakeJournal.set_entries([])
+      :ok = FakeReconciler.emit_recover_all(all_ref)
+
+      assert :ok = Task.await(barrier_task, 5_000)
+      refute Process.alive?(barrier_task.pid)
+    end
+
+    test "shutdown admission for an absent row waits for final global proof", %{holder: holder} do
+      rec = record()
+      :ok = FakeJournal.reset(entries: [])
+      :ok = Snapshot.set({:ok, []})
+      :ok = FakeReconciler.reset(phase: "ready", recover_all_mode: :hold)
+
+      pid = start_coord!(holder)
+      await_ready(pid)
+
+      barrier_task =
+        Task.async(fn -> Coordinator.prepare_durable_shutdown(pid) end)
+
+      eventually!(fn -> :sys.get_state(pid).phase == :preparing_shutdown end)
+
+      unit_task =
+        Task.async(fn ->
+          Coordinator.compare_and_settle_apple_container_unit(settle_fields(rec), pid)
+        end)
+
+      eventually!(fn ->
+        state = :sys.get_state(pid)
+
+        map_size(state.apple_unit_settlements) == 1 and
+          map_size(state.pending_apple_unit_settlement_admissions) == 0
+      end)
+
+      eventually!(fn -> map_size(FakeReconciler.recover_all_pending()) == 1 end)
+      assert Process.alive?(unit_task.pid)
+
+      [{all_ref, _}] = Map.to_list(FakeReconciler.recover_all_pending())
+      :ok = FakeJournal.set_entries([])
+      :ok = FakeReconciler.emit_recover_all(all_ref)
+
+      assert :ok = Task.await(barrier_task, 5_000)
+      assert {:ok, receipt} = Task.await(unit_task, 5_000)
+      assert receipt["outcome"] == "already_absent"
+      assert receipt["active"] == false
     end
 
     test "invalid execution id is rejected without registering a waiter", %{holder: holder} do

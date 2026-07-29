@@ -358,17 +358,35 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
 
     case AppleContainerUnitIdentity.normalize_settle_fields(fields) do
       {:ok, normalized_resource_id, normalized_identity} ->
-        case register_apple_unit_settlement(
-               state,
-               normalized_resource_id,
-               normalized_identity,
-               from
-             ) do
-          {:ok, state} ->
-            {:noreply, drive_execution_settlement(state)}
+        if shutdown_preparation?(state.phase) do
+          # Shutdown admission is closed: this fresh journal classification
+          # brackets the independent global cleanup, so exact rows may be
+          # marked observed while absent rows require the final empty proof.
+          case enqueue_apple_unit_settlement_admission(
+                 state,
+                 normalized_resource_id,
+                 normalized_identity,
+                 from
+               ) do
+            {:ok, state} ->
+              {:noreply, drive_execution_settlement(state)}
 
-          {:error, reason} ->
-            {:reply, {:error, reason}, state}
+            {:error, reason} ->
+              {:reply, {:error, reason}, state}
+          end
+        else
+          case register_apple_unit_settlement(
+                 state,
+                 normalized_resource_id,
+                 normalized_identity,
+                 from
+               ) do
+            {:ok, state} ->
+              {:noreply, drive_execution_settlement(state)}
+
+            {:error, reason} ->
+              {:reply, {:error, reason}, state}
+          end
         end
 
       {:error, reason} ->
@@ -496,6 +514,7 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
     _ = cancel_barrier_timer(state)
     _ = clear_barrier_recover_all_monitors(state)
     _ = demonitor_execution_waiters(state)
+    _ = demonitor_apple_unit_settlement_admissions(state)
     :ok
   end
 
@@ -549,7 +568,11 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
         # mon_ref => %{from, execution_id, caller_pid} — settlement waiters.
         execution_waiters: %{},
         # resource_id => %{expected_identity, waiters: %{mon_ref => waiter}}.
-        apple_unit_settlements: %{}
+        apple_unit_settlements: %{},
+        # mon_ref => %{from, caller_pid, resource_id, expected_identity}.
+        # Shutdown admission is classified against a fresh journal snapshot
+        # before it can join the independent global barrier.
+        pending_apple_unit_settlement_admissions: %{}
       },
       deps
     )
@@ -680,7 +703,9 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
        when map_size(settlements) == 0,
        do: :ok
 
-  defp settlement_journal_gate(state) do
+  defp settlement_journal_gate(state), do: settlement_journal_status_gate(state)
+
+  defp settlement_journal_status_gate(state) do
     case journal_settlement_status(state) do
       {:ok, status} when status in ["ready", :ready] ->
         :ok
@@ -1535,23 +1560,29 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
   end
 
   defp handle_down(state, mon_ref, pid) do
-    case pop_apple_unit_settlement_waiter(state, mon_ref, pid) do
+    case pop_apple_unit_settlement_admission(state, mon_ref, pid) do
       {:ok, state} ->
         state
 
       :not_found ->
-        case Map.pop(state.execution_waiters, mon_ref) do
-          {%{caller_pid: ^pid}, waiters} ->
-            # Exact mon_ref + caller PID match only — remove that waiter. Never
-            # settle remaining waiters and never treat caller death as absence proof.
-            %{state | execution_waiters: waiters}
-
-          {waiter, _waiters} when is_map(waiter) ->
-            # A forged DOWN with a known ref but wrong PID must not remove anyone.
+        case pop_apple_unit_settlement_waiter(state, mon_ref, pid) do
+          {:ok, state} ->
             state
 
-          {nil, _} ->
-            handle_down_non_waiter(state, mon_ref, pid)
+          :not_found ->
+            case Map.pop(state.execution_waiters, mon_ref) do
+              {%{caller_pid: ^pid}, waiters} ->
+                # Exact mon_ref + caller PID match only — remove that waiter. Never
+                # settle remaining waiters and never treat caller death as absence proof.
+                %{state | execution_waiters: waiters}
+
+              {waiter, _waiters} when is_map(waiter) ->
+                # A forged DOWN with a known ref but wrong PID must not remove anyone.
+                state
+
+              {nil, _} ->
+                handle_down_non_waiter(state, mon_ref, pid)
+            end
         end
     end
   end
@@ -1908,39 +1939,46 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
   # is UNKNOWN and is never treated as empty. Execution settlement waiters reuse
   # this machine during preparing_shutdown even when no prep_stop waiter exists.
   defp advance_shutdown_barrier(state) do
-    if barrier_progress_idle?(state) do
-      cancel_barrier_timer(state)
-    else
-      state = cancel_barrier_timer(state)
+    cond do
+      map_size(state.pending_apple_unit_settlement_admissions) > 0 ->
+        resolve_apple_unit_settlement_admissions(state)
 
-      case snapshot_live_workers(state) do
-        {:ok, workers} when is_list(workers) and workers != [] ->
-          state =
+      barrier_progress_idle?(state) ->
+        cancel_barrier_timer(state)
+
+      true ->
+        state = cancel_barrier_timer(state)
+
+        case snapshot_live_workers(state) do
+          {:ok, workers} when is_list(workers) and workers != [] ->
+            state =
+              state
+              |> ensure_barrier_drains(workers)
+              |> attempt_barrier_handshakes()
+              # Live workers: receipts settle; DOWN alone never settles.
+              |> Map.put(:barrier_recover_all, normalize_recover_all_after_workers(state))
+              |> Map.put(:barrier_converged, false)
+
+            schedule_barrier_tick(state)
+
+          {:ok, []} ->
+            state = prune_barrier_drains_on_empty_snapshot(state)
+            advance_barrier_after_empty_workers(state)
+
+          {:error, _reason} ->
+            # Missing/failed supervisor is UNKNOWN — never empty.
             state
-            |> ensure_barrier_drains(workers)
-            |> attempt_barrier_handshakes()
-            # Live workers: receipts settle; DOWN alone never settles.
-            |> Map.put(:barrier_recover_all, normalize_recover_all_after_workers(state))
             |> Map.put(:barrier_converged, false)
-
-          schedule_barrier_tick(state)
-
-        {:ok, []} ->
-          state = prune_barrier_drains_on_empty_snapshot(state)
-          advance_barrier_after_empty_workers(state)
-
-        {:error, _reason} ->
-          # Missing/failed supervisor is UNKNOWN — never empty.
-          state
-          |> Map.put(:barrier_converged, false)
-          |> schedule_barrier_tick()
-      end
+            |> schedule_barrier_tick()
+        end
     end
   end
 
   defp barrier_progress_idle?(state) do
     state.barrier_waiters == [] and map_size(state.execution_waiters) == 0 and
-      map_size(state.apple_unit_settlements) == 0 and state.barrier_converged
+      map_size(state.apple_unit_settlements) == 0 and
+      map_size(state.pending_apple_unit_settlement_admissions) == 0 and
+      state.barrier_converged
   end
 
   defp normalize_recover_all_after_workers(%{barrier_recover_all: :completed}), do: nil
@@ -2339,6 +2377,8 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
       barrier_waiter_count: length(Map.get(state, :barrier_waiters) || []),
       barrier_converged: Map.get(state, :barrier_converged),
       execution_waiter_count: map_size(Map.get(state, :execution_waiters) || %{}),
+      pending_apple_unit_settlement_admission_count:
+        map_size(Map.get(state, :pending_apple_unit_settlement_admissions) || %{}),
       monitored: :redacted,
       pending_orphan_receipts: :redacted,
       pending_drain: :redacted,
@@ -2347,6 +2387,7 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
       barrier_recover_all: :redacted,
       execution_waiters: :redacted,
       apple_unit_settlements: :redacted,
+      pending_apple_unit_settlement_admissions: :redacted,
       journal: :redacted,
       journal_server: :redacted,
       reconciler: :redacted,
@@ -2386,7 +2427,13 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
     end
   end
 
-  defp register_apple_unit_settlement(state, resource_id, expected_identity, from) do
+  defp register_apple_unit_settlement(
+         state,
+         resource_id,
+         expected_identity,
+         from,
+         observed \\ false
+       ) do
     with {:ok, caller_pid} <- caller_pid_from(from),
          :ok <- check_apple_unit_settlement_capacity(state, resource_id) do
       case Map.get(state.apple_unit_settlements, resource_id) do
@@ -2397,7 +2444,7 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
 
           settlement = %{
             expected_identity: expected_identity,
-            observed: false,
+            observed: observed,
             waiters: %{mon_ref => waiter}
           }
 
@@ -2443,6 +2490,70 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
       true ->
         :ok
     end
+  end
+
+  defp enqueue_apple_unit_settlement_admission(state, resource_id, expected_identity, from) do
+    with {:ok, caller_pid} <- caller_pid_from(from),
+         :ok <- check_apple_unit_settlement_admission_capacity(state, resource_id) do
+      mon_ref = Process.monitor(caller_pid)
+
+      admission = %{
+        from: from,
+        caller_pid: caller_pid,
+        resource_id: resource_id,
+        expected_identity: expected_identity
+      }
+
+      {:ok,
+       %{
+         state
+         | pending_apple_unit_settlement_admissions:
+             Map.put(state.pending_apple_unit_settlement_admissions, mon_ref, admission)
+       }}
+    end
+  end
+
+  defp check_apple_unit_settlement_admission_capacity(state, resource_id) do
+    pending = state.pending_apple_unit_settlement_admissions
+    current = Map.get(state.apple_unit_settlements, resource_id)
+    count = map_size(pending) + settlement_waiter_count(state.apple_unit_settlements)
+
+    cond do
+      count >= @max_apple_unit_settlement_waiters ->
+        {:error, :too_many_apple_container_unit_settlement_waiters}
+
+      current != nil and map_size(pending) >= @max_apple_unit_settlement_waiters ->
+        {:error, :too_many_apple_container_unit_settlement_waiters}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp pop_apple_unit_settlement_admission(state, mon_ref, caller_pid)
+       when is_reference(mon_ref) and is_pid(caller_pid) do
+    case Map.get(state.pending_apple_unit_settlement_admissions, mon_ref) do
+      %{caller_pid: ^caller_pid} ->
+        {:ok,
+         %{
+           state
+           | pending_apple_unit_settlement_admissions:
+               Map.delete(state.pending_apple_unit_settlement_admissions, mon_ref)
+         }}
+
+      _other ->
+        :not_found
+    end
+  end
+
+  defp pop_apple_unit_settlement_admission(_state, _mon_ref, _caller_pid), do: :not_found
+
+  defp demonitor_apple_unit_settlement_admissions(state) do
+    Enum.each(Map.get(state, :pending_apple_unit_settlement_admissions) || %{}, fn {mon_ref, _} ->
+      if is_reference(mon_ref), do: Process.demonitor(mon_ref, [:flush])
+    end)
+
+    state
   end
 
   defp pop_apple_unit_settlement_waiter(state, mon_ref, caller_pid)
@@ -2499,14 +2610,166 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
   # Force progress without blocking the GenServer loop. Cached :ready is never
   # sufficient — every registration drives a fresh authoritative observation.
   defp drive_execution_settlement(state) do
-    if shutdown_preparation?(state.phase) do
-      state
-      |> Map.put(:barrier_converged, false)
-      |> advance_shutdown_barrier()
-    else
-      wake_reconstruction(state)
+    cond do
+      map_size(state.pending_apple_unit_settlement_admissions) > 0 ->
+        resolve_apple_unit_settlement_admissions(state)
+
+      shutdown_preparation?(state.phase) ->
+        state
+        |> Map.put(:barrier_converged, false)
+        |> advance_shutdown_barrier()
+
+      true ->
+        wake_reconstruction(state)
     end
   end
+
+  defp resolve_apple_unit_settlement_admissions(state) do
+    case settlement_journal_status_gate(state) do
+      {:permanent, reason} ->
+        state
+        |> reject_pending_apple_unit_settlement_admissions(reason)
+        |> advance_shutdown_barrier()
+
+      :retry ->
+        schedule_barrier_tick(state)
+
+      :ok ->
+        case fetch_recovery_entries(state) do
+          {:ok, records} ->
+            state
+            |> classify_apple_unit_settlement_admissions(records)
+            |> advance_shutdown_barrier()
+
+          {:error, reason} ->
+            case settlement_terminal_reason(reason) do
+              {:ok, terminal_reason} ->
+                state
+                |> reject_pending_apple_unit_settlement_admissions(terminal_reason)
+                |> advance_shutdown_barrier()
+
+              :retry ->
+                schedule_barrier_tick(state)
+            end
+        end
+    end
+  end
+
+  defp classify_apple_unit_settlement_admissions(state, records) do
+    Enum.reduce(
+      state.pending_apple_unit_settlement_admissions,
+      state,
+      fn {mon_ref, admission}, acc ->
+        case classify_apple_unit_settlement_admission(acc, records, admission) do
+          :absent ->
+            promote_apple_unit_settlement_admission(acc, mon_ref, admission, false)
+
+          :exact ->
+            promote_apple_unit_settlement_admission(acc, mon_ref, admission, true)
+
+          {:conflict, current_identity} ->
+            reject_apple_unit_settlement_admission(
+              acc,
+              mon_ref,
+              admission,
+              {:reconciliation_identity_conflict,
+               %{
+                 "resource_id" => admission.resource_id,
+                 "current_identity" => current_identity
+               }}
+            )
+
+          :current_identity_unavailable ->
+            reject_apple_unit_settlement_admission(
+              acc,
+              mon_ref,
+              admission,
+              :current_identity_unavailable
+            )
+        end
+      end
+    )
+  end
+
+  defp classify_apple_unit_settlement_admission(state, records, admission) do
+    matching_records =
+      Enum.filter(records, fn record ->
+        Map.get(record, :unit_name) == admission.expected_identity["unit_name"]
+      end)
+
+    case matching_records do
+      [] ->
+        :absent
+
+      [record] ->
+        case project_record_identity(state, record) do
+          {:ok, identity} when identity == admission.expected_identity ->
+            :exact
+
+          {:ok, current_identity} ->
+            {:conflict, current_identity}
+
+          {:error, _reason} ->
+            :current_identity_unavailable
+        end
+
+      _multiple ->
+        :current_identity_unavailable
+    end
+  end
+
+  defp promote_apple_unit_settlement_admission(state, mon_ref, admission, observed) do
+    case register_apple_unit_settlement(
+           state,
+           admission.resource_id,
+           admission.expected_identity,
+           admission.from,
+           observed
+         ) do
+      {:ok, state} ->
+        Process.demonitor(mon_ref, [:flush])
+
+        %{
+          state
+          | pending_apple_unit_settlement_admissions:
+              Map.delete(state.pending_apple_unit_settlement_admissions, mon_ref)
+        }
+
+      {:error, reason} ->
+        reject_apple_unit_settlement_admission(state, mon_ref, admission, reason)
+    end
+  end
+
+  defp reject_apple_unit_settlement_admission(state, mon_ref, admission, reason) do
+    Process.demonitor(mon_ref, [:flush])
+    GenServer.reply(admission.from, {:error, reason})
+
+    %{
+      state
+      | pending_apple_unit_settlement_admissions:
+          Map.delete(state.pending_apple_unit_settlement_admissions, mon_ref)
+    }
+  end
+
+  defp reject_pending_apple_unit_settlement_admissions(state, reason) do
+    Enum.reduce(
+      state.pending_apple_unit_settlement_admissions,
+      state,
+      fn {mon_ref, admission}, acc ->
+        reject_apple_unit_settlement_admission(acc, mon_ref, admission, reason)
+      end
+    )
+  end
+
+  defp settlement_terminal_reason(reason)
+       when reason in [
+              :apple_container_unit_journal_disabled,
+              :apple_container_unit_journal_poisoned,
+              :apple_container_unit_journal_unavailable
+            ],
+       do: {:ok, reason}
+
+  defp settlement_terminal_reason(_reason), do: :retry
 
   defp present_execution_ids(records) when is_list(records) do
     records
