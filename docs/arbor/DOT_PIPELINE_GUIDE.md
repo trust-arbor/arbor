@@ -830,7 +830,6 @@ actions documented in [CODING_TASK_DISPATCH.md](./CODING_TASK_DISPATCH.md).
 | `sanitization` | Sanitization | Sanitize inputs |
 | `safe_input` | SafeInput | Validate input safety |
 | `checkpoint` | CheckpointMiddleware | Save/restore state |
-| `budget` | Budget | Enforce resource budgets |
 | `signal_emit` | SignalEmit | Emit pipeline signals |
 | `secret_scan` | SecretScan | Scan for leaked secrets |
 
@@ -856,7 +855,7 @@ my_node [type="compute" prompt="..." skip_middleware="checkpoint"]
 
 ### Mandatory Middleware
 
-Seven middleware modules form the mandatory chain (capability, taint, sanitization, safe_input, checkpoint, budget, signal). These are currently feature-flagged off. When enabled via config, they run on every node and cannot be skipped.
+Six middleware modules form the mandatory chain (capability, taint, sanitization, safe_input, checkpoint, signal). They are enabled by default and run on every node; graph-controlled `skip_middleware` cannot remove them. Set `config :arbor_orchestrator, mandatory_middleware: false` only as a local emergency override while debugging a broken middleware rollout.
 
 ## Legacy Aliases
 

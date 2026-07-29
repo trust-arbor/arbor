@@ -299,8 +299,8 @@ defmodule Arbor.Orchestrator.Handlers.MapHandlerTest do
 
     test "security regression (OQ-6): per-item handler dispatch invokes the middleware chain" do
       # OQ-6: pre-fix, MapHandler called `handler_module.execute/4` directly
-      # for each item — CapabilityCheck, TaintCheck, Budget, etc. did NOT
-      # fire per item. The fix routes the per-item dispatch through
+      # for each item — CapabilityCheck, TaintCheck, etc. did NOT fire
+      # per item. The fix routes the per-item dispatch through
       # Engine.Authorization.authorize_and_execute/5, which builds the
       # middleware chain via Chain.build and runs before_node/after_node
       # once per item. This test pins the wiring with a counting

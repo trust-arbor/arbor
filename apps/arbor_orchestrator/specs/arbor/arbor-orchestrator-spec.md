@@ -481,7 +481,7 @@ Custom handlers take highest priority in resolution. Storage uses `:persistent_t
 
 ### 5.1 Middleware Chain
 
-Seven middleware modules run on every node execution when `mandatory_middleware=true` (the default). Middleware is compiled from three sources: engine config, graph-level attributes, and node-level attributes.
+Six middleware modules run on every node execution when `mandatory_middleware=true` (the default). Middleware is compiled from three sources: engine config, graph-level attributes, and node-level attributes.
 
 **Execution order:**
 
@@ -492,14 +492,13 @@ Seven middleware modules run on every node execution when `mandatory_middleware=
 | 3     | Sanitization       | Sanitize prompt and context values against injection. |
 | 4     | SafeInput          | Validate input constraints and type safety. |
 | 5     | Checkpoint         | Save checkpoint before execution. |
-| 6     | Budget             | Enforce token/cost/time budget limits. |
-| 7     | SignalEmit         | Emit execution signals to the Arbor signal bus. |
+| 6     | SignalEmit         | Emit execution signals to the Arbor signal bus. |
 
 **Protocol:** Each middleware implements `before_node/1` and `after_node/1`, receiving and returning a `Token` struct that carries context, node, graph, and options. A middleware can halt the chain by returning `{:halt, outcome}`.
 
 ```
-before_node chain: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> [handler]
-after_node chain:  7 -> 6 -> 5 -> 4 -> 3 -> 2 -> 1    (reverse order)
+before_node chain: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> [handler]
+after_node chain:  6 -> 5 -> 4 -> 3 -> 2 -> 1    (reverse order)
 ```
 
 ### 5.2 Capability Check

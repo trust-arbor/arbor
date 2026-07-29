@@ -19,7 +19,6 @@ defmodule Arbor.Orchestrator.Middleware.Chain do
     Arbor.Orchestrator.Middleware.Sanitization,
     Arbor.Orchestrator.Middleware.SafeInput,
     Arbor.Orchestrator.Middleware.CheckpointMiddleware,
-    Arbor.Orchestrator.Middleware.Budget,
     Arbor.Orchestrator.Middleware.SignalEmit
   ]
 
@@ -30,7 +29,6 @@ defmodule Arbor.Orchestrator.Middleware.Chain do
     "sanitization" => Arbor.Orchestrator.Middleware.Sanitization,
     "safe_input" => Arbor.Orchestrator.Middleware.SafeInput,
     "checkpoint" => Arbor.Orchestrator.Middleware.CheckpointMiddleware,
-    "budget" => Arbor.Orchestrator.Middleware.Budget,
     "signal_emit" => Arbor.Orchestrator.Middleware.SignalEmit
   }
 
@@ -94,9 +92,9 @@ defmodule Arbor.Orchestrator.Middleware.Chain do
     # but the mandatory chain must NOT be — otherwise a graph attribute is
     # part of the trusted computing base. Pre-fix, skip was applied to the
     # entire concatenated list, so a DOT graph could turn off CapabilityCheck,
-    # TaintCheck, SafeInput, Budget, SignalEmit, and Checkpoint just by
-    # naming them in skip_middleware. Mandatory middleware listed in skip
-    # is silently kept rather than rejected.
+    # TaintCheck, SafeInput, SignalEmit, and Checkpoint just by naming them
+    # in skip_middleware. Mandatory middleware listed in skip is silently
+    # kept rather than rejected.
     optional = (engine_mw ++ graph_mw ++ node_mw) |> Enum.uniq() |> Enum.reject(&(&1 in skip))
     (mandatory ++ optional) |> Enum.uniq()
   end

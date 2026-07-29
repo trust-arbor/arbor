@@ -154,8 +154,8 @@ defmodule Arbor.Orchestrator.Handlers.MapHandler do
             Arbor.Orchestrator.Handlers.Registry.resolve_with_attrs(child_node)
 
           # OQ-6: route per-item dispatch through Engine.Authorization
-          # so CapabilityCheck, TaintCheck, SafeInput, Budget, etc. fire
-          # once per item — same path top-level nodes take. Pre-fix this
+          # so CapabilityCheck, TaintCheck, SafeInput, etc. fire once
+          # per item — same path top-level nodes take. Pre-fix this
           # called `handler_module.execute/4` directly, bypassing the
           # middleware chain entirely.
           Arbor.Orchestrator.Engine.Authorization.authorize_and_execute(

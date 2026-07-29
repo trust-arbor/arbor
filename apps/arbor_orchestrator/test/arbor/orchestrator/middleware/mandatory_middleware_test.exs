@@ -8,7 +8,6 @@ defmodule Arbor.Orchestrator.Middleware.MandatoryMiddlewareTest do
   alias Arbor.Orchestrator.IR.TaintProfile
 
   alias Arbor.Orchestrator.Middleware.{
-    Budget,
     CapabilityCheck,
     Chain,
     CheckpointMiddleware,
@@ -579,50 +578,6 @@ defmodule Arbor.Orchestrator.Middleware.MandatoryMiddlewareTest do
     end
   end
 
-  # --- Budget ---
-
-  describe "Budget" do
-    test "passes through when skip_budget_check is set" do
-      token = make_token(%{}, %{skip_budget_check: true})
-      result = Budget.before_node(token)
-      refute result.halted
-    end
-
-    test "passes through when no budget tracker configured" do
-      token = make_token()
-      result = Budget.before_node(token)
-      refute result.halted
-    end
-
-    test "after_node passes through when no tracker" do
-      token = make_token_with_outcome()
-      result = Budget.after_node(token)
-      refute result.halted
-    end
-
-    test "build_cost_hint/1 extracts model, timeout, and type from compiled node" do
-      node =
-        make_compiled_node(%{
-          llm_model: "claude-sonnet",
-          timeout_ms: 30_000,
-          type: "codergen"
-        })
-
-      hint = Budget.build_cost_hint(node)
-      assert hint[:model] == "claude-sonnet"
-      assert hint[:timeout_ms] == 30_000
-      assert hint[:handler_type] == "codergen"
-    end
-
-    test "build_cost_hint/1 omits nil fields" do
-      node = make_compiled_node(%{llm_model: nil, timeout_ms: nil, type: nil, attrs: %{}})
-      hint = Budget.build_cost_hint(node)
-      refute Map.has_key?(hint, :model)
-      refute Map.has_key?(hint, :timeout_ms)
-      refute Map.has_key?(hint, :handler_type)
-    end
-  end
-
   # --- SignalEmit ---
 
   describe "SignalEmit" do
@@ -653,9 +608,9 @@ defmodule Arbor.Orchestrator.Middleware.MandatoryMiddlewareTest do
   # --- Chain integration ---
 
   describe "Chain integration" do
-    test "default_mandatory_chain returns 7 middleware modules" do
+    test "default_mandatory_chain returns 6 middleware modules" do
       chain = Chain.default_mandatory_chain()
-      assert length(chain) == 7
+      assert length(chain) == 6
     end
 
     test "mandatory chain includes all expected middleware" do
@@ -665,7 +620,6 @@ defmodule Arbor.Orchestrator.Middleware.MandatoryMiddlewareTest do
       assert Sanitization in chain
       assert SafeInput in chain
       assert CheckpointMiddleware in chain
-      assert Budget in chain
       assert SignalEmit in chain
     end
 
@@ -676,8 +630,8 @@ defmodule Arbor.Orchestrator.Middleware.MandatoryMiddlewareTest do
       assert Map.has_key?(registry, "sanitization")
       assert Map.has_key?(registry, "safe_input")
       assert Map.has_key?(registry, "checkpoint")
-      assert Map.has_key?(registry, "budget")
       assert Map.has_key?(registry, "signal_emit")
+      refute Map.has_key?(registry, "budget")
     end
 
     test "build/3 includes mandatory middleware when enabled" do
@@ -700,8 +654,8 @@ defmodule Arbor.Orchestrator.Middleware.MandatoryMiddlewareTest do
     test "security regression (P0-2): skip_middleware CANNOT remove mandatory middleware" do
       # P0-2: pre-fix, skip_middleware was applied to the entire concatenated
       # chain — mandatory + engine + graph + node — so a DOT graph could
-      # disable CapabilityCheck, TaintCheck, SafeInput, Budget, SignalEmit,
-      # and Checkpoint just by naming them in skip_middleware. That made
+      # disable CapabilityCheck, TaintCheck, SafeInput, SignalEmit, and
+      # Checkpoint just by naming them in skip_middleware. That made
       # graph input part of the trusted computing base, which directly
       # contradicts the term "mandatory."
       #
@@ -714,7 +668,7 @@ defmodule Arbor.Orchestrator.Middleware.MandatoryMiddlewareTest do
         id: "test",
         attrs: %{
           "skip_middleware" =>
-            "capability_check,taint_check,sanitization,safe_input,checkpoint,budget,signal_emit"
+            "capability_check,taint_check,sanitization,safe_input,checkpoint,signal_emit"
         }
       }
 
@@ -734,9 +688,6 @@ defmodule Arbor.Orchestrator.Middleware.MandatoryMiddlewareTest do
 
       assert CheckpointMiddleware in chain,
              "P0-2 regression: skip_middleware removed mandatory CheckpointMiddleware"
-
-      assert Budget in chain,
-             "P0-2 regression: skip_middleware removed mandatory Budget"
 
       assert SignalEmit in chain,
              "P0-2 regression: skip_middleware removed mandatory SignalEmit"
