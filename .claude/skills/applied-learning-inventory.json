@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-07-29",
-  "entry_count": 582,
+  "entry_count": 583,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -7110,8 +7110,21 @@
       "source_incident": "found 2026-07-29 while independently validating the interaction-wait candidate).",
       "content_sha256": "a3f6dee88aa5aa2d8a417408de86f98f84ec036603cc2088dbeb042af5f403b9",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 583,
+      "source_kind": "post-migration",
+      "slug": "compile-the-exact-structured-coding-plan-before-dispatch",
+      "title": "Compile the exact structured coding plan before dispatch.",
+      "topic": "acp-mcp",
+      "destination": ".claude/skills/applied-learning-acp-mcp.md",
+      "anchor": "applied-learning-compile-the-exact-structured-coding-plan-before-dispatch",
+      "source_date": "2026-07-29",
+      "source_incident": "found 2026-07-29 preparing the provider-observation slice).",
+      "content_sha256": "c6a92b0406ae9d6be1e4c99e269f2158347fb86f506f13044bfb057cfc4a65b8",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 121
+  "post_migration_entry_count": 122
 }

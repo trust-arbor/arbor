@@ -13,6 +13,17 @@ digest even when every value is identical, so coding preflight correctly rejects
 it as `digest_mismatch`. Normalize the packet, call the helper, and relay that
 exact digest (found 2026-07-29 redispatching the interaction-wait correction).
 
+<!-- applied-learning: compile-the-exact-structured-coding-plan-before-dispatch -->
+<a id="applied-learning-compile-the-exact-structured-coding-plan-before-dispatch"></a>
+**Compile the exact structured coding plan before dispatch.** `Plan.new/1`
+validates the interchange contract, not whether every declared feature is
+implemented by the reviewed compiler. For example, the contract accepts
+nonempty `rework.stop_conditions`, while the current compiler rejects them as
+`unsupported_v1_feature`; MCP admission then exposes only `compilation_failed`.
+Run the exact normalized plan through `CodingPlan.Compiler.compile/1` against
+the current source before dispatch, and recompile a live node before retrying
+loaded/on-disk drift (found 2026-07-29 preparing the provider-observation slice).
+
 <!-- applied-learning: never-mutate-a-delegated-worktree-after-owner-inspection-has-pinned-its-validation-fingerprint -->
 <a id="applied-learning-never-mutate-a-delegated-worktree-after-owner-inspection-has-pinned-its-validation-fingerprint"></a>
 **Never mutate a delegated worktree after owner inspection has pinned its
