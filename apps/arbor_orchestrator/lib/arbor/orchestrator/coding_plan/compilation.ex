@@ -3,7 +3,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compilation do
 
   use TypedStruct
 
-  alias Arbor.Contracts.Coding.Plan
+  alias Arbor.Contracts.Coding.{Plan, WorkPacket}
   alias Arbor.Orchestrator.CodingPlan.{ExecutionManifest, Profiles, ValidationProgram}
   alias Arbor.Orchestrator.Dot.Parser
 
@@ -13,6 +13,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compilation do
   @work_packet_binding_keys ["work_packet", "work_packet_digest", @work_packet_graph_metadata_key]
   @initial_context_keys %{
     work_packet: "coding_plan_work_packet",
+    work_packet_json: "coding_plan_work_packet_json",
     checkpoint_policy: "coding_plan_checkpoint_policy"
   }
   @max_version_bytes 128
@@ -156,7 +157,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Compilation do
   defp validate_json_object(_value, field), do: invalid(field)
 
   defp validate_initial_values(compilation, plan) do
-    with {:ok, validation_program} <- validation_program(compilation, plan) do
+    with {:ok, validation_program} <- validation_program(compilation, plan),
+         {:ok, work_packet_json} <- canonical_work_packet_json(plan) do
       expected =
         %{
           "task" => plan.task,
@@ -181,7 +183,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compilation do
         |> maybe_put("branch_name", plan.workspace_policy["branch_name"])
         |> maybe_put("worktree_base_dir", plan.workspace_policy["worktree_base_dir"])
         |> maybe_put("model", plan.worker["model"])
-        |> maybe_put_initial_work_packet(plan)
+        |> maybe_put_initial_work_packet(plan, work_packet_json)
         |> maybe_put_initial_work_packet_digest(plan)
         |> maybe_put_test_paths(plan)
 
@@ -311,18 +313,29 @@ defmodule Arbor.Orchestrator.CodingPlan.Compilation do
   defp maybe_put_initial_work_packet_digest(values, _plan),
     do: Map.delete(values, @work_packet_graph_metadata_key)
 
-  defp maybe_put_initial_work_packet(values, %Plan{version: 2} = plan) do
+  defp maybe_put_initial_work_packet(values, %Plan{version: 2} = plan, work_packet_json) do
     Map.merge(values, %{
       @initial_context_keys.work_packet => plan.work_packet,
+      @initial_context_keys.work_packet_json => work_packet_json,
       @initial_context_keys.checkpoint_policy => Map.fetch!(plan.work_packet, "checkpoint_policy")
     })
   end
 
-  defp maybe_put_initial_work_packet(values, _plan) do
+  defp maybe_put_initial_work_packet(values, _plan, _work_packet_json) do
     values
     |> Map.delete(@initial_context_keys.work_packet)
+    |> Map.delete(@initial_context_keys.work_packet_json)
     |> Map.delete(@initial_context_keys.checkpoint_policy)
   end
+
+  defp canonical_work_packet_json(%Plan{version: 2, work_packet: work_packet}) do
+    case WorkPacket.canonical_bytes(work_packet) do
+      {:ok, work_packet_json} -> {:ok, work_packet_json}
+      {:error, _reason} -> invalid("initial_values")
+    end
+  end
+
+  defp canonical_work_packet_json(%Plan{}), do: {:ok, nil}
 
   defp maybe_add_manifest_work_packet_digest(bindings, %Plan{version: 2} = plan),
     do: bindings ++ [{"work_packet_digest", plan.work_packet_digest}]

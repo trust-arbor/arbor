@@ -136,6 +136,54 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
              )
   end
 
+  test "security regression: v2 direct worker prompts retain the frozen work packet", ctx do
+    plan = v2_plan!("direct")
+    assert {:ok, packet_json} = WorkPacket.canonical_bytes(plan.work_packet)
+    assert {:ok, compilation} = compile(plan, ctx)
+    graph = compiled_graph!(compilation.dot_source)
+    assert {:ok, profile} = Profiles.fetch_executable("default")
+
+    for node_id <- ~w[
+          build_implement_prompt
+          build_validation_rework_prompt
+          build_review_rework_prompt
+          build_operator_rework_prompt
+        ] do
+      expression = graph.nodes[node_id].attrs["expression"]
+      assert expression =~ "{ctx.coding_plan_work_packet_json}"
+
+      mutated =
+        update_in(
+          graph.nodes[node_id].attrs,
+          &Map.update!(
+            &1,
+            "expression",
+            fn value ->
+              String.replace(
+                value,
+                "{ctx.coding_plan_work_packet_json}",
+                "[packet removed]",
+                global: false
+              )
+            end
+          )
+        )
+
+      assert {:error, {:semantic_preflight_failed, errors}} =
+               preflight(mutated, profile["semantic_policy"],
+                 review_profile: "binding",
+                 checkpoint_policy: "direct",
+                 checkpoint_work_packet_json: packet_json,
+                 design_checkpoint_timeout_ms: plan.budgets["inactivity_timeout_ms"]
+               )
+
+      assert Enum.any?(errors, fn error ->
+               error["code"] == "design_checkpoint_prompt_violation" and
+                 error["node_id"] == node_id
+             end)
+    end
+  end
+
   test "reviewed profile independently rejects repair prompt executable attr drift", ctx do
     plan = v2_plan!()
     assert {:ok, packet_json} = WorkPacket.canonical_bytes(plan.work_packet)
@@ -2311,7 +2359,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     plan
   end
 
-  defp v2_plan! do
+  defp v2_plan!(checkpoint_policy \\ "design_required") do
     packet = %{
       "version" => 1,
       "success_criteria" => ["focused tests pass"],
@@ -2319,7 +2367,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
       "constraints" => ["touch only owned files"],
       "architecture_refs" => ["apps/arbor_orchestrator/lib/arbor/orchestrator/coding_plan"],
       "required_evidence" => ["focused test output"],
-      "checkpoint_policy" => "design_required"
+      "checkpoint_policy" => checkpoint_policy
     }
 
     {:ok, digest} = WorkPacket.digest(packet)

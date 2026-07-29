@@ -2658,8 +2658,64 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
         end
       end)
     else
-      errors
+      check_direct_work_packet_prompts(errors, graph, checkpoint.work_packet_json)
     end
+  end
+
+  defp check_direct_work_packet_prompts(errors, _graph, "{}"), do: errors
+
+  defp check_direct_work_packet_prompts(errors, graph, _work_packet_json) do
+    prompt_requirements = [
+      {"build_implement_prompt",
+       [
+         "IMPLEMENTATION PHASE",
+         "{value}",
+         "{ctx.worktree_path}",
+         "{ctx.coding_plan_work_packet_json}"
+       ]},
+      {"build_validation_rework_prompt",
+       [
+         "VALIDATION REWORK",
+         "{value}",
+         "{ctx.worktree_path}",
+         "{ctx.coding_plan_work_packet_json}",
+         "{ctx.validation.feedback_json}"
+       ]},
+      {"build_review_rework_prompt",
+       [
+         "COUNCIL REVIEW REWORK",
+         "{value}",
+         "{ctx.worktree_path}",
+         "{ctx.coding_plan_work_packet_json}",
+         "{ctx.review.feedback_json}"
+       ]},
+      {"build_operator_rework_prompt",
+       [
+         "OPERATOR REWORK",
+         "{value}",
+         "{ctx.worktree_path}",
+         "{ctx.coding_plan_work_packet_json}",
+         "{ctx.approval_note}"
+       ]}
+    ]
+
+    Enum.reduce(prompt_requirements, errors, fn {node_id, required}, acc ->
+      expression =
+        graph.nodes
+        |> Map.get(node_id, %Graph.Node{id: node_id, attrs: %{}})
+        |> then(&Map.get(&1.attrs, "expression"))
+
+      if is_binary(expression) and Enum.all?(required, &String.contains?(expression, &1)) do
+        acc
+      else
+        [
+          error("design_checkpoint_prompt_violation", node_id, %{
+            "required_fragments" => required
+          })
+          | acc
+        ]
+      end
+    end)
   end
 
   defp check_design_checkpoint_topology(errors, graph, policy, rework_max_cycles) do

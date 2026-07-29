@@ -95,6 +95,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
   }
   @initial_context_keys %{
     work_packet: "coding_plan_work_packet",
+    work_packet_json: "coding_plan_work_packet_json",
     checkpoint_policy: "coding_plan_checkpoint_policy"
   }
 
@@ -166,7 +167,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
           plan,
           validation_program,
           plan_fingerprint,
-          action_catalog["digest"]
+          action_catalog["digest"],
+          work_packet_json
         )
 
       manifest =
@@ -769,13 +771,16 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
              "open_design_checkpoint",
              "coding_design_checkpoint_open"
            ) do
-      activate_design_checkpoint(graph, policy)
+      activate_design_checkpoint(graph, plan, policy)
     end
   end
 
-  defp activate_design_checkpoint(graph, "direct"), do: {:ok, graph}
+  defp activate_design_checkpoint(graph, %Plan{version: 2}, "direct"),
+    do: rewrite_template_node(graph, "build_implement_prompt", direct_implementation_prompt())
 
-  defp activate_design_checkpoint(graph, "design_required") do
+  defp activate_design_checkpoint(graph, %Plan{}, "direct"), do: {:ok, graph}
+
+  defp activate_design_checkpoint(graph, %Plan{}, "design_required") do
     with {:ok, graph} <- remove_design_checkpoint_seed_edges(graph),
          {:ok, graph} <-
            rewrite_unconditional_edge(
@@ -829,9 +834,32 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
         )
       end
     else
-      {:ok, graph}
+      rewrite_direct_rework_prompts(graph, plan)
     end
   end
+
+  defp rewrite_direct_rework_prompts(graph, %Plan{version: 2}) do
+    with {:ok, graph} <-
+           rewrite_template_node(
+             graph,
+             "build_validation_rework_prompt",
+             direct_validation_rework_prompt()
+           ),
+         {:ok, graph} <-
+           rewrite_template_node(
+             graph,
+             "build_review_rework_prompt",
+             direct_review_rework_prompt()
+           ) do
+      rewrite_template_node(
+        graph,
+        "build_operator_rework_prompt",
+        direct_operator_rework_prompt()
+      )
+    end
+  end
+
+  defp rewrite_direct_rework_prompts(graph, %Plan{}), do: {:ok, graph}
 
   defp rewrite_constant_node(graph, node_id, output_key, expression) do
     update_node(graph, node_id, fn attrs ->
@@ -947,6 +975,38 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
       "object and no prose or Markdown: {\"status\":\"implemented\",\"summary\":\"what changed\"} " <>
       "or {\"status\":\"declined\",\"summary\":\"why no change was made\"}. Arbor treats this " <>
       "object as advisory only and decides the outcome from the owned workspace."
+  end
+
+  defp direct_implementation_prompt do
+    direct_scope_prompt("IMPLEMENTATION PHASE", "{value}") <>
+      "Implement the reviewed task in the worktree; produce a reviewable diff; do not merge, " <>
+      "push, or open a PR. " <> implementation_response_contract()
+  end
+
+  defp direct_validation_rework_prompt do
+    direct_scope_prompt("VALIDATION REWORK", "{value}") <>
+      "Structured validation feedback JSON: {ctx.validation.feedback_json}. " <>
+      "Fix the validation issues in the same worktree. " <> implementation_response_contract()
+  end
+
+  defp direct_review_rework_prompt do
+    direct_scope_prompt("COUNCIL REVIEW REWORK", "{value}") <>
+      "Structured review feedback JSON: {ctx.review.feedback_json}. " <>
+      "Address the council review feedback in the same worktree. " <>
+      implementation_response_contract()
+  end
+
+  defp direct_operator_rework_prompt do
+    direct_scope_prompt("OPERATOR REWORK", "{value}") <>
+      "Operator note: {ctx.approval_note}. " <>
+      "Address the operator feedback in the same worktree. " <>
+      implementation_response_contract()
+  end
+
+  defp direct_scope_prompt(phase, task_placeholder) do
+    "#{phase}. You are implementing an Arbor code change inside worktree " <>
+      "{ctx.worktree_path}. Exact reviewed task: #{task_placeholder}. " <>
+      "Frozen canonical work packet JSON: {ctx.coding_plan_work_packet_json}. "
   end
 
   defp approved_validation_rework_prompt("security_regression") do
@@ -1804,7 +1864,13 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
   defp diagnostic_edge(nil), do: nil
   defp diagnostic_edge({from, to}), do: [from, to]
 
-  defp build_initial_values(plan, validation_program, plan_fingerprint, catalog_digest) do
+  defp build_initial_values(
+         plan,
+         validation_program,
+         plan_fingerprint,
+         catalog_digest,
+         work_packet_json
+       ) do
     submit_review = plan.review_profile != "none"
 
     %{
@@ -1830,21 +1896,23 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
     |> maybe_put("branch_name", plan.workspace_policy["branch_name"])
     |> maybe_put("worktree_base_dir", plan.workspace_policy["worktree_base_dir"])
     |> maybe_put("model", plan.worker["model"])
-    |> maybe_put_initial_work_packet(plan)
+    |> maybe_put_initial_work_packet(plan, work_packet_json)
     |> maybe_put_initial_work_packet_digest(plan)
     |> maybe_put_test_paths(plan)
   end
 
-  defp maybe_put_initial_work_packet(values, %Plan{version: 2} = plan) do
+  defp maybe_put_initial_work_packet(values, %Plan{version: 2} = plan, work_packet_json) do
     Map.merge(values, %{
       @initial_context_keys.work_packet => plan.work_packet,
+      @initial_context_keys.work_packet_json => work_packet_json,
       @initial_context_keys.checkpoint_policy => Map.fetch!(plan.work_packet, "checkpoint_policy")
     })
   end
 
-  defp maybe_put_initial_work_packet(values, _plan) do
+  defp maybe_put_initial_work_packet(values, _plan, _work_packet_json) do
     values
     |> Map.delete(@initial_context_keys.work_packet)
+    |> Map.delete(@initial_context_keys.work_packet_json)
     |> Map.delete(@initial_context_keys.checkpoint_policy)
   end
 

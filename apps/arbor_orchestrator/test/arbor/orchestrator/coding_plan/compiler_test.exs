@@ -294,17 +294,19 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert length(graph.edges) <= 512
   end
 
-  test "v1 and v2 direct plans retain the original worker route and bypass checkpoints", ctx do
-    template_graph = parse!(ctx.template_source)
-
+  test "v2 direct prompts bind the frozen packet without opening checkpoints", ctx do
     for plan <- [plan!(), v2_plan!()] do
       assert {:ok, compilation} = compile(plan, ctx)
       graph = parse!(compilation.dot_source)
+      packet_json = node_attrs(graph, "freeze_coding_plan_work_packet_json")["expression"]
 
       assert node_attrs(graph, "init_worker_phase")["expression"] == "implement"
 
       assert edge_target(graph, "hoist_worker_provider_session_id", nil) ==
                "build_implement_prompt"
+
+      assert edge_target(graph, "freeze_coding_plan_work_packet_json", nil) ==
+               "build_design_prompt"
 
       assert edge_target(
                graph,
@@ -359,13 +361,33 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
       assert node_attrs(graph, "parse_design_response")["action"] ==
                "coding_design_envelope_parse"
 
-      for node_id <- ~w[
-            build_validation_rework_prompt
-            build_review_rework_prompt
-            build_operator_rework_prompt
-          ] do
-        assert node_attrs(graph, node_id)["expression"] ==
-                 node_attrs(template_graph, node_id)["expression"]
+      if plan.version == 2 do
+        assert compilation.initial_values["coding_plan_work_packet_json"] == packet_json
+
+        scope = %{
+          "task" => plan.task,
+          "worktree_path" => "/tmp/direct-worktree",
+          "coding_plan_work_packet_json" => packet_json,
+          "validation.feedback_json" => ~s({"errors":["compile failed"]}),
+          "review.feedback_json" => ~s({"findings":["scope drift"]}),
+          "approval_note" => "Keep the implementation inside the reviewed packet."
+        }
+
+        implementation_prompt = run_transform(graph, "build_implement_prompt", scope)
+        assert implementation_prompt =~ "IMPLEMENTATION PHASE"
+        assert implementation_prompt =~ packet_json
+        assert implementation_prompt =~ "/tmp/direct-worktree"
+
+        for {node_id, feedback} <- [
+              {"build_validation_rework_prompt", scope["validation.feedback_json"]},
+              {"build_review_rework_prompt", scope["review.feedback_json"]},
+              {"build_operator_rework_prompt", scope["approval_note"]}
+            ] do
+          prompt = run_transform(graph, node_id, scope)
+          assert prompt =~ packet_json
+          assert prompt =~ feedback
+          assert prompt =~ "/tmp/direct-worktree"
+        end
       end
     end
   end
@@ -701,10 +723,22 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert {:error, {:compilation_field_mismatch, "initial_values"}} =
              Compilation.validate(%{compilation | initial_values: tampered_policy}, plan)
 
+    tampered_packet_json =
+      Map.put(compilation.initial_values, "coding_plan_work_packet_json", ~s({"tampered":true}))
+
+    assert {:error, {:compilation_field_mismatch, "initial_values"}} =
+             Compilation.validate(%{compilation | initial_values: tampered_packet_json}, plan)
+
     missing_packet = Map.delete(compilation.initial_values, "coding_plan_work_packet")
 
     assert {:error, {:compilation_field_mismatch, "initial_values"}} =
              Compilation.validate(%{compilation | initial_values: missing_packet}, plan)
+
+    missing_packet_json =
+      Map.delete(compilation.initial_values, "coding_plan_work_packet_json")
+
+    assert {:error, {:compilation_field_mismatch, "initial_values"}} =
+             Compilation.validate(%{compilation | initial_values: missing_packet_json}, plan)
 
     missing_policy = Map.delete(compilation.initial_values, "coding_plan_checkpoint_policy")
 
@@ -759,6 +793,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
 
     refute Map.has_key?(graph.attrs, "coding_plan_work_packet_digest")
     refute Map.has_key?(compilation.initial_values, "coding_plan_work_packet")
+    refute Map.has_key?(compilation.initial_values, "coding_plan_work_packet_json")
     refute Map.has_key?(compilation.initial_values, "coding_plan_checkpoint_policy")
     refute Map.has_key?(compilation.initial_values, "coding_plan_work_packet_digest")
     refute Map.has_key?(compilation.manifest, "work_packet_digest")

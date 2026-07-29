@@ -683,3 +683,14 @@ that synthetic commit under a preservation ref and review it from a separate
 worktree. Do not stage, reset, commit, or otherwise alter the retained source
 workspace after Arbor has published its ownership and fingerprint evidence
 (found 2026-07-28 salvaging the rejected Phase F design-turn implementation).
+
+<!-- applied-learning: a-frozen-work-packet-is-not-delegated-until-every-worker-facing-prompt-binds-it -->
+<a id="applied-learning-a-frozen-work-packet-is-not-delegated-until-every-worker-facing-prompt-binds-it"></a>
+**A frozen work packet is not delegated until every worker-facing prompt binds
+it.** Storing canonical packet bytes in graph metadata or a checkpoint node does
+not scope a direct worker when the implementation route bypasses that node. Put
+the canonical JSON in validated initial context before the first worker turn,
+bind it into implementation and every rework prompt, and inspect the rendered
+`build_*_prompt/status.json` artifact in an end-to-end dispatch; graph presence
+alone proves construction, not delivery (found 2026-07-29 after a Grok ledger
+worker spent its budget rediscovering constraints already present in the packet).

@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-07-29",
-  "entry_count": 577,
+  "entry_count": 578,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -7045,8 +7045,21 @@
       "source_incident": "found 2026-07-29 while tracing coding-pipeline heartbeat regressions during long validation).",
       "content_sha256": "7921bce020e94403ecf62b8efbe776a06f00512f4bef1dde49f4abb4059d9e4e",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 578,
+      "source_kind": "post-migration",
+      "slug": "a-frozen-work-packet-is-not-delegated-until-every-worker-facing-prompt-binds-it",
+      "title": "A frozen work packet is not delegated until every worker-facing prompt binds it.",
+      "topic": "acp-mcp",
+      "destination": ".claude/skills/applied-learning-acp-mcp.md",
+      "anchor": "applied-learning-a-frozen-work-packet-is-not-delegated-until-every-worker-facing-prompt-binds-it",
+      "source_date": "2026-07-29",
+      "source_incident": "found 2026-07-29 after a Grok ledger worker spent its budget rediscovering constraints already present in the packet).",
+      "content_sha256": "d283cf859a2d3e0abde93885720a84a3e0946c201468aee3672e0a1cb3fe6692",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 116
+  "post_migration_entry_count": 117
 }
