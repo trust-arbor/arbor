@@ -2,8 +2,8 @@
   "schema_version": 1,
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
-  "source_captured_on": "2026-07-28",
-  "entry_count": 575,
+  "source_captured_on": "2026-07-29",
+  "entry_count": 576,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -7019,8 +7019,21 @@
       "source_incident": "found 2026-07-28 reviewing the Apple Container journal v2 migration).",
       "content_sha256": "360043e80ce589a52797b48755f583386acf0b197931d30be668fce193457bee",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 576,
+      "source_kind": "post-migration",
+      "slug": "transient-authority-capacity-failures-are-not-integrity-drift",
+      "title": "Transient authority capacity failures are not integrity drift.",
+      "topic": "shell-containment",
+      "destination": ".claude/skills/applied-learning-shell-containment.md",
+      "anchor": "applied-learning-transient-authority-capacity-failures-are-not-integrity-drift",
+      "source_date": "2026-07-29",
+      "source_incident": "found 2026-07-29 when two parallel coding validations timed out baseline checkout, poisoned image-policy authority, and restarted `ExecutionRegistry`).",
+      "content_sha256": "fdb77c44bdf444d96d7d102f2f0434bd13d3e953956cbf35e7c0b6041b7d3313",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 114
+  "post_migration_entry_count": 115
 }

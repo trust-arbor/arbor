@@ -21,6 +21,7 @@ defmodule Arbor.Shell.LinuxDependencyBaselineAuthority do
   alias Arbor.Shell.TrustedPath
 
   @epoch_namespace __MODULE__
+  @checkout_timeout_ms 30_000
 
   @type status :: :unavailable | :pinned
 
@@ -513,7 +514,7 @@ defmodule Arbor.Shell.LinuxDependencyBaselineAuthority do
 
   defp call(server, request) do
     case resolve_server(server) do
-      {:ok, pid} -> GenServer.call(pid, request)
+      {:ok, pid} -> GenServer.call(pid, request, @checkout_timeout_ms)
       {:error, reason} -> {:error, reason}
     end
   catch

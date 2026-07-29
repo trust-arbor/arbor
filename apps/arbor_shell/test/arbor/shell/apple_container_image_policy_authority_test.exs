@@ -476,6 +476,49 @@ defmodule Arbor.Shell.AppleContainerImagePolicyAuthorityTest do
   end
 
   describe "checkout drift" do
+    test "transient baseline unavailability fails closed without poisoning the epoch" do
+      boot_epoch = make_ref()
+      name = unique_name()
+
+      {:ok, pid} =
+        start_authority(
+          name: name,
+          config: FakeConfig,
+          baseline_authority: FakeBaselineAuthority,
+          boot_epoch: boot_epoch
+        )
+
+      for reason <- [
+            :linux_dependency_baseline_authority_unavailable,
+            :linux_dependency_baseline_unavailable
+          ] do
+        FakeBaselineAuthority.set_mode({:error, reason})
+
+        assert {:error, :apple_container_image_policy_unavailable} =
+                 Authority.checkout_policy(pid)
+
+        assert Process.alive?(pid)
+        assert Authority.public_status(pid) == %{"state" => "pinned", "reason" => nil}
+      end
+
+      FakeBaselineAuthority.set_mode(:ok)
+      assert {:ok, @valid_policy} = Authority.checkout_policy(pid)
+
+      Process.exit(pid, :shutdown)
+      wait_until_unregistered(name)
+
+      {:ok, restarted} =
+        start_authority(
+          name: unique_name(),
+          config: FakeConfig,
+          baseline_authority: FakeBaselineAuthority,
+          boot_epoch: boot_epoch
+        )
+
+      assert Authority.public_status(restarted) == %{"state" => "pinned", "reason" => nil}
+      assert {:ok, @valid_policy} = Authority.checkout_policy(restarted)
+    end
+
     test "baseline receipt drift poisons and terminates the owner" do
       boot_epoch = make_ref()
       name = unique_name()

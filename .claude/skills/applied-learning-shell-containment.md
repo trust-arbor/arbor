@@ -4,6 +4,19 @@ Read this when executing commands, configuring process or container containment,
 
 ## Retained Applied Learning
 
+<!-- applied-learning: transient-authority-capacity-failures-are-not-integrity-drift -->
+<a id="applied-learning-transient-authority-capacity-failures-are-not-integrity-drift"></a>
+**Transient authority capacity failures are not integrity drift.** A serialized
+startup-pinned verifier can legitimately exceed the default five-second
+`GenServer.call` timeout under concurrent validation. Fail the requesting
+operation closed, but poison the boot epoch only for positive integrity
+evidence such as a verified receipt mismatch or malformed trusted state. Use a
+system-owned bounded call timeout sized for the verifier's measured work, and
+regress that transient unavailability preserves the pinned owner while real
+drift still tears down later owners (found 2026-07-29 when two parallel coding
+validations timed out baseline checkout, poisoned image-policy authority, and
+restarted `ExecutionRegistry`).
+
 <!-- applied-learning: admission-ceilings-must-be-supported-by-every-lower-execution-layer -->
 <a id="applied-learning-admission-ceilings-must-be-supported-by-every-lower-execution-layer"></a>
 **Admission ceilings must be supported by every lower execution layer.** Shell admitted

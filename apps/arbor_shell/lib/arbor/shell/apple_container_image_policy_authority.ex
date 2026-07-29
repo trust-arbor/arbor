@@ -22,6 +22,11 @@ defmodule Arbor.Shell.AppleContainerImagePolicyAuthority do
   alias Arbor.Shell.StartupEpoch
 
   @epoch_namespace __MODULE__
+  @checkout_timeout_ms 30_000
+  @transient_baseline_errors [
+    :linux_dependency_baseline_authority_unavailable,
+    :linux_dependency_baseline_unavailable
+  ]
 
   @plan_keys MapSet.new([
                "kind",
@@ -178,6 +183,9 @@ defmodule Arbor.Shell.AppleContainerImagePolicyAuthority do
     case safe_recheckout(baseline_authority, receipt) do
       :ok ->
         {:reply, {:ok, shallow_policy_copy(policy)}, state}
+
+      {:error, reason} when reason in @transient_baseline_errors ->
+        {:reply, {:error, :apple_container_image_policy_unavailable}, state}
 
       {:error, reason} ->
         poison_epoch(boot_epoch)
@@ -660,7 +668,7 @@ defmodule Arbor.Shell.AppleContainerImagePolicyAuthority do
 
   defp call(server, request) do
     case resolve_server(server) do
-      {:ok, pid} -> GenServer.call(pid, request)
+      {:ok, pid} -> GenServer.call(pid, request, @checkout_timeout_ms)
       {:error, reason} -> {:error, reason}
     end
   catch
