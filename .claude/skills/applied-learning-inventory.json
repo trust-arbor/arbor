@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-07-28",
-  "entry_count": 571,
+  "entry_count": 572,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -6967,8 +6967,21 @@
       "source_incident": "found 2026-07-28 while hardening exact pending-approval settlement across Consensus and Comms).",
       "content_sha256": "73346a9b3f0de689ccf0a542bf9eb4f3fc8fd0ac06b4a30f7aded034719be7af",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 572,
+      "source_kind": "post-migration",
+      "slug": "inspect-the-source-owned-containment-unit-before-calling-a-long-validation-stalled",
+      "title": "Inspect the source-owned containment unit before calling a long validation stalled.",
+      "topic": "shell-containment",
+      "destination": ".claude/skills/applied-learning-shell-containment.md",
+      "anchor": "applied-learning-inspect-the-source-owned-containment-unit-before-calling-a-long-validation-stalled",
+      "source_date": "2026-07-28",
+      "source_incident": "found 2026-07-28 while the budget-separation canary spent 547 seconds in a cold contained compile).",
+      "content_sha256": "edba63a87fc6c3842a0b187e73258e5f22948b14e117de1805a690fb8917c463",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 110
+  "post_migration_entry_count": 111
 }

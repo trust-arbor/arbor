@@ -224,3 +224,17 @@ in argv. Inspect bounded fields such as PID, elapsed time, executable name
 redact any unavoidable argv evidence before it reaches logs or conversation
 output (found 2026-07-28 while checking whether delegated validation was still
 active).
+
+<!-- applied-learning: inspect-the-source-owned-containment-unit-before-calling-a-long-validation-stalled -->
+<a id="applied-learning-inspect-the-source-owned-containment-unit-before-calling-a-long-validation-stalled"></a>
+**Inspect the source-owned containment unit before calling a long validation
+stalled.** Pipeline status can remain at `validate` and RecoveryCoordinator can
+report a stale heartbeat while a synchronous Apple Container unit is still
+legitimately running under its exact operation deadline. Identify the node
+process from bounded server telemetry, inspect only `Process.info/2`
+status/current function and the supervised unit's redacted `:sys.get_state/2`
+status, active phase, terminal, and remaining deadline; do not print argv or
+mutate the unit. Treat owner-connected plus running unit plus positive remaining
+budget as active, then rely on trusted terminal flags for the final capacity
+classification (found 2026-07-28 while the budget-separation canary spent 547
+seconds in a cold contained compile).
