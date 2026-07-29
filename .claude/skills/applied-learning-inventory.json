@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-07-29",
-  "entry_count": 576,
+  "entry_count": 577,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -7032,8 +7032,21 @@
       "source_incident": "found 2026-07-29 when two parallel coding validations timed out baseline checkout, poisoned image-policy authority, and restarted `ExecutionRegistry`).",
       "content_sha256": "fdb77c44bdf444d96d7d102f2f0434bd13d3e953956cbf35e7c0b6041b7d3313",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 577,
+      "source_kind": "post-migration",
+      "slug": "out-of-band-owner-updates-must-survive-stale-process-local-publication",
+      "title": "Out-of-band owner updates must survive stale process-local publication.",
+      "topic": "otp-ownership-cleanup",
+      "destination": ".claude/skills/applied-learning-otp-ownership-cleanup.md",
+      "anchor": "applied-learning-out-of-band-owner-updates-must-survive-stale-process-local-publication",
+      "source_date": "2026-07-29",
+      "source_incident": "found 2026-07-29 while tracing coding-pipeline heartbeat regressions during long validation).",
+      "content_sha256": "7921bce020e94403ecf62b8efbe776a06f00512f4bef1dde49f4abb4059d9e4e",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 115
+  "post_migration_entry_count": 116
 }
