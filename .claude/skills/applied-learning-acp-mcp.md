@@ -694,3 +694,14 @@ bind it into implementation and every rework prompt, and inspect the rendered
 `build_*_prompt/status.json` artifact in an end-to-end dispatch; graph presence
 alone proves construction, not delivery (found 2026-07-29 after a Grok ledger
 worker spent its budget rediscovering constraints already present in the packet).
+
+<!-- applied-learning: prefer-provider-canonical-terminal-text-over-replayed-acp-stream-chunks -->
+<a id="applied-learning-prefer-provider-canonical-terminal-text-over-replayed-acp-stream-chunks"></a>
+**Prefer provider-canonical terminal text over replayed ACP stream chunks.**
+An adapter may emit incremental text deltas and then emit the complete assistant
+message again before its terminal result. When that result carries a validated
+provider-namespaced canonical text field, use it instead of concatenating the
+generic chunk accumulator; do not guess by splitting repeated halves. Regress
+the exact delta-plus-full-message sequence because ordinary streaming tests will
+not expose the duplication (found 2026-07-29 when Claude SDK responses doubled
+every coding design envelope).

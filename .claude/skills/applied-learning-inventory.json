@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-07-29",
-  "entry_count": 578,
+  "entry_count": 579,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -7058,8 +7058,21 @@
       "source_incident": "found 2026-07-29 after a Grok ledger worker spent its budget rediscovering constraints already present in the packet).",
       "content_sha256": "d283cf859a2d3e0abde93885720a84a3e0946c201468aee3672e0a1cb3fe6692",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 579,
+      "source_kind": "post-migration",
+      "slug": "prefer-provider-canonical-terminal-text-over-replayed-acp-stream-chunks",
+      "title": "Prefer provider-canonical terminal text over replayed ACP stream chunks.",
+      "topic": "acp-mcp",
+      "destination": ".claude/skills/applied-learning-acp-mcp.md",
+      "anchor": "applied-learning-prefer-provider-canonical-terminal-text-over-replayed-acp-stream-chunks",
+      "source_date": "2026-07-29",
+      "source_incident": "found 2026-07-29 when Claude SDK responses doubled every coding design envelope).",
+      "content_sha256": "63e77ffada4975616b7aac35141d29d9a24438f6a557315fe5f93bfa8d0d2779",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 117
+  "post_migration_entry_count": 118
 }
