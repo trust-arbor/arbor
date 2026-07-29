@@ -70,6 +70,7 @@ defmodule Arbor.Actions.TestMixShell do
         wrapper: wrapper,
         args: args,
         opts: opts,
+        unit_owner: Keyword.get(opts, :unit_owner),
         env: env,
         deps_snapshot: deps_snapshot
       })

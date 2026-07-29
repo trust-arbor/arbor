@@ -25,7 +25,10 @@ defmodule Arbor.Shell.AppleContainerUnitJournal do
   alias Arbor.Shell.ExecutablePolicy
   alias Arbor.Shell.Executor
 
-  @max_snapshot_bytes 1_048_576
+  # Raised deliberately for schema-v2 known records at max_active=1024 with
+  # max-length owner IDs (proven by journal core size tests). Process/BEAM
+  # crash consistency only — not power-loss durability.
+  @max_snapshot_bytes 2_097_152
   # The fixed schema nests root -> active[] -> record -> scalar. The lexical
   # preflight rejects deeper inputs before Jason allocates their decode tree;
   # the ordered-object reducer enforces the same boundary while converting.
@@ -150,33 +153,64 @@ defmodule Arbor.Shell.AppleContainerUnitJournal do
   end
 
   @doc """
-  Reserve a unit intent for the exact `unit_name` + `execution_id`.
+  Reserve a unit intent for the exact `unit_name` + `execution_id` + known owner.
 
-  Generates a 32-byte cryptorandom token (64 lowercase hex) and a millisecond
-  wall-clock timestamp, asks the pure core to reserve, and persists the exact
-  core snapshot before replying the token. Same single reservation transaction
-  as `reserve_record/3`; only the successful reply shape differs.
+  `owner` is a closed map with `validation_resource_id`, `workspace_id`,
+  `task_id`, and `principal_id`. Generates a 32-byte cryptorandom token
+  (64 lowercase hex) and a millisecond wall-clock timestamp, asks the pure
+  core to reserve, and persists the exact core snapshot before replying the
+  token. Same single reservation transaction as `reserve_record/4`; only the
+  successful reply shape differs.
   """
-  @spec reserve(String.t(), String.t(), GenServer.server()) ::
+  @spec reserve(String.t(), String.t(), map(), GenServer.server()) ::
           {:ok, String.t()} | {:error, term()}
-  def reserve(unit_name, execution_id, server \\ __MODULE__) do
-    call(server, {:reserve, unit_name, execution_id, :token})
+  def reserve(unit_name, execution_id, owner, server \\ __MODULE__)
+
+  def reserve(unit_name, execution_id, owner, server)
+      when is_binary(unit_name) and is_binary(execution_id) and is_map(owner) do
+    call(server, {:reserve, unit_name, execution_id, owner, :token})
   end
+
+  def reserve(_unit_name, _execution_id, _owner, _server),
+    do: {:error, :invalid_apple_container_unit_owner}
 
   @doc """
   Reserve a unit intent and return the exact normalized core record.
 
-  Uses the same single reservation transaction as `reserve/3` (generate token
+  Uses the same single reservation transaction as `reserve/4` (generate token
   + timestamp, core reserve, durable publish). Replies `{:ok, record}` only
-  after the snapshot is published, with the committed `unit_name`,
-  `execution_id`, `token`, and `reserved_at_ms` from the next journal state —
+  after the snapshot is published with the committed known-owner v2 record —
   never a reserve-then-reread path.
   """
-  @spec reserve_record(String.t(), String.t(), GenServer.server()) ::
+  @spec reserve_record(String.t(), String.t(), map(), GenServer.server()) ::
           {:ok, Core.record()} | {:error, term()}
-  def reserve_record(unit_name, execution_id, server \\ __MODULE__) do
-    call(server, {:reserve, unit_name, execution_id, :record})
+  def reserve_record(unit_name, execution_id, owner, server \\ __MODULE__)
+
+  def reserve_record(unit_name, execution_id, owner, server)
+      when is_binary(unit_name) and is_binary(execution_id) and is_map(owner) do
+    call(server, {:reserve, unit_name, execution_id, owner, :record})
   end
+
+  def reserve_record(_unit_name, _execution_id, _owner, _server),
+    do: {:error, :invalid_apple_container_unit_owner}
+
+  @doc """
+  Bounded redacted unit inventory with closed filters.
+
+  Accepts only `:task_id`, `:principal_id`, and `:max_items`. Global mode
+  (both task/principal absent) includes owner-unknown rows. Scoped mode
+  (both present) returns only exact known-owner matches and never infers
+  ownership for unknown rows. Items never include token, path, PID, or refs.
+  """
+  @spec unit_inventory(keyword() | map(), GenServer.server()) ::
+          {:ok, map()} | {:error, term()}
+  def unit_inventory(opts \\ [], server \\ __MODULE__)
+
+  def unit_inventory(opts, server) when is_list(opts) or is_map(opts) do
+    call(server, {:unit_inventory, opts})
+  end
+
+  def unit_inventory(_opts, _server), do: {:error, :invalid_unit_inventory_filters}
 
   @doc """
   Complete an active intent only when both `unit_name` and `token` match.
@@ -273,7 +307,7 @@ defmodule Arbor.Shell.AppleContainerUnitJournal do
   end
 
   def handle_call(
-        {:reserve, _unit_name, _execution_id, reply_mode},
+        {:reserve, _unit_name, _execution_id, _owner, reply_mode},
         _from,
         %{status: :disabled} = state
       )
@@ -282,7 +316,7 @@ defmodule Arbor.Shell.AppleContainerUnitJournal do
   end
 
   def handle_call(
-        {:reserve, _unit_name, _execution_id, reply_mode},
+        {:reserve, _unit_name, _execution_id, _owner, reply_mode},
         _from,
         %{status: :poisoned} = state
       )
@@ -291,16 +325,44 @@ defmodule Arbor.Shell.AppleContainerUnitJournal do
   end
 
   def handle_call(
-        {:reserve, unit_name, execution_id, reply_mode},
+        {:reserve, unit_name, execution_id, owner, reply_mode},
         _from,
         %{status: :ready, journal: journal, binding: binding} = state
       )
       when reply_mode in [:token, :record] and is_map(journal) and is_map(binding) do
-    perform_reserve(state, journal, binding, unit_name, execution_id, reply_mode)
+    perform_reserve(state, journal, binding, unit_name, execution_id, owner, reply_mode)
   end
 
-  def handle_call({:reserve, _unit_name, _execution_id, _reply_mode}, _from, state) do
+  def handle_call({:reserve, _unit_name, _execution_id, _owner, _reply_mode}, _from, state) do
     {:reply, {:error, :unsupported_apple_container_unit_journal_reserve_reply_mode}, state}
+  end
+
+  def handle_call({:unit_inventory, opts}, _from, %{status: :disabled} = state) do
+    reply_empty_inventory(state, "disabled", opts)
+  end
+
+  def handle_call({:unit_inventory, opts}, _from, %{status: :poisoned} = state) do
+    # Inventory remains readable so operators can inspect retained evidence.
+    case state.journal do
+      journal when is_map(journal) ->
+        reply_inventory(state, journal, opts)
+
+      _ ->
+        reply_empty_inventory(state, "unavailable", opts)
+    end
+  end
+
+  def handle_call(
+        {:unit_inventory, opts},
+        _from,
+        %{status: :ready, journal: journal} = state
+      )
+      when is_map(journal) do
+    reply_inventory(state, journal, opts)
+  end
+
+  def handle_call({:unit_inventory, opts}, _from, state) do
+    reply_empty_inventory(state, "unavailable", opts)
   end
 
   def handle_call({:complete, _unit_name, _token}, _from, %{status: :disabled} = state) do
@@ -1879,22 +1941,35 @@ defmodule Arbor.Shell.AppleContainerUnitJournal do
 
   # --- Effect interpretation --------------------------------------------------
 
-  # Single reservation transaction shared by reserve/3 (:token) and
-  # reserve_record/3 (:record). Token + timestamp are generated once; core
+  # Single reservation transaction shared by reserve/4 (:token) and
+  # reserve_record/4 (:record). Token + timestamp are generated once; core
   # reserve and durable publish run once; only the success reply shape differs.
-  defp perform_reserve(state, journal, binding, unit_name, execution_id, reply_mode)
+  defp perform_reserve(state, journal, binding, unit_name, execution_id, owner, reply_mode)
        when is_map(state) and is_map(journal) and is_map(binding) and
               reply_mode in [:token, :record] do
-    token = generate_token()
-    reserved_at_ms = System.system_time(:millisecond)
+    with {:ok, owner_ids} <- normalize_owner_binding(owner) do
+      token = generate_token()
+      reserved_at_ms = System.system_time(:millisecond)
 
-    attrs = %{
-      unit_name: unit_name,
-      execution_id: execution_id,
-      token: token,
-      reserved_at_ms: reserved_at_ms
-    }
+      attrs = %{
+        unit_name: unit_name,
+        execution_id: execution_id,
+        token: token,
+        reserved_at_ms: reserved_at_ms,
+        validation_resource_id: owner_ids.validation_resource_id,
+        workspace_id: owner_ids.workspace_id,
+        task_id: owner_ids.task_id,
+        principal_id: owner_ids.principal_id
+      }
 
+      do_perform_reserve(state, journal, binding, attrs, token, reply_mode)
+    else
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  defp do_perform_reserve(state, journal, binding, attrs, token, reply_mode) do
     case Core.reserve(journal, attrs) do
       {:ok, next_state, effects} ->
         case interpret_and_persist(binding, next_state, effects) do
@@ -1970,22 +2045,9 @@ defmodule Arbor.Shell.AppleContainerUnitJournal do
       end)
 
     case found do
-      %{
-        unit_name: unit_name,
-        execution_id: execution_id,
-        token: found_token,
-        reserved_at_ms: reserved_at_ms
-      }
-      when found_token == token and is_binary(unit_name) and is_binary(execution_id) and
-             is_integer(reserved_at_ms) and reserved_at_ms >= 0 ->
+      %{token: ^token} = record when is_map(record) ->
         # Exact normalized Core.record shape from committed state only.
-        {:ok,
-         %{
-           unit_name: unit_name,
-           execution_id: execution_id,
-           token: found_token,
-           reserved_at_ms: reserved_at_ms
-         }}
+        Core.normalize_existing_record(record)
 
       _other ->
         {:error, :journal_reserve_record_missing}
@@ -1994,6 +2056,115 @@ defmodule Arbor.Shell.AppleContainerUnitJournal do
 
   defp committed_reserve_record(_next_state, _token),
     do: {:error, :journal_reserve_record_missing}
+
+  defp normalize_owner_binding(owner), do: Core.normalize_known_owner(owner)
+
+  defp reply_inventory(state, journal, opts) do
+    with {:ok, projection} <- Core.project_inventory(journal, opts),
+         {:ok, items} <- redact_inventory_records(projection.records) do
+      status = if projection.truncated, do: "truncated", else: "complete"
+
+      envelope = %{
+        "status" => status,
+        "filter" => projection.filter,
+        "matched_count" => projection.matched_count,
+        "returned_count" => projection.returned_count,
+        "max_items" => projection.max_items,
+        "truncated" => projection.truncated,
+        "items" => items
+      }
+
+      {:reply, {:ok, envelope}, state}
+    else
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  defp reply_empty_inventory(state, status, opts) do
+    with {:ok, empty} <- Core.new(),
+         {:ok, projection} <- Core.project_inventory(empty, opts) do
+      {:reply, {:ok, inventory_status_envelope(status, projection)}, state}
+    else
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  defp inventory_status_envelope(status, projection) do
+    %{
+      "status" => status,
+      "filter" => projection.filter,
+      "matched_count" => 0,
+      "returned_count" => 0,
+      "max_items" => projection.max_items,
+      "truncated" => false,
+      "items" => []
+    }
+  end
+
+  defp redact_inventory_records(records) when is_list(records) do
+    Enum.reduce_while(records, {:ok, []}, fn record, {:ok, acc} ->
+      case redacted_inventory_item(record) do
+        {:ok, item} -> {:cont, {:ok, [item | acc]}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, items} -> {:ok, Enum.reverse(items)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp redacted_inventory_item(record) when is_map(record) do
+    with {:ok, resource_id} <- Core.resource_id_from_unit_name(record.unit_name),
+         {:ok, digest} <- source_record_digest(record) do
+      {:ok,
+       %{
+         "resource_id" => resource_id,
+         "unit_name" => record.unit_name,
+         "execution_id" => record.execution_id,
+         "reserved_at_ms" => record.reserved_at_ms,
+         "owner_status" => owner_status_string(record.owner_status),
+         "validation_resource_id" => record.validation_resource_id,
+         "workspace_id" => record.workspace_id,
+         "task_id" => record.task_id,
+         "principal_id" => record.principal_id,
+         "source_record_digest" => digest
+       }}
+    else
+      _ -> {:error, :unit_inventory_projection_failed}
+    end
+  end
+
+  defp owner_status_string(:known), do: "known"
+  defp owner_status_string(:unknown), do: "unknown"
+  defp owner_status_string("known"), do: "known"
+  defp owner_status_string("unknown"), do: "unknown"
+
+  # Domain-separated digest of the complete secret-bearing canonical record.
+  defp source_record_digest(record) do
+    case Core.canonical_record(record) do
+      canonical when is_map(canonical) ->
+        ordered =
+          canonical
+          |> Enum.sort_by(fn {key, _value} -> key end)
+          |> Jason.OrderedObject.new()
+
+        with {:ok, encoded} <- Jason.encode(ordered) do
+          digest =
+            :crypto.hash(:sha256, Core.digest_domain_tag() <> <<0>> <> encoded)
+            |> Base.encode16(case: :lower)
+
+          {:ok, digest}
+        else
+          _ -> {:error, :unit_inventory_digest_failed}
+        end
+
+      {:error, _reason} ->
+        {:error, :unit_inventory_digest_failed}
+    end
+  end
 
   defp interpret_and_persist(binding, next_state, effects) when is_map(binding) do
     with :ok <- require_exact_persist_effect(effects),

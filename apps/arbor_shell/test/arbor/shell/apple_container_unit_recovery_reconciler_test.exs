@@ -219,6 +219,16 @@ defmodule Arbor.Shell.AppleContainerUnitRecoveryReconcilerTest do
       GenServer.call(__MODULE__, {:register_pid, pid})
     end
 
+    def register_entry(entry) when is_map(entry) do
+      ensure_started()
+      GenServer.call(__MODULE__, {:register_entry, entry})
+    end
+
+    def entries do
+      ensure_started()
+      GenServer.call(__MODULE__, :entries)
+    end
+
     def worker_pids do
       ensure_started()
       GenServer.call(__MODULE__, :worker_pids)
@@ -226,12 +236,12 @@ defmodule Arbor.Shell.AppleContainerUnitRecoveryReconcilerTest do
 
     @impl true
     def init(_) do
-      {:ok, %{script: [], starts: [], pids: []}}
+      {:ok, %{script: [], starts: [], entries: [], pids: []}}
     end
 
     @impl true
     def handle_call({:reset, script}, _from, _state) do
-      {:reply, :ok, %{script: script, starts: [], pids: []}}
+      {:reply, :ok, %{script: script, starts: [], entries: [], pids: []}}
     end
 
     def handle_call(:starts, _from, state) do
@@ -240,6 +250,14 @@ defmodule Arbor.Shell.AppleContainerUnitRecoveryReconcilerTest do
 
     def handle_call({:register_pid, pid}, _from, state) do
       {:reply, :ok, %{state | pids: state.pids ++ [pid]}}
+    end
+
+    def handle_call({:register_entry, entry}, _from, state) do
+      {:reply, :ok, %{state | entries: state.entries ++ [entry]}}
+    end
+
+    def handle_call(:entries, _from, state) do
+      {:reply, state.entries, state}
     end
 
     def handle_call(:worker_pids, _from, state) do
@@ -294,11 +312,17 @@ defmodule Arbor.Shell.AppleContainerUnitRecoveryReconcilerTest do
       "unit_name" => @unit_name,
       "execution_id" => @execution_id,
       "token" => @token,
-      "reserved_at_ms" => @reserved_at_ms
+      "reserved_at_ms" => @reserved_at_ms,
+      "owner_status" => "known",
+      "validation_resource_id" => "validation_res",
+      "workspace_id" => "workspace",
+      "task_id" => "task",
+      "principal_id" => "principal"
     }
 
     launcher = fn entry, owner, receipt_ref, _sup ->
       action = WorkerScript.next_action()
+      :ok = WorkerScript.register_entry(entry)
       unit_name = entry["unit_name"]
       token = entry["token"]
 
@@ -493,8 +517,28 @@ defmodule Arbor.Shell.AppleContainerUnitRecoveryReconcilerTest do
                       ^receipt_ref},
                      2_000
 
+      assert WorkerScript.entries() == [entry]
+
       # Never leak token/execution_id in completion message.
       refute_received {:apple_container_unit_recovery_entry_complete, _, _, _, _}
+    end
+
+    test "security regression: journal owner mismatch is not exact presence", %{
+      start_reconciler: start,
+      coordinator_name: coord,
+      entry: entry
+    } do
+      :ok = FakeJournal.reset(entries: [])
+      assert {:ok, pid} = start.([])
+      await_ready(pid)
+
+      :ok = FakeJournal.set_entries([entry])
+      mismatched = Map.put(entry, "task_id", "task-other")
+
+      assert {:error, :identity_mismatch} =
+               FakeCoordinator.recover_entry(pid, coord, mismatched, make_ref())
+
+      assert WorkerScript.entries() == []
     end
   end
 
@@ -512,7 +556,12 @@ defmodule Arbor.Shell.AppleContainerUnitRecoveryReconcilerTest do
         "unit_name" => @unit_name_b,
         "execution_id" => "exec-rec-2",
         "token" => @token_b,
-        "reserved_at_ms" => @reserved_at_ms
+        "reserved_at_ms" => @reserved_at_ms,
+        "owner_status" => "known",
+        "validation_resource_id" => "validation_res",
+        "workspace_id" => "workspace",
+        "task_id" => "task",
+        "principal_id" => "principal"
       }
 
       :ok = FakeJournal.set_entries([entry, entry_b])
@@ -1080,7 +1129,12 @@ defmodule Arbor.Shell.AppleContainerUnitRecoveryReconcilerTest do
         "unit_name" => @unit_name_b,
         "execution_id" => "exec-rec-2",
         "token" => @token_b,
-        "reserved_at_ms" => @reserved_at_ms
+        "reserved_at_ms" => @reserved_at_ms,
+        "owner_status" => "known",
+        "validation_resource_id" => "validation_res",
+        "workspace_id" => "workspace",
+        "task_id" => "task",
+        "principal_id" => "principal"
       }
 
       :ok = FakeJournal.set_entries([entry, other])
@@ -1114,7 +1168,12 @@ defmodule Arbor.Shell.AppleContainerUnitRecoveryReconcilerTest do
         "unit_name" => @unit_name_b,
         "execution_id" => "exec-rec-2",
         "token" => @token_b,
-        "reserved_at_ms" => @reserved_at_ms
+        "reserved_at_ms" => @reserved_at_ms,
+        "owner_status" => "known",
+        "validation_resource_id" => "validation_res",
+        "workspace_id" => "workspace",
+        "task_id" => "task",
+        "principal_id" => "principal"
       }
 
       :ok = FakeJournal.set_entries([other])

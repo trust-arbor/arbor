@@ -213,6 +213,9 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   @type validation_resource :: %{
           resource_id: String.t(),
           workspace_id: String.t(),
+          # Source-owned from parent lease at create; projected in public view.
+          task_id: String.t() | nil,
+          principal_id: String.t() | nil,
           owner_pid: pid(),
           owner_ref: reference(),
           repo_path: String.t(),
@@ -287,7 +290,9 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   """
   @spec acquire(map(), keyword()) :: {:ok, map()} | {:error, term()}
   def acquire(attrs, opts \\ []) when is_map(attrs) do
-    call({:acquire, normalize_acquire_attrs(attrs)}, opts)
+    with :ok <- reject_ambiguous_acquire_identity(attrs) do
+      call({:acquire, normalize_acquire_attrs(attrs)}, opts)
+    end
   end
 
   @doc """
@@ -1989,6 +1994,11 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     %{
       resource_id: resource_id,
       workspace_id: lease.workspace_id,
+      # Source-owned lineage from the parent workspace lease (authority).
+      # Projected into public validation_resource_view for Shell unit-owner
+      # binding. Never taken from Mix/action context at spawn time.
+      task_id: Map.get(lease, :task_id),
+      principal_id: Map.get(lease, :principal_id),
       owner_pid: owner_pid,
       owner_ref: owner_ref,
       repo_path: lease.repo_path,
@@ -3072,9 +3082,13 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
 
     # JSON-clean only. Never include dependency_lease, token, worker, owner,
     # private Shell root, or any other rich term from the opaque lease.
+    # task_id/principal_id are source-owned lease fields projected for
+    # Apple Container unit-owner binding — never taken from Mix action context.
     %{
       resource_id: resource.resource_id,
       workspace_id: resource.workspace_id,
+      task_id: Map.get(resource, :task_id),
+      principal_id: Map.get(resource, :principal_id),
       repo_path: resource.repo_path,
       candidate_path: resource.candidate_path,
       candidate_commit: resource.candidate_commit,
@@ -3783,6 +3797,22 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       worktree_path: Map.get(attrs, :worktree_path) || Map.get(attrs, "worktree_path"),
       create_worktree: create_worktree
     }
+  end
+
+  defp reject_ambiguous_acquire_identity(attrs) when is_map(attrs) do
+    alias_groups = [
+      [:workspace_id, "workspace_id"],
+      [:task_id, "task_id"],
+      [:principal_id, "principal_id", :agent_id, "agent_id"]
+    ]
+
+    if Enum.any?(alias_groups, fn keys ->
+         Enum.count(keys, &Map.has_key?(attrs, &1)) > 1
+       end) do
+      {:error, :ambiguous_workspace_identity}
+    else
+      :ok
+    end
   end
 
   defp prepare_acquire_identity(attrs, owner_pid) do

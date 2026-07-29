@@ -114,8 +114,8 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinatorTest do
     def recovery_entries(server \\ __MODULE__),
       do: GenServer.call(server, :recovery_entries)
 
-    def reserve_record(unit_name, execution_id, server \\ __MODULE__),
-      do: GenServer.call(server, {:reserve_record, unit_name, execution_id})
+    def reserve_record(unit_name, execution_id, owner, server \\ __MODULE__),
+      do: GenServer.call(server, {:reserve_record, unit_name, execution_id, owner})
 
     def complete(unit_name, token, server \\ __MODULE__),
       do: GenServer.call(server, {:complete, unit_name, token})
@@ -185,7 +185,7 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinatorTest do
       {:reply, reply, state}
     end
 
-    def handle_call({:reserve_record, unit_name, execution_id}, _from, state) do
+    def handle_call({:reserve_record, unit_name, execution_id, owner}, _from, state) do
       SharedTrace.append({:journal_reserve, unit_name, execution_id})
       events = [{:reserve_record, unit_name, execution_id} | state.events]
 
@@ -196,7 +196,12 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinatorTest do
           unit_name: unit_name,
           execution_id: execution_id,
           token: @token,
-          reserved_at_ms: @reserved_at_ms
+          reserved_at_ms: @reserved_at_ms,
+          owner_status: :known,
+          validation_resource_id: Map.get(owner, :validation_resource_id, "validation_res"),
+          workspace_id: Map.get(owner, :workspace_id, "workspace"),
+          task_id: Map.get(owner, :task_id, "task"),
+          principal_id: Map.get(owner, :principal_id, "principal")
         }
 
         entries = [record | Enum.reject(state.entries, &(&1.unit_name == unit_name))]
@@ -704,7 +709,12 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinatorTest do
       unit_name: Keyword.get(opts, :unit_name, @unit_name),
       execution_id: Keyword.get(opts, :execution_id, @execution_id),
       token: Keyword.get(opts, :token, @token),
-      reserved_at_ms: Keyword.get(opts, :reserved_at_ms, @reserved_at_ms)
+      reserved_at_ms: Keyword.get(opts, :reserved_at_ms, @reserved_at_ms),
+      owner_status: :known,
+      validation_resource_id: "validation_res",
+      workspace_id: "workspace",
+      task_id: "task",
+      principal_id: "principal"
     }
   end
 
@@ -786,9 +796,15 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinatorTest do
 
   defp spec_fixture do
     %{
-      plan: %{unit_name: @unit_name},
+      plan: %{unit_name: @unit_name, resource_profile: :standard},
       timeout_ms: @timeout_ms,
-      max_output_bytes: 8_192
+      max_output_bytes: 8_192,
+      unit_owner: %{
+        validation_resource_id: "validation_res",
+        workspace_id: "workspace",
+        task_id: "task",
+        principal_id: "principal"
+      }
     }
   end
 
@@ -1100,6 +1116,35 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinatorTest do
              ]
     end
 
+    test "security regression: open unit owner is rejected before clock or journal reserve", %{
+      holder: holder
+    } do
+      :ok = Snapshot.set({:ok, []})
+      :ok = FakeJournal.reset(entries: [])
+      :ok = FakeReconciler.reset(phase: "ready")
+      :ok = FakeWorker.reset(start_result: :spawn_worker)
+
+      pid = start_coord!(holder)
+      await_ready(pid)
+
+      :ok = FakeJournal.reset(entries: [])
+      :ok = SharedTrace.reset()
+
+      spec =
+        update_in(spec_fixture(), [:unit_owner], fn owner ->
+          Map.put(owner, "task_id", "conflicting-task")
+        end)
+
+      assert {:error, :invalid_apple_container_unit_owner} =
+               GenServer.call(
+                 pid,
+                 {:start_unit, spec, :executable, @execution_id, make_ref()}
+               )
+
+      assert SharedTrace.events() == []
+      assert FakeJournal.events() == []
+    end
+
     test "admits spawn-capable ceiling timeout and rejects one above without clamping", %{
       holder: holder
     } do
@@ -1154,7 +1199,13 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinatorTest do
       intensive_spec = %{
         plan: %{unit_name: @unit_name, resource_profile: :intensive},
         timeout_ms: intensive_ceiling,
-        max_output_bytes: 8_192
+        max_output_bytes: 8_192,
+        unit_owner: %{
+          validation_resource_id: "validation_res",
+          workspace_id: "workspace",
+          task_id: "task",
+          principal_id: "principal"
+        }
       }
 
       :ok = FakeJournal.reset(entries: [])
@@ -1188,7 +1239,13 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinatorTest do
       serialized_intensive_spec = %{
         plan: %{"resource_profile" => "intensive", unit_name: @unit_name},
         timeout_ms: intensive_ceiling,
-        max_output_bytes: 8_192
+        max_output_bytes: 8_192,
+        unit_owner: %{
+          validation_resource_id: "validation_res",
+          workspace_id: "workspace",
+          task_id: "task",
+          principal_id: "principal"
+        }
       }
 
       :ok = FakeJournal.reset(entries: [])
@@ -1215,7 +1272,13 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinatorTest do
       serialized_standard_over = %{
         plan: %{"resource_profile" => "standard", unit_name: @unit_name},
         timeout_ms: ceiling + 1,
-        max_output_bytes: 8_192
+        max_output_bytes: 8_192,
+        unit_owner: %{
+          validation_resource_id: "validation_res",
+          workspace_id: "workspace",
+          task_id: "task",
+          principal_id: "principal"
+        }
       }
 
       :ok = SharedTrace.reset()

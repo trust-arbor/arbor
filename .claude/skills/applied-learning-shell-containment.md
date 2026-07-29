@@ -238,3 +238,12 @@ mutate the unit. Treat owner-connected plus running unit plus positive remaining
 budget as active, then rely on trusted terminal flags for the final capacity
 classification (found 2026-07-28 while the budget-separation canary spent 547
 seconds in a cold contained compile).
+
+<!-- applied-learning: degraded-inventory-views-must-preserve-the-requested-scope -->
+<a id="applied-learning-degraded-inventory-views-must-preserve-the-requested-scope"></a>
+**Degraded inventory views must preserve the requested scope.** A poisoned,
+disabled, or unavailable owner may return less evidence, but rebuilding an
+empty default projection can silently widen a scoped query to global. Validate
+the caller's filters and preserve the normalized mode and bounds in every
+status response; degradation may reduce evidence, never broaden visibility
+(found 2026-07-28 reviewing Apple Container unit inventory).

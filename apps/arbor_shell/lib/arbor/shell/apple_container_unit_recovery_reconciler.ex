@@ -619,9 +619,7 @@ defmodule Arbor.Shell.AppleContainerUnitRecoveryReconciler do
       case normalize_entry(entry) do
         {:ok, other} ->
           cond do
-            other.unit_name == record.unit_name and other.token == record.token and
-              other.execution_id == record.execution_id and
-                other.reserved_at_ms == record.reserved_at_ms ->
+            JournalCore.same_record?(other, record) ->
               {:halt, :ok}
 
             other.unit_name == record.unit_name ->
@@ -722,13 +720,23 @@ defmodule Arbor.Shell.AppleContainerUnitRecoveryReconciler do
          unit_name: unit_name,
          execution_id: execution_id,
          token: token,
-         reserved_at_ms: reserved_at_ms
+         reserved_at_ms: reserved_at_ms,
+         owner_status: owner_status,
+         validation_resource_id: validation_resource_id,
+         workspace_id: workspace_id,
+         task_id: task_id,
+         principal_id: principal_id
        }) do
     %{
       "unit_name" => unit_name,
       "execution_id" => execution_id,
       "token" => token,
-      "reserved_at_ms" => reserved_at_ms
+      "reserved_at_ms" => reserved_at_ms,
+      "owner_status" => Atom.to_string(owner_status),
+      "validation_resource_id" => validation_resource_id,
+      "workspace_id" => workspace_id,
+      "task_id" => task_id,
+      "principal_id" => principal_id
     }
   end
 
@@ -772,24 +780,9 @@ defmodule Arbor.Shell.AppleContainerUnitRecoveryReconciler do
   end
 
   defp normalize_entry(entry) when is_map(entry) do
-    snapshot = %{
-      "schema_version" => 1,
-      "generation" => 1,
-      "active" => [entry]
-    }
-
-    case JournalCore.new(snapshot) do
-      {:ok, journal} ->
-        case JournalCore.recovery_entries(journal) do
-          [normalized] when is_map(normalized) ->
-            {:ok, normalized}
-
-          _other ->
-            {:error, :invalid_journal_entry}
-        end
-
-      {:error, reason} ->
-        {:error, reason}
+    case JournalCore.normalize_existing_record(entry) do
+      {:ok, normalized} -> {:ok, normalized}
+      {:error, reason} -> {:error, reason}
     end
   end
 

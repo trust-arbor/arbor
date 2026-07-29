@@ -2,41 +2,47 @@ defmodule Arbor.Shell do
   @moduledoc """
   Safe shell command execution for the Arbor platform.
 
-  Arbor.Shell provides a secure interface for executing shell commands with
-  sandbox support, timeout handling, and observability through signals.
+  Arbor.Shell provides two distinct execution surfaces:
 
-  ## Quick Start
+  * **`execute/2`** — native host command execution with sandbox modes,
+    timeout handling, and observability through signals.
+  * **`execute_spawn_capable/3`** — trusted-system Mix tool execution inside an
+    admitted Apple Container unit (descendant-spawning workloads). Requires a
+    closed `:unit_owner` binding from source-owned validation lineage.
+
+  ## Native execution (`execute/2`)
 
       {:ok, result} = Arbor.Shell.execute("ls -la", timeout: 5000)
       IO.puts(result.stdout)
 
-  ## Sandbox Modes
+  ### Sandbox modes (native host only)
 
   | Mode | Description |
   |------|-------------|
-  | `:none` | No restrictions - use with caution |
-  | `:basic` | Blocks dangerous commands (rm -rf, sudo, etc.) |
-  | `:strict` | Allowlist only - very limited commands |
-  | `:container` | Container isolation (future) |
+  | `:none` | No restrictions — use with caution |
+  | `:basic` | Blocks dangerous commands (`rm -rf`, sudo, etc.) |
+  | `:strict` | Allowlist only — very limited commands |
 
-  ## Examples
+  ### Native examples
 
-      # Basic execution
       {:ok, result} = Arbor.Shell.execute("echo hello")
-
-      # With sandbox
       {:ok, result} = Arbor.Shell.execute("ls", sandbox: :strict)
-
-      # With working directory
       {:ok, result} = Arbor.Shell.execute("git status", cwd: "/path/to/repo")
 
-      # With absolute timeout (continuous output does not extend the deadline)
-      {:ok, result} = Arbor.Shell.execute("sleep 10", timeout: 5000)
-      result.timed_out  # => true
+  ## Apple Container execution (`execute_spawn_capable/3`)
 
-      # With retained-output ceiling (default 8 MiB; hard max 16 MiB)
-      {:ok, result} = Arbor.Shell.execute(noisy_cmd, max_output_bytes: 256)
-      result.output_limit_exceeded  # => true when the ceiling is hit
+  Runs a validated Mix wrapper path inside a journal-reserved Apple Container
+  unit. Callers must pass closed filesystem projections and a complete
+  `:unit_owner` map (`validation_resource_id`, `workspace_id`, `task_id`,
+  `principal_id`) obtained from the source-owned validation resource — never
+  from arbitrary action context.
+
+  ## Unit inventory
+
+  `apple_container_unit_inventory/1` returns a bounded, JSON-clean, redacted
+  view of active unit-intent journal rows (complete/truncated status, segment-safe
+  `resource_id`, domain-separated `source_record_digest`). It never exposes
+  journal tokens, paths, PIDs, references, or raw provider output.
 
   ## Signals
 
@@ -51,6 +57,7 @@ defmodule Arbor.Shell do
 
   alias Arbor.Shell.{
     AppleContainerExecutor,
+    AppleContainerUnitJournal,
     CapShell,
     ExecutablePolicy,
     ExecutionRegistry,
@@ -541,6 +548,21 @@ defmodule Arbor.Shell do
   malformed opts, and other request shape errors fail closed before admission,
   registry ownership, or candidate unit work.
 
+  ## Required owner binding
+
+  Closed opt `:unit_owner` must supply complete known provenance:
+
+      %{
+        validation_resource_id: "...",
+        workspace_id: "...",
+        task_id: "...",
+        principal_id: "..."
+      }
+
+  Obtained only from WorkspaceLeaseRegistry's source-owned validation resource
+  (via Actions Mix). Missing or partial owner fails closed before journal
+  reserve / unit create.
+
   ## Resource capacity (closed profile selector)
 
   Optional `:resource_profile` is the only capacity control on this facade.
@@ -563,6 +585,34 @@ defmodule Arbor.Shell do
   def execute_spawn_capable(tool_name, args, opts \\ []) do
     AppleContainerExecutor.execute(tool_name, args, opts)
   end
+
+  @doc """
+  Bounded, JSON-clean, redacted Apple Container unit-intent inventory.
+
+  Closed opts only: `:task_id`, `:principal_id`, `:max_items`.
+
+  * **Global** (both task/principal absent) — all actives, including
+    owner-unknown legacy rows (never invents provenance).
+  * **Scoped** (both present) — only known rows with exact task+principal
+    match; unknown rows are excluded and never inferred into scope.
+  * One-sided filters fail closed.
+
+  Items expose segment-safe `resource_id` (`acu_v1_<hex>`), owner fields
+  (null when unknown), and domain-separated `source_record_digest`. Never
+  includes journal token, path, PID, reference, or raw provider output.
+  """
+  @spec apple_container_unit_inventory(keyword()) :: {:ok, map()} | {:error, term()}
+  def apple_container_unit_inventory(opts \\ [])
+
+  def apple_container_unit_inventory(opts) when is_list(opts) do
+    if Keyword.keyword?(opts) do
+      AppleContainerUnitJournal.unit_inventory(opts)
+    else
+      {:error, :invalid_unit_inventory_filters}
+    end
+  end
+
+  def apple_container_unit_inventory(_opts), do: {:error, :invalid_unit_inventory_filters}
 
   @doc """
   Acquire a Shell-owned Linux dependency-baseline materialization lease.

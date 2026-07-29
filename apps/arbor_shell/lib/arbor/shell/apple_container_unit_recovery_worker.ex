@@ -581,24 +581,9 @@ defmodule Arbor.Shell.AppleContainerUnitRecoveryWorker do
   # ---------------------------------------------------------------------------
 
   defp validate_entry(entry) when is_map(entry) do
-    snapshot = %{
-      "schema_version" => 1,
-      "generation" => 1,
-      "active" => [entry]
-    }
-
-    case JournalCore.new(snapshot) do
-      {:ok, journal} ->
-        case JournalCore.recovery_entries(journal) do
-          [record] when is_map(record) ->
-            {:ok, record}
-
-          _other ->
-            {:error, :invalid_journal_entry}
-        end
-
-      {:error, reason} ->
-        {:error, reason}
+    case JournalCore.normalize_existing_record(entry) do
+      {:ok, record} -> {:ok, record}
+      {:error, reason} -> {:error, reason}
     end
   end
 

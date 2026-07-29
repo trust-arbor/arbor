@@ -1,28 +1,35 @@
 defmodule Arbor.Shell.AppleContainerUnitJournalCore do
   @moduledoc """
-  Pure CRC reducer for a durable Apple Container unit-intent journal.
+  Pure CRC reducer for a durable Apple Container unit-intent journal (schema v2).
 
-  Before a future production worker may issue `container create`, Shell will
-  durably persist a reserved unit name. Active records survive crashes until the
-  unit owner or a startup reconciler has positively proven exact absence. This
-  core decides reserve/complete transitions and returns persistence effects as
-  data only — a later imperative shell interprets them.
+  Before a production worker may issue `container create`, Shell durably
+  persists a reserved unit name bound to source-owned validation lineage.
+  Schema v1 snapshots load as owner-unknown v2 records without inventing
+  provenance. New reserves require complete known owner binding.
+  `normalize_existing_record/1` accepts known or unknown rows for recovery;
+  `reserve/2` is strict known-only.
 
   All functions are pure: no File/IO, GenServer, ETS, Application config,
   Logger, System time, DateTime, randomness, process references, crypto
-  generation, or other library facades. Time and tokens are injected by the
-  caller.
+  hashing/generation, or other library facades. Time and tokens are injected
+  by the caller. Digest hashing stays at the imperative journal boundary.
   """
 
-  @schema_version 1
+  # Durable writes are always schema 2. Schema 1 is accepted only on load.
+  @schema_version 2
+  @legacy_schema_version 1
   @max_active 1_024
   # JSON-safe integer ceiling (2^53 - 1). Larger generation values fail closed
   # before arithmetic so huge decoded JSON integers cannot overflow counters.
   @max_generation 9_007_199_254_740_991
   @max_map_keys 16
   @max_execution_id_bytes 256
+  @max_owner_id_bytes 128
   @token_hex_bytes 64
-
+  @default_inventory_max_items 256
+  @digest_domain_tag "arbor.shell.apple_container_unit_journal.record.v2"
+  @resource_id_prefix "acu_v1_"
+  @resource_id_re ~r/\Aacu_v1_[0-9a-f]{32}\z/
   @token_re ~r/\A[0-9a-f]{64}\z/
 
   alias Arbor.Shell.AppleContainerUnitName
@@ -37,33 +44,107 @@ defmodule Arbor.Shell.AppleContainerUnitJournalCore do
 
   @logical_state_keys [:schema_version, :generation, :by_name]
 
-  @logical_record_keys [:unit_name, :execution_id, :token, :reserved_at_ms]
+  # Exact v2 key set for every durable/in-memory record (known and unknown).
+  @logical_record_keys [
+    :unit_name,
+    :execution_id,
+    :token,
+    :reserved_at_ms,
+    :owner_status,
+    :validation_resource_id,
+    :workspace_id,
+    :task_id,
+    :principal_id
+  ]
   @allowed_record_keys MapSet.new(
                          @logical_record_keys ++
                            Enum.map(@logical_record_keys, &Atom.to_string/1)
                        )
 
+  @logical_owner_keys [
+    :validation_resource_id,
+    :workspace_id,
+    :task_id,
+    :principal_id
+  ]
+  @allowed_owner_keys MapSet.new(
+                        @logical_owner_keys ++ Enum.map(@logical_owner_keys, &Atom.to_string/1)
+                      )
+
+  @logical_reserve_keys [
+    :unit_name,
+    :execution_id,
+    :token,
+    :reserved_at_ms,
+    :validation_resource_id,
+    :workspace_id,
+    :task_id,
+    :principal_id
+  ]
+  @allowed_reserve_keys MapSet.new(
+                          @logical_reserve_keys ++
+                            Enum.map(@logical_reserve_keys, &Atom.to_string/1)
+                        )
+
+  @logical_v1_record_keys [:unit_name, :execution_id, :token, :reserved_at_ms]
+  @allowed_v1_record_keys MapSet.new(
+                            @logical_v1_record_keys ++
+                              Enum.map(@logical_v1_record_keys, &Atom.to_string/1)
+                          )
+
+  @type owner_status :: :known | :unknown
+
   @type record :: %{
           unit_name: String.t(),
           execution_id: String.t(),
           token: String.t(),
-          reserved_at_ms: non_neg_integer()
+          reserved_at_ms: non_neg_integer(),
+          owner_status: owner_status(),
+          validation_resource_id: String.t() | nil,
+          workspace_id: String.t() | nil,
+          task_id: String.t() | nil,
+          principal_id: String.t() | nil
         }
 
   @type state :: %{
-          schema_version: 1,
+          schema_version: 2,
           generation: non_neg_integer(),
           by_name: %{optional(String.t()) => record()}
         }
 
   @type effect :: {:persist_snapshot, map()}
 
+  @type inventory_projection :: %{
+          filter: String.t(),
+          matched_count: non_neg_integer(),
+          returned_count: non_neg_integer(),
+          max_items: pos_integer(),
+          truncated: boolean(),
+          records: [record()]
+        }
+
   @doc false
-  @spec limits() :: %{max_active: pos_integer(), max_generation: pos_integer()}
-  def limits, do: %{max_active: @max_active, max_generation: @max_generation}
+  @spec limits() :: map()
+  def limits do
+    %{
+      max_active: @max_active,
+      max_generation: @max_generation,
+      max_owner_id_bytes: @max_owner_id_bytes,
+      default_inventory_max_items: @default_inventory_max_items,
+      digest_domain_tag: @digest_domain_tag
+    }
+  end
+
+  @doc "Fixed domain-separation tag for schema-v2 record digests."
+  @spec digest_domain_tag() :: String.t()
+  def digest_domain_tag, do: @digest_domain_tag
+
+  @doc "Default inventory page size when `:max_items` is omitted."
+  @spec default_inventory_max_items() :: pos_integer()
+  def default_inventory_max_items, do: @default_inventory_max_items
 
   @doc """
-  Construct an empty journal (`schema_version` 1, `generation` 0, no actives).
+  Construct an empty journal (`schema_version` 2, `generation` 0, no actives).
   """
   @spec new() :: {:ok, state()}
   def new, do: {:ok, empty_state()}
@@ -71,9 +152,10 @@ defmodule Arbor.Shell.AppleContainerUnitJournalCore do
   @doc """
   Construct journal state from a closed external snapshot.
 
-  Accepts atom- or string-keyed maps (never both aliases for the same logical
-  field). Rejects unknown keys, duplicate aliases, malformed records,
-  unsupported `schema_version`, and over-capacity active collections.
+  Accepts schema v2 or canonical schema v1 (migrated in-memory to owner-unknown
+  v2 without inventing provenance). Rejects unknown keys, duplicate aliases,
+  malformed records, unsupported schema versions, and over-capacity actives.
+  Durable `show/1` always emits schema 2.
   """
   @spec new(term()) :: {:ok, state()} | {:error, term()}
   def new(input) when is_map(input) do
@@ -84,14 +166,14 @@ defmodule Arbor.Shell.AppleContainerUnitJournalCore do
              @logical_journal_keys,
              :journal
            ),
-         {:ok, schema_version} <- fetch_schema_version(input),
+         {:ok, loaded_schema} <- fetch_schema_version(input),
          {:ok, generation} <- fetch_generation(input),
          {:ok, active_list} <- fetch_active_list(input),
-         {:ok, by_name} <- normalize_active_records(active_list),
+         {:ok, by_name} <- normalize_active_records_for_schema(active_list, loaded_schema),
          :ok <- validate_generation_consistency(generation, by_name) do
       {:ok,
        %{
-         schema_version: schema_version,
+         schema_version: @schema_version,
          generation: generation,
          by_name: by_name
        }}
@@ -101,13 +183,97 @@ defmodule Arbor.Shell.AppleContainerUnitJournalCore do
   def new(_), do: {:error, :invalid_journal}
 
   @doc """
-  Reserve a unit intent.
+  Normalize one existing journal record (known or unknown).
 
-  Requires a closed attrs map with `unit_name`, `execution_id`, `token`, and
-  injected `reserved_at_ms`. Rejects duplicate unit_name / execution_id /
-  token, invalid fields, and capacity. On success increments `generation`
-  exactly once and returns a single `{:persist_snapshot, snapshot}` effect
-  carrying the exact complete JSON-clean snapshot to persist.
+  Used by recovery, worker ownership, and reconciler paths. Distinct from
+  strict `reserve/2` which requires known owner binding.
+  """
+  @spec normalize_existing_record(term()) :: {:ok, record()} | {:error, term()}
+  def normalize_existing_record(input), do: normalize_v2_record(input)
+
+  @doc """
+  Normalize an existing record only when it carries complete known ownership.
+
+  Normal execution admission uses this stricter path. Recovery may use
+  `normalize_existing_record/1` so legacy owner-unknown rows can be cleaned.
+  """
+  @spec normalize_known_record(term()) :: {:ok, record()} | {:error, term()}
+  def normalize_known_record(input) do
+    case normalize_existing_record(input) do
+      {:ok, %{owner_status: :known} = record} -> {:ok, record}
+      {:ok, %{owner_status: :unknown}} -> {:error, :apple_container_unit_owner_required}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc """
+  Normalize an exact, complete known-owner binding.
+
+  The map is closed over the four owner keys. Atom or string keys are accepted,
+  but aliases, extras, missing values, and malformed IDs fail closed.
+  """
+  @spec normalize_known_owner(term()) :: {:ok, map()} | {:error, term()}
+  def normalize_known_owner(input) when is_map(input) do
+    result =
+      with :ok <-
+             validate_closed_keys(
+               input,
+               @allowed_owner_keys,
+               @logical_owner_keys,
+               :unit_owner
+             ),
+           {:ok, owner_ids} <- fetch_owner_ids_for_status(input, :known) do
+        {:ok, owner_ids}
+      end
+
+    case result do
+      {:error, reason}
+      when reason in [
+             :missing_validation_resource_id,
+             :missing_workspace_id,
+             :missing_task_id,
+             :missing_principal_id
+           ] ->
+        {:error, :incomplete_unit_owner}
+
+      {:error, {:unsupported_keys, :unit_owner}} ->
+        {:error, :invalid_apple_container_unit_owner}
+
+      {:error, {:duplicate_key_alias, :unit_owner, _key}} ->
+        {:error, :invalid_apple_container_unit_owner}
+
+      {:error, :map_too_large} ->
+        {:error, :invalid_apple_container_unit_owner}
+
+      other ->
+        other
+    end
+  end
+
+  def normalize_known_owner(_), do: {:error, :invalid_apple_container_unit_owner}
+
+  @doc """
+  Return true only when both inputs normalize to the same complete v2 record.
+
+  Owner status and all four owner identifiers are part of exact identity.
+  """
+  @spec same_record?(term(), term()) :: boolean()
+  def same_record?(left, right) do
+    with {:ok, normalized_left} <- normalize_existing_record(left),
+         {:ok, normalized_right} <- normalize_existing_record(right) do
+      normalized_left == normalized_right
+    else
+      _ -> false
+    end
+  end
+
+  @doc """
+  Strict reserve of a unit intent with complete known owner binding.
+
+  Requires closed attrs: `unit_name`, `execution_id`, `token`,
+  `reserved_at_ms`, and the four owner IDs. Rejects partial/malformed owner,
+  duplicates, and capacity. On success increments `generation` once and
+  returns a schema-v2 persist snapshot.
   """
   @spec reserve(state(), term()) ::
           {:ok, state(), [effect()]} | {:error, term()}
@@ -116,11 +282,11 @@ defmodule Arbor.Shell.AppleContainerUnitJournalCore do
          :ok <-
            validate_closed_keys(
              attrs,
-             @allowed_record_keys,
-             @logical_record_keys,
+             @allowed_reserve_keys,
+             @logical_reserve_keys,
              :reserve
            ),
-         {:ok, record} <- normalize_record(attrs),
+         {:ok, record} <- normalize_reserve_attrs(attrs),
          :ok <- reject_capacity(state),
          :ok <- reject_generation_ceiling(state),
          :ok <- reject_duplicate_name(state, record.unit_name),
@@ -177,7 +343,7 @@ defmodule Arbor.Shell.AppleContainerUnitJournalCore do
   end
 
   @doc """
-  Convert journal state to a deterministic JSON-clean canonical snapshot.
+  Convert journal state to a deterministic JSON-clean canonical schema-v2 snapshot.
 
   Keys are strings; `active` is sorted by `unit_name` bytewise. Suitable for
   durable persistence and round-trip through `new/1`.
@@ -186,6 +352,88 @@ defmodule Arbor.Shell.AppleContainerUnitJournalCore do
   def show(state) do
     with :ok <- require_state(state) do
       snapshot(state)
+    end
+  end
+
+  @doc """
+  Canonical secret-bearing string-keyed record for domain-separated digests.
+  """
+  @spec canonical_record(term()) :: map() | {:error, term()}
+  def canonical_record(record) do
+    case normalize_existing_record(record) do
+      {:ok, normalized} -> show_record(normalized)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc """
+  Segment-safe non-authority resource id: `acu_v1_<32hex>` from `arbor-v1-<32hex>`.
+  """
+  @spec resource_id_from_unit_name(term()) ::
+          {:ok, String.t()} | {:error, :invalid_unit_name}
+  def resource_id_from_unit_name(unit_name) do
+    with {:ok, name} <- validate_unit_name(unit_name),
+         "arbor-v1-" <> hex32 <- name,
+         true <- byte_size(hex32) == 32 do
+      {:ok, @resource_id_prefix <> hex32}
+    else
+      _ -> {:error, :invalid_unit_name}
+    end
+  end
+
+  @doc """
+  Reverse `acu_v1_<32hex>` to the exact canonical `arbor-v1-<32hex>` unit name.
+  """
+  @spec unit_name_from_resource_id(term()) ::
+          {:ok, String.t()} | {:error, :invalid_resource_id}
+  def unit_name_from_resource_id(resource_id) when is_binary(resource_id) do
+    if String.valid?(resource_id) and Regex.match?(@resource_id_re, resource_id) do
+      "acu_v1_" <> hex32 = resource_id
+
+      case AppleContainerUnitName.validate("arbor-v1-" <> hex32) do
+        {:ok, name} -> {:ok, name}
+        {:error, _} -> {:error, :invalid_resource_id}
+      end
+    else
+      {:error, :invalid_resource_id}
+    end
+  end
+
+  def unit_name_from_resource_id(_), do: {:error, :invalid_resource_id}
+
+  @doc """
+  Pure inventory projection with closed filters.
+
+  Global (both task_id and principal_id absent/nil): includes owner-unknown.
+  Scoped (both non-blank): only known rows with exact task+principal match;
+  never infers ownership for unknown rows. One-sided filters fail closed.
+  Returns secret-bearing matched records for the imperative shell to digest
+  and redact; does not hash.
+  """
+  @spec project_inventory(state(), term()) ::
+          {:ok, inventory_projection()} | {:error, term()}
+  def project_inventory(state, filters) do
+    with :ok <- require_state(state),
+         {:ok, mode, task_id, principal_id, max_items} <- normalize_inventory_filters(filters) do
+      matched =
+        state
+        |> sorted_records()
+        |> Enum.filter(&inventory_match?(&1, mode, task_id, principal_id))
+
+      matched_count = length(matched)
+      returned = Enum.take(matched, max_items)
+      returned_count = length(returned)
+      truncated = matched_count > returned_count
+
+      {:ok,
+       %{
+         filter: mode,
+         matched_count: matched_count,
+         returned_count: returned_count,
+         max_items: max_items,
+         truncated: truncated,
+         records: returned
+       }}
     end
   end
 
@@ -210,7 +458,8 @@ defmodule Arbor.Shell.AppleContainerUnitJournalCore do
               is_map(by_name) do
     with true <- Map.keys(state) |> MapSet.new() |> MapSet.equal?(MapSet.new(@logical_state_keys)),
          true <- map_size(by_name) <= @max_active,
-         {:ok, normalized_by_name} <- normalize_active_records(Map.values(by_name)),
+         {:ok, normalized_by_name} <-
+           normalize_active_records_for_schema(Map.values(by_name), @schema_version),
          true <- normalized_by_name == by_name,
          :ok <- validate_generation_consistency(generation, by_name) do
       :ok
@@ -228,6 +477,9 @@ defmodule Arbor.Shell.AppleContainerUnitJournalCore do
 
       {:ok, @schema_version} ->
         {:ok, @schema_version}
+
+      {:ok, @legacy_schema_version} ->
+        {:ok, @legacy_schema_version}
 
       {:ok, version} when is_integer(version) ->
         {:error, {:unsupported_schema_version, version}}
@@ -279,11 +531,19 @@ defmodule Arbor.Shell.AppleContainerUnitJournalCore do
     end
   end
 
-  defp normalize_active_records(active_list) do
+  defp normalize_active_records_for_schema(active_list, @legacy_schema_version) do
+    reduce_active_records(active_list, &normalize_v1_record_as_unknown/1)
+  end
+
+  defp normalize_active_records_for_schema(active_list, @schema_version) do
+    reduce_active_records(active_list, &normalize_v2_record/1)
+  end
+
+  defp reduce_active_records(active_list, normalize_fun) do
     active_list
     |> Enum.reduce_while({:ok, %{}, MapSet.new(), MapSet.new()}, fn
       entry, {:ok, by_name, execution_ids, tokens} ->
-        case normalize_record(entry) do
+        case normalize_fun.(entry) do
           {:ok, record} ->
             cond do
               Map.has_key?(by_name, record.unit_name) ->
@@ -315,7 +575,25 @@ defmodule Arbor.Shell.AppleContainerUnitJournalCore do
     end
   end
 
-  defp normalize_record(input) when is_map(input) do
+  defp normalize_v1_record_as_unknown(input) when is_map(input) do
+    with :ok <-
+           validate_closed_keys(
+             input,
+             @allowed_v1_record_keys,
+             @logical_v1_record_keys,
+             :record
+           ),
+         {:ok, unit_name} <- fetch_unit_name(input),
+         {:ok, execution_id} <- fetch_execution_id(input),
+         {:ok, token} <- fetch_token(input),
+         {:ok, reserved_at_ms} <- fetch_reserved_at_ms(input) do
+      {:ok, unknown_record(unit_name, execution_id, token, reserved_at_ms)}
+    end
+  end
+
+  defp normalize_v1_record_as_unknown(_), do: {:error, :invalid_record}
+
+  defp normalize_v2_record(input) when is_map(input) do
     with :ok <-
            validate_closed_keys(
              input,
@@ -326,18 +604,62 @@ defmodule Arbor.Shell.AppleContainerUnitJournalCore do
          {:ok, unit_name} <- fetch_unit_name(input),
          {:ok, execution_id} <- fetch_execution_id(input),
          {:ok, token} <- fetch_token(input),
-         {:ok, reserved_at_ms} <- fetch_reserved_at_ms(input) do
+         {:ok, reserved_at_ms} <- fetch_reserved_at_ms(input),
+         {:ok, owner_status} <- fetch_owner_status(input),
+         {:ok, owner_ids} <- fetch_owner_ids_for_status(input, owner_status) do
       {:ok,
        %{
          unit_name: unit_name,
          execution_id: execution_id,
          token: token,
-         reserved_at_ms: reserved_at_ms
+         reserved_at_ms: reserved_at_ms,
+         owner_status: owner_status,
+         validation_resource_id: owner_ids.validation_resource_id,
+         workspace_id: owner_ids.workspace_id,
+         task_id: owner_ids.task_id,
+         principal_id: owner_ids.principal_id
        }}
     end
   end
 
-  defp normalize_record(_), do: {:error, :invalid_record}
+  defp normalize_v2_record(_), do: {:error, :invalid_record}
+
+  defp normalize_reserve_attrs(input) when is_map(input) do
+    with {:ok, unit_name} <- fetch_unit_name(input),
+         {:ok, execution_id} <- fetch_execution_id(input),
+         {:ok, token} <- fetch_token(input),
+         {:ok, reserved_at_ms} <- fetch_reserved_at_ms(input),
+         {:ok, owner_ids} <- fetch_owner_ids_for_status(input, :known) do
+      {:ok,
+       %{
+         unit_name: unit_name,
+         execution_id: execution_id,
+         token: token,
+         reserved_at_ms: reserved_at_ms,
+         owner_status: :known,
+         validation_resource_id: owner_ids.validation_resource_id,
+         workspace_id: owner_ids.workspace_id,
+         task_id: owner_ids.task_id,
+         principal_id: owner_ids.principal_id
+       }}
+    end
+  end
+
+  defp normalize_reserve_attrs(_), do: {:error, :invalid_record}
+
+  defp unknown_record(unit_name, execution_id, token, reserved_at_ms) do
+    %{
+      unit_name: unit_name,
+      execution_id: execution_id,
+      token: token,
+      reserved_at_ms: reserved_at_ms,
+      owner_status: :unknown,
+      validation_resource_id: nil,
+      workspace_id: nil,
+      task_id: nil,
+      principal_id: nil
+    }
+  end
 
   defp fetch_unit_name(input) do
     case fetch_field(input, :unit_name) do
@@ -366,6 +688,83 @@ defmodule Arbor.Shell.AppleContainerUnitJournalCore do
       {:ok, value} -> validate_reserved_at_ms(value)
     end
   end
+
+  defp fetch_owner_status(input) do
+    case fetch_field(input, :owner_status) do
+      :error ->
+        {:error, :missing_owner_status}
+
+      {:ok, status} when status in [:known, "known"] ->
+        {:ok, :known}
+
+      {:ok, status} when status in [:unknown, "unknown"] ->
+        {:ok, :unknown}
+
+      {:ok, _other} ->
+        {:error, :invalid_owner_status}
+    end
+  end
+
+  defp fetch_owner_ids_for_status(input, :known) do
+    with {:ok, validation_resource_id} <- fetch_required_owner_id(input, :validation_resource_id),
+         {:ok, workspace_id} <- fetch_required_owner_id(input, :workspace_id),
+         {:ok, task_id} <- fetch_required_owner_id(input, :task_id),
+         {:ok, principal_id} <- fetch_required_owner_id(input, :principal_id) do
+      {:ok,
+       %{
+         validation_resource_id: validation_resource_id,
+         workspace_id: workspace_id,
+         task_id: task_id,
+         principal_id: principal_id
+       }}
+    end
+  end
+
+  defp fetch_owner_ids_for_status(input, :unknown) do
+    with :ok <- require_nil_owner_id(input, :validation_resource_id),
+         :ok <- require_nil_owner_id(input, :workspace_id),
+         :ok <- require_nil_owner_id(input, :task_id),
+         :ok <- require_nil_owner_id(input, :principal_id) do
+      {:ok,
+       %{
+         validation_resource_id: nil,
+         workspace_id: nil,
+         task_id: nil,
+         principal_id: nil
+       }}
+    end
+  end
+
+  defp fetch_required_owner_id(input, key) do
+    case fetch_field(input, key) do
+      :error ->
+        {:error, missing_owner_error(key)}
+
+      {:ok, nil} ->
+        {:error, :incomplete_unit_owner}
+
+      {:ok, value} ->
+        validate_owner_id(value, key)
+    end
+  end
+
+  defp require_nil_owner_id(input, key) do
+    case fetch_field(input, key) do
+      :error ->
+        {:error, missing_owner_error(key)}
+
+      {:ok, nil} ->
+        :ok
+
+      {:ok, _value} ->
+        {:error, :owner_unknown_must_have_nil_ids}
+    end
+  end
+
+  defp missing_owner_error(:validation_resource_id), do: :missing_validation_resource_id
+  defp missing_owner_error(:workspace_id), do: :missing_workspace_id
+  defp missing_owner_error(:task_id), do: :missing_task_id
+  defp missing_owner_error(:principal_id), do: :missing_principal_id
 
   # --- Field validators -------------------------------------------------------
 
@@ -397,6 +796,37 @@ defmodule Arbor.Shell.AppleContainerUnitJournalCore do
 
   defp validate_execution_id(_), do: {:error, :invalid_execution_id}
 
+  defp validate_owner_id(id, key) when is_binary(id) do
+    size = byte_size(id)
+
+    cond do
+      not String.valid?(id) ->
+        {:error, invalid_owner_error(key)}
+
+      size < 1 or size > @max_owner_id_bytes ->
+        {:error, invalid_owner_error(key)}
+
+      String.contains?(id, ["/", "\\", <<0>>]) ->
+        {:error, invalid_owner_error(key)}
+
+      has_control_char?(id) ->
+        {:error, invalid_owner_error(key)}
+
+      has_whitespace?(id) ->
+        {:error, invalid_owner_error(key)}
+
+      true ->
+        {:ok, id}
+    end
+  end
+
+  defp validate_owner_id(_id, key), do: {:error, invalid_owner_error(key)}
+
+  defp invalid_owner_error(:validation_resource_id), do: :invalid_validation_resource_id
+  defp invalid_owner_error(:workspace_id), do: :invalid_workspace_id
+  defp invalid_owner_error(:task_id), do: :invalid_task_id
+  defp invalid_owner_error(:principal_id), do: :invalid_principal_id
+
   defp validate_token(token) when is_binary(token) do
     cond do
       not String.valid?(token) ->
@@ -417,6 +847,122 @@ defmodule Arbor.Shell.AppleContainerUnitJournalCore do
 
   defp validate_reserved_at_ms(ms) when is_integer(ms) and ms >= 0, do: {:ok, ms}
   defp validate_reserved_at_ms(_), do: {:error, :invalid_reserved_at_ms}
+
+  # --- Inventory filters ------------------------------------------------------
+
+  defp normalize_inventory_filters(filters) when is_map(filters) do
+    allowed =
+      MapSet.new([
+        :task_id,
+        :principal_id,
+        :max_items,
+        "task_id",
+        "principal_id",
+        "max_items"
+      ])
+
+    with :ok <- reject_unknown_filter_keys(filters, allowed),
+         :ok <- reject_duplicate_inventory_aliases(filters),
+         {:ok, task_id} <- optional_filter_id(filters, :task_id),
+         {:ok, principal_id} <- optional_filter_id(filters, :principal_id),
+         {:ok, max_items} <- optional_max_items(filters),
+         {:ok, mode} <- inventory_mode(task_id, principal_id) do
+      {:ok, mode, task_id, principal_id, max_items}
+    end
+  end
+
+  defp normalize_inventory_filters(filters) when is_list(filters) do
+    if Keyword.keyword?(filters) and unique_keyword_keys?(filters) do
+      normalize_inventory_filters(Map.new(filters))
+    else
+      {:error, :invalid_unit_inventory_filters}
+    end
+  end
+
+  defp normalize_inventory_filters(_), do: {:error, :invalid_unit_inventory_filters}
+
+  defp reject_unknown_filter_keys(map, allowed) do
+    if Enum.all?(Map.keys(map), &MapSet.member?(allowed, &1)) do
+      :ok
+    else
+      {:error, :invalid_unit_inventory_filters}
+    end
+  end
+
+  defp reject_duplicate_inventory_aliases(map) do
+    case reject_duplicate_key_aliases(
+           Map.keys(map),
+           [:task_id, :principal_id, :max_items],
+           :unit_inventory
+         ) do
+      :ok -> :ok
+      {:error, _reason} -> {:error, :invalid_unit_inventory_filters}
+    end
+  end
+
+  defp unique_keyword_keys?(filters) do
+    keys = Keyword.keys(filters)
+    length(keys) == MapSet.size(MapSet.new(keys))
+  end
+
+  defp optional_filter_id(map, key) do
+    case fetch_field(map, key) do
+      :error ->
+        {:ok, nil}
+
+      {:ok, nil} ->
+        {:ok, nil}
+
+      {:ok, value} when is_binary(value) ->
+        case validate_owner_id(value, key) do
+          {:ok, id} -> {:ok, id}
+          {:error, _} -> {:error, :invalid_unit_inventory_filters}
+        end
+
+      {:ok, _other} ->
+        {:error, :invalid_unit_inventory_filters}
+    end
+  end
+
+  defp optional_max_items(map) do
+    case fetch_field(map, :max_items) do
+      :error ->
+        {:ok, @default_inventory_max_items}
+
+      {:ok, n} when is_integer(n) and n > 0 and n <= @max_active ->
+        {:ok, n}
+
+      {:ok, _} ->
+        {:error, :invalid_unit_inventory_filters}
+    end
+  end
+
+  defp inventory_mode(nil, nil), do: {:ok, "global"}
+
+  defp inventory_mode(task_id, principal_id)
+       when is_binary(task_id) and is_binary(principal_id),
+       do: {:ok, "scoped"}
+
+  defp inventory_mode(_, _), do: {:error, :invalid_unit_inventory_filters}
+
+  defp inventory_match?(_record, "global", _task_id, _principal_id), do: true
+
+  defp inventory_match?(
+         %{
+           owner_status: :known,
+           task_id: task_id,
+           principal_id: principal_id
+         },
+         "scoped",
+         want_task,
+         want_principal
+       )
+       when is_binary(task_id) and is_binary(principal_id) and is_binary(want_task) and
+              is_binary(want_principal) do
+    task_id == want_task and principal_id == want_principal
+  end
+
+  defp inventory_match?(_record, "scoped", _task_id, _principal_id), do: false
 
   # --- Transition guards ------------------------------------------------------
 
@@ -480,7 +1026,7 @@ defmodule Arbor.Shell.AppleContainerUnitJournalCore do
 
   defp snapshot(state) do
     %{
-      "schema_version" => state.schema_version,
+      "schema_version" => @schema_version,
       "generation" => state.generation,
       "active" => Enum.map(sorted_records(state), &show_record/1)
     }
@@ -496,15 +1042,28 @@ defmodule Arbor.Shell.AppleContainerUnitJournalCore do
          unit_name: unit_name,
          execution_id: execution_id,
          token: token,
-         reserved_at_ms: reserved_at_ms
+         reserved_at_ms: reserved_at_ms,
+         owner_status: owner_status,
+         validation_resource_id: validation_resource_id,
+         workspace_id: workspace_id,
+         task_id: task_id,
+         principal_id: principal_id
        }) do
     %{
       "unit_name" => unit_name,
       "execution_id" => execution_id,
       "token" => token,
-      "reserved_at_ms" => reserved_at_ms
+      "reserved_at_ms" => reserved_at_ms,
+      "owner_status" => owner_status_string(owner_status),
+      "validation_resource_id" => validation_resource_id,
+      "workspace_id" => workspace_id,
+      "task_id" => task_id,
+      "principal_id" => principal_id
     }
   end
+
+  defp owner_status_string(:known), do: "known"
+  defp owner_status_string(:unknown), do: "unknown"
 
   # --- Closed-map discipline --------------------------------------------------
 

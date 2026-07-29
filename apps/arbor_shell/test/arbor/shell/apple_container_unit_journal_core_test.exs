@@ -52,12 +52,27 @@ defmodule Arbor.Shell.AppleContainerUnitJournalCoreTest do
     String.pad_leading(base, 32, "0")
   end
 
+  defp owner_ids(opts) do
+    %{
+      validation_resource_id: Keyword.get(opts, :validation_resource_id, "validation_res_a"),
+      workspace_id: Keyword.get(opts, :workspace_id, "workspace_a"),
+      task_id: Keyword.get(opts, :task_id, "task_a"),
+      principal_id: Keyword.get(opts, :principal_id, "principal_a")
+    }
+  end
+
   defp reserve_attrs(opts) do
+    owner = owner_ids(opts)
+
     %{
       unit_name: Keyword.fetch!(opts, :unit_name),
       execution_id: Keyword.fetch!(opts, :execution_id),
       token: Keyword.fetch!(opts, :token),
-      reserved_at_ms: Keyword.get(opts, :reserved_at_ms, 1_700_000_000_000)
+      reserved_at_ms: Keyword.get(opts, :reserved_at_ms, 1_700_000_000_000),
+      validation_resource_id: owner.validation_resource_id,
+      workspace_id: owner.workspace_id,
+      task_id: owner.task_id,
+      principal_id: owner.principal_id
     }
   end
 
@@ -72,11 +87,19 @@ defmodule Arbor.Shell.AppleContainerUnitJournalCoreTest do
   end
 
   defp snapshot_record(opts) do
+    owner = owner_ids(opts)
+
     %{
       "unit_name" => Keyword.fetch!(opts, :unit_name),
       "execution_id" => Keyword.fetch!(opts, :execution_id),
       "token" => Keyword.fetch!(opts, :token),
-      "reserved_at_ms" => Keyword.get(opts, :reserved_at_ms, 1_700_000_000_000)
+      "reserved_at_ms" => Keyword.get(opts, :reserved_at_ms, 1_700_000_000_000),
+      "owner_status" => Keyword.get(opts, :owner_status, "known"),
+      "validation_resource_id" =>
+        Keyword.get(opts, :validation_resource_id, owner.validation_resource_id),
+      "workspace_id" => Keyword.get(opts, :workspace_id, owner.workspace_id),
+      "task_id" => Keyword.get(opts, :task_id, owner.task_id),
+      "principal_id" => Keyword.get(opts, :principal_id, owner.principal_id)
     }
   end
 
@@ -85,14 +108,14 @@ defmodule Arbor.Shell.AppleContainerUnitJournalCoreTest do
   # ---------------------------------------------------------------------------
 
   describe "new/0 empty journal" do
-    test "constructs schema_version 1, generation 0, empty active" do
+    test "constructs schema_version 2, generation 0, empty active" do
       assert {:ok, state} = Core.new()
-      assert state.schema_version == 1
+      assert state.schema_version == 2
       assert state.generation == 0
       assert state.by_name == %{}
 
       shown = Core.show(state)
-      assert shown == %{"schema_version" => 1, "generation" => 0, "active" => []}
+      assert shown == %{"schema_version" => 2, "generation" => 0, "active" => []}
       assert Jason.encode!(shown)
     end
   end
@@ -129,20 +152,25 @@ defmodule Arbor.Shell.AppleContainerUnitJournalCoreTest do
     end
 
     test "empty snapshot round trip" do
-      assert {:ok, state} = Core.new(%{"schema_version" => 1, "generation" => 0, "active" => []})
-      assert Core.show(state) == %{"schema_version" => 1, "generation" => 0, "active" => []}
+      assert {:ok, state} = Core.new(%{"schema_version" => 2, "generation" => 0, "active" => []})
+      assert Core.show(state) == %{"schema_version" => 2, "generation" => 0, "active" => []}
     end
 
     test "atom-keyed snapshot round trip" do
       snapshot = %{
-        schema_version: 1,
+        schema_version: 2,
         generation: 3,
         active: [
           %{
             unit_name: @unit_a,
             execution_id: @exec_a,
             token: @token_a,
-            reserved_at_ms: 42
+            reserved_at_ms: 42,
+            owner_status: :known,
+            validation_resource_id: "validation_res_a",
+            workspace_id: "workspace_a",
+            task_id: "task_a",
+            principal_id: "principal_a"
           }
         ]
       }
@@ -151,13 +179,43 @@ defmodule Arbor.Shell.AppleContainerUnitJournalCoreTest do
       assert state.generation == 3
 
       assert Core.show(state)["active"] == [
-               %{
-                 "unit_name" => @unit_a,
-                 "execution_id" => @exec_a,
-                 "token" => @token_a,
-                 "reserved_at_ms" => 42
-               }
+               snapshot_record(
+                 unit_name: @unit_a,
+                 execution_id: @exec_a,
+                 token: @token_a,
+                 reserved_at_ms: 42
+               )
              ]
+    end
+
+    test "v1 snapshot migrates to owner-unknown v2 without inventing provenance" do
+      v1 = %{
+        "schema_version" => 1,
+        "generation" => 1,
+        "active" => [
+          %{
+            "unit_name" => @unit_a,
+            "execution_id" => @exec_a,
+            "token" => @token_a,
+            "reserved_at_ms" => 42
+          }
+        ]
+      }
+
+      assert {:ok, state} = Core.new(v1)
+      assert state.schema_version == 2
+      record = state.by_name[@unit_a]
+      assert record.owner_status == :unknown
+      assert record.validation_resource_id == nil
+      assert record.workspace_id == nil
+      assert record.task_id == nil
+      assert record.principal_id == nil
+      assert record.token == @token_a
+
+      shown = Core.show(state)
+      assert shown["schema_version"] == 2
+      assert hd(shown["active"])["owner_status"] == "unknown"
+      assert hd(shown["active"])["task_id"] == nil
     end
   end
 
@@ -173,19 +231,23 @@ defmodule Arbor.Shell.AppleContainerUnitJournalCoreTest do
         "unit_name" => @unit_a,
         "execution_id" => @exec_a,
         "token" => @token_a,
-        "reserved_at_ms" => 99
+        "reserved_at_ms" => 99,
+        "validation_resource_id" => "validation_res_a",
+        "workspace_id" => "workspace_a",
+        "task_id" => "task_a",
+        "principal_id" => "principal_a"
       }
 
       assert {:ok, new_state, [{:persist_snapshot, snap}]} = Core.reserve(state, attrs)
       assert new_state.generation == 1
 
       assert snap["active"] == [
-               %{
-                 "unit_name" => @unit_a,
-                 "execution_id" => @exec_a,
-                 "token" => @token_a,
-                 "reserved_at_ms" => 99
-               }
+               snapshot_record(
+                 unit_name: @unit_a,
+                 execution_id: @exec_a,
+                 token: @token_a,
+                 reserved_at_ms: 99
+               )
              ]
     end
 
@@ -554,7 +616,7 @@ defmodule Arbor.Shell.AppleContainerUnitJournalCoreTest do
 
       assert {:ok, state} =
                Core.new(%{
-                 "schema_version" => 1,
+                 "schema_version" => 2,
                  "generation" => max,
                  "active" => [
                    snapshot_record(
@@ -614,7 +676,7 @@ defmodule Arbor.Shell.AppleContainerUnitJournalCoreTest do
 
       assert {:ok, full} =
                Core.new(%{
-                 "schema_version" => 1,
+                 "schema_version" => 2,
                  "generation" => max,
                  "active" => active
                })
@@ -650,7 +712,7 @@ defmodule Arbor.Shell.AppleContainerUnitJournalCoreTest do
         end
 
       assert {:error, :journal_at_capacity} =
-               Core.new(%{"schema_version" => 1, "generation" => 0, "active" => active})
+               Core.new(%{"schema_version" => 2, "generation" => 0, "active" => active})
     end
   end
 
@@ -939,8 +1001,8 @@ defmodule Arbor.Shell.AppleContainerUnitJournalCoreTest do
     end
 
     test "rejects unsupported schema versions" do
-      assert {:error, {:unsupported_schema_version, 2}} =
-               Core.new(%{schema_version: 2, generation: 0, active: []})
+      assert {:error, {:unsupported_schema_version, 99}} =
+               Core.new(%{schema_version: 99, generation: 0, active: []})
 
       assert {:error, {:unsupported_schema_version, 0}} =
                Core.new(%{schema_version: 0, generation: 0, active: []})
@@ -969,7 +1031,7 @@ defmodule Arbor.Shell.AppleContainerUnitJournalCoreTest do
     test "rejects a generation older than the active record set" do
       assert {:error, :invalid_generation} =
                Core.new(%{
-                 schema_version: 1,
+                 schema_version: 2,
                  generation: 0,
                  active: [
                    snapshot_record(
@@ -1082,7 +1144,17 @@ defmodule Arbor.Shell.AppleContainerUnitJournalCoreTest do
 
       assert Enum.all?(entries, fn e ->
                Map.keys(e) |> Enum.sort() ==
-                 [:execution_id, :reserved_at_ms, :token, :unit_name]
+                 [
+                   :execution_id,
+                   :owner_status,
+                   :principal_id,
+                   :reserved_at_ms,
+                   :task_id,
+                   :token,
+                   :unit_name,
+                   :validation_resource_id,
+                   :workspace_id
+                 ]
              end)
 
       assert Core.show(state) == original
@@ -1167,12 +1239,275 @@ defmodule Arbor.Shell.AppleContainerUnitJournalCoreTest do
         ~r/:ets\./,
         ~r/Logger\./,
         ~r/File\./,
-        ~r/:crypto\.(strong_rand_bytes|rand_seed)/
+        ~r/:crypto\.(strong_rand_bytes|rand_seed|hash)/
       ]
 
       for re <- forbidden do
         refute Regex.match?(re, src), "impure pattern #{inspect(re)} found in journal core"
       end
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Schema v2 owner / inventory / identity (slice 1)
+  # ---------------------------------------------------------------------------
+
+  describe "strict owner reserve" do
+    test "rejects incomplete owner before creating a unit row" do
+      state = empty!()
+      original = Core.show(state)
+
+      base =
+        reserve_attrs(unit_name: @unit_a, execution_id: @exec_a, token: @token_a)
+        |> Map.delete(:task_id)
+
+      assert {:error, :missing_task_id} = Core.reserve(state, base)
+      assert Core.show(state) == original
+
+      assert {:error, :incomplete_unit_owner} =
+               Core.reserve(state, Map.put(base, :task_id, nil))
+
+      assert Core.show(state) == original
+    end
+
+    test "known reserve propagates complete owner binding" do
+      state = empty!()
+
+      {state, [{:persist_snapshot, snap}]} =
+        reserve!(state,
+          unit_name: @unit_a,
+          execution_id: @exec_a,
+          token: @token_a,
+          task_id: "task-known",
+          principal_id: "principal-known"
+        )
+
+      record = hd(snap["active"])
+      assert record["owner_status"] == "known"
+      assert record["task_id"] == "task-known"
+      assert record["principal_id"] == "principal-known"
+      assert record["workspace_id"] == "workspace_a"
+      assert record["validation_resource_id"] == "validation_res_a"
+      assert state.by_name[@unit_a].owner_status == :known
+    end
+
+    test "known owner normalization is closed and alias-safe" do
+      owner = owner_ids([])
+
+      assert {:ok, ^owner} = Core.normalize_known_owner(owner)
+
+      assert {:error, :invalid_apple_container_unit_owner} =
+               owner
+               |> Map.put(:unexpected, "authority")
+               |> Core.normalize_known_owner()
+
+      assert {:error, :invalid_apple_container_unit_owner} =
+               owner
+               |> Map.put("task_id", "conflicting-task")
+               |> Core.normalize_known_owner()
+    end
+
+    test "normalize_existing_record accepts unknown; reserve rejects unknown status" do
+      unknown = %{
+        unit_name: @unit_a,
+        execution_id: @exec_a,
+        token: @token_a,
+        reserved_at_ms: 1,
+        owner_status: :unknown,
+        validation_resource_id: nil,
+        workspace_id: nil,
+        task_id: nil,
+        principal_id: nil
+      }
+
+      assert {:ok, normalized} = Core.normalize_existing_record(unknown)
+      assert normalized.owner_status == :unknown
+
+      assert {:error, :apple_container_unit_owner_required} =
+               Core.normalize_known_record(unknown)
+
+      # Strict reserve attrs never include owner_status; missing owner IDs fail.
+      assert {:error, :missing_validation_resource_id} =
+               Core.reserve(empty!(), %{
+                 unit_name: @unit_a,
+                 execution_id: @exec_a,
+                 token: @token_a,
+                 reserved_at_ms: 1
+               })
+    end
+
+    test "security regression: exact record identity includes owner lineage" do
+      base =
+        reserve_attrs(unit_name: @unit_a, execution_id: @exec_a, token: @token_a)
+
+      {:ok, state, _effects} = Core.reserve(empty!(), base)
+      record = state.by_name[@unit_a]
+
+      assert Core.same_record?(record, record)
+      refute Core.same_record?(record, %{record | task_id: "task-other"})
+    end
+  end
+
+  describe "resource identity" do
+    test "acu_v1 resource_id is reversible to arbor-v1 unit name" do
+      assert {:ok, rid} = Core.resource_id_from_unit_name(@unit_a)
+      assert rid == "acu_v1_" <> @hex32_a
+      assert {:ok, @unit_a} = Core.unit_name_from_resource_id(rid)
+
+      assert {:error, :invalid_resource_id} =
+               Core.unit_name_from_resource_id("arbor://x/" <> @hex32_a)
+
+      assert {:error, :invalid_unit_name} = Core.resource_id_from_unit_name("not-a-unit")
+    end
+  end
+
+  describe "project_inventory" do
+    test "global includes unknown; scoped never infers unknown; truncation counts" do
+      v1 = %{
+        "schema_version" => 1,
+        "generation" => 1,
+        "active" => [
+          %{
+            "unit_name" => @unit_b,
+            "execution_id" => @exec_b,
+            "token" => @token_b,
+            "reserved_at_ms" => 1
+          }
+        ]
+      }
+
+      assert {:ok, state} = Core.new(v1)
+
+      {state, _} =
+        reserve!(state,
+          unit_name: @unit_a,
+          execution_id: @exec_a,
+          token: @token_a,
+          task_id: "task-scope",
+          principal_id: "principal-scope"
+        )
+
+      {state, _} =
+        reserve!(state,
+          unit_name: @unit_c,
+          execution_id: @exec_c,
+          token: @token_c,
+          task_id: "task-other",
+          principal_id: "principal-other"
+        )
+
+      assert {:ok, global} = Core.project_inventory(state, %{})
+      assert global.filter == "global"
+      assert global.matched_count == 3
+      assert Enum.any?(global.records, &(&1.owner_status == :unknown))
+
+      assert {:ok, scoped} =
+               Core.project_inventory(state, %{
+                 task_id: "task-scope",
+                 principal_id: "principal-scope"
+               })
+
+      assert scoped.filter == "scoped"
+      assert scoped.matched_count == 1
+      assert hd(scoped.records).unit_name == @unit_a
+      refute Enum.any?(scoped.records, &(&1.owner_status == :unknown))
+
+      assert {:ok, page} = Core.project_inventory(state, %{max_items: 1})
+      assert page.truncated == true
+      assert page.matched_count == 3
+      assert page.returned_count == 1
+      assert page.max_items == 1
+
+      assert {:error, :invalid_unit_inventory_filters} =
+               Core.project_inventory(state, %{task_id: "only-one"})
+
+      assert {:error, :invalid_unit_inventory_filters} =
+               Core.project_inventory(state, %{
+                 "task_id" => "task-other",
+                 task_id: "task-scope",
+                 principal_id: "principal-scope"
+               })
+
+      assert {:error, :invalid_unit_inventory_filters} =
+               Core.project_inventory(state,
+                 task_id: "task-scope",
+                 task_id: "task-other",
+                 principal_id: "principal-scope"
+               )
+    end
+  end
+
+  describe "snapshot size ceiling proof" do
+    test "max-filled v1 migration and v2 known snapshots encode under 2 MiB" do
+      ceiling = 2_097_152
+      max = Core.limits().max_active
+
+      v1_active =
+        for i <- 0..(max - 1) do
+          hex = hex32_from_n(i)
+          tok = token_from_n(i)
+          base = Integer.to_string(i, 16) |> String.downcase() |> String.pad_leading(8, "0")
+
+          %{
+            "unit_name" => unit_name(hex),
+            "execution_id" => base <> String.duplicate("e", 248),
+            "token" => tok,
+            "reserved_at_ms" => i
+          }
+        end
+
+      assert {:ok, migrated} =
+               Core.new(%{"schema_version" => 1, "generation" => max, "active" => v1_active})
+
+      v1_json = Jason.encode!(Core.show(migrated)) <> "\n"
+      assert byte_size(v1_json) <= ceiling
+
+      owner_pad = String.duplicate("o", 128)
+
+      v2_active =
+        for i <- 0..(max - 1) do
+          hex = hex32_from_n(i)
+          tok = token_from_n(i)
+          base = Integer.to_string(i, 16) |> String.downcase() |> String.pad_leading(8, "0")
+
+          %{
+            "unit_name" => unit_name(hex),
+            "execution_id" => base <> String.duplicate("e", 248),
+            "token" => tok,
+            "reserved_at_ms" => i,
+            "owner_status" => "known",
+            "validation_resource_id" => owner_pad,
+            "workspace_id" => owner_pad,
+            "task_id" => owner_pad,
+            "principal_id" => owner_pad
+          }
+        end
+
+      assert {:ok, v2_state} =
+               Core.new(%{"schema_version" => 2, "generation" => max, "active" => v2_active})
+
+      v2_json = Jason.encode!(Core.show(v2_state)) <> "\n"
+      assert byte_size(v2_json) <= ceiling
+      assert byte_size(v2_json) > 1_048_576
+
+      overflow_row = %{
+        "unit_name" => unit_name(hex32_from_n(max)),
+        "execution_id" => "overflow-exec",
+        "token" => token_from_n(max),
+        "reserved_at_ms" => 0,
+        "owner_status" => "known",
+        "validation_resource_id" => owner_pad,
+        "workspace_id" => owner_pad,
+        "task_id" => owner_pad,
+        "principal_id" => owner_pad
+      }
+
+      assert {:error, :journal_at_capacity} =
+               Core.new(%{
+                 "schema_version" => 2,
+                 "generation" => max + 1,
+                 "active" => v2_active ++ [overflow_row]
+               })
     end
   end
 end

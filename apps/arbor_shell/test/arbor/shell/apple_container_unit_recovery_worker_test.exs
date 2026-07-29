@@ -212,7 +212,12 @@ defmodule Arbor.Shell.AppleContainerUnitRecoveryWorkerTest do
       "unit_name" => @unit_name,
       "execution_id" => @execution_id,
       "token" => @token,
-      "reserved_at_ms" => @reserved_at_ms
+      "reserved_at_ms" => @reserved_at_ms,
+      "owner_status" => "known",
+      "validation_resource_id" => "validation_res",
+      "workspace_id" => "workspace",
+      "task_id" => "task",
+      "principal_id" => "principal"
     }
 
     {:ok, executable: executable, entry: entry}

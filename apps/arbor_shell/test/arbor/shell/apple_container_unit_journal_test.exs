@@ -34,6 +34,20 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
   @exec_b "exec-beta-2"
   @token_b String.duplicate("2", 64)
 
+  @owner_a %{
+    validation_resource_id: "validation_res_a",
+    workspace_id: "workspace_a",
+    task_id: "task_a",
+    principal_id: "principal_a"
+  }
+
+  @owner_b %{
+    validation_resource_id: "validation_res_b",
+    workspace_id: "workspace_b",
+    task_id: "task_b",
+    principal_id: "principal_b"
+  }
+
   setup do
     previous = Application.get_env(@app, @config_key)
     previous_cleanup_hook = Application.get_env(@app, @test_only_temp_cleanup_replace_key)
@@ -68,13 +82,27 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
       assert status["active_count"] == nil
 
       assert {:error, :apple_container_unit_journal_disabled} =
-               Journal.reserve(@unit_a, @exec_a, name)
+               Journal.reserve(@unit_a, @exec_a, @owner_a, name)
 
       assert {:error, :apple_container_unit_journal_disabled} =
                Journal.complete(@unit_a, @token_b, name)
 
       assert {:error, :apple_container_unit_journal_disabled} =
                Journal.recovery_entries(name)
+
+      assert {:ok, scoped} =
+               Journal.unit_inventory(
+                 [task_id: "task-disabled", principal_id: "principal-disabled", max_items: 7],
+                 name
+               )
+
+      assert scoped["status"] == "disabled"
+      assert scoped["filter"] == "scoped"
+      assert scoped["max_items"] == 7
+      assert scoped["items"] == []
+
+      assert {:error, :invalid_unit_inventory_filters} =
+               Journal.unit_inventory([task_id: "one-sided"], name)
 
       GenServer.stop(pid)
     end
@@ -132,13 +160,13 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
 
       # Interpose by reading disk immediately after reserve returns: token reply
       # must only happen after the durable snapshot exists.
-      assert {:ok, token} = Journal.reserve(@unit_a, @exec_a, name)
+      assert {:ok, token} = Journal.reserve(@unit_a, @exec_a, @owner_a, name)
       assert Regex.match?(~r/\A[0-9a-f]{64}\z/, token)
 
       assert {:ok, bytes} = File.read(path)
       assert String.ends_with?(bytes, "\n")
       assert {:ok, snapshot} = Jason.decode(String.trim_trailing(bytes, "\n"))
-      assert snapshot["schema_version"] == 1
+      assert snapshot["schema_version"] == 2
       assert snapshot["generation"] == 1
       assert length(snapshot["active"]) == 1
       assert hd(snapshot["active"])["unit_name"] == @unit_a
@@ -158,7 +186,7 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
     test "restart round-trips reserved intents from disk", %{path: path} do
       name1 = unique_name()
       assert {:ok, pid1} = start_journal!(name1, path)
-      assert {:ok, token} = Journal.reserve(@unit_a, @exec_a, name1)
+      assert {:ok, token} = Journal.reserve(@unit_a, @exec_a, @owner_a, name1)
 
       assert {:ok, [entry]} = Journal.recovery_entries(name1)
       assert entry.unit_name == @unit_a
@@ -185,7 +213,7 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
     } do
       name = unique_name()
       assert {:ok, pid} = start_journal!(name, path)
-      assert {:ok, token} = Journal.reserve(@unit_a, @exec_a, name)
+      assert {:ok, token} = Journal.reserve(@unit_a, @exec_a, @owner_a, name)
       before = File.read!(path)
 
       assert {:error, :token_mismatch} = Journal.complete(@unit_a, @token_b, name)
@@ -210,11 +238,11 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
     test "malformed API inputs fail closed without mutating disk", %{path: path} do
       name = unique_name()
       assert {:ok, pid} = start_journal!(name, path)
-      assert {:ok, token} = Journal.reserve(@unit_a, @exec_a, name)
+      assert {:ok, token} = Journal.reserve(@unit_a, @exec_a, @owner_a, name)
       before = File.read!(path)
 
-      assert {:error, :invalid_unit_name} = Journal.reserve("not-a-unit", @exec_b, name)
-      assert {:error, :invalid_execution_id} = Journal.reserve(@unit_b, "bad id", name)
+      assert {:error, :invalid_unit_name} = Journal.reserve("not-a-unit", @exec_b, @owner_b, name)
+      assert {:error, :invalid_execution_id} = Journal.reserve(@unit_b, "bad id", @owner_b, name)
       assert {:error, :invalid_unit_name} = Journal.complete("nope", token, name)
       assert {:error, :invalid_token} = Journal.complete(@unit_a, "short", name)
       assert File.read!(path) == before
@@ -237,13 +265,18 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
       name1 = unique_name()
       assert {:ok, pid1} = start_journal!(name1, path)
 
-      assert {:ok, record} = Journal.reserve_record(@unit_a, @exec_a, name1)
+      assert {:ok, record} = Journal.reserve_record(@unit_a, @exec_a, @owner_a, name1)
       assert is_map(record)
       assert record.unit_name == @unit_a
       assert record.execution_id == @exec_a
       assert Regex.match?(~r/\A[0-9a-f]{64}\z/, record.token)
       assert is_integer(record.reserved_at_ms) and record.reserved_at_ms >= 0
-      assert map_size(record) == 4
+      assert record.owner_status == :known
+      assert record.validation_resource_id == @owner_a.validation_resource_id
+      assert record.workspace_id == @owner_a.workspace_id
+      assert record.task_id == @owner_a.task_id
+      assert record.principal_id == @owner_a.principal_id
+      assert map_size(record) == 9
 
       assert {:ok, [entry]} = Journal.recovery_entries(name1)
       assert entry == record
@@ -257,6 +290,11 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
       assert disk["execution_id"] == record.execution_id
       assert disk["token"] == record.token
       assert disk["reserved_at_ms"] == record.reserved_at_ms
+      assert disk["owner_status"] == "known"
+      assert disk["validation_resource_id"] == record.validation_resource_id
+      assert disk["workspace_id"] == record.workspace_id
+      assert disk["task_id"] == record.task_id
+      assert disk["principal_id"] == record.principal_id
 
       GenServer.stop(pid1)
 
@@ -276,7 +314,7 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
       name = unique_name()
       assert {:ok, pid} = start_journal!(name, path)
 
-      assert {:ok, token} = Journal.reserve(@unit_a, @exec_a, name)
+      assert {:ok, token} = Journal.reserve(@unit_a, @exec_a, @owner_a, name)
       assert is_binary(token)
       assert Regex.match?(~r/\A[0-9a-f]{64}\z/, token)
       refute is_map(token)
@@ -287,7 +325,7 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
       assert entry.execution_id == @exec_a
 
       # reserve_record still works for a second intent on the same owner.
-      assert {:ok, record} = Journal.reserve_record(@unit_b, @exec_b, name)
+      assert {:ok, record} = Journal.reserve_record(@unit_b, @exec_b, @owner_b, name)
       assert record.unit_name == @unit_b
       assert record.execution_id == @exec_b
       assert record.token != token
@@ -303,14 +341,14 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
     test "persistence failure never returns a record", %{root: root, path: path} do
       name = unique_name()
       assert {:ok, pid} = start_journal!(name, path)
-      assert {:ok, first} = Journal.reserve_record(@unit_a, @exec_a, name)
+      assert {:ok, first} = Journal.reserve_record(@unit_a, @exec_a, @owner_a, name)
       before = File.read!(path)
 
       # Widen parent permissions so the next atomic publish fails closed.
       assert :ok = File.chmod(root, 0o750)
 
       assert {:error, {:apple_container_unit_journal_persist_failed, :journal_parent_not_private}} =
-               Journal.reserve_record(@unit_b, @exec_b, name)
+               Journal.reserve_record(@unit_b, @exec_b, @owner_b, name)
 
       assert File.read!(path) == before
       status = Journal.status(name)
@@ -320,10 +358,10 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
       refute String.contains?(inspect(status), first.token)
 
       assert {:error, :apple_container_unit_journal_poisoned} =
-               Journal.reserve_record(@unit_b, @exec_b, name)
+               Journal.reserve_record(@unit_b, @exec_b, @owner_b, name)
 
       assert {:error, :apple_container_unit_journal_poisoned} =
-               Journal.reserve(@unit_b, @exec_b, name)
+               Journal.reserve(@unit_b, @exec_b, @owner_b, name)
 
       assert {:ok, [entry]} = Journal.recovery_entries(name)
       assert entry == first
@@ -337,23 +375,29 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
       assert {:ok, disabled_pid} = Journal.start_link(name: disabled)
 
       assert {:error, :apple_container_unit_journal_disabled} =
-               Journal.reserve(@unit_a, @exec_a, disabled)
+               Journal.reserve(@unit_a, @exec_a, @owner_a, disabled)
 
       assert {:error, :apple_container_unit_journal_disabled} =
-               Journal.reserve_record(@unit_a, @exec_a, disabled)
+               Journal.reserve_record(@unit_a, @exec_a, @owner_a, disabled)
 
       GenServer.stop(disabled_pid)
 
       # Active owner: core rejections leave disk unchanged for both modes.
       name = unique_name()
       assert {:ok, pid} = start_journal!(name, path)
-      assert {:ok, token} = Journal.reserve(@unit_a, @exec_a, name)
+      assert {:ok, token} = Journal.reserve(@unit_a, @exec_a, @owner_a, name)
       before = File.read!(path)
 
-      assert {:error, :invalid_unit_name} = Journal.reserve("not-a-unit", @exec_b, name)
-      assert {:error, :invalid_unit_name} = Journal.reserve_record("not-a-unit", @exec_b, name)
-      assert {:error, :invalid_execution_id} = Journal.reserve(@unit_b, "bad id", name)
-      assert {:error, :invalid_execution_id} = Journal.reserve_record(@unit_b, "bad id", name)
+      assert {:error, :invalid_unit_name} = Journal.reserve("not-a-unit", @exec_b, @owner_b, name)
+
+      assert {:error, :invalid_unit_name} =
+               Journal.reserve_record("not-a-unit", @exec_b, @owner_b, name)
+
+      assert {:error, :invalid_execution_id} = Journal.reserve(@unit_b, "bad id", @owner_b, name)
+
+      assert {:error, :invalid_execution_id} =
+               Journal.reserve_record(@unit_b, "bad id", @owner_b, name)
+
       assert File.read!(path) == before
 
       assert {:ok, [entry]} = Journal.recovery_entries(name)
@@ -471,8 +515,8 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
     @tag :requires_shlock
     @tag skip: @shlock_skip
     test "security regression: oversize journal fails startup without truncation", %{path: path} do
-      # Just over 1 MiB of valid UTF-8 JSON-ish content.
-      oversize = String.duplicate("x", 1_048_577)
+      # Just over the 2 MiB schema-v2 snapshot ceiling.
+      oversize = String.duplicate("x", 2_097_153)
       write_private_file!(path, oversize)
       before_size = byte_size(File.read!(path))
       name = unique_name()
@@ -500,14 +544,14 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
          } do
       name = unique_name()
       assert {:ok, pid} = start_journal!(name, path)
-      assert {:ok, token} = Journal.reserve(@unit_a, @exec_a, name)
+      assert {:ok, token} = Journal.reserve(@unit_a, @exec_a, @owner_a, name)
       before = File.read!(path)
 
       # Widen parent permissions so the next atomic publish fails closed.
       assert :ok = File.chmod(root, 0o750)
 
       assert {:error, {:apple_container_unit_journal_persist_failed, :journal_parent_not_private}} =
-               Journal.reserve(@unit_b, @exec_b, name)
+               Journal.reserve(@unit_b, @exec_b, @owner_b, name)
 
       assert File.read!(path) == before
 
@@ -516,7 +560,7 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
       assert status["active_count"] == 1
 
       assert {:error, :apple_container_unit_journal_poisoned} =
-               Journal.reserve(@unit_b, @exec_b, name)
+               Journal.reserve(@unit_b, @exec_b, @owner_b, name)
 
       # Recovery still lists retained evidence.
       assert {:ok, [entry]} = Journal.recovery_entries(name)
@@ -543,7 +587,7 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
     } do
       name = unique_name()
       assert {:ok, pid} = start_journal!(name, path)
-      assert {:ok, token} = Journal.reserve(@unit_a, @exec_a, name)
+      assert {:ok, token} = Journal.reserve(@unit_a, @exec_a, @owner_a, name)
       before = File.read!(path)
 
       # Replace the private parent directory at the same path with a new inode,
@@ -561,7 +605,7 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
       end
 
       assert {:error, {:apple_container_unit_journal_persist_failed, :journal_parent_replaced}} =
-               Journal.reserve(@unit_b, @exec_b, name)
+               Journal.reserve(@unit_b, @exec_b, @owner_b, name)
 
       assert File.read!(path) == before
       status = Journal.status(name)
@@ -570,7 +614,7 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
       refute String.contains?(inspect(status), root)
 
       assert {:error, :apple_container_unit_journal_poisoned} =
-               Journal.reserve(@unit_b, @exec_b, name)
+               Journal.reserve(@unit_b, @exec_b, @owner_b, name)
 
       assert {:ok, [entry]} = Journal.recovery_entries(name)
       assert entry.token == token
@@ -587,7 +631,7 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
     } do
       name = unique_name()
       assert {:ok, pid} = start_journal!(name, path)
-      assert {:ok, token} = Journal.reserve(@unit_a, @exec_a, name)
+      assert {:ok, token} = Journal.reserve(@unit_a, @exec_a, @owner_a, name)
       before = File.read!(path)
       before_stat = File.lstat!(path)
 
@@ -598,7 +642,7 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
       assert after_stat.inode != before_stat.inode
 
       assert {:error, {:apple_container_unit_journal_persist_failed, :journal_target_replaced}} =
-               Journal.reserve(@unit_b, @exec_b, name)
+               Journal.reserve(@unit_b, @exec_b, @owner_b, name)
 
       assert File.read!(path) == before
       status = Journal.status(name)
@@ -620,14 +664,14 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
          } do
       name = unique_name()
       assert {:ok, pid} = start_journal!(name, path)
-      assert {:ok, token} = Journal.reserve(@unit_a, @exec_a, name)
+      assert {:ok, token} = Journal.reserve(@unit_a, @exec_a, @owner_a, name)
       assert File.exists?(path)
 
       assert :ok = File.rm(path)
       refute File.exists?(path)
 
       assert {:error, {:apple_container_unit_journal_persist_failed, :journal_target_missing}} =
-               Journal.reserve(@unit_b, @exec_b, name)
+               Journal.reserve(@unit_b, @exec_b, @owner_b, name)
 
       refute File.exists?(path)
       status = Journal.status(name)
@@ -650,7 +694,7 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
       assert {:ok, pid1} = start_journal!(name1, path)
 
       # First publish binds a concrete target identity + content digest.
-      assert {:ok, token} = Journal.reserve(@unit_a, @exec_a, name1)
+      assert {:ok, token} = Journal.reserve(@unit_a, @exec_a, @owner_a, name1)
       state1 = :sys.get_state(pid1)
       assert is_map(state1.binding)
       assert is_map(state1.binding.target)
@@ -727,7 +771,7 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
     } do
       name = unique_name()
       assert {:ok, pid} = start_journal!(name, path)
-      assert {:ok, token} = Journal.reserve(@unit_a, @exec_a, name)
+      assert {:ok, token} = Journal.reserve(@unit_a, @exec_a, @owner_a, name)
       before = File.read!(path)
       before_stat = File.lstat!(path)
       before_digest = sha256_hex(before)
@@ -754,7 +798,7 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
 
       assert {:error,
               {:apple_container_unit_journal_persist_failed, :journal_target_digest_mismatch}} =
-               Journal.reserve(@unit_b, @exec_b, name)
+               Journal.reserve(@unit_b, @exec_b, @owner_b, name)
 
       # Prior snapshot content remains the mutated bytes we wrote; journal did
       # not publish a new generation over the undetected mutation.
@@ -767,7 +811,7 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
       refute String.contains?(inspect(status), token)
 
       assert {:error, :apple_container_unit_journal_poisoned} =
-               Journal.reserve(@unit_b, @exec_b, name)
+               Journal.reserve(@unit_b, @exec_b, @owner_b, name)
 
       assert {:ok, [entry]} = Journal.recovery_entries(name)
       assert entry.token == token
@@ -781,13 +825,13 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
       name = unique_name()
       assert {:ok, pid} = start_journal!(name, path)
 
-      assert {:ok, token1} = Journal.reserve(@unit_a, @exec_a, name)
+      assert {:ok, token1} = Journal.reserve(@unit_a, @exec_a, @owner_a, name)
       state1 = :sys.get_state(pid)
       disk1 = bound_target_from_path!(path)
       assert state1.binding.target == disk1
       assert state1.binding.target.digest == sha256_hex(File.read!(path))
 
-      assert {:ok, _token2} = Journal.reserve(@unit_b, @exec_b, name)
+      assert {:ok, _token2} = Journal.reserve(@unit_b, @exec_b, @owner_b, name)
       state2 = :sys.get_state(pid)
       disk2 = bound_target_from_path!(path)
       assert state2.binding.target == disk2
@@ -809,7 +853,7 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
     } do
       name = unique_name()
       assert {:ok, pid} = start_journal!(name, path)
-      assert {:ok, token} = Journal.reserve(@unit_a, @exec_a, name)
+      assert {:ok, token} = Journal.reserve(@unit_a, @exec_a, @owner_a, name)
 
       # Successful publish must leave only the journal (+ lock), never a temp.
       entries = File.ls!(root)
@@ -844,7 +888,7 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
     } do
       name = unique_name()
       assert {:ok, pid} = start_journal!(name, path)
-      assert {:ok, token} = Journal.reserve(@unit_a, @exec_a, name)
+      assert {:ok, token} = Journal.reserve(@unit_a, @exec_a, @owner_a, name)
       before = File.read!(path)
 
       # Pre-seed an unrelated temp-shaped private file the journal never owned.
@@ -866,7 +910,7 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
       end)
 
       assert {:error, {:apple_container_unit_journal_persist_failed, reason}} =
-               Journal.reserve(@unit_b, @exec_b, name)
+               Journal.reserve(@unit_b, @exec_b, @owner_b, name)
 
       assert match?({:journal_persist_failed, _}, reason) or
                reason in [
@@ -912,7 +956,7 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
     } do
       name = unique_name()
       assert {:ok, pid} = start_journal!(name, path)
-      assert {:ok, token} = Journal.reserve(@unit_a, @exec_a, name)
+      assert {:ok, token} = Journal.reserve(@unit_a, @exec_a, @owner_a, name)
       before = File.read!(path)
       test_pid = self()
 
@@ -944,7 +988,7 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
       end)
 
       assert {:error, {:apple_container_unit_journal_persist_failed, reason}} =
-               Journal.reserve(@unit_b, @exec_b, name)
+               Journal.reserve(@unit_b, @exec_b, @owner_b, name)
 
       assert match?({:journal_persist_failed, _}, reason) or
                reason in [
@@ -995,12 +1039,12 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
     } do
       name = unique_name()
       assert {:ok, pid} = start_journal!(name, path)
-      assert {:ok, token} = Journal.reserve(@unit_a, @exec_a, name)
+      assert {:ok, token} = Journal.reserve(@unit_a, @exec_a, @owner_a, name)
       digest = :sys.get_state(pid).binding.target.digest
 
       assert :ok = File.chmod(root, 0o750)
 
-      assert {:error, err} = Journal.reserve(@unit_b, @exec_b, name)
+      assert {:error, err} = Journal.reserve(@unit_b, @exec_b, @owner_b, name)
       err_text = inspect(err)
       status = Journal.status(name)
       status_text = inspect(status)
@@ -1081,7 +1125,7 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
 
       name1 = unique_name()
       assert {:ok, pid1} = start_journal!(name1, path)
-      assert {:ok, token} = Journal.reserve(@unit_a, @exec_a, name1)
+      assert {:ok, token} = Journal.reserve(@unit_a, @exec_a, @owner_a, name1)
       GenServer.stop(pid1)
 
       name2 = unique_name()
@@ -1135,11 +1179,141 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
       assert status["generation"] == max
 
       assert {:error, :journal_at_capacity} =
-               Journal.reserve(unit_name_from_n(max), "exec-overflow", name)
+               Journal.reserve(unit_name_from_n(max), "exec-overflow", @owner_a, name)
 
       assert File.read!(path) == before
       assert {:ok, entries} = Journal.recovery_entries(name)
       assert length(entries) == max
+
+      GenServer.stop(pid)
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Schema v2 inventory / owner / migration (slice 1)
+  # ---------------------------------------------------------------------------
+
+  describe "owner binding and inventory" do
+    @describetag :requires_shlock
+    @describetag skip: @shlock_skip
+
+    test "incomplete owner is rejected before unit creation", %{path: path} do
+      name = unique_name()
+      assert {:ok, pid} = start_journal!(name, path)
+
+      assert {:error, :incomplete_unit_owner} =
+               Journal.reserve(@unit_a, @exec_a, Map.delete(@owner_a, :task_id), name)
+
+      assert {:ok, []} = Journal.recovery_entries(name)
+      GenServer.stop(pid)
+    end
+
+    test "security regression: poisoned inventory preserves exact requested scope", %{
+      root: root,
+      path: path
+    } do
+      name = unique_name()
+      assert {:ok, pid} = start_journal!(name, path)
+      assert {:ok, _token} = Journal.reserve(@unit_a, @exec_a, @owner_a, name)
+
+      assert :ok = File.chmod(root, 0o750)
+
+      assert {:error, {:apple_container_unit_journal_persist_failed, _reason}} =
+               Journal.reserve(@unit_b, @exec_b, @owner_b, name)
+
+      assert Journal.status(name)["status"] == "poisoned"
+
+      assert {:ok, scoped} =
+               Journal.unit_inventory(
+                 [task_id: @owner_b.task_id, principal_id: @owner_b.principal_id],
+                 name
+               )
+
+      assert scoped["filter"] == "scoped"
+      assert scoped["matched_count"] == 0
+      assert scoped["items"] == []
+
+      assert {:ok, global} = Journal.unit_inventory([], name)
+      assert global["matched_count"] == 1
+      assert hd(global["items"])["task_id"] == @owner_a.task_id
+      GenServer.stop(pid)
+    end
+
+    test "loads v1 file as owner-unknown and next reserve persists schema v2", %{path: path} do
+      v1 = %{
+        "schema_version" => 1,
+        "generation" => 1,
+        "active" => [
+          %{
+            "unit_name" => @unit_a,
+            "execution_id" => @exec_a,
+            "token" => @token_b,
+            "reserved_at_ms" => 10
+          }
+        ]
+      }
+
+      write_private_file!(path, Jason.encode!(v1) <> "\n")
+      name = unique_name()
+      assert {:ok, pid} = start_journal!(name, path)
+
+      assert {:ok, [legacy]} = Journal.recovery_entries(name)
+      assert legacy.owner_status == :unknown
+      assert legacy.task_id == nil
+
+      assert {:ok, _token} = Journal.reserve(@unit_b, @exec_b, @owner_b, name)
+      disk = path |> File.read!() |> Jason.decode!()
+      assert disk["schema_version"] == 2
+      by_name = Map.new(disk["active"], &{&1["unit_name"], &1})
+      assert by_name[@unit_a]["owner_status"] == "unknown"
+      assert by_name[@unit_a]["task_id"] == nil
+      assert by_name[@unit_b]["owner_status"] == "known"
+      assert by_name[@unit_b]["task_id"] == "task_b"
+
+      assert {:ok, inv} = Journal.unit_inventory([], name)
+      assert inv["filter"] == "global"
+      assert inv["matched_count"] == 2
+      assert Enum.any?(inv["items"], &(&1["owner_status"] == "unknown"))
+      refute Enum.any?(inv["items"], &Map.has_key?(&1, "token"))
+      refute Enum.any?(inv["items"], &String.contains?(inspect(&1), @token_b))
+
+      item = Enum.find(inv["items"], &(&1["unit_name"] == @unit_b))
+      assert String.starts_with?(item["resource_id"], "acu_v1_")
+      assert is_binary(item["source_record_digest"])
+      assert byte_size(item["source_record_digest"]) == 64
+
+      canonical_json =
+        by_name[@unit_b]
+        |> Enum.sort_by(fn {key, _value} -> key end)
+        |> Jason.OrderedObject.new()
+        |> Jason.encode!()
+
+      expected_digest =
+        :crypto.hash(:sha256, Core.digest_domain_tag() <> <<0>> <> canonical_json)
+        |> Base.encode16(case: :lower)
+
+      assert item["source_record_digest"] == expected_digest
+
+      assert {:ok, scoped} =
+               Journal.unit_inventory(
+                 [task_id: "task_b", principal_id: "principal_b"],
+                 name
+               )
+
+      assert scoped["filter"] == "scoped"
+      assert scoped["matched_count"] == 1
+      refute Enum.any?(scoped["items"], &(&1["owner_status"] == "unknown"))
+
+      assert {:error, :invalid_unit_inventory_filters} =
+               Journal.unit_inventory([:malformed], name)
+
+      assert Process.alive?(pid)
+
+      assert {:error, :invalid_unit_inventory_filters} =
+               Arbor.Shell.apple_container_unit_inventory([:malformed])
+
+      assert {:error, :invalid_unit_inventory_filters} =
+               Arbor.Shell.apple_container_unit_inventory(server: name)
 
       GenServer.stop(pid)
     end
@@ -1156,7 +1330,7 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
     test "status and format_status never leak tokens or path", %{path: path} do
       name = unique_name()
       assert {:ok, pid} = start_journal!(name, path)
-      assert {:ok, token} = Journal.reserve(@unit_a, @exec_a, name)
+      assert {:ok, token} = Journal.reserve(@unit_a, @exec_a, @owner_a, name)
 
       status = Journal.status(name)
       status_text = inspect(status)
@@ -1204,7 +1378,7 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
       name = unique_name()
 
       assert {:ok, pid} = Journal.start_link(name: name)
-      assert {:ok, token} = Journal.reserve(@unit_a, @exec_a, name)
+      assert {:ok, token} = Journal.reserve(@unit_a, @exec_a, @owner_a, name)
       assert Regex.match?(~r/\A[0-9a-f]{64}\z/, token)
       assert File.exists?(path)
 
@@ -1635,7 +1809,7 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
                start_link_result(name: name2, path: path)
 
       # First owner remains fully usable.
-      assert {:ok, token} = Journal.reserve(@unit_a, @exec_a, name1)
+      assert {:ok, token} = Journal.reserve(@unit_a, @exec_a, @owner_a, name1)
       assert Regex.match?(~r/\A[0-9a-f]{64}\z/, token)
       assert {:ok, [entry]} = Journal.recovery_entries(name1)
       assert entry.token == token
@@ -1651,7 +1825,7 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
          } do
       name1 = unique_name()
       assert {:ok, pid1} = start_journal!(name1, path)
-      assert {:ok, token} = Journal.reserve(@unit_a, @exec_a, name1)
+      assert {:ok, token} = Journal.reserve(@unit_a, @exec_a, @owner_a, name1)
 
       lock_path = journal_lock_path(path)
       assert File.exists?(lock_path)
@@ -1788,7 +1962,7 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
       case start_link_result(name: name, path: path) do
         {:ok, pid} ->
           assert String.trim_trailing(File.read!(lock_path), "\n") == System.pid()
-          assert {:ok, token} = Journal.reserve(@unit_a, @exec_a, name)
+          assert {:ok, token} = Journal.reserve(@unit_a, @exec_a, @owner_a, name)
           assert Regex.match?(~r/\A[0-9a-f]{64}\z/, token)
           GenServer.stop(pid)
 
@@ -1815,7 +1989,7 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
                 {:apple_container_unit_journal_start_failed, :journal_path_already_claimed}} =
                  start_link_result(name: unique_name(), path: private_path)
 
-        assert {:ok, _} = Journal.reserve(@unit_b, @exec_b, name_a)
+        assert {:ok, _} = Journal.reserve(@unit_b, @exec_b, @owner_b, name_a)
         GenServer.stop(pid_a)
       end
     end

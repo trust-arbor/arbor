@@ -120,7 +120,13 @@ defmodule Arbor.Shell.AppleContainerExecutorTest do
       sandbox: :basic,
       env: %{},
       clear_env: true,
-      filesystem_projections: base_projections()
+      filesystem_projections: base_projections(),
+      unit_owner: %{
+        validation_resource_id: "validation_res",
+        workspace_id: "workspace",
+        task_id: "task",
+        principal_id: "principal"
+      }
     ]
 
     Keyword.merge(base, overrides)
@@ -443,6 +449,29 @@ defmodule Arbor.Shell.AppleContainerExecutorTest do
 
       assert get_state(agent, :probe_calls) == []
       assert get_state(agent, :start_calls) == []
+    end
+
+    test "security regression: open or ambiguous unit owner fails before side effects", %{
+      agent: agent
+    } do
+      deps = base_deps(agent)
+      owner = Keyword.fetch!(valid_opts(), :unit_owner)
+
+      for invalid_owner <- [
+            Map.put(owner, :unexpected, "authority"),
+            Map.put(owner, "task_id", "conflicting-task")
+          ] do
+        opts = Keyword.put(valid_opts(), :unit_owner, invalid_owner)
+
+        assert {:error, :invalid_apple_container_unit_owner} =
+                 Executor.execute_for_test(@mix_wrapper, ["compile"], opts, deps)
+      end
+
+      assert get_state(agent, :probe_calls) == []
+      assert get_state(agent, :random_calls) == 0
+      assert get_state(agent, :register_calls) == 0
+      assert get_state(agent, :start_calls) == []
+      assert get_state(agent, :resolve_calls) == 0
     end
   end
 

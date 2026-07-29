@@ -857,6 +857,14 @@ defmodule Arbor.Actions.MixSpawnContainmentSlice1Test do
       assert {:ok, wrapper} = Arbor.Actions.TestMixShell.resolve_mix_wrapper()
       assert invocation.tool == wrapper or same_realpath?(invocation.tool, wrapper)
       assert invocation.wrapper == wrapper or same_realpath?(invocation.wrapper, wrapper)
+
+      assert invocation.unit_owner == %{
+               validation_resource_id: resource.resource_id,
+               workspace_id: fixture.lease.workspace_id,
+               task_id: fixture.context.task_id,
+               principal_id: fixture.context.principal_id
+             }
+
       projections = Keyword.get(invocation.opts, :filesystem_projections)
       assert projections.revision == "candidate"
       rw = Enum.map(projections.read_write, & &1["path"])
@@ -874,8 +882,85 @@ defmodule Arbor.Actions.MixSpawnContainmentSlice1Test do
       assert env_map["TMPDIR"] == resource.candidate_tmp_path
       assert env_map["MIX_BUILD_PATH"] == resource.candidate_build_path
       assert env_map["MIX_DEPS_PATH"] == resource.candidate_deps_path
+
+      Arbor.Actions.TestMixShell.clear_last_invocation()
+      malformed_resource = Map.delete(resource, :task_id)
+
+      assert {:error, reason} =
+               MixAction.run_mix(resource.candidate_path, ["compile"],
+                 validation_resource: malformed_resource,
+                 validation_revision: :candidate
+               )
+
+      assert inspect(reason) =~ "incomplete_unit_owner"
+      assert is_nil(Arbor.Actions.TestMixShell.last_invocation())
       {:ok, :ok}
     end)
+  end
+
+  test "security regression: action context cannot override lease-owned unit lineage", %{
+    tmp_dir: tmp_dir
+  } do
+    fixture = leased_fixture(tmp_dir)
+    create_tiny_project(fixture.lease.worktree_path)
+    git!(fixture.lease.worktree_path, ["add", "-A"])
+    git!(fixture.lease.worktree_path, ["commit", "-m", "project"])
+
+    untrusted_context = %{
+      task_id: "task_from_untrusted_context",
+      principal_id: "principal_from_untrusted_context",
+      agent_id: "principal_from_untrusted_context"
+    }
+
+    assert {:ok, :ok} =
+             MixAction.with_validation_resource(
+               fixture.lease.workspace_id,
+               untrusted_context,
+               fn resource ->
+                 assert {:ok, _} =
+                          MixAction.run_mix(resource.candidate_path, ["compile"],
+                            validation_resource: resource,
+                            validation_revision: :candidate
+                          )
+
+                 invocation = Arbor.Actions.TestMixShell.last_invocation()
+
+                 assert invocation.unit_owner == %{
+                          validation_resource_id: resource.resource_id,
+                          workspace_id: fixture.lease.workspace_id,
+                          task_id: fixture.context.task_id,
+                          principal_id: fixture.context.principal_id
+                        }
+
+                 refute invocation.unit_owner.task_id == untrusted_context.task_id
+                 refute invocation.unit_owner.principal_id == untrusted_context.principal_id
+                 {:ok, :ok}
+               end
+             )
+  end
+
+  test "security regression: ambiguous lease identity is rejected before worktree creation", %{
+    tmp_dir: tmp_dir
+  } do
+    fixture = leased_fixture(tmp_dir)
+    test_pid = self()
+
+    assert {:error, :ambiguous_workspace_identity} =
+             WorkspaceLeaseRegistry.acquire(%{
+               "task_id" => "task_from_string",
+               repo_path: fixture.repo,
+               branch: "ambiguous-#{System.unique_integer([:positive])}",
+               task_id: "task_from_atom",
+               principal_id: fixture.context.principal_id,
+               base_ref: fixture.lease.base_commit,
+               worktree_base_dir: Path.join(tmp_dir, "ambiguous-worktrees"),
+               create_worktree: fn _repo, _branch, _params ->
+                 send(test_pid, :ambiguous_identity_created_worktree)
+                 {:error, :unexpected_worktree_creation}
+               end
+             })
+
+    refute_received :ambiguous_identity_created_worktree
   end
 
   test "run_mix forwards explicit resource_profile unchanged to Shell facade", %{

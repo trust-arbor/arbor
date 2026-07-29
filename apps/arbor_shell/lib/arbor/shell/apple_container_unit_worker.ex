@@ -1654,10 +1654,7 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
     unit_name = Map.get(plan, :unit_name)
 
     with true <- is_binary(unit_name) and unit_name != "",
-         {:ok, empty} <- JournalCore.new(),
-         {:ok, journal, _effects} <- JournalCore.reserve(empty, record),
-         entries when is_list(entries) <- JournalCore.recovery_entries(journal),
-         [normalized] <- entries do
+         {:ok, normalized} <- JournalCore.normalize_known_record(record) do
       cond do
         normalized.execution_id != execution_id ->
           {:error, :journal_record_mismatch}
@@ -1718,10 +1715,7 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
 
     with true <- authorized_ownership_caller?(ownership, caller_pid),
          true <- is_map(stored),
-         {:ok, empty} <- JournalCore.new(),
-         {:ok, journal, _effects} <- JournalCore.reserve(empty, exact_record),
-         entries when is_list(entries) <- JournalCore.recovery_entries(journal),
-         [normalized] <- entries,
+         {:ok, normalized} <- JournalCore.normalize_existing_record(exact_record),
          true <- normalized == stored do
       {:ok,
        %{

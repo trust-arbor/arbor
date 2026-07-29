@@ -564,7 +564,12 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
       unit_name: Keyword.get(opts, :unit_name, spec.plan.unit_name),
       execution_id: Keyword.get(opts, :execution_id, execution_id),
       token: Keyword.get(opts, :token, @journal_token),
-      reserved_at_ms: Keyword.get(opts, :reserved_at_ms, 1_700_000_000_000)
+      reserved_at_ms: Keyword.get(opts, :reserved_at_ms, 1_700_000_000_000),
+      owner_status: :known,
+      validation_resource_id: Keyword.get(opts, :validation_resource_id, "validation_res"),
+      workspace_id: Keyword.get(opts, :workspace_id, "workspace"),
+      task_id: Keyword.get(opts, :task_id, "task"),
+      principal_id: Keyword.get(opts, :principal_id, "principal")
     }
   end
 
@@ -2100,6 +2105,26 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
                      unit_name: "arbor-v1-" <> String.duplicate("b", 32)
                    )
                  )
+               )
+
+      unknown_owner_record =
+        spec
+        |> journal_record_for(execution_id)
+        |> Map.merge(%{
+          owner_status: :unknown,
+          validation_resource_id: nil,
+          workspace_id: nil,
+          task_id: nil,
+          principal_id: nil
+        })
+
+      assert {:error, :apple_container_unit_owner_required} =
+               Worker.start_for_test(
+                 spec,
+                 executable,
+                 execution_id,
+                 start_ref,
+                 Keyword.put(base, :journal_record, unknown_owner_record)
                )
 
       assert unit_child_count() == before

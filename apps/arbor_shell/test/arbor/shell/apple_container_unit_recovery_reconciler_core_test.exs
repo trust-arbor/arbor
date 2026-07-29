@@ -23,7 +23,12 @@ defmodule Arbor.Shell.AppleContainerUnitRecoveryReconcilerCoreTest do
       unit_name: Keyword.get(opts, :unit_name, @unit_name),
       execution_id: Keyword.get(opts, :execution_id, @execution_id),
       token: Keyword.get(opts, :token, @token),
-      reserved_at_ms: Keyword.get(opts, :reserved_at_ms, @reserved_at_ms)
+      reserved_at_ms: Keyword.get(opts, :reserved_at_ms, @reserved_at_ms),
+      owner_status: Keyword.get(opts, :owner_status, :known),
+      validation_resource_id: Keyword.get(opts, :validation_resource_id, "validation_res"),
+      workspace_id: Keyword.get(opts, :workspace_id, "workspace"),
+      task_id: Keyword.get(opts, :task_id, "task"),
+      principal_id: Keyword.get(opts, :principal_id, "principal")
     }
   end
 
@@ -32,15 +37,24 @@ defmodule Arbor.Shell.AppleContainerUnitRecoveryReconcilerCoreTest do
       "unit_name" => record.unit_name,
       "execution_id" => record.execution_id,
       "token" => record.token,
-      "reserved_at_ms" => record.reserved_at_ms
+      "reserved_at_ms" => record.reserved_at_ms,
+      "owner_status" =>
+        case record.owner_status do
+          :known -> "known"
+          :unknown -> "unknown"
+          other -> other
+        end,
+      "validation_resource_id" => record.validation_resource_id,
+      "workspace_id" => record.workspace_id,
+      "task_id" => record.task_id,
+      "principal_id" => record.principal_id
     }
   end
 
   defp same_identity_map?(nil, _r), do: false
 
   defp same_identity_map?(worker, r) do
-    worker.unit_name == r.unit_name and worker.token == r.token and
-      worker.execution_id == r.execution_id and worker.reserved_at_ms == r.reserved_at_ms
+    Map.take(worker, Map.keys(r)) == r
   end
 
   describe "new/0" do
@@ -155,6 +169,19 @@ defmodule Arbor.Shell.AppleContainerUnitRecoveryReconcilerCoreTest do
       {:ok, state, []} = Core.apply_journal_ok(state, [])
       r = record()
       other = record(reserved_at_ms: @reserved_at_ms + 1)
+
+      {:ok, state, [{:start_worker, _}]} =
+        Core.request_recover_entry(state, r, self(), make_ref())
+
+      assert {:error, :identity_mismatch} =
+               Core.request_recover_entry(state, other, self(), make_ref())
+    end
+
+    test "security regression: owner lineage is part of exact identity" do
+      {:ok, state, _} = Core.new()
+      {:ok, state, []} = Core.apply_journal_ok(state, [])
+      r = record()
+      other = record(task_id: "task-other")
 
       {:ok, state, [{:start_worker, _}]} =
         Core.request_recover_entry(state, r, self(), make_ref())

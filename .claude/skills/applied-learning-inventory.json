@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-07-28",
-  "entry_count": 572,
+  "entry_count": 575,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -6980,8 +6980,47 @@
       "source_incident": "found 2026-07-28 while the budget-separation canary spent 547 seconds in a cold contained compile).",
       "content_sha256": "edba63a87fc6c3842a0b187e73258e5f22948b14e117de1805a690fb8917c463",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 573,
+      "source_kind": "post-migration",
+      "slug": "degraded-inventory-views-must-preserve-the-requested-scope",
+      "title": "Degraded inventory views must preserve the requested scope.",
+      "topic": "shell-containment",
+      "destination": ".claude/skills/applied-learning-shell-containment.md",
+      "anchor": "applied-learning-degraded-inventory-views-must-preserve-the-requested-scope",
+      "source_date": "2026-07-28",
+      "source_incident": "found 2026-07-28 reviewing Apple Container unit inventory).",
+      "content_sha256": "e3fe057cb4d9cfe93c7f763bbd501fb815f591797ba270254a0e2a556f3feba4",
+      "always_loaded": false
+    },
+    {
+      "source_ordinal": 574,
+      "source_kind": "post-migration",
+      "slug": "collection-reducers-must-fail-on-malformed-members-not-return-the-accumulator",
+      "title": "Collection reducers must fail on malformed members, not return the accumulated prefix.",
+      "topic": "persistence-database",
+      "destination": ".claude/skills/applied-learning-persistence-database.md",
+      "anchor": "applied-learning-collection-reducers-must-fail-on-malformed-members-not-return-the-accumulator",
+      "source_date": "2026-07-28",
+      "source_incident": "found 2026-07-28 reviewing Apple Container recovery reconstruction).",
+      "content_sha256": "ed66f74aeaafb5c85fb98dc17eb89e220e756543df2087e91b43e4ad98c60b72",
+      "always_loaded": false
+    },
+    {
+      "source_ordinal": 575,
+      "source_kind": "post-migration",
+      "slug": "durable-identity-schema-upgrades-must-cross-every-lifecycle-adapter",
+      "title": "Durable identity schema upgrades must cross every lifecycle adapter.",
+      "topic": "persistence-database",
+      "destination": ".claude/skills/applied-learning-persistence-database.md",
+      "anchor": "applied-learning-durable-identity-schema-upgrades-must-cross-every-lifecycle-adapter",
+      "source_date": "2026-07-28",
+      "source_incident": "found 2026-07-28 reviewing the Apple Container journal v2 migration).",
+      "content_sha256": "360043e80ce589a52797b48755f583386acf0b197931d30be668fce193457bee",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 111
+  "post_migration_entry_count": 114
 }

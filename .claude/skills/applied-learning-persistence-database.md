@@ -196,3 +196,22 @@ abandonment event before changing hot state or publishing success, and regress
 both restart replay and append failure so a transient reply cannot resurrect
 the resource later (found 2026-07-28 while hardening exact pending-approval
 settlement across Consensus and Comms).
+
+<!-- applied-learning: collection-reducers-must-fail-on-malformed-members-not-return-the-accumulator -->
+<a id="applied-learning-collection-reducers-must-fail-on-malformed-members-not-return-the-accumulator"></a>
+**Collection reducers must fail on malformed members, not return the accumulated
+prefix.** A catch-all reduction clause that halts with the current accumulator
+can turn a bad later row into successful partial data. Halt with a typed error
+for every invalid element, convert only the canonical success tuple to output,
+and regress malformed first and later entries (found 2026-07-28 reviewing Apple
+Container recovery reconstruction).
+
+<!-- applied-learning: durable-identity-schema-upgrades-must-cross-every-lifecycle-adapter -->
+<a id="applied-learning-durable-identity-schema-upgrades-must-cross-every-lifecycle-adapter"></a>
+**Durable identity schema upgrades must cross every lifecycle adapter.** Adding
+owner fields to the writer and loader is incomplete if a wire adapter, worker
+state, pending or settled ledger, exact comparator, reconstruction snapshot, or
+admission path drops them. Trace one record through reserve, worker start,
+restart, reconciliation, and settlement; normal workers require known lineage,
+while legacy unknown lineage is admitted only to cleanup recovery (found
+2026-07-28 reviewing the Apple Container journal v2 migration).

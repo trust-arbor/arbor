@@ -874,22 +874,68 @@ defmodule Arbor.Actions.Mix do
   # Optional internal `:resource_profile` is forwarded unchanged to Shell.
   # Actions does not default, normalize, or drop invalid values — Shell owns
   # closed-profile validation (`:standard` | `:intensive`).
+  # Unit owner binding is taken only from the source-owned validation resource
+  # (WorkspaceLeaseRegistry lease fields projected on the resource view) —
+  # never from arbitrary action context task_id/principal_id.
   defp invoke_spawn_capable(prepared, args, remaining, opts) do
-    shell_opts =
-      [
-        cwd: prepared.cwd,
-        timeout: remaining,
-        sandbox: mix_sandbox(),
-        env: prepared.env,
-        clear_env: true,
-        filesystem_projections: prepared.projections
-      ]
-      |> Enum.reject(fn {_k, v} -> is_nil(v) end)
-      |> maybe_put_resource_profile(opts)
+    with {:ok, unit_owner} <-
+           unit_owner_from_validation_resource(Keyword.get(opts, :validation_resource)) do
+      shell_opts =
+        [
+          cwd: prepared.cwd,
+          timeout: remaining,
+          sandbox: mix_sandbox(),
+          env: prepared.env,
+          clear_env: true,
+          filesystem_projections: prepared.projections,
+          unit_owner: unit_owner
+        ]
+        |> Enum.reject(fn {_k, v} -> is_nil(v) end)
+        |> maybe_put_resource_profile(opts)
 
-    case prepared.shell_module.execute_spawn_capable(prepared.wrapper, args, shell_opts) do
-      {:ok, result} -> {:ok, result}
+      case prepared.shell_module.execute_spawn_capable(prepared.wrapper, args, shell_opts) do
+        {:ok, result} -> {:ok, result}
+        {:error, reason} -> {:error, inspect(reason)}
+      end
+    else
       {:error, reason} -> {:error, inspect(reason)}
+    end
+  end
+
+  @doc false
+  def unit_owner_from_validation_resource(resource) when is_map(resource) do
+    with {:ok, validation_resource_id} <- fetch_resource_owner_field(resource, :resource_id),
+         {:ok, workspace_id} <- fetch_resource_owner_field(resource, :workspace_id),
+         {:ok, task_id} <- fetch_resource_owner_field(resource, :task_id),
+         {:ok, principal_id} <- fetch_resource_owner_field(resource, :principal_id) do
+      {:ok,
+       %{
+         validation_resource_id: validation_resource_id,
+         workspace_id: workspace_id,
+         task_id: task_id,
+         principal_id: principal_id
+       }}
+    else
+      :error -> {:error, :incomplete_unit_owner}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  def unit_owner_from_validation_resource(_), do: {:error, :validation_resource_required}
+
+  defp fetch_resource_owner_field(resource, key) when is_atom(key) do
+    case {Map.fetch(resource, key), Map.fetch(resource, Atom.to_string(key))} do
+      {{:ok, _atom_value}, {:ok, _string_value}} ->
+        {:error, :ambiguous_unit_owner}
+
+      {{:ok, value}, :error} when is_binary(value) and value != "" ->
+        {:ok, value}
+
+      {:error, {:ok, value}} when is_binary(value) and value != "" ->
+        {:ok, value}
+
+      _ ->
+        :error
     end
   end
 

@@ -60,6 +60,11 @@ defmodule Arbor.Shell.AppleContainerUnitRecoveryReconcilerCore do
           execution_id: String.t(),
           token: String.t(),
           reserved_at_ms: non_neg_integer(),
+          owner_status: JournalCore.owner_status(),
+          validation_resource_id: String.t() | nil,
+          workspace_id: String.t() | nil,
+          task_id: String.t() | nil,
+          principal_id: String.t() | nil,
           worker_pid: pid() | nil,
           receipt_ref: reference() | nil,
           restart_ms: pos_integer(),
@@ -71,6 +76,11 @@ defmodule Arbor.Shell.AppleContainerUnitRecoveryReconcilerCore do
           execution_id: String.t(),
           token: String.t(),
           reserved_at_ms: non_neg_integer(),
+          owner_status: JournalCore.owner_status(),
+          validation_resource_id: String.t() | nil,
+          workspace_id: String.t() | nil,
+          task_id: String.t() | nil,
+          principal_id: String.t() | nil,
           caller_pid: pid(),
           receipt_ref: reference()
         }
@@ -87,6 +97,11 @@ defmodule Arbor.Shell.AppleContainerUnitRecoveryReconcilerCore do
             execution_id: String.t(),
             token: String.t(),
             reserved_at_ms: non_neg_integer(),
+            owner_status: JournalCore.owner_status(),
+            validation_resource_id: String.t() | nil,
+            workspace_id: String.t() | nil,
+            task_id: String.t() | nil,
+            principal_id: String.t() | nil,
             caller_pid: pid(),
             receipt_ref: reference()
           }
@@ -671,6 +686,11 @@ defmodule Arbor.Shell.AppleContainerUnitRecoveryReconcilerCore do
       execution_id: normalized.execution_id,
       token: normalized.token,
       reserved_at_ms: normalized.reserved_at_ms,
+      owner_status: normalized.owner_status,
+      validation_resource_id: normalized.validation_resource_id,
+      workspace_id: normalized.workspace_id,
+      task_id: normalized.task_id,
+      principal_id: normalized.principal_id,
       caller_pid: caller_pid,
       receipt_ref: receipt_ref
     }
@@ -797,6 +817,11 @@ defmodule Arbor.Shell.AppleContainerUnitRecoveryReconcilerCore do
                   execution_id: req.execution_id,
                   token: req.token,
                   reserved_at_ms: req.reserved_at_ms,
+                  owner_status: req.owner_status,
+                  validation_resource_id: req.validation_resource_id,
+                  workspace_id: req.workspace_id,
+                  task_id: req.task_id,
+                  principal_id: req.principal_id,
                   caller_pid: req.caller_pid,
                   receipt_ref: req.receipt_ref
                 }
@@ -994,24 +1019,11 @@ defmodule Arbor.Shell.AppleContainerUnitRecoveryReconcilerCore do
 
   defp normalize_record(record) when is_map(record) do
     # Route through JournalCore so schema rules stay single-sourced.
-    snapshot = %{
-      "schema_version" => 1,
-      "generation" => 1,
-      "active" => [record]
-    }
-
-    case JournalCore.new(snapshot) do
-      {:ok, journal} ->
-        case JournalCore.recovery_entries(journal) do
-          [normalized] when is_map(normalized) ->
-            {:ok, normalized}
-
-          _other ->
-            {:error, :invalid_journal_entry}
-        end
-
-      {:error, reason} ->
-        {:error, reason}
+    # normalize_existing_record accepts known and owner-unknown v2 rows;
+    # distinct from strict reserve which requires known owner.
+    case JournalCore.normalize_existing_record(record) do
+      {:ok, normalized} -> {:ok, normalized}
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -1023,6 +1035,11 @@ defmodule Arbor.Shell.AppleContainerUnitRecoveryReconcilerCore do
       execution_id: record.execution_id,
       token: record.token,
       reserved_at_ms: record.reserved_at_ms,
+      owner_status: record.owner_status,
+      validation_resource_id: record.validation_resource_id,
+      workspace_id: record.workspace_id,
+      task_id: record.task_id,
+      principal_id: record.principal_id,
       worker_pid: nil,
       receipt_ref: nil,
       restart_ms: @worker_restart_initial_ms,
@@ -1035,7 +1052,12 @@ defmodule Arbor.Shell.AppleContainerUnitRecoveryReconcilerCore do
       unit_name: worker.unit_name,
       execution_id: worker.execution_id,
       token: worker.token,
-      reserved_at_ms: worker.reserved_at_ms
+      reserved_at_ms: worker.reserved_at_ms,
+      owner_status: Map.get(worker, :owner_status, :unknown),
+      validation_resource_id: Map.get(worker, :validation_resource_id),
+      workspace_id: Map.get(worker, :workspace_id),
+      task_id: Map.get(worker, :task_id),
+      principal_id: Map.get(worker, :principal_id)
     }
   end
 
@@ -1044,8 +1066,7 @@ defmodule Arbor.Shell.AppleContainerUnitRecoveryReconcilerCore do
   end
 
   defp same_identity?(a, b) do
-    a.unit_name == b.unit_name and a.token == b.token and a.execution_id == b.execution_id and
-      a.reserved_at_ms == b.reserved_at_ms
+    JournalCore.same_record?(record_from_worker(a), record_from_worker(b))
   end
 
   defp find_worker_by_receipt(state, worker_pid, unit_name, receipt_ref) do

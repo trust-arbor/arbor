@@ -64,6 +64,7 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
   alias Arbor.Shell.AppleContainerUnitDrainCoordinatorCore, as: Core
   alias Arbor.Shell.AppleContainerPlanCore
   alias Arbor.Shell.AppleContainerUnitJournal, as: Journal
+  alias Arbor.Shell.AppleContainerUnitJournalCore, as: JournalCore
   alias Arbor.Shell.AppleContainerUnitName
   alias Arbor.Shell.AppleContainerUnitRecoveryReconciler, as: Reconciler
   alias Arbor.Shell.AppleContainerUnitRuntime
@@ -732,11 +733,17 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
     {
       Map.get(record, :unit_name),
       Map.get(record, :execution_id),
-      Map.get(record, :token)
+      Map.get(record, :token),
+      Map.get(record, :reserved_at_ms),
+      Map.get(record, :owner_status),
+      Map.get(record, :validation_resource_id),
+      Map.get(record, :workspace_id),
+      Map.get(record, :task_id),
+      Map.get(record, :principal_id)
     }
   end
 
-  defp record_identity(_), do: {nil, nil, nil}
+  defp record_identity(_), do: nil
 
   defp collect_hints(state, worker_pids) do
     Enum.reduce(worker_pids, {[], []}, fn worker, {hints, unhintable} ->
@@ -1122,11 +1129,12 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
     with :ok <- validate_execution_id(execution_id),
          {:ok, unit_name} <- fetch_unit_name(spec),
          {:ok, timeout_ms} <- fetch_timeout_ms(spec),
+         {:ok, unit_owner} <- fetch_unit_owner(spec),
          {:ok, now} <- monotonic_now(state) do
       # Absolute deadline is fixed BEFORE journal reserve.
       deadline = now + timeout_ms
 
-      case reserve_record(state, unit_name, execution_id) do
+      case reserve_record(state, unit_name, execution_id, unit_owner) do
         {:ok, record} ->
           case start_worker_durable(
                  state,
@@ -1212,9 +1220,14 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
     |> schedule_reconstruct()
   end
 
-  defp reserve_record(state, unit_name, execution_id) do
+  defp reserve_record(state, unit_name, execution_id, unit_owner) do
     try do
-      case state.journal.reserve_record(unit_name, execution_id, state.journal_server) do
+      case state.journal.reserve_record(
+             unit_name,
+             execution_id,
+             unit_owner,
+             state.journal_server
+           ) do
         {:ok, record} when is_map(record) ->
           {:ok, record}
 
@@ -1229,6 +1242,10 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
         {:error, :journal_unavailable}
     end
   end
+
+  defp fetch_unit_owner(%{unit_owner: owner}), do: JournalCore.normalize_known_owner(owner)
+
+  defp fetch_unit_owner(_), do: {:error, :apple_container_unit_owner_required}
 
   defp complete_record(state, unit_name, token) do
     try do

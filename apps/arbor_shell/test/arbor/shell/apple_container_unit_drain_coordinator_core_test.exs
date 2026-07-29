@@ -40,7 +40,12 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinatorCoreTest do
       unit_name: Keyword.fetch!(opts, :unit_name),
       execution_id: Keyword.fetch!(opts, :execution_id),
       token: Keyword.fetch!(opts, :token),
-      reserved_at_ms: Keyword.get(opts, :reserved_at_ms, 1_700_000_000_000)
+      reserved_at_ms: Keyword.get(opts, :reserved_at_ms, 1_700_000_000_000),
+      owner_status: :known,
+      validation_resource_id: "validation_res",
+      workspace_id: "workspace",
+      task_id: "task",
+      principal_id: "principal"
     }
   end
 
@@ -49,9 +54,7 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinatorCoreTest do
   end
 
   defp normalize!(attrs) do
-    assert {:ok, empty} = JournalCore.new()
-    assert {:ok, journal, _} = JournalCore.reserve(empty, attrs)
-    assert [normalized] = JournalCore.recovery_entries(journal)
+    assert {:ok, normalized} = JournalCore.normalize_existing_record(attrs)
     normalized
   end
 
@@ -159,7 +162,12 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinatorCoreTest do
         "unit_name" => @unit_a,
         "execution_id" => @exec_a,
         "token" => @token_a,
-        "reserved_at_ms" => 1_700_000_000_123
+        "reserved_at_ms" => 1_700_000_000_123,
+        "owner_status" => "known",
+        "validation_resource_id" => "validation_res",
+        "workspace_id" => "workspace",
+        "task_id" => "task",
+        "principal_id" => "principal"
       }
 
       expected = normalize!(raw)
@@ -171,7 +179,17 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinatorCoreTest do
       assert candidate.journal_record == expected
 
       assert Map.keys(candidate.journal_record) |> Enum.sort() ==
-               [:execution_id, :reserved_at_ms, :token, :unit_name]
+               [
+                 :execution_id,
+                 :owner_status,
+                 :principal_id,
+                 :reserved_at_ms,
+                 :task_id,
+                 :token,
+                 :unit_name,
+                 :validation_resource_id,
+                 :workspace_id
+               ]
     end
   end
 
@@ -274,6 +292,13 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinatorCoreTest do
                )
 
       assert {:error, :invalid_records} = Core.reconstruction_plan(:not_a_list, [])
+    end
+
+    test "security regression: a non-map journal row never truncates reconstruction to success" do
+      valid = record(unit_name: @unit_a, execution_id: @exec_a, token: @token_a)
+
+      assert {:error, :invalid_record} =
+               Core.reconstruction_plan([valid, :malformed, valid], [])
     end
 
     test "one-to-one matching never pairs two hints to one record when ids differ" do

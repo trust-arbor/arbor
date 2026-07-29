@@ -83,15 +83,40 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinatorCore do
     if length(records) > @max_records do
       {:error, :too_many_records}
     else
-      snapshot = %{
-        schema_version: 1,
-        generation: length(records),
-        active: records
-      }
+      records
+      |> Enum.reduce_while({:ok, [], MapSet.new(), MapSet.new()}, fn
+        entry, {:ok, acc, execution_ids, tokens} ->
+          case JournalCore.normalize_existing_record(entry) do
+            {:ok, record} ->
+              cond do
+                Enum.any?(acc, &(&1.unit_name == record.unit_name)) ->
+                  {:halt, {:error, :duplicate_unit_name}}
 
-      case JournalCore.new(snapshot) do
-        {:ok, journal} -> {:ok, JournalCore.recovery_entries(journal)}
-        {:error, reason} -> {:error, reason}
+                MapSet.member?(execution_ids, record.execution_id) ->
+                  {:halt, {:error, :duplicate_execution_id}}
+
+                MapSet.member?(tokens, record.token) ->
+                  {:halt, {:error, :duplicate_token}}
+
+                true ->
+                  {:cont,
+                   {:ok, [record | acc], MapSet.put(execution_ids, record.execution_id),
+                    MapSet.put(tokens, record.token)}}
+              end
+
+            {:error, reason} ->
+              {:halt, {:error, reason}}
+          end
+
+        _entry, _acc ->
+          {:halt, {:error, :invalid_record}}
+      end)
+      |> case do
+        {:ok, acc, _execution_ids, _tokens} ->
+          {:ok, Enum.sort_by(Enum.reverse(acc), & &1.unit_name)}
+
+        {:error, reason} ->
+          {:error, reason}
       end
     end
   end

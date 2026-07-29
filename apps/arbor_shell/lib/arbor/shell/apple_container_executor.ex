@@ -21,6 +21,7 @@ defmodule Arbor.Shell.AppleContainerExecutor do
   alias Arbor.Shell.AppleContainerProber
   alias Arbor.Shell.AppleContainerProbeRuntime
   alias Arbor.Shell.AppleContainerUnitDrainCoordinator
+  alias Arbor.Shell.AppleContainerUnitJournalCore
   alias Arbor.Shell.AppleContainerUnitName
   alias Arbor.Shell.AppleContainerUnitWorker
   alias Arbor.Shell.ExecutablePolicy.Executable
@@ -180,16 +181,16 @@ defmodule Arbor.Shell.AppleContainerExecutor do
 
   defp do_execute(tool_name, args, opts, deps) do
     # (1) Pure preflight before any probe, random, registry, or worker start.
-    case AppleContainerExecutionCore.validate_request(tool_name, args, opts) do
-      :ok ->
-        execute_after_preflight(tool_name, args, opts, deps)
-
-      {:error, reason} ->
-        {:error, bound_reason(reason)}
+    with {:ok, execution_opts} <- execution_opts_for_preflight(opts),
+         :ok <- AppleContainerExecutionCore.validate_request(tool_name, args, execution_opts),
+         {:ok, unit_owner} <- fetch_unit_owner(opts) do
+      execute_after_preflight(tool_name, args, execution_opts, unit_owner, deps)
+    else
+      {:error, reason} -> {:error, bound_reason(reason)}
     end
   end
 
-  defp execute_after_preflight(tool_name, args, opts, deps) do
+  defp execute_after_preflight(tool_name, args, opts, unit_owner, deps) do
     with {:ok, timeout_ms} <- fetch_timeout(opts),
          {:ok, started_mono} <- read_monotonic_ms(deps),
          deadline = started_mono + timeout_ms,
@@ -202,8 +203,9 @@ defmodule Arbor.Shell.AppleContainerExecutor do
          {:ok, remaining_for_spec} <- remaining_before_start(deadline, deps),
          reduced_opts <- Keyword.put(opts, :timeout, min(timeout_ms, remaining_for_spec)),
          {:ok, spec} <- build_spec(tool_name, args, reduced_opts, admission, unit_name),
+         reduced_spec <- Map.put(spec, :unit_owner, unit_owner),
          {:ok, remaining_pre_register} <- remaining_before_start(deadline, deps),
-         reduced_spec <- shrink_spec_timeout(spec, remaining_pre_register),
+         reduced_spec <- shrink_spec_timeout(reduced_spec, remaining_pre_register),
          {:ok, execution_id} <- register_execution(opts, deps) do
       # Recompute remaining AFTER register and immediately before Worker.start.
       # Setup latency during register must not extend the original deadline.
@@ -213,6 +215,26 @@ defmodule Arbor.Shell.AppleContainerExecutor do
         {:error, bound_reason(reason)}
     end
   end
+
+  defp execution_opts_for_preflight(opts) when is_list(opts) do
+    if Keyword.keyword?(opts) do
+      {:ok, Keyword.delete(opts, :unit_owner)}
+    else
+      {:error, :invalid_opts}
+    end
+  end
+
+  defp execution_opts_for_preflight(_), do: {:error, :invalid_opts}
+
+  defp fetch_unit_owner(opts) when is_list(opts) do
+    case Keyword.get_values(opts, :unit_owner) do
+      [owner] -> AppleContainerUnitJournalCore.normalize_known_owner(owner)
+      [] -> {:error, :apple_container_unit_owner_required}
+      _duplicates -> {:error, :invalid_apple_container_unit_owner}
+    end
+  end
+
+  defp fetch_unit_owner(_), do: {:error, :apple_container_unit_owner_required}
 
   defp fetch_timeout(opts) when is_list(opts) do
     case Keyword.fetch(opts, :timeout) do
