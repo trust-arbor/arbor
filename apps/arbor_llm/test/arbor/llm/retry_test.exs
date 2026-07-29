@@ -11,6 +11,7 @@ defmodule Arbor.LLM.RetryTest do
   @moduletag :fast
 
   alias Arbor.LLM.Retry
+  alias Arbor.LLM.OAuth.ResponsesFailure
 
   describe "fallback_eligible?/1" do
     test "transient atoms are eligible" do
@@ -52,6 +53,58 @@ defmodule Arbor.LLM.RetryTest do
                provider: :anthropic,
                retryable: false
              })
+    end
+
+    test "ResponsesFailure eligibility is table authoritative" do
+      assert Retry.fallback_eligible?(
+               ResponsesFailure.transport(:openai_oauth, :openai, :deadline_exceeded)
+             )
+
+      assert Retry.fallback_eligible?(
+               ResponsesFailure.transport(:xai_oauth, :xai, :connection_failed)
+             )
+
+      assert Retry.fallback_eligible?(ResponsesFailure.from_status(:openai_oauth, :openai, 408))
+
+      refute Retry.fallback_eligible?(
+               ResponsesFailure.protocol(:openai_oauth, :openai, :invalid_stream)
+             )
+
+      refute Retry.fallback_eligible?(ResponsesFailure.from_status(:openai_oauth, :openai, 401))
+    end
+
+    test "ResponsesFailure ignores direct struct and override forgery attempts" do
+      assert Retry.fallback_eligible?(
+               ResponsesFailure.exception(
+                 route: :openai_oauth,
+                 backend: :openai,
+                 code: :rate_limited,
+                 retryable: false
+               )
+             )
+
+      refute Retry.fallback_eligible?(
+               struct(ResponsesFailure,
+                 route: :openai_oauth,
+                 backend: :openai,
+                 class: :auth,
+                 code: :connection_failed,
+                 status: 500,
+                 retryable: true
+               )
+             )
+
+      refute Retry.fallback_eligible?(
+               struct(
+                 ResponsesFailure,
+                 route: :openai_oauth,
+                 backend: :openai,
+                 class: :quota,
+                 code: :unexpected_status,
+                 status: 500,
+                 retryable: true
+               )
+             )
     end
 
     test "RequestTimeoutError is always eligible" do

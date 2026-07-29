@@ -3,7 +3,7 @@ defmodule Arbor.LLM.OAuth.ResponsesTest do
 
   @moduletag :fast
 
-  alias Arbor.LLM.OAuth.Responses
+  alias Arbor.LLM.OAuth.{Responses, ResponsesFailure}
 
   @env_keys [
     :oauth_store_dir,
@@ -178,8 +178,8 @@ defmodule Arbor.LLM.OAuth.ResponsesTest do
     {url, server} = start_drip_server(100, 10)
     started = System.monotonic_time(:millisecond)
 
-    assert Responses.request_sse(url, [], %{}, receive_timeout: 120) ==
-             {:error, {:responses_deadline_exceeded, 120}}
+    assert {:error, %ResponsesFailure{class: :transport, code: :deadline_exceeded}} =
+             Responses.request_sse(url, [], %{}, receive_timeout: 120)
 
     elapsed = System.monotonic_time(:millisecond) - started
     assert elapsed >= 100
@@ -205,7 +205,13 @@ defmodule Arbor.LLM.OAuth.ResponsesTest do
         receive_timeout: 500
       )
 
-    assert result == {:error, {:responses_http, 401, :redacted}}
+    assert {:error, %ResponsesFailure{} = failure} = result
+    assert failure.class == :auth
+    assert failure.code == :unauthorized
+    assert failure.status == 401
+    assert failure.route == nil
+    assert failure.backend == nil
+    assert failure.retryable == false
     refute inspect(result) =~ secret
     refute inspect(result) =~ token
     assert %{request: request} = Task.await(server, 2_000)
@@ -224,9 +230,85 @@ defmodule Arbor.LLM.OAuth.ResponsesTest do
         receive_timeout: 500
       )
 
-    assert result == {:error, {:responses_request_failed, :redacted}}
+    assert {:error, %ResponsesFailure{} = failure} = result
+    assert failure.class == :transport
+    assert failure.code == :connection_failed
+    assert failure.route == nil
+    assert failure.backend == nil
     refute inspect(result) =~ token
     assert :closed = Task.await(server, 2_000)
+  end
+
+  test "security regression: ResponsesFailure.exception ignores caller retryability overrides" do
+    assert ResponsesFailure.exception(
+             route: :openai_oauth,
+             backend: :openai,
+             code: :unauthorized,
+             retryable: true
+           ).retryable == false
+
+    assert ResponsesFailure.exception(
+             route: :xai_oauth,
+             backend: :xai,
+             code: :connection_failed,
+             retryable: false
+           ).retryable == true
+  end
+
+  test "HTTP 408 preserves retryable request-timeout classification" do
+    assert %ResponsesFailure{
+             route: :openai_oauth,
+             backend: :openai,
+             class: :transport,
+             code: :request_timeout,
+             status: 408,
+             retryable: true
+           } = ResponsesFailure.from_status(:openai_oauth, :openai, 408)
+  end
+
+  test "security regression: failure constructors erase mismatched route/backend identity" do
+    assert %ResponsesFailure{route: nil, backend: nil} =
+             ResponsesFailure.exception(
+               route: :openai_oauth,
+               backend: :xai,
+               code: :connection_failed
+             )
+
+    assert %ResponsesFailure{route: nil, backend: nil} =
+             ResponsesFailure.from_status(:xai_oauth, :openai, 503)
+  end
+
+  test "security regression: mismatched route/backend identity does not leak to failure classes" do
+    {url, server} = start_no_request_server()
+
+    assert {:error,
+            %ResponsesFailure{
+              route: nil,
+              backend: nil,
+              class: :protocol,
+              code: :invalid_stream,
+              retryable: false
+            }} =
+             Responses.request_sse(
+               url,
+               [{"authorization", "Bearer mismatch-secret"}],
+               %{},
+               %{receive_timeout: 500},
+               %{route: :openai_oauth, backend: :xai}
+             )
+
+    assert :no_request = Task.await(server, 2_000)
+  end
+
+  test "security regression: adapter rejects non-route aliases before credentials or network" do
+    request = %Arbor.LLM.Request{
+      provider: "xai",
+      model: "grok-4.5",
+      messages: [Arbor.LLM.Message.new(:user, "health route gate")]
+    }
+
+    assert {:error, {:unknown_oauth_route, "xai"}} =
+             Arbor.LLM.Adapter.OAuthResponses.complete(request, receive_timeout: 200)
   end
 
   test "security regression: unchanged Codex source after 401 returns stable auth error without retry",
@@ -281,11 +363,121 @@ defmodule Arbor.LLM.OAuth.ResponsesTest do
     {url, server} = start_single_status_server(403)
     configure_responses_endpoint!(url)
 
-    assert {:error, {:responses_http, 403, :redacted}} =
+    assert {:error, %ResponsesFailure{class: :forbidden, status: 403, code: :forbidden}} =
              Responses.complete(:openai, empty_request(), receive_timeout: 1_000)
 
     assert %{requests: 1} = Task.await(server, 2_000)
     assert File.read!(source_path) == source_bytes
+  end
+
+  test "security regression: strict xAI 403 tier-denial allows only exact parsed allow-listed code",
+       %{root: root, store_dir: store_dir} do
+    source_path = configure_source_owned_openai!(root, store_dir, "allowed", "never-refresh")
+    _source_bytes = File.read!(source_path)
+
+    write_store_json(
+      store_dir,
+      "xai.json",
+      %{
+        "version" => 1,
+        "provider" => "xai",
+        "account_id" => nil,
+        "origin" => "arbor_login",
+        "owner" => "arbor_owned",
+        "source" => "arbor_oauth_store",
+        "generation" => 12,
+        "tokens" => %{
+          "access_token" => "xai-access-token",
+          "refresh_token" => "xai-refresh-token"
+        }
+      }
+    )
+
+    {allow_url, allow_server} =
+      start_status_server_with_body(
+        403,
+        Jason.encode!(%{"error" => %{"code" => "xai_oauth_tier_denied"}})
+      )
+
+    {lookalike_url, lookalike_server} =
+      start_status_server_with_body(
+        403,
+        Jason.encode!(%{"error" => %{"code" => "xai_oauth_tier_denied_plus"}})
+      )
+
+    malformed_body = "{invalid json"
+    {malformed_url, malformed_server} = start_status_server_with_body(403, malformed_body)
+
+    oversized_body = String.duplicate("x", 16_385)
+    {oversized_url, oversized_server} = start_status_server_with_body(403, oversized_body)
+
+    configure_responses_endpoint!(%{xai: allow_url})
+
+    assert {:error,
+            %ResponsesFailure{
+              class: :tier_denied,
+              code: :xai_oauth_tier_denied,
+              status: 403,
+              backend: :xai,
+              retryable: false
+            }} = Responses.complete(:xai_oauth, empty_request(), receive_timeout: 1_000)
+
+    configure_responses_endpoint!(%{xai: lookalike_url})
+
+    assert {:error, %ResponsesFailure{class: :forbidden, code: :forbidden, status: 403}} =
+             Responses.complete(:xai_oauth, empty_request(), receive_timeout: 1_000)
+
+    configure_responses_endpoint!(%{xai: malformed_url})
+
+    assert {:error, %ResponsesFailure{class: :forbidden, code: :forbidden, status: 403}} =
+             Responses.complete(:xai_oauth, empty_request(), receive_timeout: 1_000)
+
+    configure_responses_endpoint!(%{xai: oversized_url})
+
+    assert {:error, %ResponsesFailure{class: :forbidden, code: :forbidden, status: 403}} =
+             Responses.complete(:xai_oauth, empty_request(), receive_timeout: 1_000)
+
+    assert %{request: _} = Task.await(allow_server, 2_000)
+    assert %{request: _} = Task.await(lookalike_server, 2_000)
+    assert %{request: _} = Task.await(malformed_server, 2_000)
+    assert %{request: _} = Task.await(oversized_server, 2_000)
+  end
+
+  test "security regression: xAI tier classification never applies to non-xAI backends", %{
+    store_dir: store_dir
+  } do
+    write_store_json(
+      store_dir,
+      "openai.json",
+      %{
+        "version" => 1,
+        "provider" => "openai",
+        "account_id" => "acct-openai",
+        "origin" => "arbor_login",
+        "owner" => "arbor_owned",
+        "source" => "arbor_oauth_store",
+        "generation" => 2,
+        "tokens" => %{
+          "access_token" => "openai-access-token",
+          "refresh_token" => "openai-refresh"
+        }
+      }
+    )
+
+    {url, server} =
+      start_status_server_with_body(
+        403,
+        Jason.encode!(%{"error" => %{"code" => "xai_oauth_tier_denied"}})
+      )
+
+    configure_responses_endpoint!(%{openai: url})
+
+    assert {:error,
+            %ResponsesFailure{class: :forbidden, code: :forbidden, status: 403, backend: :openai}} =
+             Responses.complete(:openai, empty_request(), receive_timeout: 1_000)
+
+    assert %{request: request} = Task.await(server, 2_000)
+    assert request =~ "authorization: Bearer"
   end
 
   test "security regression: concurrent changed-source 401s have one bounded retry per caller",
@@ -366,9 +558,20 @@ defmodule Arbor.LLM.OAuth.ResponsesTest do
     )
   end
 
-  defp configure_responses_endpoint!(url) do
-    Application.put_env(:arbor_llm, :oauth_response_endpoints, %{openai: url})
-    Application.put_env(:arbor_llm, :trusted_oauth_response_endpoints, [url])
+  defp configure_responses_endpoint!(url) when is_binary(url) do
+    configure_responses_endpoint!(%{openai: url})
+  end
+
+  defp configure_responses_endpoint!(urls) when is_map(urls) do
+    Application.put_env(:arbor_llm, :oauth_response_endpoints, urls)
+    Application.put_env(:arbor_llm, :trusted_oauth_response_endpoints, Map.values(urls))
+  end
+
+  defp write_store_json(store_dir, filename, envelope) do
+    path = Path.join(store_dir, filename)
+    File.write!(path, Jason.encode!(envelope))
+    File.chmod!(path, 0o600)
+    path
   end
 
   defp start_unchanged_401_server do
@@ -422,6 +625,45 @@ defmodule Arbor.LLM.OAuth.ResponsesTest do
         %{requests: requests}
       end)
 
+    {url, server}
+  end
+
+  defp start_status_server_with_body(status, body) do
+    {listener, url} = listen()
+
+    server =
+      Task.async(fn ->
+        {socket, request} = accept_request!(listener)
+        send_http!(socket, status, body)
+        :gen_tcp.close(socket)
+        request_received = request
+        :gen_tcp.close(listener)
+        %{request: request_received}
+      end)
+
+    {url, server}
+  end
+
+  defp start_no_request_server do
+    {listener, url} = listen()
+
+    server =
+      Task.async(fn ->
+        result =
+          case :gen_tcp.accept(listener, 300) do
+            {:ok, socket} ->
+              :gen_tcp.close(socket)
+              :request_received
+
+            {:error, :timeout} ->
+              :no_request
+          end
+
+        :gen_tcp.close(listener)
+        result
+      end)
+
+    Application.put_env(:arbor_llm, :trusted_oauth_response_endpoints, [url])
     {url, server}
   end
 

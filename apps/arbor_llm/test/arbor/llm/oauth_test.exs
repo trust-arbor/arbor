@@ -3,6 +3,7 @@ defmodule Arbor.LLM.OAuthTest do
   @moduletag :fast
 
   alias Arbor.LLM.{Client, Message, OAuth, Request}
+  alias Arbor.Contracts.LLM.OAuthHealth
 
   @env_keys [
     :oauth_store_dir,
@@ -97,6 +98,126 @@ defmodule Arbor.LLM.OAuthTest do
     # NOTE: we deliberately do NOT call access_token(:xai)/(:grok) against real credentials —
     # tests use hermetic store + refresh seams only and never touch ~/.codex, ~/.grok, or
     # ~/.arbor/oauth.
+  end
+
+  describe "OAuth route exactness and health contract (security regression)" do
+    test "security regression: route accepts exact IDs and rejects aliases",
+         %{store_dir: _store_dir} do
+      assert {:ok, %{route: :openai_oauth, backend: :openai}} = OAuth.route(:openai_oauth)
+      assert {:ok, %{route: :xai_oauth, backend: :xai}} = OAuth.route(:xai_oauth)
+      assert {:ok, %{route: nil, backend: :openai}} = OAuth.route("openai")
+      assert {:ok, %{route: nil, backend: :xai}} = OAuth.route("xai")
+      assert {:error, {:unknown_oauth_route, "grok"}} = OAuth.route("grok")
+      assert {:error, :anthropic_oauth_forbidden} = OAuth.route("anthropic")
+
+      assert {:ok, %{route: :openai_oauth, backend: :openai}} = OAuth.route_only(:openai_oauth)
+      assert {:ok, %{route: :xai_oauth, backend: :xai}} = OAuth.route_only(:xai_oauth)
+      assert {:error, {:unknown_oauth_route, "xai"}} = OAuth.route_only("xai")
+      assert {:error, {:unknown_oauth_route, "grok"}} = OAuth.route_only("grok")
+      assert {:error, :anthropic_oauth_forbidden} = OAuth.route_only(:claude)
+    end
+
+    test "security regression: adapter rejects non-route aliases before credential or request I/O",
+         %{
+           store_dir: store_dir
+         } do
+      request = %Request{
+        provider: "grok",
+        model: "grok-4.5",
+        messages: [Message.new(:user, "no-route")]
+      }
+
+      File.write!(Path.join(store_dir, "openai.json"), "{")
+      File.write!(Path.join(store_dir, "xai.json"), "{")
+
+      assert {:error, {:unknown_oauth_route, "grok"}} =
+               Arbor.LLM.Adapter.OAuthResponses.complete(request, receive_timeout: 200)
+    end
+
+    test "security regression: oauth_health returns bounded local statuses for exact routes only",
+         %{
+           store_dir: store_dir
+         } do
+      Application.put_env(:arbor_llm, :oauth_refresh_fun, fn _, _, _ ->
+        flunk("oauth_health must not refresh credentials")
+      end)
+
+      assert {:ok, %OAuthHealth{status: "login_required", owner: nil}} =
+               OAuth.health(:openai_oauth)
+
+      assert {:ok, %OAuthHealth{status: "login_required", owner: nil}} =
+               Arbor.LLM.oauth_health(:openai_oauth)
+
+      assert {:error, {:unknown_oauth_route, "openai"}} = OAuth.health(:openai)
+
+      write_store!(
+        store_dir,
+        :openai,
+        %{
+          "access_token" => jwt_access(System.system_time(:second) + 3_600),
+          "refresh_token" => "rt-openai",
+          "account_id" => "acct_openai"
+        }
+      )
+
+      assert {:ok,
+              %OAuthHealth{route: "openai_oauth", backend: "openai", status: "ready"} = health} =
+               OAuth.health(:openai_oauth)
+
+      assert health.owner == "arbor_owned"
+      assert health.source == "arbor_oauth_store"
+
+      map = OAuthHealth.to_map(health)
+      assert map["route"] == "openai_oauth"
+      assert map["backend"] == "openai"
+      refute Map.has_key?(map, "account_id")
+      assert byte_size(inspect(map)) < 1_024
+
+      root = store_dir
+      source_path = Path.join(root, "codex-auth.json")
+      write_codex_source!(source_path, "source-access", "source-refresh")
+      write_envelope!(store_dir, :openai, source_envelope(:openai, "acct_source"))
+      Application.put_env(:arbor_llm, :oauth_source_files, %{openai: source_path})
+
+      assert {:ok,
+              %OAuthHealth{route: "openai_oauth", status: "ready", owner: "source_owned"} =
+                source_health} =
+               OAuth.health(:openai_oauth)
+
+      assert source_health.source == "codex_file"
+      assert source_health.origin == "external_cli"
+      assert source_health.owner == "source_owned"
+      refute Map.has_key?(source_health, :account_id)
+      refute inspect(source_health) =~ "source-access"
+
+      expired_source_path = Path.join(root, "expired-codex-auth.json")
+
+      write_codex_source!(
+        expired_source_path,
+        jwt_access(System.system_time(:second) - 10),
+        "ignored"
+      )
+
+      write_envelope!(store_dir, :openai, source_envelope(:openai, "acct_source"))
+      Application.put_env(:arbor_llm, :oauth_source_files, %{openai: expired_source_path})
+
+      assert {:ok, %OAuthHealth{status: "expired", owner: "source_owned"}} =
+               OAuth.health(:openai_oauth)
+
+      write_envelope!(
+        store_dir,
+        :xai,
+        source_envelope(:xai, nil)
+      )
+
+      assert {:ok,
+              %OAuthHealth{
+                route: "xai_oauth",
+                status: "source_unsupported",
+                owner: "source_owned"
+              }} =
+               OAuth.health(:xai_oauth)
+    end
   end
 
   describe "credential ownership enforcement" do

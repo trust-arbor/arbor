@@ -13,7 +13,7 @@ defmodule Arbor.LLM.OAuth.Responses do
   """
 
   alias Arbor.LLM.{Deadline, Endpoint, OAuth, ResponseBudget}
-  alias Arbor.LLM.OAuth.CredentialReceipt
+  alias Arbor.LLM.OAuth.{CredentialReceipt, ResponsesFailure}
 
   @max_response_bytes 16_777_216
   @max_events 100_000
@@ -24,6 +24,23 @@ defmodule Arbor.LLM.OAuth.Responses do
   @max_map_keys 10_000
   @max_list_items 100_000
   @max_timeout 900_000
+  @max_error_json_bytes 16_384
+  @max_error_code_bytes 128
+
+  # The closed set of structured provider error codes that may classify an xAI 403 as
+  # subscription tier denial. Matched by EXACT equality on a parsed JSON field — never by
+  # substring, regex, or a generic 403. Extend only with a real observed code.
+  @xai_tier_codes ["tier_denied", "subscription_tier_denied", "xai_oauth_tier_denied"]
+
+  @error_json_limits [
+    max_bytes: @max_error_json_bytes,
+    max_nodes: 512,
+    max_depth: 8,
+    max_map_keys: 128,
+    max_list_items: 128
+  ]
+
+  @no_identity %{route: nil, backend: nil}
 
   @endpoints %{
     openai: "https://chatgpt.com/backend-api/codex/responses",
@@ -36,52 +53,62 @@ defmodule Arbor.LLM.OAuth.Responses do
   `complete(provider, %{instructions, input, tools}, opts)` → `{:ok, %{text, tool_calls}}`.
 
   `input` is a fully-built Responses input list, `tools` a Responses tools list (or nil). Options:
-  `:model`, `:receive_timeout`. Anthropic is refused upstream by `OAuth.access_token/1`.
+  `:model`, `:receive_timeout`. `provider` is resolved against `OAuth.route/1`'s exact closed
+  table: the two route IDs plus the two bare backend keys. Anthropic is refused there, and
+  `grok` / `codex` / `chatgpt` / unknown names are rejected rather than defaulted to OpenAI.
   """
   @spec complete(atom() | String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
   def complete(provider, req, opts \\ [])
 
   def complete(provider, %{} = req, opts) do
     with {:ok, limits} <- build_limits(opts),
+         {:ok, identity} <- resolve_identity(provider),
          {:ok, receipt} <- Deadline.receipt(timeout_ms: limits.timeout) do
       Deadline.run(
-        fn -> do_complete(provider, req, opts, limits) end,
+        fn -> do_complete(identity, req, opts, limits) end,
         receipt,
-        {:responses_deadline_exceeded, limits.timeout}
+        ResponsesFailure.transport(identity.route, identity.backend, :deadline_exceeded)
       )
     end
   end
 
   def complete(_provider, _req, _opts), do: {:error, :invalid_responses_request}
 
-  defp do_complete(provider, req, opts, limits) do
-    with :ok <- ResponseBudget.validate(req, request_limits()),
-         {:ok, key} <- provider_key(provider),
-         {:ok, credential} <- OAuth.credential_receipt(provider) do
-      sid = :crypto.strong_rand_bytes(16) |> Base.encode16(case: :lower)
-      body = build_body(Keyword.get(opts, :model) || @default_models[key], req)
-
-      request_with_credential(key, credential, sid, body, limits)
+  # Exact closed resolution only. A bare backend key keeps `route: nil` so it never
+  # advertises a route identity it does not have.
+  defp resolve_identity(provider) do
+    with {:ok, %{route: route, backend: backend}} <- OAuth.route(provider) do
+      {:ok, %{route: route, backend: backend}}
     end
   end
 
-  defp request_with_credential(key, credential, sid, body, limits) do
-    result = request_sse(response_endpoint(key), headers(key, credential, sid), body, limits)
+  defp do_complete(identity, req, opts, limits) do
+    with :ok <- ResponseBudget.validate(req, request_limits()),
+         {:ok, credential} <- OAuth.credential_receipt(identity.backend) do
+      sid = :crypto.strong_rand_bytes(16) |> Base.encode16(case: :lower)
+      body = build_body(Keyword.get(opts, :model) || @default_models[identity.backend], req)
+
+      request_with_credential(identity, credential, sid, body, limits)
+    end
+  end
+
+  defp request_with_credential(identity, credential, sid, body, limits) do
+    result = request_identity(identity, credential, sid, body, limits)
 
     case {result, credential} do
-      {{:error, {:responses_http, 401, :redacted}},
+      {{:error, %ResponsesFailure{class: :auth, status: 401}},
        %CredentialReceipt{provider: :openai, owner: "source_owned"} = used} ->
-        retry_source_once(key, used, sid, body, limits)
+        retry_source_once(identity, used, sid, body, limits)
 
       _ ->
         result
     end
   end
 
-  defp retry_source_once(key, used, sid, body, limits) do
+  defp retry_source_once(identity, used, sid, body, limits) do
     with {:ok, latest} <- OAuth.reread_source_credential(used) do
-      case request_sse(response_endpoint(key), headers(key, latest, sid), body, limits) do
-        {:error, {:responses_http, 401, :redacted}} ->
+      case request_identity(identity, latest, sid, body, limits) do
+        {:error, %ResponsesFailure{class: :auth, status: 401}} ->
           {:error, :oauth_source_reauthentication_required}
 
         result ->
@@ -92,6 +119,16 @@ defmodule Arbor.LLM.OAuth.Responses do
     end
   end
 
+  defp request_identity(identity, credential, sid, body, limits) do
+    request_sse(
+      response_endpoint(identity.backend),
+      headers(identity.backend, credential, sid),
+      body,
+      limits,
+      identity
+    )
+  end
+
   defp response_endpoint(key) do
     case Application.get_env(:arbor_llm, :oauth_response_endpoints) do
       %{} = configured -> Map.get(configured, key) || Map.get(configured, Atom.to_string(key))
@@ -100,19 +137,39 @@ defmodule Arbor.LLM.OAuth.Responses do
   end
 
   @doc false
-  def request_sse(url, headers, body, opts_or_limits) do
-    with {:ok, limits} <- normalize_limits(opts_or_limits),
+  def request_sse(url, headers, body, opts_or_limits, identity \\ @no_identity) do
+    with {:ok, identity} <- normalize_identity(identity),
+         {:ok, limits} <- normalize_limits(opts_or_limits),
          {:ok, receipt} <- Deadline.receipt(timeout_ms: limits.timeout),
          {:ok, canonical_url} <- Endpoint.validate(url, :oauth_responses) do
       limits = Map.put(limits, :deadline_ms, receipt.deadline_ms)
 
       Deadline.run(
-        fn -> do_request_sse(canonical_url, headers, body, limits) end,
+        fn -> do_request_sse(canonical_url, headers, body, limits, identity) end,
         receipt,
-        {:responses_deadline_exceeded, limits.timeout}
+        ResponsesFailure.transport(identity.route, identity.backend, :deadline_exceeded)
       )
     end
   end
+
+  # No fabricated identity: allowed pairs are validated; mismatched or malformed
+  # identity returns a bounded, non-retryable protocol failure.
+  defp normalize_identity(%{route: :openai_oauth, backend: :openai}),
+    do: {:ok, %{route: :openai_oauth, backend: :openai}}
+
+  defp normalize_identity(%{route: :xai_oauth, backend: :xai}),
+    do: {:ok, %{route: :xai_oauth, backend: :xai}}
+
+  defp normalize_identity(%{route: nil, backend: :openai}),
+    do: {:ok, %{route: nil, backend: :openai}}
+
+  defp normalize_identity(%{route: nil, backend: :xai}),
+    do: {:ok, %{route: nil, backend: :xai}}
+
+  defp normalize_identity(%{route: nil, backend: nil}), do: {:ok, @no_identity}
+
+  defp normalize_identity(_identity),
+    do: {:error, ResponsesFailure.protocol(nil, nil, :invalid_stream)}
 
   @doc """
   Convenience for the simple text path (no tools): `messages` is `[%{role, content}]`.
@@ -141,20 +198,6 @@ defmodule Arbor.LLM.OAuth.Responses do
       end
     end
   end
-
-  defp provider_key(provider) when is_atom(provider),
-    do: provider |> Atom.to_string() |> provider_key()
-
-  defp provider_key(provider)
-       when is_binary(provider) and byte_size(provider) > 0 and byte_size(provider) <= 256 do
-    case String.downcase(provider) do
-      p when p in ~w(openai codex chatgpt gpt) -> {:ok, :openai}
-      p when p in ~w(xai grok x-ai) -> {:ok, :xai}
-      p -> {:error, {:no_responses_provider, p}}
-    end
-  end
-
-  defp provider_key(_provider), do: {:error, :invalid_responses_provider}
 
   defp validate_text_messages(messages) do
     with :ok <- ResponseBudget.validate(messages, request_limits()) do
@@ -241,7 +284,10 @@ defmodule Arbor.LLM.OAuth.Responses do
 
   def parse_sse(_raw, _opts_or_limits), do: {:error, :binary_sse_required}
 
-  defp do_request_sse(url, headers, body, limits) do
+  # Every error escaping this function is a route-aware ResponsesFailure. Granular reasons stay
+  # inside parse_sse/2 for its direct callers; they are DISCARDED here rather than wrapped,
+  # because they can embed decoded response fragments.
+  defp do_request_sse(url, headers, body, limits, identity) do
     into = bounded_sse_receipt(limits)
 
     case Req.post(url,
@@ -254,7 +300,7 @@ defmodule Arbor.LLM.OAuth.Responses do
            into: into
          ) do
       {:ok, %Req.Response{private: %{arbor_oauth_response_error: reason}}} ->
-        {:error, reason}
+        {:error, classify_halt(reason, identity)}
 
       {:ok, %Req.Response{status: 200} = response} ->
         with :ok <- identity_content_encoding(response),
@@ -262,22 +308,104 @@ defmodule Arbor.LLM.OAuth.Responses do
              {:ok, raw} <- collected_body(response, limits.max_response_bytes),
              {:ok, parsed} <- parse_sse(raw, limits) do
           {:ok, parsed}
+        else
+          {:error, reason} -> {:error, classify_stream_reason(reason, identity)}
         end
 
       {:ok, %Req.Response{status: status} = response} ->
-        with {:ok, _raw} <- collected_body(response, limits.max_response_bytes) do
-          {:error, {:responses_http, status, :redacted}}
+        case collected_body(response, limits.max_response_bytes) do
+          {:ok, raw} ->
+            {:error, classify_status(status, raw, response, identity)}
+
+          {:error, reason} ->
+            {:error, classify_stream_reason(reason, identity)}
         end
 
       {:error, _reason} ->
-        {:error, {:responses_request_failed, :redacted}}
+        {:error, transport_failure(identity, :connection_failed)}
     end
   rescue
     _exception ->
-      {:error, {:responses_request_failed, :redacted}}
+      {:error, protocol_failure(identity, :invalid_stream)}
   catch
     _kind, _reason ->
-      {:error, {:responses_request_failed, :redacted}}
+      {:error, protocol_failure(identity, :invalid_stream)}
+  end
+
+  defp transport_failure(identity, code),
+    do: ResponsesFailure.transport(identity.route, identity.backend, code)
+
+  defp protocol_failure(identity, code),
+    do: ResponsesFailure.protocol(identity.route, identity.backend, code)
+
+  defp classify_halt({:responses_deadline_exceeded, _timeout}, identity),
+    do: transport_failure(identity, :deadline_exceeded)
+
+  defp classify_halt({:response_bytes_exceeded, _maximum}, identity),
+    do: protocol_failure(identity, :response_bytes_exceeded)
+
+  defp classify_halt(_reason, identity), do: transport_failure(identity, :connection_failed)
+
+  defp classify_stream_reason(reason, identity)
+       when reason in [:identity_content_encoding_required, :event_stream_content_type_required],
+       do: protocol_failure(identity, :invalid_response_headers)
+
+  defp classify_stream_reason({:response_bytes_exceeded, _maximum}, identity),
+    do: protocol_failure(identity, :response_bytes_exceeded)
+
+  defp classify_stream_reason(_reason, identity),
+    do: protocol_failure(identity, :invalid_stream)
+
+  defp classify_status(status, raw, response, identity) do
+    ResponsesFailure.from_status(identity.route, identity.backend, status,
+      tier_denied?: xai_tier_denied?(status, raw, identity),
+      retry_after_ms: retry_after_ms(status, response)
+    )
+  end
+
+  # Tier denial requires an EXPLICITLY parsed, allow-listed structured error code on an xAI 403.
+  # Never a substring scan, never a generic 403, never any other backend.
+  defp xai_tier_denied?(403, raw, %{backend: :xai}) when is_binary(raw) do
+    byte_size(raw) <= @max_error_json_bytes and allow_listed_error_code?(raw)
+  end
+
+  defp xai_tier_denied?(_status, _raw, _identity), do: false
+
+  defp allow_listed_error_code?(raw) do
+    case ResponseBudget.decode_json(raw, @error_json_limits) do
+      {:ok, %{} = json} -> structured_error_code(json) in @xai_tier_codes
+      _ -> false
+    end
+  end
+
+  # Only the boolean escapes; neither the body nor the decoded term is retained, and the code
+  # that reaches the failure struct is our own atom constant, not the parsed string.
+  defp structured_error_code(json) do
+    code =
+      case json do
+        %{"error" => %{"code" => code}} -> code
+        %{"code" => code} -> code
+        _ -> nil
+      end
+
+    if is_binary(code) and byte_size(code) <= @max_error_code_bytes, do: code, else: nil
+  end
+
+  # Read from the response HEADER only, never the body, and only where a wait hint is meaningful.
+  defp retry_after_ms(status, response) when status in [429, 503] do
+    case Req.Response.get_header(response, "retry-after") do
+      [value] when is_binary(value) -> bounded_retry_after_seconds(value)
+      _ -> nil
+    end
+  end
+
+  defp retry_after_ms(_status, _response), do: nil
+
+  defp bounded_retry_after_seconds(value) do
+    case Integer.parse(String.trim(value)) do
+      {seconds, ""} when seconds >= 0 and seconds <= 86_400 -> seconds * 1_000
+      _ -> nil
+    end
   end
 
   defp bounded_sse_receipt(limits) do

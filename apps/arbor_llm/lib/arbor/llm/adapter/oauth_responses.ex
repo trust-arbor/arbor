@@ -5,7 +5,10 @@ defmodule Arbor.LLM.Adapter.OAuthResponses do
   `Arbor.LLM.OAuth.Responses` call (OpenAI Responses API against the subscription backend).
 
   Registered under `"openai_oauth"` / `"xai_oauth"` (see `Client.discover_env_adapters/1`).
-  Anthropic is impossible here — `OAuth.access_token/1` refuses it and no `*_oauth` alias maps to it.
+  `request.provider` is resolved through `OAuth.route_only/1` — the single exact resolver — so
+  only those two IDs are accepted; `grok`, a bare `xai`, and unrelated names are rejected before
+  any request is built rather than inferred. Anthropic is impossible here: `route_only/1` refuses
+  it and no `*_oauth` route maps to it.
 
   **Tool calling** is supported (needed for coding-recon + the security evals): `request.tools`
   (OpenAI-nested) → Responses flat function tools; returned `function_call`s → `%Response{}` with
@@ -40,22 +43,26 @@ defmodule Arbor.LLM.Adapter.OAuthResponses do
 
   def complete(_request, _opts), do: {:error, :invalid_oauth_completion_request}
 
+  # Resolve the exact route FIRST: an unknown provider must fail before any input is built,
+  # any credential is read, and any socket is opened.
   defp do_complete(request, opts) do
-    {instructions, input} = build_input(request.messages)
-    req = %{instructions: instructions, input: input, tools: build_tools(request.tools)}
+    with {:ok, %{route: route}} <- OAuth.route_only(request.provider) do
+      {instructions, input} = build_input(request.messages)
+      req = %{instructions: instructions, input: input, tools: build_tools(request.tools)}
 
-    response_opts =
-      opts
-      |> Keyword.take([:max_response_bytes, :max_events, :max_event_bytes, :max_work])
-      |> maybe_put_opt(:receive_timeout, Keyword.fetch!(opts, :receive_timeout))
-      |> maybe_put_opt(:model, model_id(request.model))
+      response_opts =
+        opts
+        |> Keyword.take([:max_response_bytes, :max_events, :max_event_bytes, :max_work])
+        |> maybe_put_opt(:receive_timeout, Keyword.fetch!(opts, :receive_timeout))
+        |> maybe_put_opt(:model, model_id(request.model))
 
-    case OAuth.Responses.complete(oauth_provider(request.provider), req, response_opts) do
-      {:ok, %{text: text, tool_calls: tool_calls}} ->
-        Boundary.completion({:ok, build_response(text, tool_calls)}, opts)
+      case OAuth.Responses.complete(route, req, response_opts) do
+        {:ok, %{text: text, tool_calls: tool_calls}} ->
+          Boundary.completion({:ok, build_response(text, tool_calls)}, opts)
 
-      {:error, reason} ->
-        {:error, reason}
+        {:error, reason} ->
+          {:error, reason}
+      end
     end
   end
 
@@ -170,12 +177,6 @@ defmodule Arbor.LLM.Adapter.OAuthResponses do
   defp build_tools(_), do: nil
 
   # ── helpers ──
-
-  defp oauth_provider(p) when is_binary(p) do
-    if String.contains?(String.downcase(p), "xai"), do: :xai, else: :openai
-  end
-
-  defp oauth_provider(_), do: :openai
 
   defp model_id(nil), do: nil
   defp model_id(""), do: nil

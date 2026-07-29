@@ -63,6 +63,7 @@ defmodule Arbor.LLM.OAuth do
   alias Arbor.LLM.{Deadline, Endpoint, ResponseBudget}
   alias Arbor.LLM.OAuth.CredentialReceipt
   alias Arbor.Contracts.LLM.AuthProvenance
+  alias Arbor.Contracts.LLM.OAuthHealth
 
   @max_oauth_response_bytes 1_048_576
   @max_access_token_bytes 65_536
@@ -86,6 +87,13 @@ defmodule Arbor.LLM.OAuth do
   @doc false
   def provider_atoms, do: @provider_atoms
 
+  # Exact Arbor OAuth route IDs -> subscription backend store keys, and the bare
+  # backend keys that store-level callers legitimately use. Both are literal
+  # tables: the only atoms these produce are compile-time constants, so there is
+  # no dynamic atom creation on this path. Unknown names are NEVER defaulted.
+  @oauth_routes %{"openai_oauth" => :openai, "xai_oauth" => :xai}
+  @oauth_backends %{"openai" => :openai, "xai" => :xai}
+
   # Per-provider refresh endpoint + client_id and JWT-expiry skew. Acquisition is out of scope.
   @providers %{
     openai: %{
@@ -99,6 +107,62 @@ defmodule Arbor.LLM.OAuth do
       skew_s: 3600
     }
   }
+
+  @doc """
+  Resolve `provider` against the exact closed OAuth route table.
+
+  Returns `%{route: :openai_oauth | :xai_oauth | nil, backend: :openai | :xai}`. A bare backend
+  key (`openai` / `xai`) is accepted for store-level callers but resolves with `route: nil` — it
+  never claims a route identity. Everything else, including `grok`, `codex`, `chatgpt`, `gpt`, and
+  `x-ai`, is rejected; nothing falls back to OpenAI.
+  """
+  @spec route(atom() | String.t()) ::
+          {:ok, %{route: :openai_oauth | :xai_oauth | nil, backend: :openai | :xai}}
+          | {:error, term()}
+  def route(provider) do
+    with {:ok, p} <- normalize_oauth_provider(provider) do
+      cond do
+        # The one surviving `=~`: it only WIDENS denial (claude/claude-code/anthropic), never
+        # acceptance, so it is not permissive provider matching. It runs before any file read.
+        p =~ "claude" or p =~ "anthropic" ->
+          {:error, :anthropic_oauth_forbidden}
+
+        Map.has_key?(@oauth_routes, p) ->
+          {:ok, %{route: route_atom(p), backend: Map.fetch!(@oauth_routes, p)}}
+
+        Map.has_key?(@oauth_backends, p) ->
+          {:ok, %{route: nil, backend: Map.fetch!(@oauth_backends, p)}}
+
+        true ->
+          {:error, {:unknown_oauth_route, p}}
+      end
+    end
+  end
+
+  @doc """
+  Like `route/1` but requires an exact route ID — a bare backend key is rejected.
+
+  This is the single exact resolver for the production adapter and `health/1`; callers must not
+  re-implement downcasing, size, or UTF-8 checks.
+  """
+  @spec route_only(atom() | String.t()) ::
+          {:ok, %{route: :openai_oauth | :xai_oauth, backend: :openai | :xai}} | {:error, term()}
+  def route_only(provider) do
+    with {:ok, resolved} <- route(provider) do
+      case resolved do
+        %{route: nil} ->
+          {:ok, p} = normalize_oauth_provider(provider)
+          {:error, {:unknown_oauth_route, p}}
+
+        resolved ->
+          {:ok, resolved}
+      end
+    end
+  end
+
+  # Literal mapping, not String.to_atom/1.
+  defp route_atom("openai_oauth"), do: :openai_oauth
+  defp route_atom("xai_oauth"), do: :xai_oauth
 
   @doc """
   Return a valid access token for `provider`. `{:ok, token}` or `{:error, reason}`.
@@ -196,7 +260,110 @@ defmodule Arbor.LLM.OAuth do
     end
   end
 
+  @doc """
+  Local readiness for one exact OAuth route ID (`openai_oauth` / `xai_oauth`).
+
+  Performs **no network request and no token refresh**: this call graph reaches only the local
+  store read, the JWT expiry check, and (for source-owned OpenAI) the configured Codex source
+  read. An expiring token is REPORTED as `"expired"` rather than refreshed — that is the whole
+  point of the call. The result carries no token, account id, or path material; ownership metadata
+  comes only from the validated stored envelope, never from the source file.
+  """
+  @spec health(atom() | String.t()) :: {:ok, OAuthHealth.t()} | {:error, term()}
+  def health(provider) do
+    with {:ok, %{route: route, backend: backend}} <- route_only(provider) do
+      {status, credential} = health_status(backend, read_credential(backend))
+
+      OAuthHealth.new(
+        %{
+          version: OAuthHealth.schema_version(),
+          route: Atom.to_string(route),
+          backend: Atom.to_string(backend),
+          status: status
+        }
+        |> put_health_metadata(status, credential)
+      )
+    end
+  end
+
   # ── internals ──
+
+  defp health_status(_backend, {:error, :oauth_login_required}), do: {"login_required", nil}
+
+  defp health_status(_backend, {:error, :oauth_credential_migration_required}),
+    do: {"migration_required", nil}
+
+  defp health_status(_backend, {:error, :oauth_credential_invalid}), do: {"invalid", nil}
+
+  defp health_status(_backend, {:error, {:oauth_token_store_read_failed, _reason}}),
+    do: {"store_unreadable", nil}
+
+  defp health_status(_backend, {:error, _reason}), do: {"invalid", nil}
+
+  defp health_status(backend, {:ok, credential}),
+    do: {health_credential_status(backend, credential), credential}
+
+  defp health_credential_status(backend, %{owner: "arbor_owned"} = credential) do
+    config = Map.fetch!(@providers, backend)
+    access = credential.tokens["access_token"]
+
+    cond do
+      not is_binary(access) or byte_size(access) == 0 or
+          byte_size(access) > @max_access_token_bytes ->
+        "invalid"
+
+      # Reported, never refreshed: the refresh seam is unreachable from health/1.
+      expiring?(access, config.skew_s) ->
+        "expired"
+
+      true ->
+        "ready"
+    end
+  end
+
+  defp health_credential_status(:xai, %{owner: "source_owned"}), do: "source_unsupported"
+
+  defp health_credential_status(:openai, %{owner: "source_owned"} = credential) do
+    case read_openai_source_receipt(credential) do
+      {:ok, %CredentialReceipt{} = source_credential} ->
+        if expiring?(source_credential.access_token, @providers.openai.skew_s),
+          do: "expired",
+          else: "ready"
+
+      {:error, reason}
+      when reason in [
+             :oauth_source_path_invalid,
+             :oauth_source_file_unreadable,
+             :oauth_source_file_symlink,
+             :oauth_source_file_not_regular,
+             :oauth_source_file_oversized,
+             :oauth_source_file_changed
+           ] ->
+        "source_unavailable"
+
+      # Includes :oauth_source_credential_invalid — the source file is readable but its
+      # credential no longer matches this envelope, which only a relogin can fix.
+      {:error, _reason} ->
+        "relogin_required"
+    end
+  end
+
+  defp health_credential_status(_backend, _credential), do: "invalid"
+
+  defp put_health_metadata(attrs, _status, nil), do: attrs
+
+  defp put_health_metadata(attrs, status, credential) do
+    if status in ["login_required", "migration_required", "store_unreadable"] do
+      attrs
+    else
+      Map.merge(attrs, %{
+        owner: credential.owner,
+        origin: credential.origin,
+        source: credential.source,
+        generation: credential.generation
+      })
+    end
+  end
 
   # Map provider aliases -> the config key, refusing Anthropic FIRST (before any file read).
   defp resolve(provider) do

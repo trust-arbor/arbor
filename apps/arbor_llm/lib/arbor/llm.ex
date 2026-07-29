@@ -65,6 +65,17 @@ defmodule Arbor.LLM do
   @spec eval_subject_names() :: [String.t()]
   def eval_subject_names, do: Map.keys(@eval_subjects)
 
+  @doc """
+  Local subscription-OAuth readiness for one exact route ID (`openai_oauth` / `xai_oauth`).
+
+  Performs no network request and no token refresh, and returns no credential, token, account id,
+  or filesystem path material — only the closed `Arbor.Contracts.LLM.OAuthHealth` contract. Any
+  other provider name, including `grok` and a bare `xai`, is rejected rather than inferred.
+  """
+  @spec oauth_health(atom() | String.t()) ::
+          {:ok, Arbor.Contracts.LLM.OAuthHealth.t()} | {:error, term()}
+  def oauth_health(provider), do: Arbor.LLM.OAuth.health(provider)
+
   @spec generate(generate_opts()) ::
           {:ok, Arbor.LLM.Response.t()} | {:error, term()}
   def generate(opts) when is_list(opts) do

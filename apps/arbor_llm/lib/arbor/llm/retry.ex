@@ -118,6 +118,30 @@ defmodule Arbor.LLM.Retry do
     {:ok, retry_after_ms}
   end
 
+  defp retry_delay(
+         %Arbor.LLM.OAuth.ResponsesFailure{retry_after_ms: retry_after_ms},
+         _initial,
+         _factor,
+         _attempt,
+         max_delay,
+         _jitter
+       )
+       when is_integer(retry_after_ms) and retry_after_ms > max_delay do
+    :do_not_retry
+  end
+
+  defp retry_delay(
+         %Arbor.LLM.OAuth.ResponsesFailure{retry_after_ms: retry_after_ms},
+         _initial,
+         _factor,
+         _attempt,
+         max_delay,
+         _jitter
+       )
+       when is_integer(retry_after_ms) and retry_after_ms >= 0 and retry_after_ms <= max_delay do
+    {:ok, retry_after_ms}
+  end
+
   defp retry_delay(_reason, initial, factor, attempt, max_delay, jitter) do
     {:ok, backoff_delay(initial, factor, attempt, max_delay, jitter)}
   end
@@ -131,6 +155,11 @@ defmodule Arbor.LLM.Retry do
   Covers the same shapes as `Retry.execute/2`'s default `:should_retry`
   callback: rate-limit, timeout, network error, transient_error atoms;
   HTTP 429 and 5xx; `%Arbor.LLM.ProviderError{retryable: true}`;
+  `%Arbor.LLM.OAuth.ResponsesFailure` with one of
+  `:quota`, `:provider_outage`, or `:transport` class — while auth, forbidden,
+  tier-denied, and protocol failures stay non-retryable, so a credential problem
+  no retry can fix
+  never burns retry or fallback budget);
   `%Arbor.LLM.RequestTimeoutError{}`. Anything else returns false —
   fail closed so unknown errors don't burn retry budget.
 
@@ -143,6 +172,15 @@ defmodule Arbor.LLM.Retry do
   """
   @spec fallback_eligible?(term()) :: boolean()
   def fallback_eligible?(%Arbor.LLM.ProviderError{retryable: retryable}), do: retryable
+
+  def fallback_eligible?(%Arbor.LLM.OAuth.ResponsesFailure{class: class, code: code}) do
+    with true <- Arbor.LLM.OAuth.ResponsesFailure.valid_class_code?(class, code) do
+      class in [:quota, :provider_outage, :transport]
+    else
+      _ -> false
+    end
+  end
+
   def fallback_eligible?(%Arbor.LLM.RequestTimeoutError{}), do: true
 
   def fallback_eligible?(reason) when is_atom(reason) do
