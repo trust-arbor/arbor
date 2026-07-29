@@ -126,6 +126,39 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCoreTest do
     assert hd(manifest["decisions"])["reason"] == "retained_expired"
   end
 
+  test "quarantines an expired retained resource when its exact identity is unavailable" do
+    retained =
+      resource("retained_workspace_record", "retained", "terminal", "principal",
+        expires_at: @observed_at
+      )
+
+    unavailable_identity =
+      retained["expected_identity"]
+      |> Map.merge(%{
+        "proof_status" => "unavailable",
+        "marker_source" => "unavailable",
+        "workspace_digest" => nil,
+        "marker_digest" => nil,
+        "repository_digest" => nil,
+        "branch_observation" => %{"status" => "unavailable", "oid" => nil}
+      })
+
+    inventory =
+      resource_inventory([
+        Map.put(retained, "expected_identity", unavailable_identity)
+      ])
+
+    assert {:ok, manifest, _digest} =
+             ReconciliationCore.reconcile(
+               task_inventory([task("terminal", "done", false)]),
+               inventory,
+               @observed_at
+             )
+
+    assert hd(manifest["decisions"])["decision"] == "quarantine"
+    assert hd(manifest["decisions"])["reason"] == "ambiguous_provenance"
+  end
+
   test "quarantines every resource when the journal is degraded" do
     resources = [resource("live_workspace_lease", "degraded", "task-live", "principal")]
 
