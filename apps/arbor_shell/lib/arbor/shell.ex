@@ -598,7 +598,8 @@ defmodule Arbor.Shell do
     match; unknown rows are excluded and never inferred into scope.
   * One-sided filters fail closed.
 
-  Items expose segment-safe `resource_id` (`acu_v1_<hex>`), owner fields
+  Items expose the closed `resource_type` discriminator, segment-safe
+  `resource_id` (`acu_v1_<hex>`), owner fields
   (null when unknown), and domain-separated `source_record_digest`. Never
   includes journal token, path, PID, reference, or raw provider output.
   """

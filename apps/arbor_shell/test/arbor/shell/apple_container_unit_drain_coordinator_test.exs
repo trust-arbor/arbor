@@ -1962,9 +1962,14 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinatorTest do
       assert Process.alive?(task.pid)
       assert Map.has_key?(:sys.get_state(pid).pending_drain, worker)
 
+      :ok = FakeWorker.emit_drain(worker, @execution_id, receipt_ref)
+      Process.sleep(40)
+      assert Process.alive?(task.pid)
+      [{^worker, {fresh_receipt_ref, _caller}}] = Map.to_list(FakeWorker.drain_pending())
+
       :ok = Snapshot.set({:ok, []})
       :ok = FakeJournal.set_entries([])
-      :ok = FakeWorker.emit_drain(worker, @execution_id, receipt_ref)
+      :ok = FakeWorker.emit_drain(worker, @execution_id, fresh_receipt_ref)
 
       assert {:ok, receipt} = Task.await(task, 5_000)
       assert receipt["outcome"] == "settled"
@@ -1972,6 +1977,188 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinatorTest do
       assert receipt["active"] == false
       assert receipt["resource_id"] == settle_fields(rec)["resource_id"]
       refute String.contains?(inspect(receipt), @token)
+    end
+
+    test "worker verification uncertainty keeps baseline recovery and settles exact row", %{
+      holder: holder
+    } do
+      rec = record()
+      :ok = FakeJournal.reset(entries: [])
+      :ok = Snapshot.set({:ok, []})
+      pid = start_coord!(holder)
+      await_ready(pid)
+
+      worker = spawn_worker()
+      :ok = FakeJournal.set_entries([rec])
+      :ok = Snapshot.set({:ok, [worker]})
+
+      :ok =
+        FakeWorker.register_worker(worker,
+          execution_id: @execution_id,
+          journal_record: rec,
+          deny_info: true
+        )
+
+      task =
+        Task.async(fn ->
+          Coordinator.compare_and_settle_apple_container_unit(settle_fields(rec), pid)
+        end)
+
+      eventually!(fn ->
+        Enum.any?(FakeReconciler.events(), &match?({:recover_entry, ^rec, _, _}, &1))
+      end)
+
+      eventually!(fn ->
+        Enum.any?(FakeWorker.events(), &match?({:request_drain, ^worker, _, _}, &1))
+      end)
+
+      assert :sys.get_state(pid).apple_unit_settlements
+             |> Map.values()
+             |> hd()
+             |> Map.get(:observed)
+
+      [{receipt_ref, {_record, _caller}}] = Map.to_list(FakeReconciler.pending())
+      [{^worker, {drain_ref, _caller}}] = Map.to_list(FakeWorker.drain_pending())
+
+      :ok = FakeJournal.set_entries([])
+      :ok = Snapshot.set({:ok, []})
+      :ok = FakeReconciler.emit_recover_entry(receipt_ref)
+      :ok = FakeWorker.emit_drain(worker, @execution_id, drain_ref)
+
+      assert {:ok, receipt} = Task.await(task, 5_000)
+      assert receipt["outcome"] == "settled"
+      assert Enum.any?(FakeReconciler.events(), &match?({:recover_entry, ^rec, _, _}, &1))
+      assert Enum.any?(FakeWorker.events(), &match?({:request_drain, ^worker, _, _}, &1))
+    end
+
+    test "absent row with an unresolved hinted worker uses baseline drain before already_absent",
+         %{holder: holder} do
+      rec = record()
+      :ok = FakeJournal.reset(entries: [])
+      :ok = Snapshot.set({:ok, []})
+      pid = start_coord!(holder)
+      await_ready(pid)
+
+      worker = spawn_worker()
+
+      :ok =
+        FakeWorker.register_worker(worker,
+          execution_id: @execution_id,
+          journal_record: nil
+        )
+
+      :ok = Snapshot.set({:ok, [worker]})
+
+      task =
+        Task.async(fn ->
+          Coordinator.compare_and_settle_apple_container_unit(settle_fields(rec), pid)
+        end)
+
+      eventually!(fn ->
+        Enum.any?(FakeWorker.events(), &match?({:request_drain, ^worker, _, _}, &1))
+      end)
+
+      refute :sys.get_state(pid).apple_unit_settlements
+             |> Map.values()
+             |> hd()
+             |> Map.get(:observed)
+
+      assert Process.alive?(task.pid)
+      [{^worker, {drain_ref, _caller}}] = Map.to_list(FakeWorker.drain_pending())
+
+      :ok = FakeWorker.emit_drain(worker, @execution_id, drain_ref)
+      Process.sleep(40)
+      assert Process.alive?(task.pid)
+
+      :ok = Snapshot.set({:ok, []})
+      assert {:ok, receipt} = Task.await(task, 5_000)
+      assert receipt["outcome"] == "already_absent"
+      refute Map.has_key?(receipt, "unit_name")
+    end
+
+    test "pre-existing observed settlement rejects generation drift before shutdown cleanup", %{
+      holder: holder
+    } do
+      rec = record()
+      drifted = %{rec | token: String.duplicate("d", 64)}
+      :ok = FakeJournal.reset(entries: [])
+      :ok = Snapshot.set({:ok, []})
+      :ok = FakeReconciler.reset(phase: "ready", recover_all_mode: :hold)
+
+      pid = start_coord!(holder)
+      await_ready(pid)
+
+      :ok = FakeJournal.set_entries([rec])
+
+      settlement_task =
+        Task.async(fn ->
+          Coordinator.compare_and_settle_apple_container_unit(settle_fields(rec), pid)
+        end)
+
+      eventually!(fn ->
+        state = :sys.get_state(pid)
+
+        map_size(state.apple_unit_settlements) == 1 and
+          state.apple_unit_settlements |> Map.values() |> hd() |> Map.get(:observed)
+      end)
+
+      :ok = FakeJournal.set_entries([drifted])
+      barrier_task = Task.async(fn -> Coordinator.prepare_durable_shutdown(pid) end)
+
+      assert {:error, {:reconciliation_identity_conflict, conflict}} =
+               Task.await(settlement_task, 5_000)
+
+      assert conflict["resource_id"] == settle_fields(rec)["resource_id"]
+      assert map_size(:sys.get_state(pid).apple_unit_settlements) == 0
+      assert map_size(:sys.get_state(pid).pending_apple_unit_settlement_admissions) == 0
+
+      eventually!(fn -> map_size(FakeReconciler.recover_all_pending()) == 1 end)
+      [{all_ref, _caller}] = Map.to_list(FakeReconciler.recover_all_pending())
+      :ok = FakeJournal.set_entries([])
+      :ok = FakeReconciler.emit_recover_all(all_ref)
+      assert :ok = Task.await(barrier_task, 5_000)
+    end
+
+    test "pre-existing unobserved settlement is classified before shutdown cleanup", %{
+      holder: holder
+    } do
+      rec = record()
+      :ok = FakeJournal.reset(entries: [])
+      :ok = Snapshot.set({:ok, []})
+      :ok = FakeReconciler.reset(phase: "ready", recover_all_mode: :hold)
+
+      pid = start_coord!(holder)
+      await_ready(pid)
+
+      :ok = Snapshot.set({:error, :unit_supervisor_unavailable})
+
+      settlement_task =
+        Task.async(fn ->
+          Coordinator.compare_and_settle_apple_container_unit(settle_fields(rec), pid)
+        end)
+
+      eventually!(fn -> map_size(:sys.get_state(pid).apple_unit_settlements) == 1 end)
+      :ok = FakeJournal.set_entries([rec])
+      :ok = Snapshot.set({:ok, []})
+
+      barrier_task = Task.async(fn -> Coordinator.prepare_durable_shutdown(pid) end)
+
+      eventually!(fn ->
+        state = :sys.get_state(pid)
+
+        map_size(state.apple_unit_settlements) == 1 and
+          map_size(state.pending_apple_unit_settlement_admissions) == 0 and
+          state.apple_unit_settlements |> Map.values() |> hd() |> Map.get(:observed)
+      end)
+
+      eventually!(fn -> map_size(FakeReconciler.recover_all_pending()) == 1 end)
+      [{all_ref, _caller}] = Map.to_list(FakeReconciler.recover_all_pending())
+      :ok = FakeJournal.set_entries([])
+      :ok = FakeReconciler.emit_recover_all(all_ref)
+
+      assert :ok = Task.await(barrier_task, 5_000)
+      assert {:ok, receipt} = Task.await(settlement_task, 5_000)
+      assert receipt["outcome"] == "settled"
     end
 
     test "exact orphan uses the existing recovery path and settles after authoritative absence",
@@ -2017,6 +2204,9 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinatorTest do
       assert receipt["outcome"] == "already_absent"
       assert receipt["active"] == false
       refute Map.has_key?(receipt, "status")
+      refute Map.has_key?(receipt, "unit_name")
+      refute Map.has_key?(receipt, "execution_id")
+      refute Map.has_key?(receipt, "source_record_digest")
       refute Enum.any?(FakeWorker.events(), &match?({:request_drain, _, _, _}, &1))
       stop_pid(pid)
 
@@ -2399,13 +2589,17 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinatorTest do
       barrier_task =
         Task.async(fn ->
           send(parent, {:barrier_started, self()})
-          Coordinator.prepare_durable_shutdown(pid)
+          result = Coordinator.prepare_durable_shutdown(pid)
+          send(parent, :barrier_replied)
+          result
         end)
 
       settle_task =
         Task.async(fn ->
           send(parent, {:settlement_started, self()})
-          Coordinator.await_execution_settled(@execution_id, pid)
+          result = Coordinator.await_execution_settled(@execution_id, pid)
+          send(parent, :execution_replied)
+          result
         end)
 
       assert_receive {:barrier_started, _}, 1_000
@@ -2423,7 +2617,9 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinatorTest do
 
       unit_task =
         Task.async(fn ->
-          Coordinator.compare_and_settle_apple_container_unit(settle_fields(rec), pid)
+          result = Coordinator.compare_and_settle_apple_container_unit(settle_fields(rec), pid)
+          send(parent, :unit_replied)
+          result
         end)
 
       eventually!(fn ->
@@ -2445,6 +2641,9 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinatorTest do
       :ok = FakeJournal.set_entries([])
       assert :ok = FakeReconciler.emit_recover_all(all_ref)
 
+      assert_receive :unit_replied, 1_000
+      assert_receive :execution_replied, 1_000
+      assert_receive :barrier_replied, 1_000
       assert :ok = Task.await(barrier_task, 5_000)
       assert :ok = Task.await(settle_task, 5_000)
       assert {:ok, receipt} = Task.await(unit_task, 5_000)

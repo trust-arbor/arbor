@@ -2151,7 +2151,7 @@ defmodule Arbor.Shell.AppleContainerUnitJournal do
 
   defp redacted_inventory_item(record) when is_map(record) do
     with {:ok, identity} <- identity_from_record(record) do
-      {:ok, Map.delete(identity, "resource_type")}
+      {:ok, identity}
     else
       _ -> {:error, :unit_inventory_projection_failed}
     end

@@ -565,6 +565,7 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
         barrier_timer: nil,
         barrier_recover_all: nil,
         barrier_converged: false,
+        shutdown_settlement_classification_pending: false,
         # mon_ref => %{from, execution_id, caller_pid} — settlement waiters.
         execution_waiters: %{},
         # resource_id => %{expected_identity, waiters: %{mon_ref => waiter}}.
@@ -1055,33 +1056,6 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
     end
   end
 
-  defp suppress_unsafe_settlement_targets(orphan_records, unmatched_workers, analyses) do
-    unsafe =
-      Enum.filter(analyses, fn analysis ->
-        analysis.status == :worker_uncertain
-      end)
-
-    unsafe_unit_names =
-      unsafe
-      |> Enum.map(fn analysis -> analysis.expected_identity["unit_name"] end)
-      |> MapSet.new()
-
-    unsafe_workers =
-      unsafe
-      |> Enum.flat_map(&Map.get(&1, :worker_pids, []))
-      |> MapSet.new()
-
-    orphan_records =
-      Enum.reject(orphan_records, fn record ->
-        MapSet.member?(unsafe_unit_names, Map.get(record, :unit_name))
-      end)
-
-    unmatched_workers =
-      Enum.reject(unmatched_workers, &MapSet.member?(unsafe_workers, &1))
-
-    {orphan_records, unmatched_workers}
-  end
-
   defp reject_terminal_settlements(state, analyses) do
     Enum.reduce(analyses, {state, []}, fn analysis, {acc, keep} ->
       case analysis.status do
@@ -1143,7 +1117,10 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
   defp mark_settlement_observed(state, analyses) do
     observed_resources =
       analyses
-      |> Enum.filter(&(&1.status in [:live, :orphan]))
+      |> Enum.filter(
+        &(&1.status in [:live, :orphan] or
+            (&1.status == :worker_uncertain and is_map(&1[:record])))
+      )
       |> MapSet.new(& &1.resource_id)
 
     Enum.reduce(observed_resources, state, fn resource_id, acc ->
@@ -1235,16 +1212,23 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
 
   defp apple_unit_settlement_receipt(expected_identity, outcome)
        when outcome in ["settled", "already_absent"] do
-    %{
+    receipt = %{
       "schema_version" => 1,
       "resource_type" => "apple_container_unit",
       "resource_id" => expected_identity["resource_id"],
       "outcome" => outcome,
-      "active" => false,
-      "unit_name" => expected_identity["unit_name"],
-      "execution_id" => expected_identity["execution_id"],
-      "source_record_digest" => expected_identity["source_record_digest"]
+      "active" => false
     }
+
+    if outcome == "settled" do
+      Map.merge(receipt, %{
+        "unit_name" => expected_identity["unit_name"],
+        "execution_id" => expected_identity["execution_id"],
+        "source_record_digest" => expected_identity["source_record_digest"]
+      })
+    else
+      receipt
+    end
   end
 
   defp collect_hints(state, worker_pids) do
@@ -1303,13 +1287,6 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
     settlement_analysis = settlement_analysis(state, records, plan, verified)
 
     {state, settlement_analysis} = reject_terminal_settlements(state, settlement_analysis)
-
-    {orphan_records, unmatched_workers} =
-      suppress_unsafe_settlement_targets(
-        orphan_records,
-        unmatched_workers,
-        settlement_analysis
-      )
 
     state =
       state
@@ -1925,6 +1902,13 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
   defp shutdown_preparation?(_), do: false
 
   defp enter_shutdown_preparation(state) do
+    state =
+      if shutdown_preparation?(state.phase) do
+        state
+      else
+        %{state | shutdown_settlement_classification_pending: true}
+      end
+
     state
     |> cancel_reconstruct_timer()
     |> Map.put(:phase, :preparing_shutdown)
@@ -1940,6 +1924,9 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
   # this machine during preparing_shutdown even when no prep_stop waiter exists.
   defp advance_shutdown_barrier(state) do
     cond do
+      state.shutdown_settlement_classification_pending ->
+        classify_preexisting_shutdown_settlements(state)
+
       map_size(state.pending_apple_unit_settlement_admissions) > 0 ->
         resolve_apple_unit_settlement_admissions(state)
 
@@ -2092,12 +2079,15 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
   end
 
   defp reply_barrier_success(state) do
+    state =
+      state
+      |> settle_apple_unit_waiters_after_global_empty()
+      |> settle_all_execution_waiters()
+
     waiters = Enum.reverse(state.barrier_waiters)
     Enum.each(waiters, fn from -> GenServer.reply(from, :ok) end)
 
     state
-    |> settle_apple_unit_waiters_after_global_empty()
-    |> settle_all_execution_waiters()
     |> cancel_barrier_timer()
     |> Map.put(:barrier_waiters, [])
     |> Map.put(:barrier_converged, true)
@@ -2655,6 +2645,89 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
     end
   end
 
+  defp classify_preexisting_shutdown_settlements(%{apple_unit_settlements: settlements} = state)
+       when map_size(settlements) == 0 do
+    state
+    |> Map.put(:shutdown_settlement_classification_pending, false)
+    |> advance_shutdown_barrier()
+  end
+
+  defp classify_preexisting_shutdown_settlements(state) do
+    case settlement_journal_status_gate(state) do
+      {:permanent, reason} ->
+        state
+        |> reject_all_apple_unit_settlements(reason)
+        |> Map.put(:shutdown_settlement_classification_pending, false)
+        |> advance_shutdown_barrier()
+
+      :retry ->
+        schedule_barrier_tick(state)
+
+      :ok ->
+        case fetch_recovery_entries(state) do
+          {:ok, records} ->
+            state
+            |> classify_existing_settlements_against_records(records)
+            |> Map.put(:shutdown_settlement_classification_pending, false)
+            |> advance_shutdown_barrier()
+
+          {:error, reason} ->
+            case settlement_terminal_reason(reason) do
+              {:ok, terminal_reason} ->
+                state
+                |> reject_all_apple_unit_settlements(terminal_reason)
+                |> Map.put(:shutdown_settlement_classification_pending, false)
+                |> advance_shutdown_barrier()
+
+              :retry ->
+                schedule_barrier_tick(state)
+            end
+        end
+    end
+  end
+
+  defp classify_existing_settlements_against_records(state, records) do
+    Enum.reduce(state.apple_unit_settlements, state, fn {resource_id, settlement}, acc ->
+      case classify_settlement_identity(acc, records, settlement.expected_identity) do
+        :exact ->
+          put_settlement_observed(acc, resource_id)
+
+        :absent ->
+          # A prior live/orphan observation remains authenticated; otherwise
+          # absence is deliberately left unobserved for the global proof.
+          acc
+
+        {:conflict, current_identity} ->
+          remove_apple_unit_settlement(
+            acc,
+            resource_id,
+            {:reconciliation_identity_conflict,
+             %{
+               "resource_id" => resource_id,
+               "current_identity" => current_identity
+             }}
+          )
+
+        :current_identity_unavailable ->
+          remove_apple_unit_settlement(acc, resource_id, :current_identity_unavailable)
+      end
+    end)
+  end
+
+  defp put_settlement_observed(state, resource_id) do
+    case Map.get(state.apple_unit_settlements, resource_id) do
+      %{observed: false} = settlement ->
+        %{
+          state
+          | apple_unit_settlements:
+              Map.put(state.apple_unit_settlements, resource_id, %{settlement | observed: true})
+        }
+
+      _already_observed ->
+        state
+    end
+  end
+
   defp classify_apple_unit_settlement_admissions(state, records) do
     Enum.reduce(
       state.pending_apple_unit_settlement_admissions,
@@ -2692,9 +2765,13 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
   end
 
   defp classify_apple_unit_settlement_admission(state, records, admission) do
+    classify_settlement_identity(state, records, admission.expected_identity)
+  end
+
+  defp classify_settlement_identity(state, records, expected_identity) do
     matching_records =
       Enum.filter(records, fn record ->
-        Map.get(record, :unit_name) == admission.expected_identity["unit_name"]
+        Map.get(record, :unit_name) == expected_identity["unit_name"]
       end)
 
     case matching_records do
@@ -2703,7 +2780,7 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
 
       [record] ->
         case project_record_identity(state, record) do
-          {:ok, identity} when identity == admission.expected_identity ->
+          {:ok, identity} when identity == expected_identity ->
             :exact
 
           {:ok, current_identity} ->

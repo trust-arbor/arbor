@@ -9,6 +9,7 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
 
   import Bitwise
 
+  alias Arbor.Contracts.Coding.AppleContainerUnitIdentity
   alias Arbor.Shell.AppleContainerUnitJournal, as: Journal
   alias Arbor.Shell.AppleContainerUnitJournalCore, as: Core
   alias Arbor.Shell.Config
@@ -1278,9 +1279,18 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
       refute Enum.any?(inv["items"], &String.contains?(inspect(&1), @token_b))
 
       item = Enum.find(inv["items"], &(&1["unit_name"] == @unit_b))
+      assert item["resource_type"] == "apple_container_unit"
       assert String.starts_with?(item["resource_id"], "acu_v1_")
       assert is_binary(item["source_record_digest"])
       assert byte_size(item["source_record_digest"]) == 64
+
+      resource_id = item["resource_id"]
+
+      assert {:ok, ^resource_id, ^item} =
+               AppleContainerUnitIdentity.normalize_settle_fields(%{
+                 "resource_id" => item["resource_id"],
+                 "expected_identity" => item
+               })
 
       canonical_json =
         by_name[@unit_b]
