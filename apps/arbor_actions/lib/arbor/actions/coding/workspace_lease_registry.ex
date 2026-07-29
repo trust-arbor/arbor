@@ -2624,14 +2624,18 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
           {:ok, retained} ->
             case observe_retained_reconciliation_identity(state, retained, source) do
               {:ok, ^expected_identity} ->
-                retained = put_reconciliation_marker_fence(retained, source, workspace_id)
+                case put_reconciliation_marker_fence(retained, source, workspace_id) do
+                  {:ok, fenced_retained} ->
+                    settle_retained_after_identity_match(
+                      state,
+                      fenced_retained,
+                      workspace_id,
+                      expected_identity["branch_observation"]
+                    )
 
-                settle_retained_after_identity_match(
-                  state,
-                  retained,
-                  workspace_id,
-                  expected_identity["branch_observation"]
-                )
+                  {:error, reason} ->
+                    {:reply, {:error, reason}, state}
+                end
 
               {:ok, current_identity} ->
                 {:reply,
@@ -4249,22 +4253,6 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   defp require_worktree_phase_observation(_retained, _path_kind, _branch_observation),
     do: {:error, :discard_worktree_observation_unavailable}
 
-  # A marker-only retained settlement is authorized only by definitive absence
-  # of both independently recorded paths. The paths themselves remain inside
-  # the digest input built by RetainedReconciliationIdentity.
-  defp retained_paths_absence_proof(repo_path, worktree_path)
-       when is_binary(repo_path) and is_binary(worktree_path) do
-    case {File.lstat(repo_path), File.lstat(worktree_path)} do
-      {{:error, :enoent}, {:error, :enoent}} ->
-        {:ok, %{"repo_path" => repo_path, "worktree_path" => worktree_path, "state" => "absent"}}
-
-      _other ->
-        :not_both_absent
-    end
-  end
-
-  defp retained_paths_absence_proof(_repo_path, _worktree_path), do: :not_both_absent
-
   defp put_reconciliation_marker_fence(
          retained,
          %{marker_source: "durable", records: records},
@@ -4272,12 +4260,23 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
        )
        when is_map(retained) and is_map(records) do
     case Map.fetch(records, workspace_id) do
-      {:ok, marker} -> Map.put(retained, :reconciliation_marker_fence, marker)
-      :error -> retained
+      {:ok, marker} when is_map(marker) ->
+        {:ok, Map.put(retained, :reconciliation_marker_fence, marker)}
+
+      {:ok, _malformed} ->
+        {:error, :reconciliation_marker_fence_malformed}
+
+      :error ->
+        {:error, :reconciliation_marker_fence_unavailable}
     end
   end
 
-  defp put_reconciliation_marker_fence(retained, _source, _workspace_id), do: retained
+  defp put_reconciliation_marker_fence(retained, %{marker_source: "disabled"}, _workspace_id)
+       when is_map(retained),
+       do: {:ok, retained}
+
+  defp put_reconciliation_marker_fence(_retained, _source, _workspace_id),
+    do: {:error, :reconciliation_marker_fence_unavailable}
 
   defp require_matching_durable_hot_ids(state, records) do
     durable_ids = records |> Enum.map(& &1.workspace_id) |> MapSet.new()
@@ -6971,8 +6970,12 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   end
 
   defp both_paths_positively_absent?(repo_path, worktree_path)
-       when is_binary(repo_path) and is_binary(worktree_path),
-       do: match?({:ok, _proof}, retained_paths_absence_proof(repo_path, worktree_path))
+       when is_binary(repo_path) and is_binary(worktree_path) do
+    match?(
+      {:ok, {:both_absent, _proof}},
+      retained_path_observation(repo_path, worktree_path)
+    )
+  end
 
   defp both_paths_positively_absent?(_repo_path, _worktree_path), do: false
 
@@ -8109,7 +8112,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
                journal.store_name,
                journal.backend,
                key,
-               {:value, fence}
+               fence
              ) do
         :ok
       else

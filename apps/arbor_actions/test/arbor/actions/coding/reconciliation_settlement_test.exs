@@ -49,9 +49,14 @@ defmodule Arbor.Actions.Coding.ReconciliationApplyTest do
       ETS.compare_and_swap(key, expected, replacement, opts)
     end
 
-    def compare_and_delete(key, expected, opts) do
+    def compare_and_delete(key, expected, opts) when is_map(expected) do
       mutate_once(:delete, key, opts)
       ETS.compare_and_delete(key, expected, opts)
+    end
+
+    def compare_and_delete(_key, expected, _opts) do
+      raise ArgumentError,
+            "compare_and_delete expected an unwrapped marker map, got: #{inspect(expected)}"
     end
 
     defp mutate_once(kind, key, opts) do
@@ -1269,9 +1274,10 @@ defmodule Arbor.Actions.Coding.ReconciliationApplyTest do
     end)
 
     {_, expected_identity} = retained_identity_for(workspace_id)
+    assert expected_identity["proof_status"] == "unavailable"
     decision = retained_settle_decision(workspace_id, expected_identity)
 
-    assert {:error, :retained_not_expirable} =
+    assert {:error, :retained_identity_proof_required} =
              Actions.apply_coding_reconciliation_decision(auth, decision)
 
     :sys.replace_state(WorkspaceLeaseRegistry, fn state ->
