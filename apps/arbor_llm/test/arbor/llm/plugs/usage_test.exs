@@ -226,6 +226,25 @@ defmodule Arbor.LLM.Plugs.UsageTest do
     refute_receive {:usage_event, @event, _, _}, 50
   end
 
+  test "suppress_streaming claims gate without emitting or requiring a response" do
+    provenance = Usage.streaming_provenance(build_call(:stream, {:ok, :bounded_stream}))
+    response = arbor_response(%{input_tokens: 4, output_tokens: 3, total_tokens: 7})
+
+    assert is_nil(Usage.suppress_streaming(nil))
+
+    suppressed = Usage.suppress_streaming(provenance)
+    assert suppressed.usage_finalized?
+    refute Map.get(suppressed, :usage_emitted?, false)
+    refute_receive {:usage_event, @event, _, _}, 50
+
+    # Same gate cannot later emit via finalize_streaming.
+    Usage.finalize_streaming(response, provenance)
+    refute_receive {:usage_event, @event, _, _}, 50
+
+    # Idempotent when already finalized.
+    assert Usage.suppress_streaming(suppressed) == suppressed
+  end
+
   test "per-wrapper atomics gate enforces exactly-once when returned map is discarded" do
     provenance = Usage.streaming_provenance(build_call(:stream, {:ok, :bounded_stream}))
     response = arbor_response(%{input_tokens: 4, output_tokens: 3, total_tokens: 7})

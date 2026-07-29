@@ -20,7 +20,10 @@ defmodule Arbor.LLM.Plugs.Usage do
   repeated or concurrent collection of the same replayable wrapper cannot
   double-emit even when callers discard `finalize_streaming/3`'s return value.
   There is no global registry, TTL, or eviction. A collection that observed an
-  error event never finalizes usage.
+  error event never finalizes usage. Terminal `collect_stream` failures (producer
+  exceptions, malformed/over-limit streams, Boundary rejection) claim the same
+  gate via `suppress_streaming/1` so a later recollection cannot bill a
+  non-billable logical stream.
   """
 
   use Arbor.LLM.Plug
@@ -172,6 +175,30 @@ defmodule Arbor.LLM.Plugs.Usage do
       when is_map(provenance) and is_list(opts) do
     _ = claim_finalize_gate(Map.get(provenance, :finalize_gate))
     Map.put(provenance, :usage_finalized?, true)
+  end
+
+  @doc """
+  Claim the per-stream finalize gate without emitting usage.
+
+  Used by terminal `collect_stream` failure paths (producer exceptions,
+  malformed or over-limit streams, Boundary rejection) so a later recollection
+  of the same replayable wrapper cannot bill a non-billable logical stream.
+  Does not require constructing a fake response. A `nil` provenance is a no-op.
+  """
+  @spec suppress_streaming(map() | nil) :: map() | nil
+  def suppress_streaming(nil), do: nil
+
+  def suppress_streaming(provenance) when is_map(provenance) do
+    if Map.get(provenance, :usage_finalized?, false) do
+      provenance
+    else
+      _ = claim_finalize_gate(Map.get(provenance, :finalize_gate))
+      Map.put(provenance, :usage_finalized?, true)
+    end
+  rescue
+    _ -> provenance
+  catch
+    _, _ -> provenance
   end
 
   defp error_observed?(opts) when is_list(opts) do

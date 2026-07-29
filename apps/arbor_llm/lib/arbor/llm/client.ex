@@ -744,13 +744,23 @@ defmodule Arbor.LLM.Client do
           ok
 
         {:error, _reason} = error ->
+          # Boundary rejection is a terminal non-billable outcome for this
+          # logical stream; claim the gate so a later recollection cannot bill.
+          _ = Usage.suppress_streaming(provenance)
           error
       end
     else
-      {:error, _reason} = error -> error
+      {:error, _reason} = error ->
+        # Malformed / over-limit / track failures are terminal for this wrapper.
+        _ = Usage.suppress_streaming(provenance)
+        error
     end
   rescue
-    exception -> {:error, exception}
+    exception ->
+      # Producer exceptions during collect_stream are terminal non-billable
+      # failures; poison the same per-wrapper gate without emitting usage.
+      _ = Usage.suppress_streaming(provenance)
+      {:error, exception}
   end
 
   defp collect_step_finish(data, acc) do

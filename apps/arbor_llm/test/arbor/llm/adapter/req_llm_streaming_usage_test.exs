@@ -341,6 +341,92 @@ defmodule Arbor.LLM.Adapter.ReqLLMStreamingUsageTest do
     refute_receive {:usage_event, @event, _, _}, 50
   end
 
+  test "producer exception on first collect_stream cannot bill on later successful collection" do
+    alias Arbor.LLM.Client
+    alias Arbor.LLM.StreamEvent
+
+    provenance =
+      Usage.streaming_provenance(
+        Arbor.LLM.Call.new(:stream, {LLMDB.Model.new!(%{id: "gpt-4", provider: :openai}), [], []})
+      )
+
+    successful_events = [
+      %StreamEvent{type: :delta, data: %{text: "answer"}},
+      %StreamEvent{
+        type: :step_finish,
+        data: %{
+          usage: %{input_tokens: 4, output_tokens: 3, total_tokens: 7},
+          finish_reason: :stop
+        }
+      }
+    ]
+
+    {:ok, attempt} = Agent.start_link(fn -> 0 end)
+
+    # Replayable producer: first reduce raises; later reduces yield billable events.
+    # Terminal collect_stream failure must poison the gate so the later success
+    # of the same wrapper cannot bill.
+    producer =
+      Stream.resource(
+        fn -> Agent.get_and_update(attempt, fn n -> {n, n + 1} end) end,
+        fn
+          0 ->
+            raise "producer failed on first collection"
+
+          n when is_integer(n) ->
+            {successful_events, :done}
+
+          :done ->
+            {:halt, :done}
+        end,
+        fn _ -> :ok end
+      )
+
+    stream = Usage.accounted_stream(producer, provenance)
+
+    assert {:error, %RuntimeError{message: "producer failed on first collection"}} =
+             Client.collect_stream(stream)
+
+    refute_receive {:usage_event, @event, _, _}, 50
+
+    assert {:ok, response} = Client.collect_stream(stream)
+    assert response.text == "answer"
+    assert response.usage.input_tokens == 4
+    refute_receive {:usage_event, @event, _, _}, 50
+  end
+
+  test "Boundary rejection followed by permissive recollection cannot bill" do
+    alias Arbor.LLM.Client
+    alias Arbor.LLM.StreamEvent
+
+    provenance =
+      Usage.streaming_provenance(
+        Arbor.LLM.Call.new(:stream, {LLMDB.Model.new!(%{id: "gpt-4", provider: :openai}), [], []})
+      )
+
+    events = [
+      %StreamEvent{type: :delta, data: %{text: "answer"}},
+      %StreamEvent{
+        type: :step_finish,
+        data: %{
+          usage: %{input_tokens: 4, output_tokens: 3, total_tokens: 7},
+          finish_reason: :stop
+        }
+      }
+    ]
+
+    stream = Usage.accounted_stream(events, provenance)
+
+    assert {:error, _reason} = Client.collect_stream(stream, max_response_bytes: 1)
+    refute_receive {:usage_event, @event, _, _}, 50
+
+    # Same wrapper, permissive opts — gate claimed by the rejected attempt.
+    assert {:ok, response} = Client.collect_stream(stream)
+    assert response.text == "answer"
+    assert response.usage.input_tokens == 4
+    refute_receive {:usage_event, @event, _, _}, 50
+  end
+
   defp flush_pipeline_event_ids do
     receive do
       {:pipeline_event_id, _} -> flush_pipeline_event_ids()
