@@ -88,7 +88,10 @@ defmodule Arbor.Contracts.Coding.RetainedWorkspaceIdentity do
              workspace_digest,
              marker_digest,
              repository_digest,
-             branch_observation
+             branch_observation,
+             legacy["lifecycle"],
+             discard_phase,
+             settlement_tip
            ) do
       {:ok,
        legacy
@@ -183,14 +186,22 @@ defmodule Arbor.Contracts.Coding.RetainedWorkspaceIdentity do
          workspace_digest,
          marker_digest,
          repository_digest,
-         %{"status" => branch_status}
+         %{"status" => branch_status} = branch_observation,
+         lifecycle,
+         discard_phase,
+         settlement_tip
        )
        when marker_source in ~w(durable disabled) and is_binary(workspace_digest) and
               is_binary(repository_digest) and branch_status in ~w(present absent) do
-    cond do
-      marker_source == "durable" and is_binary(marker_digest) -> :ok
-      marker_source == "disabled" and is_nil(marker_digest) -> :ok
-      true -> {:error, :invalid_retained_workspace_identity}
+    with :ok <- validate_marker_shape(marker_source, marker_digest),
+         :ok <-
+           validate_complete_coherence(
+             lifecycle,
+             discard_phase,
+             settlement_tip,
+             branch_observation
+           ) do
+      :ok
     end
   end
 
@@ -200,7 +211,10 @@ defmodule Arbor.Contracts.Coding.RetainedWorkspaceIdentity do
          nil,
          nil,
          nil,
-         %{"status" => "unavailable", "oid" => nil}
+         %{"status" => "unavailable", "oid" => nil},
+         _lifecycle,
+         nil,
+         nil
        )
        when marker_source in ~w(durable disabled unavailable),
        do: :ok
@@ -211,6 +225,63 @@ defmodule Arbor.Contracts.Coding.RetainedWorkspaceIdentity do
          _workspace_digest,
          _marker_digest,
          _repository_digest,
+         _branch_observation,
+         _lifecycle,
+         _discard_phase,
+         _settlement_tip
+       ),
+       do: {:error, :invalid_retained_workspace_identity}
+
+  defp validate_marker_shape("durable", marker_digest) when is_binary(marker_digest), do: :ok
+  defp validate_marker_shape("disabled", nil), do: :ok
+
+  defp validate_marker_shape(_marker_source, _marker_digest),
+    do: {:error, :invalid_retained_workspace_identity}
+
+  defp validate_complete_coherence(
+         "retained",
+         nil,
+         nil,
+         %{"status" => "present", "oid" => oid}
+       )
+       when is_binary(oid),
+       do: :ok
+
+  defp validate_complete_coherence(
+         "discarding",
+         phase,
+         settlement_tip,
+         %{"status" => "present", "oid" => observed_oid}
+       )
+       when phase in ~w(archive worktree) and is_binary(settlement_tip) do
+    if observed_oid == settlement_tip,
+      do: :ok,
+      else: {:error, :invalid_retained_workspace_identity}
+  end
+
+  defp validate_complete_coherence(
+         "discarding",
+         "branch",
+         settlement_tip,
+         branch_observation
+       )
+       when is_binary(settlement_tip) do
+    case branch_observation do
+      %{"status" => "absent", "oid" => nil} ->
+        :ok
+
+      %{"status" => "present", "oid" => ^settlement_tip} ->
+        :ok
+
+      _other ->
+        {:error, :invalid_retained_workspace_identity}
+    end
+  end
+
+  defp validate_complete_coherence(
+         _lifecycle,
+         _discard_phase,
+         _settlement_tip,
          _branch_observation
        ),
        do: {:error, :invalid_retained_workspace_identity}
