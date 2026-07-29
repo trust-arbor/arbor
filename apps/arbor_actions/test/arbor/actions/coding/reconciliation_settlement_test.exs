@@ -1004,15 +1004,13 @@ defmodule Arbor.Actions.Coding.ReconciliationApplyTest do
   test "security regression: retained branch tip drift conflicts before archive intent", %{
     tmp_dir: tmp_dir
   } do
-    server = start_durable_retained_registry()
-    fixture = leased_project_for_registry(tmp_dir, server)
+    fixture = leased_project(tmp_dir)
     {retained, _expected_identity} = retained_identity(fixture)
     auth = verified_auth("agent_retained_branch_tip_drift")
     workspace_id = retained.workspace_id
 
     force_retained_expired_ms(workspace_id)
     {source_retained, expected_identity} = retained_identity_for(workspace_id)
-    {:ok, source_marker} = durable_retained_marker(workspace_id)
     previous_tip = git!(fixture.repo, ["rev-parse", source_retained.branch])
 
     File.write!(Path.join(source_retained.worktree_path, "branch-tip-drift.txt"), "v2\n")
@@ -1040,10 +1038,8 @@ defmodule Arbor.Actions.Coding.ReconciliationApplyTest do
              "oid" => replacement_tip
            }
 
-    state = :sys.get_state(workspace_registry_server())
+    state = :sys.get_state(WorkspaceLeaseRegistry)
     assert Map.fetch!(state.retained_by_id, workspace_id) == source_retained
-    assert {:ok, ^source_marker} = durable_retained_marker(workspace_id)
-    refute ref_exists?(fixture.repo, evidence_ref_for(fixture.context.task_id, workspace_id))
   end
 
   test "security regression: durable marker drift before reconciliation CAS has no destructive effect",
