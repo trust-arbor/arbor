@@ -2498,12 +2498,12 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
 
       iv = last_opts()[:initial_values]
 
-      validation_timeout_ms =
-        iv
-        |> Map.fetch!("coding_plan_validation_program")
-        |> get_in(["static_parameters", "timeout"])
+      assert {:ok, validation_source_ms} =
+               iv
+               |> Map.fetch!("coding_plan_validation_program")
+               |> ValidationProgram.largest_timeout_ms()
 
-      assert {:ok, expected_budget} = BudgetPolicy.allocate(timeout, validation_timeout_ms)
+      assert {:ok, expected_budget} = BudgetPolicy.allocate(timeout, validation_source_ms)
 
       expected_dotted_budget =
         Map.new(expected_budget, fn {key, value} ->
@@ -2519,10 +2519,95 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert actual_budget_keys == expected_dotted_budget |> Map.keys() |> Enum.sort()
       assert Map.take(iv, actual_budget_keys) == expected_dotted_budget
       assert Enum.all?(expected_dotted_budget, fn {_key, value} -> is_integer(value) end)
+      assert Map.has_key?(expected_dotted_budget, "coding_budget.validation_reserve_ms")
 
       assert Map.fetch!(iv, "session.run_deadline_unix_ms") > 0
       refute Map.has_key?(iv, "coding_budget")
       assert {:ok, _json} = Jason.encode(iv)
+    end
+
+    test "seeds opportunistic validation cap above guaranteed reserve for compound programs" do
+      # Plan wall clock large enough that cross_app static params materialize a
+      # test_stage_timeout above the 600s guaranteed reserve ceiling.
+      wall_clock_ms = 4_300_000
+      effective_timeout_ms = 4_300_000
+
+      assert {:ok, _result} =
+               CodingTaskExecutor.run(
+                 "agent_1",
+                 valid_direct_task(%{
+                   "validation_profile" => "cross_app",
+                   "budgets" => %{
+                     "wall_clock_ms" => wall_clock_ms,
+                     "inactivity_timeout_ms" => 120_000
+                   }
+                 }),
+                 valid_context(%{
+                   "task_id" => "task_owner_budget_compound",
+                   "timeout" => effective_timeout_ms
+                 })
+               )
+
+      iv = last_opts()[:initial_values]
+      program = Map.fetch!(iv, "coding_plan_validation_program")
+
+      assert {:ok, largest} = ValidationProgram.largest_timeout_ms(program)
+      assert largest > 600_000
+
+      assert iv["coding_budget.validation_ms"] == min(largest, effective_timeout_ms)
+      assert iv["coding_budget.validation_ms"] > iv["coding_budget.validation_reserve_ms"]
+
+      assert iv["coding_budget.worker_completion_reserve_ms"] ==
+               iv["coding_budget.validation_reserve_ms"] +
+                 iv["coding_budget.approval_ms"] +
+                 iv["coding_budget.review_ms"] +
+                 iv["coding_budget.cleanup_ms"]
+
+      refute iv["coding_budget.worker_completion_reserve_ms"] ==
+               iv["coding_budget.validation_ms"] +
+                 iv["coding_budget.approval_ms"] +
+                 iv["coding_budget.review_ms"] +
+                 iv["coding_budget.cleanup_ms"]
+
+      assert {:ok, _json} = Jason.encode(iv)
+    end
+
+    test "shorter trusted outer timeout recomputes cap and reserves with post-validation headroom" do
+      wall_clock_ms = 4_300_000
+      short_timeout_ms = 100_000
+
+      assert {:ok, _result} =
+               CodingTaskExecutor.run(
+                 "agent_1",
+                 valid_direct_task(%{
+                   "validation_profile" => "cross_app",
+                   "budgets" => %{
+                     "wall_clock_ms" => wall_clock_ms,
+                     "inactivity_timeout_ms" => 120_000
+                   }
+                 }),
+                 valid_context(%{
+                   "task_id" => "task_owner_budget_short_outer",
+                   "timeout" => short_timeout_ms
+                 })
+               )
+
+      iv = last_opts()[:initial_values]
+
+      assert iv["coding_budget.validation_ms"] == short_timeout_ms
+      assert iv["coding_budget.worker_completion_reserve_ms"] == 40_000
+      assert iv["coding_budget.validation_completion_reserve_ms"] > 0
+
+      assert iv["coding_budget.worker_completion_reserve_ms"] ==
+               iv["coding_budget.validation_reserve_ms"] +
+                 iv["coding_budget.approval_ms"] +
+                 iv["coding_budget.review_ms"] +
+                 iv["coding_budget.cleanup_ms"]
+
+      assert iv["coding_budget.validation_completion_reserve_ms"] ==
+               iv["coding_budget.approval_ms"] +
+                 iv["coding_budget.review_ms"] +
+                 iv["coding_budget.cleanup_ms"]
     end
 
     test "security regression: authority closes after success, runner error, and timeout" do

@@ -269,6 +269,49 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationProgramTest do
     end
   end
 
+  describe "largest_timeout_ms/1" do
+    test "returns ordinary profile timeout" do
+      assert {:ok, program} =
+               ValidationProgram.build(strategy!("default"), %{"wall_clock_ms" => 900_000})
+
+      assert {:ok, 900_000} = ValidationProgram.largest_timeout_ms(program)
+    end
+
+    test "returns the largest timeout-named static parameter for compound programs" do
+      assert {:ok, program} =
+               ValidationProgram.build(strategy!("cross_app"), %{"wall_clock_ms" => 4_300_000})
+
+      assert program["static_parameters"]["timeout"] == 1_200_000
+      assert program["static_parameters"]["test_stage_timeout"] == 4_200_000
+      assert {:ok, 4_200_000} = ValidationProgram.largest_timeout_ms(program)
+    end
+
+    test "uses equal timeouts when compound parameters share the same bound" do
+      assert {:ok, program} =
+               ValidationProgram.build(strategy!("cross_app"), %{"wall_clock_ms" => 900_000})
+
+      assert {:ok, 900_000} = ValidationProgram.largest_timeout_ms(program)
+    end
+
+    test "rejects invalid programs and programs without positive timeout-named integers" do
+      assert {:error, :invalid_validation_program} =
+               ValidationProgram.largest_timeout_ms(%{})
+
+      assert {:error, :invalid_validation_program} =
+               ValidationProgram.largest_timeout_ms(nil)
+
+      assert {:ok, program} =
+               ValidationProgram.build(strategy!("default"), %{"wall_clock_ms" => 900_000})
+
+      without_timeout =
+        put_in(program, ["static_parameters"], %{"warnings_as_errors" => true})
+
+      # Drifted static parameters fail closed as an invalid program first.
+      assert {:error, :invalid_validation_program} =
+               ValidationProgram.largest_timeout_ms(without_timeout)
+    end
+  end
+
   defp strategy!(profile_id) do
     {:ok, profile} = Profiles.fetch_executable(profile_id)
     profile["validation_strategy"]

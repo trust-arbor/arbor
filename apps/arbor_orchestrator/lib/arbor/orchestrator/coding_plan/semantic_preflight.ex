@@ -2117,6 +2117,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
         session.task_id
         coding_budget
         coding_budget.validation_ms
+        coding_budget.validation_reserve_ms
         coding_budget.approval_ms
         coding_budget.review_ms
         coding_budget.cleanup_ms

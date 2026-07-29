@@ -103,6 +103,38 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationProgram do
 
   def project_onto(_program, _attrs), do: {:error, :invalid_validation_program}
 
+  @doc """
+  Returns the largest positive timeout already present in a validated program's
+  static parameters.
+
+  Timeout keys are identified by name (the key string contains `"timeout"`),
+  not by action or profile id. This covers ordinary `timeout` and compound
+  `test_stage_timeout` without hardcoding coding action names.
+  """
+  @spec largest_timeout_ms(descriptor()) ::
+          {:ok, pos_integer()}
+          | {:error, :invalid_validation_program | :invalid_validation_timeout}
+  def largest_timeout_ms(program) do
+    with :ok <- validate(program),
+         static_parameters when is_map(static_parameters) and not is_struct(static_parameters) <-
+           program["static_parameters"] do
+      timeouts =
+        static_parameters
+        |> Enum.filter(fn {key, value} ->
+          is_binary(key) and String.contains?(key, "timeout") and is_integer(value) and
+            value > 0
+        end)
+        |> Enum.map(fn {_key, value} -> value end)
+
+      case timeouts do
+        [] -> {:error, :invalid_validation_timeout}
+        values -> {:ok, Enum.max(values)}
+      end
+    else
+      _other -> {:error, :invalid_validation_program}
+    end
+  end
+
   @doc "Validates a validation program as closed, versioned JSON-clean data."
   @spec validate(term()) :: :ok | {:error, :invalid_validation_program}
   def validate(program) when is_map(program) and not is_struct(program) do

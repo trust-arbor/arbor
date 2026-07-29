@@ -87,7 +87,8 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     Readiness,
     SemanticPreflight,
     TaskTerminalArchiveCore,
-    ValidationCapacityTerminal
+    ValidationCapacityTerminal,
+    ValidationProgram
   }
 
   alias Arbor.Orchestrator.Dot.Parser
@@ -1980,8 +1981,9 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     timeout = effective_timeout(plan, Map.get(exec_ctx, :timeout))
     approval_timeout_ms = Config.coding_approval_timeout_ms(timeout)
 
-    with {:ok, validation_timeout_ms} <- validation_timeout_ms(compilation),
-         {:ok, budget_allocation} <- BudgetPolicy.allocate(timeout, validation_timeout_ms) do
+    with {:ok, validation_action_source_ms} <- validation_action_source_ms(compilation),
+         {:ok, budget_allocation} <-
+           BudgetPolicy.allocate(timeout, validation_action_source_ms) do
       dotted_budget_allocation =
         Map.new(budget_allocation, fn {key, value} ->
           {"coding_budget.#{key}", value}
@@ -2042,16 +2044,10 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     end
   end
 
-  defp validation_timeout_ms(%Compilation{} = compilation) do
-    validation_program = Map.get(compilation.initial_values, "coding_plan_validation_program")
-
-    case get_in(validation_program, ["static_parameters", "timeout"]) do
-      timeout_ms when is_integer(timeout_ms) and timeout_ms > 0 ->
-        {:ok, timeout_ms}
-
-      _ ->
-        {:error, :invalid_validation_timeout}
-    end
+  defp validation_action_source_ms(%Compilation{} = compilation) do
+    compilation.initial_values
+    |> Map.get("coding_plan_validation_program")
+    |> ValidationProgram.largest_timeout_ms()
   end
 
   defp effective_timeout(%Plan{} = plan, context_timeout) do

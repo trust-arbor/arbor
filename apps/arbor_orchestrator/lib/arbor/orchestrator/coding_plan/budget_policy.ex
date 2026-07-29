@@ -4,17 +4,28 @@ defmodule Arbor.Orchestrator.CodingPlan.BudgetPolicy do
   DOT pipeline.
 
   Pure CRC core (no IO, no time, no config lookups): given the effective task
-  wall clock and the reviewed validation-program timeout, allocates desired
-  tail caps for the four terminal gates that must still run after a worker
-  turn completes — validation, approval, council review, and cleanup.
+  wall clock and the largest timeout present on the reviewed validation
+  program, allocates:
 
-  The tail reserve (the sum of the four stage budgets) is capped at 40% of
-  the effective wall clock so the worker phase always keeps the majority of
-  the budget. When the desired total would exceed that cap, the cap itself is
-  distributed across the four stages by approximate share (validation 55%,
-  approval 25%, review 15%, cleanup 5%) using the largest-remainder method,
-  so the allocation is exact (sums to the cap), deterministic, and never
-  negative.
+  1. An **opportunistic validation action cap** (`validation_ms`) —
+     `min(source_timeout, effective_wall_clock)`. This is *not* scaled under
+     the tail ceiling; runtime still clamps via DeadlineBudget against the
+     owner deadline and post-validation completion reserve.
+  2. A **guaranteed validation reserve** (`validation_reserve_ms`) plus the
+     other terminal stages (approval, council review, cleanup). The reserve
+     desired amount is `min(action_cap, 600_000)` and is scaled with the
+     other stages under the 40% tail ceiling.
+
+  The guaranteed tail reserve (validation_reserve + approval + review +
+  cleanup) is capped at 40% of the effective wall clock so the worker phase
+  always keeps the majority of the budget. When the desired total would
+  exceed that cap, the cap itself is distributed across the four reserve
+  stages by approximate share (validation 55%, approval 25%, review 15%,
+  cleanup 5%) using the largest-remainder method, so the allocation is exact
+  (sums to the cap), deterministic, and never negative.
+
+  `worker_completion_reserve_ms` includes only the guaranteed validation
+  reserve (not the larger opportunistic action cap).
   """
 
   @desired_validation_max_ms 600_000
@@ -33,28 +44,35 @@ defmodule Arbor.Orchestrator.CodingPlan.BudgetPolicy do
   @type allocate_error :: :invalid_budget_policy_input
 
   @doc """
-  Allocate deterministic terminal-gate tail budgets.
+  Allocate deterministic terminal-gate tail budgets and the opportunistic
+  validation action cap.
 
   `effective_wall_clock_ms` is the owner-computed effective task wall clock
   (`min(plan wall clock, trusted execution-context timeout)`).
-  `validation_timeout_ms` is the reviewed, compiler-selected validation
-  program timeout. Both must be positive integers.
+  `validation_action_source_ms` is the largest positive timeout already present
+  in the reviewed validation program static parameters. Both must be positive
+  integers.
 
-  Returns a flat, JSON-clean, string-keyed map with the four stage amounts
-  (`validation_ms`, `approval_ms`, `review_ms`, `cleanup_ms`) and the four
-  cumulative completion reserves consumed at each terminal gate boundary:
+  Returns a flat, JSON-clean, string-keyed map with:
 
-    - `worker_completion_reserve_ms` — validation + approval + review + cleanup
-    - `validation_completion_reserve_ms` — approval + review + cleanup
-    - `review_completion_reserve_ms` — cleanup
-    - `approval_completion_reserve_ms` — review + cleanup
+    - `validation_ms` — opportunistic action cap (`min(source, wall)`), not scaled
+    - `validation_reserve_ms` — guaranteed validation reserve (≤ 600_000 desired,
+      then scaled with the other stages under the 40% tail ceiling)
+    - `approval_ms`, `review_ms`, `cleanup_ms` — stage amounts
+    - cumulative completion reserves:
+      - `worker_completion_reserve_ms` — validation_reserve + approval + review + cleanup
+      - `validation_completion_reserve_ms` — approval + review + cleanup
+      - `review_completion_reserve_ms` — cleanup
+      - `approval_completion_reserve_ms` — review + cleanup
   """
   @spec allocate(pos_integer(), pos_integer()) :: {:ok, stage_ms()} | {:error, allocate_error()}
-  def allocate(effective_wall_clock_ms, validation_timeout_ms)
+  def allocate(effective_wall_clock_ms, validation_action_source_ms)
       when is_integer(effective_wall_clock_ms) and effective_wall_clock_ms > 0 and
-             is_integer(validation_timeout_ms) and validation_timeout_ms > 0 do
+             is_integer(validation_action_source_ms) and validation_action_source_ms > 0 do
+    action_cap_ms = min(validation_action_source_ms, effective_wall_clock_ms)
+
     desired = %{
-      validation: min(validation_timeout_ms, @desired_validation_max_ms),
+      validation: min(action_cap_ms, @desired_validation_max_ms),
       approval: @desired_approval_ms,
       review: @desired_review_ms,
       cleanup: @desired_cleanup_ms
@@ -72,15 +90,15 @@ defmodule Arbor.Orchestrator.CodingPlan.BudgetPolicy do
         scale_down(tail_cap_ms)
       end
 
-    {:ok, build_stage_ms(stages)}
+    {:ok, build_stage_ms(action_cap_ms, stages)}
   end
 
-  def allocate(_effective_wall_clock_ms, _validation_timeout_ms),
+  def allocate(_effective_wall_clock_ms, _validation_action_source_ms),
     do: {:error, :invalid_budget_policy_input}
 
   # Largest-remainder (Hamilton) apportionment of `tail_cap_ms` across the
-  # four stages by their approximate share. Exact integer accounting: the
-  # resulting amounts always sum to exactly `tail_cap_ms`, and are never
+  # four reserve stages by their approximate share. Exact integer accounting:
+  # the resulting amounts always sum to exactly `tail_cap_ms`, and are never
   # negative. Deterministic tie-break: stages with equal remainders are
   # ordered by @stage_order (validation, approval, review, cleanup).
   defp scale_down(tail_cap_ms) do
@@ -114,9 +132,10 @@ defmodule Arbor.Orchestrator.CodingPlan.BudgetPolicy do
     final
   end
 
-  defp build_stage_ms(%{validation: v, approval: a, review: r, cleanup: c}) do
+  defp build_stage_ms(action_cap_ms, %{validation: v, approval: a, review: r, cleanup: c}) do
     %{
-      "validation_ms" => v,
+      "validation_ms" => action_cap_ms,
+      "validation_reserve_ms" => v,
       "approval_ms" => a,
       "review_ms" => r,
       "cleanup_ms" => c,

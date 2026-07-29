@@ -2098,6 +2098,10 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
         graph.nodes["implement"].attrs,
         &Map.put(&1, "output_key", "coding_budget.validation_ms")
       ),
+      update_in(
+        graph.nodes["implement"].attrs,
+        &Map.put(&1, "output_key", "coding_budget.validation_reserve_ms")
+      ),
       update_in(graph.nodes["implement"].attrs, &Map.put(&1, "output_prefix", "coding_budget"))
     ]
 
