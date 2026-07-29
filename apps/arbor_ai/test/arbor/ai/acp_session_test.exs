@@ -1574,6 +1574,16 @@ defmodule Arbor.AI.AcpSessionTest do
       assert merged["text"] == "streamed text"
     end
 
+    test "uses canonical Claude result text instead of duplicated streamed replay" do
+      result = %{
+        "stopReason" => "end_turn",
+        "_meta" => %{"ex_mcp.claude_sdk" => %{"text" => "agent text"}}
+      }
+
+      merged = AcpSession.merge_accumulated_text(result, "agent textagent text")
+      assert merged["text"] == "agent text"
+    end
+
     test "handles atom-keyed result maps" do
       result = %{text: "", stop_reason: "end_turn"}
       merged = AcpSession.merge_accumulated_text(result, "streamed")

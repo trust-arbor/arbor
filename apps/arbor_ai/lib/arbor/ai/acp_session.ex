@@ -1415,13 +1415,23 @@ defmodule Arbor.AI.AcpSession do
     existing = Map.get(result, "text") || Map.get(result, :text)
 
     if is_nil(existing) or existing == "" do
-      Map.put(result, "text", accumulated)
+      Map.put(result, "text", claude_sdk_result_text(result) || accumulated)
     else
       result
     end
   end
 
   def merge_accumulated_text(result, _), do: result
+
+  defp claude_sdk_result_text(result) do
+    with %{} = meta <- Map.get(result, "_meta") || Map.get(result, :_meta),
+         %{} = claude <- Map.get(meta, "ex_mcp.claude_sdk"),
+         text when is_binary(text) and text != "" <- Map.get(claude, "text") do
+      text
+    else
+      _ -> nil
+    end
+  end
 
   # -- Usage & Context Tracking --
 
