@@ -8,7 +8,6 @@ defmodule Arbor.Actions.Coding.ReconciliationApplyTest do
   alias Arbor.Actions.Coding.WorkspaceRetentionJournalCore, as: RetentionJournal
   alias Arbor.Contracts.Coding.PendingApprovalResourceId
   alias Arbor.Contracts.Coding.ReconciliationDecision
-  alias Arbor.Contracts.Coding.RetainedWorkspaceIdentity
   alias Arbor.Contracts.Security.AuthContext
   alias Arbor.Contracts.Security.SignedRequest
   alias Arbor.Persistence
@@ -31,6 +30,55 @@ defmodule Arbor.Actions.Coding.ReconciliationApplyTest do
 
   defmodule WeirdSecurity do
     def authorize(_principal_id, _uri, :execute, _opts), do: :not_a_valid_authz_result
+  end
+
+  # Test-only Store delegate. It injects a semantic durable-marker change at
+  # the public CAS boundary, then forwards to the real ETS backend.
+  defmodule DriftBeforeCasStore do
+    alias Arbor.Persistence.Store.ETS
+
+    def put(key, value, opts), do: ETS.put(key, value, opts)
+    def get(key, opts), do: ETS.get(key, opts)
+    def delete(key, opts), do: ETS.delete(key, opts)
+    def list(opts), do: ETS.list(opts)
+    def exists?(key, opts), do: ETS.exists?(key, opts)
+    def durability_class(opts), do: ETS.durability_class(opts)
+
+    def compare_and_swap(key, expected, replacement, opts) do
+      mutate_once(:swap, key, opts)
+      ETS.compare_and_swap(key, expected, replacement, opts)
+    end
+
+    def compare_and_delete(key, expected, opts) do
+      mutate_once(:delete, key, opts)
+      ETS.compare_and_delete(key, expected, opts)
+    end
+
+    defp mutate_once(kind, key, opts) do
+      name = Keyword.fetch!(opts, :name)
+      injection_key = {__MODULE__, name}
+
+      case :persistent_term.get(injection_key, :off) do
+        :swap when kind == :swap ->
+          :persistent_term.put(injection_key, :off)
+          {:ok, marker} = ETS.get(key, opts)
+          :ok = ETS.put(key, Map.update!(marker, :retry_count, &(&1 + 1)), opts)
+
+        :delete when kind == :delete ->
+          :persistent_term.put(injection_key, :off)
+          {:ok, marker} = ETS.get(key, opts)
+          :ok = ETS.put(key, Map.update!(marker, :retry_count, &(&1 + 1)), opts)
+
+        :swap ->
+          :ok
+
+        :delete ->
+          :ok
+
+        :off ->
+          :ok
+      end
+    end
   end
 
   defmodule RecordingSecurity do
@@ -959,7 +1007,7 @@ defmodule Arbor.Actions.Coding.ReconciliationApplyTest do
 
     force_retained_expired_ms(workspace_id)
     {source_retained, expected_identity} = retained_identity_for(workspace_id)
-    source_marker = durable_retained_marker(workspace_id)
+    {:ok, source_marker} = durable_retained_marker(workspace_id)
     previous_tip = git!(fixture.repo, ["rev-parse", source_retained.branch])
 
     File.write!(Path.join(source_retained.worktree_path, "branch-tip-drift.txt"), "v2\n")
@@ -971,9 +1019,15 @@ defmodule Arbor.Actions.Coding.ReconciliationApplyTest do
 
     decision = retained_settle_decision(workspace_id, expected_identity)
 
-    assert {:error, {:reconciliation_identity_conflict, conflict}} =
-             Actions.apply_coding_reconciliation_decision(auth, decision)
+    result = Actions.apply_coding_reconciliation_decision(auth, decision)
 
+    # This behavioral assertion is intentionally before the fixed-code shape
+    # assertion: on the parent-only test hunk the replacement tip is archived
+    # and deleted, proving the regression without candidate-only helpers.
+    assert git!(fixture.repo, ["rev-parse", source_retained.branch]) == replacement_tip
+    assert File.dir?(source_retained.worktree_path)
+
+    assert {:error, {:reconciliation_identity_conflict, conflict}} = result
     assert conflict["resource_id"] == workspace_id
 
     assert conflict["current_identity"]["branch_observation"] == %{
@@ -981,13 +1035,41 @@ defmodule Arbor.Actions.Coding.ReconciliationApplyTest do
              "oid" => replacement_tip
            }
 
-    assert git!(fixture.repo, ["rev-parse", source_retained.branch]) == replacement_tip
-    assert File.dir?(source_retained.worktree_path)
-
     state = :sys.get_state(workspace_registry_server())
     assert Map.fetch!(state.retained_by_id, workspace_id) == source_retained
-    assert durable_retained_marker(workspace_id) == source_marker
+    assert {:ok, ^source_marker} = durable_retained_marker(workspace_id)
     refute ref_exists?(fixture.repo, evidence_ref_for(fixture.context.task_id, workspace_id))
+  end
+
+  test "security regression: durable marker drift before reconciliation CAS has no destructive effect",
+       %{
+         tmp_dir: tmp_dir
+       } do
+    server = start_durable_retained_registry(DriftBeforeCasStore)
+    fixture = leased_project_for_registry(tmp_dir, server)
+    {retained, _identity} = retained_identity(fixture)
+    auth = verified_auth("agent_retained_marker_cas_drift")
+    workspace_id = retained.workspace_id
+
+    force_retained_expired_ms(workspace_id)
+    {source_retained, expected_identity} = retained_identity_for(workspace_id)
+    {:ok, source_marker} = durable_retained_marker(workspace_id)
+    :persistent_term.put({DriftBeforeCasStore, retention_store_name()}, :swap)
+
+    decision = retained_settle_decision(workspace_id, expected_identity)
+
+    assert {:error, {_stage, :reconciliation_marker_identity_conflict}} =
+             Actions.apply_coding_reconciliation_decision(auth, decision)
+
+    assert {:ok, changed_marker} = durable_retained_marker(workspace_id)
+    assert changed_marker.retry_count == source_marker.retry_count + 1
+
+    assert git!(fixture.repo, ["rev-parse", source_retained.branch]) ==
+             source_retained.base_commit
+
+    assert File.dir?(source_retained.worktree_path)
+    refute ref_exists?(fixture.repo, evidence_ref_for(fixture.context.task_id, workspace_id))
+    assert Map.has_key?(:sys.get_state(workspace_registry_server()).retained_by_id, workspace_id)
   end
 
   test "retained both-paths-absent settlement is exact and replay idempotent", %{tmp_dir: tmp_dir} do
@@ -1019,6 +1101,97 @@ defmodule Arbor.Actions.Coding.ReconciliationApplyTest do
              "resource_type" => "retained_workspace_record",
              "schema_version" => 1
            }
+  end
+
+  test "security regression: both-absent reconciliation never deletes a drifted marker", %{
+    tmp_dir: tmp_dir
+  } do
+    server = start_durable_retained_registry(DriftBeforeCasStore)
+    fixture = leased_project_for_registry(tmp_dir, server)
+    {retained, _identity} = retained_identity(fixture)
+    auth = verified_auth("agent_retained_absent_delete_drift")
+    workspace_id = retained.workspace_id
+
+    force_retained_expired_ms(workspace_id)
+    File.rm_rf!(retained.worktree_path)
+    File.rm_rf!(retained.repo_path)
+    {_source_retained, expected_identity} = retained_identity_for(workspace_id)
+    {:ok, source_marker} = durable_retained_marker(workspace_id)
+    :persistent_term.put({DriftBeforeCasStore, retention_store_name()}, :delete)
+
+    decision = retained_settle_decision(workspace_id, expected_identity)
+
+    assert {:error, {:marker_delete_failed, :reconciliation_marker_identity_conflict}} =
+             Actions.apply_coding_reconciliation_decision(auth, decision)
+
+    assert {:ok, changed_marker} = durable_retained_marker(workspace_id)
+    assert changed_marker.retry_count == source_marker.retry_count + 2
+    assert Map.has_key?(:sys.get_state(workspace_registry_server()).retained_by_id, workspace_id)
+  end
+
+  test "retained inventory quarantines branch absence and one-sided or unreadable paths", %{
+    tmp_dir: tmp_dir
+  } do
+    server = start_durable_retained_registry()
+    fixture = leased_project_for_registry(tmp_dir, server)
+    {retained, _identity} = retained_identity(fixture)
+    workspace_id = retained.workspace_id
+
+    git!(fixture.repo, ["update-ref", "-d", "refs/heads/#{retained.branch}"])
+    assert retained_inventory_identity(workspace_id)["proof_status"] == "unavailable"
+
+    # Recreate the fixture for a distinct one-sided path observation.
+    fixture = leased_project_for_registry(tmp_dir, server)
+    {retained, _identity} = retained_identity(fixture)
+    File.rm_rf!(retained.worktree_path)
+    assert retained_inventory_identity(retained.workspace_id)["proof_status"] == "unavailable"
+
+    fixture = leased_project_for_registry(tmp_dir, server)
+    {retained, _identity} = retained_identity(fixture)
+    parent = Path.dirname(retained.worktree_path)
+    :ok = File.chmod(parent, 0o000)
+    on_exit(fn -> File.chmod(parent, 0o700) end)
+
+    assert retained_inventory_identity(retained.workspace_id)["proof_status"] == "unavailable"
+  end
+
+  test "retention blockers publish an unavailable v2 identity without path leakage", %{
+    tmp_dir: tmp_dir
+  } do
+    server = start_durable_retained_registry()
+    fixture = leased_project_for_registry(tmp_dir, server)
+    {retained, _identity} = retained_identity(fixture)
+    workspace_id = retained.workspace_id
+
+    complete_identity = retained_inventory_identity(workspace_id)
+    encoded = Jason.encode!(complete_identity)
+
+    for secret <- [
+          retained.repo_path,
+          retained.worktree_path,
+          retained.display_worktree_path,
+          retained.branch,
+          retained.runtime_id,
+          inspect(retained.lstat_identity),
+          inspect(retained.worktree_registration)
+        ] do
+      refute String.contains?(encoded, secret)
+    end
+
+    :sys.replace_state(workspace_registry_server(), fn state ->
+      %{
+        state
+        | retained_by_id: Map.delete(state.retained_by_id, workspace_id),
+          retained_by_target: Map.delete(state.retained_by_target, retained.target),
+          retention_blockers: Map.put(state.retention_blockers, workspace_id, retained),
+          retention_blockers_by_target:
+            Map.put(state.retention_blockers_by_target, retained.target, retained)
+      }
+    end)
+
+    identity = retained_inventory_identity(workspace_id)
+    assert identity["identity_version"] == 2
+    assert identity["proof_status"] == "unavailable"
   end
 
   test "retained legacy identity apply is rejected", %{tmp_dir: tmp_dir} do
@@ -1119,6 +1292,93 @@ defmodule Arbor.Actions.Coding.ReconciliationApplyTest do
              Actions.apply_coding_reconciliation_decision(auth, decision)
 
     assert Map.has_key?(:sys.get_state(WorkspaceLeaseRegistry).retained_by_id, workspace_id)
+  end
+
+  test "discarding branch phase admits an absent branch after proven worktree removal", %{
+    tmp_dir: tmp_dir
+  } do
+    fixture = leased_project(tmp_dir)
+    {retained, _identity} = retained_identity(fixture)
+    auth = verified_auth("agent_retained_branch_phase_absent")
+    workspace_id = retained.workspace_id
+    settlement_tip = git!(fixture.repo, ["rev-parse", retained.branch])
+
+    File.rm_rf!(retained.worktree_path)
+    git!(fixture.repo, ["update-ref", "-d", "refs/heads/#{retained.branch}"])
+
+    :sys.replace_state(workspace_registry_server(), fn state ->
+      current = Map.fetch!(state.retained_by_id, workspace_id)
+
+      updated =
+        current
+        |> Map.put(:lifecycle, :discarding)
+        |> Map.put(:discard_phase, :branch)
+        |> Map.put(:settlement_tip, settlement_tip)
+        |> Map.put(:lstat_identity, nil)
+        |> Map.put(:worktree_registration, nil)
+        |> Map.put(:expiry_ref, nil)
+
+      put_retained_indexes(state, updated)
+    end)
+
+    {_seeded, expected_identity} = retained_identity_for(workspace_id)
+    assert expected_identity["proof_status"] == "complete"
+    assert expected_identity["branch_observation"] == %{"status" => "absent", "oid" => nil}
+
+    assert {:ok, receipt} =
+             Actions.apply_coding_reconciliation_decision(
+               auth,
+               retained_settle_decision(workspace_id, expected_identity)
+             )
+
+    assert receipt["outcome"] == "settled"
+    refute Map.has_key?(:sys.get_state(workspace_registry_server()).retained_by_id, workspace_id)
+  end
+
+  test "discard phase and settlement tip drift block exact settlement until the durable source is restored",
+       %{
+         tmp_dir: tmp_dir
+       } do
+    server = start_durable_retained_registry()
+    fixture = leased_project_for_registry(tmp_dir, server)
+    {retained, _identity} = retained_identity(fixture)
+    auth = verified_auth("agent_retained_phase_tip_drift")
+    workspace_id = retained.workspace_id
+    settlement_tip = git!(fixture.repo, ["rev-parse", retained.branch])
+    {:ok, source_marker} = durable_retained_marker(workspace_id)
+
+    phase_marker =
+      source_marker
+      |> Map.put(:lifecycle, "discarding")
+      |> Map.put(:discard_phase, "worktree")
+      |> Map.put(:settlement_tip, settlement_tip)
+
+    put_durable_retained_marker(workspace_id, phase_marker)
+    put_retained_discard_phase(workspace_id, :worktree, settlement_tip)
+
+    {_seeded, expected_identity} = retained_identity_for(workspace_id)
+    assert expected_identity["proof_status"] == "complete"
+    assert expected_identity["discard_phase"] == "worktree"
+    assert expected_identity["settlement_tip"] == settlement_tip
+
+    drifted_tip = String.duplicate("a", 40)
+    put_durable_retained_marker(workspace_id, Map.put(phase_marker, :settlement_tip, drifted_tip))
+    put_retained_discard_phase(workspace_id, :worktree, drifted_tip)
+
+    assert retained_inventory_identity(workspace_id)["proof_status"] == "unavailable"
+
+    assert {:error, :current_identity_unavailable} =
+             Actions.apply_coding_reconciliation_decision(
+               auth,
+               retained_settle_decision(workspace_id, expected_identity)
+             )
+
+    put_durable_retained_marker(workspace_id, phase_marker)
+    put_retained_discard_phase(workspace_id, :worktree, settlement_tip)
+    {_seeded, resumed_identity} = retained_identity_for(workspace_id)
+    assert resumed_identity["proof_status"] == "complete"
+    assert resumed_identity["discard_phase"] == "worktree"
+    assert resumed_identity["settlement_tip"] == settlement_tip
   end
 
   test "retained discarding continues crash-durable phase without expiry gate and settles only on full absence",
@@ -1752,10 +2012,54 @@ defmodule Arbor.Actions.Coding.ReconciliationApplyTest do
       end)
 
     assert is_map(resource)
-    expected_identity = resource["expected_identity"]
-    assert RetainedWorkspaceIdentity.settlement_ready?(expected_identity)
+    # The branch-tip security regression must be runnable as a test-only hunk
+    # against the parent: fixed code supplies the v2 source proof, while the
+    # parent falls back to its legacy projected comparison identity and exposes
+    # the unsafe archive/delete behavior.
+    expected_identity =
+      case Map.get(resource, "expected_identity") do
+        identity when is_map(identity) -> identity
+        _ -> legacy_projected_retained_identity(resource)
+      end
 
     {retained, expected_identity}
+  end
+
+  defp retained_inventory_identity(workspace_id) do
+    assert {:ok, inventory} =
+             WorkspaceLeaseRegistry.reconciliation_inventory(nil, nil, 256,
+               server: workspace_registry_server()
+             )
+
+    resource =
+      Enum.find(inventory["resources"], fn resource ->
+        resource["resource_type"] == "retained_workspace_record" and
+          resource["resource_id"] == workspace_id
+      end)
+
+    assert is_map(resource)
+    assert is_map(resource["expected_identity"])
+    resource["expected_identity"]
+  end
+
+  defp legacy_projected_retained_identity(resource) do
+    retry_state = Map.get(resource, "retry_state", %{})
+
+    %{
+      "resource_type" => resource["resource_type"],
+      "resource_id" => resource["resource_id"],
+      "task_id" => resource["task_id"],
+      "principal_id" => resource["principal_id"],
+      "lifecycle" => resource["lifecycle"],
+      "active" => resource["active"],
+      "ownership" => resource["ownership"],
+      "branch_provenance" => resource["branch_provenance"],
+      "cleanup_armed" => resource["cleanup_armed"] || false,
+      "dormant" => resource["dormant"] || retry_state["dormant"] || false,
+      "retry_count" => retry_state["count"] || 0,
+      "retry_limit" => retry_state["limit"] || 0,
+      "expires_at" => resource["expires_at"]
+    }
   end
 
   defp force_retained_expired_ms(workspace_id) do
@@ -1782,6 +2086,22 @@ defmodule Arbor.Actions.Coding.ReconciliationApplyTest do
       | retained_by_id: Map.put(state.retained_by_id, retained.workspace_id, retained),
         retained_by_target: Map.put(state.retained_by_target, retained.target, retained)
     }
+  end
+
+  defp put_retained_discard_phase(workspace_id, phase, settlement_tip) do
+    :sys.replace_state(workspace_registry_server(), fn state ->
+      current = Map.fetch!(state.retained_by_id, workspace_id)
+
+      updated =
+        current
+        |> Map.put(:lifecycle, :discarding)
+        |> Map.put(:discard_phase, phase)
+        |> Map.put(:settlement_tip, settlement_tip)
+        |> Map.put(:durable_lifecycle, nil)
+        |> Map.put(:expiry_ref, nil)
+
+      put_retained_indexes(state, updated)
+    end)
   end
 
   defp drop_workspace_residue(workspace_id) when is_binary(workspace_id) do
@@ -1819,7 +2139,7 @@ defmodule Arbor.Actions.Coding.ReconciliationApplyTest do
   defp retained_settle_decision(workspace_id, expected_identity) do
     {:ok, decision} =
       ReconciliationDecision.new(%{
-        "schema_version" => 1,
+        "schema_version" => ReconciliationDecision.schema_version(),
         "resource_type" => "retained_workspace_record",
         "resource_id" => workspace_id,
         "task_id" => expected_identity["task_id"],
@@ -2480,7 +2800,7 @@ defmodule Arbor.Actions.Coding.ReconciliationApplyTest do
     String.trim(output)
   end
 
-  defp start_durable_retained_registry do
+  defp start_durable_retained_registry(backend \\ Arbor.Persistence.Store.ETS) do
     store_name = String.to_atom("reconciliation_retained_#{System.unique_integer([:positive])}")
     server = String.to_atom("reconciliation_registry_#{System.unique_integer([:positive])}")
 
@@ -2492,7 +2812,7 @@ defmodule Arbor.Actions.Coding.ReconciliationApplyTest do
       {WorkspaceLeaseRegistry,
        [
          name: server,
-         retention_journal: {store_name, Arbor.Persistence.Store.ETS},
+         retention_journal: {store_name, backend},
          retention_ttl_ms: 60_000,
          linux_dependency_baseline_materializer: Arbor.Actions.TestLinuxBaselineMaterializer
        ]},
@@ -2505,9 +2825,21 @@ defmodule Arbor.Actions.Coding.ReconciliationApplyTest do
 
   defp durable_retained_marker(workspace_id) do
     state = :sys.get_state(workspace_registry_server())
-    %{status: :ready, store_name: store_name, backend: backend} = state.retention_journal
+    %{store_name: store_name, backend: backend} = state.retention_journal
     {:ok, key} = RetentionJournal.record_key(workspace_id)
     Persistence.get(store_name, backend, key)
+  end
+
+  defp put_durable_retained_marker(workspace_id, marker) do
+    state = :sys.get_state(workspace_registry_server())
+    %{store_name: store_name, backend: backend} = state.retention_journal
+    {:ok, key} = RetentionJournal.record_key(workspace_id)
+    :ok = Persistence.put(store_name, backend, key, marker)
+  end
+
+  defp retention_store_name do
+    state = :sys.get_state(workspace_registry_server())
+    get_in(state, [:retention_journal, :store_name])
   end
 
   defp workspace_registry_server do
