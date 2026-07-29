@@ -171,6 +171,23 @@ defmodule Arbor.Contracts.API.Persistence do
             ) :: {:ok, term()} | {:error, :conflict | :unsupported | term()}
 
   @doc """
+  Atomically delete a live key only when its current logical value/version
+  matches `expected`.
+
+  Structured Records fence on generation+revision and retain their generation
+  tombstone after deletion. Ordinary values use exact term equality and retain
+  the documented delete/reinsert ABA limitation. Unsupported backends return
+  `{:error, :unsupported}`.
+  """
+  @callback compare_and_delete_value_using_backend(
+              store_name(),
+              backend(),
+              key(),
+              expected :: term(),
+              opts()
+            ) :: :ok | {:error, :conflict | :unsupported | term()}
+
+  @doc """
   Report the backend's code-owned durability class.
 
   Returns `{:ok, class}` for backends that implement durability classification,
@@ -364,6 +381,7 @@ defmodule Arbor.Contracts.API.Persistence do
   @optional_callbacks [
     # CAS / durability (optional — third-party backends need not implement)
     compare_and_swap_value_using_backend: 6,
+    compare_and_delete_value_using_backend: 5,
     report_backend_durability_class: 3,
     # QueryableStore operations
     query_records_by_filter_using_backend: 4,

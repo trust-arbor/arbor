@@ -208,6 +208,78 @@ defmodule Arbor.Persistence.Store.CASFencingTest do
     end
   end
 
+  describe "compare-and-delete fencing" do
+    test "Store.Agent and Store.ETS delete only the exact observed live value" do
+      for {backend, start_backend} <- [{Store.Agent, Store.Agent}, {Store.ETS, Store.ETS}] do
+        # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+        name = :"compare_delete_#{:erlang.unique_integer([:positive])}"
+        start_supervised!({start_backend, name: name})
+
+        assert :ok = backend.put("k", "v1", name: name)
+        assert {:error, :conflict} = backend.compare_and_delete("k", "stale", name: name)
+        assert {:ok, "v1"} = backend.get("k", name: name)
+
+        assert :ok = backend.compare_and_delete("k", "v1", name: name)
+        assert {:error, :not_found} = backend.get("k", name: name)
+        assert {:error, :conflict} = backend.compare_and_delete("k", "v1", name: name)
+      end
+    end
+
+    test "structured Record compare-delete leaves a generation tombstone" do
+      for {backend, start_backend} <- [{Store.Agent, Store.Agent}, {Store.ETS, Store.ETS}] do
+        # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+        name = :"compare_delete_record_#{:erlang.unique_integer([:positive])}"
+        start_supervised!({start_backend, name: name})
+
+        assert :ok = backend.put("k", Record.new("k", %{"v" => 1}), name: name)
+
+        assert {:ok, %Record{generation: 1, revision: 1} = observed} =
+                 backend.get("k", name: name)
+
+        assert :ok = backend.compare_and_delete("k", observed, name: name)
+        assert {:error, :not_found} = backend.get("k", name: name)
+        assert {:error, :conflict} = backend.compare_and_delete("k", observed, name: name)
+
+        assert {:ok, %Record{generation: 2, revision: 1}} =
+                 backend.compare_and_swap(
+                   "k",
+                   :not_found,
+                   Record.new("k", %{"v" => 2}),
+                   name: name
+                 )
+      end
+    end
+
+    test "exactly one concurrent compare-delete succeeds" do
+      for {backend, start_backend} <- [{Store.Agent, Store.Agent}, {Store.ETS, Store.ETS}] do
+        # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+        name = :"compare_delete_winner_#{:erlang.unique_integer([:positive])}"
+        start_supervised!({start_backend, name: name})
+        assert :ok = backend.put("k", "v1", name: name)
+        parent = self()
+
+        tasks =
+          for i <- 1..2 do
+            Task.async(fn ->
+              send(parent, {:compare_delete_ready, i})
+
+              receive do
+                :compare_delete_go -> backend.compare_and_delete("k", "v1", name: name)
+              after
+                5_000 -> flunk("start barrier timeout")
+              end
+            end)
+          end
+
+        for _ <- 1..2, do: assert_receive({:compare_delete_ready, _}, 5_000)
+        Enum.each(tasks, &send(&1.pid, :compare_delete_go))
+
+        assert Enum.sort(Enum.map(tasks, &Task.await(&1, 5_000))) ==
+                 [:ok, {:error, :conflict}]
+      end
+    end
+  end
+
   describe "identity mismatch" do
     test "put rejects Record.key != store key" do
       # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion

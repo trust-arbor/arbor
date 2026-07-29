@@ -19,10 +19,10 @@ defmodule Arbor.Persistence.Store.ETS do
   - `:max_entries` — maximum number of entries (default: 100_000).
     When reached, new writes are rejected with `{:error, :store_full}`.
 
-  Durability class: `:process_lifetime`. CAS uses GenServer serialization for
-  structured Records (generation+revision + tombstones) and `insert_new` /
-  `select_replace` for ordinary unversioned term CAS (not ABA-safe across
-  delete/reinsert).
+  Durability class: `:process_lifetime`. CAS and compare-and-delete use
+  GenServer serialization for structured Records (generation+revision +
+  tombstones); ordinary unversioned CAS also uses `insert_new` /
+  `select_replace` for exact term fencing (not ABA-safe across delete/reinsert).
   """
 
   use GenServer
@@ -111,6 +111,16 @@ defmodule Arbor.Persistence.Store.ETS do
   end
 
   @impl true
+  def compare_and_delete(key, expected, opts) do
+    if Revision.key_mismatch?(key, expected) do
+      {:error, :key_mismatch}
+    else
+      name = Keyword.fetch!(opts, :name)
+      GenServer.call(name, {:compare_and_delete, key, expected})
+    end
+  end
+
+  @impl true
   def durability_class(_opts), do: :process_lifetime
 
   # --- GenServer ---
@@ -189,6 +199,28 @@ defmodule Arbor.Persistence.Store.ETS do
       error ->
         {:reply, error, state}
     end
+  end
+
+  def handle_call({:compare_and_delete, key, expected}, _from, %{table: table} = state) do
+    reply =
+      case :ets.lookup(table, key) do
+        [{^key, current}] ->
+          if Revision.cas_matches?(current, expected) do
+            case Revision.to_tombstone(current) do
+              :absent -> :ets.delete(table, key)
+              tombstone -> :ets.insert(table, {key, tombstone})
+            end
+
+            :ok
+          else
+            {:error, :conflict}
+          end
+
+        _ ->
+          {:error, :conflict}
+      end
+
+    {:reply, reply, state}
   end
 
   defp cas(table, key, :not_found, replacement, max) do

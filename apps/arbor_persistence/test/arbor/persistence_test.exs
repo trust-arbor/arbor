@@ -25,6 +25,17 @@ defmodule Arbor.PersistenceTest do
       assert :ok = Persistence.delete(name, backend, "k1")
       assert {:error, :not_found} = Persistence.get(name, backend, "k1")
     end
+
+    test "compare-and-delete reports support and fences the observed value", %{
+      name: name,
+      backend: backend
+    } do
+      assert Persistence.supports_compare_and_delete?(backend)
+      assert :ok = Persistence.put(name, backend, "k1", "v1")
+      assert {:error, :conflict} = Persistence.compare_and_delete(name, backend, "k1", "stale")
+      assert :ok = Persistence.compare_and_delete(name, backend, "k1", "v1")
+      assert {:error, :not_found} = Persistence.get(name, backend, "k1")
+    end
   end
 
   describe "QueryableStore facade" do
@@ -192,6 +203,13 @@ defmodule Arbor.PersistenceTest do
       assert Persistence.exists?(:x, NoExistsBackend, "found")
       refute Persistence.exists?(:x, NoExistsBackend, "missing")
     end
+
+    test "compare-and-delete returns unsupported for a backend without the optional callback" do
+      refute Persistence.supports_compare_and_delete?(NoExistsBackend)
+
+      assert {:error, :unsupported} =
+               Persistence.compare_and_delete(:x, NoExistsBackend, "found", "value")
+    end
   end
 
   describe "facade contract callbacks" do
@@ -214,6 +232,16 @@ defmodule Arbor.PersistenceTest do
       assert {:ok, ["k"]} = Persistence.list_all_keys_using_backend(name, backend, [])
       assert true == Persistence.check_key_exists_using_backend(name, backend, "k", [])
       assert :ok = Persistence.delete_value_by_key_using_backend(name, backend, "k", [])
+      assert :ok = Persistence.put(name, backend, "conditional", "value")
+
+      assert :ok =
+               Persistence.compare_and_delete_value_using_backend(
+                 name,
+                 backend,
+                 "conditional",
+                 "value",
+                 []
+               )
     end
 
     test "event log callbacks", %{el: name} do

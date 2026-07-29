@@ -3,8 +3,9 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionDurableStore do
   Node-restart durable file backend for retained-workspace markers.
 
   Implements `Arbor.Contracts.Persistence.Store` so the registry uses only the
-  public `Arbor.Persistence` facade (`put`/`get`/`delete`/`list`). Values are
-  written as exclusive temp + rename under an operator-configured root.
+  public `Arbor.Persistence` facade (`put`/`get`/`delete`/`list` and optional
+  compare-and-swap/delete). Values are written as exclusive temp + rename under
+  an operator-configured root.
 
   Durability class: `:node_restart` (survives BEAM restart; process/BEAM crash
   consistency via atomic rename — not a power-loss fsync claim).
@@ -105,6 +106,18 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionDurableStore do
   def delete(key, opts) do
     name = Keyword.fetch!(opts, :name)
     GenServer.call(name, {:delete, key})
+  end
+
+  @impl true
+  def compare_and_swap(key, expected, replacement, opts) do
+    name = Keyword.fetch!(opts, :name)
+    GenServer.call(name, {:compare_and_swap, key, expected, replacement})
+  end
+
+  @impl true
+  def compare_and_delete(key, expected, opts) do
+    name = Keyword.fetch!(opts, :name)
+    GenServer.call(name, {:compare_and_delete, key, expected})
   end
 
   @impl true
@@ -240,6 +253,63 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionDurableStore do
          :ok <- verify_delete_result(state, key, inventory) do
       {:reply, :ok, %{state | inventory: inventory, total_bytes: total_bytes}}
     else
+      {:error, reason} ->
+        {:reply, {:error, reason}, maybe_poison(state, reason)}
+    end
+  end
+
+  def handle_call({:compare_and_swap, key, expected, replacement}, _from, state) do
+    with :ok <- validate_key(key),
+         {:ok, state} <- refresh_state(state),
+         {:ok, normalized_expected} <- normalize_cas_expected(expected),
+         {:ok, encoded, normalized_replacement} <- normalize_value(replacement),
+         :ok <- compare_expected(state.inventory, key, normalized_expected),
+         :ok <- ensure_capacity(state, key, byte_size(encoded)),
+         :ok <- publish_file(state, key, encoded),
+         {:ok, inventory, total_bytes} <- load_inventory(state, state.inventory),
+         :ok <- verify_put_result(state, key, normalized_replacement, encoded, inventory) do
+      {:reply, {:ok, normalized_replacement},
+       %{state | inventory: inventory, total_bytes: total_bytes}}
+    else
+      {:error, :conflict} ->
+        {:reply, {:error, :conflict}, state}
+
+      {:error, :invalid_store_key} ->
+        {:reply, {:error, :invalid_store_key}, state}
+
+      {:error, {:retention_capacity_exceeded, reason}} ->
+        {:reply, {:error, reason}, state}
+
+      {:error, {:retention_input_rejected, reason}} ->
+        {:reply, {:error, reason}, state}
+
+      {:error, :invalid_cas_expected} ->
+        {:reply, {:error, :invalid_cas_expected}, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, maybe_poison(state, reason)}
+    end
+  end
+
+  def handle_call({:compare_and_delete, key, expected}, _from, state) do
+    with :ok <- validate_key(key),
+         {:ok, state} <- refresh_state(state),
+         {:ok, _encoded, normalized_expected} <- normalize_value(expected),
+         :ok <- compare_expected(state.inventory, key, {:value, normalized_expected}),
+         {:ok, _existed} <- remove_key_file(state, key),
+         {:ok, inventory, total_bytes} <- load_inventory(state, state.inventory),
+         :ok <- verify_delete_result(state, key, inventory) do
+      {:reply, :ok, %{state | inventory: inventory, total_bytes: total_bytes}}
+    else
+      {:error, :conflict} ->
+        {:reply, {:error, :conflict}, state}
+
+      {:error, :invalid_store_key} ->
+        {:reply, {:error, :invalid_store_key}, state}
+
+      {:error, {:retention_input_rejected, reason}} ->
+        {:reply, {:error, reason}, state}
+
       {:error, reason} ->
         {:reply, {:error, reason}, maybe_poison(state, reason)}
     end
@@ -771,6 +841,35 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionDurableStore do
       rescue
         _ -> {:error, {:retention_input_rejected, :encode_failed}}
       end
+    end
+  end
+
+  defp normalize_value(value) do
+    with {:ok, encoded} <- encode_value(value),
+         {:ok, normalized} <- decode_input_json(encoded) do
+      {:ok, encoded, normalized}
+    end
+  end
+
+  defp normalize_cas_expected(:not_found), do: {:ok, :not_found}
+
+  defp normalize_cas_expected({:value, expected}) do
+    case normalize_value(expected) do
+      {:ok, _encoded, normalized} -> {:ok, {:value, normalized}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp normalize_cas_expected(_expected), do: {:error, :invalid_cas_expected}
+
+  defp compare_expected(inventory, key, :not_found) do
+    if Map.has_key?(inventory, key), do: {:error, :conflict}, else: :ok
+  end
+
+  defp compare_expected(inventory, key, {:value, expected}) do
+    case Map.fetch(inventory, key) do
+      {:ok, %{value: ^expected}} -> :ok
+      _ -> {:error, :conflict}
     end
   end
 

@@ -506,6 +506,24 @@ defmodule Arbor.Persistence do
   end
 
   @doc """
+  Atomically compare-and-delete a live key via the public facade.
+
+  Delegates only when the backend exports `compare_and_delete/3`. Otherwise
+  returns `{:error, :unsupported}`. Structured Records fence on
+  generation+revision; ordinary values use exact term equality and retain the
+  documented delete/reinsert ABA limitation.
+  """
+  @spec compare_and_delete(atom(), module(), String.t(), term(), keyword()) ::
+          :ok | {:error, :conflict | :unsupported | term()}
+  def compare_and_delete(name, backend, key, expected, opts \\ []) do
+    if supports_compare_and_delete?(backend) do
+      backend.compare_and_delete(key, expected, Keyword.put(opts, :name, name))
+    else
+      {:error, :unsupported}
+    end
+  end
+
+  @doc """
   Report a backend's code-owned durability class via the public facade.
 
   Returns `{:ok, class}` when the backend exports `durability_class/1`, else
@@ -532,6 +550,17 @@ defmodule Arbor.Persistence do
   end
 
   def supports_compare_and_swap?(_backend), do: false
+
+  @doc """
+  True when the backend module is loaded and exports linearizable
+  `compare_and_delete/3`.
+  """
+  @spec supports_compare_and_delete?(module()) :: boolean()
+  def supports_compare_and_delete?(backend) when is_atom(backend) do
+    Code.ensure_loaded?(backend) and function_exported?(backend, :compare_and_delete, 3)
+  end
+
+  def supports_compare_and_delete?(_backend), do: false
 
   @doc """
   True when the backend module is loaded and exports `durability_class/1`.
@@ -710,6 +739,10 @@ defmodule Arbor.Persistence do
   @impl Arbor.Contracts.API.Persistence
   def compare_and_swap_value_using_backend(name, backend, key, expected, replacement, opts),
     do: compare_and_swap(name, backend, key, expected, replacement, opts)
+
+  @impl Arbor.Contracts.API.Persistence
+  def compare_and_delete_value_using_backend(name, backend, key, expected, opts),
+    do: compare_and_delete(name, backend, key, expected, opts)
 
   @impl Arbor.Contracts.API.Persistence
   def report_backend_durability_class(name, backend, opts),

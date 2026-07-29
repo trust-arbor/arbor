@@ -71,6 +71,127 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionDurableStoreTest do
     assert {:ok, %{"payload" => "x"}} = Persistence.get(name, WorkspaceRetentionDurableStore, key)
   end
 
+  test "compare-and-swap normalizes and replaces only the exact observed marker", %{
+    tmp_dir: tmp_dir
+  } do
+    root = Path.join(tmp_dir, "compare-and-swap")
+    key = "retained:ws_compare_swap"
+    path = Path.join(root, key <> ".json")
+    name = start_store(root)
+    initial = %{"payload" => "before", "phase" => "retained"}
+    replacement = %{payload: "after", phase: "discarding"}
+    normalized_replacement = %{"payload" => "after", "phase" => "discarding"}
+
+    assert Persistence.supports_compare_and_swap?(WorkspaceRetentionDurableStore)
+    assert Persistence.supports_compare_and_delete?(WorkspaceRetentionDurableStore)
+    assert :ok = Persistence.put(name, WorkspaceRetentionDurableStore, key, initial)
+
+    assert {:ok, ^normalized_replacement} =
+             Persistence.compare_and_swap(
+               name,
+               WorkspaceRetentionDurableStore,
+               key,
+               {:value, initial},
+               replacement
+             )
+
+    bytes_after_success = File.read!(path)
+
+    assert {:error, :conflict} =
+             Persistence.compare_and_swap(
+               name,
+               WorkspaceRetentionDurableStore,
+               key,
+               {:value, initial},
+               %{"payload" => "stale"}
+             )
+
+    assert bytes_after_success == File.read!(path)
+
+    assert {:ok, ^normalized_replacement} =
+             Persistence.get(name, WorkspaceRetentionDurableStore, key)
+  end
+
+  test "compare-and-swap supports absent insertion and conflicts on a live key", %{
+    tmp_dir: tmp_dir
+  } do
+    root = Path.join(tmp_dir, "compare-and-swap-absence")
+    key = "retained:ws_compare_swap_absent"
+    name = start_store(root)
+    value = %{"payload" => "new"}
+
+    assert {:ok, ^value} =
+             Persistence.compare_and_swap(
+               name,
+               WorkspaceRetentionDurableStore,
+               key,
+               :not_found,
+               value
+             )
+
+    assert {:error, :conflict} =
+             Persistence.compare_and_swap(
+               name,
+               WorkspaceRetentionDurableStore,
+               key,
+               :not_found,
+               %{"payload" => "replacement"}
+             )
+  end
+
+  test "compare-and-delete deletes only the exact observed marker", %{tmp_dir: tmp_dir} do
+    root = Path.join(tmp_dir, "compare-and-delete")
+    key = "retained:ws_compare_delete"
+    path = Path.join(root, key <> ".json")
+    name = start_store(root)
+    value = %{"payload" => "current"}
+
+    assert :ok = Persistence.put(name, WorkspaceRetentionDurableStore, key, value)
+    bytes_before_conflict = File.read!(path)
+
+    assert {:error, :conflict} =
+             Persistence.compare_and_delete(
+               name,
+               WorkspaceRetentionDurableStore,
+               key,
+               %{"payload" => "stale"}
+             )
+
+    assert bytes_before_conflict == File.read!(path)
+    assert {:ok, ^value} = Persistence.get(name, WorkspaceRetentionDurableStore, key)
+
+    assert :ok =
+             Persistence.compare_and_delete(name, WorkspaceRetentionDurableStore, key, value)
+
+    assert {:error, :not_found} = Persistence.get(name, WorkspaceRetentionDurableStore, key)
+
+    assert {:error, :conflict} =
+             Persistence.compare_and_delete(name, WorkspaceRetentionDurableStore, key, value)
+  end
+
+  test "conditional mutation fails closed when the external inventory drifts", %{tmp_dir: tmp_dir} do
+    root = Path.join(tmp_dir, "compare-drift")
+    key = "retained:ws_compare_drift"
+    path = Path.join(root, key <> ".json")
+    name = start_store(root)
+    value = %{"payload" => "original"}
+
+    assert :ok = Persistence.put(name, WorkspaceRetentionDurableStore, key, value)
+    File.write!(path, ~s({"payload":"outside"}))
+
+    assert {:error, {:retention_inventory_drift, _}} =
+             Persistence.compare_and_delete(name, WorkspaceRetentionDurableStore, key, value)
+
+    assert {:error, {:retention_store_poisoned, {:retention_inventory_drift, _}}} =
+             Persistence.compare_and_swap(
+               name,
+               WorkspaceRetentionDurableStore,
+               key,
+               {:value, value},
+               %{"payload" => "replacement"}
+             )
+  end
+
   test "security regression: caller JSON duplicate members reject without poisoning evidence", %{
     tmp_dir: tmp_dir
   } do

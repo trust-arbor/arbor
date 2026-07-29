@@ -8,8 +8,8 @@ defmodule Arbor.Persistence.Store.Agent do
         {Arbor.Persistence.Store.Agent, name: :my_store}
       ]
 
-  Durability class: `:process_lifetime`. Supports linearizable CAS via
-  `Agent.get_and_update/2`.
+  Durability class: `:process_lifetime`. Supports linearizable CAS and
+  compare-and-delete via `Agent.get_and_update/2`.
 
   Structured `Record` values keep logical `Record.id` separate from the store
   key, require `Record.key == store key`, advance backend-owned
@@ -114,6 +114,32 @@ defmodule Arbor.Persistence.Store.Agent do
 
       Agent.get_and_update(name, fn map ->
         do_cas(map, key, expected, replacement)
+      end)
+    end
+  end
+
+  @impl true
+  def compare_and_delete(key, expected, opts) do
+    if Revision.key_mismatch?(key, expected) do
+      {:error, :key_mismatch}
+    else
+      name = Keyword.fetch!(opts, :name)
+
+      Agent.get_and_update(name, fn map ->
+        case Map.fetch(map, key) do
+          {:ok, current} ->
+            if Revision.cas_matches?(current, expected) do
+              case Revision.to_tombstone(current) do
+                :absent -> {:ok, Map.delete(map, key)}
+                tombstone -> {:ok, Map.put(map, key, tombstone)}
+              end
+            else
+              {{:error, :conflict}, map}
+            end
+
+          :error ->
+            {{:error, :conflict}, map}
+        end
       end)
     end
   end

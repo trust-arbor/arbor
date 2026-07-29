@@ -47,6 +47,15 @@ defmodule Arbor.Contracts.Persistence.Store do
   Callers that need delete/reinsert fencing must use structured Records (or
   embed their own incarnation token in the value).
 
+  ## Optional compare-and-delete
+
+  Backends may implement linearizable `compare_and_delete/3` for settlement of
+  an exactly observed live value. It deletes only when the current logical
+  value/version matches `expected`; absence and mismatch return
+  `{:error, :conflict}`. Structured `Record` values match generation+revision
+  and leave the existing generation tombstone. Ordinary values use exact term
+  equality and retain the documented ABA limitation.
+
   ## Optional durability classification
 
   `durability_class/1` is a code-owned backend capability (not a module-name
@@ -174,6 +183,17 @@ defmodule Arbor.Contracts.Persistence.Store do
               {:ok, value()} | {:error, :conflict | term()}
 
   @doc """
+  Atomically delete a live key only when its current logical value/version
+  matches `expected`.
+
+  Structured `Record` expectations fence on generation+revision and leave a
+  generation tombstone. Ordinary values use exact term equality and are not
+  ABA-safe across delete/reinsert. Missing keys and mismatches return
+  `{:error, :conflict}`.
+  """
+  @callback compare_and_delete(key(), value(), opts()) :: :ok | {:error, :conflict | term()}
+
+  @doc """
   Return this backend's code-owned durability class.
 
   Must return exactly one of `:volatile`, `:process_lifetime`,
@@ -187,6 +207,7 @@ defmodule Arbor.Contracts.Persistence.Store do
     count: 2,
     aggregate: 4,
     compare_and_swap: 4,
+    compare_and_delete: 3,
     durability_class: 1
   ]
 end
