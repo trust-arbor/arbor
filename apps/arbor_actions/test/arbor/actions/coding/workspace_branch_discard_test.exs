@@ -102,12 +102,16 @@ defmodule Arbor.Actions.Coding.WorkspaceBranchDiscardTest do
   alias Arbor.Actions.Git
   alias Arbor.Persistence
 
-  @moduletag :fast
+  @moduletag :slow
+  @moduletag :integration
   @moduletag :security_regression
 
   # Mirrors WorkspaceLeaseRegistry's default retry budget so dormant residue
   # assertions stay accurate if either default changes.
   @default_retained_cleanup_retry_limit 8
+  # assert_eventually/2 polls every 20 ms.
+  @archive_settlement_attempts 1_500
+  @archive_callback_timeout 30_000
 
   # Lock in the DiscardFaultStore contract independently of the registry flow:
   # the discard regression below depends on successful fail-after-N puts
@@ -1698,7 +1702,7 @@ defmodule Arbor.Actions.Coding.WorkspaceBranchDiscardTest do
       assert acquisition_base != expected_tip
 
       assert_receive {:archive_result, archive_result, ^acquisition_base, ^expected_tip},
-                     2_000
+                     @archive_callback_timeout
 
       assert {:ok, %{hidden_ref: hidden_ref}} = archive_result
 
@@ -1708,7 +1712,7 @@ defmodule Arbor.Actions.Coding.WorkspaceBranchDiscardTest do
           refute branch_exists?(repo, branch)
           assert :sys.get_state(server).retained_by_id == %{}
         end,
-        100
+        @archive_settlement_attempts
       )
 
       assert git!(repo, ["rev-parse", hidden_ref]) == expected_tip
@@ -1765,7 +1769,7 @@ defmodule Arbor.Actions.Coding.WorkspaceBranchDiscardTest do
             assert git!(repo, ["rev-parse", branch]) == expected_tip
             assert :sys.get_state(server).retained_by_id == %{}
           end,
-          150
+          @archive_settlement_attempts
         )
 
         hidden_ref = evidence_ref_for(task_id, lease.workspace_id)

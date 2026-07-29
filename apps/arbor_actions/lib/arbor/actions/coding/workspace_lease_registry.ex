@@ -4161,16 +4161,23 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
 
     with {:ok, path_state} <- retained_path_observation(repo_path, worktree_path) do
       case path_state do
-        {:both_absent, absence_proof} ->
-          {:ok, absence_proof, :absent}
+        {:both_absent, _absence_proof} ->
+          {:error, :repository_branch_observation_unavailable}
 
-        {path_kind, _repo_lstat, _worktree_lstat}
+        {path_kind, _repo_lstat, worktree_lstat}
         when path_kind in [:both_present, :repo_present_worktree_absent] ->
           with {:ok, repository_before} <- Git.repository_identity(repo_path),
+               :ok <-
+                 validate_retained_observation_path_identity(
+                   retained,
+                   path_kind,
+                   worktree_lstat
+                 ),
                {:ok, branch_observation} <- Git.observe_branch_ref(repo_path, branch),
+               :ok <- retained_observation_allowed(retained, path_kind, branch_observation),
+               :ok <- require_retained_observation_evidence(retained),
                {:ok, repository_after} <- Git.repository_identity(repo_path),
-               true <- repository_before === repository_after,
-               :ok <- retained_observation_allowed(retained, path_kind, branch_observation) do
+               true <- repository_before === repository_after do
             {:ok, repository_before, branch_observation}
           else
             _ -> {:error, :repository_branch_observation_unavailable}
@@ -4204,6 +4211,46 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   defp retained_path_observation(_repo_path, _worktree_path),
     do: {:error, :retained_path_observation_unavailable}
 
+  defp validate_retained_observation_path_identity(
+         retained,
+         :both_present,
+         %File.Stat{} = worktree_lstat
+       ) do
+    expected_lstat = Map.get(retained, :lstat_identity)
+    expected_registration = Map.get(retained, :worktree_registration)
+    repo_path = Map.get(retained, :repo_path)
+    worktree_path = Map.get(retained, :worktree_path)
+    branch = Map.get(retained, :branch)
+
+    with true <- is_map(expected_lstat),
+         true <- is_map(expected_registration),
+         true <- lstat_identity(worktree_lstat) == normalize_lstat_for_compare(expected_lstat),
+         {:ok, registration} <- worktree_registration(repo_path, worktree_path),
+         true <- registration_matches?(registration, expected_registration),
+         true <- Map.get(registration, :branch) == branch do
+      :ok
+    else
+      _ -> {:error, :retained_observation_identity_mismatch}
+    end
+  end
+
+  defp validate_retained_observation_path_identity(
+         retained,
+         :repo_present_worktree_absent,
+         nil
+       ) do
+    case worktree_path_registration_presence(
+           Map.get(retained, :repo_path),
+           Map.get(retained, :worktree_path)
+         ) do
+      {:ok, :absent} -> :ok
+      _ -> {:error, :retained_worktree_absence_unavailable}
+    end
+  end
+
+  defp validate_retained_observation_path_identity(_retained, _path_kind, _worktree_lstat),
+    do: {:error, :retained_observation_identity_mismatch}
+
   defp retained_observation_allowed(%{lifecycle: lifecycle}, :both_present, {:present, _oid})
        when lifecycle in [:retained, "retained"],
        do: :ok
@@ -4216,18 +4263,13 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     if Map.get(retained, :lifecycle) in [:discarding, "discarding"] do
       case BranchLifecycle.normalize_phase(Map.get(retained, :discard_phase)) do
         {:ok, :archive} ->
-          require_retained_observation(path_kind == :both_present, branch_observation)
+          require_retained_observation(retained, path_kind == :both_present, branch_observation)
 
         {:ok, :worktree} ->
           require_worktree_phase_observation(retained, path_kind, branch_observation)
 
         {:ok, :branch} ->
-          if path_kind == :repo_present_worktree_absent and
-               (branch_observation == :absent or match?({:present, _}, branch_observation)) do
-            :ok
-          else
-            {:error, :discard_branch_observation_unavailable}
-          end
+          require_branch_phase_observation(retained, path_kind, branch_observation)
 
         :invalid ->
           {:error, :invalid_discard_phase}
@@ -4237,21 +4279,62 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     end
   end
 
-  defp require_retained_observation(true, {:present, _oid}), do: :ok
+  defp require_retained_observation(retained, true, {:present, oid}) do
+    require_settlement_tip_match(retained, oid, :discard_archive_branch_identity_conflict)
+  end
 
-  defp require_retained_observation(_path_present, _branch_observation),
+  defp require_retained_observation(_retained, _path_present, _branch_observation),
     do: {:error, :discard_archive_observation_unavailable}
 
   defp require_worktree_phase_observation(retained, path_kind, {:present, oid})
        when path_kind in [:both_present, :repo_present_worktree_absent] do
-    case Map.get(retained, :settlement_tip) do
-      expected when is_binary(expected) and expected == oid -> :ok
-      _ -> {:error, :discard_worktree_branch_identity_conflict}
-    end
+    require_settlement_tip_match(retained, oid, :discard_worktree_branch_identity_conflict)
   end
 
   defp require_worktree_phase_observation(_retained, _path_kind, _branch_observation),
     do: {:error, :discard_worktree_observation_unavailable}
+
+  defp require_branch_phase_observation(
+         _retained,
+         :repo_present_worktree_absent,
+         :absent
+       ),
+       do: :ok
+
+  defp require_branch_phase_observation(
+         retained,
+         :repo_present_worktree_absent,
+         {:present, oid}
+       ) do
+    require_settlement_tip_match(retained, oid, :discard_branch_identity_conflict)
+  end
+
+  defp require_branch_phase_observation(_retained, _path_kind, _branch_observation),
+    do: {:error, :discard_branch_observation_unavailable}
+
+  defp require_settlement_tip_match(retained, observed_oid, error)
+       when is_map(retained) and is_binary(observed_oid) do
+    case Map.get(retained, :settlement_tip) do
+      expected when is_binary(expected) and expected != "" and expected == observed_oid -> :ok
+      _ -> {:error, error}
+    end
+  end
+
+  defp require_settlement_tip_match(_retained, _observed_oid, error), do: {:error, error}
+
+  defp require_retained_observation_evidence(retained) do
+    case {
+      Map.get(retained, :lifecycle),
+      BranchLifecycle.normalize_phase(Map.get(retained, :discard_phase))
+    } do
+      {lifecycle, {:ok, phase}}
+      when lifecycle in [:discarding, "discarding"] and phase in [:worktree, :branch] ->
+        verify_retained_evidence_ref(retained)
+
+      _ ->
+        :ok
+    end
+  end
 
   defp put_reconciliation_marker_fence(
          retained,
@@ -6186,8 +6269,16 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
 
   defp run_reserved_archive(state, reserved) do
     case invoke_retained_archive(state.retained_archive, reserved) do
-      {:ok, _proof} ->
-        advance_archive_to_worktree_phase(state, reserved)
+      {:ok, proof} ->
+        case verify_retained_archive_completion(reserved, proof) do
+          :ok ->
+            advance_archive_to_worktree_phase(state, reserved)
+
+          {:error, reason} ->
+            failure = {:archive_completion_unverified, reason}
+            state = schedule_retry_after_failed_attempt(state, reserved, failure)
+            discard_pending_result(state, reserved, failure)
+        end
 
       {:error, reason} ->
         state = schedule_retry_after_failed_attempt(state, reserved, {:archive_failed, reason})
@@ -6227,8 +6318,10 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       advance_discard_to_branch_phase(state, retained)
     else
       # Worktree cleanup is a destructive attempt: reserve before invoking the
-      # boundary so crash/restart cannot regain free attempts. Reservation
-      # failure performs no work and keeps the marker as evidence.
+      # boundary so crash/restart cannot regain free attempts. The authority
+      # proof is re-read after this durable transition and immediately before
+      # cleanup, so an earlier duplicate read would add cost without closing a
+      # race.
       case reserve_cleanup_attempt(state, retained) do
         {:ok, reserved, state2} ->
           run_reserved_worktree_cleanup(state2, reserved)
@@ -6245,13 +6338,22 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   end
 
   defp run_reserved_worktree_cleanup(state, reserved) do
-    case invoke_retained_cleanup(state.retained_cleanup, reserved) do
+    # The durable reservation is itself a state-changing boundary. Recheck the
+    # archive authority after it and immediately before worktree destruction.
+    case require_archive_bound_worktree_authority(reserved) do
       :ok ->
-        verify_and_advance_worktree_cleanup(state, reserved)
+        case invoke_retained_cleanup(state.retained_cleanup, reserved) do
+          :ok ->
+            verify_and_advance_worktree_cleanup(state, reserved)
+
+          {:error, reason} ->
+            # Schedule a retry on the already-reserved marker without a second
+            # reservation.
+            state = schedule_retry_after_failed_attempt(state, reserved, reason)
+            {:error, reason, state}
+        end
 
       {:error, reason} ->
-        # Schedule a retry on the already-reserved marker without a second
-        # reservation.
         state = schedule_retry_after_failed_attempt(state, reserved, reason)
         {:error, reason, state}
     end
@@ -6320,12 +6422,27 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   end
 
   defp interpret_branch_decision(state, retained, {:settle_complete, opts}, _limit) do
-    settle_discard_complete(state, retained, Keyword.get(opts, :branch_retired, true), nil, false)
+    case require_archive_bound_evidence(retained) do
+      :ok ->
+        settle_discard_complete(
+          state,
+          retained,
+          Keyword.get(opts, :branch_retired, true),
+          nil,
+          false
+        )
+
+      {:error, reason} ->
+        {:error, reason, state}
+    end
   end
 
   defp interpret_branch_decision(state, retained, {:settle_preserve_branch, reason}, _limit) do
     # Reused/unknown provenance settles while preserving the pre-existing branch.
-    settle_discard_preserving_branch(state, retained, reason)
+    case require_archive_bound_evidence(retained) do
+      :ok -> settle_discard_preserving_branch(state, retained, reason)
+      {:error, evidence_reason} -> {:error, evidence_reason, state}
+    end
   end
 
   defp interpret_branch_decision(state, retained, {:dormant_preserve_branch, reason}, _limit) do
@@ -6339,8 +6456,15 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     # no work; exhaustion goes dormant with the branch preserved.
     case reserve_cleanup_attempt(state, retained) do
       {:ok, reserved, state2} ->
-        outcome = Git.delete_branch_ref(reserved.repo_path, reserved.branch, expected_oid)
-        interpret_delete_outcome(state2, reserved, outcome, limit)
+        case require_archive_bound_evidence(reserved) do
+          :ok ->
+            outcome = Git.delete_branch_ref(reserved.repo_path, reserved.branch, expected_oid)
+            interpret_delete_outcome(state2, reserved, outcome, limit)
+
+          {:error, reason} ->
+            state3 = schedule_retry_after_failed_attempt(state2, reserved, reason)
+            {:error, reason, state3}
+        end
 
       {:error, :retries_exhausted, state2} ->
         dormant_discard_marker(state2, retained, :retries_exhausted)
@@ -7024,6 +7148,95 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       _ -> {:error, :retained_identity_mismatch}
     end
   end
+
+  # The archive callback is an in-process trusted boundary and its success
+  # contract guarantees that hidden_ref was written at settlement_tip. Re-read
+  # the independently mutable branch after the callback to catch idempotent
+  # archive replay followed by branch drift. The evidence ref itself is read
+  # again after the durable phase reservation and before cleanup or settlement.
+  defp verify_retained_archive_completion(
+         retained,
+         %{hidden_ref: hidden_ref}
+       )
+       when is_map(retained) and is_binary(hidden_ref) and hidden_ref != "" do
+    with expected_tip when is_binary(expected_tip) and expected_tip != "" <-
+           Map.get(retained, :settlement_tip),
+         {:ok, {:present, ^expected_tip}} <-
+           Git.observe_branch_ref(Map.get(retained, :repo_path), Map.get(retained, :branch)) do
+      :ok
+    else
+      _ -> {:error, :retained_archive_completion_unavailable}
+    end
+  end
+
+  defp verify_retained_archive_completion(_retained, _proof),
+    do: {:error, :retained_archive_completion_unavailable}
+
+  # Archive-first markers carry settlement_tip. Explicit non-archive discard
+  # markers do not, so their established lifecycle remains compatible.
+  defp require_archive_bound_worktree_authority(retained) when is_map(retained) do
+    case archive_bound_settlement_tip(retained) do
+      {:ok, expected_tip} ->
+        with {:ok, {:present, ^expected_tip}} <-
+               Git.observe_branch_ref(Map.get(retained, :repo_path), Map.get(retained, :branch)),
+             :ok <- verify_retained_evidence_ref(retained) do
+          :ok
+        else
+          _ -> {:error, :retained_worktree_archive_authority_unavailable}
+        end
+
+      :not_archive_bound ->
+        :ok
+
+      {:error, _reason} ->
+        {:error, :retained_worktree_archive_authority_unavailable}
+    end
+  end
+
+  defp require_archive_bound_worktree_authority(_retained),
+    do: {:error, :retained_worktree_archive_authority_unavailable}
+
+  defp require_archive_bound_evidence(retained) when is_map(retained) do
+    case archive_bound_settlement_tip(retained) do
+      {:ok, _expected_tip} ->
+        case verify_retained_evidence_ref(retained) do
+          :ok -> :ok
+          {:error, _reason} -> {:error, :retained_archive_evidence_unavailable}
+        end
+
+      :not_archive_bound ->
+        :ok
+
+      {:error, _reason} ->
+        {:error, :retained_archive_evidence_unavailable}
+    end
+  end
+
+  defp require_archive_bound_evidence(_retained),
+    do: {:error, :retained_archive_evidence_unavailable}
+
+  defp archive_bound_settlement_tip(retained) do
+    case Map.get(retained, :settlement_tip) do
+      nil -> :not_archive_bound
+      tip when is_binary(tip) and tip != "" -> {:ok, tip}
+      _ -> {:error, :invalid_settlement_tip}
+    end
+  end
+
+  defp verify_retained_evidence_ref(retained) when is_map(retained) do
+    case Git.verify_archived_evidence_ref(
+           Map.get(retained, :repo_path),
+           Map.get(retained, :task_id),
+           Map.get(retained, :workspace_id),
+           Map.get(retained, :settlement_tip)
+         ) do
+      {:ok, %{hidden_ref: hidden_ref}} when is_binary(hidden_ref) and hidden_ref != "" -> :ok
+      _ -> {:error, :retained_archive_evidence_unavailable}
+    end
+  end
+
+  defp verify_retained_evidence_ref(_retained),
+    do: {:error, :retained_archive_evidence_unavailable}
 
   defp archive_retained_branch(retained) when is_map(retained) do
     Git.archive_branch_evidence_ref(

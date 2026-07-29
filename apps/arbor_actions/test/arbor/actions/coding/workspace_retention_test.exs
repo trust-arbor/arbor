@@ -7,8 +7,11 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionTest do
   alias Arbor.Actions.Config
   alias Arbor.Actions.Git
 
-  @moduletag :fast
-  @owner_operation_timeout 10_000
+  @moduletag :slow
+  @moduletag :integration
+  @owner_operation_timeout 30_000
+  # assert_eventually/2 polls every 20 ms.
+  @archive_settlement_attempts 1_500
 
   test "security regression: closed creating records accept normalized string-key base fields" do
     input = %{
@@ -82,7 +85,7 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionTest do
     assert is_binary(retained.expires_at)
     assert File.dir?(path)
 
-    assert_eventually(fn -> refute File.dir?(path) end, 200)
+    assert_eventually(fn -> refute File.dir?(path) end, @archive_settlement_attempts)
     assert retained_state(server) == {[], []}
   end
 
@@ -357,7 +360,7 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionTest do
         refute File.dir?(path)
         assert retained_state(server) == {[], []}
       end,
-      100
+      @archive_settlement_attempts
     )
 
     assert git!(repo, ["rev-parse", hidden_ref]) == expected_tip

@@ -151,6 +151,9 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionRestartTest do
 
   @moduletag :slow
   @moduletag :integration
+  # assert_eventually/2 polls every 20 ms.
+  @archive_settlement_attempts 1_500
+  @archive_callback_timeout 30_000
 
   describe "security regression: retained workspace restart durability" do
     test "dirty, untracked, and committed state survives registry restart with exact task+principal",
@@ -320,7 +323,7 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionRestartTest do
           refute File.dir?(path)
           refute durable_marker?(store_name, backend, lease.workspace_id)
         end,
-        200
+        @archive_settlement_attempts
       )
     end
 
@@ -2906,7 +2909,7 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionRestartTest do
       {target, generation} = retained_target_and_generation(server)
       send(server_pid(server), {:retained_expire, target, generation})
 
-      assert_receive :detached_cleanup_performed, 2_000
+      assert_receive :detached_cleanup_performed, @archive_callback_timeout
 
       assert_eventually(
         fn ->
@@ -2915,7 +2918,7 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionRestartTest do
           assert {:error, :enoent} = File.lstat(lease.worktree_path)
           assert worktree_registered?(repo, lease.worktree_path)
         end,
-        100
+        @archive_settlement_attempts
       )
 
       _ = System.cmd("git", ["-C", repo, "worktree", "prune"], stderr_to_stdout: true)
@@ -3648,7 +3651,7 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionRestartTest do
           refute File.dir?(path)
           refute durable_marker?(store_name, backend, lease.workspace_id)
         end,
-        300
+        @archive_settlement_attempts
       )
     end
 

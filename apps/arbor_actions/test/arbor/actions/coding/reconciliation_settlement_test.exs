@@ -6,6 +6,7 @@ defmodule Arbor.Actions.Coding.ReconciliationApplyTest do
   alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
   alias Arbor.Actions.Coding.WorkspaceReconciliationProjection
   alias Arbor.Actions.Coding.WorkspaceRetentionJournalCore, as: RetentionJournal
+  alias Arbor.Actions.Git
   alias Arbor.Contracts.Coding.PendingApprovalResourceId
   alias Arbor.Contracts.Coding.ReconciliationDecision
   alias Arbor.Contracts.Security.AuthContext
@@ -74,10 +75,44 @@ defmodule Arbor.Actions.Coding.ReconciliationApplyTest do
           {:ok, marker} = ETS.get(key, opts)
           :ok = ETS.put(key, Map.update!(marker, :retry_count, &(&1 + 1)), opts)
 
+        {:delete_evidence, repo_path, evidence_ref} when kind == :swap ->
+          :persistent_term.put(injection_key, :off)
+
+          {_, 0} =
+            System.cmd(
+              "git",
+              ["-C", repo_path, "update-ref", "-d", evidence_ref],
+              stderr_to_stdout: true
+            )
+
+        {:advance_branch, repo_path, branch, replacement_tip, expected_tip}
+        when kind == :swap ->
+          :persistent_term.put(injection_key, :off)
+
+          {_, 0} =
+            System.cmd(
+              "git",
+              [
+                "-C",
+                repo_path,
+                "update-ref",
+                "refs/heads/#{branch}",
+                replacement_tip,
+                expected_tip
+              ],
+              stderr_to_stdout: true
+            )
+
         :swap ->
           :ok
 
         :delete ->
+          :ok
+
+        {:delete_evidence, _repo_path, _evidence_ref} ->
+          :ok
+
+        {:advance_branch, _repo_path, _branch, _replacement_tip, _expected_tip} ->
           :ok
 
         :off ->
@@ -823,6 +858,8 @@ defmodule Arbor.Actions.Coding.ReconciliationApplyTest do
     assert receipt["status"] == "removed"
     refute Map.has_key?(receipt, "worktree_path")
     refute Map.has_key?(receipt, "cleanup_identity")
+    refute Map.has_key?(receipt, "reconciliation_marker_fence")
+    refute Jason.encode!(receipt) =~ "reconciliation_marker_fence"
 
     state = :sys.get_state(WorkspaceLeaseRegistry)
     refute Map.has_key?(state.leases, workspace_id)
@@ -1042,6 +1079,79 @@ defmodule Arbor.Actions.Coding.ReconciliationApplyTest do
     assert Map.fetch!(state.retained_by_id, workspace_id) == source_retained
   end
 
+  test "security regression: idempotent archive replay rechecks branch tip before cleanup", %{
+    tmp_dir: tmp_dir
+  } do
+    server = start_durable_retained_registry()
+    fixture = leased_project_for_registry(tmp_dir, server)
+    {retained, _identity} = retained_identity(fixture)
+    auth = verified_auth("agent_retained_archive_replay_drift")
+    workspace_id = retained.workspace_id
+
+    force_retained_expired_ms(workspace_id)
+    {source_retained, expected_identity} = retained_identity_for(workspace_id)
+    settlement_tip = git!(fixture.repo, ["rev-parse", source_retained.branch])
+    replacement_tip = detached_commit!(fixture.repo, settlement_tip, "archive replay drift")
+    evidence_ref = evidence_ref_for(fixture.context.task_id, workspace_id)
+
+    on_exit(fn ->
+      _ =
+        System.cmd(
+          "git",
+          [
+            "-C",
+            fixture.repo,
+            "update-ref",
+            "refs/heads/#{source_retained.branch}",
+            settlement_tip
+          ],
+          stderr_to_stdout: true
+        )
+    end)
+
+    :sys.replace_state(server, fn state ->
+      archive = fn archive_input ->
+        result =
+          Git.archive_branch_evidence_ref(
+            archive_input.repo_path,
+            archive_input.branch,
+            archive_input.task_id,
+            archive_input.workspace_id,
+            archive_input.settlement_tip
+          )
+
+        assert {:ok, %{hidden_ref: ^evidence_ref}} = result
+
+        git!(archive_input.repo_path, [
+          "update-ref",
+          "refs/heads/#{archive_input.branch}",
+          replacement_tip,
+          settlement_tip
+        ])
+
+        result
+      end
+
+      %{state | retained_archive: archive}
+    end)
+
+    assert {:error, :settlement_residue} =
+             Actions.apply_coding_reconciliation_decision(
+               auth,
+               retained_settle_decision(workspace_id, expected_identity)
+             )
+
+    assert git!(fixture.repo, ["rev-parse", source_retained.branch]) == replacement_tip
+    assert git!(fixture.repo, ["rev-parse", evidence_ref]) == settlement_tip
+    assert File.dir?(source_retained.worktree_path)
+
+    state = :sys.get_state(server)
+    preserved = Map.fetch!(state.retained_by_id, workspace_id)
+    assert preserved.lifecycle == :discarding
+    assert preserved.discard_phase == :archive
+    assert preserved.settlement_tip == settlement_tip
+  end
+
   test "security regression: durable marker drift before reconciliation CAS has no destructive effect",
        %{
          tmp_dir: tmp_dir
@@ -1073,60 +1183,60 @@ defmodule Arbor.Actions.Coding.ReconciliationApplyTest do
     assert Map.has_key?(:sys.get_state(workspace_registry_server()).retained_by_id, workspace_id)
   end
 
-  test "retained both-paths-absent settlement is exact and replay idempotent", %{tmp_dir: tmp_dir} do
+  test "security regression: two ENOENT paths are unavailable and preserve durable evidence", %{
+    tmp_dir: tmp_dir
+  } do
     server = start_durable_retained_registry()
     fixture = leased_project_for_registry(tmp_dir, server)
-    {retained, _expected_identity} = retained_identity(fixture)
+    {retained, _identity} = retained_identity(fixture)
     auth = verified_auth("agent_retained_both_absent")
     workspace_id = retained.workspace_id
 
     force_retained_expired_ms(workspace_id)
+    {_source_retained, expected_identity} = retained_identity_for(workspace_id)
+    {:ok, source_marker} = durable_retained_marker(workspace_id)
+    decision = retained_settle_decision(workspace_id, expected_identity)
+
     File.rm_rf!(retained.worktree_path)
     File.rm_rf!(retained.repo_path)
 
-    {_retained, expected_identity} = retained_identity_for(workspace_id)
-    assert expected_identity["branch_observation"] == %{"status" => "absent", "oid" => nil}
+    assert retained_inventory_identity(workspace_id)["proof_status"] == "unavailable"
 
-    decision = retained_settle_decision(workspace_id, expected_identity)
+    assert {:error, :current_identity_unavailable} =
+             Actions.apply_coding_reconciliation_decision(auth, decision)
 
-    assert {:ok, first} = Actions.apply_coding_reconciliation_decision(auth, decision)
-    assert first["outcome"] == "settled"
-    assert {:error, :not_found} = durable_retained_marker(workspace_id)
-
-    assert {:ok, second} = Actions.apply_coding_reconciliation_decision(auth, decision)
-
-    assert second == %{
-             "active" => false,
-             "outcome" => "already_absent",
-             "resource_id" => workspace_id,
-             "resource_type" => "retained_workspace_record",
-             "schema_version" => 1
-           }
+    assert {:ok, ^source_marker} = durable_retained_marker(workspace_id)
+    assert Map.has_key?(:sys.get_state(workspace_registry_server()).retained_by_id, workspace_id)
   end
 
-  test "security regression: both-absent reconciliation never deletes a drifted marker", %{
-    tmp_dir: tmp_dir
-  } do
+  test "security regression: proven settlement never deletes a marker drifted at compare-delete",
+       %{
+         tmp_dir: tmp_dir
+       } do
     server = start_durable_retained_registry(DriftBeforeCasStore)
     fixture = leased_project_for_registry(tmp_dir, server)
     {retained, _identity} = retained_identity(fixture)
-    auth = verified_auth("agent_retained_absent_delete_drift")
+    auth = verified_auth("agent_retained_proven_delete_drift")
     workspace_id = retained.workspace_id
 
     force_retained_expired_ms(workspace_id)
-    File.rm_rf!(retained.worktree_path)
-    File.rm_rf!(retained.repo_path)
-    {_source_retained, expected_identity} = retained_identity_for(workspace_id)
+    {source_retained, expected_identity} = retained_identity_for(workspace_id)
     {:ok, source_marker} = durable_retained_marker(workspace_id)
     :persistent_term.put({DriftBeforeCasStore, retention_store_name()}, :delete)
 
     decision = retained_settle_decision(workspace_id, expected_identity)
 
-    assert {:error, {:marker_delete_failed, :reconciliation_marker_identity_conflict}} =
+    assert {:error, :settlement_residue} =
              Actions.apply_coding_reconciliation_decision(auth, decision)
 
     assert {:ok, changed_marker} = durable_retained_marker(workspace_id)
-    assert changed_marker.retry_count == source_marker.retry_count + 2
+    assert changed_marker.retry_count == source_marker.retry_count + 3
+    refute Map.has_key?(changed_marker, :reconciliation_marker_fence)
+    refute Map.has_key?(changed_marker, "reconciliation_marker_fence")
+
+    refute File.exists?(source_retained.worktree_path)
+    refute branch_exists?(fixture.repo, source_retained.branch)
+    assert ref_exists?(fixture.repo, evidence_ref_for(fixture.context.task_id, workspace_id))
     assert Map.has_key?(:sys.get_state(workspace_registry_server()).retained_by_id, workspace_id)
   end
 
@@ -1154,6 +1264,108 @@ defmodule Arbor.Actions.Coding.ReconciliationApplyTest do
     on_exit(fn -> File.chmod(parent, 0o700) end)
 
     assert retained_inventory_identity(retained.workspace_id)["proof_status"] == "unavailable"
+  end
+
+  test "security regression: same-path worktree inode replacement is unavailable and untouched",
+       %{
+         tmp_dir: tmp_dir
+       } do
+    server = start_durable_retained_registry()
+    fixture = leased_project_for_registry(tmp_dir, server)
+    {retained, _identity} = retained_identity(fixture)
+    auth = verified_auth("agent_retained_inode_replacement")
+    workspace_id = retained.workspace_id
+    original_tip = git!(fixture.repo, ["rev-parse", retained.branch])
+    backup_path = retained.worktree_path <> ".original"
+    sentinel_path = Path.join(retained.worktree_path, "replacement-sentinel")
+
+    force_retained_expired_ms(workspace_id)
+    {_source_retained, expected_identity} = retained_identity_for(workspace_id)
+    {:ok, source_marker} = durable_retained_marker(workspace_id)
+
+    File.rename!(retained.worktree_path, backup_path)
+    File.mkdir_p!(retained.worktree_path)
+    File.write!(sentinel_path, "replacement\n")
+
+    on_exit(fn ->
+      File.rm_rf!(retained.worktree_path)
+
+      if File.exists?(backup_path) do
+        File.rename!(backup_path, retained.worktree_path)
+      end
+    end)
+
+    assert retained_inventory_identity(workspace_id)["proof_status"] == "unavailable"
+
+    assert {:error, :current_identity_unavailable} =
+             Actions.apply_coding_reconciliation_decision(
+               auth,
+               retained_settle_decision(workspace_id, expected_identity)
+             )
+
+    assert File.read!(sentinel_path) == "replacement\n"
+    assert File.dir?(backup_path)
+    assert git!(fixture.repo, ["rev-parse", retained.branch]) == original_tip
+    assert {:ok, ^source_marker} = durable_retained_marker(workspace_id)
+    assert Map.has_key?(:sys.get_state(server).retained_by_id, workspace_id)
+  end
+
+  test "security regression: replacement repository without evidence cannot retire branch", %{
+    tmp_dir: tmp_dir
+  } do
+    server = start_durable_retained_registry()
+    fixture = leased_project_for_registry(tmp_dir, server)
+    {retained, _identity} = retained_identity(fixture)
+    auth = verified_auth("agent_retained_repository_replacement")
+    workspace_id = retained.workspace_id
+    settlement_tip = git!(fixture.repo, ["rev-parse", retained.branch])
+    evidence_ref = archive_retained_evidence!(retained, settlement_tip)
+
+    assert :ok = WorkspaceLeaseRegistry.remove_owned_retained_worktree(retained)
+    refute File.exists?(retained.worktree_path)
+
+    {:ok, source_marker} = durable_retained_marker(workspace_id)
+
+    phase_marker =
+      source_marker
+      |> Map.put(:lifecycle, "discarding")
+      |> Map.put(:discard_phase, "branch")
+      |> Map.put(:settlement_tip, settlement_tip)
+      |> Map.put(:lstat_identity, nil)
+      |> Map.put(:worktree_registration, nil)
+
+    put_durable_retained_marker(workspace_id, phase_marker)
+    put_retained_branch_phase(workspace_id, settlement_tip)
+
+    {_source_retained, expected_identity} = retained_identity_for(workspace_id)
+    assert expected_identity["proof_status"] == "complete"
+
+    original_repo = fixture.repo <> ".original"
+    File.rename!(fixture.repo, original_repo)
+    git_clone_without_hidden_refs!(original_repo, fixture.repo)
+    git!(fixture.repo, ["branch", retained.branch, settlement_tip])
+
+    on_exit(fn ->
+      File.rm_rf!(fixture.repo)
+
+      if File.exists?(original_repo) do
+        File.rename!(original_repo, fixture.repo)
+      end
+    end)
+
+    refute ref_exists?(fixture.repo, evidence_ref)
+    assert git!(fixture.repo, ["rev-parse", retained.branch]) == settlement_tip
+    assert retained_inventory_identity(workspace_id)["proof_status"] == "unavailable"
+
+    assert {:error, :current_identity_unavailable} =
+             Actions.apply_coding_reconciliation_decision(
+               auth,
+               retained_settle_decision(workspace_id, expected_identity)
+             )
+
+    assert git!(fixture.repo, ["rev-parse", retained.branch]) == settlement_tip
+    assert {:ok, ^phase_marker} = durable_retained_marker(workspace_id)
+    assert Map.has_key?(:sys.get_state(server).retained_by_id, workspace_id)
   end
 
   test "retention blockers publish an unavailable v2 identity without path leakage", %{
@@ -1296,6 +1508,63 @@ defmodule Arbor.Actions.Coding.ReconciliationApplyTest do
     assert Map.has_key?(:sys.get_state(WorkspaceLeaseRegistry).retained_by_id, workspace_id)
   end
 
+  test "security regression: branch advance after worktree reservation prevents removal", %{
+    tmp_dir: tmp_dir
+  } do
+    server = start_durable_retained_registry(DriftBeforeCasStore)
+    fixture = leased_project_for_registry(tmp_dir, server)
+    {retained, _identity} = retained_identity(fixture)
+    auth = verified_auth("agent_retained_worktree_reservation_drift")
+    workspace_id = retained.workspace_id
+    settlement_tip = git!(fixture.repo, ["rev-parse", retained.branch])
+    replacement_tip = detached_commit!(fixture.repo, settlement_tip, "worktree reservation drift")
+    evidence_ref = archive_retained_evidence!(retained, settlement_tip)
+    {:ok, source_marker} = durable_retained_marker(workspace_id)
+
+    phase_marker =
+      source_marker
+      |> Map.put(:lifecycle, "discarding")
+      |> Map.put(:discard_phase, "worktree")
+      |> Map.put(:settlement_tip, settlement_tip)
+
+    put_durable_retained_marker(workspace_id, phase_marker)
+    put_retained_discard_phase(workspace_id, :worktree, settlement_tip)
+    {_source_retained, expected_identity} = retained_identity_for(workspace_id)
+
+    :persistent_term.put(
+      {DriftBeforeCasStore, retention_store_name()},
+      {:advance_branch, fixture.repo, retained.branch, replacement_tip, settlement_tip}
+    )
+
+    on_exit(fn ->
+      _ =
+        System.cmd(
+          "git",
+          [
+            "-C",
+            fixture.repo,
+            "update-ref",
+            "refs/heads/#{retained.branch}",
+            settlement_tip
+          ],
+          stderr_to_stdout: true
+        )
+    end)
+
+    assert {:error, :retained_worktree_archive_authority_unavailable} =
+             Actions.apply_coding_reconciliation_decision(
+               auth,
+               retained_settle_decision(workspace_id, expected_identity)
+             )
+
+    assert File.dir?(retained.worktree_path)
+    assert git!(fixture.repo, ["rev-parse", retained.branch]) == replacement_tip
+    assert git!(fixture.repo, ["rev-parse", evidence_ref]) == settlement_tip
+    assert {:ok, changed_marker} = durable_retained_marker(workspace_id)
+    refute Map.has_key?(changed_marker, :reconciliation_marker_fence)
+    assert Map.has_key?(:sys.get_state(server).retained_by_id, workspace_id)
+  end
+
   test "discarding branch phase admits an absent branch after proven worktree removal", %{
     tmp_dir: tmp_dir
   } do
@@ -1305,7 +1574,8 @@ defmodule Arbor.Actions.Coding.ReconciliationApplyTest do
     workspace_id = retained.workspace_id
     settlement_tip = git!(fixture.repo, ["rev-parse", retained.branch])
 
-    File.rm_rf!(retained.worktree_path)
+    _evidence_ref = archive_retained_evidence!(retained, settlement_tip)
+    assert :ok = WorkspaceLeaseRegistry.remove_owned_retained_worktree(retained)
     git!(fixture.repo, ["update-ref", "-d", "refs/heads/#{retained.branch}"])
 
     :sys.replace_state(workspace_registry_server(), fn state ->
@@ -1337,6 +1607,182 @@ defmodule Arbor.Actions.Coding.ReconciliationApplyTest do
     refute Map.has_key?(:sys.get_state(workspace_registry_server()).retained_by_id, workspace_id)
   end
 
+  test "security regression: archive phase branch divergence is unavailable without cleanup", %{
+    tmp_dir: tmp_dir
+  } do
+    server = start_durable_retained_registry()
+    fixture = leased_project_for_registry(tmp_dir, server)
+    {retained, _identity} = retained_identity(fixture)
+    auth = verified_auth("agent_retained_archive_phase_drift")
+    workspace_id = retained.workspace_id
+    settlement_tip = git!(fixture.repo, ["rev-parse", retained.branch])
+    replacement_tip = detached_commit!(fixture.repo, settlement_tip, "archive phase drift")
+    {:ok, source_marker} = durable_retained_marker(workspace_id)
+
+    phase_marker =
+      source_marker
+      |> Map.put(:lifecycle, "discarding")
+      |> Map.put(:discard_phase, "archive")
+      |> Map.put(:settlement_tip, settlement_tip)
+
+    put_durable_retained_marker(workspace_id, phase_marker)
+    put_retained_discard_phase(workspace_id, :archive, settlement_tip)
+    {_source_retained, expected_identity} = retained_identity_for(workspace_id)
+
+    on_exit(fn ->
+      _ =
+        System.cmd(
+          "git",
+          [
+            "-C",
+            fixture.repo,
+            "update-ref",
+            "refs/heads/#{retained.branch}",
+            settlement_tip
+          ],
+          stderr_to_stdout: true
+        )
+    end)
+
+    git!(fixture.repo, [
+      "update-ref",
+      "refs/heads/#{retained.branch}",
+      replacement_tip,
+      settlement_tip
+    ])
+
+    assert retained_inventory_identity(workspace_id)["proof_status"] == "unavailable"
+
+    assert {:error, :current_identity_unavailable} =
+             Actions.apply_coding_reconciliation_decision(
+               auth,
+               retained_settle_decision(workspace_id, expected_identity)
+             )
+
+    assert git!(fixture.repo, ["rev-parse", retained.branch]) == replacement_tip
+    assert File.dir?(retained.worktree_path)
+    assert {:ok, ^phase_marker} = durable_retained_marker(workspace_id)
+  end
+
+  test "security regression: branch phase present-tip divergence cannot retire the branch", %{
+    tmp_dir: tmp_dir
+  } do
+    server = start_durable_retained_registry()
+    fixture = leased_project_for_registry(tmp_dir, server)
+    {retained, _identity} = retained_identity(fixture)
+    auth = verified_auth("agent_retained_branch_phase_drift")
+    workspace_id = retained.workspace_id
+    settlement_tip = git!(fixture.repo, ["rev-parse", retained.branch])
+    replacement_tip = detached_commit!(fixture.repo, settlement_tip, "branch phase drift")
+    _evidence_ref = archive_retained_evidence!(retained, settlement_tip)
+
+    assert :ok = WorkspaceLeaseRegistry.remove_owned_retained_worktree(retained)
+
+    {:ok, source_marker} = durable_retained_marker(workspace_id)
+
+    phase_marker =
+      source_marker
+      |> Map.put(:lifecycle, "discarding")
+      |> Map.put(:discard_phase, "branch")
+      |> Map.put(:settlement_tip, settlement_tip)
+      |> Map.put(:lstat_identity, nil)
+      |> Map.put(:worktree_registration, nil)
+
+    put_durable_retained_marker(workspace_id, phase_marker)
+    put_retained_branch_phase(workspace_id, settlement_tip)
+    {_source_retained, expected_identity} = retained_identity_for(workspace_id)
+
+    on_exit(fn ->
+      _ =
+        System.cmd(
+          "git",
+          [
+            "-C",
+            fixture.repo,
+            "update-ref",
+            "refs/heads/#{retained.branch}",
+            settlement_tip
+          ],
+          stderr_to_stdout: true
+        )
+    end)
+
+    git!(fixture.repo, [
+      "update-ref",
+      "refs/heads/#{retained.branch}",
+      replacement_tip,
+      settlement_tip
+    ])
+
+    assert retained_inventory_identity(workspace_id)["proof_status"] == "unavailable"
+
+    assert {:error, :current_identity_unavailable} =
+             Actions.apply_coding_reconciliation_decision(
+               auth,
+               retained_settle_decision(workspace_id, expected_identity)
+             )
+
+    assert git!(fixture.repo, ["rev-parse", retained.branch]) == replacement_tip
+    assert {:ok, ^phase_marker} = durable_retained_marker(workspace_id)
+    assert Map.has_key?(:sys.get_state(server).retained_by_id, workspace_id)
+  end
+
+  test "security regression: evidence loss after branch reservation prevents branch deletion", %{
+    tmp_dir: tmp_dir
+  } do
+    server = start_durable_retained_registry(DriftBeforeCasStore)
+    fixture = leased_project_for_registry(tmp_dir, server)
+    {retained, _identity} = retained_identity(fixture)
+    auth = verified_auth("agent_retained_branch_evidence_race")
+    workspace_id = retained.workspace_id
+    settlement_tip = git!(fixture.repo, ["rev-parse", retained.branch])
+    evidence_ref = archive_retained_evidence!(retained, settlement_tip)
+
+    assert :ok = WorkspaceLeaseRegistry.remove_owned_retained_worktree(retained)
+
+    {:ok, source_marker} = durable_retained_marker(workspace_id)
+
+    phase_marker =
+      source_marker
+      |> Map.put(:lifecycle, "discarding")
+      |> Map.put(:discard_phase, "branch")
+      |> Map.put(:settlement_tip, settlement_tip)
+      |> Map.put(:lstat_identity, nil)
+      |> Map.put(:worktree_registration, nil)
+
+    put_durable_retained_marker(workspace_id, phase_marker)
+    put_retained_branch_phase(workspace_id, settlement_tip)
+    {_source_retained, expected_identity} = retained_identity_for(workspace_id)
+
+    :persistent_term.put(
+      {DriftBeforeCasStore, retention_store_name()},
+      {:delete_evidence, fixture.repo, evidence_ref}
+    )
+
+    on_exit(fn ->
+      _ =
+        Git.archive_branch_evidence_ref(
+          retained.repo_path,
+          retained.branch,
+          retained.task_id,
+          retained.workspace_id,
+          settlement_tip
+        )
+    end)
+
+    assert {:error, :retained_archive_evidence_unavailable} =
+             Actions.apply_coding_reconciliation_decision(
+               auth,
+               retained_settle_decision(workspace_id, expected_identity)
+             )
+
+    refute ref_exists?(fixture.repo, evidence_ref)
+    assert git!(fixture.repo, ["rev-parse", retained.branch]) == settlement_tip
+    assert {:ok, changed_marker} = durable_retained_marker(workspace_id)
+    refute Map.has_key?(changed_marker, :reconciliation_marker_fence)
+    assert Map.has_key?(:sys.get_state(server).retained_by_id, workspace_id)
+  end
+
   test "discard phase and settlement tip drift block exact settlement until the durable source is restored",
        %{
          tmp_dir: tmp_dir
@@ -1348,6 +1794,7 @@ defmodule Arbor.Actions.Coding.ReconciliationApplyTest do
     workspace_id = retained.workspace_id
     settlement_tip = git!(fixture.repo, ["rev-parse", retained.branch])
     {:ok, source_marker} = durable_retained_marker(workspace_id)
+    _evidence_ref = archive_retained_evidence!(retained, settlement_tip)
 
     phase_marker =
       source_marker
@@ -1392,6 +1839,7 @@ defmodule Arbor.Actions.Coding.ReconciliationApplyTest do
     worktree_path = retained.worktree_path
     settlement_tip = git!(fixture.repo, ["rev-parse", retained.branch])
     future_ms = System.monotonic_time(:millisecond) + 60_000
+    _evidence_ref = archive_retained_evidence!(retained, settlement_tip)
 
     :sys.replace_state(WorkspaceLeaseRegistry, fn state ->
       current = Map.fetch!(state.retained_by_id, workspace_id)
@@ -2106,6 +2554,24 @@ defmodule Arbor.Actions.Coding.ReconciliationApplyTest do
     end)
   end
 
+  defp put_retained_branch_phase(workspace_id, settlement_tip) do
+    :sys.replace_state(workspace_registry_server(), fn state ->
+      current = Map.fetch!(state.retained_by_id, workspace_id)
+
+      updated =
+        current
+        |> Map.put(:lifecycle, :discarding)
+        |> Map.put(:discard_phase, :branch)
+        |> Map.put(:settlement_tip, settlement_tip)
+        |> Map.put(:lstat_identity, nil)
+        |> Map.put(:worktree_registration, nil)
+        |> Map.put(:durable_lifecycle, nil)
+        |> Map.put(:expiry_ref, nil)
+
+      put_retained_indexes(state, updated)
+    end)
+  end
+
   defp drop_workspace_residue(workspace_id) when is_binary(workspace_id) do
     :sys.replace_state(WorkspaceLeaseRegistry, fn state ->
       retained_by_target =
@@ -2802,6 +3268,35 @@ defmodule Arbor.Actions.Coding.ReconciliationApplyTest do
     String.trim(output)
   end
 
+  defp detached_commit!(repo_path, parent_oid, message) do
+    tree_oid = git!(repo_path, ["rev-parse", "#{parent_oid}^{tree}"])
+    git!(repo_path, ["commit-tree", tree_oid, "-p", parent_oid, "-m", message])
+  end
+
+  defp archive_retained_evidence!(retained, settlement_tip) do
+    assert {:ok, %{hidden_ref: hidden_ref}} =
+             Git.archive_branch_evidence_ref(
+               retained.repo_path,
+               retained.branch,
+               retained.task_id,
+               retained.workspace_id,
+               settlement_tip
+             )
+
+    hidden_ref
+  end
+
+  defp git_clone_without_hidden_refs!(source, destination) do
+    {_, 0} =
+      System.cmd(
+        "git",
+        ["clone", "--no-local", "--no-checkout", source, destination],
+        stderr_to_stdout: true
+      )
+
+    :ok
+  end
+
   defp start_durable_retained_registry(backend \\ Arbor.Persistence.Store.ETS) do
     store_name = String.to_atom("reconciliation_retained_#{System.unique_integer([:positive])}")
     server = String.to_atom("reconciliation_registry_#{System.unique_integer([:positive])}")
@@ -2866,6 +3361,8 @@ defmodule Arbor.Actions.Coding.ReconciliationApplyTest do
       )
     )
   end
+
+  defp branch_exists?(repo, branch), do: ref_exists?(repo, "refs/heads/#{branch}")
 
   defp restore_env(key, nil), do: Application.delete_env(:arbor_actions, key)
   defp restore_env(key, value), do: Application.put_env(:arbor_actions, key, value)
