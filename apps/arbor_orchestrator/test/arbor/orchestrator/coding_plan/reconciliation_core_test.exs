@@ -1318,27 +1318,67 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCoreTest do
   end
 
   defp resource(type, resource_id, task_id, principal_id, overrides \\ []) do
+    resource =
+      %{
+        "resource_type" => type,
+        "resource_id" => resource_id,
+        "workspace_id" => "workspace-#{resource_id}",
+        "task_id" => task_id,
+        "principal_id" => principal_id,
+        "repo_path" => "/repo",
+        "worktree_path" => "/worktree",
+        "branch" => "branch-#{resource_id}",
+        "base_commit" => "commit",
+        "ownership" => "owned",
+        "branch_provenance" => "created",
+        "lifecycle" => if(type == "retained_workspace_record", do: "retained", else: "active"),
+        "active" => type != "retained_workspace_record" and type != "quarantine",
+        "cleanup_armed" => type == "live_workspace_lease",
+        "dormant" => false,
+        "retry_state" => %{"count" => 0, "limit" => 3, "dormant" => false},
+        "expires_at" =>
+          if(type == "retained_workspace_record", do: "2026-07-22T18:00:00Z", else: nil)
+      }
+      |> Map.merge(Map.new(overrides, fn {key, value} -> {to_string(key), value} end))
+
+    if type == "retained_workspace_record" and
+         not Map.has_key?(resource, "expected_identity") do
+      Map.put(resource, "expected_identity", retained_expected_identity(resource))
+    else
+      resource
+    end
+  end
+
+  defp retained_expected_identity(resource) do
+    retry_state = resource["retry_state"]
+
     %{
-      "resource_type" => type,
-      "resource_id" => resource_id,
-      "workspace_id" => "workspace-#{resource_id}",
-      "task_id" => task_id,
-      "principal_id" => principal_id,
-      "repo_path" => "/repo",
-      "worktree_path" => "/worktree",
-      "branch" => "branch-#{resource_id}",
-      "base_commit" => "commit",
-      "ownership" => "owned",
-      "branch_provenance" => "created",
-      "lifecycle" => if(type == "retained_workspace_record", do: "retained", else: "active"),
-      "active" => type != "retained_workspace_record" and type != "quarantine",
-      "cleanup_armed" => type == "live_workspace_lease",
-      "dormant" => false,
-      "retry_state" => %{"count" => 0, "limit" => 3, "dormant" => false},
-      "expires_at" =>
-        if(type == "retained_workspace_record", do: "2026-07-22T18:00:00Z", else: nil)
+      "resource_type" => "retained_workspace_record",
+      "resource_id" => resource["resource_id"],
+      "task_id" => resource["task_id"],
+      "principal_id" => resource["principal_id"],
+      "lifecycle" => resource["lifecycle"],
+      "active" => resource["active"],
+      "ownership" => resource["ownership"],
+      "branch_provenance" => resource["branch_provenance"],
+      "cleanup_armed" => resource["cleanup_armed"],
+      "dormant" => resource["dormant"],
+      "retry_count" => retry_state["count"],
+      "retry_limit" => retry_state["limit"],
+      "expires_at" => resource["expires_at"],
+      "identity_version" => 2,
+      "proof_status" => "complete",
+      "marker_source" => "disabled",
+      "workspace_digest" => String.duplicate("a", 64),
+      "marker_digest" => nil,
+      "repository_digest" => String.duplicate("b", 64),
+      "branch_observation" => %{
+        "status" => "present",
+        "oid" => String.duplicate("c", 40)
+      },
+      "discard_phase" => resource["discard_phase"],
+      "settlement_tip" => resource["settlement_tip"]
     }
-    |> Map.merge(Map.new(overrides, fn {key, value} -> {to_string(key), value} end))
   end
 
   defp resource_inventory(resources) do

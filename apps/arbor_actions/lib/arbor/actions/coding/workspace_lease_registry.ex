@@ -123,12 +123,17 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   alias Arbor.Actions.Config
   alias Arbor.Actions.Coding.ValidationResourceOwner
   alias Arbor.Actions.Coding.Workspace
+
+  alias Arbor.Actions.Coding.RetainedWorkspaceReconciliationIdentityCore,
+    as: RetainedReconciliationIdentity
+
   alias Arbor.Actions.Coding.WorkspaceReconciliationProjection
   alias Arbor.Actions.Coding.WorkspaceBranchLifecycleCore, as: BranchLifecycle
   alias Arbor.Actions.Coding.WorkspaceLifecycleStatusCore, as: LifecycleStatus
   alias Arbor.Actions.Coding.WorkspaceRetentionJournalCore, as: RetentionJournal
   alias Arbor.Actions.Git
   alias Arbor.Common.SafePath
+  alias Arbor.Contracts.Coding.RetainedWorkspaceIdentity
   alias Arbor.Persistence
 
   @type ownership :: :owned | :reused
@@ -1144,6 +1149,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
         principal_id,
         max_items
       )
+      |> attach_retained_reconciliation_identities(state)
 
     {:reply, {:ok, inventory}, state}
   end
@@ -1298,16 +1304,14 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     expected_identity = Map.get(fields, "expected_identity")
 
     if is_binary(workspace_id) and is_map(expected_identity) and not is_struct(expected_identity) do
-      case ensure_journal_inventory_known(state) do
-        :ok ->
-          compare_and_settle_retained_after_journal(
-            state,
-            workspace_id,
-            expected_identity
-          )
-
-        {:error, reason} ->
-          {:reply, {:error, reason}, state}
+      if RetainedWorkspaceIdentity.settlement_ready?(expected_identity) do
+        compare_and_settle_retained_after_journal(
+          state,
+          workspace_id,
+          expected_identity
+        )
+      else
+        {:reply, {:error, :retained_identity_proof_required}, state}
       end
     else
       {:reply, {:error, :invalid_reconciliation_settle_fields}, state}
@@ -2611,37 +2615,47 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   end
 
   defp compare_and_settle_retained_after_journal(state, workspace_id, expected_identity) do
-    case Map.fetch(state.retained_by_id, workspace_id) do
-      :error ->
-        reply_retained_absent(state, workspace_id)
-
-      {:ok, retained} ->
-        case WorkspaceReconciliationProjection.retained_comparison_identity(
-               state,
-               workspace_id
-             ) do
-          {:ok, ^expected_identity} ->
-            settle_retained_after_identity_match(state, retained, workspace_id)
-
-          {:ok, current_identity} ->
-            {:reply,
-             {:error,
-              {:reconciliation_identity_conflict,
-               %{
-                 "resource_id" => workspace_id,
-                 "current_identity" => current_identity
-               }}}, state}
-
-          {:error, :current_identity_unavailable} ->
-            {:reply, {:error, :current_identity_unavailable}, state}
-
-          :absent ->
+    case retained_identity_source(state) do
+      {:ok, source} ->
+        case Map.fetch(state.retained_by_id, workspace_id) do
+          :error ->
             reply_retained_absent(state, workspace_id)
+
+          {:ok, retained} ->
+            case observe_retained_reconciliation_identity(state, retained, source) do
+              {:ok, ^expected_identity} ->
+                settle_retained_after_identity_match(
+                  state,
+                  retained,
+                  workspace_id,
+                  expected_identity["branch_observation"]
+                )
+
+              {:ok, current_identity} ->
+                {:reply,
+                 {:error,
+                  {:reconciliation_identity_conflict,
+                   %{
+                     "resource_id" => workspace_id,
+                     "current_identity" => current_identity
+                   }}}, state}
+
+              {:error, _reason} ->
+                {:reply, {:error, :current_identity_unavailable}, state}
+            end
         end
+
+      {:error, _reason} ->
+        {:reply, {:error, :retention_journal_unavailable}, state}
     end
   end
 
-  defp settle_retained_after_identity_match(state, retained, workspace_id) do
+  defp settle_retained_after_identity_match(
+         state,
+         retained,
+         workspace_id,
+         expected_branch_observation
+       ) do
     cond do
       Map.get(retained, :dormant) == true ->
         {:reply, {:error, :retained_not_expirable}, state}
@@ -2666,7 +2680,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
              :ok <- require_retained_expired(retained),
              :ok <- require_no_active_target(state, derived) do
           confirm_retained_workspace_settlement(
-            expire_retained_workspace_result(state, retained),
+            expire_retained_workspace_result(state, retained, expected_branch_observation),
             workspace_id
           )
         else
@@ -3952,6 +3966,189 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   end
 
   defp ensure_journal_inventory_known(_state), do: {:error, :retention_journal_unavailable}
+
+  defp retained_identity_source(%{retention_journal: %{status: :disabled}}),
+    do: {:ok, %{marker_source: "disabled", records: %{}}}
+
+  defp retained_identity_source(%{retention_journal: %{status: :ready} = journal} = state) do
+    with {:ok, records} <- load_durable_retained_records(journal),
+         :ok <- validate_protection_inventory_branches(records),
+         :ok <- require_matching_durable_hot_ids(state, records),
+         :ok <- require_unique_durable_targets(records) do
+      {:ok,
+       %{
+         marker_source: "durable",
+         records: Map.new(records, &{&1.workspace_id, &1})
+       }}
+    end
+  end
+
+  defp retained_identity_source(_state), do: {:error, :retention_journal_unavailable}
+
+  defp require_unique_durable_targets(records) when is_list(records) do
+    records
+    |> Enum.reduce_while({:ok, MapSet.new()}, fn record, {:ok, targets} ->
+      target =
+        target_key(
+          Map.get(record, :repo_path),
+          Map.get(record, :branch),
+          Map.get(record, :worktree_path)
+        )
+
+      if MapSet.member?(targets, target) do
+        {:halt, {:error, :duplicate_retention_target}}
+      else
+        {:cont, {:ok, MapSet.put(targets, target)}}
+      end
+    end)
+    |> case do
+      {:ok, _targets} -> :ok
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp attach_retained_reconciliation_identities(inventory, state)
+       when is_map(inventory) and is_map(state) do
+    source = retained_identity_source(state)
+
+    resources =
+      Enum.map(Map.get(inventory, "resources", []), fn
+        %{
+          "resource_type" => "retained_workspace_record",
+          "resource_id" => workspace_id
+        } = resource ->
+          case Map.fetch(state.retained_by_id, workspace_id) do
+            {:ok, retained} ->
+              identity =
+                case source do
+                  {:ok, available_source} ->
+                    case observe_retained_reconciliation_identity(
+                           state,
+                           retained,
+                           available_source
+                         ) do
+                      {:ok, identity} ->
+                        identity
+
+                      {:error, _reason} ->
+                        unavailable_retained_identity(state, workspace_id)
+                    end
+
+                  {:error, _reason} ->
+                    unavailable_retained_identity(state, workspace_id)
+                end
+
+              Map.put(resource, "expected_identity", identity)
+
+            :error ->
+              resource
+          end
+
+        resource ->
+          resource
+      end)
+
+    Map.put(inventory, "resources", resources)
+  end
+
+  defp attach_retained_reconciliation_identities(inventory, _state), do: inventory
+
+  defp unavailable_retained_identity(state, workspace_id) do
+    marker_source =
+      case get_in(state, [:retention_journal, :status]) do
+        :ready -> "durable"
+        :disabled -> "disabled"
+        _ -> "unavailable"
+      end
+
+    with {:ok, legacy} <-
+           WorkspaceReconciliationProjection.retained_comparison_identity(state, workspace_id),
+         {:ok, unavailable} <-
+           RetainedReconciliationIdentity.unavailable(legacy, marker_source) do
+      unavailable
+    else
+      _ -> nil
+    end
+  end
+
+  defp observe_retained_reconciliation_identity(state, retained, source)
+       when is_map(state) and is_map(retained) and is_map(source) do
+    workspace_id = Map.get(retained, :workspace_id)
+
+    with {:ok, legacy} <-
+           WorkspaceReconciliationProjection.retained_comparison_identity(state, workspace_id),
+         {:ok, durable_record} <- retained_source_record(source, workspace_id),
+         {:ok, repository_identity, branch_observation} <-
+           observe_retained_repository_branch(retained),
+         runtime_id when is_binary(runtime_id) <- Map.get(state, :retention_runtime_id),
+         {:ok, identity} <-
+           RetainedReconciliationIdentity.complete(
+             legacy,
+             retained,
+             source.marker_source,
+             durable_record,
+             repository_identity,
+             branch_observation,
+             runtime_id
+           ) do
+      {:ok, identity}
+    else
+      _ -> {:error, :current_identity_unavailable}
+    end
+  end
+
+  defp observe_retained_reconciliation_identity(_state, _retained, _source),
+    do: {:error, :current_identity_unavailable}
+
+  defp retained_source_record(%{marker_source: "disabled"}, _workspace_id), do: {:ok, nil}
+
+  defp retained_source_record(
+         %{marker_source: "durable", records: records},
+         workspace_id
+       )
+       when is_map(records) do
+    Map.fetch(records, workspace_id)
+  end
+
+  defp retained_source_record(_source, _workspace_id),
+    do: {:error, :retention_marker_unavailable}
+
+  defp observe_retained_repository_branch(retained) do
+    repo_path = Map.get(retained, :repo_path)
+    worktree_path = Map.get(retained, :worktree_path)
+    branch = Map.get(retained, :branch)
+
+    case retained_paths_absence_proof(repo_path, worktree_path) do
+      {:ok, absence_proof} ->
+        {:ok, absence_proof, :absent}
+
+      :not_both_absent ->
+        with {:ok, repository_before} <- Git.repository_identity(repo_path),
+             {:ok, branch_observation} <- Git.observe_branch_ref(repo_path, branch),
+             {:ok, repository_after} <- Git.repository_identity(repo_path),
+             true <- repository_before === repository_after do
+          {:ok, repository_before, branch_observation}
+        else
+          _ -> {:error, :repository_branch_observation_unavailable}
+        end
+    end
+  end
+
+  # A marker-only retained settlement is authorized only by definitive absence
+  # of both independently recorded paths. The paths themselves remain inside
+  # the digest input built by RetainedReconciliationIdentity.
+  defp retained_paths_absence_proof(repo_path, worktree_path)
+       when is_binary(repo_path) and is_binary(worktree_path) do
+    case {File.lstat(repo_path), File.lstat(worktree_path)} do
+      {{:error, :enoent}, {:error, :enoent}} ->
+        {:ok, %{"repo_path" => repo_path, "worktree_path" => worktree_path, "state" => "absent"}}
+
+      _other ->
+        :not_both_absent
+    end
+  end
+
+  defp retained_paths_absence_proof(_repo_path, _worktree_path), do: :not_both_absent
 
   defp require_matching_durable_hot_ids(state, records) do
     durable_ids = records |> Enum.map(& &1.workspace_id) |> MapSet.new()
@@ -6509,7 +6706,15 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     if both_paths_positively_absent?(retained.repo_path, retained.worktree_path) do
       settle_expired_both_absent_result(state, retained)
     else
-      begin_retained_expiry_archive_result(state, retained)
+      begin_retained_expiry_archive_result(state, retained, :capture_current)
+    end
+  end
+
+  defp expire_retained_workspace_result(state, retained, expected_branch_observation) do
+    if both_paths_positively_absent?(retained.repo_path, retained.worktree_path) do
+      settle_expired_both_absent_result(state, retained)
+    else
+      begin_retained_expiry_archive_result(state, retained, expected_branch_observation)
     end
   end
 
@@ -6547,10 +6752,12 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   # worktree identity is still valid, then persist archive intent before the
   # hidden ref or either destructive phase can run. Once persisted, retries
   # never rebind to a replacement tip.
-  defp begin_retained_expiry_archive_result(state, retained) do
+  defp begin_retained_expiry_archive_result(state, retained, expected_branch_observation) do
     with :ok <- validate_retained_stored_identity(retained),
-         {:ok, {:present, expected_tip}} <-
-           Git.observe_branch_ref(retained.repo_path, retained.branch) do
+         {:ok, branch_observation} <-
+           Git.observe_branch_ref(retained.repo_path, retained.branch),
+         {:ok, expected_tip} <-
+           bind_retained_archive_tip(branch_observation, expected_branch_observation) do
       archive_marker =
         BranchLifecycle.begin_archive_phase(
           retained,
@@ -6576,9 +6783,8 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
           {:error, failure, state2}
       end
     else
-      {:ok, :absent} ->
-        state2 = schedule_expiry_transition_retry(state, retained, :archive_branch_absent)
-        {:error, :archive_branch_absent, state2}
+      {:error, :reconciliation_branch_identity_conflict} ->
+        {:error, :reconciliation_branch_identity_conflict, state}
 
       {:error, reason} ->
         failure = {:archive_capture_failed, reason}
@@ -6586,6 +6792,22 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
         {:error, failure, state2}
     end
   end
+
+  defp bind_retained_archive_tip({:present, oid}, :capture_current) when is_binary(oid),
+    do: {:ok, oid}
+
+  defp bind_retained_archive_tip(
+         {:present, oid},
+         %{"status" => "present", "oid" => oid}
+       )
+       when is_binary(oid),
+       do: {:ok, oid}
+
+  defp bind_retained_archive_tip(_current, :capture_current),
+    do: {:error, :archive_branch_absent}
+
+  defp bind_retained_archive_tip(_current, _expected),
+    do: {:error, :reconciliation_branch_identity_conflict}
 
   # Capture/intent failures occur before archive authority is committed. They
   # stay in retained lifecycle and consume the same durable bounded retry
@@ -6620,12 +6842,8 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   end
 
   defp both_paths_positively_absent?(repo_path, worktree_path)
-       when is_binary(repo_path) and is_binary(worktree_path) do
-    case {File.lstat(repo_path), File.lstat(worktree_path)} do
-      {{:error, :enoent}, {:error, :enoent}} -> true
-      _other -> false
-    end
-  end
+       when is_binary(repo_path) and is_binary(worktree_path),
+       do: match?({:ok, _proof}, retained_paths_absence_proof(repo_path, worktree_path))
 
   defp both_paths_positively_absent?(_repo_path, _worktree_path), do: false
 
@@ -7678,48 +7896,13 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   defp persist_retained_marker(%{retention_journal: journal} = state, retained)
        when journal.status == :ready do
     try do
-      lifecycle =
-        Map.get(retained, :durable_lifecycle) ||
-          case Map.get(retained, :lifecycle, :retained) do
-            :active_orphaned -> "active"
-            :retained -> "retained"
-            :discarding -> "discarding"
-            :creating -> "creating"
-            "active" -> "active"
-            "retained" -> "retained"
-            "discarding" -> "discarding"
-            "creating" -> "creating"
-            _ -> "retained"
-          end
-
       runtime_id =
         Map.get(retained, :runtime_id) || Map.get(state, :retention_runtime_id) ||
           beam_retention_runtime_id()
 
-      encode_input = %{
-        workspace_id: retained.workspace_id,
-        task_id: retained.task_id,
-        principal_id: retained.principal_id,
-        repo_path: retained.repo_path,
-        worktree_path: retained.worktree_path,
-        display_worktree_path: Map.get(retained, :display_worktree_path, retained.worktree_path),
-        branch: retained.branch,
-        base_commit: retained.base_commit,
-        ownership: Map.get(retained, :ownership, :owned),
-        lifecycle: lifecycle,
-        runtime_id: runtime_id,
-        lstat_identity: retained.lstat_identity,
-        worktree_registration: retained.worktree_registration,
-        expires_at: retained.expires_at,
-        retry_count: Map.get(retained, :retry_count, 0),
-        branch_provenance: Map.get(retained, :branch_provenance, :unknown)
-      }
-
-      encode_input = maybe_put_settlement_tip(encode_input, retained)
-      encode_input = maybe_put_discard_phase(encode_input, retained)
-
       with {:ok, key} <- RetentionJournal.record_key(retained.workspace_id),
-           {:ok, payload} <- RetentionJournal.encode_record(encode_input),
+           {:ok, payload} <-
+             RetainedReconciliationIdentity.durable_marker_record(retained, runtime_id),
            :ok <- Persistence.put(journal.store_name, journal.backend, key, payload) do
         :ok
       else
@@ -7733,23 +7916,6 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   end
 
   defp persist_retained_marker(_state, _retained), do: {:error, :retention_journal_unavailable}
-
-  defp maybe_put_settlement_tip(encode_input, retained) do
-    case Map.get(retained, :settlement_tip) do
-      tip when is_binary(tip) and tip != "" -> Map.put(encode_input, :settlement_tip, tip)
-      _ -> encode_input
-    end
-  end
-
-  defp maybe_put_discard_phase(encode_input, retained) do
-    case Map.get(retained, :discard_phase) do
-      phase when phase in [:archive, :worktree, :branch, "archive", "worktree", "branch"] ->
-        Map.put(encode_input, :discard_phase, phase)
-
-      _ ->
-        encode_input
-    end
-  end
 
   defp delete_retained_marker(%{retention_journal: %{status: :disabled}}, _retained), do: :ok
 

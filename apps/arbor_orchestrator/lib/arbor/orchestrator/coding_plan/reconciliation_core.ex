@@ -11,6 +11,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
   alias Arbor.Contracts.Coding.AppleContainerUnitIdentity
   alias Arbor.Contracts.Coding.PendingApprovalResourceId
   alias Arbor.Contracts.Coding.ReconciliationManifest
+  alias Arbor.Contracts.Coding.RetainedWorkspaceIdentity
   alias Arbor.Contracts.Security.CapabilityUri
 
   @schema_version 1
@@ -44,7 +45,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
     resource_type resource_id workspace_id task_id principal_id repo_path worktree_path branch
     base_commit settlement_tip candidate_path candidate_commit base_worktree_path ownership
     branch_provenance lifecycle active cleanup_armed dormant retry_state expires_at discard_phase
-    cleanup_state source quarantine_reason evidence_count
+    cleanup_state source quarantine_reason evidence_count expected_identity
   )
   @source_acp_session_fields ~w(
     worker_session_id provider_session_id provider model status pooled return_to_pool
@@ -1209,6 +1210,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
          :ok <- optional_id(resource["task_id"]),
          :ok <- optional_id(resource["principal_id"]),
          :ok <- optional_fields(resource),
+         :ok <- normalize_retained_source_identity(resource),
          :ok <- boolean_value(resource["active"]) do
       {:ok,
        resource |> Map.put("resource_type", resource_type) |> Map.put("resource_id", resource_id)}
@@ -1216,6 +1218,29 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
   end
 
   defp normalize_resource(_resource), do: {:error, :malformed_resource}
+
+  defp normalize_retained_source_identity(%{
+         "resource_type" => "retained_workspace_record",
+         "expected_identity" => identity,
+         "resource_id" => resource_id,
+         "task_id" => task_id,
+         "principal_id" => principal_id
+       }) do
+    with {:ok, normalized} <- RetainedWorkspaceIdentity.normalize(identity),
+         true <- normalized["identity_version"] == RetainedWorkspaceIdentity.identity_version(),
+         true <- normalized["resource_id"] == resource_id,
+         true <- normalized["task_id"] == task_id,
+         true <- normalized["principal_id"] == principal_id do
+      :ok
+    else
+      _ -> {:error, :malformed_retained_source_identity}
+    end
+  end
+
+  defp normalize_retained_source_identity(%{"resource_type" => "retained_workspace_record"}),
+    do: {:error, :malformed_retained_source_identity}
+
+  defp normalize_retained_source_identity(_resource), do: :ok
 
   defp optional_fields(resource) do
     with :ok <- optional_text_value(resource["repo_path"]),
@@ -1272,6 +1297,10 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
       cond do
         type == "quarantine" ->
           {"quarantine", "existing_quarantine"}
+
+        type == "retained_workspace_record" and
+            not RetainedWorkspaceIdentity.settlement_ready?(resource["expected_identity"]) ->
+          {"quarantine", "ambiguous_provenance"}
 
         journal_status == "degraded" ->
           {"quarantine", "journal_degraded"}
@@ -1339,6 +1368,14 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
   end
 
   defp expected_identity(resource) do
+    if resource["resource_type"] == "retained_workspace_record" do
+      resource["expected_identity"]
+    else
+      workspace_expected_identity(resource)
+    end
+  end
+
+  defp workspace_expected_identity(resource) do
     retry_state = resource["retry_state"] || %{}
 
     %{

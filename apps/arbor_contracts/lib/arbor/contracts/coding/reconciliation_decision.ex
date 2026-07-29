@@ -5,6 +5,7 @@ defmodule Arbor.Contracts.Coding.ReconciliationDecision do
 
   alias Arbor.Contracts.Coding.AppleContainerUnitIdentity
   alias Arbor.Contracts.Coding.PendingApprovalIdentity
+  alias Arbor.Contracts.Coding.RetainedWorkspaceIdentity
 
   @schema_version 1
   @workspace_resource_types ~w(
@@ -248,6 +249,19 @@ defmodule Arbor.Contracts.Coding.ReconciliationDecision do
          true <- identity["resource_id"] == resource_id,
          true <- identity["task_id"] == outer_task_id,
          true <- identity["principal_id"] == outer_principal_id do
+      {:ok, identity}
+    else
+      false -> {:error, {:invalid_field, "expected_identity"}}
+      error -> error
+    end
+  end
+
+  defp normalize_identity(value, "retained_workspace_record", resource_id, task_id, principal_id)
+       when is_map(value) and not is_struct(value) do
+    with {:ok, identity} <- RetainedWorkspaceIdentity.normalize(value),
+         true <- identity["resource_id"] == resource_id,
+         true <- identity["task_id"] == task_id,
+         true <- identity["principal_id"] == principal_id do
       {:ok, identity}
     else
       false -> {:error, {:invalid_field, "expected_identity"}}
