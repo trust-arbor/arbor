@@ -1785,6 +1785,13 @@ defmodule Arbor.Orchestrator.RunJournal do
     # Prefer the richer progress between process-local state and journal.
     progress = prefer_progress(from_state, preserved)
 
+    # In-call ticker writes advance last_heartbeat on the journal while the
+    # process-local RunState snapshot stays stale. Never let a same-epoch
+    # put_run_state regress that canonical heartbeat. Owner epoch is
+    # owner_node + spawning_pid so recovery/takeover does not inherit
+    # the previous owner's freshness.
+    last_heartbeat = prefer_monotonic_heartbeat(from_state, preserved)
+
     record =
       %Record{
         from_state
@@ -1800,6 +1807,7 @@ defmodule Arbor.Orchestrator.RunJournal do
           owner_node: from_state.owner_node || preserved.owner_node,
           source_node: from_state.source_node || preserved.source_node,
           started_at: from_state.started_at || preserved.started_at,
+          last_heartbeat: last_heartbeat,
           # Effect evidence is journal-owned — never reset from RunState (always 0/nil).
           effect_generation: preserved.effect_generation || 0,
           current_effect: preserved.current_effect
@@ -1807,6 +1815,37 @@ defmodule Arbor.Orchestrator.RunJournal do
       |> Adapter.merge_meta(meta)
 
     write_record(record, state)
+  end
+
+  # Keep the newer heartbeat only for the same live owner epoch. A changed
+  # owner_node or spawning_pid is a new epoch and must publish its own
+  # snapshot (recovery/takeover must not inherit prior freshness).
+  defp prefer_monotonic_heartbeat(%Record{} = from_state, %Record{} = preserved) do
+    if same_owner_epoch?(from_state, preserved) do
+      newer_datetime(from_state.last_heartbeat, preserved.last_heartbeat)
+    else
+      from_state.last_heartbeat
+    end
+  end
+
+  defp same_owner_epoch?(%Record{} = a, %Record{} = b) do
+    owner_a = a.owner_node && to_string(a.owner_node)
+    owner_b = b.owner_node && to_string(b.owner_node)
+    pid_a = a.spawning_pid
+    pid_b = b.spawning_pid
+
+    is_binary(owner_a) and owner_a != "" and owner_a == owner_b and
+      is_pid(pid_a) and is_pid(pid_b) and pid_a == pid_b
+  end
+
+  defp newer_datetime(nil, other), do: other
+  defp newer_datetime(other, nil), do: other
+
+  defp newer_datetime(%DateTime{} = a, %DateTime{} = b) do
+    case DateTime.compare(a, b) do
+      :lt -> b
+      _ -> a
+    end
   end
 
   # ---------------------------------------------------------------------------
