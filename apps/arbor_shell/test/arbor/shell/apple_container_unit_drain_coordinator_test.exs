@@ -114,6 +114,9 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinatorTest do
     def recovery_entries(server \\ __MODULE__),
       do: GenServer.call(server, :recovery_entries)
 
+    def identity_from_record(record),
+      do: Arbor.Shell.AppleContainerUnitJournal.identity_from_record(record)
+
     def reserve_record(unit_name, execution_id, owner, server \\ __MODULE__),
       do: GenServer.call(server, {:reserve_record, unit_name, execution_id, owner})
 
@@ -286,6 +289,11 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinatorTest do
       GenServer.call(__MODULE__, :pending)
     end
 
+    def emit_recover_entry(receipt_ref) when is_reference(receipt_ref) do
+      ensure_started()
+      GenServer.call(__MODULE__, {:emit_recover_entry, receipt_ref})
+    end
+
     def recover_all_pending do
       ensure_started()
       GenServer.call(__MODULE__, :recover_all_pending)
@@ -327,6 +335,21 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinatorTest do
     def handle_call(:status_count, _from, state), do: {:reply, state.status_count, state}
     def handle_call(:events, _from, state), do: {:reply, Enum.reverse(state.events), state}
     def handle_call(:pending, _from, state), do: {:reply, state.pending, state}
+
+    def handle_call({:emit_recover_entry, receipt_ref}, _from, state) do
+      case Map.get(state.pending, receipt_ref) do
+        {record, caller} when is_pid(caller) ->
+          send(
+            caller,
+            {:apple_container_unit_recovery_entry_complete, self(), record.unit_name, receipt_ref}
+          )
+
+          {:reply, :ok, %{state | pending: Map.delete(state.pending, receipt_ref)}}
+
+        _missing ->
+          {:reply, {:error, :no_pending}, state}
+      end
+    end
 
     def handle_call(:recover_all_pending, _from, state),
       do: {:reply, state.recover_all_pending, state}
@@ -806,6 +829,12 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinatorTest do
         principal_id: "principal"
       }
     }
+  end
+
+  defp settle_fields(record, overrides \\ %{}) do
+    {:ok, identity} = Arbor.Shell.AppleContainerUnitJournal.identity_from_record(record)
+    expected = Map.merge(identity, overrides)
+    %{"resource_id" => expected["resource_id"], "expected_identity" => expected}
   end
 
   defp eventually!(fun, timeout \\ 2_000) do
@@ -1881,6 +1910,208 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinatorTest do
 
       other ->
         other
+    end
+  end
+
+  describe "compare_and_settle_apple_container_unit" do
+    test "exact live worker uses the established drain path and settles after fresh absence proof",
+         %{
+           holder: holder
+         } do
+      worker = spawn_worker()
+      rec = record()
+      :ok = FakeJournal.reset(entries: [rec])
+      :ok = Snapshot.set({:ok, [worker]})
+      :ok = FakeWorker.register_worker(worker, execution_id: @execution_id, journal_record: rec)
+
+      pid = start_coord!(holder)
+      await_ready(pid)
+
+      task =
+        Task.async(fn ->
+          Coordinator.compare_and_settle_apple_container_unit(settle_fields(rec), pid)
+        end)
+
+      eventually!(fn ->
+        Enum.any?(FakeWorker.events(), &match?({:request_drain, ^worker, _, _}, &1))
+      end)
+
+      assert Process.alive?(task.pid)
+
+      [{^worker, {receipt_ref, _caller}}] = Map.to_list(FakeWorker.drain_pending())
+      :ok = Snapshot.set({:ok, []})
+      :ok = FakeJournal.set_entries([])
+      :ok = FakeWorker.emit_drain(worker, @execution_id, receipt_ref)
+
+      assert {:ok, receipt} = Task.await(task, 5_000)
+      assert receipt["status"] == "settled"
+      assert receipt["resource_id"] == settle_fields(rec)["resource_id"]
+      refute String.contains?(inspect(receipt), @token)
+    end
+
+    test "exact orphan uses the existing recovery path and settles after authoritative absence",
+         %{
+           holder: holder
+         } do
+      rec = record()
+      :ok = FakeJournal.reset(entries: [rec])
+      :ok = Snapshot.set({:ok, []})
+
+      pid = start_coord!(holder)
+      eventually!(fn -> map_size(FakeReconciler.pending()) >= 1 end)
+
+      task =
+        Task.async(fn ->
+          Coordinator.compare_and_settle_apple_container_unit(settle_fields(rec), pid)
+        end)
+
+      eventually!(fn -> map_size(:sys.get_state(pid).apple_unit_settlements) == 1 end)
+      [{receipt_ref, {_record, _caller}}] = Map.to_list(FakeReconciler.pending())
+      :ok = FakeJournal.set_entries([])
+      :ok = FakeReconciler.emit_recover_entry(receipt_ref)
+
+      assert {:ok, receipt} = Task.await(task, 5_000)
+      assert receipt["status"] == "settled"
+      assert Enum.any?(FakeReconciler.events(), &match?({:recover_entry, ^rec, _, _}, &1))
+    end
+
+    test "already absent replay is idempotent after a complete empty observation", %{
+      holder: holder
+    } do
+      rec = record()
+      :ok = FakeJournal.reset(entries: [rec])
+      :ok = Snapshot.set({:ok, []})
+
+      pid = start_coord!(holder)
+      eventually!(fn -> map_size(FakeReconciler.pending()) >= 1 end)
+
+      first_task =
+        Task.async(fn ->
+          Coordinator.compare_and_settle_apple_container_unit(settle_fields(rec), pid)
+        end)
+
+      eventually!(fn -> map_size(:sys.get_state(pid).apple_unit_settlements) == 1 end)
+      [{receipt_ref, {_record, _caller}}] = Map.to_list(FakeReconciler.pending())
+      :ok = FakeJournal.set_entries([])
+      :ok = FakeReconciler.emit_recover_entry(receipt_ref)
+
+      assert {:ok, receipt} =
+               Task.await(first_task, 5_000)
+
+      assert {:ok, replay_receipt} =
+               Coordinator.compare_and_settle_apple_container_unit(settle_fields(rec), pid)
+
+      assert receipt["status"] == "settled"
+      assert replay_receipt == receipt
+      refute Enum.any?(FakeWorker.events(), &match?({:request_drain, _, _, _}, &1))
+      assert Enum.any?(FakeReconciler.events(), &match?({:recover_entry, ^rec, _, _}, &1))
+    end
+
+    test "security regression: forged absent identity never settles", %{holder: holder} do
+      rec = record()
+      :ok = FakeJournal.reset(entries: [])
+      :ok = Snapshot.set({:ok, []})
+
+      pid = start_coord!(holder)
+      await_ready(pid)
+
+      task =
+        Task.async(fn ->
+          Coordinator.compare_and_settle_apple_container_unit(settle_fields(rec), pid)
+        end)
+
+      eventually!(fn -> map_size(:sys.get_state(pid).apple_unit_settlements) == 1 end)
+      Process.sleep(100)
+      assert Process.alive?(task.pid)
+      Process.exit(task.pid, :kill)
+    end
+
+    test "security regression: digest and generation drift never invoke cleanup", %{
+      holder: holder
+    } do
+      rec = record()
+      :ok = FakeJournal.reset(entries: [rec])
+      :ok = Snapshot.set({:error, :unit_supervisor_unavailable})
+
+      pid = start_coord!(holder)
+
+      wrong = settle_fields(rec, %{"source_record_digest" => String.duplicate("c", 64)})
+
+      task =
+        Task.async(fn ->
+          Coordinator.compare_and_settle_apple_container_unit(wrong, pid)
+        end)
+
+      eventually!(fn -> map_size(:sys.get_state(pid).apple_unit_settlements) == 1 end)
+      Process.sleep(100)
+      assert Process.alive?(task.pid)
+      refute Enum.any?(FakeWorker.events(), &match?({:request_drain, _, _, _}, &1))
+      refute Enum.any?(FakeReconciler.events(), &match?({:recover_entry, _, _, _}, &1))
+      Process.exit(task.pid, :kill)
+    end
+
+    test "security regression: owner drift remains pending without cleanup", %{holder: holder} do
+      rec = record()
+      :ok = FakeJournal.reset(entries: [rec])
+      :ok = Snapshot.set({:error, :unit_supervisor_unavailable})
+      pid = start_coord!(holder)
+
+      wrong = settle_fields(rec, %{"principal_id" => "principal-other"})
+
+      task =
+        Task.async(fn ->
+          Coordinator.compare_and_settle_apple_container_unit(wrong, pid)
+        end)
+
+      eventually!(fn -> map_size(:sys.get_state(pid).apple_unit_settlements) == 1 end)
+      Process.sleep(100)
+      assert Process.alive?(task.pid)
+      refute Enum.any?(FakeWorker.events(), &match?({:request_drain, _, _, _}, &1))
+      refute Enum.any?(FakeReconciler.events(), &match?({:recover_entry, _, _, _}, &1))
+      Process.exit(task.pid, :kill)
+    end
+
+    test "unknown legacy identity cannot be settled", %{holder: holder} do
+      rec = %{
+        record()
+        | owner_status: :unknown,
+          validation_resource_id: nil,
+          workspace_id: nil,
+          task_id: nil,
+          principal_id: nil
+      }
+
+      :ok = FakeJournal.reset(entries: [rec])
+      :ok = Snapshot.set({:error, :unit_supervisor_unavailable})
+      pid = start_coord!(holder)
+
+      assert {:error, :invalid_reconciliation_settle_fields} =
+               Coordinator.compare_and_settle_apple_container_unit(
+                 settle_fields(rec),
+                 pid
+               )
+
+      refute Enum.any?(FakeReconciler.events(), &match?({:recover_entry, _, _, _}, &1))
+    end
+
+    test "caller death removes the settlement waiter", %{holder: holder} do
+      rec = record()
+      :ok = FakeJournal.reset(entries: [rec])
+      :ok = Snapshot.set({:ok, []})
+      pid = start_coord!(holder)
+
+      dying_pid =
+        spawn(fn ->
+          _ = Coordinator.compare_and_settle_apple_container_unit(settle_fields(rec), pid)
+        end)
+
+      eventually!(fn ->
+        state = :sys.get_state(pid)
+        state.apple_unit_settlements |> map_size() == 1
+      end)
+
+      Process.exit(dying_pid, :kill)
+      eventually!(fn -> map_size(:sys.get_state(pid).apple_unit_settlements) == 0 end)
     end
   end
 

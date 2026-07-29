@@ -62,6 +62,7 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
   use GenServer
 
   alias Arbor.Shell.AppleContainerUnitDrainCoordinatorCore, as: Core
+  alias Arbor.Contracts.Coding.AppleContainerUnitIdentity
   alias Arbor.Shell.AppleContainerPlanCore
   alias Arbor.Shell.AppleContainerUnitJournal, as: Journal
   alias Arbor.Shell.AppleContainerUnitJournalCore, as: JournalCore
@@ -87,6 +88,7 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
   @max_workers 1_024
   @max_pending 1_024
   @max_execution_waiters 1_024
+  @max_apple_unit_settlement_waiters 1_024
   @max_unit_name_bytes 64
   # Operational handshake/call ceilings (not spawn-capable execution budgets).
   @max_timeout_ms 300_000
@@ -218,6 +220,53 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
 
   def await_execution_settled(_execution_id, _server), do: {:error, :invalid_execution_id}
 
+  @doc """
+  Nonblocking source-owned settlement wait for one exact Apple Container unit.
+
+  The coordinator owns the waiter and reuses reconstruction, worker drain, and
+  reconciler recovery. It replies only after a fresh complete observation
+  proves the exact unit absent; the caller never supplies a journal token.
+  """
+  @spec compare_and_settle_apple_container_unit(String.t(), map(), GenServer.server()) ::
+          {:ok, map()} | {:error, term()}
+  def compare_and_settle_apple_container_unit(resource_id, expected_identity, server)
+
+  def compare_and_settle_apple_container_unit(resource_id, expected_identity, server)
+      when is_binary(resource_id) and is_map(expected_identity) do
+    GenServer.call(
+      server,
+      {:compare_and_settle_apple_container_unit, resource_id, expected_identity},
+      :infinity
+    )
+  catch
+    :exit, reason -> {:error, {:coordinator_unavailable, reason}}
+  end
+
+  def compare_and_settle_apple_container_unit(_resource_id, _expected_identity, _server),
+    do: {:error, :invalid_reconciliation_settle_fields}
+
+  @spec compare_and_settle_apple_container_unit(String.t(), map()) ::
+          {:ok, map()} | {:error, term()}
+  def compare_and_settle_apple_container_unit(resource_id, expected_identity)
+      when is_binary(resource_id) and is_map(expected_identity) do
+    compare_and_settle_apple_container_unit(resource_id, expected_identity, @name)
+  end
+
+  @spec compare_and_settle_apple_container_unit(map(), GenServer.server()) ::
+          {:ok, map()} | {:error, term()}
+  def compare_and_settle_apple_container_unit(fields, server) when is_map(fields) do
+    case AppleContainerUnitIdentity.normalize_settle_fields(fields) do
+      {:ok, resource_id, expected_identity} ->
+        compare_and_settle_apple_container_unit(resource_id, expected_identity, server)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  def compare_and_settle_apple_container_unit(_fields, _server),
+    do: {:error, :invalid_reconciliation_settle_fields}
+
   # ---------------------------------------------------------------------------
   # GenServer
   # ---------------------------------------------------------------------------
@@ -298,6 +347,33 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
 
   def handle_call({:await_execution_settled, _execution_id}, _from, state) do
     {:reply, {:error, :invalid_execution_id}, state}
+  end
+
+  def handle_call(
+        {:compare_and_settle_apple_container_unit, resource_id, expected_identity},
+        from,
+        state
+      ) do
+    fields = %{"resource_id" => resource_id, "expected_identity" => expected_identity}
+
+    case AppleContainerUnitIdentity.normalize_settle_fields(fields) do
+      {:ok, normalized_resource_id, normalized_identity} ->
+        case register_apple_unit_settlement(
+               state,
+               normalized_resource_id,
+               normalized_identity,
+               from
+             ) do
+          {:ok, state} ->
+            {:noreply, drive_execution_settlement(state)}
+
+          {:error, reason} ->
+            {:reply, {:error, reason}, state}
+        end
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
   end
 
   def handle_call(_request, _from, state) do
@@ -463,7 +539,11 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
         barrier_recover_all: nil,
         barrier_converged: false,
         # mon_ref => %{from, execution_id, caller_pid} — settlement waiters.
-        execution_waiters: %{}
+        execution_waiters: %{},
+        # resource_id => %{expected_identity, waiters: %{mon_ref => waiter}}.
+        apple_unit_settlements: %{},
+        # Exact receipts retained only for bounded same-coordinator replay.
+        settled_apple_unit_receipts: %{}
       },
       deps
     )
@@ -745,6 +825,297 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
 
   defp record_identity(_), do: nil
 
+  # ---------------------------------------------------------------------------
+  # Exact Apple Container unit settlement
+  # ---------------------------------------------------------------------------
+
+  defp settlement_analysis(state, records, plan, verified) do
+    Enum.map(state.apple_unit_settlements, fn {resource_id, settlement} ->
+      expected = settlement.expected_identity
+      unit_name = expected["unit_name"]
+      execution_id = expected["execution_id"]
+      matching_records = Enum.filter(records, &(Map.get(&1, :unit_name) == unit_name))
+
+      case matching_records do
+        [] ->
+          target_workers =
+            Enum.filter(plan.unmatched_workers, &(Map.get(&1, :execution_id) == execution_id))
+
+          if target_workers == [] do
+            %{resource_id: resource_id, expected_identity: expected, status: :absent}
+          else
+            %{
+              resource_id: resource_id,
+              expected_identity: expected,
+              status: :worker_uncertain,
+              worker_pids: Enum.map(target_workers, & &1.worker_pid)
+            }
+          end
+
+        [record] ->
+          candidate_workers =
+            plan.verification_candidates
+            |> Enum.filter(&(&1.journal_record.unit_name == record.unit_name))
+            |> Enum.map(& &1.worker_pid)
+
+          case project_record_identity(state, record) do
+            {:ok, ^expected} ->
+              candidate =
+                Enum.find(plan.verification_candidates, fn candidate ->
+                  candidate.journal_record == record
+                end)
+
+              verified_worker =
+                Enum.find_value(verified, fn
+                  {worker, ^record} -> worker
+                  _other -> nil
+                end)
+
+              cond do
+                is_pid(verified_worker) ->
+                  %{
+                    resource_id: resource_id,
+                    expected_identity: expected,
+                    status: :live,
+                    record: record,
+                    worker_pid: verified_worker
+                  }
+
+                is_map(candidate) ->
+                  %{
+                    resource_id: resource_id,
+                    expected_identity: expected,
+                    status: :worker_uncertain,
+                    record: record,
+                    worker_pids: [candidate.worker_pid]
+                  }
+
+                true ->
+                  %{
+                    resource_id: resource_id,
+                    expected_identity: expected,
+                    status: :orphan,
+                    record: record
+                  }
+              end
+
+            {:ok, _different} ->
+              %{
+                resource_id: resource_id,
+                expected_identity: expected,
+                status: :identity_drift,
+                record: record,
+                worker_pids: candidate_workers
+              }
+
+            {:error, _reason} ->
+              %{
+                resource_id: resource_id,
+                expected_identity: expected,
+                status: :source_projection_uncertain,
+                record: record,
+                worker_pids: candidate_workers
+              }
+          end
+
+        _multiple ->
+          %{
+            resource_id: resource_id,
+            expected_identity: expected,
+            status: :source_projection_uncertain,
+            record: nil
+          }
+      end
+    end)
+  end
+
+  defp project_record_identity(state, record) do
+    try do
+      case state.journal.identity_from_record(record) do
+        {:ok, identity} when is_map(identity) -> {:ok, identity}
+        {:error, reason} -> {:error, reason}
+        _other -> {:error, :unit_identity_projection_failed}
+      end
+    catch
+      _, _reason -> {:error, :unit_identity_projection_failed}
+    end
+  end
+
+  defp suppress_unsafe_settlement_targets(orphan_records, unmatched_workers, analyses) do
+    unsafe =
+      Enum.filter(analyses, fn analysis ->
+        analysis.status in [:worker_uncertain, :identity_drift, :source_projection_uncertain]
+      end)
+
+    unsafe_unit_names =
+      unsafe
+      |> Enum.map(fn analysis -> analysis.expected_identity["unit_name"] end)
+      |> MapSet.new()
+
+    unsafe_workers =
+      unsafe
+      |> Enum.flat_map(&Map.get(&1, :worker_pids, []))
+      |> MapSet.new()
+
+    orphan_records =
+      Enum.reject(orphan_records, fn record ->
+        MapSet.member?(unsafe_unit_names, Map.get(record, :unit_name))
+      end)
+
+    unmatched_workers =
+      Enum.reject(unmatched_workers, &MapSet.member?(unsafe_workers, &1))
+
+    {orphan_records, unmatched_workers}
+  end
+
+  defp drive_apple_unit_settlements(state, analyses) do
+    state = mark_settlement_observed(state, analyses)
+
+    Enum.reduce(analyses, state, fn
+      %{status: :live, resource_id: resource_id, record: record, worker_pid: worker}, acc ->
+        issue_settlement_drain(acc, resource_id, record, worker)
+
+      %{status: :orphan, record: record}, acc when is_map(record) ->
+        if pending_orphan_for_identity?(acc, record_identity(record)) do
+          acc
+        else
+          issue_orphan_recovery(acc, [record])
+        end
+
+      _analysis, acc ->
+        acc
+    end)
+  end
+
+  defp mark_settlement_observed(state, analyses) do
+    observed_resources =
+      analyses
+      |> Enum.filter(&(&1.status in [:live, :orphan]))
+      |> MapSet.new(& &1.resource_id)
+
+    Enum.reduce(observed_resources, state, fn resource_id, acc ->
+      case Map.get(acc.apple_unit_settlements, resource_id) do
+        %{observed: false} = settlement ->
+          %{
+            acc
+            | apple_unit_settlements:
+                Map.put(acc.apple_unit_settlements, resource_id, %{settlement | observed: true})
+          }
+
+        _other ->
+          acc
+      end
+    end)
+  end
+
+  defp issue_settlement_drain(state, resource_id, record, worker) do
+    case Map.get(state.pending_drain, worker) do
+      %{settlement_resource_id: ^resource_id} ->
+        state
+
+      %{} ->
+        # Another coordinator-owned drain already controls this worker. Never
+        # replace its receipt with a settlement receipt for a different target.
+        state
+
+      nil ->
+        receipt_ref = make_ref()
+
+        case request_drain_handshake(state, worker, receipt_ref) do
+          :ok ->
+            next =
+              Map.update!(
+                state,
+                :pending_drain,
+                &Map.put(&1, worker, %{
+                  receipt_ref: receipt_ref,
+                  accepted: true,
+                  mon_ref: nil,
+                  settlement_resource_id: resource_id,
+                  journal_record: record
+                })
+              )
+
+            ensure_drain_monitor(next, worker, next.pending_drain[worker])
+
+          _retryable ->
+            state
+        end
+    end
+  end
+
+  defp settle_apple_unit_waiters(state, analyses) do
+    absent =
+      analyses
+      |> Enum.filter(&(&1.status == :absent))
+      |> Map.new(&{&1.resource_id, &1})
+
+    Enum.reduce(absent, state, fn {resource_id, analysis}, acc ->
+      case Map.get(acc.apple_unit_settlements, resource_id) do
+        %{expected_identity: expected_identity, observed: true} = settlement ->
+          settle_apple_unit_waiter(acc, resource_id, analysis, settlement, expected_identity)
+
+        %{expected_identity: expected_identity} = settlement ->
+          case Map.get(acc.settled_apple_unit_receipts, resource_id) do
+            %{expected_identity: ^expected_identity} ->
+              settle_apple_unit_waiter(acc, resource_id, analysis, settlement, expected_identity)
+
+            _other ->
+              acc
+          end
+
+        nil ->
+          acc
+      end
+    end)
+  end
+
+  defp settle_apple_unit_waiter(state, resource_id, _analysis, _settlement, expected_identity) do
+    case Map.pop(state.apple_unit_settlements, resource_id) do
+      {nil, _settlements} ->
+        state
+
+      {settlement, settlements} ->
+        receipt = %{
+          "status" => "settled",
+          "resource_id" => resource_id,
+          "unit_name" => expected_identity["unit_name"],
+          "execution_id" => expected_identity["execution_id"],
+          "source_record_digest" => expected_identity["source_record_digest"]
+        }
+
+        Enum.each(settlement.waiters, fn {mon_ref, waiter} ->
+          Process.demonitor(mon_ref, [:flush])
+          GenServer.reply(waiter.from, {:ok, receipt})
+        end)
+
+        %{
+          state
+          | apple_unit_settlements: settlements,
+            settled_apple_unit_receipts:
+              retain_settled_receipt(
+                state.settled_apple_unit_receipts,
+                resource_id,
+                expected_identity,
+                receipt
+              )
+        }
+    end
+  end
+
+  defp retain_settled_receipt(receipts, resource_id, expected_identity, receipt)
+       when is_map(receipts) do
+    receipts =
+      if map_size(receipts) >= @max_apple_unit_settlement_waiters do
+        oldest = receipts |> Map.keys() |> Enum.sort() |> List.first()
+        Map.delete(receipts, oldest)
+      else
+        receipts
+      end
+
+    Map.put(receipts, resource_id, %{expected_identity: expected_identity, receipt: receipt})
+  end
+
   defp collect_hints(state, worker_pids) do
     Enum.reduce(worker_pids, {[], []}, fn worker, {hints, unhintable} ->
       cond do
@@ -788,8 +1159,7 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
     {verified, failed_workers, failed_records} =
       verify_candidates(state, plan.verification_candidates)
 
-    orphan_records =
-      dedupe_records(plan.orphan_records ++ failed_records)
+    orphan_records = dedupe_records(plan.orphan_records ++ failed_records)
 
     unmatched_workers =
       Enum.map(plan.unmatched_workers, & &1.worker_pid) ++ unhintable ++ failed_workers
@@ -799,17 +1169,28 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
       |> Enum.uniq()
       |> Enum.filter(&MapSet.member?(live_set, &1))
 
+    settlement_analysis = settlement_analysis(state, records, plan, verified)
+
+    {orphan_records, unmatched_workers} =
+      suppress_unsafe_settlement_targets(
+        orphan_records,
+        unmatched_workers,
+        settlement_analysis
+      )
+
     state =
       state
       |> adopt_verified(verified)
       |> issue_orphan_recovery(orphan_records)
       |> issue_unmatched_drains(unmatched_workers)
+      |> drive_apple_unit_settlements(settlement_analysis)
 
     if reconstruction_settled?(state, orphan_records, unmatched_workers, verified, live_set) do
       state = %{state | phase: :ready}
       # Fresh observation reached :ready — every live worker is verified against
       # authoritative records, so executions absent from those records settle.
       settle_execution_waiters_absent_from(state, present_execution_ids(records))
+      |> settle_apple_unit_waiters(settlement_analysis)
     else
       schedule_reconstruct(state)
     end
@@ -1038,19 +1419,24 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
   end
 
   defp handle_down(state, mon_ref, pid) do
-    case Map.pop(state.execution_waiters, mon_ref) do
-      {%{caller_pid: ^pid}, waiters} ->
-        # Exact mon_ref + caller PID match only — remove that waiter. Never
-        # settle remaining waiters and never treat caller death as absence proof.
-        %{state | execution_waiters: waiters}
-
-      {waiter, _waiters} when is_map(waiter) ->
-        # mon_ref collision with wrong PID is impossible for Process.monitor;
-        # a forged DOWN with a known ref but wrong PID must not remove anyone.
+    case pop_apple_unit_settlement_waiter(state, mon_ref, pid) do
+      {:ok, state} ->
         state
 
-      {nil, _} ->
-        handle_down_non_waiter(state, mon_ref, pid)
+      :not_found ->
+        case Map.pop(state.execution_waiters, mon_ref) do
+          {%{caller_pid: ^pid}, waiters} ->
+            # Exact mon_ref + caller PID match only — remove that waiter. Never
+            # settle remaining waiters and never treat caller death as absence proof.
+            %{state | execution_waiters: waiters}
+
+          {waiter, _waiters} when is_map(waiter) ->
+            # A forged DOWN with a known ref but wrong PID must not remove anyone.
+            state
+
+          {nil, _} ->
+            handle_down_non_waiter(state, mon_ref, pid)
+        end
     end
   end
 
@@ -1783,6 +2169,8 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
       monitored_count: map_size(Map.get(state, :monitored) || %{}),
       pending_orphan_count: map_size(Map.get(state, :pending_orphan_receipts) || %{}),
       pending_drain_count: map_size(Map.get(state, :pending_drain) || %{}),
+      apple_unit_settlement_waiter_count:
+        settlement_waiter_count(Map.get(state, :apple_unit_settlements) || %{}),
       reconstruct_generation: Map.get(state, :reconstruct_generation),
       barrier_waiter_count: length(Map.get(state, :barrier_waiters) || []),
       barrier_converged: Map.get(state, :barrier_converged),
@@ -1794,6 +2182,8 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
       barrier_timer: :redacted,
       barrier_recover_all: :redacted,
       execution_waiters: :redacted,
+      apple_unit_settlements: :redacted,
+      settled_apple_unit_receipts: :redacted,
       journal: :redacted,
       journal_server: :redacted,
       reconciler: :redacted,
@@ -1832,6 +2222,105 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
       {:ok, %{state | execution_waiters: Map.put(state.execution_waiters, mon_ref, waiter)}}
     end
   end
+
+  defp register_apple_unit_settlement(state, resource_id, expected_identity, from) do
+    with {:ok, caller_pid} <- caller_pid_from(from),
+         :ok <- check_apple_unit_settlement_capacity(state, resource_id) do
+      case Map.get(state.apple_unit_settlements, resource_id) do
+        nil ->
+          mon_ref = Process.monitor(caller_pid)
+
+          waiter = %{from: from, caller_pid: caller_pid}
+
+          settlement = %{
+            expected_identity: expected_identity,
+            observed: false,
+            waiters: %{mon_ref => waiter}
+          }
+
+          {:ok,
+           %{
+             state
+             | apple_unit_settlements:
+                 Map.put(state.apple_unit_settlements, resource_id, settlement)
+           }}
+
+        %{expected_identity: ^expected_identity, waiters: waiters} = settlement ->
+          mon_ref = Process.monitor(caller_pid)
+          waiter = %{from: from, caller_pid: caller_pid}
+
+          {:ok,
+           %{
+             state
+             | apple_unit_settlements:
+                 Map.put(state.apple_unit_settlements, resource_id, %{
+                   settlement
+                   | waiters: Map.put(waiters, mon_ref, waiter)
+                 })
+           }}
+
+        %{expected_identity: _different} ->
+          {:error, :conflicting_apple_container_unit_settlement}
+      end
+    end
+  end
+
+  defp check_apple_unit_settlement_capacity(state, resource_id) do
+    current = Map.get(state.apple_unit_settlements, resource_id)
+    resources = map_size(state.apple_unit_settlements)
+    waiters = settlement_waiter_count(state.apple_unit_settlements)
+
+    cond do
+      current != nil and waiters >= @max_apple_unit_settlement_waiters ->
+        {:error, :too_many_apple_container_unit_settlement_waiters}
+
+      current == nil and resources >= @max_apple_unit_settlement_waiters ->
+        {:error, :too_many_apple_container_unit_settlements}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp pop_apple_unit_settlement_waiter(state, mon_ref, caller_pid)
+       when is_reference(mon_ref) and is_pid(caller_pid) do
+    Enum.reduce_while(state.apple_unit_settlements, :not_found, fn
+      {resource_id, %{waiters: waiters} = settlement}, _acc ->
+        case Map.get(waiters, mon_ref) do
+          %{caller_pid: ^caller_pid} ->
+            next_waiters = Map.delete(waiters, mon_ref)
+
+            next_settlements =
+              if map_size(next_waiters) == 0 do
+                Map.delete(state.apple_unit_settlements, resource_id)
+              else
+                Map.put(
+                  state.apple_unit_settlements,
+                  resource_id,
+                  %{settlement | waiters: next_waiters}
+                )
+              end
+
+            {:halt, {:ok, %{state | apple_unit_settlements: next_settlements}}}
+
+          %{} ->
+            {:halt, :not_found}
+
+          nil ->
+            {:cont, :not_found}
+        end
+    end)
+  end
+
+  defp pop_apple_unit_settlement_waiter(_state, _mon_ref, _caller_pid), do: :not_found
+
+  defp settlement_waiter_count(settlements) when is_map(settlements) do
+    Enum.reduce(settlements, 0, fn {_resource_id, settlement}, count ->
+      count + map_size(Map.get(settlement, :waiters) || %{})
+    end)
+  end
+
+  defp settlement_waiter_count(_), do: 0
 
   defp check_execution_waiter_capacity(state) do
     if map_size(state.execution_waiters) >= @max_execution_waiters do

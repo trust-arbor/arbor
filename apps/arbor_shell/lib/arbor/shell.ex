@@ -57,6 +57,7 @@ defmodule Arbor.Shell do
 
   alias Arbor.Shell.{
     AppleContainerExecutor,
+    AppleContainerUnitDrainCoordinator,
     AppleContainerUnitJournal,
     CapShell,
     ExecutablePolicy,
@@ -613,6 +614,34 @@ defmodule Arbor.Shell do
   end
 
   def apple_container_unit_inventory(_opts), do: {:error, :invalid_unit_inventory_filters}
+
+  @doc """
+  Compare and settle one exact, known-owner Apple Container unit journal row.
+
+  This trusted-system Shell primitive accepts only the closed redacted
+  identity projected by `apple_container_unit_inventory/1`. It delegates all
+  live-worker draining and orphan recovery to the existing nonblocking drain
+  coordinator and returns success only after a fresh authoritative absence
+  proof. It never accepts or exposes the journal token; authorization belongs
+  to the higher Actions layer.
+  """
+  @spec compare_and_settle_apple_container_unit(map()) ::
+          {:ok, map()} | {:error, term()}
+  def compare_and_settle_apple_container_unit(fields) when is_map(fields) do
+    case Arbor.Contracts.Coding.AppleContainerUnitIdentity.normalize_settle_fields(fields) do
+      {:ok, resource_id, expected_identity} ->
+        AppleContainerUnitDrainCoordinator.compare_and_settle_apple_container_unit(
+          resource_id,
+          expected_identity
+        )
+
+      {:error, :invalid_reconciliation_settle_fields} = error ->
+        error
+    end
+  end
+
+  def compare_and_settle_apple_container_unit(_fields),
+    do: {:error, :invalid_reconciliation_settle_fields}
 
   @doc """
   Acquire a Shell-owned Linux dependency-baseline materialization lease.

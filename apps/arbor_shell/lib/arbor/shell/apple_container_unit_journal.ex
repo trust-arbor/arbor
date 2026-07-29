@@ -20,6 +20,7 @@ defmodule Arbor.Shell.AppleContainerUnitJournal do
   import Bitwise
 
   alias Arbor.Common.SafePath
+  alias Arbor.Contracts.Coding.AppleContainerUnitIdentity
   alias Arbor.Shell.AppleContainerUnitJournalCore, as: Core
   alias Arbor.Shell.Config
   alias Arbor.Shell.ExecutablePolicy
@@ -231,6 +232,38 @@ defmodule Arbor.Shell.AppleContainerUnitJournal do
   def recovery_entries(server \\ __MODULE__) do
     call(server, :recovery_entries)
   end
+
+  @doc """
+  Project one authoritative journal record into the closed, redacted identity
+  used by inventory and source-owned settlement. The token is included only in
+  the digest input and is never present in the returned map.
+  """
+  @spec identity_from_record(Core.record() | map()) :: {:ok, map()} | {:error, term()}
+  def identity_from_record(record) when is_map(record) do
+    with {:ok, normalized} <- Core.normalize_existing_record(record),
+         {:ok, resource_id} <- Core.resource_id_from_unit_name(normalized.unit_name),
+         {:ok, digest} <- source_record_digest(normalized),
+         {:ok, identity} <-
+           AppleContainerUnitIdentity.normalize(%{
+             "resource_type" => AppleContainerUnitIdentity.resource_type(),
+             "resource_id" => resource_id,
+             "unit_name" => normalized.unit_name,
+             "execution_id" => normalized.execution_id,
+             "reserved_at_ms" => normalized.reserved_at_ms,
+             "owner_status" => owner_status_string(normalized.owner_status),
+             "validation_resource_id" => normalized.validation_resource_id,
+             "workspace_id" => normalized.workspace_id,
+             "task_id" => normalized.task_id,
+             "principal_id" => normalized.principal_id,
+             "source_record_digest" => digest
+           }) do
+      {:ok, identity}
+    else
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  def identity_from_record(_record), do: {:error, :unit_identity_projection_failed}
 
   @doc """
   Redacted public status. Never includes path, tokens, or raw journal state.
@@ -2117,21 +2150,8 @@ defmodule Arbor.Shell.AppleContainerUnitJournal do
   end
 
   defp redacted_inventory_item(record) when is_map(record) do
-    with {:ok, resource_id} <- Core.resource_id_from_unit_name(record.unit_name),
-         {:ok, digest} <- source_record_digest(record) do
-      {:ok,
-       %{
-         "resource_id" => resource_id,
-         "unit_name" => record.unit_name,
-         "execution_id" => record.execution_id,
-         "reserved_at_ms" => record.reserved_at_ms,
-         "owner_status" => owner_status_string(record.owner_status),
-         "validation_resource_id" => record.validation_resource_id,
-         "workspace_id" => record.workspace_id,
-         "task_id" => record.task_id,
-         "principal_id" => record.principal_id,
-         "source_record_digest" => digest
-       }}
+    with {:ok, identity} <- identity_from_record(record) do
+      {:ok, Map.delete(identity, "resource_type")}
     else
       _ -> {:error, :unit_inventory_projection_failed}
     end
