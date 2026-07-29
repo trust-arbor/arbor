@@ -100,10 +100,23 @@ defmodule Arbor.Actions.Coding.CrossAppTest do
 
     assert Arbor.Actions.cross_app_maximum_test_stage_timeout_ms() == 4_200_000
 
-    assert {:error, :invalid_stage_timeout} =
+    # Whole-validation budget includes three pre-test children in addition to
+    # the test-stage ceiling, so it is intentionally larger.
+    assert {:ok, %{stage_timeout: 4_200_001}} =
              Arbor.Actions.Coding.CrossApp.Core.new(%{
                workspace_id: "ws_closed",
                stage_timeout: 4_200_001
+             })
+
+    maximum_stage_timeout = Arbor.Actions.cross_app_maximum_stage_timeout_ms()
+
+    assert maximum_stage_timeout >
+             Arbor.Actions.cross_app_maximum_test_stage_timeout_ms()
+
+    assert {:error, :invalid_stage_timeout} =
+             Arbor.Actions.Coding.CrossApp.Core.new(%{
+               workspace_id: "ws_closed",
+               stage_timeout: maximum_stage_timeout + 1
              })
 
     # cross_app binds the intensive Shell ceiling (1_200_000) for per-op only;
