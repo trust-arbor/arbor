@@ -2,25 +2,39 @@ defmodule Arbor.Actions.Coding.ToolchainIdentityTest do
   use ExUnit.Case, async: true
 
   alias Arbor.Actions.Coding.ToolchainIdentityCore, as: Core
+  alias Arbor.Actions.Mix, as: MixAction
 
-  test "public observation has a deterministic bounded JSON-clean shape" do
-    assert {:ok, first} = Arbor.Actions.coding_toolchain_identity()
-    assert {:ok, second} = Arbor.Actions.coding_toolchain_identity()
-    assert first == second
+  test "public observation is deterministic or fails closed without a reviewed wrapper" do
+    case MixAction.resolve_mix_wrapper() do
+      {:ok, expected_wrapper} ->
+        assert {:ok, first} = Arbor.Actions.coding_toolchain_identity()
+        assert {:ok, second} = Arbor.Actions.coding_toolchain_identity()
+        assert first == second
 
-    assert Map.keys(first) |> Enum.sort() ==
-             ~w(architecture elixir_version identity_digest mix_wrapper_path otp_release platform runtime_roots schema_version)
+        assert Map.keys(first) |> Enum.sort() ==
+                 ~w(architecture elixir_version identity_digest mix_wrapper_path otp_release platform runtime_roots schema_version)
 
-    assert first["schema_version"] == 1
-    assert is_binary(first["platform"])
-    assert is_binary(first["architecture"])
-    assert is_binary(first["otp_release"])
-    assert is_binary(first["elixir_version"])
-    assert Path.type(first["mix_wrapper_path"]) == :absolute
-    assert Map.keys(first["runtime_roots"]) |> Enum.sort() == ~w(elixir_root erlang_root)
-    assert Enum.all?(Map.values(first["runtime_roots"]), &(Path.type(&1) == :absolute))
-    assert Regex.match?(~r/\A[0-9a-f]{64}\z/, first["identity_digest"])
-    assert {:ok, _json} = Jason.encode(first)
+        assert first["schema_version"] == 1
+        assert is_binary(first["platform"])
+        assert is_binary(first["architecture"])
+        assert is_binary(first["otp_release"])
+        assert is_binary(first["elixir_version"])
+        assert first["mix_wrapper_path"] == expected_wrapper
+        assert Path.type(first["mix_wrapper_path"]) == :absolute
+        assert Map.keys(first["runtime_roots"]) |> Enum.sort() == ~w(elixir_root erlang_root)
+        assert Enum.all?(Map.values(first["runtime_roots"]), &(Path.type(&1) == :absolute))
+        assert Regex.match?(~r/\A[0-9a-f]{64}\z/, first["identity_digest"])
+        assert {:ok, _json} = Jason.encode(first)
+
+      {:error, :mix_wrapper_unavailable} ->
+        # Hermetic validation compiles under /arbor/build so loaded candidate
+        # code cannot authorize the candidate-controlled /workspace/bin/mix.
+        assert {:error, :mix_wrapper_unavailable} =
+                 Arbor.Actions.coding_toolchain_identity()
+
+        assert {:error, :mix_wrapper_unavailable} =
+                 Arbor.Actions.coding_toolchain_identity()
+    end
   end
 
   test "digest is stable across observation map insertion order" do
