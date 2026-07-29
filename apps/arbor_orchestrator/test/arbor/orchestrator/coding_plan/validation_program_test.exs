@@ -31,6 +31,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationProgramTest do
            "result_adapter" => "cross_app_v1",
            "context_keys" => ["workspace_id"],
            "static_parameters" => %{
+             "stage_timeout" => 900_000,
              "test_stage_timeout" => 900_000,
              "timeout" => 900_000
            }
@@ -65,9 +66,30 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationProgramTest do
         {"default", 900_000, %{"timeout" => 900_000, "warnings_as_errors" => true}},
         {"default", 1_500_000, %{"timeout" => 1_200_000, "warnings_as_errors" => true}},
         {"security_regression", 900_000, %{"timeout" => 600_000}},
-        {"cross_app", 120_000, %{"timeout" => 120_000, "test_stage_timeout" => 120_000}},
-        {"cross_app", 1_500_000, %{"timeout" => 1_200_000, "test_stage_timeout" => 1_500_000}},
-        {"cross_app", 4_300_000, %{"timeout" => 1_200_000, "test_stage_timeout" => 4_200_000}}
+        {"cross_app", 120_000,
+         %{
+           "timeout" => 120_000,
+           "test_stage_timeout" => 120_000,
+           "stage_timeout" => 120_000
+         }},
+        {"cross_app", 1_500_000,
+         %{
+           "timeout" => 1_200_000,
+           "test_stage_timeout" => 1_500_000,
+           "stage_timeout" => 1_500_000
+         }},
+        {"cross_app", 5_000_000,
+         %{
+           "timeout" => 1_200_000,
+           "test_stage_timeout" => 4_200_000,
+           "stage_timeout" => 5_000_000
+         }},
+        {"cross_app", 8_000_000,
+         %{
+           "timeout" => 1_200_000,
+           "test_stage_timeout" => 4_200_000,
+           "stage_timeout" => Arbor.Actions.cross_app_maximum_stage_timeout_ms()
+         }}
       ]
 
       for {profile_id, wall_clock_ms, expected_parameters} <- cases do
@@ -212,6 +234,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationProgramTest do
           "action" => "coding_cross_app_validate",
           "context_keys" => "workspace_id",
           "output_prefix" => "validation",
+          "param.stage_timeout" => 900_000,
           "param.test_stage_timeout" => 900_000,
           "param.timeout" => 900_000
         },
@@ -278,12 +301,15 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationProgramTest do
     end
 
     test "returns the largest timeout-named static parameter for compound programs" do
+      stage_max = Arbor.Actions.cross_app_maximum_stage_timeout_ms()
+
       assert {:ok, program} =
-               ValidationProgram.build(strategy!("cross_app"), %{"wall_clock_ms" => 4_300_000})
+               ValidationProgram.build(strategy!("cross_app"), %{"wall_clock_ms" => 8_000_000})
 
       assert program["static_parameters"]["timeout"] == 1_200_000
       assert program["static_parameters"]["test_stage_timeout"] == 4_200_000
-      assert {:ok, 4_200_000} = ValidationProgram.largest_timeout_ms(program)
+      assert program["static_parameters"]["stage_timeout"] == stage_max
+      assert {:ok, ^stage_max} = ValidationProgram.largest_timeout_ms(program)
     end
 
     test "uses equal timeouts when compound parameters share the same bound" do

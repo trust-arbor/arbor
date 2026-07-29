@@ -110,11 +110,28 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCoreTest do
     assert {:ok, report} = verify("cross_app", result)
     assert report["status"] == "blocked"
 
+    interrupted = cross_capacity_result(capacity_handoff(:interrupted))
+    assert {:ok, %{"status" => "blocked"}} = verify("cross_app", interrupted)
+
     tampered = put_in(result, [:test, "capacity_handoff", "available_budget_ms"], 1)
     assert_invalid_evidence("cross_app", tampered)
 
+    interrupted_digest_tamper =
+      put_in(
+        interrupted,
+        [:test, "capacity_handoff", "ordered_plan_sha256"],
+        String.duplicate("0", 64)
+      )
+
+    assert_invalid_evidence("cross_app", interrupted_digest_tamper)
+
     extra = put_in(result, [:test, "capacity_handoff", "authority"], "forbidden")
     assert_invalid_evidence("cross_app", extra)
+
+    for version <- [1, 2] do
+      historical = cross_capacity_result(historical_capacity_handoff(version))
+      assert_invalid_evidence("cross_app", historical)
+    end
 
     default = default_capacity_result()
     assert {:ok, %{"status" => "blocked"}} = verify("default", default)
@@ -509,14 +526,14 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCoreTest do
     })
   end
 
-  defp cross_capacity_result do
+  defp cross_capacity_result(handoff \\ capacity_handoff()) do
     cross_result()
     |> Map.merge(%{
       passed: false,
       reason: "validation_capacity_exceeded",
       test:
         cross_check(passed: false, exit_code: nil, reason: "validation_capacity_exceeded")
-        |> Map.put("capacity_handoff", capacity_handoff())
+        |> Map.put("capacity_handoff", handoff)
     })
   end
 
@@ -538,7 +555,9 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCoreTest do
   defp skipped_check(reason),
     do: cross_check(status: "skipped", passed: false, exit_code: nil, reason: reason)
 
-  defp capacity_handoff do
+  defp capacity_handoff, do: capacity_handoff(:structural)
+
+  defp capacity_handoff(:structural) do
     inventory = @digest
     label = "batch-1-of-1-n1-#{inventory}"
 
@@ -565,10 +584,57 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCoreTest do
         "total_batch_count" => 1,
         "total_file_count" => 1,
         "ordered_plan_sha256" => plan_digest,
+        "interrupted_batch" => nil,
         "unstarted_batches" => [batch]
       })
 
     handoff
+  end
+
+  defp capacity_handoff(:interrupted) do
+    inventory = @digest
+
+    batch = %{
+      "index" => 1,
+      "total" => 1,
+      "count" => 1,
+      "label" => "batch-1-of-1-n1-#{inventory}",
+      "inventory_sha256" => inventory
+    }
+
+    {:ok, plan_digest} = ValidationCapacityHandoff.ordered_plan_digest([batch])
+
+    {:ok, handoff} =
+      ValidationCapacityHandoff.normalize(%{
+        "schema_version" => ValidationCapacityHandoff.schema_version(),
+        "phase" => "runtime",
+        "available_budget_ms" => 0,
+        "per_batch_budget_ms" => 1_000,
+        "completed_batch_count" => 0,
+        "completed_file_count" => 0,
+        "unstarted_batch_count" => 0,
+        "unstarted_file_count" => 0,
+        "total_batch_count" => 1,
+        "total_file_count" => 1,
+        "ordered_plan_sha256" => plan_digest,
+        "interrupted_batch" => batch,
+        "unstarted_batches" => []
+      })
+
+    handoff
+  end
+
+  defp historical_capacity_handoff(version) when version in [1, 2] do
+    handoff =
+      capacity_handoff()
+      |> Map.delete("interrupted_batch")
+      |> Map.put("schema_version", version)
+
+    if version == 1 do
+      Map.put(handoff, "required_budget_ms", handoff["per_batch_budget_ms"])
+    else
+      handoff
+    end
   end
 
   defp security_result(reason) do

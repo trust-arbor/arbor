@@ -149,6 +149,9 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     * `:validation_test_stage_timeout_ms` — optional positive integer for
       profiles with a reviewed aggregate test-stage ceiling (cross_app). When
       present, `param.test_stage_timeout` must match exactly.
+    * `:validation_stage_timeout_ms` — optional positive integer for profiles
+      with a reviewed whole-validation stage ceiling (cross_app). When present,
+      `param.stage_timeout` must match exactly.
     * `:checkpoint_policy` — `\"direct\"` (default) or `\"design_required\"`.
       This binds the worker-continuity edge and design-checkpoint topology.
     * `:checkpoint_work_packet_json` — the contract-canonical frozen packet
@@ -168,6 +171,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
          {:ok, validation_timeout_ms} <- normalize_validation_timeout_ms(opts),
          {:ok, validation_test_stage_timeout_ms} <-
            normalize_validation_test_stage_timeout_ms(opts),
+         {:ok, validation_stage_timeout_ms} <- normalize_validation_stage_timeout_ms(opts),
          :ok <- require_compiled(graph) do
       errors =
         []
@@ -195,7 +199,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
           policy,
           review_profile,
           validation_timeout_ms,
-          validation_test_stage_timeout_ms
+          validation_test_stage_timeout_ms,
+          validation_stage_timeout_ms
         )
         |> check_reachability_and_dominance(graph, policy, review_profile)
         |> Enum.sort_by(&error_sort_key/1)
@@ -879,6 +884,23 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
 
       {:ok, other} ->
         {:error, {:invalid_semantic_policy, {:invalid_validation_test_stage_timeout_ms, other}}}
+    end
+  end
+
+  defp normalize_validation_stage_timeout_ms(opts) do
+    case Keyword.fetch(opts, :validation_stage_timeout_ms) do
+      {:ok, nil} ->
+        {:ok, nil}
+
+      {:ok, timeout_ms} when is_integer(timeout_ms) and timeout_ms > 0 ->
+        {:ok, timeout_ms}
+
+      :error ->
+        # Optional except for profiles that emit param.stage_timeout.
+        {:ok, nil}
+
+      {:ok, other} ->
+        {:error, {:invalid_semantic_policy, {:invalid_validation_stage_timeout_ms, other}}}
     end
   end
 
@@ -3669,7 +3691,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
          %{"validation_profile" => "default"},
          _review,
          validation_timeout_ms,
-         _validation_test_stage_timeout_ms
+         _validation_test_stage_timeout_ms,
+         _validation_stage_timeout_ms
        ) do
     check_validation_parameters(
       errors,
@@ -3688,16 +3711,19 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
          %{"validation_profile" => "cross_app"},
          _review,
          validation_timeout_ms,
-         validation_test_stage_timeout_ms
+         validation_test_stage_timeout_ms,
+         validation_stage_timeout_ms
        )
        when is_integer(validation_test_stage_timeout_ms) and
-              validation_test_stage_timeout_ms > 0 do
+              validation_test_stage_timeout_ms > 0 and
+              is_integer(validation_stage_timeout_ms) and validation_stage_timeout_ms > 0 do
     check_validation_parameters(
       errors,
       graph,
       %{
         "param.timeout" => validation_timeout_ms,
-        "param.test_stage_timeout" => validation_test_stage_timeout_ms
+        "param.test_stage_timeout" => validation_test_stage_timeout_ms,
+        "param.stage_timeout" => validation_stage_timeout_ms
       },
       "validation_parameter_violation"
     )
@@ -3709,12 +3735,18 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
          %{"validation_profile" => "cross_app"},
          _review,
          _validation_timeout_ms,
-         validation_test_stage_timeout_ms
+         validation_test_stage_timeout_ms,
+         validation_stage_timeout_ms
        ) do
     [
       error("validation_parameter_violation", "validate", %{
-        "missing_validation_test_stage_timeout_ms" => true,
-        "got" => validation_test_stage_timeout_ms
+        "missing_validation_stage_timeout_ms" =>
+          not (is_integer(validation_stage_timeout_ms) and validation_stage_timeout_ms > 0),
+        "missing_validation_test_stage_timeout_ms" =>
+          not (is_integer(validation_test_stage_timeout_ms) and
+                 validation_test_stage_timeout_ms > 0),
+        "got_test_stage" => validation_test_stage_timeout_ms,
+        "got_stage" => validation_stage_timeout_ms
       })
       | errors
     ]
@@ -3726,7 +3758,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
          %{"validation_profile" => "security_regression"},
          review_profile,
          validation_timeout_ms,
-         _validation_test_stage_timeout_ms
+         _validation_test_stage_timeout_ms,
+         _validation_stage_timeout_ms
        ) do
     errors
     |> reject_security_review_none(review_profile)
@@ -3742,7 +3775,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
          _policy,
          _review_profile,
          _validation_timeout_ms,
-         _validation_test_stage_timeout_ms
+         _validation_test_stage_timeout_ms,
+         _validation_stage_timeout_ms
        ),
        do: errors
 

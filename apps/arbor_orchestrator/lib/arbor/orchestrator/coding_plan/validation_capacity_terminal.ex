@@ -5,9 +5,10 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationCapacityTerminal do
   # Accepts the default Mix.Compile termination envelope and the existing
   # CrossApp batch handoff without conflating the two shapes.
   #
-  # Live write/finalize/normalize paths accept schema-v2 handoffs only.
-  # Callers that already hold historical schema-v1 evidence may verify it
-  # explicitly via `verify_archived_capacity_handoff/1`; no live path calls it.
+  # Live write/finalize/normalize paths accept schema-v3 handoffs only.
+  # Callers that already hold historical evidence may verify any known
+  # generation explicitly via `verify_archived_capacity_handoff/1`; no live
+  # path calls it for admission.
 
   alias Arbor.Contracts.Coding.ValidationCapacityHandoff
 
@@ -110,16 +111,22 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationCapacityTerminal do
   @doc """
   Explicit verification of a capacity handoff read from historical storage.
 
-  Schema v2 uses the live normalize path. Schema v1 uses the archive-only
-  contract API. Any other version or shape fails closed. This helper does not
-  read storage itself and is not used by live write, finalize, or candidate
-  verification paths.
+  Dispatches every known schema generation: v3 via live normalize, v2 via
+  `normalize_archived_v2/1`, v1 via `normalize_archived_v1/1`. Unknown versions
+  fail closed. This helper does not read storage itself and is not used by live
+  write, finalize, or candidate verification paths (those admit v3 only).
   """
   @spec verify_archived_capacity_handoff(term()) :: {:ok, map()} | :error
   def verify_archived_capacity_handoff(handoff) when is_map(handoff) and not is_struct(handoff) do
     case Map.get(handoff, "schema_version") || Map.get(handoff, :schema_version) do
-      2 ->
+      3 ->
         case ValidationCapacityHandoff.normalize(handoff) do
+          {:ok, normalized} -> {:ok, normalized}
+          {:error, _} -> :error
+        end
+
+      2 ->
+        case ValidationCapacityHandoff.normalize_archived_v2(handoff) do
           {:ok, normalized} -> {:ok, normalized}
           {:error, _} -> :error
         end

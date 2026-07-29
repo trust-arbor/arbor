@@ -54,7 +54,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Validate do
       stage_timeout: [
         type: :non_neg_integer,
         doc:
-          "Optional whole-validation timeout in milliseconds (1,000 to 4,200,000); caps every contained stage without widening per-operation limits"
+          "Optional whole-validation timeout in milliseconds (1,000 up to the Actions-owned whole-stage maximum of three intensive pre-test ceilings plus the aggregate test-stage maximum); caps every contained stage without widening per-operation limits"
       ],
       test_stage_timeout: [
         type: :non_neg_integer,

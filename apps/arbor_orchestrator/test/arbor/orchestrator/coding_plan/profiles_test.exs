@@ -234,9 +234,11 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
 
       assert {:ok, intensive_ceiling} = Arbor.Shell.spawn_capable_max_timeout_ms(:intensive)
       standard_ceiling = Arbor.Shell.spawn_capable_max_timeout_ms()
-      stage_ceiling = Arbor.Actions.cross_app_maximum_test_stage_timeout_ms()
+      test_stage_ceiling = Arbor.Actions.cross_app_maximum_test_stage_timeout_ms()
+      whole_stage_ceiling = Arbor.Actions.cross_app_maximum_stage_timeout_ms()
       assert intensive_ceiling == 1_200_000
-      assert stage_ceiling == 4_200_000
+      assert test_stage_ceiling == 4_200_000
+      assert whole_stage_ceiling == 3 * intensive_ceiling + test_stage_ceiling
 
       assert cross_app["validation_strategy"] == %{
                "action" => "coding_cross_app_validate",
@@ -249,7 +251,9 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
                "timeout_budget_source" => "budgets.wall_clock_ms",
                "timeout_max_ms" => intensive_ceiling,
                "test_stage_timeout_budget_source" => "budgets.wall_clock_ms",
-               "test_stage_timeout_max_ms" => stage_ceiling,
+               "test_stage_timeout_max_ms" => test_stage_ceiling,
+               "stage_timeout_budget_source" => "budgets.wall_clock_ms",
+               "stage_timeout_max_ms" => whole_stage_ceiling,
                "selects_downstream_dependents" => true,
                "runs_xref_graph_evidence" => true,
                "runs_test_environment_compile" => true,
@@ -270,12 +274,26 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
       assert {:ok, 900_000} = Profiles.validation_test_stage_timeout(cross_app, 900_000)
       assert {:ok, 1_500_000} = Profiles.validation_test_stage_timeout(cross_app, 1_500_000)
       assert {:ok, 2_500_000} = Profiles.validation_test_stage_timeout(cross_app, 2_500_000)
-      assert {:ok, ^stage_ceiling} = Profiles.validation_test_stage_timeout(cross_app, 4_300_000)
+
+      assert {:ok, ^test_stage_ceiling} =
+               Profiles.validation_test_stage_timeout(cross_app, 4_300_000)
+
       assert {:ok, 120_000} = Profiles.validation_test_stage_timeout(cross_app, 120_000)
+
+      assert {:ok, 900_000} = Profiles.validation_stage_timeout(cross_app, 900_000)
+      assert {:ok, 1_500_000} = Profiles.validation_stage_timeout(cross_app, 1_500_000)
+      assert {:ok, 5_000_000} = Profiles.validation_stage_timeout(cross_app, 5_000_000)
+
+      assert {:ok, ^whole_stage_ceiling} =
+               Profiles.validation_stage_timeout(cross_app, whole_stage_ceiling + 100_000)
+
+      assert {:ok, 120_000} = Profiles.validation_stage_timeout(cross_app, 120_000)
 
       # Profiles without aggregate-stage keys return nil (not an error).
       assert {:ok, nil} = Profiles.validation_test_stage_timeout(default, 900_000)
       assert {:ok, nil} = Profiles.validation_test_stage_timeout(security, 900_000)
+      assert {:ok, nil} = Profiles.validation_stage_timeout(default, 900_000)
+      assert {:ok, nil} = Profiles.validation_stage_timeout(security, 900_000)
 
       # Partial/malformed aggregate declarations fail closed — never coerced to nil.
       missing_source =
@@ -308,13 +326,53 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
       assert {:error, :invalid_validation_test_stage_timeout_policy} =
                Profiles.validation_test_stage_timeout(bad_stage_source, 900_000)
 
-      # Per-op from intensive Shell; aggregate stage from Actions facade hard max.
+      missing_whole_source =
+        update_in(
+          cross_app,
+          ["validation_strategy"],
+          &Map.delete(&1, "stage_timeout_budget_source")
+        )
+
+      assert {:error, :invalid_validation_stage_timeout_policy} =
+               Profiles.validation_stage_timeout(missing_whole_source, 900_000)
+
+      missing_whole_max =
+        update_in(
+          cross_app,
+          ["validation_strategy"],
+          &Map.delete(&1, "stage_timeout_max_ms")
+        )
+
+      assert {:error, :invalid_validation_stage_timeout_policy} =
+               Profiles.validation_stage_timeout(missing_whole_max, 900_000)
+
+      bad_whole_source =
+        put_in(
+          cross_app,
+          ["validation_strategy", "stage_timeout_budget_source"],
+          "unreviewed.budget"
+        )
+
+      assert {:error, :invalid_validation_stage_timeout_policy} =
+               Profiles.validation_stage_timeout(bad_whole_source, 900_000)
+
+      bad_whole_max =
+        put_in(cross_app, ["validation_strategy", "stage_timeout_max_ms"], "7_800_000")
+
+      assert {:error, :invalid_validation_stage_timeout_policy} =
+               Profiles.validation_stage_timeout(bad_whole_max, 900_000)
+
+      # Per-op from intensive Shell; aggregate/whole stage from Actions facade.
       assert cross_app["validation_strategy"]["timeout_max_ms"] == intensive_ceiling
 
       assert cross_app["validation_strategy"]["test_stage_timeout_max_ms"] ==
                Profiles.cross_app_test_stage_timeout_max_ms()
 
-      assert Profiles.cross_app_test_stage_timeout_max_ms() == stage_ceiling
+      assert Profiles.cross_app_test_stage_timeout_max_ms() == test_stage_ceiling
+      assert Profiles.cross_app_stage_timeout_max_ms() == whole_stage_ceiling
+
+      assert cross_app["validation_strategy"]["stage_timeout_max_ms"] ==
+               Profiles.cross_app_stage_timeout_max_ms()
 
       assert cross_app["validation_strategy"]["test_stage_timeout_max_ms"] >
                cross_app["validation_strategy"]["timeout_max_ms"]

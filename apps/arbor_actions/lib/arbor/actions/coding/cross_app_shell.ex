@@ -566,6 +566,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
                0,
                operation_timeout,
                completed_batches,
+               nil,
                remaining_batches
              ) do
           {:ok, check} -> check
@@ -586,28 +587,30 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
             remaining_after = deadline - monotonic_ms()
             runner_timeout = Core.runner_timed_out?(result)
             feedback = Core.feedback_from_result(result)
-            raw_passed = Map.get(feedback, "passed") == true
 
-            # A passing child that consumes the shared budget is completed, but
-            # the remaining exact plan cannot be started. A child-level timeout
-            # or failure remains an ordinary validation failure.
-            timed_out =
-              runner_timeout or (remaining_after <= 0 and raw_passed and rest == [])
+            aggregate_interrupted? =
+              Core.aggregate_deadline_interrupted?(
+                runner_timeout,
+                remaining_after,
+                budget_ms,
+                operation_timeout
+              )
 
-            app_result =
-              Core.classify_app_test_result(batch.label, feedback, timed_out: timed_out)
-
-            # Stop after first failed/timed-out batch — overall result is failed.
-            # Prior successful children remain in the aggregate evidence.
-            if app_result.passed do
-              if remaining_after <= 0 and rest != [] do
-                completed_batches = Enum.take(all_batches, batch.index)
+            # Aggregate-deadline interruption of a launched child is a capacity
+            # handoff (compact interrupted descriptor). Ordinary child timeout
+            # (including equal ceilings) and nonzero failures remain validation
+            # failures. A passing child that consumes residual is completed;
+            # only a remaining unstarted suffix is handed off.
+            cond do
+              aggregate_interrupted? ->
+                completed_batches = Enum.take(all_batches, batch.index - 1)
 
                 case Core.capacity_handoff(
                        :runtime,
                        0,
                        operation_timeout,
                        completed_batches,
+                       batch,
                        rest
                      ) do
                   {:ok, check} ->
@@ -616,19 +619,48 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
                   {:error, reason} ->
                     throw({:execution_error, {:invalid_capacity_handoff, reason}})
                 end
-              else
-                run_tests_sequential(
-                  worktree_path,
-                  all_batches,
-                  rest,
-                  deadline,
-                  operation_timeout,
-                  resource,
-                  [app_result | acc]
-                )
-              end
-            else
-              Core.aggregate_test_check(Enum.reverse([app_result | acc]))
+
+              true ->
+                # Ordinary runner timeout only (equal ceilings / residual still
+                # positive). A passing child that exhausts residual is completed:
+                # hand off remaining suffix, or succeed when it was the final batch.
+                timed_out = runner_timeout
+
+                app_result =
+                  Core.classify_app_test_result(batch.label, feedback, timed_out: timed_out)
+
+                if app_result.passed do
+                  if remaining_after <= 0 and rest != [] do
+                    completed_batches = Enum.take(all_batches, batch.index)
+
+                    case Core.capacity_handoff(
+                           :runtime,
+                           0,
+                           operation_timeout,
+                           completed_batches,
+                           nil,
+                           rest
+                         ) do
+                      {:ok, check} ->
+                        check
+
+                      {:error, reason} ->
+                        throw({:execution_error, {:invalid_capacity_handoff, reason}})
+                    end
+                  else
+                    run_tests_sequential(
+                      worktree_path,
+                      all_batches,
+                      rest,
+                      deadline,
+                      operation_timeout,
+                      resource,
+                      [app_result | acc]
+                    )
+                  end
+                else
+                  Core.aggregate_test_check(Enum.reverse([app_result | acc]))
+                end
             end
 
           {:error, reason} ->

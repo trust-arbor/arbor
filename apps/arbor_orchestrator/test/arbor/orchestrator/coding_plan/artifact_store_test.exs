@@ -1118,6 +1118,52 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
              ArtifactStore.archive_terminal_evidence(root, "task_coding_capacity", result, [])
   end
 
+  test "accepts live interrupted-final CrossApp capacity evidence", %{root: root} do
+    File.mkdir_p!(root)
+
+    result =
+      terminal_result(root)
+      |> Map.put("status", "validation_capacity_exceeded")
+      |> Map.put("canonical_status", "validation_capacity_exceeded")
+      |> Map.put(
+        "outcome",
+        terminal_outcome(
+          "validation_capacity_exceeded",
+          "requires_input",
+          "validation",
+          "validator",
+          "after_external_change"
+        )
+      )
+      |> Map.put("validation", interrupted_capacity_validation())
+
+    assert {:ok, _descriptor} =
+             ArtifactStore.archive_terminal_evidence(
+               root,
+               "task_coding_capacity_interrupted",
+               result,
+               []
+             )
+
+    archived =
+      root
+      |> Path.join("coding-terminal-evidence.json")
+      |> File.read!()
+      |> Jason.decode!()
+
+    handoff =
+      get_in(archived, [
+        "validation_outputs",
+        Access.at(0),
+        "test",
+        "capacity_handoff"
+      ])
+
+    assert handoff["interrupted_batch"]["index"] == 1
+    assert handoff["unstarted_batches"] == []
+    refute Map.has_key?(handoff["interrupted_batch"], "paths")
+  end
+
   test "maximum compact capacity terminal evidence stays below the archive cap", %{root: root} do
     File.mkdir_p!(root)
 
@@ -1182,7 +1228,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
              ArtifactStore.archive_terminal_evidence(root, "task_coding_capacity", mismatched, [])
   end
 
-  test "archive-read verifies historical schema-v1 handoffs; live write rejects them", %{
+  test "archive-read verifies historical schema-v1/v2 and live v3; live write rejects v1/v2", %{
     root: root
   } do
     File.mkdir_p!(root)
@@ -1214,16 +1260,66 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
       "unstarted_batches" => [batch]
     }
 
-    # Archive-read boundary accepts historical v1.
-    assert {:ok, archived} =
+    v2_handoff = %{
+      "schema_version" => 2,
+      "phase" => "structural",
+      "available_budget_ms" => 0,
+      "per_batch_budget_ms" => 1_200_000,
+      "completed_batch_count" => 0,
+      "completed_file_count" => 0,
+      "unstarted_batch_count" => 1,
+      "unstarted_file_count" => 1,
+      "total_batch_count" => 1,
+      "total_file_count" => 1,
+      "ordered_plan_sha256" => ordered_plan_sha256,
+      "unstarted_batches" => [batch]
+    }
+
+    v3_handoff = %{
+      "schema_version" => 3,
+      "phase" => "structural",
+      "available_budget_ms" => 0,
+      "per_batch_budget_ms" => 1_200_000,
+      "completed_batch_count" => 0,
+      "completed_file_count" => 0,
+      "unstarted_batch_count" => 1,
+      "unstarted_file_count" => 1,
+      "total_batch_count" => 1,
+      "total_file_count" => 1,
+      "ordered_plan_sha256" => ordered_plan_sha256,
+      "interrupted_batch" => nil,
+      "unstarted_batches" => [batch]
+    }
+
+    # Archive-read boundary accepts every known generation.
+    assert {:ok, archived_v1} =
              ValidationCapacityTerminal.verify_archived_capacity_handoff(v1_handoff)
 
-    assert archived["schema_version"] == 1
-    assert archived["required_budget_ms"] == 1_200_000
+    assert archived_v1["schema_version"] == 1
+    assert archived_v1["required_budget_ms"] == 1_200_000
 
-    # Live normalize/write path rejects v1 (no dual escape).
-    assert {:error, {:invalid_capacity_handoff, :schema_version}} =
-             ValidationCapacityHandoff.normalize(v1_handoff)
+    assert {:ok, archived_v2} =
+             ValidationCapacityTerminal.verify_archived_capacity_handoff(v2_handoff)
+
+    assert archived_v2["schema_version"] == 2
+
+    assert {:ok, archived_v3} =
+             ValidationCapacityTerminal.verify_archived_capacity_handoff(v3_handoff)
+
+    assert archived_v3["schema_version"] == 3
+    assert archived_v3["interrupted_batch"] == nil
+
+    assert :error =
+             ValidationCapacityTerminal.verify_archived_capacity_handoff(
+               Map.put(v3_handoff, "schema_version", 99)
+             )
+
+    # Live normalize/write path rejects v1/v2 (no dual escape).
+    assert {:error, _} = ValidationCapacityHandoff.normalize(v1_handoff)
+
+    assert {:error, _} = ValidationCapacityHandoff.normalize(v2_handoff)
+
+    assert {:ok, _} = ValidationCapacityHandoff.normalize(v3_handoff)
 
     result =
       terminal_result(root)
@@ -1704,7 +1800,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
     per_batch_budget_ms = 1_200_000
 
     handoff = %{
-      "schema_version" => 2,
+      "schema_version" => 3,
       "phase" => "structural",
       "available_budget_ms" => 0,
       "per_batch_budget_ms" => per_batch_budget_ms,
@@ -1715,6 +1811,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
       "total_batch_count" => batch_count,
       "total_file_count" => file_count,
       "ordered_plan_sha256" => ordered_plan_sha256,
+      "interrupted_batch" => nil,
       "unstarted_batches" => batches
     }
 
@@ -1726,6 +1823,46 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
           "passed" => false,
           "reason" => "validation_capacity_exceeded",
           "capacity_handoff" => handoff
+        }
+      }
+    ]
+  end
+
+  defp interrupted_capacity_validation do
+    inventory_sha256 = String.duplicate("a", 64)
+
+    batch = %{
+      "index" => 1,
+      "total" => 1,
+      "count" => 1,
+      "label" => "batch-1-of-1-n1-#{inventory_sha256}",
+      "inventory_sha256" => inventory_sha256
+    }
+
+    {:ok, ordered_plan_sha256} = ValidationCapacityHandoff.ordered_plan_digest([batch])
+
+    [
+      %{
+        "passed" => false,
+        "reason" => "validation_capacity_exceeded",
+        "test" => %{
+          "passed" => false,
+          "reason" => "validation_capacity_exceeded",
+          "capacity_handoff" => %{
+            "schema_version" => 3,
+            "phase" => "runtime",
+            "available_budget_ms" => 0,
+            "per_batch_budget_ms" => 1_200_000,
+            "completed_batch_count" => 0,
+            "completed_file_count" => 0,
+            "unstarted_batch_count" => 0,
+            "unstarted_file_count" => 0,
+            "total_batch_count" => 1,
+            "total_file_count" => 1,
+            "ordered_plan_sha256" => ordered_plan_sha256,
+            "interrupted_batch" => batch,
+            "unstarted_batches" => []
+          }
         }
       }
     ]

@@ -161,7 +161,7 @@ defmodule Arbor.Commands.CodingParityTest do
     {:ok, ordered_plan_sha256} = ValidationCapacityHandoff.ordered_plan_digest([batch])
 
     handoff = %{
-      "schema_version" => 2,
+      "schema_version" => 3,
       "phase" => "structural",
       "available_budget_ms" => 0,
       "per_batch_budget_ms" => 10_000,
@@ -172,6 +172,7 @@ defmodule Arbor.Commands.CodingParityTest do
       "total_batch_count" => 1,
       "total_file_count" => 1,
       "ordered_plan_sha256" => ordered_plan_sha256,
+      "interrupted_batch" => nil,
       "unstarted_batches" => [batch]
     }
 

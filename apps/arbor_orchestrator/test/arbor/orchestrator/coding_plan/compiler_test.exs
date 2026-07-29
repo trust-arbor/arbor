@@ -1352,6 +1352,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     # with default wall-clock 900_000.
     assert validate["param.timeout"] == 900_000
     assert validate["param.test_stage_timeout"] == 900_000
+    assert validate["param.stage_timeout"] == 900_000
     assert validate["timeout_budget.param"] == "stage_timeout"
     refute validate["context_keys"] =~ "path"
     refute validate["context_keys"] =~ "test_paths"
@@ -1412,9 +1413,10 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
 
     assert validate["param.timeout"] == 120_000
     assert validate["param.test_stage_timeout"] == 120_000
+    assert validate["param.stage_timeout"] == 120_000
   end
 
-  test "cross_app distinguishes per-operation and aggregate test-stage ceilings", ctx do
+  test "cross_app distinguishes per-operation, test-stage, and whole-stage ceilings", ctx do
     plan =
       plan!(%{
         "validation_profile" => "cross_app",
@@ -1424,13 +1426,41 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert {:ok, compilation} = compile(plan, ctx)
     validate = node_attrs(parse!(compilation.dot_source), "validate")
 
-    # Per-op intensive Shell max is 1_200_000; aggregate stage max is 4_200_000
-    # and is further bounded only by the plan wall clock here.
+    # Per-op intensive Shell max is 1_200_000; aggregate test-stage max is
+    # 4_200_000; whole-stage max is three intensive children + test-stage.
+    # All are further bounded by plan wall clock here.
     assert validate["param.timeout"] == 1_200_000
     assert validate["param.test_stage_timeout"] == 1_500_000
+    assert validate["param.stage_timeout"] == 1_500_000
   end
 
-  test "cross_app aggregate test-stage timeout never exceeds the Actions hard max", ctx do
+  test "cross_app whole-stage timeout never exceeds the Actions hard max", ctx do
+    stage_max = Arbor.Actions.cross_app_maximum_stage_timeout_ms()
+
+    plan =
+      plan!(%{
+        "validation_profile" => "cross_app",
+        "budgets" => %{"wall_clock_ms" => stage_max + 100_000}
+      })
+
+    assert {:ok, compilation} = compile(plan, ctx)
+    validate = node_attrs(parse!(compilation.dot_source), "validate")
+
+    assert validate["param.timeout"] == 1_200_000
+    assert validate["param.test_stage_timeout"] == 4_200_000
+    assert validate["param.stage_timeout"] == stage_max
+
+    assert validate["param.test_stage_timeout"] ==
+             Arbor.Actions.cross_app_maximum_test_stage_timeout_ms()
+
+    assert validate["param.stage_timeout"] ==
+             Arbor.Actions.cross_app_maximum_stage_timeout_ms()
+
+    assert validate["param.test_stage_timeout"] > validate["param.timeout"]
+    assert validate["param.stage_timeout"] > validate["param.test_stage_timeout"]
+  end
+
+  test "cross_app whole-stage binds between test-stage and stage maxima", ctx do
     plan =
       plan!(%{
         "validation_profile" => "cross_app",
@@ -1442,11 +1472,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
 
     assert validate["param.timeout"] == 1_200_000
     assert validate["param.test_stage_timeout"] == 4_200_000
-
-    assert validate["param.test_stage_timeout"] ==
-             Arbor.Actions.cross_app_maximum_test_stage_timeout_ms()
-
-    assert validate["param.test_stage_timeout"] > validate["param.timeout"]
+    assert validate["param.stage_timeout"] == 5_000_000
   end
 
   test "cross_app human_required review does not weaken review routing", ctx do

@@ -481,11 +481,14 @@ defmodule Arbor.Orchestrator do
            Profiles.validation_timeout(profile, plan.budgets["wall_clock_ms"]),
          {:ok, validation_test_stage_timeout_ms} <-
            Profiles.validation_test_stage_timeout(profile, plan.budgets["wall_clock_ms"]),
+         {:ok, validation_stage_timeout_ms} <-
+           Profiles.validation_stage_timeout(profile, plan.budgets["wall_clock_ms"]),
          {:ok, semantic_preflight_opts} <-
            Compiler.semantic_preflight_options(
              plan,
              validation_timeout_ms,
-             validation_test_stage_timeout_ms
+             validation_test_stage_timeout_ms,
+             validation_stage_timeout_ms
            ),
          :ok <- Profiles.validate_requirements(profile, compiled_graph),
          :ok <-

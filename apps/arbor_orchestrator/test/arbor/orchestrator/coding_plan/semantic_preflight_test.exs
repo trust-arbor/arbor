@@ -1350,7 +1350,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
   test "compound validation profiles pin the aggregate stage timeout target", ctx do
     for {plan, profile_id, opts} <- [
           {plan!(%{"validation_profile" => "cross_app"}), "cross_app",
-           [validation_test_stage_timeout_ms: 900_000]},
+           [validation_test_stage_timeout_ms: 900_000, validation_stage_timeout_ms: 900_000]},
           {security_plan!(), "security_regression", []}
         ] do
       assert {:ok, compilation} = compile(plan, ctx)
@@ -2204,52 +2204,84 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
            end)
   end
 
-  test "cross_app enforces exact aggregate test_stage_timeout and rejects missing/wrong values",
+  test "cross_app enforces exact compound timeouts and rejects missing/wrong values",
        ctx do
     plan = plan!(%{"validation_profile" => "cross_app"})
     assert {:ok, compilation} = compile(plan, ctx)
     graph = compiled_graph!(compilation.dot_source)
     assert {:ok, profile} = Profiles.fetch_executable("cross_app")
 
-    # Default plan wall-clock is 900_000; per-op max 1_200_000 and stage max
-    # 4_200_000 both min to 900_000.
+    # Default plan wall-clock is 900_000; per-op, test-stage, and whole-stage
+    # maxima all min to 900_000.
     assert :ok =
              preflight(graph, profile["semantic_policy"],
                review_profile: "binding",
                validation_timeout_ms: 900_000,
-               validation_test_stage_timeout_ms: 900_000
+               validation_test_stage_timeout_ms: 900_000,
+               validation_stage_timeout_ms: 900_000
              )
 
-    # Wrong aggregate value fails closed.
-    wrong_stage =
+    # Wrong aggregate test-stage value fails closed.
+    wrong_test_stage =
       update_in(graph.nodes["validate"].attrs, &Map.put(&1, "param.test_stage_timeout", 899_999))
 
     assert {:error, {:semantic_preflight_failed, wrong_errors}} =
-             preflight(wrong_stage, profile["semantic_policy"],
+             preflight(wrong_test_stage, profile["semantic_policy"],
                review_profile: "binding",
                validation_timeout_ms: 900_000,
-               validation_test_stage_timeout_ms: 900_000
+               validation_test_stage_timeout_ms: 900_000,
+               validation_stage_timeout_ms: 900_000
              )
 
     assert Enum.any?(wrong_errors, &(&1["code"] == "validation_parameter_violation"))
 
+    # Wrong whole-stage value fails closed.
+    wrong_stage =
+      update_in(graph.nodes["validate"].attrs, &Map.put(&1, "param.stage_timeout", 899_999))
+
+    assert {:error, {:semantic_preflight_failed, wrong_stage_errors}} =
+             preflight(wrong_stage, profile["semantic_policy"],
+               review_profile: "binding",
+               validation_timeout_ms: 900_000,
+               validation_test_stage_timeout_ms: 900_000,
+               validation_stage_timeout_ms: 900_000
+             )
+
+    assert Enum.any?(wrong_stage_errors, &(&1["code"] == "validation_parameter_violation"))
+
     # Missing aggregate param fails closed when the profile requires it.
-    missing_stage =
+    missing_test_stage =
       update_in(graph.nodes["validate"].attrs, &Map.delete(&1, "param.test_stage_timeout"))
 
     assert {:error, {:semantic_preflight_failed, missing_errors}} =
-             preflight(missing_stage, profile["semantic_policy"],
+             preflight(missing_test_stage, profile["semantic_policy"],
                review_profile: "binding",
                validation_timeout_ms: 900_000,
-               validation_test_stage_timeout_ms: 900_000
+               validation_test_stage_timeout_ms: 900_000,
+               validation_stage_timeout_ms: 900_000
              )
 
     assert Enum.any?(missing_errors, &(&1["code"] == "validation_parameter_violation"))
 
-    # Omitting the preflight option for a cross_app graph also fails closed.
-    assert {:error, {:semantic_preflight_failed, absent_opt_errors}} =
-             preflight(graph, profile["semantic_policy"],
+    missing_stage =
+      update_in(graph.nodes["validate"].attrs, &Map.delete(&1, "param.stage_timeout"))
+
+    assert {:error, {:semantic_preflight_failed, missing_stage_errors}} =
+             preflight(missing_stage, profile["semantic_policy"],
                review_profile: "binding",
+               validation_timeout_ms: 900_000,
+               validation_test_stage_timeout_ms: 900_000,
+               validation_stage_timeout_ms: 900_000
+             )
+
+    assert Enum.any?(missing_stage_errors, &(&1["code"] == "validation_parameter_violation"))
+
+    # Omitting the compound preflight options for a cross_app graph fails closed.
+    # Call SemanticPreflight directly so the test helper cannot backfill them.
+    assert {:error, {:semantic_preflight_failed, absent_opt_errors}} =
+             SemanticPreflight.validate(graph, profile["semantic_policy"],
+               review_profile: "binding",
+               rework_max_cycles: 2,
                validation_timeout_ms: 900_000
              )
 
@@ -2329,21 +2361,32 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
       opts
       |> Keyword.put_new(:rework_max_cycles, 2)
       |> Keyword.put_new_lazy(:validation_timeout_ms, fn -> validation_timeout_ms(policy) end)
+      |> Keyword.put_new_lazy(:validation_test_stage_timeout_ms, fn ->
+        validation_static_timeout_ms(policy, "test_stage_timeout")
+      end)
+      |> Keyword.put_new_lazy(:validation_stage_timeout_ms, fn ->
+        validation_static_timeout_ms(policy, "stage_timeout")
+      end)
     )
   end
 
   defp validation_timeout_ms(policy) do
+    case validation_static_timeout_ms(policy, "timeout") do
+      timeout when is_integer(timeout) and timeout > 0 -> timeout
+      _other -> default_validation_timeout_ms!()
+    end
+  end
+
+  defp validation_static_timeout_ms(policy, key) when is_binary(key) do
     profile_id =
       if is_map(policy), do: Map.get(policy, "validation_profile", "default"), else: "default"
 
     with {:ok, profile} <- Profiles.fetch_executable(profile_id),
          {:ok, program} <-
-           ValidationProgram.build(profile["validation_strategy"], plan!().budgets),
-         timeout when is_integer(timeout) and timeout > 0 <-
-           get_in(program, ["static_parameters", "timeout"]) do
-      timeout
+           ValidationProgram.build(profile["validation_strategy"], plan!().budgets) do
+      get_in(program, ["static_parameters", key])
     else
-      _other -> default_validation_timeout_ms!()
+      _other -> nil
     end
   end
 

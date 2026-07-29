@@ -1779,11 +1779,14 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
            Profiles.validation_timeout(profile, plan.budgets["wall_clock_ms"]),
          {:ok, validation_test_stage_timeout_ms} <-
            Profiles.validation_test_stage_timeout(profile, plan.budgets["wall_clock_ms"]),
+         {:ok, validation_stage_timeout_ms} <-
+           Profiles.validation_stage_timeout(profile, plan.budgets["wall_clock_ms"]),
          {:ok, semantic_preflight_opts} <-
            execution_boundary_semantic_preflight_opts(
              plan,
              validation_timeout_ms,
-             validation_test_stage_timeout_ms
+             validation_test_stage_timeout_ms,
+             validation_stage_timeout_ms
            ),
          :ok <- Profiles.validate_requirements(profile, compiled_graph),
          :ok <-
@@ -1822,7 +1825,8 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   defp execution_boundary_semantic_preflight_opts(
          %Plan{} = plan,
          validation_timeout_ms,
-         validation_test_stage_timeout_ms
+         validation_test_stage_timeout_ms,
+         validation_stage_timeout_ms
        ) do
     with {:ok, {checkpoint_policy, checkpoint_work_packet_json}} <-
            execution_boundary_checkpoint_binding(plan) do
@@ -1839,7 +1843,8 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
            min(plan.budgets["inactivity_timeout_ms"], plan.budgets["wall_clock_ms"]),
          rework_max_cycles: plan.rework["max_cycles"],
          validation_timeout_ms: validation_timeout_ms,
-         validation_test_stage_timeout_ms: validation_test_stage_timeout_ms
+         validation_test_stage_timeout_ms: validation_test_stage_timeout_ms,
+         validation_stage_timeout_ms: validation_stage_timeout_ms
        ]}
     end
   end

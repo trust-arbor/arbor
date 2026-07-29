@@ -9,7 +9,8 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   Test-stage admission is residual-budget based: a positive aggregate remainder
   starts the first exact batch under one shared deadline. Per-batch intensive
   ceilings are never multiplied as a predicted total duration. Capacity handoffs
-  emit schema-v2 evidence with `available_budget_ms == 0` only.
+  emit schema-v3 evidence with `available_budget_ms == 0` only, including an
+  optional aggregate-deadline interrupted batch descriptor.
   """
 
   alias Arbor.Contracts.Coding.ValidationCapacityHandoff
@@ -37,7 +38,13 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   # min(this, plan wall_clock) at compile time.
   @default_test_stage_timeout 300_000
   @maximum_test_stage_timeout 4_200_000
-  @maximum_stage_timeout @maximum_test_stage_timeout
+  # Whole-validation stage hard max: exactly three pre-test intensive children
+  # (compile, xref, MIX_ENV=test compile) plus the aggregate test-stage ceiling.
+  # Canonical owner of this product — do not restate the numeric result outside
+  # this module / the Arbor.Actions facade.
+  @pretest_intensive_children 3
+  @maximum_stage_timeout @pretest_intensive_children * @maximum_timeout +
+                           @maximum_test_stage_timeout
   @allowed_param_keys [:workspace_id, :timeout, :stage_timeout, :test_stage_timeout]
   @allowed_param_string_keys Enum.map(@allowed_param_keys, &Atom.to_string/1)
 
@@ -480,6 +487,29 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   end
 
   @doc """
+  True only for aggregate-deadline interruption of a launched child.
+
+  Requires trusted runner timeout evidence, non-positive residual after the
+  child, and a launched budget strictly below the intensive operation ceiling.
+  Equal ceilings remain an ordinary child timeout.
+  """
+  @spec aggregate_deadline_interrupted?(boolean(), integer(), pos_integer(), pos_integer()) ::
+          boolean()
+  def aggregate_deadline_interrupted?(
+        runner_timed_out?,
+        remaining_after,
+        budget_ms,
+        operation_timeout
+      )
+      when is_boolean(runner_timed_out?) and is_integer(remaining_after) and
+             is_integer(budget_ms) and budget_ms > 0 and is_integer(operation_timeout) and
+             operation_timeout > 0 do
+    runner_timed_out? == true and remaining_after <= 0 and budget_ms < operation_timeout
+  end
+
+  def aggregate_deadline_interrupted?(_runner, _remaining, _budget, _operation), do: false
+
+  @doc """
   Pure next-step decision for sequential batch tests under dual budgets.
 
   `remaining_ms` is the aggregate test-stage budget remaining. Each child is
@@ -547,7 +577,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
 
       true ->
         # Residual exhausted before the first child — structural handoff.
-        case capacity_handoff(:structural, 0, operation_timeout_ms, [], batches) do
+        case capacity_handoff(:structural, 0, operation_timeout_ms, [], nil, batches) do
           {:ok, check} -> {:capacity_exceeded, check}
           {:error, reason} -> {:error, reason}
         end
@@ -558,18 +588,20 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
     do: {:error, :invalid_test_batch_plan}
 
   @doc """
-  Build the bounded, JSON-clean handoff check for an unstarted batch suffix.
+  Build the bounded, JSON-clean handoff check for residual capacity evidence.
 
   Residual available budget on a handoff is always 0: any positive remainder is
   executable via `next_test_step/3`. Batch paths are already admitted and
-  normalized by partition_test_batches/1. The descriptor binds the exact ordered
-  suffix with deterministic labels, counts, and digests only.
+  normalized by partition_test_batches/1. Schema v3 binds either an unstarted
+  suffix (`interrupted_batch` null) or one aggregate-deadline interrupted batch
+  plus optional unstarted suffix — path-free labels, counts, and digests only.
   """
   @spec capacity_handoff(
           :structural | :runtime,
           integer(),
           pos_integer(),
           [test_batch()],
+          test_batch() | nil,
           [test_batch()]
         ) :: {:ok, map()} | {:error, term()}
   def capacity_handoff(
@@ -577,24 +609,39 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
         available_ms,
         per_batch_budget_ms,
         completed_batches,
+        interrupted_batch,
         unstarted_batches
       )
       when phase in [:structural, :runtime] and is_integer(available_ms) and
              is_integer(per_batch_budget_ms) and per_batch_budget_ms > 0 and
-             is_list(completed_batches) and is_list(unstarted_batches) do
+             is_list(completed_batches) and is_list(unstarted_batches) and
+             (is_nil(interrupted_batch) or is_map(interrupted_batch)) do
     cond do
       available_ms > 0 ->
         # Positive residual must execute, not hand off.
         {:error, :invalid_capacity_handoff}
 
       true ->
-        with :ok <- validate_capacity_batches(completed_batches, unstarted_batches),
-             all_batches <- completed_batches ++ unstarted_batches,
+        with :ok <-
+               validate_capacity_batches(
+                 completed_batches,
+                 interrupted_batch,
+                 unstarted_batches
+               ),
+             all_batches <-
+               capacity_all_batches(completed_batches, interrupted_batch, unstarted_batches),
              completed_files <- Enum.sum(Enum.map(completed_batches, & &1.count)),
+             interrupted_files <- interrupted_file_count(interrupted_batch),
              unstarted_files <- Enum.sum(Enum.map(unstarted_batches, & &1.count)),
-             compact_batches <- Enum.map(unstarted_batches, &capacity_batch/1),
+             compact_interrupted <- compact_interrupted(interrupted_batch),
+             compact_unstarted <- Enum.map(unstarted_batches, &capacity_batch/1),
+             digest_subject <-
+               if(compact_interrupted,
+                 do: [compact_interrupted | compact_unstarted],
+                 else: compact_unstarted
+               ),
              {:ok, ordered_plan_sha256} <-
-               ValidationCapacityHandoff.ordered_plan_digest(compact_batches),
+               ValidationCapacityHandoff.ordered_plan_digest(digest_subject),
              {:ok, handoff} <-
                ValidationCapacityHandoff.new(%{
                  "schema_version" => ValidationCapacityHandoff.schema_version(),
@@ -607,9 +654,10 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
                  "unstarted_batch_count" => length(unstarted_batches),
                  "unstarted_file_count" => unstarted_files,
                  "total_batch_count" => length(all_batches),
-                 "total_file_count" => completed_files + unstarted_files,
+                 "total_file_count" => completed_files + interrupted_files + unstarted_files,
                  "ordered_plan_sha256" => ordered_plan_sha256,
-                 "unstarted_batches" => compact_batches
+                 "interrupted_batch" => compact_interrupted,
+                 "unstarted_batches" => compact_unstarted
                }) do
           check =
             completed_check(
@@ -630,9 +678,31 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
         _available_ms,
         _per_batch_budget_ms,
         _completed_batches,
+        _interrupted_batch,
         _unstarted_batches
       ),
       do: {:error, :invalid_capacity_handoff}
+
+  # Compatibility shim for call sites that still pass the pre-v3 arity
+  # (completed + unstarted only => interrupted null).
+  @doc false
+  def capacity_handoff(
+        phase,
+        available_ms,
+        per_batch_budget_ms,
+        completed_batches,
+        unstarted_batches
+      )
+      when is_list(unstarted_batches) do
+    capacity_handoff(
+      phase,
+      available_ms,
+      per_batch_budget_ms,
+      completed_batches,
+      nil,
+      unstarted_batches
+    )
+  end
 
   defp capacity_batch(batch) do
     %{
@@ -644,7 +714,18 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
     }
   end
 
-  defp validate_capacity_batches(completed_batches, unstarted_batches)
+  defp compact_interrupted(nil), do: nil
+  defp compact_interrupted(batch), do: capacity_batch(batch)
+
+  defp interrupted_file_count(nil), do: 0
+  defp interrupted_file_count(batch), do: Map.get(batch, :count) || Map.get(batch, "count") || 0
+
+  defp capacity_all_batches(completed, nil, unstarted), do: completed ++ unstarted
+
+  defp capacity_all_batches(completed, interrupted, unstarted),
+    do: completed ++ [interrupted | unstarted]
+
+  defp validate_capacity_batches(completed_batches, nil, unstarted_batches)
        when is_list(completed_batches) and is_list(unstarted_batches) and unstarted_batches != [] do
     all_batches = completed_batches ++ unstarted_batches
 
@@ -653,7 +734,16 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
       else: {:error, :invalid_capacity_batch_plan}
   end
 
-  defp validate_capacity_batches(_completed_batches, _unstarted_batches),
+  defp validate_capacity_batches(completed_batches, interrupted, unstarted_batches)
+       when is_map(interrupted) and is_list(completed_batches) and is_list(unstarted_batches) do
+    all_batches = completed_batches ++ [interrupted | unstarted_batches]
+
+    if Enum.all?(all_batches, &is_map/1) and valid_remaining_batches?(all_batches),
+      do: :ok,
+      else: {:error, :invalid_capacity_batch_plan}
+  end
+
+  defp validate_capacity_batches(_completed_batches, _interrupted, _unstarted_batches),
     do: {:error, :invalid_capacity_batch_plan}
 
   defp invalid_test_step_input(remaining_ms, batches, operation_timeout_ms) do

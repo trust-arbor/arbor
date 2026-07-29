@@ -828,6 +828,21 @@ defmodule Arbor.Actions do
     Arbor.Actions.Coding.CrossApp.Core.maximum_test_stage_timeout()
   end
 
+  @doc """
+  Reviewed hard maximum for the cross-app whole-validation stage budget in
+  milliseconds.
+
+  Derived as three intensive pre-test child ceilings plus the aggregate
+  test-stage maximum. Coding-plan profiles bind plan wall-clock against this
+  Actions-owned value when compiling `param.stage_timeout`; callers must not
+  import `Arbor.Actions.Coding.CrossApp.Core` directly or restate the numeric
+  product outside this facade.
+  """
+  @spec cross_app_maximum_stage_timeout_ms() :: pos_integer()
+  def cross_app_maximum_stage_timeout_ms do
+    Arbor.Actions.Coding.CrossApp.Core.maximum_stage_timeout()
+  end
+
   @approval_payload_keys [
     :content,
     "content",

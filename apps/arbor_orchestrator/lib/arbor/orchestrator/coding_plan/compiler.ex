@@ -114,13 +114,16 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
          validation_timeout_ms = validation_program["static_parameters"]["timeout"],
          validation_test_stage_timeout_ms =
            validation_program["static_parameters"]["test_stage_timeout"],
+         validation_stage_timeout_ms =
+           validation_program["static_parameters"]["stage_timeout"],
          :ok <- validate_supported_features(plan),
          {:ok, work_packet_json} <- canonical_work_packet_json(plan),
          {:ok, semantic_preflight_opts} <-
            semantic_preflight_options(
              plan,
              validation_timeout_ms,
-             validation_test_stage_timeout_ms
+             validation_test_stage_timeout_ms,
+             validation_stage_timeout_ms
            ),
          {:ok, action_catalog} <- resolve_action_catalog(opts),
          {:ok, template_source} <- resolve_template_source(opts),
@@ -1871,12 +1874,18 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
   defp checkpoint_policy(_plan), do: "direct"
 
   @doc false
-  @spec semantic_preflight_options(Plan.t(), pos_integer(), pos_integer() | nil) ::
+  @spec semantic_preflight_options(
+          Plan.t(),
+          pos_integer(),
+          pos_integer() | nil,
+          pos_integer() | nil
+        ) ::
           {:ok, keyword()} | {:error, term()}
   def semantic_preflight_options(
         %Plan{} = plan,
         validation_timeout_ms,
-        validation_test_stage_timeout_ms
+        validation_test_stage_timeout_ms,
+        validation_stage_timeout_ms \\ nil
       ) do
     with {:ok, work_packet_json} <- canonical_work_packet_json(plan) do
       {:ok,
@@ -1891,7 +1900,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
          design_checkpoint_timeout_ms: design_checkpoint_timeout_ms(plan),
          rework_max_cycles: plan.rework["max_cycles"],
          validation_timeout_ms: validation_timeout_ms,
-         validation_test_stage_timeout_ms: validation_test_stage_timeout_ms
+         validation_test_stage_timeout_ms: validation_test_stage_timeout_ms,
+         validation_stage_timeout_ms: validation_stage_timeout_ms
        ]}
     end
   end

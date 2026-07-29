@@ -26,14 +26,17 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
     assert intensive_ceiling == 1_200_000
     standard_ceiling = Arbor.Shell.spawn_capable_max_timeout_ms()
     assert standard_ceiling == 600_000
-    stage_ceiling = Core.maximum_test_stage_timeout()
-    assert stage_ceiling == 4_200_000
-    assert stage_ceiling == Arbor.Actions.cross_app_maximum_test_stage_timeout_ms()
+    test_stage_ceiling = Core.maximum_test_stage_timeout()
+    whole_stage_ceiling = Core.maximum_stage_timeout()
+    assert test_stage_ceiling == 4_200_000
+    assert test_stage_ceiling == Arbor.Actions.cross_app_maximum_test_stage_timeout_ms()
+    assert whole_stage_ceiling == Arbor.Actions.cross_app_maximum_stage_timeout_ms()
 
     # Per-op derives from intensive Shell; aggregate stage is a separate Actions max.
     assert Core.maximum_timeout() == intensive_ceiling
-    assert Core.maximum_test_stage_timeout() == stage_ceiling
+    assert Core.maximum_test_stage_timeout() == test_stage_ceiling
     assert Core.maximum_test_stage_timeout() > Core.maximum_timeout()
+    assert Core.maximum_stage_timeout() > Core.maximum_test_stage_timeout()
     assert Core.maximum_timeout() > standard_ceiling
 
     assert {:ok, %{timeout: ^intensive_ceiling}} =
@@ -73,7 +76,13 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
     assert {:ok, %{stage_timeout: 4_200_000}} =
              Core.new(%{workspace_id: "ws_opaque", stage_timeout: "4200000"})
 
-    for invalid <- [999, 4_200_001, "04200000", "4200000ms"] do
+    assert {:ok, %{stage_timeout: ^whole_stage_ceiling}} =
+             Core.new(%{
+               workspace_id: "ws_opaque",
+               stage_timeout: Integer.to_string(whole_stage_ceiling)
+             })
+
+    for invalid <- [999, whole_stage_ceiling + 1, "04200000", "4200000ms"] do
       assert {:error, :invalid_stage_timeout} =
                Core.new(%{workspace_id: "ws_opaque", stage_timeout: invalid})
     end
@@ -1396,9 +1405,10 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
 
     assert check["reason"] == "validation_capacity_exceeded"
     handoff = check["capacity_handoff"]
-    assert handoff["schema_version"] == 2
+    assert handoff["schema_version"] == 3
     assert handoff["phase"] == "structural"
     assert handoff["available_budget_ms"] == 0
+    assert handoff["interrupted_batch"] == nil
     refute Map.has_key?(handoff, "required_budget_ms")
     assert handoff["completed_batch_count"] == 0
     assert handoff["completed_file_count"] == 0
@@ -1411,7 +1421,7 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
     assert {:ok, _} = Jason.encode(check)
   end
 
-  test "capacity_handoff/5 rejects positive residual and binds runtime suffix" do
+  test "capacity_handoff rejects positive residual and binds runtime suffix or interrupted batch" do
     # Cross-app roots force multiple batches so a completed prefix leaves a suffix.
     files = [
       "apps/alpha/test/a1_test.exs",
@@ -1424,17 +1434,57 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
     [first | rest] = batches
 
     assert {:error, :invalid_capacity_handoff} =
-             Core.capacity_handoff(:runtime, 1, 1_000, [first], rest)
+             Core.capacity_handoff(:runtime, 1, 1_000, [first], nil, rest)
 
-    assert {:ok, check} = Core.capacity_handoff(:runtime, 0, 1_000, [first], rest)
+    assert {:ok, check} = Core.capacity_handoff(:runtime, 0, 1_000, [first], nil, rest)
     handoff = check["capacity_handoff"]
-    assert handoff["schema_version"] == 2
+    assert handoff["schema_version"] == 3
     assert handoff["phase"] == "runtime"
     assert handoff["available_budget_ms"] == 0
+    assert handoff["interrupted_batch"] == nil
     assert handoff["completed_batch_count"] == 1
     assert handoff["unstarted_batch_count"] == length(rest)
     refute Map.has_key?(handoff, "required_budget_ms")
     assert Arbor.Contracts.Coding.ValidationCapacityHandoff.valid?(handoff)
+
+    assert {:ok, interrupted_check} =
+             Core.capacity_handoff(:runtime, 0, 1_000, [], first, rest)
+
+    interrupted = interrupted_check["capacity_handoff"]
+    assert interrupted["interrupted_batch"]["index"] == first.index
+    assert interrupted["unstarted_batch_count"] == length(rest)
+    refute Map.has_key?(interrupted["interrupted_batch"], "paths")
+    assert Arbor.Contracts.Coding.ValidationCapacityHandoff.valid?(interrupted)
+
+    last = List.last(batches)
+    completed = Enum.drop(batches, -1)
+
+    assert {:ok, final_check} =
+             Core.capacity_handoff(:runtime, 0, 1_000, completed, last, [])
+
+    final = final_check["capacity_handoff"]
+    assert final["interrupted_batch"]["index"] == last.index
+    assert final["unstarted_batches"] == []
+    assert final["unstarted_batch_count"] == 0
+    assert Arbor.Contracts.Coding.ValidationCapacityHandoff.valid?(final)
+  end
+
+  test "whole-stage max is three intensive children plus aggregate test-stage max" do
+    assert Core.maximum_stage_timeout() ==
+             3 * Core.maximum_timeout() + Core.maximum_test_stage_timeout()
+
+    assert Arbor.Actions.cross_app_maximum_stage_timeout_ms() == Core.maximum_stage_timeout()
+
+    assert Arbor.Actions.cross_app_maximum_test_stage_timeout_ms() ==
+             Core.maximum_test_stage_timeout()
+  end
+
+  test "aggregate_deadline_interrupted? requires runner timeout, residual, and strict budget" do
+    assert Core.aggregate_deadline_interrupted?(true, 0, 500, 1_000)
+    assert Core.aggregate_deadline_interrupted?(true, -1, 999, 1_000)
+    refute Core.aggregate_deadline_interrupted?(true, 0, 1_000, 1_000)
+    refute Core.aggregate_deadline_interrupted?(false, 0, 500, 1_000)
+    refute Core.aggregate_deadline_interrupted?(true, 1, 500, 1_000)
   end
 
   test "malformed batch plan fails closed at admission" do

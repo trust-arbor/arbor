@@ -34,6 +34,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationProgram do
           | {:unsupported_validation_strategy, term()}
           | :invalid_validation_timeout_policy
           | :invalid_validation_test_stage_timeout_policy
+          | :invalid_validation_stage_timeout_policy
 
   @doc "Returns the canonical validation program version."
   @spec version() :: pos_integer()
@@ -49,11 +50,13 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationProgram do
          profile = %{"validation_strategy" => strategy},
          {:ok, timeout_ms} <- Profiles.validation_timeout(profile, wall_clock_ms),
          {:ok, test_stage_timeout_ms} <-
-           Profiles.validation_test_stage_timeout(profile, wall_clock_ms) do
+           Profiles.validation_test_stage_timeout(profile, wall_clock_ms),
+         {:ok, stage_timeout_ms} <- Profiles.validation_stage_timeout(profile, wall_clock_ms) do
       static_parameters =
         strategy["static_parameters"]
         |> Map.put("timeout", timeout_ms)
         |> maybe_put_test_stage_timeout(test_stage_timeout_ms)
+        |> maybe_put_stage_timeout(stage_timeout_ms)
 
       program = %{
         "version" => @version,
@@ -72,7 +75,6 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationProgram do
   end
 
   def build(_strategy, _budgets), do: {:error, :invalid_validation_strategy}
-
   @doc "Projects a validated program onto the existing validation exec node."
   @spec project_onto(descriptor(), map()) ::
           {:ok, %{String.t() => term()}} | {:error, :invalid_validation_program}
@@ -109,7 +111,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationProgram do
 
   Timeout keys are identified by name (the key string contains `"timeout"`),
   not by action or profile id. This covers ordinary `timeout` and compound
-  `test_stage_timeout` without hardcoding coding action names.
+  `test_stage_timeout` / `stage_timeout` without hardcoding coding action names.
   """
   @spec largest_timeout_ms(descriptor()) ::
           {:ok, pos_integer()}
@@ -206,6 +208,11 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationProgram do
   defp maybe_put_test_stage_timeout(parameters, timeout_ms),
     do: Map.put(parameters, "test_stage_timeout", timeout_ms)
 
+  defp maybe_put_stage_timeout(parameters, nil), do: parameters
+
+  defp maybe_put_stage_timeout(parameters, timeout_ms),
+    do: Map.put(parameters, "stage_timeout", timeout_ms)
+
   defp valid_static_parameters?(strategy, params)
        when is_map(strategy) and is_map(params) and not is_struct(params) do
     base = strategy["static_parameters"]
@@ -213,20 +220,39 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationProgram do
     if is_map(base) and not is_struct(base) do
       timeout_ms = Map.get(params, "timeout")
       has_test_stage? = Map.has_key?(strategy, "test_stage_timeout_max_ms")
+      has_stage? = Map.has_key?(strategy, "stage_timeout_max_ms")
 
-      if has_test_stage? do
-        test_stage_timeout_ms = Map.get(params, "test_stage_timeout")
-        expected_keys = MapSet.new(Map.keys(base) ++ ["timeout", "test_stage_timeout"])
+      cond do
+        has_test_stage? and has_stage? ->
+          test_stage_timeout_ms = Map.get(params, "test_stage_timeout")
+          stage_timeout_ms = Map.get(params, "stage_timeout")
 
-        MapSet.new(Map.keys(params)) == expected_keys and
-          Map.drop(params, ["timeout", "test_stage_timeout"]) == base and
-          valid_compound_timeouts?(strategy, timeout_ms, test_stage_timeout_ms)
-      else
-        expected_keys = MapSet.new(Map.keys(base) ++ ["timeout"])
+          expected_keys =
+            MapSet.new(Map.keys(base) ++ ["timeout", "test_stage_timeout", "stage_timeout"])
 
-        MapSet.new(Map.keys(params)) == expected_keys and
-          Map.drop(params, ["timeout"]) == base and
-          valid_timeout?(strategy, timeout_ms)
+          MapSet.new(Map.keys(params)) == expected_keys and
+            Map.drop(params, ["timeout", "test_stage_timeout", "stage_timeout"]) == base and
+            valid_compound_timeouts?(
+              strategy,
+              timeout_ms,
+              test_stage_timeout_ms,
+              stage_timeout_ms
+            )
+
+        has_test_stage? ->
+          test_stage_timeout_ms = Map.get(params, "test_stage_timeout")
+          expected_keys = MapSet.new(Map.keys(base) ++ ["timeout", "test_stage_timeout"])
+
+          MapSet.new(Map.keys(params)) == expected_keys and
+            Map.drop(params, ["timeout", "test_stage_timeout"]) == base and
+            valid_compound_timeouts?(strategy, timeout_ms, test_stage_timeout_ms, nil)
+
+        true ->
+          expected_keys = MapSet.new(Map.keys(base) ++ ["timeout"])
+
+          MapSet.new(Map.keys(params)) == expected_keys and
+            Map.drop(params, ["timeout"]) == base and
+            valid_timeout?(strategy, timeout_ms)
       end
     else
       false
@@ -243,7 +269,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationProgram do
 
   defp valid_timeout?(_strategy, _timeout_ms), do: false
 
-  defp valid_compound_timeouts?(strategy, timeout_ms, test_stage_timeout_ms) do
+  defp valid_compound_timeouts?(strategy, timeout_ms, test_stage_timeout_ms, nil) do
     timeout_max_ms = strategy["timeout_max_ms"]
     test_stage_timeout_max_ms = strategy["test_stage_timeout_max_ms"]
 
@@ -252,6 +278,22 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationProgram do
       is_integer(test_stage_timeout_ms) and test_stage_timeout_ms >= timeout_ms and
       is_integer(test_stage_timeout_max_ms) and test_stage_timeout_max_ms > 0 and
       test_stage_timeout_ms <= test_stage_timeout_max_ms and
+      (timeout_ms == timeout_max_ms or test_stage_timeout_ms == timeout_ms)
+  end
+
+  defp valid_compound_timeouts?(strategy, timeout_ms, test_stage_timeout_ms, stage_timeout_ms) do
+    timeout_max_ms = strategy["timeout_max_ms"]
+    test_stage_timeout_max_ms = strategy["test_stage_timeout_max_ms"]
+    stage_timeout_max_ms = strategy["stage_timeout_max_ms"]
+
+    is_integer(timeout_ms) and timeout_ms > 0 and is_integer(timeout_max_ms) and
+      timeout_max_ms > 0 and timeout_ms <= timeout_max_ms and
+      is_integer(test_stage_timeout_ms) and test_stage_timeout_ms >= timeout_ms and
+      is_integer(test_stage_timeout_max_ms) and test_stage_timeout_max_ms > 0 and
+      test_stage_timeout_ms <= test_stage_timeout_max_ms and
+      is_integer(stage_timeout_ms) and stage_timeout_ms >= test_stage_timeout_ms and
+      is_integer(stage_timeout_max_ms) and stage_timeout_max_ms > 0 and
+      stage_timeout_ms <= stage_timeout_max_ms and
       (timeout_ms == timeout_max_ms or test_stage_timeout_ms == timeout_ms)
   end
 
