@@ -472,5 +472,147 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandlerTaintTest do
 
       assert Keyword.fetch!(exec_opts, :taint).level == :untrusted
     end
+
+    test "default 900000ms design open uses interaction wait not scaled approval_ms" do
+      # Live default Plan wall: approval_ms scales to 90s under the 40% tail, while
+      # interaction_wait_ms is the full wall. Human wait must not collapse to 90s.
+      wall_ms = 900_000
+      reserve_ms = 360_000
+      approval_ms = 90_000
+      interaction_wait_ms = wall_ms
+      now = System.system_time(:millisecond)
+
+      context =
+        Context.new(%{
+          "session.run_deadline_unix_ms" => now + wall_ms,
+          "coding_budget.interaction_wait_ms" => interaction_wait_ms,
+          "coding_budget.approval_ms" => approval_ms,
+          "coding_budget.worker_completion_reserve_ms" => reserve_ms
+        })
+
+      node =
+        action_node(%{
+          "action" => "coding_design_checkpoint_open",
+          "timeout_budget.deadline_key" => "session.run_deadline_unix_ms",
+          "timeout_budget.cap_key" => "coding_budget.interaction_wait_ms",
+          "timeout_budget.reserve_key" => "coding_budget.worker_completion_reserve_ms",
+          "timeout_budget.param" => "timeout"
+        })
+
+      assert ExecHandler.execute(node, context, graph(), opts()).status == :success
+
+      assert_received {:stub_execute, "coding_design_checkpoint_open", %{"timeout" => effective},
+                       _, _}
+
+      # Exact composition: min(interaction_wait, deadline - now - reserve) ≈ 540_000
+      assert effective > approval_ms
+      assert effective <= wall_ms - reserve_ms
+    end
+
+    test "reviewed commit binds interaction wait with approval completion reserve" do
+      wall_ms = 900_000
+      reserve_ms = 72_000
+      interaction_wait_ms = wall_ms
+      now = System.system_time(:millisecond)
+
+      context =
+        Context.new(%{
+          "session.run_deadline_unix_ms" => now + wall_ms,
+          "coding_budget.interaction_wait_ms" => interaction_wait_ms,
+          "coding_budget.approval_ms" => 90_000,
+          "coding_budget.approval_completion_reserve_ms" => reserve_ms
+        })
+
+      node =
+        action_node(%{
+          "action" => "coding_reviewed_commit",
+          "timeout_budget.deadline_key" => "session.run_deadline_unix_ms",
+          "timeout_budget.cap_key" => "coding_budget.interaction_wait_ms",
+          "timeout_budget.reserve_key" => "coding_budget.approval_completion_reserve_ms",
+          "timeout_budget.param" => "timeout"
+        })
+
+      assert ExecHandler.execute(node, context, graph(), opts()).status == :success
+      assert_received {:stub_execute, "coding_reviewed_commit", %{"timeout" => effective}, _, _}
+
+      assert effective > 90_000
+      assert effective <= wall_ms - reserve_ms
+    end
+
+    test "explicit short interaction wait shortens and missing cap fails closed" do
+      now = System.system_time(:millisecond)
+
+      short_context =
+        Context.new(%{
+          "session.run_deadline_unix_ms" => now + 900_000,
+          "coding_budget.interaction_wait_ms" => 60_000,
+          "coding_budget.worker_completion_reserve_ms" => 10_000
+        })
+
+      design_node =
+        action_node(%{
+          "action" => "coding_design_checkpoint_open",
+          "timeout_budget.deadline_key" => "session.run_deadline_unix_ms",
+          "timeout_budget.cap_key" => "coding_budget.interaction_wait_ms",
+          "timeout_budget.reserve_key" => "coding_budget.worker_completion_reserve_ms",
+          "timeout_budget.param" => "timeout"
+        })
+
+      assert ExecHandler.execute(design_node, short_context, graph(), opts()).status == :success
+
+      assert_received {:stub_execute, "coding_design_checkpoint_open", %{"timeout" => effective},
+                       _, _}
+
+      assert effective > 0
+      assert effective <= 60_000
+
+      missing =
+        Context.new(%{
+          "session.run_deadline_unix_ms" => now + 900_000,
+          "coding_budget.approval_ms" => 90_000,
+          "coding_budget.worker_completion_reserve_ms" => 360_000
+        })
+
+      assert ExecHandler.execute(design_node, missing, graph(), opts()).status == :fail
+      refute_received {:stub_execute, "coding_design_checkpoint_open", _, _, _}
+
+      zero_cap =
+        Context.new(%{
+          "session.run_deadline_unix_ms" => now + 900_000,
+          "coding_budget.interaction_wait_ms" => 0,
+          "coding_budget.worker_completion_reserve_ms" => 360_000
+        })
+
+      assert ExecHandler.execute(design_node, zero_cap, graph(), opts()).status == :fail
+      refute_received {:stub_execute, "coding_design_checkpoint_open", _, _, _}
+    end
+
+    test "untrusted interaction wait taint projects onto the timeout param" do
+      context =
+        Context.new(%{
+          "session.run_deadline_unix_ms" => System.system_time(:millisecond) + 60_000,
+          "coding_budget.interaction_wait_ms" => 30_000,
+          "coding_budget.worker_completion_reserve_ms" => 5_000
+        })
+        |> Context.record_output_taint(["session.run_deadline_unix_ms"], :trusted)
+        |> Context.record_output_taint(["coding_budget.interaction_wait_ms"], :untrusted)
+
+      node =
+        action_node(%{
+          "action" => "coding_design_checkpoint_open",
+          "timeout_budget.deadline_key" => "session.run_deadline_unix_ms",
+          "timeout_budget.cap_key" => "coding_budget.interaction_wait_ms",
+          "timeout_budget.reserve_key" => "coding_budget.worker_completion_reserve_ms",
+          "timeout_budget.param" => "timeout"
+        })
+
+      assert ExecHandler.execute(node, context, graph(), opts()).status == :success
+      assert_received {:stub_execute, _, %{"timeout" => timeout}, _, exec_opts}
+      assert timeout > 0
+      assert timeout <= 30_000
+
+      assert %{"timeout" => %TaintStruct{level: :untrusted}} =
+               Keyword.fetch!(exec_opts, :param_taint)
+    end
   end
 end

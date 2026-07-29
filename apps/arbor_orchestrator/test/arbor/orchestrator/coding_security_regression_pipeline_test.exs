@@ -744,9 +744,11 @@ defmodule Arbor.Orchestrator.CodingSecurityRegressionPipelineTest do
   defp fixture_budget_values(wall_clock_ms) do
     {:ok, allocation} = BudgetPolicy.allocate(wall_clock_ms, wall_clock_ms)
 
-    Map.new(allocation, fn {key, value} ->
+    allocation
+    |> Map.new(fn {key, value} ->
       {"coding_budget.#{key}", value}
     end)
+    |> Map.put("coding_budget.interaction_wait_ms", wall_clock_ms)
   end
 
   defp calls_for(calls, action), do: Enum.filter(calls, fn {name, _args} -> name == action end)

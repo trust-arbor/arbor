@@ -156,7 +156,9 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       This binds the worker-continuity edge and design-checkpoint topology.
     * `:checkpoint_work_packet_json` — the contract-canonical frozen packet
       serialization embedded by the compiler.
-    * `:design_checkpoint_timeout_ms` — exact positive Await timeout.
+    * `:design_checkpoint_timeout_ms` — optional legacy opt; ignored. Human-wait
+      capacity is owner-seeded as `coding_budget.interaction_wait_ms` and bound
+      via timeout_budget (no static design request timeout).
   """
   @spec validate(Graph.t(), policy(), keyword()) :: :ok | {:error, validate_error()}
   def validate(graph, policy, opts \\ [])
@@ -823,8 +825,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
         :error -> :missing
       end
 
-    timeout_ms = Keyword.get(opts, :design_checkpoint_timeout_ms, 300_000)
-
+    # Legacy callers may still pass :design_checkpoint_timeout_ms; it is ignored.
+    # Human-wait capacity is owner-seeded (coding_budget.interaction_wait_ms).
     cond do
       policy not in ["direct", "design_required"] ->
         {:error, {:invalid_semantic_policy, {:invalid_checkpoint_policy, policy}}}
@@ -836,11 +838,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
           not match?({:ok, value} when is_map(value), Jason.decode(packet_json)) ->
         {:error, {:invalid_semantic_policy, :invalid_checkpoint_work_packet_json}}
 
-      not is_integer(timeout_ms) or timeout_ms <= 0 ->
-        {:error, {:invalid_semantic_policy, {:invalid_design_checkpoint_timeout_ms, timeout_ms}}}
-
       true ->
-        {:ok, %{policy: policy, work_packet_json: packet_json, timeout_ms: timeout_ms}}
+        {:ok, %{policy: policy, work_packet_json: packet_json}}
     end
   end
 
@@ -2141,6 +2140,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
         coding_budget.validation_ms
         coding_budget.validation_reserve_ms
         coding_budget.approval_ms
+        coding_budget.interaction_wait_ms
         coding_budget.review_ms
         coding_budget.cleanup_ms
         coding_budget.worker_completion_reserve_ms
@@ -2191,11 +2191,11 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
         else: "timeout"
 
     expected = [
-      {"open_design_checkpoint", "coding_budget.approval_ms",
+      {"open_design_checkpoint", "coding_budget.interaction_wait_ms",
        "coding_budget.worker_completion_reserve_ms", "timeout"},
       {"validate", "coding_budget.validation_ms",
        "coding_budget.validation_completion_reserve_ms", validation_param},
-      {"commit_change", "coding_budget.approval_ms",
+      {"commit_change", "coding_budget.interaction_wait_ms",
        "coding_budget.approval_completion_reserve_ms", "timeout"},
       {"review_change", "coding_budget.review_ms", "coding_budget.review_completion_reserve_ms",
        "timeout"}
@@ -2355,9 +2355,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
          "target" => "action",
          "action" => "coding_design_checkpoint_open",
          "context_keys" => context_keys,
-         "param.timeout" => checkpoint.timeout_ms,
          "timeout_budget.deadline_key" => "session.run_deadline_unix_ms",
-         "timeout_budget.cap_key" => "coding_budget.approval_ms",
+         "timeout_budget.cap_key" => "coding_budget.interaction_wait_ms",
          "timeout_budget.reserve_key" => "coding_budget.worker_completion_reserve_ms",
          "timeout_budget.param" => "timeout",
          "output_prefix" => "design_checkpoint_open",

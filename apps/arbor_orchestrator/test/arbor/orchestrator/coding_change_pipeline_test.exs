@@ -1425,9 +1425,11 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
   defp fixture_budget_values do
     {:ok, allocation} = BudgetPolicy.allocate(900_000, 900_000)
 
-    Map.new(allocation, fn {key, value} ->
+    allocation
+    |> Map.new(fn {key, value} ->
       {"coding_budget.#{key}", value}
     end)
+    |> Map.put("coding_budget.interaction_wait_ms", 900_000)
   end
 
   defp run_compiled_v2_fixture(scenario, checkpoint_policy, plan_overrides \\ %{}) do
@@ -1664,10 +1666,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
     assert await_args["request_id"] == "irq_design_fixture_#{attempt}"
 
     assert open_args["timeout"] ===
-             min(
-               plan.budgets["inactivity_timeout_ms"],
-               fixture_budget_values()["coding_budget.approval_ms"]
-             )
+             fixture_budget_values()["coding_budget.interaction_wait_ms"]
 
     refute Map.has_key?(await_args, "timeout")
     assert open_args["run_deadline_unix_ms"] == @fixture_run_deadline_unix_ms

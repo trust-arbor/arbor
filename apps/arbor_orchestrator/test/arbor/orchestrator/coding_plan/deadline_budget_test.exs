@@ -5,6 +5,47 @@ defmodule Arbor.Orchestrator.CodingPlan.DeadlineBudgetTest do
 
   @moduletag :fast
 
+  describe "binding_parameter/1" do
+    test "recognizes absent, default, and explicit action parameter bindings" do
+      assert {:ok, nil} = DeadlineBudget.binding_parameter(%{})
+
+      binding = %{
+        "timeout_budget.deadline_key" => "session.run_deadline_unix_ms",
+        "timeout_budget.cap_key" => "coding_budget.validation_ms",
+        "timeout_budget.reserve_key" => "coding_budget.validation_completion_reserve_ms"
+      }
+
+      assert {:ok, "timeout"} = DeadlineBudget.binding_parameter(binding)
+
+      assert {:ok, "stage_timeout"} =
+               DeadlineBudget.binding_parameter(
+                 Map.put(binding, "timeout_budget.param", "stage_timeout")
+               )
+    end
+
+    test "rejects partial bindings and invalid action parameter names" do
+      partial = %{
+        "timeout_budget.deadline_key" => "session.run_deadline_unix_ms",
+        "timeout_budget.cap_key" => "coding_budget.validation_ms"
+      }
+
+      assert {:error, :invalid_timeout_budget_attrs} =
+               DeadlineBudget.binding_parameter(partial)
+
+      assert {:error, :invalid_timeout_budget_attrs} =
+               DeadlineBudget.binding_parameter(%{"timeout_budget.param" => "timeout"})
+
+      assert {:error, :invalid_timeout_budget_metadata} =
+               partial
+               |> Map.put(
+                 "timeout_budget.reserve_key",
+                 "coding_budget.validation_completion_reserve_ms"
+               )
+               |> Map.put("timeout_budget.param", "not.valid")
+               |> DeadlineBudget.binding_parameter()
+    end
+  end
+
   test "legacy path preserves the requested timeout" do
     assert {:ok, 5_000} = DeadlineBudget.cap(5_000, nil, nil, 7_000)
   end

@@ -2497,6 +2497,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
 
     test "seeds coding budget values as exact flat coding_budget leaves" do
       timeout = 12_000
+      Application.delete_env(:arbor_orchestrator, :coding_approval_timeout_ms)
 
       assert {:ok, _result} =
                CodingTaskExecutor.run(
@@ -2515,9 +2516,11 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert {:ok, expected_budget} = BudgetPolicy.allocate(timeout, validation_source_ms)
 
       expected_dotted_budget =
-        Map.new(expected_budget, fn {key, value} ->
+        expected_budget
+        |> Map.new(fn {key, value} ->
           {"coding_budget.#{key}", value}
         end)
+        |> Map.put("coding_budget.interaction_wait_ms", timeout)
 
       actual_budget_keys =
         iv
@@ -2529,10 +2532,77 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert Map.take(iv, actual_budget_keys) == expected_dotted_budget
       assert Enum.all?(expected_dotted_budget, fn {_key, value} -> is_integer(value) end)
       assert Map.has_key?(expected_dotted_budget, "coding_budget.validation_reserve_ms")
+      assert iv["coding_budget.interaction_wait_ms"] == timeout
 
       assert Map.fetch!(iv, "session.run_deadline_unix_ms") > 0
       refute Map.has_key?(iv, "coding_budget")
       assert {:ok, _json} = Jason.encode(iv)
+    end
+
+    test "default 900000ms run seeds interaction wait above scaled approval_ms reserve" do
+      Application.delete_env(:arbor_orchestrator, :coding_approval_timeout_ms)
+      timeout = 900_000
+
+      assert {:ok, _result} =
+               CodingTaskExecutor.run(
+                 "agent_1",
+                 valid_task(),
+                 valid_context(%{
+                   "task_id" => "task_owner_interaction_wait_default",
+                   "timeout" => timeout
+                 })
+               )
+
+      iv = last_opts()[:initial_values]
+
+      assert iv["coding_budget.interaction_wait_ms"] == 900_000
+      assert iv["coding_budget.approval_ms"] == 90_000
+      assert iv["coding_budget.worker_completion_reserve_ms"] == 360_000
+      assert iv["coding_budget.interaction_wait_ms"] > iv["coding_budget.approval_ms"]
+    end
+
+    test "operator coding approval config shortens interaction wait but cannot widen it" do
+      Application.put_env(:arbor_orchestrator, :coding_approval_timeout_ms, 60_000)
+
+      assert {:ok, _result} =
+               CodingTaskExecutor.run(
+                 "agent_1",
+                 valid_task(),
+                 valid_context(%{
+                   "task_id" => "task_owner_interaction_wait_shorten",
+                   "timeout" => 900_000
+                 })
+               )
+
+      assert last_opts()[:initial_values]["coding_budget.interaction_wait_ms"] == 60_000
+
+      Application.put_env(:arbor_orchestrator, :coding_approval_timeout_ms, 2_000_000)
+
+      assert {:ok, _result} =
+               CodingTaskExecutor.run(
+                 "agent_1",
+                 valid_task(),
+                 valid_context(%{
+                   "task_id" => "task_owner_interaction_wait_no_widen",
+                   "timeout" => 900_000
+                 })
+               )
+
+      assert last_opts()[:initial_values]["coding_budget.interaction_wait_ms"] == 900_000
+
+      Application.put_env(:arbor_orchestrator, :coding_approval_timeout_ms, "invalid")
+
+      assert {:ok, _result} =
+               CodingTaskExecutor.run(
+                 "agent_1",
+                 valid_task(),
+                 valid_context(%{
+                   "task_id" => "task_owner_interaction_wait_invalid_cfg",
+                   "timeout" => 900_000
+                 })
+               )
+
+      assert last_opts()[:initial_values]["coding_budget.interaction_wait_ms"] == 900_000
     end
 
     test "seeds opportunistic validation cap above guaranteed reserve for compound programs" do

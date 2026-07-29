@@ -16,7 +16,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ConfigTest do
     :coding_plan_artifact_store,
     :coding_reconciliation_observer_module,
     :coding_reconciliation_clock,
-    :coding_reconciliation_shell_facade
+    :coding_reconciliation_shell_facade,
+    :coding_approval_timeout_ms
   ]
 
   setup do
@@ -58,5 +59,31 @@ defmodule Arbor.Orchestrator.CodingPlan.ConfigTest do
     refute is_map(Config.coding_reconciliation_observer_module())
     assert Config.coding_reconciliation_clock() == nil
     assert Config.coding_reconciliation_shell_facade() == Arbor.Shell
+  end
+
+  describe "coding_interaction_wait_ms/1" do
+    test "absent operator config uses the full effective wall with no five-minute ceiling" do
+      assert Config.coding_approval_operator_timeout_ms() == :none
+      assert Config.coding_interaction_wait_ms(900_000) == 900_000
+      assert Config.coding_interaction_wait_ms(20) == 20
+    end
+
+    test "invalid operator config is ignored and does not impose a five-minute ceiling" do
+      for invalid <- [0, -1, "fast", :fast, 1.5, nil] do
+        Application.put_env(:arbor_orchestrator, :coding_approval_timeout_ms, invalid)
+        assert Config.coding_approval_operator_timeout_ms() == :none
+        assert Config.coding_interaction_wait_ms(900_000) == 900_000
+      end
+    end
+
+    test "explicit positive operator config shortens but cannot widen beyond the wall" do
+      Application.put_env(:arbor_orchestrator, :coding_approval_timeout_ms, 60_000)
+      assert Config.coding_approval_operator_timeout_ms() == {:ok, 60_000}
+      assert Config.coding_interaction_wait_ms(900_000) == 60_000
+      assert Config.coding_interaction_wait_ms(20_000) == 20_000
+
+      Application.put_env(:arbor_orchestrator, :coding_approval_timeout_ms, 2_000_000)
+      assert Config.coding_interaction_wait_ms(900_000) == 900_000
+    end
   end
 end

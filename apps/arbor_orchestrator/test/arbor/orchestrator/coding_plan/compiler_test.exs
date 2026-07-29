@@ -288,7 +288,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
   test "template stays within reviewed DOT source, node, and edge ceilings", ctx do
     graph = parse!(ctx.template_source)
 
-    assert byte_size(ctx.template_source) == 81_456
+    assert byte_size(ctx.template_source) == 81_446
     assert map_size(graph.nodes) == 236
     assert length(graph.edges) == 342
     assert byte_size(ctx.template_source) <= 262_144
@@ -474,11 +474,9 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert node_attrs(graph, "hoist_accepted_design")["source_key"] ==
              "design_artifact_load.design"
 
-    assert open["param.timeout"] ==
-             min(
-               plan.budgets["inactivity_timeout_ms"],
-               plan.budgets["wall_clock_ms"]
-             )
+    refute Map.has_key?(open, "param.timeout")
+
+    assert open["timeout_budget.cap_key"] == "coding_budget.interaction_wait_ms"
 
     assert await["context_keys"] ==
              "request_id,design_checkpoint_open.operation_id," <>
@@ -1015,10 +1013,12 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
              "timeout_budget.param"
            ]) == %{
              "timeout_budget.deadline_key" => "session.run_deadline_unix_ms",
-             "timeout_budget.cap_key" => "coding_budget.approval_ms",
+             "timeout_budget.cap_key" => "coding_budget.interaction_wait_ms",
              "timeout_budget.reserve_key" => "coding_budget.worker_completion_reserve_ms",
              "timeout_budget.param" => "timeout"
            }
+
+    refute Map.has_key?(node_attrs(graph, "open_design_checkpoint"), "param.timeout")
 
     assert node_attrs(graph, "validate")
            |> Map.take([
@@ -1041,7 +1041,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
              "timeout_budget.param"
            ]) == %{
              "timeout_budget.deadline_key" => "session.run_deadline_unix_ms",
-             "timeout_budget.cap_key" => "coding_budget.approval_ms",
+             "timeout_budget.cap_key" => "coding_budget.interaction_wait_ms",
              "timeout_budget.reserve_key" => "coding_budget.approval_completion_reserve_ms",
              "timeout_budget.param" => "timeout"
            }
@@ -1782,6 +1782,48 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert {:error,
             {:invalid_static_action_parameter, "open_worker", "acp_start_session", "timeout",
              "integer", "not_integer"}} = compile(plan!(), ctx, wrong_integer)
+  end
+
+  test "timeout budget bindings supply action parameters and malformed bindings fail closed",
+       ctx do
+    assert {:ok, _compilation} = compile(plan!(), ctx)
+
+    partial_binding =
+      String.replace(
+        ctx.template_source,
+        ~s(    timeout_budget.reserve_key="coding_budget.worker_completion_reserve_ms",\n),
+        "",
+        global: false
+      )
+
+    assert {:error,
+            {:invalid_action_node, "open_design_checkpoint", :invalid_timeout_budget_attrs}} =
+             compile(plan!(), ctx, partial_binding)
+
+    invalid_target =
+      String.replace(
+        ctx.template_source,
+        ~s(timeout_budget.param="timeout"),
+        ~s(timeout_budget.param="not.valid"),
+        global: false
+      )
+
+    assert {:error,
+            {:invalid_action_node, "open_design_checkpoint", :invalid_timeout_budget_metadata}} =
+             compile(plan!(), ctx, invalid_target)
+
+    unknown_target =
+      String.replace(
+        ctx.template_source,
+        ~s(timeout_budget.param="timeout"),
+        ~s(timeout_budget.param="unexpected"),
+        global: false
+      )
+
+    assert {:error,
+            {:unknown_action_parameters, "open_design_checkpoint",
+             "coding_design_checkpoint_open", ["unexpected"]}} =
+             compile(plan!(), ctx, unknown_target)
   end
 
   test "security regression: static schemas enforce ranges, enums, and collection types", ctx do

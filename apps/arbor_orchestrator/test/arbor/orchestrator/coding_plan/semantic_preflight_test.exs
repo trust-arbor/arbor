@@ -265,6 +265,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
             coding_plan_work_packet
             coding_plan_work_packet_digest
             session.run_deadline_unix_ms
+            coding_budget.interaction_wait_ms
             task
           ] do
         update_in(
@@ -283,6 +284,10 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
       update_in(
         graph.nodes["open_design_checkpoint"].attrs,
         &Map.put(&1, "param.timeout", plan.budgets["inactivity_timeout_ms"] - 1)
+      ),
+      update_in(
+        graph.nodes["open_design_checkpoint"].attrs,
+        &Map.put(&1, "timeout_budget.cap_key", "coding_budget.approval_ms")
       ),
       update_in(
         graph.nodes["await_design_checkpoint"].attrs,
@@ -388,6 +393,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
                  "design_checkpoint_topology_mismatch",
                  "design_checkpoint_writer_violation",
                  "immutable_context_writer_violation",
+                 "terminal_timeout_budget_binding_mismatch",
                  "worker_recovery_start_binding_mismatch"
                ]
              end)

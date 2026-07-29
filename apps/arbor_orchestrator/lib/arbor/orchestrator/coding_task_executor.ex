@@ -1839,8 +1839,6 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
          worker_model: plan.worker["model"],
          checkpoint_policy: checkpoint_policy,
          checkpoint_work_packet_json: checkpoint_work_packet_json,
-         design_checkpoint_timeout_ms:
-           min(plan.budgets["inactivity_timeout_ms"], plan.budgets["wall_clock_ms"]),
          rework_max_cycles: plan.rework["max_cycles"],
          validation_timeout_ms: validation_timeout_ms,
          validation_test_stage_timeout_ms: validation_test_stage_timeout_ms,
@@ -1985,6 +1983,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     caller_id = Map.get(exec_ctx, :caller_id)
     timeout = effective_timeout(plan, Map.get(exec_ctx, :timeout))
     approval_timeout_ms = Config.coding_approval_timeout_ms(timeout)
+    interaction_wait_ms = Config.coding_interaction_wait_ms(timeout)
 
     with {:ok, validation_action_source_ms} <- validation_action_source_ms(compilation),
          {:ok, budget_allocation} <-
@@ -2002,6 +2001,8 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
         |> maybe_put_session_caller_id(caller_id)
         |> maybe_put_session_metadata(Map.get(exec_ctx, :metadata))
         |> Map.merge(dotted_budget_allocation)
+        # Owner-only human-wait cap; distinct from coding_budget.approval_ms reserve.
+        |> Map.put("coding_budget.interaction_wait_ms", interaction_wait_ms)
 
       opts =
         [

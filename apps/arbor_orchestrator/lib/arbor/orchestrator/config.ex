@@ -314,6 +314,11 @@ defmodule Arbor.Orchestrator.Config do
 
   The default is five minutes. Invalid configuration falls back to that
   default; task, graph, and Engine context data are not consulted here.
+
+  This legacy path remains for non-DOT consumers (engine opt fallbacks,
+  candidate verification). Human-wait nodes in the coding DOT graph use
+  `coding_interaction_wait_ms/1` instead — that path does **not** impose an
+  independent five-minute ceiling when operator config is absent or invalid.
   """
   @spec coding_approval_timeout_ms() :: pos_integer()
   def coding_approval_timeout_ms do
@@ -339,6 +344,42 @@ defmodule Arbor.Orchestrator.Config do
       when is_integer(wall_clock_ms) and wall_clock_ms > 0 do
     wall_clock_budget = max(wall_clock_ms - @coding_approval_completion_reserve_ms, 1)
     min(coding_approval_timeout_ms(), wall_clock_budget)
+  end
+
+  @doc """
+  Optional operator-configured coding approval timeout.
+
+  Returns `{:ok, ms}` only when Application env `:coding_approval_timeout_ms`
+  is a positive integer. Absent or invalid values return `:none` — they do
+  **not** fall back to the five-minute default. Used to shorten the owner
+  interaction-wait budget; never to widen it.
+  """
+  @spec coding_approval_operator_timeout_ms() :: {:ok, pos_integer()} | :none
+  def coding_approval_operator_timeout_ms do
+    case Application.get_env(@app, :coding_approval_timeout_ms) do
+      timeout when is_integer(timeout) and timeout > 0 -> {:ok, timeout}
+      _ -> :none
+    end
+  end
+
+  @doc """
+  Owner-derived human interaction-wait capacity for coding DOT human-wait nodes.
+
+  Starts at the effective run wall clock. A valid positive operator
+  `:coding_approval_timeout_ms` may only **shorten** that bound. Absent or
+  invalid operator config imposes no independent five-minute ceiling.
+
+  This is the stage **cap** for design-checkpoint open and reviewed commit.
+  `DeadlineBudget` still subtracts each node's exact completion reserve against
+  `session.run_deadline_unix_ms`. Waiting still burns wall-clock time.
+  """
+  @spec coding_interaction_wait_ms(pos_integer()) :: pos_integer()
+  def coding_interaction_wait_ms(effective_wall_ms)
+      when is_integer(effective_wall_ms) and effective_wall_ms > 0 do
+    case coding_approval_operator_timeout_ms() do
+      {:ok, operator_ms} -> min(effective_wall_ms, operator_ms)
+      :none -> effective_wall_ms
+    end
   end
 
   @doc false

@@ -12,6 +12,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
   alias Arbor.Orchestrator.CodingPlan.{
     ActionCatalog,
     Compilation,
+    DeadlineBudget,
     ExecutionManifest,
     Profiles,
     SemanticPreflight,
@@ -759,9 +760,11 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
          {:ok, graph} <-
            update_node(graph, "open_design_checkpoint", fn attrs ->
              with :ok <- require_action_attrs(attrs, "coding_design_checkpoint_open") do
+               # Human-wait capacity is owner-seeded as coding_budget.interaction_wait_ms
+               # and bound via timeout_budget; do not inject a static request timeout.
                {:ok,
                 attrs
-                |> Map.put("param.timeout", design_checkpoint_timeout_ms(plan))
+                |> Map.delete("param.timeout")
                 |> Map.put("max_retries", "0")}
              end
            end),
@@ -1472,8 +1475,10 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
     with {:ok, properties, required} <- normalize_parameter_schema(node_id, action, spec),
          {:ok, context_names} <- parse_context_keys(node_id, attrs),
          {:ok, static_params} <- parse_static_params(node_id, attrs),
+         {:ok, timeout_param} <- parse_timeout_budget_parameter(node_id, attrs),
          :ok <- reject_duplicate_parameter_sources(node_id, context_names, static_params),
-         supplied = Enum.uniq(context_names ++ Map.keys(static_params)),
+         supplied =
+           Enum.uniq(context_names ++ Map.keys(static_params) ++ List.wrap(timeout_param)),
          :ok <- reject_unknown_parameters(node_id, action, supplied, properties),
          :ok <- reject_missing_parameters(node_id, action, supplied, required) do
       validate_static_parameter_types(node_id, action, static_params, properties)
@@ -1569,6 +1574,16 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
   defp static_parameter_name("param." <> name), do: name
   defp static_parameter_name("arg." <> name), do: name
   defp static_parameter_name(_key), do: nil
+
+  defp parse_timeout_budget_parameter(node_id, attrs) do
+    case DeadlineBudget.binding_parameter(attrs) do
+      {:ok, param_name} ->
+        {:ok, param_name}
+
+      {:error, reason} ->
+        {:error, {:invalid_action_node, node_id, reason}}
+    end
+  end
 
   defp reject_duplicate_parameter_sources(node_id, context_names, static_params) do
     duplicates = context_names |> Enum.filter(&Map.has_key?(static_params, &1)) |> Enum.sort()
@@ -1964,17 +1979,12 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
          worker_model: plan.worker["model"],
          checkpoint_policy: checkpoint_policy(plan),
          checkpoint_work_packet_json: work_packet_json,
-         design_checkpoint_timeout_ms: design_checkpoint_timeout_ms(plan),
          rework_max_cycles: plan.rework["max_cycles"],
          validation_timeout_ms: validation_timeout_ms,
          validation_test_stage_timeout_ms: validation_test_stage_timeout_ms,
          validation_stage_timeout_ms: validation_stage_timeout_ms
        ]}
     end
-  end
-
-  defp design_checkpoint_timeout_ms(%Plan{} = plan) do
-    min(plan.budgets["inactivity_timeout_ms"], plan.budgets["wall_clock_ms"])
   end
 
   defp canonical_work_packet_json(%Plan{version: 2, work_packet: work_packet}),

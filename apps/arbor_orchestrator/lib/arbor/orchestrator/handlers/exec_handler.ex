@@ -38,6 +38,7 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
   require Logger
 
   alias Arbor.Orchestrator.ActionsExecutor
+  alias Arbor.Orchestrator.CodingPlan.DeadlineBudget
   alias Arbor.Orchestrator.Engine.{Context, Outcome, RunAuthorization}
 
   alias Arbor.Orchestrator.Handlers.{
@@ -50,8 +51,6 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
     timeout_budget.cap_key
     timeout_budget.reserve_key
   )
-  @timeout_budget_param_attr "timeout_budget.param"
-  @action_param_name ~r/\A[a-z][a-z0-9_]*\z/
 
   @impl true
   def execute(node, context, graph, opts) do
@@ -414,34 +413,32 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
   defp apply_timeout_budget(attrs, context, action_args, param_taint) do
     bindings = Enum.map(@timeout_budget_attrs, &Map.get(attrs, &1))
 
-    cond do
-      Enum.all?(bindings, &is_nil/1) and is_nil(Map.get(attrs, @timeout_budget_param_attr)) ->
+    case DeadlineBudget.binding_parameter(attrs) do
+      {:ok, nil} ->
         {:ok, action_args, param_taint}
 
-      Enum.all?(bindings, &(is_binary(&1) and &1 != "")) ->
-        apply_bound_timeout_budget(attrs, context, action_args, param_taint, bindings)
+      {:ok, param_name} ->
+        apply_bound_timeout_budget(context, action_args, param_taint, bindings, param_name)
 
-      true ->
-        {:error, :invalid_timeout_budget_attrs}
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
   defp apply_bound_timeout_budget(
-         attrs,
          context,
          action_args,
          param_taint,
-         [deadline_key, cap_key, reserve_key] = source_keys
+         [deadline_key, cap_key, reserve_key] = source_keys,
+         param_name
        ) do
-    param_name = Map.get(attrs, @timeout_budget_param_attr, "timeout")
     cap_ms = Context.get(context, cap_key)
 
-    with true <- valid_action_param_name?(param_name),
-         true <- is_integer(cap_ms) and cap_ms > 0,
+    with true <- is_integer(cap_ms) and cap_ms > 0,
          {:ok, requested_timeout_ms} <-
            requested_timeout(action_args, param_name, cap_ms),
          {:ok, effective_timeout_ms} <-
-           Arbor.Orchestrator.CodingPlan.DeadlineBudget.cap(
+           DeadlineBudget.cap(
              min(requested_timeout_ms, cap_ms),
              Context.get(context, deadline_key),
              Context.get(context, reserve_key),
@@ -468,11 +465,6 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
       _other -> {:error, :invalid_budget_metadata}
     end
   end
-
-  defp valid_action_param_name?(name) when is_binary(name) and byte_size(name) <= 64,
-    do: Regex.match?(@action_param_name, name)
-
-  defp valid_action_param_name?(_name), do: false
 
   defp resolve_context_params(node_id, source_keys, context, attr_args) do
     Enum.reduce_while(source_keys, {:ok, %{}, %{}, MapSet.new()}, fn source_key,
