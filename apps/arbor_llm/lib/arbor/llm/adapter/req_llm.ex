@@ -147,9 +147,17 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
           with {:ok, model_spec} <- build_model_spec(request),
                messages <- translate_messages(request.messages),
                {:ok, req_opts} <- validated_stream_opts(request, opts),
-               {:ok, %BoundedStream{stream: stream}} <-
-                 call_req_llm_stream(model_spec, messages, req_opts) do
-            Stream.map(stream, &translate_bounded_stream_chunk/1)
+               pipeline_call = run_pipeline_call(:stream, {model_spec, messages, req_opts}),
+               {:ok, %BoundedStream{stream: stream}} <- pipeline_call.result do
+            translated = Stream.map(stream, &translate_bounded_stream_chunk/1)
+
+            # Internal provenance wrapper only — public Enumerable contract
+            # stays ordinary events for middleware/callers. Client.collect_stream/2
+            # peels provenance and finalizes exactly once after acceptance.
+            Usage.accounted_stream(
+              translated,
+              Usage.streaming_provenance(pipeline_call)
+            )
           else
             {:ok, _unowned_stream} -> {:error, :unowned_stream_producer}
             {:error, _reason} = error -> error
@@ -438,10 +446,6 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
 
   defp validate_embedding_texts(_improper_or_non_list, _count, _bytes),
     do: {:error, {:invalid_request, :proper_string_list_required}}
-
-  defp call_req_llm_stream(model_spec, messages, opts) do
-    run_pipeline(:stream, {model_spec, messages, opts})
-  end
 
   # ── Streaming translation ──────────────────────────────────────────
 

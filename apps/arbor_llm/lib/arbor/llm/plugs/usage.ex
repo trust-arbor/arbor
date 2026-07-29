@@ -1,23 +1,35 @@
 defmodule Arbor.LLM.Plugs.Usage do
   @moduledoc """
   Emits one bounded `[:arbor, :llm, :usage]` observation for a final,
-  non-streaming ReqLLM operation, or for an eagerly completed streaming
-  operation after its final Arbor response has passed the response boundary.
+  non-streaming ReqLLM operation, or for a streaming operation after its final
+  Arbor response has passed the response boundary.
 
   Only canonical evidence from `%ReqLLM.Response{}` and Arbor's bounded
   embedding result tuple is considered authoritative. The plug never emits
   prompts, responses, provider metadata, headers, errors, or arbitrary terms.
 
-  Lazy `stream/2` remains intentionally unaccounted for: it can be partially
-  consumed or abandoned before terminal usage exists. Only
-  `complete_streaming/3`, which eagerly consumes a bounded stream and returns a
-  validated final response, uses the streaming finalizer.
+  Eager `complete_streaming/3` finalizes after assembly + boundary acceptance.
+  Lazy `stream/2` carries provenance only through an internal Enumerable
+  wrapper (`AccountedStream`) so public stream and middleware contracts stay
+  unchanged; `Client.collect_stream/2` finalizes exactly once after the full
+  collected response is accepted. Partial consumption or abandonment emits
+  nothing — billing is never inferred from intermediate metadata chunks.
+
+  Exactly-once for lazy wrappers is enforced by a GC-owned `:atomics` claim
+  ref embedded in provenance (not only by the returned provenance map), so
+  repeated or concurrent collection of the same replayable wrapper cannot
+  double-emit even when callers discard `finalize_streaming/3`'s return value.
+  There is no global registry, TTL, or eviction. A collection that observed an
+  error event never finalizes usage.
   """
 
   use Arbor.LLM.Plug
 
   alias Arbor.LLM.Call
+  alias Arbor.LLM.Plugs.Usage.AccountedStream
   alias Arbor.LLM.Response
+
+  @max_provenance_walk_depth 8
 
   @max_token_count 1_000_000_000
   @max_cost_usd 1_000_000.0
@@ -64,25 +76,72 @@ defmodule Arbor.LLM.Plugs.Usage do
       model: model,
       halted?: halted,
       replayed?: halted or replayed?(metadata),
-      usage_finalized?: false
+      usage_finalized?: false,
+      # GC-owned atomic claim ref: lives as long as any AccountedStream /
+      # provenance map that holds it; no global table or process ownership.
+      finalize_gate: new_finalize_gate()
     }
   end
 
+  @doc false
+  @spec accounted_stream(Enumerable.t(), map()) :: AccountedStream.t()
+  def accounted_stream(source, provenance) when is_map(provenance) do
+    AccountedStream.new(source, ensure_finalize_gate(provenance))
+  end
+
+  @doc false
+  @spec attach_stream_provenance(Enumerable.t(), map() | nil) :: Enumerable.t()
+  def attach_stream_provenance(source, nil), do: source
+
+  def attach_stream_provenance(source, provenance) when is_map(provenance) do
+    accounted_stream(source, provenance)
+  end
+
+  @doc false
+  @spec stream_provenance(term()) :: map() | nil
+  def stream_provenance(stream), do: do_stream_provenance(stream, 0)
+
+  defp do_stream_provenance(_stream, depth) when depth > @max_provenance_walk_depth, do: nil
+
+  defp do_stream_provenance(%AccountedStream{provenance: provenance}, _depth)
+       when is_map(provenance),
+       do: provenance
+
+  defp do_stream_provenance(%Stream{enum: enum}, depth),
+    do: do_stream_provenance(enum, depth + 1)
+
+  defp do_stream_provenance(_other, _depth), do: nil
+
   @doc """
-  Finalize usage for an eagerly consumed streaming response.
+  Finalize usage for a fully collected streaming response.
 
   The caller must invoke this only after the final translated response has
   passed `Arbor.LLM.Boundary.completion/2`. Missing or invalid usage is not an
-  observation. The returned bounded state prevents repeated finalization from
-  emitting a second event.
+  observation. Exactly-once is enforced by the embedded `:atomics` finalize gate
+  (when present) plus the returned bounded state, so discarding the return value
+  cannot double-emit for the same wrapper. A `nil` provenance is a no-op so
+  plain event lists stay unaccounted. Pass `error_observed?: true` to claim the
+  gate without emitting when the collection saw an error event.
   """
-  @spec finalize_streaming(Response.t(), map()) :: map()
-  def finalize_streaming(%Response{usage: usage}, provenance) when is_map(provenance) do
+  @spec finalize_streaming(Response.t(), map() | nil) :: map() | nil
+  @spec finalize_streaming(Response.t(), map() | nil, keyword()) :: map() | nil
+  def finalize_streaming(response, provenance, opts \\ [])
+
+  def finalize_streaming(_response, nil, _opts), do: nil
+
+  def finalize_streaming(%Response{usage: usage}, provenance, opts)
+      when is_map(provenance) and is_list(opts) do
     cond do
       Map.get(provenance, :usage_finalized?, false) ->
         provenance
 
+      not claim_finalize_gate(Map.get(provenance, :finalize_gate)) ->
+        Map.put(provenance, :usage_finalized?, true)
+
       Map.get(provenance, :halted?, false) or Map.get(provenance, :replayed?, false) ->
+        Map.put(provenance, :usage_finalized?, true)
+
+      error_observed?(opts) ->
         Map.put(provenance, :usage_finalized?, true)
 
       true ->
@@ -109,8 +168,51 @@ defmodule Arbor.LLM.Plugs.Usage do
     _, _ -> provenance
   end
 
-  def finalize_streaming(_response, provenance) when is_map(provenance),
-    do: Map.put(provenance, :usage_finalized?, true)
+  def finalize_streaming(_response, provenance, opts)
+      when is_map(provenance) and is_list(opts) do
+    _ = claim_finalize_gate(Map.get(provenance, :finalize_gate))
+    Map.put(provenance, :usage_finalized?, true)
+  end
+
+  defp error_observed?(opts) when is_list(opts) do
+    case safe_keyword_get(opts, :error_observed?, false) do
+      {:ok, true} -> true
+      _ -> false
+    end
+  end
+
+  defp ensure_finalize_gate(%{finalize_gate: gate} = provenance)
+       when not is_nil(gate),
+       do: provenance
+
+  defp ensure_finalize_gate(provenance),
+    do: Map.put(provenance, :finalize_gate, new_finalize_gate())
+
+  defp new_finalize_gate, do: :atomics.new(1, signed: false)
+
+  # Per-wrapper compare-exchange on the GC-owned atomics ref carried in
+  # provenance. First claim wins (0 → 1); later concurrent/repeated collectors
+  # lose. Fail closed on unexpected errors so a broken gate never double-bills.
+  defp claim_finalize_gate(nil), do: true
+
+  defp claim_finalize_gate(gate) do
+    case :atomics.compare_exchange(gate, 1, 0, 1) do
+      :ok -> true
+      _already_claimed -> false
+    end
+  rescue
+    _ -> false
+  catch
+    _, _ -> false
+  end
+
+  defp safe_keyword_get([], _key, default), do: {:ok, default}
+  defp safe_keyword_get([{key, value} | _rest], key, _default), do: {:ok, value}
+
+  defp safe_keyword_get([{key, _value} | rest], wanted, default) when is_atom(key),
+    do: safe_keyword_get(rest, wanted, default)
+
+  defp safe_keyword_get(_improper, _key, _default), do: {:error, :keyword_options_required}
 
   defp extract_usage(operation, result) do
     case usage_map(operation, result) do

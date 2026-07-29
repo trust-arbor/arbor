@@ -158,6 +158,197 @@ defmodule Arbor.LLM.Adapter.ReqLLMStreamingUsageTest do
     refute_receive {:usage_event, @event, _, _}, 50
   end
 
+  test "lazy stream accounts only after full accepted collection" do
+    alias Arbor.LLM.Client
+    alias Arbor.LLM.Plugs.Usage.AccountedStream
+
+    request = %Request{provider: "openai", model: "gpt-4"}
+
+    assert %AccountedStream{} = partial = Adapter.stream(request)
+    assert_receive {:pipeline_event_id, _partial_event_id}
+    refute_receive {:usage_event, @event, _, _}, 50
+
+    # Partial consumption must not bill.
+    assert [%Arbor.LLM.StreamEvent{type: :delta} | _] = Enum.take(partial, 1)
+    refute_receive {:usage_event, @event, _, _}, 50
+
+    assert %AccountedStream{} = full_stream = Adapter.stream(request)
+    assert_receive {:pipeline_event_id, event_id}
+
+    assert {:ok, response} = Client.collect_stream(full_stream)
+    assert response.text == "answer"
+    assert response.usage.input_tokens == 4
+    assert response.usage.output_tokens == 3
+
+    assert_receive {:usage_event, @event, measurements, metadata}
+    assert measurements == %{count: 1, input: 4, output: 3, total: 7, cached: 0}
+
+    assert metadata == %{
+             event_id: event_id,
+             source: :req_llm,
+             operation: :complete,
+             provider: "openai",
+             model: "gpt-4",
+             usage_status: :authoritative
+           }
+
+    # Exactly once for this collection.
+    refute_receive {:usage_event, @event, _, _}, 50
+  end
+
+  test "lazy stream rejected by Boundary emits no usage" do
+    alias Arbor.LLM.Client
+
+    request = %Request{provider: "openai", model: "gpt-4"}
+    stream = Adapter.stream(request)
+    flush_pipeline_event_ids()
+
+    assert {:error, _reason} = Client.collect_stream(stream, max_response_bytes: 1)
+    refute_receive {:usage_event, @event, _, _}, 50
+  end
+
+  test "lazy stream with missing usage emits no observation" do
+    alias Arbor.LLM.Client
+
+    Application.put_env(:arbor_llm, :streaming_usage_test_mode, :missing_usage)
+    request = %Request{provider: "openai", model: "gpt-4"}
+    stream = Adapter.stream(request)
+    flush_pipeline_event_ids()
+
+    assert {:ok, _response} = Client.collect_stream(stream)
+    refute_receive {:usage_event, @event, _, _}, 50
+  end
+
+  test "Client.stream preserves provenance through OwnedStream for collect_stream" do
+    alias Arbor.LLM.Client
+
+    client =
+      Client.new(
+        default_provider: "openai",
+        adapters: %{"openai" => Adapter}
+      )
+
+    request = %Request{provider: "openai", model: "gpt-4"}
+
+    assert {:ok, stream} = Client.stream(client, request)
+    assert_receive {:pipeline_event_id, event_id}
+
+    # Middleware-style Stream.each must not strip peelable provenance.
+    assert {:ok, response} =
+             stream
+             |> Stream.each(fn _ -> :ok end)
+             |> Client.collect_stream()
+
+    assert response.text == "answer"
+    assert_receive {:usage_event, @event, %{input: 4, output: 3, total: 7}, metadata}
+    assert metadata.event_id == event_id
+    refute_receive {:usage_event, @event, _, _}, 50
+  end
+
+  test "repeated collect_stream on the same replayable wrapper emits usage once" do
+    alias Arbor.LLM.Client
+    alias Arbor.LLM.StreamEvent
+
+    provenance =
+      Usage.streaming_provenance(
+        Arbor.LLM.Call.new(:stream, {LLMDB.Model.new!(%{id: "gpt-4", provider: :openai}), [], []})
+      )
+
+    events = [
+      %StreamEvent{type: :delta, data: %{text: "answer"}},
+      %StreamEvent{
+        type: :step_finish,
+        data: %{
+          usage: %{input_tokens: 4, output_tokens: 3, total_tokens: 7},
+          finish_reason: :stop
+        }
+      }
+    ]
+
+    stream = Usage.accounted_stream(events, provenance)
+
+    assert {:ok, first} = Client.collect_stream(stream)
+    assert first.text == "answer"
+    assert_receive {:usage_event, @event, %{input: 4, output: 3, total: 7}, _}
+
+    # Same wrapper, discarded finalize map — atomics gate must suppress second bill.
+    assert {:ok, second} = Client.collect_stream(stream)
+    assert second.text == "answer"
+    refute_receive {:usage_event, @event, _, _}, 50
+  end
+
+  test "concurrent collect_stream on the same replayable wrapper emits usage once" do
+    alias Arbor.LLM.Client
+    alias Arbor.LLM.StreamEvent
+
+    provenance =
+      Usage.streaming_provenance(
+        Arbor.LLM.Call.new(:stream, {LLMDB.Model.new!(%{id: "gpt-4", provider: :openai}), [], []})
+      )
+
+    events = [
+      %StreamEvent{type: :delta, data: %{text: "answer"}},
+      %StreamEvent{
+        type: :step_finish,
+        data: %{
+          usage: %{input_tokens: 4, output_tokens: 3, total_tokens: 7},
+          finish_reason: :stop
+        }
+      }
+    ]
+
+    stream = Usage.accounted_stream(events, provenance)
+
+    tasks =
+      for _ <- 1..8 do
+        Task.async(fn -> Client.collect_stream(stream) end)
+      end
+
+    results = Enum.map(tasks, &Task.await(&1, 5_000))
+    assert Enum.all?(results, &match?({:ok, %Arbor.LLM.Response{text: "answer"}}, &1))
+
+    assert_receive {:usage_event, @event, %{input: 4, output: 3, total: 7}, _}
+    refute_receive {:usage_event, @event, _, _}, 50
+  end
+
+  test "error after step_finish usage suppresses usage finalization" do
+    alias Arbor.LLM.Client
+    alias Arbor.LLM.StreamEvent
+
+    provenance =
+      Usage.streaming_provenance(
+        Arbor.LLM.Call.new(:stream, {LLMDB.Model.new!(%{id: "gpt-4", provider: :openai}), [], []})
+      )
+
+    events = [
+      %StreamEvent{type: :delta, data: %{text: "answer"}},
+      %StreamEvent{
+        type: :step_finish,
+        data: %{
+          usage: %{input_tokens: 4, output_tokens: 3, total_tokens: 7},
+          finish_reason: :stop
+        }
+      },
+      %StreamEvent{type: :error, data: %{reason: :transport_failed}}
+    ]
+
+    stream = Usage.accounted_stream(events, provenance)
+
+    assert {:ok, response} = Client.collect_stream(stream)
+    assert response.text == "answer"
+    assert response.usage.input_tokens == 4
+    assert response.warnings != []
+    refute_receive {:usage_event, @event, _, _}, 50
+  end
+
+  defp flush_pipeline_event_ids do
+    receive do
+      {:pipeline_event_id, _} -> flush_pipeline_event_ids()
+    after
+      0 -> :ok
+    end
+  end
+
   defp restore_env(key, nil), do: Application.delete_env(:arbor_llm, key)
   defp restore_env(key, value), do: Application.put_env(:arbor_llm, key, value)
 end

@@ -178,6 +178,68 @@ defmodule Arbor.LLM.Plugs.UsageTest do
     refute_receive {:usage_event, @event, _, _}, 50
   end
 
+  test "accounted stream carries peelable provenance through Stream wrappers" do
+    alias Arbor.LLM.Plugs.Usage.AccountedStream
+
+    provenance = Usage.streaming_provenance(build_call(:stream, {:ok, :bounded_stream}))
+    events = [%Arbor.LLM.StreamEvent{type: :delta, data: %{text: "x"}}]
+    accounted = Usage.accounted_stream(events, provenance)
+
+    assert %AccountedStream{} = accounted
+    assert Usage.stream_provenance(accounted) == provenance
+    assert Usage.stream_provenance(Stream.each(accounted, fn _ -> :ok end)) == provenance
+    assert Usage.stream_provenance(events) == nil
+    assert Usage.attach_stream_provenance(events, nil) == events
+    assert %AccountedStream{} = Usage.attach_stream_provenance(events, provenance)
+
+    # Enumerable contract is preserved for callers/middleware.
+    assert [%Arbor.LLM.StreamEvent{type: :delta}] = Enum.to_list(accounted)
+    refute_receive {:usage_event, @event, _, _}, 50
+  end
+
+  test "finalize_streaming with nil provenance is a no-op" do
+    assert is_nil(
+             Usage.finalize_streaming(
+               arbor_response(%{input_tokens: 1, output_tokens: 1}),
+               nil
+             )
+           )
+
+    refute_receive {:usage_event, @event, _, _}, 50
+  end
+
+  test "finalize_streaming with error_observed claims gate without emitting" do
+    call = build_call(:stream, {:ok, :bounded_stream})
+    provenance = Usage.streaming_provenance(call)
+    response = arbor_response(%{input_tokens: 4, output_tokens: 3, total_tokens: 7})
+
+    finalized =
+      Usage.finalize_streaming(response, provenance, error_observed?: true)
+
+    assert finalized.usage_finalized?
+    refute Map.get(finalized, :usage_emitted?, false)
+    refute_receive {:usage_event, @event, _, _}, 50
+
+    # Same finalize_gate atomics ref cannot later emit even if callers discard
+    # the returned map.
+    Usage.finalize_streaming(response, provenance)
+    refute_receive {:usage_event, @event, _, _}, 50
+  end
+
+  test "per-wrapper atomics gate enforces exactly-once when returned map is discarded" do
+    provenance = Usage.streaming_provenance(build_call(:stream, {:ok, :bounded_stream}))
+    response = arbor_response(%{input_tokens: 4, output_tokens: 3, total_tokens: 7})
+
+    assert is_reference(provenance.finalize_gate)
+
+    _ = Usage.finalize_streaming(response, provenance)
+    assert_receive {:usage_event, @event, %{input: 4, output: 3, total: 7}, _}
+
+    # Discarded return map: second finalize still silent via compare-exchange.
+    _ = Usage.finalize_streaming(response, provenance)
+    refute_receive {:usage_event, @event, _, _}, 50
+  end
+
   test "telemetry is closed and contains no prompt or response material" do
     prompt = "prompt-secret-should-never-appear"
 

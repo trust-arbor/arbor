@@ -44,6 +44,8 @@ defmodule Arbor.LLM.Client do
 
   alias Arbor.LLM.ToolResultBudget
 
+  alias Arbor.LLM.Plugs.Usage
+
   # ── Adapter routing ──────────────────────────────────────────────────
   #
   # The generic `Arbor.LLM.Adapter.ReqLLM` handles every API + local-LM
@@ -348,13 +350,19 @@ defmodule Arbor.LLM.Client do
                  true <-
                    not match?(%OwnedStream{}, source) or
                      {:error, :owned_stream_nesting_forbidden},
+                 provenance = Usage.stream_provenance(source),
                  {:ok, owned} <-
                    OwnedStream.new(track_stream_source(source, tracker, max_events, opts),
                      deadline_ms: receipt.deadline_ms,
                      timeout_ms: receipt.timeout_ms,
                      validator: fn event -> {:ok, event} end
                    ) do
-              {:ok, owned}
+              # Re-attach provenance outside OwnedStream so collect_stream can
+              # finalize after full accepted collection without changing the
+              # public Enumerable contract for middleware or callers. The same
+              # finalize_gate atomics ref is preserved unchanged so exactly-once
+              # holds across OwnedStream / Stream wrappers.
+              {:ok, Usage.attach_stream_provenance(owned, provenance)}
             end
           end
         end,
@@ -595,13 +603,15 @@ defmodule Arbor.LLM.Client do
 
   @spec collect_stream(Enumerable.t(), keyword()) :: {:ok, Response.t()} | {:error, term()}
   def collect_stream(events, opts \\ []) do
+    provenance = Usage.stream_provenance(events)
+
     with {:ok, tracker} <- Boundary.stream_tracker(opts),
          {:ok, max_events} <- Boundary.stream_event_limit(opts) do
-      do_collect_stream(events, opts, tracker, max_events)
+      do_collect_stream(events, opts, tracker, max_events, provenance)
     end
   end
 
-  defp do_collect_stream(events, opts, tracker, max_events) do
+  defp do_collect_stream(events, opts, tracker, max_events, provenance) do
     result =
       Enum.reduce_while(
         events,
@@ -618,7 +628,8 @@ defmodule Arbor.LLM.Client do
           warning_count: 0,
           tool_calls: [],
           tool_call_count: 0,
-          usage: nil
+          usage: nil,
+          error_observed?: false
         },
         fn event, acc ->
           event_count = acc.event_count + 1
@@ -667,14 +678,23 @@ defmodule Arbor.LLM.Client do
                       {:halt, {:error, reason}}
                   end
 
+                # ReqLLM meta chunks translate to :step_finish and may carry
+                # terminal usage / finish_reason. Harvest only when present so
+                # intermediate step metadata stays a no-op.
+                %StreamEvent{type: :step_finish, data: data} when is_map(data) ->
+                  collect_step_finish(data, acc)
+
                 %StreamEvent{type: :error, data: data} when acc.warning_count < 1_000 ->
+                  # Preserve error-as-warning compatibility, but mark the
+                  # collection so usage is never finalized for this attempt.
                   warning = Arbor.LLM.ExternalTerm.inspect(data)
 
                   {:cont,
                    %{
                      acc
                      | warnings: [warning | acc.warnings],
-                       warning_count: acc.warning_count + 1
+                       warning_count: acc.warning_count + 1,
+                       error_observed?: true
                    }}
 
                 %StreamEvent{type: :error} ->
@@ -711,13 +731,53 @@ defmodule Arbor.LLM.Client do
         usage: result.usage || %{}
       }
 
-      Boundary.completion({:ok, response}, opts)
+      case Boundary.completion({:ok, response}, opts) do
+        {:ok, accepted} = ok ->
+          # Finalize exactly once after the full collected response is accepted.
+          # Missing provenance (plain lists / non-ReqLLM adapters) is a no-op.
+          # Error-observed collections claim the gate without emitting usage.
+          _ =
+            Usage.finalize_streaming(accepted, provenance,
+              error_observed?: result.error_observed?
+            )
+
+          ok
+
+        {:error, _reason} = error ->
+          error
+      end
     else
       {:error, _reason} = error -> error
     end
   rescue
     exception -> {:error, exception}
   end
+
+  defp collect_step_finish(data, acc) do
+    usage = Map.get(data, :usage, Map.get(data, "usage"))
+
+    reason =
+      Map.get(data, :finish_reason, Map.get(data, "finish_reason")) ||
+        Map.get(data, :reason, Map.get(data, "reason"))
+
+    with :ok <- validate_optional_step_usage(usage),
+         :ok <- validate_optional_step_reason(reason) do
+      {:cont,
+       %{
+         acc
+         | usage: if(is_map(usage) and map_size(usage) > 0, do: usage, else: acc.usage),
+           finish_reason: if(is_nil(reason), do: acc.finish_reason, else: reason)
+       }}
+    else
+      {:error, reason} -> {:halt, {:error, reason}}
+    end
+  end
+
+  defp validate_optional_step_usage(nil), do: :ok
+  defp validate_optional_step_usage(usage), do: validate_finish_usage(usage)
+
+  defp validate_optional_step_reason(nil), do: :ok
+  defp validate_optional_step_reason(reason), do: validate_finish_reason(reason)
 
   defp collect_text_chunk(chunk, acc) when is_binary(chunk) do
     bytes = acc.text_bytes + byte_size(chunk)
