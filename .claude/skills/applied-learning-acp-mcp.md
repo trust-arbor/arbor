@@ -24,6 +24,15 @@ Run the exact normalized plan through `CodingPlan.Compiler.compile/1` against
 the current source before dispatch, and recompile a live node before retrying
 loaded/on-disk drift (found 2026-07-29 preparing the provider-observation slice).
 
+<!-- applied-learning: keep-approval-decisions-concise-and-put-detail-in-the-artifact -->
+<a id="applied-learning-keep-approval-decisions-concise-and-put-detail-in-the-artifact"></a>
+**Keep approval decisions concise and put detail in the artifact.** MCP approval
+notes are contract-bounded to 1,024 bytes and reject oversize input; they are
+not a second design document. Review the digest-bound artifact, record only the
+decisive constraints in the approval note, and keep extended reasoning in the
+artifact or review record (found 2026-07-29 reviewing a delegated design
+checkpoint).
+
 <!-- applied-learning: never-mutate-a-delegated-worktree-after-owner-inspection-has-pinned-its-validation-fingerprint -->
 <a id="applied-learning-never-mutate-a-delegated-worktree-after-owner-inspection-has-pinned-its-validation-fingerprint"></a>
 **Never mutate a delegated worktree after owner inspection has pinned its

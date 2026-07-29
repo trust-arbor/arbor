@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-07-29",
-  "entry_count": 583,
+  "entry_count": 584,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -7123,8 +7123,21 @@
       "source_incident": "found 2026-07-29 preparing the provider-observation slice).",
       "content_sha256": "c6a92b0406ae9d6be1e4c99e269f2158347fb86f506f13044bfb057cfc4a65b8",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 584,
+      "source_kind": "post-migration",
+      "slug": "keep-approval-decisions-concise-and-put-detail-in-the-artifact",
+      "title": "Keep approval decisions concise and put detail in the artifact.",
+      "topic": "acp-mcp",
+      "destination": ".claude/skills/applied-learning-acp-mcp.md",
+      "anchor": "applied-learning-keep-approval-decisions-concise-and-put-detail-in-the-artifact",
+      "source_date": "2026-07-29",
+      "source_incident": "found 2026-07-29 reviewing a delegated design checkpoint).",
+      "content_sha256": "c4a905bc1c719637691bf13db809f1edb3f17b8650cc25fd4b027396d2ce2dc3",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 122
+  "post_migration_entry_count": 123
 }
