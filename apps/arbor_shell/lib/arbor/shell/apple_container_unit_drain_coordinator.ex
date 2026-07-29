@@ -436,7 +436,13 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
       when is_pid(worker_pid) and is_reference(receipt_ref) do
     case Map.get(state.pending_drain, worker_pid) do
       %{receipt_ref: ^receipt_ref} = meta ->
-        if valid_execution_id?(execution_id) do
+        receipt_matches_settlement? =
+          case Map.get(meta, :settlement_execution_id) do
+            nil -> valid_execution_id?(execution_id)
+            expected_execution_id -> execution_id == expected_execution_id
+          end
+
+        if receipt_matches_settlement? do
           state = settle_barrier_drain(state, worker_pid, meta)
 
           if shutdown_preparation?(state.phase) do
@@ -445,7 +451,9 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
             {:noreply, wake_reconstruction(state)}
           end
         else
-          {:noreply, state}
+          # A valid receipt for another generation may wake a fresh
+          # reconstruction, but it must not clear this settlement expectation.
+          {:noreply, wake_or_advance_after_drain(state)}
         end
 
       _unknown ->
@@ -541,9 +549,7 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
         # mon_ref => %{from, execution_id, caller_pid} — settlement waiters.
         execution_waiters: %{},
         # resource_id => %{expected_identity, waiters: %{mon_ref => waiter}}.
-        apple_unit_settlements: %{},
-        # Exact receipts retained only for bounded same-coordinator replay.
-        settled_apple_unit_receipts: %{}
+        apple_unit_settlements: %{}
       },
       deps
     )
@@ -643,6 +649,21 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
         reconstruct_generation: state.reconstruct_generation + 1
     }
 
+    case settlement_journal_gate(state) do
+      {:permanent, reason} ->
+        state
+        |> reject_all_apple_unit_settlements(reason)
+        |> continue_authoritative_reconstruction()
+
+      :ok ->
+        continue_authoritative_reconstruction(state)
+
+      :retry ->
+        schedule_reconstruct(state)
+    end
+  end
+
+  defp continue_authoritative_reconstruction(state) do
     case observe_authoritative_inputs(state) do
       {:ok, records, worker_pids} ->
         state = reconcile_pending_against_snapshot(state, records, worker_pids)
@@ -653,6 +674,71 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
         # Keep pending; re-issue paths stay open on the next successful snapshot.
         schedule_reconstruct(state)
     end
+  end
+
+  defp settlement_journal_gate(%{apple_unit_settlements: settlements})
+       when map_size(settlements) == 0,
+       do: :ok
+
+  defp settlement_journal_gate(state) do
+    case journal_settlement_status(state) do
+      {:ok, status} when status in ["ready", :ready] ->
+        :ok
+
+      {:ok, "disabled"} ->
+        {:permanent, :apple_container_unit_journal_disabled}
+
+      {:ok, "poisoned"} ->
+        {:permanent, :apple_container_unit_journal_poisoned}
+
+      {:ok, "unavailable"} ->
+        {:permanent, :apple_container_unit_journal_unavailable}
+
+      {:ok, :disabled} ->
+        {:permanent, :apple_container_unit_journal_disabled}
+
+      {:ok, :poisoned} ->
+        {:permanent, :apple_container_unit_journal_poisoned}
+
+      {:ok, :unavailable} ->
+        {:permanent, :apple_container_unit_journal_unavailable}
+
+      {:error, reason}
+      when reason in [
+             :apple_container_unit_journal_disabled,
+             :apple_container_unit_journal_poisoned,
+             :apple_container_unit_journal_unavailable
+           ] ->
+        {:permanent, reason}
+
+      {:error, _reason} ->
+        :retry
+    end
+  end
+
+  defp journal_settlement_status(state) do
+    if function_exported?(state.journal, :status, 1) do
+      try do
+        case state.journal.status(state.journal_server) do
+          %{"status" => status} -> {:ok, status}
+          %{status: status} -> {:ok, status}
+          {:ok, %{"status" => status}} -> {:ok, status}
+          {:ok, %{status: status}} -> {:ok, status}
+          {:error, reason} -> {:error, reason}
+          _other -> {:error, :journal_status_unavailable}
+        end
+      catch
+        :exit, _ -> {:error, :journal_status_unavailable}
+      end
+    else
+      {:error, :journal_status_unavailable}
+    end
+  end
+
+  defp reject_all_apple_unit_settlements(state, reason) do
+    Enum.reduce(Map.keys(state.apple_unit_settlements), state, fn resource_id, acc ->
+      remove_apple_unit_settlement(acc, resource_id, reason)
+    end)
   end
 
   defp continue_reconstruction(state, records, worker_pids) do
@@ -900,12 +986,15 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
               end
 
             {:ok, _different} ->
+              {:ok, current_identity} = project_record_identity(state, record)
+
               %{
                 resource_id: resource_id,
                 expected_identity: expected,
                 status: :identity_drift,
                 record: record,
-                worker_pids: candidate_workers
+                worker_pids: candidate_workers,
+                current_identity: current_identity
               }
 
             {:error, _reason} ->
@@ -944,7 +1033,7 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
   defp suppress_unsafe_settlement_targets(orphan_records, unmatched_workers, analyses) do
     unsafe =
       Enum.filter(analyses, fn analysis ->
-        analysis.status in [:worker_uncertain, :identity_drift, :source_projection_uncertain]
+        analysis.status == :worker_uncertain
       end)
 
     unsafe_unit_names =
@@ -966,6 +1055,45 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
       Enum.reject(unmatched_workers, &MapSet.member?(unsafe_workers, &1))
 
     {orphan_records, unmatched_workers}
+  end
+
+  defp reject_terminal_settlements(state, analyses) do
+    Enum.reduce(analyses, {state, []}, fn analysis, {acc, keep} ->
+      case analysis.status do
+        :identity_drift ->
+          reason =
+            {:reconciliation_identity_conflict,
+             %{
+               "resource_id" => analysis.resource_id,
+               "current_identity" => analysis.current_identity
+             }}
+
+          {remove_apple_unit_settlement(acc, analysis.resource_id, reason), keep}
+
+        :source_projection_uncertain ->
+          {remove_apple_unit_settlement(acc, analysis.resource_id, :current_identity_unavailable),
+           keep}
+
+        _retryable_or_active ->
+          {acc, [analysis | keep]}
+      end
+    end)
+    |> then(fn {state, analyses} -> {state, Enum.reverse(analyses)} end)
+  end
+
+  defp remove_apple_unit_settlement(state, resource_id, reason) do
+    case Map.pop(state.apple_unit_settlements, resource_id) do
+      {nil, _settlements} ->
+        state
+
+      {settlement, settlements} ->
+        Enum.each(settlement.waiters, fn {mon_ref, waiter} ->
+          Process.demonitor(mon_ref, [:flush])
+          GenServer.reply(waiter.from, {:error, reason})
+        end)
+
+        %{state | apple_unit_settlements: settlements}
+    end
   end
 
   defp drive_apple_unit_settlements(state, analyses) do
@@ -1032,6 +1160,7 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
                   accepted: true,
                   mon_ref: nil,
                   settlement_resource_id: resource_id,
+                  settlement_execution_id: Map.get(record, :execution_id),
                   journal_record: record
                 })
               )
@@ -1050,19 +1179,11 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
       |> Enum.filter(&(&1.status == :absent))
       |> Map.new(&{&1.resource_id, &1})
 
-    Enum.reduce(absent, state, fn {resource_id, analysis}, acc ->
+    Enum.reduce(absent, state, fn {resource_id, _analysis}, acc ->
       case Map.get(acc.apple_unit_settlements, resource_id) do
-        %{expected_identity: expected_identity, observed: true} = settlement ->
-          settle_apple_unit_waiter(acc, resource_id, analysis, settlement, expected_identity)
-
-        %{expected_identity: expected_identity} = settlement ->
-          case Map.get(acc.settled_apple_unit_receipts, resource_id) do
-            %{expected_identity: ^expected_identity} ->
-              settle_apple_unit_waiter(acc, resource_id, analysis, settlement, expected_identity)
-
-            _other ->
-              acc
-          end
+        %{expected_identity: expected_identity, observed: observed} = settlement ->
+          outcome = if observed, do: "settled", else: "already_absent"
+          settle_apple_unit_waiter(acc, resource_id, settlement, expected_identity, outcome)
 
         nil ->
           acc
@@ -1070,50 +1191,35 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
     end)
   end
 
-  defp settle_apple_unit_waiter(state, resource_id, _analysis, _settlement, expected_identity) do
+  defp settle_apple_unit_waiter(state, resource_id, _settlement, expected_identity, outcome) do
     case Map.pop(state.apple_unit_settlements, resource_id) do
       {nil, _settlements} ->
         state
 
       {settlement, settlements} ->
-        receipt = %{
-          "status" => "settled",
-          "resource_id" => resource_id,
-          "unit_name" => expected_identity["unit_name"],
-          "execution_id" => expected_identity["execution_id"],
-          "source_record_digest" => expected_identity["source_record_digest"]
-        }
+        receipt = apple_unit_settlement_receipt(expected_identity, outcome)
 
         Enum.each(settlement.waiters, fn {mon_ref, waiter} ->
           Process.demonitor(mon_ref, [:flush])
           GenServer.reply(waiter.from, {:ok, receipt})
         end)
 
-        %{
-          state
-          | apple_unit_settlements: settlements,
-            settled_apple_unit_receipts:
-              retain_settled_receipt(
-                state.settled_apple_unit_receipts,
-                resource_id,
-                expected_identity,
-                receipt
-              )
-        }
+        %{state | apple_unit_settlements: settlements}
     end
   end
 
-  defp retain_settled_receipt(receipts, resource_id, expected_identity, receipt)
-       when is_map(receipts) do
-    receipts =
-      if map_size(receipts) >= @max_apple_unit_settlement_waiters do
-        oldest = receipts |> Map.keys() |> Enum.sort() |> List.first()
-        Map.delete(receipts, oldest)
-      else
-        receipts
-      end
-
-    Map.put(receipts, resource_id, %{expected_identity: expected_identity, receipt: receipt})
+  defp apple_unit_settlement_receipt(expected_identity, outcome)
+       when outcome in ["settled", "already_absent"] do
+    %{
+      "schema_version" => 1,
+      "resource_type" => "apple_container_unit",
+      "resource_id" => expected_identity["resource_id"],
+      "outcome" => outcome,
+      "active" => false,
+      "unit_name" => expected_identity["unit_name"],
+      "execution_id" => expected_identity["execution_id"],
+      "source_record_digest" => expected_identity["source_record_digest"]
+    }
   end
 
   defp collect_hints(state, worker_pids) do
@@ -1170,6 +1276,8 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
       |> Enum.filter(&MapSet.member?(live_set, &1))
 
     settlement_analysis = settlement_analysis(state, records, plan, verified)
+
+    {state, settlement_analysis} = reject_terminal_settlements(state, settlement_analysis)
 
     {orphan_records, unmatched_workers} =
       suppress_unsafe_settlement_targets(
@@ -1383,6 +1491,14 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
     # Preserve pending receipt expectations across a wake so exact later
     # messages remain bound; snapshot reconcile prunes settled work.
     run_reconstruction(state)
+  end
+
+  defp wake_or_advance_after_drain(state) do
+    if shutdown_preparation?(state.phase) do
+      advance_shutdown_barrier(state)
+    else
+      wake_reconstruction(state)
+    end
   end
 
   defp cancel_reconstruct_timer(%{reconstruct_timer: {timer_ref, _token}} = state)
@@ -1824,13 +1940,30 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
 
   defp barrier_progress_idle?(state) do
     state.barrier_waiters == [] and map_size(state.execution_waiters) == 0 and
-      state.barrier_converged
+      map_size(state.apple_unit_settlements) == 0 and state.barrier_converged
   end
 
   defp normalize_recover_all_after_workers(%{barrier_recover_all: :completed}), do: nil
   defp normalize_recover_all_after_workers(%{barrier_recover_all: other}), do: other
 
   defp advance_barrier_after_empty_workers(state) do
+    case settlement_journal_gate(state) do
+      {:permanent, reason} ->
+        state
+        |> reject_all_apple_unit_settlements(reason)
+        |> advance_barrier_after_empty_workers()
+
+      :retry ->
+        state
+        |> Map.put(:barrier_converged, false)
+        |> schedule_barrier_tick()
+
+      :ok ->
+        advance_barrier_after_empty_workers_with_journal(state)
+    end
+  end
+
+  defp advance_barrier_after_empty_workers_with_journal(state) do
     case journal_shutdown_status(state) do
       :disabled ->
         # Disabled journal: admission was closed and no durable unit can have
@@ -1880,17 +2013,19 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
   defp fresh_verify_and_maybe_reply(state) do
     case snapshot_live_workers(state) do
       {:ok, []} ->
-        case journal_shutdown_status(state) do
-          :empty ->
-            reply_barrier_success(state)
+        case settlement_journal_gate(state) do
+          {:permanent, reason} ->
+            state
+            |> reject_all_apple_unit_settlements(reason)
+            |> fresh_verify_and_maybe_reply()
 
-          :disabled ->
-            reply_barrier_success(state)
+          :retry ->
+            state
+            |> Map.put(:barrier_converged, false)
+            |> schedule_barrier_tick()
 
-          _not_empty ->
-            # Need another recover_all / wait cycle.
-            state = %{state | barrier_recover_all: nil, barrier_converged: false}
-            schedule_barrier_tick(state)
+          :ok ->
+            fresh_verify_and_maybe_reply_with_journal(state)
         end
 
       {:ok, workers} when is_list(workers) and workers != [] ->
@@ -1903,16 +2038,45 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
     end
   end
 
+  defp fresh_verify_and_maybe_reply_with_journal(state) do
+    case journal_shutdown_status(state) do
+      :empty ->
+        reply_barrier_success(state)
+
+      :disabled ->
+        reply_barrier_success(state)
+
+      _not_empty ->
+        # Need another recover_all / wait cycle.
+        state = %{state | barrier_recover_all: nil, barrier_converged: false}
+        schedule_barrier_tick(state)
+    end
+  end
+
   defp reply_barrier_success(state) do
     waiters = Enum.reverse(state.barrier_waiters)
     Enum.each(waiters, fn from -> GenServer.reply(from, :ok) end)
 
     state
+    |> settle_apple_unit_waiters_after_global_empty()
     |> settle_all_execution_waiters()
     |> cancel_barrier_timer()
     |> Map.put(:barrier_waiters, [])
     |> Map.put(:barrier_converged, true)
     |> Map.put(:barrier_recover_all, nil)
+  end
+
+  defp settle_apple_unit_waiters_after_global_empty(state) do
+    Enum.reduce(Map.keys(state.apple_unit_settlements), state, fn resource_id, acc ->
+      case Map.get(acc.apple_unit_settlements, resource_id) do
+        %{expected_identity: expected_identity, observed: observed} = settlement ->
+          outcome = if observed, do: "settled", else: "already_absent"
+          settle_apple_unit_waiter(acc, resource_id, settlement, expected_identity, outcome)
+
+        _missing ->
+          acc
+      end
+    end)
   end
 
   defp journal_shutdown_status(state) do
@@ -2183,7 +2347,6 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
       barrier_recover_all: :redacted,
       execution_waiters: :redacted,
       apple_unit_settlements: :redacted,
-      settled_apple_unit_receipts: :redacted,
       journal: :redacted,
       journal_server: :redacted,
       reconciler: :redacted,
