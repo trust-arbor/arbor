@@ -1241,8 +1241,6 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCore do
   defp normalize_retained_source_identity(%{"resource_type" => "retained_workspace_record"}),
     do: {:error, :malformed_retained_source_identity}
 
-  defp normalize_retained_source_identity(%{"expected_identity" => nil}), do: :ok
-
   defp normalize_retained_source_identity(%{"expected_identity" => _identity}),
     do: {:error, :malformed_resource}
 

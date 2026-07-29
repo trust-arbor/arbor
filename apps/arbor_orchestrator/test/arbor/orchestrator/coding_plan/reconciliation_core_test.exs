@@ -27,17 +27,19 @@ defmodule Arbor.Orchestrator.CodingPlan.ReconciliationCoreTest do
     assert hd(manifest["decisions"])["schema_version"] == 2
   end
 
-  test "rejects expected_identity on non-retained source resources" do
-    resource =
-      resource("live_workspace_lease", "lease-1", "task-1", "principal-1")
-      |> Map.put("expected_identity", %{"ignored" => true})
+  test "rejects expected_identity presence on non-retained sources, including nil" do
+    Enum.each([nil, %{"ignored" => true}], fn expected_identity ->
+      resource =
+        resource("live_workspace_lease", "lease-1", "task-1", "principal-1")
+        |> Map.put("expected_identity", expected_identity)
 
-    assert {:error, :malformed_resource} =
-             ReconciliationCore.reconcile(
-               task_inventory([task("task-1", "running", true)]),
-               resource_inventory([resource]),
-               @observed_at
-             )
+      assert {:error, :malformed_resource} =
+               ReconciliationCore.reconcile(
+                 task_inventory([task("task-1", "running", true)]),
+                 resource_inventory([resource]),
+                 @observed_at
+               )
+    end)
   end
 
   test "applies every conservative first-slice rule and never emits remove" do
