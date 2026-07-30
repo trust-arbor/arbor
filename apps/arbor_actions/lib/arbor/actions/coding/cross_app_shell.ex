@@ -58,7 +58,23 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
   def run_app_tests(worktree_path, test_paths, operation_timeout, test_stage_timeout)
       when is_binary(worktree_path) and is_list(test_paths) and is_integer(operation_timeout) and
              is_integer(test_stage_timeout) do
-    run_tests(worktree_path, test_paths, operation_timeout, test_stage_timeout, nil, nil)
+    {ordered_apps, ordered_test_dirs} =
+      with {:ok, apps} <- app_ids_from_test_dirs(test_paths),
+           {:ok, dirs} <- test_dirs_for_apps(apps) do
+        {apps, dirs}
+      else
+        {:error, _reason} -> throw({:execution_error, {:invalid_test_dir, test_paths}})
+      end
+
+    run_tests(
+      worktree_path,
+      ordered_test_dirs,
+      ordered_apps,
+      operation_timeout,
+      test_stage_timeout,
+      nil,
+      nil
+    )
   end
 
   @doc false
@@ -68,7 +84,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
           {:ok, map()} | {:error, term()}
   def run_validation_checks(worktree_path, test_paths, timeout)
       when is_binary(worktree_path) and is_list(test_paths) and is_integer(timeout) do
-    run_validation_checks(worktree_path, test_paths, timeout, timeout, nil)
+    run_validation_checks(worktree_path, %{test_paths: test_paths}, timeout, timeout, nil)
   end
 
   @doc false
@@ -77,8 +93,8 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
           {:ok, map()} | {:error, term()}
   def run_validation_checks(worktree_path, test_paths, timeout, resource)
       when is_binary(worktree_path) and is_list(test_paths) and is_integer(timeout) and
-             is_map(resource) do
-    run_validation_checks(worktree_path, test_paths, timeout, timeout, resource)
+             (is_map(resource) or is_nil(resource)) do
+    run_validation_checks(worktree_path, %{test_paths: test_paths}, timeout, timeout, resource)
   end
 
   def run_validation_checks(worktree_path, test_paths, operation_timeout, test_stage_timeout)
@@ -86,7 +102,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
              is_integer(test_stage_timeout) do
     run_validation_checks(
       worktree_path,
-      test_paths,
+      %{test_paths: test_paths},
       operation_timeout,
       test_stage_timeout,
       nil
@@ -96,11 +112,12 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
   @doc false
   @spec run_validation_checks(
           String.t(),
-          [String.t()],
+          map() | [String.t()],
           pos_integer(),
           pos_integer(),
           map() | nil
-        ) :: {:ok, map()} | {:error, term()}
+        ) ::
+          {:ok, map()} | {:error, term()}
   def run_validation_checks(
         worktree_path,
         test_paths,
@@ -110,8 +127,24 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
       )
       when is_binary(worktree_path) and is_list(test_paths) and is_integer(operation_timeout) and
              is_integer(test_stage_timeout) and (is_map(resource) or is_nil(resource)) do
-    selection = %{test_paths: test_paths}
+    run_validation_checks(
+      worktree_path,
+      %{test_paths: test_paths},
+      operation_timeout,
+      test_stage_timeout,
+      resource
+    )
+  end
 
+  def run_validation_checks(
+        worktree_path,
+        selection,
+        operation_timeout,
+        test_stage_timeout,
+        resource
+      )
+      when is_binary(worktree_path) and is_map(selection) and is_integer(operation_timeout) and
+             is_integer(test_stage_timeout) and (is_map(resource) or is_nil(resource)) do
     try do
       run_checks(worktree_path, selection, operation_timeout, test_stage_timeout, nil, resource)
     catch
@@ -122,12 +155,13 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
   @doc false
   @spec run_validation_checks(
           String.t(),
-          [String.t()],
+          map() | [String.t()],
           pos_integer(),
           pos_integer(),
           pos_integer(),
           map() | nil
-        ) :: {:ok, map()} | {:error, term()}
+        ) ::
+          {:ok, map()} | {:error, term()}
   def run_validation_checks(
         worktree_path,
         test_paths,
@@ -139,8 +173,27 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
       when is_binary(worktree_path) and is_list(test_paths) and is_integer(operation_timeout) and
              is_integer(test_stage_timeout) and is_integer(stage_timeout) and
              (is_map(resource) or is_nil(resource)) do
-    selection = %{test_paths: test_paths}
+    run_validation_checks(
+      worktree_path,
+      %{test_paths: test_paths},
+      operation_timeout,
+      test_stage_timeout,
+      stage_timeout,
+      resource
+    )
+  end
 
+  def run_validation_checks(
+        worktree_path,
+        selection,
+        operation_timeout,
+        test_stage_timeout,
+        stage_timeout,
+        resource
+      )
+      when is_binary(worktree_path) and is_map(selection) and is_integer(operation_timeout) and
+             is_integer(test_stage_timeout) and is_integer(stage_timeout) and
+             (is_map(resource) or is_nil(resource)) do
     try do
       run_checks(
         worktree_path,
@@ -315,6 +368,32 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
          validation_deadline,
          resource
        ) do
+    with {:ok, normalized_selection} <- normalize_selection(selection),
+         {:ok, ordered_apps} <- execution_ordered_apps(normalized_selection),
+         {:ok, ordered_test_dirs} <- test_dirs_for_apps(ordered_apps) do
+      run_prepared_checks(
+        worktree_path,
+        ordered_test_dirs,
+        ordered_apps,
+        operation_timeout,
+        test_stage_timeout,
+        validation_deadline,
+        resource
+      )
+    else
+      {:error, reason} -> {:error, {:invalid_validation_selection, reason}}
+    end
+  end
+
+  defp run_prepared_checks(
+         worktree_path,
+         ordered_test_dirs,
+         ordered_apps,
+         operation_timeout,
+         test_stage_timeout,
+         validation_deadline,
+         resource
+       ) do
     compile = run_compile(worktree_path, operation_timeout, validation_deadline, resource)
 
     if compile["passed"] do
@@ -329,7 +408,8 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
             # Aggregate test-stage budget starts only after MIX_ENV=test compile.
             run_tests(
               worktree_path,
-              selection.test_paths,
+              ordered_test_dirs,
+              ordered_apps,
               operation_timeout,
               test_stage_timeout,
               validation_deadline,
@@ -357,6 +437,110 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
          test_compile: Core.skipped_check("compile_failed"),
          test: Core.skipped_check("compile_failed")
        }}
+    end
+  end
+
+  defp normalize_selection(selection) when is_map(selection) do
+    with {:ok, changed_files} <- selection_list(selection, :changed_files),
+         {:ok, test_paths} <- selection_list(selection, :test_paths),
+         {:ok, changed_apps} <- selection_app_list(selection, :changed_apps),
+         {:ok, affected_apps} <- selection_app_list(selection, :affected_apps),
+         {:ok, root_wide} <- selection_root_wide(selection) do
+      {:ok,
+       %{
+         changed_files: changed_files,
+         changed_apps: changed_apps,
+         affected_apps: affected_apps,
+         test_paths: test_paths,
+         root_wide: root_wide
+       }}
+    end
+  end
+
+  defp normalize_selection(_selection), do: {:error, :invalid_selection}
+
+  defp selection_list(selection, key) when is_map(selection) do
+    case map_value(selection, key) do
+      nil -> {:ok, []}
+      list when is_list(list) -> {:ok, list}
+      _ -> {:error, {:invalid_selection_list, key}}
+    end
+  end
+
+  defp selection_app_list(selection, key) when is_map(selection) do
+    with {:ok, app_ids} <- selection_list(selection, key),
+         {:ok, normalized} <- Core.normalize_app_ids(app_ids) do
+      {:ok, normalized}
+    end
+  end
+
+  defp selection_root_wide(selection) when is_map(selection) do
+    case map_value(selection, :root_wide) do
+      nil -> {:ok, false}
+      value when is_boolean(value) -> {:ok, value}
+      _ -> {:error, :invalid_root_wide}
+    end
+  end
+
+  defp execution_ordered_apps(selection) when is_map(selection) do
+    changed_apps = Map.fetch!(selection, :changed_apps)
+    affected_apps = Map.fetch!(selection, :affected_apps)
+    selected_apps_result = app_ids_from_test_dirs(Map.fetch!(selection, :test_paths))
+
+    cond do
+      changed_apps == [] and affected_apps == [] ->
+        selected_apps_result
+
+      changed_apps != [] or affected_apps != [] ->
+        with {:ok, order} <- Core.execution_app_order(changed_apps, affected_apps),
+             {:ok, selected_apps} <- selected_apps_result do
+          if MapSet.equal?(MapSet.new(selected_apps), MapSet.new(order.ordered)) do
+            {:ok, order.ordered}
+          else
+            {:error, :invalid_app_order_input}
+          end
+        end
+
+      true ->
+        {:ok, []}
+    end
+  end
+
+  defp app_ids_from_test_dirs(test_paths) do
+    collect_app_ids_from_test_dirs(test_paths, Core.max_apps(), [])
+  end
+
+  defp collect_app_ids_from_test_dirs([], _remaining, acc) do
+    acc
+    |> Enum.reverse()
+    |> Core.normalize_ordered_app_ids()
+  end
+
+  defp collect_app_ids_from_test_dirs([_path | _rest], 0, _acc),
+    do: {:error, :invalid_app_order_input}
+
+  defp collect_app_ids_from_test_dirs([path | rest], remaining, acc) do
+    case Core.app_id_from_test_dir(path) do
+      {:ok, app} -> collect_app_ids_from_test_dirs(rest, remaining - 1, [app | acc])
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp collect_app_ids_from_test_dirs(_improper, _remaining, _acc),
+    do: {:error, :invalid_test_path}
+
+  defp test_dirs_for_apps(app_ids) do
+    with {:ok, normalized_apps} <- Core.normalize_ordered_app_ids(app_ids) do
+      Enum.reduce_while(normalized_apps, {:ok, []}, fn app_id, {:ok, acc} ->
+        case Core.canonical_test_dir_for_app(app_id) do
+          {:ok, test_dir} -> {:cont, {:ok, [test_dir | acc]}}
+          {:error, reason} -> {:halt, {:error, reason}}
+        end
+      end)
+      |> case do
+        {:ok, dirs} -> {:ok, Enum.reverse(dirs)}
+        {:error, reason} -> {:error, reason}
+      end
     end
   end
 
@@ -427,6 +611,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
   defp run_tests(
          _path,
          [],
+         _ordered_apps,
          _operation_timeout,
          _test_stage_timeout,
          _validation_deadline,
@@ -438,18 +623,19 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
   defp run_tests(
          path,
          test_paths,
+         ordered_apps,
          operation_timeout,
          test_stage_timeout,
          validation_deadline,
          resource
        )
        when is_list(test_paths) do
-    case expand_test_files(path, test_paths) do
+    case expand_test_files(path, test_paths, ordered_apps) do
       {:ok, []} ->
         Core.empty_pass_check("no_existing_test_files")
 
       {:ok, files} ->
-        case Core.partition_test_batches(files) do
+        case Core.partition_test_batches(files, ordered_apps) do
           {:ok, []} ->
             Core.empty_pass_check("no_existing_test_files")
 
@@ -678,14 +864,18 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
   # Inventory is git tracked + untracked (exclude-standard) only — ignored and
   # generated files never enter validation. Bound inventory size before any
   # per-entry lstat work. Symlink roots/components/files fail closed.
-  defp expand_test_files(worktree_path, test_dirs) when is_list(test_dirs) do
+  defp expand_test_files(worktree_path, test_dirs, ordered_apps)
+       when is_list(test_dirs) and is_list(ordered_apps) do
     with {:ok, selected_dirs} <- prepare_selected_test_dirs(worktree_path, test_dirs),
          {:ok, test_paths} <- git_list_test_paths(worktree_path, selected_dirs),
          {:ok, verified} <-
            verify_listed_test_files(worktree_path, selected_dirs, test_paths) do
-      Core.normalize_expanded_test_files(verified)
+      Core.normalize_expanded_test_files(verified, ordered_apps)
     end
   end
+
+  defp expand_test_files(_worktree_path, _test_dirs, _ordered_apps),
+    do: {:error, :invalid_test_dir}
 
   defp prepare_selected_test_dirs(worktree_path, test_dirs) do
     Enum.reduce_while(test_dirs, {:ok, []}, fn dir, {:ok, acc} ->

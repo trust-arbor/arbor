@@ -509,6 +509,91 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
              Core.next_test_step(10_000, [oversized], 10_000)
   end
 
+  test "normalize_app_id and app_id_from_test_dir accept only canonical app identifiers" do
+    assert {:ok, "arbor_actions"} = Core.normalize_app_id("arbor_actions")
+    assert {:error, :invalid_app_identifier} = Core.normalize_app_id("  arbor_actions ")
+    assert {:error, :invalid_app_identifier} = Core.normalize_app_id("a-b_c")
+    assert {:error, :invalid_app_identifier} = Core.normalize_app_id("ArborActions")
+    assert {:error, :invalid_app_identifier} = Core.normalize_app_id("../bad")
+    assert {:error, :invalid_app_identifier} = Core.normalize_app_id("")
+    assert {:error, :invalid_app_identifier} = Core.normalize_app_id("space name")
+
+    assert {:ok, "arbor_security"} = Core.app_id_from_test_dir("apps/arbor_security/test")
+
+    assert {:ok, "arbor_security"} =
+             Core.app_id_from_test_dir("apps/arbor_security/test/")
+
+    assert {:error, {:invalid_test_dir, "apps/arbor_security"}} =
+             Core.app_id_from_test_dir("apps/arbor_security")
+
+    assert {:error, {:invalid_test_dir, "apps/arbor_security/spec"}} =
+             Core.app_id_from_test_dir("apps/arbor_security/spec")
+
+    assert {:error, {:invalid_test_dir, "apps/arbor_security/test/nested"}} =
+             Core.app_id_from_test_dir("apps/arbor_security/test/nested")
+  end
+
+  test "ordered app identifiers reject duplicate, improper, and oversized inputs" do
+    assert {:error, :invalid_app_order_input} =
+             Core.normalize_ordered_app_ids(["alpha", "alpha"])
+
+    assert {:error, :invalid_app_order_input} =
+             Core.normalize_ordered_app_ids(["alpha" | "improper"])
+
+    oversized = for index <- 0..Core.max_apps(), do: "app_#{index}"
+    assert {:error, :invalid_app_order_input} = Core.normalize_ordered_app_ids(oversized)
+  end
+
+  test "execution_app_order fails closed for malformed metadata and non-subset changed apps" do
+    assert {:error, :invalid_app_order_input} =
+             Core.execution_app_order(["arbor-security", "arbor_actions"], ["arbor_actions"])
+
+    assert {:error, :invalid_app_order_input} =
+             Core.execution_app_order(["arbor_actions", "arbor_actions"], ["arbor_actions"])
+
+    assert {:error, :invalid_app_order_input} =
+             Core.execution_app_order(["arbor_security"], ["arbor_actions"])
+
+    assert {:ok, order} =
+             Core.execution_app_order(["arbor_security", "arbor_actions"], [
+               "arbor_actions",
+               "arbor_security"
+             ])
+
+    # canonical sorting by validated app id still applies
+    assert order.direct == ["arbor_actions", "arbor_security"]
+    assert order.downstream == []
+    assert order.ordered == ["arbor_actions", "arbor_security"]
+  end
+
+  test "direct-first execution order survives batch suffix validation with non-lexical app ordering" do
+    files = [
+      "apps/arbor_security/test/security_first_test.exs",
+      "apps/arbor_security/test/security_second_test.exs",
+      "apps/arbor_actions/test/actions_only_test.exs"
+    ]
+
+    assert {:ok, [security_batch, actions_batch]} =
+             Core.partition_test_batches(files, ["arbor_security", "arbor_actions"])
+
+    assert security_batch.index == 1
+
+    assert security_batch.paths == [
+             "apps/arbor_security/test/security_first_test.exs",
+             "apps/arbor_security/test/security_second_test.exs"
+           ]
+
+    assert actions_batch.index == 2
+    assert actions_batch.paths == ["apps/arbor_actions/test/actions_only_test.exs"]
+
+    # Suffix validation must accept direct-first grouping and preserve inventory partitioning.
+    assert {:run, ^security_batch, 10_000, [^actions_batch]} =
+             Core.next_test_step(10_000, [security_batch, actions_batch], 10_000)
+
+    assert {:error, {:invalid_test_step_input, _}} =
+             Core.next_test_step(10_000, [actions_batch, security_batch], 10_000)
+  end
+
   test "normalize_expanded_test_files bounds, sorts, and rejects bad paths" do
     assert {:ok, ["apps/alpha/test/a_test.exs", "apps/alpha/test/nested/b_test.exs"]} =
              Core.normalize_expanded_test_files([
@@ -1028,6 +1113,90 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
     assert {:ok, selection} = Core.select(["apps/alpha/lib/alpha.ex"], graph)
     assert selection.affected_apps == ["alpha", "beta", "gamma"]
     assert selection.test_paths == ["apps/alpha/test", "apps/beta/test", "apps/gamma/test"]
+  end
+
+  test "execution_app_order enforces direct-first ordering and preserves full affected inventory" do
+    assert {:ok, order} = Core.execution_app_order(["beta", "alpha"], ["gamma", "beta", "alpha"])
+    assert order.direct == ["alpha", "beta"]
+    assert order.downstream == ["gamma"]
+    assert order.ordered == ["alpha", "beta", "gamma"]
+
+    assert {:ok, same_order} = Core.execution_app_order([], ["alpha", "beta"])
+    assert same_order.direct == []
+    assert same_order.downstream == ["alpha", "beta"]
+    assert same_order.ordered == ["alpha", "beta"]
+  end
+
+  test "normalize_expanded_test_files reorders normalized inventory by direct-first app order" do
+    files = [
+      "apps/arbor_actions/test/alpha_test.exs",
+      "apps/arbor_security/test/zebra_test.exs",
+      "apps/arbor_actions/test/a_test.exs",
+      "apps/arbor_security/test/alpha_test.exs"
+    ]
+
+    assert {:ok,
+            [
+              "apps/arbor_security/test/alpha_test.exs",
+              "apps/arbor_security/test/zebra_test.exs",
+              "apps/arbor_actions/test/a_test.exs",
+              "apps/arbor_actions/test/alpha_test.exs"
+            ]} =
+             Core.normalize_expanded_test_files(files, ["arbor_security", "arbor_actions"])
+
+    assert {:error, {:test_file_outside_app_order, "apps/arbor_security/test/alpha_test.exs"}} =
+             Core.normalize_expanded_test_files(files, ["arbor_actions"])
+
+    assert {:error, :invalid_app_order_input} =
+             Core.normalize_expanded_test_files(files, ["arbor_actions", "arbor_actions"])
+  end
+
+  test "partition_test_batches respects explicit ordered app execution tiers" do
+    files = [
+      "apps/beta/test/b_test.exs",
+      "apps/alpha/test/a_test.exs",
+      "apps/beta/test/b2_test.exs",
+      "apps/gamma/test/c_test.exs",
+      "apps/alpha/test/a2_test.exs"
+    ]
+
+    # Ordered app contract puts alpha upstream before beta before gamma.
+    assert {:ok, [alpha_batch, beta_batch, gamma_batch]} =
+             Core.partition_test_batches(files, ["alpha", "beta", "gamma"])
+
+    assert alpha_batch.paths == ["apps/alpha/test/a2_test.exs", "apps/alpha/test/a_test.exs"]
+    assert beta_batch.paths == ["apps/beta/test/b2_test.exs", "apps/beta/test/b_test.exs"]
+    assert gamma_batch.paths == ["apps/gamma/test/c_test.exs"]
+
+    assert alpha_batch.index == 1
+    assert beta_batch.index == 2
+    assert gamma_batch.index == 3
+    assert Enum.map([alpha_batch, beta_batch, gamma_batch], & &1.count) == [2, 2, 1]
+  end
+
+  test "validation enforces app-group contiguity for direct-first and rejects re-entry" do
+    assert {:error, {:invalid_test_step_input, _}} =
+             Core.next_test_step(
+               10_000,
+               [
+                 signed_batch(["apps/arbor_actions/test/actions_a_test.exs"], 1, 3),
+                 signed_batch(["apps/arbor_security/test/security_a_test.exs"], 2, 3),
+                 signed_batch(["apps/arbor_actions/test/actions_b_test.exs"], 3, 3)
+               ],
+               10_000
+             )
+
+    assert {:ok, [security_batch, actions_batch]} =
+             Core.partition_test_batches(
+               [
+                 "apps/arbor_security/test/security_a_test.exs",
+                 "apps/arbor_actions/test/actions_a_test.exs"
+               ],
+               ["arbor_security", "arbor_actions"]
+             )
+
+    assert security_batch.paths == ["apps/arbor_security/test/security_a_test.exs"]
+    assert actions_batch.paths == ["apps/arbor_actions/test/actions_a_test.exs"]
   end
 
   @tag timeout: 15_000

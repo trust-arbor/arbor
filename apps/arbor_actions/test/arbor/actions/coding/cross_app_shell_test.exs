@@ -781,6 +781,75 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     refute_received {:mix_invocation, _, _, _}
   end
 
+  test "run_validation_checks list arities remain compatible for direct test-path lists", %{
+    worktree: worktree
+  } do
+    parent = self()
+    mkdir_app_tests!(worktree, ["alpha"])
+    resource = %{id: "run-validation-list-arity"}
+
+    Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, args, _opts ->
+      send(parent, {:validation_invocation, args})
+
+      {:ok,
+       %{
+         exit_code: 0,
+         stdout: "ok #{Enum.join(args, " ")}",
+         stderr: "",
+         timed_out: false
+       }}
+    end)
+
+    assert {:ok, checks_3} = Shell.run_validation_checks(worktree, ["apps/alpha/test"], 30_000)
+    assert checks_3.test["passed"]
+    assert_receive {:validation_invocation, ["compile", "--warnings-as-errors"]}
+    assert_receive {:validation_invocation, ["xref", "graph"]}
+    assert_receive {:validation_invocation, ["compile", "--warnings-as-errors"]}
+    assert_receive {:validation_invocation, ["test", "--", "apps/alpha/test/alpha_test.exs"]}
+
+    # 4-arity with resource map (legacy selection seam)
+    assert {:ok, checks_4_resource} =
+             Shell.run_validation_checks(
+               worktree,
+               ["apps/alpha/test"],
+               30_000,
+               resource
+             )
+
+    assert checks_4_resource.test["passed"]
+
+    # 4-arity with explicit test-stage timeout
+    assert {:ok, checks_4_timeout} =
+             Shell.run_validation_checks(worktree, ["apps/alpha/test"], 30_000, 40_000)
+
+    assert checks_4_timeout.test["passed"]
+
+    # 5-arity with explicit test-stage timeout + resource
+    assert {:ok, checks_5} =
+             Shell.run_validation_checks(
+               worktree,
+               ["apps/alpha/test"],
+               30_000,
+               40_000,
+               resource
+             )
+
+    assert checks_5.test["passed"]
+
+    # 6-arity map/list-aware stage timeout + resource
+    assert {:ok, checks_6} =
+             Shell.run_validation_checks(
+               worktree,
+               ["apps/alpha/test"],
+               30_000,
+               40_000,
+               50_000,
+               resource
+             )
+
+    assert checks_6.test["passed"]
+  end
+
   test "whole-validation deadline caps each pre-test child from one monotonic budget", %{
     worktree: worktree
   } do
@@ -832,6 +901,240 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     assert_receive {:mix_invocation, ["xref", "graph"], xref_opts, 1_000}
     assert Keyword.get(xref_opts, :timeout) == 4_000
     refute_received {:mix_invocation, _, _, _}
+  end
+
+  test "direct changed app executes before alphabetically earlier downstream app in test stage",
+       %{
+         worktree: worktree
+       } do
+    parent = self()
+    mkdir_app_tests!(worktree, ["arbor_actions", "arbor_security"])
+
+    selection = %{
+      changed_files: ["apps/arbor_security/lib/security.ex"],
+      changed_apps: ["arbor_security"],
+      affected_apps: ["arbor_actions", "arbor_security"],
+      test_paths: ["apps/arbor_actions/test", "apps/arbor_security/test"],
+      root_wide: false
+    }
+
+    Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, args, opts ->
+      send(parent, {:mix_invocation, args, opts})
+
+      cond do
+        args == ["compile", "--warnings-as-errors"] and
+            Keyword.get(opts, :env) == %{"MIX_ENV" => "test"} ->
+          {:ok, %{exit_code: 0, stdout: "ok", stderr: "", timed_out: false}}
+
+        args == ["compile", "--warnings-as-errors"] ->
+          {:ok, %{exit_code: 0, stdout: "ok", stderr: "", timed_out: false}}
+
+        args == ["xref", "graph"] ->
+          {:ok, %{exit_code: 0, stdout: "ok", stderr: "", timed_out: false}}
+
+        args == ["test", "--", "apps/arbor_security/test/arbor_security_test.exs"] ->
+          {:ok, %{exit_code: 0, stdout: "security ok", stderr: "", timed_out: false}}
+
+        args == ["test", "--", "apps/arbor_actions/test/arbor_actions_test.exs"] ->
+          {:ok, %{exit_code: 0, stdout: "actions ok", stderr: "", timed_out: false}}
+
+        true ->
+          flunk("unexpected mix invocation: #{inspect(args)}")
+      end
+    end)
+
+    assert {:ok, checks} =
+             Shell.run_validation_checks(
+               worktree,
+               selection,
+               30_000,
+               30_000,
+               60_000,
+               %{id: "res"}
+             )
+
+    assert checks.test["passed"]
+    assert checks.test["reason"] == nil
+    refute checks.test["reason"] == "no_existing_test_files"
+
+    assert_receive {:mix_invocation, ["compile", "--warnings-as-errors"], _dev_opts}
+    assert_receive {:mix_invocation, ["xref", "graph"], _xref_opts}
+    assert_receive {:mix_invocation, ["compile", "--warnings-as-errors"], _test_compile_opts}
+
+    assert_receive {:mix_invocation,
+                    ["test", "--", "apps/arbor_security/test/arbor_security_test.exs"] =
+                      security_args, security_run_opts}
+
+    assert_receive {:mix_invocation,
+                    ["test", "--", "apps/arbor_actions/test/arbor_actions_test.exs"],
+                    _actions_test}
+
+    assert Enum.drop(security_args, 2) != []
+    assert Keyword.get(security_run_opts, :timeout) == 30_000
+    refute_received {:mix_invocation, ["test", "--", _], _}
+  end
+
+  test "malformed or incomplete app selection fails before any Mix invocation", %{
+    worktree: worktree
+  } do
+    parent = self()
+    mkdir_app_tests!(worktree, ["arbor_actions", "arbor_security"])
+
+    Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, args, _opts ->
+      send(parent, {:unexpected_mix_invocation, args})
+      {:ok, %{exit_code: 0, stdout: "unexpected", stderr: "", timed_out: false}}
+    end)
+
+    duplicate_metadata = %{
+      changed_apps: ["arbor_security"],
+      affected_apps: ["arbor_security", "arbor_security"],
+      test_paths: ["apps/arbor_security/test"]
+    }
+
+    assert {:error, {:invalid_validation_selection, :invalid_app_order_input}} =
+             Shell.run_validation_checks(
+               worktree,
+               duplicate_metadata,
+               30_000,
+               30_000,
+               nil
+             )
+
+    incomplete_inventory = %{
+      changed_apps: ["arbor_security"],
+      affected_apps: ["arbor_actions", "arbor_security"],
+      test_paths: ["apps/arbor_security/test"]
+    }
+
+    assert {:error, {:invalid_validation_selection, :invalid_app_order_input}} =
+             Shell.run_validation_checks(
+               worktree,
+               incomplete_inventory,
+               30_000,
+               30_000,
+               nil
+             )
+
+    refute_received {:unexpected_mix_invocation, _}
+  end
+
+  test "run_app_tests rejects malformed canonical conversion input before filesystem enumeration",
+       %{worktree: worktree} do
+    mkdir_app_tests!(worktree, ["arbor_actions"])
+
+    Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, args, _opts ->
+      flunk("must fail closed before mix invocation: #{inspect(args)}")
+    end)
+
+    thrown =
+      catch_throw(
+        Shell.run_app_tests(
+          worktree,
+          ["apps/arbor_security", "apps/arbor_actions"],
+          10_000,
+          20_000
+        )
+      )
+
+    assert match?(
+             {:execution_error,
+              {:invalid_test_dir, ["apps/arbor_security", "apps/arbor_actions"]}},
+             thrown
+           )
+  end
+
+  test "direct-first completed batch is preserved when downstream batch is handed off", %{
+    worktree: worktree
+  } do
+    parent = self()
+    mkdir_app_tests!(worktree, ["arbor_actions", "arbor_security"])
+
+    selection = %{
+      changed_files: ["apps/arbor_security/lib/security.ex"],
+      changed_apps: ["arbor_security"],
+      affected_apps: ["arbor_actions", "arbor_security"],
+      test_paths: ["apps/arbor_actions/test", "apps/arbor_security/test"],
+      root_wide: false
+    }
+
+    {:ok, clock_agent} = Agent.start_link(fn -> 0 end)
+
+    on_exit(fn ->
+      if Process.alive?(clock_agent), do: Agent.stop(clock_agent)
+    end)
+
+    Application.put_env(:arbor_actions, :cross_app_monotonic_ms, fn ->
+      Agent.get(clock_agent, & &1)
+    end)
+
+    Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, args, opts ->
+      send(parent, {:mix_invocation, args, opts})
+
+      cond do
+        args == ["compile", "--warnings-as-errors"] ->
+          {:ok, %{exit_code: 0, stdout: "ok", stderr: "", timed_out: false}}
+
+        args == ["xref", "graph"] ->
+          {:ok, %{exit_code: 0, stdout: "ok", stderr: "", timed_out: false}}
+
+        args == ["test", "--", "apps/arbor_security/test/arbor_security_test.exs"] ->
+          Agent.update(clock_agent, fn _ -> 10_000 end)
+          {:ok, %{exit_code: 0, stdout: "security ok", stderr: "", timed_out: false}}
+
+        args == ["test", "--", "apps/arbor_actions/test/arbor_actions_test.exs"] ->
+          flunk("downstream batch must not launch after runtime cap")
+
+        true ->
+          {:ok, %{exit_code: 0, stdout: "ok", stderr: "", timed_out: false}}
+      end
+    end)
+
+    assert {:ok, checks} =
+             Shell.run_validation_checks(
+               worktree,
+               selection,
+               5_000,
+               5_000,
+               20_000,
+               %{id: "res"}
+             )
+
+    assert checks.test["passed"] == false
+    assert checks.test["reason"] == "validation_capacity_exceeded"
+    handoff = checks.test["capacity_handoff"]
+    assert handoff["completed_batch_count"] == 1
+    assert handoff["unstarted_batch_count"] == 1
+    assert handoff["interrupted_batch"] == nil
+    assert handoff["phase"] == "runtime"
+
+    assert {:ok, [_security_batch, actions_batch]} =
+             Core.partition_test_batches(
+               [
+                 "apps/arbor_security/test/arbor_security_test.exs",
+                 "apps/arbor_actions/test/arbor_actions_test.exs"
+               ],
+               ["arbor_security", "arbor_actions"]
+             )
+
+    assert handoff["unstarted_batches"] == [
+             %{
+               "index" => actions_batch.index,
+               "total" => actions_batch.total,
+               "count" => actions_batch.count,
+               "label" => actions_batch.label,
+               "inventory_sha256" => actions_batch.inventory_sha256
+             }
+           ]
+
+    assert_receive {:mix_invocation, ["compile", "--warnings-as-errors"], _}
+    assert_receive {:mix_invocation, ["xref", "graph"], _}
+    assert_receive {:mix_invocation, ["compile", "--warnings-as-errors"], _}
+
+    assert_receive {:mix_invocation,
+                    ["test", "--", "apps/arbor_security/test/arbor_security_test.exs"], _}
+
+    refute_received {:mix_invocation,
+                     ["test", "--", "apps/arbor_actions/test/arbor_actions_test.exs"], _}
   end
 
   test "whole-validation deadline rejects an overrun immediately after a child", %{

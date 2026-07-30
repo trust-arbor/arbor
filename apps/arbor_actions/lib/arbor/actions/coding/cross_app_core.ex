@@ -135,6 +135,12 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
           root_wide: boolean()
         }
 
+  @type execution_app_order :: %{
+          direct: [String.t()],
+          downstream: [String.t()],
+          ordered: [String.t()]
+        }
+
   @typedoc "One deterministic argv-safe batch of exact `*_test.exs` paths."
   @type test_batch :: %{
           label: String.t(),
@@ -169,6 +175,81 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
 
   @typedoc "Bounded evidence for a validation capacity handoff."
   @type capacity_handoff :: %{required(String.t()) => term()}
+
+  @doc false
+  @spec normalize_app_id(term()) :: {:ok, String.t()} | {:error, term()}
+  def normalize_app_id(app_id) when is_binary(app_id) do
+    if valid_identifier?(app_id), do: {:ok, app_id}, else: {:error, :invalid_app_identifier}
+  end
+
+  def normalize_app_id(_), do: {:error, :invalid_app_identifier}
+
+  @doc false
+  @spec normalize_app_ids(term()) :: {:ok, [String.t()]} | {:error, term()}
+  def normalize_app_ids(app_ids) do
+    with {:ok, normalized} <- collect_normalized_app_ids(app_ids) do
+      {:ok, Enum.sort(normalized)}
+    end
+  end
+
+  @doc false
+  @spec normalize_ordered_app_ids(term()) :: {:ok, [String.t()]} | {:error, term()}
+  def normalize_ordered_app_ids(app_ids), do: collect_normalized_app_ids(app_ids)
+
+  @doc false
+  @spec canonical_test_dir_for_app(term()) :: {:ok, String.t()} | {:error, term()}
+  def canonical_test_dir_for_app(app_id) do
+    with {:ok, normalized} <- normalize_app_id(app_id) do
+      {:ok, "apps/#{normalized}/test"}
+    end
+  end
+
+  @doc false
+  @spec app_id_from_test_dir(term()) :: {:ok, String.t()} | {:error, term()}
+  def app_id_from_test_dir(path) when is_binary(path) do
+    case Path.split(path) do
+      ["apps", app, "test"] ->
+        case normalize_app_id(app) do
+          {:ok, normalized} -> {:ok, normalized}
+          {:error, _reason} -> {:error, {:invalid_test_dir, path}}
+        end
+
+      _ ->
+        {:error, {:invalid_test_dir, path}}
+    end
+  end
+
+  def app_id_from_test_dir(_), do: {:error, :invalid_test_dir}
+
+  @doc false
+  def max_apps, do: @max_apps
+
+  defp collect_normalized_app_ids(app_ids) do
+    collect_normalized_app_ids(app_ids, @max_apps, MapSet.new(), [])
+  end
+
+  defp collect_normalized_app_ids([], _remaining, _seen, acc),
+    do: {:ok, Enum.reverse(acc)}
+
+  defp collect_normalized_app_ids([_app_id | _rest], 0, _seen, _acc),
+    do: {:error, :invalid_app_order_input}
+
+  defp collect_normalized_app_ids([app_id | rest], remaining, seen, acc) do
+    with {:ok, normalized} <- normalize_app_id(app_id),
+         false <- MapSet.member?(seen, normalized) do
+      collect_normalized_app_ids(
+        rest,
+        remaining - 1,
+        MapSet.put(seen, normalized),
+        [normalized | acc]
+      )
+    else
+      _ -> {:error, :invalid_app_order_input}
+    end
+  end
+
+  defp collect_normalized_app_ids(_improper, _remaining, _seen, _acc),
+    do: {:error, :invalid_app_order_input}
 
   @doc "Construct and validate the action's deliberately narrow input surface."
   @spec new(map()) :: {:ok, input()} | {:error, atom()}
@@ -824,13 +905,20 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
         :error
 
       true ->
-        Enum.reduce_while(paths, {:ok, nil, 0}, fn path, {:ok, prev, bytes} ->
+        Enum.reduce_while(paths, {:ok, nil, nil, 0}, fn path, {:ok, prev_app, prev_path, bytes} ->
           case normalize_test_file_path(path) do
             {:ok, ^path} ->
+              path_root = app_test_root(path)
               cost = path_arg_bytes(path)
 
               cond do
-                is_binary(prev) and path <= prev ->
+                is_nil(path_root) ->
+                  {:halt, :error}
+
+                is_binary(prev_app) and path_root != prev_app ->
+                  {:halt, :error}
+
+                is_binary(prev_path) and path <= prev_path ->
                   {:halt, :error}
 
                 cost > @max_test_batch_arg_bytes ->
@@ -840,7 +928,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
                   {:halt, :error}
 
                 true ->
-                  {:cont, {:ok, path, bytes + cost}}
+                  {:cont, {:ok, path_root, path, bytes + cost}}
               end
 
             _ ->
@@ -848,7 +936,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
           end
         end)
         |> case do
-          {:ok, _prev, _bytes} -> :ok
+          {:ok, _prev_app, _prev_path, _bytes} -> :ok
           :error -> :error
         end
     end
@@ -860,16 +948,14 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   Deterministically partition verified, normalized `*_test.exs` paths into
   argv-safe Mix batches.
 
-  Input must already be the post-normalization inventory: strictly sorted,
-  unique, and every path must re-normalize to itself. Partitioning is greedy
-  left-to-right under the closed runtime file-count cap (at most 20 exact
-  files per child), Shell argv-count ceiling, argument-byte ceiling, and
-  app test root boundary (a batch never mixes files from different
-  `apps/<app>/test` roots). Every path appears in exactly one non-empty
-  batch, including a final partial batch; labels bind inventory count and
-  SHA-256 over the exact ordered batch paths. Slow/integration-tagged files
-  are never excluded — they remain in the exact inventory and are only split
-  across sequential children.
+  Input must already be the post-normalization inventory: unique, grouped
+  contiguously by app, strictly sorted within each app, and every path must
+  re-normalize to itself. Partitioning is greedy left-to-right under the closed
+  runtime file-count cap (at most 20 exact files per child), Shell argv-count
+  ceiling, argument-byte ceiling, and app test root boundary (a batch never
+  mixes files from different `apps/<app>/test` roots). Every path appears in
+  exactly one non-empty batch, including a final partial batch; labels bind
+  inventory count and SHA-256 over the exact ordered batch paths.
   """
   @spec partition_test_batches(term()) :: {:ok, [test_batch()]} | {:error, term()}
   def partition_test_batches([]), do: {:ok, []}
@@ -890,38 +976,160 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
 
   def partition_test_batches(_), do: {:error, :invalid_test_batch_input}
 
-  defp validate_batch_source_files(files) do
-    if length(files) > @max_expanded_test_files do
-      {:error, :too_many_test_files}
-    else
-      Enum.reduce_while(files, {:ok, nil}, fn path, {:ok, prev} ->
-        case normalize_test_file_path(path) do
-          {:ok, ^path} ->
-            cond do
-              is_binary(prev) and path <= prev ->
-                {:halt, {:error, :unsorted_or_duplicate_test_files}}
+  @doc """
+  Deterministically partition verified, normalized `*_test.exs` paths into
+  argv-safe Mix batches using an explicit app execution order contract.
 
-              path_arg_bytes(path) > @max_test_batch_arg_bytes ->
-                # Defensive: normalized paths are ≤1024 bytes and always fit.
-                {:halt, {:error, {:test_file_path_exceeds_batch_bytes, path}}}
+  `ordered_apps` is a canonical direct-first app ordering: changed apps first,
+  then downstream apps. Paths are first normalized and deduped as before, then
+  reordered so each listed app's entire deterministic per-app suffix appears in
+  execution order before downstream app files.
+  """
+  @spec partition_test_batches([String.t()], [String.t()]) ::
+          {:ok, [test_batch()]} | {:error, term()}
+  def partition_test_batches(files, ordered_apps) when is_list(ordered_apps) do
+    with {:ok, ordered_files} <- normalize_expanded_test_files(files, ordered_apps),
+         {:ok, packed} <- pack_test_batches(ordered_files) do
+      total = length(packed)
 
-              true ->
-                {:cont, {:ok, path}}
-            end
+      batches =
+        packed
+        |> Enum.with_index(1)
+        |> Enum.map(fn {paths, index} -> build_test_batch(paths, index, total) end)
 
-          {:ok, _other} ->
-            {:halt, {:error, {:non_normalized_test_file, path}}}
-
-          {:error, reason} ->
-            {:halt, {:error, reason}}
-        end
-      end)
-      |> case do
-        {:ok, _} -> :ok
-        {:error, _} = error -> error
-      end
+      {:ok, batches}
     end
   end
+
+  def partition_test_batches(_files, _ordered_apps), do: {:error, :invalid_test_batch_input}
+
+  @doc """
+  Build the direct-first execution-app order from selection metadata.
+
+  `changed_apps` and `affected_apps` are fully validated sets; this helper is a
+  pure deterministic projection that preserves the unchanged downstream inventory.
+  """
+  @spec execution_app_order([String.t()], [String.t()]) ::
+          {:ok, execution_app_order()} | {:error, term()}
+  def execution_app_order(changed_apps, affected_apps)
+      when is_list(changed_apps) and is_list(affected_apps) do
+    with {:ok, changed} <- normalize_app_ids(changed_apps),
+         {:ok, affected} <- normalize_app_ids(affected_apps),
+         :ok <- validate_changed_subset(changed, affected) do
+      direct = changed
+      direct_set = MapSet.new(direct)
+      downstream = Enum.reject(affected, &MapSet.member?(direct_set, &1))
+      ordered = direct ++ downstream
+
+      {:ok,
+       %{
+         direct: direct,
+         downstream: downstream,
+         ordered: ordered
+       }}
+    end
+  end
+
+  def execution_app_order(_changed_apps, _affected_apps), do: {:error, :invalid_app_order_input}
+
+  defp validate_changed_subset(changed_apps, affected_apps)
+       when is_list(changed_apps) and is_list(affected_apps) do
+    affected_set = MapSet.new(affected_apps)
+
+    if Enum.all?(changed_apps, &MapSet.member?(affected_set, &1)) do
+      :ok
+    else
+      {:error, :invalid_app_order_input}
+    end
+  end
+
+  defp validate_batch_source_files(files) do
+    validate_batch_source_files(
+      files,
+      @max_expanded_test_files,
+      nil,
+      nil,
+      MapSet.new(),
+      MapSet.new()
+    )
+  end
+
+  defp validate_batch_source_files(
+         [],
+         _remaining,
+         _prev_app,
+         _prev_path,
+         _seen_paths,
+         _seen_apps
+       ),
+       do: :ok
+
+  defp validate_batch_source_files(
+         [_path | _rest],
+         0,
+         _prev_app,
+         _prev_path,
+         _seen_paths,
+         _seen_apps
+       ),
+       do: {:error, :too_many_test_files}
+
+  defp validate_batch_source_files(
+         [path | rest],
+         remaining,
+         prev_app,
+         prev_path,
+         seen_paths,
+         seen_apps
+       ) do
+    case normalize_test_file_path(path) do
+      {:ok, ^path} ->
+        app = test_file_app(path)
+
+        cond do
+          is_nil(app) ->
+            {:error, {:invalid_test_file_path, path}}
+
+          MapSet.member?(seen_paths, path) ->
+            {:error, :unsorted_or_duplicate_test_files}
+
+          path_arg_bytes(path) > @max_test_batch_arg_bytes ->
+            {:error, {:test_file_path_exceeds_batch_bytes, path}}
+
+          app == prev_app and is_binary(prev_path) and path <= prev_path ->
+            {:error, :unsorted_or_duplicate_test_files}
+
+          app != prev_app and MapSet.member?(seen_apps, app) ->
+            {:error, :invalid_app_batching}
+
+          true ->
+            validate_batch_source_files(
+              rest,
+              remaining - 1,
+              app,
+              path,
+              MapSet.put(seen_paths, path),
+              MapSet.put(seen_apps, app)
+            )
+        end
+
+      {:ok, _other} ->
+        {:error, {:non_normalized_test_file, path}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp validate_batch_source_files(
+         _improper,
+         _remaining,
+         _prev_app,
+         _prev_path,
+         _seen_paths,
+         _seen_apps
+       ),
+       do: {:error, :invalid_test_file_list}
 
   defp pack_test_batches(files) do
     {batches, current, _count, _bytes, _current_root} =
@@ -995,6 +1203,24 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
 
   defp path_arg_bytes(path) when is_binary(path), do: byte_size(path) + 1
 
+  defp test_file_app(path) when is_binary(path) do
+    case Path.split(path) do
+      ["apps", app, "test" | _rest] when app != "" -> app
+      _ -> nil
+    end
+  end
+
+  defp reorder_normalized_test_files(paths, ordered_apps) do
+    order_lookup =
+      ordered_apps
+      |> Enum.with_index()
+      |> Enum.into(%{}, fn {app, index} -> {app, index} end)
+
+    Enum.sort_by(paths, fn path ->
+      {Map.fetch!(order_lookup, test_file_app(path)), path}
+    end)
+  end
+
   @doc """
   Normalize and bound an expanded list of relative `*_test.exs` file paths.
 
@@ -1002,29 +1228,65 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   Fails closed on empty components, escapes, absolute paths, non-test suffixes,
   oversized inventories, and overlong path bytes.
   """
-  @spec normalize_expanded_test_files([String.t()]) ::
+  @spec normalize_expanded_test_files(term()) ::
           {:ok, [String.t()]} | {:error, term()}
-  def normalize_expanded_test_files(files) when is_list(files) do
-    if length(files) > @max_expanded_test_files do
-      {:error, :too_many_test_files}
-    else
-      Enum.reduce_while(files, {:ok, []}, fn path, {:ok, acc} ->
-        case normalize_test_file_path(path) do
-          {:ok, normalized} -> {:cont, {:ok, [normalized | acc]}}
-          {:error, _} = error -> {:halt, error}
-        end
-      end)
-      |> case do
-        {:ok, collected} ->
-          {:ok, collected |> Enum.reverse() |> Enum.uniq() |> Enum.sort()}
+  def normalize_expanded_test_files(files) do
+    collect_normalized_test_files(files, @max_expanded_test_files, MapSet.new(), [])
+  end
 
-        {:error, _} = error ->
-          error
-      end
+  @doc """
+  Same validation as `normalize_expanded_test_files/1`, then deterministic
+  reordering into a direct-first per-app execution plan.
+
+  Existing per-app validation and global uniqueness semantics remain unchanged.
+  """
+  @spec normalize_expanded_test_files(term(), term()) ::
+          {:ok, [String.t()]} | {:error, term()}
+  def normalize_expanded_test_files(files, ordered_apps) do
+    with {:ok, normalized_apps} <- normalize_ordered_app_ids(ordered_apps),
+         {:ok, normalized} <- normalize_expanded_test_files(files),
+         :ok <- validate_test_file_apps(normalized, normalized_apps) do
+      {:ok, reorder_normalized_test_files(normalized, normalized_apps)}
     end
   end
 
-  def normalize_expanded_test_files(_), do: {:error, :invalid_test_file_list}
+  defp collect_normalized_test_files([], _remaining, _seen, acc) do
+    {:ok, acc |> Enum.reverse() |> Enum.sort()}
+  end
+
+  defp collect_normalized_test_files([_path | _rest], 0, _seen, _acc),
+    do: {:error, :too_many_test_files}
+
+  defp collect_normalized_test_files([path | rest], remaining, seen, acc) do
+    case normalize_test_file_path(path) do
+      {:ok, normalized} ->
+        if MapSet.member?(seen, normalized) do
+          collect_normalized_test_files(rest, remaining - 1, seen, acc)
+        else
+          collect_normalized_test_files(
+            rest,
+            remaining - 1,
+            MapSet.put(seen, normalized),
+            [normalized | acc]
+          )
+        end
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  defp collect_normalized_test_files(_improper, _remaining, _seen, _acc),
+    do: {:error, :invalid_test_file_list}
+
+  defp validate_test_file_apps(paths, ordered_apps) do
+    allowed = MapSet.new(ordered_apps)
+
+    case Enum.find(paths, &(not MapSet.member?(allowed, test_file_app(&1)))) do
+      nil -> :ok
+      path -> {:error, {:test_file_outside_app_order, path}}
+    end
+  end
 
   @doc false
   def normalize_test_file_path(path) when is_binary(path) do
