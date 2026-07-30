@@ -1837,6 +1837,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       refute Map.has_key?(graph.nodes, "status_review_requires_rework")
       assert graph.nodes["status_rework_exhausted"]
       assert graph.nodes["legacy_status_review_requires_rework"]
+      refute Map.has_key?(graph.nodes, "legacy_status_operator_approval_rework")
 
       # Strict enum routers have explicit, single-path fallbacks. This keeps an
       # unconditional error edge from becoming a fan-out sibling.
@@ -2598,7 +2599,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
     test "exhausted operator rework terminates deterministically" do
       assert {{:ok, result}, calls} = run_fixture(:commit_approval_rework_exhausted)
       assert result.context["status"] == "rework_exhausted"
-      assert result.context["legacy_status"] == "operator_approval_rework"
+      refute Map.has_key?(result.context, "legacy_status")
       assert result.context["error"] == "operator_approval_rework_exhausted"
       assert result.context["operator_rework_count"] == 1
       assert result.context["total_rework_count"] == 1
@@ -2617,7 +2618,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert {{:ok, result}, calls} = run_fixture(:validation_then_operator_rework_exhausted)
       assert result.context["status"] == "rework_exhausted"
       assert result.context["error"] == "operator_approval_rework_exhausted"
-      assert result.context["legacy_status"] == "operator_approval_rework"
+      refute Map.has_key?(result.context, "legacy_status")
       assert result.context["validation_rework_count"] == 1
       assert result.context["operator_rework_count"] == 1
       assert result.context["total_rework_count"] == 2

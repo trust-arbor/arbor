@@ -1416,7 +1416,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
     ],
     [
       "check_operator_rework_category_budget",
-      "legacy_status_operator_approval_rework",
+      "mark_operator_rework_exhausted_error",
       "context.operator_rework_count>=1"
     ],
     [

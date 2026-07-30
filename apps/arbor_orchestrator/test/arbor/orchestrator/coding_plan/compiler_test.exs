@@ -289,9 +289,9 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
   test "template stays within reviewed DOT source, node, and edge ceilings", ctx do
     graph = parse!(ctx.template_source)
 
-    assert byte_size(ctx.template_source) == 81_473
-    assert map_size(graph.nodes) == 236
-    assert length(graph.edges) == 342
+    assert byte_size(ctx.template_source) == 81_218
+    assert map_size(graph.nodes) == 235
+    assert length(graph.edges) == 341
     assert byte_size(ctx.template_source) <= 262_144
     assert map_size(graph.nodes) <= 256
     assert length(graph.edges) <= 512
@@ -1682,7 +1682,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
       assert edge_condition(
                graph,
                "check_operator_rework_total_budget",
-               "legacy_status_operator_approval_rework"
+               "mark_operator_rework_exhausted_error"
              ) == "context.total_rework_count>=#{max_cycles}"
 
       assert edge_condition(

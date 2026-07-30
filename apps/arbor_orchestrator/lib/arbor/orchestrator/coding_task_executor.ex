@@ -2822,9 +2822,11 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     |> reject_nil_values()
   end
 
-  defp terminal_status_pair("rework_exhausted", legacy_status)
-       when is_binary(legacy_status) and legacy_status != "",
-       do: {legacy_status, "rework_exhausted"}
+  defp terminal_status_pair("rework_exhausted", legacy_status) do
+    if OutcomeMapper.terminal_status?(legacy_status),
+      do: {legacy_status, "rework_exhausted"},
+      else: {"rework_exhausted", "rework_exhausted"}
+  end
 
   defp terminal_status_pair(status, _legacy_status), do: {status, status}
 

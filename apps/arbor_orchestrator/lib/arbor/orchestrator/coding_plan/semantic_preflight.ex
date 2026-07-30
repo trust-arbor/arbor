@@ -3292,7 +3292,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     |> check_dynamic_total_budget_edges(
       graph,
       "check_operator_rework_total_budget",
-      "legacy_status_operator_approval_rework",
+      "mark_operator_rework_exhausted_error",
       "inc_operator_rework_count",
       rework_max_cycles
     )

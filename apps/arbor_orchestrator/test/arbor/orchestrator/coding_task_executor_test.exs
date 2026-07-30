@@ -3991,20 +3991,33 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       end
     end
 
-    test "accepts passed verification for legacy review and operator rework exhaustion" do
+    test "accepts passed verification for legacy review rework exhaustion" do
       validation = validation_result("default")
 
-      for legacy_status <- ~w(review_requires_rework operator_approval_rework) do
-        assert {:ok, result} =
-                 run_with_profile_verification("default", validation, %{
-                   "status" => "rework_exhausted",
-                   "legacy_status" => legacy_status
-                 })
+      assert {:ok, result} =
+               run_with_profile_verification("default", validation, %{
+                 "status" => "rework_exhausted",
+                 "legacy_status" => "review_requires_rework"
+               })
 
-        assert result["status"] == legacy_status
-        assert result["canonical_status"] == "rework_exhausted"
-        assert result["verification_report"]["status"] == "passed"
-      end
+      assert result["status"] == "review_requires_rework"
+      assert result["canonical_status"] == "rework_exhausted"
+      assert result["verification_report"]["status"] == "passed"
+    end
+
+    test "falls back to canonical rework_exhausted for archived operator rework legacy_status" do
+      validation = validation_result("default")
+
+      assert {:ok, result} =
+               run_with_profile_verification("default", validation, %{
+                 "status" => "rework_exhausted",
+                 "legacy_status" => "operator_approval_rework"
+               })
+
+      assert result["status"] == "rework_exhausted"
+      assert result["canonical_status"] == "rework_exhausted"
+      assert result["outcome"]["code"] == "rework_exhausted"
+      assert result["verification_report"]["status"] == "passed"
     end
 
     test "cancelled remains outside the coding executor terminal vocabulary" do
@@ -5311,6 +5324,34 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert evidence["path"] == Path.join(root, "coding-terminal-evidence.json")
       assert evidence["byte_size"] == File.stat!(evidence["path"]).size
       assert evidence["sha256"] == sha256(File.read!(evidence["path"]))
+    end
+
+    test "finalizes fallback operator rework legacy payload as canonical rework_exhausted" do
+      validation = validation_result("default")
+
+      assert {:ok, result} =
+               run_with_profile_verification("default", validation, %{
+                 "status" => "rework_exhausted",
+                 "legacy_status" => "operator_approval_rework"
+               })
+
+      root = prepare_finalize_artifacts()
+      archived_fallback_payload = Map.put(result, "artifacts", finalize_result(root)["artifacts"])
+
+      assert archived_fallback_payload["status"] == "rework_exhausted"
+      assert archived_fallback_payload["canonical_status"] == "rework_exhausted"
+
+      assert {:ok, finalized} =
+               CodingTaskExecutor.finalize_task(
+                 "agent_1",
+                 archived_fallback_payload,
+                 [],
+                 valid_context()
+               )
+
+      assert finalized["status"] == "rework_exhausted"
+      assert finalized["canonical_status"] == "rework_exhausted"
+      assert finalized["outcome"]["code"] == "rework_exhausted"
     end
 
     test "rejects a symlink artifact and a path outside the trusted task root" do

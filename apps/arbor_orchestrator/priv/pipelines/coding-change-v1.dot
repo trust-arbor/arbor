@@ -1109,13 +1109,6 @@ digraph CodingChangeV1 {
     output_key="error"
   ]
 
-  legacy_status_operator_approval_rework [
-    type="transform",
-    transform="constant",
-    expression="operator_approval_rework",
-    output_key="legacy_status"
-  ]
-
   // Clean self-commit adoption is performed inside coding_reviewed_commit
   // (workspace_dirty=false) so operator rework cannot bypass a fresh gate by
   // self-committing. There is no separate unapproved adopt_head path.
@@ -2197,12 +2190,11 @@ digraph CodingChangeV1 {
   hoist_approval_note_rework -> snapshot_operator_prior_commit
   snapshot_operator_prior_commit -> check_operator_rework_category_budget
 
-  check_operator_rework_category_budget -> legacy_status_operator_approval_rework [condition="context.operator_rework_count>=1"]
+  check_operator_rework_category_budget -> mark_operator_rework_exhausted_error [condition="context.operator_rework_count>=1"]
   check_operator_rework_category_budget -> check_operator_rework_total_budget [condition="context.operator_rework_count<1"]
-  check_operator_rework_total_budget -> legacy_status_operator_approval_rework [condition="context.total_rework_count>=2"]
+  check_operator_rework_total_budget -> mark_operator_rework_exhausted_error [condition="context.total_rework_count>=2"]
   check_operator_rework_total_budget -> inc_operator_rework_count [condition="context.total_rework_count<2"]
 
-  legacy_status_operator_approval_rework -> mark_operator_rework_exhausted_error
   mark_operator_rework_exhausted_error -> status_rework_exhausted
 
   inc_operator_rework_count -> inc_operator_total_rework_count

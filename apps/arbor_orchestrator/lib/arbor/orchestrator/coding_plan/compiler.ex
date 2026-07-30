@@ -726,7 +726,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
        "context.total_rework_count>=2", "context.total_rework_count>=#{max_cycles}"},
       {"check_review_total_budget", "snapshot_review_prior_commit",
        "context.total_rework_count<2", "context.total_rework_count<#{max_cycles}"},
-      {"check_operator_rework_total_budget", "legacy_status_operator_approval_rework",
+      {"check_operator_rework_total_budget", "mark_operator_rework_exhausted_error",
        "context.total_rework_count>=2", "context.total_rework_count>=#{max_cycles}"},
       {"check_operator_rework_total_budget", "inc_operator_rework_count",
        "context.total_rework_count<2", "context.total_rework_count<#{max_cycles}"},
