@@ -796,3 +796,13 @@ the frozen diff as soon as the approval appears. If the deadline is too short
 for a responsible review, preserve the immutable workspace evidence and
 redispatch an explicit continuation rather than mutating the worker tree (found
 2026-07-30 during the OAuth model-catalog transport review).
+
+<!-- applied-learning: use-current-coding-plan-output-keys-and-preflight-the-normalized-plan -->
+<a id="applied-learning-use-current-coding-plan-output-keys-and-preflight-the-normalized-plan"></a>
+**Use current CodingPlan output keys and preflight the normalized plan.** The v2
+output contract accepts `commit`, `draft_pr`, and `retain_workspace`; stale
+`draft` or `retain` keys are unknown input and correctly fail admission. Run the
+exact plan map through `Arbor.Contracts.Coding.Plan.new/1` and the current
+compiler before dispatch so schema drift is caught before workspace or provider
+resources are acquired (found 2026-07-30 while preparing the OAuth
+model-catalog correction).

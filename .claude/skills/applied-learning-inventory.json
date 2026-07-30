@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-07-30",
-  "entry_count": 590,
+  "entry_count": 591,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -7214,8 +7214,21 @@
       "source_incident": "found 2026-07-30 during the OAuth model-catalog transport review).",
       "content_sha256": "de14697685cd4f57ada0ba61b126039a77d16f29fb693de83be07f25b9527575",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 591,
+      "source_kind": "post-migration",
+      "slug": "use-current-coding-plan-output-keys-and-preflight-the-normalized-plan",
+      "title": "Use current CodingPlan output keys and preflight the normalized plan.",
+      "topic": "acp-mcp",
+      "destination": ".claude/skills/applied-learning-acp-mcp.md",
+      "anchor": "applied-learning-use-current-coding-plan-output-keys-and-preflight-the-normalized-plan",
+      "source_date": "2026-07-30",
+      "source_incident": "found 2026-07-30 while preparing the OAuth model-catalog correction).",
+      "content_sha256": "ecef7c914c226510a3bfe86ded732e7ec5cddea5019a73517f1760b25f7d5b0a",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 129
+  "post_migration_entry_count": 130
 }
