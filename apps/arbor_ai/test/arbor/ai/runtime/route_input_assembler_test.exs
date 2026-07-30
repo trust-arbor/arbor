@@ -351,6 +351,93 @@ defmodule Arbor.AI.Runtime.RouteInputAssemblerTest do
              )
   end
 
+  test "default catalog reader overlays exact OAuth routes without injected catalog_reader" do
+    obs_o = observation("openai_oauth", "gpt-5.6-sol", @stale_observed, "2026-07-22T23:00:00Z")
+    obs_x = observation("xai_oauth", "grok-4.5", @stale_observed, "2026-07-22T23:00:00Z")
+    budget_o = budget("openai_oauth", @stale_observed, "2026-07-22T23:00:00Z")
+    budget_x = budget("xai_oauth", @stale_observed, "2026-07-22T23:00:00Z")
+
+    profile = %{
+      enabled: true,
+      task_registry: %{"default" => %{requirements: %{}}},
+      default_task_class: "default",
+      catalog_model_ids: ["gpt-5.6-sol", "grok-4.5"],
+      scoreboard: [
+        score_row("gpt-5.6-sol", "openai_oauth"),
+        score_row("grok-4.5", "xai_oauth")
+      ],
+      providers: ["openai_oauth", "xai_oauth"],
+      params: %{}
+    }
+
+    assert {:ok, input} =
+             RouteInputAssembler.assemble(
+               profile: profile,
+               clock: fn -> @decision_time end,
+               observation_reader: fn _providers, _dt -> {:ok, [obs_o, obs_x]} end,
+               budget_reader: fn _providers, _dt -> {:ok, [budget_o, budget_x]} end
+             )
+
+    assert [gpt, grok] = input.catalog
+    assert gpt.canonical_id == "gpt-5.6-sol"
+    assert grok.canonical_id == "grok-4.5"
+
+    assert [
+             %ProviderEntry{
+               id: :openai_oauth,
+               auth: :oauth,
+               ref: "gpt-5.6-sol",
+               runtimes: [:arbor],
+               pricing: nil
+             }
+           ] = gpt.providers
+
+    assert [
+             %ProviderEntry{
+               id: :xai_oauth,
+               auth: :oauth,
+               ref: "grok-4.5",
+               runtimes: [:arbor],
+               pricing: nil
+             }
+           ] = grok.providers
+  end
+
+  test "injected catalog_reader is used instead of the exact route catalog default" do
+    custom = model_entry("gpt-5.6-sol", :custom_provider)
+    obs = observation("custom_provider", "gpt-5.6-sol", @stale_observed, "2026-07-22T23:00:00Z")
+    budget = budget("custom_provider", @stale_observed, "2026-07-22T23:00:00Z")
+    test_pid = self()
+
+    profile = %{
+      enabled: true,
+      task_registry: %{"default" => %{requirements: %{}}},
+      default_task_class: "default",
+      catalog_model_ids: ["gpt-5.6-sol"],
+      scoreboard: [score_row("gpt-5.6-sol", "custom_provider")],
+      providers: ["custom_provider"],
+      params: %{}
+    }
+
+    assert {:ok, input} =
+             RouteInputAssembler.assemble(
+               profile: profile,
+               clock: fn -> @decision_time end,
+               catalog_reader: fn ids ->
+                 send(test_pid, {:catalog_reader_called, ids})
+                 {:ok, [custom]}
+               end,
+               observation_reader: fn _providers, _dt -> {:ok, [obs]} end,
+               budget_reader: fn _providers, _dt -> {:ok, [budget]} end
+             )
+
+    assert_received {:catalog_reader_called, ["gpt-5.6-sol"]}
+    assert [entry] = input.catalog
+    assert entry.canonical_id == "gpt-5.6-sol"
+    assert [%ProviderEntry{id: :custom_provider}] = entry.providers
+    refute Enum.any?(entry.providers, &(&1.id in [:openai_oauth, :xai_oauth]))
+  end
+
   describe "Arbor.AI.assemble_provider_route_input/1 facade" do
     test "rejects every non-nil non-binary task_class without defaulting" do
       prior = Application.get_env(:arbor_ai, :provider_route_profile)

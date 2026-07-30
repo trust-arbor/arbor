@@ -23,7 +23,8 @@ defmodule Arbor.AI.Runtime.Arbor do
   callbacks include `:on_text_delta`, `:on_thinking_delta`, or
   `:on_tool_call`. The optional `:client` opt lets callers inject a
   pre-built `%Client{}` (e.g., one with custom middleware); the
-  default builds a fresh one via `Client.new()`.
+  default uses `Client.default_client/0` (persistent default); explicit
+  `:client` overrides.
 
   ## Streaming → callbacks mapping
 
@@ -61,7 +62,7 @@ defmodule Arbor.AI.Runtime.Arbor do
   @spec execute(Request.t(), Runtime.callbacks(), keyword()) ::
           {:ok, Response.t()} | {:error, term()}
   def execute(%Request{} = prepared, callbacks, opts) do
-    client = Keyword.get_lazy(opts, :client, fn -> Client.new() end)
+    client = Keyword.get_lazy(opts, :client, &Client.default_client/0)
     forwarded = Keyword.drop(opts, [:client])
 
     if streaming_callbacks?(callbacks) do

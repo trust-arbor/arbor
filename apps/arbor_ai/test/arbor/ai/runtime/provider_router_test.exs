@@ -75,6 +75,54 @@ defmodule Arbor.AI.Runtime.ProviderRouterTest do
     refute "zero_remaining_spend" in reasons
   end
 
+  test "security regression: strict mode rejects unknown quota without remaining units" do
+    input = base_input("default", %{"default" => %{requirements: %{}}})
+    catalog = [model("model-a", :good)]
+
+    budget =
+      budget_for("model-a", :good)
+      |> Map.put(:quota_state, "unknown")
+      |> Map.put(:quota_remaining_units, nil)
+
+    input = %{
+      input
+      | catalog: catalog,
+        scoreboard: [row("model-a", 0.8, 0, 0.1, 0.1, 0.1, 20)],
+        observations: [observation_for("model-a", :good)],
+        budgets: [budget],
+        policy: %{strict_evidence: true}
+    }
+
+    assert {:error, {:no_eligible_routes, [%{"reasons" => reasons} | _]}} =
+             ProviderRouter.route(input)
+
+    assert "missing_evidence:quota" in reasons
+  end
+
+  test "security regression: strict mode rejects unknown subscription without remaining capacity" do
+    input = base_input("default", %{"default" => %{requirements: %{}}})
+    catalog = [model("model-a", :good)]
+
+    budget =
+      budget_for("model-a", :good)
+      |> Map.put(:subscription_capacity_state, "unknown")
+      |> Map.put(:subscription_capacity_remaining, nil)
+
+    input = %{
+      input
+      | catalog: catalog,
+        scoreboard: [row("model-a", 0.8, 0, 0.1, 0.1, 0.1, 20)],
+        observations: [observation_for("model-a", :good)],
+        budgets: [budget],
+        policy: %{strict_evidence: true}
+    }
+
+    assert {:error, {:no_eligible_routes, [%{"reasons" => reasons} | _]}} =
+             ProviderRouter.route(input)
+
+    assert "missing_evidence:subscription" in reasons
+  end
+
   test "exact model binding excludes a mismatched confirmed model" do
     input = base_input("default", %{"default" => %{requirements: %{exact_model: "model-a"}}})
     observation = observation_for("model-a", :binding)

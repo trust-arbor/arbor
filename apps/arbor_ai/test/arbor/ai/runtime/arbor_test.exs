@@ -1,8 +1,11 @@
 defmodule Arbor.AI.Runtime.ArborTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
   @moduletag :fast
 
   alias Arbor.AI.Runtime.Arbor, as: RuntimeArbor
+  alias Arbor.LLM.Client
+
+  @default_client_key {Client, :default_client}
 
   describe "profile/0" do
     test "declares full Arbor support" do
@@ -27,6 +30,88 @@ defmodule Arbor.AI.Runtime.ArborTest do
     test "returns the request unchanged (pass-through)" do
       request = %Arbor.LLM.Request{model: "claude-opus-4-6", provider: "anthropic"}
       assert {:ok, ^request} = RuntimeArbor.prepare(request, [])
+    end
+  end
+
+  describe "execute/3 — default client" do
+    defmodule DefaultClientAdapter do
+      @moduledoc false
+      @behaviour Arbor.LLM.ProviderAdapter
+
+      @impl true
+      def provider, do: "default_fake"
+
+      @impl true
+      def complete(_req, _opts) do
+        {:ok, %Arbor.LLM.Response{text: "from-default-client", finish_reason: :stop}}
+      end
+
+      @impl true
+      def stream(_req, _opts), do: {:error, {:stream_not_supported, "default_fake"}}
+    end
+
+    defmodule ExplicitClientAdapter do
+      @moduledoc false
+      @behaviour Arbor.LLM.ProviderAdapter
+
+      @impl true
+      def provider, do: "explicit_fake"
+
+      @impl true
+      def complete(_req, _opts) do
+        {:ok, %Arbor.LLM.Response{text: "from-explicit-client", finish_reason: :stop}}
+      end
+
+      @impl true
+      def stream(_req, _opts), do: {:error, {:stream_not_supported, "explicit_fake"}}
+    end
+
+    setup do
+      previous = :persistent_term.get(@default_client_key, :__absent__)
+
+      fake =
+        Client.new(
+          adapters: %{"default_fake" => DefaultClientAdapter},
+          default_provider: "default_fake"
+        )
+
+      :ok = Client.set_default_client(fake)
+
+      on_exit(fn ->
+        case previous do
+          :__absent__ -> Client.clear_default_client()
+          %Client{} = client -> Client.set_default_client(client)
+          _ -> Client.clear_default_client()
+        end
+      end)
+
+      :ok
+    end
+
+    test "omitted :client uses Client.default_client/0" do
+      assert %Client{default_provider: "default_fake"} = Client.default_client()
+
+      request = %Arbor.LLM.Request{provider: "default_fake", model: "fake-1", messages: []}
+
+      assert {:ok, response} = RuntimeArbor.execute(request, %{}, [])
+      assert response.text == "from-default-client"
+    end
+
+    test "explicit :client wins over the persistent default" do
+      explicit =
+        Client.new(
+          adapters: %{"explicit_fake" => ExplicitClientAdapter},
+          default_provider: "explicit_fake"
+        )
+
+      # Persistent default remains the no-network fake; explicit must still win.
+      assert %Client{default_provider: "default_fake"} = Client.default_client()
+
+      request = %Arbor.LLM.Request{provider: "explicit_fake", model: "fake-1", messages: []}
+
+      assert {:ok, response} = RuntimeArbor.execute(request, %{}, client: explicit)
+      assert response.text == "from-explicit-client"
+      refute response.text == "from-default-client"
     end
   end
 

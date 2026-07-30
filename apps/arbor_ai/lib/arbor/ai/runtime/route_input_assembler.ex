@@ -19,10 +19,10 @@ defmodule Arbor.AI.Runtime.RouteInputAssembler do
   alias Arbor.AI.ProviderControlPlane
   alias Arbor.AI.QuotaTracker
   alias Arbor.AI.RouteFailureStore
+  alias Arbor.AI.Runtime.RouteCatalog
   alias Arbor.AI.Runtime.OAuthHealthObservation
   alias Arbor.AI.Runtime.ProviderRouter
   alias Arbor.AI.Runtime.RouteEvidenceOverlay
-  alias Arbor.Common.ModelProfile
   alias Arbor.Contracts.LLM.BudgetSnapshot
   alias Arbor.Contracts.LLM.ModelEntry
   alias Arbor.Contracts.LLM.ProviderObservation
@@ -321,8 +321,7 @@ defmodule Arbor.AI.Runtime.RouteInputAssembler do
   end
 
   defp default_catalog_reader(ids) do
-    catalog = Enum.map(ids, &ModelProfile.entry/1)
-    {:ok, catalog}
+    RouteCatalog.entries(ids)
   end
 
   # Enabled profiles must declare scoreboard explicitly. An empty list is a

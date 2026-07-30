@@ -1323,11 +1323,12 @@ defmodule Arbor.AI.Runtime.ProviderRouter do
       "missing_evidence:budget_amount"
     )
     |> add_if(
-      budget != nil and is_nil(budget.quota_state) and is_nil(budget.quota_remaining_units),
+      budget != nil and budget.quota_state in [nil, "unknown"] and
+        is_nil(budget.quota_remaining_units),
       "missing_evidence:quota"
     )
     |> add_if(
-      budget != nil and is_nil(budget.subscription_capacity_state) and
+      budget != nil and budget.subscription_capacity_state in [nil, "unknown"] and
         is_nil(budget.subscription_capacity_remaining),
       "missing_evidence:subscription"
     )
