@@ -141,3 +141,13 @@ readiness_observed_at` check rejects every healthy call. Permit one small docume
 window for that call ordering, still require provider expiry after the coordinator time,
 and reject evidence beyond the window rather than refreshing it (found 2026-07-22 while
 reviewing live coding readiness).
+
+<!-- applied-learning: never-recursively-search-credential-or-provider-session-roots -->
+<a id="applied-learning-never-recursively-search-credential-or-provider-session-roots"></a>
+**Never recursively search credential or provider-session roots.** A broad command such as
+`rg ~/.codex ~/.grok ~/.claude ~/.arbor` can copy bearer tokens, refresh tokens, session
+transcripts, or keychain-related metadata into terminal and agent logs even when the search
+term looks harmless. Search source, configuration, and documentation roots separately. When
+credential state itself must be inspected, use a known exact file plus bounded metadata-only
+extraction or the product's redacting facade; never print raw credential or session content
+(found 2026-07-30 while auditing provider OAuth client eligibility).

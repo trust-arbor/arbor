@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-07-30",
-  "entry_count": 594,
+  "entry_count": 595,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -7266,8 +7266,21 @@
       "source_incident": "found 2026-07-30 when an `arbor_common`/`arbor_security` OAuth change spent its test budget in `arbor_actions` first).",
       "content_sha256": "e5e0ae7522d39fa18ca3c4d0d600c929771a0fce131d3de8491e0648d019d04f",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 595,
+      "source_kind": "post-migration",
+      "slug": "never-recursively-search-credential-or-provider-session-roots",
+      "title": "Never recursively search credential or provider-session roots.",
+      "topic": "providers-oauth",
+      "destination": ".claude/skills/applied-learning-providers-oauth.md",
+      "anchor": "applied-learning-never-recursively-search-credential-or-provider-session-roots",
+      "source_date": "2026-07-30",
+      "source_incident": "found 2026-07-30 while auditing provider OAuth client eligibility).",
+      "content_sha256": "2b5d9cddc447660c6e0fa55498f37a6760dff140ba92c7cb0f17fcd1f0b38a8d",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 133
+  "post_migration_entry_count": 134
 }
