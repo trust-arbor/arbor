@@ -9,7 +9,9 @@ defmodule Arbor.LLM.OAuthTest do
     :oauth_store_dir,
     :oauth_refresh_fun,
     :oauth_cli_files,
-    :oauth_source_files
+    :oauth_source_files,
+    :oauth_rename_fun,
+    :oauth_fsync_dir_fun
   ]
 
   setup do
@@ -30,6 +32,8 @@ defmodule Arbor.LLM.OAuthTest do
     Application.delete_env(:arbor_llm, :oauth_refresh_fun)
     Application.delete_env(:arbor_llm, :oauth_cli_files)
     Application.delete_env(:arbor_llm, :oauth_source_files)
+    Application.delete_env(:arbor_llm, :oauth_rename_fun)
+    Application.delete_env(:arbor_llm, :oauth_fsync_dir_fun)
 
     on_exit(fn ->
       Enum.each(prior, fn
@@ -884,6 +888,514 @@ defmodule Arbor.LLM.OAuthTest do
                OAuth.access_token(:openai)
 
       assert File.read!(store_path) == "{"
+    end
+  end
+
+  describe "AcquiredCredential.new/1 (single normalization seam)" do
+    test "accepts a well-formed credential from a map or a keyword list" do
+      assert {:ok, %OAuth.AcquiredCredential{provider: :openai, account_id: "acct_new"}} =
+               OAuth.AcquiredCredential.new(%{
+                 provider: :openai,
+                 account_id: "acct_new",
+                 access_token: jwt_access(System.system_time(:second) + 3_600),
+                 refresh_token: "rt-fresh"
+               })
+
+      assert {:ok, %OAuth.AcquiredCredential{provider: :xai, account_id: nil}} =
+               OAuth.AcquiredCredential.new(
+                 provider: :xai,
+                 access_token: "xai-access",
+                 refresh_token: "xai-refresh"
+               )
+    end
+
+    test "security regression: unknown fields / metadata injection are rejected" do
+      # A keyword list (not a map) isolates unknown-key rejection from the separate map_size
+      # bound below -- a 5-key map is rejected as :too_many_fields before any key is inspected,
+      # so a keyword list is what actually exercises normalize_key/1's catch-all here.
+      base = [
+        provider: :openai,
+        account_id: "acct_new",
+        access_token: jwt_access(System.system_time(:second) + 3_600),
+        refresh_token: "rt-fresh"
+      ]
+
+      for injected <- [:origin, :owner, :source, :version, :generation, :evil] do
+        assert {:error, {:invalid_acquired_credential, :unknown_key}} =
+                 OAuth.AcquiredCredential.new(base ++ [{injected, "attacker"}])
+      end
+    end
+
+    test "security regression: an invalid or malformed provider is rejected" do
+      base = %{account_id: "acct", access_token: "a", refresh_token: "r"}
+
+      for bad <- [:anthropic, :claude, "openai", :openai_oauth, :grok, nil] do
+        assert {:error, {:invalid_acquired_credential, :invalid_provider}} =
+                 OAuth.AcquiredCredential.new(Map.put(base, :provider, bad))
+      end
+    end
+
+    test "security regression: a missing required field is rejected" do
+      assert {:error, {:invalid_acquired_credential, :missing_field}} =
+               OAuth.AcquiredCredential.new(%{access_token: "a", refresh_token: "r"})
+    end
+
+    test "security regression: malformed or oversized access_token/refresh_token/account_id is rejected" do
+      base = %{
+        provider: :openai,
+        account_id: "acct",
+        access_token: jwt_access(System.system_time(:second) + 3_600),
+        refresh_token: "rt"
+      }
+
+      assert {:error, {:invalid_acquired_credential, :invalid_token}} =
+               OAuth.AcquiredCredential.new(%{base | access_token: ""})
+
+      assert {:error, {:invalid_acquired_credential, :invalid_token}} =
+               OAuth.AcquiredCredential.new(%{
+                 base
+                 | refresh_token: String.duplicate("a", 65_537)
+               })
+
+      assert {:error, {:invalid_acquired_credential, :invalid_account_id}} =
+               OAuth.AcquiredCredential.new(%{base | account_id: nil})
+
+      assert {:error, {:invalid_acquired_credential, :invalid_account_id}} =
+               OAuth.AcquiredCredential.new(%{base | account_id: "bad\x00id"})
+    end
+
+    test "security regression: Inspect never renders access or refresh tokens" do
+      {:ok, credential} =
+        OAuth.AcquiredCredential.new(%{
+          provider: :openai,
+          account_id: "acct_secret_holder",
+          access_token: "super-secret-access-token",
+          refresh_token: "super-secret-refresh-token"
+        })
+
+      rendered = inspect(credential)
+      refute rendered =~ "super-secret-access-token"
+      refute rendered =~ "super-secret-refresh-token"
+      assert rendered =~ "acct_secret_holder"
+
+      normalized =
+        OAuth.normalize_acquired_credential(
+          :openai,
+          "acct_secret_holder",
+          "super-secret-access-token",
+          "super-secret-refresh-token"
+        )
+
+      refute inspect(normalized) =~ "super-secret-access-token"
+      refute inspect(normalized) =~ "super-secret-refresh-token"
+    end
+
+    test "security regression: an oversized map is rejected by map_size before Map.to_list materializes it" do
+      base = %{
+        provider: :openai,
+        account_id: "acct",
+        access_token: jwt_access(System.system_time(:second) + 3_600),
+        refresh_token: "rt"
+      }
+
+      oversized = Map.merge(base, %{extra1: "a", extra2: "b"})
+      assert map_size(oversized) == 6
+
+      assert {:error, {:invalid_acquired_credential, :too_many_fields}} =
+               OAuth.AcquiredCredential.new(oversized)
+    end
+  end
+
+  describe "publish_arbor_owned/2 (Arbor-owned OAuth credential publication boundary)" do
+    test "successful publish: openai, complete fixed metadata, generation 0, mode 0600, no temp residue",
+         %{store_dir: store_dir} do
+      access = jwt_access(System.system_time(:second) + 3_600)
+
+      {:ok, credential} =
+        OAuth.AcquiredCredential.new(%{
+          provider: :openai,
+          account_id: "acct_publish",
+          access_token: access,
+          refresh_token: "rt-publish"
+        })
+
+      assert :ok = OAuth.publish_arbor_owned(:openai_oauth, credential)
+
+      path = Path.join(store_dir, "openai.json")
+      {:ok, stat} = File.stat(path)
+      assert Bitwise.band(stat.mode, 0o777) == 0o600
+
+      assert {:ok, stored} = Jason.decode(File.read!(path))
+      assert stored["version"] == 1
+      assert stored["provider"] == "openai"
+      assert stored["account_id"] == "acct_publish"
+      assert stored["origin"] == "arbor_login"
+      assert stored["owner"] == "arbor_owned"
+      assert stored["source"] == "arbor_oauth_store"
+      assert stored["generation"] == 0
+      assert stored["tokens"]["access_token"] == access
+      assert stored["tokens"]["refresh_token"] == "rt-publish"
+      assert list_temp_files(store_dir) == []
+
+      assert {:ok, ^access} = OAuth.access_token(:openai)
+    end
+
+    test "successful publish: xai, nil account_id accepted, mode 0600, no temp residue",
+         %{store_dir: store_dir} do
+      {:ok, credential} =
+        OAuth.AcquiredCredential.new(%{
+          provider: :xai,
+          access_token: "xai-fresh-access",
+          refresh_token: "xai-fresh-refresh"
+        })
+
+      assert :ok = OAuth.publish_arbor_owned(:xai_oauth, credential)
+
+      path = Path.join(store_dir, "xai.json")
+      {:ok, stat} = File.stat(path)
+      assert Bitwise.band(stat.mode, 0o777) == 0o600
+      assert {:ok, stored} = Jason.decode(File.read!(path))
+      assert stored["account_id"] == nil
+      assert stored["generation"] == 0
+      assert list_temp_files(store_dir) == []
+    end
+
+    test "publish replaces an existing family and resets generation to 0 (not a continuation)",
+         %{store_dir: store_dir} do
+      write_envelope!(
+        store_dir,
+        :openai,
+        arbor_envelope(:openai, %{"access_token" => "old-a", "refresh_token" => "old-r"},
+          account_id: "acct_old",
+          generation: 41
+        )
+      )
+
+      {:ok, credential} =
+        OAuth.AcquiredCredential.new(%{
+          provider: :openai,
+          account_id: "acct_new",
+          access_token: "new-a",
+          refresh_token: "new-r"
+        })
+
+      assert :ok = OAuth.publish_arbor_owned(:openai_oauth, credential)
+
+      assert {:ok, stored} = read_store(store_dir, :openai)
+      assert stored["generation"] == 0
+      assert stored["account_id"] == "acct_new"
+      assert stored["access_token"] == "new-a"
+      assert stored["refresh_token"] == "new-r"
+      assert list_temp_files(store_dir) == []
+    end
+
+    test "publish also works via the bare backend key, not only the exact route id",
+         %{store_dir: store_dir} do
+      {:ok, credential} =
+        OAuth.AcquiredCredential.new(%{
+          provider: :xai,
+          access_token: "xai-a",
+          refresh_token: "xai-r"
+        })
+
+      assert :ok = OAuth.publish_arbor_owned(:xai, credential)
+      assert {:ok, _stored} = read_store(store_dir, :xai)
+    end
+
+    test "security regression: unknown/malformed route is refused before any mutation",
+         %{store_dir: store_dir} do
+      {:ok, credential} =
+        OAuth.AcquiredCredential.new(%{
+          provider: :openai,
+          account_id: "acct",
+          access_token: "a",
+          refresh_token: "r"
+        })
+
+      for bad <- ["grok", "chatgpt", "codex", 123] do
+        assert {:error, _} = OAuth.publish_arbor_owned(bad, credential)
+      end
+
+      refute File.exists?(Path.join(store_dir, "openai.json"))
+      assert list_temp_files(store_dir) == []
+    end
+
+    test "security regression: Anthropic-family providers are refused before any mutation, regardless of credential shape",
+         %{store_dir: store_dir} do
+      {:ok, credential} =
+        OAuth.AcquiredCredential.new(%{
+          provider: :openai,
+          account_id: "acct",
+          access_token: "a",
+          refresh_token: "r"
+        })
+
+      for p <- [:anthropic, :claude, "claude-code", "Anthropic"] do
+        assert {:error, :anthropic_oauth_forbidden} = OAuth.publish_arbor_owned(p, credential)
+      end
+
+      refute File.exists?(Path.join(store_dir, "openai.json"))
+      refute File.exists?(Path.join(store_dir, "anthropic.json"))
+      assert list_temp_files(store_dir) == []
+    end
+
+    test "security regression: provider mismatch between route and credential is refused before mutation",
+         %{store_dir: store_dir} do
+      write_envelope!(
+        store_dir,
+        :openai,
+        arbor_envelope(:openai, %{"access_token" => "keep-a", "refresh_token" => "keep-r"},
+          account_id: "acct_keep",
+          generation: 7
+        )
+      )
+
+      before = File.read!(Path.join(store_dir, "openai.json"))
+
+      {:ok, xai_credential} =
+        OAuth.AcquiredCredential.new(%{
+          provider: :xai,
+          access_token: "xai-a",
+          refresh_token: "xai-r"
+        })
+
+      assert {:error, :oauth_publish_provider_mismatch} =
+               OAuth.publish_arbor_owned(:openai_oauth, xai_credential)
+
+      assert File.read!(Path.join(store_dir, "openai.json")) == before
+      assert list_temp_files(store_dir) == []
+    end
+
+    test "security regression: a manually constructed credential is revalidated before mutation",
+         %{store_dir: store_dir} do
+      path =
+        write_store!(store_dir, :openai, %{
+          "access_token" => "keep-a",
+          "refresh_token" => "keep-r"
+        })
+
+      before = File.read!(path)
+
+      forged = %OAuth.AcquiredCredential{
+        provider: :openai,
+        account_id: "acct",
+        access_token: "bad\x00access",
+        refresh_token: "refresh"
+      }
+
+      assert {:error, {:invalid_acquired_credential, :invalid_token}} =
+               OAuth.publish_arbor_owned(:openai_oauth, forged)
+
+      assert File.read!(path) == before
+      assert list_temp_files(store_dir) == []
+    end
+
+    test "security regression: Inspect/errors never expose token values or token-derived material",
+         %{store_dir: _store_dir} do
+      {:ok, credential} =
+        OAuth.AcquiredCredential.new(%{
+          provider: :openai,
+          account_id: "acct",
+          access_token: "leak-me-access",
+          refresh_token: "leak-me-refresh"
+        })
+
+      result = OAuth.publish_arbor_owned(:anthropic, credential)
+      refute inspect(result) =~ "leak-me-access"
+      refute inspect(result) =~ "leak-me-refresh"
+
+      {:ok, mismatch_credential} =
+        OAuth.AcquiredCredential.new(%{
+          provider: :xai,
+          access_token: "xai-a",
+          refresh_token: "xai-r"
+        })
+
+      mismatch_result = OAuth.publish_arbor_owned(:openai_oauth, mismatch_credential)
+      refute inspect(mismatch_result) =~ "xai-a"
+      refute inspect(mismatch_result) =~ "xai-r"
+    end
+
+    test "security regression: publish_arbor_owned/2 is total -- a non-struct second argument returns a stable redacted error instead of raising",
+         %{store_dir: store_dir} do
+      for bad <- [%{provider: :openai}, "not-a-credential", nil, 123, %{}] do
+        assert {:error, {:invalid_acquired_credential, :struct_required}} =
+                 OAuth.publish_arbor_owned(:openai_oauth, bad)
+      end
+
+      refute File.exists?(Path.join(store_dir, "openai.json"))
+      assert list_temp_files(store_dir) == []
+    end
+
+    test "security regression: an invalid provider is refused before the non-struct credential is even inspected" do
+      for p <- [:anthropic, :claude, "grok", "chatgpt"] do
+        result = OAuth.publish_arbor_owned(p, "garbage-not-a-credential")
+        refute match?({:error, {:invalid_acquired_credential, _}}, result)
+      end
+
+      assert {:error, :anthropic_oauth_forbidden} =
+               OAuth.publish_arbor_owned(:anthropic, "garbage-not-a-credential")
+    end
+  end
+
+  describe "publish_arbor_owned/2 atomic write failure handling (security regression — honest commit point)" do
+    test "security regression: a pre-rename write failure leaves the real target byte-for-byte unchanged with no temp residue",
+         %{store_dir: store_dir} do
+      path =
+        write_store!(store_dir, :openai, %{
+          "access_token" => "prior-a",
+          "refresh_token" => "prior-r"
+        })
+
+      before = File.read!(path)
+
+      Application.put_env(:arbor_llm, :oauth_rename_fun, fn _tmp, _path ->
+        {:error, :simulated_rename_failure}
+      end)
+
+      {:ok, credential} =
+        OAuth.AcquiredCredential.new(%{
+          provider: :openai,
+          account_id: "acct_new",
+          access_token: "new-a",
+          refresh_token: "new-r"
+        })
+
+      assert {:error, {:token_store_write_failed, :simulated_rename_failure}} =
+               OAuth.publish_arbor_owned(:openai_oauth, credential)
+
+      assert File.read!(path) == before
+      assert list_temp_files(store_dir) == []
+    end
+
+    test "security regression: a post-rename failure is reported as commit-uncertain, never falsely as unchanged",
+         %{store_dir: store_dir} do
+      Application.put_env(:arbor_llm, :oauth_fsync_dir_fun, fn _dir ->
+        {:error, {:dir_fsync_failed, :simulated_fsync_failure}}
+      end)
+
+      {:ok, credential} =
+        OAuth.AcquiredCredential.new(%{
+          provider: :openai,
+          account_id: "acct_committed",
+          access_token: "committed-a",
+          refresh_token: "committed-r"
+        })
+
+      result = OAuth.publish_arbor_owned(:openai_oauth, credential)
+
+      assert {:error,
+              {:oauth_publish_commit_uncertain,
+               {:token_store_write_failed, {:dir_fsync_failed, :simulated_fsync_failure}}}} =
+               result
+
+      refute inspect(result) =~ "committed-a"
+      refute inspect(result) =~ "committed-r"
+
+      path = Path.join(store_dir, "openai.json")
+      assert {:ok, stored} = Jason.decode(File.read!(path))
+      assert stored["tokens"]["access_token"] == "committed-a"
+      assert stored["account_id"] == "acct_committed"
+      assert list_temp_files(store_dir) == []
+    end
+
+    test "security regression: refresh's public error shape is preserved unchanged through the same post-rename tag",
+         %{store_dir: store_dir} do
+      write_store!(store_dir, :openai, %{
+        "access_token" => jwt_access(System.system_time(:second) - 5),
+        "refresh_token" => "rt-refresh-remap"
+      })
+
+      Application.put_env(:arbor_llm, :oauth_refresh_fun, fn :openai,
+                                                             _config,
+                                                             "rt-refresh-remap" ->
+        {:ok,
+         %{
+           "access_token" => jwt_access(System.system_time(:second) + 3_600),
+           "refresh_token" => "rt-refresh-remap-2"
+         }}
+      end)
+
+      Application.put_env(:arbor_llm, :oauth_fsync_dir_fun, fn _dir ->
+        {:error, {:dir_fsync_failed, :simulated_fsync_failure}}
+      end)
+
+      assert {:error, {:token_store_write_failed, {:dir_fsync_failed, :simulated_fsync_failure}}} =
+               OAuth.access_token(:openai)
+    end
+  end
+
+  describe "publish_arbor_owned/2 concurrency (security regression — shared provider lock)" do
+    test "security regression: a forced refresh and a concurrent publication both block on the identical provider-scoped lock",
+         %{store_dir: store_dir} do
+      write_store!(store_dir, :openai, %{
+        "access_token" => jwt_access(System.system_time(:second) - 5),
+        "refresh_token" => "rt-shared-lock"
+      })
+
+      refreshed_access = jwt_access(System.system_time(:second) + 3_600)
+
+      # Generic on refresh_token: :global.trans does not guarantee which of the two waiters below
+      # acquires the resource first once released, so whichever one (publish or refresh) runs
+      # second must see a store already mutated by the other. Pinning to one exact refresh_token
+      # would make the test's outcome depend on that unspecified ordering.
+      Application.put_env(:arbor_llm, :oauth_refresh_fun, fn :openai, _config, _refresh_token ->
+        {:ok, %{"access_token" => refreshed_access, "refresh_token" => "rt-shared-lock-2"}}
+      end)
+
+      {:ok, credential} =
+        OAuth.AcquiredCredential.new(%{
+          provider: :openai,
+          account_id: "acct_locked",
+          # Also expired, for the same reason: if publication commits first, the subsequent
+          # refresh must still see a token that needs refreshing, regardless of ordering.
+          access_token: jwt_access(System.system_time(:second) - 5),
+          refresh_token: "locked-r"
+        })
+
+      lock_id = {{OAuth, :refresh, :openai}, self()}
+      lock_nodes = [node() | Node.list()]
+      assert true = :global.set_lock(lock_id, lock_nodes, 0)
+
+      # Two independent processes, each contending the SAME resource: a forced refresh (the
+      # stored token is already expired, so access_token/1 must take the refresh path) and a
+      # concurrent publication. Both must be provably blocked on the externally-held lock before
+      # it is released -- proving they share one resource, not merely that each respects locking
+      # in isolation.
+      refresh_task = Task.async(fn -> OAuth.access_token(:openai) end)
+      publish_task = Task.async(fn -> OAuth.publish_arbor_owned(:openai_oauth, credential) end)
+
+      try do
+        wait_until(fn -> waiting_on_global_lock?(refresh_task.pid) end, 2_000)
+        wait_until(fn -> waiting_on_global_lock?(publish_task.pid) end, 2_000)
+      after
+        :global.del_lock(lock_id, lock_nodes)
+      end
+
+      assert {:ok, ^refreshed_access} = Task.await(refresh_task, 5_000)
+      assert :ok = Task.await(publish_task, 5_000)
+    end
+
+    test "security regression: different providers remain independently lockable during publication" do
+      {:ok, xai_credential} =
+        OAuth.AcquiredCredential.new(%{
+          provider: :xai,
+          access_token: "xai-independent-a",
+          refresh_token: "xai-independent-r"
+        })
+
+      lock_id = {{OAuth, :refresh, :openai}, self()}
+      lock_nodes = [node() | Node.list()]
+      assert true = :global.set_lock(lock_id, lock_nodes, 0)
+
+      try do
+        publish_task =
+          Task.async(fn -> OAuth.publish_arbor_owned(:xai_oauth, xai_credential) end)
+
+        assert :ok = Task.await(publish_task, 2_000)
+      after
+        :global.del_lock(lock_id, lock_nodes)
+      end
     end
   end
 

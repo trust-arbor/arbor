@@ -32,6 +32,108 @@ defmodule Arbor.LLM.OAuth.CredentialReceipt do
         }
 end
 
+defmodule Arbor.LLM.OAuth.AcquiredCredential do
+  @moduledoc """
+  Bounded, typed input for `Arbor.LLM.OAuth.publish_arbor_owned/2`.
+
+  Carries only what a login/relogin caller may supply: provider, account identity, and freshly
+  acquired access/refresh token material. `new/1` is the single normalization seam -- unknown
+  keys, a missing required field, and malformed or oversized content are all rejected before a
+  struct is returned, by delegating the byte/charset bound to
+  `Arbor.LLM.OAuth.normalize_acquired_credential/4` (the same validators the credential envelope
+  decoder and refresh already trust). A returned `t()` is therefore fully validated, not merely
+  shape-plausible.
+  """
+
+  @derive {Inspect, only: [:provider, :account_id]}
+  @enforce_keys [:provider, :access_token, :refresh_token]
+  defstruct [:provider, :account_id, :access_token, :refresh_token]
+
+  @type t :: %__MODULE__{
+          provider: :openai | :xai,
+          account_id: String.t() | nil,
+          access_token: String.t(),
+          refresh_token: String.t()
+        }
+
+  # The closed field set has exactly 4 keys; anything larger is structurally invalid regardless
+  # of content, so it is rejected via the O(1) map_size/1 check BEFORE Map.to_list/1 would
+  # otherwise eagerly materialize an unbounded map into a list.
+  @max_attrs_fields 4
+
+  @doc """
+  Construct an `AcquiredCredential` from a closed field set.
+
+  Accepts a map or keyword list with exactly the keys `:provider`, `:access_token`,
+  `:refresh_token` (required), and `:account_id` (optional). Any other key -- including
+  `:origin`, `:owner`, `:source`, `:version`, or `:generation`, the fields
+  `Arbor.LLM.OAuth.publish_arbor_owned/2` fixes internally -- is rejected. `provider` must be
+  exactly the atom `:openai` or `:xai`. `access_token`/`refresh_token` must be non-empty,
+  bounded, safe-text binaries; `account_id` must be `nil` or such a binary, subject to the same
+  per-provider requirement the stored envelope already enforces (required for `:openai`,
+  optional for `:xai`).
+  """
+  @spec new(map() | keyword()) :: {:ok, t()} | {:error, {:invalid_acquired_credential, atom()}}
+  def new(attrs) when is_map(attrs) or is_list(attrs) do
+    with {:ok, normalized} <- normalize(attrs),
+         {:ok, provider} <- fetch_provider(normalized),
+         {:ok, credential} <-
+           Arbor.LLM.OAuth.normalize_acquired_credential(
+             provider,
+             Map.get(normalized, :account_id),
+             Map.get(normalized, :access_token),
+             Map.get(normalized, :refresh_token)
+           ) do
+      {:ok, credential}
+    else
+      {:error, reason} -> {:error, {:invalid_acquired_credential, reason}}
+    end
+  end
+
+  def new(_attrs), do: {:error, {:invalid_acquired_credential, :map_or_keyword_required}}
+
+  defp normalize(attrs) when is_list(attrs), do: normalize_pairs(attrs, %{})
+
+  defp normalize(attrs) when is_map(attrs) do
+    if map_size(attrs) > @max_attrs_fields do
+      {:error, :too_many_fields}
+    else
+      normalize_pairs(Map.to_list(attrs), %{})
+    end
+  end
+
+  defp normalize_pairs([], acc), do: {:ok, acc}
+
+  defp normalize_pairs([{key, value} | rest], acc) when is_list(rest) do
+    with {:ok, normalized_key} <- normalize_key(key),
+         false <- Map.has_key?(acc, normalized_key) do
+      normalize_pairs(rest, Map.put(acc, normalized_key, value))
+    else
+      true -> {:error, :duplicate_key}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp normalize_pairs(_other, _acc), do: {:error, :invalid_attrs}
+
+  # Literal mapping, not String.to_atom/1.
+  defp normalize_key(:provider), do: {:ok, :provider}
+  defp normalize_key("provider"), do: {:ok, :provider}
+  defp normalize_key(:account_id), do: {:ok, :account_id}
+  defp normalize_key("account_id"), do: {:ok, :account_id}
+  defp normalize_key(:access_token), do: {:ok, :access_token}
+  defp normalize_key("access_token"), do: {:ok, :access_token}
+  defp normalize_key(:refresh_token), do: {:ok, :refresh_token}
+  defp normalize_key("refresh_token"), do: {:ok, :refresh_token}
+  defp normalize_key(_key), do: {:error, :unknown_key}
+
+  defp fetch_provider(%{provider: provider}) when provider in [:openai, :xai],
+    do: {:ok, provider}
+
+  defp fetch_provider(%{provider: _provider}), do: {:error, :invalid_provider}
+  defp fetch_provider(%{}), do: {:error, :missing_field}
+end
+
 defmodule Arbor.LLM.OAuth do
   @moduledoc """
   Subscription OAuth token access for LLM providers that authenticate against their SUBSCRIPTION
@@ -51,6 +153,18 @@ defmodule Arbor.LLM.OAuth do
   atomic same-directory rename. Provider refresh responses may replace only token payload fields;
   ownership metadata always comes from the validated stored envelope.
 
+  `publish_arbor_owned/2` is the sole way to establish or replace an Arbor-owned credential
+  family from freshly acquired access/refresh token material (see `AcquiredCredential`). It fixes
+  `version`, `origin`, `owner`, `source`, and `generation` internally -- the caller supplies only
+  provider, account identity, and token material -- and every successful publish starts
+  generation at `0` unconditionally: a fresh, independent family, never a continuation of
+  whatever generation (or owner) the file it replaces held. It does not perform the OAuth
+  authorization exchange itself (that remains out of scope here); it is the publication boundary
+  a future login/relogin flow calls into once it already has tokens in hand. Publication and
+  refresh serialize on the identical provider-scoped `:global` lock resource (see
+  `with_provider_lock/2`) so a login/relogin can never race a concurrent refresh and lose a token
+  rotation.
+
   ## SECURITY — Anthropic is HARD-REFUSED
 
   Using a Claude subscription OAuth token programmatically is against Anthropic's ToS. This module
@@ -61,6 +175,7 @@ defmodule Arbor.LLM.OAuth do
   """
 
   alias Arbor.LLM.{Deadline, Endpoint, ResponseBudget}
+  alias Arbor.LLM.OAuth.AcquiredCredential
   alias Arbor.LLM.OAuth.CredentialReceipt
   alias Arbor.Contracts.LLM.AuthProvenance
   alias Arbor.Contracts.LLM.OAuthHealth
@@ -163,6 +278,107 @@ defmodule Arbor.LLM.OAuth do
   # Literal mapping, not String.to_atom/1.
   defp route_atom("openai_oauth"), do: :openai_oauth
   defp route_atom("xai_oauth"), do: :xai_oauth
+
+  @doc """
+  Publish a freshly acquired Arbor-owned OAuth credential for `provider` (an exact route id like
+  `:openai_oauth` or a bare backend key like `:openai` -- resolved via `route/1`, the closed
+  `@oauth_routes`/`@oauth_backends` table. This is deliberately NOT the same table every other
+  public function reads: `access_token/1` resolves through `resolve/1`, a separate, wider table
+  that also accepts provider aliases like `"codex"`/`"chatgpt"`/`"grok"`; `health/1` resolves
+  through `route_only/1`, the same `@oauth_routes`/`@oauth_backends` table narrowed to reject a
+  bare backend key. Every other spelling, including any Anthropic/claude alias, is refused before
+  any file is touched, regardless of which of the three resolvers is in play).
+
+  The caller supplies only provider identity, account identity, and freshly acquired access/
+  refresh token material via `AcquiredCredential.new/1`; `version`, `origin`, `owner`, `source`,
+  and `generation` are fixed internally to `1`, `"arbor_login"`, `"arbor_owned"`,
+  `"arbor_oauth_store"`, and `0` respectively -- the caller cannot supply or override any of
+  them. `credential.provider` must match the backend `provider` resolves to; a mismatch is
+  refused before any file is touched.
+
+  Every successful publish begins a NEW, independent Arbor-owned credential family at generation
+  0, regardless of what (if anything) it replaces -- it is not a continuation of a prior family's
+  generation counter; `access_token/1`'s refresh path only ever increments a generation that
+  began at a publish.
+
+  Publication serializes on the exact same provider-scoped `:global` lock resource refresh uses
+  (see `with_provider_lock/2`), so a login/relogin can never race a concurrent refresh and lose a
+  token rotation, while different providers remain independently lockable. It reuses the existing
+  validated atomic same-directory publication path (`write_stored/2`) -- a validation, lock, or
+  write failure leaves any prior credential store byte-for-byte unchanged and leaves no temporary
+  file; the sole exception is the narrow window after a successful rename where only the parent
+  directory's crash-durability sync or the final mode re-check failed, which is reported as a
+  distinct `{:oauth_publish_commit_uncertain, reason}` rather than falsely implied to be
+  unchanged.
+  """
+  @spec publish_arbor_owned(atom() | String.t(), AcquiredCredential.t() | term()) ::
+          :ok | {:error, term()}
+  def publish_arbor_owned(provider, %AcquiredCredential{} = credential) do
+    with {:ok, %{backend: backend}} <- route(provider),
+         :ok <- match_publish_provider(backend, credential.provider),
+         {:ok, credential} <- revalidate_acquired_credential(credential) do
+      publish_under_lock(backend, %{
+        version: @credential_version,
+        provider: Atom.to_string(backend),
+        account_id: credential.account_id,
+        origin: "arbor_login",
+        owner: "arbor_owned",
+        source: "arbor_oauth_store",
+        generation: 0,
+        tokens: %{
+          "access_token" => credential.access_token,
+          "refresh_token" => credential.refresh_token
+        }
+      })
+    end
+  end
+
+  # Total: a caller passing anything other than an %AcquiredCredential{} struct as the second
+  # argument must get a stable, redacted error rather than a FunctionClauseError. The provider is
+  # still resolved/refused FIRST, so an Anthropic-family or unknown route reports its own reason
+  # rather than being shadowed by "invalid credential" -- matching the struct clause's ordering.
+  def publish_arbor_owned(provider, _credential) do
+    with {:ok, %{backend: _backend}} <- route(provider) do
+      {:error, {:invalid_acquired_credential, :struct_required}}
+    end
+  end
+
+  defp match_publish_provider(backend, backend), do: :ok
+  defp match_publish_provider(_backend, _other), do: {:error, :oauth_publish_provider_mismatch}
+
+  defp revalidate_acquired_credential(%AcquiredCredential{} = credential) do
+    case normalize_acquired_credential(
+           credential.provider,
+           credential.account_id,
+           credential.access_token,
+           credential.refresh_token
+         ) do
+      {:ok, validated} -> {:ok, validated}
+      {:error, reason} -> {:error, {:invalid_acquired_credential, reason}}
+    end
+  end
+
+  @doc false
+  @spec normalize_acquired_credential(atom(), String.t() | nil, term(), term()) ::
+          {:ok, AcquiredCredential.t()}
+          | {:error, atom()}
+  def normalize_acquired_credential(provider, account_id, access_token, refresh_token)
+      when provider in [:openai, :xai] do
+    with {:ok, account_id} <- validate_account_id(provider, account_id),
+         {:ok, access_token} <- validate_token(access_token, @max_access_token_bytes),
+         {:ok, refresh_token} <- validate_token(refresh_token, @max_refresh_token_bytes) do
+      {:ok,
+       %AcquiredCredential{
+         provider: provider,
+         account_id: account_id,
+         access_token: access_token,
+         refresh_token: refresh_token
+       }}
+    end
+  end
+
+  def normalize_acquired_credential(_provider, _account_id, _access_token, _refresh_token),
+    do: {:error, :invalid_provider}
 
   @doc """
   Return a valid access token for `provider`. `{:ok, token}` or `{:error, reason}`.
@@ -813,17 +1029,31 @@ defmodule Arbor.LLM.OAuth do
   end
 
   defp refresh_singleflight(key, config) do
+    case with_provider_lock(key, fn -> refresh_under_lock(key, config) end) do
+      :aborted -> {:error, :oauth_refresh_lock_aborted}
+      result -> result
+    end
+  end
+
+  # Shared provider-scoped :global lock: ResourceId = {__MODULE__, :refresh, key} (identical for
+  # every caller addressing this provider, whether refreshing or publishing -- the literal
+  # :refresh tag is kept unchanged so publish contends the EXACT same resource, not an
+  # independent one). RequesterId = self() (standard :global.trans {ResourceId, RequesterId}
+  # pairing; unique per contending process). Different provider keys -> different resources ->
+  # independent per-provider concurrency.
+  defp with_provider_lock(key, fun) do
     id = {{__MODULE__, :refresh, key}, self()}
     nodes = [node() | Node.list()]
+    :global.trans(id, fun, nodes, @refresh_lock_retries)
+  end
 
-    case :global.trans(
-           id,
-           fn -> refresh_under_lock(key, config) end,
-           nodes,
-           @refresh_lock_retries
-         ) do
+  defp publish_under_lock(key, credential) do
+    case with_provider_lock(key, fn -> write_stored(key, credential) end) do
       :aborted ->
-        {:error, :oauth_refresh_lock_aborted}
+        {:error, :oauth_publish_lock_aborted}
+
+      {:error, {:token_store_post_commit_failed, inner}} ->
+        {:error, {:oauth_publish_commit_uncertain, inner}}
 
       result ->
         result
@@ -872,8 +1102,19 @@ defmodule Arbor.LLM.OAuth do
                "refresh_token" => effective_refresh
              }
          },
-         :ok <- write_stored(key, updated) do
+         :ok <- refresh_write_stored(key, updated) do
       {:ok, access}
+    end
+  end
+
+  # write_stored/2 tags a post-rename (post-commit) failure distinctly so
+  # publish_arbor_owned/2 can report commit-uncertainty honestly; refresh never needed that
+  # distinction and must keep its existing public error shape byte-for-byte unchanged, so the
+  # tag is unwrapped back to exactly what write_stored/2 returned before that tagging existed.
+  defp refresh_write_stored(key, credential) do
+    case write_stored(key, credential) do
+      {:error, {:token_store_post_commit_failed, inner}} -> {:error, inner}
+      result -> result
     end
   end
 
@@ -920,7 +1161,12 @@ defmodule Arbor.LLM.OAuth do
   # Persist tokens to Arbor's local store via atomic same-directory publication.
   # Encode first; exclusive temp (mode 0600 before content); write + fsync; rename over target;
   # fsync the parent directory so the directory entry is crash-durable; ensure final mode 0600.
-  # Never delete the old target before rename. Failures clean the temp and return an error.
+  # Never delete the old target before rename. Pre-rename failures clean the temp and leave the
+  # prior target byte-for-byte unchanged. A post-rename failure (fsync_directory/ensure_final_mode)
+  # means the new content is ALREADY the durable target -- tagged distinctly (never inferred from
+  # error shape, which is ambiguous: ensure_final_mode/1 can also surface a raw reason
+  # structurally identical to a pre-rename failure) so callers cannot mistake it for "nothing
+  # changed".
   defp write_stored(key, credential) do
     with {:ok, envelope} <- encode_credential(key, credential),
          {:ok, json} <- encode_token_json(envelope) do
@@ -930,11 +1176,11 @@ defmodule Arbor.LLM.OAuth do
       with :ok <- ensure_store_dir(dir),
            {:ok, tmp} <- create_temp_path(dir, key),
            :ok <- write_temp_token_file(tmp, json) do
-        case File.rename(tmp, path) do
+        case perform_rename(tmp, path) do
           :ok ->
-            with :ok <- fsync_directory(dir),
-                 :ok <- ensure_final_mode(path) do
-              :ok
+            case post_rename_finalize(dir, path) do
+              :ok -> :ok
+              {:error, inner} -> {:error, {:token_store_post_commit_failed, inner}}
             end
 
           {:error, reason} ->
@@ -943,6 +1189,21 @@ defmodule Arbor.LLM.OAuth do
         end
       end
     end
+  end
+
+  # Test seam: Application env `:oauth_rename_fun` (arity 2) replaces the rename call so tests
+  # can force a deterministic pre-commit failure against the real target/store_dir without
+  # redirecting it elsewhere. Production never sets this; real behavior is File.rename/2,
+  # unchanged.
+  defp perform_rename(tmp, path) do
+    case Application.get_env(:arbor_llm, :oauth_rename_fun) do
+      fun when is_function(fun, 2) -> fun.(tmp, path)
+      _ -> File.rename(tmp, path)
+    end
+  end
+
+  defp post_rename_finalize(dir, path) do
+    with :ok <- fsync_directory(dir), :ok <- ensure_final_mode(path), do: :ok
   end
 
   defp encode_credential(key, credential) do
@@ -975,20 +1236,42 @@ defmodule Arbor.LLM.OAuth do
   # Directory fsync makes the rename durable across crash/power loss on filesystems
   # that only guarantee directory-entry durability after sync of the parent dir.
   # OTP requires the :directory mode; plain [:raw, :read] returns :eisdir.
-  defp fsync_directory(dir) when is_binary(dir) do
+  #
+  # Test seam: Application env `:oauth_fsync_dir_fun` (arity 1) replaces the raw directory-sync
+  # step so tests can force a deterministic post-commit (post-rename) failure against the real
+  # target. The seam shares do_fsync_directory/1's own RAW contract -- `:ok | {:error, reason}`
+  # with reason already inner-tagged (`{:dir_fsync_failed, _}` / `{:dir_open_failed, _}`) exactly
+  # like a real failure would be -- and the outer `{:token_store_write_failed, _}` wrap below is
+  # applied exactly once, here, to whichever source ran. Neither path can double-wrap, and the
+  # seam never has to know write_stored/2's error taxonomy beyond that one inner tag. Production
+  # never sets this; real behavior is do_fsync_directory/1, unchanged.
+  defp fsync_directory(dir) do
+    result =
+      case Application.get_env(:arbor_llm, :oauth_fsync_dir_fun) do
+        fun when is_function(fun, 1) -> fun.(dir)
+        _ -> do_fsync_directory(dir)
+      end
+
+    case result do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:token_store_write_failed, reason}}
+    end
+  end
+
+  defp do_fsync_directory(dir) when is_binary(dir) do
     case :file.open(dir, [:raw, :read, :directory]) do
       {:ok, io} ->
         try do
           case :file.sync(io) do
             :ok -> :ok
-            {:error, reason} -> {:error, {:token_store_write_failed, {:dir_fsync_failed, reason}}}
+            {:error, reason} -> {:error, {:dir_fsync_failed, reason}}
           end
         after
           _ = close_io_silent(io)
         end
 
       {:error, reason} ->
-        {:error, {:token_store_write_failed, {:dir_open_failed, reason}}}
+        {:error, {:dir_open_failed, reason}}
     end
   end
 
