@@ -43,6 +43,10 @@ defmodule Arbor.LLM.Endpoint do
     "https://chatgpt.com/backend-api/codex/responses",
     "https://api.x.ai/v1/responses"
   ]
+  @oauth_model_catalog_endpoints [
+    "https://chatgpt.com/backend-api/codex/models",
+    "https://cli-chat-proxy.grok.com/v1/models"
+  ]
   @oauth_discovery_endpoints ["https://auth.x.ai/.well-known/openid-configuration"]
   @oauth_token_origins ["https://auth.openai.com", "https://auth.x.ai"]
   @eval_http_paths ["/api/embeddings", "/api/chat", "/v1/embeddings"]
@@ -53,6 +57,7 @@ defmodule Arbor.LLM.Endpoint do
           | :lm_studio
           | :eval_http
           | :oauth_responses
+          | :oauth_model_catalog
           | :oauth_discovery
           | :oauth_token
           | :oauth_xai_token
@@ -102,6 +107,7 @@ defmodule Arbor.LLM.Endpoint do
               :lm_studio,
               :eval_http,
               :oauth_responses,
+              :oauth_model_catalog,
               :oauth_discovery,
               :oauth_token,
               :oauth_xai_token,
@@ -290,6 +296,7 @@ defmodule Arbor.LLM.Endpoint do
   end
 
   defp validate_path(path, :oauth_responses), do: canonical_endpoint_path(path)
+  defp validate_path(path, :oauth_model_catalog), do: canonical_endpoint_path(path)
   defp validate_path(path, :oauth_discovery), do: canonical_endpoint_path(path)
   defp validate_path(path, :oauth_token), do: canonical_endpoint_path(path)
   defp validate_path(path, :oauth_xai_token), do: canonical_endpoint_path(path)
@@ -414,6 +421,13 @@ defmodule Arbor.LLM.Endpoint do
         do: :ok,
         else: {:error, :endpoint_origin_not_trusted}
     end
+  end
+
+  # Compile-time exact catalog endpoints only. No Application-env trusted list.
+  defp authorize_endpoint(canonical, :oauth_model_catalog) do
+    if canonical in @oauth_model_catalog_endpoints,
+      do: :ok,
+      else: {:error, :endpoint_origin_not_trusted}
   end
 
   defp authorize_endpoint(canonical, :oauth_discovery) do

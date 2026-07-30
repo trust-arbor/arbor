@@ -76,6 +76,20 @@ defmodule Arbor.LLM do
           {:ok, Arbor.Contracts.LLM.OAuthHealth.t()} | {:error, term()}
   def oauth_health(provider), do: Arbor.LLM.OAuth.health(provider)
 
+  @doc """
+  Fetch provider-reported subscription model catalog for one exact OAuth route
+  (`openai_oauth` / `xai_oauth`). Returns closed ProviderModelCatalog evidence.
+  Rejects aliases/lookalikes and forbidden options before credential or network I/O.
+  """
+  @spec oauth_model_catalog(atom() | String.t(), keyword()) ::
+          {:ok, Arbor.Contracts.LLM.ProviderModelCatalog.t()} | {:error, term()}
+  def oauth_model_catalog(route, opts \\ [])
+
+  def oauth_model_catalog(route, opts) when is_list(opts),
+    do: Arbor.LLM.OAuth.ModelCatalog.fetch(route, opts)
+
+  def oauth_model_catalog(_route, _opts), do: {:error, :keyword_options_required}
+
   @spec generate(generate_opts()) ::
           {:ok, Arbor.LLM.Response.t()} | {:error, term()}
   def generate(opts) when is_list(opts) do

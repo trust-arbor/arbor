@@ -156,6 +156,28 @@ defmodule Arbor.LLM.EndpointTest do
              Endpoint.validate("https://api.openai.com/v1", {:req_llm_base, %{}})
   end
 
+  test "security regression: oauth model catalog endpoints are compile-time exact" do
+    assert {:ok, "https://chatgpt.com/backend-api/codex/models"} =
+             Endpoint.validate(
+               "https://chatgpt.com/backend-api/codex/models",
+               :oauth_model_catalog
+             )
+
+    assert {:ok, "https://cli-chat-proxy.grok.com/v1/models"} =
+             Endpoint.validate("https://cli-chat-proxy.grok.com/v1/models", :oauth_model_catalog)
+
+    for endpoint <- [
+          "https://chatgpt.com/backend-api/codex/models?client_version=0.0.0",
+          "https://chatgpt.com/backend-api/codex/responses",
+          "https://api.openai.com/v1/models",
+          "https://cli-chat-proxy.grok.com/v1/responses",
+          "http://cli-chat-proxy.grok.com/v1/models",
+          "https://evil.example/v1/models"
+        ] do
+      assert {:error, _reason} = Endpoint.validate(endpoint, :oauth_model_catalog)
+    end
+  end
+
   defp restore_env(key, nil), do: Application.delete_env(:arbor_llm, key)
   defp restore_env(key, value), do: Application.put_env(:arbor_llm, key, value)
 end
