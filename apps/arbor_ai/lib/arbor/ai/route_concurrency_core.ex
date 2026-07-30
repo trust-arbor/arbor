@@ -261,6 +261,10 @@ defmodule Arbor.AI.RouteConcurrencyCore do
   defp normalize_provider_runtimes(_provider_key, _runtimes, _acc),
     do: {:error, :malformed_config}
 
+  # nil/true/false are atoms in Elixir; reject them before generic atom
+  # normalization so they never become segment strings "nil"/"true"/"false".
+  defp normalize_segment(value) when value in [nil, true, false], do: :error
+
   defp normalize_segment(value) when is_atom(value) do
     # Existing atoms only — never String.to_atom.
     normalize_segment(Atom.to_string(value))
@@ -329,7 +333,8 @@ defmodule Arbor.AI.RouteConcurrencyCore do
   defp normalize_snapshot_entry({{p, r}, fields}) when is_binary(p) and is_binary(r) and is_map(fields) do
     with {:ok, route} <- normalize_route(p, r),
          {:ok, limit} <- fetch_nonneg(fields, :concurrency_limit, "concurrency_limit"),
-         {:ok, in_use} <- fetch_nonneg(fields, :concurrency_in_use, "concurrency_in_use") do
+         {:ok, in_use} <- fetch_nonneg(fields, :concurrency_in_use, "concurrency_in_use"),
+         true <- in_use <= limit do
       {:ok, route, %{concurrency_limit: limit, concurrency_in_use: in_use}}
     else
       _ -> :error

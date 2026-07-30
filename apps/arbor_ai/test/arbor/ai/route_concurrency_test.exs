@@ -77,20 +77,41 @@ defmodule Arbor.AI.RouteConcurrencyTest do
   } do
     # Behavioral lock: acquire uses :infinity. Suspend past the old 1s timeout,
     # resume, and the caller still receives a lease (not :unavailable).
+    # Always resume on cleanup so assertion failures cannot leave the authority suspended.
     :ok = :sys.suspend(pid)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        try do
+          :sys.resume(pid)
+        catch
+          :exit, _ -> :ok
+        end
+      end
+    end)
 
     task =
       Task.async(fn ->
         RouteConcurrency.acquire(:provider_a, :arbor, route_concurrency_server: name)
       end)
 
-    # Still blocked after the former finite timeout window.
-    assert Task.yield(task, @former_finite_timeout_ms + 100) == nil
+    try do
+      # Still blocked after the former finite timeout window.
+      assert Task.yield(task, @former_finite_timeout_ms + 100) == nil
 
-    :ok = :sys.resume(pid)
+      :ok = :sys.resume(pid)
 
-    assert {:ok, {:route_concurrency_lease, ^pid, _token} = lease} = Task.await(task, 500)
-    assert :ok = RouteConcurrency.release(lease)
+      assert {:ok, {:route_concurrency_lease, ^pid, _token} = lease} = Task.await(task, 500)
+      assert :ok = RouteConcurrency.release(lease)
+    after
+      if Process.alive?(pid) do
+        try do
+          :sys.resume(pid)
+        catch
+          :exit, _ -> :ok
+        end
+      end
+    end
   end
 
   test "acquire returns opaque lease bound to the authority PID", %{server: server, pid: pid} do

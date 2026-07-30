@@ -49,6 +49,15 @@ defmodule Arbor.AI.RouteConcurrencyCoreTest do
 
       assert {:error, :malformed_config} = RouteConcurrencyCore.new(too_many_runtimes)
     end
+
+    test "rejects nil and boolean provider/runtime config keys as malformed_config" do
+      assert {:error, :malformed_config} = RouteConcurrencyCore.new(%{nil => %{arbor: 1}})
+      assert {:error, :malformed_config} = RouteConcurrencyCore.new(%{true => %{arbor: 1}})
+      assert {:error, :malformed_config} = RouteConcurrencyCore.new(%{false => %{arbor: 1}})
+      assert {:error, :malformed_config} = RouteConcurrencyCore.new(%{openai: %{nil => 1}})
+      assert {:error, :malformed_config} = RouteConcurrencyCore.new(%{openai: %{true => 1}})
+      assert {:error, :malformed_config} = RouteConcurrencyCore.new(%{openai: %{false => 1}})
+    end
   end
 
   describe "acquire/release/snapshot" do
@@ -107,6 +116,17 @@ defmodule Arbor.AI.RouteConcurrencyCoreTest do
                RouteConcurrencyCore.acquire(state, :provider_a, nil, self(), make_ref())
     end
 
+    test "normalize_route rejects nil and boolean identifiers as malformed_route" do
+      assert {:error, :malformed_route} = RouteConcurrencyCore.normalize_route(nil, "arbor")
+      assert {:error, :malformed_route} = RouteConcurrencyCore.normalize_route("openai", nil)
+      assert {:error, :malformed_route} = RouteConcurrencyCore.normalize_route(true, "arbor")
+      assert {:error, :malformed_route} = RouteConcurrencyCore.normalize_route("openai", true)
+      assert {:error, :malformed_route} = RouteConcurrencyCore.normalize_route(false, "arbor")
+      assert {:error, :malformed_route} = RouteConcurrencyCore.normalize_route("openai", false)
+      assert {:error, :malformed_route} = RouteConcurrencyCore.normalize_route(nil, nil)
+      assert {:error, :malformed_route} = RouteConcurrencyCore.normalize_route(true, false)
+    end
+
     test "idempotent release frees capacity and emits demonitor after bind", %{state: state} do
       token = make_ref()
       mon = make_ref()
@@ -163,6 +183,18 @@ defmodule Arbor.AI.RouteConcurrencyCoreTest do
     test "rejects malformed snapshots" do
       assert {:error, :malformed} = RouteConcurrencyCore.validate_snapshot("nope")
       assert {:error, :malformed} = RouteConcurrencyCore.validate_snapshot(%{{"a", "b"} => %{}})
+    end
+
+    test "rejects concurrency_in_use above concurrency_limit" do
+      over =
+        %{{"openai", "arbor"} => %{concurrency_limit: 1, concurrency_in_use: 2}}
+
+      assert {:error, :malformed} = RouteConcurrencyCore.validate_snapshot(over)
+
+      equal =
+        %{{"openai", "arbor"} => %{concurrency_limit: 2, concurrency_in_use: 2}}
+
+      assert {:ok, _} = RouteConcurrencyCore.validate_snapshot(equal)
     end
   end
 end
