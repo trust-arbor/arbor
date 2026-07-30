@@ -142,6 +142,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
       assert {:ok, security} = Profiles.fetch_executable("security_regression")
       assert security["executable"]
 
+      security_stage_ceiling = Arbor.Actions.security_regression_maximum_stage_timeout_ms()
+
       assert security["validation_strategy"] == %{
                "action" => "coding_security_regression_validate",
                "authority_parameter" => "review_attestation_id",
@@ -152,8 +154,13 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
                "timeout_budget_param" => "stage_timeout",
                "timeout_budget_source" => "budgets.wall_clock_ms",
                "timeout_max_ms" => 600_000,
+               "stage_timeout_budget_source" => "budgets.wall_clock_ms",
+               "stage_timeout_max_ms" => security_stage_ceiling,
                "two_revision" => true
              }
+
+      assert security_stage_ceiling == 1_200_000
+      assert security_stage_ceiling == 2 * Arbor.Shell.spawn_capable_max_timeout_ms()
 
       assert security["semantic_policy"]["validation_profile"] == "security_regression"
 
@@ -298,7 +305,13 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
       assert {:ok, nil} = Profiles.validation_test_stage_timeout(default, 900_000)
       assert {:ok, nil} = Profiles.validation_test_stage_timeout(security, 900_000)
       assert {:ok, nil} = Profiles.validation_stage_timeout(default, 900_000)
-      assert {:ok, nil} = Profiles.validation_stage_timeout(security, 900_000)
+
+      # security_regression binds a whole-stage ceiling of two sequential children.
+      assert {:ok, 600_000} = Profiles.validation_timeout(security, 900_000)
+      assert {:ok, 600_000} = Profiles.validation_timeout(security, 1_500_000)
+      assert {:ok, 900_000} = Profiles.validation_stage_timeout(security, 900_000)
+      assert {:ok, 1_200_000} = Profiles.validation_stage_timeout(security, 1_500_000)
+      assert {:ok, 120_000} = Profiles.validation_stage_timeout(security, 120_000)
 
       # Partial/malformed aggregate declarations fail closed — never coerced to nil.
       missing_source =

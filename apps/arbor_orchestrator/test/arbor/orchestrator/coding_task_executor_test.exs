@@ -1158,6 +1158,46 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     ]
   end
 
+  defp security_capacity_validation_fixture(opts) do
+    timed_out = Keyword.get(opts, :timed_out, true)
+    killed = Keyword.get(opts, :killed, false)
+    evidence_type_only? = Keyword.get(opts, :evidence_type_only, false)
+
+    report = %{
+      "passed" => false,
+      "reason" => "validation_capacity_exceeded",
+      "termination" => %{
+        "timed_out" => timed_out,
+        "killed" => killed,
+        "output_limit_exceeded" => false,
+        "cancelled" => false
+      }
+    }
+
+    report =
+      if evidence_type_only? do
+        # Exact evidence_type alone must classify as security (no candidate/base).
+        Map.put(report, "evidence_type", "reviewed_regression_evidence")
+      else
+        report
+        |> Map.put("candidate_fingerprint", @verification_digest)
+        |> Map.put("candidate", %{
+          "completed" => false,
+          "status" => "stage_timeout",
+          "exit_code" => nil,
+          "timed_out" => true
+        })
+        |> Map.put("base", %{
+          "completed" => false,
+          "status" => "not_run",
+          "exit_code" => nil,
+          "timed_out" => false
+        })
+      end
+
+    [report]
+  end
+
   defp sha256(value) do
     Base.encode16(:crypto.hash(:sha256, value), case: :lower)
   end
@@ -1256,7 +1296,8 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       ],
       "review_attestation_digest" => @verification_digest,
       "council_decision_digest" => @verification_other_digest,
-      "feedback_json" => "ignored raw feedback"
+      "feedback_json" => "ignored raw feedback",
+      "termination" => nil
     }
   end
 
@@ -5137,6 +5178,95 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert [report] = finalized_default["validation"]
       assert report["reason"] == "validation_capacity_exceeded"
       assert report["termination"]["killed"] == true
+
+      # Security capacity requires timed_out; killed-only security reports fail closed.
+      security_killed_only =
+        finalize_result(root)
+        |> Map.put("status", "validation_capacity_exceeded")
+        |> Map.put("canonical_status", "validation_capacity_exceeded")
+        |> Map.put("outcome", terminal_outcome("validation_capacity_exceeded"))
+        |> Map.put(
+          "validation",
+          security_capacity_validation_fixture(timed_out: false, killed: true)
+        )
+
+      assert {:error, {:invalid_finalize_result, :capacity_handoff}} =
+               CodingTaskExecutor.finalize_task(
+                 "agent_1",
+                 security_killed_only,
+                 [],
+                 valid_context()
+               )
+
+      # evidence_type-only killed report must not fall through default killed-only path.
+      evidence_type_killed_only =
+        finalize_result(root)
+        |> Map.put("status", "validation_capacity_exceeded")
+        |> Map.put("canonical_status", "validation_capacity_exceeded")
+        |> Map.put("outcome", terminal_outcome("validation_capacity_exceeded"))
+        |> Map.put(
+          "validation",
+          security_capacity_validation_fixture(
+            timed_out: false,
+            killed: true,
+            evidence_type_only: true
+          )
+        )
+
+      assert {:error, {:invalid_finalize_result, :capacity_handoff}} =
+               CodingTaskExecutor.finalize_task(
+                 "agent_1",
+                 evidence_type_killed_only,
+                 [],
+                 valid_context()
+               )
+
+      security_timed_out =
+        finalize_result(root)
+        |> Map.put("status", "validation_capacity_exceeded")
+        |> Map.put("canonical_status", "validation_capacity_exceeded")
+        |> Map.put("outcome", terminal_outcome("validation_capacity_exceeded"))
+        |> Map.put(
+          "validation",
+          security_capacity_validation_fixture(timed_out: true, killed: false)
+        )
+
+      assert {:ok, finalized_security} =
+               CodingTaskExecutor.finalize_task(
+                 "agent_1",
+                 security_timed_out,
+                 [],
+                 valid_context()
+               )
+
+      assert [security_report] = finalized_security["validation"]
+      assert security_report["termination"]["timed_out"] == true
+
+      evidence_type_timed_out =
+        finalize_result(root)
+        |> Map.put("status", "validation_capacity_exceeded")
+        |> Map.put("canonical_status", "validation_capacity_exceeded")
+        |> Map.put("outcome", terminal_outcome("validation_capacity_exceeded"))
+        |> Map.put(
+          "validation",
+          security_capacity_validation_fixture(
+            timed_out: true,
+            killed: false,
+            evidence_type_only: true
+          )
+        )
+
+      assert {:ok, finalized_evidence_type} =
+               CodingTaskExecutor.finalize_task(
+                 "agent_1",
+                 evidence_type_timed_out,
+                 [],
+                 valid_context()
+               )
+
+      assert [evidence_type_report] = finalized_evidence_type["validation"]
+      assert evidence_type_report["evidence_type"] == "reviewed_regression_evidence"
+      assert evidence_type_report["termination"]["timed_out"] == true
 
       mismatched =
         valid

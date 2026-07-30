@@ -870,6 +870,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
         &Map.put(&1, "param.test_paths", ["test/forged_test.exs"])
       ),
       update_in(graph.nodes["validate"].attrs, &Map.put(&1, "param.timeout", 599_999)),
+      update_in(graph.nodes["validate"].attrs, &Map.delete(&1, "param.stage_timeout")),
       update_in(
         graph.nodes["hoist_review_attestation_id"].attrs,
         &Map.put(&1, "source_key", "forged.review_attestation_id")

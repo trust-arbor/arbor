@@ -37,6 +37,9 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
   # pre-test children + aggregate test-stage max). Never import CrossApp.Core
   # or restate the numeric product here.
   @cross_app_stage_timeout_max_ms Arbor.Actions.cross_app_maximum_stage_timeout_ms()
+  # Security-regression whole-stage hard max: exactly two sequential standard
+  # child ceilings (candidate then base). Actions facade only — never restate.
+  @security_regression_stage_timeout_max_ms Arbor.Actions.security_regression_maximum_stage_timeout_ms()
 
   @default_required_nodes Enum.sort(~w[
                     acquire_workspace
@@ -1959,7 +1962,11 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                   "static_parameters" => %{},
                   "timeout_budget_param" => "stage_timeout",
                   "timeout_budget_source" => "budgets.wall_clock_ms",
+                  # Standard Shell profile: per-revision Mix child ceiling only.
                   "timeout_max_ms" => @spawn_capable_max_timeout_ms,
+                  "stage_timeout_budget_source" => "budgets.wall_clock_ms",
+                  # Whole two-revision stage max from Actions facade (2 × standard child).
+                  "stage_timeout_max_ms" => @security_regression_stage_timeout_max_ms,
                   "two_revision" => true
                 },
                 "review_strategy" => @binding_council_review,
@@ -2330,6 +2337,9 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
 
   @doc false
   def cross_app_stage_timeout_max_ms, do: @cross_app_stage_timeout_max_ms
+
+  @doc false
+  def security_regression_stage_timeout_max_ms, do: @security_regression_stage_timeout_max_ms
 
   @doc "Verifies that a compiled execution manifest contains reviewed nested actions."
   @spec validate_execution_manifest(descriptor(), map()) ::

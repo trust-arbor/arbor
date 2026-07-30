@@ -150,8 +150,9 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       profiles with a reviewed aggregate test-stage ceiling (cross_app). When
       present, `param.test_stage_timeout` must match exactly.
     * `:validation_stage_timeout_ms` — optional positive integer for profiles
-      with a reviewed whole-validation stage ceiling (cross_app). When present,
-      `param.stage_timeout` must match exactly.
+      with a reviewed whole-validation stage ceiling (cross_app,
+      security_regression). When present, `param.stage_timeout` must match
+      exactly. Required for security_regression.
     * `:checkpoint_policy` — `\"direct\"` (default) or `\"design_required\"`.
       This binds the worker-continuity edge and design-checkpoint topology.
     * `:checkpoint_work_packet_json` — the contract-canonical frozen packet
@@ -3860,14 +3861,38 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
          review_profile,
          validation_timeout_ms,
          _validation_test_stage_timeout_ms,
-         _validation_stage_timeout_ms
-       ) do
+         validation_stage_timeout_ms
+       )
+       when is_integer(validation_stage_timeout_ms) and validation_stage_timeout_ms > 0 do
     errors
     |> reject_security_review_none(review_profile)
     |> check_security_node_bindings(graph)
-    |> check_security_validator_parameters(graph, validation_timeout_ms)
+    |> check_security_validator_parameters(
+      graph,
+      validation_timeout_ms,
+      validation_stage_timeout_ms
+    )
     |> check_security_protected_writers(graph)
     |> check_security_topology(graph, review_profile)
+  end
+
+  defp check_profile_bindings(
+         errors,
+         _graph,
+         %{"validation_profile" => "security_regression"},
+         _review_profile,
+         _validation_timeout_ms,
+         _validation_test_stage_timeout_ms,
+         validation_stage_timeout_ms
+       ) do
+    [
+      error("security_validator_parameter_violation", "validate", %{
+        "missing_validation_stage_timeout_ms" =>
+          not (is_integer(validation_stage_timeout_ms) and validation_stage_timeout_ms > 0),
+        "got_stage" => validation_stage_timeout_ms
+      })
+      | errors
+    ]
   end
 
   defp check_profile_bindings(
@@ -4060,11 +4085,19 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     end
   end
 
-  defp check_security_validator_parameters(errors, graph, validation_timeout_ms) do
+  defp check_security_validator_parameters(
+         errors,
+         graph,
+         validation_timeout_ms,
+         validation_stage_timeout_ms
+       ) do
     check_validation_parameters(
       errors,
       graph,
-      %{"param.timeout" => validation_timeout_ms},
+      %{
+        "param.timeout" => validation_timeout_ms,
+        "param.stage_timeout" => validation_stage_timeout_ms
+      },
       "security_validator_parameter_violation"
     )
   end

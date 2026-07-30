@@ -89,6 +89,8 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCoreTest do
       {"default", default_capacity_result(), "validation_capacity_exceeded"},
       {"cross_app", cross_capacity_result(), "validation_capacity_exceeded"},
       {"cross_app", cross_timeout_result(), "tests_timed_out"},
+      {"security_regression", security_result("validation_capacity_exceeded"),
+       "validation_capacity_exceeded"},
       {"security_regression", security_result("candidate_setup_failed"),
        "candidate_setup_failed"},
       {"security_regression", security_result("candidate_source_changed"),
@@ -103,6 +105,55 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCoreTest do
       assert code in Enum.map(report["diagnostics"], & &1["code"])
       assert report["evidence_ref"] =~ "sha256:"
     end
+  end
+
+  test "security regression capacity rejects forged and ambiguous evidence" do
+    good = security_result("validation_capacity_exceeded")
+    assert {:ok, report} = verify("security_regression", good)
+    assert report["status"] == "blocked"
+
+    # Missing termination envelope.
+    assert {:ok, invalid} =
+             verify("security_regression", Map.put(good, :termination, nil))
+
+    assert invalid["status"] == "blocked"
+    assert "validation_evidence_invalid" in Enum.map(invalid["diagnostics"], & &1["code"])
+
+    # timed_out false in termination.
+    forged_termination =
+      Map.put(good, :termination, %{
+        "timed_out" => false,
+        "killed" => true,
+        "output_limit_exceeded" => false,
+        "cancelled" => false
+      })
+
+    assert {:ok, killed_only} = verify("security_regression", forged_termination)
+    assert "validation_evidence_invalid" in Enum.map(killed_only["diagnostics"], & &1["code"])
+
+    # Leg/diagnostic inconsistency (post-child gap class).
+    inconsistent =
+      good
+      |> put_in([:diagnostics, :candidate, "timed_out"], false)
+
+    assert {:ok, drift} = verify("security_regression", inconsistent)
+    assert "validation_evidence_invalid" in Enum.map(drift["diagnostics"], & &1["code"])
+
+    # Exit 137 alone is ordinary domain failure, not capacity.
+    exit_only =
+      security_result("candidate_tests_failed")
+      |> put_in([:candidate, :exit_code], 137)
+      |> put_in([:diagnostics, :candidate, "exit_code"], 137)
+
+    assert exit_only.candidate.exit_code == 137
+    assert exit_only.diagnostics.candidate["exit_code"] == 137
+    assert exit_only.candidate.timed_out == false
+    assert exit_only.termination == nil
+
+    assert {:ok, ordinary} = verify("security_regression", exit_only)
+    assert ordinary["status"] == "failed"
+    assert "candidate_tests_failed" in Enum.map(ordinary["diagnostics"], & &1["code"])
+    refute "validation_capacity_exceeded" in Enum.map(ordinary["diagnostics"], & &1["code"])
   end
 
   test "capacity handoff is closed, bounded evidence and malformed handoffs fail closed" do
@@ -642,6 +693,18 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCoreTest do
     passed = reason == "security_regression_validated"
     path = "test/security_regression_test.exs"
 
+    termination =
+      if reason == "validation_capacity_exceeded" do
+        %{
+          "timed_out" => true,
+          "killed" => false,
+          "output_limit_exceeded" => false,
+          "cancelled" => false
+        }
+      else
+        nil
+      end
+
     %{
       passed: passed,
       reason: reason,
@@ -663,7 +726,8 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCoreTest do
       attested_selected_tests: [%{path: path, blob_sha256: @other_digest}],
       review_attestation_digest: @digest,
       council_decision_digest: @other_digest,
-      feedback_json: "ignored feedback json"
+      feedback_json: "ignored feedback json",
+      termination: termination
     }
   end
 
@@ -673,8 +737,17 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCoreTest do
   defp security_legs("candidate_source_changed"),
     do: {%{candidate_pass_leg() | status: "source_changed", completed: false}, not_run_leg()}
 
-  defp security_legs("candidate_timeout"),
-    do: {%{candidate_pass_leg() | timed_out: true}, not_run_leg()}
+  defp security_legs("validation_capacity_exceeded") do
+    candidate = %{
+      candidate_pass_leg()
+      | timed_out: true,
+        exit_code: 1,
+        passed: 0,
+        test_failures: 1
+    }
+
+    {candidate, not_run_leg()}
+  end
 
   defp security_legs("candidate_setup_failed") do
     candidate = %{candidate_pass_leg() | executed: 0, passed: 0, setup_failures: 1, invalid: 1}

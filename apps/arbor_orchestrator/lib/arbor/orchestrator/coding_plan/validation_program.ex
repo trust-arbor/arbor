@@ -247,6 +247,14 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationProgram do
             Map.drop(params, ["timeout", "test_stage_timeout"]) == base and
             valid_compound_timeouts?(strategy, timeout_ms, test_stage_timeout_ms, nil)
 
+        has_stage? ->
+          stage_timeout_ms = Map.get(params, "stage_timeout")
+          expected_keys = MapSet.new(Map.keys(base) ++ ["timeout", "stage_timeout"])
+
+          MapSet.new(Map.keys(params)) == expected_keys and
+            Map.drop(params, ["timeout", "stage_timeout"]) == base and
+            valid_stage_only_timeouts?(strategy, timeout_ms, stage_timeout_ms)
+
         true ->
           expected_keys = MapSet.new(Map.keys(base) ++ ["timeout"])
 
@@ -268,6 +276,18 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationProgram do
   end
 
   defp valid_timeout?(_strategy, _timeout_ms), do: false
+
+  defp valid_stage_only_timeouts?(strategy, timeout_ms, stage_timeout_ms) do
+    timeout_max_ms = strategy["timeout_max_ms"]
+    stage_timeout_max_ms = strategy["stage_timeout_max_ms"]
+
+    is_integer(timeout_ms) and timeout_ms > 0 and is_integer(timeout_max_ms) and
+      timeout_max_ms > 0 and timeout_ms <= timeout_max_ms and
+      is_integer(stage_timeout_ms) and stage_timeout_ms >= timeout_ms and
+      is_integer(stage_timeout_max_ms) and stage_timeout_max_ms > 0 and
+      stage_timeout_ms <= stage_timeout_max_ms and
+      (timeout_ms == timeout_max_ms or stage_timeout_ms == timeout_ms)
+  end
 
   defp valid_compound_timeouts?(strategy, timeout_ms, test_stage_timeout_ms, nil) do
     timeout_max_ms = strategy["timeout_max_ms"]

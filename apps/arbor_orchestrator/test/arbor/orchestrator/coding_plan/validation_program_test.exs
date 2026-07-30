@@ -43,7 +43,10 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationProgramTest do
            "action" => "coding_security_regression_validate",
            "result_adapter" => "security_regression_v1",
            "context_keys" => ["review_attestation_id"],
-           "static_parameters" => %{"timeout" => 120_000}
+           "static_parameters" => %{
+             "timeout" => 120_000,
+             "stage_timeout" => 120_000
+           }
          }}
       ]
 
@@ -65,7 +68,16 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationProgramTest do
         {"default", 120_000, %{"timeout" => 120_000, "warnings_as_errors" => true}},
         {"default", 900_000, %{"timeout" => 900_000, "warnings_as_errors" => true}},
         {"default", 1_500_000, %{"timeout" => 1_200_000, "warnings_as_errors" => true}},
-        {"security_regression", 900_000, %{"timeout" => 600_000}},
+        {"security_regression", 900_000,
+         %{
+           "timeout" => 600_000,
+           "stage_timeout" => 900_000
+         }},
+        {"security_regression", 1_500_000,
+         %{
+           "timeout" => 600_000,
+           "stage_timeout" => 1_200_000
+         }},
         {"cross_app", 120_000,
          %{
            "timeout" => 120_000,
@@ -242,7 +254,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationProgramTest do
           "action" => "coding_security_regression_validate",
           "context_keys" => "review_attestation_id",
           "output_prefix" => "validation",
-          "param.timeout" => 600_000
+          "param.timeout" => 600_000,
+          "param.stage_timeout" => 900_000
         }
       }
 

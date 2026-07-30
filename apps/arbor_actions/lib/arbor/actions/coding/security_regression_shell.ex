@@ -143,13 +143,13 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Shell do
               )
 
             if stage_exhausted?(stage_deadline) do
-              {:ok, timed_out_leg(leg), candidate_fingerprint}
+              {:ok, Core.mark_capacity_leg(leg), candidate_fingerprint}
             else
               finish_candidate(resource, sources, candidate_fingerprint, leg)
             end
           else
             {:error, :stage_timeout} ->
-              {:ok, Core.incomplete_leg(:stage_timeout, %{}, nil, true), candidate_fingerprint}
+              {:ok, Core.stage_timeout_leg(), candidate_fingerprint}
           end
         else
           {:error, :candidate_source_changed} ->
@@ -197,7 +197,7 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Shell do
 
   defp run_base(resource, input, sources, caller, stage_deadline) do
     if stage_exhausted?(stage_deadline) do
-      {:ok, Core.incomplete_leg(:stage_timeout, %{}, nil, true)}
+      {:ok, Core.stage_timeout_leg()}
     else
       case WorkspaceLeaseRegistry.create_validation_snapshot(resource.resource_id, caller) do
         {:ok, snapshot} ->
@@ -244,7 +244,7 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Shell do
               )
 
             if stage_exhausted?(stage_deadline) do
-              {:ok, timed_out_leg(leg)}
+              {:ok, Core.mark_capacity_leg(leg)}
             else
               with :ok <- verify_exact_head(snapshot.base_worktree_path, snapshot.base_commit),
                    {:ok, after_fingerprint} <-
@@ -265,7 +265,7 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Shell do
             end
           else
             {:error, :stage_timeout} ->
-              {:ok, Core.incomplete_leg(:stage_timeout, %{}, nil, true)}
+              {:ok, Core.stage_timeout_leg()}
           end
         end
 
@@ -346,8 +346,6 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Shell do
 
   defp stage_exhausted?(deadline),
     do: monotonic_ms() >= deadline
-
-  defp timed_out_leg(leg), do: %{leg | timed_out: true}
 
   defp monotonic_ms do
     clock =

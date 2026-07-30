@@ -899,6 +899,32 @@ defmodule Arbor.Actions do
     Arbor.Actions.Coding.CrossApp.Core.maximum_stage_timeout()
   end
 
+  @doc """
+  Reviewed hard maximum for a security-regression per-revision Mix child timeout
+  in milliseconds.
+
+  Bound to the standard Shell spawn-capable ceiling. Coding-plan profiles bind
+  plan wall-clock against this Actions-owned value when compiling `param.timeout`.
+  """
+  @spec security_regression_maximum_timeout_ms() :: pos_integer()
+  def security_regression_maximum_timeout_ms do
+    Arbor.Actions.Coding.SecurityRegression.Core.maximum_timeout()
+  end
+
+  @doc """
+  Reviewed hard maximum for the security-regression whole-validation stage budget
+  in milliseconds.
+
+  Derived as exactly two sequential standard child ceilings (candidate then base).
+  Coding-plan profiles bind plan wall-clock against this Actions-owned value when
+  compiling `param.stage_timeout`; callers must not import
+  `Arbor.Actions.Coding.SecurityRegression.Core` directly or restate the product.
+  """
+  @spec security_regression_maximum_stage_timeout_ms() :: pos_integer()
+  def security_regression_maximum_stage_timeout_ms do
+    Arbor.Actions.Coding.SecurityRegression.Core.maximum_stage_timeout()
+  end
+
   @approval_payload_keys [
     :content,
     "content",

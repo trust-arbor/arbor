@@ -153,7 +153,8 @@ defmodule Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifierTest do
          ],
          "review_attestation_digest" => digest,
          "council_decision_digest" => source_digest,
-         "feedback_json" => Jason.encode!(%{"passed" => true})
+         "feedback_json" => Jason.encode!(%{"passed" => true}),
+         "termination" => nil
        }}
     end
 

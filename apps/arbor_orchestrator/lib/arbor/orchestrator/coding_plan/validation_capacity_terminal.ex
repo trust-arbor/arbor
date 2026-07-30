@@ -2,8 +2,10 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationCapacityTerminal do
   @moduledoc false
 
   # Shared terminal capacity normalization/validation for coding results.
-  # Accepts the default Mix.Compile termination envelope and the existing
-  # CrossApp batch handoff without conflating the two shapes.
+  # Accepts three distinct shapes without conflating them:
+  #   * default Mix.Compile termination envelope (any Shell capacity flag)
+  #   * security_regression termination envelope (requires timed_out == true)
+  #   * CrossApp batch capacity handoff (schema-v3 live)
   #
   # Live write/finalize/normalize paths accept schema-v3 handoffs only.
   # Callers that already hold historical evidence may verify any known
@@ -157,7 +159,17 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationCapacityTerminal do
 
   defp normalize_capacity_report(report) do
     cond do
+      security_capacity_report?(report) ->
+        # Security capacity requires exact timed_out evidence — killed-only is rejected.
+        with {:ok, termination} <- normalize_termination(Map.get(report, "termination")),
+             true <- termination["timed_out"] == true do
+          {:ok, Map.put(report, "termination", termination)}
+        else
+          _other -> :error
+        end
+
       default_profile_capacity_report?(report) ->
+        # Default Mix.Compile admits any closed Shell capacity flag (including killed-only).
         with {:ok, termination} <- normalize_termination(Map.get(report, "termination")) do
           {:ok, Map.put(report, "termination", termination)}
         end
@@ -182,9 +194,34 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationCapacityTerminal do
       match?([_], validation) and length(validation) <= @max_validation_entries
   end
 
+  # Security two-revision evidence carries candidate/base (and often attestation)
+  # fields alongside reason + termination. Exact evidence_type alone is also
+  # security capacity so an evidence-type-only killed report cannot fall through
+  # the default killed-only path.
+  defp security_capacity_report?(report) when is_map(report) and not is_struct(report) do
+    Map.get(report, "reason") == "validation_capacity_exceeded" and
+      Map.has_key?(report, "termination") and
+      security_evidence_shape?(report) and
+      not Map.has_key?(report, "test") and
+      not Map.has_key?(report, "capacity_handoff")
+  end
+
+  defp security_capacity_report?(_report), do: false
+
+  defp security_evidence_shape?(report) do
+    (Map.has_key?(report, "candidate") and Map.has_key?(report, "base")) or
+      Map.get(report, "adapter") == "security_regression_v1" or
+      Map.get(report, "evidence_type") == "reviewed_regression_evidence" or
+      Map.has_key?(report, "attested_candidate_tree_oid") or
+      Map.has_key?(report, "candidate_fingerprint")
+  end
+
+  # Default Mix.Compile capacity: closed termination envelope without security
+  # two-revision shape. Any trusted Shell capacity flag is admitted.
   defp default_profile_capacity_report?(report) when is_map(report) and not is_struct(report) do
     Map.get(report, "reason") == "validation_capacity_exceeded" and
       Map.has_key?(report, "termination") and
+      not security_evidence_shape?(report) and
       not Map.has_key?(report, "test") and
       not Map.has_key?(report, "capacity_handoff")
   end

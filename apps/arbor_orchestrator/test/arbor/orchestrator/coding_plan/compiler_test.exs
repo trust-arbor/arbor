@@ -1329,6 +1329,8 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert validate["action"] == "coding_security_regression_validate"
     assert validate["context_keys"] == "review_attestation_id"
     assert validate["param.timeout"] == 600_000
+    assert validate["param.stage_timeout"] == plan.budgets["wall_clock_ms"]
+    assert validate["param.stage_timeout"] == 900_000
     assert validate["timeout_budget.param"] == "stage_timeout"
     refute Map.has_key?(validate, "param.warnings_as_errors")
     refute validate["context_keys"] =~ "path"

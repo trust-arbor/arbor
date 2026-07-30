@@ -32,7 +32,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCore do
     passed reason base_commit candidate_fingerprint test_paths source_hashes candidate base diagnostics
     evidence_type attested_base_commit attested_candidate_commit attested_candidate_tree_oid
     attested_diff_sha256 attested_selected_tests review_attestation_digest council_decision_digest
-    feedback_json
+    feedback_json termination
   ]a
   @security_leg_fields ~w[
     completed status exit_code timed_out executed passed test_failures setup_failures skipped excluded
@@ -57,18 +57,19 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCore do
 
   @candidate_statuses ~w[
     completed source_changed artifact_invalid helper_missing execution_failed suite_incomplete
+    stage_timeout
   ]
   @base_statuses ~w[
     completed artifact_invalid helper_missing snapshot_failed overlay_failed execution_failed not_run
-    suite_incomplete
+    suite_incomplete stage_timeout
   ]
 
   @security_reasons ~w[
-    security_regression_validated
-    candidate_source_changed candidate_timeout candidate_artifact_invalid candidate_helper_missing
+    security_regression_validated validation_capacity_exceeded
+    candidate_source_changed candidate_artifact_invalid candidate_helper_missing
     candidate_execution_failed candidate_suite_incomplete candidate_setup_failed candidate_zero_tests
     candidate_tests_failed candidate_exit_nonzero
-    base_timeout base_artifact_invalid base_helper_missing base_snapshot_failed base_overlay_failed
+    base_artifact_invalid base_helper_missing base_snapshot_failed base_overlay_failed
     base_execution_failed base_not_run base_suite_incomplete base_setup_failed base_zero_tests
     base_tests_passed base_non_test_failure base_exit_zero
   ]
@@ -487,7 +488,23 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCore do
          true <- valid_sha256?(values.review_attestation_digest),
          true <- valid_sha256?(values.council_decision_digest),
          true <- bounded_binary?(values.feedback_json, @max_feedback_json_bytes),
-         true <- valid_security_verdict?(values.passed, values.reason, candidate, base) do
+         {:ok, capacity_termination} <-
+           normalize_security_capacity(
+             values.reason,
+             values.termination,
+             values.passed,
+             candidate,
+             base,
+             diagnostics
+           ),
+         true <-
+           valid_security_verdict?(
+             values.passed,
+             values.reason,
+             candidate,
+             base,
+             capacity_termination
+           ) do
       evidence = %{
         "adapter" => "security_regression_v1",
         "candidate_tree_oid" => values.attested_candidate_tree_oid,
@@ -505,19 +522,74 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCore do
         "diagnostics" => diagnostics
       }
 
-      status =
-        cond do
-          values.passed -> "passed"
-          values.reason in @security_domain_failures -> "failed"
-          true -> "blocked"
+      {evidence, assessment} =
+        case capacity_termination do
+          nil ->
+            status =
+              cond do
+                values.passed -> "passed"
+                values.reason in @security_domain_failures -> "failed"
+                true -> "blocked"
+              end
+
+            {evidence,
+             %{status: status, gates: security_gates(values.reason, values.passed, base)}}
+
+          termination ->
+            {evidence
+             |> Map.put("reason", "validation_capacity_exceeded")
+             |> Map.put("termination", termination),
+             %{
+               status: "blocked",
+               gates: security_gates("validation_capacity_exceeded", false, base)
+             }}
         end
 
-      {:ok, evidence,
-       %{status: status, gates: security_gates(values.reason, values.passed, base)}}
+      {:ok, evidence, assessment}
     else
       _other -> :error
     end
   end
+
+  # Capacity only from trusted timed_out legs + closed termination. Exit codes
+  # and process output alone never project validation_capacity_exceeded.
+  defp normalize_security_capacity(
+         "validation_capacity_exceeded",
+         termination,
+         false,
+         candidate,
+         base,
+         diagnostics
+       ) do
+    with {:ok, normalized} <- ValidationCapacityTerminal.normalize_termination(termination),
+         true <- normalized["timed_out"] == true,
+         true <-
+           security_capacity_leg?(candidate, diagnostics["candidate"]) or
+             security_capacity_leg?(base, diagnostics["base"]) do
+      {:ok, normalized}
+    else
+      _other -> :error
+    end
+  end
+
+  defp normalize_security_capacity(reason, nil, passed, candidate, base, _diagnostics)
+       when reason != "validation_capacity_exceeded" and is_boolean(passed) do
+    if candidate["timed_out"] or base["timed_out"] do
+      :error
+    else
+      {:ok, nil}
+    end
+  end
+
+  defp normalize_security_capacity(_reason, _termination, _passed, _candidate, _base, _diagnostics),
+    do: :error
+
+  defp security_capacity_leg?(leg, diagnostic) when is_map(leg) and is_map(diagnostic) do
+    leg["timed_out"] == true and map_size(diagnostic) > 0 and diagnostic["timed_out"] == true and
+      diagnostic["exit_code"] == leg["exit_code"]
+  end
+
+  defp security_capacity_leg?(_leg, _diagnostic), do: false
 
   defp normalize_security_sources(sources, style) do
     with {:ok, sources} <- bounded_list(sources, @max_security_tests, & &1),
@@ -653,40 +725,55 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCore do
   end
 
   defp diagnostic_consistent?(diagnostic, leg, kind) when map_size(diagnostic) == 0 do
-    case {kind, leg["status"]} do
-      {:candidate, status} when status in ["source_changed", "helper_missing"] ->
-        true
+    # Empty diagnostics are never legal for capacity / stage_timeout legs.
+    if leg["timed_out"] == true or leg["status"] == "stage_timeout" do
+      false
+    else
+      case {kind, leg["status"]} do
+        {:candidate, status} when status in ["source_changed", "helper_missing"] ->
+          true
 
-      {:base, status}
-      when status in ["helper_missing", "snapshot_failed", "overlay_failed", "not_run"] ->
-        true
+        {:base, status}
+        when status in ["helper_missing", "snapshot_failed", "overlay_failed", "not_run"] ->
+          true
 
-      _other ->
-        false
+        _other ->
+          false
+      end
     end
   end
 
   defp diagnostic_consistent?(diagnostic, leg, _kind) do
     diagnostic["exit_code"] == leg["exit_code"] and
-      diagnostic["timed_out"] == leg["timed_out"]
+      diagnostic["timed_out"] == leg["timed_out"] and
+      (leg["timed_out"] != true or diagnostic["timed_out"] == true)
   end
 
-  defp valid_security_verdict?(passed, reason, candidate, base) do
-    expected = security_reason(candidate, base, reason)
+  defp valid_security_verdict?(passed, reason, candidate, base, capacity_termination) do
+    expected = security_reason(candidate, base, reason, capacity_termination)
     reason == expected and passed == (reason == "security_regression_validated")
   end
 
-  defp security_reason(candidate, base, supplied_reason) do
-    case candidate_reason(candidate) do
-      :clean ->
-        if supplied_reason == "candidate_suite_incomplete" and base["status"] == "not_run" do
-          supplied_reason
-        else
-          security_base_reason(base, supplied_reason)
-        end
+  defp security_reason(candidate, base, supplied_reason, capacity_termination) do
+    cond do
+      capacity_termination != nil ->
+        "validation_capacity_exceeded"
 
-      reason ->
-        reason
+      candidate["timed_out"] or base["timed_out"] ->
+        "validation_capacity_exceeded"
+
+      true ->
+        case candidate_reason(candidate) do
+          :clean ->
+            if supplied_reason == "candidate_suite_incomplete" and base["status"] == "not_run" do
+              supplied_reason
+            else
+              security_base_reason(base, supplied_reason)
+            end
+
+          reason ->
+            reason
+        end
     end
   end
 
@@ -705,7 +792,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCore do
   defp candidate_reason(candidate) do
     cond do
       candidate["status"] == "source_changed" -> "candidate_source_changed"
-      candidate["timed_out"] -> "candidate_timeout"
+      candidate["timed_out"] -> "validation_capacity_exceeded"
       candidate["status"] != "completed" -> candidate_incomplete_reason(candidate["status"])
       candidate["setup_failures"] > 0 or candidate["invalid"] > 0 -> "candidate_setup_failed"
       candidate["executed"] < 1 -> "candidate_zero_tests"
@@ -717,7 +804,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCore do
 
   defp base_reason(base) do
     cond do
-      base["timed_out"] -> "base_timeout"
+      base["timed_out"] -> "validation_capacity_exceeded"
       base["status"] != "completed" -> base_incomplete_reason(base["status"])
       base["setup_failures"] > 0 or base["invalid"] > 0 -> "base_setup_failed"
       base["executed"] < 1 -> "base_zero_tests"
@@ -731,6 +818,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCore do
   defp candidate_incomplete_reason("artifact_invalid"), do: "candidate_artifact_invalid"
   defp candidate_incomplete_reason("helper_missing"), do: "candidate_helper_missing"
   defp candidate_incomplete_reason("execution_failed"), do: "candidate_execution_failed"
+  defp candidate_incomplete_reason("stage_timeout"), do: "validation_capacity_exceeded"
   defp candidate_incomplete_reason(_status), do: "candidate_suite_incomplete"
 
   defp base_incomplete_reason("artifact_invalid"), do: "base_artifact_invalid"
@@ -739,6 +827,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCore do
   defp base_incomplete_reason("overlay_failed"), do: "base_overlay_failed"
   defp base_incomplete_reason("execution_failed"), do: "base_execution_failed"
   defp base_incomplete_reason("not_run"), do: "base_not_run"
+  defp base_incomplete_reason("stage_timeout"), do: "validation_capacity_exceeded"
   defp base_incomplete_reason(_status), do: "base_suite_incomplete"
 
   defp security_gates(_reason, true, _base) do
@@ -746,6 +835,14 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCore do
       {:passed, "attestation_bound"},
       {:passed, "validation_passed"},
       {:passed, "validation_passed"}
+    ]
+  end
+
+  defp security_gates("validation_capacity_exceeded", false, _base) do
+    [
+      {:passed, "attestation_bound"},
+      {:blocked, "validation_capacity_exceeded"},
+      {:blocked, "validation_capacity_exceeded"}
     ]
   end
 

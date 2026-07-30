@@ -280,22 +280,47 @@ defmodule Arbor.Orchestrator.CodingSecurityRegressionPipelineTest do
       end
     end
 
-    defp dispatch("coding_security_regression_validate", _args, scenario, state) do
+    defp dispatch("coding_security_regression_validate", args, scenario, state) do
       validation_index = bump(state, :validation)
 
-      passed =
-        not (scenario in [
-               :validation_rework_dirty,
-               :validation_rework_self_commit,
-               :validation_rework_noop
-             ] and validation_index == 1)
+      cond do
+        scenario == :validation_capacity ->
+          {:ok,
+           %{
+             passed: false,
+             reason: "validation_capacity_exceeded",
+             evidence_type: "reviewed_regression_evidence",
+             termination: %{
+               "timed_out" => true,
+               "killed" => false,
+               "output_limit_exceeded" => false,
+               "cancelled" => false
+             },
+             review_attestation_id: args["review_attestation_id"]
+           }}
 
-      {:ok,
-       %{
-         passed: passed,
-         reason: if(passed, do: "security_regression_validated", else: "candidate_tests_failed"),
-         evidence_type: "reviewed_regression_evidence"
-       }}
+        scenario in [
+          :validation_rework_dirty,
+          :validation_rework_self_commit,
+          :validation_rework_noop
+        ] and validation_index == 1 ->
+          {:ok,
+           %{
+             passed: false,
+             reason: "candidate_tests_failed",
+             evidence_type: "reviewed_regression_evidence",
+             termination: nil
+           }}
+
+        true ->
+          {:ok,
+           %{
+             passed: true,
+             reason: "security_regression_validated",
+             evidence_type: "reviewed_regression_evidence",
+             termination: nil
+           }}
+      end
     end
 
     defp dispatch("acp_close_session", _args, _scenario, _state) do
@@ -523,11 +548,10 @@ defmodule Arbor.Orchestrator.CodingSecurityRegressionPipelineTest do
     assert [{"coding_security_regression_validate", validator_args}] =
              calls_for(calls, "coding_security_regression_validate")
 
-    assert validator_args == %{
-             "review_attestation_id" => "attestation-1",
-             "stage_timeout" => fixture_budget_values(900_000)["coding_budget.validation_ms"],
-             "timeout" => 600_000
-           }
+    assert validator_args["review_attestation_id"] == "attestation-1"
+    assert validator_args["timeout"] == 600_000
+    # Whole-stage budget is min(2 × standard child, wall_clock); wall is 900_000.
+    assert validator_args["stage_timeout"] == 900_000
 
     assert [{"council_review_change", review_args}] =
              calls_for(calls, "council_review_change")
@@ -561,6 +585,29 @@ defmodule Arbor.Orchestrator.CodingSecurityRegressionPipelineTest do
     assert called?(calls, "coding_security_regression_validate")
     assert called?(calls, "coding_workspace_committed_change", 2)
     assert "post_validation_committed_change" in result.completed_nodes
+  end
+
+  test "trusted security validation capacity reaches capacity terminal without worker rework",
+       ctx do
+    assert {{:ok, result}, calls} = run_fixture(:validation_capacity, ctx)
+
+    assert result.context["status"] == "validation_capacity_exceeded",
+           "expected capacity terminal, got: #{inspect(current: result.context["current_node"], status: result.context["status"], completed: result.completed_nodes, calls: calls)}"
+
+    assert "status_validation_capacity_exceeded" in result.completed_nodes
+    assert "prep_release_mode_retain" in result.completed_nodes
+    assert "release_workspace" in result.completed_nodes
+    assert called?(calls, "coding_security_regression_validate", 1)
+    # Capacity retains workspace and must not open ACP worker rework.
+    refute called?(calls, "acp_send_message", 2)
+    refute "build_validation_rework_prompt" in result.completed_nodes
+    refute "check_validation_category_budget" in result.completed_nodes
+    assert called?(calls, "coding_workspace_release", 1)
+
+    assert [{"coding_workspace_release", release_args}] =
+             calls_for(calls, "coding_workspace_release")
+
+    assert release_args["mode"] == "retain"
   end
 
   test "unattested human_review deadlock fails closed before security validator", ctx do

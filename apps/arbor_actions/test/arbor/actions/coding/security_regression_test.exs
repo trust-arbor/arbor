@@ -215,9 +215,58 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
 
         assert {:ok, result} = Validate.run(params, fixture.context)
         refute result.passed
-        assert result.reason == "candidate_timeout"
+        assert result.reason == "validation_capacity_exceeded"
+        assert result.termination["timed_out"] == true
+        assert result.candidate.timed_out == true
+        assert result.diagnostics.candidate["timed_out"] == true
         assert_receive {:stage_timeout_revision, :candidate}, 5_000
         refute_receive {:stage_timeout_revision, :base}, 100
+
+        assert {:ok, []} =
+                 WorkspaceLeaseRegistry.validation_resources(
+                   fixture.lease.workspace_id,
+                   fixture.context
+                 )
+      end
+    )
+  end
+
+  test "pre-child residual exhaustion is capacity without launching Mix", %{tmp_dir: tmp_dir} do
+    fixture = regression_fixture(tmp_dir)
+    parent = self()
+    stage_timeout = 30_000
+    # First monotonic read builds stage_deadline at t=0; subsequent reads are
+    # already at the deadline so timeout_for_child fails before Mix launches.
+    {:ok, clock_agent} = Agent.start_link(fn -> :first end)
+
+    Application.put_env(:arbor_actions, :security_regression_monotonic_ms, fn ->
+      Agent.get_and_update(clock_agent, fn
+        :first -> {0, stage_timeout}
+        ms -> {ms, ms}
+      end)
+    end)
+
+    with_security_regression_runner(
+      fn path, args, opts ->
+        send(parent, {:pre_child_mix_launched, Keyword.get(opts, :validation_revision)})
+        Arbor.Actions.SecurityRegressionTestMixRunner.run(path, args, opts)
+      end,
+      fn ->
+        params =
+          fixture
+          |> attested_params(["test/security_regression_test.exs"])
+          |> Map.put(:stage_timeout, stage_timeout)
+
+        assert {:ok, result} = Validate.run(params, fixture.context)
+        refute result.passed
+        assert result.reason == "validation_capacity_exceeded"
+        assert result.termination["timed_out"] == true
+        assert result.candidate.status == "stage_timeout"
+        assert result.candidate.timed_out == true
+        assert result.diagnostics.candidate["timed_out"] == true
+        assert map_size(result.diagnostics.candidate) > 0
+        assert result.base.status == "not_run"
+        refute_receive {:pre_child_mix_launched, _}, 100
 
         assert {:ok, []} =
                  WorkspaceLeaseRegistry.validation_resources(
@@ -257,7 +306,10 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
 
         assert {:ok, result} = Validate.run(params, fixture.context)
         refute result.passed
-        assert result.reason == "base_timeout"
+        assert result.reason == "validation_capacity_exceeded"
+        assert result.termination["timed_out"] == true
+        assert result.base.timed_out == true
+        assert result.diagnostics.base["timed_out"] == true
         assert_receive {:final_stage_timeout_revision, :candidate}, 5_000
         assert_receive {:final_stage_timeout_revision, :base}, 5_000
 
