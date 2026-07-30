@@ -57,6 +57,9 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint do
   def max_design_bytes, do: @max_design_bytes
 
   @doc false
+  def max_timeout_ms, do: @max_timeout
+
+  @doc false
   def max_task_bytes, do: @max_task_bytes
 
   @doc false

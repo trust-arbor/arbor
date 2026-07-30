@@ -89,6 +89,13 @@ defmodule Arbor.ActionsTest do
     assert Actions.coding_design_max_bytes() == 32_768
   end
 
+  test "coding design checkpoint max timeout is exposed through the public facade" do
+    assert Actions.coding_design_checkpoint_max_timeout_ms() ==
+             Arbor.Actions.Coding.DesignCheckpoint.max_timeout_ms()
+
+    assert Actions.coding_design_checkpoint_max_timeout_ms() == 3_600_000
+  end
+
   describe "runtime_descriptor/1" do
     test "binds exact Jido name, module, loaded BEAM, resource, and egress declarations" do
       module = Arbor.Actions.File.Read

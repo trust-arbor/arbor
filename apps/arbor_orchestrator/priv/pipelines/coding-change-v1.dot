@@ -424,6 +424,7 @@ digraph CodingChangeV1 {
     target="action",
     action="coding_design_checkpoint_open",
     context_keys="work_packet,packet_digest,session.task_id,task,plan_fingerprint,coding_plan_fingerprint,workspace_id,worker_session_id,worker_provider_session_id,design_attempt,design_artifact,design_digest,session.run_deadline_unix_ms",
+    param.timeout=3600000,
     timeout_budget.deadline_key="session.run_deadline_unix_ms",
     timeout_budget.cap_key="coding_budget.interaction_wait_ms",
     timeout_budget.reserve_key="coding_budget.worker_completion_reserve_ms",

@@ -196,6 +196,16 @@ defmodule Arbor.Actions do
   def coding_design_max_bytes, do: DesignCheckpoint.max_design_bytes()
 
   @doc """
+  Reviewed hard maximum for coding design-checkpoint Open timeout (ms).
+
+  Orchestrator compiler + semantic preflight bind/pin `param.timeout` to this
+  value. Plan `coding_budget.interaction_wait_ms` remains stage capacity and may
+  be larger; ExecHandler still clamps via timeout_budget.
+  """
+  @spec coding_design_checkpoint_max_timeout_ms() :: pos_integer()
+  def coding_design_checkpoint_max_timeout_ms, do: DesignCheckpoint.max_timeout_ms()
+
+  @doc """
   Settle every coding workspace lease owned by an exact task+principal pair.
 
   Thin public facade over `WorkspaceLeaseRegistry.settle_task_workspaces/3`.

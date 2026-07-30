@@ -97,6 +97,27 @@ defmodule Arbor.Actions.Coding.DesignCheckpointTest do
     {:ok, params: params, context: context}
   end
 
+  test "timeout admits the exact maximum and fails closed above it" do
+    max = DesignCheckpoint.max_timeout_ms()
+
+    assert max == 3_600_000
+    assert max == Arbor.Actions.coding_design_checkpoint_max_timeout_ms()
+    assert DesignCheckpoint.timeout(%{}, %{timeout: max}) == {:ok, max}
+    assert DesignCheckpoint.timeout(%{}, %{"timeout" => max}) == {:ok, max}
+
+    assert DesignCheckpoint.timeout(%{}, %{timeout: max + 1}) ==
+             {:error, :invalid_design_checkpoint_timeout}
+
+    assert DesignCheckpoint.timeout(%{}, %{timeout: 0}) ==
+             {:error, :invalid_design_checkpoint_timeout}
+
+    assert DesignCheckpoint.timeout(%{}, %{timeout: -1}) ==
+             {:error, :invalid_design_checkpoint_timeout}
+
+    assert DesignCheckpoint.timeout(%{}, %{timeout: "3600000"}) ==
+             {:error, :invalid_design_checkpoint_timeout}
+  end
+
   test "Open persists the atomic deadline-bound receipt and accepts an earlier duplicate deadline",
        ctx do
     earlier_deadline = System.system_time(:millisecond) + 1_000

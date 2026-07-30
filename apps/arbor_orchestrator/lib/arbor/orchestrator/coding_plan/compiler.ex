@@ -760,11 +760,15 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
          {:ok, graph} <-
            update_node(graph, "open_design_checkpoint", fn attrs ->
              with :ok <- require_action_attrs(attrs, "coding_design_checkpoint_open") do
-               # Human-wait capacity is owner-seeded as coding_budget.interaction_wait_ms
-               # and bound via timeout_budget; do not inject a static request timeout.
+               # Plan interaction_wait is capacity; the action-owned maximum is the
+               # requested operation timeout. DeadlineBudget still clamps by cap,
+               # owner deadline, and worker completion reserve.
                {:ok,
                 attrs
-                |> Map.delete("param.timeout")
+                |> Map.put(
+                  "param.timeout",
+                  Arbor.Actions.coding_design_checkpoint_max_timeout_ms()
+                )
                 |> Map.put("max_retries", "0")}
              end
            end),

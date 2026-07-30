@@ -480,6 +480,7 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandlerTaintTest do
       reserve_ms = 360_000
       approval_ms = 90_000
       interaction_wait_ms = wall_ms
+      design_max = Arbor.Actions.coding_design_checkpoint_max_timeout_ms()
       now = System.system_time(:millisecond)
 
       context =
@@ -493,6 +494,7 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandlerTaintTest do
       node =
         action_node(%{
           "action" => "coding_design_checkpoint_open",
+          "param.timeout" => design_max,
           "timeout_budget.deadline_key" => "session.run_deadline_unix_ms",
           "timeout_budget.cap_key" => "coding_budget.interaction_wait_ms",
           "timeout_budget.reserve_key" => "coding_budget.worker_completion_reserve_ms",
@@ -504,9 +506,75 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandlerTaintTest do
       assert_received {:stub_execute, "coding_design_checkpoint_open", %{"timeout" => effective},
                        _, _}
 
-      # Exact composition: min(interaction_wait, deadline - now - reserve) ≈ 540_000
+      # Exact composition: min(action max, interaction_wait, deadline - now - reserve)
       assert effective > approval_ms
+      assert effective <= design_max
       assert effective <= wall_ms - reserve_ms
+      assert Context.get(context, "coding_budget.interaction_wait_ms") == interaction_wait_ms
+    end
+
+    test "long-plan design-checkpoint timeout mismatch: request is action max, not interaction_wait" do
+      # Availability regression: long plans keep interaction_wait at full wall
+      # capacity, but Open must request the action-owned maximum so ExecHandler
+      # clamps to an admitted timeout instead of failing with
+      # invalid_design_checkpoint_timeout.
+      wall_ms = 5_400_000
+      interaction_wait_ms = 5_400_000
+      reserve_ms = 1_110_000
+      design_max = Arbor.Actions.coding_design_checkpoint_max_timeout_ms()
+      now = System.system_time(:millisecond)
+
+      context =
+        Context.new(%{
+          "session.run_deadline_unix_ms" => now + wall_ms,
+          "coding_budget.interaction_wait_ms" => interaction_wait_ms,
+          "coding_budget.worker_completion_reserve_ms" => reserve_ms
+        })
+
+      fixed_node =
+        action_node(%{
+          "action" => "coding_design_checkpoint_open",
+          "param.timeout" => design_max,
+          "timeout_budget.deadline_key" => "session.run_deadline_unix_ms",
+          "timeout_budget.cap_key" => "coding_budget.interaction_wait_ms",
+          "timeout_budget.reserve_key" => "coding_budget.worker_completion_reserve_ms",
+          "timeout_budget.param" => "timeout"
+        })
+
+      assert ExecHandler.execute(fixed_node, context, graph(), opts()).status == :success
+
+      assert_received {:stub_execute, "coding_design_checkpoint_open", %{"timeout" => effective},
+                       _, _}
+
+      assert Context.get(context, "coding_budget.interaction_wait_ms") == 5_400_000
+      assert effective == design_max
+      assert effective == 3_600_000
+
+      assert Arbor.Actions.Coding.DesignCheckpoint.timeout(%{}, %{"timeout" => effective}) ==
+               {:ok, 3_600_000}
+
+      # Base-contract control: missing param.timeout falls back to the long
+      # interaction capacity and exceeds the action maximum.
+      legacy_node =
+        action_node(%{
+          "action" => "coding_design_checkpoint_open",
+          "timeout_budget.deadline_key" => "session.run_deadline_unix_ms",
+          "timeout_budget.cap_key" => "coding_budget.interaction_wait_ms",
+          "timeout_budget.reserve_key" => "coding_budget.worker_completion_reserve_ms",
+          "timeout_budget.param" => "timeout"
+        })
+
+      assert ExecHandler.execute(legacy_node, context, graph(), opts()).status == :success
+
+      assert_received {:stub_execute, "coding_design_checkpoint_open",
+                       %{"timeout" => legacy_effective}, _, _}
+
+      assert legacy_effective > design_max
+      assert legacy_effective <= wall_ms - reserve_ms
+
+      assert Arbor.Actions.Coding.DesignCheckpoint.timeout(%{}, %{
+               "timeout" => legacy_effective
+             }) == {:error, :invalid_design_checkpoint_timeout}
     end
 
     test "reviewed commit binds interaction wait with approval completion reserve" do

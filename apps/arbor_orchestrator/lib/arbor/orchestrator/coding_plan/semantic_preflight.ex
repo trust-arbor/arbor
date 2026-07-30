@@ -157,8 +157,10 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     * `:checkpoint_work_packet_json` — the contract-canonical frozen packet
       serialization embedded by the compiler.
     * `:design_checkpoint_timeout_ms` — optional legacy opt; ignored. Human-wait
-      capacity is owner-seeded as `coding_budget.interaction_wait_ms` and bound
-      via timeout_budget (no static design request timeout).
+      capacity is owner-seeded as `coding_budget.interaction_wait_ms`. Open pins
+      exact `param.timeout` to
+      `Arbor.Actions.coding_design_checkpoint_max_timeout_ms()`; timeout_budget
+      still clamps that request by capacity, owner deadline, and reserve.
   """
   @spec validate(Graph.t(), policy(), keyword()) :: :ok | {:error, validate_error()}
   def validate(graph, policy, opts \\ [])
@@ -827,6 +829,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
 
     # Legacy callers may still pass :design_checkpoint_timeout_ms; it is ignored.
     # Human-wait capacity is owner-seeded (coding_budget.interaction_wait_ms).
+    # Open's requested timeout is the action-owned maximum, pinned below.
     cond do
       policy not in ["direct", "design_required"] ->
         {:error, {:invalid_semantic_policy, {:invalid_checkpoint_policy, policy}}}
@@ -2355,6 +2358,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
          "target" => "action",
          "action" => "coding_design_checkpoint_open",
          "context_keys" => context_keys,
+         "param.timeout" => Arbor.Actions.coding_design_checkpoint_max_timeout_ms(),
          "timeout_budget.deadline_key" => "session.run_deadline_unix_ms",
          "timeout_budget.cap_key" => "coding_budget.interaction_wait_ms",
          "timeout_budget.reserve_key" => "coding_budget.worker_completion_reserve_ms",

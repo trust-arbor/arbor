@@ -129,6 +129,12 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     refute graph.nodes["open_design_checkpoint"].attrs["context_keys"] =~ ",design,"
     refute graph.nodes["open_design_checkpoint"].attrs["context_keys"] =~ "design_attempt,design,"
 
+    assert graph.nodes["open_design_checkpoint"].attrs["param.timeout"] ==
+             Arbor.Actions.coding_design_checkpoint_max_timeout_ms()
+
+    assert graph.nodes["open_design_checkpoint"].attrs["timeout_budget.cap_key"] ==
+             "coding_budget.interaction_wait_ms"
+
     assert graph.nodes["await_design_checkpoint"].attrs["context_keys"] =~
              "design_checkpoint_open.operation_id,design_checkpoint_open.owner_deadline_unix_ms," <>
                "design_checkpoint_open.evidence"
@@ -284,6 +290,18 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
       update_in(
         graph.nodes["open_design_checkpoint"].attrs,
         &Map.put(&1, "param.timeout", plan.budgets["inactivity_timeout_ms"] - 1)
+      ),
+      update_in(
+        graph.nodes["open_design_checkpoint"].attrs,
+        &Map.delete(&1, "param.timeout")
+      ),
+      update_in(
+        graph.nodes["open_design_checkpoint"].attrs,
+        &Map.put(&1, "param.timeout", 5_400_000)
+      ),
+      update_in(
+        graph.nodes["open_design_checkpoint"].attrs,
+        &Map.put(&1, "param.timeout", "3600000")
       ),
       update_in(
         graph.nodes["open_design_checkpoint"].attrs,

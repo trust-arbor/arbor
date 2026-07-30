@@ -8,6 +8,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     ActionCatalog,
     Compilation,
     Compiler,
+    DeadlineBudget,
     ExecutionManifest,
     Profiles,
     ValidationProgram
@@ -288,7 +289,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
   test "template stays within reviewed DOT source, node, and edge ceilings", ctx do
     graph = parse!(ctx.template_source)
 
-    assert byte_size(ctx.template_source) == 81_446
+    assert byte_size(ctx.template_source) == 81_473
     assert map_size(graph.nodes) == 236
     assert length(graph.edges) == 342
     assert byte_size(ctx.template_source) <= 262_144
@@ -394,6 +395,51 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     end
   end
 
+  test "long-plan design-checkpoint timeout mismatch: compiled Open requests action max not interaction_wait",
+       ctx do
+    # Availability regression for long coding plans: interaction_wait stays at
+    # full wall capacity while Open's requested timeout is the action-owned
+    # maximum so DeadlineBudget clamps to an admitted value.
+    wall_ms = 5_400_000
+    interaction_wait_ms = 5_400_000
+    reserve_ms = 1_110_000
+    design_max = Arbor.Actions.coding_design_checkpoint_max_timeout_ms()
+    now = System.system_time(:millisecond)
+
+    plan =
+      v2_plan!(%{
+        "checkpoint_policy" => "design_required",
+        "budgets" => %{"wall_clock_ms" => wall_ms}
+      })
+
+    assert {:ok, compilation} = compile(plan, ctx)
+    open = node_attrs(parse!(compilation.dot_source), "open_design_checkpoint")
+
+    assert open["param.timeout"] == design_max
+    assert open["timeout_budget.cap_key"] == "coding_budget.interaction_wait_ms"
+    assert open["timeout_budget.reserve_key"] == "coding_budget.worker_completion_reserve_ms"
+    assert open["timeout_budget.deadline_key"] == "session.run_deadline_unix_ms"
+    assert open["timeout_budget.param"] == "timeout"
+
+    requested = open["param.timeout"]
+    assert is_integer(requested) and requested > 0
+
+    assert {:ok, effective} =
+             DeadlineBudget.cap(
+               min(requested, interaction_wait_ms),
+               now + wall_ms,
+               reserve_ms,
+               now
+             )
+
+    assert interaction_wait_ms == 5_400_000
+    assert effective == design_max
+    assert effective == 3_600_000
+
+    assert Arbor.Actions.Coding.DesignCheckpoint.timeout(%{}, %{"timeout" => effective}) ==
+             {:ok, 3_600_000}
+  end
+
   test "design-required plans activate exact checkpoint topology and canonical prompts", ctx do
     plan =
       v2_plan!(%{
@@ -474,7 +520,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert node_attrs(graph, "hoist_accepted_design")["source_key"] ==
              "design_artifact_load.design"
 
-    refute Map.has_key?(open, "param.timeout")
+    assert open["param.timeout"] == Arbor.Actions.coding_design_checkpoint_max_timeout_ms()
 
     assert open["timeout_budget.cap_key"] == "coding_budget.interaction_wait_ms"
 
@@ -1007,18 +1053,18 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
 
     assert node_attrs(graph, "open_design_checkpoint")
            |> Map.take([
+             "param.timeout",
              "timeout_budget.deadline_key",
              "timeout_budget.cap_key",
              "timeout_budget.reserve_key",
              "timeout_budget.param"
            ]) == %{
+             "param.timeout" => Arbor.Actions.coding_design_checkpoint_max_timeout_ms(),
              "timeout_budget.deadline_key" => "session.run_deadline_unix_ms",
              "timeout_budget.cap_key" => "coding_budget.interaction_wait_ms",
              "timeout_budget.reserve_key" => "coding_budget.worker_completion_reserve_ms",
              "timeout_budget.param" => "timeout"
            }
-
-    refute Map.has_key?(node_attrs(graph, "open_design_checkpoint"), "param.timeout")
 
     assert node_attrs(graph, "validate")
            |> Map.take([
