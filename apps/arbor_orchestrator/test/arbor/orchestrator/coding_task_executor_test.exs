@@ -1655,6 +1655,8 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     end
 
     test "task and context data cannot set the coding approval timeout" do
+      Application.delete_env(:arbor_orchestrator, :coding_approval_timeout_ms)
+
       assert_coding_admission_failed(
         CodingTaskExecutor.run(
           "agent_1",
@@ -1681,7 +1683,14 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
                  })
                )
 
-      assert last_opts()[:approval_timeout_ms] == 300_000
+      # Metadata cannot inject authority; Engine approval timeout is the
+      # owner-derived interaction wait (default plan wall clock), not the
+      # legacy 300_000ms cap and not the injected 999_999.
+      opts = last_opts()
+      assert opts[:approval_timeout_ms] == 900_000
+      assert opts[:initial_values]["coding_budget.interaction_wait_ms"] == 900_000
+      refute opts[:approval_timeout_ms] == 300_000
+      refute opts[:approval_timeout_ms] == 999_999
     end
 
     test "rejects invalid optional field types and requires task_id in context" do
@@ -2232,6 +2241,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     end
 
     test "forces authorization, authority, run ids, and archived graph path" do
+      Application.delete_env(:arbor_orchestrator, :coding_approval_timeout_ms)
       template_path = Config.coding_pipeline_path()
 
       assert {:ok, result} =
@@ -2277,7 +2287,11 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
 
       assert design_root == opts[:logs_root]
       assert opts[:timeout] == 900_000
-      assert opts[:approval_timeout_ms] == 300_000
+      # Compiled coding DOT runs pass the owner interaction wait as Engine
+      # approval_timeout_ms — not the legacy 300_000ms coding_approval default.
+      assert opts[:approval_timeout_ms] == 900_000
+      assert opts[:initial_values]["coding_budget.interaction_wait_ms"] == 900_000
+      refute opts[:approval_timeout_ms] == 300_000
       assert opts[:graph_hash] == artifacts["graph_hash"]
       assert opts[:cache] == false
       assert opts[:execution_manifest_digest] =~ ~r/^[0-9a-f]{64}$/
@@ -2455,6 +2469,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     end
 
     test "threads and enforces a supplied pipeline timeout" do
+      Application.delete_env(:arbor_orchestrator, :coding_approval_timeout_ms)
       Application.put_env(:arbor_orchestrator, :coding_pipeline_runner, SlowRunner)
 
       assert {:error, {:pipeline_error, detail}} =
@@ -2469,7 +2484,9 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
 
       assert_receive {:slow_runner_started, runner_pid, opts, links}
       assert opts[:timeout] == 20
-      assert opts[:approval_timeout_ms] == 1
+      # Interaction wait equals the effective wall clock (no legacy 5s reserve
+      # re-cap on the Engine approval timeout for compiled coding runs).
+      assert opts[:approval_timeout_ms] == 20
       assert self() in links
       refute Process.alive?(runner_pid)
       assert length(Process.get(:coding_executor_closed_authorities, [])) == 1
@@ -2553,12 +2570,18 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
                  })
                )
 
-      iv = last_opts()[:initial_values]
+      opts = last_opts()
+      iv = opts[:initial_values]
 
       assert iv["coding_budget.interaction_wait_ms"] == 900_000
       assert iv["coding_budget.approval_ms"] == 90_000
       assert iv["coding_budget.worker_completion_reserve_ms"] == 360_000
       assert iv["coding_budget.interaction_wait_ms"] > iv["coding_budget.approval_ms"]
+      # Regression: Engine approval timeout must use the interaction wait, not
+      # the legacy coding_approval_timeout_ms default of 300_000.
+      assert opts[:approval_timeout_ms] == 900_000
+      refute opts[:approval_timeout_ms] == 300_000
+      assert opts[:approval_timeout_ms] == iv["coding_budget.interaction_wait_ms"]
     end
 
     test "operator coding approval config shortens interaction wait but cannot widen it" do
@@ -2574,7 +2597,9 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
                  })
                )
 
-      assert last_opts()[:initial_values]["coding_budget.interaction_wait_ms"] == 60_000
+      shortened_opts = last_opts()
+      assert shortened_opts[:initial_values]["coding_budget.interaction_wait_ms"] == 60_000
+      assert shortened_opts[:approval_timeout_ms] == 60_000
 
       Application.put_env(:arbor_orchestrator, :coding_approval_timeout_ms, 2_000_000)
 
@@ -2588,7 +2613,10 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
                  })
                )
 
-      assert last_opts()[:initial_values]["coding_budget.interaction_wait_ms"] == 900_000
+      bounded_opts = last_opts()
+      assert bounded_opts[:initial_values]["coding_budget.interaction_wait_ms"] == 900_000
+      assert bounded_opts[:approval_timeout_ms] == 900_000
+      refute bounded_opts[:approval_timeout_ms] == 2_000_000
 
       Application.put_env(:arbor_orchestrator, :coding_approval_timeout_ms, "invalid")
 
@@ -2602,7 +2630,10 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
                  })
                )
 
-      assert last_opts()[:initial_values]["coding_budget.interaction_wait_ms"] == 900_000
+      invalid_opts = last_opts()
+      assert invalid_opts[:initial_values]["coding_budget.interaction_wait_ms"] == 900_000
+      assert invalid_opts[:approval_timeout_ms] == 900_000
+      refute invalid_opts[:approval_timeout_ms] == 300_000
     end
 
     test "seeds opportunistic validation cap above guaranteed reserve for compound programs" do
@@ -2897,6 +2928,8 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     end
 
     test "uses the smaller of plan wall-clock and context timeouts" do
+      Application.delete_env(:arbor_orchestrator, :coding_approval_timeout_ms)
+
       task =
         valid_direct_task(%{
           "budgets" => %{
@@ -2914,7 +2947,9 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
 
       plan_bound_opts = last_opts()
       assert plan_bound_opts[:timeout] == 20_000
-      assert plan_bound_opts[:approval_timeout_ms] == 15_000
+      # Effective plan wall clock bounds interaction wait / Engine approval timeout.
+      assert plan_bound_opts[:approval_timeout_ms] == 20_000
+      assert plan_bound_opts[:initial_values]["coding_budget.interaction_wait_ms"] == 20_000
       assert_receive {:coding_executor_runner_observed_at, plan_observed_at}
 
       assert (plan_bound_opts[:initial_values]["session.run_deadline_unix_ms"] -
@@ -2929,7 +2964,9 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
 
       context_bound_opts = last_opts()
       assert context_bound_opts[:timeout] == 12_000
-      assert context_bound_opts[:approval_timeout_ms] == 7_000
+      # Context timeout is the effective wall clock when smaller than plan.
+      assert context_bound_opts[:approval_timeout_ms] == 12_000
+      assert context_bound_opts[:initial_values]["coding_budget.interaction_wait_ms"] == 12_000
       assert_receive {:coding_executor_runner_observed_at, context_observed_at}
 
       assert (context_bound_opts[:initial_values]["session.run_deadline_unix_ms"] -

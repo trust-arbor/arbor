@@ -1982,7 +1982,10 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     task_id = exec_ctx.task_id
     caller_id = Map.get(exec_ctx, :caller_id)
     timeout = effective_timeout(plan, Map.get(exec_ctx, :timeout))
-    approval_timeout_ms = Config.coding_approval_timeout_ms(timeout)
+    # Owner-derived interaction wait is the Engine approval timeout for compiled
+    # coding DOT runs. Do not re-cap via coding_approval_timeout_ms/1 (legacy
+    # 300_000ms default) — that path remains for CandidateVerifier and other
+    # non-DOT consumers. Operator config may only shorten this value.
     interaction_wait_ms = Config.coding_interaction_wait_ms(timeout)
 
     with {:ok, validation_action_source_ms} <- validation_action_source_ms(compilation),
@@ -2036,7 +2039,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
           pinned_handler_bindings: pinned_handler_bindings,
           workdir: plan.repo_root,
           timeout: timeout,
-          approval_timeout_ms: approval_timeout_ms,
+          approval_timeout_ms: interaction_wait_ms,
           spawning_pid: self(),
           resumable: true,
           cache: false
