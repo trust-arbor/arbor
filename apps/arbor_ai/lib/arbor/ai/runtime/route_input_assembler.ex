@@ -11,6 +11,15 @@ defmodule Arbor.AI.Runtime.RouteInputAssembler do
   profile load, catalog-source policy, explicit providers, evidence readers,
   and source-timestamp preservation.
 
+  Default production observation assembly walks admitted `%ModelEntry{}`
+  OAuth candidates, takes **one** supervised OAuth model-catalog cache
+  snapshot, and emits **model-specific** observations (never a generic
+  provider-wide OAuth row that could wildcard-match sibling models). Catalog
+  membership for arbor OAuth routes is composed via
+  `ProviderModelCatalogObservation`; non-arbor OAuth runtimes never borrow
+  catalog evidence or relabel as arbor. Route selection never refreshes
+  credentials or calls `Arbor.LLM.oauth_model_catalog`.
+
   Injectable `profile`/`clock`/readers are a **test seam only**. Production
   callers use `Arbor.AI.assemble_provider_route_input/1`, which loads the
   reviewed Application profile and production readers.
@@ -23,10 +32,13 @@ defmodule Arbor.AI.Runtime.RouteInputAssembler do
   alias Arbor.AI.RouteFailureStore
   alias Arbor.AI.Runtime.RouteCatalog
   alias Arbor.AI.Runtime.OAuthHealthObservation
+  alias Arbor.AI.Runtime.ProviderModelCatalogObservation
   alias Arbor.AI.Runtime.ProviderRouter
   alias Arbor.AI.Runtime.RouteEvidenceOverlay
   alias Arbor.Contracts.LLM.BudgetSnapshot
   alias Arbor.Contracts.LLM.ModelEntry
+  alias Arbor.Contracts.LLM.ProviderEntry
+  alias Arbor.Contracts.LLM.ProviderModelCatalog
   alias Arbor.Contracts.LLM.ProviderObservation
 
   @max_catalog 128
@@ -34,6 +46,8 @@ defmodule Arbor.AI.Runtime.RouteInputAssembler do
   @max_observations 256
   @max_budgets 256
   @max_fallbacks 64
+  @max_oauth_catalog_routes 2
+  @oauth_catalog_routes MapSet.new(["openai_oauth", "xai_oauth"])
   @profile_keys ~w(
     enabled task_registry default_task_class catalog_model_ids catalog
     scoreboard providers fallback_limit params
@@ -53,6 +67,8 @@ defmodule Arbor.AI.Runtime.RouteInputAssembler do
              | :route_failure_evidence_malformed
              | :route_concurrency_evidence_unavailable
              | :route_concurrency_evidence_malformed
+             | :oauth_model_catalog_evidence_unavailable
+             | :oauth_model_catalog_evidence_malformed
              | :malformed}
 
   @doc """
@@ -66,6 +82,11 @@ defmodule Arbor.AI.Runtime.RouteInputAssembler do
     * `:clock` — zero-arity returning `%DateTime{}`
     * `:catalog_reader` — `(model_ids :: [String.t()]) -> {:ok, [ModelEntry.t()]} | {:error, term()}`
     * `:observation_reader` — `(providers, decision_time) -> {:ok, [ProviderObservation.t()]} | {:error, term()}`
+      Injected two-arity seam bypasses default OAuth catalog snapshot/health wiring.
+    * `:oauth_catalog_snapshot_reader` — `() -> {:ok, map()} | {:error, term()}`
+      (default path only; production uses `Arbor.AI.oauth_model_catalog_snapshot/1`)
+    * `:oauth_health_reader` — `(route) -> {:ok, health} | {:error, term()}`
+      (default path only; production uses `Arbor.LLM.oauth_health/1`; memoized once per route)
     * `:budget_reader` — `(providers, decision_time) -> {:ok, [BudgetSnapshot.t()]} | {:error, term()}`
     * `:task_class` — bounded task class string
   """
@@ -83,7 +104,7 @@ defmodule Arbor.AI.Runtime.RouteInputAssembler do
          {:ok, catalog} <- resolve_catalog(profile, opts, test_profile_seam?),
          {:ok, scoreboard} <- resolve_scoreboard(profile),
          {:ok, providers} <- resolve_providers(profile, catalog),
-         {:ok, observations} <- resolve_observations(providers, decision_time, opts),
+         {:ok, observations} <- resolve_observations(providers, decision_time, catalog, opts),
          {:ok, budgets} <- resolve_budgets(providers, decision_time, opts),
          {:ok, policy} <- build_policy(profile) do
       {:ok,
@@ -390,10 +411,22 @@ defmodule Arbor.AI.Runtime.RouteInputAssembler do
 
   defp normalize_explicit_providers(_), do: {:error, {:route_assembly_failed, :invalid_profile}}
 
-  defp resolve_observations(providers, decision_time, opts) do
-    reader = Keyword.get(opts, :observation_reader, &default_observation_reader/2)
+  # Injected observation_reader.(providers, decision_time) is exact two-arity and
+  # bypasses catalog snapshot / oauth health wiring. Default path is catalog-aware.
+  defp resolve_observations(providers, decision_time, catalog, opts) do
+    result =
+      case Keyword.fetch(opts, :observation_reader) do
+        {:ok, reader} when is_function(reader, 2) ->
+          reader.(providers, decision_time)
 
-    case reader.(providers, decision_time) do
+        :error ->
+          default_observation_reader(providers, decision_time, catalog, opts)
+
+        {:ok, _} ->
+          {:error, :invalid_observation}
+      end
+
+    case result do
       {:ok, observations}
       when is_list(observations) and length(observations) <= @max_observations ->
         normalize_observation_list(observations)
@@ -412,6 +445,12 @@ defmodule Arbor.AI.Runtime.RouteInputAssembler do
 
       {:error, :route_concurrency_evidence_malformed} ->
         {:error, {:route_assembly_failed, :route_concurrency_evidence_malformed}}
+
+      {:error, :oauth_model_catalog_evidence_unavailable} ->
+        {:error, {:route_assembly_failed, :oauth_model_catalog_evidence_unavailable}}
+
+      {:error, :oauth_model_catalog_evidence_malformed} ->
+        {:error, {:route_assembly_failed, :oauth_model_catalog_evidence_malformed}}
 
       {:error, :invalid_observation} ->
         {:error, {:route_assembly_failed, :invalid_observation}}
@@ -485,34 +524,274 @@ defmodule Arbor.AI.Runtime.RouteInputAssembler do
     end
   end
 
-  defp default_observation_reader(providers, decision_time) do
+  defp default_observation_reader(providers, decision_time, catalog, opts) do
     with {:ok, route_failures} <- read_route_failures(decision_time),
-         {:ok, concurrency_snap} <- read_concurrency_snapshot() do
+         {:ok, concurrency_snap} <- read_concurrency_snapshot(),
+         {:ok, catalog_snap} <- read_and_admit_oauth_catalog_snapshot(opts) do
       quota_status = read_quota_status()
+      health_reader = Keyword.get(opts, :oauth_health_reader, &Arbor.LLM.oauth_health/1)
+      candidates = oauth_route_candidates(catalog)
+      non_oauth_providers = Enum.reject(providers, &OAuthHealthObservation.oauth_route?/1)
 
-      Enum.reduce_while(providers, {:ok, []}, fn provider, {:ok, acc} ->
-        with {:ok, provider_key} <- provider_key(provider),
-             {:ok, base} <- base_observation(provider, decision_time) do
-          failure = Map.get(route_failures, provider_key)
-          quota = Map.get(quota_status, provider_key)
+      planned = length(candidates) + length(non_oauth_providers)
 
-          attrs =
-            base
-            |> RouteEvidenceOverlay.overlay(failure, quota, decision_time)
-            |> overlay_route_concurrency(concurrency_snap)
-
-          {:cont, {:ok, [attrs | acc]}}
-        else
-          :error -> {:halt, {:error, :invalid_observation}}
-          {:error, reason} -> {:halt, {:error, reason}}
-        end
-      end)
-      |> case do
-        {:ok, list} -> {:ok, Enum.reverse(list)}
-        error -> error
+      if planned > @max_observations do
+        {:error, :invalid_observation}
+      else
+        emit_default_observations(
+          candidates,
+          non_oauth_providers,
+          catalog_snap,
+          health_reader,
+          route_failures,
+          quota_status,
+          concurrency_snap,
+          decision_time
+        )
       end
     end
   end
+
+  defp emit_default_observations(
+         candidates,
+         non_oauth_providers,
+         catalog_snap,
+         health_reader,
+         route_failures,
+         quota_status,
+         concurrency_snap,
+         decision_time
+       ) do
+    oauth_result =
+      Enum.reduce_while(candidates, {:ok, {[], %{}}}, fn candidate, {:ok, {acc, health_cache}} ->
+        case emit_oauth_candidate(
+               candidate,
+               catalog_snap,
+               health_reader,
+               health_cache,
+               route_failures,
+               quota_status,
+               concurrency_snap,
+               decision_time
+             ) do
+          {:ok, attrs, new_cache} ->
+            {:cont, {:ok, {[attrs | acc], new_cache}}}
+
+          {:error, reason} ->
+            {:halt, {:error, reason}}
+        end
+      end)
+
+    case oauth_result do
+      {:error, reason} ->
+        {:error, reason}
+
+      {:ok, {oauth_attrs, _health_cache}} ->
+        Enum.reduce_while(non_oauth_providers, {:ok, oauth_attrs}, fn provider, {:ok, acc} ->
+          with {:ok, provider_key} <- provider_key(provider),
+               {:ok, base} <- non_oauth_base_observation(provider, decision_time) do
+            failure = Map.get(route_failures, provider_key)
+            quota = Map.get(quota_status, provider_key)
+
+            attrs =
+              base
+              |> RouteEvidenceOverlay.overlay(failure, quota, decision_time)
+              |> overlay_route_concurrency(concurrency_snap)
+
+            {:cont, {:ok, [attrs | acc]}}
+          else
+            :error -> {:halt, {:error, :invalid_observation}}
+            {:error, reason} -> {:halt, {:error, reason}}
+          end
+        end)
+        |> case do
+          {:ok, list} -> {:ok, Enum.reverse(list)}
+          error -> error
+        end
+    end
+  end
+
+  defp emit_oauth_candidate(
+         candidate,
+         catalog_snap,
+         health_reader,
+         health_cache,
+         route_failures,
+         quota_status,
+         concurrency_snap,
+         decision_time
+       ) do
+    with {:ok, health, new_cache} <-
+           health_cached(candidate.provider, health_reader, health_cache),
+         {:ok, base} <-
+           oauth_candidate_base(candidate, health, catalog_snap, decision_time) do
+      failure = Map.get(route_failures, candidate.provider)
+      quota = Map.get(quota_status, candidate.provider)
+
+      attrs =
+        base
+        |> RouteEvidenceOverlay.overlay(failure, quota, decision_time)
+        |> overlay_route_concurrency(concurrency_snap)
+
+      {:ok, attrs, new_cache}
+    end
+  end
+
+  # Arbor OAuth: compose catalog membership. Non-arbor: exact runtime + unknown
+  # membership without borrowing catalog evidence (never relabel as arbor).
+  defp oauth_candidate_base(candidate, health, catalog_snap, decision_time) do
+    if candidate.runtime_atom == :arbor do
+      catalog_or_nil = Map.get(catalog_snap, candidate.provider)
+
+      ProviderModelCatalogObservation.compose(
+        health,
+        catalog_or_nil,
+        candidate.ref,
+        decision_time
+      )
+    else
+      non_arbor_oauth_observation(candidate, health, decision_time)
+    end
+  end
+
+  defp non_arbor_oauth_observation(candidate, health, decision_time) do
+    case OAuthHealthObservation.from_health(health, decision_time) do
+      {:ok, base} when is_map(base) ->
+        attrs =
+          base
+          |> Map.put("provider", candidate.provider)
+          |> Map.put("requested_model_id", candidate.ref)
+          |> Map.put("runtime", candidate.runtime)
+          |> Map.put("model_catalog_membership", "unknown")
+          |> Map.put("source", "arbor_oauth_health")
+
+        case ProviderObservation.new(attrs) do
+          {:ok, observation} ->
+            case ProviderObservation.to_map(observation) do
+              map when is_map(map) -> {:ok, map}
+              _ -> {:error, :invalid_observation}
+            end
+
+          {:error, _} ->
+            {:error, :invalid_observation}
+        end
+
+      _ ->
+        {:error, :invalid_observation}
+    end
+  rescue
+    _ -> {:error, :invalid_observation}
+  catch
+    _, _ -> {:error, :invalid_observation}
+  end
+
+  # Exact OAuth ProviderEntry×runtime candidates from admitted ModelEntry catalog.
+  # requested_model_id uses ProviderEntry.ref with no alias coercion.
+  defp oauth_route_candidates(catalog) when is_list(catalog) do
+    candidates =
+      for %ModelEntry{providers: providers} <- catalog,
+          is_list(providers),
+          %ProviderEntry{} = pe <- providers,
+          OAuthHealthObservation.oauth_route?(pe.id),
+          runtime <- pe.runtimes,
+          is_atom(runtime) do
+        %{
+          provider: Atom.to_string(pe.id),
+          ref: pe.ref,
+          runtime_atom: runtime,
+          runtime: Atom.to_string(runtime)
+        }
+      end
+
+    Enum.uniq_by(candidates, &{&1.provider, &1.ref, &1.runtime})
+  end
+
+  defp oauth_route_candidates(_), do: []
+
+  defp health_cached(route, reader, cache) when is_map(cache) do
+    case Map.fetch(cache, route) do
+      {:ok, health} ->
+        {:ok, health, cache}
+
+      :error ->
+        case reader.(route) do
+          {:ok, health} -> {:ok, health, Map.put(cache, route, health)}
+          {:error, _} -> {:error, :invalid_observation}
+          _ -> {:error, :invalid_observation}
+        end
+    end
+  rescue
+    _ -> {:error, :invalid_observation}
+  catch
+    _, _ -> {:error, :invalid_observation}
+  end
+
+  # One bounded OAuth catalog snapshot per default assembly; shape-admit before use.
+  defp read_and_admit_oauth_catalog_snapshot(opts) do
+    reader =
+      Keyword.get(opts, :oauth_catalog_snapshot_reader, fn ->
+        Arbor.AI.oauth_model_catalog_snapshot([])
+      end)
+
+    case reader.() do
+      {:ok, snap} when is_map(snap) ->
+        admit_oauth_catalog_snapshot(snap)
+
+      {:error, :unavailable} ->
+        {:error, :oauth_model_catalog_evidence_unavailable}
+
+      {:error, :malformed} ->
+        {:error, :oauth_model_catalog_evidence_malformed}
+
+      _ ->
+        {:error, :oauth_model_catalog_evidence_malformed}
+    end
+  rescue
+    _ -> {:error, :oauth_model_catalog_evidence_malformed}
+  catch
+    _, _ -> {:error, :oauth_model_catalog_evidence_malformed}
+  end
+
+  defp admit_oauth_catalog_snapshot(snap) when is_map(snap) do
+    cond do
+      map_size(snap) == 0 ->
+        {:ok, %{}}
+
+      map_size(snap) > @max_oauth_catalog_routes ->
+        {:error, :oauth_model_catalog_evidence_malformed}
+
+      true ->
+        Enum.reduce_while(snap, {:ok, %{}}, fn {route, entry}, {:ok, acc} ->
+          cond do
+            not exact_oauth_route_string?(route) ->
+              {:halt, {:error, :oauth_model_catalog_evidence_malformed}}
+
+            is_nil(entry) ->
+              {:halt, {:error, :oauth_model_catalog_evidence_malformed}}
+
+            true ->
+              case ProviderModelCatalog.new(entry) do
+                {:ok, %ProviderModelCatalog{route: catalog_route} = valid} ->
+                  if catalog_route == route do
+                    {:cont, {:ok, Map.put(acc, route, valid)}}
+                  else
+                    {:halt, {:error, :oauth_model_catalog_evidence_malformed}}
+                  end
+
+                {:error, _} ->
+                  {:halt, {:error, :oauth_model_catalog_evidence_malformed}}
+              end
+          end
+        end)
+    end
+  end
+
+  defp admit_oauth_catalog_snapshot(_), do: {:error, :oauth_model_catalog_evidence_malformed}
+
+  defp exact_oauth_route_string?(route) when is_binary(route),
+    do: MapSet.member?(@oauth_catalog_routes, route)
+
+  defp exact_oauth_route_string?(_), do: false
 
   # One bounded node-local snapshot per assembly; fail closed when unavailable.
   defp read_concurrency_snapshot do
@@ -549,22 +828,16 @@ defmodule Arbor.AI.Runtime.RouteInputAssembler do
 
   defp overlay_route_concurrency(attrs, _snap), do: attrs
 
-  defp base_observation(provider, decision_time) do
-    if OAuthHealthObservation.oauth_route?(provider) do
-      case Arbor.LLM.oauth_health(provider) do
-        {:ok, health} -> OAuthHealthObservation.from_health(health, decision_time)
-        {:error, _} -> {:error, :invalid_observation}
-      end
-    else
-      envelope =
-        Arbor.AI.AcpSession.Readiness.Internal.observe(provider, nil,
-          clock: fn -> decision_time end
-        )
+  # Non-OAuth readiness only — OAuth rows come from admitted ModelEntry candidates.
+  defp non_oauth_base_observation(provider, decision_time) do
+    envelope =
+      Arbor.AI.AcpSession.Readiness.Internal.observe(provider, nil,
+        clock: fn -> decision_time end
+      )
 
-      case envelope do
-        %{"observation" => attrs} when is_map(attrs) -> {:ok, attrs}
-        _ -> {:error, :invalid_observation}
-      end
+    case envelope do
+      %{"observation" => attrs} when is_map(attrs) -> {:ok, attrs}
+      _ -> {:error, :invalid_observation}
     end
   end
 

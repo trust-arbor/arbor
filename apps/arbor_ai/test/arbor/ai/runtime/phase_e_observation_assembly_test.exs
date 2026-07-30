@@ -29,9 +29,12 @@ defmodule Arbor.AI.Runtime.PhaseEObservationAssemblyTest do
 
     obs = hd(input.observations)
     assert obs.provider == "openai_oauth"
+    # Empty/miss catalog keeps health source; membership is model-specific unknown.
     assert obs.source == "arbor_oauth_health"
     refute obs.source == "acp_provider_readiness"
     assert obs.runtime == "arbor"
+    assert obs.requested_model_id == "m1"
+    assert obs.model_catalog_membership == "unknown"
     assert_bounded_timestamps(obs, @now, @oauth_ttl_seconds)
     assert ProviderObservation.valid?(obs)
     assert obs.availability in @availability_enum
@@ -72,7 +75,9 @@ defmodule Arbor.AI.Runtime.PhaseEObservationAssemblyTest do
                end
              )
 
-    assert hd(input.observations).source == "arbor_oauth_health"
+    obs = hd(input.observations)
+    assert obs.source == "arbor_oauth_health"
+    assert obs.requested_model_id == "m1"
   end
 
   test "non-OAuth default reader produces bounded acp_provider_readiness envelope" do

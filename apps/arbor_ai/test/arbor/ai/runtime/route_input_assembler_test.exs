@@ -3,7 +3,14 @@ defmodule Arbor.AI.Runtime.RouteInputAssemblerTest do
 
   alias Arbor.AI
   alias Arbor.AI.Runtime.RouteInputAssembler
-  alias Arbor.Contracts.LLM.{BudgetSnapshot, ModelEntry, ProviderEntry, ProviderObservation}
+  alias Arbor.Contracts.LLM.{
+    BudgetSnapshot,
+    ModelEntry,
+    OAuthHealth,
+    ProviderEntry,
+    ProviderModelCatalog,
+    ProviderObservation
+  }
 
   @moduletag :fast
   @decision_time ~U[2026-07-22 22:00:00Z]
@@ -460,6 +467,243 @@ defmodule Arbor.AI.Runtime.RouteInputAssemblerTest do
     end
   end
 
+  describe "default OAuth catalog evidence wiring" do
+    @oauth_now ~U[2026-07-29 12:02:00Z]
+    @oauth_observed "2026-07-29T12:00:00Z"
+    @oauth_gen 3
+
+    test "present and absent membership from one snapshot and one health read" do
+      models = [oauth_model("model-a"), oauth_model("model-b")]
+      health_calls = :counters.new(1, [])
+      snap_calls = :counters.new(1, [])
+      catalog = oauth_catalog!(["model-a"], @oauth_gen)
+
+      assert {:ok, input} =
+               RouteInputAssembler.assemble(
+                 profile: enabled_profile(models, []),
+                 clock: fn -> @oauth_now end,
+                 oauth_health_reader: fn route ->
+                   :counters.add(health_calls, 1, 1)
+                   assert route in ["openai_oauth", :openai_oauth]
+                   {:ok, ready_health(@oauth_gen)}
+                 end,
+                 oauth_catalog_snapshot_reader: fn ->
+                   :counters.add(snap_calls, 1, 1)
+                   {:ok, %{"openai_oauth" => ProviderModelCatalog.to_map(catalog)}}
+                 end,
+                 budget_reader: fn providers, dt ->
+                   {:ok, Enum.map(providers, &budget_dt(&1, dt))}
+                 end
+               )
+
+      assert :counters.get(health_calls, 1) == 1
+      assert :counters.get(snap_calls, 1) == 1
+
+      by_model = Map.new(input.observations, &{&1.requested_model_id, &1})
+      assert by_model["model-a"].model_catalog_membership == "present"
+      assert by_model["model-a"].source == "arbor_oauth_catalog"
+      assert by_model["model-a"].observed_at == @oauth_observed
+      assert by_model["model-b"].model_catalog_membership == "absent"
+    end
+
+    test "missing empty snapshot yields unknown membership without assembly failure" do
+      model = oauth_model("model-a")
+
+      assert {:ok, input} =
+               RouteInputAssembler.assemble(
+                 profile: enabled_profile([model], []),
+                 clock: fn -> @oauth_now end,
+                 oauth_health_reader: fn _ -> {:ok, ready_health(1)} end,
+                 oauth_catalog_snapshot_reader: fn -> {:ok, %{}} end,
+                 budget_reader: fn providers, dt ->
+                   {:ok, Enum.map(providers, &budget_dt(&1, dt))}
+                 end
+               )
+
+      obs = hd(input.observations)
+      assert obs.requested_model_id == "model-a"
+      assert obs.model_catalog_membership == "unknown"
+      assert obs.source == "arbor_oauth_health"
+    end
+
+    test "expired future identity and generation mismatches yield exact unknown" do
+      model = oauth_model("model-a")
+      health = ready_health(@oauth_gen)
+
+      cases = [
+        # expired
+        oauth_catalog!(["model-a"], @oauth_gen,
+          observed_at: "2026-07-29T11:00:00Z",
+          expires_at: "2026-07-29T11:05:00Z"
+        ),
+        # future observed
+        oauth_catalog!(["model-a"], @oauth_gen,
+          observed_at: "2026-07-29T12:10:00Z",
+          expires_at: "2026-07-29T12:15:00Z"
+        ),
+        # generation mismatch
+        oauth_catalog!(["model-a"], @oauth_gen + 1),
+        # identity mismatch (xai catalog under openai route key is shape-malformed —
+        # use valid openai route with wrong backend via compose path: xai catalog
+        # admitted under its own key while candidate is openai → miss → unknown)
+      ]
+
+      for catalog <- cases do
+        assert {:ok, input} =
+                 RouteInputAssembler.assemble(
+                   profile: enabled_profile([model], []),
+                   clock: fn -> @oauth_now end,
+                   oauth_health_reader: fn _ -> {:ok, health} end,
+                   oauth_catalog_snapshot_reader: fn ->
+                     {:ok, %{"openai_oauth" => ProviderModelCatalog.to_map(catalog)}}
+                   end,
+                   budget_reader: fn providers, dt ->
+                     {:ok, Enum.map(providers, &budget_dt(&1, dt))}
+                   end
+                 )
+
+        assert hd(input.observations).model_catalog_membership == "unknown"
+        assert hd(input.observations).source == "arbor_oauth_health"
+      end
+
+      # Route key present for xai while candidate is openai → miss → unknown
+      xai =
+        oauth_catalog_route!("xai_oauth", "xai", ["model-a"], @oauth_gen)
+
+      assert {:ok, input} =
+               RouteInputAssembler.assemble(
+                 profile: enabled_profile([model], []),
+                 clock: fn -> @oauth_now end,
+                 oauth_health_reader: fn _ -> {:ok, health} end,
+                 oauth_catalog_snapshot_reader: fn ->
+                   {:ok, %{"xai_oauth" => ProviderModelCatalog.to_map(xai)}}
+                 end,
+                 budget_reader: fn providers, dt ->
+                   {:ok, Enum.map(providers, &budget_dt(&1, dt))}
+                 end
+               )
+
+      assert hd(input.observations).model_catalog_membership == "unknown"
+    end
+
+    test "unavailable and malformed cache states fail closed with distinct reasons" do
+      model = oauth_model("model-a")
+
+      assert {:error, {:route_assembly_failed, :oauth_model_catalog_evidence_unavailable}} =
+               RouteInputAssembler.assemble(
+                 profile: enabled_profile([model], []),
+                 clock: fn -> @oauth_now end,
+                 oauth_health_reader: fn _ -> {:ok, ready_health(1)} end,
+                 oauth_catalog_snapshot_reader: fn -> {:error, :unavailable} end,
+                 budget_reader: fn providers, dt ->
+                   {:ok, Enum.map(providers, &budget_dt(&1, dt))}
+                 end
+               )
+
+      assert {:error, {:route_assembly_failed, :oauth_model_catalog_evidence_malformed}} =
+               RouteInputAssembler.assemble(
+                 profile: enabled_profile([model], []),
+                 clock: fn -> @oauth_now end,
+                 oauth_health_reader: fn _ -> {:ok, ready_health(1)} end,
+                 oauth_catalog_snapshot_reader: fn ->
+                   {:ok, %{"openai_oauth" => %{not: "a catalog"}}}
+                 end,
+                 budget_reader: fn providers, dt ->
+                   {:ok, Enum.map(providers, &budget_dt(&1, dt))}
+                 end
+               )
+
+      assert {:error, {:route_assembly_failed, :oauth_model_catalog_evidence_malformed}} =
+               RouteInputAssembler.assemble(
+                 profile: enabled_profile([model], []),
+                 clock: fn -> @oauth_now end,
+                 oauth_health_reader: fn _ -> {:ok, ready_health(1)} end,
+                 oauth_catalog_snapshot_reader: fn ->
+                   {:ok, %{"not_a_route" => %{"route" => "openai_oauth"}}}
+                 end,
+                 budget_reader: fn providers, dt ->
+                   {:ok, Enum.map(providers, &budget_dt(&1, dt))}
+                 end
+               )
+    end
+
+    test "non-arbor OAuth runtime never borrows catalog evidence or relabels as arbor" do
+      model = %ModelEntry{
+        canonical_id: "model-a",
+        providers: [
+          %ProviderEntry{
+            id: :openai_oauth,
+            ref: "model-a",
+            auth: :oauth,
+            runtimes: [:acp],
+            pricing: nil
+          }
+        ],
+        family: :test,
+        context_window: 100_000,
+        max_output_tokens: 4_000
+      }
+
+      catalog = oauth_catalog!(["model-a"], @oauth_gen)
+
+      assert {:ok, input} =
+               RouteInputAssembler.assemble(
+                 profile: enabled_profile([model], []),
+                 clock: fn -> @oauth_now end,
+                 oauth_health_reader: fn _ -> {:ok, ready_health(@oauth_gen)} end,
+                 oauth_catalog_snapshot_reader: fn ->
+                   {:ok, %{"openai_oauth" => ProviderModelCatalog.to_map(catalog)}}
+                 end,
+                 budget_reader: fn providers, dt ->
+                   {:ok, Enum.map(providers, &budget_dt(&1, dt))}
+                 end
+               )
+
+      obs = hd(input.observations)
+      assert obs.provider == "openai_oauth"
+      assert obs.requested_model_id == "model-a"
+      assert obs.runtime == "acp"
+      refute obs.runtime == "arbor"
+      assert obs.model_catalog_membership == "unknown"
+      refute obs.source == "arbor_oauth_catalog"
+      assert obs.source == "arbor_oauth_health"
+    end
+
+    test "one snapshot per assembly and no credential refresh on default path" do
+      prior = Application.get_env(:arbor_llm, :oauth_refresh_fun)
+
+      Application.put_env(:arbor_llm, :oauth_refresh_fun, fn _, _, _ ->
+        flunk("default assembly must not refresh credentials")
+      end)
+
+      on_exit(fn ->
+        case prior do
+          nil -> Application.delete_env(:arbor_llm, :oauth_refresh_fun)
+          fun -> Application.put_env(:arbor_llm, :oauth_refresh_fun, fun)
+        end
+      end)
+
+      models = [oauth_model("model-a"), oauth_model("model-b")]
+      snap_calls = :counters.new(1, [])
+
+      assert {:ok, _input} =
+               RouteInputAssembler.assemble(
+                 profile: enabled_profile(models, []),
+                 clock: fn -> @oauth_now end,
+                 oauth_health_reader: fn _ -> {:ok, ready_health(@oauth_gen)} end,
+                 oauth_catalog_snapshot_reader: fn ->
+                   :counters.add(snap_calls, 1, 1)
+                   {:ok, %{}}
+                 end,
+                 budget_reader: fn providers, dt ->
+                   {:ok, Enum.map(providers, &budget_dt(&1, dt))}
+                 end
+               )
+
+      assert :counters.get(snap_calls, 1) == 1
+    end
+  end
+
   defp enabled_profile(catalog, scoreboard) do
     %{
       enabled: true,
@@ -535,5 +779,69 @@ defmodule Arbor.AI.Runtime.RouteInputAssemblerTest do
       })
 
     snap
+  end
+
+  defp budget_dt(provider, %DateTime{} = dt) do
+    budget(
+      provider,
+      DateTime.to_iso8601(dt),
+      DateTime.to_iso8601(DateTime.add(dt, 300, :second))
+    )
+  end
+
+  defp oauth_model(id) do
+    %ModelEntry{
+      canonical_id: id,
+      providers: [
+        %ProviderEntry{
+          id: :openai_oauth,
+          ref: id,
+          auth: :oauth,
+          runtimes: [:arbor],
+          pricing: nil
+        }
+      ],
+      family: :test,
+      context_window: 100_000,
+      max_output_tokens: 4_000
+    }
+  end
+
+  defp ready_health(generation) do
+    {:ok, health} =
+      OAuthHealth.new(%{
+        version: 1,
+        route: "openai_oauth",
+        backend: "openai",
+        status: "ready",
+        owner: "arbor_owned",
+        origin: "arbor_login",
+        source: "arbor_oauth_store",
+        generation: generation
+      })
+
+    health
+  end
+
+  defp oauth_catalog!(model_ids, generation, opts \\ []) do
+    oauth_catalog_route!("openai_oauth", "openai", model_ids, generation, opts)
+  end
+
+  defp oauth_catalog_route!(route, backend, model_ids, generation, opts \\ []) do
+    observed = Keyword.get(opts, :observed_at, "2026-07-29T12:00:00Z")
+    expires = Keyword.get(opts, :expires_at, "2026-07-29T12:05:00Z")
+
+    {:ok, catalog} =
+      ProviderModelCatalog.new(%{
+        route: route,
+        backend: backend,
+        runtime: "arbor",
+        model_ids: model_ids,
+        observed_at: observed,
+        expires_at: expires,
+        credential_generation: generation
+      })
+
+    catalog
   end
 end

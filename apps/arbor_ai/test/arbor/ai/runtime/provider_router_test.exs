@@ -424,6 +424,52 @@ defmodule Arbor.AI.Runtime.ProviderRouterTest do
     end
   end
 
+  test "strict mode: present membership for one OAuth model does not authorize sibling model" do
+    # Two siblings share provider/runtime; only model-a has present catalog evidence.
+    model_a = oauth_sibling("model-a")
+    model_b = oauth_sibling("model-b")
+
+    obs_a = oauth_observation("model-a", "present")
+    obs_b = oauth_observation("model-b", "absent")
+
+    budget =
+      budget_for("model-a", :good)
+      |> Map.put(:provider, "openai_oauth")
+
+    input = %{
+      task_class: "default",
+      task_registry: %{"default" => %{requirements: %{}}},
+      catalog: [model_a, model_b],
+      scoreboard: [
+        row("model-a", 0.5, 0, 0.0, 0.0, 0.0, 10) |> Map.put(:provider, "openai_oauth"),
+        row("model-b", 0.99, 0, 0.0, 0.0, 0.0, 10) |> Map.put(:provider, "openai_oauth")
+      ],
+      observations: [obs_a, obs_b],
+      budgets: [budget],
+      now: @now,
+      policy: %{strict_evidence: true, fallback_limit: 4, params: %{}}
+    }
+
+    assert {:ok, result} = ProviderRouter.decide_route(input)
+    assert result["model"] == "model-a"
+
+    b_excluded =
+      Enum.find(result["rationale"]["excluded"], &(&1["model"] == "model-b"))
+
+    assert "catalog_absent" in b_excluded["reasons"]
+
+    # Unknown membership is also ineligible under strict mode.
+    obs_unknown = oauth_observation("model-b", "unknown")
+
+    assert {:ok, result2} =
+             ProviderRouter.decide_route(%{input | observations: [obs_a, obs_unknown]})
+
+    assert result2["model"] == "model-a"
+
+    b2 = Enum.find(result2["rationale"]["excluded"], &(&1["model"] == "model-b"))
+    assert "missing_evidence:catalog" in b2["reasons"]
+  end
+
   test "scoreboard selection orders task, provider, runtime specificity, then newest evidence" do
     catalog = [model_with_ref("canonical-model", "provider-ref")]
     input = base_input("default", %{"default" => %{requirements: %{}}})
@@ -639,4 +685,43 @@ defmodule Arbor.AI.Runtime.ProviderRouterTest do
   defp provider_for(:zero_spend), do: :zero_spend_provider
   defp provider_for(:full), do: :full_provider
   defp provider_for(:plain), do: :plain_provider
+
+  defp oauth_sibling(id) do
+    %ModelEntry{
+      canonical_id: id,
+      providers: [
+        %ProviderEntry{
+          id: :openai_oauth,
+          ref: id,
+          auth: :oauth,
+          runtimes: [:arbor]
+        }
+      ],
+      family: :good,
+      context_window: 100_000,
+      max_output_tokens: 4_000,
+      capabilities: [:tool_use]
+    }
+  end
+
+  defp oauth_observation(model, membership) do
+    {:ok, observation} =
+      ProviderObservation.new(%{
+        provider: "openai_oauth",
+        source: "test",
+        runtime: "arbor",
+        observed_at: "2026-07-22T21:00:00Z",
+        expires_at: "2026-07-22T23:00:00Z",
+        availability: "available",
+        auth_health: "healthy",
+        model_catalog_membership: membership,
+        quota_state: "available",
+        subscription_capacity_state: "not_applicable",
+        concurrency_limit: 4,
+        concurrency_in_use: 0,
+        requested_model_id: model
+      })
+
+    observation
+  end
 end
