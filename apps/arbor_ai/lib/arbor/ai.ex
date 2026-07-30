@@ -52,9 +52,12 @@ defmodule Arbor.AI do
     Backends.TestEmbedding,
     BudgetTracker,
     Config,
+    LLMError,
     LLMTrace,
     ProviderControlPlane,
     ProviderUsageLedger,
+    QuotaTracker,
+    RouteFailureStore,
     SessionReader,
     SystemPromptBuilder,
     ToolSignals,
@@ -63,6 +66,8 @@ defmodule Arbor.AI do
   }
 
   alias Arbor.AI.Runtime.RouteInputAssembler
+
+  @max_retry_after_ms 86_400_000
 
   # Note: Arbor.Memory.* and Arbor.Actions are higher in the hierarchy than arbor_ai (L4).
   # All calls use Code.ensure_loaded?/apply to avoid compile-time dependency.
@@ -986,6 +991,89 @@ defmodule Arbor.AI do
   def assemble_provider_route_input(_task_class) do
     {:error, {:route_assembly_failed, :invalid_task_class}}
   end
+
+  @doc """
+  Synchronously feed one classified LLM failure into AI-owned control-plane state.
+
+  Pure classification stays in `Arbor.AI.LLMError.classify/1`. This facade is the
+  only production write boundary:
+
+  * exact OAuth route + exact `{type, code}` quota pair → `QuotaTracker.mark_quota_exhausted_sync/2`
+  * exact OAuth route + exact `{type, code}` route-failure pair → `RouteFailureStore.put_sync/1`
+  * type-only maps, aliases, missing route/code, or non-OAuth providers → `{:ok, :noop}`
+
+  Returns `{:ok, :recorded}` after the store acknowledges a required write,
+  `{:ok, :noop}` for deliberate no-ops, or `{:error, reason}` when a required
+  write fails. Never raises.
+  """
+  @spec record_classified_llm_failure(map()) ::
+          {:ok, :recorded} | {:ok, :noop} | {:error, term()}
+  def record_classified_llm_failure(error_info) when is_map(error_info) do
+    with {:ok, provider} <- exact_oauth_provider(Map.get(error_info, :provider)),
+         effect when effect != :none <- LLMError.control_plane_effect(error_info),
+         {:ok, code} <- exact_effect_code(error_info) do
+      case effect do
+        {:quota, :rate_limited} ->
+          opts = quota_mark_opts(error_info)
+
+          try do
+            QuotaTracker.mark_quota_exhausted_sync(provider, opts)
+            {:ok, :recorded}
+          catch
+            :exit, _ -> {:error, :quota_write_failed}
+          end
+
+        {:route_failure, class} ->
+          case RouteFailureStore.put_sync(
+                 route: provider,
+                 class: class,
+                 code: code,
+                 retryable: Map.get(error_info, :retryable) == true,
+                 retry_after_ms: bounded_retry_after(Map.get(error_info, :retry_after_ms))
+               ) do
+            :ok -> {:ok, :recorded}
+            {:error, :unavailable} -> {:error, :route_failure_write_failed}
+            {:error, :rejected} -> {:error, :route_failure_write_failed}
+          end
+      end
+    else
+      _ -> {:ok, :noop}
+    end
+  rescue
+    _ -> {:error, :record_failed}
+  catch
+    :exit, _ -> {:error, :record_failed}
+    _, _ -> {:error, :record_failed}
+  end
+
+  def record_classified_llm_failure(_), do: {:ok, :noop}
+
+  defp exact_oauth_provider(provider) when provider in [:openai_oauth, :xai_oauth],
+    do: {:ok, provider}
+
+  defp exact_oauth_provider(provider) when provider in ["openai_oauth", "xai_oauth"] do
+    {:ok, String.to_existing_atom(provider)}
+  end
+
+  defp exact_oauth_provider(_), do: :error
+
+  defp exact_effect_code(%{code: code}) when is_binary(code) and code != "", do: {:ok, code}
+  defp exact_effect_code(_), do: :error
+
+  defp quota_mark_opts(error_info) do
+    case bounded_retry_after(Map.get(error_info, :retry_after_ms)) do
+      ms when is_integer(ms) ->
+        [until: DateTime.add(DateTime.utc_now(), ms, :millisecond), message: "rate limited"]
+
+      _ ->
+        [message: "rate limited"]
+    end
+  end
+
+  defp bounded_retry_after(ms) when is_integer(ms) and ms >= 0 and ms <= @max_retry_after_ms,
+    do: ms
+
+  defp bounded_retry_after(_), do: nil
 
   @doc "Whether `provider` is a known ACP provider in the catalog."
   @spec acp_known_provider?(atom()) :: boolean()

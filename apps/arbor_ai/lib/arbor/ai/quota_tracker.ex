@@ -82,6 +82,19 @@ defmodule Arbor.AI.QuotaTracker do
   end
 
   @doc """
+  Synchronously mark a backend as quota-exhausted.
+
+  Replies only after in-memory state is updated so a subsequent
+  `snapshot_status/1` in the same BEAM observes the cooldown. Prefer this
+  for control-plane recording; the cast variant remains for legacy fire-and-forget callers.
+  """
+  @spec mark_quota_exhausted_sync(atom(), keyword()) :: :ok
+  def mark_quota_exhausted_sync(backend, opts \\ []) do
+    ensure_started()
+    GenServer.call(__MODULE__, {:mark_exhausted, backend, opts})
+  end
+
+  @doc """
   Check error output for quota patterns and mark the backend if found.
 
   Returns `true` if quota exhaustion was detected, `false` otherwise.
@@ -107,6 +120,13 @@ defmodule Arbor.AI.QuotaTracker do
   def clear(backend) do
     ensure_started()
     GenServer.cast(__MODULE__, {:clear, backend})
+  end
+
+  @doc "Synchronously clear quota status for a backend."
+  @spec clear_sync(atom()) :: :ok
+  def clear_sync(backend) do
+    ensure_started()
+    GenServer.call(__MODULE__, {:clear, backend})
   end
 
   @doc """
@@ -222,33 +242,23 @@ defmodule Arbor.AI.QuotaTracker do
   end
 
   @impl true
+  def handle_call({:mark_exhausted, backend, opts}, _from, state) do
+    {:reply, :ok, apply_mark_exhausted(state, backend, opts)}
+  end
+
+  @impl true
+  def handle_call({:clear, backend}, _from, state) do
+    {:reply, :ok, apply_clear(state, backend)}
+  end
+
+  @impl true
   def handle_cast({:mark_exhausted, backend, opts}, state) do
-    available_at = calculate_available_at(opts)
-    reason = Keyword.get(opts, :message, "quota exhausted")
-
-    Logger.warning("Backend quota exhausted",
-      backend: backend,
-      available_at: available_at,
-      reason: reason
-    )
-
-    info = %{
-      available_at: available_at,
-      marked_at: DateTime.utc_now(),
-      reason: reason
-    }
-
-    new_backends = Map.put(state.backends, backend, info)
-    persist_quota(backend, info)
-    {:noreply, %{state | backends: new_backends}}
+    {:noreply, apply_mark_exhausted(state, backend, opts)}
   end
 
   @impl true
   def handle_cast({:clear, backend}, state) do
-    Logger.info("Clearing quota status", backend: backend)
-    new_backends = Map.delete(state.backends, backend)
-    delete_quota(backend)
-    {:noreply, %{state | backends: new_backends}}
+    {:noreply, apply_clear(state, backend)}
   end
 
   @impl true
@@ -337,6 +347,32 @@ defmodule Arbor.AI.QuotaTracker do
   end
 
   defp snapshot_datetime(_datetime), do: {:error, :malformed}
+
+  defp apply_mark_exhausted(state, backend, opts) do
+    available_at = calculate_available_at(opts)
+    reason = Keyword.get(opts, :message, "quota exhausted")
+
+    Logger.warning("Backend quota exhausted",
+      backend: backend,
+      available_at: available_at,
+      reason: reason
+    )
+
+    info = %{
+      available_at: available_at,
+      marked_at: DateTime.utc_now(),
+      reason: reason
+    }
+
+    persist_quota(backend, info)
+    %{state | backends: Map.put(state.backends, backend, info)}
+  end
+
+  defp apply_clear(state, backend) do
+    Logger.info("Clearing quota status", backend: backend)
+    delete_quota(backend)
+    %{state | backends: Map.delete(state.backends, backend)}
+  end
 
   defp calculate_available_at(opts) do
     cond do

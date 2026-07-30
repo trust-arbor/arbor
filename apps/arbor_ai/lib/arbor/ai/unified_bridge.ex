@@ -145,6 +145,7 @@ defmodule Arbor.AI.UnifiedBridge do
          }}
 
       {:error, reason} ->
+        safe_emit_bridge_error(reason)
         {:error, reason}
     end
   rescue
@@ -212,8 +213,12 @@ defmodule Arbor.AI.UnifiedBridge do
 
         if collect? do
           case Client.collect_stream(events) do
-            {:ok, response} -> {:ok, format_response(response, opts)}
-            {:error, _} = err -> err
+            {:ok, response} ->
+              {:ok, format_response(response, opts)}
+
+            {:error, reason} = err ->
+              safe_emit_bridge_error(reason)
+              err
           end
         else
           {:ok, events}
@@ -224,6 +229,7 @@ defmodule Arbor.AI.UnifiedBridge do
           "UnifiedBridge stream failed: #{Arbor.LLM.inspect_external_reason(reason)}"
         )
 
+        safe_emit_bridge_error(reason)
         {:error, reason}
     end
   rescue
@@ -260,6 +266,7 @@ defmodule Arbor.AI.UnifiedBridge do
           "UnifiedBridge generation failed: #{Arbor.LLM.inspect_external_reason(reason)}"
         )
 
+        safe_emit_bridge_error(reason)
         {:error, reason}
     end
   rescue
@@ -422,11 +429,20 @@ defmodule Arbor.AI.UnifiedBridge do
     }
   end
 
-  # Emit a structured bridge error signal for observability.
-  # Non-fatal — never crashes the caller.
+  # Emit a structured bridge error signal for observability and feed the
+  # AI-owned control-plane facade. Non-fatal — never crashes the caller.
+  # Facade is the sole mutation owner; this is the AI-API edge invoker.
   defp safe_emit_bridge_error(reason) do
-    # arbor_signals is a direct dep — emit directly.
     error_info = Arbor.AI.LLMError.classify(reason)
+
+    case Arbor.AI.record_classified_llm_failure(error_info) do
+      {:ok, _} ->
+        :ok
+
+      {:error, write_reason} ->
+        Logger.warning("UnifiedBridge control-plane record failed: #{inspect(write_reason)}")
+    end
+
     Arbor.Signals.durable_emit(:ai, :llm_bridge_error, error_info)
   rescue
     _ -> :ok

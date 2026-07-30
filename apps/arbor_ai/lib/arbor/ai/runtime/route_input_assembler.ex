@@ -17,7 +17,11 @@ defmodule Arbor.AI.Runtime.RouteInputAssembler do
   """
 
   alias Arbor.AI.ProviderControlPlane
+  alias Arbor.AI.QuotaTracker
+  alias Arbor.AI.RouteFailureStore
+  alias Arbor.AI.Runtime.OAuthHealthObservation
   alias Arbor.AI.Runtime.ProviderRouter
+  alias Arbor.AI.Runtime.RouteEvidenceOverlay
   alias Arbor.Common.ModelProfile
   alias Arbor.Contracts.LLM.BudgetSnapshot
   alias Arbor.Contracts.LLM.ModelEntry
@@ -43,6 +47,8 @@ defmodule Arbor.AI.Runtime.RouteInputAssembler do
              | :invalid_budget
              | :missing_budget
              | :invalid_task_class
+             | :route_failure_evidence_unavailable
+             | :route_failure_evidence_malformed
              | :malformed}
 
   @doc """
@@ -392,6 +398,12 @@ defmodule Arbor.AI.Runtime.RouteInputAssembler do
       {:ok, _too_many} ->
         {:error, {:route_assembly_failed, :invalid_observation}}
 
+      {:error, :route_failure_evidence_unavailable} ->
+        {:error, {:route_assembly_failed, :route_failure_evidence_unavailable}}
+
+      {:error, :route_failure_evidence_malformed} ->
+        {:error, {:route_assembly_failed, :route_failure_evidence_malformed}}
+
       {:error, :invalid_observation} ->
         {:error, {:route_assembly_failed, :invalid_observation}}
 
@@ -465,25 +477,67 @@ defmodule Arbor.AI.Runtime.RouteInputAssembler do
   end
 
   defp default_observation_reader(providers, decision_time) do
-    observations =
-      Enum.map(providers, fn provider ->
-        envelope =
-          Arbor.AI.AcpSession.Readiness.Internal.observe(provider, nil,
-            clock: fn -> decision_time end
-          )
+    with {:ok, route_failures} <- read_route_failures(decision_time) do
+      quota_status = read_quota_status()
 
-        case envelope do
-          %{"observation" => attrs} when is_map(attrs) -> attrs
-          _ -> :error
+      Enum.reduce_while(providers, {:ok, []}, fn provider, {:ok, acc} ->
+        with {:ok, provider_key} <- provider_key(provider),
+             {:ok, base} <- base_observation(provider, decision_time) do
+          failure = Map.get(route_failures, provider_key)
+          quota = Map.get(quota_status, provider_key)
+          attrs = RouteEvidenceOverlay.overlay(base, failure, quota, decision_time)
+          {:cont, {:ok, [attrs | acc]}}
+        else
+          :error -> {:halt, {:error, :invalid_observation}}
+          {:error, reason} -> {:halt, {:error, reason}}
         end
       end)
-
-    if Enum.any?(observations, &(&1 == :error)) do
-      {:error, :invalid_observation}
-    else
-      {:ok, observations}
+      |> case do
+        {:ok, list} -> {:ok, Enum.reverse(list)}
+        error -> error
+      end
     end
   end
+
+  defp base_observation(provider, decision_time) do
+    if OAuthHealthObservation.oauth_route?(provider) do
+      case Arbor.LLM.oauth_health(provider) do
+        {:ok, health} -> OAuthHealthObservation.from_health(health, decision_time)
+        {:error, _} -> {:error, :invalid_observation}
+      end
+    else
+      envelope =
+        Arbor.AI.AcpSession.Readiness.Internal.observe(provider, nil,
+          clock: fn -> decision_time end
+        )
+
+      case envelope do
+        %{"observation" => attrs} when is_map(attrs) -> {:ok, attrs}
+        _ -> {:error, :invalid_observation}
+      end
+    end
+  end
+
+  defp read_route_failures(decision_time) do
+    case RouteFailureStore.snapshot_status(now: decision_time) do
+      {:ok, map} when is_map(map) -> {:ok, map}
+      {:error, :unavailable} -> {:error, :route_failure_evidence_unavailable}
+      {:error, :malformed} -> {:error, :route_failure_evidence_malformed}
+      _ -> {:error, :route_failure_evidence_malformed}
+    end
+  end
+
+  defp read_quota_status do
+    case QuotaTracker.snapshot_status() do
+      {:ok, map} when is_map(map) -> map
+      _ -> %{}
+    end
+  end
+
+  # Exact route identities only — never coerce via to_string/1.
+  defp provider_key(provider) when is_binary(provider), do: {:ok, provider}
+  defp provider_key(provider) when is_atom(provider), do: {:ok, Atom.to_string(provider)}
+  defp provider_key(_), do: :error
 
   defp resolve_budgets(providers, decision_time, opts) do
     reader = Keyword.get(opts, :budget_reader, &default_budget_reader/2)

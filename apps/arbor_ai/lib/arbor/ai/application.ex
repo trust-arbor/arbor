@@ -16,7 +16,8 @@ defmodule Arbor.AI.Application do
       if Application.get_env(:arbor_ai, :start_children, true) do
         buffered_store_child() ++
           [
-            Arbor.AI.QuotaTracker
+            Arbor.AI.QuotaTracker,
+            Arbor.AI.RouteFailureStore
           ] ++
           budget_tracker_child() ++
           llm_usage_consumer_child() ++

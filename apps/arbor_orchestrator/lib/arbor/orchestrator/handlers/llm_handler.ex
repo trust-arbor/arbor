@@ -407,6 +407,9 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
       {:error, reason} ->
         elapsed = System.monotonic_time(:millisecond) - start_time
         error_info = classify_error(reason)
+        # Facade is sole mutation owner; handler is orchestrator-edge invoker.
+        # Required write failures get a bounded warning; never change the LLM fail outcome.
+        _ = maybe_record_control_plane_failure(error_info, node.id)
 
         Logger.warning(
           "[LlmHandler] #{node.id} for #{agent_id}: " <>
@@ -1902,6 +1905,65 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
   defp classify_error(reason) do
     Arbor.AI.LLMError.classify(reason)
   end
+
+  # Record via AI facade only. On required write failure emit a bounded warning
+  # (closed reason token + error_type). Never log prompts, provider bodies,
+  # credentials, account IDs, paths, or exception text. Never alter the original
+  # LLM failure. The facade contract guarantees tuple returns and never raises,
+  # so this path does not swallow exceptions with broad rescue/catch.
+  defp maybe_record_control_plane_failure(error_info, node_id) do
+    case Arbor.AI.record_classified_llm_failure(error_info) do
+      {:ok, :recorded} ->
+        :ok
+
+      {:ok, :noop} ->
+        :ok
+
+      {:ok, _} ->
+        :ok
+
+      {:error, reason} ->
+        warn_control_plane_record_failed(node_id, error_info, reason)
+
+      _unexpected ->
+        # Non-contract return: still warn with bounded reason=unknown.
+        warn_control_plane_record_failed(node_id, error_info, :unknown)
+    end
+  end
+
+  defp warn_control_plane_record_failed(node_id, error_info, reason) do
+    Logger.warning(
+      "[LlmHandler] #{node_id}: control-plane record failed " <>
+        "reason=#{bounded_control_plane_reason(reason)} " <>
+        "error_type=#{error_info.type}"
+    )
+
+    :ok
+  end
+
+  @control_plane_fail_reasons [
+    :route_failure_write_failed,
+    :quota_write_failed,
+    :record_failed,
+    :unavailable,
+    :rejected,
+    :unknown
+  ]
+
+  defp bounded_control_plane_reason(reason) when reason in @control_plane_fail_reasons,
+    do: Atom.to_string(reason)
+
+  defp bounded_control_plane_reason(reason) when is_binary(reason) and byte_size(reason) <= 64 do
+    allowed = Enum.map(@control_plane_fail_reasons, &Atom.to_string/1)
+
+    if String.valid?(reason) and reason in allowed do
+      reason
+    else
+      "unknown"
+    end
+  end
+
+  defp bounded_control_plane_reason(_), do: "unknown"
 
   defp write_stage_artifacts(opts, node_id, prompt, response) do
     case Keyword.get(opts, :logs_root) do

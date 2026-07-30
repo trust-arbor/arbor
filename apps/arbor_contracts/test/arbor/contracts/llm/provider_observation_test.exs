@@ -87,6 +87,24 @@ defmodule Arbor.Contracts.LLM.ProviderObservationTest do
              )
   end
 
+  test "admits tier_denied and provider_outage while keeping account_exhausted reserved" do
+    for code <- ["tier_denied", "provider_outage", "account_exhausted"] do
+      assert {:ok, obs} =
+               ProviderObservation.new(
+                 Map.merge(@valid, %{
+                   failure_code: code,
+                   failure_message: "bounded message for #{code}"
+                 })
+               )
+
+      assert obs.failure_code == code
+    end
+
+    assert "tier_denied" in ProviderObservation.enums()["failure_code"]
+    assert "provider_outage" in ProviderObservation.enums()["failure_code"]
+    assert "account_exhausted" in ProviderObservation.enums()["failure_code"]
+  end
+
   test "rejects closed-object authority fields, hostile terms, and oversized identifiers" do
     for key <- [
           "access_token",
