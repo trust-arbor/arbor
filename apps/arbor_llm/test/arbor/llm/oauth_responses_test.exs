@@ -519,6 +519,76 @@ defmodule Arbor.LLM.OAuth.ResponsesTest do
     refute inspect(retries) =~ "shared-new-refresh"
   end
 
+  test "OpenAI OAuth Responses defaults to gpt-5.6-sol when model is omitted; explicit override wins",
+       %{store_dir: store_dir} do
+    write_store_json(
+      store_dir,
+      "openai.json",
+      %{
+        "version" => 1,
+        "provider" => "openai",
+        "account_id" => "acct-default-model",
+        "origin" => "arbor_login",
+        "owner" => "arbor_owned",
+        "source" => "arbor_oauth_store",
+        "generation" => 3,
+        "tokens" => %{
+          "access_token" => "openai-default-model-token",
+          "refresh_token" => "openai-default-model-refresh"
+        }
+      }
+    )
+
+    write_store_json(
+      store_dir,
+      "xai.json",
+      %{
+        "version" => 1,
+        "provider" => "xai",
+        "account_id" => nil,
+        "origin" => "arbor_login",
+        "owner" => "arbor_owned",
+        "source" => "arbor_oauth_store",
+        "generation" => 4,
+        "tokens" => %{
+          "access_token" => "xai-default-model-token",
+          "refresh_token" => "xai-default-model-refresh"
+        }
+      }
+    )
+
+    {default_url, default_server} = start_request_capture_server()
+    configure_responses_endpoint!(%{openai: default_url})
+
+    assert {:ok, %{text: "ok", tool_calls: []}} =
+             Responses.complete(:openai, empty_request(), receive_timeout: 1_000)
+
+    assert %{request: default_request, body: default_body} = Task.await(default_server, 2_000)
+    assert default_request =~ "authorization: Bearer openai-default-model-token"
+    assert Jason.decode!(default_body)["model"] == "gpt-5.6-sol"
+
+    {override_url, override_server} = start_request_capture_server()
+    configure_responses_endpoint!(%{openai: override_url})
+
+    assert {:ok, %{text: "ok", tool_calls: []}} =
+             Responses.complete(:openai, empty_request(),
+               model: "gpt-custom-override",
+               receive_timeout: 1_000
+             )
+
+    assert %{body: override_body} = Task.await(override_server, 2_000)
+    assert Jason.decode!(override_body)["model"] == "gpt-custom-override"
+
+    {xai_url, xai_server} = start_request_capture_server()
+    configure_responses_endpoint!(%{xai: xai_url})
+
+    assert {:ok, %{text: "ok", tool_calls: []}} =
+             Responses.complete(:xai, empty_request(), receive_timeout: 1_000)
+
+    assert %{body: xai_body} = Task.await(xai_server, 2_000)
+    assert Jason.decode!(xai_body)["model"] == "grok-4.5"
+  end
+
   defp sse(event), do: "data: " <> Jason.encode!(event) <> "\n\n"
 
   defp empty_request, do: %{instructions: "", input: [], tools: nil}
@@ -644,6 +714,25 @@ defmodule Arbor.LLM.OAuth.ResponsesTest do
     {url, server}
   end
 
+  defp start_request_capture_server do
+    {listener, url} = listen()
+
+    server =
+      Task.async(fn ->
+        {socket, raw} = accept_request!(listener)
+        {headers, initial_body} = split_headers_and_body(raw)
+        content_length = content_length_from_headers(headers)
+        remaining = max(content_length - byte_size(initial_body), 0)
+        {:ok, body} = receive_http_body(socket, remaining, initial_body)
+        send_sse_success!(socket, "ok")
+        :gen_tcp.close(socket)
+        :gen_tcp.close(listener)
+        %{request: headers, body: body}
+      end)
+
+    {url, server}
+  end
+
   defp start_no_request_server do
     {listener, url} = listen()
 
@@ -737,9 +826,9 @@ defmodule Arbor.LLM.OAuth.ResponsesTest do
       )
   end
 
-  defp send_sse_success!(socket) do
+  defp send_sse_success!(socket, delta \\ "retried") do
     body =
-      sse(%{"type" => "response.output_text.delta", "delta" => "retried"}) <> "data: [DONE]\n\n"
+      sse(%{"type" => "response.output_text.delta", "delta" => delta}) <> "data: [DONE]\n\n"
 
     :ok =
       :gen_tcp.send(
@@ -747,6 +836,39 @@ defmodule Arbor.LLM.OAuth.ResponsesTest do
         "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n" <>
           "content-length: #{byte_size(body)}\r\nconnection: close\r\n\r\n#{body}"
       )
+  end
+
+  defp split_headers_and_body(raw) do
+    case :binary.split(raw, "\r\n\r\n") do
+      [headers, body] -> {headers, body}
+      [headers] -> {headers, ""}
+    end
+  end
+
+  defp content_length_from_headers(headers) do
+    headers
+    |> String.split("\r\n")
+    |> Enum.find_value(0, fn line ->
+      case String.split(String.downcase(line), ":", parts: 2) do
+        ["content-length", value] ->
+          value |> String.trim() |> String.to_integer()
+
+        _ ->
+          nil
+      end
+    end)
+  end
+
+  defp receive_http_body(_socket, 0, acc), do: {:ok, acc}
+
+  defp receive_http_body(socket, remaining, acc) when remaining > 0 do
+    case :gen_tcp.recv(socket, min(remaining, 65_536), 2_000) do
+      {:ok, data} ->
+        receive_http_body(socket, remaining - byte_size(data), acc <> data)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
   end
 
   defp start_drip_server(chunk_count, delay_ms) do

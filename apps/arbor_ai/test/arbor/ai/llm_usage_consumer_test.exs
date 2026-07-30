@@ -208,6 +208,70 @@ defmodule Arbor.AI.LLMUsageConsumerTest do
     assert status.backends == %{}
   end
 
+  test "exact OAuth usage projects to distinct :openai_oauth and :xai_oauth buckets", %{
+    target: target
+  } do
+    emit(
+      %{
+        count: 1,
+        input: 100,
+        output: 20,
+        total: 120,
+        cached: 0,
+        marginal_cost_usd: 0.5
+      },
+      provider: "openai_oauth",
+      model: "gpt-5.6-sol",
+      event_id: "oauth-openai-usage-1"
+    )
+
+    emit(
+      %{
+        count: 1,
+        input: 50,
+        output: 10,
+        total: 60,
+        cached: 0,
+        marginal_cost_usd: 0.25
+      },
+      provider: "xai_oauth",
+      model: "grok-4.5",
+      event_id: "oauth-xai-usage-1"
+    )
+
+    assert_eventually(fn ->
+      match?(
+        {:ok,
+         %{
+           backends: %{
+             openai_oauth: %{requests: 1, cost: 0.5},
+             xai_oauth: %{requests: 1, cost: 0.25}
+           }
+         }},
+        BudgetTracker.get_status()
+      )
+    end)
+
+    assert {:ok, status} = BudgetTracker.get_status()
+    refute Map.has_key?(status.backends, :openai)
+    refute Map.has_key?(status.backends, :xai)
+    assert status.backends.openai_oauth.requests == 1
+    assert status.backends.xai_oauth.requests == 1
+
+    assert_eventually(fn ->
+      match?(
+        {:ok, [%{id: "oauth-openai-usage-1"}, %{id: "oauth-xai-usage-1"}]},
+        Persistence.read_stream(target.name, target.backend, @stream_id, from: 1, limit: 10)
+      )
+    end)
+
+    assert {:ok, events} =
+             Persistence.read_stream(target.name, target.backend, @stream_id, from: 1, limit: 10)
+
+    providers = Enum.map(events, & &1.data["provider"]) |> Enum.sort()
+    assert providers == ["openai_oauth", "xai_oauth"]
+  end
+
   test "malformed events and invalid costs are ignored", %{target: target} do
     emit(%{count: 1, input: 1, output: 1, total: 2, cached: 0, unexpected: "secret"},
       provider: "openai",
