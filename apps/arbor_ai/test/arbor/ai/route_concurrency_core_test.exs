@@ -15,7 +15,7 @@ defmodule Arbor.AI.RouteConcurrencyCoreTest do
     test "normalizes atom and string keys without creating atoms" do
       assert {:ok, state} =
                RouteConcurrencyCore.new(%{
-                 openai: %{arbor: 2},
+                 :openai => %{arbor: 2},
                  "anthropic" => %{"acp" => 3}
                })
 
@@ -26,7 +26,7 @@ defmodule Arbor.AI.RouteConcurrencyCoreTest do
     test "rejects duplicate canonical keys from atom/string collision" do
       assert {:error, :malformed_config} =
                RouteConcurrencyCore.new(%{
-                 openai: %{arbor: 1},
+                 :openai => %{arbor: 1},
                  "openai" => %{"arbor" => 2}
                })
     end
