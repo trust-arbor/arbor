@@ -630,3 +630,24 @@ roots and fail valid dependency includes such as `yamerl`. Put isolated build
 artifacts under the canonical `/private/tmp/...` path, keep `MIX_DEPS_PATH`
 explicit, and let the worktree itself remain under either spelling (found
 2026-07-29 while independently validating the interaction-wait candidate).
+
+<!-- applied-learning: isolate-mix-build-roots-by-revision-and-environment -->
+<a id="applied-learning-isolate-mix-build-roots-by-revision-and-environment"></a>
+**Isolate Mix build roots by revision and environment.** `MIX_BUILD_PATH` is the
+exact artifact directory and bypasses Mix's ordinary environment partitioning;
+sharing one raw path between parent/candidate revisions or `dev`/`test` can run
+stale BEAMs and invalidate comparison evidence. Give every revision and
+`MIX_ENV` a distinct build root, and never use the live server's build tree for
+two-revision proof (found 2026-07-30 while preparing the OAuth security
+regression comparison).
+
+<!-- applied-learning: run-directly-changed-app-tests-before-downstream-tests -->
+<a id="applied-learning-run-directly-changed-app-tests-before-downstream-tests"></a>
+**Run directly changed app tests before downstream tests.** A complete
+dependency closure is still required, but a fixed aggregate deadline can expire
+inside an alphabetically earlier downstream suite before testing the code that
+actually changed. Preserve a deterministic direct-first app order through Git
+inventory expansion, normalization, and batching, then report the exact
+unstarted downstream suffix on capacity exhaustion without treating it as
+success (found 2026-07-30 when an `arbor_common`/`arbor_security` OAuth change
+spent its test budget in `arbor_actions` first).

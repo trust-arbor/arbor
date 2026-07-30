@@ -806,3 +806,13 @@ exact plan map through `Arbor.Contracts.Coding.Plan.new/1` and the current
 compiler before dispatch so schema drift is caught before workspace or provider
 resources are acquired (found 2026-07-30 while preparing the OAuth
 model-catalog correction).
+
+<!-- applied-learning: acp-receiver-idleness-is-not-worker-inactivity -->
+<a id="applied-learning-acp-receiver-idleness-is-not-worker-inactivity"></a>
+**ACP receiver idleness is not worker inactivity.** A provider turn can be
+waiting on a background tool process while the adapter receiver emits no new
+frames. Track acknowledged tool-call and child-process lifecycle as activity,
+and require terminal provider or process evidence before declaring the turn
+stalled; receiver silence alone can kill useful work and strand its workspace
+(found 2026-07-30 when a Spark worker's broker reproduction continued in a
+background job after the ACP receiver appeared idle).

@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-07-30",
-  "entry_count": 591,
+  "entry_count": 594,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -7227,8 +7227,47 @@
       "source_incident": "found 2026-07-30 while preparing the OAuth model-catalog correction).",
       "content_sha256": "ecef7c914c226510a3bfe86ded732e7ec5cddea5019a73517f1760b25f7d5b0a",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 592,
+      "source_kind": "post-migration",
+      "slug": "acp-receiver-idleness-is-not-worker-inactivity",
+      "title": "ACP receiver idleness is not worker inactivity.",
+      "topic": "acp-mcp",
+      "destination": ".claude/skills/applied-learning-acp-mcp.md",
+      "anchor": "applied-learning-acp-receiver-idleness-is-not-worker-inactivity",
+      "source_date": "2026-07-30",
+      "source_incident": "found 2026-07-30 when a Spark worker's broker reproduction continued in a background job after the ACP receiver appeared idle).",
+      "content_sha256": "20d542e6471d172ae4588a95dfbe741c9242b964119c4c56a23a4628b1175276",
+      "always_loaded": false
+    },
+    {
+      "source_ordinal": 593,
+      "source_kind": "post-migration",
+      "slug": "isolate-mix-build-roots-by-revision-and-environment",
+      "title": "Isolate Mix build roots by revision and environment.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-isolate-mix-build-roots-by-revision-and-environment",
+      "source_date": "2026-07-30",
+      "source_incident": "found 2026-07-30 while preparing the OAuth security regression comparison).",
+      "content_sha256": "69db28396004e0e2e707128b7f2f8073be968a9e08055c16d52a9cc73d143db5",
+      "always_loaded": false
+    },
+    {
+      "source_ordinal": 594,
+      "source_kind": "post-migration",
+      "slug": "run-directly-changed-app-tests-before-downstream-tests",
+      "title": "Run directly changed app tests before downstream tests.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-run-directly-changed-app-tests-before-downstream-tests",
+      "source_date": "2026-07-30",
+      "source_incident": "found 2026-07-30 when an `arbor_common`/`arbor_security` OAuth change spent its test budget in `arbor_actions` first).",
+      "content_sha256": "e5e0ae7522d39fa18ca3c4d0d600c929771a0fce131d3de8491e0648d019d04f",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 130
+  "post_migration_entry_count": 133
 }
