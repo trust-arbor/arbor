@@ -2,7 +2,9 @@
 children =
   [
     Arbor.AI.QuotaTracker,
-    Arbor.AI.RouteFailureStore
+    Arbor.AI.RouteFailureStore,
+    # Node-local exact-route concurrency authority (not cluster-global).
+    Arbor.AI.RouteConcurrency
   ] ++
     if(Application.get_env(:arbor_ai, :enable_budget_tracking, true),
       do: [Arbor.AI.BudgetTracker],

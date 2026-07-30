@@ -1,6 +1,7 @@
 defmodule Arbor.AI.Runtime.RouteEvidenceOverlay do
   @moduledoc """
-  Pure merge of base observation attrs with route-failure and quota evidence.
+  Pure merge of base observation attrs with route-failure, quota, and
+  node-local concurrency evidence.
 
   Never upgrades availability from unavailable to available. Does not write stores.
   """
@@ -12,6 +13,32 @@ defmodule Arbor.AI.Runtime.RouteEvidenceOverlay do
     |> overlay_route_failure(route_failure, decision_time)
     |> overlay_quota(quota_entry, decision_time)
   end
+
+  @doc """
+  Overlay exact-route concurrency fields from a snapshot entry.
+
+  `snap_entry` is `%{concurrency_limit: n, concurrency_in_use: u}` for the
+  observation's exact `{provider, runtime}`, or `nil` when the route is
+  unconfigured (leaves concurrency evidence missing so strict routing rejects).
+  Never invents zeros for unconfigured routes.
+  """
+  @spec overlay_concurrency(map(), map() | nil) :: map()
+  def overlay_concurrency(attrs, nil) when is_map(attrs), do: attrs
+
+  def overlay_concurrency(attrs, snap_entry) when is_map(attrs) and is_map(snap_entry) do
+    limit = Map.get(snap_entry, :concurrency_limit) || Map.get(snap_entry, "concurrency_limit")
+    in_use = Map.get(snap_entry, :concurrency_in_use) || Map.get(snap_entry, "concurrency_in_use")
+
+    if is_integer(limit) and limit >= 0 and is_integer(in_use) and in_use >= 0 do
+      attrs
+      |> Map.put(key(attrs, "concurrency_limit"), limit)
+      |> Map.put(key(attrs, "concurrency_in_use"), in_use)
+    else
+      attrs
+    end
+  end
+
+  def overlay_concurrency(attrs, _), do: attrs
 
   defp overlay_route_failure(attrs, nil, _now), do: attrs
 
@@ -179,6 +206,8 @@ defmodule Arbor.AI.Runtime.RouteEvidenceOverlay do
         "failure_code" -> :failure_code
         "failure_message" -> :failure_message
         "expires_at" -> :expires_at
+        "concurrency_limit" -> :concurrency_limit
+        "concurrency_in_use" -> :concurrency_in_use
         _ -> nil
       end
 

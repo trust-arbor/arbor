@@ -246,6 +246,10 @@ defmodule Arbor.AI.Runtime.DispatchTest do
       assert Dispatch.fallback_eligible?({:pool_exit, :killed})
       assert Dispatch.fallback_eligible?({:session_exit, :normal})
       assert Dispatch.fallback_eligible?({:selection_failed, :no_providers})
+      assert Dispatch.fallback_eligible?({:route_concurrency, :at_capacity})
+      assert Dispatch.fallback_eligible?({:route_concurrency, :unconfigured_route})
+      refute Dispatch.fallback_eligible?({:route_concurrency, :unavailable})
+      refute Dispatch.fallback_eligible?({:route_concurrency, :malformed_route})
     end
 
     test "unknown errors are NOT eligible (fail closed — propagate)" do
@@ -541,6 +545,83 @@ defmodule Arbor.AI.Runtime.DispatchTest do
       end
     end
 
+    defmodule StripCheckRuntime do
+      @moduledoc false
+      @behaviour Arbor.AI.Runtime
+
+      alias Arbor.Contracts.AI.RuntimeProfile
+
+      @impl true
+      def prepare(request, opts) do
+        send(Application.fetch_env!(:arbor_ai, :_test_router_pid), {:strip_prepare, opts})
+        {:ok, request}
+      end
+
+      @impl true
+      def execute(request, _cb, opts) do
+        send(Application.fetch_env!(:arbor_ai, :_test_router_pid), {:strip_execute, opts})
+
+        {:ok,
+         %Arbor.LLM.Response{
+           text: "ok",
+           finish_reason: :stop,
+           usage: %{input_tokens: 1, output_tokens: 1},
+           raw: %{model: request.model, runtime: request.runtime}
+         }}
+      end
+
+      @impl true
+      def profile do
+        {:ok, p} =
+          RuntimeProfile.new(%{
+            runtime_id: :strip_check,
+            display_name: "strip",
+            owns_model_loop: false,
+            owns_thread_history: false,
+            supports_jido_actions: false,
+            supports_action_hooks: false,
+            supports_native_tools: false,
+            runs_context_engine: false,
+            exposes_compaction_data: false,
+            unsupported_features: []
+          })
+
+        p
+      end
+    end
+
+    defmodule RaisingRuntime do
+      @moduledoc false
+      @behaviour Arbor.AI.Runtime
+
+      alias Arbor.Contracts.AI.RuntimeProfile
+
+      @impl true
+      def prepare(request, _opts), do: {:ok, request}
+
+      @impl true
+      def execute(_request, _cb, _opts), do: raise("route concurrency release must run")
+
+      @impl true
+      def profile do
+        {:ok, p} =
+          RuntimeProfile.new(%{
+            runtime_id: :raising,
+            display_name: "raising",
+            owns_model_loop: false,
+            owns_thread_history: false,
+            supports_jido_actions: false,
+            supports_action_hooks: false,
+            supports_native_tools: false,
+            runs_context_engine: false,
+            exposes_compaction_data: false,
+            unsupported_features: []
+          })
+
+        p
+      end
+    end
+
     setup do
       original = Application.get_env(:arbor_ai, :runtime_registry, %{})
 
@@ -551,15 +632,43 @@ defmodule Arbor.AI.Runtime.DispatchTest do
 
       Application.put_env(:arbor_ai, :_test_router_pid, self())
 
+      # Node-local test authority with headroom so existing router tests admit.
+      concurrency_name = :"dispatch_rc_#{System.unique_integer([:positive])}"
+
+      start_supervised!(
+        {Arbor.AI.RouteConcurrency,
+         name: concurrency_name,
+         limits: %{
+           provider_a: %{arbor: 32, acp: 32},
+           provider_b: %{arbor: 32, acp: 32}
+         }}
+      )
+
+      Process.put(:route_concurrency_server, concurrency_name)
+
       on_exit(fn ->
         Application.put_env(:arbor_ai, :runtime_registry, original)
         Application.delete_env(:arbor_ai, :_test_router_pid)
         Application.delete_env(:arbor_ai, :_test_router_fail_model)
         Application.delete_env(:arbor_ai, :_test_router_spoof_executed_route)
         Application.delete_env(:arbor_ai, :_test_router_non_response_ok)
+        Process.delete(:route_concurrency_server)
       end)
 
       :ok
+    end
+
+    defp router_dispatch(request, opts) do
+      server = Process.get(:route_concurrency_server)
+
+      opts =
+        if server do
+          Keyword.put_new(opts, :route_concurrency_server, server)
+        else
+          opts
+        end
+
+      Dispatch.dispatch(request, opts)
     end
 
     test "legacy dispatch still uses Selector when router input is absent" do
@@ -594,7 +703,7 @@ defmodule Arbor.AI.Runtime.DispatchTest do
       end
 
       assert {:ok, response} =
-               Dispatch.dispatch(request,
+               router_dispatch(request,
                  provider_route_input: provider_route_input([primary]),
                  route_authorizer: authorizer
                )
@@ -628,7 +737,7 @@ defmodule Arbor.AI.Runtime.DispatchTest do
       end
 
       assert {:ok, response} =
-               Dispatch.dispatch(build_request("ignored"),
+               router_dispatch(build_request("ignored"),
                  provider_route_input: provider_route_input([fallback, primary]),
                  route_authorizer: authorizer
                )
@@ -669,7 +778,7 @@ defmodule Arbor.AI.Runtime.DispatchTest do
       Application.put_env(:arbor_ai, :_test_router_fail_model, "wire-primary")
 
       assert {:ok, _response} =
-               Dispatch.dispatch(build_request("original-model"),
+               router_dispatch(build_request("original-model"),
                  provider_route_input: provider_route_input([fallback, primary]),
                  route_authorizer: fn _ -> :allow end,
                  telemetry_metadata: %{
@@ -711,7 +820,7 @@ defmodule Arbor.AI.Runtime.DispatchTest do
       on_exit(fn -> :telemetry.detach(handler_id) end)
 
       assert {:error, {:selection_failed, {:provider_route, :invalid_route_input}}} =
-               Dispatch.dispatch(request,
+               router_dispatch(request,
                  provider_route_input: %{},
                  route_authorizer: fn _ -> :allow end
                )
@@ -721,7 +830,7 @@ defmodule Arbor.AI.Runtime.DispatchTest do
         |> put_in([:task_registry, "default", :requirements], %{providers: ["missing"]})
 
       assert {:error, {:selection_failed, {:provider_route, :no_eligible_routes}}} =
-               Dispatch.dispatch(request,
+               router_dispatch(request,
                  provider_route_input: ineligible,
                  route_authorizer: fn _ -> :allow end
                )
@@ -729,7 +838,7 @@ defmodule Arbor.AI.Runtime.DispatchTest do
       module_route = route_model("module", :provider_a, "wire", RouterRuntime)
 
       assert {:error, {:selection_failed, {:provider_route, :route_mapping_mismatch}}} =
-               Dispatch.dispatch(request,
+               router_dispatch(request,
                  provider_route_input: provider_route_input([module_route]),
                  route_authorizer: fn _ -> :allow end
                )
@@ -738,7 +847,7 @@ defmodule Arbor.AI.Runtime.DispatchTest do
         route_model("primary", :provider_a, String.duplicate("r", 513), :arbor)
 
       assert {:error, {:selection_failed, {:provider_route, :invalid_route_input}}} =
-               Dispatch.dispatch(request,
+               router_dispatch(request,
                  provider_route_input: provider_route_input([malformed_ref]),
                  route_authorizer: fn _ -> :allow end
                )
@@ -748,7 +857,7 @@ defmodule Arbor.AI.Runtime.DispatchTest do
         |> Map.put(:policy, %{params: %{"temperature" => 0.2}})
 
       assert {:error, {:selection_failed, {:provider_route, :unsupported_route_params}}} =
-               Dispatch.dispatch(request,
+               router_dispatch(request,
                  provider_route_input: with_params,
                  route_authorizer: fn _ -> :allow end
                )
@@ -774,7 +883,7 @@ defmodule Arbor.AI.Runtime.DispatchTest do
         opts = [provider_route_input: route_input] ++ authorizer_opts
 
         assert {:error, {:authorization_failed, ^reason}} =
-                 Dispatch.dispatch(build_request("ignored"), opts)
+                 router_dispatch(build_request("ignored"), opts)
 
         refute_received {:prepare, _}
         refute_received {:execute, _}
@@ -799,7 +908,7 @@ defmodule Arbor.AI.Runtime.DispatchTest do
       route = route_model("primary", :provider_a, "wire-primary", :arbor)
 
       assert {:ok, response} =
-               Dispatch.dispatch(build_request("ignored"),
+               router_dispatch(build_request("ignored"),
                  provider_route_input: provider_route_input([route]),
                  route_authorizer: fn _ -> :allow end
                )
@@ -831,7 +940,7 @@ defmodule Arbor.AI.Runtime.DispatchTest do
       on_exit(fn -> Application.delete_env(:arbor_ai, :_test_router_spoof_executed_route) end)
 
       assert {:ok, response} =
-               Dispatch.dispatch(build_request("ignored"),
+               router_dispatch(build_request("ignored"),
                  provider_route_input: provider_route_input([primary]),
                  route_authorizer: fn _ -> :allow end
                )
@@ -849,7 +958,7 @@ defmodule Arbor.AI.Runtime.DispatchTest do
       Application.put_env(:arbor_ai, :_test_router_fail_model, "wire-primary")
 
       assert {:ok, response} =
-               Dispatch.dispatch(build_request("ignored"),
+               router_dispatch(build_request("ignored"),
                  provider_route_input: provider_route_input([fallback, primary]),
                  route_authorizer: fn _ -> :allow end
                )
@@ -878,12 +987,167 @@ defmodule Arbor.AI.Runtime.DispatchTest do
       on_exit(fn -> :telemetry.detach(handler_id) end)
 
       assert {:error, {:selection_failed, {:provider_route, :invalid_runtime_response}}} =
-               Dispatch.dispatch(build_request("ignored"),
+               router_dispatch(build_request("ignored"),
                  provider_route_input: provider_route_input([primary]),
                  route_authorizer: fn _ -> :allow end
                )
 
       refute_received :executed
+    end
+
+    test "releases concurrency lease after successful execution" do
+      primary = route_model("primary", :provider_a, "wire-primary", :arbor)
+      server = Process.get(:route_concurrency_server)
+
+      assert {:ok, _} =
+               router_dispatch(build_request("ignored"),
+                 provider_route_input: provider_route_input([primary]),
+                 route_authorizer: fn _ -> :allow end
+               )
+
+      assert {:ok, snap} = Arbor.AI.RouteConcurrency.snapshot(route_concurrency_server: server)
+      assert snap[{"provider_a", "arbor"}].concurrency_in_use == 0
+    end
+
+    test "releases concurrency lease after runtime error" do
+      primary = route_model("primary", :provider_a, "wire-primary", :arbor)
+      Application.put_env(:arbor_ai, :_test_router_fail_model, "wire-primary")
+      server = Process.get(:route_concurrency_server)
+
+      assert {:error, :timeout} =
+               router_dispatch(build_request("ignored"),
+                 provider_route_input: provider_route_input([primary]),
+                 route_authorizer: fn _ -> :allow end
+               )
+
+      assert {:ok, snap} = Arbor.AI.RouteConcurrency.snapshot(route_concurrency_server: server)
+      assert snap[{"provider_a", "arbor"}].concurrency_in_use == 0
+    end
+
+    test "releases concurrency lease after raised execution" do
+      primary = route_model("primary", :provider_a, "wire-primary", :arbor)
+      server = Process.get(:route_concurrency_server)
+      original = Application.get_env(:arbor_ai, :runtime_registry)
+
+      Application.put_env(:arbor_ai, :runtime_registry, %{
+        arbor: RaisingRuntime,
+        acp: RaisingRuntime
+      })
+
+      on_exit(fn -> Application.put_env(:arbor_ai, :runtime_registry, original) end)
+
+      assert_raise RuntimeError, "route concurrency release must run", fn ->
+        router_dispatch(build_request("ignored"),
+          provider_route_input: provider_route_input([primary]),
+          route_authorizer: fn _ -> :allow end
+        )
+      end
+
+      assert {:ok, snap} = Arbor.AI.RouteConcurrency.snapshot(route_concurrency_server: server)
+      assert snap[{"provider_a", "arbor"}].concurrency_in_use == 0
+    end
+
+    test "primary at-capacity may try ranked configured fallback after release" do
+      primary = route_model("primary", :provider_a, "wire-primary", :arbor)
+      fallback = route_model("fallback", :provider_b, "wire-fallback", :acp)
+      server = Process.get(:route_concurrency_server)
+
+      # Saturate primary route capacity (limit 32 in setup — acquire all).
+      leases =
+        for _ <- 1..32 do
+          assert {:ok, lease} =
+                   Arbor.AI.RouteConcurrency.acquire(:provider_a, :arbor,
+                     route_concurrency_server: server
+                   )
+
+          lease
+        end
+
+      assert {:ok, response} =
+               router_dispatch(build_request("ignored"),
+                 provider_route_input: provider_route_input([fallback, primary]),
+                 route_authorizer: fn _ -> :allow end
+               )
+
+      assert response.raw.model == "wire-fallback"
+      # Primary never entered runtime (at capacity before prepare).
+      refute_received {:prepare, %Request{model: "wire-primary"}}
+      assert_received {:prepare, %Request{model: "wire-fallback"}}
+
+      Enum.each(leases, &Arbor.AI.RouteConcurrency.release/1)
+    end
+
+    test "same-route runtime failure releases primary before fallback acquire (limit 1)" do
+      # Prove try/after releases the exact-route lease before the next ranked
+      # attempt acquires the same {provider, runtime}. With limit 1, a missing
+      # release would make the fallback hit :at_capacity instead of execute.
+      concurrency_name = :"same_route_rc_#{System.unique_integer([:positive])}"
+
+      start_supervised!(
+        {Arbor.AI.RouteConcurrency,
+         name: concurrency_name, limits: %{provider_a: %{arbor: 1}}}
+      )
+
+      primary = route_model("primary", :provider_a, "wire-primary", :arbor)
+      # Same exact provider/runtime as primary — distinct model only.
+      fallback = route_model("fallback", :provider_a, "wire-fallback", :arbor)
+      Application.put_env(:arbor_ai, :_test_router_fail_model, "wire-primary")
+
+      assert {:ok, response} =
+               router_dispatch(build_request("ignored"),
+                 provider_route_input: provider_route_input([fallback, primary]),
+                 route_authorizer: fn _ -> :allow end,
+                 route_concurrency_server: concurrency_name
+               )
+
+      assert response.raw.model == "wire-fallback"
+      assert_received {:execute, %Request{model: "wire-primary"}}
+      assert_received {:execute, %Request{model: "wire-fallback"}}
+
+      assert {:ok, snap} =
+               Arbor.AI.RouteConcurrency.snapshot(route_concurrency_server: concurrency_name)
+
+      assert snap[{"provider_a", "arbor"}].concurrency_in_use == 0
+    end
+
+    test "unavailable concurrency authority fails closed without fallback" do
+      primary = route_model("primary", :provider_a, "wire-primary", :arbor)
+      fallback = route_model("fallback", :provider_b, "wire-fallback", :acp)
+      dead = :"missing_route_concurrency_#{System.unique_integer([:positive])}"
+
+      assert {:error, {:route_concurrency, :unavailable}} =
+               router_dispatch(build_request("ignored"),
+                 provider_route_input: provider_route_input([fallback, primary]),
+                 route_authorizer: fn _ -> :allow end,
+                 route_concurrency_server: dead
+               )
+
+      refute_received {:prepare, _}
+      refute_received {:execute, _}
+    end
+
+    test "strips route_concurrency_server before prepare/execute" do
+      primary = route_model("primary", :provider_a, "wire-primary", :arbor)
+
+      original = Application.get_env(:arbor_ai, :runtime_registry)
+
+      Application.put_env(:arbor_ai, :runtime_registry, %{
+        arbor: StripCheckRuntime,
+        acp: StripCheckRuntime
+      })
+
+      on_exit(fn -> Application.put_env(:arbor_ai, :runtime_registry, original) end)
+
+      assert {:ok, _} =
+               router_dispatch(build_request("ignored"),
+                 provider_route_input: provider_route_input([primary]),
+                 route_authorizer: fn _ -> :allow end
+               )
+
+      assert_receive {:strip_prepare, prepare_opts}
+      assert_receive {:strip_execute, execute_opts}
+      refute Keyword.has_key?(prepare_opts, :route_concurrency_server)
+      refute Keyword.has_key?(execute_opts, :route_concurrency_server)
     end
 
     defp provider_route_input(catalog) do
@@ -1068,6 +1332,17 @@ defmodule Arbor.AI.Runtime.DispatchTest do
         acp: CapturingRuntime
       })
 
+      concurrency_name = :"usage_rc_#{System.unique_integer([:positive])}"
+
+      start_supervised!(
+        {Arbor.AI.RouteConcurrency,
+         name: concurrency_name,
+         limits: %{
+           provider_a: %{arbor: 8, acp: 8},
+           provider_b: %{arbor: 8, acp: 8}
+         }}
+      )
+
       usage_ctx = %{principal_id: "agent_route", task_id: "task_route"}
       # Reuse ProviderRouter helpers from the router describe (same module defp).
       primary = usage_route_model("primary", :provider_a, "wire-primary", :arbor)
@@ -1077,7 +1352,8 @@ defmodule Arbor.AI.Runtime.DispatchTest do
                Dispatch.dispatch(build_request("ignored"),
                  provider_route_input: usage_provider_route_input([fallback, primary]),
                  route_authorizer: fn _ -> :allow end,
-                 provider_usage_context: usage_ctx
+                 provider_usage_context: usage_ctx,
+                 route_concurrency_server: concurrency_name
                )
 
       assert_receive {:runtime_prepare, :arbor, arbor_prepare_opts}
@@ -1097,6 +1373,13 @@ defmodule Arbor.AI.Runtime.DispatchTest do
         acp: CapturingRuntime
       })
 
+      concurrency_name = :"usage_rc_acp_#{System.unique_integer([:positive])}"
+
+      start_supervised!(
+        {Arbor.AI.RouteConcurrency,
+         name: concurrency_name, limits: %{provider_b: %{acp: 8, arbor: 8}}}
+      )
+
       usage_ctx = %{principal_id: "agent_route_acp"}
       primary = usage_route_model("primary", :provider_b, "wire-acp", :acp)
 
@@ -1104,7 +1387,8 @@ defmodule Arbor.AI.Runtime.DispatchTest do
                Dispatch.dispatch(build_request("ignored"),
                  provider_route_input: usage_provider_route_input([primary]),
                  route_authorizer: fn _ -> :allow end,
-                 provider_usage_context: usage_ctx
+                 provider_usage_context: usage_ctx,
+                 route_concurrency_server: concurrency_name
                )
 
       assert_receive {:runtime_prepare, :acp, opts}

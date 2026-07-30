@@ -18,6 +18,8 @@ defmodule Arbor.AI.Runtime.RouteInputAssembler do
 
   alias Arbor.AI.ProviderControlPlane
   alias Arbor.AI.QuotaTracker
+  alias Arbor.AI.RouteConcurrency
+  alias Arbor.AI.RouteConcurrencyCore
   alias Arbor.AI.RouteFailureStore
   alias Arbor.AI.Runtime.RouteCatalog
   alias Arbor.AI.Runtime.OAuthHealthObservation
@@ -49,6 +51,8 @@ defmodule Arbor.AI.Runtime.RouteInputAssembler do
              | :invalid_task_class
              | :route_failure_evidence_unavailable
              | :route_failure_evidence_malformed
+             | :route_concurrency_evidence_unavailable
+             | :route_concurrency_evidence_malformed
              | :malformed}
 
   @doc """
@@ -403,6 +407,12 @@ defmodule Arbor.AI.Runtime.RouteInputAssembler do
       {:error, :route_failure_evidence_malformed} ->
         {:error, {:route_assembly_failed, :route_failure_evidence_malformed}}
 
+      {:error, :route_concurrency_evidence_unavailable} ->
+        {:error, {:route_assembly_failed, :route_concurrency_evidence_unavailable}}
+
+      {:error, :route_concurrency_evidence_malformed} ->
+        {:error, {:route_assembly_failed, :route_concurrency_evidence_malformed}}
+
       {:error, :invalid_observation} ->
         {:error, {:route_assembly_failed, :invalid_observation}}
 
@@ -476,7 +486,8 @@ defmodule Arbor.AI.Runtime.RouteInputAssembler do
   end
 
   defp default_observation_reader(providers, decision_time) do
-    with {:ok, route_failures} <- read_route_failures(decision_time) do
+    with {:ok, route_failures} <- read_route_failures(decision_time),
+         {:ok, concurrency_snap} <- read_concurrency_snapshot() do
       quota_status = read_quota_status()
 
       Enum.reduce_while(providers, {:ok, []}, fn provider, {:ok, acc} ->
@@ -484,7 +495,12 @@ defmodule Arbor.AI.Runtime.RouteInputAssembler do
              {:ok, base} <- base_observation(provider, decision_time) do
           failure = Map.get(route_failures, provider_key)
           quota = Map.get(quota_status, provider_key)
-          attrs = RouteEvidenceOverlay.overlay(base, failure, quota, decision_time)
+
+          attrs =
+            base
+            |> RouteEvidenceOverlay.overlay(failure, quota, decision_time)
+            |> overlay_route_concurrency(concurrency_snap)
+
           {:cont, {:ok, [attrs | acc]}}
         else
           :error -> {:halt, {:error, :invalid_observation}}
@@ -497,6 +513,41 @@ defmodule Arbor.AI.Runtime.RouteInputAssembler do
       end
     end
   end
+
+  # One bounded node-local snapshot per assembly; fail closed when unavailable.
+  defp read_concurrency_snapshot do
+    case RouteConcurrency.snapshot() do
+      {:ok, snap} when is_map(snap) ->
+        case RouteConcurrencyCore.validate_snapshot(snap) do
+          {:ok, validated} -> {:ok, validated}
+          {:error, :malformed} -> {:error, :route_concurrency_evidence_malformed}
+        end
+
+      {:error, :unavailable} ->
+        {:error, :route_concurrency_evidence_unavailable}
+
+      {:error, :malformed} ->
+        {:error, :route_concurrency_evidence_malformed}
+
+      _ ->
+        {:error, :route_concurrency_evidence_malformed}
+    end
+  end
+
+  defp overlay_route_concurrency(attrs, snap) when is_map(attrs) and is_map(snap) do
+    provider = Map.get(attrs, :provider) || Map.get(attrs, "provider")
+    runtime = Map.get(attrs, :runtime) || Map.get(attrs, "runtime")
+
+    entry =
+      case RouteConcurrencyCore.normalize_route(provider, runtime) do
+        {:ok, route_key} -> Map.get(snap, route_key)
+        {:error, :malformed_route} -> nil
+      end
+
+    RouteEvidenceOverlay.overlay_concurrency(attrs, entry)
+  end
+
+  defp overlay_route_concurrency(attrs, _snap), do: attrs
 
   defp base_observation(provider, decision_time) do
     if OAuthHealthObservation.oauth_route?(provider) do

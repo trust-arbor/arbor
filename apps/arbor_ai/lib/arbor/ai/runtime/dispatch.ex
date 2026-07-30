@@ -35,6 +35,7 @@ defmodule Arbor.AI.Runtime.Dispatch do
 
   require Logger
 
+  alias Arbor.AI.RouteConcurrency
   alias Arbor.AI.Runtime.ProviderRouter
   alias Arbor.AI.Runtime.Registry, as: RuntimeRegistry
   alias Arbor.AI.Runtime.RoutePlan
@@ -204,12 +205,33 @@ defmodule Arbor.AI.Runtime.Dispatch do
   end
 
   defp dispatch_route_attempt(%{request: request, route: route, opts: opts} = attempt) do
+    with :ok <- authorize_route(Keyword.get(opts, :route_authorizer), route),
+         {:ok, lease} <- acquire_route_concurrency(route, opts) do
+      try do
+        run_authorized_route_attempt(attempt, request, route, opts)
+      after
+        # Always release (success, error, raise, throw) before any fallback attempt.
+        # Lease is bound to the exact authority server used for acquire.
+        safe_release_lease(lease)
+      end
+    end
+  end
+
+  # Cleanup must never raise or replace the original runtime result.
+  defp safe_release_lease(lease) do
+    RouteConcurrency.release(lease)
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
+  end
+
+  defp run_authorized_route_attempt(attempt, request, route, opts) do
     extra_meta = Keyword.get(opts, :telemetry_metadata, %{})
     callbacks = Keyword.get(opts, :callbacks, %{})
     selection = %{provider: route.provider, runtime: route.runtime}
 
-    with :ok <- authorize_route(Keyword.get(opts, :route_authorizer), route),
-         :ok <- maybe_emit_route_fallback(attempt, route),
+    with :ok <- maybe_emit_route_fallback(attempt, route),
          :ok <-
            emit_selected(route.model_entry, selection, request, route_extra_meta(extra_meta)),
          {:ok, runtime_module} <- exact_runtime_module(route.runtime),
@@ -220,6 +242,36 @@ defmodule Arbor.AI.Runtime.Dispatch do
            execute_routed_runtime(runtime_module, prepared, callbacks, runtime_opts) do
       :ok = emit_executed(route, request, attempt.attempt)
       {:ok, put_executed_route(response, route, attempt.attempt)}
+    end
+  end
+
+  # Node-local exact-route admission. Leases never enter route input / JSON.
+  defp acquire_route_concurrency(route, opts) do
+    provider = route_provider_id(route)
+    runtime = route.runtime
+    server_opts = concurrency_server_opts(opts)
+
+    case RouteConcurrency.acquire(provider, runtime, server_opts) do
+      {:ok, lease} ->
+        {:ok, lease}
+
+      {:error, reason}
+      when reason in [:at_capacity, :unconfigured_route, :malformed_route, :unavailable] ->
+        {:error, {:route_concurrency, reason}}
+
+      _ ->
+        {:error, {:route_concurrency, :unavailable}}
+    end
+  end
+
+  defp route_provider_id(%{provider: %{id: id}}), do: id
+  defp route_provider_id(%{provider: id}) when is_atom(id) or is_binary(id), do: id
+  defp route_provider_id(_), do: nil
+
+  defp concurrency_server_opts(opts) when is_list(opts) do
+    case Keyword.fetch(opts, :route_concurrency_server) do
+      {:ok, server} -> [route_concurrency_server: server]
+      :error -> []
     end
   end
 
@@ -326,7 +378,9 @@ defmodule Arbor.AI.Runtime.Dispatch do
         :telemetry_metadata,
         :callbacks,
         :provider_route_input,
-        :route_authorizer
+        :route_authorizer,
+        # Internal test seam — never leak to runtime adapters.
+        :route_concurrency_server
       ])
 
     if runtime == :arbor and is_map(ctx) and not is_struct(ctx) do
@@ -371,6 +425,11 @@ defmodule Arbor.AI.Runtime.Dispatch do
   defp path_unavailable_error?({:pool_exit, _}), do: true
   defp path_unavailable_error?({:session_exit, _}), do: true
   defp path_unavailable_error?({:selection_failed, _}), do: true
+  # At-capacity / unconfigured may try a ranked configured fallback.
+  # Authority failure (:unavailable / :malformed_route) remains fail-closed.
+  defp path_unavailable_error?({:route_concurrency, :at_capacity}), do: true
+  defp path_unavailable_error?({:route_concurrency, :unconfigured_route}), do: true
+  defp path_unavailable_error?({:route_concurrency, _}), do: false
   defp path_unavailable_error?(_), do: false
 
   defp apply_request_override(%Request{} = request, %{model: model})
