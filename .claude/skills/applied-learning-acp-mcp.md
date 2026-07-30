@@ -775,3 +775,24 @@ rework an earlier commit checkpoint. If the task has already reached validation,
 preserve its commit/workspace, start a follow-up from that exact commit, and
 explicitly resume the provider session when continuity is useful (found
 2026-07-30 while correcting the route-concurrency `nil` identifier edge case).
+
+<!-- applied-learning: bind-security-regression-paths-in-the-reviewed-plan -->
+<a id="applied-learning-bind-security-regression-paths-in-the-reviewed-plan"></a>
+**Bind security-regression paths in the reviewed plan.** A
+`task_class: "security_regression"` dispatch must include the exact committed
+regression test paths in `requested_paths`; naming them only in
+`required_evidence` does not satisfy compiler admission. Preflight the plan
+locally when possible so a missing path binding fails before workspace
+acquisition (found 2026-07-30 while redispatching the OAuth model-catalog
+transport).
+
+<!-- applied-learning: review-frozen-commit-approvals-before-the-interaction-deadline -->
+<a id="applied-learning-review-frozen-commit-approvals-before-the-interaction-deadline"></a>
+**Review frozen commit approvals before the interaction deadline.** The current
+coding pipeline expires a pending commit approval after roughly five minutes;
+once expired, the task is terminal and neither `rework` nor steering can reach
+the worker. Inspect likely risk areas while implementation runs, then prioritize
+the frozen diff as soon as the approval appears. If the deadline is too short
+for a responsible review, preserve the immutable workspace evidence and
+redispatch an explicit continuation rather than mutating the worker tree (found
+2026-07-30 during the OAuth model-catalog transport review).

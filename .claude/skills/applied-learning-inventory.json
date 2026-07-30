@@ -2,8 +2,8 @@
   "schema_version": 1,
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
-  "source_captured_on": "2026-07-29",
-  "entry_count": 587,
+  "source_captured_on": "2026-07-30",
+  "entry_count": 590,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -7175,8 +7175,47 @@
       "source_incident": "found 2026-07-30 while correcting the route-concurrency `nil` identifier edge case).",
       "content_sha256": "4cf61d639dd74c0d75211b36f8a3e8167ff12832b73f2f6c3cf34bb9b10cd725",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 588,
+      "source_kind": "post-migration",
+      "slug": "design-checkpoint-rework-can-exhaust-provider-session-continuity-before-implementation",
+      "title": "Design-checkpoint rework can exhaust provider-session continuity before implementation.",
+      "topic": "acp-mcp",
+      "destination": ".claude/skills/applied-learning-acp-mcp.md",
+      "anchor": "applied-learning-design-checkpoint-rework-can-exhaust-provider-session-continuity-before-implementation",
+      "source_date": "2026-07-30",
+      "source_incident": "found 2026-07-30 in `task_545761ac0ba110c6da1af9365594ef18`).",
+      "content_sha256": "f9b67e65e9cb20fb5d628c315b8394041c96fde4612239c23d94c8a6a962447c",
+      "always_loaded": false
+    },
+    {
+      "source_ordinal": 589,
+      "source_kind": "post-migration",
+      "slug": "bind-security-regression-paths-in-the-reviewed-plan",
+      "title": "Bind security-regression paths in the reviewed plan.",
+      "topic": "acp-mcp",
+      "destination": ".claude/skills/applied-learning-acp-mcp.md",
+      "anchor": "applied-learning-bind-security-regression-paths-in-the-reviewed-plan",
+      "source_date": "2026-07-30",
+      "source_incident": "found 2026-07-30 while redispatching the OAuth model-catalog transport).",
+      "content_sha256": "11f705b1432c194463d54ad70e21faae674d50df04a0f2d97028c23fc90d7c68",
+      "always_loaded": false
+    },
+    {
+      "source_ordinal": 590,
+      "source_kind": "post-migration",
+      "slug": "review-frozen-commit-approvals-before-the-interaction-deadline",
+      "title": "Review frozen commit approvals before the interaction deadline.",
+      "topic": "acp-mcp",
+      "destination": ".claude/skills/applied-learning-acp-mcp.md",
+      "anchor": "applied-learning-review-frozen-commit-approvals-before-the-interaction-deadline",
+      "source_date": "2026-07-30",
+      "source_incident": "found 2026-07-30 during the OAuth model-catalog transport review).",
+      "content_sha256": "de14697685cd4f57ada0ba61b126039a77d16f29fb693de83be07f25b9527575",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 126
+  "post_migration_entry_count": 129
 }
