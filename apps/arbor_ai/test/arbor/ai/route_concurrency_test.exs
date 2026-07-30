@@ -219,7 +219,10 @@ defmodule Arbor.AI.RouteConcurrencyTest do
 
   test "unavailable authority when server is down" do
     missing = :"missing_rc_#{System.unique_integer([:positive])}"
-    assert {:error, :unavailable} = RouteConcurrency.acquire(:provider_a, :arbor, route_concurrency_server: missing)
+
+    assert {:error, :unavailable} =
+             RouteConcurrency.acquire(:provider_a, :arbor, route_concurrency_server: missing)
+
     assert {:error, :unavailable} = RouteConcurrency.snapshot(route_concurrency_server: missing)
     dead = spawn(fn -> :ok end)
     ref = Process.monitor(dead)
@@ -230,8 +233,10 @@ defmodule Arbor.AI.RouteConcurrencyTest do
   test "malformed configuration refuses to start" do
     name = :"bad_rc_#{System.unique_integer([:positive])}"
 
-    assert {:error, :malformed_config} =
+    assert {:error, {:malformed_config, _child}} =
              start_supervised({RouteConcurrency, name: name, limits: %{"" => %{arbor: 1}}})
+
+    refute Process.whereis(name)
   end
 
   test "snapshot is exact and bounded", %{server: server} do
