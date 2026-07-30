@@ -3,6 +3,8 @@ children =
   [
     Arbor.AI.QuotaTracker,
     Arbor.AI.RouteFailureStore,
+    # Exact-route OAuth ProviderModelCatalog cache (no network on read).
+    Arbor.AI.ProviderModelCatalogStore,
     # Node-local exact-route concurrency authority (not cluster-global).
     Arbor.AI.RouteConcurrency
   ] ++

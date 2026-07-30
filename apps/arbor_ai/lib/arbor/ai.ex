@@ -55,6 +55,8 @@ defmodule Arbor.AI do
     LLMError,
     LLMTrace,
     ProviderControlPlane,
+    ProviderModelCatalogRefresh,
+    ProviderModelCatalogStore,
     ProviderUsageLedger,
     QuotaTracker,
     RouteFailureStore,
@@ -927,6 +929,50 @@ defmodule Arbor.AI do
           | {:error, :unavailable | :malformed}
   def provider_budget_snapshots(opts \\ []) do
     ProviderControlPlane.snapshots(opts)
+  end
+
+  @doc """
+  Refresh one exact OAuth route's provider-reported model catalog.
+
+  Production-owned write path: fetches through `Arbor.LLM.oauth_model_catalog/2`
+  (network + credentials live there) and publishes only a contract-valid
+  `ProviderModelCatalog` into the supervised exact-route cache. Rejected
+  publishes leave the last valid catalog untouched.
+
+  Accepts only exact `openai_oauth` / `xai_oauth` identities and closed
+  non-callback options (at most `:timeout_ms`). Caller-supplied credential,
+  request, or clock callbacks are rejected — they must not forge cache state.
+  Route selection / composition must use the cache read path, not this refresh
+  boundary.
+  """
+  @spec refresh_oauth_model_catalog(atom() | String.t(), keyword()) ::
+          {:ok, Arbor.Contracts.LLM.ProviderModelCatalog.t()} | {:error, term()}
+  def refresh_oauth_model_catalog(route, opts \\ []) do
+    ProviderModelCatalogRefresh.refresh(route, opts)
+  end
+
+  @doc """
+  Read one exact-route cached `ProviderModelCatalog` without network or
+  credential work.
+
+  Returns `{:error, :miss}` when the store is up but empty for that route, and
+  `{:error, :unavailable}` when the supervised store process is down.
+  """
+  @spec fetch_oauth_model_catalog(atom() | String.t()) ::
+          {:ok, Arbor.Contracts.LLM.ProviderModelCatalog.t()}
+          | {:error, :miss | :unavailable | :rejected | :malformed}
+  def fetch_oauth_model_catalog(route) do
+    ProviderModelCatalogStore.fetch_sync(route)
+  end
+
+  @doc """
+  Bounded snapshot of every currently cached OAuth model catalog, keyed by
+  exact route string. Values are JSON-clean catalog maps.
+  """
+  @spec oauth_model_catalog_snapshot(keyword()) ::
+          {:ok, %{optional(String.t()) => map()}} | {:error, :unavailable | :malformed}
+  def oauth_model_catalog_snapshot(opts \\ []) do
+    ProviderModelCatalogStore.snapshot_sync(opts)
   end
 
   @doc """
