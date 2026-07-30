@@ -4,6 +4,7 @@ defmodule Arbor.AI.Runtime.RouteAssemblyCanaryTest do
   """
   use ExUnit.Case, async: false
 
+  alias Arbor.AI.RouteConcurrency
   alias Arbor.AI.Runtime.{Dispatch, ProviderRouter, RouteInputAssembler}
   alias Arbor.Contracts.LLM.{BudgetSnapshot, ModelEntry, ProviderEntry, ProviderObservation}
   alias Arbor.LLM.Request
@@ -59,6 +60,12 @@ defmodule Arbor.AI.Runtime.RouteAssemblyCanaryTest do
 
   setup do
     original = Application.get_env(:arbor_ai, :runtime_registry, %{})
+    concurrency_name = :"route_assembly_canary_#{System.unique_integer([:positive])}"
+
+    start_supervised!(
+      {RouteConcurrency,
+       name: concurrency_name, limits: %{provider_a: %{arbor: 1}, provider_b: %{acp: 1}}}
+    )
 
     Application.put_env(:arbor_ai, :runtime_registry, %{
       arbor: CanaryRuntime,
@@ -70,10 +77,12 @@ defmodule Arbor.AI.Runtime.RouteAssemblyCanaryTest do
       Application.delete_env(:arbor_ai, :_canary_fail_model)
     end)
 
-    :ok
+    %{route_concurrency_server: concurrency_name}
   end
 
-  test "primary success through assemble → authorize → fake execution" do
+  test "primary success through assemble → authorize → fake execution", %{
+    route_concurrency_server: concurrency_server
+  } do
     primary = model("primary", :provider_a, "wire-primary", :arbor)
 
     assert {:ok, input} = assemble([primary], healthy_evidence([primary]))
@@ -85,7 +94,8 @@ defmodule Arbor.AI.Runtime.RouteAssemblyCanaryTest do
                route_authorizer: fn route ->
                  assert route.provider.id == :provider_a
                  :allow
-               end
+               end,
+               route_concurrency_server: concurrency_server
              )
 
     executed = response.usage["arbor.executed_route"]
@@ -95,7 +105,9 @@ defmodule Arbor.AI.Runtime.RouteAssemblyCanaryTest do
     assert executed["provider_confirmed"] == false
   end
 
-  test "fallback executes after primary failure and records fallback evidence" do
+  test "fallback executes after primary failure and records fallback evidence", %{
+    route_concurrency_server: concurrency_server
+  } do
     primary = model("primary", :provider_a, "wire-primary", :arbor)
     fallback = model("fallback", :provider_b, "wire-fallback", :acp)
     Application.put_env(:arbor_ai, :_canary_fail_model, "wire-primary")
@@ -105,7 +117,8 @@ defmodule Arbor.AI.Runtime.RouteAssemblyCanaryTest do
     assert {:ok, response} =
              Dispatch.dispatch(request(),
                provider_route_input: input,
-               route_authorizer: fn _ -> :allow end
+               route_authorizer: fn _ -> :allow end,
+               route_concurrency_server: concurrency_server
              )
 
     executed = response.usage["arbor.executed_route"]
