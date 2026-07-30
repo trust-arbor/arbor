@@ -759,3 +759,15 @@ producer-to-consumer path with a plan whose wall clock exceeds the action
 maximum (found 2026-07-29 when a 90-minute provider-observation plan passed
 design generation but failed `coding_design_checkpoint_open` with
 `:invalid_design_checkpoint_timeout`).
+
+<!-- applied-learning: route-rework-before-authorizing-validation -->
+<a id="applied-learning-route-rework-before-authorizing-validation"></a>
+**Route known rework before authorizing validation.** A `rework` answer at a
+commit checkpoint can return the same task to implementation, but a non-approve
+answer to a validation authorization denies that side effect and terminates the
+run as `validation_failed`; it is not an in-place worker rework control. When
+review exposes a defect before validation, steer it while the task is active or
+rework an earlier commit checkpoint. If the task has already reached validation,
+preserve its commit/workspace, start a follow-up from that exact commit, and
+explicitly resume the provider session when continuity is useful (found
+2026-07-30 while correcting the route-concurrency `nil` identifier edge case).
