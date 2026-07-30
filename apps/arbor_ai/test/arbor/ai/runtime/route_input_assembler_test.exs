@@ -472,6 +472,35 @@ defmodule Arbor.AI.Runtime.RouteInputAssemblerTest do
     @oauth_observed "2026-07-29T12:00:00Z"
     @oauth_gen 3
 
+    test "non-OAuth catalog skips OAuth snapshot reader even when it would be unavailable" do
+      # Zero exact OAuth candidates: irrelevant snapshot evidence must not be
+      # required or invoked. Assembly succeeds via non-OAuth readiness path.
+      model = model_entry("model-a", :grok)
+      snap_calls = :counters.new(1, [])
+
+      assert {:ok, input} =
+               RouteInputAssembler.assemble(
+                 profile: enabled_profile([model], [score_row("model-a", "grok")]),
+                 clock: fn -> @oauth_now end,
+                 oauth_health_reader: fn _ ->
+                   flunk("oauth_health_reader must not run without OAuth candidates")
+                 end,
+                 oauth_catalog_snapshot_reader: fn ->
+                   :counters.add(snap_calls, 1, 1)
+                   {:error, :unavailable}
+                 end,
+                 budget_reader: fn providers, dt ->
+                   {:ok, Enum.map(providers, &budget_dt(&1, dt))}
+                 end
+               )
+
+      assert :counters.get(snap_calls, 1) == 0
+      assert [obs] = input.observations
+      assert obs.provider == "grok"
+      refute obs.source == "arbor_oauth_catalog"
+      refute obs.source == "arbor_oauth_health"
+    end
+
     test "present and absent membership from one snapshot and one health read" do
       models = [oauth_model("model-a"), oauth_model("model-b")]
       health_calls = :counters.new(1, [])

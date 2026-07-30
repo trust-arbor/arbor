@@ -11,14 +11,16 @@ defmodule Arbor.AI.Runtime.RouteInputAssembler do
   profile load, catalog-source policy, explicit providers, evidence readers,
   and source-timestamp preservation.
 
-  Default production observation assembly walks admitted `%ModelEntry{}`
-  OAuth candidates, takes **one** supervised OAuth model-catalog cache
-  snapshot, and emits **model-specific** observations (never a generic
-  provider-wide OAuth row that could wildcard-match sibling models). Catalog
-  membership for arbor OAuth routes is composed via
-  `ProviderModelCatalogObservation`; non-arbor OAuth runtimes never borrow
-  catalog evidence or relabel as arbor. Route selection never refreshes
-  credentials or calls `Arbor.LLM.oauth_model_catalog`.
+  Default production observation assembly first computes exact admitted
+  `%ModelEntry{}` OAuth candidates. When candidates are present it takes
+  **one** supervised OAuth model-catalog cache snapshot and emits
+  **model-specific** observations (never a generic provider-wide OAuth row
+  that could wildcard-match sibling models). When there are zero OAuth
+  candidates the snapshot is not read. Catalog membership for arbor OAuth
+  routes is composed via `ProviderModelCatalogObservation`; non-arbor OAuth
+  runtimes never borrow catalog evidence or relabel as arbor. Route
+  selection never refreshes credentials or calls
+  `Arbor.LLM.oauth_model_catalog`.
 
   Injectable `profile`/`clock`/readers are a **test seam only**. Production
   callers use `Arbor.AI.assemble_provider_route_input/1`, which loads the
@@ -526,28 +528,32 @@ defmodule Arbor.AI.Runtime.RouteInputAssembler do
 
   defp default_observation_reader(providers, decision_time, catalog, opts) do
     with {:ok, route_failures} <- read_route_failures(decision_time),
-         {:ok, concurrency_snap} <- read_concurrency_snapshot(),
-         {:ok, catalog_snap} <- read_and_admit_oauth_catalog_snapshot(opts) do
-      quota_status = read_quota_status()
-      health_reader = Keyword.get(opts, :oauth_health_reader, &Arbor.LLM.oauth_health/1)
+         {:ok, concurrency_snap} <- read_concurrency_snapshot() do
+      # Exact OAuth candidates first — only then read catalog snapshot evidence.
+      # Zero candidates: skip the irrelevant reader. Non-empty: one bounded
+      # snapshot, fail-closed on unavailable/malformed.
       candidates = oauth_route_candidates(catalog)
       non_oauth_providers = Enum.reject(providers, &OAuthHealthObservation.oauth_route?/1)
-
       planned = length(candidates) + length(non_oauth_providers)
 
       if planned > @max_observations do
         {:error, :invalid_observation}
       else
-        emit_default_observations(
-          candidates,
-          non_oauth_providers,
-          catalog_snap,
-          health_reader,
-          route_failures,
-          quota_status,
-          concurrency_snap,
-          decision_time
-        )
+        with {:ok, catalog_snap} <- maybe_read_oauth_catalog_snapshot(candidates, opts) do
+          quota_status = read_quota_status()
+          health_reader = Keyword.get(opts, :oauth_health_reader, &Arbor.LLM.oauth_health/1)
+
+          emit_default_observations(
+            candidates,
+            non_oauth_providers,
+            catalog_snap,
+            health_reader,
+            route_failures,
+            quota_status,
+            concurrency_snap,
+            decision_time
+          )
+        end
       end
     end
   end
@@ -726,7 +732,15 @@ defmodule Arbor.AI.Runtime.RouteInputAssembler do
     _, _ -> {:error, :invalid_observation}
   end
 
-  # One bounded OAuth catalog snapshot per default assembly; shape-admit before use.
+  # Skip the OAuth catalog snapshot when no exact OAuth candidates exist.
+  # Empty map is a safe no-op for emit paths that never consult it.
+  defp maybe_read_oauth_catalog_snapshot([], _opts), do: {:ok, %{}}
+
+  defp maybe_read_oauth_catalog_snapshot(_candidates, opts),
+    do: read_and_admit_oauth_catalog_snapshot(opts)
+
+  # One bounded OAuth catalog snapshot per default assembly when OAuth
+  # candidates exist; shape-admit before use. Fail closed on unavailable/malformed.
   defp read_and_admit_oauth_catalog_snapshot(opts) do
     reader =
       Keyword.get(opts, :oauth_catalog_snapshot_reader, fn ->
