@@ -48,7 +48,12 @@ defmodule ArborCommon.MixProject do
   defp deps do
     [
       {:arbor_contracts, in_umbrella: true},
+      {:finch, "~> 0.21.0"},
       {:jason, "~> 1.4"},
+      # OAuth's bounded HTTP/1 pool relies on Mint's parser-level response
+      # header limit and the response-smuggling fixes released in 1.9.3.
+      {:mint, "~> 1.9.3", override: true},
+      {:req, "~> 0.5"},
       {:zoi, "~> 0.17"},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
     ]

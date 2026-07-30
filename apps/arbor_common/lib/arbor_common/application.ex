@@ -7,7 +7,7 @@ defmodule Arbor.Common.Application do
   def start(_type, _args) do
     install_log_redaction_filter()
 
-    children =
+    optional_children =
       if Application.get_env(:arbor_common, :start_children, true) do
         [
           # pg scope for cross-node registry discovery
@@ -35,6 +35,10 @@ defmodule Arbor.Common.Application do
       else
         []
       end
+
+    # OAuth's public HTTP boundary remains usable in isolated app tests where
+    # the registry/stateful Common children are deliberately disabled.
+    children = [Arbor.Common.OAuth.HttpClient.Pool | optional_children]
 
     opts = [strategy: :one_for_one, name: Arbor.Common.Supervisor]
     Supervisor.start_link(children, opts)
