@@ -289,9 +289,9 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
   test "template stays within reviewed DOT source, node, and edge ceilings", ctx do
     graph = parse!(ctx.template_source)
 
-    assert byte_size(ctx.template_source) == 81_218
-    assert map_size(graph.nodes) == 235
-    assert length(graph.edges) == 341
+    assert byte_size(ctx.template_source) == 81_782
+    assert map_size(graph.nodes) == 236
+    assert length(graph.edges) == 342
     assert byte_size(ctx.template_source) <= 262_144
     assert map_size(graph.nodes) <= 256
     assert length(graph.edges) <= 512
@@ -750,14 +750,14 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert edge_target(
              graph,
              "check_design_rework_total_budget",
-             "context.total_rework_count>=1"
+             "context.design_rework_count>=1"
            ) == "mark_design_rework_exhausted_error"
 
     assert edge_target(
              graph,
              "check_design_rework_total_budget",
-             "context.total_rework_count<1"
-           ) == "inc_design_total_rework_count"
+             "context.design_rework_count<1"
+           ) == "inc_design_rework_count"
 
     assert edge_target(graph, "mark_implementation_phase", nil) == "build_implement_prompt"
     assert edge_target(graph, "build_implement_prompt", nil) == "capture_pre_turn_workspace"
@@ -1652,11 +1652,23 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert Enum.any?(none_graph.edges, &submit_review_false_edge?/1)
   end
 
-  test "rework max cycles rewrites all shared total-budget gates", ctx do
+  test "rework max cycles rewrite uses independent design gates and shared total gates", ctx do
     for max_cycles <- 0..2 do
       plan = plan!(%{"rework" => %{"max_cycles" => max_cycles}})
       assert {:ok, compilation} = compile(plan, ctx)
       graph = parse!(compilation.dot_source)
+
+      assert edge_condition(
+               graph,
+               "check_design_rework_total_budget",
+               "mark_design_rework_exhausted_error"
+             ) == "context.design_rework_count>=#{max_cycles}"
+
+      assert edge_condition(
+               graph,
+               "check_design_rework_total_budget",
+               "inc_design_rework_count"
+             ) == "context.design_rework_count<#{max_cycles}"
 
       assert edge_condition(
                graph,

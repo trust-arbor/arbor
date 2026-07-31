@@ -558,11 +558,20 @@ defmodule Arbor.Commands.CodingBenchmark.Adapter do
     metrics = result_metrics(result)
 
     %{
-      "rework_cycles" =>
-        bounded_counter(map_value(metrics, "total_rework_count", :total_rework_count)),
+      "rework_cycles" => aggregate_rework_cycles(metrics),
       "validation_cycles" =>
         bounded_counter(map_value(metrics, "validation_attempts", :validation_attempts))
     }
+  end
+
+  defp aggregate_rework_cycles(metrics) do
+    design =
+      bounded_counter(map_value(metrics, "design_rework_count", :design_rework_count))
+
+    post_implementation =
+      bounded_counter(map_value(metrics, "total_rework_count", :total_rework_count))
+
+    min(design + post_implementation, @max_counter)
   end
 
   defp bounded_counter(value) when is_integer(value) and value in 0..@max_counter, do: value

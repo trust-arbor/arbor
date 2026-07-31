@@ -2749,7 +2749,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
 
   defp check_design_checkpoint_topology(errors, graph, policy, rework_max_cycles) do
     common = [
-      {"init_design_defaults", [{"init_design_attempt", nil}]},
+      {"init_design_defaults", [{"init_design_rework_count", nil}]},
+      {"init_design_rework_count", [{"init_design_attempt", nil}]},
       {"init_design_attempt", [{"init_design_envelope_retry_count", nil}]},
       {"init_design_envelope_retry_count", [{"init_worker_phase", nil}]},
       {"init_worker_phase", [{"freeze_coding_plan_work_packet_json", nil}]},
@@ -2849,11 +2850,11 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       {"check_design_rework_total_budget",
        [
          {"mark_design_rework_exhausted_error",
-          "context.total_rework_count>=#{rework_max_cycles}"},
-         {"inc_design_total_rework_count", "context.total_rework_count<#{rework_max_cycles}"}
+          "context.design_rework_count>=#{rework_max_cycles}"},
+         {"inc_design_rework_count", "context.design_rework_count<#{rework_max_cycles}"}
        ]},
       {"mark_design_rework_exhausted_error", [{"status_rework_exhausted", nil}]},
-      {"inc_design_total_rework_count", [{"inc_design_attempt", nil}]},
+      {"inc_design_rework_count", [{"inc_design_attempt", nil}]},
       {"inc_design_attempt", [{"reset_design_envelope_retry_count", nil}]},
       {"reset_design_envelope_retry_count", [{"mark_design_rework_kind", nil}]},
       {"mark_design_rework_kind", [{"mark_design_rework_iteration", nil}]},

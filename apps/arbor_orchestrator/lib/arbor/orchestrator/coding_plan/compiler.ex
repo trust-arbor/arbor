@@ -731,9 +731,9 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
       {"check_operator_rework_total_budget", "inc_operator_rework_count",
        "context.total_rework_count<2", "context.total_rework_count<#{max_cycles}"},
       {"check_design_rework_total_budget", "mark_design_rework_exhausted_error",
-       "context.total_rework_count>=2", "context.total_rework_count>=#{max_cycles}"},
-      {"check_design_rework_total_budget", "inc_design_total_rework_count",
-       "context.total_rework_count<2", "context.total_rework_count<#{max_cycles}"}
+       "context.design_rework_count>=2", "context.design_rework_count>=#{max_cycles}"},
+      {"check_design_rework_total_budget", "inc_design_rework_count",
+       "context.design_rework_count<2", "context.design_rework_count<#{max_cycles}"}
     ]
 
     Enum.reduce_while(rewrites, {:ok, graph}, fn {from, to, old, new}, {:ok, graph} ->

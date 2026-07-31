@@ -88,6 +88,22 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
       end
     end
 
+    test "design counter partition is explicit in review convergence policies" do
+      assert {:ok, default} = Profiles.fetch_executable("default")
+      assert {:ok, security} = Profiles.fetch_executable("security_regression")
+
+      for profile <- [default, security] do
+        writers = profile["semantic_policy"]["review_convergence"]["protected_writers"]
+
+        assert writers["design_rework_count"] == [
+                 "inc_design_rework_count",
+                 "init_design_rework_count"
+               ]
+
+        refute "inc_design_rework_count" in writers["total_rework_count"]
+      end
+    end
+
     test "requires the frozen-ledger reducer and git_commit in compiled execution manifests" do
       assert {:ok, profile} = Profiles.fetch_executable("default")
 

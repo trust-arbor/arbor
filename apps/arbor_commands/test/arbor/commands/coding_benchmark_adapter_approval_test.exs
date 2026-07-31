@@ -110,6 +110,26 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterApprovalTest do
     refute envelope["worker_ownership"] == "nil"
   end
 
+  test "aggregates independent design and post-implementation rework counters" do
+    requests = unique_requests!()
+
+    Application.put_env(
+      :arbor_commands,
+      :coding_benchmark_legacy_executor_module,
+      CapturingLegacyExecutor
+    )
+
+    result =
+      success_result()
+      |> put_in(["payload", "report", "metrics", "design_rework_count"], 2)
+
+    Application.put_env(:arbor_commands, :coding_benchmark_legacy_test_reply, {:ok, result})
+
+    assert {:ok, envelope} = LegacyAdapter.run(requests.legacy)
+    assert envelope["counters"]["rework_cycles"] == 3
+    assert envelope["counters"]["validation_cycles"] == 1
+  end
+
   defmodule ApprovalHistoryExecutor do
     @moduledoc false
 

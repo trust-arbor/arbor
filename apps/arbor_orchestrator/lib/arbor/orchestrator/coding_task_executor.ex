@@ -2523,6 +2523,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
       "validation_attempts" => Enum.count(completed, &(&1 == "validate")),
       "review_attempts" => Enum.count(completed, &(&1 == "review_change")),
       "protocol_retry_count" => metric_counter(clean_context, "protocol_retry_count"),
+      "design_rework_count" => metric_counter(clean_context, "design_rework_count"),
       "validation_rework_count" => metric_counter(clean_context, "validation_rework_count"),
       "review_rework_count" => metric_counter(clean_context, "review_rework_count"),
       "operator_rework_count" => metric_counter(clean_context, "operator_rework_count"),

@@ -30,9 +30,10 @@
 //   retain_workspace     - canonical "true"/"false" plan output policy for
 //                          successful workspace retention
 //   branch / commit_hash - reviewable branch tip when produced
+//   design_rework_count  - initiated design-checkpoint rework cycles
 //   validation_rework_count / review_rework_count / operator_rework_count
-//                        / total_rework_count
-//                        - initiated same-session rework-cycle counters
+//                        - initiated post-implementation category counters
+//   total_rework_count   - shared initiated post-implementation rework cycles
 //   review_cycle         - completed/next council cycle (1..3)
 //   finding_ledger       - frozen JSON finding ledger from the last council cycle
 //   review_disposition   - frozen ledger disposition from the last council cycle
@@ -43,7 +44,9 @@
 //                        - scoped evidence since prior_commit; cumulative
 //                          diff/files remain the reviewed candidate
 //   rework_kind          - most recently initiated rework category
-//   rework_iteration     - total initiated rework-cycle sequence
+//   rework_iteration     - current budget sequence: design uses
+//                          design_rework_count; post-implementation categories
+//                          use total_rework_count
 //   error                - stable terminal failure code when applicable
 //   approval_request_id  - last operator approval request id (deny/rework)
 //   approval_note        - bounded operator note from the last deny/rework
@@ -63,9 +66,11 @@
 //
 // Does NOT call coding_produce_reviewable_change.
 //
-// Rework bound: one initiated validation repair, up to two initiated council
-// repairs, and one initiated operator-approval repair, with a hard total
-// maximum of two same-session repair attempts across all kinds.
+// Rework bound: the design checkpoint and post-implementation workflow each
+// have an independent rework.max_cycles budget (0..2). Within the shared
+// post-implementation budget, validation admits one initiated repair, council
+// review admits up to two, and operator approval admits one. At max_cycles=2,
+// a run can therefore admit two design and two post-implementation repairs.
 // Review-budget exhaustion emits status=rework_exhausted (canonical). A
 // legacy_status=review_requires_rework field is also set for Phase 2 adapters.
 // Operator denial of the commit gate emits status=approval_denied (not
@@ -158,6 +163,13 @@ digraph CodingChangeV1 {
     transform="constant",
     expression="{\"design_attempt\":1,\"design_envelope_retry_count\":0}",
     output_key="design_defaults"
+  ]
+
+  init_design_rework_count [
+    type="transform",
+    transform="constant",
+    expression="0",
+    output_key="design_rework_count"
   ]
 
   init_design_attempt [
@@ -533,11 +545,11 @@ digraph CodingChangeV1 {
     fan_out="false"
   ]
 
-  inc_design_total_rework_count [
+  inc_design_rework_count [
     type="transform",
     transform="increment",
-    source_key="total_rework_count",
-    output_key="total_rework_count"
+    source_key="design_rework_count",
+    output_key="design_rework_count"
   ]
 
   inc_design_attempt [
@@ -565,7 +577,7 @@ digraph CodingChangeV1 {
   mark_design_rework_iteration [
     type="transform",
     transform="identity",
-    source_key="total_rework_count",
+    source_key="design_rework_count",
     output_key="rework_iteration"
   ]
 
@@ -1968,7 +1980,8 @@ digraph CodingChangeV1 {
   route_commit_interaction -> init_design_defaults [condition="context.coding_plan_version=2&&context.coding_plan_checkpoint_policy=design_required"]
   route_commit_interaction -> route_worker_phase [condition="context.coding_plan_version=2&&context.coding_plan_checkpoint_policy=design_required"]
 
-  init_design_defaults -> init_design_attempt -> init_design_envelope_retry_count -> init_worker_phase
+  init_design_defaults -> init_design_rework_count -> init_design_attempt ->
+  init_design_envelope_retry_count -> init_worker_phase
   init_worker_phase -> freeze_coding_plan_work_packet_json -> build_design_prompt
   build_design_prompt -> capture_pre_turn_workspace
   route_worker_phase -> check_design_workspace_unchanged [condition="context.worker_phase=design"]
@@ -2023,7 +2036,7 @@ digraph CodingChangeV1 {
   mark_implementation_phase -> build_implement_prompt
 
   // Deny uses the existing approval_denied terminal. Rework consumes the
-  // shared total budget, increments the numeric attempt, and asks the same
+  // dedicated design budget, increments the numeric attempt, and asks the same
   // worker in the same workspace/session for a fresh deterministic design.
   hoist_design_decision_request_id -> hoist_design_decision_note
   hoist_design_decision_note -> route_design_nonapproval
@@ -2031,10 +2044,10 @@ digraph CodingChangeV1 {
   route_design_nonapproval -> check_design_rework_total_budget [condition="context.design_checkpoint.checkpoint_outcome=rework"]
   route_design_nonapproval -> error_design_checkpoint_outcome_invalid
 
-  check_design_rework_total_budget -> mark_design_rework_exhausted_error [condition="context.total_rework_count>=2"]
-  check_design_rework_total_budget -> inc_design_total_rework_count [condition="context.total_rework_count<2"]
+  check_design_rework_total_budget -> mark_design_rework_exhausted_error [condition="context.design_rework_count>=2"]
+  check_design_rework_total_budget -> inc_design_rework_count [condition="context.design_rework_count<2"]
   mark_design_rework_exhausted_error -> status_rework_exhausted
-  inc_design_total_rework_count -> inc_design_attempt
+  inc_design_rework_count -> inc_design_attempt
   inc_design_attempt -> reset_design_envelope_retry_count
   reset_design_envelope_retry_count -> mark_design_rework_kind
   mark_design_rework_kind -> mark_design_rework_iteration

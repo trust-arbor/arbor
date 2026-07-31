@@ -641,6 +641,119 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
            end)
   end
 
+  test "security regression: design checkpoints are checked on the dedicated design_rework_count",
+       ctx do
+    assert {:ok, compilation} = compile(plan!(%{"rework" => %{"max_cycles" => 1}}), ctx)
+    graph = compiled_graph!(compilation.dot_source)
+    assert {:ok, profile} = Profiles.fetch_executable("default")
+
+    substituted =
+      graph
+      |> replace_edge_condition(
+        "check_design_rework_total_budget",
+        "mark_design_rework_exhausted_error",
+        "context.design_rework_count>=1",
+        "context.total_rework_count>=1"
+      )
+      |> replace_edge_condition(
+        "check_design_rework_total_budget",
+        "inc_design_rework_count",
+        "context.design_rework_count<1",
+        "context.total_rework_count<1"
+      )
+
+    assert {:error, {:semantic_preflight_failed, errors}} =
+             preflight(substituted, profile["semantic_policy"], review_profile: "binding")
+
+    assert Enum.any?(errors, fn error ->
+             error["code"] == "design_checkpoint_topology_mismatch" and
+               error["node_id"] == "check_design_rework_total_budget"
+           end)
+  end
+
+  test "security regression: missing design counter initialization is rejected", ctx do
+    assert {:ok, compilation} = compile(plan!(), ctx)
+    graph = compiled_graph!(compilation.dot_source)
+    assert {:ok, profile} = Profiles.fetch_executable("default")
+
+    mutated = %{
+      graph
+      | nodes: Map.delete(graph.nodes, "init_design_rework_count"),
+        edges:
+          Enum.reject(graph.edges, fn edge ->
+            edge.from == "init_design_rework_count" or edge.to == "init_design_rework_count"
+          end),
+        adjacency: %{},
+        reverse_adjacency: %{}
+    }
+
+    assert {:error, {:semantic_preflight_failed, errors}} =
+             preflight(mutated, profile["semantic_policy"], review_profile: "binding")
+
+    assert Enum.any?(errors, fn error ->
+             error["code"] == "review_convergence_missing_node" and
+               error["node_id"] == "init_design_rework_count"
+           end)
+  end
+
+  test "security regression: design rework increment dataflow must remain isolated", ctx do
+    assert {:ok, compilation} = compile(plan!(), ctx)
+    graph = compiled_graph!(compilation.dot_source)
+    assert {:ok, profile} = Profiles.fetch_executable("default")
+
+    for attr <- ["source_key", "output_key"] do
+      malformed =
+        Map.put(
+          graph.nodes["inc_design_rework_count"].attrs,
+          attr,
+          "total_rework_count"
+        )
+
+      mutated =
+        %{
+          graph
+          | nodes:
+              Map.put(graph.nodes, "inc_design_rework_count", %{
+                graph.nodes["inc_design_rework_count"]
+                | attrs: malformed
+              })
+        }
+
+      assert {:error, {:semantic_preflight_failed, errors}} =
+               preflight(mutated, profile["semantic_policy"], review_profile: "binding")
+
+      assert Enum.any?(errors, fn error ->
+               error["code"] in [
+                 "review_convergence_node_mismatch",
+                 "review_convergence_node_attr_subset_mismatch"
+               ] and error["node_id"] == "inc_design_rework_count"
+             end)
+    end
+  end
+
+  test "security regression: design checkpoint budget bypass cannot be reconstructed", ctx do
+    assert {:ok, compilation} = compile(plan!(), ctx)
+    graph = compiled_graph!(compilation.dot_source)
+    assert {:ok, profile} = Profiles.fetch_executable("default")
+
+    bypassed =
+      replace_edge_target(
+        graph,
+        "check_design_rework_total_budget",
+        "inc_design_rework_count",
+        "context.design_rework_count<2",
+        "inc_design_attempt"
+      )
+
+    assert {:error, {:semantic_preflight_failed, errors}} =
+             preflight(bypassed, profile["semantic_policy"], review_profile: "binding")
+
+    assert Enum.any?(errors, fn error ->
+             error["code"] == "design_checkpoint_topology_mismatch" and
+               error["node_id"] == "check_design_rework_total_budget"
+           end)
+  end
+
   test "security regression: review convergence and shared counter mutations fail closed", ctx do
     assert {:ok, compilation} = compile(plan!(), ctx)
     graph = compiled_graph!(compilation.dot_source)

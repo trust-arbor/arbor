@@ -123,7 +123,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                     implement
                     inc_design_attempt
                     inc_design_envelope_retry_count
-                    inc_design_total_rework_count
+                    inc_design_rework_count
                     inc_review_cycle
                     init_delta_diff
                     init_delta_files
@@ -133,6 +133,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                     init_review_defaults
                     init_design_attempt
                     init_design_defaults
+                    init_design_rework_count
                     init_design_envelope_retry_count
                     init_worker_phase
                     inspect_workspace
@@ -929,12 +930,12 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
       }
     },
     %{
-      "node_id" => "inc_design_total_rework_count",
+      "node_id" => "inc_design_rework_count",
       "attrs" => %{
         "type" => "transform",
         "transform" => "increment",
-        "source_key" => "total_rework_count",
-        "output_key" => "total_rework_count"
+        "source_key" => "design_rework_count",
+        "output_key" => "design_rework_count"
       }
     },
     %{
@@ -1002,6 +1003,15 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
       }
     },
     %{
+      "node_id" => "init_design_rework_count",
+      "attrs" => %{
+        "type" => "transform",
+        "transform" => "constant",
+        "expression" => "0",
+        "output_key" => "design_rework_count"
+      }
+    },
+    %{
       "node_id" => "init_operator_rework_count",
       "attrs" => %{
         "type" => "transform",
@@ -1042,7 +1052,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
       "attrs" => %{
         "type" => "transform",
         "transform" => "identity",
-        "source_key" => "total_rework_count",
+        "source_key" => "design_rework_count",
         "output_key" => "rework_iteration"
       }
     },
@@ -1401,7 +1411,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
     ],
     ["inc_design_attempt", "reset_design_envelope_retry_count", nil],
     ["inc_design_envelope_retry_count", "build_design_envelope_repair_prompt", nil],
-    ["inc_design_total_rework_count", "inc_design_attempt", nil],
+    ["inc_design_rework_count", "inc_design_attempt", nil],
     ["mark_design_rework_exhausted_error", "status_rework_exhausted", nil],
     ["mark_design_rework_iteration", "build_design_rework_prompt", nil],
     ["mark_design_rework_kind", "mark_design_rework_iteration", nil],
@@ -1638,12 +1648,12 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
         "mark_validation_rework_kind"
       ],
       "total_rework_count" => [
-        "inc_design_total_rework_count",
         "inc_operator_total_rework_count",
         "inc_review_total_rework_count",
         "inc_validation_total_rework_count",
         "init_total_rework_count"
       ],
+      "design_rework_count" => ["inc_design_rework_count", "init_design_rework_count"],
       "validation_rework_count" => [
         "inc_validation_rework_count",
         "init_validation_rework_count"
@@ -1747,12 +1757,12 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
         "mark_validation_rework_kind"
       ],
       "total_rework_count" => [
-        "inc_design_total_rework_count",
         "inc_operator_total_rework_count",
         "inc_review_total_rework_count",
         "inc_validation_total_rework_count",
         "init_total_rework_count"
       ],
+      "design_rework_count" => ["inc_design_rework_count", "init_design_rework_count"],
       "validation_rework_count" => [
         "inc_validation_rework_count",
         "init_validation_rework_count"

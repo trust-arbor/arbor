@@ -468,6 +468,12 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
 
       {outcome, note} =
         case {scenario, attempt} do
+          {:design_rework_always, _attempt} ->
+            {"rework", "Clarify the focused test coverage."}
+
+          {:design_rework_twice_then_validation_rework, attempt} when attempt in [1, 2] ->
+            {"rework", "Clarify the focused test coverage."}
+
           {scenario, 1}
           when scenario in [:design_rework_then_approved, :protocol_repair_then_design_rework] ->
             {"rework", "Clarify the focused test coverage."}
@@ -850,7 +856,9 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
         s
         when s in [
                :design_approved,
+               :design_rework_always,
                :design_rework_then_approved,
+               :design_rework_twice_then_validation_rework,
                :design_denied,
                :design_timeout,
                :malformed_design_output,
@@ -952,6 +960,8 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
               {:validation_then_review_rework_success, _} -> true
               {:validation_then_operator_rework_exhausted, 0} -> false
               {:validation_then_operator_rework_exhausted, _} -> true
+              {:design_rework_twice_then_validation_rework, 0} -> false
+              {:design_rework_twice_then_validation_rework, _} -> true
               {:narrative_validation_rework, 0} -> false
               {:narrative_validation_rework, _} -> true
               # First implement progresses then fails validation so rework runs;
@@ -1365,7 +1375,12 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
     graph
   end
 
-  defp run_fixture(scenario, initial_overrides \\ %{}, dot_source \\ load_dot()) do
+  defp run_fixture(
+         scenario,
+         initial_overrides \\ %{},
+         dot_source \\ load_dot(),
+         engine_opts \\ []
+       ) do
     {:ok, state} =
       Agent.start_link(fn ->
         %{
@@ -1411,7 +1426,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       authorization: false,
       actions_executor: FakeActionsExecutor,
       initial_values: initial,
-      max_steps: 200,
+      max_steps: Keyword.get(engine_opts, :max_steps, 200),
       sleep_fn: fn _ -> :ok end
     ]
 
@@ -1432,7 +1447,12 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
     |> Map.put("coding_budget.interaction_wait_ms", 900_000)
   end
 
-  defp run_compiled_v2_fixture(scenario, checkpoint_policy, plan_overrides \\ %{}) do
+  defp run_compiled_v2_fixture(
+         scenario,
+         checkpoint_policy,
+         plan_overrides \\ %{},
+         engine_opts \\ []
+       ) do
     plan = v2_plan!(checkpoint_policy, plan_overrides)
     assert {:ok, compilation} = Compiler.compile(plan)
 
@@ -1444,7 +1464,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
         "session.run_deadline_unix_ms" => @fixture_run_deadline_unix_ms
       })
 
-    {result, calls} = run_fixture(scenario, initial, compilation.dot_source)
+    {result, calls} = run_fixture(scenario, initial, compilation.dot_source, engine_opts)
     {result, calls, plan, compilation}
   end
 
@@ -2016,7 +2036,8 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert result.context["status"] == "change_committed"
       assert result.context["design_attempt"] == 2
       assert result.context["design_envelope_retry_count"] == 0
-      assert result.context["total_rework_count"] == 1
+      assert result.context["design_rework_count"] == 1
+      assert result.context["total_rework_count"] == "0"
       assert result.context["rework_kind"] == "design_checkpoint"
 
       assert [first_open, second_open] = action_calls(calls, "coding_design_checkpoint_open")
@@ -2044,7 +2065,8 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert result.context["status"] == "change_committed"
       assert result.context["design_attempt"] == 2
       assert result.context["design_envelope_retry_count"] == 1
-      assert result.context["total_rework_count"] == 1
+      assert result.context["design_rework_count"] == 1
+      assert result.context["total_rework_count"] == "0"
       assert result.context["rework_kind"] == "design_checkpoint"
       assert result.context["accepted_design"] == fixture_design(2)
       assert result.context["accepted_design_digest"] == fixture_design_digest(2)
@@ -2078,6 +2100,74 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
 
       assert_single_worker_session(calls, 5)
       assert_close_after_last_send_before_release(calls)
+      assert_closed_and_released(calls)
+    end
+
+    for max_cycles <- 0..2 do
+      test "design rework exhausts deterministically at bound #{max_cycles}" do
+        max_cycles = unquote(max_cycles)
+
+        assert {{:ok, result}, calls, _plan, _compilation} =
+                 run_compiled_v2_fixture(
+                   :design_rework_always,
+                   "design_required",
+                   %{"rework" => %{"max_cycles" => max_cycles}},
+                   max_steps: 300
+                 )
+
+        assert result.context["status"] == "rework_exhausted"
+        assert result.context["error"] == "design_checkpoint_rework_exhausted"
+        assert result.context["design_attempt"] == max_cycles + 1
+        assert to_string(result.context["design_rework_count"]) == Integer.to_string(max_cycles)
+        assert result.context["total_rework_count"] == "0"
+        assert result.context["rework_kind"] in [nil, "design_checkpoint"]
+        assert length(action_calls(calls, "coding_design_checkpoint_open")) == max_cycles + 1
+        assert length(action_calls(calls, "coding_design_checkpoint_await")) == max_cycles + 1
+        assert length(action_prompts(calls)) == max_cycles + 1
+        assert_single_worker_session(calls, max_cycles + 1)
+        refute called?(calls, "mix_compile")
+        refute called?(calls, "coding_reviewed_commit")
+        assert_closed_and_released(calls)
+      end
+    end
+
+    test "two design reworks preserve the first post-implementation repair" do
+      assert {{:ok, result}, calls, _plan, _compilation} =
+               run_compiled_v2_fixture(
+                 :design_rework_twice_then_validation_rework,
+                 "design_required",
+                 %{"rework" => %{"max_cycles" => 2}},
+                 max_steps: 300
+               )
+
+      assert result.context["status"] == "change_committed"
+      assert result.context["design_attempt"] == 3
+      assert result.context["design_rework_count"] == 2
+      assert result.context["validation_rework_count"] == 1
+      assert result.context["total_rework_count"] == 1
+      assert result.context["rework_kind"] == "validation"
+      assert result.context["rework_iteration"] == 1
+      assert result.context["accepted_design"] == fixture_design(3)
+      assert result.context["accepted_design_digest"] == fixture_design_digest(3)
+
+      [
+        initial_prompt,
+        first_design_rework_prompt,
+        second_design_rework_prompt,
+        implementation_prompt,
+        validation_rework_prompt
+      ] =
+        action_prompts(calls)
+
+      assert initial_prompt =~ "DESIGN PHASE ONLY"
+      assert first_design_rework_prompt =~ "DESIGN REWORK PHASE ONLY"
+      assert second_design_rework_prompt =~ "DESIGN REWORK PHASE ONLY"
+      assert implementation_prompt =~ "IMPLEMENTATION PHASE"
+      assert validation_rework_prompt =~ "Structured validation feedback JSON"
+
+      assert length(action_calls(calls, "coding_design_checkpoint_open")) == 3
+      assert length(action_calls(calls, "mix_compile")) == 2
+      assert_single_worker_session(calls, 5)
       assert_closed_and_released(calls)
     end
 

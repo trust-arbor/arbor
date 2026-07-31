@@ -3663,6 +3663,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
         "commit_hash" => "c1",
         "worktree_path" => "/tmp/ws",
         "protocol_retry_count" => "1",
+        "design_rework_count" => "2",
         "validation_rework_count" => 1,
         "review_rework_count" => "1",
         "operator_rework_count" => 0,
@@ -3705,6 +3706,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert metrics["validation_attempts"] == 2
       assert metrics["review_attempts"] == 2
       assert metrics["protocol_retry_count"] == 1
+      assert metrics["design_rework_count"] == 2
       assert metrics["validation_rework_count"] == 1
       assert metrics["review_rework_count"] == 1
       assert metrics["operator_rework_count"] == 0
