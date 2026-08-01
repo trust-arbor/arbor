@@ -34,9 +34,9 @@ Master vision for Arbor as an external integration hub. Tracks dependency order 
 Four-stage plan from private development to publicly usable product. Defines Arbor's core differentiators across three tiers (relationship memory, earned autonomy, security architecture) and stages the work needed to harden, polish, and publicly launch.
 **Priority:** High · **Source:** `.arbor/roadmap/2-planned/public-launch-roadmap.md`
 
-### Voice Pipeline — Phone Cluster Integration
-Voice conversation pipeline between an Android phone (BEAM node) and the Arbor homelab over distributed Erlang. Phone handles STT/TTS locally; Arbor processes through an agent and returns the response. Phone clustering already verified; this is the conversation pipeline on top.
-**Priority:** High · **Source:** `.arbor/roadmap/2-planned/voice-pipeline-phone-cluster.md`
+### Voice-First Interface — Earbuds Primary, Phone Secondary
+Hands-free operator console: dispatch and supervise Arbor agents by voice in public, earbuds primary, phone (mobile dashboard) as the visual escalation surface. Consolidates the three voice items (ambient voice UI, xAI realtime integration, phone-cluster pipeline) into one five-phase plan: engagement-native voice channel → phone/earbud transport → audio UX (earcons, barge-in, speakable rendering) → operator loop + voice HITL approvals → sovereign local backend. xAI Realtime first behind a `RealtimeBackend` behaviour; orchestration + audio loop already proven in prototype.
+**Priority:** High · **Source:** `.arbor/roadmap/2-planned/voice-first-interface.md` (absorbs `voice-pipeline-phone-cluster.md`, `0-inbox/ambient-voice-ui-design.md`, `0-inbox/voice-agent-xai-integration.md`)
 
 ### Security Kernel Extraction
 Extract `arbor_security` into a standalone Hex library so any Elixir developer can use capability-based agent authorization and cryptographic identity without the full Arbor umbrella. ~15K lines, ~2–3 days of mostly mechanical work.
