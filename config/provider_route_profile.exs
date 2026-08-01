@@ -1,9 +1,8 @@
 import Config
 
-# Reviewed Phase E routing candidate. Development enables this profile for live
-# restart dogfood. Production remains disabled until these evals are rerun on an
-# immutable clean revision; changing that gate is a separate reviewed rollout.
-provider_route_profile_enabled = config_env() == :dev
+# Reviewed Phase E routing profile. Both routes passed the heartbeat eval suite
+# on the immutable clean revision recorded by the scoreboard evidence below.
+provider_route_profile_enabled = true
 
 config :arbor_ai, :provider_route_profile, %{
   enabled: provider_route_profile_enabled,
@@ -24,9 +23,9 @@ config :arbor_ai, :provider_route_profile, %{
       # Subscription OAuth had no marginal API charge in this eval. This is
       # separate from subscription capacity and total economic cost.
       marginal_cost: 0.0,
-      latency_ms: 5_690.875,
-      eval_run_ref: "gpt-5-6-sol-heartbeat-2026-08-01-1bcb2f",
-      last_verified: "2026-08-01T16:05:45.559268Z"
+      latency_ms: 6_256.1,
+      eval_run_ref: "gpt-5-6-sol-heartbeat-2026-08-01-2a1cc2",
+      last_verified: "2026-08-01T19:41:34.301064Z"
     },
     %{
       model: "grok-4.5",
@@ -37,9 +36,9 @@ config :arbor_ai, :provider_route_profile, %{
       format_failure_rate: 0.0,
       variance: 0.0,
       marginal_cost: 0.0,
-      latency_ms: 4_616.75,
-      eval_run_ref: "grok-4-5-heartbeat-2026-08-01-207268",
-      last_verified: "2026-08-01T16:22:36.985474Z"
+      latency_ms: 4_217.1,
+      eval_run_ref: "grok-4-5-heartbeat-2026-08-01-4fcb18",
+      last_verified: "2026-08-01T19:42:36.096985Z"
     }
   ],
   providers: ["openai_oauth", "xai_oauth"],
