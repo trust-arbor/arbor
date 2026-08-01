@@ -151,3 +151,48 @@ term looks harmless. Search source, configuration, and documentation roots separ
 credential state itself must be inspected, use a known exact file plus bounded metadata-only
 extraction or the product's redacting facade; never print raw credential or session content
 (found 2026-07-30 while auditing provider OAuth client eligibility).
+
+<!-- applied-learning: verify-the-shipped-credential-envelope-not-only-provider-auth-documentation -->
+<a id="applied-learning-verify-the-shipped-credential-envelope-not-only-provider-auth-documentation"></a>
+**Verify the shipped credential envelope, not only provider auth documentation.** Provider
+documentation and current source can describe a newer store shape than an installed release.
+Before enabling external-source-owned OAuth, inspect only the known exact file with
+metadata-only extraction and prove that a current access token plus stable generation metadata
+actually exist; never infer feasibility from refresh-token presence or print credential values.
+On 2026-07-31, current xAI documentation described an access token while the installed Grok
+0.2.117 nested store exposed only a refresh token, so xAI source-owned mode remains disabled
+(found 2026-07-31 during the Phase E provider-login audit).
+
+<!-- applied-learning: canonical-model-ids-are-not-provider-wire-model-ids -->
+<a id="applied-learning-canonical-model-ids-are-not-provider-wire-model-ids"></a>
+**Canonical model IDs are not provider wire model IDs.** Preserve the canonical requested
+`model`, exact sent `provider_ref`, and provider-reported `confirmed_model` as separate fields.
+Confirmation compares the trusted terminal model to `provider_ref`; requiring it to equal the
+canonical ID rejects legitimate aliases and erases which name the provider actually executed
+(found 2026-07-31 while reviewing Phase E Responses attestation).
+
+<!-- applied-learning: durable-oauth-login-must-request-the-provider-s-refresh-grant-scope -->
+<a id="applied-learning-durable-oauth-login-must-request-the-provider-s-refresh-grant-scope"></a>
+**Durable OAuth login must request the provider's refresh-grant scope.** A mocked token
+response containing a refresh token can make acquisition tests pass even when the real
+authorization request cannot obtain one. Assert the exact scope at the public request boundary
+and dogfood each provider's live flow; keep refresh-token publication fail-closed rather than
+accepting an access-only credential. On 2026-08-01, xAI accepted Arbor's device authorization
+but omitted a refresh token until the request included `offline_access`. A later live Responses
+canary proved that refresh authority is independent of resource authority: the resulting
+`grok-cli:access` token refreshed correctly but `/v1/responses` returned 403, while the replacement
+`api:access` token reached Responses but the CLI model catalog returned 403. xAI discovery
+advertises both scopes, and Arbor uses both protected resources, so its single owned credential
+must request `openid profile email offline_access api:access grok-cli:access`. Assert refresh and
+every target-resource scope against the live endpoints, not only against a client template.
+
+<!-- applied-learning: background-evidence-refresh-must-start-before-its-freshness-deadline -->
+<a id="applied-learning-background-evidence-refresh-must-start-before-its-freshness-deadline"></a>
+**Background evidence refresh must start before its freshness deadline.** A coordinator that
+polls every 30 seconds but refreshes only after a five-minute catalog expires creates a recurring
+fail-closed outage even when both mechanisms work as designed. Trigger refresh when remaining
+freshness is no greater than the next steady interval plus the bounded refresh timeout and
+scheduling jitter. If a proactive refresh fails transiently, keep still-valid last-good evidence
+usable until its actual expiry but retry on backoff instead of waiting another steady interval.
+Pin the boundary with an injected clock and repeatedly exercise the timer regression (found
+2026-08-01 during the final Phase E provider-route health check).

@@ -651,3 +651,16 @@ inventory expansion, normalization, and batching, then report the exact
 unstarted downstream suffix on capacity exhaustion without treating it as
 success (found 2026-07-30 when an `arbor_common`/`arbor_security` OAuth change
 spent its test budget in `arbor_actions` first).
+
+<!-- applied-learning: missing-attested-native-baselines-must-defer-validation-not-trigger-host-discovery -->
+<a id="applied-learning-missing-attested-native-baselines-must-defer-validation-not-trigger-host-discovery"></a>
+**Missing attested native baselines must defer validation, not trigger host
+discovery.** When isolated-worktree compilation cannot load a pinned native
+artifact, do not scan broad host paths, probe release sites, or install an
+opportunistic binary from inside the delegated task. Report the exact baseline
+dependency, preserve the candidate, and let source-owned baseline provisioning
+and verification complete outside no-network validation; only then rerun under
+the pinned baseline. A broad fallback weakens supply-chain provenance and can
+traverse protected user data (found 2026-07-31 when Phase E OAuth validation
+searched `/` and probed GitHub for `sqlite-vec` while the reviewed baseline
+awaited privileged installation).

@@ -260,3 +260,16 @@ empty default projection can silently widen a scoped query to global. Validate
 the caller's filters and preserve the normalized mode and bounds in every
 status response; degradation may reduce evidence, never broaden visibility
 (found 2026-07-28 reviewing Apple Container unit inventory).
+
+<!-- applied-learning: privileged-approval-must-not-execute-mutable-user-owned-inputs -->
+<a id="applied-learning-privileged-approval-must-not-execute-mutable-user-owned-inputs"></a>
+**Privileged approval must not execute mutable user-owned inputs.** An
+administrator dialog can remain open while a referenced script, archive, or
+configuration under a user-writable path changes. Copy the launcher into a
+privileged process-created temporary file, verify that copied file against a
+digest embedded in the already-issued authorization command, and execute only
+the verified copy. The launcher must likewise copy every payload into
+privileged staging and verify its pinned digest before extraction or
+installation; checking a source path and then reopening it leaves the same
+TOCTOU window (found 2026-07-31 while refreshing the Apple Container
+dependency baseline).

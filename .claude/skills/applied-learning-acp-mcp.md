@@ -788,14 +788,17 @@ transport).
 
 <!-- applied-learning: review-frozen-commit-approvals-before-the-interaction-deadline -->
 <a id="applied-learning-review-frozen-commit-approvals-before-the-interaction-deadline"></a>
-**Review frozen commit approvals before the interaction deadline.** The current
-coding pipeline expires a pending commit approval after roughly five minutes;
-once expired, the task is terminal and neither `rework` nor steering can reach
-the worker. Inspect likely risk areas while implementation runs, then prioritize
-the frozen diff as soon as the approval appears. If the deadline is too short
-for a responsible review, preserve the immutable workspace evidence and
-redispatch an explicit continuation rather than mutating the worker tree (found
-2026-07-30 during the OAuth model-catalog transport review).
+**Review frozen approvals before the remaining interaction deadline.** The
+current coding pipeline expires a pending design or commit approval against
+the remaining stage budget, which can be materially shorter than a nominal
+five-minute interaction window. Once expired, the task is terminal and neither
+`rework` nor steering can reach the worker. Inspect likely risk areas while the
+worker runs, then prioritize the frozen artifact as soon as the approval
+appears. If the deadline is too short for a responsible review, preserve the
+immutable workspace evidence and redispatch an explicit provider-session
+continuation rather than mutating the worker tree (found 2026-07-30 during the
+OAuth model-catalog transport review; reinforced 2026-07-31 when a Phase E
+design checkpoint had about 223 seconds available).
 
 <!-- applied-learning: use-current-coding-plan-output-keys-and-preflight-the-normalized-plan -->
 <a id="applied-learning-use-current-coding-plan-output-keys-and-preflight-the-normalized-plan"></a>
@@ -804,8 +807,12 @@ output contract accepts `commit`, `draft_pr`, and `retain_workspace`; stale
 `draft` or `retain` keys are unknown input and correctly fail admission. Run the
 exact plan map through `Arbor.Contracts.Coding.Plan.new/1` and the current
 compiler before dispatch so schema drift is caught before workspace or provider
-resources are acquired (found 2026-07-30 while preparing the OAuth
-model-catalog correction).
+resources are acquired. Include nested policy bounds in that preflight: the
+current contract caps `rework.max_cycles` at `2`, so a remembered higher retry
+count fails admission before delegation begins. Treat the live constructor and
+compiler as authoritative rather than copying bounds into dispatch code (found
+2026-07-30 while preparing the OAuth model-catalog correction and reinforced
+2026-07-31 while dispatching the OAuth Device Code correction).
 
 <!-- applied-learning: acp-receiver-idleness-is-not-worker-inactivity -->
 <a id="applied-learning-acp-receiver-idleness-is-not-worker-inactivity"></a>
@@ -816,3 +823,27 @@ and require terminal provider or process evidence before declaring the turn
 stalled; receiver silence alone can kill useful work and strand its workspace
 (found 2026-07-30 when a Spark worker's broker reproduction continued in a
 background job after the ACP receiver appeared idle).
+
+<!-- applied-learning: delegate-from-candidate-commits-via-base-ref-not-linked-repo-roots -->
+<a id="applied-learning-delegate-from-candidate-commits-via-base-ref-not-linked-repo-roots"></a>
+**Delegate from candidate commits via `base_ref`, not linked `repo_root`
+paths.** Keep the canonical repository as the coding plan's `repo_root` and
+bind an unmerged candidate by its exact commit in `base_ref`. A linked
+worktree may pass trusted-root readiness, but workspace acquisition runs the
+hardened Git facade and correctly rejects that worktree's administrative
+directory under the parent repository's `.git/worktrees` as storage outside
+the linked root. The canonical repository plus candidate object ID preserves
+the exact base without widening Git authority (found 2026-07-31 while
+dispatching the Phase E provider-login continuation).
+
+<!-- applied-learning: attest-dynamic-acp-models-from-session-state-not-process-arguments -->
+<a id="applied-learning-attest-dynamic-acp-models-from-session-state-not-process-arguments"></a>
+**Attest dynamic ACP models from managed session state, not process
+arguments.** Adapted providers such as Claude can launch the CLI with a
+configured bootstrap model and then select the reviewed task model over the
+SDK control channel. The OS command line therefore describes process startup,
+not necessarily the active model. Check Arbor's managed-session inventory and
+the pipeline's requested/confirmed model evidence before diagnosing a model
+mismatch; both still must agree with the reviewed plan (found 2026-07-31 while
+the Phase E Claude fallback launched with `--model opus` but attested
+`model: sonnet` after dynamic selection).

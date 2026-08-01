@@ -215,3 +215,7 @@ admission path drops them. Trace one record through reserve, worker start,
 restart, reconciliation, and settlement; normal workers require known lineage,
 while legacy unknown lineage is admitted only to cleanup recovery (found
 2026-07-28 reviewing the Apple Container journal v2 migration).
+
+<!-- applied-learning: shared-durable-storage-does-not-make-hot-projections-cluster-global -->
+<a id="applied-learning-shared-durable-storage-does-not-make-hot-projections-cluster-global"></a>
+**Shared durable storage does not make hot projections cluster-global.** A GenServer that replays a shared EventLog on startup and after local writes will not observe another node's append until it replays again. Describe the implemented guarantee as restart durability, add an explicit bounded reconciliation or cluster-owned authority for live convergence, and use signals only as latency hints rather than control-plane truth (found 2026-07-31 reviewing provider-route evidence before Phase E rollout).

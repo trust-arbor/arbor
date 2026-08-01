@@ -348,3 +348,24 @@ deletion and verify the committed summary records delete mode; preserve a
 useful dirty candidate in a separate salvage worktree before correcting it
 (found 2026-07-29 when the inert Engine Budget middleware and its test were
 emptied rather than deleted).
+
+<!-- applied-learning: git-apply-three-way-updates-the-index -->
+<a id="applied-learning-git-apply-three-way-updates-the-index"></a>
+**`git apply --3way` updates the index.** A clean three-way patch can leave all
+applied paths staged even when the intent was only to import a worker's diff
+into the working tree. Immediately inspect `git diff --cached --name-only`
+after integration and run `git restore --staged -- <owned paths>` when no
+commit or staging was requested; then verify worktree bytes separately. Do not
+use broad unstaging in a shared dirty tree (found 2026-07-31 while integrating
+Phase E provider attestation).
+
+<!-- applied-learning: rsync-accepts-one-destination-per-invocation -->
+<a id="applied-learning-rsync-accepts-one-destination-per-invocation"></a>
+**`rsync` accepts one destination per invocation.** A command that alternates
+several source and destination paths treats every argument except the last as a
+source and can merge unrelated trees into that final destination. Multiple
+individual sources sent to one directory also flatten to their basenames instead
+of preserving each source path. When syncing an isolated validation worktree,
+run one explicit source/exact-file destination pair per invocation (or use a
+verified relative-root mode), then inspect status before testing (found
+2026-07-31 and reinforced 2026-08-01 during Phase E validation).
