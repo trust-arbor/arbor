@@ -10,9 +10,10 @@ defmodule Arbor.AI.RouteConcurrency do
 
   This authority is **node-local only** — process-local to one BEAM node.
   It is **not** cluster-global, partition-tolerant, or multi-node coherent.
-  Cluster leases are deferred architecture work. Production provider routing
-  remains disabled until a later reviewed profile/canary acknowledges this
-  scope or adds cluster authority.
+  Cluster leases are deferred architecture work. The reviewed production
+  profile explicitly treats these limits as node-local deployment policy, not
+  observed cluster capacity. Cluster-global authority remains separately
+  tracked work.
 
   Callers must not lazy-start this process; it is started under
   `Arbor.AI.Supervisor` (and the arbor_ai test helper).
