@@ -177,6 +177,8 @@ defmodule Arbor.LLM.OAuth do
   alias Arbor.LLM.{Deadline, Endpoint, ResponseBudget}
   alias Arbor.LLM.OAuth.AcquiredCredential
   alias Arbor.LLM.OAuth.CredentialReceipt
+  alias Arbor.LLM.OAuth.JwtPayload
+  alias Arbor.LLM.OAuth.ProviderPolicy
   alias Arbor.Contracts.LLM.AuthProvenance
   alias Arbor.Contracts.LLM.OAuthHealth
 
@@ -208,20 +210,6 @@ defmodule Arbor.LLM.OAuth do
   # no dynamic atom creation on this path. Unknown names are NEVER defaulted.
   @oauth_routes %{"openai_oauth" => :openai, "xai_oauth" => :xai}
   @oauth_backends %{"openai" => :openai, "xai" => :xai}
-
-  # Per-provider refresh endpoint + client_id and JWT-expiry skew. Acquisition is out of scope.
-  @providers %{
-    openai: %{
-      refresh_url: "https://auth.openai.com/oauth/token",
-      client_id: "app_EMoamEEZ73f0CkXaXp7hrann",
-      skew_s: 120
-    },
-    xai: %{
-      discovery_url: "https://auth.x.ai/.well-known/openid-configuration",
-      client_id: "b1a00492-073a-47ea-816f-4c329264a828",
-      skew_s: 3600
-    }
-  }
 
   @doc """
   Resolve `provider` against the exact closed OAuth route table.
@@ -520,7 +508,7 @@ defmodule Arbor.LLM.OAuth do
     do: {health_credential_status(backend, credential), credential}
 
   defp health_credential_status(backend, %{owner: "arbor_owned"} = credential) do
-    config = Map.fetch!(@providers, backend)
+    config = ProviderPolicy.refresh_config(backend)
     access = credential.tokens["access_token"]
 
     cond do
@@ -542,7 +530,7 @@ defmodule Arbor.LLM.OAuth do
   defp health_credential_status(:openai, %{owner: "source_owned"} = credential) do
     case read_openai_source_receipt(credential) do
       {:ok, %CredentialReceipt{} = source_credential} ->
-        if expiring?(source_credential.access_token, @providers.openai.skew_s),
+        if expiring?(source_credential.access_token, ProviderPolicy.openai().skew_s),
           do: "expired",
           else: "ready"
 
@@ -590,10 +578,10 @@ defmodule Arbor.LLM.OAuth do
           {:error, :anthropic_oauth_forbidden}
 
         p in ~w(openai codex chatgpt gpt) ->
-          {:ok, :openai, @providers.openai}
+          {:ok, :openai, ProviderPolicy.refresh_config(:openai)}
 
         p in ~w(xai grok x-ai) ->
-          {:ok, :xai, @providers.xai}
+          {:ok, :xai, ProviderPolicy.refresh_config(:xai)}
 
         true ->
           {:error, {:no_oauth_provider, p}}
@@ -740,14 +728,6 @@ defmodule Arbor.LLM.OAuth do
     max_map_keys: 2_000,
     max_list_items: 10_000
   ]
-  @jwt_json_limits [
-    max_bytes: 65_536,
-    max_nodes: 1_000,
-    max_depth: 8,
-    max_map_keys: 200,
-    max_list_items: 1_000
-  ]
-
   defp store_dir do
     case Application.get_env(:arbor_llm, :oauth_store_dir) do
       dir when is_binary(dir) and byte_size(dir) > 0 ->
@@ -1386,14 +1366,12 @@ defmodule Arbor.LLM.OAuth do
   # A JWT access token is `<h>.<payload>.<sig>`; the payload has an `exp` (unix seconds). Expiring
   # if now + skew >= exp. Opaque/non-JWT tokens can't be checked → treat as not-expiring.
   defp expiring?(token, skew_s) do
-    with [_h, payload, _s] <- String.split(token, "."),
-         {:ok, decoded} <- Base.url_decode64(payload, padding: false),
-         {:ok, %{"exp" => exp}} <-
-           Arbor.LLM.ResponseBudget.decode_json(decoded, @jwt_json_limits),
-         true <- is_integer(exp) do
-      System.system_time(:second) + skew_s >= exp
-    else
-      _ -> false
+    case JwtPayload.decode(token) do
+      {:ok, %{"exp" => exp}} when is_integer(exp) ->
+        System.system_time(:second) + skew_s >= exp
+
+      _ ->
+        false
     end
   end
 

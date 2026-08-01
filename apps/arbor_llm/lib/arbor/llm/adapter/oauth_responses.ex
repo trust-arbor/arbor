@@ -57,8 +57,12 @@ defmodule Arbor.LLM.Adapter.OAuthResponses do
         |> maybe_put_opt(:model, model_id(request.model))
 
       case OAuth.Responses.complete(route, req, response_opts) do
-        {:ok, %{text: text, tool_calls: tool_calls}} ->
-          Boundary.completion({:ok, build_response(text, tool_calls)}, opts)
+        {:ok,
+         %{text: text, tool_calls: tool_calls, usage: usage, provider_receipt: provider_receipt}} ->
+          Boundary.completion(
+            {:ok, build_response(text, tool_calls, usage, provider_receipt)},
+            opts
+          )
 
         {:error, reason} ->
           {:error, reason}
@@ -68,13 +72,20 @@ defmodule Arbor.LLM.Adapter.OAuthResponses do
 
   # ── Response: tool_call parts FIRST, then text; finish_reason gates the ToolLoop ──
 
-  defp build_response(text, tool_calls) do
+  defp build_response(text, tool_calls, usage, provider_receipt) do
     tc_parts =
       Enum.map(tool_calls, fn tc -> ContentPart.tool_call(tc.id, tc.name, tc.arguments) end)
 
     text_parts = if is_binary(text) and text != "", do: [ContentPart.text(text)], else: []
     finish = if tool_calls == [], do: :stop, else: :tool_calls
-    %Response{text: text || "", content_parts: tc_parts ++ text_parts, finish_reason: finish}
+
+    %Response{
+      text: text || "",
+      content_parts: tc_parts ++ text_parts,
+      finish_reason: finish,
+      usage: usage || %{},
+      provider_receipt: provider_receipt
+    }
   end
 
   # ── messages → Responses input items (+ hoisted system instructions) ──

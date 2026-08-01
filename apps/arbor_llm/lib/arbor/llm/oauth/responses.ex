@@ -12,7 +12,7 @@ defmodule Arbor.LLM.OAuth.Responses do
   `response.completed` event's `response.output`.
   """
 
-  alias Arbor.LLM.{Deadline, Endpoint, OAuth, ResponseBudget}
+  alias Arbor.LLM.{Deadline, Endpoint, OAuth, Response, ResponseBudget}
   alias Arbor.LLM.OAuth.{CredentialReceipt, ResponsesFailure}
 
   @max_response_bytes 16_777_216
@@ -26,6 +26,16 @@ defmodule Arbor.LLM.OAuth.Responses do
   @max_timeout 900_000
   @max_error_json_bytes 16_384
   @max_error_code_bytes 128
+  @max_terminal_model_bytes 512
+  @max_token_count 1_000_000_000
+  @max_json_safe_integer 9_007_199_254_740_991
+
+  @xai_terminal_usage_fields [
+    "context_details",
+    "cost_in_usd_ticks",
+    "num_server_side_tools_used",
+    "num_sources_used"
+  ]
 
   # The closed set of structured provider error codes that may classify an xAI 403 as
   # subscription tier denial. Matched by EXACT equality on a parsed JSON field — never by
@@ -267,22 +277,29 @@ defmodule Arbor.LLM.OAuth.Responses do
   def parse_sse(raw, opts_or_limits \\ [])
 
   def parse_sse(raw, opts_or_limits) when is_binary(raw) do
+    parse_sse(raw, opts_or_limits, @no_identity)
+  end
+
+  def parse_sse(_raw, _opts_or_limits), do: {:error, :binary_sse_required}
+
+  defp parse_sse(raw, opts_or_limits, identity) when is_binary(raw) do
     with {:ok, limits} <- normalize_limits(opts_or_limits),
          true <-
            byte_size(raw) <= limits.max_response_bytes or
              {:error, {:response_bytes_exceeded, limits.max_response_bytes}},
          true <- String.valid?(raw) or {:error, :valid_utf8_sse_required},
-         {:ok, state} <- parse_sse_lines(raw, new_parser_state(limits)),
+         {:ok, state} <- parse_sse_lines(raw, new_parser_state(limits, identity.backend)),
          {:ok, state} <- finish_sse_event(state) do
       {:ok,
        %{
          text: state.text_chunks |> Enum.reverse() |> IO.iodata_to_binary(),
-         tool_calls: Enum.reverse(state.tool_calls)
+         tool_calls: Enum.reverse(state.tool_calls),
+         provider_model: state.provider_model,
+         usage: state.usage,
+         terminal_seen: state.terminal_seen
        }}
     end
   end
-
-  def parse_sse(_raw, _opts_or_limits), do: {:error, :binary_sse_required}
 
   # Every error escaping this function is a route-aware ResponsesFailure. Granular reasons stay
   # inside parse_sse/2 for its direct callers; they are DISCARDED here rather than wrapped,
@@ -304,10 +321,11 @@ defmodule Arbor.LLM.OAuth.Responses do
 
       {:ok, %Req.Response{status: 200} = response} ->
         with :ok <- identity_content_encoding(response),
-             :ok <- event_stream_content_type(response),
+             :ok <- event_stream_content_type(response, identity),
              {:ok, raw} <- collected_body(response, limits.max_response_bytes),
-             {:ok, parsed} <- parse_sse(raw, limits) do
-          {:ok, parsed}
+             {:ok, parsed} <- parse_sse(raw, limits, identity),
+             {:ok, result} <- stamp_provider_receipt(parsed, identity) do
+          {:ok, result}
         else
           {:error, reason} -> {:error, classify_stream_reason(reason, identity)}
         end
@@ -456,9 +474,10 @@ defmodule Arbor.LLM.OAuth.Responses do
 
   defp collected_body(_response, _maximum), do: {:error, :binary_response_body_required}
 
-  defp new_parser_state(limits) do
+  defp new_parser_state(limits, backend) do
     %{
       limits: limits,
+      backend: backend,
       data_parts: [],
       event_bytes: 0,
       event_count: 0,
@@ -469,7 +488,10 @@ defmodule Arbor.LLM.OAuth.Responses do
       decoded_list_items: 0,
       text_chunks: [],
       text_bytes: 0,
-      tool_calls: []
+      tool_calls: [],
+      provider_model: nil,
+      usage: %{},
+      terminal_seen: false
     }
   end
 
@@ -585,7 +607,317 @@ defmodule Arbor.LLM.OAuth.Responses do
     end
   end
 
+  defp retain_response_event(
+         %{"type" => "response.completed", "response" => response},
+         %{terminal_seen: false} = state
+       )
+       when is_map(response) do
+    with {:ok, provider_model} <- terminal_model(response),
+         {:ok, usage} <- terminal_usage(response, state.backend) do
+      {:ok, %{state | provider_model: provider_model, usage: usage, terminal_seen: true}}
+    end
+  end
+
+  defp retain_response_event(%{"type" => "response.completed"}, %{terminal_seen: true}),
+    do: {:error, :duplicate_terminal_response}
+
+  defp retain_response_event(%{"type" => "response.completed"}, _state),
+    do: {:error, :invalid_terminal_response}
+
   defp retain_response_event(_event, state), do: {:ok, state}
+
+  defp terminal_model(response) do
+    case Map.fetch(response, "model") do
+      :error ->
+        {:ok, nil}
+
+      {:ok, nil} ->
+        {:ok, nil}
+
+      {:ok, model} when is_binary(model) ->
+        if byte_size(model) <= @max_terminal_model_bytes and String.valid?(model) and
+             String.trim(model) == model and String.trim(model) != "" and
+             not String.match?(model, ~r/[\x00-\x1F\x7F]/) do
+          {:ok, model}
+        else
+          {:error, :invalid_terminal_model}
+        end
+
+      {:ok, _model} ->
+        {:error, :invalid_terminal_model}
+    end
+  end
+
+  defp terminal_usage(response, backend) do
+    case Map.fetch(response, "usage") do
+      :error -> {:ok, %{}}
+      {:ok, nil} -> {:ok, %{}}
+      {:ok, usage} -> normalize_terminal_usage(usage, backend)
+    end
+  end
+
+  defp normalize_terminal_usage(usage, _backend) when is_map(usage) and map_size(usage) == 0,
+    do: {:ok, %{}}
+
+  defp normalize_terminal_usage(usage, backend) when is_map(usage) do
+    common_allowed = [
+      "input_tokens",
+      "prompt_tokens",
+      "output_tokens",
+      "completion_tokens",
+      "total_tokens",
+      "input_tokens_details",
+      "prompt_tokens_details",
+      "output_tokens_details",
+      "completion_tokens_details"
+    ]
+
+    allowed =
+      if backend == :xai,
+        do: common_allowed ++ @xai_terminal_usage_fields,
+        else: common_allowed
+
+    keys = Map.keys(usage)
+
+    cond do
+      not Enum.all?(keys, &(is_binary(&1) and &1 in allowed)) ->
+        {:error, :invalid_terminal_usage_keys}
+
+      Map.has_key?(usage, "input_tokens") and Map.has_key?(usage, "prompt_tokens") ->
+        {:error, :ambiguous_terminal_usage}
+
+      Map.has_key?(usage, "output_tokens") and Map.has_key?(usage, "completion_tokens") ->
+        {:error, :ambiguous_terminal_usage}
+
+      Map.has_key?(usage, "input_tokens_details") and
+          Map.has_key?(usage, "prompt_tokens_details") ->
+        {:error, :ambiguous_terminal_usage_details}
+
+      Map.has_key?(usage, "output_tokens_details") and
+          Map.has_key?(usage, "completion_tokens_details") ->
+        {:error, :ambiguous_terminal_usage_details}
+
+      true ->
+        with {:ok, input_tokens} <- terminal_usage_value(usage, ["input_tokens", "prompt_tokens"]),
+             {:ok, output_tokens} <-
+               terminal_usage_value(usage, ["output_tokens", "completion_tokens"]),
+             {:ok, total_tokens} <- terminal_usage_value(usage, ["total_tokens"]),
+             {:ok, cached_tokens} <-
+               terminal_detail_value(
+                 usage,
+                 ["input_tokens_details", "prompt_tokens_details"],
+                 "cached_tokens",
+                 ["cached_tokens", "cache_write_tokens"]
+               ),
+             {:ok, cache_write_tokens} <-
+               terminal_detail_value(
+                 usage,
+                 ["input_tokens_details", "prompt_tokens_details"],
+                 "cache_write_tokens",
+                 ["cached_tokens", "cache_write_tokens"]
+               ),
+             {:ok, reasoning_tokens} <-
+               terminal_detail_value(
+                 usage,
+                 ["output_tokens_details", "completion_tokens_details"],
+                 "reasoning_tokens"
+               ),
+             :ok <- require_complete_terminal_usage(input_tokens, output_tokens, total_tokens),
+             :ok <- consistent_terminal_total(input_tokens, output_tokens, total_tokens),
+             :ok <- bounded_terminal_detail(cached_tokens, input_tokens, :cached_tokens),
+             :ok <-
+               bounded_terminal_detail(
+                 cache_write_tokens,
+                 input_tokens,
+                 :cache_write_tokens
+               ),
+             :ok <- bounded_terminal_detail(reasoning_tokens, output_tokens, :reasoning_tokens),
+             :ok <-
+               validate_xai_terminal_usage_extensions(
+                 usage,
+                 backend,
+                 input_tokens,
+                 output_tokens
+               ) do
+          {:ok,
+           compact_usage(
+             input_tokens,
+             output_tokens,
+             total_tokens,
+             cached_tokens,
+             cache_write_tokens,
+             reasoning_tokens
+           )}
+        end
+    end
+  end
+
+  defp normalize_terminal_usage(_usage, _backend), do: {:error, :invalid_terminal_usage}
+
+  defp validate_xai_terminal_usage_extensions(usage, :xai, input_tokens, output_tokens) do
+    with :ok <- validate_xai_context_details(usage, input_tokens, output_tokens),
+         :ok <- validate_xai_counter(usage, "cost_in_usd_ticks"),
+         :ok <- validate_xai_counter(usage, "num_server_side_tools_used"),
+         :ok <- validate_xai_counter(usage, "num_sources_used") do
+      :ok
+    end
+  end
+
+  defp validate_xai_terminal_usage_extensions(_usage, _backend, _input_tokens, _output_tokens),
+    do: :ok
+
+  defp validate_xai_context_details(usage, input_tokens, output_tokens) do
+    case Map.fetch(usage, "context_details") do
+      :error ->
+        :ok
+
+      {:ok, %{"input_tokens" => ^input_tokens, "output_tokens" => ^output_tokens} = details}
+      when map_size(details) == 2 ->
+        :ok
+
+      {:ok, _details} ->
+        {:error, :invalid_terminal_usage_context_details}
+    end
+  end
+
+  defp validate_xai_counter(usage, key) do
+    case Map.fetch(usage, key) do
+      :error ->
+        :ok
+
+      {:ok, value}
+      when is_integer(value) and value >= 0 and value <= @max_json_safe_integer ->
+        :ok
+
+      {:ok, _value} ->
+        {:error, :invalid_terminal_usage_extension_value}
+    end
+  end
+
+  defp terminal_usage_value(usage, keys) do
+    case Enum.find_value(keys, :missing, fn key ->
+           case Map.fetch(usage, key) do
+             :error -> nil
+             {:ok, value} -> {:ok, value}
+           end
+         end) do
+      :missing ->
+        {:ok, nil}
+
+      {:ok, value} when is_integer(value) and value >= 0 and value <= @max_token_count ->
+        {:ok, value}
+
+      {:ok, _value} ->
+        {:error, :invalid_terminal_usage_value}
+    end
+  end
+
+  defp consistent_terminal_total(input_tokens, output_tokens, total_tokens)
+       when is_integer(input_tokens) and is_integer(output_tokens) and is_integer(total_tokens) do
+    if input_tokens + output_tokens == total_tokens,
+      do: :ok,
+      else: {:error, :inconsistent_terminal_usage_total}
+  end
+
+  defp require_complete_terminal_usage(input_tokens, output_tokens, total_tokens)
+       when is_integer(input_tokens) and is_integer(output_tokens) and is_integer(total_tokens),
+       do: :ok
+
+  defp require_complete_terminal_usage(_input_tokens, _output_tokens, _total_tokens),
+    do: {:error, :incomplete_terminal_usage}
+
+  defp terminal_detail_value(usage, keys, detail_key, allowed_keys \\ nil) do
+    allowed_keys = allowed_keys || [detail_key]
+
+    case Enum.filter(keys, &Map.has_key?(usage, &1)) do
+      [] ->
+        {:ok, nil}
+
+      [key] ->
+        case Map.fetch!(usage, key) do
+          detail when is_map(detail) ->
+            normalize_terminal_detail(detail, detail_key, allowed_keys)
+
+          _ ->
+            {:error, :invalid_terminal_usage_details}
+        end
+
+      _ ->
+        {:error, :ambiguous_terminal_usage_details}
+    end
+  end
+
+  defp normalize_terminal_detail(detail, detail_key, allowed_keys) when is_map(detail) do
+    keys = Map.keys(detail)
+
+    cond do
+      not Enum.all?(keys, &(is_binary(&1) and &1 in allowed_keys)) ->
+        {:error, :invalid_terminal_usage_detail_keys}
+
+      Map.has_key?(detail, detail_key) ->
+        case Map.fetch!(detail, detail_key) do
+          value when is_integer(value) and value >= 0 and value <= @max_token_count ->
+            {:ok, value}
+
+          _ ->
+            {:error, :invalid_terminal_usage_detail_value}
+        end
+
+      true ->
+        {:ok, nil}
+    end
+  end
+
+  defp bounded_terminal_detail(nil, _total, _name), do: :ok
+
+  defp bounded_terminal_detail(value, total, _name)
+       when is_integer(value) and is_integer(total) and value <= total,
+       do: :ok
+
+  defp bounded_terminal_detail(_value, _total, name),
+    do: {:error, {:inconsistent_terminal_usage_detail, name}}
+
+  defp compact_usage(
+         input_tokens,
+         output_tokens,
+         total_tokens,
+         cached_tokens,
+         cache_write_tokens,
+         reasoning_tokens
+       ) do
+    %{}
+    |> maybe_put_usage(:input_tokens, input_tokens)
+    |> maybe_put_usage(:output_tokens, output_tokens)
+    |> maybe_put_usage(:total_tokens, total_tokens)
+    |> maybe_put_usage(:cached_tokens, cached_tokens)
+    |> maybe_put_usage(:cache_write_tokens, cache_write_tokens)
+    |> maybe_put_usage(:reasoning_tokens, reasoning_tokens)
+  end
+
+  defp maybe_put_usage(usage, _key, nil), do: usage
+  defp maybe_put_usage(usage, key, value), do: Map.put(usage, key, value)
+
+  defp stamp_provider_receipt(%{terminal_seen: true} = parsed, %{backend: backend})
+       when backend in [:openai, :xai] do
+    with {:ok, receipt} <-
+           Response.ProviderReceipt.new(%{
+             backend: backend,
+             reported_model: parsed.provider_model,
+             usage: parsed.usage
+           }) do
+      {:ok, public_complete_result(parsed, receipt)}
+    end
+  end
+
+  defp stamp_provider_receipt(parsed, _identity) do
+    {:ok, public_complete_result(parsed, nil)}
+  end
+
+  defp public_complete_result(parsed, provider_receipt) do
+    parsed
+    |> Map.take([:text, :tool_calls, :usage])
+    |> Map.put(:provider_receipt, provider_receipt)
+  end
 
   defp tool_call_from_item(item) do
     id = item["call_id"] || item["id"]
@@ -801,8 +1133,14 @@ defmodule Arbor.LLM.OAuth.Responses do
     end
   end
 
-  defp event_stream_content_type(response) do
+  defp event_stream_content_type(response, identity) do
     case Req.Response.get_header(response, "content-type") do
+      # The Codex subscription endpoint currently omits Content-Type on a valid
+      # 200 SSE response. Keep this exception backend-scoped: xAI and every
+      # unbound request still require an explicit event-stream declaration.
+      [] when identity.backend == :openai ->
+        :ok
+
       [value] ->
         media_type =
           value |> String.split(";", parts: 2) |> hd() |> String.trim() |> String.downcase()

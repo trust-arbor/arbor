@@ -11,6 +11,7 @@ defmodule Arbor.AI.RouteFailureAndRecordTest do
   @now ~U[2026-07-22 22:00:00Z]
 
   setup do
+    Arbor.AI.TestSupport.ProviderRouteEvidence.reset!()
     RouteFailureStore.clear_sync(:openai_oauth)
     RouteFailureStore.clear_sync(:xai_oauth)
     QuotaTracker.clear_sync(:openai_oauth)
@@ -475,7 +476,7 @@ defmodule Arbor.AI.RouteFailureAndRecordTest do
     refute by_provider["openai_oauth"].subscription_capacity_state == "exhausted"
   end
 
-  test "security regression: default assembly fails closed when route-failure reader is unavailable" do
+  test "security regression: strict assembly ignores unavailable legacy route-failure mirror" do
     assert is_pid(Process.whereis(RouteFailureStore))
 
     # Deterministic: terminate supervised child without auto-restart until restart_child.
@@ -499,7 +500,7 @@ defmodule Arbor.AI.RouteFailureAndRecordTest do
       model = model_entry("m1", :openai_oauth)
 
       # Production default observation_reader (no injected evidence readers).
-      assert {:error, {:route_assembly_failed, :route_failure_evidence_unavailable}} =
+      assert {:ok, _input} =
                RouteInputAssembler.assemble(
                  profile: enabled_profile([model]),
                  clock: fn -> @now end,
@@ -514,7 +515,7 @@ defmodule Arbor.AI.RouteFailureAndRecordTest do
     end
   end
 
-  test "security regression: default assembly fails closed on malformed current store state" do
+  test "security regression: strict assembly ignores malformed legacy route-failure mirror" do
     pid = Process.whereis(RouteFailureStore)
     assert is_pid(pid)
 
@@ -544,7 +545,7 @@ defmodule Arbor.AI.RouteFailureAndRecordTest do
 
       model = model_entry("m1", :openai_oauth)
 
-      assert {:error, {:route_assembly_failed, :route_failure_evidence_malformed}} =
+      assert {:ok, _input} =
                RouteInputAssembler.assemble(
                  profile: enabled_profile([model]),
                  clock: fn -> @now end,
@@ -560,7 +561,7 @@ defmodule Arbor.AI.RouteFailureAndRecordTest do
     end
   end
 
-  test "security regression: cleanup cannot erase corrupt required evidence into a clean route" do
+  test "security regression: cleanup cannot erase corrupt legacy evidence, and strict assembly uses durable evidence" do
     pid = Process.whereis(RouteFailureStore)
     assert is_pid(pid)
     now = DateTime.utc_now()
@@ -594,7 +595,7 @@ defmodule Arbor.AI.RouteFailureAndRecordTest do
 
       model = model_entry("m1", :openai_oauth)
 
-      assert {:error, {:route_assembly_failed, :route_failure_evidence_malformed}} =
+      assert {:ok, _input} =
                RouteInputAssembler.assemble(
                  profile: enabled_profile([model]),
                  clock: fn -> @now end,
@@ -696,7 +697,7 @@ defmodule Arbor.AI.RouteFailureAndRecordTest do
     refute Map.has_key?(failures, "xai_oauth")
   end
 
-  test "write failure propagates when route-failure store is unavailable" do
+  test "durable write succeeds when the legacy route-failure mirror is unavailable" do
     assert is_pid(Process.whereis(RouteFailureStore))
     assert :ok = Supervisor.terminate_child(Arbor.AI.Supervisor, RouteFailureStore)
     assert Process.whereis(RouteFailureStore) == nil
@@ -712,12 +713,65 @@ defmodule Arbor.AI.RouteFailureAndRecordTest do
           )
         )
 
-      assert {:error, :route_failure_write_failed} = AI.record_classified_llm_failure(info)
-      # Public write boundary fails; store remains supervised-down (no lazy start).
+      assert {:ok, :recorded} = AI.record_classified_llm_failure(info)
+      # The durable authority is authoritative; the legacy mirror remains down.
       assert Process.whereis(RouteFailureStore) == nil
     after
       ensure_route_failure_store_running()
     end
+  end
+
+  test "security regression: strict assembly cannot fall back to populated legacy stores" do
+    RouteFailureStore.put_sync(
+      route: :openai_oauth,
+      class: :auth,
+      code: "unauthorized",
+      retryable: false,
+      retry_after_ms: 60_000
+    )
+
+    QuotaTracker.mark_quota_exhausted_sync(
+      :openai_oauth,
+      until: DateTime.add(DateTime.utc_now(), 60, :second)
+    )
+
+    assert pid = Process.whereis(Arbor.AI.ProviderRouteEvidence)
+    GenServer.stop(pid)
+    assert Process.whereis(Arbor.AI.ProviderRouteEvidence) == nil
+    assert {:error, :unavailable} = Arbor.AI.ProviderRouteEvidence.snapshot_status(now: @now)
+    assert {:error, :unavailable} = Arbor.AI.provider_route_quota_evidence_snapshot(now: @now)
+
+    model = model_entry("m1", :openai_oauth)
+
+    assert {:error, {:route_assembly_failed, :route_failure_evidence_unavailable}} =
+             RouteInputAssembler.assemble(
+               profile: enabled_profile([model]),
+               clock: fn -> @now end,
+               budget_reader: fn providers, dt -> {:ok, Enum.map(providers, &budget(&1, dt))} end
+             )
+  end
+
+  test "security regression: strict assembly surfaces malformed quota evidence distinctly" do
+    pid = Process.whereis(Arbor.AI.ProviderRouteEvidence)
+    assert is_pid(pid)
+
+    :sys.replace_state(pid, fn authority ->
+      core = authority.state.core
+      malformed_core = %{core | quotas: %{"openai_oauth" => %{"route" => "openai_oauth"}}}
+      %{authority | state: %{authority.state | core: malformed_core}}
+    end)
+
+    assert {:ok, %{}} = Arbor.AI.provider_route_failure_evidence_snapshot(now: @now)
+    assert {:error, :malformed} = Arbor.AI.provider_route_quota_evidence_snapshot(now: @now)
+
+    model = model_entry("m1", :openai_oauth)
+
+    assert {:error, {:route_assembly_failed, :quota_evidence_malformed}} =
+             RouteInputAssembler.assemble(
+               profile: enabled_profile([model]),
+               clock: fn -> @now end,
+               budget_reader: fn providers, dt -> {:ok, Enum.map(providers, &budget(&1, dt))} end
+             )
   end
 
   test "oauth_route exact table used by health observation helper" do

@@ -18,8 +18,12 @@ defmodule Arbor.AI.Application do
           [
             Arbor.AI.QuotaTracker,
             Arbor.AI.RouteFailureStore,
+            {Task.Supervisor, name: Arbor.AI.ProviderRouteEvidence.TaskSupervisor},
+            Arbor.AI.ProviderRouteEvidence,
             # Exact-route OAuth ProviderModelCatalog cache (no network on read).
             Arbor.AI.ProviderModelCatalogStore,
+            {Task.Supervisor, name: Arbor.AI.ProviderRouteReadiness.TaskSupervisor},
+            Arbor.AI.ProviderRouteReadiness,
             # Node-local exact-route concurrency authority (not cluster-global).
             Arbor.AI.RouteConcurrency
           ] ++

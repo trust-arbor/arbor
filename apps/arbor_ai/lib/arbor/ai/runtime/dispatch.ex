@@ -240,8 +240,9 @@ defmodule Arbor.AI.Runtime.Dispatch do
          {:ok, prepared} <- runtime_module.prepare(rewritten, runtime_opts),
          {:ok, %Response{} = response} <-
            execute_routed_runtime(runtime_module, prepared, callbacks, runtime_opts) do
-      :ok = emit_executed(route, request, attempt.attempt)
-      {:ok, put_executed_route(response, route, attempt.attempt)}
+      provider_confirmed = provider_confirmed?(response, route)
+      :ok = emit_executed(route, request, attempt.attempt, provider_confirmed)
+      {:ok, put_executed_route(response, route, attempt.attempt, provider_confirmed)}
     end
   end
 
@@ -648,7 +649,7 @@ defmodule Arbor.AI.Runtime.Dispatch do
     :ok
   end
 
-  defp emit_executed(route, request, attempt) do
+  defp emit_executed(route, request, attempt, provider_confirmed) do
     metadata = %{
       canonical_id: route.model_entry.canonical_id,
       provider: route.provider.id,
@@ -657,22 +658,54 @@ defmodule Arbor.AI.Runtime.Dispatch do
       request_id: bounded_request_id(request),
       attempt: attempt,
       route_identity: :router_selected,
-      provider_confirmed: false
+      provider_confirmed: provider_confirmed
     }
+
+    metadata =
+      if provider_confirmed do
+        Map.put(metadata, :confirmed_model, route.provider.ref)
+      else
+        metadata
+      end
 
     safe_telemetry([:arbor, :runtime, :executed], %{count: 1}, metadata)
     :ok
   end
 
-  defp put_executed_route(%Response{} = response, route, attempt) do
+  defp put_executed_route(%Response{} = response, route, attempt, provider_confirmed) do
     usage =
       response.usage
       |> normalize_usage_map()
       |> strip_executed_route_aliases()
-      |> Map.put(@executed_route_key, executed_route_evidence(route, attempt))
+      |> Map.put(@executed_route_key, executed_route_evidence(route, attempt, provider_confirmed))
 
     %{response | usage: usage}
   end
+
+  # A provider can report only untrusted evidence. Confirmation is admitted
+  # when the typed receipt agrees exactly with the route selected by Arbor:
+  # the closed backend identity and exact wire provider reference must match.
+  # The canonical model remains separate route metadata. Raw payload and usage
+  # aliases are intentionally ignored.
+  defp provider_confirmed?(
+         %Response{
+           provider_receipt: %Response.ProviderReceipt{
+             backend: backend,
+             reported_model: reported_model
+           }
+         },
+         route
+       )
+       when is_binary(reported_model) do
+    backend == selected_backend(route) and reported_model == route.provider.ref
+  end
+
+  defp provider_confirmed?(_response, _route), do: false
+
+  defp selected_backend(%{provider: %{id: :openai_oauth}}), do: :openai
+  defp selected_backend(%{provider: %{id: :xai_oauth}}), do: :xai
+  defp selected_backend(%{provider: %{id: backend}}) when backend in [:openai, :xai], do: backend
+  defp selected_backend(_route), do: nil
 
   defp normalize_usage_map(usage) when is_map(usage) and not is_struct(usage), do: usage
   defp normalize_usage_map(_), do: %{}
@@ -683,17 +716,24 @@ defmodule Arbor.AI.Runtime.Dispatch do
 
   defp strip_executed_route_aliases(_usage), do: %{}
 
-  # Closed seven-field canonical route owned by Dispatch (not the provider).
-  defp executed_route_evidence(route, attempt) do
-    %{
+  # Closed route evidence owned by Dispatch (not the provider). Confirmed
+  # evidence adds one exact model field to the legacy seven-field false form.
+  defp executed_route_evidence(route, attempt, provider_confirmed) do
+    evidence = %{
       "provider" => Atom.to_string(route.provider.id),
       "provider_ref" => route.provider.ref,
       "model" => route.model_entry.canonical_id,
       "runtime" => Atom.to_string(route.runtime),
       "attempt" => attempt_string(attempt),
       "route_identity" => "router_selected",
-      "provider_confirmed" => false
+      "provider_confirmed" => provider_confirmed
     }
+
+    if provider_confirmed do
+      Map.put(evidence, "confirmed_model", route.provider.ref)
+    else
+      evidence
+    end
   end
 
   defp attempt_string(:primary), do: "primary"

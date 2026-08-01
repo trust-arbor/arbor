@@ -80,11 +80,11 @@ defmodule Arbor.LLM.Conformance84Test do
                 {[%StreamEvent{type: :start, data: %{}}], 1}
 
               1 ->
-                Process.sleep(40)
+                Process.sleep(200)
                 {[%StreamEvent{type: :delta, data: %{"text" => "hi"}}], 2}
 
               2 ->
-                Process.sleep(40)
+                Process.sleep(200)
                 {[%StreamEvent{type: :finish, data: %{"reason" => :stop}}], 3}
 
               _ ->
@@ -392,7 +392,7 @@ defmodule Arbor.LLM.Conformance84Test do
                client: client,
                model: "slow-event-stream",
                prompt: "hello",
-               stream_read_timeout_ms: 5
+               stream_read_timeout_ms: 100
              )
 
     assert_raise RequestTimeoutError, fn -> Enum.to_list(stream) end

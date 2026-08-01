@@ -505,6 +505,32 @@ defmodule Arbor.AI.Runtime.DispatchTest do
                 %{input_tokens: 1, output_tokens: 1}
               end
 
+            provider_receipt =
+              case Application.get_env(:arbor_ai, :_test_router_provider_receipt) do
+                %{backend: backend, reported_model: reported_model} ->
+                  %Arbor.LLM.Response.ProviderReceipt{
+                    backend: backend,
+                    reported_model: reported_model,
+                    usage: usage
+                  }
+
+                _ ->
+                  nil
+              end
+
+            raw = %{
+              provider: request.provider,
+              model: request.model,
+              runtime: request.runtime
+            }
+
+            raw =
+              if Application.get_env(:arbor_ai, :_test_router_spoof_executed_route) do
+                Map.put(raw, "provider_confirmed", true)
+              else
+                raw
+              end
+
             case Application.get_env(:arbor_ai, :_test_router_non_response_ok) do
               true ->
                 {:ok, %{not: "an Arbor.LLM.Response"}}
@@ -515,11 +541,8 @@ defmodule Arbor.AI.Runtime.DispatchTest do
                    text: "router success",
                    finish_reason: :stop,
                    usage: usage,
-                   raw: %{
-                     provider: request.provider,
-                     model: request.model,
-                     runtime: request.runtime
-                   }
+                   raw: raw,
+                   provider_receipt: provider_receipt
                  }}
             end
         end
@@ -640,7 +663,9 @@ defmodule Arbor.AI.Runtime.DispatchTest do
          name: concurrency_name,
          limits: %{
            provider_a: %{arbor: 32, acp: 32},
-           provider_b: %{arbor: 32, acp: 32}
+           provider_b: %{arbor: 32, acp: 32},
+           openai_oauth: %{arbor: 32},
+           xai_oauth: %{arbor: 32}
          }}
       )
 
@@ -651,6 +676,7 @@ defmodule Arbor.AI.Runtime.DispatchTest do
         Application.delete_env(:arbor_ai, :_test_router_pid)
         Application.delete_env(:arbor_ai, :_test_router_fail_model)
         Application.delete_env(:arbor_ai, :_test_router_spoof_executed_route)
+        Application.delete_env(:arbor_ai, :_test_router_provider_receipt)
         Application.delete_env(:arbor_ai, :_test_router_non_response_ok)
         Process.delete(:route_concurrency_server)
       end)
@@ -920,6 +946,7 @@ defmodule Arbor.AI.Runtime.DispatchTest do
       assert metadata.attempt == :primary
       assert metadata.route_identity == :router_selected
       assert metadata.provider_confirmed == false
+      refute Map.has_key?(metadata, :confirmed_model)
 
       executed = response.usage["arbor.executed_route"]
       assert executed["provider"] == "provider_a"
@@ -933,7 +960,79 @@ defmodule Arbor.AI.Runtime.DispatchTest do
       refute is_map(response.raw) and Map.has_key?(response.raw, "arbor.executed_route")
     end
 
-    test "overwrites provider-supplied arbor.executed_route on usage after exact success" do
+    test "exact OAuth receipt confirms the selected backend and preserves the typed receipt" do
+      handler_id = "router-confirmed-#{System.unique_integer([:positive])}"
+      test_pid = self()
+
+      :telemetry.attach(
+        handler_id,
+        [:arbor, :runtime, :executed],
+        fn event, measurements, metadata, _config ->
+          send(test_pid, {:telemetry, event, measurements, metadata})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      for {provider, backend, canonical_model, wire_model} <- [
+            {:openai_oauth, :openai, "gpt-canonical", "gpt-5.6-sol"},
+            {:xai_oauth, :xai, "grok-canonical", "grok-4.5"}
+          ] do
+        route = route_model(canonical_model, provider, wire_model, :arbor)
+
+        Application.put_env(:arbor_ai, :_test_router_provider_receipt, %{
+          backend: backend,
+          reported_model: wire_model
+        })
+
+        assert {:ok, response} =
+                 router_dispatch(build_request("ignored"),
+                   provider_route_input: provider_route_input([route]),
+                   route_authorizer: fn _ -> :allow end
+                 )
+
+        assert %Arbor.LLM.Response.ProviderReceipt{
+                 backend: ^backend,
+                 reported_model: ^wire_model
+               } = response.provider_receipt
+
+        assert response.usage["arbor.executed_route"]["provider_confirmed"] == true
+        assert response.usage["arbor.executed_route"]["model"] == canonical_model
+        assert response.usage["arbor.executed_route"]["provider_ref"] == wire_model
+        assert response.usage["arbor.executed_route"]["confirmed_model"] == wire_model
+        assert_receive {:telemetry, [:arbor, :runtime, :executed], %{count: 1}, metadata}
+        assert metadata.provider_confirmed == true
+        assert metadata.confirmed_model == wire_model
+        Application.delete_env(:arbor_ai, :_test_router_provider_receipt)
+      end
+    end
+
+    test "security regression: backend, provider ref, and model mismatches never confirm" do
+      cases = [
+        {:wrong_backend, route_model("gpt-5.6-sol", :openai_oauth, "gpt-5.6-sol", :arbor),
+         %{backend: :xai, reported_model: "gpt-5.6-sol"}},
+        {:wrong_provider_ref, route_model("gpt-5.6-sol", :openai_oauth, "wire-gpt", :arbor),
+         %{backend: :openai, reported_model: "gpt-5.6-sol"}},
+        {:wrong_model, route_model("gpt-5.6-sol", :openai_oauth, "gpt-5.6-sol", :arbor),
+         %{backend: :openai, reported_model: "gpt-5.6-other"}}
+      ]
+
+      Enum.each(cases, fn {_name, route, receipt} ->
+        Application.put_env(:arbor_ai, :_test_router_provider_receipt, receipt)
+
+        assert {:ok, response} =
+                 router_dispatch(build_request("ignored"),
+                   provider_route_input: provider_route_input([route]),
+                   route_authorizer: fn _ -> :allow end
+                 )
+
+        assert response.usage["arbor.executed_route"]["provider_confirmed"] == false
+        Application.delete_env(:arbor_ai, :_test_router_provider_receipt)
+      end)
+    end
+
+    test "security regression: raw and usage aliases cannot author provider confirmation" do
       primary = route_model("primary", :provider_a, "wire-primary", :arbor)
       Application.put_env(:arbor_ai, :_test_router_spoof_executed_route, true)
 
@@ -948,7 +1047,10 @@ defmodule Arbor.AI.Runtime.DispatchTest do
       executed = response.usage["arbor.executed_route"]
       assert executed["provider"] == "provider_a"
       assert executed["model"] == "primary"
+      assert executed["provider_confirmed"] == false
       refute executed["provider"] == "attacker"
+      assert response.raw["provider_confirmed"] == true
+      assert response.provider_receipt == nil
     end
 
     test "fallback success writes executed_route for the fallback attempt" do
@@ -1084,8 +1186,7 @@ defmodule Arbor.AI.Runtime.DispatchTest do
       concurrency_name = :"same_route_rc_#{System.unique_integer([:positive])}"
 
       start_supervised!(
-        {Arbor.AI.RouteConcurrency,
-         name: concurrency_name, limits: %{provider_a: %{arbor: 1}}}
+        {Arbor.AI.RouteConcurrency, name: concurrency_name, limits: %{provider_a: %{arbor: 1}}}
       )
 
       primary = route_model("primary", :provider_a, "wire-primary", :arbor)

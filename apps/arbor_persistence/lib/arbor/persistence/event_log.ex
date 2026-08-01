@@ -22,6 +22,7 @@ defmodule Arbor.Persistence.EventLog do
   """
 
   alias Arbor.Contracts.Persistence.AppendOperation
+  alias Arbor.Contracts.Persistence.Store
   alias Arbor.Persistence.Event
 
   @max_string_bytes 255
@@ -172,13 +173,22 @@ defmodule Arbor.Persistence.EventLog do
   @callback read_agent_events(agent_id :: String.t(), opts()) ::
               {:ok, [Event.t()]} | {:error, term()}
 
+  @doc """
+  Return this EventLog's code-owned durability class.
+
+  This value describes backend-owned durability semantics and is not configurable by
+  callers or through options passed to this callback.
+  """
+  @callback durability_class(opts()) :: Store.durability_class()
+
   @optional_callbacks [
     reconcile_append: 2,
     subscribe: 3,
     list_streams: 1,
     stream_count: 1,
     event_count: 1,
-    read_agent_events: 2
+    read_agent_events: 2,
+    durability_class: 1
   ]
 
   @doc false

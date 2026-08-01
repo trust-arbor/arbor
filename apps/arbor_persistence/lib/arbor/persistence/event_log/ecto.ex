@@ -185,6 +185,9 @@ defmodule Arbor.Persistence.EventLog.Ecto do
     end
   end
 
+  @impl true
+  def durability_class(_opts), do: :node_restart
+
   @impl Arbor.Persistence.EventLog
   def reconcile_append(operation, opts) do
     EventLog.with_operation_deadline(opts, fn normalized_opts, deadline_mono ->

@@ -502,6 +502,32 @@ defmodule Arbor.LLM.Eval.SubjectTest do
       assert message =~ "Available:"
     end
 
+    test "security regression: non-ready exact OAuth route fails before transport" do
+      previous = Application.fetch_env(:arbor_llm, :oauth_store_dir)
+
+      store_dir =
+        Path.join(
+          System.tmp_dir!(),
+          "arbor-eval-subject-oauth-#{System.unique_integer([:positive])}"
+        )
+
+      File.mkdir_p!(store_dir)
+      Application.put_env(:arbor_llm, :oauth_store_dir, store_dir)
+
+      on_exit(fn ->
+        case previous do
+          {:ok, value} -> Application.put_env(:arbor_llm, :oauth_store_dir, value)
+          :error -> Application.delete_env(:arbor_llm, :oauth_store_dir)
+        end
+
+        File.rm_rf!(store_dir)
+      end)
+
+      assert Subject.run("hello", provider: "xai_oauth", model: "grok-4.5") ==
+               {:error,
+                {:eval_provider_unavailable, "xai_oauth", {:oauth_status, "login_required"}}}
+    end
+
     test "returns JSON-clean successful output" do
       assert {:ok, output} =
                Subject.run("hello",

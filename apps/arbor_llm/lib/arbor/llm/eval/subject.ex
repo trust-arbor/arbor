@@ -7,7 +7,9 @@ defmodule Arbor.LLM.Eval.Subject do
 
   A concrete `Arbor.LLM.Client` may be supplied with `:client` to select an
   explicitly configured transport for a single eval run. Without one, the
-  provider adapter is selected from `Arbor.LLM.ProviderCatalog`.
+  provider adapter is selected from the ordinary provider catalog or the exact
+  subscription-OAuth route resolver. OAuth routes must be locally ready before
+  transport begins.
 
   `:max_tokens` is forwarded only when the caller supplies a positive signed
   64-bit protocol integer; it remains unset by default.
@@ -24,7 +26,6 @@ defmodule Arbor.LLM.Eval.Subject do
     Client,
     Deadline,
     Message,
-    ProviderCatalog,
     Request,
     ResponseBudget,
     StreamEvent
@@ -193,23 +194,29 @@ defmodule Arbor.LLM.Eval.Subject do
 
   defp resolve_transport(provider, opts) do
     case Keyword.get(opts, :client) do
-      nil -> resolve_catalog_transport(provider)
+      nil -> resolve_default_transport(provider)
       %Client{} = client -> {:ok, {:client, client}}
       _other -> {:error, "invalid client: expected an Arbor.LLM.Client struct"}
     end
   end
 
-  defp resolve_catalog_transport(provider) do
-    case Enum.find(ProviderCatalog.all(), &(&1.provider == provider)) do
-      %{adapter_module: adapter} ->
-        client = Client.new(adapters: %{provider => adapter}, default_provider: provider)
+  defp resolve_default_transport(provider) do
+    case Arbor.LLM.resolve_eval_transport(provider) do
+      {:ok, %{adapter_module: adapter, provider: resolved_provider}} ->
+        client =
+          Client.new(
+            adapters: %{resolved_provider => adapter},
+            default_provider: resolved_provider
+          )
+
         {:ok, {:client, client}}
 
-      nil ->
-        available = ProviderCatalog.available() |> Enum.map(fn {name, _capabilities} -> name end)
-
+      {:error, {:unknown_eval_provider, ^provider, known}} ->
         {:error,
-         "unknown provider: #{provider}. Available: #{Arbor.LLM.ExternalTerm.inspect(available)}"}
+         "unknown provider: #{provider}. Available: #{Arbor.LLM.ExternalTerm.inspect(known)}"}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 

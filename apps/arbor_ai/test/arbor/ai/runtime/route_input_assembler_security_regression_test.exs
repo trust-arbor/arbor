@@ -3,6 +3,7 @@ defmodule Arbor.AI.Runtime.RouteInputAssemblerSecurityRegressionTest do
   use ExUnit.Case, async: false
 
   alias Arbor.AI.Runtime.{ProviderRouter, RouteInputAssembler}
+
   alias Arbor.Contracts.LLM.{
     BudgetSnapshot,
     ModelEntry,
@@ -17,6 +18,11 @@ defmodule Arbor.AI.Runtime.RouteInputAssemblerSecurityRegressionTest do
   @observed "2026-07-29T12:00:00Z"
   @expires "2026-07-29T12:05:00Z"
   @generation 7
+
+  setup do
+    Arbor.AI.TestSupport.ProviderRouteEvidence.reset!()
+    :ok
+  end
 
   test "security regression: OAuth model-a present evidence cannot authorize sibling model-b" do
     # Deterministic ready health + usable catalog containing only model-a.

@@ -228,6 +228,29 @@ defmodule Arbor.Security.OIDC.DiscoveryTest do
       assert endpoints.token_endpoint == "#{issuer}/token"
     end
 
+    test "preserves :both as authorize-and-token discovery" do
+      {issuer, server} =
+        Server.start(fn base ->
+          %{
+            "/.well-known/openid-configuration" =>
+              {:respond, 200, [{"content-type", "application/json"}],
+               Jason.encode!(%{
+                 "issuer" => base,
+                 "authorization_endpoint" => "#{base}/authorize",
+                 "token_endpoint" => "#{base}/token",
+                 "device_authorization_endpoint" => "https://evil.example/device"
+               })}
+          }
+        end)
+
+      on_exit(fn -> Server.stop(server) end)
+
+      assert {:ok, endpoints} = Discovery.discover(issuer, allow_http: true, for: :both)
+      assert endpoints.authorization_endpoint == "#{issuer}/authorize"
+      assert endpoints.token_endpoint == "#{issuer}/token"
+      assert endpoints.device_authorization_endpoint == nil
+    end
+
     test "rejects a cross-origin authorization_endpoint" do
       {issuer, server} =
         Server.start(fn base ->
@@ -245,6 +268,74 @@ defmodule Arbor.Security.OIDC.DiscoveryTest do
 
       assert {:error, {:untrusted_endpoint, :issuer_origin_mismatch}} =
                Discovery.discover(issuer, allow_http: true)
+    end
+
+    test "accepts same-origin device_authorization_endpoint for :device" do
+      {issuer, server} =
+        Server.start(fn base ->
+          %{
+            "/.well-known/openid-configuration" =>
+              {:respond, 200, [{"content-type", "application/json"}],
+               Jason.encode!(%{
+                 "issuer" => base,
+                 "device_authorization_endpoint" => "#{base}/device-authorize",
+                 "token_endpoint" => "#{base}/token"
+               })}
+          }
+        end)
+
+      on_exit(fn -> Server.stop(server) end)
+
+      assert {:ok, endpoints} = Discovery.discover(issuer, allow_http: true, for: :device)
+      assert endpoints.device_authorization_endpoint == "#{issuer}/device-authorize"
+    end
+
+    test "rejects a cross-origin device_authorization_endpoint for :device" do
+      {issuer, server} =
+        Server.start(fn base ->
+          %{
+            "/.well-known/openid-configuration" =>
+              {:respond, 200, [{"content-type", "application/json"}],
+               Jason.encode!(%{
+                 "issuer" => base,
+                 "device_authorization_endpoint" => "https://evil.example/device",
+                 "token_endpoint" => "#{base}/token"
+               })}
+          }
+        end)
+
+      on_exit(fn -> Server.stop(server) end)
+
+      assert {:error, {:untrusted_endpoint, :issuer_origin_mismatch}} =
+               Discovery.discover(issuer, allow_http: true, for: :device)
+    end
+
+    test "operation-scoped discovery enforces only device endpoint for :device" do
+      {issuer, server} =
+        Server.start(
+          fn base ->
+            %{
+              "/.well-known/openid-configuration" =>
+                {:respond, 200, [{"content-type", "application/json"}],
+                 Jason.encode!(%{
+                   "issuer" => base,
+                   "device_authorization_endpoint" => "#{base}/device-authorize",
+                   "token_endpoint" => "/cross-origin-token"
+                 })}
+            }
+          end,
+          connections: 2
+        )
+
+      on_exit(fn -> Server.stop(server) end)
+
+      expected_device = "#{issuer}/device-authorize"
+
+      assert {:ok, %{device_authorization_endpoint: ^expected_device, token_endpoint: nil}} =
+               Discovery.discover(issuer, allow_http: true, for: :device)
+
+      assert {:error, {:untrusted_endpoint, :issuer_origin_mismatch}} =
+               Discovery.discover(issuer, allow_http: true, for: :token)
     end
 
     test "rejects a relative endpoint and a non-binary endpoint" do

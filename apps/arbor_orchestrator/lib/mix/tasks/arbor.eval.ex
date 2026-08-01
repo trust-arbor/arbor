@@ -273,32 +273,57 @@ defmodule Mix.Tasks.Arbor.Eval do
 
           duration_ms = System.monotonic_time(:millisecond) - start_time
 
-          metrics = compute_metrics(results, graders)
+          case infrastructure_failure(results) do
+            nil ->
+              metrics = compute_metrics(results, graders)
 
-          # Complete run
-          Persistence.complete_eval_run(run_id, metrics, length(results), duration_ms)
+              # Complete run
+              Persistence.complete_eval_run(run_id, metrics, length(results), duration_ms)
 
-          # Persist individual results
-          persist_results(run_id, model, results)
+              # Persist individual results
+              persist_results(run_id, model, results)
 
-          # Also save to JSON file store for backwards compat
-          save_to_runstore(run_id, model, provider, dataset, graders, metrics, results)
+              # Also save to JSON file store for backwards compat
+              save_to_runstore(run_id, model, provider, dataset, graders, metrics, results)
 
-          # Save raw outputs to files for LLM-as-judge evaluation
-          if save_outputs do
-            save_model_outputs(model, domain, results)
+              # Save raw outputs to files for LLM-as-judge evaluation
+              if save_outputs do
+                save_model_outputs(model, domain, results)
+              end
+
+              pass_count = Enum.count(results, & &1.passed)
+              n = length(results)
+
+              Mix.shell().info(
+                "  TOTALS: pass=#{pass_count}/#{n} (#{Float.round(pass_count / max(n, 1) * 100, 1)}%)"
+              )
+
+              Mix.shell().info("  Saved as #{run_id}\n")
+
+              metrics
+
+            failure ->
+              case Persistence.fail_eval_run(run_id, failure) do
+                :ok ->
+                  :ok
+
+                {:ok, _run} ->
+                  :ok
+
+                {:error, reason} ->
+                  Mix.raise(
+                    "Eval run #{run_id} hit provider infrastructure failure and could not " <>
+                      "be terminalized: #{Arbor.LLM.ExternalTerm.inspect(reason)}"
+                  )
+              end
+
+              persist_results(run_id, model, results)
+
+              Mix.raise(
+                "Eval run #{run_id} failed due to provider infrastructure: #{failure}. " <>
+                  "No model-quality metrics were published."
+              )
           end
-
-          pass_count = Enum.count(results, & &1.passed)
-          n = length(results)
-
-          Mix.shell().info(
-            "  TOTALS: pass=#{pass_count}/#{n} (#{Float.round(pass_count / max(n, 1) * 100, 1)}%)"
-          )
-
-          Mix.shell().info("  Saved as #{run_id}\n")
-
-          metrics
         end
 
       # Print cross-run statistics if multiple runs
@@ -380,10 +405,26 @@ defmodule Mix.Tasks.Arbor.Eval do
         scores: result.scores_map,
         duration_ms: result.duration_ms,
         ttft_ms: result.ttft_ms,
-        tokens_generated: result.tokens_generated
+        tokens_generated: result.tokens_generated,
+        metadata: infrastructure_metadata(result.infrastructure_error)
       })
     end)
   end
+
+  defp infrastructure_metadata(nil), do: %{}
+
+  defp infrastructure_metadata(failure),
+    do: %{"infrastructure_error" => failure}
+
+  @doc false
+  def infrastructure_failure(results) when is_list(results) do
+    Enum.find_value(results, fn
+      %{infrastructure_error: failure} when is_binary(failure) and failure != "" -> failure
+      _result -> nil
+    end)
+  end
+
+  def infrastructure_failure(_results), do: "invalid eval result collection"
 
   defp save_model_outputs(model, domain, results) do
     slug = model |> String.replace(~r/[:\/.]+/, "-")
@@ -524,13 +565,29 @@ defmodule Mix.Tasks.Arbor.Eval do
                }}
 
             {:error, reason} ->
-              Mix.shell().info("    ERROR: #{inspect(reason)}")
-              {"", %{duration_ms: 0, ttft_ms: nil, tokens_generated: nil}}
+              failure = Arbor.LLM.ExternalTerm.inspect(reason)
+              Mix.shell().info("    INFRASTRUCTURE ERROR: #{failure}")
+
+              {"",
+               %{
+                 duration_ms: 0,
+                 ttft_ms: nil,
+                 tokens_generated: nil,
+                 infrastructure_error: failure
+               }}
           end
         rescue
           e ->
-            Mix.shell().info("    CRASH: #{Exception.message(e)}")
-            {"", %{duration_ms: 0, ttft_ms: nil, tokens_generated: nil}}
+            failure = Arbor.LLM.ExternalTerm.inspect({:subject_exception, e})
+            Mix.shell().info("    INFRASTRUCTURE CRASH: #{failure}")
+
+            {"",
+             %{
+               duration_ms: 0,
+               ttft_ms: nil,
+               tokens_generated: nil,
+               infrastructure_error: failure
+             }}
         end
 
       # Pass sample input to graders (for intent conformance judging)
@@ -579,7 +636,8 @@ defmodule Mix.Tasks.Arbor.Eval do
         scores_map: scores_map,
         duration_ms: timing.duration_ms,
         ttft_ms: timing.ttft_ms,
-        tokens_generated: timing.tokens_generated
+        tokens_generated: timing.tokens_generated,
+        infrastructure_error: timing[:infrastructure_error]
       }
     end)
   end
@@ -811,43 +869,41 @@ defmodule Mix.Tasks.Arbor.Eval do
   # longitudinal eval store with infrastructure failures recorded as model
   # quality. (2026-06-11: three such garbage runs persisted during the
   # trinity-replacement bake-off before this guard existed.)
-  defp preflight_provider!(provider, opts) do
-    catalog = Arbor.LLM.ProviderCatalog.all(opts)
-
-    case Enum.find(catalog, fn entry -> entry.provider == provider end) do
-      nil ->
-        available = catalog |> Enum.map(& &1.provider) |> Enum.sort()
-
-        Mix.raise("""
-        Unknown provider: #{inspect(provider)}
-        Known providers: #{inspect(available)}
-        If a cloud provider is missing entirely, the LLM layer may not have started
-        (this task starts :arbor_llm — check for startup errors above).
-        """)
-
-      %{available?: false} = entry ->
-        hint =
-          case entry do
-            %{contract: %{env_vars: [_ | _] = keys}} ->
-              "Likely missing credentials — expected env: #{Enum.join(keys, ", ")}"
-
-            _ ->
-              "Provider known but unavailable — run `mix arbor.doctor` for diagnostics."
-          end
-
-        Mix.raise("""
-        Provider #{inspect(provider)} is known but NOT currently available.
-        #{hint}
-        Refusing to run: results would persist as 0.0 scores and poison the eval store.
-        """)
-
-      _available ->
+  @doc false
+  def preflight_provider(provider, opts \\ []) do
+    case Arbor.LLM.preflight_eval_provider(provider, opts) do
+      :ok ->
         :ok
+
+      {:error, {:unknown_eval_provider, ^provider, known}} ->
+        {:error,
+         "Unknown provider: #{inspect(provider)}\nKnown providers: #{inspect(known)}\n" <>
+           "If a cloud provider is missing entirely, the LLM layer may not have started."}
+
+      {:error, {:eval_provider_unavailable, ^provider, {:oauth_status, status}}} ->
+        {:error,
+         "OAuth provider #{inspect(provider)} is not ready (status: #{status}).\n" <>
+           "Complete provider login before running the eval; no EvalRun was created."}
+
+      {:error, {:eval_provider_unavailable, ^provider, _reason}} ->
+        {:error,
+         "Provider #{inspect(provider)} is known but NOT currently available.\n" <>
+           "Run `mix arbor.doctor` for diagnostics.\n" <>
+           "Refusing to run: results would persist as 0.0 scores and poison the eval store."}
+
+      {:error, reason} ->
+        {:error, "Provider preflight failed: #{Arbor.LLM.ExternalTerm.inspect(reason)}"}
     end
   rescue
-    e in [Mix.Error] -> reraise e, __STACKTRACE__
-    # ProviderCatalog itself failing is the same class — fail loud, not into 0.0s.
-    e -> Mix.raise("Provider preflight failed: #{Exception.message(e)}")
+    exception ->
+      {:error, "Provider preflight failed: #{Exception.message(exception)}"}
+  end
+
+  defp preflight_provider!(provider, opts) do
+    case preflight_provider(provider, opts) do
+      :ok -> :ok
+      {:error, message} -> Mix.raise(message)
+    end
   end
 
   defp maybe_filter(filters, _key, nil), do: filters

@@ -4,6 +4,7 @@ defmodule Arbor.LLM.OAuth.ResponsesTest do
   @moduletag :fast
 
   alias Arbor.LLM.OAuth.{Responses, ResponsesFailure}
+  alias Arbor.LLM.{Message, Request, Response}
 
   @env_keys [
     :oauth_store_dir,
@@ -96,6 +97,417 @@ defmodule Arbor.LLM.OAuth.ResponsesTest do
                 %{id: "call-1", name: "lookup", arguments: %{"q" => "complete"}}
               ]
             }} = Responses.parse_sse(raw)
+  end
+
+  test "OpenAI and xAI terminal responses expose bounded model and usage evidence", %{
+    store_dir: store_dir
+  } do
+    write_store_json(store_dir, "openai.json", oauth_store("openai", "openai-receipt-token"))
+    write_store_json(store_dir, "xai.json", oauth_store("xai", "xai-receipt-token"))
+
+    {openai_url, openai_server} =
+      start_request_capture_server(%{
+        "model" => "gpt-5.6-sol",
+        "usage" => %{
+          "input_tokens" => 10,
+          "output_tokens" => 5,
+          "total_tokens" => 15,
+          "input_tokens_details" => %{"cached_tokens" => 2},
+          "output_tokens_details" => %{"reasoning_tokens" => 3}
+        },
+        "backend" => "xai"
+      })
+
+    configure_responses_endpoint!(%{openai: openai_url})
+
+    assert {:ok,
+            openai_result = %{
+              provider_receipt: %Response.ProviderReceipt{
+                backend: :openai,
+                reported_model: "gpt-5.6-sol",
+                usage: %{
+                  input_tokens: 10,
+                  output_tokens: 5,
+                  total_tokens: 15,
+                  cached_tokens: 2,
+                  reasoning_tokens: 3
+                }
+              },
+              usage: %{
+                input_tokens: 10,
+                output_tokens: 5,
+                total_tokens: 15,
+                cached_tokens: 2,
+                reasoning_tokens: 3
+              }
+            }} = Responses.complete(:openai, empty_request(), receive_timeout: 1_000)
+
+    refute Map.has_key?(openai_result, :terminal_seen)
+
+    assert %{request: _, body: _} = Task.await(openai_server, 2_000)
+
+    {xai_url, xai_server} =
+      start_request_capture_server(%{
+        "model" => "grok-4.5",
+        "usage" => %{
+          "input_tokens" => 3,
+          "output_tokens" => 2,
+          "total_tokens" => 5,
+          "input_tokens_details" => %{"cached_tokens" => 1},
+          "output_tokens_details" => %{"reasoning_tokens" => 1},
+          "context_details" => %{"input_tokens" => 3, "output_tokens" => 2},
+          "cost_in_usd_ticks" => 3_244_000,
+          "num_server_side_tools_used" => 0,
+          "num_sources_used" => 0
+        }
+      })
+
+    configure_responses_endpoint!(%{xai: xai_url})
+
+    assert {:ok,
+            %{
+              provider_receipt: %Response.ProviderReceipt{
+                backend: :xai,
+                reported_model: "grok-4.5",
+                usage: %{
+                  input_tokens: 3,
+                  output_tokens: 2,
+                  total_tokens: 5,
+                  cached_tokens: 1,
+                  reasoning_tokens: 1
+                }
+              },
+              usage: %{
+                input_tokens: 3,
+                output_tokens: 2,
+                total_tokens: 5,
+                cached_tokens: 1,
+                reasoning_tokens: 1
+              }
+            }} = Responses.complete(:xai, empty_request(), receive_timeout: 1_000)
+
+    assert %{request: _, body: _} = Task.await(xai_server, 2_000)
+  end
+
+  test "security regression: xAI accounting extensions are backend-scoped and validated", %{
+    store_dir: store_dir
+  } do
+    write_store_json(store_dir, "openai.json", oauth_store("openai", "openai-token"))
+    write_store_json(store_dir, "xai.json", oauth_store("xai", "xai-token"))
+
+    terminal = %{
+      "model" => "grok-4.5",
+      "usage" => %{
+        "input_tokens" => 3,
+        "output_tokens" => 2,
+        "total_tokens" => 5,
+        "context_details" => %{"input_tokens" => 3, "output_tokens" => 2},
+        "cost_in_usd_ticks" => 3_244_000,
+        "num_server_side_tools_used" => 0,
+        "num_sources_used" => 0
+      }
+    }
+
+    {xai_url, xai_server} = start_request_capture_server(terminal)
+    configure_responses_endpoint!(%{xai: xai_url})
+
+    assert {:ok, %{usage: %{input_tokens: 3, output_tokens: 2, total_tokens: 5}}} =
+             Responses.complete(:xai, empty_request(), receive_timeout: 1_000)
+
+    assert %{request: _, body: _} = Task.await(xai_server, 2_000)
+
+    {openai_url, openai_server} = start_request_capture_server(terminal)
+    configure_responses_endpoint!(%{openai: openai_url})
+
+    assert {:error,
+            %ResponsesFailure{
+              backend: :openai,
+              class: :protocol,
+              code: :invalid_stream
+            }} = Responses.complete(:openai, empty_request(), receive_timeout: 1_000)
+
+    assert %{request: _, body: _} = Task.await(openai_server, 2_000)
+
+    malformed = put_in(terminal, ["usage", "context_details", "input_tokens"], 4)
+    {malformed_url, malformed_server} = start_request_capture_server(malformed)
+    configure_responses_endpoint!(%{xai: malformed_url})
+
+    assert {:error, %ResponsesFailure{backend: :xai, class: :protocol, code: :invalid_stream}} =
+             Responses.complete(:xai, empty_request(), receive_timeout: 1_000)
+
+    assert %{request: _, body: _} = Task.await(malformed_server, 2_000)
+  end
+
+  test "OpenAI terminal usage preserves its observed cache-write detail" do
+    raw =
+      terminal_sse(%{
+        "model" => "gpt-5.6-sol",
+        "usage" => %{
+          "input_tokens" => 10,
+          "output_tokens" => 5,
+          "total_tokens" => 15,
+          "input_tokens_details" => %{
+            "cached_tokens" => 2,
+            "cache_write_tokens" => 4
+          },
+          "output_tokens_details" => %{"reasoning_tokens" => 3}
+        }
+      })
+
+    assert {:ok,
+            %{
+              usage: %{
+                input_tokens: 10,
+                output_tokens: 5,
+                total_tokens: 15,
+                cached_tokens: 2,
+                cache_write_tokens: 4,
+                reasoning_tokens: 3
+              }
+            }} = Responses.parse_sse(raw)
+  end
+
+  test "terminal response may omit model and usage" do
+    raw = terminal_sse(%{"backend" => "provider-controlled"})
+
+    assert {:ok, %{provider_model: nil, usage: %{}}} = Responses.parse_sse(raw)
+  end
+
+  test "no response.completed event produces no provider receipt", %{store_dir: store_dir} do
+    write_store_json(store_dir, "openai.json", oauth_store("openai", "no-terminal-token"))
+    {url, server} = start_request_capture_server()
+    configure_responses_endpoint!(%{openai: url})
+
+    assert {:ok, result} = Responses.complete(:openai, empty_request(), receive_timeout: 1_000)
+    assert result.provider_receipt == nil
+    assert result.usage == %{}
+    assert Map.keys(result) |> Enum.sort() == [:provider_receipt, :text, :tool_calls, :usage]
+    refute Map.has_key?(result, :terminal_seen)
+
+    assert %{request: _, body: _} = Task.await(server, 2_000)
+  end
+
+  test "terminal usage aliases normalize only when unambiguous" do
+    raw =
+      terminal_sse(%{
+        "usage" => %{
+          "prompt_tokens" => 7,
+          "completion_tokens" => 4,
+          "total_tokens" => 11
+        }
+      })
+
+    assert {:ok, %{usage: %{input_tokens: 7, output_tokens: 4, total_tokens: 11}}} =
+             Responses.parse_sse(raw)
+
+    ambiguous = terminal_sse(%{"usage" => %{"input_tokens" => 7, "prompt_tokens" => 7}})
+
+    assert {:error, {:invalid_responses_event, :ambiguous_terminal_usage}} =
+             Responses.parse_sse(ambiguous)
+
+    detail_alias_ambiguous =
+      terminal_sse(%{
+        "usage" => %{
+          "input_tokens" => 7,
+          "output_tokens" => 4,
+          "total_tokens" => 11,
+          "input_tokens_details" => %{},
+          "prompt_tokens_details" => %{}
+        }
+      })
+
+    assert {:error, {:invalid_responses_event, :ambiguous_terminal_usage_details}} =
+             Responses.parse_sse(detail_alias_ambiguous)
+  end
+
+  test "security regression: terminal model and usage protocol violations fail closed" do
+    invalid_cases = [
+      %{"model" => "   "},
+      %{"model" => " model"},
+      %{"model" => "model "},
+      %{"model" => "model\u0000"},
+      %{"model" => 42},
+      %{"model" => String.duplicate("m", 513)},
+      %{"usage" => %{"input_tokens" => 1, "output_tokens" => 1}},
+      %{
+        "usage" => %{
+          "input_tokens" => 1,
+          "output_tokens" => 1,
+          "total_tokens" => 2,
+          "input_tokens_details" => %{"unknown_tokens" => 1}
+        }
+      },
+      %{
+        "usage" => %{
+          "input_tokens" => 1,
+          "output_tokens" => 1,
+          "total_tokens" => 2,
+          "input_tokens_details" => "not-a-map"
+        }
+      },
+      %{
+        "usage" => %{
+          "input_tokens" => 1,
+          "output_tokens" => 1,
+          "total_tokens" => 2,
+          "input_tokens_details" => %{"cached_tokens" => 2}
+        }
+      },
+      %{
+        "usage" => %{
+          "input_tokens" => 1,
+          "output_tokens" => 1,
+          "total_tokens" => 2,
+          "output_tokens_details" => %{"reasoning_tokens" => 2}
+        }
+      },
+      %{"usage" => %{"input_tokens" => -1}},
+      %{"usage" => %{"output_tokens" => 1_000_000_001}},
+      %{"usage" => %{"input_tokens" => 2, "output_tokens" => 3, "total_tokens" => 4}},
+      %{"usage" => %{"input_tokens_details" => %{"cached_tokens" => 1}}},
+      %{"usage" => [%{"input_tokens" => 1}]}
+    ]
+
+    Enum.each(invalid_cases, fn response ->
+      assert {:error, {:invalid_responses_event, _reason}} =
+               Responses.parse_sse(terminal_sse(response))
+    end)
+  end
+
+  test "security regression: OAuth adapter stamps backend from route, not provider payload", %{
+    store_dir: store_dir
+  } do
+    write_store_json(store_dir, "openai.json", oauth_store("openai", "adapter-token"))
+
+    {url, server} =
+      start_request_capture_server(%{
+        "model" => "provider-model",
+        "backend" => "xai",
+        "provider" => "xai",
+        "usage" => %{"input_tokens" => 1, "output_tokens" => 1, "total_tokens" => 2}
+      })
+
+    configure_responses_endpoint!(%{openai: url})
+
+    request = %Request{
+      provider: "openai_oauth",
+      model: "gpt-5.6-sol",
+      messages: [Message.new(:user, "receipt")]
+    }
+
+    assert {:ok,
+            %Response{
+              provider_receipt: %Response.ProviderReceipt{
+                backend: :openai,
+                reported_model: "provider-model",
+                usage: %{input_tokens: 1, output_tokens: 1, total_tokens: 2}
+              },
+              usage: %{input_tokens: 1, output_tokens: 1, total_tokens: 2}
+            }} = Arbor.LLM.Adapter.OAuthResponses.complete(request, receive_timeout: 1_000)
+
+    assert %{request: _, body: _} = Task.await(server, 2_000)
+  end
+
+  test "Boundary rejects a receipt whose canonical usage differs from Response.usage" do
+    usage = %{input_tokens: 1, output_tokens: 1, total_tokens: 2}
+
+    response = %Response{
+      text: "ok",
+      usage: usage,
+      provider_receipt: %Response.ProviderReceipt{
+        backend: :openai,
+        reported_model: "gpt-5.6-sol",
+        usage: %{input_tokens: 1, output_tokens: 2, total_tokens: 3}
+      }
+    }
+
+    assert {:error, {:invalid_completion_response, :invalid_provider_receipt}} =
+             Arbor.LLM.Boundary.completion({:ok, response})
+  end
+
+  test "Boundary rejects whitespace and control characters in reported models" do
+    usage = %{input_tokens: 1, output_tokens: 1, total_tokens: 2}
+
+    for reported_model <- [" gpt", "gpt ", "gpt\u0000"] do
+      response = %Response{
+        text: "ok",
+        usage: usage,
+        provider_receipt: %Response.ProviderReceipt{
+          backend: :openai,
+          reported_model: reported_model,
+          usage: usage
+        }
+      }
+
+      assert {:error, {:invalid_completion_response, :invalid_provider_receipt}} =
+               Arbor.LLM.Boundary.completion({:ok, response})
+    end
+  end
+
+  test "ProviderReceipt constructor and revalidator enforce canonical closed usage" do
+    usage = %{
+      input_tokens: 10,
+      output_tokens: 5,
+      total_tokens: 15,
+      cached_tokens: 2,
+      cache_write_tokens: 4,
+      reasoning_tokens: 3
+    }
+
+    assert {:ok, receipt} =
+             Response.ProviderReceipt.new(%{
+               backend: :openai,
+               reported_model: "gpt-5.6-sol",
+               usage: usage
+             })
+
+    assert {:ok, ^receipt} = Response.ProviderReceipt.revalidate(receipt)
+
+    invalid = [
+      %{backend: :other, reported_model: "gpt", usage: usage},
+      %{backend: :openai, reported_model: " gpt", usage: usage},
+      %{backend: :openai, reported_model: "gpt", usage: %{input_tokens: 1}},
+      %{backend: :openai, reported_model: "gpt", usage: %{"input_tokens" => 1}},
+      %{
+        backend: :openai,
+        reported_model: "gpt",
+        usage: %{input_tokens: 10, output_tokens: 5, total_tokens: 15, cached_tokens: 11}
+      },
+      %{
+        backend: :openai,
+        reported_model: "gpt",
+        usage: %{
+          input_tokens: 10,
+          output_tokens: 5,
+          total_tokens: 15,
+          cache_write_tokens: 11
+        }
+      },
+      %{
+        backend: :openai,
+        reported_model: "gpt",
+        usage: %{input_tokens: 10, output_tokens: 5, total_tokens: 14}
+      }
+    ]
+
+    Enum.each(invalid, fn attrs ->
+      assert {:error, _reason} = Response.ProviderReceipt.new(attrs)
+    end)
+
+    forged = Map.put(receipt, :unexpected, true)
+
+    assert {:error, :invalid_provider_receipt_fields} =
+             Response.ProviderReceipt.revalidate(forged)
+
+    assert {:error, _reason} =
+             Arbor.LLM.Boundary.completion(
+               {:ok,
+                %Response{
+                  text: "ok",
+                  usage: usage,
+                  provider_receipt: forged
+                }}
+             )
   end
 
   test "terminal function-call arguments must contain complete JSON" do
@@ -216,6 +628,40 @@ defmodule Arbor.LLM.OAuth.ResponsesTest do
     refute inspect(result) =~ token
     assert %{request: request} = Task.await(server, 2_000)
     assert request =~ "authorization: Bearer " <> token
+  end
+
+  test "security regression: only OpenAI admits its observed missing SSE content type" do
+    {openai_url, openai_server} = start_missing_content_type_server()
+
+    assert {:ok, %{text: "openai-no-content-type"}} =
+             Responses.request_sse(
+               openai_url,
+               [],
+               %{},
+               [receive_timeout: 500],
+               %{route: :openai_oauth, backend: :openai}
+             )
+
+    assert :ok = Task.await(openai_server, 2_000)
+
+    {xai_url, xai_server} = start_missing_content_type_server()
+
+    assert {:error,
+            %ResponsesFailure{
+              route: :xai_oauth,
+              backend: :xai,
+              class: :protocol,
+              code: :invalid_response_headers
+            }} =
+             Responses.request_sse(
+               xai_url,
+               [],
+               %{},
+               [receive_timeout: 500],
+               %{route: :xai_oauth, backend: :xai}
+             )
+
+    assert :ok = Task.await(xai_server, 2_000)
   end
 
   test "security regression: OAuth transport failures never return request bearer secrets" do
@@ -591,7 +1037,23 @@ defmodule Arbor.LLM.OAuth.ResponsesTest do
 
   defp sse(event), do: "data: " <> Jason.encode!(event) <> "\n\n"
 
+  defp terminal_sse(response),
+    do: sse(%{"type" => "response.completed", "response" => response})
+
   defp empty_request, do: %{instructions: "", input: [], tools: nil}
+
+  defp oauth_store(provider, access_token) do
+    %{
+      "version" => 1,
+      "provider" => provider,
+      "account_id" => if(provider == "openai", do: "acct-receipt", else: nil),
+      "origin" => "arbor_login",
+      "owner" => "arbor_owned",
+      "source" => "arbor_oauth_store",
+      "generation" => 1,
+      "tokens" => %{"access_token" => access_token, "refresh_token" => "never-used"}
+    }
+  end
 
   defp configure_source_owned_openai!(root, store_dir, access_token, refresh_token) do
     source_path = Path.join(root, "codex-auth.json")
@@ -714,7 +1176,7 @@ defmodule Arbor.LLM.OAuth.ResponsesTest do
     {url, server}
   end
 
-  defp start_request_capture_server do
+  defp start_request_capture_server(terminal_response \\ nil) do
     {listener, url} = listen()
 
     server =
@@ -724,12 +1186,41 @@ defmodule Arbor.LLM.OAuth.ResponsesTest do
         content_length = content_length_from_headers(headers)
         remaining = max(content_length - byte_size(initial_body), 0)
         {:ok, body} = receive_http_body(socket, remaining, initial_body)
-        send_sse_success!(socket, "ok")
+        send_sse_success!(socket, "ok", terminal_response)
         :gen_tcp.close(socket)
         :gen_tcp.close(listener)
         %{request: headers, body: body}
       end)
 
+    {url, server}
+  end
+
+  defp start_missing_content_type_server do
+    {listener, url} = listen()
+
+    server =
+      Task.async(fn ->
+        {socket, _request} = accept_request!(listener)
+
+        body =
+          sse(%{
+            "type" => "response.output_text.delta",
+            "delta" => "openai-no-content-type"
+          }) <> "data: [DONE]\n\n"
+
+        :ok =
+          :gen_tcp.send(
+            socket,
+            "HTTP/1.1 200 OK\r\n" <>
+              "content-length: #{byte_size(body)}\r\nconnection: close\r\n\r\n#{body}"
+          )
+
+        :gen_tcp.close(socket)
+        :gen_tcp.close(listener)
+        :ok
+      end)
+
+    Application.put_env(:arbor_llm, :trusted_oauth_response_endpoints, [url])
     {url, server}
   end
 
@@ -826,9 +1317,13 @@ defmodule Arbor.LLM.OAuth.ResponsesTest do
       )
   end
 
-  defp send_sse_success!(socket, delta \\ "retried") do
+  defp send_sse_success!(socket, delta \\ "retried", terminal_response \\ nil) do
     body =
-      sse(%{"type" => "response.output_text.delta", "delta" => delta}) <> "data: [DONE]\n\n"
+      sse(%{"type" => "response.output_text.delta", "delta" => delta}) <>
+        if(is_map(terminal_response),
+          do: terminal_sse(terminal_response),
+          else: ""
+        ) <> "data: [DONE]\n\n"
 
     :ok =
       :gen_tcp.send(

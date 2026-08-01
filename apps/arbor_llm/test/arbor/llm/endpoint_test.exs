@@ -178,6 +178,38 @@ defmodule Arbor.LLM.EndpointTest do
     end
   end
 
+  test "security regression: OAuth login authorization/device endpoints are compile-time exact" do
+    assert {:ok, "https://auth.openai.com/oauth/authorize"} =
+             Endpoint.validate(
+               "https://auth.openai.com/oauth/authorize",
+               :oauth_openai_authorize
+             )
+
+    assert {:ok, "https://auth.x.ai/oauth2/device/code"} =
+             Endpoint.validate(
+               "https://auth.x.ai/oauth2/device/code",
+               :oauth_xai_device_authorization
+             )
+
+    for endpoint <- [
+          "https://auth.openai.com/oauth/token",
+          "https://auth.x.ai/oauth/authorize",
+          "http://auth.openai.com/oauth/authorize",
+          "https://evil.example/oauth/authorize"
+        ] do
+      assert {:error, _reason} = Endpoint.validate(endpoint, :oauth_openai_authorize)
+    end
+
+    for endpoint <- [
+          "https://auth.x.ai/oauth2/token",
+          "https://auth.openai.com/oauth2/device/code",
+          "http://auth.x.ai/oauth2/device/code",
+          "https://evil.example/oauth2/device/code"
+        ] do
+      assert {:error, _reason} = Endpoint.validate(endpoint, :oauth_xai_device_authorization)
+    end
+  end
+
   defp restore_env(key, nil), do: Application.delete_env(:arbor_llm, key)
   defp restore_env(key, value), do: Application.put_env(:arbor_llm, key, value)
 end

@@ -3,6 +3,7 @@ defmodule Arbor.AI.Runtime.RouteInputAssemblerTest do
 
   alias Arbor.AI
   alias Arbor.AI.Runtime.RouteInputAssembler
+
   alias Arbor.Contracts.LLM.{
     BudgetSnapshot,
     ModelEntry,
@@ -16,6 +17,11 @@ defmodule Arbor.AI.Runtime.RouteInputAssemblerTest do
   @decision_time ~U[2026-07-22 22:00:00Z]
   @stale_observed "2026-07-22T20:00:00Z"
   @stale_expires "2026-07-22T21:00:00Z"
+
+  setup do
+    Arbor.AI.TestSupport.ProviderRouteEvidence.reset!()
+    :ok
+  end
 
   test "absent or disabled profile returns disabled" do
     assert {:error, :disabled} = RouteInputAssembler.assemble(profile: nil)
@@ -571,7 +577,7 @@ defmodule Arbor.AI.Runtime.RouteInputAssemblerTest do
           expires_at: "2026-07-29T12:15:00Z"
         ),
         # generation mismatch
-        oauth_catalog!(["model-a"], @oauth_gen + 1),
+        oauth_catalog!(["model-a"], @oauth_gen + 1)
         # identity mismatch (xai catalog under openai route key is shape-malformed —
         # use valid openai route with wrong backend via compose path: xai catalog
         # admitted under its own key while candidate is openai → miss → unknown)

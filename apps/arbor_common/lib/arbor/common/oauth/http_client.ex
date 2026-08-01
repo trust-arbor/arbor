@@ -191,6 +191,10 @@ defmodule Arbor.Common.OAuth.HttpClient do
     end
   end
 
+  @doc "Returns the maximum timeout accepted by the OAuth HTTP boundary."
+  @spec max_timeout_ms() :: pos_integer()
+  def max_timeout_ms, do: @max_timeout_ms
+
   @doc "Resolve the adapter module for the given options."
   @spec adapter(keyword()) :: module()
   def adapter(opts \\ []) do

@@ -474,6 +474,32 @@ defmodule Arbor.Common.OAuth.AuthCodeTest do
                  )
                )
     end
+
+    test "applies response schemas with presence-aware null and required-field semantics" do
+      assert {:error, {:invalid_token_response, :field_type}} =
+               AuthCode.apply_response_schema(
+                 %{"optional" => nil},
+                 %{"optional" => :optional_string}
+               )
+
+      assert {:error, {:invalid_token_response, :field_type}} =
+               AuthCode.apply_response_schema(
+                 %{"optional" => nil},
+                 %{"optional" => :optional_integer}
+               )
+
+      assert {:error, {:invalid_token_response, :missing_field}} =
+               AuthCode.apply_response_schema(
+                 %{},
+                 %{"required" => :required_string}
+               )
+
+      assert {:error, {:invalid_token_response, :field_type}} =
+               AuthCode.apply_response_schema(
+                 %{"required" => 1},
+                 %{"required" => :required_string}
+               )
+    end
   end
 
   describe "pre-I/O request validation rejects unsafe settings" do

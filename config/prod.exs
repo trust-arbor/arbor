@@ -21,3 +21,5 @@ config :arbor_trust, default_egress_modes: %{external_provider: :allow}
 
 config :arbor_memory,
   embedding_dedup_enabled: true
+
+import_config "provider_route_profile.exs"

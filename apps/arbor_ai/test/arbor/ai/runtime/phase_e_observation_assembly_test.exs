@@ -12,6 +12,11 @@ defmodule Arbor.AI.Runtime.PhaseEObservationAssemblyTest do
   # OAuthHealthObservation TTL is 30 seconds.
   @oauth_ttl_seconds 30
 
+  setup do
+    Arbor.AI.TestSupport.ProviderRouteEvidence.reset!()
+    :ok
+  end
+
   test "default path uses oauth_health for exact oauth routes never ACP source" do
     # Environment-neutral: prove exact route, source, runtime, bounded timestamps,
     # and a contract-valid closed health state without assuming credentials are

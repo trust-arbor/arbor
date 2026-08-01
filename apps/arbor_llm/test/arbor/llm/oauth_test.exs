@@ -3,6 +3,7 @@ defmodule Arbor.LLM.OAuthTest do
   @moduletag :fast
 
   alias Arbor.LLM.{Client, Message, OAuth, Request}
+  alias Arbor.LLM.OAuth.Login
   alias Arbor.Contracts.LLM.OAuthHealth
 
   @env_keys [
@@ -221,6 +222,35 @@ defmodule Arbor.LLM.OAuthTest do
                 owner: "source_owned"
               }} =
                OAuth.health(:xai_oauth)
+    end
+  end
+
+  describe "OAuth login facade delegation" do
+    test "facade exposes all provider-specific login operations" do
+      assert function_exported?(Arbor.LLM, :start_openai_login, 1)
+      assert function_exported?(Arbor.LLM, :complete_openai_login, 3)
+      assert function_exported?(Arbor.LLM, :start_xai_device_login, 0)
+      assert function_exported?(Arbor.LLM, :complete_xai_device_login, 1)
+    end
+
+    test "facade delegates option and handle validation behavior from Login module" do
+      assert {:error, :keyword_options_required} =
+               Login.start_openai_login(%{"redirect_uri" => :port_1457})
+
+      assert {:error, :keyword_options_required} =
+               Arbor.LLM.start_openai_login(%{"redirect_uri" => :port_1457})
+
+      assert {:error, :improper_openai_options} =
+               Arbor.LLM.start_openai_login([{"redirect_uri", :port_1457}])
+
+      assert {:error, :duplicate_login_option} =
+               Arbor.LLM.start_openai_login(redirect_uri: :port_1455, redirect_uri: :port_1457)
+
+      assert {:error, :oauth_handle_invalid} =
+               Arbor.LLM.complete_openai_login("never-issued-handle", "code", "state")
+
+      assert {:error, :oauth_handle_invalid} =
+               Arbor.LLM.complete_xai_device_login("never-issued-handle")
     end
   end
 

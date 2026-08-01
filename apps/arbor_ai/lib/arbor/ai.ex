@@ -57,6 +57,8 @@ defmodule Arbor.AI do
     ProviderControlPlane,
     ProviderModelCatalogRefresh,
     ProviderModelCatalogStore,
+    ProviderRouteEvidence,
+    ProviderRouteReadiness,
     ProviderUsageLedger,
     QuotaTracker,
     RouteFailureStore,
@@ -975,6 +977,29 @@ defmodule Arbor.AI do
     ProviderModelCatalogStore.snapshot_sync(opts)
   end
 
+  @doc "Return the bounded readiness state for the strict provider-route profile."
+  @spec provider_route_readiness_status() :: map()
+  def provider_route_readiness_status do
+    ProviderRouteReadiness.status()
+  end
+
+  @doc "Ensure the currently admitted production provider routes are ready."
+  @spec ensure_provider_route_readiness() :: :ok | {:ok, :disabled} | {:error, atom()}
+  def ensure_provider_route_readiness do
+    case RouteInputAssembler.production_requirements() do
+      {:ok, %{enabled: false}} -> {:ok, :disabled}
+      {:ok, requirements} -> ProviderRouteReadiness.ensure_ready(requirements)
+      {:error, _reason} -> {:error, :unavailable}
+    end
+  end
+
+  @doc "Retry provider-route catalog/auth observation, including permanent failures."
+  @spec refresh_provider_route_readiness() ::
+          {:ok, :scheduled | :already_running} | {:error, atom()}
+  def refresh_provider_route_readiness do
+    ProviderRouteReadiness.manual_refresh()
+  end
+
   @doc """
   Persist one validated provider usage fact to the durable daily ledger.
 
@@ -990,6 +1015,45 @@ defmodule Arbor.AI do
   @spec record_provider_usage(term(), keyword()) :: {:ok, map()} | {:error, term()}
   def record_provider_usage(attrs, opts \\ []) do
     ProviderUsageLedger.record_provider_usage(attrs, opts)
+  end
+
+  @doc "Record durable exact OAuth provider-route failure evidence."
+  @spec record_provider_route_failure(map(), keyword()) :: {:ok, map()} | {:error, term()}
+  def record_provider_route_failure(attrs, opts \\ []) do
+    ProviderRouteEvidence.record_failure(attrs, opts)
+  end
+
+  @doc "Record durable exact OAuth provider-route quota evidence."
+  @spec record_provider_route_quota(map(), keyword()) :: {:ok, map()} | {:error, term()}
+  def record_provider_route_quota(attrs, opts \\ []) do
+    ProviderRouteEvidence.record_quota(attrs, opts)
+  end
+
+  @doc "Read the bounded durable exact OAuth provider-route evidence snapshot."
+  @spec provider_route_evidence_snapshot(keyword()) ::
+          {:ok, map()} | {:error, :unavailable | :malformed | :invalid_options}
+  def provider_route_evidence_snapshot(opts \\ []) do
+    ProviderRouteEvidence.snapshot_status(opts)
+  end
+
+  @doc "Read bounded durable exact OAuth route-failure evidence."
+  @spec provider_route_failure_evidence_snapshot(keyword()) ::
+          {:ok, map()} | {:error, :unavailable | :malformed | :invalid_options}
+  def provider_route_failure_evidence_snapshot(opts \\ []) do
+    ProviderRouteEvidence.route_failure_snapshot(opts)
+  end
+
+  @doc "Read bounded durable exact OAuth quota evidence."
+  @spec provider_route_quota_evidence_snapshot(keyword()) ::
+          {:ok, map()} | {:error, :unavailable | :malformed | :invalid_options}
+  def provider_route_quota_evidence_snapshot(opts \\ []) do
+    ProviderRouteEvidence.quota_snapshot(opts)
+  end
+
+  @doc "Return durable exact OAuth provider-route evidence authority status."
+  @spec provider_route_evidence_status() :: map()
+  def provider_route_evidence_status do
+    ProviderRouteEvidence.status()
   end
 
   @doc """
@@ -1027,16 +1091,38 @@ defmodule Arbor.AI do
   def assemble_provider_route_input(task_class \\ nil)
 
   def assemble_provider_route_input(nil) do
-    RouteInputAssembler.assemble([])
+    assemble_and_gate_provider_route_input([])
   end
 
   def assemble_provider_route_input(task_class) when is_binary(task_class) do
-    RouteInputAssembler.assemble(task_class: task_class)
+    assemble_and_gate_provider_route_input(task_class: task_class)
   end
 
   def assemble_provider_route_input(_task_class) do
     {:error, {:route_assembly_failed, :invalid_task_class}}
   end
+
+  defp assemble_and_gate_provider_route_input(opts) do
+    with {:ok, input} <- RouteInputAssembler.assemble(opts),
+         {:ok, requirements} <- RouteInputAssembler.requirements_for_catalog(input.catalog),
+         :ok <- gate_provider_route_input(requirements) do
+      {:ok, input}
+    else
+      {:error, :disabled} -> {:error, :disabled}
+      {:error, {:route_assembly_failed, _reason} = error} -> error
+      {:error, reason} -> {:error, {:route_assembly_failed, {:provider_route_readiness, reason}}}
+    end
+  end
+
+  defp gate_provider_route_input(%{enabled: true} = requirements) do
+    case ProviderRouteReadiness.ensure_ready(requirements) do
+      :ok -> :ok
+      {:ok, :disabled} -> {:error, :provider_route_readiness_unavailable}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp gate_provider_route_input(%{enabled: false}), do: :ok
 
   @doc """
   Synchronously feed one classified LLM failure into AI-owned control-plane state.
@@ -1044,8 +1130,8 @@ defmodule Arbor.AI do
   Pure classification stays in `Arbor.AI.LLMError.classify/1`. This facade is the
   only production write boundary:
 
-  * exact OAuth route + exact `{type, code}` quota pair → `QuotaTracker.mark_quota_exhausted_sync/2`
-  * exact OAuth route + exact `{type, code}` route-failure pair → `RouteFailureStore.put_sync/1`
+  * exact OAuth route + exact `{type, code}` quota pair → durable provider-route evidence, then a best-effort `QuotaTracker` mirror
+  * exact OAuth route + exact `{type, code}` route-failure pair → durable provider-route evidence, then a best-effort `RouteFailureStore` mirror
   * type-only maps, aliases, missing route/code, or non-OAuth providers → `{:ok, :noop}`
 
   Returns `{:ok, :recorded}` after the store acknowledges a required write,
@@ -1060,26 +1146,33 @@ defmodule Arbor.AI do
          {:ok, code} <- exact_effect_code(error_info) do
       case effect do
         {:quota, :rate_limited} ->
-          opts = quota_mark_opts(error_info)
+          available_at = quota_available_at(error_info)
 
-          try do
-            QuotaTracker.mark_quota_exhausted_sync(provider, opts)
-            {:ok, :recorded}
-          catch
-            :exit, _ -> {:error, :quota_write_failed}
+          case record_provider_route_quota(%{route: provider, available_at: available_at}) do
+            {:ok, _receipt} ->
+              _ = mirror_quota(provider, available_at)
+              {:ok, :recorded}
+
+            {:error, _reason} ->
+              {:error, :quota_write_failed}
           end
 
         {:route_failure, class} ->
-          case RouteFailureStore.put_sync(
-                 route: provider,
-                 class: class,
-                 code: code,
-                 retryable: Map.get(error_info, :retryable) == true,
-                 retry_after_ms: bounded_retry_after(Map.get(error_info, :retry_after_ms))
-               ) do
-            :ok -> {:ok, :recorded}
-            {:error, :unavailable} -> {:error, :route_failure_write_failed}
-            {:error, :rejected} -> {:error, :route_failure_write_failed}
+          attrs = %{
+            route: provider,
+            class: class,
+            code: code,
+            retryable: Map.get(error_info, :retryable) == true,
+            retry_after_ms: bounded_retry_after(Map.get(error_info, :retry_after_ms))
+          }
+
+          case record_provider_route_failure(attrs) do
+            {:ok, _receipt} ->
+              _ = mirror_route_failure(attrs)
+              {:ok, :recorded}
+
+            {:error, _reason} ->
+              {:error, :route_failure_write_failed}
           end
       end
     else
@@ -1094,6 +1187,25 @@ defmodule Arbor.AI do
 
   def record_classified_llm_failure(_), do: {:ok, :noop}
 
+  defp mirror_quota(provider, available_at) do
+    QuotaTracker.mark_quota_exhausted_sync(provider, until: available_at, message: "rate limited")
+  catch
+    _, _ -> :ok
+  end
+
+  defp mirror_route_failure(attrs) do
+    RouteFailureStore.put_sync(attrs)
+  catch
+    _, _ -> :ok
+  end
+
+  defp quota_available_at(error_info) do
+    case bounded_retry_after(Map.get(error_info, :retry_after_ms)) do
+      ms when is_integer(ms) and ms > 0 -> DateTime.add(DateTime.utc_now(), ms, :millisecond)
+      _ -> DateTime.add(DateTime.utc_now(), 6 * 60 * 60, :second)
+    end
+  end
+
   defp exact_oauth_provider(provider) when provider in [:openai_oauth, :xai_oauth],
     do: {:ok, provider}
 
@@ -1105,16 +1217,6 @@ defmodule Arbor.AI do
 
   defp exact_effect_code(%{code: code}) when is_binary(code) and code != "", do: {:ok, code}
   defp exact_effect_code(_), do: :error
-
-  defp quota_mark_opts(error_info) do
-    case bounded_retry_after(Map.get(error_info, :retry_after_ms)) do
-      ms when is_integer(ms) ->
-        [until: DateTime.add(DateTime.utc_now(), ms, :millisecond), message: "rate limited"]
-
-      _ ->
-        [message: "rate limited"]
-    end
-  end
 
   defp bounded_retry_after(ms) when is_integer(ms) and ms >= 0 and ms <= @max_retry_after_ms,
     do: ms

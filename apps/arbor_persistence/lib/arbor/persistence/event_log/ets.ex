@@ -142,6 +142,9 @@ defmodule Arbor.Persistence.EventLog.ETS do
     GenServer.call(name, {:read_agent_events, agent_id, opts})
   end
 
+  @impl true
+  def durability_class(_opts), do: :process_lifetime
+
   @doc """
   Return the lowest `event_number` currently held in ETS for `stream_id`,
   or `nil` if the stream has no events in cache.

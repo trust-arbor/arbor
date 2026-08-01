@@ -10,6 +10,11 @@ defmodule Arbor.AI.Runtime.RouteConcurrencyOverlayTest do
 
   @now ~U[2026-07-22 22:00:00Z]
 
+  setup do
+    Arbor.AI.TestSupport.ProviderRouteEvidence.reset!()
+    :ok
+  end
+
   describe "RouteEvidenceOverlay.overlay_concurrency/2" do
     test "sets exact limit and in_use; nil leaves evidence missing" do
       base = %{"provider" => "openai", "runtime" => "arbor", "source" => "test"}

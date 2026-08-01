@@ -253,3 +253,5 @@ config :arbor_common, skill_catalog_enabled: true
 # model/provider lives in Arbor.Orchestrator.Config.@default_preprocessor — don't
 # restate it here, only override specific keys if dev needs to differ.
 config :arbor_orchestrator, preprocessor_enabled: true
+
+import_config "provider_route_profile.exs"

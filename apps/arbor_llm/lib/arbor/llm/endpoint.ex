@@ -49,6 +49,8 @@ defmodule Arbor.LLM.Endpoint do
   ]
   @oauth_discovery_endpoints ["https://auth.x.ai/.well-known/openid-configuration"]
   @oauth_token_origins ["https://auth.openai.com", "https://auth.x.ai"]
+  @oauth_openai_authorize_endpoints ["https://auth.openai.com/oauth/authorize"]
+  @oauth_xai_device_authorization_endpoints ["https://auth.x.ai/oauth2/device/code"]
   @eval_http_paths ["/api/embeddings", "/api/chat", "/v1/embeddings"]
 
   @type policy ::
@@ -61,6 +63,8 @@ defmodule Arbor.LLM.Endpoint do
           | :oauth_discovery
           | :oauth_token
           | :oauth_xai_token
+          | :oauth_openai_authorize
+          | :oauth_xai_device_authorization
           | :req_llm_base
           | {:req_llm_base, atom() | String.t()}
 
@@ -111,6 +115,8 @@ defmodule Arbor.LLM.Endpoint do
               :oauth_discovery,
               :oauth_token,
               :oauth_xai_token,
+              :oauth_openai_authorize,
+              :oauth_xai_device_authorization,
               :req_llm_base
             ],
        do: {:ok, policy}
@@ -300,6 +306,8 @@ defmodule Arbor.LLM.Endpoint do
   defp validate_path(path, :oauth_discovery), do: canonical_endpoint_path(path)
   defp validate_path(path, :oauth_token), do: canonical_endpoint_path(path)
   defp validate_path(path, :oauth_xai_token), do: canonical_endpoint_path(path)
+  defp validate_path(path, :oauth_openai_authorize), do: canonical_endpoint_path(path)
+  defp validate_path(path, :oauth_xai_device_authorization), do: canonical_endpoint_path(path)
 
   defp validate_path(path, {:operator_req_llm_base, provider, configured}) do
     with {:ok, canonical} <- canonical_endpoint_path(path) do
@@ -448,6 +456,18 @@ defmodule Arbor.LLM.Endpoint do
 
   defp authorize_endpoint(canonical, :oauth_xai_token) do
     if endpoint_origin(canonical) == "https://auth.x.ai",
+      do: :ok,
+      else: {:error, :endpoint_origin_not_trusted}
+  end
+
+  defp authorize_endpoint(canonical, :oauth_openai_authorize) do
+    if canonical in @oauth_openai_authorize_endpoints,
+      do: :ok,
+      else: {:error, :endpoint_origin_not_trusted}
+  end
+
+  defp authorize_endpoint(canonical, :oauth_xai_device_authorization) do
+    if canonical in @oauth_xai_device_authorization_endpoints,
       do: :ok,
       else: {:error, :endpoint_origin_not_trusted}
   end

@@ -224,6 +224,7 @@ defmodule Arbor.LLM.Boundary do
          :ok <- validate_warning_list(response.warnings, 0),
          :ok <- validate_optional_list(response.thinking, :thinking),
          :ok <- validate_optional_map(response.raw, :raw),
+         :ok <- validate_provider_receipt(response.provider_receipt, response.usage),
          :ok <- validate_proper_list(response.content_parts, :content_parts),
          :ok <-
            ResponseBudget.validate(projection,
@@ -416,6 +417,17 @@ defmodule Arbor.LLM.Boundary do
   end
 
   defp validate_usage(_usage), do: {:error, :usage_must_be_map}
+
+  defp validate_provider_receipt(nil, _usage), do: :ok
+
+  defp validate_provider_receipt(%Response.ProviderReceipt{} = receipt, response_usage) do
+    case Response.ProviderReceipt.revalidate(receipt) do
+      {:ok, %Response.ProviderReceipt{usage: ^response_usage}} -> :ok
+      _ -> {:error, :invalid_provider_receipt}
+    end
+  end
+
+  defp validate_provider_receipt(_receipt, _usage), do: {:error, :invalid_provider_receipt}
 
   defp validate_numeric_tree([]), do: :ok
 

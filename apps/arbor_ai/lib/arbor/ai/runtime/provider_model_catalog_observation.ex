@@ -16,6 +16,7 @@ defmodule Arbor.AI.Runtime.ProviderModelCatalogObservation do
   """
 
   alias Arbor.AI.Runtime.OAuthHealthObservation
+  alias Arbor.AI.Runtime.ProviderModelCatalogEvidence
   alias Arbor.Contracts.LLM.{OAuthHealth, ProviderModelCatalog, ProviderObservation}
 
   @catalog_source "arbor_oauth_catalog"
@@ -136,12 +137,21 @@ defmodule Arbor.AI.Runtime.ProviderModelCatalogObservation do
        when is_binary(model_id) do
     case admit_catalog(catalog) do
       {:ok, %ProviderModelCatalog{} = valid} ->
-        if usable_catalog?(health, valid, now) do
-          membership = if model_id in valid.model_ids, do: "present", else: "absent"
-          {:ok, {membership, valid}}
-        else
-          # Contract-valid but unusable (expired/future/gen/route mismatch).
-          {:ok, {"unknown", nil}}
+        case ProviderModelCatalogEvidence.assess(
+               valid,
+               health.route,
+               health.backend,
+               @runtime,
+               health.generation,
+               now
+             ) do
+          {:ok, _usable} ->
+            membership = if model_id in valid.model_ids, do: "present", else: "absent"
+            {:ok, {membership, valid}}
+
+          {:error, _reason} ->
+            # Contract-valid but unusable (expired/future/gen/route mismatch).
+            {:ok, {"unknown", nil}}
         end
 
       :error ->
@@ -151,22 +161,6 @@ defmodule Arbor.AI.Runtime.ProviderModelCatalogObservation do
   end
 
   defp resolve_catalog(_health, _catalog, _model_id, _now), do: :error
-
-  defp usable_catalog?(%OAuthHealth{} = health, %ProviderModelCatalog{} = catalog, %DateTime{} = now) do
-    with true <- catalog.route == health.route,
-         true <- catalog.backend == health.backend,
-         true <- catalog.runtime == @runtime,
-         true <- is_integer(health.generation),
-         true <- catalog.credential_generation == health.generation,
-         {:ok, observed_at} <- parse_dt(catalog.observed_at),
-         {:ok, expires_at} <- parse_dt(catalog.expires_at),
-         true <- DateTime.compare(observed_at, now) != :gt,
-         true <- DateTime.compare(expires_at, now) == :gt do
-      true
-    else
-      _ -> false
-    end
-  end
 
   defp admit_catalog(%ProviderModelCatalog{} = catalog) do
     case ProviderModelCatalog.new(ProviderModelCatalog.to_map(catalog)) do
@@ -194,7 +188,12 @@ defmodule Arbor.AI.Runtime.ProviderModelCatalogObservation do
 
   defp maybe_apply_usable_catalog(attrs, nil, _membership, _now), do: attrs
 
-  defp maybe_apply_usable_catalog(attrs, %ProviderModelCatalog{} = catalog, membership, %DateTime{} = now) do
+  defp maybe_apply_usable_catalog(
+         attrs,
+         %ProviderModelCatalog{} = catalog,
+         membership,
+         %DateTime{} = now
+       ) do
     attrs
     |> Map.put("source", @catalog_source)
     |> apply_catalog_window(catalog, now)

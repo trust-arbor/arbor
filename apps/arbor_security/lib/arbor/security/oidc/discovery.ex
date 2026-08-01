@@ -44,11 +44,13 @@ defmodule Arbor.Security.OIDC.Discovery do
   @type endpoints :: %{
           issuer: String.t(),
           authorization_endpoint: String.t() | nil,
-          token_endpoint: String.t() | nil
+          token_endpoint: String.t() | nil,
+          device_authorization_endpoint: String.t() | nil
         }
 
   @doc """
-  Resolve an issuer's authorization and token endpoints under the closed policy.
+  Resolve an issuer's authorization, token, and device endpoints under the closed
+  policy.
 
   An endpoint absent from the document is returned as `nil` — the caller
   decides whether the one it needs is required (this preserves the historical
@@ -59,7 +61,8 @@ defmodule Arbor.Security.OIDC.Discovery do
 
     * `:allow_http` — permit an `http://` issuer (loopback/dev). Default `false`.
     * `:endpoints` — pin endpoints and skip discovery entirely. A map with
-      `:authorization_endpoint` and/or `:token_endpoint`.
+      `:authorization_endpoint`, `:token_endpoint`, and/or
+      `:device_authorization_endpoint`.
     * `:trusted_origins` — additional origins accepted alongside the issuer's.
     * `:http_client` — `Arbor.Common.OAuth.HttpClient` adapter override.
     * `:max_response_bytes`, `:timeout_ms` — budget overrides.
@@ -88,8 +91,23 @@ defmodule Arbor.Security.OIDC.Discovery do
              :token,
              normalized,
              normalized_opts
+           ),
+         {:ok, device} <-
+           endpoint_for_operation(
+             document,
+             "device_authorization_endpoint",
+             normalized_opts.for,
+             :device,
+             normalized,
+             normalized_opts
            ) do
-      {:ok, %{issuer: normalized, authorization_endpoint: authorize, token_endpoint: token}}
+      {:ok,
+       %{
+         issuer: normalized,
+         authorization_endpoint: authorize,
+         token_endpoint: token,
+         device_authorization_endpoint: device
+       }}
     end
   end
 
@@ -254,6 +272,13 @@ defmodule Arbor.Security.OIDC.Discovery do
   defp normalize_pinned_endpoint_key("authorization_endpoint"), do: {:ok, :authorization_endpoint}
   defp normalize_pinned_endpoint_key(:token_endpoint), do: {:ok, :token_endpoint}
   defp normalize_pinned_endpoint_key("token_endpoint"), do: {:ok, :token_endpoint}
+
+  defp normalize_pinned_endpoint_key(:device_authorization_endpoint),
+    do: {:ok, :device_authorization_endpoint}
+
+  defp normalize_pinned_endpoint_key("device_authorization_endpoint"),
+    do: {:ok, :device_authorization_endpoint}
+
   defp normalize_pinned_endpoint_key(_), do: {:error, :pinned_endpoint_key}
 
   defp validate_pinned_endpoint_value(nil, _allow_http), do: {:ok, nil}
@@ -511,6 +536,10 @@ defmodule Arbor.Security.OIDC.Discovery do
     %{}
     |> maybe_put_pinned("authorization_endpoint", Map.get(pinned, :authorization_endpoint))
     |> maybe_put_pinned("token_endpoint", Map.get(pinned, :token_endpoint))
+    |> maybe_put_pinned(
+      "device_authorization_endpoint",
+      Map.get(pinned, :device_authorization_endpoint)
+    )
   end
 
   defp maybe_put_pinned(doc, _key, nil), do: doc
@@ -600,10 +629,12 @@ defmodule Arbor.Security.OIDC.Discovery do
   defp applies_to_operation?(:authorize, :both), do: true
   defp applies_to_operation?(:token, :token), do: true
   defp applies_to_operation?(:token, :both), do: true
+  defp applies_to_operation?(:device, :device), do: true
   defp applies_to_operation?(_field, _operation), do: false
 
   defp validate_operation(:authorize), do: :ok
   defp validate_operation(:token), do: :ok
+  defp validate_operation(:device), do: :ok
   defp validate_operation(:both), do: :ok
   defp validate_operation(_other), do: {:error, {:invalid_discovery_operation, :unsupported}}
 

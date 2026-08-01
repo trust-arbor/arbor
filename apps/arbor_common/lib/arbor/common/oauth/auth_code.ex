@@ -51,7 +51,6 @@ defmodule Arbor.Common.OAuth.AuthCode do
   @default_timeout_ms 10_000
 
   @max_http_range 1_048_576
-  @max_timeout_ms 120_000
   @max_params 128
   @max_param_pairs 128
 
@@ -422,7 +421,7 @@ defmodule Arbor.Common.OAuth.AuthCode do
          :ok <- validate_allow_http(params.allow_http),
          :ok <- validate_http_client(params.http_client),
          :ok <- validate_range(params.max_response_bytes, @max_http_range, :max_response_bytes),
-         :ok <- validate_range(params.timeout_ms, @max_timeout_ms, :timeout_ms) do
+         :ok <- validate_range(params.timeout_ms, HttpClient.max_timeout_ms(), :timeout_ms) do
       :ok
     end
   end
@@ -810,6 +809,22 @@ defmodule Arbor.Common.OAuth.AuthCode do
   def validate_response_schema(nil), do: {:error, {:invalid_response_schema, :required}}
   def validate_response_schema(_schema), do: {:error, {:invalid_response_schema, :map_required}}
 
+  @doc """
+  Apply a validated response schema to a decoded token response.
+
+  `Map.fetch/2` is intentional here: a present JSON `null` is a value and
+  must fail the declared field type rather than being treated as missing.
+  """
+  @spec apply_response_schema(map(), term()) :: :ok | {:error, term()}
+  def apply_response_schema(decoded, schema) when is_map(decoded) do
+    with {:ok, validated_schema} <- validate_response_schema(schema) do
+      apply_schema(decoded, validated_schema)
+    end
+  end
+
+  def apply_response_schema(_decoded, _schema),
+    do: {:error, {:invalid_token_response, :object_required}}
+
   # --- Token exchange ---
 
   defp post_token(%Params{} = params) do
@@ -843,7 +858,7 @@ defmodule Arbor.Common.OAuth.AuthCode do
   defp handle_token_response(%HttpClient.Response{status: 200, body: body}, schema) do
     with {:ok, decoded} <- decode_token_body(body),
          :ok <- structural_budget(decoded),
-         :ok <- apply_schema(decoded, schema) do
+         :ok <- apply_response_schema(decoded, schema) do
       {:ok, decoded}
     end
   end

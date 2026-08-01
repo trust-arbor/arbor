@@ -474,7 +474,8 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
     end
   end
 
-  # Closed seven-field canonical route. Reject incomplete / enum-invalid evidence.
+  # Closed seven-field false route, or an eight-field confirmed route carrying
+  # the exact selected wire model. Reject incomplete / enum-invalid evidence.
   defp sanitize_executed_route(route) do
     provider = route_string(route, "provider", :provider)
     provider_ref = route_string(route, "provider_ref", :provider_ref)
@@ -483,21 +484,38 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
     attempt = route_attempt(route)
     identity = route_identity(route)
     confirmed = route_provider_confirmed(route)
+    confirmed_model = route_confirmed_model(route)
 
-    if is_binary(provider) and is_binary(provider_ref) and is_binary(model) and
-         is_binary(runtime) and is_binary(attempt) and identity == @executed_route_identity and
-         confirmed == false do
-      %{
-        "provider" => provider,
-        "provider_ref" => provider_ref,
-        "model" => model,
-        "runtime" => runtime,
-        "attempt" => attempt,
-        "route_identity" => @executed_route_identity,
-        "provider_confirmed" => false
-      }
-    else
-      nil
+    base_valid? =
+      is_binary(provider) and is_binary(provider_ref) and is_binary(model) and
+        is_binary(runtime) and is_binary(attempt) and identity == @executed_route_identity
+
+    cond do
+      base_valid? and confirmed == false and is_nil(confirmed_model) ->
+        %{
+          "provider" => provider,
+          "provider_ref" => provider_ref,
+          "model" => model,
+          "runtime" => runtime,
+          "attempt" => attempt,
+          "route_identity" => @executed_route_identity,
+          "provider_confirmed" => false
+        }
+
+      base_valid? and confirmed == true and confirmed_model == provider_ref ->
+        %{
+          "provider" => provider,
+          "provider_ref" => provider_ref,
+          "model" => model,
+          "runtime" => runtime,
+          "attempt" => attempt,
+          "route_identity" => @executed_route_identity,
+          "provider_confirmed" => true,
+          "confirmed_model" => confirmed_model
+        }
+
+      true ->
+        nil
     end
   end
 
@@ -548,12 +566,15 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
   end
 
   defp route_provider_confirmed(route) do
-    # Must not use `||` — false is valid Dispatch evidence and is falsy in Elixir.
     case fetch_mixed_key(route, "provider_confirmed", :provider_confirmed) do
       {:ok, false} -> false
+      {:ok, true} -> true
       _ -> nil
     end
   end
+
+  defp route_confirmed_model(route),
+    do: route_string(route, "confirmed_model", :confirmed_model)
 
   defp strip_executed_route_aliases(usage) when is_map(usage) and not is_struct(usage) do
     Map.drop(usage, @executed_route_aliases)

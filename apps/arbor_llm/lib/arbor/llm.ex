@@ -19,6 +19,8 @@ defmodule Arbor.LLM do
 
   alias Arbor.LLM.ResponseBudget
 
+  alias Arbor.LLM.OAuth.Login
+
   alias Arbor.LLM.Retry
 
   alias Arbor.LLM.Tool
@@ -66,6 +68,29 @@ defmodule Arbor.LLM do
   def eval_subject_names, do: Map.keys(@eval_subjects)
 
   @doc """
+  Resolves the transport for an eval provider without conflating API-key catalog
+  discovery with exact subscription-OAuth readiness.
+
+  OAuth routes must be locally `ready`; ordinary catalog providers retain their
+  existing lazy transport behavior. The result contains no credential material.
+  """
+  @spec resolve_eval_transport(String.t()) ::
+          {:ok, %{provider: String.t(), source: :oauth | :catalog, adapter_module: module()}}
+          | {:error, term()}
+  def resolve_eval_transport(provider),
+    do: Arbor.LLM.Eval.ProviderResolver.resolve_transport(provider)
+
+  @doc """
+  Fails closed unless an eval provider is currently ready to create a persisted run.
+
+  Exact OAuth routes use local OAuth health; ordinary providers use the runtime
+  provider catalog. This check performs no OAuth refresh or provider network call.
+  """
+  @spec preflight_eval_provider(String.t(), keyword()) :: :ok | {:error, term()}
+  def preflight_eval_provider(provider, opts \\ []),
+    do: Arbor.LLM.Eval.ProviderResolver.preflight(provider, opts)
+
+  @doc """
   Local subscription-OAuth readiness for one exact route ID (`openai_oauth` / `xai_oauth`).
 
   Performs no network request and no token refresh, and returns no credential, token, account id,
@@ -89,6 +114,46 @@ defmodule Arbor.LLM do
     do: Arbor.LLM.OAuth.ModelCatalog.fetch(route, opts)
 
   def oauth_model_catalog(_route, _opts), do: {:error, :keyword_options_required}
+
+  @doc """
+  Start provider-specific OpenAI OAuth login with closed options.
+
+  The only accepted option is a keyword list with optional `:redirect_uri`
+  selector (`:port_1455` default, `:port_1457` alternative). Unknown keys,
+  duplicate keys, non-keyword/improper options, and invalid selectors are
+  rejected before any PKCE/state generation, endpoint request, or credential
+  side effects.
+  """
+  @spec start_openai_login(keyword()) ::
+          {:ok, Arbor.LLM.OAuth.Login.AuthorizationPrompt.t()} | {:error, term()}
+  def start_openai_login(opts \\ []), do: Login.start_openai_login(opts)
+
+  @doc """
+  Complete provider-specific OpenAI OAuth login with `handle`, OAuth `code`, and
+  state value returned inside the `AuthorizationPrompt`.
+
+  This consumes the correlation handle one-shot and returns `:ok` only.
+  """
+  @spec complete_openai_login(String.t(), String.t(), String.t()) :: :ok | {:error, term()}
+  def complete_openai_login(handle, code, state),
+    do: Login.complete_openai_login(handle, code, state)
+
+  @doc """
+  Start provider-specific xAI OAuth device login.
+
+  Returns a `DevicePrompt` containing user-facing device fields and an opaque
+  one-shot handle. The handle and associated sensitive derivation stay internal
+  to `Arbor.LLM.OAuth.Login` and never appear in prompt inspection or public errors.
+  """
+  @spec start_xai_device_login() ::
+          {:ok, Arbor.LLM.OAuth.Login.DevicePrompt.t()} | {:error, term()}
+  def start_xai_device_login, do: Login.start_xai_device_login()
+
+  @doc """
+  Complete provider-specific xAI OAuth device login from a one-shot handle.
+  """
+  @spec complete_xai_device_login(String.t()) :: :ok | {:error, term()}
+  def complete_xai_device_login(handle), do: Login.complete_xai_device_login(handle)
 
   @spec generate(generate_opts()) ::
           {:ok, Arbor.LLM.Response.t()} | {:error, term()}

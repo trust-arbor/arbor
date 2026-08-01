@@ -2,188 +2,192 @@ defmodule Arbor.Security.OIDC.DeviceFlow do
   @moduledoc """
   RFC 8628 Device Authorization Grant for CLI authentication.
 
-  Implements the three-phase device flow:
-  1. `start/1` — request device + user codes from the authorization server
-  2. `poll/2` — poll the token endpoint until the user authorizes
-  3. `refresh/2` — refresh an expired access token
+  This module preserves the public shape used by `Arbor.Security.authenticate_oidc/1`
+  and delegates transport/parsing to the provider-neutral
+  `Arbor.Common.OAuth.DeviceCode` primitive.
 
-  All functions are pure I/O — no GenServer or persistent state needed.
+  Endpoint trust remains in Security via `Arbor.Security.OIDC.Discovery`.
   """
 
-  require Logger
+  alias Arbor.Common.OAuth.DeviceCode
+  alias Arbor.Security.OIDC.Discovery
+
+  @default_scopes ["openid", "email", "profile"]
+  @default_timeout_ms 10_000
+  @default_poll_timeout_ms 300_000
+  @default_max_response_bytes 65_536
+  @default_discovery_timeout_ms 10_000
+  @default_discovery_max_response_bytes 262_144
 
   @default_poll_interval 5
-  @default_timeout_ms :timer.minutes(5)
+
+  @token_response_schema %{
+    "id_token" => :required_string,
+    "access_token" => :optional_string,
+    "token_type" => :optional_string,
+    "refresh_token" => :optional_string,
+    "scope" => :optional_string,
+    "expires_in" => :optional_integer
+  }
 
   @doc """
   Start the device authorization flow.
 
-  Fetches the provider's OpenID Configuration to discover the
-  `device_authorization_endpoint`, then requests device + user codes.
-
-  Returns `{:ok, device_response}` with:
-  - `:device_code` — opaque code for polling
-  - `:user_code` — code the user enters in browser
-  - `:verification_uri` — URL for the user to visit
-  - `:verification_uri_complete` — URL with code pre-filled (optional)
-  - `:interval` — polling interval in seconds
-  - `:expires_in` — lifetime of the device code in seconds
+  Fetches the provider's OIDC discovery document and resolves the trusted
+  `device_authorization_endpoint`, then requests a device code.
   """
   @spec start(map()) :: {:ok, map()} | {:error, term()}
-  def start(%{issuer: issuer, client_id: client_id} = config) do
-    scopes = Map.get(config, :scopes, ["openid", "email", "profile"])
-
-    with {:ok, oidc_config} <- fetch_openid_configuration(issuer),
-         {:ok, device_endpoint} <- get_device_endpoint(oidc_config) do
-      request_device_code(device_endpoint, client_id, scopes)
+  def start(%{issuer: _issuer, client_id: client_id} = config) do
+    with :ok <- validate_scope_options(config),
+         {:ok, endpoints} <- discover(config, :device),
+         {:ok, endpoint} <-
+           require_endpoint(
+             Map.get(endpoints, :device_authorization_endpoint),
+             :no_device_authorization_endpoint
+           ),
+         {:ok, response} <-
+           DeviceCode.start(
+             device_authorization_endpoint: endpoint,
+             client_id: client_id,
+             client_secret: Map.get(config, :client_secret),
+             scopes: scopes_for(config),
+             scope: Map.get(config, :scope),
+             max_response_bytes:
+               config_get(config, :max_response_bytes, @default_max_response_bytes),
+             timeout_ms: config_get(config, :timeout_ms, @default_timeout_ms),
+             allow_http: allow_http?(config),
+             http_client: Map.get(config, :http_client)
+           ) do
+      {:ok, response}
+    else
+      {:error, reason} -> normalize_error(reason)
     end
   end
 
   @doc """
-  Poll the token endpoint until the user authorizes or the flow expires.
-
-  Blocks the current process. Returns `{:ok, token_response}` on success
-  with `:access_token`, `:id_token`, `:refresh_token`, `:expires_in`.
+  Poll the token endpoint until the user authorizes or the flow terminates.
   """
   @spec poll(map(), map()) :: {:ok, map()} | {:error, term()}
-  def poll(%{issuer: issuer, client_id: client_id} = _config, device_response) do
+  def poll(%{issuer: _issuer, client_id: client_id} = config, device_response) do
     device_code = device_response["device_code"] || device_response[:device_code]
     interval = device_response["interval"] || device_response[:interval] || @default_poll_interval
-    expires_in = device_response["expires_in"] || device_response[:expires_in] || 300
-    deadline = System.monotonic_time(:millisecond) + min(expires_in * 1000, @default_timeout_ms)
+    expires_in = device_response["expires_in"] || device_response[:expires_in]
 
-    with {:ok, oidc_config} <- fetch_openid_configuration(issuer),
-         token_endpoint when is_binary(token_endpoint) <- Map.get(oidc_config, "token_endpoint") do
-      poll_loop(token_endpoint, client_id, device_code, interval, deadline)
+    with {:ok, endpoints} <- discover(config, :token),
+         {:ok, endpoint} <-
+           require_endpoint(Map.get(endpoints, :token_endpoint), :no_token_endpoint),
+         {:ok, token_schema} <-
+           DeviceCode.validate_token_response_schema(
+             Map.get(config, :response_schema, @token_response_schema)
+           ),
+         {:ok, response} <-
+           DeviceCode.poll(
+             token_endpoint: endpoint,
+             client_id: client_id,
+             client_secret: Map.get(config, :client_secret),
+             device_code: device_code,
+             response_schema: token_schema,
+             interval: interval,
+             expires_in: expires_in,
+             poll_timeout_ms: config_get(config, :poll_timeout_ms, @default_poll_timeout_ms),
+             max_response_bytes:
+               config_get(config, :max_response_bytes, @default_max_response_bytes),
+             timeout_ms: config_get(config, :timeout_ms, @default_timeout_ms),
+             allow_http: allow_http?(config),
+             http_client: Map.get(config, :http_client)
+           ) do
+      {:ok, response}
     else
-      nil -> {:error, :no_token_endpoint}
-      {:error, _} = error -> error
+      {:error, reason} -> normalize_error(reason)
     end
   end
 
   @doc """
-  Refresh an access token using a refresh token.
-
-  Returns `{:ok, token_response}` with new tokens.
+  Refresh tokens with the trusted token endpoint.
   """
   @spec refresh(map(), String.t()) :: {:ok, map()} | {:error, term()}
-  def refresh(%{issuer: issuer, client_id: client_id}, refresh_token) do
-    with {:ok, oidc_config} <- fetch_openid_configuration(issuer),
-         token_endpoint when is_binary(token_endpoint) <- Map.get(oidc_config, "token_endpoint") do
-      body = %{
-        "grant_type" => "refresh_token",
-        "client_id" => client_id,
-        "refresh_token" => refresh_token
-      }
-
-      case Req.post(token_endpoint, form: body, receive_timeout: 10_000) do
-        {:ok, %{status: 200, body: response}} when is_map(response) ->
-          {:ok, response}
-
-        {:ok, %{status: status, body: body}} ->
-          {:error, {:token_refresh_failed, status, body}}
-
-        {:error, reason} ->
-          {:error, {:http_request_failed, reason}}
-      end
+  def refresh(%{issuer: _issuer, client_id: client_id} = config, refresh_token) do
+    with {:ok, endpoints} <- discover(config, :token),
+         {:ok, endpoint} <-
+           require_endpoint(Map.get(endpoints, :token_endpoint), :no_token_endpoint),
+         {:ok, token_schema} <- DeviceCode.validate_token_response_schema(@token_response_schema),
+         {:ok, response} <-
+           DeviceCode.refresh(
+             token_endpoint: endpoint,
+             client_id: client_id,
+             client_secret: Map.get(config, :client_secret),
+             refresh_token: refresh_token,
+             response_schema: token_schema,
+             max_response_bytes:
+               config_get(config, :max_response_bytes, @default_max_response_bytes),
+             timeout_ms: config_get(config, :timeout_ms, @default_timeout_ms),
+             allow_http: allow_http?(config),
+             http_client: Map.get(config, :http_client)
+           ) do
+      {:ok, response}
     else
-      nil -> {:error, :no_token_endpoint}
-      {:error, _} = error -> error
+      {:error, reason} -> normalize_error(reason)
     end
   end
 
   # --- Private ---
 
-  defp fetch_openid_configuration(issuer) do
-    url = String.trim_trailing(issuer, "/") <> "/.well-known/openid-configuration"
-
-    case Req.get(url, receive_timeout: 10_000) do
-      {:ok, %{status: 200, body: body}} when is_map(body) ->
-        {:ok, body}
-
-      {:ok, %{status: 200, body: body}} when is_binary(body) ->
-        Jason.decode(body)
-
-      {:ok, %{status: status}} ->
-        {:error, {:openid_config_fetch_failed, status}}
-
-      {:error, reason} ->
-        {:error, {:http_request_failed, reason}}
-    end
-  end
-
-  defp get_device_endpoint(oidc_config) do
-    case Map.get(oidc_config, "device_authorization_endpoint") do
-      nil -> {:error, :no_device_authorization_endpoint}
-      endpoint -> {:ok, endpoint}
-    end
-  end
-
-  defp request_device_code(endpoint, client_id, scopes) do
-    body = %{
-      "client_id" => client_id,
-      "scope" => Enum.join(scopes, " ")
-    }
-
-    case Req.post(endpoint, form: body, receive_timeout: 10_000) do
-      {:ok, %{status: 200, body: response}} when is_map(response) ->
-        {:ok, response}
-
-      {:ok, %{status: status, body: body}} ->
-        {:error, {:device_code_request_failed, status, body}}
-
-      {:error, reason} ->
-        {:error, {:http_request_failed, reason}}
-    end
-  end
-
-  defp poll_loop(token_endpoint, client_id, device_code, interval, deadline) do
-    if System.monotonic_time(:millisecond) >= deadline do
-      {:error, :device_flow_expired}
-    else
-      body = %{
-        "grant_type" => "urn:ietf:params:oauth:grant-type:device_code",
-        "client_id" => client_id,
-        "device_code" => device_code
+  defp discover(%{issuer: issuer} = config, operation) do
+    opts =
+      %{
+        allow_http: allow_http?(config),
+        endpoints: Map.get(config, :endpoints),
+        trusted_origins: Map.get(config, :trusted_origins, []),
+        http_client: Map.get(config, :http_client),
+        for: operation
       }
+      |> maybe_put(
+        :timeout_ms,
+        config_get(config, :discovery_timeout_ms, @default_discovery_timeout_ms)
+      )
+      |> maybe_put(
+        :max_response_bytes,
+        config_get(config, :discovery_max_response_bytes, @default_discovery_max_response_bytes)
+      )
 
-      case Req.post(token_endpoint, form: body, receive_timeout: 10_000) do
-        {:ok, %{status: 200, body: response}} when is_map(response) ->
-          {:ok, response}
+    Discovery.discover(issuer, opts)
+  end
 
-        {:ok, %{status: status, body: %{"error" => error} = body}} when status in [400, 428] ->
-          handle_poll_error(error, body, token_endpoint, client_id, device_code, interval, deadline)
+  defp maybe_put(opts, _key, nil), do: opts
+  defp maybe_put(opts, key, value), do: Map.put(opts, key, value)
 
-        {:ok, %{status: status, body: body}} ->
-          {:error, {:token_request_failed, status, body}}
+  defp require_endpoint(endpoint, _reason) when is_binary(endpoint) and endpoint != "",
+    do: {:ok, endpoint}
 
-        {:error, reason} ->
-          {:error, {:http_request_failed, reason}}
-      end
+  defp require_endpoint(_endpoint, reason), do: {:error, reason}
+
+  defp allow_http?(config), do: Map.get(config, :allow_http, false) == true
+
+  defp validate_scope_options(config) do
+    if not is_nil(Map.get(config, :scope)) and not is_nil(Map.get(config, :scopes)),
+      do: {:error, {:invalid_scope_options, :scope_and_scopes}},
+      else: :ok
+  end
+
+  defp scopes_for(config) do
+    if is_nil(Map.get(config, :scope)),
+      do: Map.get(config, :scopes, @default_scopes),
+      else: nil
+  end
+
+  defp config_get(config, key, default) do
+    case Map.get(config, key) do
+      nil -> default
+      value -> value
     end
   end
 
-  defp handle_poll_error("authorization_pending", _body, token_endpoint, client_id, device_code, interval, deadline) do
-    Process.sleep(interval * 1000)
-    poll_loop(token_endpoint, client_id, device_code, interval, deadline)
-  end
+  defp normalize_error({:timeout, _ms} = reason), do: {:error, {:http_request_failed, reason}}
 
-  defp handle_poll_error("slow_down", _body, token_endpoint, client_id, device_code, interval, deadline) do
-    # RFC 8628 §3.5: increase interval by 5 seconds
-    new_interval = interval + 5
-    Process.sleep(new_interval * 1000)
-    poll_loop(token_endpoint, client_id, device_code, new_interval, deadline)
-  end
+  defp normalize_error({:transport_error, _reason} = reason),
+    do: {:error, {:http_request_failed, reason}}
 
-  defp handle_poll_error("expired_token", _body, _token_endpoint, _client_id, _device_code, _interval, _deadline) do
-    {:error, :device_code_expired}
-  end
-
-  defp handle_poll_error("access_denied", _body, _token_endpoint, _client_id, _device_code, _interval, _deadline) do
-    {:error, :access_denied}
-  end
-
-  defp handle_poll_error(error, body, _token_endpoint, _client_id, _device_code, _interval, _deadline) do
-    {:error, {:device_flow_error, error, body}}
-  end
+  defp normalize_error({:response_bytes_exceeded, _max} = reason), do: {:error, reason}
+  defp normalize_error({:invalid_response, _reason} = reason), do: {:error, reason}
+  defp normalize_error(reason), do: {:error, reason}
 end

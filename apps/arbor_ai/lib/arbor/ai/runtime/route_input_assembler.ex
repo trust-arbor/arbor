@@ -28,10 +28,8 @@ defmodule Arbor.AI.Runtime.RouteInputAssembler do
   """
 
   alias Arbor.AI.ProviderControlPlane
-  alias Arbor.AI.QuotaTracker
   alias Arbor.AI.RouteConcurrency
   alias Arbor.AI.RouteConcurrencyCore
-  alias Arbor.AI.RouteFailureStore
   alias Arbor.AI.Runtime.RouteCatalog
   alias Arbor.AI.Runtime.OAuthHealthObservation
   alias Arbor.AI.Runtime.ProviderModelCatalogObservation
@@ -67,6 +65,8 @@ defmodule Arbor.AI.Runtime.RouteInputAssembler do
              | :invalid_task_class
              | :route_failure_evidence_unavailable
              | :route_failure_evidence_malformed
+             | :quota_evidence_unavailable
+             | :quota_evidence_malformed
              | :route_concurrency_evidence_unavailable
              | :route_concurrency_evidence_malformed
              | :oauth_model_catalog_evidence_unavailable
@@ -128,6 +128,67 @@ defmodule Arbor.AI.Runtime.RouteInputAssembler do
   end
 
   def assemble(_opts), do: {:error, {:route_assembly_failed, :malformed}}
+
+  @doc false
+  @spec production_requirements() :: {:ok, map()} | {:error, term()}
+  def production_requirements do
+    with {:ok, profile} <- load_profile([]) do
+      if Map.get(profile, :enabled, false) do
+        with :ok <- ensure_enabled(profile),
+             {:ok, _task_class} <- resolve_task_class([], profile),
+             {:ok, _task_registry} <- resolve_task_registry(profile),
+             {:ok, catalog} <- resolve_catalog(profile, [], false),
+             {:ok, _scoreboard} <- resolve_scoreboard(profile),
+             {:ok, _providers} <- resolve_providers(profile, catalog),
+             {:ok, _policy} <- build_policy(profile) do
+          requirements_for_catalog(catalog)
+        end
+      else
+        {:ok, %{enabled: false, required_routes: [], binding: []}}
+      end
+    end
+  rescue
+    _ -> {:error, {:route_assembly_failed, :malformed}}
+  catch
+    _, _ -> {:error, {:route_assembly_failed, :malformed}}
+  end
+
+  @doc false
+  @spec requirements_for_catalog(term()) :: {:ok, map()} | {:error, term()}
+  def requirements_for_catalog(catalog) when is_list(catalog) do
+    candidates = oauth_route_candidates(catalog)
+
+    binding =
+      candidates
+      |> Enum.map(fn candidate ->
+        %{
+          "route" => candidate.provider,
+          "model_id" => candidate.ref,
+          "runtime" => candidate.runtime
+        }
+      end)
+      |> Enum.uniq()
+      |> Enum.sort_by(fn candidate ->
+        {candidate["route"], candidate["model_id"], candidate["runtime"]}
+      end)
+
+    {:ok,
+     %{
+       enabled: true,
+       required_routes:
+         binding
+         |> Enum.map(& &1["route"])
+         |> Enum.uniq()
+         |> canonical_oauth_route_order(),
+       binding: binding
+     }}
+  rescue
+    _ -> {:error, {:route_assembly_failed, :malformed}}
+  catch
+    _, _ -> {:error, {:route_assembly_failed, :malformed}}
+  end
+
+  def requirements_for_catalog(_), do: {:error, {:route_assembly_failed, :malformed}}
 
   defp load_profile(opts) do
     case Keyword.fetch(opts, :profile) do
@@ -442,6 +503,12 @@ defmodule Arbor.AI.Runtime.RouteInputAssembler do
       {:error, :route_failure_evidence_malformed} ->
         {:error, {:route_assembly_failed, :route_failure_evidence_malformed}}
 
+      {:error, :quota_evidence_unavailable} ->
+        {:error, {:route_assembly_failed, :quota_evidence_unavailable}}
+
+      {:error, :quota_evidence_malformed} ->
+        {:error, {:route_assembly_failed, :quota_evidence_malformed}}
+
       {:error, :route_concurrency_evidence_unavailable} ->
         {:error, {:route_assembly_failed, :route_concurrency_evidence_unavailable}}
 
@@ -528,6 +595,7 @@ defmodule Arbor.AI.Runtime.RouteInputAssembler do
 
   defp default_observation_reader(providers, decision_time, catalog, opts) do
     with {:ok, route_failures} <- read_route_failures(decision_time),
+         {:ok, quota_status} <- read_quota_evidence(decision_time),
          {:ok, concurrency_snap} <- read_concurrency_snapshot() do
       # Exact OAuth candidates first — only then read catalog snapshot evidence.
       # Zero candidates: skip the irrelevant reader. Non-empty: one bounded
@@ -540,7 +608,6 @@ defmodule Arbor.AI.Runtime.RouteInputAssembler do
         {:error, :invalid_observation}
       else
         with {:ok, catalog_snap} <- maybe_read_oauth_catalog_snapshot(candidates, opts) do
-          quota_status = read_quota_status()
           health_reader = Keyword.get(opts, :oauth_health_reader, &Arbor.LLM.oauth_health/1)
 
           emit_default_observations(
@@ -714,6 +781,10 @@ defmodule Arbor.AI.Runtime.RouteInputAssembler do
 
   defp oauth_route_candidates(_), do: []
 
+  defp canonical_oauth_route_order(routes) do
+    Enum.filter(["openai_oauth", "xai_oauth"], &(&1 in routes))
+  end
+
   defp health_cached(route, reader, cache) when is_map(cache) do
     case Map.fetch(cache, route) do
       {:ok, health} ->
@@ -856,18 +927,27 @@ defmodule Arbor.AI.Runtime.RouteInputAssembler do
   end
 
   defp read_route_failures(decision_time) do
-    case RouteFailureStore.snapshot_status(now: decision_time) do
-      {:ok, map} when is_map(map) -> {:ok, map}
-      {:error, :unavailable} -> {:error, :route_failure_evidence_unavailable}
-      {:error, :malformed} -> {:error, :route_failure_evidence_malformed}
-      _ -> {:error, :route_failure_evidence_malformed}
+    case Arbor.AI.provider_route_failure_evidence_snapshot(now: decision_time) do
+      {:ok, failures} when is_map(failures) ->
+        {:ok, failures}
+
+      {:error, :unavailable} ->
+        {:error, :route_failure_evidence_unavailable}
+
+      {:error, :malformed} ->
+        {:error, :route_failure_evidence_malformed}
+
+      _ ->
+        {:error, :route_failure_evidence_malformed}
     end
   end
 
-  defp read_quota_status do
-    case QuotaTracker.snapshot_status() do
-      {:ok, map} when is_map(map) -> map
-      _ -> %{}
+  defp read_quota_evidence(decision_time) do
+    case Arbor.AI.provider_route_quota_evidence_snapshot(now: decision_time) do
+      {:ok, quota} when is_map(quota) -> {:ok, quota}
+      {:error, :unavailable} -> {:error, :quota_evidence_unavailable}
+      {:error, :malformed} -> {:error, :quota_evidence_malformed}
+      _ -> {:error, :quota_evidence_malformed}
     end
   end
 

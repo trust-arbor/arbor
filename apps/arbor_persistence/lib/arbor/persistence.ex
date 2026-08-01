@@ -534,7 +534,12 @@ defmodule Arbor.Persistence do
           | {:error, :unsupported}
   def durability_class(name, backend, opts \\ []) do
     if supports_durability_class?(backend) do
-      class = backend.durability_class(Keyword.put(opts, :name, name))
+      callback_opts =
+        opts
+        |> Keyword.drop([:durability_class, :durability])
+        |> Keyword.put(:name, name)
+
+      class = backend.durability_class(callback_opts)
       {:ok, class}
     else
       {:error, :unsupported}

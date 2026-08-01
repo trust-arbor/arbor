@@ -68,18 +68,36 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerRouteAssemblyTest do
             %{input_tokens: 1, output_tokens: 1}
 
           {_input, _} ->
+            route = %{
+              "provider" => "provider_a",
+              "provider_ref" => "wire-primary",
+              "model" => "primary",
+              "runtime" => "arbor",
+              "attempt" => "primary",
+              "route_identity" => "router_selected",
+              "provider_confirmed" => false
+            }
+
+            route =
+              if Application.get_env(:arbor_orchestrator, :_test_confirmed_route) do
+                route
+                |> Map.put("provider_ref", "wire-primary")
+                |> Map.put("provider_confirmed", true)
+                |> Map.put("confirmed_model", "wire-primary")
+              else
+                route
+              end
+
+            route =
+              case Application.get_env(:arbor_orchestrator, :_test_route_override) do
+                override when is_map(override) -> override
+                _ -> route
+              end
+
             %{
               :input_tokens => 1,
               :output_tokens => 1,
-              "arbor.executed_route" => %{
-                "provider" => "provider_a",
-                "provider_ref" => "wire-primary",
-                "model" => "primary",
-                "runtime" => "arbor",
-                "attempt" => "primary",
-                "route_identity" => "router_selected",
-                "provider_confirmed" => false
-              }
+              "arbor.executed_route" => route
             }
         end
 
@@ -123,6 +141,8 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerRouteAssemblyTest do
     on_exit(fn ->
       Application.delete_env(:arbor_orchestrator, :llm_dispatcher)
       Application.delete_env(:arbor_orchestrator, :_test_legacy_spoof_executed_route)
+      Application.delete_env(:arbor_orchestrator, :_test_confirmed_route)
+      Application.delete_env(:arbor_orchestrator, :_test_route_override)
       _ = RecordingDispatcher.stop()
 
       case prior_profile do
@@ -223,6 +243,73 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerRouteAssemblyTest do
     refute Map.has_key?(outcome.context_updates, "session.llm_provider")
     refute Map.has_key?(outcome.context_updates, "session.llm_model")
     refute Map.has_key?(outcome.context_updates, "session.llm_runtime")
+  end
+
+  test "confirmed executed route survives sanitizer into usage and context" do
+    Application.put_env(:arbor_ai, :provider_route_profile, %{enabled: false})
+    Application.put_env(:arbor_orchestrator, :_test_confirmed_route, true)
+
+    outcome =
+      LlmHandler.execute(
+        route_node(),
+        context(),
+        graph(),
+        provider_route_input: %{assembled: "by-test"}
+      )
+
+    assert outcome.status == :success
+    executed = outcome.context_updates["session.usage"]["arbor.executed_route"]
+    assert executed["provider_confirmed"] == true
+    assert executed["model"] == "primary"
+    assert executed["provider_ref"] == "wire-primary"
+    assert executed["confirmed_model"] == "wire-primary"
+    assert outcome.context_updates["turn.executed_route"]["model"] == "primary"
+    assert outcome.context_updates["turn.executed_route"]["confirmed_model"] == "wire-primary"
+  end
+
+  test "security regression: confirmed route requires exact model and rejects alias conflicts" do
+    Application.put_env(:arbor_ai, :provider_route_profile, %{enabled: false})
+
+    routes = [
+      %{
+        "provider" => "provider_a",
+        "provider_ref" => "wire-primary",
+        "model" => "primary",
+        "runtime" => "arbor",
+        "attempt" => "primary",
+        "route_identity" => "router_selected",
+        "provider_confirmed" => true,
+        "confirmed_model" => "primary"
+      },
+      %{
+        "provider" => "provider_a",
+        "provider_ref" => "primary",
+        "model" => "primary",
+        "runtime" => "arbor",
+        "attempt" => "primary",
+        "route_identity" => "router_selected",
+        "provider_confirmed" => true,
+        "confirmed_model" => "primary",
+        :confirmed_model => "attacker-model"
+      }
+    ]
+
+    Enum.each(routes, fn route ->
+      Application.put_env(:arbor_orchestrator, :_test_route_override, route)
+
+      outcome =
+        LlmHandler.execute(
+          route_node(),
+          context(),
+          graph(),
+          provider_route_input: %{assembled: "by-test"}
+        )
+
+      assert outcome.status == :success
+      refute Map.has_key?(outcome.context_updates["session.usage"], "arbor.executed_route")
+      refute Map.has_key?(outcome.context_updates, "turn.executed_route")
+      Application.delete_env(:arbor_orchestrator, :_test_route_override)
+    end)
   end
 
   test "incomplete executed_route evidence is ignored even in router mode" do

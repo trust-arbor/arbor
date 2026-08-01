@@ -123,6 +123,9 @@ defmodule Arbor.Persistence.EventLog.Agent do
     {:ok, version}
   end
 
+  @impl true
+  def durability_class(_opts), do: :process_lifetime
+
   # --- Lifecycle ---
 
   def start_link(opts) do
