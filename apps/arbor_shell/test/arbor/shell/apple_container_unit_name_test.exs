@@ -20,6 +20,10 @@ defmodule Arbor.Shell.AppleContainerUnitNameTest do
              Journal.reserve(journal, %{
                unit_name: name,
                execution_id: "exec-unit-name-contract",
+               validation_resource_id: "validation_res",
+               workspace_id: "workspace",
+               task_id: "task",
+               principal_id: "principal",
                token: String.duplicate("a", 64),
                reserved_at_ms: 1
              })

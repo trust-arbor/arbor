@@ -82,6 +82,34 @@ defmodule Arbor.Actions.MixTest do
       assert Keyword.fetch!(invocation.opts, :resource_profile) == :intensive
     end
 
+    test "all public Mix actions preserve typed validation infrastructure errors", %{
+      project_path: project_path,
+      fixture: fixture
+    } do
+      File.write!(Path.join(project_path, "mix.lock"), "%{stale: true}\n")
+
+      actions = [
+        {&MixAction.Compile.run/2,
+         %{path: project_path, workspace_id: fixture.lease.workspace_id}},
+        {&MixAction.Test.run/2, %{path: project_path, workspace_id: fixture.lease.workspace_id}},
+        {&MixAction.Quality.run/2,
+         %{path: project_path, workspace_id: fixture.lease.workspace_id}},
+        {&MixAction.Format.run/2,
+         %{path: project_path, workspace_id: fixture.lease.workspace_id}},
+        {&MixAction.Xref.run/2, %{path: project_path, workspace_id: fixture.lease.workspace_id}}
+      ]
+
+      for {run, params} <- actions do
+        Arbor.Actions.TestMixShell.clear_last_invocation()
+
+        assert {:error,
+                {:validation_infrastructure_error, :dependency_baseline_mix_lock_mismatch}} =
+                 run.(params, fixture.context)
+
+        assert is_nil(Arbor.Actions.TestMixShell.last_invocation())
+      end
+    end
+
     test "Compile.run projects capacity reason/envelope from exact Shell termination flags",
          %{
            project_path: project_path,
@@ -697,6 +725,8 @@ defmodule Arbor.Actions.MixTest do
     File.write!(Path.join(path, ".formatter.exs"), """
     [inputs: ["{mix,.formatter}.exs", "{lib,test}/**/*.{ex,exs}"]]
     """)
+
+    File.write!(Path.join(path, "mix.lock"), "%{}\n")
 
     path
   end

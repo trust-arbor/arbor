@@ -142,6 +142,266 @@ defmodule Arbor.Actions.MixSpawnContainmentSlice1Test do
     assert reason =~ "workspace_id_required"
   end
 
+  test "validation infrastructure: matching candidate and base lock digests reach the shell", %{
+    tmp_dir: tmp_dir
+  } do
+    fixture = leased_fixture(tmp_dir)
+    create_tiny_project(fixture.lease.worktree_path)
+    git!(fixture.lease.worktree_path, ["add", "-A"])
+    git!(fixture.lease.worktree_path, ["commit", "-m", "candidate project"])
+
+    MixAction.with_validation_resource(
+      fixture.lease.workspace_id,
+      fixture.context,
+      fn resource ->
+        assert {:ok, resource} =
+                 WorkspaceLeaseRegistry.create_validation_snapshot(
+                   resource.resource_id,
+                   fixture.context
+                 )
+
+        File.write!(Path.join(resource.base_worktree_path, "mix.lock"), "%{}\n")
+
+        for {path, revision} <- [
+              {resource.candidate_path, :candidate},
+              {resource.base_worktree_path, :base}
+            ] do
+          Arbor.Actions.TestMixShell.clear_last_invocation()
+
+          assert {:ok, _result} =
+                   MixAction.run_mix(path, ["compile"],
+                     validation_resource: resource,
+                     validation_revision: revision,
+                     bind_committable_tree: false
+                   )
+
+          assert is_map(Arbor.Actions.TestMixShell.last_invocation())
+        end
+
+        {:ok, :ok}
+      end
+    )
+  end
+
+  test "validation infrastructure: mismatched lock digest never invokes the shell", %{
+    tmp_dir: tmp_dir
+  } do
+    fixture = leased_fixture(tmp_dir)
+    create_tiny_project(fixture.lease.worktree_path)
+    File.write!(Path.join(fixture.lease.worktree_path, "mix.lock"), "%{evil: true}\n")
+
+    MixAction.with_validation_resource(fixture.lease.workspace_id, fixture.context, fn resource ->
+      Arbor.Actions.TestMixShell.clear_last_invocation()
+
+      assert {:error, {:validation_infrastructure_error, :dependency_baseline_mix_lock_mismatch}} =
+               MixAction.run_mix(fixture.lease.worktree_path, ["compile"],
+                 validation_resource: resource,
+                 bind_committable_tree: false
+               )
+
+      assert is_nil(Arbor.Actions.TestMixShell.last_invocation())
+      {:ok, :ok}
+    end)
+  end
+
+  test "validation infrastructure: malformed receipt never invokes the shell", %{
+    tmp_dir: tmp_dir
+  } do
+    fixture = leased_fixture(tmp_dir)
+    create_tiny_project(fixture.lease.worktree_path)
+
+    MixAction.with_validation_resource(fixture.lease.workspace_id, fixture.context, fn resource ->
+      Arbor.Actions.TestMixShell.clear_last_invocation()
+      malformed = Map.put(resource, :baseline_receipt, %{"mix_lock_digest" => "not-a-digest"})
+
+      assert {:error, {:validation_infrastructure_error, :dependency_baseline_mix_lock_invalid}} =
+               MixAction.run_mix(fixture.lease.worktree_path, ["compile"],
+                 validation_resource: malformed,
+                 bind_committable_tree: false
+               )
+
+      assert is_nil(Arbor.Actions.TestMixShell.last_invocation())
+      {:ok, :ok}
+    end)
+  end
+
+  test "validation infrastructure: missing or ambiguous receipt never invokes the shell", %{
+    tmp_dir: tmp_dir
+  } do
+    fixture = leased_fixture(tmp_dir)
+    create_tiny_project(fixture.lease.worktree_path)
+
+    MixAction.with_validation_resource(fixture.lease.workspace_id, fixture.context, fn resource ->
+      for invalid_resource <- [
+            Map.delete(resource, :baseline_receipt),
+            Map.put(resource, :dependency_receipt, resource.baseline_receipt)
+          ] do
+        Arbor.Actions.TestMixShell.clear_last_invocation()
+
+        assert {:error, {:validation_infrastructure_error, :dependency_baseline_mix_lock_invalid}} =
+                 MixAction.run_mix(fixture.lease.worktree_path, ["compile"],
+                   validation_resource: invalid_resource,
+                   bind_committable_tree: false
+                 )
+
+        assert is_nil(Arbor.Actions.TestMixShell.last_invocation())
+      end
+
+      {:ok, :ok}
+    end)
+  end
+
+  test "validation infrastructure: symlinked lock never invokes the shell", %{
+    tmp_dir: tmp_dir
+  } do
+    fixture = leased_fixture(tmp_dir)
+    create_tiny_project(fixture.lease.worktree_path)
+    target = Path.join(tmp_dir, "outside-mix.lock")
+    File.write!(target, "%{}\n")
+    lock_path = Path.join(fixture.lease.worktree_path, "mix.lock")
+    File.rm!(lock_path)
+    File.ln_s!(target, lock_path)
+
+    MixAction.with_validation_resource(fixture.lease.workspace_id, fixture.context, fn resource ->
+      Arbor.Actions.TestMixShell.clear_last_invocation()
+
+      assert {:error, {:validation_infrastructure_error, :dependency_baseline_mix_lock_invalid}} =
+               MixAction.run_mix(fixture.lease.worktree_path, ["compile"],
+                 validation_resource: resource,
+                 bind_committable_tree: false
+               )
+
+      assert is_nil(Arbor.Actions.TestMixShell.last_invocation())
+      {:ok, :ok}
+    end)
+  end
+
+  test "validation infrastructure: lock replacement during open never invokes the shell", %{
+    tmp_dir: tmp_dir
+  } do
+    fixture = leased_fixture(tmp_dir)
+    create_tiny_project(fixture.lease.worktree_path)
+    lock_path = Path.join(fixture.lease.worktree_path, "mix.lock")
+    outside = Path.join(tmp_dir, "replacement-mix.lock")
+    original = lock_path <> ".original"
+    File.write!(outside, "%{evil: true}\n")
+
+    on_exit(fn ->
+      Arbor.Shell.__test_set_linux_dependency_baseline_before_open_hook__(nil)
+      _ = File.rm(lock_path)
+      _ = File.rename(original, lock_path)
+    end)
+
+    assert :ok =
+             Arbor.Shell.__test_set_linux_dependency_baseline_before_open_hook__(fn path ->
+               if path == lock_path do
+                 File.rename!(lock_path, original)
+                 File.ln_s!(outside, lock_path)
+               end
+             end)
+
+    MixAction.with_validation_resource(fixture.lease.workspace_id, fixture.context, fn resource ->
+      Arbor.Actions.TestMixShell.clear_last_invocation()
+
+      assert {:error, {:validation_infrastructure_error, :dependency_baseline_mix_lock_invalid}} =
+               MixAction.run_mix(fixture.lease.worktree_path, ["compile"],
+                 validation_resource: resource,
+                 bind_committable_tree: false
+               )
+
+      assert is_nil(Arbor.Actions.TestMixShell.last_invocation())
+      {:ok, :ok}
+    end)
+  end
+
+  test "validation infrastructure: hardlinked lock never invokes the shell", %{
+    tmp_dir: tmp_dir
+  } do
+    fixture = leased_fixture(tmp_dir)
+    create_tiny_project(fixture.lease.worktree_path)
+    target = Path.join(tmp_dir, "hardlinked-mix.lock")
+    lock_path = Path.join(fixture.lease.worktree_path, "mix.lock")
+    File.write!(target, "%{}\n")
+    File.rm!(lock_path)
+
+    case File.ln(target, lock_path) do
+      :ok ->
+        assert {:ok, %File.Stat{type: :regular, links: links}} = File.lstat(lock_path)
+        assert links > 1
+
+        MixAction.with_validation_resource(
+          fixture.lease.workspace_id,
+          fixture.context,
+          fn resource ->
+            Arbor.Actions.TestMixShell.clear_last_invocation()
+
+            assert {:error,
+                    {:validation_infrastructure_error, :dependency_baseline_mix_lock_invalid}} =
+                     MixAction.run_mix(fixture.lease.worktree_path, ["compile"],
+                       validation_resource: resource,
+                       bind_committable_tree: false
+                     )
+
+            assert is_nil(Arbor.Actions.TestMixShell.last_invocation())
+            {:ok, :ok}
+          end
+        )
+
+      {:error, reason} when reason in [:eacces, :eperm, :enotsup, :enosys] ->
+        :ok
+    end
+  end
+
+  test "validation infrastructure: oversized regular lock never invokes the shell", %{
+    tmp_dir: tmp_dir
+  } do
+    fixture = leased_fixture(tmp_dir)
+    create_tiny_project(fixture.lease.worktree_path)
+    oversized = String.duplicate("x", 1_048_577)
+    File.write!(Path.join(fixture.lease.worktree_path, "mix.lock"), oversized)
+
+    MixAction.with_validation_resource(fixture.lease.workspace_id, fixture.context, fn resource ->
+      Arbor.Actions.TestMixShell.clear_last_invocation()
+
+      assert {:error, {:validation_infrastructure_error, :dependency_baseline_mix_lock_invalid}} =
+               MixAction.run_mix(fixture.lease.worktree_path, ["compile"],
+                 validation_resource: resource,
+                 bind_committable_tree: false
+               )
+
+      assert is_nil(Arbor.Actions.TestMixShell.last_invocation())
+      {:ok, :ok}
+    end)
+  end
+
+  test "validation infrastructure: aliased receipt digest never invokes the shell", %{
+    tmp_dir: tmp_dir
+  } do
+    fixture = leased_fixture(tmp_dir)
+    create_tiny_project(fixture.lease.worktree_path)
+
+    MixAction.with_validation_resource(fixture.lease.workspace_id, fixture.context, fn resource ->
+      Arbor.Actions.TestMixShell.clear_last_invocation()
+      digest = Base.encode16(:crypto.hash(:sha256, "%{}\n"), case: :lower)
+
+      aliased_receipt = %{
+        "mix_lock_digest" => digest,
+        :mix_lock_digest => digest
+      }
+
+      invalid_resource = Map.put(resource, :baseline_receipt, aliased_receipt)
+
+      assert {:error, {:validation_infrastructure_error, :dependency_baseline_mix_lock_invalid}} =
+               MixAction.run_mix(fixture.lease.worktree_path, ["compile"],
+                 validation_resource: invalid_resource,
+                 bind_committable_tree: false
+               )
+
+      assert is_nil(Arbor.Actions.TestMixShell.last_invocation())
+      {:ok, :ok}
+    end)
+  end
+
   test "contained_mix_env scrubs path-bearing caller keys against live resource paths", %{
     tmp_dir: tmp_dir
   } do
@@ -1777,6 +2037,7 @@ defmodule Arbor.Actions.MixSpawnContainmentSlice1Test do
     )
 
     File.write!(Path.join([path, "test", "test_helper.exs"]), "ExUnit.start()\n")
+    File.write!(Path.join(path, "mix.lock"), "%{}\n")
     path
   end
 

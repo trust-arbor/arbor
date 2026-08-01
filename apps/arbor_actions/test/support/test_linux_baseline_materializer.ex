@@ -14,6 +14,7 @@ defmodule Arbor.Actions.TestLinuxBaselineMaterializer do
 
   @baseline_marker "linux-baseline-marker"
   @host_secret "host-only-secret-marker"
+  @mix_lock_contents "%{}\n"
   @max_deadline_ms 3_600_000
 
   defmodule Lease do
@@ -235,6 +236,8 @@ defmodule Arbor.Actions.TestLinuxBaselineMaterializer do
           "schema" => "1",
           "platform" => "linux/test",
           "baseline_tree_digest" => String.duplicate("a", 64),
+          "mix_lock_digest" =>
+            Base.encode16(:crypto.hash(:sha256, @mix_lock_contents), case: :lower),
           "entry_count" => 1,
           "total_bytes" => byte_size(@baseline_marker)
         },

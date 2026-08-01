@@ -64,6 +64,8 @@ defmodule Arbor.Shell do
     ExecutionRegistry,
     ExecutionWorker,
     Executor,
+    LinuxDependencyBaselineBuilder,
+    LinuxDependencyBaselineFilesystem,
     PortSession,
     Sandbox,
     SpawnCapableArgvLimits,
@@ -73,6 +75,44 @@ defmodule Arbor.Shell do
   alias Arbor.Signals
 
   @default_sandbox :basic
+
+  @doc """
+  Build and validate an evidence-only Linux dependency-baseline document.
+
+  The caller supplies the source root and all manifest metadata explicitly.
+  This operation only reads the source tree and returns the canonical document
+  plus the core's compact receipt; it never installs files or infers authority.
+  """
+  @spec build_linux_dependency_baseline(term(), term()) ::
+          {:ok, %{manifest: map(), entries: [map()]}, map()} | {:error, term()}
+  def build_linux_dependency_baseline(source_root, metadata),
+    do: LinuxDependencyBaselineBuilder.build(source_root, metadata)
+
+  @spec build_linux_dependency_baseline(term(), term(), keyword()) ::
+          {:ok, %{manifest: map(), entries: [map()]}, map()} | {:error, term()}
+  def build_linux_dependency_baseline(source_root, metadata, opts)
+      when is_list(opts) do
+    LinuxDependencyBaselineBuilder.build(source_root, metadata, opts)
+  end
+
+  def build_linux_dependency_baseline(_source_root, _metadata, _opts),
+    do: {:error, :invalid_options}
+
+  @doc false
+  @spec read_verified_regular_file(String.t(), pos_integer()) ::
+          {:ok, binary()} | {:error, term()}
+  def read_verified_regular_file(path, max_bytes)
+      when is_binary(path) and is_integer(max_bytes) and max_bytes > 0 do
+    LinuxDependencyBaselineFilesystem.read_regular_file(path, max_bytes)
+  end
+
+  def read_verified_regular_file(_path, _max_bytes), do: {:error, :invalid_regular_file}
+
+  @doc false
+  def __test_set_linux_dependency_baseline_before_open_hook__(fun)
+      when is_function(fun, 1) or is_nil(fun) do
+    LinuxDependencyBaselineFilesystem.__test_set_before_open_hook__(fun)
+  end
 
   # ===========================================================================
   # Public API — Output ceiling bounds (single source of truth for callers)

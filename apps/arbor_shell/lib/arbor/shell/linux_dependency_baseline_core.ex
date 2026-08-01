@@ -258,6 +258,24 @@ defmodule Arbor.Shell.LinuxDependencyBaselineCore do
   @spec materialization_entries(state()) :: [entry()]
   def materialization_entries(%{entries: entries}) when is_list(entries), do: entries
 
+  @doc """
+  Validate an inventory and return its canonical v1 tree digest.
+
+  This projection is intended for imperative source builders that must construct
+  the manifest before calling `new/1`. It applies the same inventory and tree
+  structure checks used by `new/1`; it does not validate manifest metadata.
+  """
+  @spec tree_digest(term()) :: {:ok, String.t()} | {:error, term()}
+  def tree_digest(entries) when is_list(entries) do
+    with {:ok, normalized_entries, _total_bytes} <- normalize_inventory(entries),
+         sorted_entries = Enum.sort_by(normalized_entries, & &1.path, &path_lte?/2),
+         :ok <- validate_tree_structure(sorted_entries) do
+      {:ok, compute_baseline_tree_digest(sorted_entries)}
+    end
+  end
+
+  def tree_digest(_entries), do: {:error, :invalid_entries}
+
   # --- Manifest / compact receipt ---
 
   defp compact_receipt_map(%{

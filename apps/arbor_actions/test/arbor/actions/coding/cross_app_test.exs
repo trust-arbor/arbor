@@ -443,6 +443,7 @@ defmodule Arbor.Actions.Coding.CrossAppTest do
 
     File.mkdir_p!(Path.join(path, "config"))
     File.write!(Path.join(path, "config/config.exs"), "import Config\n")
+    File.write!(Path.join(path, "mix.lock"), "%{}\n")
 
     write_app(path, "alpha", [], """
     defmodule Alpha do

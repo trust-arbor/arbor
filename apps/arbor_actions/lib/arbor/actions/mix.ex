@@ -51,6 +51,7 @@ defmodule Arbor.Actions.Mix do
   @snapshot_max_entries 50_000
   @snapshot_max_bytes 512 * 1024 * 1024
   @snapshot_max_depth 48
+  @mix_lock_max_bytes 1_048_576
 
   # When `bind_committable_tree` is true, reserve this many milliseconds of the
   # remaining outer deadline for the mandatory *postflight* tree binding and
@@ -957,6 +958,7 @@ defmodule Arbor.Actions.Mix do
          :ok <- bind_cwd_to_revision(resource, revision, canonical_path),
          {:ok, shell_module} <- Config.mix_shell_module(),
          {:ok, wrapper} <- resolve_execution_mix_wrapper(shell_module),
+         :ok <- validate_validation_mix_lock(resource, revision, canonical_path),
          {:ok, _} <- remaining_timeout(deadline_ms) do
       case build_contained_env(canonical_path, opts) do
         {:ok, env, ephemeral_root} ->
@@ -1035,8 +1037,96 @@ defmodule Arbor.Actions.Mix do
   end
 
   defp format_prepare_error({:invalid_mix_shell_module, _} = error), do: {:error, error}
+
+  defp format_prepare_error({:validation_infrastructure_error, _} = error),
+    do: {:error, error}
+
   defp format_prepare_error(reason) when is_binary(reason), do: {:error, reason}
   defp format_prepare_error(reason), do: {:error, inspect(reason)}
+
+  defp validate_validation_mix_lock(resource, revision, cwd)
+       when is_map(resource) and revision in [:candidate, :base] and is_binary(cwd) do
+    with {:ok, expected_digest} <- validation_mix_lock_digest(resource),
+         {:ok, lock_contents} <- read_bounded_regular_mix_lock(cwd),
+         actual_digest <- sha256(lock_contents),
+         true <- actual_digest == expected_digest do
+      :ok
+    else
+      {:error, _reason} ->
+        {:error, {:validation_infrastructure_error, :dependency_baseline_mix_lock_invalid}}
+
+      false ->
+        {:error, {:validation_infrastructure_error, :dependency_baseline_mix_lock_mismatch}}
+    end
+  end
+
+  defp validate_validation_mix_lock(_, _, _),
+    do: {:error, {:validation_infrastructure_error, :dependency_baseline_mix_lock_invalid}}
+
+  defp validation_mix_lock_digest(resource) when is_map(resource) do
+    with {:ok, receipt} <- unique_validation_receipt(resource),
+         {:ok, digest} <- unique_receipt_digest(receipt),
+         true <- exact_lower_hex_digest?(digest) do
+      {:ok, digest}
+    else
+      _ -> {:error, :invalid_dependency_receipt}
+    end
+  end
+
+  defp validation_mix_lock_digest(_), do: {:error, :invalid_dependency_receipt}
+
+  defp exact_lower_hex_digest?(digest) when is_binary(digest) and byte_size(digest) == 64 do
+    digest
+    |> :binary.bin_to_list()
+    |> Enum.all?(fn byte ->
+      (byte >= ?0 and byte <= ?9) or (byte >= ?a and byte <= ?f)
+    end)
+  end
+
+  defp exact_lower_hex_digest?(_), do: false
+
+  defp unique_validation_receipt(resource) do
+    values =
+      [:baseline_receipt, :dependency_receipt]
+      |> Enum.flat_map(fn key ->
+        atom_value = Map.fetch(resource, key)
+        string_value = Map.fetch(resource, Atom.to_string(key))
+
+        case {atom_value, string_value} do
+          {{:ok, _}, {:ok, _}} -> [{:ambiguous, nil}]
+          {{:ok, value}, :error} -> [{:value, value}]
+          {:error, {:ok, value}} -> [{:value, value}]
+          _ -> []
+        end
+      end)
+
+    case values do
+      [{:value, receipt}] when is_map(receipt) -> {:ok, receipt}
+      _ -> {:error, :ambiguous_or_missing_dependency_receipt}
+    end
+  end
+
+  defp unique_receipt_digest(receipt) when is_map(receipt) do
+    case {Map.fetch(receipt, "mix_lock_digest"), Map.fetch(receipt, :mix_lock_digest)} do
+      {{:ok, _}, {:ok, _}} -> {:error, :ambiguous_mix_lock_digest}
+      {{:ok, digest}, :error} when is_binary(digest) -> {:ok, digest}
+      {:error, {:ok, digest}} when is_binary(digest) -> {:ok, digest}
+      _ -> {:error, :missing_mix_lock_digest}
+    end
+  end
+
+  defp unique_receipt_digest(_), do: {:error, :invalid_dependency_receipt}
+
+  defp read_bounded_regular_mix_lock(cwd) when is_binary(cwd) do
+    lock_path = Path.join(cwd, "mix.lock")
+
+    case Arbor.Shell.read_verified_regular_file(lock_path, @mix_lock_max_bytes) do
+      {:ok, contents} -> {:ok, contents}
+      {:error, _reason} -> {:error, :invalid_mix_lock}
+    end
+  end
+
+  defp read_bounded_regular_mix_lock(_), do: {:error, :invalid_mix_lock}
 
   # Enforcing cleanup: never ignore File.rm_rf outcomes.
   defp cleanup_ephemeral_root(nil), do: :ok
@@ -2343,6 +2433,27 @@ defmodule Arbor.Actions.Mix do
   def format_error(reason) when is_binary(reason), do: reason
   def format_error(reason), do: inspect(reason)
 
+  @doc false
+  @spec validation_infrastructure_error?(term()) :: boolean()
+  def validation_infrastructure_error?({:validation_infrastructure_error, classification})
+      when classification in [
+             :dependency_baseline_mix_lock_invalid,
+             :dependency_baseline_mix_lock_mismatch
+           ],
+      do: true
+
+  def validation_infrastructure_error?(_), do: false
+
+  @doc false
+  @spec public_action_error(term(), String.t()) :: {:error, term()}
+  def public_action_error(reason, prefix) when is_binary(prefix) do
+    if validation_infrastructure_error?(reason) do
+      {:error, reason}
+    else
+      {:error, prefix <> format_error(reason)}
+    end
+  end
+
   defp default_mix_env(["test" | _args]), do: %{"MIX_ENV" => "test"}
   defp default_mix_env(_args), do: %{}
 
@@ -2773,7 +2884,7 @@ defmodule Arbor.Actions.Mix do
     end
 
     @impl true
-    @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
+    @spec run(map(), map()) :: {:ok, map()} | {:error, String.t() | tuple()}
     def run(%{path: path} = params, context) do
       Actions.emit_started(__MODULE__, params)
 
@@ -2818,7 +2929,7 @@ defmodule Arbor.Actions.Mix do
 
         {:error, reason} ->
           Actions.emit_failed(__MODULE__, reason)
-          {:error, "mix compile failed to execute: #{MixAction.format_error(reason)}"}
+          MixAction.public_action_error(reason, "mix compile failed to execute: ")
       end
     end
 
@@ -2895,7 +3006,7 @@ defmodule Arbor.Actions.Mix do
     end
 
     @impl true
-    @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
+    @spec run(map(), map()) :: {:ok, map()} | {:error, String.t() | tuple()}
     def run(%{path: path} = params, context) do
       Actions.emit_started(__MODULE__, params)
 
@@ -2931,7 +3042,7 @@ defmodule Arbor.Actions.Mix do
 
         {:error, reason} ->
           Actions.emit_failed(__MODULE__, reason)
-          {:error, "mix test failed to execute: #{MixAction.format_error(reason)}"}
+          MixAction.public_action_error(reason, "mix test failed to execute: ")
       end
     end
 
@@ -3059,7 +3170,7 @@ defmodule Arbor.Actions.Mix do
     end
 
     @impl true
-    @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
+    @spec run(map(), map()) :: {:ok, map()} | {:error, String.t() | tuple()}
     def run(%{path: path} = params, context) do
       Actions.emit_started(__MODULE__, params)
 
@@ -3088,7 +3199,7 @@ defmodule Arbor.Actions.Mix do
 
         {:error, reason} ->
           Actions.emit_failed(__MODULE__, reason)
-          {:error, "mix quality failed to execute: #{MixAction.format_error(reason)}"}
+          MixAction.public_action_error(reason, "mix quality failed to execute: ")
       end
     end
   end
@@ -3148,7 +3259,7 @@ defmodule Arbor.Actions.Mix do
     end
 
     @impl true
-    @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
+    @spec run(map(), map()) :: {:ok, map()} | {:error, String.t() | tuple()}
     def run(%{} = params, context) do
       with {:ok, path, args} <- build_invocation(params) do
         Actions.emit_started(__MODULE__, params)
@@ -3171,7 +3282,7 @@ defmodule Arbor.Actions.Mix do
 
           {:error, reason} ->
             Actions.emit_failed(__MODULE__, reason)
-            {:error, "mix format failed to execute: #{MixAction.format_error(reason)}"}
+            MixAction.public_action_error(reason, "mix format failed to execute: ")
         end
       else
         {:error, reason} ->
@@ -3304,7 +3415,7 @@ defmodule Arbor.Actions.Mix do
     end
 
     @impl true
-    @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
+    @spec run(map(), map()) :: {:ok, map()} | {:error, String.t() | tuple()}
     def run(%{path: path} = params, context) do
       Actions.emit_started(__MODULE__, params)
 
@@ -3332,7 +3443,7 @@ defmodule Arbor.Actions.Mix do
 
           {:error, reason} ->
             Actions.emit_failed(__MODULE__, reason)
-            {:error, "mix xref failed to execute: #{MixAction.format_error(reason)}"}
+            MixAction.public_action_error(reason, "mix xref failed to execute: ")
         end
       else
         {:error, reason} ->
