@@ -27,9 +27,11 @@ defmodule Arbor.Comms do
   alias Arbor.Comms.Channels.Limitless
   alias Arbor.Comms.Channels.Voice
   alias Arbor.Comms.ChatLogger
+  alias Arbor.Comms.EngagementStore
   alias Arbor.Comms.InteractionRegistry.DurableLifecycleCore
   alias Arbor.Comms.InteractionRouter
   alias Arbor.Comms.PresenceTracker
+  alias Arbor.Contracts.Comms.Engagement
   alias Arbor.Contracts.Comms.Interaction
   require Logger
 
@@ -699,5 +701,272 @@ defmodule Arbor.Comms do
   def recent_messages(channel, opts \\ []) do
     count = Keyword.get(opts, :count, 50)
     ChatLogger.recent(channel, count)
+  end
+
+  # -- Voice/dashboard engagement transcript (VP-04A) --
+  #
+  # Canonical public path for a transport (dashboard ChatLive, voice) to resolve
+  # a human's private, user-scoped engagement and atomically append/load
+  # engagement-stamped transcript entries — without importing
+  # Arbor.Comms.EngagementStore or Arbor.Persistence.SessionStore directly.
+
+  @id_max_bytes 256
+  @content_max_bytes 8192
+  @metadata_value_max_bytes 1024
+  @metadata_max_bytes 2048
+  @turn_metadata_keys [:transport, :backend, :mode]
+  @resolve_opts_allowlist [:engagement_store]
+  @turn_opts_allowlist [:persistence]
+  @load_opts_allowlist [:limit, :before_timestamp, :persistence]
+
+  @doc """
+  Resolve (or create) the human's private, `:user`-scoped engagement with
+  `agent_id`.
+
+  Always resolves with the canonical, non-overridable creation options
+  `scope: :user`, `visibility: :private`, `owner_tenant: user_id` — callers
+  cannot widen or narrow those authority-bearing fields via `opts`.
+  `opts[:engagement_store]` may inject a test double implementing
+  `resolve_or_create/3`.
+  """
+  @spec resolve_user_engagement(String.t(), String.t(), keyword()) ::
+          {:ok, Engagement.t()} | {:error, term()}
+  def resolve_user_engagement(agent_id, user_id, opts \\ []) do
+    with :ok <- validate_opts(opts, @resolve_opts_allowlist),
+         :ok <- validate_id(agent_id, :agent_id),
+         :ok <- validate_id(user_id, :user_id) do
+      store = Keyword.get(opts, :engagement_store, EngagementStore)
+
+      store.resolve_or_create(agent_id, user_id,
+        scope: :user,
+        visibility: :private,
+        owner_tenant: user_id
+      )
+    end
+  end
+
+  @doc """
+  Record one completed two-sided turn as exactly two ordered, atomically
+  appended session entries under `"agent-session-\#{agent_id}"`.
+
+  Both entries are stamped with `metadata["engagement_id"] = engagement_id`
+  (source-owned, never overridable). `user_entry` and `assistant_entry` are
+  maps of the shape `%{content: String.t(), sent_at | completed_at: DateTime.t(),
+  metadata: map()}` (the user entry uses `:sent_at`, the assistant entry uses
+  `:completed_at`). `content` must be nonblank, valid UTF-8, and within
+  `#{@content_max_bytes}` bytes; it is converted to the existing text-block
+  persistence shape (`[%{"type" => "text", "text" => content}]`). `metadata` is
+  bounded to `"transport"`, `"backend"`, `"mode"` — `"utterance_end_at"` is
+  derived server-side from the user entry's `:sent_at` and cannot be supplied by
+  the caller. Returns an explicit error for invalid input or a failed append;
+  never reports success after a failed append. `opts[:persistence]` may inject
+  a test double implementing the `Arbor.Persistence` session functions.
+  """
+  @spec record_engagement_turn(String.t(), String.t(), map(), map(), keyword()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def record_engagement_turn(agent_id, engagement_id, user_entry, assistant_entry, opts \\ []) do
+    with :ok <- validate_opts(opts, @turn_opts_allowlist),
+         :ok <- validate_id(agent_id, :agent_id),
+         :ok <- validate_id(engagement_id, :engagement_id),
+         {:ok, user_attrs} <- build_turn_entry_attrs(:user, user_entry),
+         {:ok, assistant_attrs} <- build_turn_entry_attrs(:assistant, assistant_entry),
+         :ok <- validate_chronological(user_attrs.timestamp, assistant_attrs.timestamp) do
+      persistence = Keyword.get(opts, :persistence, Arbor.Persistence)
+
+      stamped_user =
+        stamp_entry(user_attrs, engagement_id, derive_utterance_end_at(user_attrs.timestamp))
+
+      stamped_assistant = stamp_entry(assistant_attrs, engagement_id, %{})
+      session_id = "agent-session-#{agent_id}"
+
+      with {:ok, session} <- persistence.ensure_session(session_id, agent_id, []) do
+        persistence.append_session_entries(session.id, [stamped_user, stamped_assistant])
+      end
+    end
+  end
+
+  @doc """
+  Load the display-ready transcript for one engagement, the same maps ChatLive
+  consumes, via the public `Arbor.Persistence` facade with the engagement
+  filter applied. Returns an explicit `{:error, reason}` for invalid ids or
+  opts rather than an empty list. `opts` accepts only `:limit`,
+  `:before_timestamp`, and `:persistence` (the test seam); any other key is
+  rejected.
+  """
+  @spec load_engagement_transcript(String.t(), String.t(), keyword()) ::
+          [map()] | {:error, term()}
+  def load_engagement_transcript(agent_id, engagement_id, opts \\ []) do
+    with :ok <- validate_opts(opts, @load_opts_allowlist),
+         :ok <- validate_id(agent_id, :agent_id),
+         :ok <- validate_id(engagement_id, :engagement_id) do
+      persistence = Keyword.get(opts, :persistence, Arbor.Persistence)
+      session_id = "agent-session-#{agent_id}"
+
+      forward_opts =
+        Keyword.take(opts, [:limit, :before_timestamp]) ++ [engagement_id: engagement_id]
+
+      persistence.load_recent_session_messages(session_id, forward_opts)
+    end
+  end
+
+  # -- Voice/dashboard engagement transcript: validation and shaping (private) --
+
+  defp validate_opts(opts, allowlist) do
+    cond do
+      not Keyword.keyword?(opts) ->
+        {:error, {:invalid_opts, :not_a_keyword_list}}
+
+      has_duplicate_keys?(opts) ->
+        {:error, {:invalid_opts, :duplicate_keys}}
+
+      true ->
+        case Enum.reject(Keyword.keys(opts), &(&1 in allowlist)) do
+          [] -> :ok
+          unknown -> {:error, {:invalid_opts, {:unknown_keys, unknown}}}
+        end
+    end
+  end
+
+  defp has_duplicate_keys?(opts) do
+    keys = Keyword.keys(opts)
+    length(keys) != length(Enum.uniq(keys))
+  end
+
+  # Byte-size is checked FIRST, before any Unicode validity/trim scan — those
+  # scans walk the whole binary, so an untrusted oversized value (valid or
+  # malformed UTF-8) is rejected on a cheap byte_size/1 call rather than after
+  # a full scan of attacker-controlled bytes.
+  defp validate_id(v, field) when is_binary(v) do
+    cond do
+      byte_size(v) > @id_max_bytes -> {:error, {:invalid_id, field, :too_large}}
+      not String.valid?(v) -> {:error, {:invalid_id, field, :not_utf8}}
+      String.trim(v) == "" -> {:error, {:invalid_id, field, :blank}}
+      true -> :ok
+    end
+  end
+
+  defp validate_id(_v, field), do: {:error, {:invalid_id, field, :not_a_string}}
+
+  defp validate_content(v, field) when is_binary(v) do
+    cond do
+      byte_size(v) > @content_max_bytes -> {:error, {:invalid_content, field, :too_large}}
+      not String.valid?(v) -> {:error, {:invalid_content, field, :not_utf8}}
+      String.trim(v) == "" -> {:error, {:invalid_content, field, :blank}}
+      true -> :ok
+    end
+  end
+
+  defp validate_content(_v, field), do: {:error, {:invalid_content, field, :not_a_string}}
+
+  defp validate_timestamp(%DateTime{}, _field), do: :ok
+  defp validate_timestamp(_v, field), do: {:error, {:invalid_timestamp, field}}
+
+  defp build_turn_entry_attrs(kind, entry) when is_map(entry) do
+    ts_field = if kind == :user, do: :sent_at, else: :completed_at
+    content = Map.get(entry, :content)
+    ts = Map.get(entry, ts_field)
+
+    with :ok <- validate_content(content, :content),
+         :ok <- validate_timestamp(ts, ts_field),
+         {:ok, meta} <- bound_and_validate_metadata(Map.get(entry, :metadata, %{})) do
+      entry_type = Atom.to_string(kind)
+
+      {:ok,
+       %{
+         entry_type: entry_type,
+         role: entry_type,
+         content: [%{"type" => "text", "text" => content}],
+         timestamp: ts,
+         metadata: meta
+       }}
+    else
+      {:error, reason} -> {:error, {invalid_entry_tag(kind), reason}}
+    end
+  end
+
+  # Non-map user_entry/assistant_entry (nil, a list, a string, ...) — reject
+  # with a typed error instead of raising inside Map.get/2 above.
+  defp build_turn_entry_attrs(kind, _entry), do: {:error, {invalid_entry_tag(kind), :not_a_map}}
+
+  defp invalid_entry_tag(:user), do: :invalid_user_entry
+  defp invalid_entry_tag(:assistant), do: :invalid_assistant_entry
+
+  defp validate_chronological(sent_at, completed_at) do
+    if DateTime.compare(sent_at, completed_at) == :gt do
+      {:error, :timestamps_out_of_order}
+    else
+      :ok
+    end
+  end
+
+  # Looks up OUR fixed compiled-in atoms (@turn_metadata_keys) as either their
+  # atom or string form in the CALLER's map. to_string/1 (via Atom.to_string/1)
+  # is only ever called on those known-safe atoms, never on a caller-supplied
+  # key — key allowlisting alone would not bound an arbitrary/adversarial key.
+  defp bound_and_validate_metadata(m) when is_map(m) do
+    bounded =
+      Enum.reduce(@turn_metadata_keys, %{}, fn key, acc ->
+        case Map.fetch(m, key) do
+          {:ok, value} ->
+            Map.put(acc, Atom.to_string(key), value)
+
+          :error ->
+            case Map.fetch(m, Atom.to_string(key)) do
+              {:ok, value} -> Map.put(acc, Atom.to_string(key), value)
+              :error -> acc
+            end
+        end
+      end)
+
+    with :ok <- validate_metadata_values(bounded),
+         :ok <- validate_metadata_size(bounded) do
+      {:ok, bounded}
+    end
+  end
+
+  defp bound_and_validate_metadata(_m), do: {:error, :metadata_must_be_a_map}
+
+  defp validate_metadata_values(metadata) do
+    if Enum.all?(metadata, fn {_k, v} -> json_scalar?(v) end) do
+      :ok
+    else
+      {:error, :invalid_metadata_value}
+    end
+  end
+
+  # Byte-size is checked FIRST, before String.valid?/1 — same reasoning as
+  # validate_id/2 and validate_content/2 above: bound each individual
+  # caller-supplied metadata string BEFORE it is scanned for UTF-8 validity or
+  # folded into the whole-map `:erlang.term_to_binary/1` size check below, so
+  # an oversized single value never reaches either scan.
+  defp json_scalar?(v) when is_binary(v) do
+    byte_size(v) <= @metadata_value_max_bytes and String.valid?(v)
+  end
+
+  defp json_scalar?(v) when is_boolean(v) or is_number(v) or is_nil(v), do: true
+  defp json_scalar?(_v), do: false
+
+  defp validate_metadata_size(metadata) do
+    if byte_size(:erlang.term_to_binary(metadata)) <= @metadata_max_bytes do
+      :ok
+    else
+      {:error, :metadata_too_large}
+    end
+  end
+
+  # Source-owned: derived from the SAME sent_at already validated/persisted on
+  # the user entry, so it can never diverge from it. Not in @turn_metadata_keys,
+  # so any caller-supplied "utterance_end_at" is unreachable, not compared.
+  defp derive_utterance_end_at(%DateTime{} = sent_at) do
+    %{"utterance_end_at" => DateTime.to_iso8601(sent_at)}
+  end
+
+  defp stamp_entry(attrs, engagement_id, extra_metadata) do
+    metadata =
+      attrs.metadata
+      |> Map.merge(extra_metadata)
+      |> Map.put("engagement_id", engagement_id)
+
+    %{attrs | metadata: metadata}
   end
 end

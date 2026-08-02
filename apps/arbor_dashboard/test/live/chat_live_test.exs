@@ -420,4 +420,30 @@ defmodule Arbor.Dashboard.Live.ChatLiveTest do
       assert_received {:answer_approval, "irq_definitely_unknown", :deny, _opts}
     end
   end
+
+  # VP-04A: tag_engagement/2 was migrated from reaching into the internal
+  # Arbor.Comms.EngagementStore module to calling the public Arbor.Comms
+  # facade (resolve_user_engagement/2). This guard is a static source scan —
+  # deliberately not a mounted-LiveView or shared-ETS-backed behavioral test —
+  # so it stays fully hermetic (no DB, no live agent, no process-wide
+  # EngagementStore state). Same technique as the AST-based
+  # apps/arbor_contracts/test/arbor/contracts/dependency_hierarchy_test.exs
+  # drift guard.
+  describe "tag_engagement/2 facade migration (VP-04A)" do
+    @tag :fast
+    test "uses the public Arbor.Comms facade and no longer references Arbor.Comms.EngagementStore" do
+      source =
+        __ENV__.file
+        |> Path.dirname()
+        |> Path.join("../../lib/arbor_dashboard/live/chat_live.ex")
+        |> Path.expand()
+        |> File.read!()
+
+      assert source =~ "Arbor.Comms.resolve_user_engagement",
+             "tag_engagement/2 must resolve engagements through the public Arbor.Comms facade"
+
+      refute source =~ "Arbor.Comms.EngagementStore",
+             "tag_engagement/2 must not reach into the internal Arbor.Comms.EngagementStore module"
+    end
+  end
 end

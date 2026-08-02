@@ -56,9 +56,64 @@ defmodule Arbor.Persistence.SessionStore do
   """
   @spec get_session(String.t()) :: {:ok, Session.t()} | {:error, :not_found}
   def get_session(session_id) do
-    case Repo.one(from s in Session, where: s.session_id == ^session_id) do
+    case Repo.one(from(s in Session, where: s.session_id == ^session_id)) do
       nil -> {:error, :not_found}
       session -> {:ok, session}
+    end
+  end
+
+  @doc """
+  Return the existing session for `session_id`, or create it for `agent_id`.
+
+  Concurrent first callers converge on the same persisted row: a losing racer's
+  `create_session/2` fails on the `session_id` unique constraint, and this
+  re-fetches the winner's row instead of surfacing the conflict. Either way the
+  returned session's `agent_id` MUST match the requested `agent_id` — a
+  `session_id` that already belongs to a different agent fails closed with
+  `{:error, {:agent_id_mismatch, owner_agent_id, requested_agent_id}}` rather
+  than silently handing back another agent's session.
+  """
+  @spec ensure_session(String.t(), String.t(), keyword()) ::
+          {:ok, Session.t()} | {:error, term()}
+  def ensure_session(session_id, agent_id, opts \\ []) do
+    case get_session(session_id) do
+      {:ok, session} -> check_session_owner(session, agent_id)
+      {:error, :not_found} -> create_or_converge_session(session_id, agent_id, opts)
+    end
+  end
+
+  defp create_or_converge_session(session_id, agent_id, opts) do
+    case create_session(agent_id, Keyword.put(opts, :session_id, session_id)) do
+      {:ok, session} ->
+        check_session_owner(session, agent_id)
+
+      {:error, %Ecto.Changeset{} = changeset} ->
+        if session_id_unique_conflict?(changeset) do
+          case get_session(session_id) do
+            {:ok, session} -> check_session_owner(session, agent_id)
+            error -> error
+          end
+        else
+          {:error, changeset}
+        end
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp check_session_owner(%Session{agent_id: owner_agent_id} = session, agent_id) do
+    if owner_agent_id == agent_id do
+      {:ok, session}
+    else
+      {:error, {:agent_id_mismatch, owner_agent_id, agent_id}}
+    end
+  end
+
+  defp session_id_unique_conflict?(%Ecto.Changeset{errors: errors}) do
+    case Keyword.get(errors, :session_id) do
+      {_msg, opts} -> Keyword.get(opts, :constraint) == :unique
+      _ -> false
     end
   end
 
@@ -68,10 +123,11 @@ defmodule Arbor.Persistence.SessionStore do
   @spec get_active_session(String.t()) :: {:ok, Session.t()} | {:error, :not_found}
   def get_active_session(agent_id) do
     query =
-      from s in Session,
+      from(s in Session,
         where: s.agent_id == ^agent_id and s.status == "active",
         order_by: [desc: s.inserted_at],
         limit: 1
+      )
 
     case Repo.one(query) do
       nil -> {:error, :not_found}
@@ -160,21 +216,22 @@ defmodule Arbor.Persistence.SessionStore do
     types = Keyword.get(opts, :entry_types)
 
     query =
-      from e in SessionEntry,
+      from(e in SessionEntry,
         where: e.session_id == ^session_uuid,
         order_by: [asc: e.timestamp],
         limit: ^limit
+      )
 
     query =
       if after_ts do
-        from e in query, where: e.timestamp > ^after_ts
+        from(e in query, where: e.timestamp > ^after_ts)
       else
         query
       end
 
     query =
       if types do
-        from e in query, where: e.entry_type in ^types
+        from(e in query, where: e.entry_type in ^types)
       else
         query
       end
@@ -198,7 +255,7 @@ defmodule Arbor.Persistence.SessionStore do
   """
   @spec entry_count(Ecto.UUID.t()) :: non_neg_integer()
   def entry_count(session_uuid) do
-    Repo.one(from e in SessionEntry, where: e.session_id == ^session_uuid, select: count())
+    Repo.one(from(e in SessionEntry, where: e.session_id == ^session_uuid, select: count()))
   end
 
   # ── Dashboard display API ──────────────────────────────────────────
@@ -213,6 +270,8 @@ defmodule Arbor.Persistence.SessionStore do
 
   - `:limit` — max messages (default 50)
   - `:before_timestamp` — only messages before this DateTime (cursor)
+  - `:engagement_id` — only entries stamped `metadata["engagement_id"]` with
+    this value, applied in the query before `:limit`
   """
   @spec load_recent_for_display(String.t(), keyword()) :: [map()]
   def load_recent_for_display(session_id, opts \\ []) do
@@ -220,20 +279,17 @@ defmodule Arbor.Persistence.SessionStore do
       {:ok, session} ->
         limit = Keyword.get(opts, :limit, 50)
         before_ts = Keyword.get(opts, :before_timestamp)
+        engagement_id = Keyword.get(opts, :engagement_id)
 
         query =
-          from e in SessionEntry,
+          from(e in SessionEntry,
             where: e.session_id == ^session.id,
-            where: e.entry_type in ["user", "assistant"],
-            order_by: [desc: e.timestamp],
-            limit: ^limit
+            where: e.entry_type in ["user", "assistant"]
+          )
 
-        query =
-          if before_ts do
-            from e in query, where: e.timestamp < ^before_ts
-          else
-            query
-          end
+        query = maybe_before_timestamp(query, before_ts)
+        query = maybe_engagement_filter(query, engagement_id)
+        query = from(e in query, order_by: [desc: e.timestamp], limit: ^limit)
 
         Repo.all(query)
         |> Enum.reverse()
@@ -246,6 +302,44 @@ defmodule Arbor.Persistence.SessionStore do
     _ -> []
   end
 
+  defp maybe_before_timestamp(query, nil), do: query
+
+  defp maybe_before_timestamp(query, before_ts) do
+    from(e in query, where: e.timestamp < ^before_ts)
+  end
+
+  defp maybe_engagement_filter(query, nil), do: query
+
+  defp maybe_engagement_filter(query, engagement_id) do
+    case repo_adapter(Repo) do
+      Ecto.Adapters.SQLite3 ->
+        from(e in query,
+          where: fragment("json_extract(?, '$.engagement_id')", e.metadata) == ^engagement_id
+        )
+
+      _ ->
+        from(e in query, where: fragment("?->>'engagement_id'", e.metadata) == ^engagement_id)
+    end
+  end
+
+  # Arbor.Persistence.Repo.__adapter__/0 is the ONLY adapter source that can't
+  # drift from what the Repo module was actually compiled with (`use Ecto.Repo,
+  # adapter: Application.compile_env(...)`). Application.get_env/3 reads the
+  # same config key at RUNTIME and can be mutated independently of the already-
+  # compiled Repo (e.g. by a test or a later config load), which would pick the
+  # wrong SQL dialect below — a real correctness bug, not just a lint concern.
+  #
+  # __adapter__/0 is called through this repo-as-parameter indirection, not as
+  # a literal `Repo.__adapter__()` inline in the case above: dispatching on a
+  # parameter keeps Elixir's set-theoretic type checker from narrowing the
+  # call's return type to this build's single compiled adapter (which is what
+  # made the non-matching case clause a compile-time "will never match"
+  # warning — fatal under --warnings-as-errors — when this was written as a
+  # literal call). Same technique as `postgres_repo?/1` /
+  # `sqlite_repo?/1` in event_log/ecto.ex, which take `repo` as a parameter for
+  # the identical reason.
+  defp repo_adapter(repo), do: repo.__adapter__()
+
   @doc """
   Count user + assistant messages for a session by session_id string.
   """
@@ -254,10 +348,11 @@ defmodule Arbor.Persistence.SessionStore do
     case get_session(session_id) do
       {:ok, session} ->
         Repo.one(
-          from e in SessionEntry,
+          from(e in SessionEntry,
             where: e.session_id == ^session.id,
             where: e.entry_type in ["user", "assistant"],
             select: count()
+          )
         )
 
       {:error, _} ->
@@ -287,20 +382,22 @@ defmodule Arbor.Persistence.SessionStore do
     }
   rescue
     # If atom conversion fails, keep as string
-    _ -> %{
-      id: entry.id,
-      role: entry.role,
-      content: unwrap_content(entry.content),
-      timestamp: entry.timestamp,
-      model: entry.model,
-      token_usage: entry.token_usage
-    }
+    _ ->
+      %{
+        id: entry.id,
+        role: entry.role,
+        content: unwrap_content(entry.content),
+        timestamp: entry.timestamp,
+        model: entry.model,
+        token_usage: entry.token_usage
+      }
   end
 
   # Unwrap content blocks to plain text for display.
   # Content may be: [%{"type" => "text", "text" => "hello"}], a plain string, or nil.
   defp unwrap_content(nil), do: ""
   defp unwrap_content(content) when is_binary(content), do: content
+
   defp unwrap_content(content) when is_list(content) do
     content
     |> Enum.filter(fn
@@ -309,6 +406,7 @@ defmodule Arbor.Persistence.SessionStore do
     end)
     |> Enum.map_join("\n", fn block -> block["text"] || "" end)
   end
+
   defp unwrap_content(_), do: ""
 
   # ── JSONL export ───────────────────────────────────────────────────

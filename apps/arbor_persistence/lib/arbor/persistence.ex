@@ -27,6 +27,61 @@ defmodule Arbor.Persistence do
   alias Arbor.Contracts.Persistence.{AppendOperation, Filter, Record}
   alias Arbor.Persistence.{Event, EventLog}
   alias Arbor.Persistence.Repo
+  alias Arbor.Persistence.Schemas.Session
+  alias Arbor.Persistence.SessionStore
+
+  # ---------------------------------------------------------------
+  # Session transcript facade (VP-04A)
+  #
+  # Narrow delegates onto Arbor.Persistence.SessionStore — the canonical public
+  # path for a transport (dashboard, voice) to resolve/append/load an agent's
+  # session transcript without importing SessionStore or its Ecto schemas
+  # directly. Opts are validated as closed-allowlist keyword lists: an unknown
+  # or duplicate key is rejected outright, never silently dropped.
+  # ---------------------------------------------------------------
+
+  @ensure_session_opts_allowlist [:model, :cwd, :git_branch, :metadata]
+  @load_recent_opts_allowlist [:limit, :before_timestamp, :engagement_id]
+  @load_limit_max 1000
+  @engagement_id_max_bytes 256
+
+  @doc """
+  Return the existing session for `session_id`, or create it for `agent_id`.
+
+  See `Arbor.Persistence.SessionStore.ensure_session/3` for the concurrency and
+  ownership semantics. `opts` accepts only `:model`, `:cwd`, `:git_branch`, and
+  `:metadata` (forwarded to session creation); any other key is rejected.
+  """
+  @spec ensure_session(String.t(), String.t(), keyword()) ::
+          {:ok, Session.t()} | {:error, term()}
+  def ensure_session(session_id, agent_id, opts \\ []) do
+    with :ok <- validate_opts(opts, @ensure_session_opts_allowlist) do
+      SessionStore.ensure_session(session_id, agent_id, opts)
+    end
+  end
+
+  @doc "Atomically bulk-append session entries. Delegates to SessionStore.append_entries/2."
+  @spec append_session_entries(Ecto.UUID.t(), [map()]) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def append_session_entries(session_uuid, entries) do
+    SessionStore.append_entries(session_uuid, entries)
+  end
+
+  @doc """
+  Load recent display-ready session messages, optionally filtered to one
+  engagement. `opts` accepts only `:limit` (a positive integer, capped at
+  `#{@load_limit_max}`), `:before_timestamp` (a `DateTime` or absent), and
+  `:engagement_id` (a nonblank, valid-UTF8 string within
+  `#{@engagement_id_max_bytes}` bytes); any other key, or a present key holding
+  a value outside those bounds, is rejected.
+  """
+  @spec load_recent_session_messages(String.t(), keyword()) :: [map()] | {:error, term()}
+  def load_recent_session_messages(session_id, opts \\ []) do
+    with :ok <- validate_opts(opts, @load_recent_opts_allowlist),
+         :ok <- validate_load_opt_values(opts) do
+      SessionStore.load_recent_for_display(session_id, opts)
+    end
+  end
 
   # ---------------------------------------------------------------
   # Authorized API (for agent callers)
@@ -834,4 +889,75 @@ defmodule Arbor.Persistence do
   catch
     _kind, _reason -> {:error, :dispatch_uncertain}
   end
+
+  # Closed-allowlist keyword validation for the session transcript facade above.
+  # Rejects anything outside `allowlist` instead of silently filtering it out.
+  defp validate_opts(opts, allowlist) do
+    cond do
+      not Keyword.keyword?(opts) ->
+        {:error, {:invalid_opts, :not_a_keyword_list}}
+
+      has_duplicate_keys?(opts) ->
+        {:error, {:invalid_opts, :duplicate_keys}}
+
+      true ->
+        case Enum.reject(Keyword.keys(opts), &(&1 in allowlist)) do
+          [] -> :ok
+          unknown -> {:error, {:invalid_opts, {:unknown_keys, unknown}}}
+        end
+    end
+  end
+
+  defp has_duplicate_keys?(opts) do
+    keys = Keyword.keys(opts)
+    length(keys) != length(Enum.uniq(keys))
+  end
+
+  # Value bounds for load_recent_session_messages/2's opts — allowlisting the
+  # KEYS above is not itself a bound; a present key must also hold a value
+  # inside its own contract or it is rejected outright, not passed through to
+  # the query.
+  defp validate_load_opt_values(opts) do
+    with :ok <- validate_limit_opt(Keyword.get(opts, :limit)),
+         :ok <- validate_before_timestamp_opt(Keyword.get(opts, :before_timestamp)) do
+      validate_engagement_id_opt(Keyword.get(opts, :engagement_id))
+    end
+  end
+
+  defp validate_limit_opt(nil), do: :ok
+
+  defp validate_limit_opt(limit)
+       when is_integer(limit) and limit > 0 and limit <= @load_limit_max,
+       do: :ok
+
+  defp validate_limit_opt(limit), do: {:error, {:invalid_opt_value, :limit, limit}}
+
+  defp validate_before_timestamp_opt(nil), do: :ok
+  defp validate_before_timestamp_opt(%DateTime{}), do: :ok
+
+  defp validate_before_timestamp_opt(value),
+    do: {:error, {:invalid_opt_value, :before_timestamp, value}}
+
+  defp validate_engagement_id_opt(nil), do: :ok
+
+  defp validate_engagement_id_opt(v) when is_binary(v) do
+    # Byte-size checked before String.valid?/1 / String.trim/1 — bounds an
+    # oversized untrusted value on a cheap byte_size/1 call before either scan
+    # walks it.
+    cond do
+      byte_size(v) > @engagement_id_max_bytes ->
+        {:error, {:invalid_opt_value, :engagement_id, :too_large}}
+
+      not String.valid?(v) ->
+        {:error, {:invalid_opt_value, :engagement_id, :not_utf8}}
+
+      String.trim(v) == "" ->
+        {:error, {:invalid_opt_value, :engagement_id, :blank}}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp validate_engagement_id_opt(v), do: {:error, {:invalid_opt_value, :engagement_id, v}}
 end

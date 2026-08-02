@@ -1075,24 +1075,27 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   # Resolve the :user-scoped engagement for this (agent, human) pair — one
   # continuous conversation per user↔agent that resumes across tabs/devices — and
   # tag the message so the single-mind Session keys its transcript + persisted-entry
-  # provenance on it. Best-effort: if the store/agent isn't available, fall back to
+  # provenance on it. Best-effort: if resolution isn't available, fall back to
   # the agent's default conversation (engagement_id stays nil = today's behavior).
+  # Goes through the public Arbor.Comms facade (VP-04A) so dashboard and voice
+  # resolve engagements identically instead of each reaching into EngagementStore.
   defp tag_engagement(user_message, socket) do
     agent_id = socket.assigns[:agent_id]
     user_id = approval_actor_id(socket)
 
-    with true <- is_binary(agent_id),
-         true <- Code.ensure_loaded?(Arbor.Comms.EngagementStore),
-         {:ok, engagement} <-
-           Arbor.Comms.EngagementStore.resolve_or_create(agent_id, user_id,
-             scope: :user,
-             visibility: :private,
-             owner_tenant: user_id
-           ) do
-      Arbor.Contracts.Session.UserMessage.with_engagement(user_message, engagement.id)
+    if is_binary(agent_id) do
+      case Arbor.Comms.resolve_user_engagement(agent_id, user_id) do
+        {:ok, engagement} ->
+          Arbor.Contracts.Session.UserMessage.with_engagement(user_message, engagement.id)
+
+        _ ->
+          user_message
+      end
     else
-      _ -> user_message
+      user_message
     end
+  rescue
+    _ -> user_message
   end
 
   defp send_prompt(input, socket) do
