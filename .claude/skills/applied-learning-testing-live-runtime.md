@@ -673,3 +673,15 @@ fixtures, or docs as evidence, silently turning unimplemented requirements
 green. Parse the AST and accept only literal ExUnit tag attributes; malformed
 files should fail the scan instead of being skipped (found 2026-08-01 during the
 voice specification preflight).
+
+<!-- applied-learning: managed-lifecycle-commands-must-bind-to-the-persisted-running-node-identity -->
+<a id="applied-learning-managed-lifecycle-commands-must-bind-to-the-persisted-running-node-identity"></a>
+**Managed lifecycle commands must bind to the persisted running-node identity.**
+Re-detecting the host on every invocation can make restart look for
+`arbor_dev@new-host` while `arbor_dev@old-host` is still alive, skip shutdown,
+overwrite PID metadata, and collide in EPMD. Persist the exact node name and
+host with the PID at successful start; prefer an explicit operator override
+only when intentionally relocating; use the stored identity for status, stop,
+and restart; and refuse to start when a verified managed PID is alive but
+unreachable. Regression-test host drift and stale or mismatched metadata (found
+2026-08-02 restarting after Linux dependency-baseline activation).
