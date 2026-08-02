@@ -308,6 +308,7 @@ defmodule Arbor.Agent.TemplateStoreTest do
       assert "arbor://action/coding/security_regression/validate" in resources
       assert "arbor://action/coding/cross_app/validate" in resources
       assert "arbor://action/coding/workspace/**" in resources
+      assert "arbor://action/coding/dependency_baseline/check" in resources
       assert "arbor://action/coding/review_tree/read" in resources
       assert "arbor://action/coding/review_tree/search" in resources
       assert "arbor://action/coding/review/submit" in resources
@@ -350,6 +351,9 @@ defmodule Arbor.Agent.TemplateStoreTest do
       assert preset["rules"]["arbor://action/coding/security_regression/validate"] == "ask"
       assert preset["rules"]["arbor://action/coding/cross_app/validate"] == "ask"
       assert preset["rules"]["arbor://action/coding/workspace"] == "auto"
+
+      assert preset["rules"]["arbor://action/coding/dependency_baseline/check"] == "auto"
+
       assert preset["rules"]["arbor://action/coding/review_tree/read"] == "auto"
       assert preset["rules"]["arbor://action/coding/review_tree/search"] == "auto"
       assert preset["rules"]["arbor://action/coding/review/submit"] == "auto"
