@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-08-01",
-  "entry_count": 607,
+  "entry_count": 608,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -7435,8 +7435,21 @@
       "source_incident": "found 2026-08-01 during the voice specification preflight).",
       "content_sha256": "ec0b6f0223752d8ee2a8a787560573fa7c382de3f85fa3379d9070a7e01dc5a1",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 608,
+      "source_kind": "post-migration",
+      "slug": "smoke-test-a-disposable-copy-of-a-dependency-baseline-never-the-source-to-be-signed",
+      "title": "Smoke-test a disposable copy of a dependency baseline, never the source to be signed.",
+      "topic": "shell-containment",
+      "destination": ".claude/skills/applied-learning-shell-containment.md",
+      "anchor": "applied-learning-smoke-test-a-disposable-copy-of-a-dependency-baseline-never-the-source-to-be-signed",
+      "source_date": "2026-08-02",
+      "source_incident": "found 2026-08-02 repairing the Linux `sqlite_vec` baseline).",
+      "content_sha256": "b5b3bf0d6e098ced442ffcaff7fdee8048d9b5d21a1b65f38c4f0a74096d0c30",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 146
+  "post_migration_entry_count": 147
 }
