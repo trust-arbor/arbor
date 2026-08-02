@@ -847,3 +847,10 @@ the pipeline's requested/confirmed model evidence before diagnosing a model
 mismatch; both still must agree with the reviewed plan (found 2026-07-31 while
 the Phase E Claude fallback launched with `--model opus` but attested
 `model: sonnet` after dynamic selection).
+<!-- applied-learning: approval-notes-are-bounded-single-line-audit-fields -->
+<a id="applied-learning-approval-notes-are-bounded-single-line-audit-fields"></a>
+**Approval notes are bounded single-line audit fields, not review documents.**
+`arbor_answer_approval` rejects control characters and oversized notes. Keep the
+note to one line under 1 KB, summarize the decision and essential blockers, and
+put detailed evidence in the reviewed artifact or a separate steering message
+(found 2026-08-02 requesting lifecycle-design rework through MCP).

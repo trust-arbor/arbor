@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-08-01",
-  "entry_count": 609,
+  "entry_count": 610,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -7461,8 +7461,21 @@
       "source_incident": "found 2026-08-02 restarting after Linux dependency-baseline activation).",
       "content_sha256": "617d2d40275f14d315375d7aeaa60a7e41c03877be42e8e173877382106ab842",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 610,
+      "source_kind": "post-migration",
+      "slug": "approval-notes-are-bounded-single-line-audit-fields",
+      "title": "Approval notes are bounded single-line audit fields, not review documents.",
+      "topic": "acp-mcp",
+      "destination": ".claude/skills/applied-learning-acp-mcp.md",
+      "anchor": "applied-learning-approval-notes-are-bounded-single-line-audit-fields",
+      "source_date": "2026-08-02",
+      "source_incident": "found 2026-08-02 requesting lifecycle-design rework through MCP).",
+      "content_sha256": "0d3e36f7709c1d782315d66eca037bb40e832a0adf8a5e93c03ef0e278dfeee4",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 148
+  "post_migration_entry_count": 149
 }
