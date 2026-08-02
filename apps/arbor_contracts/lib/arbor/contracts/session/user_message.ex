@@ -37,6 +37,9 @@ defmodule Arbor.Contracts.Session.UserMessage do
       # Bare string fallback (CLI / Manager.chat / backwards compat)
       UserMessage.from_string(content)
 
+      # Voice interface — utterance-end sent_at, adapter-specific metadata
+      UserMessage.from_voice(content, sent_at: utterance_end_at, sender_id: agent_id)
+
       # Future adapters supply their own constructors:
       # UserMessage.from_signal_envelope(envelope)
       # UserMessage.from_discord_event(event)
@@ -59,7 +62,7 @@ defmodule Arbor.Contracts.Session.UserMessage do
   use TypedStruct
 
   @type transport ::
-          :dashboard | :cli | :acp | :signal | :discord | :slack | :http | nil
+          :dashboard | :cli | :acp | :signal | :discord | :slack | :http | :voice | nil
 
   typedstruct do
     @typedoc "A user message at the session entry boundary"
@@ -175,6 +178,43 @@ defmodule Arbor.Contracts.Session.UserMessage do
       sent_at: DateTime.utc_now(),
       sender: sender,
       transport: :cli
+    }
+  end
+
+  @doc """
+  Build a UserMessage from a voice interface turn.
+
+  Voice utterances are transcribed asynchronously, so the caller supplies the
+  utterance-end timestamp (the most accurate `sent_at` available) via opts
+  rather than having it stamped here; it defaults to `DateTime.utc_now/0` only
+  when the caller doesn't have a better one. Tags the transport as `:voice`.
+
+  ## Parameters
+
+  - `content` — the transcribed utterance text
+  - `opts` — `:sent_at` (DateTime, default `DateTime.utc_now/0` — pass the
+    utterance-end time), `:sender_id` (the principal id of the speaker),
+    `:transport_metadata` (map of adapter-specific fields, e.g.
+    `%{backend: "xai_realtime", input: :speech, device: "mac"}`)
+
+  ## Examples
+
+      iex> msg = UserMessage.from_voice("hello", sender_id: "human_alice")
+      iex> msg.content
+      "hello"
+      iex> msg.transport
+      :voice
+      iex> msg.sender_id
+      "human_alice"
+  """
+  @spec from_voice(String.t(), keyword()) :: t()
+  def from_voice(content, opts \\ []) when is_binary(content) do
+    %__MODULE__{
+      content: content,
+      sent_at: Keyword.get(opts, :sent_at, DateTime.utc_now()),
+      sender_id: Keyword.get(opts, :sender_id),
+      transport: :voice,
+      transport_metadata: Keyword.get(opts, :transport_metadata, %{})
     }
   end
 

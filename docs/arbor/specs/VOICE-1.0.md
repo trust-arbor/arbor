@@ -31,7 +31,7 @@ transport — raw audio never leaves the phone.
 
 ## Transport & Engagement
 
-- **VOICE-1** (MUST, planned): Every user utterance entering Arbor from the voice interface MUST
+- **VOICE-1** (MUST): Every user utterance entering Arbor from the voice interface MUST
   be represented as an `Arbor.Contracts.Session.UserMessage` with `transport: :voice`
   and the most accurate `sent_at` available (utterance end time, not processing time).
 

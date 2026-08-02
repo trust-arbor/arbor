@@ -56,6 +56,61 @@ defmodule Arbor.Contracts.Session.UserMessageTest do
     end
   end
 
+  describe "from_voice/2" do
+    @tag spec: "VOICE-1"
+    test "tags transport as :voice and enforces content" do
+      msg = UserMessage.from_voice("hello")
+      assert msg.content == "hello"
+      assert msg.transport == :voice
+      assert %DateTime{} = msg.sent_at
+    end
+
+    @tag spec: "VOICE-1"
+    test "defaults sent_at to now when absent" do
+      before = DateTime.utc_now()
+      msg = UserMessage.from_voice("hello")
+      after_time = DateTime.utc_now()
+
+      assert DateTime.compare(msg.sent_at, before) in [:gt, :eq]
+      assert DateTime.compare(msg.sent_at, after_time) in [:lt, :eq]
+    end
+
+    @tag spec: "VOICE-1"
+    test "respects sent_at from opts (utterance-end time, not processing time)" do
+      utterance_end = DateTime.add(DateTime.utc_now(), -5, :second)
+      msg = UserMessage.from_voice("hello", sent_at: utterance_end)
+      assert msg.sent_at == utterance_end
+    end
+
+    @tag spec: "VOICE-1"
+    test "carries sender_id and transport_metadata through" do
+      metadata = %{backend: "xai_realtime", input: :speech, device: "mac"}
+
+      msg =
+        UserMessage.from_voice("hello", sender_id: "human_alice", transport_metadata: metadata)
+
+      assert msg.sender_id == "human_alice"
+      assert msg.transport_metadata == metadata
+    end
+
+    @tag spec: "VOICE-1"
+    test "transport_metadata defaults to an empty map" do
+      msg = UserMessage.from_voice("hello")
+      assert msg.transport_metadata == %{}
+    end
+
+    @tag spec: "VOICE-1"
+    test "composes with with_engagement/2" do
+      msg =
+        "hello"
+        |> UserMessage.from_voice(sender_id: "human_alice")
+        |> UserMessage.with_engagement("engagement_123")
+
+      assert msg.transport == :voice
+      assert msg.engagement_id == "engagement_123"
+    end
+  end
+
   describe "coerce/1" do
     test "passes a UserMessage struct through unchanged" do
       original = UserMessage.from_dashboard("test", "human_x")
