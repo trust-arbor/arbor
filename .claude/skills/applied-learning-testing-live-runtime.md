@@ -715,3 +715,12 @@ later cleanup may reclaim. Use isolated roots for compile and test evidence, but
 perform the final managed restart from a stable project build environment unless
 the daemon boundary explicitly sanitizes transient build variables (found
 2026-08-02 while verifying managed lifecycle identity).
+
+<!-- applied-learning: portable-file-mode-probes-must-try-gnu-stat-before-bsd-stat -->
+<a id="applied-learning-portable-file-mode-probes-must-try-gnu-stat-before-bsd-stat"></a>
+**Portable file-mode probes must try GNU `stat` before BSD `stat`.** GNU
+`stat -f` succeeds but prints filesystem details, so a BSD-first `||` chain
+never reaches its GNU fallback in Linux containers and can falsely fail a
+permission test. Use `stat -c '%a' file 2>/dev/null || stat -f '%Lp' file
+2>/dev/null`, then validate the output shape (found 2026-08-02 when cross-app
+validation falsely rejected the unrelated VP-04A candidate).

@@ -102,8 +102,9 @@ defmodule Arbor.Persistence.BackupPgpassSecurityTest do
       #!/bin/sh
       env > "#{env_dump}"
       if [ -n "$PGPASSFILE" ] && [ -f "$PGPASSFILE" ]; then
-        # %Lp = octal file mode incl. type bits, e.g. 100600
-        mode=$(stat -f '%Lp' "$PGPASSFILE" 2>/dev/null || stat -c '%a' "$PGPASSFILE" 2>/dev/null)
+        # Try GNU stat first. GNU `stat -f` succeeds but reports filesystem
+        # details, so using the BSD form first does not reliably fall back.
+        mode=$(stat -c '%a' "$PGPASSFILE" 2>/dev/null || stat -f '%Lp' "$PGPASSFILE" 2>/dev/null)
         echo "PGPASS_MODE=$mode" >> "#{env_dump}"
       fi
       for a in "$@"; do

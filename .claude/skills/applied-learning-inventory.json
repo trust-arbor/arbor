@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-08-02",
-  "entry_count": 616,
+  "entry_count": 617,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -7552,8 +7552,21 @@
       "source_incident": "found 2026-08-02 when three voice prerequisite packets exhausted recovery or approval capacity).",
       "content_sha256": "8edbb5d015a15ef4a7e484bf60bd6dd2b787d38fcaae609a700a6227fbdb2240",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 617,
+      "source_kind": "post-migration",
+      "slug": "portable-file-mode-probes-must-try-gnu-stat-before-bsd-stat",
+      "title": "Portable file-mode probes must try GNU `stat` before BSD `stat`.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-portable-file-mode-probes-must-try-gnu-stat-before-bsd-stat",
+      "source_date": "2026-08-02",
+      "source_incident": "found 2026-08-02 when cross-app validation falsely rejected the unrelated VP-04A candidate).",
+      "content_sha256": "2ea182669375e8e940b03501ed3fcee54176162d17f76cf2a15dcdc397cb4415",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 155
+  "post_migration_entry_count": 156
 }
