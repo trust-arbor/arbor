@@ -2,7 +2,12 @@ defmodule Mix.Tasks.Arbor.Spec.Coverage do
   @shortdoc "Report spec-statement → test traceability (conformance coverage)"
 
   @moduledoc """
-  Maps normative spec statements (docs/specs/*.md) to the tests that prove them.
+  Maps normative spec statements to the tests that prove them.
+
+  Tracked specifications live under `docs/arbor/specs/`. The legacy tracked
+  `docs/specs/*.md` location remains supported while existing specifications
+  migrate. Generated and local handoff packages under nested `docs/specs/`
+  directories are intentionally not treated as conformance authority.
 
   Spec statements are lines of the form:
 
@@ -16,34 +21,34 @@ defmodule Mix.Tasks.Arbor.Spec.Coverage do
 
   ## Usage
 
-      mix arbor.spec.coverage              # full report
-      mix arbor.spec.coverage --strict     # exit 1 on unproven non-planned MUSTs or dead refs
-      mix arbor.spec.coverage --spec TRUST # restrict to one spec area prefix
+      ./bin/mix arbor.spec.coverage              # full report
+      ./bin/mix arbor.spec.coverage --strict     # exit 1 on unproven non-planned MUSTs or dead refs
+      ./bin/mix arbor.spec.coverage --spec TRUST # restrict to one spec area prefix
 
   Run from the umbrella root. See `.arbor/roadmap/1-brainstorming/executable-specs-and-conformance.md`.
   """
 
   use Mix.Task
 
-  @specs_glob "docs/specs/*.md"
+  @specs_globs ["docs/specs/*.md", "docs/arbor/specs/**/*.md"]
   @test_globs ["apps/*/test/**/*.exs", "test/**/*.exs"]
 
   # - **TRUST-7** (MUST): ...   /   - **TRUST-14** (MUST, planned): ...
   @statement_re ~r/^\s*-\s+\*\*([A-Z][A-Z0-9]*-\d+)\*\*\s+\((MUST(?:\s+NOT)?|SHOULD(?:\s+NOT)?|MAY)(,\s*planned)?\)/
-  @tag_re ~r/@tag\s+spec:\s*"([^"]+)"/
 
   @impl Mix.Task
   def run(args) do
     {opts, _, _} = OptionParser.parse(args, strict: [strict: :boolean, spec: :string])
 
-    statements = parse_specs(opts[:spec])
+    area_filter = opts[:spec]
+    statements = parse_specs(area_filter)
 
     if statements == %{} do
-      Mix.shell().error("No spec statements found under #{@specs_glob}")
+      Mix.shell().error("No spec statements found under #{Enum.join(@specs_globs, ", ")}")
       exit({:shutdown, 1})
     end
 
-    tags = scan_test_tags()
+    tags = scan_test_tags(area_filter)
 
     proven =
       for {id, _meta} <- statements,
@@ -81,9 +86,20 @@ defmodule Mix.Tasks.Arbor.Spec.Coverage do
     end
   end
 
-  defp parse_specs(area_filter) do
-    @specs_glob
-    |> Path.wildcard()
+  @doc false
+  @spec spec_paths(Path.t()) :: [Path.t()]
+  def spec_paths(root \\ ".") do
+    @specs_globs
+    |> Enum.flat_map(fn glob -> Path.wildcard(Path.join(root, glob)) end)
+    |> Enum.uniq()
+    |> Enum.sort()
+  end
+
+  @doc false
+  @spec parse_specs(String.t() | nil, Path.t()) :: map()
+  def parse_specs(area_filter, root \\ ".") do
+    root
+    |> spec_paths()
     |> Enum.flat_map(fn path ->
       path
       |> File.read!()
@@ -104,27 +120,79 @@ defmodule Mix.Tasks.Arbor.Spec.Coverage do
     |> Enum.filter(fn {id, _} ->
       area_filter == nil or String.starts_with?(id, area_filter)
     end)
+    |> ensure_unique_statement_ids!()
     |> Map.new()
   end
 
-  defp scan_test_tags do
+  @doc false
+  @spec scan_test_tags(String.t() | nil, Path.t()) :: map()
+  def scan_test_tags(area_filter, root \\ ".") do
     @test_globs
-    |> Enum.flat_map(&Path.wildcard/1)
+    |> Enum.flat_map(fn glob -> Path.wildcard(Path.join(root, glob)) end)
     |> Enum.reject(&String.contains?(&1, ["/_build/", "/.elixir_ls/", "/deps/"]))
     |> Enum.reduce(%{}, fn path, acc ->
-      content = File.read!(path)
-
-      @tag_re
-      |> Regex.scan(content)
-      |> Enum.flat_map(fn [_, ids] ->
-        ids |> String.split(",") |> Enum.map(&String.trim/1)
-      end)
+      path
+      |> read_spec_tag_ids!()
       |> Enum.reduce(acc, fn id, inner ->
-        Map.update(inner, id, [path], fn paths ->
-          if path in paths, do: paths, else: [path | paths]
-        end)
+        if area_filter == nil or String.starts_with?(id, area_filter) do
+          Map.update(inner, id, [path], fn paths ->
+            if path in paths, do: paths, else: [path | paths]
+          end)
+        else
+          inner
+        end
       end)
     end)
+  end
+
+  defp read_spec_tag_ids!(path) do
+    content = File.read!(path)
+
+    case Code.string_to_quoted(content) do
+      {:ok, ast} ->
+        {_ast, ids} =
+          Macro.prewalk(ast, [], fn
+            {:@, _meta, [{:tag, _tag_meta, args}]} = node, acc ->
+              {node, literal_spec_ids(args) ++ acc}
+
+            node, acc ->
+              {node, acc}
+          end)
+
+        ids |> Enum.reverse() |> Enum.uniq()
+
+      {:error, reason} ->
+        raise Mix.Error,
+          message: "Cannot parse test file while scanning spec tags: #{path}: #{inspect(reason)}"
+    end
+  end
+
+  defp literal_spec_ids([tags]) when is_list(tags) do
+    case Keyword.get(tags, :spec) do
+      ids when is_binary(ids) -> ids |> String.split(",") |> Enum.map(&String.trim/1)
+      _other -> []
+    end
+  end
+
+  defp literal_spec_ids(_args), do: []
+
+  defp ensure_unique_statement_ids!(statements) do
+    duplicates =
+      statements
+      |> Enum.group_by(fn {id, _meta} -> id end, fn {_id, meta} -> meta.file end)
+      |> Enum.filter(fn {_id, files} -> length(files) > 1 end)
+      |> Enum.sort_by(&elem(&1, 0))
+
+    if duplicates != [] do
+      details =
+        Enum.map_join(duplicates, "; ", fn {id, files} ->
+          "#{id} in #{Enum.join(files, ", ")}"
+        end)
+
+      raise Mix.Error, message: "Duplicate normative spec statement IDs: #{details}"
+    end
+
+    statements
   end
 
   defp print_report(statements, proven, unproven, dead_refs) do

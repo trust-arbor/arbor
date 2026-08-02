@@ -23,10 +23,10 @@ Guidelines for consistent test tagging across the Arbor codebase.
 
 | Tag | When to use |
 |-----|-------------|
-| `spec: "TRUST-7"` | The test proves a normative statement from `docs/specs/*.md`. Comma-separate multiple IDs: `spec: "TRUST-1,TRUST-2"`. |
+| `spec: "TRUST-7"` | The test proves a normative statement from tracked specs under `docs/arbor/specs/` or the legacy `docs/specs/*.md` location. Comma-separate multiple IDs: `spec: "TRUST-1,TRUST-2"`. |
 
 Spec statements are numbered RFC 2119 statements (`- **TRUST-7** (MUST): ...`).
-`mix arbor.spec.coverage` maps statements ↔ tests and reports unproven claims and dead
+`./bin/mix arbor.spec.coverage` maps statements ↔ tests and reports unproven claims and dead
 refs; `--strict` fails CI on unproven non-planned MUSTs. When fixing a security bug, give
 the regression test a spec ID so the invariant is named, not just tested. See
 `.arbor/roadmap/1-brainstorming/executable-specs-and-conformance.md`.

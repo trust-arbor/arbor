@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-08-01",
-  "entry_count": 606,
+  "entry_count": 607,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -7422,8 +7422,21 @@
       "source_incident": "found 2026-08-01 during the final Phase E provider-route health check).",
       "content_sha256": "9c29b251f5a9e1765ceb370c7b45d6190e034fb3abf3c21df45fdabec29f3e27",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 607,
+      "source_kind": "post-migration",
+      "slug": "conformance-proof-scanners-must-parse-test-syntax-not-regex-source-text",
+      "title": "Conformance proof scanners must parse test syntax, not regex source text.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-conformance-proof-scanners-must-parse-test-syntax-not-regex-source-text",
+      "source_date": "2026-08-01",
+      "source_incident": "found 2026-08-01 during the voice specification preflight).",
+      "content_sha256": "ec0b6f0223752d8ee2a8a787560573fa7c382de3f85fa3379d9070a7e01dc5a1",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 145
+  "post_migration_entry_count": 146
 }

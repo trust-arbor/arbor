@@ -664,3 +664,12 @@ the pinned baseline. A broad fallback weakens supply-chain provenance and can
 traverse protected user data (found 2026-07-31 when Phase E OAuth validation
 searched `/` and probed GitHub for `sqlite-vec` while the reviewed baseline
 awaited privileged installation).
+
+<!-- applied-learning: conformance-proof-scanners-must-parse-test-syntax-not-regex-source-text -->
+<a id="applied-learning-conformance-proof-scanners-must-parse-test-syntax-not-regex-source-text"></a>
+**Conformance proof scanners must parse test syntax, not regex source text.** A
+regex over `.exs` can count `@tag spec:` markers embedded in comments, string
+fixtures, or docs as evidence, silently turning unimplemented requirements
+green. Parse the AST and accept only literal ExUnit tag attributes; malformed
+files should fail the scan instead of being skipped (found 2026-08-01 during the
+voice specification preflight).
