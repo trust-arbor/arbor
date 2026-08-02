@@ -262,6 +262,28 @@ digraph CodingChangeV1 {
     output_key="branch"
   ]
 
+  hoist_base_commit [
+    type="transform",
+    transform="identity",
+    source_key="workspace.base_commit",
+    output_key="base_commit"
+  ]
+
+  // Pre-worker admission gate: the exact acquired base commit's mix.lock
+  // (read from the immutable commit object, never the worktree's live file)
+  // must match the verified startup-pinned Linux dependency baseline before
+  // any ACP worker session opens. On mismatch/unavailable, routes through
+  // the same release-without-close path open_worker's own failure edge uses
+  // below (no worker exists yet on either path).
+  check_dependency_baseline [
+    type="exec",
+    target="action",
+    action="coding_dependency_baseline_check",
+    context_keys="worktree_path,base_commit",
+    output_prefix="dependency_baseline",
+    max_retries="0"
+  ]
+
   // Worker session
 
   prep_cwd [
@@ -1886,8 +1908,14 @@ digraph CodingChangeV1 {
   status_pipeline_error -> done
 
   acquire_workspace -> hoist_workspace_id [condition="outcome=success"]
-  hoist_workspace_id -> hoist_worktree_path -> hoist_branch
-  hoist_branch -> prep_cwd -> prep_provider -> open_worker
+  hoist_workspace_id -> hoist_worktree_path -> hoist_branch -> hoist_base_commit
+  hoist_base_commit -> check_dependency_baseline
+
+  // Dependency-baseline mismatch: release workspace, no close (mirrors the
+  // open_worker failure edge below — no worker exists yet on either path)
+  check_dependency_baseline -> prep_release_mode_only [condition="outcome=fail"]
+  check_dependency_baseline -> prep_cwd [condition="outcome=success"]
+  prep_cwd -> prep_provider -> open_worker
 
   // Worker open failure: release workspace, no close
   open_worker -> prep_release_mode_only [condition="outcome=fail"]

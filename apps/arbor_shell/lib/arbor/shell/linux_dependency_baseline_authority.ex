@@ -85,6 +85,25 @@ defmodule Arbor.Shell.LinuxDependencyBaselineAuthority do
   end
 
   @doc """
+  Narrow evidence-only checkout of the verified Linux dependency-baseline
+  mix.lock digest.
+
+  Never accepts caller bindings or paths, and never returns anything beyond
+  the single hex64 digest string: this re-verifies the private Binding
+  exactly like `checkout_plan/1`, then projects and validates only
+  `plan["receipt"]["mix_lock_digest"]` before replying, discarding the
+  toolchain/image digests, entry_count, total_bytes, materialization_entries,
+  and paths that `checkout_plan/1` would otherwise expose. Drift, plan
+  corruption, or a missing/malformed digest field poisons the boot epoch and
+  terminates this owner abnormally, exactly like `checkout_plan/1`.
+  """
+  @spec checkout_mix_lock_digest(GenServer.server()) ::
+          {:ok, String.t()} | {:error, :linux_dependency_baseline_unavailable | term()}
+  def checkout_mix_lock_digest(server \\ __MODULE__) do
+    call(server, :checkout_mix_lock_digest)
+  end
+
+  @doc """
   Redacted public status map. Never includes Binding, paths, inventory, or digests.
   """
   @spec public_status(GenServer.server()) :: public_status()
@@ -165,6 +184,43 @@ defmodule Arbor.Shell.LinuxDependencyBaselineAuthority do
     # Pinned status without a well-formed private Binding / source modules is
     # internal corruption: poison the epoch and fail closed without exposing
     # arbitrary state terms.
+    poison_epoch(state.boot_epoch)
+    bounded = :malformed_pinned_state
+
+    {:stop, {:linux_dependency_baseline_drift, bounded},
+     {:error, {:linux_dependency_baseline_drift, bounded}}, state}
+  end
+
+  def handle_call(:checkout_mix_lock_digest, _from, %{status: :unavailable} = state) do
+    {:reply, {:error, :linux_dependency_baseline_unavailable}, state}
+  end
+
+  def handle_call(
+        :checkout_mix_lock_digest,
+        _from,
+        %{
+          status: :pinned,
+          binding: binding,
+          source: source,
+          trusted_path: trusted_path,
+          boot_epoch: boot_epoch
+        } = state
+      )
+      when not is_nil(binding) and is_atom(source) and is_atom(trusted_path) do
+    case safe_verify_and_mix_lock_digest(source, binding, trusted_path) do
+      {:ok, digest} ->
+        {:reply, {:ok, digest}, state}
+
+      {:error, reason} ->
+        poison_epoch(boot_epoch)
+        bounded = bound_checkout_reason(reason)
+
+        {:stop, {:linux_dependency_baseline_drift, bounded},
+         {:error, {:linux_dependency_baseline_drift, bounded}}, state}
+    end
+  end
+
+  def handle_call(:checkout_mix_lock_digest, _from, %{status: :pinned} = state) do
     poison_epoch(state.boot_epoch)
     bounded = :malformed_pinned_state
 
@@ -337,6 +393,58 @@ defmodule Arbor.Shell.LinuxDependencyBaselineAuthority do
         {:error, :invalid_plan}
     end
   end
+
+  # Same fail-closed boundary as safe_verify_and_plan/3, but the reply never
+  # carries anything beyond the one bounded hex64 digest string — toolchain,
+  # image digests, entry_count, total_bytes, materialization_entries, and
+  # paths never cross the GenServer boundary through this call.
+  defp safe_verify_and_mix_lock_digest(source, binding, trusted_path) do
+    try do
+      verify_and_mix_lock_digest(source, binding, trusted_path)
+    rescue
+      _exception ->
+        {:error, :source_verify_or_plan_failed}
+    catch
+      :throw, _value ->
+        {:error, :source_verify_or_plan_failed}
+
+      :exit, _reason ->
+        {:error, :source_verify_or_plan_failed}
+    end
+  end
+
+  defp verify_and_mix_lock_digest(source, binding, trusted_path) do
+    with {:ok, plan} <- verify_and_plan(source, binding, trusted_path),
+         {:ok, digest} <- fetch_mix_lock_digest(plan),
+         true <- hex64?(digest) do
+      {:ok, digest}
+    else
+      {:error, reason} ->
+        {:error, reason}
+
+      false ->
+        {:error, :invalid_mix_lock_digest}
+
+      _other ->
+        {:error, :invalid_mix_lock_digest}
+    end
+  end
+
+  defp fetch_mix_lock_digest(%{"receipt" => %{"mix_lock_digest" => digest}})
+       when is_binary(digest),
+       do: {:ok, digest}
+
+  defp fetch_mix_lock_digest(_plan), do: {:error, :missing_mix_lock_digest}
+
+  defp hex64?(value) when is_binary(value) and byte_size(value) == 64 do
+    value
+    |> :binary.bin_to_list()
+    |> Enum.all?(fn byte ->
+      (byte >= ?0 and byte <= ?9) or (byte >= ?a and byte <= ?f)
+    end)
+  end
+
+  defp hex64?(_value), do: false
 
   # Atom-only reasons are stable operator labels. Anything else (paths, digests,
   # exception-shaped terms) collapses to a bounded generic atom.

@@ -24,6 +24,173 @@ defmodule Arbor.Actions.GitTest do
     {:ok, repo_path: repo_path}
   end
 
+  describe "read_bounded_blob_at_commit/4" do
+    test "reads the blob content exactly matching git show at the exact commit", %{
+      repo_path: repo_path
+    } do
+      File.write!(Path.join(repo_path, "mix.lock"), "%{\"original\" => \"lock\"}\n")
+      {_, 0} = System.cmd("git", ["add", "mix.lock"], cd: repo_path)
+      {_, 0} = System.cmd("git", ["commit", "-m", "add mix.lock"], cd: repo_path)
+      {commit, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: repo_path)
+      commit = String.trim(commit)
+
+      {expected, 0} =
+        System.cmd("git", ["show", "#{commit}:mix.lock"], cd: repo_path, stderr_to_stdout: true)
+
+      assert {:ok, blob} =
+               Git.read_bounded_blob_at_commit(repo_path, commit, "mix.lock", 1_048_576)
+
+      assert blob == expected
+    end
+
+    @tag :security_regression
+    test "security regression: ignores the live working-tree file — reads the immutable commit object instead",
+         %{
+           repo_path: repo_path
+         } do
+      File.write!(Path.join(repo_path, "mix.lock"), "%{\"committed\" => \"stale\"}\n")
+      {_, 0} = System.cmd("git", ["add", "mix.lock"], cd: repo_path)
+      {_, 0} = System.cmd("git", ["commit", "-m", "add stale mix.lock"], cd: repo_path)
+      {commit, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: repo_path)
+      commit = String.trim(commit)
+
+      # Dirty replacement on disk, never committed — a TOCTOU-style substitution.
+      File.write!(Path.join(repo_path, "mix.lock"), "%{\"dirty\" => \"replacement\"}\n")
+
+      assert {:ok, blob} =
+               Git.read_bounded_blob_at_commit(repo_path, commit, "mix.lock", 1_048_576)
+
+      assert blob == "%{\"committed\" => \"stale\"}\n"
+      refute blob == "%{\"dirty\" => \"replacement\"}\n"
+    end
+
+    test "rejects a malformed commit oid before any git call", %{repo_path: repo_path} do
+      assert {:error, :invalid_commit_oid} =
+               Git.read_bounded_blob_at_commit(repo_path, "--upload-pack=evil", "mix.lock", 1024)
+
+      assert {:error, :invalid_commit_oid} =
+               Git.read_bounded_blob_at_commit(repo_path, "not-hex!!", "mix.lock", 1024)
+    end
+
+    test "rejects a malformed relative path before any git call", %{repo_path: repo_path} do
+      {commit, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: repo_path)
+      commit = String.trim(commit)
+
+      for invalid_path <- [
+            "/etc/passwd",
+            "../escape",
+            ".",
+            "./mix.lock",
+            "a//b",
+            "a/",
+            ".git/config",
+            ".GIT/config",
+            "C:\\Windows\\system.ini",
+            "\\\\server\\share\\file"
+          ] do
+        assert {:error, :invalid_blob_path} =
+                 Git.read_bounded_blob_at_commit(repo_path, commit, invalid_path, 1024)
+      end
+
+      assert {:error, :invalid_blob_path} =
+               Git.read_bounded_blob_at_commit(
+                 repo_path,
+                 commit,
+                 String.duplicate("a", 1025),
+                 1024
+               )
+    end
+
+    test "returns a bounded error when the path does not exist at that commit", %{
+      repo_path: repo_path
+    } do
+      {commit, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: repo_path)
+      commit = String.trim(commit)
+
+      assert {:error, {:git_blob_read_failed, _detail}} =
+               Git.read_bounded_blob_at_commit(repo_path, commit, "mix.lock", 1024)
+    end
+
+    test "returns a bounded error rather than a truncated blob when the ceiling is exceeded", %{
+      repo_path: repo_path
+    } do
+      File.write!(Path.join(repo_path, "mix.lock"), String.duplicate("a", 100))
+      {_, 0} = System.cmd("git", ["add", "mix.lock"], cd: repo_path)
+      {_, 0} = System.cmd("git", ["commit", "-m", "add large mix.lock"], cd: repo_path)
+      {commit, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: repo_path)
+      commit = String.trim(commit)
+
+      assert {:error, {:git_blob_read_failed, _detail}} =
+               Git.read_bounded_blob_at_commit(repo_path, commit, "mix.lock", 10)
+    end
+
+    @tag :security_regression
+    test "security regression: rejects an abbreviated commit oid even when it uniquely resolves",
+         %{repo_path: repo_path} do
+      File.write!(Path.join(repo_path, "mix.lock"), "%{}\n")
+      {_, 0} = System.cmd("git", ["add", "mix.lock"], cd: repo_path)
+      {_, 0} = System.cmd("git", ["commit", "-m", "add mix.lock"], cd: repo_path)
+      {commit, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: repo_path)
+      commit = String.trim(commit)
+      abbreviated = String.slice(commit, 0, 12)
+
+      assert {:error, :invalid_commit_oid} =
+               Git.read_bounded_blob_at_commit(repo_path, abbreviated, "mix.lock", 1024)
+    end
+
+    test "rejects an uppercase-hex commit oid", %{repo_path: repo_path} do
+      {commit, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: repo_path)
+      commit = String.trim(commit)
+
+      assert {:error, :invalid_commit_oid} =
+               Git.read_bounded_blob_at_commit(repo_path, String.upcase(commit), "mix.lock", 1024)
+    end
+
+    test "accepts a syntactically valid 64-char (SHA-256-shaped) oid without a SHA-256 fixture repository",
+         %{repo_path: repo_path} do
+      oid64 = String.duplicate("a", 64)
+
+      assert {:error, {:git_blob_read_failed, _detail}} =
+               Git.read_bounded_blob_at_commit(repo_path, oid64, "mix.lock", 1024)
+    end
+
+    test "rejects a relative path containing a NUL byte", %{repo_path: repo_path} do
+      {commit, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: repo_path)
+      commit = String.trim(commit)
+
+      assert {:error, :invalid_blob_path} =
+               Git.read_bounded_blob_at_commit(repo_path, commit, "mix.lock\0evil", 1024)
+    end
+
+    test "accepts a legitimate nested repository-relative path", %{repo_path: repo_path} do
+      {commit, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: repo_path)
+      commit = String.trim(commit)
+
+      assert {:error, {:git_blob_read_failed, _detail}} =
+               Git.read_bounded_blob_at_commit(repo_path, commit, "config/mix.lock", 1024)
+    end
+
+    test "accepts spaces and non-ASCII segments in repository-relative paths", %{
+      repo_path: repo_path
+    } do
+      relative_path = "config docs/caf\u00E9.lock"
+      absolute_path = Path.join(repo_path, relative_path)
+      File.mkdir_p!(Path.dirname(absolute_path))
+      File.write!(absolute_path, "locked\n")
+      {_, 0} = System.cmd("git", ["add", relative_path], cd: repo_path)
+      {_, 0} = System.cmd("git", ["commit", "-m", "add unicode lock"], cd: repo_path)
+      {commit, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: repo_path)
+
+      assert {:ok, "locked\n"} =
+               Git.read_bounded_blob_at_commit(
+                 repo_path,
+                 String.trim(commit),
+                 relative_path,
+                 1024
+               )
+    end
+  end
+
   describe "closed worktree removal" do
     @tag :security_regression
     test "removes a registered linked worktree with its bound lstat identity", %{

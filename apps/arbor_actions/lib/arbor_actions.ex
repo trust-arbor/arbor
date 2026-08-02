@@ -2066,6 +2066,7 @@ defmodule Arbor.Actions do
         Arbor.Actions.Coding.CrossApp.Validate,
         Arbor.Actions.Coding.Workspace.Acquire,
         Arbor.Actions.Coding.Workspace.Inspect,
+        Arbor.Actions.Coding.DependencyBaselineAdmission,
         Arbor.Actions.Coding.Workspace.RecoverySummary,
         Arbor.Actions.Coding.Workspace.LifecycleStatus,
         Arbor.Actions.Coding.Workspace.Release,
@@ -3108,6 +3109,8 @@ defmodule Arbor.Actions do
     Arbor.Actions.Coding.CrossApp.Validate => "arbor://action/coding/cross_app/validate",
     Arbor.Actions.Coding.Workspace.Acquire => "arbor://action/coding/workspace/acquire",
     Arbor.Actions.Coding.Workspace.Inspect => "arbor://action/coding/workspace/inspect",
+    Arbor.Actions.Coding.DependencyBaselineAdmission =>
+      "arbor://action/coding/dependency_baseline/check",
     Arbor.Actions.Coding.Workspace.RecoverySummary =>
       "arbor://action/coding/workspace/recovery_summary",
     Arbor.Actions.Coding.Workspace.LifecycleStatus => "arbor://action/coding/workspace/status",

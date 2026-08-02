@@ -224,6 +224,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                              coding_workspace_recovery_summary
                              coding_reviewed_commit
                              coding_workspace_acquire
+                             coding_dependency_baseline_check
                              coding_workspace_committed_change
                              coding_design_envelope_parse
                              coding_design_artifact_capture
@@ -426,9 +427,19 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                                   "required_dominator_sets" => []
                                 },
                                 %{
+                                  "node_id" => "check_dependency_baseline",
+                                  "action" => "coding_dependency_baseline_check",
+                                  "required_dominators" => ["acquire_workspace"],
+                                  "review_required_dominators" => [],
+                                  "required_dominator_sets" => []
+                                },
+                                %{
                                   "node_id" => "open_worker",
                                   "action" => "acp_start_session",
-                                  "required_dominators" => ["acquire_workspace"],
+                                  "required_dominators" => [
+                                    "acquire_workspace",
+                                    "check_dependency_baseline"
+                                  ],
                                   "review_required_dominators" => [],
                                   "required_dominator_sets" => []
                                 },

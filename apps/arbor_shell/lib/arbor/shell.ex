@@ -765,6 +765,23 @@ defmodule Arbor.Shell do
   def remove_owned_tree(_identity, _opts), do: {:error, :invalid_owned_tree_cleanup}
 
   @doc """
+  Verified startup-pinned Linux dependency-baseline mix.lock digest.
+
+  **Trusted system API only.** Thin public facade over
+  `Arbor.Shell.LinuxDependencyBaselineAuthority.checkout_mix_lock_digest/1`.
+  Re-verifies the private Binding before replying and returns only a single
+  bounded hex64 digest string — never the private Binding, configured paths,
+  dependency inventory, toolchain identity, or other authority-bearing data.
+  Drift or corruption poisons the authority's boot epoch (same fail-closed
+  behavior as `acquire_linux_dependency_baseline_lease/1`).
+  """
+  @spec linux_dependency_baseline_mix_lock_digest() ::
+          {:ok, String.t()} | {:error, term()}
+  def linux_dependency_baseline_mix_lock_digest do
+    Arbor.Shell.LinuxDependencyBaselineAuthority.checkout_mix_lock_digest()
+  end
+
+  @doc """
   Redacted public status of the Apple Container control-plane authority owner.
 
   Returns an ordinary JSON-clean map with state/reason/platform labels only.

@@ -49,6 +49,7 @@ defmodule Arbor.Actions.Git do
   @storage_authority_key {__MODULE__, :storage_authority}
   @git_deadline_key {__MODULE__, :command_deadline_ms}
   @default_git_timeout_ms 30_000
+  @max_blob_path_bytes 1024
   @adoption_range_limit 256
   @adoption_patch_bytes_limit 4 * 1024 * 1024
   @adoption_patch_evidence_bytes_limit 32 * 1024 * 1024
@@ -166,6 +167,113 @@ defmodule Arbor.Actions.Git do
     do: execute_with_options(path, args, nil)
 
   def execute(_path, _args), do: {:error, :invalid_git_execution}
+
+  @doc """
+  Read one blob's bytes out of the immutable object database at an exact
+  commit — never the working-tree file.
+
+  `git cat-file -p <commit>:<relative_path>` resolves the blob directly from
+  the commit's tree object; it never opens, stats, or otherwise touches the
+  working-tree file at `relative_path`. A replaced or dirty on-disk file at
+  `path` therefore cannot influence the result — this is the intended atomic
+  binding to an immutable acquired commit (as opposed to trusting ambient
+  HEAD or the live working directory).
+
+  `commit` must be a full lowercase 40-hex (SHA-1) or 64-hex (SHA-256) commit
+  object ID — abbreviated/short OIDs are rejected before git argv ever sees
+  them (delegates to `validate_full_oid/1`, the same full-OID rule this
+  module already uses for adoption and branch operations). This is an
+  argument-injection defense on top of `validate_git_args/1`'s existing
+  dangerous-flag rejection, and it also closes the ambiguity a short OID
+  would otherwise leave in the `<commit>:<path>` object-name argument.
+  `relative_path` is a bounded UTF-8 Git-tree path using `/` separators. It
+  rejects empty, `.`, `..`, and `.git` segments; doubled/trailing separators;
+  POSIX, Windows drive-root, and UNC absolute forms; NUL bytes; and encoded
+  traversal sequences. Spaces and non-ASCII path segments remain valid.
+
+  Reuses the same audited/bounded/contained execution path `execute/2` does
+  (`authorized_root/1` + storage-root/`GIT_CEILING_DIRECTORIES` containment,
+  `reject_configured_helpers/1`, `Shell.execute_direct/3`'s kill-on-exceed
+  output ceiling). `max_bytes` is a required explicit ceiling — callers must
+  size it to what they expect to read (e.g. a `mix.lock`), never rely on the
+  facade's own default. A truncated/limit-exceeded read fails closed rather
+  than being treated as a complete blob.
+  """
+  @spec read_bounded_blob_at_commit(String.t(), String.t(), String.t(), pos_integer()) ::
+          {:ok, binary()} | {:error, term()}
+  def read_bounded_blob_at_commit(path, commit, relative_path, max_bytes)
+      when is_binary(path) and is_binary(commit) and is_binary(relative_path) and
+             is_integer(max_bytes) and max_bytes > 0 do
+    with :ok <- validate_commit_oid(commit),
+         :ok <- validate_blob_relative_path(relative_path) do
+      case execute_with_options(
+             path,
+             ["cat-file", "-p", commit <> ":" <> relative_path],
+             max_bytes
+           ) do
+        {:ok, %{exit_code: 0, output_truncated: false, output_limit_exceeded: false} = result} ->
+          {:ok, result.stdout}
+
+        {:ok, %{exit_code: 0}} ->
+          {:error, {:git_blob_read_failed, :output_truncated}}
+
+        {:ok, result} ->
+          {:error, {:git_blob_read_failed, result.exit_code}}
+
+        {:error, reason} ->
+          {:error, {:git_blob_read_failed, reason}}
+      end
+    end
+  end
+
+  def read_bounded_blob_at_commit(_path, _commit, _relative_path, _max_bytes),
+    do: {:error, :invalid_git_blob_read}
+
+  defp validate_commit_oid(commit) do
+    case validate_full_oid(commit) do
+      :ok -> :ok
+      {:error, :invalid_git_oid} -> {:error, :invalid_commit_oid}
+    end
+  end
+
+  defp validate_blob_relative_path(relative_path)
+       when is_binary(relative_path) and byte_size(relative_path) <= @max_blob_path_bytes do
+    case SafePath.validate(relative_path) do
+      :ok ->
+        validate_blob_path_shape(relative_path)
+
+      {:error, _reason} ->
+        {:error, :invalid_blob_path}
+    end
+  end
+
+  defp validate_blob_relative_path(_relative_path), do: {:error, :invalid_blob_path}
+
+  defp validate_blob_path_shape(relative_path) do
+    segments = String.split(relative_path, "/", trim: false)
+
+    cond do
+      Path.type(relative_path) == :absolute ->
+        {:error, :invalid_blob_path}
+
+      windows_absolute_path?(relative_path) ->
+        {:error, :invalid_blob_path}
+
+      Enum.any?(segments, &invalid_blob_path_segment?/1) ->
+        {:error, :invalid_blob_path}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp windows_absolute_path?(path) do
+    String.starts_with?(path, "\\") or Regex.match?(~r/\A[A-Za-z]:[\\\/]/, path)
+  end
+
+  defp invalid_blob_path_segment?(segment) do
+    segment in ["", ".", ".."] or String.downcase(segment) == ".git"
+  end
 
   defp execute_with_options(path, args, max_output_bytes)
        when is_binary(path) and is_list(args) do

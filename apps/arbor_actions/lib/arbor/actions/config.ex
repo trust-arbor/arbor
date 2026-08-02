@@ -204,6 +204,47 @@ defmodule Arbor.Actions.Config do
   end
 
   @doc """
+  Trusted public Shell facade used by the pre-worker dependency-baseline
+  admission gate (`Arbor.Actions.Coding.DependencyBaselineAdmission`).
+
+  Production defaults to `Arbor.Shell`. Tests may configure a trusted named
+  module via `:dependency_baseline_digest_module` so admission behavior
+  (match/mismatch/unavailable) can be exercised without booting the real
+  `LinuxDependencyBaselineAuthority` GenServer. This is operator/test
+  Application-env configuration only — the action never resolves it from
+  run/2 params or context, so it cannot be shaped by anything flowing
+  through the Engine/DOT graph.
+  """
+  @type dependency_baseline_digest_module_error ::
+          {:invalid_dependency_baseline_digest_module,
+           :named_module_required
+           | {:module_not_loaded, module()}
+           | {:callback_not_exported, module(), atom(), non_neg_integer()}}
+
+  @spec dependency_baseline_digest_module() ::
+          {:ok, module()} | {:error, dependency_baseline_digest_module_error()}
+  def dependency_baseline_digest_module do
+    case Application.get_env(:arbor_actions, :dependency_baseline_digest_module, Arbor.Shell) do
+      module when is_atom(module) ->
+        cond do
+          not Code.ensure_loaded?(module) ->
+            {:error, {:invalid_dependency_baseline_digest_module, {:module_not_loaded, module}}}
+
+          not function_exported?(module, :linux_dependency_baseline_mix_lock_digest, 0) ->
+            {:error,
+             {:invalid_dependency_baseline_digest_module,
+              {:callback_not_exported, module, :linux_dependency_baseline_mix_lock_digest, 0}}}
+
+          true ->
+            {:ok, module}
+        end
+
+      _other ->
+        {:error, {:invalid_dependency_baseline_digest_module, :named_module_required}}
+    end
+  end
+
+  @doc """
   Workspace lease registry GenServer name/server used by coding facades.
 
   Production defaults to `Arbor.Actions.Coding.WorkspaceLeaseRegistry`.

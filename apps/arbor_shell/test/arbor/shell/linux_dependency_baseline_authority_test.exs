@@ -36,7 +36,7 @@ defmodule Arbor.Shell.LinuxDependencyBaselineAuthorityTest do
 
     defmodule Binding do
       @moduledoc false
-      defstruct [:source_root, :manifest_path, :digest, :inventory, :token]
+      defstruct [:source_root, :manifest_path, :digest, :inventory, :token, :mix_lock_digest]
     end
 
     def reset do
@@ -47,7 +47,14 @@ defmodule Arbor.Shell.LinuxDependencyBaselineAuthorityTest do
       :persistent_term.put({__MODULE__, :verify_mode}, :ok)
       :persistent_term.put({__MODULE__, :plan_mode}, :ok)
       :persistent_term.put({__MODULE__, :binding_token}, "baseline-v1")
+      :persistent_term.put({__MODULE__, :mix_lock_digest}, nil)
     end
+
+    # Opt-in only: existing tests never set this, so their exact-equality
+    # `plan/1` assertions are unaffected (the receipt gains no new key when
+    # this stays nil).
+    def set_mix_lock_digest(digest),
+      do: :persistent_term.put({__MODULE__, :mix_lock_digest}, digest)
 
     def pin_attempts, do: :persistent_term.get({__MODULE__, :pin_attempts}, [])
     def verify_attempts, do: :persistent_term.get({__MODULE__, :verify_attempts}, [])
@@ -108,10 +115,12 @@ defmodule Arbor.Shell.LinuxDependencyBaselineAuthorityTest do
             "kind" => "linux_dependency_baseline_source",
             "source_root" => binding.source_root,
             "manifest_path" => binding.manifest_path,
-            "receipt" => %{
-              "digest" => binding.digest,
-              "entry_count" => length(binding.inventory)
-            },
+            "receipt" =>
+              %{
+                "digest" => binding.digest,
+                "entry_count" => length(binding.inventory)
+              }
+              |> maybe_put_mix_lock_digest(binding.mix_lock_digest),
             "materialization_entries" => binding.inventory,
             "evidence_only" => true
           }
@@ -137,6 +146,7 @@ defmodule Arbor.Shell.LinuxDependencyBaselineAuthorityTest do
 
     def build_binding(source_root, manifest_path) do
       token = :persistent_term.get({__MODULE__, :binding_token}, "baseline-v1")
+      mix_lock_digest = :persistent_term.get({__MODULE__, :mix_lock_digest}, nil)
 
       %Binding{
         source_root: source_root,
@@ -148,9 +158,15 @@ defmodule Arbor.Shell.LinuxDependencyBaselineAuthorityTest do
             "sha256" => "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
           }
         ],
-        token: token
+        token: token,
+        mix_lock_digest: mix_lock_digest
       }
     end
+
+    defp maybe_put_mix_lock_digest(receipt, nil), do: receipt
+
+    defp maybe_put_mix_lock_digest(receipt, digest),
+      do: Map.put(receipt, "mix_lock_digest", digest)
 
     def identity_fixture(path) do
       %Identity{
@@ -760,6 +776,148 @@ defmodule Arbor.Shell.LinuxDependencyBaselineAuthorityTest do
 
       assert Authority.public_status(restarted)["reason"] == "boot_epoch_poisoned"
       assert FakeSource.pin_attempts() == initial_pins
+    end
+  end
+
+  describe "checkout_mix_lock_digest/1" do
+    @mix_lock_digest String.duplicate("1", 64)
+
+    test "returns only the bounded hex64 mix.lock digest, never the wider plan" do
+      put_valid_config()
+      FakeSource.set_mix_lock_digest(@mix_lock_digest)
+
+      {:ok, pid} =
+        start_authority(
+          name: unique_name(),
+          source: FakeSource,
+          trusted_path: FakeTrustedPath
+        )
+
+      assert {:ok, @mix_lock_digest} = Authority.checkout_mix_lock_digest(pid)
+    end
+
+    test "security regression: unavailable authority never fabricates a digest" do
+      Application.delete_env(@app, @config_key)
+
+      {:ok, pid} =
+        start_authority(
+          name: unique_name(),
+          source: FakeSource,
+          trusted_path: FakeTrustedPath
+        )
+
+      assert {:error, :linux_dependency_baseline_unavailable} =
+               Authority.checkout_mix_lock_digest(pid)
+    end
+
+    test "security regression: missing mix_lock_digest field poisons instead of returning nil/stale" do
+      put_valid_config()
+      boot_epoch = make_ref()
+
+      {:ok, pid} =
+        start_authority(
+          name: unique_name(),
+          source: FakeSource,
+          trusted_path: FakeTrustedPath,
+          boot_epoch: boot_epoch
+        )
+
+      # FakeSource never sets mix_lock_digest by default, so the receipt has
+      # no "mix_lock_digest" key at all — same shape as a pre-migration
+      # baseline manifest.
+      ref = Process.monitor(pid)
+
+      assert {:error, {:linux_dependency_baseline_drift, :missing_mix_lock_digest}} =
+               Authority.checkout_mix_lock_digest(pid)
+
+      assert_receive {:DOWN, ^ref, :process, ^pid,
+                      {:linux_dependency_baseline_drift, :missing_mix_lock_digest}}
+    end
+
+    test "security regression: malformed (non-hex64) digest poisons instead of being trusted" do
+      put_valid_config()
+      boot_epoch = make_ref()
+      FakeSource.set_mix_lock_digest("not-a-hex-digest")
+
+      {:ok, pid} =
+        start_authority(
+          name: unique_name(),
+          source: FakeSource,
+          trusted_path: FakeTrustedPath,
+          boot_epoch: boot_epoch
+        )
+
+      ref = Process.monitor(pid)
+
+      assert {:error, {:linux_dependency_baseline_drift, :invalid_mix_lock_digest}} =
+               Authority.checkout_mix_lock_digest(pid)
+
+      assert_receive {:DOWN, ^ref, :process, ^pid,
+                      {:linux_dependency_baseline_drift, :invalid_mix_lock_digest}}
+    end
+
+    test "security regression: stale baseline is not silently served — a re-verify drift fails closed, never a stale digest" do
+      put_valid_config()
+      boot_epoch = make_ref()
+      FakeSource.set_mix_lock_digest(@mix_lock_digest)
+
+      {:ok, pid} =
+        start_authority(
+          name: unique_name(),
+          source: FakeSource,
+          trusted_path: FakeTrustedPath,
+          boot_epoch: boot_epoch
+        )
+
+      assert {:ok, @mix_lock_digest} = Authority.checkout_mix_lock_digest(pid)
+
+      # Simulate the underlying source drifting (the operator-owned baseline
+      # changed on disk since pin) — the re-verify inside checkout must catch
+      # it and never hand back the old (now-stale) digest.
+      ref = Process.monitor(pid)
+      FakeSource.set_verify_mode(:drift)
+
+      assert {:error, {:linux_dependency_baseline_drift, :identity_mismatch}} =
+               Authority.checkout_mix_lock_digest(pid)
+
+      assert_receive {:DOWN, ^ref, :process, ^pid,
+                      {:linux_dependency_baseline_drift, :identity_mismatch}}
+
+      FakeSource.set_verify_mode(:ok)
+
+      {:ok, restarted} =
+        start_authority(
+          name: unique_name(),
+          source: FakeSource,
+          trusted_path: FakeTrustedPath,
+          boot_epoch: boot_epoch
+        )
+
+      assert Authority.public_status(restarted) == %{
+               "state" => "unavailable",
+               "reason" => "boot_epoch_poisoned"
+             }
+
+      assert {:error, :linux_dependency_baseline_unavailable} =
+               Authority.checkout_mix_lock_digest(restarted)
+    end
+
+    test "narrow projection never leaks toolchain/image/path/inventory evidence" do
+      put_valid_config()
+      FakeSource.set_mix_lock_digest(@mix_lock_digest)
+
+      {:ok, pid} =
+        start_authority(
+          name: unique_name(),
+          source: FakeSource,
+          trusted_path: FakeTrustedPath
+        )
+
+      assert {:ok, digest} = Authority.checkout_mix_lock_digest(pid)
+      assert is_binary(digest)
+      refute inspect(digest) =~ @source_root
+      refute inspect(digest) =~ @manifest_path
+      refute inspect(digest) =~ @sentinel_inventory_path
     end
   end
 

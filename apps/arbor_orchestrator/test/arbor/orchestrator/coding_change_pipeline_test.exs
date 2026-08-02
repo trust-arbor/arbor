@@ -17,6 +17,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
 
   @exec_actions ~w(
     coding_workspace_acquire
+    coding_dependency_baseline_check
     coding_workspace_inspect
     coding_workspace_release
     coding_workspace_committed_change
@@ -87,6 +88,15 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
                  ownership: "owned",
                  active: true
                }}
+          end
+
+        "coding_dependency_baseline_check" ->
+          case scenario do
+            :dependency_baseline_mismatch ->
+              {:error, "dependency baseline mismatch"}
+
+            _ ->
+              {:ok, %{matched: true}}
           end
 
         "acp_start_session" ->
@@ -3248,6 +3258,35 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert_released(calls)
       refute called?(calls, "acp_close_session")
       refute called?(calls, "acp_send_message")
+    end
+
+    @tag :security_regression
+    test "security regression: a mismatched dependency baseline blocks ACP worker admission and releases the workspace" do
+      assert {{:ok, result}, calls} = run_fixture(:dependency_baseline_mismatch)
+      assert result.context["status"] == "pipeline_error"
+      assert called?(calls, "coding_dependency_baseline_check")
+      assert_released(calls)
+      assert_release_mode(calls, "retain")
+      refute called?(calls, "acp_start_session")
+      refute called?(calls, "acp_close_session")
+      refute called?(calls, "acp_send_message")
+    end
+
+    test "matching dependency baseline continues to worker open" do
+      assert {{:ok, result}, calls} = run_fixture(:no_changes)
+      assert called?(calls, "coding_dependency_baseline_check")
+      assert called?(calls, "acp_start_session")
+
+      dependency_check_index =
+        Enum.find_index(calls, fn {name, _} -> name == "coding_dependency_baseline_check" end)
+
+      worker_open_index =
+        Enum.find_index(calls, fn {name, _} -> name == "acp_start_session" end)
+
+      assert is_integer(dependency_check_index)
+      assert is_integer(worker_open_index)
+      assert dependency_check_index < worker_open_index
+      refute result.context["status"] == "pipeline_error"
     end
 
     test "implement hard failure sets pipeline_error and cleans up" do

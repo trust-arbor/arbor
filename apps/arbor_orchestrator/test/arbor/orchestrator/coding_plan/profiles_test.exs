@@ -41,6 +41,35 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
       assert Profiles.known_ids() == Plan.profile_ids()
     end
 
+    @tag :security_regression
+    test "security regression: open_worker cannot be reached without the dependency-baseline check dominating it" do
+      for profile_id <- @executable_ids do
+        assert {:ok, profile} = Profiles.fetch_executable(profile_id)
+        placements = profile["semantic_policy"]["action_placements"]
+
+        check_placement =
+          Enum.find(placements, &(&1["node_id"] == "check_dependency_baseline"))
+
+        assert check_placement,
+               "profile #{profile_id} is missing the check_dependency_baseline placement"
+
+        assert check_placement["action"] == "coding_dependency_baseline_check"
+        assert "acquire_workspace" in check_placement["required_dominators"]
+
+        open_worker_placement = Enum.find(placements, &(&1["node_id"] == "open_worker"))
+
+        assert open_worker_placement,
+               "profile #{profile_id} is missing the open_worker placement"
+
+        assert "check_dependency_baseline" in open_worker_placement["required_dominators"],
+               "open_worker in profile #{profile_id} can be reached without " <>
+                 "check_dependency_baseline dominating it — the dependency-baseline " <>
+                 "admission gate can be bypassed by graph drift"
+
+        assert "coding_dependency_baseline_check" in profile["required_actions"]
+      end
+    end
+
     test "executable profiles own complete action-unique validation declarations" do
       strategies =
         for profile_id <- @executable_ids do
