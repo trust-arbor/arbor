@@ -58,7 +58,7 @@ transport — raw audio never leaves the phone.
   `Arbor.Voice.RealtimeBackend` behaviour. `Arbor.Voice.Session` MUST NOT reference a
   concrete backend module except through configuration.
 
-- **VOICE-6** (MUST, planned): Backend credentials MUST be resolved on the core node
+- **VOICE-6** (MUST): Backend credentials MUST be resolved on the core node
   (`Arbor.LLM.OAuth.access_token(:xai)` for xAI) and MUST NOT be transmitted to edge
   devices or logged.
 

@@ -42,14 +42,20 @@ defmodule Arbor.Voice.RealtimeBackend do
   @doc """
   Opens a new realtime connection and returns its opaque session handle.
 
-  `opts` is backend-specific (API key/token, model id, sample rates, ...);
-  each backend documents its own accepted keys. Credentials are expected to
-  already be resolved by the caller (VOICE-6) — open/1 does not fetch
-  secrets itself.
+  Provider backends resolve their OWN credentials on the core node (e.g.
+  xAI via `Arbor.LLM.OAuth.access_token/1`) — callers do not pass provider
+  secrets into `opts` or the session boundary (VOICE-6). `opts` carries only
+  non-secret, backend-specific configuration (model/host/path overrides, an
+  injectable credential resolver for tests, ...); each backend documents its
+  own accepted keys.
 
-  Returns `{:error, :missing_credentials}` when a required credential opt
-  is absent, `{:error, :invalid_opts}` when opts fails backend-specific
-  validation, or `{:error, term()}` for transport-level failures
+  Credential-resolution failure surfaces the resolver's own reason (e.g.
+  `:oauth_login_required`) rather than a fixed atom — that reason is safe to
+  return because no credential has been obtained yet. Once a credential has
+  been resolved, a backend MUST redact any subsequent connect-stage failure
+  (returned or raised) to a stable, backend-specific atom rather than
+  passing the raw reason through, since it could echo the resolved secret.
+  Returns `{:error, term()}` for these and other transport-level failures
   (connection refused, TLS handshake failure, DNS) — that space is
   genuinely open-ended and backend-specific.
   """

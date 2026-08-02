@@ -8,9 +8,8 @@ defmodule Arbor.Voice.Config do
   @doc """
   The Arbor.Voice.RealtimeBackend implementation Arbor.Voice.Session
   (VP-04) opens. Swappable via `config :arbor_voice, backend: MyBackend`.
-  Defaults to the xAI Realtime backend name (VP-03) — that module does not
-  exist yet in this slice; naming it here only fixes the intended default
-  atom, nothing calls it until VP-03 lands.
+  Defaults to `Arbor.Voice.Backend.XaiRealtime` (VP-03) — nothing calls this
+  default until `Arbor.Voice.Session` (VP-04) exists.
   """
   @spec backend_module() :: module()
   def backend_module,

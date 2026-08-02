@@ -42,7 +42,9 @@ defmodule ArborVoice.MixProject do
       {:arbor_ai, in_umbrella: true},
       {:arbor_orchestrator, in_umbrella: true},
       {:arbor_agent, in_umbrella: true},
-      {:jason, "~> 1.4"}
+      {:jason, "~> 1.4"},
+      {:mint, "~> 1.9"},
+      {:mint_web_socket, "~> 1.0"}
     ]
   end
 
