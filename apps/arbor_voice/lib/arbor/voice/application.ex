@@ -6,7 +6,9 @@ defmodule Arbor.Voice.Application do
   @impl true
   def start(_type, _args) do
     children = [
-      {Registry, keys: :unique, name: Arbor.Voice.Registry}
+      {Registry, keys: :unique, name: Arbor.Voice.Registry},
+      Arbor.Voice.ResourceCleanupTaskSupervisor,
+      Arbor.Voice.ResourceSupervisor
     ]
 
     opts = [strategy: :one_for_one, name: Arbor.Voice.Supervisor]

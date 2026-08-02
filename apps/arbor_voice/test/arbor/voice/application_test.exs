@@ -1,6 +1,9 @@
 defmodule Arbor.Voice.ApplicationTest do
   use ExUnit.Case, async: true
 
+  alias Arbor.Voice.ResourceSupervisor
+  alias Arbor.Voice.ResourceCleanupTaskSupervisor
+
   @moduletag :fast
 
   test "the application supervisor is running" do
@@ -14,5 +17,25 @@ defmodule Arbor.Voice.ApplicationTest do
 
     {:ok, _owner} = Registry.register(Arbor.Voice.Registry, :application_test_probe, :ok)
     assert Registry.lookup(Arbor.Voice.Registry, :application_test_probe) != []
+  end
+
+  @tag spec: "VOICE-7"
+  test "ResourceCleanupTaskSupervisor starts before ResourceSupervisor under the app supervisor" do
+    supervisor = Arbor.Voice.Supervisor
+    children = Supervisor.which_children(supervisor)
+
+    cleanup_entry =
+      Enum.find(children, fn {id, _, _, _} -> id == ResourceCleanupTaskSupervisor end)
+
+    assert {ResourceCleanupTaskSupervisor, cleanup_pid, :supervisor, [Task.Supervisor]} =
+             cleanup_entry
+
+    assert is_pid(cleanup_pid)
+    assert Process.alive?(cleanup_pid)
+
+    resource_entry = Enum.find(children, fn {id, _, _, _} -> id == ResourceSupervisor end)
+    assert {ResourceSupervisor, resource_pid, :supervisor, [DynamicSupervisor]} = resource_entry
+    assert is_pid(resource_pid)
+    assert Process.alive?(resource_pid)
   end
 end
