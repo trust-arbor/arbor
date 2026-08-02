@@ -30,6 +30,8 @@ defmodule Mix.Tasks.Arbor.Helpers do
   - Node identity is stable across restarts and network changes.
   """
 
+  alias Mix.Tasks.Arbor.LifecycleIdentity
+
   @node_base_name "arbor_dev"
   @pid_file Path.expand("~/.arbor/arbor-dev.pid")
   @log_file Path.expand("~/.arbor/logs/arbor-dev.log")
@@ -139,8 +141,285 @@ defmodule Mix.Tasks.Arbor.Helpers do
     end
   end
 
-  def pid_file, do: @pid_file
   def log_file, do: @log_file
+
+  # ─── Persisted managed-node identity ───────────────────────────────────
+  #
+  # `~/.arbor/arbor-dev.meta.json` records the exact node/host/pid of the
+  # daemon this machine's `mix arbor.start` actually launched, so status/
+  # stop/restart resolve the real running identity instead of a freshly
+  # re-detected host (the 2026-08-02 host-drift EPMD-collision incident).
+  # The legacy `arbor-dev.pid` file is preserved unchanged for back-compat.
+  #
+  # Every read here distinguishes "file genuinely does not exist" (ENOENT —
+  # `:absent`) from any other read failure or unparseable content
+  # (permission denied, I/O error, a directory in the file's place,
+  # non-numeric PID contents, …), which is `{:error, :malformed}` —
+  # ambiguous, fail-closed, and never silently treated as "nothing here."
+
+  @metadata_file_name "arbor-dev.meta.json"
+  @pid_file_name "arbor-dev.pid"
+  @lock_dir_name "arbor-dev.lock"
+  @max_argv_bytes 8192
+
+  def arbor_home, do: Path.expand("~/.arbor")
+
+  def pid_file(home \\ arbor_home()), do: Path.join(home, @pid_file_name)
+  def metadata_file(home \\ arbor_home()), do: Path.join(home, @metadata_file_name)
+  def lock_dir(home \\ arbor_home()), do: Path.join(home, @lock_dir_name)
+
+  @doc """
+  Reads and validates the persisted metadata record. Returns `:absent` only
+  when the file genuinely does not exist, or `{:error, :malformed}` when it
+  exists but fails to read cleanly, fails syntactic parsing, or fails local
+  node-identity cross-validation — that state is distinct from `:absent`
+  and must never be silently overwritten.
+  """
+  def read_metadata(home \\ arbor_home()) do
+    case File.read(metadata_file(home)) do
+      {:ok, raw} ->
+        with {:ok, meta} <- LifecycleIdentity.parse_metadata(raw),
+             :ok <- LifecycleIdentity.validate_metadata_identity(meta, node_id()) do
+          {:ok, meta}
+        else
+          {:error, :malformed} -> {:error, :malformed}
+        end
+
+      {:error, :enoent} ->
+        :absent
+
+      {:error, _reason} ->
+        {:error, :malformed}
+    end
+  end
+
+  @doc """
+  Reads the legacy OS PID file. Returns `:absent` only when the file
+  genuinely does not exist, `{:error, :malformed}` when it exists but
+  can't be read cleanly or its content isn't a bare positive integer
+  (never raises — a corrupted PID file must not crash the caller), or
+  `{:ok, pid}` on a well-formed value.
+  """
+  def read_pid(home \\ arbor_home()) do
+    case File.read(pid_file(home)) do
+      {:ok, content} ->
+        case content |> String.trim() |> Integer.parse() do
+          {pid, ""} when pid > 0 -> {:ok, pid}
+          _ -> {:error, :malformed}
+        end
+
+      {:error, :enoent} ->
+        :absent
+
+      {:error, _reason} ->
+        {:error, :malformed}
+    end
+  end
+
+  @doc "Atomically publishes the managed-node metadata record (tmp write + rename)."
+  def write_metadata!(meta, home \\ arbor_home()) do
+    atomic_write!(metadata_file(home), LifecycleIdentity.encode_metadata(meta))
+  end
+
+  defp atomic_write!(path, data) do
+    File.mkdir_p!(Path.dirname(path))
+    tmp = path <> ".tmp"
+    File.write!(tmp, data)
+    File.rename!(tmp, path)
+  end
+
+  @doc "Existence probe only (`kill -0`) — delivers no signal, safe against any PID."
+  def pid_alive?(pid) do
+    match?({_, 0}, System.cmd("kill", ["-0", to_string(pid)], stderr_to_stdout: true))
+  end
+
+  @doc """
+  Verifies whether `pid` is a live Arbor node managed by this machine, via a
+  bounded, exact argv check (never a substring match) — see
+  `LifecycleIdentity.parse_arbor_node_from_argv/2`. Returns `:unverified` on
+  any read/parse ambiguity so callers fail closed rather than guess.
+  """
+  def verify_pid_as_arbor_node(pid) do
+    if pid_alive?(pid) do
+      case System.cmd("ps", ["-ww", "-o", "args=", "-p", to_string(pid)], stderr_to_stdout: true) do
+        {argv, 0} when byte_size(argv) <= @max_argv_bytes ->
+          LifecycleIdentity.parse_arbor_node_from_argv(argv, node_id())
+
+        _ ->
+          :unverified
+      end
+    else
+      :no_such_process
+    end
+  end
+
+  @doc """
+  Revalidates `pid`'s exact argv identity as `expected_node` immediately
+  before delivering `signal`, and only signals when that fresh recheck
+  matches — binding PID and expected node identity together at the actual
+  effect boundary rather than at an earlier decision point. This is the
+  only call site in this codebase that ever delivers `kill <pid>` (not
+  `kill -0`); Start and Stop both route every signal through it.
+  """
+  @spec signal_if_verified(pos_integer(), String.t(), :sigterm) ::
+          {:signaled, LifecycleIdentity.pid_check()} | {:refused, LifecycleIdentity.pid_check()}
+  def signal_if_verified(pid, expected_node, :sigterm) do
+    check = verify_pid_as_arbor_node(pid)
+
+    case LifecycleIdentity.decide_signal_authorization(check, expected_node) do
+      :safe_to_signal ->
+        System.cmd("kill", [to_string(pid)], stderr_to_stdout: true)
+        {:signaled, check}
+
+      :preserve_evidence ->
+        {:refused, check}
+    end
+  end
+
+  @doc """
+  Polls until `pid` is no longer alive, or `timeout_ms` elapses. Never
+  signals anything — existence probing only (`pid_alive?/1`, `kill -0`).
+  """
+  @spec await_exit?(pos_integer(), non_neg_integer(), pos_integer()) :: boolean()
+  def await_exit?(pid, timeout_ms, poll_interval_ms \\ 250)
+
+  def await_exit?(pid, timeout_ms, _poll_interval_ms) when timeout_ms <= 0 do
+    not pid_alive?(pid)
+  end
+
+  def await_exit?(pid, timeout_ms, poll_interval_ms) do
+    if pid_alive?(pid) do
+      Process.sleep(poll_interval_ms)
+      await_exit?(pid, timeout_ms - poll_interval_ms, poll_interval_ms)
+    else
+      true
+    end
+  end
+
+  @doc "Pings a node given as a validated `arbor_dev_<id>@<host>` string."
+  def node_alive?(node_string) do
+    :net_adm.ping(node_atom(node_string)) == :pong
+  end
+
+  @doc "Converts a validated node-identity string to its distribution atom."
+  # Safe: only ever called with a value already matched against the
+  # arbor_dev_<hex>@<host> shape by LifecycleIdentity parse/validate
+  # functions — never raw operator or file input.
+  # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+  def node_atom(node_string), do: String.to_atom(node_string)
+
+  # --- Exclusive lifecycle lock -------------------------------------------
+  #
+  # `File.mkdir/1` is the OS-atomic exclusivity primitive: exactly one
+  # concurrent caller succeeds. The winner records its OS pid + a random
+  # token; release only deletes when the on-disk token still matches ours,
+  # so external/manual recovery cannot make an old owner tear down a newly
+  # acquired lock generation.
+  #
+  # Stale locks are deliberately not reclaimed automatically. A contender
+  # can prove that the recorded owner is dead, but no portable File API can
+  # atomically prove that the directory at this reusable path is still the
+  # same generation it observed before deleting or renaming it. A delayed
+  # contender could otherwise remove a new owner's lock. The safe recovery
+  # is an explicit operator inspection/removal followed by a fresh command.
+
+  @doc "Acquires the exclusive lifecycle lock, refusing stale or ambiguous owners."
+  def acquire_lock(home \\ arbor_home()) do
+    dir = lock_dir(home)
+    owner_path = Path.join(dir, "owner.json")
+
+    case File.mkdir(dir) do
+      :ok ->
+        token = :crypto.strong_rand_bytes(16) |> Base.encode16(case: :lower)
+
+        case File.write(
+               owner_path,
+               LifecycleIdentity.encode_lock_owner(self_os_pid(), token)
+             ) do
+          :ok ->
+            {:ok, token}
+
+          {:error, reason} ->
+            File.rm_rf(dir)
+            {:refuse, :lock_io_error, %{reason: reason}}
+        end
+
+      {:error, :eexist} ->
+        owner = read_lock_owner(owner_path)
+        alive? = lock_owner_alive?(owner)
+        LifecycleIdentity.decide_lock_step(%{owner: owner, owner_pid_alive?: alive?})
+
+      {:error, reason} ->
+        {:refuse, :lock_io_error, %{reason: reason}}
+    end
+  end
+
+  defp lock_owner_alive?({:ok, %{pid: pid}}), do: pid_alive?(pid)
+  defp lock_owner_alive?(_), do: :unverified
+
+  defp read_lock_owner(owner_path) do
+    case File.read(owner_path) do
+      {:ok, raw} -> LifecycleIdentity.parse_lock_owner(raw)
+      {:error, _} -> :absent
+    end
+  end
+
+  @doc "Releases the lock only if `token` still matches the recorded owner."
+  def release_lock(home \\ arbor_home(), token) do
+    dir = lock_dir(home)
+    owner_path = Path.join(dir, "owner.json")
+
+    case read_lock_owner(owner_path) do
+      {:ok, %{pid: pid, token: ^token}} ->
+        if pid == self_os_pid() do
+          File.rm(owner_path)
+          File.rmdir(dir)
+        end
+
+        :ok
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp self_os_pid, do: System.pid() |> String.to_integer()
+
+  @doc "Runs `fun` while holding the exclusive lifecycle lock; always releases it."
+  def with_lock(fun, home \\ arbor_home()) do
+    case acquire_lock(home) do
+      {:ok, token} ->
+        try do
+          fun.()
+        after
+          release_lock(home, token)
+        end
+
+      {:refuse, _reason, _detail} = refusal ->
+        refusal
+    end
+  end
+
+  @doc "Human-readable message for a lock-acquisition refusal."
+  def describe_lock_refusal(:held_by, pid) do
+    "Another arbor lifecycle command (pid #{pid}) is already in progress. " <>
+      "Wait for it to finish, or investigate if it appears stuck."
+  end
+
+  def describe_lock_refusal(:ambiguous_lock, _detail) do
+    "Cannot verify the lifecycle lock owner; refusing to proceed. " <>
+      "Inspect #{lock_dir()} manually if this persists."
+  end
+
+  def describe_lock_refusal(:stale_lock, %{pid: pid}) do
+    "The lifecycle lock records dead owner pid #{pid}. Refusing automatic " <>
+      "reclamation because the lock path may have been replaced; inspect and " <>
+      "remove #{lock_dir()} manually, then retry."
+  end
+
+  def describe_lock_refusal(:lock_io_error, %{reason: reason}) do
+    "Could not acquire the lifecycle lock (#{inspect(reason)})."
+  end
 
   @doc """
   Ensure the runtime directories for the pid + log files exist.
@@ -186,17 +465,6 @@ defmodule Mix.Tasks.Arbor.Helpers do
   @doc "Checks if the server node is responding to pings."
   def server_running? do
     :net_adm.ping(full_node_name()) == :pong
-  end
-
-  @doc "Reads the OS PID from the PID file, or returns nil."
-  def read_pid do
-    case File.read(@pid_file) do
-      {:ok, content} ->
-        content |> String.trim() |> String.to_integer()
-
-      _ ->
-        nil
-    end
   end
 
   @doc """
