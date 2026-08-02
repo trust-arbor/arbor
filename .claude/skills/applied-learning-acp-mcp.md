@@ -854,3 +854,16 @@ the Phase E Claude fallback launched with `--model opus` but attested
 note to one line under 1 KB, summarize the decision and essential blockers, and
 put detailed evidence in the reviewed artifact or a separate steering message
 (found 2026-08-02 requesting lifecycle-design rework through MCP).
+
+<!-- applied-learning: negotiate-optional-acp-resume-fields-against-advertised-capabilities -->
+<a id="applied-learning-negotiate-optional-acp-resume-fields-against-advertised-capabilities"></a>
+**Negotiate optional ACP resume fields against advertised capabilities.** A
+provider session id does not prove every extension on that provider's resume
+request is accepted. In particular, do not send Codex
+`thread/resume.initialTurnsPage` unless the peer advertised the required
+`experimentalApi` capability; otherwise a valid explicit continuation fails at
+session startup with JSON-RPC `-32600` before the worker can respond. Gate the
+field structurally from negotiated capabilities and regress the full managed
+resume path, rather than matching provider error text or treating every resume
+failure as a missing conversation (found 2026-08-02 while recovering a voice
+packet after `design_response_invalid`).
