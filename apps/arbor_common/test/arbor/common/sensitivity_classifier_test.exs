@@ -1,0 +1,120 @@
+defmodule Arbor.Common.SensitivityClassifierTest do
+  use ExUnit.Case, async: true
+
+  @moduletag :fast
+
+  alias Arbor.Common.SensitivityClassifier
+
+  describe "classify/2" do
+    test "returns :public for clean prompt" do
+      result = SensitivityClassifier.classify("deploy the app to staging")
+
+      assert result.overall_sensitivity == :public
+      assert result.routing_recommendation == :any
+      assert result.findings == []
+      assert result.element_count == 0
+      assert result.sanitized_prompt == "deploy the app to staging"
+      assert result.taint_tags == %{pii: false, credentials: false, code: false, internal: false}
+    end
+
+    test "detects API key and classifies as :confidential" do
+      prompt = ~s(use key sk-ant-api1234567890abcdefghij to call the API)
+      result = SensitivityClassifier.classify(prompt)
+
+      assert result.overall_sensitivity == :confidential
+      assert result.routing_recommendation == :local_preferred
+      assert result.element_count >= 1
+      assert result.taint_tags.credentials == true
+      assert result.sanitized_prompt =~ "[REDACTED]"
+      refute result.sanitized_prompt =~ "sk-ant-"
+    end
+
+    test "detects private key and classifies as :restricted" do
+      header = "-----BEGIN " <> "RSA PRIVATE KEY-----"
+      prompt = "here is my key:\n" <> header <> "\ndata"
+      result = SensitivityClassifier.classify(prompt)
+
+      assert result.overall_sensitivity == :restricted
+      assert result.routing_recommendation == :local_only
+      assert result.taint_tags.credentials == true
+    end
+
+    test "detects database connection string as :restricted" do
+      prompt = "connect to postgres://admin:secret@db.example.com/mydb"
+      result = SensitivityClassifier.classify(prompt)
+
+      assert result.overall_sensitivity == :restricted
+      assert result.routing_recommendation == :local_only
+    end
+
+    test "detects password in config as :confidential" do
+      prompt = ~s(set password = "hunter2secret")
+      result = SensitivityClassifier.classify(prompt)
+
+      assert result.overall_sensitivity == :confidential
+      assert result.taint_tags.credentials == true
+    end
+
+    test "detects PII — email address" do
+      prompt = "contact john.doe@company.com for access"
+      result = SensitivityClassifier.classify(prompt)
+
+      assert result.element_count >= 1
+      assert result.taint_tags.pii == true
+      assert result.sanitized_prompt =~ "[REDACTED]"
+    end
+
+    test "detects SSN as :restricted with PII tag" do
+      prompt = "my SSN is 123-45-6789"
+      result = SensitivityClassifier.classify(prompt)
+
+      assert result.overall_sensitivity == :restricted
+      assert result.routing_recommendation == :local_only
+      assert result.taint_tags.pii == true
+    end
+
+    test "handles mixed findings — takes highest sensitivity" do
+      header = "-----BEGIN " <> "PRIVATE KEY-----"
+      prompt = ~s(email: john.doe@company.com key: ) <> header
+      result = SensitivityClassifier.classify(prompt)
+
+      # Private key = :restricted, email = :internal → max is :restricted
+      assert result.overall_sensitivity == :restricted
+      assert result.taint_tags.pii == true
+      assert result.taint_tags.credentials == true
+    end
+
+    test "sanitized_prompt matches original when no findings" do
+      prompt = "plain request with no secrets"
+      result = SensitivityClassifier.classify(prompt)
+
+      assert result.sanitized_prompt == prompt
+    end
+  end
+
+  describe "sensitive?/1" do
+    test "returns false for clean text" do
+      refute SensitivityClassifier.sensitive?("hello world")
+    end
+
+    test "returns true for text with API key" do
+      assert SensitivityClassifier.sensitive?(~s(key: sk-ant-api1234567890abcdefghij))
+    end
+  end
+
+  describe "routing_for/1" do
+    test "returns :any for clean text" do
+      assert SensitivityClassifier.routing_for("hello") == :any
+    end
+
+    test "returns :local_only for restricted content" do
+      header = "-----BEGIN " <> "PRIVATE KEY-----"
+      assert SensitivityClassifier.routing_for(header) == :local_only
+    end
+
+    test "returns :local_preferred for confidential content" do
+      assert SensitivityClassifier.routing_for(~s(key: sk-ant-api1234567890abcdefghij)) ==
+               :local_preferred
+    end
+  end
+end

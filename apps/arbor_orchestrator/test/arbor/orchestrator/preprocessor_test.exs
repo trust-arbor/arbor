@@ -174,4 +174,29 @@ defmodule Arbor.Orchestrator.PreprocessorTest do
       Application.put_env(@app, :preprocessor, original || [])
     end
   end
+
+  describe "sensitivity default classifier (VP-06A lower-level facade)" do
+    test "prompt_classifier defaults to Arbor.Common.SensitivityClassifier" do
+      Application.delete_env(@app, :preprocessor)
+
+      assert Config.preprocessor()[:prompt_classifier] == Arbor.Common.SensitivityClassifier
+    end
+
+    test "enabled sensitivity-only run uses the default classifier with no network access" do
+      Application.put_env(@app, :preprocessor_enabled, true)
+
+      Application.put_env(@app, :preprocessor,
+        needs_tools: [enabled: false],
+        complexity: [enabled: false]
+      )
+
+      # Sensitivity classification is pure regex (Arbor.Common.SensitiveData) — no
+      # LM Studio/Ollama call is made, so this proves the default is network-free.
+      prompt = ~s(use key sk-ant-api1234567890abcdefghij to call the API)
+      assert {:ok, result} = Preprocessor.run(prompt)
+
+      assert result["sensitivity"]["level"] == "confidential"
+      assert result["sensitivity"]["routing"] == "local_preferred"
+    end
+  end
 end

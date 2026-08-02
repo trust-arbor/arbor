@@ -27,8 +27,10 @@ defmodule Arbor.Orchestrator.Config do
           retrieval:   [provider: :lm_studio, embed_model: "mxbai-embed-large-v1",
                         base_url: "http://localhost:1234/v1", enabled: false,
                         index_path: nil, top_k: 8],
-          # runtime-resolved gateway modules (avoids a compile-time cross-library dep)
-          prompt_classifier: Arbor.Gateway.PromptClassifier,
+          # prompt_classifier is a declared lower-level arbor_common dependency;
+          # intent_extractor remains a runtime-resolved gateway module (avoids a
+          # compile-time cross-library dep for the still-gateway-owned stage)
+          prompt_classifier: Arbor.Common.SensitivityClassifier,
           intent_extractor: Arbor.Gateway.IntentExtractor,
           timeout_ms: 30_000
         ]
@@ -77,7 +79,9 @@ defmodule Arbor.Orchestrator.Config do
       # raises the chance the right tool is present (mxbai recall@5 ≈ 66%).
       top_k: 8
     ],
-    prompt_classifier: Arbor.Gateway.PromptClassifier,
+    # Declared lower-level arbor_common dependency for content-sensitivity
+    # classification (VP-06A) — no longer resolved through the HTTP gateway.
+    prompt_classifier: Arbor.Common.SensitivityClassifier,
     intent_extractor: Arbor.Gateway.IntentExtractor,
     # Engine consumption: when tier == DIRECT, empty the tool list (no-tools fast
     # lane). Set false to keep DIRECT advisory-only as insurance against the

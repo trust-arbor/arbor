@@ -15,7 +15,7 @@ On each user turn, when enabled, `Arbor.Orchestrator.Preprocessor.run/2` runs:
 
 | Stage | What it produces | Provider (default) |
 |---|---|---|
-| **sensitivity** | PII/secret scan → routing recommendation | `Arbor.Gateway.PromptClassifier` (runtime-resolved) |
+| **sensitivity** | PII/secret scan → routing recommendation | `Arbor.Common.SensitivityClassifier` (declared arbor_common dep; default) |
 | **needs_tools** | boolean: does this need tools, or a pure conversational answer? (the effort-tier gate) | LM Studio, `gemma-4-e4b-it@q4_k_xl` |
 | **complexity** | SIMPLE / MULTI_STEP / NON_ACTIONABLE (actionable turns only) | Ollama, `granite4.1:3b` |
 | **intent** | goal / risk_level (actionable turns only) | `Arbor.Gateway.IntentExtractor` (runtime-resolved) |
@@ -92,9 +92,10 @@ config :arbor_orchestrator, :preprocessor,
     top_k: 5
   ],
 
-  # Gateway modules resolved at RUNTIME (no compile-time cross-library dep).
-  # Override for testing or to swap implementations.
-  prompt_classifier: Arbor.Gateway.PromptClassifier,
+  # prompt_classifier is a declared lower-level arbor_common dependency (default).
+  # intent_extractor is a gateway module resolved at RUNTIME (no compile-time
+  # cross-library dep). Both are overridable for testing or to swap implementations.
+  prompt_classifier: Arbor.Common.SensitivityClassifier,
   intent_extractor: Arbor.Gateway.IntentExtractor,
 
   timeout_ms: 30_000
@@ -179,10 +180,15 @@ LLM rerank would tighten it.
 
 ## Architecture notes
 
-- `arbor_orchestrator` does not depend on `arbor_gateway`/`arbor_ai` at compile time
-  (library hierarchy). Gateway modules are resolved at **runtime**
-  (`Code.ensure_loaded?` + `function_exported?`), so there's no cross-library compile
-  dependency. LLM calls use `Req` (external) directly to Ollama / LM Studio.
+- `arbor_orchestrator` does not depend on `arbor_gateway` at compile time. The default
+  sensitivity classifier,
+  `Arbor.Common.SensitivityClassifier`, is a declared lower-level `arbor_common`
+  dependency consumed directly (arbor_common sits below arbor_gateway in the
+  hierarchy) — `Arbor.Gateway.PromptClassifier` remains available as an explicit
+  override for source compatibility. The `intent_extractor` stage still resolves
+  its gateway module at **runtime** (`Code.ensure_loaded?` + `function_exported?`),
+  so there's no cross-library compile dependency for that stage. LLM calls use
+  `Req` (external) directly to Ollama / LM Studio.
 - **Fail-open everywhere.** `Preprocessor.run/2` never returns `{:error, _}`; the Session
   integration (`maybe_preprocess/2`) also rescues, so a preprocessor failure can never
   break a turn.

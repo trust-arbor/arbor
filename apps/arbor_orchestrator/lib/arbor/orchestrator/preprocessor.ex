@@ -9,7 +9,9 @@ defmodule Arbor.Orchestrator.Preprocessor do
 
   ## Stages
 
-  1. **sensitivity** — `Arbor.Gateway.PromptClassifier` (PII/secret scan → routing).
+  1. **sensitivity** — `Arbor.Common.SensitivityClassifier` (PII/secret scan → routing;
+     default, overridable — e.g. to `Arbor.Gateway.PromptClassifier` — via
+     `:prompt_classifier` config).
   2. **needs_tools** — small LLM judges whether fulfilling the request needs tools
      (files/commands/state/investigation) vs. a pure conversational answer. This is
      the effort-tier gate. Locked model: `gemma-4-e4b-it-qat` (LM Studio).
@@ -26,10 +28,12 @@ defmodule Arbor.Orchestrator.Preprocessor do
 
   ## Architectural notes
 
-  `arbor_orchestrator` does NOT depend on `arbor_gateway`/`arbor_ai` at compile time
-  (hierarchy). Gateway modules are resolved at RUNTIME (`Code.ensure_loaded?` +
-  `function_exported?`) per the config, so there is no cross-library compile dep.
-  LLM calls go through `Req` (external) directly to Ollama / LM Studio.
+  `arbor_orchestrator` does not depend on `arbor_gateway` at compile time. The
+  sensitivity classifier is a declared lower-level `arbor_common` dependency
+  (`Arbor.Common.SensitivityClassifier`), not runtime-resolved. The `intent_extractor`
+  stage still resolves its gateway module at RUNTIME (`Code.ensure_loaded?` +
+  `function_exported?`) per the config, so there is no cross-library compile dep for
+  that stage. LLM calls go through `Req` (external) directly to Ollama / LM Studio.
 
   ## What this does NOT do
 
