@@ -705,3 +705,13 @@ clean only resources whose ownership and terminal state are proven. Treat
 `ENOSPC` as an infrastructure failure that preserves the candidate; never delete
 temporary paths by broad prefix and age alone (found 2026-08-02 after lifecycle
 validation exhausted the host disk).
+
+<!-- applied-learning: do-not-launch-long-lived-services-from-disposable-validation-build-roots -->
+<a id="applied-learning-do-not-launch-long-lived-services-from-disposable-validation-build-roots"></a>
+**Do not launch long-lived services from disposable validation build roots.**
+An isolated `MIX_BUILD_ROOT` supplied to a lifecycle command can be inherited by
+the background daemon, leaving the service dependent on a temporary path that a
+later cleanup may reclaim. Use isolated roots for compile and test evidence, but
+perform the final managed restart from a stable project build environment unless
+the daemon boundary explicitly sanitizes transient build variables (found
+2026-08-02 while verifying managed lifecycle identity).

@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-08-01",
-  "entry_count": 613,
+  "entry_count": 614,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -7513,8 +7513,21 @@
       "source_incident": "found 2026-08-02 after lifecycle validation exhausted the host disk).",
       "content_sha256": "2c99dde3a5f69449d30d8a6b6b00a293bb5839a688aff49de90bec557202f6e1",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 614,
+      "source_kind": "post-migration",
+      "slug": "do-not-launch-long-lived-services-from-disposable-validation-build-roots",
+      "title": "Do not launch long-lived services from disposable validation build roots.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-do-not-launch-long-lived-services-from-disposable-validation-build-roots",
+      "source_date": "2026-08-02",
+      "source_incident": "found 2026-08-02 while verifying managed lifecycle identity).",
+      "content_sha256": "7414fcab9d6b77aa20cd5de58bfa95d6dec95151e4359b14d3c01ac91deb72c6",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 152
+  "post_migration_entry_count": 153
 }
