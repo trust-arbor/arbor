@@ -109,7 +109,7 @@ L4  arbor_persistence_ecto, arbor_historian, arbor_trust, arbor_ai, arbor_comms,
 L5  arbor_memory, arbor_scheduler
 L6  arbor_actions
 L7  arbor_orchestrator, arbor_agent, arbor_gateway
-L8  arbor_commands
+L8  arbor_commands, arbor_voice
 L9  arbor_dashboard
 ```
 
@@ -119,12 +119,17 @@ Notes:
   executes Jido actions via `exec` nodes, authorizes capabilities + egress,
   routes LLMs/ACP, reads goals/percepts, trust policy, and runs sandboxed
   shell; the old runtime `Code.ensure_loaded?`/`apply` indirection was dropped
-  for real deps in the 2026-06-17 runtime-bridge sweep). Only `arbor_commands`
-  + `arbor_dashboard` depend on orchestrator, so it sits high (L7), not as a
-  low kernel.
+  for real deps in the 2026-06-17 runtime-bridge sweep). Only `arbor_commands`,
+  `arbor_dashboard`, and (as of VP-02) `arbor_voice` depend on orchestrator, so
+  it sits high (L7), not as a low kernel.
 - `arbor_gateway` moved L6→L7 in the 2026-06-17 sweep — it now deps
   **arbor_actions** (MCP tool execution via `Arbor.Actions.authorize_and_execute`;
   acyclic — actions does not dep gateway).
+- `arbor_voice` (new, VP-02) sits at L8 — its highest in-umbrella dep is
+  `arbor_orchestrator`/`arbor_agent` (L7). It's the headless
+  engagement-substrate consumer for voice (`Arbor.Voice.RealtimeBackend`
+  behaviour only in this slice; `Arbor.Voice.Session` and the xAI backend
+  land in VP-03/VP-04).
 - The 2026-06-17 sweep also added (all acyclic, no level change): `arbor_agent`
   → arbor_llm; `arbor_consensus` → arbor_security; `arbor_dashboard` →
   arbor_security (was already transitive).
