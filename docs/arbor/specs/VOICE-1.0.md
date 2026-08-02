@@ -98,7 +98,7 @@ transport — raw audio never leaves the phone.
 - **VOICE-13** (MUST, planned): Every string sent to any TTS output MUST first pass through
   `Arbor.Voice.Speakable.render/2`. There MUST be no TTS call site that bypasses it.
 
-- **VOICE-14** (MUST, planned): `Speakable.render/2` MUST enforce a word budget (default: 60
+- **VOICE-14** (MUST): `Speakable.render/2` MUST enforce a word budget (default: 60
   words) and MUST NOT emit URLs, fenced code blocks, markdown tables, or base64 blobs
   into speech output.
 
