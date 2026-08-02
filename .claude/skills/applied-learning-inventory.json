@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-08-01",
-  "entry_count": 611,
+  "entry_count": 613,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -7487,8 +7487,34 @@
       "source_incident": "found 2026-08-02 while validating managed lifecycle identity).",
       "content_sha256": "b73380cdfe3affaaad85a06ae117e15d400cfa9b4ab8c34d09270d14370de783",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 612,
+      "source_kind": "post-migration",
+      "slug": "deterministic-deadline-tests-must-count-every-clock-read-and-keep-fake-clocks-process-local",
+      "title": "Deterministic deadline tests must count every clock read and keep fake clocks process-local.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-deterministic-deadline-tests-must-count-every-clock-read-and-keep-fake-clocks-process-local",
+      "source_date": "2026-08-02",
+      "source_incident": "found 2026-08-02 while reworking VOICE transport deadlines).",
+      "content_sha256": "86046ca8413c7ec93b7f5c2f6440b2b4a851a92e6ebbfe549f3faabfde56608c",
+      "always_loaded": false
+    },
+    {
+      "source_ordinal": 613,
+      "source_kind": "post-migration",
+      "slug": "isolated-validation-artifacts-need-owned-disk-admission-and-garbage-collection",
+      "title": "Isolated validation artifacts need owned disk admission and garbage collection.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-isolated-validation-artifacts-need-owned-disk-admission-and-garbage-collection",
+      "source_date": "2026-08-02",
+      "source_incident": "found 2026-08-02 after lifecycle validation exhausted the host disk).",
+      "content_sha256": "2c99dde3a5f69449d30d8a6b6b00a293bb5839a688aff49de90bec557202f6e1",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 150
+  "post_migration_entry_count": 152
 }

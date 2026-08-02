@@ -685,3 +685,23 @@ only when intentionally relocating; use the stored identity for status, stop,
 and restart; and refuse to start when a verified managed PID is alive but
 unreachable. Regression-test host drift and stale or mismatched metadata (found
 2026-08-02 restarting after Linux dependency-baseline activation).
+
+<!-- applied-learning: deterministic-deadline-tests-must-count-every-clock-read-and-keep-fake-clocks-process-local -->
+<a id="applied-learning-deterministic-deadline-tests-must-count-every-clock-read-and-keep-fake-clocks-process-local"></a>
+**Deterministic deadline tests must count every clock read and keep fake clocks
+process-local.** Absolute-deadline code may sample time while constructing the
+deadline and again before each receive, so scripted clocks must model every read
+and mailbox tests should assert exact unconsumed messages. Keep fake-clock state
+in the test process or ensure explicit cleanup; a linked Agent can outlive a
+normally exiting test process and leak into later tests (found 2026-08-02 while
+reworking VOICE transport deadlines).
+
+<!-- applied-learning: isolated-validation-artifacts-need-owned-disk-admission-and-garbage-collection -->
+<a id="applied-learning-isolated-validation-artifacts-need-owned-disk-admission-and-garbage-collection"></a>
+**Isolated validation artifacts need owned disk admission and garbage
+collection.** Check free bytes and inodes before admitting worker or validation
+work, attach exact owner and attempt identity plus expiry to every artifact, and
+clean only resources whose ownership and terminal state are proven. Treat
+`ENOSPC` as an infrastructure failure that preserves the candidate; never delete
+temporary paths by broad prefix and age alone (found 2026-08-02 after lifecycle
+validation exhausted the host disk).
