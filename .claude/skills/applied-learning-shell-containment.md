@@ -277,3 +277,14 @@ privileged staging and verify its pinned digest before extraction or
 installation; checking a source path and then reopening it leaves the same
 TOCTOU window (found 2026-07-31 while refreshing the Apple Container
 dependency baseline).
+
+<!-- applied-learning: secrets-must-not-be-passed-or-printed-in-process-argv -->
+<a id="applied-learning-secrets-must-not-be-passed-or-printed-in-process-argv"></a>
+**Secrets must not be passed or printed in process argv.** Command lines are
+visible to routine same-user diagnostics and may be system-visible; Arbor's
+Erlang distribution cookie carries remote code-execution authority. Deliver
+secrets through a permissioned file or protected post-spawn channel, construct
+child argv structurally instead of interpolating shell text, and let attach
+commands reuse the protected source without echoing its value. A secret being
+operator-controlled does not make argv exposure or shell interpolation safe
+(found 2026-08-02 while validating managed lifecycle identity).
