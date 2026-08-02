@@ -676,6 +676,18 @@ Preserve the exact candidate tree, avoid blind cross-provider retries, and
 reserve enough stage budget for one complete recovery turn plus settlement
 (found 2026-07-28 while completing the managed ACP reconciliation read model).
 
+<!-- applied-learning: budget-design-required-plans-for-the-design-and-the-reserved-tail -->
+<a id="applied-learning-budget-design-required-plans-for-the-design-and-the-reserved-tail"></a>
+**Budget design-required plans for the design and the reserved tail.** The
+coding policy reserves 40% of wall-clock capacity for validation, review, and
+cleanup, so a nominal 15-minute plan can leave too little implementation or
+approval time after a substantial design turn. Give design-required packets
+enough total capacity for design, operator review, implementation, and the
+reserved tail; keep inactivity separate from wall-clock capacity. Budgets are
+immutable after admission, so preserve continuity and redispatch with a larger
+reviewed plan instead of repeatedly resuming an exhausted one (found 2026-08-02
+when three voice prerequisite packets exhausted recovery or approval capacity).
+
 <!-- applied-learning: a-design-checkpoint-approval-note-is-audit-evidence-not-guaranteed-worker-steering -->
 <a id="applied-learning-a-design-checkpoint-approval-note-is-audit-evidence-not-guaranteed-worker-steering"></a>
 **A design checkpoint approval note is audit evidence, not guaranteed worker
@@ -700,12 +712,15 @@ pending-approval settlement dispatch used `max_cycles: 3`).
 <!-- applied-learning: design-required-checkpoint-turns-must-be-observational -->
 <a id="applied-learning-design-required-checkpoint-turns-must-be-observational"></a>
 **Design-required checkpoint turns must be observational.** Tell the delegated
-worker explicitly to inspect and design without editing the worktree until the
-checkpoint is approved. Arbor correctly rejects a design turn that changes the
-workspace as `design_turn_modified_workspace`, even when the resulting patch is
-useful; implementation authority begins only after approval, not when the model
-believes its design is obvious (found 2026-07-28 during the Phase F
-pending-approval settlement delegation).
+worker explicitly to inspect and design without editing any filesystem state
+until the checkpoint is approved, including shared locations such as `/tmp`.
+Arbor correctly rejects a design turn that changes the owned workspace as
+`design_turn_modified_workspace`, even when the resulting patch is useful, but
+an unowned shared-temp write can escape that fingerprint and collide with
+another worker. Implementation authority begins only after approval, not when
+the model believes its design is obvious (found 2026-07-28 during the Phase F
+pending-approval settlement delegation; broadened 2026-08-02 after a voice
+design wrote `/tmp/design_draft.txt`).
 
 <!-- applied-learning: preserve-retained-worker-trees-without-mutating-the-source-owned-workspace -->
 <a id="applied-learning-preserve-retained-worker-trees-without-mutating-the-source-owned-workspace"></a>
