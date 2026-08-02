@@ -3277,6 +3277,15 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert called?(calls, "coding_dependency_baseline_check")
       assert called?(calls, "acp_start_session")
 
+      assert {"coding_dependency_baseline_check", dependency_args} =
+               Enum.find(calls, fn {name, _args} ->
+                 name == "coding_dependency_baseline_check"
+               end)
+
+      assert dependency_args["repo_path"] == "/tmp/repo"
+      assert dependency_args["base_commit"] == "basecommit0001"
+      refute Map.has_key?(dependency_args, "worktree_path")
+
       dependency_check_index =
         Enum.find_index(calls, fn {name, _} -> name == "coding_dependency_baseline_check" end)
 

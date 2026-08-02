@@ -48,7 +48,7 @@ defmodule Arbor.Actions.Coding.DependencyBaselineAdmissionTest do
 
       assert {:ok, %{"matched" => true}} =
                DependencyBaselineAdmission.run(
-                 %{worktree_path: repo_path, base_commit: base_commit},
+                 %{repo_path: repo_path, base_commit: base_commit},
                  %{}
                )
     end
@@ -64,7 +64,7 @@ defmodule Arbor.Actions.Coding.DependencyBaselineAdmissionTest do
 
       result =
         DependencyBaselineAdmission.run(
-          %{worktree_path: repo_path, base_commit: base_commit},
+          %{repo_path: repo_path, base_commit: base_commit},
           %{}
         )
 
@@ -80,7 +80,7 @@ defmodule Arbor.Actions.Coding.DependencyBaselineAdmissionTest do
 
       assert {:error, {:dependency_baseline_admission_failed, :baseline_unavailable}} =
                DependencyBaselineAdmission.run(
-                 %{worktree_path: repo_path, base_commit: base_commit},
+                 %{repo_path: repo_path, base_commit: base_commit},
                  %{}
                )
     end
@@ -100,7 +100,7 @@ defmodule Arbor.Actions.Coding.DependencyBaselineAdmissionTest do
 
         assert {:error, {:dependency_baseline_admission_failed, :baseline_unavailable}} =
                  DependencyBaselineAdmission.run(
-                   %{worktree_path: repo_path, base_commit: base_commit},
+                   %{repo_path: repo_path, base_commit: base_commit},
                    %{}
                  )
       end
@@ -113,7 +113,7 @@ defmodule Arbor.Actions.Coding.DependencyBaselineAdmissionTest do
 
       assert {:error, {:dependency_baseline_admission_failed, :baseline_unavailable}} =
                DependencyBaselineAdmission.run(
-                 %{worktree_path: repo_path, base_commit: base_commit},
+                 %{repo_path: repo_path, base_commit: base_commit},
                  %{}
                )
     end
@@ -127,7 +127,7 @@ defmodule Arbor.Actions.Coding.DependencyBaselineAdmissionTest do
       assert {:error,
               {:dependency_baseline_admission_failed, :mix_lock_unreadable_at_base_commit}} =
                DependencyBaselineAdmission.run(
-                 %{worktree_path: repo_path, base_commit: initial_commit},
+                 %{repo_path: repo_path, base_commit: initial_commit},
                  %{}
                )
     end
@@ -147,7 +147,29 @@ defmodule Arbor.Actions.Coding.DependencyBaselineAdmissionTest do
 
       assert {:error, {:dependency_baseline_admission_failed, :digest_mismatch}} =
                DependencyBaselineAdmission.run(
-                 %{worktree_path: repo_path, base_commit: base_commit},
+                 %{repo_path: repo_path, base_commit: base_commit},
+                 %{}
+               )
+    end
+
+    test "regression: canonical repository storage admits the base used by a linked workspace",
+         %{repo_path: repo_path, tmp_dir: tmp_dir} do
+      contents = "%{\"linked\" => \"workspace\"}\n"
+      base_commit = commit_mix_lock(repo_path, contents)
+      linked_worktree = Path.join(tmp_dir, "linked-worktree")
+      FakeDigestSource.set_digest(mix_lock_digest(contents))
+
+      {output, status} =
+        System.cmd("git", ["worktree", "add", "--detach", linked_worktree, base_commit],
+          cd: repo_path,
+          stderr_to_stdout: true
+        )
+
+      assert status == 0, output
+
+      assert {:ok, %{"matched" => true}} =
+               DependencyBaselineAdmission.run(
+                 %{repo_path: repo_path, base_commit: base_commit},
                  %{}
                )
     end

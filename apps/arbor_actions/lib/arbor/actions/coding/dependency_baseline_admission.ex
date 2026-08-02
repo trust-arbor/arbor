@@ -4,9 +4,10 @@ defmodule Arbor.Actions.Coding.DependencyBaselineAdmission do
   match the verified startup-pinned Linux dependency baseline?
 
   Reads the `mix.lock` blob directly out of the immutable commit object at
-  `base_commit` (via `Arbor.Actions.Git.read_bounded_blob_at_commit/4`) —
-  never the worktree's live working-tree file, so a dirty replacement or
-  TOCTOU substitution on disk cannot influence the result. Compares its
+  `base_commit` through the canonical repository root (via
+  `Arbor.Actions.Git.read_bounded_blob_at_commit/4`) — never the linked
+  worktree's live file, so a dirty replacement or TOCTOU substitution on disk
+  cannot influence the result. Compares its
   SHA-256 digest against `Arbor.Shell.linux_dependency_baseline_mix_lock_digest/0`,
   the narrow evidence-only projection of the startup-pinned authority.
 
@@ -22,10 +23,10 @@ defmodule Arbor.Actions.Coding.DependencyBaselineAdmission do
     category: "coding",
     tags: ["coding", "workspace", "dependency-baseline"],
     schema: [
-      worktree_path: [
+      repo_path: [
         type: :string,
         required: true,
-        doc: "Acquired coding workspace worktree path"
+        doc: "Canonical repository root recorded by workspace acquisition"
       ],
       base_commit: [
         type: :string,
@@ -43,7 +44,7 @@ defmodule Arbor.Actions.Coding.DependencyBaselineAdmission do
 
   def taint_roles do
     %{
-      worktree_path: {:control, requires: [:path_traversal]},
+      repo_path: {:control, requires: [:path_traversal]},
       base_commit: {:control, requires: [:command_injection]}
     }
   end
@@ -52,11 +53,11 @@ defmodule Arbor.Actions.Coding.DependencyBaselineAdmission do
 
   @impl true
   @spec run(map(), map()) :: {:ok, map()} | {:error, term()}
-  def run(%{worktree_path: worktree_path, base_commit: base_commit}, _context)
-      when is_binary(worktree_path) and is_binary(base_commit) do
-    Actions.emit_started(__MODULE__, %{worktree_path: worktree_path})
+  def run(%{repo_path: repo_path, base_commit: base_commit}, _context)
+      when is_binary(repo_path) and is_binary(base_commit) do
+    Actions.emit_started(__MODULE__, %{repo_path: repo_path})
 
-    case check_baseline(worktree_path, base_commit) do
+    case check_baseline(repo_path, base_commit) do
       {:ok, result} ->
         Actions.emit_completed(__MODULE__, result)
         {:ok, result}
@@ -77,10 +78,10 @@ defmodule Arbor.Actions.Coding.DependencyBaselineAdmission do
       {:error, reason}
   end
 
-  def run(_params, _context), do: {:error, "worktree_path and base_commit are required"}
+  def run(_params, _context), do: {:error, "repo_path and base_commit are required"}
 
-  defp check_baseline(worktree_path, base_commit) do
-    with {:ok, blob} <- read_base_mix_lock(worktree_path, base_commit),
+  defp check_baseline(repo_path, base_commit) do
+    with {:ok, blob} <- read_base_mix_lock(repo_path, base_commit),
          actual_digest <- sha256_hex(blob),
          {:ok, expected_digest} <- baseline_mix_lock_digest() do
       if actual_digest == expected_digest do
@@ -91,9 +92,9 @@ defmodule Arbor.Actions.Coding.DependencyBaselineAdmission do
     end
   end
 
-  defp read_base_mix_lock(worktree_path, base_commit) do
+  defp read_base_mix_lock(repo_path, base_commit) do
     case Git.read_bounded_blob_at_commit(
-           worktree_path,
+           repo_path,
            base_commit,
            @mix_lock_relative_path,
            @mix_lock_max_bytes

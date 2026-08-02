@@ -270,7 +270,8 @@ digraph CodingChangeV1 {
   ]
 
   // Pre-worker admission gate: the exact acquired base commit's mix.lock
-  // (read from the immutable commit object, never the worktree's live file)
+  // (read through the canonical repository root from the immutable commit
+  // object, never the linked worktree's live file)
   // must match the verified startup-pinned Linux dependency baseline before
   // any ACP worker session opens. On mismatch/unavailable, routes through
   // the same release-without-close path open_worker's own failure edge uses
@@ -279,7 +280,7 @@ digraph CodingChangeV1 {
     type="exec",
     target="action",
     action="coding_dependency_baseline_check",
-    context_keys="worktree_path,base_commit",
+    context_keys="repo_path,base_commit",
     output_prefix="dependency_baseline",
     max_retries="0"
   ]
