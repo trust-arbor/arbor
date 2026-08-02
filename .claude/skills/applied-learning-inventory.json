@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-08-02",
-  "entry_count": 617,
+  "entry_count": 618,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -2858,8 +2858,8 @@
       "destination": ".claude/skills/applied-learning-council-review.md",
       "anchor": "applied-learning-make-multi-agent-rework-monotonic-with-a-frozen-finding-ledger",
       "source_date": "2026-07-12",
-      "source_incident": "adopted 2026-07-12 after Phase 6 review rounds showed high rejection counts despite substantial accepted progress; ACP continuity corrected 2026-07-12).",
-      "content_sha256": "00dca48a40ef994bec910509cdcda8064a06474be3205dfba203eebf354d070b",
+      "source_incident": "adopted 2026-07-12 after Phase 6 review rounds showed high rejection counts despite substantial accepted progress; ACP continuity corrected 2026-07-12; design constraint retention reinforced 2026-08-02 during VP-04).",
+      "content_sha256": "e99595a5f2426c7801d2137057253ce96b937e3d5388516701294a1f1bde3f4c",
       "always_loaded": false
     },
     {
@@ -7565,8 +7565,21 @@
       "source_incident": "found 2026-08-02 when cross-app validation falsely rejected the unrelated VP-04A candidate).",
       "content_sha256": "2ea182669375e8e940b03501ed3fcee54176162d17f76cf2a15dcdc397cb4415",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 618,
+      "source_kind": "post-migration",
+      "slug": "crash-recovery-state-must-be-resumable-at-every-effect-boundary",
+      "title": "Crash-recovery state must be resumable at every effect boundary.",
+      "topic": "otp-ownership-cleanup",
+      "destination": ".claude/skills/applied-learning-otp-ownership-cleanup.md",
+      "anchor": "applied-learning-crash-recovery-state-must-be-resumable-at-every-effect-boundary",
+      "source_date": "2026-08-02",
+      "source_incident": "found 2026-08-02 while reviewing VP-04 budget settlement across forced Session death).",
+      "content_sha256": "7bb43d4221c64869a86b3d9fb6c33d22699cdaa87df515eb7c3f4f442771aa83",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 156
+  "post_migration_entry_count": 157
 }

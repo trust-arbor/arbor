@@ -289,3 +289,13 @@ path (found 2026-07-12 in ACP timeout task-control settlement).
 <!-- applied-learning: out-of-band-owner-updates-must-survive-stale-process-local-publication -->
 <a id="applied-learning-out-of-band-owner-updates-must-survive-stale-process-local-publication"></a>
 **Out-of-band owner updates must survive stale process-local publication.** A ticker or helper can advance canonical journal state while the owning process is blocked, leaving its process-local snapshot stale. When that owner later republishes the full snapshot, the canonical owner boundary must monotonic-merge independently advanced fields only within the same owner epoch (for example, `owner_node` plus the actual Engine `spawning_pid`); a recovery or takeover epoch must publish its own value. Regress the exact sequence of initial publication, out-of-band advance, then stale full publication (found 2026-07-29 while tracing coding-pipeline heartbeat regressions during long validation).
+
+<!-- applied-learning: crash-recovery-state-must-be-resumable-at-every-effect-boundary -->
+<a id="applied-learning-crash-recovery-state-must-be-resumable-at-every-effect-boundary"></a>
+**Crash-recovery state must be resumable at every effect boundary.** Do not add a
+`settling` or `in_progress` state that recovery treats as complete: the owner can
+die after publishing that state but before performing the effect. Persist or retain
+the stable effect arguments first, replay the same idempotent effect until its
+completion marker is durable, and test death immediately before the effect and
+immediately after success but before completion publication (found 2026-08-02 while
+reviewing VP-04 budget settlement across forced Session death).
