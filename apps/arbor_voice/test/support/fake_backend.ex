@@ -1,4 +1,4 @@
-defmodule Arbor.VoiceTest.Support.FakeBackend do
+defmodule Arbor.Voice.Test.FakeBackend do
   @moduledoc """
   Minimal Arbor.Voice.RealtimeBackend implementation used only to prove
   behaviour conformance (VOICE-5, partial — see realtime_backend_test.exs).

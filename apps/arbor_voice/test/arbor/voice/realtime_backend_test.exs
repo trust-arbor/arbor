@@ -7,7 +7,7 @@ defmodule Arbor.Voice.RealtimeBackendTest do
   # concurrently, without relying on that never happening.
   use ExUnit.Case, async: false
 
-  alias Arbor.VoiceTest.Support.FakeBackend
+  alias Arbor.Voice.Test.FakeBackend
 
   @moduletag :fast
 
@@ -35,17 +35,22 @@ defmodule Arbor.Voice.RealtimeBackendTest do
     previous = Application.fetch_env(:arbor_voice, :backend)
     Application.put_env(:arbor_voice, :backend, FakeBackend)
 
-    on_exit(fn ->
-      case previous do
-        {:ok, value} -> Application.put_env(:arbor_voice, :backend, value)
-        :error -> Application.delete_env(:arbor_voice, :backend)
-      end
-    end)
+    on_exit(fn -> restore_backend_env(previous) end)
 
     assert Arbor.Voice.Config.backend_module() == FakeBackend
   end
 
   test "Config.backend_module/0 defaults to the xAI Realtime backend name" do
+    previous = Application.fetch_env(:arbor_voice, :backend)
+    Application.delete_env(:arbor_voice, :backend)
+
+    on_exit(fn -> restore_backend_env(previous) end)
+
     assert Arbor.Voice.Config.backend_module() == Arbor.Voice.Backend.XaiRealtime
   end
+
+  defp restore_backend_env({:ok, value}),
+    do: Application.put_env(:arbor_voice, :backend, value)
+
+  defp restore_backend_env(:error), do: Application.delete_env(:arbor_voice, :backend)
 end
