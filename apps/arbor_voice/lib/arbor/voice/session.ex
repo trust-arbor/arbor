@@ -1020,7 +1020,6 @@ defmodule Arbor.Voice.Session do
       {:other, next_dispatch} ->
         next_turn = %{turn | dispatch: next_dispatch}
 
-        # Mark already applied in core; capacity path syncs output, no spawn.
         maybe_start_tool_under_capacity(
           %{state | turn: next_turn},
           next_turn,
@@ -1033,6 +1032,9 @@ defmodule Arbor.Voice.Session do
     end
   end
 
+  # Shared capacity gate for admitted dispatch candidates and ordinary tools.
+  # Over-capacity: sync capacity JSON only (no spawn). Under capacity: start owner
+  # (dispatch_candidate is the admit candidate or nil for :other tools).
   defp maybe_start_tool_under_capacity(
          state,
          turn,
@@ -1043,6 +1045,7 @@ defmodule Arbor.Voice.Session do
          dispatch_candidate
        ) do
     if map_size(pending) >= ToolTaskCore.max_outstanding() do
+      # Mark already applied in core; sync capacity output, no spawn.
       case safe_send_tool_result(
              state,
              call_id,

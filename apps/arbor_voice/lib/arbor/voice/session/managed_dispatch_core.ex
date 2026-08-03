@@ -18,17 +18,34 @@ defmodule Arbor.Voice.Session.ManagedDispatchCore do
   @confirmation_sentence "I've dispatched that coding task; this voice turn is complete."
   @outcome_dispatched "dispatched"
 
-  @type candidate :: %{
-          required("provider") => String.t(),
-          required("task") => String.t()
-        }
+  @typedoc """
+  Admitted one-dispatch candidate.
 
-  @type receipt :: %{
-          required("provider") => String.t(),
-          required("task") => String.t(),
-          required("task_id") => String.t(),
-          required("outcome") => String.t()
-        }
+  Exact runtime map (map_size == 2, string keys only):
+  key "provider" -> worker provider string (CodingPlanFactory.worker_provider/0);
+  key "task" -> admitted task-intent string.
+
+  Elixir typespecs cannot encode singleton binary keys (Elixir 1.19 raises
+  unexpected expression in typespec for literal binary map keys). The @type
+  below is therefore the compilable open string-key form; runtime shape is
+  unchanged.
+  """
+  @type candidate :: %{required(String.t()) => String.t()}
+
+  @typedoc """
+  Finalized success receipt.
+
+  Exact runtime map (four string keys):
+  key "provider" -> worker provider string;
+  key "task" -> admitted task-intent string;
+  key "task_id" -> admitted task id string;
+  key "outcome" -> the string dispatched.
+
+  Elixir typespecs cannot encode singleton binary keys (same limitation as
+  candidate/0). The @type below is the compilable open string-key form;
+  runtime shape is unchanged.
+  """
+  @type receipt :: %{required(String.t()) => String.t()}
 
   @type t :: %{
           slot: :open | :closed,

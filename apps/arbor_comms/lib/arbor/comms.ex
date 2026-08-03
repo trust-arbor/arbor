@@ -734,22 +734,19 @@ defmodule Arbor.Comms do
   # Do not globally raise per-value bounds for transport/backend/mode.
   @assistant_metadata_max_bytes 4537
   @user_metadata_keys [:transport, :backend, :mode]
-  @assistant_metadata_keys [
-    :transport,
-    :backend,
-    :mode,
+  # Shared atom source for assistant allowlist + all-or-none receipt keys.
+  @delegation_receipt_key_atoms [
     :delegation_provider,
     :delegation_task,
     :delegation_task_id,
     :delegation_outcome
   ]
-  # All-or-none assistant delegation receipt keys (string form after bounding).
-  @delegation_receipt_keys [
-    "delegation_provider",
-    "delegation_task",
-    "delegation_task_id",
-    "delegation_outcome"
-  ]
+  @assistant_metadata_keys Enum.concat(
+                             [:transport, :backend, :mode],
+                             @delegation_receipt_key_atoms
+                           )
+  # String form after allowlist bounding — derived so lists cannot drift.
+  @delegation_receipt_keys Enum.map(@delegation_receipt_key_atoms, &Atom.to_string/1)
   @resolve_opts_allowlist [:engagement_store]
   @turn_opts_allowlist [:persistence]
   @load_opts_allowlist [:limit, :before_timestamp, :persistence]
