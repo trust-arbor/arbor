@@ -146,11 +146,9 @@ defmodule Arbor.Voice.Session.Settlement do
       _pending ->
         case select_consume(effect_ref) do
           :ok ->
-            _ = publish_consume_pending(phase_ref)
-
-            case :atomics.get(phase_ref, 1) do
-              @phase_done -> {:error, :already_done}
-              _ -> :ok
+            case publish_consume_pending(phase_ref) do
+              :ok -> :ok
+              :done -> {:error, :already_done}
             end
 
           {:error, _reason} = error ->
@@ -174,8 +172,9 @@ defmodule Arbor.Voice.Session.Settlement do
   unchanged when the ledger call fails; the phase stays pending so a later
   `settle/2` call replays with identical arguments. Does not catch exits —
   an uncertain ledger outcome (this process dies mid-call) must remain
-  replayable, never `:done`. Every successful `:ok` corresponds to
-  `phase/1 == :done`.
+  replayable, never `:done`. Returns `{:error, :invariant_violation}` if a
+  successful ledger call cannot publish or observe `:done`. Every successful
+  `:ok` corresponds to `phase/1 == :done`.
   """
   @spec settle(t(), integer()) :: :ok | {:error, term()}
   def settle(%__MODULE__{} = settlement, now_ms) when is_integer(now_ms) do
