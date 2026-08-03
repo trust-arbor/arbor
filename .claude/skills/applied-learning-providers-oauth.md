@@ -196,3 +196,13 @@ scheduling jitter. If a proactive refresh fails transiently, keep still-valid la
 usable until its actual expiry but retry on backoff instead of waiting another steady interval.
 Pin the boundary with an injected clock and repeatedly exercise the timer regression (found
 2026-08-01 during the final Phase E provider-route health check).
+
+<!-- applied-learning: isolated-acp-runtime-homes-snapshot-provider-credentials-at-worker-creation -->
+<a id="applied-learning-isolated-acp-runtime-homes-snapshot-provider-credentials-at-worker-creation"></a>
+**Isolated ACP runtime homes snapshot provider credentials at worker creation.** A CLI login or
+token refresh performed after a worker starts updates the source credential, not the private copy
+already staged for that worker. Compare bounded file timestamps when a later CLI check disagrees
+with an earlier provider error, then start a fresh worker or session; do not reinterpret a real
+HTTP 403 as a classifier defect, and do not expect relogin to repair an already-open session
+(found 2026-08-02 after a Grok coding task failed two minutes before the CLI rewrote its auth
+store, while a fresh Grok 4.5 task succeeded).

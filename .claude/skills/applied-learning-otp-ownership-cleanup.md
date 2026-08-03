@@ -299,3 +299,13 @@ the stable effect arguments first, replay the same idempotent effect until its
 completion marker is durable, and test death immediately before the effect and
 immediately after success but before completion publication (found 2026-08-02 while
 reviewing VP-04 budget settlement across forced Session death).
+
+<!-- applied-learning: crash-safe-competing-effects-need-a-permanent-pre-io-winner -->
+<a id="applied-learning-crash-safe-competing-effects-need-a-permanent-pre-io-winner"></a>
+**Crash-safe competing effects need a permanent pre-I/O winner.** A bounded phase such as
+`release_pending` or `consume_pending` cannot by itself arbitrate a concurrent mode change once
+ledger I/O has begun, and a transient owner lock strands progress when its caller dies. Atomically
+select one permanent effect before external I/O, never clear that selection, make every replay
+follow it, and report completion-CAS loss as success only when the terminal state is already
+published. Regress the losing mode change while the winning effect is paused after durable
+acceptance but before return (found 2026-08-02 repairing the VP-04D1 release-versus-arm race).

@@ -369,3 +369,13 @@ of preserving each source path. When syncing an isolated validation worktree,
 run one explicit source/exact-file destination pair per invocation (or use a
 verified relative-root mode), then inspect status before testing (found
 2026-07-31 and reinforced 2026-08-01 during Phase E validation).
+
+<!-- applied-learning: stacked-candidate-adoption-requires-preserving-the-exact-base-ancestry -->
+<a id="applied-learning-stacked-candidate-adoption-requires-preserving-the-exact-base-ancestry"></a>
+**Stacked candidate adoption requires preserving the exact base ancestry.** The bounded adoption
+proof compares candidate and destination ranges rooted at the candidate's full base OID. If a
+repair is dispatched atop an unintegrated retained candidate and both commits are later
+cherry-picked, Git rewrites both OIDs and the original base is not a destination ancestor even
+though the resulting tree contains the patches. Integrate the prerequisite before dispatching
+the repair, or deliberately preserve the stacked ancestry; do not assume tree equivalence alone
+can settle retained task evidence (found 2026-08-02 adopting the VP-04D1 race repair).
