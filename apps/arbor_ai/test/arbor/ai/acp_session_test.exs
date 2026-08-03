@@ -175,6 +175,7 @@ defmodule Arbor.AI.AcpSessionTest do
     def prompt(client, session_id, content, opts) do
       state = Agent.get(client, & &1)
       listener = state.opts[:event_listener]
+      progress_session_id = state.opts[:progress_session_id] || session_id
       send(state.opts[:test_pid], {:fake_prompt_started, self(), content, opts})
 
       case content do
@@ -188,13 +189,17 @@ defmodule Arbor.AI.AcpSessionTest do
         "steady_progress" ->
           for sequence <- 1..5 do
             Process.sleep(15)
-            send_progress(listener, session_id, sequence)
+            send_progress(listener, progress_session_id, sequence)
           end
 
           {:ok, %{"text" => "done"}}
 
+        "progress_then_stall" ->
+          send_progress(listener, progress_session_id, 1)
+          Process.sleep(:infinity)
+
         "progress_forever" ->
-          progress_forever(listener, session_id)
+          progress_forever(listener, progress_session_id)
 
         _ ->
           {:ok, %{"text" => "ok"}}
@@ -266,9 +271,14 @@ defmodule Arbor.AI.AcpSessionTest do
   defp restore_env(key, value), do: Application.put_env(:arbor_ai, key, value)
 
   defp start_fake_progress_session(opts \\ []) do
+    provider = Keyword.get(opts, :provider, :test)
+
     AcpSession.start_link(
-      provider: :test,
-      client_opts: Keyword.put(opts, :test_pid, self())
+      provider: provider,
+      client_opts:
+        opts
+        |> Keyword.delete(:provider)
+        |> Keyword.put(:test_pid, self())
     )
   end
 
@@ -1023,6 +1033,49 @@ defmodule Arbor.AI.AcpSessionTest do
     end
 
     @tag timeout: 1_000
+    test "security regression: Claude update UUID refreshes inactivity and becomes durable identity" do
+      install_fake_progress_client(40)
+      provider_session_id = "6b9302de-0ed1-48c7-92bd-8963dbc530a8"
+
+      {:ok, session} =
+        start_fake_progress_session(
+          provider: :claude,
+          new_session_result: {:ok, %{"sessionId" => "claude_sdk_8890"}},
+          progress_session_id: provider_session_id
+        )
+
+      assert {:ok, %{"text" => "done"}} =
+               AcpSession.send_message(session, "steady_progress", timeout: 1_000)
+
+      assert %{status: :ready, session_id: ^provider_session_id} = AcpSession.status(session)
+      assert :sys.get_state(session).last_session_id == provider_session_id
+      assert :ok = AcpSession.close(session)
+    end
+
+    @tag timeout: 1_000
+    test "security regression: Claude update UUID survives timeout for recovery" do
+      install_fake_progress_client(25)
+      provider_session_id = "6b9302de-0ed1-48c7-92bd-8963dbc530a8"
+
+      {:ok, session} =
+        start_fake_progress_session(
+          provider: :claude,
+          new_session_result: {:ok, %{"sessionId" => "claude_sdk_8890"}},
+          progress_session_id: provider_session_id
+        )
+
+      assert {:error, :inactivity_timeout} =
+               AcpSession.send_message(session, "progress_then_stall", timeout: 1_000)
+
+      assert_receive {:fake_cancel, ^provider_session_id}
+
+      assert %{status: :recovery_required, session_id: ^provider_session_id} =
+               AcpSession.status(session)
+
+      assert :ok = AcpSession.close(session)
+    end
+
+    @tag timeout: 1_000
     test "security regression: completed prompt cancels real timer handles and flushes mailbox" do
       # Layer-0 regression: synthetic make_ref() correlation tokens passed to
       # Process.cancel_timer/1 leave live send_after timers. After a fast prompt
@@ -1600,7 +1653,12 @@ defmodule Arbor.AI.AcpSessionTest do
       # Simulates the bug: agent_message_chunk updates arrive as {:acp_session_update} messages
       # queued in the mailbox during the blocking prompt/4 call. The drain must process them so the
       # streamed text isn't lost — Claude returns its answer ONLY via these chunks, not the result.
-      state = %{accumulated_text: "", stream_callback: nil}
+      state = %{
+        accumulated_text: "",
+        stream_callback: nil,
+        provider: :test,
+        session_id: "s1"
+      }
 
       send(
         self(),
@@ -1625,7 +1683,33 @@ defmodule Arbor.AI.AcpSessionTest do
     end
 
     test "returns state unchanged when the mailbox has no updates" do
-      state = %{accumulated_text: "", stream_callback: nil}
+      state = %{
+        accumulated_text: "",
+        stream_callback: nil,
+        provider: :test,
+        session_id: "s1"
+      }
+
+      assert AcpSession.drain_pending_updates(state).accumulated_text == ""
+    end
+
+    test "security regression: ignores updates for a different provider session" do
+      state = %{
+        accumulated_text: "",
+        stream_callback: nil,
+        provider: :test,
+        session_id: "bound-session"
+      }
+
+      send(
+        self(),
+        {:acp_session_update, "other-session",
+         %{
+           "sessionUpdate" => "agent_message_chunk",
+           "content" => %{"text" => "must not cross session boundary"}
+         }}
+      )
+
       assert AcpSession.drain_pending_updates(state).accumulated_text == ""
     end
   end

@@ -1293,6 +1293,13 @@ defmodule Arbor.AI.AcpSession do
   ]
 
   defp process_session_update(state, session_id, update, opts) do
+    case reconcile_session_update_identity(state, session_id) do
+      {:ok, state} -> process_bound_session_update(state, session_id, update, opts)
+      :ignore -> {:ok, state}
+    end
+  end
+
+  defp process_bound_session_update(state, session_id, update, opts) do
     callback_result =
       case stream_callback_opts(opts) do
         {:ok, callback_opts} -> run_stream_callback(state.stream_callback, update, callback_opts)
@@ -1327,6 +1334,36 @@ defmodule Arbor.AI.AcpSession do
 
         {:ok, state}
     end
+  end
+
+  defp reconcile_session_update_identity(%{session_id: session_id} = state, session_id),
+    do: {:ok, state}
+
+  defp reconcile_session_update_identity(
+         %{provider: :claude} = state,
+         session_id
+       ) do
+    case reconcile_claude_provider_session_id(session_id, state, :claude_session_update) do
+      {:ok, state} ->
+        {:ok, state}
+
+      {:error, reason} ->
+        Logger.debug(
+          "AcpSession ignored update with invalid Claude session identity: " <>
+            Arbor.LLM.inspect_external_reason(reason)
+        )
+
+        :ignore
+    end
+  end
+
+  defp reconcile_session_update_identity(_state, session_id) do
+    Logger.debug(
+      "AcpSession ignored update for mismatched session " <>
+        Arbor.LLM.inspect_external_reason(session_id)
+    )
+
+    :ignore
   end
 
   defp run_stream_callback(nil, _update, _opts), do: :ok
@@ -2945,16 +2982,7 @@ defmodule Arbor.AI.AcpSession do
         {:error, reason}
 
       {:ok, session_id} ->
-        cond do
-          state.session_id == session_id ->
-            {:ok, %{state | last_session_id: session_id}}
-
-          transient_claude_session_id?(state.session_id) ->
-            {:ok, %{state | session_id: session_id, last_session_id: session_id}}
-
-          true ->
-            {:error, {:provider_session_id_mismatch, :claude_prompt_result}}
-        end
+        reconcile_claude_provider_session_id(session_id, state, :claude_prompt_result)
     end
   end
 
@@ -2975,6 +3003,27 @@ defmodule Arbor.AI.AcpSession do
   end
 
   defp claude_prompt_provider_session_id(_result), do: :absent
+
+  defp reconcile_claude_provider_session_id(session_id, state, source) do
+    cond do
+      not valid_claude_provider_session_id?(session_id) ->
+        {:error, {:invalid_provider_session_id, source}}
+
+      state.session_id == session_id ->
+        {:ok, %{state | last_session_id: session_id}}
+
+      transient_claude_session_id?(state.session_id) ->
+        {:ok, %{state | session_id: session_id, last_session_id: session_id}}
+
+      true ->
+        {:error, {:provider_session_id_mismatch, source}}
+    end
+  end
+
+  defp valid_claude_provider_session_id?(session_id) when is_binary(session_id),
+    do: Regex.match?(@claude_provider_session_id_pattern, session_id)
+
+  defp valid_claude_provider_session_id?(_session_id), do: false
 
   defp transient_claude_session_id?(session_id) when is_binary(session_id),
     do: String.starts_with?(session_id, @claude_transient_session_prefix)
