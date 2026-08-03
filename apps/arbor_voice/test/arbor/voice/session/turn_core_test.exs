@@ -90,7 +90,10 @@ defmodule Arbor.Voice.Session.TurnCoreTest do
                TurnCore.reduce(%{text_acc: "x", seen_tool_ids: nil}, {:tool_call, %{}})
 
       assert {:error, :protocol_error} =
-               TurnCore.reduce(%{text_acc: <<0xFF>>, seen_tool_ids: MapSet.new()}, {:turn_done, %{text: "y"}})
+               TurnCore.reduce(
+                 %{text_acc: <<0xFF>>, seen_tool_ids: MapSet.new()},
+                 {:turn_done, %{text: "y"}}
+               )
 
       assert {:error, :protocol_error} = TurnCore.reduce(:not_a_state, {:turn_done, %{text: "y"}})
       assert {:error, :protocol_error} = TurnCore.reduce(%{}, {:output_text_delta, "x"})
@@ -132,6 +135,7 @@ defmodule Arbor.Voice.Session.TurnCoreTest do
       refute Map.has_key?(s1, :audio)
 
       assert {:error, :protocol_error} = TurnCore.reduce(state, {:output_audio, over})
+
       assert {:error, :protocol_error} =
                TurnCore.reduce(state, {:output_audio, :binary.copy(<<1>>, 100_000)})
     end
@@ -139,15 +143,60 @@ defmodule Arbor.Voice.Session.TurnCoreTest do
 
   describe "tool call handling" do
     @tag spec: "VOICE-8"
-    test "well-formed tool call returns reject_tool and marks id; duplicates continue" do
+    test "well-formed tool call returns admit_tool and marks id; duplicates continue" do
       state = TurnCore.new()
       call = %{id: "call_1", name: "consult_agent", arguments: %{"q" => "hi"}}
 
-      assert {:reject_tool, s1, "call_1"} = TurnCore.reduce(state, {:tool_call, call})
+      assert {:admit_tool, s1, admitted} = TurnCore.reduce(state, {:tool_call, call})
+      assert admitted == %{id: "call_1", name: "consult_agent", arguments: %{"q" => "hi"}}
       assert MapSet.member?(s1.seen_tool_ids, "call_1")
+      assert s1.tool_wave == true
 
       assert {:continue, s2} = TurnCore.reduce(s1, {:tool_call, call})
       assert s2.seen_tool_ids == s1.seen_tool_ids
+    end
+
+    @tag spec: "VOICE-8"
+    test "tool-bearing blank turn_done resets cycle independent of settlement" do
+      state = TurnCore.new()
+      call = %{id: "c1", name: "x", arguments: %{}}
+
+      assert {:admit_tool, s1, _} = TurnCore.reduce(state, {:tool_call, call})
+      assert {:continue, s2} = TurnCore.reduce(s1, {:output_text_delta, "pre-tool"})
+      assert s2.text_acc == "pre-tool"
+
+      # Blank done clears pre-tool text even if shell still has pending work.
+      assert {:cycle_reset, s3} = TurnCore.reduce(s2, {:turn_done, %{text: ""}})
+      assert s3.tool_wave == false
+      assert s3.text_acc == ""
+    end
+
+    @tag spec: "VOICE-8"
+    test "tool-bearing nonblank turn_done is intermediate cycle_reset; discards text" do
+      state = TurnCore.new()
+      call = %{id: "c1", name: "x", arguments: %{}}
+
+      assert {:admit_tool, s1, _} = TurnCore.reduce(state, {:tool_call, call})
+      assert {:continue, s2} = TurnCore.reduce(s1, {:output_text_delta, "pre-tool-leak"})
+      # Nonblank intermediate must NOT complete — only later tool_wave=false terminal.
+      assert {:cycle_reset, s3} = TurnCore.reduce(s2, {:turn_done, %{text: "not final"}})
+      assert s3.tool_wave == false
+      assert s3.text_acc == ""
+
+      # Post-wave terminal can complete.
+      assert {:done, "real final"} = TurnCore.reduce(s3, {:turn_done, %{text: "real final"}})
+    end
+
+    @tag spec: "VOICE-8"
+    test "settlement-before-intermediate-done race: cycle_reset then later done" do
+      state = TurnCore.new()
+      call = %{id: "c1", name: "x", arguments: %{}}
+
+      assert {:admit_tool, s1, _} = TurnCore.reduce(state, {:tool_call, call})
+      # Simulate: owners already settled (shell pending empty) before response.done.
+      assert {:cycle_reset, s2} = TurnCore.reduce(s1, {:turn_done, %{text: ""}})
+      assert s2.tool_wave == false
+      assert {:done, "post-tool"} = TurnCore.reduce(s2, {:turn_done, %{text: "post-tool"}})
     end
 
     @tag spec: "VOICE-8"
@@ -167,6 +216,48 @@ defmodule Arbor.Voice.Session.TurnCoreTest do
                TurnCore.reduce(state, {:tool_call, %{id: "c1", name: "x", arguments: "nope"}})
     end
 
+    @tag spec: "VOICE-8"
+    test "security regression: non-JSON or bounded arguments fail closed without admit" do
+      state = TurnCore.new()
+      huge = String.duplicate("x", TurnCore.max_args_encoded_bytes() + 1)
+
+      assert {:error, :protocol_error} =
+               TurnCore.reduce(
+                 state,
+                 {:tool_call, %{id: "c1", name: "x", arguments: %{"b" => huge}}}
+               )
+
+      deep =
+        Enum.reduce(1..(TurnCore.max_args_depth() + 2), %{"v" => 1}, fn _, acc ->
+          %{"n" => acc}
+        end)
+
+      assert {:error, :protocol_error} =
+               TurnCore.reduce(state, {:tool_call, %{id: "c2", name: "x", arguments: deep}})
+
+      assert {:error, :protocol_error} =
+               TurnCore.reduce(
+                 state,
+                 {:tool_call, %{id: "c3", name: "x", arguments: %{"p" => self()}}}
+               )
+
+      assert {:error, :protocol_error} =
+               TurnCore.reduce(
+                 state,
+                 {:tool_call, %{id: "c4", name: "x", arguments: %{atom_key: 1}}}
+               )
+
+      assert {:error, :protocol_error} =
+               TurnCore.reduce(
+                 state,
+                 {:tool_call, %{id: "c5", name: "x", arguments: %{"bad" => [1 | 2]}}}
+               )
+
+      # Id must not be marked on failed admission.
+      assert MapSet.size(state.seen_tool_ids) == 0
+    end
+
+    @tag spec: "VOICE-8"
     test "no_tools_installed_output is deterministic JSON with code" do
       out = TurnCore.no_tools_installed_output()
       assert is_binary(out)

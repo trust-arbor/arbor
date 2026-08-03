@@ -73,9 +73,17 @@ defmodule Arbor.Voice.ResourceOwnerTest do
     after_tool = Backend.session_handle(owner)
     refute after_audio == after_tool
 
+    # Nonblocking request seam (Session cancel path); await the asynchronous reply.
+    assert {:ok, req} =
+             ResourceOwner.send_tool_result_request(ro, "call_async", "async-out")
+
+    assert {:reply, :ok} = :gen_server.wait_response(req, :infinity)
+    after_async = Backend.session_handle(owner)
+    refute after_tool == after_async
+
     assert {:ok, {:turn_done, %{text: ""}}} = ResourceOwner.recv(ro, 100)
     after_recv = Backend.session_handle(owner)
-    refute after_tool == after_recv
+    refute after_async == after_recv
 
     assert {:ok,
             %{
@@ -452,7 +460,7 @@ defmodule Arbor.Voice.ResourceOwnerTest do
         end
       end
 
-      def open(_), do: (ensure!() && {:ok, %{}})
+      def open(_), do: ensure!() && {:ok, %{}}
       def configure(s, _), do: {:ok, s}
       def send_text(s, _), do: {:ok, s}
       def send_audio(s, _), do: {:ok, s}

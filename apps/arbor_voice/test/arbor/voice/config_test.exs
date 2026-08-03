@@ -190,4 +190,32 @@ defmodule Arbor.Voice.ConfigTest do
                Config.validate_speech_output_timeout_ms(Config.default_speech_output_timeout_ms())
     end
   end
+
+  describe "tool router timeout (VP-04E3)" do
+    @tag spec: "VOICE-8"
+    test "literal default is 5000 ms and ceiling is 30000 ms" do
+      assert Config.default_tool_router_timeout_ms() == 5_000
+      assert Config.max_tool_router_timeout_ms() == 30_000
+    end
+
+    @tag spec: "VOICE-8"
+    test "validate_tool_router_timeout_ms/1 accepts 1, default, and 30000" do
+      assert {:ok, 1} = Config.validate_tool_router_timeout_ms(1)
+      assert {:ok, 5_000} = Config.validate_tool_router_timeout_ms(5_000)
+      assert {:ok, 30_000} = Config.validate_tool_router_timeout_ms(30_000)
+    end
+
+    @tag spec: "VOICE-8"
+    test "validate_tool_router_timeout_ms/1 fails closed on zero, above-ceiling, and malformed" do
+      for bad <- [0, -1, 30_001, 1.5, "5000", nil, :ms, true, %{}] do
+        assert {:error, :invalid_config} = Config.validate_tool_router_timeout_ms(bad)
+      end
+    end
+
+    @tag spec: "VOICE-8"
+    test "tool_router_timeout_ms/0 resolves to the validated default under checked-in config" do
+      assert Config.tool_router_timeout_ms() ==
+               Config.validate_tool_router_timeout_ms(Config.default_tool_router_timeout_ms())
+    end
+  end
 end

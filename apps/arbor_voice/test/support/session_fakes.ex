@@ -714,7 +714,9 @@ defmodule Arbor.Voice.Test.SessionFakes do
         tool_result_mode: :ok,
         send_text_mode: :ok,
         close_count: 0,
-        recv_timeouts: 0
+        recv_timeouts: 0,
+        # Ordered backend ops for cancel-before-close proofs.
+        op_log: []
       }
     end
 
@@ -744,6 +746,10 @@ defmodule Arbor.Voice.Test.SessionFakes do
 
     def tool_results do
       Agent.get(agent!(), fn s -> Enum.reverse(s.tool_results) end)
+    end
+
+    def op_log do
+      Agent.get(agent!(), fn s -> Enum.reverse(Map.get(s, :op_log, [])) end)
     end
 
     def set_tool_result_mode(mode) when mode in [:ok, :error, :raise] do
@@ -786,7 +792,14 @@ defmodule Arbor.Voice.Test.SessionFakes do
     def send_tool_result(session, call_id, output) do
       mode =
         Agent.get_and_update(agent!(), fn s ->
-          {s.tool_result_mode, %{s | tool_results: [{call_id, output} | s.tool_results]}}
+          op_log = [{:tool_result, call_id} | Map.get(s, :op_log, [])]
+
+          {s.tool_result_mode,
+           %{
+             s
+             | tool_results: [{call_id, output} | s.tool_results],
+               op_log: op_log
+           }}
         end)
 
       case mode do
@@ -832,7 +845,11 @@ defmodule Arbor.Voice.Test.SessionFakes do
 
     @impl true
     def close(_session) do
-      Agent.update(agent!(), fn s -> %{s | close_count: s.close_count + 1} end)
+      Agent.update(agent!(), fn s ->
+        op_log = [:close | Map.get(s, :op_log, [])]
+        %{s | close_count: s.close_count + 1, op_log: op_log}
+      end)
+
       :ok
     end
 

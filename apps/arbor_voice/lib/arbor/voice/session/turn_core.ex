@@ -1,11 +1,11 @@
 defmodule Arbor.Voice.Session.TurnCore do
   @moduledoc """
-  Pure bounded event reduction for a single voice text turn (VP-04E1).
+  Pure bounded event reduction for a single voice text turn (VP-04E1/E3).
 
   Accumulates output text deltas, ignores validated input-transcript/audio
-  payloads, treats nonblank terminal text as authoritative (with delta
-  fallback), and tracks a bounded set of seen tool-call ids. Stores no pids,
-  clocks, functions, or side effects.
+  payloads, tracks tool-bearing response waves, and a bounded set of seen
+  tool-call ids. Stores no pids, clocks, functions, or outstanding-task
+  authority (Session.pending owns outstanding calls).
   """
 
   @max_text_bytes 8192
@@ -14,38 +14,43 @@ defmodule Arbor.Voice.Session.TurnCore do
   @max_tool_id_bytes 256
   @max_seen_tool_ids 64
 
+  alias Arbor.Voice.Session.JsonTerm
+
   @type state :: %{
           text_acc: binary(),
-          seen_tool_ids: MapSet.t(String.t())
+          seen_tool_ids: MapSet.t(String.t()),
+          tool_wave: boolean()
         }
+
+  @type admit_call :: %{id: String.t(), name: String.t(), arguments: map()}
 
   @type reduce_result ::
           {:continue, state()}
           | {:done, String.t()}
-          | {:reject_tool, state(), String.t()}
+          | {:cycle_reset, state()}
+          | {:admit_tool, state(), admit_call()}
           | {:error, :protocol_error}
 
   @doc "Construct empty pure turn state."
   @spec new() :: state()
   def new do
-    %{text_acc: "", seen_tool_ids: MapSet.new()}
+    %{text_acc: "", seen_tool_ids: MapSet.new(), tool_wave: false}
   end
 
   @doc """
   Reduce one backend event.
 
   Returns:
-  * `{:continue, state}` — keep polling (ignored/benign event or duplicate tool id)
-  * `{:done, raw_text}` — terminal text ready for transcript + reply
-  * `{:reject_tool, state, call_id}` — new well-formed tool call; shell must mark
-    (already applied in returned state), send one `no_tools_installed` output,
-    then continue polling
+  * `{:continue, state}` — keep polling
+  * `{:done, raw_text}` — terminal text ready (`tool_wave` was false)
+  * `{:cycle_reset, state}` — any `turn_done` while `tool_wave` is true: intermediate
+    provider boundary; pre-tool text cleared; never completes from this event
+  * `{:admit_tool, state, call}` — new well-formed tool call; id marked; shell owns spawn
   * `{:error, :protocol_error}` — malformed, oversized, or backend error event
   """
   @spec reduce(state(), term()) :: reduce_result()
-  def reduce(%{text_acc: acc, seen_tool_ids: %MapSet{}} = state, event)
-      when is_binary(acc) do
-    # Reject malformed core state without raising on MapSet or String ops.
+  def reduce(%{text_acc: acc, seen_tool_ids: %MapSet{}, tool_wave: wave} = state, event)
+      when is_binary(acc) and is_boolean(wave) do
     if String.valid?(acc) do
       do_reduce(state, event)
     else
@@ -63,7 +68,19 @@ defmodule Arbor.Voice.Session.TurnCore do
   @spec max_audio_bytes() :: pos_integer()
   def max_audio_bytes, do: @max_audio_bytes
 
-  @doc "JSON body for the empty-catalog tool rejection (VOICE-8 partial)."
+  @doc "Per-turn distinct tool-id ceiling."
+  @spec max_seen_tool_ids() :: pos_integer()
+  def max_seen_tool_ids, do: @max_seen_tool_ids
+
+  @doc "Max nesting depth for tool arguments."
+  @spec max_args_depth() :: pos_integer()
+  def max_args_depth, do: JsonTerm.max_depth()
+
+  @doc "Max Jason-encoded byte size for tool arguments."
+  @spec max_args_encoded_bytes() :: pos_integer()
+  def max_args_encoded_bytes, do: JsonTerm.max_encoded_bytes()
+
+  @doc "JSON body for the empty-catalog tool rejection (VOICE-8)."
   @spec no_tools_installed_output() :: String.t()
   def no_tools_installed_output do
     Jason.encode!(%{"code" => "no_tools_installed"})
@@ -105,7 +122,6 @@ defmodule Arbor.Voice.Session.TurnCore do
   end
 
   defp reduce_text_delta(%{text_acc: acc} = state, delta) do
-    # Byte bound first, then UTF-8 — never trim/concat invalid binaries.
     cond do
       byte_size(delta) > @max_text_bytes ->
         {:error, :protocol_error}
@@ -121,7 +137,6 @@ defmodule Arbor.Voice.Session.TurnCore do
     end
   end
 
-  # Byte size first; payload is never retained in core state.
   defp reduce_output_audio(state, chunk) do
     if byte_size(chunk) > @max_audio_bytes do
       {:error, :protocol_error}
@@ -130,8 +145,23 @@ defmodule Arbor.Voice.Session.TurnCore do
     end
   end
 
-  defp reduce_turn_done(%{text_acc: acc}, text) do
-    # Byte bound first, then UTF-8 — never String.trim invalid binaries.
+  # Any turn_done while tool_wave is true is an intermediate provider boundary:
+  # clear text_acc/tool_wave and continue — never complete, even if text is nonblank
+  # and even if Session.pending is already empty.
+  defp reduce_turn_done(%{tool_wave: true} = state, text) do
+    cond do
+      byte_size(text) > @max_text_bytes ->
+        {:error, :protocol_error}
+
+      not String.valid?(text) ->
+        {:error, :protocol_error}
+
+      true ->
+        {:cycle_reset, %{state | tool_wave: false, text_acc: ""}}
+    end
+  end
+
+  defp reduce_turn_done(%{text_acc: acc, tool_wave: false}, text) do
     cond do
       byte_size(text) > @max_text_bytes ->
         {:error, :protocol_error}
@@ -140,11 +170,9 @@ defmodule Arbor.Voice.Session.TurnCore do
         {:error, :protocol_error}
 
       String.trim(text) != "" ->
-        # Nonblank terminal is authoritative.
         {:done, text}
 
       String.trim(acc) != "" ->
-        # Blank terminal falls back to nonblank accumulated deltas.
         if byte_size(acc) > @max_text_bytes do
           {:error, :protocol_error}
         else
@@ -152,14 +180,13 @@ defmodule Arbor.Voice.Session.TurnCore do
         end
 
       true ->
-        # Both terminal and accumulator blank — protocol error, not empty success.
         {:error, :protocol_error}
     end
   end
 
   defp reduce_tool_call(%{seen_tool_ids: %MapSet{} = seen} = state, call) do
     with {:ok, id} <- tool_call_id(call),
-         :ok <- tool_call_shape(call) do
+         {:ok, name, args} <- tool_call_fields(call) do
       cond do
         MapSet.member?(seen, id) ->
           {:continue, state}
@@ -168,8 +195,13 @@ defmodule Arbor.Voice.Session.TurnCore do
           {:error, :protocol_error}
 
         true ->
-          next = %{state | seen_tool_ids: MapSet.put(seen, id)}
-          {:reject_tool, next, id}
+          next = %{
+            state
+            | seen_tool_ids: MapSet.put(seen, id),
+              tool_wave: true
+          }
+
+          {:admit_tool, next, %{id: id, name: name, arguments: args}}
       end
     else
       :error -> {:error, :protocol_error}
@@ -189,16 +221,23 @@ defmodule Arbor.Voice.Session.TurnCore do
     end
   end
 
-  # Require name + arguments keys so malformed calls fail closed (VOICE-8).
-  defp tool_call_shape(%{name: name, arguments: args})
-       when is_binary(name) and is_map(args),
-       do: validate_tool_name(name)
+  defp tool_call_fields(%{name: name, arguments: args})
+       when is_binary(name) and is_map(args) do
+    with :ok <- validate_tool_name(name),
+         :ok <- validate_arguments(args) do
+      {:ok, name, args}
+    end
+  end
 
-  defp tool_call_shape(%{"name" => name, "arguments" => args})
-       when is_binary(name) and is_map(args),
-       do: validate_tool_name(name)
+  defp tool_call_fields(%{"name" => name, "arguments" => args})
+       when is_binary(name) and is_map(args) do
+    with :ok <- validate_tool_name(name),
+         :ok <- validate_arguments(args) do
+      {:ok, name, args}
+    end
+  end
 
-  defp tool_call_shape(_), do: :error
+  defp tool_call_fields(_), do: :error
 
   defp validate_tool_name(name) do
     cond do
@@ -208,6 +247,13 @@ defmodule Arbor.Voice.Session.TurnCore do
       true -> :ok
     end
   end
+
+  # Fail closed before mark/spawn via shared strict JSON-term helper.
+  defp validate_arguments(args) when is_map(args) do
+    JsonTerm.validate(args)
+  end
+
+  defp validate_arguments(_), do: :error
 
   defp valid_ignored_text?(text) do
     byte_size(text) <= @max_text_bytes and String.valid?(text)

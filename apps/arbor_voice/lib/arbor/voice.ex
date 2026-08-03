@@ -34,11 +34,14 @@ defmodule Arbor.Voice do
     :transcript_opts,
     :speakable,
     :speech_output,
-    :speech_output_timeout_ms
+    :speech_output_timeout_ms,
+    :tool_router,
+    :tool_router_timeout_ms
   ]
 
   @transcript_opts_allowlist [:persistence]
   @speakable_exports [render: 2, tts_guard!: 1]
+  @tool_router_exports [invoke: 1]
 
   @type session_key :: {String.t(), String.t()}
 
@@ -179,6 +182,8 @@ defmodule Arbor.Voice do
          {:ok, speakable} <- resolve_speakable(opts),
          {:ok, speech_output} <- resolve_speech_output(opts),
          {:ok, speech_output_timeout_ms} <- resolve_speech_output_timeout_ms(opts),
+         {:ok, tool_router} <- resolve_tool_router(opts),
+         {:ok, tool_router_timeout_ms} <- resolve_tool_router_timeout_ms(opts),
          :ok <- validate_optional_module(opts, :engagement_store) do
       {:ok,
        %{
@@ -202,7 +207,9 @@ defmodule Arbor.Voice do
          transcript_opts: transcript_opts,
          speakable: speakable,
          speech_output: speech_output,
-         speech_output_timeout_ms: speech_output_timeout_ms
+         speech_output_timeout_ms: speech_output_timeout_ms,
+         tool_router: tool_router,
+         tool_router_timeout_ms: tool_router_timeout_ms
        }}
     end
   end
@@ -285,6 +292,52 @@ defmodule Arbor.Voice do
 
       {:ok, v} ->
         case Config.validate_speech_output_timeout_ms(v) do
+          {:ok, ms} -> {:ok, ms}
+          {:error, _} -> {:error, :invalid_opts}
+        end
+    end
+  end
+
+  # Closed tool-router seam: default EmptyCatalog; module must export invoke/1.
+  defp resolve_tool_router(opts) do
+    case Keyword.fetch(opts, :tool_router) do
+      :error ->
+        validate_tool_router_module(Arbor.Voice.ToolRouter.EmptyCatalog)
+
+      {:ok, mod} when is_atom(mod) and not is_nil(mod) ->
+        validate_tool_router_module(mod)
+
+      {:ok, _} ->
+        {:error, :invalid_opts}
+    end
+  end
+
+  defp validate_tool_router_module(module) do
+    exports = module.module_info(:exports)
+
+    if Enum.all?(@tool_router_exports, &(&1 in exports)) do
+      {:ok, module}
+    else
+      {:error, :invalid_opts}
+    end
+  rescue
+    _ ->
+      {:error, :invalid_opts}
+  catch
+    _kind, _reason ->
+      {:error, :invalid_opts}
+  end
+
+  defp resolve_tool_router_timeout_ms(opts) do
+    case Keyword.fetch(opts, :tool_router_timeout_ms) do
+      :error ->
+        case Config.tool_router_timeout_ms() do
+          {:ok, ms} -> {:ok, ms}
+          {:error, _} -> {:error, :invalid_config}
+        end
+
+      {:ok, v} ->
+        case Config.validate_tool_router_timeout_ms(v) do
           {:ok, ms} -> {:ok, ms}
           {:error, _} -> {:error, :invalid_opts}
         end

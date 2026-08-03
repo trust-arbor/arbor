@@ -124,6 +124,57 @@ defmodule Arbor.VoiceTest do
     end
   end
 
+  describe "tool_router opts (VP-04E3)" do
+    @tag spec: "VOICE-8"
+    test "invalid tool_router module and timeout map to :invalid_opts" do
+      {user_id, agent_id} = unique_ids()
+      {opts, _} = base_opts()
+
+      assert {:error, :invalid_opts} =
+               Voice.start_session(user_id, agent_id, Keyword.put(opts, :tool_router, 123))
+
+      assert {:error, :invalid_opts} =
+               Voice.start_session(
+                 user_id,
+                 agent_id,
+                 Keyword.put(opts, :tool_router, String)
+               )
+
+      assert {:error, :invalid_opts} =
+               Voice.start_session(
+                 user_id,
+                 agent_id,
+                 Keyword.put(opts, :tool_router_timeout_ms, 0)
+               )
+
+      assert {:error, :invalid_opts} =
+               Voice.start_session(
+                 user_id,
+                 agent_id,
+                 Keyword.put(opts, :tool_router_timeout_ms, 30_001)
+               )
+    end
+
+    @tag spec: "VOICE-8"
+    test "malformed Application tool_router_timeout_ms fails as :invalid_config" do
+      previous = Application.fetch_env(:arbor_voice, :tool_router_timeout_ms)
+
+      on_exit(fn ->
+        case previous do
+          {:ok, value} -> Application.put_env(:arbor_voice, :tool_router_timeout_ms, value)
+          :error -> Application.delete_env(:arbor_voice, :tool_router_timeout_ms)
+        end
+      end)
+
+      {user_id, agent_id} = unique_ids()
+      {opts, _} = base_opts()
+      Application.put_env(:arbor_voice, :tool_router_timeout_ms, 0)
+
+      assert {:error, :invalid_config} =
+               Voice.start_session(user_id, agent_id, opts)
+    end
+  end
+
   describe "start_session/3 API" do
     @tag spec: "VOICE-2"
     test "returns the tuple key, never a pid, and registers uniquely" do

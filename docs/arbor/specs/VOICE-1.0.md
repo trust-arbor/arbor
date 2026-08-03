@@ -67,7 +67,7 @@ transport — raw audio never leaves the phone.
   crash. Cleanup MUST be owned by supervision or a dedicated resource owner and MUST
   NOT rely only on the session process's `terminate/2` callback.
 
-- **VOICE-8** (MUST, planned): Every backend `function_call` event MUST receive exactly one
+- **VOICE-8** (MUST): Every backend `function_call` event MUST receive exactly one
   matching `function_call_output` (success or structured error). Tool calls MUST NOT
   be silently dropped, and unknown tool names MUST return a structured error output
   rather than crash the session.

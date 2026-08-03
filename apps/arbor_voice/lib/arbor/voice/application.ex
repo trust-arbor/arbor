@@ -14,6 +14,12 @@ defmodule Arbor.Voice.Application do
         {Task.Supervisor, name: Arbor.Voice.SpeechOutputTaskSupervisor},
         id: Arbor.Voice.SpeechOutputTaskSupervisor
       ),
+      # Dedicated tool-call owner Task.Supervisor (VP-04E3). Direct named child;
+      # not speech/cleanup and not an empty wrapper module.
+      Supervisor.child_spec(
+        {Task.Supervisor, name: Arbor.Voice.ToolTaskSupervisor},
+        id: Arbor.Voice.ToolTaskSupervisor
+      ),
       Arbor.Voice.ResourceSupervisor,
       Arbor.Voice.SessionSupervisor
     ]

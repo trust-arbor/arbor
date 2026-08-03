@@ -2,8 +2,8 @@
   "schema_version": 1,
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
-  "source_captured_on": "2026-08-02",
-  "entry_count": 622,
+  "source_captured_on": "2026-08-03",
+  "entry_count": 623,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -7630,8 +7630,21 @@
       "source_incident": "found 2026-08-03 while isolating VP-04D2B Session startup).",
       "content_sha256": "80a3dc6bea02eba0cad265c9f5f6df1c88d1d63689ad8f767db2fbb39ee578e0",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 623,
+      "source_kind": "post-migration",
+      "slug": "spawned-processes-do-not-inherit-process-dictionaries-and-shared-fakes-require-cleanup-convergence",
+      "title": "Spawned processes do not inherit process dictionaries, and shared fakes require cleanup convergence.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-spawned-processes-do-not-inherit-process-dictionaries-and-shared-fakes-require-cleanup-convergence",
+      "source_date": "2026-08-03",
+      "source_incident": "found 2026-08-03 while stabilizing VP-04E3 voice tool lifecycle tests).",
+      "content_sha256": "39dc26098791cafff56d06db0463f56cc3d2872fcdd1f249b88547e8337f9aae",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 161
+  "post_migration_entry_count": 162
 }

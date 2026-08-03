@@ -133,6 +133,31 @@ defmodule Arbor.Voice.ResourceOwner do
   def send_tool_result(owner, call_id, output),
     do: call(owner, {:backend, :send_tool_result, [call_id, output]})
 
+  @doc """
+  Nonblocking owner-authenticated tool-result request.
+
+  Uses `:gen_server.send_request/2` so `caller_pid` remains `self()` (must be the
+  Session owner_pid). Callers that need the result use
+  `:gen_server.wait_response/2`; cancel/best-effort paths may fire-and-forget and
+  rely on same-sender mailbox ordering so requests are enqueued before a
+  subsequent `close/1` call.
+  """
+  @spec send_tool_result_request(GenServer.server(), String.t(), String.t()) ::
+          {:ok, :gen_server.request_id()} | {:error, atom()}
+  def send_tool_result_request(owner, call_id, output)
+      when is_pid(owner) and is_binary(call_id) and is_binary(output) do
+    req_id = :gen_server.send_request(owner, {:backend, :send_tool_result, [call_id, output]})
+    {:ok, req_id}
+  rescue
+    _ -> {:error, :owner_unavailable}
+  catch
+    :exit, {:noproc, _} -> {:error, :owner_unavailable}
+    :exit, _ -> {:error, :owner_unavailable}
+    _kind, _reason -> {:error, :owner_unavailable}
+  end
+
+  def send_tool_result_request(_owner, _call_id, _output), do: {:error, :owner_unavailable}
+
   @spec recv(GenServer.server(), timeout()) ::
           {:ok, Arbor.Voice.RealtimeBackend.event()} | {:error, atom()}
   def recv(owner, timeout), do: call(owner, {:backend, :recv, [timeout]})

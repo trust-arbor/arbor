@@ -71,4 +71,25 @@ defmodule Arbor.Voice.ApplicationTest do
     assert is_pid(cleanup)
     refute pid == cleanup
   end
+
+  @tag spec: "VOICE-8"
+  test "ToolTaskSupervisor is a direct named Task.Supervisor distinct from speech/cleanup" do
+    children = Supervisor.which_children(Arbor.Voice.Supervisor)
+
+    entry =
+      Enum.find(children, fn {id, _, _, _} ->
+        id == Arbor.Voice.ToolTaskSupervisor
+      end)
+
+    # Direct Supervisor.child_spec in Application — not a wrapper module child_spec.
+    assert {Arbor.Voice.ToolTaskSupervisor, pid, :supervisor, [Task.Supervisor]} = entry
+    assert is_pid(pid)
+    assert Process.alive?(pid)
+    assert Process.whereis(Arbor.Voice.ToolTaskSupervisor) == pid
+
+    speech = Process.whereis(Arbor.Voice.SpeechOutputTaskSupervisor)
+    cleanup = Process.whereis(ResourceCleanupTaskSupervisor)
+    refute pid == speech
+    refute pid == cleanup
+  end
 end

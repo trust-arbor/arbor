@@ -4,6 +4,10 @@ Read this when choosing a Mix/test isolation boundary, reloading a live runtime,
 
 ## Retained Applied Learning
 
+<!-- applied-learning: spawned-processes-do-not-inherit-process-dictionaries-and-shared-fakes-require-cleanup-convergence -->
+<a id="applied-learning-spawned-processes-do-not-inherit-process-dictionaries-and-shared-fakes-require-cleanup-convergence"></a>
+**Spawned processes do not inherit process dictionaries, and shared fakes require cleanup convergence.** Pass test observers explicitly or use test-owned ETS; `Process.put/2` in the test process is invisible to spawned router workers. When a deliberate owner kill triggers asynchronous monitored cleanup, wait for close/absence before replacing a named Agent/ETS backend, or late callbacks can contaminate the next randomized test (found 2026-08-03 while stabilizing VP-04E3 voice tool lifecycle tests).
+
 <!-- applied-learning: independently-rerun-delegated-verification-against-the-committed-revision -->
 <a id="applied-learning-independently-rerun-delegated-verification-against-the-committed-revision"></a>
 **Independently rerun delegated verification against the committed revision.**

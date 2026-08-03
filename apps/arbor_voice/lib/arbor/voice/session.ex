@@ -9,7 +9,9 @@ defmodule Arbor.Voice.Session do
 
   alias Arbor.Contracts.Session.UserMessage
   alias Arbor.Voice.Session.Settlement
+  alias Arbor.Voice.Session.ToolTaskCore
   alias Arbor.Voice.Session.TurnCore
+  alias Arbor.Voice.ToolCallOwner
 
   @cleanup_key :budget_settlement
   @registry Arbor.Voice.Registry
@@ -25,6 +27,9 @@ defmodule Arbor.Voice.Session do
   @speech_output_max_bytes 8192
   # Dedicated acceptance-seam Task.Supervisor (VP-04E2R1). Not ResourceCleanup.
   @speech_output_task_supervisor Arbor.Voice.SpeechOutputTaskSupervisor
+  # Dedicated tool-call owner Task.Supervisor name (VP-04E3). Not speech/cleanup.
+  # Registered via Application Supervisor.child_spec — no wrapper module.
+  @tool_task_supervisor Arbor.Voice.ToolTaskSupervisor
   # Deterministic non-sensitive hard-timeout notice (VOICE-24).
   @budget_exhaustion_notice "This voice session has reached its time limit. Continue on your screen."
 
@@ -202,6 +207,9 @@ defmodule Arbor.Voice.Session do
           speech_output: config.speech_output,
           # Source-owned acceptance bound (1..250 ms); never in public status.
           speech_output_timeout_ms: config.speech_output_timeout_ms,
+          # Tool router (VP-04E3): private; never in status/signals.
+          tool_router: config.tool_router,
+          tool_router_timeout_ms: config.tool_router_timeout_ms,
           # min(100, owner max_recv) so recv never exceeds a tighter owner cap.
           poll_window_ms: derive_poll_window_ms(config.resource_owner_opts),
           turn: nil,
@@ -583,6 +591,7 @@ defmodule Arbor.Voice.Session do
   end
 
   def handle_call(:stop, _from, %{lifecycle: :ready, closing: false} = state) do
+    state = cancel_pending_tools_with_outputs(state)
     state = reply_turn_caller(state, {:error, :session_stopped})
     state = %{state | closing: true}
     state = cancel_hard_timer(state)
@@ -625,7 +634,8 @@ defmodule Arbor.Voice.Session do
 
   @impl true
   def handle_info(:hard_timeout, %{lifecycle: :ready, closing: false} = state) do
-    # 1) Explicit in-flight reply + generation clear before any speech work.
+    # 1) Kill pending tools + best-effort cancel outputs, then reply caller.
+    state = cancel_pending_tools_with_outputs(state)
     state = reply_turn_caller(state, {:error, :budget_exhausted})
     state = %{state | closing: true, timer_ref: nil}
     # 2) Render/guard/offer the deterministic exhaustion notice (never raw).
@@ -651,6 +661,30 @@ defmodule Arbor.Voice.Session do
 
   def handle_info({:turn_poll, _generation}, state), do: {:noreply, state}
 
+  def handle_info(
+        {:tool_outcome, generation, call_id, token, output},
+        %{lifecycle: :ready, closing: false} = state
+      )
+      when is_integer(generation) and is_binary(call_id) and is_reference(token) and
+             is_binary(output) do
+    {:noreply, handle_tool_outcome(state, generation, call_id, token, output)}
+  end
+
+  def handle_info({:tool_outcome, _gen, _id, _token, _output}, state), do: {:noreply, state}
+
+  def handle_info(
+        {:DOWN, mon, :process, _pid, _reason},
+        %{lifecycle: :ready, closing: false} = state
+      )
+      when is_reference(mon) do
+    # Any DOWN still matching pending (including :normal/:shutdown when outcome
+    # was lost) settles as tool_failed. Outcome-before-exit ordering means a
+    # successful propose clears pending before this DOWN is handled.
+    {:noreply, handle_tool_owner_down(state, mon)}
+  end
+
+  def handle_info({:DOWN, _mon, :process, _pid, _reason}, state), do: {:noreply, state}
+
   def handle_info(_msg, state), do: {:noreply, state}
 
   # ---------------------------------------------------------------------------
@@ -674,7 +708,9 @@ defmodule Arbor.Voice.Session do
             from: from,
             user_message: user_message,
             core: TurnCore.new(),
-            started_ms: started_ms
+            started_ms: started_ms,
+            # Sole outstanding-tool authority (not TurnCore).
+            pending: %{}
           }
 
           next = %{state | turn: turn, turn_generation: generation}
@@ -754,25 +790,207 @@ defmodule Arbor.Voice.Session do
         enqueue_poll(%{state | turn: next_turn}, turn.generation)
 
       {:done, raw_text} ->
-        complete_turn(state, turn, raw_text)
-
-      {:reject_tool, core, call_id} ->
-        next_turn = %{turn | core: core}
-        next_state = %{state | turn: next_turn}
-
-        case safe_send_tool_result(next_state, call_id, TurnCore.no_tools_installed_output()) do
-          :ok ->
-            enqueue_poll(next_state, turn.generation)
-
-          {:error, _reason} ->
-            finish_turn_error(next_state, next_turn, :turn_failed)
+        # Only tool_wave=false terminals reach here. If owners still pending,
+        # hold post-tool text until the last settle (not intermediate-wave text).
+        if map_size(turn.pending) == 0 do
+          complete_turn(state, turn, raw_text)
+        else
+          next_turn = Map.put(turn, :held_terminal, raw_text)
+          enqueue_poll(%{state | turn: next_turn}, turn.generation)
         end
+
+      {:cycle_reset, core} ->
+        # Intermediate provider boundary: pre-tool text already cleared in core.
+        # Never complete from this event regardless of pending emptiness.
+        next_turn = turn |> Map.put(:core, core) |> Map.delete(:held_terminal)
+        enqueue_poll(%{state | turn: next_turn}, turn.generation)
+
+      {:admit_tool, core, call} ->
+        # A new tool wave invalidates any terminal held from an earlier wave.
+        next_turn = turn |> Map.put(:core, core) |> Map.delete(:held_terminal)
+        admit_and_route_tool(%{state | turn: next_turn}, next_turn, call)
 
       {:error, :protocol_error} ->
         finish_turn_error(state, turn, :turn_failed)
     end
   end
 
+  # ---------------------------------------------------------------------------
+  # Tool routing (VP-04E3) — Session is sole backend-output authority
+  # ---------------------------------------------------------------------------
+
+  defp admit_and_route_tool(state, turn, %{id: call_id, name: name, arguments: args}) do
+    pending = turn.pending || %{}
+
+    if map_size(pending) >= ToolTaskCore.max_outstanding() do
+      # Mark already applied in core; sync capacity output, no spawn.
+      case safe_send_tool_result(
+             state,
+             call_id,
+             ToolTaskCore.normalize(:tool_capacity_exceeded)
+           ) do
+        :ok ->
+          enqueue_poll(state, turn.generation)
+
+        {:error, _} ->
+          finish_turn_error(state, turn, :turn_failed)
+      end
+    else
+      start_tool_owner(state, turn, call_id, name, args, pending)
+    end
+  end
+
+  defp start_tool_owner(state, turn, call_id, name, args, pending) do
+    # Pre-create fence token before spawn; activation carries the same token.
+    token = make_ref()
+    generation = turn.generation
+    session_pid = self()
+
+    context = %{
+      call_id: call_id,
+      name: name,
+      arguments: args,
+      user_id: state.user_id,
+      agent_id: state.agent_id,
+      engagement_id: state.engagement_id
+    }
+
+    owner_opts = %{
+      session_pid: session_pid,
+      generation: generation,
+      call_id: call_id,
+      token: token,
+      router: state.tool_router,
+      context: context,
+      timeout_ms: state.tool_router_timeout_ms
+    }
+
+    case start_tool_owner_child(owner_opts) do
+      {:ok, owner_pid} when is_pid(owner_pid) ->
+        # 1) Monitor 2) record pending 3) activate with token — no router work
+        # starts until activation, so every post-activate DOWN is fenced.
+        owner_mon = Process.monitor(owner_pid)
+
+        entry = %{
+          token: token,
+          owner_pid: owner_pid,
+          owner_mon: owner_mon
+        }
+
+        next_pending = Map.put(pending, call_id, entry)
+        next_turn = %{turn | pending: next_pending}
+        next_state = %{state | turn: next_turn}
+
+        if Process.alive?(owner_pid) do
+          send(owner_pid, {:activate, token})
+          enqueue_poll(next_state, generation)
+        else
+          # Died before activate; DOWN settles via handle_tool_owner_down.
+          enqueue_poll(next_state, generation)
+        end
+
+      {:error, _reason} ->
+        case safe_send_tool_result(
+               state,
+               call_id,
+               ToolTaskCore.normalize(:router_unavailable)
+             ) do
+          :ok ->
+            enqueue_poll(state, turn.generation)
+
+          {:error, _} ->
+            finish_turn_error(state, turn, :turn_failed)
+        end
+    end
+  end
+
+  defp start_tool_owner_child(owner_opts) do
+    Task.Supervisor.start_child(@tool_task_supervisor, fn ->
+      ToolCallOwner.run(owner_opts)
+    end)
+  rescue
+    _ -> {:error, :router_unavailable}
+  catch
+    _kind, _reason -> {:error, :router_unavailable}
+  end
+
+  defp handle_tool_outcome(state, generation, call_id, token, output) do
+    case state.turn do
+      %{generation: ^generation, pending: pending} = turn when is_map(pending) ->
+        entry = Map.get(pending, call_id)
+
+        case ToolTaskCore.authorize(entry, generation, call_id, token, generation) do
+          :settle ->
+            settle_tool_output(state, turn, call_id, entry, output)
+
+          :ignore ->
+            state
+        end
+
+      _ ->
+        state
+    end
+  end
+
+  defp handle_tool_owner_down(state, mon) do
+    case state.turn do
+      %{generation: generation, pending: pending} = turn when is_map(pending) ->
+        case find_pending_by_mon(pending, mon) do
+          {call_id, entry} ->
+            case ToolTaskCore.authorize_down(entry, mon, generation, generation) do
+              :settle ->
+                output = ToolTaskCore.normalize(:tool_failed)
+                settle_tool_output(state, turn, call_id, entry, output)
+
+              :ignore ->
+                state
+            end
+
+          nil ->
+            state
+        end
+
+      _ ->
+        state
+    end
+  end
+
+  defp find_pending_by_mon(pending, mon) do
+    Enum.find_value(pending, fn {call_id, entry} ->
+      if entry.owner_mon == mon, do: {call_id, entry}, else: nil
+    end)
+  end
+
+  defp settle_tool_output(state, turn, call_id, entry, output) do
+    # Drop from pending before send so a concurrent DOWN cannot double-settle.
+    _ = Process.demonitor(entry.owner_mon, [:flush])
+    pending = Map.delete(turn.pending, call_id)
+    next_turn = %{turn | pending: pending}
+    next_state = %{state | turn: next_turn}
+
+    case safe_send_tool_result(next_state, call_id, output) do
+      :ok ->
+        maybe_complete_after_settle(next_state, next_turn)
+
+      {:error, _} ->
+        finish_turn_error(next_state, next_turn, :turn_failed)
+    end
+  end
+
+  defp maybe_complete_after_settle(state, turn) do
+    cond do
+      map_size(turn.pending) > 0 ->
+        enqueue_poll(state, turn.generation)
+
+      is_binary(Map.get(turn, :held_terminal)) and String.trim(turn.held_terminal) != "" ->
+        complete_turn(state, turn, turn.held_terminal)
+
+      true ->
+        enqueue_poll(state, turn.generation)
+    end
+  end
+
+  # Synchronous send for turn-path settle (need accept/fail for :turn_failed).
   defp safe_send_tool_result(state, call_id, output) do
     try do
       case state.resource_owner.send_tool_result(state.owner, call_id, output) do
@@ -784,6 +1002,63 @@ defmodule Arbor.Voice.Session do
       _kind, _reason ->
         {:error, :turn_failed}
     end
+  end
+
+  # Nonblocking Session-authorized request (:gen_server.send_request). Does not
+  # wait for backend completion; same-sender mailbox order places requests
+  # before a subsequent close/1 call.
+  defp queue_send_tool_result(state, call_id, output) do
+    case state.resource_owner.send_tool_result_request(state.owner, call_id, output) do
+      {:ok, _req_id} -> :ok
+      {:error, _} -> :error
+      _other -> :error
+    end
+  catch
+    _kind, _reason -> :error
+  end
+
+  # Kill outstanding tool owners, then queue exactly one cancel tool-result
+  # request per admitted pending id before any close. Session is the RO owner.
+  defp cancel_pending_tools_with_outputs(state) do
+    case state.turn do
+      %{pending: pending} = turn when is_map(pending) and map_size(pending) > 0 ->
+        ids = Map.keys(pending)
+        _ = cancel_all_siblings(pending)
+        _ = queue_cancel_outputs(state, ids)
+        %{state | turn: %{turn | pending: %{}}}
+
+      _ ->
+        state
+    end
+  end
+
+  defp queue_cancel_outputs(state, ids) when is_list(ids) do
+    cancel_json = ToolTaskCore.normalize(:tool_cancelled)
+
+    Enum.each(ids, fn call_id ->
+      # Exactly one attempt per id; never skip remaining ids on failure.
+      _ = queue_send_tool_result(state, call_id, cancel_json)
+    end)
+
+    :ok
+  end
+
+  defp cancel_all_siblings(pending) when is_map(pending) do
+    Enum.each(pending, fn {_call_id, entry} ->
+      owner_pid = Map.get(entry, :owner_pid)
+      owner_mon = Map.get(entry, :owner_mon)
+
+      if is_pid(owner_pid) do
+        Process.exit(owner_pid, :kill)
+      end
+
+      # Flush so stop/exhaust cancel path owns the attempt, not a late DOWN.
+      if is_reference(owner_mon) do
+        _ = Process.demonitor(owner_mon, [:flush])
+      end
+    end)
+
+    :ok
   end
 
   defp complete_turn(state, turn, raw_text) do
@@ -956,7 +1231,12 @@ defmodule Arbor.Voice.Session do
   end
 
   defp finish_turn_error(state, turn, reason) do
-    reply_and_clear_turn(state, turn, {:error, reason})
+    # Cancel owners + queue one structured cancellation attempt per still-pending
+    # sibling (no admitted id silently dropped). Then reply and clear.
+    from = Map.get(turn, :from)
+    state = cancel_pending_tools_with_outputs(%{state | turn: turn})
+    if from, do: safe_reply(from, {:error, reason})
+    clear_turn(state)
   end
 
   defp reply_and_clear_turn(state, turn, reply) do
@@ -964,8 +1244,18 @@ defmodule Arbor.Voice.Session do
     clear_turn(state)
   end
 
-  # Reply any retained turn caller, then bump generation so stale polls die.
-  defp reply_turn_caller(%{turn: %{from: from}} = state, reply) do
+  # Reply any retained turn caller. Pending tools should already be cancelled
+  # by stop/exhaust paths; still kill any residual owners without double-queue.
+  defp reply_turn_caller(%{turn: %{from: from} = turn} = state, reply) do
+    pending = Map.get(turn, :pending, %{})
+
+    if is_map(pending) and map_size(pending) > 0 do
+      # Safety net: cancel + queue if a path forgot cancel_pending first.
+      _ = cancel_all_siblings(pending)
+      ids = Map.keys(pending)
+      _ = queue_cancel_outputs(state, ids)
+    end
+
     safe_reply(from, reply)
     clear_turn(state)
   end
@@ -973,7 +1263,7 @@ defmodule Arbor.Voice.Session do
   defp reply_turn_caller(state, _reply), do: state
 
   defp clear_turn(state) do
-    # Increment generation so any queued {:turn_poll, old} is rejected.
+    # Increment generation so any queued {:turn_poll, old} / tool_outcome is rejected.
     generation = state.turn_generation + 1
     %{state | turn: nil, turn_generation: generation}
   end
@@ -1161,8 +1451,9 @@ defmodule Arbor.Voice.Session do
 
   # Crash/status output is a closed whitelist only. Live turn fields (caller
   # `from`, engagement-tagged `user_message`, TurnCore text accumulator,
-  # tool-id set, owner/settlement handles), Speakable module, speech_output
-  # callback, and any presentation errors stay private — never included here.
+  # tool-id set, pending tool owners/tokens, owner/settlement handles),
+  # Speakable module, speech_output callback, tool_router, and any presentation
+  # errors stay private — never included here.
   defp redacted_genserver_state(state) when is_map(state) do
     %{
       lifecycle: Map.get(state, :lifecycle),

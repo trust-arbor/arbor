@@ -47,6 +47,9 @@ defmodule Arbor.Voice.Config do
   # Speech-output acceptance timeout (VP-04E2R1): source-owned hard ceiling.
   @default_speech_output_timeout_ms 100
   @max_speech_output_timeout_ms 250
+  # Tool-router timeout (VP-04E3): source-owned hard ceiling.
+  @default_tool_router_timeout_ms 5_000
+  @max_tool_router_timeout_ms 30_000
 
   @doc "The fixed durable-budget-ledger namespace. Not operator-configurable."
   @spec fixed_budget_namespace() :: :voice_daily_budgets
@@ -252,5 +255,42 @@ defmodule Arbor.Voice.Config do
     :arbor_voice
     |> Application.get_env(:speech_output_timeout_ms, @default_speech_output_timeout_ms)
     |> validate_speech_output_timeout_ms()
+  end
+
+  # ---------------------------------------------------------------------------
+  # Tool-router timeout (VP-04E3)
+  # ---------------------------------------------------------------------------
+
+  @doc "Literal default tool-router timeout, in milliseconds (5000)."
+  @spec default_tool_router_timeout_ms() :: pos_integer()
+  def default_tool_router_timeout_ms, do: @default_tool_router_timeout_ms
+
+  @doc "Hard ceiling for tool-router timeout, in milliseconds (30000)."
+  @spec max_tool_router_timeout_ms() :: pos_integer()
+  def max_tool_router_timeout_ms, do: @max_tool_router_timeout_ms
+
+  @doc """
+  Pure validation: a positive-integer tool-router timeout at most 30_000 ms.
+  Source-owned hard ceiling; not bypassable via Application env.
+  """
+  @spec validate_tool_router_timeout_ms(term()) ::
+          {:ok, pos_integer()} | {:error, :invalid_config}
+  def validate_tool_router_timeout_ms(v)
+      when is_integer(v) and v > 0 and v <= @max_tool_router_timeout_ms,
+      do: {:ok, v}
+
+  def validate_tool_router_timeout_ms(_v), do: {:error, :invalid_config}
+
+  @doc """
+  Validated tool-router timeout in milliseconds.
+
+  Defaults to 5000 ms. A present but malformed Application config value fails
+  closed as `{:error, :invalid_config}`.
+  """
+  @spec tool_router_timeout_ms() :: {:ok, pos_integer()} | {:error, :invalid_config}
+  def tool_router_timeout_ms do
+    :arbor_voice
+    |> Application.get_env(:tool_router_timeout_ms, @default_tool_router_timeout_ms)
+    |> validate_tool_router_timeout_ms()
   end
 end
