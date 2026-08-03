@@ -1,0 +1,214 @@
+defmodule Arbor.VoiceTest do
+  @moduledoc """
+  Facade/application proofs for the tuple-only voice lifecycle API (VP-04D2B).
+  """
+  use ExUnit.Case, async: false
+
+  @moduletag :fast
+
+  alias Arbor.Voice
+  alias Arbor.Voice.Test.FakeBackend
+
+  alias Arbor.Voice.Test.SessionFakes.{
+    FakeCommsSession,
+    FakeEngagementStore,
+    FakeLedger,
+    FakeSignals
+  }
+
+  defp unique_ids do
+    n = System.unique_integer([:positive])
+    {"user_#{n}", "agent_#{n}"}
+  end
+
+  defp base_opts(extra \\ []) do
+    {:ok, _eng} = FakeEngagementStore.start()
+    {:ok, ledger} = FakeLedger.start()
+    {:ok, _signals} = FakeSignals.start()
+
+    [
+      comms: FakeCommsSession,
+      engagement_store: FakeEngagementStore,
+      ledger: FakeLedger,
+      ledger_opts: [],
+      backend: FakeBackend,
+      backend_opts: [],
+      signals: FakeSignals,
+      session_budget_ms: 60_000,
+      daily_budget_ms: 3_600_000,
+      wall_clock: fn -> ~U[2026-08-02 12:00:00.000000Z] end,
+      monotonic_clock: fn -> 1_000_000 end
+    ]
+    |> Keyword.merge(extra)
+    |> then(fn opts -> {opts, ledger} end)
+  end
+
+  setup do
+    assert is_pid(Process.whereis(Arbor.Voice.SessionSupervisor))
+    :ok
+  end
+
+  describe "application supervision" do
+    @tag spec: "VOICE-7"
+    test "SessionSupervisor is present under the app supervisor" do
+      children = Supervisor.which_children(Arbor.Voice.Supervisor)
+
+      entry =
+        Enum.find(children, fn {id, _, _, _} -> id == Arbor.Voice.SessionSupervisor end)
+
+      assert {Arbor.Voice.SessionSupervisor, pid, :supervisor, [DynamicSupervisor]} = entry
+      assert is_pid(pid)
+      assert Process.alive?(pid)
+    end
+  end
+
+  describe "start_session/3 API" do
+    @tag spec: "VOICE-2"
+    test "returns the tuple key, never a pid, and registers uniquely" do
+      {user_id, agent_id} = unique_ids()
+      {opts, _ledger} = base_opts()
+
+      assert {:ok, {^user_id, ^agent_id} = key} = Voice.start_session(user_id, agent_id, opts)
+      refute match?({:ok, pid} when is_pid(pid), {:ok, key})
+
+      assert [{pid, _}] = Registry.lookup(Arbor.Voice.Registry, key)
+      assert is_pid(pid)
+      assert Process.alive?(pid)
+
+      assert :ok = Voice.stop_session(key)
+    end
+
+    @tag spec: "VOICE-2"
+    test "duplicate start returns :already_started" do
+      {user_id, agent_id} = unique_ids()
+      {opts, _ledger} = base_opts()
+
+      assert {:ok, key} = Voice.start_session(user_id, agent_id, opts)
+      assert {:error, :already_started} = Voice.start_session(user_id, agent_id, opts)
+      assert :ok = Voice.stop_session(key)
+    end
+
+    test "rejects blank, non-utf8, oversized, and non-string ids" do
+      {opts, _} = base_opts()
+
+      assert {:error, :invalid_user_id} = Voice.start_session("", "agent_1", opts)
+      assert {:error, :invalid_user_id} = Voice.start_session("   ", "agent_1", opts)
+      assert {:error, :invalid_agent_id} = Voice.start_session("user_1", "", opts)
+      assert {:error, :invalid_user_id} = Voice.start_session(nil, "agent_1", opts)
+      assert {:error, :invalid_agent_id} = Voice.start_session("user_1", 123, opts)
+
+      huge = String.duplicate("a", 257)
+      assert {:error, :invalid_user_id} = Voice.start_session(huge, "agent_1", opts)
+      assert {:error, :invalid_agent_id} = Voice.start_session("user_1", huge, opts)
+
+      # invalid UTF-8
+      bad = <<0xFF, 0xFE>>
+      assert {:error, :invalid_user_id} = Voice.start_session(bad, "agent_1", opts)
+    end
+
+    test "rejects unknown and duplicate option keys" do
+      {user_id, agent_id} = unique_ids()
+      {opts, _} = base_opts()
+
+      assert {:error, :invalid_opts} =
+               Voice.start_session(user_id, agent_id, opts ++ [bogus: true])
+
+      assert {:error, :invalid_opts} =
+               Voice.start_session(user_id, agent_id, opts ++ [backend: FakeBackend])
+    end
+
+    test "no public text_turn/3" do
+      refute function_exported?(Voice, :text_turn, 3)
+      refute function_exported?(Voice, :text_turn, 2)
+    end
+  end
+
+  describe "session_status/1" do
+    @tag spec: "VOICE-5"
+    test "returns a redacted bounded status map" do
+      {user_id, agent_id} = unique_ids()
+      {opts, _} = base_opts()
+
+      assert {:ok, key} = Voice.start_session(user_id, agent_id, opts)
+      assert {:ok, status} = Voice.session_status(key)
+
+      assert status == %{
+               state: :ready,
+               user_id: user_id,
+               agent_id: agent_id,
+               backend: :fake,
+               mode: :local,
+               reserved_ms: 60_000
+             }
+
+      # No pids, engagement ids, reservation ids, or raw errors.
+      refute Map.has_key?(status, :pid)
+      refute Map.has_key?(status, :engagement_id)
+      refute Map.has_key?(status, :reservation_id)
+      refute Map.has_key?(status, :owner)
+      refute Map.has_key?(status, :error)
+
+      encoded = inspect(status)
+      refute encoded =~ "pid"
+      refute encoded =~ "eng_"
+
+      assert :ok = Voice.stop_session(key)
+    end
+
+    test "unknown session returns :not_found" do
+      assert {:error, :not_found} = Voice.session_status({"missing_user", "missing_agent"})
+    end
+  end
+
+  describe "stop_session/1" do
+    @tag spec: "VOICE-7,VOICE-22"
+    test "normal stop settles, closes, emits stop, and removes registry entry" do
+      {user_id, agent_id} = unique_ids()
+      {opts, ledger} = base_opts()
+      {:ok, signals} = FakeSignals.start()
+
+      assert {:ok, key} = Voice.start_session(user_id, agent_id, opts)
+      assert [{pid, _}] = Registry.lookup(Arbor.Voice.Registry, key)
+
+      assert :ok = Voice.stop_session(key)
+
+      # Registry entry gone (allow brief lag)
+      wait_until(fn -> Registry.lookup(Arbor.Voice.Registry, key) == [] end, 2_000)
+      refute Process.alive?(pid)
+
+      emissions = FakeSignals.emissions(signals)
+      assert Enum.any?(emissions, fn {cat, type, _, _} -> cat == :voice and type == :stop end)
+      assert Enum.any?(emissions, fn {cat, type, _, _} -> cat == :voice and type == :start end)
+
+      assert Enum.any?(emissions, fn {cat, type, _, _} ->
+               cat == :voice and type == :backend_connected
+             end)
+
+      # Public Signals shape is emit/4 with a closed opts list.
+      assert Enum.all?(emissions, fn {_c, _t, _data, opts} -> is_list(opts) and opts == [] end)
+
+      calls = FakeLedger.calls(ledger)
+      assert Enum.any?(calls, fn c -> match?({:consume, _, _, _}, c) end)
+
+      assert {:error, :not_found} = Voice.stop_session(key)
+    end
+  end
+
+  defp wait_until(fun, timeout_ms) do
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+    do_wait_until(fun, deadline)
+  end
+
+  defp do_wait_until(fun, deadline) do
+    if fun.() do
+      :ok
+    else
+      if System.monotonic_time(:millisecond) >= deadline do
+        flunk("condition not met before timeout")
+      else
+        Process.sleep(10)
+        do_wait_until(fun, deadline)
+      end
+    end
+  end
+end

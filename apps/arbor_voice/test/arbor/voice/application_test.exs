@@ -38,4 +38,16 @@ defmodule Arbor.Voice.ApplicationTest do
     assert is_pid(resource_pid)
     assert Process.alive?(resource_pid)
   end
+
+  @tag spec: "VOICE-7"
+  test "SessionSupervisor is supervised under the app supervisor" do
+    children = Supervisor.which_children(Arbor.Voice.Supervisor)
+
+    entry =
+      Enum.find(children, fn {id, _, _, _} -> id == Arbor.Voice.SessionSupervisor end)
+
+    assert {Arbor.Voice.SessionSupervisor, pid, :supervisor, [DynamicSupervisor]} = entry
+    assert is_pid(pid)
+    assert Process.alive?(pid)
+  end
 end

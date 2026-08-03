@@ -481,6 +481,40 @@ defmodule Arbor.Voice.ResourceOwnerTest do
     refute_receive {^marker, :attempt}, 200
   end
 
+  @tag spec: "VOICE-7"
+  test "security regression: cleanup returning {:error, :transient} once is retried then succeeds" do
+    owner = self()
+    me = self()
+    marker = make_ref()
+    counter = :atomics.new(1, signed: false)
+    :atomics.put(counter, 1, 0)
+
+    opts = Keyword.merge(@default_opts, cleanup_attempts: 3, cleanup_per_attempt_timeout_ms: 100)
+
+    assert {:ok, ro} = ResourceOwner.start(self(), Backend, [parent: owner], opts)
+
+    # Soft {:error, _} must retry (budget settlement and other cleanups rely on
+    # this). Other normal returns remain success for compatibility.
+    :ok =
+      ResourceOwner.register_cleanup(ro, :budget_like, fn ->
+        n = :atomics.add_get(counter, 1, 1)
+        send(me, {marker, {:attempt, n}})
+
+        if n == 1 do
+          {:error, :transient}
+        else
+          :ok
+        end
+      end)
+
+    assert :ok = ResourceOwner.close(ro)
+
+    assert_receive {^marker, {:attempt, 1}}, 1_000
+    assert_receive {^marker, {:attempt, 2}}, 1_000
+    refute_receive {^marker, {:attempt, _}}, 200
+    assert :atomics.get(counter, 1) == 2
+  end
+
   # ── hanging close ──
 
   @tag spec: "VOICE-7"

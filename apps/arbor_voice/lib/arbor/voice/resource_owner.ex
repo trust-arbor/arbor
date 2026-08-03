@@ -654,8 +654,14 @@ defmodule Arbor.Voice.ResourceOwner do
           task =
             Task.Supervisor.async_nolink(supervisor, fn ->
               try do
-                fun.()
-                :ok
+                # Soft failures must retry: `{:error, _}` is failure. Other
+                # normal returns (including `:ok` and incidental values such as
+                # `send/2` → pid) remain success for compatibility. raise /
+                # throw / exit / timeout still fail via the catch clause.
+                case fun.() do
+                  {:error, _reason} -> :error
+                  _other -> :ok
+                end
               catch
                 _kind, _reason ->
                   :error

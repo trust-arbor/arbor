@@ -8,7 +8,8 @@ defmodule Arbor.Voice.Application do
     children = [
       {Registry, keys: :unique, name: Arbor.Voice.Registry},
       Arbor.Voice.ResourceCleanupTaskSupervisor,
-      Arbor.Voice.ResourceSupervisor
+      Arbor.Voice.ResourceSupervisor,
+      Arbor.Voice.SessionSupervisor
     ]
 
     opts = [strategy: :one_for_one, name: Arbor.Voice.Supervisor]

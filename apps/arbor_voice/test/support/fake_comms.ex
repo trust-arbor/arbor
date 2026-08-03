@@ -6,6 +6,11 @@ defmodule Arbor.Voice.Test.FakeComms do
   Install the Agent target via `install/1` (or `start/1`) before calling the
   recorder with `comms: __MODULE__`. Call history is owned by the ExUnit
   process's Agent so evidence is exact and network-free.
+
+  Not for Session lifecycle tests (VP-04D2B): this fake is process-dictionary
+  bound and cannot be reached from the Session GenServer. Use
+  `Arbor.Voice.Test.SessionFakes.FakeCommsSession` /
+  `FakeEngagementStore` instead.
   """
 
   @agent_key {__MODULE__, :agent}
