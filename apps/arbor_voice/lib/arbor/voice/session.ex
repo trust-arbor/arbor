@@ -585,19 +585,18 @@ defmodule Arbor.Voice.Session do
 
   def handle_call({:text_turn, user_text}, from, %{lifecycle: :ready, closing: false} = state)
       when is_binary(user_text) do
-    cond do
-      match?(%{}, state.turn) ->
-        {:reply, {:error, :busy}, state}
+    # In-flight turn is always a map; nil means idle.
+    if is_map(state.turn) do
+      {:reply, {:error, :busy}, state}
+    else
+      case begin_text_turn(state, from, user_text) do
+        {:ok, next_state} ->
+          # Poll asynchronously so stop / hard timeout remain serviceable.
+          {:noreply, next_state}
 
-      true ->
-        case begin_text_turn(state, from, user_text) do
-          {:ok, next_state} ->
-            # Poll asynchronously so stop / hard timeout remain serviceable.
-            {:noreply, next_state}
-
-          {:error, reason} ->
-            {:reply, {:error, reason}, state}
-        end
+        {:error, reason} ->
+          {:reply, {:error, reason}, state}
+      end
     end
   end
 
@@ -800,7 +799,8 @@ defmodule Arbor.Voice.Session do
                  completed_at,
                  opts
                ) do
-            {:ok, _n} -> :ok
+            # Public contract: {:ok, non_neg_integer()}. Reject malformed success.
+            {:ok, n} when is_integer(n) and n >= 0 -> :ok
             {:error, _reason} -> {:error, :transcript_record_failed}
             _other -> {:error, :transcript_record_failed}
           end
@@ -1007,9 +1007,9 @@ defmodule Arbor.Voice.Session do
     end
   end
 
-  # Never expose raw transcript, audio, backend events, persistence errors,
-  # opaque handles, caller refs, or collaborator closures. Private live turn
-  # state may retain a bounded transcript while a turn is in flight.
+  # Crash/status output is a closed whitelist only. Live turn fields (caller
+  # `from`, engagement-tagged `user_message`, TurnCore text accumulator,
+  # tool-id set, owner/settlement handles) stay private — never included here.
   defp redacted_genserver_state(state) when is_map(state) do
     %{
       lifecycle: Map.get(state, :lifecycle),

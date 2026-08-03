@@ -120,6 +120,21 @@ defmodule Arbor.Voice.Session.TurnCoreTest do
       huge = String.duplicate("x", TurnCore.max_text_bytes() + 1)
       assert {:error, :protocol_error} = TurnCore.reduce(state, {:input_transcript, huge})
     end
+
+    @tag spec: "VOICE-5"
+    test "security regression: oversized output_audio is protocol_error and not retained" do
+      state = TurnCore.new()
+      at_cap = :binary.copy(<<0>>, TurnCore.max_audio_bytes())
+      over = :binary.copy(<<0>>, TurnCore.max_audio_bytes() + 1)
+
+      assert {:continue, s1} = TurnCore.reduce(state, {:output_audio, at_cap})
+      assert s1 == state
+      refute Map.has_key?(s1, :audio)
+
+      assert {:error, :protocol_error} = TurnCore.reduce(state, {:output_audio, over})
+      assert {:error, :protocol_error} =
+               TurnCore.reduce(state, {:output_audio, :binary.copy(<<1>>, 100_000)})
+    end
   end
 
   describe "tool call handling" do

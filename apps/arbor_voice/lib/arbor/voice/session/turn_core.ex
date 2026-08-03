@@ -9,6 +9,8 @@ defmodule Arbor.Voice.Session.TurnCore do
   """
 
   @max_text_bytes 8192
+  # Single-event DoS ceiling for backend :output_audio chunks (payload not retained).
+  @max_audio_bytes 65_536
   @max_tool_id_bytes 256
   @max_seen_tool_ids 64
 
@@ -57,6 +59,10 @@ defmodule Arbor.Voice.Session.TurnCore do
   @spec max_text_bytes() :: pos_integer()
   def max_text_bytes, do: @max_text_bytes
 
+  @doc "Byte ceiling for a single :output_audio event (payload never retained)."
+  @spec max_audio_bytes() :: pos_integer()
+  def max_audio_bytes, do: @max_audio_bytes
+
   @doc "JSON body for the empty-catalog tool rejection (VOICE-8 partial)."
   @spec no_tools_installed_output() :: String.t()
   def no_tools_installed_output do
@@ -85,8 +91,7 @@ defmodule Arbor.Voice.Session.TurnCore do
         if valid_ignored_text?(text), do: {:continue, state}, else: {:error, :protocol_error}
 
       {:output_audio, chunk} when is_binary(chunk) ->
-        # Validated shape only; payload is never retained.
-        {:continue, state}
+        reduce_output_audio(state, chunk)
 
       {:tool_call, call} when is_map(call) ->
         reduce_tool_call(state, call)
@@ -113,6 +118,15 @@ defmodule Arbor.Voice.Session.TurnCore do
 
       true ->
         {:continue, %{state | text_acc: acc <> delta}}
+    end
+  end
+
+  # Byte size first; payload is never retained in core state.
+  defp reduce_output_audio(state, chunk) do
+    if byte_size(chunk) > @max_audio_bytes do
+      {:error, :protocol_error}
+    else
+      {:continue, state}
     end
   end
 

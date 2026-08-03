@@ -19,6 +19,12 @@ defmodule Arbor.Voice.SessionTextTurnTest do
     FakeSignals
   }
 
+  defmodule MalformedOkRecorder do
+    @moduledoc false
+    # Defective recorder returning a non-contract success envelope.
+    def record(_agent_id, _msg, _raw, _completed_at, _opts), do: {:ok, :not_recorded}
+  end
+
   defp unique_ids do
     n = System.unique_integer([:positive])
     {"user_#{n}", "agent_#{n}"}
@@ -387,6 +393,27 @@ defmodule Arbor.Voice.SessionTextTurnTest do
 
       assert :ok = Voice.stop_session(key)
     end
+
+    @tag spec: "VOICE-5"
+    test "security regression: oversized output_audio ends the turn with :turn_failed" do
+      ctx = turn_opts()
+      over = :binary.copy(<<0>>, TurnCore.max_audio_bytes() + 1)
+
+      ControllableTurnBackend.enqueue([
+        {:output_audio, over},
+        {:turn_done, %{text: "should-not-complete"}}
+      ])
+
+      {user_id, agent_id} = unique_ids()
+      assert {:ok, key} = Voice.start_session(user_id, agent_id, ctx.opts)
+      assert {:error, :turn_failed} = Voice.text_turn(user_id, agent_id, "hi")
+      assert FakeCommsSession.record_calls(ctx.recorder_agent) == []
+      refute Enum.any?(FakeSignals.emissions(ctx.signals), fn {c, t, _, _} ->
+               c == :voice and t == :turn_completed
+             end)
+
+      assert :ok = Voice.stop_session(key)
+    end
   end
 
   describe "transcript recorder integration" do
@@ -476,6 +503,28 @@ defmodule Arbor.Voice.SessionTextTurnTest do
 
         assert :ok = Voice.stop_session(key)
       end
+    end
+
+    @tag spec: "VOICE-3"
+    test "malformed recorder {:ok, ...} envelope is not treated as durable success" do
+      ctx = turn_opts(transcript_recorder: MalformedOkRecorder)
+      ControllableTurnBackend.enqueue([{:turn_done, %{text: "raw-malformed-ok"}}])
+
+      {user_id, agent_id} = unique_ids()
+      assert {:ok, key} = Voice.start_session(user_id, agent_id, ctx.opts)
+      assert {:error, :transcript_record_failed} = Voice.text_turn(user_id, agent_id, "u")
+
+      emissions = FakeSignals.emissions(ctx.signals)
+
+      assert Enum.any?(emissions, fn {c, t, _, _} ->
+               c == :voice and t == :"transcript.record_failed"
+             end)
+
+      refute Enum.any?(emissions, fn {c, t, _, _} -> c == :voice and t == :turn_completed end)
+      # Injected recorder never hit Comms; no durable pair claimed.
+      assert FakeCommsSession.record_calls(ctx.recorder_agent) == []
+
+      assert :ok = Voice.stop_session(key)
     end
   end
 
