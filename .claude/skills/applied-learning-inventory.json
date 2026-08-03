@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-08-03",
-  "entry_count": 624,
+  "entry_count": 625,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -7656,8 +7656,21 @@
       "source_incident": "found 2026-08-03 when Grok displayed 0% usage but an exact `grok-4.5` CLI call reported that it was not signed in and removed stale auth).",
       "content_sha256": "f40e4e7267eecdfb2b10f29786be3d22bb91ba26c90b6785544e6b2329a73d84",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 625,
+      "source_kind": "post-migration",
+      "slug": "consolidate-candidate-findings-before-spending-the-commit-rework-budget",
+      "title": "Consolidate candidate findings before spending the commit-rework budget.",
+      "topic": "acp-mcp",
+      "destination": ".claude/skills/applied-learning-acp-mcp.md",
+      "anchor": "applied-learning-consolidate-candidate-findings-before-spending-the-commit-rework-budget",
+      "source_date": "2026-08-03",
+      "source_incident": "found 2026-08-03 while integrating VP-05A after a second commit correction hit the category budget).",
+      "content_sha256": "7c44310dab1ee7e36ca1beb69038c8880a3465987c8e5e9afc396372800cb8f9",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 163
+  "post_migration_entry_count": 164
 }

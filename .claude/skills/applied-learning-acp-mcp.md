@@ -882,3 +882,16 @@ field structurally from negotiated capabilities and regress the full managed
 resume path, rather than matching provider error text or treating every resume
 failure as a missing conversation (found 2026-08-02 while recovering a voice
 packet after `design_response_invalid`).
+
+<!-- applied-learning: consolidate-candidate-findings-before-spending-the-commit-rework-budget -->
+<a id="applied-learning-consolidate-candidate-findings-before-spending-the-commit-rework-budget"></a>
+**Consolidate candidate findings before spending the commit-rework budget.** The
+operator commit gate can admit fewer rework turns than the plan's total rework
+setting suggests; after one accepted commit rework, a second request may
+terminalize as `rework_exhausted` before the worker receives its note. Inspect the
+whole frozen candidate, including cleanup and test infrastructure, and run the
+smallest decisive checks before sending one compact correction ledger. If a later
+issue still surfaces, preserve the retained workspace and finish the narrow repair
+locally or redispatch from an exact checkpoint instead of discarding good work
+(found 2026-08-03 while integrating VP-05A after a second commit correction hit
+the category budget).
