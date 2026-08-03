@@ -206,3 +206,14 @@ with an earlier provider error, then start a fresh worker or session; do not rei
 HTTP 403 as a classifier defect, and do not expect relogin to repair an already-open session
 (found 2026-08-02 after a Grok coding task failed two minutes before the CLI rewrote its auth
 store, while a fresh Grok 4.5 task succeeded).
+
+<!-- applied-learning: provider-usage-displays-do-not-prove-persisted-cli-authentication -->
+<a id="applied-learning-provider-usage-displays-do-not-prove-persisted-cli-authentication"></a>
+**Provider usage displays do not prove persisted CLI authentication.** Before dispatching an
+expensive ACP task after login or quota uncertainty, run the provider's smallest no-tools
+authenticated canary against the exact launch-bound model. A healthy-looking usage window may
+come from cached or interactive session state even when the persisted CLI credential is stale;
+Arbor will faithfully snapshot that stale file, and the provider may classify the resulting
+request as an account-limit 403. Treat the canary plus bounded credential generation metadata as
+readiness evidence, and never print credential contents (found 2026-08-03 when Grok displayed 0%
+usage but an exact `grok-4.5` CLI call reported that it was not signed in and removed stale auth).

@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-08-03",
-  "entry_count": 623,
+  "entry_count": 624,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -7643,8 +7643,21 @@
       "source_incident": "found 2026-08-03 while stabilizing VP-04E3 voice tool lifecycle tests).",
       "content_sha256": "39dc26098791cafff56d06db0463f56cc3d2872fcdd1f249b88547e8337f9aae",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 624,
+      "source_kind": "post-migration",
+      "slug": "provider-usage-displays-do-not-prove-persisted-cli-authentication",
+      "title": "Provider usage displays do not prove persisted CLI authentication.",
+      "topic": "providers-oauth",
+      "destination": ".claude/skills/applied-learning-providers-oauth.md",
+      "anchor": "applied-learning-provider-usage-displays-do-not-prove-persisted-cli-authentication",
+      "source_date": "2026-08-03",
+      "source_incident": "found 2026-08-03 when Grok displayed 0% usage but an exact `grok-4.5` CLI call reported that it was not signed in and removed stale auth).",
+      "content_sha256": "f40e4e7267eecdfb2b10f29786be3d22bb91ba26c90b6785544e6b2329a73d84",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 162
+  "post_migration_entry_count": 163
 }
