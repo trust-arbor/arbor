@@ -294,6 +294,31 @@ defmodule Arbor.Voice.TranscriptRecorderTest do
       assert FakeComms.call_count(agent) == 0
     end
 
+    test "rejects non-binary user and assistant content before calling Comms", %{agent: agent} do
+      completed = ~U[2026-01-01 00:00:01.000000Z]
+      malformed_message = %{voice_message() | content: %{unexpected: "shape"}}
+
+      assert {:error, {:invalid_content, :user_message_content, :not_a_string}} =
+               TranscriptRecorder.record(
+                 "agent_1",
+                 malformed_message,
+                 "ok",
+                 completed,
+                 comms: FakeComms
+               )
+
+      assert {:error, {:invalid_content, :raw_assistant_text, :not_a_string}} =
+               TranscriptRecorder.record(
+                 "agent_1",
+                 voice_message(),
+                 [:not, :text],
+                 completed,
+                 comms: FakeComms
+               )
+
+      assert FakeComms.call_count(agent) == 0
+    end
+
     test "rejects a non-DateTime completed_at without calling Comms", %{agent: agent} do
       assert {:error, {:invalid_timestamp, :completed_at}} =
                TranscriptRecorder.record(

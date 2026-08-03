@@ -45,6 +45,8 @@ defmodule Arbor.Voice.TranscriptRecorder do
   def record(agent_id, user_message, raw_assistant_text, completed_at, opts \\ []) do
     with :ok <- validate_opts(opts),
          :ok <- validate_user_message(user_message),
+         :ok <- validate_content_shape(user_message.content, :user_message_content),
+         :ok <- validate_content_shape(raw_assistant_text, :raw_assistant_text),
          :ok <- validate_completed_at(completed_at),
          :ok <- validate_engagement_id(user_message.engagement_id),
          {:ok, metadata} <- build_metadata(opts) do
@@ -107,6 +109,11 @@ defmodule Arbor.Voice.TranscriptRecorder do
 
   defp validate_user_message(_),
     do: {:error, {:invalid_user_message, :not_a_user_message}}
+
+  defp validate_content_shape(value, _field) when is_binary(value), do: :ok
+
+  defp validate_content_shape(_value, field),
+    do: {:error, {:invalid_content, field, :not_a_string}}
 
   defp validate_completed_at(%DateTime{}), do: :ok
   defp validate_completed_at(_), do: {:error, {:invalid_timestamp, :completed_at}}
