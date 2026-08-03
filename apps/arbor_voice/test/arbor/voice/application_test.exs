@@ -50,4 +50,25 @@ defmodule Arbor.Voice.ApplicationTest do
     assert is_pid(pid)
     assert Process.alive?(pid)
   end
+
+  @tag spec: "VOICE-13"
+  test "SpeechOutputTaskSupervisor is a dedicated alive Task.Supervisor under the app" do
+    supervisor = Arbor.Voice.Supervisor
+    children = Supervisor.which_children(supervisor)
+
+    entry =
+      Enum.find(children, fn {id, _, _, _} ->
+        id == Arbor.Voice.SpeechOutputTaskSupervisor
+      end)
+
+    assert {Arbor.Voice.SpeechOutputTaskSupervisor, pid, :supervisor, [Task.Supervisor]} = entry
+    assert is_pid(pid)
+    assert Process.alive?(pid)
+    assert Process.whereis(Arbor.Voice.SpeechOutputTaskSupervisor) == pid
+
+    # Distinct from ResourceOwner cleanup supervisor — separate ownership.
+    cleanup = Process.whereis(ResourceCleanupTaskSupervisor)
+    assert is_pid(cleanup)
+    refute pid == cleanup
+  end
 end

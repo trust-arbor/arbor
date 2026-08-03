@@ -44,6 +44,9 @@ defmodule Arbor.Voice.Config do
   @budget_namespace :voice_daily_budgets
   @max_backend_opts_count 32
   @max_backend_opts_encoded_bytes 4096
+  # Speech-output acceptance timeout (VP-04E2R1): source-owned hard ceiling.
+  @default_speech_output_timeout_ms 100
+  @max_speech_output_timeout_ms 250
 
   @doc "The fixed durable-budget-ledger namespace. Not operator-configurable."
   @spec fixed_budget_namespace() :: :voice_daily_budgets
@@ -210,5 +213,44 @@ defmodule Arbor.Voice.Config do
     :arbor_voice
     |> Application.get_env(:budget_cas_max_retries, @default_budget_cas_max_retries)
     |> validate_budget_cas_max_retries()
+  end
+
+  # ---------------------------------------------------------------------------
+  # Speech-output acceptance timeout (VP-04E2R1)
+  # ---------------------------------------------------------------------------
+
+  @doc "Literal default speech-output acceptance timeout, in milliseconds (100)."
+  @spec default_speech_output_timeout_ms() :: pos_integer()
+  def default_speech_output_timeout_ms, do: @default_speech_output_timeout_ms
+
+  @doc "Hard ceiling for speech-output acceptance timeout, in milliseconds (250)."
+  @spec max_speech_output_timeout_ms() :: pos_integer()
+  def max_speech_output_timeout_ms, do: @max_speech_output_timeout_ms
+
+  @doc """
+  Pure validation: a positive-integer speech-output acceptance timeout at most
+  250 ms. This is a source-owned hard ceiling on the enqueue/acceptance seam,
+  not an advisory adapter contract.
+  """
+  @spec validate_speech_output_timeout_ms(term()) ::
+          {:ok, pos_integer()} | {:error, :invalid_config}
+  def validate_speech_output_timeout_ms(v)
+      when is_integer(v) and v > 0 and v <= @max_speech_output_timeout_ms,
+      do: {:ok, v}
+
+  def validate_speech_output_timeout_ms(_v), do: {:error, :invalid_config}
+
+  @doc """
+  Validated speech-output acceptance timeout in milliseconds.
+
+  Defaults to 100 ms. A present but malformed Application config value fails
+  closed as `{:error, :invalid_config}` rather than silently substituting the
+  default.
+  """
+  @spec speech_output_timeout_ms() :: {:ok, pos_integer()} | {:error, :invalid_config}
+  def speech_output_timeout_ms do
+    :arbor_voice
+    |> Application.get_env(:speech_output_timeout_ms, @default_speech_output_timeout_ms)
+    |> validate_speech_output_timeout_ms()
   end
 end

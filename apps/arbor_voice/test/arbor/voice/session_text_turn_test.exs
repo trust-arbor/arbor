@@ -715,8 +715,9 @@ defmodule Arbor.Voice.SessionTextTurnTest do
       parent = self()
       spoken_agent = start_spoken_collector()
 
-      # Speech callback blocks in the Session process until the test releases it,
-      # so public success and :turn_completed stay pending while output is held.
+      # Speech callback runs under SpeechOutputTaskSupervisor (distinct from
+      # Session). Blocks until the test releases it so public success and
+      # :turn_completed stay pending while acceptance is held.
       speech_output = fn spoken ->
         Agent.update(spoken_agent, &(&1 ++ [spoken]))
         send(parent, {:speech_entered, self(), spoken})
@@ -732,7 +733,9 @@ defmodule Arbor.Voice.SessionTextTurnTest do
       ctx =
         turn_opts(
           speakable: TrackingSpeakable,
-          speech_output: speech_output
+          speech_output: speech_output,
+          # Ceiling bound so the test can hold then release within the window.
+          speech_output_timeout_ms: 250
         )
 
       FakeCommsSession.set_record_waiter(ctx.recorder_agent, self())
@@ -765,13 +768,15 @@ defmodule Arbor.Voice.SessionTextTurnTest do
       send(session_pid, :release_record)
 
       assert_receive {:speech_entered, speech_pid, "spoken:raw-blocked-speech"}, 3_000
-      assert speech_pid == session_pid
+      # Callback runs in a dedicated task process, not the Session process.
+      assert speech_pid != session_pid
+      assert Process.alive?(speech_pid)
 
       # Speakable ran after persistence; public success still pending while output holds.
       assert {:render, "raw-blocked-speech", []} in TrackingSpeakable.calls()
       assert {:tts_guard, {:speak, "spoken:raw-blocked-speech"}} in TrackingSpeakable.calls()
       assert Agent.get(spoken_agent, & &1) == ["spoken:raw-blocked-speech"]
-      assert Task.yield(task, 150) == nil
+      assert Task.yield(task, 50) == nil
 
       emissions_held = FakeSignals.emissions(ctx.signals)
 
@@ -779,14 +784,15 @@ defmodule Arbor.Voice.SessionTextTurnTest do
                c == :voice and t == :turn_completed
              end)
 
-      # 3) Release speech output — only then public success and completion audit.
+      # 3) Release speech output within the 250 ms acceptance bound — only then
+      # public success and completion audit with :accepted disposition.
       send(speech_pid, :release_speech)
-      assert {:ok, "raw-blocked-speech"} = Task.await(task, 5_000)
+      assert {:ok, "raw-blocked-speech"} = Task.await(task, 1_000)
 
       emissions = FakeSignals.emissions(ctx.signals)
 
       assert Enum.any?(emissions, fn {c, t, payload, _} ->
-               c == :voice and t == :turn_completed and payload.speech_output == :delivered
+               c == :voice and t == :turn_completed and payload.speech_output == :accepted
              end)
 
       assert :ok = Voice.stop_session(key)
@@ -825,7 +831,7 @@ defmodule Arbor.Voice.SessionTextTurnTest do
       emissions = FakeSignals.emissions(ctx.signals)
 
       assert Enum.any?(emissions, fn {c, t, payload, _} ->
-               c == :voice and t == :turn_completed and payload.speech_output == :delivered
+               c == :voice and t == :turn_completed and payload.speech_output == :accepted
              end)
 
       # Signal must not carry raw or spoken content.
@@ -864,7 +870,7 @@ defmodule Arbor.Voice.SessionTextTurnTest do
       emissions = FakeSignals.emissions(ctx.signals)
 
       assert Enum.any?(emissions, fn {c, t, payload, _} ->
-               c == :voice and t == :turn_completed and payload.speech_output == :delivered
+               c == :voice and t == :turn_completed and payload.speech_output == :accepted
              end)
 
       encoded = inspect(emissions)
@@ -998,6 +1004,123 @@ defmodule Arbor.Voice.SessionTextTurnTest do
     end
 
     @tag spec: "VOICE-3,VOICE-13"
+    test "blocking speech callback times out as :failed with durable raw success and task kill" do
+      parent = self()
+
+      speech_output = fn spoken ->
+        send(parent, {:speech_entered, self(), spoken})
+
+        receive do
+          :never_release -> :ok
+        after
+          60_000 -> :ok
+        end
+      end
+
+      ctx =
+        turn_opts(
+          speech_output: speech_output,
+          speech_output_timeout_ms: 50
+        )
+
+      ControllableTurnBackend.enqueue([{:turn_done, %{text: "raw-timeout-bound"}}])
+
+      {user_id, agent_id} = unique_ids()
+      assert {:ok, key} = Voice.start_session(user_id, agent_id, ctx.opts)
+      assert [{session_pid, _}] = Registry.lookup(Arbor.Voice.Registry, key)
+
+      started_ms = System.monotonic_time(:millisecond)
+      assert {:ok, "raw-timeout-bound"} = Voice.text_turn(user_id, agent_id, "q")
+      elapsed_ms = System.monotonic_time(:millisecond) - started_ms
+
+      # Bound is enforced; hang cannot postpone public durable success.
+      assert elapsed_ms < 1_000
+
+      assert_receive {:speech_entered, speech_pid, spoken}, 1_000
+      assert is_binary(spoken)
+      assert String.trim(spoken) != ""
+      assert speech_pid != session_pid
+      wait_until(fn -> not Process.alive?(speech_pid) end, 2_000)
+      refute Process.alive?(speech_pid)
+
+      # Durable raw pair recorded.
+      assert [
+               {_a, _e, _u, assistant, _o}
+             ] = FakeCommsSession.record_calls(ctx.recorder_agent)
+
+      assert assistant.content == "raw-timeout-bound"
+
+      emissions = FakeSignals.emissions(ctx.signals)
+
+      assert Enum.any?(emissions, fn {c, t, payload, _} ->
+               c == :voice and t == :turn_completed and payload.speech_output == :failed
+             end)
+
+      assert {:ok, %{state: :ready}} = Voice.session_status(key)
+      assert :ok = Voice.stop_session(key)
+    end
+
+    @tag spec: "VOICE-3,VOICE-13"
+    test "SpeechOutputTaskSupervisor unavailability still yields durable success as :failed" do
+      spoken_agent = start_spoken_collector()
+
+      speech_output = fn spoken ->
+        Agent.update(spoken_agent, &(&1 ++ [spoken]))
+        :ok
+      end
+
+      ctx = turn_opts(speech_output: speech_output)
+      ControllableTurnBackend.enqueue([{:turn_done, %{text: "raw-sup-down"}}])
+
+      {user_id, agent_id} = unique_ids()
+      assert {:ok, key} = Voice.start_session(user_id, agent_id, ctx.opts)
+
+      # Terminate the dedicated supervisor; leave it down for the turn.
+      assert :ok =
+               Supervisor.terminate_child(
+                 Arbor.Voice.Supervisor,
+                 Arbor.Voice.SpeechOutputTaskSupervisor
+               )
+
+      on_exit(fn ->
+        _ =
+          Supervisor.restart_child(
+            Arbor.Voice.Supervisor,
+            Arbor.Voice.SpeechOutputTaskSupervisor
+          )
+
+        :ok
+      end)
+
+      assert Process.whereis(Arbor.Voice.SpeechOutputTaskSupervisor) == nil
+
+      assert {:ok, "raw-sup-down"} = Voice.text_turn(user_id, agent_id, "q")
+      assert Agent.get(spoken_agent, & &1) == []
+
+      assert [
+               {_a, _e, _u, assistant, _o}
+             ] = FakeCommsSession.record_calls(ctx.recorder_agent)
+
+      assert assistant.content == "raw-sup-down"
+
+      emissions = FakeSignals.emissions(ctx.signals)
+
+      assert Enum.any?(emissions, fn {c, t, payload, _} ->
+               c == :voice and t == :turn_completed and payload.speech_output == :failed
+             end)
+
+      assert {:ok, %{state: :ready}} = Voice.session_status(key)
+      assert :ok = Voice.stop_session(key)
+
+      # Restore for later tests in this process.
+      assert {:ok, _pid} =
+               Supervisor.restart_child(
+                 Arbor.Voice.Supervisor,
+                 Arbor.Voice.SpeechOutputTaskSupervisor
+               )
+    end
+
+    @tag spec: "VOICE-3,VOICE-13"
     test "speech_output returned/malformed/raised/thrown/exited failures report :failed without raw leak" do
       failure_callbacks = [
         {:error_tuple, fn _s -> {:error, :tts_down} end},
@@ -1117,7 +1240,7 @@ defmodule Arbor.Voice.SessionTextTurnTest do
       emissions = FakeSignals.emissions(ctx.signals)
 
       assert Enum.any?(emissions, fn {c, t, payload, _} ->
-               c == :voice and t == :budget_exhausted and payload.speech_output == :delivered
+               c == :voice and t == :budget_exhausted and payload.speech_output == :accepted
              end)
 
       # No content/callback errors in the audit signal.
@@ -1178,6 +1301,78 @@ defmodule Arbor.Voice.SessionTextTurnTest do
       encoded = inspect(emissions)
       refute encoded =~ "exhaustion output secret"
       refute encoded =~ @budget_exhaustion_notice
+    end
+
+    @tag spec: "VOICE-13,VOICE-24"
+    test "blocking exhaustion callback is killed; settlement/close/termination stay bounded" do
+      parent = self()
+
+      speech_output = fn spoken ->
+        send(parent, {:exhaustion_entered, self(), spoken})
+
+        receive do
+          :never_release -> :ok
+        after
+          60_000 -> :ok
+        end
+      end
+
+      ctx =
+        turn_opts(
+          session_budget_ms: 80,
+          wall_clock: fn -> ~U[2026-08-02 12:00:00.000000Z] end,
+          monotonic_clock: fn -> System.monotonic_time(:millisecond) end,
+          speech_output: speech_output,
+          speech_output_timeout_ms: 50
+        )
+
+      ControllableTurnBackend.enqueue([:timeout, :timeout, :timeout, :timeout, :timeout])
+
+      {user_id, agent_id} = unique_ids()
+      assert {:ok, key} = Voice.start_session(user_id, agent_id, ctx.opts)
+      assert [{session_pid, _}] = Registry.lookup(Arbor.Voice.Registry, key)
+
+      t1 =
+        Task.async(fn ->
+          send(parent, :turn_started)
+          Voice.text_turn(user_id, agent_id, "slow")
+        end)
+
+      assert_receive :turn_started, 1_000
+      started_ms = System.monotonic_time(:millisecond)
+
+      assert {:error, :budget_exhausted} = Task.await(t1, 5_000)
+
+      assert_receive {:exhaustion_entered, speech_pid, _spoken}, 2_000
+      assert speech_pid != session_pid
+
+      # Task was brutally terminated at the acceptance bound.
+      wait_until(fn -> not Process.alive?(speech_pid) end, 2_000)
+      refute Process.alive?(speech_pid)
+
+      # Ledger settlement and backend close complete before the elapsed bound.
+      wait_until(
+        fn ->
+          Enum.any?(FakeLedger.calls(ctx.ledger), &match?({:consume, _, _, _}, &1))
+        end,
+        2_000
+      )
+
+      wait_until(fn -> ControllableTurnBackend.close_count() == 1 end, 2_000)
+      assert ControllableTurnBackend.close_count() == 1
+
+      wait_until(fn -> Registry.lookup(Arbor.Voice.Registry, key) == [] end, 2_000)
+      refute Process.alive?(session_pid)
+
+      elapsed_ms = System.monotonic_time(:millisecond) - started_ms
+      # Generous vs former unbounded hang; well under multi-second sleep.
+      assert elapsed_ms < 2_000
+
+      emissions = FakeSignals.emissions(ctx.signals)
+
+      assert Enum.any?(emissions, fn {c, t, payload, _} ->
+               c == :voice and t == :budget_exhausted and payload.speech_output == :failed
+             end)
     end
   end
 

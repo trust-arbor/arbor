@@ -33,7 +33,8 @@ defmodule Arbor.Voice do
     :transcript_recorder,
     :transcript_opts,
     :speakable,
-    :speech_output
+    :speech_output,
+    :speech_output_timeout_ms
   ]
 
   @transcript_opts_allowlist [:persistence]
@@ -177,6 +178,7 @@ defmodule Arbor.Voice do
            resolve_module(opts, :transcript_recorder, Arbor.Voice.TranscriptRecorder),
          {:ok, speakable} <- resolve_speakable(opts),
          {:ok, speech_output} <- resolve_speech_output(opts),
+         {:ok, speech_output_timeout_ms} <- resolve_speech_output_timeout_ms(opts),
          :ok <- validate_optional_module(opts, :engagement_store) do
       {:ok,
        %{
@@ -199,7 +201,8 @@ defmodule Arbor.Voice do
          transcript_recorder: transcript_recorder,
          transcript_opts: transcript_opts,
          speakable: speakable,
-         speech_output: speech_output
+         speech_output: speech_output,
+         speech_output_timeout_ms: speech_output_timeout_ms
        }}
     end
   end
@@ -252,7 +255,8 @@ defmodule Arbor.Voice do
   end
 
   # nil (default) disables speech output; only an arity-1 fun is accepted.
-  # The callback owns any external-I/O timeout; Session never wraps it in Task.
+  # Session enforces a source-owned acceptance timeout via a supervised task
+  # (VP-04E2R1); the callback is an enqueue/acceptance seam, not playback.
   defp resolve_speech_output(opts) do
     case Keyword.fetch(opts, :speech_output) do
       :error ->
@@ -266,6 +270,24 @@ defmodule Arbor.Voice do
 
       {:ok, _} ->
         {:error, :invalid_opts}
+    end
+  end
+
+  # Missing option → Config (malformed config → :invalid_config).
+  # Explicit value → same pure validator (malformed → :invalid_opts).
+  defp resolve_speech_output_timeout_ms(opts) do
+    case Keyword.fetch(opts, :speech_output_timeout_ms) do
+      :error ->
+        case Config.speech_output_timeout_ms() do
+          {:ok, ms} -> {:ok, ms}
+          {:error, _} -> {:error, :invalid_config}
+        end
+
+      {:ok, v} ->
+        case Config.validate_speech_output_timeout_ms(v) do
+          {:ok, ms} -> {:ok, ms}
+          {:error, _} -> {:error, :invalid_opts}
+        end
     end
   end
 

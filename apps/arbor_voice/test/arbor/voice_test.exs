@@ -62,6 +62,66 @@ defmodule Arbor.VoiceTest do
       assert is_pid(pid)
       assert Process.alive?(pid)
     end
+
+    @tag spec: "VOICE-13"
+    test "SpeechOutputTaskSupervisor is present under the app supervisor" do
+      children = Supervisor.which_children(Arbor.Voice.Supervisor)
+
+      entry =
+        Enum.find(children, fn {id, _, _, _} ->
+          id == Arbor.Voice.SpeechOutputTaskSupervisor
+        end)
+
+      assert {Arbor.Voice.SpeechOutputTaskSupervisor, pid, :supervisor, [Task.Supervisor]} =
+               entry
+
+      assert is_pid(pid)
+      assert Process.alive?(pid)
+    end
+  end
+
+  describe "speech_output_timeout_ms config" do
+    @tag spec: "VOICE-13"
+    test "malformed Application config fails closed without leaking global env" do
+      previous = Application.fetch_env(:arbor_voice, :speech_output_timeout_ms)
+
+      on_exit(fn ->
+        case previous do
+          {:ok, value} -> Application.put_env(:arbor_voice, :speech_output_timeout_ms, value)
+          :error -> Application.delete_env(:arbor_voice, :speech_output_timeout_ms)
+        end
+      end)
+
+      Application.put_env(:arbor_voice, :speech_output_timeout_ms, 0)
+      assert {:error, :invalid_config} = Arbor.Voice.Config.speech_output_timeout_ms()
+
+      Application.put_env(:arbor_voice, :speech_output_timeout_ms, 251)
+      assert {:error, :invalid_config} = Arbor.Voice.Config.speech_output_timeout_ms()
+
+      Application.put_env(:arbor_voice, :speech_output_timeout_ms, "100")
+      assert {:error, :invalid_config} = Arbor.Voice.Config.speech_output_timeout_ms()
+
+      Application.put_env(:arbor_voice, :speech_output_timeout_ms, 50)
+      assert {:ok, 50} = Arbor.Voice.Config.speech_output_timeout_ms()
+
+      # Explicit session opt maps pure-validator failure to :invalid_opts.
+      {user_id, agent_id} = unique_ids()
+      {opts, _} = base_opts()
+
+      assert {:error, :invalid_opts} =
+               Voice.start_session(
+                 user_id,
+                 agent_id,
+                 Keyword.put(opts, :speech_output_timeout_ms, 0)
+               )
+
+      # Malformed Application config surfaces as :invalid_config on start when
+      # the per-session option is omitted.
+      Application.put_env(:arbor_voice, :speech_output_timeout_ms, 999)
+
+      assert {:error, :invalid_config} =
+               Voice.start_session(user_id, agent_id, opts)
+    end
   end
 
   describe "start_session/3 API" do
@@ -255,12 +315,47 @@ defmodule Arbor.VoiceTest do
                  agent_id5,
                  Keyword.put(opts, :speech_output, "nope")
                )
+
+      # speech_output_timeout_ms: closed positive integer 1..250.
+      {user_id6, agent_id6} = unique_ids()
+
+      assert {:ok, key6} =
+               Voice.start_session(
+                 user_id6,
+                 agent_id6,
+                 Keyword.put(opts, :speech_output_timeout_ms, 1)
+               )
+
+      assert :ok = Voice.stop_session(key6)
+
+      {user_id7, agent_id7} = unique_ids()
+
+      assert {:ok, key7} =
+               Voice.start_session(
+                 user_id7,
+                 agent_id7,
+                 Keyword.put(opts, :speech_output_timeout_ms, 250)
+               )
+
+      assert :ok = Voice.stop_session(key7)
+
+      for bad <- [0, 251, -1, 1.5, "100", nil] do
+        assert {:error, :invalid_opts} =
+                 Voice.start_session(
+                   user_id5,
+                   agent_id5,
+                   Keyword.put(opts, :speech_output_timeout_ms, bad)
+                 ),
+               "bad timeout #{inspect(bad)}"
+      end
     end
   end
 
   describe "text_turn/3 facade" do
     @tag spec: "VOICE-2,VOICE-3,VOICE-5"
     test "exports text_turn/3, validates input, returns raw text, never exposes a pid" do
+      # Alias does not load the module; ensure_loaded so function_exported?/3 is order-stable.
+      assert Code.ensure_loaded?(Voice)
       assert function_exported?(Voice, :text_turn, 3)
       refute function_exported?(Voice, :text_turn, 2)
 

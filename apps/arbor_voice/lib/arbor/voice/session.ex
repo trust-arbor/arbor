@@ -23,6 +23,8 @@ defmodule Arbor.Voice.Session do
   @turn_call_timeout_ms :infinity
   # Max bytes of a guarded speakable string offered to speech_output.
   @speech_output_max_bytes 8192
+  # Dedicated acceptance-seam Task.Supervisor (VP-04E2R1). Not ResourceCleanup.
+  @speech_output_task_supervisor Arbor.Voice.SpeechOutputTaskSupervisor
   # Deterministic non-sensitive hard-timeout notice (VOICE-24).
   @budget_exhaustion_notice "This voice session has reached its time limit. Continue on your screen."
 
@@ -198,6 +200,8 @@ defmodule Arbor.Voice.Session do
           # Private only — never in status/format_status/signals content.
           speakable: config.speakable,
           speech_output: config.speech_output,
+          # Source-owned acceptance bound (1..250 ms); never in public status.
+          speech_output_timeout_ms: config.speech_output_timeout_ms,
           # min(100, owner max_recv) so recv never exceeds a tighter owner cap.
           poll_window_ms: derive_poll_window_ms(config.resource_owner_opts),
           turn: nil,
@@ -833,18 +837,25 @@ defmodule Arbor.Voice.Session do
   end
 
   # ---------------------------------------------------------------------------
-  # Speakable-only speech output (VP-04E2)
+  # Speakable-only speech output (VP-04E2 + VP-04E2R1 bounded acceptance)
   # ---------------------------------------------------------------------------
 
-  # Returns :disabled | :delivered | :failed. Never returns content, never
-  # falls back to raw text, never raises past this boundary.
+  # Returns :disabled | :accepted | :failed. Never returns content, never
+  # falls back to raw text, never raises past this boundary. `:accepted` means
+  # the callback returned :ok within the source-owned timeout (enqueue only),
+  # not that playback completed.
   defp offer_speech(state, source_text) when is_binary(source_text) do
     case state.speech_output do
       nil ->
         :disabled
 
       callback when is_function(callback, 1) ->
-        render_guard_and_offer(state.speakable, callback, source_text)
+        render_guard_and_offer(
+          state.speakable,
+          callback,
+          source_text,
+          state.speech_output_timeout_ms
+        )
 
       _other ->
         # Defensive: invalid callback shape was rejected at start_session.
@@ -854,14 +865,14 @@ defmodule Arbor.Voice.Session do
 
   defp offer_speech(_state, _source_text), do: :failed
 
-  defp render_guard_and_offer(speakable, callback, source_text) do
+  defp render_guard_and_offer(speakable, callback, source_text, timeout_ms) do
     try do
       verdict = speakable.render(source_text, [])
       guarded = speakable.tts_guard!(verdict)
 
       case accept_guarded_speech(guarded) do
         {:ok, spoken} ->
-          invoke_speech_output(callback, spoken)
+          invoke_speech_output(callback, spoken, timeout_ms)
 
         :error ->
           # Malformed/oversized/blank guard output — do not invoke callback,
@@ -888,20 +899,48 @@ defmodule Arbor.Voice.Session do
 
   defp accept_guarded_speech(_), do: :error
 
-  defp invoke_speech_output(callback, spoken) do
+  # Run the acceptance callback under SpeechOutputTaskSupervisor with a hard
+  # timeout. Failures (return shape, raise, throw, exit, timeout, supervisor
+  # unavailability) collapse to :failed. Session never retains the Task, the
+  # spoken text, or any callback error term.
+  defp invoke_speech_output(callback, spoken, timeout_ms)
+       when is_function(callback, 1) and is_binary(spoken) and is_integer(timeout_ms) and
+              timeout_ms > 0 do
     try do
-      case callback.(spoken) do
-        :ok -> :delivered
-        {:error, _reason} -> :failed
-        _other -> :failed
+      task =
+        Task.Supervisor.async_nolink(@speech_output_task_supervisor, fn ->
+          # Catch inside the task so exception text never reaches Task logs,
+          # Session state, signals, or public errors.
+          try do
+            case callback.(spoken) do
+              :ok -> :accepted
+              {:error, _reason} -> :failed
+              _other -> :failed
+            end
+          rescue
+            _ -> :failed
+          catch
+            :exit, _ -> :failed
+            _kind, _reason -> :failed
+          end
+        end)
+
+      case Task.yield(task, timeout_ms) || Task.shutdown(task, :brutal_kill) do
+        {:ok, :accepted} -> :accepted
+        {:ok, :failed} -> :failed
+        {:ok, _other} -> :failed
+        {:exit, _reason} -> :failed
+        nil -> :failed
       end
     rescue
+      # Supervisor unavailable / async_nolink failure — durable success unaffected.
       _ -> :failed
     catch
-      :exit, _ -> :failed
       _kind, _reason -> :failed
     end
   end
+
+  defp invoke_speech_output(_callback, _spoken, _timeout_ms), do: :failed
 
   defp turn_duration_ms(state, turn) do
     case read_monotonic_ms(state.monotonic_clock) do
@@ -1072,7 +1111,7 @@ defmodule Arbor.Voice.Session do
 
   defp safe_emit_turn_completed(state, duration_ms, speech_output)
        when is_integer(duration_ms) and duration_ms >= 0 and
-              speech_output in [:disabled, :delivered, :failed] do
+              speech_output in [:disabled, :accepted, :failed] do
     payload = %{
       user_id: state.user_id,
       agent_id: state.agent_id,
@@ -1095,7 +1134,7 @@ defmodule Arbor.Voice.Session do
   # Never forward content, modules, functions, verdicts, or error terms.
   defp bounded_extra_payload(extra) when is_map(extra) do
     case Map.get(extra, :speech_output) do
-      disposition when disposition in [:disabled, :delivered, :failed] ->
+      disposition when disposition in [:disabled, :accepted, :failed] ->
         %{speech_output: disposition}
 
       _ ->

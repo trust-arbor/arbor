@@ -159,4 +159,35 @@ defmodule Arbor.Voice.ConfigTest do
       assert {:error, :invalid_config} = Config.validate_budget_cas_max_retries(1.0)
     end
   end
+
+  describe "speech output acceptance timeout (VP-04E2R1)" do
+    @tag spec: "VOICE-13"
+    test "literal default is 100 ms and ceiling is 250 ms" do
+      assert Config.default_speech_output_timeout_ms() == 100
+      assert Config.max_speech_output_timeout_ms() == 250
+    end
+
+    @tag spec: "VOICE-13"
+    test "validate_speech_output_timeout_ms/1 accepts 1, default, and 250" do
+      assert {:ok, 1} = Config.validate_speech_output_timeout_ms(1)
+      assert {:ok, 100} = Config.validate_speech_output_timeout_ms(100)
+      assert {:ok, 250} = Config.validate_speech_output_timeout_ms(250)
+
+      assert {:ok, 100} =
+               Config.validate_speech_output_timeout_ms(Config.default_speech_output_timeout_ms())
+    end
+
+    @tag spec: "VOICE-13"
+    test "validate_speech_output_timeout_ms/1 fails closed on zero, above-ceiling, and malformed" do
+      for bad <- [0, -1, 251, 251.0, 1.5, "100", nil, :ms, true, %{}] do
+        assert {:error, :invalid_config} = Config.validate_speech_output_timeout_ms(bad)
+      end
+    end
+
+    @tag spec: "VOICE-13"
+    test "speech_output_timeout_ms/0 resolves to the validated default under checked-in config" do
+      assert Config.speech_output_timeout_ms() ==
+               Config.validate_speech_output_timeout_ms(Config.default_speech_output_timeout_ms())
+    end
+  end
 end
