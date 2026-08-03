@@ -218,4 +218,28 @@ defmodule Arbor.Voice.ConfigTest do
                Config.validate_tool_router_timeout_ms(Config.default_tool_router_timeout_ms())
     end
   end
+
+  describe "progress threshold (VP-05B / VOICE-11)" do
+    @tag spec: "VOICE-11"
+    test "defaults and pure validation against tool timeout" do
+      assert Config.default_progress_threshold_ms() == 2_000
+      assert Config.max_progress_threshold_ms() == 30_000
+      assert {:ok, 2_000} = Config.validate_progress_threshold_ms(2_000, 5_000)
+      assert {:ok, 1} = Config.validate_progress_threshold_ms(1, 1)
+
+      for bad <- [0, -1, 30_001, 2_001, "x", nil] do
+        assert {:error, :invalid_config} = Config.validate_progress_threshold_ms(bad, 2_000)
+      end
+    end
+  end
+
+  describe "agent_module (VP-05B / VOICE-9)" do
+    @tag spec: "VOICE-9"
+    test "defaults to Arbor.Agent and rejects modules without send_message/4" do
+      assert {:ok, Arbor.Agent} = Config.validate_agent_module(Arbor.Agent)
+      assert {:error, :invalid_config} = Config.validate_agent_module(String)
+      assert {:error, :invalid_config} = Config.validate_agent_module(nil)
+      assert {:error, :invalid_config} = Config.validate_agent_module("Arbor.Agent")
+    end
+  end
 end

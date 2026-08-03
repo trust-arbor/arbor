@@ -82,6 +82,29 @@ defmodule Arbor.Voice.Session.ToolTaskCore do
 
   def authorize_down(_pending_entry, _mon_ref, _generation, _live_generation), do: :ignore
 
+  @doc """
+  Authorize a progress-cue timer against Session pending authority.
+
+  Requires live generation match, pending entry, exact fence token, and that
+  the cue has not already been emitted. Returns `:emit` or `:ignore`.
+  """
+  @spec authorize_progress(map() | nil, non_neg_integer(), String.t(), reference(), non_neg_integer()) ::
+          :emit | :ignore
+  def authorize_progress(pending_entry, generation, call_id, token, live_generation)
+      when is_binary(call_id) and is_reference(token) and is_integer(generation) and
+             is_integer(live_generation) do
+    cond do
+      generation != live_generation -> :ignore
+      not is_map(pending_entry) -> :ignore
+      Map.get(pending_entry, :token) != token -> :ignore
+      Map.get(pending_entry, :progress_emitted) == true -> :ignore
+      true -> :emit
+    end
+  end
+
+  def authorize_progress(_pending_entry, _generation, _call_id, _token, _live_generation),
+    do: :ignore
+
   defp code_json(code) when is_binary(code) do
     Jason.encode!(%{"code" => code})
   end

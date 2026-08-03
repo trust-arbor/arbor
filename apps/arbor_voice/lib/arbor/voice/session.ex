@@ -8,6 +8,7 @@ defmodule Arbor.Voice.Session do
   use GenServer
 
   alias Arbor.Contracts.Session.UserMessage
+  alias Arbor.Voice.Redacted
   alias Arbor.Voice.Session.Settlement
   alias Arbor.Voice.Session.ToolTaskCore
   alias Arbor.Voice.Session.TurnCore
@@ -32,6 +33,8 @@ defmodule Arbor.Voice.Session do
   @tool_task_supervisor Arbor.Voice.ToolTaskSupervisor
   # Deterministic non-sensitive hard-timeout notice (VOICE-24).
   @budget_exhaustion_notice "This voice session has reached its time limit. Continue on your screen."
+  # Source-owned progress filler (VP-05B / VOICE-11). Not model-authored.
+  @progress_working_cue "I'm still working on that."
 
   # ---------------------------------------------------------------------------
   # Internal start / call API (facade only)
@@ -96,19 +99,45 @@ defmodule Arbor.Voice.Session do
   end
 
   defp after_engagement(config, engagement_id) do
+    # Fixed consult authority after engagement is known; raw proof stays
+    # inside the closure only (VP-05B). Built before resource/backend effects.
+    consult_authority = build_consult_authority(config, engagement_id)
+
     case reserve_budget(config) do
       {:ok, _reservation, reserved_ms, start_ms, settlement} ->
-        after_reservation(config, engagement_id, reserved_ms, start_ms, settlement)
+        after_reservation(
+          config,
+          engagement_id,
+          consult_authority,
+          reserved_ms,
+          start_ms,
+          settlement
+        )
 
       {:error, reason} ->
         {:error, reason}
     end
   end
 
-  defp after_reservation(config, engagement_id, reserved_ms, start_ms, settlement) do
+  defp after_reservation(
+         config,
+         engagement_id,
+         consult_authority,
+         reserved_ms,
+         start_ms,
+         settlement
+       ) do
     case start_resource_owner(config) do
       {:ok, owner} ->
-        after_owner(config, engagement_id, reserved_ms, start_ms, settlement, owner)
+        after_owner(
+          config,
+          engagement_id,
+          consult_authority,
+          reserved_ms,
+          start_ms,
+          settlement,
+          owner
+        )
 
       {:error, reason} ->
         # No owner started — settle release directly (pre-registration path).
@@ -117,12 +146,21 @@ defmodule Arbor.Voice.Session do
     end
   end
 
-  defp after_owner(config, engagement_id, reserved_ms, start_ms, settlement, owner) do
+  defp after_owner(
+         config,
+         engagement_id,
+         consult_authority,
+         reserved_ms,
+         start_ms,
+         settlement,
+         owner
+       ) do
     case register_settlement_cleanup(config, owner, settlement) do
       :ok ->
         after_cleanup_registered(
           config,
           engagement_id,
+          consult_authority,
           reserved_ms,
           start_ms,
           settlement,
@@ -143,6 +181,7 @@ defmodule Arbor.Voice.Session do
   defp after_cleanup_registered(
          config,
          engagement_id,
+         consult_authority,
          reserved_ms,
          start_ms,
          settlement,
@@ -153,6 +192,7 @@ defmodule Arbor.Voice.Session do
         after_backend_ready(
           config,
           engagement_id,
+          consult_authority,
           reserved_ms,
           start_ms,
           settlement,
@@ -171,6 +211,7 @@ defmodule Arbor.Voice.Session do
   defp after_backend_ready(
          config,
          engagement_id,
+         consult_authority,
          reserved_ms,
          start_ms,
          settlement,
@@ -207,9 +248,14 @@ defmodule Arbor.Voice.Session do
           speech_output: config.speech_output,
           # Source-owned acceptance bound (1..250 ms); never in public status.
           speech_output_timeout_ms: config.speech_output_timeout_ms,
-          # Tool router (VP-04E3): private; never in status/signals.
+          # Tool router (VP-04E3/VP-05B): private; never in status/signals.
           tool_router: config.tool_router,
           tool_router_timeout_ms: config.tool_router_timeout_ms,
+          tool_declarations: config.tool_declarations,
+          progress_threshold_ms: config.progress_threshold_ms,
+          # Redacted proof + fixed authority (VP-05B); never public.
+          session_token: config.session_token,
+          consult_authority: consult_authority,
           # min(100, owner max_recv) so recv never exceeds a tighter owner cap.
           poll_window_ms: derive_poll_window_ms(config.resource_owner_opts),
           turn: nil,
@@ -496,8 +542,10 @@ defmodule Arbor.Voice.Session do
   end
 
   defp configure_and_read_meta(config, owner) do
+    tools = Map.get(config, :tool_declarations, [])
+
     try do
-      case config.resource_owner.configure(owner, %{tools: []}) do
+      case config.resource_owner.configure(owner, %{tools: tools}) do
         :ok ->
           case config.resource_owner.meta(owner) do
             {:ok, meta} ->
@@ -520,6 +568,36 @@ defmodule Arbor.Voice.Session do
       _kind, _reason ->
         {:error, :start_failed}
     end
+  end
+
+  # Fixed consult authority: binds caller, target, engagement, timeout, and
+  # optional redacted proof. Router never sees raw credentials or MFA choice.
+  defp build_consult_authority(config, engagement_id) do
+    user_id = config.user_id
+    agent_id = config.agent_id
+    tool_timeout_ms = config.tool_router_timeout_ms
+    redacted = config.session_token
+    agent_module = config.agent_module
+
+    %{
+      consult_agent: fn message when is_binary(message) ->
+        um =
+          message
+          |> UserMessage.from_voice(sender_id: user_id)
+          |> UserMessage.with_engagement(engagement_id)
+
+        opts =
+          case redacted do
+            nil ->
+              [timeout: tool_timeout_ms]
+
+            %Redacted{} = r ->
+              [timeout: tool_timeout_ms, session_token: Redacted.value(r)]
+          end
+
+        agent_module.send_message(user_id, agent_id, um, opts)
+      end
+    }
   end
 
   defp reduce_backend_meta(%{backend: backend, mode: mode})
@@ -671,6 +749,16 @@ defmodule Arbor.Voice.Session do
   end
 
   def handle_info({:tool_outcome, _gen, _id, _token, _output}, state), do: {:noreply, state}
+
+  def handle_info(
+        {:tool_progress, generation, call_id, token},
+        %{lifecycle: :ready, closing: false} = state
+      )
+      when is_integer(generation) and is_binary(call_id) and is_reference(token) do
+    {:noreply, handle_tool_progress(state, generation, call_id, token)}
+  end
+
+  def handle_info({:tool_progress, _gen, _id, _token}, state), do: {:noreply, state}
 
   def handle_info(
         {:DOWN, mon, :process, _pid, _reason},
@@ -862,19 +950,30 @@ defmodule Arbor.Voice.Session do
       token: token,
       router: state.tool_router,
       context: context,
+      authority: state.consult_authority,
       timeout_ms: state.tool_router_timeout_ms
     }
 
     case start_tool_owner_child(owner_opts) do
       {:ok, owner_pid} when is_pid(owner_pid) ->
-        # 1) Monitor 2) record pending 3) activate with token — no router work
-        # starts until activation, so every post-activate DOWN is fenced.
+        # Locked order (VP-05B): monitor → progress timer → store pending
+        # (timer-bearing fence retained) → activate. No router work starts
+        # until activation, so every post-activate DOWN is fenced.
         owner_mon = Process.monitor(owner_pid)
+
+        progress_timer_ref =
+          Process.send_after(
+            self(),
+            {:tool_progress, generation, call_id, token},
+            state.progress_threshold_ms
+          )
 
         entry = %{
           token: token,
           owner_pid: owner_pid,
-          owner_mon: owner_mon
+          owner_mon: owner_mon,
+          progress_timer_ref: progress_timer_ref,
+          progress_emitted: false
         }
 
         next_pending = Map.put(pending, call_id, entry)
@@ -962,7 +1061,9 @@ defmodule Arbor.Voice.Session do
   end
 
   defp settle_tool_output(state, turn, call_id, entry, output) do
-    # Drop from pending before send so a concurrent DOWN cannot double-settle.
+    # Cancel progress timer first, then drop from pending before send so a
+    # concurrent DOWN cannot double-settle and progress cannot double-cue.
+    _ = cancel_and_flush_progress(entry, turn.generation, call_id)
     _ = Process.demonitor(entry.owner_mon, [:flush])
     pending = Map.delete(turn.pending, call_id)
     next_turn = %{turn | pending: pending}
@@ -976,6 +1077,54 @@ defmodule Arbor.Voice.Session do
         finish_turn_error(next_state, next_turn, :turn_failed)
     end
   end
+
+  defp handle_tool_progress(state, generation, call_id, token) do
+    case state.turn do
+      %{generation: ^generation, pending: pending} = turn when is_map(pending) ->
+        entry = Map.get(pending, call_id)
+
+        case ToolTaskCore.authorize_progress(entry, generation, call_id, token, generation) do
+          :emit ->
+            # Mark emitted before any speech/signal effects (at-most-once).
+            marked = %{entry | progress_emitted: true, progress_timer_ref: nil}
+            next_pending = Map.put(pending, call_id, marked)
+            next_turn = %{turn | pending: next_pending}
+            next_state = %{state | turn: next_turn}
+
+            speech_output = offer_speech(next_state, @progress_working_cue)
+            safe_emit_tool_progress(next_state, speech_output)
+            next_state
+
+          :ignore ->
+            state
+        end
+
+      _ ->
+        state
+    end
+  end
+
+  defp cancel_and_flush_progress(entry, generation, call_id)
+       when is_map(entry) and is_integer(generation) and is_binary(call_id) do
+    token = Map.get(entry, :token)
+    ref = Map.get(entry, :progress_timer_ref)
+
+    if is_reference(ref) do
+      _ = Process.cancel_timer(ref)
+    end
+
+    if is_reference(token) do
+      receive do
+        {:tool_progress, ^generation, ^call_id, ^token} -> :ok
+      after
+        0 -> :ok
+      end
+    end
+
+    :ok
+  end
+
+  defp cancel_and_flush_progress(_entry, _generation, _call_id), do: :ok
 
   defp maybe_complete_after_settle(state, turn) do
     cond do
@@ -1021,8 +1170,10 @@ defmodule Arbor.Voice.Session do
   # request per admitted pending id before any close. Session is the RO owner.
   defp cancel_pending_tools_with_outputs(state) do
     case state.turn do
-      %{pending: pending} = turn when is_map(pending) and map_size(pending) > 0 ->
+      %{pending: pending, generation: generation} = turn
+      when is_map(pending) and map_size(pending) > 0 ->
         ids = Map.keys(pending)
+        _ = cancel_all_progress_timers(pending, generation)
         _ = cancel_all_siblings(pending)
         _ = queue_cancel_outputs(state, ids)
         %{state | turn: %{turn | pending: %{}}}
@@ -1030,6 +1181,14 @@ defmodule Arbor.Voice.Session do
       _ ->
         state
     end
+  end
+
+  defp cancel_all_progress_timers(pending, generation) when is_map(pending) do
+    Enum.each(pending, fn {call_id, entry} ->
+      _ = cancel_and_flush_progress(entry, generation, call_id)
+    end)
+
+    :ok
   end
 
   defp queue_cancel_outputs(state, ids) when is_list(ids) do
@@ -1419,6 +1578,30 @@ defmodule Arbor.Voice.Session do
       _kind, _reason -> :ok
     end
   end
+
+  # Bounded progress cue signal (VP-05B / VOICE-11). Never includes tool name,
+  # arguments, call_id, reply, proof, callbacks, pids, refs, or errors.
+  defp safe_emit_tool_progress(state, speech_output)
+       when speech_output in [:disabled, :accepted, :failed] do
+    payload = %{
+      user_id: state.user_id,
+      agent_id: state.agent_id,
+      engagement_id: state.engagement_id,
+      backend: state.backend,
+      mode: state.mode,
+      cue: :working,
+      speech_output: speech_output
+    }
+
+    try do
+      _ = state.signals.emit(:voice, :tool_progress, payload, [])
+      :ok
+    catch
+      _kind, _reason -> :ok
+    end
+  end
+
+  defp safe_emit_tool_progress(_state, _speech_output), do: :ok
 
   # Only admit the closed speech_output disposition into audit payloads.
   # Never forward content, modules, functions, verdicts, or error terms.

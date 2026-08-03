@@ -175,6 +175,271 @@ defmodule Arbor.VoiceTest do
     end
   end
 
+  defmodule BadToolsRaise do
+    @moduledoc false
+    def tools, do: raise("tools boom")
+    def invoke(_, _), do: {:error, :no_tools_installed}
+  end
+
+  defmodule BadToolsThrow do
+    @moduledoc false
+    def tools, do: throw(:tools_throw)
+    def invoke(_, _), do: {:error, :no_tools_installed}
+  end
+
+  defmodule BadToolsExit do
+    @moduledoc false
+    def tools, do: exit(:tools_exit)
+    def invoke(_, _), do: {:error, :no_tools_installed}
+  end
+
+  defmodule BadToolsDup do
+    @moduledoc false
+    def tools do
+      decl = %{
+        "type" => "function",
+        "name" => "a",
+        "description" => "desc",
+        "parameters" => %{
+          "type" => "object",
+          "properties" => %{},
+          "required" => [],
+          "additionalProperties" => false
+        }
+      }
+
+      [decl, decl]
+    end
+
+    def invoke(_, _), do: {:error, :no_tools_installed}
+  end
+
+  defmodule BadToolsNameOnly do
+    @moduledoc false
+    def tools, do: [%{"name" => "only_name"}]
+    def invoke(_, _), do: {:error, :no_tools_installed}
+  end
+
+  defmodule BadToolsOversized do
+    @moduledoc false
+    def tools do
+      # More than max_tool_declarations (8)
+      for i <- 1..10 do
+        %{
+          "type" => "function",
+          "name" => "tool_#{i}",
+          "description" => "desc #{i}",
+          "parameters" => %{
+            "type" => "object",
+            "properties" => %{},
+            "required" => [],
+            "additionalProperties" => false
+          }
+        }
+      end
+    end
+
+    def invoke(_, _), do: {:error, :no_tools_installed}
+  end
+
+  defmodule BadToolsNonJson do
+    @moduledoc false
+    def tools do
+      # Valid function shape but non-JSON term (PID) inside properties schema.
+      [
+        %{
+          "type" => "function",
+          "name" => "bad",
+          "description" => "has non-JSON term",
+          "parameters" => %{
+            "type" => "object",
+            "properties" => %{"x" => %{"type" => "string", "default" => self()}},
+            "required" => [],
+            "additionalProperties" => false
+          }
+        }
+      ]
+    end
+
+    def invoke(_, _), do: {:error, :no_tools_installed}
+  end
+
+  defmodule BadToolsNotList do
+    @moduledoc false
+    def tools, do: %{not: "a list"}
+    def invoke(_, _), do: {:error, :no_tools_installed}
+  end
+
+  defmodule BadToolsAdditionalPropertiesAbsent do
+    @moduledoc false
+    def tools do
+      [
+        %{
+          "type" => "function",
+          "name" => "a",
+          "description" => "desc",
+          "parameters" => %{
+            "type" => "object",
+            "properties" => %{},
+            "required" => []
+          }
+        }
+      ]
+    end
+
+    def invoke(_, _), do: {:error, :no_tools_installed}
+  end
+
+  defmodule BadToolsAdditionalPropertiesTrue do
+    @moduledoc false
+    def tools do
+      [
+        %{
+          "type" => "function",
+          "name" => "a",
+          "description" => "desc",
+          "parameters" => %{
+            "type" => "object",
+            "properties" => %{},
+            "required" => [],
+            "additionalProperties" => true
+          }
+        }
+      ]
+    end
+
+    def invoke(_, _), do: {:error, :no_tools_installed}
+  end
+
+  describe "session_token and progress opts (VP-05B)" do
+    @tag spec: "VOICE-9"
+    test "malformed session_token fails as :invalid_opts before resource effects" do
+      {user_id, agent_id} = unique_ids()
+      {opts, _} = base_opts()
+
+      for bad <- [nil, "", 123, :atom, String.duplicate("x", 4097)] do
+        assert {:error, :invalid_opts} =
+                 Voice.start_session(user_id, agent_id, Keyword.put(opts, :session_token, bad))
+      end
+
+      assert {:error, :invalid_opts} =
+               Voice.start_session(
+                 user_id,
+                 agent_id,
+                 opts ++ [session_token: "a", session_token: "b"]
+               )
+    end
+
+    @tag spec: "VOICE-9"
+    test "malformed agent_module Application config fails as :invalid_config" do
+      previous = Application.fetch_env(:arbor_voice, :agent_module)
+
+      on_exit(fn ->
+        case previous do
+          {:ok, value} -> Application.put_env(:arbor_voice, :agent_module, value)
+          :error -> Application.delete_env(:arbor_voice, :agent_module)
+        end
+      end)
+
+      {user_id, agent_id} = unique_ids()
+      {opts, _} = base_opts()
+      Application.put_env(:arbor_voice, :agent_module, String)
+
+      assert {:error, :invalid_config} =
+               Voice.start_session(user_id, agent_id, opts)
+    end
+
+    @tag spec: "VOICE-11"
+    test "progress_threshold_ms validation and tool-timeout ceiling" do
+      {user_id, agent_id} = unique_ids()
+      {opts, _} = base_opts()
+
+      assert {:error, :invalid_opts} =
+               Voice.start_session(
+                 user_id,
+                 agent_id,
+                 Keyword.put(opts, :progress_threshold_ms, 0)
+               )
+
+      assert {:error, :invalid_opts} =
+               Voice.start_session(
+                 user_id,
+                 agent_id,
+                 Keyword.put(opts, :progress_threshold_ms, 30_001)
+               )
+
+      assert {:error, :invalid_opts} =
+               Voice.start_session(
+                 user_id,
+                 agent_id,
+                 opts
+                 |> Keyword.put(:tool_router_timeout_ms, 1_000)
+                 |> Keyword.put(:progress_threshold_ms, 2_000)
+               )
+    end
+
+    @tag spec: "VOICE-9"
+    test "explicit router declaration failures are :invalid_opts" do
+      {user_id, agent_id} = unique_ids()
+      {opts, _} = base_opts()
+
+      for router <- [
+            BadToolsRaise,
+            BadToolsThrow,
+            BadToolsExit,
+            BadToolsDup,
+            BadToolsNameOnly,
+            BadToolsOversized,
+            BadToolsNonJson,
+            BadToolsNotList,
+            BadToolsAdditionalPropertiesAbsent,
+            BadToolsAdditionalPropertiesTrue
+          ] do
+        assert {:error, :invalid_opts} =
+                 Voice.start_session(user_id, agent_id, Keyword.put(opts, :tool_router, router)),
+               "expected :invalid_opts for #{inspect(router)}"
+      end
+    end
+
+    @tag spec: "VOICE-9"
+    test "Application progress_threshold_ms malformed is :invalid_config" do
+      previous = Application.fetch_env(:arbor_voice, :progress_threshold_ms)
+
+      on_exit(fn ->
+        case previous do
+          {:ok, value} -> Application.put_env(:arbor_voice, :progress_threshold_ms, value)
+          :error -> Application.delete_env(:arbor_voice, :progress_threshold_ms)
+        end
+      end)
+
+      {user_id, agent_id} = unique_ids()
+      {opts, _} = base_opts()
+      # Omit explicit progress so Application path is used.
+      opts = Keyword.delete(opts, :progress_threshold_ms)
+      Application.put_env(:arbor_voice, :progress_threshold_ms, 0)
+
+      assert {:error, :invalid_config} =
+               Voice.start_session(user_id, agent_id, opts)
+    end
+
+    @tag spec: "VOICE-9"
+    test "valid session_token starts and stays out of public status and retained state" do
+      {user_id, agent_id} = unique_ids()
+      token = "facade-proof-token-abc"
+      {opts, _} = base_opts(session_token: token)
+
+      assert {:ok, key} = Voice.start_session(user_id, agent_id, opts)
+      assert {:ok, status} = Voice.session_status(key)
+      refute inspect(status) =~ token
+
+      [{session_pid, _}] = Registry.lookup(Arbor.Voice.Registry, key)
+      refute inspect(:sys.get_status(session_pid)) =~ token
+      refute inspect(:sys.get_state(session_pid)) =~ token
+
+      assert :ok = Voice.stop_session(key)
+    end
+  end
+
   describe "start_session/3 API" do
     @tag spec: "VOICE-2"
     test "returns the tuple key, never a pid, and registers uniquely" do

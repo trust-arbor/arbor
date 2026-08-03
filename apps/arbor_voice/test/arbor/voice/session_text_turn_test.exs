@@ -616,15 +616,17 @@ defmodule Arbor.Voice.SessionTextTurnTest do
 
   defmodule SuccessRouter do
     @moduledoc false
-    def invoke(%{name: "ok_tool"}), do: {:ok, %{"answer" => 42}}
-    def invoke(%{name: "unknown"}), do: {:error, :unknown_tool}
-    def invoke(%{name: "err"}), do: {:error, :boom}
-    def invoke(%{name: "bad_shape"}), do: :not_a_result
-    def invoke(%{name: "pid_result"}), do: {:ok, self()}
-    def invoke(%{name: "struct_result"}), do: {:ok, %URI{}}
-    def invoke(%{name: "atom_result"}), do: {:ok, :not_json}
+    def tools, do: []
 
-    def invoke(%{name: "huge_result"}) do
+    def invoke(%{name: "ok_tool"}, _authority), do: {:ok, %{"answer" => 42}}
+    def invoke(%{name: "unknown"}, _authority), do: {:error, :unknown_tool}
+    def invoke(%{name: "err"}, _authority), do: {:error, :boom}
+    def invoke(%{name: "bad_shape"}, _authority), do: :not_a_result
+    def invoke(%{name: "pid_result"}, _authority), do: {:ok, self()}
+    def invoke(%{name: "struct_result"}, _authority), do: {:ok, %URI{}}
+    def invoke(%{name: "atom_result"}, _authority), do: {:ok, :not_json}
+
+    def invoke(%{name: "huge_result"}, _authority) do
       {:ok,
        String.duplicate(
          "x",
@@ -632,11 +634,11 @@ defmodule Arbor.Voice.SessionTextTurnTest do
        )}
     end
 
-    def invoke(%{name: "raise_me"}), do: raise("router boom")
-    def invoke(%{name: "throw_me"}), do: throw(:router_throw)
-    def invoke(%{name: "exit_me"}), do: exit(:router_exit)
+    def invoke(%{name: "raise_me"}, _authority), do: raise("router boom")
+    def invoke(%{name: "throw_me"}, _authority), do: throw(:router_throw)
+    def invoke(%{name: "exit_me"}, _authority), do: exit(:router_exit)
 
-    def invoke(%{name: "block"} = ctx) do
+    def invoke(%{name: "block"} = ctx, _authority) do
       if is_pid(ctx[:report_to]) do
         send(ctx.report_to, {:worker_pid, self()})
       end
@@ -645,12 +647,12 @@ defmodule Arbor.Voice.SessionTextTurnTest do
       {:ok, %{"never" => true}}
     end
 
-    def invoke(%{name: "instant"} = ctx) do
+    def invoke(%{name: "instant"} = ctx, _authority) do
       if is_pid(ctx[:report_to]), do: send(ctx.report_to, {:worker_pid, self()})
       {:ok, %{"fast" => true}}
     end
 
-    def invoke(%{name: "await_release", call_id: call_id} = ctx) do
+    def invoke(%{name: "await_release", call_id: call_id} = ctx, _authority) do
       if is_pid(ctx[:report_to]), do: send(ctx.report_to, {:releasable_worker, call_id, self()})
 
       receive do
@@ -660,12 +662,14 @@ defmodule Arbor.Voice.SessionTextTurnTest do
       end
     end
 
-    def invoke(_), do: {:error, :unknown_tool}
+    def invoke(_, _authority), do: {:error, :unknown_tool}
   end
 
   defmodule ReportingRouter do
     @moduledoc false
     @table :arbor_voice_reporting_router
+
+    def tools, do: []
 
     def report_to(pid) when is_pid(pid) do
       case :ets.whereis(@table) do
@@ -677,7 +681,7 @@ defmodule Arbor.Voice.SessionTextTurnTest do
       :ok
     end
 
-    def invoke(ctx) do
+    def invoke(ctx, authority) do
       report_to =
         case :ets.whereis(@table) do
           :undefined -> nil
@@ -689,12 +693,16 @@ defmodule Arbor.Voice.SessionTextTurnTest do
       ctx =
         if is_pid(report_to), do: Map.put(ctx, :report_to, report_to), else: ctx
 
-      SuccessRouter.invoke(ctx)
+      SuccessRouter.invoke(ctx, authority)
     end
   end
 
   defp tool_router_opts(router, timeout_ms \\ 5_000) do
-    turn_opts(tool_router: router, tool_router_timeout_ms: timeout_ms)
+    turn_opts(
+      tool_router: router,
+      tool_router_timeout_ms: timeout_ms,
+      progress_threshold_ms: min(timeout_ms, 2_000)
+    )
   end
 
   describe "async tool routing outcomes" do
@@ -1123,6 +1131,7 @@ defmodule Arbor.Voice.SessionTextTurnTest do
         turn_opts(
           tool_router: ReportingRouter,
           tool_router_timeout_ms: 30_000,
+          progress_threshold_ms: 2_000,
           session_budget_ms: 500,
           wall_clock: fn -> ~U[2026-08-02 12:00:00.000000Z] end,
           monotonic_clock: fn -> System.monotonic_time(:millisecond) end

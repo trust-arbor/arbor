@@ -8,6 +8,23 @@ defmodule Arbor.Voice.Session.ToolTaskCoreTest do
   alias Arbor.Voice.Session.ToolTaskCore
   alias Arbor.Voice.Session.TurnCore
 
+  describe "authorize_progress/5" do
+    @tag spec: "VOICE-11"
+    test "emits only for matching generation, token, and unemitted pending" do
+      token = make_ref()
+      entry = %{token: token, progress_emitted: false}
+
+      assert :emit = ToolTaskCore.authorize_progress(entry, 1, "c1", token, 1)
+      assert :ignore = ToolTaskCore.authorize_progress(entry, 2, "c1", token, 1)
+      assert :ignore = ToolTaskCore.authorize_progress(entry, 1, "c1", make_ref(), 1)
+
+      assert :ignore =
+               ToolTaskCore.authorize_progress(%{entry | progress_emitted: true}, 1, "c1", token, 1)
+
+      assert :ignore = ToolTaskCore.authorize_progress(nil, 1, "c1", token, 1)
+    end
+  end
+
   describe "normalize/1" do
     @tag spec: "VOICE-8"
     test "maps success, known codes, and failure classes to bounded JSON objects" do

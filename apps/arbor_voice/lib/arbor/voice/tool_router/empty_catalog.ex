@@ -1,10 +1,14 @@
 defmodule Arbor.Voice.ToolRouter.EmptyCatalog do
   @moduledoc """
-  Production default router: empty catalog, deterministic no_tools_installed.
+  Explicit empty router: no declarations, deterministic no_tools_installed.
+  Available for tests/deployments; production defaults to FrontDesk.
   """
 
   @behaviour Arbor.Voice.ToolRouter
 
   @impl true
-  def invoke(_context), do: {:error, :no_tools_installed}
+  def tools, do: []
+
+  @impl true
+  def invoke(_context, _authority), do: {:error, :no_tools_installed}
 end

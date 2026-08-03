@@ -86,8 +86,9 @@ defmodule Arbor.Voice.Backend.XaiRealtimeToolE2ETest do
 
   defmodule OkRouter do
     @moduledoc false
-    def invoke(%{name: "lookup"}), do: {:ok, %{"value" => "ok"}}
-    def invoke(_), do: {:error, :unknown_tool}
+    def tools, do: []
+    def invoke(%{name: "lookup"}, _authority), do: {:ok, %{"value" => "ok"}}
+    def invoke(_, _authority), do: {:error, :unknown_tool}
   end
 
   defp unique_ids do
@@ -134,6 +135,7 @@ defmodule Arbor.Voice.Backend.XaiRealtimeToolE2ETest do
       ],
       tool_router: OkRouter,
       tool_router_timeout_ms: 2_000,
+      progress_threshold_ms: 2_000,
       session_budget_ms: 60_000,
       daily_budget_ms: 3_600_000,
       resource_owner_opts: [

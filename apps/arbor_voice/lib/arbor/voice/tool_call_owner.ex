@@ -18,6 +18,7 @@ defmodule Arbor.Voice.ToolCallOwner do
     token = Map.fetch!(opts, :token)
     router = Map.fetch!(opts, :router)
     context = Map.fetch!(opts, :context)
+    authority = Map.fetch!(opts, :authority)
     timeout_ms = Map.fetch!(opts, :timeout_ms)
 
     # Keep the supervisor/worker links load-bearing. Supervisor shutdown or an
@@ -49,7 +50,7 @@ defmodule Arbor.Voice.ToolCallOwner do
 
     worker =
       spawn_link(fn ->
-        output = router |> safe_invoke(context) |> ToolTaskCore.normalize()
+        output = router |> safe_invoke(context, authority) |> ToolTaskCore.normalize()
         send(owner, {:worker_finished, generation, call_id, token, output})
       end)
 
@@ -112,8 +113,8 @@ defmodule Arbor.Voice.ToolCallOwner do
     :ok
   end
 
-  defp safe_invoke(router, context) do
-    case router.invoke(context) do
+  defp safe_invoke(router, context, authority) do
+    case router.invoke(context, authority) do
       {:ok, _} = ok -> ok
       {:error, reason} when is_atom(reason) -> {:error, reason}
       _other -> :invalid_return

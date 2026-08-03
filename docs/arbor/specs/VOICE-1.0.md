@@ -74,7 +74,7 @@ transport — raw audio never leaves the phone.
 
 ## Turn loop & tools
 
-- **VOICE-9** (MUST, planned): The `consult_agent` tool MUST post the engagement-tagged
+- **VOICE-9** (MUST): The `consult_agent` tool MUST post the engagement-tagged
   `UserMessage` through a public agent/orchestrator facade to the target agent's live
   Session path and return the agent's reply text to the backend as the tool output.
 
@@ -85,7 +85,7 @@ transport — raw audio never leaves the phone.
   The delegation (provider, task, task id or session id, and outcome summary) MUST be
   included in the turn's engagement record.
 
-- **VOICE-11** (MUST, planned): A tool execution exceeding a configured progress threshold
+- **VOICE-11** (MUST): A tool execution exceeding a configured progress threshold
   (default 2000 ms) MUST trigger a progress cue to the user (spoken filler or earcon)
   without blocking the tool.
 

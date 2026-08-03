@@ -10,11 +10,19 @@ defmodule Arbor.Voice do
   """
 
   alias Arbor.Voice.Config
+  alias Arbor.Voice.Redacted
   alias Arbor.Voice.Session
+  alias Arbor.Voice.Session.JsonTerm
   alias Arbor.Voice.SessionSupervisor
 
   @id_max_bytes 256
   @user_text_max_bytes 8192
+  @session_token_max_bytes 4096
+  @max_tool_declarations 8
+  @max_tool_name_bytes 256
+  @max_tool_description_bytes 512
+  @tool_decl_top_keys MapSet.new(["type", "name", "description", "parameters"])
+  @parameters_top_keys MapSet.new(["type", "properties", "required", "additionalProperties"])
 
   @allowed_opts [
     :comms,
@@ -36,12 +44,14 @@ defmodule Arbor.Voice do
     :speech_output,
     :speech_output_timeout_ms,
     :tool_router,
-    :tool_router_timeout_ms
+    :tool_router_timeout_ms,
+    :session_token,
+    :progress_threshold_ms
   ]
 
   @transcript_opts_allowlist [:persistence]
   @speakable_exports [render: 2, tts_guard!: 1]
-  @tool_router_exports [invoke: 1]
+  @tool_router_exports [tools: 0, invoke: 2]
 
   @type session_key :: {String.t(), String.t()}
 
@@ -182,8 +192,13 @@ defmodule Arbor.Voice do
          {:ok, speakable} <- resolve_speakable(opts),
          {:ok, speech_output} <- resolve_speech_output(opts),
          {:ok, speech_output_timeout_ms} <- resolve_speech_output_timeout_ms(opts),
-         {:ok, tool_router} <- resolve_tool_router(opts),
+         {:ok, tool_router, router_source} <- resolve_tool_router(opts),
          {:ok, tool_router_timeout_ms} <- resolve_tool_router_timeout_ms(opts),
+         {:ok, tool_declarations} <- resolve_tool_declarations(tool_router, router_source),
+         {:ok, progress_threshold_ms} <-
+           resolve_progress_threshold_ms(opts, tool_router_timeout_ms),
+         {:ok, session_token} <- resolve_session_token(opts),
+         {:ok, agent_module} <- resolve_agent_module(),
          :ok <- validate_optional_module(opts, :engagement_store) do
       {:ok,
        %{
@@ -209,7 +224,11 @@ defmodule Arbor.Voice do
          speech_output: speech_output,
          speech_output_timeout_ms: speech_output_timeout_ms,
          tool_router: tool_router,
-         tool_router_timeout_ms: tool_router_timeout_ms
+         tool_router_timeout_ms: tool_router_timeout_ms,
+         tool_declarations: tool_declarations,
+         progress_threshold_ms: progress_threshold_ms,
+         session_token: session_token,
+         agent_module: agent_module
        }}
     end
   end
@@ -298,14 +317,22 @@ defmodule Arbor.Voice do
     end
   end
 
-  # Closed tool-router seam: default EmptyCatalog; module must export invoke/1.
+  # Closed tool-router seam: default FrontDesk; module must export tools/0 + invoke/2.
+  # Returns {module, :default | :explicit} so declaration failures map correctly:
+  # explicit router → :invalid_opts; default/config path → :invalid_config.
   defp resolve_tool_router(opts) do
     case Keyword.fetch(opts, :tool_router) do
       :error ->
-        validate_tool_router_module(Arbor.Voice.ToolRouter.EmptyCatalog)
+        case validate_tool_router_module(Arbor.Voice.ToolRouter.FrontDesk) do
+          {:ok, mod} -> {:ok, mod, :default}
+          {:error, _} = err -> err
+        end
 
       {:ok, mod} when is_atom(mod) and not is_nil(mod) ->
-        validate_tool_router_module(mod)
+        case validate_tool_router_module(mod) do
+          {:ok, m} -> {:ok, m, :explicit}
+          {:error, _} = err -> err
+        end
 
       {:ok, _} ->
         {:error, :invalid_opts}
@@ -341,6 +368,196 @@ defmodule Arbor.Voice do
           {:ok, ms} -> {:ok, ms}
           {:error, _} -> {:error, :invalid_opts}
         end
+    end
+  end
+
+  # Call tools/0 once and validate strict function schemas before any Session
+  # resource/backend effects. Explicit tool_router failures → :invalid_opts;
+  # default/config path failures → :invalid_config.
+  defp resolve_tool_declarations(tool_router, router_source)
+       when router_source in [:default, :explicit] do
+    fail =
+      case router_source do
+        :explicit -> :invalid_opts
+        :default -> :invalid_config
+      end
+
+    try do
+      case tool_router.tools() do
+        list when is_list(list) ->
+          validate_tool_declarations(list, fail)
+
+        _other ->
+          {:error, fail}
+      end
+    rescue
+      _ -> {:error, fail}
+    catch
+      _kind, _reason -> {:error, fail}
+    end
+  end
+
+  defp validate_tool_declarations(list, fail) when is_list(list) do
+    cond do
+      length(list) > @max_tool_declarations ->
+        {:error, fail}
+
+      true ->
+        case walk_tool_declarations(list, [], MapSet.new(), fail) do
+          {:ok, decls} ->
+            case JsonTerm.validate(decls) do
+              :ok -> {:ok, decls}
+              :error -> {:error, fail}
+            end
+
+          {:error, _} = err ->
+            err
+        end
+    end
+  end
+
+  defp walk_tool_declarations([], acc, _names, _fail), do: {:ok, Enum.reverse(acc)}
+
+  defp walk_tool_declarations([decl | rest], acc, names, fail) do
+    with :ok <- validate_function_schema(decl),
+         name when is_binary(name) <- Map.get(decl, "name"),
+         false <- MapSet.member?(names, name) do
+      walk_tool_declarations(rest, [decl | acc], MapSet.put(names, name), fail)
+    else
+      true -> {:error, fail}
+      _ -> {:error, fail}
+    end
+  end
+
+  defp validate_function_schema(decl) when is_map(decl) do
+    keys = Map.keys(decl)
+
+    cond do
+      not Enum.all?(keys, &is_binary/1) ->
+        :error
+
+      not MapSet.subset?(MapSet.new(keys), @tool_decl_top_keys) ->
+        :error
+
+      Map.get(decl, "type") != "function" ->
+        :error
+
+      not bounded_nonblank_utf8?(Map.get(decl, "name"), @max_tool_name_bytes) ->
+        :error
+
+      not bounded_nonblank_utf8?(Map.get(decl, "description"), @max_tool_description_bytes) ->
+        :error
+
+      true ->
+        validate_parameters_schema(Map.get(decl, "parameters"))
+    end
+  end
+
+  defp validate_function_schema(_), do: :error
+
+  defp validate_parameters_schema(params) when is_map(params) do
+    keys = Map.keys(params)
+
+    cond do
+      not Enum.all?(keys, &is_binary/1) ->
+        :error
+
+      not MapSet.subset?(MapSet.new(keys), @parameters_top_keys) ->
+        :error
+
+      Map.get(params, "type") != "object" ->
+        :error
+
+      not is_map(Map.get(params, "properties")) ->
+        :error
+
+      true ->
+        properties = Map.get(params, "properties")
+        prop_keys = Map.keys(properties)
+
+        cond do
+          not Enum.all?(prop_keys, &is_binary/1) ->
+            :error
+
+          not Enum.all?(Map.values(properties), &is_map/1) ->
+            :error
+
+          not valid_required?(Map.get(params, "required", []), prop_keys) ->
+            :error
+
+          # Strict: additionalProperties must be present and exactly false.
+          Map.fetch(params, "additionalProperties") != {:ok, false} ->
+            :error
+
+          true ->
+            :ok
+        end
+    end
+  end
+
+  defp validate_parameters_schema(_), do: :error
+
+  defp valid_required?(required, prop_keys) when is_list(required) do
+    Enum.all?(required, fn key -> is_binary(key) and key in prop_keys end)
+  end
+
+  defp valid_required?(_, _), do: false
+
+  defp bounded_nonblank_utf8?(v, max_bytes)
+       when is_binary(v) and is_integer(max_bytes) do
+    byte_size(v) >= 1 and byte_size(v) <= max_bytes and String.valid?(v) and
+      String.trim(v) != ""
+  end
+
+  defp bounded_nonblank_utf8?(_, _), do: false
+
+  defp resolve_progress_threshold_ms(opts, tool_timeout_ms) do
+    case Keyword.fetch(opts, :progress_threshold_ms) do
+      :error ->
+        raw =
+          Application.get_env(
+            :arbor_voice,
+            :progress_threshold_ms,
+            Config.default_progress_threshold_ms()
+          )
+
+        case Config.validate_progress_threshold_ms(raw, tool_timeout_ms) do
+          {:ok, ms} ->
+            {:ok, ms}
+
+          {:error, _} ->
+            # Present malformed Application value, or default that cannot fit
+            # the effective tool timeout under Application-only config.
+            {:error, :invalid_config}
+        end
+
+      {:ok, v} ->
+        case Config.validate_progress_threshold_ms(v, tool_timeout_ms) do
+          {:ok, ms} -> {:ok, ms}
+          {:error, _} -> {:error, :invalid_opts}
+        end
+    end
+  end
+
+  defp resolve_session_token(opts) do
+    case Keyword.fetch(opts, :session_token) do
+      :error ->
+        {:ok, nil}
+
+      {:ok, token}
+      when is_binary(token) and byte_size(token) > 0 and
+             byte_size(token) <= @session_token_max_bytes ->
+        {:ok, Redacted.new(token)}
+
+      {:ok, _} ->
+        {:error, :invalid_opts}
+    end
+  end
+
+  defp resolve_agent_module do
+    case Config.agent_module() do
+      {:ok, mod} -> {:ok, mod}
+      {:error, _} -> {:error, :invalid_config}
     end
   end
 

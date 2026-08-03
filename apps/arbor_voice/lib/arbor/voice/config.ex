@@ -50,6 +50,9 @@ defmodule Arbor.Voice.Config do
   # Tool-router timeout (VP-04E3): source-owned hard ceiling.
   @default_tool_router_timeout_ms 5_000
   @max_tool_router_timeout_ms 30_000
+  # Progress cue threshold (VP-05B / VOICE-11): source-owned hard ceiling.
+  @default_progress_threshold_ms 2_000
+  @max_progress_threshold_ms 30_000
 
   @doc "The fixed durable-budget-ledger namespace. Not operator-configurable."
   @spec fixed_budget_namespace() :: :voice_daily_budgets
@@ -292,5 +295,88 @@ defmodule Arbor.Voice.Config do
     :arbor_voice
     |> Application.get_env(:tool_router_timeout_ms, @default_tool_router_timeout_ms)
     |> validate_tool_router_timeout_ms()
+  end
+
+  # ---------------------------------------------------------------------------
+  # Progress cue threshold (VP-05B / VOICE-11)
+  # ---------------------------------------------------------------------------
+
+  @doc "Literal default progress threshold, in milliseconds (2000)."
+  @spec default_progress_threshold_ms() :: pos_integer()
+  def default_progress_threshold_ms, do: @default_progress_threshold_ms
+
+  @doc "Hard ceiling for progress threshold, in milliseconds (30000)."
+  @spec max_progress_threshold_ms() :: pos_integer()
+  def max_progress_threshold_ms, do: @max_progress_threshold_ms
+
+  @doc """
+  Pure validation: positive-integer progress threshold at most 30_000 ms and
+  not exceeding the effective tool-router timeout.
+  """
+  @spec validate_progress_threshold_ms(term(), pos_integer()) ::
+          {:ok, pos_integer()} | {:error, :invalid_config}
+  def validate_progress_threshold_ms(v, tool_timeout_ms)
+      when is_integer(v) and is_integer(tool_timeout_ms) and v > 0 and
+             v <= @max_progress_threshold_ms and v <= tool_timeout_ms,
+      do: {:ok, v}
+
+  def validate_progress_threshold_ms(_v, _tool_timeout_ms), do: {:error, :invalid_config}
+
+  @doc """
+  Validated progress threshold in milliseconds.
+
+  Defaults to 2000 ms. Requires a validated tool-router timeout so the
+  threshold cannot exceed the effective tool timeout. Malformed Application
+  config fails closed as `{:error, :invalid_config}`.
+  """
+  @spec progress_threshold_ms() :: {:ok, pos_integer()} | {:error, :invalid_config}
+  def progress_threshold_ms do
+    with {:ok, tool_ms} <- tool_router_timeout_ms() do
+      :arbor_voice
+      |> Application.get_env(:progress_threshold_ms, @default_progress_threshold_ms)
+      |> validate_progress_threshold_ms(tool_ms)
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Agent facade collaborator (VP-05B / VOICE-9)
+  # ---------------------------------------------------------------------------
+
+  @doc """
+  Pure validation: an atom module exporting `send_message/4`. Catch-safe so
+  compiled-but-not-yet-loaded modules are accepted.
+  """
+  @spec validate_agent_module(term()) :: {:ok, module()} | {:error, :invalid_config}
+  def validate_agent_module(mod) when is_atom(mod) and not is_nil(mod) do
+    try do
+      exports = mod.module_info(:exports)
+
+      if {:send_message, 4} in exports do
+        {:ok, mod}
+      else
+        {:error, :invalid_config}
+      end
+    rescue
+      _ -> {:error, :invalid_config}
+    catch
+      _kind, _reason -> {:error, :invalid_config}
+    end
+  end
+
+  def validate_agent_module(_), do: {:error, :invalid_config}
+
+  @doc """
+  Cross-library Agent facade module for consult_agent.
+
+  Defaults to `Arbor.Agent`. Not a public per-session option — tests may
+  replace via Application env (`:agent_module`) in isolated non-async tests
+  and must restore. Malformed Application config fails closed as
+  `{:error, :invalid_config}`.
+  """
+  @spec agent_module() :: {:ok, module()} | {:error, :invalid_config}
+  def agent_module do
+    :arbor_voice
+    |> Application.get_env(:agent_module, Arbor.Agent)
+    |> validate_agent_module()
   end
 end
