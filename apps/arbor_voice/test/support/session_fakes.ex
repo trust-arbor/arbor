@@ -3,7 +3,24 @@ defmodule Arbor.Voice.Test.SessionFakes do
   Hermetic collaborator fakes for `Arbor.Voice.Session` lifecycle tests
   (VP-04D2B). State is process-independent (ETS + Agent) so the Session
   GenServer can call them from another process. No Application env mutation.
+
+  Agents are started under ExUnit's per-test supervisor with unique child
+  ids so normal test-process exit reclaims every fake state process. Do not
+  use bare `Agent.start_link/1` here — a linked Agent outlives a normally
+  exiting ExUnit process.
   """
+
+  @doc false
+  def start_owned_agent(initial_fun) when is_function(initial_fun, 0) do
+    # Unique child id per start so table-driven tests may own many Agents
+    # within one ExUnit case; all are stopped by ExUnit on test exit.
+    id = {__MODULE__, make_ref()}
+
+    ExUnit.Callbacks.start_supervised(%{
+      id: id,
+      start: {Agent, :start_link, [initial_fun]}
+    })
+  end
 
   # ---------------------------------------------------------------------------
   # Signals
@@ -25,7 +42,12 @@ defmodule Arbor.Voice.Test.SessionFakes do
     def start(opts \\ []) do
       ensure_table!()
       mode = Keyword.get(opts, :mode, :ok)
-      {:ok, agent} = Agent.start_link(fn -> %{mode: mode, emissions: []} end)
+
+      {:ok, agent} =
+        Arbor.Voice.Test.SessionFakes.start_owned_agent(fn ->
+          %{mode: mode, emissions: []}
+        end)
+
       :ets.insert(@table, {:agent, agent})
       {:ok, agent}
     end
@@ -86,7 +108,11 @@ defmodule Arbor.Voice.Test.SessionFakes do
       result =
         Keyword.get(opts, :result, {:ok, %{id: "eng_lifecycle", agent_id: "agent_x"}})
 
-      {:ok, agent} = Agent.start_link(fn -> %{result: result, calls: []} end)
+      {:ok, agent} =
+        Arbor.Voice.Test.SessionFakes.start_owned_agent(fn ->
+          %{result: result, calls: []}
+        end)
+
       :ets.insert(@table, {:agent, agent})
       {:ok, agent}
     end
@@ -151,7 +177,7 @@ defmodule Arbor.Voice.Test.SessionFakes do
       ensure_table!()
 
       {:ok, agent} =
-        Agent.start_link(fn ->
+        Arbor.Voice.Test.SessionFakes.start_owned_agent(fn ->
           %{
             reserve_mode: Keyword.get(opts, :reserve_mode, :ok),
             consume_mode: Keyword.get(opts, :consume_mode, :ok),
@@ -319,12 +345,13 @@ defmodule Arbor.Voice.Test.SessionFakes do
       ensure_table!()
 
       {:ok, agent} =
-        Agent.start_link(fn ->
+        Arbor.Voice.Test.SessionFakes.start_owned_agent(fn ->
           %{
             start_mode: Keyword.get(opts, :start_mode, :ok),
             register_mode: Keyword.get(opts, :register_mode, :ok),
             configure_mode: Keyword.get(opts, :configure_mode, :ok),
             meta_mode: Keyword.get(opts, :meta_mode, :ok),
+            close_mode: Keyword.get(opts, :close_mode, :ok),
             starts: 0,
             closes: 0,
             registers: 0,
@@ -352,7 +379,8 @@ defmodule Arbor.Voice.Test.SessionFakes do
           :start_mode,
           :register_mode,
           :configure_mode,
-          :meta_mode
+          :meta_mode,
+          :close_mode
         ])
       )
     end
@@ -361,6 +389,7 @@ defmodule Arbor.Voice.Test.SessionFakes do
     def set_register_mode(agent, mode), do: Agent.update(agent, &%{&1 | register_mode: mode})
     def set_configure_mode(agent, mode), do: Agent.update(agent, &%{&1 | configure_mode: mode})
     def set_meta_mode(agent, mode), do: Agent.update(agent, &%{&1 | meta_mode: mode})
+    def set_close_mode(agent, mode), do: Agent.update(agent, &%{&1 | close_mode: mode})
 
     # Tracker state is read/updated via Agent, but every real ResourceOwner
     # call MUST run in the original Session caller process — ResourceOwner's
@@ -426,8 +455,22 @@ defmodule Arbor.Voice.Test.SessionFakes do
 
     def close(owner) do
       agent = lookup_agent!()
+      mode = Agent.get(agent, fn s -> s.close_mode end)
       _ = Agent.update(agent, fn s -> %{s | closes: s.closes + 1} end)
-      Arbor.Voice.ResourceOwner.close(owner)
+
+      case mode do
+        :ok ->
+          Arbor.Voice.ResourceOwner.close(owner)
+
+        :raise ->
+          raise "resource_owner close boom"
+
+        :throw ->
+          throw(:resource_owner_close_throw)
+
+        :exit ->
+          exit(:resource_owner_close_exit)
+      end
     end
 
     defp lookup_agent! do

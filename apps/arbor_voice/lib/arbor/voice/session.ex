@@ -101,9 +101,11 @@ defmodule Arbor.Voice.Session do
         )
 
       {:error, reason} ->
-        # Before cleanup registration succeeds: close owner + settle release
-        # directly. Never both after registration.
-        _ = config.resource_owner.close(owner)
+        # Before cleanup registration succeeds: close owner (catch-safe) then
+        # always settle release directly. A raise/throw/exit from close must
+        # not skip release — no cleanup was registered, so direct release is
+        # the only settlement authority. Never both after registration.
+        _ = safe_close_resource_owner(config.resource_owner, owner)
         _ = settle_release(settlement, config)
         {:error, reason}
     end
@@ -220,28 +222,97 @@ defmodule Arbor.Voice.Session do
   defp engagement_id(_), do: :error
 
   defp reserve_budget(config) do
-    wall = config.wall_clock.()
+    # Wall clock is an injected collaborator: invoke inside catch/normalization
+    # so raise/throw/exit/malformed values never leak past the public facade.
+    # Accept only a valid UTC DateTime; never reserve or emit on failure.
+    case read_wall_clock_utc(config.wall_clock) do
+      {:ok, wall} ->
+        case utc_day_and_ms_to_midnight(wall) do
+          {:ok, utc_day, ms_to_midnight} ->
+            requested_ms = min(config.session_budget_ms, ms_to_midnight)
 
-    case utc_day_and_ms_to_midnight(wall) do
-      {:ok, utc_day, ms_to_midnight} ->
-        requested_ms = min(config.session_budget_ms, ms_to_midnight)
+            if not is_integer(requested_ms) or requested_ms < 1 do
+              {:error, :start_failed}
+            else
+              case safe_reserve(config, utc_day, requested_ms) do
+                {:ok, reservation} ->
+                  # Once reserve succeeds, every later failure MUST release this
+                  # exact reservation — never let an outer catch swallow it.
+                  after_successful_reserve(config, reservation)
 
-        if not is_integer(requested_ms) or requested_ms < 1 do
-          {:error, :start_failed}
-        else
-          case safe_reserve(config, utc_day, requested_ms) do
-            {:ok, reservation} ->
-              # Once reserve succeeds, every later failure MUST release this
-              # exact reservation — never let an outer catch swallow it.
-              after_successful_reserve(config, reservation)
+                {:error, reason} ->
+                  {:error, reason}
+              end
+            end
 
-            {:error, reason} ->
-              {:error, reason}
-          end
+          :error ->
+            {:error, :start_failed}
         end
 
-      :error ->
+      {:error, :invalid_clock} ->
         {:error, :start_failed}
+    end
+  end
+
+  # Injected wall clocks must return a valid UTC DateTime. Mirror the monotonic
+  # clock boundary: catch raise/throw/exit and reject non-UTC/malformed values
+  # without falling through to System time or reserving budget.
+  defp read_wall_clock_utc(clock) when is_function(clock, 0) do
+    try do
+      case clock.() do
+        %DateTime{} = wall ->
+          if utc_datetime?(wall), do: {:ok, wall}, else: {:error, :invalid_clock}
+
+        _other ->
+          {:error, :invalid_clock}
+      end
+    catch
+      _kind, _reason ->
+        {:error, :invalid_clock}
+    end
+  end
+
+  defp read_wall_clock_utc(_), do: {:error, :invalid_clock}
+
+  # Full UTC contract: ISO calendar, UTC zone name, zero offsets, and
+  # semantically valid date/time fields. Rejects zone/offset inconsistencies
+  # (e.g. Etc/UTC with utc_offset: 3600) and impossible calendar values
+  # (e.g. day 32, microsecond out of range).
+  defp utc_datetime?(%DateTime{
+         calendar: Calendar.ISO,
+         time_zone: tz,
+         utc_offset: 0,
+         std_offset: 0,
+         year: year,
+         month: month,
+         day: day,
+         hour: hour,
+         minute: minute,
+         second: second,
+         microsecond: microsecond
+       })
+       when tz in ["Etc/UTC", "UTC"] do
+    valid_iso_date?(year, month, day) and
+      valid_iso_time?(hour, minute, second, microsecond)
+  end
+
+  defp utc_datetime?(_), do: false
+
+  defp valid_iso_date?(year, month, day) do
+    try do
+      Calendar.ISO.valid_date?(year, month, day)
+    catch
+      _kind, _reason -> false
+    end
+  end
+
+  defp valid_iso_time?(hour, minute, second, microsecond) do
+    # Calendar.ISO.valid_time?/4 returns false for out-of-range components;
+    # wrap so a hostile inject never escapes the boundary.
+    try do
+      Calendar.ISO.valid_time?(hour, minute, second, microsecond)
+    catch
+      _kind, _reason -> false
     end
   end
 
@@ -300,36 +371,29 @@ defmodule Arbor.Voice.Session do
   end
 
   defp utc_day_and_ms_to_midnight(%DateTime{} = wall) do
-    # Contract: wall clock is UTC. Prefer unix arithmetic so we never depend on
-    # tzdata for the Etc/UTC zone database at the session boundary.
-    unix_ms = DateTime.to_unix(wall, :millisecond)
+    # Caller already validated UTC DateTime. Prefer unix arithmetic so we never
+    # depend on tzdata for the Etc/UTC zone database at the session boundary.
+    try do
+      unix_ms = DateTime.to_unix(wall, :millisecond)
 
-    if is_integer(unix_ms) do
-      ms_into_day = rem(unix_ms, 86_400_000)
-      ms_into_day = if ms_into_day < 0, do: ms_into_day + 86_400_000, else: ms_into_day
-      ms_to_midnight = 86_400_000 - ms_into_day
+      if is_integer(unix_ms) do
+        ms_into_day = rem(unix_ms, 86_400_000)
+        ms_into_day = if ms_into_day < 0, do: ms_into_day + 86_400_000, else: ms_into_day
+        ms_to_midnight = 86_400_000 - ms_into_day
+        utc_day = wall |> DateTime.to_date() |> Date.to_iso8601()
 
-      # Calendar UTC day from the wall DateTime's date component when already UTC;
-      # fall back to unix-derived date for non-UTC injects.
-      date =
-        if wall.time_zone in ["Etc/UTC", "UTC"] do
-          DateTime.to_date(wall)
+        if ms_to_midnight > 0 do
+          {:ok, utc_day, ms_to_midnight}
         else
-          unix_ms
-          |> DateTime.from_unix!(:millisecond)
-          |> DateTime.to_date()
+          # Exactly on a midnight boundary → full next UTC day.
+          {:ok, utc_day, 86_400_000}
         end
-
-      utc_day = Date.to_iso8601(date)
-
-      if ms_to_midnight > 0 do
-        {:ok, utc_day, ms_to_midnight}
       else
-        # Exactly on a midnight boundary → full next UTC day.
-        {:ok, utc_day, 86_400_000}
+        :error
       end
-    else
-      :error
+    catch
+      _kind, _reason ->
+        :error
     end
   end
 
@@ -574,8 +638,15 @@ defmodule Arbor.Voice.Session do
   end
 
   defp safe_close_owner(state) do
+    safe_close_resource_owner(state.resource_owner, state.owner)
+  end
+
+  # Catch-safe owner close used by both ready-path settle_and_close and
+  # pre-registration unwind. Never lets close raise/throw/exit skip a
+  # subsequent direct settle_release on the pre-registration path.
+  defp safe_close_resource_owner(resource_owner, owner) do
     try do
-      state.resource_owner.close(state.owner)
+      resource_owner.close(owner)
     catch
       _kind, _reason -> :error
     end

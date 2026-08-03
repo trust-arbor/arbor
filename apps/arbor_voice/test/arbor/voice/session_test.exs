@@ -199,6 +199,210 @@ defmodule Arbor.Voice.SessionTest do
   end
 
   # ---------------------------------------------------------------------------
+  # Security regression: pre-registration close raise must not leak budget
+  # ---------------------------------------------------------------------------
+
+  describe "pre-registration unwind budget-leak security regression" do
+    @tag spec: "VOICE-24"
+    test "security regression: register cleanup fails and owner close raises still releases exactly once" do
+      ControllableBackend.ensure_table!()
+      ControllableBackend.set_mode(:ok)
+      ControllableBackend.reset_close_count()
+
+      ctx = lifecycle_opts()
+      TrackingResourceOwner.set_register_mode(ctx.owner_tracker, :fail)
+      TrackingResourceOwner.set_close_mode(ctx.owner_tracker, :raise)
+      {user_id, agent_id} = unique_ids()
+
+      assert {:error, :start_failed} = Voice.start_session(user_id, agent_id, ctx.opts)
+
+      calls = FakeLedger.calls(ctx.ledger)
+      emissions = FakeSignals.emissions(ctx.signals)
+      stats = TrackingResourceOwner.stats(ctx.owner_tracker)
+
+      reserve_calls = Enum.filter(calls, &match?({:reserve, _, _, _, _, _}, &1))
+      release_calls = Enum.filter(calls, &match?({:release, _, _}, &1))
+      consume_calls = Enum.filter(calls, &match?({:consume, _, _, _}, &1))
+
+      # Reserved once, released exactly once via direct settle — not leaked to expiry.
+      assert length(reserve_calls) == 1
+      assert length(release_calls) == 1
+      assert consume_calls == []
+
+      # Pre-registration path attempted close (raised) then direct release.
+      assert stats.starts == 1
+      assert stats.registers == 1
+      assert stats.closes == 1
+
+      success_types = emissions |> Enum.map(fn {_, t, _, _} -> t end) |> Enum.uniq()
+      refute :start in success_types
+      refute :backend_connected in success_types
+      refute :stop in success_types
+      refute :budget_exhausted in success_types
+
+      assert Registry.lookup(Arbor.Voice.Registry, {user_id, agent_id}) == []
+
+      # Direct facade close raised, but the real ResourceOwner still monitors the
+      # failed Session and must close the backend after init dies.
+      wait_until(fn -> ControllableBackend.close_count() == 1 end, 5_000)
+      assert ControllableBackend.close_count() == 1
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Wall-clock boundary: catch + UTC DateTime contract
+  # ---------------------------------------------------------------------------
+
+  describe "wall_clock boundary" do
+    @tag spec: "VOICE-24"
+    test "table: raise/throw/exit/malformed/non-UTC wall_clock fail closed without reserve or success signals" do
+      non_utc =
+        case DateTime.new(~D[2026-08-02], ~T[12:00:00], "America/New_York") do
+          {:ok, dt} ->
+            dt
+
+          {:error, _} ->
+            # Environments without the zone database still need a non-UTC DateTime.
+            %{
+              DateTime.utc_now()
+              | time_zone: "America/New_York",
+                utc_offset: -14_400,
+                std_offset: 0
+            }
+        end
+
+      cases = [
+        %{
+          name: :raise,
+          wall_clock: fn -> raise "injected wall_clock boom" end
+        },
+        %{
+          name: :throw,
+          wall_clock: fn -> throw(:wall_clock_throw) end
+        },
+        %{
+          name: :exit,
+          wall_clock: fn -> exit(:wall_clock_exit) end
+        },
+        %{
+          name: :malformed_atom,
+          wall_clock: fn -> :not_a_datetime end
+        },
+        %{
+          name: :malformed_naive,
+          wall_clock: fn -> ~N[2026-08-02 12:00:00] end
+        },
+        %{
+          name: :malformed_integer,
+          wall_clock: fn -> 1_725_000_000 end
+        },
+        %{
+          name: :non_utc_datetime,
+          wall_clock: fn -> non_utc end
+        },
+        %{
+          # Internally inconsistent %DateTime{}: claims Etc/UTC but non-zero offset.
+          # Must fail the UTC contract without reserving (not merely a non-DateTime).
+          name: :malformed_datetime_nonzero_utc_offset,
+          wall_clock: fn ->
+            %DateTime{
+              year: 2026,
+              month: 8,
+              day: 2,
+              hour: 12,
+              minute: 0,
+              second: 0,
+              microsecond: {0, 6},
+              time_zone: "Etc/UTC",
+              zone_abbr: "UTC",
+              utc_offset: 3_600,
+              std_offset: 0
+            }
+          end
+        },
+        %{
+          name: :malformed_datetime_nonzero_std_offset,
+          wall_clock: fn ->
+            %{~U[2026-08-02 12:00:00.000000Z] | std_offset: 3_600}
+          end
+        },
+        %{
+          # Semantically invalid calendar date (day 32) with otherwise-UTC shell.
+          name: :malformed_datetime_invalid_date,
+          wall_clock: fn ->
+            %DateTime{
+              year: 2026,
+              month: 8,
+              day: 32,
+              hour: 12,
+              minute: 0,
+              second: 0,
+              microsecond: {0, 6},
+              time_zone: "Etc/UTC",
+              zone_abbr: "UTC",
+              utc_offset: 0,
+              std_offset: 0
+            }
+          end
+        },
+        %{
+          # Semantically invalid microsecond component with otherwise-UTC shell.
+          name: :malformed_datetime_invalid_microsecond,
+          wall_clock: fn ->
+            %DateTime{
+              year: 2026,
+              month: 8,
+              day: 2,
+              hour: 12,
+              minute: 0,
+              second: 0,
+              microsecond: {1_000_000, 6},
+              time_zone: "Etc/UTC",
+              zone_abbr: "UTC",
+              utc_offset: 0,
+              std_offset: 0
+            }
+          end
+        }
+      ]
+
+      for c <- cases do
+        ctx = lifecycle_opts(wall_clock: c.wall_clock)
+        {user_id, agent_id} = unique_ids()
+
+        assert {:error, :start_failed} = Voice.start_session(user_id, agent_id, ctx.opts),
+               "case #{c.name}: expected :start_failed"
+
+        calls = FakeLedger.calls(ctx.ledger)
+        emissions = FakeSignals.emissions(ctx.signals)
+        stats = TrackingResourceOwner.stats(ctx.owner_tracker)
+
+        assert Enum.filter(calls, &match?({:reserve, _, _, _, _, _}, &1)) == [],
+               "case #{c.name}: must not reserve"
+
+        assert Enum.filter(calls, &match?({:release, _, _}, &1)) == [],
+               "case #{c.name}: must not release"
+
+        assert Enum.filter(calls, &match?({:consume, _, _, _}, &1)) == [],
+               "case #{c.name}: must not consume"
+
+        assert stats.starts == 0, "case #{c.name}: must not start owner"
+        assert stats.closes == 0, "case #{c.name}: must not close owner"
+        assert stats.registers == 0, "case #{c.name}: must not register cleanup"
+
+        success_types = emissions |> Enum.map(fn {_, t, _, _} -> t end) |> Enum.uniq()
+        refute :start in success_types, "case #{c.name}: no :start signal"
+        refute :backend_connected in success_types, "case #{c.name}: no :backend_connected"
+        refute :stop in success_types, "case #{c.name}: no :stop signal"
+        refute :budget_exhausted in success_types, "case #{c.name}: no :budget_exhausted"
+
+        assert Registry.lookup(Arbor.Voice.Registry, {user_id, agent_id}) == [],
+               "case #{c.name}: no registry leak"
+      end
+    end
+  end
+
+  # ---------------------------------------------------------------------------
   # UTC day / duration calculation
   # ---------------------------------------------------------------------------
 
