@@ -343,15 +343,16 @@ defmodule Arbor.Voice.Config do
   # ---------------------------------------------------------------------------
 
   @doc """
-  Pure validation: an atom module exporting `send_message/4`. Catch-safe so
-  compiled-but-not-yet-loaded modules are accepted.
+  Pure validation: an atom module exporting `send_message/4` and
+  `dispatch_task/4`. Catch-safe so compiled-but-not-yet-loaded modules are
+  accepted.
   """
   @spec validate_agent_module(term()) :: {:ok, module()} | {:error, :invalid_config}
   def validate_agent_module(mod) when is_atom(mod) and not is_nil(mod) do
     try do
       exports = mod.module_info(:exports)
 
-      if {:send_message, 4} in exports do
+      if {:send_message, 4} in exports and {:dispatch_task, 4} in exports do
         {:ok, mod}
       else
         {:error, :invalid_config}
@@ -366,7 +367,7 @@ defmodule Arbor.Voice.Config do
   def validate_agent_module(_), do: {:error, :invalid_config}
 
   @doc """
-  Cross-library Agent facade module for consult_agent.
+  Cross-library Agent facade module for consult_agent and dispatch_coding_task.
 
   Defaults to `Arbor.Agent`. Not a public per-session option — tests may
   replace via Application env (`:agent_module`) in isolated non-async tests
@@ -378,5 +379,46 @@ defmodule Arbor.Voice.Config do
     :arbor_voice
     |> Application.get_env(:agent_module, Arbor.Agent)
     |> validate_agent_module()
+  end
+
+  # ---------------------------------------------------------------------------
+  # Orchestrator facade collaborator (VP-05C / VOICE-10 partial)
+  # ---------------------------------------------------------------------------
+
+  @doc """
+  Pure validation: an atom module exporting `coding_repo_roots/0`. Catch-safe.
+  """
+  @spec validate_orchestrator_module(term()) :: {:ok, module()} | {:error, :invalid_config}
+  def validate_orchestrator_module(mod) when is_atom(mod) and not is_nil(mod) do
+    try do
+      exports = mod.module_info(:exports)
+
+      if {:coding_repo_roots, 0} in exports do
+        {:ok, mod}
+      else
+        {:error, :invalid_config}
+      end
+    rescue
+      _ -> {:error, :invalid_config}
+    catch
+      _kind, _reason -> {:error, :invalid_config}
+    end
+  end
+
+  def validate_orchestrator_module(_), do: {:error, :invalid_config}
+
+  @doc """
+  Cross-library Orchestrator facade for coding repo root resolution.
+
+  Defaults to `Arbor.Orchestrator`. Not a public per-session option — tests may
+  replace via Application env (`:orchestrator_module`) in isolated non-async
+  tests and must restore. Malformed Application config fails closed as
+  `{:error, :invalid_config}`.
+  """
+  @spec orchestrator_module() :: {:ok, module()} | {:error, :invalid_config}
+  def orchestrator_module do
+    :arbor_voice
+    |> Application.get_env(:orchestrator_module, Arbor.Orchestrator)
+    |> validate_orchestrator_module()
   end
 end

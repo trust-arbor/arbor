@@ -9,12 +9,13 @@ defmodule Arbor.Voice.ToolRouter.FrontDeskTest do
   alias Arbor.Voice.ToolRouter.FrontDesk
 
   @tag spec: "VOICE-9"
-  test "catalog is exactly one consult_agent function schema with min/maxLength" do
-    assert [decl] = FrontDesk.tools()
-    assert decl == hd(FrontDesk.catalog())
+  test "catalog includes consult_agent function schema with min/maxLength" do
+    tools = FrontDesk.tools()
+    assert tools == FrontDesk.catalog()
+    assert Enum.map(tools, & &1["name"]) == ["consult_agent", "dispatch_coding_task"]
 
+    decl = Enum.find(tools, &(&1["name"] == "consult_agent"))
     assert decl["type"] == "function"
-    assert decl["name"] == "consult_agent"
     assert is_binary(decl["description"]) and String.trim(decl["description"]) != ""
 
     params = decl["parameters"]

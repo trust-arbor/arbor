@@ -570,14 +570,16 @@ defmodule Arbor.Voice.Session do
     end
   end
 
-  # Fixed consult authority: binds caller, target, engagement, timeout, and
-  # optional redacted proof. Router never sees raw credentials or MFA choice.
+  # Fixed tool authority: binds caller, target, engagement, timeout, optional
+  # redacted proof, orchestrator roots, and policy factory. Router never sees
+  # raw credentials or MFA choice.
   defp build_consult_authority(config, engagement_id) do
     user_id = config.user_id
     agent_id = config.agent_id
     tool_timeout_ms = config.tool_router_timeout_ms
     redacted = config.session_token
     agent_module = config.agent_module
+    orchestrator_module = config.orchestrator_module
 
     %{
       consult_agent: fn message when is_binary(message) ->
@@ -596,8 +598,72 @@ defmodule Arbor.Voice.Session do
           end
 
         agent_module.send_message(user_id, agent_id, um, opts)
+      end,
+      dispatch_coding_task: fn task_intent when is_binary(task_intent) ->
+        dispatch_coding_task(
+          task_intent,
+          user_id,
+          agent_id,
+          agent_module,
+          orchestrator_module,
+          redacted
+        )
       end
     }
+  end
+
+  defp dispatch_coding_task(
+         task_intent,
+         user_id,
+         agent_id,
+         agent_module,
+         orchestrator_module,
+         redacted
+       ) do
+    try do
+      with {:ok, root} <- first_coding_root(orchestrator_module),
+           {:ok, task} <- Arbor.Voice.CodingPlanFactory.build(task_intent, root) do
+        agent_opts =
+          case redacted do
+            nil -> []
+            %Redacted{} = r -> [session_token: Redacted.value(r)]
+          end
+
+        case agent_module.dispatch_task(user_id, agent_id, task, agent_opts) do
+          {:ok, task_id} when is_binary(task_id) -> {:ok, task_id}
+          {:error, _} -> {:error, :tool_error}
+          _ -> {:error, :tool_error}
+        end
+      else
+        {:error, _} -> {:error, :tool_error}
+        _ -> {:error, :tool_error}
+      end
+    rescue
+      _ -> {:error, :tool_error}
+    catch
+      _, _ -> {:error, :tool_error}
+    end
+  end
+
+  defp first_coding_root(orchestrator_module) do
+    try do
+      case orchestrator_module.coding_repo_roots() do
+        {:ok, [root | _]}
+        when is_binary(root) and byte_size(root) > 0 and String.valid?(root) ->
+          if Path.type(root) == :absolute and not String.match?(root, ~r/[\x00-\x1F\x7F]/) do
+            {:ok, root}
+          else
+            {:error, :roots_unavailable}
+          end
+
+        _ ->
+          {:error, :roots_unavailable}
+      end
+    rescue
+      _ -> {:error, :roots_unavailable}
+    catch
+      _, _ -> {:error, :roots_unavailable}
+    end
   end
 
   defp reduce_backend_meta(%{backend: backend, mode: mode})

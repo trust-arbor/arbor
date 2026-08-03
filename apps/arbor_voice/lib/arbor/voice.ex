@@ -7,13 +7,14 @@ defmodule Arbor.Voice do
   No public operation accepts or returns a pid. Optional speech output is an
   arity-1 callback seam only; no device transport or public output API.
 
-  ## VP-05B — front-desk tools and progress (VOICE-9, VOICE-11)
+  ## VP-05B / VP-05C — front-desk tools and progress (VOICE-9, VOICE-11; partial VOICE-10/12/17)
 
   Production sessions default to `Arbor.Voice.ToolRouter.FrontDesk` with a
-  static `consult_agent` catalog. Consultation runs through a Session-built
-  authority that calls the public `Arbor.Agent` facade; the optional
-  `:session_token` bearer proof is wrapped in `Arbor.Voice.Redacted` and never
-  enters router context, signals, status, or tool output.
+  static two-tool catalog: `consult_agent` and `dispatch_coding_task`.
+  Consultation and managed coding dispatch run through a Session-built
+  authority that calls public `Arbor.Agent` / `Arbor.Orchestrator` facades; the
+  optional `:session_token` bearer proof is wrapped in `Arbor.Voice.Redacted`
+  and never enters router context, signals, status, or tool output.
 
   Slow tools schedule one generation/token-fenced progress timer. Crossing
   `:progress_threshold_ms` (default 2000 ms) offers a fixed spoken working cue
@@ -89,8 +90,9 @@ defmodule Arbor.Voice do
 
   ## VP-05B options (closed allowlist)
 
-  * `:tool_router` — defaults to `Arbor.Voice.ToolRouter.FrontDesk` (VOICE-9
-    static `consult_agent` catalog). Explicit empty: `EmptyCatalog`.
+  * `:tool_router` — defaults to `Arbor.Voice.ToolRouter.FrontDesk` (VOICE-9/10
+    static `consult_agent` + `dispatch_coding_task` catalog). Explicit empty:
+    `EmptyCatalog`.
   * `:session_token` — optional non-empty binary human session proof (≤4096
     bytes). Wrapped in `Redacted` before Session state; omitted Agent key when
     absent. Malformed values → `{:error, :invalid_opts}`.
@@ -232,6 +234,7 @@ defmodule Arbor.Voice do
            resolve_progress_threshold_ms(opts, tool_router_timeout_ms),
          {:ok, session_token} <- resolve_session_token(opts),
          {:ok, agent_module} <- resolve_agent_module(),
+         {:ok, orchestrator_module} <- resolve_orchestrator_module(),
          :ok <- validate_optional_module(opts, :engagement_store) do
       {:ok,
        %{
@@ -261,7 +264,8 @@ defmodule Arbor.Voice do
          tool_declarations: tool_declarations,
          progress_threshold_ms: progress_threshold_ms,
          session_token: session_token,
-         agent_module: agent_module
+         agent_module: agent_module,
+         orchestrator_module: orchestrator_module
        }}
     end
   end
@@ -655,6 +659,13 @@ defmodule Arbor.Voice do
 
   defp resolve_agent_module do
     case Config.agent_module() do
+      {:ok, mod} -> {:ok, mod}
+      {:error, _} -> {:error, :invalid_config}
+    end
+  end
+
+  defp resolve_orchestrator_module do
+    case Config.orchestrator_module() do
       {:ok, mod} -> {:ok, mod}
       {:error, _} -> {:error, :invalid_config}
     end

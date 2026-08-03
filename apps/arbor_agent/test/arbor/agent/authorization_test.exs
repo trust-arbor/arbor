@@ -90,6 +90,10 @@ defmodule Arbor.Agent.AuthorizationTest do
       # VP-05A owner-scoped chat facade (default opts yields both arities)
       assert {:send_message, 3} in exports
       assert {:send_message, 4} in exports
+
+      # VP-05C managed dispatch facade
+      assert {:dispatch_task, 3} in exports
+      assert {:dispatch_task, 4} in exports
     end
   end
 end

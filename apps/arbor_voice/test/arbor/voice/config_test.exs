@@ -233,13 +233,22 @@ defmodule Arbor.Voice.ConfigTest do
     end
   end
 
-  describe "agent_module (VP-05B / VOICE-9)" do
+  describe "agent_module (VP-05B / VP-05C)" do
     @tag spec: "VOICE-9"
-    test "defaults to Arbor.Agent and rejects modules without send_message/4" do
+    test "defaults to Arbor.Agent and requires send_message/4 and dispatch_task/4" do
       assert {:ok, Arbor.Agent} = Config.validate_agent_module(Arbor.Agent)
       assert {:error, :invalid_config} = Config.validate_agent_module(String)
       assert {:error, :invalid_config} = Config.validate_agent_module(nil)
       assert {:error, :invalid_config} = Config.validate_agent_module("Arbor.Agent")
+    end
+  end
+
+  describe "orchestrator_module (VP-05C)" do
+    @tag spec: "VOICE-10"
+    test "defaults to Arbor.Orchestrator and requires coding_repo_roots/0" do
+      assert {:ok, Arbor.Orchestrator} = Config.validate_orchestrator_module(Arbor.Orchestrator)
+      assert {:error, :invalid_config} = Config.validate_orchestrator_module(String)
+      assert {:error, :invalid_config} = Config.validate_orchestrator_module(nil)
     end
   end
 end

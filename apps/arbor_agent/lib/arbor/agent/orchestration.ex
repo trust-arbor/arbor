@@ -57,7 +57,10 @@ defmodule Arbor.Agent.Orchestration do
          {:ok, task_id} <- normalize_or_generate_task_id(opts),
          {:ok, caller_id} <- caller_id(opts),
          :ok <- authorize_dispatch(opts, caller_id, agent_id) do
-      dispatch_with_task_capabilities(agent_id, task, task_id, caller_id, opts)
+      # Proof may reach only Security.authorize/4. Strip both key forms before
+      # grants, TaskStore, cleanup descriptors, audit, or retained state.
+      safe_opts = strip_session_tokens(opts)
+      dispatch_with_task_capabilities(agent_id, task, task_id, caller_id, safe_opts)
     end
   end
 
@@ -632,16 +635,23 @@ defmodule Arbor.Agent.Orchestration do
     if opt(opts, :authorize?, true) == false do
       :ok
     else
-      [scoped_dispatch_uri(agent_id), @dispatch_uri]
-      |> Enum.find_value(fn resource_uri ->
-        case authorize_caller(opts, caller_id, resource_uri, :execute) do
-          :ok -> :ok
-          _ -> nil
-        end
-      end)
-      |> case do
-        :ok -> :ok
-        nil -> {:error, {:unauthorized, :agent_dispatch_required}}
+      # Reject malformed/duplicate session proofs before any grant/TaskStore work.
+      case security_auth_opts(opts) do
+        {:error, :invalid_session_token} ->
+          {:error, {:unauthorized, :invalid_session_token}}
+
+        {:ok, _auth_opts} ->
+          [scoped_dispatch_uri(agent_id), @dispatch_uri]
+          |> Enum.find_value(fn resource_uri ->
+            case authorize_caller(opts, caller_id, resource_uri, :execute) do
+              :ok -> :ok
+              _ -> nil
+            end
+          end)
+          |> case do
+            :ok -> :ok
+            nil -> {:error, {:unauthorized, :agent_dispatch_required}}
+          end
       end
     end
   end
@@ -1566,6 +1576,7 @@ defmodule Arbor.Agent.Orchestration do
       :ok
     else
       with {:ok, actor} <- caller_id(opts),
+           {:ok, auth_opts} <- security_auth_opts(opts),
            {:ok, :authorized} <-
              opts
              |> security_module()
@@ -1573,14 +1584,24 @@ defmodule Arbor.Agent.Orchestration do
                actor,
                resource_uri,
                action,
-               [verify_identity: false]
+               auth_opts
              ]) do
         :ok
       else
-        {:ok, :pending_approval, _id} -> {:error, {:unauthorized, :pending_approval}}
-        {:error, reason} -> {:error, {:unauthorized, reason}}
-        :module_unavailable -> {:error, {:unauthorized, :security_unavailable}}
-        other -> {:error, {:unauthorized, other}}
+        {:error, :invalid_session_token} ->
+          {:error, {:unauthorized, :invalid_session_token}}
+
+        {:ok, :pending_approval, _id} ->
+          {:error, {:unauthorized, :pending_approval}}
+
+        {:error, reason} ->
+          {:error, {:unauthorized, reason}}
+
+        :module_unavailable ->
+          {:error, {:unauthorized, :security_unavailable}}
+
+        other ->
+          {:error, {:unauthorized, other}}
       end
     end
   end
@@ -1648,23 +1669,98 @@ defmodule Arbor.Agent.Orchestration do
   end
 
   defp authorize_caller(opts, caller_id, resource_uri, action) do
-    case opts
-         |> security_module()
-         |> apply_if_exported(:authorize, [
-           caller_id,
-           resource_uri,
-           action,
-           [verify_identity: false]
-         ]) do
-      {:ok, :authorized} -> :ok
-      :ok -> :ok
-      :authorized -> :ok
-      {:ok, :pending_approval, _id} -> {:error, {:unauthorized, :pending_approval}}
-      {:error, reason} -> {:error, {:unauthorized, reason}}
-      :module_unavailable -> {:error, {:unauthorized, :security_unavailable}}
-      other -> {:error, {:unauthorized, other}}
+    case security_auth_opts(opts) do
+      {:error, :invalid_session_token} ->
+        {:error, {:unauthorized, :invalid_session_token}}
+
+      {:ok, auth_opts} ->
+        case opts
+             |> security_module()
+             |> apply_if_exported(:authorize, [
+               caller_id,
+               resource_uri,
+               action,
+               auth_opts
+             ]) do
+          {:ok, :authorized} -> :ok
+          :ok -> :ok
+          :authorized -> :ok
+          {:ok, :pending_approval, _id} -> {:error, {:unauthorized, :pending_approval}}
+          {:error, reason} -> {:error, {:unauthorized, reason}}
+          :module_unavailable -> {:error, {:unauthorized, :security_unavailable}}
+          other -> {:error, {:unauthorized, other}}
+        end
     end
   end
+
+  # Absent vs exactly one atom/string session_token. Alias duplicates and every
+  # malformed present value fail closed before grants/TaskStore/audit.
+  @max_session_token_bytes 4096
+
+  defp security_auth_opts(opts) do
+    case parse_session_token_opt(opts) do
+      :absent ->
+        {:ok, [verify_identity: false]}
+
+      {:ok, token} ->
+        {:ok, [verify_identity: false, session_token: token]}
+
+      {:error, :invalid_session_token} = error ->
+        error
+    end
+  end
+
+  defp parse_session_token_opt(opts) when is_list(opts) do
+    try do
+      values =
+        opts
+        |> Enum.filter(fn
+          {k, _} when k in [:session_token, "session_token"] -> true
+          _ -> false
+        end)
+        |> Enum.map(fn {_k, v} -> v end)
+
+      case values do
+        [] ->
+          :absent
+
+        [token]
+        when is_binary(token) and byte_size(token) > 0 and
+               byte_size(token) <= @max_session_token_bytes ->
+          {:ok, token}
+
+        [_invalid] ->
+          {:error, :invalid_session_token}
+
+        _duplicates ->
+          {:error, :invalid_session_token}
+      end
+    rescue
+      _ -> {:error, :invalid_session_token}
+    catch
+      :exit, _ -> {:error, :invalid_session_token}
+    end
+  end
+
+  defp parse_session_token_opt(opts) when is_map(opts) do
+    parse_session_token_opt(Map.to_list(opts))
+  end
+
+  defp parse_session_token_opt(_opts), do: :absent
+
+  defp strip_session_tokens(opts) when is_list(opts) do
+    Enum.reject(opts, fn
+      {k, _} when k in [:session_token, "session_token"] -> true
+      _ -> false
+    end)
+  end
+
+  defp strip_session_tokens(opts) when is_map(opts) do
+    opts
+    |> Map.drop([:session_token, "session_token"])
+  end
+
+  defp strip_session_tokens(_opts), do: []
 
   defp normalize_id(id) when is_binary(id) do
     if String.trim(id) == "", do: {:error, :invalid_approval_id}, else: {:ok, id}
@@ -1999,8 +2095,11 @@ defmodule Arbor.Agent.Orchestration do
 
   defp opt(_opts, _key, default), do: default
 
-  defp task_store_opts(opts) when is_list(opts), do: opts
-  defp task_store_opts(opts) when is_map(opts), do: Map.to_list(opts)
+  defp task_store_opts(opts) when is_list(opts), do: strip_session_tokens(opts)
+
+  defp task_store_opts(opts) when is_map(opts),
+    do: opts |> strip_session_tokens() |> Map.to_list()
+
   defp task_store_opts(_opts), do: []
 
   defp normalize_opts(opts) when is_list(opts), do: Map.new(opts)

@@ -171,6 +171,51 @@ defmodule Arbor.Agent do
   end
 
   # ===========================================================================
+  # Public API — Authorized managed-task dispatch (owner-scoped)
+  # ===========================================================================
+
+  @doc """
+  Dispatch one managed, owner-scoped async task after capability authorization.
+
+  Delegates to `Arbor.Agent.Orchestration.dispatch/3` with fixed production
+  collaborators. The optional `:session_token` human proof is forwarded only
+  into `Arbor.Security.authorize/4` and is stripped before TaskStore, grants,
+  audit, or retained orchestration state.
+
+  ## Options
+
+  - `:session_token` — optional human session proof (non-empty binary ≤4096)
+
+  Unknown, duplicate, nil, empty, non-binary, or oversized options are rejected
+  before authorization or dispatch. Absence of `:session_token` is allowed.
+
+  ## Returns
+
+  - `{:ok, task_id}` when orchestration returns a stable task id immediately
+  - `{:error, reason}` with a closed atom vocabulary (no content/capability leakage)
+  """
+  @spec dispatch_task(String.t(), String.t(), map(), keyword()) ::
+          {:ok, String.t()}
+          | {:error,
+             :invalid_opts
+             | :invalid_caller_id
+             | :invalid_agent_id
+             | :invalid_task
+             | :unauthorized
+             | :dispatch_failed}
+  def dispatch_task(caller_id, target_agent_id, task, opts \\ []) do
+    # Fixed production collaborator only — never selectable via public opts.
+    # Tests inject via DispatchFacade.dispatch/5, never module/MFA opts.
+    Arbor.Agent.DispatchFacade.dispatch(
+      caller_id,
+      target_agent_id,
+      task,
+      opts,
+      &Arbor.Agent.Orchestration.dispatch/3
+    )
+  end
+
+  # ===========================================================================
   # Public API — Authorized versions (for callers that need capability checks)
   # ===========================================================================
 
