@@ -91,5 +91,22 @@ defmodule Arbor.Security.SessionTokenTest do
     test "non-binary input is rejected" do
       assert {:error, :invalid_token} = SessionToken.verify(:not_a_token)
     end
+
+    test "oversized binary is rejected before Base64/HMAC work" do
+      oversized = String.duplicate("A", 4097)
+      assert {:error, :invalid_token} = SessionToken.verify(oversized)
+    end
+
+    test "empty binary is rejected before Base64/HMAC work" do
+      assert {:error, :invalid_token} = SessionToken.verify("")
+    end
+
+    test "generated tokens stay under the 4096-byte bound" do
+      {:ok, token} = SessionToken.generate("human_bound_check")
+      assert is_binary(token)
+      assert byte_size(token) > 0
+      assert byte_size(token) <= 4096
+      assert {:ok, "human_bound_check"} = SessionToken.verify(token)
+    end
   end
 end

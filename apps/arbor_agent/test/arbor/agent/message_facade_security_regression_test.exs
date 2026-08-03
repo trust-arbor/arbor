@@ -7,6 +7,7 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
   alias Arbor.Agent.Registry
   alias Arbor.Contracts.Session.UserMessage
   alias Arbor.Security
+  alias Arbor.Security.SessionToken
 
   defmodule CaptureHost do
     @moduledoc false
@@ -168,7 +169,7 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
     auth_counter = :counters.new(1, [])
     chat_counter = :counters.new(1, [])
 
-    authorize = fn _caller, _resource, _action ->
+    authorize = fn _caller, _resource, _action, _auth_opts ->
       :counters.add(auth_counter, 1, 1)
       {:ok, :authorized}
     end
@@ -179,6 +180,80 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
     end
 
     {auth_counter, chat_counter, authorize, chat}
+  end
+
+  # Humans require OIDC registration (Registry rejects bare human_ register).
+  # Inline the minimal issuer path so arbor_agent tests do not depend on
+  # arbor_security/test/support (not on the agent test load path).
+  defp register_active_human! do
+    unique = System.unique_integer([:positive, :monotonic])
+    issuer = "https://oidc-test.arbor.local/msgfacade/#{unique}"
+    subject = "subject-#{unique}"
+    client_id = "arbor-test-client"
+    kid = "test-key-#{unique}"
+
+    private_jwk = JOSE.JWK.generate_key({:ec, :secp256r1})
+    {_, private_map} = JOSE.JWK.to_map(private_jwk)
+    {_, public_map} = JOSE.JWK.to_public_map(private_jwk)
+    public_map = Map.merge(public_map, %{"alg" => "ES256", "kid" => kid})
+    signer = Joken.Signer.create("ES256", private_map, %{"kid" => kid})
+
+    claims = %{
+      "iss" => issuer,
+      "sub" => subject,
+      "aud" => client_id,
+      "exp" => System.os_time(:second) + 3_600,
+      "iat" => System.os_time(:second),
+      "email" => "operator-#{unique}@example.test",
+      "name" => "MessageFacade OIDC Human"
+    }
+
+    {:ok, id_token} = Joken.Signer.sign(claims, signer)
+
+    table = :arbor_oidc_jwks_cache
+
+    if :ets.whereis(table) == :undefined do
+      :ets.new(table, [:named_table, :public, :set, read_concurrency: true])
+    end
+
+    true =
+      :ets.insert(
+        table,
+        {issuer, %{"keys" => [public_map]}, System.monotonic_time(:millisecond) + 60_000}
+      )
+
+    {:ok, identity} = Arbor.Contracts.Security.Identity.generate(name: claims["name"])
+
+    human_id =
+      "human_" <>
+        String.slice(
+          Base.encode16(:crypto.hash(:sha256, "#{issuer}:#{subject}"), case: :lower),
+          0,
+          40
+        )
+
+    human_identity = %{
+      identity
+      | agent_id: human_id,
+        metadata: %{
+          "identity_type" => "human",
+          "oidc_issuer" => issuer,
+          "oidc_sub" => subject
+        }
+    }
+
+    assert :ok =
+             Security.register_oidc_identity(human_identity, id_token, %{
+               issuer: issuer,
+               client_id: client_id
+             })
+
+    on_exit(fn ->
+      if :ets.whereis(table) != :undefined, do: :ets.delete(table, issuer)
+      _ = Security.deregister_identity(human_id)
+    end)
+
+    human_id
   end
 
   # ---------------------------------------------------------------------------
@@ -214,7 +289,141 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
       # Exact envelope identity — not a field-by-field subset.
       assert seen == message
       assert opts[:timeout] == 5_000
+      refute Keyword.has_key?(opts, :session_token)
       assert Process.alive?(host_pid)
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # A2. Enabled identity verification + human session token (public path)
+  # ---------------------------------------------------------------------------
+
+  describe "security regression: enabled identity verification with session_token" do
+    setup do
+      prev_secret = Application.get_env(:arbor_security, :session_token_secret)
+
+      Application.put_env(
+        :arbor_security,
+        :session_token_secret,
+        "agent-msg-facade-secret-#{System.unique_integer([:positive])}"
+      )
+
+      # Force the production identity-verification path ON for this describe.
+      Application.put_env(:arbor_security, :identity_verification, true)
+
+      on_exit(fn ->
+        case prev_secret do
+          nil -> Application.delete_env(:arbor_security, :session_token_secret)
+          v -> Application.put_env(:arbor_security, :session_token_secret, v)
+        end
+      end)
+
+      :ok
+    end
+
+    test "security regression: valid human token + exact chat cap delivers exact envelope once" do
+      n = System.unique_integer([:positive])
+      caller = register_active_human!()
+      target = "agent_msgfacade_tok_#{n}"
+
+      track_grant!(caller, "arbor://chat/agent/#{target}")
+      host_pid = register_capture_host(target, self(), "reply-token")
+
+      assert {:ok, token} = SessionToken.generate(caller)
+
+      message =
+        build_message(caller,
+          content: "enabled-identity token path",
+          engagement_id: "engagement_token_#{n}"
+        )
+
+      assert {:ok, "reply-token"} =
+               Arbor.Agent.send_message(caller, target, message,
+                 timeout: 5_000,
+                 session_token: token
+               )
+
+      assert_receive {:query_seen, %UserMessage{} = seen, opts}
+      refute_receive {:query_seen, _, _}, 50
+
+      assert seen == message
+      assert opts[:timeout] == 5_000
+      refute Keyword.has_key?(opts, :session_token)
+      refute inspect(opts) =~ token
+      refute inspect({:ok, "reply-token"}) =~ token
+      assert Process.alive?(host_pid)
+    end
+
+    test "security regression: valid token without exact capability denies before delivery" do
+      n = System.unique_integer([:positive])
+      caller = register_active_human!()
+      target = "agent_msgfacade_nocap_#{n}"
+
+      register_capture_host(target)
+      assert {:ok, token} = SessionToken.generate(caller)
+      message = build_message(caller)
+
+      assert {:error, :unauthorized} =
+               Arbor.Agent.send_message(caller, target, message, session_token: token)
+
+      refute_receive {:query_seen, _, _}, 50
+      refute inspect({:error, :unauthorized}) =~ token
+    end
+
+    test "security regression: missing proof with verification on denies before delivery" do
+      n = System.unique_integer([:positive])
+      caller = register_active_human!()
+      target = "agent_msgfacade_miss_#{n}"
+
+      track_grant!(caller, "arbor://chat/agent/#{target}")
+      register_capture_host(target)
+      message = build_message(caller)
+
+      assert {:error, :unauthorized} = Arbor.Agent.send_message(caller, target, message)
+      refute_receive {:query_seen, _, _}, 50
+    end
+
+    test "security regression: exact capability but wrong-principal token denies before Manager" do
+      n = System.unique_integer([:positive])
+      caller = register_active_human!()
+      other = register_active_human!()
+      target = "agent_msgfacade_wrongtok_#{n}"
+
+      track_grant!(caller, "arbor://chat/agent/#{target}")
+      register_capture_host(target)
+      message = build_message(caller)
+
+      assert {:ok, wrong_token} = SessionToken.generate(other)
+
+      assert {:error, :unauthorized} =
+               Arbor.Agent.send_message(caller, target, message, session_token: wrong_token)
+
+      refute_receive {:query_seen, _, _}, 50
+      refute inspect({:error, :unauthorized}) =~ wrong_token
+    end
+
+    test "security regression: exact capability but tampered token denies before Manager" do
+      n = System.unique_integer([:positive])
+      caller = register_active_human!()
+      target = "agent_msgfacade_tamper_#{n}"
+
+      track_grant!(caller, "arbor://chat/agent/#{target}")
+      register_capture_host(target)
+      message = build_message(caller)
+
+      assert {:ok, good} = SessionToken.generate(caller)
+      {:ok, raw} = Base.url_decode64(good, padding: false)
+      <<sig::binary-size(32), first, rest::binary>> = raw
+
+      tampered =
+        Base.url_encode64(sig <> <<Bitwise.bxor(first, 0xFF)>> <> rest, padding: false)
+
+      assert {:error, :unauthorized} =
+               Arbor.Agent.send_message(caller, target, message, session_token: tampered)
+
+      refute_receive {:query_seen, _, _}, 50
+      refute inspect({:error, :unauthorized}) =~ good
+      refute inspect({:error, :unauthorized}) =~ tampered
     end
   end
 
@@ -262,14 +471,14 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
       chat = flunk_chat_fun()
 
       faults = [
-        fn _c, _r, _a -> {:ok, :pending_approval, "prop_1"} end,
-        fn _c, _r, _a -> :ok end,
-        fn _c, _r, _a -> {:ok, :weird} end,
-        fn _c, _r, _a -> :authorized end,
-        fn _c, _r, _a -> raise "auth boom" end,
-        fn _c, _r, _a -> throw(:auth_throw) end,
-        fn _c, _r, _a -> exit(:auth_exit) end,
-        fn _c, _r, _a -> exit({:noproc, {GenServer, :call, [:missing, :x]}}) end
+        fn _c, _r, _a, _o -> {:ok, :pending_approval, "prop_1"} end,
+        fn _c, _r, _a, _o -> :ok end,
+        fn _c, _r, _a, _o -> {:ok, :weird} end,
+        fn _c, _r, _a, _o -> :authorized end,
+        fn _c, _r, _a, _o -> raise "auth boom" end,
+        fn _c, _r, _a, _o -> throw(:auth_throw) end,
+        fn _c, _r, _a, _o -> exit(:auth_exit) end,
+        fn _c, _r, _a, _o -> exit({:noproc, {GenServer, :call, [:missing, :x]}}) end
       ]
 
       for authorize <- faults do
@@ -328,6 +537,11 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
         {caller, target, good, [timeout: "fast"], :invalid_timeout},
         {caller, target, good, [unknown: true], :invalid_opts},
         {caller, target, good, [timeout: 1000, timeout: 2000], :invalid_opts},
+        {caller, target, good, [session_token: nil], :invalid_opts},
+        {caller, target, good, [session_token: ""], :invalid_opts},
+        {caller, target, good, [session_token: :atom], :invalid_opts},
+        {caller, target, good, [session_token: String.duplicate("x", 4097)], :invalid_opts},
+        {caller, target, good, [session_token: "a", session_token: "b"], :invalid_opts},
         # Non-keyword / improper / non-list option shapes
         {caller, target, good, %{timeout: 1000}, :invalid_opts},
         {caller, target, good, :timeout, :invalid_opts},
@@ -357,7 +571,7 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
            target: target
          } do
       message = build_message(caller, content: "secret-content-xyz", engagement_id: "eng_secret")
-      authorize = fn _c, _r, _a -> {:ok, :authorized} end
+      authorize = fn _c, _r, _a, _o -> {:ok, :authorized} end
 
       chats = [
         fn _m, _s, _o -> {:error, :agent_not_found} end,
@@ -379,7 +593,7 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
       target: target
     } do
       message = build_message(caller)
-      authorize = fn _c, _r, _a -> {:ok, :authorized} end
+      authorize = fn _c, _r, _a, _o -> {:ok, :authorized} end
 
       assert {:ok, ""} =
                MessageFacade.deliver(caller, target, message, [], authorize, fn _m, _s, _o ->
@@ -391,6 +605,7 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
         assert sender == caller
         assert opts[:agent_id] == target
         assert opts[:timeout] == 100
+        refute Keyword.has_key?(opts, :session_token)
         {:ok, "ok"}
       end
 
@@ -400,7 +615,72 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
   end
 
   # ---------------------------------------------------------------------------
-  # F. Public fixed collaborators / exports
+  # F. Session token option forwarding (synthetic)
+  # ---------------------------------------------------------------------------
+
+  describe "security regression: session_token option forwarding" do
+    test "security regression: authorizer receives exact token once; Manager never sees it", %{
+      caller: caller,
+      target: target
+    } do
+      message = build_message(caller)
+      token = "session-token-sentinel-#{System.unique_integer([:positive])}"
+      auth_counter = :counters.new(1, [])
+
+      authorize = fn c, resource, action, auth_opts ->
+        :counters.add(auth_counter, 1, 1)
+        assert c == caller
+        assert resource == "arbor://chat/agent/#{target}"
+        assert action == :chat
+        assert auth_opts == [session_token: token]
+        {:ok, :authorized}
+      end
+
+      chat = fn msg, sender, opts ->
+        assert msg == message
+        assert sender == caller
+        assert opts[:agent_id] == target
+        assert opts[:timeout] == 5_000
+        refute Keyword.has_key?(opts, :session_token)
+        refute inspect(opts) =~ token
+        {:ok, "reply-ok"}
+      end
+
+      assert {:ok, "reply-ok"} =
+               MessageFacade.deliver(
+                 caller,
+                 target,
+                 message,
+                 [timeout: 5_000, session_token: token],
+                 authorize,
+                 chat
+               )
+
+      assert :counters.get(auth_counter, 1) == 1
+    end
+
+    test "security regression: absent session_token forwards empty auth opts", %{
+      caller: caller,
+      target: target
+    } do
+      message = build_message(caller)
+
+      authorize = fn _c, _r, _a, auth_opts ->
+        assert auth_opts == []
+        {:ok, :authorized}
+      end
+
+      chat = fn _m, _s, opts ->
+        refute Keyword.has_key?(opts, :session_token)
+        {:ok, "ok"}
+      end
+
+      assert {:ok, "ok"} = MessageFacade.deliver(caller, target, message, [], authorize, chat)
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # G. Public fixed collaborators / exports
   # ---------------------------------------------------------------------------
 
   describe "public facade uses fixed collaborators" do

@@ -80,9 +80,20 @@ defmodule Arbor.Security do
 
   Checks whether the principal holds a valid capability for the resource.
 
+  ## Identity proof options
+
+  - `:signed_request` — per-request Ed25519 proof (agents)
+  - `:session_token` — HMAC human session proof (alternative to signing)
+  - `:identity_verified` — Gateway pre-verified shortcut (no token present)
+
+  When `:session_token` is present it is extracted and redacted at this boundary
+  before URI normalization, reflexes, context construction, or events. A present
+  token forces active Registry status then HMAC/principal verification.
+
   ## Examples
 
       Arbor.Security.authorize("agent_001", "arbor://fs/read/docs")
+      Arbor.Security.authorize(human_id, resource, :chat, session_token: token)
   """
   @spec authorize(String.t(), String.t(), atom(), keyword()) ::
           {:ok, :authorized}
@@ -645,6 +656,10 @@ defmodule Arbor.Security do
   # ===========================================================================
 
   @impl Arbor.Contracts.API.Security
+  # Private absence sentinel for session_token extraction — never nil.
+  @session_token_absent :__session_token_absent__
+  @max_session_token_bytes 4096
+
   def check_if_principal_has_capability_for_resource_action(
         principal_id,
         resource_uri,
@@ -662,33 +677,97 @@ defmodule Arbor.Security do
     # defense-in-depth path normalization. Surfaced 2026-06-06 by the
     # morning-digest pipelines hitting the gate when run via the
     # per-run identity flow.
-    # Step 1: Reflexes — instant safety block, must run before anything else
+    #
+    # Session tokens are extracted and redacted before URI normalize, reflexes,
+    # AuthContext construction, or any event/receipt/escalation work so the raw
+    # credential never reaches those surfaces.
     requested_resource_uri = resource_uri
 
-    with {:ok, resource_uri} <- normalize_authorization_resource_uri(resource_uri, opts),
-         reflex_context = build_reflex_context(resource_uri, action, opts),
-         :ok <- check_reflexes(principal_id, reflex_context, resource_uri, action, opts) do
-      # Step 2: Build AuthContext with identity, capabilities, trust profile
-      auth = build_auth_context(principal_id, opts)
+    case extract_session_token(opts) do
+      {:error, reason, safe_opts} ->
+        Events.record_authorization_denied(
+          principal_id,
+          requested_resource_uri,
+          reason,
+          safe_opts
+        )
 
-      # Step 3: Pure authorization decision (no side effects)
-      case AuthDecision.evaluate(auth, resource_uri, action, opts) do
-        {:ok, :authorized, cap, auth} ->
-          handle_authorized(cap, auth, principal_id, resource_uri, action, opts)
+        {:error, reason}
 
-        {:ok, :requires_approval, cap, auth} ->
-          handle_requires_approval(cap, auth, principal_id, resource_uri, action, opts)
+      {:ok, proof, safe_opts} ->
+        decision_opts =
+          case proof do
+            @session_token_absent -> safe_opts
+            token when is_binary(token) -> Keyword.put(safe_opts, :session_token, token)
+          end
 
-        {:error, reason, _auth} ->
-          Events.record_authorization_denied(principal_id, resource_uri, reason, opts)
-          {:error, reason}
-      end
-    else
-      {:error, reason} = error ->
-        Events.record_authorization_denied(principal_id, requested_resource_uri, reason, opts)
-        error
+        with {:ok, resource_uri} <-
+               normalize_authorization_resource_uri(resource_uri, safe_opts),
+             reflex_context = build_reflex_context(resource_uri, action, safe_opts),
+             :ok <-
+               check_reflexes(principal_id, reflex_context, resource_uri, action, safe_opts) do
+          auth = build_auth_context(principal_id, safe_opts)
+
+          case AuthDecision.evaluate(auth, resource_uri, action, decision_opts) do
+            {:ok, :authorized, cap, auth} ->
+              handle_authorized(cap, auth, principal_id, resource_uri, action, safe_opts)
+
+            {:ok, :requires_approval, cap, auth} ->
+              handle_requires_approval(cap, auth, principal_id, resource_uri, action, safe_opts)
+
+            {:error, reason, _auth} ->
+              Events.record_authorization_denied(principal_id, resource_uri, reason, safe_opts)
+              {:error, reason}
+          end
+        else
+          {:error, reason} = error ->
+            Events.record_authorization_denied(
+              principal_id,
+              requested_resource_uri,
+              reason,
+              safe_opts
+            )
+
+            error
+        end
     end
   end
+
+  # Extract every :session_token entry before any downstream work. Absence is a
+  # private sentinel; present nil/empty/non-binary/oversized/duplicate values
+  # fail closed and never fall back to "no proof".
+  defp extract_session_token(opts) when is_list(opts) do
+    try do
+      if Keyword.keyword?(opts) do
+        values = Keyword.get_values(opts, :session_token)
+        safe_opts = Keyword.delete(opts, :session_token)
+
+        case values do
+          [] ->
+            {:ok, @session_token_absent, safe_opts}
+
+          [token]
+          when is_binary(token) and byte_size(token) > 0 and
+                 byte_size(token) <= @max_session_token_bytes ->
+            {:ok, token, safe_opts}
+
+          [_invalid] ->
+            {:error, :invalid_session_token, safe_opts}
+
+          _duplicates ->
+            {:error, :invalid_session_token, safe_opts}
+        end
+      else
+        {:ok, @session_token_absent, opts}
+      end
+    rescue
+      _ -> {:error, :invalid_session_token, []}
+    catch
+      :exit, _ -> {:error, :invalid_session_token, []}
+    end
+  end
+
+  defp extract_session_token(opts), do: {:ok, @session_token_absent, opts}
 
   # Side effects for authorized decisions
   defp handle_authorized(cap, _auth, principal_id, resource_uri, action, opts) do

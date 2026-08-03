@@ -3,7 +3,7 @@ defmodule Arbor.Agent.MessageFacade do
 
   # Library-local implementation of authorized live-agent messaging.
   # Public entry is Arbor.Agent.send_message/4, which always passes fixed
-  # Arbor.Security.authorize/3 and Arbor.Agent.Manager.chat/3 collaborators.
+  # Arbor.Security.authorize/4 and Arbor.Agent.Manager.chat/3 collaborators.
   # deliver/6 accepts funs only so unit tests can inject authorization and
   # delivery faults without ambient Process/Application hijacking.
 
@@ -14,6 +14,9 @@ defmodule Arbor.Agent.MessageFacade do
   @max_id_bytes 256
   @max_content_bytes 32_768
   @max_engagement_id_bytes 256
+  @max_session_token_bytes 4096
+  @session_token_absent :__session_token_absent__
+  @allowed_opt_keys [:timeout, :session_token]
   # Whole-string positive allowlist for ids interpolated into
   # arbor://chat/agent/<target>. Equivalent to
   # \A(?:agent|human)_[A-Za-z0-9_-]+\z plus the 256-byte bound.
@@ -37,16 +40,16 @@ defmodule Arbor.Agent.MessageFacade do
           String.t(),
           UserMessage.t(),
           keyword(),
-          (String.t(), String.t(), atom() -> term()),
+          (String.t(), String.t(), atom(), keyword() -> term()),
           (term(), String.t(), keyword() -> term())
         ) :: {:ok, String.t()} | {:error, error_reason()}
   def deliver(caller_id, target_agent_id, message, opts, authorize_fun, chat_fun)
-      when is_function(authorize_fun, 3) and is_function(chat_fun, 3) do
-    with {:ok, timeout_ms} <- validate_opts(opts),
+      when is_function(authorize_fun, 4) and is_function(chat_fun, 3) do
+    with {:ok, timeout_ms, session_token} <- validate_opts(opts),
          :ok <- validate_principal_id(caller_id, :invalid_caller_id),
          :ok <- validate_principal_id(target_agent_id, :invalid_agent_id),
          :ok <- validate_message(message, caller_id),
-         :ok <- authorize_chat(authorize_fun, caller_id, target_agent_id) do
+         :ok <- authorize_chat(authorize_fun, caller_id, target_agent_id, session_token) do
       deliver_chat(chat_fun, message, caller_id, target_agent_id, timeout_ms)
     end
   end
@@ -64,9 +67,16 @@ defmodule Arbor.Agent.MessageFacade do
           {:error, :invalid_opts}
 
         true ->
-          case Enum.reject(Keyword.keys(opts), &(&1 == :timeout)) do
-            [] -> validate_timeout(Keyword.get(opts, :timeout, @default_timeout_ms))
-            _unknown -> {:error, :invalid_opts}
+          case Enum.reject(Keyword.keys(opts), &(&1 in @allowed_opt_keys)) do
+            [] ->
+              with {:ok, timeout_ms} <-
+                     validate_timeout(Keyword.get(opts, :timeout, @default_timeout_ms)),
+                   {:ok, session_token} <- extract_session_token_opt(opts) do
+                {:ok, timeout_ms, session_token}
+              end
+
+            _unknown ->
+              {:error, :invalid_opts}
           end
       end
     rescue
@@ -79,6 +89,24 @@ defmodule Arbor.Agent.MessageFacade do
   defp has_duplicate_keys?(opts) do
     keys = Keyword.keys(opts)
     length(keys) != length(Enum.uniq(keys))
+  end
+
+  defp extract_session_token_opt(opts) do
+    case Keyword.get_values(opts, :session_token) do
+      [] ->
+        {:ok, @session_token_absent}
+
+      [token]
+      when is_binary(token) and byte_size(token) > 0 and
+             byte_size(token) <= @max_session_token_bytes ->
+        {:ok, token}
+
+      [_invalid] ->
+        {:error, :invalid_opts}
+
+      _duplicates ->
+        {:error, :invalid_opts}
+    end
   end
 
   defp validate_timeout(timeout)
@@ -136,10 +164,16 @@ defmodule Arbor.Agent.MessageFacade do
 
   defp validate_engagement_id(_), do: {:error, :invalid_engagement_id}
 
-  defp authorize_chat(authorize_fun, caller_id, target_agent_id) do
+  defp authorize_chat(authorize_fun, caller_id, target_agent_id, session_token) do
     resource = "arbor://chat/agent/" <> target_agent_id
 
-    case authorize_fun.(caller_id, resource, :chat) do
+    auth_opts =
+      case session_token do
+        @session_token_absent -> []
+        token when is_binary(token) -> [session_token: token]
+      end
+
+    case authorize_fun.(caller_id, resource, :chat, auth_opts) do
       {:ok, :authorized} -> :ok
       {:ok, :pending_approval, _proposal_id} -> {:error, :unauthorized}
       {:error, _reason} -> {:error, :unauthorized}
@@ -153,6 +187,7 @@ defmodule Arbor.Agent.MessageFacade do
   end
 
   defp deliver_chat(chat_fun, message, caller_id, target_agent_id, timeout_ms) do
+    # Manager receives only agent_id + timeout — never session_token.
     case chat_fun.(message, caller_id, agent_id: target_agent_id, timeout: timeout_ms) do
       {:ok, reply} when is_binary(reply) -> {:ok, reply}
       {:ok, _non_binary} -> {:error, :delivery_failed}

@@ -126,8 +126,13 @@ defmodule Arbor.Agent do
   ## Options
 
   - `:timeout` — positive integer milliseconds, max `30_000` (default `30_000`)
+  - `:session_token` — optional human session proof forwarded only to
+    `Arbor.Security.authorize/4` (never to Manager/chat opts, logs, or errors)
 
   Unknown, duplicate, zero, or oversized options are rejected before effects.
+  Present but invalid `:session_token` values (`nil`, empty, non-binary,
+  oversized, duplicate keys) are rejected as `:invalid_opts` before
+  authorization.
 
   ## Returns
 
@@ -160,7 +165,7 @@ defmodule Arbor.Agent do
       target_agent_id,
       message,
       opts,
-      &Arbor.Security.authorize/3,
+      &Arbor.Security.authorize/4,
       &Arbor.Agent.Manager.chat/3
     )
   end

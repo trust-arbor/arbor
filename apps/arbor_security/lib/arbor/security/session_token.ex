@@ -43,6 +43,8 @@ defmodule Arbor.Security.SessionToken do
 
   @default_ttl_seconds 86_400
   @token_version 1
+  # Bound before Base64/HMAC work. Comfortably exceeds generated tokens.
+  @max_token_bytes 4096
 
   @doc """
   Generate a signed session token for a human principal.
@@ -77,9 +79,13 @@ defmodule Arbor.Security.SessionToken do
   The HMAC is checked over the raw transported payload bytes BEFORE the
   payload is deserialized, so a forged/garbage token can never drive
   `binary_to_term` on attacker-controlled bytes.
+
+  Oversized and empty binaries are rejected before any Base64 decode or
+  HMAC work (`@max_token_bytes` = 4096).
   """
   @spec verify(binary()) :: {:ok, String.t()} | {:error, term()}
-  def verify(token) when is_binary(token) do
+  def verify(token)
+      when is_binary(token) and byte_size(token) > 0 and byte_size(token) <= @max_token_bytes do
     with {:ok, signature, payload_bytes} <- split_token(token),
          :ok <- verify_mac(payload_bytes, signature),
          {:ok, payload} <- safe_decode_payload(payload_bytes),
@@ -89,6 +95,7 @@ defmodule Arbor.Security.SessionToken do
     end
   end
 
+  def verify(token) when is_binary(token), do: {:error, :invalid_token}
   def verify(_), do: {:error, :invalid_token}
 
   @doc """

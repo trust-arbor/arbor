@@ -63,23 +63,30 @@ defmodule Arbor.Security.AuthDecision do
   @spec evaluate(AuthContext.t(), String.t(), atom(), keyword()) :: decision_result()
   def evaluate(%AuthContext{} = auth, resource_uri, _action \\ :execute, opts \\ []) do
     with {:ok, auth} <- check_uri(auth, resource_uri),
-         {:ok, auth} <- check_identity(auth),
-         {:ok, auth} <- verify_signed_request(auth, resource_uri, opts),
-         {:ok, cap, auth} <- find_matching_capability(auth, resource_uri),
-         {:ok, auth} <- check_scope_binding(auth, cap, opts),
-         {:ok, auth} <- check_delegation_chain(auth, cap),
-         {:ok, auth} <- check_time_constraints(auth, cap),
-         {:ok, auth} <- check_file_guard(auth, resource_uri),
-         {:ok, auth} <- check_egress_block(auth, opts),
-         result <- check_approval(auth, cap, resource_uri, opts),
-         result <- apply_egress_ask(result, cap, resource_uri, opts) do
-      case result do
-        {:authorized, auth} ->
-          {:ok, :authorized, cap, AuthContext.record_decision(auth, resource_uri, :authorized)}
+         {:ok, auth} <- verify_identity_proof(auth, resource_uri, opts) do
+      # Drop any session_token before capability/scope/approval work so the
+      # credential cannot leak into later pure checks or recorded decisions.
+      opts = strip_session_token(opts)
 
-        {:requires_approval, cap, auth} ->
-          {:ok, :requires_approval, cap,
-           AuthContext.record_decision(auth, resource_uri, {:requires_approval, cap.id})}
+      with {:ok, cap, auth} <- find_matching_capability(auth, resource_uri),
+           {:ok, auth} <- check_scope_binding(auth, cap, opts),
+           {:ok, auth} <- check_delegation_chain(auth, cap),
+           {:ok, auth} <- check_time_constraints(auth, cap),
+           {:ok, auth} <- check_file_guard(auth, resource_uri),
+           {:ok, auth} <- check_egress_block(auth, opts),
+           result <- check_approval(auth, cap, resource_uri, opts),
+           result <- apply_egress_ask(result, cap, resource_uri, opts) do
+        case result do
+          {:authorized, auth} ->
+            {:ok, :authorized, cap, AuthContext.record_decision(auth, resource_uri, :authorized)}
+
+          {:requires_approval, cap, auth} ->
+            {:ok, :requires_approval, cap,
+             AuthContext.record_decision(auth, resource_uri, {:requires_approval, cap.id})}
+        end
+      else
+        {:error, reason, auth} ->
+          {:error, reason, AuthContext.record_decision(auth, resource_uri, {:error, reason})}
       end
     else
       {:error, reason, auth} ->
@@ -123,8 +130,133 @@ defmodule Arbor.Security.AuthDecision do
     end
   end
 
+  # Presence of :session_token is the human alternative to signed requests.
+  # Status is always forced before token crypto or ambiguity checks; the
+  # Gateway-preverified / signed-request path is used only when the option is
+  # absent.
+  defp verify_identity_proof(auth, resource_uri, opts) do
+    case session_token_presence(opts) do
+      :absent ->
+        with {:ok, auth} <- check_identity(auth),
+             {:ok, auth} <- verify_signed_request(auth, resource_uri, opts) do
+          {:ok, auth}
+        end
+
+      {:present, token} ->
+        with {:ok, auth} <- check_identity_status(auth, auth.principal_id),
+             :ok <- reject_ambiguous_signed_request(auth),
+             {:ok, auth} <- verify_session_token_proof(auth, token) do
+          {:ok, auth}
+        end
+
+      :invalid ->
+        {:error, :invalid_session_token, auth}
+    end
+  end
+
+  defp strip_session_token(opts) when is_list(opts) do
+    if Keyword.keyword?(opts), do: Keyword.delete(opts, :session_token), else: opts
+  rescue
+    _ -> opts
+  end
+
+  defp strip_session_token(opts), do: opts
+
+  # Bound matches SessionToken / Security public extract (4096).
+  @max_session_token_bytes 4096
+
+  defp session_token_presence(opts) when is_list(opts) do
+    try do
+      if Keyword.keyword?(opts) do
+        case Keyword.get_values(opts, :session_token) do
+          [] ->
+            :absent
+
+          [token]
+          when is_binary(token) and byte_size(token) > 0 and
+                 byte_size(token) <= @max_session_token_bytes ->
+            {:present, token}
+
+          [_single] ->
+            :invalid
+
+          _duplicates ->
+            :invalid
+        end
+      else
+        :absent
+      end
+    rescue
+      _ -> :invalid
+    catch
+      :exit, _ -> :invalid
+    end
+  end
+
+  defp session_token_presence(_), do: :absent
+
+  defp reject_ambiguous_signed_request(%AuthContext{signed_request: nil}), do: :ok
+
+  defp reject_ambiguous_signed_request(%AuthContext{} = auth) do
+    {:error, :ambiguous_identity_proof, auth}
+  end
+
+  defp verify_session_token_proof(%AuthContext{principal_id: principal_id} = auth, token) do
+    case safe_verify_session_token(token) do
+      {:ok, verified_pid} when is_binary(verified_pid) and verified_pid != "" ->
+        cond do
+          not is_binary(principal_id) ->
+            {:error, :invalid_session_token, auth}
+
+          not String.starts_with?(principal_id, "human_") ->
+            {:error, :invalid_session_token, auth}
+
+          not String.starts_with?(verified_pid, "human_") ->
+            {:error, :invalid_session_token, auth}
+
+          verified_pid !== principal_id ->
+            {:error, :invalid_session_token, auth}
+
+          true ->
+            {:ok, AuthContext.mark_verified(auth)}
+        end
+
+      _ ->
+        {:error, :invalid_session_token, auth}
+    end
+  end
+
+  defp safe_verify_session_token(token) do
+    module = session_token_module()
+
+    if Code.ensure_loaded?(module) and function_exported?(module, :verify, 1) do
+      case apply(module, :verify, [token]) do
+        {:ok, pid} when is_binary(pid) -> {:ok, pid}
+        {:error, _} -> :invalid
+        _ -> :invalid
+      end
+    else
+      :invalid
+    end
+  rescue
+    _ -> :invalid
+  catch
+    :throw, _ -> :invalid
+    :exit, _ -> :invalid
+  end
+
+  defp session_token_module do
+    config = Arbor.Security.Config
+
+    if Code.ensure_loaded?(config) and function_exported?(config, :session_token_module, 0) do
+      apply(config, :session_token_module, [])
+    else
+      Arbor.Security.SessionToken
+    end
+  end
+
   defp check_identity(%AuthContext{identity_verified: true} = auth) do
-    # Already verified — skip
+    # Already verified — skip (no-token Gateway-preverified path only)
     {:ok, auth}
   end
 

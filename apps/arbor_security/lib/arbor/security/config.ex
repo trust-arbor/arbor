@@ -355,6 +355,19 @@ defmodule Arbor.Security.Config do
   end
 
   @doc """
+  The module used to verify human session tokens during authorization.
+
+  Must implement `verify/1` returning `{:ok, principal_id}` or `{:error, reason}`.
+  Defaults to `Arbor.Security.SessionToken`. Overridable so public-path tests
+  can prove error/raise/throw/exit outcomes fail closed without a public
+  collaborator argument on `authorize/4`.
+  """
+  @spec session_token_module() :: module()
+  def session_token_module do
+    Application.get_env(@app, :session_token_module, Arbor.Security.SessionToken)
+  end
+
+  @doc """
   The module used to verify capability delegation-chain signatures.
 
   Must implement `verify_delegation_chain/2`. Defaults to
