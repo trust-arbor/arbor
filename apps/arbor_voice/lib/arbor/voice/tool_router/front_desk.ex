@@ -10,11 +10,10 @@ defmodule Arbor.Voice.ToolRouter.FrontDesk do
 
   @behaviour Arbor.Voice.ToolRouter
 
+  alias Arbor.Voice.CodingPlanFactory
+  alias Arbor.Voice.Session.ManagedDispatchCore
+
   @max_message_bytes 8192
-  @max_task_intent_bytes 2048
-  @max_task_id_bytes 256
-  @task_id_pattern ~r/\A[A-Za-z0-9][A-Za-z0-9._-]*\z/
-  @control_chars ~r/[\x00-\x1F\x7F]/
 
   @consult_description "Consult the user's Arbor agent with one message and return the grounded reply."
   @message_description "The message to send to the user's Arbor agent."
@@ -54,7 +53,7 @@ defmodule Arbor.Voice.ToolRouter.FrontDesk do
               "type" => "string",
               "description" => @task_description,
               "minLength" => 1,
-              "maxLength" => @max_task_intent_bytes
+              "maxLength" => CodingPlanFactory.max_intent_bytes()
             }
           },
           "required" => ["task"],
@@ -104,7 +103,7 @@ defmodule Arbor.Voice.ToolRouter.FrontDesk do
              {:ok, dispatch} <- fetch_dispatch(authority) do
           case dispatch.(task_intent) do
             {:ok, task_id} when is_binary(task_id) ->
-              if valid_task_id?(task_id) do
+              if ManagedDispatchCore.valid_task_id?(task_id) do
                 {:ok, %{"task_id" => task_id, "status" => "dispatched"}}
               else
                 {:error, :tool_error}
@@ -148,24 +147,9 @@ defmodule Arbor.Voice.ToolRouter.FrontDesk do
   defp admit_message(_), do: {:error, :invalid_arguments}
 
   defp admit_task_arg(%{"task" => task} = args) when map_size(args) == 1 do
-    cond do
-      not is_binary(task) ->
-        {:error, :invalid_arguments}
-
-      byte_size(task) > @max_task_intent_bytes ->
-        {:error, :invalid_arguments}
-
-      not String.valid?(task) ->
-        {:error, :invalid_arguments}
-
-      String.trim(task) == "" ->
-        {:error, :invalid_arguments}
-
-      String.match?(task, @control_chars) ->
-        {:error, :invalid_arguments}
-
-      true ->
-        {:ok, task}
+    case CodingPlanFactory.admit_intent(task) do
+      {:ok, intent} -> {:ok, intent}
+      {:error, :invalid_intent} -> {:error, :invalid_arguments}
     end
   end
 
@@ -182,12 +166,4 @@ defmodule Arbor.Voice.ToolRouter.FrontDesk do
   end
 
   defp valid_reply?(_), do: false
-
-  defp valid_task_id?(task_id)
-       when is_binary(task_id) and byte_size(task_id) > 0 and
-              byte_size(task_id) <= @max_task_id_bytes do
-    String.valid?(task_id) and Regex.match?(@task_id_pattern, task_id)
-  end
-
-  defp valid_task_id?(_), do: false
 end

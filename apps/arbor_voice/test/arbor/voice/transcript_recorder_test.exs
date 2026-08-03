@@ -189,6 +189,78 @@ defmodule Arbor.Voice.TranscriptRecorderTest do
       assert assistant_entry.metadata == %{"transport" => "voice"}
     end
 
+    @tag spec: "VOICE-10"
+    test "valid :delegation adds assistant-only flat receipt keys; user stays transport/backend/mode",
+         %{agent: agent} do
+      receipt = %{
+        "provider" => "grok",
+        "task" => "fix the bug",
+        "task_id" => "task_abc_1",
+        "outcome" => "dispatched"
+      }
+
+      assert {:ok, 2} =
+               TranscriptRecorder.record(
+                 "agent_1",
+                 voice_message(),
+                 "I've dispatched that coding task; this voice turn is complete.",
+                 ~U[2026-01-01 00:00:01.000000Z],
+                 comms: FakeComms,
+                 backend: :xai_realtime,
+                 mode: "conversation",
+                 delegation: receipt
+               )
+
+      assert [{_, _, user_entry, assistant_entry, forwarded}] = FakeComms.calls(agent)
+      assert forwarded == []
+
+      assert user_entry.metadata == %{
+               "transport" => "voice",
+               "backend" => "xai_realtime",
+               "mode" => "conversation"
+             }
+
+      refute Map.has_key?(user_entry.metadata, "delegation_provider")
+
+      assert assistant_entry.metadata == %{
+               "transport" => "voice",
+               "backend" => "xai_realtime",
+               "mode" => "conversation",
+               "delegation_provider" => "grok",
+               "delegation_task" => "fix the bug",
+               "delegation_task_id" => "task_abc_1",
+               "delegation_outcome" => "dispatched"
+             }
+    end
+
+    @tag spec: "VOICE-10"
+    test "maximal valid delegation receipt is accepted before Comms", %{agent: agent} do
+      task = String.duplicate("t", 2048)
+      task_id = String.duplicate("a", 256)
+
+      receipt = %{
+        "provider" => "grok",
+        "task" => task,
+        "task_id" => task_id,
+        "outcome" => "dispatched"
+      }
+
+      assert {:ok, 2} =
+               TranscriptRecorder.record(
+                 "agent_1",
+                 voice_message(),
+                 "ok",
+                 ~U[2026-01-01 00:00:01.000000Z],
+                 comms: FakeComms,
+                 delegation: receipt
+               )
+
+      assert [{_, _, user_entry, assistant_entry, _}] = FakeComms.calls(agent)
+      refute Map.has_key?(user_entry.metadata, "delegation_task")
+      assert assistant_entry.metadata["delegation_task"] == task
+      assert assistant_entry.metadata["delegation_task_id"] == task_id
+    end
+
     test "normalizes backend/mode atoms with Atom.to_string/1 and accepts UTF-8 binaries",
          %{agent: agent} do
       assert {:ok, 2} =
@@ -329,6 +401,41 @@ defmodule Arbor.Voice.TranscriptRecorderTest do
                  "2026-01-01T00:00:01Z",
                  comms: FakeComms
                )
+
+      assert FakeComms.call_count(agent) == 0
+    end
+
+    @tag spec: "VOICE-10"
+    test "rejects every malformed :delegation field before Comms", %{agent: agent} do
+      msg = voice_message()
+      completed = ~U[2026-01-01 00:00:01.000000Z]
+      base = %{"provider" => "grok", "task" => "t", "task_id" => "task_1", "outcome" => "dispatched"}
+
+      malformed = [
+        nil,
+        "not-a-map",
+        Map.put(base, :provider, "grok") |> Map.delete("provider"),
+        Map.put(base, "extra", "x"),
+        Map.delete(base, "task_id"),
+        %{base | "provider" => "openai"},
+        %{base | "outcome" => "completed"},
+        %{base | "task" => ""},
+        %{base | "task" => String.duplicate("x", 2049)},
+        %{base | "task" => "has\ncontrol"},
+        %{base | "task" => "has\x00null"},
+        %{base | "task_id" => "bad id"},
+        %{base | "task_id" => ""},
+        %{base | "task_id" => String.duplicate("a", 257)},
+        %{base | "task_id" => "bad/slash"}
+      ]
+
+      for bad <- malformed do
+        assert {:error, {:invalid_opts, :invalid_delegation}} =
+                 TranscriptRecorder.record("agent_1", msg, "ok", completed,
+                   comms: FakeComms,
+                   delegation: bad
+                 )
+      end
 
       assert FakeComms.call_count(agent) == 0
     end

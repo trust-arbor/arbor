@@ -8,9 +8,12 @@ defmodule Arbor.Voice.CodingPlanFactory do
 
   alias Arbor.Contracts.Coding.{Plan, WorkPacket}
 
+  # Source-owned admitted task-intent ceiling (shared by FrontDesk, Session
+  # ManagedDispatchCore, and TranscriptRecorder).
   @max_intent_bytes 2048
   # Source-owned bound for trusted repo roots (absolute path strings).
   @max_repo_root_bytes 4096
+  @worker_provider "grok"
   @control_chars ~r/[\x00-\x1F\x7F]/
 
   @non_goals [
@@ -54,7 +57,19 @@ defmodule Arbor.Voice.CodingPlanFactory do
     _, _ -> {:error, :invalid_plan}
   end
 
-  defp admit_intent(intent) when is_binary(intent) do
+  @doc false
+  @spec max_intent_bytes() :: pos_integer()
+  def max_intent_bytes, do: @max_intent_bytes
+
+  @doc """
+  Pure source-owned task-intent admission used by CodingPlanFactory,
+  ManagedDispatchCore, FrontDesk, and TranscriptRecorder.
+
+  Rejects non-binaries, non-UTF-8, blank, oversized, and control-bearing text
+  (`\\x00-\\x1F` and `\\x7F`). Does not parse intent into authority fields.
+  """
+  @spec admit_intent(term()) :: {:ok, String.t()} | {:error, :invalid_intent}
+  def admit_intent(intent) when is_binary(intent) do
     cond do
       not String.valid?(intent) ->
         {:error, :invalid_intent}
@@ -73,7 +88,7 @@ defmodule Arbor.Voice.CodingPlanFactory do
     end
   end
 
-  defp admit_intent(_), do: {:error, :invalid_intent}
+  def admit_intent(_), do: {:error, :invalid_intent}
 
   defp admit_repo_root(root) when is_binary(root) do
     cond do
@@ -103,6 +118,10 @@ defmodule Arbor.Voice.CodingPlanFactory do
   @spec max_repo_root_bytes() :: pos_integer()
   def max_repo_root_bytes, do: @max_repo_root_bytes
 
+  @doc false
+  @spec worker_provider() :: String.t()
+  def worker_provider, do: @worker_provider
+
   defp build_work_packet(intent) do
     WorkPacket.new(%{
       version: 1,
@@ -128,7 +147,7 @@ defmodule Arbor.Voice.CodingPlanFactory do
         "worktree_base_dir" => nil
       },
       worker: %{
-        "provider" => "grok",
+        "provider" => @worker_provider,
         "model" => "grok-4.5",
         "permission_mode" => "default",
         "use_pool" => true,

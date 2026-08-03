@@ -9,6 +9,7 @@ defmodule Arbor.Voice.Session do
 
   alias Arbor.Contracts.Session.UserMessage
   alias Arbor.Voice.Redacted
+  alias Arbor.Voice.Session.ManagedDispatchCore
   alias Arbor.Voice.Session.Settlement
   alias Arbor.Voice.Session.ToolTaskCore
   alias Arbor.Voice.Session.TurnCore
@@ -876,7 +877,9 @@ defmodule Arbor.Voice.Session do
             core: TurnCore.new(),
             started_ms: started_ms,
             # Sole outstanding-tool authority (not TurnCore).
-            pending: %{}
+            pending: %{},
+            # One-dispatch slot + at most one receipt (VP-05D1 / VOICE-10).
+            dispatch: ManagedDispatchCore.new()
           }
 
           next = %{state | turn: turn, turn_generation: generation}
@@ -985,28 +988,80 @@ defmodule Arbor.Voice.Session do
   # Tool routing (VP-04E3) — Session is sole backend-output authority
   # ---------------------------------------------------------------------------
 
-  defp admit_and_route_tool(state, turn, %{id: call_id, name: name, arguments: args}) do
+  defp admit_and_route_tool(state, turn, %{id: call_id, name: name, arguments: args} = call) do
     pending = turn.pending || %{}
+    dispatch = Map.get(turn, :dispatch) || ManagedDispatchCore.new()
 
-    if map_size(pending) >= ToolTaskCore.max_outstanding() do
-      # Mark already applied in core; sync capacity output, no spawn.
-      case safe_send_tool_result(
-             state,
-             call_id,
-             ToolTaskCore.normalize(:tool_capacity_exceeded)
-           ) do
-        :ok ->
-          enqueue_poll(state, turn.generation)
+    case ManagedDispatchCore.reserve_dispatch(dispatch, call) do
+      {:reject, next_dispatch, reject_json} ->
+        next_turn = %{turn | dispatch: next_dispatch}
 
-        {:error, _} ->
-          finish_turn_error(state, turn, :turn_failed)
-      end
-    else
-      start_tool_owner(state, turn, call_id, name, args, pending)
+        case safe_send_tool_result(state, call_id, reject_json) do
+          :ok ->
+            enqueue_poll(%{state | turn: next_turn}, turn.generation)
+
+          {:error, _} ->
+            finish_turn_error(%{state | turn: next_turn}, next_turn, :turn_failed)
+        end
+
+      {:admit, next_dispatch, candidate} ->
+        next_turn = %{turn | dispatch: next_dispatch}
+
+        if map_size(pending) >= ToolTaskCore.max_outstanding() do
+          case safe_send_tool_result(
+                 state,
+                 call_id,
+                 ToolTaskCore.normalize(:tool_capacity_exceeded)
+               ) do
+            :ok ->
+              enqueue_poll(%{state | turn: next_turn}, turn.generation)
+
+            {:error, _} ->
+              finish_turn_error(%{state | turn: next_turn}, next_turn, :turn_failed)
+          end
+        else
+          start_tool_owner(
+            %{state | turn: next_turn},
+            next_turn,
+            call_id,
+            name,
+            args,
+            pending,
+            candidate
+          )
+        end
+
+      {:other, next_dispatch} ->
+        next_turn = %{turn | dispatch: next_dispatch}
+
+        if map_size(pending) >= ToolTaskCore.max_outstanding() do
+          # Mark already applied in core; sync capacity output, no spawn.
+          case safe_send_tool_result(
+                 state,
+                 call_id,
+                 ToolTaskCore.normalize(:tool_capacity_exceeded)
+               ) do
+            :ok ->
+              enqueue_poll(%{state | turn: next_turn}, turn.generation)
+
+            {:error, _} ->
+              finish_turn_error(%{state | turn: next_turn}, next_turn, :turn_failed)
+          end
+        else
+          start_tool_owner(
+            %{state | turn: next_turn},
+            next_turn,
+            call_id,
+            name,
+            args,
+            pending,
+            nil
+          )
+        end
     end
   end
 
-  defp start_tool_owner(state, turn, call_id, name, args, pending) do
+  defp start_tool_owner(state, turn, call_id, name, args, pending, dispatch_candidate) do
     # Pre-create fence token before spawn; activation carries the same token.
     token = make_ref()
     generation = turn.generation
@@ -1051,7 +1106,9 @@ defmodule Arbor.Voice.Session do
           owner_pid: owner_pid,
           owner_mon: owner_mon,
           progress_timer_ref: progress_timer_ref,
-          progress_emitted: false
+          progress_emitted: false,
+          # Bounded dispatch candidate only; never provider/task-id on turn top-level.
+          dispatch_candidate: dispatch_candidate
         }
 
         next_pending = Map.put(pending, call_id, entry)
@@ -1144,15 +1201,27 @@ defmodule Arbor.Voice.Session do
     _ = cancel_and_flush_progress(entry, turn.generation, call_id)
     _ = Process.demonitor(entry.owner_mon, [:flush])
     pending = Map.delete(turn.pending, call_id)
-    next_turn = %{turn | pending: pending}
-    next_state = %{state | turn: next_turn}
 
-    case safe_send_tool_result(next_state, call_id, output) do
+    # Pure provisional receipt only after the same authorize fence that owns
+    # backend output. Commit/expose the receipt only after safe_send_tool_result
+    # returns :ok so a delivery failure never leaves durable/public provenance.
+    dispatch = Map.get(turn, :dispatch) || ManagedDispatchCore.new()
+    candidate = Map.get(entry, :dispatch_candidate)
+    provisional_dispatch = ManagedDispatchCore.maybe_receipt(dispatch, candidate, output)
+
+    # Pending cleared; dispatch not yet advanced until delivery succeeds.
+    base_turn = %{turn | pending: pending}
+    base_state = %{state | turn: base_turn}
+
+    case safe_send_tool_result(base_state, call_id, output) do
       :ok ->
+        next_turn = %{base_turn | dispatch: provisional_dispatch}
+        next_state = %{base_state | turn: next_turn}
         maybe_complete_after_settle(next_state, next_turn)
 
       {:error, _} ->
-        finish_turn_error(next_state, next_turn, :turn_failed)
+        # No receipt commit: keep pre-settlement dispatch (no new receipt).
+        finish_turn_error(base_state, base_turn, :turn_failed)
     end
   end
 
@@ -1299,15 +1368,18 @@ defmodule Arbor.Voice.Session do
   end
 
   defp complete_turn(state, turn, raw_text) do
-    case record_transcript(state, turn, raw_text) do
+    dispatch = Map.get(turn, :dispatch) || ManagedDispatchCore.new()
+    presented = ManagedDispatchCore.select_raw_assistant(dispatch, raw_text)
+
+    case record_transcript(state, turn, presented) do
       :ok ->
         # Speech is presentation only: never rewrite durable/public raw text.
         # Rendering runs only after exact transcript success and never falls
         # back to raw when Speakable/output fails.
-        speech_output = offer_speech(state, raw_text)
+        speech_output = offer_speech(state, presented)
         duration_ms = turn_duration_ms(state, turn)
         safe_emit_turn_completed(state, duration_ms, speech_output)
-        reply_and_clear_turn(state, turn, {:ok, raw_text})
+        reply_and_clear_turn(state, turn, {:ok, presented})
 
       {:error, :transcript_record_failed} ->
         # Recorder failure: no render, no output callback.
@@ -1324,6 +1396,18 @@ defmodule Arbor.Voice.Session do
           |> Keyword.put(:comms, state.comms)
           |> Keyword.put(:backend, state.backend)
           |> Keyword.put(:mode, state.mode)
+
+        opts =
+          case turn do
+            %{dispatch: dispatch} ->
+              case ManagedDispatchCore.receipt(dispatch) do
+                nil -> opts
+                receipt when is_map(receipt) -> Keyword.put(opts, :delegation, receipt)
+              end
+
+            _ ->
+              opts
+          end
 
         try do
           case state.transcript_recorder.record(

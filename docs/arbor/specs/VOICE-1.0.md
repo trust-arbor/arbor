@@ -78,7 +78,7 @@ transport — raw audio never leaves the phone.
   `UserMessage` through a public agent/orchestrator facade to the target agent's live
   Session path and return the agent's reply text to the backend as the tool output.
 
-- **VOICE-10** (MUST, planned): Delegation MUST use Arbor's managed, owner-scoped
+- **VOICE-10** (MUST): Delegation MUST use Arbor's managed, owner-scoped
   orchestration facades. Long-running coding work MUST use a version-2 structured
   `coding_change` task rather than a raw provider session. Any bounded synchronous ACP
   consultation MUST use the public `Arbor.AI.acp_*` facade with deterministic cleanup.

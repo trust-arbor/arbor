@@ -243,6 +243,135 @@ defmodule Arbor.Comms.EngagementTranscriptTest do
              }
     end
 
+    @tag spec: "VOICE-10"
+    test "assistant-only delegation keys persist; user-supplied delegation keys are dropped",
+         %{
+           user_entry: user_entry,
+           assistant_entry: assistant_entry,
+           persistence_agent: persistence_agent
+         } do
+      user_with_spoof =
+        Map.put(user_entry, :metadata, %{
+          "transport" => "voice",
+          "delegation_provider" => "openai",
+          "delegation_task" => "spoofed",
+          "delegation_task_id" => "spoof_id",
+          "delegation_outcome" => "dispatched"
+        })
+
+      assistant_with_receipt =
+        Map.put(assistant_entry, :metadata, %{
+          "transport" => "voice",
+          "backend" => "xai_realtime",
+          "mode" => "conversation",
+          "delegation_provider" => "grok",
+          "delegation_task" => "fix the bug",
+          "delegation_task_id" => "task_abc_1",
+          "delegation_outcome" => "dispatched"
+        })
+
+      assert {:ok, 2} =
+               Comms.record_engagement_turn(
+                 "agent_1",
+                 "eng_1",
+                 user_with_spoof,
+                 assistant_with_receipt,
+                 persistence: PersistenceAdapter
+               )
+
+      %{appended: [{_uuid, [user_attrs, assistant_attrs]}]} =
+        FakePersistence.calls(persistence_agent)
+
+      refute Map.has_key?(user_attrs.metadata, "delegation_provider")
+      refute Map.has_key?(user_attrs.metadata, "delegation_task")
+      refute Map.has_key?(user_attrs.metadata, "delegation_task_id")
+      refute Map.has_key?(user_attrs.metadata, "delegation_outcome")
+      assert user_attrs.metadata["engagement_id"] == "eng_1"
+      assert user_attrs.metadata["transport"] == "voice"
+
+      assert assistant_attrs.metadata["delegation_provider"] == "grok"
+      assert assistant_attrs.metadata["delegation_task"] == "fix the bug"
+      assert assistant_attrs.metadata["delegation_task_id"] == "task_abc_1"
+      assert assistant_attrs.metadata["delegation_outcome"] == "dispatched"
+      assert assistant_attrs.metadata["engagement_id"] == "eng_1"
+    end
+
+    @tag spec: "VOICE-10"
+    test "maximal valid assistant receipt metadata passes; malformed delegation fields fail before persistence",
+         %{
+           user_entry: user_entry,
+           assistant_entry: assistant_entry,
+           persistence_agent: persistence_agent
+         } do
+      # Exact smallest measured whole-map ceiling for the maximal valid receipt
+      # on the pinned OTP/Elixir runtime (matches Arbor.Comms constant).
+      assistant_metadata_max_bytes = 4537
+
+      max_meta = %{
+        "transport" => "voice",
+        "backend" => String.duplicate("b", 1024),
+        "mode" => String.duplicate("m", 1024),
+        "delegation_provider" => "grok",
+        "delegation_task" => String.duplicate("t", 2048),
+        "delegation_task_id" => String.duplicate("a", 256),
+        "delegation_outcome" => "dispatched"
+      }
+
+      assert byte_size(:erlang.term_to_binary(max_meta)) == assistant_metadata_max_bytes
+
+      assert {:ok, 2} =
+               Comms.record_engagement_turn(
+                 "agent_1",
+                 "eng_1",
+                 user_entry,
+                 Map.put(assistant_entry, :metadata, max_meta),
+                 persistence: PersistenceAdapter
+               )
+
+      for bad_meta <- [
+            Map.put(max_meta, "delegation_provider", "openai"),
+            Map.put(max_meta, "delegation_outcome", "completed"),
+            Map.put(max_meta, "delegation_task", ""),
+            Map.put(max_meta, "delegation_task", String.duplicate("x", 2049)),
+            Map.put(max_meta, "delegation_task", "control\nbearing"),
+            Map.put(max_meta, "delegation_task", "null\x00byte"),
+            Map.put(max_meta, "delegation_task_id", ""),
+            Map.put(max_meta, "delegation_task_id", String.duplicate("a", 257)),
+            Map.put(max_meta, "delegation_task_id", "bad id with spaces"),
+            Map.put(max_meta, "delegation_task_id", "bad/slash"),
+            Map.put(max_meta, "delegation_task", %{nested: true}),
+            Map.put(max_meta, "backend", String.duplicate("x", 1025))
+          ] do
+        assert {:error, {:invalid_assistant_entry, :invalid_metadata_value}} =
+                 Comms.record_engagement_turn(
+                   "agent_1",
+                   "eng_1",
+                   user_entry,
+                   Map.put(assistant_entry, :metadata, bad_meta),
+                   persistence: PersistenceAdapter
+                 )
+      end
+
+      # Exact +1-byte over-bound: keep every other admitted field unchanged and
+      # only grow transport from "voice" (5) to "voice!" (6). Encoded size must
+      # be exactly 4538 and reject before persistence.
+      oversize_meta = Map.put(max_meta, "transport", "voice!")
+      assert byte_size(:erlang.term_to_binary(oversize_meta)) == assistant_metadata_max_bytes + 1
+      assert byte_size(:erlang.term_to_binary(oversize_meta)) == 4538
+
+      assert {:error, {:invalid_assistant_entry, :metadata_too_large}} =
+               Comms.record_engagement_turn(
+                 "agent_1",
+                 "eng_1",
+                 user_entry,
+                 Map.put(assistant_entry, :metadata, oversize_meta),
+                 persistence: PersistenceAdapter
+               )
+
+      # Only the successful maximal append (malformed/oversize never persisted).
+      assert length(FakePersistence.calls(persistence_agent).appended) == 1
+    end
+
     test "rejects an id/content exceeding the byte bound, blank/non-UTF8, out-of-order timestamps, bad metadata — no persistence call",
          %{
            user_entry: user_entry,

@@ -712,9 +712,37 @@ defmodule Arbor.Comms do
 
   @id_max_bytes 256
   @content_max_bytes 8192
+  # Default per-value bound for transport/backend/mode (both roles).
   @metadata_value_max_bytes 1024
-  @metadata_max_bytes 2048
-  @turn_metadata_keys [:transport, :backend, :mode]
+  # User whole-map budget (transport/backend/mode only).
+  @user_metadata_max_bytes 2048
+  # Closed public-boundary contract for assistant delegation metadata.
+  # Independently mirrored from voice source bounds (Comms cannot depend
+  # upward on arbor_voice): intent ceiling, control-char reject, task-id grammar.
+  @delegation_task_max_bytes 2048
+  @delegation_task_id_max_bytes 256
+  @delegation_task_id_pattern ~r/\A[A-Za-z0-9][A-Za-z0-9._-]*\z/
+  @delegation_control_chars ~r/[\x00-\x1F\x7F]/
+  @delegation_provider_values MapSet.new(["grok"])
+  @delegation_outcome_values MapSet.new(["dispatched"])
+  # Assistant whole-map budget: exact smallest measured ceiling that admits a
+  # maximal valid delegation receipt plus transport/backend/mode at their
+  # per-value ceilings. Measured on the pinned OTP/Elixir runtime as
+  # byte_size(:erlang.term_to_binary(max_meta)) == 4537 for:
+  #   transport="voice", backend/mode at 1024, delegation_task at 2048,
+  #   delegation_task_id at 256, provider/outcome enums.
+  # Do not globally raise per-value bounds for transport/backend/mode.
+  @assistant_metadata_max_bytes 4537
+  @user_metadata_keys [:transport, :backend, :mode]
+  @assistant_metadata_keys [
+    :transport,
+    :backend,
+    :mode,
+    :delegation_provider,
+    :delegation_task,
+    :delegation_task_id,
+    :delegation_outcome
+  ]
   @resolve_opts_allowlist [:engagement_store]
   @turn_opts_allowlist [:persistence]
   @load_opts_allowlist [:limit, :before_timestamp, :persistence]
@@ -755,12 +783,16 @@ defmodule Arbor.Comms do
   metadata: map()}` (the user entry uses `:sent_at`, the assistant entry uses
   `:completed_at`). `content` must be nonblank, valid UTF-8, and within
   `#{@content_max_bytes}` bytes; it is converted to the existing text-block
-  persistence shape (`[%{"type" => "text", "text" => content}]`). `metadata` is
-  bounded to `"transport"`, `"backend"`, `"mode"` — `"utterance_end_at"` is
-  derived server-side from the user entry's `:sent_at` and cannot be supplied by
-  the caller. Returns an explicit error for invalid input or a failed append;
-  never reports success after a failed append. `opts[:persistence]` may inject
-  a test double implementing the `Arbor.Persistence` session functions.
+  persistence shape (`[%{"type" => "text", "text" => content}]`). User
+  `metadata` admits only `"transport"`, `"backend"`, `"mode"`. Assistant
+  metadata may additionally carry flat delegation receipt keys
+  (`delegation_provider`, `delegation_task`, `delegation_task_id`,
+  `delegation_outcome`) with field-specific bounds. Delegation keys supplied
+  on the user entry are dropped. `"utterance_end_at"` is derived server-side
+  from the user entry's `:sent_at` and cannot be supplied by the caller.
+  Returns an explicit error for invalid input or a failed append; never
+  reports success after a failed append. `opts[:persistence]` may inject a
+  test double implementing the `Arbor.Persistence` session functions.
   """
   @spec record_engagement_turn(String.t(), String.t(), map(), map(), keyword()) ::
           {:ok, non_neg_integer()} | {:error, term()}
@@ -868,7 +900,7 @@ defmodule Arbor.Comms do
 
     with :ok <- validate_content(content, :content),
          :ok <- validate_timestamp(ts, ts_field),
-         {:ok, meta} <- bound_and_validate_metadata(Map.get(entry, :metadata, %{})) do
+         {:ok, meta} <- bound_and_validate_metadata(kind, Map.get(entry, :metadata, %{})) do
       entry_type = Atom.to_string(kind)
 
       {:ok,
@@ -899,13 +931,17 @@ defmodule Arbor.Comms do
     end
   end
 
-  # Looks up OUR fixed compiled-in atoms (@turn_metadata_keys) as either their
-  # atom or string form in the CALLER's map. to_string/1 (via Atom.to_string/1)
-  # is only ever called on those known-safe atoms, never on a caller-supplied
-  # key — key allowlisting alone would not bound an arbitrary/adversarial key.
-  defp bound_and_validate_metadata(m) when is_map(m) do
+  # Looks up OUR fixed compiled-in atoms as either their atom or string form
+  # in the CALLER's map. to_string/1 (via Atom.to_string/1) is only ever
+  # called on those known-safe atoms, never on a caller-supplied key — key
+  # allowlisting alone would not bound an arbitrary/adversarial key.
+  # User and assistant use separate allowlists; delegation keys are
+  # assistant-only and are dropped (not rejected) when present on user.
+  defp bound_and_validate_metadata(kind, m) when is_map(m) and kind in [:user, :assistant] do
+    keys = metadata_keys_for(kind)
+
     bounded =
-      Enum.reduce(@turn_metadata_keys, %{}, fn key, acc ->
+      Enum.reduce(keys, %{}, fn key, acc ->
         case Map.fetch(m, key) do
           {:ok, value} ->
             Map.put(acc, Atom.to_string(key), value)
@@ -918,20 +954,24 @@ defmodule Arbor.Comms do
         end
       end)
 
-    with :ok <- validate_metadata_values(bounded),
-         :ok <- validate_metadata_size(bounded) do
+    with :ok <- validate_metadata_values(kind, bounded),
+         :ok <- validate_metadata_size(kind, bounded) do
       {:ok, bounded}
     end
   end
 
-  defp bound_and_validate_metadata(_m), do: {:error, :metadata_must_be_a_map}
+  defp bound_and_validate_metadata(_kind, _m), do: {:error, :metadata_must_be_a_map}
 
-  defp validate_metadata_values(metadata) do
-    if Enum.all?(metadata, fn {_k, v} -> json_scalar?(v) end) do
-      :ok
-    else
-      {:error, :invalid_metadata_value}
-    end
+  defp metadata_keys_for(:user), do: @user_metadata_keys
+  defp metadata_keys_for(:assistant), do: @assistant_metadata_keys
+
+  defp validate_metadata_values(kind, metadata) do
+    Enum.reduce_while(metadata, :ok, fn {key, value}, :ok ->
+      case validate_metadata_value(kind, key, value) do
+        :ok -> {:cont, :ok}
+        {:error, _} = err -> {:halt, err}
+      end
+    end)
   end
 
   # Byte-size is checked FIRST, before String.valid?/1 — same reasoning as
@@ -939,23 +979,92 @@ defmodule Arbor.Comms do
   # caller-supplied metadata string BEFORE it is scanned for UTF-8 validity or
   # folded into the whole-map `:erlang.term_to_binary/1` size check below, so
   # an oversized single value never reaches either scan.
-  defp json_scalar?(v) when is_binary(v) do
-    byte_size(v) <= @metadata_value_max_bytes and String.valid?(v)
+  defp validate_metadata_value(_kind, key, v)
+       when key in ["transport", "backend", "mode"] and is_binary(v) do
+    if byte_size(v) <= @metadata_value_max_bytes and String.valid?(v) do
+      :ok
+    else
+      {:error, :invalid_metadata_value}
+    end
   end
 
-  defp json_scalar?(v) when is_boolean(v) or is_number(v) or is_nil(v), do: true
-  defp json_scalar?(_v), do: false
+  defp validate_metadata_value(_kind, key, v)
+       when key in ["transport", "backend", "mode"] and
+              (is_boolean(v) or is_number(v) or is_nil(v)) do
+    :ok
+  end
 
-  defp validate_metadata_size(metadata) do
-    if byte_size(:erlang.term_to_binary(metadata)) <= @metadata_max_bytes do
+  defp validate_metadata_value(:assistant, "delegation_provider", v) when is_binary(v) do
+    if MapSet.member?(@delegation_provider_values, v) and String.valid?(v) do
+      :ok
+    else
+      {:error, :invalid_metadata_value}
+    end
+  end
+
+  defp validate_metadata_value(:assistant, "delegation_outcome", v) when is_binary(v) do
+    if MapSet.member?(@delegation_outcome_values, v) and String.valid?(v) do
+      :ok
+    else
+      {:error, :invalid_metadata_value}
+    end
+  end
+
+  defp validate_metadata_value(:assistant, "delegation_task", v) when is_binary(v) do
+    cond do
+      byte_size(v) > @delegation_task_max_bytes ->
+        {:error, :invalid_metadata_value}
+
+      not String.valid?(v) ->
+        {:error, :invalid_metadata_value}
+
+      String.trim(v) == "" ->
+        {:error, :invalid_metadata_value}
+
+      String.match?(v, @delegation_control_chars) ->
+        {:error, :invalid_metadata_value}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp validate_metadata_value(:assistant, "delegation_task_id", v) when is_binary(v) do
+    cond do
+      byte_size(v) == 0 ->
+        {:error, :invalid_metadata_value}
+
+      byte_size(v) > @delegation_task_id_max_bytes ->
+        {:error, :invalid_metadata_value}
+
+      not String.valid?(v) ->
+        {:error, :invalid_metadata_value}
+
+      not Regex.match?(@delegation_task_id_pattern, v) ->
+        {:error, :invalid_metadata_value}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp validate_metadata_value(_kind, _key, _v), do: {:error, :invalid_metadata_value}
+
+  defp validate_metadata_size(kind, metadata) do
+    ceiling = metadata_size_ceiling(kind)
+
+    if byte_size(:erlang.term_to_binary(metadata)) <= ceiling do
       :ok
     else
       {:error, :metadata_too_large}
     end
   end
 
+  defp metadata_size_ceiling(:user), do: @user_metadata_max_bytes
+  defp metadata_size_ceiling(:assistant), do: @assistant_metadata_max_bytes
+
   # Source-owned: derived from the SAME sent_at already validated/persisted on
-  # the user entry, so it can never diverge from it. Not in @turn_metadata_keys,
+  # the user entry, so it can never diverge from it. Not in metadata allowlists,
   # so any caller-supplied "utterance_end_at" is unreachable, not compared.
   defp derive_utterance_end_at(%DateTime{} = sent_at) do
     %{"utterance_end_at" => DateTime.to_iso8601(sent_at)}

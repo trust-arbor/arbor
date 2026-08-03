@@ -1,6 +1,6 @@
 defmodule Arbor.Voice.TranscriptRecorder do
   @moduledoc """
-  Isolated engagement-transcript persistence boundary for voice (VP-04D2A).
+  Isolated engagement-transcript persistence boundary for voice (VP-04D2A + VP-05D1).
 
   Builds one ordered user/assistant entry pair from an already engagement-tagged
   voice `UserMessage` and raw, unrendered assistant text, then calls the public
@@ -14,9 +14,13 @@ defmodule Arbor.Voice.TranscriptRecorder do
   """
 
   alias Arbor.Contracts.Session.UserMessage
+  alias Arbor.Voice.CodingPlanFactory
+  alias Arbor.Voice.Session.ManagedDispatchCore
 
   @id_max_bytes 256
-  @opts_allowlist [:comms, :persistence, :backend, :mode]
+  @opts_allowlist [:comms, :persistence, :backend, :mode, :delegation]
+  @delegation_keys ["provider", "task", "task_id", "outcome"]
+  @allowed_outcomes MapSet.new(["dispatched"])
 
   @doc """
   Record one completed voice turn through the public Comms engagement path.
@@ -34,11 +38,15 @@ defmodule Arbor.Voice.TranscriptRecorder do
   * `:backend` / `:mode` — trusted backend metadata; existing atoms or valid
     UTF-8 binaries, normalized to strings via `Atom.to_string/1` (never
     `String.to_atom/1`)
+  * `:delegation` — optional trusted string-keyed receipt with exactly
+    `provider`, `task`, `task_id`, and `outcome`. Valid receipts add flat
+    assistant-only `delegation_*` metadata keys; user metadata stays
+    transport/backend/mode only. Absence remains valid.
 
-  Rejects unknown or duplicate option keys, invalid envelopes/timestamps, and
-  a missing/blank/oversized/invalid-UTF-8 engagement id without calling Comms.
-  Content-size, chronological-order, and final metadata-size policy remain at
-  the Comms boundary.
+  Rejects unknown or duplicate option keys, invalid envelopes/timestamps,
+  invalid delegation receipts, and a missing/blank/oversized/invalid-UTF-8
+  engagement id without calling Comms. Content-size, chronological-order, and
+  final metadata-size policy remain at the Comms boundary.
   """
   @spec record(String.t(), UserMessage.t(), String.t(), DateTime.t(), keyword()) ::
           {:ok, non_neg_integer()} | {:error, term()}
@@ -49,20 +57,21 @@ defmodule Arbor.Voice.TranscriptRecorder do
          :ok <- validate_content_shape(raw_assistant_text, :raw_assistant_text),
          :ok <- validate_completed_at(completed_at),
          :ok <- validate_engagement_id(user_message.engagement_id),
-         {:ok, metadata} <- build_metadata(opts) do
+         {:ok, user_metadata} <- build_user_metadata(opts),
+         {:ok, assistant_metadata} <- build_assistant_metadata(opts, user_metadata) do
       comms = Keyword.get(opts, :comms, Arbor.Comms)
       forwarded_opts = Keyword.take(opts, [:persistence])
 
       user_entry = %{
         content: user_message.content,
         sent_at: user_message.sent_at,
-        metadata: metadata
+        metadata: user_metadata
       }
 
       assistant_entry = %{
         content: raw_assistant_text,
         completed_at: completed_at,
-        metadata: metadata
+        metadata: assistant_metadata
       }
 
       # Exactly one call; return result unchanged. Do not catch raise/throw/exit.
@@ -133,12 +142,80 @@ defmodule Arbor.Voice.TranscriptRecorder do
 
   # -- metadata ---------------------------------------------------------------
 
-  defp build_metadata(opts) do
+  defp build_user_metadata(opts) do
     base = %{"transport" => "voice"}
 
     with {:ok, meta} <- put_optional_meta(base, opts, :backend),
          {:ok, meta} <- put_optional_meta(meta, opts, :mode) do
       {:ok, meta}
+    end
+  end
+
+  defp build_assistant_metadata(opts, user_metadata) do
+    if Keyword.has_key?(opts, :delegation) do
+      with {:ok, receipt} <- validate_delegation(Keyword.get(opts, :delegation)) do
+        {:ok,
+         user_metadata
+         |> Map.put("delegation_provider", receipt["provider"])
+         |> Map.put("delegation_task", receipt["task"])
+         |> Map.put("delegation_task_id", receipt["task_id"])
+         |> Map.put("delegation_outcome", receipt["outcome"])}
+      end
+    else
+      {:ok, user_metadata}
+    end
+  end
+
+  defp validate_delegation(receipt) when is_map(receipt) do
+    keys = Map.keys(receipt)
+
+    cond do
+      Enum.any?(keys, &(not is_binary(&1))) ->
+        {:error, {:invalid_opts, :invalid_delegation}}
+
+      MapSet.new(keys) != MapSet.new(@delegation_keys) ->
+        {:error, {:invalid_opts, :invalid_delegation}}
+
+      true ->
+        with :ok <- validate_delegation_provider(receipt["provider"]),
+             :ok <- validate_delegation_task(receipt["task"]),
+             :ok <- validate_delegation_task_id(receipt["task_id"]),
+             :ok <- validate_delegation_outcome(receipt["outcome"]) do
+          {:ok, receipt}
+        end
+    end
+  end
+
+  defp validate_delegation(_), do: {:error, {:invalid_opts, :invalid_delegation}}
+
+  defp validate_delegation_provider(provider) do
+    if is_binary(provider) and provider == CodingPlanFactory.worker_provider() do
+      :ok
+    else
+      {:error, {:invalid_opts, :invalid_delegation}}
+    end
+  end
+
+  defp validate_delegation_task(task) do
+    case CodingPlanFactory.admit_intent(task) do
+      {:ok, _intent} -> :ok
+      {:error, :invalid_intent} -> {:error, {:invalid_opts, :invalid_delegation}}
+    end
+  end
+
+  defp validate_delegation_task_id(task_id) do
+    if ManagedDispatchCore.valid_task_id?(task_id) do
+      :ok
+    else
+      {:error, {:invalid_opts, :invalid_delegation}}
+    end
+  end
+
+  defp validate_delegation_outcome(outcome) do
+    if is_binary(outcome) and MapSet.member?(@allowed_outcomes, outcome) do
+      :ok
+    else
+      {:error, {:invalid_opts, :invalid_delegation}}
     end
   end
 
