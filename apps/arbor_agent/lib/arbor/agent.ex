@@ -112,6 +112,60 @@ defmodule Arbor.Agent do
   defdelegate connect_mcp_servers(agent_id), to: Arbor.Agent.Manager
 
   # ===========================================================================
+  # Public API — Authorized live message (owner-scoped chat)
+  # ===========================================================================
+
+  @doc """
+  Send one engagement-tagged `UserMessage` to a running agent after owner-scoped
+  chat authorization.
+
+  Authorizes exactly `arbor://chat/agent/<target_agent_id>` with action `:chat`.
+  Only `{:ok, :authorized}` reaches `Arbor.Agent.Manager.chat/3`. The typed
+  envelope is preserved byte-for-byte (no restamp/reconstruct).
+
+  ## Options
+
+  - `:timeout` — positive integer milliseconds, max `30_000` (default `30_000`)
+
+  Unknown, duplicate, zero, or oversized options are rejected before effects.
+
+  ## Returns
+
+  - `{:ok, reply_text}` when Manager returns a binary reply
+  - `{:error, reason}` with a closed atom vocabulary (no content/capability leakage)
+  """
+  @spec send_message(
+          String.t(),
+          String.t(),
+          Arbor.Contracts.Session.UserMessage.t(),
+          keyword()
+        ) ::
+          {:ok, String.t()}
+          | {:error,
+             :invalid_opts
+             | :invalid_timeout
+             | :invalid_caller_id
+             | :invalid_agent_id
+             | :invalid_message
+             | :invalid_content
+             | :invalid_sender
+             | :invalid_engagement_id
+             | :unauthorized
+             | :delivery_failed}
+  def send_message(caller_id, target_agent_id, message, opts \\ []) do
+    # Fixed production collaborators only — never selectable via public opts or
+    # ambient process/application state (see MessageFacade.deliver/6 for tests).
+    Arbor.Agent.MessageFacade.deliver(
+      caller_id,
+      target_agent_id,
+      message,
+      opts,
+      &Arbor.Security.authorize/3,
+      &Arbor.Agent.Manager.chat/3
+    )
+  end
+
+  # ===========================================================================
   # Public API — Authorized versions (for callers that need capability checks)
   # ===========================================================================
 

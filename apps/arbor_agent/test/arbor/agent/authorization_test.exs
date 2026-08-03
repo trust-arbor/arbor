@@ -86,6 +86,10 @@ defmodule Arbor.Agent.AuthorizationTest do
       assert {:authorize_create, 2} in exports or {:authorize_create, 3} in exports
       assert {:authorize_destroy, 2} in exports
       assert {:authorize_restore, 2} in exports
+
+      # VP-05A owner-scoped chat facade (default opts yields both arities)
+      assert {:send_message, 3} in exports
+      assert {:send_message, 4} in exports
     end
   end
 end

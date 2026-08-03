@@ -506,10 +506,19 @@ defmodule Arbor.Agent.Manager do
   This allows external callers (e.g., Claude Code via Tidewave) to have
   conversations with the agent that are visible to any signal subscriber.
 
-  The `sender` label identifies who sent the message (e.g., "Hysun", "Unknown Sender").
-  If no `:agent_id` is provided, uses the first running agent.
+  The first argument may be a bare string or an
+  `Arbor.Contracts.Session.UserMessage` envelope (engagement-tagged, with an
+  authoritative `sent_at`). The envelope is passed through unchanged to the
+  live Session path.
+
+  The `sender` label identifies who sent the message for signals (e.g., "Hysun",
+  "Unknown Sender"). If no `:agent_id` is provided, uses the first running agent.
   """
-  @spec chat(String.t(), String.t(), keyword()) :: {:ok, String.t()} | {:error, term()}
+  @spec chat(
+          String.t() | Arbor.Contracts.Session.UserMessage.t(),
+          String.t(),
+          keyword()
+        ) :: {:ok, String.t()} | {:error, term()}
   def chat(input, sender \\ @default_sender, opts \\ []) do
     input
     |> chat_response(sender, opts)
@@ -522,8 +531,14 @@ defmodule Arbor.Agent.Manager do
   This is the same dispatch path as `chat/3`, but preserves fields such as
   tool-call history, usage, model, and provider for orchestration callers that
   need artifacts rather than final assistant text only.
+
+  Accepts a bare string or an `Arbor.Contracts.Session.UserMessage` envelope.
   """
-  @spec chat_response(String.t(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  @spec chat_response(
+          String.t() | Arbor.Contracts.Session.UserMessage.t(),
+          String.t(),
+          keyword()
+        ) :: {:ok, map()} | {:error, term()}
   def chat_response(input, sender \\ @default_sender, opts \\ []) do
     agent_result =
       case Keyword.get(opts, :agent_id) do
