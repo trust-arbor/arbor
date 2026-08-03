@@ -2085,12 +2085,27 @@ defmodule Arbor.Agent.Orchestration do
 
   defp opt(opts, key, default \\ nil)
 
-  defp opt(opts, key, default) when is_list(opts) do
-    Keyword.get(opts, key, default)
+  # Mixed atom/string option lists are valid for session_token alias support.
+  # Never use Keyword.* on mixed lists — Keyword.get/3 raises on non-atom keys
+  # in the list (Applied Learning: Elixir Keyword APIs require atom keys).
+  # Atom-first, then string-key fallback via List.keyfind/3 only.
+  defp opt(opts, key, default) when is_list(opts) and is_atom(key) do
+    case List.keyfind(opts, key, 0) do
+      {^key, value} ->
+        value
+
+      nil ->
+        string_key = Atom.to_string(key)
+
+        case List.keyfind(opts, string_key, 0) do
+          {^string_key, value} -> value
+          nil -> default
+        end
+    end
   end
 
-  defp opt(opts, key, default) when is_map(opts) do
-    Map.get(opts, key, Map.get(opts, to_string(key), default))
+  defp opt(opts, key, default) when is_map(opts) and is_atom(key) do
+    Map.get(opts, key, Map.get(opts, Atom.to_string(key), default))
   end
 
   defp opt(_opts, _key, default), do: default

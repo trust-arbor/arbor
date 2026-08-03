@@ -355,7 +355,7 @@ defmodule Arbor.Voice.ConsultAgentSecurityRegressionTest do
     [{session_pid, _}] = Registry.lookup(Arbor.Voice.Registry, key)
     sys_status = :sys.get_status(session_pid)
     refute inspect(sys_status) =~ @distinctive_token
-    # Proof is closed over inside consult_authority only — not a Session field
+    # Proof is closed over inside tool_authority only — not a Session field
     # and never visible via Inspect of retained state.
     state = :sys.get_state(session_pid)
     refute Map.has_key?(state, :session_token)

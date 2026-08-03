@@ -9,6 +9,8 @@ defmodule Arbor.Voice.CodingPlanFactory do
   alias Arbor.Contracts.Coding.{Plan, WorkPacket}
 
   @max_intent_bytes 2048
+  # Source-owned bound for trusted repo roots (absolute path strings).
+  @max_repo_root_bytes 4096
   @control_chars ~r/[\x00-\x1F\x7F]/
 
   @non_goals [
@@ -78,6 +80,9 @@ defmodule Arbor.Voice.CodingPlanFactory do
       not String.valid?(root) ->
         {:error, :invalid_repo_root}
 
+      byte_size(root) > @max_repo_root_bytes ->
+        {:error, :invalid_repo_root}
+
       String.trim(root) == "" ->
         {:error, :invalid_repo_root}
 
@@ -93,6 +98,10 @@ defmodule Arbor.Voice.CodingPlanFactory do
   end
 
   defp admit_repo_root(_), do: {:error, :invalid_repo_root}
+
+  @doc false
+  @spec max_repo_root_bytes() :: pos_integer()
+  def max_repo_root_bytes, do: @max_repo_root_bytes
 
   defp build_work_packet(intent) do
     WorkPacket.new(%{

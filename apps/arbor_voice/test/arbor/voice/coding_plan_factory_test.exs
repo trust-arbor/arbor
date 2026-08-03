@@ -84,12 +84,23 @@ defmodule Arbor.Voice.CodingPlanFactoryTest do
     assert {:error, :invalid_intent} = CodingPlanFactory.build(oversized, @root)
   end
 
-  test "rejects non-absolute, blank, control-bearing, and invalid UTF-8 roots" do
+  test "rejects non-absolute, blank, control-bearing, invalid UTF-8, and oversized roots" do
     assert {:error, :invalid_repo_root} = CodingPlanFactory.build(@intent, "relative/path")
     assert {:error, :invalid_repo_root} = CodingPlanFactory.build(@intent, "")
     assert {:error, :invalid_repo_root} = CodingPlanFactory.build(@intent, "   ")
     assert {:error, :invalid_repo_root} = CodingPlanFactory.build(@intent, "/tmp/bad\nroot")
     assert {:error, :invalid_repo_root} = CodingPlanFactory.build(@intent, <<0xFF, 0xFE>>)
+
+    max = CodingPlanFactory.max_repo_root_bytes()
+    # Absolute path at exact ceiling is admitted.
+    at_ceiling = "/" <> String.duplicate("a", max - 1)
+    assert byte_size(at_ceiling) == max
+    assert {:ok, _} = CodingPlanFactory.build(@intent, at_ceiling)
+
+    # One byte over the source-owned ceiling fails closed.
+    over = "/" <> String.duplicate("a", max)
+    assert byte_size(over) == max + 1
+    assert {:error, :invalid_repo_root} = CodingPlanFactory.build(@intent, over)
   end
 
   @tag spec: "VOICE-17"

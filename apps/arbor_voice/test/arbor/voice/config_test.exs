@@ -235,11 +235,17 @@ defmodule Arbor.Voice.ConfigTest do
 
   describe "agent_module (VP-05B / VP-05C)" do
     @tag spec: "VOICE-9"
-    test "defaults to Arbor.Agent and requires send_message/4 and dispatch_task/4" do
+    test "defaults to Arbor.Agent and requires send_message/4 for consult path" do
       assert {:ok, Arbor.Agent} = Config.validate_agent_module(Arbor.Agent)
       assert {:error, :invalid_config} = Config.validate_agent_module(String)
       assert {:error, :invalid_config} = Config.validate_agent_module(nil)
       assert {:error, :invalid_config} = Config.validate_agent_module("Arbor.Agent")
+    end
+
+    @tag spec: "VOICE-10"
+    test "dispatch path requires both send_message/4 and dispatch_task/4" do
+      assert {:ok, Arbor.Agent} = Config.validate_agent_module_with_dispatch(Arbor.Agent)
+      assert {:error, :invalid_config} = Config.validate_agent_module_with_dispatch(String)
     end
   end
 

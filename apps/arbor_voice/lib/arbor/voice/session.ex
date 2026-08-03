@@ -99,16 +99,16 @@ defmodule Arbor.Voice.Session do
   end
 
   defp after_engagement(config, engagement_id) do
-    # Fixed consult authority after engagement is known; raw proof stays
-    # inside the closure only (VP-05B). Built before resource/backend effects.
-    consult_authority = build_consult_authority(config, engagement_id)
+    # Fixed tool authority after engagement is known; raw proof stays
+    # inside the closure only (VP-05B/VP-05C). Built before resource/backend effects.
+    tool_authority = build_tool_authority(config, engagement_id)
 
     case reserve_budget(config) do
       {:ok, _reservation, reserved_ms, start_ms, settlement} ->
         after_reservation(
           config,
           engagement_id,
-          consult_authority,
+          tool_authority,
           reserved_ms,
           start_ms,
           settlement
@@ -122,7 +122,7 @@ defmodule Arbor.Voice.Session do
   defp after_reservation(
          config,
          engagement_id,
-         consult_authority,
+         tool_authority,
          reserved_ms,
          start_ms,
          settlement
@@ -132,7 +132,7 @@ defmodule Arbor.Voice.Session do
         after_owner(
           config,
           engagement_id,
-          consult_authority,
+          tool_authority,
           reserved_ms,
           start_ms,
           settlement,
@@ -149,7 +149,7 @@ defmodule Arbor.Voice.Session do
   defp after_owner(
          config,
          engagement_id,
-         consult_authority,
+         tool_authority,
          reserved_ms,
          start_ms,
          settlement,
@@ -160,7 +160,7 @@ defmodule Arbor.Voice.Session do
         after_cleanup_registered(
           config,
           engagement_id,
-          consult_authority,
+          tool_authority,
           reserved_ms,
           start_ms,
           settlement,
@@ -181,7 +181,7 @@ defmodule Arbor.Voice.Session do
   defp after_cleanup_registered(
          config,
          engagement_id,
-         consult_authority,
+         tool_authority,
          reserved_ms,
          start_ms,
          settlement,
@@ -192,7 +192,7 @@ defmodule Arbor.Voice.Session do
         after_backend_ready(
           config,
           engagement_id,
-          consult_authority,
+          tool_authority,
           reserved_ms,
           start_ms,
           settlement,
@@ -211,7 +211,7 @@ defmodule Arbor.Voice.Session do
   defp after_backend_ready(
          config,
          engagement_id,
-         consult_authority,
+         tool_authority,
          reserved_ms,
          start_ms,
          settlement,
@@ -254,8 +254,8 @@ defmodule Arbor.Voice.Session do
           tool_declarations: config.tool_declarations,
           progress_threshold_ms: config.progress_threshold_ms,
           # Single live retention path for the redacted proof: closed over
-          # inside consult_authority only (never a separate Session field).
-          consult_authority: consult_authority,
+          # inside tool_authority only (never a separate Session field).
+          tool_authority: tool_authority,
           # min(100, owner max_recv) so recv never exceeds a tighter owner cap.
           poll_window_ms: derive_poll_window_ms(config.resource_owner_opts),
           turn: nil,
@@ -571,17 +571,17 @@ defmodule Arbor.Voice.Session do
   end
 
   # Fixed tool authority: binds caller, target, engagement, timeout, optional
-  # redacted proof, orchestrator roots, and policy factory. Router never sees
-  # raw credentials or MFA choice.
-  defp build_consult_authority(config, engagement_id) do
+  # redacted proof, and (when catalog requires it) orchestrator roots + policy
+  # factory. Router never sees raw credentials or MFA choice.
+  defp build_tool_authority(config, engagement_id) do
     user_id = config.user_id
     agent_id = config.agent_id
     tool_timeout_ms = config.tool_router_timeout_ms
     redacted = config.session_token
     agent_module = config.agent_module
-    orchestrator_module = config.orchestrator_module
+    orchestrator_module = Map.get(config, :orchestrator_module)
 
-    %{
+    base = %{
       consult_agent: fn message when is_binary(message) ->
         um =
           message
@@ -598,18 +598,25 @@ defmodule Arbor.Voice.Session do
           end
 
         agent_module.send_message(user_id, agent_id, um, opts)
-      end,
-      dispatch_coding_task: fn task_intent when is_binary(task_intent) ->
-        dispatch_coding_task(
-          task_intent,
-          user_id,
-          agent_id,
-          agent_module,
-          orchestrator_module,
-          redacted
-        )
       end
     }
+
+    case orchestrator_module do
+      nil ->
+        base
+
+      orch when is_atom(orch) and not is_nil(orch) ->
+        Map.put(base, :dispatch_coding_task, fn task_intent when is_binary(task_intent) ->
+          dispatch_coding_task(
+            task_intent,
+            user_id,
+            agent_id,
+            agent_module,
+            orch,
+            redacted
+          )
+        end)
+    end
   end
 
   defp dispatch_coding_task(
@@ -645,12 +652,15 @@ defmodule Arbor.Voice.Session do
     end
   end
 
-  defp first_coding_root(orchestrator_module) do
+  defp first_coding_root(nil), do: {:error, :roots_unavailable}
+
+  defp first_coding_root(orchestrator_module) when is_atom(orchestrator_module) do
     try do
       case orchestrator_module.coding_repo_roots() do
         {:ok, [root | _]}
         when is_binary(root) and byte_size(root) > 0 and String.valid?(root) ->
-          if Path.type(root) == :absolute and not String.match?(root, ~r/[\x00-\x1F\x7F]/) do
+          if Path.type(root) == :absolute and not String.match?(root, ~r/[\x00-\x1F\x7F]/) and
+               byte_size(root) <= 4096 do
             {:ok, root}
           else
             {:error, :roots_unavailable}
@@ -665,6 +675,8 @@ defmodule Arbor.Voice.Session do
       _, _ -> {:error, :roots_unavailable}
     end
   end
+
+  defp first_coding_root(_), do: {:error, :roots_unavailable}
 
   defp reduce_backend_meta(%{backend: backend, mode: mode})
        when is_atom(backend) and not is_nil(backend) and mode in [:cloud, :local] do
@@ -1016,7 +1028,7 @@ defmodule Arbor.Voice.Session do
       token: token,
       router: state.tool_router,
       context: context,
-      authority: state.consult_authority,
+      authority: state.tool_authority,
       timeout_ms: state.tool_router_timeout_ms
     }
 

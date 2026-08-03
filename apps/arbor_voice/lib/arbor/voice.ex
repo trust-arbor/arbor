@@ -233,8 +233,8 @@ defmodule Arbor.Voice do
          {:ok, progress_threshold_ms} <-
            resolve_progress_threshold_ms(opts, tool_router_timeout_ms),
          {:ok, session_token} <- resolve_session_token(opts),
-         {:ok, agent_module} <- resolve_agent_module(),
-         {:ok, orchestrator_module} <- resolve_orchestrator_module(),
+         {:ok, agent_module, orchestrator_module} <-
+           resolve_coding_dispatch_collaborators(tool_declarations),
          :ok <- validate_optional_module(opts, :engagement_store) do
       {:ok,
        %{
@@ -657,18 +657,31 @@ defmodule Arbor.Voice do
     end
   end
 
-  defp resolve_agent_module do
-    case Config.agent_module() do
-      {:ok, mod} -> {:ok, mod}
-      {:error, _} -> {:error, :invalid_config}
+  # Coding-dispatch collaborators are required only when the effective static
+  # catalog exposes dispatch_coding_task. Consult-only / empty routers keep the
+  # prior send_message-only agent validation and skip Orchestrator resolution.
+  defp resolve_coding_dispatch_collaborators(tool_declarations)
+       when is_list(tool_declarations) do
+    if catalog_exposes_dispatch_coding_task?(tool_declarations) do
+      with {:ok, agent_module} <- Config.agent_module_with_dispatch(),
+           {:ok, orchestrator_module} <- Config.orchestrator_module() do
+        {:ok, agent_module, orchestrator_module}
+      else
+        {:error, _} -> {:error, :invalid_config}
+      end
+    else
+      case Config.agent_module() do
+        {:ok, agent_module} -> {:ok, agent_module, nil}
+        {:error, _} -> {:error, :invalid_config}
+      end
     end
   end
 
-  defp resolve_orchestrator_module do
-    case Config.orchestrator_module() do
-      {:ok, mod} -> {:ok, mod}
-      {:error, _} -> {:error, :invalid_config}
-    end
+  defp catalog_exposes_dispatch_coding_task?(tool_declarations) do
+    Enum.any?(tool_declarations, fn
+      %{"name" => "dispatch_coding_task"} -> true
+      _ -> false
+    end)
   end
 
   defp validate_optional_module(opts, key) do

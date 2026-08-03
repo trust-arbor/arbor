@@ -343,12 +343,37 @@ defmodule Arbor.Voice.Config do
   # ---------------------------------------------------------------------------
 
   @doc """
-  Pure validation: an atom module exporting `send_message/4` and
-  `dispatch_task/4`. Catch-safe so compiled-but-not-yet-loaded modules are
-  accepted.
+  Pure validation: an atom module exporting `send_message/4` (consult path).
+  Catch-safe so compiled-but-not-yet-loaded modules are accepted.
+  Does not require `dispatch_task/4` — that is validated only when the session
+  catalog exposes `dispatch_coding_task` (VP-05C).
   """
   @spec validate_agent_module(term()) :: {:ok, module()} | {:error, :invalid_config}
   def validate_agent_module(mod) when is_atom(mod) and not is_nil(mod) do
+    try do
+      exports = mod.module_info(:exports)
+
+      if {:send_message, 4} in exports do
+        {:ok, mod}
+      else
+        {:error, :invalid_config}
+      end
+    rescue
+      _ -> {:error, :invalid_config}
+    catch
+      _kind, _reason -> {:error, :invalid_config}
+    end
+  end
+
+  def validate_agent_module(_), do: {:error, :invalid_config}
+
+  @doc """
+  Pure validation: agent module exporting both `send_message/4` and
+  `dispatch_task/4` for catalogs that include `dispatch_coding_task`.
+  """
+  @spec validate_agent_module_with_dispatch(term()) ::
+          {:ok, module()} | {:error, :invalid_config}
+  def validate_agent_module_with_dispatch(mod) when is_atom(mod) and not is_nil(mod) do
     try do
       exports = mod.module_info(:exports)
 
@@ -364,10 +389,11 @@ defmodule Arbor.Voice.Config do
     end
   end
 
-  def validate_agent_module(_), do: {:error, :invalid_config}
+  def validate_agent_module_with_dispatch(_), do: {:error, :invalid_config}
 
   @doc """
-  Cross-library Agent facade module for consult_agent and dispatch_coding_task.
+  Cross-library Agent facade module for consult_agent (and dispatch when the
+  catalog requires it).
 
   Defaults to `Arbor.Agent`. Not a public per-session option — tests may
   replace via Application env (`:agent_module`) in isolated non-async tests
@@ -379,6 +405,17 @@ defmodule Arbor.Voice.Config do
     :arbor_voice
     |> Application.get_env(:agent_module, Arbor.Agent)
     |> validate_agent_module()
+  end
+
+  @doc """
+  Agent facade when the effective catalog exposes `dispatch_coding_task`.
+  Requires both `send_message/4` and `dispatch_task/4`.
+  """
+  @spec agent_module_with_dispatch() :: {:ok, module()} | {:error, :invalid_config}
+  def agent_module_with_dispatch do
+    :arbor_voice
+    |> Application.get_env(:agent_module, Arbor.Agent)
+    |> validate_agent_module_with_dispatch()
   end
 
   # ---------------------------------------------------------------------------

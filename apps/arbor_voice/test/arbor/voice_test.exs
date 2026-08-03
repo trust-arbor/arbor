@@ -18,6 +18,12 @@ defmodule Arbor.VoiceTest do
     ValidSpeakableDouble
   }
 
+  # Consult-only agent for empty-catalog sessions (VP-05C): send_message only.
+  defmodule ConsultOnlyAgent do
+    @moduledoc false
+    def send_message(_c, _t, _m, _o \\ []), do: {:ok, "ok"}
+  end
+
   defp unique_ids do
     n = System.unique_integer([:positive])
     {"user_#{n}", "agent_#{n}"}
@@ -614,11 +620,39 @@ defmodule Arbor.VoiceTest do
 
       [{session_pid, _}] = Registry.lookup(Arbor.Voice.Registry, key)
       refute inspect(:sys.get_status(session_pid)) =~ token
-      # Proof is closed over inside consult_authority only — not a Session field.
+      # Proof is closed over inside tool_authority only — not a Session field.
       state = :sys.get_state(session_pid)
       refute Map.has_key?(state, :session_token)
       refute inspect(state) =~ token
 
+      assert :ok = Voice.stop_session(key)
+    end
+
+    @tag spec: "VOICE-10"
+    test "empty catalog does not require dispatch_task or orchestrator collaborators" do
+      previous_agent = Application.fetch_env(:arbor_voice, :agent_module)
+      previous_orch = Application.fetch_env(:arbor_voice, :orchestrator_module)
+
+      on_exit(fn ->
+        case previous_agent do
+          {:ok, value} -> Application.put_env(:arbor_voice, :agent_module, value)
+          :error -> Application.delete_env(:arbor_voice, :agent_module)
+        end
+
+        case previous_orch do
+          {:ok, value} -> Application.put_env(:arbor_voice, :orchestrator_module, value)
+          :error -> Application.delete_env(:arbor_voice, :orchestrator_module)
+        end
+      end)
+
+      Application.put_env(:arbor_voice, :agent_module, ConsultOnlyAgent)
+      # Broken orchestrator would fail if resolved — must not be required.
+      Application.put_env(:arbor_voice, :orchestrator_module, String)
+
+      {user_id, agent_id} = unique_ids()
+      {opts, _} = base_opts(tool_router: Arbor.Voice.ToolRouter.EmptyCatalog)
+
+      assert {:ok, key} = Voice.start_session(user_id, agent_id, opts)
       assert :ok = Voice.stop_session(key)
     end
   end
