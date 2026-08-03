@@ -16,8 +16,6 @@ defmodule Arbor.Agent.TaskDispatchFacadeSecurityRegressionTest do
   alias Arbor.Security
   alias Arbor.Security.SessionToken
 
-  @distinctive_token "vp05c-dispatch-security-token-9e4b1c7a"
-
   # ---------------------------------------------------------------------------
   # Capture collaborators (TaskStore / audit) — Security is real
   # ---------------------------------------------------------------------------
@@ -321,6 +319,17 @@ defmodule Arbor.Agent.TaskDispatchFacadeSecurityRegressionTest do
   end
 
   defp ensure_task_store! do
+    case Process.whereis(Arbor.Agent.Orchestration.TaskSupervisor) do
+      pid when is_pid(pid) ->
+        :ok
+
+      nil ->
+        {:ok, _pid} =
+          Task.Supervisor.start_link(name: Arbor.Agent.Orchestration.TaskSupervisor)
+
+        :ok
+    end
+
     case Process.whereis(Arbor.Agent.Orchestration.TaskStore) do
       pid when is_pid(pid) ->
         :ok
@@ -537,7 +546,7 @@ defmodule Arbor.Agent.TaskDispatchFacadeSecurityRegressionTest do
 
       assert [dispatch] = CaptureTaskStore.dispatches()
       refute Keyword.has_key?(dispatch.opts, :session_token)
-      refute Keyword.has_key?(dispatch.opts, "session_token")
+      refute List.keymember?(dispatch.opts, "session_token", 0)
       refute inspect(dispatch) =~ token
       assert dispatch.task == probe_task()
       assert dispatch.agent_id == target
@@ -577,7 +586,7 @@ defmodule Arbor.Agent.TaskDispatchFacadeSecurityRegressionTest do
 
       assert [dispatch] = CaptureTaskStore.dispatches()
       refute Keyword.has_key?(dispatch.opts, :session_token)
-      refute Keyword.has_key?(dispatch.opts, "session_token")
+      refute List.keymember?(dispatch.opts, "session_token", 0)
       refute inspect(dispatch) =~ token
     end
 

@@ -553,7 +553,7 @@ defmodule Arbor.Voice.SessionTextTurnTest do
   describe "empty-catalog tool path" do
     @tag spec: "VOICE-8"
     test "one no_tools_installed output per id; duplicates suppressed" do
-      ctx = turn_opts()
+      ctx = turn_opts(tool_router: Arbor.Voice.ToolRouter.EmptyCatalog)
 
       call = %{id: "tc_1", name: "consult_agent", arguments: %{"q" => "x"}}
 
@@ -582,7 +582,7 @@ defmodule Arbor.Voice.SessionTextTurnTest do
 
     @tag spec: "VOICE-8"
     test "malformed tool call ends turn with :turn_failed" do
-      ctx = turn_opts()
+      ctx = turn_opts(tool_router: Arbor.Voice.ToolRouter.EmptyCatalog)
       ControllableTurnBackend.enqueue([{:tool_call, %{id: "x"}}])
 
       {user_id, agent_id} = unique_ids()
@@ -594,7 +594,7 @@ defmodule Arbor.Voice.SessionTextTurnTest do
 
     @tag spec: "VOICE-8"
     test "failed tool-result send ends turn with :turn_failed" do
-      ctx = turn_opts()
+      ctx = turn_opts(tool_router: Arbor.Voice.ToolRouter.EmptyCatalog)
       ControllableTurnBackend.set_tool_result_mode(:error)
 
       ControllableTurnBackend.enqueue([

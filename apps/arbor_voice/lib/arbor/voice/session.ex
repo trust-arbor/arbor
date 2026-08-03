@@ -657,9 +657,9 @@ defmodule Arbor.Voice.Session do
   defp first_coding_root(orchestrator_module) when is_atom(orchestrator_module) do
     try do
       case orchestrator_module.coding_repo_roots() do
-        {:ok, [root | _]}
-        when is_binary(root) and byte_size(root) > 0 and String.valid?(root) ->
-          if Path.type(root) == :absolute and not String.match?(root, ~r/[\x00-\x1F\x7F]/) and
+        {:ok, [root | _]} when is_binary(root) and byte_size(root) > 0 ->
+          if String.valid?(root) and Path.type(root) == :absolute and
+               not String.match?(root, ~r/[\x00-\x1F\x7F]/) and
                byte_size(root) <= 4096 do
             {:ok, root}
           else
