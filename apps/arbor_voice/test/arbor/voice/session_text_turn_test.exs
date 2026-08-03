@@ -139,7 +139,10 @@ defmodule Arbor.Voice.SessionTextTurnTest do
       assert forwarded_opts == []
 
       emissions = FakeSignals.emissions(ctx.signals)
-      completed = Enum.filter(emissions, fn {c, t, _, _} -> c == :voice and t == :turn_completed end)
+
+      completed =
+        Enum.filter(emissions, fn {c, t, _, _} -> c == :voice and t == :turn_completed end)
+
       assert length(completed) == 1
       assert [{_, _, payload, []}] = completed
       assert payload.user_id == user_id
@@ -148,6 +151,11 @@ defmodule Arbor.Voice.SessionTextTurnTest do
       assert payload.backend == :controllable_turn
       assert payload.mode == :local
       assert is_integer(payload.duration_ms) and payload.duration_ms >= 0
+      # Default speech_output is nil → :disabled; no content/callback fields.
+      assert payload.speech_output == :disabled
+      refute Map.has_key?(payload, :spoken_text)
+      refute Map.has_key?(payload, :raw_text)
+      refute Map.has_key?(payload, :error)
 
       refute Enum.any?(emissions, fn {_, t, _, _} -> t == :"transcript.record_failed" end)
 
@@ -257,7 +265,9 @@ defmodule Arbor.Voice.SessionTextTurnTest do
 
       emissions = FakeSignals.emissions(ctx.signals)
 
-      assert Enum.any?(emissions, fn {c, t, _, _} -> c == :voice and t == :budget_exhausted end)
+      assert Enum.any?(emissions, fn {c, t, payload, _} ->
+               c == :voice and t == :budget_exhausted and payload.speech_output == :disabled
+             end)
     end
   end
 
@@ -387,6 +397,7 @@ defmodule Arbor.Voice.SessionTextTurnTest do
       assert {:ok, key} = Voice.start_session(user_id, agent_id, ctx.opts)
       assert {:error, :turn_failed} = Voice.text_turn(user_id, agent_id, "hi")
       assert FakeCommsSession.record_calls(ctx.recorder_agent) == []
+
       refute Enum.any?(FakeSignals.emissions(ctx.signals), fn {c, t, _, _} ->
                c == :voice and t == :turn_completed
              end)
@@ -408,6 +419,7 @@ defmodule Arbor.Voice.SessionTextTurnTest do
       assert {:ok, key} = Voice.start_session(user_id, agent_id, ctx.opts)
       assert {:error, :turn_failed} = Voice.text_turn(user_id, agent_id, "hi")
       assert FakeCommsSession.record_calls(ctx.recorder_agent) == []
+
       refute Enum.any?(FakeSignals.emissions(ctx.signals), fn {c, t, _, _} ->
                c == :voice and t == :turn_completed
              end)
@@ -582,6 +594,598 @@ defmodule Arbor.Voice.SessionTextTurnTest do
       assert length(ControllableTurnBackend.tool_results()) == 1
       assert :ok = Voice.stop_session(key)
     end
+  end
+
+  # ---------------------------------------------------------------------------
+  # VP-04E2 — Speakable-only output after durable transcript success
+  # ---------------------------------------------------------------------------
+
+  defmodule TrackingSpeakable do
+    @moduledoc false
+    @table :arbor_voice_tracking_speakable
+
+    def ensure_table! do
+      case :ets.whereis(@table) do
+        :undefined -> _ = :ets.new(@table, [:named_table, :public, :bag])
+        _tid -> :ok
+      end
+
+      :ok
+    end
+
+    def reset do
+      ensure_table!()
+      :ets.delete_all_objects(@table)
+      :ok
+    end
+
+    def calls do
+      ensure_table!()
+      @table |> :ets.lookup(:call) |> Enum.map(&elem(&1, 1))
+    end
+
+    def render(text, opts) do
+      ensure_table!()
+      :ets.insert(@table, {:call, {:render, text, opts}})
+      {:speak, "spoken:#{text}"}
+    end
+
+    def tts_guard!(verdict) do
+      ensure_table!()
+      :ets.insert(@table, {:call, {:tts_guard, verdict}})
+      Arbor.Voice.Speakable.tts_guard!(verdict)
+    end
+  end
+
+  defmodule RaisingSpeakable do
+    @moduledoc false
+    def render(_text, _opts), do: raise("speakable render secret")
+    def tts_guard!(_), do: "should-not-run"
+  end
+
+  defmodule ThrowingSpeakable do
+    @moduledoc false
+    def render(_text, _opts), do: throw(:speakable_throw)
+    def tts_guard!(_), do: "should-not-run"
+  end
+
+  defmodule ExitingSpeakable do
+    @moduledoc false
+    def render(_text, _opts), do: exit(:speakable_exit)
+    def tts_guard!(_), do: "should-not-run"
+  end
+
+  defmodule GuardRaisingSpeakable do
+    @moduledoc false
+    def render(text, _opts), do: {:speak, text}
+    def tts_guard!(_), do: raise("guard secret")
+  end
+
+  defmodule GuardThrowingSpeakable do
+    @moduledoc false
+    def render(text, _opts), do: {:speak, text}
+    def tts_guard!(_), do: throw(:guard_throw)
+  end
+
+  defmodule GuardExitingSpeakable do
+    @moduledoc false
+    def render(text, _opts), do: {:speak, text}
+    def tts_guard!(_), do: exit(:guard_exit)
+  end
+
+  defmodule MalformedVerdictSpeakable do
+    @moduledoc false
+    def render(_text, _opts), do: {:bad, "x"}
+    def tts_guard!(v), do: Arbor.Voice.Speakable.tts_guard!(v)
+  end
+
+  defmodule BlankGuardSpeakable do
+    @moduledoc false
+    def render(_text, _opts), do: {:speak, "x"}
+    def tts_guard!(_), do: "   "
+  end
+
+  defmodule OversizedGuardSpeakable do
+    @moduledoc false
+    def render(_text, _opts), do: {:speak, "x"}
+    def tts_guard!(_), do: String.duplicate("a", 8193)
+  end
+
+  defmodule InvalidUtf8GuardSpeakable do
+    @moduledoc false
+    def render(_text, _opts), do: {:speak, "x"}
+    def tts_guard!(_), do: <<0xFF, 0xFE>>
+  end
+
+  defmodule NonBinaryGuardSpeakable do
+    @moduledoc false
+    def render(_text, _opts), do: {:speak, "x"}
+    # Bypass tts_guard! contract shape deliberately for Session rejection proof.
+    def tts_guard!(_), do: :not_a_string
+  end
+
+  @budget_exhaustion_notice "This voice session has reached its time limit. Continue on your screen."
+  @sensitive_pointer "That's sensitive. I've put it on your screen."
+  @default_escalation "the rest is on your screen"
+
+  describe "speakable output after durable success" do
+    @tag spec: "VOICE-3,VOICE-13,VOICE-15"
+    test "blocking recorder then blocking speech: persistence → output → public success" do
+      TrackingSpeakable.reset()
+      parent = self()
+      spoken_agent = start_spoken_collector()
+
+      # Speech callback blocks in the Session process until the test releases it,
+      # so public success and :turn_completed stay pending while output is held.
+      speech_output = fn spoken ->
+        Agent.update(spoken_agent, &(&1 ++ [spoken]))
+        send(parent, {:speech_entered, self(), spoken})
+
+        receive do
+          :release_speech -> :ok
+        after
+          15_000 ->
+            raise "speech_output block timed out waiting for :release_speech"
+        end
+      end
+
+      ctx =
+        turn_opts(
+          speakable: TrackingSpeakable,
+          speech_output: speech_output
+        )
+
+      FakeCommsSession.set_record_waiter(ctx.recorder_agent, self())
+      FakeCommsSession.set_record_mode(ctx.recorder_agent, :block)
+      ControllableTurnBackend.enqueue([{:turn_done, %{text: "raw-blocked-speech"}}])
+
+      {user_id, agent_id} = unique_ids()
+      assert {:ok, key} = Voice.start_session(user_id, agent_id, ctx.opts)
+
+      task =
+        Task.async(fn ->
+          send(parent, :turn_call_started)
+          Voice.text_turn(user_id, agent_id, "user-blocked")
+        end)
+
+      assert_receive :turn_call_started, 1_000
+      assert_receive {:record_entered, session_pid}, 3_000
+      assert is_pid(session_pid)
+
+      # 1) While persistence is held: no Speakable, no callback, no public success.
+      assert Task.yield(task, 150) == nil
+      assert TrackingSpeakable.calls() == []
+      assert Agent.get(spoken_agent, & &1) == []
+      refute_receive {:speech_entered, _, _}, 50
+
+      emissions_mid = FakeSignals.emissions(ctx.signals)
+      refute Enum.any?(emissions_mid, fn {c, t, _, _} -> c == :voice and t == :turn_completed end)
+
+      # 2) Release durable write first — speech may enter only after persistence.
+      send(session_pid, :release_record)
+
+      assert_receive {:speech_entered, speech_pid, "spoken:raw-blocked-speech"}, 3_000
+      assert speech_pid == session_pid
+
+      # Speakable ran after persistence; public success still pending while output holds.
+      assert {:render, "raw-blocked-speech", []} in TrackingSpeakable.calls()
+      assert {:tts_guard, {:speak, "spoken:raw-blocked-speech"}} in TrackingSpeakable.calls()
+      assert Agent.get(spoken_agent, & &1) == ["spoken:raw-blocked-speech"]
+      assert Task.yield(task, 150) == nil
+
+      emissions_held = FakeSignals.emissions(ctx.signals)
+
+      refute Enum.any?(emissions_held, fn {c, t, _, _} ->
+               c == :voice and t == :turn_completed
+             end)
+
+      # 3) Release speech output — only then public success and completion audit.
+      send(speech_pid, :release_speech)
+      assert {:ok, "raw-blocked-speech"} = Task.await(task, 5_000)
+
+      emissions = FakeSignals.emissions(ctx.signals)
+
+      assert Enum.any?(emissions, fn {c, t, payload, _} ->
+               c == :voice and t == :turn_completed and payload.speech_output == :delivered
+             end)
+
+      assert :ok = Voice.stop_session(key)
+    end
+
+    @tag spec: "VOICE-3,VOICE-13,VOICE-15"
+    test "production Speakable: long raw persists/returns; callback gets truncated+escalation" do
+      raw = 1..70 |> Enum.map_join(" ", &"word#{&1}")
+      spoken_agent = start_spoken_collector()
+
+      speech_output = fn spoken ->
+        Agent.update(spoken_agent, &(&1 ++ [spoken]))
+        :ok
+      end
+
+      ctx = turn_opts(speech_output: speech_output)
+      ControllableTurnBackend.enqueue([{:turn_done, %{text: raw}}])
+
+      {user_id, agent_id} = unique_ids()
+      assert {:ok, key} = Voice.start_session(user_id, agent_id, ctx.opts)
+      assert {:ok, ^raw} = Voice.text_turn(user_id, agent_id, "ask long")
+
+      # Durable raw unchanged.
+      assert [
+               {_agent, _eng, _user, assistant, _opts}
+             ] = FakeCommsSession.record_calls(ctx.recorder_agent)
+
+      assert assistant.content == raw
+
+      [spoken] = Agent.get(spoken_agent, & &1)
+      assert spoken != raw
+      assert String.ends_with?(spoken, @default_escalation)
+      assert length(String.split(spoken, ~r/\s+/, trim: true)) <= 60
+      refute String.contains?(spoken, "word70")
+
+      emissions = FakeSignals.emissions(ctx.signals)
+
+      assert Enum.any?(emissions, fn {c, t, payload, _} ->
+               c == :voice and t == :turn_completed and payload.speech_output == :delivered
+             end)
+
+      # Signal must not carry raw or spoken content.
+      encoded = inspect(emissions)
+      refute encoded =~ "word70"
+      refute encoded =~ @default_escalation
+
+      assert :ok = Voice.stop_session(key)
+    end
+
+    @tag spec: "VOICE-3,VOICE-13,VOICE-16"
+    test "production Speakable: sensitive raw persists/returns; callback gets screen pointer only" do
+      raw = "use key sk-ant-api1234567890abcdefghij to call the API"
+      spoken_agent = start_spoken_collector()
+
+      speech_output = fn spoken ->
+        Agent.update(spoken_agent, &(&1 ++ [spoken]))
+        :ok
+      end
+
+      ctx = turn_opts(speech_output: speech_output)
+      ControllableTurnBackend.enqueue([{:turn_done, %{text: raw}}])
+
+      {user_id, agent_id} = unique_ids()
+      assert {:ok, key} = Voice.start_session(user_id, agent_id, ctx.opts)
+      assert {:ok, ^raw} = Voice.text_turn(user_id, agent_id, "secret q")
+
+      assert [
+               {_agent, _eng, _user, assistant, _opts}
+             ] = FakeCommsSession.record_calls(ctx.recorder_agent)
+
+      assert assistant.content == raw
+
+      assert Agent.get(spoken_agent, & &1) == [@sensitive_pointer]
+
+      emissions = FakeSignals.emissions(ctx.signals)
+
+      assert Enum.any?(emissions, fn {c, t, payload, _} ->
+               c == :voice and t == :turn_completed and payload.speech_output == :delivered
+             end)
+
+      encoded = inspect(emissions)
+      refute encoded =~ "sk-ant"
+      refute encoded =~ @sensitive_pointer
+
+      assert :ok = Voice.stop_session(key)
+    end
+
+    @tag spec: "VOICE-3,VOICE-13"
+    test "recorder returned/raised/thrown/exited failure invokes neither Speakable nor output" do
+      TrackingSpeakable.reset()
+      spoken_agent = start_spoken_collector()
+
+      speech_output = fn spoken ->
+        Agent.update(spoken_agent, &(&1 ++ [spoken]))
+        :ok
+      end
+
+      for mode <- [:error, :raise, :throw, :exit] do
+        TrackingSpeakable.reset()
+        Agent.update(spoken_agent, fn _ -> [] end)
+
+        ctx =
+          turn_opts(
+            speakable: TrackingSpeakable,
+            speech_output: speech_output
+          )
+
+        FakeCommsSession.set_record_mode(ctx.recorder_agent, mode)
+        ControllableTurnBackend.enqueue([{:turn_done, %{text: "raw-#{mode}"}}])
+
+        {user_id, agent_id} = unique_ids()
+        assert {:ok, key} = Voice.start_session(user_id, agent_id, ctx.opts)
+
+        assert {:error, :transcript_record_failed} =
+                 Voice.text_turn(user_id, agent_id, "u"),
+               "mode #{mode}"
+
+        assert TrackingSpeakable.calls() == [], "mode #{mode}"
+        assert Agent.get(spoken_agent, & &1) == [], "mode #{mode}"
+
+        emissions = FakeSignals.emissions(ctx.signals)
+
+        refute Enum.any?(emissions, fn {c, t, _, _} -> c == :voice and t == :turn_completed end),
+               "mode #{mode}"
+
+        assert :ok = Voice.stop_session(key)
+      end
+    end
+
+    @tag spec: "VOICE-3,VOICE-13"
+    test "malformed recorder success envelope skips Speakable and output" do
+      TrackingSpeakable.reset()
+      spoken_agent = start_spoken_collector()
+
+      speech_output = fn spoken ->
+        Agent.update(spoken_agent, &(&1 ++ [spoken]))
+        :ok
+      end
+
+      ctx =
+        turn_opts(
+          transcript_recorder: MalformedOkRecorder,
+          speakable: TrackingSpeakable,
+          speech_output: speech_output
+        )
+
+      ControllableTurnBackend.enqueue([{:turn_done, %{text: "raw-malformed"}}])
+
+      {user_id, agent_id} = unique_ids()
+      assert {:ok, key} = Voice.start_session(user_id, agent_id, ctx.opts)
+      assert {:error, :transcript_record_failed} = Voice.text_turn(user_id, agent_id, "u")
+      assert TrackingSpeakable.calls() == []
+      assert Agent.get(spoken_agent, & &1) == []
+      assert :ok = Voice.stop_session(key)
+    end
+
+    @tag spec: "VOICE-3,VOICE-13,VOICE-15,VOICE-16"
+    test "Speakable raise/throw/exit/malformed never leaks raw, keeps durable success, reports :failed" do
+      cases = [
+        RaisingSpeakable,
+        ThrowingSpeakable,
+        ExitingSpeakable,
+        GuardRaisingSpeakable,
+        GuardThrowingSpeakable,
+        GuardExitingSpeakable,
+        MalformedVerdictSpeakable,
+        BlankGuardSpeakable,
+        OversizedGuardSpeakable,
+        InvalidUtf8GuardSpeakable,
+        NonBinaryGuardSpeakable
+      ]
+
+      for speakable <- cases do
+        spoken_agent = start_spoken_collector()
+
+        speech_output = fn spoken ->
+          Agent.update(spoken_agent, &(&1 ++ [spoken]))
+          :ok
+        end
+
+        raw = "public raw for #{inspect(speakable)}"
+        ctx = turn_opts(speakable: speakable, speech_output: speech_output)
+        ControllableTurnBackend.enqueue([{:turn_done, %{text: raw}}])
+
+        {user_id, agent_id} = unique_ids()
+        assert {:ok, key} = Voice.start_session(user_id, agent_id, ctx.opts)
+
+        # Durable public success even when presentation fails — never raw fallback.
+        assert {:ok, ^raw} = Voice.text_turn(user_id, agent_id, "q"), inspect(speakable)
+        assert Agent.get(spoken_agent, & &1) == [], inspect(speakable)
+
+        assert [
+                 {_a, _e, _u, assistant, _o}
+               ] = FakeCommsSession.record_calls(ctx.recorder_agent)
+
+        assert assistant.content == raw
+
+        emissions = FakeSignals.emissions(ctx.signals)
+
+        assert Enum.any?(emissions, fn {c, t, payload, _} ->
+                 c == :voice and t == :turn_completed and payload.speech_output == :failed
+               end),
+               inspect(speakable)
+
+        # Session still ready.
+        assert {:ok, %{state: :ready}} = Voice.session_status(key), inspect(speakable)
+        assert :ok = Voice.stop_session(key)
+      end
+    end
+
+    @tag spec: "VOICE-3,VOICE-13"
+    test "speech_output returned/malformed/raised/thrown/exited failures report :failed without raw leak" do
+      failure_callbacks = [
+        {:error_tuple, fn _s -> {:error, :tts_down} end},
+        {:malformed, fn _s -> :not_ok end},
+        {:raise, fn _s -> raise "output secret boom" end},
+        {:throw, fn _s -> throw(:output_throw) end},
+        {:exit, fn _s -> exit(:output_exit) end}
+      ]
+
+      for {name, callback} <- failure_callbacks do
+        expected_raw = "raw-output-#{name}"
+        ctx = turn_opts(speech_output: callback)
+        ControllableTurnBackend.enqueue([{:turn_done, %{text: expected_raw}}])
+
+        {user_id, agent_id} = unique_ids()
+        assert {:ok, key} = Voice.start_session(user_id, agent_id, ctx.opts)
+        assert {:ok, ^expected_raw} = Voice.text_turn(user_id, agent_id, "q"), inspect(name)
+
+        emissions = FakeSignals.emissions(ctx.signals)
+
+        assert Enum.any?(emissions, fn {c, t, payload, _} ->
+                 c == :voice and t == :turn_completed and payload.speech_output == :failed
+               end),
+               inspect(name)
+
+        encoded = inspect(emissions)
+        refute encoded =~ "output secret", inspect(name)
+        refute encoded =~ expected_raw, inspect(name)
+
+        assert {:ok, %{state: :ready}} = Voice.session_status(key), inspect(name)
+        status = elem(Voice.session_status(key), 1)
+        refute Map.has_key?(status, :speech_output)
+        refute Map.has_key?(status, :speakable)
+        assert :ok = Voice.stop_session(key)
+      end
+    end
+
+    @tag spec: "VOICE-3,VOICE-13"
+    test "disabled output reports :disabled; status/crash inspection hide speakable and output" do
+      ctx = turn_opts(speech_output: nil)
+      ControllableTurnBackend.enqueue([{:turn_done, %{text: "raw-disabled"}}])
+
+      {user_id, agent_id} = unique_ids()
+      assert {:ok, key} = Voice.start_session(user_id, agent_id, ctx.opts)
+      assert {:ok, "raw-disabled"} = Voice.text_turn(user_id, agent_id, "q")
+
+      emissions = FakeSignals.emissions(ctx.signals)
+
+      assert Enum.any?(emissions, fn {c, t, payload, _} ->
+               c == :voice and t == :turn_completed and payload.speech_output == :disabled
+             end)
+
+      assert {:ok, status} = Voice.session_status(key)
+      refute Map.has_key?(status, :speakable)
+      refute Map.has_key?(status, :speech_output)
+      refute Map.has_key?(status, :engagement_id)
+
+      assert [{pid, _}] = Registry.lookup(Arbor.Voice.Registry, key)
+      {:status, ^pid, _server, status_info} = :sys.get_status(pid)
+      encoded = inspect(status_info)
+      # Closed whitelist: no Speakable module, speech callback, or turn content.
+      refute encoded =~ "Arbor.Voice.Speakable"
+      refute encoded =~ "speech_output"
+      refute encoded =~ "raw-disabled"
+      refute encoded =~ "#Function<"
+      refute encoded =~ "spoken:"
+
+      assert :ok = Voice.stop_session(key)
+    end
+  end
+
+  describe "hard-timeout exhaustion notice through Speakable" do
+    @tag spec: "VOICE-13,VOICE-24"
+    test "exact notice is rendered/guarded before callback; disposition audited; cleanup converges" do
+      TrackingSpeakable.reset()
+      parent = self()
+      spoken_agent = start_spoken_collector()
+
+      speech_output = fn spoken ->
+        Agent.update(spoken_agent, &(&1 ++ [spoken]))
+        send(parent, {:exhaustion_spoken, spoken})
+        :ok
+      end
+
+      ctx =
+        turn_opts(
+          session_budget_ms: 80,
+          wall_clock: fn -> ~U[2026-08-02 12:00:00.000000Z] end,
+          monotonic_clock: fn -> System.monotonic_time(:millisecond) end,
+          speakable: TrackingSpeakable,
+          speech_output: speech_output
+        )
+
+      ControllableTurnBackend.enqueue([:timeout, :timeout, :timeout, :timeout, :timeout])
+
+      {user_id, agent_id} = unique_ids()
+      assert {:ok, key} = Voice.start_session(user_id, agent_id, ctx.opts)
+
+      t1 =
+        Task.async(fn ->
+          send(parent, :turn_started)
+          Voice.text_turn(user_id, agent_id, "slow")
+        end)
+
+      assert_receive :turn_started, 1_000
+      assert {:error, :budget_exhausted} = Task.await(t1, 5_000)
+
+      assert_receive {:exhaustion_spoken, spoken}, 3_000
+      assert spoken == "spoken:#{@budget_exhaustion_notice}"
+
+      assert {:render, @budget_exhaustion_notice, []} in TrackingSpeakable.calls()
+
+      assert {:tts_guard, {:speak, "spoken:#{@budget_exhaustion_notice}"}} in TrackingSpeakable.calls()
+
+      wait_until(fn -> Registry.lookup(Arbor.Voice.Registry, key) == [] end, 2_000)
+
+      emissions = FakeSignals.emissions(ctx.signals)
+
+      assert Enum.any?(emissions, fn {c, t, payload, _} ->
+               c == :voice and t == :budget_exhausted and payload.speech_output == :delivered
+             end)
+
+      # No content/callback errors in the audit signal.
+      exhaust =
+        Enum.find(emissions, fn {c, t, _, _} -> c == :voice and t == :budget_exhausted end)
+
+      {_c, _t, payload, opts} = exhaust
+      assert opts == []
+      assert Map.keys(payload) -- [:user_id, :agent_id, :backend, :mode, :speech_output] == []
+      refute Map.has_key?(payload, :error)
+      refute Map.has_key?(payload, :spoken_text)
+    end
+
+    @tag spec: "VOICE-13,VOICE-24"
+    test "output failure on hard timeout cannot suppress settlement, close, signal, or termination" do
+      speech_output = fn _spoken -> raise "exhaustion output secret" end
+
+      ctx =
+        turn_opts(
+          session_budget_ms: 80,
+          wall_clock: fn -> ~U[2026-08-02 12:00:00.000000Z] end,
+          monotonic_clock: fn -> System.monotonic_time(:millisecond) end,
+          speech_output: speech_output
+        )
+
+      ControllableTurnBackend.enqueue([:timeout, :timeout, :timeout, :timeout, :timeout])
+
+      {user_id, agent_id} = unique_ids()
+      assert {:ok, key} = Voice.start_session(user_id, agent_id, ctx.opts)
+
+      parent = self()
+
+      t1 =
+        Task.async(fn ->
+          send(parent, :turn_started)
+          Voice.text_turn(user_id, agent_id, "slow")
+        end)
+
+      assert_receive :turn_started, 1_000
+      assert {:error, :budget_exhausted} = Task.await(t1, 5_000)
+
+      wait_until(fn -> Registry.lookup(Arbor.Voice.Registry, key) == [] end, 2_000)
+
+      emissions = FakeSignals.emissions(ctx.signals)
+
+      assert Enum.any?(emissions, fn {c, t, payload, _} ->
+               c == :voice and t == :budget_exhausted and payload.speech_output == :failed
+             end)
+
+      # Settlement still ran (ledger consume via FakeLedger).
+      wait_until(
+        fn ->
+          Enum.any?(FakeLedger.calls(ctx.ledger), &match?({:consume, _, _, _}, &1))
+        end,
+        2_000
+      )
+
+      encoded = inspect(emissions)
+      refute encoded =~ "exhaustion output secret"
+      refute encoded =~ @budget_exhaustion_notice
+    end
+  end
+
+  defp start_spoken_collector do
+    {:ok, agent} =
+      Arbor.Voice.Test.SessionFakes.start_owned_agent(fn -> [] end)
+
+    agent
   end
 
   defp wait_until(fun, timeout_ms) do

@@ -1,12 +1,12 @@
 defmodule Arbor.Voice do
   @moduledoc """
   Public facade for the voice-first interface (VP-04D2B lifecycle + VP-04E1
-  durable text turns).
+  durable text turns + VP-04E2 speakable-only output).
 
   Exposes a tuple-keyed session lifecycle and message-driven text turns —
   `start_session/3`, `session_status/1`, `stop_session/1`, and `text_turn/3`.
-  No public operation accepts or returns a pid. Speakable rendering and
-  spoken output remain later VP-04E packets.
+  No public operation accepts or returns a pid. Optional speech output is an
+  arity-1 callback seam only; no device transport or public output API.
   """
 
   alias Arbor.Voice.Config
@@ -31,11 +31,13 @@ defmodule Arbor.Voice do
     :session_budget_ms,
     :daily_budget_ms,
     :transcript_recorder,
-    :transcript_opts
+    :transcript_opts,
+    :speakable,
+    :speech_output
   ]
 
   @transcript_opts_allowlist [:persistence]
-
+  @speakable_exports [render: 2, tts_guard!: 1]
 
   @type session_key :: {String.t(), String.t()}
 
@@ -173,6 +175,8 @@ defmodule Arbor.Voice do
          {:ok, signals} <- resolve_module(opts, :signals, Arbor.Signals),
          {:ok, transcript_recorder} <-
            resolve_module(opts, :transcript_recorder, Arbor.Voice.TranscriptRecorder),
+         {:ok, speakable} <- resolve_speakable(opts),
+         {:ok, speech_output} <- resolve_speech_output(opts),
          :ok <- validate_optional_module(opts, :engagement_store) do
       {:ok,
        %{
@@ -193,7 +197,9 @@ defmodule Arbor.Voice do
          session_budget_ms: session_ms,
          daily_budget_ms: daily_ms,
          transcript_recorder: transcript_recorder,
-         transcript_opts: transcript_opts
+         transcript_opts: transcript_opts,
+         speakable: speakable,
+         speech_output: speech_output
        }}
     end
   end
@@ -205,6 +211,58 @@ defmodule Arbor.Voice do
 
       {:ok, mod} when is_atom(mod) and not is_nil(mod) ->
         {:ok, mod}
+
+      {:ok, _} ->
+        {:error, :invalid_opts}
+    end
+  end
+
+  # Closed Speakable seam: default Arbor.Voice.Speakable; module must export
+  # render/2 and tts_guard!/1. Use catch-safe module_info(:exports) so
+  # compiled-but-not-yet-loaded modules are accepted (ResourceOwner pattern).
+  defp resolve_speakable(opts) do
+    case Keyword.fetch(opts, :speakable) do
+      :error ->
+        validate_speakable_module(Arbor.Voice.Speakable)
+
+      {:ok, mod} when is_atom(mod) and not is_nil(mod) ->
+        validate_speakable_module(mod)
+
+      {:ok, _} ->
+        {:error, :invalid_opts}
+    end
+  end
+
+  defp validate_speakable_module(module) do
+    try do
+      exports = module.module_info(:exports)
+
+      if Enum.all?(@speakable_exports, &(&1 in exports)) do
+        {:ok, module}
+      else
+        {:error, :invalid_opts}
+      end
+    rescue
+      _ ->
+        {:error, :invalid_opts}
+    catch
+      _kind, _reason ->
+        {:error, :invalid_opts}
+    end
+  end
+
+  # nil (default) disables speech output; only an arity-1 fun is accepted.
+  # The callback owns any external-I/O timeout; Session never wraps it in Task.
+  defp resolve_speech_output(opts) do
+    case Keyword.fetch(opts, :speech_output) do
+      :error ->
+        {:ok, nil}
+
+      {:ok, nil} ->
+        {:ok, nil}
+
+      {:ok, fun} when is_function(fun, 1) ->
+        {:ok, fun}
 
       {:ok, _} ->
         {:error, :invalid_opts}

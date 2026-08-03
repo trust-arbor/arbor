@@ -1,9 +1,9 @@
 defmodule Arbor.Voice.Session do
   @moduledoc false
-  # Internal supervised voice session (VP-04D2B + VP-04E1 text turns). Not part
-  # of the public Arbor.Voice facade — callers use start_session /
-  # session_status / stop_session / text_turn with the `{user_id, agent_id}`
-  # tuple key only. Never exposes a pid.
+  # Internal supervised voice session (VP-04D2B + VP-04E1 text turns +
+  # VP-04E2 speakable-only output). Not part of the public Arbor.Voice
+  # facade — callers use start_session / session_status / stop_session /
+  # text_turn with the `{user_id, agent_id}` tuple key only. Never exposes a pid.
 
   use GenServer
 
@@ -21,6 +21,10 @@ defmodule Arbor.Voice.Session do
   @default_owner_max_recv_ms 1_000
   # Text turns can run until hard budget; reply path clears the caller.
   @turn_call_timeout_ms :infinity
+  # Max bytes of a guarded speakable string offered to speech_output.
+  @speech_output_max_bytes 8192
+  # Deterministic non-sensitive hard-timeout notice (VOICE-24).
+  @budget_exhaustion_notice "This voice session has reached its time limit. Continue on your screen."
 
   # ---------------------------------------------------------------------------
   # Internal start / call API (facade only)
@@ -191,6 +195,9 @@ defmodule Arbor.Voice.Session do
           comms: config.comms,
           transcript_recorder: config.transcript_recorder,
           transcript_opts: config.transcript_opts,
+          # Private only — never in status/format_status/signals content.
+          speakable: config.speakable,
+          speech_output: config.speech_output,
           # min(100, owner max_recv) so recv never exceeds a tighter owner cap.
           poll_window_ms: derive_poll_window_ms(config.resource_owner_opts),
           turn: nil,
@@ -614,9 +621,15 @@ defmodule Arbor.Voice.Session do
 
   @impl true
   def handle_info(:hard_timeout, %{lifecycle: :ready, closing: false} = state) do
+    # 1) Explicit in-flight reply + generation clear before any speech work.
     state = reply_turn_caller(state, {:error, :budget_exhausted})
     state = %{state | closing: true, timer_ref: nil}
-    {state, _settled?} = settle_and_close(state, :budget_exhausted)
+    # 2) Render/guard/offer the deterministic exhaustion notice (never raw).
+    speech_output = offer_speech(state, @budget_exhaustion_notice)
+    # 3) Exclusive settlement + close; disposition is audit metadata only.
+    {state, _settled?} =
+      settle_and_close(state, :budget_exhausted, %{speech_output: speech_output})
+
     {:stop, :normal, state}
   end
 
@@ -772,11 +785,16 @@ defmodule Arbor.Voice.Session do
   defp complete_turn(state, turn, raw_text) do
     case record_transcript(state, turn, raw_text) do
       :ok ->
+        # Speech is presentation only: never rewrite durable/public raw text.
+        # Rendering runs only after exact transcript success and never falls
+        # back to raw when Speakable/output fails.
+        speech_output = offer_speech(state, raw_text)
         duration_ms = turn_duration_ms(state, turn)
-        safe_emit_turn_completed(state, duration_ms)
+        safe_emit_turn_completed(state, duration_ms, speech_output)
         reply_and_clear_turn(state, turn, {:ok, raw_text})
 
       {:error, :transcript_record_failed} ->
+        # Recorder failure: no render, no output callback.
         safe_emit(state, :"transcript.record_failed")
         reply_and_clear_turn(state, turn, {:error, :transcript_record_failed})
     end
@@ -811,6 +829,77 @@ defmodule Arbor.Voice.Session do
 
       {:error, :invalid_clock} ->
         {:error, :transcript_record_failed}
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Speakable-only speech output (VP-04E2)
+  # ---------------------------------------------------------------------------
+
+  # Returns :disabled | :delivered | :failed. Never returns content, never
+  # falls back to raw text, never raises past this boundary.
+  defp offer_speech(state, source_text) when is_binary(source_text) do
+    case state.speech_output do
+      nil ->
+        :disabled
+
+      callback when is_function(callback, 1) ->
+        render_guard_and_offer(state.speakable, callback, source_text)
+
+      _other ->
+        # Defensive: invalid callback shape was rejected at start_session.
+        :failed
+    end
+  end
+
+  defp offer_speech(_state, _source_text), do: :failed
+
+  defp render_guard_and_offer(speakable, callback, source_text) do
+    try do
+      verdict = speakable.render(source_text, [])
+      guarded = speakable.tts_guard!(verdict)
+
+      case accept_guarded_speech(guarded) do
+        {:ok, spoken} ->
+          invoke_speech_output(callback, spoken)
+
+        :error ->
+          # Malformed/oversized/blank guard output — do not invoke callback,
+          # do not fall back to raw.
+          :failed
+      end
+    rescue
+      _ -> :failed
+    catch
+      :exit, _ -> :failed
+      _kind, _reason -> :failed
+    end
+  end
+
+  # Only a valid UTF-8, nonblank, bounded string may reach speech_output.
+  defp accept_guarded_speech(text) when is_binary(text) do
+    cond do
+      byte_size(text) > @speech_output_max_bytes -> :error
+      not String.valid?(text) -> :error
+      String.trim(text) == "" -> :error
+      true -> {:ok, text}
+    end
+  end
+
+  defp accept_guarded_speech(_), do: :error
+
+  defp invoke_speech_output(callback, spoken) do
+    try do
+      case callback.(spoken) do
+        :ok -> :delivered
+        {:error, _reason} -> :failed
+        _other -> :failed
+      end
+    rescue
+      _ -> :failed
+    catch
+      :exit, _ -> :failed
+      _kind, _reason -> :failed
     end
   end
 
@@ -871,7 +960,11 @@ defmodule Arbor.Voice.Session do
   # remove the cleanup then close the owner. On uncertain/failed settle, leave
   # the cleanup installed and close the owner so its bounded replay remains
   # authoritative. Never both remove cleanup and independently release.
-  defp settle_and_close(state, signal_type) do
+  # `extra_payload` is merge-only bounded audit metadata (e.g. speech_output).
+  defp settle_and_close(state, signal_type, extra_payload \\ %{})
+
+  defp settle_and_close(state, signal_type, extra_payload)
+       when is_map(extra_payload) do
     settle_result =
       case read_monotonic_ms(state.monotonic_clock) do
         {:ok, now_ms} ->
@@ -893,13 +986,13 @@ defmodule Arbor.Voice.Session do
         # still prefers a single path once :done is observed.
         _ = safe_remove_cleanup(state)
         _ = safe_close_owner(state)
-        safe_emit(state, signal_type)
+        safe_emit(state, signal_type, extra_payload)
         {state, true}
 
       {:error, _reason} ->
         # Leave cleanup installed; owner close is the sole settlement authority.
         _ = safe_close_owner(state)
-        safe_emit(state, signal_type)
+        safe_emit(state, signal_type, extra_payload)
         {state, false}
     end
   end
@@ -956,13 +1049,17 @@ defmodule Arbor.Voice.Session do
   # Signals — best-effort, never crash a ready/closing session
   # ---------------------------------------------------------------------------
 
-  defp safe_emit(state, type) do
-    payload = %{
-      user_id: state.user_id,
-      agent_id: state.agent_id,
-      backend: state.backend,
-      mode: state.mode
-    }
+  defp safe_emit(state, type, extra_payload \\ %{})
+
+  defp safe_emit(state, type, extra_payload) when is_map(extra_payload) do
+    payload =
+      %{
+        user_id: state.user_id,
+        agent_id: state.agent_id,
+        backend: state.backend,
+        mode: state.mode
+      }
+      |> Map.merge(bounded_extra_payload(extra_payload))
 
     # Public Signals shape is emit/4 with a closed opts list.
     try do
@@ -973,15 +1070,17 @@ defmodule Arbor.Voice.Session do
     end
   end
 
-  defp safe_emit_turn_completed(state, duration_ms)
-       when is_integer(duration_ms) and duration_ms >= 0 do
+  defp safe_emit_turn_completed(state, duration_ms, speech_output)
+       when is_integer(duration_ms) and duration_ms >= 0 and
+              speech_output in [:disabled, :delivered, :failed] do
     payload = %{
       user_id: state.user_id,
       agent_id: state.agent_id,
       engagement_id: state.engagement_id,
       backend: state.backend,
       mode: state.mode,
-      duration_ms: duration_ms
+      duration_ms: duration_ms,
+      speech_output: speech_output
     }
 
     try do
@@ -991,6 +1090,20 @@ defmodule Arbor.Voice.Session do
       _kind, _reason -> :ok
     end
   end
+
+  # Only admit the closed speech_output disposition into audit payloads.
+  # Never forward content, modules, functions, verdicts, or error terms.
+  defp bounded_extra_payload(extra) when is_map(extra) do
+    case Map.get(extra, :speech_output) do
+      disposition when disposition in [:disabled, :delivered, :failed] ->
+        %{speech_output: disposition}
+
+      _ ->
+        %{}
+    end
+  end
+
+  defp bounded_extra_payload(_), do: %{}
 
   # ---------------------------------------------------------------------------
   # Status redaction for crash reports
@@ -1009,7 +1122,8 @@ defmodule Arbor.Voice.Session do
 
   # Crash/status output is a closed whitelist only. Live turn fields (caller
   # `from`, engagement-tagged `user_message`, TurnCore text accumulator,
-  # tool-id set, owner/settlement handles) stay private — never included here.
+  # tool-id set, owner/settlement handles), Speakable module, speech_output
+  # callback, and any presentation errors stay private — never included here.
   defp redacted_genserver_state(state) when is_map(state) do
     %{
       lifecycle: Map.get(state, :lifecycle),

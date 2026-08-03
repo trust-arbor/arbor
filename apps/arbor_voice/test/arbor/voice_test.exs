@@ -13,7 +13,9 @@ defmodule Arbor.VoiceTest do
     FakeCommsSession,
     FakeEngagementStore,
     FakeLedger,
-    FakeSignals
+    FakeSignals,
+    IncompleteSpeakableDouble,
+    ValidSpeakableDouble
   }
 
   defp unique_ids do
@@ -125,14 +127,133 @@ defmodule Arbor.VoiceTest do
                Voice.start_session(
                  user_id,
                  agent_id,
-                 Keyword.put(opts, :transcript_opts, [comms: :x])
+                 Keyword.put(opts, :transcript_opts, comms: :x)
                )
 
       assert {:error, :invalid_opts} =
                Voice.start_session(
                  user_id,
                  agent_id,
-                 Keyword.put(opts, :transcript_opts, [persistence: :a, persistence: :b])
+                 Keyword.put(opts, :transcript_opts, persistence: :a, persistence: :b)
+               )
+    end
+
+    @tag spec: "VOICE-13"
+    test "closed speakable/speech_output options: defaults, validation, compiled-unloaded" do
+      {user_id, agent_id} = unique_ids()
+      {opts, _} = base_opts()
+
+      # Default Speakable + nil speech_output accepted.
+      assert {:ok, key} = Voice.start_session(user_id, agent_id, opts)
+      assert :ok = Voice.stop_session(key)
+
+      # Explicit production Speakable + nil output.
+      {user_id2, agent_id2} = unique_ids()
+
+      assert {:ok, key2} =
+               Voice.start_session(
+                 user_id2,
+                 agent_id2,
+                 Keyword.merge(opts, speakable: Arbor.Voice.Speakable, speech_output: nil)
+               )
+
+      assert :ok = Voice.stop_session(key2)
+
+      # Explicit valid double + nil output.
+      {user_id2b, agent_id2b} = unique_ids()
+
+      assert {:ok, key2b} =
+               Voice.start_session(
+                 user_id2b,
+                 agent_id2b,
+                 Keyword.merge(opts, speakable: ValidSpeakableDouble, speech_output: nil)
+               )
+
+      assert :ok = Voice.stop_session(key2b)
+
+      # Valid arity-1 speech_output.
+      {user_id3, agent_id3} = unique_ids()
+
+      assert {:ok, key3} =
+               Voice.start_session(
+                 user_id3,
+                 agent_id3,
+                 Keyword.put(opts, :speech_output, fn _s -> :ok end)
+               )
+
+      assert :ok = Voice.stop_session(key3)
+
+      # Compiled-but-unloaded Speakable double still validates via module_info.
+      # Purge the test double only — never the production Speakable module.
+      speakable = ValidSpeakableDouble
+      _ = :code.purge(speakable)
+      _ = :code.delete(speakable)
+      _ = :code.purge(speakable)
+      assert :code.is_loaded(speakable) == false
+
+      {user_id4, agent_id4} = unique_ids()
+
+      assert {:ok, key4} =
+               Voice.start_session(
+                 user_id4,
+                 agent_id4,
+                 Keyword.put(opts, :speakable, speakable)
+               )
+
+      assert match?({:file, _path}, :code.is_loaded(speakable))
+      assert :ok = Voice.stop_session(key4)
+
+      # Missing callback(s).
+      {user_id5, agent_id5} = unique_ids()
+
+      assert {:error, :invalid_opts} =
+               Voice.start_session(
+                 user_id5,
+                 agent_id5,
+                 Keyword.put(opts, :speakable, IncompleteSpeakableDouble)
+               )
+
+      # nil / non-module speakable.
+      assert {:error, :invalid_opts} =
+               Voice.start_session(user_id5, agent_id5, Keyword.put(opts, :speakable, nil))
+
+      assert {:error, :invalid_opts} =
+               Voice.start_session(user_id5, agent_id5, Keyword.put(opts, :speakable, "nope"))
+
+      assert {:error, :invalid_opts} =
+               Voice.start_session(
+                 user_id5,
+                 agent_id5,
+                 Keyword.put(opts, :speakable, :NonexistentSpeakableModuleXYZ)
+               )
+
+      # Invalid speech_output values/arities.
+      assert {:error, :invalid_opts} =
+               Voice.start_session(
+                 user_id5,
+                 agent_id5,
+                 Keyword.put(opts, :speech_output, fn -> :ok end)
+               )
+
+      assert {:error, :invalid_opts} =
+               Voice.start_session(
+                 user_id5,
+                 agent_id5,
+                 Keyword.put(opts, :speech_output, fn _a, _b -> :ok end)
+               )
+
+      assert {:error, :invalid_opts} =
+               Voice.start_session(
+                 user_id5,
+                 agent_id5,
+                 Keyword.put(opts, :speech_output, :not_a_fun)
+               )
+
+      assert {:error, :invalid_opts} =
+               Voice.start_session(
+                 user_id5,
+                 agent_id5,
+                 Keyword.put(opts, :speech_output, "nope")
                )
     end
   end

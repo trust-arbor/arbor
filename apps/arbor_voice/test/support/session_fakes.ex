@@ -841,4 +841,23 @@ defmodule Arbor.Voice.Test.SessionFakes do
       %{backend: :controllable_turn, mode: :local, input_rate: nil, output_rate: nil}
     end
   end
+
+  # ---------------------------------------------------------------------------
+  # Speakable doubles for closed start_session option validation (VP-04E2)
+  # ---------------------------------------------------------------------------
+
+  defmodule ValidSpeakableDouble do
+    @moduledoc false
+    def render(text, _opts), do: {:speak, text}
+
+    def tts_guard!({tag, text})
+        when tag in [:speak, :speak_truncated, :screen_only] and is_binary(text),
+        do: text
+  end
+
+  defmodule IncompleteSpeakableDouble do
+    @moduledoc false
+    # Missing tts_guard!/1 — start_session must reject.
+    def render(text, _opts), do: {:speak, text}
+  end
 end
