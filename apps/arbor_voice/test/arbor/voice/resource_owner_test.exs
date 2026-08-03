@@ -91,6 +91,22 @@ defmodule Arbor.Voice.ResourceOwnerTest do
   end
 
   @tag spec: "VOICE-5"
+  test "compiled backend is loaded before callback validation" do
+    backend = Arbor.Voice.Test.FakeBackend
+
+    # Test support BEAMs are already compiled but may not be loaded in a fresh,
+    # focused test VM. Recreate that first-use production state explicitly.
+    _ = :code.purge(backend)
+    _ = :code.delete(backend)
+    _ = :code.purge(backend)
+    assert :code.is_loaded(backend) == false
+
+    assert {:ok, ro} = ResourceOwner.start(self(), backend, [], @default_opts)
+    assert match?({:file, _path}, :code.is_loaded(backend))
+    assert :ok = ResourceOwner.close(ro)
+  end
+
+  @tag spec: "VOICE-5"
   test "meta returns the exact four-field contract and rejects malformed meta" do
     defmodule BadMetaBackend do
       @behaviour Arbor.Voice.RealtimeBackend

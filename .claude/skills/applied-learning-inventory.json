@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-08-02",
-  "entry_count": 621,
+  "entry_count": 622,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -7617,8 +7617,21 @@
       "source_incident": "found 2026-08-02 adopting the VP-04D1 race repair).",
       "content_sha256": "de0ee559c0e5b74e95881075a2ff717a9081f68deb6ffdfa3483e3b2028d73d0",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 622,
+      "source_kind": "post-migration",
+      "slug": "callback-validation-must-not-depend-on-incidental-module-preload",
+      "title": "Callback validation must not depend on incidental module preload.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-callback-validation-must-not-depend-on-incidental-module-preload",
+      "source_date": "2026-08-03",
+      "source_incident": "found 2026-08-03 while isolating VP-04D2B Session startup).",
+      "content_sha256": "80a3dc6bea02eba0cad265c9f5f6df1c88d1d63689ad8f767db2fbb39ee578e0",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 160
+  "post_migration_entry_count": 161
 }

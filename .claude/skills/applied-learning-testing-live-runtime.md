@@ -724,3 +724,14 @@ never reaches its GNU fallback in Linux containers and can falsely fail a
 permission test. Use `stat -c '%a' file 2>/dev/null || stat -f '%Lp' file
 2>/dev/null`, then validate the output shape (found 2026-08-02 when cross-app
 validation falsely rejected the unrelated VP-04A candidate).
+
+<!-- applied-learning: callback-validation-must-not-depend-on-incidental-module-preload -->
+<a id="applied-learning-callback-validation-must-not-depend-on-incidental-module-preload"></a>
+**Callback validation must not depend on incidental module preload.**
+`function_exported?/3` returns false for a compiled but unloaded module, so a
+focused test or first production call can reject a valid injectable adapter
+while a full suite passes because another test loaded it. At an owned adapter
+boundary, load and inspect exports deterministically (for example with a
+catch-safe `module.module_info(:exports)`) before validating callbacks; prove
+the behavior from an explicitly unloaded compiled module instead of preloading
+it in the test (found 2026-08-03 while isolating VP-04D2B Session startup).

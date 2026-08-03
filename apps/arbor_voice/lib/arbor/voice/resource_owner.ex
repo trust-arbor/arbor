@@ -972,10 +972,16 @@ defmodule Arbor.Voice.ResourceOwner do
   defp validate_backend_module(module) do
     callbacks = Arbor.Voice.RealtimeBackend.behaviour_info(:callbacks)
 
-    if Enum.all?(callbacks, fn {fun, arity} -> function_exported?(module, fun, arity) end) do
-      :ok
-    else
-      {:error, :invalid_backend}
+    try do
+      exports = module.module_info(:exports)
+
+      if Enum.all?(callbacks, &(&1 in exports)) do
+        :ok
+      else
+        {:error, :invalid_backend}
+      end
+    catch
+      _kind, _reason -> {:error, :invalid_backend}
     end
   end
 

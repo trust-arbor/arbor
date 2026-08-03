@@ -134,7 +134,7 @@ defmodule Arbor.Voice.Session do
 
       {:error, reason} ->
         # After registration: close owner; cleanup is sole settlement authority.
-        _ = config.resource_owner.close(owner)
+        _ = safe_close_resource_owner(config.resource_owner, owner)
         {:error, reason}
     end
   end
@@ -180,7 +180,7 @@ defmodule Arbor.Voice.Session do
       {:error, _reason} ->
         _ = Process.cancel_timer(timer_ref)
         # After registration: close owner only; do not settle independently.
-        _ = config.resource_owner.close(owner)
+        _ = safe_close_resource_owner(config.resource_owner, owner)
         {:error, :start_failed}
     end
   end
@@ -281,6 +281,7 @@ defmodule Arbor.Voice.Session do
   defp utc_datetime?(%DateTime{
          calendar: Calendar.ISO,
          time_zone: tz,
+         zone_abbr: "UTC",
          utc_offset: 0,
          std_offset: 0,
          year: year,

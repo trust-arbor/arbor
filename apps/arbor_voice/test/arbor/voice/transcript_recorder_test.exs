@@ -50,6 +50,7 @@ defmodule Arbor.Voice.TranscriptRecorderTest do
 
   setup do
     {:ok, agent} = FakeComms.start()
+    on_exit(fn -> if Process.alive?(agent), do: Agent.stop(agent) end)
     %{agent: agent}
   end
 

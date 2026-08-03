@@ -327,6 +327,13 @@ defmodule Arbor.Voice.SessionTest do
           end
         },
         %{
+          # Contradictory abbreviation must not be admitted as a UTC instant.
+          name: :malformed_datetime_non_utc_abbreviation,
+          wall_clock: fn ->
+            %{~U[2026-08-02 12:00:00.000000Z] | zone_abbr: "EST"}
+          end
+        },
+        %{
           # Semantically invalid calendar date (day 32) with otherwise-UTC shell.
           name: :malformed_datetime_invalid_date,
           wall_clock: fn ->
