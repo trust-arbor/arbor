@@ -5,12 +5,20 @@ defmodule Arbor.Voice.Session.Settlement do
 
   This is a **data primitive, not a process**: an immutable struct wrapping a
   `Arbor.Voice.BudgetLedger.Reservation`, an injected ledger module + closed
-  `opts`, a captured monotonic start time, and two private `:atomics` refs
-  (phase, frozen elapsed). It is deliberately not a GenServer, Agent, ETS
-  owner, supervised child, or registered process: a `ResourceOwner` cleanup
-  closure retains this struct directly, so the atomics — ordinary reference-
-  counted Erlang resources, not process state — outlive the `Session` that
-  constructed it.
+  `opts`, a captured monotonic start time, and private `:atomics` refs
+  (permanent effect selection, phase, frozen elapsed). It is deliberately not
+  a GenServer, Agent, ETS owner, supervised child, or registered process: a
+  `ResourceOwner` cleanup closure retains this struct directly, so the
+  atomics — ordinary reference-counted Erlang resources, not process state —
+  outlive the `Session` that constructed it.
+
+  Effect selection is a permanent, owner-independent decision among
+  `undecided`, `release`, and `consume`. It is never an in-progress claim and
+  is never cleared: a caller that dies immediately after selection leaves the
+  next caller able to replay the same selected effect. `arm_consume/1`
+  selects consume before publishing `:consume_pending`. `settle/2` selects
+  the effect before any ledger IO and follows whichever selection won, even
+  when a concurrent arm raced a release-intent settler.
 
   There is no `settling`/`in_progress` phase. Every settlement starts
   `:release_pending` (the default outcome — return the reservation unused),
@@ -25,12 +33,29 @@ defmodule Arbor.Voice.Session.Settlement do
   `settle/2` never catches exits or errors from the injected ledger call: an
   uncertain outcome (the calling process died, or the ledger raised) must not
   be converted into `:done`. Only an explicit `:ok` return advances the phase.
+  Every `:ok` from `settle/2` corresponds to `phase/1 == :done`.
   """
 
   alias Arbor.Voice.BudgetLedger.Reservation
 
-  @enforce_keys [:reservation, :ledger, :ledger_opts, :start_ms, :phase_ref, :elapsed_ref]
-  defstruct [:reservation, :ledger, :ledger_opts, :start_ms, :phase_ref, :elapsed_ref]
+  @enforce_keys [
+    :reservation,
+    :ledger,
+    :ledger_opts,
+    :start_ms,
+    :effect_ref,
+    :phase_ref,
+    :elapsed_ref
+  ]
+  defstruct [
+    :reservation,
+    :ledger,
+    :ledger_opts,
+    :start_ms,
+    :effect_ref,
+    :phase_ref,
+    :elapsed_ref
+  ]
 
   @type phase :: :release_pending | :consume_pending | :done
 
@@ -39,9 +64,15 @@ defmodule Arbor.Voice.Session.Settlement do
           ledger: module(),
           ledger_opts: keyword(),
           start_ms: integer(),
+          effect_ref: :atomics.atomics_ref(),
           phase_ref: :atomics.atomics_ref(),
           elapsed_ref: :atomics.atomics_ref()
         }
+
+  # Permanent effect selection — never cleared, never an in-progress claim.
+  @effect_undecided 0
+  @effect_release 1
+  @effect_consume 2
 
   @phase_release_pending 0
   @phase_consume_pending 1
@@ -76,8 +107,10 @@ defmodule Arbor.Voice.Session.Settlement do
         {:error, :invalid_start_ms}
 
       true ->
+        effect_ref = :atomics.new(1, signed: false)
         phase_ref = :atomics.new(1, signed: false)
         elapsed_ref = :atomics.new(1, signed: true)
+        :atomics.put(effect_ref, 1, @effect_undecided)
         :atomics.put(phase_ref, 1, @phase_release_pending)
         :atomics.put(elapsed_ref, 1, @elapsed_unset)
 
@@ -87,6 +120,7 @@ defmodule Arbor.Voice.Session.Settlement do
            ledger: ledger,
            ledger_opts: ledger_opts,
            start_ms: start_ms,
+           effect_ref: effect_ref,
            phase_ref: phase_ref,
            elapsed_ref: elapsed_ref
          }}
@@ -97,16 +131,31 @@ defmodule Arbor.Voice.Session.Settlement do
   Arm consume mode: the session actually used budget and `settle/2` should
   call `ledger.consume/3` instead of `ledger.release/2`.
 
-  Idempotent while pending (repeated arming is a no-op success). Rejected
-  once the settlement is `:done` — the effect mode cannot change after
-  settlement.
+  Atomically selects the permanent consume effect before publishing
+  `:consume_pending`. Idempotent while consume is already selected and the
+  cell is not yet done. Fails when release has already been selected (a
+  settler won the linearizable effect race) or when the settlement is
+  already `:done`.
   """
-  @spec arm_consume(t()) :: :ok | {:error, :already_done}
-  def arm_consume(%__MODULE__{phase_ref: ref}) do
-    case :atomics.compare_exchange(ref, 1, @phase_release_pending, @phase_consume_pending) do
-      :ok -> :ok
-      @phase_consume_pending -> :ok
-      @phase_done -> {:error, :already_done}
+  @spec arm_consume(t()) :: :ok | {:error, :already_done | :release_selected}
+  def arm_consume(%__MODULE__{effect_ref: effect_ref, phase_ref: phase_ref}) do
+    case :atomics.get(phase_ref, 1) do
+      @phase_done ->
+        {:error, :already_done}
+
+      _pending ->
+        case select_consume(effect_ref) do
+          :ok ->
+            _ = publish_consume_pending(phase_ref)
+
+            case :atomics.get(phase_ref, 1) do
+              @phase_done -> {:error, :already_done}
+              _ -> :ok
+            end
+
+          {:error, _reason} = error ->
+            error
+        end
     end
   end
 
@@ -115,31 +164,50 @@ defmodule Arbor.Voice.Session.Settlement do
   injected ledger, using the explicit monotonic `now_ms` supplied by the
   caller (this module never reads the clock).
 
+  Atomically selects the permanent effect before any ledger IO. If release
+  selection wins, later arming fails and every replay releases. If consume
+  selection wins, every settler follows consume — even a settler that first
+  observed `:release_pending` before losing the selection CAS.
+
   Returns `:ok` once the settlement reaches `:done` — including when it was
   already `:done` on entry (idempotent). Returns the ledger's `{:error, _}`
   unchanged when the ledger call fails; the phase stays pending so a later
   `settle/2` call replays with identical arguments. Does not catch exits —
   an uncertain ledger outcome (this process dies mid-call) must remain
-  replayable, never `:done`.
+  replayable, never `:done`. Every successful `:ok` corresponds to
+  `phase/1 == :done`.
   """
-  @spec settle(t(), integer()) :: :ok | {:error, atom()}
+  @spec settle(t(), integer()) :: :ok | {:error, term()}
   def settle(%__MODULE__{} = settlement, now_ms) when is_integer(now_ms) do
     case phase(settlement) do
       :done -> :ok
-      :release_pending -> do_release(settlement)
-      :consume_pending -> do_consume(settlement, now_ms)
+      observed -> settle_pending(settlement, now_ms, observed)
     end
   end
 
   def settle(%__MODULE__{}, _now_ms), do: {:error, :invalid_now_ms}
 
-  @doc "Bounded phase observation for tests/status."
+  @doc """
+  Bounded phase observation for tests/status.
+
+  Reconciles a permanent consume selection that has not yet published
+  `:consume_pending` so caller death between selection and phase publication
+  cannot expose a contradictory durable mode.
+  """
   @spec phase(t()) :: phase()
-  def phase(%__MODULE__{phase_ref: ref}) do
-    case :atomics.get(ref, 1) do
-      @phase_release_pending -> :release_pending
-      @phase_consume_pending -> :consume_pending
-      @phase_done -> :done
+  def phase(%__MODULE__{phase_ref: phase_ref, effect_ref: effect_ref}) do
+    case :atomics.get(phase_ref, 1) do
+      @phase_done ->
+        :done
+
+      @phase_consume_pending ->
+        :consume_pending
+
+      @phase_release_pending ->
+        case :atomics.get(effect_ref, 1) do
+          @effect_consume -> :consume_pending
+          _ -> :release_pending
+        end
     end
   end
 
@@ -157,8 +225,51 @@ defmodule Arbor.Voice.Session.Settlement do
   end
 
   # ---------------------------------------------------------------------------
-  # Effect dispatch
+  # Effect selection + dispatch
   # ---------------------------------------------------------------------------
+
+  defp settle_pending(settlement, now_ms, observed) do
+    desired =
+      case observed do
+        :consume_pending -> @effect_consume
+        :release_pending -> @effect_release
+      end
+
+    case select_or_follow(settlement.effect_ref, desired) do
+      @effect_release -> do_release(settlement)
+      @effect_consume -> do_consume(settlement, now_ms)
+    end
+  end
+
+  # Select `desired` if still undecided; otherwise follow the permanent winner.
+  defp select_or_follow(effect_ref, desired) do
+    case :atomics.compare_exchange(effect_ref, 1, @effect_undecided, desired) do
+      :ok -> desired
+      @effect_release -> @effect_release
+      @effect_consume -> @effect_consume
+    end
+  end
+
+  defp select_consume(effect_ref) do
+    case :atomics.compare_exchange(effect_ref, 1, @effect_undecided, @effect_consume) do
+      :ok -> :ok
+      @effect_consume -> :ok
+      @effect_release -> {:error, :release_selected}
+    end
+  end
+
+  defp publish_consume_pending(phase_ref) do
+    case :atomics.compare_exchange(
+           phase_ref,
+           1,
+           @phase_release_pending,
+           @phase_consume_pending
+         ) do
+      :ok -> :ok
+      @phase_consume_pending -> :ok
+      @phase_done -> :done
+    end
+  end
 
   defp do_release(settlement) do
     case settlement.ledger.release(settlement.reservation, settlement.ledger_opts) do
@@ -168,15 +279,21 @@ defmodule Arbor.Voice.Session.Settlement do
   end
 
   defp do_consume(settlement, now_ms) do
-    frozen_elapsed_ms = freeze_elapsed(settlement, now_ms)
+    case publish_consume_pending(settlement.phase_ref) do
+      :done ->
+        :ok
 
-    case settlement.ledger.consume(
-           settlement.reservation,
-           frozen_elapsed_ms,
-           settlement.ledger_opts
-         ) do
-      :ok -> mark_done(settlement, @phase_consume_pending)
-      {:error, _reason} = error -> error
+      :ok ->
+        frozen_elapsed_ms = freeze_elapsed(settlement, now_ms)
+
+        case settlement.ledger.consume(
+               settlement.reservation,
+               frozen_elapsed_ms,
+               settlement.ledger_opts
+             ) do
+          :ok -> mark_done(settlement, @phase_consume_pending)
+          {:error, _reason} = error -> error
+        end
     end
   end
 
@@ -197,12 +314,23 @@ defmodule Arbor.Voice.Session.Settlement do
   end
 
   # Marks done only after the ledger call above returned an explicit :ok. A
-  # losing compare_exchange here means a concurrent replay already recorded
-  # the same idempotent effect and won the race to :done first — that is
-  # itself a successful settlement, not an error.
+  # failed completion CAS is success only when another caller already
+  # published :done; any other mismatch is an invariant error so settle/2
+  # never reports :ok while the cell remains pending.
   defp mark_done(settlement, from_phase) do
-    _ = :atomics.compare_exchange(settlement.phase_ref, 1, from_phase, @phase_done)
-    :ok
+    case :atomics.compare_exchange(settlement.phase_ref, 1, from_phase, @phase_done) do
+      :ok ->
+        :ok
+
+      @phase_done ->
+        :ok
+
+      _other ->
+        case :atomics.get(settlement.phase_ref, 1) do
+          @phase_done -> :ok
+          _ -> {:error, :invariant_violation}
+        end
+    end
   end
 
   # ---------------------------------------------------------------------------

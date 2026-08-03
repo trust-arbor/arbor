@@ -127,6 +127,49 @@ defmodule Arbor.Voice.Session.SettlementTest do
     end
   end
 
+  # ── VOICE-24 security regression: release-versus-arm linearizability ──
+
+  describe "security regression: release selection vs concurrent arm" do
+    @tag spec: "VOICE-24"
+    test "security regression: release selection rejects concurrent consume arming and reaches done with release only",
+         %{ledger_opts: ledger_opts, name: name} do
+      r = reservation()
+      assert {:ok, settlement} = Settlement.new(r, Fake, ledger_opts, 1_000)
+
+      test_pid = self()
+      Fake.set_mode(name, {:pause_once, test_pid})
+
+      {:ok, task_pid} =
+        Task.start(fn ->
+          Settlement.settle(settlement, 1_500)
+        end)
+
+      # Durable release accepted; settler paused before returning. Effect
+      # selection has already permanently chosen release.
+      assert_receive {:accepted, ^task_pid, {:release, id}}, 1_000
+      assert id == r.id
+
+      # Concurrent arming must lose the linearizable race — it must not flip
+      # the cell to consume_pending after release selection won.
+      assert {:error, :release_selected} = Settlement.arm_consume(settlement)
+      assert Settlement.phase(settlement) == :release_pending
+
+      ref = Process.monitor(task_pid)
+      Process.exit(task_pid, :kill)
+      assert_receive {:DOWN, ^ref, :process, ^task_pid, :killed}, 1_000
+
+      # Evidence owned by this ExUnit process (atomics + Agent) survives the
+      # killed settler. Replay releases again and reaches done.
+      assert Settlement.phase(settlement) == :release_pending
+      assert :ok = Settlement.settle(settlement, 1_600)
+      assert Settlement.phase(settlement) == :done
+      assert {:error, :already_done} = Settlement.arm_consume(settlement)
+
+      assert [{:release, ^id}, {:release, ^id}] = Fake.calls(name)
+      refute Enum.any?(Fake.calls(name), &match?({:consume, _, _}, &1))
+    end
+  end
+
   # ── settle/2 release path ──
 
   describe "settle/2 release path" do
