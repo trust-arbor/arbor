@@ -26,11 +26,14 @@ defmodule Arbor.Security.EgressGate do
      (`max_tier`/`destinations`) covers the request downgrades `:ask` -> `:allow`.
   """
 
+  alias Arbor.Contracts.Security.CapabilityUri
   alias Arbor.Contracts.Security.Classification
 
   @type decision :: :allow | :ask | {:block, atom()}
 
-  @blocking_taint [:untrusted, :hostile]
+  # VP-05D2A0 — interactive-disclosure capability namespace. Segment-aware
+  # membership only (CapabilityUri.prefix_match?/2), never String.starts_with?/2.
+  @disclosure_uri_prefix "arbor://egress/disclose"
 
   # Escalation order for egress tiers (used for cap max_tier coverage).
   @tier_rank %{
@@ -52,16 +55,40 @@ defmodule Arbor.Security.EgressGate do
   refinement. Returns `:allow`, `:ask`, or `{:block, reason}`.
 
   `opts`: `:egress_taint` (level atom or Taint struct), `:egress_destination`
-  (host/provider string for destination-scoped caps).
+  (host/provider string for destination-scoped caps), plus the disclosure
+  route opts `:egress_provider`/`:egress_runtime`/`:egress_model` consulted
+  only when `disclosure_cap` is present.
+
+  `disclosure_cap` (VP-05D2A0) is an already-validated, exact interactive
+  disclosure `Capability.t()` (never a raw candidate list, never resolved
+  here) — see `Arbor.Security.DisclosureCapability.fetch_and_validate/2`. It
+  may admit `:untrusted` data to `:external_provider` on its exact bound
+  route ONLY; `:hostile` is always hard-blocked before `disclosure_cap` is
+  ever inspected, and no other tier consults it. Ordinary caps in `caps` can
+  never perform this override — they only ever reach `cap_covers?/3`, which
+  is unreachable while taint is untrusted/hostile.
+
+  An explicit caller-supplied `opts[:egress_mode] == :block` is absolute: it
+  is checked before the disclosure override, so a valid exact disclosure
+  capability cannot admit `:untrusted` data when the caller has explicitly
+  blocked this egress. Only a genuinely un-gated tier (`:on_host`, `:none`) or
+  the taint level itself changes that outcome.
   """
-  @spec decide(String.t(), atom(), keyword(), [map()]) :: decision()
-  def decide(agent_id, tier, opts \\ [], caps \\ []) do
+  @spec decide(String.t(), atom(), keyword(), [map()], map() | nil) :: decision()
+  def decide(agent_id, tier, opts \\ [], caps \\ [], disclosure_cap \\ nil) do
     cond do
       not enforcing?() ->
         :allow
 
-      Classification.external_egress?(tier) and taint_level(opts) in @blocking_taint ->
-        {:block, taint_level(opts)}
+      Classification.external_egress?(tier) and taint_level(opts) == :hostile ->
+        {:block, :hostile}
+
+      Classification.external_egress?(tier) and taint_level(opts) == :untrusted ->
+        if not explicit_block?(opts) and disclosure_admits?(disclosure_cap, tier, opts) do
+          :allow
+        else
+          {:block, untrusted_block_reason(opts)}
+        end
 
       true ->
         case policy_mode(agent_id, tier, opts) do
@@ -71,6 +98,59 @@ defmodule Arbor.Security.EgressGate do
         end
     end
   end
+
+  # An explicit :block from the caller-supplied egress standing is absolute —
+  # no capability (ordinary or disclosure) may override it. Ordinary caps
+  # already can't reach this (cap_covers?/3 is only consulted from the :ask
+  # branch of policy_mode/3, never from :block); this guard closes the
+  # equivalent gap for the disclosure override specifically.
+  defp explicit_block?(opts), do: Keyword.get(opts, :egress_mode) == :block
+
+  defp untrusted_block_reason(opts) do
+    if explicit_block?(opts), do: :policy, else: :untrusted
+  end
+
+  defp disclosure_admits?(nil, _tier, _opts), do: false
+
+  defp disclosure_admits?(%{resource_uri: uri} = cap, :external_provider, opts) do
+    CapabilityUri.prefix_match?(@disclosure_uri_prefix, uri) and
+      disclosure_route_matches?(cap, opts)
+  end
+
+  defp disclosure_admits?(_cap, _other_tier, _opts), do: false
+
+  defp disclosure_route_matches?(cap, opts) do
+    disclosure = disclosure_constraint(cap)
+
+    field(disclosure, :destination) == Keyword.get(opts, :egress_destination) and
+      field(disclosure, :provider) == Keyword.get(opts, :egress_provider) and
+      field(disclosure, :runtime) == Keyword.get(opts, :egress_runtime) and
+      model_matches?(disclosure, opts)
+  end
+
+  defp model_matches?(disclosure, opts) do
+    if has_field?(disclosure, :model) do
+      field(disclosure, :model) == Keyword.get(opts, :egress_model)
+    else
+      true
+    end
+  end
+
+  defp disclosure_constraint(%{constraints: constraints}) when is_map(constraints) do
+    field(constraints, :disclosure) || %{}
+  end
+
+  defp disclosure_constraint(_cap), do: %{}
+
+  defp field(map, key) when is_map(map) and is_atom(key),
+    do: Map.get(map, key) || Map.get(map, Atom.to_string(key))
+
+  defp field(_map, _key), do: nil
+
+  defp has_field?(map, key) when is_map(map) and is_atom(key),
+    do: Map.has_key?(map, key) or Map.has_key?(map, Atom.to_string(key))
+
+  defp has_field?(_map, _key), do: false
 
   # The intent for a tier from tier semantics + caller-supplied policy standing,
   # EXCLUDING caps.

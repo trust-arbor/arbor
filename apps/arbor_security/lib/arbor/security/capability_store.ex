@@ -21,6 +21,7 @@ defmodule Arbor.Security.CapabilityStore do
 
   alias Arbor.Contracts.Persistence.Record
   alias Arbor.Contracts.Security.Capability
+  alias Arbor.Contracts.Security.CapabilityUri
   alias Arbor.Security.Capability.Signer
   alias Arbor.Security.CapabilityStore.Serializer
   alias Arbor.Security.Config
@@ -31,6 +32,11 @@ defmodule Arbor.Security.CapabilityStore do
   # Runtime bridge — arbor_persistence is Level 1 peer, no compile-time dep
   @buffered_store Arbor.Persistence.BufferedStore
   @cap_store :arbor_security_capabilities
+
+  # VP-05D2A0 — interactive-disclosure capability namespace, kept distinct
+  # from ordinary `constraints.egress` refinement. Segment-aware membership
+  # only (never String.starts_with?/2) — see CapabilityUri.prefix_match?/2.
+  @disclosure_uri_prefix "arbor://egress/disclose"
 
   @cleanup_interval_ms 60_000
   @signal_events [
@@ -160,6 +166,58 @@ defmodule Arbor.Security.CapabilityStore do
     GenServer.call(__MODULE__, :stats)
   end
 
+  @doc """
+  List capabilities for a principal that are current, stored, signed when
+  required, delegation-chain valid, and scope-matched (VP-05D2A0 hardened
+  replacement for the raw `list_for_principal/2` shortcut as an authorization
+  candidate source). Excludes any capability in the `arbor://egress/disclose`
+  namespace — disclosure caps never participate in ordinary refinement.
+
+  `opts`: `:session_id`, `:task_id`, `:principal_scope` — the live request's
+  scope, used for `Capability.scope_matches?/2` filtering.
+
+  Fails closed to `{:ok, []}` if the store process itself is unreachable —
+  callers treat an empty candidate list identically to "no covering cap".
+  """
+  @spec list_valid_for_principal(String.t(), keyword()) :: {:ok, [Capability.t()]}
+  def list_valid_for_principal(principal_id, opts \\ []) do
+    GenServer.call(__MODULE__, {:list_valid_for_principal, principal_id, opts})
+  rescue
+    _ -> {:ok, []}
+  catch
+    :exit, _ -> {:ok, []}
+    :throw, _ -> {:ok, []}
+  end
+
+  @doc """
+  Fetch and validate an exact disclosure capability by id in one linearized
+  store call (VP-05D2A0). Checks: stored under this id, in the
+  `arbor://egress/disclose` namespace, `principal_id` matches, current
+  (`Capability.valid?/1`), ALWAYS signed (regardless of the global
+  `capability_signing_required?` config), delegation-chain valid, and
+  scope-matched against `scope_context` (`:session_id`/`:task_id`/`:principal_scope`).
+
+  Because this all happens inside one `handle_call`, a concurrent `revoke/1`
+  cannot interleave mid-check — whichever message the store's mailbox
+  processes first determines the outcome.
+
+  Fails closed to `{:error, :capability_store_unavailable}` if the store
+  process itself is unreachable.
+  """
+  @spec get_valid_disclosure(String.t(), String.t(), keyword()) ::
+          {:ok, Capability.t()} | {:error, atom()}
+  def get_valid_disclosure(capability_id, principal_id, scope_context \\ []) do
+    GenServer.call(
+      __MODULE__,
+      {:get_valid_disclosure, capability_id, principal_id, scope_context}
+    )
+  rescue
+    _ -> {:error, :capability_store_unavailable}
+  catch
+    :exit, _ -> {:error, :capability_store_unavailable}
+    :throw, _ -> {:error, :capability_store_unavailable}
+  end
+
   # Server callbacks
 
   @impl true
@@ -263,6 +321,65 @@ defmodule Arbor.Security.CapabilityStore do
       end
 
     {:reply, result, state}
+  end
+
+  @impl true
+  def handle_call({:list_valid_for_principal, principal_id, opts}, _from, state) do
+    scope_context = [
+      session_id: Keyword.get(opts, :session_id),
+      task_id: Keyword.get(opts, :task_id),
+      principal_scope: Keyword.get(opts, :principal_scope)
+    ]
+
+    caps =
+      state.by_principal
+      |> Map.get(principal_id, [])
+      |> Enum.map(&Map.get(state.by_id, &1))
+      |> Enum.reject(&is_nil/1)
+      |> Enum.reject(&disclosure_namespaced?/1)
+      |> Enum.filter(&candidate_current_and_scoped?(&1, scope_context, false))
+
+    {:reply, {:ok, caps}, state}
+  rescue
+    _ -> {:reply, {:ok, []}, state}
+  catch
+    :exit, _ -> {:reply, {:ok, []}, state}
+    :throw, _ -> {:reply, {:ok, []}, state}
+  end
+
+  @impl true
+  def handle_call(
+        {:get_valid_disclosure, capability_id, principal_id, scope_context},
+        _from,
+        state
+      ) do
+    result =
+      case Map.get(state.by_id, capability_id) do
+        nil ->
+          {:error, :not_found}
+
+        cap ->
+          cond do
+            not disclosure_namespaced?(cap) ->
+              {:error, :not_disclosure_capability}
+
+            cap.principal_id != principal_id ->
+              {:error, :disclosure_capability_wrong_principal}
+
+            not candidate_current_and_scoped?(cap, scope_context, true) ->
+              {:error, :disclosure_capability_rejected}
+
+            true ->
+              {:ok, cap}
+          end
+      end
+
+    {:reply, result, state}
+  rescue
+    _ -> {:reply, {:error, :disclosure_capability_validation_error}, state}
+  catch
+    :exit, _ -> {:reply, {:error, :disclosure_capability_validation_unavailable}, state}
+    :throw, _ -> {:reply, {:error, :disclosure_capability_validation_unavailable}, state}
   end
 
   @impl true
@@ -473,6 +590,45 @@ defmodule Arbor.Security.CapabilityStore do
 
   defp authorizes_resource?(cap, resource_uri) do
     Capability.grants_access?(cap, resource_uri)
+  end
+
+  # ===========================================================================
+  # Shared candidate validation (VP-05D2A0) — one linearized predicate reused
+  # by both the ordinary (list_valid_for_principal) and disclosure
+  # (get_valid_disclosure) candidate paths, so signature/chain/scope logic is
+  # written once. `require_signature?` is `false` for ordinary candidates
+  # (config-conditional, matching `signature_acceptable?/1`) and `true` for
+  # disclosure candidates (always-signed regardless of global config).
+  # ===========================================================================
+
+  defp disclosure_namespaced?(%{resource_uri: uri}) do
+    CapabilityUri.prefix_match?(@disclosure_uri_prefix, uri)
+  end
+
+  defp candidate_current_and_scoped?(cap, scope_context, require_signature?) do
+    Capability.valid?(cap) and
+      Capability.scope_matches?(cap, scope_context) and
+      candidate_signature_ok?(cap, require_signature?) and
+      delegation_chain_valid?(cap)
+  end
+
+  defp candidate_signature_ok?(cap, true) do
+    Capability.signed?(cap) and safe_verify_capability_signature(cap) == :ok
+  end
+
+  defp candidate_signature_ok?(cap, false), do: signature_acceptable?(cap)
+
+  # Verifier-exit containment: this runs INSIDE the store's own handle_call,
+  # so an unreachable/crashing SystemAuthority must not crash CapabilityStore
+  # itself (that would take down every in-flight capability operation, not
+  # just this one request).
+  defp safe_verify_capability_signature(cap) do
+    SystemAuthority.verify_capability_signature(cap)
+  rescue
+    _ -> {:error, :verification_unavailable}
+  catch
+    :exit, _ -> {:error, :verification_unavailable}
+    :throw, _ -> {:error, :verification_unavailable}
   end
 
   defp delegation_chain_valid?(%{delegation_chain: nil}), do: true

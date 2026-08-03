@@ -74,6 +74,16 @@ defmodule Arbor.Security.UriRegistryTest do
       assert UriRegistry.registered?("arbor://mcp/server")
       refute UriRegistry.registered?("arbor://mcproxy/server")
     end
+
+    @tag spec: "VP-05D2A0"
+    test "VP-05D2A0: interactive-disclosure namespace is registered, segment-aware" do
+      token = Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
+      assert UriRegistry.registered?("arbor://egress/disclose/" <> token)
+
+      # Segment confusion: a different operation that merely shares a string
+      # prefix with "disclose" must NOT be treated as the disclosure namespace.
+      refute UriRegistry.registered?("arbor://egress/disclosed/" <> token)
+    end
   end
 
   describe "Arbor.Security.uri_registered?/1" do

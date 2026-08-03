@@ -102,6 +102,30 @@ defmodule Arbor.Security.SystemAuthorityTest do
                SystemAuthority.verify_capability_signature(cap)
     end
 
+    @tag spec: "VP-05D2A0"
+    test "security regression: a nil/non-binary issuer_id fails closed instead of crashing the authority" do
+      {:ok, cap} =
+        Capability.new(
+          resource_uri: "arbor://fs/read/docs",
+          principal_id: "agent_test001"
+        )
+
+      # issuer_id left nil (never signed) plus a garbage signature — the shape
+      # a forged capability could plausibly take. Pre-fix, the `else` branch
+      # called Registry.lookup(cap.issuer_id) unconditionally, and
+      # Registry.lookup/1 has a `when is_binary(agent_id)` guard — nil raised
+      # a FunctionClauseError INSIDE this GenServer's handle_call, crashing
+      # the shared SystemAuthority process for every other in-flight
+      # capability verification, not just this one request.
+      forged = %{cap | issuer_signature: :crypto.strong_rand_bytes(64)}
+
+      assert {:error, :invalid_capability_signature} =
+               SystemAuthority.verify_capability_signature(forged)
+
+      # The authority must still be alive and answering afterward.
+      assert is_binary(SystemAuthority.agent_id())
+    end
+
     test "verifies capability signed by a different registered entity" do
       # Generate a separate identity and register it
       alias Arbor.Contracts.Security.Identity

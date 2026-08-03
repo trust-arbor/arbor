@@ -22,7 +22,7 @@ defmodule Arbor.Security.EgressGateTest do
   use ExUnit.Case, async: false
 
   alias Arbor.Contracts.Security.Capability
-  alias Arbor.Security.{AuthDecision, CapabilityStore}
+  alias Arbor.Security.{AuthDecision, CapabilityStore, EgressGate}
 
   @resource "arbor://ai/generate"
 
@@ -309,5 +309,117 @@ defmodule Arbor.Security.EgressGateTest do
                  egress_taint: :untrusted
                )
     end
+  end
+
+  describe "VP-05D2A0: decide/5 interactive-disclosure override (pure)" do
+    @tag spec: "VP-05D2A0"
+    test "a valid exact disclosure cap admits :untrusted on its exact route" do
+      enforce!()
+
+      assert EgressGate.decide(
+               "agent_1",
+               :external_provider,
+               [egress_taint: :untrusted] ++ route_opts(),
+               [],
+               disclosure_cap()
+             ) == :allow
+    end
+
+    @tag spec: "VP-05D2A0"
+    test "the same cap cannot admit :hostile data" do
+      enforce!()
+
+      assert {:block, :hostile} =
+               EgressGate.decide(
+                 "agent_1",
+                 :external_provider,
+                 [egress_taint: :hostile] ++ route_opts(),
+                 [],
+                 disclosure_cap()
+               )
+    end
+
+    @tag spec: "VP-05D2A0"
+    test "the same cap cannot admit a different destination/provider/runtime/model" do
+      enforce!()
+
+      opts = [egress_taint: :untrusted] ++ route_opts(%{egress_destination: "evil.example.com"})
+
+      assert {:block, :untrusted} =
+               EgressGate.decide("agent_1", :external_provider, opts, [], disclosure_cap())
+
+      opts2 = [egress_taint: :untrusted] ++ route_opts(%{egress_provider: "openai"})
+
+      assert {:block, :untrusted} =
+               EgressGate.decide("agent_1", :external_provider, opts2, [], disclosure_cap())
+
+      opts3 = [egress_taint: :untrusted] ++ route_opts(%{egress_runtime: "edge"})
+
+      assert {:block, :untrusted} =
+               EgressGate.decide("agent_1", :external_provider, opts3, [], disclosure_cap())
+
+      cap_with_model = disclosure_cap(%{model: "claude-sonnet-5"})
+      opts4 = [egress_taint: :untrusted, egress_model: "claude-opus-5"] ++ route_opts()
+
+      assert {:block, :untrusted} =
+               EgressGate.decide("agent_1", :external_provider, opts4, [], cap_with_model)
+    end
+
+    @tag spec: "VP-05D2A0"
+    test "a nil disclosure cap never admits untrusted data" do
+      enforce!()
+
+      opts = [egress_taint: :untrusted] ++ route_opts()
+
+      assert {:block, :untrusted} =
+               EgressGate.decide("agent_1", :external_provider, opts, [], nil)
+    end
+
+    @tag spec: "VP-05D2A0"
+    test ":external_peer is never admitted, even with a valid cap" do
+      enforce!()
+
+      opts = [egress_taint: :untrusted] ++ route_opts()
+
+      assert {:block, :untrusted} =
+               EgressGate.decide("agent_1", :external_peer, opts, [], disclosure_cap())
+    end
+
+    @tag spec: "VP-05D2A0"
+    test "ordinary caps in the candidate list can never perform this override" do
+      enforce!()
+
+      ordinary_cap = %{constraints: %{egress: %{max_tier: :external_provider}}}
+      opts = [egress_taint: :untrusted] ++ route_opts()
+
+      assert {:block, :untrusted} =
+               EgressGate.decide("agent_1", :external_provider, opts, [ordinary_cap], nil)
+    end
+  end
+
+  defp disclosure_cap(route_overrides \\ %{}) do
+    disclosure =
+      %{
+        kind: :interactive_human,
+        destination: "api.anthropic.com",
+        provider: "anthropic",
+        runtime: "cloud"
+      }
+      |> Map.merge(route_overrides)
+
+    %{
+      resource_uri: "arbor://egress/disclose/#{System.unique_integer([:positive])}",
+      constraints: %{disclosure: disclosure}
+    }
+  end
+
+  defp route_opts(overrides \\ %{}) do
+    base = %{
+      egress_destination: "api.anthropic.com",
+      egress_provider: "anthropic",
+      egress_runtime: "cloud"
+    }
+
+    base |> Map.merge(overrides) |> Map.to_list()
   end
 end

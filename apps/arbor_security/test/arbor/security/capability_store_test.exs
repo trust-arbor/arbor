@@ -4,6 +4,7 @@ defmodule Arbor.Security.CapabilityStoreTest do
 
   alias Arbor.Contracts.Security.Capability
   alias Arbor.Security.CapabilityStore
+  alias Arbor.Security.SystemAuthority
 
   setup do
     # Create unique agent ID for each test
@@ -411,8 +412,268 @@ defmodule Arbor.Security.CapabilityStoreTest do
   end
 
   # ===========================================================================
+  # VP-05D2A0: list_valid_for_principal/2 and get_valid_disclosure/3
+  # ===========================================================================
+
+  describe "list_valid_for_principal/2 (VP-05D2A0 hardened ordinary-candidate source)" do
+    @tag spec: "VP-05D2A0"
+    test "excludes an expired capability", %{agent_id: agent_id} do
+      {:ok, cap} =
+        Capability.new(
+          resource_uri: "arbor://ai/generate/vsp_expired",
+          principal_id: agent_id,
+          expires_at: DateTime.add(DateTime.utc_now(), 1)
+        )
+
+      expired = %{cap | expires_at: DateTime.add(DateTime.utc_now(), -3600)}
+      {:ok, :stored} = CapabilityStore.put(expired)
+
+      {:ok, caps} = CapabilityStore.list_valid_for_principal(agent_id)
+      refute Enum.any?(caps, &(&1.id == expired.id))
+    end
+
+    @tag spec: "VP-05D2A0"
+    test "excludes an unsigned capability when signing is required", %{agent_id: agent_id} do
+      # config/test.exs sets capability_signing_required: false by default (so
+      # the rest of this suite's unsigned fixtures keep working) — enable it
+      # explicitly here to exercise the "signed when required" branch.
+      original = Application.get_env(:arbor_security, :capability_signing_required)
+      Application.put_env(:arbor_security, :capability_signing_required, true)
+      on_exit(fn -> restore_config(:capability_signing_required, original) end)
+
+      {:ok, cap} = build_capability(agent_id, "arbor://ai/generate/vsp_unsigned")
+      {:ok, :stored} = CapabilityStore.put(cap)
+
+      {:ok, caps} = CapabilityStore.list_valid_for_principal(agent_id)
+      refute Enum.any?(caps, &(&1.id == cap.id))
+    end
+
+    @tag spec: "VP-05D2A0"
+    test "excludes a capability whose scope does not match the live request", %{
+      agent_id: agent_id
+    } do
+      {:ok, cap} =
+        Capability.new(
+          resource_uri: "arbor://ai/generate/vsp_scoped",
+          principal_id: agent_id,
+          session_id: "session_only_this_one"
+        )
+
+      {:ok, signed} = SystemAuthority.sign_capability(cap)
+      {:ok, :stored} = CapabilityStore.put(signed)
+
+      {:ok, caps} =
+        CapabilityStore.list_valid_for_principal(agent_id, session_id: "some_other_session")
+
+      refute Enum.any?(caps, &(&1.id == signed.id))
+
+      {:ok, caps_matching} =
+        CapabilityStore.list_valid_for_principal(agent_id, session_id: "session_only_this_one")
+
+      assert Enum.any?(caps_matching, &(&1.id == signed.id))
+    end
+
+    @tag spec: "VP-05D2A0"
+    test "excludes a disclosure-namespaced capability even when otherwise valid", %{
+      agent_id: agent_id
+    } do
+      cap = build_disclosure_capability(agent_id)
+      {:ok, signed} = SystemAuthority.sign_capability(cap)
+      {:ok, :stored} = CapabilityStore.put(signed)
+
+      {:ok, caps} =
+        CapabilityStore.list_valid_for_principal(agent_id,
+          session_id: signed.session_id,
+          task_id: signed.task_id,
+          principal_scope: signed.principal_scope
+        )
+
+      refute Enum.any?(caps, &(&1.id == signed.id))
+    end
+
+    @tag spec: "VP-05D2A0"
+    test "includes a valid current signed scoped ordinary capability (base-fail regression)", %{
+      agent_id: agent_id
+    } do
+      {:ok, cap} = build_capability(agent_id, "arbor://ai/generate/vsp_valid")
+      {:ok, signed} = SystemAuthority.sign_capability(cap)
+      {:ok, :stored} = CapabilityStore.put(signed)
+
+      {:ok, caps} = CapabilityStore.list_valid_for_principal(agent_id)
+      assert Enum.any?(caps, &(&1.id == signed.id))
+    end
+  end
+
+  describe "get_valid_disclosure/3 (VP-05D2A0 store-linearized disclosure fetch)" do
+    @tag spec: "VP-05D2A0"
+    test "not_found for an unknown id", %{agent_id: agent_id} do
+      assert {:error, :not_found} =
+               CapabilityStore.get_valid_disclosure("cap_nonexistent_disclosure", agent_id)
+    end
+
+    @tag spec: "VP-05D2A0"
+    test "not_disclosure_capability for an id outside the disclosure namespace", %{
+      agent_id: agent_id
+    } do
+      {:ok, cap} = build_capability(agent_id, "arbor://ai/generate/not_disclosure")
+      {:ok, signed} = SystemAuthority.sign_capability(cap)
+      {:ok, :stored} = CapabilityStore.put(signed)
+
+      assert {:error, :not_disclosure_capability} =
+               CapabilityStore.get_valid_disclosure(signed.id, agent_id)
+    end
+
+    @tag spec: "VP-05D2A0"
+    test "wrong_principal when the id belongs to a different agent", %{agent_id: agent_id} do
+      cap = build_disclosure_capability(agent_id)
+      {:ok, signed} = SystemAuthority.sign_capability(cap)
+      {:ok, :stored} = CapabilityStore.put(signed)
+
+      other_agent = "agent_#{:erlang.unique_integer([:positive])}"
+
+      assert {:error, :disclosure_capability_wrong_principal} =
+               CapabilityStore.get_valid_disclosure(signed.id, other_agent)
+    end
+
+    @tag spec: "VP-05D2A0"
+    test "always requires a signature, even when global capability_signing_required? is false",
+         %{agent_id: agent_id} do
+      original = Application.get_env(:arbor_security, :capability_signing_required)
+      Application.put_env(:arbor_security, :capability_signing_required, false)
+
+      on_exit(fn -> restore_config(:capability_signing_required, original) end)
+
+      cap = build_disclosure_capability(agent_id)
+      {:ok, :stored} = CapabilityStore.put(cap)
+
+      scope = [
+        session_id: cap.session_id,
+        task_id: cap.task_id,
+        principal_scope: cap.principal_scope
+      ]
+
+      assert {:error, :disclosure_capability_rejected} =
+               CapabilityStore.get_valid_disclosure(cap.id, agent_id, scope)
+    end
+
+    @tag spec: "VP-05D2A0"
+    test "returns a valid signed, scoped disclosure capability", %{agent_id: agent_id} do
+      cap = build_disclosure_capability(agent_id)
+      {:ok, signed} = SystemAuthority.sign_capability(cap)
+      {:ok, :stored} = CapabilityStore.put(signed)
+
+      scope = [
+        session_id: signed.session_id,
+        task_id: signed.task_id,
+        principal_scope: signed.principal_scope
+      ]
+
+      assert {:ok, found} = CapabilityStore.get_valid_disclosure(signed.id, agent_id, scope)
+      assert found.id == signed.id
+    end
+
+    @tag spec: "VP-05D2A0"
+    test "deterministic: revoke-before-validation denies (sequential, no concurrency needed)",
+         %{agent_id: agent_id} do
+      cap = build_disclosure_capability(agent_id)
+      {:ok, signed} = SystemAuthority.sign_capability(cap)
+      {:ok, :stored} = CapabilityStore.put(signed)
+
+      scope = [
+        session_id: signed.session_id,
+        task_id: signed.task_id,
+        principal_scope: signed.principal_scope
+      ]
+
+      assert :ok = CapabilityStore.revoke(signed.id)
+
+      assert {:error, :not_found} =
+               CapabilityStore.get_valid_disclosure(signed.id, agent_id, scope)
+    end
+
+    @tag spec: "VP-05D2A0"
+    test "deterministic: mailbox order is the linearization point (validation enqueued before revoke)",
+         %{agent_id: agent_id} do
+      cap = build_disclosure_capability(agent_id)
+      {:ok, signed} = SystemAuthority.sign_capability(cap)
+      {:ok, :stored} = CapabilityStore.put(signed)
+
+      scope = [
+        session_id: signed.session_id,
+        task_id: signed.task_id,
+        principal_scope: signed.principal_scope
+      ]
+
+      pid = Process.whereis(CapabilityStore)
+      :sys.suspend(pid)
+
+      validate_task =
+        Task.async(fn -> CapabilityStore.get_valid_disclosure(signed.id, agent_id, scope) end)
+
+      wait_until_queue_len(pid, 1)
+
+      revoke_task = Task.async(fn -> CapabilityStore.revoke(signed.id) end)
+      wait_until_queue_len(pid, 2)
+
+      :sys.resume(pid)
+
+      assert {:ok, found} = Task.await(validate_task)
+      assert found.id == signed.id
+      assert :ok = Task.await(revoke_task)
+
+      # The revoke, second in FIFO mailbox order, still took effect immediately after.
+      assert {:error, :not_found} =
+               CapabilityStore.get_valid_disclosure(signed.id, agent_id, scope)
+    end
+  end
+
+  # ===========================================================================
   # Helpers
   # ===========================================================================
+
+  defp build_disclosure_capability(agent_id) do
+    token = Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
+    unique = :erlang.unique_integer([:positive])
+
+    %Capability{
+      id: "cap_disclosure_test_#{unique}",
+      resource_uri: "arbor://egress/disclose/" <> token,
+      principal_id: agent_id,
+      granted_at: DateTime.utc_now(),
+      expires_at: DateTime.add(DateTime.utc_now(), 300, :second),
+      delegation_depth: 0,
+      max_uses: nil,
+      session_id: "session_#{unique}",
+      task_id: "task_#{unique}",
+      principal_scope: "human_#{unique}",
+      constraints: %{
+        disclosure: %{
+          kind: :interactive_human,
+          destination: "api.example.com",
+          provider: "anthropic",
+          runtime: "cloud"
+        }
+      },
+      delegation_chain: [],
+      metadata: %{}
+    }
+  end
+
+  defp wait_until_queue_len(pid, min_len), do: wait_until_queue_len(pid, min_len, 400)
+
+  defp wait_until_queue_len(_pid, _min_len, 0),
+    do: flunk("timed out waiting for message queue length")
+
+  defp wait_until_queue_len(pid, min_len, retries) do
+    case Process.info(pid, :message_queue_len) do
+      {:message_queue_len, n} when n >= min_len ->
+        :ok
+
+      _ ->
+        Process.sleep(5)
+        wait_until_queue_len(pid, min_len, retries - 1)
+    end
+  end
 
   defp build_capability(agent_id, resource_uri, opts \\ []) do
     Capability.new(

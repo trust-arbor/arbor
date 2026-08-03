@@ -58,6 +58,7 @@ defmodule Arbor.Security do
   alias Arbor.Security.Constraint
   alias Arbor.Security.Constraint.RateLimiter
   alias Arbor.Security.AuthDecision
+  alias Arbor.Security.DisclosureCapability
   alias Arbor.Security.EgressGate
   alias Arbor.Security.Events
   alias Arbor.Security.Identity.Registry
@@ -176,7 +177,13 @@ defmodule Arbor.Security do
   ## Parameters
   - `egress_tier` — resolved `Arbor.Contracts.Security.Classification.egress_tier`
   - `opts` — `:egress_taint` (level/Taint), `:egress_destination` (host/provider),
-    `:egress_mode` (`:allow`/`:ask`/`:block`/`:auto`) from a policy layer
+    `:egress_mode` (`:allow`/`:ask`/`:block`/`:auto`) from a policy layer;
+    `:session_id`/`:task_id`/`:principal_scope` for ordinary-candidate scope
+    matching (VP-05D2A0); `:disclosure_capability_id` plus
+    `:egress_provider`/`:egress_runtime`/`:egress_model` (in addition to
+    `:egress_destination`) to consult an interactive disclosure capability —
+    see `Arbor.Security.DisclosureCapability`. Omitting `:disclosure_capability_id`
+    is fully behavior-preserving for every existing caller.
 
   ## Returns
   - `:allow`
@@ -191,16 +198,53 @@ defmodule Arbor.Security do
   def authorize_egress(principal_id, egress_tier, opts \\ []) do
     emit_egress_observed(principal_id, egress_tier, opts)
 
-    caps =
-      case CapabilityStore.list_for_principal(principal_id) do
+    scope_opts = Keyword.take(opts, [:session_id, :task_id, :principal_scope])
+
+    ordinary_caps =
+      case CapabilityStore.list_valid_for_principal(principal_id, scope_opts) do
         {:ok, list} -> list
         _ -> []
       end
 
-    case EgressGate.decide(principal_id, egress_tier, opts, caps) do
+    disclosure_cap = resolve_disclosure_candidate(principal_id, opts)
+
+    case EgressGate.decide(principal_id, egress_tier, opts, ordinary_caps, disclosure_cap) do
       :allow -> :allow
       :ask -> {:requires_approval, :egress}
       {:block, reason} -> {:error, {:egress_blocked, egress_tier, reason}}
+    end
+  end
+
+  @doc """
+  Mint a new interactive disclosure capability (VP-05D2A0). See
+  `Arbor.Security.DisclosureCapability.issue/1` for the option contract and
+  invariants.
+  """
+  @spec issue_disclosure_capability(keyword()) :: {:ok, Capability.t()} | {:error, atom()}
+  def issue_disclosure_capability(opts), do: DisclosureCapability.issue(opts)
+
+  # Resolves `opts[:disclosure_capability_id]` to an already-revalidated
+  # disclosure Capability, or nil on ANY validation failure (forged, unsigned,
+  # expired, wrong-principal/session/task/human, delegated, revoked, malformed,
+  # wrong-route, or the store/authority being unavailable all collapse to the
+  # same fail-closed nil here — EgressGate simply cannot use it to override
+  # untrusted/hostile taint).
+  defp resolve_disclosure_candidate(principal_id, opts) do
+    if Keyword.keyword?(opts) do
+      case Keyword.get(opts, :disclosure_capability_id) do
+        id when is_binary(id) ->
+          request_opts = Keyword.put(opts, :principal_id, principal_id)
+
+          case DisclosureCapability.fetch_and_validate(id, request_opts) do
+            {:ok, cap} -> cap
+            {:error, _reason} -> nil
+          end
+
+        _ ->
+          nil
+      end
+    else
+      nil
     end
   end
 
@@ -216,7 +260,11 @@ defmodule Arbor.Security do
       # The flowing data's taint level — THE signal for observe-before-enable:
       # whether real egress carries untrusted data the taint conjunct would block.
       egress_taint: egress_taint_level(Keyword.get(opts, :egress_taint)),
-      source: :compute_node
+      source: :compute_node,
+      # VP-05D2A0 — bounded: id and a presence flag only, never the human
+      # principal_scope, the constraints map, or any raw authority.
+      disclosure_capability_id: Keyword.get(opts, :disclosure_capability_id),
+      disclosure_requested: is_binary(Keyword.get(opts, :disclosure_capability_id))
     }
 
     # Prefer durable bridging so observe-before-enable data persists to the

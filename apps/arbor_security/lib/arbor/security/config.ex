@@ -508,4 +508,59 @@ defmodule Arbor.Security.Config do
   """
   @spec oidc_enabled?() :: boolean()
   defdelegate oidc_enabled?, to: Arbor.Security.OIDC.Config, as: :enabled?
+
+  # ===========================================================================
+  # Interactive Disclosure Capability (VP-05D2A0)
+  # ===========================================================================
+
+  @default_disclosure_ttl_seconds 900
+  @max_disclosure_ttl_seconds 3600
+
+  @doc """
+  Maximum lifetime, in seconds, of an interactive disclosure capability.
+
+  Default 900 (15 minutes). A configured value must be a positive integer;
+  malformed or oversized configuration falls back to the packaged default /
+  is hard-capped at 3600, never propagated as-is.
+  """
+  @spec disclosure_capability_max_ttl_seconds() :: pos_integer()
+  def disclosure_capability_max_ttl_seconds do
+    case Application.get_env(
+           @app,
+           :disclosure_capability_max_ttl_seconds,
+           @default_disclosure_ttl_seconds
+         ) do
+      ttl when is_integer(ttl) and ttl > 0 -> min(ttl, @max_disclosure_ttl_seconds)
+      _invalid -> @default_disclosure_ttl_seconds
+    end
+  end
+
+  @default_disclosure_route_field_max_bytes 256
+  @max_disclosure_route_field_max_bytes 1024
+
+  @doc """
+  Maximum byte length of a disclosure capability route field (destination,
+  provider, runtime, model). Default 256, hard-capped at 1024.
+  """
+  @spec disclosure_capability_route_field_max_bytes() :: pos_integer()
+  def disclosure_capability_route_field_max_bytes do
+    case Application.get_env(
+           @app,
+           :disclosure_capability_route_field_max_bytes,
+           @default_disclosure_route_field_max_bytes
+         ) do
+      n when is_integer(n) and n > 0 -> min(n, @max_disclosure_route_field_max_bytes)
+      _invalid -> @default_disclosure_route_field_max_bytes
+    end
+  end
+
+  # No `disclosure_accepted_providers`/`disclosure_accepted_runtimes` config
+  # accessors here (deliberately removed per operator correction): `provider`
+  # is the caller's exact selected catalog/provider route identity — Arbor's
+  # live provider catalog lives in arbor_llm/arbor_ai, both above
+  # arbor_security in the dependency hierarchy, so this layer cannot and must
+  # not gate it behind a fixed allowlist. `runtime` is validated in
+  # `Arbor.Security.DisclosureCapability` against Arbor's own source-owned
+  # runtime axis (`"arbor"` / `"acp"`) as a hardcoded structural constant, not
+  # an operator-configurable value.
 end

@@ -257,15 +257,26 @@ defmodule Arbor.Security.SystemAuthority do
   @impl true
   def handle_call({:verify_capability_signature, cap}, _from, %{identity: identity} = state) do
     result =
-      if cap.issuer_id == identity.agent_id do
-        # Signed by this system authority — use local key
-        Signer.verify(cap, identity.public_key)
-      else
-        # Signed by another entity — look up their key
-        case Registry.lookup(cap.issuer_id) do
-          {:ok, public_key} -> Signer.verify(cap, public_key)
-          {:error, :not_found} -> {:error, :invalid_capability_signature}
-        end
+      cond do
+        cap.issuer_id == identity.agent_id ->
+          # Signed by this system authority — use local key
+          Signer.verify(cap, identity.public_key)
+
+        is_binary(cap.issuer_id) ->
+          # Signed by another entity — look up their key
+          case Registry.lookup(cap.issuer_id) do
+            {:ok, public_key} -> Signer.verify(cap, public_key)
+            {:error, :not_found} -> {:error, :invalid_capability_signature}
+          end
+
+        true ->
+          # A missing/non-binary issuer_id (e.g. a forged capability with
+          # issuer_signature set but issuer_id left nil) would otherwise raise
+          # in Registry.lookup/1's `is_binary` guard, crashing this shared
+          # GenServer. Fail closed instead — VP-05D2A0 requires verification
+          # exceptions to deny, not take down the authority for every other
+          # in-flight capability check.
+          {:error, :invalid_capability_signature}
       end
 
     {:reply, result, state}

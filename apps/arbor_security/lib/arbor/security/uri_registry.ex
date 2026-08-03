@@ -200,7 +200,14 @@ defmodule Arbor.Security.UriRegistry do
     # Orchestrator handler capabilities — declared via `capability_required/1`
     # on the handler contracts (read/write/compute/compose). Live infra, not a
     # stale trust grant. (Security Sentinel uri-inventory, 2026-06-09.)
-    "arbor://handler/"
+    "arbor://handler/",
+
+    # Interactive-disclosure capability convention (VP-05D2A0) — a distinct
+    # namespace from ordinary `constraints.egress` refinement. Caps in this
+    # namespace are looked up by exact id only (CapabilityStore.get_valid_disclosure/3);
+    # this registration is for URI validation / registry-coverage auditing, not
+    # a wildcard/prefix authorization path.
+    "arbor://egress/disclose"
 
     # Action namespace prefixes are generated and registered by arbor_actions at
     # application start. arbor_security must not own a broad `arbor://action`
