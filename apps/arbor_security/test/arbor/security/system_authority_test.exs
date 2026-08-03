@@ -126,6 +126,44 @@ defmodule Arbor.Security.SystemAuthorityTest do
       assert is_binary(SystemAuthority.agent_id())
     end
 
+    @tag spec: "VP-05D2A0"
+    test "security regression: a non-binary signature fails closed without restarting the authority" do
+      authority_pid = Process.whereis(SystemAuthority)
+
+      {:ok, cap} =
+        Capability.new(
+          resource_uri: "arbor://fs/read/malformed_signature",
+          principal_id: "agent_test001",
+          issuer_id: SystemAuthority.agent_id()
+        )
+
+      malformed = %{cap | issuer_signature: {:not, :binary}}
+
+      assert {:error, :invalid_capability_signature} =
+               SystemAuthority.verify_capability_signature(malformed)
+
+      assert Process.whereis(SystemAuthority) == authority_pid
+      assert Process.alive?(authority_pid)
+      assert is_binary(SystemAuthority.agent_id())
+    end
+
+    @tag spec: "VP-05D2A0"
+    test "batch verification returns only valid capability ids" do
+      {:ok, cap} =
+        Capability.new(
+          resource_uri: "arbor://fs/read/batch_verification",
+          principal_id: "agent_test001"
+        )
+
+      {:ok, signed} = SystemAuthority.sign_capability(cap)
+      forged = %{signed | id: "cap_" <> String.duplicate("f", 32)}
+
+      assert {:ok, [valid_id]} =
+               SystemAuthority.verify_capability_signatures([signed, forged])
+
+      assert valid_id == signed.id
+    end
+
     test "verifies capability signed by a different registered entity" do
       # Generate a separate identity and register it
       alias Arbor.Contracts.Security.Identity

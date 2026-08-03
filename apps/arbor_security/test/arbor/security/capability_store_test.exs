@@ -651,7 +651,7 @@ defmodule Arbor.Security.CapabilityStoreTest do
           kind: :interactive_human,
           destination: "api.example.com",
           provider: "anthropic",
-          runtime: "cloud"
+          runtime: "arbor"
         }
       },
       delegation_chain: [],

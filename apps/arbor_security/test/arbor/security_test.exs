@@ -226,6 +226,42 @@ defmodule Arbor.SecurityTest do
     end
   end
 
+  describe "VP-05D2A0 scoped revocation facade" do
+    @tag spec: "VP-05D2A0"
+    test "security regression: revoke_by_session/1 revokes every matching disclosure cap" do
+      agent_id = Arbor.Identifiers.generate_agent_id()
+      unique = System.unique_integer([:positive])
+      session_id = "session_scope_#{System.unique_integer([:positive])}"
+      other_session_id = "session_other_#{System.unique_integer([:positive])}"
+
+      cap1 = issue_disclosure!(agent_id, session_id, "task_one_#{unique}")
+      cap2 = issue_disclosure!(agent_id, session_id, "task_two_#{unique}")
+      survivor = issue_disclosure!(agent_id, other_session_id, "task_three_#{unique}")
+
+      assert {:ok, 2} = Security.revoke_by_session(session_id)
+      assert {:error, :not_found} = CapabilityStore.get(cap1.id)
+      assert {:error, :not_found} = CapabilityStore.get(cap2.id)
+      assert {:ok, _cap} = CapabilityStore.get(survivor.id)
+    end
+
+    @tag spec: "VP-05D2A0"
+    test "security regression: revoke_by_task/1 revokes every matching disclosure cap" do
+      agent_id = Arbor.Identifiers.generate_agent_id()
+      task_id = "task_scope_#{System.unique_integer([:positive])}"
+      other_task_id = "task_other_#{System.unique_integer([:positive])}"
+      unique = System.unique_integer([:positive])
+
+      cap1 = issue_disclosure!(agent_id, "session_one_#{unique}", task_id)
+      cap2 = issue_disclosure!(agent_id, "session_two_#{unique}", task_id)
+      survivor = issue_disclosure!(agent_id, "session_three_#{unique}", other_task_id)
+
+      assert {:ok, 2} = Security.revoke_by_task(task_id)
+      assert {:error, :not_found} = CapabilityStore.get(cap1.id)
+      assert {:error, :not_found} = CapabilityStore.get(cap2.id)
+      assert {:ok, _cap} = CapabilityStore.get(survivor.id)
+    end
+  end
+
   describe "list_capabilities/2" do
     test "lists capabilities for agent", %{agent_id: agent_id} do
       {:ok, _} =
@@ -884,5 +920,20 @@ defmodule Arbor.SecurityTest do
 
       assert {:ok, :authorized} = Security.authorize(agent_id, resource)
     end
+  end
+
+  defp issue_disclosure!(agent_id, session_id, task_id) do
+    {:ok, cap} =
+      Security.issue_disclosure_capability(
+        principal_id: agent_id,
+        session_id: session_id,
+        task_id: task_id,
+        principal_scope: "human_operator",
+        destination: "api.example.com",
+        provider: "future_provider",
+        runtime: "arbor"
+      )
+
+    cap
   end
 end

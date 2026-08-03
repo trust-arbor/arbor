@@ -21,7 +21,7 @@ defmodule Arbor.Security.DisclosureCapability do
   `model` only when explicitly user-selected) with no other top-level or
   nested constraint keys.
 
-  `issue/1` is the only way to mint one — it owns URI construction (a fresh
+  `issue/1` is the supported public issuance path — it owns URI construction (a fresh
   random token per grant, so two grants for the same route never collide
   under `CapabilityStore`'s principal+resource replace-on-put) and forces
   every invariant above regardless of caller input. `fetch_and_validate/2` is
@@ -54,7 +54,8 @@ defmodule Arbor.Security.DisclosureCapability do
   Agent/Voice ingress — those are later VP-05D2A1/A2/B/C packets.
   """
 
-  alias Arbor.Contracts.Security.Capability
+  alias Arbor.Contracts.Security.{Capability, CapabilityUri}
+  alias Arbor.Identifiers
   alias Arbor.Security.CapabilityStore
   alias Arbor.Security.Config
   alias Arbor.Security.Events
@@ -70,6 +71,7 @@ defmodule Arbor.Security.DisclosureCapability do
   # deliberately NOT the invented cloud/edge/local labels an earlier attempt
   # used.
   @accepted_runtimes ["arbor", "acp"]
+  @provider_route_id ~r/\A[a-z0-9][a-z0-9_.:-]*\z/
 
   @known_issue_keys [
     :principal_id,
@@ -187,13 +189,14 @@ defmodule Arbor.Security.DisclosureCapability do
   end
 
   defp extract_and_validate_fields(opts) do
-    with {:ok, principal_id} <- required_field(opts, :principal_id, :invalid_binding_field),
+    with {:ok, principal_id} <- required_agent_field(opts),
          {:ok, session_id} <- required_field(opts, :session_id, :invalid_binding_field),
          {:ok, task_id} <- required_field(opts, :task_id, :invalid_binding_field),
          {:ok, principal_scope} <- required_human_field(opts),
          {:ok, destination} <- required_field(opts, :destination, :invalid_destination),
-         {:ok, provider} <- required_field(opts, :provider, :invalid_provider),
-         {:ok, runtime} <- required_label_field(opts, :runtime, @accepted_runtimes, :invalid_runtime),
+         {:ok, provider} <- required_provider_field(opts),
+         {:ok, runtime} <-
+           required_label_field(opts, :runtime, @accepted_runtimes, :invalid_runtime),
          {:ok, model} <- optional_field(opts, :model, :invalid_model),
          {:ok, ttl} <- validate_ttl(opts) do
       {:ok,
@@ -218,6 +221,26 @@ defmodule Arbor.Security.DisclosureCapability do
     if canonical_field?(value, max_bytes), do: {:ok, value}, else: {:error, error}
   end
 
+  defp required_agent_field(opts) do
+    value = Keyword.get(opts, :principal_id)
+
+    if canonical_field?(value, @max_binding_field_bytes) and
+         Identifiers.valid_id?(value, :agent) do
+      {:ok, value}
+    else
+      {:error, :invalid_binding_field}
+    end
+  end
+
+  defp required_provider_field(opts) do
+    value = Keyword.get(opts, :provider)
+    max_bytes = Config.disclosure_capability_route_field_max_bytes()
+
+    if canonical_provider?(value, max_bytes),
+      do: {:ok, value},
+      else: {:error, :invalid_provider}
+  end
+
   defp route_field_max_bytes_for(key) when key in [:destination, :provider, :model],
     do: Config.disclosure_capability_route_field_max_bytes()
 
@@ -226,7 +249,7 @@ defmodule Arbor.Security.DisclosureCapability do
   defp required_human_field(opts) do
     value = Keyword.get(opts, :principal_scope)
 
-    if canonical_field?(value, @max_binding_field_bytes) and String.starts_with?(value, "human_") do
+    if canonical_human_principal?(value) do
       {:ok, value}
     else
       {:error, :invalid_binding_field}
@@ -325,16 +348,23 @@ defmodule Arbor.Security.DisclosureCapability do
   # Read-time validation
   # ===========================================================================
 
-  defp validate_capability_id(id) when is_binary(id) do
-    if canonical_field?(id, @max_capability_id_bytes),
+  @doc false
+  @spec valid_capability_id?(term()) :: boolean()
+  def valid_capability_id?(id) when is_binary(id) do
+    canonical_field?(id, @max_capability_id_bytes) and
+      Identifiers.valid_id?(id, :capability)
+  end
+
+  def valid_capability_id?(_id), do: false
+
+  defp validate_capability_id(id) do
+    if valid_capability_id?(id),
       do: :ok,
       else: {:error, :disclosure_capability_id_malformed}
   end
 
-  defp validate_capability_id(_id), do: {:error, :disclosure_capability_id_malformed}
-
   defp validate_principal_id_present(id) when is_binary(id) do
-    if canonical_field?(id, @max_binding_field_bytes),
+    if canonical_field?(id, @max_binding_field_bytes) and Identifiers.valid_id?(id, :agent),
       do: :ok,
       else: {:error, :disclosure_capability_wrong_principal}
   end
@@ -360,7 +390,7 @@ defmodule Arbor.Security.DisclosureCapability do
   end
 
   defp validate_human_scope_request(value) do
-    if canonical_field?(value, @max_binding_field_bytes) and String.starts_with?(value, "human_") do
+    if canonical_human_principal?(value) do
       {:ok, value}
     else
       {:error, :disclosure_capability_wrong_human}
@@ -378,7 +408,7 @@ defmodule Arbor.Security.DisclosureCapability do
       not canonical_field?(destination, max_bytes) ->
         {:error, :disclosure_capability_wrong_route}
 
-      not canonical_field?(provider, max_bytes) ->
+      not canonical_provider?(provider, max_bytes) ->
         {:error, :disclosure_capability_wrong_route}
 
       not (canonical_field?(runtime, max_bytes) and accepted_label?(runtime, @accepted_runtimes)) ->
@@ -393,7 +423,12 @@ defmodule Arbor.Security.DisclosureCapability do
   end
 
   defp validate_shape(%Capability{} = cap) do
+    now = DateTime.utc_now()
+
     cond do
+      not exact_disclosure_uri?(cap.resource_uri) ->
+        {:error, :disclosure_capability_uri_malformed}
+
       cap.parent_capability_id != nil or cap.delegation_chain != [] ->
         {:error, :disclosure_capability_delegated}
 
@@ -403,17 +438,41 @@ defmodule Arbor.Security.DisclosureCapability do
       cap.max_uses != nil ->
         {:error, :disclosure_capability_max_uses_forbidden}
 
-      is_nil(cap.expires_at) ->
-        {:error, :disclosure_capability_missing_expiry}
+      true ->
+        with :ok <- validate_temporal_shape(cap, now) do
+          validate_constraints_shape(cap.constraints)
+        end
+    end
+  end
 
-      DateTime.diff(cap.expires_at, cap.granted_at) >
-          Config.disclosure_capability_max_ttl_seconds() ->
+  defp validate_temporal_shape(
+         %Capability{granted_at: %DateTime{} = granted_at, expires_at: %DateTime{} = expires_at},
+         %DateTime{} = now
+       ) do
+    max_ttl = Config.disclosure_capability_max_ttl_seconds()
+    validity_seconds = DateTime.diff(expires_at, granted_at, :second)
+    remaining_seconds = DateTime.diff(expires_at, now, :second)
+
+    cond do
+      DateTime.compare(granted_at, now) == :gt ->
+        {:error, :disclosure_capability_future_grant}
+
+      validity_seconds <= 0 ->
+        {:error, :disclosure_capability_invalid_window}
+
+      validity_seconds > max_ttl or remaining_seconds > max_ttl ->
         {:error, :disclosure_capability_expiry_too_long}
 
       true ->
-        validate_constraints_shape(cap.constraints)
+        :ok
     end
   end
+
+  defp validate_temporal_shape(%Capability{expires_at: nil}, _now),
+    do: {:error, :disclosure_capability_missing_expiry}
+
+  defp validate_temporal_shape(_cap, _now),
+    do: {:error, :disclosure_capability_invalid_window}
 
   defp validate_constraints_shape(constraints) when is_map(constraints) do
     top_level_recognized = count_recognized(constraints, [{:disclosure, "disclosure"}])
@@ -445,7 +504,7 @@ defmodule Arbor.Security.DisclosureCapability do
       not canonical_field?(get_field(map, :destination), max_bytes) ->
         {:error, :disclosure_capability_missing_route_field}
 
-      not canonical_field?(get_field(map, :provider), max_bytes) ->
+      not canonical_provider?(get_field(map, :provider), max_bytes) ->
         {:error, :disclosure_capability_missing_route_field}
 
       not (canonical_field?(get_field(map, :runtime), max_bytes) and
@@ -509,6 +568,26 @@ defmodule Arbor.Security.DisclosureCapability do
   end
 
   defp canonical_field?(_value, _max_bytes), do: false
+
+  defp canonical_provider?(value, max_bytes) do
+    canonical_field?(value, max_bytes) and Regex.match?(@provider_route_id, value)
+  end
+
+  defp canonical_human_principal?(value) do
+    canonical_field?(value, @max_binding_field_bytes) and
+      String.starts_with?(value, "human_") and value != "human_"
+  end
+
+  defp exact_disclosure_uri?(uri) do
+    case CapabilityUri.parse(uri) do
+      {:ok, %{segments: ["egress", "disclose", token], wildcard: :none} = parsed} ->
+        CapabilityUri.canonical(parsed) == uri and byte_size(token) == 32 and
+          String.match?(token, ~r/\A[0-9a-f]{32}\z/)
+
+      _ ->
+        false
+    end
+  end
 
   defp control_chars?(value) do
     value

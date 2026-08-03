@@ -115,6 +115,38 @@ defmodule Arbor.Security.SystemAuthority do
   end
 
   @doc """
+  Verify that a capability was signed by the current system authority.
+
+  The issuer check and signature verification happen in one authority call so
+  a concurrent authority rotation cannot admit a capability from the previous
+  authority.
+  """
+  @spec verify_authority_capability_signature(Capability.t()) ::
+          :ok | {:error, :invalid_capability_signature}
+  def verify_authority_capability_signature(%Capability{} = cap) do
+    GenServer.call(__MODULE__, {:verify_authority_capability_signature, cap})
+  end
+
+  @doc """
+  Verify a batch of capability signatures in one authority call.
+
+  Returns the ids whose signatures are valid. Issuer keys are resolved once
+  per distinct issuer, preventing authorization candidate scans from making
+  one cross-GenServer call per capability.
+  """
+  @spec verify_capability_signatures([Capability.t()]) ::
+          {:ok, [String.t()]} | {:error, :invalid_capabilities}
+  def verify_capability_signatures(caps) when is_list(caps) do
+    if Enum.all?(caps, &match?(%Capability{}, &1)) do
+      GenServer.call(__MODULE__, {:verify_capability_signatures, caps})
+    else
+      {:error, :invalid_capabilities}
+    end
+  end
+
+  def verify_capability_signatures(_caps), do: {:error, :invalid_capabilities}
+
+  @doc """
   Endorse an agent's identity by signing their public key.
 
   Returns an endorsement map that proves the system authority authorized
@@ -256,30 +288,25 @@ defmodule Arbor.Security.SystemAuthority do
 
   @impl true
   def handle_call({:verify_capability_signature, cap}, _from, %{identity: identity} = state) do
-    result =
-      cond do
-        cap.issuer_id == identity.agent_id ->
-          # Signed by this system authority — use local key
-          Signer.verify(cap, identity.public_key)
+    {:reply, verify_capability_signature_safe(cap, identity), state}
+  end
 
-        is_binary(cap.issuer_id) ->
-          # Signed by another entity — look up their key
-          case Registry.lookup(cap.issuer_id) do
-            {:ok, public_key} -> Signer.verify(cap, public_key)
-            {:error, :not_found} -> {:error, :invalid_capability_signature}
-          end
+  @impl true
+  def handle_call(
+        {:verify_authority_capability_signature, cap},
+        _from,
+        %{identity: identity} = state
+      ) do
+    {:reply, verify_authority_capability_signature_safe(cap, identity), state}
+  end
 
-        true ->
-          # A missing/non-binary issuer_id (e.g. a forged capability with
-          # issuer_signature set but issuer_id left nil) would otherwise raise
-          # in Registry.lookup/1's `is_binary` guard, crashing this shared
-          # GenServer. Fail closed instead — VP-05D2A0 requires verification
-          # exceptions to deny, not take down the authority for every other
-          # in-flight capability check.
-          {:error, :invalid_capability_signature}
-      end
-
-    {:reply, result, state}
+  @impl true
+  def handle_call(
+        {:verify_capability_signatures, caps},
+        _from,
+        %{identity: identity} = state
+      ) do
+    {:reply, {:ok, verify_capability_signatures_safe(caps, identity)}, state}
   end
 
   @impl true
@@ -328,6 +355,106 @@ defmodule Arbor.Security.SystemAuthority do
       {:error, reason} ->
         {:reply, {:error, {:rotation_failed, reason}}, state}
     end
+  end
+
+  defp verify_capability_signature_safe(cap, identity) do
+    with true <- valid_capability_signature_shape?(cap),
+         {:ok, public_key} <- issuer_public_key(cap.issuer_id, identity),
+         :ok <- Signer.verify(cap, public_key) do
+      :ok
+    else
+      _ -> {:error, :invalid_capability_signature}
+    end
+  rescue
+    _ -> {:error, :invalid_capability_signature}
+  catch
+    _, _ -> {:error, :invalid_capability_signature}
+  end
+
+  defp verify_authority_capability_signature_safe(cap, identity) do
+    with true <- valid_capability_signature_shape?(cap),
+         true <- cap.issuer_id == identity.agent_id,
+         :ok <- Signer.verify(cap, identity.public_key) do
+      :ok
+    else
+      _ -> {:error, :invalid_capability_signature}
+    end
+  rescue
+    _ -> {:error, :invalid_capability_signature}
+  catch
+    _, _ -> {:error, :invalid_capability_signature}
+  end
+
+  defp verify_capability_signatures_safe(caps, identity) do
+    {valid_ids, _key_cache} =
+      Enum.reduce(caps, {[], %{}}, fn cap, accumulator ->
+        verify_capability_with_cache(cap, accumulator, identity)
+      end)
+
+    Enum.reverse(valid_ids)
+  rescue
+    _ -> []
+  catch
+    _, _ -> []
+  end
+
+  defp verify_capability_with_cache(cap, {valid_ids, key_cache}, identity) do
+    if valid_capability_signature_shape?(cap) do
+      {key_result, updated_cache} = cached_issuer_public_key(cap.issuer_id, identity, key_cache)
+      maybe_collect_verified_id(key_result, cap, valid_ids, updated_cache)
+    else
+      {valid_ids, key_cache}
+    end
+  end
+
+  defp maybe_collect_verified_id({:ok, public_key}, cap, valid_ids, cache) do
+    if safe_signer_verify(cap, public_key) == :ok,
+      do: {[cap.id | valid_ids], cache},
+      else: {valid_ids, cache}
+  end
+
+  defp maybe_collect_verified_id({:error, _reason}, _cap, valid_ids, cache),
+    do: {valid_ids, cache}
+
+  defp valid_capability_signature_shape?(%Capability{
+         issuer_id: issuer_id,
+         issuer_signature: signature
+       }) do
+    is_binary(issuer_id) and is_binary(signature) and byte_size(signature) == 64
+  end
+
+  defp issuer_public_key(issuer_id, %{agent_id: issuer_id, public_key: public_key}),
+    do: {:ok, public_key}
+
+  defp issuer_public_key(issuer_id, _identity) when is_binary(issuer_id),
+    do: Registry.lookup(issuer_id)
+
+  defp issuer_public_key(_issuer_id, _identity), do: {:error, :not_found}
+
+  defp cached_issuer_public_key(
+         issuer_id,
+         %{agent_id: issuer_id, public_key: public_key},
+         cache
+       ),
+       do: {{:ok, public_key}, cache}
+
+  defp cached_issuer_public_key(issuer_id, identity, cache) do
+    case Map.fetch(cache, issuer_id) do
+      {:ok, result} ->
+        {result, cache}
+
+      :error ->
+        result = issuer_public_key(issuer_id, identity)
+        {result, Map.put(cache, issuer_id, result)}
+    end
+  end
+
+  defp safe_signer_verify(cap, public_key) do
+    Signer.verify(cap, public_key)
+  rescue
+    _ -> {:error, :invalid_capability_signature}
+  catch
+    _, _ -> {:error, :invalid_capability_signature}
   end
 
   # Length-prefixed endorsement payload to prevent field-boundary ambiguity.

@@ -13,9 +13,9 @@ defmodule Arbor.Security.EgressGate do
   URI. Inert unless `config :arbor_security, :egress_gate_enforcing` is true (the
   gate lands dark). Composition, in order:
 
-  1. **Taint conjunct** — untrusted/hostile data to an external destination is a
-     hard block, NOT bypassable by trust standing or caps (the outbound mirror of
-     the taint rebuild's inbound control-param protection).
+  1. **Taint conjunct** — hostile data to an external destination is an absolute
+     hard block. Untrusted data is also blocked except for one exact, already-
+     validated interactive-disclosure capability to an external provider route.
   2. **Tier semantics** — `:external_peer` is advisory (1.0 ACP deferral);
      `:on_host`/`:none` allow; `:on_premises` allows unless the on-premises flag.
   3. **Policy standing** — caller-supplied `opts[:egress_mode]` for gated tiers
@@ -26,7 +26,7 @@ defmodule Arbor.Security.EgressGate do
      (`max_tier`/`destinations`) covers the request downgrades `:ask` -> `:allow`.
   """
 
-  alias Arbor.Contracts.Security.CapabilityUri
+  alias Arbor.Contracts.Security.{Capability, CapabilityUri}
   alias Arbor.Contracts.Security.Classification
 
   @type decision :: :allow | :ask | {:block, atom()}
@@ -74,7 +74,7 @@ defmodule Arbor.Security.EgressGate do
   blocked this egress. Only a genuinely un-gated tier (`:on_host`, `:none`) or
   the taint level itself changes that outcome.
   """
-  @spec decide(String.t(), atom(), keyword(), [map()], map() | nil) :: decision()
+  @spec decide(String.t(), atom(), keyword(), [map()], Capability.t() | nil) :: decision()
   def decide(agent_id, tier, opts \\ [], caps \\ [], disclosure_cap \\ nil) do
     cond do
       not enforcing?() ->

@@ -13,8 +13,15 @@ defmodule Arbor.Security.DisclosureEgressRegressionTest do
   """
   use ExUnit.Case, async: false
 
-  alias Arbor.Contracts.Security.Capability
-  alias Arbor.Security.{CapabilityStore, Events, SystemAuthority}
+  alias Arbor.Contracts.Security.{Capability, Identity}
+
+  alias Arbor.Security.{
+    Capability.Signer,
+    CapabilityStore,
+    Events,
+    Identity.Registry,
+    SystemAuthority
+  }
 
   @resource "arbor://ai/generate"
 
@@ -26,7 +33,7 @@ defmodule Arbor.Security.DisclosureEgressRegressionTest do
     unique = :erlang.unique_integer([:positive])
 
     %{
-      agent_id: "agent_disclosure_#{unique}",
+      agent_id: Arbor.Identifiers.generate_agent_id(),
       session_id: "session_#{unique}",
       task_id: "task_#{unique}",
       principal_scope: "human_#{unique}"
@@ -64,10 +71,32 @@ defmodule Arbor.Security.DisclosureEgressRegressionTest do
       for override <- [
             [egress_destination: "evil.example.com"],
             [egress_provider: "openai"],
-            [egress_runtime: "edge"]
+            [egress_runtime: "acp"]
           ] do
         opts = full_opts(ctx, cap.id, :untrusted, override)
 
+        assert {:error, {:egress_blocked, :external_provider, :untrusted}} =
+                 Arbor.Security.authorize_egress(ctx.agent_id, :external_provider, opts)
+      end
+    end
+
+    @tag spec: "VP-05D2A0"
+    test "security regression: an explicitly selected model must match exactly", ctx do
+      cap = issue!(ctx, model: "claude-sonnet-5")
+
+      matching_opts =
+        full_opts(ctx, cap.id, :untrusted, egress_model: "claude-sonnet-5")
+
+      assert Arbor.Security.authorize_egress(
+               ctx.agent_id,
+               :external_provider,
+               matching_opts
+             ) == :allow
+
+      for opts <- [
+            full_opts(ctx, cap.id, :untrusted),
+            full_opts(ctx, cap.id, :untrusted, egress_model: "claude-opus-5")
+          ] do
         assert {:error, {:egress_blocked, :external_provider, :untrusted}} =
                  Arbor.Security.authorize_egress(ctx.agent_id, :external_provider, opts)
       end
@@ -101,6 +130,67 @@ defmodule Arbor.Security.DisclosureEgressRegressionTest do
     end
 
     @tag spec: "VP-05D2A0"
+    test "security regression: future-dated grant is refused", %{base: base} = ctx do
+      granted_at = DateTime.add(DateTime.utc_now(), 3600, :second)
+
+      future = %{
+        base
+        | granted_at: granted_at,
+          expires_at: DateTime.add(granted_at, 300, :second)
+      }
+
+      {:ok, signed} = SystemAuthority.sign_capability(future)
+      {:ok, :stored} = CapabilityStore.put(signed)
+      assert_refused(ctx, signed.id)
+    end
+
+    @tag spec: "VP-05D2A0"
+    test "security regression: non-positive validity window is refused", %{base: base} = ctx do
+      expires_at = DateTime.add(DateTime.utc_now(), 300, :second)
+      invalid = %{base | granted_at: DateTime.add(expires_at, 1, :second), expires_at: expires_at}
+      {:ok, signed} = SystemAuthority.sign_capability(invalid)
+      {:ok, :stored} = CapabilityStore.put(signed)
+      assert_refused(ctx, signed.id)
+    end
+
+    @tag spec: "VP-05D2A0"
+    test "security regression: malformed signature field is refused", %{base: base} = ctx do
+      malformed = %{
+        base
+        | issuer_id: SystemAuthority.agent_id(),
+          issuer_signature: {:not, :a_binary}
+      }
+
+      {:ok, :stored} = CapabilityStore.put(malformed)
+      assert_refused(ctx, malformed.id)
+      assert is_binary(SystemAuthority.agent_id())
+    end
+
+    @tag spec: "VP-05D2A0"
+    test "security regression: a different registered issuer cannot mint disclosure authority",
+         %{base: base} = ctx do
+      {:ok, other_identity} = Identity.generate()
+      :ok = Registry.register(Identity.public_only(other_identity))
+
+      signed =
+        base
+        |> Map.put(:issuer_id, other_identity.agent_id)
+        |> Signer.sign(other_identity.private_key)
+
+      {:ok, :stored} = CapabilityStore.put(signed)
+      assert_refused(ctx, signed.id)
+    end
+
+    @tag spec: "VP-05D2A0"
+    test "security regression: non-exact disclosure resource URI is refused",
+         %{base: base} = ctx do
+      malformed = %{base | resource_uri: base.resource_uri <> "/extra"}
+      {:ok, signed} = SystemAuthority.sign_capability(malformed)
+      {:ok, :stored} = CapabilityStore.put(signed)
+      assert_refused(ctx, signed.id)
+    end
+
+    @tag spec: "VP-05D2A0"
     test "wrong principal is refused", %{base: base} = ctx do
       {:ok, signed} = SystemAuthority.sign_capability(base)
       {:ok, :stored} = CapabilityStore.put(signed)
@@ -108,7 +198,11 @@ defmodule Arbor.Security.DisclosureEgressRegressionTest do
       opts = full_opts(ctx, signed.id, :untrusted)
 
       assert {:error, {:egress_blocked, :external_provider, :untrusted}} =
-               Arbor.Security.authorize_egress("agent_someone_else", :external_provider, opts)
+               Arbor.Security.authorize_egress(
+                 Arbor.Identifiers.generate_agent_id(),
+                 :external_provider,
+                 opts
+               )
     end
 
     @tag spec: "VP-05D2A0"
@@ -214,6 +308,17 @@ defmodule Arbor.Security.DisclosureEgressRegressionTest do
       assert {:error, {:egress_blocked, :external_provider, :untrusted}} =
                Arbor.Security.authorize_egress(ctx.agent_id, :external_provider, opts)
     end
+
+    @tag spec: "VP-05D2A0"
+    test "security regression: malformed authorize_egress opts fail closed without raising",
+         ctx do
+      assert {:error, {:egress_blocked, :external_provider, :invalid_options}} =
+               Arbor.Security.authorize_egress(
+                 ctx.agent_id,
+                 :external_provider,
+                 %{"egress_taint" => "untrusted"}
+               )
+    end
   end
 
   describe "ordinary-candidate compatibility" do
@@ -255,6 +360,41 @@ defmodule Arbor.Security.DisclosureEgressRegressionTest do
     end
   end
 
+  describe "bounded egress telemetry" do
+    @tag spec: "VP-05D2A0"
+    test "security regression: malformed disclosure ids are never copied into telemetry", ctx do
+      parent = self()
+      handler_id = "disclosure-egress-#{System.unique_integer([:positive])}"
+
+      :ok =
+        :telemetry.attach(
+          handler_id,
+          [:arbor, :security, :egress_observed],
+          fn _event, _measurements, metadata, _config ->
+            send(parent, {:egress_observed, metadata})
+          end,
+          %{}
+        )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      oversized_id = "cap_" <> String.duplicate("a", 10_000)
+
+      assert {:requires_approval, :egress} =
+               Arbor.Security.authorize_egress(
+                 ctx.agent_id,
+                 :external_provider,
+                 egress_taint: :trusted,
+                 disclosure_capability_id: oversized_id
+               )
+
+      assert_receive {:egress_observed, metadata}
+      assert metadata.data.disclosure_requested
+      assert metadata.data.disclosure_capability_id == nil
+      assert metadata.signal_data.disclosure_capability_id == nil
+    end
+  end
+
   describe "durable audit event" do
     setup do
       name = Arbor.Historian.EventLog.ETS
@@ -293,17 +433,19 @@ defmodule Arbor.Security.DisclosureEgressRegressionTest do
   # Helpers
   # ===========================================================================
 
-  defp issue!(ctx) do
+  defp issue!(ctx, overrides \\ []) do
     {:ok, cap} =
-      Arbor.Security.issue_disclosure_capability(
+      [
         principal_id: ctx.agent_id,
         session_id: ctx.session_id,
         task_id: ctx.task_id,
         principal_scope: ctx.principal_scope,
         destination: "api.anthropic.com",
         provider: "anthropic",
-        runtime: "cloud"
-      )
+        runtime: "arbor"
+      ]
+      |> Keyword.merge(overrides)
+      |> Arbor.Security.issue_disclosure_capability()
 
     cap
   end
@@ -312,7 +454,7 @@ defmodule Arbor.Security.DisclosureEgressRegressionTest do
     token = Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
 
     %Capability{
-      id: "cap_disclosure_regression_#{:erlang.unique_integer([:positive])}",
+      id: capability_id(),
       resource_uri: "arbor://egress/disclose/" <> token,
       principal_id: ctx.agent_id,
       granted_at: DateTime.utc_now(),
@@ -327,7 +469,7 @@ defmodule Arbor.Security.DisclosureEgressRegressionTest do
           kind: :interactive_human,
           destination: "api.anthropic.com",
           provider: "anthropic",
-          runtime: "cloud"
+          runtime: "arbor"
         }
       },
       delegation_chain: [],
@@ -344,7 +486,7 @@ defmodule Arbor.Security.DisclosureEgressRegressionTest do
       disclosure_capability_id: cap_id,
       egress_destination: "api.anthropic.com",
       egress_provider: "anthropic",
-      egress_runtime: "cloud"
+      egress_runtime: "arbor"
     ]
     |> Keyword.merge(route_overrides)
   end
@@ -363,5 +505,9 @@ defmodule Arbor.Security.DisclosureEgressRegressionTest do
     Map.get(data, key) || Map.get(data, String.to_existing_atom(key))
   rescue
     ArgumentError -> nil
+  end
+
+  defp capability_id do
+    "cap_" <> Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
   end
 end

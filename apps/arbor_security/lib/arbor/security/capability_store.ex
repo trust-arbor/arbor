@@ -325,6 +325,8 @@ defmodule Arbor.Security.CapabilityStore do
 
   @impl true
   def handle_call({:list_valid_for_principal, principal_id, opts}, _from, state) do
+    now = DateTime.utc_now()
+
     scope_context = [
       session_id: Keyword.get(opts, :session_id),
       task_id: Keyword.get(opts, :task_id),
@@ -335,9 +337,9 @@ defmodule Arbor.Security.CapabilityStore do
       state.by_principal
       |> Map.get(principal_id, [])
       |> Enum.map(&Map.get(state.by_id, &1))
-      |> Enum.reject(&is_nil/1)
-      |> Enum.reject(&disclosure_namespaced?/1)
-      |> Enum.filter(&candidate_current_and_scoped?(&1, scope_context, false))
+      |> Enum.reject(&(is_nil(&1) or disclosure_namespaced?(&1)))
+      |> Enum.filter(&candidate_cheaply_valid?(&1, principal_id, scope_context, now))
+      |> verify_ordinary_candidates()
 
     {:reply, {:ok, caps}, state}
   rescue
@@ -353,6 +355,8 @@ defmodule Arbor.Security.CapabilityStore do
         _from,
         state
       ) do
+    now = DateTime.utc_now()
+
     result =
       case Map.get(state.by_id, capability_id) do
         nil ->
@@ -366,7 +370,13 @@ defmodule Arbor.Security.CapabilityStore do
             cap.principal_id != principal_id ->
               {:error, :disclosure_capability_wrong_principal}
 
-            not candidate_current_and_scoped?(cap, scope_context, true) ->
+            not candidate_cheaply_valid?(cap, principal_id, scope_context, now) ->
+              {:error, :disclosure_capability_rejected}
+
+            not disclosure_time_candidate?(cap, now) ->
+              {:error, :disclosure_capability_rejected}
+
+            not authority_signature_ok?(cap) or not delegation_chain_valid?(cap) ->
               {:error, :disclosure_capability_rejected}
 
             true ->
@@ -593,37 +603,91 @@ defmodule Arbor.Security.CapabilityStore do
   end
 
   # ===========================================================================
-  # Shared candidate validation (VP-05D2A0) — one linearized predicate reused
-  # by both the ordinary (list_valid_for_principal) and disclosure
-  # (get_valid_disclosure) candidate paths, so signature/chain/scope logic is
-  # written once. `require_signature?` is `false` for ordinary candidates
-  # (config-conditional, matching `signature_acceptable?/1`) and `true` for
-  # disclosure candidates (always-signed regardless of global config).
+  # Shared candidate validation (VP-05D2A0). Cheap checks run over the whole
+  # candidate set first. Ordinary signatures are then verified in one batched
+  # SystemAuthority call, rather than one nested GenServer call per capability.
   # ===========================================================================
 
   defp disclosure_namespaced?(%{resource_uri: uri}) do
     CapabilityUri.prefix_match?(@disclosure_uri_prefix, uri)
   end
 
-  defp candidate_current_and_scoped?(cap, scope_context, require_signature?) do
-    Capability.valid?(cap) and
-      Capability.scope_matches?(cap, scope_context) and
-      candidate_signature_ok?(cap, require_signature?) and
-      delegation_chain_valid?(cap)
+  defp candidate_cheaply_valid?(cap, principal_id, scope_context, now) do
+    cap.principal_id == principal_id and current_at?(cap, now) and
+      Capability.scope_matches?(cap, scope_context)
+  rescue
+    _ -> false
+  catch
+    _, _ -> false
   end
 
-  defp candidate_signature_ok?(cap, true) do
-    Capability.signed?(cap) and safe_verify_capability_signature(cap) == :ok
+  defp current_at?(%Capability{} = cap, %DateTime{} = now) do
+    expires_ok? =
+      is_nil(cap.expires_at) or
+        (match?(%DateTime{}, cap.expires_at) and DateTime.compare(cap.expires_at, now) == :gt)
+
+    not_before_ok? =
+      is_nil(cap.not_before) or
+        (match?(%DateTime{}, cap.not_before) and DateTime.compare(now, cap.not_before) != :lt)
+
+    expires_ok? and not_before_ok? and is_integer(cap.delegation_depth) and
+      cap.delegation_depth >= 0
   end
 
-  defp candidate_signature_ok?(cap, false), do: signature_acceptable?(cap)
+  defp verify_ordinary_candidates(caps) do
+    signed = Enum.filter(caps, &Capability.signed?/1)
+    valid_signed_ids = valid_signature_ids(signed)
+    signing_required? = Config.capability_signing_required?()
+
+    Enum.filter(caps, fn cap ->
+      signature_valid? =
+        if Capability.signed?(cap) do
+          MapSet.member?(valid_signed_ids, cap.id)
+        else
+          not signing_required?
+        end
+
+      signature_valid? and delegation_chain_valid?(cap)
+    end)
+  end
+
+  defp valid_signature_ids([]), do: MapSet.new()
+
+  defp valid_signature_ids(caps) do
+    case SystemAuthority.verify_capability_signatures(caps) do
+      {:ok, ids} when is_list(ids) -> MapSet.new(ids)
+      _ -> MapSet.new()
+    end
+  rescue
+    _ -> MapSet.new()
+  catch
+    _, _ -> MapSet.new()
+  end
+
+  defp authority_signature_ok?(cap) do
+    Capability.signed?(cap) and safe_verify_authority_capability_signature(cap) == :ok
+  end
+
+  defp disclosure_time_candidate?(
+         %Capability{granted_at: %DateTime{} = granted_at, expires_at: %DateTime{} = expires_at},
+         %DateTime{} = now
+       ) do
+    max_ttl = Config.disclosure_capability_max_ttl_seconds()
+    validity_seconds = DateTime.diff(expires_at, granted_at, :second)
+    remaining_seconds = DateTime.diff(expires_at, now, :second)
+
+    DateTime.compare(granted_at, now) != :gt and validity_seconds > 0 and
+      validity_seconds <= max_ttl and remaining_seconds <= max_ttl
+  end
+
+  defp disclosure_time_candidate?(_cap, _now), do: false
 
   # Verifier-exit containment: this runs INSIDE the store's own handle_call,
   # so an unreachable/crashing SystemAuthority must not crash CapabilityStore
   # itself (that would take down every in-flight capability operation, not
   # just this one request).
-  defp safe_verify_capability_signature(cap) do
-    SystemAuthority.verify_capability_signature(cap)
+  defp safe_verify_authority_capability_signature(cap) do
+    SystemAuthority.verify_authority_capability_signature(cap)
   rescue
     _ -> {:error, :verification_unavailable}
   catch

@@ -353,7 +353,7 @@ defmodule Arbor.Security.EgressGateTest do
       assert {:block, :untrusted} =
                EgressGate.decide("agent_1", :external_provider, opts2, [], disclosure_cap())
 
-      opts3 = [egress_taint: :untrusted] ++ route_opts(%{egress_runtime: "edge"})
+      opts3 = [egress_taint: :untrusted] ++ route_opts(%{egress_runtime: "acp"})
 
       assert {:block, :untrusted} =
                EgressGate.decide("agent_1", :external_provider, opts3, [], disclosure_cap())
@@ -403,7 +403,7 @@ defmodule Arbor.Security.EgressGateTest do
         kind: :interactive_human,
         destination: "api.anthropic.com",
         provider: "anthropic",
-        runtime: "cloud"
+        runtime: "arbor"
       }
       |> Map.merge(route_overrides)
 
@@ -417,7 +417,7 @@ defmodule Arbor.Security.EgressGateTest do
     base = %{
       egress_destination: "api.anthropic.com",
       egress_provider: "anthropic",
-      egress_runtime: "cloud"
+      egress_runtime: "arbor"
     }
 
     base |> Map.merge(overrides) |> Map.to_list()

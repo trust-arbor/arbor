@@ -9,8 +9,16 @@ defmodule Arbor.Security.DisclosureCapabilityTest do
   """
   use ExUnit.Case, async: false
 
-  alias Arbor.Contracts.Security.Capability
-  alias Arbor.Security.{CapabilityStore, DisclosureCapability, SystemAuthority}
+  alias Arbor.Contracts.Security.{Capability, Identity}
+
+  alias Arbor.Security.{
+    Capability.Signer,
+    CapabilityStore,
+    Config,
+    DisclosureCapability,
+    Identity.Registry,
+    SystemAuthority
+  }
 
   defp unique, do: :erlang.unique_integer([:positive])
 
@@ -18,13 +26,13 @@ defmodule Arbor.Security.DisclosureCapabilityTest do
     n = unique()
 
     [
-      principal_id: "agent_#{n}",
+      principal_id: Arbor.Identifiers.generate_agent_id(),
       session_id: "session_#{n}",
       task_id: "task_#{n}",
       principal_scope: "human_#{n}",
       destination: "api.anthropic.com",
       provider: "anthropic",
-      runtime: "cloud"
+      runtime: "arbor"
     ]
     |> Keyword.merge(overrides)
   end
@@ -87,9 +95,17 @@ defmodule Arbor.Security.DisclosureCapabilityTest do
     end
 
     @tag spec: "VP-05D2A0"
-    test "rejects a provider outside the accepted-label allowlist" do
+    test "accepts a canonical future provider id without a stale allowlist" do
+      assert {:ok, cap} =
+               DisclosureCapability.issue(valid_issue_opts(provider: "some_future_provider"))
+
+      assert cap.constraints.disclosure.provider == "some_future_provider"
+    end
+
+    @tag spec: "VP-05D2A0"
+    test "rejects a malformed provider route id" do
       assert {:error, :invalid_provider} =
-               DisclosureCapability.issue(valid_issue_opts(provider: "not_a_real_provider"))
+               DisclosureCapability.issue(valid_issue_opts(provider: "Bad Provider/Route"))
     end
 
     @tag spec: "VP-05D2A0"
@@ -102,6 +118,18 @@ defmodule Arbor.Security.DisclosureCapabilityTest do
     test "rejects a principal_scope without the human_ prefix" do
       assert {:error, :invalid_binding_field} =
                DisclosureCapability.issue(valid_issue_opts(principal_scope: "agent_not_human"))
+    end
+
+    @tag spec: "VP-05D2A0"
+    test "security regression: rejects a non-agent executing principal" do
+      assert {:error, :invalid_binding_field} =
+               DisclosureCapability.issue(valid_issue_opts(principal_id: "human_not_an_agent"))
+    end
+
+    @tag spec: "VP-05D2A0"
+    test "security regression: rejects an empty human principal suffix" do
+      assert {:error, :invalid_binding_field} =
+               DisclosureCapability.issue(valid_issue_opts(principal_scope: "human_"))
     end
 
     @tag spec: "VP-05D2A0"
@@ -149,7 +177,7 @@ defmodule Arbor.Security.DisclosureCapabilityTest do
     @tag spec: "VP-05D2A0"
     test "not-found id fails closed", %{cap: cap} do
       assert {:error, :not_found} =
-               DisclosureCapability.fetch_and_validate("cap_ghost_#{unique()}", fetch_opts(cap))
+               DisclosureCapability.fetch_and_validate(capability_id(), fetch_opts(cap))
     end
 
     @tag spec: "VP-05D2A0"
@@ -171,7 +199,7 @@ defmodule Arbor.Security.DisclosureCapabilityTest do
       assert {:error, :disclosure_capability_wrong_principal} =
                DisclosureCapability.fetch_and_validate(
                  cap.id,
-                 fetch_opts(cap, principal_id: "agent_someone_else")
+                 fetch_opts(cap, principal_id: Arbor.Identifiers.generate_agent_id())
                )
     end
 
@@ -246,6 +274,78 @@ defmodule Arbor.Security.DisclosureCapabilityTest do
 
       assert {:error, :disclosure_capability_rejected} =
                DisclosureCapability.fetch_and_validate(resigned.id, fetch_opts(cap))
+    end
+
+    @tag spec: "VP-05D2A0"
+    test "security regression: a future-dated grant fails closed", %{cap: cap} do
+      granted_at = DateTime.add(DateTime.utc_now(), 3600, :second)
+      future = %{cap | granted_at: granted_at, expires_at: DateTime.add(granted_at, 300, :second)}
+      {:ok, resigned} = SystemAuthority.sign_capability(future)
+      {:ok, :stored} = CapabilityStore.put(resigned)
+
+      assert {:error, :disclosure_capability_rejected} =
+               DisclosureCapability.fetch_and_validate(resigned.id, fetch_opts(cap))
+    end
+
+    @tag spec: "VP-05D2A0"
+    test "security regression: a non-positive validity window fails closed", %{cap: cap} do
+      expires_at = DateTime.add(DateTime.utc_now(), 300, :second)
+      invalid = %{cap | granted_at: DateTime.add(expires_at, 1, :second), expires_at: expires_at}
+      {:ok, resigned} = SystemAuthority.sign_capability(invalid)
+      {:ok, :stored} = CapabilityStore.put(resigned)
+
+      assert {:error, :disclosure_capability_rejected} =
+               DisclosureCapability.fetch_and_validate(resigned.id, fetch_opts(cap))
+    end
+
+    @tag spec: "VP-05D2A0"
+    test "security regression: an overlong validity window fails closed", %{cap: cap} do
+      max_ttl = Config.disclosure_capability_max_ttl_seconds()
+      granted_at = DateTime.utc_now()
+
+      overlong = %{
+        cap
+        | granted_at: granted_at,
+          expires_at: DateTime.add(granted_at, max_ttl + 1, :second)
+      }
+
+      {:ok, resigned} = SystemAuthority.sign_capability(overlong)
+      {:ok, :stored} = CapabilityStore.put(resigned)
+
+      assert {:error, :disclosure_capability_rejected} =
+               DisclosureCapability.fetch_and_validate(resigned.id, fetch_opts(cap))
+    end
+
+    @tag spec: "VP-05D2A0"
+    test "security regression: only the current SystemAuthority issuer is accepted", %{cap: cap} do
+      {:ok, other_identity} = Identity.generate()
+      :ok = Registry.register(Identity.public_only(other_identity))
+
+      signed =
+        cap
+        |> Map.put(:issuer_id, other_identity.agent_id)
+        |> Signer.sign(other_identity.private_key)
+
+      {:ok, :stored} = CapabilityStore.put(signed)
+
+      assert {:error, :disclosure_capability_rejected} =
+               DisclosureCapability.fetch_and_validate(signed.id, fetch_opts(cap))
+    end
+
+    @tag spec: "VP-05D2A0"
+    test "security regression: disclosure resource URI requires one lowercase-hex token segment",
+         %{cap: cap} do
+      prefix = "arbor://egress/disclose/"
+      token = String.replace_prefix(cap.resource_uri, prefix, "")
+
+      for uri <- [cap.resource_uri <> "/extra", prefix <> String.upcase(token)] do
+        malformed = %{cap | resource_uri: uri}
+        {:ok, resigned} = SystemAuthority.sign_capability(malformed)
+        {:ok, :stored} = CapabilityStore.put(resigned)
+
+        assert {:error, :disclosure_capability_uri_malformed} =
+                 DisclosureCapability.fetch_and_validate(resigned.id, fetch_opts(cap))
+      end
     end
 
     @tag spec: "VP-05D2A0"
@@ -358,4 +458,8 @@ defmodule Arbor.Security.DisclosureCapabilityTest do
 
   defp restore_config(key, nil), do: Application.delete_env(:arbor_security, key)
   defp restore_config(key, value), do: Application.put_env(:arbor_security, key, value)
+
+  defp capability_id do
+    "cap_" <> Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
+  end
 end

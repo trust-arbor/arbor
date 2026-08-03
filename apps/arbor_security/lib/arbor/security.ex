@@ -68,6 +68,7 @@ defmodule Arbor.Security do
   alias Arbor.Security.SigningAuthorityBroker
   alias Arbor.Security.SigningKeyStore
   alias Arbor.Security.SystemAuthority
+  alias Arbor.Security.Telemetry
   alias Arbor.Security.UriRegistry
 
   require Logger
@@ -196,6 +197,14 @@ defmodule Arbor.Security do
           | {:requires_approval, :egress}
           | {:error, {:egress_blocked, atom(), atom()}}
   def authorize_egress(principal_id, egress_tier, opts \\ []) do
+    if Keyword.keyword?(opts) do
+      do_authorize_egress(principal_id, egress_tier, opts)
+    else
+      {:error, {:egress_blocked, egress_tier, :invalid_options}}
+    end
+  end
+
+  defp do_authorize_egress(principal_id, egress_tier, opts) do
     emit_egress_observed(principal_id, egress_tier, opts)
 
     scope_opts = Keyword.take(opts, [:session_id, :task_id, :principal_scope])
@@ -263,14 +272,14 @@ defmodule Arbor.Security do
       source: :compute_node,
       # VP-05D2A0 — bounded: id and a presence flag only, never the human
       # principal_scope, the constraints map, or any raw authority.
-      disclosure_capability_id: Keyword.get(opts, :disclosure_capability_id),
-      disclosure_requested: is_binary(Keyword.get(opts, :disclosure_capability_id))
+      disclosure_capability_id: sanitized_disclosure_capability_id(opts),
+      disclosure_requested: not is_nil(Keyword.get(opts, :disclosure_capability_id))
     }
 
     # Prefer durable bridging so observe-before-enable data persists to the
     # EventLog (security:events stream), matching the action path when the
     # signals telemetry bridge is attached.
-    Arbor.Security.Telemetry.emit(:egress_observed, data,
+    Telemetry.emit(:egress_observed, data,
       signal_durable: true,
       stream_id: "security:events"
     )
@@ -281,6 +290,16 @@ defmodule Arbor.Security do
   end
 
   defp emit_egress_observed(_principal_id, _tier, _opts), do: :ok
+
+  defp sanitized_disclosure_capability_id(opts) do
+    case Keyword.get(opts, :disclosure_capability_id) do
+      id when is_binary(id) ->
+        if DisclosureCapability.valid_capability_id?(id), do: id, else: nil
+
+      _ ->
+        nil
+    end
+  end
 
   # Normalize an egress taint opt (level atom or Taint struct) to a level atom.
   defp egress_taint_level(%{level: level}), do: level
@@ -314,6 +333,15 @@ defmodule Arbor.Security do
   """
   @spec revoke_by_session(String.t()) :: {:ok, non_neg_integer()}
   def revoke_by_session(session_id), do: CapabilityStore.revoke_by_session(session_id)
+
+  @doc """
+  Revoke all task-scoped capabilities for a task.
+
+  VP-05D2A0 exposes both task and session revocation at the security facade.
+  Agent/Voice terminal lifecycle call sites are wired by VP-05D2A1/A2.
+  """
+  @spec revoke_by_task(String.t()) :: {:ok, non_neg_integer()}
+  def revoke_by_task(task_id), do: CapabilityStore.revoke_by_task(task_id)
 
   @doc """
   Delegate a capability to another agent.
