@@ -350,8 +350,11 @@ defmodule Arbor.Voice.ConsultAgentSecurityRegressionTest do
     [{session_pid, _}] = Registry.lookup(Arbor.Voice.Registry, key)
     sys_status = :sys.get_status(session_pid)
     refute inspect(sys_status) =~ @distinctive_token
-    # Retained GenServer state must not expose the raw bearer credential.
-    refute inspect(:sys.get_state(session_pid)) =~ @distinctive_token
+    # Proof is closed over inside consult_authority only — not a Session field
+    # and never visible via Inspect of retained state.
+    state = :sys.get_state(session_pid)
+    refute Map.has_key?(state, :session_token)
+    refute inspect(state) =~ @distinctive_token
     refute inspect(session_pid) =~ @distinctive_token
 
     # Transcript path only has front-desk user/final assistant pair

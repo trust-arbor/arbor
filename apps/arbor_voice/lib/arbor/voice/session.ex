@@ -253,8 +253,8 @@ defmodule Arbor.Voice.Session do
           tool_router_timeout_ms: config.tool_router_timeout_ms,
           tool_declarations: config.tool_declarations,
           progress_threshold_ms: config.progress_threshold_ms,
-          # Redacted proof + fixed authority (VP-05B); never public.
-          session_token: config.session_token,
+          # Single live retention path for the redacted proof: closed over
+          # inside consult_authority only (never a separate Session field).
           consult_authority: consult_authority,
           # min(100, owner max_recv) so recv never exceeds a tighter owner cap.
           poll_window_ms: derive_poll_window_ms(config.resource_owner_opts),

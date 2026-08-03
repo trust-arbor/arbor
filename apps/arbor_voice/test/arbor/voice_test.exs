@@ -311,6 +311,178 @@ defmodule Arbor.VoiceTest do
     def invoke(_, _), do: {:error, :no_tools_installed}
   end
 
+  defmodule BadToolsEmptyPropertySchema do
+    @moduledoc false
+    def tools do
+      [
+        %{
+          "type" => "function",
+          "name" => "a",
+          "description" => "desc",
+          "parameters" => %{
+            "type" => "object",
+            "properties" => %{"message" => %{}},
+            "required" => ["message"],
+            "additionalProperties" => false
+          }
+        }
+      ]
+    end
+
+    def invoke(_, _), do: {:error, :no_tools_installed}
+  end
+
+  defmodule BadToolsBogusPropertyType do
+    @moduledoc false
+    def tools do
+      [
+        %{
+          "type" => "function",
+          "name" => "a",
+          "description" => "desc",
+          "parameters" => %{
+            "type" => "object",
+            "properties" => %{"message" => %{"type" => "bogus"}},
+            "required" => ["message"],
+            "additionalProperties" => false
+          }
+        }
+      ]
+    end
+
+    def invoke(_, _), do: {:error, :no_tools_installed}
+  end
+
+  defmodule BadToolsUnknownPropertyKey do
+    @moduledoc false
+    def tools do
+      [
+        %{
+          "type" => "function",
+          "name" => "a",
+          "description" => "desc",
+          "parameters" => %{
+            "type" => "object",
+            "properties" => %{
+              "message" => %{"type" => "string", "pattern" => ".*"}
+            },
+            "required" => ["message"],
+            "additionalProperties" => false
+          }
+        }
+      ]
+    end
+
+    def invoke(_, _), do: {:error, :no_tools_installed}
+  end
+
+  defmodule BadToolsInvertedLengthBounds do
+    @moduledoc false
+    def tools do
+      [
+        %{
+          "type" => "function",
+          "name" => "a",
+          "description" => "desc",
+          "parameters" => %{
+            "type" => "object",
+            "properties" => %{
+              "message" => %{"type" => "string", "minLength" => 10, "maxLength" => 1}
+            },
+            "required" => ["message"],
+            "additionalProperties" => false
+          }
+        }
+      ]
+    end
+
+    def invoke(_, _), do: {:error, :no_tools_installed}
+  end
+
+  defmodule BadToolsNullPropertyDescription do
+    @moduledoc false
+    def tools do
+      [
+        %{
+          "type" => "function",
+          "name" => "a",
+          "description" => "desc",
+          "parameters" => %{
+            "type" => "object",
+            "properties" => %{"message" => %{"type" => "string", "description" => nil}},
+            "required" => ["message"],
+            "additionalProperties" => false
+          }
+        }
+      ]
+    end
+
+    def invoke(_, _), do: {:error, :no_tools_installed}
+  end
+
+  defmodule BadToolsNullMinLength do
+    @moduledoc false
+    def tools do
+      [
+        %{
+          "type" => "function",
+          "name" => "a",
+          "description" => "desc",
+          "parameters" => %{
+            "type" => "object",
+            "properties" => %{"message" => %{"type" => "string", "minLength" => nil}},
+            "required" => ["message"],
+            "additionalProperties" => false
+          }
+        }
+      ]
+    end
+
+    def invoke(_, _), do: {:error, :no_tools_installed}
+  end
+
+  defmodule BadToolsNullMaxLength do
+    @moduledoc false
+    def tools do
+      [
+        %{
+          "type" => "function",
+          "name" => "a",
+          "description" => "desc",
+          "parameters" => %{
+            "type" => "object",
+            "properties" => %{"message" => %{"type" => "string", "maxLength" => nil}},
+            "required" => ["message"],
+            "additionalProperties" => false
+          }
+        }
+      ]
+    end
+
+    def invoke(_, _), do: {:error, :no_tools_installed}
+  end
+
+  defmodule BadToolsDuplicateRequired do
+    @moduledoc false
+    def tools do
+      [
+        %{
+          "type" => "function",
+          "name" => "a",
+          "description" => "desc",
+          "parameters" => %{
+            "type" => "object",
+            "properties" => %{"message" => %{"type" => "string"}},
+            "required" => ["message", "message"],
+            "additionalProperties" => false
+          }
+        }
+      ]
+    end
+
+    def invoke(_, _), do: {:error, :no_tools_installed}
+  end
+
   describe "session_token and progress opts (VP-05B)" do
     @tag spec: "VOICE-9"
     test "malformed session_token fails as :invalid_opts before resource effects" do
@@ -393,7 +565,15 @@ defmodule Arbor.VoiceTest do
             BadToolsNonJson,
             BadToolsNotList,
             BadToolsAdditionalPropertiesAbsent,
-            BadToolsAdditionalPropertiesTrue
+            BadToolsAdditionalPropertiesTrue,
+            BadToolsEmptyPropertySchema,
+            BadToolsBogusPropertyType,
+            BadToolsUnknownPropertyKey,
+            BadToolsInvertedLengthBounds,
+            BadToolsNullPropertyDescription,
+            BadToolsNullMinLength,
+            BadToolsNullMaxLength,
+            BadToolsDuplicateRequired
           ] do
         assert {:error, :invalid_opts} =
                  Voice.start_session(user_id, agent_id, Keyword.put(opts, :tool_router, router)),
@@ -434,7 +614,10 @@ defmodule Arbor.VoiceTest do
 
       [{session_pid, _}] = Registry.lookup(Arbor.Voice.Registry, key)
       refute inspect(:sys.get_status(session_pid)) =~ token
-      refute inspect(:sys.get_state(session_pid)) =~ token
+      # Proof is closed over inside consult_authority only — not a Session field.
+      state = :sys.get_state(session_pid)
+      refute Map.has_key?(state, :session_token)
+      refute inspect(state) =~ token
 
       assert :ok = Voice.stop_session(key)
     end

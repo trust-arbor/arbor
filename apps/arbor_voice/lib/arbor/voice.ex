@@ -1,12 +1,24 @@
 defmodule Arbor.Voice do
   @moduledoc """
-  Public facade for the voice-first interface (VP-04D2B lifecycle + VP-04E1
-  durable text turns + VP-04E2 speakable-only output).
+  Public facade for the voice-first interface (VP-04 lifecycle through VP-05B).
 
   Exposes a tuple-keyed session lifecycle and message-driven text turns —
   `start_session/3`, `session_status/1`, `stop_session/1`, and `text_turn/3`.
   No public operation accepts or returns a pid. Optional speech output is an
   arity-1 callback seam only; no device transport or public output API.
+
+  ## VP-05B — front-desk tools and progress (VOICE-9, VOICE-11)
+
+  Production sessions default to `Arbor.Voice.ToolRouter.FrontDesk` with a
+  static `consult_agent` catalog. Consultation runs through a Session-built
+  authority that calls the public `Arbor.Agent` facade; the optional
+  `:session_token` bearer proof is wrapped in `Arbor.Voice.Redacted` and never
+  enters router context, signals, status, or tool output.
+
+  Slow tools schedule one generation/token-fenced progress timer. Crossing
+  `:progress_threshold_ms` (default 2000 ms) offers a fixed spoken working cue
+  and emits one bounded `:voice`/`:tool_progress` signal without a backend
+  model turn.
   """
 
   alias Arbor.Voice.Config
@@ -23,6 +35,11 @@ defmodule Arbor.Voice do
   @max_tool_description_bytes 512
   @tool_decl_top_keys MapSet.new(["type", "name", "description", "parameters"])
   @parameters_top_keys MapSet.new(["type", "properties", "required", "additionalProperties"])
+  # Closed property-schema shape for static function declarations (VOICE-9).
+  @property_schema_keys MapSet.new(["type", "description", "minLength", "maxLength"])
+  @property_schema_types MapSet.new(["string"])
+  @max_property_description_bytes 512
+  @max_property_length_bound 8192
 
   @allowed_opts [
     :comms,
@@ -69,6 +86,22 @@ defmodule Arbor.Voice do
 
   Returns `{:ok, {user_id, agent_id}}` on success. Duplicate starts return
   `{:error, :already_started}`. Never returns a pid.
+
+  ## VP-05B options (closed allowlist)
+
+  * `:tool_router` — defaults to `Arbor.Voice.ToolRouter.FrontDesk` (VOICE-9
+    static `consult_agent` catalog). Explicit empty: `EmptyCatalog`.
+  * `:session_token` — optional non-empty binary human session proof (≤4096
+    bytes). Wrapped in `Redacted` before Session state; omitted Agent key when
+    absent. Malformed values → `{:error, :invalid_opts}`.
+  * `:progress_threshold_ms` — positive integer, default 2000, hard ceiling
+    30000, must not exceed the effective tool-router timeout (VOICE-11).
+    Explicit malformed → `{:error, :invalid_opts}`; malformed Application
+    config → `{:error, :invalid_config}`.
+  * `:tool_router_timeout_ms` — tool worker timeout (1..30000 ms).
+
+  Malformed tool declarations or collaborator modules fail closed before
+  resource/backend effects (`:invalid_opts` or `:invalid_config`).
   """
   @spec start_session(String.t(), String.t(), keyword()) ::
           {:ok, session_key()} | {:error, atom()}
@@ -424,7 +457,7 @@ defmodule Arbor.Voice do
          false <- MapSet.member?(names, name) do
       walk_tool_declarations(rest, [decl | acc], MapSet.put(names, name), fail)
     else
-      true -> {:error, fail}
+      # Duplicate name, schema error, or non-binary name — same closed failure.
       _ -> {:error, fail}
     end
   end
@@ -479,7 +512,7 @@ defmodule Arbor.Voice do
           not Enum.all?(prop_keys, &is_binary/1) ->
             :error
 
-          not Enum.all?(Map.values(properties), &is_map/1) ->
+          not Enum.all?(prop_keys, &bounded_nonblank_utf8?(&1, @max_tool_name_bytes)) ->
             :error
 
           not valid_required?(Map.get(params, "required", []), prop_keys) ->
@@ -487,6 +520,9 @@ defmodule Arbor.Voice do
 
           # Strict: additionalProperties must be present and exactly false.
           Map.fetch(params, "additionalProperties") != {:ok, false} ->
+            :error
+
+          not Enum.all?(Map.values(properties), &valid_property_schema?/1) ->
             :error
 
           true ->
@@ -497,8 +533,71 @@ defmodule Arbor.Voice do
 
   defp validate_parameters_schema(_), do: :error
 
+  # Closed per-property JSON-schema shape. Empty maps, missing type, unknown
+  # types/keys, explicit nulls, or unbounded bounds fail session start closed.
+  # Use Map.fetch so present null is not treated as omitted.
+  defp valid_property_schema?(schema) when is_map(schema) do
+    keys = Map.keys(schema)
+
+    cond do
+      not Enum.all?(keys, &is_binary/1) ->
+        false
+
+      not MapSet.subset?(MapSet.new(keys), @property_schema_keys) ->
+        false
+
+      true ->
+        case Map.fetch(schema, "type") do
+          {:ok, type} when is_binary(type) ->
+            MapSet.member?(@property_schema_types, type) and
+              valid_optional_property_description?(schema) and
+              valid_property_length_bounds?(schema)
+
+          _missing_or_non_binary ->
+            false
+        end
+    end
+  end
+
+  defp valid_property_schema?(_), do: false
+
+  defp valid_optional_property_description?(schema) do
+    case Map.fetch(schema, "description") do
+      :error ->
+        true
+
+      {:ok, desc} ->
+        bounded_nonblank_utf8?(desc, @max_property_description_bytes)
+    end
+  end
+
+  defp valid_property_length_bounds?(schema) when is_map(schema) do
+    with {:ok, min_l} <- optional_length_fetch(schema, "minLength"),
+         {:ok, max_l} <- optional_length_fetch(schema, "maxLength") do
+      not (is_integer(min_l) and is_integer(max_l) and min_l > max_l)
+    else
+      :error -> false
+    end
+  end
+
+  # Absent key → {:ok, nil} sentinel for "no bound". Present null/non-int → :error.
+  defp optional_length_fetch(schema, key) do
+    case Map.fetch(schema, key) do
+      :error ->
+        {:ok, nil}
+
+      {:ok, n} when is_integer(n) and n >= 0 and n <= @max_property_length_bound ->
+        {:ok, n}
+
+      {:ok, _invalid} ->
+        :error
+    end
+  end
+
   defp valid_required?(required, prop_keys) when is_list(required) do
-    Enum.all?(required, fn key -> is_binary(key) and key in prop_keys end)
+    # JSON Schema uniqueness: no duplicate entries in a present required array.
+    length(required) == length(Enum.uniq(required)) and
+      Enum.all?(required, fn key -> is_binary(key) and key in prop_keys end)
   end
 
   defp valid_required?(_, _), do: false
