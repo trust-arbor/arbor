@@ -19,11 +19,15 @@ defmodule Arbor.Voice.Session.ManagedDispatchCore do
   @outcome_dispatched "dispatched"
 
   @type candidate :: %{
-          required(String.t()) => String.t()
+          required("provider") => String.t(),
+          required("task") => String.t()
         }
 
   @type receipt :: %{
-          required(String.t()) => String.t()
+          required("provider") => String.t(),
+          required("task") => String.t(),
+          required("task_id") => String.t(),
+          required("outcome") => String.t()
         }
 
   @type t :: %{

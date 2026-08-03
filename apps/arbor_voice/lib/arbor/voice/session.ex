@@ -1007,57 +1007,55 @@ defmodule Arbor.Voice.Session do
       {:admit, next_dispatch, candidate} ->
         next_turn = %{turn | dispatch: next_dispatch}
 
-        if map_size(pending) >= ToolTaskCore.max_outstanding() do
-          case safe_send_tool_result(
-                 state,
-                 call_id,
-                 ToolTaskCore.normalize(:tool_capacity_exceeded)
-               ) do
-            :ok ->
-              enqueue_poll(%{state | turn: next_turn}, turn.generation)
-
-            {:error, _} ->
-              finish_turn_error(%{state | turn: next_turn}, next_turn, :turn_failed)
-          end
-        else
-          start_tool_owner(
-            %{state | turn: next_turn},
-            next_turn,
-            call_id,
-            name,
-            args,
-            pending,
-            candidate
-          )
-        end
+        maybe_start_tool_under_capacity(
+          %{state | turn: next_turn},
+          next_turn,
+          call_id,
+          name,
+          args,
+          pending,
+          candidate
+        )
 
       {:other, next_dispatch} ->
         next_turn = %{turn | dispatch: next_dispatch}
 
-        if map_size(pending) >= ToolTaskCore.max_outstanding() do
-          # Mark already applied in core; sync capacity output, no spawn.
-          case safe_send_tool_result(
-                 state,
-                 call_id,
-                 ToolTaskCore.normalize(:tool_capacity_exceeded)
-               ) do
-            :ok ->
-              enqueue_poll(%{state | turn: next_turn}, turn.generation)
+        # Mark already applied in core; capacity path syncs output, no spawn.
+        maybe_start_tool_under_capacity(
+          %{state | turn: next_turn},
+          next_turn,
+          call_id,
+          name,
+          args,
+          pending,
+          nil
+        )
+    end
+  end
 
-            {:error, _} ->
-              finish_turn_error(%{state | turn: next_turn}, next_turn, :turn_failed)
-          end
-        else
-          start_tool_owner(
-            %{state | turn: next_turn},
-            next_turn,
-            call_id,
-            name,
-            args,
-            pending,
-            nil
-          )
-        end
+  defp maybe_start_tool_under_capacity(
+         state,
+         turn,
+         call_id,
+         name,
+         args,
+         pending,
+         dispatch_candidate
+       ) do
+    if map_size(pending) >= ToolTaskCore.max_outstanding() do
+      case safe_send_tool_result(
+             state,
+             call_id,
+             ToolTaskCore.normalize(:tool_capacity_exceeded)
+           ) do
+        :ok ->
+          enqueue_poll(state, turn.generation)
+
+        {:error, _} ->
+          finish_turn_error(state, turn, :turn_failed)
+      end
+    else
+      start_tool_owner(state, turn, call_id, name, args, pending, dispatch_candidate)
     end
   end
 

@@ -297,6 +297,47 @@ defmodule Arbor.Comms.EngagementTranscriptTest do
     end
 
     @tag spec: "VOICE-10"
+    @tag :security_regression
+    test "security regression: partial assistant delegation receipt is rejected before persistence",
+         %{
+           user_entry: user_entry,
+           assistant_entry: assistant_entry,
+           persistence_agent: persistence_agent
+         } do
+      complete = %{
+        "transport" => "voice",
+        "backend" => "xai_realtime",
+        "mode" => "conversation",
+        "delegation_provider" => "grok",
+        "delegation_task" => "fix the bug",
+        "delegation_task_id" => "task_abc_1",
+        "delegation_outcome" => "dispatched"
+      }
+
+      for deleted_key <- [
+            "delegation_provider",
+            "delegation_task",
+            "delegation_task_id",
+            "delegation_outcome"
+          ] do
+        partial = Map.delete(complete, deleted_key)
+
+        assert {:error, {:invalid_assistant_entry, :incomplete_delegation_receipt}} =
+                 Comms.record_engagement_turn(
+                   "agent_1",
+                   "eng_1",
+                   user_entry,
+                   Map.put(assistant_entry, :metadata, partial),
+                   persistence: PersistenceAdapter
+                 )
+      end
+
+      calls = FakePersistence.calls(persistence_agent)
+      assert calls.appended == []
+      assert Map.get(calls, :ensure_session) == nil
+    end
+
+    @tag spec: "VOICE-10"
     test "maximal valid assistant receipt metadata passes; malformed delegation fields fail before persistence",
          %{
            user_entry: user_entry,

@@ -743,6 +743,13 @@ defmodule Arbor.Comms do
     :delegation_task_id,
     :delegation_outcome
   ]
+  # All-or-none assistant delegation receipt keys (string form after bounding).
+  @delegation_receipt_keys [
+    "delegation_provider",
+    "delegation_task",
+    "delegation_task_id",
+    "delegation_outcome"
+  ]
   @resolve_opts_allowlist [:engagement_store]
   @turn_opts_allowlist [:persistence]
   @load_opts_allowlist [:limit, :before_timestamp, :persistence]
@@ -787,9 +794,11 @@ defmodule Arbor.Comms do
   `metadata` admits only `"transport"`, `"backend"`, `"mode"`. Assistant
   metadata may additionally carry flat delegation receipt keys
   (`delegation_provider`, `delegation_task`, `delegation_task_id`,
-  `delegation_outcome`) with field-specific bounds. Delegation keys supplied
-  on the user entry are dropped. `"utterance_end_at"` is derived server-side
-  from the user entry's `:sent_at` and cannot be supplied by the caller.
+  `delegation_outcome`) with field-specific bounds; those four keys are
+  all-or-none (zero present, or exactly all four). Any nonempty proper
+  subset is rejected before persistence. Delegation keys supplied on the
+  user entry are dropped. `"utterance_end_at"` is derived server-side from
+  the user entry's `:sent_at` and cannot be supplied by the caller.
   Returns an explicit error for invalid input or a failed append; never
   reports success after a failed append. `opts[:persistence]` may inject a
   test double implementing the `Arbor.Persistence` session functions.
@@ -954,7 +963,8 @@ defmodule Arbor.Comms do
         end
       end)
 
-    with :ok <- validate_metadata_values(kind, bounded),
+    with :ok <- validate_delegation_receipt_shape(kind, bounded),
+         :ok <- validate_metadata_values(kind, bounded),
          :ok <- validate_metadata_size(kind, bounded) do
       {:ok, bounded}
     end
@@ -964,6 +974,21 @@ defmodule Arbor.Comms do
 
   defp metadata_keys_for(:user), do: @user_metadata_keys
   defp metadata_keys_for(:assistant), do: @assistant_metadata_keys
+
+  # Public-boundary integrity: assistant delegation receipt keys are all-or-none.
+  # Zero keys (no receipt) and exactly four keys (complete receipt) are admitted;
+  # any nonempty proper subset fails before field validation and persistence.
+  defp validate_delegation_receipt_shape(:assistant, metadata) when is_map(metadata) do
+    present = Enum.count(@delegation_receipt_keys, &Map.has_key?(metadata, &1))
+
+    case present do
+      0 -> :ok
+      4 -> :ok
+      _ -> {:error, :incomplete_delegation_receipt}
+    end
+  end
+
+  defp validate_delegation_receipt_shape(_kind, _metadata), do: :ok
 
   defp validate_metadata_values(kind, metadata) do
     Enum.reduce_while(metadata, :ok, fn {key, value}, :ok ->
