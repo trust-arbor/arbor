@@ -146,11 +146,103 @@ defmodule Arbor.Voice.Test.SessionFakes do
 
   defmodule FakeCommsSession do
     @moduledoc false
-    # resolve_user_engagement/3 only — Session does not call record_engagement_turn.
+    # Public Comms shapes used by Session: resolve_user_engagement/3 and
+    # record_engagement_turn/5 (via TranscriptRecorder).
+
+    @table :arbor_voice_fake_comms_session
+
+    def ensure_table! do
+      case :ets.whereis(@table) do
+        :undefined -> _ = :ets.new(@table, [:named_table, :public, :set])
+        _tid -> :ok
+      end
+
+      :ok
+    end
+
+    def start_recorder(opts \\ []) do
+      ensure_table!()
+
+      {:ok, agent} =
+        Arbor.Voice.Test.SessionFakes.start_owned_agent(fn ->
+          %{
+            result: Keyword.get(opts, :result, {:ok, 2}),
+            mode: Keyword.get(opts, :mode, :ok),
+            waiter: Keyword.get(opts, :waiter),
+            calls: []
+          }
+        end)
+
+      :ets.insert(@table, {:agent, agent})
+      {:ok, agent}
+    end
+
+    def record_calls(agent), do: Agent.get(agent, &Enum.reverse(&1.calls))
+
+    def set_record_result(agent, result),
+      do: Agent.update(agent, &%{&1 | result: result, mode: :ok})
+
+    def set_record_mode(agent, mode), do: Agent.update(agent, &%{&1 | mode: mode})
+
+    def set_record_waiter(agent, waiter) when is_pid(waiter),
+      do: Agent.update(agent, &%{&1 | waiter: waiter})
 
     def resolve_user_engagement(agent_id, user_id, opts) do
       store = Keyword.get(opts, :engagement_store, FakeEngagementStore)
       store.resolve_or_create(agent_id, user_id, opts)
+    end
+
+    def record_engagement_turn(agent_id, engagement_id, user_entry, assistant_entry, opts) do
+      agent = lookup_recorder!()
+
+      outcome =
+        Agent.get_and_update(agent, fn state ->
+          call = {agent_id, engagement_id, user_entry, assistant_entry, opts}
+          state = %{state | calls: [call | state.calls]}
+
+          case state.mode do
+            :ok -> {{:return, state.result}, state}
+            :error -> {{:return, {:error, :persistence_down}}, state}
+            :raise -> {{:raise, "comms record boom"}, state}
+            :throw -> {{:throw, :comms_throw}, state}
+            :exit -> {{:exit, :comms_exit}, state}
+            :block -> {{:block, state.result, state.waiter}, state}
+          end
+        end)
+
+      case outcome do
+        {:return, result} ->
+          result
+
+        {:raise, message} ->
+          raise(message)
+
+        {:throw, value} ->
+          throw(value)
+
+        {:exit, reason} ->
+          exit(reason)
+
+        {:block, result, waiter} ->
+          # Session shell blocks here until the test releases durable write.
+          if is_pid(waiter), do: send(waiter, {:record_entered, self()})
+
+          receive do
+            :release_record -> result
+          after
+            15_000 ->
+              raise "FakeCommsSession record block timed out waiting for :release_record"
+          end
+      end
+    end
+
+    defp lookup_recorder! do
+      ensure_table!()
+
+      case :ets.lookup(@table, :agent) do
+        [{:agent, agent}] -> agent
+        [] -> raise "FakeCommsSession recorder not started"
+      end
     end
   end
 
@@ -581,6 +673,172 @@ defmodule Arbor.Voice.Test.SessionFakes do
         _ ->
           %{backend: :controllable, mode: :local, input_rate: nil, output_rate: nil}
       end
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Controllable turn backend — queue-driven recv for message-driven Session
+  # ---------------------------------------------------------------------------
+
+  defmodule ControllableTurnBackend do
+    @moduledoc false
+    @behaviour Arbor.Voice.RealtimeBackend
+    # Agent-owned mutable state so test-process enqueue and ResourceOwner
+    # recv cannot race on a non-atomic ETS read-modify-write.
+    @table :arbor_voice_session_turn_backend
+
+    def ensure_table! do
+      case :ets.whereis(@table) do
+        :undefined -> _ = :ets.new(@table, [:named_table, :public, :set])
+        _tid -> :ok
+      end
+
+      :ok
+    end
+
+    def reset do
+      ensure_table!()
+
+      {:ok, agent} =
+        Arbor.Voice.Test.SessionFakes.start_owned_agent(fn -> initial_state() end)
+
+      :ets.insert(@table, {:agent, agent})
+      :ok
+    end
+
+    defp initial_state do
+      %{
+        queue: :queue.new(),
+        sent_texts: [],
+        tool_results: [],
+        tool_result_mode: :ok,
+        send_text_mode: :ok,
+        close_count: 0,
+        recv_timeouts: 0
+      }
+    end
+
+    defp agent! do
+      ensure_table!()
+
+      case :ets.lookup(@table, :agent) do
+        [{:agent, agent}] when is_pid(agent) -> agent
+        _ -> raise "ControllableTurnBackend.reset/0 must be called before use"
+      end
+    end
+
+    def enqueue(items) when is_list(items) do
+      Agent.update(agent!(), fn state ->
+        queue =
+          Enum.reduce(items, state.queue, fn item, q ->
+            :queue.in(item, q)
+          end)
+
+        %{state | queue: queue}
+      end)
+    end
+
+    def sent_texts do
+      Agent.get(agent!(), fn s -> Enum.reverse(s.sent_texts) end)
+    end
+
+    def tool_results do
+      Agent.get(agent!(), fn s -> Enum.reverse(s.tool_results) end)
+    end
+
+    def set_tool_result_mode(mode) when mode in [:ok, :error, :raise] do
+      Agent.update(agent!(), fn s -> %{s | tool_result_mode: mode} end)
+    end
+
+    def set_send_text_mode(mode) when mode in [:ok, :error] do
+      Agent.update(agent!(), fn s -> %{s | send_text_mode: mode} end)
+    end
+
+    def close_count, do: Agent.get(agent!(), & &1.close_count)
+    def recv_timeouts, do: Agent.get(agent!(), & &1.recv_timeouts)
+
+    @impl true
+    def open(_opts) do
+      _ = agent!()
+      {:ok, %{id: make_ref()}}
+    end
+
+    @impl true
+    def configure(session, _config), do: {:ok, session}
+
+    @impl true
+    def send_text(session, text) do
+      mode =
+        Agent.get_and_update(agent!(), fn s ->
+          {s.send_text_mode, %{s | sent_texts: [text | s.sent_texts]}}
+        end)
+
+      case mode do
+        :ok -> {:ok, session}
+        :error -> {:error, :send_failed}
+      end
+    end
+
+    @impl true
+    def send_audio(session, _chunk), do: {:ok, session}
+
+    @impl true
+    def send_tool_result(session, call_id, output) do
+      mode =
+        Agent.get_and_update(agent!(), fn s ->
+          {s.tool_result_mode, %{s | tool_results: [{call_id, output} | s.tool_results]}}
+        end)
+
+      case mode do
+        :ok -> {:ok, session}
+        :error -> {:error, :tool_send_failed}
+        :raise -> raise "tool result boom"
+      end
+    end
+
+    @impl true
+    def recv(session, timeout) do
+      item =
+        Agent.get_and_update(agent!(), fn s ->
+          case :queue.out(s.queue) do
+            {{:value, value}, rest} ->
+              {{:ok, value}, %{s | queue: rest}}
+
+            {:empty, _} ->
+              {:empty, s}
+          end
+        end)
+
+      case item do
+        {:ok, :timeout} ->
+          Agent.update(agent!(), fn s -> %{s | recv_timeouts: s.recv_timeouts + 1} end)
+          {:error, :timeout}
+
+        {:ok, {:error, reason}} ->
+          {:error, reason}
+
+        {:ok, event} ->
+          {:ok, session, event}
+
+        :empty ->
+          receive do
+          after
+            timeout ->
+              Agent.update(agent!(), fn s -> %{s | recv_timeouts: s.recv_timeouts + 1} end)
+              {:error, :timeout}
+          end
+      end
+    end
+
+    @impl true
+    def close(_session) do
+      Agent.update(agent!(), fn s -> %{s | close_count: s.close_count + 1} end)
+      :ok
+    end
+
+    @impl true
+    def meta(_session) do
+      %{backend: :controllable_turn, mode: :local, input_rate: nil, output_rate: nil}
     end
   end
 end

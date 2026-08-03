@@ -117,9 +117,57 @@ defmodule Arbor.VoiceTest do
                Voice.start_session(user_id, agent_id, opts ++ [backend: FakeBackend])
     end
 
-    test "no public text_turn/3" do
-      refute function_exported?(Voice, :text_turn, 3)
+    test "rejects unknown and duplicate transcript_opts keys" do
+      {user_id, agent_id} = unique_ids()
+      {opts, _} = base_opts()
+
+      assert {:error, :invalid_opts} =
+               Voice.start_session(
+                 user_id,
+                 agent_id,
+                 Keyword.put(opts, :transcript_opts, [comms: :x])
+               )
+
+      assert {:error, :invalid_opts} =
+               Voice.start_session(
+                 user_id,
+                 agent_id,
+                 Keyword.put(opts, :transcript_opts, [persistence: :a, persistence: :b])
+               )
+    end
+  end
+
+  describe "text_turn/3 facade" do
+    @tag spec: "VOICE-2,VOICE-3,VOICE-5"
+    test "exports text_turn/3, validates input, returns raw text, never exposes a pid" do
+      assert function_exported?(Voice, :text_turn, 3)
       refute function_exported?(Voice, :text_turn, 2)
+
+      # Validation without a live session.
+      assert {:error, :invalid_user_text} = Voice.text_turn("user_1", "agent_1", "")
+      assert {:error, :invalid_user_text} = Voice.text_turn("user_1", "agent_1", "   ")
+      assert {:error, :invalid_user_text} = Voice.text_turn("user_1", "agent_1", <<0xFF, 0xFE>>)
+      assert {:error, :invalid_user_text} = Voice.text_turn("user_1", "agent_1", nil)
+
+      huge = String.duplicate("a", 8193)
+      assert {:error, :invalid_user_text} = Voice.text_turn("user_1", "agent_1", huge)
+
+      assert {:error, :not_found} = Voice.text_turn("missing_u", "missing_a", "hello")
+
+      # Successful raw-text return through supervised session (FakeBackend).
+      {user_id, agent_id} = unique_ids()
+      {opts, _} = base_opts()
+      {:ok, _} = Arbor.Voice.Test.SessionFakes.FakeCommsSession.start_recorder()
+
+      assert {:ok, key} = Voice.start_session(user_id, agent_id, opts)
+      assert {:ok, raw} = Voice.text_turn(user_id, agent_id, "hello facade")
+      assert is_binary(raw)
+      assert String.trim(raw) != ""
+      refute is_pid(raw)
+      refute match?({:ok, pid} when is_pid(pid), {:ok, raw})
+      assert key == {user_id, agent_id}
+
+      assert :ok = Voice.stop_session(key)
     end
   end
 

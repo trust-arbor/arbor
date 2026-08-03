@@ -422,6 +422,74 @@ defmodule Arbor.Voice.ResourceOwnerTest do
     assert :ok = ResourceOwner.close(ro)
   end
 
+  @tag spec: "VOICE-5"
+  test "recv timeout is preserved while arbitrary backend errors remain redacted" do
+    defmodule TimeoutAwareBackend do
+      @behaviour Arbor.Voice.RealtimeBackend
+      @table :arbor_voice_timeout_aware_backend
+
+      def ensure! do
+        case :ets.whereis(@table) do
+          :undefined -> _ = :ets.new(@table, [:named_table, :public, :set])
+          _ -> :ok
+        end
+
+        :ok
+      end
+
+      def set_mode(mode) do
+        ensure!()
+        :ets.insert(@table, {:mode, mode})
+        :ok
+      end
+
+      defp mode do
+        ensure!()
+
+        case :ets.lookup(@table, :mode) do
+          [{:mode, m}] -> m
+          [] -> :event
+        end
+      end
+
+      def open(_), do: (ensure!() && {:ok, %{}})
+      def configure(s, _), do: {:ok, s}
+      def send_text(s, _), do: {:ok, s}
+      def send_audio(s, _), do: {:ok, s}
+      def send_tool_result(s, _, _), do: {:ok, s}
+
+      def recv(s, _timeout) do
+        case mode() do
+          :timeout -> {:error, :timeout}
+          :secret_error -> {:error, {:transport_secret, "leaked-credential-xyz"}}
+          :event -> {:ok, s, {:turn_done, %{text: "ok"}}}
+        end
+      end
+
+      def close(_), do: :ok
+
+      def meta(_) do
+        %{backend: :timeout_aware, mode: :local, input_rate: nil, output_rate: nil}
+      end
+    end
+
+    TimeoutAwareBackend.ensure!()
+    TimeoutAwareBackend.set_mode(:timeout)
+
+    assert {:ok, ro} = ResourceOwner.start(self(), TimeoutAwareBackend, [], @default_opts)
+    assert {:error, :timeout} = ResourceOwner.recv(ro, 50)
+
+    TimeoutAwareBackend.set_mode(:secret_error)
+    result = ResourceOwner.recv(ro, 50)
+    assert result == {:error, :backend_callback_failed}
+    refute inspect(result) =~ "leaked-credential"
+    refute inspect(result) =~ "transport_secret"
+
+    TimeoutAwareBackend.set_mode(:event)
+    assert {:ok, {:turn_done, %{text: "ok"}}} = ResourceOwner.recv(ro, 50)
+    assert :ok = ResourceOwner.close(ro)
+  end
+
   # ── cleanup failure modes ──
 
   @tag spec: "VOICE-7"

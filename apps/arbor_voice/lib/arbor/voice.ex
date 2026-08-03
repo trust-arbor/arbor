@@ -1,11 +1,12 @@
 defmodule Arbor.Voice do
   @moduledoc """
-  Public facade for the voice-first interface (VP-04D2B lifecycle slice).
+  Public facade for the voice-first interface (VP-04D2B lifecycle + VP-04E1
+  durable text turns).
 
-  Exposes a tuple-keyed session lifecycle only — `start_session/3`,
-  `session_status/1`, and `stop_session/1`. No public operation accepts or
-  returns a pid. Message turns (`text_turn/3`), transcript call-site ordering,
-  Speakable rendering, and output land in VP-04E.
+  Exposes a tuple-keyed session lifecycle and message-driven text turns —
+  `start_session/3`, `session_status/1`, `stop_session/1`, and `text_turn/3`.
+  No public operation accepts or returns a pid. Speakable rendering and
+  spoken output remain later VP-04E packets.
   """
 
   alias Arbor.Voice.Config
@@ -13,6 +14,7 @@ defmodule Arbor.Voice do
   alias Arbor.Voice.SessionSupervisor
 
   @id_max_bytes 256
+  @user_text_max_bytes 8192
 
   @allowed_opts [
     :comms,
@@ -27,8 +29,13 @@ defmodule Arbor.Voice do
     :wall_clock,
     :monotonic_clock,
     :session_budget_ms,
-    :daily_budget_ms
+    :daily_budget_ms,
+    :transcript_recorder,
+    :transcript_opts
   ]
+
+  @transcript_opts_allowlist [:persistence]
+
 
   @type session_key :: {String.t(), String.t()}
 
@@ -110,6 +117,40 @@ defmodule Arbor.Voice do
 
   def stop_session(_), do: {:error, :invalid_session_key}
 
+  @doc """
+  Run one durable text turn against a live session keyed by `{user_id, agent_id}`.
+
+  Returns `{:ok, raw_assistant_text}` only after the complete raw user/assistant
+  pair is durably recorded. Never accepts or returns a Session pid.
+
+  ## Errors
+
+  * `:not_found` — no live session for the tuple
+  * `:busy` — another turn is already in flight
+  * `:invalid_user_text` — blank, non-UTF-8, oversized, or non-binary text
+  * `:turn_failed` — backend/protocol failure (normalized)
+  * `:transcript_record_failed` — durable write failed before public success
+  * `:session_stopped` — normal stop while a turn was in flight
+  * `:budget_exhausted` — hard session timer fired during the turn
+  """
+  @spec text_turn(String.t(), String.t(), String.t()) ::
+          {:ok, String.t()} | {:error, atom()}
+  def text_turn(user_id, agent_id, user_text) do
+    with :ok <- validate_id(user_id, :user_id),
+         :ok <- validate_id(agent_id, :agent_id),
+         :ok <- validate_user_text(user_text),
+         {:ok, pid} <- lookup({user_id, agent_id}) do
+      case Session.text_turn(pid, user_text) do
+        {:ok, raw} when is_binary(raw) -> {:ok, raw}
+        {:error, reason} -> {:error, public_turn_error(reason)}
+        _other -> {:error, :turn_failed}
+      end
+    else
+      :error -> {:error, :not_found}
+      {:error, _} = error -> error
+    end
+  end
+
   # ---------------------------------------------------------------------------
   # Config construction — closed, duplicate-free option list
   # ---------------------------------------------------------------------------
@@ -122,6 +163,7 @@ defmodule Arbor.Voice do
          {:ok, backend_opts} <- resolve_backend_opts(opts),
          {:ok, ledger_opts} <- resolve_ledger_opts(opts),
          {:ok, resource_owner_opts} <- resolve_resource_owner_opts(opts),
+         {:ok, transcript_opts} <- resolve_transcript_opts(opts),
          {:ok, wall_clock} <- resolve_clock(opts, :wall_clock, &default_wall_clock/0),
          {:ok, mono_clock} <- resolve_clock(opts, :monotonic_clock, &default_monotonic_clock/0),
          {:ok, comms} <- resolve_module(opts, :comms, Arbor.Comms),
@@ -129,6 +171,8 @@ defmodule Arbor.Voice do
          {:ok, resource_owner} <-
            resolve_module(opts, :resource_owner, Arbor.Voice.ResourceOwner),
          {:ok, signals} <- resolve_module(opts, :signals, Arbor.Signals),
+         {:ok, transcript_recorder} <-
+           resolve_module(opts, :transcript_recorder, Arbor.Voice.TranscriptRecorder),
          :ok <- validate_optional_module(opts, :engagement_store) do
       {:ok,
        %{
@@ -147,7 +191,9 @@ defmodule Arbor.Voice do
          wall_clock: wall_clock,
          monotonic_clock: mono_clock,
          session_budget_ms: session_ms,
-         daily_budget_ms: daily_ms
+         daily_budget_ms: daily_ms,
+         transcript_recorder: transcript_recorder,
+         transcript_opts: transcript_opts
        }}
     end
   end
@@ -316,6 +362,28 @@ defmodule Arbor.Voice do
     end
   end
 
+  # Closed, duplicate-free, limited to :persistence. Session source-owns
+  # recorder options comms:, backend:, and mode: — callers cannot override them.
+  defp resolve_transcript_opts(opts) do
+    case Keyword.fetch(opts, :transcript_opts) do
+      :error ->
+        {:ok, []}
+
+      {:ok, t_opts} when is_list(t_opts) ->
+        if Keyword.keyword?(t_opts) and not has_duplicate_keys?(t_opts) do
+          case Enum.reject(Keyword.keys(t_opts), &(&1 in @transcript_opts_allowlist)) do
+            [] -> {:ok, t_opts}
+            _unknown -> {:error, :invalid_opts}
+          end
+        else
+          {:error, :invalid_opts}
+        end
+
+      {:ok, _} ->
+        {:error, :invalid_opts}
+    end
+  end
+
   defp resolve_clock(opts, key, default_fun) do
     case Keyword.fetch(opts, key) do
       :error ->
@@ -331,6 +399,18 @@ defmodule Arbor.Voice do
 
   defp default_wall_clock, do: DateTime.utc_now()
   defp default_monotonic_clock, do: System.monotonic_time(:millisecond)
+
+  # Byte size before UTF-8 or trim scans (DoS-safe admission).
+  defp validate_user_text(text) when is_binary(text) do
+    cond do
+      byte_size(text) > @user_text_max_bytes -> {:error, :invalid_user_text}
+      not String.valid?(text) -> {:error, :invalid_user_text}
+      String.trim(text) == "" -> {:error, :invalid_user_text}
+      true -> :ok
+    end
+  end
+
+  defp validate_user_text(_), do: {:error, :invalid_user_text}
 
   defp lookup(key) do
     case Registry.lookup(Arbor.Voice.Registry, key) do
@@ -352,4 +432,14 @@ defmodule Arbor.Voice do
   defp public_error({:shutdown, reason}), do: public_error(reason)
   defp public_error({:error, reason}), do: public_error(reason)
   defp public_error(_), do: :start_failed
+
+  defp public_turn_error(:not_found), do: :not_found
+  defp public_turn_error(:busy), do: :busy
+  defp public_turn_error(:invalid_user_text), do: :invalid_user_text
+  defp public_turn_error(:turn_failed), do: :turn_failed
+  defp public_turn_error(:transcript_record_failed), do: :transcript_record_failed
+  defp public_turn_error(:session_stopped), do: :session_stopped
+  defp public_turn_error(:budget_exhausted), do: :budget_exhausted
+  defp public_turn_error({:error, reason}), do: public_turn_error(reason)
+  defp public_turn_error(_), do: :turn_failed
 end

@@ -1,17 +1,26 @@
 defmodule Arbor.Voice.Session do
   @moduledoc false
-  # Internal supervised voice session (VP-04D2B). Not part of the public
-  # Arbor.Voice facade — callers use start_session/session_status/stop_session
-  # with the `{user_id, agent_id}` tuple key only. Never exposes a pid.
+  # Internal supervised voice session (VP-04D2B + VP-04E1 text turns). Not part
+  # of the public Arbor.Voice facade — callers use start_session /
+  # session_status / stop_session / text_turn with the `{user_id, agent_id}`
+  # tuple key only. Never exposes a pid.
 
   use GenServer
 
+  alias Arbor.Contracts.Session.UserMessage
   alias Arbor.Voice.Session.Settlement
+  alias Arbor.Voice.Session.TurnCore
 
   @cleanup_key :budget_settlement
   @registry Arbor.Voice.Registry
   # Must outlive ResourceOwner close (max close timeout + cleanup grace).
   @stop_call_timeout_ms 70_000
+  # Upper bound on backend poll window (packet: no greater than 100 ms).
+  @max_poll_window_ms 100
+  # Mirror ResourceOwner's default when resource_owner_opts omit the key.
+  @default_owner_max_recv_ms 1_000
+  # Text turns can run until hard budget; reply path clears the caller.
+  @turn_call_timeout_ms :infinity
 
   # ---------------------------------------------------------------------------
   # Internal start / call API (facade only)
@@ -36,6 +45,15 @@ defmodule Arbor.Voice.Session do
   catch
     :exit, {:noproc, _} -> {:error, :not_found}
     :exit, {:normal, _} -> :ok
+    :exit, _ -> {:error, :not_found}
+  end
+
+  @doc false
+  def text_turn(pid, user_text) when is_pid(pid) and is_binary(user_text) do
+    GenServer.call(pid, {:text_turn, user_text}, @turn_call_timeout_ms)
+  catch
+    :exit, {:noproc, _} -> {:error, :not_found}
+    :exit, {:normal, _} -> {:error, :session_stopped}
     :exit, _ -> {:error, :not_found}
   end
 
@@ -168,7 +186,15 @@ defmodule Arbor.Voice.Session do
           timer_ref: timer_ref,
           resource_owner: config.resource_owner,
           signals: config.signals,
+          wall_clock: config.wall_clock,
           monotonic_clock: config.monotonic_clock,
+          comms: config.comms,
+          transcript_recorder: config.transcript_recorder,
+          transcript_opts: config.transcript_opts,
+          # min(100, owner max_recv) so recv never exceeds a tighter owner cap.
+          poll_window_ms: derive_poll_window_ms(config.resource_owner_opts),
+          turn: nil,
+          turn_generation: 0,
           closing: false
         }
 
@@ -546,6 +572,7 @@ defmodule Arbor.Voice.Session do
   end
 
   def handle_call(:stop, _from, %{lifecycle: :ready, closing: false} = state) do
+    state = reply_turn_caller(state, {:error, :session_stopped})
     state = %{state | closing: true}
     state = cancel_hard_timer(state)
     {state, _settled?} = settle_and_close(state, :stop)
@@ -556,16 +583,39 @@ defmodule Arbor.Voice.Session do
     {:reply, {:error, :not_found}, state}
   end
 
+  def handle_call({:text_turn, user_text}, from, %{lifecycle: :ready, closing: false} = state)
+      when is_binary(user_text) do
+    cond do
+      match?(%{}, state.turn) ->
+        {:reply, {:error, :busy}, state}
+
+      true ->
+        case begin_text_turn(state, from, user_text) do
+          {:ok, next_state} ->
+            # Poll asynchronously so stop / hard timeout remain serviceable.
+            {:noreply, next_state}
+
+          {:error, reason} ->
+            {:reply, {:error, reason}, state}
+        end
+    end
+  end
+
+  def handle_call({:text_turn, _user_text}, _from, state) do
+    {:reply, {:error, :not_found}, state}
+  end
+
   def handle_call(_request, _from, state) do
     {:reply, {:error, :unsupported}, state}
   end
 
   # ---------------------------------------------------------------------------
-  # Hard timeout
+  # Hard timeout + turn polling
   # ---------------------------------------------------------------------------
 
   @impl true
   def handle_info(:hard_timeout, %{lifecycle: :ready, closing: false} = state) do
+    state = reply_turn_caller(state, {:error, :budget_exhausted})
     state = %{state | closing: true, timer_ref: nil}
     {state, _settled?} = settle_and_close(state, :budget_exhausted)
     {:stop, :normal, state}
@@ -573,7 +623,245 @@ defmodule Arbor.Voice.Session do
 
   def handle_info(:hard_timeout, state), do: {:noreply, state}
 
+  def handle_info({:turn_poll, generation}, %{lifecycle: :ready, closing: false} = state) do
+    case state.turn do
+      %{generation: ^generation} = turn ->
+        {:noreply, poll_turn(state, turn)}
+
+      _stale_or_absent ->
+        {:noreply, state}
+    end
+  end
+
+  def handle_info({:turn_poll, _generation}, state), do: {:noreply, state}
+
   def handle_info(_msg, state), do: {:noreply, state}
+
+  # ---------------------------------------------------------------------------
+  # Text turn — intake in handle_call, poll in handle_info
+  # ---------------------------------------------------------------------------
+
+  defp begin_text_turn(state, from, user_text) do
+    with {:ok, wall} <- read_wall_clock_utc(state.wall_clock),
+         {:ok, started_ms} <- read_monotonic_ms(state.monotonic_clock) do
+      user_message =
+        user_text
+        |> UserMessage.from_voice(sent_at: wall, sender_id: state.user_id)
+        |> UserMessage.with_engagement(state.engagement_id)
+
+      case safe_send_text(state, user_text) do
+        :ok ->
+          generation = state.turn_generation + 1
+
+          turn = %{
+            generation: generation,
+            from: from,
+            user_message: user_message,
+            core: TurnCore.new(),
+            started_ms: started_ms
+          }
+
+          next = %{state | turn: turn, turn_generation: generation}
+          _ = Process.send(self(), {:turn_poll, generation}, [])
+          {:ok, next}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    else
+      {:error, :invalid_clock} ->
+        {:error, :turn_failed}
+    end
+  end
+
+  defp safe_send_text(state, user_text) do
+    try do
+      case state.resource_owner.send_text(state.owner, user_text) do
+        :ok -> :ok
+        {:error, _reason} -> {:error, :turn_failed}
+        _other -> {:error, :turn_failed}
+      end
+    catch
+      _kind, _reason ->
+        {:error, :turn_failed}
+    end
+  end
+
+  defp poll_turn(state, turn) do
+    case safe_recv(state) do
+      {:ok, event} ->
+        apply_turn_event(state, turn, event)
+
+      {:error, :timeout} ->
+        # Normal empty window — schedule another poll without ending the turn.
+        enqueue_poll(state, turn.generation)
+
+      {:error, _reason} ->
+        finish_turn_error(state, turn, :turn_failed)
+    end
+  end
+
+  defp safe_recv(state) do
+    window_ms = state.poll_window_ms
+
+    try do
+      case state.resource_owner.recv(state.owner, window_ms) do
+        {:ok, event} -> {:ok, event}
+        {:error, :timeout} -> {:error, :timeout}
+        {:error, _reason} -> {:error, :turn_failed}
+        _other -> {:error, :turn_failed}
+      end
+    catch
+      _kind, _reason ->
+        {:error, :turn_failed}
+    end
+  end
+
+  # Packet ceiling is 100 ms; never request more than the owner's configured
+  # max_recv_timeout_ms (ResourceOwner rejects oversized recv with :invalid_timeout).
+  defp derive_poll_window_ms(resource_owner_opts) when is_list(resource_owner_opts) do
+    owner_cap =
+      case Keyword.get(resource_owner_opts, :max_recv_timeout_ms) do
+        ms when is_integer(ms) and ms > 0 -> ms
+        _ -> @default_owner_max_recv_ms
+      end
+
+    min(@max_poll_window_ms, owner_cap)
+  end
+
+  defp derive_poll_window_ms(_), do: @max_poll_window_ms
+
+  defp apply_turn_event(state, turn, event) do
+    case TurnCore.reduce(turn.core, event) do
+      {:continue, core} ->
+        next_turn = %{turn | core: core}
+        enqueue_poll(%{state | turn: next_turn}, turn.generation)
+
+      {:done, raw_text} ->
+        complete_turn(state, turn, raw_text)
+
+      {:reject_tool, core, call_id} ->
+        next_turn = %{turn | core: core}
+        next_state = %{state | turn: next_turn}
+
+        case safe_send_tool_result(next_state, call_id, TurnCore.no_tools_installed_output()) do
+          :ok ->
+            enqueue_poll(next_state, turn.generation)
+
+          {:error, _reason} ->
+            finish_turn_error(next_state, next_turn, :turn_failed)
+        end
+
+      {:error, :protocol_error} ->
+        finish_turn_error(state, turn, :turn_failed)
+    end
+  end
+
+  defp safe_send_tool_result(state, call_id, output) do
+    try do
+      case state.resource_owner.send_tool_result(state.owner, call_id, output) do
+        :ok -> :ok
+        {:error, _reason} -> {:error, :turn_failed}
+        _other -> {:error, :turn_failed}
+      end
+    catch
+      _kind, _reason ->
+        {:error, :turn_failed}
+    end
+  end
+
+  defp complete_turn(state, turn, raw_text) do
+    case record_transcript(state, turn, raw_text) do
+      :ok ->
+        duration_ms = turn_duration_ms(state, turn)
+        safe_emit_turn_completed(state, duration_ms)
+        reply_and_clear_turn(state, turn, {:ok, raw_text})
+
+      {:error, :transcript_record_failed} ->
+        safe_emit(state, :"transcript.record_failed")
+        reply_and_clear_turn(state, turn, {:error, :transcript_record_failed})
+    end
+  end
+
+  defp record_transcript(state, turn, raw_text) do
+    case read_wall_clock_utc(state.wall_clock) do
+      {:ok, completed_at} ->
+        opts =
+          state.transcript_opts
+          |> Keyword.put(:comms, state.comms)
+          |> Keyword.put(:backend, state.backend)
+          |> Keyword.put(:mode, state.mode)
+
+        try do
+          case state.transcript_recorder.record(
+                 state.agent_id,
+                 turn.user_message,
+                 raw_text,
+                 completed_at,
+                 opts
+               ) do
+            {:ok, _n} -> :ok
+            {:error, _reason} -> {:error, :transcript_record_failed}
+            _other -> {:error, :transcript_record_failed}
+          end
+        catch
+          _kind, _reason ->
+            {:error, :transcript_record_failed}
+        end
+
+      {:error, :invalid_clock} ->
+        {:error, :transcript_record_failed}
+    end
+  end
+
+  defp turn_duration_ms(state, turn) do
+    case read_monotonic_ms(state.monotonic_clock) do
+      {:ok, now_ms} when is_integer(turn.started_ms) and now_ms >= turn.started_ms ->
+        now_ms - turn.started_ms
+
+      {:ok, _now_ms} ->
+        0
+
+      {:error, _} ->
+        0
+    end
+  end
+
+  defp finish_turn_error(state, turn, reason) do
+    reply_and_clear_turn(state, turn, {:error, reason})
+  end
+
+  defp reply_and_clear_turn(state, turn, reply) do
+    safe_reply(turn.from, reply)
+    clear_turn(state)
+  end
+
+  # Reply any retained turn caller, then bump generation so stale polls die.
+  defp reply_turn_caller(%{turn: %{from: from}} = state, reply) do
+    safe_reply(from, reply)
+    clear_turn(state)
+  end
+
+  defp reply_turn_caller(state, _reply), do: state
+
+  defp clear_turn(state) do
+    # Increment generation so any queued {:turn_poll, old} is rejected.
+    generation = state.turn_generation + 1
+    %{state | turn: nil, turn_generation: generation}
+  end
+
+  defp enqueue_poll(state, generation) do
+    _ = Process.send(self(), {:turn_poll, generation}, [])
+    state
+  end
+
+  defp safe_reply(from, reply) do
+    try do
+      GenServer.reply(from, reply)
+    catch
+      _kind, _reason -> :ok
+    end
+  end
 
   # ---------------------------------------------------------------------------
   # Close path — exclusive settlement authority
@@ -685,6 +973,25 @@ defmodule Arbor.Voice.Session do
     end
   end
 
+  defp safe_emit_turn_completed(state, duration_ms)
+       when is_integer(duration_ms) and duration_ms >= 0 do
+    payload = %{
+      user_id: state.user_id,
+      agent_id: state.agent_id,
+      engagement_id: state.engagement_id,
+      backend: state.backend,
+      mode: state.mode,
+      duration_ms: duration_ms
+    }
+
+    try do
+      _ = state.signals.emit(:voice, :turn_completed, payload, [])
+      :ok
+    catch
+      _kind, _reason -> :ok
+    end
+  end
+
   # ---------------------------------------------------------------------------
   # Status redaction for crash reports
   # ---------------------------------------------------------------------------
@@ -700,6 +1007,9 @@ defmodule Arbor.Voice.Session do
     end
   end
 
+  # Never expose raw transcript, audio, backend events, persistence errors,
+  # opaque handles, caller refs, or collaborator closures. Private live turn
+  # state may retain a bounded transcript while a turn is in flight.
   defp redacted_genserver_state(state) when is_map(state) do
     %{
       lifecycle: Map.get(state, :lifecycle),

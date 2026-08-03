@@ -779,6 +779,11 @@ defmodule Arbor.Voice.ResourceOwner do
     {:ok, %{state | session: Redacted.new(new_session)}, event}
   end
 
+  # Preserve only a backend recv timeout so Session can continue finite
+  # polling. Every other returned backend reason stays redacted.
+  defp validate_backend_result({:error, :timeout}, :recv, _state),
+    do: {:error, :timeout}
+
   defp validate_backend_result({:error, _reason}, _operation, _state),
     do: {:error, :backend_callback_failed}
 
