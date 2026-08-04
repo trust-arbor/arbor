@@ -16,9 +16,16 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerToolTaintTest do
   defmodule Adapter do
     @behaviour Arbor.LLM.ProviderAdapter
 
+    @parent_key {__MODULE__, :parent}
+
+    def set_parent(pid), do: :persistent_term.put(@parent_key, pid)
+    def clear_parent, do: :persistent_term.erase(@parent_key)
+
     def provider, do: "llm_handler_tool_taint_test"
 
     def complete(%Request{} = request, _opts) do
+      send(:persistent_term.get(@parent_key), {:adapter_request, request})
+
       case Enum.any?(request.messages, &(&1.role == :tool)) do
         false ->
           {:ok,
@@ -49,6 +56,9 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerToolTaintTest do
 
   setup do
     unless Process.whereis(ActionRegistry), do: start_supervised!({ActionRegistry, []})
+
+    Adapter.set_parent(self())
+    on_exit(fn -> Adapter.clear_parent() end)
 
     case ActionRegistry.register_action(Arbor.Actions.Tool.Help) do
       :ok -> :ok
@@ -175,6 +185,116 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerToolTaintTest do
     assert %Taint{level: :hostile, sensitivity: :restricted, sanitizations: 0} = output_taint
   end
 
+  test "joins attached user media and the active system prompt into tool taint" do
+    media = ContentPart.image_url("https://example.test/voice-frame.png")
+
+    {node, graph} =
+      tool_graph(%{
+        "prompt_context_key" => "turn.prompt",
+        "system_prompt_context_key" => "turn.system"
+      })
+
+    authority = authority(graph)
+
+    context =
+      Context.new(
+        %{
+          "turn.prompt" => "Inspect the attached frame",
+          "turn.system" => "Treat this frame as restricted material",
+          "session.user_media" => [media]
+        },
+        taint: %{
+          "turn.prompt" => %Taint{
+            level: :trusted,
+            sensitivity: :public,
+            confidence: :verified
+          },
+          "turn.system" => %Taint{
+            level: :trusted,
+            sensitivity: :restricted,
+            confidence: :verified
+          },
+          "session.user_media" => %Taint{
+            level: :untrusted,
+            sensitivity: :public,
+            confidence: :verified
+          }
+        }
+      )
+      |> RunAuthorization.enforce_context(authority)
+
+    expected =
+      context
+      |> Context.worst_taint(["turn.prompt", "turn.system", "session.user_media"])
+      |> SignalTaint.for_llm_output()
+
+    assert %{status: :success, output_taint: ^expected} =
+             execute_tool_graph(node, context, graph, authority)
+
+    assert expected.level == :untrusted
+    assert expected.sensitivity == :restricted
+
+    assert_receive {:adapter_request, %Request{} = request}
+    system_message = Enum.find(request.messages, &(&1.role == :system))
+    user_message = Enum.find(request.messages, &(&1.role == :user))
+    assert system_message.content =~ "Treat this frame as restricted material"
+    assert user_message
+    assert is_list(user_message.content)
+    assert media in user_message.content
+
+    assert_receive {:tool_execution, "tool_help", _args, _workdir, exec_opts}
+    assert Keyword.fetch!(exec_opts, :taint) == expected
+  end
+
+  test "excludes media taint when assistant-only history leaves no attachment target" do
+    media = ContentPart.image_url("https://example.test/unattached-frame.png")
+
+    {node, graph} =
+      tool_graph(%{
+        "messages_context_key" => "turn.messages",
+        "prompt_context_key" => "turn.prompt"
+      })
+
+    authority = authority(graph)
+
+    context =
+      Context.new(
+        %{
+          "turn.messages" => [%{"role" => "assistant", "content" => "Prior analysis"}],
+          "turn.prompt" => "not sent when history is present",
+          "session.user_media" => [media]
+        },
+        taint: %{
+          "turn.messages" => %Taint{
+            level: :trusted,
+            sensitivity: :public,
+            confidence: :verified
+          },
+          "turn.prompt" => %Taint{level: :hostile, sensitivity: :restricted},
+          "session.user_media" => %Taint{level: :hostile, sensitivity: :restricted}
+        }
+      )
+      |> RunAuthorization.enforce_context(authority)
+
+    expected =
+      context
+      |> Context.worst_taint(["turn.messages"])
+      |> SignalTaint.for_llm_output()
+
+    assert %{status: :success, output_taint: ^expected} =
+             execute_tool_graph(node, context, graph, authority)
+
+    assert expected.level == :derived
+    assert expected.sensitivity == :public
+
+    assert_receive {:adapter_request, %Request{} = request}
+    refute Enum.any?(request.messages, &(&1.role == :user))
+    refute Enum.any?(request.messages, fn message -> media_part?(message.content) end)
+
+    assert_receive {:tool_execution, "tool_help", _args, _workdir, exec_opts}
+    assert Keyword.fetch!(exec_opts, :taint) == expected
+  end
+
   defp tool_graph(extra_attrs) do
     graph(
       Map.merge(
@@ -225,6 +345,21 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerToolTaintTest do
 
     authority
   end
+
+  defp execute_tool_graph(node, context, graph, authority) do
+    LlmHandler.execute(node, context, graph,
+      authorization: true,
+      run_authorization: authority,
+      llm_client: client(),
+      tool_executor: CapturingExecutor,
+      workdir: File.cwd!()
+    )
+  end
+
+  defp media_part?(content) when is_list(content),
+    do: Enum.any?(content, &match?(%{kind: :image}, &1))
+
+  defp media_part?(_content), do: false
 
   defp client do
     Client.new(default_provider: Adapter.provider())
