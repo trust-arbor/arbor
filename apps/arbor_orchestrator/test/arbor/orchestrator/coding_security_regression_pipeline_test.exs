@@ -3,36 +3,11 @@ defmodule Arbor.Orchestrator.CodingSecurityRegressionPipelineTest do
 
   alias Arbor.Contracts.Coding.Plan
   alias Arbor.Orchestrator.CodingPlan.{ActionCatalog, BudgetPolicy, Compiler}
+  alias Arbor.Orchestrator.CodingPlanTestActionCatalog
 
   @moduletag :fast
   @moduletag :coding_change_pipeline
   @fixture_run_deadline_unix_ms 4_102_444_800_000
-
-  @action_modules [
-    Arbor.Actions.Acp.StartSession,
-    Arbor.Actions.Acp.SendMessage,
-    Arbor.Actions.Acp.SessionStatus,
-    Arbor.Actions.Acp.CloseSession,
-    Arbor.Actions.Coding.DesignCheckpoint.Parse,
-    Arbor.Actions.Coding.DesignCheckpoint.Capture,
-    Arbor.Actions.Coding.DesignCheckpoint.Open,
-    Arbor.Actions.Coding.DesignCheckpoint.Await,
-    Arbor.Actions.Coding.DesignCheckpoint.Load,
-    Arbor.Actions.Coding.SecurityRegression.Validate,
-    Arbor.Actions.Coding.ReviewTree.Read,
-    Arbor.Actions.Coding.ReviewTree.Search,
-    Arbor.Actions.Coding.SubmitReviewReport,
-    Arbor.Actions.Coding.Workspace.Acquire,
-    Arbor.Actions.Coding.Workspace.Inspect,
-    Arbor.Actions.Coding.Workspace.Release,
-    Arbor.Actions.Coding.Workspace.CommittedChange,
-    Arbor.Actions.Coding.Workspace.RecoverySummary,
-    Arbor.Actions.Coding.ReviewedCommit,
-    Arbor.Actions.Git.Commit,
-    Arbor.Actions.Git.PR,
-    Arbor.Actions.Council.ReviewChange,
-    Arbor.Actions.Consensus.DecideReview
-  ]
 
   defmodule FakeActionsExecutor do
     @moduledoc false
@@ -64,6 +39,10 @@ defmodule Arbor.Orchestrator.CodingSecurityRegressionPipelineTest do
          ownership: "owned",
          active: true
        }}
+    end
+
+    defp dispatch("coding_dependency_baseline_check", _args, _scenario, _state) do
+      {:ok, %{matched: true}}
     end
 
     defp dispatch("acp_start_session", _args, _scenario, _state) do
@@ -510,7 +489,8 @@ defmodule Arbor.Orchestrator.CodingSecurityRegressionPipelineTest do
     template_path =
       Application.app_dir(:arbor_orchestrator, "priv/pipelines/coding-change-v1.dot")
 
-    {:ok, action_catalog} = ActionCatalog.snapshot(modules: @action_modules)
+    {:ok, action_catalog} =
+      ActionCatalog.snapshot(modules: CodingPlanTestActionCatalog.modules())
 
     %{
       template_source: File.read!(template_path),

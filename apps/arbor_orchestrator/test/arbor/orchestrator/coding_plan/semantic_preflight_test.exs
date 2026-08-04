@@ -13,43 +13,15 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
 
   alias Arbor.Orchestrator.Dot.Parser
   alias Arbor.Orchestrator.IR.Compiler, as: IRCompiler
+  alias Arbor.Orchestrator.CodingPlanTestActionCatalog
 
   @moduletag :fast
-
-  @action_modules [
-    Arbor.Actions.Acp.StartSession,
-    Arbor.Actions.Acp.SendMessage,
-    Arbor.Actions.Acp.SessionStatus,
-    Arbor.Actions.Acp.CloseSession,
-    Arbor.Actions.Coding.Workspace.Acquire,
-    Arbor.Actions.Coding.Workspace.Inspect,
-    Arbor.Actions.Coding.Workspace.Release,
-    Arbor.Actions.Coding.Workspace.CommittedChange,
-    Arbor.Actions.Coding.Workspace.RecoverySummary,
-    Arbor.Actions.Coding.DesignCheckpoint.Parse,
-    Arbor.Actions.Coding.DesignCheckpoint.Capture,
-    Arbor.Actions.Coding.DesignCheckpoint.Open,
-    Arbor.Actions.Coding.DesignCheckpoint.Await,
-    Arbor.Actions.Coding.DesignCheckpoint.Load,
-    Arbor.Actions.Coding.SecurityRegression.Validate,
-    Arbor.Actions.Coding.CrossApp.Validate,
-    Arbor.Actions.Mix.Compile,
-    Arbor.Actions.Mix.Test,
-    Arbor.Actions.Coding.ReviewedCommit,
-    Arbor.Actions.Git.Commit,
-    Arbor.Actions.Git.PR,
-    Arbor.Actions.Coding.ReviewTree.Read,
-    Arbor.Actions.Coding.ReviewTree.Search,
-    Arbor.Actions.Coding.SubmitReviewReport,
-    Arbor.Actions.Council.ReviewChange,
-    Arbor.Actions.Consensus.DecideReview
-  ]
 
   setup_all do
     template_path =
       Application.app_dir(:arbor_orchestrator, "priv/pipelines/coding-change-v1.dot")
 
-    {:ok, catalog} = ActionCatalog.snapshot(modules: @action_modules)
+    {:ok, catalog} = ActionCatalog.snapshot(modules: CodingPlanTestActionCatalog.modules())
 
     %{template_source: File.read!(template_path), action_catalog: catalog}
   end
