@@ -126,11 +126,11 @@ Notes:
 - `arbor_gateway` moved L6→L7 in the 2026-06-17 sweep — it now deps
   **arbor_actions** (MCP tool execution via `Arbor.Actions.authorize_and_execute`;
   acyclic — actions does not dep gateway).
-- `arbor_voice` (new, VP-02) sits at L8 — its highest in-umbrella dep is
-  `arbor_orchestrator`/`arbor_agent` (L7). It's the headless
-  engagement-substrate consumer for voice (`Arbor.Voice.RealtimeBackend`
-  behaviour only in this slice; `Arbor.Voice.Session` and the xAI backend
-  land in VP-03/VP-04).
+- `arbor_voice` sits at L8 — its highest in-umbrella deps remain
+  `arbor_orchestrator`/`arbor_agent` (L7). It also directly depends on
+  **arbor_ai/security/trust** for source-owned realtime route classification,
+  exact capability authorization, disclosure validation, and egress policy;
+  these are compile-time facade calls, not optional runtime bridges.
 - The 2026-06-17 sweep also added (all acyclic, no level change): `arbor_agent`
   → arbor_llm; `arbor_consensus` → arbor_security; `arbor_dashboard` →
   arbor_security (was already transitive).
@@ -324,3 +324,7 @@ reducer; compile caught it (first found 2026-07-15).
 <!-- applied-learning: conserve-the-local-agent-s-tokens-for-planning-design-delegation-and-review -->
 <a id="applied-learning-conserve-the-local-agent-s-tokens-for-planning-design-delegation-and-review"></a>
 **Conserve the local agent's tokens for planning, design, delegation, and review.** As a rule of thumb, delegate substantive implementation to Grok through `coding_produce_reviewable_change`, then have the local agent inspect the diff, verify behavior, and request corrections. This is a heuristic, not a prohibition: make direct edits when delegation is blocked, the change is genuinely tiny, or local intervention is the clearest way to finish safely. The goal is to spend local-agent context on decision quality and integration judgment rather than routine code production (requested 2026-07-09).
+
+<!-- applied-learning: fault-tests-with-retained-owners-need-recovery-first-teardown -->
+<a id="applied-learning-fault-tests-with-retained-owners-need-recovery-first-teardown"></a>
+**Fault tests with retained owners need recovery-first teardown.** Register teardown before inducing a permanent cleanup fault; in `on_exit`, restore the failed collaborator/gate first, request normal shutdown, await owner death, and only then use a deterministic supervisor stop as a last resort. Otherwise an assertion failure leaves a forever-retrying owner that contaminates later tests (found 2026-08-04 in Voice provisional-cap cleanup coverage).

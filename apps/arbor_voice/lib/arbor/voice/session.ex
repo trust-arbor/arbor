@@ -8,7 +8,10 @@ defmodule Arbor.Voice.Session do
   use GenServer
 
   alias Arbor.Contracts.Session.UserMessage
+  alias Arbor.Identifiers
+  alias Arbor.Voice.EgressAuthority
   alias Arbor.Voice.Redacted
+  alias Arbor.Voice.ResourceOwner
   alias Arbor.Voice.Session.ManagedDispatchCore
   alias Arbor.Voice.Session.Settlement
   alias Arbor.Voice.Session.ToolTaskCore
@@ -17,8 +20,13 @@ defmodule Arbor.Voice.Session do
 
   @cleanup_key :budget_settlement
   @registry Arbor.Voice.Registry
-  # Must outlive ResourceOwner close (max close timeout + cleanup grace).
-  @stop_call_timeout_ms 70_000
+  @owner_death_confirmation_timeout_ms 5_000
+  @stop_call_scheduling_margin_ms 5_000
+  # Covers the owner's maximum close call, positive death confirmation, and
+  # scheduler delay at the public caller boundary.
+  @stop_call_timeout_ms ResourceOwner.close_call_timeout_ms() +
+                          @owner_death_confirmation_timeout_ms +
+                          @stop_call_scheduling_margin_ms
   # Upper bound on backend poll window (packet: no greater than 100 ms).
   @max_poll_window_ms 100
   # Mirror ResourceOwner's default when resource_owner_opts omit the key.
@@ -32,6 +40,7 @@ defmodule Arbor.Voice.Session do
   # Dedicated tool-call owner Task.Supervisor name (VP-04E3). Not speech/cleanup.
   # Registered via Application Supervisor.child_spec — no wrapper module.
   @tool_task_supervisor Arbor.Voice.ToolTaskSupervisor
+  @cleanup_pending_stop_reason {:shutdown, :cleanup_pending}
   # Deterministic non-sensitive hard-timeout notice (VOICE-24).
   @budget_exhaustion_notice "This voice session has reached its time limit. Continue on your screen."
   # Source-owned progress filler (VP-05B / VOICE-11). Not model-authored.
@@ -53,6 +62,10 @@ defmodule Arbor.Voice.Session do
     :exit, {:noproc, _} -> {:error, :not_found}
     :exit, _ -> {:error, :not_found}
   end
+
+  @doc false
+  @spec stop_call_timeout_ms() :: pos_integer()
+  def stop_call_timeout_ms, do: @stop_call_timeout_ms
 
   @doc false
   def stop(pid) when is_pid(pid) do
@@ -90,16 +103,20 @@ defmodule Arbor.Voice.Session do
   end
 
   defp start_transaction(config) do
-    case resolve_engagement(config) do
-      {:ok, engagement_id} ->
-        after_engagement(config, engagement_id)
-
-      {:error, reason} ->
-        {:error, reason}
+    with {:ok, route_context} <-
+           EgressAuthority.resolve_backend_route(config.backend, config.ai_module),
+         voice_session_id <- Identifiers.generate_session_id(),
+         true <- EgressAuthority.canonical_session_id?(voice_session_id),
+         :ok <- EgressAuthority.authenticate_human(route_context, config),
+         {:ok, engagement_id} <- resolve_engagement(config) do
+      after_engagement(config, engagement_id, route_context, voice_session_id)
+    else
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :start_failed}
     end
   end
 
-  defp after_engagement(config, engagement_id) do
+  defp after_engagement(config, engagement_id, route_context, voice_session_id) do
     # Fixed tool authority after engagement is known; raw proof stays
     # inside the closure only (VP-05B/VP-05C). Built before resource/backend effects.
     tool_authority = build_tool_authority(config, engagement_id)
@@ -110,6 +127,8 @@ defmodule Arbor.Voice.Session do
           config,
           engagement_id,
           tool_authority,
+          route_context,
+          voice_session_id,
           reserved_ms,
           start_ms,
           settlement
@@ -124,24 +143,51 @@ defmodule Arbor.Voice.Session do
          config,
          engagement_id,
          tool_authority,
+         route_context,
+         voice_session_id,
          reserved_ms,
          start_ms,
          settlement
        ) do
-    case start_resource_owner(config) do
-      {:ok, owner} ->
-        after_owner(
-          config,
-          engagement_id,
-          tool_authority,
-          reserved_ms,
-          start_ms,
-          settlement,
-          owner
-        )
+    case EgressAuthority.prepare_session_authority(
+           route_context,
+           config,
+           voice_session_id,
+           reserved_ms
+         ) do
+      {:ok, egress_authority} ->
+        handoff = EgressAuthority.owner_handoff(egress_authority)
+
+        case start_resource_owner(config, handoff) do
+          {:ok, owner} ->
+            owner_ref = Process.monitor(owner)
+
+            after_owner(
+              config,
+              engagement_id,
+              tool_authority,
+              voice_session_id,
+              egress_authority,
+              reserved_ms,
+              start_ms,
+              settlement,
+              owner,
+              owner_ref
+            )
+
+          {:error, reason} ->
+            # Until start/5 confirms the handoff, Session retains direct
+            # idempotent route cleanup authority.
+            _ =
+              egress_authority
+              |> EgressAuthority.route_cleanup()
+              |> run_fallback_cleanup(3)
+
+            _ = settle_release(settlement, config)
+            {:error, reason}
+        end
 
       {:error, reason} ->
-        # No owner started — settle release directly (pre-registration path).
         _ = settle_release(settlement, config)
         {:error, reason}
     end
@@ -151,10 +197,13 @@ defmodule Arbor.Voice.Session do
          config,
          engagement_id,
          tool_authority,
+         voice_session_id,
+         egress_authority,
          reserved_ms,
          start_ms,
          settlement,
-         owner
+         owner,
+         owner_ref
        ) do
     case register_settlement_cleanup(config, owner, settlement) do
       :ok ->
@@ -162,10 +211,13 @@ defmodule Arbor.Voice.Session do
           config,
           engagement_id,
           tool_authority,
+          voice_session_id,
+          egress_authority,
           reserved_ms,
           start_ms,
           settlement,
-          owner
+          owner,
+          owner_ref
         )
 
       {:error, reason} ->
@@ -173,7 +225,14 @@ defmodule Arbor.Voice.Session do
         # always settle release directly. A raise/throw/exit from close must
         # not skip release — no cleanup was registered, so direct release is
         # the only settlement authority. Never both after registration.
-        _ = safe_close_resource_owner(config.resource_owner, owner)
+        _ =
+          startup_owner_unwind(
+            config.resource_owner,
+            owner,
+            owner_ref,
+            egress_authority
+          )
+
         _ = settle_release(settlement, config)
         {:error, reason}
     end
@@ -183,10 +242,13 @@ defmodule Arbor.Voice.Session do
          config,
          engagement_id,
          tool_authority,
+         voice_session_id,
+         egress_authority,
          reserved_ms,
          start_ms,
          settlement,
-         owner
+         owner,
+         owner_ref
        ) do
     case configure_and_read_meta(config, owner) do
       {:ok, backend, mode} ->
@@ -194,17 +256,28 @@ defmodule Arbor.Voice.Session do
           config,
           engagement_id,
           tool_authority,
+          voice_session_id,
+          egress_authority,
           reserved_ms,
           start_ms,
           settlement,
           owner,
+          owner_ref,
           backend,
           mode
         )
 
       {:error, reason} ->
         # After registration: close owner; cleanup is sole settlement authority.
-        _ = safe_close_resource_owner(config.resource_owner, owner)
+        _ =
+          startup_owner_unwind(
+            config.resource_owner,
+            owner,
+            owner_ref,
+            egress_authority,
+            startup_settlement_cleanup(settlement)
+          )
+
         {:error, reason}
     end
   end
@@ -213,10 +286,13 @@ defmodule Arbor.Voice.Session do
          config,
          engagement_id,
          tool_authority,
+         voice_session_id,
+         egress_authority,
          reserved_ms,
          start_ms,
          settlement,
          owner,
+         owner_ref,
          backend,
          mode
        ) do
@@ -229,8 +305,12 @@ defmodule Arbor.Voice.Session do
           user_id: config.user_id,
           agent_id: config.agent_id,
           session_key: config.session_key,
+          voice_session_id: voice_session_id,
           engagement_id: engagement_id,
           owner: owner,
+          owner_ref: owner_ref,
+          # Private fallback authority, used only after confirmed owner death.
+          egress_authority: Redacted.new(egress_authority),
           settlement: settlement,
           reserved_ms: reserved_ms,
           start_ms: start_ms,
@@ -260,6 +340,9 @@ defmodule Arbor.Voice.Session do
           # min(100, owner max_recv) so recv never exceeds a tighter owner cap.
           poll_window_ms: derive_poll_window_ms(config.resource_owner_opts),
           turn: nil,
+          # A disclosure minted before owner registration/activation failed.
+          # Retained only until fatal close confirms owner death and retries it.
+          provisional_turn_authority: nil,
           turn_generation: 0,
           closing: false
         }
@@ -272,7 +355,15 @@ defmodule Arbor.Voice.Session do
       {:error, _reason} ->
         _ = Process.cancel_timer(timer_ref)
         # After registration: close owner only; do not settle independently.
-        _ = safe_close_resource_owner(config.resource_owner, owner)
+        _ =
+          startup_owner_unwind(
+            config.resource_owner,
+            owner,
+            owner_ref,
+            egress_authority,
+            startup_settlement_cleanup(settlement)
+          )
+
         {:error, :start_failed}
     end
   end
@@ -492,12 +583,13 @@ defmodule Arbor.Voice.Session do
 
   defp utc_day_and_ms_to_midnight(_), do: :error
 
-  defp start_resource_owner(config) do
+  defp start_resource_owner(config, handoff) do
     try do
       case config.resource_owner.start(
              self(),
              config.backend,
              config.backend_opts,
+             handoff,
              config.resource_owner_opts
            ) do
         {:ok, owner} when is_pid(owner) ->
@@ -749,12 +841,31 @@ defmodule Arbor.Voice.Session do
   end
 
   def handle_call(:stop, _from, %{lifecycle: :ready, closing: false} = state) do
+    turn = state.turn
     state = cancel_pending_tools_with_outputs(state)
-    state = reply_turn_caller(state, {:error, :session_stopped})
-    state = %{state | closing: true}
-    state = cancel_hard_timer(state)
-    {state, _settled?} = settle_and_close(state, :stop)
-    {:stop, :normal, :ok, state}
+
+    if is_map(turn), do: _ = finalize_turn_authority(state, turn)
+
+    state = state |> Map.put(:closing, true) |> cancel_hard_timer()
+    _ = safe_fence_and_drain(state, :session)
+    {state, cleanup_result} = settle_and_close(state)
+
+    case cleanup_result do
+      :ok ->
+        state =
+          if is_map(turn) do
+            safe_reply(turn.from, {:error, :session_stopped})
+            clear_turn(state)
+          else
+            state
+          end
+
+        safe_emit(state, :stop)
+        {:stop, :normal, :ok, state}
+
+      {:error, _reason} ->
+        {:stop, @cleanup_pending_stop_reason, state}
+    end
   end
 
   def handle_call(:stop, _from, state) do
@@ -772,8 +883,14 @@ defmodule Arbor.Voice.Session do
           # Poll asynchronously so stop / hard timeout remain serviceable.
           {:noreply, next_state}
 
-        {:error, reason} ->
-          {:reply, {:error, reason}, state}
+        {:error, reason, next_state} ->
+          {:reply, {:error, reason}, next_state}
+
+        {:fatal, reason, next_state} ->
+          {:stop, :normal, {:error, reason}, next_state}
+
+        {:fatal_no_reply, next_state} ->
+          {:stop, @cleanup_pending_stop_reason, next_state}
       end
     end
   end
@@ -792,17 +909,34 @@ defmodule Arbor.Voice.Session do
 
   @impl true
   def handle_info(:hard_timeout, %{lifecycle: :ready, closing: false} = state) do
-    # 1) Kill pending tools + best-effort cancel outputs, then reply caller.
+    turn = state.turn
     state = cancel_pending_tools_with_outputs(state)
-    state = reply_turn_caller(state, {:error, :budget_exhausted})
-    state = %{state | closing: true, timer_ref: nil}
-    # 2) Render/guard/offer the deterministic exhaustion notice (never raw).
-    speech_output = offer_speech(state, @budget_exhaustion_notice)
-    # 3) Exclusive settlement + close; disposition is audit metadata only.
-    {state, _settled?} =
-      settle_and_close(state, :budget_exhausted, %{speech_output: speech_output})
 
-    {:stop, :normal, state}
+    if is_map(turn), do: _ = finalize_turn_authority(state, turn)
+
+    state = %{state | closing: true, timer_ref: nil}
+    _ = safe_fence_and_drain(state, :session)
+    {state, cleanup_result} = settle_and_close(state)
+
+    case cleanup_result do
+      :ok ->
+        state =
+          if is_map(turn) do
+            safe_reply(turn.from, {:error, :budget_exhausted})
+            clear_turn(state)
+          else
+            state
+          end
+
+        # Presentation and all observable terminal output happen only after the
+        # fence, disclosure revocation, route cleanup, settlement, and close.
+        speech_output = offer_speech(state, @budget_exhaustion_notice)
+        safe_emit(state, :budget_exhausted, %{speech_output: speech_output})
+        {:stop, :normal, state}
+
+      {:error, _reason} ->
+        {:stop, @cleanup_pending_stop_reason, state}
+    end
   end
 
   def handle_info(:hard_timeout, state), do: {:noreply, state}
@@ -818,6 +952,10 @@ defmodule Arbor.Voice.Session do
   end
 
   def handle_info({:turn_poll, _generation}, state), do: {:noreply, state}
+
+  def handle_info(:terminate_after_close, state) do
+    {:stop, Map.get(state, :terminal_stop_reason, :normal), state}
+  end
 
   def handle_info(
         {:tool_outcome, generation, call_id, token, output},
@@ -841,6 +979,14 @@ defmodule Arbor.Voice.Session do
   def handle_info({:tool_progress, _gen, _id, _token}, state), do: {:noreply, state}
 
   def handle_info(
+        {:DOWN, ref, :process, owner, _reason},
+        %{owner_ref: ref, owner: owner} = state
+      ) do
+    state = handle_resource_owner_down(state)
+    {:stop, Map.get(state, :terminal_stop_reason, :normal), state}
+  end
+
+  def handle_info(
         {:DOWN, mon, :process, _pid, _reason},
         %{lifecycle: :ready, closing: false} = state
       )
@@ -855,44 +1001,265 @@ defmodule Arbor.Voice.Session do
 
   def handle_info(_msg, state), do: {:noreply, state}
 
+  defp handle_resource_owner_down(state) do
+    turn = state.turn
+
+    state =
+      state
+      |> cancel_pending_tools_without_outputs()
+      |> cancel_hard_timer()
+      |> Map.put(:closing, true)
+
+    cleanup_result =
+      cleanup_results([
+        turn_cleanup_result(turn),
+        provisional_turn_cleanup_result(state),
+        state.egress_authority
+        |> Redacted.value()
+        |> EgressAuthority.route_cleanup()
+        |> run_fallback_cleanup(3),
+        normalize_settlement_cleanup(settle_after_owner_death(state))
+      ])
+
+    case cleanup_result do
+      :ok ->
+        state =
+          if is_map(turn) do
+            safe_reply(turn.from, {:error, :turn_failed})
+            clear_turn(state)
+          else
+            state
+          end
+
+        safe_emit(state, :stop)
+        %{state | lifecycle: :closed}
+
+      {:error, _reason} ->
+        state
+        |> Map.put(:lifecycle, :closed)
+        |> Map.put(:terminal_stop_reason, @cleanup_pending_stop_reason)
+    end
+  end
+
+  defp redacted_turn_cleanup(%Redacted{} = authority) do
+    case Redacted.value(authority) do
+      %{cleanup: cleanup} when is_function(cleanup, 0) -> cleanup
+      turn_authority -> EgressAuthority.turn_cleanup(turn_authority)
+    end
+  end
+
+  defp redacted_turn_cleanup(_), do: nil
+
+  defp run_fallback_cleanup(nil, _attempts), do: :ok
+
+  defp run_fallback_cleanup(cleanup, attempts)
+       when is_function(cleanup, 0) and is_integer(attempts) and attempts > 0 do
+    case EgressAuthority.run_cleanup(cleanup) do
+      :ok -> :ok
+      {:error, _} -> run_fallback_cleanup(cleanup, attempts - 1)
+    end
+  end
+
+  defp run_fallback_cleanup(_cleanup, _attempts), do: {:error, :cleanup_failed}
+
+  defp turn_cleanup_result(%{authority: authority}) do
+    authority
+    |> redacted_turn_cleanup()
+    |> run_fallback_cleanup(3)
+  end
+
+  defp turn_cleanup_result(_turn), do: :ok
+
+  defp provisional_turn_cleanup_result(%{provisional_turn_authority: authority}) do
+    authority
+    |> redacted_turn_cleanup()
+    |> run_fallback_cleanup(3)
+  end
+
+  defp provisional_turn_cleanup_result(_state), do: :ok
+
+  defp normalize_settlement_cleanup(:ok), do: :ok
+  defp normalize_settlement_cleanup(_), do: {:error, :cleanup_failed}
+
+  defp cleanup_results(results) do
+    if Enum.all?(results, &(&1 == :ok)), do: :ok, else: {:error, :cleanup_failed}
+  end
+
+  defp settle_after_owner_death(state) do
+    now_ms =
+      case read_monotonic_ms(state.monotonic_clock) do
+        {:ok, value} -> value
+        # Consume is armed in every ready state. If the injected clock is no
+        # longer trustworthy after owner death, conservatively charge the full
+        # reservation in the same retained epoch instead of undercharging.
+        {:error, _} -> state.start_ms + state.reserved_ms
+      end
+
+    try do
+      Settlement.settle(state.settlement, now_ms)
+    catch
+      _, _ -> {:error, :settlement_failed}
+    end
+  end
+
   # ---------------------------------------------------------------------------
   # Text turn — intake in handle_call, poll in handle_info
   # ---------------------------------------------------------------------------
 
   defp begin_text_turn(state, from, user_text) do
     with {:ok, wall} <- read_wall_clock_utc(state.wall_clock),
-         {:ok, started_ms} <- read_monotonic_ms(state.monotonic_clock) do
+         {:ok, started_ms} <- read_monotonic_ms(state.monotonic_clock),
+         {:ok, turn_authority} <- prepare_turn_authority(state) do
       user_message =
         user_text
         |> UserMessage.from_voice(sent_at: wall, sender_id: state.user_id)
         |> UserMessage.with_engagement(state.engagement_id)
 
-      case safe_send_text(state, user_text) do
+      generation = state.turn_generation + 1
+
+      turn = %{
+        generation: generation,
+        from: from,
+        user_message: user_message,
+        core: TurnCore.new(),
+        started_ms: started_ms,
+        turn_id: turn_authority.turn_id,
+        authority: Redacted.new(turn_authority),
+        # Sole outstanding-tool authority (not TurnCore).
+        pending: %{},
+        # One-dispatch slot + at most one receipt (VP-05D1 / VOICE-10).
+        dispatch: ManagedDispatchCore.new()
+      }
+
+      active_state = %{state | turn: turn, turn_generation: generation}
+
+      case safe_send_text(active_state, user_text) do
         :ok ->
-          generation = state.turn_generation + 1
-
-          turn = %{
-            generation: generation,
-            from: from,
-            user_message: user_message,
-            core: TurnCore.new(),
-            started_ms: started_ms,
-            # Sole outstanding-tool authority (not TurnCore).
-            pending: %{},
-            # One-dispatch slot + at most one receipt (VP-05D1 / VOICE-10).
-            dispatch: ManagedDispatchCore.new()
-          }
-
-          next = %{state | turn: turn, turn_generation: generation}
           _ = Process.send(self(), {:turn_poll, generation}, [])
-          {:ok, next}
+          {:ok, active_state}
 
-        {:error, reason} ->
-          {:error, reason}
+        {:error, _reason} ->
+          {next_state, cleanup_result} = close_failed_turn(active_state, turn, :turn_failed)
+
+          case cleanup_result do
+            :ok -> {:fatal, :turn_failed, next_state}
+            {:error, _reason} -> {:fatal_no_reply, next_state}
+          end
       end
     else
       {:error, :invalid_clock} ->
-        {:error, :turn_failed}
+        {:error, :turn_failed, state}
+
+      {:error, :turn_failed, :recoverable} ->
+        {:error, :turn_failed, state}
+
+      {:error, :turn_failed, {:fatal, provisional_turn_authority}} ->
+        {next_state, cleanup_result} =
+          close_session_without_turn(state, :turn_failed, provisional_turn_authority)
+
+        case cleanup_result do
+          :ok -> {:fatal, :turn_failed, next_state}
+          {:error, _reason} -> {:fatal_no_reply, next_state}
+        end
+
+      _ ->
+        {:error, :turn_failed, state}
+    end
+  end
+
+  defp prepare_turn_authority(state) do
+    session_authority = Redacted.value(state.egress_authority)
+    turn_id = Identifiers.generate_id("turn_")
+
+    case EgressAuthority.issue_turn(session_authority, turn_id) do
+      {:ok, turn_authority} ->
+        case register_turn_cleanup(state, turn_authority) do
+          :ok ->
+            case safe_activate_turn(state, turn_authority) do
+              :ok ->
+                {:ok, turn_authority}
+
+              {:error, _reason} ->
+                unwind_unpublished_turn(state, turn_authority, true)
+            end
+
+          {:error, _reason} ->
+            unwind_unpublished_turn(state, turn_authority, false)
+        end
+
+      {:error, _reason} ->
+        {:error, :turn_failed, :recoverable}
+    end
+  end
+
+  defp register_turn_cleanup(_state, %{kind: :local}), do: :ok
+
+  defp register_turn_cleanup(state, %{kind: :external} = turn_authority) do
+    key = EgressAuthority.turn_cleanup_key(turn_authority)
+    cleanup = EgressAuthority.turn_cleanup(turn_authority)
+
+    try do
+      case state.resource_owner.register_cleanup(state.owner, key, cleanup) do
+        :ok -> :ok
+        _ -> {:error, :turn_failed}
+      end
+    catch
+      _, _ -> {:error, :turn_failed}
+    end
+  end
+
+  defp safe_activate_turn(state, turn_authority) do
+    lease = EgressAuthority.turn_lease(turn_authority)
+
+    try do
+      case state.resource_owner.activate_turn(state.owner, lease) do
+        :ok -> :ok
+        _ -> {:error, :turn_failed}
+      end
+    catch
+      _, _ -> {:error, :turn_failed}
+    end
+  end
+
+  defp unwind_unpublished_turn(state, turn_authority, registered?) do
+    turn_id = turn_authority.turn_id
+    cleanup_key = EgressAuthority.turn_cleanup_key(turn_authority)
+    cleanup = EgressAuthority.turn_cleanup(turn_authority)
+
+    fence_result =
+      if registered? do
+        safe_fence_and_drain(state, turn_id)
+      else
+        :ok
+      end
+
+    cleanup_result = EgressAuthority.run_cleanup(cleanup)
+
+    remove_result =
+      if registered? and cleanup_result == :ok do
+        safe_remove_turn_cleanup(state, turn_authority)
+      else
+        :ok
+      end
+
+    if fence_result == :ok and cleanup_result == :ok and remove_result == :ok do
+      {:error, :turn_failed, :recoverable}
+    else
+      ownership =
+        cond do
+          cleanup_result == :ok -> :complete
+          registered? -> :owner
+          true -> :session
+        end
+
+      provisional = %{
+        authority: turn_authority,
+        cleanup_key: cleanup_key,
+        cleanup: cleanup,
+        ownership: ownership
+      }
+
+      {:error, :turn_failed, {:fatal, Redacted.new(provisional)}}
     end
   end
 
@@ -1332,6 +1699,21 @@ defmodule Arbor.Voice.Session do
     end
   end
 
+  # ResourceOwner death is already the physical no-more-effects barrier, so
+  # only terminate local tool workers. No backend output can be queued.
+  defp cancel_pending_tools_without_outputs(state) do
+    case state.turn do
+      %{pending: pending, generation: generation} = turn
+      when is_map(pending) and map_size(pending) > 0 ->
+        _ = cancel_all_progress_timers(pending, generation)
+        _ = cancel_all_siblings(pending)
+        %{state | turn: %{turn | pending: %{}}}
+
+      _ ->
+        state
+    end
+  end
+
   defp cancel_all_progress_timers(pending, generation) when is_map(pending) do
     Enum.each(pending, fn {call_id, entry} ->
       _ = cancel_and_flush_progress(entry, generation, call_id)
@@ -1370,23 +1752,31 @@ defmodule Arbor.Voice.Session do
   end
 
   defp complete_turn(state, turn, raw_text) do
-    dispatch = Map.get(turn, :dispatch) || ManagedDispatchCore.new()
-    presented = ManagedDispatchCore.select_raw_assistant(dispatch, raw_text)
+    case finalize_turn_authority(state, turn) do
+      :healthy ->
+        dispatch = Map.get(turn, :dispatch) || ManagedDispatchCore.new()
+        presented = ManagedDispatchCore.select_raw_assistant(dispatch, raw_text)
 
-    case record_transcript(state, turn, presented) do
-      :ok ->
-        # Speech is presentation only: never rewrite durable/public raw text.
-        # Rendering runs only after exact transcript success and never falls
-        # back to raw when Speakable/output fails.
-        speech_output = offer_speech(state, presented)
-        duration_ms = turn_duration_ms(state, turn)
-        safe_emit_turn_completed(state, duration_ms, speech_output)
-        reply_and_clear_turn(state, turn, {:ok, presented})
+        case record_transcript(state, turn, presented) do
+          :ok ->
+            # Speech is presentation only: never rewrite durable/public raw text.
+            # Rendering runs only after exact transcript success and never falls
+            # back to raw when Speakable/output fails.
+            speech_output = offer_speech(state, presented)
+            duration_ms = turn_duration_ms(state, turn)
+            safe_emit_turn_completed(state, duration_ms, speech_output)
+            reply_and_clear_turn(state, turn, {:ok, presented})
 
-      {:error, :transcript_record_failed} ->
-        # Recorder failure: no render, no output callback.
-        safe_emit(state, :"transcript.record_failed")
-        reply_and_clear_turn(state, turn, {:error, :transcript_record_failed})
+          {:error, :transcript_record_failed} ->
+            # Recorder failure: no render, no output callback.
+            safe_emit(state, :"transcript.record_failed")
+            reply_and_clear_turn(state, turn, {:error, :transcript_record_failed})
+        end
+
+      _quarantine ->
+        {state, cleanup_result} = quarantine_turn(state)
+        if cleanup_result == :ok, do: safe_reply(turn.from, {:error, :turn_failed})
+        state
     end
   end
 
@@ -1558,32 +1948,131 @@ defmodule Arbor.Voice.Session do
     # sibling (no admitted id silently dropped). Then reply and clear.
     from = Map.get(turn, :from)
     state = cancel_pending_tools_with_outputs(%{state | turn: turn})
-    if from, do: safe_reply(from, {:error, reason})
-    clear_turn(state)
+
+    case finalize_turn_authority(state, turn) do
+      :healthy ->
+        if from, do: safe_reply(from, {:error, reason})
+        clear_turn(state)
+
+      _quarantine ->
+        {state, cleanup_result} = quarantine_turn(state)
+        if cleanup_result == :ok, do: safe_reply(turn.from, {:error, reason})
+        state
+    end
+  end
+
+  defp finalize_turn_authority(state, turn) do
+    turn_authority = turn.authority |> Redacted.value()
+    fence_result = safe_fence_and_drain(state, turn.turn_id)
+
+    cleanup_result =
+      turn_authority
+      |> EgressAuthority.turn_cleanup()
+      |> EgressAuthority.run_cleanup()
+
+    remove_result =
+      if cleanup_result == :ok do
+        safe_remove_turn_cleanup(state, turn_authority)
+      else
+        {:error, :cleanup_retained}
+      end
+
+    case {fence_result, cleanup_result, remove_result} do
+      {:ok, :ok, :ok} -> :healthy
+      {{:error, :owner_poisoned}, :ok, :ok} -> :poisoned
+      _ -> :fatal
+    end
+  end
+
+  defp safe_fence_and_drain(state, scope) do
+    try do
+      case state.resource_owner.fence_and_drain(state.owner, scope) do
+        :ok -> :ok
+        {:error, :owner_poisoned} -> {:error, :owner_poisoned}
+        _ -> {:error, :fence_failed}
+      end
+    catch
+      _, _ -> {:error, :fence_failed}
+    end
+  end
+
+  defp safe_remove_turn_cleanup(_state, %{kind: :local}), do: :ok
+
+  defp safe_remove_turn_cleanup(state, turn_authority) do
+    key = EgressAuthority.turn_cleanup_key(turn_authority)
+
+    try do
+      case state.resource_owner.remove_cleanup(state.owner, key) do
+        :ok -> :ok
+        _ -> {:error, :cleanup_remove_failed}
+      end
+    catch
+      _, _ -> {:error, :cleanup_remove_failed}
+    end
+  end
+
+  defp quarantine_turn(state) do
+    state =
+      state
+      |> Map.put(:closing, true)
+      |> cancel_hard_timer()
+
+    _ = safe_fence_and_drain(state, :session)
+    {state, cleanup_result} = settle_and_close(state)
+    _ = Process.send(self(), :terminate_after_close, [])
+
+    next_state =
+      case cleanup_result do
+        :ok ->
+          safe_emit(state, :stop)
+
+          state
+          |> clear_turn()
+          |> Map.put(:lifecycle, :closed)
+
+        {:error, _reason} ->
+          state
+          |> Map.put(:lifecycle, :closed)
+          |> Map.put(:terminal_stop_reason, @cleanup_pending_stop_reason)
+      end
+
+    {next_state, cleanup_result}
+  end
+
+  defp close_failed_turn(state, turn, _reason) do
+    _ = finalize_turn_authority(state, turn)
+    quarantine_turn(state)
+  end
+
+  defp close_session_without_turn(state, _reason, provisional_turn_authority) do
+    state =
+      state
+      |> Map.put(:closing, true)
+      |> Map.put(:provisional_turn_authority, provisional_turn_authority)
+      |> cancel_hard_timer()
+
+    _ = safe_fence_and_drain(state, :session)
+    {state, cleanup_result} = settle_and_close(state)
+
+    next_state =
+      case cleanup_result do
+        :ok ->
+          safe_emit(state, :stop)
+          %{state | lifecycle: :closed}
+
+        {:error, _reason} ->
+          state
+          |> Map.put(:lifecycle, :closed)
+          |> Map.put(:terminal_stop_reason, @cleanup_pending_stop_reason)
+      end
+
+    {next_state, cleanup_result}
   end
 
   defp reply_and_clear_turn(state, turn, reply) do
     safe_reply(turn.from, reply)
     clear_turn(state)
   end
-
-  # Reply any retained turn caller. Pending tools should already be cancelled
-  # by stop/exhaust paths; still kill any residual owners without double-queue.
-  defp reply_turn_caller(%{turn: %{from: from} = turn} = state, reply) do
-    pending = Map.get(turn, :pending, %{})
-
-    if is_map(pending) and map_size(pending) > 0 do
-      # Safety net: cancel + queue if a path forgot cancel_pending first.
-      _ = cancel_all_siblings(pending)
-      ids = Map.keys(pending)
-      _ = queue_cancel_outputs(state, ids)
-    end
-
-    safe_reply(from, reply)
-    clear_turn(state)
-  end
-
-  defp reply_turn_caller(state, _reply), do: state
 
   defp clear_turn(state) do
     # Increment generation so any queued {:turn_poll, old} / tool_outcome is rejected.
@@ -1612,11 +2101,14 @@ defmodule Arbor.Voice.Session do
   # remove the cleanup then close the owner. On uncertain/failed settle, leave
   # the cleanup installed and close the owner so its bounded replay remains
   # authoritative. Never both remove cleanup and independently release.
-  # `extra_payload` is merge-only bounded audit metadata (e.g. speech_output).
-  defp settle_and_close(state, signal_type, extra_payload \\ %{})
+  defp settle_and_close(state) do
+    case ensure_provisional_cleanup_owned(state) do
+      {:ok, state} -> do_settle_and_close(state)
+      {:error, state} -> {state, {:error, :cleanup_failed}}
+    end
+  end
 
-  defp settle_and_close(state, signal_type, extra_payload)
-       when is_map(extra_payload) do
+  defp do_settle_and_close(state) do
     settle_result =
       case read_monotonic_ms(state.monotonic_clock) do
         {:ok, now_ms} ->
@@ -1637,15 +2129,62 @@ defmodule Arbor.Voice.Session do
         # Settlement.settle/2 is idempotent at :done, but exclusive authority
         # still prefers a single path once :done is observed.
         _ = safe_remove_cleanup(state)
-        _ = safe_close_owner(state)
-        safe_emit(state, signal_type, extra_payload)
-        {state, true}
+        {state, close_owner_with_fallback(state, false)}
 
       {:error, _reason} ->
         # Leave cleanup installed; owner close is the sole settlement authority.
-        _ = safe_close_owner(state)
-        safe_emit(state, signal_type, extra_payload)
-        {state, false}
+        {state, close_owner_with_fallback(state, true)}
+    end
+  end
+
+  defp ensure_provisional_cleanup_owned(%{provisional_turn_authority: nil} = state),
+    do: {:ok, state}
+
+  defp ensure_provisional_cleanup_owned(%{provisional_turn_authority: provisional} = state) do
+    case Redacted.value(provisional) do
+      %{ownership: ownership} when ownership in [:owner, :complete] ->
+        {:ok, state}
+
+      %{ownership: :session, cleanup_key: key, cleanup: cleanup} = retained
+      when is_function(cleanup, 0) ->
+        # Exercise the configured facade first so its observability and normal
+        # ownership path remain intact. The concrete same-library adoption call
+        # then verifies exact ownership or uses ResourceOwner's one reserved
+        # emergency slot when ordinary registration failed.
+        _ = safe_register_provisional_cleanup(state, key, cleanup)
+
+        case ResourceOwner.adopt_provisional_cleanup(state.owner, key, cleanup) do
+          :ok ->
+            retained = %{retained | ownership: :owner}
+            {:ok, %{state | provisional_turn_authority: Redacted.new(retained)}}
+
+          _ ->
+            complete_provisional_cleanup(state, retained, cleanup)
+        end
+
+      _malformed ->
+        {:error, state}
+    end
+  catch
+    _, _ -> {:error, state}
+  end
+
+  defp safe_register_provisional_cleanup(state, key, cleanup) do
+    try do
+      state.resource_owner.register_cleanup(state.owner, key, cleanup)
+    catch
+      _, _ -> {:error, :cleanup_registration_failed}
+    end
+  end
+
+  defp complete_provisional_cleanup(state, retained, cleanup) do
+    case run_fallback_cleanup(cleanup, 3) do
+      :ok ->
+        retained = %{retained | ownership: :complete}
+        {:ok, %{state | provisional_turn_authority: Redacted.new(retained)}}
+
+      {:error, _reason} ->
+        {:error, state}
     end
   end
 
@@ -1671,18 +2210,106 @@ defmodule Arbor.Voice.Session do
     end
   end
 
-  defp safe_close_owner(state) do
-    safe_close_resource_owner(state.resource_owner, state.owner)
-  end
-
   # Catch-safe owner close used by both ready-path settle_and_close and
   # pre-registration unwind. Never lets close raise/throw/exit skip a
   # subsequent direct settle_release on the pre-registration path.
   defp safe_close_resource_owner(resource_owner, owner) do
     try do
-      resource_owner.close(owner)
+      case resource_owner.close(owner) do
+        :ok -> :ok
+        {:error, :owner_timeout} -> {:error, :owner_timeout}
+        _ -> {:error, :owner_unavailable}
+      end
     catch
-      _kind, _reason -> :error
+      _kind, _reason -> {:error, :owner_unavailable}
+    end
+  end
+
+  defp startup_owner_unwind(
+         resource_owner,
+         owner,
+         owner_ref,
+         egress_authority,
+         settlement_cleanup \\ nil
+       ) do
+    close_result = safe_close_resource_owner(resource_owner, owner)
+
+    case owner_close_outcome(owner, owner_ref, close_result) do
+      :dead ->
+        _ =
+          egress_authority
+          |> EgressAuthority.route_cleanup()
+          |> run_fallback_cleanup(3)
+
+        run_fallback_cleanup(settlement_cleanup, 3)
+
+      :pending ->
+        {:error, :owner_pending}
+    end
+  end
+
+  defp startup_settlement_cleanup(settlement) do
+    fn ->
+      try do
+        Settlement.settle(settlement, settlement.start_ms)
+      catch
+        _, _ -> {:error, :settlement_failed}
+      end
+    end
+  end
+
+  defp close_owner_with_fallback(state, settlement_fallback?) do
+    close_result = safe_close_resource_owner(state.resource_owner, state.owner)
+
+    case owner_close_outcome(state.owner, state.owner_ref, close_result) do
+      :dead ->
+        settlement_result =
+          if settlement_fallback? do
+            state |> settle_after_owner_death() |> normalize_settlement_cleanup()
+          else
+            :ok
+          end
+
+        cleanup_results([
+          turn_cleanup_result(state.turn),
+          provisional_turn_cleanup_result(state),
+          state.egress_authority
+          |> Redacted.value()
+          |> EgressAuthority.route_cleanup()
+          |> run_fallback_cleanup(3),
+          settlement_result
+        ])
+
+      :pending ->
+        {:error, :owner_pending}
+    end
+  end
+
+  defp owner_close_outcome(owner, owner_ref, close_result)
+       when is_pid(owner) and is_reference(owner_ref) do
+    wait_ms = if close_result == :ok, do: @owner_death_confirmation_timeout_ms, else: 0
+
+    if await_owner_down(owner, owner_ref, wait_ms) do
+      :dead
+    else
+      :pending
+    end
+  end
+
+  defp owner_close_outcome(_owner, _owner_ref, _close_result), do: :pending
+
+  defp await_owner_down(owner, owner_ref, wait_ms) do
+    receive do
+      {:DOWN, ^owner_ref, :process, ^owner, _reason} ->
+        true
+    after
+      wait_ms ->
+        if Process.alive?(owner) do
+          false
+        else
+          _ = Process.demonitor(owner_ref, [:flush])
+          true
+        end
     end
   end
 

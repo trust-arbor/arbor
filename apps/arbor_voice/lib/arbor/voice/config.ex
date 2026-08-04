@@ -458,4 +458,64 @@ defmodule Arbor.Voice.Config do
     |> Application.get_env(:orchestrator_module, Arbor.Orchestrator)
     |> validate_orchestrator_module()
   end
+
+  # ---------------------------------------------------------------------------
+  # Realtime egress collaborators (VP-05D2A2P3)
+  # ---------------------------------------------------------------------------
+
+  @security_exports [
+    authorize: 4,
+    authorize_and_issue_delivery_receipt: 4,
+    consume_delivery_receipt: 3,
+    grant_capability_id: 1,
+    issue_disclosure_capability_id: 1,
+    revoke: 1,
+    uri_registered?: 1,
+    validate_disclosure_capability: 3
+  ]
+  @trust_exports [authorize_egress: 3]
+  @ai_exports [egress_tier_for: 2]
+
+  @doc "Source-owned Security facade collaborator for realtime egress authority."
+  @spec security_module() :: {:ok, module()} | {:error, :invalid_config}
+  def security_module do
+    :arbor_voice
+    |> Application.get_env(:security_module, Arbor.Security)
+    |> validate_facade_module(@security_exports)
+  end
+
+  @doc "Source-owned Trust facade collaborator for realtime egress policy."
+  @spec trust_module() :: {:ok, module()} | {:error, :invalid_config}
+  def trust_module do
+    :arbor_voice
+    |> Application.get_env(:trust_module, Arbor.Trust)
+    |> validate_facade_module(@trust_exports)
+  end
+
+  @doc "Source-owned AI facade collaborator for realtime route classification."
+  @spec ai_module() :: {:ok, module()} | {:error, :invalid_config}
+  def ai_module do
+    :arbor_voice
+    |> Application.get_env(:ai_module, Arbor.AI)
+    |> validate_facade_module(@ai_exports)
+  end
+
+  defp validate_facade_module(mod, required_exports)
+       when is_atom(mod) and not is_nil(mod) and is_list(required_exports) do
+    try do
+      exports = mod.module_info(:exports)
+
+      if Enum.all?(required_exports, &(&1 in exports)) do
+        {:ok, mod}
+      else
+        {:error, :invalid_config}
+      end
+    rescue
+      _ -> {:error, :invalid_config}
+    catch
+      _kind, _reason -> {:error, :invalid_config}
+    end
+  end
+
+  defp validate_facade_module(_mod, _required_exports), do: {:error, :invalid_config}
 end

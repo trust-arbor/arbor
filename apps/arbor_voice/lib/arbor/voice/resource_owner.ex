@@ -4,12 +4,14 @@ defmodule Arbor.Voice.ResourceOwner do
   cleanup obligations.
 
   The owner owns the backend session handle and executes all backend callbacks
-  in its own process. Session-bound cleanups execute under a dedicated
-  `Task.Supervisor` and are bounded by an absolute close deadline.
+  in its own process. Close callers have a bounded wait, while unresolved
+  backend and authority cleanup remains owned and is retried in the background.
   """
 
   use GenServer
 
+  alias Arbor.Identifiers
+  alias Arbor.Voice.EgressAuthority
   alias Arbor.Voice.Redacted
 
   @supervisor Arbor.Voice.ResourceSupervisor
@@ -29,6 +31,9 @@ defmodule Arbor.Voice.ResourceOwner do
   @max_cleanup_per_attempt_timeout_ms 60_000
   @shutdown_grace_ms 5_000
   @shutdown_timeout_ms @max_close_timeout_ms + @shutdown_grace_ms
+  @retry_base_ms 50
+  @retry_max_ms 2_000
+  @provisional_cleanup_tag :voice_provisional_cleanup
 
   @defaults [
     close_timeout_ms: @default_close_timeout_ms,
@@ -53,14 +58,41 @@ defmodule Arbor.Voice.ResourceOwner do
   @call_timeout_ms @shutdown_timeout_ms
 
   @doc false
+  @spec close_call_timeout_ms() :: pos_integer()
+  def close_call_timeout_ms, do: @call_timeout_ms
+
+  @doc false
   def start(owner_pid, backend_module, backend_opts \\ [], opts \\ [])
 
   def start(owner_pid, backend_module, backend_opts, opts)
       when is_pid(owner_pid) and is_atom(backend_module) do
+    # Compatibility is deliberately local-only. External backends must use
+    # start/5 with authenticated route authority; there is no allow default.
+    handoff = %{
+      authority: %{
+        kind: :local,
+        route: :none,
+        session_id: Identifiers.generate_session_id()
+      },
+      initial_cleanup: nil
+    }
+
+    start(owner_pid, backend_module, backend_opts, handoff, opts)
+  end
+
+  def start(_owner_pid, _backend_module, _backend_opts, _opts),
+    do: {:error, :invalid_owner_config}
+
+  @doc false
+  @spec start(pid(), module(), keyword(), map(), keyword()) ::
+          {:ok, pid()} | {:error, atom() | tuple()}
+  def start(owner_pid, backend_module, backend_opts, handoff, opts)
+      when is_pid(owner_pid) and is_atom(backend_module) and is_map(handoff) do
     if owner_pid != self() do
       {:error, :foreign_caller}
     else
       with :ok <- validate_backend_opts(backend_opts),
+           :ok <- validate_handoff(handoff),
            {:ok, config} <- validate_opts(opts),
            supervisor_opt <- Keyword.get(opts, :supervisor, @supervisor),
            cleanup_supervisor_opt <-
@@ -68,7 +100,8 @@ defmodule Arbor.Voice.ResourceOwner do
            {:ok, supervisor} <- resolve_supervisor(supervisor_opt),
            {:ok, cleanup_supervisor} <-
              resolve_cleanup_supervisor(cleanup_supervisor_opt),
-           :ok <- validate_backend_module(backend_module) do
+           :ok <- validate_backend_module(backend_module),
+           :ok <- validate_backend_handoff(backend_module, handoff) do
         spec = %{
           id: make_ref(),
           start:
@@ -77,6 +110,7 @@ defmodule Arbor.Voice.ResourceOwner do
                owner_pid,
                backend_module,
                Redacted.new(backend_opts),
+               Redacted.new(handoff),
                config,
                supervisor,
                cleanup_supervisor
@@ -100,7 +134,7 @@ defmodule Arbor.Voice.ResourceOwner do
     end
   end
 
-  def start(_owner_pid, _backend_module, _backend_opts, _opts),
+  def start(_owner_pid, _backend_module, _backend_opts, _handoff, _opts),
     do: {:error, :invalid_owner_config}
 
   @doc false
@@ -108,6 +142,7 @@ defmodule Arbor.Voice.ResourceOwner do
         owner_pid,
         backend_module,
         backend_opts,
+        handoff,
         config,
         supervisor,
         cleanup_supervisor
@@ -116,7 +151,7 @@ defmodule Arbor.Voice.ResourceOwner do
              is_pid(cleanup_supervisor) do
     GenServer.start_link(
       __MODULE__,
-      {owner_pid, backend_module, backend_opts, config, supervisor, cleanup_supervisor}
+      {owner_pid, backend_module, backend_opts, handoff, config, supervisor, cleanup_supervisor}
     )
   end
 
@@ -168,8 +203,21 @@ defmodule Arbor.Voice.ResourceOwner do
   @spec register_cleanup(GenServer.server(), term(), fun()) :: :ok | {:error, atom()}
   def register_cleanup(owner, key, fun), do: call(owner, {:register_cleanup, key, fun})
 
+  @doc false
+  @spec adopt_provisional_cleanup(GenServer.server(), term(), fun()) ::
+          :ok | {:error, atom()}
+  def adopt_provisional_cleanup(owner, key, fun),
+    do: call(owner, {:adopt_provisional_cleanup, key, fun})
+
   @spec remove_cleanup(GenServer.server(), term()) :: :ok | {:error, atom()}
   def remove_cleanup(owner, key), do: call(owner, {:remove_cleanup, key})
+
+  @spec activate_turn(GenServer.server(), map()) :: :ok | {:error, atom()}
+  def activate_turn(owner, lease), do: call(owner, {:activate_turn, lease})
+
+  @spec fence_and_drain(GenServer.server(), :session | String.t()) ::
+          :ok | {:error, atom()}
+  def fence_and_drain(owner, scope), do: call(owner, {:fence_and_drain, scope})
 
   @spec close(GenServer.server()) :: :ok | {:error, atom()}
   def close(owner) when is_pid(owner) do
@@ -198,7 +246,11 @@ defmodule Arbor.Voice.ResourceOwner do
   end
 
   @impl true
-  def init({owner_pid, backend_module, backend_opts, config, supervisor, cleanup_supervisor}) do
+  def init(
+        {owner_pid, backend_module, backend_opts, handoff, config, supervisor, cleanup_supervisor}
+      ) do
+    Process.flag(:trap_exit, true)
+
     if not is_pid(supervisor) or not is_pid(cleanup_supervisor) do
       {:stop, :invalid_supervisor}
     else
@@ -208,37 +260,61 @@ defmodule Arbor.Voice.ResourceOwner do
         if not Process.alive?(cleanup_supervisor) do
           {:stop, :cleanup_unavailable}
         else
-          state = %{
-            owner_pid: owner_pid,
-            owner_ref: Process.monitor(owner_pid),
-            backend_mod: backend_module,
-            backend_opts: backend_opts,
-            session: nil,
-            config: config,
-            supervisor: supervisor,
-            supervisor_ref: Process.monitor(supervisor),
-            cleanup_supervisor: cleanup_supervisor,
-            cleanup_supervisor_ref: Process.monitor(cleanup_supervisor),
-            close_state: :open,
-            close_ref: nil,
-            close_deadline_ms: nil,
-            close_coordinator_pid: nil,
-            close_coordinator_ref: nil,
-            coordinator_ready: false,
-            coordinator_ready_ref: nil,
-            close_deadline_ref: nil,
-            backend_closed: false,
-            cleanups_done: false,
-            cleanups: Redacted.new(%{}),
-            close_waiters: []
-          }
+          handoff = Redacted.value(handoff)
 
-          case open_backend(state) do
-            {:ok, session} ->
-              {:ok, %{state | session: Redacted.new(session)}}
+          case EgressAuthority.new_private_cell(handoff.authority) do
+            {:ok, authority_cell} ->
+              authorizer = EgressAuthority.effect_authorizer(authority_cell)
 
-            {:error, reason} ->
-              {:stop, reason}
+              backend_opts =
+                backend_opts
+                |> Redacted.value()
+                |> Keyword.put(:effect_authorizer, authorizer)
+                |> Redacted.new()
+
+              state = %{
+                owner_pid: owner_pid,
+                owner_ref: Process.monitor(owner_pid),
+                backend_mod: backend_module,
+                backend_opts: backend_opts,
+                session: Redacted.new(nil),
+                authority_cell: Redacted.new(authority_cell),
+                poisoned: false,
+                config: config,
+                supervisor: supervisor,
+                supervisor_ref: Process.monitor(supervisor),
+                cleanup_supervisor: cleanup_supervisor,
+                cleanup_supervisor_ref: Process.monitor(cleanup_supervisor),
+                close_state: :open,
+                close_deadline_ms: nil,
+                close_deadline_ref: nil,
+                close_deadline_token: nil,
+                close_deadline_expired: false,
+                backend_closed: false,
+                backend_close_attempt: nil,
+                cleanup_attempt: nil,
+                retry_ref: nil,
+                retry_token: nil,
+                retry_delay_ms: @retry_base_ms,
+                cleanups: Redacted.new(initial_cleanups(handoff)),
+                close_waiters: []
+              }
+
+              case open_backend(state) do
+                {:ok, session} ->
+                  {:ok, %{state | session: Redacted.new(session)}}
+
+                {:error, reason} ->
+                  # init/1 failure does not guarantee terminate/2. Execute the
+                  # already-handed-off route cleanup before reporting failure;
+                  # Session still retains idempotent fallback until start/5
+                  # confirms success.
+                  _ = run_open_failure_cleanups(state)
+                  {:stop, reason}
+              end
+
+            {:error, _reason} ->
+              {:stop, :invalid_authority}
           end
         end
       end
@@ -258,19 +334,55 @@ defmodule Arbor.Voice.ResourceOwner do
     {:reply, :ok, state}
   end
 
+  defp handle_owner_call(
+         :close,
+         _from,
+         %{close_state: :closing, close_deadline_expired: true} = state
+       ) do
+    {:reply, {:error, :owner_timeout}, state}
+  end
+
   defp handle_owner_call(:close, from, %{close_state: :closing} = state) do
-    {:noreply, add_close_waiter(state, from)}
+    state = state |> add_close_waiter(from) |> ensure_caller_deadline()
+    {:noreply, state}
   end
 
   defp handle_owner_call(:close, from, state) do
-    case begin_close(state) do
-      {:ok, next_state} ->
-        {:noreply, add_close_waiter(next_state, from)}
+    state = state |> begin_close() |> add_close_waiter(from) |> ensure_caller_deadline()
+    {:noreply, state}
+  end
 
-      {:error, reason, next_state} ->
-        next_state = stop_after_close(next_state, reason)
+  defp handle_owner_call({:activate_turn, _lease}, _from, %{close_state: state} = owner)
+       when state in [:closing, :closed] do
+    {:reply, {:error, :owner_closing}, owner}
+  end
 
-        {:stop, :normal, {:error, reason}, next_state}
+  defp handle_owner_call({:activate_turn, _lease}, _from, %{poisoned: true} = state) do
+    {:reply, {:error, :owner_poisoned}, state}
+  end
+
+  defp handle_owner_call({:activate_turn, lease}, _from, state) when is_map(lease) do
+    cleanups = Redacted.value(state.cleanups)
+    cleanup_registered? = Map.has_key?(cleanups, Map.get(lease, :cleanup_key))
+    cell = Redacted.value(state.authority_cell)
+
+    case EgressAuthority.activate_turn(cell, lease, cleanup_registered?) do
+      :ok -> {:reply, :ok, state}
+      {:error, _reason} -> {:reply, {:error, :turn_activation_denied}, state}
+    end
+  end
+
+  defp handle_owner_call({:activate_turn, _lease}, _from, state) do
+    {:reply, {:error, :turn_activation_denied}, state}
+  end
+
+  defp handle_owner_call({:fence_and_drain, scope}, _from, state) do
+    cell = Redacted.value(state.authority_cell)
+
+    case EgressAuthority.fence_and_drain(cell, scope) do
+      :ok -> {:reply, :ok, state}
+      {:error, :owner_poisoned} -> {:reply, {:error, :owner_poisoned}, %{state | poisoned: true}}
+      {:error, _reason} -> {:reply, {:error, :fence_failed}, state}
     end
   end
 
@@ -282,6 +394,10 @@ defmodule Arbor.Voice.ResourceOwner do
     {:reply, {:error, :owner_closing}, state}
   end
 
+  defp handle_owner_call({:backend, _operation, _args}, _from, %{poisoned: true} = state) do
+    {:reply, {:error, :owner_poisoned}, state}
+  end
+
   defp handle_owner_call({:backend, operation, args}, _from, state) do
     case execute_backend_callback(operation, args, state) do
       {:ok, next_state} ->
@@ -289,6 +405,9 @@ defmodule Arbor.Voice.ResourceOwner do
 
       {:ok, next_state, event} ->
         {:reply, {:ok, event}, next_state}
+
+      {:error, reason, next_state} ->
+        {:reply, {:error, reason}, next_state}
 
       {:error, reason} ->
         {:reply, {:error, reason}, state}
@@ -339,6 +458,25 @@ defmodule Arbor.Voice.ResourceOwner do
     end
   end
 
+  defp handle_owner_call(
+         {:adopt_provisional_cleanup, _key, _fun},
+         _from,
+         %{close_state: state} = owner
+       )
+       when state in [:closing, :closed] do
+    {:reply, {:error, :owner_closing}, owner}
+  end
+
+  defp handle_owner_call({:adopt_provisional_cleanup, key, fun}, _from, state) do
+    case do_adopt_provisional_cleanup(state, key, fun) do
+      {:ok, cleanups} ->
+        {:reply, :ok, %{state | cleanups: Redacted.new(cleanups)}}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
   defp handle_owner_call({:remove_cleanup, _key}, _from, %{close_state: :closed} = state) do
     {:reply, {:error, :owner_closed}, state}
   end
@@ -362,115 +500,310 @@ defmodule Arbor.Voice.ResourceOwner do
   end
 
   @impl true
+  def handle_info({:EXIT, supervisor, reason}, %{supervisor: supervisor} = state) do
+    {:stop, reason, state}
+  end
+
   def handle_info(
         {:DOWN, ref, :process, pid, _reason},
         %{owner_ref: ref, owner_pid: pid} = state
       ) do
-    if state.close_state == :open do
-      case begin_close(state) do
-        {:ok, next_state} ->
-          {:noreply, next_state}
-
-        {:error, _reason, next_state} ->
-          {:stop, :normal, next_state}
-      end
-    else
-      {:noreply, state}
-    end
+    state = %{state | owner_ref: nil}
+    state = if state.close_state == :open, do: begin_close(state), else: state
+    continue_close(state)
   end
 
   def handle_info(
         {:DOWN, ref, :process, pid, _reason},
         %{supervisor_ref: ref, supervisor: pid} = state
       ) do
-    {:stop, :normal, %{state | supervisor_ref: nil, close_state: :closed}}
+    state = %{state | supervisor_ref: nil}
+    state = if state.close_state == :open, do: begin_close(state), else: state
+    continue_close(state)
   end
 
   def handle_info(
         {:DOWN, ref, :process, pid, _reason},
         %{cleanup_supervisor_ref: ref, cleanup_supervisor: pid} = state
       ) do
-    case state.close_state do
-      :open ->
-        {:noreply, state}
+    state = %{state | cleanup_supervisor_ref: nil}
 
-      _ ->
-        {:stop, :normal, stop_after_close(state, :cleanup_unavailable)}
+    state =
+      if state.close_state == :closing and is_nil(state.cleanup_attempt),
+        do: schedule_retry(state),
+        else: state
+
+    continue_close(state)
+  end
+
+  def handle_info(
+        {:DOWN, ref, :process, pid, _reason},
+        %{cleanup_attempt: %{monitor_ref: ref, pid: pid}} = state
+      ) do
+    state =
+      state
+      |> cancel_attempt_timer(:cleanup_attempt, :ready_timer_ref)
+      |> cancel_attempt_timer(:cleanup_attempt, :timeout_timer_ref)
+
+    case state.cleanup_attempt.child do
+      nil ->
+        state
+        |> Map.put(:cleanup_attempt, nil)
+        |> maybe_schedule_pending_retry()
+        |> continue_close()
+
+      %{pid: child_pid} ->
+        if Process.alive?(child_pid), do: Process.exit(child_pid, :kill)
+
+        attempt = %{state.cleanup_attempt | status: :awaiting_child_down}
+        {:noreply, %{state | cleanup_attempt: attempt}}
     end
   end
 
   def handle_info(
         {:DOWN, ref, :process, pid, _reason},
         %{
-          close_coordinator_ref: ref,
-          close_coordinator_pid: pid,
-          close_state: :closing
+          cleanup_attempt: %{
+            generation: generation,
+            pid: coordinator,
+            child: %{monitor_ref: ref, pid: pid}
+          }
         } = state
       ) do
-    {:stop, :normal, stop_after_close(state, :cleanup_unavailable)}
+    if state.cleanup_attempt.status == :awaiting_child_down do
+      state
+      |> Map.put(:cleanup_attempt, nil)
+      |> maybe_schedule_pending_retry()
+      |> continue_close()
+    else
+      send(coordinator, {:cleanup_child_cleared, generation, pid})
+      attempt = %{state.cleanup_attempt | child: nil}
+      {:noreply, %{state | cleanup_attempt: attempt}}
+    end
   end
 
   def handle_info(
-        {:coordinator_ready, close_ref, coordinator_pid},
-        %{
-          close_state: :closing,
-          close_ref: close_ref,
-          close_coordinator_pid: coordinator_pid,
-          coordinator_ready: false
-        } = state
+        {:DOWN, ref, :process, pid, _reason},
+        %{backend_close_attempt: %{monitor_ref: ref, pid: pid}} = state
       ) do
     state =
       state
-      |> cancel_timer(:coordinator_ready_ref)
-      |> Map.put(:coordinator_ready, true)
+      |> cancel_attempt_timer(:backend_close_attempt, :ready_timer_ref)
+      |> cancel_attempt_timer(:backend_close_attempt, :timeout_timer_ref)
+      |> Map.put(:backend_close_attempt, nil)
+      |> maybe_schedule_pending_retry()
 
-    send(self(), :perform_close)
+    continue_close(state)
+  end
+
+  def handle_info(
+        {:cleanup_ready, generation, pid},
+        %{
+          cleanup_attempt: %{
+            generation: generation,
+            pid: pid,
+            status: :starting
+          }
+        } = state
+      ) do
+    attempt =
+      state.cleanup_attempt
+      |> cancel_timer_in_map(:ready_timer_ref)
+      |> Map.put(:status, :ready)
+
+    {:noreply, %{state | cleanup_attempt: attempt}}
+  end
+
+  def handle_info(
+        {:cleanup_child_started, generation, coordinator, child},
+        %{
+          cleanup_attempt: %{
+            generation: generation,
+            pid: coordinator,
+            child: nil,
+            status: status
+          }
+        } = state
+      )
+      when is_pid(child) and status in [:starting, :ready] do
+    monitor_ref = Process.monitor(child)
+    send(coordinator, {:cleanup_child_registered, generation, child})
+
+    attempt = %{state.cleanup_attempt | child: %{pid: child, monitor_ref: monitor_ref}}
+    {:noreply, %{state | cleanup_attempt: attempt}}
+  end
+
+  def handle_info(
+        {:cleanup_result, generation, pid, successful_keys},
+        %{
+          cleanup_attempt: %{
+            generation: generation,
+            pid: pid,
+            status: status,
+            keys: attempted_keys
+          }
+        } = state
+      ) do
+    if status in [:ready, :starting] and valid_successful_keys?(successful_keys, attempted_keys) do
+      cleanups = Redacted.value(state.cleanups)
+      remaining = Map.drop(cleanups, successful_keys)
+      progress? = map_size(remaining) < map_size(cleanups)
+
+      attempt = %{state.cleanup_attempt | status: :result_received}
+
+      attempt = cancel_timer_in_map(attempt, :timeout_timer_ref)
+
+      state =
+        state
+        |> Map.put(:cleanups, Redacted.new(remaining))
+        |> Map.put(:cleanup_attempt, attempt)
+        |> maybe_reset_retry_delay(progress?)
+
+      continue_close(state)
+    else
+      {:noreply, state}
+    end
+  end
+
+  def handle_info(
+        {:cleanup_ready_timeout, generation, pid},
+        %{
+          cleanup_attempt: %{
+            generation: generation,
+            pid: pid,
+            status: :starting
+          }
+        } = state
+      ) do
+    Process.exit(pid, :kill)
+    attempt = %{state.cleanup_attempt | status: :canceling, ready_timer_ref: nil}
+    {:noreply, %{state | cleanup_attempt: attempt}}
+  end
+
+  def handle_info(
+        {:cleanup_attempt_timeout, generation, pid},
+        %{
+          cleanup_attempt: %{
+            generation: generation,
+            pid: pid,
+            status: status
+          }
+        } = state
+      )
+      when status in [:starting, :ready] do
+    Process.exit(pid, :kill)
+
+    attempt = %{
+      state.cleanup_attempt
+      | status: :canceling,
+        ready_timer_ref: cancel_timer_ref(state.cleanup_attempt.ready_timer_ref),
+        timeout_timer_ref: nil
+    }
+
+    {:noreply, %{state | cleanup_attempt: attempt}}
+  end
+
+  def handle_info(
+        {:backend_close_ready, generation, pid},
+        %{
+          backend_close_attempt: %{
+            generation: generation,
+            pid: pid,
+            status: :starting
+          }
+        } = state
+      ) do
+    attempt = %{state.backend_close_attempt | status: :ready}
+    {:noreply, %{state | backend_close_attempt: attempt}}
+  end
+
+  def handle_info(
+        {:backend_close_result, generation, pid, result},
+        %{
+          backend_close_attempt: %{
+            generation: generation,
+            pid: pid,
+            status: status
+          }
+        } = state
+      ) do
+    if status in [:ready, :starting] and result in [:ok, :error] do
+      attempt =
+        state.backend_close_attempt
+        |> cancel_timer_in_map(:timeout_timer_ref)
+        |> Map.put(:status, :result_received)
+
+      state = %{
+        state
+        | backend_close_attempt: attempt,
+          backend_closed: result == :ok,
+          retry_delay_ms: if(result == :ok, do: @retry_base_ms, else: state.retry_delay_ms)
+      }
+
+      continue_close(state)
+    else
+      {:noreply, state}
+    end
+  end
+
+  def handle_info(
+        {:backend_close_timeout, generation, pid},
+        %{
+          backend_close_attempt: %{
+            generation: generation,
+            pid: pid,
+            status: status
+          }
+        } = state
+      )
+      when status in [:starting, :ready] do
+    Process.exit(pid, :kill)
+    attempt = %{state.backend_close_attempt | status: :canceling, timeout_timer_ref: nil}
+    {:noreply, %{state | backend_close_attempt: attempt}}
+  end
+
+  def handle_info(
+        {:close_deadline_reached, token},
+        %{close_deadline_token: token, close_state: :closing} = state
+      ) do
+    Enum.each(state.close_waiters, &safe_reply(&1, {:error, :owner_timeout}))
+
+    state = %{
+      state
+      | close_waiters: [],
+        close_deadline_ms: nil,
+        close_deadline_ref: nil,
+        close_deadline_token: nil,
+        close_deadline_expired: true
+    }
 
     {:noreply, state}
   end
 
-  def handle_info({:coordinator_ready, _close_ref, _coordinator_pid}, state),
-    do: {:noreply, state}
-
-  def handle_info(
-        {:coordinator_done, close_ref},
-        %{close_state: :closing, close_ref: close_ref} = state
-      ) do
-    state
-    |> Map.put(:cleanups_done, true)
-    |> finish_close_if_ready()
+  def handle_info({:retry_close, token}, %{retry_token: token, close_state: :closing} = state) do
+    state = %{state | retry_ref: nil, retry_token: nil}
+    state = start_pending_attempts(state)
+    continue_close(state)
   end
 
-  def handle_info(
-        {:coordinator_ready_timeout, close_ref},
-        %{close_state: :closing, close_ref: close_ref, coordinator_ready: false} = state
-      ) do
-    {:stop, :normal, stop_after_close(state, :cleanup_unavailable)}
-  end
-
-  def handle_info({:coordinator_ready_timeout, _close_ref}, state), do: {:noreply, state}
-
-  def handle_info(
-        {:close_deadline_reached, close_ref},
-        %{close_state: :closing, close_ref: close_ref} = state
-      ) do
-    {:stop, :normal, stop_after_close(state, :owner_timeout)}
-  end
-
-  def handle_info(:perform_close, %{close_state: :closing} = state) do
-    state
-    |> close_backend_once()
-    |> finish_close_if_ready()
-  end
-
-  def handle_info({:coordinator_done, _close_ref, _results}, state), do: {:noreply, state}
-  def handle_info({_msg, _}, state), do: {:noreply, state}
+  def handle_info(_message, state), do: {:noreply, state}
 
   @impl true
   def terminate(_reason, state) do
-    if state.close_state != :closed do
-      _ = close_backend_once(state)
+    stop_attempt(state.cleanup_attempt)
+    stop_attempt(state.backend_close_attempt)
+
+    deadline_ms = now_ms() + @shutdown_grace_ms
+
+    unless state.backend_closed do
+      _ = invoke_backend_close_bounded(state, max(0, deadline_ms - now_ms()))
     end
+
+    state.cleanups
+    |> Redacted.value()
+    |> Enum.each(fn {_key, cleanup} ->
+      _ = invoke_cleanup_bounded(cleanup, max(0, deadline_ms - now_ms()))
+    end)
 
     :ok
   end
@@ -483,6 +816,7 @@ defmodule Arbor.Voice.ResourceOwner do
       owner_pid: state.owner_pid,
       backend_mod: state.backend_mod,
       close_state: state.close_state,
+      poisoned: state.poisoned,
       backend_closed: state.backend_closed,
       close_deadline_ms: state.close_deadline_ms,
       cleanup_count: map_size(cleanups),
@@ -500,132 +834,185 @@ defmodule Arbor.Voice.ResourceOwner do
   # Close orchestration
 
   defp begin_close(state) do
-    if state.close_state != :open do
-      {:ok, state}
-    else
-      close_ref = make_ref()
-      close_deadline_ms = now_ms() + state.config[:close_timeout_ms]
+    _ =
+      state.authority_cell
+      |> Redacted.value()
+      |> EgressAuthority.fence_and_drain(:session)
 
-      state =
-        state
-        |> Map.put(:close_state, :closing)
-        |> Map.put(:close_ref, close_ref)
-        |> Map.put(:close_deadline_ms, close_deadline_ms)
-        |> Map.put(:backend_closed, false)
-        |> Map.put(:cleanups_done, false)
-        |> Map.put(:close_coordinator_pid, nil)
-        |> Map.put(:close_coordinator_ref, nil)
-        |> Map.put(:coordinator_ready, false)
-
-      if not alive?(state.cleanup_supervisor) do
-        {:error, :cleanup_unavailable, close_after_fail(state)}
-      else
-        case start_cleanup_coordinator(state) do
-          {:ok, next_state} ->
-            {:ok, next_state}
-
-          {:error, :cleanup_unavailable} ->
-            {:error, :cleanup_unavailable, close_after_fail(state)}
-        end
-      end
-    end
-  end
-
-  defp close_after_fail(state) do
     state
-    |> Map.put(:close_state, :closed)
-    |> cancel_timers()
+    |> Map.put(:close_state, :closing)
+    |> start_pending_attempts()
   end
 
-  defp start_cleanup_coordinator(state) do
-    close_ref = state.close_ref
-    deadline_ms = state.close_deadline_ms
-    now = now_ms()
-    ready_timeout_ms = max(0, min(state.config[:cleanup_ready_timeout_ms], deadline_ms - now))
-    deadline_timeout_ms = max(0, deadline_ms - now)
+  defp ensure_caller_deadline(%{close_deadline_ref: ref} = state) when is_reference(ref),
+    do: state
 
-    if ready_timeout_ms == 0 or deadline_timeout_ms == 0 do
-      {:error, :cleanup_unavailable}
+  defp ensure_caller_deadline(%{close_deadline_expired: true} = state), do: state
+
+  defp ensure_caller_deadline(state) do
+    token = make_ref()
+    timeout_ms = state.config[:close_timeout_ms]
+    timer_ref = Process.send_after(self(), {:close_deadline_reached, token}, timeout_ms)
+
+    %{
+      state
+      | close_deadline_ms: now_ms() + timeout_ms,
+        close_deadline_ref: timer_ref,
+        close_deadline_token: token
+    }
+  end
+
+  defp start_pending_attempts(%{close_state: :closing} = state) do
+    state
+    |> maybe_start_backend_close_attempt()
+    |> maybe_start_cleanup_attempt()
+  end
+
+  defp start_pending_attempts(state), do: state
+
+  defp maybe_start_backend_close_attempt(
+         %{backend_closed: false, backend_close_attempt: nil} = state
+       ) do
+    generation = make_ref()
+    owner = self()
+    backend = state.backend_mod
+    session = Redacted.value(state.session)
+
+    {pid, monitor_ref} =
+      spawn_monitor(fn ->
+        send(owner, {:backend_close_ready, generation, self()})
+
+        result =
+          try do
+            if backend.close(session) == :ok, do: :ok, else: :error
+          catch
+            _kind, _reason -> :error
+          end
+
+        send(owner, {:backend_close_result, generation, self(), result})
+      end)
+
+    timeout_timer_ref =
+      Process.send_after(
+        self(),
+        {:backend_close_timeout, generation, pid},
+        state.config[:close_timeout_ms]
+      )
+
+    attempt = %{
+      generation: generation,
+      pid: pid,
+      monitor_ref: monitor_ref,
+      status: :starting,
+      timeout_timer_ref: timeout_timer_ref
+    }
+
+    %{state | backend_close_attempt: attempt}
+  end
+
+  defp maybe_start_backend_close_attempt(state), do: state
+
+  defp maybe_start_cleanup_attempt(%{cleanup_attempt: nil} = state) do
+    cleanups = Redacted.value(state.cleanups)
+
+    if map_size(cleanups) == 0 do
+      state
     else
-      ready_ref =
-        Process.send_after(self(), {:coordinator_ready_timeout, close_ref}, ready_timeout_ms)
-
-      deadline_ref =
-        Process.send_after(self(), {:close_deadline_reached, close_ref}, deadline_timeout_ms)
-
-      state =
-        state
-        |> Map.put(:coordinator_ready_ref, ready_ref)
-        |> Map.put(:close_deadline_ref, deadline_ref)
-
-      cleanups =
-        state.cleanups
-        |> Redacted.value()
-        |> Map.new(fn {key, fun} -> {key, {fun, state.config[:cleanup_attempts]}} end)
-
+      generation = make_ref()
       owner = self()
+      keys = Map.keys(cleanups)
+      attempts = state.config[:cleanup_attempts]
+      per_attempt_timeout_ms = state.config[:cleanup_per_attempt_timeout_ms]
+      attempt_deadline_ms = now_ms() + state.config[:close_timeout_ms]
 
-      coordinator_task_fn = fn ->
-        send(owner, {:coordinator_ready, close_ref, self()})
+      coordinator = fn ->
+        send(owner, {:cleanup_ready, generation, self()})
 
-        run_cleanups_in_rounds(
-          cleanups,
-          state.cleanup_supervisor,
-          state.config[:cleanup_per_attempt_timeout_ms],
-          deadline_ms
+        invoke = fn fun, timeout_ms ->
+          invoke_cleanup_bounded(fun, timeout_ms, owner, generation)
+        end
+
+        unresolved =
+          cleanups
+          |> Map.new(fn {key, fun} -> {key, {fun, attempts}} end)
+          |> run_cleanups_without_supervisor(per_attempt_timeout_ms, attempt_deadline_ms, invoke)
+
+        successful_keys = keys -- Map.keys(unresolved)
+        send(owner, {:cleanup_result, generation, self(), successful_keys})
+      end
+
+      {pid, kind} = start_cleanup_worker(state.cleanup_supervisor, coordinator)
+      monitor_ref = Process.monitor(pid)
+
+      ready_timer_ref =
+        Process.send_after(
+          self(),
+          {:cleanup_ready_timeout, generation, pid},
+          state.config[:cleanup_ready_timeout_ms]
         )
 
-        send(owner, {:coordinator_done, close_ref})
+      timeout_timer_ref =
+        Process.send_after(
+          self(),
+          {:cleanup_attempt_timeout, generation, pid},
+          state.config[:close_timeout_ms]
+        )
 
-        monitor_ref = Process.monitor(owner)
-        remaining_ms = max(0, deadline_ms - now_ms())
+      attempt = %{
+        generation: generation,
+        pid: pid,
+        monitor_ref: monitor_ref,
+        kind: kind,
+        keys: MapSet.new(keys),
+        status: :starting,
+        child: nil,
+        ready_timer_ref: ready_timer_ref,
+        timeout_timer_ref: timeout_timer_ref
+      }
 
-        receive do
-          {:DOWN, ^monitor_ref, :process, ^owner, _reason} ->
-            :ok
-        after
-          remaining_ms ->
-            if Process.alive?(owner), do: Process.exit(owner, :kill)
-        end
-      end
-
-      case Task.Supervisor.start_child(state.cleanup_supervisor, coordinator_task_fn) do
-        {:ok, pid} ->
-          {:ok,
-           state
-           |> Map.put(:close_coordinator_pid, pid)
-           |> Map.put(:close_coordinator_ref, Process.monitor(pid))}
-
-        {:error, reason} ->
-          log_redacted(:cleanup_unavailable)
-          _ = reason
-          {:error, :cleanup_unavailable}
-      end
+      %{state | cleanup_attempt: attempt}
     end
   end
 
-  defp stop_after_close(state, close_result) do
-    reply = normalize_close_result(close_result)
+  defp maybe_start_cleanup_attempt(state), do: state
 
-    Enum.each(state.close_waiters, fn from ->
-      safe_reply(from, reply)
-    end)
-
-    state
-    |> Map.put(:close_waiters, [])
-    |> Map.put(:close_state, :closed)
-    |> Map.put(:backend_closed, true)
-    |> cancel_timers()
+  defp start_cleanup_worker(supervisor, coordinator) do
+    if alive?(supervisor) do
+      try do
+        case Task.Supervisor.start_child(supervisor, coordinator) do
+          {:ok, pid} -> {pid, :supervised}
+          _ -> {spawn(coordinator), :fallback}
+        end
+      catch
+        _kind, _reason -> {spawn(coordinator), :fallback}
+      end
+    else
+      {spawn(coordinator), :fallback}
+    end
   end
 
-  defp finish_close_if_ready(%{backend_closed: true, cleanups_done: true} = state) do
-    {:stop, :normal, stop_after_close(state, :ok)}
+  defp continue_close(state) do
+    if close_complete?(state) do
+      Enum.each(state.close_waiters, &safe_reply(&1, :ok))
+
+      state =
+        state
+        |> Map.put(:close_waiters, [])
+        |> Map.put(:close_state, :closed)
+        |> cancel_close_timers()
+
+      {:stop, :normal, state}
+    else
+      {:noreply, maybe_schedule_pending_retry(state)}
+    end
   end
 
-  defp finish_close_if_ready(state), do: {:noreply, state}
-
-  defp normalize_close_result(:ok), do: :ok
-  defp normalize_close_result(result), do: {:error, result}
+  defp close_complete?(state) do
+    state.backend_closed and
+      map_size(Redacted.value(state.cleanups)) == 0 and
+      is_nil(state.backend_close_attempt) and
+      is_nil(state.cleanup_attempt)
+  end
 
   defp safe_reply({pid, ref} = from, reply) do
     try do
@@ -642,114 +1029,377 @@ defmodule Arbor.Voice.ResourceOwner do
     %{state | close_waiters: [from | state.close_waiters]}
   end
 
-  defp run_cleanups_in_rounds(cleanups, cleanup_supervisor, per_attempt_timeout_ms, deadline_ms) do
-    if map_size(cleanups) == 0 do
-      :ok
+  defp valid_successful_keys?(successful_keys, attempted_keys)
+       when is_list(successful_keys) and is_struct(attempted_keys, MapSet) do
+    length(successful_keys) == length(Enum.uniq(successful_keys)) and
+      Enum.all?(successful_keys, &MapSet.member?(attempted_keys, &1))
+  end
+
+  defp valid_successful_keys?(_successful_keys, _attempted_keys), do: false
+
+  defp maybe_reset_retry_delay(state, true), do: %{state | retry_delay_ms: @retry_base_ms}
+  defp maybe_reset_retry_delay(state, false), do: state
+
+  defp maybe_schedule_pending_retry(%{close_state: :closing} = state) do
+    pending_backend? = not state.backend_closed and is_nil(state.backend_close_attempt)
+
+    pending_cleanups? =
+      map_size(Redacted.value(state.cleanups)) > 0 and is_nil(state.cleanup_attempt)
+
+    if (pending_backend? or pending_cleanups?) and is_nil(state.retry_ref) do
+      schedule_retry(state)
     else
-      if now_ms() >= deadline_ms do
+      state
+    end
+  end
+
+  defp maybe_schedule_pending_retry(state), do: state
+
+  defp schedule_retry(%{retry_ref: ref} = state) when is_reference(ref), do: state
+
+  defp schedule_retry(state) do
+    token = make_ref()
+    delay_ms = state.retry_delay_ms
+    timer_ref = Process.send_after(self(), {:retry_close, token}, delay_ms)
+
+    %{
+      state
+      | retry_ref: timer_ref,
+        retry_token: token,
+        retry_delay_ms: min(delay_ms * 2, @retry_max_ms)
+    }
+  end
+
+  defp cancel_attempt_timer(state, attempt_key, timer_key) do
+    case Map.get(state, attempt_key) do
+      nil -> state
+      attempt -> Map.put(state, attempt_key, cancel_timer_in_map(attempt, timer_key))
+    end
+  end
+
+  defp cancel_timer_in_map(map, key) do
+    Map.put(map, key, cancel_timer_ref(Map.get(map, key)))
+  end
+
+  defp cancel_timer_ref(ref) when is_reference(ref) do
+    _ = Process.cancel_timer(ref)
+    nil
+  end
+
+  defp cancel_timer_ref(_ref), do: nil
+
+  defp cancel_close_timers(state) do
+    _ = cancel_timer_ref(state.close_deadline_ref)
+    _ = cancel_timer_ref(state.retry_ref)
+
+    %{
+      state
+      | close_deadline_ms: nil,
+        close_deadline_ref: nil,
+        close_deadline_token: nil,
+        retry_ref: nil,
+        retry_token: nil
+    }
+  end
+
+  defp stop_attempt(nil), do: :ok
+
+  defp stop_attempt(%{pid: pid, monitor_ref: monitor_ref} = attempt) do
+    stop_cleanup_child(Map.get(attempt, :child))
+
+    if Process.alive?(pid), do: Process.exit(pid, :kill)
+
+    receive do
+      {:DOWN, ^monitor_ref, :process, ^pid, _reason} -> :ok
+    after
+      100 ->
+        Process.demonitor(monitor_ref, [:flush])
         :ok
-      else
-        next_round =
-          run_cleanup_round(cleanups, cleanup_supervisor, per_attempt_timeout_ms, deadline_ms)
-
-        if map_size(next_round) == 0 do
-          :ok
-        else
-          run_cleanups_in_rounds(
-            next_round,
-            cleanup_supervisor,
-            per_attempt_timeout_ms,
-            deadline_ms
-          )
-        end
-      end
     end
   end
 
-  defp run_cleanup_round(cleanups, supervisor, per_attempt_timeout_ms, deadline_ms) do
-    remaining_ms = max(0, deadline_ms - now_ms())
+  defp stop_cleanup_child(nil), do: :ok
 
-    if remaining_ms == 0 do
-      cleanups
-    else
-      task_timeout_ms = min(per_attempt_timeout_ms, remaining_ms)
+  defp stop_cleanup_child(%{pid: pid, monitor_ref: monitor_ref}) do
+    if Process.alive?(pid), do: Process.exit(pid, :kill)
 
-      tasks =
-        for {key, {fun, attempts_left}} <- cleanups do
-          task =
-            Task.Supervisor.async_nolink(supervisor, fn ->
-              try do
-                # Soft failures must retry: `{:error, _}` is failure. Other
-                # normal returns (including `:ok` and incidental values such as
-                # `send/2` → pid) remain success for compatibility. raise /
-                # throw / exit / timeout still fail via the catch clause.
-                case fun.() do
-                  {:error, _reason} -> :error
-                  _other -> :ok
-                end
-              catch
-                _kind, _reason ->
-                  :error
-              end
-            end)
-
-          {key, fun, attempts_left, task}
-        end
-
-      task_refs = Enum.map(tasks, fn {_key, _fun, _attempts_left, task} -> task end)
-      yields = Task.yield_many(task_refs, task_timeout_ms)
-
-      Enum.zip(tasks, yields)
-      |> Enum.reduce(%{}, fn
-        {{key, fun, attempts_left, task}, {_task, result}}, acc ->
-          case result do
-            {:ok, :ok} ->
-              acc
-
-            {:ok, :error} ->
-              attempt_cleanup_retry(acc, key, fun, attempts_left)
-
-            nil ->
-              Task.shutdown(task, :brutal_kill)
-              attempt_cleanup_retry(acc, key, fun, attempts_left)
-
-            {:exit, _reason} ->
-              attempt_cleanup_retry(acc, key, fun, attempts_left)
-
-            {:ok, _other} ->
-              attempt_cleanup_retry(acc, key, fun, attempts_left)
-
-            _ ->
-              attempt_cleanup_retry(acc, key, fun, attempts_left)
-          end
-      end)
+    receive do
+      {:DOWN, ^monitor_ref, :process, ^pid, _reason} -> :ok
+    after
+      100 ->
+        Process.demonitor(monitor_ref, [:flush])
+        :ok
     end
   end
 
-  defp attempt_cleanup_retry(acc, _key, _fun, attempts_left) when attempts_left <= 1 do
+  defp attempt_cleanup_retry(acc, key, fun, attempts_left) when attempts_left <= 1 do
     log_redacted(:cleanup_retry_exhausted)
-    acc
+    Map.put(acc, key, {fun, 0})
   end
 
   defp attempt_cleanup_retry(acc, key, fun, attempts_left) do
     Map.put(acc, key, {fun, attempts_left - 1})
   end
 
-  defp close_backend_once(state) do
-    if state.backend_closed do
-      state
-    else
-      session = Redacted.value(state.session)
-      backend_mod = state.backend_mod
+  defp no_cleanup_attempts_left?(cleanups) do
+    Enum.all?(cleanups, fn {_key, {_fun, attempts_left}} -> attempts_left <= 0 end)
+  end
 
-      try do
-        backend_mod.close(session)
-      catch
-        _kind, _reason ->
-          :ok
+  defp run_cleanups_without_supervisor(cleanups, per_attempt_timeout_ms, deadline_ms) do
+    run_cleanups_without_supervisor(
+      cleanups,
+      per_attempt_timeout_ms,
+      deadline_ms,
+      &invoke_cleanup_bounded/2
+    )
+  end
+
+  defp run_cleanups_without_supervisor(
+         cleanups,
+         per_attempt_timeout_ms,
+         deadline_ms,
+         invoke
+       ) do
+    cond do
+      map_size(cleanups) == 0 ->
+        %{}
+
+      now_ms() >= deadline_ms or no_cleanup_attempts_left?(cleanups) ->
+        cleanups
+
+      true ->
+        next_round =
+          Enum.reduce(cleanups, %{}, fn
+            {key, {fun, attempts_left}}, acc when attempts_left > 0 ->
+              timeout_ms = min(per_attempt_timeout_ms, max(0, deadline_ms - now_ms()))
+
+              case invoke.(fun, timeout_ms) do
+                :ok -> acc
+                :error -> attempt_cleanup_retry(acc, key, fun, attempts_left)
+              end
+
+            {key, {fun, attempts_left}}, acc ->
+              Map.put(acc, key, {fun, attempts_left})
+          end)
+
+        run_cleanups_without_supervisor(
+          next_round,
+          per_attempt_timeout_ms,
+          deadline_ms,
+          invoke
+        )
+    end
+  end
+
+  defp invoke_cleanup_bounded(_fun, timeout_ms) when timeout_ms <= 0, do: :error
+
+  defp invoke_cleanup_bounded(fun, timeout_ms) when is_function(fun, 0) do
+    coordinator = self()
+    result_ref = make_ref()
+
+    {pid, monitor_ref} =
+      spawn_monitor(fn ->
+        result =
+          try do
+            case fun.() do
+              {:error, _reason} -> :error
+              _other -> :ok
+            end
+          catch
+            _kind, _reason -> :error
+          end
+
+        send(coordinator, {result_ref, result})
+      end)
+
+    _guard = spawn(fn -> guard_cleanup_worker(coordinator, pid) end)
+
+    receive do
+      {^result_ref, result} ->
+        Process.demonitor(monitor_ref, [:flush])
+        result
+
+      {:DOWN, ^monitor_ref, :process, ^pid, _reason} ->
+        receive do
+          {^result_ref, result} -> result
+        after
+          0 -> :error
+        end
+    after
+      timeout_ms ->
+        Process.exit(pid, :kill)
+
+        receive do
+          {:DOWN, ^monitor_ref, :process, ^pid, _reason} -> :error
+        after
+          100 -> :error
+        end
+    end
+  end
+
+  defp invoke_cleanup_bounded(fun, timeout_ms, owner, generation)
+       when is_function(fun, 0) and is_pid(owner) and is_reference(generation) do
+    coordinator = self()
+    owner_ref = Process.monitor(owner)
+    result_ref = make_ref()
+
+    {pid, monitor_ref} =
+      spawn_monitor(fn ->
+        coordinator_ref = Process.monitor(coordinator)
+
+        receive do
+          {:run_cleanup, ^result_ref} ->
+            Process.demonitor(coordinator_ref, [:flush])
+
+            result =
+              try do
+                case fun.() do
+                  {:error, _reason} -> :error
+                  _other -> :ok
+                end
+              catch
+                _kind, _reason -> :error
+              end
+
+            send(coordinator, {result_ref, result})
+
+          {:DOWN, ^coordinator_ref, :process, ^coordinator, _reason} ->
+            :ok
+        end
+      end)
+
+    _guard = spawn(fn -> guard_cleanup_worker(coordinator, pid) end)
+    send(owner, {:cleanup_child_started, generation, coordinator, pid})
+
+    registered? =
+      receive do
+        {:cleanup_child_registered, ^generation, ^pid} -> true
+        {:DOWN, ^owner_ref, :process, ^owner, _reason} -> :owner_down
+      after
+        timeout_ms -> false
       end
 
-      %{state | backend_closed: true}
+    case registered? do
+      true ->
+        send(pid, {:run_cleanup, result_ref})
+
+        {result, worker_down?} =
+          receive do
+            {^result_ref, result} ->
+              {result, false}
+
+            {:DOWN, ^monitor_ref, :process, ^pid, _reason} ->
+              {:error, true}
+
+            {:DOWN, ^owner_ref, :process, ^owner, _reason} ->
+              Process.exit(pid, :kill)
+              await_worker_down(pid, monitor_ref)
+              exit(:resource_owner_down)
+          after
+            timeout_ms ->
+              Process.exit(pid, :kill)
+              await_worker_down(pid, monitor_ref)
+              {:error, true}
+          end
+
+        unless worker_down?, do: await_worker_down(pid, monitor_ref)
+
+        receive do
+          {:cleanup_child_cleared, ^generation, ^pid} ->
+            Process.demonitor(owner_ref, [:flush])
+            result
+
+          {:DOWN, ^owner_ref, :process, ^owner, _reason} ->
+            exit(:resource_owner_down)
+        after
+          timeout_ms ->
+            Process.demonitor(owner_ref, [:flush])
+            exit(:cleanup_child_clear_timeout)
+        end
+
+      :owner_down ->
+        Process.exit(pid, :kill)
+        await_worker_down(pid, monitor_ref)
+        exit(:resource_owner_down)
+
+      false ->
+        Process.demonitor(owner_ref, [:flush])
+        Process.exit(pid, :kill)
+        await_worker_down(pid, monitor_ref)
+        exit(:cleanup_child_registration_timeout)
+    end
+  end
+
+  defp await_worker_down(pid, monitor_ref) do
+    receive do
+      {:DOWN, ^monitor_ref, :process, ^pid, _reason} -> :ok
+    after
+      100 ->
+        Process.demonitor(monitor_ref, [:flush])
+        :ok
+    end
+  end
+
+  defp guard_cleanup_worker(coordinator, worker) do
+    coordinator_ref = Process.monitor(coordinator)
+    worker_ref = Process.monitor(worker)
+
+    receive do
+      {:DOWN, ^coordinator_ref, :process, ^coordinator, _reason} ->
+        if Process.alive?(worker), do: Process.exit(worker, :kill)
+
+        receive do
+          {:DOWN, ^worker_ref, :process, ^worker, _reason} -> :ok
+        after
+          100 -> Process.demonitor(worker_ref, [:flush])
+        end
+
+      {:DOWN, ^worker_ref, :process, ^worker, _reason} ->
+        Process.demonitor(coordinator_ref, [:flush])
+        :ok
+    end
+  end
+
+  defp invoke_backend_close_bounded(_state, timeout_ms) when timeout_ms <= 0, do: :error
+
+  defp invoke_backend_close_bounded(state, timeout_ms) do
+    parent = self()
+    result_ref = make_ref()
+    backend = state.backend_mod
+    session = Redacted.value(state.session)
+
+    {pid, monitor_ref} =
+      spawn_monitor(fn ->
+        result =
+          try do
+            if backend.close(session) == :ok, do: :ok, else: :error
+          catch
+            _kind, _reason -> :error
+          end
+
+        send(parent, {result_ref, result})
+      end)
+
+    receive do
+      {^result_ref, result} ->
+        Process.demonitor(monitor_ref, [:flush])
+        result
+
+      {:DOWN, ^monitor_ref, :process, ^pid, _reason} ->
+        receive do
+          {^result_ref, result} -> result
+        after
+          0 -> :error
+        end
+    after
+      timeout_ms ->
+        Process.exit(pid, :kill)
+
+        receive do
+          {:DOWN, ^monitor_ref, :process, ^pid, _reason} -> :error
+        after
+          100 -> :error
+        end
     end
   end
 
@@ -779,25 +1429,48 @@ defmodule Arbor.Voice.ResourceOwner do
   end
 
   defp execute_backend_callback(operation, args, state) do
-    with {:ok, validated_args} <-
-           validate_backend_args(operation, args, state.config[:max_recv_timeout_ms]) do
-      session = Redacted.value(state.session)
+    case validate_backend_args(operation, args, state.config[:max_recv_timeout_ms]) do
+      {:ok, validated_args} ->
+        session = Redacted.value(state.session)
 
-      try do
-        state.backend_mod
-        |> apply(operation, [session | validated_args])
-        |> validate_backend_result(operation, state)
-      catch
-        _kind, _reason ->
-          log_redacted(:backend_callback_error)
-          {:error, :backend_callback_failed}
-      end
+        try do
+          state.backend_mod
+          |> apply(operation, [session | validated_args])
+          |> validate_backend_result(operation, state)
+        catch
+          _kind, _reason ->
+            log_redacted(:backend_callback_error)
+
+            if send_operation?(operation) do
+              poisoned = poison_state(state)
+              {:error, :backend_callback_failed, poisoned}
+            else
+              {:error, :backend_callback_failed}
+            end
+        end
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
   defp validate_backend_result({:ok, new_session}, operation, state)
        when operation in [:configure, :send_text, :send_audio, :send_tool_result] do
     {:ok, %{state | session: Redacted.new(new_session)}}
+  end
+
+  defp validate_backend_result({:error, _reason, latest_session}, operation, state)
+       when operation in [:send_text, :send_audio, :send_tool_result] do
+    next_state =
+      state
+      |> Map.put(:session, Redacted.new(latest_session))
+      |> poison_state()
+
+    {:error, :backend_callback_failed, next_state}
+  end
+
+  defp validate_backend_result({:error, _reason, latest_session}, :configure, state) do
+    {:error, :backend_callback_failed, %{state | session: Redacted.new(latest_session)}}
   end
 
   defp validate_backend_result({:ok, new_session, event}, :recv, state) do
@@ -809,11 +1482,29 @@ defmodule Arbor.Voice.ResourceOwner do
   defp validate_backend_result({:error, :timeout}, :recv, _state),
     do: {:error, :timeout}
 
+  defp validate_backend_result({:error, _reason}, operation, state)
+       when operation in [:send_text, :send_audio, :send_tool_result] do
+    {:error, :backend_callback_failed, poison_state(state)}
+  end
+
   defp validate_backend_result({:error, _reason}, _operation, _state),
     do: {:error, :backend_callback_failed}
 
+  defp validate_backend_result(_result, operation, state)
+       when operation in [:send_text, :send_audio, :send_tool_result] do
+    {:error, :backend_callback_failed, poison_state(state)}
+  end
+
   defp validate_backend_result(_result, _operation, _state),
     do: {:error, :backend_callback_failed}
+
+  defp send_operation?(operation),
+    do: operation in [:send_text, :send_audio, :send_tool_result]
+
+  defp poison_state(state) do
+    _ = state.authority_cell |> Redacted.value() |> EgressAuthority.poison()
+    %{state | poisoned: true}
+  end
 
   defp validate_backend_args(:recv, [timeout], max_recv_timeout_ms)
        when is_integer(timeout) and is_integer(max_recv_timeout_ms) and max_recv_timeout_ms > 0 do
@@ -901,6 +1592,46 @@ defmodule Arbor.Voice.ResourceOwner do
     end
   end
 
+  # A disclosure minted before ordinary cleanup registration succeeds must not
+  # be stranded in Session if owner close remains pending. Reserve exactly one
+  # owner-only slot outside the ordinary cleanup cap for that handoff. If the
+  # configured facade already registered the exact closure, this is a pure
+  # verification and does not add a duplicate obligation.
+  defp do_adopt_provisional_cleanup(state, key, fun) when is_function(fun, 0) do
+    cleanups = Redacted.value(state.cleanups)
+    provisional_key = {@provisional_cleanup_tag, key}
+
+    case Map.fetch(cleanups, key) do
+      {:ok, existing} when existing === fun ->
+        {:ok, cleanups}
+
+      {:ok, _different_cleanup} ->
+        {:error, :provisional_cleanup_conflict}
+
+      :error ->
+        adopt_reserved_provisional_cleanup(cleanups, provisional_key, fun)
+    end
+  end
+
+  defp do_adopt_provisional_cleanup(_state, _key, _fun),
+    do: {:error, :invalid_cleanup}
+
+  defp adopt_reserved_provisional_cleanup(cleanups, provisional_key, fun) do
+    cond do
+      Map.get(cleanups, provisional_key) === fun ->
+        {:ok, cleanups}
+
+      Map.has_key?(cleanups, provisional_key) ->
+        {:error, :provisional_cleanup_conflict}
+
+      Enum.any?(Map.keys(cleanups), &match?({@provisional_cleanup_tag, _}, &1)) ->
+        {:error, :provisional_cleanup_occupied}
+
+      true ->
+        {:ok, Map.put(cleanups, provisional_key, fun)}
+    end
+  end
+
   # ------------------------------------------------------------------
   # Validation and helpers
 
@@ -965,7 +1696,8 @@ defmodule Arbor.Voice.ResourceOwner do
 
   defp validate_backend_opts(backend_opts) when is_list(backend_opts) do
     if Keyword.keyword?(backend_opts) and
-         length(Keyword.keys(backend_opts)) == length(Enum.uniq(Keyword.keys(backend_opts))) do
+         length(Keyword.keys(backend_opts)) == length(Enum.uniq(Keyword.keys(backend_opts))) and
+         not Keyword.has_key?(backend_opts, :effect_authorizer) do
       :ok
     else
       {:error, {:invalid_owner_config, :backend_opts}}
@@ -973,6 +1705,50 @@ defmodule Arbor.Voice.ResourceOwner do
   end
 
   defp validate_backend_opts(_backend_opts), do: {:error, {:invalid_owner_config, :backend_opts}}
+
+  defp validate_handoff(%{authority: authority, initial_cleanup: nil})
+       when is_map(authority) do
+    if Map.get(authority, :kind) == :local and Map.get(authority, :route) == :none do
+      :ok
+    else
+      {:error, :invalid_authority}
+    end
+  end
+
+  defp validate_handoff(%{
+         authority: %{kind: :external} = authority,
+         initial_cleanup: {key, cleanup}
+       })
+       when is_map(authority) and is_function(cleanup, 0) do
+    if key == :voice_realtime_route_capability do
+      :ok
+    else
+      {:error, :invalid_authority}
+    end
+  end
+
+  defp validate_handoff(_handoff), do: {:error, :invalid_authority}
+
+  defp initial_cleanups(%{initial_cleanup: nil}), do: %{}
+
+  defp initial_cleanups(%{initial_cleanup: {key, cleanup}})
+       when is_function(cleanup, 0),
+       do: %{key => cleanup}
+
+  defp run_open_failure_cleanups(state) do
+    cleanups =
+      state.cleanups
+      |> Redacted.value()
+      |> Map.new(fn {key, fun} -> {key, {fun, state.config[:cleanup_attempts]}} end)
+
+    deadline_ms = now_ms() + state.config[:close_timeout_ms]
+
+    run_cleanups_without_supervisor(
+      cleanups,
+      state.config[:cleanup_per_attempt_timeout_ms],
+      deadline_ms
+    )
+  end
 
   defp validate_pos_int(value, _key) when is_integer(value) and value > 0, do: :ok
   defp validate_pos_int(_value, key), do: {:error, {:invalid_owner_config, key}}
@@ -1015,9 +1791,24 @@ defmodule Arbor.Voice.ResourceOwner do
     end
   end
 
+  defp validate_backend_handoff(backend_module, %{authority: %{route: expected_route}}) do
+    try do
+      if backend_module.egress_route() == expected_route do
+        :ok
+      else
+        {:error, :invalid_authority}
+      end
+    catch
+      _kind, _reason -> {:error, :invalid_authority}
+    end
+  end
+
+  defp validate_backend_handoff(_backend_module, _handoff), do: {:error, :invalid_authority}
+
   defp normalize_supervisor_error({:already_started, _pid}), do: :owner_already_started
   defp normalize_supervisor_error(:max_children), do: :supervisor_capacity_exceeded
   defp normalize_supervisor_error(:backend_open_failed), do: :backend_open_failed
+  defp normalize_supervisor_error(:invalid_authority), do: :invalid_authority
   defp normalize_supervisor_error(:cleanup_unavailable), do: :cleanup_unavailable
   defp normalize_supervisor_error(_), do: :supervisor_unavailable
 
@@ -1025,22 +1816,6 @@ defmodule Arbor.Voice.ResourceOwner do
 
   defp alive?(pid) when is_pid(pid), do: Process.alive?(pid)
   defp alive?(_), do: false
-
-  defp cancel_timer(state, key) do
-    ref = Map.get(state, key)
-
-    if is_reference(ref) do
-      _ = Process.cancel_timer(ref)
-    end
-
-    Map.put(state, key, nil)
-  end
-
-  defp cancel_timers(state) do
-    state
-    |> cancel_timer(:coordinator_ready_ref)
-    |> cancel_timer(:close_deadline_ref)
-  end
 
   defp log_redacted(tag) do
     require Logger

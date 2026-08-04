@@ -12,6 +12,8 @@ defmodule Arbor.Voice.ManagedCodingDispatchSecurityRegressionTest do
   alias Arbor.Voice.Backend.XaiRealtime
   alias Arbor.Voice.CodingPlanFactory
   alias Arbor.Voice.Session.ManagedDispatchCore
+  alias Arbor.Voice.Test.EgressAuthorityFakes
+  alias Arbor.Voice.Test.EgressAuthorityFakes.{AI, Security, Trust}
   alias Arbor.Voice.ToolRouter.FrontDesk
 
   alias Arbor.Voice.Test.SessionFakes.{
@@ -239,6 +241,7 @@ defmodule Arbor.Voice.ManagedCodingDispatchSecurityRegressionTest do
   end
 
   setup do
+    EgressAuthorityFakes.reset()
     SharedTransport.ensure!()
     FakeAgentFacade.ensure!()
     FakeAgentFacade.reset()
@@ -246,23 +249,30 @@ defmodule Arbor.Voice.ManagedCodingDispatchSecurityRegressionTest do
     FakeOrchestrator.reset()
     ContextCapturingFrontDesk.reset()
 
-    previous_agent = Application.fetch_env(:arbor_voice, :agent_module)
-    previous_orch = Application.fetch_env(:arbor_voice, :orchestrator_module)
+    previous_modules =
+      for key <- [
+            :agent_module,
+            :orchestrator_module,
+            :ai_module,
+            :security_module,
+            :trust_module
+          ],
+          into: %{} do
+        {key, Application.fetch_env(:arbor_voice, key)}
+      end
 
     on_exit(fn ->
-      case previous_agent do
-        {:ok, value} -> Application.put_env(:arbor_voice, :agent_module, value)
-        :error -> Application.delete_env(:arbor_voice, :agent_module)
-      end
-
-      case previous_orch do
-        {:ok, value} -> Application.put_env(:arbor_voice, :orchestrator_module, value)
-        :error -> Application.delete_env(:arbor_voice, :orchestrator_module)
-      end
+      Enum.each(previous_modules, fn
+        {key, {:ok, value}} -> Application.put_env(:arbor_voice, key, value)
+        {key, :error} -> Application.delete_env(:arbor_voice, key)
+      end)
     end)
 
     Application.put_env(:arbor_voice, :agent_module, FakeAgentFacade)
     Application.put_env(:arbor_voice, :orchestrator_module, FakeOrchestrator)
+    Application.put_env(:arbor_voice, :ai_module, AI)
+    Application.put_env(:arbor_voice, :security_module, Security)
+    Application.put_env(:arbor_voice, :trust_module, Trust)
 
     frames = [
       %{
@@ -510,7 +520,7 @@ defmodule Arbor.Voice.ManagedCodingDispatchSecurityRegressionTest do
 
   @tag spec: "VOICE-10"
   @tag :security_regression
-  test "security regression: missing proof omits session_token key rather than nil", %{
+  test "security regression: missing proof fails before dispatch and provider effects", %{
     opts: opts
   } do
     FakeAgentFacade.reset()
@@ -529,14 +539,10 @@ defmodule Arbor.Voice.ManagedCodingDispatchSecurityRegressionTest do
 
     opts = Keyword.delete(opts, :session_token)
     {user_id, agent_id} = unique_ids()
-    assert {:ok, key} = Voice.start_session(user_id, agent_id, opts)
-    assert {:ok, @confirmation} = Voice.text_turn(user_id, agent_id, "dispatch")
-
-    assert [call] = FakeAgentFacade.dispatch_calls()
-    refute Keyword.has_key?(call.opts, :session_token)
-    assert call.opts == []
-
-    assert :ok = Voice.stop_session(key)
+    assert {:error, :start_failed} = Voice.start_session(user_id, agent_id, opts)
+    assert FakeAgentFacade.dispatch_calls() == []
+    assert SharedTransport.sent() == []
+    assert EgressAuthorityFakes.active_capabilities() == []
   end
 
   @tag spec: "VOICE-10"
@@ -587,19 +593,12 @@ defmodule Arbor.Voice.ManagedCodingDispatchSecurityRegressionTest do
     assert FakeCommsSession.record_calls(recorder) == []
     assert :ets.lookup(speech_box, :spoken) == []
 
-    assert {:ok, status} = Voice.session_status(key)
-    refute inspect(status) =~ "ship after agent"
-    refute inspect(status) =~ "delegation"
-    refute inspect(status) =~ "task_voice_dispatch"
-
-    [{session_pid, _}] = Elixir.Registry.lookup(Arbor.Voice.Registry, key)
-    state = :sys.get_state(session_pid)
-    # Turn cleared; no live receipt left on Session.
-    assert state.turn == nil
-    refute inspect(state) =~ "delegation_task"
-    refute inspect(state) =~ "ship after agent"
-
-    assert :ok = Voice.stop_session(key)
+    # A physical send failure is potentially partial protocol state. The
+    # session is quarantined and cannot be reused after cleanup/close.
+    assert {:error, :not_found} = Voice.session_status(key)
+    assert {:error, :not_found} = Voice.text_turn(user_id, agent_id, "must not reuse")
+    assert_session_gone(key)
+    assert {:error, :not_found} = Voice.stop_session(key)
   end
 
   @tag spec: "VOICE-10"
@@ -788,5 +787,18 @@ defmodule Arbor.Voice.ManagedCodingDispatchSecurityRegressionTest do
 
     assert length(outputs) == 1
     assert :ok = Voice.stop_session(key)
+  end
+
+  defp assert_session_gone(key) do
+    case Elixir.Registry.lookup(Arbor.Voice.Registry, key) do
+      [] ->
+        :ok
+
+      [{pid, _value}] ->
+        ref = Process.monitor(pid)
+
+        assert_receive {:DOWN, ^ref, :process, ^pid, _reason}, 1_000
+        assert Elixir.Registry.lookup(Arbor.Voice.Registry, key) == []
+    end
   end
 end

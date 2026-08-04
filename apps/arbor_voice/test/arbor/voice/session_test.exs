@@ -66,6 +66,11 @@ defmodule Arbor.Voice.SessionTest do
     :ok
   end
 
+  test "public stop timeout covers owner close, death confirmation, and scheduling margin" do
+    assert Arbor.Voice.Session.stop_call_timeout_ms() >=
+             Arbor.Voice.ResourceOwner.close_call_timeout_ms() + 10_000
+  end
+
   @tag :security_regression
   @tag spec: "VOICE-17"
   test "security regression: public backend_opts cannot inject the internal effect authorizer" do

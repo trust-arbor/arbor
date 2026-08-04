@@ -403,7 +403,8 @@ defmodule Arbor.Voice.SessionTextTurnTest do
                c == :voice and t == :turn_completed
              end)
 
-      assert :ok = Voice.stop_session(key)
+      assert {:error, :not_found} = Voice.stop_session(key)
+      assert :ok = wait_until(fn -> ControllableTurnBackend.close_count() == 1 end, 2_000)
     end
 
     @tag spec: "VOICE-5"
@@ -606,7 +607,8 @@ defmodule Arbor.Voice.SessionTextTurnTest do
       assert {:error, :turn_failed} = Voice.text_turn(user_id, agent_id, "hi")
       # Mark-before-send: one attempt was recorded even though send failed.
       assert length(ControllableTurnBackend.tool_results()) == 1
-      assert :ok = Voice.stop_session(key)
+      assert {:error, :not_found} = Voice.stop_session(key)
+      assert :ok = wait_until(fn -> ControllableTurnBackend.close_count() == 1 end, 2_000)
     end
   end
 
@@ -1167,7 +1169,7 @@ defmodule Arbor.Voice.SessionTextTurnTest do
     end
 
     @tag spec: "VOICE-8"
-    test "cancel queues one attempt per admitted id even when earlier backend results error" do
+    test "cancel queue is fenced and closes after the first physical send poisons the owner" do
       ctx = tool_router_opts(ReportingRouter, 30_000)
       ReportingRouter.report_to(self())
 
@@ -1185,7 +1187,9 @@ defmodule Arbor.Voice.SessionTextTurnTest do
         assert_receive {:worker_pid, _}, 2_000
       end
 
-      # Fail every tool-result send; every admitted id must still be attempted.
+      # The three requests are queued before the same-sender fence. The first
+      # physical failure poisons the owner, so later queued requests fail closed
+      # without additional backend effects before close.
       ControllableTurnBackend.set_tool_result_mode(:error)
 
       assert :ok = Voice.stop_session(key)
@@ -1193,13 +1197,13 @@ defmodule Arbor.Voice.SessionTextTurnTest do
 
       results = ControllableTurnBackend.tool_results()
       ids = results |> Enum.map(&elem(&1, 0)) |> Enum.sort()
-      assert ids == ["c1", "c2", "c3"]
+      assert ids == ["c1"]
 
       assert Enum.all?(results, fn {_id, out} ->
                Jason.decode!(out)["code"] == "tool_cancelled"
              end)
 
-      # All cancel attempts precede close (same-sender mailbox order).
+      # The admitted physical attempt precedes close (same-sender mailbox order).
       log = ControllableTurnBackend.op_log()
       close_idx = Enum.find_index(log, &(&1 == :close))
       assert is_integer(close_idx)
@@ -1210,7 +1214,7 @@ defmodule Arbor.Voice.SessionTextTurnTest do
         |> Enum.filter(fn {op, _} -> match?({:tool_result, _}, op) end)
         |> Enum.map(fn {_, i} -> i end)
 
-      assert length(tool_idxs) == 3
+      assert length(tool_idxs) == 1
       assert Enum.all?(tool_idxs, fn i -> i < close_idx end)
     end
 

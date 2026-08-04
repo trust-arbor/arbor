@@ -37,6 +37,66 @@ defmodule Arbor.Voice.ResourceOwnerTest do
     end
   end
 
+  defmodule ConfigureLatestBackend do
+    @behaviour Arbor.Voice.RealtimeBackend
+
+    def egress_route, do: :none
+    def open(opts), do: {:ok, %{parent: Keyword.fetch!(opts, :parent), generation: 0}}
+
+    def configure(session, _config) do
+      {:error, :distinctive_configure_failure, %{session | generation: 1}}
+    end
+
+    def send_text(session, _text), do: {:ok, session}
+    def send_audio(session, _chunk), do: {:ok, session}
+    def send_tool_result(session, _call_id, _output), do: {:ok, session}
+    def recv(_session, _timeout), do: {:error, :timeout}
+
+    def close(session) do
+      send(session.parent, {:configure_latest_closed, session.generation})
+      :ok
+    end
+
+    def meta(_session),
+      do: %{backend: :configure_latest, mode: :local, input_rate: nil, output_rate: nil}
+  end
+
+  defmodule DelayedCleanupSupervisor do
+    use GenServer
+
+    def start_link(test_pid, marker), do: GenServer.start_link(__MODULE__, {test_pid, marker})
+
+    @impl true
+    def init({test_pid, marker}), do: {:ok, %{test_pid: test_pid, marker: marker, starts: 0}}
+
+    @impl true
+    def handle_call(
+          {:start_task, [_owner, _callers, {:erlang, :apply, [fun, []]}], _restart, _shutdown},
+          _from,
+          state
+        )
+        when is_function(fun, 0) do
+      attempt = state.starts + 1
+      test_pid = state.test_pid
+      marker = state.marker
+
+      pid =
+        spawn(fn ->
+          send(test_pid, {marker, :coordinator_spawned, attempt, self()})
+
+          if attempt == 1 do
+            receive do
+              :run_delayed_coordinator -> fun.()
+            end
+          else
+            fun.()
+          end
+        end)
+
+      {:reply, {:ok, pid}, %{state | starts: attempt}}
+    end
+  end
+
   setup do
     :ok = Backend.start_test_table!()
 
@@ -99,6 +159,18 @@ defmodule Arbor.Voice.ResourceOwnerTest do
     assert Backend.close_count(owner) == 1
   end
 
+  @tag :security_regression
+  @tag spec: "VOICE-17"
+  test "configure failure retains and closes the backend's latest opaque handle" do
+    assert {:ok, ro} =
+             ResourceOwner.start(self(), ConfigureLatestBackend, [parent: self()], @default_opts)
+
+    assert {:error, :backend_callback_failed} = ResourceOwner.configure(ro, %{})
+    assert :ok = ResourceOwner.close(ro)
+    assert_receive {:configure_latest_closed, 1}, 1_000
+    refute_receive {:configure_latest_closed, 0}, 100
+  end
+
   @tag spec: "VOICE-5"
   test "compiled backend is loaded before callback validation" do
     backend = Arbor.Voice.Test.FakeBackend
@@ -152,6 +224,10 @@ defmodule Arbor.Voice.ResourceOwnerTest do
         assert {:error, :foreign_caller} = ResourceOwner.recv(ro, 10)
         assert {:error, :foreign_caller} = ResourceOwner.meta(ro)
         assert {:error, :foreign_caller} = ResourceOwner.register_cleanup(ro, :x, fn -> :ok end)
+
+        assert {:error, :foreign_caller} =
+                 ResourceOwner.adopt_provisional_cleanup(ro, :x, fn -> :ok end)
+
         assert {:error, :foreign_caller} = ResourceOwner.remove_cleanup(ro, :x)
         assert {:error, :foreign_caller} = ResourceOwner.close(ro)
         send(owner, :foreign_done)
@@ -191,7 +267,7 @@ defmodule Arbor.Voice.ResourceOwnerTest do
   # ── normal close ──
 
   @tag spec: "VOICE-7"
-  test "normal close closes the backend exactly once, runs cleanups, and removes the child" do
+  test "normal close serializes multiple cleanup children in one generation and removes the owner" do
     owner = self()
 
     me = self()
@@ -221,6 +297,141 @@ defmodule Arbor.Voice.ResourceOwnerTest do
       cleanup_before_count,
       2_000
     )
+  end
+
+  @tag spec: "VOICE-17"
+  test "planned ResourceSupervisor child shutdown runs the bounded terminate backstop" do
+    marker = make_ref()
+    test_pid = self()
+
+    assert {:ok, ro} = ResourceOwner.start(self(), Backend, [parent: self()], @default_opts)
+    ro_ref = Process.monitor(ro)
+
+    :ok =
+      ResourceOwner.register_cleanup(ro, :planned_shutdown_cleanup, fn ->
+        send(test_pid, {marker, :cleanup_ran})
+        :ok
+      end)
+
+    assert :ok = DynamicSupervisor.terminate_child(Arbor.Voice.ResourceSupervisor, ro)
+    assert_receive {^marker, :cleanup_ran}, 500
+    assert_receive {:DOWN, ^ro_ref, :process, ^ro, :shutdown}, 500
+    assert Backend.close_count(self()) == 1
+  end
+
+  @tag spec: "VOICE-17"
+  test "killing a coordinator kills its in-flight child and stale completion cannot skip replay" do
+    marker = make_ref()
+    gate = :atomics.new(1, signed: false)
+    attempts = :atomics.new(1, signed: false)
+
+    opts =
+      Keyword.merge(@default_opts,
+        close_timeout_ms: 750,
+        cleanup_attempts: 1,
+        cleanup_per_attempt_timeout_ms: 500
+      )
+
+    assert {:ok, ro} = ResourceOwner.start(self(), Backend, [parent: self()], opts)
+    ro_ref = Process.monitor(ro)
+
+    on_exit(fn ->
+      :atomics.put(gate, 1, 1)
+      await_process_exit(ro, 2_000)
+    end)
+
+    test_pid = self()
+
+    :ok =
+      ResourceOwner.register_cleanup(ro, :guarded_cleanup, fn ->
+        attempt = :atomics.add_get(attempts, 1, 1)
+        send(test_pid, {marker, :worker_started, attempt, self()})
+        send(test_pid, {marker, :pre_ack_effect, attempt})
+
+        wait = fn wait ->
+          if :atomics.get(gate, 1) == 1 do
+            send(test_pid, {marker, :post_gate_effect, attempt})
+            :ok
+          else
+            receive do
+            after
+              10 -> wait.(wait)
+            end
+          end
+        end
+
+        wait.(wait)
+      end)
+
+    request = :gen_server.send_request(ro, :close)
+    assert_receive {^marker, :worker_started, 1, first_worker}, 500
+    assert_receive {^marker, :pre_ack_effect, 1}, 500
+
+    %{generation: old_generation, pid: old_coordinator, child: %{pid: ^first_worker}} =
+      cleanup_attempt_snapshot(ro)
+
+    coordinator_ref = Process.monitor(old_coordinator)
+    worker_ref = Process.monitor(first_worker)
+    Process.exit(old_coordinator, :kill)
+
+    assert_receive {:DOWN, ^coordinator_ref, :process, ^old_coordinator, :killed}, 500
+    assert_receive {:DOWN, ^worker_ref, :process, ^first_worker, :killed}, 500
+
+    assert_receive {^marker, :worker_started, replay_attempt, replay_worker}, 1_000
+    assert replay_attempt >= 2
+    refute replay_worker == first_worker
+    assert_receive {^marker, :pre_ack_effect, ^replay_attempt}, 500
+
+    send(ro, {:cleanup_result, old_generation, old_coordinator, [:guarded_cleanup]})
+    refute_receive {^marker, :post_gate_effect, 1}, 50
+
+    :atomics.put(gate, 1, 1)
+    assert_receive {^marker, :post_gate_effect, ^replay_attempt}, 500
+    refute_receive {^marker, :post_gate_effect, 1}, 100
+
+    assert {:reply, :ok} = :gen_server.wait_response(request, 1_000)
+    assert_receive {:DOWN, ^ro_ref, :process, ^ro, :normal}, 500
+  end
+
+  @tag spec: "VOICE-17"
+  test "ready timeout retires one exact generation before a replacement can run" do
+    marker = make_ref()
+    test_pid = self()
+    {:ok, cleanup_supervisor} = DelayedCleanupSupervisor.start_link(self(), marker)
+
+    opts =
+      Keyword.merge(@default_opts,
+        close_timeout_ms: 750,
+        cleanup_ready_timeout_ms: 50,
+        cleanup_supervisor: cleanup_supervisor
+      )
+
+    assert {:ok, ro} = ResourceOwner.start(self(), Backend, [parent: self()], opts)
+    ro_ref = Process.monitor(ro)
+
+    :ok =
+      ResourceOwner.register_cleanup(ro, :ready_race_cleanup, fn ->
+        send(test_pid, {marker, :cleanup_ran})
+        :ok
+      end)
+
+    request = :gen_server.send_request(ro, :close)
+    assert_receive {^marker, :coordinator_spawned, 1, first_coordinator}, 500
+
+    %{generation: first_generation, pid: ^first_coordinator} = cleanup_attempt_snapshot(ro)
+    first_ref = Process.monitor(first_coordinator)
+    assert_receive {:DOWN, ^first_ref, :process, ^first_coordinator, :killed}, 500
+
+    assert_receive {^marker, :coordinator_spawned, 2, second_coordinator}, 500
+    refute second_coordinator == first_coordinator
+
+    send(ro, {:cleanup_ready, first_generation, first_coordinator})
+
+    assert_receive {^marker, :cleanup_ran}, 500
+    refute_receive {^marker, :coordinator_spawned, 3, _pid}, 100
+    refute_receive {^marker, :cleanup_ran}, 100
+    assert {:reply, :ok} = :gen_server.wait_response(request, 1_000)
+    assert_receive {:DOWN, ^ro_ref, :process, ^ro, :normal}, 500
   end
 
   # ── forced owner death ──
@@ -273,6 +484,130 @@ defmodule Arbor.Voice.ResourceOwnerTest do
     assert Process.whereis(Arbor.Voice.Session) == nil
   end
 
+  @tag spec: "VOICE-17"
+  test "cleanup supervisor death before Session owner death retains cleanup in ResourceOwner" do
+    test_pid = self()
+    marker = make_ref()
+    gate = :atomics.new(1, signed: false)
+    {:ok, cleanup_supervisor} = Task.Supervisor.start_link()
+    Process.unlink(cleanup_supervisor)
+
+    owner_pid =
+      spawn(fn ->
+        opts = Keyword.merge(@default_opts, cleanup_supervisor: cleanup_supervisor)
+        {:ok, ro} = ResourceOwner.start(self(), Backend, [parent: self()], opts)
+
+        :ok =
+          ResourceOwner.register_cleanup(ro, :retained_after_both_deaths, fn ->
+            if :atomics.get(gate, 1) == 1 do
+              send(test_pid, {marker, :cleanup_ran})
+              :ok
+            else
+              {:error, :blocked}
+            end
+          end)
+
+        send(test_pid, {marker, :ready, self(), ro})
+        Process.sleep(:infinity)
+      end)
+
+    assert_receive {^marker, :ready, ^owner_pid, ro}, 1_000
+    ro_ref = Process.monitor(ro)
+
+    on_exit(fn ->
+      :atomics.put(gate, 1, 1)
+      if Process.alive?(owner_pid), do: Process.exit(owner_pid, :kill)
+      if Process.alive?(cleanup_supervisor), do: Process.exit(cleanup_supervisor, :kill)
+      await_process_exit(ro, 2_000)
+    end)
+
+    cleanup_ref = Process.monitor(cleanup_supervisor)
+    Process.exit(cleanup_supervisor, :kill)
+    assert_receive {:DOWN, ^cleanup_ref, :process, ^cleanup_supervisor, :killed}, 500
+
+    owner_ref = Process.monitor(owner_pid)
+    Process.exit(owner_pid, :kill)
+    assert_receive {:DOWN, ^owner_ref, :process, ^owner_pid, :killed}, 500
+    assert Process.alive?(ro)
+
+    :atomics.put(gate, 1, 1)
+    assert_receive {^marker, :cleanup_ran}, 1_000
+    assert_receive {:DOWN, ^ro_ref, :process, ^ro, :normal}, 1_000
+  end
+
+  @tag spec: "VOICE-17"
+  test "Session owner death before cleanup supervisor death kills stale child and replays cleanup" do
+    test_pid = self()
+    marker = make_ref()
+    gate = :atomics.new(1, signed: false)
+    attempts = :atomics.new(1, signed: false)
+    {:ok, cleanup_supervisor} = Task.Supervisor.start_link()
+    Process.unlink(cleanup_supervisor)
+
+    owner_pid =
+      spawn(fn ->
+        opts =
+          Keyword.merge(@default_opts,
+            cleanup_supervisor: cleanup_supervisor,
+            cleanup_per_attempt_timeout_ms: 500
+          )
+
+        {:ok, ro} = ResourceOwner.start(self(), Backend, [parent: self()], opts)
+
+        :ok =
+          ResourceOwner.register_cleanup(ro, :retained_after_coordinator_loss, fn ->
+            attempt = :atomics.add_get(attempts, 1, 1)
+            send(test_pid, {marker, :cleanup_worker, attempt, self()})
+
+            wait = fn wait ->
+              if :atomics.get(gate, 1) == 1 do
+                send(test_pid, {marker, :cleanup_ran, attempt})
+                :ok
+              else
+                receive do
+                after
+                  10 -> wait.(wait)
+                end
+              end
+            end
+
+            wait.(wait)
+          end)
+
+        send(test_pid, {marker, :ready, self(), ro})
+        Process.sleep(:infinity)
+      end)
+
+    assert_receive {^marker, :ready, ^owner_pid, ro}, 1_000
+    ro_ref = Process.monitor(ro)
+
+    on_exit(fn ->
+      :atomics.put(gate, 1, 1)
+      if Process.alive?(owner_pid), do: Process.exit(owner_pid, :kill)
+      if Process.alive?(cleanup_supervisor), do: Process.exit(cleanup_supervisor, :kill)
+      await_process_exit(ro, 2_000)
+    end)
+
+    owner_ref = Process.monitor(owner_pid)
+    Process.exit(owner_pid, :kill)
+    assert_receive {:DOWN, ^owner_ref, :process, ^owner_pid, :killed}, 500
+    assert_receive {^marker, :cleanup_worker, 1, stale_worker}, 500
+    stale_worker_ref = Process.monitor(stale_worker)
+
+    cleanup_ref = Process.monitor(cleanup_supervisor)
+    Process.exit(cleanup_supervisor, :kill)
+    assert_receive {:DOWN, ^cleanup_ref, :process, ^cleanup_supervisor, :killed}, 500
+    assert_receive {:DOWN, ^stale_worker_ref, :process, ^stale_worker, :killed}, 500
+    assert Process.alive?(ro)
+
+    assert_receive {^marker, :cleanup_worker, replay_attempt, _replay_worker}, 1_000
+    assert replay_attempt >= 2
+    :atomics.put(gate, 1, 1)
+    assert_receive {^marker, :cleanup_ran, ^replay_attempt}, 1_000
+    refute_receive {^marker, :cleanup_ran, 1}, 100
+    assert_receive {:DOWN, ^ro_ref, :process, ^ro, :normal}, 1_000
+  end
+
   # ── registration invariants ──
 
   @tag spec: "VOICE-7"
@@ -302,6 +637,54 @@ defmodule Arbor.Voice.ResourceOwnerTest do
              ResourceOwner.register_cleanup(ro, 17, fn -> :ok end)
 
     assert :ok = ResourceOwner.close(ro)
+  end
+
+  @tag spec: "VOICE-17"
+  test "one provisional cleanup can be adopted beyond the ordinary cleanup cap" do
+    marker = make_ref()
+    test_pid = self()
+
+    assert {:ok, ro} = ResourceOwner.start(self(), Backend, [parent: self()], @default_opts)
+
+    for i <- 1..16 do
+      :ok = ResourceOwner.register_cleanup(ro, i, fn -> :ok end)
+    end
+
+    cleanup = fn -> send(test_pid, {marker, :provisional_cleanup}) end
+
+    assert :ok = ResourceOwner.adopt_provisional_cleanup(ro, :turn, cleanup)
+    assert :ok = ResourceOwner.adopt_provisional_cleanup(ro, :turn, cleanup)
+
+    assert {:error, :provisional_cleanup_occupied} =
+             ResourceOwner.adopt_provisional_cleanup(ro, :other_turn, fn -> :ok end)
+
+    assert :ok = ResourceOwner.close(ro)
+    assert_receive {^marker, :provisional_cleanup}, 1_000
+  end
+
+  @tag spec: "VOICE-17"
+  test "provisional adoption coalesces an exact ordinary cleanup without duplicate execution" do
+    calls = :atomics.new(1, signed: false)
+
+    assert {:ok, ro} = ResourceOwner.start(self(), Backend, [parent: self()], @default_opts)
+
+    cleanup = fn ->
+      _ = :atomics.add_get(calls, 1, 1)
+      :ok
+    end
+
+    :ok = ResourceOwner.register_cleanup(ro, :turn, cleanup)
+    :ok = ResourceOwner.adopt_provisional_cleanup(ro, :turn, cleanup)
+
+    assert {:error, :provisional_cleanup_conflict} =
+             ResourceOwner.adopt_provisional_cleanup(ro, :turn, fn -> :ok end)
+
+    owner_state = :sys.get_state(ro)
+    assert %{turn: ^cleanup} = Arbor.Voice.Redacted.value(owner_state.cleanups)
+    assert map_size(Arbor.Voice.Redacted.value(owner_state.cleanups)) == 1
+
+    assert :ok = ResourceOwner.close(ro)
+    assert :atomics.get(calls, 1) == 1
   end
 
   @tag spec: "VOICE-7"
@@ -506,42 +889,85 @@ defmodule Arbor.Voice.ResourceOwnerTest do
   # ── cleanup failure modes ──
 
   @tag spec: "VOICE-7"
-  test "one failing cleanup does not suppress the rest" do
+  test "one failing cleanup remains owned without suppressing the rest and later recovers" do
     owner = self()
     me = self()
     marker = make_ref()
+    gate = :atomics.new(1, signed: false)
 
-    assert {:ok, ro} = ResourceOwner.start(self(), Backend, [parent: owner], @default_opts)
+    opts = Keyword.merge(@default_opts, close_timeout_ms: 200)
+    assert {:ok, ro} = ResourceOwner.start(self(), Backend, [parent: owner], opts)
+    ro_ref = Process.monitor(ro)
 
-    :ok =
-      ResourceOwner.register_cleanup(ro, :fail, fn -> raise "boom secret=#{inspect(marker)}" end)
-
-    :ok = ResourceOwner.register_cleanup(ro, :ok, fn -> send(me, {marker, :ok_cleanup}) end)
-
-    assert :ok = ResourceOwner.close(ro)
-    assert_receive {^marker, :ok_cleanup}, 2_000
-  end
-
-  @tag spec: "VOICE-7"
-  test "cleanup timeout is retried and eventually exhausts without suppressing others" do
-    owner = self()
-    me = self()
-    marker = make_ref()
-    cleanup_before_count = supervisor_child_count(Arbor.Voice.ResourceCleanupTaskSupervisor)
-
-    assert {:ok, ro} = ResourceOwner.start(self(), Backend, [parent: owner], @default_opts)
+    on_exit(fn ->
+      :atomics.put(gate, 1, 1)
+      await_process_exit(ro, 2_000)
+    end)
 
     :ok =
-      ResourceOwner.register_cleanup(ro, :slow, fn ->
-        Process.sleep(500)
-        :ok
+      ResourceOwner.register_cleanup(ro, :fail, fn ->
+        send(me, {marker, :failing_cleanup_attempt})
+
+        if :atomics.get(gate, 1) == 1 do
+          :ok
+        else
+          raise "boom secret=#{inspect(marker)}"
+        end
       end)
 
     :ok = ResourceOwner.register_cleanup(ro, :ok, fn -> send(me, {marker, :ok_cleanup}) end)
 
-    assert :ok = ResourceOwner.close(ro)
+    assert {:error, :owner_timeout} = ResourceOwner.close(ro)
     assert_receive {^marker, :ok_cleanup}, 2_000
-    refute Process.alive?(ro)
+    assert_receive {^marker, :failing_cleanup_attempt}, 2_000
+    assert Process.alive?(ro)
+
+    :atomics.put(gate, 1, 1)
+    assert_receive {:DOWN, ^ro_ref, :process, ^ro, :normal}, 2_000
+  end
+
+  @tag spec: "VOICE-7"
+  test "cleanup timeout remains pending after the caller deadline and later recovers" do
+    owner = self()
+    me = self()
+    marker = make_ref()
+    gate = :atomics.new(1, signed: false)
+    cleanup_before_count = supervisor_child_count(Arbor.Voice.ResourceCleanupTaskSupervisor)
+
+    opts =
+      Keyword.merge(@default_opts,
+        close_timeout_ms: 250,
+        cleanup_per_attempt_timeout_ms: 75
+      )
+
+    assert {:ok, ro} = ResourceOwner.start(self(), Backend, [parent: owner], opts)
+    ro_ref = Process.monitor(ro)
+
+    on_exit(fn ->
+      :atomics.put(gate, 1, 1)
+      await_process_exit(ro, 2_000)
+    end)
+
+    :ok =
+      ResourceOwner.register_cleanup(ro, :slow, fn ->
+        send(me, {marker, {:slow_worker, self()}})
+
+        if :atomics.get(gate, 1) == 1 do
+          :ok
+        else
+          Process.sleep(10_000)
+        end
+      end)
+
+    :ok = ResourceOwner.register_cleanup(ro, :ok, fn -> send(me, {marker, :ok_cleanup}) end)
+
+    assert {:error, :owner_timeout} = ResourceOwner.close(ro)
+    assert_receive {^marker, :ok_cleanup}, 2_000
+    assert_receive {^marker, {:slow_worker, _worker}}, 2_000
+    assert Process.alive?(ro)
+
+    :atomics.put(gate, 1, 1)
+    assert_receive {:DOWN, ^ro_ref, :process, ^ro, :normal}, 2_000
 
     wait_for_supervisor_child_count(
       Arbor.Voice.ResourceCleanupTaskSupervisor,
@@ -551,31 +977,51 @@ defmodule Arbor.Voice.ResourceOwnerTest do
   end
 
   @tag spec: "VOICE-7"
-  test "cleanup retries are round-based" do
+  test "round-based raise exhaustion remains pending and later recovers" do
     owner = self()
     me = self()
     marker = make_ref()
+    gate = :atomics.new(1, signed: false)
 
     # Custom opts with 3 attempts so we can observe round ordering.
-    opts = Keyword.merge(@default_opts, cleanup_attempts: 3, cleanup_per_attempt_timeout_ms: 50)
+    opts =
+      Keyword.merge(@default_opts,
+        close_timeout_ms: 200,
+        cleanup_attempts: 3,
+        cleanup_per_attempt_timeout_ms: 50
+      )
 
     assert {:ok, ro} = ResourceOwner.start(self(), Backend, [parent: owner], opts)
+    ro_ref = Process.monitor(ro)
+
+    on_exit(fn ->
+      :atomics.put(gate, 1, 1)
+      await_process_exit(ro, 2_000)
+    end)
 
     fail_fun = fn ->
       send(me, {marker, :attempt})
-      raise "still failing secret=secret-value"
+
+      if :atomics.get(gate, 1) == 1 do
+        :ok
+      else
+        raise "still failing secret=secret-value"
+      end
     end
 
     :ok = ResourceOwner.register_cleanup(ro, :fail, fail_fun)
 
-    assert :ok = ResourceOwner.close(ro)
+    assert {:error, :owner_timeout} = ResourceOwner.close(ro)
+    assert Process.alive?(ro)
 
-    # We expect attempts 1, 2, 3 (round-based, all first attempts come first,
-    # but there is only one obligation here so we see three attempts sequentially).
+    # At least one complete configured batch ran; later generations may already
+    # have begun because retained cleanup retries continue after exhaustion.
     assert_receive {^marker, :attempt}, 1_000
     assert_receive {^marker, :attempt}, 1_000
     assert_receive {^marker, :attempt}, 1_000
-    refute_receive {^marker, :attempt}, 200
+
+    :atomics.put(gate, 1, 1)
+    assert_receive {:DOWN, ^ro_ref, :process, ^ro, :normal}, 2_000
   end
 
   @tag spec: "VOICE-7"
@@ -615,30 +1061,49 @@ defmodule Arbor.Voice.ResourceOwnerTest do
   # ── hanging close ──
 
   @tag spec: "VOICE-7"
-  test "hanging backend close does not prevent cleanups from being attempted" do
+  test "hanging backend close kills only its worker while owner retains cleanup and later recovers" do
     owner = self()
     me = self()
     marker = make_ref()
     cleanup_before_count = supervisor_child_count(Arbor.Voice.ResourceCleanupTaskSupervisor)
+    opts = Keyword.merge(@default_opts, close_timeout_ms: 300)
 
-    # Tell the backend to hang longer than the close timeout so coordinator will
-    # still drive cleanups and kill the owner at the deadline.
     assert {:ok, ro} =
              ResourceOwner.start(
                self(),
                Backend,
                [parent: owner, hang_close_for_ms: 10_000],
-               @default_opts
+               opts
              )
+
+    ro_ref = Process.monitor(ro)
+
+    on_exit(fn ->
+      await_process_exit(ro, 2_000)
+    end)
 
     :ok =
       ResourceOwner.register_cleanup(ro, :hung_cleanup, fn -> send(me, {marker, :cleanup_ran}) end)
 
-    assert {:error, :owner_timeout} = ResourceOwner.close(ro)
+    request = :gen_server.send_request(ro, :close)
+
+    assert :ok = wait_until(fn -> backend_close_attempt_pid(ro) != nil end, 200)
+    close_worker = backend_close_attempt_pid(ro)
+    close_worker_ref = Process.monitor(close_worker)
+
+    assert {:reply, {:error, :owner_timeout}} = :gen_server.wait_response(request, 1_000)
     assert_receive {^marker, :cleanup_ran}, 2_000
-    refute Process.alive?(ro)
+    assert_receive {:DOWN, ^close_worker_ref, :process, ^close_worker, :killed}, 1_000
+    assert Process.alive?(ro)
     assert Backend.close_count(owner) == 1
-    assert :ok = ResourceOwner.close(ro)
+
+    started_ms = System.monotonic_time(:millisecond)
+    assert {:error, :owner_timeout} = ResourceOwner.close(ro)
+    assert System.monotonic_time(:millisecond) - started_ms < 100
+
+    assert :ok = Backend.set_hang_close(owner, nil)
+    assert_receive {:DOWN, ^ro_ref, :process, ^ro, :normal}, 2_000
+    assert Backend.close_count(owner) >= 2
 
     wait_for_supervisor_child_count(
       Arbor.Voice.ResourceCleanupTaskSupervisor,
@@ -652,6 +1117,7 @@ defmodule Arbor.Voice.ResourceOwnerTest do
   @tag spec: "VOICE-7"
   test "close is bounded when cleanup supervisor is unavailable" do
     owner = self()
+    marker = make_ref()
 
     {:ok, custom_cleanup_supervisor} = Task.Supervisor.start_link()
     Process.unlink(custom_cleanup_supervisor)
@@ -664,12 +1130,18 @@ defmodule Arbor.Voice.ResourceOwnerTest do
                Keyword.merge(@default_opts, cleanup_supervisor: custom_cleanup_supervisor)
              )
 
+    :ok =
+      ResourceOwner.register_cleanup(ro, :supervisor_independent, fn ->
+        send(owner, {marker, :cleanup_ran})
+      end)
+
     cleanup_ref = Process.monitor(custom_cleanup_supervisor)
     Process.exit(custom_cleanup_supervisor, :kill)
     assert_receive {:DOWN, ^cleanup_ref, :process, ^custom_cleanup_supervisor, :killed}, 1_000
 
-    assert {:error, :cleanup_unavailable} = ResourceOwner.close(ro)
-    assert Backend.close_count(owner) == 0
+    assert :ok = ResourceOwner.close(ro)
+    assert_receive {^marker, :cleanup_ran}, 1_000
+    assert Backend.close_count(owner) == 1
     refute Process.alive?(ro)
   end
 
@@ -702,6 +1174,57 @@ defmodule Arbor.Voice.ResourceOwnerTest do
   end
 
   # ── helpers ──
+
+  defp await_process_exit(pid, timeout_ms) when is_pid(pid) do
+    if Process.alive?(pid) do
+      ref = Process.monitor(pid)
+
+      receive do
+        {:DOWN, ^ref, :process, ^pid, _reason} ->
+          :ok
+      after
+        timeout_ms ->
+          Process.demonitor(ref, [:flush])
+          _ = DynamicSupervisor.terminate_child(Arbor.Voice.ResourceSupervisor, pid)
+          :ok
+      end
+    else
+      :ok
+    end
+  end
+
+  defp backend_close_attempt_pid(owner) do
+    case :sys.get_state(owner) do
+      %{backend_close_attempt: %{pid: pid}} when is_pid(pid) -> pid
+      _state -> nil
+    end
+  catch
+    :exit, _reason -> nil
+  end
+
+  defp cleanup_attempt_snapshot(owner) do
+    %{cleanup_attempt: attempt} = :sys.get_state(owner)
+    attempt
+  end
+
+  defp wait_until(fun, timeout_ms) when is_function(fun, 0) do
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+
+    loop = fn loop ->
+      if fun.() do
+        :ok
+      else
+        if System.monotonic_time(:millisecond) < deadline do
+          Process.sleep(5)
+          loop.(loop)
+        else
+          {:error, :timeout}
+        end
+      end
+    end
+
+    loop.(loop)
+  end
 
   defp supervisor_child_count(supervisor) do
     supervisor

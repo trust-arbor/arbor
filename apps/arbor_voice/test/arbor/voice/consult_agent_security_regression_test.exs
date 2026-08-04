@@ -11,6 +11,8 @@ defmodule Arbor.Voice.ConsultAgentSecurityRegressionTest do
   alias Arbor.Contracts.Session.UserMessage
   alias Arbor.Voice
   alias Arbor.Voice.Backend.XaiRealtime
+  alias Arbor.Voice.Test.EgressAuthorityFakes
+  alias Arbor.Voice.Test.EgressAuthorityFakes.{AI, Security, Trust}
   alias Arbor.Voice.ToolRouter.FrontDesk
 
   alias Arbor.Voice.Test.SessionFakes.{
@@ -189,21 +191,28 @@ defmodule Arbor.Voice.ConsultAgentSecurityRegressionTest do
   end
 
   setup do
+    EgressAuthorityFakes.reset()
     SharedTransport.ensure!()
     FakeAgentFacade.ensure!()
     FakeAgentFacade.reset()
     ContextCapturingFrontDesk.reset()
 
-    previous_agent = Application.fetch_env(:arbor_voice, :agent_module)
+    previous_modules =
+      for key <- [:agent_module, :ai_module, :security_module, :trust_module], into: %{} do
+        {key, Application.fetch_env(:arbor_voice, key)}
+      end
 
     on_exit(fn ->
-      case previous_agent do
-        {:ok, value} -> Application.put_env(:arbor_voice, :agent_module, value)
-        :error -> Application.delete_env(:arbor_voice, :agent_module)
-      end
+      Enum.each(previous_modules, fn
+        {key, {:ok, value}} -> Application.put_env(:arbor_voice, key, value)
+        {key, :error} -> Application.delete_env(:arbor_voice, key)
+      end)
     end)
 
     Application.put_env(:arbor_voice, :agent_module, FakeAgentFacade)
+    Application.put_env(:arbor_voice, :ai_module, AI)
+    Application.put_env(:arbor_voice, :security_module, Security)
+    Application.put_env(:arbor_voice, :trust_module, Trust)
 
     frames = [
       %{
@@ -373,7 +382,7 @@ defmodule Arbor.Voice.ConsultAgentSecurityRegressionTest do
 
   @tag spec: "VOICE-9,VOICE-17"
   @tag :security_regression
-  test "security regression: missing proof retains engagement and omits session_token key", %{
+  test "security regression: missing proof fails before consult and provider effects", %{
     opts: opts
   } do
     FakeAgentFacade.reset()
@@ -392,18 +401,9 @@ defmodule Arbor.Voice.ConsultAgentSecurityRegressionTest do
 
     opts = Keyword.delete(opts, :session_token)
     {user_id, agent_id} = unique_ids()
-    assert {:ok, key} = Voice.start_session(user_id, agent_id, opts)
-    assert {:ok, "ok"} = Voice.text_turn(user_id, agent_id, "consult")
-
-    assert [call] = FakeAgentFacade.calls()
-    assert %UserMessage{} = call.message
-    assert call.message.content == "no proof"
-    assert call.message.transport == :voice
-    assert call.message.sender_id == user_id
-    assert call.message.engagement_id == "eng_consult_e2e"
-    assert Keyword.has_key?(call.opts, :timeout)
-    refute Keyword.has_key?(call.opts, :session_token)
-
-    assert :ok = Voice.stop_session(key)
+    assert {:error, :start_failed} = Voice.start_session(user_id, agent_id, opts)
+    assert FakeAgentFacade.calls() == []
+    assert SharedTransport.sent() == []
+    assert EgressAuthorityFakes.active_capabilities() == []
   end
 end

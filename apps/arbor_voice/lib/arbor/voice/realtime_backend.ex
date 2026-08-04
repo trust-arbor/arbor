@@ -17,6 +17,12 @@ defmodule Arbor.Voice.RealtimeBackend do
   @typedoc "Backend-opaque session handle, passed back into every callback."
   @type session :: term()
 
+  @typedoc "Private backend-to-owner send result retaining the latest opaque session on partial failure."
+  @type send_result ::
+          {:ok, session()}
+          | {:error, term()}
+          | {:error, term(), session()}
+
   @typedoc """
   Source-owned external egress route declared by a backend.
 
@@ -107,7 +113,7 @@ defmodule Arbor.Voice.RealtimeBackend do
                 optional(:tools) => [tool_decl()],
                 optional(:audio) => map()
               }
-            ) :: {:ok, session()} | {:error, term()}
+            ) :: send_result()
 
   @doc """
   Sends a text turn input. Used for text-mode fallback and for injecting
@@ -116,7 +122,7 @@ defmodule Arbor.Voice.RealtimeBackend do
   Returns `{:error, :session_closed}` if the session was already closed, or
   `{:error, term()}` for transport failures.
   """
-  @callback send_text(session(), String.t()) :: {:ok, session()} | {:error, term()}
+  @callback send_text(session(), String.t()) :: send_result()
 
   @doc """
   Sends a chunk of PCM16 audio input (rate per meta/1's input_rate).
@@ -127,7 +133,7 @@ defmodule Arbor.Voice.RealtimeBackend do
   chunk fails backend-specific format validation, or `{:error, term()}` for
   transport failures.
   """
-  @callback send_audio(session(), binary()) :: {:ok, session()} | {:error, term()}
+  @callback send_audio(session(), binary()) :: send_result()
 
   @doc """
   Sends the result of a tool call the backend previously requested via a
@@ -141,7 +147,7 @@ defmodule Arbor.Voice.RealtimeBackend do
   transport failures.
   """
   @callback send_tool_result(session(), call_id :: String.t(), output :: String.t()) ::
-              {:ok, session()} | {:error, term()}
+              send_result()
 
   @doc """
   Blocks up to `timeout` milliseconds for the next backend event. Callers

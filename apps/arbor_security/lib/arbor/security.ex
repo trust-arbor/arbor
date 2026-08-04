@@ -454,6 +454,21 @@ defmodule Arbor.Security do
   def issue_disclosure_capability(opts), do: DisclosureCapability.issue(opts)
 
   @doc """
+  Mint an interactive disclosure capability and return only its opaque id.
+
+  Cross-library consumers should prefer this facade boundary so capability
+  structs remain private to `arbor_security`.
+  """
+  @spec issue_disclosure_capability_id(keyword()) :: {:ok, String.t()} | {:error, atom()}
+  def issue_disclosure_capability_id(opts) do
+    case issue_disclosure_capability(opts) do
+      {:ok, %Capability{id: id}} when is_binary(id) -> {:ok, id}
+      {:error, reason} when is_atom(reason) -> {:error, reason}
+      _ -> {:error, :disclosure_capability_rejected}
+    end
+  end
+
+  @doc """
   Revalidate one exact interactive disclosure capability against a live request.
 
   This is the public, capability-struct-free counterpart to disclosure issuance.
@@ -575,6 +590,21 @@ defmodule Arbor.Security do
   """
   @spec grant(keyword()) :: {:ok, Capability.t()} | {:error, term()}
   def grant(opts), do: grant_capability_to_principal_for_resource(opts)
+
+  @doc """
+  Grant an ordinary capability and return only its opaque id.
+
+  Cross-library consumers should prefer this facade boundary so capability
+  structs remain private to `arbor_security`.
+  """
+  @spec grant_capability_id(keyword()) :: {:ok, String.t()} | {:error, term()}
+  def grant_capability_id(opts) do
+    case grant(opts) do
+      {:ok, %Capability{id: id}} when is_binary(id) -> {:ok, id}
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :capability_grant_failed}
+    end
+  end
 
   @doc "Revoke a capability."
   @spec revoke(String.t(), keyword()) :: :ok | {:error, :not_found | term()}

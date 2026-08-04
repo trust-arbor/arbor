@@ -156,6 +156,26 @@ defmodule Arbor.Voice.Backend.XaiRealtimeTest do
     refute inspect(session) =~ "transport_state"
   end
 
+  @tag :security_regression
+  test "session inspection redacts a populated output accumulator" do
+    secret_delta = "distinctive-populated-accumulator-secret"
+
+    {:ok, session} =
+      XaiRealtime.open(
+        transport: FakeTransport,
+        transport_opts: [
+          frames: [%{"type" => "response.output_text.delta", "delta" => secret_delta}]
+        ],
+        effect_authorizer: &allow_effect/2,
+        oauth_resolver: &stub_resolver/1
+      )
+
+    assert {:ok, session, {:output_text_delta, ^secret_delta}} = XaiRealtime.recv(session, 1_000)
+    assert session.acc == secret_delta
+    refute inspect(session) =~ secret_delta
+    refute inspect(session) =~ "acc:"
+  end
+
   @tag spec: "VOICE-6"
   test "post-connect transport failures cannot echo a retained token" do
     token = "post-connect-secret"
@@ -469,7 +489,9 @@ defmodule Arbor.Voice.Backend.XaiRealtimeTest do
       )
 
     reset_events(key)
-    assert {:error, :xai_effect_not_authorized} = XaiRealtime.send_text(session, "partial")
+
+    assert {:error, :xai_effect_not_authorized, latest_session} =
+             XaiRealtime.send_text(session, "partial")
 
     assert events(key) == [
              {:authorize, :text_item, route},
@@ -477,7 +499,8 @@ defmodule Arbor.Voice.Backend.XaiRealtimeTest do
              {:authorize, :text_response, route}
            ]
 
-    assert :ok = XaiRealtime.close(session)
+    refute inspect(latest_session) =~ "partial"
+    assert :ok = XaiRealtime.close(latest_session)
   end
 
   @tag :security_regression
@@ -507,7 +530,9 @@ defmodule Arbor.Voice.Backend.XaiRealtimeTest do
       )
 
     reset_events(key)
-    assert {:error, :xai_effect_not_authorized} = XaiRealtime.send_audio(session, <<1, 2>>)
+
+    assert {:error, :xai_effect_not_authorized, latest_session} =
+             XaiRealtime.send_audio(session, <<1, 2>>)
 
     assert events(key) == [
              {:authorize, :audio_append, route},
@@ -517,7 +542,7 @@ defmodule Arbor.Voice.Backend.XaiRealtimeTest do
              {:authorize, :audio_response, route}
            ]
 
-    assert :ok = XaiRealtime.close(session)
+    assert :ok = XaiRealtime.close(latest_session)
   end
 
   @tag spec: "VOICE-17"

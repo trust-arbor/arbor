@@ -448,9 +448,12 @@ defmodule Arbor.Voice.Test.SessionFakes do
             closes: 0,
             registers: 0,
             removes: 0,
+            activates: 0,
+            fences: 0,
             configures: 0,
             metas: 0,
-            direct_releases: 0
+            direct_releases: 0,
+            last_owner: nil
           }
         end)
 
@@ -466,6 +469,8 @@ defmodule Arbor.Voice.Test.SessionFakes do
           :closes,
           :registers,
           :removes,
+          :activates,
+          :fences,
           :configures,
           :metas,
           :start_mode,
@@ -482,14 +487,15 @@ defmodule Arbor.Voice.Test.SessionFakes do
     def set_configure_mode(agent, mode), do: Agent.update(agent, &%{&1 | configure_mode: mode})
     def set_meta_mode(agent, mode), do: Agent.update(agent, &%{&1 | meta_mode: mode})
     def set_close_mode(agent, mode), do: Agent.update(agent, &%{&1 | close_mode: mode})
+    def owner(agent), do: Agent.get(agent, & &1.last_owner)
 
     # Tracker state is read/updated via Agent, but every real ResourceOwner
     # call MUST run in the original Session caller process — ResourceOwner's
     # owner-bound check rejects foreign callers (Agent pid ≠ Session pid).
 
-    def start(owner_pid, backend_module, backend_opts \\ [], opts \\ [])
+    def start(owner_pid, backend_module, backend_opts, handoff, opts)
 
-    def start(owner_pid, backend_module, backend_opts, opts)
+    def start(owner_pid, backend_module, backend_opts, handoff, opts)
         when is_pid(owner_pid) and is_atom(backend_module) do
       agent = lookup_agent!()
       mode = Agent.get(agent, fn s -> s.start_mode end)
@@ -498,7 +504,20 @@ defmodule Arbor.Voice.Test.SessionFakes do
       case mode do
         :ok ->
           # Call in this process (Session), not inside the Agent callback.
-          Arbor.Voice.ResourceOwner.start(owner_pid, backend_module, backend_opts, opts)
+          case Arbor.Voice.ResourceOwner.start(
+                 owner_pid,
+                 backend_module,
+                 backend_opts,
+                 handoff,
+                 opts
+               ) do
+            {:ok, owner} = result ->
+              _ = Agent.update(agent, &%{&1 | last_owner: owner})
+              result
+
+            other ->
+              other
+          end
 
         :fail ->
           {:error, :open_failed}
@@ -530,8 +549,12 @@ defmodule Arbor.Voice.Test.SessionFakes do
 
     def register_cleanup(owner, key, fun) do
       agent = lookup_agent!()
-      mode = Agent.get(agent, fn s -> s.register_mode end)
-      _ = Agent.update(agent, fn s -> %{s | registers: s.registers + 1} end)
+
+      mode =
+        Agent.get_and_update(agent, fn state ->
+          {mode, register_mode} = next_register_mode(state.register_mode)
+          {mode, %{state | register_mode: register_mode, registers: state.registers + 1}}
+        end)
 
       case mode do
         :ok -> Arbor.Voice.ResourceOwner.register_cleanup(owner, key, fun)
@@ -543,6 +566,18 @@ defmodule Arbor.Voice.Test.SessionFakes do
       agent = lookup_agent!()
       _ = Agent.update(agent, fn s -> %{s | removes: s.removes + 1} end)
       Arbor.Voice.ResourceOwner.remove_cleanup(owner, key)
+    end
+
+    def activate_turn(owner, lease) do
+      agent = lookup_agent!()
+      _ = Agent.update(agent, fn s -> %{s | activates: s.activates + 1} end)
+      Arbor.Voice.ResourceOwner.activate_turn(owner, lease)
+    end
+
+    def fence_and_drain(owner, scope) do
+      agent = lookup_agent!()
+      _ = Agent.update(agent, fn s -> %{s | fences: s.fences + 1} end)
+      Arbor.Voice.ResourceOwner.fence_and_drain(owner, scope)
     end
 
     def close(owner) do
@@ -573,6 +608,12 @@ defmodule Arbor.Voice.Test.SessionFakes do
         [] -> raise "TrackingResourceOwner not started"
       end
     end
+
+    defp next_register_mode({:sequence, [mode | rest]}) when mode in [:ok, :fail],
+      do: {mode, {:sequence, rest}}
+
+    defp next_register_mode({:sequence, []}), do: {:fail, {:sequence, []}}
+    defp next_register_mode(mode) when mode in [:ok, :fail], do: {mode, mode}
   end
 
   # ---------------------------------------------------------------------------

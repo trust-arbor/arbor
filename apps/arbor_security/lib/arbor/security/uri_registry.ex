@@ -207,7 +207,12 @@ defmodule Arbor.Security.UriRegistry do
     # namespace are looked up by exact id only (CapabilityStore.get_valid_disclosure/3);
     # this registration is for URI validation / registry-coverage auditing, not
     # a wildcard/prefix authorization path.
-    "arbor://egress/disclose"
+    "arbor://egress/disclose",
+
+    # Voice realtime xAI sessions. Capabilities are granted only on a
+    # session-qualified child URI so concurrent sessions cannot replace each
+    # other in CapabilityStore's principal/resource index.
+    "arbor://voice/realtime/xai"
 
     # Action namespace prefixes are generated and registered by arbor_actions at
     # application start. arbor_security must not own a broad `arbor://action`

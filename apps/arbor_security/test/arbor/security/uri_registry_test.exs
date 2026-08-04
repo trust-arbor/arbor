@@ -84,6 +84,14 @@ defmodule Arbor.Security.UriRegistryTest do
       # prefix with "disclose" must NOT be treated as the disclosure namespace.
       refute UriRegistry.registered?("arbor://egress/disclosed/" <> token)
     end
+
+    @tag spec: "VP-05D2A2P3"
+    test "voice realtime xAI namespace is canonical and segment-aware" do
+      assert "arbor://voice/realtime/xai" in UriRegistry.canonical_prefixes()
+      assert UriRegistry.registered?("arbor://voice/realtime/xai/session_abc")
+      refute UriRegistry.registered?("arbor://voice/realtime/xai_attacker/session_abc")
+      refute UriRegistry.registered?("arbor://voice/realtime/xaiplayer/session_abc")
+    end
   end
 
   describe "Arbor.Security.uri_registered?/1" do

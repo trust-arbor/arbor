@@ -62,7 +62,7 @@ defmodule Arbor.Voice.Backend.XaiRealtime do
 
   defmodule Session do
     @moduledoc false
-    @derive {Inspect, except: [:transport_state, :effect_authorizer]}
+    @derive {Inspect, except: [:transport_state, :effect_authorizer, :acc]}
     @enforce_keys [:transport_mod, :transport_state, :clock_fun, :effect_authorizer]
     defstruct [:transport_mod, :transport_state, :clock_fun, :effect_authorizer, acc: ""]
   end
@@ -174,20 +174,23 @@ defmodule Arbor.Voice.Backend.XaiRealtime do
       }
     }
 
-    with {:ok, session} <- put_frame(session, :text_item, frame),
-         do: put_frame(session, :text_response, %{"type" => "response.create"})
+    send_frames(session, [
+      {:text_item, frame},
+      {:text_response, %{"type" => "response.create"}}
+    ])
   end
 
   @impl true
   def send_audio(%Session{} = session, pcm) when is_binary(pcm) do
-    with {:ok, session} <-
-           put_frame(session, :audio_append, %{
-             "type" => "input_audio_buffer.append",
-             "audio" => Base.encode64(pcm)
-           }),
-         {:ok, session} <-
-           put_frame(session, :audio_commit, %{"type" => "input_audio_buffer.commit"}),
-         do: put_frame(session, :audio_response, %{"type" => "response.create"})
+    send_frames(session, [
+      {:audio_append,
+       %{
+         "type" => "input_audio_buffer.append",
+         "audio" => Base.encode64(pcm)
+       }},
+      {:audio_commit, %{"type" => "input_audio_buffer.commit"}},
+      {:audio_response, %{"type" => "response.create"}}
+    ])
   end
 
   @impl true
@@ -197,8 +200,33 @@ defmodule Arbor.Voice.Backend.XaiRealtime do
       "item" => %{"type" => "function_call_output", "call_id" => call_id, "output" => output}
     }
 
-    with {:ok, session} <- put_frame(session, :tool_result_item, frame),
-         do: put_frame(session, :tool_result_response, %{"type" => "response.create"})
+    send_frames(session, [
+      {:tool_result_item, frame},
+      {:tool_result_response, %{"type" => "response.create"}}
+    ])
+  end
+
+  # Once at least one physical frame succeeds, retain the latest opaque
+  # backend session in a private third tuple element. ResourceOwner consumes
+  # and redacts it, marks the connection poisoned, and closes this latest
+  # transport state; public Voice callers still receive only a stable atom.
+  defp send_frames(%Session{} = session, frames) when is_list(frames) do
+    Enum.reduce_while(frames, {:ok, session, false}, fn {effect, frame}, {:ok, latest, sent?} ->
+      case put_frame(latest, effect, frame) do
+        {:ok, next} ->
+          {:cont, {:ok, next, true}}
+
+        {:error, reason} when sent? ->
+          {:halt, {:error, reason, latest}}
+
+        {:error, reason} ->
+          {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, latest, _sent?} -> {:ok, latest}
+      error -> error
+    end
   end
 
   defp put_frame(%Session{} = session, effect, frame) when effect in @effects do

@@ -29,8 +29,8 @@ defmodule ArborVoice.MixProject do
   end
 
   # L8 — headless engagement-substrate consumer for voice, the sibling of
-  # arbor_dashboard. Deps are the packet's exact list; arbor_orchestrator +
-  # arbor_agent pin the level at L8 (1 + their L7).
+  # arbor_dashboard. arbor_orchestrator + arbor_agent pin the level at L8
+  # (1 + their L7); direct security/trust deps support realtime egress gates.
   defp deps do
     [
       {:arbor_contracts, in_umbrella: true},
@@ -40,6 +40,8 @@ defmodule ArborVoice.MixProject do
       {:arbor_comms, in_umbrella: true},
       {:arbor_llm, in_umbrella: true},
       {:arbor_ai, in_umbrella: true},
+      {:arbor_security, in_umbrella: true},
+      {:arbor_trust, in_umbrella: true},
       {:arbor_orchestrator, in_umbrella: true},
       {:arbor_agent, in_umbrella: true},
       {:jason, "~> 1.4"},

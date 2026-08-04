@@ -11,6 +11,9 @@ defmodule Arbor.Voice.Backend.XaiRealtimeToolE2ETest do
   alias Arbor.Voice
   alias Arbor.Voice.Backend.XaiRealtime
   alias Arbor.Voice.Session.TurnCore
+  alias Arbor.Voice.Test.EgressAuthorityFakes
+
+  alias Arbor.Voice.Test.EgressAuthorityFakes.{AI, Security, Trust}
 
   alias Arbor.Voice.Test.SessionFakes.{
     FakeCommsSession,
@@ -97,6 +100,24 @@ defmodule Arbor.Voice.Backend.XaiRealtimeToolE2ETest do
   end
 
   setup do
+    EgressAuthorityFakes.reset()
+
+    previous_modules =
+      for key <- [:ai_module, :security_module, :trust_module], into: %{} do
+        {key, Application.fetch_env(:arbor_voice, key)}
+      end
+
+    Application.put_env(:arbor_voice, :ai_module, AI)
+    Application.put_env(:arbor_voice, :security_module, Security)
+    Application.put_env(:arbor_voice, :trust_module, Trust)
+
+    on_exit(fn ->
+      Enum.each(previous_modules, fn
+        {key, {:ok, value}} -> Application.put_env(:arbor_voice, key, value)
+        {key, :error} -> Application.delete_env(:arbor_voice, key)
+      end)
+    end)
+
     SharedTransport.ensure!()
 
     frames = [
@@ -128,6 +149,7 @@ defmodule Arbor.Voice.Backend.XaiRealtimeToolE2ETest do
       engagement_store: FakeEngagementStore,
       ledger: FakeLedger,
       signals: FakeSignals,
+      session_token: "test-human-session-proof",
       backend: XaiRealtime,
       backend_opts: [
         transport: SharedTransport,

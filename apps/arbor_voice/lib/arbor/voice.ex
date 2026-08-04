@@ -236,6 +236,9 @@ defmodule Arbor.Voice do
          {:ok, progress_threshold_ms} <-
            resolve_progress_threshold_ms(opts, tool_router_timeout_ms),
          {:ok, session_token} <- resolve_session_token(opts),
+         {:ok, security_module} <- Config.security_module(),
+         {:ok, trust_module} <- Config.trust_module(),
+         {:ok, ai_module} <- Config.ai_module(),
          {:ok, agent_module, orchestrator_module} <-
            resolve_coding_dispatch_collaborators(tool_declarations),
          :ok <- validate_optional_module(opts, :engagement_store) do
@@ -267,6 +270,9 @@ defmodule Arbor.Voice do
          tool_declarations: tool_declarations,
          progress_threshold_ms: progress_threshold_ms,
          session_token: session_token,
+         security_module: security_module,
+         trust_module: trust_module,
+         ai_module: ai_module,
          agent_module: agent_module,
          orchestrator_module: orchestrator_module
        }}
