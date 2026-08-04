@@ -5,6 +5,7 @@ defmodule Arbor.Voice.EgressSecurityRegressionTest do
 
   alias Arbor.Voice
   alias Arbor.Voice.Backend.XaiRealtime
+  alias Arbor.Voice.Redacted
   alias Arbor.Voice.Test.EgressAuthorityFakes
   alias Arbor.Voice.Test.EgressAuthorityFakes.{AI, Security, Trust}
 
@@ -63,6 +64,15 @@ defmodule Arbor.Voice.EgressSecurityRegressionTest do
     end
   end
 
+  defmodule OrderedRecorder do
+    @moduledoc false
+
+    def record(_agent_id, _message, _raw_text, _completed_at, _opts) do
+      EgressAuthorityFakes.record(:transcript_record)
+      {:ok, 2}
+    end
+  end
+
   setup do
     EgressAuthorityFakes.reset()
 
@@ -90,11 +100,96 @@ defmodule Arbor.Voice.EgressSecurityRegressionTest do
     {:ok, _engagement} =
       FakeEngagementStore.start(result: {:ok, %{id: "eng_p3_selector", agent_id: "agent"}})
 
-    {:ok, _ledger} = FakeLedger.start()
-    {:ok, _signals} = FakeSignals.start()
+    {:ok, ledger} = FakeLedger.start()
+    {:ok, signals} = FakeSignals.start()
     {:ok, _recorder} = FakeCommsSession.start_recorder()
 
-    :ok
+    %{ledger: ledger, signals: signals}
+  end
+
+  defp external_tracking_opts(extra \\ []) do
+    [
+      comms: FakeCommsSession,
+      engagement_store: FakeEngagementStore,
+      ledger: FakeLedger,
+      signals: FakeSignals,
+      resource_owner: TrackingResourceOwner,
+      backend: XaiRealtime,
+      backend_opts: [
+        transport: SelectorTransport,
+        oauth_resolver: fn :xai -> {:ok, "startup-boundary-oauth-proof"} end
+      ],
+      session_token: "startup-boundary-human-proof",
+      session_budget_ms: 60_000,
+      daily_budget_ms: 3_600_000,
+      resource_owner_opts: [
+        close_timeout_ms: 1_000,
+        cleanup_ready_timeout_ms: 200,
+        cleanup_attempts: 2,
+        cleanup_per_attempt_timeout_ms: 200,
+        max_recv_timeout_ms: 100
+      ]
+    ]
+    |> Keyword.merge(extra)
+  end
+
+  defp revoke_events do
+    Enum.filter(EgressAuthorityFakes.events(), &match?({:revoke, _capability_id}, &1))
+  end
+
+  @tag :security_regression
+  @tag spec: "VOICE-17,VOICE-24"
+  test "pre-acceptance owner start failure unwinds route and budget directly", %{ledger: ledger} do
+    {:ok, owner_tracker} = TrackingResourceOwner.start_tracker(start_mode: :fail)
+
+    assert {:error, :start_failed} =
+             Voice.start_session(
+               "user_pre_accept",
+               "agent_pre_accept",
+               external_tracking_opts()
+             )
+
+    assert TrackingResourceOwner.stats(owner_tracker).handoff_cleanup_keys |> MapSet.new() ==
+             MapSet.new([:voice_realtime_route_capability, :budget_settlement])
+
+    assert Enum.count(FakeLedger.calls(ledger), &match?({:release, _, _}, &1)) == 1
+    assert [{:revoke, capability_id}] = revoke_events()
+    assert %{revoked: true} = EgressAuthorityFakes.capability(capability_id)
+  end
+
+  @tag :security_regression
+  @tag spec: "VOICE-17,VOICE-24"
+  test "accepted owner start failure leaves route and budget exclusively with the lease", %{
+    ledger: ledger
+  } do
+    clock_reads = :atomics.new(1, signed: false)
+
+    monotonic_clock = fn ->
+      _ = :atomics.add_get(clock_reads, 1, 1)
+      5_000_000
+    end
+
+    {:ok, owner_tracker} = TrackingResourceOwner.start_tracker(start_mode: :accepted_fail)
+
+    assert {:error, :start_failed} =
+             Voice.start_session(
+               "user_accepted",
+               "agent_accepted",
+               external_tracking_opts(monotonic_clock: monotonic_clock)
+             )
+
+    stats = TrackingResourceOwner.stats(owner_tracker)
+
+    assert stats.handoff_cleanup_keys |> MapSet.new() ==
+             MapSet.new([:voice_realtime_route_capability, :budget_settlement])
+
+    assert stats.accepted_failures == 1
+    assert stats.cleanup_runs == 2
+    assert stats.closes == 0
+    assert Enum.count(FakeLedger.calls(ledger), &match?({:release, _, _}, &1)) == 1
+    assert length(revoke_events()) == 1
+    # Construction plus lease cleanup; direct Session unwind would read again.
+    assert :atomics.get(clock_reads, 1) == 2
   end
 
   @tag :security_regression
@@ -192,6 +287,155 @@ defmodule Arbor.Voice.EgressSecurityRegressionTest do
   end
 
   @tag spec: "VOICE-17"
+  test "registered external turn retains only its lease and drains before presentation", %{
+    signals: signals
+  } do
+    user_id = "user_lease_only"
+    agent_id = "agent_lease_only"
+    {:ok, owner_tracker} = TrackingResourceOwner.start_tracker()
+
+    speech_output = fn _spoken ->
+      EgressAuthorityFakes.record(:speech_output)
+      :ok
+    end
+
+    opts = [
+      comms: FakeCommsSession,
+      engagement_store: FakeEngagementStore,
+      ledger: FakeLedger,
+      signals: FakeSignals,
+      resource_owner: TrackingResourceOwner,
+      backend: XaiRealtime,
+      backend_opts: [
+        transport: SelectorTransport,
+        oauth_resolver: fn :xai -> {:ok, "lease-only-oauth-proof"} end
+      ],
+      session_token: "lease-only-human-proof",
+      transcript_recorder: OrderedRecorder,
+      speech_output: speech_output,
+      session_budget_ms: 60_000,
+      daily_budget_ms: 3_600_000,
+      resource_owner_opts: [
+        close_timeout_ms: 1_000,
+        cleanup_ready_timeout_ms: 200,
+        cleanup_attempts: 2,
+        cleanup_per_attempt_timeout_ms: 200,
+        max_recv_timeout_ms: 100
+      ]
+    ]
+
+    assert {:ok, key} = Voice.start_session(user_id, agent_id, opts)
+    SelectorTransport.reset([])
+    task = Task.async(fn -> Voice.text_turn(user_id, agent_id, "lease-only text") end)
+
+    assert_eventually(fn ->
+      Enum.any?(EgressAuthorityFakes.events(), &match?({:transport_send, "response.create"}, &1))
+    end)
+
+    assert [{session, _value}] = Registry.lookup(Arbor.Voice.Registry, key)
+    %{turn: turn} = :sys.get_state(session)
+    refute Map.has_key?(turn, :authority)
+    assert %Redacted{} = turn.lease
+
+    lease = Redacted.value(turn.lease)
+
+    [route_capability] =
+      EgressAuthorityFakes.active_capabilities()
+      |> Enum.filter(&(&1.kind == :route))
+
+    assert Map.keys(lease) |> MapSet.new() ==
+             MapSet.new([:kind, :turn_id, :disclosure_capability_id, :cleanup_key])
+
+    refute contains_function?(lease)
+    refute Map.has_key?(:sys.get_state(session), :settlement)
+
+    inspected_status = inspect({Voice.session_status(key), :sys.get_status(session)})
+
+    for secret <- [
+          route_capability.id,
+          lease.disclosure_capability_id,
+          "lease-only-oauth-proof",
+          "lease-only-human-proof",
+          "lease-only text"
+        ] do
+      refute inspected_status =~ secret
+    end
+
+    refute inspected_status =~ "#Function"
+
+    SelectorTransport.reset([
+      %{"type" => "response.output_text.delta", "delta" => "lease complete"},
+      %{"type" => "response.done"}
+    ])
+
+    assert {:ok, "lease complete"} = Task.await(task, 3_000)
+    EgressAuthorityFakes.record(:public_reply_observed)
+
+    events = EgressAuthorityFakes.events()
+    assert_before(events, {:revoke, lease.disclosure_capability_id}, :transcript_record)
+    assert_before(events, :transcript_record, :speech_output)
+    assert_before(events, :speech_output, :public_reply_observed)
+
+    inspected_signals = inspect(FakeSignals.emissions(signals))
+
+    for secret <- [
+          route_capability.id,
+          lease.disclosure_capability_id,
+          "lease-only-oauth-proof",
+          "lease-only-human-proof",
+          "lease-only text",
+          "lease complete"
+        ] do
+      refute inspected_signals =~ secret
+    end
+
+    assert :ok = Voice.stop_session(key)
+
+    stats = TrackingResourceOwner.stats(owner_tracker)
+    assert stats.registers == 1
+    assert stats.removes == 0
+  end
+
+  @tag spec: "VOICE-17"
+  test "registered unpublished turn activation failure drains only through the exact barrier" do
+    {:ok, owner_tracker} = TrackingResourceOwner.start_tracker(activate_mode: :fail)
+
+    assert {:ok, key} =
+             Voice.start_session(
+               "user_activation_fail",
+               "agent_activation_fail",
+               external_tracking_opts()
+             )
+
+    event_count_before_turn = EgressAuthorityFakes.events() |> length()
+
+    assert {:error, :turn_failed} =
+             Voice.text_turn("user_activation_fail", "agent_activation_fail", "not published")
+
+    disclosure_id =
+      EgressAuthorityFakes.capabilities()
+      |> Map.values()
+      |> Enum.find_value(fn
+        %{kind: :disclosure, id: id} -> id
+        _other -> nil
+      end)
+
+    assert is_binary(disclosure_id)
+
+    turn_events = EgressAuthorityFakes.events() |> Enum.drop(event_count_before_turn)
+    assert Enum.count(turn_events, &(&1 == {:revoke, disclosure_id})) == 1
+    assert %{revoked: true} = EgressAuthorityFakes.capability(disclosure_id)
+
+    stats = TrackingResourceOwner.stats(owner_tracker)
+    assert stats.registers == 1
+    assert stats.activates == 1
+    assert stats.fences == 1
+    assert stats.removes == 0
+    assert {:ok, %{state: :ready}} = Voice.session_status(key)
+    assert :ok = Voice.stop_session(key)
+  end
+
+  @tag spec: "VOICE-17"
   test "failed pre-registration revoke is transferred while route cleanup remains pending" do
     user_id = "user_provisional_cleanup"
     agent_id = "agent_provisional_cleanup"
@@ -239,16 +483,15 @@ defmodule Arbor.Voice.EgressSecurityRegressionTest do
       end
     end)
 
-    # The first registration is the normal turn handoff; the second is the
-    # terminal transfer retry. The retry succeeds through the configured
-    # facade, and concrete adoption must verify rather than duplicate it.
+    # The first registration is the normal turn handoff; the second transfers
+    # the still-Session-owned provisional closure before authoritative close.
     TrackingResourceOwner.set_register_mode(owner_tracker, {:sequence, [:fail, :ok]})
     EgressAuthorityFakes.set_mode(:revoke, {:return, {:error, :revoke_blocked}})
 
-    assert {:error, :not_found} = Voice.text_turn(user_id, agent_id, "never sent")
+    assert {:error, :cleanup_pending} = Voice.text_turn(user_id, agent_id, "never sent")
     assert {:error, :not_found} = Voice.session_status(key)
     assert Process.alive?(owner)
-    assert TrackingResourceOwner.stats(owner_tracker).registers >= 3
+    assert TrackingResourceOwner.stats(owner_tracker).registers == 2
 
     active = EgressAuthorityFakes.active_capabilities()
     assert Enum.count(active, &(&1.kind == :route)) == 1
@@ -293,6 +536,40 @@ defmodule Arbor.Voice.EgressSecurityRegressionTest do
 
   defp physical_send_count(events) do
     Enum.count(events, &match?({:transport_send, _}, &1))
+  end
+
+  defp contains_function?(term) when is_function(term), do: true
+
+  defp contains_function?(term) when is_map(term) do
+    Enum.any?(term, fn {key, value} -> contains_function?(key) or contains_function?(value) end)
+  end
+
+  defp contains_function?(term) when is_tuple(term) do
+    term |> Tuple.to_list() |> Enum.any?(&contains_function?/1)
+  end
+
+  defp contains_function?(term) when is_list(term), do: Enum.any?(term, &contains_function?/1)
+  defp contains_function?(_term), do: false
+
+  defp assert_before(events, first, second) do
+    first_index = Enum.find_index(events, &(&1 == first))
+    second_index = Enum.find_index(events, &(&1 == second))
+    assert is_integer(first_index), "missing #{inspect(first)} in #{inspect(events)}"
+    assert is_integer(second_index), "missing #{inspect(second)} in #{inspect(events)}"
+    assert first_index < second_index
+  end
+
+  defp assert_eventually(fun, attempts \\ 100)
+
+  defp assert_eventually(fun, 0), do: assert(fun.())
+
+  defp assert_eventually(fun, attempts) do
+    if fun.() do
+      :ok
+    else
+      Process.sleep(10)
+      assert_eventually(fun, attempts - 1)
+    end
   end
 
   defp await_process_exit(pid, timeout_ms) when is_pid(pid) do

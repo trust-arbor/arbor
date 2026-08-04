@@ -17,7 +17,8 @@ defmodule Arbor.Voice.SessionTextTurnTest do
     FakeCommsSession,
     FakeEngagementStore,
     FakeLedger,
-    FakeSignals
+    FakeSignals,
+    TrackingResourceOwner
   }
 
   defmodule MalformedOkRecorder do
@@ -269,6 +270,88 @@ defmodule Arbor.Voice.SessionTextTurnTest do
       assert Enum.any?(emissions, fn {c, t, payload, _} ->
                c == :voice and t == :budget_exhausted and payload.speech_output == :disabled
              end)
+    end
+
+    test "stop and active text turn both preserve cleanup_pending" do
+      {:ok, owner_tracker} = TrackingResourceOwner.start_tracker()
+      ctx = turn_opts(resource_owner: TrackingResourceOwner)
+      ControllableTurnBackend.enqueue(List.duplicate(:timeout, 20))
+
+      {user_id, agent_id} = unique_ids()
+      assert {:ok, key} = Voice.start_session(user_id, agent_id, ctx.opts)
+      owner = TrackingResourceOwner.owner(owner_tracker)
+
+      task = Task.async(fn -> Voice.text_turn(user_id, agent_id, "still active") end)
+      wait_until(fn -> ControllableTurnBackend.sent_texts() == ["still active"] end, 1_000)
+      TrackingResourceOwner.set_close_mode(owner_tracker, :cleanup_pending)
+
+      assert {:error, :cleanup_pending} = Voice.stop_session(key)
+      assert {:error, :cleanup_pending} = Task.await(task, 2_000)
+      assert {:error, :not_found} = Voice.session_status(key)
+
+      wait_until(
+        fn ->
+          Enum.any?(FakeLedger.calls(ctx.ledger), &match?({:consume, _, _, _}, &1))
+        end,
+        2_000
+      )
+
+      calls = FakeLedger.calls(ctx.ledger)
+      assert Enum.count(calls, &match?({:consume, _, _, _}, &1)) == 1
+      refute Enum.any?(calls, &match?({:release, _, _}, &1))
+      wait_until(fn -> not Process.alive?(owner) end, 2_000)
+    end
+
+    test "hard timeout reports cleanup_pending before exit when close cannot confirm cleanup" do
+      {:ok, owner_tracker} = TrackingResourceOwner.start_tracker()
+
+      ctx =
+        turn_opts(
+          resource_owner: TrackingResourceOwner,
+          session_budget_ms: 80,
+          monotonic_clock: fn -> System.monotonic_time(:millisecond) end
+        )
+
+      TrackingResourceOwner.set_close_mode(owner_tracker, :cleanup_pending)
+      ControllableTurnBackend.enqueue(List.duplicate(:timeout, 20))
+
+      {user_id, agent_id} = unique_ids()
+      assert {:ok, key} = Voice.start_session(user_id, agent_id, ctx.opts)
+      owner = TrackingResourceOwner.owner(owner_tracker)
+      assert {:error, :cleanup_pending} = Voice.text_turn(user_id, agent_id, "slow cleanup")
+      assert {:error, :not_found} = Voice.session_status(key)
+
+      refute Enum.any?(FakeSignals.emissions(ctx.signals), fn {category, type, _payload, _opts} ->
+               category == :voice and type == :budget_exhausted
+             end)
+
+      wait_until(fn -> not Process.alive?(owner) end, 2_000)
+    end
+
+    test "unexpected ResourceOwner DOWN does not replay handed-off cleanup" do
+      {:ok, owner_tracker} = TrackingResourceOwner.start_tracker()
+      ctx = turn_opts(resource_owner: TrackingResourceOwner)
+      ControllableTurnBackend.enqueue(List.duplicate(:timeout, 20))
+
+      {user_id, agent_id} = unique_ids()
+      assert {:ok, key} = Voice.start_session(user_id, agent_id, ctx.opts)
+
+      task = Task.async(fn -> Voice.text_turn(user_id, agent_id, "owner down") end)
+      wait_until(fn -> ControllableTurnBackend.sent_texts() == ["owner down"] end, 1_000)
+
+      owner = TrackingResourceOwner.owner(owner_tracker)
+      assert [{session, _value}] = Registry.lookup(Arbor.Voice.Registry, key)
+      :ok = :sys.suspend(session)
+      Process.exit(owner, :kill)
+      wait_until(fn -> not Process.alive?(owner) end, 1_000)
+      :ok = :sys.resume(session)
+
+      assert {:error, :cleanup_pending} = Task.await(task, 2_000)
+      assert {:error, :not_found} = Voice.session_status(key)
+
+      calls = FakeLedger.calls(ctx.ledger)
+      refute Enum.any?(calls, &match?({:consume, _, _, _}, &1))
+      refute Enum.any?(calls, &match?({:release, _, _}, &1))
     end
   end
 

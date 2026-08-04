@@ -71,6 +71,87 @@ defmodule Arbor.Voice.SessionTest do
              Arbor.Voice.ResourceOwner.close_call_timeout_ms() + 10_000
   end
 
+  test "ready Session drops Settlement after arming the handed-off cleanup" do
+    ctx = lifecycle_opts()
+    {user_id, agent_id} = unique_ids()
+
+    assert {:ok, key} = Voice.start_session(user_id, agent_id, ctx.opts)
+    assert [{session, _value}] = Registry.lookup(Arbor.Voice.Registry, key)
+    state = :sys.get_state(session)
+
+    refute Map.has_key?(state, :settlement)
+    refute Map.has_key?(state, :start_ms)
+
+    assert TrackingResourceOwner.stats(ctx.owner_tracker).handoff_cleanup_keys == [
+             :budget_settlement
+           ]
+
+    assert :ok = Voice.stop_session(key)
+  end
+
+  test "stop returns cleanup_pending and never directly settles lease-owned budget" do
+    clock_reads = :atomics.new(1, signed: false)
+
+    clock = fn ->
+      _ = :atomics.add_get(clock_reads, 1, 1)
+      5_000_000
+    end
+
+    ctx = lifecycle_opts(monotonic_clock: clock)
+    {user_id, agent_id} = unique_ids()
+
+    assert {:ok, key} = Voice.start_session(user_id, agent_id, ctx.opts)
+    owner = TrackingResourceOwner.owner(ctx.owner_tracker)
+    TrackingResourceOwner.set_close_mode(ctx.owner_tracker, :cleanup_pending)
+
+    assert {:error, :cleanup_pending} = Voice.stop_session(key)
+    assert {:error, :not_found} = Voice.session_status(key)
+
+    wait_until(
+      fn ->
+        Enum.any?(FakeLedger.calls(ctx.ledger), &match?({:consume, _, _, _}, &1))
+      end,
+      2_000
+    )
+
+    calls = FakeLedger.calls(ctx.ledger)
+    assert Enum.count(calls, &match?({:consume, _, _, _}, &1)) == 1
+    refute Enum.any?(calls, &match?({:release, _, _}, &1))
+    # Construction plus the lease-owned cleanup. A Session-owned settlement
+    # attempt before exit would add another clock read.
+    assert :atomics.get(clock_reads, 1) == 2
+    assert TrackingResourceOwner.stats(ctx.owner_tracker).closes == 1
+    wait_until(fn -> not Process.alive?(owner) end, 2_000)
+  end
+
+  test "close callback faults stay redacted while public cleanup remains pending" do
+    ctx = lifecycle_opts()
+    {user_id, agent_id} = unique_ids()
+
+    assert {:ok, key} = Voice.start_session(user_id, agent_id, ctx.opts)
+    owner = TrackingResourceOwner.owner(ctx.owner_tracker)
+    TrackingResourceOwner.set_close_mode(ctx.owner_tracker, :raise)
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert {:error, :cleanup_pending} = Voice.stop_session(key)
+      end)
+
+    assert {:error, :not_found} = Voice.session_status(key)
+    refute log =~ "resource_owner close boom"
+    refute inspect(FakeSignals.emissions(ctx.signals)) =~ "resource_owner close boom"
+
+    wait_until(
+      fn ->
+        Enum.any?(FakeLedger.calls(ctx.ledger), &match?({:consume, _, _, _}, &1))
+      end,
+      2_000
+    )
+
+    assert Enum.count(FakeLedger.calls(ctx.ledger), &match?({:consume, _, _, _}, &1)) == 1
+    wait_until(fn -> not Process.alive?(owner) end, 2_000)
+  end
+
   @tag :security_regression
   @tag spec: "VOICE-17"
   test "security regression: public backend_opts cannot inject the internal effect authorizer" do
@@ -101,6 +182,7 @@ defmodule Arbor.Voice.SessionTest do
           expect_releases: 0,
           expect_owner_closes: 0,
           expect_registers: 0,
+          expect_cleanup_runs: 0,
           expect_success_signals: false
         },
         %{
@@ -113,6 +195,7 @@ defmodule Arbor.Voice.SessionTest do
           expect_releases: 0,
           expect_owner_closes: 0,
           expect_registers: 0,
+          expect_cleanup_runs: 0,
           expect_success_signals: false
         },
         %{
@@ -126,19 +209,21 @@ defmodule Arbor.Voice.SessionTest do
           expect_releases: 1,
           expect_owner_closes: 0,
           expect_registers: 0,
+          expect_cleanup_runs: 0,
           expect_success_signals: false
         },
         %{
-          name: :cleanup_register_fail,
+          name: :accepted_owner_start_fail,
           setup: fn ctx ->
-            TrackingResourceOwner.set_register_mode(ctx.owner_tracker, :fail)
+            TrackingResourceOwner.set_start_mode(ctx.owner_tracker, :accepted_fail)
             ctx
           end,
           expect_error: :start_failed,
-          # Pre-registration path: close owner + direct settle release.
+          # CleanupLease accepted the initial map and is the sole releaser.
           expect_releases: 1,
-          expect_owner_closes: 1,
-          expect_registers: 1,
+          expect_owner_closes: 0,
+          expect_registers: 0,
+          expect_cleanup_runs: 1,
           expect_success_signals: false
         },
         %{
@@ -148,11 +233,10 @@ defmodule Arbor.Voice.SessionTest do
             ctx
           end,
           expect_error: :start_failed,
-          # Post-registration: owner close only (cleanup settles; no direct release call
-          # beyond what cleanup performs). Direct settle_release is NOT used.
-          expect_releases_via_cleanup: true,
+          expect_releases: 1,
           expect_owner_closes: 1,
-          expect_registers: 1,
+          expect_registers: 0,
+          expect_cleanup_runs: 1,
           expect_success_signals: false
         },
         %{
@@ -162,9 +246,10 @@ defmodule Arbor.Voice.SessionTest do
             ctx
           end,
           expect_error: :start_failed,
-          expect_releases_via_cleanup: true,
+          expect_releases: 1,
           expect_owner_closes: 1,
-          expect_registers: 1,
+          expect_registers: 0,
+          expect_cleanup_runs: 1,
           expect_success_signals: false
         }
       ]
@@ -186,21 +271,12 @@ defmodule Arbor.Voice.SessionTest do
         release_calls = Enum.filter(calls, &match?({:release, _, _}, &1))
         consume_calls = Enum.filter(calls, &match?({:consume, _, _, _}, &1))
 
-        if Map.get(c, :expect_releases_via_cleanup) do
-          # After registration, cleanup path settles (release) — no leaked reservation.
-          assert length(release_calls) >= 1, "case #{c.name}: expected cleanup release"
-          assert stats.closes == c.expect_owner_closes, "case #{c.name}: closes"
-          assert stats.registers == c.expect_registers, "case #{c.name}: registers"
-          # Must NOT have both independent release before close AND cleanup release
-          # without owner close. Owner close is required.
-          assert stats.closes >= 1
-        else
-          assert length(release_calls) == c.expect_releases,
-                 "case #{c.name}: releases got #{length(release_calls)}"
+        assert length(release_calls) == c.expect_releases,
+               "case #{c.name}: releases got #{length(release_calls)}"
 
-          assert stats.closes == c.expect_owner_closes, "case #{c.name}: closes"
-          assert stats.registers == c.expect_registers, "case #{c.name}: registers"
-        end
+        assert stats.closes == c.expect_owner_closes, "case #{c.name}: closes"
+        assert stats.registers == c.expect_registers, "case #{c.name}: registers"
+        assert stats.cleanup_runs == c.expect_cleanup_runs, "case #{c.name}: cleanup runs"
 
         assert consume_calls == [], "case #{c.name}: no consume on failed start"
 
@@ -216,53 +292,45 @@ defmodule Arbor.Voice.SessionTest do
   end
 
   # ---------------------------------------------------------------------------
-  # Security regression: pre-registration close raise must not leak budget
+  # Initial handoff acceptance boundary
   # ---------------------------------------------------------------------------
 
-  describe "pre-registration unwind budget-leak security regression" do
+  describe "initial cleanup handoff boundary" do
     @tag spec: "VOICE-24"
-    test "security regression: register cleanup fails and owner close raises still releases exactly once" do
-      ControllableBackend.ensure_table!()
-      ControllableBackend.set_mode(:ok)
-      ControllableBackend.reset_close_count()
+    test "security regression: accepted start failure never triggers direct Session settlement" do
+      clock_reads = :atomics.new(1, signed: false)
 
-      ctx = lifecycle_opts()
-      TrackingResourceOwner.set_register_mode(ctx.owner_tracker, :fail)
-      TrackingResourceOwner.set_close_mode(ctx.owner_tracker, :raise)
+      clock = fn ->
+        _ = :atomics.add_get(clock_reads, 1, 1)
+        5_000_000
+      end
+
+      ctx = lifecycle_opts(monotonic_clock: clock)
+      TrackingResourceOwner.set_start_mode(ctx.owner_tracker, :accepted_fail)
       {user_id, agent_id} = unique_ids()
 
       assert {:error, :start_failed} = Voice.start_session(user_id, agent_id, ctx.opts)
 
       calls = FakeLedger.calls(ctx.ledger)
-      emissions = FakeSignals.emissions(ctx.signals)
       stats = TrackingResourceOwner.stats(ctx.owner_tracker)
 
       reserve_calls = Enum.filter(calls, &match?({:reserve, _, _, _, _, _}, &1))
       release_calls = Enum.filter(calls, &match?({:release, _, _}, &1))
       consume_calls = Enum.filter(calls, &match?({:consume, _, _, _}, &1))
 
-      # Reserved once, released exactly once via direct settle — not leaked to expiry.
       assert length(reserve_calls) == 1
       assert length(release_calls) == 1
       assert consume_calls == []
-
-      # Pre-registration path attempted close (raised) then direct release.
       assert stats.starts == 1
-      assert stats.registers == 1
-      assert stats.closes == 1
-
-      success_types = emissions |> Enum.map(fn {_, t, _, _} -> t end) |> Enum.uniq()
-      refute :start in success_types
-      refute :backend_connected in success_types
-      refute :stop in success_types
-      refute :budget_exhausted in success_types
-
+      assert stats.accepted_failures == 1
+      assert stats.cleanup_runs == 1
+      assert stats.registers == 0
+      assert stats.closes == 0
+      assert stats.handoff_cleanup_keys == [:budget_settlement]
+      # One construction read plus one lease-owned cleanup read. A direct
+      # Session unwind after accepted handoff would perform a third read.
+      assert :atomics.get(clock_reads, 1) == 2
       assert Registry.lookup(Arbor.Voice.Registry, {user_id, agent_id}) == []
-
-      # Direct facade close raised, but the real ResourceOwner still monitors the
-      # failed Session and must close the backend after init dies.
-      wait_until(fn -> ControllableBackend.close_count() == 1 end, 5_000)
-      assert ControllableBackend.close_count() == 1
     end
   end
 

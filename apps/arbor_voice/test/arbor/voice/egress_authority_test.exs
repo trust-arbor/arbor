@@ -42,6 +42,50 @@ defmodule Arbor.Voice.EgressAuthorityTest do
     def revoke(_capability_id), do: :ok
   end
 
+  defmodule HandoffSecurity do
+    @moduledoc false
+
+    def revoke(capability_id) do
+      send(self(), {:handoff_revoke, capability_id})
+      :ok
+    end
+  end
+
+  test "owner handoff uses one canonical initial cleanup map" do
+    local = %{kind: :local, route: :none, session_id: @session_id}
+
+    assert %{authority: ^local, initial_cleanups: %{}} =
+             local_handoff =
+             EgressAuthority.owner_handoff(local)
+
+    refute Map.has_key?(local_handoff, :initial_cleanup)
+
+    capability_id = "cap_0123456789abcdef0123456789abcdef"
+
+    external = %{
+      kind: :external,
+      route: @route,
+      tier: :external_provider,
+      agent_id: "agent_0123456789abcdef0123456789abcdef",
+      human_id: "human-1",
+      session_id: @session_id,
+      resource_uri: "arbor://voice/realtime/xai/#{@session_id}",
+      route_capability_id: capability_id,
+      security_module: HandoffSecurity,
+      trust_module: __MODULE__
+    }
+
+    assert %{
+             authority: ^external,
+             initial_cleanups: %{voice_realtime_route_capability: cleanup}
+           } = external_handoff = EgressAuthority.owner_handoff(external)
+
+    assert is_function(cleanup, 0)
+    refute Map.has_key?(external_handoff, :initial_cleanup)
+    assert :ok = cleanup.()
+    assert_receive {:handoff_revoke, ^capability_id}
+  end
+
   test "correct-length non-hex authority identifiers fail closed before retention" do
     refute EgressAuthority.canonical_session_id?("session_gggggggggggggggggggggggggggggggg")
     refute EgressAuthority.canonical_capability_id?(@malformed_capability_id)

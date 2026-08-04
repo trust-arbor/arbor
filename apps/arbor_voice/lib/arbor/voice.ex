@@ -152,11 +152,19 @@ defmodule Arbor.Voice do
   @doc """
   Stop a live voice session by tuple key.
 
-  Settles the retained budget reservation, closes the backend via ResourceOwner,
-  emits a bounded `:voice/:stop` signal, and terminates the temporary Session
-  child. Never accepts or returns a pid.
+  ResourceOwner fences authority, drains every handed-off cleanup, closes the
+  backend, and terminates the temporary Session child. Returns
+  `{:error, :cleanup_pending}` when that cleanup cannot be confirmed before
+  exit. Never accepts or returns a pid; status after death remains `:not_found`.
   """
-  @spec stop_session(session_key()) :: :ok | {:error, atom()}
+  @spec stop_session(session_key()) ::
+          :ok
+          | {:error,
+             :cleanup_pending
+             | :not_found
+             | :invalid_session_key
+             | :invalid_user_id
+             | :invalid_agent_id}
   def stop_session({user_id, agent_id} = key)
       when is_binary(user_id) and is_binary(agent_id) do
     with :ok <- validate_id(user_id, :user_id),
@@ -186,9 +194,21 @@ defmodule Arbor.Voice do
   * `:transcript_record_failed` — durable write failed before public success
   * `:session_stopped` — normal stop while a turn was in flight
   * `:budget_exhausted` — hard session timer fired during the turn
+  * `:cleanup_pending` — owner/lease cleanup was not positively confirmed
   """
   @spec text_turn(String.t(), String.t(), String.t()) ::
-          {:ok, String.t()} | {:error, atom()}
+          {:ok, String.t()}
+          | {:error,
+             :not_found
+             | :busy
+             | :invalid_user_text
+             | :invalid_user_id
+             | :invalid_agent_id
+             | :turn_failed
+             | :transcript_record_failed
+             | :session_stopped
+             | :budget_exhausted
+             | :cleanup_pending}
   def text_turn(user_id, agent_id, user_text) do
     with :ok <- validate_id(user_id, :user_id),
          :ok <- validate_id(agent_id, :agent_id),
@@ -930,6 +950,7 @@ defmodule Arbor.Voice do
   defp public_turn_error(:transcript_record_failed), do: :transcript_record_failed
   defp public_turn_error(:session_stopped), do: :session_stopped
   defp public_turn_error(:budget_exhausted), do: :budget_exhausted
+  defp public_turn_error(:cleanup_pending), do: :cleanup_pending
   defp public_turn_error({:error, reason}), do: public_turn_error(reason)
   defp public_turn_error(_), do: :turn_failed
 end

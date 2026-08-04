@@ -161,13 +161,13 @@ defmodule Arbor.Voice.EgressAuthority do
 
   @spec owner_handoff(session_authority()) :: map()
   def owner_handoff(%{kind: :local} = authority) do
-    %{authority: authority, initial_cleanup: nil}
+    %{authority: authority, initial_cleanups: %{}}
   end
 
   def owner_handoff(%{kind: :external} = authority) do
     %{
       authority: authority,
-      initial_cleanup: {@route_cleanup_key, capability_cleanup(authority)}
+      initial_cleanups: %{@route_cleanup_key => capability_cleanup(authority)}
     }
   end
 
