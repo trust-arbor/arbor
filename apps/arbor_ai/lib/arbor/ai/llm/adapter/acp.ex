@@ -69,6 +69,24 @@ defmodule Arbor.AI.LLM.Adapter.Acp do
   @deprecated "Use Arbor.AI.Runtime.Acp via Arbor.AI.Runtime.Dispatch.dispatch/2. This path ships for backwards-compat with the pre-Phase-2c provider:\"acp\"+agent shape."
   @impl true
   def complete(%Request{} = request, opts \\ []) do
+    do_complete(request, opts)
+  end
+
+  @doc """
+  Single-attempt ACP completion.
+
+  Attests the existing linear path: at most one pool checkout and one
+  `send_message` invocation. No retry/recovery loop — ordinary and
+  single-attempt share the same linear body (a per-call CAS cannot guard
+  a second public callback invocation).
+  """
+  @impl true
+  def complete_single_attempt(%Request{} = request, opts \\ []) do
+    do_complete(request, opts)
+  end
+
+  # Linear path only: one checkout → one send_message → checkin. No retry loop.
+  defp do_complete(%Request{} = request, opts) do
     fallback_opts =
       if is_nil(request.receive_timeout),
         do: opts,
@@ -219,11 +237,27 @@ defmodule Arbor.AI.LLM.Adapter.Acp do
       @default_agent
   end
 
+  defp pool_mod do
+    # Test-only seam (matches arbor_ai `_test_*` Application env pattern).
+    Application.get_env(:arbor_ai, :_test_acp_adapter_pool_mod, @pool_mod)
+  end
+
+  defp session_mod do
+    Application.get_env(:arbor_ai, :_test_acp_adapter_session_mod, @session_mod)
+  end
+
   defp pool_checkout(agent, opts) do
-    if Code.ensure_loaded?(@pool_mod) and is_pid(Process.whereis(@pool_mod)) do
-      apply(@pool_mod, :checkout, [agent, opts])
-    else
-      {:error, :pool_not_available}
+    pool = pool_mod()
+
+    cond do
+      pool != @pool_mod ->
+        apply(pool, :checkout, [agent, opts])
+
+      Code.ensure_loaded?(pool) and is_pid(Process.whereis(pool)) ->
+        apply(pool, :checkout, [agent, opts])
+
+      true ->
+        {:error, :pool_not_available}
     end
   rescue
     exception -> {:error, {:pool_failed, Arbor.LLM.external_exception_message(exception)}}
@@ -233,7 +267,9 @@ defmodule Arbor.AI.LLM.Adapter.Acp do
   end
 
   defp pool_checkin(session, opts) do
-    if Code.ensure_loaded?(@pool_mod) do
+    pool = pool_mod()
+
+    if pool != @pool_mod or Code.ensure_loaded?(pool) do
       case live_session_ready?(session) do
         true ->
           pool_call(session, :checkin, opts)
@@ -254,13 +290,16 @@ defmodule Arbor.AI.LLM.Adapter.Acp do
   end
 
   defp live_session_ready?(session) do
-    if Code.ensure_loaded?(@session_mod) and function_exported?(@session_mod, :status, 1) do
-      case apply(@session_mod, :status, [session]) do
+    session_m = session_mod()
+
+    if Code.ensure_loaded?(session_m) and function_exported?(session_m, :status, 1) do
+      case apply(session_m, :status, [session]) do
         %{status: :ready} -> true
         _other -> false
       end
     else
-      false
+      # Test stubs without status/1 are treated as ready so checkin is exercised.
+      session_m != @session_mod
     end
   rescue
     _exception -> false
@@ -269,20 +308,21 @@ defmodule Arbor.AI.LLM.Adapter.Acp do
   end
 
   defp pool_call(session, function, opts) do
+    pool = pool_mod()
     args = [session]
-    supports_options? = function_exported?(@pool_mod, function, 2)
+    supports_options? = function_exported?(pool, function, 2)
 
     case Arbor.AI.Timeout.remaining(opts) do
       {:ok, cleanup_opts, _remaining} when supports_options? ->
-        apply(@pool_mod, function, args ++ [cleanup_opts])
+        apply(pool, function, args ++ [cleanup_opts])
 
       {:ok, _cleanup_opts, _remaining} ->
-        apply(@pool_mod, function, args)
+        apply(pool, function, args)
 
       {:error, _reason} ->
         Task.start(fn ->
           try do
-            apply(@pool_mod, function, args)
+            apply(pool, function, args)
           rescue
             _exception -> :ok
           catch
@@ -304,8 +344,10 @@ defmodule Arbor.AI.LLM.Adapter.Acp do
       |> Keyword.put(:timeout, timeout)
       |> maybe_add(:system_prompt, system_prompt)
 
-    if Code.ensure_loaded?(@session_mod) do
-      apply(@session_mod, :send_message, [session, prompt, send_opts])
+    session_m = session_mod()
+
+    if session_m != @session_mod or Code.ensure_loaded?(session_m) do
+      apply(session_m, :send_message, [session, prompt, send_opts])
     else
       {:error, :session_mod_not_available}
     end

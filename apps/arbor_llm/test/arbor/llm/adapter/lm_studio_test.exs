@@ -57,6 +57,43 @@ defmodule Arbor.LLM.Adapter.LmStudioTest do
     refute_receive {:chunk, 3}
   end
 
+  @tag voice_id: "VOICE-17"
+  @tag :security_regression
+  test "security regression VOICE-17: single-attempt disables Req retry on final prepared request" do
+    parent = self()
+
+    Req.default_options(
+      adapter: fn request ->
+        send(parent, {:lm_studio_req_options, request.options})
+        body =
+          Jason.encode!(%{
+            "choices" => [
+              %{"finish_reason" => "stop", "message" => %{"content" => "hello"}}
+            ]
+          })
+
+        {request,
+         Req.Response.new(
+           status: 200,
+           headers: [{"content-type", "application/json"}],
+           body: body
+         )}
+      end
+    )
+
+    request = %Request{
+      provider: "lm_studio_owned",
+      model: "model",
+      messages: [%Message{role: :user, content: "hello"}]
+    }
+
+    assert {:ok, _} = LmStudio.complete_single_attempt(request, [])
+
+    assert_receive {:lm_studio_req_options, options}
+    assert Keyword.get(options, :retry) == false
+    assert Keyword.get(options, :max_retries) == 0
+  end
+
   test "bounded receipt preserves a valid LM Studio response" do
     Req.default_options(
       adapter: fn request ->

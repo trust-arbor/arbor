@@ -125,14 +125,35 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
 
   def complete(_request, _opts), do: {:error, :invalid_req_llm_completion_request}
 
-  defp do_complete(request, opts) do
+  @doc """
+  Single-attempt completion: at most one real outbound Req after provider prepare.
+  """
+  @impl true
+  @spec complete_single_attempt(Request.t(), keyword()) :: {:ok, Response.t()} | {:error, term()}
+  def complete_single_attempt(request, opts \\ [])
+
+  def complete_single_attempt(%Request{} = request, opts) do
+    with {:ok, opts, _timeout} <-
+           Deadline.normalize_transport_options(opts, request.receive_timeout),
+         {:ok, receipt} <- Deadline.receipt(opts) do
+      Deadline.run(
+        fn -> do_complete(request, opts, true) |> Boundary.completion(opts) end,
+        receipt,
+        RequestTimeoutError.exception(timeout_ms: receipt.timeout_ms)
+      )
+    end
+  end
+
+  def complete_single_attempt(_request, _opts), do: {:error, :invalid_req_llm_completion_request}
+
+  defp do_complete(request, opts, single_attempt? \\ false) do
     {usage_context, opts} = pop_provider_usage_context(opts)
 
     with {:ok, model_spec} <- build_model_spec(request),
          messages <- translate_messages(request.messages),
          {:ok, req_opts} <- validated_req_opts(request, opts),
          {:ok, %ReqLLM.Response{} = resp} <-
-           call_req_llm(model_spec, messages, req_opts, usage_context) do
+           call_req_llm(model_spec, messages, req_opts, usage_context, single_attempt?) do
       {:ok, translate_response(resp, request)}
     end
   end
@@ -211,8 +232,36 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   def complete_streaming(_request, _callback, _opts),
     do: {:error, :invalid_req_llm_streaming_request}
 
-  defp complete_streaming_result(request, callback, opts) do
-    case do_complete_streaming(request, callback, opts) do
+  @doc """
+  Single-attempt stream-and-assemble. Finch streaming already one request;
+  policy is carried as a private boolean + Call.assign, never generic opts.
+  """
+  @impl true
+  @spec complete_streaming_single_attempt(
+          Request.t(),
+          (Arbor.LLM.StreamEvent.t() -> any()),
+          keyword()
+        ) :: {:ok, Response.t()} | {:error, term()}
+  def complete_streaming_single_attempt(request, callback, opts \\ [])
+
+  def complete_streaming_single_attempt(%Request{} = request, callback, opts)
+      when is_function(callback, 1) do
+    with {:ok, opts, _timeout} <-
+           Deadline.normalize_transport_options(opts, request.receive_timeout),
+         {:ok, receipt} <- Deadline.receipt(opts) do
+      Deadline.run(
+        fn -> complete_streaming_result(request, callback, opts, true) end,
+        receipt,
+        RequestTimeoutError.exception(timeout_ms: receipt.timeout_ms)
+      )
+    end
+  end
+
+  def complete_streaming_single_attempt(_request, _callback, _opts),
+    do: {:error, :invalid_req_llm_streaming_request}
+
+  defp complete_streaming_result(request, callback, opts, single_attempt? \\ false) do
+    case do_complete_streaming(request, callback, opts, single_attempt?) do
       {:ok, response, provenance} ->
         case Boundary.completion({:ok, response}, opts) do
           {:ok, accepted} = result ->
@@ -228,7 +277,7 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
     end
   end
 
-  defp do_complete_streaming(request, callback, opts) do
+  defp do_complete_streaming(request, callback, opts, single_attempt? \\ false) do
     # Accumulate the thinking deltas: ReqLLM's process_stream forwards them to
     # on_thinking but does NOT retain the full chain-of-thought on the assembled
     # response (streaming captured only the first fragment, e.g. "Thinking"),
@@ -242,7 +291,12 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
          messages <- translate_messages(request.messages),
          {:ok, req_opts} <- validated_stream_opts(request, opts),
          pipeline_call =
-           run_pipeline_call(:stream, {model_spec, messages, req_opts}, usage_context),
+           run_pipeline_call(
+             :stream,
+             {model_spec, messages, req_opts},
+             usage_context,
+             single_attempt?
+           ),
          {:ok, %BoundedStream{} = stream_response} <-
            pipeline_call.result,
          {:ok, %ReqLLM.Response{} = resp} <-
@@ -965,8 +1019,8 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
 
   # ── Dispatch ────────────────────────────────────────────────────────
 
-  defp call_req_llm(model_spec, messages, opts, usage_context) do
-    run_pipeline(:complete, {model_spec, messages, opts}, usage_context)
+  defp call_req_llm(model_spec, messages, opts, usage_context, single_attempt? \\ false) do
+    run_pipeline(:complete, {model_spec, messages, opts}, usage_context, single_attempt?)
   end
 
   # Single entry point for all four dispatch operations. Each call
@@ -975,17 +1029,28 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   # no upstream plug short-circuited. The pipeline is configurable
   # so tests can swap in record-only, replay-only, or transparent
   # variants without touching the adapter.
-  defp run_pipeline(operation, request, usage_context) do
-    run_pipeline_call(operation, request, usage_context) |> Map.fetch!(:result)
+  defp run_pipeline(operation, request, usage_context, single_attempt? \\ false) do
+    run_pipeline_call(operation, request, usage_context, single_attempt?)
+    |> Map.fetch!(:result)
   end
 
   # Private provider_usage_context is merged into Call metadata only — never
   # into the request tuple that Dispatch forwards to ReqLLM.
-  defp run_pipeline_call(operation, request, usage_context) do
-    operation
-    |> Call.new(request)
-    |> maybe_put_provider_usage_context(usage_context)
-    |> Pipeline.through(pipeline())
+  # Single-attempt policy is a direct private boolean + Call.assign, never opts.
+  defp run_pipeline_call(operation, request, usage_context, single_attempt? \\ false) do
+    call =
+      operation
+      |> Call.new(request)
+      |> maybe_put_provider_usage_context(usage_context)
+
+    call =
+      if single_attempt? do
+        Call.assign(call, :single_attempt, true)
+      else
+        call
+      end
+
+    Pipeline.through(call, pipeline())
   end
 
   defp pop_provider_usage_context(opts) when is_list(opts) do

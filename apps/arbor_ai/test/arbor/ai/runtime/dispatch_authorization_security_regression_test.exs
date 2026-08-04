@@ -181,7 +181,12 @@ defmodule Arbor.AI.Runtime.DispatchAuthorizationSecurityRegressionTest do
 
     assert_receive {:prepare, %Request{} = fallback_request}
     assert fallback_request.runtime == :acp
-    assert fallback.destination == fallback_request.provider
+    # ACP destination is the exact CLI used by checkout (shared resolver), not bare provider.
+    assert {:ok, expected_acp_dest} =
+             Arbor.AI.Runtime.Acp.authorization_destination(:acp, fallback_request.provider)
+
+    assert fallback.destination == expected_acp_dest
+    assert String.starts_with?(fallback.destination, "acp:")
     assert fallback.model == fallback_request.model
     assert_receive {:execute, %Request{runtime: :acp}}
   end
@@ -275,5 +280,162 @@ defmodule Arbor.AI.Runtime.DispatchAuthorizationSecurityRegressionTest do
       refute_received {:prepare, _}
       refute_received {:execute, _}
     end)
+  end
+
+  test "security regression VOICE-17: ProviderRouter ACP destinations are exact acp:<agent>" do
+    alias Arbor.Contracts.LLM.{ModelEntry, ProviderEntry}
+
+    primary =
+      %ModelEntry{
+        canonical_id: "primary",
+        providers: [
+          %ProviderEntry{id: :anthropic, ref: "claude-wire", auth: :none, runtimes: [:acp]}
+        ],
+        family: :test,
+        context_window: 100_000,
+        max_output_tokens: 4_000
+      }
+
+    fallback =
+      %ModelEntry{
+        canonical_id: "fallback",
+        providers: [
+          %ProviderEntry{id: :openai, ref: "codex-wire", auth: :none, runtimes: [:acp]}
+        ],
+        family: :test,
+        context_window: 100_000,
+        max_output_tokens: 4_000
+      }
+
+    # Primary ACP attempt fails so fallback is considered; authorizer records destinations.
+    Application.put_env(:arbor_ai, :runtime_registry, %{
+      acp: LegacyAuthFailingRuntime
+    })
+
+    concurrency_name = :"auth_rc_#{System.unique_integer([:positive])}"
+
+    start_supervised!(
+      {Arbor.AI.RouteConcurrency,
+       name: concurrency_name,
+       limits: %{
+         anthropic: %{acp: 8, arbor: 8},
+         openai: %{acp: 8, arbor: 8}
+       }}
+    )
+
+    test_pid = self()
+
+    authorizer = fn route ->
+      send(
+        test_pid,
+        {:authorize_acp, route.destination, route.runtime, route.model, route.provider.id}
+      )
+
+      :allow
+    end
+
+    route_input = %{
+      task_class: "default",
+      task_registry: %{"default" => %{requirements: %{}}},
+      catalog: [primary, fallback],
+      scoreboard: [
+        %{model: "primary", provider: "anthropic", runtime: "acp", score: 1.0},
+        %{model: "fallback", provider: "openai", runtime: "acp", score: 0.5}
+      ],
+      observations: [],
+      budgets: [],
+      now: ~U[2026-07-22 22:00:00Z],
+      policy: %{}
+    }
+
+    assert {:error, :timeout} =
+             Dispatch.dispatch(build_request("primary"),
+               provider_route_input: route_input,
+               route_authorizer: authorizer,
+               route_concurrency_server: concurrency_name
+             )
+
+    assert_receive {:authorize_acp, "acp:claude", :acp, "claude-wire", :anthropic}
+    assert_receive {:prepare, %Request{provider: "anthropic", runtime: :acp, model: "claude-wire"}}
+    assert_receive {:execute, %Request{provider: "anthropic", runtime: :acp}}
+
+    assert_receive {:authorize_acp, "acp:codex", :acp, "codex-wire", :openai}
+    assert_receive {:prepare, %Request{provider: "openai", runtime: :acp, model: "codex-wire"}}
+    assert_receive {:execute, %Request{provider: "openai", runtime: :acp}}
+  end
+
+  test "security regression VOICE-17: ProviderRouter approval for one ACP agent cannot authorize another" do
+    alias Arbor.Contracts.LLM.{ModelEntry, ProviderEntry}
+
+    primary =
+      %ModelEntry{
+        canonical_id: "primary",
+        providers: [
+          %ProviderEntry{id: :anthropic, ref: "claude-wire", auth: :none, runtimes: [:acp]}
+        ],
+        family: :test,
+        context_window: 100_000,
+        max_output_tokens: 4_000
+      }
+
+    fallback =
+      %ModelEntry{
+        canonical_id: "fallback",
+        providers: [
+          %ProviderEntry{id: :openai, ref: "codex-wire", auth: :none, runtimes: [:acp]}
+        ],
+        family: :test,
+        context_window: 100_000,
+        max_output_tokens: 4_000
+      }
+
+    Application.put_env(:arbor_ai, :runtime_registry, %{
+      acp: LegacyAuthFailingRuntime
+    })
+
+    concurrency_name = :"auth_rc_deny_#{System.unique_integer([:positive])}"
+
+    start_supervised!(
+      {Arbor.AI.RouteConcurrency,
+       name: concurrency_name,
+       limits: %{
+         anthropic: %{acp: 8, arbor: 8},
+         openai: %{acp: 8, arbor: 8}
+       }}
+    )
+
+    authorizer = fn route ->
+      send(self(), {:authorize_dest, route.destination})
+      # Allow only claude CLI destination — codex must be denied separately.
+      if route.destination == "acp:claude", do: :allow, else: :deny
+    end
+
+    route_input = %{
+      task_class: "default",
+      task_registry: %{"default" => %{requirements: %{}}},
+      catalog: [primary, fallback],
+      scoreboard: [
+        %{model: "primary", provider: "anthropic", runtime: "acp", score: 1.0},
+        %{model: "fallback", provider: "openai", runtime: "acp", score: 0.5}
+      ],
+      observations: [],
+      budgets: [],
+      now: ~U[2026-07-22 22:00:00Z],
+      policy: %{}
+    }
+
+    assert {:error, {:authorization_failed, :denied}} =
+             Dispatch.dispatch(build_request("primary"),
+               provider_route_input: route_input,
+               route_authorizer: authorizer,
+               route_concurrency_server: concurrency_name
+             )
+
+    assert_receive {:authorize_dest, "acp:claude"}
+    assert_receive {:prepare, %Request{provider: "anthropic", runtime: :acp}}
+    assert_receive {:execute, %Request{provider: "anthropic", runtime: :acp}}
+    assert_receive {:authorize_dest, "acp:codex"}
+    refute_received {:prepare, %Request{provider: "openai"}}
+    refute_received {:execute, %Request{provider: "openai"}}
   end
 end

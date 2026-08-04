@@ -42,9 +42,22 @@ defmodule Arbor.LLM.ProviderAdapter do
 
   @callback provider() :: String.t()
   @callback complete(Request.t(), keyword()) :: {:ok, Response.t()} | {:error, term()}
+  @callback complete_single_attempt(Request.t(), keyword()) ::
+              {:ok, Response.t()} | {:error, term()}
+  @callback complete_streaming_single_attempt(
+              Request.t(),
+              (Arbor.LLM.StreamEvent.t() -> any()),
+              keyword()
+            ) :: {:ok, Response.t()} | {:error, term()}
   @callback stream(Request.t(), keyword()) :: Enumerable.t() | {:error, term()}
   @callback embed(texts :: [String.t()], model :: String.t(), opts :: keyword()) ::
               {:ok, embed_batch_result()} | {:error, term()}
   @callback runtime_contract() :: Arbor.Contracts.AI.RuntimeContract.t()
-  @optional_callbacks [stream: 2, embed: 3, runtime_contract: 0]
+  @optional_callbacks [
+    stream: 2,
+    embed: 3,
+    runtime_contract: 0,
+    complete_single_attempt: 2,
+    complete_streaming_single_attempt: 3
+  ]
 end

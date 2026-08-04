@@ -800,6 +800,28 @@ defmodule Arbor.LLM.OAuth.ResponsesTest do
     refute second =~ "new-refresh-never-send"
   end
 
+  @tag voice_id: "VOICE-17"
+  @tag :security_regression
+  test "security regression VOICE-17: single-attempt complete does not reread/retry on source-owned 401",
+       %{root: root, store_dir: store_dir} do
+    source_path =
+      configure_source_owned_openai!(root, store_dir, "same-access", "never-send-refresh")
+
+    source_bytes = File.read!(source_path)
+    {url, server} = start_unchanged_401_server()
+    configure_responses_endpoint!(url)
+
+    # Ordinary complete would reread and collapse to reauthentication_required.
+    # Single-attempt must return the first 401 and never reread the source.
+    assert {:error, %ResponsesFailure{class: :auth, status: 401}} =
+             Responses.complete_single_attempt(:openai, empty_request(), receive_timeout: 1_000)
+
+    assert %{request: request, retried?: false} = Task.await(server, 2_000)
+    assert request =~ "authorization: Bearer same-access"
+    refute request =~ "never-send-refresh"
+    assert File.read!(source_path) == source_bytes
+  end
+
   test "security regression: source-owned Responses does not reread or retry non-401 statuses",
        %{root: root, store_dir: store_dir} do
     source_path =

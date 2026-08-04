@@ -1,6 +1,7 @@
 defmodule Arbor.LLM.ToolLoopEgressAuthorizationSecurityRegressionTest do
   @moduledoc false
-  use ExUnit.Case, async: true
+  # async: false — formal selector mutates Application pipeline config for ReqLLM proof.
+  use ExUnit.Case, async: false
 
   @moduletag :fast
   @moduletag :security_regression
@@ -17,8 +18,24 @@ defmodule Arbor.LLM.ToolLoopEgressAuthorizationSecurityRegressionTest do
 
       if is_pid(parent) do
         send(parent, {:client_complete, request.model, Keyword.keys(opts)})
+        send(parent, {:adapter_complete, :ordinary})
       end
 
+      counting_response(request)
+    end
+
+    def complete_single_attempt(%Request{} = request, opts) do
+      parent = Keyword.get(opts, :parent) || Map.get(request.provider_options || %{}, :parent)
+
+      if is_pid(parent) do
+        send(parent, {:client_complete, request.model, Keyword.keys(opts)})
+        send(parent, {:adapter_complete, :single_attempt})
+      end
+
+      counting_response(request)
+    end
+
+    defp counting_response(%Request{} = request) do
       case Enum.count(request.messages, &(&1.role == :tool)) do
         0 ->
           {:ok,
@@ -43,27 +60,38 @@ defmodule Arbor.LLM.ToolLoopEgressAuthorizationSecurityRegressionTest do
     end
   end
 
-  # Implements complete_streaming so the streaming attempt is observable, then
-  # returns stream_not_supported so ToolLoop must reauthorize and complete.
-  defmodule StreamUnsupportedAdapter do
+  # Ordinary complete only — no single-attempt attestation.
+  defmodule UnsupportedSingleAttemptAdapter do
     @behaviour Arbor.LLM.ProviderAdapter
-    def provider, do: "llm_auth_stream_unsupported"
+    def provider, do: "llm_auth_unsupported_single"
 
-    def complete_streaming(%Request{} = request, _callback, opts) do
+    def complete(%Request{} = request, opts) do
       parent = Keyword.get(opts, :parent) || Map.get(request.provider_options || %{}, :parent)
+      if is_pid(parent), do: send(parent, {:adapter_complete, :ordinary})
 
-      if is_pid(parent) do
-        send(parent, {:client_complete_streaming, Keyword.keys(opts)})
-      end
-
-      {:error, {:stream_not_supported, __MODULE__}}
+      {:ok,
+       %Response{
+         text: "should-not-run",
+         finish_reason: :stop,
+         content_parts: [ContentPart.text("should-not-run")],
+         usage: %{},
+         raw: %{}
+       }}
     end
+  end
+
+  # True no/no streaming capability: neither ordinary nor attested streaming exports.
+  # Client returns {:stream_not_supported, adapter}; ToolLoop reauthorizes non-stream.
+  defmodule NoStreamCapabilityAdapter do
+    @behaviour Arbor.LLM.ProviderAdapter
+    def provider, do: "llm_auth_no_stream"
 
     def complete(%Request{} = request, opts) do
       parent = Keyword.get(opts, :parent) || Map.get(request.provider_options || %{}, :parent)
 
       if is_pid(parent) do
         send(parent, {:client_complete, :fallback, Keyword.keys(opts)})
+        send(parent, {:adapter_complete, :ordinary})
       end
 
       {:ok,
@@ -75,6 +103,60 @@ defmodule Arbor.LLM.ToolLoopEgressAuthorizationSecurityRegressionTest do
          raw: %{}
        }}
     end
+
+    def complete_single_attempt(%Request{} = request, opts) do
+      parent = Keyword.get(opts, :parent) || Map.get(request.provider_options || %{}, :parent)
+
+      if is_pid(parent) do
+        send(parent, {:client_complete, :fallback, Keyword.keys(opts)})
+        send(parent, {:adapter_complete, :single_attempt})
+      end
+
+      {:ok,
+       %Response{
+         text: "stream-fallback-ok",
+         finish_reason: :stop,
+         content_parts: [ContentPart.text("stream-fallback-ok")],
+         usage: %{},
+         raw: %{}
+       }}
+    end
+  end
+
+  # Ordinary streaming exists without attested streaming — fail closed under authorizer.
+  defmodule StreamOrdinaryOnlyAdapter do
+    @behaviour Arbor.LLM.ProviderAdapter
+    def provider, do: "llm_auth_stream_ordinary_only"
+
+    def complete_streaming(%Request{} = request, _callback, opts) do
+      parent = Keyword.get(opts, :parent) || Map.get(request.provider_options || %{}, :parent)
+      if is_pid(parent), do: send(parent, {:client_complete_streaming, :ordinary})
+
+      {:ok,
+       %Response{
+         text: "streamed",
+         finish_reason: :stop,
+         content_parts: [ContentPart.text("streamed")],
+         usage: %{},
+         raw: %{}
+       }}
+    end
+
+    def complete(%Request{} = request, opts) do
+      parent = Keyword.get(opts, :parent) || Map.get(request.provider_options || %{}, :parent)
+      if is_pid(parent), do: send(parent, {:adapter_complete, :ordinary})
+
+      {:ok,
+       %Response{
+         text: "complete",
+         finish_reason: :stop,
+         content_parts: [ContentPart.text("complete")],
+         usage: %{},
+         raw: %{}
+       }}
+    end
+
+    def complete_single_attempt(%Request{} = request, opts), do: complete(request, opts)
   end
 
   defmodule MaxTurnsAdapter do
@@ -108,6 +190,8 @@ defmodule Arbor.LLM.ToolLoopEgressAuthorizationSecurityRegressionTest do
          raw: %{}
        }}
     end
+
+    def complete_single_attempt(%Request{} = request, opts), do: complete(request, opts)
   end
 
   defmodule EmptyFinalAdapter do
@@ -157,6 +241,8 @@ defmodule Arbor.LLM.ToolLoopEgressAuthorizationSecurityRegressionTest do
            }}
       end
     end
+
+    def complete_single_attempt(%Request{} = request, opts), do: complete(request, opts)
   end
 
   defmodule TerminalFreeFormThenSubmitAdapter do
@@ -199,6 +285,44 @@ defmodule Arbor.LLM.ToolLoopEgressAuthorizationSecurityRegressionTest do
            raw: %{}
          }}
       end
+    end
+
+    def complete_single_attempt(%Request{} = request, opts), do: complete(request, opts)
+  end
+
+  # Counts single-attempt entries; used with middleware that multi-invokes continuation.
+  # Counter lives in Application env so ToolLoop opts need not carry it.
+  defmodule GatedSingleAttemptAdapter do
+    @behaviour Arbor.LLM.ProviderAdapter
+    def provider, do: "llm_auth_gated"
+
+    def complete(%Request{} = _request, _opts) do
+      send(self(), {:adapter_complete, :ordinary})
+
+      {:ok,
+       %Response{
+         text: "ordinary",
+         finish_reason: :stop,
+         content_parts: [ContentPart.text("ordinary")],
+         usage: %{},
+         raw: %{}
+       }}
+    end
+
+    def complete_single_attempt(%Request{} = _request, _opts) do
+      counter = Application.fetch_env!(:arbor_llm, :_test_gated_entry_counter)
+      parent = Application.fetch_env!(:arbor_llm, :_test_gated_parent)
+      n = :atomics.add_get(counter, 1, 1)
+      send(parent, {:adapter_complete, :single_attempt, n})
+
+      {:ok,
+       %Response{
+         text: "single",
+         finish_reason: :stop,
+         content_parts: [ContentPart.text("single")],
+         usage: %{},
+         raw: %{}
+       }}
     end
   end
 
@@ -312,7 +436,7 @@ defmodule Arbor.LLM.ToolLoopEgressAuthorizationSecurityRegressionTest do
     assert length(completes) == 2
   end
 
-  test "security regression VOICE-17: stream-not-supported fallback reauthorizes separately" do
+  test "security regression VOICE-17: no/no stream capability reauthorizes non-stream fallback" do
     counter = :atomics.new(1, [])
 
     authorizer = fn %Request{} = req ->
@@ -321,10 +445,12 @@ defmodule Arbor.LLM.ToolLoopEgressAuthorizationSecurityRegressionTest do
       :allow
     end
 
+    # True no/no: adapter exports neither ordinary nor attested streaming.
+    # Client returns {:stream_not_supported, adapter}; ToolLoop reauthorizes complete.
     assert {:ok, result} =
              ToolLoop.run(
-               client(StreamUnsupportedAdapter),
-               request("llm_auth_stream_unsupported"),
+               client(NoStreamCapabilityAdapter),
+               request("llm_auth_no_stream"),
                tools: [],
                tool_executor: EchoTools,
                max_turns: 1,
@@ -334,14 +460,13 @@ defmodule Arbor.LLM.ToolLoopEgressAuthorizationSecurityRegressionTest do
              )
 
     assert result.content == "stream-fallback-ok"
-    # First authorize admits the streaming attempt; second admits fallback complete.
-    assert_receive {:authorize, 1, "llm_auth_stream_unsupported"}
-    assert_receive {:client_complete_streaming, stream_keys}
-    refute :llm_call_authorizer in stream_keys
-    assert_receive {:authorize, 2, "llm_auth_stream_unsupported"}
+    # First authorize admits the streaming attempt (capability probe); second admits fallback.
+    assert_receive {:authorize, 1, "llm_auth_no_stream"}
+    assert_receive {:authorize, 2, "llm_auth_no_stream"}
     assert_receive {:client_complete, :fallback, complete_keys}
     refute :llm_call_authorizer in complete_keys
-    refute_received {:client_complete, _, _}
+    assert_receive {:adapter_complete, :single_attempt}
+    refute_received {:adapter_complete, :ordinary}
     refute_received {:client_complete_streaming, _}
   end
 
@@ -356,8 +481,8 @@ defmodule Arbor.LLM.ToolLoopEgressAuthorizationSecurityRegressionTest do
 
     assert {:error, {:llm_call_authorization_failed, :denied}} =
              ToolLoop.run(
-               client(StreamUnsupportedAdapter),
-               request("llm_auth_stream_unsupported"),
+               client(NoStreamCapabilityAdapter),
+               request("llm_auth_no_stream"),
                tools: [],
                max_turns: 1,
                parent: self(),
@@ -366,12 +491,11 @@ defmodule Arbor.LLM.ToolLoopEgressAuthorizationSecurityRegressionTest do
              )
 
     assert_receive {:authorize, 1}
-    # Streaming attempt was admitted and observed; fallback complete must not run.
-    assert_receive {:client_complete_streaming, stream_keys}
-    refute :llm_call_authorizer in stream_keys
+    # Streaming probe admitted; fallback complete must not run after deny.
     assert_receive {:authorize, 2}
     refute_received {:client_complete, _, _}
     refute_received {:client_complete, _}
+    refute_received {:adapter_complete, _}
   end
 
   test "security regression VOICE-17: max-turn wrap-up is authorized independently" do
@@ -505,5 +629,285 @@ defmodule Arbor.LLM.ToolLoopEgressAuthorizationSecurityRegressionTest do
     assert_receive {:client_complete, _, keys2}
     refute :llm_call_authorizer in keys1
     refute :llm_call_authorizer in keys2
+  end
+
+  test "security regression VOICE-17: authorizer present uses single-attempt adapter path" do
+    assert {:ok, _} =
+             ToolLoop.run(client(CountingAdapter), request("llm_auth_counting"),
+               tools: tools(),
+               tool_executor: EchoTools,
+               max_turns: 3,
+               parent: self(),
+               llm_call_authorizer: allow_authorizer()
+             )
+
+    assert_receive {:adapter_complete, :single_attempt}
+    assert_receive {:adapter_complete, :single_attempt}
+    refute_received {:adapter_complete, :ordinary}
+  end
+
+  test "security regression VOICE-17: unsupported adapter fails before ordinary complete" do
+    assert {:error, :single_attempt_not_supported} =
+             ToolLoop.run(
+               client(UnsupportedSingleAttemptAdapter),
+               request("llm_auth_unsupported_single"),
+               tools: [],
+               max_turns: 1,
+               parent: self(),
+               llm_call_authorizer: allow_authorizer()
+             )
+
+    refute_received {:adapter_complete, :ordinary}
+  end
+
+  test "security regression VOICE-17: ToolLoop middleware sequential double-enter yields one adapter invoke" do
+    counter = :atomics.new(1, [])
+    parent = self()
+    Application.put_env(:arbor_llm, :_test_gated_entry_counter, counter)
+    Application.put_env(:arbor_llm, :_test_gated_parent, parent)
+
+    on_exit(fn ->
+      Application.delete_env(:arbor_llm, :_test_gated_entry_counter)
+      Application.delete_env(:arbor_llm, :_test_gated_parent)
+    end)
+
+    middleware = fn req, next ->
+      first = next.(req)
+      second = next.(req)
+      send(parent, {:middleware_results, first, second})
+      first
+    end
+
+    client =
+      client(GatedSingleAttemptAdapter)
+      |> Map.put(:middleware, [middleware])
+
+    assert {:ok, result} =
+             ToolLoop.run(client, request("llm_auth_gated"),
+               tools: [],
+               max_turns: 1,
+               llm_call_authorizer: allow_authorizer()
+             )
+
+    assert result.content == "single"
+    assert_receive {:middleware_results, first, second}
+    assert match?({:ok, %Response{text: "single"}}, first)
+    assert second == {:error, :single_attempt_continuation_spent}
+    assert :atomics.get(counter, 1) == 1
+    assert_receive {:adapter_complete, :single_attempt, 1}
+    refute_received {:adapter_complete, :single_attempt, 2}
+  end
+
+  test "security regression VOICE-17: ToolLoop middleware concurrent continuation yields one adapter invoke" do
+    counter = :atomics.new(1, [])
+    parent = self()
+    Application.put_env(:arbor_llm, :_test_gated_entry_counter, counter)
+    Application.put_env(:arbor_llm, :_test_gated_parent, parent)
+
+    on_exit(fn ->
+      Application.delete_env(:arbor_llm, :_test_gated_entry_counter)
+      Application.delete_env(:arbor_llm, :_test_gated_parent)
+    end)
+
+    middleware = fn req, next ->
+      task1 = Task.async(fn -> next.(req) end)
+      task2 = Task.async(fn -> next.(req) end)
+      r1 = Task.await(task1)
+      r2 = Task.await(task2)
+      send(parent, {:concurrent_results, r1, r2})
+
+      case {r1, r2} do
+        {{:ok, _} = ok, _} -> ok
+        {_, {:ok, _} = ok} -> ok
+        {other, _} -> other
+      end
+    end
+
+    client =
+      client(GatedSingleAttemptAdapter)
+      |> Map.put(:middleware, [middleware])
+
+    assert {:ok, _} =
+             ToolLoop.run(client, request("llm_auth_gated"),
+               tools: [],
+               max_turns: 1,
+               llm_call_authorizer: allow_authorizer()
+             )
+
+    assert_receive {:concurrent_results, r1, r2}
+    results = [r1, r2]
+    assert Enum.count(results, &match?({:ok, _}, &1)) == 1
+    assert Enum.count(results, &(&1 == {:error, :single_attempt_continuation_spent})) == 1
+    assert :atomics.get(counter, 1) == 1
+  end
+
+  test "security regression VOICE-17: ToolLoop late retained continuation cannot invoke adapter" do
+    counter = :atomics.new(1, [])
+    parent = self()
+    Application.put_env(:arbor_llm, :_test_gated_entry_counter, counter)
+    Application.put_env(:arbor_llm, :_test_gated_parent, parent)
+
+    on_exit(fn ->
+      Application.delete_env(:arbor_llm, :_test_gated_entry_counter)
+      Application.delete_env(:arbor_llm, :_test_gated_parent)
+    end)
+
+    # Retain continuation via mailbox (not Process.put) for late post-return call.
+    middleware = fn req, next ->
+      send(parent, {:retained_continuation, next, req})
+      next.(req)
+    end
+
+    client =
+      client(GatedSingleAttemptAdapter)
+      |> Map.put(:middleware, [middleware])
+
+    assert {:ok, _} =
+             ToolLoop.run(client, request("llm_auth_gated"),
+               tools: [],
+               max_turns: 1,
+               llm_call_authorizer: allow_authorizer()
+             )
+
+    assert :atomics.get(counter, 1) == 1
+    assert_receive {:retained_continuation, next, req}
+    assert is_function(next, 1)
+    assert next.(req) == {:error, :single_attempt_continuation_spent}
+    assert :atomics.get(counter, 1) == 1
+    refute_received {:adapter_complete, :single_attempt, 2}
+  end
+
+  test "security regression VOICE-17: ToolLoop timeout-kill retained continuation cannot invoke adapter" do
+    counter = :atomics.new(1, [])
+    parent = self()
+    Application.put_env(:arbor_llm, :_test_gated_entry_counter, counter)
+    Application.put_env(:arbor_llm, :_test_gated_parent, parent)
+
+    on_exit(fn ->
+      Application.delete_env(:arbor_llm, :_test_gated_entry_counter)
+      Application.delete_env(:arbor_llm, :_test_gated_parent)
+    end)
+
+    timeout_ms = 50
+
+    # Export continuation via mailbox, then park forever without claiming the gate.
+    # Only the Deadline-owned worker may block past the short deadline; :kill ends it.
+    middleware = fn req, next ->
+      send(parent, {:retained_timeout_continuation, next, req})
+
+      receive do
+      after
+        :infinity -> :ok
+      end
+
+      # Unreachable when Deadline kills the worker on timeout.
+      next.(req)
+    end
+
+    client =
+      client(GatedSingleAttemptAdapter)
+      |> Map.put(:middleware, [middleware])
+
+    # Run ToolLoop off the test process so mailbox handoff can be observed before
+    # the timeout result returns, keeping the race deterministic under load.
+    task =
+      Task.async(fn ->
+        ToolLoop.run(client, request("llm_auth_gated"),
+          tools: [],
+          max_turns: 1,
+          timeout_ms: timeout_ms,
+          receive_timeout: timeout_ms,
+          llm_call_authorizer: allow_authorizer(parent)
+        )
+      end)
+
+    assert_receive {:retained_timeout_continuation, next, req}, 1_000
+    assert is_function(next, 1)
+
+    assert {:error, %Arbor.LLM.RequestTimeoutError{}} = Task.await(task, 2_000)
+
+    # After Deadline kills its worker, invoker-owned cleanup must close the gate so a
+    # retained continuation cannot invoke the adapter.
+    assert next.(req) == {:error, :single_attempt_continuation_spent}
+    assert :atomics.get(counter, 1) == 0
+    refute_received {:adapter_complete, :single_attempt, 1}
+  end
+
+  test "security regression VOICE-17: ordinary stream without attestation fails closed under authorizer" do
+    assert {:error, :single_attempt_not_supported} =
+             ToolLoop.run(
+               client(StreamOrdinaryOnlyAdapter),
+               request("llm_auth_stream_ordinary_only"),
+               tools: [],
+               max_turns: 1,
+               parent: self(),
+               stream_callback: fn _ -> :ok end,
+               llm_call_authorizer: allow_authorizer()
+             )
+
+    refute_received {:client_complete_streaming, :ordinary}
+    refute_received {:adapter_complete, :ordinary}
+  end
+
+  test "security regression VOICE-17: ToolLoop+ReqLLM+Dispatch single-attempt performs one request" do
+    # Production path through public ToolLoop + authorizer + real Plugs.Dispatch
+    # after real provider prepare. Network-free Req.Test.transport_error.
+    # Must not substitute an intercept dispatch plug before provider attach.
+    # Deadline performs the transport in its worker, so this non-async test must
+    # expose its stub to that child process.
+    Req.Test.set_req_test_to_shared()
+
+    bypass_plug = {Req.Test, __MODULE__.ReqLLMSingleAttempt}
+
+    previous_pipeline = Application.get_env(:arbor_llm, :pipeline)
+
+    Application.put_env(:arbor_llm, :pipeline, [
+      Arbor.LLM.Plugs.Dispatch,
+      Arbor.LLM.Plugs.RateLimitBackoff
+    ])
+
+    on_exit(fn ->
+      if previous_pipeline do
+        Application.put_env(:arbor_llm, :pipeline, previous_pipeline)
+      else
+        Application.delete_env(:arbor_llm, :pipeline)
+      end
+    end)
+
+    hits = :atomics.new(1, [])
+    parent = self()
+
+    Req.Test.stub(__MODULE__.ReqLLMSingleAttempt, fn conn ->
+      :atomics.add_get(hits, 1, 1)
+      send(parent, {:req_transport_hit, conn.method})
+      Req.Test.transport_error(conn, :econnrefused)
+    end)
+
+    client =
+      Client.new(
+        adapters: %{"openai" => Arbor.LLM.Adapter.ReqLLM},
+        default_provider: "openai"
+      )
+
+    req = %Request{
+      provider: "openai",
+      model: "gpt-4o-mini",
+      messages: [Message.new(:user, "ping")],
+      tools: []
+    }
+
+    assert {:error, _} =
+             ToolLoop.run(client, req,
+               tools: [],
+               max_turns: 1,
+               llm_call_authorizer: allow_authorizer(),
+               api_key: "test-key-not-real",
+               # Intentionally request retries; single-attempt post-prepare override must win.
+               req_http_options: [plug: bypass_plug, retry: :transient, max_retries: 3]
+             )
+
+    assert :atomics.get(hits, 1) == 1
+    assert_receive {:req_transport_hit, _}
+    refute_received {:req_transport_hit, _}
   end
 end

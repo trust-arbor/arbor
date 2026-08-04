@@ -45,6 +45,7 @@ defmodule Arbor.AI.Runtime.Acp do
   # to spawn a real CLI for. Bedrock/Vertex/Anthropic models served via
   # OpenRouter etc. don't have a generic "OpenRouter CLI" — those go
   # through `:arbor` runtime instead.
+  # Single source of truth for checkout AND authorization destination binding.
   @provider_to_cli %{
     "anthropic" => :claude,
     "openai" => :codex,
@@ -59,14 +60,47 @@ defmodule Arbor.AI.Runtime.Acp do
   @pool_mod Arbor.AI.AcpPool
   @session_mod Arbor.AI.AcpSession
 
+  @doc """
+  Resolve the CLI agent atom for a model-source provider string.
+
+  Shared by checkout and Dispatch authorization so an approval for one
+  ACP agent cannot authorize another.
+  """
+  @spec cli_for_provider(String.t()) ::
+          {:ok, atom()} | {:error, {:no_cli_for_provider, String.t()}}
+  def cli_for_provider(provider) when is_binary(provider) do
+    case Map.get(@provider_to_cli, provider) do
+      nil -> {:error, {:no_cli_for_provider, provider}}
+      cli when is_atom(cli) -> {:ok, cli}
+    end
+  end
+
+  # Non-binary input must fail closed without raising (to_string/1 can raise on bad terms).
+  def cli_for_provider(_provider), do: {:error, {:no_cli_for_provider, ""}}
+
+  @doc """
+  Authorization destination for an ACP runtime route: `\"acp:<agent>\"`.
+
+  Exact wire identity used by checkout (e.g. `acp:claude`, `acp:codex`).
+  """
+  @spec authorization_destination(:acp, String.t()) ::
+          {:ok, String.t()} | {:error, term()}
+  def authorization_destination(:acp, provider) when is_binary(provider) do
+    with {:ok, cli} <- cli_for_provider(provider) do
+      {:ok, "acp:" <> Atom.to_string(cli)}
+    end
+  end
+
+  def authorization_destination(:acp, _provider), do: {:error, {:no_cli_for_provider, ""}}
+
   @impl Runtime
   @spec prepare(Request.t(), keyword()) :: {:ok, Request.t()} | {:error, term()}
   def prepare(%Request{provider: provider} = request, _opts) do
-    case Map.get(@provider_to_cli, provider) do
-      nil ->
-        {:error, {:no_cli_for_provider, provider}}
+    case cli_for_provider(provider) do
+      {:error, reason} ->
+        {:error, reason}
 
-      _cli ->
+      {:ok, _cli} ->
         # Pass the request through unchanged — execute/3 will re-resolve
         # the CLI from request.provider. Splitting resolution between
         # prepare and execute kept the boundary clean against `Runtime`
@@ -137,12 +171,7 @@ defmodule Arbor.AI.Runtime.Acp do
 
   # -- Internals --
 
-  defp resolve_cli(%Request{provider: provider}) do
-    case Map.get(@provider_to_cli, provider) do
-      nil -> {:error, {:no_cli_for_provider, provider}}
-      cli -> {:ok, cli}
-    end
-  end
+  defp resolve_cli(%Request{provider: provider}), do: cli_for_provider(provider)
 
   @doc false
   # Exposed (under @doc false) so tests can pin the

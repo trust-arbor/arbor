@@ -946,14 +946,21 @@ defmodule Arbor.LLM.ToolLoop do
   # Use streaming when a stream_callback is provided, otherwise Client.complete.
   # Every external Client attempt funnels here so a present :llm_call_authorizer
   # is consulted once per attempt (including stream-not-supported fallback).
+  # When the authorizer is present and allows, dedicated single-attempt Client
+  # APIs are used so one approval covers at most one real outbound attempt.
   defp call_llm(client, request, opts) do
     # Never forward the process-local authorizer into Client/adapters.
     client_opts = Keyword.delete(opts, :llm_call_authorizer)
+    single_attempt? = Keyword.has_key?(opts, :llm_call_authorizer)
 
     case Keyword.get(opts, :stream_callback) do
       nil ->
         with :ok <- authorize_llm_call(opts, request) do
-          Client.complete(client, request, client_opts)
+          if single_attempt? do
+            Client.complete_single_attempt(client, request, client_opts)
+          else
+            Client.complete(client, request, client_opts)
+          end
         end
 
       callback ->
@@ -961,16 +968,27 @@ defmodule Arbor.LLM.ToolLoop do
         # a fully-assembled response with tool calls + ARGUMENTS. The old
         # stream→collect_stream path dropped tool-call arguments (streamed
         # tool-call chunks carry no assembled args), so tools ran with empty
-        # input. Fall back to complete/3 if the adapter can't stream-and-assemble.
+        # input. Fall back to complete if the adapter can't stream-and-assemble.
         with :ok <- authorize_llm_call(opts, request) do
-          case Client.complete_streaming(client, request, callback, client_opts) do
+          stream_result =
+            if single_attempt? do
+              Client.complete_streaming_single_attempt(client, request, callback, client_opts)
+            else
+              Client.complete_streaming(client, request, callback, client_opts)
+            end
+
+          case stream_result do
             {:ok, _} = ok ->
               ok
 
             {:error, {:stream_not_supported, _}} ->
               # One approval never covers the non-streaming fallback attempt.
               with :ok <- authorize_llm_call(opts, request) do
-                Client.complete(client, request, client_opts)
+                if single_attempt? do
+                  Client.complete_single_attempt(client, request, client_opts)
+                else
+                  Client.complete(client, request, client_opts)
+                end
               end
 
             {:error, _} = error ->

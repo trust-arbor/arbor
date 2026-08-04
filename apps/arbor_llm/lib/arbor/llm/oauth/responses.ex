@@ -84,6 +84,28 @@ defmodule Arbor.LLM.OAuth.Responses do
 
   def complete(_provider, _req, _opts), do: {:error, :invalid_responses_request}
 
+  @doc """
+  Single-attempt complete: identical to `complete/3` except source-token 401
+  reread/retry is disabled. Private single-attempt policy only — not generic opts.
+  """
+  @spec complete_single_attempt(atom() | String.t(), map(), keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def complete_single_attempt(provider, req, opts \\ [])
+
+  def complete_single_attempt(provider, %{} = req, opts) do
+    with {:ok, limits} <- build_limits(opts),
+         {:ok, identity} <- resolve_identity(provider),
+         {:ok, receipt} <- Deadline.receipt(timeout_ms: limits.timeout) do
+      Deadline.run(
+        fn -> do_complete(identity, req, opts, limits, true) end,
+        receipt,
+        ResponsesFailure.transport(identity.route, identity.backend, :deadline_exceeded)
+      )
+    end
+  end
+
+  def complete_single_attempt(_provider, _req, _opts), do: {:error, :invalid_responses_request}
+
   # Exact closed resolution only. A bare backend key keeps `route: nil` so it never
   # advertises a route identity it does not have.
   defp resolve_identity(provider) do
@@ -92,22 +114,22 @@ defmodule Arbor.LLM.OAuth.Responses do
     end
   end
 
-  defp do_complete(identity, req, opts, limits) do
+  defp do_complete(identity, req, opts, limits, single_attempt? \\ false) do
     with :ok <- ResponseBudget.validate(req, request_limits()),
          {:ok, credential} <- OAuth.credential_receipt(identity.backend) do
       sid = :crypto.strong_rand_bytes(16) |> Base.encode16(case: :lower)
       body = build_body(Keyword.get(opts, :model) || @default_models[identity.backend], req)
 
-      request_with_credential(identity, credential, sid, body, limits)
+      request_with_credential(identity, credential, sid, body, limits, single_attempt?)
     end
   end
 
-  defp request_with_credential(identity, credential, sid, body, limits) do
+  defp request_with_credential(identity, credential, sid, body, limits, single_attempt? \\ false) do
     result = request_identity(identity, credential, sid, body, limits)
 
-    case {result, credential} do
+    case {result, credential, single_attempt?} do
       {{:error, %ResponsesFailure{class: :auth, status: 401}},
-       %CredentialReceipt{provider: :openai, owner: "source_owned"} = used} ->
+       %CredentialReceipt{provider: :openai, owner: "source_owned"} = used, false} ->
         retry_source_once(identity, used, sid, body, limits)
 
       _ ->

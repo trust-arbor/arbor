@@ -43,9 +43,29 @@ defmodule Arbor.LLM.Adapter.OAuthResponses do
 
   def complete(_request, _opts), do: {:error, :invalid_oauth_completion_request}
 
+  @doc """
+  Single-attempt OAuth completion: no source-token 401 reread/retry.
+  """
+  @impl true
+  def complete_single_attempt(request, opts \\ [])
+
+  def complete_single_attempt(%Request{} = request, opts) do
+    with {:ok, opts, _timeout} <-
+           Deadline.normalize_transport_options(opts, request.receive_timeout),
+         {:ok, receipt} <- Deadline.receipt(opts) do
+      Deadline.run(
+        fn -> do_complete(request, opts, true) end,
+        receipt,
+        RequestTimeoutError.exception(timeout_ms: receipt.timeout_ms)
+      )
+    end
+  end
+
+  def complete_single_attempt(_request, _opts), do: {:error, :invalid_oauth_completion_request}
+
   # Resolve the exact route FIRST: an unknown provider must fail before any input is built,
   # any credential is read, and any socket is opened.
-  defp do_complete(request, opts) do
+  defp do_complete(request, opts, single_attempt? \\ false) do
     with {:ok, %{route: route}} <- OAuth.route_only(request.provider) do
       {instructions, input} = build_input(request.messages)
       req = %{instructions: instructions, input: input, tools: build_tools(request.tools)}
@@ -56,7 +76,12 @@ defmodule Arbor.LLM.Adapter.OAuthResponses do
         |> maybe_put_opt(:receive_timeout, Keyword.fetch!(opts, :receive_timeout))
         |> maybe_put_opt(:model, model_id(request.model))
 
-      case OAuth.Responses.complete(route, req, response_opts) do
+      complete_fun =
+        if single_attempt?,
+          do: &OAuth.Responses.complete_single_attempt/3,
+          else: &OAuth.Responses.complete/3
+
+      case complete_fun.(route, req, response_opts) do
         {:ok,
          %{text: text, tool_calls: tool_calls, usage: usage, provider_receipt: provider_receipt}} ->
           Boundary.completion(

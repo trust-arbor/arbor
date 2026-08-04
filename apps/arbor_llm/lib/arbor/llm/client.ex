@@ -327,6 +327,63 @@ defmodule Arbor.LLM.Client do
 
   def complete(_client, _request, _opts), do: {:error, :invalid_completion_request}
 
+  @doc """
+  Complete with an attested single-attempt adapter contract.
+
+  Uses the same middleware ordering as `complete/3`, but the final adapter
+  continuation is guarded by a concurrency-safe, lifecycle-bounded one-shot
+  gate. Adapters must export `complete_single_attempt/2`; ordinary
+  `complete/2` is never used as a fallback.
+  """
+  @spec complete_single_attempt(t(), Request.t(), keyword()) ::
+          {:ok, Response.t()} | {:error, term()}
+  def complete_single_attempt(client, request, opts \\ [])
+
+  def complete_single_attempt(%__MODULE__{} = client, %Request{} = request, opts) do
+    with {:ok, opts, _timeout} <- normalize_client_deadline(opts, request.receive_timeout),
+         {:ok, receipt} <- Deadline.receipt(opts) do
+      # Gate is owned by the invoking process so cleanup runs after Deadline.run/3
+      # returns — including when Deadline kills its worker with untrappable :kill.
+      gate = single_attempt_gate_new()
+
+      try do
+        Deadline.run(
+          fn ->
+            with {:ok, adapter} <- resolve_adapter(client, request) do
+              if adapter_exports?(adapter, :complete_single_attempt, 2) do
+                base = fn req ->
+                  case single_attempt_gate_claim(gate) do
+                    :ok ->
+                      adapter.complete_single_attempt(req, opts)
+
+                    {:error, _} = error ->
+                      error
+                  end
+                end
+
+                wrapped =
+                  Enum.reduce(Enum.reverse(client.middleware), base, fn mw, acc ->
+                    fn req -> mw.(req, acc) end
+                  end)
+
+                Boundary.completion(wrapped.(request), opts)
+              else
+                {:error, :single_attempt_not_supported}
+              end
+            end
+          end,
+          receipt,
+          RequestTimeoutError.exception(timeout_ms: receipt.timeout_ms)
+        )
+      after
+        single_attempt_gate_close(gate)
+      end
+    end
+  end
+
+  def complete_single_attempt(_client, _request, _opts),
+    do: {:error, :invalid_completion_request}
+
   @spec stream(t(), Request.t(), keyword()) :: {:ok, Enumerable.t()} | {:error, term()}
   def stream(client, request, opts \\ [])
 
@@ -432,6 +489,77 @@ defmodule Arbor.LLM.Client do
   end
 
   def complete_streaming(_client, _request, _callback, _opts),
+    do: {:error, :invalid_streaming_completion_request}
+
+  @doc """
+  Stream-and-assemble under an attested single-attempt adapter contract.
+
+  Capability matrix:
+  - no ordinary streaming and no attested streaming → `{:stream_not_supported, adapter}`
+  - ordinary streaming present but attested absent → `:single_attempt_not_supported`
+  - attested streaming present → run attested callback only (never ordinary stream)
+  """
+  @spec complete_streaming_single_attempt(
+          t(),
+          Request.t(),
+          (Arbor.LLM.StreamEvent.t() -> any()),
+          keyword()
+        ) :: {:ok, Response.t()} | {:error, term()}
+  def complete_streaming_single_attempt(client, request, callback, opts \\ [])
+
+  def complete_streaming_single_attempt(%__MODULE__{} = client, %Request{} = request, callback, opts)
+      when is_function(callback, 1) do
+    with {:ok, opts, _timeout} <- normalize_client_deadline(opts, request.receive_timeout),
+         {:ok, receipt} <- Deadline.receipt(opts) do
+      Deadline.run(
+        fn ->
+          with {:ok, adapter} <- resolve_adapter(client, request) do
+            attested? = adapter_exports?(adapter, :complete_streaming_single_attempt, 3)
+            ordinary? = adapter_exports?(adapter, :complete_streaming, 3)
+
+            cond do
+              attested? ->
+                with {:ok, tracker} <- Boundary.stream_tracker(opts),
+                     {:ok, max_events} <- Boundary.stream_event_limit(opts) do
+                  event_counter = :atomics.new(1, [])
+
+                  guarded_callback = fn event ->
+                    if :atomics.add_get(event_counter, 1, 1) <= max_events do
+                      case Boundary.track_stream_event(tracker, event, opts) do
+                        {:ok, normalized} -> callback.(normalized)
+                        {:error, reason} -> throw({:invalid_stream_callback_event, reason})
+                      end
+                    else
+                      throw(
+                        {:invalid_stream_callback_event,
+                         {:stream_limit_exceeded, :events, max_events}}
+                      )
+                    end
+                  end
+
+                  try do
+                    adapter.complete_streaming_single_attempt(request, guarded_callback, opts)
+                    |> Boundary.completion(opts)
+                  catch
+                    :throw, {:invalid_stream_callback_event, reason} -> {:error, reason}
+                  end
+                end
+
+              ordinary? ->
+                {:error, :single_attempt_not_supported}
+
+              true ->
+                {:error, {:stream_not_supported, adapter}}
+            end
+          end
+        end,
+        receipt,
+        RequestTimeoutError.exception(timeout_ms: receipt.timeout_ms)
+      )
+    end
+  end
+
+  def complete_streaming_single_attempt(_client, _request, _callback, _opts),
     do: {:error, :invalid_streaming_completion_request}
 
   @doc """
@@ -575,6 +703,23 @@ defmodule Arbor.LLM.Client do
     if adapter_exports?(adapter, :stream, 2),
       do: :ok,
       else: {:error, {:stream_not_supported, adapter}}
+  end
+
+  # One-shot gate for single-attempt complete middleware continuations.
+  # 0 = open, 1 = claimed, 2 = closed. At most one caller may claim.
+  defp single_attempt_gate_new, do: :atomics.new(1, [])
+
+  defp single_attempt_gate_claim(gate) do
+    case :atomics.compare_exchange(gate, 1, 0, 1) do
+      :ok -> :ok
+      _ -> {:error, :single_attempt_continuation_spent}
+    end
+  end
+
+  defp single_attempt_gate_close(gate) do
+    # Close only if still open so a claimed gate stays claimed.
+    _ = :atomics.compare_exchange(gate, 1, 0, 2)
+    :ok
   end
 
   defp adapter_exports?(adapter, function, arity) when is_atom(adapter) do

@@ -31,8 +31,9 @@ defmodule Arbor.LLM.Plugs.Dispatch do
 
   def call(%Call{halted: true} = call), do: call
 
-  def call(%Call{result: nil, operation: op, request: req} = call) do
-    %{call | result: do_dispatch(op, req)}
+  def call(%Call{result: nil, operation: op, request: req, assigns: assigns} = call) do
+    single_attempt? = Map.get(assigns, :single_attempt) == true
+    %{call | result: do_dispatch(op, req, single_attempt?)}
   end
 
   # Already has a result — short-circuited by an upstream plug.
@@ -40,7 +41,7 @@ defmodule Arbor.LLM.Plugs.Dispatch do
 
   # ── Operation-specific dispatch ────────────────────────────────────
 
-  defp do_dispatch(:complete, {model_spec, messages, opts}) do
+  defp do_dispatch(:complete, {model_spec, messages, opts}, single_attempt?) do
     maximum = Keyword.get(opts, :arbor_max_response_bytes, 16_777_216)
     req_opts = Keyword.delete(opts, :arbor_max_response_bytes)
 
@@ -48,6 +49,7 @@ defmodule Arbor.LLM.Plugs.Dispatch do
          {:ok, provider_module} <- ReqLLM.provider(model.provider),
          {:ok, request} <- provider_module.prepare_request(:chat, model, messages, req_opts),
          request <- ResponseBudget.apply_req_receipt(request, maximum),
+         request <- maybe_disable_req_retry(request, single_attempt?),
          {:ok, %Req.Response{private: %{arbor_response_overflow: ^maximum}}} <-
            Req.request(request) do
       {:error, {:response_bytes_exceeded, maximum}}
@@ -76,7 +78,7 @@ defmodule Arbor.LLM.Plugs.Dispatch do
     kind, reason -> {:error, {:adapter_failure, kind, Arbor.LLM.ExternalTerm.sanitize(reason)}}
   end
 
-  defp do_dispatch(:stream, {model_spec, messages, opts}) do
+  defp do_dispatch(:stream, {model_spec, messages, opts}, _single_attempt?) do
     maximum = Keyword.get(opts, :arbor_max_response_bytes, @default_max_response_bytes)
     max_events = Keyword.get(opts, :max_stream_events, 100_000)
     max_event_bytes = Keyword.get(opts, :max_stream_event_bytes, min(1_048_576, maximum))
@@ -88,6 +90,7 @@ defmodule Arbor.LLM.Plugs.Dispatch do
         :max_stream_event_bytes
       ])
 
+    # Bounded Finch streaming already performs one stream request.
     BoundedStream.start(model_spec, messages, req_opts,
       max_response_bytes: maximum,
       max_events: max_events,
@@ -100,10 +103,11 @@ defmodule Arbor.LLM.Plugs.Dispatch do
     kind, reason -> {:error, {:adapter_failure, kind, Arbor.LLM.ExternalTerm.sanitize(reason)}}
   end
 
-  defp do_dispatch(:embed_cloud, {model_spec, texts, opts}) when is_binary(model_spec) do
+  defp do_dispatch(:embed_cloud, {model_spec, texts, opts}, single_attempt?)
+       when is_binary(model_spec) do
     with {:ok, model} <- ReqLLM.model(model_spec),
          true <- embedding_capable?(model) or {:error, {:embedding_not_supported, model_spec}} do
-      dispatch_embedding(model, texts, opts, :req_llm)
+      dispatch_embedding(model, texts, opts, :req_llm, single_attempt?)
     end
   rescue
     e -> {:error, exception_for(e)}
@@ -112,14 +116,14 @@ defmodule Arbor.LLM.Plugs.Dispatch do
     kind, reason -> {:error, {:adapter_failure, kind, Arbor.LLM.ExternalTerm.sanitize(reason)}}
   end
 
-  defp do_dispatch(:embed_local, {%LLMDB.Model{} = model, texts, opts}) do
+  defp do_dispatch(:embed_local, {%LLMDB.Model{} = model, texts, opts}, single_attempt?) do
     # Local LM path: bypass ReqLLM.Embedding.embed/3's validate_model
     # gate (which hard-checks llm_db's embedding-capable catalog).
     # Operator-pulled local models aren't in the catalog, so the gate
     # would reject them before reaching the network. Call the
     # provider's prepare_request + Req.request directly — same shape
     # as the openai embeddings API which Ollama serves at /v1/embeddings.
-    dispatch_embedding(model, texts, opts, :req_llm_direct)
+    dispatch_embedding(model, texts, opts, :req_llm_direct, single_attempt?)
   rescue
     e -> {:error, exception_for(e)}
   catch
@@ -129,13 +133,22 @@ defmodule Arbor.LLM.Plugs.Dispatch do
 
   # ── Helpers ────────────────────────────────────────────────────────
 
-  defp dispatch_embedding(model, texts, opts, source) do
+  # Apply retry suppression only after provider prepare_request has attached its
+  # defaults — pre-provider option overrides are reinstalled by provider attach.
+  defp maybe_disable_req_retry(%Req.Request{} = request, true) do
+    Req.Request.merge_options(request, retry: false, max_retries: 0)
+  end
+
+  defp maybe_disable_req_retry(request, _single_attempt?), do: request
+
+  defp dispatch_embedding(model, texts, opts, source, single_attempt? \\ false) do
     maximum = Keyword.get(opts, :arbor_max_response_bytes, @default_max_response_bytes)
     req_opts = Keyword.delete(opts, :arbor_max_response_bytes)
 
     with {:ok, provider_module} <- ReqLLM.provider(model.provider),
          {:ok, request} <- provider_module.prepare_request(:embedding, model, texts, req_opts),
          request <- ResponseBudget.apply_req_receipt(request, maximum),
+         request <- maybe_disable_req_retry(request, single_attempt?),
          {:ok, %Req.Response{private: %{arbor_response_overflow: ^maximum}}} <-
            Req.request(request) do
       {:error, {:response_bytes_exceeded, maximum}}

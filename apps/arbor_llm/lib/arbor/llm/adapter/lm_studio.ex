@@ -60,7 +60,37 @@ defmodule Arbor.LLM.Adapter.LmStudio do
 
   def complete(_request, _opts), do: {:error, :invalid_lm_studio_completion_request}
 
-  defp do_complete(request, opts, url, maximum) do
+  @doc """
+  Single-attempt LM Studio completion: disables Req retry on the final prepared request.
+  """
+  @impl true
+  def complete_single_attempt(request, opts \\ [])
+
+  def complete_single_attempt(%Request{} = request, opts) do
+    with {:ok, opts, _timeout} <-
+           Deadline.normalize_transport_options(opts, request.receive_timeout),
+         {:ok, receipt} <- Deadline.receipt(opts) do
+      Deadline.run(
+        fn ->
+          with {:ok, maximum} <- response_limit(opts),
+               {:ok, url} <- chat_url() do
+            do_complete(request, opts, url, maximum, true)
+            |> Boundary.completion(opts)
+          else
+            {:error, {:invalid_response_limit, _maximum}} = error -> error
+            {:error, reason} -> {:error, {:invalid_lm_studio_endpoint, reason}}
+          end
+        end,
+        receipt,
+        RequestTimeoutError.exception(timeout_ms: receipt.timeout_ms)
+      )
+    end
+  end
+
+  def complete_single_attempt(_request, _opts),
+    do: {:error, :invalid_lm_studio_completion_request}
+
+  defp do_complete(request, opts, url, maximum, single_attempt? \\ false) do
     body = build_body(request)
 
     req =
@@ -72,6 +102,14 @@ defmodule Arbor.LLM.Adapter.LmStudio do
         receive_timeout: Keyword.fetch!(opts, :receive_timeout)
       )
       |> ResponseBudget.apply_req_receipt(maximum)
+
+    # Disable retry only on the fully prepared request for single-attempt mode.
+    req =
+      if single_attempt? do
+        Req.Request.merge_options(req, retry: false, max_retries: 0)
+      else
+        req
+      end
 
     case Req.request(req) do
       {:ok, %Req.Response{private: %{arbor_response_overflow: ^maximum}}} ->

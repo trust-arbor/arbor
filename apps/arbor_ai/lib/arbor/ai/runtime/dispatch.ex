@@ -36,6 +36,7 @@ defmodule Arbor.AI.Runtime.Dispatch do
   require Logger
 
   alias Arbor.AI.RouteConcurrency
+  alias Arbor.AI.Runtime.Acp, as: RuntimeAcp
   alias Arbor.AI.Runtime.ProviderRouter
   alias Arbor.AI.Runtime.Registry, as: RuntimeRegistry
   alias Arbor.AI.Runtime.RoutePlan
@@ -218,10 +219,13 @@ defmodule Arbor.AI.Runtime.Dispatch do
   end
 
   defp dispatch_route_attempt(%{request: request, route: route, opts: opts} = attempt) do
-    with :ok <- authorize_route(Keyword.get(opts, :route_authorizer), route),
-         {:ok, lease} <- acquire_route_concurrency(route, opts) do
+    # Bind exact source-owned destination (including acp:<agent>) before authorize
+    # and before concurrency/prepare/execute I/O.
+    with {:ok, bound_route} <- bind_authorization_destination(route),
+         :ok <- authorize_route(Keyword.get(opts, :route_authorizer), bound_route),
+         {:ok, lease} <- acquire_route_concurrency(bound_route, opts) do
       try do
-        run_authorized_route_attempt(attempt, request, route, opts)
+        run_authorized_route_attempt(attempt, request, bound_route, opts)
       after
         # Always release (success, error, raise, throw) before any fallback attempt.
         # Lease is bound to the exact authority server used for acquire.
@@ -346,6 +350,8 @@ defmodule Arbor.AI.Runtime.Dispatch do
   # authorization binds these two scalar fields because they are what runtime I/O
   # actually receives. Legacy synthesized entries cannot otherwise distinguish an
   # `openai` request from an `xai` request: both have provider id `:legacy`.
+  # ACP runtime routes must already carry destination = "acp:<agent>" from the
+  # shared Runtime.Acp resolver (bind_authorization_destination/1).
   defp normalize_authorization_route(
          %{
            model_entry: %ModelEntry{},
@@ -366,6 +372,61 @@ defmodule Arbor.AI.Runtime.Dispatch do
   end
 
   defp normalize_authorization_route(_route), do: {:error, :invalid_route}
+
+  # Bind exact wire destination shared by authorization and checkout.
+  # Non-ACP: provider string. ACP: "acp:<cli>" via Runtime.Acp (single source).
+  defp bind_authorization_destination(
+         %{
+           provider: %ProviderEntry{id: provider_id} = provider,
+           runtime: runtime
+         } = route
+       )
+       when is_atom(provider_id) and is_atom(runtime) do
+    model = Map.get(route, :model, provider.ref)
+
+    # Prefer rewritten request provider (legacy destination) for CLI lookup;
+    # fall back to catalog provider id. Never treat an already-bound acp:* as a
+    # provider name.
+    provider_for_cli =
+      case Map.get(route, :destination) do
+        "acp:" <> _already -> Atom.to_string(provider_id)
+        dest when is_binary(dest) and dest != "" -> dest
+        _ -> Atom.to_string(provider_id)
+      end
+
+    case runtime do
+      :acp ->
+        case RuntimeAcp.authorization_destination(:acp, provider_for_cli) do
+          {:ok, destination} ->
+            if valid_authorization_route_text?(destination) and
+                 valid_authorization_route_text?(model) do
+              {:ok, Map.merge(route, %{destination: destination, model: model})}
+            else
+              {:error, {:authorization_failed, :invalid_route}}
+            end
+
+          {:error, _} ->
+            {:error, {:authorization_failed, :invalid_route}}
+        end
+
+      _other ->
+        destination =
+          case Map.get(route, :destination) do
+            dest when is_binary(dest) and dest != "" -> dest
+            _ -> Atom.to_string(provider_id)
+          end
+
+        if valid_authorization_route_text?(destination) and
+             valid_authorization_route_text?(model) do
+          {:ok, Map.merge(route, %{destination: destination, model: model})}
+        else
+          {:error, {:authorization_failed, :invalid_route}}
+        end
+    end
+  end
+
+  defp bind_authorization_destination(_route),
+    do: {:error, {:authorization_failed, :invalid_route}}
 
   defp valid_authorization_route_text?(value) do
     is_binary(value) and String.valid?(value) and byte_size(value) > 0 and
@@ -426,7 +487,8 @@ defmodule Arbor.AI.Runtime.Dispatch do
          {:ok, selection} <- select(model_entry, policy),
          rewritten <- rewrite_request(request, selection, model_entry),
          route <- legacy_route(model_entry, selection, rewritten),
-         :ok <- authorize_legacy_route(Keyword.fetch(opts, :route_authorizer), route) do
+         {:ok, bound_route} <- bind_authorization_destination(route),
+         :ok <- authorize_legacy_route(Keyword.fetch(opts, :route_authorizer), bound_route) do
       :ok = emit_selected(model_entry, selection, request, extra_meta)
 
       runtime_module = RuntimeRegistry.lookup(selection.runtime)
@@ -441,6 +503,7 @@ defmodule Arbor.AI.Runtime.Dispatch do
   # Source-owned route identity for legacy Selector selection. The selected
   # structs retain catalog provenance; destination/model bind the exact rewritten
   # request and prevent synthesized `:legacy` entries from collapsing providers.
+  # ACP destination is finalized by bind_authorization_destination/1 to acp:<agent>.
   defp legacy_route(
          model_entry,
          %{provider: provider, runtime: runtime},

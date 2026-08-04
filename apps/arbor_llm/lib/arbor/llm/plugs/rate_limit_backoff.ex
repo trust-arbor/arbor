@@ -78,6 +78,10 @@ defmodule Arbor.LLM.Plugs.RateLimitBackoff do
   @impl Arbor.LLM.Plug
   def call(%Call{halted: true} = call), do: call
 
+  # Single-attempt Calls must never redispatch — one authorization covers at
+  # most one real outbound attempt. Policy arrives via Call.assign only.
+  def call(%Call{assigns: %{single_attempt: true}} = call), do: call
+
   def call(%Call{operation: :stream} = call), do: call
 
   def call(%Call{result: {:error, error}} = call) do

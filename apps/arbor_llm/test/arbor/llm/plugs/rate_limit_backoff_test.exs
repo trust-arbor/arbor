@@ -109,6 +109,24 @@ defmodule Arbor.LLM.Plugs.RateLimitBackoffTest do
       call = build_call(result: {:error, err})
       assert RateLimitBackoff.call(call) == call
     end
+
+    @tag voice_id: "VOICE-17"
+    @tag :security_regression
+    test "security regression VOICE-17: single_attempt assign never redispatches even on 429", %{
+      sleep_log: sleep_log,
+      dispatch_log: dispatch_log
+    } do
+      Application.put_env(:arbor_llm, RateLimitBackoff, max_retries: 2)
+      install_dispatch_seq(dispatch_log, [{:ok, "should-not-run"}])
+
+      err = rate_limit_error()
+      call = build_call(result: {:error, err}, assigns: %{single_attempt: true})
+      result = RateLimitBackoff.call(call)
+
+      assert result.result == {:error, err}
+      assert sleeps(sleep_log) == []
+      assert redispatch_count(dispatch_log) == 0
+    end
   end
 
   describe "rate-limit detection" do
