@@ -16,6 +16,7 @@ defmodule Arbor.Voice.ConsultAgentSecurityRegressionTest do
   alias Arbor.Voice.ToolRouter.FrontDesk
 
   alias Arbor.Voice.Test.SessionFakes.{
+    ControllableTurnBackend,
     FakeCommsSession,
     FakeEngagementStore,
     FakeLedger,
@@ -378,6 +379,73 @@ defmodule Arbor.Voice.ConsultAgentSecurityRegressionTest do
     refute inspect(records) =~ @distinctive_token
 
     assert :ok = Voice.stop_session(key)
+  end
+
+  @tag spec: "VOICE-9"
+  @tag :security_regression
+  test "security regression: unauthenticated local backend preserves consult engagement without proof",
+       %{opts: opts, recorder: recorder} do
+    FakeAgentFacade.reset()
+    ControllableTurnBackend.ensure_table!()
+    ControllableTurnBackend.reset()
+
+    ControllableTurnBackend.enqueue([
+      {:tool_call,
+       %{
+         id: "call_local_consult",
+         name: "consult_agent",
+         arguments: %{"message" => "local status"}
+       }},
+      {:turn_done, %{text: ""}},
+      {:turn_done, %{text: "Local consult final"}}
+    ])
+
+    local_opts =
+      opts
+      |> Keyword.delete(:session_token)
+      |> Keyword.put(:backend, ControllableTurnBackend)
+      |> Keyword.put(:backend_opts, [])
+      |> Keyword.put(:tool_router, FrontDesk)
+
+    refute Keyword.has_key?(local_opts, :session_token)
+    assert ControllableTurnBackend.egress_route() == :none
+
+    {user_id, agent_id} = unique_ids()
+    assert {:ok, key} = Voice.start_session(user_id, agent_id, local_opts)
+    on_exit(fn -> _ = Voice.stop_session(key) end)
+
+    assert {:ok, "Local consult final"} =
+             Voice.text_turn(user_id, agent_id, "consult over local backend")
+
+    assert [call] = FakeAgentFacade.calls()
+    assert call.caller_id == user_id
+    assert call.target_agent_id == agent_id
+    assert %UserMessage{} = call.message
+    assert call.message.content == "local status"
+    assert call.message.transport == :voice
+    assert call.message.sender_id == user_id
+    assert call.message.engagement_id == "eng_consult_e2e"
+    assert call.opts == [timeout: 5_000]
+    refute Keyword.has_key?(call.opts, :session_token)
+    refute inspect(call) =~ "session_token"
+
+    assert [{"call_local_consult", output}] = ControllableTurnBackend.tool_results()
+
+    assert Jason.decode!(output) == %{
+             "success" => true,
+             "result" => %{"reply" => "agent grounded reply"}
+           }
+
+    assert [{^agent_id, "eng_consult_e2e", _user_entry, assistant_entry, _record_opts}] =
+             FakeCommsSession.record_calls(recorder)
+
+    assert assistant_entry.content == "Local consult final"
+
+    [{session_pid, _}] = Registry.lookup(Arbor.Voice.Registry, key)
+    session_ref = Process.monitor(session_pid)
+    assert :ok = Voice.stop_session(key)
+    assert_receive {:DOWN, ^session_ref, :process, ^session_pid, _reason}, 1_000
+    assert ControllableTurnBackend.close_count() == 1
   end
 
   @tag spec: "VOICE-9,VOICE-17"

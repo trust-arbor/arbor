@@ -486,6 +486,74 @@ defmodule Arbor.Voice.ManagedCodingDispatchSecurityRegressionTest do
     assert :ok = Voice.stop_session(key)
   end
 
+  @tag spec: "VOICE-10"
+  @tag :security_regression
+  test "security regression: unauthenticated local backend preserves managed dispatch engagement without proof",
+       %{opts: opts, recorder: recorder} do
+    FakeAgentFacade.reset()
+    ControllableTurnBackend.ensure_table!()
+    ControllableTurnBackend.reset()
+
+    ControllableTurnBackend.enqueue([
+      {:tool_call,
+       %{
+         id: "call_local_dispatch",
+         name: "dispatch_coding_task",
+         arguments: %{"task" => "local coding intent"}
+       }},
+      {:turn_done, %{text: ""}},
+      {:turn_done, %{text: "model prose must not replace managed confirmation"}}
+    ])
+
+    local_opts =
+      opts
+      |> Keyword.delete(:session_token)
+      |> Keyword.put(:backend, ControllableTurnBackend)
+      |> Keyword.put(:backend_opts, [])
+      |> Keyword.put(:tool_router, FrontDesk)
+
+    refute Keyword.has_key?(local_opts, :session_token)
+    assert ControllableTurnBackend.egress_route() == :none
+
+    {user_id, agent_id} = unique_ids()
+    assert {:ok, key} = Voice.start_session(user_id, agent_id, local_opts)
+    on_exit(fn -> _ = Voice.stop_session(key) end)
+
+    assert {:ok, @confirmation} =
+             Voice.text_turn(user_id, agent_id, "dispatch over local backend")
+
+    assert [call] = FakeAgentFacade.dispatch_calls()
+    assert call.caller_id == user_id
+    assert call.target_agent_id == agent_id
+    assert call.task["kind"] == "coding_change"
+    assert call.task["plan"]["task"] == "local coding intent"
+    assert call.opts == []
+    refute Keyword.has_key?(call.opts, :session_token)
+    refute inspect(call) =~ "session_token"
+
+    assert [{"call_local_dispatch", output}] = ControllableTurnBackend.tool_results()
+
+    assert Jason.decode!(output) == %{
+             "success" => true,
+             "result" => %{"task_id" => "task_voice_dispatch_1", "status" => "dispatched"}
+           }
+
+    assert [{^agent_id, "eng_dispatch_e2e", user_entry, assistant_entry, _record_opts}] =
+             FakeCommsSession.record_calls(recorder)
+
+    assert user_entry.metadata["transport"] == "voice"
+    assert assistant_entry.content == @confirmation
+    assert assistant_entry.metadata["delegation_task"] == "local coding intent"
+    assert assistant_entry.metadata["delegation_task_id"] == "task_voice_dispatch_1"
+    refute Map.has_key?(assistant_entry.metadata, "session_token")
+
+    [{session_pid, _}] = Elixir.Registry.lookup(Arbor.Voice.Registry, key)
+    session_ref = Process.monitor(session_pid)
+    assert :ok = Voice.stop_session(key)
+    assert_receive {:DOWN, ^session_ref, :process, ^session_pid, _reason}, 1_000
+    assert ControllableTurnBackend.close_count() == 1
+  end
+
   @tag spec: "VOICE-17"
   @tag :security_regression
   test "security regression: adversarial task text cannot mutate authoritative plan fields",

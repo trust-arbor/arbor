@@ -324,7 +324,3 @@ reducer; compile caught it (first found 2026-07-15).
 <!-- applied-learning: conserve-the-local-agent-s-tokens-for-planning-design-delegation-and-review -->
 <a id="applied-learning-conserve-the-local-agent-s-tokens-for-planning-design-delegation-and-review"></a>
 **Conserve the local agent's tokens for planning, design, delegation, and review.** As a rule of thumb, delegate substantive implementation to Grok through `coding_produce_reviewable_change`, then have the local agent inspect the diff, verify behavior, and request corrections. This is a heuristic, not a prohibition: make direct edits when delegation is blocked, the change is genuinely tiny, or local intervention is the clearest way to finish safely. The goal is to spend local-agent context on decision quality and integration judgment rather than routine code production (requested 2026-07-09).
-
-<!-- applied-learning: fault-tests-with-retained-owners-need-recovery-first-teardown -->
-<a id="applied-learning-fault-tests-with-retained-owners-need-recovery-first-teardown"></a>
-**Fault tests with retained owners need recovery-first teardown.** Register teardown before inducing a permanent cleanup fault; in `on_exit`, restore the failed collaborator/gate first, request normal shutdown, await owner death, and only then use a deterministic supervisor stop as a last resort. Otherwise an assertion failure leaves a forever-retrying owner that contaminates later tests (found 2026-08-04 in Voice provisional-cap cleanup coverage).
