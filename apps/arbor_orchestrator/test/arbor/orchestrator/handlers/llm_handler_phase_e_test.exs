@@ -4,12 +4,25 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerPhaseETest do
   import ExUnit.CaptureLog
 
   alias Arbor.AI.LLMError
-  alias Arbor.AI.RouteFailureStore
+  alias Arbor.AI.{ProviderRouteEvidence, RouteFailureStore}
   alias Arbor.LLM.OAuth.ResponsesFailure
   alias Arbor.Orchestrator.Engine.Context
   alias Arbor.Orchestrator.Handlers.LlmHandler
 
   @moduletag :fast
+  @evidence_log :llm_handler_phase_e_provider_evidence
+
+  defmodule EvidenceBackend do
+    @moduledoc false
+
+    alias Arbor.Persistence.EventLog.ETS
+
+    def durability_class(_opts), do: :node_restart
+    def append(stream, events, opts), do: ETS.append(stream, events, opts)
+    def reconcile_append(operation, opts), do: ETS.reconcile_append(operation, opts)
+    def stream_version(stream, opts), do: ETS.stream_version(stream, opts)
+    def read_stream(stream, opts), do: ETS.read_stream(stream, opts)
+  end
 
   defmodule FailingControlPlaneDispatcher do
     @moduledoc false
@@ -35,6 +48,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerPhaseETest do
     # on exit is strict and must fail visibly if the supervised child cannot be
     # brought back (async:false mutates global Application + AI supervision).
     ensure_route_failure_store_running()
+    start_provider_route_evidence_fixture()
 
     on_exit(fn ->
       case prior_dispatcher do
@@ -76,10 +90,13 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerPhaseETest do
   end
 
   test "handler boundary emits bounded warning when control-plane record fails without changing LLM fail outcome" do
-    # RouteFailureStore never lazy-starts. Ensure it is down so a required
-    # route-failure write fails closed with a typed facade error.
+    # Durable ProviderRouteEvidence is authoritative and never lazy-starts;
+    # RouteFailureStore is only its best-effort compatibility mirror. Stop both
+    # so the required durable write fails closed with a typed facade error.
     stop_route_failure_store()
+    assert :ok = stop_supervised(:llm_handler_phase_e_evidence)
     assert Process.whereis(RouteFailureStore) == nil
+    assert Process.whereis(ProviderRouteEvidence) == nil
 
     # Match dispatcher-test node/graph shape so we hit the real failure path
     # without route-assembly profile requirements.
@@ -117,8 +134,9 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerPhaseETest do
     refute log =~ "SECRET_PROMPT_MUST_NOT_APPEAR_IN_CONTROL_PLANE_WARNING"
     refute log =~ "account_id"
     refute log =~ "/Users/"
-    # Store must remain unstarted (no lazy start on write failure).
+    # Neither authority nor mirror may lazy-start on write failure.
     assert Process.whereis(RouteFailureStore) == nil
+    assert Process.whereis(ProviderRouteEvidence) == nil
     # Do not restart here — on_exit restores supervised state so later tests
     # never observe a leaked terminated RouteFailureStore.
   end
@@ -156,6 +174,75 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerPhaseETest do
            "RouteFailureStore must be clean after restore"
 
     :ok
+  end
+
+  defp start_provider_route_evidence_fixture do
+    stop_named(ProviderRouteEvidence)
+    stop_named(@evidence_log)
+
+    if Process.whereis(Arbor.AI.ProviderRouteEvidence.TaskSupervisor) == nil do
+      spec =
+        Supervisor.child_spec(
+          {Task.Supervisor, name: Arbor.AI.ProviderRouteEvidence.TaskSupervisor},
+          id: :llm_handler_phase_e_evidence_tasks
+        )
+
+      start_supervised!(spec)
+    end
+
+    log_spec =
+      Supervisor.child_spec(
+        {Arbor.Persistence.EventLog.ETS,
+         name: @evidence_log, max_age_ms: :infinity, trim_interval_ms: :disabled},
+        id: :llm_handler_phase_e_evidence_log
+      )
+
+    start_supervised!(log_spec)
+
+    target = [name: @evidence_log, backend: EvidenceBackend, opts: []]
+
+    evidence_spec =
+      Supervisor.child_spec(
+        {ProviderRouteEvidence, target: target},
+        id: :llm_handler_phase_e_evidence
+      )
+
+    start_supervised!(evidence_spec)
+    await_provider_route_evidence_ready()
+  end
+
+  defp await_provider_route_evidence_ready(attempts \\ 100)
+
+  defp await_provider_route_evidence_ready(0) do
+    flunk("ProviderRouteEvidence fixture did not become ready")
+  end
+
+  defp await_provider_route_evidence_ready(attempts) do
+    case ProviderRouteEvidence.status() do
+      %{status: :ready} ->
+        :ok
+
+      %{status: :replaying} ->
+        Process.sleep(1)
+        await_provider_route_evidence_ready(attempts - 1)
+
+      status ->
+        flunk("ProviderRouteEvidence fixture unavailable: #{inspect(status)}")
+    end
+  end
+
+  defp stop_named(name) do
+    case Process.whereis(name) do
+      pid when is_pid(pid) ->
+        try do
+          GenServer.stop(pid)
+        catch
+          :exit, _ -> :ok
+        end
+
+      _ ->
+        :ok
+    end
   end
 
   defp restart_route_failure_store do

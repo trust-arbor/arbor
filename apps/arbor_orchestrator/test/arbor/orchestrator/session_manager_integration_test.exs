@@ -19,6 +19,38 @@ defmodule Arbor.Orchestrator.SessionManagerIntegrationTest do
   @session_available Code.ensure_loaded?(Arbor.Agent.SessionManager)
 
   if @session_available do
+    setup_all do
+      tmp_dir =
+        Path.join(
+          System.tmp_dir!(),
+          "arbor_session_manager_integration_#{:erlang.unique_integer([:positive])}"
+        )
+
+      File.mkdir_p!(tmp_dir)
+      turn_path = Path.join(tmp_dir, "turn.dot")
+
+      File.write!(turn_path, """
+      digraph SessionManagerIntegration {
+        graph [goal="Exercise SessionManager through a hermetic DOT turn"]
+        start [shape=Mdiamond]
+        respond [type="compute", simulate="true"]
+        format [type="transform", transform="identity", source_key="last_response", output_key="session.response"]
+        done [shape=Msquare]
+        start -> respond -> format -> done
+      }
+      """)
+
+      prior_turn_dot = Application.get_env(:arbor_ai, :session_turn_dot)
+      Application.put_env(:arbor_ai, :session_turn_dot, turn_path)
+
+      on_exit(fn ->
+        restore_env(:arbor_ai, :session_turn_dot, prior_turn_dot)
+        File.rm_rf(tmp_dir)
+      end)
+
+      :ok
+    end
+
     setup do
       # Ensure EventRegistry is running
       case Registry.start_link(keys: :duplicate, name: Arbor.Orchestrator.EventRegistry) do
@@ -45,6 +77,8 @@ defmodule Arbor.Orchestrator.SessionManagerIntegrationTest do
         catch
           :exit, _ -> :ok
         end
+
+        Arbor.Orchestrator.TestCapabilities.revoke_all(agent_id)
       end)
 
       %{agent_id: agent_id}
@@ -52,25 +86,21 @@ defmodule Arbor.Orchestrator.SessionManagerIntegrationTest do
 
     describe "ensure_session/2" do
       test "creates a real session and returns pid", %{agent_id: agent_id} do
-        assert {:ok, pid} = @session_manager.ensure_session(agent_id, trust_tier: :established)
+        assert {:ok, pid} = ensure_test_session(agent_id)
         assert is_pid(pid)
         assert Process.alive?(pid)
       end
 
       test "is idempotent — second call returns same pid", %{agent_id: agent_id} do
-        assert {:ok, pid1} = @session_manager.ensure_session(agent_id, trust_tier: :established)
-        assert {:ok, pid2} = @session_manager.ensure_session(agent_id, trust_tier: :established)
+        assert {:ok, pid1} = ensure_test_session(agent_id)
+        assert {:ok, pid2} = ensure_test_session(agent_id)
         assert pid1 == pid2
       end
     end
 
     describe "session messaging" do
       test "send_message works through the DOT graph", %{agent_id: agent_id} do
-        {:ok, pid} =
-          @session_manager.ensure_session(agent_id,
-            trust_tier: :established,
-            start_heartbeat: false
-          )
+        {:ok, pid} = ensure_test_session(agent_id)
 
         result = Session.send_message(pid, "Hello from integration test")
         assert {:ok, %{content: text}} = result
@@ -78,11 +108,7 @@ defmodule Arbor.Orchestrator.SessionManagerIntegrationTest do
       end
 
       test "session state accumulates across turns", %{agent_id: agent_id} do
-        {:ok, pid} =
-          @session_manager.ensure_session(agent_id,
-            trust_tier: :established,
-            start_heartbeat: false
-          )
+        {:ok, pid} = ensure_test_session(agent_id)
 
         {:ok, _} = Session.send_message(pid, "First message")
         state1 = Session.get_state(pid)
@@ -97,7 +123,7 @@ defmodule Arbor.Orchestrator.SessionManagerIntegrationTest do
 
     describe "crash cleanup" do
       test "DOWN monitor cleans up ETS entry", %{agent_id: agent_id} do
-        {:ok, pid} = @session_manager.ensure_session(agent_id, trust_tier: :established)
+        {:ok, pid} = ensure_test_session(agent_id)
         assert @session_manager.has_session?(agent_id)
 
         Process.exit(pid, :kill)
@@ -106,6 +132,18 @@ defmodule Arbor.Orchestrator.SessionManagerIntegrationTest do
         refute @session_manager.has_session?(agent_id)
       end
     end
+
+    defp ensure_test_session(agent_id) do
+      @session_manager.ensure_session(agent_id,
+        trust_tier: :established,
+        start_heartbeat: false,
+        provider: :lmstudio,
+        model: "session-manager-integration"
+      )
+    end
+
+    defp restore_env(app, key, nil), do: Application.delete_env(app, key)
+    defp restore_env(app, key, value), do: Application.put_env(app, key, value)
   else
     @tag :skip
     test "skipped — SessionManager not available in this test context" do
