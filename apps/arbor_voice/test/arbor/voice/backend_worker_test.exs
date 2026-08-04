@@ -2,7 +2,12 @@ defmodule Arbor.Voice.BackendWorkerTest do
   use ExUnit.Case, async: true
 
   alias Arbor.Voice.BackendWorker
+  alias Arbor.Voice.BackendWorker.CompletionCredential
+  alias Arbor.Voice.BackendWorker.Credential
+  alias Arbor.Voice.BackendWorker.EffectRequest
+  alias Arbor.Voice.BackendWorker.Result
   alias Arbor.Voice.BackendWorkerSupervisor
+  alias Arbor.Voice.Redacted
 
   @moduletag :fast
 
@@ -35,7 +40,7 @@ defmodule Arbor.Voice.BackendWorkerTest do
             :never_open -> {:error, :unreachable}
           end
 
-        :effect ->
+        mode when mode in [:effect, :effect_send_error] ->
           authorization = authorizer.(:connect, route)
           send(parent, {:effect_authorization, authorization})
 
@@ -61,6 +66,12 @@ defmodule Arbor.Voice.BackendWorkerTest do
             :release_configure -> {:ok, bump(session)}
           end
 
+        :configure_error ->
+          {:error, {:distinctive_configure_error, session.secret}}
+
+        :partial_configure ->
+          {:error, {:distinctive_partial_configure, session.secret}, bump(session)}
+
         :invalid_configure ->
           {:ok, session, :wrong_shape}
 
@@ -80,7 +91,7 @@ defmodule Arbor.Voice.BackendWorkerTest do
         :partial_send ->
           {:error, {:distinctive_partial_error, session.secret}, bump(session)}
 
-        :send_error ->
+        mode when mode in [:send_error, :effect_send_error] ->
           {:error, {:distinctive_raw_error, session.secret}}
 
         _other ->
@@ -148,37 +159,36 @@ defmodule Arbor.Voice.BackendWorkerTest do
   end
 
   test "hanging open dies at its exact deadline and leaves no supervised orphan", ctx do
-    {worker, generation, worker_token} =
+    {worker, credential} =
       start_worker(ctx.supervisor, [parent: self(), mode: :hang_open], :none)
 
     monitor = Process.monitor(worker)
     operation_token = BackendWorker.new_operation_token()
-    deadline = now_ms() + 80
 
     assert :ok =
              BackendWorker.submit(
                worker,
-               generation,
-               worker_token,
+               credential,
                operation_token,
-               deadline,
+               now_ms() + 80,
                :open,
                []
              )
 
     assert_receive {:backend_called, :open, ^worker, 0}
-    assert_receive {:DOWN, ^monitor, :process, ^worker, :killed}, 1_000
-    refute_receive {:voice_backend_operation_result, ^worker, _, _, _, _, _, _}, 50
+    assert_receive down = {:DOWN, ^monitor, :process, ^worker, :killed}, 1_000
+    refute inspect(down) =~ "ordinary-session"
+    refute_receive {:voice_backend_operation_result, %Result{worker: ^worker}}, 50
     assert_eventually_no_children(ctx.supervisor)
   end
 
   test "one socket-owning process performs open configure send recv meta and close", ctx do
-    {worker, generation, worker_token} = start_worker(ctx.supervisor, [parent: self()], :none)
+    {worker, credential} = start_worker(ctx.supervisor, [parent: self()], :none)
 
-    open = submit_result(worker, generation, worker_token, :open, [])
+    open = submit_result(worker, credential, :open, [])
     assert_receive {:backend_called, :open, ^worker, 0}
     assert open.outcome == :ok
-    assert :ok = ack(worker, generation, worker_token, open.token)
+    assert :ok = ack(worker, credential, open)
 
     operations = [
       {:configure, [%{instructions: "hello"}], 0, :ok},
@@ -191,62 +201,76 @@ defmodule Arbor.Voice.BackendWorkerTest do
     ]
 
     Enum.each(operations, fn {operation, args, version, expected} ->
-      result = submit_result(worker, generation, worker_token, operation, args)
+      result = submit_result(worker, credential, operation, args)
       assert_receive {:backend_called, ^operation, ^worker, ^version}
       assert result.outcome == expected
-      assert :ok = ack(worker, generation, worker_token, result.token)
+      assert :ok = ack(worker, credential, result)
     end)
 
     monitor = Process.monitor(worker)
-    close = submit_result(worker, generation, worker_token, :close, [])
+    close = submit_result(worker, credential, :close, [])
     assert_receive {:backend_called, :close, ^worker, 5, "ordinary-session"}
     assert close.outcome == :ok
     refute_receive {:DOWN, ^monitor, :process, ^worker, _reason}, 25
-    assert :ok = ack(worker, generation, worker_token, close.token)
+    assert :ok = ack(worker, credential, close)
     assert_receive {:DOWN, ^monitor, :process, ^worker, :normal}, 500
   end
 
-  test "effect RPC binds exact worker token and faults or timeouts deny before effect", ctx do
-    {worker, generation, worker_token} =
+  test "foreign holder of an exact effect request cannot authorize a physical effect", ctx do
+    {worker, credential} =
       start_worker(
         ctx.supervisor,
         [parent: self(), mode: :effect, callback_route: @route],
         @route,
-        effect_timeout_ms: 60
+        effect_timeout_ms: 250
       )
 
-    open_token = BackendWorker.new_operation_token()
+    operation_token = BackendWorker.new_operation_token()
 
     assert :ok =
              BackendWorker.submit(
                worker,
-               generation,
-               worker_token,
-               open_token,
+               credential,
+               operation_token,
                now_ms() + 1_000,
                :open,
                []
              )
 
-    assert_receive request =
-                     {:voice_backend_effect_request, ^worker, ^generation, ^worker_token,
-                      effect_token, :connect, @route, reply_alias}
+    assert_receive %EffectRequest{
+                     worker: ^worker,
+                     coordinator: coordinator,
+                     generation: generation,
+                     operation_token: ^operation_token,
+                     effect: :connect,
+                     frozen_route: @route
+                   } = request
 
-    assert is_reference(effect_token)
-    assert is_reference(reply_alias)
-    assert :ok = BackendWorker.reply_effect(request, :allow)
+    assert coordinator == self()
+    assert generation == credential.generation
+
+    parent = self()
+
+    spawn(fn ->
+      send(parent, {:foreign_effect_reply, BackendWorker.reply_effect(request, :allow)})
+    end)
+
+    assert_receive {:foreign_effect_reply, {:error, :invalid_effect_request}}
+    refute_receive {:physical_effect, ^worker}, 25
+
+    assert :ok = BackendWorker.reply_effect(request, credential, :allow)
     assert_receive {:physical_effect, ^worker}
     assert_receive {:effect_authorization, :allow}
 
-    assert_receive {:voice_backend_operation_result, ^worker, ^generation, ^worker_token,
-                    ^open_token, :open, completed_at, :ok}
+    open = receive_result(worker, credential, operation_token, :open)
+    assert open.outcome == :ok
+    assert :ok = ack(worker, credential, open)
+    close_worker(worker, credential)
+  end
 
-    assert is_integer(completed_at)
-    assert :ok = ack(worker, generation, worker_token, open_token)
-    close_worker(worker, generation, worker_token)
-
-    Enum.each([:wrong_token, :fault, :timeout], fn refusal ->
-      {denied_worker, denied_generation, denied_token} =
+  test "faulting malformed and timeout effect responses deny before transport", ctx do
+    Enum.each([:fault, :malformed_credential, :timeout], fn refusal ->
+      {worker, credential} =
         start_worker(
           ctx.supervisor,
           [parent: self(), mode: :effect, callback_route: @route],
@@ -258,244 +282,382 @@ defmodule Arbor.Voice.BackendWorkerTest do
 
       assert :ok =
                BackendWorker.submit(
-                 denied_worker,
-                 denied_generation,
-                 denied_token,
+                 worker,
+                 credential,
                  operation_token,
                  now_ms() + 1_000,
                  :open,
                  []
                )
 
-      assert_receive denied_request =
-                       {:voice_backend_effect_request, ^denied_worker, ^denied_generation,
-                        ^denied_token, denied_effect_token, :connect, @route, denied_reply_alias}
+      assert_receive %EffectRequest{worker: ^worker} = request
 
       case refusal do
-        :wrong_token ->
-          send(
-            denied_reply_alias,
-            {:voice_backend_effect_reply, denied_worker, denied_generation,
-             :crypto.strong_rand_bytes(32), denied_effect_token, :connect, @route, :allow}
-          )
-
         :fault ->
           assert :ok =
                    BackendWorker.reply_effect(
-                     denied_request,
+                     request,
+                     credential,
                      {:error, {:distinctive_authorizer_fault, make_ref()}}
                    )
+
+        :malformed_credential ->
+          fake = %Credential{credential | secret: Redacted.new(:crypto.strong_rand_bytes(32))}
+          assert :ok = BackendWorker.reply_effect(request, fake, :allow)
 
         :timeout ->
           :ok
       end
 
       assert_receive {:effect_authorization, {:error, :backend_effect_denied}}, 500
+      denied = receive_result(worker, credential, operation_token, :open)
+      assert denied.outcome == {:error, :backend_open_failed}
+      refute_receive {:physical_effect, ^worker}, 25
 
-      assert_receive {:voice_backend_operation_result, ^denied_worker, ^denied_generation,
-                      ^denied_token, ^operation_token, :open, _completed_at,
-                      {:error, :backend_open_failed}},
-                     500
-
-      refute_receive {:physical_effect, ^denied_worker}, 25
-      denied_monitor = Process.monitor(denied_worker)
-      assert :ok = ack(denied_worker, denied_generation, denied_token, operation_token)
-      assert_receive {:DOWN, ^denied_monitor, :process, ^denied_worker, :normal}, 500
+      monitor = Process.monitor(worker)
+      assert :ok = ack(worker, credential, denied)
+      assert_receive {:DOWN, ^monitor, :process, ^worker, :normal}, 500
     end)
   end
 
-  test "terminal result precedes DOWN and exact ack fences every following operation", ctx do
-    {worker, generation, worker_token} =
-      start_worker(ctx.supervisor, [parent: self(), mode: :invalid_configure], :none)
+  test "worker-minted completion rejects an ACK sent before callback completion", ctx do
+    {worker, credential} =
+      start_worker(ctx.supervisor, [parent: self(), mode: :blocking_configure], :none)
 
-    open = submit_result(worker, generation, worker_token, :open, [])
-    assert :ok = ack(worker, generation, worker_token, open.token)
+    open = submit_result(worker, credential, :open, [])
+    assert :ok = ack(worker, credential, open)
 
-    monitor = Process.monitor(worker)
-    invalid = submit_result(worker, generation, worker_token, :configure, [%{}])
-    assert invalid.outcome == {:error, :invalid_backend_return}
-    assert_receive {:backend_called, :close, ^worker, 0, "ordinary-session"}
-    refute_receive {:DOWN, ^monitor, :process, ^worker, _reason}, 25
+    operation_token = BackendWorker.new_operation_token()
+
+    assert :ok =
+             BackendWorker.submit(
+               worker,
+               credential,
+               operation_token,
+               now_ms() + 1_000,
+               :configure,
+               [%{}]
+             )
+
+    assert_receive {:backend_called, :configure, ^worker, 0}
+
+    fake_completion = %CompletionCredential{value: Redacted.new(make_ref())}
+
+    spawn(fn ->
+      Process.sleep(25)
+      send(worker, :release_configure)
+    end)
+
+    assert {:error, :stale_ack} =
+             BackendWorker.ack(worker, credential, operation_token, fake_completion)
+
+    configured = receive_result(worker, credential, operation_token, :configure)
+    assert configured.outcome == :ok
 
     assert {:error, :operation_pending} =
              BackendWorker.submit(
                worker,
-               generation,
-               worker_token,
+               credential,
                make_ref(),
                now_ms() + 1_000,
-               :meta,
-               []
+               :send_text,
+               ["must-not-run"]
              )
 
-    assert {:error, :stale_ack} = ack(worker, generation, worker_token, make_ref())
-    refute_receive {:DOWN, ^monitor, :process, ^worker, _reason}, 25
-    assert :ok = ack(worker, generation, worker_token, invalid.token)
-    assert_receive {:DOWN, ^monitor, :process, ^worker, :normal}, 500
+    refute_receive {:backend_called, :send_text, ^worker, _version}, 25
+    assert :ok = ack(worker, credential, configured)
+    close_worker(worker, credential)
   end
 
-  test "partial send retains the latest opaque state for same-process close", ctx do
+  test "every configure error fault malformed or partial result quarantines the connection",
+       ctx do
+    cases = [
+      {:configure_error, {:error, :backend_callback_failed}, 0},
+      {:faulting_configure, {:error, :backend_callback_fault}, 0},
+      {:invalid_configure, {:error, :invalid_backend_return}, 0},
+      {:partial_configure, {:error, :backend_partial_failure}, 1}
+    ]
+
+    Enum.each(cases, fn {mode, expected, close_version} ->
+      {worker, credential} = start_worker(ctx.supervisor, [parent: self(), mode: mode], :none)
+      open = submit_result(worker, credential, :open, [])
+      assert :ok = ack(worker, credential, open)
+
+      monitor = Process.monitor(worker)
+      failed = submit_result(worker, credential, :configure, [%{}])
+      assert failed.outcome == expected
+      assert_receive {:backend_called, :close, ^worker, ^close_version, "ordinary-session"}
+
+      assert {:error, :operation_pending} =
+               BackendWorker.submit(
+                 worker,
+                 credential,
+                 make_ref(),
+                 now_ms() + 1_000,
+                 :send_text,
+                 ["must-not-run"]
+               )
+
+      refute_receive {:backend_called, :send_text, ^worker, _version}, 25
+      refute_receive {:DOWN, ^monitor, :process, ^worker, _reason}, 10
+      assert :ok = ack(worker, credential, failed)
+      assert_receive {:DOWN, ^monitor, :process, ^worker, :normal}, 500
+    end)
+  end
+
+  test "partial send closes the latest opaque state before terminal result acknowledgement",
+       ctx do
     secret = "partial-session-secret-9a0d"
 
-    {worker, generation, worker_token} =
+    {worker, credential} =
       start_worker(
         ctx.supervisor,
         [parent: self(), mode: :partial_send, secret: secret],
         :none
       )
 
-    open = submit_result(worker, generation, worker_token, :open, [])
-    assert :ok = ack(worker, generation, worker_token, open.token)
+    open = submit_result(worker, credential, :open, [])
+    assert :ok = ack(worker, credential, open)
 
     monitor = Process.monitor(worker)
-    partial = submit_result(worker, generation, worker_token, :send_text, ["sensitive-text"])
+    partial = submit_result(worker, credential, :send_text, ["sensitive-text"])
     assert partial.outcome == {:error, :backend_partial_failure}
     assert_receive {:backend_called, :close, ^worker, 1, ^secret}
     refute_receive {:DOWN, ^monitor, :process, ^worker, _reason}, 25
-    assert :ok = ack(worker, generation, worker_token, partial.token)
+    assert :ok = ack(worker, credential, partial)
     assert_receive {:DOWN, ^monitor, :process, ^worker, :normal}, 500
   end
 
-  test "stale malformed overlapping and foreign operations fail closed", ctx do
-    {worker, generation, worker_token} = start_worker(ctx.supervisor, [parent: self()], :none)
-    valid_token = BackendWorker.new_operation_token()
+  test "stale malformed overlapping foreign and tampered protocol terms fail closed", ctx do
+    {worker, credential} = start_worker(ctx.supervisor, [parent: self()], :none)
+    operation_token = BackendWorker.new_operation_token()
     future = now_ms() + 1_000
 
-    assert {:error, :stale_generation} =
-             BackendWorker.submit(
-               worker,
-               make_ref(),
-               worker_token,
-               valid_token,
-               future,
-               :open,
-               []
-             )
+    stale = %Credential{credential | generation: make_ref()}
 
-    assert {:error, :invalid_worker_token} =
-             BackendWorker.submit(
-               worker,
-               generation,
-               :crypto.strong_rand_bytes(32),
-               valid_token,
-               future,
-               :open,
-               []
-             )
+    assert {:error, :stale_generation} =
+             BackendWorker.submit(worker, stale, operation_token, future, :open, [])
+
+    fake = %Credential{credential | secret: Redacted.new(:crypto.strong_rand_bytes(32))}
+
+    assert {:error, :invalid_operation_authenticator} =
+             BackendWorker.submit(worker, fake, operation_token, future, :open, [])
 
     assert {:error, :invalid_operation_token} =
-             BackendWorker.submit(worker, generation, worker_token, "bad", future, :open, [])
-
-    assert {:error, :invalid_deadline} =
-             BackendWorker.submit(
-               worker,
-               generation,
-               worker_token,
-               valid_token,
-               :tomorrow,
-               :open,
-               []
-             )
-
-    assert {:error, :deadline_expired} =
-             BackendWorker.submit(
-               worker,
-               generation,
-               worker_token,
-               valid_token,
-               now_ms() - 1,
-               :open,
-               []
-             )
-
-    assert {:error, :open_required} =
-             BackendWorker.submit(
-               worker,
-               generation,
-               worker_token,
-               valid_token,
-               future,
-               :meta,
-               []
-             )
+             BackendWorker.submit(worker, credential, "bad", future, :open, [])
 
     parent = self()
 
     spawn(fn ->
       result =
-        BackendWorker.submit(
-          worker,
-          generation,
-          worker_token,
-          make_ref(),
-          now_ms() + 1_000,
-          :open,
-          []
-        )
+        BackendWorker.submit(worker, credential, make_ref(), now_ms() + 1_000, :open, [])
 
       send(parent, {:foreign_result, result})
     end)
 
     assert_receive {:foreign_result, {:error, :foreign_coordinator}}
 
-    open = submit_result(worker, generation, worker_token, :open, [])
+    open = submit_result(worker, credential, :open, [])
+
+    tampered = %{open.result | outcome: {:ok, {:output_text_delta, "forged"}}}
+    assert {:error, :invalid_result} = BackendWorker.verify_result(tampered, credential)
+    assert {:error, :invalid_result} = BackendWorker.ack(worker, credential, tampered)
 
     assert {:error, :operation_pending} =
              BackendWorker.submit(
                worker,
-               generation,
-               worker_token,
+               credential,
                make_ref(),
                now_ms() + 1_000,
                :configure,
                [%{}]
              )
 
-    assert {:error, :stale_ack} = ack(worker, generation, worker_token, make_ref())
-    assert :ok = ack(worker, generation, worker_token, open.token)
+    assert :ok = ack(worker, credential, open)
+    close_worker(worker, credential)
+  end
 
-    assert {:error, :invalid_operation} =
+  test "deadline distance and operation aggregate bounds reject before callback", ctx do
+    {worker, credential} = start_worker(ctx.supervisor, [parent: self()], :none)
+
+    assert {:error, :deadline_too_far} =
              BackendWorker.submit(
                worker,
-               generation,
-               worker_token,
+               credential,
                make_ref(),
-               now_ms() + 1_000,
-               :configure,
-               ["not-a-map"]
+               now_ms() + BackendWorker.max_deadline_distance_ms() + 1,
+               :open,
+               []
              )
 
-    close_worker(worker, generation, worker_token)
+    assert {:error, :deadline_expired} =
+             BackendWorker.submit(worker, credential, make_ref(), now_ms() - 1, :open, [])
+
+    refute_receive {:backend_called, :open, ^worker, 0}, 25
+
+    open = submit_result(worker, credential, :open, [])
+    assert :ok = ack(worker, credential, open)
+
+    oversized_config = %{instructions: String.duplicate("c", BackendWorker.max_config_bytes())}
+    oversized_audio = :binary.copy(<<0>>, BackendWorker.max_audio_bytes() + 1)
+
+    refused = [
+      {:configure, [oversized_config]},
+      {:send_text, [String.duplicate("t", 8_193)]},
+      {:send_audio, [oversized_audio]},
+      {:send_tool_result, [String.duplicate("i", 257), "output"]},
+      {:send_tool_result, ["id", String.duplicate("o", 8_193)]}
+    ]
+
+    Enum.each(refused, fn {operation, args} ->
+      assert {:error, :invalid_operation} =
+               BackendWorker.submit(
+                 worker,
+                 credential,
+                 make_ref(),
+                 now_ms() + 1_000,
+                 operation,
+                 args
+               )
+
+      refute_receive {:backend_called, ^operation, ^worker, _version}, 10
+    end)
+
+    close_worker(worker, credential)
+  end
+
+  test "route backend option and DynamicSupervisor capacity are source bounded", ctx do
+    oversized_route = %{@route | destination: String.duplicate("r", 2_049)}
+
+    assert {:error, :worker_start_failed} =
+             BackendWorkerSupervisor.start_worker(
+               ctx.supervisor,
+               self(),
+               make_ref(),
+               Backend,
+               [parent: self()],
+               oversized_route,
+               []
+             )
+
+    keys = [
+      :a,
+      :b,
+      :c,
+      :d,
+      :e,
+      :f,
+      :g,
+      :h,
+      :i,
+      :j,
+      :k,
+      :l,
+      :m,
+      :n,
+      :o,
+      :p,
+      :q,
+      :r,
+      :s,
+      :t,
+      :u,
+      :v,
+      :w,
+      :x,
+      :y,
+      :z,
+      :aa,
+      :ab,
+      :ac,
+      :ad,
+      :ae,
+      :af,
+      :ag
+    ]
+
+    too_many_opts = Enum.map(keys, &{&1, 1})
+
+    assert {:error, :worker_start_failed} =
+             BackendWorkerSupervisor.start_worker(
+               ctx.supervisor,
+               self(),
+               make_ref(),
+               Backend,
+               too_many_opts,
+               :none,
+               []
+             )
+
+    assert {:error, :worker_start_failed} =
+             BackendWorkerSupervisor.start_worker(
+               ctx.supervisor,
+               self(),
+               make_ref(),
+               Backend,
+               [parent: self(), oversized: String.duplicate("b", 65_537)],
+               :none,
+               []
+             )
+
+    workers =
+      for _index <- 1..BackendWorkerSupervisor.max_children() do
+        assert {:ok, worker, %Credential{}} =
+                 BackendWorkerSupervisor.start_worker(
+                   ctx.supervisor,
+                   self(),
+                   make_ref(),
+                   Backend,
+                   [parent: self()],
+                   :none,
+                   []
+                 )
+
+        worker
+      end
+
+    assert {:error, :worker_start_failed} =
+             BackendWorkerSupervisor.start_worker(
+               ctx.supervisor,
+               self(),
+               make_ref(),
+               Backend,
+               [parent: self()],
+               :none,
+               []
+             )
+
+    Enum.each(workers, fn worker ->
+      assert :ok = DynamicSupervisor.terminate_child(ctx.supervisor, worker)
+    end)
   end
 
   test "coordinator kill cannot orphan a worker blocked in open", ctx do
     parent = self()
-    generation = make_ref()
 
     coordinator =
       spawn(fn ->
         Process.flag(:trap_exit, true)
 
-        {:ok, worker, worker_token} =
+        {:ok, worker, credential} =
           BackendWorkerSupervisor.start_worker(
             ctx.supervisor,
             self(),
-            generation,
+            make_ref(),
             Backend,
             [parent: parent, mode: :hang_open],
             :none,
             ack_timeout_ms: 500
           )
 
-        send(parent, {:coordinator_worker, self(), worker, worker_token})
+        send(parent, {:coordinator_worker, self(), worker})
 
         receive do
           :open ->
             :ok =
               BackendWorker.submit(
                 worker,
-                generation,
-                worker_token,
+                credential,
                 make_ref(),
                 now_ms() + 5_000,
                 :open,
@@ -510,7 +672,7 @@ defmodule Arbor.Voice.BackendWorkerTest do
         end
       end)
 
-    assert_receive {:coordinator_worker, ^coordinator, worker, _worker_token}
+    assert_receive {:coordinator_worker, ^coordinator, worker}
     worker_monitor = Process.monitor(worker)
     coordinator_monitor = Process.monitor(coordinator)
     send(coordinator, :open)
@@ -525,25 +687,24 @@ defmodule Arbor.Voice.BackendWorkerTest do
 
   test "normal coordinator death closes the session and retires the worker", ctx do
     parent = self()
-    generation = make_ref()
 
     coordinator =
       spawn(fn ->
         Process.flag(:trap_exit, true)
 
-        {:ok, worker, worker_token} =
+        {:ok, worker, credential} =
           BackendWorkerSupervisor.start_worker(
             ctx.supervisor,
             self(),
-            generation,
+            make_ref(),
             Backend,
             [parent: parent, secret: "coordinator-death-session"],
             :none,
             ack_timeout_ms: 500
           )
 
-        open = submit_result(worker, generation, worker_token, :open, [])
-        :ok = ack(worker, generation, worker_token, open.token)
+        open = submit_result(worker, credential, :open, [])
+        :ok = ack(worker, credential, open)
         send(parent, {:coordinator_ready_to_exit, self(), worker})
 
         receive do
@@ -559,7 +720,7 @@ defmodule Arbor.Voice.BackendWorkerTest do
     assert_eventually_no_children(ctx.supervisor)
   end
 
-  test "state status results and Inspect redact distinctive secrets", ctx do
+  test "actual credentials requests results state and status redact distinctive secrets", ctx do
     backend_secret = "backend-opt-and-session-secret-f48b"
     route_secret = "route-secret-b32a"
     operation_secret = "text-and-tool-output-secret-a7ce"
@@ -571,64 +732,100 @@ defmodule Arbor.Voice.BackendWorkerTest do
       model: "model-#{route_secret}"
     }
 
-    {worker, generation, worker_token} =
+    {worker, credential} =
       start_worker(
         ctx.supervisor,
-        [parent: self(), mode: :send_error, secret: backend_secret],
+        [
+          parent: self(),
+          mode: :effect_send_error,
+          secret: backend_secret,
+          callback_route: route
+        ],
         route,
-        ack_timeout_ms: 2_000
+        ack_timeout_ms: 2_000,
+        effect_timeout_ms: 500
       )
 
-    open = submit_result(worker, generation, worker_token, :open, [])
-    assert :ok = ack(worker, generation, worker_token, open.token)
+    worker_secret = credential.secret |> Redacted.value()
+    operation_token = BackendWorker.new_operation_token()
 
-    terminal =
-      submit_result(worker, generation, worker_token, :send_text, [operation_secret])
+    assert :ok =
+             BackendWorker.submit(
+               worker,
+               credential,
+               operation_token,
+               now_ms() + 1_000,
+               :open,
+               []
+             )
 
+    assert_receive %EffectRequest{} = effect_request
+    refute contains_exact_binary?(effect_request, worker_secret)
+    refute inspect(effect_request) =~ route_secret
+    refute inspect(effect_request) =~ inspect(operation_token)
+    assert :ok = BackendWorker.reply_effect(effect_request, credential, :allow)
+    assert_receive {:physical_effect, ^worker}
+
+    open = receive_result(worker, credential, operation_token, :open)
+    refute contains_exact_binary?(open.result, worker_secret)
+    refute inspect({:voice_backend_operation_result, open.result}) =~ backend_secret
+    refute inspect(open.result) =~ route_secret
+    refute inspect(open.result) =~ inspect(operation_token)
+
+    refute inspect(open.result.completion) =~
+             inspect(Redacted.value(open.result.completion.value))
+
+    refute inspect(credential) =~ inspect(worker_secret)
+    assert :ok = ack(worker, credential, open)
+
+    error_token = BackendWorker.new_operation_token()
+
+    assert :ok =
+             BackendWorker.submit(
+               worker,
+               credential,
+               error_token,
+               now_ms() + 1_000,
+               :send_text,
+               [operation_secret]
+             )
+
+    terminal = receive_result(worker, credential, error_token, :send_text)
     assert terminal.outcome == {:error, :backend_callback_failed}
     assert_receive {:backend_called, :close, ^worker, 0, ^backend_secret}
 
-    state_inspection = worker |> :sys.get_state() |> inspect()
-    status_inspection = worker |> :sys.get_status() |> inspect()
-    result_inspection = inspect(terminal)
+    inspections = [
+      inspect(:sys.get_state(worker)),
+      inspect(:sys.get_status(worker)),
+      inspect(terminal.result),
+      inspect({:voice_backend_operation_result, terminal.result}),
+      inspect(credential)
+    ]
 
-    Enum.each([state_inspection, status_inspection, result_inspection], fn inspection ->
+    Enum.each(inspections, fn inspection ->
       refute inspection =~ backend_secret
       refute inspection =~ route_secret
       refute inspection =~ operation_secret
       refute inspection =~ "distinctive_raw_error"
-      refute inspection =~ inspect(worker_token)
+      refute inspection =~ inspect(worker_secret)
+      refute inspection =~ inspect(error_token)
     end)
 
-    monitor = Process.monitor(worker)
-    assert :ok = ack(worker, generation, worker_token, terminal.token)
-    assert_receive {:DOWN, ^monitor, :process, ^worker, :normal}, 500
-  end
-
-  test "callback faults are terminal and raw exception content never crosses the boundary", ctx do
-    {worker, generation, worker_token} =
-      start_worker(ctx.supervisor, [parent: self(), mode: :faulting_configure], :none)
-
-    open = submit_result(worker, generation, worker_token, :open, [])
-    assert :ok = ack(worker, generation, worker_token, open.token)
+    refute contains_exact_binary?(terminal.result, worker_secret)
 
     monitor = Process.monitor(worker)
-    fault = submit_result(worker, generation, worker_token, :configure, [%{}])
-    assert fault.outcome == {:error, :backend_callback_fault}
-    refute inspect(fault) =~ "distinctive-configure-fault"
-    assert_receive {:backend_called, :close, ^worker, 0, "ordinary-session"}
-    assert :ok = ack(worker, generation, worker_token, fault.token)
-    assert_receive {:DOWN, ^monitor, :process, ^worker, :normal}, 500
+    assert :ok = ack(worker, credential, terminal)
+    assert_receive down = {:DOWN, ^monitor, :process, ^worker, :normal}, 500
+    refute inspect(down) =~ backend_secret
+    refute inspect(down) =~ operation_secret
   end
 
   defp start_worker(supervisor, backend_opts, route, worker_opts \\ []) do
-    generation = make_ref()
-
-    assert {:ok, worker, worker_token} =
+    assert {:ok, worker, %Credential{} = credential} =
              BackendWorkerSupervisor.start_worker(
                supervisor,
                self(),
-               generation,
+               make_ref(),
                Backend,
                backend_opts,
                route,
@@ -639,45 +836,79 @@ defmodule Arbor.Voice.BackendWorkerTest do
              )
 
     assert is_pid(worker)
-    assert is_binary(worker_token)
-    assert byte_size(worker_token) == 32
-    {worker, generation, worker_token}
+    assert credential.worker == worker
+    assert credential.coordinator == self()
+    assert is_reference(credential.generation)
+    refute inspect(credential) =~ inspect(Redacted.value(credential.secret))
+    {worker, credential}
   end
 
-  defp submit_result(worker, generation, worker_token, operation, args) do
+  defp submit_result(worker, credential, operation, args) do
     operation_token = BackendWorker.new_operation_token()
 
     assert :ok =
              BackendWorker.submit(
                worker,
-               generation,
-               worker_token,
+               credential,
                operation_token,
                now_ms() + 1_000,
                operation,
                args
              )
 
-    assert_receive {:voice_backend_operation_result, ^worker, ^generation, ^worker_token,
-                    ^operation_token, ^operation, completed_at, outcome},
+    receive_result(worker, credential, operation_token, operation)
+  end
+
+  defp receive_result(worker, credential, operation_token, operation) do
+    assert_receive {:voice_backend_operation_result,
+                    %Result{
+                      worker: ^worker,
+                      operation_token: ^operation_token,
+                      operation: ^operation
+                    } = result},
                    1_000
 
-    assert is_integer(completed_at)
-    %{token: operation_token, completed_at: completed_at, outcome: outcome}
+    assert {:ok, verified} = BackendWorker.verify_result(result, credential)
+    assert is_integer(verified.completed_at)
+
+    %{
+      result: result,
+      token: operation_token,
+      completed_at: verified.completed_at,
+      outcome: verified.outcome
+    }
   end
 
-  defp ack(worker, generation, worker_token, operation_token) do
-    BackendWorker.ack(worker, generation, worker_token, operation_token)
+  defp ack(worker, credential, %{result: result}) do
+    BackendWorker.ack(worker, credential, result)
   end
 
-  defp close_worker(worker, generation, worker_token) do
+  defp close_worker(worker, credential) do
     monitor = Process.monitor(worker)
-    result = submit_result(worker, generation, worker_token, :close, [])
+    result = submit_result(worker, credential, :close, [])
     assert result.outcome == :ok
-    assert :ok = ack(worker, generation, worker_token, result.token)
+    assert :ok = ack(worker, credential, result)
     assert_receive {:DOWN, ^monitor, :process, ^worker, :normal}, 500
     :ok
   end
+
+  defp contains_exact_binary?(term, target) when is_binary(term), do: term == target
+
+  defp contains_exact_binary?(term, target) when is_list(term),
+    do: Enum.any?(term, &contains_exact_binary?(&1, target))
+
+  defp contains_exact_binary?(term, target) when is_tuple(term),
+    do: term |> Tuple.to_list() |> Enum.any?(&contains_exact_binary?(&1, target))
+
+  defp contains_exact_binary?(term, target) when is_map(term),
+    do:
+      term
+      |> Map.to_list()
+      |> Enum.any?(fn {key, value} ->
+        contains_exact_binary?(key, target) or contains_exact_binary?(value, target)
+      end)
+
+  defp contains_exact_binary?(_term, _target), do: false
 
   defp assert_eventually_no_children(supervisor, attempts \\ 20)
 

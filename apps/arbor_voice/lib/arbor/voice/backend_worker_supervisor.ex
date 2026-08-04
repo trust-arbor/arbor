@@ -7,6 +7,7 @@ defmodule Arbor.Voice.BackendWorkerSupervisor do
   alias Arbor.Voice.Redacted
 
   @name __MODULE__
+  @max_children 64
 
   @doc false
   def child_spec(opts) do
@@ -27,7 +28,12 @@ defmodule Arbor.Voice.BackendWorkerSupervisor do
   end
 
   @impl true
-  def init(:ok), do: DynamicSupervisor.init(strategy: :one_for_one)
+  def init(:ok),
+    do: DynamicSupervisor.init(strategy: :one_for_one, max_children: @max_children)
+
+  @doc false
+  @spec max_children() :: pos_integer()
+  def max_children, do: @max_children
 
   @doc false
   @spec start_worker(
@@ -38,7 +44,7 @@ defmodule Arbor.Voice.BackendWorkerSupervisor do
           keyword(),
           Arbor.Voice.RealtimeBackend.egress_route(),
           keyword()
-        ) :: {:ok, pid(), binary()} | {:error, atom()}
+        ) :: {:ok, pid(), BackendWorker.Credential.t()} | {:error, atom()}
   def start_worker(
         supervisor,
         coordinator,
@@ -63,7 +69,7 @@ defmodule Arbor.Voice.BackendWorkerSupervisor do
     if coordinator != self() do
       {:error, :foreign_coordinator}
     else
-      worker_token = :crypto.strong_rand_bytes(32)
+      worker_secret = :crypto.strong_rand_bytes(32)
 
       child_spec = %{
         id: make_ref(),
@@ -72,7 +78,7 @@ defmodule Arbor.Voice.BackendWorkerSupervisor do
            [
              coordinator,
              generation,
-             Redacted.new(worker_token),
+             Redacted.new(worker_secret),
              backend_module,
              Redacted.new(backend_opts),
              Redacted.new(frozen_route),
@@ -84,9 +90,30 @@ defmodule Arbor.Voice.BackendWorkerSupervisor do
       }
 
       case DynamicSupervisor.start_child(supervisor, child_spec) do
-        {:ok, worker} -> {:ok, worker, worker_token}
-        {:ok, worker, _info} -> {:ok, worker, worker_token}
-        {:error, _reason} -> {:error, :worker_start_failed}
+        {:ok, worker} ->
+          credential =
+            BackendWorker.new_credential(
+              worker,
+              coordinator,
+              generation,
+              Redacted.new(worker_secret)
+            )
+
+          {:ok, worker, credential}
+
+        {:ok, worker, _info} ->
+          credential =
+            BackendWorker.new_credential(
+              worker,
+              coordinator,
+              generation,
+              Redacted.new(worker_secret)
+            )
+
+          {:ok, worker, credential}
+
+        {:error, _reason} ->
+          {:error, :worker_start_failed}
       end
     end
   rescue
