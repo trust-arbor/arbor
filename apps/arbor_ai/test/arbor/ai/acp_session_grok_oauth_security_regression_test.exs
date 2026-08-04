@@ -88,7 +88,7 @@ defmodule Arbor.AI.AcpSessionGrokOAuthSecurityRegressionTest do
       lock_path = Path.join(grok_home, "auth.json.lock")
       File.write!(auth_path, cache)
       File.chmod!(auth_path, 0o600)
-      File.write!(lock_path, "")
+      File.write!(lock_path, "grok-lock-state\n")
       File.chmod!(lock_path, 0o644)
     end
   end

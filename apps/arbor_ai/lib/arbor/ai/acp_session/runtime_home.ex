@@ -611,8 +611,8 @@ defmodule Arbor.AI.AcpSession.RuntimeHome do
       {:error, :enoent} ->
         :ok
 
-      {:ok, %File.Stat{type: :regular, links: 1, mode: mode, size: 0}}
-      when (mode &&& 0o022) == 0 ->
+      {:ok, %File.Stat{type: :regular, links: 1, mode: mode, size: size}}
+      when (mode &&& 0o022) == 0 and size <= 1_024 ->
         with {:ok, ^lock_path} <-
                contained_grok_file_path(lock_path, grok_home, @grok_auth_lock_filename),
              :ok <- File.rm(lock_path),
