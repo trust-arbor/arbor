@@ -20,6 +20,7 @@ defmodule Arbor.Voice.CleanupLease do
   @max_wait_keys @max_cleanups + 1
   @max_wait_timeout_ms 65_000
   @max_wait_keys_external_bytes 4_096
+  @max_cleanup_key_external_bytes 4_096
   @call_timeout_ms 5_000
   @provisional_cleanup_tag :voice_provisional_cleanup
 
@@ -131,6 +132,33 @@ defmodule Arbor.Voice.CleanupLease do
   def begin_cleanup(_credential, _proof), do: {:error, :cleanup_not_fenced}
 
   @doc false
+  @spec settle_cleanup(credential(), term(), pos_integer()) ::
+          :ok
+          | {:error,
+             :cleanup_busy
+             | :cleanup_pending
+             | :invalid_cleanup_request
+             | :lease_closing
+             | :lease_unavailable
+             | :unknown_cleanup_key}
+  def settle_cleanup(credential, logical_key, timeout_ms)
+      when is_integer(timeout_ms) and timeout_ms > 0 and
+             timeout_ms <= @max_cleanup_per_attempt_timeout_ms do
+    if valid_cleanup_key?(logical_key) do
+      credential_call(
+        credential,
+        {:settle_cleanup, logical_key, timeout_ms},
+        timeout_ms + @call_timeout_ms
+      )
+    else
+      {:error, :invalid_cleanup_request}
+    end
+  end
+
+  def settle_cleanup(_credential, _logical_key, _timeout_ms),
+    do: {:error, :invalid_cleanup_request}
+
+  @doc false
   @spec await_empty(credential(), [term()], non_neg_integer()) ::
           :ok | {:error, :cleanup_pending | :lease_unavailable}
   def await_empty(credential, keys, timeout_ms)
@@ -197,6 +225,14 @@ defmodule Arbor.Voice.CleanupLease do
 
       {:begin_cleanup, token, proof} ->
         handle_authorized_call(token, {:begin_cleanup, proof}, from, state)
+
+      {:settle_cleanup, token, logical_key, timeout_ms} ->
+        handle_authorized_call(
+          token,
+          {:settle_cleanup, logical_key, timeout_ms},
+          from,
+          state
+        )
 
       {:await_empty, token, keys, timeout_ms} ->
         handle_authorized_call(token, {:await_empty, keys, timeout_ms}, from, state)
@@ -310,6 +346,22 @@ defmodule Arbor.Voice.CleanupLease do
     end
   end
 
+  defp handle_lease_call({:settle_cleanup, logical_key, timeout_ms}, from, state) do
+    cond do
+      not valid_settle_request?(logical_key, timeout_ms) ->
+        {:reply, {:error, :invalid_cleanup_request}, state}
+
+      state.mode != :holding ->
+        {:reply, {:error, :lease_closing}, state}
+
+      not is_nil(state.current) ->
+        {:reply, {:error, :cleanup_busy}, state}
+
+      true ->
+        start_settlement(state, logical_key, timeout_ms, from)
+    end
+  end
+
   defp handle_lease_call({:await_empty, keys, timeout_ms}, from, state) do
     with true <- valid_wait_timeout?(timeout_ms),
          {:ok, key_set} <- normalize_wait_keys(keys) do
@@ -370,13 +422,15 @@ defmodule Arbor.Voice.CleanupLease do
       ) do
     Process.unlink(pid)
 
-    state = %{
+    state =
       state
-      | worker_pid: nil,
+      |> abort_current_settlement()
+      |> Map.merge(%{
+        worker_pid: nil,
         worker_ref: nil,
         retiring_worker: false,
         mode: :draining
-    }
+      })
 
     continue(state)
   end
@@ -482,20 +536,9 @@ defmodule Arbor.Voice.CleanupLease do
     cancel_timer(current.timer_ref)
 
     state = %{state | current: nil}
+    success? = result == :ok and current.normal_exit and not current.timed_out
 
-    state =
-      if result == :ok and current.normal_exit and not current.timed_out do
-        state
-        |> remove_cleanup_key(current.key)
-        |> Map.put(:retry_delay_ms, state.config.retry_base_ms)
-        |> notify_waiters()
-      else
-        state
-        |> rotate_cleanup_key(current.key)
-        |> schedule_retry()
-      end
-
-    continue(state)
+    finish_current(state, current, success?)
   end
 
   defp continue_current(state), do: {:noreply, state}
@@ -533,10 +576,19 @@ defmodule Arbor.Voice.CleanupLease do
   end
 
   defp start_cleanup_task(state, key, fun) do
+    start_cleanup_task(
+      state,
+      key,
+      fun,
+      state.config.cleanup_per_attempt_timeout_ms,
+      :drain
+    )
+  end
+
+  defp start_cleanup_task(state, key, fun, timeout_ms, operation) do
     with {:ok, cleanup_supervisor} <- resolve_task_supervisor(state.cleanup_supervisor) do
       lease = self()
       generation = make_ref()
-      timeout_ms = state.config.cleanup_per_attempt_timeout_ms
       deadline_ms = now_ms() + timeout_ms
 
       task = fn ->
@@ -568,6 +620,7 @@ defmodule Arbor.Voice.CleanupLease do
           {:ok,
            %{
              key: key,
+             operation: operation,
              generation: generation,
              pid: pid,
              monitor_ref: monitor_ref,
@@ -596,6 +649,94 @@ defmodule Arbor.Voice.CleanupLease do
       [] -> :none
     end
   end
+
+  defp start_settlement(state, logical_key, timeout_ms, from) do
+    cleanups = Redacted.value(state.cleanups)
+
+    case storage_keys_for_logical_key(cleanups, logical_key) do
+      [] ->
+        {:reply, {:error, :unknown_cleanup_key}, state}
+
+      [storage_key] ->
+        fun = Map.fetch!(cleanups, storage_key)
+        attempt_timeout_ms = min(timeout_ms, state.config.cleanup_per_attempt_timeout_ms)
+
+        case start_cleanup_task(
+               state,
+               storage_key,
+               fun,
+               attempt_timeout_ms,
+               {:settle, from}
+             ) do
+          {:ok, current} -> {:noreply, %{state | current: current}}
+          {:error, _reason} -> {:reply, {:error, :cleanup_pending}, state}
+        end
+
+      _ambiguous ->
+        {:reply, {:error, :cleanup_pending}, state}
+    end
+  end
+
+  defp finish_current(state, current, success?) do
+    case current.operation do
+      :drain ->
+        finish_draining_current(state, current, success?)
+
+      {:settle, from} ->
+        finish_settlement_current(state, current, from, success?)
+    end
+  end
+
+  defp finish_draining_current(state, current, true) do
+    state
+    |> remove_cleanup_key(current.key)
+    |> Map.put(:retry_delay_ms, state.config.retry_base_ms)
+    |> notify_waiters()
+    |> continue()
+  end
+
+  defp finish_draining_current(state, current, false) do
+    state
+    |> rotate_cleanup_key(current.key)
+    |> schedule_retry()
+    |> continue()
+  end
+
+  defp finish_settlement_current(%{mode: :holding} = state, current, from, true) do
+    state =
+      state
+      |> remove_cleanup_key(current.key)
+      |> Map.put(:retry_delay_ms, state.config.retry_base_ms)
+      |> notify_waiters()
+
+    reply_to_settlement_owner(state, from, :ok)
+    continue(state)
+  end
+
+  defp finish_settlement_current(state, current, from, _success) do
+    state =
+      if state.mode == :draining,
+        do: rotate_cleanup_key(state, current.key),
+        else: state
+
+    reply_to_settlement_owner(state, from, {:error, :cleanup_pending})
+    continue(state)
+  end
+
+  defp reply_to_settlement_owner(state, {caller_pid, _tag} = from, reply) do
+    if caller_pid == state.owner_pid and not state.owner_down and Process.alive?(caller_pid) do
+      GenServer.reply(from, reply)
+    end
+
+    :ok
+  end
+
+  defp abort_current_settlement(%{current: %{operation: {:settle, _from}} = current} = state) do
+    if Process.alive?(current.pid), do: Process.exit(current.pid, :kill)
+    %{state | current: %{current | timed_out: true, result: :error}}
+  end
+
+  defp abort_current_settlement(state), do: state
 
   defp remove_cleanup_key(state, key) do
     cleanups = Map.delete(Redacted.value(state.cleanups), key)
@@ -718,6 +859,19 @@ defmodule Arbor.Voice.CleanupLease do
   defp valid_wait_timeout?(timeout_ms),
     do: is_integer(timeout_ms) and timeout_ms >= 0 and timeout_ms <= @max_wait_timeout_ms
 
+  defp valid_settle_request?(logical_key, timeout_ms) do
+    is_integer(timeout_ms) and timeout_ms > 0 and
+      timeout_ms <= @max_cleanup_per_attempt_timeout_ms and valid_cleanup_key?(logical_key)
+  end
+
+  defp valid_cleanup_key?(key) do
+    :erlang.external_size(key) <= @max_cleanup_key_external_bytes
+  rescue
+    _ -> false
+  catch
+    _, _ -> false
+  end
+
   defp clear_worker_monitor(%{worker_ref: ref, worker_pid: worker} = state)
        when is_reference(ref) do
     if is_pid(worker), do: Process.unlink(worker)
@@ -728,10 +882,13 @@ defmodule Arbor.Voice.CleanupLease do
   defp clear_worker_monitor(state),
     do: %{state | worker_pid: nil, worker_ref: nil, retiring_worker: false}
 
-  defp credential_call(credential, request) do
+  defp credential_call(credential, request),
+    do: credential_call(credential, request, @call_timeout_ms)
+
+  defp credential_call(credential, request, call_timeout_ms) do
     with {:ok, pid, token} <- unpack_credential(credential) do
       message = insert_token(request, token)
-      GenServer.call(pid, message, @call_timeout_ms)
+      GenServer.call(pid, message, call_timeout_ms)
     else
       _ -> {:error, :lease_unavailable}
     end
@@ -758,6 +915,10 @@ defmodule Arbor.Voice.CleanupLease do
 
   defp insert_token({:remove_cleanup, key}, token), do: {:remove_cleanup, token, key}
   defp insert_token({:begin_cleanup, proof}, token), do: {:begin_cleanup, token, proof}
+
+  defp insert_token({:settle_cleanup, logical_key, timeout_ms}, token),
+    do: {:settle_cleanup, token, logical_key, timeout_ms}
+
   defp insert_token(:status, token), do: {:status, token}
 
   defp normalize_initial_cleanups(nil), do: {:ok, %{}}

@@ -40,6 +40,255 @@ defmodule Arbor.Voice.CleanupLeaseTest do
             }} = CleanupLease.status(credential)
   end
 
+  test "settle_cleanup discharges one key while a bound worker stays live", %{opts: opts} do
+    test_pid = self()
+    worker = spawn(fn -> Process.sleep(:infinity) end)
+    worker_ref = Process.monitor(worker)
+
+    turn_cleanup = fn ->
+      send(test_pid, :turn_settled)
+      :ok
+    end
+
+    route_cleanup = fn ->
+      send(test_pid, :route_settled)
+      :ok
+    end
+
+    assert {:ok, lease, credential} =
+             CleanupLease.start(
+               self(),
+               %{turn: turn_cleanup, route: route_cleanup},
+               opts
+             )
+
+    on_exit(fn ->
+      if Process.alive?(lease), do: Process.exit(lease, :kill)
+      if Process.alive?(worker), do: Process.exit(worker, :kill)
+    end)
+
+    assert :ok = CleanupLease.bind_worker(credential, worker)
+    assert :ok = CleanupLease.settle_cleanup(credential, :turn, 1_000)
+    assert_receive :turn_settled, 500
+    refute_receive :route_settled, 50
+
+    assert {:ok,
+            %{
+              cleanup_count: 1,
+              mode: :holding,
+              worker_alive: true,
+              cleanup_active: false,
+              retry_scheduled: false
+            }} = CleanupLease.status(credential)
+
+    assert Process.alive?(worker)
+    assert :ok = CleanupLease.await_empty(credential, [:turn], 0)
+    assert {:error, :cleanup_pending} = CleanupLease.await_empty(credential, [:route], 0)
+
+    Process.exit(worker, :kill)
+    assert_receive {:DOWN, ^worker_ref, :process, ^worker, :killed}, 500
+    assert_receive :route_settled, 1_000
+    assert :ok = CleanupLease.await_empty(credential, [:route], 500)
+  end
+
+  test "failed settlement remains holding without retry until worker DOWN", %{opts: opts} do
+    test_pid = self()
+    attempts = :atomics.new(1, signed: false)
+    worker = spawn(fn -> Process.sleep(:infinity) end)
+
+    cleanup = fn ->
+      attempt = :atomics.add_get(attempts, 1, 1)
+      send(test_pid, {:settlement_attempt, attempt})
+      if attempt == 1, do: {:error, :revoke_failed}, else: :ok
+    end
+
+    assert {:ok, lease, credential} = CleanupLease.start(self(), {:turn, cleanup}, opts)
+
+    on_exit(fn ->
+      if Process.alive?(lease), do: Process.exit(lease, :kill)
+      if Process.alive?(worker), do: Process.exit(worker, :kill)
+    end)
+
+    assert :ok = CleanupLease.bind_worker(credential, worker)
+    assert {:error, :cleanup_pending} = CleanupLease.settle_cleanup(credential, :turn, 500)
+    assert_receive {:settlement_attempt, 1}, 500
+
+    assert {:ok,
+            %{
+              cleanup_count: 1,
+              mode: :holding,
+              worker_alive: true,
+              cleanup_active: false,
+              retry_scheduled: false
+            }} = CleanupLease.status(credential)
+
+    refute_receive {:settlement_attempt, 2}, 100
+
+    Process.exit(worker, :kill)
+    assert_receive {:settlement_attempt, 2}, 1_000
+    assert :ok = CleanupLease.await_empty(credential, [:turn], 500)
+  end
+
+  test "settlement timeout is capped by cleanup configuration and retained", %{opts: opts} do
+    test_pid = self()
+    attempts = :atomics.new(1, signed: false)
+    worker = spawn(fn -> Process.sleep(:infinity) end)
+    opts = Keyword.put(opts, :cleanup_per_attempt_timeout_ms, 30)
+
+    cleanup = fn ->
+      attempt = :atomics.add_get(attempts, 1, 1)
+      send(test_pid, {:timed_settlement_attempt, attempt, self()})
+      if attempt == 1, do: Process.sleep(:infinity), else: :ok
+    end
+
+    assert {:ok, lease, credential} = CleanupLease.start(self(), {:turn, cleanup}, opts)
+
+    on_exit(fn ->
+      if Process.alive?(lease), do: Process.exit(lease, :kill)
+      if Process.alive?(worker), do: Process.exit(worker, :kill)
+    end)
+
+    assert :ok = CleanupLease.bind_worker(credential, worker)
+    started_at = System.monotonic_time(:millisecond)
+    assert {:error, :cleanup_pending} = CleanupLease.settle_cleanup(credential, :turn, 1_000)
+    elapsed_ms = System.monotonic_time(:millisecond) - started_at
+
+    assert_receive {:timed_settlement_attempt, 1, first_pid}, 500
+    refute Process.alive?(first_pid)
+    assert elapsed_ms < 800
+    refute_receive {:timed_settlement_attempt, 2, _pid}, 100
+
+    assert {:ok, %{cleanup_count: 1, mode: :holding, retry_scheduled: false}} =
+             CleanupLease.status(credential)
+
+    Process.exit(worker, :kill)
+    assert_receive {:timed_settlement_attempt, 2, _pid}, 1_000
+    assert :ok = CleanupLease.await_empty(credential, [:turn], 500)
+  end
+
+  test "settle_cleanup resolves a provisional obligation by its logical key", %{opts: opts} do
+    test_pid = self()
+    worker = spawn(fn -> Process.sleep(:infinity) end)
+
+    cleanup = fn ->
+      send(test_pid, :provisional_settled)
+      :ok
+    end
+
+    assert {:ok, lease, credential} = CleanupLease.start(self(), nil, opts)
+
+    on_exit(fn ->
+      if Process.alive?(lease), do: Process.exit(lease, :kill)
+      if Process.alive?(worker), do: Process.exit(worker, :kill)
+    end)
+
+    assert :ok = CleanupLease.adopt_provisional_cleanup(credential, :turn, cleanup)
+    assert :ok = CleanupLease.bind_worker(credential, worker)
+    assert :ok = CleanupLease.settle_cleanup(credential, :turn, 500)
+    assert_receive :provisional_settled, 500
+
+    assert {:ok, %{cleanup_count: 0, mode: :holding, worker_alive: true}} =
+             CleanupLease.status(credential)
+
+    assert :ok = CleanupLease.await_empty(credential, [:turn], 0)
+  end
+
+  test "owner death during settlement retires the worker and drains the retained key", %{
+    lease_supervisor: lease_supervisor,
+    cleanup_supervisor: cleanup_supervisor
+  } do
+    test_pid = self()
+    attempts = :atomics.new(1, signed: false)
+
+    cleanup = fn ->
+      attempt = :atomics.add_get(attempts, 1, 1)
+      send(test_pid, {:owner_death_settlement_attempt, attempt, self()})
+      if attempt == 1, do: Process.sleep(:infinity), else: :ok
+    end
+
+    owner =
+      spawn(fn ->
+        worker = spawn(fn -> Process.sleep(:infinity) end)
+
+        opts = [
+          supervisor: lease_supervisor,
+          cleanup_supervisor: cleanup_supervisor,
+          cleanup_per_attempt_timeout_ms: 1_000,
+          retry_base_ms: 5,
+          retry_max_ms: 25
+        ]
+
+        {:ok, lease, credential} = CleanupLease.start(self(), {:turn, cleanup}, opts)
+        :ok = CleanupLease.bind_worker(credential, worker)
+        send(test_pid, {:settlement_owner_ready, lease, worker})
+        result = CleanupLease.settle_cleanup(credential, :turn, 2_000)
+        send(test_pid, {:settlement_owner_result, result})
+      end)
+
+    assert_receive {:settlement_owner_ready, lease, worker}, 500
+    assert_receive {:owner_death_settlement_attempt, 1, first_cleanup_pid}, 500
+
+    owner_ref = Process.monitor(owner)
+    lease_ref = Process.monitor(lease)
+    worker_ref = Process.monitor(worker)
+    first_cleanup_ref = Process.monitor(first_cleanup_pid)
+
+    Process.exit(owner, :kill)
+
+    assert_receive {:DOWN, ^owner_ref, :process, ^owner, :killed}, 500
+    assert_receive {:DOWN, ^worker_ref, :process, ^worker, :killed}, 1_000
+    assert_receive {:DOWN, ^first_cleanup_ref, :process, ^first_cleanup_pid, _reason}, 1_000
+    assert_receive {:owner_death_settlement_attempt, 2, _retry_pid}, 1_000
+    assert_receive {:DOWN, ^lease_ref, :process, ^lease, :normal}, 1_000
+    refute_receive {:settlement_owner_result, _result}, 50
+  end
+
+  test "settle_cleanup rejects unknown, oversized, and duplicate requests", %{opts: opts} do
+    test_pid = self()
+    worker = spawn(fn -> Process.sleep(:infinity) end)
+
+    cleanup = fn ->
+      send(test_pid, {:serialized_settlement_started, self()})
+
+      receive do
+        :finish_serialized_settlement -> :ok
+      end
+    end
+
+    assert {:ok, lease, credential} = CleanupLease.start(self(), {:turn, cleanup}, opts)
+
+    on_exit(fn ->
+      if Process.alive?(lease), do: Process.exit(lease, :kill)
+      if Process.alive?(worker), do: Process.exit(worker, :kill)
+    end)
+
+    assert :ok = CleanupLease.bind_worker(credential, worker)
+    assert {:error, :unknown_cleanup_key} = CleanupLease.settle_cleanup(credential, :missing, 50)
+
+    assert {:error, :invalid_cleanup_request} =
+             CleanupLease.settle_cleanup(credential, String.duplicate("k", 4_097), 50)
+
+    assert {:error, :invalid_cleanup_request} =
+             CleanupLease.settle_cleanup(credential, :turn, 60_001)
+
+    {^lease, token} = Redacted.value(credential)
+    reply_tag = make_ref()
+
+    send(
+      lease,
+      {:"$gen_call", {self(), reply_tag}, {:settle_cleanup, token, :turn, 500}}
+    )
+
+    assert_receive {:serialized_settlement_started, cleanup_pid}, 500
+
+    assert {:error, :cleanup_busy} =
+             CleanupLease.settle_cleanup(credential, :turn, 50)
+
+    send(cleanup_pid, :finish_serialized_settlement)
+    assert_receive {^reply_tag, :ok}, 500
+    assert :ok = CleanupLease.await_empty(credential, [:turn], 0)
+  end
+
   test "cleanup is retained until exact success and cleanup worker DOWN", %{opts: opts} do
     test_pid = self()
 
@@ -310,6 +559,7 @@ defmodule Arbor.Voice.CleanupLeaseTest do
           adopt: CleanupLease.adopt_provisional_cleanup(credential, :foreign, fn -> :ok end),
           remove: CleanupLease.remove_cleanup(credential, :foreign),
           begin: CleanupLease.begin_cleanup(credential, :fenced),
+          settle: CleanupLease.settle_cleanup(credential, :foreign, 10),
           await: CleanupLease.await_empty(credential, [], 0)
         }
 
@@ -461,6 +711,9 @@ defmodule Arbor.Voice.CleanupLeaseTest do
 
     assert {:error, :lease_unavailable} =
              CleanupLease.register_cleanup(forged, :forged, fn -> :ok end)
+
+    assert {:error, :lease_unavailable} =
+             CleanupLease.settle_cleanup(forged, :forged, 10)
   end
 
   defp wait_until(predicate, attempts \\ 100)
