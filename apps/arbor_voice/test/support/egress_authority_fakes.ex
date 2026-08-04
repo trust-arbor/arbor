@@ -237,6 +237,38 @@ defmodule Arbor.Voice.Test.EgressAuthorityFakes do
       end)
     end
 
+    def authorize_source_owned_exact_ordinary_capability(
+          principal_id,
+          resource,
+          effect,
+          capability_id,
+          expectations
+        ) do
+      expected_egress = expectations.expected_egress
+
+      with {:ok, :authorized} <-
+             authorize(
+               principal_id,
+               resource,
+               effect,
+               exact_capability_id: capability_id,
+               session_id: expectations.session_id,
+               task_id: expectations.task_id,
+               principal_scope: expectations.principal_scope
+             ),
+           %{
+             constraints: %{
+               egress: %{max_tier: max_tier, destinations: [destination]}
+             }
+           } <- EgressAuthorityFakes.capability(capability_id),
+           true <- max_tier == expected_egress.max_tier,
+           true <- destination == expected_egress.destination do
+        {:ok, :authorized}
+      else
+        _mismatch -> {:error, :unauthorized}
+      end
+    end
+
     def issue_disclosure_capability_id(opts) do
       EgressAuthorityFakes.record({:disclosure_issue, opts})
 

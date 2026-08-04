@@ -113,7 +113,7 @@ defmodule Arbor.Voice.EgressAuthority do
 
     with true <- is_binary(resource_uri),
          true <- safe_apply(security, :uri_registered?, [resource_uri]),
-         {:ok, expires_at} <- route_expiry(Map.get(config, :wall_clock), reserved_ms),
+         {:ok, expires_at} <- route_expiry(reserved_ms),
          {:ok, capability_id} <-
            safe_apply(security, :grant_capability_id, [
              [
@@ -417,17 +417,17 @@ defmodule Arbor.Voice.EgressAuthority do
              trust_opts
            ]),
          {:ok, :authorized} <-
-           safe_apply(authority.security_module, :authorize, [
-             authority.agent_id,
-             authority.resource_uri,
-             effect,
+           safe_apply(
+             authority.security_module,
+             :authorize_source_owned_exact_ordinary_capability,
              [
-               exact_capability_id: authority.route_capability_id,
-               session_id: authority.session_id,
-               task_id: nil,
-               principal_scope: authority.human_id
+               authority.agent_id,
+               authority.resource_uri,
+               effect,
+               authority.route_capability_id,
+               exact_route_expectations(authority, route)
              ]
-           ]) do
+           ) do
       :allow
     else
       _ -> {:error, @authorization_error}
@@ -436,17 +436,17 @@ defmodule Arbor.Voice.EgressAuthority do
 
   defp authorize_turn(authority, lease, effect, route) do
     with {:ok, :authorized} <-
-           safe_apply(authority.security_module, :authorize, [
-             authority.agent_id,
-             authority.resource_uri,
-             effect,
+           safe_apply(
+             authority.security_module,
+             :authorize_source_owned_exact_ordinary_capability,
              [
-               exact_capability_id: authority.route_capability_id,
-               session_id: authority.session_id,
-               task_id: nil,
-               principal_scope: authority.human_id
+               authority.agent_id,
+               authority.resource_uri,
+               effect,
+               authority.route_capability_id,
+               exact_route_expectations(authority, route)
              ]
-           ]),
+           ),
          :allow <-
            safe_apply(authority.trust_module, :authorize_egress, [
              authority.agent_id,
@@ -502,6 +502,18 @@ defmodule Arbor.Voice.EgressAuthority do
       egress_runtime: route.runtime,
       egress_model: route.model
     ]
+  end
+
+  defp exact_route_expectations(authority, route) do
+    %{
+      session_id: authority.session_id,
+      task_id: nil,
+      principal_scope: authority.human_id,
+      expected_egress: %{
+        max_tier: :external_provider,
+        destination: route.destination
+      }
+    }
   end
 
   defp valid_session_authority?(%{kind: :local, route: :none, session_id: session_id}),
@@ -618,38 +630,22 @@ defmodule Arbor.Voice.EgressAuthority do
 
   defp session_resource(_), do: nil
 
-  defp route_expiry(clock, reserved_ms) when is_function(clock, 0) do
-    with %DateTime{} = now <- clock.(),
-         true <- utc_datetime?(now) do
-      seconds =
-        reserved_ms
-        |> Kernel.+(999)
-        |> div(1_000)
-        |> Kernel.+(@route_expiry_grace_seconds)
-        |> min(@max_route_lifetime_seconds)
+  defp route_expiry(reserved_ms) when is_integer(reserved_ms) and reserved_ms > 0 do
+    seconds =
+      reserved_ms
+      |> Kernel.+(999)
+      |> div(1_000)
+      |> Kernel.+(@route_expiry_grace_seconds)
+      |> min(@max_route_lifetime_seconds)
 
-      {:ok, DateTime.add(now, seconds, :second)}
-    else
-      _ -> {:error, :invalid_clock}
-    end
+    {:ok, DateTime.add(DateTime.utc_now(), seconds, :second)}
   rescue
     _ -> {:error, :invalid_clock}
   catch
     _, _ -> {:error, :invalid_clock}
   end
 
-  defp route_expiry(_clock, _reserved_ms), do: {:error, :invalid_clock}
-
-  defp utc_datetime?(%DateTime{
-         calendar: Calendar.ISO,
-         utc_offset: 0,
-         std_offset: 0,
-         time_zone: zone
-       })
-       when zone in ["Etc/UTC", "UTC"],
-       do: true
-
-  defp utc_datetime?(_), do: false
+  defp route_expiry(_reserved_ms), do: {:error, :invalid_clock}
 
   defp admit_capability_id(id) when is_binary(id) do
     if canonical_capability_id?(id), do: {:ok, id}, else: {:invalid_capability_id, id}

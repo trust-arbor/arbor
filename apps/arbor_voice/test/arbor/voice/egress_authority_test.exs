@@ -29,6 +29,19 @@ defmodule Arbor.Voice.EgressAuthorityTest do
     def revoke(_capability_id), do: :ok
   end
 
+  defmodule ClockCaptureSecurity do
+    @moduledoc false
+
+    def uri_registered?(_resource), do: true
+
+    def grant_capability_id(opts) do
+      send(self(), {:clock_capture_grant, opts})
+      {:ok, "cap_0123456789abcdef0123456789abcdef"}
+    end
+
+    def revoke(_capability_id), do: :ok
+  end
+
   test "correct-length non-hex authority identifiers fail closed before retention" do
     refute EgressAuthority.canonical_session_id?("session_gggggggggggggggggggggggggggggggg")
     refute EgressAuthority.canonical_capability_id?(@malformed_capability_id)
@@ -71,5 +84,33 @@ defmodule Arbor.Voice.EgressAuthorityTest do
 
     refute EgressAuthority.canonical_session_id?(String.upcase(@session_id))
     refute EgressAuthority.canonical_capability_id?("cap_0123456789abcdef0123456789abcde")
+  end
+
+  test "route capability expiry uses source-owned system UTC instead of caller wall clock" do
+    before_now = DateTime.utc_now()
+
+    config = %{
+      agent_id: "agent_0123456789abcdef0123456789abcdef",
+      user_id: "human-1",
+      security_module: ClockCaptureSecurity,
+      trust_module: __MODULE__,
+      wall_clock: fn -> ~U[2099-01-01 00:00:00Z] end
+    }
+
+    assert {:ok, _authority} =
+             EgressAuthority.prepare_session_authority(
+               %{kind: :external, route: @route, tier: :external_provider},
+               config,
+               @session_id,
+               1_000
+             )
+
+    after_now = DateTime.utc_now()
+    assert_receive {:clock_capture_grant, grant_opts}
+    expires_at = Keyword.fetch!(grant_opts, :expires_at)
+
+    assert DateTime.compare(expires_at, DateTime.add(before_now, 60, :second)) in [:eq, :gt]
+    assert DateTime.compare(expires_at, DateTime.add(after_now, 62, :second)) in [:eq, :lt]
+    assert expires_at.year != 2099
   end
 end

@@ -21,6 +21,8 @@ defmodule Arbor.Security.FacadeIdIssuanceTest do
                resource: "arbor://fs/read/facade-id"
              )
 
+    on_exit(fn -> Security.revoke(capability_id) end)
+
     assert "cap_" <> _ = capability_id
     assert {:ok, capability} = CapabilityStore.get(capability_id)
     assert capability.id == capability_id
@@ -40,6 +42,8 @@ defmodule Arbor.Security.FacadeIdIssuanceTest do
                runtime: "arbor",
                model: "grok-voice-latest"
              )
+
+    on_exit(fn -> Security.revoke(capability_id) end)
 
     assert "cap_" <> _ = capability_id
     assert {:ok, capability} = CapabilityStore.get(capability_id)

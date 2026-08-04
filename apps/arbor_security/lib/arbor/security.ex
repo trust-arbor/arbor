@@ -45,6 +45,7 @@ defmodule Arbor.Security do
 
   alias Arbor.Contracts.API.Security, as: SecurityContract
   alias Arbor.Contracts.Security.Capability
+  alias Arbor.Contracts.Security.Classification
   alias Arbor.Contracts.Security.DeliveryReceipt
   alias Arbor.Contracts.Security.Identity
   alias Arbor.Contracts.Security.InvocationReceipt
@@ -114,6 +115,172 @@ defmodule Arbor.Security do
         action,
         opts
       )
+
+  @exact_scope_keys MapSet.new([:session_id, :task_id, :principal_scope, :expected_egress])
+  @exact_egress_keys MapSet.new([:max_tier, :destination])
+  @exact_scalar_max_bytes 256
+  @source_owned_egress_opt :source_owned_exact_egress_expectation
+
+  @doc """
+  Exercise one exact, signed ordinary capability from source-owned code.
+
+  This narrow facade accepts no generic authorization options and never returns
+  a capability struct. Security still requires the principal's Identity
+  Registry status to be exactly `:active`; only the per-external-request
+  SignedRequest proof is omitted. The selected ordinary capability must be the
+  exact stored id and be live, signed, validly delegated, and exactly bound to
+  the supplied principal/resource/scope. An optional expected egress constraint
+  is checked against the exact capability selected by the normal authorization
+  pipeline before stateful constraints and max-use accounting.
+
+  `expectations` is a closed atom-keyed map with exactly these fields:
+
+      %{
+        session_id: binary | nil,
+        task_id: binary | nil,
+        principal_scope: binary | nil,
+        expected_egress: nil | %{max_tier: atom, destination: binary}
+      }
+
+  Stateful constraints, max-use accounting, authorization events, and
+  invocation receipts use the normal Security authorization side-effect path.
+  """
+  @spec authorize_source_owned_exact_ordinary_capability(
+          String.t(),
+          String.t(),
+          atom(),
+          String.t(),
+          map()
+        ) :: {:ok, :authorized} | {:error, :invalid_request | :unauthorized}
+  def authorize_source_owned_exact_ordinary_capability(
+        principal_id,
+        resource_uri,
+        action,
+        capability_id,
+        expectations
+      ) do
+    with :ok <-
+           validate_exact_capability_request(
+             principal_id,
+             resource_uri,
+             action,
+             capability_id,
+             expectations
+           ),
+         :ok <- require_exact_active_identity(principal_id),
+         %{session_id: session_id, task_id: task_id, principal_scope: principal_scope} <-
+           expectations,
+         {:ok, :authorized} <-
+           check_if_principal_has_capability_for_resource_action(
+             principal_id,
+             resource_uri,
+             action,
+             [
+               verify_identity: false,
+               exact_capability_id: capability_id,
+               session_id: session_id,
+               task_id: task_id,
+               principal_scope: principal_scope
+             ]
+             |> Keyword.put(@source_owned_egress_opt, expectations.expected_egress)
+           ) do
+      {:ok, :authorized}
+    else
+      {:error, :invalid_request} = error ->
+        error
+
+      _denied ->
+        {:error, :unauthorized}
+    end
+  rescue
+    _ -> {:error, :unauthorized}
+  catch
+    _, _ -> {:error, :unauthorized}
+  end
+
+  defp validate_exact_capability_request(
+         principal_id,
+         resource_uri,
+         action,
+         capability_id,
+         expectations
+       ) do
+    if bounded_exact_scalar?(principal_id) and bounded_exact_scalar?(resource_uri) and
+         is_atom(action) and not is_nil(action) and
+         canonical_exact_capability_id?(capability_id) and
+         valid_exact_expectations?(expectations) do
+      :ok
+    else
+      {:error, :invalid_request}
+    end
+  end
+
+  defp valid_exact_expectations?(expectations) when is_map(expectations) do
+    MapSet.equal?(MapSet.new(Map.keys(expectations)), @exact_scope_keys) and
+      optional_exact_scalar?(Map.get(expectations, :session_id)) and
+      optional_exact_scalar?(Map.get(expectations, :task_id)) and
+      optional_exact_scalar?(Map.get(expectations, :principal_scope)) and
+      valid_exact_egress?(Map.get(expectations, :expected_egress))
+  end
+
+  defp valid_exact_expectations?(_expectations), do: false
+
+  defp require_exact_active_identity(principal_id) do
+    case Registry.identity_status(principal_id) do
+      {:ok, :active} -> :ok
+      _not_active -> {:error, :unauthorized}
+    end
+  rescue
+    _ -> {:error, :unauthorized}
+  catch
+    _, _ -> {:error, :unauthorized}
+  end
+
+  defp valid_exact_egress?(nil), do: true
+
+  defp valid_exact_egress?(egress) when is_map(egress) do
+    MapSet.equal?(MapSet.new(Map.keys(egress)), @exact_egress_keys) and
+      Map.get(egress, :max_tier) in Classification.egress_tiers() and
+      bounded_exact_scalar?(Map.get(egress, :destination))
+  end
+
+  defp valid_exact_egress?(_egress), do: false
+
+  defp exact_egress_constraint?(%Capability{constraints: constraints}, %{
+         max_tier: tier,
+         destination: destination
+       })
+       when is_map(constraints) and is_atom(tier) and is_binary(destination) do
+    egress = Map.get(constraints, :egress) || Map.get(constraints, "egress")
+
+    is_map(egress) and
+      normalize_exact_egress_tier(Map.get(egress, :max_tier) || Map.get(egress, "max_tier")) ==
+        tier and
+      (Map.get(egress, :destinations) || Map.get(egress, "destinations")) == [destination]
+  end
+
+  defp exact_egress_constraint?(_cap, _expectation), do: false
+
+  defp normalize_exact_egress_tier(tier)
+       when tier in [:on_host, :on_premises, :external_provider, :external_peer, :none],
+       do: tier
+
+  defp normalize_exact_egress_tier(tier) when is_binary(tier) do
+    Enum.find(Classification.egress_tiers(), &(Atom.to_string(&1) == tier))
+  end
+
+  defp normalize_exact_egress_tier(_tier), do: nil
+
+  defp optional_exact_scalar?(nil), do: true
+  defp optional_exact_scalar?(value), do: bounded_exact_scalar?(value)
+
+  defp bounded_exact_scalar?(value) when is_binary(value) do
+    byte_size(value) > 0 and byte_size(value) <= @exact_scalar_max_bytes and
+      String.valid?(value) and String.trim(value) == value and
+      not String.match?(value, ~r/[\x00-\x1F\x7F]/)
+  end
+
+  defp bounded_exact_scalar?(_value), do: false
 
   # Delivery-receipt issue admits only cryptographic proof keys. Never silently
   # strip. Explicitly forbidden (among others): :identity_verified,
@@ -1222,28 +1389,54 @@ defmodule Arbor.Security do
 
   # Side effects for authorized decisions
   defp handle_authorized(cap, _auth, principal_id, resource_uri, action, opts) do
+    safe_opts = Keyword.delete(opts, @source_owned_egress_opt)
+
     # Stateful constraint checks (rate limiting) — cap was already found by AuthDecision
-    with :ok <- if(cap, do: maybe_enforce_constraints(cap, principal_id, resource_uri), else: :ok) do
+    with :ok <- enforce_source_owned_egress_expectation(cap, opts),
+         :ok <- if(cap, do: maybe_enforce_constraints(cap, principal_id, resource_uri), else: :ok) do
       # FileGuard for fs:// URIs — runs explicit (caller passed :file_path)
       # OR implicit (we have a matched cap and the URI's path-part is the
       # implicit file_path) defense-in-depth normalization.
-      file_guard_result = maybe_check_file_guard(principal_id, resource_uri, opts, cap)
+      file_guard_result = maybe_check_file_guard(principal_id, resource_uri, safe_opts, cap)
 
       case normalize_file_guard_result(file_guard_result) do
         :ok ->
-          Events.record_authorization_granted(principal_id, resource_uri, opts)
+          Events.record_authorization_granted(principal_id, resource_uri, safe_opts)
           if cap, do: maybe_check_max_uses(cap)
-          if cap, do: maybe_emit_receipt(cap, principal_id, resource_uri, action, :granted, opts)
+
+          if cap,
+            do: maybe_emit_receipt(cap, principal_id, resource_uri, action, :granted, safe_opts)
+
           {:ok, :authorized}
 
         {:error, reason} ->
-          Events.record_authorization_denied(principal_id, resource_uri, reason, opts)
+          Events.record_authorization_denied(principal_id, resource_uri, reason, safe_opts)
           {:error, reason}
       end
     else
       {:error, reason} = error ->
-        Events.record_authorization_denied(principal_id, resource_uri, reason, opts)
+        Events.record_authorization_denied(principal_id, resource_uri, reason, safe_opts)
         error
+    end
+  end
+
+  defp enforce_source_owned_egress_expectation(nil, _opts), do: :ok
+
+  defp enforce_source_owned_egress_expectation(cap, opts) do
+    case Keyword.get(opts, @source_owned_egress_opt, :absent) do
+      :absent ->
+        :ok
+
+      nil ->
+        :ok
+
+      expectation when is_map(expectation) ->
+        if exact_egress_constraint?(cap, expectation),
+          do: :ok,
+          else: {:error, :exact_egress_constraint_mismatch}
+
+      _invalid ->
+        {:error, :invalid_exact_egress_expectation}
     end
   end
 
