@@ -115,9 +115,10 @@ L9  arbor_dashboard
 
 Notes:
 - `arbor_orchestrator` is NOT standalone — it deps contracts/common/llm/
-  persistence/signals AND **arbor_actions/security/ai/memory/trust/shell** (it
+  persistence/signals AND **arbor_actions/security/ai/memory/trust/shell/comms** (it
   executes Jido actions via `exec` nodes, authorizes capabilities + egress,
-  routes LLMs/ACP, reads goals/percepts, trust policy, and runs sandboxed
+  routes LLMs/ACP, reads goals/percepts, trust policy, resolves authenticated
+  source-owned engagements, and runs sandboxed
   shell; the old runtime `Code.ensure_loaded?`/`apply` indirection was dropped
   for real deps in the 2026-06-17 runtime-bridge sweep). Only `arbor_commands`,
   `arbor_dashboard`, and (as of VP-02) `arbor_voice` depend on orchestrator, so
