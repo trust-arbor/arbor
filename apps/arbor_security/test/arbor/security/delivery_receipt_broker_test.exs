@@ -166,6 +166,7 @@ defmodule Arbor.Security.DeliveryReceiptBrokerTest do
 
     token = Map.get(receipt, :token)
     ref = Process.monitor(pid)
+    true = Process.unlink(pid)
     Process.exit(pid, :kill)
     assert_receive {:DOWN, ^ref, :process, ^pid, :killed}, 1_000
 

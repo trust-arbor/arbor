@@ -85,7 +85,9 @@ defmodule Arbor.Contracts.Security.DeliveryReceiptTest do
 
       assert inspected == "#Arbor.Contracts.Security.DeliveryReceipt<token: [REDACTED]>"
       refute inspected =~ Base.encode16(@token, case: :lower)
-      assert is_nil(Jason.Encoder.impl_for(receipt))
+      # Protocol consolidation may select the fallback Any implementation.
+      # No receipt-specific encoder exists, so encoding must still fail closed.
+      assert Jason.Encoder.impl_for(receipt) in [nil, Jason.Encoder.Any]
 
       assert_raise Protocol.UndefinedError, fn ->
         Jason.encode!(receipt)
