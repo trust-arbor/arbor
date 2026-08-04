@@ -69,6 +69,7 @@ defmodule Arbor.AI do
     UsageStats
   }
 
+  alias Arbor.AI.Runtime.Dispatch
   alias Arbor.AI.Runtime.RouteInputAssembler
 
   @max_retry_after_ms 86_400_000
@@ -1100,6 +1101,67 @@ defmodule Arbor.AI do
 
   def assemble_provider_route_input(_task_class) do
     {:error, {:route_assembly_failed, :invalid_task_class}}
+  end
+
+  @doc """
+  Assemble once, decide the primary ProviderRouter route, and freeze its closed
+  scalar wire identity for Session binding.
+
+  Production calls `assemble_provider_route_input/1` exactly once, then reuses
+  Dispatch's destination binder on only the primary route. Returns that original
+  assembled input unchanged plus a closed `%{destination, provider, runtime, model}`
+  map whose destination is byte-identical to the route later authorized by
+  Dispatch. Fallbacks, catalog structs, and rationale never escape.
+
+  Input policy matches `assemble_provider_route_input/1` (`nil` or binary task
+  class). Disabled routing remains `{:error, :disabled}`. Post-assemble plan,
+  bind, or projection failures collapse to `{:error, :route_freeze_failed}`.
+  """
+  @spec freeze_provider_route(String.t() | nil) ::
+          {:ok,
+           %{
+             provider_route_input: map(),
+             route: %{
+               destination: String.t(),
+               provider: String.t(),
+               runtime: String.t(),
+               model: String.t()
+             }
+           }}
+          | {:error, :disabled}
+          | {:error, :route_freeze_failed}
+          | {:error, {:route_assembly_failed, term()}}
+  def freeze_provider_route(task_class \\ nil)
+
+  def freeze_provider_route(nil), do: do_freeze_provider_route(nil)
+
+  def freeze_provider_route(task_class) when is_binary(task_class),
+    do: do_freeze_provider_route(task_class)
+
+  def freeze_provider_route(_task_class) do
+    {:error, {:route_assembly_failed, :invalid_task_class}}
+  end
+
+  defp do_freeze_provider_route(task_class) do
+    case assemble_provider_route_input(task_class) do
+      {:ok, input} ->
+        case Dispatch.prepare_frozen_primary_route(input) do
+          {:ok, route} ->
+            {:ok, %{provider_route_input: input, route: route}}
+
+          _ ->
+            {:error, :route_freeze_failed}
+        end
+
+      {:error, :disabled} = error ->
+        error
+
+      {:error, {:route_assembly_failed, _}} = error ->
+        error
+
+      _ ->
+        {:error, :route_freeze_failed}
+    end
   end
 
   defp assemble_and_gate_provider_route_input(opts) do

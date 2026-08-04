@@ -69,6 +69,13 @@ defmodule Arbor.AI.Runtime.Dispatch do
           model: String.t()
         }
 
+  @type frozen_route :: %{
+          destination: String.t(),
+          provider: String.t(),
+          runtime: String.t(),
+          model: String.t()
+        }
+
   @type dispatch_opts :: [
           client: Client.t() | nil,
           policy: Selector.policy(),
@@ -176,6 +183,23 @@ defmodule Arbor.AI.Runtime.Dispatch do
       {:ok, plan} -> run_route_plan(request, plan, opts)
       {:error, reason} -> {:error, {:selection_failed, {:provider_route, reason}}}
     end
+  end
+
+  @doc false
+  @spec prepare_frozen_primary_route(ProviderRouter.input() | keyword()) ::
+          {:ok, frozen_route()} | {:error, :route_freeze_failed}
+  def prepare_frozen_primary_route(route_input) do
+    with {:ok, %RoutePlan{primary: primary}} <- RoutePlan.build(route_input),
+         {:ok, bound} <- bind_authorization_destination(primary),
+         {:ok, scalar} <- project_frozen_authorization_route(bound) do
+      {:ok, scalar}
+    else
+      _ -> {:error, :route_freeze_failed}
+    end
+  rescue
+    _ -> {:error, :route_freeze_failed}
+  catch
+    _, _ -> {:error, :route_freeze_failed}
   end
 
   defp run_route_plan(request, %RoutePlan{} = plan, opts) do
@@ -433,6 +457,37 @@ defmodule Arbor.AI.Runtime.Dispatch do
 
   defp bind_authorization_destination(_route),
     do: {:error, {:authorization_failed, :invalid_route}}
+
+  # Closed scalar projection for freeze_provider_route/1. Admits provider ids only
+  # as non-sentinel atoms and runtime only as :arbor | :acp before Atom.to_string/1.
+  defp project_frozen_authorization_route(%{
+         destination: destination,
+         model: model,
+         provider: %ProviderEntry{id: provider_id},
+         runtime: runtime
+       })
+       when is_atom(provider_id) and provider_id not in [nil, true, false] and
+              runtime in [:arbor, :acp] do
+    provider = Atom.to_string(provider_id)
+    runtime_string = Atom.to_string(runtime)
+
+    if valid_authorization_route_text?(destination) and
+         valid_authorization_route_text?(provider) and
+         valid_authorization_route_text?(runtime_string) and
+         valid_authorization_route_text?(model) do
+      {:ok,
+       %{
+         destination: destination,
+         provider: provider,
+         runtime: runtime_string,
+         model: model
+       }}
+    else
+      {:error, :route_freeze_failed}
+    end
+  end
+
+  defp project_frozen_authorization_route(_route), do: {:error, :route_freeze_failed}
 
   defp valid_authorization_route_text?(value) do
     is_binary(value) and String.valid?(value) and byte_size(value) > 0 and

@@ -2,7 +2,7 @@ defmodule Arbor.AI.ProviderRouteReadinessTest do
   use ExUnit.Case, async: false
 
   alias Arbor.AI
-  alias Arbor.AI.{ProviderModelCatalogStore, ProviderRouteReadiness}
+  alias Arbor.AI.{ProviderModelCatalogStore, ProviderRouteReadiness, RouteConcurrency}
   alias Arbor.AI.Runtime.RouteInputAssembler
   alias Arbor.Contracts.LLM.{OAuthHealth, ProviderModelCatalog}
   alias Arbor.LLM.OAuth
@@ -378,6 +378,7 @@ defmodule Arbor.AI.ProviderRouteReadinessTest do
     end)
   end
 
+  @tag voice_id: "VOICE-17"
   test "public production assembly gates on exact cached readiness without request-path refresh",
        %{
          task_supervisor: task_supervisor
@@ -391,12 +392,18 @@ defmodule Arbor.AI.ProviderRouteReadinessTest do
     prior_profile = Application.get_env(:arbor_ai, :provider_route_profile)
     prior_store_dir = Application.get_env(:arbor_llm, :oauth_store_dir)
     prior_refresh = Application.get_env(:arbor_llm, :oauth_refresh_fun)
+    prior_limits = Application.fetch_env(:arbor_ai, :provider_route_concurrency_limits)
+    prior_ceilings = Application.fetch_env(:arbor_ai, :provider_spend_ceilings_usd)
+    prior_capacity = Application.fetch_env(:arbor_ai, :subscription_capacity_states)
     {:ok, prior_catalogs} = ProviderModelCatalogStore.snapshot_sync()
 
     on_exit(fn ->
       restore_env(:arbor_ai, :provider_route_profile, prior_profile)
       restore_env(:arbor_llm, :oauth_store_dir, prior_store_dir)
       restore_env(:arbor_llm, :oauth_refresh_fun, prior_refresh)
+      restore_fetched_env(:arbor_ai, :provider_spend_ceilings_usd, prior_ceilings)
+      restore_fetched_env(:arbor_ai, :subscription_capacity_states, prior_capacity)
+      restore_route_concurrency(prior_limits)
       restore_catalogs(prior_catalogs)
       File.rm_rf(root)
     end)
@@ -427,6 +434,13 @@ defmodule Arbor.AI.ProviderRouteReadinessTest do
     :ok = ProviderModelCatalogStore.put_sync(production_catalog)
 
     Application.put_env(:arbor_ai, :provider_route_profile, production_profile())
+    Application.put_env(:arbor_ai, :provider_spend_ceilings_usd, %{"openai_oauth" => 1.0})
+
+    Application.put_env(:arbor_ai, :subscription_capacity_states, %{
+      "openai_oauth" => "available"
+    })
+
+    configure_route_concurrency(%{"openai_oauth" => %{"arbor" => 2}})
     assert {:ok, requirements} = RouteInputAssembler.production_requirements()
 
     assert {:error, {:route_assembly_failed, {:provider_route_readiness, :unavailable}}} =
@@ -452,6 +466,27 @@ defmodule Arbor.AI.ProviderRouteReadinessTest do
     assert [%{canonical_id: "gpt-5.6-sol"}] = input.catalog
     refute_receive :provider_callback_called, 20
     refute_receive :readiness_refresh_called, 20
+
+    # VOICE-17: public freeze packages original assembled input + closed primary route.
+    assert {:ok, pack} = AI.freeze_provider_route()
+    assert Map.keys(pack) |> Enum.sort() == [:provider_route_input, :route]
+    assert is_map(pack.provider_route_input)
+    assert [%{canonical_id: "gpt-5.6-sol"}] = pack.provider_route_input.catalog
+    assert Map.has_key?(pack.provider_route_input, :task_class)
+    assert Map.has_key?(pack.provider_route_input, :scoreboard)
+    assert Map.has_key?(pack.provider_route_input, :observations)
+    assert Map.has_key?(pack.provider_route_input, :budgets)
+    assert Map.has_key?(pack.provider_route_input, :now)
+    assert Map.has_key?(pack.provider_route_input, :policy)
+
+    assert Map.keys(pack.route) |> Enum.sort() == [:destination, :model, :provider, :runtime]
+
+    assert pack.route == %{
+             destination: "openai_oauth",
+             provider: "openai_oauth",
+             runtime: "arbor",
+             model: "gpt-5.6-sol"
+           }
   end
 
   defp start_readiness(task_supervisor, opts) do
@@ -611,6 +646,36 @@ defmodule Arbor.AI.ProviderRouteReadinessTest do
     Enum.each([:openai_oauth, :xai_oauth], &ProviderModelCatalogStore.clear_sync/1)
     Enum.each(catalogs, fn {_route, catalog} -> ProviderModelCatalogStore.put_sync(catalog) end)
   end
+
+  defp configure_route_concurrency(limits) do
+    stop_route_concurrency()
+    Application.put_env(:arbor_ai, :provider_route_concurrency_limits, limits)
+    restart_route_concurrency()
+  end
+
+  defp restore_route_concurrency(prior_limits) do
+    stop_route_concurrency()
+    restore_fetched_env(:arbor_ai, :provider_route_concurrency_limits, prior_limits)
+    restart_route_concurrency()
+  end
+
+  defp stop_route_concurrency do
+    if Process.whereis(RouteConcurrency) do
+      _ = Supervisor.terminate_child(Arbor.AI.Supervisor, RouteConcurrency)
+    end
+  end
+
+  defp restart_route_concurrency do
+    case Supervisor.restart_child(Arbor.AI.Supervisor, RouteConcurrency) do
+      {:ok, _pid} -> :ok
+      {:error, :running} -> :ok
+      {:error, {:already_started, _pid}} -> :ok
+      {:error, :not_found} -> Supervisor.start_child(Arbor.AI.Supervisor, RouteConcurrency)
+    end
+  end
+
+  defp restore_fetched_env(app, key, :error), do: Application.delete_env(app, key)
+  defp restore_fetched_env(app, key, {:ok, value}), do: Application.put_env(app, key, value)
 
   defp restore_env(app, key, nil), do: Application.delete_env(app, key)
   defp restore_env(app, key, value), do: Application.put_env(app, key, value)
