@@ -6,6 +6,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
   require Logger
 
   alias Arbor.Contracts.Pipeline.Response, as: PipelineResponse
+  alias Arbor.Signals.Taint, as: SignalTaint
 
   alias Arbor.Orchestrator.Engine.{Context, Outcome, RunAuthorization}
 
@@ -41,15 +42,80 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
 
   @impl true
   def execute(node, context, graph, opts) do
-    # Provenance (taint-tracking-rebuild Phase 1): LLM output is :derived — it
-    # may have incorporated untrusted content the model read, so it can never be
-    # :trusted. The engine records this on the node's output keys. (Sanitization
-    # bits are also wiped at :derived per council decision #6; that struct-level
-    # nuance lands with Phase 4 — here we record the atom level.)
+    output_taint = llm_output_taint(node, context, graph)
+
     case do_execute(node, context, graph, opts) do
-      %Outcome{output_taint: nil} = outcome -> %{outcome | output_taint: :derived}
+      %Outcome{output_taint: nil} = outcome -> %{outcome | output_taint: output_taint}
       other -> other
     end
+  end
+
+  defp llm_output_taint(node, context, graph) do
+    input_taint =
+      Context.worst_taint(context, llm_content_input_keys(node, context, graph)) ||
+        SignalTaint.from_level(:trusted)
+
+    SignalTaint.for_llm_output(input_taint)
+  end
+
+  defp llm_content_input_keys(node, context, graph) do
+    messages_key = Map.get(node.attrs, "messages_context_key")
+    messages = context_value(context, messages_key)
+    history? = is_list(messages) and messages != []
+
+    keys =
+      [actual_context_key(context, Map.get(node.attrs, "system_prompt_context_key"))] ++
+        if history? do
+          [messages_key]
+        else
+          [prompt_content_key(node, context, graph)]
+        end
+
+    keys =
+      if user_message_present?(messages, history?) and
+           nonempty_list?(Context.get(context, "session.user_media")) do
+        ["session.user_media" | keys]
+      else
+        keys
+      end
+
+    keys |> Enum.reject(&is_nil/1) |> Enum.uniq()
+  end
+
+  defp prompt_content_key(node, context, graph) do
+    if council_question_used?(node, context, graph) do
+      "council.question"
+    else
+      actual_context_key(context, Map.get(node.attrs, "prompt_context_key"))
+    end
+  end
+
+  defp council_question_used?(node, context, graph) do
+    Map.get(node.attrs, "perspective") && Map.get(graph.attrs, "mode") == "decision" &&
+      not Map.has_key?(node.attrs, "prompt") &&
+      Context.get(context, "council.question", "") != ""
+  end
+
+  defp actual_context_key(_context, key) when not is_binary(key) or key == "", do: nil
+
+  defp actual_context_key(context, key) do
+    if Map.has_key?(context.values, key) and not is_nil(Context.get(context, key)), do: key
+  end
+
+  defp context_value(_context, key) when not is_binary(key) or key == "", do: nil
+  defp context_value(context, key), do: Context.get(context, key)
+
+  defp nonempty_list?(value), do: is_list(value) and value != []
+
+  defp user_message_present?(_messages, false), do: true
+
+  defp user_message_present?(messages, true) do
+    Enum.any?(messages, fn
+      %Message{role: :user} -> true
+      %{"role" => "user"} -> true
+      %{role: :user} -> true
+      _ -> false
+    end)
   end
 
   defp do_execute(node, context, graph, opts) do
@@ -826,7 +892,16 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
         use_tools = Map.get(node.attrs, "use_tools") in ["true", true]
 
         if use_tools do
-          call_llm_with_tools(client, request, node, context, on_stream, opts, nonce)
+          call_llm_with_tools(
+            client,
+            request,
+            node,
+            context,
+            on_stream,
+            opts,
+            nonce,
+            llm_output_taint(node, context, graph)
+          )
         else
           call_llm_direct(client, request, call_opts, context, on_stream)
         end
@@ -1242,7 +1317,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
     end
   end
 
-  defp call_llm_with_tools(client, request, node, context, on_stream, opts, nonce) do
+  defp call_llm_with_tools(client, request, node, context, on_stream, opts, nonce, tool_taint) do
     with {:ok, authority_opts} <- tool_loop_authority_opts(node, context, opts) do
       workdir =
         Keyword.get(authority_opts, :workdir) ||
@@ -1298,6 +1373,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
             |> maybe_add_stream_callback(on_stream)
             |> maybe_put_llm_call_authorizer(opts)
             |> strip_turn_private_opts()
+            |> Keyword.put(:tool_taint, tool_taint)
 
           # Phase 4+ (B4): wrap ToolLoop in a fallback loop so per-agent
           # fallback chains apply to tool turns too. ToolLoop itself stays in

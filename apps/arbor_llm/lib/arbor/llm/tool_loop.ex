@@ -44,6 +44,12 @@ defmodule Arbor.LLM.ToolLoop do
       `{:llm_call_authorization_failed, reason}` and zero external calls for
       that attempt. Never forwarded to adapters, executors, requests, responses,
       signals, or logs.
+    * `:tool_taint` - Optional exact `%Arbor.Contracts.Security.Taint{}` label
+      for model-produced tool calls. When present, it is forwarded to every
+      executor invocation as aggregate `:taint` plus a complete `:param_taint`
+      map covering every normalized argument key. It is process-local and is
+      never forwarded to an LLM client or provider adapter. A malformed present
+      value fails closed; absence preserves the legacy behavior.
 
   ## Example
 
@@ -58,6 +64,7 @@ defmodule Arbor.LLM.ToolLoop do
   """
 
   alias Arbor.Contracts.Pipeline.Response, as: PipelineResponse
+  alias Arbor.Contracts.Security.Taint
 
   alias Arbor.LLM.ArborActionsExecutor
 
@@ -96,6 +103,7 @@ defmodule Arbor.LLM.ToolLoop do
   def run(client, %Request{} = request, opts \\ []) do
     with :ok <- validate_credential_exclusivity(opts),
          {:ok, identity} <- execution_identity(opts),
+         {:ok, tool_taint} <- normalize_tool_taint(opts),
          {:ok, terminal_tools} <- normalize_terminal_tools(Keyword.get(opts, :terminal_tools)) do
       max_turns = Keyword.get(opts, :max_turns, @default_max_turns)
       workdir = Keyword.get(opts, :workdir, ".")
@@ -128,7 +136,8 @@ defmodule Arbor.LLM.ToolLoop do
             signing_authority,
             signing_authority_present?,
             terminal_tools,
-            tools
+            tools,
+            tool_taint
           )
 
         {:error, _} = error ->
@@ -150,7 +159,8 @@ defmodule Arbor.LLM.ToolLoop do
          signing_authority,
          signing_authority_present?,
          terminal_tools,
-         tools
+         tools,
+         tool_taint
        ) do
     loop(client, request, opts, %{
       max_turns: max_turns,
@@ -181,6 +191,7 @@ defmodule Arbor.LLM.ToolLoop do
       tool_failures: %{},
       terminal_tools: terminal_tools,
       terminal_correction_attempted: false,
+      tool_taint: tool_taint,
       # Full tool set retained so a terminal-only correction turn can be built without
       # losing non-terminal tools from the original request.
       all_tools: tools
@@ -213,6 +224,32 @@ defmodule Arbor.LLM.ToolLoop do
     else
       :ok
     end
+  end
+
+  defp normalize_tool_taint(opts) when is_list(opts) do
+    case Keyword.fetch(opts, :tool_taint) do
+      :error ->
+        {:ok, nil}
+
+      {:ok, %Taint{} = taint} ->
+        if valid_tool_taint?(taint), do: {:ok, taint}, else: {:error, :invalid_tool_taint}
+
+      {:ok, _malformed} ->
+        {:error, :invalid_tool_taint}
+    end
+  end
+
+  defp normalize_tool_taint(_opts), do: {:error, :invalid_tool_taint}
+
+  defp valid_tool_taint?(taint) do
+    Enum.sort(Map.keys(taint)) == Enum.sort(Map.keys(%Taint{})) and
+      Map.get(taint, :level) in Taint.levels() and
+      Map.get(taint, :sensitivity) in Taint.sensitivities() and
+      is_integer(Map.get(taint, :sanitizations)) and
+      Map.get(taint, :sanitizations) in 0..255 and
+      Map.get(taint, :confidence) in Taint.confidences() and
+      (is_nil(Map.get(taint, :source)) or is_binary(Map.get(taint, :source))) and
+      is_list(Map.get(taint, :chain)) and Enum.all?(Map.get(taint, :chain), &is_binary/1)
   end
 
   # Closed list of terminal tool names as a MapSet. Absent / empty / nil => disabled.
@@ -949,8 +986,8 @@ defmodule Arbor.LLM.ToolLoop do
   # When the authorizer is present and allows, dedicated single-attempt Client
   # APIs are used so one approval covers at most one real outbound attempt.
   defp call_llm(client, request, opts) do
-    # Never forward the process-local authorizer into Client/adapters.
-    client_opts = Keyword.delete(opts, :llm_call_authorizer)
+    # Never forward process-local controls into Client/adapters.
+    client_opts = Keyword.drop(opts, [:llm_call_authorizer, :tool_taint])
     single_attempt? = Keyword.has_key?(opts, :llm_call_authorizer)
 
     case Keyword.get(opts, :stream_callback) do
@@ -1064,6 +1101,8 @@ defmodule Arbor.LLM.ToolLoop do
           else
             maybe_add_signer(state.executor_opts, state.signer)
           end
+
+        exec_opts = put_tool_taint(exec_opts, state.tool_taint, args)
 
         {result, duration_ms} =
           cond do
@@ -1179,6 +1218,16 @@ defmodule Arbor.LLM.ToolLoop do
       |> Map.update(:discovery_count, discovery_this_round, &(&1 + discovery_this_round))
 
     {results, updated_state}
+  end
+
+  defp put_tool_taint(opts, nil, _args), do: opts
+
+  defp put_tool_taint(opts, %Taint{} = taint, args) when is_map(args) do
+    param_taint = Map.new(Map.keys(args), &{&1, taint})
+
+    opts
+    |> Keyword.put(:taint, taint)
+    |> Keyword.put(:param_taint, param_taint)
   end
 
   # Runaway-guard knobs (configurable). A tool that fails this many times IN A ROW stops being
