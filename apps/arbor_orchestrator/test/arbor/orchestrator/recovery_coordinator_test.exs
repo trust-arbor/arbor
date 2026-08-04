@@ -875,8 +875,7 @@ defmodule Arbor.Orchestrator.RecoveryCoordinatorTest do
 
   describe "process liveness tri-state" do
     test "local dead pid is :dead and local live is :alive" do
-      dead = spawn(fn -> :ok end)
-      Process.sleep(20)
+      dead = spawn_dead_pid()
       refute Process.alive?(dead)
 
       assert Arbor.Orchestrator.PipelineStatus.process_liveness(dead) == :dead
@@ -890,8 +889,7 @@ defmodule Arbor.Orchestrator.RecoveryCoordinatorTest do
 
     test "proven-dead same-node spawner interrupts and queues a resumable candidate" do
       run_id = "dead_spawner_#{System.unique_integer([:positive])}"
-      dead_pid = spawn(fn -> :ok end)
-      Process.sleep(20)
+      dead_pid = spawn_dead_pid()
       refute Process.alive?(dead_pid)
 
       now = DateTime.utc_now()
@@ -1021,8 +1019,7 @@ defmodule Arbor.Orchestrator.RecoveryCoordinatorTest do
       journal_name = String.to_atom("rc_dead_current_journal_#{suffix}")
       ets_table = String.to_atom("rc_dead_current_hot_#{suffix}")
       run_id = "dead_current_#{suffix}"
-      dead_pid = spawn(fn -> :ok end)
-      Process.sleep(20)
+      dead_pid = spawn_dead_pid()
       now = DateTime.utc_now()
 
       {:ok, _} = start_supervised({AppRestartStore, name: store_name})
@@ -1084,8 +1081,7 @@ defmodule Arbor.Orchestrator.RecoveryCoordinatorTest do
       journal_name = String.to_atom("rc_fail_current_journal_#{suffix}")
       ets_table = String.to_atom("rc_fail_current_hot_#{suffix}")
       run_id = "fail_current_#{suffix}"
-      dead_pid = spawn(fn -> :ok end)
-      Process.sleep(20)
+      dead_pid = spawn_dead_pid()
       now = DateTime.utc_now()
 
       {:ok, _} = start_supervised({AppRestartStore, name: store_name})
@@ -1510,6 +1506,12 @@ defmodule Arbor.Orchestrator.RecoveryCoordinatorTest do
       refute match?({:error, :execution_principal_mismatch}, result)
       refute match?({:error, {:invalid_resume_status, _}}, result)
     end
+  end
+
+  defp spawn_dead_pid do
+    {pid, ref} = spawn_monitor(fn -> :ok end)
+    assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 1_000
+    pid
   end
 
   defp assert_eventually(fun, attempts \\ 50)
