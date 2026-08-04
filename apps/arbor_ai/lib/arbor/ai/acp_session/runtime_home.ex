@@ -36,6 +36,7 @@ defmodule Arbor.AI.AcpSession.RuntimeHome do
   @max_grok_auth_payload_bytes 65_600
   @max_grok_access_token_bytes 65_536
   @max_grok_auth_ttl_seconds 300
+  @grok_auth_method_id "grok.com"
   @grok_auth_provider_command ~s(/bin/cat "$ARBOR_GROK_AUTH_PAYLOAD_PATH")
   @grok_auth_provider_label "Arbor"
   @grok_auth_token_ttl "300"
@@ -105,6 +106,12 @@ defmodule Arbor.AI.AcpSession.RuntimeHome do
   @spec grok_auth_payload_path(String.t()) :: String.t()
   def grok_auth_payload_path(grok_home) when is_binary(grok_home),
     do: Path.join(grok_home, @grok_auth_payload_filename)
+
+  @doc false
+  @spec grok_external_auth_method() :: %{required(String.t()) => String.t()}
+  def grok_external_auth_method do
+    %{"id" => @grok_auth_method_id, "name" => @grok_auth_provider_label}
+  end
 
   @doc false
   @spec stage_grok_external_auth(map()) :: :ok | {:error, atom()}

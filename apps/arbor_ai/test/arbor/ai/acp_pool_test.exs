@@ -86,6 +86,8 @@ defmodule Arbor.AI.AcpPoolTest do
     @moduledoc false
 
     def start_link(opts), do: Agent.start_link(fn -> opts end)
+    def auth_methods(_client), do: {:ok, [%{"id" => "grok.com", "name" => "Arbor"}]}
+    def authenticate(_client, "grok.com", _opts), do: {:ok, %{}}
 
     def new_session(_client, _cwd, _opts) do
       {:ok, %{"sessionId" => "grok-pool-session"}}

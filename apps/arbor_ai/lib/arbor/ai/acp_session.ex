@@ -974,17 +974,20 @@ defmodule Arbor.AI.AcpSession do
 
   defp unwrap_grok_launch({:error, _reason} = error), do: error
 
-  defp initialize_client(session_pid, _provider, opts, workspace_plan, client_opts) do
+  defp initialize_client(session_pid, provider, opts, workspace_plan, client_opts) do
     if acp_available?() do
       workspace = materialize_workspace(workspace_plan)
       cwd = workspace_cwd(workspace, opts)
 
-      with {:ok, client} <-
-             client_opts
-             |> configure_client_opts(session_pid, opts, cwd)
-             |> start_acp_client() do
-        {:ok, client, workspace}
-      else
+      result =
+        client_opts
+        |> configure_client_opts(session_pid, opts, cwd)
+        |> start_authenticated_acp_client(provider, opts)
+
+      case result do
+        {:ok, client} ->
+          {:ok, client, workspace}
+
         {:error, reason} ->
           cleanup_workspace(workspace)
           {:error, reason}
@@ -1158,6 +1161,66 @@ defmodule Arbor.AI.AcpSession do
     kind, reason ->
       {:error, {:start_failure, kind, Arbor.LLM.sanitize_external_reason(reason)}}
   end
+
+  defp start_authenticated_acp_client(client_opts, provider, auth_opts) do
+    case start_acp_client(client_opts) do
+      {:ok, client} ->
+        case authenticate_provider_client(provider, client, auth_opts) do
+          :ok ->
+            {:ok, client}
+
+          {:error, reason} ->
+            terminate_client(client)
+            {:error, reason}
+        end
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp authenticate_provider_client(:grok, client, opts) do
+    module = acp_client_module()
+    auth_methods? = function_exported?(module, :auth_methods, 1)
+    authenticate? = function_exported?(module, :authenticate, 3)
+
+    if auth_methods? and authenticate? do
+      authenticate_grok_client(module, client, opts)
+    else
+      {:error, :grok_external_auth_unavailable}
+    end
+  rescue
+    _exception -> {:error, :grok_external_auth_unavailable}
+  catch
+    _kind, _reason -> {:error, :grok_external_auth_unavailable}
+  end
+
+  defp authenticate_provider_client(_provider, _client, _opts), do: :ok
+
+  defp authenticate_grok_client(module, client, opts) do
+    expected = RuntimeHome.grok_external_auth_method()
+
+    # credo:disable-for-next-line Credo.Check.Refactor.Apply
+    with {:ok, methods} <- apply(module, :auth_methods, [client]),
+         {:ok, method_id} <- exact_grok_external_auth_method(methods, expected),
+         {:ok, _opts, remaining} <- Arbor.AI.Timeout.remaining(opts),
+         # credo:disable-for-next-line Credo.Check.Refactor.Apply
+         {:ok, _result} <- apply(module, :authenticate, [client, method_id, [timeout: remaining]]) do
+      :ok
+    else
+      _other -> {:error, :grok_external_auth_unavailable}
+    end
+  end
+
+  defp exact_grok_external_auth_method(
+         [%{"id" => method_id, "name" => method_name}],
+         %{"id" => method_id, "name" => method_name}
+       )
+       when is_binary(method_id) and is_binary(method_name),
+       do: {:ok, method_id}
+
+  defp exact_grok_external_auth_method(_methods, _expected),
+    do: {:error, :grok_external_auth_unavailable}
 
   defp attach_client(client) when is_pid(client) do
     if Process.alive?(client) do
@@ -2020,7 +2083,8 @@ defmodule Arbor.AI.AcpSession do
       |> bind_mcp_servers(state.mcp_servers)
       |> sanitize_provider_facing_opts()
 
-    with {:ok, client} <- start_acp_client(client_opts) do
+    with {:ok, client} <-
+           start_authenticated_acp_client(client_opts, state.provider, operation_opts) do
       # credo:disable-for-next-line Credo.Check.Refactor.Apply
       case apply(acp_client_module(), :load_session, [
              client,

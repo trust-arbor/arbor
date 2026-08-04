@@ -16,6 +16,8 @@ defmodule Arbor.AI.AcpProviderUsageTest do
     @moduledoc false
 
     def start_link(opts), do: Agent.start_link(fn -> opts end)
+    def auth_methods(_client), do: {:ok, [%{"id" => "grok.com", "name" => "Arbor"}]}
+    def authenticate(_client, "grok.com", _opts), do: {:ok, %{}}
 
     def new_session(client, _cwd, opts) do
       state = Agent.get(client, & &1)

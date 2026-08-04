@@ -16,6 +16,21 @@ defmodule Arbor.AI.AcpSessionGrokOAuthSecurityRegressionTest do
       {:ok, client}
     end
 
+    def auth_methods(client) do
+      opts = Agent.get(client, & &1)
+
+      {:ok,
+       Keyword.get(opts, :auth_methods, [
+         %{"id" => "grok.com", "name" => "Arbor", "description" => "Sign in with Arbor"}
+       ])}
+    end
+
+    def authenticate(client, method_id, auth_opts) do
+      opts = Agent.get(client, & &1)
+      send(opts[:test_pid], {:grok_probe_authenticated, client, method_id, auth_opts})
+      Keyword.get(opts, :auth_result, {:ok, %{}})
+    end
+
     def new_session(_client, _cwd, _opts), do: {:ok, %{"sessionId" => "grok-probe-session"}}
 
     def load_session(client, session_id, _cwd, _opts) do
@@ -50,6 +65,14 @@ defmodule Arbor.AI.AcpSessionGrokOAuthSecurityRegressionTest do
     defp payload(opts) do
       env = opts |> Keyword.fetch!(:env) |> Map.new()
       env |> Map.fetch!("ARBOR_GROK_AUTH_PAYLOAD_PATH") |> File.read!() |> Jason.decode!()
+    end
+  end
+
+  defmodule MissingAuthClient do
+    def start_link(opts) do
+      {:ok, client} = Agent.start_link(fn -> opts end)
+      send(opts[:test_pid], {:grok_missing_auth_client_started, client})
+      {:ok, client}
     end
   end
 
@@ -102,6 +125,7 @@ defmodule Arbor.AI.AcpSessionGrokOAuthSecurityRegressionTest do
     workspace = standalone_workspace!(root, "sentinel")
     session = start_grok_session!(workspace)
     assert_receive {:grok_probe_started, client, started_opts, payload}, 2_000
+    assert_grok_authenticated(client)
     assert :ok = AcpSession.await_ready(session, timeout: 2_000)
 
     env = started_opts |> Keyword.fetch!(:env) |> Map.new()
@@ -137,6 +161,7 @@ defmodule Arbor.AI.AcpSessionGrokOAuthSecurityRegressionTest do
     assert_receive {:grok_probe_started, first_client, _opts, %{"access_token" => ^access_a}},
                    2_000
 
+    assert_grok_authenticated(first_client)
     assert :ok = AcpSession.await_ready(session, timeout: 2_000)
 
     assert {:ok, %{"sessionId" => "grok-probe-session"}} =
@@ -158,6 +183,8 @@ defmodule Arbor.AI.AcpSessionGrokOAuthSecurityRegressionTest do
 
     assert_receive {:grok_probe_started, reconnect_client, _opts, %{"access_token" => ^access_d}},
                    2_000
+
+    assert_grok_authenticated(reconnect_client)
 
     assert_receive {:grok_probe_loaded, ^reconnect_client, "grok-probe-session",
                     %{"access_token" => ^access_d}},
@@ -200,7 +227,8 @@ defmodule Arbor.AI.AcpSessionGrokOAuthSecurityRegressionTest do
     access = jwt(System.system_time(:second) + 7_200, "access-valid")
     publish_xai!(access, "refresh-valid")
     session = start_grok_session!(workspace)
-    assert_receive {:grok_probe_started, _client, opts, _payload}, 2_000
+    assert_receive {:grok_probe_started, client, opts, _payload}, 2_000
+    assert_grok_authenticated(client)
     assert :ok = AcpSession.await_ready(session, timeout: 2_000)
     assert {:ok, _} = AcpSession.create_session(session, timeout: 2_000)
 
@@ -219,13 +247,66 @@ defmodule Arbor.AI.AcpSessionGrokOAuthSecurityRegressionTest do
     File.rm!(Path.join(store, "xai.json"))
   end
 
+  test "security regression: Grok auth advertisement and authentication fail closed",
+       %{root: root} do
+    publish_xai!(jwt(System.system_time(:second) + 7_200, "auth-method"), "refresh-auth")
+    workspace = standalone_workspace!(root, "auth-method")
+
+    wrong_method_session =
+      start_grok_session!(workspace,
+        auth_methods: [%{"id" => "grok.com", "name" => "Unexpected"}]
+      )
+
+    assert_receive {:grok_probe_started, wrong_client, _opts, _payload}, 2_000
+
+    assert {:error, :grok_external_auth_unavailable} =
+             AcpSession.await_ready(wrong_method_session, timeout: 2_000)
+
+    refute_receive {:grok_probe_authenticated, ^wrong_client, _method_id, _auth_opts}, 100
+    refute inspect(AcpSession.status(wrong_method_session)) =~ "refresh-auth"
+    GenServer.stop(wrong_method_session)
+
+    sentinel = "auth-rejection-sentinel-#{unique_suffix()}"
+
+    rejected_session =
+      start_grok_session!(workspace, auth_result: {:error, %{"message" => sentinel}})
+
+    assert_receive {:grok_probe_started, rejected_client, _opts, _payload}, 2_000
+    assert_grok_authenticated(rejected_client)
+
+    assert {:error, :grok_external_auth_unavailable} =
+             AcpSession.await_ready(rejected_session, timeout: 2_000)
+
+    refute inspect(AcpSession.status(rejected_session)) =~ sentinel
+    refute_receive {:grok_probe_prompt, _worker, _content, _payload}, 100
+    GenServer.stop(rejected_session)
+  end
+
+  test "security regression: Grok client missing ACP authentication fails closed",
+       %{root: root} do
+    publish_xai!(jwt(System.system_time(:second) + 7_200, "missing-auth"), "refresh-missing")
+    workspace = standalone_workspace!(root, "missing-auth")
+    Application.put_env(:arbor_ai, :acp_client_module, MissingAuthClient)
+
+    session = start_grok_session!(workspace)
+    assert_receive {:grok_missing_auth_client_started, client}, 2_000
+
+    assert {:error, :grok_external_auth_unavailable} =
+             AcpSession.await_ready(session, timeout: 2_000)
+
+    refute Process.alive?(client)
+    refute inspect(AcpSession.status(session)) =~ "refresh-missing"
+    GenServer.stop(session)
+  end
+
   test "security regression: resolver failure refuses prompt reconnect and follow-up IO",
        %{root: root, store: store} do
     workspace = standalone_workspace!(root, "resolver-boundaries")
 
     publish_xai!(jwt(System.system_time(:second) + 7_200, "prompt"), "refresh-prompt")
     prompt_session = start_grok_session!(workspace)
-    assert_receive {:grok_probe_started, _client, prompt_opts, _payload}, 2_000
+    assert_receive {:grok_probe_started, prompt_client, prompt_opts, _payload}, 2_000
+    assert_grok_authenticated(prompt_client)
     assert :ok = AcpSession.await_ready(prompt_session, timeout: 2_000)
     assert {:ok, _} = AcpSession.create_session(prompt_session, timeout: 2_000)
     prompt_payload = auth_payload_path(prompt_opts)
@@ -241,6 +322,7 @@ defmodule Arbor.AI.AcpSessionGrokOAuthSecurityRegressionTest do
     publish_xai!(jwt(System.system_time(:second) + 7_200, "reconnect"), "refresh-reconnect")
     reconnect_session = start_grok_session!(workspace)
     assert_receive {:grok_probe_started, reconnect_client, _opts, _payload}, 2_000
+    assert_grok_authenticated(reconnect_client)
     assert :ok = AcpSession.await_ready(reconnect_session, timeout: 2_000)
     assert {:ok, _} = AcpSession.create_session(reconnect_session, timeout: 2_000)
     File.rm!(Path.join(store, "xai.json"))
@@ -251,7 +333,8 @@ defmodule Arbor.AI.AcpSessionGrokOAuthSecurityRegressionTest do
 
     publish_xai!(jwt(System.system_time(:second) + 7_200, "follow-up"), "refresh-follow-up")
     follow_up_session = start_grok_session!(workspace)
-    assert_receive {:grok_probe_started, _client, _opts, _payload}, 2_000
+    assert_receive {:grok_probe_started, follow_up_client, _opts, _payload}, 2_000
+    assert_grok_authenticated(follow_up_client)
     assert :ok = AcpSession.await_ready(follow_up_session, timeout: 2_000)
     assert {:ok, _} = AcpSession.create_session(follow_up_session, timeout: 2_000)
 
@@ -346,14 +429,20 @@ defmodule Arbor.AI.AcpSessionGrokOAuthSecurityRegressionTest do
     end
   end
 
-  defp start_grok_session!(workspace) do
+  defp start_grok_session!(workspace, overrides \\ []) do
     assert {:ok, opts} = Config.resolve(:grok, [])
-    opts = Keyword.put(opts, :test_pid, self())
+    opts = opts |> Keyword.merge(overrides) |> Keyword.put(:test_pid, self())
 
     assert {:ok, session} =
              AcpSession.start_link(provider: :grok, client_opts: opts, cwd: workspace)
 
     session
+  end
+
+  defp assert_grok_authenticated(client) do
+    assert_receive {:grok_probe_authenticated, ^client, "grok.com", auth_opts}, 2_000
+    assert is_integer(auth_opts[:timeout])
+    assert auth_opts[:timeout] > 0
   end
 
   defp staged_opts! do

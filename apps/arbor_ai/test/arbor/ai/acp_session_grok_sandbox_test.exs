@@ -80,6 +80,9 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
       end
     end
 
+    def auth_methods(_client), do: {:ok, [%{"id" => "grok.com", "name" => "Arbor"}]}
+    def authenticate(_client, "grok.com", _opts), do: {:ok, %{}}
+
     def new_session(client, _cwd, _opts) do
       send_signal(test_pid(client), {:grok_client_new_session, client, test_opts(client).opts})
       {:ok, %{"sessionId" => "probe-session"}}

@@ -105,6 +105,9 @@ defmodule Arbor.AI.AcpSessionTest do
       end
     end
 
+    def auth_methods(_client), do: {:ok, [%{"id" => "grok.com", "name" => "Arbor"}]}
+    def authenticate(_client, "grok.com", _opts), do: {:ok, %{}}
+
     def new_session(client, cwd, opts) do
       state = Agent.get(client, & &1)
       send(state.opts[:test_pid], {:fake_new_session, cwd})
