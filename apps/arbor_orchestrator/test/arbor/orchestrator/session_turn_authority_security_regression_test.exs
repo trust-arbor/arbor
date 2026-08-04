@@ -1477,10 +1477,15 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
       # Receipt encodings never retained on process-local state (TA fields OK process-locally).
       refute term_contains_forbidden?(started, bearer_encodings, allow_turn_authority?: true)
 
-      assert_receive {:turn_result, received_msg, engine_outcome}, 10_000
+      assert_receive {:turn_result, turn_token, received_msg, engine_outcome}, 10_000
+      assert is_reference(turn_token)
+      assert turn_token == started.turn_token
       assert received_msg.content == content
 
-      assert match?({:ok, %{final_outcome: %{status: :success}, run_id: rid}} when is_binary(rid), engine_outcome),
+      assert match?(
+               {:ok, %{final_outcome: %{status: :success}, run_id: rid}} when is_binary(rid),
+               engine_outcome
+             ),
              "expected hermetic Engine success, got: #{inspect(engine_outcome)}"
 
       {:ok, run_result} = engine_outcome
@@ -1502,7 +1507,10 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
 
       # Drive the real Session completion path (admission → apply/checkpoint/signal).
       assert {:noreply, after_success} =
-               Session.handle_info({:turn_result, received_msg, engine_outcome}, started)
+               Session.handle_info(
+                 {:turn_result, turn_token, received_msg, engine_outcome},
+                 started
+               )
 
       assert after_success.turn_count == 1
 
@@ -1515,8 +1523,14 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
       assert emitted_signal.category == :agent
       assert emitted_signal.type == :query_completed
       refute term_contains_forbidden?(emitted_signal, forbidden, allow_turn_authority?: false)
-      refute term_contains_forbidden?(emitted_signal.data, forbidden, allow_turn_authority?: false)
-      refute term_contains_forbidden?(emitted_signal.metadata, forbidden, allow_turn_authority?: false)
+
+      refute term_contains_forbidden?(emitted_signal.data, forbidden,
+               allow_turn_authority?: false
+             )
+
+      refute term_contains_forbidden?(emitted_signal.metadata, forbidden,
+               allow_turn_authority?: false
+             )
 
       flush_mailbox_noise()
 
@@ -1567,7 +1581,9 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
 
       refute term_contains_forbidden?(started_fail, fail_bearer, allow_turn_authority?: true)
 
-      assert_receive {:turn_result, fail_msg, fail_outcome}, 10_000
+      assert_receive {:turn_result, fail_token, fail_msg, fail_outcome}, 10_000
+      assert is_reference(fail_token)
+      assert fail_token == started_fail.turn_token
       assert fail_msg.content == "fail path leak probe"
 
       # Real Engine failure envelope (not Elixir error, not fabricated).
@@ -1583,7 +1599,10 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
       refute fail_run_id == success_run_id
 
       refute term_contains_forbidden?(fail_result, fail_forbidden, allow_turn_authority?: false)
-      refute term_contains_forbidden?(fail_result.context, fail_forbidden, allow_turn_authority?: false)
+
+      refute term_contains_forbidden?(fail_result.context, fail_forbidden,
+               allow_turn_authority?: false
+             )
 
       orch_fail = await_run_correlated_orchestrator_signals!(fail_run_id)
 
@@ -1597,7 +1616,10 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
 
       # Session admission rejects before apply/checkpoint/success signal.
       assert {:noreply, after_fail} =
-               Session.handle_info({:turn_result, fail_msg, fail_outcome}, started_fail)
+               Session.handle_info(
+                 {:turn_result, fail_token, fail_msg, fail_outcome},
+                 started_fail
+               )
 
       assert after_fail.turn_count == 0
       assert after_fail.messages == []
@@ -1616,7 +1638,9 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
       assert {:reply, fail_projected, _} =
                Session.handle_call(:get_state, {self(), make_ref()}, after_fail)
 
-      refute term_contains_forbidden?(fail_projected, fail_forbidden, allow_turn_authority?: false)
+      refute term_contains_forbidden?(fail_projected, fail_forbidden,
+               allow_turn_authority?: false
+             )
 
       assert_receive {^fail_ref, fail_public_reply}, 1_000
       # Closed bounded public error — never raw Engine failure_reason.

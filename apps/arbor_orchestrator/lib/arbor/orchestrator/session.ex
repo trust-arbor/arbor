@@ -45,9 +45,11 @@ defmodule Arbor.Orchestrator.Session do
 
   **Turns** run in a spawned `Task` — the caller blocks on `GenServer.call` but
   the GenServer itself remains responsive. When the Task completes,
-  the result is sent back as `{:turn_result, message, result}` and
+  the result is sent back as `{:turn_result, turn_token, message, result}` and
   `GenServer.reply/2` unblocks the original caller. Only one turn can be
   in-flight at a time (concurrent turns get `{:error, :turn_in_progress}`).
+  Stale or forged tokens are ignored so a detached background task cannot
+  finalize a newer turn.
 
   `Engine.run/2` returning `{:ok, run_result}` only proves an envelope was
   produced — it is **not** success. Session admits only
@@ -84,6 +86,7 @@ defmodule Arbor.Orchestrator.Session do
   alias Arbor.Orchestrator.Engine
   alias Arbor.Orchestrator.Session.Builders
   alias Arbor.Orchestrator.Session.Persistence
+  alias Arbor.Orchestrator.Session.TurnEgress
 
   # ── Contract module availability (runtime bridge) ──────────────────
   # Checked at runtime so the orchestrator works standalone without
@@ -153,6 +156,13 @@ defmodule Arbor.Orchestrator.Session do
     # Process-local authenticated-turn identity (nil for direct/unauthenticated sends).
     # Never enters Engine values, checkpoints, signals, or public errors.
     turn_authority: nil,
+    # VP-05D2A1P5: private process-local fence for the active turn-egress authorizer.
+    # Deactivated before kill/revoke on every terminal path. Never public.
+    turn_egress_fence: nil,
+    # VP-05D2A1P5: process-local turn result token. Real task results must carry
+    # the exact reference; stale/detached/forged results are ignored. Never
+    # public, never Engine context.
+    turn_token: nil,
     streaming_buffer: nil,
     turn_task_pid: nil,
     turn_timeout_ref: nil,
@@ -221,6 +231,8 @@ defmodule Arbor.Orchestrator.Session do
           pid: pid() | nil,
           turn_user_message: Arbor.Contracts.Session.UserMessage.t() | nil,
           turn_authority: TurnAuthority.t() | nil,
+          turn_egress_fence: term() | nil,
+          turn_token: reference() | nil,
           streaming_buffer: map() | nil,
           turn_task_pid: pid() | nil,
           turn_timeout_ref: reference() | nil
@@ -853,37 +865,36 @@ defmodule Arbor.Orchestrator.Session do
          %UserMessage{} = user_message,
          turn_authority,
          from,
-         state
+         state,
+         prepared
        ) do
     state = transition_phase(state, :idle, :input_received, :processing)
-    # The engine still receives the bare content string — only the persistence
-    # path needs the typed envelope, and that's threaded via the {:turn_result,
-    # user_message, result} tuple below. TurnAuthority / receipts never enter
-    # builders, engine opts, or preprocessor values.
-    values =
-      state
-      |> Builders.build_turn_values(user_message.content)
-      |> maybe_put_user_message_task_id(user_message)
-
-    # Pre-turn preprocessor (disabled by default, fails open). When enabled it
-    # attaches enrichment under "session.preprocessor.*". See
-    # Arbor.Orchestrator.Preprocessor and docs/arbor/PREPROCESSOR.md.
-    values = maybe_preprocess(values, user_message.content)
-
-    engine_opts = Builders.build_engine_opts(state, values)
+    # TurnAuthority / receipts / disclosure ids never enter builders, engine
+    # values, or preprocessor maps. Only process-local function opts + taint.
+    engine_opts = prepared.engine_opts
+    fence = prepared.fence
+    turn_token = make_ref()
 
     session_pid = self()
     turn_graph = state.turn_graph
 
+    # Load-bearing: deactivate fence BEFORE send so Session cannot observe an
+    # active fence while handling the terminal result. The `after` block is an
+    # idempotent crash/exit backstop only. Session remains sole revocation owner.
     task_fn = fn ->
-      result =
-        try do
-          Engine.run(turn_graph, engine_opts)
-        rescue
-          e -> {:error, {:engine_crash, Exception.message(e)}}
-        end
+      try do
+        result =
+          try do
+            Engine.run(turn_graph, engine_opts)
+          rescue
+            e -> {:error, {:engine_crash, Exception.message(e)}}
+          end
 
-      send(session_pid, {:turn_result, user_message, result})
+        TurnEgress.deactivate_fence(fence)
+        send(session_pid, {:turn_result, turn_token, user_message, result})
+      after
+        TurnEgress.deactivate_fence(fence)
+      end
     end
 
     task_sup = Arbor.Orchestrator.Session.TaskSupervisor
@@ -917,11 +928,21 @@ defmodule Arbor.Orchestrator.Session do
         turn_started_at: System.monotonic_time(),
         turn_user_message: user_message,
         turn_authority: turn_authority,
+        turn_egress_fence: fence,
+        turn_token: turn_token,
         streaming_buffer: %{content: "", started_at: DateTime.utc_now(), first_token_at: nil},
         turn_timeout_ref: timeout_ref
     }
 
     {:noreply, new_state}
+  rescue
+    _ ->
+      cleanup_prepared_partial(prepared)
+      {:error, :turn_preparation_refused}
+  catch
+    _, _ ->
+      cleanup_prepared_partial(prepared)
+      {:error, :turn_preparation_refused}
   end
 
   # Run the pre-turn preprocessor when enabled; merge its output into turn values
@@ -1006,56 +1027,18 @@ defmodule Arbor.Orchestrator.Session do
 
   defp do_cancel_active_turn(state, reason) do
     new_state = transition_phase(state, :processing, :complete, :idle)
+    # Fence → kill (await DOWN) → revoke, then finalize/reply/reset so the
+    # task cannot authorize another wave during partial persistence.
+    state = cleanup_turn_terminal(state, kill_task?: true)
+    lifecycle_probe(:before_finalize, %{reason: reason})
     finalize_partial(state, :cancelled, reason)
+    lifecycle_probe(:before_reply, %{reply: :cancelled})
     reply_turn(state, {:error, :cancelled})
-
-    if state.turn_task_ref, do: Process.demonitor(state.turn_task_ref, [:flush])
-    if state.turn_caller_ref, do: Process.demonitor(state.turn_caller_ref, [:flush])
-    if is_pid(state.turn_task_pid), do: Process.exit(state.turn_task_pid, :kill)
+    lifecycle_probe(:after_reply, %{reply: :cancelled})
 
     # Cancelling the active turn frees the mind — let queued turns proceed.
     send(self(), :drain_queue)
     reset_turn(new_state)
-  end
-
-  # Pop the next non-tombstoned queue entry for steering. Cancel-reply and skip
-  # any leading entries whose task was cancelled while queued.
-  # Authority-bearing active turn or queue head: leave head, return :none.
-  defp pop_steering_message(%{turn_queue: []} = state), do: {:none, state}
-
-  defp pop_steering_message(
-         %{turn_queue: [{user_message, queued_authority, caller_from} | rest]} = state
-       ) do
-    if task_cancelled?(state, user_message_task_id(user_message)) do
-      state = %{state | turn_queue: rest}
-      safe_reply(caller_from, {:error, :cancelled})
-      pop_steering_message(state)
-    else
-      if is_nil(state.turn_authority) and is_nil(queued_authority) do
-        state = %{state | turn_queue: rest}
-        new_state = %{state | steer_froms: [caller_from | state.steer_froms]}
-        {:ok, user_message.content, new_state}
-      else
-        # Do not consume or reorder an authority-bearing boundary.
-        {:none, state}
-      end
-    end
-  end
-
-  # Engine consumption of the preprocessor: override the turn's tool list based on
-  # tier / retrieved tools. `LlmHandler.resolve_tools/3` reads "session.tools" first,
-  # so this controls exactly which tools the LLM call sees. DIRECT empties the list
-  # (no-tools fast lane) unless `direct_skips_tools` is disabled in config.
-  defp apply_preprocessor_tools(values, preproc) do
-    direct_skips? =
-      Keyword.get(Arbor.Orchestrator.Config.preprocessor(), :direct_skips_tools, true)
-
-    case Arbor.Orchestrator.Preprocessor.tool_override(preproc,
-           direct_skips_tools?: direct_skips?
-         ) do
-      {:override, tools} -> Map.put(values, "session.tools", tools)
-      :no_override -> values
-    end
   end
 
   # Drain the next queued turn once the current one has finished. Triggered as a
@@ -1072,36 +1055,57 @@ defmodule Arbor.Orchestrator.Session do
       ) do
     state = %{state | turn_queue: rest}
 
-    if task_cancelled?(state, user_message_task_id(user_message)) do
-      safe_reply(from, {:error, :cancelled})
-      send(self(), :drain_queue)
-      {:noreply, state}
-    else
-      start_turn(user_message, turn_authority, from, state)
+    cond do
+      task_cancelled?(state, user_message_task_id(user_message)) ->
+        safe_reply(from, {:error, :cancelled})
+        send(self(), :drain_queue)
+        {:noreply, state}
+
+      not caller_alive?(from) ->
+        # Dead queued caller: never prepare/issue disclosure.
+        send(self(), :drain_queue)
+        {:noreply, state}
+
+      true ->
+        start_turn(user_message, turn_authority, from, state)
     end
   end
 
   def handle_info(
-        {:turn_result, %Arbor.Contracts.Session.UserMessage{} = user_message, {:ok, result}},
+        {:turn_result, token, %Arbor.Contracts.Session.UserMessage{} = user_message,
+         {:ok, result}},
         state
       ) do
-    # Engine.run/2 returning {:ok, run_result} only proves an envelope was
-    # produced. Admit only :success / :partial_success before apply/checkpoint/
-    # success signals; all other final outcomes fail closed with a bounded error.
-    case admit_engine_run_result(result) do
-      :ok ->
-        complete_turn_success(user_message, result, state)
+    if matching_turn_token?(state, token) do
+      # Engine.run/2 returning {:ok, run_result} only proves an envelope was
+      # produced. Admit only :success / :partial_success before apply/checkpoint/
+      # success signals; all other final outcomes fail closed with a bounded error.
+      case admit_engine_run_result(result) do
+        :ok ->
+          complete_turn_success(user_message, result, state)
 
-      {:error, :turn_failed} ->
-        complete_turn_error(state, :turn_failed)
+        {:error, :turn_failed} ->
+          complete_turn_error(state, :turn_failed)
+      end
+    else
+      # Stale/detached/forged result — ignore so a background nil-authority task
+      # cannot finalize, reply to, reset, or revoke a newer authenticated turn.
+      {:noreply, state}
     end
   end
 
-  def handle_info({:turn_result, _user_message, {:error, reason}}, state) do
-    # Elixir-level Engine errors (and rescued crashes) continue on the ordinary
-    # failure path — reason may still be Engine-shaped for those cases.
-    complete_turn_error(state, reason)
+  def handle_info({:turn_result, token, _user_message, {:error, reason}}, state) do
+    if matching_turn_token?(state, token) do
+      # Elixir-level Engine errors (and rescued crashes) continue on the ordinary
+      # failure path — reason may still be Engine-shaped for those cases.
+      complete_turn_error(state, reason)
+    else
+      {:noreply, state}
+    end
   end
+
+  # Legacy results carry no process-local authority token and always fail closed.
+  def handle_info({:turn_result, _user_message, _result}, state), do: {:noreply, state}
 
   # Handle Task DOWN messages
   def handle_info({:DOWN, ref, :process, _pid, :normal}, state) do
@@ -1121,27 +1125,16 @@ defmodule Arbor.Orchestrator.Session do
     cond do
       ref == state.turn_task_ref ->
         # Turn task died non-normally (exit/kill/linked death the task's rescue
-        # didn't catch) — preserve any streamed partial, reply, reset.
+        # didn't catch) — fence/revoke first (task already dead), then partial.
         new_state = transition_phase(state, :processing, :complete, :idle)
+        state = cleanup_turn_terminal(state, kill_task?: false)
         finalize_partial(state, :interrupted, {:task_down, reason})
         reply_turn(state, {:error, {:turn_task_crashed, reason}})
-        if state.turn_caller_ref, do: Process.demonitor(state.turn_caller_ref, [:flush])
 
         reset_and_drain(new_state)
 
       not is_nil(state.turn_caller_ref) and ref == state.turn_caller_ref ->
-        # Caller died/timed out. Clear in-flight so future turns are accepted;
-        # the background task (if any) completes and hits safe_reply (noop). We do
-        # NOT finalize a partial here — the turn isn't interrupted, only the caller
-        # left; the task runs on and persists the complete message itself.
-        Logger.info(
-          "[Session] send_message caller died (timeout or crash) for #{state.agent_id}; clearing in-flight state to unblock future turns"
-        )
-
-        if state.turn_task_ref, do: Process.demonitor(state.turn_task_ref, [:flush])
-        new_state = transition_phase(state, :processing, :complete, :idle)
-
-        reset_and_drain(new_state)
+        handle_caller_down(state)
 
       true ->
         {:noreply, state}
@@ -1197,13 +1190,14 @@ defmodule Arbor.Orchestrator.Session do
   def handle_info({:turn_timeout, ref}, %{turn_task_ref: ref} = state) when not is_nil(ref) do
     Logger.warning("[Session] Turn timed out for #{state.agent_id}; preserving partial")
     new_state = transition_phase(state, :processing, :complete, :idle)
+    # Fence → kill (await DOWN) → revoke before finalize/reply so a late wave
+    # cannot authorize during partial persistence.
+    state = cleanup_turn_terminal(state, kill_task?: true)
+    lifecycle_probe(:before_finalize, %{reason: :timeout})
     finalize_partial(state, :interrupted, :timeout)
+    lifecycle_probe(:before_reply, %{reply: :turn_timeout})
     reply_turn(state, {:error, :turn_timeout})
-
-    # Detach + kill the task so its impending :DOWN can't re-finalize.
-    if state.turn_task_ref, do: Process.demonitor(state.turn_task_ref, [:flush])
-    if state.turn_caller_ref, do: Process.demonitor(state.turn_caller_ref, [:flush])
-    if is_pid(state.turn_task_pid), do: Process.exit(state.turn_task_pid, :kill)
+    lifecycle_probe(:after_reply, %{reply: :turn_timeout})
 
     reset_and_drain(new_state)
   end
@@ -1213,7 +1207,195 @@ defmodule Arbor.Orchestrator.Session do
 
   def handle_info(_msg, state), do: {:noreply, state}
 
+  @impl true
+  def terminate(_reason, state) do
+    # Orderly shutdown: fence/kill/revoke any active authority-bearing turn.
+    if state.turn_in_flight do
+      _ = cleanup_turn_terminal(state, kill_task?: true)
+    end
+
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
+  end
+
   # ── Private helpers ──────────────────────────────────────────────────
+
+  # Deterministic terminal order: deactivate fence → kill/await task DOWN →
+  # revoke by exact capability id. Process.exit(:kill) is asynchronous; we
+  # boundedly await the monitor DOWN before revoke so kill-before-revoke is
+  # observationally true. Each step is independently catch-safe so a fault
+  # after fence deactivation cannot skip revocation (cap leak).
+  @task_kill_await_ms 5_000
+
+  defp matching_turn_token?(%{turn_in_flight: true, turn_token: token}, token)
+       when is_reference(token),
+       do: true
+
+  defp matching_turn_token?(_state, _token), do: false
+
+  defp cleanup_turn_terminal(state, opts) when is_list(opts) do
+    kill_task? = Keyword.get(opts, :kill_task?, false)
+    task_pid = state.turn_task_pid
+
+    TurnEgress.deactivate_fence(state.turn_egress_fence)
+    lifecycle_probe(:fence_deactivated, %{task_alive?: task_alive?(task_pid)})
+
+    try do
+      if kill_task? do
+        kill_task_and_await_down(state)
+
+        lifecycle_probe(:task_kill_awaited, %{
+          task_alive?: task_alive?(task_pid),
+          task_pid: task_pid
+        })
+      else
+        if state.turn_task_ref, do: Process.demonitor(state.turn_task_ref, [:flush])
+      end
+
+      if state.turn_caller_ref, do: Process.demonitor(state.turn_caller_ref, [:flush])
+    rescue
+      _ -> :ok
+    catch
+      _, _ -> :ok
+    end
+
+    # Revoke only after kill has been observed (or task was already dead).
+    lifecycle_probe(:before_revoke, %{task_alive?: task_alive?(task_pid)})
+
+    TurnEgress.safe_revoke_disclosure(
+      TurnEgress.disclosure_id_from_authority(state.turn_authority)
+    )
+
+    lifecycle_probe(:revoked, %{task_alive?: task_alive?(task_pid)})
+
+    state
+  end
+
+  defp task_alive?(pid) when is_pid(pid), do: Process.alive?(pid)
+  defp task_alive?(_), do: false
+
+  # Test/observability probe for terminal ordering. No-op unless a test pid is set.
+  defp lifecycle_probe(event, meta) when is_atom(event) and is_map(meta) do
+    case Application.get_env(:arbor_orchestrator, :_session_lifecycle_probe) do
+      pid when is_pid(pid) ->
+        send(pid, {:lifecycle_probe, event, Map.put(meta, :mono, System.monotonic_time())})
+
+      _ ->
+        :ok
+    end
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
+  end
+
+  # Kill the turn task and wait for its monitor DOWN before returning.
+  # Prefer the existing turn_task_ref; if absent, install a fresh monitor.
+  defp kill_task_and_await_down(state) do
+    pid = state.turn_task_pid
+    ref = state.turn_task_ref
+
+    cond do
+      not is_pid(pid) ->
+        if is_reference(ref), do: Process.demonitor(ref, [:flush])
+        :ok
+
+      not Process.alive?(pid) ->
+        if is_reference(ref), do: Process.demonitor(ref, [:flush])
+        :ok
+
+      is_reference(ref) ->
+        # Do not flush before kill — we need this DOWN for ordering.
+        Process.exit(pid, :kill)
+        await_task_down(ref)
+
+      true ->
+        mon = Process.monitor(pid)
+        Process.exit(pid, :kill)
+        await_task_down(mon)
+    end
+  end
+
+  defp await_task_down(ref) when is_reference(ref) do
+    receive do
+      {:DOWN, ^ref, :process, _pid, _reason} -> :ok
+    after
+      @task_kill_await_ms ->
+        Process.demonitor(ref, [:flush])
+        :ok
+    end
+  end
+
+  defp await_task_down(_), do: :ok
+
+  # Nil-authority: deactivate fence (task-owned waves cannot authorize), detach
+  # monitors, leave task running (P2 background continuation).
+  # Authority-bearing: fence/kill task before revoke so no later wave authorizes.
+  defp handle_caller_down(state) do
+    Logger.info(
+      "[Session] send_message caller died (timeout or crash) for #{state.agent_id}; clearing in-flight state to unblock future turns"
+    )
+
+    new_state = transition_phase(state, :processing, :complete, :idle)
+
+    if match?(%TurnAuthority{}, state.turn_authority) do
+      _ = cleanup_turn_terminal(state, kill_task?: true)
+      lifecycle_probe(:after_reply, %{reply: :caller_down_auth})
+      reset_and_drain(new_state)
+    else
+      # Task continues; fence deactivation is the load-bearing close for any
+      # process-local authorizer the task still holds.
+      TurnEgress.deactivate_fence(state.turn_egress_fence)
+      lifecycle_probe(:fence_deactivated, %{task_alive?: task_alive?(state.turn_task_pid)})
+      if state.turn_task_ref, do: Process.demonitor(state.turn_task_ref, [:flush])
+      if state.turn_caller_ref, do: Process.demonitor(state.turn_caller_ref, [:flush])
+      lifecycle_probe(:after_reply, %{reply: :caller_down_nil})
+      reset_and_drain(new_state)
+    end
+  end
+
+  # Pop the next non-tombstoned queue entry for steering. Cancel-reply and skip
+  # any leading entries whose task was cancelled while queued.
+  # Authority-bearing active turn or queue head: leave head, return :none.
+  defp pop_steering_message(%{turn_queue: []} = state), do: {:none, state}
+
+  defp pop_steering_message(
+         %{turn_queue: [{user_message, queued_authority, caller_from} | rest]} = state
+       ) do
+    if task_cancelled?(state, user_message_task_id(user_message)) do
+      state = %{state | turn_queue: rest}
+      safe_reply(caller_from, {:error, :cancelled})
+      pop_steering_message(state)
+    else
+      if is_nil(state.turn_authority) and is_nil(queued_authority) do
+        state = %{state | turn_queue: rest}
+        new_state = %{state | steer_froms: [caller_from | state.steer_froms]}
+        {:ok, user_message.content, new_state}
+      else
+        # Do not consume or reorder an authority-bearing boundary.
+        {:none, state}
+      end
+    end
+  end
+
+  # Engine consumption of the preprocessor: override the turn's tool list based on
+  # tier / retrieved tools. `LlmHandler.resolve_tools/3` reads "session.tools" first,
+  # so this controls exactly which tools the LLM call sees. DIRECT empties the list
+  # (no-tools fast lane) unless `direct_skips_tools` is disabled in config.
+  defp apply_preprocessor_tools(values, preproc) do
+    direct_skips? =
+      Keyword.get(Arbor.Orchestrator.Config.preprocessor(), :direct_skips_tools, true)
+
+    case Arbor.Orchestrator.Preprocessor.tool_override(preproc,
+           direct_skips_tools?: direct_skips?
+         ) do
+      {:override, tools} -> Map.put(values, "session.tools", tools)
+      :no_override -> values
+    end
+  end
 
   defp admit_engine_run_result(%{final_outcome: %{status: status}})
        when status in @admitted_final_statuses,
@@ -1223,6 +1405,9 @@ defmodule Arbor.Orchestrator.Session do
 
   defp complete_turn_success(user_message, result, state) do
     completed = Map.get(result.context, "__completed_nodes__", [])
+
+    # Fence/revoke before reply/reset so a late wave cannot authorize.
+    state = cleanup_turn_terminal(state, kill_task?: false)
 
     new_state =
       state
@@ -1288,9 +1473,6 @@ defmodule Arbor.Orchestrator.Session do
 
     reply_turn(state, reply)
 
-    if state.turn_task_ref, do: Process.demonitor(state.turn_task_ref, [:flush])
-    if state.turn_caller_ref, do: Process.demonitor(state.turn_caller_ref, [:flush])
-
     # Normal completion: apply_turn_result already persisted the complete message,
     # so just clear the turn (incl. buffer + timeout).
     reset_and_drain(new_state)
@@ -1302,14 +1484,13 @@ defmodule Arbor.Orchestrator.Session do
 
     emit_turn_telemetry(state.turn_started_at, %{agent_id: state.agent_id, status: :error})
 
+    # Fence/revoke before partial persistence so a late wave cannot authorize.
+    state = cleanup_turn_terminal(state, kill_task?: false)
+
     # Preserve whatever streamed before the failure as an :interrupted partial.
     # For rejected Engine envelopes, reason is the closed atom :turn_failed only.
     finalize_partial(state, :interrupted, reason)
-
     reply_turn(state, {:error, reason})
-
-    if state.turn_task_ref, do: Process.demonitor(state.turn_task_ref, [:flush])
-    if state.turn_caller_ref, do: Process.demonitor(state.turn_caller_ref, [:flush])
 
     reset_and_drain(new_state)
   end
@@ -1406,7 +1587,8 @@ defmodule Arbor.Orchestrator.Session do
     |> Persistence.sync_checkpoint_to_session_state()
   end
 
-  # Authorize, then start the turn — shared by direct sends and queue drains.
+  # Authorize, then prepare (freeze route / taint / disclosure / authorizer),
+  # then start the turn — shared by direct sends and queue drains.
   # Replies are sent explicitly (GenServer.reply) so this returns {:noreply, _}
   # uniformly, matching do_send_message_async (which replies later from the turn
   # task). On auth failure the caller is told and the session stays idle.
@@ -1414,15 +1596,153 @@ defmodule Arbor.Orchestrator.Session do
   defp start_turn(user_message, turn_authority, from, state) do
     state = maybe_switch_engagement(state, user_message.engagement_id)
 
-    case authorize_orchestrator(state) do
-      :ok ->
-        do_send_message_async(user_message, turn_authority, from, state)
+    if caller_alive?(from) do
+      case authorize_orchestrator(state) do
+        :ok ->
+          case prepare_live_turn(user_message, turn_authority, state) do
+            {:ok, prepared} ->
+              case do_send_message_async(
+                     user_message,
+                     prepared.authority,
+                     from,
+                     state,
+                     prepared
+                   ) do
+                {:noreply, _} = ok ->
+                  ok
 
-      {:error, reason} ->
-        safe_reply(from, {:error, {:unauthorized, reason}})
-        {:noreply, state}
+                {:error, reason} ->
+                  cleanup_prepared_partial(prepared)
+                  safe_reply(from, {:error, reason})
+                  {:noreply, state}
+              end
+
+            {:error, reason} ->
+              safe_reply(from, {:error, reason})
+              {:noreply, state}
+          end
+
+        {:error, reason} ->
+          safe_reply(from, {:error, {:unauthorized, reason}})
+          {:noreply, state}
+      end
+    else
+      # Dead caller: never prepare/issue; silently drop.
+      {:noreply, state}
     end
   end
+
+  defp caller_alive?({pid, _tag}) when is_pid(pid), do: Process.alive?(pid)
+  defp caller_alive?(_), do: false
+
+  # VP-05D2A1P5: after orchestrator authorize, before Task start. Freeze one
+  # source-owned route, derive final-value taint, issue D2A0 only for
+  # authenticated external, install process-local fence + authorizer.
+  # Any fault after disclosure issue deactivates the fence and revokes the cap.
+  defp prepare_live_turn(user_message, turn_authority, state) do
+    pre_values =
+      state
+      |> Builders.build_turn_values(user_message.content)
+      |> maybe_put_user_message_task_id(user_message)
+
+    final_values = maybe_preprocess(pre_values, user_message.content)
+    initial_taint = TurnEgress.derive_initial_taint(pre_values, final_values)
+
+    with {:ok, %{route: route, provider_route_input: route_input}} <-
+           TurnEgress.resolve_frozen_route(state, state.turn_graph),
+         {:ok, frozen_tier} <-
+           TurnEgress.admit_frozen_tier(Arbor.AI.egress_tier_for(route.provider)),
+         fence = TurnEgress.new_fence(),
+         {:ok, authority, cap_id} <-
+           TurnEgress.issue_disclosure_if_needed(
+             state,
+             turn_authority,
+             route,
+             frozen_tier
+           ) do
+      try do
+        authorizer =
+          TurnEgress.build_authorizer(%{
+            fence: fence,
+            frozen_route: route,
+            frozen_tier: frozen_tier,
+            agent_id: state.agent_id,
+            session_id: state.session_id,
+            turn_id: authority && authority.turn_id,
+            human_id: authority && authority.authenticated_principal_id,
+            disclosure_capability_id: TurnEgress.disclosure_id_from_authority(authority)
+          })
+
+        engine_opts =
+          state
+          |> Builders.build_engine_opts(final_values)
+          |> Keyword.put(:initial_taint, initial_taint)
+          |> Keyword.put(:frozen_egress_route, route)
+          |> Keyword.put(:turn_egress_authorizer, authorizer)
+          |> maybe_put_provider_route_input(route_input)
+
+        {:ok,
+         %{
+           authority: authority,
+           fence: fence,
+           cap_id: cap_id,
+           engine_opts: engine_opts,
+           values: final_values
+         }}
+      rescue
+        _ ->
+          TurnEgress.deactivate_fence(fence)
+          TurnEgress.safe_revoke_disclosure(cap_id)
+          {:error, :turn_preparation_refused}
+      catch
+        _, _ ->
+          TurnEgress.deactivate_fence(fence)
+          TurnEgress.safe_revoke_disclosure(cap_id)
+          {:error, :turn_preparation_refused}
+      end
+    else
+      {:error, reason} ->
+        # issue_disclosure_if_needed already revokes on bind failure.
+        {:error, map_prepare_error(reason)}
+    end
+  rescue
+    _ -> {:error, :turn_preparation_refused}
+  catch
+    _, _ -> {:error, :turn_preparation_refused}
+  end
+
+  defp cleanup_prepared_partial(prepared) when is_map(prepared) do
+    TurnEgress.deactivate_fence(Map.get(prepared, :fence))
+    TurnEgress.safe_revoke_disclosure(Map.get(prepared, :cap_id))
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
+  end
+
+  defp maybe_put_provider_route_input(opts, nil), do: opts
+
+  defp maybe_put_provider_route_input(opts, input) when is_map(input) do
+    Keyword.put(opts, :provider_route_input, input)
+  end
+
+  defp map_prepare_error(reason)
+       when reason in [
+              :missing_configured_route,
+              :ambiguous_compute_route,
+              :ambiguous_task_class,
+              :invalid_task_class,
+              :route_assembly_failed,
+              :route_freeze_failed,
+              :invalid_frozen_tier,
+              :disclosure_bind_failed,
+              :disclosure_issue_failed
+            ],
+       do: :turn_preparation_refused
+
+  defp map_prepare_error(reason) when is_atom(reason), do: :turn_preparation_refused
+  defp map_prepare_error(_), do: :turn_preparation_refused
 
   # Receipt-authenticated ingress: consume one-use receipt, bind principal,
   # allocate TurnAuthority. Receipt never enters state/queue.
@@ -1542,6 +1862,8 @@ defmodule Arbor.Orchestrator.Session do
     %{
       state
       | turn_authority: nil,
+        turn_egress_fence: nil,
+        turn_token: nil,
         turn_user_message: sanitized_turn_message,
         turn_queue: sanitized_queue
     }
@@ -1577,6 +1899,8 @@ defmodule Arbor.Orchestrator.Session do
         turn_started_at: nil,
         turn_user_message: nil,
         turn_authority: nil,
+        turn_egress_fence: nil,
+        turn_token: nil,
         streaming_buffer: nil,
         turn_timeout_ref: nil
     }

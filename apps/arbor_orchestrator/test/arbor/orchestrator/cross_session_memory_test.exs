@@ -56,7 +56,10 @@ defmodule Arbor.Orchestrator.CrossSessionMemoryTest do
     @behaviour Arbor.LLM.ProviderAdapter
 
     @impl true
-    def provider, do: "capture_xsession"
+    # This fake adapter executes in-process. Use the canonical on-host provider
+    # identity so Session's production egress classifier does not mistake the
+    # test double for an unauthenticated external service.
+    def provider, do: "ollama"
 
     @impl true
     def complete(%Arbor.LLM.Request{} = request, _opts) do
@@ -74,6 +77,9 @@ defmodule Arbor.Orchestrator.CrossSessionMemoryTest do
          raw: %{}
        }}
     end
+
+    @impl true
+    def complete_single_attempt(request, opts), do: complete(request, opts)
 
     @impl true
     def stream(_request, _opts), do: {:error, :not_supported}

@@ -164,6 +164,43 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerEgressTest do
     assert [{%Arbor.LLM.Request{}, _opts}] = RecordingDispatcher.calls()
   end
 
+  @tag voice_id: "VOICE-17"
+  @tag spec: "VOICE-17"
+  test "VOICE-17: Session turn-egress seam blocks external without disclosure before dispatch" do
+    alias Arbor.Orchestrator.Session.TurnEgress
+
+    fence = TurnEgress.new_fence()
+
+    route = %{
+      destination: "anthropic",
+      provider: "anthropic",
+      runtime: "arbor",
+      model: "claude-opus-4-6"
+    }
+
+    authorizer =
+      TurnEgress.build_authorizer(%{
+        fence: fence,
+        frozen_route: route,
+        frozen_tier: :external_provider,
+        agent_id: "agent_session_seam_#{System.unique_integer([:positive])}",
+        session_id: "session_seam",
+        turn_id: nil,
+        human_id: nil,
+        disclosure_capability_id: nil
+      })
+
+    outcome =
+      LlmHandler.execute(build_node(), build_context(), build_graph(),
+        frozen_egress_route: route,
+        turn_egress_authorizer: authorizer
+      )
+
+    assert RecordingDispatcher.calls() == []
+    assert outcome.status == :partial_success
+    assert outcome.context_updates["egress_blocked"] == true
+  end
+
   test "an allowed original provider cannot authorize a different router-selected provider" do
     Application.put_env(:arbor_security, :egress_gate_enforcing, true)
 

@@ -27,8 +27,17 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
   import Arbor.Orchestrator.Handlers.Helpers
 
   alias Arbor.Orchestrator.Session.Builders
+  alias Arbor.Orchestrator.Session.TurnEgress
 
   @prompt_sanitizer Arbor.Common.PromptSanitizer
+
+  # VP-05D2A1P5 Session-owned process-local controls. Never forward past the
+  # Client / Dispatch runtime boundary. `:provider_route_input` stays on
+  # Dispatch opts (Dispatch strips it before runtime adapters).
+  @turn_private_opt_keys [
+    :turn_egress_authorizer,
+    :frozen_egress_route
+  ]
 
   @impl true
   def execute(node, context, graph, opts) do
@@ -168,46 +177,135 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
 
   defp call_llm_and_respond(prompt, node, context, graph, base_updates, opts) do
     tool_loop? = Map.get(node.attrs, "use_tools") in ["true", true]
+    session_seam? = session_turn_egress_seam?(opts)
 
-    case maybe_assemble_provider_route(opts, node, tool_loop?) do
-      {:error, %Outcome{} = outcome} ->
-        %{
-          outcome
-          | context_updates: Map.merge(base_updates, outcome.context_updates || %{})
-        }
+    # VP-05D2A1P5: Session-owned initial admit against the frozen route before
+    # any prompt/provider I/O. Absent seam retains historical behavior.
+    case maybe_initial_turn_egress_admit(opts, base_updates, session_seam?) do
+      %Outcome{} = halt ->
+        halt
 
-      {:ok, opts} ->
-        router_mode? = Keyword.has_key?(opts, :provider_route_input)
-
-        cond do
-          router_mode? and tool_loop? ->
-            %Outcome{
-              status: :fail,
-              failure_reason: "ProviderRouter dispatch is not supported for tool-loop calls",
-              context_updates: Map.put(base_updates, "last_response", nil)
+      :ok ->
+        case maybe_assemble_provider_route(opts, node, tool_loop?, session_seam?) do
+          {:error, %Outcome{} = outcome} ->
+            %{
+              outcome
+              | context_updates: Map.merge(base_updates, outcome.context_updates || %{})
             }
 
-          router_mode? ->
-            # The session provider may be stale once ProviderRouter selects an exact
-            # destination. Router mode authorizes every mapped attempt inside Dispatch.
-            call_llm_and_respond_allowed(prompt, node, context, graph, base_updates, opts)
+          {:ok, opts} ->
+            router_mode? = Keyword.has_key?(opts, :provider_route_input)
 
-          true ->
-            # Legacy defense-in-depth gate (2026-06-14 URI-addressing-vs-classification
-            # decision). Keep its historical behavior unchanged when router mode is absent.
-            case egress_halt_outcome(context, base_updates) do
-              %Outcome{} = halt -> halt
-              _ -> call_llm_and_respond_allowed(prompt, node, context, graph, base_updates, opts)
+            cond do
+              router_mode? and tool_loop? ->
+                %Outcome{
+                  status: :fail,
+                  failure_reason: "ProviderRouter dispatch is not supported for tool-loop calls",
+                  context_updates: Map.put(base_updates, "last_response", nil)
+                }
+
+              router_mode? ->
+                # The session provider may be stale once ProviderRouter selects an exact
+                # destination. Router mode authorizes every mapped attempt inside Dispatch.
+                call_llm_and_respond_allowed(prompt, node, context, graph, base_updates, opts)
+
+              session_seam? ->
+                # Session turns: the turn-egress authorizer is the gate (initial +
+                # per-attempt). Do not re-run the dark-default legacy halt path.
+                call_llm_and_respond_allowed(prompt, node, context, graph, base_updates, opts)
+
+              true ->
+                # Legacy defense-in-depth gate (2026-06-14 URI-addressing-vs-classification
+                # decision). Keep its historical behavior unchanged when router mode is absent.
+                case egress_halt_outcome(context, base_updates) do
+                  %Outcome{} = halt ->
+                    halt
+
+                  _ ->
+                    call_llm_and_respond_allowed(
+                      prompt,
+                      node,
+                      context,
+                      graph,
+                      base_updates,
+                      opts
+                    )
+                end
             end
         end
     end
   end
 
+  defp session_turn_egress_seam?(opts) when is_list(opts) do
+    Keyword.has_key?(opts, :turn_egress_authorizer)
+  end
+
+  defp session_turn_egress_seam?(_), do: false
+
+  defp maybe_initial_turn_egress_admit(_opts, _base_updates, false), do: :ok
+
+  defp maybe_initial_turn_egress_admit(opts, base_updates, true) do
+    authorizer = Keyword.get(opts, :turn_egress_authorizer)
+    frozen = Keyword.get(opts, :frozen_egress_route)
+
+    cond do
+      not is_function(authorizer, 1) ->
+        turn_egress_refusal(base_updates, :invalid_authorizer)
+
+      true ->
+        case TurnEgress.canonicalize_route(frozen) do
+          {:ok, route} ->
+            case safe_call_turn_authorizer(authorizer, route) do
+              :allow -> :ok
+              _ -> turn_egress_refusal(base_updates, :initial_denied)
+            end
+
+          {:error, _} ->
+            turn_egress_refusal(base_updates, :invalid_frozen_route)
+        end
+    end
+  end
+
+  defp turn_egress_refusal(base_updates, reason) do
+    msg =
+      "⛔ Egress blocked: session turn-egress authorizer refused (#{inspect(reason)})."
+
+    updates =
+      base_updates
+      |> Map.put("last_response", msg)
+      |> Map.put("llm.content", msg)
+      |> Map.put("egress_blocked", true)
+
+    %Outcome{
+      status: :partial_success,
+      notes: msg,
+      failure_reason: msg,
+      context_updates: updates
+    }
+  end
+
+  defp safe_call_turn_authorizer(authorizer, route) when is_function(authorizer, 1) do
+    case authorizer.(route) do
+      :allow -> :allow
+      other -> other
+    end
+  rescue
+    _ -> {:error, :raised}
+  catch
+    _, _ -> {:error, :raised}
+  end
+
   # Production assembly uses Arbor.AI facade only (Application profile).
   # Explicit :provider_route_input remains a test/upstream opt and is not overwritten.
-  defp maybe_assemble_provider_route(opts, node, tool_loop?) do
+  # Session seam: never reassemble from Application; use only the frozen input.
+  defp maybe_assemble_provider_route(opts, node, tool_loop?, session_seam?) do
     cond do
       Keyword.has_key?(opts, :provider_route_input) ->
+        {:ok, opts}
+
+      session_seam? ->
+        # Frozen Session turn: tool-loop has no ProviderRouter input; non-tool
+        # already put :provider_route_input when freeze succeeded.
         {:ok, opts}
 
       tool_loop? ->
@@ -1198,6 +1296,8 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
             |> Keyword.merge(authority_opts)
             |> maybe_put_provider_usage_context(opts)
             |> maybe_add_stream_callback(on_stream)
+            |> maybe_put_llm_call_authorizer(opts)
+            |> strip_turn_private_opts()
 
           # Phase 4+ (B4): wrap ToolLoop in a fallback loop so per-agent
           # fallback chains apply to tool turns too. ToolLoop itself stays in
@@ -1293,6 +1393,18 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
 
   defp maybe_put_terminal_tools(opts, []), do: opts
   defp maybe_put_terminal_tools(opts, names), do: Keyword.put(opts, :terminal_tools, names)
+
+  defp maybe_put_llm_call_authorizer(tool_loop_opts, engine_opts) do
+    if session_turn_egress_seam?(engine_opts) do
+      Keyword.put(
+        tool_loop_opts,
+        :llm_call_authorizer,
+        wrap_llm_call_authorizer(Keyword.fetch!(engine_opts, :turn_egress_authorizer))
+      )
+    else
+      tool_loop_opts
+    end
+  end
 
   defp tool_loop_authority_opts(node, context, opts) do
     case {Keyword.get(opts, :authorization, false), Keyword.get(opts, :run_authorization)} do
@@ -1492,7 +1604,8 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
       call_opts
       |> Keyword.put(:client, client)
       |> Keyword.put(:policy, build_dispatch_policy(context, request))
-      |> maybe_put_route_authorizer(context)
+      |> maybe_put_route_authorizer(context, call_opts)
+      |> strip_turn_private_opts()
 
     run_id = Keyword.get(call_opts, :run_id)
 
@@ -1519,7 +1632,8 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
       |> Keyword.put(:client, client)
       |> Keyword.put(:callbacks, callbacks)
       |> Keyword.put(:policy, build_dispatch_policy(context, request))
-      |> maybe_put_route_authorizer(context)
+      |> maybe_put_route_authorizer(context, call_opts)
+      |> strip_turn_private_opts()
 
     run_id = Keyword.get(call_opts, :run_id)
 
@@ -1528,15 +1642,65 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
     end)
   end
 
-  defp maybe_put_route_authorizer(dispatch_opts, context) do
-    if Keyword.has_key?(dispatch_opts, :provider_route_input) do
-      authorizer = route_authorizer(Context.get(context, "session.agent_id"), context)
+  defp maybe_put_route_authorizer(dispatch_opts, context, engine_opts) do
+    cond do
+      session_turn_egress_seam?(engine_opts) ->
+        Keyword.put(
+          dispatch_opts,
+          :route_authorizer,
+          wrap_dispatch_route_authorizer(Keyword.fetch!(engine_opts, :turn_egress_authorizer))
+        )
 
-      Keyword.put(dispatch_opts, :route_authorizer, authorizer)
-    else
-      dispatch_opts
+      Keyword.has_key?(dispatch_opts, :provider_route_input) ->
+        authorizer = route_authorizer(Context.get(context, "session.agent_id"), context)
+        Keyword.put(dispatch_opts, :route_authorizer, authorizer)
+
+      true ->
+        dispatch_opts
     end
   end
+
+  defp wrap_dispatch_route_authorizer(turn_authorizer) when is_function(turn_authorizer, 1) do
+    fn route ->
+      case TurnEgress.project_dispatch_route(route) do
+        {:ok, scalar} ->
+          case safe_call_turn_authorizer(turn_authorizer, scalar) do
+            :allow -> :allow
+            {:requires_approval, _} -> {:requires_approval, :egress}
+            _ -> {:error, {:egress_blocked, :external_provider, :denied}}
+          end
+
+        {:error, _} ->
+          {:error, {:egress_blocked, :external_provider, :invalid_route}}
+      end
+    end
+  end
+
+  defp wrap_dispatch_route_authorizer(_), do: denying_route_authorizer()
+
+  defp wrap_llm_call_authorizer(turn_authorizer) when is_function(turn_authorizer, 1) do
+    fn request ->
+      case TurnEgress.project_request_route(request) do
+        {:ok, scalar} ->
+          case safe_call_turn_authorizer(turn_authorizer, scalar) do
+            :allow -> :allow
+            {:requires_approval, _} -> {:requires_approval, :egress}
+            _ -> {:error, {:egress_blocked, :external_provider, :denied}}
+          end
+
+        {:error, _} ->
+          {:error, {:egress_blocked, :external_provider, :invalid_route}}
+      end
+    end
+  end
+
+  defp wrap_llm_call_authorizer(_), do: fn _ -> {:error, :invalid_llm_call_authorizer} end
+
+  defp strip_turn_private_opts(opts) when is_list(opts) do
+    Keyword.drop(opts, @turn_private_opt_keys)
+  end
+
+  defp strip_turn_private_opts(opts), do: opts
 
   defp route_authorizer(agent_id, context) when is_binary(agent_id) do
     if valid_route_principal?(agent_id) do
