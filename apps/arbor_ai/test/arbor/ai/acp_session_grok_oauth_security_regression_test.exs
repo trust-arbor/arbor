@@ -252,6 +252,40 @@ defmodule Arbor.AI.AcpSessionGrokOAuthSecurityRegressionTest do
     assert :ok = AcpSession.close(session)
   end
 
+  test "security regression: prompt refresh accepts bounded provider cache recreated while idle",
+       %{root: root} do
+    workspace = standalone_workspace!(root, "idle-cache")
+    access_a = jwt(System.system_time(:second) + 7_200, "idle-access-a")
+    publish_xai!(access_a, "idle-refresh-a")
+    session = start_grok_session!(workspace)
+
+    assert_receive {:grok_probe_started, client, opts, %{"access_token" => ^access_a}}, 2_000
+    assert_grok_authenticated(client)
+    assert :ok = AcpSession.await_ready(session, timeout: 2_000)
+    refute_grok_auth_cache(opts)
+
+    assert {:ok, %{"sessionId" => "grok-probe-session"}} =
+             AcpSession.create_session(session, timeout: 2_000)
+
+    write_grok_auth_cache!(opts, access_a)
+    assert File.regular?(Path.join(grok_home(opts), "auth.json"))
+    assert File.regular?(Path.join(grok_home(opts), "auth.json.lock"))
+
+    access_b = jwt(System.system_time(:second) + 7_200, "idle-access-b")
+    publish_xai!(access_b, "idle-refresh-b")
+
+    assert {:ok, %{"text" => "ok"}} =
+             AcpSession.send_message(session, "after-idle", timeout: 2_000)
+
+    assert_grok_authenticated(client)
+
+    assert_receive {:grok_probe_prompt, _worker, "after-idle", %{"access_token" => ^access_b}},
+                   2_000
+
+    refute_grok_auth_cache(opts)
+    assert :ok = AcpSession.close(session)
+  end
+
   test "security regression: missing projection and launch resolver failure cause zero provider IO",
        %{root: root, store: store} do
     workspace = standalone_workspace!(root, "failures")
@@ -530,6 +564,26 @@ defmodule Arbor.AI.AcpSessionGrokOAuthSecurityRegressionTest do
 
   defp grok_home(opts) do
     opts |> Keyword.fetch!(:env) |> Map.new() |> Map.fetch!("GROK_HOME")
+  end
+
+  defp write_grok_auth_cache!(opts, access_token) do
+    home = grok_home(opts)
+
+    cache =
+      Jason.encode!(%{
+        "https://auth.x.ai::00000000-0000-4000-8000-000000000000" => %{
+          "auth_mode" => "external",
+          "expires_at" => "2026-08-03T23:59:59Z",
+          "key" => access_token
+        }
+      })
+
+    auth_path = Path.join(home, "auth.json")
+    lock_path = Path.join(home, "auth.json.lock")
+    File.write!(auth_path, cache)
+    File.chmod!(auth_path, 0o600)
+    File.write!(lock_path, "grok-lock-state\n")
+    File.chmod!(lock_path, 0o644)
   end
 
   defp refute_grok_auth_cache(opts) do

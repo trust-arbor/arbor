@@ -140,9 +140,11 @@ defmodule Arbor.AI.AcpSession.RuntimeHome do
 
   @doc false
   @spec refresh_grok_external_auth(map()) :: :ok | {:error, atom()}
-  def refresh_grok_external_auth(%{path: runtime_home})
+  def refresh_grok_external_auth(%{path: runtime_home} = cleanup_identity)
       when is_binary(runtime_home) and runtime_home != "" do
-    update_grok_external_auth(runtime_home, :existing)
+    with :ok <- scrub_grok_external_auth_cache(cleanup_identity) do
+      update_grok_external_auth(runtime_home, :existing)
+    end
   end
 
   def refresh_grok_external_auth(_cleanup_identity),
