@@ -137,6 +137,62 @@ defmodule Arbor.Agent.SessionManager do
 
   def cancel_task(_agent_id, _task_id), do: {:error, :invalid_args}
 
+  @doc """
+  Deliver an authenticated `UserMessage` + opaque delivery receipt to the live
+  Session for `agent_id`.
+
+  Looks up the session pid from the public ETS table and invokes the configured
+  Session module's `send_authenticated_message/4` **in the caller's process**
+  (no GenServer hop through SessionManager for the send itself). This preserves
+  the original facade caller PID so Session's caller monitor observes the real
+  caller.
+
+  Returns:
+  - the Session module's result on success/error
+  - `{:error, :no_session}` when no live session is registered
+  - `{:error, :session_unavailable}` when the runtime bridge is missing or the
+    call raises/throws/exits (including GenServer call timeout)
+  - `{:error, :invalid_args}` for non-positive timeout or wrong argument shapes
+
+  Does not create sessions, store the receipt, or fall back to APIAgent.
+  """
+  @spec send_authenticated_message(
+          String.t(),
+          Arbor.Contracts.Session.UserMessage.t(),
+          Arbor.Contracts.Security.DeliveryReceipt.t(),
+          pos_integer()
+        ) ::
+          {:ok, term()}
+          | {:error, :no_session | :session_unavailable | :invalid_args | term()}
+  def send_authenticated_message(agent_id, message, receipt, timeout_ms)
+      when is_binary(agent_id) and is_integer(timeout_ms) and timeout_ms > 0 and
+             is_struct(message, Arbor.Contracts.Session.UserMessage) and
+             is_struct(receipt, Arbor.Contracts.Security.DeliveryReceipt) do
+    with {:ok, session_pid} <- get_session(agent_id) do
+      session_mod = session_module()
+
+      if Code.ensure_loaded?(session_mod) and
+           function_exported?(session_mod, :send_authenticated_message, 4) do
+        apply(session_mod, :send_authenticated_message, [
+          session_pid,
+          message,
+          receipt,
+          timeout_ms
+        ])
+      else
+        {:error, :session_unavailable}
+      end
+    end
+  rescue
+    _ -> {:error, :session_unavailable}
+  catch
+    :throw, _ -> {:error, :session_unavailable}
+    :exit, _ -> {:error, :session_unavailable}
+  end
+
+  def send_authenticated_message(_agent_id, _message, _receipt, _timeout_ms),
+    do: {:error, :invalid_args}
+
   defp session_module do
     Application.get_env(:arbor_agent, :orchestrator_session_module, @session_module)
   end

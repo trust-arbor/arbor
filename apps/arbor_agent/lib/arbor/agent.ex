@@ -116,18 +116,23 @@ defmodule Arbor.Agent do
   # ===========================================================================
 
   @doc """
-  Send one engagement-tagged `UserMessage` to a running agent after owner-scoped
-  chat authorization.
+  Send one `UserMessage` to a running agent and return assistant text.
 
-  Authorizes exactly `arbor://chat/agent/<target_agent_id>` with action `:chat`.
-  Only `{:ok, :authorized}` reaches `Arbor.Agent.Manager.chat/3`. The typed
-  envelope is preserved byte-for-byte (no restamp/reconstruct).
+  ## Branches
+
+  - **Absent `:session_token`** — ordinary compatibility path: requires an
+    engagement-tagged envelope, authorizes via `Arbor.Security.authorize/4`,
+    and delivers through `Arbor.Agent.Manager.chat/3` (no turn authority).
+  - **Present `:session_token`** — authenticated path: requires
+    `engagement_id == nil`, exchanges the proof for a one-use delivery receipt
+    inside `MessageFacade` only, and delivers through
+    `Manager.chat_authenticated/4` → Session (no APIAgent fallback).
 
   ## Options
 
   - `:timeout` — positive integer milliseconds, max `30_000` (default `30_000`)
-  - `:session_token` — optional human session proof forwarded only to
-    `Arbor.Security.authorize/4` (never to Manager/chat opts, logs, or errors)
+  - `:session_token` — optional human session proof (never forwarded to Manager
+    opts, signals, logs, or errors)
 
   Unknown, duplicate, zero, or oversized options are rejected before effects.
   Present but invalid `:session_token` values (`nil`, empty, non-binary,
@@ -136,7 +141,7 @@ defmodule Arbor.Agent do
 
   ## Returns
 
-  - `{:ok, reply_text}` when Manager returns a binary reply
+  - `{:ok, reply_text}` when delivery returns a binary reply
   - `{:error, reason}` with a closed atom vocabulary (no content/capability leakage)
   """
   @spec send_message(
@@ -159,15 +164,41 @@ defmodule Arbor.Agent do
              | :delivery_failed}
   def send_message(caller_id, target_agent_id, message, opts \\ []) do
     # Fixed production collaborators only — never selectable via public opts or
-    # ambient process/application state (see MessageFacade.deliver/6 for tests).
-    Arbor.Agent.MessageFacade.deliver(
-      caller_id,
-      target_agent_id,
-      message,
-      opts,
-      &Arbor.Security.authorize/4,
-      &Arbor.Agent.Manager.chat/3
-    )
+    # ambient process/application state (see MessageFacade for test injects).
+    Arbor.Agent.MessageFacade.deliver_text(caller_id, target_agent_id, message, opts)
+  end
+
+  @doc """
+  Send one `UserMessage` to a running agent and return a structured response.
+
+  Same authorization and delivery branches as `send_message/4`:
+
+  - Absent token → ordinary `Manager.chat_response/3` map shape
+  - Present token → authenticated Session path returning
+    `%Arbor.Contracts.Pipeline.Response{}` after closed projection
+
+  Options and closed error vocabulary match `send_message/4`.
+  """
+  @spec send_message_response(
+          String.t(),
+          String.t(),
+          Arbor.Contracts.Session.UserMessage.t(),
+          keyword()
+        ) ::
+          {:ok, Arbor.Contracts.Pipeline.Response.t() | map()}
+          | {:error,
+             :invalid_opts
+             | :invalid_timeout
+             | :invalid_caller_id
+             | :invalid_agent_id
+             | :invalid_message
+             | :invalid_content
+             | :invalid_sender
+             | :invalid_engagement_id
+             | :unauthorized
+             | :delivery_failed}
+  def send_message_response(caller_id, target_agent_id, message, opts \\ []) do
+    Arbor.Agent.MessageFacade.deliver_response(caller_id, target_agent_id, message, opts)
   end
 
   # ===========================================================================

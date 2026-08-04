@@ -150,4 +150,187 @@ defmodule Arbor.Agent.SessionManagerTest do
       assert {:error, :invalid_args} = SessionManager.cancel_task(nil, "task_abc")
     end
   end
+
+  defmodule AuthSessionBridge do
+    @moduledoc false
+    def send_authenticated_message(session, message, receipt, timeout_ms)
+        when is_integer(timeout_ms) and timeout_ms > 0 do
+      GenServer.call(session, {:send_authenticated_message, message, receipt}, timeout_ms)
+    end
+
+    def send_authenticated_message(_, _, _, _), do: {:error, :invalid_authenticated_message_request}
+  end
+
+  defmodule AuthFakeSession do
+    @moduledoc false
+    use GenServer
+
+    def start_link(test_pid), do: GenServer.start_link(__MODULE__, test_pid)
+
+    @impl true
+    def init(test_pid), do: {:ok, test_pid}
+
+    @impl true
+    def handle_call({:send_authenticated_message, message, receipt}, {from_pid, _}, test_pid) do
+      send(test_pid, {:auth_send, from_pid, message, receipt})
+      {:reply, {:ok, %{content: "bridged"}}, test_pid}
+    end
+  end
+
+  describe "send_authenticated_message/4" do
+    @tag voice_id: "VOICE-17"
+    test "bridges in original caller process and returns Session result", %{agent_id: agent_id} do
+      prev = Application.get_env(:arbor_agent, :orchestrator_session_module)
+      Application.put_env(:arbor_agent, :orchestrator_session_module, AuthSessionBridge)
+
+      on_exit(fn ->
+        case prev do
+          nil -> Application.delete_env(:arbor_agent, :orchestrator_session_module)
+          mod -> Application.put_env(:arbor_agent, :orchestrator_session_module, mod)
+        end
+      end)
+
+      {:ok, fake_session} = AuthFakeSession.start_link(self())
+      true = :ets.insert(SessionManager, {agent_id, fake_session})
+
+      message = %Arbor.Contracts.Session.UserMessage{
+        content: "hello",
+        sent_at: ~U[2026-08-01 12:00:00Z],
+        sender_id: "human_test",
+        engagement_id: nil
+      }
+
+      assert {:ok, receipt} =
+               Arbor.Contracts.Security.DeliveryReceipt.new(token: :crypto.strong_rand_bytes(32))
+
+      caller = self()
+
+      try do
+        assert {:ok, %{content: "bridged"}} =
+                 SessionManager.send_authenticated_message(agent_id, message, receipt, 1_000)
+
+        assert_receive {:auth_send, from_pid, ^message, ^receipt}, 1_000
+        assert from_pid == caller
+      after
+        :ets.delete(SessionManager, agent_id)
+
+        if Process.alive?(fake_session) do
+          GenServer.stop(fake_session, :normal, 1_000)
+        end
+      end
+    end
+
+    @tag voice_id: "VOICE-17"
+    test "returns :no_session when agent has no live session", %{agent_id: agent_id} do
+      message = %Arbor.Contracts.Session.UserMessage{
+        content: "hello",
+        sent_at: ~U[2026-08-01 12:00:00Z],
+        sender_id: "human_test",
+        engagement_id: nil
+      }
+
+      assert {:ok, receipt} =
+               Arbor.Contracts.Security.DeliveryReceipt.new(token: :crypto.strong_rand_bytes(32))
+
+      assert {:error, :no_session} =
+               SessionManager.send_authenticated_message(agent_id, message, receipt, 500)
+    end
+
+    @tag voice_id: "VOICE-17"
+    test "normalizes GenServer.call timeout/exit to :session_unavailable", %{agent_id: agent_id} do
+      prev = Application.get_env(:arbor_agent, :orchestrator_session_module)
+      Application.put_env(:arbor_agent, :orchestrator_session_module, AuthSessionBridge)
+
+      on_exit(fn ->
+        case prev do
+          nil -> Application.delete_env(:arbor_agent, :orchestrator_session_module)
+          mod -> Application.put_env(:arbor_agent, :orchestrator_session_module, mod)
+        end
+      end)
+
+      # Bare process that never replies — GenServer.call will exit :timeout
+      hang =
+        spawn(fn ->
+          receive do
+            {:"$gen_call", _from, _req} -> Process.sleep(10_000)
+          end
+        end)
+
+      true = :ets.insert(SessionManager, {agent_id, hang})
+
+      message = %Arbor.Contracts.Session.UserMessage{
+        content: "hello",
+        sent_at: ~U[2026-08-01 12:00:00Z],
+        sender_id: "human_test",
+        engagement_id: nil
+      }
+
+      assert {:ok, receipt} =
+               Arbor.Contracts.Security.DeliveryReceipt.new(token: :crypto.strong_rand_bytes(32))
+
+      try do
+        assert {:error, :session_unavailable} =
+                 SessionManager.send_authenticated_message(agent_id, message, receipt, 50)
+      after
+        :ets.delete(SessionManager, agent_id)
+        if Process.alive?(hang), do: Process.exit(hang, :kill)
+      end
+    end
+
+    @tag voice_id: "VOICE-17"
+    test "returns :session_unavailable when bridge module missing export", %{agent_id: agent_id} do
+      prev = Application.get_env(:arbor_agent, :orchestrator_session_module)
+      Application.put_env(:arbor_agent, :orchestrator_session_module, __MODULE__.NoExport)
+
+      on_exit(fn ->
+        case prev do
+          nil -> Application.delete_env(:arbor_agent, :orchestrator_session_module)
+          mod -> Application.put_env(:arbor_agent, :orchestrator_session_module, mod)
+        end
+      end)
+
+      hang = spawn(fn -> Process.sleep(:infinity) end)
+      true = :ets.insert(SessionManager, {agent_id, hang})
+
+      message = %Arbor.Contracts.Session.UserMessage{
+        content: "hello",
+        sent_at: ~U[2026-08-01 12:00:00Z],
+        sender_id: "human_test",
+        engagement_id: nil
+      }
+
+      assert {:ok, receipt} =
+               Arbor.Contracts.Security.DeliveryReceipt.new(token: :crypto.strong_rand_bytes(32))
+
+      try do
+        assert {:error, :session_unavailable} =
+                 SessionManager.send_authenticated_message(agent_id, message, receipt, 500)
+      after
+        :ets.delete(SessionManager, agent_id)
+        if Process.alive?(hang), do: Process.exit(hang, :kill)
+      end
+    end
+
+    test "invalid args rejected", %{agent_id: agent_id} do
+      message = %Arbor.Contracts.Session.UserMessage{
+        content: "hello",
+        sent_at: ~U[2026-08-01 12:00:00Z],
+        sender_id: "human_test",
+        engagement_id: nil
+      }
+
+      assert {:ok, receipt} =
+               Arbor.Contracts.Security.DeliveryReceipt.new(token: :crypto.strong_rand_bytes(32))
+
+      assert {:error, :invalid_args} =
+               SessionManager.send_authenticated_message(agent_id, message, receipt, 0)
+
+      assert {:error, :invalid_args} =
+               SessionManager.send_authenticated_message(agent_id, "bare", receipt, 100)
+    end
+  end
+
+  defmodule NoExport do
+    @moduledoc false
+  end
 end

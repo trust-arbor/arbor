@@ -567,6 +567,119 @@ defmodule Arbor.Agent.Manager do
     end
   end
 
+  @doc """
+  Authenticated chat: deliver a route-free `UserMessage` + opaque delivery
+  receipt to the live Session via `SessionManager`, returning assistant text.
+
+  Does not touch APIAgent/Claude. Receipt is the dedicated 3rd argument — never
+  placed in opts, signals, or process state.
+  """
+  @spec chat_authenticated(
+          Arbor.Contracts.Session.UserMessage.t(),
+          String.t(),
+          Arbor.Contracts.Security.DeliveryReceipt.t(),
+          keyword()
+        ) :: {:ok, String.t()} | {:error, term()}
+  def chat_authenticated(
+        %Arbor.Contracts.Session.UserMessage{} = message,
+        sender,
+        receipt,
+        opts
+      )
+      when is_binary(sender) and is_list(opts) and
+             is_struct(receipt, Arbor.Contracts.Security.DeliveryReceipt) do
+    case chat_response_authenticated(message, sender, receipt, opts) do
+      {:ok, %Arbor.Contracts.Pipeline.Response{} = response} ->
+        {:ok, Arbor.Contracts.Pipeline.Response.content(response)}
+
+      other ->
+        other
+    end
+  end
+
+  def chat_authenticated(_message, _sender, _receipt, _opts), do: {:error, :invalid_args}
+
+  @doc """
+  Authenticated structured chat: same Session bridge as `chat_authenticated/4`,
+  returning a type-projected `%Arbor.Contracts.Pipeline.Response{}`.
+
+  Emits the user `chat_message` signal only. The assistant signal is emitted by
+  `MessageFacade` **after** call-local secret admission, so a malicious Session
+  cannot surface proof/bearer material via signals before reject. Does not
+  receive or forward the raw session proof.
+  """
+  @spec chat_response_authenticated(
+          Arbor.Contracts.Session.UserMessage.t(),
+          String.t(),
+          Arbor.Contracts.Security.DeliveryReceipt.t(),
+          keyword()
+        ) ::
+          {:ok, Arbor.Contracts.Pipeline.Response.t()} | {:error, term()}
+  def chat_response_authenticated(
+        %Arbor.Contracts.Session.UserMessage{} = message,
+        sender,
+        receipt,
+        opts
+      )
+      when is_binary(sender) and is_list(opts) and
+             is_struct(receipt, Arbor.Contracts.Security.DeliveryReceipt) do
+    agent_id = Keyword.get(opts, :agent_id)
+    timeout = Keyword.get(opts, :timeout)
+
+    cond do
+      not is_binary(agent_id) ->
+        {:error, :invalid_args}
+
+      not (is_integer(timeout) and timeout > 0) ->
+        {:error, :invalid_args}
+
+      true ->
+        do_chat_response_authenticated(message, sender, receipt, agent_id, timeout)
+    end
+  end
+
+  def chat_response_authenticated(_message, _sender, _receipt, _opts),
+    do: {:error, :invalid_args}
+
+  defp do_chat_response_authenticated(message, sender, receipt, agent_id, timeout) do
+    case find_agent(agent_id) do
+      {:ok, _pid, _meta} ->
+        safe_emit(:chat_message, %{
+          role: :user,
+          content: message.content,
+          sender: sender
+        })
+
+        case Arbor.Agent.SessionManager.send_authenticated_message(
+               agent_id,
+               message,
+               receipt,
+               timeout
+             ) do
+          {:ok, raw} ->
+            # Type-project only (no call-local secrets here — proof never leaves
+            # MessageFacade). Assistant signal is deferred to MessageFacade after
+            # authoritative secret admission.
+            case Arbor.Agent.MessageFacade.admit_auth_response(raw, []) do
+              {:ok, %Arbor.Contracts.Pipeline.Response{} = response} ->
+                {:ok, response}
+
+              :reject ->
+                {:error, :malformed_response}
+            end
+
+          {:error, _} = err ->
+            err
+
+          _other ->
+            {:error, :malformed_response}
+        end
+
+      :not_found ->
+        {:error, :agent_not_found}
+    end
+  end
+
   # ── Channels (unified message containers) ──────────────────────────
 
   @doc """
