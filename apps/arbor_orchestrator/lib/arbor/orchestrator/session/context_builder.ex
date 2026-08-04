@@ -35,6 +35,28 @@ defmodule Arbor.Orchestrator.Session.ContextBuilder do
   def get_phase(%{session_state: %{phase: phase}} = _state) when is_atom(phase), do: phase
   def get_phase(state), do: state.phase
 
+  # ── Compactor construction ───────────────────────────────────────
+
+  @doc false
+  def init_compactor(spec, messages \\ [])
+
+  def init_compactor(nil, _messages), do: nil
+
+  def init_compactor({module, compactor_opts}, messages)
+      when is_atom(module) and is_list(compactor_opts) and is_list(messages) do
+    if Code.ensure_loaded?(module) and function_exported?(module, :new, 1) do
+      messages
+      |> Enum.reduce(apply(module, :new, [compactor_opts]), fn message, compactor ->
+        apply(module, :append, [compactor, message])
+      end)
+    else
+      Logger.warning("[Session] Compactor module #{inspect(module)} not available, disabling")
+      nil
+    end
+  end
+
+  def init_compactor(_spec, _messages), do: nil
+
   # ── Context assembly ──────────────────────────────────────────────
 
   @doc false

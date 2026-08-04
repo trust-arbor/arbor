@@ -113,8 +113,11 @@ defmodule Arbor.Orchestrator.Session do
     :session_config,
     :session_state,
     :behavior,
-    # Context compactor for progressive forgetting (nil = disabled)
+    # Context compactor for progressive forgetting (nil = disabled). The
+    # construction spec is process-local configuration used only to initialize
+    # a fresh engagement; inactive compactors are stashed alongside transcripts.
     :compactor,
+    :compactor_spec,
     phase: :idle,
     session_type: :primary,
     execution_mode: :session,
@@ -178,6 +181,7 @@ defmodule Arbor.Orchestrator.Session do
     # Queue entries: {UserMessage, TurnAuthority | nil, GenServer.from()}.
     current_engagement_id: nil,
     transcripts: %{},
+    compactors: %{},
     turn_queue: [],
     # Bounded task-id cancellation tombstones: reject a later send_message that
     # still carries a cancelled async-task id (race: cancel before Session sees
@@ -225,6 +229,7 @@ defmodule Arbor.Orchestrator.Session do
           turn_caller_ref: reference() | nil,
           turn_started_at: integer() | nil,
           compactor: struct() | nil,
+          compactor_spec: {module(), keyword()} | nil,
           session_config: struct() | nil,
           session_state: struct() | nil,
           behavior: struct() | nil,
@@ -586,8 +591,12 @@ defmodule Arbor.Orchestrator.Session do
     legacy_signer = Keyword.get(opts, :signer)
     tenant_context = Keyword.get(opts, :tenant_context)
 
-    # Initialize compactor if configured (runtime bridge — module lives in arbor_agent)
-    compactor = Builders.init_compactor(Keyword.get(opts, :compactor))
+    # Initialize compactor if configured (runtime bridge — module lives in arbor_agent).
+    # Retain the trusted construction spec so every engagement starts with the
+    # same configuration without deriving a new instance from another user's state.
+    requested_compactor_spec = Keyword.get(opts, :compactor)
+    compactor = Builders.init_compactor(requested_compactor_spec)
+    compactor_spec = if is_nil(compactor), do: nil, else: requested_compactor_spec
 
     with {:ok, signing_authority} <- claim_signing_authority(opts),
          :ok <- reject_mixed_credentials(signing_authority, legacy_signer),
@@ -609,6 +618,7 @@ defmodule Arbor.Orchestrator.Session do
         turn_graph: turn_graph,
         turn_dot_path: turn_dot_path,
         compactor: compactor,
+        compactor_spec: compactor_spec,
         adapters: adapters,
         session_type: session_type,
         execution_mode: execution_mode,
@@ -1561,15 +1571,14 @@ defmodule Arbor.Orchestrator.Session do
     do: Arbor.Contracts.Session.UserMessage.from_string(inspect(other))
 
   # Switch the active engagement (single-mind model): stash the current
-  # transcript under its id, load the target's (empty list on first contact).
-  # No-op when the target is nil (the default/back-compat conversation) or is
-  # already active. `messages` always holds the ACTIVE engagement's transcript,
-  # so the turn loop / SessionCore / Builders / ContextBuilder need no changes.
-  defp maybe_switch_engagement(state, nil), do: state
+  # transcript and compactor under its id, then restore the target pair. nil is
+  # the real default engagement, so it follows the same switching rules as a
+  # named engagement and is a no-op only while already active.
   defp maybe_switch_engagement(%{current_engagement_id: target} = state, target), do: state
 
   defp maybe_switch_engagement(state, target) do
     stashed = Map.put(state.transcripts, state.current_engagement_id, state.messages)
+    stashed_compactors = stash_active_compactor(state)
 
     {target_msgs, stashed} =
       if Map.has_key?(stashed, target) do
@@ -1583,11 +1592,33 @@ defmodule Arbor.Orchestrator.Session do
         {Persistence.load_engagement_transcript(state, target), stashed}
       end
 
+    {target_compactor, stashed_compactors} =
+      case Map.pop(stashed_compactors, target) do
+        {nil, remaining} ->
+          {Builders.init_compactor(state.compactor_spec, target_msgs), remaining}
+
+        {compactor, remaining} ->
+          {compactor, remaining}
+      end
+
     # Mirror the active transcript into session_state — ContextBuilder.get_messages/1
     # reads `session_state.messages` in preference to top-level `messages`, so both
     # must move together or the turn would see the previous engagement's history.
-    %{state | messages: target_msgs, transcripts: stashed, current_engagement_id: target}
+    %{
+      state
+      | messages: target_msgs,
+        compactor: target_compactor,
+        transcripts: stashed,
+        compactors: stashed_compactors,
+        current_engagement_id: target
+    }
     |> Persistence.sync_checkpoint_to_session_state()
+  end
+
+  defp stash_active_compactor(%{compactor: nil} = state), do: state.compactors
+
+  defp stash_active_compactor(state) do
+    Map.put(state.compactors, state.current_engagement_id, state.compactor)
   end
 
   # Authorize, then prepare (freeze route / taint / disclosure / authorizer),

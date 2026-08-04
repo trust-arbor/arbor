@@ -34,12 +34,12 @@ defmodule Arbor.Orchestrator.Session.Persistence do
 
     # Support both prefixed ("session.messages") and unprefixed ("messages") keys
     state
-    |> maybe_restore(:messages, cp_get(data, "messages"))
+    |> restore_checkpoint_conversation(data)
     |> maybe_restore(:working_memory, cp_get(data, "working_memory"))
     |> maybe_restore(:goals, cp_get(data, "goals"))
     |> maybe_restore(:turn_count, cp_get(data, "turn_count"))
     |> maybe_restore_cognitive_mode(cp_get(data, "cognitive_mode"))
-    |> seed_compactor_from_checkpoint()
+    |> drop_active_engagement_stash()
     |> sync_checkpoint_to_session_state()
   end
 
@@ -68,6 +68,35 @@ defmodule Arbor.Orchestrator.Session.Persistence do
       end
 
     %{state | cognitive_mode: atom_mode}
+  end
+
+  @doc false
+  def restore_checkpoint_conversation(state, data) do
+    engagement = cp_fetch(data, "current_engagement_id")
+    messages = cp_fetch(data, "messages")
+
+    case {engagement, messages} do
+      {{:ok, engagement_id}, {:ok, restored_messages}}
+      when (is_binary(engagement_id) or is_nil(engagement_id)) and
+             is_list(restored_messages) ->
+        %{state | current_engagement_id: engagement_id, messages: restored_messages}
+        |> rebuild_compactor_from_checkpoint()
+
+      {{:ok, engagement_id}, :error}
+      when (is_binary(engagement_id) or is_nil(engagement_id)) and
+             engagement_id != state.current_engagement_id ->
+        # Never relabel the active transcript when provenance changes without
+        # carrying its matching messages.
+        %{state | current_engagement_id: engagement_id, messages: []}
+        |> rebuild_compactor_from_checkpoint()
+
+      {_engagement, {:ok, restored_messages}} when is_list(restored_messages) ->
+        %{state | messages: restored_messages}
+        |> rebuild_compactor_from_checkpoint()
+
+      _ ->
+        state
+    end
   end
 
   @doc false
@@ -109,6 +138,7 @@ defmodule Arbor.Orchestrator.Session.Persistence do
   def extract_checkpoint_data(state) do
     %{
       "messages" => ContextBuilder.get_messages(state),
+      "current_engagement_id" => Map.get(state, :current_engagement_id),
       "working_memory" => ContextBuilder.get_working_memory(state),
       "goals" => ContextBuilder.get_goals(state),
       "turn_count" => ContextBuilder.get_turn_count(state),
@@ -129,19 +159,30 @@ defmodule Arbor.Orchestrator.Session.Persistence do
   # Without this, a restored session would have messages in state but an
   # empty compactor — it would never compact because it thinks it has 0 tokens.
   @doc false
-  def seed_compactor_from_checkpoint(%{compactor: nil} = state), do: state
-
-  def seed_compactor_from_checkpoint(%{compactor: compactor, messages: messages} = state)
-      when is_list(messages) and messages != [] do
-    seeded =
-      Enum.reduce(messages, compactor, fn msg, acc ->
-        apply_compactor(acc, :append, [msg])
-      end)
-
-    %{state | compactor: seeded}
+  def rebuild_compactor_from_checkpoint(%{compactor_spec: spec, messages: messages} = state)
+      when is_list(messages) do
+    %{state | compactor: ContextBuilder.init_compactor(spec, messages)}
   end
 
-  def seed_compactor_from_checkpoint(state), do: state
+  # Compatibility for state maps created before compactor_spec existed.
+  def rebuild_compactor_from_checkpoint(state), do: state
+
+  defp cp_fetch(data, field) do
+    case Map.fetch(data, "session.#{field}") do
+      :error -> Map.fetch(data, field)
+      found -> found
+    end
+  end
+
+  defp drop_active_engagement_stash(state) do
+    engagement_id = Map.get(state, :current_engagement_id)
+
+    %{
+      state
+      | transcripts: Map.delete(Map.get(state, :transcripts, %{}), engagement_id),
+        compactors: Map.delete(Map.get(state, :compactors, %{}), engagement_id)
+    }
+  end
 
   # ── Session entry persistence (runtime bridge) ────────────────────
 
@@ -406,10 +447,5 @@ defmodule Arbor.Orchestrator.Session.Persistence do
   defp update_session_state(%{session_state: ss} = state, update_fn) when not is_nil(ss) do
     updated_ss = update_fn.(ss)
     %{state | session_state: updated_ss}
-  end
-
-  # Runtime bridge: the compactor struct carries its own module via __struct__
-  defp apply_compactor(%{__struct__: module} = compactor, fun, args) do
-    apply(module, fun, [compactor | args])
   end
 end

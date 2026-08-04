@@ -20,18 +20,10 @@ defmodule Arbor.Orchestrator.Session.Builders do
   # ── Compactor initialization ─────────────────────────────────────────
 
   @doc false
-  def init_compactor(nil), do: nil
+  defdelegate init_compactor(spec), to: ContextBuilder
 
-  def init_compactor({module, compactor_opts}) when is_atom(module) do
-    if Code.ensure_loaded?(module) and function_exported?(module, :new, 1) do
-      apply(module, :new, [compactor_opts])
-    else
-      Logger.warning("[Session] Compactor module #{inspect(module)} not available, disabling")
-      nil
-    end
-  end
-
-  def init_compactor(_), do: nil
+  @doc false
+  defdelegate init_compactor(spec, messages), to: ContextBuilder
 
   # ── Context value builders ───────────────────────────────────────────
 
