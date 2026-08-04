@@ -11,12 +11,15 @@ defmodule Arbor.Voice.Test.XaiRealtimeFakeTransport do
     :captured_host,
     :captured_port,
     :captured_path,
+    :on_send,
     :on_recv,
     sent: [],
     frames: []
   ]
 
   def connect(opts) do
+    on_connect = Keyword.get(opts, :on_connect, fn -> :ok end)
+
     case Keyword.get(opts, :connect_mode) do
       {:error_echo, _reason} ->
         {:error, {:connect_failed, opts}}
@@ -25,6 +28,8 @@ defmodule Arbor.Voice.Test.XaiRealtimeFakeTransport do
         raise "connect failed for token=#{token}"
 
       _other ->
+        on_connect.()
+
         {:ok,
          %__MODULE__{
            captured_token: Keyword.fetch!(opts, :token),
@@ -32,12 +37,14 @@ defmodule Arbor.Voice.Test.XaiRealtimeFakeTransport do
            captured_port: Keyword.fetch!(opts, :port),
            captured_path: Keyword.fetch!(opts, :path),
            frames: Keyword.get(opts, :frames, []),
+           on_send: Keyword.get(opts, :on_send, fn _frame -> :ok end),
            on_recv: Keyword.get(opts, :on_recv, fn -> :ok end)
          }}
     end
   end
 
   def send_frame(%__MODULE__{} = state, frame) do
+    state.on_send.(frame)
     {:ok, %{state | sent: state.sent ++ [frame]}}
   end
 

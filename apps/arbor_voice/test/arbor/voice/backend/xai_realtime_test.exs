@@ -34,6 +34,21 @@ defmodule Arbor.Voice.Backend.XaiRealtimeTest do
   end
 
   defp stub_resolver(:xai), do: {:ok, "stub-token"}
+  defp allow_effect(_effect, _route), do: :allow
+
+  defp record_event(key, event) do
+    Process.put(key, Process.get(key, []) ++ [event])
+    :ok
+  end
+
+  defp reset_events(key), do: Process.put(key, [])
+  defp events(key), do: Process.get(key, [])
+
+  defp authorizer_fault(:deny, secret), do: {:error, {:distinctive_denial, secret}}
+  defp authorizer_fault(:malformed, secret), do: %{malformed: secret}
+  defp authorizer_fault(:raise, secret), do: raise("authorizer raised #{secret}")
+  defp authorizer_fault(:throw, secret), do: throw({:authorizer_threw, secret})
+  defp authorizer_fault(:exit, secret), do: exit({:authorizer_exited, secret})
 
   # ── VOICE-8: tool-call mapping, send_tool_result sequencing, malformed args ──
 
@@ -50,6 +65,7 @@ defmodule Arbor.Voice.Backend.XaiRealtimeTest do
       XaiRealtime.open(
         transport: FakeTransport,
         transport_opts: [frames: [frame]],
+        effect_authorizer: &allow_effect/2,
         oauth_resolver: &stub_resolver/1
       )
 
@@ -66,6 +82,7 @@ defmodule Arbor.Voice.Backend.XaiRealtimeTest do
       XaiRealtime.open(
         transport: FakeTransport,
         transport_opts: [frames: []],
+        effect_authorizer: &allow_effect/2,
         oauth_resolver: &stub_resolver/1
       )
 
@@ -97,6 +114,7 @@ defmodule Arbor.Voice.Backend.XaiRealtimeTest do
       XaiRealtime.open(
         transport: FakeTransport,
         transport_opts: [frames: [frame]],
+        effect_authorizer: &allow_effect/2,
         oauth_resolver: &stub_resolver/1
       )
 
@@ -112,6 +130,7 @@ defmodule Arbor.Voice.Backend.XaiRealtimeTest do
       XaiRealtime.open(
         transport: FakeTransport,
         transport_opts: [frames: []],
+        effect_authorizer: &allow_effect/2,
         oauth_resolver: fn :xai -> {:ok, "super-secret-token-xyz"} end
       )
 
@@ -128,6 +147,7 @@ defmodule Arbor.Voice.Backend.XaiRealtimeTest do
     {:ok, session} =
       XaiRealtime.open(
         transport: TokenBearingTransport,
+        effect_authorizer: &allow_effect/2,
         oauth_resolver: fn :xai -> {:ok, "transport-retained-secret"} end
       )
 
@@ -148,6 +168,7 @@ defmodule Arbor.Voice.Backend.XaiRealtimeTest do
         XaiRealtime.open(
           transport: TokenBearingTransport,
           transport_opts: [mode: mode],
+          effect_authorizer: &allow_effect/2,
           oauth_resolver: fn :xai -> {:ok, token} end
         )
 
@@ -160,6 +181,7 @@ defmodule Arbor.Voice.Backend.XaiRealtimeTest do
       XaiRealtime.open(
         transport: TokenBearingTransport,
         transport_opts: [mode: :close_raise],
+        effect_authorizer: &allow_effect/2,
         oauth_resolver: fn :xai -> {:ok, token} end
       )
 
@@ -172,6 +194,7 @@ defmodule Arbor.Voice.Backend.XaiRealtimeTest do
              XaiRealtime.open(
                transport: FakeTransport,
                transport_opts: [frames: []],
+               effect_authorizer: &allow_effect/2,
                oauth_resolver: fn :xai -> {:error, :oauth_login_required} end
              )
   end
@@ -182,6 +205,7 @@ defmodule Arbor.Voice.Backend.XaiRealtimeTest do
              XaiRealtime.open(
                transport: FakeTransport,
                transport_opts: [connect_mode: {:error_echo, "super-secret-token-xyz"}],
+               effect_authorizer: &allow_effect/2,
                oauth_resolver: fn :xai -> {:ok, "super-secret-token-xyz"} end
              )
   end
@@ -192,6 +216,7 @@ defmodule Arbor.Voice.Backend.XaiRealtimeTest do
              XaiRealtime.open(
                transport: FakeTransport,
                transport_opts: [connect_mode: {:raise_echo, "super-secret-token-xyz"}],
+               effect_authorizer: &allow_effect/2,
                oauth_resolver: fn :xai -> {:ok, "super-secret-token-xyz"} end
              )
   end
@@ -207,6 +232,7 @@ defmodule Arbor.Voice.Backend.XaiRealtimeTest do
         host: "top-level-attacker.example",
         port: 444,
         path: "/top-level-attacker",
+        effect_authorizer: &allow_effect/2,
         transport_opts: [
           frames: [],
           token: "attacker-supplied",
@@ -232,6 +258,317 @@ defmodule Arbor.Voice.Backend.XaiRealtimeTest do
              runtime: "arbor",
              model: "grok-voice-latest"
            }
+  end
+
+  # ── P2 physical-effect authorization ──
+
+  @tag spec: "VOICE-17"
+  test "connect authorization precedes OAuth and transport with only effect and exact route" do
+    key = {__MODULE__, make_ref()}
+
+    authorizer = fn effect, route ->
+      record_event(key, {:authorize, effect, route})
+      :allow
+    end
+
+    resolver = fn :xai ->
+      record_event(key, :oauth)
+      {:ok, "ordered-connect-token"}
+    end
+
+    on_connect = fn -> record_event(key, :connect) end
+
+    assert {:ok, _session} =
+             XaiRealtime.open(
+               transport: FakeTransport,
+               transport_opts: [on_connect: on_connect],
+               effect_authorizer: authorizer,
+               oauth_resolver: resolver
+             )
+
+    assert events(key) == [
+             {:authorize, :connect,
+              %{
+                destination: "api.x.ai",
+                provider: "xai",
+                runtime: "arbor",
+                model: "grok-voice-latest"
+              }},
+             :oauth,
+             :connect
+           ]
+  end
+
+  @tag spec: "VOICE-17"
+  test "every physical frame has a distinct exact check immediately before its send" do
+    key = {__MODULE__, make_ref()}
+    route = XaiRealtime.egress_route()
+
+    authorizer = fn effect, received_route ->
+      record_event(key, {:authorize, effect, received_route})
+      :allow
+    end
+
+    on_send = fn frame -> record_event(key, {:send, frame["type"]}) end
+
+    {:ok, session} =
+      XaiRealtime.open(
+        transport: FakeTransport,
+        transport_opts: [on_send: on_send],
+        effect_authorizer: authorizer,
+        oauth_resolver: &stub_resolver/1
+      )
+
+    reset_events(key)
+    {:ok, session} = XaiRealtime.configure(session, %{})
+
+    assert events(key) == [
+             {:authorize, :configure, route},
+             {:send, "session.update"}
+           ]
+
+    reset_events(key)
+    {:ok, session} = XaiRealtime.send_text(session, "distinctive text")
+
+    assert events(key) == [
+             {:authorize, :text_item, route},
+             {:send, "conversation.item.create"},
+             {:authorize, :text_response, route},
+             {:send, "response.create"}
+           ]
+
+    reset_events(key)
+    {:ok, session} = XaiRealtime.send_audio(session, <<1, 2, 3>>)
+
+    assert events(key) == [
+             {:authorize, :audio_append, route},
+             {:send, "input_audio_buffer.append"},
+             {:authorize, :audio_commit, route},
+             {:send, "input_audio_buffer.commit"},
+             {:authorize, :audio_response, route},
+             {:send, "response.create"}
+           ]
+
+    reset_events(key)
+
+    {:ok, _session} =
+      XaiRealtime.send_tool_result(session, "distinctive-call-id", "distinctive output")
+
+    assert events(key) == [
+             {:authorize, :tool_result_item, route},
+             {:send, "conversation.item.create"},
+             {:authorize, :tool_result_response, route},
+             {:send, "response.create"}
+           ]
+  end
+
+  @tag :security_regression
+  @tag spec: "VOICE-17"
+  test "security regression: missing or faulting connect authority performs no OAuth or connect" do
+    secret = "distinctive-connect-authorizer-secret"
+
+    for mode <- [:missing, :deny, :malformed, :raise, :throw, :exit] do
+      key = {__MODULE__, mode, make_ref()}
+
+      resolver = fn :xai ->
+        record_event(key, :oauth)
+        {:ok, "must-not-resolve"}
+      end
+
+      on_connect = fn -> record_event(key, :connect) end
+
+      opts = [
+        transport: FakeTransport,
+        transport_opts: [on_connect: on_connect],
+        oauth_resolver: resolver
+      ]
+
+      opts =
+        if mode == :missing do
+          opts
+        else
+          authorizer = fn effect, route ->
+            record_event(key, {:authorize, effect, route})
+            authorizer_fault(mode, secret)
+          end
+
+          Keyword.put(opts, :effect_authorizer, authorizer)
+        end
+
+      result = XaiRealtime.open(opts)
+
+      assert result == {:error, :xai_effect_not_authorized}, "mode=#{mode}"
+      refute :oauth in events(key), "mode=#{mode}"
+      refute :connect in events(key), "mode=#{mode}"
+      refute inspect(result) =~ secret
+    end
+  end
+
+  @tag :security_regression
+  @tag spec: "VOICE-17"
+  test "security regression: denied or faulting frame authority performs zero sends" do
+    secret = "distinctive-frame-authorizer-secret"
+
+    for mode <- [:deny, :malformed, :raise, :throw, :exit] do
+      key = {__MODULE__, mode, make_ref()}
+
+      authorizer = fn
+        :connect, route ->
+          record_event(key, {:authorize, :connect, route})
+          :allow
+
+        :configure, route ->
+          record_event(key, {:authorize, :configure, route})
+          authorizer_fault(mode, secret)
+      end
+
+      on_send = fn frame -> record_event(key, {:send, frame["type"]}) end
+
+      {:ok, session} =
+        XaiRealtime.open(
+          transport: FakeTransport,
+          transport_opts: [on_send: on_send],
+          effect_authorizer: authorizer,
+          oauth_resolver: &stub_resolver/1
+        )
+
+      reset_events(key)
+      result = XaiRealtime.configure(session, %{})
+
+      assert result == {:error, :xai_effect_not_authorized}, "mode=#{mode}"
+      assert events(key) == [{:authorize, :configure, XaiRealtime.egress_route()}]
+      refute inspect(result) =~ secret
+      assert :ok = XaiRealtime.close(session)
+    end
+  end
+
+  @tag :security_regression
+  @tag spec: "VOICE-17"
+  test "security regression: second text-frame denial preserves the first physical effect" do
+    key = {__MODULE__, make_ref()}
+    route = XaiRealtime.egress_route()
+
+    authorizer = fn
+      effect, received_route when effect in [:connect, :text_item] ->
+        record_event(key, {:authorize, effect, received_route})
+        :allow
+
+      :text_response, received_route ->
+        record_event(key, {:authorize, :text_response, received_route})
+        {:error, :denied}
+    end
+
+    on_send = fn frame -> record_event(key, {:send, frame["type"]}) end
+
+    {:ok, session} =
+      XaiRealtime.open(
+        transport: FakeTransport,
+        transport_opts: [on_send: on_send],
+        effect_authorizer: authorizer,
+        oauth_resolver: &stub_resolver/1
+      )
+
+    reset_events(key)
+    assert {:error, :xai_effect_not_authorized} = XaiRealtime.send_text(session, "partial")
+
+    assert events(key) == [
+             {:authorize, :text_item, route},
+             {:send, "conversation.item.create"},
+             {:authorize, :text_response, route}
+           ]
+
+    assert :ok = XaiRealtime.close(session)
+  end
+
+  @tag :security_regression
+  @tag spec: "VOICE-17"
+  test "security regression: third audio-frame denial preserves both earlier physical effects" do
+    key = {__MODULE__, make_ref()}
+    route = XaiRealtime.egress_route()
+
+    authorizer = fn
+      effect, received_route when effect in [:connect, :audio_append, :audio_commit] ->
+        record_event(key, {:authorize, effect, received_route})
+        :allow
+
+      :audio_response, received_route ->
+        record_event(key, {:authorize, :audio_response, received_route})
+        {:error, :denied}
+    end
+
+    on_send = fn frame -> record_event(key, {:send, frame["type"]}) end
+
+    {:ok, session} =
+      XaiRealtime.open(
+        transport: FakeTransport,
+        transport_opts: [on_send: on_send],
+        effect_authorizer: authorizer,
+        oauth_resolver: &stub_resolver/1
+      )
+
+    reset_events(key)
+    assert {:error, :xai_effect_not_authorized} = XaiRealtime.send_audio(session, <<1, 2>>)
+
+    assert events(key) == [
+             {:authorize, :audio_append, route},
+             {:send, "input_audio_buffer.append"},
+             {:authorize, :audio_commit, route},
+             {:send, "input_audio_buffer.commit"},
+             {:authorize, :audio_response, route}
+           ]
+
+    assert :ok = XaiRealtime.close(session)
+  end
+
+  @tag spec: "VOICE-17"
+  test "session inspection redacts the retained authorizer and its captured secret" do
+    secret = "captured-effect-authorizer-secret"
+    key = {__MODULE__, make_ref()}
+
+    authorizer = fn _effect, _route ->
+      Process.put(key, secret)
+      :allow
+    end
+
+    {:ok, session} =
+      XaiRealtime.open(
+        transport: FakeTransport,
+        effect_authorizer: authorizer,
+        oauth_resolver: &stub_resolver/1
+      )
+
+    assert Process.get(key) == secret
+    refute inspect(session) =~ secret
+    refute inspect(session) =~ "effect_authorizer"
+    refute inspect(session) =~ "transport_state"
+  end
+
+  @tag spec: "VOICE-17"
+  test "recv and close do not invoke effect authorization" do
+    key = {__MODULE__, make_ref()}
+
+    authorizer = fn effect, route ->
+      record_event(key, {:authorize, effect, route})
+      :allow
+    end
+
+    frame = %{"type" => "response.output_text.delta", "delta" => "ready"}
+
+    {:ok, session} =
+      XaiRealtime.open(
+        transport: FakeTransport,
+        transport_opts: [frames: [frame]],
+        effect_authorizer: authorizer,
+        oauth_resolver: &stub_resolver/1
+      )
+
+    reset_events(key)
+
+    assert {:ok, session, {:output_text_delta, "ready"}} =
+             XaiRealtime.recv(session, 1_000)
+
+    assert :ok = XaiRealtime.close(session)
+    assert events(key) == []
   end
 
   # ── transport-level deadline arithmetic ──
@@ -341,6 +678,7 @@ defmodule Arbor.Voice.Backend.XaiRealtimeTest do
       XaiRealtime.open(
         transport: FakeTransport,
         transport_opts: [frames: frames],
+        effect_authorizer: &allow_effect/2,
         oauth_resolver: &stub_resolver/1
       )
 
@@ -373,6 +711,7 @@ defmodule Arbor.Voice.Backend.XaiRealtimeTest do
       XaiRealtime.open(
         transport: FakeTransport,
         transport_opts: [frames: frames, on_recv: advance],
+        effect_authorizer: &allow_effect/2,
         oauth_resolver: &stub_resolver/1,
         clock_fun: clock_fun
       )
@@ -387,6 +726,7 @@ defmodule Arbor.Voice.Backend.XaiRealtimeTest do
       XaiRealtime.open(
         transport: FakeTransport,
         transport_opts: [frames: [frame]],
+        effect_authorizer: &allow_effect/2,
         oauth_resolver: &stub_resolver/1
       )
 
@@ -414,6 +754,7 @@ defmodule Arbor.Voice.Backend.XaiRealtimeTest do
       XaiRealtime.open(
         transport: FakeTransport,
         transport_opts: [frames: frames],
+        effect_authorizer: &allow_effect/2,
         oauth_resolver: &stub_resolver/1
       )
 
@@ -432,6 +773,7 @@ defmodule Arbor.Voice.Backend.XaiRealtimeTest do
       XaiRealtime.open(
         transport: FakeTransport,
         transport_opts: [frames: []],
+        effect_authorizer: &allow_effect/2,
         oauth_resolver: &stub_resolver/1
       )
 

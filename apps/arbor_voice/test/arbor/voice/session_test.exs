@@ -66,6 +66,18 @@ defmodule Arbor.Voice.SessionTest do
     :ok
   end
 
+  @tag :security_regression
+  @tag spec: "VOICE-17"
+  test "security regression: public backend_opts cannot inject the internal effect authorizer" do
+    ctx = lifecycle_opts(backend_opts: [effect_authorizer: fn _, _ -> :allow end])
+    {user_id, agent_id} = unique_ids()
+
+    assert {:error, :invalid_opts} = Voice.start_session(user_id, agent_id, ctx.opts)
+    assert FakeLedger.calls(ctx.ledger) == []
+    assert TrackingResourceOwner.stats(ctx.owner_tracker).starts == 0
+    assert Registry.lookup(Arbor.Voice.Registry, {user_id, agent_id}) == []
+  end
+
   # ---------------------------------------------------------------------------
   # Table-driven startup failures
   # ---------------------------------------------------------------------------

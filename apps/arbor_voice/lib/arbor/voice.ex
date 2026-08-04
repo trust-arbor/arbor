@@ -101,6 +101,9 @@ defmodule Arbor.Voice do
     Explicit malformed → `{:error, :invalid_opts}`; malformed Application
     config → `{:error, :invalid_config}`.
   * `:tool_router_timeout_ms` — tool worker timeout (1..30000 ms).
+  * `:backend_opts` — backend-specific options. The internal
+    `:effect_authorizer` key is reserved for internally owned egress authority
+    and is rejected when supplied by a public caller.
 
   Malformed tool declarations or collaborator modules fail closed before
   resource/backend effects (`:invalid_opts` or `:invalid_config`).
@@ -790,10 +793,18 @@ defmodule Arbor.Voice do
         {:ok, []}
 
       {:ok, backend_opts} when is_list(backend_opts) ->
-        if Keyword.keyword?(backend_opts) and not has_duplicate_keys?(backend_opts) do
-          {:ok, backend_opts}
-        else
-          {:error, :invalid_opts}
+        cond do
+          not Keyword.keyword?(backend_opts) ->
+            {:error, :invalid_opts}
+
+          has_duplicate_keys?(backend_opts) ->
+            {:error, :invalid_opts}
+
+          Keyword.has_key?(backend_opts, :effect_authorizer) ->
+            {:error, :invalid_opts}
+
+          true ->
+            {:ok, backend_opts}
         end
 
       {:ok, _} ->

@@ -8,6 +8,10 @@ defmodule Arbor.Voice.Backend.XaiRealtime do
   `Arbor.Voice.Backend.XaiRealtime.Transport`, selected via `opts[:transport]`
   and defaulting to the real Mint implementation, so `recv/2`'s event mapping
   is unit-testable from scripted frames without any network access.
+
+  `:effect_authorizer` is a required internal arity-2 callback. It receives
+  only a closed effect atom and `egress_route/0`; missing, denied, malformed,
+  or faulting callbacks fail closed before the corresponding transport effect.
   """
 
   @behaviour Arbor.Voice.RealtimeBackend
@@ -18,6 +22,33 @@ defmodule Arbor.Voice.Backend.XaiRealtime do
   @default_host "api.x.ai"
   @default_port 443
   @default_path "/v1/realtime?model=grok-voice-latest"
+  @authorization_error :xai_effect_not_authorized
+  @effects [
+    :connect,
+    :configure,
+    :text_item,
+    :text_response,
+    :audio_append,
+    :audio_commit,
+    :audio_response,
+    :tool_result_item,
+    :tool_result_response
+  ]
+
+  @type effect ::
+          :connect
+          | :configure
+          | :text_item
+          | :text_response
+          | :audio_append
+          | :audio_commit
+          | :audio_response
+          | :tool_result_item
+          | :tool_result_response
+
+  @type effect_authorizer ::
+          (effect(), Arbor.Voice.RealtimeBackend.egress_route() ->
+             :allow | {:error, term()})
 
   @impl true
   def egress_route do
@@ -31,15 +62,16 @@ defmodule Arbor.Voice.Backend.XaiRealtime do
 
   defmodule Session do
     @moduledoc false
-    @derive {Inspect, except: [:transport_state]}
-    @enforce_keys [:transport_mod, :transport_state, :clock_fun]
-    defstruct [:transport_mod, :transport_state, :clock_fun, acc: ""]
+    @derive {Inspect, except: [:transport_state, :effect_authorizer]}
+    @enforce_keys [:transport_mod, :transport_state, :clock_fun, :effect_authorizer]
+    defstruct [:transport_mod, :transport_state, :clock_fun, :effect_authorizer, acc: ""]
   end
 
   # ── open/1 ──
 
   @impl true
   def open(opts) do
+    effect_authorizer = Keyword.get(opts, :effect_authorizer)
     resolver = Keyword.get(opts, :oauth_resolver, &OAuth.access_token/1)
     transport_mod = Keyword.get(opts, :transport, Transport)
     clock_fun = Keyword.get(opts, :clock_fun, fn -> System.monotonic_time(:millisecond) end)
@@ -52,19 +84,21 @@ defmodule Arbor.Voice.Backend.XaiRealtime do
       clock_fun: clock_fun
     ]
 
-    case resolver.(:xai) do
-      {:ok, token} when is_binary(token) ->
-        # Keyword.merge/2: keys in the 2nd list win on collision -- canonical
-        # is 2nd, so no caller input, including transport_opts, can override
-        # resolved credential or source-owned connection fields.
-        connect_opts = Keyword.merge(scripted, Keyword.put(canonical, :token, token))
-        connect_and_wrap(transport_mod, connect_opts, clock_fun)
+    with :ok <- authorize_effect(effect_authorizer, :connect) do
+      case resolver.(:xai) do
+        {:ok, token} when is_binary(token) ->
+          # Keyword.merge/2: keys in the 2nd list win on collision -- canonical
+          # is 2nd, so no caller input, including transport_opts, can override
+          # resolved credential or source-owned connection fields.
+          connect_opts = Keyword.merge(scripted, Keyword.put(canonical, :token, token))
+          connect_and_wrap(transport_mod, connect_opts, clock_fun, effect_authorizer)
 
-      {:error, _reason} = err ->
-        err
+        {:error, _reason} = err ->
+          err
 
-      _other ->
-        {:error, :invalid_oauth_resolver_result}
+        _other ->
+          {:error, :invalid_oauth_resolver_result}
+      end
     end
   rescue
     _exception -> {:error, :oauth_resolver_failed}
@@ -76,11 +110,16 @@ defmodule Arbor.Voice.Backend.XaiRealtime do
   # exception message. Collapse unconditionally to a stable, content-free
   # atom rather than scanning-and-scrubbing (unreliable if the token is
   # transformed/encoded before being echoed back).
-  defp connect_and_wrap(transport_mod, connect_opts, clock_fun) do
+  defp connect_and_wrap(transport_mod, connect_opts, clock_fun, effect_authorizer) do
     case transport_mod.connect(connect_opts) do
       {:ok, tstate} ->
         {:ok,
-         %Session{transport_mod: transport_mod, transport_state: tstate, clock_fun: clock_fun}}
+         %Session{
+           transport_mod: transport_mod,
+           transport_state: tstate,
+           clock_fun: clock_fun,
+           effect_authorizer: effect_authorizer
+         }}
 
       {:error, _reason} ->
         {:error, :xai_connect_failed}
@@ -101,7 +140,7 @@ defmodule Arbor.Voice.Backend.XaiRealtime do
       |> maybe_put("tools", Map.get(config, :tools))
       |> put_media(Map.get(config, :audio))
 
-    put_frame(session, %{"type" => "session.update", "session" => payload})
+    put_frame(session, :configure, %{"type" => "session.update", "session" => payload})
   end
 
   defp maybe_put(map, _key, nil), do: map
@@ -135,19 +174,20 @@ defmodule Arbor.Voice.Backend.XaiRealtime do
       }
     }
 
-    with {:ok, session} <- put_frame(session, frame),
-         do: put_frame(session, %{"type" => "response.create"})
+    with {:ok, session} <- put_frame(session, :text_item, frame),
+         do: put_frame(session, :text_response, %{"type" => "response.create"})
   end
 
   @impl true
   def send_audio(%Session{} = session, pcm) when is_binary(pcm) do
     with {:ok, session} <-
-           put_frame(session, %{
+           put_frame(session, :audio_append, %{
              "type" => "input_audio_buffer.append",
              "audio" => Base.encode64(pcm)
            }),
-         {:ok, session} <- put_frame(session, %{"type" => "input_audio_buffer.commit"}),
-         do: put_frame(session, %{"type" => "response.create"})
+         {:ok, session} <-
+           put_frame(session, :audio_commit, %{"type" => "input_audio_buffer.commit"}),
+         do: put_frame(session, :audio_response, %{"type" => "response.create"})
   end
 
   @impl true
@@ -157,21 +197,38 @@ defmodule Arbor.Voice.Backend.XaiRealtime do
       "item" => %{"type" => "function_call_output", "call_id" => call_id, "output" => output}
     }
 
-    with {:ok, session} <- put_frame(session, frame),
-         do: put_frame(session, %{"type" => "response.create"})
+    with {:ok, session} <- put_frame(session, :tool_result_item, frame),
+         do: put_frame(session, :tool_result_response, %{"type" => "response.create"})
   end
 
-  defp put_frame(%Session{} = session, frame) do
-    case session.transport_mod.send_frame(session.transport_state, frame) do
-      {:ok, tstate} -> {:ok, %{session | transport_state: tstate}}
-      {:error, :session_closed} -> {:error, :session_closed}
-      {:error, _reason} -> {:error, :xai_transport_failed}
+  defp put_frame(%Session{} = session, effect, frame) when effect in @effects do
+    with :ok <- authorize_effect(session.effect_authorizer, effect) do
+      case session.transport_mod.send_frame(session.transport_state, frame) do
+        {:ok, tstate} -> {:ok, %{session | transport_state: tstate}}
+        {:error, :session_closed} -> {:error, :session_closed}
+        {:error, _reason} -> {:error, :xai_transport_failed}
+      end
     end
   rescue
     _exception -> {:error, :xai_transport_failed}
   catch
     _kind, _reason -> {:error, :xai_transport_failed}
   end
+
+  defp authorize_effect(authorizer, effect)
+       when is_function(authorizer, 2) and effect in @effects do
+    case authorizer.(effect, egress_route()) do
+      :allow -> :ok
+      _denied_or_malformed -> {:error, @authorization_error}
+    end
+  rescue
+    _exception -> {:error, @authorization_error}
+  catch
+    _kind, _reason -> {:error, @authorization_error}
+  end
+
+  defp authorize_effect(_authorizer, effect) when effect in @effects,
+    do: {:error, @authorization_error}
 
   # ── recv/2 ──
 
