@@ -584,18 +584,19 @@ defmodule Arbor.Voice.Session do
 
     base = %{
       consult_agent: fn message when is_binary(message) ->
-        um =
-          message
-          |> UserMessage.from_voice(sender_id: user_id)
-          |> UserMessage.with_engagement(engagement_id)
-
-        opts =
+        {um, opts} =
           case redacted do
             nil ->
-              [timeout: tool_timeout_ms]
+              um =
+                message
+                |> UserMessage.from_voice(sender_id: user_id)
+                |> UserMessage.with_engagement(engagement_id)
+
+              {um, [timeout: tool_timeout_ms]}
 
             %Redacted{} = r ->
-              [timeout: tool_timeout_ms, session_token: Redacted.value(r)]
+              um = UserMessage.from_voice(message, sender_id: user_id)
+              {um, [timeout: tool_timeout_ms, session_token: Redacted.value(r)]}
           end
 
         agent_module.send_message(user_id, agent_id, um, opts)

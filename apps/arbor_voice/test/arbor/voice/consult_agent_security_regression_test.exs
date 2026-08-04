@@ -1,7 +1,8 @@
 defmodule Arbor.Voice.ConsultAgentSecurityRegressionTest do
   @moduledoc """
   Scripted xAI public-turn proof for production FrontDesk consult_agent
-  (VP-05B / VOICE-9) including session_token security regression.
+  (VP-05B / VOICE-9, partial VOICE-17) including session_token security
+  regression. VOICE-17 remains normatively planned.
   """
   use ExUnit.Case, async: false
 
@@ -255,7 +256,8 @@ defmodule Arbor.Voice.ConsultAgentSecurityRegressionTest do
     %{opts: opts, eng: eng, signals: signals, recorder: recorder}
   end
 
-  @tag spec: "VOICE-9"
+  @tag spec: "VOICE-9,VOICE-17"
+  @tag :security_regression
   test "security regression: public turn consult_agent schema, grounded reply, token isolation",
        %{
          opts: opts,
@@ -308,7 +310,7 @@ defmodule Arbor.Voice.ConsultAgentSecurityRegressionTest do
     assert call.message.content == "what is status?"
     assert call.message.transport == :voice
     assert call.message.sender_id == user_id
-    assert call.message.engagement_id == "eng_consult_e2e"
+    assert call.message.engagement_id == nil
     assert Keyword.get(call.opts, :timeout) == 5_000
     assert Keyword.get(call.opts, :session_token) == @distinctive_token
 
@@ -369,8 +371,9 @@ defmodule Arbor.Voice.ConsultAgentSecurityRegressionTest do
     assert :ok = Voice.stop_session(key)
   end
 
-  @tag spec: "VOICE-9"
-  test "security regression: missing proof omits session_token key rather than nil", %{
+  @tag spec: "VOICE-9,VOICE-17"
+  @tag :security_regression
+  test "security regression: missing proof retains engagement and omits session_token key", %{
     opts: opts
   } do
     FakeAgentFacade.reset()
@@ -393,6 +396,11 @@ defmodule Arbor.Voice.ConsultAgentSecurityRegressionTest do
     assert {:ok, "ok"} = Voice.text_turn(user_id, agent_id, "consult")
 
     assert [call] = FakeAgentFacade.calls()
+    assert %UserMessage{} = call.message
+    assert call.message.content == "no proof"
+    assert call.message.transport == :voice
+    assert call.message.sender_id == user_id
+    assert call.message.engagement_id == "eng_consult_e2e"
     assert Keyword.has_key?(call.opts, :timeout)
     refute Keyword.has_key?(call.opts, :session_token)
 
