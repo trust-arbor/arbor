@@ -33,6 +33,7 @@ defmodule Arbor.Orchestrator.Session.CancelTaskTest do
       turn_task_ref: nil,
       turn_task_pid: nil,
       turn_user_message: nil,
+      turn_authority: nil,
       streaming_buffer: nil,
       turn_queue: [],
       cancelled_task_ids: %{},
@@ -128,8 +129,8 @@ defmodule Arbor.Orchestrator.Session.CancelTaskTest do
       state =
         active_task_turn("task_a")
         |> Map.put(:turn_queue, [
-          {user_message("task b body", "task_b"), queue_from},
-          {user_message("interactive follow-up"), other_from}
+          {user_message("task b body", "task_b"), nil, queue_from},
+          {user_message("interactive follow-up"), nil, other_from}
         ])
 
       {:reply, :ok, new_state} =
@@ -184,8 +185,8 @@ defmodule Arbor.Orchestrator.Session.CancelTaskTest do
           cancelled_task_ids: %{"task_b" => true},
           cancelled_task_id_order: ["task_b"],
           turn_queue: [
-            {user_message("b work", "task_b"), from_b},
-            {msg_c, from_c}
+            {user_message("b work", "task_b"), nil, from_b},
+            {msg_c, nil, from_c}
           ]
         )
 

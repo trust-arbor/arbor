@@ -68,6 +68,10 @@ defmodule Arbor.Orchestrator.Session do
   require Logger
 
   alias Arbor.Contracts.Pipeline.Response, as: PipelineResponse
+  alias Arbor.Contracts.Security.DeliveryReceipt
+  alias Arbor.Contracts.Session.TurnAuthority
+  alias Arbor.Contracts.Session.UserMessage
+  alias Arbor.Identifiers
 
   alias Arbor.Orchestrator.Engine
   alias Arbor.Orchestrator.Session.Builders
@@ -138,6 +142,9 @@ defmodule Arbor.Orchestrator.Session do
     # the turn-timeout timer. On crash/cancel/timeout the partial is finalized as
     # an :interrupted/:cancelled AssistantMessage instead of being lost.
     turn_user_message: nil,
+    # Process-local authenticated-turn identity (nil for direct/unauthenticated sends).
+    # Never enters Engine values, checkpoints, signals, or public errors.
+    turn_authority: nil,
     streaming_buffer: nil,
     turn_task_pid: nil,
     turn_timeout_ref: nil,
@@ -149,6 +156,7 @@ defmodule Arbor.Orchestrator.Session do
     # mid-turn is appended to `turn_queue` (FIFO across engagements) and run when
     # the current turn finishes, rather than rejected. This preserves "one
     # continuous experience" without dropping input.
+    # Queue entries: {UserMessage, TurnAuthority | nil, GenServer.from()}.
     current_engagement_id: nil,
     transcripts: %{},
     turn_queue: [],
@@ -200,6 +208,7 @@ defmodule Arbor.Orchestrator.Session do
           discovered_tools: MapSet.t(),
           pid: pid() | nil,
           turn_user_message: Arbor.Contracts.Session.UserMessage.t() | nil,
+          turn_authority: TurnAuthority.t() | nil,
           streaming_buffer: map() | nil,
           turn_task_pid: pid() | nil,
           turn_timeout_ref: reference() | nil
@@ -255,6 +264,34 @@ defmodule Arbor.Orchestrator.Session do
   end
 
   @doc """
+  Send a user message authenticated by a one-use Security delivery receipt.
+
+  Accepts only an exact `%UserMessage{}` (native key set) and opaque
+  `%DeliveryReceipt{}`. Session derives the chat resource exclusively from
+  `state.agent_id`, consumes the receipt, binds the Security-owned principal to
+  `UserMessage.sender_id`, and allocates a fresh process-local `TurnAuthority`
+  with `disclosure_capability_id: nil`. Receipt/identity failures collapse to
+  `{:error, :unauthenticated}`. Does not accept caller-supplied authority,
+  turn ids, targets, routes, capability ids, or taint.
+  """
+  @spec send_authenticated_message(
+          GenServer.server(),
+          UserMessage.t(),
+          DeliveryReceipt.t()
+        ) ::
+          {:ok, %{text: String.t(), tool_history: [map()], tool_rounds: non_neg_integer()}}
+          | {:error, :unauthenticated | :legacy_mode | :cancelled | term()}
+  def send_authenticated_message(session, %UserMessage{} = message, %DeliveryReceipt{} = receipt) do
+    GenServer.call(
+      session,
+      {:send_authenticated_message, message, receipt},
+      Arbor.Orchestrator.Config.turn_timeout_ms()
+    )
+  end
+
+  def send_authenticated_message(_session, _message, _receipt), do: {:error, :unauthenticated}
+
+  @doc """
   Cancel the in-flight turn (user-initiated).
 
   Preserves whatever the assistant streamed so far as a `:cancelled`
@@ -306,7 +343,12 @@ defmodule Arbor.Orchestrator.Session do
   end
 
   @doc """
-  Return the current session state. Useful for testing and inspection.
+  Return a public projection of the current session state.
+
+  Active and queued `TurnAuthority` material is stripped (set to `nil`), and
+  identity-bearing fields on their associated `UserMessage` values are cleared,
+  so callers cannot read turn/principal/capability ids. Internal GenServer state
+  is unchanged; nil-authority compatibility messages are preserved.
   """
   @spec get_state(GenServer.server()) :: t()
   def get_state(session) do
@@ -541,20 +583,46 @@ defmodule Arbor.Orchestrator.Session do
     {:reply, {:error, :legacy_mode}, state}
   end
 
+  def handle_call(
+        {:send_authenticated_message, _message, receipt},
+        _from,
+        %{execution_mode: :legacy} = state
+      ) do
+    best_effort_discard_receipt(receipt)
+    {:reply, {:error, :legacy_mode}, state}
+  end
+
   # A send arriving mid-turn is QUEUED, not rejected. Single-mind serialization:
   # the one mind finishes its current turn, then drains the queue in FIFO order
   # (across all engagements). The caller's GenServer.call blocks until its turn
   # actually runs and replies (via turn_from). Coerce here so the queued entry is
   # already a typed envelope (carrying its engagement_id).
   # Reject immediately when the message's task_id was already cancelled (tombstone).
+  # Direct/compatibility calls always carry nil turn authority.
   def handle_call({:send_message, message}, from, %{turn_in_flight: true} = state) do
     user_message = coerce_user_message(message)
 
     if task_cancelled?(state, user_message_task_id(user_message)) do
       {:reply, {:error, :cancelled}, state}
     else
-      {:noreply, %{state | turn_queue: state.turn_queue ++ [{user_message, from}]}}
+      {:noreply, %{state | turn_queue: state.turn_queue ++ [{user_message, nil, from}]}}
     end
+  end
+
+  def handle_call({:send_authenticated_message, message, receipt}, from, state) do
+    handle_authenticated_message(message, receipt, from, state)
+  rescue
+    _ ->
+      best_effort_discard_receipt(receipt)
+      {:reply, {:error, :unauthenticated}, state}
+  catch
+    :throw, _ ->
+      best_effort_discard_receipt(receipt)
+      {:reply, {:error, :unauthenticated}, state}
+
+    :exit, _ ->
+      best_effort_discard_receipt(receipt)
+      {:reply, {:error, :unauthenticated}, state}
   end
 
   # STEERING: the running tool loop calls this (via the steer_check closure built in
@@ -564,6 +632,7 @@ defmodule Arbor.Orchestrator.Session do
   # turn). Returns :none when the queue is empty — the message is consumed here instead of
   # being drained as its own turn later, so no double-processing.
   # Skip (and cancel-reply) any leading queue entries whose task_id is tombstoned.
+  # Fold only when both active and queued authorities are nil; otherwise leave head.
   def handle_call(:take_steering, _from, %{turn_queue: [_ | _]} = state) do
     case pop_steering_message(state) do
       {:ok, content, new_state} ->
@@ -591,12 +660,14 @@ defmodule Arbor.Orchestrator.Session do
     if task_cancelled?(state, user_message_task_id(user_message)) do
       {:reply, {:error, :cancelled}, state}
     else
-      start_turn(user_message, from, state)
+      start_turn(user_message, nil, from, state)
     end
   end
 
   def handle_call(:get_state, _from, state) do
-    {:reply, state, state}
+    # Public status projection: never leak TurnAuthority fields/ids to callers.
+    # Internal process state (including turn_authority / queue authorities) is unchanged.
+    {:reply, public_state_projection(state), state}
   end
 
   # User cancellation: preserve whatever streamed as a :cancelled partial, kill the
@@ -715,11 +786,17 @@ defmodule Arbor.Orchestrator.Session do
     end
   end
 
-  defp do_send_message_async(%Arbor.Contracts.Session.UserMessage{} = user_message, from, state) do
+  defp do_send_message_async(
+         %UserMessage{} = user_message,
+         turn_authority,
+         from,
+         state
+       ) do
     state = transition_phase(state, :idle, :input_received, :processing)
     # The engine still receives the bare content string — only the persistence
     # path needs the typed envelope, and that's threaded via the {:turn_result,
-    # user_message, result} tuple below.
+    # user_message, result} tuple below. TurnAuthority / receipts never enter
+    # builders, engine opts, or preprocessor values.
     values =
       state
       |> Builders.build_turn_values(user_message.content)
@@ -776,6 +853,7 @@ defmodule Arbor.Orchestrator.Session do
         turn_caller_ref: caller_ref,
         turn_started_at: System.monotonic_time(),
         turn_user_message: user_message,
+        turn_authority: turn_authority,
         streaming_buffer: %{content: "", started_at: DateTime.utc_now(), first_token_at: nil},
         turn_timeout_ref: timeout_ref
     }
@@ -852,11 +930,14 @@ defmodule Arbor.Orchestrator.Session do
 
   defp purge_queued_task(state, task_id) when is_binary(task_id) do
     {kept, removed} =
-      Enum.split_with(state.turn_queue || [], fn {user_message, _from} ->
+      Enum.split_with(state.turn_queue || [], fn {user_message, _authority, _from} ->
         user_message_task_id(user_message) != task_id
       end)
 
-    Enum.each(removed, fn {_msg, from} -> safe_reply(from, {:error, :cancelled}) end)
+    Enum.each(removed, fn {_msg, _authority, from} ->
+      safe_reply(from, {:error, :cancelled})
+    end)
+
     %{state | turn_queue: kept}
   end
 
@@ -876,17 +957,25 @@ defmodule Arbor.Orchestrator.Session do
 
   # Pop the next non-tombstoned queue entry for steering. Cancel-reply and skip
   # any leading entries whose task was cancelled while queued.
+  # Authority-bearing active turn or queue head: leave head, return :none.
   defp pop_steering_message(%{turn_queue: []} = state), do: {:none, state}
 
-  defp pop_steering_message(%{turn_queue: [{user_message, caller_from} | rest]} = state) do
-    state = %{state | turn_queue: rest}
-
+  defp pop_steering_message(
+         %{turn_queue: [{user_message, queued_authority, caller_from} | rest]} = state
+       ) do
     if task_cancelled?(state, user_message_task_id(user_message)) do
+      state = %{state | turn_queue: rest}
       safe_reply(caller_from, {:error, :cancelled})
       pop_steering_message(state)
     else
-      new_state = %{state | steer_froms: [caller_from | state.steer_froms]}
-      {:ok, user_message.content, new_state}
+      if is_nil(state.turn_authority) and is_nil(queued_authority) do
+        state = %{state | turn_queue: rest}
+        new_state = %{state | steer_froms: [caller_from | state.steer_froms]}
+        {:ok, user_message.content, new_state}
+      else
+        # Do not consume or reorder an authority-bearing boundary.
+        {:none, state}
+      end
     end
   end
 
@@ -914,7 +1003,10 @@ defmodule Arbor.Orchestrator.Session do
   def handle_info(:drain_queue, %{turn_in_flight: true} = state), do: {:noreply, state}
   def handle_info(:drain_queue, %{turn_queue: []} = state), do: {:noreply, state}
 
-  def handle_info(:drain_queue, %{turn_queue: [{user_message, from} | rest]} = state) do
+  def handle_info(
+        :drain_queue,
+        %{turn_queue: [{user_message, turn_authority, from} | rest]} = state
+      ) do
     state = %{state | turn_queue: rest}
 
     if task_cancelled?(state, user_message_task_id(user_message)) do
@@ -922,7 +1014,7 @@ defmodule Arbor.Orchestrator.Session do
       send(self(), :drain_queue)
       {:noreply, state}
     else
-      start_turn(user_message, from, state)
+      start_turn(user_message, turn_authority, from, state)
     end
   end
 
@@ -1230,18 +1322,143 @@ defmodule Arbor.Orchestrator.Session do
   # Replies are sent explicitly (GenServer.reply) so this returns {:noreply, _}
   # uniformly, matching do_send_message_async (which replies later from the turn
   # task). On auth failure the caller is told and the session stays idle.
-  defp start_turn(user_message, from, state) do
+  # `turn_authority` is process-local only and never enters builders/engine.
+  defp start_turn(user_message, turn_authority, from, state) do
     state = maybe_switch_engagement(state, user_message.engagement_id)
 
     case authorize_orchestrator(state) do
       :ok ->
-        do_send_message_async(user_message, from, state)
+        do_send_message_async(user_message, turn_authority, from, state)
 
       {:error, reason} ->
         safe_reply(from, {:error, {:unauthorized, reason}})
         {:noreply, state}
     end
   end
+
+  # Receipt-authenticated ingress: consume one-use receipt, bind principal,
+  # allocate TurnAuthority. Receipt never enters state/queue.
+  defp handle_authenticated_message(message, receipt, from, state) do
+    with {:ok, user_message} <- canonicalize_authenticated_user_message(message),
+         {:ok, valid_receipt} <- DeliveryReceipt.canonicalize(receipt),
+         {:ok, authority} <- exchange_receipt_for_authority(valid_receipt, user_message, state) do
+      if task_cancelled?(state, user_message_task_id(user_message)) do
+        {:reply, {:error, :cancelled}, state}
+      else
+        if state.turn_in_flight do
+          {:noreply, %{state | turn_queue: state.turn_queue ++ [{user_message, authority, from}]}}
+        else
+          start_turn(user_message, authority, from, state)
+        end
+      end
+    else
+      {:error, :unauthenticated} ->
+        best_effort_discard_receipt(receipt)
+        {:reply, {:error, :unauthenticated}, state}
+
+      {:error, _} ->
+        best_effort_discard_receipt(receipt)
+        {:reply, {:error, :unauthenticated}, state}
+    end
+  end
+
+  @user_message_native_keys [
+    :__struct__,
+    :content,
+    :engagement_id,
+    :sender,
+    :sender_id,
+    :sent_at,
+    :transport,
+    :transport_metadata
+  ]
+
+  # Exact native key set only — embellished forged struct maps fail closed.
+  defp canonicalize_authenticated_user_message(%UserMessage{} = msg) do
+    if Enum.sort(Map.keys(msg)) == @user_message_native_keys do
+      {:ok,
+       %UserMessage{
+         content: msg.content,
+         sent_at: msg.sent_at,
+         sender: msg.sender,
+         sender_id: msg.sender_id,
+         transport: msg.transport,
+         transport_metadata: msg.transport_metadata,
+         engagement_id: msg.engagement_id
+       }}
+    else
+      {:error, :unauthenticated}
+    end
+  end
+
+  defp canonicalize_authenticated_user_message(_), do: {:error, :unauthenticated}
+
+  defp exchange_receipt_for_authority(receipt, user_message, state) do
+    resource = "arbor://chat/agent/" <> state.agent_id
+
+    case Arbor.Security.consume_delivery_receipt(receipt, resource, :chat) do
+      {:ok, principal} when is_binary(principal) ->
+        if principal == user_message.sender_id do
+          turn_id = Identifiers.generate_id("turn_")
+
+          case TurnAuthority.new(
+                 turn_id: turn_id,
+                 authenticated_principal_id: principal,
+                 disclosure_capability_id: nil
+               ) do
+            {:ok, authority} -> {:ok, authority}
+            {:error, _} -> {:error, :unauthenticated}
+          end
+        else
+          # Receipt already consumed — destructive; cannot retry with corrected claim.
+          {:error, :unauthenticated}
+        end
+
+      {:error, _} ->
+        {:error, :unauthenticated}
+
+      _ ->
+        {:error, :unauthenticated}
+    end
+  end
+
+  defp best_effort_discard_receipt(receipt) do
+    _ = Arbor.Security.discard_delivery_receipt(receipt)
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
+  end
+
+  # Strip process-local turn authority from any public status surface.
+  # Authority-bearing messages also lose identity-bearing adapter fields; nil-
+  # authority compatibility messages remain byte-for-byte unchanged.
+  defp public_state_projection(state) do
+    sanitized_queue =
+      Enum.map(state.turn_queue || [], fn
+        {msg, authority, from} -> {sanitize_authority_message(msg, authority), nil, from}
+        other -> other
+      end)
+
+    sanitized_turn_message =
+      sanitize_authority_message(state.turn_user_message, state.turn_authority)
+
+    %{
+      state
+      | turn_authority: nil,
+        turn_user_message: sanitized_turn_message,
+        turn_queue: sanitized_queue
+    }
+  end
+
+  defp sanitize_authority_message(message, nil), do: message
+
+  defp sanitize_authority_message(%UserMessage{} = message, %TurnAuthority{}) do
+    %{message | sender: nil, sender_id: nil, transport_metadata: %{}}
+  end
+
+  defp sanitize_authority_message(message, %TurnAuthority{}), do: message
 
   # End the current turn and trigger draining of any queued turns. The drain runs
   # as a self-message after this handler returns (turn_in_flight already cleared
@@ -1264,6 +1481,7 @@ defmodule Arbor.Orchestrator.Session do
         turn_caller_ref: nil,
         turn_started_at: nil,
         turn_user_message: nil,
+        turn_authority: nil,
         streaming_buffer: nil,
         turn_timeout_ref: nil
     }

@@ -1335,7 +1335,8 @@ defmodule Arbor.Orchestrator.SessionTest do
         %{
           state
           | turn_in_flight: true,
-            turn_queue: [{%{content: "also check the config"}, fake_from}],
+            turn_queue: [{%{content: "also check the config"}, nil, fake_from}],
+            turn_authority: nil,
             steer_froms: []
         }
       end)
@@ -1366,7 +1367,8 @@ defmodule Arbor.Orchestrator.SessionTest do
         %{
           s
           | turn_in_flight: true,
-            turn_queue: [{%{content: "STEER: also verify config"}, fake_from}],
+            turn_queue: [{%{content: "STEER: also verify config"}, nil, fake_from}],
+            turn_authority: nil,
             steer_froms: []
         }
       end)
