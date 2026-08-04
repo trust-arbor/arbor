@@ -112,16 +112,13 @@ defmodule Arbor.Security do
         opts
       )
 
-  # Delivery-receipt issue admits only these keys. Never silently strip.
-  # Rejected explicitly (among others): :verify_identity, :task_id, :principal_scope.
-  @issue_admitted_opts [
-    :session_token,
-    :signed_request,
-    :identity_verified,
-    :signer,
-    :session_id,
-    :expected_resource
-  ]
+  # Delivery-receipt issue admits only cryptographic proof keys. Never silently
+  # strip. Explicitly forbidden (among others): :identity_verified,
+  # :verify_identity (caller), :task_id, :principal_scope.
+  @issue_session_mode_keys [:session_token]
+  @issue_signed_mode_keys [:signed_request, :signer, :session_id, :expected_resource]
+  @issue_admitted_opts [:session_token, :signed_request, :signer, :session_id, :expected_resource]
+  @max_issue_human_principal_bytes 256
 
   @doc """
   Authorize a human principal and exchange success for a one-use delivery receipt.
@@ -130,15 +127,16 @@ defmodule Arbor.Security do
   to `authorize/4`. The receipt carries no principal, resource, action, or
   session proof — only a Security-owned broker entry does.
 
-  Proof options (exactly one proof mode):
-  - `:session_token` — human HMAC session proof
-  - `:signed_request` — signed request proof
-  - `:identity_verified` — must be exactly `true` (Gateway pre-verified)
+  Exactly one active cryptographic proof mode is required:
+  - `:session_token` — human HMAC session proof (no companions)
+  - `:signed_request` — signed request proof; optional companions `:signer`,
+    `:session_id`, `:expected_resource`. After closed option validation the
+    wrapper injects `verify_identity: true` so verification always runs,
+    regardless of the global identity-verification default.
 
-  Optional companions: `:signer`, `:session_id`, `:expected_resource`.
   Public options may not select TTL, capacity, broker, clock, collaborators,
-  `:verify_identity`, `:task_id`, or `:principal_scope`. Verification cannot be
-  disabled through this wrapper (`identity_verified: false` is rejected).
+  `:identity_verified`, `:verify_identity`, `:task_id`, or `:principal_scope`.
+  Modes are mutually exclusive; proof-specific companions cannot cross modes.
   """
   @spec authorize_and_issue_delivery_receipt(String.t(), String.t(), atom() | nil, keyword()) ::
           {:ok, DeliveryReceipt.t()}
@@ -195,10 +193,8 @@ defmodule Arbor.Security do
           {:ok, String.t()} | {:error, :invalid_receipt | :broker_unavailable}
   def consume_delivery_receipt(receipt, resource_uri, action)
       when is_binary(resource_uri) do
-    case DeliveryReceipt.canonicalize(receipt) do
-      {:ok, valid} ->
-        token = Map.get(valid, :token)
-
+    case DeliveryReceipt.bearer_token(receipt) do
+      {:ok, token} ->
         case DeliveryReceiptBroker.consume(token, resource_uri, action) do
           {:ok, principal_id} when is_binary(principal_id) ->
             {:ok, principal_id}
@@ -230,10 +226,8 @@ defmodule Arbor.Security do
   @spec discard_delivery_receipt(term()) ::
           :ok | {:error, :invalid_receipt | :broker_unavailable}
   def discard_delivery_receipt(receipt) do
-    case DeliveryReceipt.canonicalize(receipt) do
-      {:ok, valid} ->
-        token = Map.get(valid, :token)
-
+    case DeliveryReceipt.bearer_token(receipt) do
+      {:ok, token} ->
         case DeliveryReceiptBroker.discard(token) do
           :ok -> :ok
           {:error, :broker_unavailable} -> {:error, :broker_unavailable}
@@ -251,13 +245,20 @@ defmodule Arbor.Security do
   end
 
   # Bounded canonical human principal: non-empty, valid UTF-8, no NUL, `human_`
-  # namespace only (reuses SigningAuthority principal bounds; agents rejected).
+  # namespace only, ≤256 bytes (Agent message-facade ceiling). Agents rejected.
   defp validate_issue_human_principal(principal_id) do
     case SigningAuthorityValidator.validate_principal_id(principal_id) do
       :ok ->
-        if String.starts_with?(principal_id, "human_"),
-          do: :ok,
-          else: {:error, :invalid_principal}
+        cond do
+          not String.starts_with?(principal_id, "human_") ->
+            {:error, :invalid_principal}
+
+          byte_size(principal_id) > @max_issue_human_principal_bytes ->
+            {:error, :invalid_principal}
+
+          true ->
+            :ok
+        end
 
       {:error, _} ->
         {:error, :invalid_principal}
@@ -292,28 +293,35 @@ defmodule Arbor.Security do
     _, _ -> {:error, :invalid_opts}
   end
 
-  # Exactly one proof mode:
-  #   - :session_token (alone as proof; may pair with identity_verified: true)
-  #   - :signed_request (alone as proof; may pair with identity_verified: true)
-  #   - :identity_verified exactly true (Gateway pre-verified, no raw proof)
-  # Optional companions: :signer, :session_id, :expected_resource.
-  # Both session_token and signed_request together is improper.
-  # identity_verified present and not exactly true is rejected (cannot disable).
+  # Exactly one active cryptographic proof mode:
+  #   - :session_token alone (no companions)
+  #   - :signed_request with optional :signer / :session_id / :expected_resource
+  # Caller :identity_verified and :verify_identity are never admitted.
+  # Signed mode injects verify_identity: true after validation so authorize/4
+  # always verifies regardless of the global identity-verification default.
   defp validate_issue_proof_shape(opts) do
     has_session = Keyword.has_key?(opts, :session_token)
     has_signed = Keyword.has_key?(opts, :signed_request)
-    has_verified_key = Keyword.has_key?(opts, :identity_verified)
-    verified = Keyword.get(opts, :identity_verified)
+    keys = Keyword.keys(opts)
 
     cond do
-      has_verified_key and verified != true ->
-        {:error, :invalid_opts}
-
       has_session and has_signed ->
         {:error, :invalid_opts}
 
-      has_session or has_signed or verified == true ->
-        {:ok, opts}
+      has_session ->
+        if Enum.all?(keys, &(&1 in @issue_session_mode_keys)) do
+          {:ok, opts}
+        else
+          {:error, :invalid_opts}
+        end
+
+      has_signed ->
+        if Enum.all?(keys, &(&1 in @issue_signed_mode_keys)) do
+          # Force active verification after closed caller-option validation.
+          {:ok, Keyword.put(opts, :verify_identity, true)}
+        else
+          {:error, :invalid_opts}
+        end
 
       true ->
         {:error, :invalid_opts}

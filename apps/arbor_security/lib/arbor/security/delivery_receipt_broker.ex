@@ -131,7 +131,15 @@ defmodule Arbor.Security.DeliveryReceiptBroker do
 
   @impl true
   def handle_call({:issue, principal_id, resource_uri, action}, _from, state) do
-    state = prune_expired(state)
+    # Skip O(n) expiry prune while under capacity; prune once at capacity and
+    # re-check before returning :broker_full. Periodic cleanup still runs.
+    state =
+      if map_size(state.entries) >= state.max_entries do
+        prune_expired(state)
+      else
+        state
+      end
+
     now = state.clock.()
 
     cond do

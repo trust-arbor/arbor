@@ -40,18 +40,44 @@ defmodule Arbor.Contracts.Security.DeliveryReceipt do
   def new(_), do: {:error, :invalid_attrs}
 
   @doc """
-  Canonicalize any term into a validated receipt without raising.
+  Canonicalize a term into a validated receipt without raising.
 
-  Re-validates through `new/1` so a forged struct tag cannot bypass the
-  one-field closed shape.
+  Accepts only an exact `%DeliveryReceipt{token: token}` whose map keys are
+  exactly `[:__struct__, :token]`. Raw maps, keywords, and forged struct-tag
+  maps with extra keys are rejected. Token validation is the same as `new/1`.
   """
   @spec canonicalize(term()) :: {:ok, t()} | {:error, atom()}
   def canonicalize(%__MODULE__{} = receipt) do
-    new(%{token: Map.get(receipt, :token)})
+    if Enum.sort(Map.keys(receipt)) == [:__struct__, :token] do
+      token = Map.get(receipt, :token)
+
+      case validate_token(token) do
+        :ok -> {:ok, %__MODULE__{token: token}}
+        {:error, reason} -> {:error, reason}
+      end
+    else
+      {:error, :invalid_receipt}
+    end
   end
 
-  def canonicalize(attrs) when is_map(attrs) or is_list(attrs), do: new(attrs)
   def canonicalize(_), do: {:error, :invalid_receipt}
+
+  @doc """
+  Extract the bearer token from an exact validated delivery receipt.
+
+  Performs the same closed-shape validation as `canonicalize/1`. Prefer this
+  over reading fields from an opaque receipt.
+  """
+  @spec bearer_token(term()) :: {:ok, binary()} | {:error, atom()}
+  def bearer_token(receipt) do
+    case canonicalize(receipt) do
+      {:ok, %__MODULE__{} = valid} ->
+        {:ok, Map.get(valid, :token)}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
 
   defp validate_token(token) when is_binary(token) and byte_size(token) == @token_bytes do
     if token == :binary.copy(<<0>>, @token_bytes) do

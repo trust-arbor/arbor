@@ -1,5 +1,7 @@
 defmodule Arbor.Contracts.Security.DeliveryReceiptTest do
   use ExUnit.Case, async: true
+  @moduletag :fast
+  @moduletag voice_id: "VOICE-17"
 
   alias Arbor.Contracts.Security.DeliveryReceipt
 
@@ -13,7 +15,7 @@ defmodule Arbor.Contracts.Security.DeliveryReceiptTest do
       assert Map.keys(Map.from_struct(receipt)) == [:token]
     end
 
-    test "accepts string key token" do
+    test "accepts string key token as constructor input" do
       assert {:ok, receipt} = DeliveryReceipt.new(%{"token" => @token})
       assert Map.get(receipt, :token) == @token
     end
@@ -44,14 +46,35 @@ defmodule Arbor.Contracts.Security.DeliveryReceiptTest do
     end
   end
 
-  describe "canonicalize/1" do
-    test "re-validates genuine receipts and rejects hostile partial maps" do
+  describe "canonicalize/1 and bearer_token/1" do
+    test "accepts exact DeliveryReceipt structs only" do
       assert {:ok, receipt} = DeliveryReceipt.new(token: @token)
       assert {:ok, ^receipt} = DeliveryReceipt.canonicalize(receipt)
+      assert {:ok, @token} = DeliveryReceipt.bearer_token(receipt)
+    end
 
-      hostile = %{__struct__: DeliveryReceipt, token: :crypto.strong_rand_bytes(16)}
-      assert {:error, :token_wrong_size} = DeliveryReceipt.canonicalize(hostile)
+    test "rejects raw maps, keywords, and embellished forged struct tags" do
+      assert {:error, :invalid_receipt} = DeliveryReceipt.canonicalize(%{token: @token})
+      assert {:error, :invalid_receipt} = DeliveryReceipt.canonicalize(token: @token)
+
+      embellished = %{__struct__: DeliveryReceipt, token: @token, extra: true}
+      assert {:error, :invalid_receipt} = DeliveryReceipt.canonicalize(embellished)
+
+      assert {:error, :invalid_receipt} = DeliveryReceipt.bearer_token(%{token: @token})
+      assert {:error, :invalid_receipt} = DeliveryReceipt.bearer_token(token: @token)
+      assert {:error, :invalid_receipt} = DeliveryReceipt.bearer_token(embellished)
       assert {:error, :invalid_receipt} = DeliveryReceipt.canonicalize(:nope)
+      assert {:error, :invalid_receipt} = DeliveryReceipt.bearer_token(:nope)
+    end
+
+    test "rejects exact-shape structs with invalid tokens" do
+      wrong_size = %{__struct__: DeliveryReceipt, token: :crypto.strong_rand_bytes(16)}
+      assert {:error, :token_wrong_size} = DeliveryReceipt.canonicalize(wrong_size)
+      assert {:error, :token_wrong_size} = DeliveryReceipt.bearer_token(wrong_size)
+
+      zero = %{__struct__: DeliveryReceipt, token: :binary.copy(<<0>>, 32)}
+      assert {:error, :zero_token} = DeliveryReceipt.canonicalize(zero)
+      assert {:error, :zero_token} = DeliveryReceipt.bearer_token(zero)
     end
   end
 

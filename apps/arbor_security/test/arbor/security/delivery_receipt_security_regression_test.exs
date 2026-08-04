@@ -41,6 +41,7 @@ defmodule Arbor.Security.DeliveryReceiptSecurityRegressionTest do
 
   alias Arbor.Contracts.Security.DeliveryReceipt
   alias Arbor.Contracts.Security.Identity
+  alias Arbor.Contracts.Security.SignedRequest
   alias Arbor.Security
   alias Arbor.Security.DeliveryReceiptBroker
   alias Arbor.Security.SessionToken
@@ -154,9 +155,20 @@ defmodule Arbor.Security.DeliveryReceiptSecurityRegressionTest do
   end
 
   defp register_human! do
+    {human_id, _private_key} = register_human_with_keys!()
+    human_id
+  end
+
+  # Returns {human_id, private_key} so signed-request happy paths can build a
+  # genuine SignedRequest with the registered human identity's Ed25519 key.
+  defp register_human_with_keys! do
     n = System.unique_integer([:positive])
     oidc = Arbor.Security.OIDCTestHelper.issue_identity(subject: "vp05d2a1r-#{n}")
     human_id = oidc.identity.agent_id
+    private_key = oidc.identity.private_key
+
+    assert is_binary(private_key)
+    assert byte_size(private_key) in [32, 64]
 
     assert :ok =
              Security.register_oidc_identity(oidc.identity, oidc.id_token, oidc.provider)
@@ -166,7 +178,7 @@ defmodule Arbor.Security.DeliveryReceiptSecurityRegressionTest do
       _ = Security.deregister_identity(human_id)
     end)
 
-    human_id
+    {human_id, private_key}
   end
 
   defp grant!(principal, resource, opts \\ []) do
@@ -224,6 +236,30 @@ defmodule Arbor.Security.DeliveryReceiptSecurityRegressionTest do
                )
 
       assert {:ok, ^human_id} = Security.consume_delivery_receipt(receipt, resource, :chat)
+    end
+
+    test "security regression: genuine signed_request issues receipt and exact consume", %{
+      active_before: active_before
+    } do
+      {human_id, private_key} = register_human_with_keys!()
+      resource = resource!()
+      grant!(human_id, resource)
+
+      assert {:ok, signed} =
+               SignedRequest.sign("authorize", human_id, private_key)
+
+      assert {:ok, receipt} =
+               Security.authorize_and_issue_delivery_receipt(human_id, resource, :chat,
+                 signed_request: signed
+               )
+
+      assert %DeliveryReceipt{} = receipt
+      assert broker_active() == active_before + 1
+
+      assert {:ok, ^human_id} =
+               Security.consume_delivery_receipt(receipt, resource, :chat)
+
+      assert broker_active() == active_before
     end
 
     test "security regression: replay forged resource/action mismatch reject" do
@@ -394,6 +430,10 @@ defmodule Arbor.Security.DeliveryReceiptSecurityRegressionTest do
             [verify_identity: true],
             [verify_identity: false],
             [session_token: token, signed_request: %{agent_id: human_id}],
+            # Cross-mode companions on session proof
+            [session_token: token, signer: :x],
+            [session_token: token, session_id: "s"],
+            [session_token: token, expected_resource: resource],
             [],
             :not_a_keyword
           ] do
@@ -409,7 +449,7 @@ defmodule Arbor.Security.DeliveryReceiptSecurityRegressionTest do
       assert_no_new_broker_entry(active_before)
     end
 
-    test "security regression: identity_verified false cannot disable verification", %{
+    test "security regression: identity_verified never admitted for issue", %{
       active_before: active_before
     } do
       human_id = register_human!()
@@ -417,20 +457,36 @@ defmodule Arbor.Security.DeliveryReceiptSecurityRegressionTest do
       grant!(human_id, resource)
       assert {:ok, token} = SessionToken.generate(human_id)
 
-      # Bare false — rejected before authorize
+      forged_sr = %{
+        agent_id: human_id,
+        public_key: :crypto.strong_rand_bytes(32),
+        payload: "authorize",
+        signature: :crypto.strong_rand_bytes(64),
+        nonce: Base.encode16(:crypto.strong_rand_bytes(16), case: :lower),
+        timestamp: System.system_time(:second)
+      }
+
+      # Bare identity_verified: true — authentication bypass closed
       assert {:error, :invalid_opts} =
                Security.authorize_and_issue_delivery_receipt(human_id, resource, :chat,
-                 identity_verified: false
+                 identity_verified: true
                )
 
-      # False paired with a real session token — still rejected (cannot disable)
+      # Combined with valid session token
       assert {:error, :invalid_opts} =
                Security.authorize_and_issue_delivery_receipt(human_id, resource, :chat,
                  session_token: token,
-                 identity_verified: false
+                 identity_verified: true
                )
 
-      # Non-true values also rejected (true is the atom :true in Elixir)
+      # Combined with forged signed request
+      assert {:error, :invalid_opts} =
+               Security.authorize_and_issue_delivery_receipt(human_id, resource, :chat,
+                 signed_request: forged_sr,
+                 identity_verified: true
+               )
+
+      # False / non-true values also rejected (key never admitted)
       for bad <- [nil, 0, 1, "true", false] do
         assert {:error, :invalid_opts} =
                  Security.authorize_and_issue_delivery_receipt(human_id, resource, :chat,
@@ -439,18 +495,39 @@ defmodule Arbor.Security.DeliveryReceiptSecurityRegressionTest do
       end
 
       assert_no_new_broker_entry(active_before)
-
-      # Exactly true with session_token remains admitted (token still verified by authorize)
-      assert {:ok, receipt} =
-               Security.authorize_and_issue_delivery_receipt(human_id, resource, :chat,
-                 session_token: token,
-                 identity_verified: true
-               )
-
-      assert {:ok, ^human_id} = Security.consume_delivery_receipt(receipt, resource, :chat)
     end
 
-    test "security regression: non-canonical human principal rejected before authorize", %{
+    test "security regression: invalid signed proof rejected with identity verification disabled",
+         %{
+           active_before: active_before
+         } do
+      human_id = register_human!()
+      resource = resource!()
+      grant!(human_id, resource)
+
+      Application.put_env(:arbor_security, :identity_verification, false)
+
+      forged_sr = %{
+        agent_id: human_id,
+        public_key: :crypto.strong_rand_bytes(32),
+        payload: "authorize",
+        signature: :crypto.strong_rand_bytes(64),
+        nonce: Base.encode16(:crypto.strong_rand_bytes(16), case: :lower),
+        timestamp: System.system_time(:second)
+      }
+
+      # Wrapper forces verify_identity: true; forged signed proof must not issue.
+      assert {:error, :unauthorized} =
+               Security.authorize_and_issue_delivery_receipt(human_id, resource, :chat,
+                 signed_request: forged_sr
+               )
+
+      assert_no_new_broker_entry(active_before)
+
+      Application.put_env(:arbor_security, :identity_verification, true)
+    end
+
+    test "security regression: non-canonical and oversized human principal rejected", %{
       active_before: active_before
     } do
       resource = resource!()
@@ -461,6 +538,7 @@ defmodule Arbor.Security.DeliveryReceiptSecurityRegressionTest do
             "human_" <> <<0xFF>>,
             "agent_not_allowed",
             "service_x",
+            "human_" <> String.duplicate("x", 300),
             :not_binary,
             nil
           ] do
@@ -471,6 +549,43 @@ defmodule Arbor.Security.DeliveryReceiptSecurityRegressionTest do
       end
 
       assert_no_new_broker_entry(active_before)
+    end
+
+    test "security regression: raw map and embellished receipt rejected on consume/discard" do
+      human_id = register_human!()
+      resource = resource!()
+      grant!(human_id, resource)
+      assert {:ok, token} = SessionToken.generate(human_id)
+
+      assert {:ok, receipt} =
+               Security.authorize_and_issue_delivery_receipt(human_id, resource, :chat,
+                 session_token: token
+               )
+
+      raw = %{token: Map.get(receipt, :token)}
+      keyword = [token: Map.get(receipt, :token)]
+
+      embellished =
+        receipt
+        |> Map.from_struct()
+        |> Map.put(:extra, true)
+        |> Map.put(:__struct__, DeliveryReceipt)
+
+      assert {:error, :invalid_receipt} =
+               Security.consume_delivery_receipt(raw, resource, :chat)
+
+      assert {:error, :invalid_receipt} =
+               Security.consume_delivery_receipt(keyword, resource, :chat)
+
+      assert {:error, :invalid_receipt} =
+               Security.consume_delivery_receipt(embellished, resource, :chat)
+
+      assert {:error, :invalid_receipt} = Security.discard_delivery_receipt(raw)
+      assert {:error, :invalid_receipt} = Security.discard_delivery_receipt(keyword)
+      assert {:error, :invalid_receipt} = Security.discard_delivery_receipt(embellished)
+
+      # Genuine receipt still works after hostile shape probes
+      assert {:ok, ^human_id} = Security.consume_delivery_receipt(receipt, resource, :chat)
     end
   end
 
