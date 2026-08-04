@@ -91,6 +91,30 @@ defmodule Arbor.Voice.CleanupLeaseTest do
     assert :ok = CleanupLease.await_empty(credential, [:route], 500)
   end
 
+  test "asynchronous settle and await requests preserve owner-bound lease semantics", %{
+    opts: opts
+  } do
+    worker = spawn(fn -> Process.sleep(:infinity) end)
+
+    assert {:ok, lease, credential} =
+             CleanupLease.start(self(), {:turn, fn -> :ok end}, opts)
+
+    on_exit(fn ->
+      if Process.alive?(lease), do: Process.exit(lease, :kill)
+      if Process.alive?(worker), do: Process.exit(worker, :kill)
+    end)
+
+    assert :ok = CleanupLease.bind_worker(credential, worker)
+    assert {:ok, settle_request} = CleanupLease.settle_cleanup_request(credential, :turn, 500)
+    assert_receive settle_response, 1_000
+    assert {:reply, :ok} = CleanupLease.check_response(settle_response, settle_request)
+
+    assert {:ok, await_request} = CleanupLease.await_empty_request(credential, [:turn], 0)
+    assert_receive await_response, 500
+    assert {:reply, :ok} = CleanupLease.check_response(await_response, await_request)
+    assert :no_reply = CleanupLease.check_response(:unrelated, await_request)
+  end
+
   test "failed settlement remains holding without retry until worker DOWN", %{opts: opts} do
     test_pid = self()
     attempts = :atomics.new(1, signed: false)

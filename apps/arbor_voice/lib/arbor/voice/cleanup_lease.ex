@@ -159,6 +159,22 @@ defmodule Arbor.Voice.CleanupLease do
     do: {:error, :invalid_cleanup_request}
 
   @doc false
+  @spec settle_cleanup_request(credential(), term(), pos_integer()) ::
+          {:ok, :gen_server.request_id()} | {:error, atom()}
+  def settle_cleanup_request(credential, logical_key, timeout_ms)
+      when is_integer(timeout_ms) and timeout_ms > 0 and
+             timeout_ms <= @max_cleanup_per_attempt_timeout_ms do
+    if valid_cleanup_key?(logical_key) do
+      credential_request(credential, {:settle_cleanup, logical_key, timeout_ms})
+    else
+      {:error, :invalid_cleanup_request}
+    end
+  end
+
+  def settle_cleanup_request(_credential, _logical_key, _timeout_ms),
+    do: {:error, :invalid_cleanup_request}
+
+  @doc false
   @spec await_empty(credential(), [term()], non_neg_integer()) ::
           :ok | {:error, :cleanup_pending | :lease_unavailable}
   def await_empty(credential, keys, timeout_ms)
@@ -174,6 +190,33 @@ defmodule Arbor.Voice.CleanupLease do
   end
 
   def await_empty(_credential, _keys, _timeout_ms), do: {:error, :lease_unavailable}
+
+  @doc false
+  @spec await_empty_request(credential(), [term()], non_neg_integer()) ::
+          {:ok, :gen_server.request_id()} | {:error, atom()}
+  def await_empty_request(credential, keys, timeout_ms)
+      when is_list(keys) and is_integer(timeout_ms) and timeout_ms >= 0 and
+             timeout_ms <= @max_wait_timeout_ms do
+    credential_request(credential, {:await_empty, keys, timeout_ms})
+  end
+
+  def await_empty_request(_credential, _keys, _timeout_ms),
+    do: {:error, :lease_unavailable}
+
+  @doc false
+  @spec check_response(term(), :gen_server.request_id()) ::
+          :no_reply | {:reply, term()} | {:error, :lease_unavailable}
+  def check_response(message, request_id) do
+    case :gen_server.check_response(message, request_id) do
+      {:reply, reply} -> {:reply, reply}
+      {:error, _reason} -> {:error, :lease_unavailable}
+      :no_reply -> :no_reply
+    end
+  rescue
+    _exception -> {:error, :lease_unavailable}
+  catch
+    _kind, _reason -> {:error, :lease_unavailable}
+  end
 
   @doc false
   @spec status(credential()) :: {:ok, map()} | {:error, :lease_unavailable}
@@ -896,6 +939,18 @@ defmodule Arbor.Voice.CleanupLease do
     :exit, _ -> {:error, :lease_unavailable}
   end
 
+  defp credential_request(credential, request) do
+    with {:ok, pid, token} <- unpack_credential(credential) do
+      {:ok, :gen_server.send_request(pid, insert_token(request, token))}
+    else
+      _ -> {:error, :lease_unavailable}
+    end
+  rescue
+    _exception -> {:error, :lease_unavailable}
+  catch
+    _kind, _reason -> {:error, :lease_unavailable}
+  end
+
   defp unpack_credential(%Redacted{} = credential) do
     case Redacted.value(credential) do
       {pid, token} when is_pid(pid) and is_reference(token) -> {:ok, pid, token}
@@ -918,6 +973,9 @@ defmodule Arbor.Voice.CleanupLease do
 
   defp insert_token({:settle_cleanup, logical_key, timeout_ms}, token),
     do: {:settle_cleanup, token, logical_key, timeout_ms}
+
+  defp insert_token({:await_empty, keys, timeout_ms}, token),
+    do: {:await_empty, token, keys, timeout_ms}
 
   defp insert_token(:status, token), do: {:status, token}
 
