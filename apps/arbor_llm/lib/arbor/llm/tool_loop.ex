@@ -34,6 +34,16 @@ defmodule Arbor.LLM.ToolLoop do
       typed diagnostic. Mixed or multiple terminal submissions during ordinary
       rounds fail closed as ambiguous. Absent/`[]` preserves existing free-form
       final-text / max_turns wrap-up behavior.
+    * `:llm_call_authorizer` - Optional process-local arity-1 callback invoked
+      with the exact `%Arbor.LLM.Request{}` immediately before every individual
+      `Client.complete/3` or `Client.complete_streaming/4` attempt (including
+      stream-not-supported fallback, max-turn wrap-up, empty-final retry, and
+      terminal-only correction). Only exact `:allow` admits the attempt. Absent
+      preserves current behavior. Present nil/malformed/deny/pending-like/
+      raise/throw/exit fails closed with
+      `{:llm_call_authorization_failed, reason}` and zero external calls for
+      that attempt. Never forwarded to adapters, executors, requests, responses,
+      signals, or logs.
 
   ## Example
 
@@ -616,7 +626,11 @@ defmodule Arbor.LLM.ToolLoop do
           messages: request.messages ++ [wrap_up_msg]
       }
 
-      case call_llm(client, text_only_request, []) do
+      # Keep wrap-up non-streaming, but still apply a present process-local
+      # llm_call_authorizer (one approval never covers this reserved attempt).
+      wrap_up_opts = Keyword.take(opts, [:llm_call_authorizer])
+
+      case call_llm(client, text_only_request, wrap_up_opts) do
         {:ok, response} ->
           final_text = response.text || ""
           accumulated = Map.get(state, :accumulated_text, "")
@@ -638,6 +652,10 @@ defmodule Arbor.LLM.ToolLoop do
              finish_reason: :max_turns,
              discovered_tools: state.discovered_tools
            }}
+
+        # Authorization failures must not be masked by accumulated-text fallback.
+        {:error, {:llm_call_authorization_failed, _reason}} = auth_error ->
+          auth_error
 
         {:error, _} ->
           # Final call failed — fall back to accumulated text
@@ -925,11 +943,18 @@ defmodule Arbor.LLM.ToolLoop do
     end
   end
 
-  # Use streaming when a stream_callback is provided, otherwise Client.complete
+  # Use streaming when a stream_callback is provided, otherwise Client.complete.
+  # Every external Client attempt funnels here so a present :llm_call_authorizer
+  # is consulted once per attempt (including stream-not-supported fallback).
   defp call_llm(client, request, opts) do
+    # Never forward the process-local authorizer into Client/adapters.
+    client_opts = Keyword.delete(opts, :llm_call_authorizer)
+
     case Keyword.get(opts, :stream_callback) do
       nil ->
-        Client.complete(client, request, opts)
+        with :ok <- authorize_llm_call(opts, request) do
+          Client.complete(client, request, client_opts)
+        end
 
       callback ->
         # complete_streaming delivers real-time deltas via `callback` AND returns
@@ -937,17 +962,58 @@ defmodule Arbor.LLM.ToolLoop do
         # stream→collect_stream path dropped tool-call arguments (streamed
         # tool-call chunks carry no assembled args), so tools ran with empty
         # input. Fall back to complete/3 if the adapter can't stream-and-assemble.
-        case Client.complete_streaming(client, request, callback, opts) do
-          {:ok, _} = ok ->
-            ok
+        with :ok <- authorize_llm_call(opts, request) do
+          case Client.complete_streaming(client, request, callback, client_opts) do
+            {:ok, _} = ok ->
+              ok
 
-          {:error, {:stream_not_supported, _}} ->
-            Client.complete(client, request, opts)
+            {:error, {:stream_not_supported, _}} ->
+              # One approval never covers the non-streaming fallback attempt.
+              with :ok <- authorize_llm_call(opts, request) do
+                Client.complete(client, request, client_opts)
+              end
 
-          {:error, _} = error ->
-            error
+            {:error, _} = error ->
+              error
+          end
         end
     end
+  end
+
+  # Optional process-local gate. Absent key → unchanged. Present non-arity-1 /
+  # deny / pending-like / raise / throw / exit → bounded fail-closed error.
+  defp authorize_llm_call(opts, %Request{} = request) when is_list(opts) do
+    case Keyword.fetch(opts, :llm_call_authorizer) do
+      :error ->
+        :ok
+
+      {:ok, authorizer} when is_function(authorizer, 1) ->
+        invoke_llm_call_authorizer(authorizer, request)
+
+      {:ok, _invalid} ->
+        {:error, {:llm_call_authorization_failed, :invalid_llm_call_authorizer}}
+    end
+  end
+
+  defp authorize_llm_call(_opts, %Request{}),
+    do: {:error, {:llm_call_authorization_failed, :invalid_llm_call_authorizer}}
+
+  defp invoke_llm_call_authorizer(authorizer, %Request{} = request)
+       when is_function(authorizer, 1) do
+    case authorizer.(request) do
+      :allow ->
+        :ok
+
+      {:requires_approval, _reason} ->
+        {:error, {:llm_call_authorization_failed, :pending}}
+
+      _other ->
+        {:error, {:llm_call_authorization_failed, :denied}}
+    end
+  rescue
+    _ -> {:error, {:llm_call_authorization_failed, :raised}}
+  catch
+    _, _ -> {:error, {:llm_call_authorization_failed, :raised}}
   end
 
   defp execute_tools(tool_calls, state) do

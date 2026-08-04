@@ -41,7 +41,7 @@ defmodule Arbor.AI.Runtime.Dispatch do
   alias Arbor.AI.Runtime.RoutePlan
   alias Arbor.AI.Runtime.Selector
   alias Arbor.Common.ModelProfile
-  alias Arbor.Contracts.LLM.ModelEntry
+  alias Arbor.Contracts.LLM.{ModelEntry, ProviderEntry}
   alias Arbor.LLM.Client
   alias Arbor.LLM.FallbackLoop
   alias Arbor.LLM.Request
@@ -58,13 +58,22 @@ defmodule Arbor.AI.Runtime.Dispatch do
   ]
   # Private attribution for ReqLLM Usage — never forwarded to non-Arbor runtimes.
   @private_usage_opt :provider_usage_context
+  @max_authorization_route_text_bytes 512
+
+  @type authorization_route :: %{
+          model_entry: ModelEntry.t(),
+          provider: ProviderEntry.t(),
+          runtime: atom(),
+          destination: String.t(),
+          model: String.t()
+        }
 
   @type dispatch_opts :: [
           client: Client.t() | nil,
           policy: Selector.policy(),
           telemetry_metadata: map(),
           provider_route_input: ProviderRouter.input(),
-          route_authorizer: (RoutePlan.route() -> term())
+          route_authorizer: (authorization_route() -> term())
         ]
 
   @doc """
@@ -84,9 +93,13 @@ defmodule Arbor.AI.Runtime.Dispatch do
     * `:provider_route_input` — explicitly opts this call into
       `ProviderRouter` mode. The input must include the caller's catalog
       structs. Once present, selection never falls back to `Selector`.
-    * `:route_authorizer` — required in router mode. A process-local callback
-      invoked with each exact mapped route before runtime preparation. Only
-      `:allow` admits the attempt.
+    * `:route_authorizer` — process-local callback invoked with each exact
+      source-owned route before runtime preparation or execution. The route keeps
+      its `%{model_entry, provider, runtime}` selection metadata and adds the exact
+      wire `:destination` (provider string) and `:model` that the runtime will
+      receive. Only `:allow` admits the attempt. **Required** in ProviderRouter
+      mode; **optional** in legacy Selector mode (absent preserves current
+      behavior).
 
   Any other keys in `opts` are forwarded as runtime opts to the chosen
   runtime's `prepare/2` and `execute/3`.
@@ -299,7 +312,69 @@ defmodule Arbor.AI.Runtime.Dispatch do
 
   defp maybe_emit_route_fallback(_attempt, _route), do: :ok
 
+  # Router mode: authorizer is required. Presence policy only — result
+  # normalization is shared with legacy via invoke_route_authorizer/2.
   defp authorize_route(authorizer, route) when is_function(authorizer, 1) do
+    authorize_exact_route(authorizer, route)
+  end
+
+  defp authorize_route(nil, _route),
+    do: {:error, {:authorization_failed, :route_authorizer_required}}
+
+  defp authorize_route(_authorizer, _route),
+    do: {:error, {:authorization_failed, :invalid_route_authorizer}}
+
+  # Legacy mode: authorizer is optional (absent = admit). Present non-fun fails closed.
+  defp authorize_legacy_route(:error, _route), do: :ok
+
+  defp authorize_legacy_route({:ok, authorizer}, route) when is_function(authorizer, 1) do
+    authorize_exact_route(authorizer, route)
+  end
+
+  defp authorize_legacy_route({:ok, _invalid}, _route),
+    do: {:error, {:authorization_failed, :invalid_route_authorizer}}
+
+  defp authorize_exact_route(authorizer, route) do
+    with {:ok, exact_route} <- normalize_authorization_route(route) do
+      invoke_route_authorizer(authorizer, exact_route)
+    else
+      _ -> {:error, {:authorization_failed, :invalid_route}}
+    end
+  end
+
+  # The rich catalog structs remain available for existing policy callbacks, but
+  # authorization binds these two scalar fields because they are what runtime I/O
+  # actually receives. Legacy synthesized entries cannot otherwise distinguish an
+  # `openai` request from an `xai` request: both have provider id `:legacy`.
+  defp normalize_authorization_route(
+         %{
+           model_entry: %ModelEntry{},
+           provider: %ProviderEntry{id: provider_id} = provider,
+           runtime: runtime
+         } = route
+       )
+       when is_atom(provider_id) and provider_id not in [nil, true, false] and is_atom(runtime) and
+              runtime not in [nil, true, false] do
+    destination = Map.get(route, :destination, Atom.to_string(provider_id))
+    model = Map.get(route, :model, provider.ref)
+
+    if valid_authorization_route_text?(destination) and valid_authorization_route_text?(model) do
+      {:ok, Map.merge(route, %{destination: destination, model: model})}
+    else
+      {:error, :invalid_route}
+    end
+  end
+
+  defp normalize_authorization_route(_route), do: {:error, :invalid_route}
+
+  defp valid_authorization_route_text?(value) do
+    is_binary(value) and String.valid?(value) and byte_size(value) > 0 and
+      byte_size(value) <= @max_authorization_route_text_bytes and String.trim(value) == value and
+      not String.match?(value, ~r/[\x00-\x1F\x7F]/)
+  end
+
+  # One allowlist for callback results — used by both router and legacy paths.
+  defp invoke_route_authorizer(authorizer, route) when is_function(authorizer, 1) do
     case authorizer.(route) do
       :allow -> :ok
       {:requires_approval, _reason} -> {:error, {:authorization_failed, :pending}}
@@ -310,12 +385,6 @@ defmodule Arbor.AI.Runtime.Dispatch do
   catch
     _, _ -> {:error, {:authorization_failed, :raised}}
   end
-
-  defp authorize_route(nil, _route),
-    do: {:error, {:authorization_failed, :route_authorizer_required}}
-
-  defp authorize_route(_authorizer, _route),
-    do: {:error, {:authorization_failed, :invalid_route_authorizer}}
 
   defp exact_runtime_module(runtime) do
     case Map.fetch(RuntimeRegistry.all(), runtime) do
@@ -347,16 +416,18 @@ defmodule Arbor.AI.Runtime.Dispatch do
     end
   end
 
-  # Run one attempt through the full select → emit → prepare → execute
+  # Run one attempt through the full select → authorize → emit → prepare → execute
   # chain. Same shape the old single-attempt `dispatch/2` had.
   defp do_dispatch_once(%Request{} = request, policy, opts) do
     extra_meta = Keyword.get(opts, :telemetry_metadata, %{})
     callbacks = Keyword.get(opts, :callbacks, %{})
 
     with model_entry <- ModelProfile.entry(request.model),
-         {:ok, selection} <- select(model_entry, policy) do
+         {:ok, selection} <- select(model_entry, policy),
+         rewritten <- rewrite_request(request, selection, model_entry),
+         route <- legacy_route(model_entry, selection, rewritten),
+         :ok <- authorize_legacy_route(Keyword.fetch(opts, :route_authorizer), route) do
       :ok = emit_selected(model_entry, selection, request, extra_meta)
-      rewritten = rewrite_request(request, selection, model_entry)
 
       runtime_module = RuntimeRegistry.lookup(selection.runtime)
       runtime_opts = runtime_opts_for(selection.runtime, opts)
@@ -365,6 +436,23 @@ defmodule Arbor.AI.Runtime.Dispatch do
         runtime_module.execute(prepared, callbacks, runtime_opts)
       end
     end
+  end
+
+  # Source-owned route identity for legacy Selector selection. The selected
+  # structs retain catalog provenance; destination/model bind the exact rewritten
+  # request and prevent synthesized `:legacy` entries from collapsing providers.
+  defp legacy_route(
+         model_entry,
+         %{provider: provider, runtime: runtime},
+         %Request{provider: destination, model: model}
+       ) do
+    %{
+      model_entry: model_entry,
+      provider: provider,
+      runtime: runtime,
+      destination: destination,
+      model: model
+    }
   end
 
   # Strip private attribution from generic runtime opts; re-add only for Arbor.
