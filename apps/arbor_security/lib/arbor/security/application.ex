@@ -58,7 +58,10 @@ defmodule Arbor.Security.Application do
           {Arbor.Security.Constraint.RateLimiter, []},
           {Arbor.Security.CapabilityStore, []},
           {Arbor.Security.Reflex.Registry, []},
-          {Arbor.Security.UriRegistry, []}
+          {Arbor.Security.UriRegistry, []},
+          # Ephemeral one-use delivery receipts (same-node). Last so restart
+          # loses outstanding receipts fail-closed without cascading earlier children.
+          {Arbor.Security.DeliveryReceiptBroker, []}
         ]
       else
         []

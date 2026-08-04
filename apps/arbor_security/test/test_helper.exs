@@ -40,7 +40,8 @@ for child <- [
       {Arbor.Security.SigningAuthorityBroker, state_owner_token: signing_authority_owner_token},
       {Arbor.Security.Constraint.RateLimiter, []},
       {Arbor.Security.CapabilityStore, []},
-      {Arbor.Security.Reflex.Registry, []}
+      {Arbor.Security.Reflex.Registry, []},
+      {Arbor.Security.DeliveryReceiptBroker, []}
     ] do
   Supervisor.start_child(Arbor.Security.Supervisor, child)
 end
