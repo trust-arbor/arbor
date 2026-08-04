@@ -1,10 +1,25 @@
 defmodule Arbor.Voice.ApplicationTest do
   use ExUnit.Case, async: true
 
+  alias Arbor.Voice.BackendWorkerSupervisor
+  alias Arbor.Voice.CleanupLease
+  alias Arbor.Voice.CleanupLeaseSupervisor
   alias Arbor.Voice.ResourceSupervisor
   alias Arbor.Voice.ResourceCleanupTaskSupervisor
+  alias Arbor.Voice.Test.FakeBackend
 
   @moduletag :fast
+
+  @startup_child_ids [
+    Arbor.Voice.Registry,
+    Arbor.Voice.ResourceCleanupTaskSupervisor,
+    Arbor.Voice.CleanupLeaseSupervisor,
+    Arbor.Voice.BackendWorkerSupervisor,
+    Arbor.Voice.SpeechOutputTaskSupervisor,
+    Arbor.Voice.ToolTaskSupervisor,
+    Arbor.Voice.ResourceSupervisor,
+    Arbor.Voice.SessionSupervisor
+  ]
 
   test "the application supervisor is running" do
     pid = Process.whereis(Arbor.Voice.Supervisor)
@@ -17,6 +32,60 @@ defmodule Arbor.Voice.ApplicationTest do
 
     {:ok, _owner} = Registry.register(Arbor.Voice.Registry, :application_test_probe, :ok)
     assert Registry.lookup(Arbor.Voice.Registry, :application_test_probe) != []
+  end
+
+  test "application children have the complete cleanup-safe startup order" do
+    returned_ids =
+      Arbor.Voice.Supervisor
+      |> Supervisor.which_children()
+      |> Enum.map(&elem(&1, 0))
+
+    # OTP reports these one_for_one children in reverse startup order.
+    assert returned_ids == Enum.reverse(@startup_child_ids)
+    assert Enum.reverse(returned_ids) == @startup_child_ids
+  end
+
+  test "cleanup lease and backend worker supervisors are named, alive, and usable" do
+    children = Supervisor.which_children(Arbor.Voice.Supervisor)
+
+    assert {CleanupLeaseSupervisor, cleanup_supervisor, :supervisor, _modules} =
+             Enum.find(children, &(elem(&1, 0) == CleanupLeaseSupervisor))
+
+    assert Process.whereis(CleanupLeaseSupervisor) == cleanup_supervisor
+    assert Process.alive?(cleanup_supervisor)
+
+    assert {BackendWorkerSupervisor, backend_supervisor, :supervisor, _modules} =
+             Enum.find(children, &(elem(&1, 0) == BackendWorkerSupervisor))
+
+    assert Process.whereis(BackendWorkerSupervisor) == backend_supervisor
+    assert Process.alive?(backend_supervisor)
+
+    assert {:ok, lease, credential} = CleanupLease.start(self())
+    lease_ref = Process.monitor(lease)
+    assert {:ok, %{mode: :holding, cleanup_count: 0}} = CleanupLease.status(credential)
+    assert :ok = DynamicSupervisor.terminate_child(CleanupLeaseSupervisor, lease)
+    assert_receive {:DOWN, ^lease_ref, :process, ^lease, :shutdown}, 500
+
+    previous_trap_exit = Process.flag(:trap_exit, true)
+    generation = make_ref()
+
+    assert {:ok, worker, worker_credential} =
+             BackendWorkerSupervisor.start_worker(
+               BackendWorkerSupervisor,
+               self(),
+               generation,
+               FakeBackend,
+               [],
+               :none
+             )
+
+    worker_ref = Process.monitor(worker)
+    assert Process.alive?(worker)
+    assert inspect(worker_credential) =~ "generation=redacted"
+    assert :ok = DynamicSupervisor.terminate_child(BackendWorkerSupervisor, worker)
+    assert_receive {:DOWN, ^worker_ref, :process, ^worker, :killed}, 500
+    assert_receive {:EXIT, ^worker, :killed}, 500
+    Process.flag(:trap_exit, previous_trap_exit)
   end
 
   @tag spec: "VOICE-7"

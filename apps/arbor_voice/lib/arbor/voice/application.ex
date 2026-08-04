@@ -8,6 +8,8 @@ defmodule Arbor.Voice.Application do
     children = [
       {Registry, keys: :unique, name: Arbor.Voice.Registry},
       Arbor.Voice.ResourceCleanupTaskSupervisor,
+      Arbor.Voice.CleanupLeaseSupervisor,
+      Arbor.Voice.BackendWorkerSupervisor,
       # Dedicated acceptance-seam Task.Supervisor for speech_output callbacks
       # (VP-04E2R1). Not ResourceCleanupTaskSupervisor — separate ownership.
       Supervisor.child_spec(
