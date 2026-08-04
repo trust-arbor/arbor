@@ -711,6 +711,7 @@ defmodule Arbor.Comms do
   # Arbor.Comms.EngagementStore or Arbor.Persistence.SessionStore directly.
 
   @id_max_bytes 256
+  @canonical_engagement_id_pattern ~r/\Aeng_[0-9a-f]{32}\z/
   @content_max_bytes 8192
   # Default per-value bound for transport/backend/mode (both roles).
   @metadata_value_max_bytes 1024
@@ -757,7 +758,9 @@ defmodule Arbor.Comms do
 
   Always resolves with the canonical, non-overridable creation options
   `scope: :user`, `visibility: :private`, `owner_tenant: user_id` — callers
-  cannot widen or narrow those authority-bearing fields via `opts`.
+  cannot widen or narrow those authority-bearing fields via `opts`. Existing or
+  recovered records are admitted only when those fields, `agent_id`, and the
+  canonical bounded engagement id all match the requested binding.
   `opts[:engagement_store]` may inject a test double implementing
   `resolve_or_create/3`.
   """
@@ -769,11 +772,7 @@ defmodule Arbor.Comms do
          :ok <- validate_id(user_id, :user_id) do
       store = Keyword.get(opts, :engagement_store, EngagementStore)
 
-      store.resolve_or_create(agent_id, user_id,
-        scope: :user,
-        visibility: :private,
-        owner_tenant: user_id
-      )
+      resolve_canonical_user_engagement(store, agent_id, user_id)
     end
   end
 
@@ -848,6 +847,58 @@ defmodule Arbor.Comms do
   end
 
   # -- Voice/dashboard engagement transcript: validation and shaping (private) --
+
+  defp resolve_canonical_user_engagement(store, agent_id, user_id) do
+    result =
+      store.resolve_or_create(agent_id, user_id,
+        scope: :user,
+        visibility: :private,
+        owner_tenant: user_id
+      )
+
+    case result do
+      {:ok, %Engagement{} = engagement} ->
+        validate_resolved_user_engagement(engagement, agent_id, user_id)
+
+      {:error, _reason} = error ->
+        error
+
+      _other ->
+        {:error, :invalid_engagement}
+    end
+  rescue
+    _ -> {:error, :engagement_unavailable}
+  catch
+    _, _ -> {:error, :engagement_unavailable}
+  end
+
+  defp validate_resolved_user_engagement(
+         %Engagement{
+           id: id,
+           agent_id: agent_id,
+           owner_tenant: user_id,
+           scope: :user,
+           visibility: :private
+         } = engagement,
+         agent_id,
+         user_id
+       ) do
+    if canonical_engagement_id?(id) do
+      {:ok, engagement}
+    else
+      {:error, :invalid_engagement}
+    end
+  end
+
+  defp validate_resolved_user_engagement(_engagement, _agent_id, _user_id),
+    do: {:error, :invalid_engagement}
+
+  defp canonical_engagement_id?(id) when is_binary(id) do
+    byte_size(id) <= @id_max_bytes and String.valid?(id) and
+      Regex.match?(@canonical_engagement_id_pattern, id)
+  end
+
+  defp canonical_engagement_id?(_id), do: false
 
   defp validate_opts(opts, allowlist) do
     cond do

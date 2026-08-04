@@ -13,6 +13,8 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
   @moduletag spec: "VOICE-17"
 
   alias Arbor.Contracts.Security.DeliveryReceipt
+  alias Arbor.Comms
+  alias Arbor.Comms.EngagementStore
   alias Arbor.Contracts.Security.Identity
   alias Arbor.Contracts.Security.SignedRequest
   alias Arbor.Contracts.Session.TurnAuthority
@@ -27,6 +29,7 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
 
   setup_all do
     {:ok, _} = Application.ensure_all_started(:arbor_security)
+    {:ok, _} = Application.ensure_all_started(:arbor_comms)
     ensure_signals_stack!()
 
     backend =
@@ -826,11 +829,12 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
   end
 
   describe "security regression: exact authenticated ingress" do
-    test "queues authority without receipt after exact consume and principal bind", %{
-      agent_id: agent_id,
-      human_id: human_id,
-      resource: resource
-    } do
+    test "security regression: queues source-owned engagement after exact consume and principal bind",
+         %{
+           agent_id: agent_id,
+           human_id: human_id,
+           resource: resource
+         } do
       receipt = issue_receipt!(human_id, resource)
       msg = user_message!(human_id)
       token_hex = receipt_token_hex(receipt)
@@ -850,6 +854,14 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
       assert [{queued_msg, %TurnAuthority{} = auth, ^from}] = new_state.turn_queue
       assert queued_msg.sender_id == human_id
       assert queued_msg.content == msg.content
+      assert queued_msg.engagement_id =~ ~r/^eng_[0-9a-f]{32}$/
+
+      assert {:ok, engagement} = EngagementStore.get(queued_msg.engagement_id)
+      assert engagement.agent_id == agent_id
+      assert engagement.owner_tenant == human_id
+      assert engagement.scope == :user
+      assert engagement.visibility == :private
+
       assert auth.authenticated_principal_id == human_id
       assert auth.disclosure_capability_id == nil
       assert auth.turn_id =~ ~r/^turn_[0-9a-f]{32}$/
@@ -859,6 +871,13 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
              )
 
       refute match?(%DeliveryReceipt{}, elem(hd(new_state.turn_queue), 1))
+
+      # B0 binds provenance but does not enable authenticated steering; B2 owns
+      # the typed, turn-bound steering envelope.
+      assert {:reply, :none, still_queued} =
+               Session.handle_call(:take_steering, {self(), make_ref()}, new_state)
+
+      assert still_queued.turn_queue == new_state.turn_queue
 
       # Replay must fail closed — receipt already consumed.
       assert {:reply, {:error, :unauthenticated}, returned_replay} =
@@ -870,6 +889,44 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
 
       assert returned_replay.turn_queue == state.turn_queue
       assert returned_replay.turn_authority == nil
+    end
+
+    test "security regression: poisoned engagement fails after receipt consumption without state mutation",
+         %{
+           agent_id: agent_id,
+           human_id: human_id,
+           resource: resource
+         } do
+      assert {:ok, canonical} = Comms.resolve_user_engagement(agent_id, human_id)
+      on_exit(fn -> EngagementStore.delete(canonical.id) end)
+
+      assert :ok =
+               EngagementStore.put(%{
+                 canonical
+                 | owner_tenant: "human_wrong_owner"
+               })
+
+      receipt = issue_receipt!(human_id, resource)
+      msg = user_message!(human_id, "poisoned engagement probe")
+      from = {self(), make_ref()}
+
+      state =
+        session_state(agent_id,
+          turn_in_flight: true,
+          turn_from: {self(), make_ref()},
+          turn_user_message: UserMessage.from_string("active"),
+          current_engagement_id: "eng_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          messages: [%{"role" => "user", "content" => "unchanged"}],
+          transcripts: %{"eng_public" => []}
+        )
+
+      assert {:reply, {:error, :unauthenticated}, returned} =
+               Session.handle_call({:send_authenticated_message, msg, receipt}, from, state)
+
+      assert returned == state
+
+      assert {:error, :invalid_receipt} =
+               Security.consume_delivery_receipt(receipt, resource, :chat)
     end
 
     test "sender mismatch consumes receipt and refuses without starting a turn", %{
@@ -1342,14 +1399,18 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
       active_msg =
         human_id
         |> user_message!("active with auth")
+        |> UserMessage.with_engagement("eng_11111111111111111111111111111111")
         |> Map.merge(%{sender: human_id, transport_metadata: %{principal: human_id}})
 
       msg =
         human_id
         |> user_message!("queued with auth")
+        |> UserMessage.with_engagement("eng_11111111111111111111111111111111")
         |> Map.merge(%{sender: human_id, transport_metadata: %{principal: human_id}})
 
-      compat_msg = user_message!("human_compat_projection", "nil authority compatibility")
+      compat_msg =
+        user_message!("human_compat_projection", "nil authority compatibility")
+        |> UserMessage.with_engagement("eng_public")
 
       internal =
         session_state(agent_id,
@@ -1357,7 +1418,13 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
           turn_authority: auth,
           turn_user_message: active_msg,
           turn_from: {self(), make_ref()},
-          turn_queue: [{msg, auth, queue_from}, {compat_msg, nil, compat_from}]
+          turn_queue: [{msg, auth, queue_from}, {compat_msg, nil, compat_from}],
+          current_engagement_id: "eng_11111111111111111111111111111111",
+          transcripts: %{
+            "eng_11111111111111111111111111111111" => [%{"content" => "private"}],
+            "eng_public" => [%{"content" => "public"}]
+          },
+          authenticated_engagement_ids: MapSet.new(["eng_11111111111111111111111111111111"])
         )
 
       assert {:reply, projected, still_internal} =
@@ -1370,7 +1437,8 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
                content: "active with auth",
                sender: nil,
                sender_id: nil,
-               transport_metadata: %{}
+               transport_metadata: %{},
+               engagement_id: nil
              } = projected.turn_user_message
 
       assert [
@@ -1378,10 +1446,15 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
                   content: "queued with auth",
                   sender: nil,
                   sender_id: nil,
-                  transport_metadata: %{}
+                  transport_metadata: %{},
+                  engagement_id: nil
                 }, nil, ^queue_from},
                {^compat_msg, nil, ^compat_from}
              ] = projected.turn_queue
+
+      assert projected.current_engagement_id == nil
+      assert projected.transcripts == %{"eng_public" => [%{"content" => "public"}]}
+      assert projected.authenticated_engagement_ids == MapSet.new()
 
       projected_inspected = inspect(projected, limit: :infinity, printable_limit: :infinity)
       refute projected_inspected =~ auth.turn_id
@@ -1400,6 +1473,29 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
 
       assert still_internal.turn_authority.turn_id == auth.turn_id
       assert still_internal.turn_authority.authenticated_principal_id == human_id
+    end
+
+    test "security regression: public state keeps completed authenticated routing identity private",
+         %{agent_id: agent_id} do
+      engagement_id = "eng_22222222222222222222222222222222"
+
+      internal =
+        session_state(agent_id,
+          turn_authority: nil,
+          turn_user_message: nil,
+          current_engagement_id: engagement_id,
+          transcripts: %{engagement_id => [%{"content" => "private"}]},
+          authenticated_engagement_ids: MapSet.new([engagement_id])
+        )
+
+      assert {:reply, projected, ^internal} =
+               Session.handle_call(:get_state, {self(), make_ref()}, internal)
+
+      assert projected.current_engagement_id == nil
+      assert projected.transcripts == %{}
+      assert projected.authenticated_engagement_ids == MapSet.new()
+      assert internal.current_engagement_id == engagement_id
+      assert Map.has_key?(internal.transcripts, engagement_id)
     end
 
     test "security regression: real Engine success/fail envelopes admit only success; no receipt/authority leak",

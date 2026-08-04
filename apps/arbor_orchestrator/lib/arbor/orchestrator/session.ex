@@ -78,6 +78,7 @@ defmodule Arbor.Orchestrator.Session do
   require Logger
 
   alias Arbor.Contracts.Pipeline.Response, as: PipelineResponse
+  alias Arbor.Contracts.Comms.Engagement
   alias Arbor.Contracts.Security.DeliveryReceipt
   alias Arbor.Contracts.Session.TurnAuthority
   alias Arbor.Contracts.Session.UserMessage
@@ -178,6 +179,10 @@ defmodule Arbor.Orchestrator.Session do
     current_engagement_id: nil,
     transcripts: %{},
     turn_queue: [],
+    # Source-owned engagement ids resolved only after authenticated receipt
+    # consumption. Retained process-locally so public state can redact routing
+    # identity even after the originating turn has completed.
+    authenticated_engagement_ids: MapSet.new(),
     # Bounded task-id cancellation tombstones: reject a later send_message that
     # still carries a cancelled async-task id (race: cancel before Session sees
     # the task, or cancel while the matching turn is only queued). FIFO-capped.
@@ -293,10 +298,12 @@ defmodule Arbor.Orchestrator.Session do
   Accepts only an exact `%UserMessage{}` (native key set) and opaque
   `%DeliveryReceipt{}`. Session derives the chat resource exclusively from
   `state.agent_id`, consumes the receipt, binds the Security-owned principal to
-  `UserMessage.sender_id`, and allocates a fresh process-local `TurnAuthority`
-  with `disclosure_capability_id: nil`. Receipt/identity failures collapse to
-  `{:error, :unauthenticated}`. Does not accept caller-supplied authority,
-  turn ids, targets, routes, capability ids, or taint.
+  `UserMessage.sender_id`, resolves that principal's canonical private user
+  engagement through `Arbor.Comms`, and allocates a fresh process-local
+  `TurnAuthority` with `disclosure_capability_id: nil`. Receipt, identity, and
+  engagement failures collapse to `{:error, :unauthenticated}`. Does not accept
+  caller-supplied authority, engagement, turn ids, targets, routes, capability
+  ids, or taint.
 
   On success returns `{:ok, %Arbor.Contracts.Pipeline.Response{}}` (same shape
   as ordinary `send_message/2`).
@@ -421,9 +428,11 @@ defmodule Arbor.Orchestrator.Session do
   Return a public projection of the current session state.
 
   Active and queued `TurnAuthority` material is stripped (set to `nil`), and
-  identity-bearing fields on their associated `UserMessage` values are cleared,
-  so callers cannot read turn/principal/capability ids. Internal GenServer state
-  is unchanged; nil-authority compatibility messages are preserved.
+  identity-bearing fields on their associated `UserMessage` values are cleared.
+  Source-owned authenticated engagement ids are also removed from messages,
+  active routing state, and transcript keys, so callers cannot read or reuse
+  authenticated routing identity. Internal GenServer state is unchanged;
+  nil-authority compatibility messages are preserved.
   """
   @spec get_state(GenServer.server()) :: t()
   def get_state(session) do
@@ -1745,16 +1754,20 @@ defmodule Arbor.Orchestrator.Session do
   defp map_prepare_error(_), do: :turn_preparation_refused
 
   # Receipt-authenticated ingress: consume one-use receipt, bind principal,
-  # allocate TurnAuthority. Receipt never enters state/queue.
+  # resolve the principal's source-owned engagement, and allocate TurnAuthority.
+  # Receipt never enters state/queue.
   # Caller-supplied engagement_id is a route claim — reject before consume.
   defp handle_authenticated_message(message, receipt, from, state) do
     with {:ok, user_message} <- canonicalize_authenticated_user_message(message),
          :ok <- reject_authenticated_engagement_route(user_message),
          {:ok, valid_receipt} <- DeliveryReceipt.canonicalize(receipt),
-         {:ok, authority} <- exchange_receipt_for_authority(valid_receipt, user_message, state) do
+         {:ok, authority} <- exchange_receipt_for_authority(valid_receipt, user_message, state),
+         {:ok, user_message} <- bind_authenticated_engagement(user_message, authority, state) do
       if task_cancelled?(state, user_message_task_id(user_message)) do
         {:reply, {:error, :cancelled}, state}
       else
+        state = remember_authenticated_engagement(state, user_message.engagement_id)
+
         if state.turn_in_flight do
           {:noreply, %{state | turn_queue: state.turn_queue ++ [{user_message, authority, from}]}}
         else
@@ -1837,6 +1850,35 @@ defmodule Arbor.Orchestrator.Session do
     end
   end
 
+  defp bind_authenticated_engagement(user_message, authority, state) do
+    principal = authority.authenticated_principal_id
+
+    case Arbor.Comms.resolve_user_engagement(state.agent_id, principal) do
+      {:ok,
+       %Engagement{
+         id: engagement_id,
+         agent_id: agent_id,
+         owner_tenant: owner_tenant,
+         scope: :user,
+         visibility: :private
+       }}
+      when agent_id == state.agent_id and owner_tenant == principal and is_binary(engagement_id) ->
+        {:ok, UserMessage.with_engagement(user_message, engagement_id)}
+
+      _other ->
+        {:error, :unauthenticated}
+    end
+  rescue
+    _ -> {:error, :unauthenticated}
+  catch
+    _, _ -> {:error, :unauthenticated}
+  end
+
+  defp remember_authenticated_engagement(state, engagement_id) do
+    authenticated_ids = Map.get(state, :authenticated_engagement_ids, MapSet.new())
+    %{state | authenticated_engagement_ids: MapSet.put(authenticated_ids, engagement_id)}
+  end
+
   defp best_effort_discard_receipt(receipt) do
     _ = Arbor.Security.discard_delivery_receipt(receipt)
     :ok
@@ -1850,14 +1892,28 @@ defmodule Arbor.Orchestrator.Session do
   # Authority-bearing messages also lose identity-bearing adapter fields; nil-
   # authority compatibility messages remain byte-for-byte unchanged.
   defp public_state_projection(state) do
+    authenticated_ids = Map.get(state, :authenticated_engagement_ids, MapSet.new())
+
     sanitized_queue =
       Enum.map(state.turn_queue || [], fn
-        {msg, authority, from} -> {sanitize_authority_message(msg, authority), nil, from}
-        other -> other
+        {msg, authority, from} ->
+          {sanitize_authority_message(msg, authority, authenticated_ids), nil, from}
+
+        other ->
+          other
       end)
 
     sanitized_turn_message =
-      sanitize_authority_message(state.turn_user_message, state.turn_authority)
+      sanitize_authority_message(
+        state.turn_user_message,
+        state.turn_authority,
+        authenticated_ids
+      )
+
+    public_engagement_id =
+      redact_authenticated_engagement(state.current_engagement_id, authenticated_ids)
+
+    public_transcripts = Map.drop(state.transcripts || %{}, MapSet.to_list(authenticated_ids))
 
     %{
       state
@@ -1865,17 +1921,33 @@ defmodule Arbor.Orchestrator.Session do
         turn_egress_fence: nil,
         turn_token: nil,
         turn_user_message: sanitized_turn_message,
-        turn_queue: sanitized_queue
+        turn_queue: sanitized_queue,
+        current_engagement_id: public_engagement_id,
+        transcripts: public_transcripts,
+        authenticated_engagement_ids: MapSet.new()
     }
   end
 
-  defp sanitize_authority_message(message, nil), do: message
+  defp sanitize_authority_message(%UserMessage{} = message, authority, authenticated_ids) do
+    message =
+      if match?(%TurnAuthority{}, authority) do
+        %{message | sender: nil, sender_id: nil, transport_metadata: %{}}
+      else
+        message
+      end
 
-  defp sanitize_authority_message(%UserMessage{} = message, %TurnAuthority{}) do
-    %{message | sender: nil, sender_id: nil, transport_metadata: %{}}
+    if MapSet.member?(authenticated_ids, message.engagement_id) do
+      %{message | engagement_id: nil}
+    else
+      message
+    end
   end
 
-  defp sanitize_authority_message(message, %TurnAuthority{}), do: message
+  defp sanitize_authority_message(message, _authority, _authenticated_ids), do: message
+
+  defp redact_authenticated_engagement(engagement_id, authenticated_ids) do
+    if MapSet.member?(authenticated_ids, engagement_id), do: nil, else: engagement_id
+  end
 
   # End the current turn and trigger draining of any queued turns. The drain runs
   # as a self-message after this handler returns (turn_in_flight already cleared

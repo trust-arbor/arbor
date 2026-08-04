@@ -13,16 +13,44 @@ defmodule Arbor.Comms.EngagementTranscriptTest do
   use ExUnit.Case, async: true
 
   alias Arbor.Comms
+  alias Arbor.Contracts.Comms.Engagement
 
   defmodule FakeEngagementStore do
     @moduledoc false
-    def start_link, do: Agent.start_link(fn -> [] end)
+    def start_link, do: Agent.start_link(fn -> %{calls: [], result: :canonical} end)
 
-    def calls(agent), do: Agent.get(agent, & &1)
+    def calls(agent), do: Agent.get(agent, & &1.calls)
+    def set_result(agent, result), do: Agent.update(agent, &Map.put(&1, :result, result))
 
     def resolve_or_create(agent, agent_id, resolution_key, opts) do
-      Agent.update(agent, fn calls -> calls ++ [{agent_id, resolution_key, opts}] end)
-      {:ok, %Arbor.Contracts.Comms.Engagement{agent_id: agent_id, id: "eng_fixed"}}
+      result =
+        Agent.get_and_update(agent, fn state ->
+          {state.result, %{state | calls: state.calls ++ [{agent_id, resolution_key, opts}]}}
+        end)
+
+      case result do
+        :canonical ->
+          {:ok,
+           %Engagement{
+             id: "eng_0123456789abcdef0123456789abcdef",
+             agent_id: agent_id,
+             owner_tenant: resolution_key,
+             scope: Keyword.fetch!(opts, :scope),
+             visibility: Keyword.fetch!(opts, :visibility)
+           }}
+
+        {:return, value} ->
+          value
+
+        :raise ->
+          raise "store fault"
+
+        :throw ->
+          throw(:store_fault)
+
+        :exit ->
+          exit(:store_fault)
+      end
     end
   end
 
@@ -110,12 +138,70 @@ defmodule Arbor.Comms.EngagementTranscriptTest do
                  engagement_store: EngagementStoreAdapter
                )
 
-      assert engagement.id == "eng_fixed"
+      assert engagement.id == "eng_0123456789abcdef0123456789abcdef"
 
       assert [{"agent_1", "user_1", forced_opts}] = FakeEngagementStore.calls(store_agent)
       assert Keyword.get(forced_opts, :scope) == :user
       assert Keyword.get(forced_opts, :visibility) == :private
       assert Keyword.get(forced_opts, :owner_tenant) == "user_1"
+    end
+
+    test "security regression: rejects non-canonical existing or recovered records", %{
+      store_agent: store_agent
+    } do
+      canonical = %Engagement{
+        id: "eng_0123456789abcdef0123456789abcdef",
+        agent_id: "agent_1",
+        owner_tenant: "user_1",
+        scope: :user,
+        visibility: :private
+      }
+
+      invalid_results = [
+        %{canonical | agent_id: "agent_other"},
+        %{canonical | owner_tenant: "user_other"},
+        %{canonical | scope: :channel},
+        %{canonical | visibility: :public},
+        %{canonical | id: "eng_not_canonical"},
+        %{canonical | id: String.duplicate("a", 257)},
+        %{id: canonical.id, agent_id: canonical.agent_id}
+      ]
+
+      for invalid <- invalid_results do
+        FakeEngagementStore.set_result(store_agent, {:return, {:ok, invalid}})
+
+        assert {:error, :invalid_engagement} =
+                 Comms.resolve_user_engagement("agent_1", "user_1",
+                   engagement_store: EngagementStoreAdapter
+                 )
+      end
+    end
+
+    test "security regression: normalizes malformed and exceptional store outcomes", %{
+      store_agent: store_agent
+    } do
+      FakeEngagementStore.set_result(store_agent, {:return, :malformed})
+
+      assert {:error, :invalid_engagement} =
+               Comms.resolve_user_engagement("agent_1", "user_1",
+                 engagement_store: EngagementStoreAdapter
+               )
+
+      for fault <- [:raise, :throw, :exit] do
+        FakeEngagementStore.set_result(store_agent, fault)
+
+        assert {:error, :engagement_unavailable} =
+                 Comms.resolve_user_engagement("agent_1", "user_1",
+                   engagement_store: EngagementStoreAdapter
+                 )
+      end
+
+      FakeEngagementStore.set_result(store_agent, {:return, {:error, :store_unavailable}})
+
+      assert {:error, :store_unavailable} =
+               Comms.resolve_user_engagement("agent_1", "user_1",
+                 engagement_store: EngagementStoreAdapter
+               )
     end
 
     test "rejects a blank agent_id/user_id without calling the store", %{store_agent: store_agent} do
