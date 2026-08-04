@@ -22,6 +22,43 @@ defmodule Arbor.Agent.SessionManagerTest do
     %{agent_id: agent_id}
   end
 
+  # Test-only: run ETS mutations inside the SessionManager owner process so
+  # :protected table writes succeed without a production mutation seam.
+  defp owner_ets(fun) when is_function(fun, 0) do
+    owner = Process.whereis(SessionManager)
+    assert is_pid(owner)
+    parent = self()
+    ref = make_ref()
+
+    :sys.replace_state(owner, fn state ->
+      send(parent, {ref, fun.()})
+      state
+    end)
+
+    receive do
+      {^ref, result} -> result
+    after
+      1_000 -> flunk("owner ETS op timed out")
+    end
+  end
+
+  defp insert_session!(agent_id, session_pid) do
+    true = owner_ets(fn -> :ets.insert(SessionManager, {agent_id, session_pid}) end)
+
+    on_exit(fn ->
+      if Process.whereis(SessionManager) && :ets.whereis(SessionManager) != :undefined do
+        _ = owner_ets(fn -> :ets.delete(SessionManager, agent_id) end)
+      end
+    end)
+
+    :ok
+  end
+
+  defp delete_session!(agent_id) do
+    _ = owner_ets(fn -> :ets.delete(SessionManager, agent_id) end)
+    :ok
+  end
+
   describe "graceful degradation" do
     test "ensure_session returns error when orchestrator unavailable", %{agent_id: agent_id} do
       # In arbor_agent's test env, orchestrator modules may not be loaded
@@ -90,13 +127,14 @@ defmodule Arbor.Agent.SessionManagerTest do
   end
 
   describe "cancel_turn/1" do
-    test "bridges agent_id through the public ETS table to Session.cancel_turn semantics", %{
-      agent_id: agent_id
-    } do
+    test "bridges agent_id through the owner-protected ETS table to Session.cancel_turn semantics",
+         %{
+           agent_id: agent_id
+         } do
       {:ok, fake_session} = FakeSession.start_link(self())
 
       # Unscoped user cancel: SessionManager.cancel_turn → ETS → Session.cancel_turn.
-      true = :ets.insert(SessionManager, {agent_id, fake_session})
+      insert_session!(agent_id, fake_session)
 
       try do
         assert {:ok, ^fake_session} = SessionManager.get_session(agent_id)
@@ -110,7 +148,7 @@ defmodule Arbor.Agent.SessionManagerTest do
         assert {:ok, ^fake_session} = SessionManager.get_session(agent_id)
         assert :alive = GenServer.call(fake_session, :probe)
       after
-        :ets.delete(SessionManager, agent_id)
+        delete_session!(agent_id)
 
         if Process.alive?(fake_session) do
           GenServer.stop(fake_session, :normal, 1_000)
@@ -127,7 +165,7 @@ defmodule Arbor.Agent.SessionManagerTest do
       agent_id: agent_id
     } do
       {:ok, fake_session} = FakeSession.start_link(self())
-      true = :ets.insert(SessionManager, {agent_id, fake_session})
+      insert_session!(agent_id, fake_session)
 
       try do
         # Production path: TaskStore → SessionManager.cancel_task/2 → Session.
@@ -138,7 +176,7 @@ defmodule Arbor.Agent.SessionManagerTest do
         assert :ok = SessionManager.cancel_turn(agent_id)
         assert_receive {:session_cancel_turn, ^fake_session}, 1_000
       after
-        :ets.delete(SessionManager, agent_id)
+        delete_session!(agent_id)
 
         if Process.alive?(fake_session) do
           GenServer.stop(fake_session, :normal, 1_000)
@@ -191,7 +229,7 @@ defmodule Arbor.Agent.SessionManagerTest do
       end)
 
       {:ok, fake_session} = AuthFakeSession.start_link(self())
-      true = :ets.insert(SessionManager, {agent_id, fake_session})
+      insert_session!(agent_id, fake_session)
 
       message = %Arbor.Contracts.Session.UserMessage{
         content: "hello",
@@ -212,7 +250,7 @@ defmodule Arbor.Agent.SessionManagerTest do
         assert_receive {:auth_send, from_pid, ^message, ^receipt}, 1_000
         assert from_pid == caller
       after
-        :ets.delete(SessionManager, agent_id)
+        delete_session!(agent_id)
 
         if Process.alive?(fake_session) do
           GenServer.stop(fake_session, :normal, 1_000)
@@ -256,7 +294,7 @@ defmodule Arbor.Agent.SessionManagerTest do
           end
         end)
 
-      true = :ets.insert(SessionManager, {agent_id, hang})
+      insert_session!(agent_id, hang)
 
       message = %Arbor.Contracts.Session.UserMessage{
         content: "hello",
@@ -272,7 +310,7 @@ defmodule Arbor.Agent.SessionManagerTest do
         assert {:error, :session_unavailable} =
                  SessionManager.send_authenticated_message(agent_id, message, receipt, 50)
       after
-        :ets.delete(SessionManager, agent_id)
+        delete_session!(agent_id)
         if Process.alive?(hang), do: Process.exit(hang, :kill)
       end
     end
@@ -290,7 +328,7 @@ defmodule Arbor.Agent.SessionManagerTest do
       end)
 
       hang = spawn(fn -> Process.sleep(:infinity) end)
-      true = :ets.insert(SessionManager, {agent_id, hang})
+      insert_session!(agent_id, hang)
 
       message = %Arbor.Contracts.Session.UserMessage{
         content: "hello",
@@ -306,7 +344,7 @@ defmodule Arbor.Agent.SessionManagerTest do
         assert {:error, :session_unavailable} =
                  SessionManager.send_authenticated_message(agent_id, message, receipt, 500)
       after
-        :ets.delete(SessionManager, agent_id)
+        delete_session!(agent_id)
         if Process.alive?(hang), do: Process.exit(hang, :kill)
       end
     end

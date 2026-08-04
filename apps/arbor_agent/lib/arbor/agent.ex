@@ -118,6 +118,9 @@ defmodule Arbor.Agent do
   @doc """
   Send one `UserMessage` to a running agent and return assistant text.
 
+  Structured sibling: `send_message_response/4` (same auth/delivery branches,
+  returns `%Arbor.Contracts.Pipeline.Response{}` on the authenticated path).
+
   ## Branches
 
   - **Absent `:session_token`** — ordinary compatibility path: requires an
@@ -170,6 +173,9 @@ defmodule Arbor.Agent do
 
   @doc """
   Send one `UserMessage` to a running agent and return a structured response.
+
+  Text sibling: `send_message/4` (same auth/delivery branches, returns binary
+  assistant text).
 
   Same authorization and delivery branches as `send_message/4`:
 

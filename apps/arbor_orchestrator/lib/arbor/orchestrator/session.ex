@@ -263,13 +263,13 @@ defmodule Arbor.Orchestrator.Session do
 
   Runs the turn graph synchronously. The message is appended to the session's
   message history, processed through classify -> authorize -> recall -> LLM -> format,
-  and the response is returned.
+  and the response is returned as `%Arbor.Contracts.Pipeline.Response{}`.
   """
   @spec send_message(
           GenServer.server(),
           String.t() | map() | Arbor.Contracts.Session.UserMessage.t()
         ) ::
-          {:ok, %{text: String.t(), tool_history: [map()], tool_rounds: non_neg_integer()}}
+          {:ok, PipelineResponse.t()}
           | {:error, term()}
   def send_message(session, message) do
     GenServer.call(session, {:send_message, message}, Arbor.Orchestrator.Config.turn_timeout_ms())
@@ -286,6 +286,9 @@ defmodule Arbor.Orchestrator.Session do
   `{:error, :unauthenticated}`. Does not accept caller-supplied authority,
   turn ids, targets, routes, capability ids, or taint.
 
+  On success returns `{:ok, %Arbor.Contracts.Pipeline.Response{}}` (same shape
+  as ordinary `send_message/2`).
+
   The three-argument form uses `Arbor.Orchestrator.Config.turn_timeout_ms/0`.
   Callers that already validated a shorter bound use the four-argument form
   with an explicit positive timeout. Both issue the same synchronous
@@ -298,7 +301,7 @@ defmodule Arbor.Orchestrator.Session do
           UserMessage.t(),
           DeliveryReceipt.t()
         ) ::
-          {:ok, %{text: String.t(), tool_history: [map()], tool_rounds: non_neg_integer()}}
+          {:ok, PipelineResponse.t()}
           | {:error, :unauthenticated | :legacy_mode | :cancelled | term()}
   def send_authenticated_message(session, %UserMessage{} = message, %DeliveryReceipt{} = receipt) do
     send_authenticated_message(
@@ -315,7 +318,8 @@ defmodule Arbor.Orchestrator.Session do
   Authenticated send with an explicit positive `GenServer.call` timeout (ms).
 
   Same exact `%UserMessage{}` / `%DeliveryReceipt{}` contract and message
-  tuple as `send_authenticated_message/3`. Invalid arguments (including
+  tuple as `send_authenticated_message/3`. On success returns
+  `{:ok, %Arbor.Contracts.Pipeline.Response{}}`. Invalid arguments (including
   zero/non-integer timeout) return
   `{:error, :invalid_authenticated_message_request}` before any message is
   sent; the unsubmitted receipt remains caller-owned.
@@ -326,7 +330,7 @@ defmodule Arbor.Orchestrator.Session do
           DeliveryReceipt.t(),
           pos_integer()
         ) ::
-          {:ok, %{text: String.t(), tool_history: [map()], tool_rounds: non_neg_integer()}}
+          {:ok, PipelineResponse.t()}
           | {:error,
              :unauthenticated
              | :legacy_mode

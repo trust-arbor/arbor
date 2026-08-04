@@ -656,17 +656,13 @@ defmodule Arbor.Agent.Manager do
                receipt,
                timeout
              ) do
-          {:ok, raw} ->
-            # Type-project only (no call-local secrets here — proof never leaves
-            # MessageFacade). Assistant signal is deferred to MessageFacade after
-            # authoritative secret admission.
-            case Arbor.Agent.MessageFacade.admit_auth_response(raw, []) do
-              {:ok, %Arbor.Contracts.Pipeline.Response{} = response} ->
-                {:ok, response}
+          # Outer shape only — MessageFacade owns closed projection, secret
+          # admission, assistant signal, and receipt cleanup.
+          {:ok, %Arbor.Contracts.Pipeline.Response{} = response} ->
+            {:ok, response}
 
-              :reject ->
-                {:error, :malformed_response}
-            end
+          {:ok, _other} ->
+            {:error, :malformed_response}
 
           {:error, _} = err ->
             err

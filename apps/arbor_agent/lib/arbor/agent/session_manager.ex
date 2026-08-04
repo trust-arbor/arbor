@@ -9,7 +9,8 @@ defmodule Arbor.Agent.SessionManager do
 
   ## Architecture
 
-  SessionManager owns an ETS table mapping `agent_id → session_pid`.
+  SessionManager owns an ETS table mapping `agent_id → session_pid`
+  (`:protected` — concurrent reads open; writes owner-only).
   It monitors each session process and cleans up on crash/stop.
   Session creation is delegated to `Arbor.Orchestrator.Session` via
   runtime bridge (no compile-time dependency).
@@ -75,8 +76,9 @@ defmodule Arbor.Agent.SessionManager do
   Prefer `cancel_task/2` for async orchestration cancellation so an unrelated
   interactive turn is not torn down.
 
-  Looks up the live session pid from the public ETS table, then applies the
-  Session cancel contract (`GenServer.call(session, :cancel_turn)`).
+  Looks up the live session pid from the owner-protected ETS table (reads open;
+  writes owner-only), then applies the Session cancel contract
+  (`GenServer.call(session, :cancel_turn)`).
 
   Returns `{:error, :no_session}` when the agent has no live session, or the
   underlying cancel result (`:ok` | `{:error, :no_turn_in_flight}`).
@@ -141,11 +143,11 @@ defmodule Arbor.Agent.SessionManager do
   Deliver an authenticated `UserMessage` + opaque delivery receipt to the live
   Session for `agent_id`.
 
-  Looks up the session pid from the public ETS table and invokes the configured
-  Session module's `send_authenticated_message/4` **in the caller's process**
-  (no GenServer hop through SessionManager for the send itself). This preserves
-  the original facade caller PID so Session's caller monitor observes the real
-  caller.
+  Looks up the session pid from the owner-protected ETS table (reads open;
+  writes owner-only) and invokes the configured Session module's
+  `send_authenticated_message/4` **in the caller's process** (no GenServer hop
+  through SessionManager for the send itself). This preserves the original
+  facade caller PID so Session's caller monitor observes the real caller.
 
   Returns:
   - the Session module's result on success/error
@@ -231,7 +233,8 @@ defmodule Arbor.Agent.SessionManager do
 
   @impl true
   def init(_opts) do
-    table = :ets.new(@table, [:named_table, :set, :public, read_concurrency: true])
+    # :protected — any process may read bindings; only this owner may write.
+    table = :ets.new(@table, [:named_table, :set, :protected, read_concurrency: true])
     {:ok, %{table: table, monitors: %{}}}
   end
 

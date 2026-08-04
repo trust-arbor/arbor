@@ -24,6 +24,8 @@ defmodule Arbor.Agent.MessageFacade do
   # \A(?:agent|human)_[A-Za-z0-9_-]+\z plus the 256-byte bound.
   @principal_id_re ~r/\A(?:agent|human)_[A-Za-z0-9_-]+\z/
 
+  # Denied secret-key *names* reject the channel even when the associated value
+  # is blank, redacted, or nil — key presence alone fails closed.
   @denied_secret_keys MapSet.new([
                         :session_token,
                         "session_token",
@@ -112,7 +114,7 @@ defmodule Arbor.Agent.MessageFacade do
     collaborators = %{
       authorize: authorize_fun,
       issue_receipt: fn _c, _r, _a, _o ->
-        flunk_or_error(:issue_not_expected)
+        unexpected_collaborator_result(:issue_not_expected)
       end,
       discard_receipt: fn _receipt -> :ok end,
       chat: chat_fun,
@@ -123,17 +125,17 @@ defmodule Arbor.Agent.MessageFacade do
         end
       end,
       chat_authenticated: fn _m, _s, _receipt, _o ->
-        flunk_or_error(:auth_chat_not_expected)
+        unexpected_collaborator_result(:auth_chat_not_expected)
       end,
       chat_response_authenticated: fn _m, _s, _receipt, _o ->
-        flunk_or_error(:auth_chat_not_expected)
+        unexpected_collaborator_result(:auth_chat_not_expected)
       end
     }
 
     deliver_with(caller_id, target_agent_id, message, opts, :text, collaborators)
   end
 
-  defp flunk_or_error(reason) do
+  defp unexpected_collaborator_result(reason) do
     {:error, reason}
   end
 
@@ -516,27 +518,8 @@ defmodule Arbor.Agent.MessageFacade do
     end
   end
 
-  # Manager may return a type-projected Response on the text path as well
-  # (chat_authenticated extracts text after chat_response_authenticated).
-  defp admit_authenticated_result(
-         {:ok, %PipelineResponse{} = response},
-         :text,
-         secrets,
-         collaborators,
-         receipt
-       ) do
-    case admit_auth_response(response, secrets) do
-      {:ok, projected} ->
-        text = PipelineResponse.content(projected)
-        emit_assistant_signal(text)
-        {:ok, text}
-
-      :reject ->
-        discard_receipt(collaborators, receipt)
-        {:error, :delivery_failed}
-    end
-  end
-
+  # Text mode admits binaries only. Production Manager.chat_authenticated/4
+  # extracts content from Pipeline.Response before returning.
   defp admit_authenticated_result({:ok, _other}, _mode, _secrets, collaborators, receipt) do
     discard_receipt(collaborators, receipt)
     {:error, :delivery_failed}
@@ -581,14 +564,9 @@ defmodule Arbor.Agent.MessageFacade do
 
   defp emit_assistant_signal(_), do: :ok
 
-  # ── Authenticated response admission ────────────────────────────────
+  # ── Authenticated response admission (MessageFacade-only) ───────────
 
-  @doc false
-  @spec admit_auth_response(term()) :: {:ok, PipelineResponse.t()} | :reject
-  @spec admit_auth_response(term(), [binary()]) :: {:ok, PipelineResponse.t()} | :reject
-  def admit_auth_response(term, secrets \\ [])
-
-  def admit_auth_response(%PipelineResponse{} = r, secrets) when is_list(secrets) do
+  defp admit_auth_response(%PipelineResponse{} = r, secrets) when is_list(secrets) do
     projected = %PipelineResponse{
       content: r.content,
       tool_history: r.tool_history,
@@ -609,7 +587,7 @@ defmodule Arbor.Agent.MessageFacade do
     end
   end
 
-  def admit_auth_response(_other, _secrets), do: :reject
+  defp admit_auth_response(_other, _secrets), do: :reject
 
   defp type_check_projected(%PipelineResponse{} = r) do
     cond do

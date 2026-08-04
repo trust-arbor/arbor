@@ -217,12 +217,32 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
     pid
   end
 
+  # Test-only: run ETS mutations inside the SessionManager owner process so
+  # :protected table writes succeed without a production mutation seam.
+  defp owner_ets(fun) when is_function(fun, 0) do
+    owner = Process.whereis(SessionManager)
+    assert is_pid(owner)
+    parent = self()
+    ref = make_ref()
+
+    :sys.replace_state(owner, fn state ->
+      send(parent, {ref, fun.()})
+      state
+    end)
+
+    receive do
+      {^ref, result} -> result
+    after
+      1_000 -> flunk("owner ETS op timed out")
+    end
+  end
+
   defp insert_fake_session!(agent_id, session_pid) do
-    true = :ets.insert(SessionManager, {agent_id, session_pid})
+    true = owner_ets(fn -> :ets.insert(SessionManager, {agent_id, session_pid}) end)
 
     on_exit(fn ->
-      if :ets.whereis(SessionManager) != :undefined do
-        :ets.delete(SessionManager, agent_id)
+      if Process.whereis(SessionManager) && :ets.whereis(SessionManager) != :undefined do
+        _ = owner_ets(fn -> :ets.delete(SessionManager, agent_id) end)
       end
     end)
 
@@ -466,6 +486,128 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
       end)
 
       :ok
+    end
+
+    test "security regression: non-owner cannot replace Session binding or steal authenticated delivery" do
+      n = System.unique_integer([:positive])
+      caller = register_active_human!()
+      target = "agent_msgfacade_hijack_#{n}"
+      resource = "arbor://chat/agent/#{target}"
+
+      track_grant!(caller, resource)
+      register_agent_only(target)
+
+      parent = self()
+      facade_caller = self()
+
+      clean = %PipelineResponse{
+        content: "binding-safe-reply",
+        tool_history: [],
+        tool_rounds: 0
+      }
+
+      {:ok, legit_session_pid} =
+        FakeAuthSession.start_link(parent, fn call_from_pid, request ->
+          assert match?(
+                   {:send_authenticated_message, %UserMessage{}, %DeliveryReceipt{}},
+                   request
+                 )
+
+          {_tag, msg, receipt} = request
+          send(parent, {:legit_got, call_from_pid, msg, receipt})
+          assert {:ok, ^caller} = Security.consume_delivery_receipt(receipt, resource, :chat)
+          {:ok, clean}
+        end)
+
+      insert_fake_session!(target, legit_session_pid)
+
+      Application.put_env(
+        :arbor_agent,
+        :orchestrator_session_module,
+        Arbor.Agent.MessageFacadeSecurityRegressionTest.SessionBridge
+      )
+
+      # Separate attacker process attempts to replace the agent→session binding.
+      _attacker =
+        spawn(fn ->
+          hostile_session =
+            spawn(fn ->
+              receive do
+                {:"$gen_call", {from_pid, _ref} = from, request} ->
+                  send(parent, {:hostile_got, from_pid, request})
+                  GenServer.reply(from, {:ok, %PipelineResponse{content: "stolen"}})
+              end
+            end)
+
+          result =
+            try do
+              :ets.insert(SessionManager, {target, hostile_session})
+            rescue
+              e -> {:raised, e}
+            catch
+              class, reason -> {class, reason}
+            end
+
+          send(parent, {:attacker_write, result, hostile_session})
+        end)
+
+      assert_receive {:attacker_write, write_result, hostile_session}, 1_000
+      assert is_pid(hostile_session)
+
+      # Hostile session blocks in receive forever if not cleaned up.
+      on_exit(fn ->
+        if is_pid(hostile_session) and Process.alive?(hostile_session) do
+          Process.exit(hostile_session, :kill)
+        end
+      end)
+
+      # On :protected tables non-owner insert raises; must not succeed with true.
+      # Base (:public) returns true here — that is the behavioral base-fail evidence.
+      refute write_result == true
+
+      case write_result do
+        {:raised, %ArgumentError{}} ->
+          :ok
+
+        {:raised, %ErlangError{original: :badarg}} ->
+          :ok
+
+        {:error, :badarg} ->
+          :ok
+
+        {:exit, :badarg} ->
+          :ok
+
+        other ->
+          flunk("expected ETS write refusal for non-owner, got: #{inspect(other)}")
+      end
+
+      # Legitimate binding must remain intact after the refused write.
+      assert {:ok, ^legit_session_pid} = SessionManager.get_session(target)
+
+      assert {:ok, token} = SessionToken.generate(caller)
+      message = build_route_free_message(caller, content: "binding integrity probe")
+
+      assert {:ok, "binding-safe-reply"} =
+               Arbor.Agent.send_message(caller, target, message,
+                 timeout: 5_000,
+                 session_token: token
+               )
+
+      assert_receive {:legit_got, from_pid, %UserMessage{} = seen, %DeliveryReceipt{} = receipt},
+                     1_000
+
+      assert from_pid == facade_caller
+      refute from_pid == Process.whereis(SessionManager)
+      assert seen == message
+      assert seen.engagement_id == nil
+      assert is_struct(receipt, DeliveryReceipt)
+
+      # Attacker session must never observe the authenticated message or receipt.
+      refute_receive {:hostile_got, _, _}, 200
+
+      # Deterministic cleanup after no-delivery assertion (on_exit is backup).
+      if Process.alive?(hostile_session), do: Process.exit(hostile_session, :kill)
     end
 
     test "security regression: valid human proof exchanges once and reaches exact Session" do
