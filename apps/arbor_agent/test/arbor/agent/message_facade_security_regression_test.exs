@@ -217,6 +217,75 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
     pid
   end
 
+  # Test config sets arbor_signals start_children: false, so ensure_all_started
+  # leaves Store/Bus absent. Start only missing children under the real
+  # Arbor.Signals.Supervisor, track ownership, and remove exactly those on exit.
+  defp ensure_signals_topology! do
+    {:ok, _apps} = Application.ensure_all_started(:arbor_signals)
+    sup = Process.whereis(Arbor.Signals.Supervisor)
+
+    assert is_pid(sup),
+           "Arbor.Signals.Supervisor must be running after ensure_all_started(:arbor_signals)"
+
+    started =
+      for {mod, child_spec} <- [
+            {Arbor.Signals.Store, {Arbor.Signals.Store, []}},
+            {Arbor.Signals.Bus, {Arbor.Signals.Bus, []}}
+          ],
+          Process.whereis(mod) == nil,
+          reduce: [] do
+        acc ->
+          case Supervisor.start_child(sup, child_spec) do
+            {:ok, _pid} ->
+              [mod | acc]
+
+            {:ok, _pid, _info} ->
+              [mod | acc]
+
+            {:error, {:already_started, _pid}} ->
+              # Pre-existing live child — not owned by this helper.
+              acc
+
+            {:error, :already_present} ->
+              # Pre-existing child_spec (possibly dead). Restart but do not claim
+              # ownership for delete — preserve the supervisor's topology.
+              case Supervisor.restart_child(sup, mod) do
+                {:ok, _pid} -> acc
+                {:ok, _pid, _info} -> acc
+                {:error, {:already_started, _pid}} -> acc
+                other -> flunk("failed to restart #{inspect(mod)}: #{inspect(other)}")
+              end
+
+            other ->
+              flunk("failed to start #{inspect(mod)}: #{inspect(other)}")
+          end
+      end
+
+    # Start order was Store then Bus; reverse list is start-order for clarity.
+    started = Enum.reverse(started)
+
+    on_exit(fn ->
+      case Process.whereis(Arbor.Signals.Supervisor) do
+        sup when is_pid(sup) ->
+          # Tear down only children this helper started (Bus before Store).
+          for mod <- Enum.reverse(started) do
+            if Process.whereis(mod) do
+              _ = Supervisor.terminate_child(sup, mod)
+            end
+
+            _ = Supervisor.delete_child(sup, mod)
+          end
+
+        _ ->
+          :ok
+      end
+    end)
+
+    assert Process.whereis(Arbor.Signals.Store) != nil
+    assert Process.whereis(Arbor.Signals.Bus) != nil
+    :ok
+  end
+
   # Test-only: run ETS mutations inside the SessionManager owner process so
   # :protected table writes succeed without a production mutation seam.
   defp owner_ets(fun) when is_function(fun, 0) do
@@ -910,7 +979,7 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
       register_agent_only(target)
 
       parent = self()
-      _ = Application.ensure_all_started(:arbor_signals)
+      ensure_signals_topology!()
 
       {:ok, session_pid} =
         FakeAuthSession.start_link(parent, fn _from, {_tag, _msg, receipt} ->
@@ -996,7 +1065,7 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
       register_agent_only(target)
 
       parent = self()
-      _ = Application.ensure_all_started(:arbor_signals)
+      ensure_signals_topology!()
 
       # Malicious Session echoes the receipt bearer into assistant content.
       # Facade must reject after admission, emit no assistant signal, clean up receipt.
