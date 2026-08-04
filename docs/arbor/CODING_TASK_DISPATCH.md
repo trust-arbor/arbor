@@ -20,14 +20,21 @@ CLI starts; Arbor does not treat `Method not found` as successful model
 selection.
 
 Arbor launches each worker with a private, ephemeral runtime/config home rather
-than the live Arbor home. The private Grok home never contains `auth.json` and
-Arbor never reads or copies the operator's Grok login state. Instead, immediately
-before launch, reconnect, and every prompt, Arbor's live BEAM refreshes a mode
-`0600` access-token-only xAI OAuth projection. Grok 0.2.118 consumes that file
-through the fixed external provider command
+than the live Arbor home, and never reads or copies the operator's Grok login
+state. Immediately before launch, reconnect, and every prompt, Arbor's live BEAM
+refreshes a mode-`0600`, access-token-only xAI OAuth projection. Grok 0.2.118
+consumes that file through the fixed external provider command
 `/bin/cat "$ARBOR_GROK_AUTH_PAYLOAD_PATH"`; access and refresh tokens are absent
-from argv and environment values. The projection and its runtime home are
-removed at session cleanup.
+from argv and environment values.
+
+Grok's external-provider implementation transiently writes the returned access
+token to `auth.json`. After every ACP authentication, Arbor verifies that cache
+is a bounded, single-link, mode-`0600` external-auth record whose credential
+exactly matches the staged Arbor token, then removes both `auth.json` and
+`auth.json.lock` before worker readiness or provider RPC. Unexpected cache
+schema, token, path, mode, or link state fails closed. The projection is
+re-authenticated and scrubbed before every initial or steered prompt, and the
+remaining projection and runtime home are removed at session cleanup.
 
 Managed, repository, and plugin MCP discovery is disabled for Grok sessions.
 That includes ambient repository files and directories such as `.mcp.json`,

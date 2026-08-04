@@ -974,7 +974,14 @@ defmodule Arbor.AI.AcpSession do
 
   defp unwrap_grok_launch({:error, _reason} = error), do: error
 
-  defp initialize_client(session_pid, provider, opts, workspace_plan, client_opts) do
+  defp initialize_client(
+         session_pid,
+         provider,
+         opts,
+         workspace_plan,
+         client_opts,
+         runtime_home_cleanup
+       ) do
     if acp_available?() do
       workspace = materialize_workspace(workspace_plan)
       cwd = workspace_cwd(workspace, opts)
@@ -982,7 +989,7 @@ defmodule Arbor.AI.AcpSession do
       result =
         client_opts
         |> configure_client_opts(session_pid, opts, cwd)
-        |> start_authenticated_acp_client(provider, opts)
+        |> start_authenticated_acp_client(provider, opts, runtime_home_cleanup)
 
       case result do
         {:ok, client} ->
@@ -1011,7 +1018,9 @@ defmodule Arbor.AI.AcpSession do
             Keyword.get(state.opts, :grok_sandbox_authority),
             state.owner,
             state.mcp_servers,
-            fn prepared_opts -> do_start_client_owned(state, prepared_opts) end
+            fn prepared_opts ->
+              do_start_client_owned(state, prepared_opts, runtime_home_cleanup)
+            end
           )
           |> unwrap_grok_launch()
         end
@@ -1027,7 +1036,7 @@ defmodule Arbor.AI.AcpSession do
     end
   end
 
-  defp do_start_client_owned(state, client_opts) do
+  defp do_start_client_owned(state, client_opts, runtime_home_cleanup) do
     with {:ok, _opts, requested_remaining} <- Arbor.AI.Timeout.remaining(state.opts),
          {:ok, requested_deadline} <- Arbor.AI.Timeout.deadline(state.opts) do
       {remaining, deadline} = finite_start_deadline(requested_remaining, requested_deadline)
@@ -1044,7 +1053,8 @@ defmodule Arbor.AI.AcpSession do
                 state.provider,
                 state.opts,
                 state.workspace,
-                client_opts
+                client_opts,
+                runtime_home_cleanup
               )
 
             completed_at = System.monotonic_time(:millisecond)
@@ -1162,10 +1172,20 @@ defmodule Arbor.AI.AcpSession do
       {:error, {:start_failure, kind, Arbor.LLM.sanitize_external_reason(reason)}}
   end
 
-  defp start_authenticated_acp_client(client_opts, provider, auth_opts) do
+  defp start_authenticated_acp_client(
+         client_opts,
+         provider,
+         auth_opts,
+         runtime_home_cleanup
+       ) do
     case start_acp_client(client_opts) do
       {:ok, client} ->
-        case authenticate_provider_client(provider, client, auth_opts) do
+        case authenticate_and_scrub_provider_client(
+               provider,
+               client,
+               auth_opts,
+               runtime_home_cleanup
+             ) do
           :ok ->
             {:ok, client}
 
@@ -1196,6 +1216,36 @@ defmodule Arbor.AI.AcpSession do
   end
 
   defp authenticate_provider_client(_provider, _client, _opts), do: :ok
+
+  defp authenticate_and_scrub_provider_client(
+         provider,
+         client,
+         opts,
+         runtime_home_cleanup
+       ) do
+    with :ok <- authenticate_provider_client(provider, client, opts),
+         :ok <- scrub_provider_auth_cache(provider, runtime_home_cleanup) do
+      :ok
+    end
+  end
+
+  defp scrub_provider_auth_cache(:grok, runtime_home_cleanup),
+    do: RuntimeHome.scrub_grok_external_auth_cache(runtime_home_cleanup)
+
+  defp scrub_provider_auth_cache(_provider, _runtime_home_cleanup), do: :ok
+
+  defp refresh_provider_client_auth(provider, client, opts, runtime_home_cleanup) do
+    with :ok <- refresh_grok_external_auth(provider, runtime_home_cleanup),
+         :ok <-
+           authenticate_and_scrub_provider_client(
+             provider,
+             client,
+             opts,
+             runtime_home_cleanup
+           ) do
+      :ok
+    end
+  end
 
   defp authenticate_grok_client(module, client, opts) do
     expected = RuntimeHome.grok_external_auth_method()
@@ -2084,7 +2134,12 @@ defmodule Arbor.AI.AcpSession do
       |> sanitize_provider_facing_opts()
 
     with {:ok, client} <-
-           start_authenticated_acp_client(client_opts, state.provider, operation_opts) do
+           start_authenticated_acp_client(
+             client_opts,
+             state.provider,
+             operation_opts,
+             state.runtime_home_cleanup
+           ) do
       # credo:disable-for-next-line Credo.Check.Refactor.Apply
       case apply(acp_client_module(), :load_session, [
              client,
@@ -2307,9 +2362,16 @@ defmodule Arbor.AI.AcpSession do
   # derived from the workspace (as in init/1), not state.opts[:cwd], which is
   # absent in the pool flow.
   defp do_send_message(content, opts, from, state) do
-    with {:ok, opts, hard_timeout} <- Arbor.AI.Timeout.remaining(opts),
-         {:ok, deadline_ms} <- Arbor.AI.Timeout.deadline(opts),
-         :ok <- refresh_grok_external_auth(state.provider, state.runtime_home_cleanup) do
+    with {:ok, initial_opts, _initial_timeout} <- Arbor.AI.Timeout.remaining(opts),
+         {:ok, deadline_ms} <- Arbor.AI.Timeout.deadline(initial_opts),
+         :ok <-
+           refresh_provider_client_auth(
+             state.provider,
+             state.client,
+             initial_opts,
+             state.runtime_home_cleanup
+           ),
+         {:ok, opts, hard_timeout} <- Arbor.AI.Timeout.remaining(initial_opts) do
       # Ledger target is init-only — never accept or forward from per-send opts.
       opts = drop_usage_ledger_opts(opts)
       {usage_context, opts} = pop_usage_context(opts)
@@ -3140,38 +3202,52 @@ defmodule Arbor.AI.AcpSession do
 
       {{control_id, control}, state} ->
         case Arbor.AI.Timeout.remaining(prompt.prompt_opts) do
-          {:ok, follow_up_opts, remaining} ->
-            case refresh_grok_external_auth(state.provider, state.runtime_home_cleanup) do
+          {:ok, initial_follow_up_opts, _initial_remaining} ->
+            case refresh_provider_client_auth(
+                   state.provider,
+                   state.client,
+                   initial_follow_up_opts,
+                   state.runtime_home_cleanup
+                 ) do
               :ok ->
-                follow_up =
-                  start_task_prompt(
-                    state,
-                    control.message,
-                    follow_up_opts,
-                    remaining,
-                    prompt.inactivity_timeout
-                  )
-                  |> Map.merge(%{
-                    caller_pid: prompt.caller_pid,
-                    caller_ref: prompt.caller_ref,
-                    control: control_id,
-                    prompt_text: control.message,
-                    prompt_kind: "task_control",
-                    capture_index: prompt.capture_index + 1,
-                    transcript_capture: prompt.transcript_capture,
-                    usage_context: Map.get(prompt, :usage_context),
-                    deadline_ms: prompt.deadline_ms
-                  })
-                  |> put_prompt_usage_event_id()
+                case Arbor.AI.Timeout.remaining(initial_follow_up_opts) do
+                  {:ok, follow_up_opts, remaining} ->
+                    follow_up =
+                      start_task_prompt(
+                        state,
+                        control.message,
+                        follow_up_opts,
+                        remaining,
+                        prompt.inactivity_timeout
+                      )
+                      |> Map.merge(%{
+                        caller_pid: prompt.caller_pid,
+                        caller_ref: prompt.caller_ref,
+                        control: control_id,
+                        prompt_text: control.message,
+                        prompt_kind: "task_control",
+                        capture_index: prompt.capture_index + 1,
+                        transcript_capture: prompt.transcript_capture,
+                        usage_context: Map.get(prompt, :usage_context),
+                        deadline_ms: prompt.deadline_ms
+                      })
+                      |> put_prompt_usage_event_id()
 
-                follow_up_timers =
-                  start_prompt_timers(follow_up.ref,
-                    hard_timeout: follow_up.hard_timeout,
-                    inactivity_timeout: follow_up.inactivity_timeout
-                  )
+                    follow_up_timers =
+                      start_prompt_timers(follow_up.ref,
+                        hard_timeout: follow_up.hard_timeout,
+                        inactivity_timeout: follow_up.inactivity_timeout
+                      )
 
-                capture_state = prepare_prompt_capture(state, prompt.transcript_capture)
-                await_prompt_result(follow_up, follow_up_timers, capture_state)
+                    capture_state = prepare_prompt_capture(state, prompt.transcript_capture)
+                    await_prompt_result(follow_up, follow_up_timers, capture_state)
+
+                  {:error, :timeout} ->
+                    timeout_before_follow_up(prompt, state)
+
+                  {:error, _reason} ->
+                    projection_failed_before_follow_up(prompt, result, control_id, state)
+                end
 
               {:error, _reason} ->
                 projection_failed_before_follow_up(prompt, result, control_id, state)

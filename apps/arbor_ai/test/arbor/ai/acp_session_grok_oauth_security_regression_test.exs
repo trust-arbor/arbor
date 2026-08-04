@@ -28,7 +28,10 @@ defmodule Arbor.AI.AcpSessionGrokOAuthSecurityRegressionTest do
     def authenticate(client, method_id, auth_opts) do
       opts = Agent.get(client, & &1)
       send(opts[:test_pid], {:grok_probe_authenticated, client, method_id, auth_opts})
-      Keyword.get(opts, :auth_result, {:ok, %{}})
+      result = Keyword.get(opts, :auth_result, {:ok, %{}})
+
+      if match?({:ok, _result}, result), do: write_external_auth_cache(opts)
+      result
     end
 
     def new_session(_client, _cwd, _opts), do: {:ok, %{"sessionId" => "grok-probe-session"}}
@@ -65,6 +68,28 @@ defmodule Arbor.AI.AcpSessionGrokOAuthSecurityRegressionTest do
     defp payload(opts) do
       env = opts |> Keyword.fetch!(:env) |> Map.new()
       env |> Map.fetch!("ARBOR_GROK_AUTH_PAYLOAD_PATH") |> File.read!() |> Jason.decode!()
+    end
+
+    defp write_external_auth_cache(opts) do
+      env = opts |> Keyword.fetch!(:env) |> Map.new()
+      grok_home = Map.fetch!(env, "GROK_HOME")
+      access_token = Keyword.get(opts, :auth_cache_access_token, payload(opts)["access_token"])
+
+      cache =
+        Jason.encode!(%{
+          "https://auth.x.ai::00000000-0000-4000-8000-000000000000" => %{
+            "auth_mode" => "external",
+            "expires_at" => "2026-08-03T23:59:59Z",
+            "key" => access_token
+          }
+        })
+
+      auth_path = Path.join(grok_home, "auth.json")
+      lock_path = Path.join(grok_home, "auth.json.lock")
+      File.write!(auth_path, cache)
+      File.chmod!(auth_path, 0o600)
+      File.write!(lock_path, "")
+      File.chmod!(lock_path, 0o644)
     end
   end
 
@@ -127,6 +152,7 @@ defmodule Arbor.AI.AcpSessionGrokOAuthSecurityRegressionTest do
     assert_receive {:grok_probe_started, client, started_opts, payload}, 2_000
     assert_grok_authenticated(client)
     assert :ok = AcpSession.await_ready(session, timeout: 2_000)
+    refute_grok_auth_cache(started_opts)
 
     env = started_opts |> Keyword.fetch!(:env) |> Map.new()
     command = Keyword.fetch!(started_opts, :command)
@@ -158,11 +184,13 @@ defmodule Arbor.AI.AcpSessionGrokOAuthSecurityRegressionTest do
     publish_xai!(access_a, "refresh-a")
     session = start_grok_session!(workspace)
 
-    assert_receive {:grok_probe_started, first_client, _opts, %{"access_token" => ^access_a}},
+    assert_receive {:grok_probe_started, first_client, first_opts,
+                    %{"access_token" => ^access_a}},
                    2_000
 
     assert_grok_authenticated(first_client)
     assert :ok = AcpSession.await_ready(session, timeout: 2_000)
+    refute_grok_auth_cache(first_opts)
 
     assert {:ok, %{"sessionId" => "grok-probe-session"}} =
              AcpSession.create_session(session, timeout: 2_000)
@@ -170,28 +198,36 @@ defmodule Arbor.AI.AcpSessionGrokOAuthSecurityRegressionTest do
     access_b = jwt(System.system_time(:second) + 7_200, "access-b")
     publish_xai!(access_b, "refresh-b")
     assert {:ok, %{"text" => "ok"}} = AcpSession.send_message(session, "one", timeout: 2_000)
+    assert_grok_authenticated(first_client)
     assert_receive {:grok_probe_prompt, _worker, "one", %{"access_token" => ^access_b}}, 2_000
+    refute_grok_auth_cache(first_opts)
 
     access_c = jwt(System.system_time(:second) + 7_200, "access-c")
     publish_xai!(access_c, "refresh-c")
     assert {:ok, %{"text" => "ok"}} = AcpSession.send_message(session, "two", timeout: 2_000)
+    assert_grok_authenticated(first_client)
     assert_receive {:grok_probe_prompt, _worker, "two", %{"access_token" => ^access_c}}, 2_000
+    refute_grok_auth_cache(first_opts)
 
     access_d = jwt(System.system_time(:second) + 7_200, "access-d")
     publish_xai!(access_d, "refresh-d")
     Process.exit(first_client, :kill)
 
-    assert_receive {:grok_probe_started, reconnect_client, _opts, %{"access_token" => ^access_d}},
+    assert_receive {:grok_probe_started, reconnect_client, reconnect_opts,
+                    %{"access_token" => ^access_d}},
                    2_000
 
     assert_grok_authenticated(reconnect_client)
+    refute_grok_auth_cache(reconnect_opts)
 
     assert_receive {:grok_probe_loaded, ^reconnect_client, "grok-probe-session",
                     %{"access_token" => ^access_d}},
                    2_000
 
     caller = Task.async(fn -> AcpSession.send_message(session, "hold", timeout: 5_000) end)
+    assert_grok_authenticated(reconnect_client)
     assert_receive {:grok_probe_prompt, hold_worker, "hold", _payload}, 2_000
+    refute_grok_auth_cache(reconnect_opts)
 
     assert {:ok, :queued, :same_session_follow_up} =
              AcpSession.deliver_task_control(session, %{
@@ -204,8 +240,12 @@ defmodule Arbor.AI.AcpSessionGrokOAuthSecurityRegressionTest do
     publish_xai!(access_e, "refresh-e")
     send(hold_worker, :release)
 
+    assert_grok_authenticated(reconnect_client)
+
     assert_receive {:grok_probe_prompt, _worker, "follow-up", %{"access_token" => ^access_e}},
                    2_000
+
+    refute_grok_auth_cache(reconnect_opts)
 
     assert {:ok, %{"text" => "ok"}} = Task.await(caller, 5_000)
 
@@ -230,6 +270,7 @@ defmodule Arbor.AI.AcpSessionGrokOAuthSecurityRegressionTest do
     assert_receive {:grok_probe_started, client, opts, _payload}, 2_000
     assert_grok_authenticated(client)
     assert :ok = AcpSession.await_ready(session, timeout: 2_000)
+    refute_grok_auth_cache(opts)
     assert {:ok, _} = AcpSession.create_session(session, timeout: 2_000)
 
     payload_path =
@@ -280,6 +321,21 @@ defmodule Arbor.AI.AcpSessionGrokOAuthSecurityRegressionTest do
     refute inspect(AcpSession.status(rejected_session)) =~ sentinel
     refute_receive {:grok_probe_prompt, _worker, _content, _payload}, 100
     GenServer.stop(rejected_session)
+
+    cache_sentinel = "cache-sentinel-#{unique_suffix()}"
+
+    mismatched_cache_session =
+      start_grok_session!(workspace, auth_cache_access_token: cache_sentinel)
+
+    assert_receive {:grok_probe_started, cache_client, cache_opts, _payload}, 2_000
+    assert_grok_authenticated(cache_client)
+
+    assert {:error, :grok_external_auth_unavailable} =
+             AcpSession.await_ready(mismatched_cache_session, timeout: 2_000)
+
+    refute inspect(AcpSession.status(mismatched_cache_session)) =~ cache_sentinel
+    refute File.exists?(Path.dirname(grok_home(cache_opts)))
+    GenServer.stop(mismatched_cache_session)
   end
 
   test "security regression: Grok client missing ACP authentication fails closed",
@@ -308,6 +364,7 @@ defmodule Arbor.AI.AcpSessionGrokOAuthSecurityRegressionTest do
     assert_receive {:grok_probe_started, prompt_client, prompt_opts, _payload}, 2_000
     assert_grok_authenticated(prompt_client)
     assert :ok = AcpSession.await_ready(prompt_session, timeout: 2_000)
+    refute_grok_auth_cache(prompt_opts)
     assert {:ok, _} = AcpSession.create_session(prompt_session, timeout: 2_000)
     prompt_payload = auth_payload_path(prompt_opts)
     File.rm!(Path.join(store, "xai.json"))
@@ -321,9 +378,10 @@ defmodule Arbor.AI.AcpSessionGrokOAuthSecurityRegressionTest do
 
     publish_xai!(jwt(System.system_time(:second) + 7_200, "reconnect"), "refresh-reconnect")
     reconnect_session = start_grok_session!(workspace)
-    assert_receive {:grok_probe_started, reconnect_client, _opts, _payload}, 2_000
+    assert_receive {:grok_probe_started, reconnect_client, reconnect_opts, _payload}, 2_000
     assert_grok_authenticated(reconnect_client)
     assert :ok = AcpSession.await_ready(reconnect_session, timeout: 2_000)
+    refute_grok_auth_cache(reconnect_opts)
     assert {:ok, _} = AcpSession.create_session(reconnect_session, timeout: 2_000)
     File.rm!(Path.join(store, "xai.json"))
     Process.exit(reconnect_client, :kill)
@@ -333,15 +391,18 @@ defmodule Arbor.AI.AcpSessionGrokOAuthSecurityRegressionTest do
 
     publish_xai!(jwt(System.system_time(:second) + 7_200, "follow-up"), "refresh-follow-up")
     follow_up_session = start_grok_session!(workspace)
-    assert_receive {:grok_probe_started, follow_up_client, _opts, _payload}, 2_000
+    assert_receive {:grok_probe_started, follow_up_client, follow_up_opts, _payload}, 2_000
     assert_grok_authenticated(follow_up_client)
     assert :ok = AcpSession.await_ready(follow_up_session, timeout: 2_000)
+    refute_grok_auth_cache(follow_up_opts)
     assert {:ok, _} = AcpSession.create_session(follow_up_session, timeout: 2_000)
 
     caller =
       Task.async(fn -> AcpSession.send_message(follow_up_session, "hold", timeout: 5_000) end)
 
+    assert_grok_authenticated(follow_up_client)
     assert_receive {:grok_probe_prompt, hold_worker, "hold", _payload}, 2_000
+    refute_grok_auth_cache(follow_up_opts)
 
     assert {:ok, :queued, :same_session_follow_up} =
              AcpSession.deliver_task_control(follow_up_session, %{
@@ -413,6 +474,10 @@ defmodule Arbor.AI.AcpSessionGrokOAuthSecurityRegressionTest do
       fn payload, opts ->
         File.write!(Path.join(Path.dirname(payload), "auth.json"), "legacy")
         opts
+      end,
+      fn payload, opts ->
+        File.write!(Path.join(Path.dirname(payload), "auth.json.lock"), "")
+        opts
       end
     ]
 
@@ -461,6 +526,16 @@ defmodule Arbor.AI.AcpSessionGrokOAuthSecurityRegressionTest do
 
   defp auth_payload_path(opts) do
     opts |> Keyword.fetch!(:env) |> Map.new() |> Map.fetch!("ARBOR_GROK_AUTH_PAYLOAD_PATH")
+  end
+
+  defp grok_home(opts) do
+    opts |> Keyword.fetch!(:env) |> Map.new() |> Map.fetch!("GROK_HOME")
+  end
+
+  defp refute_grok_auth_cache(opts) do
+    home = grok_home(opts)
+    assert {:error, :enoent} = File.lstat(Path.join(home, "auth.json"))
+    assert {:error, :enoent} = File.lstat(Path.join(home, "auth.json.lock"))
   end
 
   defp publish_xai!(access, refresh) do

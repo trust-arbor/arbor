@@ -7,6 +7,7 @@ defmodule Arbor.AI.AcpSession.RuntimeHome do
 
   @create_attempts 4
   @grok_auth_filename "auth.json"
+  @grok_auth_lock_filename "auth.json.lock"
   @grok_auth_payload_filename "arbor-xai-access.json"
   @grok_home_directory "grok"
   @grok_log_filename "grok.log"
@@ -36,6 +37,20 @@ defmodule Arbor.AI.AcpSession.RuntimeHome do
   @max_grok_auth_payload_bytes 65_600
   @max_grok_access_token_bytes 65_536
   @max_grok_auth_ttl_seconds 300
+  @grok_external_auth_scope_prefix "https://auth.x.ai::"
+  @grok_external_auth_cache_fields [
+    "auth_mode",
+    "coding_data_retention_opt_out",
+    "create_time",
+    "email",
+    "expires_at",
+    "first_name",
+    "key",
+    "principal_id",
+    "principal_type",
+    "profile_image_asset_id",
+    "user_id"
+  ]
   @grok_auth_method_id "grok.com"
   @grok_auth_provider_command ~s(/bin/cat "$ARBOR_GROK_AUTH_PAYLOAD_PATH")
   @grok_auth_provider_label "Arbor"
@@ -131,6 +146,34 @@ defmodule Arbor.AI.AcpSession.RuntimeHome do
   end
 
   def refresh_grok_external_auth(_cleanup_identity),
+    do: {:error, :grok_external_auth_unavailable}
+
+  @doc false
+  @spec scrub_grok_external_auth_cache(map()) :: :ok | {:error, atom()}
+  def scrub_grok_external_auth_cache(%{path: runtime_home})
+      when is_binary(runtime_home) and runtime_home != "" do
+    grok_home = Path.join(runtime_home, @grok_home_directory)
+    payload_path = grok_auth_payload_path(grok_home)
+    auth_path = Path.join(grok_home, @grok_auth_filename)
+    lock_path = Path.join(grok_home, @grok_auth_lock_filename)
+
+    with :ok <- verify_private_directory(grok_home),
+         {:ok, %{"access_token" => access_token}} <-
+           read_verified_grok_auth_payload(payload_path, grok_home),
+         :ok <- verify_and_remove_grok_external_auth_cache(auth_path, grok_home, access_token),
+         :ok <- verify_and_remove_grok_external_auth_lock(lock_path, grok_home),
+         :ok <- refuse_legacy_grok_auth(grok_home) do
+      :ok
+    else
+      _other -> {:error, :grok_external_auth_unavailable}
+    end
+  rescue
+    _exception -> {:error, :grok_external_auth_unavailable}
+  catch
+    _kind, _reason -> {:error, :grok_external_auth_unavailable}
+  end
+
+  def scrub_grok_external_auth_cache(_cleanup_identity),
     do: {:error, :grok_external_auth_unavailable}
 
   defp update_grok_external_auth(runtime_home, presence) do
@@ -427,20 +470,27 @@ defmodule Arbor.AI.AcpSession.RuntimeHome do
   end
 
   defp refuse_legacy_grok_auth(grok_home) do
-    case File.lstat(Path.join(grok_home, @grok_auth_filename)) do
-      {:error, :enoent} -> :ok
-      _other -> {:error, :grok_legacy_auth_forbidden}
-    end
+    [@grok_auth_filename, @grok_auth_lock_filename]
+    |> Enum.reduce_while(:ok, fn filename, :ok ->
+      case File.lstat(Path.join(grok_home, filename)) do
+        {:error, :enoent} -> {:cont, :ok}
+        _other -> {:halt, {:error, :grok_legacy_auth_forbidden}}
+      end
+    end)
   end
 
   defp contained_payload_path(payload_path, grok_home) do
-    expanded_home = Path.expand(grok_home)
-    expanded_payload = Path.expand(payload_path)
+    contained_grok_file_path(payload_path, grok_home, @grok_auth_payload_filename)
+  end
 
-    with true <- Path.dirname(expanded_payload) == expanded_home,
-         true <- Path.basename(expanded_payload) == @grok_auth_payload_filename,
-         {:ok, ^expanded_payload} <- SafePath.resolve_within(expanded_payload, expanded_home) do
-      {:ok, expanded_payload}
+  defp contained_grok_file_path(path, grok_home, expected_filename) do
+    expanded_home = Path.expand(grok_home)
+    expanded_path = Path.expand(path)
+
+    with true <- Path.dirname(expanded_path) == expanded_home,
+         true <- Path.basename(expanded_path) == expected_filename,
+         {:ok, ^expanded_path} <- SafePath.resolve_within(expanded_path, expanded_home) do
+      {:ok, expanded_path}
     else
       _other -> {:error, :grok_auth_payload_path_mismatch}
     end
@@ -461,6 +511,13 @@ defmodule Arbor.AI.AcpSession.RuntimeHome do
   end
 
   defp verify_grok_auth_payload(payload_path, grok_home) do
+    case read_verified_grok_auth_payload(payload_path, grok_home) do
+      {:ok, _payload} -> :ok
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp read_verified_grok_auth_payload(payload_path, grok_home) do
     with {:ok, ^payload_path} <- contained_payload_path(payload_path, grok_home),
          {:ok, %File.Stat{type: :regular, links: 1, mode: mode, size: size} = before} <-
            File.lstat(payload_path),
@@ -480,9 +537,93 @@ defmodule Arbor.AI.AcpSession.RuntimeHome do
              max_list_items: 1
            ),
          :ok <- validate_grok_auth_payload(decoded) do
-      :ok
+      {:ok, decoded}
     else
       _other -> {:error, :grok_auth_payload_invalid}
+    end
+  end
+
+  defp verify_and_remove_grok_external_auth_cache(auth_path, grok_home, access_token) do
+    case File.lstat(auth_path) do
+      {:error, :enoent} ->
+        :ok
+
+      {:ok, %File.Stat{type: :regular, links: 1, mode: mode, size: size} = before}
+      when (mode &&& 0o7777) == 0o600 and size > 0 and
+             size <= @max_grok_auth_payload_bytes ->
+        with {:ok, ^auth_path} <-
+               contained_grok_file_path(auth_path, grok_home, @grok_auth_filename),
+             {:ok, payload} <-
+               Arbor.LLM.read_bounded_regular_file(
+                 auth_path,
+                 @max_grok_auth_payload_bytes
+               ),
+             true <- byte_size(payload) == size,
+             {:ok, decoded} <-
+               Arbor.LLM.decode_bounded_json(payload,
+                 max_bytes: @max_grok_auth_payload_bytes,
+                 max_nodes: 32,
+                 max_depth: 3,
+                 max_map_keys: 16,
+                 max_list_items: 1
+               ),
+             :ok <- validate_grok_external_auth_cache(decoded, access_token),
+             {:ok, %File.Stat{type: :regular, links: 1} = after_stat} <-
+               File.lstat(auth_path),
+             true <- grok_file_identity(before) == grok_file_identity(after_stat),
+             :ok <- File.rm(auth_path),
+             {:error, :enoent} <- File.lstat(auth_path) do
+          :ok
+        else
+          _other -> {:error, :grok_external_auth_cache_invalid}
+        end
+
+      _other ->
+        {:error, :grok_external_auth_cache_invalid}
+    end
+  end
+
+  defp validate_grok_external_auth_cache(cache, access_token)
+       when is_map(cache) and map_size(cache) == 1 and is_binary(access_token) do
+    with [{scope, record}] <- Map.to_list(cache),
+         true <- is_binary(scope) and byte_size(scope) <= 1_024,
+         true <- String.starts_with?(scope, @grok_external_auth_scope_prefix),
+         true <- is_map(record),
+         true <- map_size(record) <= length(@grok_external_auth_cache_fields),
+         true <- Enum.all?(Map.keys(record), &(&1 in @grok_external_auth_cache_fields)),
+         "external" <- Map.get(record, "auth_mode"),
+         ^access_token <- Map.get(record, "key"),
+         true <- Enum.all?(Map.values(record), &grok_external_auth_scalar?/1) do
+      :ok
+    else
+      _other -> {:error, :grok_external_auth_cache_invalid}
+    end
+  end
+
+  defp validate_grok_external_auth_cache(_cache, _access_token),
+    do: {:error, :grok_external_auth_cache_invalid}
+
+  defp grok_external_auth_scalar?(value),
+    do: is_binary(value) or is_integer(value) or is_boolean(value) or is_nil(value)
+
+  defp verify_and_remove_grok_external_auth_lock(lock_path, grok_home) do
+    case File.lstat(lock_path) do
+      {:error, :enoent} ->
+        :ok
+
+      {:ok, %File.Stat{type: :regular, links: 1, mode: mode, size: 0}}
+      when (mode &&& 0o022) == 0 ->
+        with {:ok, ^lock_path} <-
+               contained_grok_file_path(lock_path, grok_home, @grok_auth_lock_filename),
+             :ok <- File.rm(lock_path),
+             {:error, :enoent} <- File.lstat(lock_path) do
+          :ok
+        else
+          _other -> {:error, :grok_external_auth_cache_invalid}
+        end
+
+      _other ->
+        {:error, :grok_external_auth_cache_invalid}
     end
   end
 
