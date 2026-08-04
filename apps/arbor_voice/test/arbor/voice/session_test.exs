@@ -236,7 +236,8 @@ defmodule Arbor.Voice.SessionTest do
           expect_releases: 1,
           expect_owner_closes: 1,
           expect_registers: 0,
-          expect_cleanup_runs: 1,
+          # The concrete CleanupLease runs accepted cleanup; the facade only observes close.
+          expect_cleanup_runs: 0,
           expect_success_signals: false
         },
         %{
@@ -249,7 +250,7 @@ defmodule Arbor.Voice.SessionTest do
           expect_releases: 1,
           expect_owner_closes: 1,
           expect_registers: 0,
-          expect_cleanup_runs: 1,
+          expect_cleanup_runs: 0,
           expect_success_signals: false
         }
       ]

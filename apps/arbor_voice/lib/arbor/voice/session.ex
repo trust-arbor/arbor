@@ -2046,11 +2046,11 @@ defmodule Arbor.Voice.Session do
 
   # Every ready-state obligation was handed to ResourceOwner/CleanupLease.
   # Session may transfer one still-provisional turn closure, then uses only the
-  # authority barrier and authoritative close result.
+  # authoritative close result. ResourceOwner.close/1 performs the session
+  # authority fence before backend close and lease drain.
   defp settle_and_close(state) do
     case ensure_provisional_cleanup_owned(state) do
       {:ok, state} ->
-        _ = safe_fence_and_drain(state, :session)
         {state, close_owner_authoritatively(state)}
 
       {:error, state} ->

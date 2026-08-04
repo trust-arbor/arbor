@@ -455,11 +455,9 @@ defmodule Arbor.Voice.Test.SessionFakes do
             fences: 0,
             configures: 0,
             metas: 0,
-            direct_releases: 0,
             accepted_failures: 0,
             cleanup_runs: 0,
             handoff_cleanup_keys: [],
-            owner_cleanups: %{},
             last_owner: nil
           }
         end)
@@ -524,39 +522,16 @@ defmodule Arbor.Voice.Test.SessionFakes do
 
       case mode do
         :ok ->
-          {legacy_handoff, cleanups_to_register} =
-            legacy_handoff(Map.get(handoff, :authority), initial_cleanups)
-
-          # The branch's concrete ResourceOwner still speaks the prior handoff
-          # shape. Translate at this fake boundary only, while retaining the
-          # complete new cleanup map for the parallel owner's drain semantics.
           case Arbor.Voice.ResourceOwner.start(
                  owner_pid,
                  backend_module,
                  backend_opts,
-                 legacy_handoff,
+                 handoff,
                  opts
                ) do
             {:ok, owner} = result ->
-              cleanups = if is_map(initial_cleanups), do: initial_cleanups, else: %{}
-
-              case register_initial_cleanups(owner, cleanups_to_register) do
-                :ok ->
-                  _ =
-                    Agent.update(agent, fn state ->
-                      %{
-                        state
-                        | last_owner: owner,
-                          owner_cleanups: Map.put(state.owner_cleanups, owner, cleanups)
-                      }
-                    end)
-
-                  result
-
-                {:error, _reason} ->
-                  _ = Arbor.Voice.ResourceOwner.close(owner)
-                  {:error, {:handoff_accepted, :start_failed}}
-              end
+              _ = Agent.update(agent, &%{&1 | last_owner: owner})
+              result
 
             other ->
               other
@@ -614,20 +589,7 @@ defmodule Arbor.Voice.Test.SessionFakes do
 
       case mode do
         :ok ->
-          case Arbor.Voice.ResourceOwner.register_cleanup(owner, key, fun) do
-            :ok ->
-              Agent.update(agent, fn state ->
-                owner_cleanups =
-                  Map.update(state.owner_cleanups, owner, %{key => fun}, &Map.put(&1, key, fun))
-
-                %{state | owner_cleanups: owner_cleanups}
-              end)
-
-              :ok
-
-            error ->
-              error
-          end
+          Arbor.Voice.ResourceOwner.register_cleanup(owner, key, fun)
 
         :fail ->
           {:error, :register_failed}
@@ -665,12 +627,7 @@ defmodule Arbor.Voice.Test.SessionFakes do
 
     def remove_cleanup(owner, key) do
       agent = lookup_agent!()
-
-      _ =
-        Agent.update(agent, fn state ->
-          owner_cleanups = Map.update(state.owner_cleanups, owner, %{}, &Map.delete(&1, key))
-          %{state | removes: state.removes + 1, owner_cleanups: owner_cleanups}
-        end)
+      _ = Agent.update(agent, &%{&1 | removes: &1.removes + 1})
 
       Arbor.Voice.ResourceOwner.remove_cleanup(owner, key)
     end
@@ -692,13 +649,7 @@ defmodule Arbor.Voice.Test.SessionFakes do
     def fence_and_drain(owner, scope) do
       agent = lookup_agent!()
       _ = Agent.update(agent, fn s -> %{s | fences: s.fences + 1} end)
-
-      with :ok <- Arbor.Voice.ResourceOwner.fence_and_drain(owner, scope),
-           :ok <- drain_scope(agent, owner, scope) do
-        :ok
-      else
-        _ -> {:error, :cleanup_pending}
-      end
+      Arbor.Voice.ResourceOwner.fence_and_drain(owner, scope)
     end
 
     def close(owner) do
@@ -708,12 +659,7 @@ defmodule Arbor.Voice.Test.SessionFakes do
 
       case mode do
         :ok ->
-          cleanup_result = drain_owner_cleanups(agent, owner)
-          close_result = Arbor.Voice.ResourceOwner.close(owner)
-
-          if cleanup_result == :ok and close_result == :ok,
-            do: :ok,
-            else: {:error, :cleanup_pending}
+          Arbor.Voice.ResourceOwner.close(owner)
 
         :cleanup_pending ->
           {:error, :cleanup_pending}
@@ -738,75 +684,6 @@ defmodule Arbor.Voice.Test.SessionFakes do
       end
     end
 
-    defp drain_scope(_agent, _owner, :session), do: :ok
-
-    defp drain_scope(agent, owner, turn_id) when is_binary(turn_id) do
-      cleanup_key = {:voice_turn, turn_id}
-
-      case take_cleanup(agent, owner, cleanup_key) do
-        nil ->
-          :ok
-
-        cleanup ->
-          case run_cleanup(agent, cleanup) do
-            :ok ->
-              _ = Arbor.Voice.ResourceOwner.remove_cleanup(owner, cleanup_key)
-              :ok
-
-            {:error, _reason} ->
-              put_cleanup(agent, owner, cleanup_key, cleanup)
-              {:error, :cleanup_pending}
-          end
-      end
-    end
-
-    defp drain_scope(_agent, _owner, _scope), do: {:error, :cleanup_pending}
-
-    defp register_initial_cleanups(owner, cleanups) do
-      Enum.reduce_while(cleanups, :ok, fn {key, cleanup}, :ok ->
-        case Arbor.Voice.ResourceOwner.register_cleanup(owner, key, cleanup) do
-          :ok -> {:cont, :ok}
-          _error -> {:halt, {:error, :cleanup_registration_failed}}
-        end
-      end)
-    end
-
-    defp legacy_handoff(%{kind: :external} = authority, initial_cleanups)
-         when is_map(initial_cleanups) do
-      route_key = :voice_realtime_route_capability
-      route_cleanup = Map.fetch!(initial_cleanups, route_key)
-
-      {
-        %{authority: authority, initial_cleanup: {route_key, route_cleanup}},
-        Map.delete(initial_cleanups, route_key)
-      }
-    end
-
-    defp legacy_handoff(authority, initial_cleanups) do
-      cleanups = if is_map(initial_cleanups), do: initial_cleanups, else: %{}
-      {%{authority: authority, initial_cleanup: nil}, cleanups}
-    end
-
-    defp drain_owner_cleanups(agent, owner) do
-      cleanups = Agent.get(agent, &Map.get(&1.owner_cleanups, owner, %{}))
-
-      case run_cleanup_map(agent, cleanups) do
-        :ok ->
-          Agent.update(agent, fn state ->
-            %{state | owner_cleanups: Map.delete(state.owner_cleanups, owner)}
-          end)
-
-          Enum.each(Map.keys(cleanups), fn key ->
-            _ = Arbor.Voice.ResourceOwner.remove_cleanup(owner, key)
-          end)
-
-          :ok
-
-        {:error, _reason} ->
-          {:error, :cleanup_pending}
-      end
-    end
-
     defp run_cleanup_map(agent, cleanups) when is_map(cleanups) do
       Enum.reduce(cleanups, :ok, fn {_key, cleanup}, aggregate ->
         case {aggregate, run_cleanup(agent, cleanup)} do
@@ -821,24 +698,6 @@ defmodule Arbor.Voice.Test.SessionFakes do
     defp run_cleanup(agent, cleanup) do
       Agent.update(agent, &%{&1 | cleanup_runs: &1.cleanup_runs + 1})
       Arbor.Voice.EgressAuthority.run_cleanup(cleanup)
-    end
-
-    defp take_cleanup(agent, owner, key) do
-      Agent.get_and_update(agent, fn state ->
-        cleanups = Map.get(state.owner_cleanups, owner, %{})
-        cleanup = Map.get(cleanups, key)
-        owner_cleanups = Map.put(state.owner_cleanups, owner, Map.delete(cleanups, key))
-        {cleanup, %{state | owner_cleanups: owner_cleanups}}
-      end)
-    end
-
-    defp put_cleanup(agent, owner, key, cleanup) do
-      Agent.update(agent, fn state ->
-        owner_cleanups =
-          Map.update(state.owner_cleanups, owner, %{key => cleanup}, &Map.put(&1, key, cleanup))
-
-        %{state | owner_cleanups: owner_cleanups}
-      end)
     end
 
     defp next_register_mode({:sequence, [mode | rest]}) when mode in [:ok, :fail],

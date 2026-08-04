@@ -468,6 +468,8 @@ defmodule Arbor.Voice.EgressSecurityRegressionTest do
     owner = TrackingResourceOwner.owner(owner_tracker)
     owner_ref = Process.monitor(owner)
     assert is_pid(owner) and Process.alive?(owner)
+    %{lease: lease} = :sys.get_state(owner)
+    lease_ref = Process.monitor(lease)
     physical_before_turn = physical_send_count(EgressAuthorityFakes.events())
 
     on_exit(fn ->
@@ -477,9 +479,9 @@ defmodule Arbor.Voice.EgressSecurityRegressionTest do
       EgressAuthorityFakes.reset(modes: [revoke: :ok])
       _ = Voice.stop_session(key)
 
-      unless await_process_exit(owner, 2_000) do
-        _ = DynamicSupervisor.terminate_child(Arbor.Voice.ResourceSupervisor, owner)
-        _ = await_process_exit(owner, 2_000)
+      unless await_process_exit(lease, 2_000) do
+        _ = DynamicSupervisor.terminate_child(Arbor.Voice.CleanupLeaseSupervisor, lease)
+        _ = await_process_exit(lease, 2_000)
       end
     end)
 
@@ -490,7 +492,8 @@ defmodule Arbor.Voice.EgressSecurityRegressionTest do
 
     assert {:error, :cleanup_pending} = Voice.text_turn(user_id, agent_id, "never sent")
     assert {:error, :not_found} = Voice.session_status(key)
-    assert Process.alive?(owner)
+    assert_receive {:DOWN, ^owner_ref, :process, ^owner, :normal}, 2_000
+    assert Process.alive?(lease)
     assert TrackingResourceOwner.stats(owner_tracker).registers == 2
 
     active = EgressAuthorityFakes.active_capabilities()
@@ -498,7 +501,7 @@ defmodule Arbor.Voice.EgressSecurityRegressionTest do
     assert Enum.count(active, &(&1.kind == :disclosure)) == 1
 
     retained_cleanup_keys =
-      owner
+      lease
       |> :sys.get_state()
       |> Map.fetch!(:cleanups)
       |> Arbor.Voice.Redacted.value()
@@ -517,10 +520,10 @@ defmodule Arbor.Voice.EgressSecurityRegressionTest do
     assert Enum.any?(events_while_blocked, &match?({:revoke, _}, &1))
     assert physical_send_count(events_while_blocked) == physical_before_turn
 
-    # ResourceOwner outlives Session and keeps retrying both pending authority
-    # obligations. Once revocation recovers, it can truthfully terminate.
+    # CleanupLease outlives both coordinators and keeps retrying every accepted
+    # obligation. Once revocation recovers, it can truthfully terminate.
     EgressAuthorityFakes.set_mode(:revoke, :ok)
-    assert_receive {:DOWN, ^owner_ref, :process, ^owner, :normal}, 2_000
+    assert_receive {:DOWN, ^lease_ref, :process, ^lease, :normal}, 2_000
 
     assert Enum.all?(EgressAuthorityFakes.capabilities(), fn {_id, capability} ->
              capability.revoked

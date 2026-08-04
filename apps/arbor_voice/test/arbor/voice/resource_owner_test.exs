@@ -2,6 +2,8 @@ defmodule Arbor.Voice.ResourceOwnerTest do
   use ExUnit.Case, async: false
 
   alias Arbor.Voice.BackendWorker
+  alias Arbor.Voice.CleanupLease
+  alias Arbor.Voice.EgressAuthority
   alias Arbor.Voice.ResourceOwner
   alias Arbor.Voice.Test.ResourceOwnerBackend, as: Backend
 
@@ -244,7 +246,31 @@ defmodule Arbor.Voice.ResourceOwnerTest do
     assert {:ok, second_request} =
              ResourceOwner.send_tool_result_request(owner, "call-2", "output-2")
 
+    close_order_calls = [
+      {EgressAuthority, :fence_and_drain, 2},
+      {BackendWorker, :submit, 6},
+      {CleanupLease, :begin_cleanup, 2}
+    ]
+
+    Enum.each(close_order_calls, &:erlang.trace_pattern(&1, true, []))
+    :erlang.trace(owner, true, [:call])
+
+    on_exit(fn ->
+      Enum.each(close_order_calls, &:erlang.trace_pattern(&1, false, []))
+    end)
+
     assert :ok = ResourceOwner.close(owner)
+
+    assert_receive {:trace, ^owner, :call,
+                    {EgressAuthority, :fence_and_drain, [_authority_cell, :session]}}
+
+    assert_receive {:trace, ^owner, :call,
+                    {BackendWorker, :submit,
+                     [_worker, _credential, _token, _deadline, :close, []]}}
+
+    assert_receive {:trace, ^owner, :call,
+                    {CleanupLease, :begin_cleanup, [_lease_credential, :fenced]}}
+
     assert {:reply, :ok} = :gen_server.wait_response(first_request, 100)
     assert {:reply, :ok} = :gen_server.wait_response(second_request, 100)
     assert Backend.close_count(self()) == 1

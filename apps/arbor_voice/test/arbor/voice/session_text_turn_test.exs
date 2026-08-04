@@ -340,6 +340,8 @@ defmodule Arbor.Voice.SessionTextTurnTest do
       wait_until(fn -> ControllableTurnBackend.sent_texts() == ["owner down"] end, 1_000)
 
       owner = TrackingResourceOwner.owner(owner_tracker)
+      %{lease: lease} = :sys.get_state(owner)
+      lease_ref = Process.monitor(lease)
       assert [{session, _value}] = Registry.lookup(Arbor.Voice.Registry, key)
       :ok = :sys.suspend(session)
       Process.exit(owner, :kill)
@@ -348,9 +350,10 @@ defmodule Arbor.Voice.SessionTextTurnTest do
 
       assert {:error, :cleanup_pending} = Task.await(task, 2_000)
       assert {:error, :not_found} = Voice.session_status(key)
+      assert_receive {:DOWN, ^lease_ref, :process, ^lease, :normal}, 2_000
 
       calls = FakeLedger.calls(ctx.ledger)
-      refute Enum.any?(calls, &match?({:consume, _, _, _}, &1))
+      assert Enum.count(calls, &match?({:consume, _, _, _}, &1)) == 1
       refute Enum.any?(calls, &match?({:release, _, _}, &1))
     end
   end
@@ -364,9 +367,8 @@ defmodule Arbor.Voice.SessionTextTurnTest do
       {user_id, agent_id} = unique_ids()
       assert {:ok, key} = Voice.start_session(user_id, agent_id, ctx.opts)
       assert {:error, :turn_failed} = Voice.text_turn(user_id, agent_id, "x")
-      # Session remains ready after a failed turn.
-      assert {:ok, %{state: :ready}} = Voice.session_status(key)
-      assert :ok = Voice.stop_session(key)
+      assert {:error, :not_found} = Voice.session_status(key)
+      assert ControllableTurnBackend.close_count() == 1
     end
 
     @tag spec: "VOICE-5"
@@ -377,7 +379,8 @@ defmodule Arbor.Voice.SessionTextTurnTest do
       {user_id, agent_id} = unique_ids()
       assert {:ok, key} = Voice.start_session(user_id, agent_id, ctx.opts)
       assert {:error, :turn_failed} = Voice.text_turn(user_id, agent_id, "x")
-      assert :ok = Voice.stop_session(key)
+      assert {:error, :not_found} = Voice.session_status(key)
+      assert ControllableTurnBackend.close_count() == 1
     end
 
     @tag spec: "VOICE-5"
@@ -673,7 +676,8 @@ defmodule Arbor.Voice.SessionTextTurnTest do
       assert {:ok, key} = Voice.start_session(user_id, agent_id, ctx.opts)
       assert {:error, :turn_failed} = Voice.text_turn(user_id, agent_id, "hi")
       assert ControllableTurnBackend.tool_results() == []
-      assert :ok = Voice.stop_session(key)
+      assert {:error, :not_found} = Voice.session_status(key)
+      assert ControllableTurnBackend.close_count() == 1
     end
 
     @tag spec: "VOICE-8"
@@ -1176,7 +1180,8 @@ defmodule Arbor.Voice.SessionTextTurnTest do
       assert {:ok, key} = Voice.start_session(user_id, agent_id, ctx.opts)
       assert {:error, :turn_failed} = Voice.text_turn(user_id, agent_id, "hi")
       assert ControllableTurnBackend.tool_results() == []
-      assert :ok = Voice.stop_session(key)
+      assert {:error, :not_found} = Voice.session_status(key)
+      assert ControllableTurnBackend.close_count() == 1
     end
 
     @tag spec: "VOICE-8"
