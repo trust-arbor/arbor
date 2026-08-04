@@ -65,6 +65,7 @@ defmodule Arbor.LLM.Adapter.LmStudioTest do
     Req.default_options(
       adapter: fn request ->
         send(parent, {:lm_studio_req_options, request.options})
+
         body =
           Jason.encode!(%{
             "choices" => [
@@ -90,8 +91,8 @@ defmodule Arbor.LLM.Adapter.LmStudioTest do
     assert {:ok, _} = LmStudio.complete_single_attempt(request, [])
 
     assert_receive {:lm_studio_req_options, options}
-    assert Keyword.get(options, :retry) == false
-    assert Keyword.get(options, :max_retries) == 0
+    assert options[:retry] == false
+    assert options[:max_retries] == 0
   end
 
   test "bounded receipt preserves a valid LM Studio response" do

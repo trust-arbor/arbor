@@ -124,7 +124,7 @@ defmodule Arbor.LLM.OAuth.Responses do
     end
   end
 
-  defp request_with_credential(identity, credential, sid, body, limits, single_attempt? \\ false) do
+  defp request_with_credential(identity, credential, sid, body, limits, single_attempt?) do
     result = request_identity(identity, credential, sid, body, limits)
 
     case {result, credential, single_attempt?} do

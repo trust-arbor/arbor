@@ -277,7 +277,7 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
     end
   end
 
-  defp do_complete_streaming(request, callback, opts, single_attempt? \\ false) do
+  defp do_complete_streaming(request, callback, opts, single_attempt?) do
     # Accumulate the thinking deltas: ReqLLM's process_stream forwards them to
     # on_thinking but does NOT retain the full chain-of-thought on the assembled
     # response (streaming captured only the first fragment, e.g. "Thinking"),
@@ -1019,7 +1019,7 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
 
   # ── Dispatch ────────────────────────────────────────────────────────
 
-  defp call_req_llm(model_spec, messages, opts, usage_context, single_attempt? \\ false) do
+  defp call_req_llm(model_spec, messages, opts, usage_context, single_attempt?) do
     run_pipeline(:complete, {model_spec, messages, opts}, usage_context, single_attempt?)
   end
 

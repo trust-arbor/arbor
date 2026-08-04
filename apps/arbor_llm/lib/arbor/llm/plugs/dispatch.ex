@@ -141,7 +141,7 @@ defmodule Arbor.LLM.Plugs.Dispatch do
 
   defp maybe_disable_req_retry(request, _single_attempt?), do: request
 
-  defp dispatch_embedding(model, texts, opts, source, single_attempt? \\ false) do
+  defp dispatch_embedding(model, texts, opts, source, single_attempt?) do
     maximum = Keyword.get(opts, :arbor_max_response_bytes, @default_max_response_bytes)
     req_opts = Keyword.delete(opts, :arbor_max_response_bytes)
 
