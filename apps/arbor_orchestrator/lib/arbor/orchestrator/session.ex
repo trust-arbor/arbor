@@ -172,6 +172,10 @@ defmodule Arbor.Orchestrator.Session do
   # retention window is enough for in-flight queue/start races.
   @max_cancelled_task_ids 64
 
+  # Admitted Engine terminal statuses for Session turn application.
+  # Engine.run/2 returning {:ok, run_result} alone is not success.
+  @admitted_final_statuses [:success, :partial_success]
+
   @type phase :: :idle | :processing | :awaiting_tools | :awaiting_llm
   @type session_type :: :primary | :background | :delegation | :consultation
   @type execution_mode :: :legacy | :session | :graph
@@ -1022,96 +1026,22 @@ defmodule Arbor.Orchestrator.Session do
         {:turn_result, %Arbor.Contracts.Session.UserMessage{} = user_message, {:ok, result}},
         state
       ) do
-    completed = Map.get(result.context, "__completed_nodes__", [])
+    # Engine.run/2 returning {:ok, run_result} only proves an envelope was
+    # produced. Admit only :success / :partial_success before apply/checkpoint/
+    # success signals; all other final outcomes fail closed with a bounded error.
+    case admit_engine_run_result(result) do
+      :ok ->
+        complete_turn_success(user_message, result, state)
 
-    new_state =
-      state
-      |> transition_phase(:processing, :complete, :idle)
-      |> Builders.apply_turn_result(user_message.content, result, user_message: user_message)
-      |> persist_discovered_tools(result)
-      |> Builders.maybe_checkpoint()
-
-    response = Map.get(result.context, "session.response", "")
-
-    tool_history = Map.get(result.context, "session.tool_history", [])
-    tool_rounds = Map.get(result.context, "session.tool_round_count", 0)
-
-    Logger.info(
-      "[Session] Turn completed for #{state.agent_id}: " <>
-        "#{length(completed)} nodes, response=#{if response != "", do: "#{String.length(to_string(response))} chars", else: "EMPTY"}, " <>
-        "completed=#{inspect(completed)}"
-    )
-
-    Builders.emit_turn_signal(new_state, result)
-
-    # Phase 3: notify ActionCycleServer of chat percept
-    maybe_enqueue_chat_percept(state.agent_id, user_message.content)
-
-    usage = Map.get(result.context, "session.usage", %{})
-
-    # NOTE: turn persistence is handled inside `Builders.apply_turn_result/3`
-    # via `Persistence.persist_turn_entries/5`. Calling a second persistence
-    # path here used to double-write every turn, leaving an orphan duplicate
-    # of the user message at the end of restored chat history (the legacy
-    # path read `session.response` which is now `""`, so only the user write
-    # succeeded — assistant write was gated out, producing the asymmetric
-    # duplicate Hysun reported on 2026-04-07).
-
-    # Record turn telemetry
-    maybe_record_telemetry(:turn, state.agent_id, %{
-      input_tokens: usage["input_tokens"] || usage[:input_tokens] || 0,
-      output_tokens: usage["output_tokens"] || usage[:output_tokens] || 0,
-      cached_tokens:
-        usage["cached_tokens"] || usage[:cached_tokens] ||
-          usage["cache_read_input_tokens"] || 0,
-      duration_ms: usage["duration_ms"] || usage[:duration_ms],
-      provider:
-        usage["provider"] || usage[:provider] ||
-          Map.get(result.context, "session.provider") ||
-          Map.get(result.context, "session.llm_provider")
-    })
-
-    emit_turn_telemetry(state.turn_started_at, %{
-      agent_id: state.agent_id,
-      status: :ok,
-      node_count: length(completed)
-    })
-
-    reply =
-      {:ok,
-       PipelineResponse.normalize(%{
-         text: response,
-         tool_history: tool_history,
-         tool_rounds: tool_rounds,
-         usage: usage
-       })}
-
-    reply_turn(state, reply)
-
-    if state.turn_task_ref, do: Process.demonitor(state.turn_task_ref, [:flush])
-    if state.turn_caller_ref, do: Process.demonitor(state.turn_caller_ref, [:flush])
-
-    # Normal completion: apply_turn_result already persisted the complete message,
-    # so just clear the turn (incl. buffer + timeout).
-    reset_and_drain(new_state)
+      {:error, :turn_failed} ->
+        complete_turn_error(state, :turn_failed)
+    end
   end
 
   def handle_info({:turn_result, _user_message, {:error, reason}}, state) do
-    Logger.warning("[Session] Turn FAILED for #{state.agent_id}: #{inspect(reason)}")
-    new_state = transition_phase(state, :processing, :complete, :idle)
-
-    emit_turn_telemetry(state.turn_started_at, %{agent_id: state.agent_id, status: :error})
-
-    # Engine errors (incl. rescued engine crashes) arrive here — preserve whatever
-    # streamed before the failure as an :interrupted partial.
-    finalize_partial(state, :interrupted, reason)
-
-    reply_turn(state, {:error, reason})
-
-    if state.turn_task_ref, do: Process.demonitor(state.turn_task_ref, [:flush])
-    if state.turn_caller_ref, do: Process.demonitor(state.turn_caller_ref, [:flush])
-
-    reset_and_drain(new_state)
+    # Elixir-level Engine errors (and rescued crashes) continue on the ordinary
+    # failure path — reason may still be Engine-shaped for those cases.
+    complete_turn_error(state, reason)
   end
 
   # Handle Task DOWN messages
@@ -1225,6 +1155,105 @@ defmodule Arbor.Orchestrator.Session do
   def handle_info(_msg, state), do: {:noreply, state}
 
   # ── Private helpers ──────────────────────────────────────────────────
+
+  defp admit_engine_run_result(%{final_outcome: %{status: status}})
+       when status in @admitted_final_statuses,
+       do: :ok
+
+  defp admit_engine_run_result(_), do: {:error, :turn_failed}
+
+  defp complete_turn_success(user_message, result, state) do
+    completed = Map.get(result.context, "__completed_nodes__", [])
+
+    new_state =
+      state
+      |> transition_phase(:processing, :complete, :idle)
+      |> Builders.apply_turn_result(user_message.content, result, user_message: user_message)
+      |> persist_discovered_tools(result)
+      |> Builders.maybe_checkpoint()
+
+    response = Map.get(result.context, "session.response", "")
+
+    tool_history = Map.get(result.context, "session.tool_history", [])
+    tool_rounds = Map.get(result.context, "session.tool_round_count", 0)
+
+    Logger.info(
+      "[Session] Turn completed for #{state.agent_id}: " <>
+        "#{length(completed)} nodes, response=#{if response != "", do: "#{String.length(to_string(response))} chars", else: "EMPTY"}, " <>
+        "completed=#{inspect(completed)}"
+    )
+
+    Builders.emit_turn_signal(new_state, result)
+
+    # Phase 3: notify ActionCycleServer of chat percept
+    maybe_enqueue_chat_percept(state.agent_id, user_message.content)
+
+    usage = Map.get(result.context, "session.usage", %{})
+
+    # NOTE: turn persistence is handled inside `Builders.apply_turn_result/3`
+    # via `Persistence.persist_turn_entries/5`. Calling a second persistence
+    # path here used to double-write every turn, leaving an orphan duplicate
+    # of the user message at the end of restored chat history (the legacy
+    # path read `session.response` which is now `""`, so only the user write
+    # succeeded — assistant write was gated out, producing the asymmetric
+    # duplicate Hysun reported on 2026-04-07).
+
+    # Record turn telemetry
+    maybe_record_telemetry(:turn, state.agent_id, %{
+      input_tokens: usage["input_tokens"] || usage[:input_tokens] || 0,
+      output_tokens: usage["output_tokens"] || usage[:output_tokens] || 0,
+      cached_tokens:
+        usage["cached_tokens"] || usage[:cached_tokens] ||
+          usage["cache_read_input_tokens"] || 0,
+      duration_ms: usage["duration_ms"] || usage[:duration_ms],
+      provider:
+        usage["provider"] || usage[:provider] ||
+          Map.get(result.context, "session.provider") ||
+          Map.get(result.context, "session.llm_provider")
+    })
+
+    emit_turn_telemetry(state.turn_started_at, %{
+      agent_id: state.agent_id,
+      status: :ok,
+      node_count: length(completed)
+    })
+
+    reply =
+      {:ok,
+       PipelineResponse.normalize(%{
+         text: response,
+         tool_history: tool_history,
+         tool_rounds: tool_rounds,
+         usage: usage
+       })}
+
+    reply_turn(state, reply)
+
+    if state.turn_task_ref, do: Process.demonitor(state.turn_task_ref, [:flush])
+    if state.turn_caller_ref, do: Process.demonitor(state.turn_caller_ref, [:flush])
+
+    # Normal completion: apply_turn_result already persisted the complete message,
+    # so just clear the turn (incl. buffer + timeout).
+    reset_and_drain(new_state)
+  end
+
+  defp complete_turn_error(state, reason) do
+    Logger.warning("[Session] Turn FAILED for #{state.agent_id}: #{inspect(reason)}")
+    new_state = transition_phase(state, :processing, :complete, :idle)
+
+    emit_turn_telemetry(state.turn_started_at, %{agent_id: state.agent_id, status: :error})
+
+    # Preserve whatever streamed before the failure as an :interrupted partial.
+    # For rejected Engine envelopes, reason is the closed atom :turn_failed only.
+    finalize_partial(state, :interrupted, reason)
+
+    reply_turn(state, {:error, reason})
+
+    if state.turn_task_ref, do: Process.demonitor(state.turn_task_ref, [:flush])
+    if state.turn_caller_ref, do: Process.demonitor(state.turn_caller_ref, [:flush])
+
+    reset_and_drain(new_state)
+  end
 
   # Persist tools discovered via find_tools during this turn into session state.
   # The ToolLoop returns discovered tool names in its result; the LlmHandler

@@ -1,6 +1,7 @@
 defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
   @moduledoc """
-  Security regression: receipt-authenticated Session ingress (VP-05D2A1P2).
+  Security regression: receipt-authenticated Session ingress (VP-05D2A1P2)
+  and Engine final-outcome admission (VP-05D2A1P2R2).
 
   Security prerequisite for VOICE-17 (planned); does not un-plan the normative
   VOICE-17 statement. Self-contained — no shared new helper modules.
@@ -248,9 +249,32 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
     UserMessage.from_voice(content, sender_id: human_id)
   end
 
+  defp collision_resistant_session_id do
+    "session_vp05r2_" <> Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
+  end
+
+  defp session_logs_root(session_id) do
+    Path.join([System.tmp_dir!(), "arbor_sessions", session_id])
+  end
+
+  defp track_session_log_root!(session_id) when is_binary(session_id) do
+    root = session_logs_root(session_id)
+
+    on_exit(fn ->
+      _ = File.rm_rf(root)
+    end)
+
+    root
+  end
+
   defp session_state(agent_id, overrides \\ []) do
+    session_id =
+      Keyword.get_lazy(overrides, :session_id, fn -> collision_resistant_session_id() end)
+
+    track_session_log_root!(session_id)
+
     base = %Session{
-      session_id: "session_vp05d2a1p2_#{System.unique_integer([:positive])}",
+      session_id: session_id,
       agent_id: agent_id,
       phase: :idle,
       turn_count: 0,
@@ -272,7 +296,9 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
       execution_mode: :session
     }
 
-    Enum.reduce(overrides, Map.put(base, :turn_authority, nil), fn {key, value}, state ->
+    overrides
+    |> Keyword.delete(:session_id)
+    |> Enum.reduce(Map.put(base, :turn_authority, nil), fn {key, value}, state ->
       Map.put(state, key, value)
     end)
   end
@@ -291,14 +317,22 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
   # Detect receipts or raw authority/receipt material in a term tree.
   # `allow_turn_authority?: true` permits process-local TurnAuthority structs
   # (Session state/queue) while still rejecting raw id/token bytes when listed.
+  # Binary matching uses :binary.match so raw 32-byte bearers (non-UTF-8) work.
   defp term_contains_forbidden?(term, forbidden_binaries, opts) do
     allow_ta? = Keyword.get(opts, :allow_turn_authority?, false)
     inspected = inspect(term, limit: :infinity, printable_limit: :infinity)
 
-    Enum.any?(forbidden_binaries, fn bin ->
-      is_binary(bin) and bin != "" and String.contains?(inspected, bin)
-    end) or walk_forbidden?(term, forbidden_binaries, allow_ta?)
+    binary_contains_forbidden?(inspected, forbidden_binaries) or
+      walk_forbidden?(term, forbidden_binaries, allow_ta?)
   end
+
+  defp binary_contains_forbidden?(haystack, forbidden) when is_binary(haystack) do
+    Enum.any?(forbidden, fn bin ->
+      is_binary(bin) and bin != "" and match?({_pos, _len}, :binary.match(haystack, bin))
+    end)
+  end
+
+  defp binary_contains_forbidden?(_haystack, _forbidden), do: false
 
   defp walk_forbidden?(term, forbidden, allow_ta?) when is_struct(term) do
     cond do
@@ -309,9 +343,18 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
         true
 
       is_struct(term, TurnAuthority) and allow_ta? ->
-        # Process-local authority is allowed; still scan for raw forbidden bytes
-        # only via inspect redaction — field access for leak of raw tokens.
-        false
+        # Process-local authority is allowed as a struct. Still scan fields for
+        # receipt bearer material; exclude this authority's own id fields.
+        own_ids =
+          MapSet.new(
+            Enum.reject(
+              [term.turn_id, term.authenticated_principal_id, term.disclosure_capability_id],
+              &is_nil/1
+            )
+          )
+
+        receipt_bins = Enum.reject(forbidden, &MapSet.member?(own_ids, &1))
+        walk_forbidden?(Map.from_struct(term), receipt_bins, allow_ta?)
 
       true ->
         walk_forbidden?(Map.from_struct(term), forbidden, allow_ta?)
@@ -333,9 +376,7 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
   end
 
   defp walk_forbidden?(term, forbidden, _allow_ta?) when is_binary(term) do
-    Enum.any?(forbidden, fn bin ->
-      is_binary(bin) and bin != "" and String.contains?(term, bin)
-    end)
+    binary_contains_forbidden?(term, forbidden)
   end
 
   defp walk_forbidden?(_term, _forbidden, _allow_ta?), do: false
@@ -347,12 +388,26 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
     end
   end
 
-  defp hermetic_turn_graph! do
+  defp bearer_forbidden_encodings(receipt) do
+    assert {:ok, raw} = DeliveryReceipt.bearer_token(receipt)
+
+    [
+      raw,
+      Base.encode16(raw, case: :lower),
+      Base.encode16(raw, case: :upper),
+      Base.encode64(raw),
+      Base.encode64(raw, padding: false),
+      Base.url_encode64(raw),
+      Base.url_encode64(raw, padding: false)
+    ]
+  end
+
+  defp hermetic_success_graph! do
     # Session/Engine authorized runs require IR-compiled graphs (RunAuthorization).
     # Public compile/1 is the same path Session.parse_dot_file uses.
     dot = """
-    digraph AuthLeakTurn {
-      graph [goal="Hermetic authenticated leak probe"]
+    digraph AuthLeakTurnSuccess {
+      graph [goal="VP-05D2A1P2R2 success"]
       start [shape=Mdiamond]
       echo [type="transform", transform="identity", source_key="session.input", output_key="session.response"]
       done [shape=Msquare]
@@ -365,18 +420,43 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
     graph
   end
 
-  defp authority_forbidden_binaries(token_hex, %TurnAuthority{} = auth) do
-    [
-      token_hex,
-      auth.turn_id,
-      auth.authenticated_principal_id,
-      auth.disclosure_capability_id
-    ]
+  defp hermetic_fail_graph! do
+    # Real Engine-handled failure: compute simulate="fail" yields
+    # {:ok, %{final_outcome: %{status: :fail}}} with a real run_id — not an
+    # Elixir error tuple and not a fabricated map.
+    dot = """
+    digraph AuthLeakTurnFail {
+      graph [goal="VP-05D2A1P2R2 deterministic fail"]
+      start [shape=Mdiamond]
+      fail_node [type="compute", simulate="fail"]
+      done [shape=Msquare]
+      start -> fail_node -> done
+    }
+    """
+
+    assert {:ok, graph} = Orchestrator.compile(dot)
+    assert graph.compiled == true
+    graph
+  end
+
+  defp authority_forbidden_binaries(receipt_or_encodings, %TurnAuthority{} = auth) do
+    encodings =
+      case receipt_or_encodings do
+        %DeliveryReceipt{} = receipt -> bearer_forbidden_encodings(receipt)
+        list when is_list(list) -> list
+      end
+
+    (encodings ++
+       [
+         auth.turn_id,
+         auth.authenticated_principal_id,
+         auth.disclosure_capability_id
+       ])
     |> Enum.reject(&(is_nil(&1) or &1 == ""))
   end
 
   defp collect_logs_root_artifacts(session_id) do
-    root = Path.join([System.tmp_dir!(), "arbor_sessions", session_id])
+    root = session_logs_root(session_id)
 
     if File.dir?(root) do
       root
@@ -404,38 +484,345 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
     end
   end
 
-  # Test env sets arbor_signals start_children: false — start the bus stack under
-  # the already-running Application supervisor so ResultProcessor.emit can publish.
-  defp ensure_signals_stack! do
-    {:ok, _} = Application.ensure_all_started(:arbor_signals)
+  # Start EventRegistry only when absent; stop only the pid this test started.
+  defp ensure_event_registry! do
+    name = Arbor.Orchestrator.EventRegistry
 
-    for child <- [
-          {Arbor.Signals.Store, []},
-          {Arbor.Signals.TopicKeys, []},
-          {Arbor.Signals.Channels, []},
-          {Arbor.Signals.Bus, []},
-          {Arbor.Signals.Relay, []}
-        ] do
-      case Supervisor.start_child(Arbor.Signals.Supervisor, child) do
-        {:ok, _pid} ->
-          :ok
+    case Process.whereis(name) do
+      pid when is_pid(pid) ->
+        # Pre-existing — do not own or stop.
+        :ok
 
-        {:error, {:already_started, _pid}} ->
-          :ok
+      nil ->
+        case Registry.start_link(keys: :duplicate, name: name) do
+          {:ok, pid} ->
+            on_exit(fn ->
+              stop_owned_event_registry!(name, pid)
+            end)
 
-        {:error, :already_present} ->
-          {mod, _} = child
-          _ = Supervisor.delete_child(Arbor.Signals.Supervisor, mod)
-          _ = Supervisor.start_child(Arbor.Signals.Supervisor, child)
-          :ok
+            :ok
 
-        {:error, reason} ->
-          flunk("failed to start signals child #{inspect(child)}: #{inspect(reason)}")
+          {:error, {:already_started, _pid}} ->
+            # Race with another starter — not owned by this test.
+            :ok
+        end
+    end
+  end
+
+  defp stop_owned_event_registry!(name, pid) do
+    cond do
+      Process.whereis(name) == pid ->
+        try do
+          GenServer.stop(pid, :normal, 5_000)
+        catch
+          :exit, _ -> :ok
+        end
+
+      Process.alive?(pid) ->
+        try do
+          GenServer.stop(pid, :normal, 5_000)
+        catch
+          :exit, _ -> :ok
+        end
+
+      true ->
+        :ok
+    end
+
+    # Owned registry must not remain registered under the public name.
+    refute Process.whereis(name) == pid
+
+    if Process.whereis(name) == nil do
+      :ok
+    else
+      # Name rebound by someone else after our stop — leave it; we only own `pid`.
+      :ok
+    end
+  end
+
+  defp signal_run_id(signal) do
+    data = Map.get(signal, :data) || %{}
+    Map.get(data, :run_id) || Map.get(data, "run_id")
+  end
+
+  defp drain_signals(tag, acc \\ []) do
+    receive do
+      {^tag, signal} -> drain_signals(tag, [signal | acc])
+    after
+      0 -> Enum.reverse(acc)
+    end
+  end
+
+  # Bus delivery is scheduled; poll until terminal lifecycle for run_id or timeout.
+  defp await_run_correlated_orchestrator_signals!(run_id, timeout_ms \\ 5_000) do
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+    do_await_orch_signals(run_id, [], deadline)
+  end
+
+  defp do_await_orch_signals(run_id, acc, deadline) do
+    remaining = deadline - System.monotonic_time(:millisecond)
+
+    if remaining <= 0 do
+      require_run_correlated_orchestrator_signals!(acc, run_id)
+    else
+      receive do
+        {:orch_signal, signal} ->
+          acc = acc ++ [signal]
+          correlated = correlated_orch(acc, run_id)
+          types = Enum.map(correlated, & &1.type)
+
+          if :pipeline_started in types and
+               (:pipeline_completed in types or :pipeline_failed in types) do
+            # Drain any stragglers briefly, then return correlated set.
+            acc = acc ++ drain_signals(:orch_signal)
+            require_run_correlated_orchestrator_signals!(acc, run_id)
+          else
+            do_await_orch_signals(run_id, acc, deadline)
+          end
+      after
+        min(remaining, 100) ->
+          do_await_orch_signals(run_id, acc ++ drain_signals(:orch_signal), deadline)
       end
     end
+  end
+
+  defp correlated_orch(signals, run_id) do
+    Enum.filter(signals, fn signal ->
+      signal.category == :orchestrator and signal_run_id(signal) == run_id
+    end)
+  end
+
+  defp require_run_correlated_orchestrator_signals!(signals, run_id) do
+    correlated = correlated_orch(signals, run_id)
+
+    assert correlated != [],
+           "expected run-correlated orchestrator.* signals for #{run_id}, got: #{inspect(signals)}"
+
+    types = Enum.map(correlated, & &1.type)
+    assert :pipeline_started in types, "missing pipeline_started for #{run_id}: #{inspect(types)}"
+
+    assert :pipeline_completed in types or :pipeline_failed in types,
+           "missing terminal lifecycle signal for #{run_id}: #{inspect(types)}"
+
+    correlated
+  end
+
+  # ── Signals topology ownership ───────────────────────────────────────
+  # config/test.exs sets arbor_signals start_children: false.
+  # Snapshot live / present-dead / absent per child. Start only missing Store
+  # then Bus. Ownership kinds:
+  #   :new_child       — we inserted the child spec → terminate + delete
+  #   :restarted_spec  — spec was present-dead, we restarted → terminate only
+  # Pre-existing live children are never owned. Never start Relay/TopicKeys/Channels.
+
+  @signals_needed [Arbor.Signals.Store, Arbor.Signals.Bus]
+
+  defp ensure_signals_stack! do
+    {:ok, _} = Application.ensure_all_started(:arbor_signals)
+    sup = Arbor.Signals.Supervisor
+    needed = @signals_needed
+
+    before = snapshot_signals_topology(sup, needed)
+    owned = ensure_signals_children!(sup, needed)
+
+    on_exit(fn ->
+      restore_signals_children!(sup, owned)
+      assert_signals_topology_restored!(sup, before)
+    end)
 
     assert Signals.healthy?(), "Arbor.Signals Store+Bus must be live for leak signal capture"
     :ok
+  end
+
+  defp snapshot_signals_topology(sup, mods) do
+    Map.new(mods, fn mod -> {mod, snapshot_signals_child_status(sup, mod)} end)
+  end
+
+  defp snapshot_signals_child_status(sup, mod) do
+    case List.keyfind(Supervisor.which_children(sup), mod, 0) do
+      {^mod, pid, _type, _modules} when is_pid(pid) ->
+        if Process.alive?(pid), do: :live, else: :present_dead
+
+      {^mod, :undefined, _type, _modules} ->
+        :present_dead
+
+      {^mod, :restarting, _type, _modules} ->
+        :present_dead
+
+      nil ->
+        # Named process outside this supervisor is still "live" for our purposes
+        # only when whereis hits; Store/Bus are always supervisor children.
+        if Process.whereis(mod), do: :live, else: :absent
+    end
+  end
+
+  # Returns [{mod, :new_child | :restarted_spec}, ...] in dependency start order.
+  defp ensure_signals_children!(sup, needed) do
+    Enum.reduce(needed, [], fn mod, owned ->
+      case snapshot_signals_child_status(sup, mod) do
+        :live ->
+          # Pre-existing live — preserve; do not own.
+          owned
+
+        :present_dead ->
+          case Supervisor.restart_child(sup, mod) do
+            {:ok, _pid} ->
+              owned ++ [{mod, :restarted_spec}]
+
+            {:ok, _pid, _info} ->
+              owned ++ [{mod, :restarted_spec}]
+
+            {:error, {:already_started, _pid}} ->
+              owned
+
+            {:error, reason} ->
+              flunk("failed to restart present-dead signals child #{mod}: #{inspect(reason)}")
+          end
+
+        :absent ->
+          case Supervisor.start_child(sup, {mod, []}) do
+            {:ok, _pid} ->
+              owned ++ [{mod, :new_child}]
+
+            {:error, {:already_started, _pid}} ->
+              owned
+
+            {:error, :already_present} ->
+              # Spec appeared as present-dead between snapshot and start.
+              case Supervisor.restart_child(sup, mod) do
+                {:ok, _pid} ->
+                  owned ++ [{mod, :restarted_spec}]
+
+                {:ok, _pid, _info} ->
+                  owned ++ [{mod, :restarted_spec}]
+
+                {:error, {:already_started, _}} ->
+                  owned
+
+                {:error, reason} ->
+                  flunk(
+                    "failed to restart already_present signals child #{mod}: #{inspect(reason)}"
+                  )
+              end
+
+            {:error, reason} ->
+              flunk("failed to start signals child #{mod}: #{inspect(reason)}")
+          end
+      end
+    end)
+  end
+
+  # Dependency-safe reverse: Bus before Store.
+  defp restore_signals_children!(sup, owned) do
+    for {mod, kind} <- Enum.reverse(owned) do
+      case kind do
+        :new_child ->
+          _ = Supervisor.terminate_child(sup, mod)
+          _ = Supervisor.delete_child(sup, mod)
+
+        :restarted_spec ->
+          # Spec pre-existed as present-dead — restore that shape.
+          _ = Supervisor.terminate_child(sup, mod)
+      end
+    end
+
+    :ok
+  end
+
+  defp assert_signals_topology_restored!(sup, expected_snapshot) do
+    actual = snapshot_signals_topology(sup, Map.keys(expected_snapshot))
+
+    assert actual == expected_snapshot,
+           "signals topology not restored exactly: expected #{inspect(expected_snapshot)}, got #{inspect(actual)}"
+  end
+
+  describe "security regression: signals topology ownership restore" do
+    @tag voice_id: "VOICE-17"
+    @tag spec: "VOICE-17"
+    test "pre-existing live is preserved; present-dead is terminate-only; new child is deleted" do
+      {:ok, _} = Application.ensure_all_started(:arbor_signals)
+      sup = Arbor.Signals.Supervisor
+      store = Arbor.Signals.Store
+      bus = Arbor.Signals.Bus
+      needed = [store, bus]
+
+      # Bring Store+Bus live without permanent ownership bookkeeping for this setup step.
+      _ = ensure_signals_children!(sup, needed)
+      assert snapshot_signals_child_status(sup, store) == :live
+      assert snapshot_signals_child_status(sup, bus) == :live
+
+      # ── present-dead path: restart is owned as :restarted_spec → terminate only ──
+      _ = Supervisor.terminate_child(sup, bus)
+      assert snapshot_signals_child_status(sup, bus) == :present_dead
+      assert snapshot_signals_child_status(sup, store) == :live
+
+      before_dead = snapshot_signals_topology(sup, needed)
+      owned_dead = ensure_signals_children!(sup, needed)
+
+      assert {bus, :restarted_spec} in owned_dead
+      refute Enum.any?(owned_dead, fn {mod, _} -> mod == store end)
+      assert snapshot_signals_child_status(sup, bus) == :live
+
+      restore_signals_children!(sup, owned_dead)
+      assert_signals_topology_restored!(sup, before_dead)
+      assert snapshot_signals_child_status(sup, bus) == :present_dead
+      assert snapshot_signals_child_status(sup, store) == :live
+
+      # ── new-child path: start is owned as :new_child → terminate + delete ──
+      # Child may already be present-dead; tolerate terminate :not_found.
+      _ = Supervisor.terminate_child(sup, bus)
+      assert :ok = Supervisor.delete_child(sup, bus)
+      assert snapshot_signals_child_status(sup, bus) == :absent
+
+      before_absent = snapshot_signals_topology(sup, needed)
+      owned_new = ensure_signals_children!(sup, needed)
+
+      assert {bus, :new_child} in owned_new
+      refute Enum.any?(owned_new, fn {mod, _} -> mod == store end)
+      assert snapshot_signals_child_status(sup, bus) == :live
+
+      restore_signals_children!(sup, owned_new)
+      assert_signals_topology_restored!(sup, before_absent)
+      assert snapshot_signals_child_status(sup, bus) == :absent
+      assert snapshot_signals_child_status(sup, store) == :live
+
+      # ── pre-existing live: ensure owns nothing; topology unchanged ──
+      {:ok, _} = Supervisor.start_child(sup, {bus, []})
+      assert snapshot_signals_child_status(sup, bus) == :live
+
+      before_live = snapshot_signals_topology(sup, needed)
+      owned_live = ensure_signals_children!(sup, needed)
+      assert owned_live == []
+      restore_signals_children!(sup, owned_live)
+      assert_signals_topology_restored!(sup, before_live)
+      assert snapshot_signals_child_status(sup, store) == :live
+      assert snapshot_signals_child_status(sup, bus) == :live
+
+      # Leave Store+Bus live for later tests / setup_all cleanup.
+      assert Signals.healthy?()
+    end
+
+    @tag voice_id: "VOICE-17"
+    @tag spec: "VOICE-17"
+    test "EventRegistry started by this test is stopped; pre-existing is left alone" do
+      name = Arbor.Orchestrator.EventRegistry
+
+      case Process.whereis(name) do
+        pid when is_pid(pid) ->
+          # Pre-existing: ensure must not stop it.
+          assert :ok = ensure_event_registry!()
+          assert Process.whereis(name) == pid
+
+        nil ->
+          assert :ok = ensure_event_registry!()
+          started = Process.whereis(name)
+          assert is_pid(started)
+
+          # Simulate the owned on_exit cleanup path.
+          stop_owned_event_registry!(name, started)
+          assert Process.whereis(name) == nil
+      end
+    end
   end
 
   describe "security regression: exact authenticated ingress" do
@@ -673,7 +1060,7 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
       assert returned.turn_authority == nil
       assert returned.turn_user_message == nil
 
-      # Receipt discarded exactly once — cannot be consumed later.
+      # Public invalidation: receipt cannot be consumed later; no turn started.
       assert {:error, :invalid_receipt} =
                Security.consume_delivery_receipt(receipt, resource, :chat)
 
@@ -1015,7 +1402,7 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
       assert still_internal.turn_authority.authenticated_principal_id == human_id
     end
 
-    test "security regression: real authenticated Engine turn keeps receipt and authority ids out of engine/checkpoint/signal/public artifacts",
+    test "security regression: real Engine success/fail envelopes admit only success; no receipt/authority leak",
          %{
            agent_id: agent_id,
            agent_signer: agent_signer,
@@ -1023,23 +1410,37 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
            resource: resource
          } do
       ensure_signals_stack!()
+      ensure_event_registry!()
       put_orchestrator_cap!(agent_id)
-      graph = hermetic_turn_graph!()
+      success_graph = hermetic_success_graph!()
+      fail_graph = hermetic_fail_graph!()
       test_pid = self()
 
-      # Capture the actual Session emit path via the live bus (not a reconstructed map).
-      assert {:ok, sub_id} =
+      assert {:ok, agent_sub_id} =
                Signals.subscribe(
                  "agent.query_completed",
                  fn signal ->
-                   send(test_pid, {:turn_signal, signal})
+                   send(test_pid, {:agent_signal, signal})
+                   :ok
+                 end,
+                 async: false
+               )
+
+      assert {:ok, orch_sub_id} =
+               Signals.subscribe(
+                 "orchestrator.*",
+                 fn signal ->
+                   send(test_pid, {:orch_signal, signal})
                    :ok
                  end,
                  async: false
                )
 
       on_exit(fn ->
-        if Process.whereis(Arbor.Signals.Bus), do: Signals.unsubscribe(sub_id)
+        if Process.whereis(Arbor.Signals.Bus) do
+          _ = Signals.unsubscribe(agent_sub_id)
+          _ = Signals.unsubscribe(orch_sub_id)
+        end
       end)
 
       adapters = %{
@@ -1049,15 +1450,16 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
         end
       }
 
+      # ── Success path: real compiled graph, lifecycle signals, agent completion ──
       receipt = issue_receipt!(human_id, resource)
-      token_hex = receipt_token_hex(receipt)
+      bearer_encodings = bearer_forbidden_encodings(receipt)
       content = "hermetic auth leak probe #{System.unique_integer([:positive])}"
       msg = user_message!(human_id, content)
       from = {self(), make_ref()}
 
       idle =
         session_state(agent_id,
-          turn_graph: graph,
+          turn_graph: success_graph,
           signer: agent_signer,
           adapters: adapters,
           pid: self(),
@@ -1070,46 +1472,52 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
 
       assert %TurnAuthority{} = started.turn_authority
       auth = started.turn_authority
-      forbidden = authority_forbidden_binaries(token_hex, auth)
+      forbidden = authority_forbidden_binaries(bearer_encodings, auth)
 
-      # Receipt never retained on process-local state (authority fields OK process-locally).
-      refute term_contains_forbidden?(started, [token_hex], allow_turn_authority?: true)
+      # Receipt encodings never retained on process-local state (TA fields OK process-locally).
+      refute term_contains_forbidden?(started, bearer_encodings, allow_turn_authority?: true)
 
       assert_receive {:turn_result, received_msg, engine_outcome}, 10_000
       assert received_msg.content == content
 
-      assert match?({:ok, %{final_outcome: %{status: :success}}}, engine_outcome),
+      assert match?({:ok, %{final_outcome: %{status: :success}, run_id: rid}} when is_binary(rid), engine_outcome),
              "expected hermetic Engine success, got: #{inspect(engine_outcome)}"
 
       {:ok, run_result} = engine_outcome
+      success_run_id = run_result.run_id
+      assert is_binary(success_run_id) and success_run_id != ""
 
-      # Real Engine context/result must not carry receipt token or authority ids.
       refute term_contains_forbidden?(run_result, forbidden, allow_turn_authority?: false)
       refute term_contains_forbidden?(run_result.context, forbidden, allow_turn_authority?: false)
 
-      logs_artifacts = collect_logs_root_artifacts(started.session_id)
+      orch_success = await_run_correlated_orchestrator_signals!(success_run_id)
 
+      Enum.each(orch_success, fn signal ->
+        refute term_contains_forbidden?(signal, forbidden, allow_turn_authority?: false)
+      end)
+
+      logs_artifacts = collect_logs_root_artifacts(started.session_id)
+      assert logs_artifacts != [], "expected Engine log artifacts under session log root"
       refute term_contains_forbidden?(logs_artifacts, forbidden, allow_turn_authority?: false)
 
-      # Drive the real Session completion path (apply/checkpoint/signal/projection).
+      # Drive the real Session completion path (admission → apply/checkpoint/signal).
       assert {:noreply, after_success} =
                Session.handle_info({:turn_result, received_msg, engine_outcome}, started)
 
-      # Require the real checkpoint_save adapter capture — no reconstruct/fallback.
+      assert after_success.turn_count == 1
+
       assert_receive {:checkpoint_saved, ckpt_session_id, checkpoint_data}, 5_000
       assert ckpt_session_id == started.session_id
       assert is_map(checkpoint_data)
       refute term_contains_forbidden?(checkpoint_data, forbidden, allow_turn_authority?: false)
 
-      # Require the actual bus-delivered turn signal payload.
-      assert_receive {:turn_signal, emitted_signal}, 5_000
+      assert_receive {:agent_signal, emitted_signal}, 5_000
       assert emitted_signal.category == :agent
       assert emitted_signal.type == :query_completed
       refute term_contains_forbidden?(emitted_signal, forbidden, allow_turn_authority?: false)
       refute term_contains_forbidden?(emitted_signal.data, forbidden, allow_turn_authority?: false)
       refute term_contains_forbidden?(emitted_signal.metadata, forbidden, allow_turn_authority?: false)
 
-      # Drain self-messages produced by reset_and_drain / monitors.
       flush_mailbox_noise()
 
       assert {:reply, projected, _} =
@@ -1117,31 +1525,33 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
 
       refute term_contains_forbidden?(projected, forbidden, allow_turn_authority?: false)
 
-      projected_inspected = inspect(projected, limit: :infinity, printable_limit: :infinity)
-      refute projected_inspected =~ token_hex
-      refute projected_inspected =~ auth.turn_id
-      refute projected_inspected =~ auth.authenticated_principal_id
-
-      # Public caller reply shape from success path is bounded (no authority material).
-      # GenServer.reply/2 delivers {ref, reply} to the caller pid.
       {_from_pid, from_ref} = from
       assert_receive {^from_ref, public_reply}, 1_000
       assert {:ok, _} = public_reply
       refute term_contains_forbidden?(public_reply, forbidden, allow_turn_authority?: false)
 
-      # Failure path: real authenticated turn through Session Task + Engine crash.
+      # ── Failure path: real deterministic fail graph → bounded :turn_failed ──
+      # Behavioral base-fail proof: without admission, Session would apply this
+      # {:ok, %{final_outcome: %{status: :fail}}} envelope as success.
       flush_mailbox_noise()
+      _ = drain_signals(:orch_signal)
+      _ = drain_signals(:agent_signal)
+
       receipt_fail = issue_receipt!(human_id, resource)
-      token_fail = receipt_token_hex(receipt_fail)
+      fail_bearer = bearer_forbidden_encodings(receipt_fail)
       msg_fail = user_message!(human_id, "fail path leak probe")
       fail_from = {self(), make_ref()}
       {_fail_pid, fail_ref} = fail_from
 
       idle_fail =
         session_state(agent_id,
-          turn_graph: nil,
+          turn_graph: fail_graph,
           signer: agent_signer,
-          config: %{"stream" => false}
+          adapters: adapters,
+          pid: self(),
+          config: %{"stream" => false, checkpoint_interval: 1},
+          turn_count: 0,
+          messages: []
         )
 
       assert {:noreply, started_fail} =
@@ -1153,15 +1563,53 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
 
       assert %TurnAuthority{} = started_fail.turn_authority
       fail_auth = started_fail.turn_authority
-      fail_forbidden = authority_forbidden_binaries(token_fail, fail_auth)
+      fail_forbidden = authority_forbidden_binaries(fail_bearer, fail_auth)
+
+      refute term_contains_forbidden?(started_fail, fail_bearer, allow_turn_authority?: true)
 
       assert_receive {:turn_result, fail_msg, fail_outcome}, 10_000
       assert fail_msg.content == "fail path leak probe"
-      assert match?({:error, _}, fail_outcome)
-      refute term_contains_forbidden?(fail_outcome, fail_forbidden, allow_turn_authority?: false)
 
+      # Real Engine failure envelope (not Elixir error, not fabricated).
+      assert match?(
+               {:ok, %{final_outcome: %{status: :fail}, run_id: rid}} when is_binary(rid),
+               fail_outcome
+             ),
+             "expected real Engine :fail envelope, got: #{inspect(fail_outcome)}"
+
+      {:ok, fail_result} = fail_outcome
+      fail_run_id = fail_result.run_id
+      assert is_binary(fail_run_id) and fail_run_id != ""
+      refute fail_run_id == success_run_id
+
+      refute term_contains_forbidden?(fail_result, fail_forbidden, allow_turn_authority?: false)
+      refute term_contains_forbidden?(fail_result.context, fail_forbidden, allow_turn_authority?: false)
+
+      orch_fail = await_run_correlated_orchestrator_signals!(fail_run_id)
+
+      Enum.each(orch_fail, fn signal ->
+        refute term_contains_forbidden?(signal, fail_forbidden, allow_turn_authority?: false)
+      end)
+
+      fail_logs = collect_logs_root_artifacts(started_fail.session_id)
+      assert fail_logs != [], "expected Engine log artifacts for fail run"
+      refute term_contains_forbidden?(fail_logs, fail_forbidden, allow_turn_authority?: false)
+
+      # Session admission rejects before apply/checkpoint/success signal.
       assert {:noreply, after_fail} =
                Session.handle_info({:turn_result, fail_msg, fail_outcome}, started_fail)
+
+      assert after_fail.turn_count == 0
+      assert after_fail.messages == []
+      assert after_fail.turn_in_flight == false
+      assert after_fail.turn_authority == nil
+
+      # No successful Session checkpoint from rejected envelope.
+      refute_receive {:checkpoint_saved, _, _}, 200
+
+      # Explicitly prove no agent.query_completed on failure.
+      agent_after_fail = drain_signals(:agent_signal)
+      assert agent_after_fail == [], "fail path must not emit agent.query_completed"
 
       flush_mailbox_noise()
 
@@ -1171,18 +1619,27 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
       refute term_contains_forbidden?(fail_projected, fail_forbidden, allow_turn_authority?: false)
 
       assert_receive {^fail_ref, fail_public_reply}, 1_000
-      assert match?({:error, _}, fail_public_reply)
+      # Closed bounded public error — never raw Engine failure_reason.
+      assert fail_public_reply == {:error, :turn_failed}
 
       refute term_contains_forbidden?(fail_public_reply, fail_forbidden,
                allow_turn_authority?: false
              )
 
       fail_inspected = inspect(fail_public_reply, limit: :infinity, printable_limit: :infinity)
-      refute fail_inspected =~ token_fail
+
+      Enum.each(fail_bearer, fn enc ->
+        if is_binary(enc) and enc != "" do
+          refute fail_inspected =~ enc
+        end
+      end)
+
       refute fail_inspected =~ fail_auth.turn_id
       refute fail_inspected =~ fail_auth.authenticated_principal_id
 
-      # Bounded unauthenticated public error never carries authority material.
+      # Simulated failure_reason must not leak into the public reply.
+      refute fail_inspected =~ "simulated failure"
+
       unauth = {:error, :unauthenticated}
       refute term_contains_forbidden?(unauth, fail_forbidden, allow_turn_authority?: false)
     end
