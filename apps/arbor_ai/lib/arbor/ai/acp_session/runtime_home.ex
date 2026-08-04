@@ -3,8 +3,11 @@ defmodule Arbor.AI.AcpSession.RuntimeHome do
 
   import Bitwise
 
+  alias Arbor.Common.SafePath
+
   @create_attempts 4
   @grok_auth_filename "auth.json"
+  @grok_auth_payload_filename "arbor-xai-access.json"
   @grok_home_directory "grok"
   @grok_log_filename "grok.log"
   @grok_agent_profile_filename "arbor-agent-profile.md"
@@ -30,7 +33,22 @@ defmodule Arbor.AI.AcpSession.RuntimeHome do
   Use native file tools for reading and editing.
   Process execution and subagents are unavailable by design.
   """
-  @max_grok_auth_bytes 1_048_576
+  @max_grok_auth_payload_bytes 65_600
+  @max_grok_access_token_bytes 65_536
+  @max_grok_auth_ttl_seconds 300
+  @grok_auth_provider_command ~s(/bin/cat "$ARBOR_GROK_AUTH_PAYLOAD_PATH")
+  @grok_auth_provider_label "Arbor"
+  @grok_auth_token_ttl "300"
+  @grok_auth_early_invalidation_seconds "60"
+  @grok_empty_auth_selectors [
+    "XAI_API_KEY",
+    "GROK_CODE_XAI_API_KEY",
+    "GROK_AUTH",
+    "GROK_AUTH_PATH",
+    "GROK_AUTH_PROVIDER_ACCESS_TOKEN",
+    "GROK_AUTH_PROVIDER_REFRESH_TOKEN",
+    "GROK_AUTH_PROVIDER_EXPIRES_AT"
+  ]
   @grok_isolation_env [
     {"GROK_CLAUDE_MCPS_ENABLED", "false"},
     {"GROK_CURSOR_MCPS_ENABLED", "false"},
@@ -82,6 +100,94 @@ defmodule Arbor.AI.AcpSession.RuntimeHome do
   @spec grok_agent_profile_path(String.t()) :: String.t()
   def grok_agent_profile_path(grok_home) when is_binary(grok_home),
     do: Path.join(grok_home, @grok_agent_profile_filename)
+
+  @doc false
+  @spec grok_auth_payload_path(String.t()) :: String.t()
+  def grok_auth_payload_path(grok_home) when is_binary(grok_home),
+    do: Path.join(grok_home, @grok_auth_payload_filename)
+
+  @doc false
+  @spec stage_grok_external_auth(map()) :: :ok | {:error, atom()}
+  def stage_grok_external_auth(%{path: runtime_home})
+      when is_binary(runtime_home) and runtime_home != "" do
+    update_grok_external_auth(runtime_home, :initial)
+  end
+
+  def stage_grok_external_auth(_cleanup_identity),
+    do: {:error, :grok_external_auth_unavailable}
+
+  @doc false
+  @spec refresh_grok_external_auth(map()) :: :ok | {:error, atom()}
+  def refresh_grok_external_auth(%{path: runtime_home})
+      when is_binary(runtime_home) and runtime_home != "" do
+    update_grok_external_auth(runtime_home, :existing)
+  end
+
+  def refresh_grok_external_auth(_cleanup_identity),
+    do: {:error, :grok_external_auth_unavailable}
+
+  defp update_grok_external_auth(runtime_home, presence) do
+    grok_home = Path.join(runtime_home, @grok_home_directory)
+    payload_path = grok_auth_payload_path(grok_home)
+
+    with :ok <- verify_private_directory(grok_home),
+         :ok <- refuse_legacy_grok_auth(grok_home),
+         :ok <- verify_grok_auth_payload_presence(payload_path, grok_home, presence),
+         {:ok, payload} <- Arbor.LLM.oauth_external_auth_payload(:xai_oauth),
+         :ok <- publish_grok_auth_payload(payload_path, payload),
+         :ok <- verify_grok_auth_payload(payload_path, grok_home) do
+      :ok
+    else
+      _other -> {:error, :grok_external_auth_unavailable}
+    end
+  rescue
+    _exception -> {:error, :grok_external_auth_unavailable}
+  catch
+    _kind, _reason -> {:error, :grok_external_auth_unavailable}
+  end
+
+  @doc false
+  @spec prepare_grok_external_auth(term(), String.t()) :: {:ok, list()} | {:error, atom()}
+  def prepare_grok_external_auth(env, grok_home) when is_binary(grok_home) do
+    payload_path = grok_auth_payload_path(grok_home)
+
+    with :ok <- refuse_legacy_grok_auth(grok_home),
+         {:ok, payload_path} <- contained_payload_path(payload_path, grok_home) do
+      values =
+        [
+          {"GROK_AUTH_PROVIDER_COMMAND", @grok_auth_provider_command},
+          {"ARBOR_GROK_AUTH_PAYLOAD_PATH", payload_path},
+          {"GROK_AUTH_PROVIDER_LABEL", @grok_auth_provider_label},
+          {"GROK_AUTH_TOKEN_TTL", @grok_auth_token_ttl},
+          {"GROK_AUTH_EARLY_INVALIDATION_SECS", @grok_auth_early_invalidation_seconds}
+        ] ++ Enum.map(@grok_empty_auth_selectors, &{&1, ""})
+
+      put_env_values(env, values)
+    else
+      _other -> {:error, :grok_external_auth_unavailable}
+    end
+  end
+
+  def prepare_grok_external_auth(_env, _grok_home),
+    do: {:error, :grok_external_auth_unavailable}
+
+  @doc false
+  @spec verify_grok_external_auth(String.t(), term()) :: :ok | {:error, atom()}
+  def verify_grok_external_auth(grok_home, env) when is_binary(grok_home) and is_list(env) do
+    payload_path = grok_auth_payload_path(grok_home)
+
+    with {:ok, ^payload_path} <- contained_payload_path(payload_path, grok_home),
+         :ok <- verify_exact_external_auth_env(env, payload_path),
+         :ok <- refuse_legacy_grok_auth(grok_home),
+         :ok <- verify_grok_auth_payload(payload_path, grok_home) do
+      :ok
+    else
+      _other -> {:error, :grok_external_auth_attestation_failed}
+    end
+  end
+
+  def verify_grok_external_auth(_grok_home, _env),
+    do: {:error, :grok_external_auth_attestation_failed}
 
   @doc false
   @spec verify_grok_agent_profile(String.t()) :: :ok | {:error, atom()}
@@ -193,10 +299,10 @@ defmodule Arbor.AI.AcpSession.RuntimeHome do
       grok_home = Path.join(runtime_home, @grok_home_directory)
 
       with {:ok, created?} <- ensure_private_grok_home(grok_home),
-           :ok <- maybe_stage_grok_auth(grok_home, created?),
            :ok <- stage_grok_agent_profile(grok_home, created?),
            {:ok, profile_path} <- bind_grok_agent_profile(client_opts, grok_home),
-           {:ok, env} <- put_grok_isolation_env(Keyword.get(client_opts, :env), grok_home) do
+           {:ok, env} <- put_grok_isolation_env(Keyword.get(client_opts, :env), grok_home),
+           {:ok, env} <- prepare_grok_external_auth(env, grok_home) do
         {:ok,
          client_opts
          |> Keyword.put(:command, profile_command(client_opts, profile_path))
@@ -237,35 +343,6 @@ defmodule Arbor.AI.AcpSession.RuntimeHome do
 
       _other ->
         {:error, :grok_runtime_home_unavailable}
-    end
-  end
-
-  defp maybe_stage_grok_auth(_grok_home, false), do: :ok
-
-  defp maybe_stage_grok_auth(grok_home, true) do
-    with {:ok, source_home} <- source_grok_home() do
-      source = Path.join(source_home, @grok_auth_filename)
-
-      case File.lstat(source) do
-        {:error, :enoent} ->
-          :ok
-
-        {:ok, %File.Stat{type: :regular}} ->
-          with {:ok, auth} <- Arbor.LLM.read_bounded_regular_file(source, @max_grok_auth_bytes),
-               :ok <-
-                 write_private_file(
-                   Path.join(grok_home, @grok_auth_filename),
-                   auth,
-                   :grok_auth_stage_failed
-                 ) do
-            :ok
-          else
-            _other -> {:error, :unsafe_grok_auth_source}
-          end
-
-        _other ->
-          {:error, :unsafe_grok_auth_source}
-      end
     end
   end
 
@@ -313,23 +390,6 @@ defmodule Arbor.AI.AcpSession.RuntimeHome do
     |> List.insert_at(agent_index + 2, profile_path)
   end
 
-  defp source_grok_home do
-    case System.get_env("GROK_HOME") do
-      nil -> {:ok, Path.expand("~/.grok")}
-      "" -> {:ok, Path.expand("~/.grok")}
-      path when is_binary(path) -> validate_absolute_path(path)
-    end
-  end
-
-  defp validate_absolute_path(path) do
-    if String.valid?(path) and not String.contains?(path, [<<0>>, "\n", "\r"]) and
-         Path.type(path) == :absolute do
-      {:ok, Path.expand(path)}
-    else
-      {:error, :invalid_grok_auth_source_home}
-    end
-  end
-
   defp write_private_file(path, content, failure_reason) when is_binary(content) do
     case :file.open(path, [:raw, :binary, :write, :exclusive]) do
       {:ok, io} ->
@@ -358,6 +418,219 @@ defmodule Arbor.AI.AcpSession.RuntimeHome do
         {:error, failure_reason}
     end
   end
+
+  defp refuse_legacy_grok_auth(grok_home) do
+    case File.lstat(Path.join(grok_home, @grok_auth_filename)) do
+      {:error, :enoent} -> :ok
+      _other -> {:error, :grok_legacy_auth_forbidden}
+    end
+  end
+
+  defp contained_payload_path(payload_path, grok_home) do
+    expanded_home = Path.expand(grok_home)
+    expanded_payload = Path.expand(payload_path)
+
+    with true <- Path.dirname(expanded_payload) == expanded_home,
+         true <- Path.basename(expanded_payload) == @grok_auth_payload_filename,
+         {:ok, ^expanded_payload} <- SafePath.resolve_within(expanded_payload, expanded_home) do
+      {:ok, expanded_payload}
+    else
+      _other -> {:error, :grok_auth_payload_path_mismatch}
+    end
+  end
+
+  defp verify_grok_auth_payload_presence(payload_path, _grok_home, :initial) do
+    case File.lstat(payload_path) do
+      {:error, :enoent} -> :ok
+      _other -> {:error, :grok_auth_payload_already_present}
+    end
+  end
+
+  defp verify_grok_auth_payload_presence(payload_path, grok_home, :existing) do
+    case File.lstat(payload_path) do
+      {:ok, _stat} -> verify_grok_auth_payload(payload_path, grok_home)
+      _other -> {:error, :grok_auth_payload_unavailable}
+    end
+  end
+
+  defp verify_grok_auth_payload(payload_path, grok_home) do
+    with {:ok, ^payload_path} <- contained_payload_path(payload_path, grok_home),
+         {:ok, %File.Stat{type: :regular, links: 1, mode: mode, size: size} = before} <-
+           File.lstat(payload_path),
+         true <- (mode &&& 0o7777) == 0o600,
+         true <- size > 0 and size <= @max_grok_auth_payload_bytes,
+         {:ok, payload} <-
+           Arbor.LLM.read_bounded_regular_file(payload_path, @max_grok_auth_payload_bytes),
+         true <- byte_size(payload) == size,
+         {:ok, %File.Stat{type: :regular, links: 1} = after_stat} <- File.lstat(payload_path),
+         true <- grok_file_identity(before) == grok_file_identity(after_stat),
+         {:ok, decoded} <-
+           Arbor.LLM.decode_bounded_json(payload,
+             max_bytes: @max_grok_auth_payload_bytes,
+             max_nodes: 8,
+             max_depth: 2,
+             max_map_keys: 2,
+             max_list_items: 1
+           ),
+         :ok <- validate_grok_auth_payload(decoded) do
+      :ok
+    else
+      _other -> {:error, :grok_auth_payload_invalid}
+    end
+  end
+
+  defp validate_grok_auth_payload(
+         %{
+           "access_token" => access_token,
+           "expires_in" => expires_in
+         } = payload
+       )
+       when map_size(payload) == 2 and is_binary(access_token) and
+              byte_size(access_token) > 0 and
+              byte_size(access_token) <= @max_grok_access_token_bytes and
+              is_integer(expires_in) and expires_in > 0 and
+              expires_in <= @max_grok_auth_ttl_seconds do
+    if String.valid?(access_token) and
+         not String.match?(access_token, ~r/[\x00-\x1F\x7F]/) do
+      :ok
+    else
+      {:error, :grok_auth_payload_invalid}
+    end
+  end
+
+  defp validate_grok_auth_payload(_payload), do: {:error, :grok_auth_payload_invalid}
+
+  defp grok_file_identity(stat) do
+    {
+      stat.type,
+      stat.mode &&& 0o7777,
+      stat.size,
+      stat.mtime,
+      stat.ctime,
+      stat.major_device,
+      stat.minor_device,
+      stat.inode,
+      stat.links
+    }
+  end
+
+  defp publish_grok_auth_payload(payload_path, payload)
+       when is_binary(payload) and byte_size(payload) > 0 and
+              byte_size(payload) <= @max_grok_auth_payload_bytes do
+    temp_path =
+      Path.join(
+        Path.dirname(payload_path),
+        ".#{@grok_auth_payload_filename}." <>
+          Base.encode16(:crypto.strong_rand_bytes(12), case: :lower) <> ".tmp"
+      )
+
+    result =
+      case :file.open(temp_path, [:raw, :binary, :write, :exclusive]) do
+        {:ok, io} ->
+          try do
+            with :ok <- :file.change_mode(temp_path, 0o600),
+                 :ok <- :file.write(io, payload),
+                 :ok <- :file.sync(io),
+                 :ok <- :file.close(io),
+                 :ok <- verify_grok_auth_payload_temp(temp_path, payload),
+                 :ok <- File.rename(temp_path, payload_path) do
+              :ok
+            else
+              _other -> {:error, :grok_auth_payload_publish_failed}
+            end
+          rescue
+            _exception -> {:error, :grok_auth_payload_publish_failed}
+          catch
+            _kind, _reason -> {:error, :grok_auth_payload_publish_failed}
+          after
+            _ = close_file_silent(io)
+          end
+
+        {:error, _reason} ->
+          {:error, :grok_auth_payload_publish_failed}
+      end
+
+    _ = File.rm(temp_path)
+    result
+  end
+
+  defp publish_grok_auth_payload(_payload_path, _payload),
+    do: {:error, :grok_auth_payload_publish_failed}
+
+  defp verify_grok_auth_payload_temp(path, expected_payload) do
+    with {:ok, %File.Stat{type: :regular, links: 1, mode: mode, size: size} = before} <-
+           File.lstat(path),
+         true <- (mode &&& 0o7777) == 0o600,
+         true <- size == byte_size(expected_payload),
+         {:ok, ^expected_payload} <-
+           Arbor.LLM.read_bounded_regular_file(path, @max_grok_auth_payload_bytes),
+         {:ok, %File.Stat{type: :regular, links: 1} = after_stat} <- File.lstat(path),
+         true <- grok_file_identity(before) == grok_file_identity(after_stat) do
+      :ok
+    else
+      _other -> {:error, :grok_auth_payload_publish_failed}
+    end
+  end
+
+  defp close_file_silent(io) do
+    try do
+      :file.close(io)
+    catch
+      _kind, _reason -> :ok
+    end
+  end
+
+  defp verify_exact_external_auth_env(env, payload_path) do
+    expected =
+      %{
+        "GROK_AUTH_PROVIDER_COMMAND" => @grok_auth_provider_command,
+        "ARBOR_GROK_AUTH_PAYLOAD_PATH" => payload_path,
+        "GROK_AUTH_PROVIDER_LABEL" => @grok_auth_provider_label,
+        "GROK_AUTH_TOKEN_TTL" => @grok_auth_token_ttl,
+        "GROK_AUTH_EARLY_INVALIDATION_SECS" => @grok_auth_early_invalidation_seconds
+      }
+      |> Map.merge(Map.new(@grok_empty_auth_selectors, &{&1, ""}))
+
+    normalized =
+      Enum.reduce_while(env, {:ok, []}, fn
+        {key, value}, {:ok, acc} ->
+          case normalize_env_key(key) do
+            {:ok, normalized_key} -> {:cont, {:ok, [{normalized_key, value} | acc]}}
+            :error -> {:halt, :error}
+          end
+
+        _other, _acc ->
+          {:halt, :error}
+      end)
+
+    case normalized do
+      {:ok, pairs} ->
+        if Enum.all?(expected, fn {key, value} ->
+             Enum.filter(pairs, &match?({^key, ^value}, &1)) == [{key, value}] and
+               Enum.count(pairs, &match?({^key, _}, &1)) == 1
+           end),
+           do: :ok,
+           else: {:error, :grok_external_auth_env_mismatch}
+
+      :error ->
+        {:error, :grok_external_auth_env_mismatch}
+    end
+  end
+
+  defp normalize_env_key(key) when is_binary(key), do: {:ok, key}
+  defp normalize_env_key(key) when is_atom(key), do: {:ok, Atom.to_string(key)}
+
+  defp normalize_env_key(key) when is_list(key) do
+    try do
+      {:ok, List.to_string(key)}
+    rescue
+      _exception -> :error
+    catch
+      _kind, _reason -> :error
+    end
+  end
+
+  defp normalize_env_key(_key), do: :error
 
   defp put_grok_isolation_env(env, grok_home) do
     values = [

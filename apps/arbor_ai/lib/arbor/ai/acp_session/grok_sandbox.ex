@@ -300,6 +300,8 @@ defmodule Arbor.AI.AcpSession.GrokSandbox do
         with {:ok, grok_home} <- effective_grok_home(client_opts),
              :ok <- verify_grok_home_binding(client_opts, grok_home),
              :ok <-
+               RuntimeHome.verify_grok_external_auth(grok_home, Keyword.fetch!(client_opts, :env)),
+             :ok <-
                RuntimeHome.verify_grok_agent_profile(
                  RuntimeHome.grok_agent_profile_path(grok_home)
                ) do

@@ -999,7 +999,8 @@ defmodule Arbor.AI.AcpSession do
       result =
         with {:ok, client_opts} <- resolve_client_opts(state.provider, state.opts),
              {:ok, client_opts} <-
-               RuntimeHome.inject(client_opts, runtime_home_cleanup, state.provider) do
+               RuntimeHome.inject(client_opts, runtime_home_cleanup, state.provider),
+             :ok <- stage_grok_external_auth(state.provider, runtime_home_cleanup) do
           GrokSandbox.with_launch(
             state.provider,
             client_opts,
@@ -1938,7 +1939,8 @@ defmodule Arbor.AI.AcpSession do
     result =
       with {:ok, client_opts} <- resolve_client_opts(state.provider, state.opts),
            {:ok, client_opts} <-
-             RuntimeHome.inject(client_opts, state.runtime_home_cleanup, state.provider) do
+             RuntimeHome.inject(client_opts, state.runtime_home_cleanup, state.provider),
+           :ok <- refresh_grok_external_auth(state.provider, state.runtime_home_cleanup) do
         GrokSandbox.with_launch(
           state.provider,
           client_opts,
@@ -2242,7 +2244,8 @@ defmodule Arbor.AI.AcpSession do
   # absent in the pool flow.
   defp do_send_message(content, opts, from, state) do
     with {:ok, opts, hard_timeout} <- Arbor.AI.Timeout.remaining(opts),
-         {:ok, deadline_ms} <- Arbor.AI.Timeout.deadline(opts) do
+         {:ok, deadline_ms} <- Arbor.AI.Timeout.deadline(opts),
+         :ok <- refresh_grok_external_auth(state.provider, state.runtime_home_cleanup) do
       # Ledger target is init-only — never accept or forward from per-send opts.
       opts = drop_usage_ledger_opts(opts)
       {usage_context, opts} = pop_usage_context(opts)
@@ -3074,35 +3077,41 @@ defmodule Arbor.AI.AcpSession do
       {{control_id, control}, state} ->
         case Arbor.AI.Timeout.remaining(prompt.prompt_opts) do
           {:ok, follow_up_opts, remaining} ->
-            follow_up =
-              start_task_prompt(
-                state,
-                control.message,
-                follow_up_opts,
-                remaining,
-                prompt.inactivity_timeout
-              )
-              |> Map.merge(%{
-                caller_pid: prompt.caller_pid,
-                caller_ref: prompt.caller_ref,
-                control: control_id,
-                prompt_text: control.message,
-                prompt_kind: "task_control",
-                capture_index: prompt.capture_index + 1,
-                transcript_capture: prompt.transcript_capture,
-                usage_context: Map.get(prompt, :usage_context),
-                deadline_ms: prompt.deadline_ms
-              })
-              |> put_prompt_usage_event_id()
+            case refresh_grok_external_auth(state.provider, state.runtime_home_cleanup) do
+              :ok ->
+                follow_up =
+                  start_task_prompt(
+                    state,
+                    control.message,
+                    follow_up_opts,
+                    remaining,
+                    prompt.inactivity_timeout
+                  )
+                  |> Map.merge(%{
+                    caller_pid: prompt.caller_pid,
+                    caller_ref: prompt.caller_ref,
+                    control: control_id,
+                    prompt_text: control.message,
+                    prompt_kind: "task_control",
+                    capture_index: prompt.capture_index + 1,
+                    transcript_capture: prompt.transcript_capture,
+                    usage_context: Map.get(prompt, :usage_context),
+                    deadline_ms: prompt.deadline_ms
+                  })
+                  |> put_prompt_usage_event_id()
 
-            follow_up_timers =
-              start_prompt_timers(follow_up.ref,
-                hard_timeout: follow_up.hard_timeout,
-                inactivity_timeout: follow_up.inactivity_timeout
-              )
+                follow_up_timers =
+                  start_prompt_timers(follow_up.ref,
+                    hard_timeout: follow_up.hard_timeout,
+                    inactivity_timeout: follow_up.inactivity_timeout
+                  )
 
-            capture_state = prepare_prompt_capture(state, prompt.transcript_capture)
-            await_prompt_result(follow_up, follow_up_timers, capture_state)
+                capture_state = prepare_prompt_capture(state, prompt.transcript_capture)
+                await_prompt_result(follow_up, follow_up_timers, capture_state)
+
+              {:error, _reason} ->
+                projection_failed_before_follow_up(prompt, result, control_id, state)
+            end
 
           {:error, _reason} ->
             timeout_before_follow_up(prompt, state)
@@ -3313,6 +3322,31 @@ defmodule Arbor.AI.AcpSession do
     new_state = enqueue_pending_settlement(new_state, :timeout, control_events)
     demonitor_owner(prompt.caller_ref)
     {:reply, {:error, :timeout}, new_state}
+  end
+
+  defp projection_failed_before_follow_up(prompt, _result, control_id, state) do
+    new_state =
+      state
+      |> transition_task_control(
+        control_id,
+        :not_delivered,
+        :grok_external_auth_unavailable
+      )
+      |> settle_task_controls(
+        [:queued],
+        :not_delivered,
+        :grok_external_auth_unavailable
+      )
+
+    emit_signal(:acp_session_error, new_state, %{
+      error: :grok_external_auth_unavailable,
+      phase: :prompt
+    })
+
+    demonitor_owner(prompt.caller_ref)
+
+    {:reply, {:error, :grok_external_auth_unavailable},
+     clear_prompt_capture(%{new_state | status: :error})}
   end
 
   defp prompt_response_text(result, state) when is_map(result) do
@@ -4365,6 +4399,16 @@ defmodule Arbor.AI.AcpSession do
       _result -> :ok
     end
   end
+
+  defp stage_grok_external_auth(:grok, cleanup_identity),
+    do: RuntimeHome.stage_grok_external_auth(cleanup_identity)
+
+  defp stage_grok_external_auth(_provider, _cleanup_identity), do: :ok
+
+  defp refresh_grok_external_auth(:grok, cleanup_identity),
+    do: RuntimeHome.refresh_grok_external_auth(cleanup_identity)
+
+  defp refresh_grok_external_auth(_provider, _cleanup_identity), do: :ok
 
   defp cleanup_runtime_home(nil), do: :ok
 

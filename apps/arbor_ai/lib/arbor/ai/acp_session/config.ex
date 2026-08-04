@@ -94,7 +94,9 @@ defmodule Arbor.AI.AcpSession.Config do
     gemini: %{command: ["gemini", "--experimental-acp"]},
     # Global policy flags must precede the `agent` subcommand; `--no-leader` and
     # `--model` belong to `agent` and must precede the `stdio` subcommand.
-    # Auth remains out-of-band via `grok login`.
+    # RuntimeHome binds Grok 0.2.118's external auth-provider command to an
+    # Arbor-owned, access-token-only xAI OAuth projection before every provider
+    # boundary. The operator's Grok login state is never imported.
     # Grok's boundary is command-shaping + process/worktree isolation, not an OS
     # network namespace. We therefore remove built-in execution and deny `Bash(*)`
     # as defense-in-depth before binding a strict runtime profile.

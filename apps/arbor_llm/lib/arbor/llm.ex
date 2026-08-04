@@ -102,6 +102,22 @@ defmodule Arbor.LLM do
   def oauth_health(provider), do: Arbor.LLM.OAuth.health(provider)
 
   @doc """
+  Return the bounded access-token-only payload consumed by Grok's external auth provider.
+
+  Only the exact atom route `:xai_oauth` is accepted. The returned JSON contains exactly
+  `access_token` and `expires_in`; credential ownership and refresh-token material never cross
+  this facade.
+  """
+  @spec oauth_external_auth_payload(:xai_oauth) ::
+          {:ok, String.t()}
+          | {:error, :unsupported_oauth_external_auth_route | :oauth_external_auth_unavailable}
+  def oauth_external_auth_payload(:xai_oauth),
+    do: Arbor.LLM.OAuth.external_auth_payload(:xai_oauth)
+
+  def oauth_external_auth_payload(_provider),
+    do: {:error, :unsupported_oauth_external_auth_route}
+
+  @doc """
   Fetch provider-reported subscription model catalog for one exact OAuth route
   (`openai_oauth` / `xai_oauth`). Returns closed ProviderModelCatalog evidence.
   Rejects aliases/lookalikes and forbidden options before credential or network I/O.

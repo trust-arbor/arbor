@@ -6,6 +6,7 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
   alias Arbor.AI.AcpSession
   alias Arbor.AI.AcpSession.GrokSandbox
   alias Arbor.AI.AcpSession.RuntimeHome
+  alias Arbor.LLM.OAuth
 
   @expected_grok_command [
     "grok",
@@ -361,11 +362,40 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
   setup do
     %{home: runtime_home} = create_temporary_workspace_isolation!()
     Process.put(:grok_runtime_home, runtime_home)
+    oauth_store = Path.join(runtime_home, "oauth")
+    File.mkdir!(oauth_store)
+    previous_oauth_store = Application.get_env(:arbor_llm, :oauth_store_dir, :unset)
+    Application.put_env(:arbor_llm, :oauth_store_dir, oauth_store)
+
+    on_exit(fn ->
+      if previous_oauth_store == :unset,
+        do: Application.delete_env(:arbor_llm, :oauth_store_dir),
+        else: Application.put_env(:arbor_llm, :oauth_store_dir, previous_oauth_store)
+    end)
+
+    access = grok_test_jwt(System.system_time(:second) + 7_200)
+
+    assert {:ok, credential} =
+             OAuth.AcquiredCredential.new(%{
+               provider: :xai,
+               access_token: access,
+               refresh_token: "sandbox-test-refresh"
+             })
+
+    assert :ok = OAuth.publish_arbor_owned(:xai_oauth, credential)
 
     assert {:ok, _opts} =
              RuntimeHome.inject([command: @expected_grok_command], %{path: runtime_home}, :grok)
 
+    assert :ok = RuntimeHome.stage_grok_external_auth(%{path: runtime_home})
+
     :ok
+  end
+
+  defp grok_test_jwt(exp) do
+    header = Base.url_encode64(~s({"alg":"none","typ":"JWT"}), padding: false)
+    payload = Base.url_encode64(Jason.encode!(%{"exp" => exp}), padding: false)
+    "#{header}.#{payload}.sig"
   end
 
   describe "grok sandbox authorization" do

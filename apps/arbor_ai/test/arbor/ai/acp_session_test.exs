@@ -10,6 +10,7 @@ defmodule Arbor.AI.AcpSessionTest do
   alias Arbor.AI.AcpManaged
   alias Arbor.AI.AcpManaged.SessionRegistry
   alias Arbor.AI.TestSupport.AutoTrustPolicy
+  alias Arbor.LLM.OAuth
 
   @moduletag :fast
 
@@ -478,9 +479,26 @@ defmodule Arbor.AI.AcpSessionTest do
       )
 
     File.mkdir!(source_home)
-    auth = ~s({"access_token":"test-only","refresh_token":"test-only"})
+    hostile_refresh = "source-refresh-must-not-copy"
+    auth = ~s({"access_token":"source-only","refresh_token":"#{hostile_refresh}"})
     File.write!(Path.join(source_home, "auth.json"), auth)
     File.chmod!(Path.join(source_home, "auth.json"), 0o600)
+
+    oauth_store = Path.join(source_home, "arbor-oauth")
+    File.mkdir!(oauth_store)
+    previous_oauth_store = Application.get_env(:arbor_llm, :oauth_store_dir, :unset)
+    Application.put_env(:arbor_llm, :oauth_store_dir, oauth_store)
+
+    access = test_jwt(System.system_time(:second) + 7_200)
+
+    assert {:ok, credential} =
+             OAuth.AcquiredCredential.new(%{
+               provider: :xai,
+               access_token: access,
+               refresh_token: "arbor-owned-refresh"
+             })
+
+    assert :ok = OAuth.publish_arbor_owned(:xai_oauth, credential)
 
     File.write!(
       Path.join(source_home, "config.toml"),
@@ -497,6 +515,10 @@ defmodule Arbor.AI.AcpSessionTest do
       if previous_grok_home,
         do: System.put_env("GROK_HOME", previous_grok_home),
         else: System.delete_env("GROK_HOME")
+
+      if previous_oauth_store == :unset,
+        do: Application.delete_env(:arbor_llm, :oauth_store_dir),
+        else: Application.put_env(:arbor_llm, :oauth_store_dir, previous_oauth_store)
 
       File.rm_rf!(source_home)
     end)
@@ -543,12 +565,26 @@ defmodule Arbor.AI.AcpSessionTest do
     assert env["GROK_WEB_FETCH"] == "0"
     assert env["RUST_LOG"] == "warn"
     assert env["GROK_LOG_FILE"] == Path.join(grok_home, "grok.log")
+    assert env["XAI_API_KEY"] == ""
+    assert env["GROK_CODE_XAI_API_KEY"] == ""
+    assert env["GROK_AUTH"] == ""
+    assert env["GROK_AUTH_PATH"] == ""
+    assert env["GROK_AUTH_PROVIDER_ACCESS_TOKEN"] == ""
+    assert env["GROK_AUTH_PROVIDER_REFRESH_TOKEN"] == ""
+    assert env["GROK_AUTH_PROVIDER_EXPIRES_AT"] == ""
 
-    assert File.read!(Path.join(grok_home, "auth.json")) == auth
+    assert File.read!(Path.join(source_home, "auth.json")) == auth
+    refute File.exists?(Path.join(grok_home, "auth.json"))
+    payload_path = Map.fetch!(env, "ARBOR_GROK_AUTH_PAYLOAD_PATH")
+
+    assert {:ok, %{"access_token" => ^access, "expires_in" => 300}} =
+             payload_path |> File.read!() |> Jason.decode()
+
+    refute File.read!(payload_path) =~ hostile_refresh
     refute File.exists?(Path.join(grok_home, "config.toml"))
 
     assert {:ok, %File.Stat{type: :regular, mode: mode}} =
-             File.lstat(Path.join(grok_home, "auth.json"))
+             File.lstat(payload_path)
 
     assert Bitwise.band(mode, 0o777) == 0o600
 
@@ -571,6 +607,12 @@ defmodule Arbor.AI.AcpSessionTest do
     runtime_home = state.runtime_home_cleanup.path
     assert :ok = AcpSession.close(session)
     refute File.exists?(runtime_home)
+  end
+
+  defp test_jwt(exp) do
+    header = Base.url_encode64(~s({"alg":"none","typ":"JWT"}), padding: false)
+    payload = Base.url_encode64(Jason.encode!(%{"exp" => exp}), padding: false)
+    "#{header}.#{payload}.sig"
   end
 
   test "security regression: lifecycle aliases cannot widen the caller deadline" do

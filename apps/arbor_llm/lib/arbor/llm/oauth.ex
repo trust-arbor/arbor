@@ -189,6 +189,7 @@ defmodule Arbor.LLM.OAuth do
   @max_account_id_bytes 512
   @max_generation 1_000_000_000_000
   @max_source_path_bytes 4_096
+  @max_external_auth_ttl_seconds 300
   @source_generation_range 4_294_967_295
   @credential_version 1
   @credential_fields ~w(version provider account_id origin owner source generation tokens)
@@ -377,6 +378,40 @@ defmodule Arbor.LLM.OAuth do
   @spec access_token(atom() | String.t()) :: {:ok, String.t()} | {:error, term()}
   def access_token(provider) do
     with {:ok, receipt} <- credential_receipt(provider), do: {:ok, receipt.access_token}
+  end
+
+  @doc false
+  @spec external_auth_payload(:xai_oauth) ::
+          {:ok, String.t()} | {:error, :oauth_external_auth_unavailable}
+  def external_auth_payload(:xai_oauth) do
+    with {:ok, %CredentialReceipt{provider: :xai, owner: "arbor_owned"} = receipt} <-
+           credential_receipt(:xai_oauth),
+         {:ok, expires_in} <- external_auth_expires_in(receipt.access_token),
+         {:ok, json} <-
+           Jason.encode(%{
+             "access_token" => receipt.access_token,
+             "expires_in" => expires_in
+           }) do
+      {:ok, json}
+    else
+      _other -> {:error, :oauth_external_auth_unavailable}
+    end
+  rescue
+    _exception -> {:error, :oauth_external_auth_unavailable}
+  catch
+    _kind, _reason -> {:error, :oauth_external_auth_unavailable}
+  end
+
+  defp external_auth_expires_in(access_token) do
+    now = System.system_time(:second)
+
+    with {:ok, %{"exp" => expires_at}} <- JwtPayload.decode(access_token),
+         true <- is_integer(expires_at),
+         expires_in when expires_in > 0 <- expires_at - now do
+      {:ok, min(expires_in, @max_external_auth_ttl_seconds)}
+    else
+      _other -> {:error, :invalid_external_auth_expiry}
+    end
   end
 
   @doc "The ChatGPT-Account-ID value for OpenAI. Prefer `credential_receipt/1` for requests."
@@ -580,7 +615,7 @@ defmodule Arbor.LLM.OAuth do
         p in ~w(openai codex chatgpt gpt) ->
           {:ok, :openai, ProviderPolicy.refresh_config(:openai)}
 
-        p in ~w(xai grok x-ai) ->
+        p in ~w(xai_oauth xai grok x-ai) ->
           {:ok, :xai, ProviderPolicy.refresh_config(:xai)}
 
         true ->

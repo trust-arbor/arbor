@@ -20,11 +20,14 @@ CLI starts; Arbor does not treat `Method not found` as successful model
 selection.
 
 Arbor launches each worker with a private, ephemeral runtime/config home rather
-than the live Arbor home. When the
-isolated Grok home is first created, Arbor stages only the bounded OAuth
-`auth.json` credential into it, preserves mode `0600`, and removes the runtime
-home at session cleanup. Authentication staging is not a general-purpose copy
-of the operator's configuration directory.
+than the live Arbor home. The private Grok home never contains `auth.json` and
+Arbor never reads or copies the operator's Grok login state. Instead, immediately
+before launch, reconnect, and every prompt, Arbor's live BEAM refreshes a mode
+`0600` access-token-only xAI OAuth projection. Grok 0.2.118 consumes that file
+through the fixed external provider command
+`/bin/cat "$ARBOR_GROK_AUTH_PAYLOAD_PATH"`; access and refresh tokens are absent
+from argv and environment values. The projection and its runtime home are
+removed at session cleanup.
 
 Managed, repository, and plugin MCP discovery is disabled for Grok sessions.
 That includes ambient repository files and directories such as `.mcp.json`,
