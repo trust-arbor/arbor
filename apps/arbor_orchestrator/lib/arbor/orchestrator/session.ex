@@ -16,7 +16,9 @@ defmodule Arbor.Orchestrator.Session do
   the agent lifecycle. Rather than hand-coding turn logic in procedural
   Elixir, the Session delegates to graph execution:
 
-      send_message/2  →  Engine.run(turn_graph, initial_values)  →  apply_turn_result/2
+      send_message/2  →  Engine.run(turn_graph, initial_values)
+                      →  admit final_outcome (:success | :partial_success)
+                      →  apply_turn_result/...
 
   Node implementations are provided by Jido Actions (via `exec target="action"`)
   and LlmHandler (via `compute` nodes). Session-specific actions live in
@@ -46,6 +48,12 @@ defmodule Arbor.Orchestrator.Session do
   the result is sent back as `{:turn_result, message, result}` and
   `GenServer.reply/2` unblocks the original caller. Only one turn can be
   in-flight at a time (concurrent turns get `{:error, :turn_in_progress}`).
+
+  `Engine.run/2` returning `{:ok, run_result}` only proves an envelope was
+  produced — it is **not** success. Session admits only
+  `final_outcome.status` of `:success` or `:partial_success` before
+  `apply_turn_result` / success signaling; every other final outcome fails
+  closed with a bounded `{:error, :turn_failed}`.
 
   ## Example
 
@@ -277,6 +285,13 @@ defmodule Arbor.Orchestrator.Session do
   with `disclosure_capability_id: nil`. Receipt/identity failures collapse to
   `{:error, :unauthenticated}`. Does not accept caller-supplied authority,
   turn ids, targets, routes, capability ids, or taint.
+
+  The three-argument form uses `Arbor.Orchestrator.Config.turn_timeout_ms/0`.
+  Callers that already validated a shorter bound use the four-argument form
+  with an explicit positive timeout. Both issue the same synchronous
+  `GenServer.call` from the invoking process (no helper Task/process).
+  A call timeout is ordinary `GenServer.call` exit behavior — it does not
+  by itself cancel or settle a queued/active turn.
   """
   @spec send_authenticated_message(
           GenServer.server(),
@@ -286,14 +301,54 @@ defmodule Arbor.Orchestrator.Session do
           {:ok, %{text: String.t(), tool_history: [map()], tool_rounds: non_neg_integer()}}
           | {:error, :unauthenticated | :legacy_mode | :cancelled | term()}
   def send_authenticated_message(session, %UserMessage{} = message, %DeliveryReceipt{} = receipt) do
-    GenServer.call(
+    send_authenticated_message(
       session,
-      {:send_authenticated_message, message, receipt},
+      message,
+      receipt,
       Arbor.Orchestrator.Config.turn_timeout_ms()
     )
   end
 
   def send_authenticated_message(_session, _message, _receipt), do: {:error, :unauthenticated}
+
+  @doc """
+  Authenticated send with an explicit positive `GenServer.call` timeout (ms).
+
+  Same exact `%UserMessage{}` / `%DeliveryReceipt{}` contract and message
+  tuple as `send_authenticated_message/3`. Invalid arguments (including
+  zero/non-integer timeout) return
+  `{:error, :invalid_authenticated_message_request}` before any message is
+  sent; the unsubmitted receipt remains caller-owned.
+  """
+  @spec send_authenticated_message(
+          GenServer.server(),
+          UserMessage.t(),
+          DeliveryReceipt.t(),
+          pos_integer()
+        ) ::
+          {:ok, %{text: String.t(), tool_history: [map()], tool_rounds: non_neg_integer()}}
+          | {:error,
+             :unauthenticated
+             | :legacy_mode
+             | :cancelled
+             | :invalid_authenticated_message_request
+             | term()}
+  def send_authenticated_message(
+        session,
+        %UserMessage{} = message,
+        %DeliveryReceipt{} = receipt,
+        timeout_ms
+      )
+      when is_integer(timeout_ms) and timeout_ms > 0 do
+    GenServer.call(
+      session,
+      {:send_authenticated_message, message, receipt},
+      timeout_ms
+    )
+  end
+
+  def send_authenticated_message(_session, _message, _receipt, _timeout_ms),
+    do: {:error, :invalid_authenticated_message_request}
 
   @doc """
   Cancel the in-flight turn (user-initiated).

@@ -1644,4 +1644,157 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
       refute term_contains_forbidden?(unauth, fail_forbidden, allow_turn_authority?: false)
     end
   end
+
+  describe "VP-05D2A1P2R3 timeout-bearing send_authenticated_message/4" do
+    @tag voice_id: "VOICE-17"
+    @tag spec: "VOICE-17"
+    test "/3 uses Config.turn_timeout_ms and exact authenticated tuple from original caller", %{
+      human_id: human_id,
+      resource: resource
+    } do
+      short_ms = 80
+      prev = Application.get_env(:arbor_orchestrator, :turn_timeout_ms)
+
+      Application.put_env(:arbor_orchestrator, :turn_timeout_ms, short_ms)
+
+      on_exit(fn ->
+        if is_nil(prev) do
+          Application.delete_env(:arbor_orchestrator, :turn_timeout_ms)
+        else
+          Application.put_env(:arbor_orchestrator, :turn_timeout_ms, prev)
+        end
+      end)
+
+      parent = self()
+      msg = user_message!(human_id)
+      receipt = issue_receipt!(human_id, resource)
+      caller = self()
+
+      # Bare process speaking GenServer.call protocol (not Session; no helper facade).
+      delay_pid =
+        spawn(fn ->
+          receive do
+            {:"$gen_call", from, request} ->
+              send(parent, {:recorded_call, elem(from, 0), request})
+              # Never reply; hold past the configured timeout.
+              Process.sleep(short_ms * 20)
+          end
+        end)
+
+      on_exit(fn ->
+        if Process.alive?(delay_pid), do: Process.exit(delay_pid, :kill)
+      end)
+
+      exit_reason =
+        catch_exit(Session.send_authenticated_message(delay_pid, msg, receipt))
+
+      assert {:timeout, {GenServer, :call, [^delay_pid, request, ^short_ms]}} = exit_reason
+      assert request == {:send_authenticated_message, msg, receipt}
+
+      assert_receive {:recorded_call, recorded_caller, recorded_request}, 1_000
+      assert recorded_caller == caller
+      assert recorded_request == {:send_authenticated_message, msg, receipt}
+    end
+
+    @tag voice_id: "VOICE-17"
+    @tag spec: "VOICE-17"
+    test "/4 uses supplied timeout and original caller PID with exact authenticated tuple", %{
+      human_id: human_id,
+      resource: resource
+    } do
+      supplied_ms = 50
+      # Leave configured timeout large so a hang would exceed wall-clock bound.
+      configured = Arbor.Orchestrator.Config.turn_timeout_ms()
+      assert configured > supplied_ms * 20
+
+      parent = self()
+      msg = user_message!(human_id)
+      receipt = issue_receipt!(human_id, resource)
+      caller = self()
+
+      delay_pid =
+        spawn(fn ->
+          receive do
+            {:"$gen_call", from, request} ->
+              send(parent, {:recorded_call, elem(from, 0), request})
+              Process.sleep(supplied_ms * 40)
+          end
+        end)
+
+      on_exit(fn ->
+        if Process.alive?(delay_pid), do: Process.exit(delay_pid, :kill)
+      end)
+
+      started = System.monotonic_time(:millisecond)
+
+      exit_reason =
+        catch_exit(Session.send_authenticated_message(delay_pid, msg, receipt, supplied_ms))
+
+      elapsed = System.monotonic_time(:millisecond) - started
+
+      assert {:timeout, {GenServer, :call, [^delay_pid, request, ^supplied_ms]}} = exit_reason
+      assert request == {:send_authenticated_message, msg, receipt}
+      # Bounded by supplied timeout, not configured Session turn timeout.
+      assert elapsed < configured
+      assert elapsed < supplied_ms * 10
+
+      assert_receive {:recorded_call, recorded_caller, recorded_request}, 1_000
+      assert recorded_caller == caller
+      assert recorded_request == {:send_authenticated_message, msg, receipt}
+    end
+
+    @tag voice_id: "VOICE-17"
+    @tag spec: "VOICE-17"
+    test "invalid /4 arguments send no message and return invalid_authenticated_message_request",
+         %{
+           human_id: human_id,
+           resource: resource
+         } do
+      parent = self()
+      msg = user_message!(human_id)
+      receipt = issue_receipt!(human_id, resource)
+
+      probe =
+        spawn(fn ->
+          receive do
+            inbound -> send(parent, {:probe_received, inbound})
+          end
+        end)
+
+      on_exit(fn ->
+        if Process.alive?(probe), do: Process.exit(probe, :kill)
+      end)
+
+      assert {:error, :invalid_authenticated_message_request} =
+               Session.send_authenticated_message(probe, msg, receipt, 0)
+
+      assert {:error, :invalid_authenticated_message_request} =
+               Session.send_authenticated_message(probe, msg, receipt, -1)
+
+      assert {:error, :invalid_authenticated_message_request} =
+               Session.send_authenticated_message(probe, msg, receipt, 1.5)
+
+      assert {:error, :invalid_authenticated_message_request} =
+               Session.send_authenticated_message(probe, msg, receipt, :infinity)
+
+      assert {:error, :invalid_authenticated_message_request} =
+               Session.send_authenticated_message(probe, "bare", receipt, 50)
+
+      assert {:error, :invalid_authenticated_message_request} =
+               Session.send_authenticated_message(probe, msg, :not_receipt, 50)
+
+      # Receipt remains caller-owned (never submitted / consumed by Session).
+      assert {:ok, _principal} =
+               Security.consume_delivery_receipt(receipt, resource, :chat)
+
+      refute_receive {:probe_received, _}, 100
+    end
+
+    @tag voice_id: "VOICE-17"
+    @tag spec: "VOICE-17"
+    test "/3 invalid inputs retain unauthenticated" do
+      assert {:error, :unauthenticated} =
+               Session.send_authenticated_message(self(), "bare", :not_receipt)
+    end
+  end
 end
