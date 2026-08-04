@@ -441,6 +441,7 @@ defmodule Arbor.Voice.Test.SessionFakes do
           %{
             start_mode: Keyword.get(opts, :start_mode, :ok),
             register_mode: Keyword.get(opts, :register_mode, :ok),
+            adopt_mode: Keyword.get(opts, :adopt_mode, :ok),
             activate_mode: Keyword.get(opts, :activate_mode, :ok),
             configure_mode: Keyword.get(opts, :configure_mode, :ok),
             meta_mode: Keyword.get(opts, :meta_mode, :ok),
@@ -448,6 +449,7 @@ defmodule Arbor.Voice.Test.SessionFakes do
             starts: 0,
             closes: 0,
             registers: 0,
+            adopts: 0,
             removes: 0,
             activates: 0,
             fences: 0,
@@ -473,6 +475,7 @@ defmodule Arbor.Voice.Test.SessionFakes do
           :starts,
           :closes,
           :registers,
+          :adopts,
           :removes,
           :activates,
           :fences,
@@ -480,6 +483,7 @@ defmodule Arbor.Voice.Test.SessionFakes do
           :metas,
           :start_mode,
           :register_mode,
+          :adopt_mode,
           :activate_mode,
           :configure_mode,
           :meta_mode,
@@ -493,6 +497,7 @@ defmodule Arbor.Voice.Test.SessionFakes do
 
     def set_start_mode(agent, mode), do: Agent.update(agent, &%{&1 | start_mode: mode})
     def set_register_mode(agent, mode), do: Agent.update(agent, &%{&1 | register_mode: mode})
+    def set_adopt_mode(agent, mode), do: Agent.update(agent, &%{&1 | adopt_mode: mode})
     def set_activate_mode(agent, mode), do: Agent.update(agent, &%{&1 | activate_mode: mode})
     def set_configure_mode(agent, mode), do: Agent.update(agent, &%{&1 | configure_mode: mode})
     def set_meta_mode(agent, mode), do: Agent.update(agent, &%{&1 | meta_mode: mode})
@@ -626,6 +631,35 @@ defmodule Arbor.Voice.Test.SessionFakes do
 
         :fail ->
           {:error, :register_failed}
+      end
+    end
+
+    def adopt_provisional_cleanup(owner, key, fun) do
+      agent = lookup_agent!()
+
+      mode =
+        Agent.get_and_update(agent, fn state ->
+          {state.adopt_mode, %{state | adopts: state.adopts + 1}}
+        end)
+
+      case mode do
+        :ok ->
+          Arbor.Voice.ResourceOwner.adopt_provisional_cleanup(owner, key, fun)
+
+        :fail ->
+          {:error, :adopt_failed}
+
+        :owner_down ->
+          ref = Process.monitor(owner)
+          Process.exit(owner, :kill)
+
+          receive do
+            {:DOWN, ^ref, :process, ^owner, _reason} -> :ok
+          after
+            1_000 -> Process.demonitor(ref, [:flush])
+          end
+
+          Arbor.Voice.ResourceOwner.adopt_provisional_cleanup(owner, key, fun)
       end
     end
 

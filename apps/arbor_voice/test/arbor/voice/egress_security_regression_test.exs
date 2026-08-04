@@ -534,6 +534,90 @@ defmodule Arbor.Voice.EgressSecurityRegressionTest do
     refute inspected =~ "never sent"
   end
 
+  @tag :security_regression
+  @tag spec: "VOICE-17"
+  test "no-lost-obligation regression: owner-down retains failed provisional cleanup until recovery" do
+    user_id = "user_provisional_owner_down"
+    agent_id = "agent_provisional_owner_down"
+
+    {:ok, owner_tracker} =
+      TrackingResourceOwner.start_tracker(register_mode: :fail, adopt_mode: :owner_down)
+
+    assert {:ok, key} =
+             Voice.start_session(user_id, agent_id, external_tracking_opts())
+
+    assert [{session, _value}] = Registry.lookup(Arbor.Voice.Registry, key)
+    owner = TrackingResourceOwner.owner(owner_tracker)
+    session_ref = Process.monitor(session)
+    owner_ref = Process.monitor(owner)
+
+    on_exit(fn ->
+      EgressAuthorityFakes.reset(modes: [revoke: :ok])
+
+      if Process.alive?(session) do
+        _ = DynamicSupervisor.terminate_child(Arbor.Voice.SessionSupervisor, session)
+      end
+
+      if Process.alive?(owner) do
+        _ = DynamicSupervisor.terminate_child(Arbor.Voice.ResourceSupervisor, owner)
+      end
+    end)
+
+    EgressAuthorityFakes.set_mode(:revoke, {:return, {:error, :transient_revoke}})
+    attempts_before_owner_down = length(revoke_events())
+
+    assert {:error, :cleanup_pending} =
+             Voice.text_turn(user_id, agent_id, "provisional cleanup must survive")
+
+    assert_receive {:DOWN, ^owner_ref, :process, ^owner, :killed}, 1_000
+    assert Process.alive?(session)
+    assert [{^session, _value}] = Registry.lookup(Arbor.Voice.Registry, key)
+    assert {:error, :not_found} = Voice.session_status(key)
+
+    state = :sys.get_state(session)
+    assert %Redacted{} = state.provisional_turn_authority
+    assert is_reference(state.provisional_cleanup_retry_token)
+
+    stats = TrackingResourceOwner.stats(owner_tracker)
+    assert stats.registers == 2
+    assert stats.adopts == 1
+
+    assert_eventually(fn ->
+      if Process.alive?(session) do
+        current = :sys.get_state(session)
+
+        match?(%Redacted{}, current.provisional_turn_authority) and
+          length(revoke_events()) >= attempts_before_owner_down + 7
+      else
+        false
+      end
+    end)
+
+    assert Process.alive?(session)
+    retry_token = :sys.get_state(session).provisional_cleanup_retry_token
+    assert is_reference(retry_token)
+
+    disclosure_id =
+      EgressAuthorityFakes.capabilities()
+      |> Map.values()
+      |> Enum.find_value(fn
+        %{kind: :disclosure, id: id} -> id
+        _other -> nil
+      end)
+
+    assert is_binary(disclosure_id)
+    assert %{revoked: false} = EgressAuthorityFakes.capability(disclosure_id)
+
+    EgressAuthorityFakes.set_mode(:revoke, :ok)
+    send(session, {:retry_provisional_cleanup, retry_token})
+
+    assert_receive {:DOWN, ^session_ref, :process, ^session, {:shutdown, :cleanup_pending}},
+                   2_000
+
+    assert %{revoked: true} = EgressAuthorityFakes.capability(disclosure_id)
+    assert_eventually(fn -> Registry.lookup(Arbor.Voice.Registry, key) == [] end)
+  end
+
   defp physical_send_count(events) do
     Enum.count(events, &match?({:transport_send, _}, &1))
   end

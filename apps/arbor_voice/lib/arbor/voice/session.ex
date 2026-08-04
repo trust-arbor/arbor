@@ -41,6 +41,10 @@ defmodule Arbor.Voice.Session do
   # Registered via Application Supervisor.child_spec — no wrapper module.
   @tool_task_supervisor Arbor.Voice.ToolTaskSupervisor
   @cleanup_pending_stop_reason {:shutdown, :cleanup_pending}
+  # A provisional disclosure closure that neither ResourceOwner nor its lease
+  # accepted remains Session-owned. Keep the quarantined Session alive and
+  # retry at a bounded cadence instead of making capability TTL the backstop.
+  @provisional_cleanup_retry_ms 1_000
   # Deterministic non-sensitive hard-timeout notice (VOICE-24).
   @budget_exhaustion_notice "This voice session has reached its time limit. Continue on your screen."
   # Source-owned progress filler (VP-05B / VOICE-11). Not model-authored.
@@ -303,6 +307,8 @@ defmodule Arbor.Voice.Session do
           # Retained only until direct cleanup succeeds or authoritative close
           # transfers it to ResourceOwner.
           provisional_turn_authority: nil,
+          provisional_cleanup_retry_ref: nil,
+          provisional_cleanup_retry_token: nil,
           turn_generation: 0,
           closing: false
         }
@@ -833,11 +839,15 @@ defmodule Arbor.Voice.Session do
         {:error, reason, next_state} ->
           {:reply, {:error, reason}, next_state}
 
-        {:fatal, reason, next_state} ->
-          stop_reason =
-            if reason == :cleanup_pending, do: @cleanup_pending_stop_reason, else: :normal
+        {:fatal, :cleanup_pending, next_state} ->
+          if session_owned_provisional_cleanup?(next_state) do
+            {:reply, {:error, :cleanup_pending}, schedule_provisional_cleanup_retry(next_state)}
+          else
+            {:stop, @cleanup_pending_stop_reason, {:error, :cleanup_pending}, next_state}
+          end
 
-          {:stop, stop_reason, {:error, reason}, next_state}
+        {:fatal, reason, next_state} ->
+          {:stop, :normal, {:error, reason}, next_state}
       end
     end
   end
@@ -900,6 +910,38 @@ defmodule Arbor.Voice.Session do
 
   def handle_info({:turn_poll, _generation}, state), do: {:noreply, state}
 
+  def handle_info(
+        {:retry_provisional_cleanup, token},
+        %{provisional_cleanup_retry_token: token} = state
+      )
+      when is_reference(token) do
+    state = clear_provisional_cleanup_retry(state)
+
+    case ensure_provisional_cleanup_owned(state) do
+      {:ok, state} ->
+        {state, cleanup_result} = settle_and_close(state)
+
+        case cleanup_result do
+          :ok ->
+            safe_emit(state, :stop)
+            {:stop, :normal, %{state | lifecycle: :closed}}
+
+          {:error, _reason} ->
+            state =
+              state
+              |> Map.put(:lifecycle, :closed)
+              |> Map.put(:terminal_stop_reason, @cleanup_pending_stop_reason)
+
+            {:stop, @cleanup_pending_stop_reason, state}
+        end
+
+      {:error, state} ->
+        {:noreply, schedule_provisional_cleanup_retry(state)}
+    end
+  end
+
+  def handle_info({:retry_provisional_cleanup, _token}, state), do: {:noreply, state}
+
   def handle_info(:terminate_after_close, state) do
     {:stop, Map.get(state, :terminal_stop_reason, :normal), state}
   end
@@ -930,7 +972,12 @@ defmodule Arbor.Voice.Session do
         %{owner_ref: ref, owner: owner} = state
       ) do
     state = handle_resource_owner_down(state)
-    {:stop, Map.get(state, :terminal_stop_reason, :normal), state}
+
+    if session_owned_provisional_cleanup?(state) do
+      {:noreply, state}
+    else
+      {:stop, Map.get(state, :terminal_stop_reason, :normal), state}
+    end
   end
 
   def handle_info(
@@ -961,7 +1008,11 @@ defmodule Arbor.Voice.Session do
     # Owner DOWN is not positive settlement evidence, so Session never replays
     # them and reports the conservative public result. Only a closure that was
     # never accepted by the owner may still be attempted here.
-    _ = provisional_turn_cleanup_result(state)
+    state =
+      case provisional_turn_cleanup_result(state) do
+        {:ok, next_state} -> next_state
+        {:error, next_state} -> next_state
+      end
 
     state =
       if is_map(turn) do
@@ -971,9 +1022,16 @@ defmodule Arbor.Voice.Session do
         state
       end
 
-    state
-    |> Map.put(:lifecycle, :closed)
-    |> Map.put(:terminal_stop_reason, @cleanup_pending_stop_reason)
+    state =
+      state
+      |> Map.put(:lifecycle, :closed)
+      |> Map.put(:terminal_stop_reason, @cleanup_pending_stop_reason)
+
+    if session_owned_provisional_cleanup?(state) do
+      schedule_provisional_cleanup_retry(state)
+    else
+      state
+    end
   end
 
   defp run_fallback_cleanup(nil, _attempts), do: :ok
@@ -988,16 +1046,24 @@ defmodule Arbor.Voice.Session do
 
   defp run_fallback_cleanup(_cleanup, _attempts), do: {:error, :cleanup_failed}
 
-  defp provisional_turn_cleanup_result(%{provisional_turn_authority: nil}), do: :ok
+  defp provisional_turn_cleanup_result(%{provisional_turn_authority: nil} = state),
+    do: {:ok, state}
 
-  defp provisional_turn_cleanup_result(%{provisional_turn_authority: %Redacted{} = authority}) do
+  defp provisional_turn_cleanup_result(
+         %{provisional_turn_authority: %Redacted{} = authority} = state
+       ) do
     case Redacted.value(authority) do
-      %{ownership: :session, cleanup: cleanup} -> run_fallback_cleanup(cleanup, 3)
-      _owner_or_complete -> :ok
+      %{ownership: :session, cleanup: cleanup} when is_function(cleanup, 0) ->
+        complete_provisional_cleanup(state, cleanup)
+
+      _owner_or_complete ->
+        {:ok, state}
     end
+  catch
+    _, _ -> {:error, state}
   end
 
-  defp provisional_turn_cleanup_result(_state), do: :ok
+  defp provisional_turn_cleanup_result(state), do: {:ok, state}
 
   # ---------------------------------------------------------------------------
   # Text turn — intake in handle_call, poll in handle_info
@@ -2004,9 +2070,9 @@ defmodule Arbor.Voice.Session do
             {:ok, %{state | provisional_turn_authority: nil}}
 
           _ ->
-            # Concrete adoption provides ResourceOwner's reserved emergency
+            # The configured owner facade provides the reserved emergency
             # handoff when ordinary registration capacity/faults block transfer.
-            case ResourceOwner.adopt_provisional_cleanup(state.owner, key, cleanup) do
+            case safe_adopt_provisional_cleanup(state, key, cleanup) do
               :ok ->
                 {:ok, %{state | provisional_turn_authority: nil}}
 
@@ -2030,6 +2096,14 @@ defmodule Arbor.Voice.Session do
     end
   end
 
+  defp safe_adopt_provisional_cleanup(state, key, cleanup) do
+    try do
+      state.resource_owner.adopt_provisional_cleanup(state.owner, key, cleanup)
+    catch
+      _, _ -> {:error, :cleanup_adoption_failed}
+    end
+  end
+
   defp complete_provisional_cleanup(state, cleanup) do
     case run_fallback_cleanup(cleanup, 3) do
       :ok ->
@@ -2038,6 +2112,62 @@ defmodule Arbor.Voice.Session do
       {:error, _reason} ->
         {:error, state}
     end
+  end
+
+  defp session_owned_provisional_cleanup?(%{
+         provisional_turn_authority: %Redacted{} = authority
+       }) do
+    case Redacted.value(authority) do
+      %{ownership: :session, cleanup: cleanup} when is_function(cleanup, 0) -> true
+      _other -> false
+    end
+  catch
+    _, _ -> false
+  end
+
+  defp session_owned_provisional_cleanup?(_state), do: false
+
+  defp schedule_provisional_cleanup_retry(state) do
+    cond do
+      not session_owned_provisional_cleanup?(state) ->
+        state
+
+      is_reference(Map.get(state, :provisional_cleanup_retry_ref)) ->
+        state
+
+      true ->
+        token = make_ref()
+
+        ref =
+          Process.send_after(
+            self(),
+            {:retry_provisional_cleanup, token},
+            @provisional_cleanup_retry_ms
+          )
+
+        state
+        |> Map.put(:provisional_cleanup_retry_ref, ref)
+        |> Map.put(:provisional_cleanup_retry_token, token)
+    end
+  end
+
+  defp clear_provisional_cleanup_retry(state) do
+    ref = Map.get(state, :provisional_cleanup_retry_ref)
+    token = Map.get(state, :provisional_cleanup_retry_token)
+
+    if is_reference(ref), do: Process.cancel_timer(ref)
+
+    if is_reference(token) do
+      receive do
+        {:retry_provisional_cleanup, ^token} -> :ok
+      after
+        0 -> :ok
+      end
+    end
+
+    state
+    |> Map.put(:provisional_cleanup_retry_ref, nil)
+    |> Map.put(:provisional_cleanup_retry_token, nil)
   end
 
   defp cancel_hard_timer(%{timer_ref: ref} = state) when is_reference(ref) do
