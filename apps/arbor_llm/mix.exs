@@ -51,6 +51,7 @@ defmodule Arbor.LLM.MixProject do
       # comes in a later session with the generic adapter.
       {:arbor_contracts, in_umbrella: true},
       {:arbor_common, in_umbrella: true},
+      {:arbor_signals, in_umbrella: true},
       {:req, "~> 0.5"},
       {:telemetry, "~> 1.2"},
       # Session 3: req_llm is the transport layer the generic

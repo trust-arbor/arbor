@@ -80,11 +80,6 @@ defmodule Arbor.LLM.ToolLoop do
 
   alias Arbor.LLM.ToolResultBudget
 
-  # Session.Builders lives in arbor_orchestrator (which depends on
-  # arbor_llm). Runtime indirection avoids the cycle — see Client's
-  # @tool_hooks_mod for the same pattern.
-  @session_builders_mod Arbor.Orchestrator.Session.Builders
-
   @prompt_sanitizer Arbor.Common.PromptSanitizer
 
   @default_max_turns 50
@@ -1619,10 +1614,14 @@ defmodule Arbor.LLM.ToolLoop do
   end
 
   defp emit_tool_loop_signal(event, data) do
-    builders_mod = @session_builders_mod
-    apply(builders_mod, :emit_signal, [:agent, event, data])
+    if Process.whereis(Arbor.Signals.Bus) != nil do
+      metadata = if data[:agent_id], do: %{agent_id: data[:agent_id]}, else: %{}
+      Arbor.Signals.emit(:agent, event, data, metadata: metadata)
+    end
   rescue
     _ -> :ok
+  catch
+    _, _ -> :ok
   end
 
   defp maybe_record_tool_telemetry(agent_id, tool_name, result, duration_ms) do
