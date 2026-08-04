@@ -115,7 +115,7 @@ defmodule Arbor.Actions.AI do
     def egress_tier(params, _context) do
       params[:provider]
       |> normalize_provider()
-      |> Arbor.AI.BackendTrust.egress_tier_for()
+      |> Arbor.AI.egress_tier_for()
     end
 
     # Destination-scoped egress caps match on the provider (nil when routing decides).
@@ -278,7 +278,7 @@ defmodule Arbor.Actions.AI do
     def egress_tier(params, _context) do
       params[:provider]
       |> normalize_provider()
-      |> Arbor.AI.BackendTrust.egress_tier_for()
+      |> Arbor.AI.egress_tier_for()
     end
 
     # Destination-scoped egress caps match on the provider (nil when routing decides).

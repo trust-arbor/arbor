@@ -313,4 +313,23 @@ defmodule Arbor.AI.BackendTrustTest do
       assert BackendTrust.egress_tier_for(:anthropic, "http://127.0.0.1:8080/proxy") == :on_host
     end
   end
+
+  describe "Arbor.AI egress facade" do
+    test "exposes provider and endpoint classification without internal-module access" do
+      assert Arbor.AI.egress_tier_for(:lmstudio) == :on_host
+      assert Arbor.AI.egress_tier_for("lmstudio") == :on_host
+      assert Arbor.AI.egress_tier_for(:anthropic) == :external_provider
+
+      assert Arbor.AI.egress_tier_for(:ollama, "http://10.42.42.6:11434") ==
+               :on_premises
+    end
+
+    test "unknown provider strings fail closed without creating atoms" do
+      provider = "unknown_provider_#{System.unique_integer([:positive])}"
+
+      assert_raise ArgumentError, fn -> String.to_existing_atom(provider) end
+      assert Arbor.AI.egress_tier_for(provider) == :external_provider
+      assert_raise ArgumentError, fn -> String.to_existing_atom(provider) end
+    end
+  end
 end

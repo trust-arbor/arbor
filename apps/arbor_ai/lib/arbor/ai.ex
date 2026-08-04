@@ -721,6 +721,31 @@ defmodule Arbor.AI do
     to: Arbor.AI.BackendTrust,
     as: :can_see?
 
+  @doc """
+  Resolve the egress tier for an AI provider and optional endpoint.
+
+  This is the public facade for AI-specific destination classification. When
+  an endpoint is present, its network locality takes precedence over the
+  provider's default trust classification.
+  """
+  @spec egress_tier_for(atom() | String.t(), String.t() | nil) ::
+          Arbor.Contracts.Security.Classification.egress_tier()
+  def egress_tier_for(provider, base_url \\ nil)
+
+  def egress_tier_for(provider, base_url) when is_atom(provider) do
+    Arbor.AI.BackendTrust.egress_tier_for(provider, base_url)
+  end
+
+  def egress_tier_for(provider, base_url) when is_binary(provider) do
+    provider =
+      case Arbor.Common.SafeAtom.to_existing(provider) do
+        {:ok, atom} -> atom
+        _ -> nil
+      end
+
+    Arbor.AI.BackendTrust.egress_tier_for(provider, base_url)
+  end
+
   # ── Stats & Observability ──
 
   @doc """

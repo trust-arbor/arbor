@@ -693,19 +693,8 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
 
   # Resolve the egress tier for the provider via BackendTrust (provider -> tier).
   defp resolve_egress_tier(provider) do
-    Arbor.AI.BackendTrust.egress_tier_for(provider_atom(provider), nil)
+    Arbor.AI.egress_tier_for(provider, nil)
   end
-
-  defp provider_atom(provider) when is_atom(provider) and not is_nil(provider), do: provider
-
-  defp provider_atom(provider) when is_binary(provider) do
-    case Arbor.Common.SafeAtom.to_existing(provider) do
-      {:ok, atom} -> atom
-      _ -> nil
-    end
-  end
-
-  defp provider_atom(_), do: nil
 
   # Conservative egress taint: the MOST severe level across all context taint —
   # the prompt may incorporate any context data, so if anything is untrusted/
