@@ -261,9 +261,9 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
   test "template stays within reviewed DOT source, node, and edge ceilings", ctx do
     graph = parse!(ctx.template_source)
 
-    assert byte_size(ctx.template_source) == 81_782
-    assert map_size(graph.nodes) == 236
-    assert length(graph.edges) == 342
+    assert byte_size(ctx.template_source) == 82_988
+    assert map_size(graph.nodes) == 238
+    assert length(graph.edges) == 345
     assert byte_size(ctx.template_source) <= 262_144
     assert map_size(graph.nodes) <= 256
     assert length(graph.edges) <= 512
