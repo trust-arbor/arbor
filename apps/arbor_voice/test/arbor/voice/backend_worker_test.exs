@@ -248,14 +248,22 @@ defmodule Arbor.Voice.BackendWorkerTest do
 
     assert coordinator == self()
     assert generation == credential.generation
+    assert {:ok, ^request} = BackendWorker.verify_effect_request(request, credential)
 
     parent = self()
 
     spawn(fn ->
-      send(parent, {:foreign_effect_reply, BackendWorker.reply_effect(request, :allow)})
+      send(
+        parent,
+        {:foreign_effect_reply, BackendWorker.reply_effect(request, :allow),
+         BackendWorker.verify_effect_request(request, credential),
+         BackendWorker.reply_effect(request, credential, :allow)}
+      )
     end)
 
-    assert_receive {:foreign_effect_reply, {:error, :invalid_effect_request}}
+    assert_receive {:foreign_effect_reply, {:error, :invalid_effect_request},
+                    {:error, :invalid_effect_request}, {:error, :invalid_effect_request}}
+
     refute_receive {:physical_effect, ^worker}, 25
 
     assert :ok = BackendWorker.reply_effect(request, credential, :allow)
@@ -266,6 +274,102 @@ defmodule Arbor.Voice.BackendWorkerTest do
     assert open.outcome == :ok
     assert :ok = ack(worker, credential, open)
     close_worker(worker, credential)
+  end
+
+  test "security regression: effect request authenticates every material field", ctx do
+    {worker, credential} =
+      start_worker(
+        ctx.supervisor,
+        [parent: self(), mode: :effect, callback_route: @route],
+        @route,
+        effect_timeout_ms: 1_000
+      )
+
+    operation_token = BackendWorker.new_operation_token()
+
+    assert :ok =
+             BackendWorker.submit(
+               worker,
+               credential,
+               operation_token,
+               now_ms() + 2_000,
+               :open,
+               []
+             )
+
+    assert_receive %EffectRequest{} = request
+    assert {:ok, ^request} = BackendWorker.verify_effect_request(request, credential)
+
+    tampered_requests = [
+      %{request | worker: self()},
+      %{request | coordinator: worker},
+      %{request | generation: make_ref()},
+      %{request | operation_token: make_ref()},
+      %{request | effect_token: make_ref()},
+      %{request | effect: :configure},
+      %{request | frozen_route: %{@route | model: "tampered-model"}},
+      %{request | reply_alias: make_ref()},
+      %{request | authenticator: Redacted.new(:crypto.strong_rand_bytes(32))},
+      Map.put(request, :unsigned_extra, :value)
+    ]
+
+    Enum.each(tampered_requests, fn tampered ->
+      assert {:error, :invalid_effect_request} =
+               BackendWorker.verify_effect_request(tampered, credential)
+
+      assert {:error, :invalid_effect_request} =
+               BackendWorker.reply_effect(tampered, credential, :allow)
+    end)
+
+    assert :ok = BackendWorker.reply_effect(request, credential, :allow)
+    assert_receive {:physical_effect, ^worker}
+    open = receive_result(worker, credential, operation_token, :open)
+    assert :ok = ack(worker, credential, open)
+    close_worker(worker, credential)
+  end
+
+  test "effect decisions are bounded to allow or deny before reply authentication", ctx do
+    {worker, credential} =
+      start_worker(
+        ctx.supervisor,
+        [parent: self(), mode: :effect, callback_route: @route],
+        @route,
+        effect_timeout_ms: 1_000
+      )
+
+    operation_token = BackendWorker.new_operation_token()
+
+    assert :ok =
+             BackendWorker.submit(
+               worker,
+               credential,
+               operation_token,
+               now_ms() + 2_000,
+               :open,
+               []
+             )
+
+    assert_receive %EffectRequest{} = request
+    assert {:ok, ^request} = BackendWorker.verify_effect_request(request, credential)
+
+    Enum.each(
+      [nil, :unknown, {:error, make_ref()}, String.duplicate("x", 1_000_000)],
+      fn decision ->
+        assert {:error, :invalid_effect_request} =
+                 BackendWorker.reply_effect(request, credential, decision)
+      end
+    )
+
+    refute_receive {:physical_effect, ^worker}, 25
+    assert :ok = BackendWorker.reply_effect(request, credential, :deny)
+    assert_receive {:effect_authorization, {:error, :backend_effect_denied}}
+    refute_receive {:physical_effect, ^worker}, 25
+
+    denied = receive_result(worker, credential, operation_token, :open)
+    assert denied.outcome == {:error, :backend_open_failed}
+    monitor = Process.monitor(worker)
+    assert :ok = ack(worker, credential, denied)
+    assert_receive {:DOWN, ^monitor, :process, ^worker, :normal}, 500
   end
 
   test "faulting malformed and timeout effect responses deny before transport", ctx do
@@ -294,7 +398,7 @@ defmodule Arbor.Voice.BackendWorkerTest do
 
       case refusal do
         :fault ->
-          assert :ok =
+          assert {:error, :invalid_effect_request} =
                    BackendWorker.reply_effect(
                      request,
                      credential,
@@ -303,7 +407,9 @@ defmodule Arbor.Voice.BackendWorkerTest do
 
         :malformed_credential ->
           fake = %Credential{credential | secret: Redacted.new(:crypto.strong_rand_bytes(32))}
-          assert :ok = BackendWorker.reply_effect(request, fake, :allow)
+
+          assert {:error, :invalid_effect_request} =
+                   BackendWorker.reply_effect(request, fake, :allow)
 
         :timeout ->
           :ok
@@ -366,6 +472,50 @@ defmodule Arbor.Voice.BackendWorkerTest do
 
     refute_receive {:backend_called, :send_text, ^worker, _version}, 25
     assert :ok = ack(worker, credential, configured)
+    close_worker(worker, credential)
+  end
+
+  test "signed forged oversized and bignum results fail closed before HMAC verification", ctx do
+    {worker, credential} = start_worker(ctx.supervisor, [parent: self()], :none)
+    open = submit_result(worker, credential, :open, [])
+
+    oversized_audio =
+      :binary.copy(<<0>>, BackendWorker.max_audio_bytes() + 65_537)
+
+    oversized =
+      open.result
+      |> Map.put(:operation, :recv)
+      |> Map.put(:outcome, {:ok, {:output_audio, oversized_audio}})
+      |> sign_result(credential)
+
+    huge_integer = :binary.decode_unsigned(<<1>> <> :binary.copy(<<0>>, 131_072))
+
+    huge_completed_at =
+      open.result
+      |> Map.put(:completed_at, huge_integer)
+      |> sign_result(credential)
+
+    huge_meta_rate =
+      open.result
+      |> Map.put(:operation, :meta)
+      |> Map.put(:outcome, {
+        :ok,
+        %{
+          backend: :test_backend,
+          mode: :cloud,
+          input_rate: huge_integer,
+          output_rate: 24_000
+        }
+      })
+      |> sign_result(credential)
+
+    Enum.each([oversized, huge_completed_at, huge_meta_rate], fn forged ->
+      assert {:error, :invalid_result} = BackendWorker.verify_result(forged, credential)
+      assert {:error, :invalid_result} = BackendWorker.ack(worker, credential, forged)
+    end)
+
+    assert {:ok, _verified} = BackendWorker.verify_result(open.result, credential)
+    assert :ok = ack(worker, credential, open)
     close_worker(worker, credential)
   end
 
@@ -760,6 +910,10 @@ defmodule Arbor.Voice.BackendWorkerTest do
              )
 
     assert_receive %EffectRequest{} = effect_request
+
+    assert {:ok, ^effect_request} =
+             BackendWorker.verify_effect_request(effect_request, credential)
+
     refute contains_exact_binary?(effect_request, worker_secret)
     refute inspect(effect_request) =~ route_secret
     refute inspect(effect_request) =~ inspect(operation_token)
@@ -881,6 +1035,18 @@ defmodule Arbor.Voice.BackendWorkerTest do
 
   defp ack(worker, credential, %{result: result}) do
     BackendWorker.ack(worker, credential, result)
+  end
+
+  defp sign_result(result, credential) do
+    completion = Redacted.value(result.completion.value)
+
+    fields =
+      {result.worker, result.coordinator, result.generation, result.operation_token,
+       result.operation, result.completed_at, result.outcome, completion}
+
+    payload = :erlang.term_to_binary({BackendWorker, :result, fields}, [:deterministic])
+    secret = Redacted.value(credential.secret)
+    %{result | authenticator: Redacted.new(:crypto.mac(:hmac, :sha256, secret, payload))}
   end
 
   defp close_worker(worker, credential) do

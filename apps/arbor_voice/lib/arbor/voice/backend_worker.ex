@@ -27,9 +27,13 @@ defmodule Arbor.Voice.BackendWorker do
   @max_tool_output_bytes 8_192
   @max_operation_bytes @max_audio_bytes + 65_536
   @max_result_binary_bytes 2 * 1024 * 1024
+  @max_public_outcome_bytes @max_result_binary_bytes + 65_536
   @max_event_text_bytes 8_192
   @max_event_arguments_bytes 8_192
   @max_identifier_bytes 256
+  @min_completed_at -9_223_372_036_854_775_808
+  @max_completed_at 9_223_372_036_854_775_807
+  @max_rate 4_294_967_295
 
   @operations [
     :open,
@@ -42,6 +46,17 @@ defmodule Arbor.Voice.BackendWorker do
     :close
   ]
   @send_operations [:send_text, :send_audio, :send_tool_result]
+  @public_error_reasons [
+    :operation_timeout,
+    :backend_callback_fault,
+    :backend_open_failed,
+    :backend_partial_failure,
+    :backend_callback_failed,
+    :invalid_backend_event,
+    :invalid_backend_meta,
+    :backend_close_failed,
+    :invalid_backend_return
+  ]
 
   defmodule Credential do
     @moduledoc false
@@ -153,9 +168,22 @@ defmodule Arbor.Voice.BackendWorker do
       :effect_token,
       :effect,
       :frozen_route,
-      :reply_alias
+      :reply_alias,
+      :authenticator
     ]
     defstruct @enforce_keys
+
+    @type t :: %__MODULE__{
+            worker: pid(),
+            coordinator: pid(),
+            generation: reference(),
+            operation_token: reference(),
+            effect_token: reference(),
+            effect: atom(),
+            frozen_route: term(),
+            reply_alias: reference(),
+            authenticator: Arbor.Voice.Redacted.t()
+          }
 
     defimpl Inspect do
       import Inspect.Algebra
@@ -168,7 +196,8 @@ defmodule Arbor.Voice.BackendWorker do
           effect: request.effect,
           operation: :redacted,
           route: :redacted,
-          reply: :redacted
+          reply: :redacted,
+          authenticator: :redacted
         }
 
         concat(["#Arbor.Voice.BackendWorker.EffectRequest<", to_doc(safe, opts), ">"])
@@ -428,6 +457,33 @@ defmodule Arbor.Voice.BackendWorker do
   def verify_result(_result, _credential), do: {:error, :invalid_result}
 
   @doc false
+  @spec verify_effect_request(EffectRequest.t(), Credential.t()) ::
+          {:ok, EffectRequest.t()} | {:error, :invalid_effect_request}
+  def verify_effect_request(%EffectRequest{} = request, credential) do
+    with {:ok, secret} <- boundary_secret(credential, request.worker),
+         true <- request.coordinator == self(),
+         true <- request.generation === credential.generation,
+         true <- valid_effect_request_shape?(request),
+         true <-
+           authenticated?(
+             request.authenticator,
+             secret,
+             :effect_request,
+             effect_request_auth_fields(request)
+           ) do
+      {:ok, request}
+    else
+      _invalid -> {:error, :invalid_effect_request}
+    end
+  rescue
+    _exception -> {:error, :invalid_effect_request}
+  catch
+    _kind, _reason -> {:error, :invalid_effect_request}
+  end
+
+  def verify_effect_request(_request, _credential), do: {:error, :invalid_effect_request}
+
+  @doc false
   @spec ack(pid(), Credential.t(), Result.t()) :: :ok | {:error, atom()}
   def ack(worker, credential, %Result{} = result) do
     with {:ok, verified} <- verify_result(result, credential) do
@@ -471,13 +527,12 @@ defmodule Arbor.Voice.BackendWorker do
   end
 
   @doc false
-  @spec reply_effect(EffectRequest.t(), Credential.t(), term()) ::
+  @spec reply_effect(EffectRequest.t(), Credential.t(), :allow | :deny) ::
           :ok | {:error, :invalid_effect_request}
-  def reply_effect(%EffectRequest{} = request, credential, decision) do
-    with {:ok, secret} <- boundary_secret(credential, request.worker),
-         true <- request.coordinator == self(),
-         true <- request.generation === credential.generation,
-         true <- valid_effect_request_shape?(request) do
+  def reply_effect(%EffectRequest{} = request, credential, decision)
+      when decision in [:allow, :deny] do
+    with {:ok, ^request} <- verify_effect_request(request, credential),
+         {:ok, secret} <- boundary_secret(credential, request.worker) do
       reply = %EffectReply{
         worker: request.worker,
         coordinator: request.coordinator,
@@ -837,7 +892,7 @@ defmodule Arbor.Voice.BackendWorker do
       effect_token = make_ref()
       reply_alias = :erlang.alias()
 
-      request = %EffectRequest{
+      unsigned_request = %EffectRequest{
         worker: self(),
         coordinator: coordinator,
         generation: generation,
@@ -845,7 +900,20 @@ defmodule Arbor.Voice.BackendWorker do
         effect_token: effect_token,
         effect: effect,
         frozen_route: frozen_route,
-        reply_alias: reply_alias
+        reply_alias: reply_alias,
+        authenticator: Redacted.new(<<>>)
+      }
+
+      request = %{
+        unsigned_request
+        | authenticator:
+            Redacted.new(
+              authenticate(
+                worker_secret,
+                :effect_request,
+                effect_request_auth_fields(unsigned_request)
+              )
+            )
       }
 
       send(coordinator, request)
@@ -1070,7 +1138,7 @@ defmodule Arbor.Voice.BackendWorker do
 
   defp valid_meta?(_meta), do: false
   defp valid_rate?(nil), do: true
-  defp valid_rate?(rate), do: is_integer(rate) and rate > 0
+  defp valid_rate?(rate), do: is_integer(rate) and rate > 0 and rate <= @max_rate
 
   defp boundary_secret(%Credential{} = credential, worker) do
     cond do
@@ -1266,17 +1334,54 @@ defmodule Arbor.Voice.BackendWorker do
   end
 
   defp valid_result_shape?(result) do
-    is_pid(result.worker) and is_pid(result.coordinator) and is_reference(result.generation) and
+    exact_struct_shape?(result, Result) and is_pid(result.worker) and
+      is_pid(result.coordinator) and is_reference(result.generation) and
       is_reference(result.operation_token) and result.operation in @operations and
-      is_integer(result.completed_at)
+      valid_completed_at?(result.completed_at) and
+      bounded_external_term?(result.outcome, @max_public_outcome_bytes) and
+      valid_public_outcome?(result.operation, result.outcome)
   end
 
   defp valid_effect_request_shape?(request) do
-    is_pid(request.worker) and is_pid(request.coordinator) and is_reference(request.generation) and
+    exact_struct_shape?(request, EffectRequest) and is_pid(request.worker) and
+      is_pid(request.coordinator) and is_reference(request.generation) and
       is_reference(request.operation_token) and is_reference(request.effect_token) and
       is_atom(request.effect) and not is_nil(request.effect) and
       valid_route?(request.frozen_route) and
-      is_reference(request.reply_alias)
+      is_reference(request.reply_alias) and match?(%Redacted{}, request.authenticator)
+  end
+
+  defp valid_completed_at?(completed_at) do
+    is_integer(completed_at) and completed_at >= @min_completed_at and
+      completed_at <= @max_completed_at
+  end
+
+  defp valid_public_outcome?(operation, :ok)
+       when operation in [:open, :configure, :send_text, :send_audio, :send_tool_result, :close],
+       do: true
+
+  defp valid_public_outcome?(:recv, {:ok, event}) do
+    case normalize_event(event) do
+      {:ok, ^event} -> true
+      _invalid -> false
+    end
+  end
+
+  defp valid_public_outcome?(:recv, {:error, :timeout}), do: true
+  defp valid_public_outcome?(:meta, {:ok, meta}), do: valid_meta?(meta)
+
+  defp valid_public_outcome?(_operation, {:error, reason}),
+    do: reason in @public_error_reasons
+
+  defp valid_public_outcome?(_operation, _outcome), do: false
+
+  defp exact_struct_shape?(value, module) do
+    expected_keys = Map.keys(module.__struct__())
+
+    map_size(value) == length(expected_keys) and
+      Enum.all?(expected_keys, &Map.has_key?(value, &1))
+  rescue
+    _exception -> false
   end
 
   defp operation_auth_fields(
@@ -1293,6 +1398,11 @@ defmodule Arbor.Voice.BackendWorker do
 
   defp ack_auth_fields(worker, coordinator, generation, operation_token, completion) do
     {worker, coordinator, generation, operation_token, completion}
+  end
+
+  defp effect_request_auth_fields(request) do
+    {request.worker, request.coordinator, request.generation, request.operation_token,
+     request.effect_token, request.effect, request.frozen_route, request.reply_alias}
   end
 
   defp effect_reply_auth_fields(request, decision) do
