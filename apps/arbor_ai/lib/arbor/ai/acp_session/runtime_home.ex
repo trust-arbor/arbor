@@ -37,6 +37,9 @@ defmodule Arbor.AI.AcpSession.RuntimeHome do
   @max_grok_auth_payload_bytes 65_600
   @max_grok_access_token_bytes 65_536
   @max_grok_auth_ttl_seconds 300
+  @grok_external_auth_scrub_timeout_ms 100
+  @grok_external_auth_scrub_quiet_ms 20
+  @grok_external_auth_scrub_retry_ms 5
   @grok_external_auth_scope_prefix "https://auth.x.ai::"
   @grok_external_auth_cache_fields [
     "auth_mode",
@@ -154,6 +157,70 @@ defmodule Arbor.AI.AcpSession.RuntimeHome do
   @spec scrub_grok_external_auth_cache(map()) :: :ok | {:error, atom()}
   def scrub_grok_external_auth_cache(%{path: runtime_home})
       when is_binary(runtime_home) and runtime_home != "" do
+    # ACP authentication may return before the provider creates or settles its cache files.
+    deadline =
+      System.monotonic_time(:millisecond) + @grok_external_auth_scrub_timeout_ms
+
+    quiet_deadline =
+      System.monotonic_time(:millisecond) + @grok_external_auth_scrub_quiet_ms
+
+    scrub_grok_external_auth_cache_until(%{path: runtime_home}, deadline, quiet_deadline)
+  end
+
+  def scrub_grok_external_auth_cache(_cleanup_identity),
+    do: {:error, :grok_external_auth_unavailable}
+
+  defp scrub_grok_external_auth_cache_until(cleanup_identity, deadline, quiet_deadline) do
+    metadata_before? = grok_external_auth_cache_metadata_present?(cleanup_identity)
+    result = scrub_grok_external_auth_cache_once(cleanup_identity)
+    metadata_after? = grok_external_auth_cache_metadata_present?(cleanup_identity)
+    now = System.monotonic_time(:millisecond)
+
+    quiet_deadline =
+      if metadata_before? or metadata_after? do
+        min(deadline, now + @grok_external_auth_scrub_quiet_ms)
+      else
+        quiet_deadline
+      end
+
+    case result do
+      :ok ->
+        if now >= quiet_deadline and not metadata_after? do
+          :ok
+        else
+          retry_grok_external_auth_scrub(cleanup_identity, deadline, quiet_deadline, :ok)
+        end
+
+      {:error, _reason} = error ->
+        retry_grok_external_auth_scrub(
+          cleanup_identity,
+          deadline,
+          quiet_deadline,
+          error
+        )
+    end
+  end
+
+  defp retry_grok_external_auth_scrub(
+         cleanup_identity,
+         deadline,
+         quiet_deadline,
+         last_result
+       ) do
+    remaining = deadline - System.monotonic_time(:millisecond)
+
+    if remaining > 0 do
+      Process.sleep(min(@grok_external_auth_scrub_retry_ms, remaining))
+      scrub_grok_external_auth_cache_until(cleanup_identity, deadline, quiet_deadline)
+    else
+      case last_result do
+        {:error, _reason} = error -> error
+        :ok -> {:error, :grok_external_auth_unavailable}
+      end
+    end
+  end
+
+  defp scrub_grok_external_auth_cache_once(%{path: runtime_home}) do
     grok_home = Path.join(runtime_home, @grok_home_directory)
     payload_path = grok_auth_payload_path(grok_home)
     auth_path = Path.join(grok_home, @grok_auth_filename)
@@ -175,8 +242,21 @@ defmodule Arbor.AI.AcpSession.RuntimeHome do
     _kind, _reason -> {:error, :grok_external_auth_unavailable}
   end
 
-  def scrub_grok_external_auth_cache(_cleanup_identity),
-    do: {:error, :grok_external_auth_unavailable}
+  defp grok_external_auth_cache_metadata_present?(%{path: runtime_home})
+       when is_binary(runtime_home) and runtime_home != "" do
+    grok_home = Path.join(runtime_home, @grok_home_directory)
+
+    [@grok_auth_filename, @grok_auth_lock_filename]
+    |> Enum.any?(fn filename ->
+      match?({:ok, _stat}, File.lstat(Path.join(grok_home, filename)))
+    end)
+  rescue
+    _exception -> false
+  catch
+    _kind, _reason -> false
+  end
+
+  defp grok_external_auth_cache_metadata_present?(_cleanup_identity), do: false
 
   defp update_grok_external_auth(runtime_home, presence) do
     grok_home = Path.join(runtime_home, @grok_home_directory)

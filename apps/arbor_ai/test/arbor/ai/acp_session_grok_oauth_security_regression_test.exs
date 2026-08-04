@@ -30,8 +30,12 @@ defmodule Arbor.AI.AcpSessionGrokOAuthSecurityRegressionTest do
       send(opts[:test_pid], {:grok_probe_authenticated, client, method_id, auth_opts})
       result = Keyword.get(opts, :auth_result, {:ok, %{}})
 
-      if match?({:ok, _result}, result), do: write_external_auth_cache(opts)
+      if match?({:ok, _result}, result), do: publish_external_auth_cache(opts)
       result
+    end
+
+    def set_auth_cache_publish_delay(client, delay_ms) when is_integer(delay_ms) do
+      Agent.update(client, &Keyword.put(&1, :auth_cache_publish_delay_ms, delay_ms))
     end
 
     def new_session(_client, _cwd, _opts), do: {:ok, %{"sessionId" => "grok-probe-session"}}
@@ -70,10 +74,12 @@ defmodule Arbor.AI.AcpSessionGrokOAuthSecurityRegressionTest do
       env |> Map.fetch!("ARBOR_GROK_AUTH_PAYLOAD_PATH") |> File.read!() |> Jason.decode!()
     end
 
-    defp write_external_auth_cache(opts) do
+    defp write_external_auth_cache(opts, access_token \\ nil) do
       env = opts |> Keyword.fetch!(:env) |> Map.new()
       grok_home = Map.fetch!(env, "GROK_HOME")
-      access_token = Keyword.get(opts, :auth_cache_access_token, payload(opts)["access_token"])
+
+      access_token =
+        access_token || Keyword.get(opts, :auth_cache_access_token, payload(opts)["access_token"])
 
       cache =
         Jason.encode!(%{
@@ -90,6 +96,30 @@ defmodule Arbor.AI.AcpSessionGrokOAuthSecurityRegressionTest do
       File.chmod!(auth_path, 0o600)
       File.write!(lock_path, "grok-lock-state\n")
       File.chmod!(lock_path, 0o644)
+    end
+
+    defp publish_external_auth_cache(opts) do
+      case Keyword.get(opts, :auth_cache_publish_delay_ms, 0) do
+        delay_ms when is_integer(delay_ms) and delay_ms > 0 ->
+          env = opts |> Keyword.fetch!(:env) |> Map.new()
+          grok_home = Map.fetch!(env, "GROK_HOME")
+          access_token = payload(opts)["access_token"]
+          auth_path = Path.join(grok_home, "auth.json")
+          lock_path = Path.join(grok_home, "auth.json.lock")
+
+          File.write!(auth_path, "{")
+          File.chmod!(auth_path, 0o600)
+          File.write!(lock_path, "grok-lock-state\n")
+          File.chmod!(lock_path, 0o644)
+
+          spawn(fn ->
+            Process.sleep(delay_ms)
+            write_external_auth_cache(opts, access_token)
+          end)
+
+        _other ->
+          write_external_auth_cache(opts)
+      end
     end
   end
 
@@ -284,6 +314,71 @@ defmodule Arbor.AI.AcpSessionGrokOAuthSecurityRegressionTest do
 
     refute_grok_auth_cache(opts)
     assert :ok = AcpSession.close(session)
+  end
+
+  test "security regression: prompt waits for asynchronous Grok auth cache publication",
+       %{root: root} do
+    workspace = standalone_workspace!(root, "async-cache")
+    access_a = jwt(System.system_time(:second) + 7_200, "async-access-a")
+    publish_xai!(access_a, "async-refresh-a")
+    session = start_grok_session!(workspace)
+
+    assert_receive {:grok_probe_started, client, opts, %{"access_token" => ^access_a}}, 2_000
+    assert_grok_authenticated(client)
+    assert :ok = AcpSession.await_ready(session, timeout: 2_000)
+    refute_grok_auth_cache(opts)
+
+    assert {:ok, %{"sessionId" => "grok-probe-session"}} =
+             AcpSession.create_session(session, timeout: 2_000)
+
+    ProbeClient.set_auth_cache_publish_delay(client, 25)
+    access_b = jwt(System.system_time(:second) + 7_200, "async-access-b")
+    publish_xai!(access_b, "async-refresh-b")
+
+    assert {:ok, %{"text" => "ok"}} =
+             AcpSession.send_message(session, "after-async-auth", timeout: 2_000)
+
+    assert_grok_authenticated(client)
+
+    assert_receive {:grok_probe_prompt, _worker, "after-async-auth",
+                    %{"access_token" => ^access_b}},
+                   2_000
+
+    refute_grok_auth_cache(opts)
+    assert :ok = AcpSession.close(session)
+  end
+
+  test "security regression: stable invalid Grok auth cache remains rejected", _context do
+    access = jwt(System.system_time(:second) + 7_200, "stable-invalid-access")
+    publish_xai!(access, "stable-invalid-refresh")
+
+    {cleanup, opts, _payload} = staged_opts!()
+    write_grok_auth_cache!(opts, "wrong-cache-token")
+
+    assert {:error, :grok_external_auth_unavailable} =
+             RuntimeHome.scrub_grok_external_auth_cache(cleanup)
+
+    assert File.regular?(Path.join(grok_home(opts), "auth.json"))
+    assert :ok = RuntimeHome.cleanup(cleanup)
+  end
+
+  test "security regression: late-starting Grok auth cache is scrubbed after quiet window",
+       _context do
+    access = jwt(System.system_time(:second) + 7_200, "late-cache-access")
+    publish_xai!(access, "late-cache-refresh")
+    {cleanup, opts, _payload} = staged_opts!()
+    parent = self()
+
+    spawn(fn ->
+      Process.sleep(10)
+      write_grok_auth_cache!(opts, access)
+      send(parent, :grok_probe_cache_published)
+    end)
+
+    assert :ok = RuntimeHome.scrub_grok_external_auth_cache(cleanup)
+    assert_receive :grok_probe_cache_published, 2_000
+    refute_grok_auth_cache(opts)
+    assert :ok = RuntimeHome.cleanup(cleanup)
   end
 
   test "security regression: missing projection and launch resolver failure cause zero provider IO",
