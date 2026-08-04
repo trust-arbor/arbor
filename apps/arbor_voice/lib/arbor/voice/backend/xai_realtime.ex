@@ -19,6 +19,16 @@ defmodule Arbor.Voice.Backend.XaiRealtime do
   @default_port 443
   @default_path "/v1/realtime?model=grok-voice-latest"
 
+  @impl true
+  def egress_route do
+    %{
+      destination: @default_host,
+      provider: "xai",
+      runtime: "arbor",
+      model: "grok-voice-latest"
+    }
+  end
+
   defmodule Session do
     @moduledoc false
     @derive {Inspect, except: [:transport_state]}
@@ -36,17 +46,17 @@ defmodule Arbor.Voice.Backend.XaiRealtime do
     scripted = Keyword.get(opts, :transport_opts, [])
 
     canonical = [
-      host: Keyword.get(opts, :host, @default_host),
-      port: Keyword.get(opts, :port, @default_port),
-      path: Keyword.get(opts, :path, @default_path),
+      host: @default_host,
+      port: @default_port,
+      path: @default_path,
       clock_fun: clock_fun
     ]
 
     case resolver.(:xai) do
       {:ok, token} when is_binary(token) ->
         # Keyword.merge/2: keys in the 2nd list win on collision -- canonical
-        # is 2nd, so nothing a caller puts in transport_opts (even :host or
-        # :token) can override the resolved credential/connection fields.
+        # is 2nd, so no caller input, including transport_opts, can override
+        # resolved credential or source-owned connection fields.
         connect_opts = Keyword.merge(scripted, Keyword.put(canonical, :token, token))
         connect_and_wrap(transport_mod, connect_opts, clock_fun)
 

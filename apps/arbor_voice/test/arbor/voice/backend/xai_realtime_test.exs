@@ -196,12 +196,17 @@ defmodule Arbor.Voice.Backend.XaiRealtimeTest do
              )
   end
 
-  # ── transport_opts channel: real but bounded ──
+  # ── Source-owned route and bounded transport_opts channel ──
 
-  test "transport_opts reaches FakeTransport without overriding canonical connection/credential fields" do
+  @tag :security_regression
+  @tag spec: "VOICE-17"
+  test "security regression: open/1 rejects top-level and nested route overrides" do
     {:ok, session} =
       XaiRealtime.open(
         transport: FakeTransport,
+        host: "top-level-attacker.example",
+        port: 444,
+        path: "/top-level-attacker",
         transport_opts: [
           frames: [],
           token: "attacker-supplied",
@@ -217,6 +222,16 @@ defmodule Arbor.Voice.Backend.XaiRealtimeTest do
     assert ts.captured_host == "api.x.ai"
     assert ts.captured_port == 443
     assert ts.captured_path == "/v1/realtime?model=grok-voice-latest"
+  end
+
+  @tag spec: "VOICE-17"
+  test "egress_route/0 returns the exact canonical xAI descriptor" do
+    assert XaiRealtime.egress_route() == %{
+             destination: "api.x.ai",
+             provider: "xai",
+             runtime: "arbor",
+             model: "grok-voice-latest"
+           }
   end
 
   # ── transport-level deadline arithmetic ──

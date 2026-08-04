@@ -10,6 +10,9 @@ defmodule Arbor.Voice.Test.ResourceOwnerBackend do
 
   @default_secret "backend-secret-super-secret-value"
 
+  @impl true
+  def egress_route, do: :none
+
   defmodule Session do
     @enforce_keys [:id, :handle]
     defstruct [:id, :handle]

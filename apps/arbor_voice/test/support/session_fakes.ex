@@ -584,6 +584,9 @@ defmodule Arbor.Voice.Test.SessionFakes do
     @behaviour Arbor.Voice.RealtimeBackend
     @table :arbor_voice_session_controllable_backend
 
+    @impl true
+    def egress_route, do: :none
+
     def ensure_table! do
       case :ets.whereis(@table) do
         :undefined ->
@@ -686,6 +689,9 @@ defmodule Arbor.Voice.Test.SessionFakes do
     # Agent-owned mutable state so test-process enqueue and ResourceOwner
     # recv cannot race on a non-atomic ETS read-modify-write.
     @table :arbor_voice_session_turn_backend
+
+    @impl true
+    def egress_route, do: :none
 
     def ensure_table! do
       case :ets.whereis(@table) do

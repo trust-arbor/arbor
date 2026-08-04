@@ -23,6 +23,7 @@ defmodule Arbor.Voice.ResourceOwnerTest do
   defmodule WrongShapeBackend do
     @behaviour Arbor.Voice.RealtimeBackend
 
+    def egress_route, do: :none
     def open(_opts), do: {:ok, %{}}
     def configure(session, _config), do: {:ok, session, :unexpected}
     def send_text(session, _text), do: {:ok, session}
@@ -118,6 +119,7 @@ defmodule Arbor.Voice.ResourceOwnerTest do
   test "meta returns the exact four-field contract and rejects malformed meta" do
     defmodule BadMetaBackend do
       @behaviour Arbor.Voice.RealtimeBackend
+      def egress_route, do: :none
       def open(_), do: {:ok, %{configured: true}}
       def configure(s, _), do: {:ok, s}
       def send_text(s, _), do: {:ok, s}
@@ -319,6 +321,7 @@ defmodule Arbor.Voice.ResourceOwnerTest do
   test "invalid backend module is rejected before open" do
     defmodule IncompleteBackend do
       @behaviour Arbor.Voice.RealtimeBackend
+      def egress_route, do: :none
       def open(_), do: {:ok, %{}}
       def configure(_), do: {:ok, %{}}
     end
@@ -435,6 +438,8 @@ defmodule Arbor.Voice.ResourceOwnerTest do
     defmodule TimeoutAwareBackend do
       @behaviour Arbor.Voice.RealtimeBackend
       @table :arbor_voice_timeout_aware_backend
+
+      def egress_route, do: :none
 
       def ensure! do
         case :ets.whereis(@table) do

@@ -8,6 +8,9 @@ defmodule Arbor.Voice.Test.FakeBackend do
   @behaviour Arbor.Voice.RealtimeBackend
 
   @impl true
+  def egress_route, do: :none
+
+  @impl true
   def open(_opts), do: {:ok, %{closed: false}}
 
   @impl true

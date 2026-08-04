@@ -18,12 +18,37 @@ defmodule Arbor.Voice.RealtimeBackend do
   @type session :: term()
 
   @typedoc """
+  Source-owned external egress route declared by a backend.
+
+  Local backends return `:none`. Cloud backends return exactly the four
+  scalar fields that identify their fixed destination and provider route.
+  """
+  @type egress_route ::
+          :none
+          | %{
+              destination: binary(),
+              provider: binary(),
+              runtime: binary(),
+              model: binary()
+            }
+
+  @typedoc """
   Backend-native tool declaration shaped for that backend's wire format
   (name, description, JSON-schema-ish parameters). Arbor.Voice.Session
   translates Arbor's tool catalog into this shape before calling
   configure/2.
   """
   @type tool_decl :: map()
+
+  @doc """
+  Declares the backend's source-owned external route, or `:none` for local
+  backends.
+
+  Cloud backends must not derive this descriptor from caller input. It is the
+  stable identity later authorization work uses to bind a session to its
+  intended provider route.
+  """
+  @callback egress_route() :: egress_route()
 
   @typedoc """
   Events a backend emits from recv/2. A turn typically yields zero or more
@@ -45,9 +70,10 @@ defmodule Arbor.Voice.RealtimeBackend do
   Provider backends resolve their OWN credentials on the core node (e.g.
   xAI via `Arbor.LLM.OAuth.access_token/1`) — callers do not pass provider
   secrets into `opts` or the session boundary (VOICE-6). `opts` carries only
-  non-secret, backend-specific configuration (model/host/path overrides, an
-  injectable credential resolver for tests, ...); each backend documents its
-  own accepted keys.
+  non-secret, backend-specific configuration (an injectable credential
+  resolver or transport for tests, ...); each backend documents its own
+  accepted keys. Network destination, port, and path remain source-owned by
+  cloud backends and are never caller-configurable.
 
   Credential-resolution failure surfaces the resolver's own reason (e.g.
   `:oauth_login_required`) rather than a fixed atom — that reason is safe to
