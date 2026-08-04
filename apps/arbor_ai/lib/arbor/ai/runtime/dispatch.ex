@@ -413,6 +413,12 @@ defmodule Arbor.AI.Runtime.Dispatch do
         destination =
           case Map.get(route, :destination) do
             dest when is_binary(dest) and dest != "" -> dest
+            # The synthesized `:legacy` provider has no catalog identity of its
+            # own — its destination is only ever the caller's rewritten request
+            # provider. A missing destination here means the outbound identity
+            # never resolved; the atom name "legacy" is not a real destination
+            # and must not be admitted as one.
+            _ when provider_id == :legacy -> nil
             _ -> Atom.to_string(provider_id)
           end
 
