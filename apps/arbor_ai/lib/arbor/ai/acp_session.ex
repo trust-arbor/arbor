@@ -90,6 +90,7 @@ defmodule Arbor.AI.AcpSession do
   @claude_transient_session_prefix "claude_sdk_"
   @claude_provider_session_id_pattern ~r/\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z/i
   @callback_cleanup_timeout_ms 250
+  @client_initialize_cleanup_grace_ms 1_000
   @task_control_stream_id "agent:task_steering"
   @terminal_task_control_statuses [
     :delivered,
@@ -1038,8 +1039,10 @@ defmodule Arbor.AI.AcpSession do
 
   defp do_start_client_owned(state, client_opts, runtime_home_cleanup) do
     with {:ok, _opts, requested_remaining} <- Arbor.AI.Timeout.remaining(state.opts),
-         {:ok, requested_deadline} <- Arbor.AI.Timeout.deadline(state.opts) do
-      {remaining, deadline} = finite_start_deadline(requested_remaining, requested_deadline)
+         {:ok, requested_deadline} <- Arbor.AI.Timeout.deadline(state.opts),
+         {remaining, deadline} =
+           finite_start_deadline(requested_remaining, requested_deadline),
+         {:ok, client_opts} <- bind_client_initialize_timeout(client_opts, remaining) do
       caller = self()
       reply_alias = :erlang.alias()
       operation_ref = make_ref()
@@ -1094,6 +1097,26 @@ defmodule Arbor.AI.AcpSession do
   end
 
   defp finite_start_deadline(remaining, deadline), do: {remaining, deadline}
+
+  defp bind_client_initialize_timeout(client_opts, remaining)
+       when is_list(client_opts) and is_integer(remaining) and remaining > 0 do
+    cleanup_grace =
+      min(@client_initialize_cleanup_grace_ms, max(div(remaining, 10), 1))
+
+    available = max(remaining - cleanup_grace, 1)
+
+    with {:ok, requested} <-
+           Arbor.AI.Timeout.select(client_opts, [:initialize_timeout], available, 1, false) do
+      {:ok, Keyword.put(client_opts, :initialize_timeout, min(requested, available))}
+    end
+  end
+
+  defp bind_client_initialize_timeout(client_opts, :infinity) when is_list(client_opts) do
+    bind_client_initialize_timeout(client_opts, @default_operation_timeout_ms)
+  end
+
+  defp bind_client_initialize_timeout(_client_opts, _remaining),
+    do: {:error, :invalid_initialize_timeout}
 
   defp await_client_start(worker, monitor, reply_alias, operation_ref, deadline, remaining) do
     receive do
@@ -2133,7 +2156,9 @@ defmodule Arbor.AI.AcpSession do
       |> bind_mcp_servers(state.mcp_servers)
       |> sanitize_provider_facing_opts()
 
-    with {:ok, client} <-
+    with {:ok, _opts, remaining} <- Arbor.AI.Timeout.remaining(operation_opts),
+         {:ok, client_opts} <- bind_client_initialize_timeout(client_opts, remaining),
+         {:ok, client} <-
            start_authenticated_acp_client(
              client_opts,
              state.provider,

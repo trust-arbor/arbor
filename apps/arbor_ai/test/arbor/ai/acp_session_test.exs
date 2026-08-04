@@ -338,6 +338,52 @@ defmodule Arbor.AI.AcpSessionTest do
     end)
   end
 
+  test "bounds the provider initialize handshake inside the session startup deadline" do
+    install_fake_progress_client(100)
+
+    for {client_opts, expected} <- [
+          {[test_pid: self()], :derived},
+          {[test_pid: self(), initialize_timeout: 25], 25},
+          {[test_pid: self(), initialize_timeout: 5_000], :derived}
+        ] do
+      assert {:ok, session} =
+               AcpSession.start_link(
+                 provider: :test,
+                 client_opts: client_opts,
+                 timeout: 1_000
+               )
+
+      assert :ok = AcpSession.await_ready(session, timeout: 1_000)
+
+      started_opts = Agent.get(:sys.get_state(session).client, & &1.opts)
+      initialize_timeout = Keyword.fetch!(started_opts, :initialize_timeout)
+
+      case expected do
+        :derived -> assert initialize_timeout in 1..900
+        explicit -> assert initialize_timeout == explicit
+      end
+
+      assert :ok = AcpSession.close(session)
+    end
+  end
+
+  test "rejects an invalid provider initialize timeout before spawning the client" do
+    install_fake_progress_client(100)
+
+    assert {:ok, session} =
+             AcpSession.start_link(
+               provider: :test,
+               client_opts: [test_pid: self(), initialize_timeout: 0],
+               timeout: 1_000
+             )
+
+    assert {:error, {:invalid_timeout, {1, 4_294_967_295}}} =
+             AcpSession.await_ready(session, timeout: 1_000)
+
+    assert %{status: :error, client: nil} = :sys.get_state(session)
+    assert :ok = AcpSession.close(session)
+  end
+
   test "security regression: ACP session MCP servers cannot be widened per operation" do
     install_fake_progress_client(100)
 
@@ -2815,6 +2861,11 @@ defmodule Arbor.AI.AcpSessionTest do
       assert final_state.reconnect_attempted == true
       assert final_state.client != nil
       assert final_state.client != first_client
+
+      reconnect_initialize_timeout =
+        Agent.get(final_state.client, &Keyword.fetch!(&1, :initialize_timeout))
+
+      assert reconnect_initialize_timeout in 1..4_500
 
       # The new client confirmed the model exactly once during reconnect.
       assert ModelSelectClient.set_config_option_count(final_state.client) == 1
