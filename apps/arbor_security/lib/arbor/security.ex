@@ -89,6 +89,9 @@ defmodule Arbor.Security do
   - `:signed_request` — per-request Ed25519 proof (agents)
   - `:session_token` — HMAC human session proof (alternative to signing)
   - `:identity_verified` — Gateway pre-verified shortcut (no token present)
+  - `:exact_capability_id` — require this one currently stored ordinary
+    capability rather than accepting another covering capability. The selected
+    capability must be signed, exactly resource- and scope-bound, and live.
 
   When `:session_token` is present it is extracted and redacted at this boundary
   before URI normalization, reflexes, context construction, or events. A present
@@ -1012,54 +1015,143 @@ defmodule Arbor.Security do
     # credential never reaches those surfaces.
     requested_resource_uri = resource_uri
 
-    case extract_session_token(opts) do
-      {:error, reason, safe_opts} ->
-        Events.record_authorization_denied(
-          principal_id,
-          requested_resource_uri,
-          reason,
-          safe_opts
-        )
+    with {:ok, opts} <- validate_exact_capability_option(opts) do
+      case extract_session_token(opts) do
+        {:error, reason, safe_opts} ->
+          Events.record_authorization_denied(
+            principal_id,
+            requested_resource_uri,
+            reason,
+            safe_opts
+          )
 
+          {:error, reason}
+
+        {:ok, proof, safe_opts} ->
+          decision_opts =
+            case proof do
+              @session_token_absent -> safe_opts
+              token when is_binary(token) -> Keyword.put(safe_opts, :session_token, token)
+            end
+
+          with {:ok, resource_uri} <-
+                 normalize_authorization_resource_uri(resource_uri, safe_opts),
+               reflex_context = build_reflex_context(resource_uri, action, safe_opts),
+               :ok <-
+                 check_reflexes(principal_id, reflex_context, resource_uri, action, safe_opts) do
+            auth = build_auth_context(principal_id, safe_opts)
+
+            case AuthDecision.evaluate(auth, resource_uri, action, decision_opts) do
+              {:ok, :authorized, cap, auth} ->
+                handle_authorized(cap, auth, principal_id, resource_uri, action, safe_opts)
+
+              {:ok, :requires_approval, cap, auth} ->
+                handle_requires_approval(cap, auth, principal_id, resource_uri, action, safe_opts)
+
+              {:error, reason, _auth} ->
+                Events.record_authorization_denied(principal_id, resource_uri, reason, safe_opts)
+                {:error, reason}
+            end
+          else
+            {:error, reason} = error ->
+              Events.record_authorization_denied(
+                principal_id,
+                requested_resource_uri,
+                reason,
+                safe_opts
+              )
+
+              error
+          end
+      end
+    else
+      {:error, reason} ->
+        Events.record_authorization_denied(principal_id, requested_resource_uri, reason, [])
         {:error, reason}
-
-      {:ok, proof, safe_opts} ->
-        decision_opts =
-          case proof do
-            @session_token_absent -> safe_opts
-            token when is_binary(token) -> Keyword.put(safe_opts, :session_token, token)
-          end
-
-        with {:ok, resource_uri} <-
-               normalize_authorization_resource_uri(resource_uri, safe_opts),
-             reflex_context = build_reflex_context(resource_uri, action, safe_opts),
-             :ok <-
-               check_reflexes(principal_id, reflex_context, resource_uri, action, safe_opts) do
-          auth = build_auth_context(principal_id, safe_opts)
-
-          case AuthDecision.evaluate(auth, resource_uri, action, decision_opts) do
-            {:ok, :authorized, cap, auth} ->
-              handle_authorized(cap, auth, principal_id, resource_uri, action, safe_opts)
-
-            {:ok, :requires_approval, cap, auth} ->
-              handle_requires_approval(cap, auth, principal_id, resource_uri, action, safe_opts)
-
-            {:error, reason, _auth} ->
-              Events.record_authorization_denied(principal_id, resource_uri, reason, safe_opts)
-              {:error, reason}
-          end
-        else
-          {:error, reason} = error ->
-            Events.record_authorization_denied(
-              principal_id,
-              requested_resource_uri,
-              reason,
-              safe_opts
-            )
-
-            error
-        end
     end
+  end
+
+  defp validate_exact_capability_option(opts) when is_list(opts) do
+    if Keyword.keyword?(opts) do
+      case Keyword.get_values(opts, :exact_capability_id) do
+        [] ->
+          {:ok, opts}
+
+        [id] when is_binary(id) ->
+          with true <- canonical_exact_capability_id?(id),
+               :ok <- validate_exact_scope_option_keys(opts) do
+            {:ok, opts}
+          else
+            false -> {:error, :invalid_exact_capability_id}
+            {:error, _} = error -> error
+          end
+
+        _ ->
+          {:error, :invalid_exact_capability_id}
+      end
+    else
+      if exact_capability_intent?(opts),
+        do: {:error, :invalid_exact_capability_id},
+        else: {:ok, opts}
+    end
+  rescue
+    _ -> {:error, :invalid_exact_capability_id}
+  catch
+    :exit, _ -> {:error, :invalid_exact_capability_id}
+    :throw, _ -> {:error, :invalid_exact_capability_id}
+  end
+
+  defp validate_exact_capability_option(opts) do
+    if exact_capability_intent?(opts),
+      do: {:error, :invalid_exact_capability_id},
+      else: {:ok, opts}
+  rescue
+    _ -> {:error, :invalid_exact_capability_id}
+  catch
+    :exit, _ -> {:error, :invalid_exact_capability_id}
+    :throw, _ -> {:error, :invalid_exact_capability_id}
+  end
+
+  defp exact_capability_intent?(opts) when is_list(opts) do
+    Enum.any?(opts, &exact_capability_intent_entry?/1)
+  end
+
+  defp exact_capability_intent?(opts) when is_map(opts) do
+    Map.has_key?(opts, :exact_capability_id) or Map.has_key?(opts, "exact_capability_id")
+  end
+
+  defp exact_capability_intent?({key, _value})
+       when key in [:exact_capability_id, "exact_capability_id"],
+       do: true
+
+  defp exact_capability_intent?(_opts), do: false
+
+  defp exact_capability_intent_entry?({key, _value})
+       when key in [:exact_capability_id, "exact_capability_id"],
+       do: true
+
+  defp exact_capability_intent_entry?(_entry), do: false
+
+  defp canonical_exact_capability_id?("cap_" <> suffix)
+       when byte_size(suffix) == 32 do
+    Regex.match?(~r/\A[0-9a-f]{32}\z/, suffix)
+  end
+
+  defp canonical_exact_capability_id?(_id), do: false
+
+  defp validate_exact_scope_option_keys(opts) do
+    if Enum.all?([:session_id, :task_id, :principal_scope], fn key ->
+         length(Keyword.get_values(opts, key)) <= 1
+       end) do
+      :ok
+    else
+      {:error, :invalid_exact_capability_scope}
+    end
+  rescue
+    _ -> {:error, :invalid_exact_capability_scope}
+  catch
+    :exit, _ -> {:error, :invalid_exact_capability_scope}
+    :throw, _ -> {:error, :invalid_exact_capability_scope}
   end
 
   # Extract every :session_token entry before any downstream work. Absence is a

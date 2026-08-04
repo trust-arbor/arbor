@@ -218,6 +218,21 @@ defmodule Arbor.Security.CapabilityStore do
     :throw, _ -> {:error, :capability_store_unavailable}
   end
 
+  @doc false
+  @spec get_valid_exact_ordinary(String.t(), String.t(), String.t(), keyword()) ::
+          {:ok, Capability.t()} | {:error, atom()}
+  def get_valid_exact_ordinary(capability_id, principal_id, resource_uri, scope_context \\ []) do
+    GenServer.call(
+      __MODULE__,
+      {:get_valid_exact_ordinary, capability_id, principal_id, resource_uri, scope_context}
+    )
+  rescue
+    _ -> {:error, :capability_store_unavailable}
+  catch
+    :exit, _ -> {:error, :capability_store_unavailable}
+    :throw, _ -> {:error, :capability_store_unavailable}
+  end
+
   # Server callbacks
 
   @impl true
@@ -390,6 +405,42 @@ defmodule Arbor.Security.CapabilityStore do
   catch
     :exit, _ -> {:reply, {:error, :disclosure_capability_validation_unavailable}, state}
     :throw, _ -> {:reply, {:error, :disclosure_capability_validation_unavailable}, state}
+  end
+
+  @impl true
+  def handle_call(
+        {:get_valid_exact_ordinary, capability_id, principal_id, resource_uri, scope_context},
+        _from,
+        state
+      ) do
+    now = DateTime.utc_now()
+
+    result =
+      case Map.get(state.by_id, capability_id) do
+        %Capability{} = cap ->
+          if exact_ordinary_capability_valid?(
+               cap,
+               capability_id,
+               principal_id,
+               resource_uri,
+               scope_context,
+               now
+             ) do
+            {:ok, cap}
+          else
+            {:error, :exact_capability_rejected}
+          end
+
+        _ ->
+          {:error, :not_found}
+      end
+
+    {:reply, result, state}
+  rescue
+    _ -> {:reply, {:error, :exact_capability_validation_error}, state}
+  catch
+    :exit, _ -> {:reply, {:error, :exact_capability_validation_unavailable}, state}
+    :throw, _ -> {:reply, {:error, :exact_capability_validation_unavailable}, state}
   end
 
   @impl true
@@ -666,6 +717,65 @@ defmodule Arbor.Security.CapabilityStore do
 
   defp authority_signature_ok?(cap) do
     Capability.signed?(cap) and safe_verify_authority_capability_signature(cap) == :ok
+  end
+
+  # Exact-capability mode is an identity check, not a covering-capability
+  # lookup. Keep every predicate here so a revoke cannot interleave between
+  # selecting the stored id and validating its live authorization shape.
+  defp exact_ordinary_capability_valid?(
+         %Capability{} = cap,
+         capability_id,
+         principal_id,
+         resource_uri,
+         scope_context,
+         now
+       ) do
+    cap.id == capability_id and cap.principal_id == principal_id and
+      cap.resource_uri == resource_uri and not disclosure_namespaced?(cap) and
+      current_at?(cap, now) and exact_scope_matches?(cap, scope_context) and
+      Capability.signed?(cap) and safe_verify_capability_signature(cap) == :ok and
+      exact_delegation_chain_valid?(cap)
+  rescue
+    _ -> false
+  catch
+    _, _ -> false
+  end
+
+  defp exact_scope_matches?(cap, scope_context) when is_list(scope_context) do
+    cap.session_id == Keyword.get(scope_context, :session_id) and
+      cap.task_id == Keyword.get(scope_context, :task_id) and
+      cap.principal_scope == Keyword.get(scope_context, :principal_scope)
+  rescue
+    _ -> false
+  end
+
+  defp exact_scope_matches?(_cap, _scope_context), do: false
+
+  defp exact_delegation_chain_valid?(%{parent_capability_id: nil, delegation_chain: []}), do: true
+
+  defp exact_delegation_chain_valid?(
+         %{parent_capability_id: parent_id, delegation_chain: [_ | _]} = cap
+       )
+       when not is_nil(parent_id) do
+    case Signer.verify_delegation_chain(cap, &Arbor.Security.lookup_public_key/1) do
+      :ok -> true
+      _ -> false
+    end
+  rescue
+    _ -> false
+  catch
+    _, _ -> false
+  end
+
+  defp exact_delegation_chain_valid?(_cap), do: false
+
+  defp safe_verify_capability_signature(cap) do
+    SystemAuthority.verify_capability_signature(cap)
+  rescue
+    _ -> {:error, :verification_unavailable}
+  catch
+    :exit, _ -> {:error, :verification_unavailable}
+    :throw, _ -> {:error, :verification_unavailable}
   end
 
   defp disclosure_time_candidate?(

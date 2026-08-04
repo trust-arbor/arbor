@@ -68,7 +68,7 @@ defmodule Arbor.Security.AuthDecision do
       # credential cannot leak into later pure checks or recorded decisions.
       opts = strip_session_token(opts)
 
-      with {:ok, cap, auth} <- find_matching_capability(auth, resource_uri),
+      with {:ok, cap, auth} <- find_matching_capability(auth, resource_uri, opts),
            {:ok, auth} <- check_scope_binding(auth, cap, opts),
            {:ok, auth} <- check_delegation_chain(auth, cap),
            {:ok, auth} <- check_time_constraints(auth, cap),
@@ -323,7 +323,15 @@ defmodule Arbor.Security.AuthDecision do
   # store outage now denies; in permissive mode the preloaded fallback is
   # still used (legitimate test paths and replay scenarios rely on it), but
   # only after a debug log so partial outages are visible.
-  defp find_matching_capability(%AuthContext{} = auth, resource_uri) do
+  defp find_matching_capability(%AuthContext{} = auth, resource_uri, opts) do
+    case exact_capability_id(opts) do
+      :absent -> find_covering_capability(auth, resource_uri)
+      {:ok, capability_id} -> find_exact_capability(auth, resource_uri, capability_id, opts)
+      :invalid -> {:error, :unauthorized, auth}
+    end
+  end
+
+  defp find_covering_capability(%AuthContext{} = auth, resource_uri) do
     store = capability_store_module()
 
     if Code.ensure_loaded?(store) and
@@ -342,6 +350,99 @@ defmodule Arbor.Security.AuthDecision do
     _ -> capability_store_unavailable_fallback(auth, resource_uri)
   catch
     :exit, _ -> capability_store_unavailable_fallback(auth, resource_uri)
+  end
+
+  # Exact mode deliberately bypasses the configurable ordinary lookup and its
+  # preloaded fallback. It must linearize id selection and validation inside
+  # CapabilityStore so revocation cannot be hidden by another covering cap.
+  defp find_exact_capability(%AuthContext{} = auth, resource_uri, capability_id, opts) do
+    scope_context = [
+      session_id: Keyword.get(opts, :session_id),
+      task_id: Keyword.get(opts, :task_id),
+      principal_scope: Keyword.get(opts, :principal_scope)
+    ]
+
+    case CapabilityStore.get_valid_exact_ordinary(
+           capability_id,
+           auth.principal_id,
+           resource_uri,
+           scope_context
+         ) do
+      {:ok, cap} -> {:ok, cap, auth}
+      _ -> {:error, :unauthorized, auth}
+    end
+  rescue
+    _ -> {:error, :unauthorized, auth}
+  catch
+    _, _ -> {:error, :unauthorized, auth}
+  end
+
+  defp exact_capability_id(opts) when is_list(opts) do
+    if Keyword.keyword?(opts) do
+      case Keyword.get_values(opts, :exact_capability_id) do
+        [] ->
+          :absent
+
+        [id] when is_binary(id) ->
+          if canonical_exact_capability_id?(id) and exact_scope_option_keys?(opts),
+            do: {:ok, id},
+            else: :invalid
+
+        _ ->
+          :invalid
+      end
+    else
+      if exact_capability_intent?(opts), do: :invalid, else: :absent
+    end
+  rescue
+    _ -> :invalid
+  catch
+    _, _ -> :invalid
+  end
+
+  defp exact_capability_id(opts) do
+    if exact_capability_intent?(opts), do: :invalid, else: :absent
+  rescue
+    _ -> :invalid
+  catch
+    _, _ -> :invalid
+  end
+
+  defp exact_capability_intent?(opts) when is_list(opts) do
+    Enum.any?(opts, &exact_capability_intent_entry?/1)
+  end
+
+  defp exact_capability_intent?(opts) when is_map(opts) do
+    Map.has_key?(opts, :exact_capability_id) or Map.has_key?(opts, "exact_capability_id")
+  end
+
+  defp exact_capability_intent?({key, _value})
+       when key in [:exact_capability_id, "exact_capability_id"],
+       do: true
+
+  defp exact_capability_intent?(_opts), do: false
+
+  defp exact_capability_intent_entry?({key, _value})
+       when key in [:exact_capability_id, "exact_capability_id"],
+       do: true
+
+  defp exact_capability_intent_entry?(_entry), do: false
+
+  defp canonical_exact_capability_id?("cap_" <> suffix)
+       when byte_size(suffix) == 32 do
+    Regex.match?(~r/\A[0-9a-f]{32}\z/, suffix)
+  end
+
+  defp canonical_exact_capability_id?(_id), do: false
+
+  defp exact_scope_option_keys?(opts) do
+    Enum.all?([:session_id, :task_id, :principal_scope], fn key ->
+      length(Keyword.get_values(opts, key)) <= 1
+    end)
+  rescue
+    _ -> false
+  catch
+    _, _ -> false
   end
 
   # CapabilityStore module, overridable via config for tests (e.g. to
