@@ -16,6 +16,10 @@ defmodule Arbor.Voice.CleanupLease do
   @max_cleanup_per_attempt_timeout_ms 60_000
   @max_retry_ms 60_000
   @max_cleanups 64
+  @max_waiters 32
+  @max_wait_keys @max_cleanups + 1
+  @max_wait_timeout_ms 65_000
+  @max_wait_keys_external_bytes 4_096
   @call_timeout_ms 5_000
   @provisional_cleanup_tag :voice_provisional_cleanup
 
@@ -61,7 +65,8 @@ defmodule Arbor.Voice.CleanupLease do
                Redacted.new(token),
                Redacted.new(cleanups),
                config,
-               Keyword.get(opts, :cleanup_supervisor, @cleanup_supervisor)
+               Keyword.get(opts, :cleanup_supervisor, @cleanup_supervisor),
+               supervisor
              ]},
           restart: :temporary,
           shutdown: 5_000,
@@ -83,10 +88,10 @@ defmodule Arbor.Voice.CleanupLease do
   def start(_owner_pid, _initial_cleanups, _opts), do: {:error, :invalid_cleanup_config}
 
   @doc false
-  def start_link(owner_pid, token, cleanups, config, cleanup_supervisor) do
+  def start_link(owner_pid, token, cleanups, config, cleanup_supervisor, supervisor) do
     GenServer.start_link(
       __MODULE__,
-      {owner_pid, token, cleanups, config, cleanup_supervisor}
+      {owner_pid, token, cleanups, config, cleanup_supervisor, supervisor}
     )
   end
 
@@ -129,7 +134,8 @@ defmodule Arbor.Voice.CleanupLease do
   @spec await_empty(credential(), [term()], non_neg_integer()) ::
           :ok | {:error, :cleanup_pending | :lease_unavailable}
   def await_empty(credential, keys, timeout_ms)
-      when is_list(keys) and is_integer(timeout_ms) and timeout_ms >= 0 do
+      when is_list(keys) and is_integer(timeout_ms) and timeout_ms >= 0 and
+             timeout_ms <= @max_wait_timeout_ms do
     with {:ok, pid, token} <- unpack_credential(credential) do
       GenServer.call(pid, {:await_empty, token, keys, timeout_ms}, timeout_ms + @call_timeout_ms)
     else
@@ -146,7 +152,7 @@ defmodule Arbor.Voice.CleanupLease do
   def status(credential), do: credential_call(credential, :status)
 
   @impl true
-  def init({owner_pid, token, cleanups, config, cleanup_supervisor}) do
+  def init({owner_pid, token, cleanups, config, cleanup_supervisor, supervisor}) do
     Process.flag(:trap_exit, true)
     cleanups = Redacted.value(cleanups)
 
@@ -163,6 +169,7 @@ defmodule Arbor.Voice.CleanupLease do
       mode: :holding,
       config: config,
       cleanup_supervisor: cleanup_supervisor,
+      supervisor: supervisor,
       current: nil,
       retry_ref: nil,
       retry_token: nil,
@@ -202,13 +209,18 @@ defmodule Arbor.Voice.CleanupLease do
     end
   end
 
-  defp handle_authorized_call(token, request, from, state) do
-    if token == Redacted.value(state.token) do
+  defp handle_authorized_call(token, request, {caller_pid, _tag} = from, state)
+       when is_pid(caller_pid) do
+    if token == Redacted.value(state.token) and caller_pid == state.owner_pid and
+         not state.owner_down and Process.alive?(state.owner_pid) do
       handle_lease_call(request, from, state)
     else
       {:reply, {:error, :lease_unavailable}, state}
     end
   end
+
+  defp handle_authorized_call(_token, _request, _from, state),
+    do: {:reply, {:error, :lease_unavailable}, state}
 
   defp handle_lease_call({:bind_worker, _worker}, _from, %{owner_down: true} = state),
     do: {:reply, {:error, :owner_unavailable}, state}
@@ -223,7 +235,9 @@ defmodule Arbor.Voice.CleanupLease do
 
       true ->
         state = clear_worker_monitor(state)
-        {:reply, :ok, %{state | worker_pid: worker, worker_ref: Process.monitor(worker)}}
+        monitor_ref = Process.monitor(worker)
+        Process.link(worker)
+        {:reply, :ok, %{state | worker_pid: worker, worker_ref: monitor_ref}}
     end
   end
 
@@ -277,9 +291,10 @@ defmodule Arbor.Voice.CleanupLease do
 
   defp handle_lease_call({:remove_cleanup, key}, _from, state) do
     cleanups = Redacted.value(state.cleanups)
+    storage_keys = storage_keys_for_logical_key(cleanups, key)
 
-    if Map.has_key?(cleanups, key) do
-      state = remove_cleanup_key(state, key)
+    if storage_keys != [] do
+      state = Enum.reduce(storage_keys, state, &remove_cleanup_key(&2, &1))
       {:reply, :ok, notify_waiters(state)}
     else
       {:reply, {:error, :unknown_cleanup_key}, state}
@@ -287,12 +302,17 @@ defmodule Arbor.Voice.CleanupLease do
   end
 
   defp handle_lease_call({:begin_cleanup, :fenced}, _from, state) do
-    state = state |> Map.put(:mode, :draining) |> schedule_work(0)
-    {:reply, :ok, state}
+    if is_nil(state.worker_pid) do
+      state = state |> Map.put(:mode, :draining) |> schedule_work(0)
+      {:reply, :ok, state}
+    else
+      {:reply, {:error, :worker_active}, state}
+    end
   end
 
   defp handle_lease_call({:await_empty, keys, timeout_ms}, from, state) do
-    with {:ok, key_set} <- normalize_wait_keys(keys) do
+    with true <- valid_wait_timeout?(timeout_ms),
+         {:ok, key_set} <- normalize_wait_keys(keys) do
       if keys_absent?(state, key_set) do
         {:reply, :ok, state}
       else
@@ -348,7 +368,16 @@ defmodule Arbor.Voice.CleanupLease do
         {:DOWN, ref, :process, pid, _reason},
         %{worker_ref: ref, worker_pid: pid} = state
       ) do
-    state = %{state | worker_pid: nil, worker_ref: nil, retiring_worker: false}
+    Process.unlink(pid)
+
+    state = %{
+      state
+      | worker_pid: nil,
+        worker_ref: nil,
+        retiring_worker: false,
+        mode: :draining
+    }
+
     continue(state)
   end
 
@@ -366,10 +395,16 @@ defmodule Arbor.Voice.CleanupLease do
   end
 
   def handle_info(
-        {:DOWN, ref, :process, pid, _reason},
+        {:DOWN, ref, :process, pid, reason},
         %{current: %{monitor_ref: ref, pid: pid} = current} = state
       ) do
-    current = %{current | down: true, result: current.result || :error}
+    current = %{
+      current
+      | down: true,
+        normal_exit: reason == :normal,
+        result: current.result || :error
+    }
+
     continue_current(%{state | current: current})
   end
 
@@ -401,11 +436,16 @@ defmodule Arbor.Voice.CleanupLease do
   def handle_info({:EXIT, pid, _reason}, %{current: %{pid: pid}} = state),
     do: {:noreply, state}
 
+  def handle_info({:EXIT, supervisor, _reason}, %{supervisor: supervisor} = state) do
+    {:stop, {:shutdown, :cleanup_lease_supervisor_lost}, state}
+  end
+
   def handle_info(_message, state), do: {:noreply, state}
 
   @impl true
   def terminate(_reason, state) do
     cancel_timer(state.retry_ref)
+    terminate_bound_worker(state)
 
     case state.current do
       %{pid: pid, timer_ref: timer_ref} ->
@@ -444,7 +484,7 @@ defmodule Arbor.Voice.CleanupLease do
     state = %{state | current: nil}
 
     state =
-      if result == :ok and not current.timed_out do
+      if result == :ok and current.normal_exit and not current.timed_out do
         state
         |> remove_cleanup_key(current.key)
         |> Map.put(:retry_delay_ms, state.config.retry_base_ms)
@@ -502,22 +542,28 @@ defmodule Arbor.Voice.CleanupLease do
       task = fn ->
         Process.link(lease)
 
-        result =
-          try do
-            if fun.() == :ok, do: :ok, else: :error
-          rescue
-            _ -> :error
-          catch
-            _, _ -> :error
-          end
+        receive do
+          {:run_cleanup, ^generation} ->
+            result =
+              try do
+                if fun.() == :ok, do: :ok, else: :error
+              rescue
+                _ -> :error
+              catch
+                _, _ -> :error
+              end
 
-        send(lease, {:cleanup_result, generation, self(), result, now_ms()})
+            send(lease, {:cleanup_result, generation, self(), result, now_ms()})
+        after
+          timeout_ms -> exit(:cleanup_activation_timeout)
+        end
       end
 
       case Task.Supervisor.start_child(cleanup_supervisor, task, restart: :temporary) do
         {:ok, pid} ->
           monitor_ref = Process.monitor(pid)
           timer_ref = Process.send_after(self(), {:cleanup_timeout, generation, pid}, timeout_ms)
+          send(pid, {:run_cleanup, generation})
 
           {:ok,
            %{
@@ -529,6 +575,7 @@ defmodule Arbor.Voice.CleanupLease do
              deadline_ms: deadline_ms,
              result: nil,
              down: false,
+             normal_exit: false,
              timed_out: false
            }}
 
@@ -616,10 +663,14 @@ defmodule Arbor.Voice.CleanupLease do
     do: {:reply, {:error, :cleanup_pending}, state}
 
   defp add_waiter(state, from, keys, timeout_ms) do
-    token = make_ref()
-    timer_ref = Process.send_after(self(), {:cleanup_wait_timeout, token}, timeout_ms)
-    waiter = %{from: from, keys: keys, timer_ref: timer_ref}
-    {:noreply, %{state | waiters: Map.put(state.waiters, token, waiter)}}
+    if map_size(state.waiters) >= @max_waiters do
+      {:reply, {:error, :cleanup_pending}, state}
+    else
+      token = make_ref()
+      timer_ref = Process.send_after(self(), {:cleanup_wait_timeout, token}, timeout_ms)
+      waiter = %{from: from, keys: keys, timer_ref: timer_ref}
+      {:noreply, %{state | waiters: Map.put(state.waiters, token, waiter)}}
+    end
   end
 
   defp notify_waiters(state) do
@@ -639,16 +690,37 @@ defmodule Arbor.Voice.CleanupLease do
 
   defp keys_absent?(state, key_set) do
     cleanups = Redacted.value(state.cleanups)
-    Enum.all?(key_set, &(not Map.has_key?(cleanups, &1)))
+    Enum.all?(key_set, &(storage_keys_for_logical_key(cleanups, &1) == []))
+  end
+
+  defp storage_keys_for_logical_key(cleanups, key) do
+    [key, {@provisional_cleanup_tag, key}]
+    |> Enum.filter(&Map.has_key?(cleanups, &1))
+    |> Enum.uniq()
   end
 
   defp normalize_wait_keys(keys) do
-    if length(keys) == length(Enum.uniq(keys)),
-      do: {:ok, MapSet.new(keys)},
-      else: {:error, :duplicate_key}
+    cond do
+      length(keys) > @max_wait_keys ->
+        {:error, :too_many_keys}
+
+      length(keys) != length(Enum.uniq(keys)) ->
+        {:error, :duplicate_key}
+
+      :erlang.external_size(keys) > @max_wait_keys_external_bytes ->
+        {:error, :keys_too_large}
+
+      true ->
+        {:ok, MapSet.new(keys)}
+    end
   end
 
-  defp clear_worker_monitor(%{worker_ref: ref} = state) when is_reference(ref) do
+  defp valid_wait_timeout?(timeout_ms),
+    do: is_integer(timeout_ms) and timeout_ms >= 0 and timeout_ms <= @max_wait_timeout_ms
+
+  defp clear_worker_monitor(%{worker_ref: ref, worker_pid: worker} = state)
+       when is_reference(ref) do
+    if is_pid(worker), do: Process.unlink(worker)
     Process.demonitor(ref, [:flush])
     %{state | worker_pid: nil, worker_ref: nil, retiring_worker: false}
   end
@@ -785,6 +857,19 @@ defmodule Arbor.Voice.CleanupLease do
   end
 
   defp cancel_timer(_), do: :ok
+
+  defp terminate_bound_worker(%{worker_pid: worker, worker_ref: ref})
+       when is_pid(worker) and is_reference(ref) do
+    if Process.alive?(worker), do: Process.exit(worker, :kill)
+
+    receive do
+      {:DOWN, ^ref, :process, ^worker, _reason} -> :ok
+    after
+      100 -> Process.demonitor(ref, [:flush])
+    end
+  end
+
+  defp terminate_bound_worker(_state), do: :ok
 
   defp now_ms, do: System.monotonic_time(:millisecond)
 end

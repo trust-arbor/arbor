@@ -8,6 +8,7 @@ defmodule Arbor.Voice.CleanupLeaseSupervisor do
   """
 
   @name __MODULE__
+  @max_children 256
 
   @doc false
   def child_spec(_args) do
@@ -15,7 +16,15 @@ defmodule Arbor.Voice.CleanupLeaseSupervisor do
       id: @name,
       start:
         {DynamicSupervisor, :start_link,
-         [[name: @name, strategy: :one_for_one, max_restarts: 100, max_seconds: 1]]},
+         [
+           [
+             name: @name,
+             strategy: :one_for_one,
+             max_children: @max_children,
+             max_restarts: 100,
+             max_seconds: 1
+           ]
+         ]},
       type: :supervisor
     }
   end

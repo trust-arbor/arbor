@@ -82,8 +82,11 @@ defmodule Arbor.Voice.CleanupLeaseTest do
     owner =
       spawn(fn ->
         cleanup = fn ->
-          send(test_pid, {:owner_down_cleanup, Process.alive?(worker)})
-          :ok
+          send(test_pid, {:owner_down_cleanup, Process.alive?(worker), self()})
+
+          receive do
+            :finish_owner_down_cleanup -> :ok
+          end
         end
 
         opts = [
@@ -95,17 +98,21 @@ defmodule Arbor.Voice.CleanupLeaseTest do
         ]
 
         {:ok, lease, credential} = CleanupLease.start(self(), {:route, cleanup}, opts)
+        :ok = CleanupLease.bind_worker(credential, worker)
         send(test_pid, {:owner_ready, lease, credential})
         Process.sleep(:infinity)
       end)
 
     assert_receive {:owner_ready, lease, credential}, 500
     lease_ref = Process.monitor(lease)
-    assert :ok = CleanupLease.bind_worker(credential, worker)
 
     Process.exit(owner, :kill)
 
-    assert_receive {:owner_down_cleanup, false}, 1_000
+    assert_receive {:owner_down_cleanup, false, cleanup_pid}, 1_000
+    assert Process.alive?(lease)
+    assert {:error, :lease_unavailable} = CleanupLease.status(credential)
+
+    send(cleanup_pid, :finish_owner_down_cleanup)
     assert_receive {:DOWN, ^worker_ref, :process, ^worker, :killed}, 1_000
     assert_receive {:DOWN, ^lease_ref, :process, ^lease, :normal}, 1_000
   end
@@ -144,6 +151,45 @@ defmodule Arbor.Voice.CleanupLeaseTest do
       {:cleanup_result, first_generation, first_pid, :ok, System.monotonic_time(:millisecond)}
     )
 
+    assert {:ok, %{cleanup_count: 1, cleanup_active: true}} = CleanupLease.status(credential)
+
+    :atomics.put(gate, 1, 1)
+    assert :ok = CleanupLease.await_empty(credential, [:route], 1_000)
+  end
+
+  test "copied success plus abnormal task DOWN cannot discharge its generation", %{opts: opts} do
+    test_pid = self()
+    attempts = :atomics.new(1, signed: false)
+    gate = :atomics.new(1, signed: false)
+
+    cleanup = fn ->
+      attempt = :atomics.add_get(attempts, 1, 1)
+      send(test_pid, {:abnormal_down_attempt, attempt, self()})
+      wait_until(fn -> :atomics.get(gate, 1) == 1 end)
+      :ok
+    end
+
+    assert {:ok, lease, credential} = CleanupLease.start(self(), {:route, cleanup}, opts)
+
+    on_exit(fn ->
+      :atomics.put(gate, 1, 1)
+      if Process.alive?(lease), do: Process.exit(lease, :kill)
+    end)
+
+    assert :ok = CleanupLease.begin_cleanup(credential, :fenced)
+    assert_receive {:abnormal_down_attempt, 1, first_pid}, 500
+
+    %{current: %{generation: generation, pid: ^first_pid}} = :sys.get_state(lease)
+
+    send(
+      lease,
+      {:cleanup_result, generation, first_pid, :ok, System.monotonic_time(:millisecond)}
+    )
+
+    Process.exit(first_pid, :kill)
+
+    assert_receive {:abnormal_down_attempt, 2, second_pid}, 1_000
+    refute second_pid == first_pid
     assert {:ok, %{cleanup_count: 1, cleanup_active: true}} = CleanupLease.status(credential)
 
     :atomics.put(gate, 1, 1)
@@ -250,6 +296,117 @@ defmodule Arbor.Voice.CleanupLeaseTest do
     assert_receive {:DOWN, ^cleanup_ref, :process, ^cleanup_pid, _reason}, 500
   end
 
+  test "genuine credentials are owner-process bound", %{opts: opts} do
+    assert {:ok, _lease, credential} = CleanupLease.start(self(), nil, opts)
+
+    results =
+      Task.async(fn ->
+        worker = spawn(fn -> Process.sleep(:infinity) end)
+
+        results = %{
+          status: CleanupLease.status(credential),
+          bind: CleanupLease.bind_worker(credential, worker),
+          register: CleanupLease.register_cleanup(credential, :foreign, fn -> :ok end),
+          adopt: CleanupLease.adopt_provisional_cleanup(credential, :foreign, fn -> :ok end),
+          remove: CleanupLease.remove_cleanup(credential, :foreign),
+          begin: CleanupLease.begin_cleanup(credential, :fenced),
+          await: CleanupLease.await_empty(credential, [], 0)
+        }
+
+        Process.exit(worker, :kill)
+        results
+      end)
+      |> Task.await()
+
+    assert Enum.all?(Map.values(results), &(&1 == {:error, :lease_unavailable}))
+
+    assert {:ok, %{cleanup_count: 0, mode: :holding, worker_alive: false}} =
+             CleanupLease.status(credential)
+  end
+
+  test "killing the lease kills a live bound backend worker", %{opts: opts} do
+    worker = spawn(fn -> Process.sleep(:infinity) end)
+    worker_ref = Process.monitor(worker)
+
+    assert {:ok, lease, credential} = CleanupLease.start(self(), nil, opts)
+    lease_ref = Process.monitor(lease)
+    assert :ok = CleanupLease.bind_worker(credential, worker)
+
+    Process.exit(lease, :kill)
+
+    assert_receive {:DOWN, ^lease_ref, :process, ^lease, :killed}, 500
+    assert_receive {:DOWN, ^worker_ref, :process, ^worker, :killed}, 500
+  end
+
+  test "cleanup lease supervisor loss terminates the lease and bound worker", %{
+    lease_supervisor: lease_supervisor,
+    cleanup_supervisor: cleanup_supervisor
+  } do
+    worker = spawn(fn -> Process.sleep(:infinity) end)
+    worker_ref = Process.monitor(worker)
+
+    opts = [
+      supervisor: lease_supervisor,
+      cleanup_supervisor: cleanup_supervisor,
+      cleanup_per_attempt_timeout_ms: 100,
+      retry_base_ms: 5,
+      retry_max_ms: 25
+    ]
+
+    assert {:ok, lease, credential} = CleanupLease.start(self(), nil, opts)
+    lease_ref = Process.monitor(lease)
+    assert :ok = CleanupLease.bind_worker(credential, worker)
+
+    Process.exit(lease_supervisor, :kill)
+
+    assert_receive {:DOWN, ^worker_ref, :process, ^worker, :killed}, 500
+
+    assert_receive {:DOWN, ^lease_ref, :process, ^lease, :killed}, 500
+  end
+
+  test "lease supervisor child count and waiter inputs are bounded", %{opts: opts} do
+    child_spec = Arbor.Voice.CleanupLeaseSupervisor.child_spec([])
+    {DynamicSupervisor, :start_link, [supervisor_opts]} = child_spec.start
+    assert supervisor_opts[:max_children] == 256
+
+    cleanup = fn -> Process.sleep(:infinity) end
+    assert {:ok, _lease, credential} = CleanupLease.start(self(), {:route, cleanup}, opts)
+
+    assert {:error, :lease_unavailable} =
+             CleanupLease.await_empty(credential, [:route], 65_001)
+
+    oversized_keys = Enum.map(1..66, &{:cleanup, &1})
+
+    assert {:error, :lease_unavailable} =
+             CleanupLease.await_empty(credential, oversized_keys, 0)
+  end
+
+  test "unexpected bound-worker DOWN drains retained cleanup without owner intervention", %{
+    opts: opts
+  } do
+    test_pid = self()
+    worker = spawn(fn -> Process.sleep(:infinity) end)
+
+    cleanup = fn ->
+      send(test_pid, :worker_down_cleanup)
+      :ok
+    end
+
+    assert {:ok, lease, credential} = CleanupLease.start(self(), {:route, cleanup}, opts)
+    assert :ok = CleanupLease.bind_worker(credential, worker)
+    assert {:error, :worker_active} = CleanupLease.begin_cleanup(credential, :fenced)
+
+    Process.exit(worker, :kill)
+
+    assert_receive :worker_down_cleanup, 1_000
+    assert :ok = CleanupLease.await_empty(credential, [:route], 500)
+
+    assert {:ok, %{cleanup_count: 0, mode: :draining, worker_alive: false}} =
+             CleanupLease.status(credential)
+
+    assert Process.alive?(lease)
+  end
+
   test "provisional adoption coalesces an exact ordinary cleanup", %{opts: opts} do
     test_pid = self()
 
@@ -281,6 +438,19 @@ defmodule Arbor.Voice.CleanupLeaseTest do
 
     assert :ok = CleanupLease.adopt_provisional_cleanup(credential, :turn, provisional)
     assert {:ok, %{cleanup_count: 2}} = CleanupLease.status(credential)
+  end
+
+  test "provisional storage remains visible through its caller-facing logical key", %{opts: opts} do
+    provisional = fn -> :ok end
+
+    assert {:ok, _lease, credential} = CleanupLease.start(self(), nil, opts)
+    assert :ok = CleanupLease.adopt_provisional_cleanup(credential, :turn, provisional)
+    assert {:ok, %{cleanup_count: 1}} = CleanupLease.status(credential)
+
+    assert {:error, :cleanup_pending} = CleanupLease.await_empty(credential, [:turn], 0)
+    assert :ok = CleanupLease.remove_cleanup(credential, :turn)
+    assert :ok = CleanupLease.await_empty(credential, [:turn], 0)
+    assert {:ok, %{cleanup_count: 0}} = CleanupLease.status(credential)
   end
 
   test "a forged credential cannot mutate or inspect the lease", %{opts: opts} do
