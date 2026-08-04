@@ -1614,7 +1614,7 @@ defmodule Arbor.LLM.ToolLoop do
   end
 
   defp emit_tool_loop_signal(event, data) do
-    if Process.whereis(Arbor.Signals.Bus) != nil do
+    if Arbor.Signals.healthy?() do
       metadata = if data[:agent_id], do: %{agent_id: data[:agent_id]}, else: %{}
       Arbor.Signals.emit(:agent, event, data, metadata: metadata)
     end

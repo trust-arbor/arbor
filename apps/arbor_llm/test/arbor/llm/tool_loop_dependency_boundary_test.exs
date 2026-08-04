@@ -9,6 +9,8 @@ defmodule Arbor.LLM.ToolLoopDependencyBoundaryTest do
       |> File.read!()
 
     refute source =~ "Arbor.Orchestrator"
+    refute source =~ "Arbor.Signals.Bus"
+    assert source =~ "Arbor.Signals.healthy?"
     assert source =~ "Arbor.Signals.emit"
   end
 end

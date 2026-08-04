@@ -114,6 +114,13 @@ defmodule Arbor.Contracts.Session.SteeringMessageTest do
     end
   end
 
+  test "rejects an oversized message id before canonical regex validation" do
+    oversized_id = "steer_" <> String.duplicate("a", 1_000_000)
+
+    assert {:error, :invalid_message_id} =
+             attrs(%{message_id: oversized_id}) |> SteeringMessage.new()
+  end
+
   test "enforces valid nonblank UTF-8 content at the Agent ingress ceiling" do
     max = SteeringMessage.max_content_bytes()
     assert {:ok, _} = attrs(%{content: String.duplicate("x", max)}) |> SteeringMessage.new()
@@ -151,6 +158,18 @@ defmodule Arbor.Contracts.Session.SteeringMessageTest do
     end
   end
 
+  test "rejects a long taint chain after inspecting only the bounded prefix" do
+    long_chain = List.duplicate("entry", 100_000)
+
+    assert {:error, :invalid_taint} =
+             attrs(%{taint: taint(%{chain: long_chain})}) |> SteeringMessage.new()
+
+    improper_after_limit = List.duplicate("entry", 17) ++ :unvisited_tail
+
+    assert {:error, :invalid_taint} =
+             attrs(%{taint: taint(%{chain: improper_after_limit})}) |> SteeringMessage.new()
+  end
+
   test "rejects extended taint structs and malformed steering structs" do
     extended_taint = Map.put(taint(), :authority, :forged)
 
@@ -165,6 +184,21 @@ defmodule Arbor.Contracts.Session.SteeringMessageTest do
 
     malformed = %{__struct__: SteeringMessage, message_id: @message_id}
     assert {:error, :invalid_message_shape} = SteeringMessage.canonicalize(malformed)
+  end
+
+  test "rejects extra-shaped maps before enumerating their keys" do
+    extras = Map.new(1..100_000, &{&1, &1})
+
+    assert {:error, :invalid_attributes} =
+             attrs() |> Map.merge(extras) |> SteeringMessage.new()
+
+    assert {:error, :invalid_taint} =
+             attrs(%{taint: Map.merge(taint(), extras)}) |> SteeringMessage.new()
+
+    assert {:ok, message} = SteeringMessage.new(attrs())
+
+    assert {:error, :invalid_message_shape} =
+             message |> Map.merge(extras) |> SteeringMessage.canonicalize()
   end
 
   test "canonicalize revalidates exact atom-keyed maps and rejects unrelated terms" do

@@ -23,11 +23,11 @@ defmodule Arbor.Contracts.Session.SteeringMessage do
   @max_taint_chain_entries 16
   @max_taint_chain_entry_bytes 128
 
+  @message_id_bytes byte_size("steer_") + 32
   @message_id_pattern ~r/\Asteer_[0-9a-f]{32}\z/
   @engagement_id_pattern ~r/\Aeng_[0-9a-f]{32}\z/
   @fields [:message_id, :engagement_id, :content, :taint]
   @taint_fields [
-    :__struct__,
     :level,
     :sensitivity,
     :sanitizations,
@@ -113,7 +113,8 @@ defmodule Arbor.Contracts.Session.SteeringMessage do
   def canonicalize(_), do: {:error, :invalid_steering_message}
 
   defp exact_attributes(attrs) when is_map(attrs) and not is_struct(attrs) do
-    if Enum.sort(Map.keys(attrs)) == Enum.sort(@fields) do
+    if map_size(attrs) == length(@fields) and
+         Enum.sort(Map.keys(attrs)) == Enum.sort(@fields) do
       {:ok, attrs}
     else
       {:error, :invalid_attributes}
@@ -134,7 +135,7 @@ defmodule Arbor.Contracts.Session.SteeringMessage do
   defp exact_keyword(_improper_or_invalid, _attrs), do: {:error, :invalid_attributes}
 
   defp validate_message_id(value) when is_binary(value) do
-    if Regex.match?(@message_id_pattern, value),
+    if byte_size(value) == @message_id_bytes and Regex.match?(@message_id_pattern, value),
       do: :ok,
       else: {:error, :invalid_message_id}
   end
@@ -166,7 +167,7 @@ defmodule Arbor.Contracts.Session.SteeringMessage do
   defp validate_content(_), do: {:error, :invalid_content}
 
   defp validate_taint(%Taint{} = taint) do
-    with true <- exact_struct_shape?(taint, Taint, tl(@taint_fields)),
+    with true <- exact_struct_shape?(taint, Taint, @taint_fields),
          true <- taint.level in Taint.levels(),
          true <- taint.sensitivity in Taint.sensitivities(),
          true <- taint.confidence in Taint.confidences(),
@@ -191,14 +192,20 @@ defmodule Arbor.Contracts.Session.SteeringMessage do
 
   defp valid_label?(_value, _max_bytes), do: false
 
-  defp valid_chain?(chain) when is_list(chain) and length(chain) <= @max_taint_chain_entries do
-    Enum.all?(chain, &valid_label?(&1, @max_taint_chain_entry_bytes))
+  defp valid_chain?(chain), do: valid_chain?(chain, @max_taint_chain_entries)
+
+  defp valid_chain?([], _remaining), do: true
+
+  defp valid_chain?([entry | rest], remaining) when remaining > 0 do
+    valid_label?(entry, @max_taint_chain_entry_bytes) and valid_chain?(rest, remaining - 1)
   end
 
-  defp valid_chain?(_), do: false
+  defp valid_chain?(_too_long_or_improper, _remaining), do: false
 
-  defp exact_struct_shape?(value, module, fields) do
-    Map.get(value, :__struct__) == module and
+  defp exact_struct_shape?(value, module, fields) when is_map(value) do
+    map_size(value) == length(fields) + 1 and Map.get(value, :__struct__) == module and
       Enum.sort(Map.keys(value)) == Enum.sort([:__struct__ | fields])
   end
+
+  defp exact_struct_shape?(_value, _module, _fields), do: false
 end
