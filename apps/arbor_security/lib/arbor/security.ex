@@ -1442,47 +1442,64 @@ defmodule Arbor.Security do
 
   # Side effects for requires_approval decisions
   defp handle_requires_approval(cap, _auth, principal_id, resource_uri, action, opts) do
+    safe_opts = Keyword.delete(opts, @source_owned_egress_opt)
+
     # Escalate to Consensus for kernel-owned capability constraints. Trust policy
     # approval lives in Arbor.Trust.ApprovalGuard.
     escalation_opts =
-      opts
+      safe_opts
       |> Keyword.put_new(:gate, :capability_constraint)
       |> Keyword.put_new(:reason, :capability_requires_approval)
 
-    case Arbor.Security.Escalation.maybe_escalate(
-           cap,
-           principal_id,
-           resource_uri,
-           escalation_opts
-         ) do
-      :ok ->
-        # Graduated — still enforce constraints (rate limits, time windows)
-        # AND run the implicit FileGuard normalization for fs URIs. The
-        # approval-graduated path is structurally just another success
-        # path and needs the same path-normalization defense as
-        # handle_authorized — otherwise an fs cap with requires_approval
-        # silently skips symlink-escape detection.
-        with :ok <- maybe_enforce_constraints(cap, principal_id, resource_uri),
-             fg_result <- maybe_check_file_guard(principal_id, resource_uri, opts, cap),
-             :ok <- normalize_file_guard_result(fg_result) do
-          Events.record_authorization_granted(principal_id, resource_uri, opts)
-          maybe_check_max_uses(cap)
-          maybe_emit_receipt(cap, principal_id, resource_uri, action, :granted, opts)
-          {:ok, :authorized}
-        else
-          {:error, reason} = error ->
-            Events.record_authorization_denied(principal_id, resource_uri, reason, opts)
-            error
-        end
+    with :ok <- enforce_source_owned_egress_expectation(cap, opts) do
+      case Arbor.Security.Escalation.maybe_escalate(
+             cap,
+             principal_id,
+             resource_uri,
+             escalation_opts
+           ) do
+        :ok ->
+          # Graduated — still enforce constraints (rate limits, time windows)
+          # AND run the implicit FileGuard normalization for fs URIs. The
+          # approval-graduated path is structurally just another success
+          # path and needs the same path-normalization defense as
+          # handle_authorized — otherwise an fs cap with requires_approval
+          # silently skips symlink-escape detection.
+          with :ok <- maybe_enforce_constraints(cap, principal_id, resource_uri),
+               fg_result <- maybe_check_file_guard(principal_id, resource_uri, safe_opts, cap),
+               :ok <- normalize_file_guard_result(fg_result) do
+            Events.record_authorization_granted(principal_id, resource_uri, safe_opts)
+            maybe_check_max_uses(cap)
+            maybe_emit_receipt(cap, principal_id, resource_uri, action, :granted, safe_opts)
+            {:ok, :authorized}
+          else
+            {:error, reason} = error ->
+              Events.record_authorization_denied(principal_id, resource_uri, reason, safe_opts)
+              error
+          end
 
-      {:ok, :pending_approval, proposal_id} ->
-        Events.record_authorization_pending(principal_id, resource_uri, proposal_id, opts)
-        maybe_emit_receipt(cap, principal_id, resource_uri, action, :pending_approval, opts)
-        {:ok, :pending_approval, proposal_id}
+        {:ok, :pending_approval, proposal_id} ->
+          Events.record_authorization_pending(principal_id, resource_uri, proposal_id, safe_opts)
 
-      {:error, reason} ->
-        Events.record_authorization_denied(principal_id, resource_uri, reason, opts)
-        {:error, reason}
+          maybe_emit_receipt(
+            cap,
+            principal_id,
+            resource_uri,
+            action,
+            :pending_approval,
+            safe_opts
+          )
+
+          {:ok, :pending_approval, proposal_id}
+
+        {:error, reason} ->
+          Events.record_authorization_denied(principal_id, resource_uri, reason, safe_opts)
+          {:error, reason}
+      end
+    else
+      {:error, reason} = error ->
+        Events.record_authorization_denied(principal_id, resource_uri, reason, safe_opts)
+        error
     end
   end
 

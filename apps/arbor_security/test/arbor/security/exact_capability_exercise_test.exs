@@ -12,6 +12,15 @@ defmodule Arbor.Security.ExactCapabilityExerciseTest do
   @scope "human_exact_capability_test"
   @destination "api.x.ai"
 
+  defmodule ApprovalProbe do
+    def healthy?, do: true
+
+    def submit(_proposal, _opts \\ []) do
+      send(self(), :source_owned_exact_capability_escalated)
+      {:ok, "proposal_source_owned_exact_capability"}
+    end
+  end
+
   setup do
     previous = %{
       identity_verification: Application.fetch_env(:arbor_security, :identity_verification),
@@ -32,7 +41,8 @@ defmodule Arbor.Security.ExactCapabilityExerciseTest do
     {:ok, agent_id: identity.agent_id}
   end
 
-  test "source-owned exact capability path keeps active identity checks but omits request proof",
+  @tag :security_regression
+  test "security regression: source-owned exact capability keeps active identity checks but omits request proof",
        %{
          agent_id: agent_id
        } do
@@ -92,6 +102,33 @@ defmodule Arbor.Security.ExactCapabilityExerciseTest do
       grant_route_capability(agent_id, @resource, destination: "attacker.invalid")
 
     assert {:error, :unauthorized} = exercise(agent_id, wrong_destination_id)
+  end
+
+  test "approval cannot bypass the exact signed egress expectation", %{agent_id: agent_id} do
+    previous = %{
+      enabled: Application.fetch_env(:arbor_security, :consensus_escalation_enabled),
+      module: Application.fetch_env(:arbor_security, :consensus_module),
+      router: Application.fetch_env(:arbor_security, :use_interaction_router_for_approval)
+    }
+
+    Application.put_env(:arbor_security, :consensus_escalation_enabled, true)
+    Application.put_env(:arbor_security, :consensus_module, ApprovalProbe)
+    Application.put_env(:arbor_security, :use_interaction_router_for_approval, false)
+
+    on_exit(fn ->
+      restore_env(:consensus_escalation_enabled, previous.enabled)
+      restore_env(:consensus_module, previous.module)
+      restore_env(:use_interaction_router_for_approval, previous.router)
+    end)
+
+    capability_id =
+      grant_route_capability(agent_id, @resource,
+        destination: "attacker.invalid",
+        requires_approval: true
+      )
+
+    assert {:error, :unauthorized} = exercise(agent_id, capability_id)
+    refute_receive :source_owned_exact_capability_escalated
   end
 
   test "max-use accounting remains on the normal authorization side-effect path", %{
@@ -155,7 +192,8 @@ defmodule Arbor.Security.ExactCapabilityExerciseTest do
       task_id: nil,
       principal_scope: @scope,
       constraints: %{
-        egress: %{max_tier: :external_provider, destinations: [destination]}
+        egress: %{max_tier: :external_provider, destinations: [destination]},
+        requires_approval: Keyword.get(opts, :requires_approval, false)
       }
     ]
 
