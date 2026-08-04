@@ -450,6 +450,41 @@ defmodule Arbor.Security do
   @spec issue_disclosure_capability(keyword()) :: {:ok, Capability.t()} | {:error, atom()}
   def issue_disclosure_capability(opts), do: DisclosureCapability.issue(opts)
 
+  @doc """
+  Revalidate one exact interactive disclosure capability against a live request.
+
+  This is the public, capability-struct-free counterpart to disclosure issuance.
+  `principal_id` is the executing agent and cannot be overridden through `opts`;
+  the remaining options are the live session, task, authenticated-human scope,
+  and exact egress route accepted by `issue_disclosure_capability/1` and
+  `authorize_egress/3`.
+
+  The check is independent of `:egress_gate_enforcing`. It does not authorize
+  egress by itself: callers must still apply their ordinary trust and egress
+  policy. It returns `:ok` only while the exact stored capability remains
+  current, signed, undelegated, unrevoked, scope-matched, and route-matched.
+  No capability struct crosses the facade.
+  """
+  @spec validate_disclosure_capability(String.t(), String.t(), keyword()) ::
+          :ok | {:error, atom()}
+  def validate_disclosure_capability(principal_id, capability_id, opts \\ []) do
+    if Keyword.keyword?(opts) do
+      request_opts = Keyword.put(opts, :principal_id, principal_id)
+
+      case DisclosureCapability.fetch_and_validate(capability_id, request_opts) do
+        {:ok, %Capability{}} -> :ok
+        {:error, reason} when is_atom(reason) -> {:error, reason}
+        _ -> {:error, :disclosure_capability_rejected}
+      end
+    else
+      {:error, :invalid_fetch_opts}
+    end
+  rescue
+    _ -> {:error, :disclosure_capability_rejected}
+  catch
+    _, _ -> {:error, :disclosure_capability_rejected}
+  end
+
   # Resolves `opts[:disclosure_capability_id]` to an already-revalidated
   # disclosure Capability, or nil on ANY validation failure (forged, unsigned,
   # expired, wrong-principal/session/task/human, delegated, revoked, malformed,

@@ -456,6 +456,75 @@ defmodule Arbor.Security.DisclosureCapabilityTest do
     end
   end
 
+  describe "Arbor.Security.validate_disclosure_capability/3" do
+    setup do
+      {:ok, cap} = Arbor.Security.issue_disclosure_capability(valid_issue_opts())
+      %{cap: cap}
+    end
+
+    @tag spec: "VP-05D2A0"
+    test "security regression: exact active authority validates while the egress gate is dark",
+         %{cap: cap} do
+      original = Application.get_env(:arbor_security, :egress_gate_enforcing)
+      Application.put_env(:arbor_security, :egress_gate_enforcing, false)
+      on_exit(fn -> restore_config(:egress_gate_enforcing, original) end)
+
+      opts = Keyword.delete(fetch_opts(cap), :principal_id)
+
+      assert :ok =
+               Arbor.Security.validate_disclosure_capability(cap.principal_id, cap.id, opts)
+    end
+
+    @tag spec: "VP-05D2A0"
+    test "security regression: revoked exact authority fails closed while the egress gate is dark",
+         %{cap: cap} do
+      original = Application.get_env(:arbor_security, :egress_gate_enforcing)
+      Application.put_env(:arbor_security, :egress_gate_enforcing, false)
+      on_exit(fn -> restore_config(:egress_gate_enforcing, original) end)
+
+      :ok = CapabilityStore.revoke(cap.id)
+      opts = Keyword.delete(fetch_opts(cap), :principal_id)
+
+      assert {:error, _reason} =
+               Arbor.Security.validate_disclosure_capability(cap.principal_id, cap.id, opts)
+    end
+
+    @tag spec: "VP-05D2A0"
+    test "security regression: positional principal and exact route cannot be overridden", %{
+      cap: cap
+    } do
+      opts =
+        cap
+        |> fetch_opts(
+          principal_id: Arbor.Identifiers.generate_agent_id(),
+          egress_provider: "openai"
+        )
+
+      assert {:error, :disclosure_capability_wrong_route} =
+               Arbor.Security.validate_disclosure_capability(cap.principal_id, cap.id, opts)
+
+      assert {:error, :disclosure_capability_wrong_principal} =
+               Arbor.Security.validate_disclosure_capability(
+                 Arbor.Identifiers.generate_agent_id(),
+                 cap.id,
+                 Keyword.put(opts, :egress_provider, "anthropic")
+               )
+    end
+
+    @tag spec: "VP-05D2A0"
+    test "malformed facade inputs fail closed without raising", %{cap: cap} do
+      assert {:error, :invalid_fetch_opts} =
+               Arbor.Security.validate_disclosure_capability(cap.principal_id, cap.id, %{})
+
+      assert {:error, _reason} =
+               Arbor.Security.validate_disclosure_capability(
+                 cap.principal_id,
+                 "not-a-capability-id",
+                 Keyword.delete(fetch_opts(cap), :principal_id)
+               )
+    end
+  end
+
   defp restore_config(key, nil), do: Application.delete_env(:arbor_security, key)
   defp restore_config(key, value), do: Application.put_env(:arbor_security, key, value)
 
