@@ -1338,8 +1338,10 @@ defmodule Arbor.Orchestrator.Session do
 
   # Receipt-authenticated ingress: consume one-use receipt, bind principal,
   # allocate TurnAuthority. Receipt never enters state/queue.
+  # Caller-supplied engagement_id is a route claim — reject before consume.
   defp handle_authenticated_message(message, receipt, from, state) do
     with {:ok, user_message} <- canonicalize_authenticated_user_message(message),
+         :ok <- reject_authenticated_engagement_route(user_message),
          {:ok, valid_receipt} <- DeliveryReceipt.canonicalize(receipt),
          {:ok, authority} <- exchange_receipt_for_authority(valid_receipt, user_message, state) do
       if task_cancelled?(state, user_message_task_id(user_message)) do
@@ -1392,6 +1394,11 @@ defmodule Arbor.Orchestrator.Session do
   end
 
   defp canonicalize_authenticated_user_message(_), do: {:error, :unauthenticated}
+
+  # Receipt binds agent only — engagement switch is a caller-supplied route.
+  # Reject any non-nil engagement_id before receipt exchange / turn routing.
+  defp reject_authenticated_engagement_route(%UserMessage{engagement_id: nil}), do: :ok
+  defp reject_authenticated_engagement_route(%UserMessage{}), do: {:error, :unauthenticated}
 
   defp exchange_receipt_for_authority(receipt, user_message, state) do
     resource = "arbor://chat/agent/" <> state.agent_id

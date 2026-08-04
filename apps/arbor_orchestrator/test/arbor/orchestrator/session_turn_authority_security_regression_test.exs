@@ -17,13 +17,16 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
   alias Arbor.Contracts.Session.TurnAuthority
   alias Arbor.Contracts.Session.UserMessage
   alias Arbor.Identifiers
+  alias Arbor.Orchestrator
   alias Arbor.Orchestrator.Session
   alias Arbor.Orchestrator.Session.Builders
   alias Arbor.Security
   alias Arbor.Security.SessionToken
+  alias Arbor.Signals
 
   setup_all do
     {:ok, _} = Application.ensure_all_started(:arbor_security)
+    ensure_signals_stack!()
 
     backend =
       Application.get_env(:arbor_security, :storage_backend, Arbor.Security.Store.JSONFile)
@@ -344,6 +347,97 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
     end
   end
 
+  defp hermetic_turn_graph! do
+    # Session/Engine authorized runs require IR-compiled graphs (RunAuthorization).
+    # Public compile/1 is the same path Session.parse_dot_file uses.
+    dot = """
+    digraph AuthLeakTurn {
+      graph [goal="Hermetic authenticated leak probe"]
+      start [shape=Mdiamond]
+      echo [type="transform", transform="identity", source_key="session.input", output_key="session.response"]
+      done [shape=Msquare]
+      start -> echo -> done
+    }
+    """
+
+    assert {:ok, graph} = Orchestrator.compile(dot)
+    assert graph.compiled == true
+    graph
+  end
+
+  defp authority_forbidden_binaries(token_hex, %TurnAuthority{} = auth) do
+    [
+      token_hex,
+      auth.turn_id,
+      auth.authenticated_principal_id,
+      auth.disclosure_capability_id
+    ]
+    |> Enum.reject(&(is_nil(&1) or &1 == ""))
+  end
+
+  defp collect_logs_root_artifacts(session_id) do
+    root = Path.join([System.tmp_dir!(), "arbor_sessions", session_id])
+
+    if File.dir?(root) do
+      root
+      |> Path.join("**/*")
+      |> Path.wildcard()
+      |> Enum.filter(&File.regular?/1)
+      |> Enum.map(fn path ->
+        case File.read(path) do
+          {:ok, body} -> {path, body}
+          _ -> {path, ""}
+        end
+      end)
+    else
+      []
+    end
+  end
+
+  defp flush_mailbox_noise do
+    receive do
+      {:turn_timeout, _} -> flush_mailbox_noise()
+      :drain_queue -> flush_mailbox_noise()
+      {:DOWN, _, _, _, _} -> flush_mailbox_noise()
+    after
+      0 -> :ok
+    end
+  end
+
+  # Test env sets arbor_signals start_children: false — start the bus stack under
+  # the already-running Application supervisor so ResultProcessor.emit can publish.
+  defp ensure_signals_stack! do
+    {:ok, _} = Application.ensure_all_started(:arbor_signals)
+
+    for child <- [
+          {Arbor.Signals.Store, []},
+          {Arbor.Signals.TopicKeys, []},
+          {Arbor.Signals.Channels, []},
+          {Arbor.Signals.Bus, []},
+          {Arbor.Signals.Relay, []}
+        ] do
+      case Supervisor.start_child(Arbor.Signals.Supervisor, child) do
+        {:ok, _pid} ->
+          :ok
+
+        {:error, {:already_started, _pid}} ->
+          :ok
+
+        {:error, :already_present} ->
+          {mod, _} = child
+          _ = Supervisor.delete_child(Arbor.Signals.Supervisor, mod)
+          _ = Supervisor.start_child(Arbor.Signals.Supervisor, child)
+          :ok
+
+        {:error, reason} ->
+          flunk("failed to start signals child #{inspect(child)}: #{inspect(reason)}")
+      end
+    end
+
+    assert Signals.healthy?(), "Arbor.Signals Store+Bus must be live for leak signal capture"
+    :ok
+  end
+
   describe "security regression: exact authenticated ingress" do
     test "queues authority without receipt after exact consume and principal bind", %{
       agent_id: agent_id,
@@ -536,6 +630,81 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
 
       state = session_state(agent_id)
       assert state.turn_authority == nil
+    end
+
+    test "security regression: non-nil engagement_id on authenticated ingress is rejected without turn or engagement switch",
+         %{
+           agent_id: agent_id,
+           human_id: human_id,
+           resource: resource
+         } do
+      owned_messages = [%{"role" => "user", "content" => "owned transcript"}]
+      owned_transcripts = %{"eng_other" => [%{"role" => "assistant", "content" => "stashed"}]}
+
+      seed =
+        session_state(agent_id,
+          current_engagement_id: "eng_owned",
+          messages: owned_messages,
+          transcripts: owned_transcripts
+        )
+
+      receipt = issue_receipt!(human_id, resource)
+
+      foreign_msg =
+        human_id
+        |> user_message!("cross engagement probe")
+        |> UserMessage.with_engagement("eng_foreign_#{System.unique_integer([:positive])}")
+
+      from = {self(), make_ref()}
+
+      assert {:reply, {:error, :unauthenticated}, returned} =
+               Session.handle_call(
+                 {:send_authenticated_message, foreign_msg, receipt},
+                 from,
+                 seed
+               )
+
+      # Engagement / transcript state must be byte-for-byte unchanged.
+      assert returned.current_engagement_id == "eng_owned"
+      assert returned.messages == owned_messages
+      assert returned.transcripts == owned_transcripts
+      assert returned.turn_in_flight == false
+      assert returned.turn_queue == []
+      assert returned.turn_authority == nil
+      assert returned.turn_user_message == nil
+
+      # Receipt discarded exactly once — cannot be consumed later.
+      assert {:error, :invalid_receipt} =
+               Security.consume_delivery_receipt(receipt, resource, :chat)
+
+      # Mid-flight: still refuse without enqueueing a foreign-engagement turn.
+      mid_flight =
+        session_state(agent_id,
+          turn_in_flight: true,
+          turn_from: {self(), make_ref()},
+          turn_user_message: UserMessage.from_string("active"),
+          current_engagement_id: "eng_owned",
+          messages: owned_messages,
+          transcripts: owned_transcripts
+        )
+
+      receipt2 = issue_receipt!(human_id, resource)
+
+      assert {:reply, {:error, :unauthenticated}, mid_returned} =
+               Session.handle_call(
+                 {:send_authenticated_message, foreign_msg, receipt2},
+                 from,
+                 mid_flight
+               )
+
+      assert mid_returned.turn_queue == []
+      assert mid_returned.current_engagement_id == "eng_owned"
+      assert mid_returned.messages == owned_messages
+      assert mid_returned.transcripts == owned_transcripts
+      assert mid_returned.turn_in_flight == true
+
+      assert {:error, :invalid_receipt} =
+               Security.consume_delivery_receipt(receipt2, resource, :chat)
     end
   end
 
@@ -844,6 +1013,178 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
 
       assert still_internal.turn_authority.turn_id == auth.turn_id
       assert still_internal.turn_authority.authenticated_principal_id == human_id
+    end
+
+    test "security regression: real authenticated Engine turn keeps receipt and authority ids out of engine/checkpoint/signal/public artifacts",
+         %{
+           agent_id: agent_id,
+           agent_signer: agent_signer,
+           human_id: human_id,
+           resource: resource
+         } do
+      ensure_signals_stack!()
+      put_orchestrator_cap!(agent_id)
+      graph = hermetic_turn_graph!()
+      test_pid = self()
+
+      # Capture the actual Session emit path via the live bus (not a reconstructed map).
+      assert {:ok, sub_id} =
+               Signals.subscribe(
+                 "agent.query_completed",
+                 fn signal ->
+                   send(test_pid, {:turn_signal, signal})
+                   :ok
+                 end,
+                 async: false
+               )
+
+      on_exit(fn ->
+        if Process.whereis(Arbor.Signals.Bus), do: Signals.unsubscribe(sub_id)
+      end)
+
+      adapters = %{
+        checkpoint_save: fn session_id, data ->
+          send(test_pid, {:checkpoint_saved, session_id, data})
+          :ok
+        end
+      }
+
+      receipt = issue_receipt!(human_id, resource)
+      token_hex = receipt_token_hex(receipt)
+      content = "hermetic auth leak probe #{System.unique_integer([:positive])}"
+      msg = user_message!(human_id, content)
+      from = {self(), make_ref()}
+
+      idle =
+        session_state(agent_id,
+          turn_graph: graph,
+          signer: agent_signer,
+          adapters: adapters,
+          pid: self(),
+          config: %{"stream" => false, checkpoint_interval: 1},
+          turn_count: 0
+        )
+
+      assert {:noreply, started} =
+               Session.handle_call({:send_authenticated_message, msg, receipt}, from, idle)
+
+      assert %TurnAuthority{} = started.turn_authority
+      auth = started.turn_authority
+      forbidden = authority_forbidden_binaries(token_hex, auth)
+
+      # Receipt never retained on process-local state (authority fields OK process-locally).
+      refute term_contains_forbidden?(started, [token_hex], allow_turn_authority?: true)
+
+      assert_receive {:turn_result, received_msg, engine_outcome}, 10_000
+      assert received_msg.content == content
+
+      assert match?({:ok, %{final_outcome: %{status: :success}}}, engine_outcome),
+             "expected hermetic Engine success, got: #{inspect(engine_outcome)}"
+
+      {:ok, run_result} = engine_outcome
+
+      # Real Engine context/result must not carry receipt token or authority ids.
+      refute term_contains_forbidden?(run_result, forbidden, allow_turn_authority?: false)
+      refute term_contains_forbidden?(run_result.context, forbidden, allow_turn_authority?: false)
+
+      logs_artifacts = collect_logs_root_artifacts(started.session_id)
+
+      refute term_contains_forbidden?(logs_artifacts, forbidden, allow_turn_authority?: false)
+
+      # Drive the real Session completion path (apply/checkpoint/signal/projection).
+      assert {:noreply, after_success} =
+               Session.handle_info({:turn_result, received_msg, engine_outcome}, started)
+
+      # Require the real checkpoint_save adapter capture — no reconstruct/fallback.
+      assert_receive {:checkpoint_saved, ckpt_session_id, checkpoint_data}, 5_000
+      assert ckpt_session_id == started.session_id
+      assert is_map(checkpoint_data)
+      refute term_contains_forbidden?(checkpoint_data, forbidden, allow_turn_authority?: false)
+
+      # Require the actual bus-delivered turn signal payload.
+      assert_receive {:turn_signal, emitted_signal}, 5_000
+      assert emitted_signal.category == :agent
+      assert emitted_signal.type == :query_completed
+      refute term_contains_forbidden?(emitted_signal, forbidden, allow_turn_authority?: false)
+      refute term_contains_forbidden?(emitted_signal.data, forbidden, allow_turn_authority?: false)
+      refute term_contains_forbidden?(emitted_signal.metadata, forbidden, allow_turn_authority?: false)
+
+      # Drain self-messages produced by reset_and_drain / monitors.
+      flush_mailbox_noise()
+
+      assert {:reply, projected, _} =
+               Session.handle_call(:get_state, {self(), make_ref()}, after_success)
+
+      refute term_contains_forbidden?(projected, forbidden, allow_turn_authority?: false)
+
+      projected_inspected = inspect(projected, limit: :infinity, printable_limit: :infinity)
+      refute projected_inspected =~ token_hex
+      refute projected_inspected =~ auth.turn_id
+      refute projected_inspected =~ auth.authenticated_principal_id
+
+      # Public caller reply shape from success path is bounded (no authority material).
+      # GenServer.reply/2 delivers {ref, reply} to the caller pid.
+      {_from_pid, from_ref} = from
+      assert_receive {^from_ref, public_reply}, 1_000
+      assert {:ok, _} = public_reply
+      refute term_contains_forbidden?(public_reply, forbidden, allow_turn_authority?: false)
+
+      # Failure path: real authenticated turn through Session Task + Engine crash.
+      flush_mailbox_noise()
+      receipt_fail = issue_receipt!(human_id, resource)
+      token_fail = receipt_token_hex(receipt_fail)
+      msg_fail = user_message!(human_id, "fail path leak probe")
+      fail_from = {self(), make_ref()}
+      {_fail_pid, fail_ref} = fail_from
+
+      idle_fail =
+        session_state(agent_id,
+          turn_graph: nil,
+          signer: agent_signer,
+          config: %{"stream" => false}
+        )
+
+      assert {:noreply, started_fail} =
+               Session.handle_call(
+                 {:send_authenticated_message, msg_fail, receipt_fail},
+                 fail_from,
+                 idle_fail
+               )
+
+      assert %TurnAuthority{} = started_fail.turn_authority
+      fail_auth = started_fail.turn_authority
+      fail_forbidden = authority_forbidden_binaries(token_fail, fail_auth)
+
+      assert_receive {:turn_result, fail_msg, fail_outcome}, 10_000
+      assert fail_msg.content == "fail path leak probe"
+      assert match?({:error, _}, fail_outcome)
+      refute term_contains_forbidden?(fail_outcome, fail_forbidden, allow_turn_authority?: false)
+
+      assert {:noreply, after_fail} =
+               Session.handle_info({:turn_result, fail_msg, fail_outcome}, started_fail)
+
+      flush_mailbox_noise()
+
+      assert {:reply, fail_projected, _} =
+               Session.handle_call(:get_state, {self(), make_ref()}, after_fail)
+
+      refute term_contains_forbidden?(fail_projected, fail_forbidden, allow_turn_authority?: false)
+
+      assert_receive {^fail_ref, fail_public_reply}, 1_000
+      assert match?({:error, _}, fail_public_reply)
+
+      refute term_contains_forbidden?(fail_public_reply, fail_forbidden,
+               allow_turn_authority?: false
+             )
+
+      fail_inspected = inspect(fail_public_reply, limit: :infinity, printable_limit: :infinity)
+      refute fail_inspected =~ token_fail
+      refute fail_inspected =~ fail_auth.turn_id
+      refute fail_inspected =~ fail_auth.authenticated_principal_id
+
+      # Bounded unauthenticated public error never carries authority material.
+      unauth = {:error, :unauthenticated}
+      refute term_contains_forbidden?(unauth, fail_forbidden, allow_turn_authority?: false)
     end
   end
 end
