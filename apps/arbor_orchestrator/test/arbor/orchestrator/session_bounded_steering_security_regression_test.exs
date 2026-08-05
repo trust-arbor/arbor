@@ -284,14 +284,23 @@ defmodule Arbor.Orchestrator.SessionBoundedSteeringSecurityRegressionTest do
 
     byte_content = String.duplicate("b", 20_000)
 
-    byte_entries =
-      Enum.map(1..2, fn _ -> {user_message(byte_content, engagement_id), nil, live_from()} end)
+    first_byte_entry = {user_message(byte_content, engagement_id), nil, live_from()}
+    second_byte_entry = {user_message(byte_content, engagement_id), nil, live_from()}
+    third_byte_entry = {user_message("x", engagement_id), nil, live_from()}
 
-    token = put_active(session, engagement_id: engagement_id, queue: byte_entries)
+    token =
+      put_active(session,
+        engagement_id: engagement_id,
+        queue: [first_byte_entry, second_byte_entry, third_byte_entry]
+      )
 
-    assert {:ok, [_]} = take_steering(session, token, engagement_id, {make_ref(), 1})
-    assert length(:sys.get_state(session).turn_queue) == 1
-    assert {:ok, [_]} = take_steering(session, token, engagement_id, {make_ref(), 2})
+    assert {:ok, [%SteeringMessage{content: ^byte_content}]} =
+             take_steering(session, token, engagement_id, {make_ref(), 1})
+
+    assert :sys.get_state(session).turn_queue == [second_byte_entry, third_byte_entry]
+
+    assert {:ok, [%SteeringMessage{content: ^byte_content}, %SteeringMessage{content: "x"}]} =
+             take_steering(session, token, engagement_id, {make_ref(), 2})
 
     turn_entries =
       Enum.map(1..17, fn index ->

@@ -1457,16 +1457,18 @@ defmodule Arbor.Orchestrator.Session do
   end
 
   # Scan the whole queue once. Cross-engagement, authority-ineligible, malformed,
-  # and over-limit entries retain their original relative order. Dead and
-  # cancelled entries are removed wherever they occur, so an eligible later
-  # same-engagement message cannot be starved by an unrelated head.
+  # and over-limit entries retain their original relative order. After an eligible
+  # active-engagement entry hits capacity, later eligible entries from that
+  # engagement remain queued behind it. Dead and cancelled entries are still
+  # removed wherever they occur.
   defp take_steering_batch(state, engagement_id) do
     acc = %{
       queue_rev: [],
       messages_rev: [],
       froms_rev: [],
       boundary_message_count: 0,
-      boundary_byte_count: 0
+      boundary_byte_count: 0,
+      active_engagement_capacity_blocked?: false
     }
 
     acc =
@@ -1513,23 +1515,37 @@ defmodule Arbor.Orchestrator.Session do
         state,
         engagement_id
       ) ->
-        case maybe_build_steering_message(user_message, state, acc) do
-          {:ok, message, byte_count} ->
-            next_acc = %{
-              acc
-              | messages_rev: [message | acc.messages_rev],
-                froms_rev: [caller_from | acc.froms_rev],
-                boundary_message_count: acc.boundary_message_count + 1,
-                boundary_byte_count: acc.boundary_byte_count + byte_count
-            }
+        if acc.active_engagement_capacity_blocked? do
+          scan_steering_queue(rest, state, engagement_id, %{
+            acc
+            | queue_rev: [entry | acc.queue_rev]
+          })
+        else
+          case maybe_build_steering_message(user_message, state, acc) do
+            {:ok, message, byte_count} ->
+              next_acc = %{
+                acc
+                | messages_rev: [message | acc.messages_rev],
+                  froms_rev: [caller_from | acc.froms_rev],
+                  boundary_message_count: acc.boundary_message_count + 1,
+                  boundary_byte_count: acc.boundary_byte_count + byte_count
+              }
 
-            scan_steering_queue(rest, state, engagement_id, next_acc)
+              scan_steering_queue(rest, state, engagement_id, next_acc)
 
-          :error ->
-            scan_steering_queue(rest, state, engagement_id, %{
-              acc
-              | queue_rev: [entry | acc.queue_rev]
-            })
+            :capacity_exhausted ->
+              scan_steering_queue(rest, state, engagement_id, %{
+                acc
+                | queue_rev: [entry | acc.queue_rev],
+                  active_engagement_capacity_blocked?: true
+              })
+
+            :error ->
+              scan_steering_queue(rest, state, engagement_id, %{
+                acc
+                | queue_rev: [entry | acc.queue_rev]
+              })
+          end
         end
 
       true ->
@@ -1634,7 +1650,7 @@ defmodule Arbor.Orchestrator.Session do
         {:error, _} -> :error
       end
     else
-      :error
+      :capacity_exhausted
     end
   rescue
     _ -> :error
