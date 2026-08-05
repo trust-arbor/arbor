@@ -18,12 +18,14 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
   @max_generic_entries 256
 
   @wrapper_keys ~w(agent_id kind payload provenance version)
-  @provenance_keys ~w(aggregate base nodes pending_facts pending_learnings)
+  @provenance_keys ~w(
+    aggregate base maintenance_effects nodes pending_facts pending_learnings
+  )
   @entry_keys ~w(envelope status)
   @payload_keys ~w(
     active_set agent_id config dedup_threshold edges last_decay_at max_active
     max_tokens nodes operation_receipt_order operation_receipts pending_facts
-    pending_learnings type_quotas
+    pending_learnings pending_maintenance_effect type_quotas
   )
   @node_keys ~w(
     access_count cached_tokens confidence content created_at id last_accessed metadata
@@ -32,8 +34,17 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
   @edge_keys ~w(created_at id metadata relationship source_id strength target_id)
   @pending_keys ~w(confidence content extracted_at id metadata source type)
   @operation_receipt_keys ~w(fingerprint kind result)
+  @maintenance_receipt_keys ~w(metrics status)
+  @maintenance_effect_keys ~w(archive_entries metrics mode occurred_at operation_id)
+  @maintenance_archive_entry_keys ~w(node reason)
+  @maintenance_metric_keys ~w(
+    archived_count average_relevance decayed_count evicted_count pruned_count
+    reinforced_count total_nodes
+  )
+  @maintenance_modes ~w(basic enhanced)
+  @maintenance_reasons ~w(low_relevance quota_exceeded)
   @operation_kinds ~w(
-    add_edge add_node add_pending_learning approve_pending cascade_recall consolidate
+    add_edge add_node add_pending_fact add_pending_learning approve_pending cascade_recall consolidate
     merge_node_metadata reinforce reject_pending
   )
   @config_keys ~w(auto_embed decay_rate max_nodes_per_type prune_threshold)
@@ -76,7 +87,11 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
                       [
                         :accepted,
                         :action,
+                        :archived_count,
                         :auto_embed,
+                        :average_relevance,
+                        :basic,
+                        :blocked_at,
                         :capability,
                         :category,
                         :confidence,
@@ -86,8 +101,11 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
                         :created_by,
                         :decay_rate,
                         :description,
+                        :decayed_count,
                         :detection_source,
                         :evidence,
+                        :enhanced,
+                        :evicted_count,
                         :failure,
                         :failure_then_success,
                         :feedback,
@@ -108,12 +126,16 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
                         :personality,
                         :preference,
                         :preserved,
+                        :promotion_blocked,
+                        :pruned_count,
                         :prune_threshold,
+                        :quota_exceeded,
                         :query_used,
                         :reason,
                         :reflection,
                         :reflection_learning,
                         :rejected,
+                        :reinforced_count,
                         :repeated_sequence,
                         :required,
                         :review,
@@ -124,6 +146,7 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
                         :tags,
                         :task_id,
                         :technical,
+                        :total_nodes,
                         :tool,
                         :tool_name,
                         :tools,
@@ -160,7 +183,8 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
           aggregate: label(),
           nodes: %{String.t() => labelled_item()},
           pending_facts: %{String.t() => labelled_item()},
-          pending_learnings: %{String.t() => labelled_item()}
+          pending_learnings: %{String.t() => labelled_item()},
+          maintenance_effects: %{String.t() => labelled_item()}
         }
 
   @spec kind() :: String.t()
@@ -191,11 +215,18 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
          true <- exact_graph_struct?(graph),
          true <- graph.agent_id == agent_id,
          :ok <-
-           validate_content_inventory(graph.nodes, graph.pending_facts, graph.pending_learnings),
+           validate_content_inventory(
+             graph.nodes,
+             graph.pending_facts,
+             graph.pending_learnings,
+             graph.pending_maintenance_effect
+           ),
          {:ok, nodes} <- encode_nodes(graph.nodes),
          {:ok, edges} <- encode_edges(graph.edges, Map.keys(nodes)),
          {:ok, pending_facts} <- encode_pending(graph.pending_facts, :fact),
          {:ok, pending_learnings} <- encode_pending(graph.pending_learnings, :learning),
+         {:ok, pending_maintenance_effect} <-
+           encode_maintenance_effect(graph.pending_maintenance_effect),
          {:ok, operation_receipts} <- encode_operation_receipts(graph.operation_receipts),
          {:ok, operation_receipt_order} <-
            encode_operation_receipt_order(
@@ -214,6 +245,7 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
         "edges" => edges,
         "pending_facts" => pending_facts,
         "pending_learnings" => pending_learnings,
+        "pending_maintenance_effect" => pending_maintenance_effect,
         "operation_receipts" => operation_receipts,
         "operation_receipt_order" => operation_receipt_order,
         "config" => config,
@@ -234,7 +266,8 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
           base_payload: base_payload(payload),
           nodes: nodes,
           pending_facts: index_pending(pending_facts),
-          pending_learnings: index_pending(pending_learnings)
+          pending_learnings: index_pending(pending_learnings),
+          maintenance_effects: index_maintenance_effect(pending_maintenance_effect)
         }
 
         with :ok <- validate_prepared_capacity(prepared) do
@@ -259,19 +292,30 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
   @spec reconcile(String.t(), KnowledgeGraph.t(), snapshot() | nil, term()) ::
           {:ok, snapshot()} | {:error, atom()}
   def reconcile(agent_id, graph, previous, supplied_taint) do
+    reconcile(agent_id, graph, previous, supplied_taint, %{})
+  end
+
+  @spec reconcile(String.t(), KnowledgeGraph.t(), snapshot() | nil, term(), map()) ::
+          {:ok, snapshot()} | {:error, atom()}
+  def reconcile(agent_id, graph, previous, supplied_taint, context) do
     with {:ok, prepared} <- prepare(agent_id, graph),
-         {:ok, supplied_taint} <- Taint.canonicalize(supplied_taint) do
+         {:ok, supplied_taint} <- Taint.canonicalize(supplied_taint),
+         {:ok, context} <- normalize_reconciliation_context(context) do
       supplied = label_record(supplied_taint, status_for_taint(supplied_taint))
 
       base =
-        reconcile_label(
-          prepared.base_payload,
-          previous_value(previous, :base_payload),
-          previous_label(previous, :base),
-          supplied
-        )
+        if context.provenance_neutral and previous_label(previous, :base) do
+          previous_label(previous, :base)
+        else
+          reconcile_label(
+            prepared.base_payload,
+            previous_value(previous, :base_payload),
+            previous_label(previous, :base),
+            supplied
+          )
+        end
 
-      nodes = reconcile_items(prepared.nodes, previous_items(previous, :nodes), supplied)
+      nodes = reconcile_nodes(prepared.nodes, previous, supplied, context.accepted_pending)
 
       pending_facts =
         reconcile_items(
@@ -287,9 +331,19 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
           supplied
         )
 
+      maintenance_effects =
+        reconcile_maintenance_effects(
+          prepared.maintenance_effects,
+          previous,
+          supplied,
+          context.archived_node_ids
+        )
+
       components =
         [base] ++
-          item_labels(nodes) ++ item_labels(pending_facts) ++ item_labels(pending_learnings)
+          item_labels(nodes) ++
+          item_labels(pending_facts) ++
+          item_labels(pending_learnings) ++ item_labels(maintenance_effects)
 
       aggregate =
         case previous_label(previous, :aggregate) do
@@ -303,7 +357,8 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
           aggregate: aggregate,
           nodes: nodes,
           pending_facts: pending_facts,
-          pending_learnings: pending_learnings
+          pending_learnings: pending_learnings,
+          maintenance_effects: maintenance_effects
         })
 
       with {:ok, _wrapper} <- encode(snapshot) do
@@ -325,7 +380,9 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
          {:ok, aggregate} <- encode_label_entry(snapshot.payload, snapshot.aggregate),
          {:ok, nodes} <- encode_labelled_inventory(snapshot.nodes),
          {:ok, pending_facts} <- encode_labelled_inventory(snapshot.pending_facts),
-         {:ok, pending_learnings} <- encode_labelled_inventory(snapshot.pending_learnings) do
+         {:ok, pending_learnings} <- encode_labelled_inventory(snapshot.pending_learnings),
+         {:ok, maintenance_effects} <-
+           encode_labelled_inventory(snapshot.maintenance_effects) do
       wrapper = %{
         "kind" => @kind,
         "version" => @version,
@@ -336,7 +393,8 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
           "aggregate" => aggregate,
           "nodes" => nodes,
           "pending_facts" => pending_facts,
-          "pending_learnings" => pending_learnings
+          "pending_learnings" => pending_learnings,
+          "maintenance_effects" => maintenance_effects
         }
       }
 
@@ -404,12 +462,18 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
              provenance["pending_learnings"],
              index_pending(data["payload"]["pending_learnings"])
            ),
+         {:ok, maintenance_effects} <-
+           decode_labelled_inventory(
+             provenance["maintenance_effects"],
+             index_maintenance_effect(data["payload"]["pending_maintenance_effect"])
+           ),
          {:ok, aggregate} <- decode_label_entry(provenance["aggregate"], data["payload"]),
          minimum <-
            join_labels(
              [base] ++
                item_labels(nodes) ++
-               item_labels(pending_facts) ++ item_labels(pending_learnings)
+               item_labels(pending_facts) ++
+               item_labels(pending_learnings) ++ item_labels(maintenance_effects)
            ),
          true <- label_dominates?(aggregate, minimum) do
       snapshot = %{
@@ -420,7 +484,8 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
         aggregate: aggregate,
         nodes: nodes,
         pending_facts: pending_facts,
-        pending_learnings: pending_learnings
+        pending_learnings: pending_learnings,
+        maintenance_effects: maintenance_effects
       }
 
       normalize_outer_provenance(snapshot, outer_taint, outer_status)
@@ -444,6 +509,7 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
       nodes = label_inventory(prepared.nodes, floor)
       pending_facts = label_inventory(prepared.pending_facts, floor)
       pending_learnings = label_inventory(prepared.pending_learnings, floor)
+      maintenance_effects = label_inventory(prepared.maintenance_effects, floor)
 
       {:ok,
        Map.merge(prepared, %{
@@ -451,7 +517,8 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
          aggregate: floor,
          nodes: nodes,
          pending_facts: pending_facts,
-         pending_learnings: pending_learnings
+         pending_learnings: pending_learnings,
+         maintenance_effects: maintenance_effects
        }), :migration}
     else
       {:error, _reason} = error -> error
@@ -481,12 +548,14 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
       nodes = join_inventory_floor(snapshot.nodes, floor)
       pending_facts = join_inventory_floor(snapshot.pending_facts, floor)
       pending_learnings = join_inventory_floor(snapshot.pending_learnings, floor)
+      maintenance_effects = join_inventory_floor(snapshot.maintenance_effects, floor)
 
       aggregate =
         join_labels(
           [snapshot.aggregate, base, floor] ++
             item_labels(nodes) ++
-            item_labels(pending_facts) ++ item_labels(pending_learnings)
+            item_labels(pending_facts) ++
+            item_labels(pending_learnings) ++ item_labels(maintenance_effects)
         )
 
       {:ok,
@@ -496,7 +565,8 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
            aggregate: aggregate,
            nodes: nodes,
            pending_facts: pending_facts,
-           pending_learnings: pending_learnings
+           pending_learnings: pending_learnings,
+           maintenance_effects: maintenance_effects
        }, :migration}
     else
       _ -> {:error, :invalid_wrapper}
@@ -514,18 +584,26 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
            validate_encoded_content_inventory(
              payload["nodes"],
              payload["pending_facts"],
-             payload["pending_learnings"]
+             payload["pending_learnings"],
+             payload["pending_maintenance_effect"]
            ),
          {:ok, nodes} <- decode_nodes(payload["nodes"]),
          {:ok, edges} <- decode_edges(payload["edges"], nodes),
          {:ok, pending_facts} <- decode_pending(payload["pending_facts"], :fact),
          {:ok, pending_learnings} <- decode_pending(payload["pending_learnings"], :learning),
+         {:ok, pending_maintenance_effect} <-
+           decode_maintenance_effect(payload["pending_maintenance_effect"]),
          :ok <- ensure_decoded_pending_ids_disjoint(pending_facts, pending_learnings),
          {:ok, operation_receipts} <-
            decode_operation_receipts(payload["operation_receipts"]),
          {:ok, operation_receipt_order} <-
            decode_operation_receipt_order(
              payload["operation_receipt_order"],
+             operation_receipts
+           ),
+         :ok <-
+           validate_maintenance_receipt_link(
+             pending_maintenance_effect,
              operation_receipts
            ),
          {:ok, config} <- decode_config(payload["config"]),
@@ -543,6 +621,7 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
          edges: edges,
          pending_facts: pending_facts,
          pending_learnings: pending_learnings,
+         pending_maintenance_effect: pending_maintenance_effect,
          operation_receipts: operation_receipts,
          operation_receipt_order: operation_receipt_order,
          config: config,
@@ -919,16 +998,166 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
     end
   end
 
+  defp encode_maintenance_effect(nil), do: {:ok, nil}
+
+  defp encode_maintenance_effect(effect) when is_map(effect) and not is_struct(effect) do
+    with :ok <- validate_legacy_map_shape(effect, @maintenance_effect_keys),
+         :ok <- validate_identifier(field(effect, :operation_id)),
+         {:ok, mode} <- normalize_maintenance_mode(field(effect, :mode)),
+         {:ok, occurred_at} <- encode_datetime(field(effect, :occurred_at)),
+         {:ok, archive_entries} <-
+           encode_maintenance_archive_entries(field(effect, :archive_entries)),
+         {:ok, metrics} <- encode_maintenance_metrics(field(effect, :metrics)) do
+      {:ok,
+       %{
+         "operation_id" => field(effect, :operation_id),
+         "mode" => Atom.to_string(mode),
+         "occurred_at" => occurred_at,
+         "archive_entries" => archive_entries,
+         "metrics" => metrics
+       }}
+    else
+      {:error, _reason} = error -> error
+      _ -> {:error, :invalid_graph}
+    end
+  end
+
+  defp encode_maintenance_effect(_effect), do: {:error, :invalid_graph}
+
+  defp decode_maintenance_effect(nil), do: {:ok, nil}
+
+  defp decode_maintenance_effect(effect) when is_map(effect) and not is_struct(effect) do
+    with true <- exact_string_keys?(effect, @maintenance_effect_keys),
+         :ok <- validate_identifier(effect["operation_id"]),
+         {:ok, mode} <- normalize_maintenance_mode(effect["mode"]),
+         {:ok, occurred_at} <- decode_datetime(effect["occurred_at"]),
+         {:ok, archive_entries} <-
+           decode_maintenance_archive_entries(effect["archive_entries"]),
+         {:ok, metrics} <- decode_maintenance_metrics(effect["metrics"]) do
+      {:ok,
+       %{
+         operation_id: effect["operation_id"],
+         mode: mode,
+         occurred_at: occurred_at,
+         archive_entries: archive_entries,
+         metrics: metrics
+       }}
+    else
+      _ -> {:error, :invalid_graph}
+    end
+  end
+
+  defp decode_maintenance_effect(_effect), do: {:error, :invalid_graph}
+
+  defp encode_maintenance_archive_entries(entries) do
+    reduce_bounded_list(entries, @max_content_items, {:ok, [], MapSet.new()}, fn entry,
+                                                                                 {:ok, acc, seen} ->
+      with true <- is_map(entry) and not is_struct(entry),
+           :ok <- validate_legacy_map_shape(entry, @maintenance_archive_entry_keys),
+           node when is_map(node) and not is_struct(node) <- field(entry, :node),
+           id when is_binary(id) <- field(node, :id),
+           false <- MapSet.member?(seen, id),
+           {:ok, encoded_node} <- encode_node(id, node),
+           {:ok, reason} <- normalize_maintenance_reason(field(entry, :reason)) do
+        encoded = %{"node" => encoded_node, "reason" => Atom.to_string(reason)}
+        {:ok, [encoded | acc], MapSet.put(seen, id)}
+      else
+        _ -> {:error, :invalid_graph}
+      end
+    end)
+    |> case do
+      {:ok, reversed, _seen} -> {:ok, Enum.reverse(reversed)}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp decode_maintenance_archive_entries(entries) do
+    reduce_bounded_list(entries, @max_content_items, {:ok, [], MapSet.new()}, fn entry,
+                                                                                 {:ok, acc, seen} ->
+      with true <- exact_string_keys?(entry, @maintenance_archive_entry_keys),
+           node when is_map(node) and not is_struct(node) <- entry["node"],
+           id when is_binary(id) <- node["id"],
+           false <- MapSet.member?(seen, id),
+           {:ok, decoded_node} <- decode_node(id, node),
+           {:ok, reason} <- normalize_maintenance_reason(entry["reason"]) do
+        {:ok, [%{node: decoded_node, reason: reason} | acc], MapSet.put(seen, id)}
+      else
+        _ -> {:error, :invalid_graph}
+      end
+    end)
+    |> case do
+      {:ok, reversed, _seen} -> {:ok, Enum.reverse(reversed)}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp encode_maintenance_metrics(metrics)
+       when is_map(metrics) and not is_struct(metrics) do
+    with :ok <- validate_legacy_map_shape(metrics, @maintenance_metric_keys),
+         normalized <-
+           Map.new(@maintenance_metric_keys, fn key ->
+             {key, field(metrics, Map.fetch!(@semantic_atoms_by_name, key))}
+           end),
+         true <- exact_string_keys?(normalized, @maintenance_metric_keys),
+         true <- valid_maintenance_metrics?(normalized) do
+      {:ok, normalized}
+    else
+      _ -> {:error, :invalid_graph}
+    end
+  end
+
+  defp encode_maintenance_metrics(_metrics), do: {:error, :invalid_graph}
+
+  defp decode_maintenance_metrics(metrics)
+       when is_map(metrics) and not is_struct(metrics) do
+    with true <- exact_string_keys?(metrics, @maintenance_metric_keys),
+         true <- valid_maintenance_metrics?(metrics) do
+      {:ok,
+       Map.new(metrics, fn {key, value} ->
+         {Map.fetch!(@semantic_atoms_by_name, key), value}
+       end)}
+    else
+      _ -> {:error, :invalid_graph}
+    end
+  end
+
+  defp decode_maintenance_metrics(_metrics), do: {:error, :invalid_graph}
+
+  defp valid_maintenance_metrics?(metrics) do
+    Enum.all?(
+      @maintenance_metric_keys -- ["average_relevance"],
+      &valid_non_negative_integer?(metrics[&1])
+    ) and valid_ratio?(metrics["average_relevance"])
+  end
+
+  defp normalize_maintenance_mode(value) when is_atom(value),
+    do: normalize_maintenance_mode(Atom.to_string(value))
+
+  defp normalize_maintenance_mode(value) when value in @maintenance_modes,
+    do: {:ok, Map.fetch!(@semantic_atoms_by_name, value)}
+
+  defp normalize_maintenance_mode(_value), do: {:error, :invalid_graph}
+
+  defp normalize_maintenance_reason(value) when is_atom(value),
+    do: normalize_maintenance_reason(Atom.to_string(value))
+
+  defp normalize_maintenance_reason(value) when value in @maintenance_reasons,
+    do: {:ok, Map.fetch!(@semantic_atoms_by_name, value)}
+
+  defp normalize_maintenance_reason(_value), do: {:error, :invalid_graph}
+
   defp encode_operation_receipts(receipts)
        when is_map(receipts) and not is_struct(receipts) and
               map_size(receipts) <= @max_operation_receipts do
     Enum.reduce_while(receipts, {:ok, %{}}, fn {operation_id, receipt}, {:ok, acc} ->
       with :ok <- validate_identifier(operation_id),
-           {:ok, normalized} <- normalize_operation_receipt(receipt) do
+           {:ok, normalized} <- normalize_operation_receipt(receipt),
+           {:ok, result} <-
+             encode_operation_receipt_result(normalized.kind, normalized.result) do
         encoded = %{
           "kind" => normalized.kind,
           "fingerprint" => normalized.fingerprint,
-          "result" => normalized.result
+          "result" => result
         }
 
         {:cont, {:ok, Map.put(acc, operation_id, encoded)}}
@@ -982,7 +1211,7 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
 
     with true <- kind in @operation_kinds,
          true <- valid_fingerprint?(fingerprint),
-         :ok <- validate_identifier(result) do
+         {:ok, result} <- normalize_operation_receipt_result(kind, result) do
       {:ok, %{kind: kind, fingerprint: fingerprint, result: result}}
     else
       _ -> {:error, :invalid_graph}
@@ -990,6 +1219,39 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
   end
 
   defp normalize_operation_receipt(_receipt), do: {:error, :invalid_graph}
+
+  defp normalize_operation_receipt_result("consolidate", result)
+       when is_map(result) and not is_struct(result) do
+    with :ok <- validate_legacy_map_shape(result, @maintenance_receipt_keys),
+         status when status in ["pending", "drained"] <- field(result, :status),
+         {:ok, metrics} <- encode_maintenance_metrics(field(result, :metrics)),
+         {:ok, metrics} <- decode_maintenance_metrics(metrics) do
+      {:ok, %{status: status, metrics: metrics}}
+    else
+      _ -> {:error, :invalid_graph}
+    end
+  end
+
+  defp normalize_operation_receipt_result("consolidate", _result),
+    do: {:error, :invalid_graph}
+
+  defp normalize_operation_receipt_result(_kind, result) do
+    with :ok <- validate_identifier(result), do: {:ok, result}
+  end
+
+  defp encode_operation_receipt_result("consolidate", %{status: status, metrics: metrics}) do
+    with true <- status in ["pending", "drained"],
+         {:ok, metrics} <- encode_maintenance_metrics(metrics) do
+      {:ok, %{"status" => status, "metrics" => metrics}}
+    else
+      _ -> {:error, :invalid_graph}
+    end
+  end
+
+  defp encode_operation_receipt_result(_kind, result) when is_binary(result),
+    do: {:ok, result}
+
+  defp encode_operation_receipt_result(_kind, _result), do: {:error, :invalid_graph}
 
   defp encode_operation_receipt_order(order, receipts) do
     reduce_bounded_list(order, @max_operation_receipts, {:ok, [], MapSet.new()}, fn operation_id,
@@ -1017,6 +1279,30 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
   defp decode_operation_receipt_order(order, receipts),
     do: encode_operation_receipt_order(order, receipts)
 
+  defp validate_maintenance_receipt_link(nil, receipts) do
+    if Enum.any?(receipts, fn {_id, receipt} -> pending_maintenance_receipt?(receipt) end),
+      do: {:error, :invalid_graph},
+      else: :ok
+  end
+
+  defp validate_maintenance_receipt_link(
+         %{operation_id: operation_id, metrics: metrics},
+         receipts
+       ) do
+    case Map.fetch(receipts, operation_id) do
+      {:ok, %{kind: "consolidate", result: %{status: "pending", metrics: ^metrics}}} -> :ok
+      _ -> {:error, :invalid_graph}
+    end
+  end
+
+  defp pending_maintenance_receipt?(%{
+         kind: "consolidate",
+         result: %{status: "pending"}
+       }),
+       do: true
+
+  defp pending_maintenance_receipt?(_receipt), do: false
+
   defp encode_active_set(active_set, node_ids) do
     node_ids = MapSet.new(node_ids)
 
@@ -1039,23 +1325,64 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
 
   defp decode_active_set(active_set, nodes), do: encode_active_set(active_set, Map.keys(nodes))
 
-  defp validate_content_inventory(nodes, pending_facts, pending_learnings)
+  defp validate_content_inventory(
+         nodes,
+         pending_facts,
+         pending_learnings,
+         pending_maintenance_effect
+       )
        when is_map(nodes) and not is_struct(nodes) do
     with {:ok, facts_count} <- bounded_list_count(pending_facts, @max_content_items),
          {:ok, learning_count} <-
            bounded_list_count(pending_learnings, @max_content_items - facts_count),
-         true <- map_size(nodes) + facts_count + learning_count <= @max_content_items do
+         {:ok, maintenance_count} <-
+           bounded_maintenance_entry_count(
+             pending_maintenance_effect,
+             @max_content_items - facts_count - learning_count
+           ),
+         true <-
+           map_size(nodes) + facts_count + learning_count + maintenance_count <=
+             @max_content_items do
       :ok
     else
       _ -> {:error, :graph_limit_exceeded}
     end
   end
 
-  defp validate_content_inventory(_nodes, _pending_facts, _pending_learnings),
-    do: {:error, :invalid_graph}
+  defp validate_content_inventory(
+         _nodes,
+         _pending_facts,
+         _pending_learnings,
+         _pending_maintenance_effect
+       ),
+       do: {:error, :invalid_graph}
 
-  defp validate_encoded_content_inventory(nodes, pending_facts, pending_learnings),
-    do: validate_content_inventory(nodes, pending_facts, pending_learnings)
+  defp validate_encoded_content_inventory(
+         nodes,
+         pending_facts,
+         pending_learnings,
+         pending_maintenance_effect
+       ),
+       do:
+         validate_content_inventory(
+           nodes,
+           pending_facts,
+           pending_learnings,
+           pending_maintenance_effect
+         )
+
+  defp bounded_maintenance_entry_count(nil, _limit), do: {:ok, 0}
+
+  defp bounded_maintenance_entry_count(effect, limit)
+       when is_map(effect) and not is_struct(effect) and limit >= 0 do
+    case field(effect, :archive_entries) do
+      entries when is_list(entries) -> bounded_list_count(entries, limit)
+      _ -> {:error, :graph_limit_exceeded}
+    end
+  end
+
+  defp bounded_maintenance_entry_count(_effect, _limit),
+    do: {:error, :graph_limit_exceeded}
 
   defp legacy_preflight(agent_id, data) when is_map(data) and not is_struct(data) do
     with :ok <- validate_legacy_map_shape(data, @payload_keys),
@@ -1064,7 +1391,13 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
          edges when is_map(edges) and not is_struct(edges) <- field(data, :edges),
          pending_facts when is_list(pending_facts) <- field(data, :pending_facts, []),
          pending_learnings when is_list(pending_learnings) <- field(data, :pending_learnings, []),
-         :ok <- validate_content_inventory(nodes, pending_facts, pending_learnings),
+         :ok <-
+           validate_content_inventory(
+             nodes,
+             pending_facts,
+             pending_learnings,
+             field(data, :pending_maintenance_effect)
+           ),
          :ok <- legacy_node_preflight(nodes),
          :ok <- legacy_edge_preflight(edges),
          {:ok, fact_ids} <- legacy_pending_preflight(pending_facts, :fact),
@@ -1077,6 +1410,8 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
              field(data, :operation_receipt_order, []),
              field(data, :operation_receipts, %{})
            ),
+         {:ok, _maintenance_effect} <-
+           encode_maintenance_effect(field(data, :pending_maintenance_effect)),
          :ok <- legacy_config_preflight(field(data, :config, %{})),
          :ok <- legacy_type_quotas_preflight(field(data, :type_quotas, %{})) do
       :ok
@@ -1258,10 +1593,128 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
     end
   end
 
+  defp normalize_reconciliation_context(context)
+       when is_map(context) and not is_struct(context) and map_size(context) <= 3 do
+    allowed = [:accepted_pending, :archived_node_ids, :provenance_neutral]
+
+    with true <- Enum.all?(Map.keys(context), &(&1 in allowed)),
+         {:ok, accepted_pending} <-
+           normalize_accepted_pending(Map.get(context, :accepted_pending, %{})),
+         {:ok, archived_node_ids} <-
+           normalize_archived_node_ids(Map.get(context, :archived_node_ids, [])),
+         provenance_neutral when is_boolean(provenance_neutral) <-
+           Map.get(context, :provenance_neutral, false) do
+      {:ok,
+       %{
+         accepted_pending: accepted_pending,
+         archived_node_ids: archived_node_ids,
+         provenance_neutral: provenance_neutral
+       }}
+    else
+      _ -> {:error, :invalid_graph}
+    end
+  end
+
+  defp normalize_reconciliation_context(_context), do: {:error, :invalid_graph}
+
+  defp normalize_accepted_pending(transfers)
+       when is_map(transfers) and not is_struct(transfers) and map_size(transfers) <= 1 do
+    Enum.reduce_while(transfers, {:ok, %{}}, fn {node_id, pending_id}, {:ok, acc} ->
+      with :ok <- validate_identifier(node_id),
+           :ok <- validate_identifier(pending_id) do
+        {:cont, {:ok, Map.put(acc, node_id, pending_id)}}
+      else
+        _ -> {:halt, {:error, :invalid_graph}}
+      end
+    end)
+  end
+
+  defp normalize_accepted_pending(_transfers), do: {:error, :invalid_graph}
+
+  defp normalize_archived_node_ids(node_ids) do
+    reduce_bounded_list(node_ids, @max_content_items, {:ok, MapSet.new()}, fn node_id,
+                                                                              {:ok, seen} ->
+      with :ok <- validate_identifier(node_id),
+           false <- MapSet.member?(seen, node_id) do
+        {:ok, MapSet.put(seen, node_id)}
+      else
+        _ -> {:error, :invalid_graph}
+      end
+    end)
+  end
+
   defp reconcile_items(current, previous, supplied) do
     Map.new(current, fn {id, payload} ->
       prior = Map.get(previous, id)
       label = reconcile_label(payload, item_payload(prior), item_label(prior), supplied)
+      {id, %{payload: payload, label: label}}
+    end)
+  end
+
+  defp reconcile_nodes(current, previous, supplied, accepted_pending) do
+    previous_nodes = previous_items(previous, :nodes)
+
+    Map.new(current, fn {id, payload} ->
+      prior = Map.get(previous_nodes, id)
+
+      label =
+        case prior do
+          nil ->
+            transferred_pending_label(id, payload, previous, accepted_pending) || supplied
+
+          prior ->
+            reconcile_label(payload, item_payload(prior), item_label(prior), supplied)
+        end
+
+      {id, %{payload: payload, label: label}}
+    end)
+  end
+
+  defp transferred_pending_label(node_id, payload, previous, accepted_pending)
+       when is_map(previous) do
+    with pending_id when is_binary(pending_id) <- Map.get(accepted_pending, node_id),
+         %{payload: pending_payload, label: label} <- previous_pending_item(previous, pending_id),
+         true <- accepted_node_matches_pending?(payload, pending_payload) do
+      label
+    else
+      _ -> nil
+    end
+  end
+
+  defp transferred_pending_label(_node_id, _payload, _previous, _accepted_pending), do: nil
+
+  defp previous_pending_item(previous, pending_id) do
+    Map.get(previous_items(previous, :pending_facts), pending_id) ||
+      Map.get(previous_items(previous, :pending_learnings), pending_id)
+  end
+
+  defp accepted_node_matches_pending?(node_payload, pending_payload) do
+    expected_type = if pending_payload["type"] == "fact", do: "fact", else: "skill"
+
+    pending_payload["type"] in ["fact", "learning"] and
+      node_payload["type"] == expected_type and
+      node_payload["content"] == pending_payload["content"]
+  end
+
+  defp reconcile_maintenance_effects(current, previous, supplied, archived_node_ids) do
+    previous_effects = previous_items(previous, :maintenance_effects)
+    previous_nodes = previous_items(previous, :nodes)
+
+    Map.new(current, fn {id, payload} ->
+      prior = Map.get(previous_effects, id)
+
+      label =
+        cond do
+          prior != nil ->
+            reconcile_label(payload, item_payload(prior), item_label(prior), supplied)
+
+          MapSet.member?(archived_node_ids, id) and Map.has_key?(previous_nodes, id) ->
+            previous_nodes |> Map.fetch!(id) |> item_label()
+
+          true ->
+            supplied
+        end
+
       {id, %{payload: payload, label: label}}
     end)
   end
@@ -1352,9 +1805,21 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
   defp decode_status(_status), do: {:error, :invalid_wrapper}
 
   defp base_payload(payload),
-    do: Map.drop(payload, ["nodes", "pending_facts", "pending_learnings"])
+    do:
+      Map.drop(payload, [
+        "nodes",
+        "pending_facts",
+        "pending_learnings",
+        "pending_maintenance_effect"
+      ])
 
   defp index_pending(items), do: Map.new(items, &{&1["id"], &1})
+
+  defp index_maintenance_effect(nil), do: %{}
+
+  defp index_maintenance_effect(%{"archive_entries" => entries}) do
+    Map.new(entries, fn entry -> {entry["node"]["id"], entry} end)
+  end
 
   defp ensure_pending_ids_disjoint(facts, learnings) do
     fact_ids = MapSet.new(facts, & &1["id"])
@@ -1383,12 +1848,22 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
            encode_operation_receipt_order(
              graph.operation_receipt_order,
              operation_receipts
+           ),
+         {:ok, encoded_maintenance_effect} <-
+           encode_maintenance_effect(graph.pending_maintenance_effect),
+         {:ok, pending_maintenance_effect} <-
+           decode_maintenance_effect(encoded_maintenance_effect),
+         :ok <-
+           validate_maintenance_receipt_link(
+             pending_maintenance_effect,
+             operation_receipts
            ) do
       {:ok,
        %{
          graph
          | config: config,
            type_quotas: type_quotas,
+           pending_maintenance_effect: pending_maintenance_effect,
            operation_receipts: operation_receipts,
            operation_receipt_order: operation_receipt_order
        }}
@@ -1495,7 +1970,8 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
         aggregate: label,
         nodes: label_inventory(prepared.nodes, label),
         pending_facts: label_inventory(prepared.pending_facts, label),
-        pending_learnings: label_inventory(prepared.pending_learnings, label)
+        pending_learnings: label_inventory(prepared.pending_learnings, label),
+        maintenance_effects: label_inventory(prepared.maintenance_effects, label)
       })
 
     case encode(snapshot) do
@@ -1870,6 +2346,7 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
         :operation_receipt_order,
         :pending_facts,
         :pending_learnings,
+        :pending_maintenance_effect,
         :type_quotas
       ]
       |> Enum.sort()

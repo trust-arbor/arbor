@@ -42,9 +42,11 @@ defmodule Arbor.Memory.Events do
   """
 
   alias Arbor.Persistence.Event
+  alias Arbor.Contracts.Security.{Taint, TaintEnvelope}
 
   @event_log_name :memory_events
   @event_log_backend Arbor.Persistence.EventLog.ETS
+  @archive_append_attempts 2
 
   # ============================================================================
   # Event Recording (Dual-Emit)
@@ -226,6 +228,50 @@ defmodule Arbor.Memory.Events do
     })
   end
 
+  @doc false
+  @spec archive_knowledge_once(String.t(), map(), DateTime.t()) :: :ok | {:error, term()}
+  def archive_knowledge_once(
+        agent_id,
+        %{
+          archive_payload: archive_payload,
+          idempotency_key: idempotency_key,
+          provenance_status: provenance_status,
+          taint: %Taint{} = taint
+        },
+        %DateTime{} = occurred_at
+      ) do
+    with true <- provenance_status in [:verified, :legacy_unlabeled, :invalid_durable_provenance],
+         {:ok, envelope} <- TaintEnvelope.new(archive_payload, taint),
+         {:ok, envelope} <- TaintEnvelope.to_map(envelope),
+         {:ok, event_id} <- archive_event_id(idempotency_key),
+         %Event{} = event <-
+           Event.new(
+             stream_id(agent_id),
+             "knowledge_archived",
+             %{
+               "agent_id" => agent_id,
+               "archive" => envelope,
+               "provenance_status" => Atom.to_string(provenance_status)
+             },
+             id: event_id,
+             timestamp: occurred_at,
+             metadata: %{"source" => "knowledge_graph_maintenance"}
+           ),
+         :ok <- append_exact_archive(stream_id(agent_id), event, @archive_append_attempts) do
+      :ok
+    else
+      {:error, _reason} = error -> error
+      _ -> {:error, :invalid_archive_effect}
+    end
+  rescue
+    _ -> {:error, :archive_sink_unavailable}
+  catch
+    _, _ -> {:error, :archive_sink_unavailable}
+  end
+
+  def archive_knowledge_once(_agent_id, _entry, _occurred_at),
+    do: {:error, :invalid_archive_effect}
+
   @doc """
   Record a relationship being created.
 
@@ -401,6 +447,71 @@ defmodule Arbor.Memory.Events do
   # ============================================================================
   # Private Helpers
   # ============================================================================
+
+  defp archive_event_id({operation_id, node_id, reason})
+       when is_binary(operation_id) and is_binary(node_id) and is_atom(reason) do
+    digest =
+      {:knowledge_graph_archive, operation_id, node_id, reason}
+      |> :erlang.term_to_binary([:deterministic])
+      |> then(&:crypto.hash(:sha256, &1))
+      |> Base.encode16(case: :lower)
+
+    {:ok, "evt_kg_archive_#{digest}"}
+  rescue
+    _ -> {:error, :invalid_archive_effect}
+  catch
+    _, _ -> {:error, :invalid_archive_effect}
+  end
+
+  defp archive_event_id(_identity), do: {:error, :invalid_archive_effect}
+
+  defp append_exact_archive(_stream_id, _event, 0),
+    do: {:error, :archive_outcome_unknown}
+
+  defp append_exact_archive(stream_id, event, attempts) do
+    if Process.whereis(@event_log_name) do
+      case Arbor.Persistence.append(
+             @event_log_name,
+             @event_log_backend,
+             stream_id,
+             event
+           ) do
+        {:ok, [%Event{id: event_id}]} when event_id == event.id ->
+          :ok
+
+        {:error, {:append_indeterminate, operation}} ->
+          reconcile_archive_append(stream_id, event, operation, attempts)
+
+        {:error, _reason} = error ->
+          error
+
+        _ ->
+          {:error, :archive_outcome_unknown}
+      end
+    else
+      {:error, :archive_sink_unavailable}
+    end
+  end
+
+  defp reconcile_archive_append(stream_id, event, operation, attempts) do
+    case Arbor.Persistence.reconcile_append(
+           @event_log_name,
+           @event_log_backend,
+           operation
+         ) do
+      {:ok, {:committed, [%Event{id: event_id}]}} when event_id == event.id ->
+        :ok
+
+      {:ok, :absent} ->
+        append_exact_archive(stream_id, event, attempts - 1)
+
+      {:error, _reason} = error ->
+        error
+
+      _ ->
+        {:error, :archive_outcome_unknown}
+    end
+  end
 
   # Dual-emit: write to the local :memory_events EventLog (for queries)
   # AND emit on the signal bus (for real-time + historian persistence).

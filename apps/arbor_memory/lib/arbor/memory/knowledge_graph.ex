@@ -123,7 +123,15 @@ defmodule Arbor.Memory.KnowledgeGraph do
   @type operation_receipt :: %{
           kind: String.t(),
           fingerprint: String.t(),
-          result: String.t()
+          result: String.t() | %{status: String.t(), metrics: map()}
+        }
+
+  @type maintenance_effect :: %{
+          operation_id: String.t(),
+          mode: :basic | :enhanced,
+          occurred_at: DateTime.t(),
+          archive_entries: [%{node: knowledge_node(), reason: :low_relevance | :quota_exceeded}],
+          metrics: map()
         }
 
   @type t :: %__MODULE__{
@@ -132,6 +140,7 @@ defmodule Arbor.Memory.KnowledgeGraph do
           edges: %{node_id() => [edge()]},
           pending_facts: [pending_item()],
           pending_learnings: [pending_item()],
+          pending_maintenance_effect: maintenance_effect() | nil,
           operation_receipts: %{String.t() => operation_receipt()},
           operation_receipt_order: [String.t()],
           config: map(),
@@ -149,6 +158,7 @@ defmodule Arbor.Memory.KnowledgeGraph do
     edges: %{},
     pending_facts: [],
     pending_learnings: [],
+    pending_maintenance_effect: nil,
     operation_receipts: %{},
     operation_receipt_order: [],
     config: %{},
@@ -805,6 +815,34 @@ defmodule Arbor.Memory.KnowledgeGraph do
   end
 
   @doc false
+  @spec add_pending_fact_transition(t(), map(), String.t(), DateTime.t()) ::
+          {:ok, t(), String.t()} | {:error, term()}
+  def add_pending_fact_transition(graph, fact_data, pending_id, %DateTime{} = occurred_at)
+      when is_map(fact_data) and is_binary(pending_id) do
+    with {:ok, content} <- validate_content(fact_data),
+         false <- pending_id_exists?(graph, pending_id) do
+      pending = %{
+        id: pending_id,
+        type: :fact,
+        content: content,
+        confidence: Map.get(fact_data, :confidence, 0.5),
+        source: Map.get(fact_data, :source),
+        extracted_at: occurred_at,
+        metadata: Map.get(fact_data, :metadata, %{})
+      }
+
+      {:ok, %{graph | pending_facts: [pending | graph.pending_facts]}, pending_id}
+    else
+      true -> {:error, :id_conflict}
+      {:error, _reason} = error -> error
+      _ -> {:error, :invalid_graph}
+    end
+  end
+
+  def add_pending_fact_transition(_graph, _fact_data, _pending_id, _occurred_at),
+    do: {:error, :invalid_graph}
+
+  @doc false
   @spec add_pending_learning_transition(t(), map(), String.t(), DateTime.t()) ::
           {:ok, t(), String.t()} | {:error, term()}
   def add_pending_learning_transition(
@@ -986,6 +1024,7 @@ defmodule Arbor.Memory.KnowledgeGraph do
       edges: graph.edges,
       pending_facts: graph.pending_facts,
       pending_learnings: graph.pending_learnings,
+      pending_maintenance_effect: graph.pending_maintenance_effect,
       operation_receipts: graph.operation_receipts,
       operation_receipt_order: graph.operation_receipt_order,
       config: graph.config,
@@ -1012,6 +1051,7 @@ defmodule Arbor.Memory.KnowledgeGraph do
       edges: edges,
       pending_facts: get_field(data, :pending_facts, []),
       pending_learnings: get_field(data, :pending_learnings, []),
+      pending_maintenance_effect: get_field(data, :pending_maintenance_effect),
       operation_receipts: get_field(data, :operation_receipts, %{}),
       operation_receipt_order: get_field(data, :operation_receipt_order, []),
       config: get_field(data, :config, %{}),

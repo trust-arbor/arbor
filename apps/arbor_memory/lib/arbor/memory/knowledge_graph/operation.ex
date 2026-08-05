@@ -1,6 +1,8 @@
 defmodule Arbor.Memory.KnowledgeGraph.Operation do
   @moduledoc false
 
+  import Kernel, except: [apply: 3]
+
   alias Arbor.Memory.KnowledgeGraph
   alias Arbor.Memory.KnowledgeGraph.{Codec, GraphSearch, Maintenance}
 
@@ -39,6 +41,7 @@ defmodule Arbor.Memory.KnowledgeGraph.Operation do
   @type t ::
           {:initialize, KnowledgeGraph.t()}
           | {:add_node, String.t(), map(), String.t(), DateTime.t()}
+          | {:add_pending_fact, String.t(), map(), String.t(), DateTime.t()}
           | {:add_pending_learning, String.t(), map(), String.t(), DateTime.t()}
           | {:add_edge, String.t(), String.t(), String.t(), atom() | String.t(), keyword(),
              String.t(), DateTime.t()}
@@ -48,6 +51,7 @@ defmodule Arbor.Memory.KnowledgeGraph.Operation do
           | {:reject_pending, String.t(), String.t()}
           | {:cascade_recall, String.t(), String.t(), number(), keyword(), DateTime.t()}
           | {:consolidate, String.t(), :basic | :enhanced, keyword(), DateTime.t()}
+          | {:ack_maintenance_effect, String.t()}
 
   @spec initialize(KnowledgeGraph.t()) :: {:ok, t()} | {:error, atom()}
   def initialize(%KnowledgeGraph{} = graph), do: validate_new({:initialize, graph})
@@ -69,6 +73,14 @@ defmodule Arbor.Memory.KnowledgeGraph.Operation do
     operation =
       {:add_pending_learning, operation_id, learning_data, generated_id("pend_"),
        DateTime.utc_now()}
+
+    validate_new(operation)
+  end
+
+  @spec add_pending_fact(String.t(), map()) :: {:ok, t()} | {:error, atom()}
+  def add_pending_fact(operation_id, fact_data) do
+    operation =
+      {:add_pending_fact, operation_id, fact_data, generated_id("pend_"), DateTime.utc_now()}
 
     validate_new(operation)
   end
@@ -132,6 +144,11 @@ defmodule Arbor.Memory.KnowledgeGraph.Operation do
 
   def consolidate(_operation_id, _mode, _opts), do: {:error, :invalid_graph}
 
+  @spec acknowledge_maintenance_effect(String.t()) :: {:ok, t()} | {:error, atom()}
+  def acknowledge_maintenance_effect(operation_id) do
+    validate_new({:ack_maintenance_effect, operation_id})
+  end
+
   @spec validate(t()) :: :ok | {:error, atom()}
   def validate({:initialize, %KnowledgeGraph{agent_id: agent_id} = graph}) do
     with :ok <- validate_identifier(agent_id),
@@ -153,6 +170,29 @@ defmodule Arbor.Memory.KnowledgeGraph.Operation do
          :ok <- validate_identifier(node_id),
          {:ok, graph, _node_id} <-
            KnowledgeGraph.add_node_transition(graph, node_data, node_id, occurred_at),
+         {:ok, _prepared} <- Codec.prepare(validation_agent, graph) do
+      :ok
+    else
+      _ -> {:error, :invalid_graph}
+    end
+  end
+
+  def validate(
+        {:add_pending_fact, operation_id, fact_data, pending_id, %DateTime{} = occurred_at}
+      ) do
+    validation_agent = "agent_operation_validation"
+    graph = KnowledgeGraph.new(validation_agent, auto_embed: false)
+
+    with :ok <- validate_identifier(operation_id),
+         :ok <- validate_identifier(pending_id),
+         :ok <- validate_pending_learning_shape(fact_data),
+         {:ok, graph, _pending_id} <-
+           KnowledgeGraph.add_pending_fact_transition(
+             graph,
+             fact_data,
+             pending_id,
+             occurred_at
+           ),
          {:ok, _prepared} <- Codec.prepare(validation_agent, graph) do
       :ok
     else
@@ -271,7 +311,21 @@ defmodule Arbor.Memory.KnowledgeGraph.Operation do
     with :ok <- validate_identifier(operation_id),
          :ok <- validate_keyword(opts, maintenance_keys(mode)),
          :ok <- validate_maintenance_opts(mode, opts),
-         {:ok, graph, _result} <- Maintenance.run(graph, mode, opts, occurred_at),
+         {:ok, graph, result} <- Maintenance.run(graph, mode, opts, occurred_at),
+         graph <- put_maintenance_effect(graph, operation_id, mode, occurred_at, result),
+         {:ok, operation_fingerprint} <-
+           fingerprint({{:consolidate, mode, opts}, Codec.missing_taint()}),
+         graph <- %{
+           graph
+           | operation_receipts: %{
+               operation_id => %{
+                 kind: "consolidate",
+                 fingerprint: operation_fingerprint,
+                 result: %{status: "pending", metrics: result.metrics}
+               }
+             },
+             operation_receipt_order: [operation_id]
+         },
          {:ok, _prepared} <- Codec.prepare(validation_agent, graph) do
       :ok
     else
@@ -279,36 +333,51 @@ defmodule Arbor.Memory.KnowledgeGraph.Operation do
     end
   end
 
+  def validate({:ack_maintenance_effect, operation_id}), do: validate_identifier(operation_id)
+
   def validate(_operation), do: {:error, :invalid_graph}
 
   @spec apply(t(), KnowledgeGraph.t() | nil) ::
           {:ok, KnowledgeGraph.t(), term(), :changed | :replayed} | {:error, term()}
-  def apply({:initialize, %KnowledgeGraph{} = graph}, _current),
+  def apply(operation, current), do: apply(operation, current, Codec.missing_taint())
+
+  @spec apply(t(), KnowledgeGraph.t() | nil, term()) ::
+          {:ok, KnowledgeGraph.t(), term(), :changed | :replayed} | {:error, term()}
+  def apply({:initialize, %KnowledgeGraph{} = graph}, _current, _taint),
     do: {:ok, graph, :ok, :changed}
 
-  def apply(_operation, nil), do: {:error, :graph_not_initialized}
+  def apply(_operation, nil, _taint), do: {:error, :graph_not_initialized}
 
   def apply(
         {:approve_pending, _operation_id, pending_id, _nonce, _occurred_at} = operation,
-        %KnowledgeGraph{} = graph
+        %KnowledgeGraph{} = graph,
+        taint
       ) do
     case accepted_proposal_node(graph, pending_id) do
       {:ok, node_id} -> {:ok, graph, node_id, :replayed}
-      :not_found -> apply_with_receipt(operation, graph)
+      :not_found -> apply_with_receipt(operation, graph, taint)
     end
   end
 
-  def apply(operation, %KnowledgeGraph{} = graph) do
-    apply_with_receipt(operation, graph)
+  def apply(
+        {:ack_maintenance_effect, operation_id},
+        %KnowledgeGraph{} = graph,
+        _taint
+      ) do
+    acknowledge_maintenance_effect(graph, operation_id)
   end
 
-  def apply(_operation, _graph), do: {:error, :invalid_graph}
+  def apply(operation, %KnowledgeGraph{} = graph, taint) do
+    apply_with_receipt(operation, graph, taint)
+  end
 
-  defp apply_with_receipt(operation, graph) do
-    with {:ok, operation_id, kind, fingerprint} <- receipt_identity(operation) do
+  def apply(_operation, _graph, _taint), do: {:error, :invalid_graph}
+
+  defp apply_with_receipt(operation, graph, taint) do
+    with {:ok, operation_id, kind, fingerprint} <- receipt_identity(operation, taint) do
       case Map.fetch(graph.operation_receipts, operation_id) do
         {:ok, %{kind: ^kind, fingerprint: ^fingerprint, result: result}} ->
-          replay_result(kind, result, graph)
+          replay_result(operation_id, kind, result, graph)
 
         {:ok, _different_receipt} ->
           {:error, :operation_id_conflict}
@@ -334,6 +403,13 @@ defmodule Arbor.Memory.KnowledgeGraph.Operation do
 
   defp apply_once({:add_node, _operation_id, node_data, node_id, occurred_at}, graph) do
     KnowledgeGraph.add_node_transition(graph, node_data, node_id, occurred_at)
+  end
+
+  defp apply_once(
+         {:add_pending_fact, _operation_id, fact_data, pending_id, occurred_at},
+         graph
+       ) do
+    KnowledgeGraph.add_pending_fact_transition(graph, fact_data, pending_id, occurred_at)
   end
 
   defp apply_once(
@@ -397,21 +473,29 @@ defmodule Arbor.Memory.KnowledgeGraph.Operation do
     {:ok, graph, KnowledgeGraph.stats(graph)}
   end
 
-  defp apply_once({:consolidate, _operation_id, mode, opts, occurred_at}, graph) do
-    with {:ok, graph, result} <- Maintenance.run(graph, mode, opts, occurred_at) do
-      {:ok, graph, Map.put(result, :graph, graph)}
+  defp apply_once({:consolidate, operation_id, mode, opts, occurred_at}, graph) do
+    with nil <- graph.pending_maintenance_effect,
+         {:ok, graph, result} <- Maintenance.run(graph, mode, opts, occurred_at) do
+      effect = maintenance_effect(result, operation_id, mode, occurred_at)
+      {:ok, %{graph | pending_maintenance_effect: effect}, effect}
+    else
+      %{} -> {:error, :maintenance_effect_pending}
+      {:error, _reason} = error -> error
     end
   end
 
-  defp receipt_identity(operation) do
+  defp receipt_identity(operation, taint) do
     with {:ok, operation_id, kind, logical_input} <- logical_operation(operation),
-         {:ok, fingerprint} <- fingerprint(logical_input) do
+         {:ok, fingerprint} <- fingerprint({logical_input, taint}) do
       {:ok, operation_id, kind, fingerprint}
     end
   end
 
   defp logical_operation({:add_node, operation_id, node_data, _node_id, _occurred_at}),
     do: {:ok, operation_id, "add_node", {:add_node, node_data}}
+
+  defp logical_operation({:add_pending_fact, operation_id, fact_data, _pending_id, _occurred_at}),
+    do: {:ok, operation_id, "add_pending_fact", {:add_pending_fact, fact_data}}
 
   defp logical_operation(
          {:add_pending_learning, operation_id, learning_data, _pending_id, _occurred_at}
@@ -456,7 +540,7 @@ defmodule Arbor.Memory.KnowledgeGraph.Operation do
   end
 
   defp receipt_result(kind, item_id)
-       when kind in ["add_node", "add_pending_learning", "approve_pending"] and
+       when kind in ["add_node", "add_pending_fact", "add_pending_learning", "approve_pending"] and
               is_binary(item_id),
        do: {:ok, item_id}
 
@@ -466,17 +550,22 @@ defmodule Arbor.Memory.KnowledgeGraph.Operation do
 
   defp receipt_result(kind, :ok) when kind in ["add_edge", "reject_pending"], do: {:ok, "ok"}
   defp receipt_result("cascade_recall", result) when is_map(result), do: {:ok, "ok"}
-  defp receipt_result("consolidate", result) when is_map(result), do: {:ok, "ok"}
+
+  defp receipt_result("consolidate", %{metrics: metrics}) when is_map(metrics),
+    do: {:ok, %{status: "pending", metrics: metrics}}
+
   defp receipt_result(_kind, _result), do: {:error, :invalid_graph}
 
-  defp finalize_result("consolidate", result, graph), do: Map.put(result, :graph, graph)
+  defp finalize_result("consolidate", result, graph),
+    do: result |> Map.put(:graph, graph) |> Map.put(:replayed, false) |> Map.put(:drained, false)
+
   defp finalize_result(_kind, result, _graph), do: result
 
-  defp replay_result(kind, item_id, graph)
-       when kind in ["add_node", "add_pending_learning", "approve_pending"],
+  defp replay_result(_operation_id, kind, item_id, graph)
+       when kind in ["add_node", "add_pending_fact", "add_pending_learning", "approve_pending"],
        do: {:ok, graph, item_id, :replayed}
 
-  defp replay_result(kind, node_id, graph)
+  defp replay_result(_operation_id, kind, node_id, graph)
        when kind in ["merge_node_metadata", "reinforce"] do
     case Map.fetch(graph.nodes, node_id) do
       {:ok, node} -> {:ok, graph, node, :replayed}
@@ -484,16 +573,45 @@ defmodule Arbor.Memory.KnowledgeGraph.Operation do
     end
   end
 
-  defp replay_result(kind, "ok", graph) when kind in ["add_edge", "reject_pending"],
-    do: {:ok, graph, :ok, :replayed}
+  defp replay_result(_operation_id, kind, "ok", graph)
+       when kind in ["add_edge", "reject_pending"],
+       do: {:ok, graph, :ok, :replayed}
 
-  defp replay_result("cascade_recall", "ok", graph),
+  defp replay_result(_operation_id, "cascade_recall", "ok", graph),
     do: {:ok, graph, KnowledgeGraph.stats(graph), :replayed}
 
-  defp replay_result("consolidate", "ok", graph),
-    do: {:ok, graph, Maintenance.replay(graph) |> Map.put(:graph, graph), :replayed}
+  defp replay_result(
+         operation_id,
+         "consolidate",
+         %{status: "pending", metrics: metrics},
+         %{pending_maintenance_effect: %{operation_id: operation_id, metrics: metrics} = effect} =
+           graph
+       ) do
+    result =
+      effect |> Map.put(:graph, graph) |> Map.put(:replayed, true) |> Map.put(:drained, false)
 
-  defp replay_result(_kind, _result, _graph), do: {:error, :invalid_graph}
+    {:ok, graph, result, :replayed}
+  end
+
+  defp replay_result(
+         operation_id,
+         "consolidate",
+         %{status: "drained", metrics: metrics},
+         graph
+       ) do
+    result = %{
+      operation_id: operation_id,
+      archive_entries: [],
+      metrics: metrics,
+      graph: graph,
+      replayed: true,
+      drained: true
+    }
+
+    {:ok, graph, result, :replayed}
+  end
+
+  defp replay_result(_operation_id, _kind, _result, _graph), do: {:error, :invalid_graph}
 
   defp put_receipt(
          %KnowledgeGraph{operation_receipts: receipts, operation_receipt_order: order} = graph,
@@ -503,22 +621,94 @@ defmodule Arbor.Memory.KnowledgeGraph.Operation do
     if Map.has_key?(receipts, operation_id) do
       {:error, :operation_id_conflict}
     else
-      {receipts, order} = evict_oldest_receipt(receipts, order)
-
-      {:ok,
-       %{
-         graph
-         | operation_receipts: Map.put(receipts, operation_id, receipt),
-           operation_receipt_order: order ++ [operation_id]
-       }}
+      with {:ok, receipts, order} <- evict_oldest_receipt(receipts, order) do
+        {:ok,
+         %{
+           graph
+           | operation_receipts: Map.put(receipts, operation_id, receipt),
+             operation_receipt_order: order ++ [operation_id]
+         }}
+      end
     end
   end
 
-  defp evict_oldest_receipt(receipts, [oldest | remaining])
-       when map_size(receipts) >= @max_receipts,
-       do: {Map.delete(receipts, oldest), remaining}
+  defp evict_oldest_receipt(receipts, order) when map_size(receipts) >= @max_receipts do
+    case Enum.find_index(order, fn operation_id ->
+           not pending_maintenance_receipt?(Map.fetch!(receipts, operation_id))
+         end) do
+      nil ->
+        {:error, :graph_limit_exceeded}
 
-  defp evict_oldest_receipt(receipts, order), do: {receipts, order}
+      index ->
+        {oldest, remaining} = List.pop_at(order, index)
+        {:ok, Map.delete(receipts, oldest), remaining}
+    end
+  end
+
+  defp evict_oldest_receipt(receipts, order), do: {:ok, receipts, order}
+
+  defp pending_maintenance_receipt?(%{
+         kind: "consolidate",
+         result: %{status: "pending"}
+       }),
+       do: true
+
+  defp pending_maintenance_receipt?(_receipt), do: false
+
+  defp acknowledge_maintenance_effect(
+         %KnowledgeGraph{
+           pending_maintenance_effect: %{operation_id: operation_id},
+           operation_receipts: receipts
+         } = graph,
+         operation_id
+       ) do
+    case Map.fetch(receipts, operation_id) do
+      {:ok, %{kind: "consolidate", result: %{status: "pending"} = result} = receipt} ->
+        receipt = %{receipt | result: %{result | status: "drained"}}
+
+        {:ok,
+         %{
+           graph
+           | pending_maintenance_effect: nil,
+             operation_receipts: Map.put(receipts, operation_id, receipt)
+         }, :ok, :changed}
+
+      _ ->
+        {:error, :invalid_graph}
+    end
+  end
+
+  defp acknowledge_maintenance_effect(
+         %KnowledgeGraph{pending_maintenance_effect: nil, operation_receipts: receipts} = graph,
+         operation_id
+       ) do
+    case Map.fetch(receipts, operation_id) do
+      {:ok, %{kind: "consolidate", result: %{status: "drained"}}} ->
+        {:ok, graph, :ok, :replayed}
+
+      _ ->
+        {:error, :maintenance_effect_not_found}
+    end
+  end
+
+  defp acknowledge_maintenance_effect(_graph, _operation_id),
+    do: {:error, :maintenance_effect_conflict}
+
+  defp maintenance_effect(result, operation_id, mode, occurred_at) do
+    %{
+      operation_id: operation_id,
+      mode: mode,
+      occurred_at: occurred_at,
+      archive_entries: result.archive_entries,
+      metrics: result.metrics
+    }
+  end
+
+  defp put_maintenance_effect(graph, operation_id, mode, occurred_at, result),
+    do: %{
+      graph
+      | pending_maintenance_effect: maintenance_effect(result, operation_id, mode, occurred_at)
+    }
 
   defp accepted_proposal_node(graph, pending_id) do
     Enum.find_value(graph.nodes, :not_found, fn {node_id, node} ->

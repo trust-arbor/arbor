@@ -3,7 +3,7 @@ defmodule Arbor.Memory.KnowledgeGraphCodecTest do
 
   alias Arbor.Contracts.Security.{Taint, TaintEnvelope}
   alias Arbor.Memory.KnowledgeGraph
-  alias Arbor.Memory.KnowledgeGraph.Codec
+  alias Arbor.Memory.KnowledgeGraph.{Codec, Operation}
 
   @moduletag :fast
 
@@ -278,6 +278,56 @@ defmodule Arbor.Memory.KnowledgeGraphCodecTest do
 
     assert restored.graph == after_delete.graph
     assert restored.aggregate == after_delete.aggregate
+  end
+
+  test "maintenance outbox independently binds each removed node label" do
+    agent_id = "agent_graph_codec_maintenance_provenance"
+    graph = KnowledgeGraph.new(agent_id, auto_embed: false)
+
+    {:ok, graph, node_id} =
+      KnowledgeGraph.add_node(graph, %{
+        type: :fact,
+        content: "label survives maintenance",
+        relevance: 0.05,
+        skip_dedup: true
+      })
+
+    source = trusted_taint()
+    assert {:ok, initial} = Codec.reconcile(agent_id, graph, nil, source)
+    assert {:ok, operation} = Operation.consolidate("codec_maintenance", :basic, [])
+
+    assert {:ok, maintained, effect, :changed} =
+             Operation.apply(operation, initial.graph, Codec.missing_taint())
+
+    assert {:ok, snapshot} =
+             Codec.reconcile(
+               agent_id,
+               maintained,
+               initial,
+               Codec.missing_taint(),
+               %{archived_node_ids: [node_id]}
+             )
+
+    assert snapshot.maintenance_effects[node_id].label == initial.nodes[node_id].label
+    refute Map.has_key?(snapshot.base_payload, "pending_maintenance_effect")
+    assert effect.operation_id == "codec_maintenance"
+
+    assert {:ok, wrapper} = Codec.encode(snapshot)
+
+    assert {:ok, restored, :current} =
+             Codec.decode(agent_id, wrapper, snapshot.aggregate.taint, :verified)
+
+    assert restored.maintenance_effects[node_id].label == initial.nodes[node_id].label
+
+    tampered =
+      put_in(
+        wrapper,
+        ["provenance", "maintenance_effects", node_id],
+        wrapper["provenance"]["base"]
+      )
+
+    assert {:error, :invalid_wrapper} =
+             Codec.decode(agent_id, tampered, snapshot.aggregate.taint, :verified)
   end
 
   test "declared capacity encodes at the envelope boundary and rejects the next item" do

@@ -19,7 +19,8 @@ defmodule Arbor.Memory.KnowledgeGraphStore do
     :knowledge_graph_aggregate,
     :knowledge_node,
     :knowledge_pending_fact,
-    :knowledge_pending_learning
+    :knowledge_pending_learning,
+    :knowledge_maintenance_effect
   ]
 
   @type store_error ::
@@ -69,6 +70,17 @@ defmodule Arbor.Memory.KnowledgeGraphStore do
     end
   end
 
+  @spec add_node_tainted(String.t(), String.t(), map(), Taint.t()) ::
+          {:ok, String.t()} | {:error, term()}
+  def add_node_tainted(agent_id, operation_id, node_data, %Taint{} = taint) do
+    with {:ok, operation} <- Operation.add_node(operation_id, node_data) do
+      call_operation(agent_id, operation, taint)
+    end
+  end
+
+  def add_node_tainted(_agent_id, _operation_id, _node_data, _taint),
+    do: {:error, :invalid_graph}
+
   @spec add_pending_learning(String.t(), String.t(), map()) ::
           {:ok, String.t()} | {:error, term()}
   def add_pending_learning(agent_id, operation_id, learning_data) do
@@ -76,6 +88,41 @@ defmodule Arbor.Memory.KnowledgeGraphStore do
       call_operation(agent_id, operation)
     end
   end
+
+  @spec add_pending_fact(String.t(), String.t(), map()) ::
+          {:ok, String.t()} | {:error, term()}
+  def add_pending_fact(agent_id, operation_id, fact_data) do
+    with {:ok, operation} <- Operation.add_pending_fact(operation_id, fact_data) do
+      call_operation(agent_id, operation)
+    end
+  end
+
+  @spec add_pending_fact_tainted(String.t(), String.t(), map(), Taint.t()) ::
+          {:ok, String.t()} | {:error, term()}
+  def add_pending_fact_tainted(agent_id, operation_id, fact_data, %Taint{} = taint) do
+    with {:ok, operation} <- Operation.add_pending_fact(operation_id, fact_data) do
+      call_operation(agent_id, operation, taint)
+    end
+  end
+
+  def add_pending_fact_tainted(_agent_id, _operation_id, _fact_data, _taint),
+    do: {:error, :invalid_graph}
+
+  @spec add_pending_learning_tainted(String.t(), String.t(), map(), Taint.t()) ::
+          {:ok, String.t()} | {:error, term()}
+  def add_pending_learning_tainted(
+        agent_id,
+        operation_id,
+        learning_data,
+        %Taint{} = taint
+      ) do
+    with {:ok, operation} <- Operation.add_pending_learning(operation_id, learning_data) do
+      call_operation(agent_id, operation, taint)
+    end
+  end
+
+  def add_pending_learning_tainted(_agent_id, _operation_id, _learning_data, _taint),
+    do: {:error, :invalid_graph}
 
   @spec add_edge(
           String.t(),
@@ -140,6 +187,21 @@ defmodule Arbor.Memory.KnowledgeGraphStore do
          {:ok, %{graph: %KnowledgeGraph{} = graph} = result} <-
            call_operation(agent_id, operation) do
       {:ok, graph, Map.delete(result, :graph)}
+    end
+  end
+
+  @spec pending_maintenance_effect(String.t()) :: {:ok, map() | nil} | {:error, term()}
+  def pending_maintenance_effect(agent_id) do
+    with {:ok, snapshot} <- get_snapshot(agent_id) do
+      {:ok, labelled_maintenance_effect(snapshot)}
+    end
+  end
+
+  @spec acknowledge_maintenance_effect(String.t(), String.t()) :: :ok | {:error, term()}
+  def acknowledge_maintenance_effect(agent_id, operation_id) do
+    with {:ok, operation} <- Operation.acknowledge_maintenance_effect(operation_id),
+         {:ok, :ok} <- call_operation(agent_id, operation) do
+      :ok
     end
   end
 
@@ -230,6 +292,7 @@ defmodule Arbor.Memory.KnowledgeGraphStore do
              @cas_attempts,
              deadline
            ) do
+      result = attach_operation_provenance(operation, snapshot, result)
       {:reply, {:ok, result}, project_or_schedule(state, agent_id, snapshot)}
     else
       {:error, reason} = error ->
@@ -333,7 +396,8 @@ defmodule Arbor.Memory.KnowledgeGraphStore do
     with :ok <- ensure_deadline(deadline),
          {:ok, taint} <- Taint.canonicalize(taint),
          {:ok, previous, expected} <- mutation_baseline(agent_id, mode),
-         {:ok, graph, result, effect} <- Operation.apply(operation, previous_graph(previous)) do
+         {:ok, graph, result, effect} <-
+           Operation.apply(operation, previous_graph(previous), taint) do
       case effect do
         :replayed ->
           {:ok, previous, result}
@@ -374,7 +438,10 @@ defmodule Arbor.Memory.KnowledgeGraphStore do
          attempts,
          deadline
        ) do
-    with {:ok, candidate} <- Codec.reconcile(agent_id, graph, previous, taint),
+    reconciliation_context = reconciliation_context(operation, result)
+
+    with {:ok, candidate} <-
+           Codec.reconcile(agent_id, graph, previous, taint, reconciliation_context),
          {:ok, wrapper} <- Codec.encode(candidate),
          :ok <- ensure_deadline(deadline) do
       case MemoryStore.compare_and_swap_tainted(
@@ -421,6 +488,26 @@ defmodule Arbor.Memory.KnowledgeGraphStore do
 
   defp previous_graph(nil), do: nil
   defp previous_graph(snapshot), do: snapshot.graph
+
+  defp reconciliation_context(
+         {:approve_pending, _operation_id, pending_id, _nonce, _occurred_at},
+         node_id
+       )
+       when is_binary(node_id) do
+    %{accepted_pending: %{node_id => pending_id}}
+  end
+
+  defp reconciliation_context(
+         {:consolidate, _operation_id, _mode, _opts, _occurred_at},
+         %{archive_entries: entries}
+       ) do
+    %{archived_node_ids: Enum.map(entries, & &1.node.id)}
+  end
+
+  defp reconciliation_context({:ack_maintenance_effect, _operation_id}, :ok),
+    do: %{provenance_neutral: true}
+
+  defp reconciliation_context(_operation, _result), do: %{}
 
   defp validate_existing_operation({:initialize, _graph}), do: {:error, :invalid_graph}
   defp validate_existing_operation(operation), do: Operation.validate(operation)
@@ -518,6 +605,12 @@ defmodule Arbor.Memory.KnowledgeGraphStore do
          :ok <- put_inventory(:knowledge_pending_fact, agent_id, snapshot.pending_facts),
          :ok <-
            put_inventory(:knowledge_pending_learning, agent_id, snapshot.pending_learnings),
+         :ok <-
+           put_inventory(
+             :knowledge_maintenance_effect,
+             agent_id,
+             snapshot.maintenance_effects
+           ),
          true <- :ets.insert(@graph_ets, {agent_id, snapshot.graph}) do
       :ok
     else
@@ -651,12 +744,54 @@ defmodule Arbor.Memory.KnowledgeGraphStore do
     end
   end
 
-  defp call_operation(agent_id, operation) do
+  defp call_operation(agent_id, operation),
+    do: call_operation(agent_id, operation, Codec.missing_taint())
+
+  defp call_operation(agent_id, operation, taint) do
     safe_call(
-      {:operate, agent_id, operation, Codec.missing_taint(), request_deadline()},
+      {:operate, agent_id, operation, taint, request_deadline()},
       :mutation,
       agent_id
     )
+  end
+
+  defp attach_operation_provenance(
+         {:consolidate, _operation_id, _mode, _opts, _occurred_at},
+         snapshot,
+         result
+       ) do
+    labelled_maintenance_result(snapshot, result)
+  end
+
+  defp attach_operation_provenance(_operation, _snapshot, result), do: result
+
+  defp labelled_maintenance_effect(%{
+         graph: %KnowledgeGraph{pending_maintenance_effect: nil}
+       }),
+       do: nil
+
+  defp labelled_maintenance_effect(
+         %{
+           graph: %KnowledgeGraph{pending_maintenance_effect: effect}
+         } = snapshot
+       ) do
+    labelled_maintenance_result(snapshot, effect)
+  end
+
+  defp labelled_maintenance_result(snapshot, result) do
+    entries =
+      Enum.map(result.archive_entries, fn %{node: %{id: node_id}, reason: reason} = entry ->
+        %{label: label, payload: archive_payload} =
+          Map.fetch!(snapshot.maintenance_effects, node_id)
+
+        entry
+        |> Map.put(:archive_payload, archive_payload)
+        |> Map.put(:taint, label.taint)
+        |> Map.put(:provenance_status, label.status)
+        |> Map.put(:idempotency_key, {result.operation_id, node_id, reason})
+      end)
+
+    %{result | archive_entries: entries}
   end
 
   defp request_deadline do

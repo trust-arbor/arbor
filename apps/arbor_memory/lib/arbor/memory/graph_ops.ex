@@ -10,6 +10,7 @@ defmodule Arbor.Memory.GraphOps do
 
   alias Arbor.Memory.{KnowledgeGraph, KnowledgeGraphStore, Signals}
   alias Arbor.Memory.KnowledgeGraph.Codec
+  alias Arbor.Contracts.Security.Taint
 
   # ============================================================================
   # Graph Authority Helpers
@@ -120,6 +121,80 @@ defmodule Arbor.Memory.GraphOps do
         error
     end
   end
+
+  @doc "Add a knowledge node with an authoritative source label."
+  @spec add_knowledge_tainted(String.t(), map(), Taint.t()) ::
+          {:ok, String.t()} | {:error, term()}
+  def add_knowledge_tainted(agent_id, node_data, %Taint{} = taint) do
+    operation_id = new_operation_id("add_node")
+
+    case reconcile_ambiguous(fn ->
+           KnowledgeGraphStore.add_node_tainted(agent_id, operation_id, node_data, taint)
+         end) do
+      {:ok, node_id} = success ->
+        safe_emit(fn -> Signals.emit_knowledge_added(agent_id, node_id, node_data[:type]) end)
+        success
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  def add_knowledge_tainted(_agent_id, _node_data, _taint),
+    do: {:error, :invalid_graph}
+
+  @doc "Add a pending fact through durable authority using a conservative source label."
+  @spec add_pending_fact(String.t(), map()) :: {:ok, String.t()} | {:error, term()}
+  def add_pending_fact(agent_id, fact_data) do
+    operation_id = new_operation_id("add_pending_fact")
+
+    reconcile_ambiguous(fn ->
+      KnowledgeGraphStore.add_pending_fact(agent_id, operation_id, fact_data)
+    end)
+  end
+
+  @doc "Add a pending fact with its exact authoritative source label."
+  @spec add_pending_fact_tainted(String.t(), map(), Taint.t()) ::
+          {:ok, String.t()} | {:error, term()}
+  def add_pending_fact_tainted(agent_id, fact_data, %Taint{} = taint) do
+    operation_id = new_operation_id("add_pending_fact")
+
+    reconcile_ambiguous(fn ->
+      KnowledgeGraphStore.add_pending_fact_tainted(agent_id, operation_id, fact_data, taint)
+    end)
+  end
+
+  def add_pending_fact_tainted(_agent_id, _fact_data, _taint),
+    do: {:error, :invalid_graph}
+
+  @doc "Add a pending learning through durable authority using a conservative source label."
+  @spec add_pending_learning(String.t(), map()) :: {:ok, String.t()} | {:error, term()}
+  def add_pending_learning(agent_id, learning_data) do
+    operation_id = new_operation_id("add_pending_learning")
+
+    reconcile_ambiguous(fn ->
+      KnowledgeGraphStore.add_pending_learning(agent_id, operation_id, learning_data)
+    end)
+  end
+
+  @doc "Add a pending learning with its exact authoritative source label."
+  @spec add_pending_learning_tainted(String.t(), map(), Taint.t()) ::
+          {:ok, String.t()} | {:error, term()}
+  def add_pending_learning_tainted(agent_id, learning_data, %Taint{} = taint) do
+    operation_id = new_operation_id("add_pending_learning")
+
+    reconcile_ambiguous(fn ->
+      KnowledgeGraphStore.add_pending_learning_tainted(
+        agent_id,
+        operation_id,
+        learning_data,
+        taint
+      )
+    end)
+  end
+
+  def add_pending_learning_tainted(_agent_id, _learning_data, _taint),
+    do: {:error, :invalid_graph}
 
   @doc """
   Link two knowledge nodes.

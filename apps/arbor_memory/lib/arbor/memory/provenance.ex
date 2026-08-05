@@ -33,6 +33,7 @@ defmodule Arbor.Memory.Provenance do
     :knowledge_node,
     :knowledge_pending_fact,
     :knowledge_pending_learning,
+    :knowledge_maintenance_effect,
     :index_entry,
     :embedding,
     :proposal,
@@ -61,6 +62,7 @@ defmodule Arbor.Memory.Provenance do
           | :knowledge_node
           | :knowledge_pending_fact
           | :knowledge_pending_learning
+          | :knowledge_maintenance_effect
           | :index_entry
           | :embedding
           | :proposal

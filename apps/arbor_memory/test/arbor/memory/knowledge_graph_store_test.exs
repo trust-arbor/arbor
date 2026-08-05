@@ -4,7 +4,7 @@ defmodule Arbor.Memory.KnowledgeGraphStoreTest do
   alias Arbor.Contracts.Persistence.Record
   alias Arbor.Contracts.Security.{Taint, TaintedValue, TaintEnvelope}
 
-  alias Arbor.Memory.{KnowledgeGraph, KnowledgeGraphStore, MemoryStore, Provenance}
+  alias Arbor.Memory.{Events, KnowledgeGraph, KnowledgeGraphStore, MemoryStore, Provenance}
   alias Arbor.Memory.KnowledgeGraph.{Codec, Operation}
   alias Arbor.Persistence.BufferedStore
 
@@ -16,7 +16,8 @@ defmodule Arbor.Memory.KnowledgeGraphStoreTest do
     :knowledge_graph_aggregate,
     :knowledge_node,
     :knowledge_pending_fact,
-    :knowledge_pending_learning
+    :knowledge_pending_learning,
+    :knowledge_maintenance_effect
   ]
 
   defmodule SwitchableNodeRestartBackend do
@@ -766,8 +767,247 @@ defmodule Arbor.Memory.KnowledgeGraphStoreTest do
              )
 
     assert replay.replayed
-    assert replay.archive_entries == []
+    assert replay.archive_entries == result.archive_entries
     assert authoritative_revision(agent_id) == revision_after_commit
+
+    assert :ok =
+             KnowledgeGraphStore.acknowledge_maintenance_effect(
+               agent_id,
+               "basic_maintenance_operation"
+             )
+
+    assert {:ok, nil} = KnowledgeGraphStore.pending_maintenance_effect(agent_id)
+
+    assert {:ok, _graph, drained} =
+             KnowledgeGraphStore.consolidate(
+               agent_id,
+               "basic_maintenance_operation",
+               :basic,
+               prune_threshold: 0.1
+             )
+
+    assert drained.drained
+    assert drained.metrics == result.metrics
+    assert drained.archive_entries == []
+  end
+
+  test "tainted typed operations bind source labels into immutable receipt identity", %{
+    agent_id: agent_id
+  } do
+    assert :ok =
+             KnowledgeGraphStore.save_graph(
+               agent_id,
+               KnowledgeGraph.new(agent_id, auto_embed: false)
+             )
+
+    trusted = trusted_taint("typed_source")
+    hostile = hostile_taint("different_source")
+    node_data = %{type: :fact, content: "labelled node", skip_dedup: true}
+
+    assert {:ok, node_id} =
+             KnowledgeGraphStore.add_node_tainted(
+               agent_id,
+               "taint_bound_node",
+               node_data,
+               trusted
+             )
+
+    revision = authoritative_revision(agent_id)
+
+    assert {:ok, ^node_id} =
+             KnowledgeGraphStore.add_node_tainted(
+               agent_id,
+               "taint_bound_node",
+               node_data,
+               trusted
+             )
+
+    assert authoritative_revision(agent_id) == revision
+
+    assert {:error, :operation_id_conflict} =
+             KnowledgeGraphStore.add_node_tainted(
+               agent_id,
+               "taint_bound_node",
+               node_data,
+               hostile
+             )
+
+    assert {:ok, snapshot} = KnowledgeGraphStore.get_snapshot(agent_id)
+    assert snapshot.nodes[node_id].label == %{taint: trusted, status: :verified}
+    assert authoritative_revision(agent_id) == revision
+
+    pending_data = %{content: "labelled pending", source: "test"}
+
+    for {kind, add} <- [
+          {:fact, &KnowledgeGraphStore.add_pending_fact_tainted/4},
+          {:learning, &KnowledgeGraphStore.add_pending_learning_tainted/4}
+        ] do
+      operation_id = "taint_bound_pending_#{kind}"
+      assert {:ok, pending_id} = add.(agent_id, operation_id, pending_data, trusted)
+      assert {:ok, ^pending_id} = add.(agent_id, operation_id, pending_data, trusted)
+
+      assert {:error, :operation_id_conflict} =
+               add.(agent_id, operation_id, pending_data, hostile)
+    end
+  end
+
+  test "security regression accepted labels transfer only from typed operation authority", %{
+    agent_id: agent_id
+  } do
+    assert :ok =
+             KnowledgeGraphStore.save_graph(
+               agent_id,
+               KnowledgeGraph.new(agent_id, auto_embed: false)
+             )
+
+    trusted = trusted_taint("pending_origin")
+    hostile = hostile_taint("forged_node")
+    pending_data = %{content: "pending authority", confidence: 0.9, source: "review"}
+
+    assert {:ok, pending_id} =
+             KnowledgeGraphStore.add_pending_fact_tainted(
+               agent_id,
+               "labelled_pending",
+               pending_data,
+               trusted
+             )
+
+    forged = %{
+      type: :fact,
+      content: pending_data.content,
+      skip_dedup: true,
+      metadata: %{"$arbor_accepted_proposal_id" => pending_id}
+    }
+
+    assert {:error, :invalid_graph} =
+             KnowledgeGraphStore.add_node_tainted(
+               agent_id,
+               "forged_acceptance",
+               forged,
+               hostile
+             )
+
+    assert {:ok, node_id} = KnowledgeGraphStore.approve_pending(agent_id, pending_id)
+    assert {:ok, snapshot} = KnowledgeGraphStore.get_snapshot(agent_id)
+    assert snapshot.nodes[node_id].label == %{taint: trusted, status: :verified}
+    refute Map.has_key?(snapshot.pending_facts, pending_id)
+
+    restart_child(KnowledgeGraphStore)
+
+    assert {:ok, restarted} = KnowledgeGraphStore.get_snapshot(agent_id)
+    assert restarted.nodes[node_id].label == %{taint: trusted, status: :verified}
+  end
+
+  test "response-loss maintenance replay archives once with exact provenance before fenced ack",
+       %{
+         agent_id: agent_id
+       } do
+    stop_supervised!(BufferedStore)
+    backend_name = unique_name(:kg_maintenance_ambiguity_backend)
+    control = unique_name(:kg_maintenance_ambiguity_control)
+
+    start_supervised!({Arbor.Persistence.QueryableStore.ETS, name: backend_name})
+
+    start_supervised!(%{
+      id: control,
+      start: {Agent, :start_link, [fn -> %{armed: false, calls: 0} end, [name: control]]}
+    })
+
+    start_supervised!(
+      {BufferedStore,
+       name: @store_name,
+       backend: PostCommitAmbiguityBackend,
+       backend_opts: [control: control],
+       collection: backend_name,
+       write_mode: :sync}
+    )
+
+    source_taint = trusted_taint("archive_origin")
+    graph = graph_with_node(agent_id, "archive-me", "durably labelled archive content")
+    graph = put_in(graph.nodes["archive-me"].relevance, 0.05)
+    assert :ok = KnowledgeGraphStore.save_graph_tainted(agent_id, graph, source_taint)
+
+    Agent.update(control, &%{&1 | armed: true})
+
+    assert {:error, :outcome_unknown} =
+             KnowledgeGraphStore.consolidate(
+               agent_id,
+               "ambiguous_maintenance",
+               :basic,
+               prune_threshold: 0.1
+             )
+
+    restart_child(KnowledgeGraphStore)
+
+    assert {:ok, pending_effect} = KnowledgeGraphStore.pending_maintenance_effect(agent_id)
+    assert pending_effect.operation_id == "ambiguous_maintenance"
+    assert [pending_entry] = pending_effect.archive_entries
+    assert pending_entry.taint == source_taint
+    assert pending_entry.provenance_status == :verified
+
+    revision_after_commit = authoritative_revision(agent_id)
+
+    assert {:ok, _graph, replayed_effect} =
+             KnowledgeGraphStore.consolidate(
+               agent_id,
+               "ambiguous_maintenance",
+               :basic,
+               prune_threshold: 0.1
+             )
+
+    assert replayed_effect.replayed
+    assert replayed_effect.archive_entries == pending_effect.archive_entries
+    assert authoritative_revision(agent_id) == revision_after_commit
+
+    assert :ok =
+             Events.archive_knowledge_once(
+               agent_id,
+               pending_entry,
+               pending_effect.occurred_at
+             )
+
+    assert :ok =
+             Events.archive_knowledge_once(
+               agent_id,
+               pending_entry,
+               pending_effect.occurred_at
+             )
+
+    assert {:ok, [archive_event]} = Events.get_by_type(agent_id, :knowledge_archived)
+    assert archive_event.data["provenance_status"] == "verified"
+
+    assert {:ok, archive_envelope} =
+             TaintEnvelope.verify(
+               archive_event.data["archive"],
+               pending_entry.archive_payload
+             )
+
+    assert archive_envelope.taint == source_taint
+
+    assert {:ok, before_ack} = KnowledgeGraphStore.get_snapshot(agent_id)
+
+    assert :ok =
+             KnowledgeGraphStore.acknowledge_maintenance_effect(
+               agent_id,
+               "ambiguous_maintenance"
+             )
+
+    assert {:ok, after_ack} = KnowledgeGraphStore.get_snapshot(agent_id)
+    assert after_ack.base == before_ack.base
+    assert after_ack.aggregate == before_ack.aggregate
+    assert after_ack.maintenance_effects == %{}
+    assert {:ok, nil} = KnowledgeGraphStore.pending_maintenance_effect(agent_id)
+
+    ack_revision = authoritative_revision(agent_id)
+
+    assert :ok =
+             KnowledgeGraphStore.acknowledge_maintenance_effect(
+               agent_id,
+               "ambiguous_maintenance"
+             )
+
+    assert authoritative_revision(agent_id) == ack_revision
+    assert {:ok, [_archive_event]} = Events.get_by_type(agent_id, :knowledge_archived)
   end
 
   test "expired queued mutation cannot start after a delayed authoritative call", %{
@@ -994,6 +1234,17 @@ defmodule Arbor.Memory.KnowledgeGraphStoreTest do
       sensitivity: :public,
       sanitizations: 0,
       confidence: :verified,
+      source: source,
+      chain: []
+    }
+  end
+
+  defp hostile_taint(source) do
+    %Taint{
+      level: :hostile,
+      sensitivity: :restricted,
+      sanitizations: 0,
+      confidence: :unverified,
       source: source,
       chain: []
     }
