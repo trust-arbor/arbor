@@ -20,7 +20,7 @@ defmodule Arbor.Memory.WorkingMemoryTest do
       assert wm.concerns == []
       assert wm.curiosity == []
       assert wm.engagement_level == 0.5
-      assert wm.version == 3
+      assert wm.version == 4
       assert wm.name == nil
       assert wm.current_human == nil
       assert wm.current_conversation == nil
@@ -64,6 +64,8 @@ defmodule Arbor.Memory.WorkingMemoryTest do
 
       assert length(wm.recent_thoughts) == 1
       thought = hd(wm.recent_thoughts)
+      assert String.starts_with?(thought.id, "thought_")
+      assert byte_size(thought.id) <= 128
       assert thought.content == "First thought"
       assert %DateTime{} = thought.timestamp
       assert is_integer(thought.cached_tokens)
@@ -254,6 +256,38 @@ defmodule Arbor.Memory.WorkingMemoryTest do
       assert Enum.all?(wm.active_goals, &(&1.type == :general))
       assert Enum.all?(wm.active_goals, &(&1.priority == :normal))
       assert Enum.all?(wm.active_goals, &(&1.progress == 0))
+    end
+  end
+
+  describe "active skill identity" do
+    test "assigns collision-resistant identity independent of mutable skill content" do
+      wm = WorkingMemory.new("agent_001", rebuild_from_signals: false)
+      skill = %{name: "research", description: "Initial", body: "Read sources"}
+
+      assert {:ok, activated} = WorkingMemory.activate_skill(wm, skill)
+      active_skill = hd(activated.active_skills)
+
+      assert String.starts_with?(active_skill.id, "skill_")
+      assert byte_size(active_skill.id) <= 128
+      refute active_skill.id =~ active_skill.name
+
+      mutated = put_in(activated.active_skills, [%{active_skill | body: "Updated body"}])
+      assert hd(mutated.active_skills).id == active_skill.id
+    end
+
+    test "a later activation receives a distinct identity" do
+      wm = WorkingMemory.new("agent_001", rebuild_from_signals: false)
+      skill = %{name: "research", description: "", body: ""}
+
+      assert {:ok, first} = WorkingMemory.activate_skill(wm, skill)
+      first_id = hd(first.active_skills).id
+
+      assert {:ok, second} =
+               first
+               |> WorkingMemory.deactivate_skill("research")
+               |> WorkingMemory.activate_skill(skill)
+
+      refute hd(second.active_skills).id == first_id
     end
   end
 
@@ -675,6 +709,13 @@ defmodule Arbor.Memory.WorkingMemoryTest do
         |> WorkingMemory.add_curiosity("Curiosity")
         |> WorkingMemory.set_engagement_level(0.7)
 
+      assert {:ok, original} =
+               WorkingMemory.activate_skill(original, %{
+                 name: "research",
+                 description: "Find evidence",
+                 body: "Read primary sources"
+               })
+
       serialized = WorkingMemory.serialize(original)
       deserialized = WorkingMemory.deserialize(serialized)
 
@@ -695,11 +736,20 @@ defmodule Arbor.Memory.WorkingMemoryTest do
       deser_contents = Enum.map(deserialized.recent_thoughts, & &1.content)
       assert deser_contents == orig_contents
 
+      assert Enum.map(deserialized.recent_thoughts, & &1.id) ==
+               Enum.map(original.recent_thoughts, & &1.id)
+
       # Goals round-trip (descriptions preserved)
       assert length(deserialized.active_goals) == length(original.active_goals)
       orig_descs = Enum.map(original.active_goals, & &1.description)
       deser_descs = Enum.map(deserialized.active_goals, & &1.description)
       assert deser_descs == orig_descs
+
+      assert Enum.map(deserialized.active_goals, & &1.id) ==
+               Enum.map(original.active_goals, & &1.id)
+
+      assert Enum.map(deserialized.active_skills, & &1.id) ==
+               Enum.map(original.active_skills, & &1.id)
     end
 
     test "serialize produces JSON-safe map" do
@@ -729,8 +779,10 @@ defmodule Arbor.Memory.WorkingMemoryTest do
       assert wm.agent_id == "agent_001"
       assert length(wm.recent_thoughts) == 1
       assert hd(wm.recent_thoughts).content == "plain thought"
+      assert String.starts_with?(hd(wm.recent_thoughts).id, "thought_")
       assert length(wm.active_goals) == 1
       assert hd(wm.active_goals).description == "plain goal"
+      assert String.starts_with?(hd(wm.active_goals).id, "goal_")
     end
 
     test "deserialize handles both string and atom keys" do
@@ -743,6 +795,102 @@ defmodule Arbor.Memory.WorkingMemoryTest do
 
       wm = WorkingMemory.deserialize(atom_data)
       assert wm.agent_id == "agent_001"
+    end
+
+    test "security regression: legacy item IDs remain stable across owning-boundary round trips" do
+      legacy = %{
+        "agent_id" => "agent_legacy",
+        "started_at" => "2026-08-04T12:00:00Z",
+        "recent_thoughts" => ["legacy thought"],
+        "active_goals" => [%{"description" => "legacy goal"}],
+        "active_skills" => [
+          %{"name" => "research", "description" => "", "body" => "legacy body"}
+        ],
+        "version" => 3
+      }
+
+      first = WorkingMemory.deserialize(legacy)
+      second = WorkingMemory.deserialize(legacy)
+      migrated = WorkingMemory.migrate(first)
+      round_tripped = first |> WorkingMemory.serialize() |> WorkingMemory.deserialize()
+
+      ids = fn wm ->
+        %{
+          thoughts: Enum.map(wm.recent_thoughts, & &1.id),
+          goals: Enum.map(wm.active_goals, & &1.id),
+          skills: Enum.map(wm.active_skills, & &1.id)
+        }
+      end
+
+      assert ids.(first) == ids.(second)
+      assert ids.(first) == ids.(migrated)
+      assert ids.(first) == ids.(round_tripped)
+      assert WorkingMemory.serialize(first) == WorkingMemory.serialize(round_tripped)
+    end
+
+    test "legacy duplicate and invalid IDs are replaced deterministically and uniquely" do
+      legacy = %{
+        "agent_id" => "agent_duplicate_ids",
+        "recent_thoughts" => [
+          %{"id" => "duplicate", "content" => "one"},
+          %{"id" => "duplicate", "content" => "two"},
+          %{"id" => String.duplicate("x", 129), "content" => "three"}
+        ]
+      }
+
+      first = WorkingMemory.deserialize(legacy)
+      second = WorkingMemory.deserialize(legacy)
+      ids = Enum.map(first.recent_thoughts, & &1.id)
+
+      assert length(Enum.uniq(ids)) == 3
+      assert ids == Enum.map(second.recent_thoughts, & &1.id)
+      assert Enum.all?(ids, &(byte_size(&1) <= 128))
+    end
+
+    test "deserialize and migrate remain total for malformed legacy records" do
+      assert %WorkingMemory{version: 4, recent_thoughts: [], active_goals: []} =
+               WorkingMemory.deserialize(%{
+                 "recent_thoughts" => :not_a_list,
+                 "active_goals" => [nil, %{"description" => 42}],
+                 "active_skills" => [self()]
+               })
+
+      assert %WorkingMemory{version: 4} = WorkingMemory.deserialize(:not_a_map)
+      assert %WorkingMemory{version: 4} = WorkingMemory.migrate(:not_a_map)
+    end
+
+    test "improper legacy lists are rejected without raising" do
+      improper = ["first" | :invalid_tail]
+
+      assert %WorkingMemory{
+               recent_thoughts: [],
+               active_goals: [],
+               concerns: [],
+               curiosity: []
+             } =
+               WorkingMemory.deserialize(%{
+                 "agent_id" => "agent_improper",
+                 "recent_thoughts" => improper,
+                 "active_goals" => improper,
+                 "concerns" => improper,
+                 "curiosity" => improper
+               })
+    end
+
+    test "missing legacy started_at preserves nil uptime compatibility" do
+      legacy = %{
+        "agent_id" => "agent_without_start",
+        "recent_thoughts" => ["stable thought"]
+      }
+
+      first = WorkingMemory.deserialize(legacy)
+      second = WorkingMemory.deserialize(legacy)
+
+      assert first.started_at == nil
+      assert WorkingMemory.uptime(first) == 0
+      assert hd(first.recent_thoughts).id == hd(second.recent_thoughts).id
+      assert hd(first.recent_thoughts).timestamp == ~U[1970-01-01 00:00:00Z]
+      assert WorkingMemory.serialize(first)["started_at"] == nil
     end
   end
 
@@ -790,7 +938,7 @@ defmodule Arbor.Memory.WorkingMemoryTest do
       assert stats.has_relationship_context == true
       assert is_integer(stats.estimated_tokens)
       assert is_integer(stats.thought_tokens)
-      assert stats.version == 3
+      assert stats.version == 4
       assert is_integer(stats.uptime_seconds)
     end
   end

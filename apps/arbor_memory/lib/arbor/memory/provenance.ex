@@ -20,6 +20,8 @@ defmodule Arbor.Memory.Provenance do
     :goal,
     :intent,
     :percept,
+    :working_memory_base,
+    :working_memory_aggregate,
     :working_memory_thought,
     :working_memory_goal,
     :working_memory_skill,
@@ -41,6 +43,8 @@ defmodule Arbor.Memory.Provenance do
           :goal
           | :intent
           | :percept
+          | :working_memory_base
+          | :working_memory_aggregate
           | :working_memory_thought
           | :working_memory_goal
           | :working_memory_skill

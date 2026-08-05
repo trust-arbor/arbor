@@ -65,9 +65,14 @@ defmodule Arbor.Memory.WorkingMemory do
 
   require Logger
 
-  @version 3
+  @version 4
+  @max_item_id_bytes 128
+  @generated_id_bytes 16
+  @max_deserialized_items 256
+  @legacy_epoch ~U[1970-01-01 00:00:00Z]
 
   @type thought :: %{
+          id: String.t(),
           content: String.t(),
           timestamp: DateTime.t(),
           cached_tokens: non_neg_integer(),
@@ -84,6 +89,7 @@ defmodule Arbor.Memory.WorkingMemory do
         }
 
   @type active_skill :: %{
+          id: String.t(),
           name: String.t(),
           description: String.t(),
           body: String.t(),
@@ -105,7 +111,7 @@ defmodule Arbor.Memory.WorkingMemory do
           max_tokens: TokenBudget.spec() | nil,
           model: String.t() | nil,
           last_consolidated_at: DateTime.t() | nil,
-          started_at: DateTime.t(),
+          started_at: DateTime.t() | nil,
           thought_count: non_neg_integer(),
           version: pos_integer()
         }
@@ -380,6 +386,7 @@ defmodule Arbor.Memory.WorkingMemory do
 
       true ->
         entry = %{
+          id: generate_item_id("skill"),
           name: name,
           description: Map.get(skill, :description, ""),
           body: Map.get(skill, :body, ""),
@@ -626,7 +633,9 @@ defmodule Arbor.Memory.WorkingMemory do
   Serialize working memory to a JSON-safe map.
   """
   @spec serialize(t()) :: map()
-  def serialize(wm) do
+  def serialize(%__MODULE__{} = wm) do
+    wm = migrate(wm)
+
     %{
       "agent_id" => wm.agent_id,
       "name" => wm.name,
@@ -651,37 +660,57 @@ defmodule Arbor.Memory.WorkingMemory do
   @doc """
   Deserialize a JSON-safe map back to a WorkingMemory struct.
 
-  Handles both v1 (plain strings) and v2 (structured maps) formats.
+  Handles legacy plain strings and structured maps. Missing item identities are
+  generated deterministically from the owning working-memory boundary so
+  repeated legacy reads do not churn IDs.
   """
   @spec deserialize(map()) :: t()
   def deserialize(data) when is_map(data) do
-    get_field = fn key ->
-      Map.get(data, key) || Map.get(data, to_string(key))
-    end
-
-    raw_thoughts = get_field.(:recent_thoughts) || []
-    raw_goals = get_field.(:active_goals) || []
+    agent_id = get_field(data, :agent_id)
+    started_at = parse_datetime(get_field(data, :started_at))
+    item_fallback_datetime = started_at || @legacy_epoch
+    owner_seed = legacy_owner_seed(agent_id, item_fallback_datetime)
 
     %__MODULE__{
-      agent_id: get_field.(:agent_id),
-      name: get_field.(:name),
-      current_human: get_field.(:current_human),
-      current_conversation: get_field.(:current_conversation),
-      recent_thoughts: Enum.map(raw_thoughts, &deserialize_thought/1),
-      active_goals: Enum.map(raw_goals, &deserialize_goal/1),
-      active_skills: Enum.map(get_field.(:active_skills) || [], &deserialize_active_skill/1),
-      relationship_context: get_field.(:relationship_context),
-      concerns: get_field.(:concerns) || [],
-      curiosity: get_field.(:curiosity) || [],
-      engagement_level: get_field.(:engagement_level) || 0.5,
-      max_tokens: deserialize_token_spec(get_field.(:max_tokens)),
-      model: get_field.(:model),
-      last_consolidated_at: parse_datetime(get_field.(:last_consolidated_at)),
-      started_at: parse_datetime(get_field.(:started_at)),
-      thought_count: get_field.(:thought_count) || 0,
-      version: get_field.(:version) || @version
+      agent_id: agent_id,
+      name: get_field(data, :name),
+      current_human: get_field(data, :current_human),
+      current_conversation: get_field(data, :current_conversation),
+      recent_thoughts:
+        deserialize_collection(
+          get_field(data, :recent_thoughts, []),
+          :thought,
+          owner_seed,
+          item_fallback_datetime
+        ),
+      active_goals:
+        deserialize_collection(
+          get_field(data, :active_goals, []),
+          :goal,
+          owner_seed,
+          item_fallback_datetime
+        ),
+      active_skills:
+        deserialize_collection(
+          get_field(data, :active_skills, []),
+          :skill,
+          owner_seed,
+          item_fallback_datetime
+        ),
+      relationship_context: get_field(data, :relationship_context),
+      concerns: proper_list(get_field(data, :concerns, [])),
+      curiosity: proper_list(get_field(data, :curiosity, [])),
+      engagement_level: numeric_or_default(get_field(data, :engagement_level), 0.5),
+      max_tokens: deserialize_token_spec(get_field(data, :max_tokens)),
+      model: get_field(data, :model),
+      last_consolidated_at: parse_datetime(get_field(data, :last_consolidated_at)),
+      started_at: started_at,
+      thought_count: non_negative_integer_or_default(get_field(data, :thought_count), 0),
+      version: @version
     }
   end
+
+  def deserialize(_data), do: empty_legacy_memory()
 
   # ============================================================================
   # Migration
@@ -694,29 +723,18 @@ defmodule Arbor.Memory.WorkingMemory do
   Handles version upgrades, nil-versioned state, and plain maps.
   """
   @spec migrate(t() | map()) :: t()
-  def migrate(%__MODULE__{version: @version} = wm), do: wm
-
-  def migrate(%__MODULE__{version: 2} = wm) do
-    %{wm | version: @version, active_skills: wm.active_skills || []}
+  def migrate(%__MODULE__{} = wm) do
+    wm
     |> ensure_defaults()
-    |> migrate()
-  end
-
-  def migrate(%__MODULE__{version: 1} = wm) do
-    %{wm | version: @version, max_tokens: nil, model: nil, active_skills: []}
-    |> ensure_defaults()
-    |> migrate()
-  end
-
-  def migrate(%__MODULE__{version: nil} = wm) do
-    %{wm | version: @version, max_tokens: nil, model: nil}
-    |> ensure_defaults()
-    |> migrate()
+    |> ensure_stable_item_ids()
+    |> Map.put(:version, @version)
   end
 
   def migrate(%{} = old) when not is_struct(old) do
     deserialize(old)
   end
+
+  def migrate(_old), do: empty_legacy_memory()
 
   defp ensure_defaults(%__MODULE__{} = wm) do
     %{
@@ -727,8 +745,28 @@ defmodule Arbor.Memory.WorkingMemory do
         curiosity: wm.curiosity || [],
         concerns: wm.concerns || [],
         engagement_level: wm.engagement_level || 0.5,
-        started_at: wm.started_at || DateTime.utc_now(),
+        started_at: wm.started_at,
         thought_count: wm.thought_count || 0
+    }
+  end
+
+  defp ensure_stable_item_ids(%__MODULE__{} = wm) do
+    item_fallback_datetime = wm.started_at || @legacy_epoch
+    owner_seed = legacy_owner_seed(wm.agent_id, item_fallback_datetime)
+
+    %{
+      wm
+      | recent_thoughts:
+          deserialize_collection(
+            wm.recent_thoughts,
+            :thought,
+            owner_seed,
+            item_fallback_datetime
+          ),
+        active_goals:
+          deserialize_collection(wm.active_goals, :goal, owner_seed, item_fallback_datetime),
+        active_skills:
+          deserialize_collection(wm.active_skills, :skill, owner_seed, item_fallback_datetime)
     }
   end
 
@@ -900,6 +938,7 @@ defmodule Arbor.Memory.WorkingMemory do
 
   defp normalize_thought(thought) when is_binary(thought) do
     %{
+      id: generate_item_id("thought"),
       content: thought,
       timestamp: DateTime.utc_now(),
       cached_tokens: TokenBudget.estimate_tokens(thought),
@@ -910,16 +949,19 @@ defmodule Arbor.Memory.WorkingMemory do
   defp normalize_thought(%{content: _} = thought) do
     Map.merge(
       %{
+        id: generate_item_id("thought"),
         timestamp: DateTime.utc_now(),
         cached_tokens: TokenBudget.estimate_tokens(thought[:content] || ""),
         referenced_date: nil
       },
       thought
     )
+    |> ensure_runtime_item_id("thought")
   end
 
   defp normalize_thought(%{"content" => content} = thought) do
     %{
+      id: valid_id_or_new(thought["id"], "thought"),
       content: content,
       timestamp: parse_datetime(thought["timestamp"]) || DateTime.utc_now(),
       cached_tokens: thought["cached_tokens"] || TokenBudget.estimate_tokens(content),
@@ -931,6 +973,7 @@ defmodule Arbor.Memory.WorkingMemory do
   # {"text": "...", "referenced_date": "YYYY-MM-DD"}. Treat "text" as the content.
   defp normalize_thought(%{"text" => text} = thought) do
     %{
+      id: valid_id_or_new(thought["id"], "thought"),
       content: text,
       timestamp: parse_datetime(thought["timestamp"]) || DateTime.utc_now(),
       cached_tokens: thought["cached_tokens"] || TokenBudget.estimate_tokens(text),
@@ -940,6 +983,7 @@ defmodule Arbor.Memory.WorkingMemory do
 
   defp normalize_thought(%{text: text} = thought) do
     %{
+      id: valid_id_or_new(thought[:id], "thought"),
       content: text,
       timestamp: parse_datetime(thought[:timestamp]) || DateTime.utc_now(),
       cached_tokens: thought[:cached_tokens] || TokenBudget.estimate_tokens(text),
@@ -951,7 +995,7 @@ defmodule Arbor.Memory.WorkingMemory do
 
   defp normalize_goal(goal) when is_binary(goal) do
     %{
-      id: generate_id(),
+      id: generate_item_id("goal"),
       description: goal,
       type: :general,
       priority: :normal,
@@ -963,7 +1007,7 @@ defmodule Arbor.Memory.WorkingMemory do
   defp normalize_goal(%{description: _} = goal) do
     Map.merge(
       %{
-        id: generate_id(),
+        id: generate_item_id("goal"),
         type: :general,
         priority: :normal,
         progress: 0,
@@ -971,11 +1015,12 @@ defmodule Arbor.Memory.WorkingMemory do
       },
       goal
     )
+    |> ensure_runtime_item_id("goal")
   end
 
   defp normalize_goal(%{"description" => desc} = goal) do
     %{
-      id: goal["id"] || generate_id(),
+      id: valid_id_or_new(goal["id"], "goal"),
       description: desc,
       type: atomize(goal["type"]) || :general,
       priority: atomize(goal["priority"]) || :normal,
@@ -1157,8 +1202,16 @@ defmodule Arbor.Memory.WorkingMemory do
   # Private Helpers — Serialization
   # ============================================================================
 
-  defp serialize_thought(%{content: content, timestamp: ts, cached_tokens: tokens} = thought) do
+  defp serialize_thought(
+         %{
+           id: id,
+           content: content,
+           timestamp: ts,
+           cached_tokens: tokens
+         } = thought
+       ) do
     base = %{
+      "id" => id,
       "content" => content,
       "timestamp" => serialize_datetime(ts),
       "cached_tokens" => tokens
@@ -1168,10 +1221,6 @@ defmodule Arbor.Memory.WorkingMemory do
       nil -> base
       rd -> Map.put(base, "referenced_date", serialize_datetime(rd))
     end
-  end
-
-  defp serialize_thought(str) when is_binary(str) do
-    %{"content" => str, "timestamp" => nil, "cached_tokens" => 0}
   end
 
   defp serialize_goal(%{
@@ -1192,58 +1241,15 @@ defmodule Arbor.Memory.WorkingMemory do
     }
   end
 
-  defp serialize_goal(str) when is_binary(str) do
-    %{"description" => str, "type" => "general", "priority" => "normal", "progress" => 0}
-  end
-
-  defp deserialize_thought(str) when is_binary(str) do
-    # v1 format: plain string
+  defp serialize_active_skill(%{
+         id: id,
+         name: name,
+         description: desc,
+         body: body,
+         activated_at: at
+       }) do
     %{
-      content: str,
-      timestamp: DateTime.utc_now(),
-      cached_tokens: TokenBudget.estimate_tokens(str),
-      referenced_date: nil
-    }
-  end
-
-  defp deserialize_thought(%{"content" => content} = data) do
-    %{
-      content: content,
-      timestamp: parse_datetime(data["timestamp"]) || DateTime.utc_now(),
-      cached_tokens: data["cached_tokens"] || TokenBudget.estimate_tokens(content),
-      referenced_date: parse_datetime(data["referenced_date"])
-    }
-  end
-
-  defp deserialize_thought(%{content: _} = thought), do: thought
-
-  defp deserialize_goal(str) when is_binary(str) do
-    # v1 format: plain string
-    %{
-      id: generate_id(),
-      description: str,
-      type: :general,
-      priority: :normal,
-      progress: 0,
-      added_at: DateTime.utc_now()
-    }
-  end
-
-  defp deserialize_goal(%{"description" => desc} = data) do
-    %{
-      id: data["id"] || generate_id(),
-      description: desc,
-      type: atomize(data["type"]) || :general,
-      priority: atomize(data["priority"]) || :normal,
-      progress: data["progress"] || 0,
-      added_at: parse_datetime(data["added_at"]) || DateTime.utc_now()
-    }
-  end
-
-  defp deserialize_goal(%{description: _} = goal), do: goal
-
-  defp serialize_active_skill(%{name: name, description: desc, body: body, activated_at: at}) do
-    %{
+      "id" => id,
       "name" => name,
       "description" => desc,
       "body" => body,
@@ -1251,16 +1257,215 @@ defmodule Arbor.Memory.WorkingMemory do
     }
   end
 
-  defp deserialize_active_skill(%{"name" => name} = data) do
+  defp deserialize_item(:thought, str, fallback_id, fallback_datetime) when is_binary(str) do
     %{
-      name: name,
-      description: data["description"] || "",
-      body: data["body"] || "",
-      activated_at: parse_datetime(data["activated_at"]) || DateTime.utc_now()
+      id: fallback_id,
+      content: str,
+      timestamp: fallback_datetime,
+      cached_tokens: TokenBudget.estimate_tokens(str),
+      referenced_date: nil
     }
   end
 
-  defp deserialize_active_skill(%{name: _} = skill), do: skill
+  defp deserialize_item(:thought, %{"content" => content} = data, fallback_id, fallback_datetime)
+       when is_binary(content) do
+    %{
+      id: valid_id_or_fallback(data["id"], fallback_id),
+      content: content,
+      timestamp: parse_datetime(data["timestamp"]) || fallback_datetime,
+      cached_tokens: data["cached_tokens"] || TokenBudget.estimate_tokens(content),
+      referenced_date: parse_datetime(data["referenced_date"])
+    }
+  end
+
+  defp deserialize_item(:thought, %{content: content} = data, fallback_id, fallback_datetime)
+       when is_binary(content) do
+    %{
+      id: valid_id_or_fallback(data[:id], fallback_id),
+      content: content,
+      timestamp: parse_datetime(data[:timestamp]) || fallback_datetime,
+      cached_tokens: data[:cached_tokens] || TokenBudget.estimate_tokens(content),
+      referenced_date: parse_datetime(data[:referenced_date])
+    }
+  end
+
+  defp deserialize_item(:goal, str, fallback_id, fallback_datetime) when is_binary(str) do
+    %{
+      id: fallback_id,
+      description: str,
+      type: :general,
+      priority: :normal,
+      progress: 0,
+      added_at: fallback_datetime
+    }
+  end
+
+  defp deserialize_item(:goal, %{"description" => desc} = data, fallback_id, fallback_datetime)
+       when is_binary(desc) do
+    %{
+      id: valid_id_or_fallback(data["id"], fallback_id),
+      description: desc,
+      type: atomize(data["type"]) || :general,
+      priority: atomize(data["priority"]) || :normal,
+      progress: data["progress"] || 0,
+      added_at: parse_datetime(data["added_at"]) || fallback_datetime
+    }
+  end
+
+  defp deserialize_item(:goal, %{description: desc} = data, fallback_id, fallback_datetime)
+       when is_binary(desc) do
+    %{
+      id: valid_id_or_fallback(data[:id], fallback_id),
+      description: desc,
+      type: atomize(data[:type]) || :general,
+      priority: atomize(data[:priority]) || :normal,
+      progress: data[:progress] || 0,
+      added_at: parse_datetime(data[:added_at]) || fallback_datetime
+    }
+  end
+
+  defp deserialize_item(:skill, %{"name" => name} = data, fallback_id, fallback_datetime)
+       when is_binary(name) do
+    %{
+      id: valid_id_or_fallback(data["id"], fallback_id),
+      name: name,
+      description: data["description"] || "",
+      body: data["body"] || "",
+      activated_at: parse_datetime(data["activated_at"]) || fallback_datetime
+    }
+  end
+
+  defp deserialize_item(:skill, %{name: name} = data, fallback_id, fallback_datetime)
+       when is_binary(name) do
+    %{
+      id: valid_id_or_fallback(data[:id], fallback_id),
+      name: name,
+      description: data[:description] || "",
+      body: data[:body] || "",
+      activated_at: parse_datetime(data[:activated_at]) || fallback_datetime
+    }
+  end
+
+  defp deserialize_item(_kind, _item, _fallback_id, _fallback_datetime), do: nil
+
+  defp deserialize_collection(raw_items, kind, owner_seed, fallback_datetime) do
+    raw_items
+    |> proper_list()
+    |> Enum.with_index()
+    |> Enum.reduce({[], MapSet.new()}, fn {raw_item, index}, {items, seen_ids} ->
+      fallback_id = unique_legacy_item_id(kind, owner_seed, index, seen_ids)
+
+      case deserialize_item(kind, raw_item, fallback_id, fallback_datetime) do
+        nil ->
+          {items, seen_ids}
+
+        item ->
+          item_id =
+            if MapSet.member?(seen_ids, item.id),
+              do: fallback_id,
+              else: item.id
+
+          item = Map.put(item, :id, item_id)
+          {[item | items], MapSet.put(seen_ids, item_id)}
+      end
+    end)
+    |> elem(0)
+    |> Enum.reverse()
+  end
+
+  defp unique_legacy_item_id(kind, owner_seed, index, seen_ids, salt \\ 0) do
+    id = legacy_item_id(kind, owner_seed, index, salt)
+
+    if MapSet.member?(seen_ids, id) do
+      unique_legacy_item_id(kind, owner_seed, index, seen_ids, salt + 1)
+    else
+      id
+    end
+  end
+
+  defp legacy_item_id(kind, owner_seed, index, salt) do
+    digest =
+      :crypto.hash(
+        :sha256,
+        [
+          owner_seed,
+          <<0>>,
+          Atom.to_string(kind),
+          <<0>>,
+          Integer.to_string(index),
+          <<0>>,
+          Integer.to_string(salt)
+        ]
+      )
+      |> binary_part(0, @generated_id_bytes)
+      |> Base.url_encode64(padding: false)
+
+    "#{item_id_prefix(kind)}_#{digest}"
+  end
+
+  defp legacy_owner_seed(agent_id, started_at) do
+    owner = if is_binary(agent_id) and String.valid?(agent_id), do: agent_id, else: "legacy_owner"
+    started = serialize_datetime(started_at) || DateTime.to_iso8601(@legacy_epoch)
+    :crypto.hash(:sha256, [owner, <<0>>, started])
+  end
+
+  defp item_id_prefix(:thought), do: "thought"
+  defp item_id_prefix(:goal), do: "goal"
+  defp item_id_prefix(:skill), do: "skill"
+
+  defp ensure_runtime_item_id(item, prefix) do
+    Map.update(item, :id, generate_item_id(prefix), &valid_id_or_new(&1, prefix))
+  end
+
+  defp valid_id_or_new(id, prefix) do
+    if valid_item_id?(id), do: id, else: generate_item_id(prefix)
+  end
+
+  defp valid_id_or_fallback(id, fallback) do
+    if valid_item_id?(id), do: id, else: fallback
+  end
+
+  defp valid_item_id?(id) when is_binary(id) do
+    byte_size(id) <= @max_item_id_bytes and String.valid?(id) and String.trim(id) != ""
+  end
+
+  defp valid_item_id?(_id), do: false
+
+  defp proper_list(value) do
+    case walk_proper_list(value, @max_deserialized_items, []) do
+      {:ok, items} -> Enum.reverse(items)
+      :error -> []
+    end
+  end
+
+  defp walk_proper_list([], _remaining, acc), do: {:ok, acc}
+  defp walk_proper_list([_item | _rest], 0, acc), do: {:ok, acc}
+
+  defp walk_proper_list([item | rest], remaining, acc) when remaining > 0 do
+    walk_proper_list(rest, remaining - 1, [item | acc])
+  end
+
+  defp walk_proper_list(_improper_tail, _remaining, _acc), do: :error
+
+  defp get_field(data, key, default \\ nil) do
+    case Map.fetch(data, key) do
+      {:ok, value} -> value
+      :error -> Map.get(data, Atom.to_string(key), default)
+    end
+  end
+
+  defp numeric_or_default(value, _default) when is_number(value), do: value
+  defp numeric_or_default(_value, default), do: default
+
+  defp non_negative_integer_or_default(value, _default)
+       when is_integer(value) and value >= 0,
+       do: value
+
+  defp non_negative_integer_or_default(_value, default), do: default
+
+  defp empty_legacy_memory do
+    %__MODULE__{started_at: nil, version: @version}
+  end
 
   defp serialize_token_spec(nil), do: nil
   defp serialize_token_spec(n) when is_integer(n), do: n
@@ -1307,8 +1512,12 @@ defmodule Arbor.Memory.WorkingMemory do
     end
   end
 
-  defp generate_id do
-    "goal_" <> (:crypto.strong_rand_bytes(8) |> Base.url_encode64(padding: false))
+  defp generate_item_id(prefix) do
+    prefix <>
+      "_" <>
+      (@generated_id_bytes
+       |> :crypto.strong_rand_bytes()
+       |> Base.url_encode64(padding: false))
   end
 
   # ============================================================================

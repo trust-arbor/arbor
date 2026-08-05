@@ -144,6 +144,20 @@ defmodule Arbor.Memory.ProvenanceTest do
     assert :thinking_entry in Provenance.allowed_domains()
     assert :code_item in Provenance.allowed_domains()
     assert :self_knowledge in Provenance.allowed_domains()
+    assert :working_memory_base in Provenance.allowed_domains()
+    assert :working_memory_aggregate in Provenance.allowed_domains()
+
+    assert :ok =
+             Provenance.put(:working_memory_base, agent_id, "base", payload, taint)
+
+    assert :ok =
+             Provenance.put(:working_memory_aggregate, agent_id, "aggregate", payload, taint)
+
+    assert {:ok, ^taint, :verified} =
+             Provenance.resolve(:working_memory_base, agent_id, "base", payload)
+
+    assert {:ok, ^taint, :verified} =
+             Provenance.resolve(:working_memory_aggregate, agent_id, "aggregate", payload)
 
     assert {:error, :invalid_domain} = Provenance.put("goal", agent_id, "one", payload, taint)
     assert {:error, :invalid_domain} = Provenance.put(:unknown, agent_id, "one", payload, taint)
