@@ -231,7 +231,8 @@ defmodule Arbor.Memory.Index do
   converged. Same-content entries may converge to one durable row while each
   acknowledged ID remains usable as an alias. A same-content group requests
   the earliest indexed ID and persists the latest indexed content, vector, and
-  ordinary metadata, with ID breaking equal-time ties deterministically.
+  ordinary metadata. Ordering comes from a process-local monotonic sequence
+  assigned by the serialized index, never from wall-clock timestamps or IDs.
 
   This latest-value rule must not be extended to future C3G provenance labels.
   Provenance, taint, and authority labels must conservatively join every group
@@ -288,6 +289,9 @@ defmodule Arbor.Memory.Index do
       persistent_writer: Keyword.get(opts, :persistent_writer, Embedding),
       entry_id_generator: Keyword.get(opts, :entry_id_generator, &generate_entry_id/0),
       clock: Keyword.get(opts, :clock, &DateTime.utc_now/0),
+      # Local ordering only; never persisted or copied into caller metadata.
+      next_insertion_sequence: 0,
+      pending_insertion_sequences: %{},
       # Track entries not yet synced to persistent (for dual mode)
       pending_sync: MapSet.new(),
       # A failed eager write can later deduplicate to a different durable ID.
@@ -341,7 +345,15 @@ defmodule Arbor.Memory.Index do
 
   def handle_call(:clear, _from, state) do
     :ets.delete_all_objects(state.table)
-    {:reply, :ok, %{state | entry_count: 0, pending_sync: MapSet.new(), id_aliases: %{}}}
+
+    {:reply, :ok,
+     %{
+       state
+       | entry_count: 0,
+         pending_sync: MapSet.new(),
+         pending_insertion_sequences: %{},
+         id_aliases: %{}
+     }}
   end
 
   def handle_call({:get, entry_id}, _from, state) do
@@ -413,6 +425,7 @@ defmodule Arbor.Memory.Index do
   defp do_index(content, metadata, opts, state) do
     with {:ok, embedding} <- get_or_compute_embedding(content, opts),
          {:ok, entry_id, now} <- generate_entry_identity(state) do
+      insertion_sequence = state.next_insertion_sequence
       normalized_metadata = normalize_metadata(metadata)
 
       entry = %{
@@ -429,14 +442,20 @@ defmodule Arbor.Memory.Index do
       case state.backend do
         :ets ->
           # ETS only
-          {:ok, entry_id, state |> maybe_evict() |> put_local_entry(entry)}
+          new_state =
+            state
+            |> maybe_evict()
+            |> put_local_entry(entry)
+            |> advance_insertion_sequence(insertion_sequence)
+
+          {:ok, entry_id, new_state}
 
         :pgvector ->
           # pgvector only
           case Embedding.store(state.agent_id, content, embedding, normalized_metadata) do
             {:ok, stored_id} ->
               if valid_entry_id?(stored_id),
-                do: {:ok, stored_id, state},
+                do: {:ok, stored_id, advance_insertion_sequence(state, insertion_sequence)},
                 else: {:error, :malformed_persistence_result}
 
             {:error, reason} ->
@@ -444,26 +463,46 @@ defmodule Arbor.Memory.Index do
           end
 
         :dual ->
-          index_dual_mode(entry_id, entry, state)
+          index_dual_mode(entry_id, entry, insertion_sequence, state)
       end
     end
   end
 
-  defp index_dual_mode(entry_id, entry, state) do
+  defp index_dual_mode(entry_id, entry, insertion_sequence, state) do
     metadata_with_id = Map.put(entry.metadata, :id, entry_id)
 
     case eager_store(state, entry, metadata_with_id) do
       {:ok, authoritative_id} ->
         with :ok <- validate_authoritative_binding(state, entry.content, authoritative_id) do
           authoritative_entry = %{entry | id: authoritative_id}
-          new_state = state |> maybe_evict() |> put_local_entry(authoritative_entry)
+
+          new_state =
+            state
+            |> maybe_evict()
+            |> put_local_entry(authoritative_entry)
+            |> advance_insertion_sequence(insertion_sequence)
+            |> refresh_pending_insertion_sequence(authoritative_id, insertion_sequence)
+
           {:ok, authoritative_id, new_state}
         end
 
       {:error, reason} ->
         log_dual_write_failure(entry_id, reason)
-        state = state |> maybe_evict() |> put_local_entry(entry)
-        {:ok, entry_id, %{state | pending_sync: MapSet.put(state.pending_sync, entry_id)}}
+
+        state =
+          state
+          |> maybe_evict()
+          |> put_local_entry(entry)
+          |> advance_insertion_sequence(insertion_sequence)
+
+        new_state = %{
+          state
+          | pending_sync: MapSet.put(state.pending_sync, entry_id),
+            pending_insertion_sequences:
+              Map.put(state.pending_insertion_sequences, entry_id, insertion_sequence)
+        }
+
+        {:ok, entry_id, new_state}
     end
   end
 
@@ -725,7 +764,14 @@ defmodule Arbor.Memory.Index do
 
     Enum.each(to_remove, &:ets.delete(state.table, &1))
 
-    %{state | entry_count: count - length(to_remove)}
+    pending_sync = Enum.reduce(to_remove, state.pending_sync, &MapSet.delete(&2, &1))
+
+    %{
+      state
+      | entry_count: count - length(to_remove),
+        pending_sync: pending_sync,
+        pending_insertion_sequences: Map.drop(state.pending_insertion_sequences, to_remove)
+    }
   end
 
   defp maybe_evict(state), do: state
@@ -870,29 +916,29 @@ defmodule Arbor.Memory.Index do
   end
 
   defp collect_pending_entry(id, state) do
-    case :ets.lookup(state.table, id) do
-      [{^id, entry}] ->
-        [{id, entry}]
+    case {:ets.lookup(state.table, id), Map.fetch(state.pending_insertion_sequences, id)} do
+      {[{^id, entry}], {:ok, insertion_sequence}} ->
+        [{id, entry, insertion_sequence}]
 
-      [] ->
+      _missing_entry_or_sequence ->
         []
     end
   end
 
   defp group_pending_entries(pending_entries) do
     pending_entries
-    |> Enum.group_by(fn {_id, entry} -> :crypto.hash(:sha256, entry.content) end)
+    |> Enum.group_by(fn {_id, entry, _sequence} -> :crypto.hash(:sha256, entry.content) end)
     |> Enum.map(fn {content_digest, members} ->
       ordered_members = Enum.sort_by(members, &pending_entry_order_key/1)
-      [{requested_id, _earliest_entry} | _rest] = ordered_members
-      {_latest_id, canonical_entry} = List.last(ordered_members)
+      [{requested_id, _earliest_entry, earliest_sequence} | _rest] = ordered_members
+      {_latest_id, canonical_entry, _latest_sequence} = List.last(ordered_members)
 
       %{
         content_digest: content_digest,
-        member_ids: Enum.map(ordered_members, &elem(&1, 0)),
+        member_ids: Enum.map(ordered_members, fn {id, _entry, _sequence} -> id end),
         requested_id: requested_id,
         canonical_entry: canonical_entry,
-        order_key: pending_entry_order_key(hd(ordered_members))
+        order_key: earliest_sequence
       }
     end)
     |> Enum.sort_by(& &1.order_key)
@@ -908,9 +954,7 @@ defmodule Arbor.Memory.Index do
     }
   end
 
-  defp pending_entry_order_key({id, entry}) do
-    {DateTime.to_unix(entry.indexed_at, :microsecond), id}
-  end
+  defp pending_entry_order_key({_id, _entry, insertion_sequence}), do: insertion_sequence
 
   defp validate_authoritative_bindings(state, groups, authoritative_ids) do
     validate_authoritative_bindings(state, groups, authoritative_ids, MapSet.new(), [])
@@ -1046,6 +1090,7 @@ defmodule Arbor.Memory.Index do
       state
       | entry_count: :ets.info(state.table, :size),
         pending_sync: pending_sync,
+        pending_insertion_sequences: Map.drop(state.pending_insertion_sequences, member_ids),
         id_aliases: aliases
     }
   end
@@ -1058,6 +1103,22 @@ defmodule Arbor.Memory.Index do
   defp put_local_entry(state, entry) do
     :ets.insert(state.table, {entry.id, entry})
     %{state | entry_count: :ets.info(state.table, :size)}
+  end
+
+  defp advance_insertion_sequence(state, insertion_sequence) do
+    %{state | next_insertion_sequence: insertion_sequence + 1}
+  end
+
+  defp refresh_pending_insertion_sequence(state, id, insertion_sequence) do
+    if MapSet.member?(state.pending_sync, id) do
+      %{
+        state
+        | pending_insertion_sequences:
+            Map.put(state.pending_insertion_sequences, id, insertion_sequence)
+      }
+    else
+      state
+    end
   end
 
   defp resolve_entry_id(entry_id, state), do: Map.get(state.id_aliases, entry_id, entry_id)
@@ -1124,6 +1185,7 @@ defmodule Arbor.Memory.Index do
       state
       | entry_count: :ets.info(state.table, :size),
         pending_sync: MapSet.delete(state.pending_sync, canonical_id),
+        pending_insertion_sequences: Map.delete(state.pending_insertion_sequences, canonical_id),
         id_aliases: aliases
     }
   end

@@ -74,6 +74,10 @@ defmodule Arbor.Memory.IndexDualTest do
           [first, second] = requested_ids
           {:ok, [second, first]}
 
+        :duplicate_batch ->
+          [first, _second] = requested_ids
+          {:ok, [first, first]}
+
         :delegate ->
           Arbor.Memory.Embedding.store_batch_with_ids(agent_id, entries)
 
@@ -317,7 +321,7 @@ defmodule Arbor.Memory.IndexDualTest do
       assert Index.stats(pid).entry_count == 0
     end
 
-    test "authority regression: same-content pending writes converge every acknowledged id" do
+    test "authority regression: pending convergence follows invocation order, not clock or ID" do
       agent_id = durable_unique("test_dual_pending_dedupe")
       suffix = :crypto.strong_rand_bytes(8) |> Base.encode16(case: :lower)
 
@@ -330,10 +334,10 @@ defmodule Arbor.Memory.IndexDualTest do
 
       clock =
         sequence_callback([
-          ~U[2026-08-05 10:00:00.000000Z],
-          ~U[2026-08-05 10:00:01.000000Z],
           ~U[2026-08-05 10:00:02.000000Z],
-          ~U[2026-08-05 10:00:02.000000Z]
+          ~U[2026-08-05 10:00:04.000000Z],
+          ~U[2026-08-05 10:00:02.000000Z],
+          ~U[2026-08-05 10:00:01.000000Z]
         ])
 
       FailFirstWriter.arm(agent_id, 4)
@@ -418,6 +422,7 @@ defmodule Arbor.Memory.IndexDualTest do
       assert persisted.metadata["type"] == "latest"
       assert persisted.metadata["source"] == "latest"
       assert persisted.metadata["tags"] == ["canonical"]
+      refute Map.has_key?(persisted.metadata, "insertion_sequence")
       assert_vector_close(Pgvector.to_list(persisted.embedding), latest_embedding)
 
       assert {:error, :not_found} = Embedding.get(agent_id, middle_id)
@@ -509,6 +514,67 @@ defmodule Arbor.Memory.IndexDualTest do
       MaliciousWriter.configure(agent_id, :delegate)
       assert {:ok, 2} = Index.sync_to_persistent(pid)
       assert {:ok, %{id: ^first_id, content: "Malicious batch first"}} = Index.get(pid, first_id)
+
+      assert {:ok, %{id: ^second_id, content: "Malicious batch second"}} =
+               Index.get(pid, second_id)
+
+      assert Embedding.count(agent_id) == 2
+      assert {:ok, 0} = Index.sync_to_persistent(pid)
+    end
+
+    test "security regression: duplicate authoritative batch IDs preserve exact pending state" do
+      agent_id = durable_unique("test_dual_duplicate_authority")
+      suffix = :crypto.strong_rand_bytes(8) |> Base.encode16(case: :lower)
+      first_id = "mem_a_#{suffix}"
+      second_id = "mem_b_#{suffix}"
+      MaliciousWriter.configure(agent_id, :fail)
+
+      {:ok, pid} =
+        Index.start_link(
+          agent_id: agent_id,
+          backend: :dual,
+          persistent_writer: MaliciousWriter,
+          entry_id_generator: sequence_callback([first_id, second_id]),
+          name: {:via, Registry, {Arbor.Memory.Registry, {:test_duplicate_authority, agent_id}}}
+        )
+
+      on_exit(fn ->
+        MaliciousWriter.disarm(agent_id)
+        if Process.alive?(pid), do: GenServer.stop(pid)
+        Embedding.delete_all(agent_id)
+      end)
+
+      first_embedding = generate_embedding(65)
+      second_embedding = generate_embedding(66)
+
+      assert {:ok, ^first_id} =
+               Index.index(pid, "Malicious batch first", %{type: :first},
+                 embedding: first_embedding
+               )
+
+      assert {:ok, ^second_id} =
+               Index.index(pid, "Malicious batch second", %{type: :second},
+                 embedding: second_embedding
+               )
+
+      MaliciousWriter.configure(agent_id, :duplicate_batch)
+      assert {:error, :malformed_persistence_result} = Index.sync_to_persistent(pid)
+
+      assert_pending_entries_unchanged(
+        pid,
+        first_id,
+        second_id,
+        first_embedding,
+        second_embedding
+      )
+
+      assert Embedding.count(agent_id) == 0
+
+      MaliciousWriter.configure(agent_id, :delegate)
+      assert {:ok, 2} = Index.sync_to_persistent(pid)
+
+      assert {:ok, %{id: ^first_id, content: "Malicious batch first"}} =
+               Index.get(pid, first_id)
 
       assert {:ok, %{id: ^second_id, content: "Malicious batch second"}} =
                Index.get(pid, second_id)
@@ -635,10 +701,22 @@ defmodule Arbor.Memory.IndexDualTest do
        ) do
     assert Index.stats(pid).entry_count == 2
 
-    assert {:ok, %{id: ^first_id, content: "Malicious batch first", embedding: first_stored}} =
+    assert {:ok,
+            %{
+              id: ^first_id,
+              content: "Malicious batch first",
+              metadata: %{type: :first},
+              embedding: first_stored
+            }} =
              Index.get(pid, first_id)
 
-    assert {:ok, %{id: ^second_id, content: "Malicious batch second", embedding: second_stored}} =
+    assert {:ok,
+            %{
+              id: ^second_id,
+              content: "Malicious batch second",
+              metadata: %{type: :second},
+              embedding: second_stored
+            }} =
              Index.get(pid, second_id)
 
     assert_vector_close(first_stored, first_embedding)
