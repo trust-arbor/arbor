@@ -208,6 +208,37 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerTypedSteeringSecurityRegressionT
     end)
   end
 
+  test "security regression: steering controls come only from process-local Engine opts" do
+    # Candidate/base evidence: the candidate ignores this JSON-safe context value;
+    # the base forwards it as control data and fails callback validation.
+    context_values = %{"session.steer_check" => "malformed-context-control"}
+
+    ignored_outcome = execute_tool_node(:dynamic_taint, context_values: context_values)
+    assert ignored_outcome.status == :success
+
+    parent = self()
+
+    opts_callback = fn descriptor ->
+      send(parent, {:opts_steer_boundary, descriptor})
+      :none
+    end
+
+    opts_outcome =
+      execute_tool_node(:dynamic_taint,
+        context_values: context_values,
+        steer_check: opts_callback
+      )
+
+    assert opts_outcome.status == :success
+
+    assert [
+             {:opts_steer_boundary, {attempt_ref, 1}},
+             {:opts_steer_boundary, {attempt_ref, 2}}
+           ] = collect_tag(:opts_steer_boundary)
+
+    assert is_reference(attempt_ref)
+  end
+
   test "arity-1 Session authorizers retain initial and per-provider compatibility" do
     parent = self()
 
@@ -327,7 +358,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerTypedSteeringSecurityRegressionT
 
     LlmHandler.execute(
       tool_node(scenario),
-      context(scenario, fallback_chain),
+      context(scenario, fallback_chain, Keyword.get(opts, :context_values, %{})),
       graph(),
       handler_opts
     )
@@ -372,15 +403,21 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerTypedSteeringSecurityRegressionT
     }
   end
 
-  defp context(_scenario, fallback_chain) do
-    Context.new(%{
-      "session.agent_id" => "agent_typed_steering_handler",
-      "session.llm_provider" => HandlerAdapter.provider(),
-      "session.llm_model" => "primary-model",
-      "session.llm_runtime" => :arbor,
-      "session.llm_fallback_chain" => fallback_chain,
-      "session.tools" => tool_definitions()
-    })
+  defp context(_scenario, fallback_chain, extra_values \\ %{}) do
+    values =
+      Map.merge(
+        %{
+          "session.agent_id" => "agent_typed_steering_handler",
+          "session.llm_provider" => HandlerAdapter.provider(),
+          "session.llm_model" => "primary-model",
+          "session.llm_runtime" => :arbor,
+          "session.llm_fallback_chain" => fallback_chain,
+          "session.tools" => tool_definitions()
+        },
+        extra_values
+      )
+
+    Context.new(values)
   end
 
   defp graph, do: %{attrs: %{"goal" => "typed steering"}}

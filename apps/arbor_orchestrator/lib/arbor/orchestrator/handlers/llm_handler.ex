@@ -1369,8 +1369,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
               [signer: signer]
             end
 
-          steer_check =
-            Keyword.get(opts, :steer_check) || Context.get(context, "session.steer_check")
+          steer_check = Keyword.get(opts, :steer_check)
 
           tool_loop_opts =
             [
@@ -1381,7 +1380,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
               prompt_sanitizer_nonce: nonce,
               on_tool_call: build_tool_callback(opts, node.id)
             ]
-            # Steering: a process-local arity-1 Session closure receives the
+            # Steering is sourced only from process-local Engine opts. An arity-1 Session closure receives the
             # ToolLoop attempt/boundary identity and returns one typed batch.
             # Absence stays absent; a present malformed value reaches ToolLoop's
             # fail-closed callback validation.
