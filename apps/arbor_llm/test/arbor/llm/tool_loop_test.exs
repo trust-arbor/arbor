@@ -1,6 +1,9 @@
 defmodule Arbor.LLM.ToolLoopTest do
   use ExUnit.Case, async: true
 
+  alias Arbor.Contracts.Security.Taint
+  alias Arbor.Contracts.Session.SteeringMessage
+
   alias Arbor.LLM.Client
 
   alias Arbor.LLM.ContentPart
@@ -762,15 +765,22 @@ defmodule Arbor.LLM.ToolLoopTest do
     test "a mid-turn message is folded in as steering at the iteration boundary", %{
       tmp_dir: tmp_dir
     } do
-      # One steering message pending; drained via on_steer_check at the boundary after the
-      # first (write_file) tool round.
-      {:ok, pending} = Agent.start_link(fn -> ["STEER: also verify the config"] end)
+      {:ok, steering_message} =
+        SteeringMessage.new(%{
+          message_id: "steer_00000000000000000000000000000001",
+          engagement_id: nil,
+          content: "STEER: also verify the config",
+          taint: %Taint{level: :untrusted, source: "test", chain: ["test"]}
+        })
+
+      # One typed batch is returned at the boundary after the first tool round.
+      {:ok, pending} = Agent.start_link(fn -> [steering_message] end)
       on_exit(fn -> if Process.alive?(pending), do: Agent.stop(pending) end)
 
-      on_steer_check = fn ->
+      on_steer_check = fn {_attempt_ref, _positive_boundary_sequence} ->
         Agent.get_and_update(pending, fn
-          [m | rest] -> {m, rest}
-          [] -> {nil, []}
+          [message | rest] -> {{:ok, [message]}, rest}
+          [] -> {:none, []}
         end)
       end
 

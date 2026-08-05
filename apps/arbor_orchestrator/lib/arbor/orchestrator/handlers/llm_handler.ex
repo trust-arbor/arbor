@@ -37,7 +37,8 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
   # Dispatch opts (Dispatch strips it before runtime adapters).
   @turn_private_opt_keys [
     :turn_egress_authorizer,
-    :frozen_egress_route
+    :frozen_egress_route,
+    :steer_check
   ]
 
   @impl true
@@ -315,13 +316,13 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
     frozen = Keyword.get(opts, :frozen_egress_route)
 
     cond do
-      not is_function(authorizer, 1) ->
+      not turn_authorizer?(authorizer) ->
         turn_egress_refusal(base_updates, :invalid_authorizer)
 
       true ->
         case TurnEgress.canonicalize_route(frozen) do
           {:ok, route} ->
-            case safe_call_turn_authorizer(authorizer, route) do
+            case safe_call_turn_authorizer(authorizer, route, conservative_untrusted_taint()) do
               :allow -> :ok
               _ -> turn_egress_refusal(base_updates, :initial_denied)
             end
@@ -350,7 +351,10 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
     }
   end
 
-  defp safe_call_turn_authorizer(authorizer, route) when is_function(authorizer, 1) do
+  defp turn_authorizer?(authorizer),
+    do: is_function(authorizer, 1) or is_function(authorizer, 2)
+
+  defp safe_call_turn_authorizer(authorizer, route, _taint) when is_function(authorizer, 1) do
     case authorizer.(route) do
       :allow -> :allow
       other -> other
@@ -360,6 +364,19 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
   catch
     _, _ -> {:error, :raised}
   end
+
+  defp safe_call_turn_authorizer(authorizer, route, taint) when is_function(authorizer, 2) do
+    case authorizer.(route, taint) do
+      :allow -> :allow
+      other -> other
+    end
+  rescue
+    _ -> {:error, :raised}
+  catch
+    _, _ -> {:error, :raised}
+  end
+
+  defp conservative_untrusted_taint, do: SignalTaint.from_level(:untrusted)
 
   # Production assembly uses Arbor.AI facade only (Application profile).
   # Explicit :provider_route_input remains a test/upstream opt and is not overwritten.
@@ -1352,6 +1369,9 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
               [signer: signer]
             end
 
+          steer_check =
+            Keyword.get(opts, :steer_check) || Context.get(context, "session.steer_check")
+
           tool_loop_opts =
             [
               workdir: workdir,
@@ -1359,13 +1379,13 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
               tools: tool_defs,
               tool_executor: executor,
               prompt_sanitizer_nonce: nonce,
-              on_tool_call: build_tool_callback(opts, node.id),
-              # Steering: a 0-arity closure (from the Session) that returns the next mid-turn user
-              # message to fold in at an iteration boundary. Opts get function-stripped for RPC, so
-              # (like signer) the closure travels in the context; read opts first, then context.
-              on_steer_check:
-                Keyword.get(opts, :steer_check) || Context.get(context, "session.steer_check")
+              on_tool_call: build_tool_callback(opts, node.id)
             ]
+            # Steering: a process-local arity-1 Session closure receives the
+            # ToolLoop attempt/boundary identity and returns one typed batch.
+            # Absence stays absent; a present malformed value reaches ToolLoop's
+            # fail-closed callback validation.
+            |> maybe_put_steer_check(steer_check)
             |> maybe_put_terminal_tools(terminal_tools)
             |> Keyword.merge(credential_opts)
             |> Keyword.merge(authority_opts)
@@ -1469,6 +1489,9 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
 
   defp maybe_put_terminal_tools(opts, []), do: opts
   defp maybe_put_terminal_tools(opts, names), do: Keyword.put(opts, :terminal_tools, names)
+
+  defp maybe_put_steer_check(opts, nil), do: opts
+  defp maybe_put_steer_check(opts, check), do: Keyword.put(opts, :on_steer_check, check)
 
   defp maybe_put_llm_call_authorizer(tool_loop_opts, engine_opts) do
     if session_turn_egress_seam?(engine_opts) do
@@ -1736,11 +1759,16 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
     end
   end
 
-  defp wrap_dispatch_route_authorizer(turn_authorizer) when is_function(turn_authorizer, 1) do
+  defp wrap_dispatch_route_authorizer(turn_authorizer)
+       when is_function(turn_authorizer, 1) or is_function(turn_authorizer, 2) do
     fn route ->
       case TurnEgress.project_dispatch_route(route) do
         {:ok, scalar} ->
-          case safe_call_turn_authorizer(turn_authorizer, scalar) do
+          case safe_call_turn_authorizer(
+                 turn_authorizer,
+                 scalar,
+                 conservative_untrusted_taint()
+               ) do
             :allow -> :allow
             {:requires_approval, _} -> {:requires_approval, :egress}
             _ -> {:error, {:egress_blocked, :external_provider, :denied}}
@@ -1758,7 +1786,23 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
     fn request ->
       case TurnEgress.project_request_route(request) do
         {:ok, scalar} ->
-          case safe_call_turn_authorizer(turn_authorizer, scalar) do
+          case safe_call_turn_authorizer(turn_authorizer, scalar, nil) do
+            :allow -> :allow
+            {:requires_approval, _} -> {:requires_approval, :egress}
+            _ -> {:error, {:egress_blocked, :external_provider, :denied}}
+          end
+
+        {:error, _} ->
+          {:error, {:egress_blocked, :external_provider, :invalid_route}}
+      end
+    end
+  end
+
+  defp wrap_llm_call_authorizer(turn_authorizer) when is_function(turn_authorizer, 2) do
+    fn request, taint ->
+      case TurnEgress.project_request_route(request) do
+        {:ok, scalar} ->
+          case safe_call_turn_authorizer(turn_authorizer, scalar, taint) do
             :allow -> :allow
             {:requires_approval, _} -> {:requires_approval, :egress}
             _ -> {:error, {:egress_blocked, :external_provider, :denied}}

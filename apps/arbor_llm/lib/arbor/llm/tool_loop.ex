@@ -34,13 +34,22 @@ defmodule Arbor.LLM.ToolLoop do
       typed diagnostic. Mixed or multiple terminal submissions during ordinary
       rounds fail closed as ambiguous. Absent/`[]` preserves existing free-form
       final-text / max_turns wrap-up behavior.
-    * `:llm_call_authorizer` - Optional process-local arity-1 callback invoked
-      with the exact `%Arbor.LLM.Request{}` immediately before every individual
-      `Client.complete/3` or `Client.complete_streaming/4` attempt (including
-      stream-not-supported fallback, max-turn wrap-up, empty-final retry, and
-      terminal-only correction). Only exact `:allow` admits the attempt. Absent
-      preserves current behavior. Present nil/malformed/deny/pending-like/
-      raise/throw/exit fails closed with
+    * `:on_steer_check` - Optional process-local arity-1 callback invoked exactly
+      once after each completed tool round with
+      `{attempt_ref, positive_boundary_sequence}`. It returns `:none` or
+      `{:ok, [%Arbor.Contracts.Session.SteeringMessage{}]}`. Accepted messages
+      are atomically bounded, appended as user messages in order, joined into
+      aggregate tool/provider taint, and audited without content.
+    * `:llm_call_authorizer` - Optional process-local arity-1 or arity-2 callback
+      invoked immediately before every individual `Client.complete/3` or
+      `Client.complete_streaming/4` attempt (including stream-not-supported
+      fallback, max-turn wrap-up, empty-final retry, and terminal-only
+      correction). Arity 1 receives the exact `%Arbor.LLM.Request{}`. Arity 2
+      also receives the current exact `%Arbor.Contracts.Security.Taint{}`;
+      absent `:tool_taint` is conservatively represented as untrusted/internal/
+      unverified. Only exact `:allow` admits the attempt. Absent preserves
+      current behavior. Present nil/malformed/deny/pending-like/raise/throw/exit
+      fails closed with
       `{:llm_call_authorization_failed, reason}` and zero external calls for
       that attempt. Never forwarded to adapters, executors, requests, responses,
       signals, or logs.
@@ -65,6 +74,7 @@ defmodule Arbor.LLM.ToolLoop do
 
   alias Arbor.Contracts.Pipeline.Response, as: PipelineResponse
   alias Arbor.Contracts.Security.Taint
+  alias Arbor.Contracts.Session.SteeringMessage
 
   alias Arbor.LLM.ArborActionsExecutor
 
@@ -79,6 +89,8 @@ defmodule Arbor.LLM.ToolLoop do
   alias Arbor.LLM.ResponseBudget
 
   alias Arbor.LLM.ToolResultBudget
+
+  alias Arbor.Signals.Taint, as: SignalTaint
 
   @prompt_sanitizer Arbor.Common.PromptSanitizer
 
@@ -99,6 +111,7 @@ defmodule Arbor.LLM.ToolLoop do
     with :ok <- validate_credential_exclusivity(opts),
          {:ok, identity} <- execution_identity(opts),
          {:ok, tool_taint} <- normalize_tool_taint(opts),
+         {:ok, steer_check} <- normalize_steer_check(opts),
          {:ok, terminal_tools} <- normalize_terminal_tools(Keyword.get(opts, :terminal_tools)) do
       max_turns = Keyword.get(opts, :max_turns, @default_max_turns)
       workdir = Keyword.get(opts, :workdir, ".")
@@ -132,7 +145,8 @@ defmodule Arbor.LLM.ToolLoop do
             signing_authority_present?,
             terminal_tools,
             tools,
-            tool_taint
+            tool_taint,
+            steer_check
           )
 
         {:error, _} = error ->
@@ -155,7 +169,8 @@ defmodule Arbor.LLM.ToolLoop do
          signing_authority_present?,
          terminal_tools,
          tools,
-         tool_taint
+         tool_taint,
+         steer_check
        ) do
     loop(client, request, opts, %{
       max_turns: max_turns,
@@ -176,10 +191,14 @@ defmodule Arbor.LLM.ToolLoop do
       discovered_tools: [],
       accumulated_text: "",
       tool_result_budget: ToolResultBudget.new(),
-      # Steering: an optional 0-arity callback that returns the next queued user message to
-      # fold into the conversation at an iteration boundary (or nil when none). Injected by the
-      # caller (the Session) so the tool loop stays generic — it never reaches into the Session.
-      on_steer_check: Keyword.get(opts, :on_steer_check),
+      # Steering authority remains process-local. One opaque attempt reference
+      # scopes every positive boundary sequence for this ToolLoop.run/3 call.
+      on_steer_check: steer_check,
+      steering_attempt_ref: make_ref(),
+      steering_boundary_sequence: 0,
+      steering_message_count: 0,
+      steering_byte_count: 0,
+      steering_accepted?: false,
       # Per-tool CONSECUTIVE failure counter (reset on success). Backs the runaway guard:
       # exponential backoff before retrying a recently-failed tool, and a hard cap that stops
       # executing a tool that keeps failing so a broken/rate-limited tool can't loop forever.
@@ -192,6 +211,22 @@ defmodule Arbor.LLM.ToolLoop do
       all_tools: tools
     })
   end
+
+  defp normalize_steer_check(opts) when is_list(opts) do
+    case Keyword.fetch(opts, :on_steer_check) do
+      :error ->
+        {:ok, nil}
+
+      {:ok, check} when is_function(check, 1) ->
+        {:ok, check}
+
+      {:ok, _malformed} ->
+        {:error, {:invalid_steering_callback, :expected_arity_1}}
+    end
+  end
+
+  defp normalize_steer_check(_opts),
+    do: {:error, {:invalid_steering_callback, :expected_keyword_options}}
 
   defp ensure_terminal_tools_subset(terminals, tools) do
     cond do
@@ -606,7 +641,13 @@ defmodule Arbor.LLM.ToolLoop do
   defp maybe_put_executor_opt(opts, _key, nil), do: opts
   defp maybe_put_executor_opt(opts, key, value), do: Keyword.put(opts, key, value)
 
-  defp loop(client, request, opts, %{turn: turn, max_turns: max} = state)
+  defp loop(client, request, opts, state) do
+    client
+    |> do_loop(request, opts, state)
+    |> maybe_wrap_steering_error(state)
+  end
+
+  defp do_loop(client, request, opts, %{turn: turn, max_turns: max} = state)
        when turn >= max do
     if terminal_tools_enabled?(state) do
       if state.terminal_correction_attempted do
@@ -662,7 +703,7 @@ defmodule Arbor.LLM.ToolLoop do
       # llm_call_authorizer (one approval never covers this reserved attempt).
       wrap_up_opts = Keyword.take(opts, [:llm_call_authorizer])
 
-      case call_llm(client, text_only_request, wrap_up_opts) do
+      case call_llm(client, text_only_request, wrap_up_opts, state.tool_taint) do
         {:ok, response} ->
           final_text = response.text || ""
           accumulated = Map.get(state, :accumulated_text, "")
@@ -689,6 +730,9 @@ defmodule Arbor.LLM.ToolLoop do
         {:error, {:llm_call_authorization_failed, _reason}} = auth_error ->
           auth_error
 
+        {:error, reason} when state.steering_accepted? ->
+          {:error, reason}
+
         {:error, _} ->
           # Final call failed — fall back to accumulated text
           accumulated = Map.get(state, :accumulated_text, "")
@@ -709,10 +753,10 @@ defmodule Arbor.LLM.ToolLoop do
     end
   end
 
-  defp loop(client, request, opts, state) do
+  defp do_loop(client, request, opts, state) do
     llm_t0 = System.monotonic_time(:millisecond)
 
-    case call_llm(client, request, opts) do
+    case call_llm(client, request, opts, state.tool_taint) do
       {:ok, response} ->
         llm_ms = System.monotonic_time(:millisecond) - llm_t0
         state = merge_usage(state, response.usage)
@@ -856,13 +900,18 @@ defmodule Arbor.LLM.ToolLoop do
                     updated_messages = request.messages ++ [assistant_msg | tool_msgs]
                     next_tools = merge_tool_definitions(request.tools, new_tool_defs)
                     next_request = %{request | messages: updated_messages, tools: next_tools}
-                    next_request = apply_steering(next_request, state)
 
-                    loop(client, next_request, opts, %{
-                      state
-                      | turn: state.turn + 1,
-                        tool_result_budget: next_budget
-                    })
+                    case apply_steering(next_request, state) do
+                      {:ok, steered_request, steered_state} ->
+                        loop(client, steered_request, opts, %{
+                          steered_state
+                          | turn: state.turn + 1,
+                            tool_result_budget: next_budget
+                        })
+
+                      {:error, _reason} = error ->
+                        error
+                    end
 
                   {:error, _reason} = error ->
                     error
@@ -975,19 +1024,30 @@ defmodule Arbor.LLM.ToolLoop do
     end
   end
 
+  defp maybe_wrap_steering_error(
+         {:error, {:steering_delivery_ambiguous, _reason}} = error,
+         _state
+       ),
+       do: error
+
+  defp maybe_wrap_steering_error({:error, reason}, %{steering_accepted?: true}),
+    do: {:error, {:steering_delivery_ambiguous, reason}}
+
+  defp maybe_wrap_steering_error(result, _state), do: result
+
   # Use streaming when a stream_callback is provided, otherwise Client.complete.
   # Every external Client attempt funnels here so a present :llm_call_authorizer
   # is consulted once per attempt (including stream-not-supported fallback).
   # When the authorizer is present and allows, dedicated single-attempt Client
   # APIs are used so one approval covers at most one real outbound attempt.
-  defp call_llm(client, request, opts) do
+  defp call_llm(client, request, opts, tool_taint) do
     # Never forward process-local controls into Client/adapters.
-    client_opts = Keyword.drop(opts, [:llm_call_authorizer, :tool_taint])
+    client_opts = Keyword.drop(opts, [:llm_call_authorizer, :on_steer_check, :tool_taint])
     single_attempt? = Keyword.has_key?(opts, :llm_call_authorizer)
 
     case Keyword.get(opts, :stream_callback) do
       nil ->
-        with :ok <- authorize_llm_call(opts, request) do
+        with :ok <- authorize_llm_call(opts, request, tool_taint) do
           if single_attempt? do
             Client.complete_single_attempt(client, request, client_opts)
           else
@@ -1001,7 +1061,7 @@ defmodule Arbor.LLM.ToolLoop do
         # stream→collect_stream path dropped tool-call arguments (streamed
         # tool-call chunks carry no assembled args), so tools ran with empty
         # input. Fall back to complete if the adapter can't stream-and-assemble.
-        with :ok <- authorize_llm_call(opts, request) do
+        with :ok <- authorize_llm_call(opts, request, tool_taint) do
           stream_result =
             if single_attempt? do
               Client.complete_streaming_single_attempt(client, request, callback, client_opts)
@@ -1015,7 +1075,7 @@ defmodule Arbor.LLM.ToolLoop do
 
             {:error, {:stream_not_supported, _}} ->
               # One approval never covers the non-streaming fallback attempt.
-              with :ok <- authorize_llm_call(opts, request) do
+              with :ok <- authorize_llm_call(opts, request, tool_taint) do
                 if single_attempt? do
                   Client.complete_single_attempt(client, request, client_opts)
                 else
@@ -1030,12 +1090,15 @@ defmodule Arbor.LLM.ToolLoop do
     end
   end
 
-  # Optional process-local gate. Absent key → unchanged. Present non-arity-1 /
-  # deny / pending-like / raise / throw / exit → bounded fail-closed error.
-  defp authorize_llm_call(opts, %Request{} = request) when is_list(opts) do
+  # Optional process-local gate. Arity 1 preserves legacy request-only checks;
+  # arity 2 receives the exact current aggregate taint for this attempt.
+  defp authorize_llm_call(opts, %Request{} = request, tool_taint) when is_list(opts) do
     case Keyword.fetch(opts, :llm_call_authorizer) do
       :error ->
         :ok
+
+      {:ok, authorizer} when is_function(authorizer, 2) ->
+        invoke_llm_call_authorizer(authorizer, request, authorization_taint(tool_taint))
 
       {:ok, authorizer} when is_function(authorizer, 1) ->
         invoke_llm_call_authorizer(authorizer, request)
@@ -1045,12 +1108,43 @@ defmodule Arbor.LLM.ToolLoop do
     end
   end
 
-  defp authorize_llm_call(_opts, %Request{}),
+  defp authorize_llm_call(_opts, %Request{}, _tool_taint),
     do: {:error, {:llm_call_authorization_failed, :invalid_llm_call_authorizer}}
+
+  defp authorization_taint(%Taint{} = taint), do: taint
+
+  defp authorization_taint(_missing) do
+    %Taint{
+      level: :untrusted,
+      sensitivity: :internal,
+      sanitizations: 0,
+      confidence: :unverified,
+      source: nil,
+      chain: []
+    }
+  end
 
   defp invoke_llm_call_authorizer(authorizer, %Request{} = request)
        when is_function(authorizer, 1) do
     case authorizer.(request) do
+      :allow ->
+        :ok
+
+      {:requires_approval, _reason} ->
+        {:error, {:llm_call_authorization_failed, :pending}}
+
+      _other ->
+        {:error, {:llm_call_authorization_failed, :denied}}
+    end
+  rescue
+    _ -> {:error, {:llm_call_authorization_failed, :raised}}
+  catch
+    _, _ -> {:error, {:llm_call_authorization_failed, :raised}}
+  end
+
+  defp invoke_llm_call_authorizer(authorizer, %Request{} = request, %Taint{} = taint)
+       when is_function(authorizer, 2) do
+    case authorizer.(request, taint) do
       :allow ->
         :ok
 
@@ -1241,33 +1335,163 @@ defmodule Arbor.LLM.ToolLoop do
       "that the tool is unavailable."
   end
 
-  # STEERING: drain ALL queued user messages from the injected checker and append each as a
-  # user message so the model sees them at the next iteration boundary. No-op when no checker is
-  # wired — the tool loop stays generic; the checker is the Session's queue peek. The checker
-  # returns a message string or nil (any non-string ends the drain).
-  defp apply_steering(request, %{on_steer_check: check}) when is_function(check, 0) do
-    case drain_steering(check, []) do
-      [] ->
-        request
+  # One typed, atomic steering read per completed tool boundary. The callback,
+  # attempt reference, source envelope, and aggregate taint stay process-local.
+  defp apply_steering(request, %{on_steer_check: nil} = state),
+    do: {:ok, request, state}
 
-      msgs ->
-        require Logger
+  defp apply_steering(request, %{on_steer_check: check} = state)
+       when is_function(check, 1) do
+    boundary = state.steering_boundary_sequence + 1
+    maximum = SteeringMessage.max_boundaries_per_turn()
 
-        Logger.info(
-          "[ToolLoop] steering: folded #{length(msgs)} mid-turn message(s) into the turn"
-        )
+    if boundary > maximum do
+      {:error, {:steering_limit_exceeded, :boundaries_per_turn, maximum}}
+    else
+      boundary_state = %{state | steering_boundary_sequence: boundary}
 
-        %{request | messages: request.messages ++ Enum.map(msgs, &Message.new(:user, &1))}
+      with {:ok, callback_result} <-
+             invoke_steer_check(check, state.steering_attempt_ref, boundary),
+           {:ok, messages} <- normalize_steering_result(callback_result, boundary_state),
+           {:ok, steered_request, steered_state} <-
+             accept_steering_messages(request, messages, boundary_state) do
+        {:ok, steered_request, steered_state}
+      end
     end
   end
 
-  defp apply_steering(request, _state), do: request
+  defp invoke_steer_check(check, attempt_ref, boundary) when is_function(check, 1) do
+    {:ok, check.({attempt_ref, boundary})}
+  rescue
+    _ -> {:error, {:steering_callback_failed, :raised}}
+  catch
+    _, _ -> {:error, {:steering_callback_failed, :raised}}
+  end
 
-  defp drain_steering(check, acc) do
-    case check.() do
-      msg when is_binary(msg) and msg != "" -> drain_steering(check, [msg | acc])
-      _ -> Enum.reverse(acc)
+  defp normalize_steering_result(:none, _state), do: {:ok, []}
+
+  defp normalize_steering_result({:ok, messages}, state)
+       when is_list(messages) and messages != [] do
+    canonicalize_steering_batch(messages, state)
+  end
+
+  defp normalize_steering_result(_malformed, _state),
+    do: {:error, {:invalid_steering_callback_result, :expected_none_or_nonempty_message_list}}
+
+  defp canonicalize_steering_batch(messages, state) do
+    initial = {:ok, [], 0, 0}
+
+    messages
+    |> Enum.reduce_while(initial, fn raw, {:ok, accepted, count, bytes} ->
+      next_count = count + 1
+      boundary_count_max = SteeringMessage.max_messages_per_boundary()
+
+      cond do
+        next_count > boundary_count_max ->
+          {:halt,
+           {:error, {:steering_limit_exceeded, :messages_per_boundary, boundary_count_max}}}
+
+        not is_struct(raw, SteeringMessage) ->
+          {:halt, {:error, {:invalid_steering_envelope, :expected_exact_struct}}}
+
+        true ->
+          case SteeringMessage.canonicalize(raw) do
+            {:ok, message} ->
+              next_bytes = bytes + byte_size(message.content)
+
+              case validate_steering_totals(state, next_count, next_bytes) do
+                :ok ->
+                  {:cont, {:ok, [message | accepted], next_count, next_bytes}}
+
+                {:error, _reason} = error ->
+                  {:halt, error}
+              end
+
+            {:error, reason} ->
+              {:halt, {:error, {:invalid_steering_envelope, reason}}}
+          end
+      end
+    end)
+    |> case do
+      {:ok, accepted, _count, _bytes} -> {:ok, Enum.reverse(accepted)}
+      {:error, _reason} = error -> error
     end
+  end
+
+  defp validate_steering_totals(state, boundary_count, boundary_bytes) do
+    boundary_bytes_max = SteeringMessage.max_bytes_per_boundary()
+    turn_count_max = SteeringMessage.max_messages_per_turn()
+    turn_bytes_max = SteeringMessage.max_bytes_per_turn()
+
+    cond do
+      boundary_bytes > boundary_bytes_max ->
+        {:error, {:steering_limit_exceeded, :bytes_per_boundary, boundary_bytes_max}}
+
+      state.steering_message_count + boundary_count > turn_count_max ->
+        {:error, {:steering_limit_exceeded, :messages_per_turn, turn_count_max}}
+
+      state.steering_byte_count + boundary_bytes > turn_bytes_max ->
+        {:error, {:steering_limit_exceeded, :bytes_per_turn, turn_bytes_max}}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp accept_steering_messages(request, [], state), do: {:ok, request, state}
+
+  defp accept_steering_messages(request, messages, state) do
+    message_bytes = Enum.reduce(messages, 0, &(byte_size(&1.content) + &2))
+    aggregate_taint = join_steering_taint(state.tool_taint, messages)
+
+    next_state = %{
+      state
+      | steering_message_count: state.steering_message_count + length(messages),
+        steering_byte_count: state.steering_byte_count + message_bytes,
+        steering_accepted?: true,
+        tool_taint: aggregate_taint
+    }
+
+    Enum.each(messages, &emit_steering_audit(&1, state.turn, state.steering_boundary_sequence))
+
+    require Logger
+
+    Logger.info(
+      "[ToolLoop] steering: folded #{length(messages)} typed mid-turn message(s) " <>
+        "at boundary #{state.steering_boundary_sequence}"
+    )
+
+    steering_messages = Enum.map(messages, &Message.new(:user, &1.content))
+    {:ok, %{request | messages: request.messages ++ steering_messages}, next_state}
+  end
+
+  defp join_steering_taint(tool_taint, messages) do
+    steering_taints = Enum.map(messages, &SignalTaint.for_llm_output(&1.taint))
+
+    [tool_taint | steering_taints]
+    |> Enum.reject(&is_nil/1)
+    |> SignalTaint.propagate_taint()
+    |> cap_steering_taint_chain()
+  end
+
+  defp cap_steering_taint_chain(%Taint{} = taint) do
+    maximum = SteeringMessage.max_taint_chain_entries()
+    %{taint | chain: Enum.take(taint.chain, -maximum)}
+  end
+
+  defp emit_steering_audit(%SteeringMessage{} = message, turn, boundary) do
+    emit_tool_loop_signal(:steering_message_accepted, %{
+      message_id: message.message_id,
+      turn: turn,
+      boundary_sequence: boundary,
+      content_bytes: byte_size(message.content),
+      taint: %{
+        level: message.taint.level,
+        sensitivity: message.taint.sensitivity,
+        sanitizations: message.taint.sanitizations,
+        confidence: message.taint.confidence
+      }
+    })
   end
 
   # Pass the signer function to the executor so it can sign with the correct
