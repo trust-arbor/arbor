@@ -4,10 +4,33 @@ defmodule Arbor.Agent.SeedTest do
 
   alias Arbor.Agent.Seed
   alias Arbor.Contracts.Memory.Goal
+  alias Arbor.Contracts.Security.Taint
   alias Arbor.Memory
-  alias Arbor.Memory.{KnowledgeGraph, Preferences, WorkingMemory}
+  alias Arbor.Memory.{KnowledgeGraph, Preferences, Provenance, WorkingMemory, WorkingMemoryStore}
+  alias Arbor.Persistence.BufferedStore
 
   @agent_id "test_seed_agent"
+  @memory_store :arbor_memory_durable
+
+  defmodule CaptureFailingBackend do
+    @moduledoc false
+    @behaviour Arbor.Contracts.Persistence.Store
+
+    @impl true
+    def put(_key, _value, _opts), do: {:error, :forced_failure}
+
+    @impl true
+    def get(_key, _opts), do: {:error, :forced_failure}
+
+    @impl true
+    def delete(_key, _opts), do: {:error, :forced_failure}
+
+    @impl true
+    def list(_opts), do: {:error, :forced_failure}
+
+    @impl true
+    def durability_class(_opts), do: :node_restart
+  end
 
   @ets_tables [
     :arbor_working_memory,
@@ -20,8 +43,27 @@ defmodule Arbor.Agent.SeedTest do
 
   setup do
     Enum.each(@ets_tables, &ensure_ets/1)
+    ensure_memory_services()
+    _ = Memory.delete_working_memory(@agent_id)
+    _ = Provenance.delete_agent(@agent_id)
     Enum.each(@ets_tables, &clean_ets/1)
+
+    on_exit(fn ->
+      _ = Memory.delete_working_memory(@agent_id)
+      _ = Provenance.delete_agent(@agent_id)
+    end)
+
     :ok
+  end
+
+  defp ensure_memory_services do
+    if Process.whereis(@memory_store) == nil do
+      start_supervised!({BufferedStore, name: @memory_store, backend: nil, write_mode: :sync})
+    end
+
+    if Process.whereis(Provenance) == nil do
+      start_supervised!({Provenance, []})
+    end
   end
 
   defp ensure_ets(name) do
@@ -106,18 +148,31 @@ defmodule Arbor.Agent.SeedTest do
 
     test "captures working_memory when present" do
       wm = WorkingMemory.new(@agent_id)
-      Arbor.Memory.save_working_memory(@agent_id, wm)
+      assert :ok = Arbor.Memory.save_working_memory(@agent_id, wm)
 
       {:ok, seed} = Seed.capture(@agent_id)
 
       assert seed.working_memory != nil
       assert is_map(seed.working_memory)
-      assert seed.working_memory["agent_id"] == @agent_id
+      assert seed.working_memory["snapshot_kind"] == "arbor_working_memory_provenance"
+      assert seed.working_memory["snapshot_version"] == 1
+      assert seed.working_memory["working_memory"]["payload"]["agent_id"] == @agent_id
     end
 
     test "handles missing working_memory gracefully" do
       {:ok, seed} = Seed.capture(@agent_id)
       assert seed.working_memory == nil
+    end
+
+    test "security regression: configured WorkingMemory outage fails Seed capture explicitly" do
+      assert :ok = stop_supervised!(BufferedStore)
+
+      start_supervised!(
+        {BufferedStore, name: @memory_store, backend: CaptureFailingBackend, write_mode: :sync}
+      )
+
+      assert {:error, {:capture_failed, :working_memory_snapshot_unavailable}} =
+               Seed.capture(@agent_id)
     end
 
     test "captures knowledge_graph when initialized" do
@@ -198,6 +253,91 @@ defmodule Arbor.Agent.SeedTest do
       restored = Arbor.Memory.get_working_memory(@agent_id)
       assert restored != nil
       assert restored.agent_id == @agent_id
+    end
+
+    test "security regression: hostile provenance survives Seed serialization and restore" do
+      {:ok, trusted} =
+        Taint.new(%{
+          level: :trusted,
+          sensitivity: :public,
+          sanitizations: 0,
+          confidence: :verified,
+          source: "seed-trusted-base",
+          chain: []
+        })
+
+      {:ok, hostile} =
+        Taint.new(%{
+          level: :hostile,
+          sensitivity: :restricted,
+          sanitizations: 0,
+          confidence: :verified,
+          source: "seed-hostile-roundtrip",
+          chain: []
+        })
+
+      base = WorkingMemory.new(@agent_id, rebuild_from_signals: false)
+      assert :ok = WorkingMemoryStore.save_working_memory_tainted(@agent_id, base, trusted)
+
+      wm = WorkingMemory.add_thought(base, "hostile portable thought")
+
+      [thought] = wm.recent_thoughts
+
+      assert :ok = WorkingMemoryStore.save_working_memory_tainted(@agent_id, wm, hostile)
+      assert {:ok, seed} = Seed.capture(@agent_id)
+      captured_snapshot = seed.working_memory
+
+      serialized = Seed.serialize(seed)
+      assert {:ok, decoded_seed} = Seed.deserialize(serialized)
+
+      assert :ok = Memory.delete_working_memory(@agent_id)
+      assert nil == Memory.get_working_memory(@agent_id)
+      assert {:ok, _restored_seed} = Seed.restore(decoded_seed)
+
+      assert {:ok, ^captured_snapshot} =
+               Memory.export_working_memory_provenance_snapshot(@agent_id)
+
+      assert {:ok, restored} = WorkingMemoryStore.get_working_memory_tainted(@agent_id)
+      assert {:ok, expected_aggregate} = Taint.join_many([trusted, hostile])
+      assert restored.value.taint == expected_aggregate
+
+      assert %{value: %{value: ^thought, taint: ^hostile}, provenance_status: :verified} =
+               hd(restored.items.recent_thoughts)
+    end
+
+    test "security regression: corrupt or partial provenance snapshot restore fails without mutation" do
+      {:ok, trusted} =
+        Taint.new(%{
+          level: :trusted,
+          sensitivity: :public,
+          sanitizations: 0,
+          confidence: :verified,
+          source: "seed-restore-baseline",
+          chain: []
+        })
+
+      baseline = WorkingMemory.new(@agent_id, rebuild_from_signals: false)
+      assert :ok = WorkingMemoryStore.save_working_memory_tainted(@agent_id, baseline, trusted)
+      assert {:ok, original} = Memory.export_working_memory_provenance_snapshot(@agent_id)
+
+      corrupt =
+        put_in(original, ["outer_envelope", "payload_sha256"], String.duplicate("0", 64))
+
+      changed_raw =
+        baseline
+        |> WorkingMemory.add_thought("must not enter through legacy import")
+        |> Memory.serialize_working_memory()
+        |> Map.put("snapshot_version", 1)
+
+      for malformed <- [corrupt, changed_raw] do
+        seed = %Seed{id: "seed_malformed", agent_id: @agent_id, working_memory: malformed}
+
+        assert {:error, {:restore_failed, :working_memory_snapshot_invalid}} =
+                 Seed.restore(seed)
+
+        assert {:ok, ^original} =
+                 Memory.export_working_memory_provenance_snapshot(@agent_id)
+      end
     end
 
     test "restores knowledge_graph via Memory facade" do
@@ -717,7 +857,7 @@ defmodule Arbor.Agent.SeedTest do
       binary = Seed.serialize(seed)
 
       # Clear state
-      :ets.delete_all_objects(:arbor_working_memory)
+      assert :ok = Arbor.Memory.delete_working_memory(@agent_id)
       assert Arbor.Memory.get_working_memory(@agent_id) == nil
 
       # Deserialize and restore

@@ -15,6 +15,8 @@ defmodule Arbor.Memory.WorkingMemoryStore do
   @namespace "working_memory"
   @wrapper_version 2
   @legacy_wrapper_version 1
+  @provenance_snapshot_kind "arbor_working_memory_provenance"
+  @provenance_snapshot_version 1
   @max_agent_id_bytes 256
   @max_item_id_bytes 128
   @max_cas_attempts 12
@@ -56,6 +58,12 @@ defmodule Arbor.Memory.WorkingMemoryStore do
     "recent_thoughts"
   ]
   @entry_keys ["envelope", "status"]
+  @provenance_snapshot_keys [
+    "outer_envelope",
+    "snapshot_kind",
+    "snapshot_version",
+    "working_memory"
+  ]
 
   @type provenance_status ::
           :verified | :legacy_unlabeled | :invalid_durable_provenance
@@ -81,9 +89,9 @@ defmodule Arbor.Memory.WorkingMemoryStore do
   @doc "Returns the current raw working memory or nil when absent."
   @spec get_working_memory(String.t()) :: WorkingMemory.t() | nil
   def get_working_memory(agent_id) do
-    case lookup_raw(agent_id) do
-      {:ok, wm} -> WorkingMemory.migrate(wm)
-      :not_found -> nil
+    case get_working_memory_tainted(agent_id) do
+      {:ok, %{value: %TaintedValue{value: %WorkingMemory{} = wm}}} -> wm
+      {:error, _reason} -> nil
     end
   end
 
@@ -190,6 +198,59 @@ defmodule Arbor.Memory.WorkingMemoryStore do
     _, _ -> error(:delete_failed)
   end
 
+  @doc "Export the exact versioned durable WorkingMemory provenance snapshot."
+  @spec export_working_memory_provenance_snapshot(String.t()) ::
+          {:ok, map() | nil} | {:error, term()}
+  def export_working_memory_provenance_snapshot(agent_id) do
+    with :ok <- validate_agent_id(agent_id) do
+      with_agent_transition(agent_id, fn -> export_authoritative_snapshot(agent_id) end)
+    end
+  rescue
+    _ -> error(:snapshot_export_failed)
+  catch
+    _, _ -> error(:snapshot_export_failed)
+  end
+
+  @doc "Import a versioned, payload-bound WorkingMemory provenance snapshot."
+  @spec import_working_memory_provenance_snapshot(String.t(), term()) ::
+          :ok | {:error, term()}
+  def import_working_memory_provenance_snapshot(agent_id, exported) do
+    with :ok <- validate_agent_id(agent_id),
+         {:ok, imported} <- decode_provenance_snapshot(agent_id, exported) do
+      with_agent_transition(agent_id, fn ->
+        import_authoritative_snapshot(agent_id, imported, @max_cas_attempts)
+      end)
+    end
+  rescue
+    _ -> error(:snapshot_import_failed)
+  catch
+    _, _ -> error(:snapshot_import_failed)
+  end
+
+  @doc "Return true when a map declares or resembles the provenance snapshot format."
+  @spec working_memory_provenance_snapshot?(term()) :: boolean()
+  def working_memory_provenance_snapshot?(value) when is_map(value) and not is_struct(value) do
+    Enum.any?(
+      [
+        "snapshot_kind",
+        "snapshot_version",
+        "working_memory",
+        "outer_envelope",
+        :snapshot_kind,
+        :snapshot_version,
+        :working_memory,
+        :outer_envelope
+      ],
+      &Map.has_key?(value, &1)
+    )
+  rescue
+    _ -> false
+  catch
+    _, _ -> false
+  end
+
+  def working_memory_provenance_snapshot?(_value), do: false
+
   # -- Save --------------------------------------------------------------------
 
   defp do_save(agent_id, working_memory, supplied_taint) do
@@ -200,11 +261,7 @@ defmodule Arbor.Memory.WorkingMemoryStore do
 
         case result do
           {:ok, snapshot} ->
-            Signals.emit_working_memory_saved(
-              agent_id,
-              WorkingMemory.stats(snapshot.prepared.wm)
-            )
-
+            safe_emit_working_memory_saved(agent_id, snapshot)
             :ok
 
           {:error, _reason} = error ->
@@ -269,10 +326,8 @@ defmodule Arbor.Memory.WorkingMemoryStore do
              taint: snapshot.aggregate.taint
            ) do
         {:ok, %Record{}} ->
-          case install_snapshot(agent_id, snapshot) do
-            :ok -> {:ok, snapshot}
-            {:error, _reason} = error -> error
-          end
+          best_effort_install_snapshot(agent_id, snapshot)
+          {:ok, snapshot}
 
         {:error, {:memory_store, :critical, :conflict}} ->
           save_authoritative(agent_id, prepared, supplied_taint, attempts - 1)
@@ -356,6 +411,139 @@ defmodule Arbor.Memory.WorkingMemoryStore do
     Map.new(previous.items[field], &{&1.id, &1})
   end
 
+  # -- Portable provenance snapshots ------------------------------------------
+
+  defp export_authoritative_snapshot(agent_id) do
+    case authoritative_read(agent_id, :existing, []) do
+      {:ok, _read} -> package_authoritative_snapshot(agent_id)
+      {:error, {:working_memory_store, :not_found}} -> {:ok, nil}
+      {:error, _reason} = error -> error
+      _ -> error(:snapshot_export_failed)
+    end
+  end
+
+  defp package_authoritative_snapshot(agent_id) do
+    case load_durable_snapshot(agent_id) do
+      {:ok, snapshot, :verified, %{record: %Record{data: wrapper, metadata: metadata}}}
+      when is_map(metadata) ->
+        outer_envelope = Map.get(metadata, "taint")
+
+        with @wrapper_version <- wrapper["version"],
+             {:ok, outer} <- TaintEnvelope.verify(outer_envelope, wrapper),
+             true <- outer.taint == snapshot.aggregate.taint,
+             {:ok, _decoded} <- decode_wrapper(agent_id, wrapper, outer.taint) do
+          {:ok,
+           %{
+             "snapshot_kind" => @provenance_snapshot_kind,
+             "snapshot_version" => @provenance_snapshot_version,
+             "working_memory" => wrapper,
+             "outer_envelope" => outer_envelope
+           }}
+        else
+          _ -> error(:invalid_provenance_snapshot)
+        end
+
+      :not_found ->
+        {:ok, nil}
+
+      {:error, _reason} = error ->
+        error
+
+      _ ->
+        error(:invalid_provenance_snapshot)
+    end
+  end
+
+  defp decode_provenance_snapshot(agent_id, exported) do
+    with true <- exact_string_keys?(exported, @provenance_snapshot_keys),
+         @provenance_snapshot_kind <- exported["snapshot_kind"],
+         @provenance_snapshot_version <- exported["snapshot_version"],
+         wrapper when is_map(wrapper) <- exported["working_memory"],
+         @wrapper_version <- wrapper["version"],
+         {:ok, outer} <- TaintEnvelope.verify(exported["outer_envelope"], wrapper),
+         {:ok, snapshot} <- decode_wrapper(agent_id, wrapper, outer.taint) do
+      {:ok, snapshot}
+    else
+      _ -> error(:invalid_provenance_snapshot)
+    end
+  rescue
+    _ -> error(:invalid_provenance_snapshot)
+  catch
+    _, _ -> error(:invalid_provenance_snapshot)
+  end
+
+  defp import_authoritative_snapshot(_agent_id, _imported, 0), do: error(:conflict)
+
+  defp import_authoritative_snapshot(agent_id, imported, attempts) do
+    case load_durable_snapshot(agent_id) do
+      {:ok, current, _source, reference} ->
+        imported
+        |> merge_imported_snapshot(current)
+        |> commit_imported_snapshot(agent_id, reference.record, attempts)
+
+      :not_found ->
+        commit_imported_snapshot(imported, agent_id, :not_found, attempts)
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp commit_imported_snapshot(snapshot, agent_id, expected_record, attempts) do
+    with {:ok, wrapper} <- build_wrapper(snapshot) do
+      case MemoryStore.compare_and_swap_tainted(
+             @namespace,
+             agent_id,
+             expected_record,
+             wrapper,
+             taint: snapshot.aggregate.taint
+           ) do
+        {:ok, %Record{}} ->
+          best_effort_install_snapshot(agent_id, snapshot)
+          safe_emit_working_memory_loaded(agent_id, :restored)
+          :ok
+
+        {:error, {:memory_store, :critical, :conflict}} ->
+          import_authoritative_snapshot(agent_id, snapshot, attempts - 1)
+
+        {:error, _reason} = error ->
+          map_memory_store_error(error)
+
+        _ ->
+          error(:persistence_failed)
+      end
+    end
+  end
+
+  defp merge_imported_snapshot(imported, current) do
+    base = join_label_records([current.base, imported.base])
+
+    items =
+      Map.new(@collection_specs, fn {field, _durable_key, _domain, _max, _id_field} ->
+        current_items = previous_items_by_id(current, field)
+
+        imported_items =
+          Enum.map(imported.items[field], fn item ->
+            case Map.get(current_items, item.id) do
+              nil ->
+                item
+
+              current_item ->
+                Map.update!(item, :label, &join_label_records([current_item.label, &1]))
+            end
+          end)
+
+        {field, imported_items}
+      end)
+
+    component_aggregate = aggregate_label(base, items)
+
+    aggregate =
+      join_label_records([current.aggregate, imported.aggregate, component_aggregate])
+
+    %{imported | base: base, items: items, aggregate: aggregate}
+  end
+
   # -- Load --------------------------------------------------------------------
 
   defp authoritative_read(agent_id, mode, opts) do
@@ -377,11 +565,13 @@ defmodule Arbor.Memory.WorkingMemoryStore do
           attempts
         )
 
-      :not_found when mode == :existing ->
-        error(:not_found)
+      :not_found ->
+        best_effort_clear_projection(agent_id)
 
-      :not_found when mode == :create ->
-        create_authoritative_snapshot(agent_id, opts, attempts)
+        case mode do
+          :existing -> error(:not_found)
+          :create -> create_authoritative_snapshot(agent_id, opts, attempts)
+        end
 
       {:error, _reason} = error ->
         error
@@ -402,10 +592,9 @@ defmodule Arbor.Memory.WorkingMemoryStore do
              taint: snapshot.aggregate.taint
            ) do
         {:ok, %Record{}} ->
-          with :ok <- install_snapshot(agent_id, snapshot) do
-            Signals.emit_working_memory_loaded(agent_id, :created)
-            {:ok, public_read(snapshot)}
-          end
+          best_effort_install_snapshot(agent_id, snapshot)
+          safe_emit_working_memory_loaded(agent_id, :created)
+          {:ok, public_read(snapshot)}
 
         {:error, {:memory_store, :critical, :conflict}} ->
           authoritative_read(agent_id, :create, opts, attempts - 1)
@@ -431,10 +620,9 @@ defmodule Arbor.Memory.WorkingMemoryStore do
          _opts,
          _attempts
        ) do
-    with :ok <- install_snapshot(agent_id, snapshot) do
-      Signals.emit_working_memory_loaded(agent_id, :restored)
-      {:ok, public_read(snapshot)}
-    end
+    best_effort_install_snapshot(agent_id, snapshot)
+    safe_emit_working_memory_loaded(agent_id, :restored)
+    {:ok, public_read(snapshot)}
   end
 
   defp restore_authoritative_snapshot(
@@ -447,9 +635,8 @@ defmodule Arbor.Memory.WorkingMemoryStore do
          attempts
        ) do
     if source == :verified do
-      with :ok <- install_snapshot(agent_id, snapshot) do
-        {:ok, public_read(snapshot)}
-      end
+      best_effort_install_snapshot(agent_id, snapshot)
+      {:ok, public_read(snapshot)}
     else
       migrate_authoritative_snapshot(agent_id, snapshot, reference, mode, opts, attempts)
     end
@@ -465,10 +652,9 @@ defmodule Arbor.Memory.WorkingMemoryStore do
              taint: snapshot.aggregate.taint
            ) do
         {:ok, %Record{}} ->
-          with :ok <- install_snapshot(agent_id, snapshot) do
-            Signals.emit_working_memory_loaded(agent_id, :restored)
-            {:ok, public_read(snapshot)}
-          end
+          best_effort_install_snapshot(agent_id, snapshot)
+          safe_emit_working_memory_loaded(agent_id, :restored)
+          {:ok, public_read(snapshot)}
 
         {:error, {:memory_store, :critical, :conflict}} ->
           authoritative_read(agent_id, mode, opts, attempts - 1)
@@ -837,6 +1023,49 @@ defmodule Arbor.Memory.WorkingMemoryStore do
     end
   end
 
+  defp best_effort_install_snapshot(agent_id, snapshot) do
+    _ = install_snapshot(agent_id, snapshot)
+    :ok
+  rescue
+    _ -> best_effort_clear_projection(agent_id)
+  catch
+    _, _ -> best_effort_clear_projection(agent_id)
+  end
+
+  defp best_effort_clear_projection(agent_id) do
+    _ = safe_ets_delete(agent_id)
+    _ = clear_working_memory_sidecars(agent_id)
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
+  end
+
+  defp safe_emit_working_memory_saved(agent_id, snapshot) do
+    try do
+      Signals.emit_working_memory_saved(agent_id, WorkingMemory.stats(snapshot.prepared.wm))
+    rescue
+      _ -> :ok
+    catch
+      _, _ -> :ok
+    end
+
+    :ok
+  end
+
+  defp safe_emit_working_memory_loaded(agent_id, status) do
+    try do
+      Signals.emit_working_memory_loaded(agent_id, status)
+    rescue
+      _ -> :ok
+    catch
+      _, _ -> :ok
+    end
+
+    :ok
+  end
+
   defp put_snapshot_sidecars(agent_id, snapshot) do
     entries =
       [
@@ -1104,15 +1333,8 @@ defmodule Arbor.Memory.WorkingMemoryStore do
   defp delete_authoritative(agent_id) do
     case MemoryStore.delete_tainted_authoritative(@namespace, agent_id) do
       :ok ->
-        projection_result = safe_ets_delete(agent_id)
-        sidecar_result = clear_working_memory_sidecars(agent_id)
-
-        case {projection_result, sidecar_result} do
-          {:ok, :ok} -> :ok
-          {{:error, _reason} = error, _sidecar_result} -> error
-          {_projection_result, {:error, _reason} = error} -> error
-          _ -> error(:delete_failed)
-        end
+        best_effort_clear_projection(agent_id)
+        :ok
 
       {:error, _reason} = error ->
         map_memory_store_error(error)
@@ -1143,6 +1365,7 @@ defmodule Arbor.Memory.WorkingMemoryStore do
   defp map_memory_store_error({:error, {:memory_store, :critical, reason}})
        when reason in [
               :conflict,
+              :outcome_unknown,
               :durable_unavailable,
               :insufficient_durability,
               :inventory_limit_exceeded,
@@ -1197,15 +1420,6 @@ defmodule Arbor.Memory.WorkingMemoryStore do
   end
 
   defp exact_string_keys?(_value, _keys), do: false
-
-  defp lookup_raw(agent_id) do
-    case :ets.lookup(@working_memory_ets, agent_id) do
-      [{^agent_id, %WorkingMemory{} = wm}] -> {:ok, wm}
-      _ -> :not_found
-    end
-  rescue
-    ArgumentError -> :not_found
-  end
 
   defp safe_ets_insert(agent_id, wm) do
     if :ets.insert(@working_memory_ets, {agent_id, wm}), do: :ok, else: error(:ets_failed)

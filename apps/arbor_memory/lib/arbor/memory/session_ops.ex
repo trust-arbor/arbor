@@ -42,6 +42,16 @@ defmodule Arbor.Memory.SessionOps do
   @doc "Delete working memory for an agent."
   defdelegate delete_working_memory(agent_id), to: WorkingMemoryStore
 
+  @doc "Export a versioned, payload-bound working-memory provenance snapshot."
+  defdelegate export_working_memory_provenance_snapshot(agent_id), to: WorkingMemoryStore
+
+  @doc "Import a versioned, payload-bound working-memory provenance snapshot."
+  defdelegate import_working_memory_provenance_snapshot(agent_id, snapshot),
+    to: WorkingMemoryStore
+
+  @doc "Identify maps intended for the working-memory provenance snapshot decoder."
+  defdelegate working_memory_provenance_snapshot?(snapshot), to: WorkingMemoryStore
+
   # ============================================================================
   # Working Memory Serialization
   # ============================================================================

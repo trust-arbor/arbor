@@ -332,6 +332,12 @@ defmodule Arbor.Memory do
   end
 
   defdelegate delete_working_memory(agent_id), to: SessionOps
+  defdelegate export_working_memory_provenance_snapshot(agent_id), to: SessionOps
+
+  defdelegate import_working_memory_provenance_snapshot(agent_id, snapshot),
+    to: SessionOps
+
+  defdelegate working_memory_provenance_snapshot?(snapshot), to: SessionOps
   defdelegate serialize_working_memory(wm), to: SessionOps
   defdelegate deserialize_working_memory(data), to: SessionOps
   defdelegate new_context_window(agent_id, opts \\ []), to: SessionOps

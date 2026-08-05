@@ -190,33 +190,38 @@ defmodule Arbor.Agent.Seed do
     reason = Keyword.get(opts, :reason, :manual)
     intent_limit = Keyword.get(opts, :intent_limit, 100)
 
-    seed = %__MODULE__{
-      id: generate_id(),
-      agent_id: agent_id,
-      seed_version: @seed_version,
-      captured_at: DateTime.utc_now(),
-      captured_on_node: node(),
-      capture_reason: reason,
-      name: opts[:name],
-      profile: opts[:profile],
-      self_model: opts[:self_model] || %{},
-      metadata: opts[:metadata] || %{},
-      context_window: opts[:context_window],
-      working_memory: capture_working_memory(agent_id),
-      knowledge_graph: capture_knowledge_graph(agent_id),
-      self_knowledge: capture_self_knowledge(agent_id),
-      preferences: capture_preferences(agent_id),
-      goals: capture_goals(agent_id),
-      recent_intents: capture_intents(agent_id, intent_limit),
-      recent_percepts: capture_percepts(agent_id, intent_limit),
-      version: 1
-    }
+    with {:ok, working_memory} <- capture_working_memory(agent_id) do
+      seed = %__MODULE__{
+        id: generate_id(),
+        agent_id: agent_id,
+        seed_version: @seed_version,
+        captured_at: DateTime.utc_now(),
+        captured_on_node: node(),
+        capture_reason: reason,
+        name: opts[:name],
+        profile: opts[:profile],
+        self_model: opts[:self_model] || %{},
+        metadata: opts[:metadata] || %{},
+        context_window: opts[:context_window],
+        working_memory: working_memory,
+        knowledge_graph: capture_knowledge_graph(agent_id),
+        self_knowledge: capture_self_knowledge(agent_id),
+        preferences: capture_preferences(agent_id),
+        goals: capture_goals(agent_id),
+        recent_intents: capture_intents(agent_id, intent_limit),
+        recent_percepts: capture_percepts(agent_id, intent_limit),
+        version: 1
+      }
 
-    emit_signal(:captured, %{agent_id: agent_id, seed_id: seed.id, reason: reason})
+      emit_signal(:captured, %{agent_id: agent_id, seed_id: seed.id, reason: reason})
 
-    Logger.info("Seed captured for #{agent_id}: #{seed.id} (reason: #{reason})")
+      Logger.info("Seed captured for #{agent_id}: #{seed.id} (reason: #{reason})")
 
-    {:ok, seed}
+      {:ok, seed}
+    else
+      {:error, :working_memory_snapshot_unavailable} ->
+        {:error, {:capture_failed, :working_memory_snapshot_unavailable}}
+    end
   rescue
     e ->
       Logger.error("Seed capture failed for #{agent_id}: #{inspect(e)}")
@@ -244,33 +249,33 @@ defmodule Arbor.Agent.Seed do
     emit = Keyword.get(opts, :emit_signals, true)
     agent_id = seed.agent_id
 
-    unless :working_memory in skip do
-      restore_working_memory(agent_id, seed.working_memory)
+    with :ok <- maybe_restore_working_memory(skip, agent_id, seed.working_memory) do
+      unless :knowledge_graph in skip do
+        restore_knowledge_graph(agent_id, seed.knowledge_graph)
+      end
+
+      unless :preferences in skip do
+        restore_preferences(agent_id, seed.preferences)
+      end
+
+      unless :goals in skip do
+        restore_goals(agent_id, seed.goals)
+      end
+
+      # context_window, self_knowledge, intents, and percepts are stored
+      # in the seed for the caller to use but not pushed to GenServers
+      # (those subsystems need special handling by the agent process)
+
+      if emit do
+        emit_signal(:restored, %{agent_id: agent_id, seed_id: seed.id})
+      end
+
+      Logger.info("Seed restored for #{agent_id}: #{seed.id}")
+
+      {:ok, seed}
+    else
+      {:error, reason} -> {:error, {:restore_failed, reason}}
     end
-
-    unless :knowledge_graph in skip do
-      restore_knowledge_graph(agent_id, seed.knowledge_graph)
-    end
-
-    unless :preferences in skip do
-      restore_preferences(agent_id, seed.preferences)
-    end
-
-    unless :goals in skip do
-      restore_goals(agent_id, seed.goals)
-    end
-
-    # context_window, self_knowledge, intents, and percepts are stored
-    # in the seed for the caller to use but not pushed to GenServers
-    # (those subsystems need special handling by the agent process)
-
-    if emit do
-      emit_signal(:restored, %{agent_id: agent_id, seed_id: seed.id})
-    end
-
-    Logger.info("Seed restored for #{agent_id}: #{seed.id}")
-
-    {:ok, seed}
   rescue
     e ->
       Logger.error("Seed restore failed for #{seed.agent_id}: #{inspect(e)}")
@@ -568,12 +573,14 @@ defmodule Arbor.Agent.Seed do
   # ============================================================================
 
   defp capture_working_memory(agent_id) do
-    case Memory.get_working_memory(agent_id) do
-      nil -> nil
-      wm -> Memory.serialize_working_memory(wm)
+    case Memory.export_working_memory_provenance_snapshot(agent_id) do
+      {:ok, snapshot} -> {:ok, snapshot}
+      {:error, _reason} -> {:error, :working_memory_snapshot_unavailable}
     end
   rescue
-    _ -> nil
+    _ -> {:error, :working_memory_snapshot_unavailable}
+  catch
+    _, _ -> {:error, :working_memory_snapshot_unavailable}
   end
 
   defp capture_knowledge_graph(agent_id) do
@@ -630,15 +637,43 @@ defmodule Arbor.Agent.Seed do
   # Private — Restore Helpers
   # ============================================================================
 
+  defp maybe_restore_working_memory(skip, agent_id, working_memory) do
+    if :working_memory in skip,
+      do: :ok,
+      else: restore_working_memory(agent_id, working_memory)
+  end
+
   defp restore_working_memory(_agent_id, nil), do: :ok
 
   defp restore_working_memory(agent_id, wm_map) do
-    wm = Memory.deserialize_working_memory(wm_map)
-    Memory.save_working_memory(agent_id, wm)
+    result =
+      if Memory.working_memory_provenance_snapshot?(wm_map) do
+        Memory.import_working_memory_provenance_snapshot(agent_id, wm_map)
+      else
+        wm = Memory.deserialize_working_memory(wm_map)
+        Memory.save_working_memory(agent_id, wm)
+      end
+
+    case result do
+      :ok ->
+        :ok
+
+      {:error, _reason} ->
+        restore_working_memory_error(wm_map)
+
+      _ ->
+        restore_working_memory_error(wm_map)
+    end
   rescue
-    e ->
-      Logger.warning("Failed to restore working memory for #{agent_id}: #{inspect(e)}")
-      :ok
+    _ -> restore_working_memory_error(wm_map)
+  catch
+    _, _ -> restore_working_memory_error(wm_map)
+  end
+
+  defp restore_working_memory_error(wm_map) do
+    if Memory.working_memory_provenance_snapshot?(wm_map),
+      do: {:error, :working_memory_snapshot_invalid},
+      else: {:error, :working_memory_restore_failed}
   end
 
   defp restore_knowledge_graph(_agent_id, nil), do: :ok

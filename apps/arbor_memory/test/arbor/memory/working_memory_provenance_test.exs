@@ -11,6 +11,7 @@ defmodule Arbor.Memory.WorkingMemoryProvenanceTest do
     WorkingMemoryStore
   }
 
+  alias Arbor.Persistence
   alias Arbor.Persistence.BufferedStore
 
   @moduletag :fast
@@ -93,6 +94,84 @@ defmodule Arbor.Memory.WorkingMemoryProvenanceTest do
 
     assert aggregate_envelope["version"] == 1
     assert thought_envelope["version"] == 1
+  end
+
+  test "security regression: portable snapshot preserves exact hostile item provenance", %{
+    agent_id: agent_id
+  } do
+    trusted = taint(:trusted, "snapshot-base", sensitivity: :public)
+    hostile = taint(:hostile, "snapshot-hostile", sensitivity: :restricted)
+    hostile_thought = thought("snapshot-hostile-thought", "portable hostile content")
+
+    wm = new_working_memory(agent_id)
+    assert :ok = WorkingMemoryStore.save_working_memory_tainted(agent_id, wm, trusted)
+
+    wm = %{wm | recent_thoughts: [hostile_thought]}
+    assert :ok = WorkingMemoryStore.save_working_memory_tainted(agent_id, wm, hostile)
+
+    assert {:ok, exported} = Arbor.Memory.export_working_memory_provenance_snapshot(agent_id)
+
+    assert %{
+             "snapshot_kind" => "arbor_working_memory_provenance",
+             "snapshot_version" => 1,
+             "working_memory" => wrapper,
+             "outer_envelope" => outer_envelope
+           } = exported
+
+    assert wrapper["version"] == 2
+    assert {:ok, verified_outer} = TaintEnvelope.verify(outer_envelope, wrapper)
+    assert verified_outer.taint.level == :hostile
+
+    assert :ok = WorkingMemoryStore.delete_working_memory(agent_id)
+
+    assert {:error, {:working_memory_store, :not_found}} =
+             WorkingMemoryStore.get_working_memory_tainted(agent_id)
+
+    assert :ok = Arbor.Memory.import_working_memory_provenance_snapshot(agent_id, exported)
+    assert {:ok, restored} = WorkingMemoryStore.get_working_memory_tainted(agent_id)
+
+    assert restored.value.value.recent_thoughts == [hostile_thought]
+    assert restored.value.taint.level == :hostile
+
+    assert item(restored, :recent_thoughts, hostile_thought.id).value.taint == hostile
+  end
+
+  test "security regression: malformed portable snapshot has zero write effects", %{
+    agent_id: agent_id
+  } do
+    trusted = taint(:trusted, "snapshot-atomic", sensitivity: :public)
+    wm = new_working_memory(agent_id)
+
+    assert :ok = WorkingMemoryStore.save_working_memory_tainted(agent_id, wm, trusted)
+    assert {:ok, exported} = Arbor.Memory.export_working_memory_provenance_snapshot(agent_id)
+    assert {:ok, %Record{} = before_record} = durable_record(agent_id)
+
+    malformed = put_in(exported, ["outer_envelope", "payload_sha256"], String.duplicate("0", 64))
+
+    assert {:error, {:working_memory_store, :invalid_provenance_snapshot}} =
+             Arbor.Memory.import_working_memory_provenance_snapshot(agent_id, malformed)
+
+    assert {:ok, ^before_record} = durable_record(agent_id)
+    assert {:ok, read} = WorkingMemoryStore.get_working_memory_tainted(agent_id)
+    assert read.value.value == wm
+    assert read.value.taint == trusted
+  end
+
+  test "all reserved portable snapshot keys force strict snapshot classification" do
+    for key <- [
+          "snapshot_kind",
+          "snapshot_version",
+          "working_memory",
+          "outer_envelope",
+          :snapshot_kind,
+          :snapshot_version,
+          :working_memory,
+          :outer_envelope
+        ] do
+      assert WorkingMemoryStore.working_memory_provenance_snapshot?(%{key => nil})
+    end
+
+    refute WorkingMemoryStore.working_memory_provenance_snapshot?(%{"agent_id" => "legacy"})
   end
 
   test "preserves mixed per-item labels and canonical aggregate sanitizations", %{
@@ -230,7 +309,7 @@ defmodule Arbor.Memory.WorkingMemoryProvenanceTest do
       |> put_in(["provenance", "concerns", first_id], second_entry)
       |> put_in(["provenance", "concerns", second_id], first_entry)
 
-    assert :ok = MemoryStore.persist("working_memory", agent_id, swapped, taint: read.value.taint)
+    assert :ok = replace_durable_data(agent_id, swapped, read.value.taint)
     clear_live_state(agent_id)
 
     assert {:ok, rejected} = WorkingMemoryStore.load_working_memory_tainted(agent_id)
@@ -622,6 +701,7 @@ defmodule Arbor.Memory.WorkingMemoryProvenanceTest do
     baseline = %{new_working_memory(agent_id) | recent_thoughts: [original]}
 
     assert :ok = WorkingMemoryStore.save_working_memory_tainted(agent_id, baseline, trusted)
+    assert {:ok, %Record{revision: baseline_revision}} = durable_record(agent_id)
     assert WorkingMemoryStore.get_working_memory(agent_id) == baseline
 
     changed = %{
@@ -634,17 +714,23 @@ defmodule Arbor.Memory.WorkingMemoryProvenanceTest do
     assert Process.unregister(Provenance)
 
     try do
-      assert {:error, {:working_memory_store, :sidecar_unavailable}} =
-               WorkingMemoryStore.save_working_memory_tainted(agent_id, changed, hostile)
+      assert :ok = WorkingMemoryStore.save_working_memory_tainted(agent_id, changed, hostile)
 
-      assert {:ok, %Record{data: committed_wrapper}} = durable_record(agent_id)
+      assert {:ok, %Record{data: committed_wrapper, revision: committed_revision}} =
+               durable_record(agent_id)
+
+      assert committed_revision == baseline_revision + 1
       assert committed_wrapper["payload"] == WorkingMemory.serialize(changed)
-      assert WorkingMemoryStore.get_working_memory(agent_id) == nil
+      assert :ets.lookup(@working_memory_ets, agent_id) == []
 
-      assert {:error, {:working_memory_store, :sidecar_unavailable}} =
-               WorkingMemoryStore.get_working_memory_tainted(agent_id)
+      assert WorkingMemoryStore.get_working_memory(agent_id) == changed
+      assert :ets.lookup(@working_memory_ets, agent_id) == []
 
-      assert WorkingMemoryStore.get_working_memory(agent_id) == nil
+      assert {:ok, authoritative} = WorkingMemoryStore.get_working_memory_tainted(agent_id)
+      assert authoritative.value.value == changed
+      assert authoritative.value.taint.level == :hostile
+
+      assert :ets.lookup(@working_memory_ets, agent_id) == []
     after
       if Process.alive?(provenance_pid) and Process.whereis(Provenance) == nil do
         Process.register(provenance_pid, Provenance)
@@ -671,10 +757,18 @@ defmodule Arbor.Memory.WorkingMemoryProvenanceTest do
     assert :ok = WorkingMemoryStore.save_working_memory_tainted(agent_id, wm, hostile)
 
     :ets.delete(@working_memory_ets, agent_id)
+    assert WorkingMemoryStore.get_working_memory(agent_id) == wm
+    assert [{^agent_id, ^wm}] = :ets.lookup(@working_memory_ets, agent_id)
+
+    forged = %{wm | recent_thoughts: []}
+    true = :ets.insert(@working_memory_ets, {agent_id, forged})
+    assert WorkingMemoryStore.get_working_memory(agent_id) == wm
+    assert [{^agent_id, ^wm}] = :ets.lookup(@working_memory_ets, agent_id)
+
+    :ets.delete(@working_memory_ets, agent_id)
     assert {:ok, restored_row} = WorkingMemoryStore.get_working_memory_tainted(agent_id)
     assert item(restored_row, :recent_thoughts, retained.id).value.taint == hostile
 
-    forged = %{wm | recent_thoughts: []}
     true = :ets.insert(@working_memory_ets, {agent_id, forged})
     assert :ok = Provenance.delete_domain_agent(:working_memory_thought, agent_id)
 
@@ -813,7 +907,7 @@ defmodule Arbor.Memory.WorkingMemoryProvenanceTest do
       assert :ok = WorkingMemoryStore.save_working_memory_tainted(agent_id, wm, label)
       assert {:ok, %Record{data: wrapper}} = durable_record(agent_id)
       corrupt = corruptor.(wrapper, thought_id)
-      assert :ok = MemoryStore.persist("working_memory", agent_id, corrupt, taint: label)
+      assert :ok = replace_durable_data(agent_id, corrupt, label)
 
       clear_live_state(agent_id)
       assert {:ok, restored} = WorkingMemoryStore.load_working_memory_tainted(agent_id)
@@ -840,7 +934,7 @@ defmodule Arbor.Memory.WorkingMemoryProvenanceTest do
     assert :ok = WorkingMemoryStore.save_working_memory_tainted(agent_id, wm, hostile)
     assert {:ok, %Record{data: wrapper}} = durable_record(agent_id)
 
-    assert :ok = MemoryStore.persist("working_memory", agent_id, wrapper)
+    assert :ok = replace_durable_data(agent_id, wrapper, :missing_outer)
     clear_live_state(agent_id)
 
     assert {:ok, restored} = WorkingMemoryStore.load_working_memory_tainted(agent_id)
@@ -950,8 +1044,7 @@ defmodule Arbor.Memory.WorkingMemoryProvenanceTest do
     assert Process.register(failing_owner, Provenance)
 
     try do
-      assert {:error, {:working_memory_store, :sidecar_unavailable}} =
-               WorkingMemoryStore.delete_working_memory(agent_id)
+      assert :ok = WorkingMemoryStore.delete_working_memory(agent_id)
 
       assert WorkingMemoryStore.get_working_memory(agent_id) == nil
 
@@ -968,6 +1061,13 @@ defmodule Arbor.Memory.WorkingMemoryProvenanceTest do
       if Process.alive?(provenance_pid) and Process.whereis(Provenance) == nil do
         Process.register(provenance_pid, Provenance)
       end
+    end
+
+    assert {:error, {:working_memory_store, :not_found}} =
+             WorkingMemoryStore.get_working_memory_tainted(agent_id)
+
+    for domain <- working_memory_domains() do
+      assert {:ok, []} = Provenance.list_item_ids(domain, agent_id)
     end
   end
 
@@ -1254,6 +1354,36 @@ defmodule Arbor.Memory.WorkingMemoryProvenanceTest do
 
   defp durable_record(agent_id) do
     BufferedStore.get("working_memory:#{agent_id}", name: @store_name)
+  end
+
+  defp replace_durable_data(agent_id, data, outer_taint) do
+    physical_key = "working_memory:#{agent_id}"
+
+    assert {:ok, %Record{} = current} =
+             Persistence.buffered_store_authoritative_get(@store_name, physical_key)
+
+    metadata =
+      case outer_taint do
+        :missing_outer ->
+          Map.delete(current.metadata, "taint")
+
+        %Taint{} = taint ->
+          assert {:ok, envelope} = TaintEnvelope.new(data, taint)
+          assert {:ok, persisted} = TaintEnvelope.to_map(envelope)
+          Map.put(current.metadata, "taint", persisted)
+      end
+
+    replacement = Record.update(current, data, metadata: metadata)
+
+    assert {:ok, %Record{}} =
+             Persistence.buffered_store_acknowledged_compare_and_swap(
+               @store_name,
+               physical_key,
+               {:value, current},
+               replacement
+             )
+
+    :ok
   end
 
   defp wait_for_durable_data(agent_id, attempts \\ 100)
