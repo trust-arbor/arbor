@@ -5,6 +5,7 @@ defmodule Arbor.Orchestrator.SessionEngagementCompactorSecurityRegressionTest do
   alias Arbor.Contracts.Session.UserMessage
   alias Arbor.LLM.{Client, ContentPart, Request, Response}
   alias Arbor.Orchestrator.Session
+  alias Arbor.Orchestrator.Session.ContextBuilder
   alias Arbor.Orchestrator.Session.Persistence
 
   @moduletag :security_regression
@@ -161,6 +162,46 @@ defmodule Arbor.Orchestrator.SessionEngagementCompactorSecurityRegressionTest do
     state = Session.get_state(pid)
     assert state.compactor == nil
     assert state.compactors == %{}
+  end
+
+  test "security regression: omitted transcript clears a legacy stale compactor" do
+    hostile_message = %{
+      "role" => "user",
+      "content" => "hostile legacy transcript",
+      "taint" => taint("legacy_hostile", :hostile),
+      "taint_status" => :verified
+    }
+
+    stale_projection = %{
+      "role" => "user",
+      "content" => "stale hostile summary"
+    }
+
+    legacy_state = %{
+      session_id: "legacy-session",
+      agent_id: "legacy-agent",
+      current_engagement_id: "legacy-engagement",
+      messages: [hostile_message],
+      compactor: %TestCompactor{
+        full_transcript: [hostile_message],
+        llm_messages: [stale_projection],
+        summary: "stale hostile summary"
+      },
+      transcripts: %{},
+      compactors: %{},
+      session_state: nil
+    }
+
+    refute Map.has_key?(legacy_state, :compactor_spec)
+
+    restored =
+      Persistence.apply_checkpoint(legacy_state, %{
+        "current_engagement_id" => "legacy-engagement"
+      })
+
+    assert restored.messages == []
+    assert restored.compactor == nil
+    assert ContextBuilder.compactor_llm_messages(restored) == []
   end
 
   test "security regression: switching from named engagement restores nil default", ctx do

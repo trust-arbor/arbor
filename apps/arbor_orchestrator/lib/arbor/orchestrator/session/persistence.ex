@@ -164,8 +164,8 @@ defmodule Arbor.Orchestrator.Session.Persistence do
     %{state | compactor: ContextBuilder.init_compactor(spec, messages)}
   end
 
-  # Compatibility for state maps created before compactor_spec existed.
-  def rebuild_compactor_from_checkpoint(state), do: state
+  # Legacy state cannot safely prove which transcript produced its compactor.
+  def rebuild_compactor_from_checkpoint(state), do: Map.put(state, :compactor, nil)
 
   defp cp_fetch(data, field) do
     case Map.fetch(data, "session.#{field}") do
