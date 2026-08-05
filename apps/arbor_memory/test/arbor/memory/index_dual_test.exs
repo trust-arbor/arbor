@@ -234,6 +234,47 @@ defmodule Arbor.Memory.IndexDualTest do
       assert {:error, :not_found} = Embedding.get(agent_id, acknowledged_id)
     end
 
+    test "authority regression: failed eager dedupe preserves caller ID continuity" do
+      agent_id = durable_unique("test_dual_retry_dedupe")
+      content = "Retry dedupe identity"
+
+      assert {:ok, authoritative_id} =
+               Embedding.store(agent_id, content, generate_embedding(28), %{type: "durable"})
+
+      FailFirstWriter.arm(agent_id)
+
+      {:ok, pid} =
+        Index.start_link(
+          agent_id: agent_id,
+          backend: :dual,
+          persistent_writer: FailFirstWriter,
+          name: {:via, Registry, {Arbor.Memory.Registry, {:test_dual_retry_dedupe, agent_id}}}
+        )
+
+      on_exit(fn ->
+        FailFirstWriter.disarm(agent_id)
+        if Process.alive?(pid), do: GenServer.stop(pid)
+        Embedding.delete_all(agent_id)
+      end)
+
+      assert {:ok, acknowledged_id} =
+               Index.index(pid, content, %{type: :local}, embedding: generate_embedding(29))
+
+      refute acknowledged_id == authoritative_id
+      assert {:ok, %{id: ^acknowledged_id}} = Index.get(pid, acknowledged_id)
+
+      assert {:ok, 1} = Index.sync_to_persistent(pid)
+      assert {:ok, %{id: ^authoritative_id}} = Index.get(pid, acknowledged_id)
+      assert {:ok, %{id: ^authoritative_id}} = Index.get(pid, authoritative_id)
+      assert {:ok, %{id: ^authoritative_id}} = Embedding.get(agent_id, authoritative_id)
+
+      assert :ok = Index.delete(pid, acknowledged_id)
+      assert {:error, :not_found} = Embedding.get(agent_id, authoritative_id)
+      assert {:error, :not_found} = Index.get(pid, acknowledged_id)
+      assert {:error, :not_found} = Index.get(pid, authoritative_id)
+      assert Index.stats(pid).entry_count == 0
+    end
+
     test "returns error for non-dual backend" do
       {:ok, ets_pid} =
         Index.start_link(
