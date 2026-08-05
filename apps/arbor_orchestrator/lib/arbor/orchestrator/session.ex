@@ -212,8 +212,10 @@ defmodule Arbor.Orchestrator.Session do
   @max_turn_queue_entries 128
 
   # A callback process exit/timeout cannot prove whether Session accepted a
-  # boundary before the caller lost the reply. Keep one closed local error for
-  # the ToolLoop worker to classify as delivery ambiguity.
+  # boundary before the caller lost the reply. Keep the read uncertainty
+  # distinct from the terminal delivery result that Session returns to message
+  # callers after an accepted instruction can no longer be reconciled.
+  @steering_read_ambiguous {:error, :steering_read_ambiguous}
   @steering_delivery_ambiguous {:error, :steering_delivery_ambiguous}
 
   # Admitted Engine terminal statuses for Session turn application.
@@ -444,13 +446,14 @@ defmodule Arbor.Orchestrator.Session do
   the active turn. A boundary is an exact `{attempt_ref, positive_sequence}`
   tuple and may be observed only once. Invalid, stale, duplicate, or over-limit
   reads fail closed as `:none`. Session call exits/timeouts return the closed
-  process-local `{:error, :steering_delivery_ambiguous}` result instead of
-  claiming that no message was present.
+  process-local `{:error, :steering_read_ambiguous}` result instead of claiming
+  that no message was present. ToolLoop projects that read uncertainty to its
+  separate delivery-ambiguity error.
   """
   @spec take_steering(GenServer.server(), reference(), String.t() | nil, term()) ::
           :none
           | {:ok, [SteeringMessage.t()]}
-          | {:error, :steering_delivery_ambiguous}
+          | {:error, :steering_read_ambiguous}
   def take_steering(session, turn_token, engagement_id, boundary) do
     GenServer.call(
       session,
@@ -458,7 +461,7 @@ defmodule Arbor.Orchestrator.Session do
       5_000
     )
   catch
-    :exit, _ -> @steering_delivery_ambiguous
+    :exit, _ -> @steering_read_ambiguous
   end
 
   @doc """
@@ -1216,7 +1219,11 @@ defmodule Arbor.Orchestrator.Session do
         new_state = transition_phase(state, :processing, :complete, :idle)
         state = cleanup_turn_terminal(state, kill_task?: false)
         finalize_partial(state, :interrupted, {:task_down, reason})
-        reply_turn(state, {:error, {:turn_task_crashed, reason}})
+
+        reply_turn(
+          state,
+          steering_aware_failure_reply(state, {:error, {:turn_task_crashed, reason}})
+        )
 
         reset_and_drain(new_state)
 
@@ -1285,9 +1292,10 @@ defmodule Arbor.Orchestrator.Session do
     state = cleanup_turn_terminal(state, kill_task?: true)
     lifecycle_probe(:before_finalize, %{reason: :timeout})
     finalize_partial(state, :interrupted, :timeout)
-    lifecycle_probe(:before_reply, %{reply: :turn_timeout})
-    reply_turn(state, {:error, :turn_timeout})
-    lifecycle_probe(:after_reply, %{reply: :turn_timeout})
+    reply = steering_aware_failure_reply(state, {:error, :turn_timeout})
+    lifecycle_probe(:before_reply, %{reply: reply})
+    reply_turn(state, reply)
+    lifecycle_probe(:after_reply, %{reply: reply})
 
     reset_and_drain(new_state)
   end
@@ -1443,6 +1451,10 @@ defmodule Arbor.Orchestrator.Session do
   defp accepted_steering?(state) do
     (is_integer(state.steering_message_count) and state.steering_message_count > 0) or
       state.steer_froms not in [nil, []] or state.steer_caller_ownership not in [nil, []]
+  end
+
+  defp steering_aware_failure_reply(state, ordinary_reply) do
+    if accepted_steering?(state), do: @steering_delivery_ambiguous, else: ordinary_reply
   end
 
   defp handle_steering_caller_down(state) do
@@ -1944,7 +1956,7 @@ defmodule Arbor.Orchestrator.Session do
     # Preserve whatever streamed before the failure as an :interrupted partial.
     # For rejected Engine envelopes, reason is the closed atom :turn_failed only.
     finalize_partial(state, :interrupted, reason)
-    reply_turn(state, {:error, reason})
+    reply_turn(state, steering_aware_failure_reply(state, {:error, reason}))
 
     reset_and_drain(new_state)
   end

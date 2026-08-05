@@ -159,7 +159,7 @@ defmodule Arbor.Agent.SessionManager do
   - the Session module's result on success/error
   - `{:error, :no_session}` when no live session is registered
   - `{:error, :delivery_ambiguous}` when the per-call proxy reaches the
-    requested timeout
+    requested timeout or Session reports accepted-steering ambiguity
   - `{:error, :session_unavailable}` when the runtime bridge is missing or the
     injected call raises/throws/exits
   - `{:error, :invalid_args}` for non-positive timeout or wrong argument shapes
@@ -227,7 +227,7 @@ defmodule Arbor.Agent.SessionManager do
 
     case Task.yield(task, timeout_ms) do
       {:ok, {:session_result, result}} ->
-        result
+        project_authenticated_session_result(result)
 
       {:ok, :session_unavailable} ->
         {:error, :session_unavailable}
@@ -240,6 +240,11 @@ defmodule Arbor.Agent.SessionManager do
         {:error, :delivery_ambiguous}
     end
   end
+
+  defp project_authenticated_session_result({:error, :steering_delivery_ambiguous}),
+    do: {:error, :delivery_ambiguous}
+
+  defp project_authenticated_session_result(result), do: result
 
   defp invoke_authenticated_session(session_mod, session_pid, message, receipt, timeout_ms) do
     {:session_result,

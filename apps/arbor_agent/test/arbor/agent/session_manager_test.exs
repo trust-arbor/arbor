@@ -359,6 +359,51 @@ defmodule Arbor.Agent.SessionManagerTest do
     end
 
     @tag voice_id: "VOICE-17"
+    test "accepted-steering ambiguity projects to the public delivery result", %{
+      agent_id: agent_id
+    } do
+      prev = Application.get_env(:arbor_agent, :orchestrator_session_module)
+      Application.put_env(:arbor_agent, :orchestrator_session_module, AuthSessionBridge)
+
+      on_exit(fn ->
+        case prev do
+          nil -> Application.delete_env(:arbor_agent, :orchestrator_session_module)
+          mod -> Application.put_env(:arbor_agent, :orchestrator_session_module, mod)
+        end
+      end)
+
+      session = BlockingAuthSession.start(self())
+      insert_session!(agent_id, session)
+
+      message = %Arbor.Contracts.Session.UserMessage{
+        content: "hello",
+        sent_at: ~U[2026-08-01 12:00:00Z],
+        sender_id: "human_test",
+        engagement_id: nil
+      }
+
+      assert {:ok, receipt} =
+               Arbor.Contracts.Security.DeliveryReceipt.new(token: :crypto.strong_rand_bytes(32))
+
+      caller =
+        Task.async(fn ->
+          SessionManager.send_authenticated_message(agent_id, message, receipt, 1_000)
+        end)
+
+      try do
+        assert_receive {:auth_send_blocked, ^session, _proxy_pid, _from, ^message, ^receipt,
+                        _session_timeout_ms},
+                       1_000
+
+        send(session, {:reply, {:error, :steering_delivery_ambiguous}})
+        assert {:error, :delivery_ambiguous} = Task.await(caller, 1_000)
+      after
+        delete_session!(agent_id)
+        if Process.alive?(session), do: Process.exit(session, :kill)
+      end
+    end
+
+    @tag voice_id: "VOICE-17"
     test "real caller death kills its linked delivery proxy", %{agent_id: agent_id} do
       prev = Application.get_env(:arbor_agent, :orchestrator_session_module)
       Application.put_env(:arbor_agent, :orchestrator_session_module, AuthSessionBridge)

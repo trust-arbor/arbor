@@ -180,12 +180,12 @@ defmodule Arbor.Orchestrator.SessionBoundedSteeringSecurityRegressionTest do
     assert :sys.get_state(session).turn_queue == over_limit_queue
   end
 
-  test "security regression: steering callback process exit reports delivery ambiguity" do
+  test "security regression: steering callback process exit reports read ambiguity" do
     dead_session = spawn(fn -> :ok end)
     monitor = Process.monitor(dead_session)
     assert_receive {:DOWN, ^monitor, :process, ^dead_session, :normal}
 
-    assert {:error, :steering_delivery_ambiguous} =
+    assert {:error, :steering_read_ambiguous} =
              Session.take_steering(dead_session, make_ref(), nil, {make_ref(), 1})
   end
 
@@ -441,6 +441,36 @@ defmodule Arbor.Orchestrator.SessionBoundedSteeringSecurityRegressionTest do
     refute reset.turn_in_flight
     assert reset.steer_froms == []
     assert reset.steer_caller_ownership == []
+  end
+
+  test "security regression: failure after accepted steering reports delivery ambiguity",
+       %{session: session} do
+    engagement_id = Identifiers.generate_id("eng_")
+    primary_from = live_from()
+    steering_from = live_from()
+
+    token =
+      put_active(session,
+        engagement_id: engagement_id,
+        queue: [{user_message("accepted before failure", engagement_id), nil, steering_from}]
+      )
+
+    {task_pid, fence} = install_live_turn(session, primary_from)
+    on_exit(fn -> if Process.alive?(task_pid), do: Process.exit(task_pid, :kill) end)
+
+    assert {:ok, [%SteeringMessage{content: "accepted before failure"}]} =
+             take_steering(session, token, engagement_id, {make_ref(), 1})
+
+    active_message = :sys.get_state(session).turn_user_message
+    send(session, {:turn_result, token, active_message, {:error, :provider_failed}})
+
+    assert_receive {primary_tag, {:error, :steering_delivery_ambiguous}}
+    assert primary_tag == elem(primary_from, 1)
+    assert_receive {steering_tag, {:error, :steering_delivery_ambiguous}}
+    assert steering_tag == elem(steering_from, 1)
+
+    refute TurnEgress.fence_active?(fence)
+    refute :sys.get_state(session).turn_in_flight
   end
 
   test "boundary and turn message and byte overflow remain queued", %{session: session} do
