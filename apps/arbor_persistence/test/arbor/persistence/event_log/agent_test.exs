@@ -5,6 +5,8 @@ defmodule Arbor.Persistence.EventLog.AgentTest do
   alias Arbor.Persistence.Event
   alias Arbor.Persistence.EventLog.Agent, as: ELAgent
 
+  @range_read_event [:arbor, :persistence, :event_log, :agent, :range_read]
+
   setup do
     # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
     name = :"el_agent_#{:erlang.unique_integer([:positive])}"
@@ -299,6 +301,59 @@ defmodule Arbor.Persistence.EventLog.AgentTest do
       {:ok, read} = ELAgent.read_stream("s1", name: name, direction: :backward)
       numbers = Enum.map(read, & &1.event_number)
       assert numbers == [3, 2, 1]
+    end
+  end
+
+  describe "read_stream_range/2" do
+    test "traverses and allocates only the requested newest page", %{name: name} do
+      events = for i <- 1..1_000, do: Event.new("bounded-range", "event", %{index: i})
+      assert {:ok, persisted} = ELAgent.append("bounded-range", events, name: name)
+      assert length(persisted) == 1_000
+
+      handler_id = {__MODULE__, self(), make_ref()}
+      test_pid = self()
+
+      :ok =
+        :telemetry.attach(
+          handler_id,
+          @range_read_event,
+          fn _event, measurements, metadata, _config ->
+            send(test_pid, {:range_read, measurements, metadata})
+          end,
+          nil
+        )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      assert {:ok, [event]} =
+               ELAgent.read_stream_range("bounded-range",
+                 name: name,
+                 from: 1,
+                 to: 1_000,
+                 limit: 1,
+                 direction: :backward
+               )
+
+      assert event.event_number == 1_000
+
+      assert_receive {:range_read,
+                      %{visited_events: 1, materialized_events: 1, stream_size: 1_000},
+                      %{stream_id: "bounded-range", direction: :backward}}
+
+      assert {:ok, forward} =
+               ELAgent.read_stream_range("bounded-range",
+                 name: name,
+                 from: 997,
+                 to: 1_000,
+                 limit: 2,
+                 direction: :forward
+               )
+
+      assert Enum.map(forward, & &1.event_number) == [997, 998]
+
+      assert_receive {:range_read,
+                      %{visited_events: 4, materialized_events: 2, stream_size: 1_000},
+                      %{stream_id: "bounded-range", direction: :forward}}
     end
   end
 

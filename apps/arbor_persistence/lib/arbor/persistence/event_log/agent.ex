@@ -20,6 +20,8 @@ defmodule Arbor.Persistence.EventLog.Agent do
   alias Arbor.Contracts.Persistence.AppendOperation
   alias Arbor.Persistence.{Event, EventLog}
 
+  @range_read_event [:arbor, :persistence, :event_log, :agent, :range_read]
+
   # --- Client API ---
 
   @impl Arbor.Persistence.EventLog
@@ -77,14 +79,20 @@ defmodule Arbor.Persistence.EventLog.Agent do
     with {:ok, range} <- EventLog.validate_stream_range(stream_id, opts) do
       name = Keyword.fetch!(opts, :name)
 
-      events =
+      {events, measurements} =
         Agent.get(name, fn state ->
-          state.streams
-          |> Map.get(stream_id, [])
-          |> project_direction(range.direction)
-          |> Enum.filter(&(&1.event_number >= range.from and &1.event_number <= range.to))
-          |> Enum.take(range.limit)
+          bounded_range(
+            Map.get(state.streams, stream_id, []),
+            Map.get(state.versions, stream_id, 0),
+            range
+          )
         end)
+
+      :telemetry.execute(@range_read_event, measurements, %{
+        name: name,
+        stream_id: stream_id,
+        direction: range.direction
+      })
 
       {:ok, events}
     end
@@ -199,6 +207,66 @@ defmodule Arbor.Persistence.EventLog.Agent do
 
   defp apply_limit(events, nil), do: events
   defp apply_limit(events, n), do: Enum.take(events, n)
+
+  defp bounded_range(events, stream_version, range) do
+    lower = max(range.from, 1)
+    upper = min(range.to, stream_version)
+
+    if lower > upper do
+      {[], %{visited_events: 0, materialized_events: 0, stream_size: stream_version}}
+    else
+      {selected, visited, materialized} =
+        select_range(events, stream_version, lower, upper, range.limit, range.direction)
+
+      {selected,
+       %{
+         visited_events: visited,
+         materialized_events: materialized,
+         stream_size: stream_version
+       }}
+    end
+  end
+
+  defp select_range(events, stream_version, lower, upper, limit, :forward) do
+    selected_upper = min(upper, lower + limit - 1)
+    offset = stream_version - selected_upper
+    count = selected_upper - lower + 1
+    {selected, visited, materialized} = bounded_slice(events, offset, count)
+    {Enum.reverse(selected), visited, materialized}
+  end
+
+  defp select_range(events, stream_version, lower, upper, limit, :backward) do
+    selected_lower = max(lower, upper - limit + 1)
+    offset = stream_version - upper
+    count = upper - selected_lower + 1
+    bounded_slice(events, offset, count)
+  end
+
+  defp bounded_slice(events, offset, count) do
+    drop_for_slice(events, offset, count, 0)
+  end
+
+  defp drop_for_slice(events, 0, count, visited) do
+    take_for_slice(events, count, [], visited, 0)
+  end
+
+  defp drop_for_slice([_event | rest], offset, count, visited) do
+    drop_for_slice(rest, offset - 1, count, visited + 1)
+  end
+
+  defp drop_for_slice([], _offset, _count, visited), do: {[], visited, 0}
+
+  defp take_for_slice(_events, 0, selected, visited, materialized) do
+    {Enum.reverse(selected), visited, materialized}
+  end
+
+  defp take_for_slice([event | rest], count, selected, visited, materialized) do
+    take_for_slice(rest, count - 1, [event | selected], visited + 1, materialized + 1)
+  end
+
+  defp take_for_slice([], _count, selected, visited, materialized) do
+    {Enum.reverse(selected), visited, materialized}
+  end
 
   defp do_append(stream_id, events, state) do
     current_version = Map.get(state.versions, stream_id, 0)
