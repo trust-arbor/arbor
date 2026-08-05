@@ -77,4 +77,32 @@ defmodule Arbor.Orchestrator.DurableJsonTest do
     assert {:error, :unsupported_payload} = DurableJson.project_and_digest(fn -> :ok end)
     assert {:error, :invalid_json_projection} = DurableJson.project_and_digest(<<255>>)
   end
+
+  test "digest convenience is equivalent and preserves projection errors" do
+    values = [
+      %{"nested" => [%{state: :ready}, 42]},
+      String.duplicate("X", 100_000),
+      Enum.reduce(1..40, "leaf", fn index, acc -> %{"d#{index}" => acc} end)
+    ]
+
+    Enum.each(values, fn value ->
+      assert {:ok, result} = DurableJson.project_and_digest(value)
+      assert {:ok, digest} = DurableJson.digest(value)
+      assert digest == result.sha256
+      assert digest == String.downcase(digest)
+    end)
+
+    invalid_values = [
+      self(),
+      fn -> :ok end,
+      <<255>>,
+      %{:same => 1, "same" => 2}
+    ]
+
+    Enum.each(invalid_values, fn value ->
+      assert DurableJson.digest(value) == error_only(DurableJson.project_and_digest(value))
+    end)
+  end
+
+  defp error_only({:error, reason}), do: {:error, reason}
 end

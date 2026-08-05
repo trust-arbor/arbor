@@ -49,6 +49,15 @@ defmodule Arbor.Orchestrator.DurableJson do
     _, _ -> {:error, :invalid_json_projection}
   end
 
+  @doc "Returns only the canonical lowercase SHA-256 for a durable JSON projection."
+  @spec digest(term()) :: {:ok, String.t()} | {:error, atom()}
+  def digest(value) do
+    case project_and_digest(value) do
+      {:ok, %{sha256: digest}} -> {:ok, digest}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
   defp encode_projection(value) do
     case Jason.encode(value, maps: :naive) do
       {:ok, encoded} -> {:ok, encoded}
