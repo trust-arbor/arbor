@@ -97,6 +97,13 @@ defmodule Arbor.Persistence.EventLog.Ecto do
   @operation_reconcile_lock_sql "SELECT pg_advisory_xact_lock(hashtextextended($1, 1))"
   @protocol_version 3
   @append_repo_callbacks [transaction: 1, rollback: 1, one: 1, insert!: 1]
+  @purge_repo_callbacks [
+    transaction: 2,
+    rollback: 1,
+    delete_all: 2,
+    exists?: 2,
+    query: 3
+  ]
 
   def append(stream_id, events, opts \\ []) do
     EventLog.with_operation_deadline(opts, fn normalized_opts, append_deadline_mono ->
@@ -210,6 +217,115 @@ defmodule Arbor.Persistence.EventLog.Ecto do
         )
       end
     end)
+  end
+
+  @impl Arbor.Persistence.EventLog
+  def purge_stream(stream_id, opts) do
+    EventLog.with_operation_deadline(opts, :purge, fn normalized_opts, deadline_mono ->
+      with {:ok, normalized_opts, ^deadline_mono} <-
+             EventLog.prepare_purge(stream_id, normalized_opts),
+           {:ok, repo} <- fetch_purge_repo(normalized_opts) do
+        run_bounded_purge(repo, stream_id, deadline_mono)
+      end
+    end)
+  end
+
+  defp run_bounded_purge(repo, stream_id, deadline_mono) do
+    if BoundedWorker.active?() do
+      repo
+      |> purge_in_transaction(stream_id, deadline_mono)
+      |> EventLog.stamp_completion()
+      |> EventLog.accept_purge_completion(stream_id, deadline_mono)
+    else
+      case BoundedWorker.run(
+             fn ->
+               EventLog.with_inherited_deadline(deadline_mono, fn ->
+                 repo
+                 |> purge_in_transaction(stream_id, deadline_mono)
+                 |> EventLog.stamp_completion()
+               end)
+             end,
+             deadline_mono
+           ) do
+        {:ok, completion} ->
+          EventLog.accept_purge_completion(completion, stream_id, deadline_mono)
+
+        {:error, _uncertain} ->
+          EventLog.purge_indeterminate(stream_id)
+      end
+    end
+  end
+
+  defp purge_in_transaction(repo, stream_id, deadline_mono) do
+    transaction(repo, deadline_mono, fn ->
+      case verify_protocol_epoch(repo, deadline_mono) do
+        :ok -> :ok
+        {:error, _reason} -> repo.rollback(:backend_unavailable)
+      end
+
+      case acquire_global_append_lock(repo, deadline_mono) do
+        :ok -> :ok
+        {:error, _reason} -> repo.rollback(:backend_unavailable)
+      end
+
+      :ok = lock_purge_tables(repo, deadline_mono)
+
+      from(event in EventSchema, where: event.stream_id == ^stream_id)
+      |> repo_delete_all(repo, deadline_mono)
+
+      from(operation in OperationSchema, where: operation.stream_id == ^stream_id)
+      |> repo_delete_all(repo, deadline_mono)
+
+      ensure_before_deadline(repo, deadline_mono)
+
+      if stream_rows_exist?(repo, stream_id, deadline_mono) do
+        repo.rollback(:purge_verification_failed)
+      end
+
+      :ok
+    end)
+    |> case do
+      {:ok, :ok} ->
+        :ok
+
+      {:error, reason} when reason in [:backend_unavailable, :purge_verification_failed] ->
+        {:error, reason}
+
+      _uncertain ->
+        EventLog.purge_indeterminate(stream_id)
+    end
+  rescue
+    _error -> EventLog.purge_indeterminate(stream_id)
+  catch
+    :exit, _reason -> EventLog.purge_indeterminate(stream_id)
+  end
+
+  defp lock_purge_tables(repo, deadline_mono) do
+    if postgres_repo?(repo) do
+      case repo.query(
+             "LOCK TABLE events, event_log_operations IN SHARE ROW EXCLUSIVE MODE",
+             [],
+             deadline_query_opts(repo, deadline_mono)
+           ) do
+        {:ok, _result} -> :ok
+        {:error, error} -> raise error
+      end
+    else
+      :ok
+    end
+  end
+
+  defp stream_rows_exist?(repo, stream_id, deadline_mono) do
+    events = from(event in EventSchema, where: event.stream_id == ^stream_id, select: 1)
+
+    operations =
+      from(operation in OperationSchema,
+        where: operation.stream_id == ^stream_id,
+        select: 1
+      )
+
+    repo_exists?(events, repo, deadline_mono) or
+      repo_exists?(operations, repo, deadline_mono)
   end
 
   # Concurrent appends to the SAME stream race on event_number assignment: the
@@ -606,8 +722,26 @@ defmodule Arbor.Persistence.EventLog.Ecto do
     end
   end
 
+  defp fetch_purge_repo(opts) do
+    case Keyword.get(opts, :repo, Repo) do
+      repo when is_atom(repo) and not is_nil(repo) ->
+        if Code.ensure_loaded?(repo) and database_repo?(repo) and valid_purge_repo?(repo),
+          do: {:ok, repo},
+          else: {:error, :invalid_precondition}
+
+      _invalid ->
+        {:error, :invalid_precondition}
+    end
+  end
+
   defp valid_append_repo?(repo) do
     Enum.all?(@append_repo_callbacks, fn {function, arity} ->
+      function_exported?(repo, function, arity)
+    end)
+  end
+
+  defp valid_purge_repo?(repo) do
+    Enum.all?(@purge_repo_callbacks, fn {function, arity} ->
       function_exported?(repo, function, arity)
     end)
   end
@@ -1710,6 +1844,14 @@ defmodule Arbor.Persistence.EventLog.Ecto do
     if database_repo?(repo),
       do: repo.all(query, deadline_query_opts(repo, deadline_mono)),
       else: repo.all(query)
+  end
+
+  defp repo_delete_all(query, repo, deadline_mono) do
+    repo.delete_all(query, deadline_query_opts(repo, deadline_mono))
+  end
+
+  defp repo_exists?(query, repo, deadline_mono) do
+    repo.exists?(query, deadline_query_opts(repo, deadline_mono))
   end
 
   defp repo_get!(repo, schema, id, deadline_mono) do

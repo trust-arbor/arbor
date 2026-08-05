@@ -56,6 +56,16 @@ defmodule Arbor.Persistence.EventLog do
              | :invalid_append_operation
              | :invalid_reconciliation
              | {:append_indeterminate, AppendOperation.t()}}
+  @type purge_error ::
+          :backend_unavailable
+          | :invalid_precondition
+          | :invalid_stream_id
+          | :purge_not_supported
+          | :purge_verification_failed
+  @type purge_result ::
+          :ok
+          | {:error, {:purge_indeterminate, stream_id()}}
+          | {:error, purge_error()}
 
   @doc """
   Append one or more events to a stream.
@@ -102,6 +112,20 @@ defmodule Arbor.Persistence.EventLog do
   content fails with `:event_identity_conflict`.
   """
   @callback reconcile_append(AppendOperation.t(), opts()) :: append_reconciliation()
+
+  @doc """
+  Permanently remove one complete stream and every backend-owned identity entry.
+
+  The operation is idempotent. `:purge_timeout_ms` sets one absolute
+  `1..60_000` millisecond deadline (default `5_000`) across validation,
+  dispatch, mutation, absence verification, and reply. A timeout or worker exit
+  after dispatch returns `{:error, {:purge_indeterminate, stream_id}}`; retrying
+  the same stream converges on authoritative absence.
+
+  This callback is optional so adapters that cannot prove whole-stream absence
+  remain loadable. The public facade rejects those adapters before dispatch.
+  """
+  @callback purge_stream(stream_id(), opts()) :: purge_result()
 
   @doc """
   Read events from a stream.
@@ -208,6 +232,7 @@ defmodule Arbor.Persistence.EventLog do
 
   @optional_callbacks [
     reconcile_append: 2,
+    purge_stream: 2,
     read_stream_range: 2,
     event_identity: 3,
     subscribe: 3,
@@ -223,10 +248,24 @@ defmodule Arbor.Persistence.EventLog do
           result | {:error, :invalid_precondition}
         when result: term()
   def with_operation_deadline(opts, fun) when is_function(fun, 2) do
+    with_operation_deadline(opts, :append, fun)
+  end
+
+  def with_operation_deadline(_opts, _fun), do: {:error, :invalid_precondition}
+
+  @doc false
+  @spec with_operation_deadline(
+          term(),
+          :append | :purge,
+          (keyword(), integer() -> result)
+        ) :: result | {:error, :invalid_precondition}
+        when result: term()
+  def with_operation_deadline(opts, operation, fun)
+      when operation in [:append, :purge] and is_function(fun, 2) do
     started_mono = System.monotonic_time(:millisecond)
 
     with {:ok, normalized_opts} <- normalize_opts(opts),
-         {:ok, timeout_ms} <- append_timeout(normalized_opts) do
+         {:ok, timeout_ms} <- operation_timeout(operation, normalized_opts) do
       requested_deadline = started_mono + timeout_ms
 
       case active_deadline() do
@@ -259,7 +298,35 @@ defmodule Arbor.Persistence.EventLog do
     end
   end
 
-  def with_operation_deadline(_opts, _fun), do: {:error, :invalid_precondition}
+  def with_operation_deadline(_opts, _operation, _fun),
+    do: {:error, :invalid_precondition}
+
+  @doc false
+  @spec with_inherited_deadline(integer(), (-> result)) :: result | {:error, :operation_timeout}
+        when result: term()
+  def with_inherited_deadline(deadline_mono, fun)
+      when is_integer(deadline_mono) and is_function(fun, 0) do
+    case remaining_timeout(deadline_mono) do
+      {:ok, _remaining} ->
+        previous =
+          Process.put(@deadline_context_key, %{
+            owner: self(),
+            token: make_ref(),
+            deadline_mono: deadline_mono
+          })
+
+        try do
+          fun.()
+        after
+          restore_deadline_context(previous)
+        end
+
+      {:error, :operation_timeout} = error ->
+        error
+    end
+  end
+
+  def with_inherited_deadline(_deadline_mono, _fun), do: {:error, :operation_timeout}
 
   @doc false
   @spec prepare_append(stream_id(), [Event.t()] | Event.t(), opts()) ::
@@ -283,6 +350,19 @@ defmodule Arbor.Persistence.EventLog do
          {:ok, operation} <- validate_operation(operation),
          {:ok, normalized_opts} <- normalize_opts(opts) do
       {:ok, operation, normalized_opts, deadline_mono}
+    end
+  end
+
+  @doc false
+  @spec prepare_purge(stream_id(), term()) ::
+          {:ok, keyword(), integer()}
+          | {:error, :invalid_stream_id | :invalid_precondition}
+  def prepare_purge(stream_id, opts) do
+    with {:ok, deadline_mono} <- require_active_deadline(),
+         :ok <- validate_stream_id(stream_id),
+         {:ok, normalized_opts} <- normalize_opts(opts),
+         :ok <- validate_purge_opts(normalized_opts) do
+      {:ok, normalized_opts, deadline_mono}
     end
   end
 
@@ -421,6 +501,16 @@ defmodule Arbor.Persistence.EventLog do
   end
 
   @doc false
+  @spec purge_indeterminate(term()) ::
+          {:error, {:purge_indeterminate, stream_id()}}
+          | {:error, :invalid_stream_id}
+  def purge_indeterminate(stream_id) do
+    with :ok <- validate_stream_id(stream_id) do
+      {:error, {:purge_indeterminate, stream_id}}
+    end
+  end
+
+  @doc false
   @spec remaining_timeout(integer()) :: {:ok, pos_integer()} | {:error, :operation_timeout}
   def remaining_timeout(deadline_mono) when is_integer(deadline_mono) do
     remaining_ms = deadline_mono - System.monotonic_time(:millisecond)
@@ -474,12 +564,59 @@ defmodule Arbor.Persistence.EventLog do
     do: indeterminate(operation)
 
   @doc false
+  @spec accept_purge_completion(term(), stream_id(), integer()) :: purge_result()
+  def accept_purge_completion(
+        {:event_log_completion, completed_mono, result},
+        stream_id,
+        deadline_mono
+      ) do
+    accept_purge_completion(result, stream_id, deadline_mono, completed_mono)
+  end
+
+  def accept_purge_completion(_invalid_reply, stream_id, _deadline_mono),
+    do: purge_indeterminate(stream_id)
+
+  @doc false
+  @spec accept_purge_completion(term(), stream_id(), integer(), integer()) :: purge_result()
+  def accept_purge_completion(
+        {:error, {:purge_indeterminate, stream_id}} = result,
+        stream_id,
+        _deadline_mono,
+        _completed_mono
+      ),
+      do: result
+
+  def accept_purge_completion(result, stream_id, deadline_mono, completed_mono)
+      when is_integer(deadline_mono) and is_integer(completed_mono) do
+    received_mono = System.monotonic_time(:millisecond)
+
+    if completed_mono < deadline_mono and received_mono < deadline_mono and
+         valid_purge_result?(result),
+       do: result,
+       else: purge_indeterminate(stream_id)
+  end
+
+  def accept_purge_completion(_result, stream_id, _deadline_mono, _completed_mono),
+    do: purge_indeterminate(stream_id)
+
+  @doc false
   @spec operation_deadline(term()) :: {:ok, integer()} | {:error, :invalid_precondition}
   def operation_deadline(opts) do
     started_mono = System.monotonic_time(:millisecond)
 
     with {:ok, normalized_opts} <- normalize_opts(opts),
          {:ok, timeout_ms} <- append_timeout(normalized_opts) do
+      {:ok, started_mono + timeout_ms}
+    end
+  end
+
+  @doc false
+  @spec purge_deadline(term()) :: {:ok, integer()} | {:error, :invalid_precondition}
+  def purge_deadline(opts) do
+    started_mono = System.monotonic_time(:millisecond)
+
+    with {:ok, normalized_opts} <- normalize_opts(opts),
+         {:ok, timeout_ms} <- operation_timeout(:purge, normalized_opts) do
       {:ok, started_mono + timeout_ms}
     end
   end
@@ -797,6 +934,41 @@ defmodule Arbor.Persistence.EventLog do
     is_integer(value) and value >= 0 and value <= @max_precondition_integer
   end
 
+  defp validate_purge_opts(opts) do
+    allowed = [:name, :repo, :purge_timeout_ms, :operation_timeout_ms, :call_timeout_ms]
+    keys = Keyword.keys(opts)
+
+    if length(keys) == length(Enum.uniq(keys)) and Enum.all?(keys, &(&1 in allowed)),
+      do: :ok,
+      else: {:error, :invalid_precondition}
+  end
+
+  defp valid_purge_result?(:ok), do: true
+
+  defp valid_purge_result?({:error, reason})
+       when reason in [
+              :backend_unavailable,
+              :invalid_precondition,
+              :purge_not_supported,
+              :purge_verification_failed
+            ],
+       do: true
+
+  defp valid_purge_result?(_result), do: false
+
+  defp operation_timeout(:append, opts), do: append_timeout(opts)
+
+  defp operation_timeout(:purge, opts) do
+    timeout =
+      Keyword.get_lazy(opts, :purge_timeout_ms, fn ->
+        Keyword.get_lazy(opts, :operation_timeout_ms, fn ->
+          Keyword.get(opts, :call_timeout_ms, @default_append_timeout_ms)
+        end)
+      end)
+
+    bounded_timeout(timeout)
+  end
+
   defp append_timeout(opts) do
     timeout =
       Keyword.get_lazy(opts, :append_timeout_ms, fn ->
@@ -805,10 +977,14 @@ defmodule Arbor.Persistence.EventLog do
         end)
       end)
 
-    if is_integer(timeout) and timeout > 0 and timeout <= @max_append_timeout_ms,
-      do: {:ok, timeout},
-      else: {:error, :invalid_precondition}
+    bounded_timeout(timeout)
   end
+
+  defp bounded_timeout(timeout)
+       when is_integer(timeout) and timeout > 0 and timeout <= @max_append_timeout_ms,
+       do: {:ok, timeout}
+
+  defp bounded_timeout(_timeout), do: {:error, :invalid_precondition}
 
   defp event_conflicts?(operation, %Event{} = event) do
     expected = Map.get(operation.fingerprints, event.id)

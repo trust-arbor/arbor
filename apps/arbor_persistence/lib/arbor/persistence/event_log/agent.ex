@@ -56,6 +56,17 @@ defmodule Arbor.Persistence.EventLog.Agent do
   end
 
   @impl Arbor.Persistence.EventLog
+  def purge_stream(stream_id, opts) do
+    EventLog.with_operation_deadline(opts, :purge, fn normalized_opts, deadline_mono ->
+      with {:ok, normalized_opts, ^deadline_mono} <-
+             EventLog.prepare_purge(stream_id, normalized_opts),
+           {:ok, name} <- fetch_name(normalized_opts) do
+        safe_purge(name, stream_id, deadline_mono)
+      end
+    end)
+  end
+
+  @impl Arbor.Persistence.EventLog
   def read_stream(stream_id, opts) do
     name = Keyword.fetch!(opts, :name)
     from_num = Keyword.get(opts, :from, 0)
@@ -435,6 +446,129 @@ defmodule Arbor.Persistence.EventLog.Agent do
   catch
     :exit, _reason -> EventLog.indeterminate(operation)
   end
+
+  defp safe_purge(name, stream_id, deadline_mono) do
+    with true <- is_pid(Process.whereis(name)),
+         {:ok, timeout} <- EventLog.remaining_timeout(deadline_mono) do
+      reply =
+        Agent.get_and_update(
+          name,
+          fn state ->
+            case purge_candidate(state, stream_id, deadline_mono) do
+              {:ok, candidate} ->
+                {EventLog.stamp_completion(:ok), candidate}
+
+              {:error, _uncertain} ->
+                {EventLog.stamp_completion(EventLog.purge_indeterminate(stream_id)), state}
+            end
+          end,
+          timeout
+        )
+
+      EventLog.accept_purge_completion(reply, stream_id, deadline_mono)
+    else
+      false -> {:error, :backend_unavailable}
+      {:error, :operation_timeout} -> EventLog.purge_indeterminate(stream_id)
+    end
+  rescue
+    _error -> EventLog.purge_indeterminate(stream_id)
+  catch
+    :exit, _reason -> EventLog.purge_indeterminate(stream_id)
+  end
+
+  defp purge_candidate(state, stream_id, deadline_mono) do
+    with {:ok, global} <- reject_stream_values(state.global, stream_id, deadline_mono),
+         {:ok, event_index} <-
+           reject_stream_index(state.event_index, stream_id, deadline_mono) do
+      candidate = %{
+        state
+        | streams: Map.delete(state.streams, stream_id),
+          stream_index: Map.delete(state.stream_index, stream_id),
+          global: global,
+          versions: Map.delete(state.versions, stream_id),
+          event_index: event_index,
+          head_inserted_mono: Map.delete(state.head_inserted_mono, stream_id)
+      }
+
+      with :ok <- verify_agent_stream_absent(candidate, stream_id, deadline_mono) do
+        {:ok, candidate}
+      end
+    end
+  end
+
+  defp reject_stream_values(events, stream_id, deadline_mono) do
+    events
+    |> Enum.reduce_while({:ok, [], 0}, fn event, {:ok, kept, count} ->
+      if deadline_check_due?(count) and deadline_expired?(deadline_mono) do
+        {:halt, {:error, :operation_timeout}}
+      else
+        kept = if event.stream_id == stream_id, do: kept, else: [event | kept]
+        {:cont, {:ok, kept, count + 1}}
+      end
+    end)
+    |> case do
+      {:ok, kept, _count} -> {:ok, Enum.reverse(kept)}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp reject_stream_index(index, stream_id, deadline_mono) do
+    index
+    |> Enum.reduce_while({:ok, %{}, 0}, fn {event_id, event}, {:ok, kept, count} ->
+      if deadline_check_due?(count) and deadline_expired?(deadline_mono) do
+        {:halt, {:error, :operation_timeout}}
+      else
+        kept = if event.stream_id == stream_id, do: kept, else: Map.put(kept, event_id, event)
+        {:cont, {:ok, kept, count + 1}}
+      end
+    end)
+    |> case do
+      {:ok, kept, _count} -> {:ok, kept}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp verify_agent_stream_absent(state, stream_id, deadline_mono) do
+    if Map.has_key?(state.streams, stream_id) or
+         Map.has_key?(state.stream_index, stream_id) or
+         Map.has_key?(state.versions, stream_id) or
+         Map.has_key?(state.head_inserted_mono, stream_id) do
+      {:error, :purge_verification_failed}
+    else
+      with :ok <- bounded_all?(state.global, deadline_mono, &(&1.stream_id != stream_id)),
+           :ok <-
+             bounded_all?(state.event_index, deadline_mono, fn {_event_id, event} ->
+               event.stream_id != stream_id
+             end) do
+        :ok
+      end
+    end
+  end
+
+  defp bounded_all?(enumerable, deadline_mono, predicate) do
+    enumerable
+    |> Enum.reduce_while({:ok, 0}, fn item, {:ok, count} ->
+      cond do
+        deadline_check_due?(count) and deadline_expired?(deadline_mono) ->
+          {:halt, {:error, :operation_timeout}}
+
+        predicate.(item) ->
+          {:cont, {:ok, count + 1}}
+
+        true ->
+          {:halt, {:error, :purge_verification_failed}}
+      end
+    end)
+    |> case do
+      {:ok, _count} -> :ok
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp deadline_check_due?(count), do: rem(count, 128) == 0
+
+  defp deadline_expired?(deadline_mono),
+    do: System.monotonic_time(:millisecond) >= deadline_mono
 
   defp fetch_name(opts) do
     case Keyword.fetch(opts, :name) do

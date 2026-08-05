@@ -24,6 +24,11 @@ defmodule Arbor.Persistence.EventLog.ETS do
   `rehydrate_metadata/2` plus any required identity replay before accepting
   append or reconciliation traffic. Standalone ETS logs are known-empty by
   default.
+
+  Whole-stream purge is serialized by this GenServer but spans five ETS tables,
+  so it is convergent rather than crash-atomic. Target identity associations are
+  removed last; a deadline or caller failure can therefore be retried until all
+  payload, version, identity, and subscriber surfaces prove absence.
   """
 
   use GenServer
@@ -76,6 +81,17 @@ defmodule Arbor.Persistence.EventLog.ETS do
              EventLog.prepare_reconcile(operation, normalized_opts),
            {:ok, name} <- fetch_name(normalized_opts) do
         reconcile_from_server(name, operation, deadline_mono)
+      end
+    end)
+  end
+
+  @impl Arbor.Persistence.EventLog
+  def purge_stream(stream_id, opts) do
+    EventLog.with_operation_deadline(opts, :purge, fn normalized_opts, deadline_mono ->
+      with {:ok, normalized_opts, ^deadline_mono} <-
+             EventLog.prepare_purge(stream_id, normalized_opts),
+           {:ok, name} <- fetch_name(normalized_opts) do
+        safe_purge_call(name, stream_id, deadline_mono)
       end
     end)
   end
@@ -310,6 +326,7 @@ defmodule Arbor.Persistence.EventLog.ETS do
       identity_history: identity_history,
       identity_metadata_consistent: true,
       global_position: 0,
+      purged_event_count: 0,
       max_events: max_events,
       warning_logged: false,
       stream_versions: %{},
@@ -393,6 +410,11 @@ defmodule Arbor.Persistence.EventLog.ETS do
       end
 
     {:reply, EventLog.stamp_completion(result), state}
+  end
+
+  def handle_call({:purge_stream, stream_id, deadline_mono}, _from, state) do
+    {result, next_state} = purge_serialized(state, stream_id, deadline_mono)
+    {:reply, EventLog.stamp_completion(result), next_state}
   end
 
   def handle_call({:read_stream, stream_id, opts}, _from, state) do
@@ -539,8 +561,9 @@ defmodule Arbor.Persistence.EventLog.ETS do
     identity_tombstones = export_identity_tombstones(state.id_table)
 
     snapshot = %{
-      snapshot_version: 2,
+      snapshot_version: 3,
       global_position: state.global_position,
+      purged_event_count: state.purged_event_count,
       stream_versions: state.stream_versions,
       max_events: state.max_events,
       events: serialized,
@@ -580,7 +603,11 @@ defmodule Arbor.Persistence.EventLog.ETS do
         head_inserted_mono: head_inserted_mono,
         identity_history: {:unavailable, :durable_metadata_only},
         identity_metadata_consistent:
-          metadata_sequence_consistent?(merged_stream_versions, new_global_position)
+          metadata_sequence_consistent?(
+            merged_stream_versions,
+            new_global_position,
+            state.purged_event_count
+          )
     }
 
     candidate =
@@ -948,6 +975,337 @@ defmodule Arbor.Persistence.EventLog.ETS do
     :exit, _reason -> EventLog.indeterminate(operation)
   end
 
+  defp safe_purge_call(name, stream_id, deadline_mono) do
+    with {:ok, timeout} <- EventLog.remaining_timeout(deadline_mono) do
+      name
+      |> GenServer.call({:purge_stream, stream_id, deadline_mono}, timeout)
+      |> EventLog.accept_purge_completion(stream_id, deadline_mono)
+    else
+      {:error, :operation_timeout} -> EventLog.purge_indeterminate(stream_id)
+    end
+  rescue
+    _error -> EventLog.purge_indeterminate(stream_id)
+  catch
+    :exit, _reason -> EventLog.purge_indeterminate(stream_id)
+  end
+
+  defp purge_serialized(state, stream_id, deadline_mono) do
+    stream_match = [{{{stream_id, :"$1"}, :"$2"}, [], [:"$_"]}]
+    global_match = [{{:"$1", %{stream_id: stream_id}}, [], [:"$_"]}]
+    identity_match = [{{:"$1", {:"$2", stream_id, :"$3", :"$4"}}, [], [:"$_"]}]
+
+    with {:ok, stream_entries} <- select_rows(state.stream_table, stream_match, deadline_mono),
+         {:ok, global_entries} <- select_rows(state.global_table, global_match, deadline_mono),
+         {:ok, identity_entries} <- select_rows(state.id_table, identity_match, deadline_mono),
+         {:ok, stream_identity_entries} <-
+           select_rows(state.identity_stream_position_table, stream_match, deadline_mono) do
+      event_ids = purge_event_ids(global_entries, identity_entries, stream_identity_entries)
+      global_positions = purge_global_positions(global_entries, identity_entries)
+
+      with {:ok, identity_position_entries} <-
+             select_identity_positions(state.identity_position_table, event_ids, deadline_mono),
+           {:ok, related_global_entries} <-
+             select_global_entries(state.global_table, event_ids, deadline_mono),
+           :ok <-
+             validate_purge_entries(
+               state,
+               stream_id,
+               stream_entries,
+               related_global_entries,
+               identity_entries,
+               stream_identity_entries,
+               deadline_mono
+             ),
+           :ok <-
+             delete_rows(
+               state.stream_table,
+               Enum.map(stream_entries, &elem(&1, 0)),
+               deadline_mono
+             ),
+           :ok <- delete_rows(state.global_table, MapSet.to_list(global_positions), deadline_mono),
+           :ok <- delete_rows(state.id_table, MapSet.to_list(event_ids), deadline_mono),
+           :ok <-
+             delete_rows(
+               state.identity_position_table,
+               Enum.map(identity_position_entries, &elem(&1, 0)),
+               deadline_mono
+             ),
+           :ok <-
+             delete_rows(
+               state.identity_stream_position_table,
+               Enum.map(stream_identity_entries, &elem(&1, 0)),
+               deadline_mono
+             ),
+           :ok <-
+             verify_ets_stream_absence(
+               state,
+               stream_match,
+               global_match,
+               identity_match,
+               event_ids,
+               deadline_mono
+             ) do
+        candidate = purge_ets_metadata(state, stream_id)
+
+        if ets_stream_absent?(candidate, stream_id) do
+          {:ok, candidate}
+        else
+          {EventLog.purge_indeterminate(stream_id), state}
+        end
+      else
+        {:error, _uncertain} -> {EventLog.purge_indeterminate(stream_id), state}
+      end
+    else
+      {:error, _uncertain} -> {EventLog.purge_indeterminate(stream_id), state}
+    end
+  end
+
+  defp purge_event_ids(global_entries, identity_entries, stream_identity_entries) do
+    Enum.reduce(global_entries, MapSet.new(), fn {_position, event}, ids ->
+      MapSet.put(ids, event.id)
+    end)
+    |> then(fn ids ->
+      Enum.reduce(identity_entries, ids, fn {event_id, _identity}, acc ->
+        MapSet.put(acc, event_id)
+      end)
+    end)
+    |> then(fn ids ->
+      Enum.reduce(stream_identity_entries, ids, fn {_stream_position, event_id}, acc ->
+        MapSet.put(acc, event_id)
+      end)
+    end)
+  end
+
+  defp purge_global_positions(global_entries, identity_entries) do
+    Enum.reduce(global_entries, MapSet.new(), fn {position, _event}, positions ->
+      MapSet.put(positions, position)
+    end)
+    |> then(fn positions ->
+      Enum.reduce(identity_entries, positions, fn
+        {_event_id, {_fingerprint, _stream_id, _event_number, position}}, acc ->
+          MapSet.put(acc, position)
+      end)
+    end)
+  end
+
+  defp select_global_entries(table, event_ids, deadline_mono) do
+    if MapSet.size(event_ids) == 0 do
+      {:ok, []}
+    else
+      select_rows(table, [{:"$1", [], [:"$_"]}], deadline_mono, fn
+        {_position, %Event{id: event_id}} -> MapSet.member?(event_ids, event_id)
+        _malformed -> false
+      end)
+    end
+  end
+
+  defp validate_purge_entries(
+         state,
+         stream_id,
+         stream_entries,
+         global_entries,
+         identity_entries,
+         stream_identity_entries,
+         deadline_mono
+       ) do
+    with :ok <-
+           validate_rows(stream_entries, deadline_mono, fn
+             {{^stream_id, event_number}, position} ->
+               case :ets.lookup(state.global_table, position) do
+                 [{^position, %Event{stream_id: ^stream_id, event_number: ^event_number}}] -> true
+                 _missing_or_cross_stream -> false
+               end
+
+             _malformed ->
+               false
+           end),
+         :ok <-
+           validate_rows(global_entries, deadline_mono, fn
+             {position, %Event{id: event_id, stream_id: ^stream_id, event_number: event_number}} ->
+               stream_pointer_safe_to_remove?(state, stream_id, event_number, position) and
+                 identity_matches?(state, event_id, stream_id, event_number, position)
+
+             _other_stream_or_malformed ->
+               false
+           end),
+         :ok <-
+           validate_rows(identity_entries, deadline_mono, fn
+             {event_id, {_fingerprint, ^stream_id, event_number, position}} ->
+               :ets.lookup(state.identity_position_table, position) == [{position, event_id}] and
+                 :ets.lookup(state.identity_stream_position_table, {stream_id, event_number}) ==
+                   [{{stream_id, event_number}, event_id}] and
+                 identity_payload_safe_to_remove?(
+                   state,
+                   event_id,
+                   stream_id,
+                   event_number,
+                   position
+                 )
+
+             _malformed ->
+               false
+           end),
+         :ok <-
+           validate_rows(stream_identity_entries, deadline_mono, fn
+             {{^stream_id, event_number}, event_id} ->
+               case :ets.lookup(state.id_table, event_id) do
+                 [] -> true
+                 [{^event_id, {_fingerprint, ^stream_id, ^event_number, _position}}] -> true
+                 _cross_stream_or_malformed -> false
+               end
+
+             _malformed ->
+               false
+           end) do
+      :ok
+    else
+      _invalid_or_uncertain -> {:error, :purge_verification_failed}
+    end
+  end
+
+  defp validate_rows(rows, deadline_mono, predicate) do
+    rows
+    |> Enum.chunk_every(128)
+    |> Enum.reduce_while(:ok, fn chunk, :ok ->
+      case EventLog.remaining_timeout(deadline_mono) do
+        {:ok, _remaining} ->
+          if Enum.all?(chunk, predicate),
+            do: {:cont, :ok},
+            else: {:halt, {:error, :purge_verification_failed}}
+
+        {:error, :operation_timeout} = error ->
+          {:halt, error}
+      end
+    end)
+  end
+
+  defp identity_matches?(state, event_id, stream_id, event_number, position) do
+    case :ets.lookup(state.id_table, event_id) do
+      [{^event_id, {_fingerprint, ^stream_id, ^event_number, ^position}}] -> true
+      _missing_or_malformed -> false
+    end
+  end
+
+  defp stream_pointer_safe_to_remove?(state, stream_id, event_number, position) do
+    case :ets.lookup(state.stream_table, {stream_id, event_number}) do
+      [] -> true
+      [{{^stream_id, ^event_number}, ^position}] -> true
+      _cross_stream_or_malformed -> false
+    end
+  end
+
+  defp identity_payload_safe_to_remove?(state, event_id, stream_id, event_number, position) do
+    case :ets.lookup(state.global_table, position) do
+      [] ->
+        true
+
+      [{^position, %Event{id: ^event_id, stream_id: ^stream_id, event_number: ^event_number}}] ->
+        true
+
+      _cross_stream_or_malformed ->
+        false
+    end
+  end
+
+  defp select_identity_positions(table, event_ids, deadline_mono) do
+    if MapSet.size(event_ids) == 0 do
+      {:ok, []}
+    else
+      select_rows(table, [{:"$1", [], [:"$_"]}], deadline_mono, fn
+        {_position, event_id} -> MapSet.member?(event_ids, event_id)
+        _malformed -> false
+      end)
+    end
+  end
+
+  defp select_rows(table, match_spec, deadline_mono, filter \\ fn _row -> true end) do
+    with {:ok, _remaining} <- EventLog.remaining_timeout(deadline_mono) do
+      table
+      |> :ets.select(match_spec, 128)
+      |> collect_selected_rows(deadline_mono, filter, [])
+    end
+  rescue
+    _error -> {:error, :purge_verification_failed}
+  catch
+    :exit, _reason -> {:error, :purge_verification_failed}
+  end
+
+  defp collect_selected_rows(:"$end_of_table", _deadline_mono, _filter, acc),
+    do: {:ok, Enum.reverse(acc)}
+
+  defp collect_selected_rows({rows, continuation}, deadline_mono, filter, acc) do
+    with {:ok, _remaining} <- EventLog.remaining_timeout(deadline_mono) do
+      acc =
+        Enum.reduce(rows, acc, fn row, kept -> if filter.(row), do: [row | kept], else: kept end)
+
+      continuation
+      |> :ets.select()
+      |> collect_selected_rows(deadline_mono, filter, acc)
+    end
+  end
+
+  defp delete_rows(table, keys, deadline_mono) do
+    keys
+    |> Enum.chunk_every(128)
+    |> Enum.reduce_while(:ok, fn chunk, :ok ->
+      case EventLog.remaining_timeout(deadline_mono) do
+        {:ok, _remaining} ->
+          Enum.each(chunk, &:ets.delete(table, &1))
+          {:cont, :ok}
+
+        {:error, :operation_timeout} = error ->
+          {:halt, error}
+      end
+    end)
+  end
+
+  defp verify_ets_stream_absence(
+         state,
+         stream_match,
+         global_match,
+         identity_match,
+         event_ids,
+         deadline_mono
+       ) do
+    with {:ok, []} <- select_rows(state.stream_table, stream_match, deadline_mono),
+         {:ok, []} <- select_rows(state.global_table, global_match, deadline_mono),
+         {:ok, []} <- select_rows(state.id_table, identity_match, deadline_mono),
+         {:ok, []} <-
+           select_rows(state.identity_stream_position_table, stream_match, deadline_mono),
+         {:ok, []} <-
+           select_identity_positions(state.identity_position_table, event_ids, deadline_mono) do
+      :ok
+    else
+      _present_or_uncertain -> {:error, :purge_verification_failed}
+    end
+  end
+
+  defp purge_ets_metadata(state, stream_id) do
+    purged_count = Map.get(state.stream_versions, stream_id, 0)
+    {stream_subscribers, subscribers} = Map.pop(state.subscribers, stream_id, [])
+
+    monitors =
+      Enum.reduce(stream_subscribers, state.monitors, fn {_pid, ref}, monitors ->
+        Process.demonitor(ref, [:flush])
+        Map.delete(monitors, ref)
+      end)
+
+    %{
+      state
+      | stream_versions: Map.delete(state.stream_versions, stream_id),
+        head_inserted_mono: Map.delete(state.head_inserted_mono, stream_id),
+        subscribers: subscribers,
+        monitors: monitors,
+        purged_event_count: state.purged_event_count + purged_count
+    }
+  end
+
+  defp ets_stream_absent?(state, stream_id) do
+    not Map.has_key?(state.stream_versions, stream_id) and
+      not Map.has_key?(state.head_inserted_mono, stream_id) and
+      not Map.has_key?(state.subscribers, stream_id)
+  end
+
   defp fetch_name(opts) do
     case Keyword.fetch(opts, :name) do
       {:ok, name} when is_atom(name) and not is_nil(name) -> {:ok, name}
@@ -1129,10 +1487,12 @@ defmodule Arbor.Persistence.EventLog.ETS do
   end
 
   defp complete_identity_ledger?(state) do
+    expected_identities = active_identity_count(state)
+
     state.identity_metadata_consistent and
-      :ets.info(state.id_table, :size) == state.global_position and
-      :ets.info(state.identity_position_table, :size) == state.global_position and
-      :ets.info(state.identity_stream_position_table, :size) == state.global_position and
+      :ets.info(state.id_table, :size) == expected_identities and
+      :ets.info(state.identity_position_table, :size) == expected_identities and
+      :ets.info(state.identity_stream_position_table, :size) == expected_identities and
       active_identity_payloads_match?(state)
   end
 
@@ -1171,24 +1531,29 @@ defmodule Arbor.Persistence.EventLog.ETS do
   defp incomplete_metadata_reason(%{identity_history: {:unavailable, reason}}), do: reason
   defp incomplete_metadata_reason(_state), do: :durable_metadata_only
 
-  defp metadata_sequence_consistent?(stream_versions, global_position) do
+  defp metadata_sequence_consistent?(stream_versions, global_position, purged_event_count) do
+    expected_active = global_position - purged_event_count
+
     stream_versions
     |> Enum.reduce_while(0, fn {_stream_id, version}, total ->
       next_total = total + version
 
-      if next_total <= global_position,
+      if next_total <= expected_active,
         do: {:cont, next_total},
         else: {:halt, :inconsistent}
     end)
     |> case do
-      ^global_position -> true
+      ^expected_active when expected_active >= 0 -> true
       _different -> false
     end
   end
 
   defp identity_history_remaining(state) do
-    max(state.global_position - :ets.info(state.id_table, :size), 0)
+    max(active_identity_count(state) - :ets.info(state.id_table, :size), 0)
   end
+
+  defp active_identity_count(state),
+    do: max(state.global_position - state.purged_event_count, 0)
 
   defp identity_history_unavailable?(%{identity_history: :complete}), do: false
   defp identity_history_unavailable?(_state), do: true
@@ -1200,7 +1565,7 @@ defmodule Arbor.Persistence.EventLog.ETS do
     {:identity_history_unavailable,
      %{
        reason: reason,
-       expected_events: state.global_position,
+       expected_events: active_identity_count(state),
        loaded_events: :ets.info(state.id_table, :size)
      }}
   end
@@ -1212,7 +1577,7 @@ defmodule Arbor.Persistence.EventLog.ETS do
     %{
       "status" => "unavailable",
       "reason" => Atom.to_string(reason),
-      "expected_events" => state.global_position,
+      "expected_events" => active_identity_count(state),
       "loaded_events" => :ets.info(state.id_table, :size)
     }
   end
@@ -1698,6 +2063,10 @@ defmodule Arbor.Persistence.EventLog.ETS do
   defp import_snapshot(state, snapshot) do
     events = Map.get(snapshot, "events", [])
     global_position = Map.get(snapshot, "global_position", 0)
+
+    purged_event_count =
+      restore_purged_event_count(Map.get(snapshot, "purged_event_count", 0), global_position)
+
     stream_versions = restore_stream_versions(Map.get(snapshot, "stream_versions", %{}))
     identity_tombstones = Map.get(snapshot, "identity_tombstones")
     declared_identity_history = Map.get(snapshot, "identity_history")
@@ -1742,10 +2111,11 @@ defmodule Arbor.Persistence.EventLog.ETS do
     restored = %{
       state
       | global_position: global_position,
+        purged_event_count: purged_event_count,
         stream_versions: stream_versions,
         head_inserted_mono: head_inserted_mono,
         identity_metadata_consistent:
-          metadata_sequence_consistent?(stream_versions, global_position)
+          metadata_sequence_consistent?(stream_versions, global_position, purged_event_count)
     }
 
     identity_history =
@@ -1763,6 +2133,14 @@ defmodule Arbor.Persistence.EventLog.ETS do
   defp restore_stream_versions(versions) when is_map(versions) do
     Map.new(versions, fn {k, v} -> {k, v} end)
   end
+
+  defp restore_purged_event_count(count, global_position)
+       when is_integer(count) and count >= 0 and is_integer(global_position) and
+              count <= global_position,
+       do: count
+
+  defp restore_purged_event_count(_count, _global_position),
+    do: raise("invalid EventLog purged event count")
 
   defp snapshot_identity_entries(events, nil, global_position) do
     events
@@ -1965,6 +2343,7 @@ defmodule Arbor.Persistence.EventLog.ETS do
     %{
       state
       | global_position: 0,
+        purged_event_count: 0,
         stream_versions: %{},
         head_inserted_mono: %{},
         identity_metadata_consistent: false,

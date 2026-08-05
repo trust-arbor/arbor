@@ -26,6 +26,7 @@ defmodule Arbor.Persistence do
 
   alias Arbor.Contracts.Persistence.{AppendOperation, Filter, Record}
   alias Arbor.Persistence.{BufferedStore, Event, EventLog, LegacyEmbeddingStore, VectorBoundary}
+  alias Arbor.Persistence.EventLog.BoundedWorker
   alias Arbor.Persistence.Repo
   alias Arbor.Persistence.Schemas.Session
   alias Arbor.Persistence.SessionStore
@@ -894,6 +895,45 @@ defmodule Arbor.Persistence do
         end
       else
         {:error, :backend_unavailable} -> {:error, :reconciliation_not_supported}
+        {:error, _reason} = error -> error
+      end
+    end)
+  end
+
+  @doc """
+  Permanently purge one complete EventLog stream.
+
+  The supported backend must prove that its event, version, identity, and
+  operation-fence surfaces no longer retain the stream before returning `:ok`.
+  Timeout or worker failure after dispatch returns
+  `{:error, {:purge_indeterminate, stream_id}}`; retrying is idempotent.
+  """
+  @spec purge_stream(atom(), module(), String.t(), keyword()) :: EventLog.purge_result()
+  def purge_stream(name, backend, stream_id, opts \\ []) do
+    EventLog.with_operation_deadline(opts, :purge, fn normalized_opts, deadline_mono ->
+      backend_opts = Keyword.put(normalized_opts, :name, name)
+
+      with :ok <- validate_store_name(name),
+           {:ok, backend_opts, ^deadline_mono} <-
+             EventLog.prepare_purge(stream_id, backend_opts),
+           :ok <- validate_backend(backend, :purge_stream, 2) do
+        case BoundedWorker.run(
+               fn ->
+                 EventLog.with_inherited_deadline(deadline_mono, fn ->
+                   backend.purge_stream(stream_id, backend_opts)
+                   |> EventLog.stamp_completion()
+                 end)
+               end,
+               deadline_mono
+             ) do
+          {:ok, completion} ->
+            EventLog.accept_purge_completion(completion, stream_id, deadline_mono)
+
+          {:error, _uncertain} ->
+            EventLog.purge_indeterminate(stream_id)
+        end
+      else
+        {:error, :backend_unavailable} -> {:error, :purge_not_supported}
         {:error, _reason} = error -> error
       end
     end)
