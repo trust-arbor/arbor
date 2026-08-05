@@ -75,6 +75,12 @@ defmodule Arbor.Memory.IndexDualTest do
                 Map.put(metadata, :id, id)
               )
 
+            {:delegate_then_exit, reason} ->
+              case Arbor.Memory.Embedding.store(agent_id, content, embedding, metadata) do
+                {:ok, _id} -> exit(reason)
+                error -> error
+              end
+
             {:exit, reason} ->
               exit(reason)
 
@@ -131,6 +137,16 @@ defmodule Arbor.Memory.IndexDualTest do
 
         :delegate ->
           Arbor.Memory.Embedding.store_batch_with_ids(agent_id, entries)
+
+        {:delegate_then_exit, reason} ->
+          case Arbor.Memory.Embedding.store_batch_with_ids(agent_id, entries) do
+            {:ok, _ids} ->
+              :persistent_term.put({__MODULE__, agent_id}, :delegate)
+              exit(reason)
+
+            error ->
+              error
+          end
 
         _mode ->
           {:error, :injected_batch_failure}
@@ -324,15 +340,15 @@ defmodule Arbor.Memory.IndexDualTest do
       assert {:ok, 0} = Index.sync_to_persistent(pid)
     end
 
-    test "ack-loss regression: same-content eager error retains one retryable authority at max one" do
-      agent_id = durable_unique("test_dual_ack_loss_capacity")
+    test "definitive-error regression: same-content eager failure retains one retryable authority at max one" do
+      agent_id = durable_unique("test_dual_eager_failure_capacity")
       suffix = :crypto.strong_rand_bytes(8) |> Base.encode16(case: :lower)
       first_id = "mem_z_#{suffix}"
       retry_id = "mem_a_#{suffix}"
 
       MaliciousWriter.configure(
         agent_id,
-        {:store_sequence, [{:error, :injected_eager_failure}, {:exit, :injected_commit_ack_loss}]}
+        {:store_sequence, [{:error, :injected_eager_failure}, {:error, :injected_eager_failure}]}
       )
 
       {:ok, pid} =
@@ -342,7 +358,8 @@ defmodule Arbor.Memory.IndexDualTest do
           max_entries: 1,
           persistent_writer: MaliciousWriter,
           entry_id_generator: sequence_callback([first_id, retry_id]),
-          name: {:via, Registry, {Arbor.Memory.Registry, {:test_ack_loss_capacity, agent_id}}}
+          name:
+            {:via, Registry, {Arbor.Memory.Registry, {:test_eager_failure_capacity, agent_id}}}
         )
 
       on_exit(fn ->
@@ -386,8 +403,80 @@ defmodule Arbor.Memory.IndexDualTest do
       assert {:error, :not_found} = Index.get(pid, retry_id)
     end
 
-    test "ack-loss regression: same-content batch fallback uses one tight-capacity authority" do
-      agent_id = durable_unique("test_dual_batch_ack_loss_capacity")
+    test "commit acknowledgement loss regression: eager retry remains convergent at max one" do
+      agent_id = durable_unique("test_dual_eager_ack_loss_capacity")
+      suffix = :crypto.strong_rand_bytes(8) |> Base.encode16(case: :lower)
+      first_id = "mem_z_#{suffix}"
+      retry_id = "mem_a_#{suffix}"
+
+      MaliciousWriter.configure(
+        agent_id,
+        {:store_sequence,
+         [
+           {:error, :injected_eager_failure},
+           {:delegate_then_exit, :injected_commit_ack_loss}
+         ]}
+      )
+
+      {:ok, pid} =
+        Index.start_link(
+          agent_id: agent_id,
+          backend: :dual,
+          max_entries: 1,
+          persistent_writer: MaliciousWriter,
+          entry_id_generator: sequence_callback([first_id, retry_id]),
+          name: {:via, Registry, {Arbor.Memory.Registry, {:test_eager_ack_loss, agent_id}}}
+        )
+
+      on_exit(fn ->
+        MaliciousWriter.disarm(agent_id)
+        if Process.alive?(pid), do: GenServer.stop(pid)
+        Embedding.delete_all(agent_id)
+      end)
+
+      content = "Committed eager acknowledgement loss"
+      latest_embedding = generate_embedding(98)
+
+      assert {:ok, ^first_id} =
+               Index.index(pid, content, %{type: :first}, embedding: generate_embedding(97))
+
+      assert {:ok, ^retry_id} =
+               Index.index(pid, content, %{type: :latest}, embedding: latest_embedding)
+
+      assert Embedding.count(agent_id) == 1
+      assert {:ok, persisted_before_sync} = Embedding.get(agent_id, first_id)
+      assert {:error, :not_found} = Embedding.get(agent_id, retry_id)
+      assert persisted_before_sync.metadata["type"] == "latest"
+      assert_vector_close(Pgvector.to_list(persisted_before_sync.embedding), latest_embedding)
+
+      state = :sys.get_state(pid)
+      assert state.entry_count == 1
+      assert state.pending_sync == MapSet.new([first_id])
+      assert state.pending_group_members == %{first_id => MapSet.new([first_id, retry_id])}
+      assert state.id_aliases == %{retry_id => first_id}
+
+      for acknowledged_id <- [first_id, retry_id] do
+        assert {:ok, %{id: ^first_id, metadata: %{type: :latest}}} =
+                 Index.get(pid, acknowledged_id)
+      end
+
+      assert {:ok, 2} = Index.sync_to_persistent(pid)
+      assert {:ok, 0} = Index.sync_to_persistent(pid)
+      assert Embedding.count(agent_id) == 1
+      assert :sys.get_state(pid).pending_sync == MapSet.new()
+
+      assert {:ok, persisted_after_sync} = Embedding.get(agent_id, first_id)
+      assert persisted_after_sync.metadata["type"] == "latest"
+      assert_vector_close(Pgvector.to_list(persisted_after_sync.embedding), latest_embedding)
+
+      for acknowledged_id <- [first_id, retry_id] do
+        assert {:ok, %{id: ^first_id, metadata: %{type: :latest}}} =
+                 Index.get(pid, acknowledged_id)
+      end
+    end
+
+    test "definitive-error regression: same-content batch fallback uses one tight-capacity authority" do
+      agent_id = durable_unique("test_dual_batch_failure_capacity")
       suffix = :crypto.strong_rand_bytes(8) |> Base.encode16(case: :lower)
       first_id = "mem_z_#{suffix}"
       latest_id = "mem_a_#{suffix}"
@@ -401,7 +490,7 @@ defmodule Arbor.Memory.IndexDualTest do
           persistent_writer: MaliciousWriter,
           entry_id_generator: sequence_callback([first_id, latest_id]),
           name:
-            {:via, Registry, {Arbor.Memory.Registry, {:test_batch_ack_loss_capacity, agent_id}}}
+            {:via, Registry, {Arbor.Memory.Registry, {:test_batch_failure_capacity, agent_id}}}
         )
 
       on_exit(fn ->
@@ -442,6 +531,71 @@ defmodule Arbor.Memory.IndexDualTest do
       assert :ok = Index.delete(pid, latest_id)
       assert {:error, :not_found} = Index.get(pid, first_id)
       assert {:error, :not_found} = Index.get(pid, latest_id)
+    end
+
+    test "commit acknowledgement loss regression: batch remains convergent at max one" do
+      agent_id = durable_unique("test_dual_batch_ack_loss_capacity")
+      suffix = :crypto.strong_rand_bytes(8) |> Base.encode16(case: :lower)
+      first_id = "mem_z_#{suffix}"
+      latest_id = "mem_a_#{suffix}"
+      MaliciousWriter.configure(agent_id, {:delegate_then_exit, :injected_commit_ack_loss})
+
+      {:ok, pid} =
+        Index.start_link(
+          agent_id: agent_id,
+          backend: :dual,
+          max_entries: 1,
+          persistent_writer: MaliciousWriter,
+          entry_id_generator: sequence_callback([first_id, latest_id]),
+          name: {:via, Registry, {Arbor.Memory.Registry, {:test_batch_ack_loss, agent_id}}}
+        )
+
+      on_exit(fn ->
+        MaliciousWriter.disarm(agent_id)
+        if Process.alive?(pid), do: GenServer.stop(pid)
+        Embedding.delete_all(agent_id)
+      end)
+
+      content = "Committed batch acknowledgement loss"
+      latest_embedding = generate_embedding(99)
+
+      assert {:ok, [^first_id, ^latest_id]} =
+               Index.batch_index(
+                 pid,
+                 [{content, %{type: :first}}, {content, %{type: :latest}}],
+                 embedding: latest_embedding
+               )
+
+      assert Embedding.count(agent_id) == 1
+      assert {:ok, persisted_before_sync} = Embedding.get(agent_id, first_id)
+      assert {:error, :not_found} = Embedding.get(agent_id, latest_id)
+      assert persisted_before_sync.metadata["type"] == "latest"
+      assert_vector_close(Pgvector.to_list(persisted_before_sync.embedding), latest_embedding)
+
+      state = :sys.get_state(pid)
+      assert state.entry_count == 1
+      assert state.pending_sync == MapSet.new([first_id])
+      assert state.pending_group_members == %{first_id => MapSet.new([first_id, latest_id])}
+      assert state.id_aliases == %{latest_id => first_id}
+
+      for acknowledged_id <- [first_id, latest_id] do
+        assert {:ok, %{id: ^first_id, metadata: %{type: :latest}}} =
+                 Index.get(pid, acknowledged_id)
+      end
+
+      assert {:ok, 2} = Index.sync_to_persistent(pid)
+      assert {:ok, 0} = Index.sync_to_persistent(pid)
+      assert Embedding.count(agent_id) == 1
+      assert :sys.get_state(pid).pending_sync == MapSet.new()
+
+      assert {:ok, persisted_after_sync} = Embedding.get(agent_id, first_id)
+      assert persisted_after_sync.metadata["type"] == "latest"
+      assert_vector_close(Pgvector.to_list(persisted_after_sync.embedding), latest_embedding)
+
+      for acknowledged_id <- [first_id, latest_id] do
+        assert {:ok, %{id: ^first_id, metadata: %{type: :latest}}} =
+                 Index.get(pid, acknowledged_id)
+      end
     end
 
     test "capacity regression: same-content batch dedupe reserves authoritative groups only" do
