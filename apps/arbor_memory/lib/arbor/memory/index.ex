@@ -513,13 +513,36 @@ defmodule Arbor.Memory.Index do
 
   defp coordinate_persistent_mutation(owner, operation_ref, writer_call) do
     owner_monitor = Process.monitor(owner)
+
+    if owner_available?(owner, owner_monitor) do
+      coordinate_live_owner(owner, owner_monitor, operation_ref, writer_call)
+    end
+  end
+
+  defp owner_available?(owner, owner_monitor) do
+    if Process.alive?(owner) do
+      receive do
+        {:DOWN, ^owner_monitor, :process, ^owner, _reason} -> false
+      after
+        0 -> true
+      end
+    else
+      Process.demonitor(owner_monitor, [:flush])
+      false
+    end
+  end
+
+  defp coordinate_live_owner(owner, owner_monitor, operation_ref, writer_call) do
     coordinator = self()
 
     {worker_pid, worker_monitor} =
-      spawn_monitor(fn ->
-        result = run_persistent_writer_call(writer_call)
-        send(coordinator, {:writer_result, self(), result})
-      end)
+      :erlang.spawn_opt(
+        fn ->
+          result = run_persistent_writer_call(writer_call)
+          send(coordinator, {:writer_result, self(), result})
+        end,
+        [:link, :monitor]
+      )
 
     receive do
       {:writer_result, ^worker_pid, result} ->

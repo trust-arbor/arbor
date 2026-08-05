@@ -48,6 +48,15 @@ defmodule Arbor.Memory.IndexTest do
             :never_sent -> {:ok, requested_id(metadata)}
           end
 
+        {:block_until_commit, owner} ->
+          send(owner, {:writer_waiting_to_commit, agent_id, self()})
+
+          receive do
+            :commit ->
+              send(owner, {:writer_committed, agent_id, self()})
+              {:ok, requested_id(metadata)}
+          end
+
         :success ->
           {:ok, requested_id(metadata)}
 
@@ -285,6 +294,69 @@ defmodule Arbor.Memory.IndexTest do
 
       assert {:ok, ^entry_id} =
                Index.index(pid, "Usable after killed writer", %{},
+                 embedding: valid_persistent_embedding()
+               )
+
+      assert Process.alive?(pid)
+    end
+
+    test "ownership regression: killed coordinator terminates its writer before any later commit" do
+      agent_id = "killed_coordinator_#{System.unique_integer([:positive])}"
+      entry_id = "mem_killed_coordinator"
+      ControlledWriter.configure(agent_id, {:block_until_commit, self()})
+
+      {:ok, pid} =
+        Index.start_link(
+          agent_id: agent_id,
+          backend: :pgvector,
+          persistent_writer: ControlledWriter,
+          entry_id_generator: fn -> entry_id end,
+          name: nil
+        )
+
+      on_exit(fn ->
+        ControlledWriter.disarm(agent_id)
+        if Process.alive?(pid), do: GenServer.stop(pid)
+      end)
+
+      parent = self()
+
+      spawn(fn ->
+        send(
+          parent,
+          {:killed_coordinator_result,
+           Index.index(pid, "Coordinator-owned writer", %{},
+             embedding: valid_persistent_embedding()
+           )}
+        )
+      end)
+
+      assert_receive {:writer_waiting_to_commit, ^agent_id, writer_pid}, 1_000
+
+      on_exit(fn ->
+        if Process.alive?(writer_pid), do: Process.exit(writer_pid, :kill)
+      end)
+
+      %{inflight_mutation: %{coordinator_pid: coordinator_pid}} = :sys.get_state(pid)
+      writer_monitor = Process.monitor(writer_pid)
+
+      Process.exit(coordinator_pid, :kill)
+
+      assert_receive {:DOWN, ^writer_monitor, :process, ^writer_pid, _reason}, 1_000
+
+      assert_receive {:killed_coordinator_result, {:error, :persistence_indeterminate}},
+                     1_000
+
+      assert Process.alive?(pid)
+      assert %{entry_count: 0} = Index.stats(pid)
+
+      send(writer_pid, :commit)
+      refute_receive {:writer_committed, ^agent_id, ^writer_pid}, 100
+
+      ControlledWriter.set_mode(agent_id, :success)
+
+      assert {:ok, ^entry_id} =
+               Index.index(pid, "Usable after coordinator death", %{},
                  embedding: valid_persistent_embedding()
                )
 
