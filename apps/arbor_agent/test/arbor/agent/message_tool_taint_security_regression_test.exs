@@ -1,6 +1,6 @@
 defmodule Arbor.Agent.MessageToolTaintSecurityRegressionTest do
   @moduledoc """
-  Public VP-05D2B B0/B1 candidate/base security selector.
+  Public VP-05D2B B0/B1/B2 candidate/base security selector.
 
   The selector enters through `Arbor.Agent.send_message/4`, exchanges and
   consumes a real human-session delivery receipt, executes a real Session DOT
@@ -25,6 +25,7 @@ defmodule Arbor.Agent.MessageToolTaintSecurityRegressionTest do
 
   @action Arbor.Actions.SecurityRegression.MessageToolTaint
   @first_prompt "voice-alpha requests the bounded control probe"
+  @steer_prompt "voice-alpha adds a same-engagement correction"
   @second_prompt "voice-beta checks engagement isolation"
   @resume_prompt "voice-alpha resumes the canonical engagement"
 
@@ -34,6 +35,7 @@ defmodule Arbor.Agent.MessageToolTaintSecurityRegressionTest do
 
     @parent_key {__MODULE__, :test_parent}
     @first_prompt "voice-alpha requests the bounded control probe"
+    @steer_prompt "voice-alpha adds a same-engagement correction"
     @second_prompt "voice-beta checks engagement isolation"
     @resume_prompt "voice-alpha resumes the canonical engagement"
 
@@ -57,26 +59,37 @@ defmodule Arbor.Agent.MessageToolTaintSecurityRegressionTest do
           text_response("engagement-resumed")
 
         tool_message = Enum.find(Enum.reverse(request.messages), &(&1.role == :tool)) ->
-          notify({:message_tool_taint_tool_result, tool_message.content})
-          text_response("tainted-control-refused")
+          notify({:message_tool_taint_tool_result, tool_message.content, transcript})
+
+          if String.contains?(transcript, @steer_prompt) and
+               not String.contains?(transcript, @second_prompt) do
+            text_response("tainted-control-refused")
+          else
+            {:error, :steering_not_isolated}
+          end
 
         String.contains?(transcript, @first_prompt) ->
-          notify({:message_tool_taint_first_request, transcript})
+          notify({:message_tool_taint_first_request, self(), transcript})
 
-          {:ok,
-           %Response{
-             text: "",
-             finish_reason: :tool_calls,
-             content_parts: [
-               ContentPart.tool_call(
-                 "message_tool_taint_call",
-                 "security_regression_message_tool_taint",
-                 %{"command" => "bounded-model-command"}
-               )
-             ],
-             usage: %{input_tokens: 1, output_tokens: 1},
-             raw: %{}
-           }}
+          receive do
+            :release_message_tool_taint_first_request ->
+              {:ok,
+               %Response{
+                 text: "",
+                 finish_reason: :tool_calls,
+                 content_parts: [
+                   ContentPart.tool_call(
+                     "message_tool_taint_call",
+                     "security_regression_message_tool_taint",
+                     %{"command" => "bounded-model-command"}
+                   )
+                 ],
+                 usage: %{input_tokens: 1, output_tokens: 1},
+                 raw: %{}
+               }}
+          after
+            5_000 -> {:error, :first_request_release_timeout}
+          end
 
         true ->
           {:error, :unexpected_scripted_request}
@@ -216,6 +229,10 @@ defmodule Arbor.Agent.MessageToolTaintSecurityRegressionTest do
       _ = SessionManager.stop_session(agent_id)
     end)
 
+    {:ok, alpha_engagement} = Arbor.Comms.resolve_user_engagement(agent_id, human_a)
+    {:ok, beta_engagement} = Arbor.Comms.resolve_user_engagement(agent_id, human_b)
+    refute alpha_engagement.id == beta_engagement.id
+
     assert {:ok, token_a} = SessionToken.generate(human_a)
 
     first =
@@ -224,36 +241,65 @@ defmodule Arbor.Agent.MessageToolTaintSecurityRegressionTest do
         transport_metadata: %{backend: "selector", input: :speech}
       )
 
-    assert {:ok, "tainted-control-refused"} =
-             Arbor.Agent.send_message(human_a, agent_id, first,
-               session_token: token_a,
-               timeout: 10_000
-             )
+    primary_task =
+      Task.async(fn ->
+        Arbor.Agent.send_message(human_a, agent_id, first,
+          session_token: token_a,
+          timeout: 10_000
+        )
+      end)
 
-    assert_receive {:message_tool_taint_tool_result, tool_result}, 2_000
+    assert_receive {:message_tool_taint_first_request, provider_pid, first_transcript}, 2_000
+    assert first_transcript =~ @first_prompt
+
+    # Queue beta first to prove an ineligible cross-engagement head cannot hide
+    # an eligible same-engagement steering message behind it.
+    assert {:ok, token_b} = SessionToken.generate(human_b)
+    second = UserMessage.from_voice(@second_prompt, sender_id: human_b)
+
+    beta_task =
+      Task.async(fn ->
+        Arbor.Agent.send_message(human_b, agent_id, second,
+          session_token: token_b,
+          timeout: 10_000
+        )
+      end)
+
+    await_queue_engagements!(session_pid, [beta_engagement.id])
+
+    assert {:ok, steer_token_a} = SessionToken.generate(human_a)
+    steer = UserMessage.from_voice(@steer_prompt, sender_id: human_a)
+
+    steer_task =
+      Task.async(fn ->
+        Arbor.Agent.send_message(human_a, agent_id, steer,
+          session_token: steer_token_a,
+          timeout: 10_000
+        )
+      end)
+
+    await_queue_engagements!(session_pid, [beta_engagement.id, alpha_engagement.id])
+    send(provider_pid, :release_message_tool_taint_first_request)
+
+    assert {:ok, "tainted-control-refused"} = Task.await(primary_task, 12_000)
+    assert {:ok, "tainted-control-refused"} = Task.await(steer_task, 12_000)
+    assert {:ok, "engagement-isolated"} = Task.await(beta_task, 12_000)
+
+    assert_receive {:message_tool_taint_tool_result, tool_result, active_transcript}, 2_000
 
     refute_received {:message_tool_taint_action_executed, "bounded-model-command"}
 
     assert inspect(tool_result) =~ "taint_blocked"
-
-    {:ok, alpha_engagement} = Arbor.Comms.resolve_user_engagement(agent_id, human_a)
-    {:ok, beta_engagement} = Arbor.Comms.resolve_user_engagement(agent_id, human_b)
-    refute alpha_engagement.id == beta_engagement.id
+    assert active_transcript =~ @first_prompt
+    assert active_transcript =~ @steer_prompt
+    refute active_transcript =~ @second_prompt
 
     # B0 public evidence: a different authenticated human gets a fresh private
     # transcript, while the first human later resumes the same canonical one.
-    assert {:ok, token_b} = SessionToken.generate(human_b)
-    second = UserMessage.from_voice(@second_prompt, sender_id: human_b)
-
-    assert {:ok, "engagement-isolated"} =
-             Arbor.Agent.send_message(human_b, agent_id, second,
-               session_token: token_b,
-               timeout: 10_000
-             )
-
     assert_receive {:message_tool_taint_second_request, beta_transcript}, 2_000
     assert beta_transcript =~ @second_prompt
     refute beta_transcript =~ @first_prompt
+    refute beta_transcript =~ @steer_prompt
 
     assert {:ok, resumed_token_a} = SessionToken.generate(human_a)
     resumed = UserMessage.from_voice(@resume_prompt, sender_id: human_a)
@@ -268,6 +314,32 @@ defmodule Arbor.Agent.MessageToolTaintSecurityRegressionTest do
     assert alpha_transcript =~ @first_prompt
     assert alpha_transcript =~ @resume_prompt
     refute alpha_transcript =~ @second_prompt
+
+    # VP-05D2B keeps accepted steering process-local. Durable, provenance-
+    # preserving steering replay is owned by VP-05D2C and must not be added as
+    # an unlabeled transcript entry here.
+    refute alpha_transcript =~ @steer_prompt
+  end
+
+  defp await_queue_engagements!(session_pid, expected, attempts \\ 100)
+
+  defp await_queue_engagements!(_session_pid, expected, 0) do
+    flunk("timed out waiting for queued engagements #{inspect(expected)}")
+  end
+
+  defp await_queue_engagements!(session_pid, expected, attempts) do
+    queued =
+      session_pid
+      |> Arbor.Orchestrator.Session.get_state()
+      |> Map.fetch!(:turn_queue)
+      |> Enum.map(fn {message, _authority, _from} -> message.engagement_id end)
+
+    if queued == expected do
+      :ok
+    else
+      Process.sleep(10)
+      await_queue_engagements!(session_pid, expected, attempts - 1)
+    end
   end
 
   defp turn_dot do
