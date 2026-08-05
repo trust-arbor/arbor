@@ -11,6 +11,12 @@ defmodule Arbor.Contracts.Session.SteeringMessage do
   existing public Agent ingress limits. Taint source and chain limits are named,
   reversible resource policy: 128 bytes per provenance label and 16 chain
   entries keep one steering envelope bounded without defining a wire protocol.
+
+  The shared batch ceilings are also reversible resource policy. A post-tool
+  boundary admits at most four messages totaling 32 KiB; one turn admits at
+  most sixteen messages totaling 128 KiB and observes at most 128 boundaries.
+  Keeping these constants with the cross-library envelope prevents the Session
+  producer and ToolLoop consumer from enforcing different limits.
   """
 
   use TypedStruct
@@ -22,6 +28,11 @@ defmodule Arbor.Contracts.Session.SteeringMessage do
   @max_taint_source_bytes 128
   @max_taint_chain_entries 16
   @max_taint_chain_entry_bytes 128
+  @max_messages_per_boundary 4
+  @max_bytes_per_boundary 32_768
+  @max_messages_per_turn 16
+  @max_bytes_per_turn 131_072
+  @max_boundaries_per_turn 128
 
   @message_id_bytes byte_size("steer_") + 32
   @message_id_pattern ~r/\Asteer_[0-9a-f]{32}\z/
@@ -64,6 +75,26 @@ defmodule Arbor.Contracts.Session.SteeringMessage do
   @doc "Returns the reversible byte ceiling for each taint chain entry."
   @spec max_taint_chain_entry_bytes() :: pos_integer()
   def max_taint_chain_entry_bytes, do: @max_taint_chain_entry_bytes
+
+  @doc "Returns the reversible message-count ceiling for one steering boundary."
+  @spec max_messages_per_boundary() :: pos_integer()
+  def max_messages_per_boundary, do: @max_messages_per_boundary
+
+  @doc "Returns the reversible content-byte ceiling for one steering boundary."
+  @spec max_bytes_per_boundary() :: pos_integer()
+  def max_bytes_per_boundary, do: @max_bytes_per_boundary
+
+  @doc "Returns the reversible message-count ceiling for one active turn."
+  @spec max_messages_per_turn() :: pos_integer()
+  def max_messages_per_turn, do: @max_messages_per_turn
+
+  @doc "Returns the reversible content-byte ceiling for one active turn."
+  @spec max_bytes_per_turn() :: pos_integer()
+  def max_bytes_per_turn, do: @max_bytes_per_turn
+
+  @doc "Returns the fail-closed boundary-count ceiling for one active turn."
+  @spec max_boundaries_per_turn() :: pos_integer()
+  def max_boundaries_per_turn, do: @max_boundaries_per_turn
 
   @doc """
   Construct a steering message from exactly four atom-keyed attributes.

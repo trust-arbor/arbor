@@ -58,6 +58,11 @@ defmodule Arbor.Contracts.Session.SteeringMessageTest do
     assert SteeringMessage.max_taint_source_bytes() == 128
     assert SteeringMessage.max_taint_chain_entries() == 16
     assert SteeringMessage.max_taint_chain_entry_bytes() == 128
+    assert SteeringMessage.max_messages_per_boundary() == 4
+    assert SteeringMessage.max_bytes_per_boundary() == 32_768
+    assert SteeringMessage.max_messages_per_turn() == 16
+    assert SteeringMessage.max_bytes_per_turn() == 131_072
+    assert SteeringMessage.max_boundaries_per_turn() == 128
   end
 
   test "rejects missing, extra, duplicate, string-keyed, struct, and improper attributes" do
