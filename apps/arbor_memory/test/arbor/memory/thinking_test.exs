@@ -1,11 +1,14 @@
 defmodule Arbor.Memory.ThinkingTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Arbor.Memory.Thinking
+  alias Arbor.Persistence.BufferedStore
 
   @moduletag :fast
+  @store_name :arbor_memory_durable
 
   setup do
+    start_supervised!({BufferedStore, name: @store_name, backend: nil, write_mode: :sync})
     agent_id = "test_agent_#{System.unique_integer([:positive])}"
     on_exit(fn -> Thinking.clear(agent_id) end)
     %{agent_id: agent_id}

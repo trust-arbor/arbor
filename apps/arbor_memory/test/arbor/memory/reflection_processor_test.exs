@@ -631,6 +631,12 @@ defmodule Arbor.Memory.ReflectionProcessorTest do
     end
 
     test "includes recent thinking text", %{agent_id: agent_id} do
+      start_supervised!(
+        {Arbor.Persistence.BufferedStore,
+         name: :arbor_memory_durable, backend: nil, write_mode: :sync}
+      )
+
+      on_exit(fn -> Arbor.Memory.Thinking.clear(agent_id) end)
       {:ok, _} = Arbor.Memory.record_thinking(agent_id, "Deep thought about code")
 
       {:ok, context} = ReflectionProcessor.build_deep_context(agent_id, [])
