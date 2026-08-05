@@ -208,35 +208,29 @@ defmodule Arbor.Persistence.EventLogPublicBoundarySecurityRegressionTest do
     refute_receive {:DOWN, ^monitor_ref, :process, ^worker, _reason}
   end
 
-  test "public Ecto append drains completion and DOWN crossing its timeout" do
+  test "security regression: timeout cleanup exposes no caller hook before kill" do
+    refute function_exported?(BoundedWorker, :with_timeout_hook, 2)
+  end
+
+  test "public facade kills an Ecto worker before returning from timeout" do
     token = CompletionCrossingRepo.install(self())
     on_exit(&CompletionCrossingRepo.clear/0)
-    capture_key = make_ref()
-
-    timeout_hook = fn worker, monitor_ref, result_ref ->
-      assert_receive {:completion_crossing_repo_waiting, ^token, ^worker}, 1_000
-      send(worker, {:release_completion_crossing_repo, token})
-      assert mailbox_eventually_contains_result_ref?(result_ref, 1_000)
-      Process.put(capture_key, {worker, monitor_ref, result_ref})
-    end
 
     event = Event.new("completion-crossing-repo", "arbor.review.ordinary", %{value: 1})
 
     assert {:error, {:append_indeterminate, _operation}} =
-             BoundedWorker.with_timeout_hook(timeout_hook, fn ->
-               EctoEventLog.append("completion-crossing-repo", event,
-                 repo: CompletionCrossingRepo,
-                 append_timeout_ms: 250
-               )
-             end)
+             Persistence.append(
+               :public_ecto_timeout,
+               EctoEventLog,
+               "completion-crossing-repo",
+               event,
+               repo: CompletionCrossingRepo,
+               append_timeout_ms: 250
+             )
 
-    assert {worker, monitor_ref, result_ref} = Process.delete(capture_key)
+    assert_receive {:completion_crossing_repo_waiting, ^token, worker}, 1_000
     assert Process.alive?(self())
     refute Process.alive?(worker)
-    refute mailbox_contains_result_ref?(result_ref)
-    refute mailbox_contains_down_ref?(monitor_ref, worker)
-    refute_receive {^result_ref, _completion}
-    refute_receive {:DOWN, ^monitor_ref, :process, ^worker, _reason}
   end
 
   test "security regression: public strings are valid UTF-8 and fit every backend schema", %{
@@ -300,32 +294,5 @@ defmodule Arbor.Persistence.EventLogPublicBoundarySecurityRegressionTest do
   defp mailbox_contains_result_ref?(result_ref) do
     {:messages, messages} = Process.info(self(), :messages)
     Enum.any?(messages, &match?({^result_ref, _completion}, &1))
-  end
-
-  defp mailbox_eventually_contains_result_ref?(result_ref, timeout_ms) do
-    deadline = System.monotonic_time(:millisecond) + timeout_ms
-    await_mailbox_result(result_ref, deadline)
-  end
-
-  defp await_mailbox_result(result_ref, deadline) do
-    cond do
-      mailbox_contains_result_ref?(result_ref) ->
-        true
-
-      System.monotonic_time(:millisecond) >= deadline ->
-        false
-
-      true ->
-        Process.sleep(1)
-        await_mailbox_result(result_ref, deadline)
-    end
-  end
-
-  defp mailbox_contains_down_ref?(monitor_ref, worker) do
-    {:messages, messages} = Process.info(self(), :messages)
-
-    Enum.any?(messages, fn message ->
-      match?({:DOWN, ^monitor_ref, :process, ^worker, _reason}, message)
-    end)
   end
 end
