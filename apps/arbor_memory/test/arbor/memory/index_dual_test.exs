@@ -279,13 +279,32 @@ defmodule Arbor.Memory.IndexDualTest do
 
     test "authority regression: same-content pending writes converge every acknowledged id" do
       agent_id = durable_unique("test_dual_pending_dedupe")
-      FailFirstWriter.arm(agent_id, 3)
+      suffix = :crypto.strong_rand_bytes(8) |> Base.encode16(case: :lower)
+
+      first_id = "mem_z_#{suffix}"
+      unrelated_id = "mem_m_#{suffix}"
+      middle_id = "mem_a_#{suffix}"
+      latest_id = "mem_b_#{suffix}"
+
+      id_generator = sequence_callback([first_id, unrelated_id, middle_id, latest_id])
+
+      clock =
+        sequence_callback([
+          ~U[2026-08-05 10:00:00.000000Z],
+          ~U[2026-08-05 10:00:01.000000Z],
+          ~U[2026-08-05 10:00:02.000000Z],
+          ~U[2026-08-05 10:00:02.000000Z]
+        ])
+
+      FailFirstWriter.arm(agent_id, 4)
 
       {:ok, pid} =
         Index.start_link(
           agent_id: agent_id,
           backend: :dual,
           persistent_writer: FailFirstWriter,
+          entry_id_generator: id_generator,
+          clock: clock,
           name: {:via, Registry, {Arbor.Memory.Registry, {:test_dual_pending_dedupe, agent_id}}}
         )
 
@@ -297,49 +316,79 @@ defmodule Arbor.Memory.IndexDualTest do
 
       duplicate_content = "Pending duplicate identity"
       unrelated_content = "Pending unrelated identity"
+      first_embedding = generate_embedding(51)
+      middle_embedding = generate_embedding(53)
+      latest_embedding = generate_embedding(54)
 
-      assert {:ok, first_id} =
-               Index.index(pid, duplicate_content, %{type: :first},
-                 embedding: generate_embedding(51)
+      assert {:ok, ^first_id} =
+               Index.index(pid, duplicate_content, %{type: :first, source: "earliest"},
+                 embedding: first_embedding
                )
 
-      assert {:ok, unrelated_id} =
+      assert {:ok, ^unrelated_id} =
                Index.index(pid, unrelated_content, %{type: :unrelated},
                  embedding: generate_embedding(52)
                )
 
-      assert {:ok, second_id} =
-               Index.index(pid, duplicate_content, %{type: :second},
-                 embedding: generate_embedding(53)
+      assert {:ok, ^middle_id} =
+               Index.index(pid, duplicate_content, %{type: :middle, source: "middle"},
+                 embedding: middle_embedding
                )
 
-      assert MapSet.size(MapSet.new([first_id, unrelated_id, second_id])) == 3
+      assert {:ok, ^latest_id} =
+               Index.index(
+                 pid,
+                 duplicate_content,
+                 %{type: :latest, source: "latest", tags: ["canonical"]},
+                 embedding: latest_embedding
+               )
+
+      assert first_id > latest_id
+      assert middle_id < latest_id
+      assert MapSet.size(MapSet.new([first_id, unrelated_id, middle_id, latest_id])) == 4
       assert Embedding.count(agent_id) == 0
-      assert Index.stats(pid).entry_count == 3
+      assert Index.stats(pid).entry_count == 4
 
-      authoritative_id = min(first_id, second_id)
-      old_alias_id = max(first_id, second_id)
-
-      assert {:ok, 3} = Index.sync_to_persistent(pid)
+      assert {:ok, 4} = Index.sync_to_persistent(pid)
       assert Embedding.count(agent_id) == 2
       assert Index.stats(pid).entry_count == 2
 
-      assert {:ok, %{id: ^authoritative_id, content: ^duplicate_content}} =
+      assert {:ok,
+              %{
+                id: ^first_id,
+                content: ^duplicate_content,
+                metadata: %{type: :latest, source: "latest", tags: ["canonical"]},
+                embedding: local_embedding
+              }} =
                Index.get(pid, first_id)
 
-      assert {:ok, %{id: ^authoritative_id, content: ^duplicate_content}} =
-               Index.get(pid, second_id)
+      assert_vector_close(local_embedding, latest_embedding)
+      refute_vector_close(local_embedding, first_embedding)
+
+      for alias_id <- [middle_id, latest_id] do
+        assert {:ok, %{id: ^first_id, content: ^duplicate_content}} = Index.get(pid, alias_id)
+      end
 
       assert {:ok, %{id: ^unrelated_id, content: ^unrelated_content}} =
                Index.get(pid, unrelated_id)
 
-      assert {:ok, %{id: ^authoritative_id}} = Embedding.get(agent_id, authoritative_id)
+      assert {:ok, persisted} = Embedding.get(agent_id, first_id)
+      assert persisted.id == first_id
+      assert persisted.content == duplicate_content
+      assert persisted.metadata["type"] == "latest"
+      assert persisted.metadata["source"] == "latest"
+      assert persisted.metadata["tags"] == ["canonical"]
+      assert_vector_close(Pgvector.to_list(persisted.embedding), latest_embedding)
+
+      assert {:error, :not_found} = Embedding.get(agent_id, middle_id)
+      assert {:error, :not_found} = Embedding.get(agent_id, latest_id)
       assert {:ok, %{id: ^unrelated_id}} = Embedding.get(agent_id, unrelated_id)
 
-      assert :ok = Index.delete(pid, old_alias_id)
+      assert :ok = Index.delete(pid, middle_id)
       assert {:error, :not_found} = Index.get(pid, first_id)
-      assert {:error, :not_found} = Index.get(pid, second_id)
-      assert {:error, :not_found} = Embedding.get(agent_id, authoritative_id)
+      assert {:error, :not_found} = Index.get(pid, middle_id)
+      assert {:error, :not_found} = Index.get(pid, latest_id)
+      assert {:error, :not_found} = Embedding.get(agent_id, first_id)
       assert {:ok, %{id: ^unrelated_id}} = Index.get(pid, unrelated_id)
       assert Index.stats(pid).entry_count == 1
 
@@ -395,5 +444,32 @@ defmodule Arbor.Memory.IndexDualTest do
   defp durable_unique(prefix) do
     suffix = :crypto.strong_rand_bytes(16) |> Base.encode16(case: :lower)
     "#{prefix}_#{suffix}"
+  end
+
+  defp sequence_callback(values) do
+    {:ok, sequence} = Agent.start_link(fn -> values end)
+
+    fn ->
+      Agent.get_and_update(sequence, fn
+        [value | rest] -> {value, rest}
+        [] -> raise "deterministic callback exhausted"
+      end)
+    end
+  end
+
+  defp assert_vector_close(actual, expected) do
+    assert length(actual) == length(expected)
+
+    Enum.zip(actual, expected)
+    |> Enum.each(fn {actual_value, expected_value} ->
+      assert_in_delta actual_value, expected_value, 1.0e-6
+    end)
+  end
+
+  defp refute_vector_close(actual, expected) do
+    refute Enum.zip(actual, expected)
+           |> Enum.all?(fn {actual_value, expected_value} ->
+             abs(actual_value - expected_value) <= 1.0e-6
+           end)
   end
 end

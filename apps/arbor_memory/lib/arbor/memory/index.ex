@@ -88,6 +88,8 @@ defmodule Arbor.Memory.Index do
   - `:threshold` - Default similarity threshold for recall (default: 0.3)
   - `:name` - Optional name for the GenServer
   - `:persistent_writer` - Legacy durable writer module (default: `Embedding`)
+  - `:entry_id_generator` - Zero-arity entry ID generator (default: random `mem_` ID)
+  - `:clock` - Zero-arity UTC clock (default: `DateTime.utc_now/0`)
 
   ## Examples
 
@@ -225,7 +227,13 @@ defmodule Arbor.Memory.Index do
 
   The returned count is the number of acknowledged local entries that
   converged. Same-content entries may converge to one durable row while each
-  acknowledged ID remains usable as an alias.
+  acknowledged ID remains usable as an alias. A same-content group requests
+  the earliest indexed ID and persists the latest indexed content, vector, and
+  ordinary metadata, with ID breaking equal-time ties deterministically.
+
+  This latest-value rule must not be extended to future C3G provenance labels.
+  Provenance, taint, and authority labels must conservatively join every group
+  member rather than using latest-wins semantics.
 
   ## Examples
 
@@ -276,6 +284,8 @@ defmodule Arbor.Memory.Index do
       entry_count: 0,
       backend: backend,
       persistent_writer: Keyword.get(opts, :persistent_writer, Embedding),
+      entry_id_generator: Keyword.get(opts, :entry_id_generator, &generate_entry_id/0),
+      clock: Keyword.get(opts, :clock, &DateTime.utc_now/0),
       # Track entries not yet synced to persistent (for dual mode)
       pending_sync: MapSet.new(),
       # A failed eager write can later deduplicate to a different durable ID.
@@ -400,8 +410,8 @@ defmodule Arbor.Memory.Index do
 
   defp do_index(content, metadata, opts, state) do
     with {:ok, embedding} <- get_or_compute_embedding(content, opts),
-         entry_id <- generate_entry_id(),
-         now <- DateTime.utc_now() do
+         entry_id <- state.entry_id_generator.(),
+         now <- state.clock.() do
       normalized_metadata = normalize_metadata(metadata)
 
       entry = %{
@@ -881,26 +891,34 @@ defmodule Arbor.Memory.Index do
   defp group_pending_entries(pending_entries) do
     pending_entries
     |> Enum.group_by(fn {_id, entry} -> :crypto.hash(:sha256, entry.content) end)
-    |> Enum.map(fn {_content_digest, members} ->
-      [{representative_id, representative_entry} | _rest] = Enum.sort_by(members, &elem(&1, 0))
+    |> Enum.map(fn {content_digest, members} ->
+      ordered_members = Enum.sort_by(members, &pending_entry_order_key/1)
+      [{requested_id, _earliest_entry} | _rest] = ordered_members
+      {_latest_id, canonical_entry} = List.last(ordered_members)
 
       %{
-        member_ids: Enum.map(members, &elem(&1, 0)),
-        representative_id: representative_id,
-        representative_entry: representative_entry
+        content_digest: content_digest,
+        member_ids: Enum.map(ordered_members, &elem(&1, 0)),
+        requested_id: requested_id,
+        canonical_entry: canonical_entry,
+        order_key: pending_entry_order_key(hd(ordered_members))
       }
     end)
-    |> Enum.sort_by(& &1.representative_id)
+    |> Enum.sort_by(& &1.order_key)
   end
 
   defp pending_group_batch_entry(group) do
-    entry = group.representative_entry
+    entry = group.canonical_entry
 
     {
       entry.content,
       entry.embedding,
-      Map.put(entry.metadata, :id, group.representative_id)
+      Map.put(entry.metadata, :id, group.requested_id)
     }
+  end
+
+  defp pending_entry_order_key({id, entry}) do
+    {DateTime.to_unix(entry.indexed_at, :microsecond), id}
   end
 
   defp eager_store(state, entry, metadata) do
@@ -925,7 +943,7 @@ defmodule Arbor.Memory.Index do
 
     Enum.each(member_ids, &:ets.delete(state.table, &1))
 
-    authoritative_entry = %{group.representative_entry | id: authoritative_id}
+    authoritative_entry = %{group.canonical_entry | id: authoritative_id}
     :ets.insert(state.table, {authoritative_id, authoritative_entry})
 
     aliases =
