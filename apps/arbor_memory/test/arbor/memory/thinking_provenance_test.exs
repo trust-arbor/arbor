@@ -11,6 +11,90 @@ defmodule Arbor.Memory.ThinkingProvenanceTest do
   @moduletag :fast
   @store_name :arbor_memory_durable
 
+  defmodule FailingNodeRestartBackend do
+    @moduledoc false
+    @behaviour Arbor.Contracts.Persistence.Store
+
+    @impl true
+    def put(_key, _value, _opts), do: {:error, :forced_failure}
+
+    @impl true
+    def get(_key, _opts), do: {:error, :forced_failure}
+
+    @impl true
+    def delete(_key, _opts), do: {:error, :forced_failure}
+
+    @impl true
+    def list(_opts), do: {:error, :forced_failure}
+
+    @impl true
+    def compare_and_swap(_key, _expected, _replacement, _opts),
+      do: {:error, :forced_failure}
+
+    @impl true
+    def compare_and_delete(_key, _expected, _opts), do: {:error, :forced_failure}
+
+    @impl true
+    def durability_class(_opts), do: :node_restart
+  end
+
+  defmodule ConflictInjectingNodeRestartBackend do
+    @moduledoc false
+    @behaviour Arbor.Contracts.Persistence.Store
+
+    alias Arbor.Persistence.QueryableStore.ETS
+
+    @impl true
+    def put(key, value, opts) do
+      inject_competitor_once(key, opts)
+      ETS.put(key, value, opts)
+    end
+
+    @impl true
+    def get(key, opts), do: ETS.get(key, opts)
+
+    @impl true
+    def delete(key, opts), do: ETS.delete(key, opts)
+
+    @impl true
+    def list(opts), do: ETS.list(opts)
+
+    @impl true
+    def query(filter, opts), do: ETS.query(filter, opts)
+
+    @impl true
+    def compare_and_swap(key, expected, replacement, opts) do
+      inject_competitor_once(key, opts)
+      ETS.compare_and_swap(key, expected, replacement, opts)
+    end
+
+    @impl true
+    def compare_and_delete(key, expected, opts),
+      do: ETS.compare_and_delete(key, expected, opts)
+
+    @impl true
+    def durability_class(_opts), do: :node_restart
+
+    defp inject_competitor_once(key, opts) do
+      control = Keyword.fetch!(opts, :control)
+
+      competitor =
+        Agent.get_and_update(control, fn state ->
+          if state.target_key == key and not state.injected? do
+            {state.competitor, %{state | injected?: true}}
+          else
+            {nil, state}
+          end
+        end)
+
+      if competitor do
+        {:ok, _stored} = ETS.compare_and_swap(key, :not_found, competitor, opts)
+      end
+
+      :ok
+    end
+  end
+
   setup do
     start_supervised!({BufferedStore, name: @store_name, backend: nil, write_mode: :sync})
     agent_id = "thinking_provenance_#{System.unique_integer([:positive])}"
@@ -54,6 +138,27 @@ defmodule Arbor.Memory.ThinkingProvenanceTest do
     assert taint.source == "legacy_unlabeled"
   end
 
+  test "security regression: legacy public thinking signal helper emits no content", %{
+    agent_id: agent_id
+  } do
+    secret = "legacy-helper-secret-#{System.unique_integer([:positive])}"
+    parent = self()
+
+    assert {:ok, subscription_id} =
+             Arbor.Signals.subscribe("memory.thinking_recorded", fn signal ->
+               send(parent, {:legacy_thinking_signal, signal})
+               :ok
+             end)
+
+    on_exit(fn -> Arbor.Signals.unsubscribe(subscription_id) end)
+
+    assert :ok = Arbor.Memory.Signals.Lifecycle.emit_thinking_recorded(agent_id, secret)
+    assert_receive {:legacy_thinking_signal, signal}
+    refute inspect(signal.data) =~ secret
+    refute Map.has_key?(signal.data, :text_preview)
+    assert signal.data.text_bytes == byte_size(secret)
+  end
+
   test "security regression: absent shared store is not replaced by live ETS authority", %{
     agent_id: agent_id
   } do
@@ -65,16 +170,127 @@ defmodule Arbor.Memory.ThinkingProvenanceTest do
     assert :ok = stop_supervised(BufferedStore)
     refute MemoryStore.available?()
 
-    assert [%{id: entry_id, text: "owner-backed entry"}] = Thinking.recent_thinking(agent_id)
-    assert entry_id == entry.id
+    assert Thinking.recent_thinking(agent_id) == []
     assert {:error, :store_unavailable} = Thinking.recent_thinking_tainted(agent_id)
 
     assert {:error, :store_unavailable} =
              Thinking.record_thinking_tainted(agent_id, "must not land", %Taint{})
 
-    assert [%{id: ^entry_id}] = Thinking.recent_thinking(agent_id)
+    assert Thinking.recent_thinking(agent_id) == []
+    assert is_binary(entry.id)
 
     start_supervised!({BufferedStore, name: @store_name, backend: nil, write_mode: :sync})
+  end
+
+  test "security regression: configured backend failure never falls back to forged ETS", %{
+    agent_id: agent_id
+  } do
+    restart_memory_store(FailingNodeRestartBackend, collection: :thinking_failing_backend)
+
+    forged = %{
+      id: "thk_forged_backend_fallback",
+      agent_id: agent_id,
+      text: "forged projection content",
+      significant: false,
+      created_at: DateTime.utc_now(),
+      metadata: %{}
+    }
+
+    true = :ets.insert(:arbor_memory_thinking, {agent_id, [forged]})
+
+    cached =
+      Record.new("thinking:#{agent_id}", %{"entries" => []}, id: "memory:thinking:#{agent_id}")
+
+    true = :ets.insert(@store_name, {"thinking:#{agent_id}", cached})
+
+    assert Thinking.recent_thinking(agent_id) == []
+    assert {:error, :store_unavailable} = Thinking.recent_thinking_tainted(agent_id)
+
+    assert {:error, :store_unavailable} =
+             Thinking.record_thinking_tainted(
+               agent_id,
+               "must not enter failed authority",
+               %Taint{}
+             )
+  end
+
+  test "security regression: CAS conflict reloads fresh authority without losing either writer",
+       %{
+         agent_id: agent_id
+       } do
+    competing_label = %Taint{
+      level: :hostile,
+      sensitivity: :restricted,
+      source: "competing_writer"
+    }
+
+    competing_entry = %{
+      id: "thk_competing_writer",
+      agent_id: agent_id,
+      text: "concurrent durable thought",
+      significant: false,
+      created_at: DateTime.utc_now(),
+      metadata: %{}
+    }
+
+    assert {:ok, competing_aggregate, competing_outer} =
+             ThinkingCodec.encode_aggregate([{competing_entry, competing_label}])
+
+    assert {:ok, competing_envelope} =
+             TaintEnvelope.new(competing_aggregate, competing_outer)
+
+    assert {:ok, competing_envelope_map} = TaintEnvelope.to_map(competing_envelope)
+
+    physical_key = "thinking:#{agent_id}"
+
+    competing_record =
+      Record.new(physical_key, competing_aggregate,
+        id: "memory:#{physical_key}",
+        metadata: %{"taint" => competing_envelope_map}
+      )
+
+    backend_name = :thinking_conflict_backend_store
+
+    start_supervised!(
+      {Arbor.Persistence.QueryableStore.ETS, name: backend_name},
+      id: backend_name
+    )
+
+    control =
+      start_supervised!(
+        {Agent,
+         fn ->
+           %{
+             target_key: physical_key,
+             competitor: competing_record,
+             injected?: false
+           }
+         end},
+        id: :thinking_conflict_control
+      )
+
+    restart_memory_store(ConflictInjectingNodeRestartBackend,
+      collection: backend_name,
+      backend_opts: [control: control]
+    )
+
+    local_label = %Taint{level: :derived, sensitivity: :internal, source: "local_writer"}
+
+    assert {:ok, local_entry} =
+             Thinking.record_thinking_tainted(agent_id, "local durable thought", local_label)
+
+    assert Agent.get(control, & &1.injected?)
+    assert {:ok, items} = Thinking.recent_thinking_tainted(agent_id, limit: 10)
+
+    assert_taints_by_id(items, %{
+      local_entry.id => local_label,
+      competing_entry.id => competing_label
+    })
+
+    assert Enum.map(items, fn {value, _status} -> value.value.id end) == [
+             local_entry.id,
+             competing_entry.id
+           ]
   end
 
   test "mixed labels remain item-specific across exact durable reload", %{agent_id: agent_id} do
@@ -328,10 +544,10 @@ defmodule Arbor.Memory.ThinkingProvenanceTest do
     mutated = Map.put(entry, :text, "mutated")
     true = :ets.insert(:arbor_memory_thinking, {agent_id, [mutated | tl(entries)]})
 
+    assert [%{text: "original"}] = Thinking.recent_thinking(agent_id, limit: 1)
+
     assert {:ok, [{%TaintedValue{value: %{text: "original"}, taint: ^label}, :verified}]} =
              Thinking.recent_thinking_tainted(agent_id, limit: 1)
-
-    assert [%{text: "original"}] = Thinking.recent_thinking(agent_id, limit: 1)
 
     true = :ets.insert(:arbor_memory_thinking, {agent_id, [mutated]})
     appended_taint = %Taint{level: :trusted, sensitivity: :public, source: "altered_append"}
@@ -774,7 +990,7 @@ defmodule Arbor.Memory.ThinkingProvenanceTest do
     Enum.each(attacker_ids, &:ets.delete(:arbor_memory_thinking, &1))
   end
 
-  test "post-persistence live install failure is fail-closed and reloadable", %{
+  test "security regression: known durable commit survives projection failure and reloads", %{
     agent_id: agent_id
   } do
     label = %Taint{level: :derived, sensitivity: :internal, source: "install_recovery"}
@@ -790,8 +1006,8 @@ defmodule Arbor.Memory.ThinkingProvenanceTest do
 
     assert Thinking.recent_thinking(agent_id) == []
 
-    # The test store is cache-acknowledged. This assertion verifies transaction
-    # ordering and projection recovery, not backend/restart durability.
+    # backend:nil is the deliberate process-lifetime authority mode. Its CAS
+    # receipt is definitive even though the post-commit projection failed.
     assert {:ok, %Record{data: cached_snapshot}} =
              BufferedStore.get("thinking:#{agent_id}", name: @store_name)
 
@@ -804,6 +1020,115 @@ defmodule Arbor.Memory.ThinkingProvenanceTest do
     assert {:ok,
             [{%TaintedValue{value: %{text: "recoverable projection"}, taint: ^label}, :verified}]} =
              Thinking.recent_thinking_tainted(agent_id)
+  end
+
+  test "security regression: owner death after durable commit returns outcome unknown", %{
+    agent_id: agent_id
+  } do
+    label = %Taint{level: :hostile, sensitivity: :restricted, source: "owner_death"}
+    provenance_owner = Process.whereis(Provenance)
+    thinking_owner = Process.whereis(Thinking)
+    assert is_pid(provenance_owner)
+    assert is_pid(thinking_owner)
+
+    on_exit(fn ->
+      resume_if_suspended(provenance_owner)
+      ensure_provenance_started()
+      wait_until(fn -> is_pid(Process.whereis(Thinking)) end)
+    end)
+
+    assert :ok = :sys.suspend(provenance_owner)
+
+    task =
+      Task.async(fn ->
+        Thinking.record_thinking_tainted(agent_id, "committed before owner death", label)
+      end)
+
+    assert wait_until(fn ->
+             case BufferedStore.get("thinking:#{agent_id}", name: @store_name) do
+               {:ok, %Record{data: %{"entries" => [item | _rest]}}} ->
+                 get_in(item, ["payload", "text"]) == "committed before owner death"
+
+               _ ->
+                 false
+             end
+           end)
+
+    monitor = Process.monitor(thinking_owner)
+    Process.exit(thinking_owner, :kill)
+    assert_receive {:DOWN, ^monitor, :process, ^thinking_owner, _reason}, 1_000
+    resume_if_suspended(provenance_owner)
+
+    assert {:error, :outcome_unknown} = Task.await(task, 5_000)
+
+    assert wait_until(fn ->
+             case Process.whereis(Thinking) do
+               owner when is_pid(owner) -> owner != thinking_owner and Process.alive?(owner)
+               _ -> false
+             end
+           end)
+
+    assert {:ok,
+            [
+              {%TaintedValue{value: %{text: "committed before owner death"}, taint: ^label},
+               :verified}
+            ]} = Thinking.recent_thinking_tainted(agent_id)
+  end
+
+  test "security regression: durable clear succeeds when sidecar cleanup is unavailable", %{
+    agent_id: agent_id
+  } do
+    label = %Taint{level: :derived, sensitivity: :internal, source: "clear_cleanup"}
+    assert {:ok, _entry} = Thinking.record_thinking_tainted(agent_id, "clear me", label)
+
+    on_exit(&ensure_provenance_started/0)
+    assert :ok = Supervisor.terminate_child(Arbor.Memory.Supervisor, Provenance)
+    assert Process.whereis(Provenance) == nil
+
+    assert :ok = Thinking.clear(agent_id)
+
+    assert {:error, :not_found} =
+             MemoryStore.load_tainted_authoritative_with_status("thinking", agent_id)
+
+    assert :ets.lookup(:arbor_memory_thinking, agent_id) == []
+
+    ensure_provenance_started()
+    assert Thinking.recent_thinking(agent_id) == []
+  end
+
+  test "security regression: clear removes only Thinking-owned provenance sidecars", %{
+    agent_id: agent_id
+  } do
+    thinking_payload = %{"content" => "orphan thinking label"}
+    goal_payload = %{"content" => "unrelated goal label"}
+    label = %Taint{level: :hostile, sensitivity: :restricted, source: "domain_scope"}
+
+    on_exit(fn -> Provenance.delete(:goal, agent_id, "goal_unrelated") end)
+
+    assert :ok =
+             Provenance.put(
+               :thinking_entry,
+               agent_id,
+               "thk_orphan_sidecar",
+               thinking_payload,
+               label
+             )
+
+    assert :ok = Provenance.put(:goal, agent_id, "goal_unrelated", goal_payload, label)
+    assert :ok = Thinking.clear(agent_id)
+
+    assert {:ok, thinking_taint, :legacy_unlabeled} =
+             Provenance.resolve(
+               :thinking_entry,
+               agent_id,
+               "thk_orphan_sidecar",
+               thinking_payload
+             )
+
+    assert thinking_taint.source == "legacy_unlabeled"
+
+    assert {:ok, ^label, :verified} =
+             Provenance.resolve(:goal, agent_id, "goal_unrelated", goal_payload)
   end
 
   test "configured maximum fits C0 and byte-heavy aggregates evict the oldest tail", %{
@@ -1031,6 +1356,42 @@ defmodule Arbor.Memory.ThinkingProvenanceTest do
   defp put_raw(key, data, metadata) do
     record = Record.new(key, data, id: "memory:#{key}", metadata: metadata)
     assert :ok = BufferedStore.put(key, record, name: @store_name)
+  end
+
+  defp restart_memory_store(backend, opts) do
+    assert :ok = stop_supervised(BufferedStore)
+
+    store_opts =
+      [name: @store_name, backend: backend, write_mode: :sync]
+      |> Keyword.merge(opts)
+
+    assert is_pid(start_supervised!({BufferedStore, store_opts}))
+    :ok
+  end
+
+  defp wait_until(fun, attempts \\ 200)
+
+  defp wait_until(_fun, 0), do: false
+
+  defp wait_until(fun, attempts) do
+    if fun.() do
+      true
+    else
+      Process.sleep(10)
+      wait_until(fun, attempts - 1)
+    end
+  rescue
+    _ -> false
+  catch
+    _, _ -> false
+  end
+
+  defp resume_if_suspended(pid) when is_pid(pid) do
+    :sys.resume(pid)
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
   end
 
   defp ensure_provenance_started do

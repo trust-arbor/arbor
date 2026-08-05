@@ -29,6 +29,7 @@ defmodule Arbor.Memory.Thinking do
 
   use GenServer
 
+  alias Arbor.Contracts.Persistence.Record
   alias Arbor.Contracts.Security.{Taint, TaintedValue, TaintEnvelope}
   alias Arbor.Memory.{MemoryStore, Provenance, Signals, ThinkingCodec}
 
@@ -38,13 +39,9 @@ defmodule Arbor.Memory.Thinking do
   @default_buffer_size 50
   @max_entries 96
   @max_text_bytes 65_536
-  @max_cleanup_entries @max_entries * 2 + 1
   @max_loaded_agents 1_024
   @max_active_streams 1_024
-  # Critical mutations must not outlive the caller because of the default
-  # five-second owner-call timeout.
-  # C3D either returns a definitive in-process result or adds operation-ID
-  # reconciliation before this can become bounded/asynchronous.
+  @max_cas_attempts 8
   @owner_call_timeout :infinity
 
   # ============================================================================
@@ -119,18 +116,12 @@ defmodule Arbor.Memory.Thinking do
     with true <- valid_agent_id?(agent_id),
          :ok <- validate_record_opts(opts),
          {:ok, taint} <- Taint.canonicalize(taint) do
-      GenServer.call(
-        server_name(),
-        {:record, agent_id, text, taint, opts},
-        @owner_call_timeout
-      )
+      call_owner({:record, agent_id, text, taint, opts}, :mutation)
     else
       _ -> {:error, :invalid_request}
     end
   rescue
     _ -> {:error, :invalid_request}
-  catch
-    _, _ -> {:error, :invalid_request}
   end
 
   def record_thinking_tainted(_agent_id, _text, _taint, _opts),
@@ -152,14 +143,14 @@ defmodule Arbor.Memory.Thinking do
   """
   @spec recent_thinking(String.t(), keyword()) :: [thinking_entry()]
   def recent_thinking(agent_id, opts \\ []) do
-    limit = Keyword.get(opts, :limit, 10)
-    since = Keyword.get(opts, :since)
-    significant_only = Keyword.get(opts, :significant_only, false)
-
-    get_agent_entries(agent_id)
-    |> maybe_filter_significant(significant_only)
-    |> maybe_filter_since(since)
-    |> Enum.take(limit)
+    with :ok <- validate_reader_request(agent_id, opts),
+         {:ok, entries} <- call_owner({:recent_compat, agent_id, opts}, :read) do
+      entries
+    else
+      _ -> []
+    end
+  rescue
+    _ -> []
   end
 
   @doc "Returns recent thinking with item-specific taint and provenance status."
@@ -168,19 +159,13 @@ defmodule Arbor.Memory.Thinking do
   def recent_thinking_tainted(agent_id, opts \\ []) do
     case validate_reader_request(agent_id, opts) do
       :ok ->
-        GenServer.call(
-          server_name(),
-          {:recent_tainted, agent_id, opts},
-          @owner_call_timeout
-        )
+        call_owner({:recent_tainted, agent_id, opts}, :read)
 
       _error ->
         {:error, :invalid_request}
     end
   rescue
     _ -> {:error, :invalid_request}
-  catch
-    _, _ -> {:error, :invalid_request}
   end
 
   @doc """
@@ -216,18 +201,12 @@ defmodule Arbor.Memory.Thinking do
     with true <- valid_agent_id?(agent_id),
          :ok <- validate_stream_opts(opts),
          {:ok, taint} <- Taint.canonicalize(taint) do
-      GenServer.call(
-        server_name(),
-        {:stream_chunk, agent_id, chunk, taint, opts},
-        @owner_call_timeout
-      )
+      call_owner({:stream_chunk, agent_id, chunk, taint, opts}, :mutation)
     else
       _ -> {:error, :invalid_request}
     end
   rescue
     _ -> {:error, :invalid_request}
-  catch
-    _, _ -> {:error, :invalid_request}
   end
 
   def process_stream_chunk_tainted(_agent_id, _chunk, _taint, _opts),
@@ -238,13 +217,15 @@ defmodule Arbor.Memory.Thinking do
   """
   @spec clear(String.t()) :: :ok | {:error, atom()}
   def clear(agent_id) do
-    GenServer.call(server_name(), {:clear, agent_id}, @owner_call_timeout)
+    if valid_agent_id?(agent_id),
+      do: call_owner({:clear, agent_id}, :mutation),
+      else: {:error, :invalid_request}
   end
 
   @doc "Reloads the complete Thinking projection from the durable memory store."
   @spec reload_from_durable() :: :ok | {:error, atom()}
   def reload_from_durable do
-    GenServer.call(server_name(), :reload_from_durable, @owner_call_timeout)
+    call_owner(:reload_from_durable, :read)
   end
 
   # ============================================================================
@@ -268,11 +249,24 @@ defmodule Arbor.Memory.Thinking do
   @impl true
   def handle_call({:record, agent_id, text, taint, opts}, _from, state) do
     case store_entry(agent_id, text, taint, opts, state) do
-      {:ok, entry} ->
+      {:ok, entry, projection_status} ->
+        maybe_schedule_convergence(agent_id, projection_status)
         {:reply, {:ok, entry}, put_owned_agent(state, agent_id)}
 
       {:error, reason} ->
         {:reply, {:error, reason}, state}
+    end
+  end
+
+  @impl true
+  def handle_call({:recent_compat, agent_id, opts}, _from, state) do
+    case read_authoritative_entries(agent_id, opts, state) do
+      {:ok, items, next_state} ->
+        entries = Enum.map(items, fn {value, _status} -> value.value end)
+        {:reply, {:ok, entries}, next_state}
+
+      {:error, _reason} ->
+        {:reply, {:ok, []}, state}
     end
   end
 
@@ -301,32 +295,18 @@ defmodule Arbor.Memory.Thinking do
 
   @impl true
   def handle_call({:recent_tainted, agent_id, opts}, _from, state) do
-    if owned_agent_capacity?(state, agent_id) do
-      case authoritative_tainted_read(agent_id, opts, state.buffer_size) do
-        {:ok, items, true} ->
-          {:reply, {:ok, items}, put_owned_agent(state, agent_id)}
-
-        {:ok, items, false} ->
-          {:reply, {:ok, items}, drop_owned_agent(state, agent_id)}
-
-        {:error, reason} ->
-          {:reply, {:error, reason}, state}
-      end
-    else
-      {:reply, {:error, :projection_capacity}, state}
+    case read_authoritative_entries(agent_id, opts, state) do
+      {:ok, items, next_state} -> {:reply, {:ok, items}, next_state}
+      {:error, reason} -> {:reply, {:error, reason}, state}
     end
   end
 
   @impl true
   def handle_call({:clear, agent_id}, _from, state) do
-    entries = get_agent_entries(agent_id)
-    durable_entries = durable_entries_for_cleanup(agent_id, @max_entries)
-    cleanup_entries = durable_entries ++ safe_cleanup_entries(entries)
-
     case delete_aggregate_before_live_clear(agent_id) do
       :ok ->
-        :ets.delete(@ets_table, agent_id)
-        cleanup_thinking_sidecars_after_clear(agent_id, cleanup_entries)
+        projection_status = clear_live_projection(agent_id)
+        maybe_schedule_convergence(agent_id, projection_status)
 
         next_state =
           state
@@ -351,11 +331,66 @@ defmodule Arbor.Memory.Thinking do
     end
   end
 
+  @impl true
+  def handle_info({:converge_projection, agent_id}, state) do
+    next_state =
+      if owned_agent_capacity?(state, agent_id) do
+        case authoritative_tainted_read(agent_id, [], state.buffer_size) do
+          {:ok, _items, true} -> put_owned_agent(state, agent_id)
+          {:ok, _items, false} -> drop_owned_agent(state, agent_id)
+          {:error, _reason} -> state
+        end
+      else
+        state
+      end
+
+    {:noreply, next_state}
+  end
+
   # ============================================================================
   # Private Helpers
   # ============================================================================
 
   defp server_name, do: __MODULE__
+
+  defp call_owner(message, kind) when kind in [:read, :mutation] do
+    case Process.whereis(server_name()) do
+      nil ->
+        {:error, :store_unavailable}
+
+      owner when is_pid(owner) ->
+        try do
+          GenServer.call(owner, message, @owner_call_timeout)
+        rescue
+          _ -> owner_call_failure(kind)
+        catch
+          :exit, _ -> owner_call_failure(kind)
+          :throw, _ -> owner_call_failure(kind)
+        end
+    end
+  end
+
+  defp owner_call_failure(:mutation), do: {:error, :outcome_unknown}
+  defp owner_call_failure(:read), do: {:error, :store_unavailable}
+
+  defp read_authoritative_entries(agent_id, opts, state) do
+    if owned_agent_capacity?(state, agent_id) do
+      case authoritative_tainted_read(agent_id, opts, state.buffer_size) do
+        {:ok, items, true} -> {:ok, items, put_owned_agent(state, agent_id)}
+        {:ok, items, false} -> {:ok, items, drop_owned_agent(state, agent_id)}
+        {:error, reason} -> {:error, reason}
+      end
+    else
+      {:error, :projection_capacity}
+    end
+  end
+
+  defp maybe_schedule_convergence(agent_id, :convergence_pending) do
+    send(self(), {:converge_projection, agent_id})
+    :ok
+  end
+
+  defp maybe_schedule_convergence(_agent_id, :projected), do: :ok
 
   defp owned_agent_capacity?(%{owned_agents: owned_agents}, agent_id) do
     MapSet.member?(owned_agents, agent_id) or MapSet.size(owned_agents) < @max_loaded_agents
@@ -375,42 +410,6 @@ defmodule Arbor.Memory.Thinking do
     ArgumentError -> :ok
   end
 
-  defp get_agent_entries(agent_id) do
-    case :ets.lookup(@ets_table, agent_id) do
-      [{^agent_id, entries}] ->
-        case bounded_projection_entries(entries, agent_id, [], 0) do
-          {:ok, safe_entries} -> safe_entries
-          {:error, :projection_corrupt} -> []
-        end
-
-      [] ->
-        []
-
-      _wrong_shape ->
-        []
-    end
-  rescue
-    _ -> []
-  catch
-    _, _ -> []
-  end
-
-  defp bounded_projection_entries([], _agent_id, acc, _count),
-    do: {:ok, Enum.reverse(acc)}
-
-  defp bounded_projection_entries([entry | rest], agent_id, acc, count)
-       when count < @max_entries do
-    with %{agent_id: ^agent_id} <- entry,
-         {:ok, _payload} <- ThinkingCodec.entry_payload(entry) do
-      bounded_projection_entries(rest, agent_id, [entry | acc], count + 1)
-    else
-      _ -> {:error, :projection_corrupt}
-    end
-  end
-
-  defp bounded_projection_entries(_entries, _agent_id, _acc, _count),
-    do: {:error, :projection_corrupt}
-
   defp build_entry(agent_id, text, opts) do
     %{
       id: generate_id(),
@@ -426,26 +425,6 @@ defmodule Arbor.Memory.Thinking do
     "thk_" <> Base.encode32(:crypto.strong_rand_bytes(8), case: :lower, padding: false)
   end
 
-  defp maybe_filter_significant(entries, false), do: entries
-
-  defp maybe_filter_significant(entries, true) do
-    Enum.filter(entries, &(is_map(&1) and Map.get(&1, :significant) == true))
-  end
-
-  defp maybe_filter_since(entries, nil), do: entries
-
-  defp maybe_filter_since(entries, since) do
-    Enum.filter(entries, fn entry ->
-      case entry do
-        %{created_at: %DateTime{} = created_at} ->
-          DateTime.compare(created_at, since) in [:gt, :eq]
-
-        _ ->
-          false
-      end
-    end)
-  end
-
   # ============================================================================
   # Persistence Helpers
   # ============================================================================
@@ -454,32 +433,14 @@ defmodule Arbor.Memory.Thinking do
     entry = build_entry(agent_id, text, opts)
 
     with true <- owned_agent_capacity?(state, agent_id),
-         {:ok, _payload} <- ThinkingCodec.entry_payload(entry),
-         {:ok, retained} <- mutation_base(agent_id, state.buffer_size) do
-      all_labelled = [{entry, taint} | retained]
-      candidates = Enum.take(all_labelled, state.buffer_size)
-      overflow_evicted = all_labelled |> Enum.drop(state.buffer_size) |> Enum.map(&elem(&1, 0))
-
-      result =
-        with {:ok, aggregate, aggregate_taint, labelled_entries, capacity_evicted} <-
-               encode_fitting_aggregate(candidates),
-             :ok <-
-               persist_aggregate_before_live_install(agent_id, aggregate, aggregate_taint) do
-          evicted = overflow_evicted ++ capacity_evicted
-
-          install_entry_after_persist(
-            agent_id,
-            entry,
-            taint,
-            labelled_entries,
-            evicted
-          )
-        end
-
-      case result do
-        {:error, reason} -> {:error, normalize_store_error(reason)}
-        other -> other
-      end
+         {:ok, _payload} <- ThinkingCodec.entry_payload(entry) do
+      append_authoritative_entry(
+        agent_id,
+        entry,
+        taint,
+        state.buffer_size,
+        @max_cas_attempts
+      )
     else
       false -> {:error, :projection_capacity}
       {:error, reason} -> {:error, normalize_store_error(reason)}
@@ -522,26 +483,44 @@ defmodule Arbor.Memory.Thinking do
     end
   end
 
-  defp mutation_base(agent_id, buffer_size) do
-    with {:ok, items, authority} <- load_mutation_items(agent_id),
-         {:ok, items} <- mutation_items_from_authority(agent_id, items, authority, buffer_size) do
-      retained = Enum.map(items, fn {entry, taint, _status} -> {entry, taint} end)
+  defp append_authoritative_entry(_agent_id, _entry, _taint, _buffer_size, 0),
+    do: {:error, :conflict}
 
-      {:ok, retained}
-    else
-      {:error, :store_unavailable} = error -> error
-      _ -> {:error, :invalid_payload}
+  defp append_authoritative_entry(agent_id, entry, taint, buffer_size, attempts) do
+    case prepare_authoritative_append(agent_id, entry, taint, buffer_size) do
+      {:ok, aggregate, aggregate_taint, labelled_entries, expected_record} ->
+        commit_authoritative_append(
+          agent_id,
+          entry,
+          taint,
+          buffer_size,
+          attempts,
+          aggregate,
+          aggregate_taint,
+          labelled_entries,
+          expected_record
+        )
+
+      {:error, reason} ->
+        {:error, normalize_store_error(reason)}
     end
   end
 
-  defp load_mutation_items(agent_id) do
-    if MemoryStore.available?() do
-      case load_stored_mutation_items(agent_id) do
-        {:ok, items} -> {:ok, items, :authoritative}
-        error -> error
-      end
+  defp prepare_authoritative_append(agent_id, entry, taint, buffer_size) do
+    with {:ok, durable_items, expected_record} <- load_authoritative_mutation_base(agent_id),
+         retained <-
+           durable_items
+           |> Enum.take(buffer_size)
+           |> Enum.map(fn {retained_entry, retained_taint, _status} ->
+             {retained_entry, retained_taint}
+           end),
+         candidates <- Enum.take([{entry, taint} | retained], buffer_size),
+         {:ok, aggregate, aggregate_taint, labelled_entries, _evicted} <-
+           encode_fitting_aggregate(candidates) do
+      {:ok, aggregate, aggregate_taint, labelled_entries, expected_record}
     else
-      {:error, :store_unavailable}
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :invalid_payload}
     end
   rescue
     _ -> {:error, :store_unavailable}
@@ -549,30 +528,78 @@ defmodule Arbor.Memory.Thinking do
     _, _ -> {:error, :store_unavailable}
   end
 
-  defp load_stored_mutation_items(agent_id) do
-    case MemoryStore.load_tainted_with_status("thinking", agent_id) do
-      {:ok, %TaintedValue{value: aggregate, taint: outer_taint}, status} ->
-        ThinkingCodec.decode_aggregate(
-          agent_id,
-          aggregate,
-          outer_taint,
-          status,
-          @max_entries
-        )
+  defp commit_authoritative_append(
+         agent_id,
+         entry,
+         taint,
+         buffer_size,
+         attempts,
+         aggregate,
+         aggregate_taint,
+         labelled_entries,
+         expected_record
+       ) do
+    case MemoryStore.compare_and_swap_tainted(
+           "thinking",
+           agent_id,
+           expected_record,
+           aggregate,
+           taint: aggregate_taint
+         ) do
+      {:ok, %Record{}} ->
+        install_entry_after_commit(agent_id, entry, taint, labelled_entries)
 
-      {:error, :not_found} ->
-        {:ok, []}
+      {:error, {:memory_store, :critical, :conflict}} ->
+        append_authoritative_entry(agent_id, entry, taint, buffer_size, attempts - 1)
 
-      _ ->
-        {:error, :store_unavailable}
+      {:error, {:memory_store, :invalid_durable_provenance, _reason} = reason} ->
+        {:error, normalize_store_error(reason)}
+
+      {:error, {:memory_store, :critical, reason}}
+      when reason in [:invalid_request, :invalid_record, :insufficient_durability] ->
+        {:error, normalize_store_error({:memory_store, :critical, reason})}
+
+      {:error, _reason} ->
+        {:error, :outcome_unknown}
+
+      _other ->
+        {:error, :outcome_unknown}
     end
+  rescue
+    _ -> {:error, :outcome_unknown}
+  catch
+    _, _ -> {:error, :outcome_unknown}
   end
 
-  defp mutation_items_from_authority(agent_id, items, :authoritative, buffer_size),
-    do: reconcile_authoritative_projection(agent_id, items, buffer_size)
+  defp load_authoritative_mutation_base(agent_id) do
+    case MemoryStore.load_tainted_authoritative_with_status("thinking", agent_id) do
+      {:ok, %TaintedValue{value: aggregate, taint: outer_taint}, status, %Record{} = record,
+       _location} ->
+        case ThinkingCodec.decode_aggregate(
+               agent_id,
+               aggregate,
+               outer_taint,
+               status,
+               @max_entries
+             ) do
+          {:ok, items} -> {:ok, items, record}
+          {:error, _reason} -> {:error, :invalid_payload}
+        end
 
-  defp mutation_items_from_authority(_agent_id, _items, _authority, _buffer_size),
-    do: {:error, :invalid_payload}
+      {:error, :not_found} ->
+        {:ok, [], :not_found}
+
+      {:error, reason} ->
+        {:error, reason}
+
+      _other ->
+        {:error, :store_unavailable}
+    end
+  rescue
+    _ -> {:error, :store_unavailable}
+  catch
+    _, _ -> {:error, :store_unavailable}
+  end
 
   defp put_live_label(agent_id, entry_id, payload, taint) do
     case Provenance.put(:thinking_entry, agent_id, entry_id, payload, taint) do
@@ -585,61 +612,33 @@ defmodule Arbor.Memory.Thinking do
     _, _ -> {:error, :store_unavailable}
   end
 
-  # VP-05D2C C3D integration point: MemoryStore.persist/4 is currently
-  # cache-acknowledged and may return :ok during a configured backend outage.
-  # Replace this read/commit boundary with C3D's shared primitive: acknowledge
-  # backend:nil as deliberate ephemeral mode, require a durable write otherwise,
-  # and CAS the aggregate version read by mutation_base/2. Thinking's GenServer
-  # serializes only this node, so the present call is not cluster-monotonic. The
-  # owner call waits without a client timeout; if this primitive ever detaches
-  # work, it must add operation-ID reconciliation before returning.
-  defp persist_aggregate_before_live_install(agent_id, aggregate, taint) do
-    if MemoryStore.available?() do
-      case MemoryStore.persist("thinking", agent_id, aggregate, taint: taint) do
-        :ok -> :ok
-        _ -> {:error, :store_unavailable}
-      end
-    else
-      {:error, :store_unavailable}
-    end
-  rescue
-    _ -> {:error, :store_unavailable}
-  catch
-    _, _ -> {:error, :store_unavailable}
-  end
-
-  defp install_entry_after_persist(
-         agent_id,
-         entry,
-         taint,
-         labelled_entries,
-         evicted
-       ) do
+  defp install_entry_after_commit(agent_id, entry, taint, labelled_entries) do
     entries = Enum.map(labelled_entries, &elem(&1, 0))
 
     case install_live_entries(agent_id, labelled_entries, entries) do
       :ok ->
-        cleanup_labels(agent_id, evicted)
         enqueue_embedding(entry, taint)
         emit_recorded(entry)
-        {:ok, entry}
+        {:ok, entry, :projected}
 
       {:error, _reason} ->
-        fail_closed_agent_projection(agent_id, entries ++ evicted)
-        {:ok, entry}
+        fail_closed_agent_projection(agent_id)
+        {:ok, entry, :convergence_pending}
     end
   rescue
     _ ->
-      fail_closed_agent_projection(agent_id, Enum.map(labelled_entries, &elem(&1, 0)) ++ evicted)
-      {:ok, entry}
+      fail_closed_agent_projection(agent_id)
+      {:ok, entry, :convergence_pending}
   catch
     _, _ ->
-      fail_closed_agent_projection(agent_id, Enum.map(labelled_entries, &elem(&1, 0)) ++ evicted)
-      {:ok, entry}
+      fail_closed_agent_projection(agent_id)
+      {:ok, entry, :convergence_pending}
   end
 
   defp install_live_entries(agent_id, labelled_entries, entries) do
     with {:ok, bindings} <- prepare_live_bindings(agent_id, labelled_entries, []),
+         true <- :ets.delete(@ets_table, agent_id),
+         :ok <- Provenance.delete_domain_agent(:thinking_entry, agent_id),
          :ok <- bind_installation(bindings, []),
          true <- :ets.insert(@ets_table, {agent_id, entries}) do
       :ok
@@ -666,15 +665,20 @@ defmodule Arbor.Memory.Thinking do
 
   defp prepare_live_bindings(_agent_id, _entries, _acc), do: {:error, :invalid_payload}
 
-  # VP-05D2C C3D integration point: this temporary delete preserves the required
-  # ordering but is cache-acknowledged. Replace it with the shared critical
-  # delete, which acknowledges backend:nil ephemeral mode, requires durable
-  # deletion for configured backends, and reports an outage before live cleanup.
   defp delete_aggregate_before_live_clear(agent_id) do
     if MemoryStore.available?() do
-      case MemoryStore.delete("thinking", agent_id) do
-        :ok -> :ok
-        _ -> {:error, :store_unavailable}
+      case MemoryStore.load_tainted_authoritative_with_status("thinking", agent_id) do
+        {:ok, %TaintedValue{}, _status, %Record{}, _location} ->
+          commit_authoritative_delete(agent_id)
+
+        {:error, :not_found} ->
+          commit_authoritative_delete(agent_id)
+
+        {:error, reason} ->
+          {:error, normalize_store_error(reason)}
+
+        _other ->
+          {:error, :store_unavailable}
       end
     else
       {:error, :store_unavailable}
@@ -685,10 +689,30 @@ defmodule Arbor.Memory.Thinking do
     _, _ -> {:error, :store_unavailable}
   end
 
-  defp fail_closed_agent_projection(agent_id, candidate_entries) do
-    current_entries = get_agent_entries(agent_id)
+  defp commit_authoritative_delete(agent_id) do
+    case MemoryStore.delete_tainted_authoritative("thinking", agent_id) do
+      :ok ->
+        :ok
+
+      {:error, {:memory_store, :critical, reason}}
+      when reason in [:invalid_request, :invalid_record, :insufficient_durability] ->
+        {:error, normalize_store_error({:memory_store, :critical, reason})}
+
+      {:error, _reason} ->
+        {:error, :outcome_unknown}
+
+      _other ->
+        {:error, :outcome_unknown}
+    end
+  rescue
+    _ -> {:error, :outcome_unknown}
+  catch
+    _, _ -> {:error, :outcome_unknown}
+  end
+
+  defp fail_closed_agent_projection(agent_id) do
     :ets.delete(@ets_table, agent_id)
-    cleanup_labels(agent_id, safe_cleanup_entries(candidate_entries ++ current_entries))
+    _ = Provenance.delete_domain_agent(:thinking_entry, agent_id)
     :ok
   rescue
     _ ->
@@ -698,6 +722,38 @@ defmodule Arbor.Memory.Thinking do
     _, _ ->
       :ets.delete(@ets_table, agent_id)
       :ok
+  end
+
+  defp install_empty_projection(agent_id) do
+    with true <- :ets.delete(@ets_table, agent_id),
+         :ok <- Provenance.delete_domain_agent(:thinking_entry, agent_id) do
+      :ok
+    else
+      _ -> {:error, :store_unavailable}
+    end
+  rescue
+    _ -> {:error, :store_unavailable}
+  catch
+    _, _ -> {:error, :store_unavailable}
+  end
+
+  defp clear_live_projection(agent_id) do
+    case install_empty_projection(agent_id) do
+      :ok ->
+        :projected
+
+      {:error, _reason} ->
+        fail_closed_agent_projection(agent_id)
+        :convergence_pending
+    end
+  rescue
+    _ ->
+      fail_closed_agent_projection(agent_id)
+      :convergence_pending
+  catch
+    _, _ ->
+      fail_closed_agent_projection(agent_id)
+      :convergence_pending
   end
 
   defp append_stream(nil, chunk, taint) do
@@ -732,7 +788,9 @@ defmodule Arbor.Memory.Thinking do
       {:reply, :ok, %{state | streams: Map.delete(state.streams, agent_id)}}
     else
       case store_entry(agent_id, text, stream_taint, opts, state) do
-        {:ok, entry} ->
+        {:ok, entry, projection_status} ->
+          maybe_schedule_convergence(agent_id, projection_status)
+
           next_state =
             state
             |> put_owned_agent(agent_id)
@@ -747,16 +805,12 @@ defmodule Arbor.Memory.Thinking do
   end
 
   defp authoritative_tainted_read(agent_id, opts, buffer_size) do
-    if MemoryStore.available?() do
-      case load_stored_mutation_items(agent_id) do
-        {:ok, durable_items} ->
-          reconcile_durable_read(agent_id, durable_items, opts, buffer_size)
+    case load_authoritative_mutation_base(agent_id) do
+      {:ok, durable_items, _expected_record} ->
+        reconcile_durable_read(agent_id, durable_items, opts, buffer_size)
 
-        {:error, _reason} ->
-          {:error, :invalid_durable_state}
-      end
-    else
-      {:error, :store_unavailable}
+      {:error, reason} ->
+        {:error, normalize_store_error(reason)}
     end
   rescue
     _ -> {:error, :store_unavailable}
@@ -776,15 +830,13 @@ defmodule Arbor.Memory.Thinking do
 
   defp reconcile_authoritative_projection(agent_id, durable_items, buffer_size) do
     projection = Enum.take(durable_items, buffer_size)
-    live_entries = safe_cleanup_entries(get_agent_entries(agent_id))
     labelled_entries = Enum.map(projection, fn {entry, taint, _status} -> {entry, taint} end)
     entries = Enum.map(projection, &elem(&1, 0))
 
     install_result =
       case labelled_entries do
         [] ->
-          true = :ets.delete(@ets_table, agent_id)
-          :ok
+          install_empty_projection(agent_id)
 
         _ ->
           install_live_entries(agent_id, labelled_entries, entries)
@@ -792,37 +844,20 @@ defmodule Arbor.Memory.Thinking do
 
     case install_result do
       :ok ->
-        cleanup_stale_projection(agent_id, live_entries, entries)
         {:ok, projection}
 
       {:error, _reason} ->
-        fail_closed_agent_projection(agent_id, entries ++ live_entries)
+        fail_closed_agent_projection(agent_id)
         {:error, :store_unavailable}
     end
   rescue
     _ ->
-      fail_closed_agent_projection(agent_id, safe_cleanup_entries(durable_items))
+      fail_closed_agent_projection(agent_id)
       {:error, :store_unavailable}
   catch
     _, _ ->
-      fail_closed_agent_projection(agent_id, safe_cleanup_entries(durable_items))
+      fail_closed_agent_projection(agent_id)
       {:error, :store_unavailable}
-  end
-
-  defp cleanup_stale_projection(agent_id, live_entries, retained_entries) do
-    retained_ids =
-      Enum.reduce(retained_entries, MapSet.new(), fn
-        %{id: id}, acc when is_binary(id) -> MapSet.put(acc, id)
-        _entry, acc -> acc
-      end)
-
-    stale_entries =
-      Enum.reject(live_entries, fn
-        %{id: id} when is_binary(id) -> MapSet.member?(retained_ids, id)
-        _entry -> false
-      end)
-
-    cleanup_labels(agent_id, stale_entries)
   end
 
   defp filter_decoded_items(items, opts) do
@@ -848,28 +883,24 @@ defmodule Arbor.Memory.Thinking do
   defp entry_since?(_entry, _since), do: false
 
   defp load_from_durable(buffer_size, replace?, owned_agents) do
-    if MemoryStore.available?() do
-      with {:ok, records} <- MemoryStore.load_all_tainted("thinking"),
-           {:ok, plans} <- decode_records(records, buffer_size, 0, []),
-           {:ok, installation} <- prepare_installation(plans, MapSet.new(), [], []) do
-        loaded_agents = installation_owned_agents(installation)
+    with {:ok, records} <- MemoryStore.load_all_tainted_authoritative("thinking"),
+         {:ok, plans} <- decode_records(records, buffer_size, 0, []),
+         {:ok, installation} <- prepare_installation(plans, MapSet.new(), [], []),
+         :ok <- maybe_clear_owned_projection(replace?, owned_agents) do
+      loaded_agents = installation_owned_agents(installation)
 
-        if replace?, do: clear_owned_projection(owned_agents)
+      case commit_installation(installation) do
+        :ok ->
+          Logger.info("Thinking durable projection loaded", record_count: length(plans))
+          {:ok, loaded_agents}
 
-        case commit_installation(installation) do
-          :ok ->
-            Logger.info("Thinking durable projection loaded", record_count: length(plans))
-            {:ok, loaded_agents}
-
-          {:error, reason} ->
-            clear_owned_projection(MapSet.union(owned_agents, loaded_agents))
-            {:error, reason}
-        end
-      else
-        _ -> {:error, :invalid_durable_state}
+        {:error, reason} ->
+          _ = clear_owned_projection(MapSet.union(owned_agents, loaded_agents))
+          {:error, reason}
       end
     else
-      if replace?, do: {:error, :store_unavailable}, else: {:ok, owned_agents}
+      {:error, reason} -> {:error, normalize_store_error(reason)}
+      _ -> {:error, :invalid_durable_state}
     end
   rescue
     _ -> {:error, :store_unavailable}
@@ -899,22 +930,6 @@ defmodule Arbor.Memory.Thinking do
   end
 
   defp decode_record(_record, _limit), do: {nil, []}
-
-  defp durable_entries_for_cleanup(agent_id, limit) do
-    with true <- MemoryStore.available?(),
-         {:ok, %TaintedValue{value: aggregate, taint: outer_taint}, status} <-
-           MemoryStore.load_tainted_with_status("thinking", agent_id),
-         {:ok, items} <-
-           ThinkingCodec.decode_aggregate(agent_id, aggregate, outer_taint, status, limit) do
-      Enum.map(items, &elem(&1, 0))
-    else
-      _ -> []
-    end
-  rescue
-    _ -> []
-  catch
-    _, _ -> []
-  end
 
   defp prepare_installation([], _seen_agents, rows, bindings) do
     {:ok, %{rows: Enum.reverse(rows), bindings: Enum.reverse(bindings)}}
@@ -961,10 +976,8 @@ defmodule Arbor.Memory.Thinking do
     do: {:error, :invalid_durable_state}
 
   defp commit_installation(%{rows: rows, bindings: bindings}) do
-    # VP-05D2C integration point: before rebinding each durable agent, invoke
-    # the planned bounded domain+agent provenance cleanup. Known ETS bindings
-    # are cleared today, but process/ETS churn can leave unenumerated orphans.
-    with :ok <- bind_installation(bindings, []) do
+    with :ok <- clear_installation_owners(rows),
+         :ok <- bind_installation(bindings, []) do
       Enum.each(rows, fn
         {_agent_id, []} -> :ok
         {agent_id, entries} -> true = :ets.insert(@ets_table, {agent_id, entries})
@@ -986,6 +999,15 @@ defmodule Arbor.Memory.Thinking do
     Enum.reduce(rows, MapSet.new(), fn
       {agent_id, [_entry | _rest]}, acc -> MapSet.put(acc, agent_id)
       {_agent_id, []}, acc -> acc
+    end)
+  end
+
+  defp clear_installation_owners(rows) do
+    Enum.reduce_while(rows, :ok, fn {agent_id, _entries}, :ok ->
+      case install_empty_projection(agent_id) do
+        :ok -> {:cont, :ok}
+        {:error, _reason} = error -> {:halt, error}
+      end
     end)
   end
 
@@ -1019,58 +1041,23 @@ defmodule Arbor.Memory.Thinking do
 
   defp clear_owned_projection(%MapSet{} = owned_agents) do
     if MapSet.size(owned_agents) <= @max_loaded_agents do
-      Enum.each(owned_agents, fn agent_id ->
-        cleanup_labels(agent_id, get_agent_entries(agent_id))
-        :ets.delete(@ets_table, agent_id)
+      Enum.reduce_while(owned_agents, :ok, fn agent_id, :ok ->
+        case install_empty_projection(agent_id) do
+          :ok -> {:cont, :ok}
+          {:error, _reason} = error -> {:halt, error}
+        end
       end)
+    else
+      {:error, :projection_capacity}
     end
-
-    :ok
   rescue
-    _ -> :ok
+    _ -> {:error, :store_unavailable}
   catch
-    _, _ -> :ok
+    _, _ -> {:error, :store_unavailable}
   end
 
-  defp cleanup_thinking_sidecars_after_clear(agent_id, entries) do
-    cleanup_labels(agent_id, entries)
-
-    # VP-05D2C integration point: invoke the planned bounded
-    # Provenance.delete_domain_agent(:thinking_entry, agent_id) primitive here.
-    # Enumerating known ETS/durable IDs handles current recovery, but cannot prove
-    # orphan removal after both inventories were lost; delete_agent/1 is too broad.
-    :ok
-  end
-
-  defp cleanup_labels(agent_id, entries) when is_list(entries) do
-    cleanup_labels_list(agent_id, entries, 0)
-  end
-
-  defp cleanup_labels(_agent_id, _entries), do: :ok
-
-  defp safe_cleanup_entries(entries), do: safe_cleanup_entries(entries, [], 0)
-
-  defp safe_cleanup_entries([], acc, _count), do: Enum.reverse(acc)
-
-  defp safe_cleanup_entries([entry | rest], acc, count)
-       when count < @max_cleanup_entries,
-       do: safe_cleanup_entries(rest, [entry | acc], count + 1)
-
-  defp safe_cleanup_entries(_entries, acc, _count), do: Enum.reverse(acc)
-
-  defp cleanup_labels_list(_agent_id, [], _count), do: :ok
-
-  defp cleanup_labels_list(agent_id, [%{id: id} | rest], count)
-       when is_binary(id) and count < @max_cleanup_entries do
-    _ = Provenance.delete(:thinking_entry, agent_id, id)
-    cleanup_labels_list(agent_id, rest, count + 1)
-  end
-
-  defp cleanup_labels_list(agent_id, [_entry | rest], count)
-       when count < @max_cleanup_entries,
-       do: cleanup_labels_list(agent_id, rest, count + 1)
-
-  defp cleanup_labels_list(_agent_id, _entries, _count), do: :ok
+  defp maybe_clear_owned_projection(true, owned_agents), do: clear_owned_projection(owned_agents)
+  defp maybe_clear_owned_projection(false, _owned_agents), do: :ok
 
   # C3G owns shared embedding identity, provenance convergence, and eviction.
   # Thinking only preserves the existing post-commit enqueue path and never
@@ -1174,6 +1161,16 @@ defmodule Arbor.Memory.Thinking do
   defp normalize_store_error(reason)
        when reason in [:invalid_payload, :invalid_aggregate, :invalid_request],
        do: :invalid_payload
+
+  defp normalize_store_error({:memory_store, :invalid_durable_provenance, _reason}),
+    do: :invalid_payload
+
+  defp normalize_store_error({:memory_store, :critical, :outcome_unknown}),
+    do: :outcome_unknown
+
+  defp normalize_store_error({:memory_store, :critical, :conflict}), do: :conflict
+  defp normalize_store_error(reason) when reason in [:outcome_unknown, :conflict], do: reason
+  defp normalize_store_error(:projection_capacity), do: :projection_capacity
 
   defp normalize_store_error(_reason), do: :store_unavailable
 

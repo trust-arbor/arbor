@@ -101,12 +101,14 @@ defmodule Arbor.Memory.Signals.Lifecycle do
 
   @doc """
   Emit a signal when a thinking block is recorded.
+
+  Thinking content is never included in the signal payload. The text argument
+  remains for compatibility and is used only to report its byte length.
   """
   @spec emit_thinking_recorded(String.t(), String.t()) :: :ok
   def emit_thinking_recorded(agent_id, text) do
     Arbor.Memory.Signals.emit_memory_signal(agent_id, :thinking_recorded, %{
-      text_preview: String.slice(text, 0, 100),
-      text_length: String.length(text),
+      text_bytes: byte_size(text),
       recorded_at: DateTime.utc_now()
     })
   end
