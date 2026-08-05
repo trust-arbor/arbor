@@ -159,6 +159,21 @@ defmodule Arbor.Orchestrator.Engine.CheckpointContextTaintEnvelopeSecurityRegres
              File.read!(Path.join(second_root, "checkpoint.json"))
   end
 
+  test "security regression: current write envelopes an unlabeled context value", %{root: root} do
+    checkpoint =
+      Context.new(%{"unlabelled" => %{"state" => :ready}})
+      |> checkpoint("run_current_missing_provenance")
+
+    {path, payload} = write_and_decode(checkpoint, root)
+    value = payload["context_values"]["unlabelled"]
+    envelope = payload["context_taint"]["unlabelled"]
+    fallback = TaintEnvelope.missing_fallback()
+
+    assert {:ok, %TaintEnvelope{taint: ^fallback}} = TaintEnvelope.verify(envelope, value)
+    assert {:ok, loaded} = Checkpoint.load(path, store: nil)
+    assert loaded.context_taint == %{"unlabelled" => fallback}
+  end
+
   test "security regression: payload tampering with unchanged label fails closed", %{root: root} do
     checkpoint = labelled_checkpoint("approved")
     {path, payload} = write_and_decode(checkpoint, root)
@@ -246,6 +261,45 @@ defmodule Arbor.Orchestrator.Engine.CheckpointContextTaintEnvelopeSecurityRegres
              TaintEnvelope.verify(migrated, migrated_payload["context_values"]["bound"])
   end
 
+  test "security regression: legacy context value absent from taint map gets missing fallback", %{
+    root: root
+  } do
+    legacy = %Taint{
+      level: :trusted,
+      sensitivity: :public,
+      sanitizations: 0xFF,
+      confidence: :verified,
+      source: "legacy_source",
+      chain: ["legacy_origin"]
+    }
+
+    context =
+      Context.new(
+        %{"legacy_labelled" => "labelled", "legacy_missing" => "missing"},
+        taint: %{"legacy_labelled" => legacy}
+      )
+
+    {path, payload} =
+      context
+      |> checkpoint("run_legacy_missing_provenance")
+      |> write_and_decode(root)
+
+    legacy_context_taint =
+      payload["context_taint"]
+      |> Map.put("legacy_labelled", Arbor.Signals.Taint.to_persistable(legacy))
+      |> Map.delete("legacy_missing")
+
+    rewrite_payload(path, Map.put(payload, "context_taint", legacy_context_taint))
+
+    assert {:ok, migrated_legacy} = Taint.join(TaintEnvelope.missing_fallback(), legacy)
+    assert {:ok, loaded} = Checkpoint.load(path, store: nil)
+
+    assert loaded.context_taint == %{
+             "legacy_labelled" => migrated_legacy,
+             "legacy_missing" => TaintEnvelope.missing_fallback()
+           }
+  end
+
   test "malformed and orphan in-memory labels fail before creating a file", %{root: root} do
     malformed =
       labelled_checkpoint("value")
@@ -290,7 +344,7 @@ defmodule Arbor.Orchestrator.Engine.CheckpointContextTaintEnvelopeSecurityRegres
 
     persist_root = Path.join(root, "persist_unencodable")
 
-    assert {:error, :checkpoint_serialization_failed} =
+    assert {:error, :unsupported_payload} =
              Checkpoint.persist(checkpoint, persist_root, configured_store_opts(store_name))
 
     assert SpyStore.events(store_name) == []
@@ -298,7 +352,7 @@ defmodule Arbor.Orchestrator.Engine.CheckpointContextTaintEnvelopeSecurityRegres
 
     write_root = Path.join(root, "write_unencodable")
 
-    assert {:error, :checkpoint_serialization_failed} =
+    assert {:error, :unsupported_payload} =
              Checkpoint.write(checkpoint, write_root, configured_store_opts(store_name))
 
     assert SpyStore.events(store_name) == []
