@@ -38,7 +38,18 @@ defmodule Arbor.Persistence.EventLogPurgeSecurityRegressionTest do
 
     def purge_stream(_stream_id, _opts) do
       {controller, token} = :persistent_term.get(@controller_key)
-      send(controller, {:purge_worker_blocked, token, self(), BoundedWorker.active?()})
+      Process.flag(:trap_exit, true)
+
+      coordinator =
+        self()
+        |> Process.info(:links)
+        |> elem(1)
+        |> List.first()
+
+      send(
+        controller,
+        {:purge_worker_blocked, token, self(), BoundedWorker.active?(), coordinator}
+      )
 
       receive do
         {:release_purge_worker, ^token} ->
@@ -252,29 +263,31 @@ defmodule Arbor.Persistence.EventLogPurgeSecurityRegressionTest do
       if Process.alive?(caller), do: Process.exit(caller, :kill)
     end)
 
-    assert_receive {:purge_worker_blocked, ^token, worker, true}, 1_000
+    assert_receive {:purge_worker_blocked, ^token, worker, true, _coordinator}, 1_000
     worker_ref = Process.monitor(worker)
 
     on_exit(fn ->
       if Process.alive?(worker), do: Process.exit(worker, :kill)
     end)
 
-    assert {:links, [coordinator]} = Process.info(worker, :links)
-    coordinator_ref = Process.monitor(coordinator)
-
     Process.exit(caller, :kill)
 
     assert_receive {:DOWN, ^caller_ref, :process, ^caller, :killed}, 500
-    assert_receive {:DOWN, ^worker_ref, :process, ^worker, _reason}, 500
-    assert_receive {:DOWN, ^coordinator_ref, :process, ^coordinator, _reason}, 500
+
+    worker_stopped =
+      receive do
+        {:DOWN, ^worker_ref, :process, ^worker, _reason} -> true
+      after
+        500 -> false
+      end
 
     send(worker, {:release_purge_worker, token})
 
     refute_receive {:post_release_side_effect, ^token, ^worker}, 100
+    assert worker_stopped
     refute_receive {:purge_caller_returned, ^caller, _result}
     refute_receive {:DOWN, _ref, :process, ^caller, _reason}
     refute_receive {:DOWN, _ref, :process, ^worker, _reason}
-    refute_receive {:DOWN, _ref, :process, ^coordinator, _reason}
   end
 
   test "security regression: coordinator death terminates its worker without killing the caller",
@@ -301,19 +314,17 @@ defmodule Arbor.Persistence.EventLogPurgeSecurityRegressionTest do
       if Process.alive?(caller), do: Process.exit(caller, :kill)
     end)
 
-    assert_receive {:purge_worker_blocked, ^token, worker, true}, 1_000
+    assert_receive {:purge_worker_blocked, ^token, worker, true, coordinator}, 1_000
     worker_ref = Process.monitor(worker)
 
     on_exit(fn ->
       if Process.alive?(worker), do: Process.exit(worker, :kill)
     end)
 
-    assert {:links, [coordinator]} = Process.info(worker, :links)
     coordinator_ref = Process.monitor(coordinator)
     Process.exit(coordinator, :kill)
 
     assert_receive {:DOWN, ^coordinator_ref, :process, ^coordinator, :killed}, 500
-    assert_receive {:DOWN, ^worker_ref, :process, ^worker, _reason}, 500
 
     assert_receive {:purge_caller_returned, ^caller,
                     {:error, {:purge_indeterminate, "purge-coordinator-death"}}},
@@ -321,8 +332,52 @@ defmodule Arbor.Persistence.EventLogPurgeSecurityRegressionTest do
 
     assert_receive {:DOWN, ^caller_ref, :process, ^caller, :normal}, 500
 
+    worker_stopped =
+      receive do
+        {:DOWN, ^worker_ref, :process, ^worker, _reason} -> true
+      after
+        500 -> false
+      end
+
     send(worker, {:release_purge_worker, token})
     refute_receive {:post_release_side_effect, ^token, ^worker}, 100
+    assert worker_stopped
+  end
+
+  test "security regression: timeout directly kills a trap-exit purge worker before return", %{
+    agent_name: name
+  } do
+    token = BlockThenSideEffectBackend.install(self())
+    on_exit(&BlockThenSideEffectBackend.clear/0)
+
+    assert {:error, {:purge_indeterminate, "purge-trap-exit-timeout"}} =
+             Persistence.purge_stream(
+               name,
+               BlockThenSideEffectBackend,
+               "purge-trap-exit-timeout",
+               purge_timeout_ms: 50
+             )
+
+    assert_receive {:purge_worker_blocked, ^token, worker, true, _coordinator}, 500
+    worker_ref = Process.monitor(worker)
+
+    on_exit(fn ->
+      if Process.alive?(worker), do: Process.exit(worker, :kill)
+    end)
+
+    worker_stopped =
+      receive do
+        {:DOWN, ^worker_ref, :process, ^worker, _reason} -> true
+      after
+        100 -> false
+      end
+
+    send(worker, {:release_purge_worker, token})
+
+    refute_receive {:post_release_side_effect, ^token, ^worker}, 100
+    assert worker_stopped
+    refute Process.alive?(worker)
+    refute_receive {:DOWN, _ref, :process, ^worker, _reason}
   end
 
   test "security regression: unsupported, malformed, and crashing backends fail closed", %{
