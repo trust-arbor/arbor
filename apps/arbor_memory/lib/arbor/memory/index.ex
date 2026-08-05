@@ -384,27 +384,22 @@ defmodule Arbor.Memory.Index do
 
   @impl true
   def handle_info(
-        {:persistent_index_result, operation_ref, result},
+        {:persistent_mutation_result, operation_ref, result},
         %{inflight_mutation: %{operation_ref: operation_ref} = inflight} = state
       ) do
     Process.demonitor(inflight.monitor_ref, [:flush])
-    finish_persistent_index(inflight, result, state)
+    finish_persistent_mutation(inflight, result, state)
   end
 
   def handle_info(
         {:DOWN, monitor_ref, :process, _pid, _reason},
         %{inflight_mutation: %{monitor_ref: monitor_ref} = inflight} = state
       ) do
-    finish_persistent_index(inflight, {:error, :persistence_indeterminate}, state)
+    finish_persistent_mutation(inflight, {:error, :persistence_indeterminate}, state)
   end
 
   @impl true
   def terminate(_reason, state) do
-    case state.inflight_mutation do
-      %{worker_pid: worker_pid} -> Process.exit(worker_pid, :shutdown)
-      nil -> :ok
-    end
-
     :ets.delete(state.table)
     :ok
   end
@@ -427,17 +422,23 @@ defmodule Arbor.Memory.Index do
         {:reply, {:ok, entry_id}, new_state}
 
       {:async, writer_call, completion} ->
-        {:noreply, start_persistent_index(writer_call, completion, from, state)}
+        {:noreply, start_persistent_mutation(writer_call, completion, from, state)}
 
       {:error, reason} ->
         {:reply, {:error, reason}, state}
     end
   end
 
-  defp execute_mutation_call({:batch_index, items, opts}, _from, state) do
+  defp execute_mutation_call({:batch_index, items, opts}, from, state) do
     case do_batch_index(items, opts, state) do
-      {:ok, ids, new_state} -> {:reply, {:ok, ids}, new_state}
-      {:error, reason} -> {:reply, {:error, reason}, state}
+      {:ok, ids, new_state} ->
+        {:reply, {:ok, ids}, new_state}
+
+      {:async, writer_call, completion} ->
+        {:noreply, start_persistent_mutation(writer_call, completion, from, state)}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
     end
   end
 
@@ -470,35 +471,39 @@ defmodule Arbor.Memory.Index do
     end
   end
 
-  defp execute_mutation_call({:sync_to_persistent, _opts}, _from, state) do
+  defp execute_mutation_call({:sync_to_persistent, _opts}, from, state) do
     if state.backend == :dual do
-      case do_sync_to_persistent(state) do
-        {:ok, count, new_state} -> {:reply, {:ok, count}, new_state}
-        error -> {:reply, error, state}
+      case prepare_persistent_sync(state) do
+        {:ok, count, new_state} ->
+          {:reply, {:ok, count}, new_state}
+
+        {:async, writer_call, completion} ->
+          {:noreply, start_persistent_mutation(writer_call, completion, from, state)}
       end
     else
       {:reply, {:error, :not_dual_backend}, state}
     end
   end
 
-  defp start_persistent_index(writer_call, completion, from, state) do
+  defp start_persistent_mutation(writer_call, completion, from, state) do
     owner = self()
     operation_ref = make_ref()
 
-    {worker_pid, monitor_ref} =
-      :erlang.spawn_opt(
-        fn ->
-          result = run_persistent_writer_call(writer_call)
-          send(owner, {:persistent_index_result, operation_ref, result})
-        end,
-        [:link, :monitor]
-      )
+    coordinator_pid =
+      spawn(fn ->
+        receive do
+          {:start, ^owner} -> coordinate_persistent_mutation(owner, operation_ref, writer_call)
+        end
+      end)
+
+    monitor_ref = Process.monitor(coordinator_pid)
+    send(coordinator_pid, {:start, owner})
 
     %{
       state
       | inflight_mutation: %{
           operation_ref: operation_ref,
-          worker_pid: worker_pid,
+          coordinator_pid: coordinator_pid,
           monitor_ref: monitor_ref,
           from: from,
           completion: completion
@@ -506,8 +511,44 @@ defmodule Arbor.Memory.Index do
     }
   end
 
-  defp finish_persistent_index(inflight, result, state) do
-    {reply, new_state} = complete_persistent_index(inflight.completion, result, state)
+  defp coordinate_persistent_mutation(owner, operation_ref, writer_call) do
+    owner_monitor = Process.monitor(owner)
+    coordinator = self()
+
+    {worker_pid, worker_monitor} =
+      spawn_monitor(fn ->
+        result = run_persistent_writer_call(writer_call)
+        send(coordinator, {:writer_result, self(), result})
+      end)
+
+    receive do
+      {:writer_result, ^worker_pid, result} ->
+        Process.demonitor(worker_monitor, [:flush])
+        Process.demonitor(owner_monitor, [:flush])
+        send(owner, {:persistent_mutation_result, operation_ref, result})
+
+      {:DOWN, ^worker_monitor, :process, ^worker_pid, _reason} ->
+        Process.demonitor(owner_monitor, [:flush])
+
+        send(
+          owner,
+          {:persistent_mutation_result, operation_ref, {:error, :persistence_indeterminate}}
+        )
+
+      {:DOWN, ^owner_monitor, :process, ^owner, _reason} ->
+        Process.exit(worker_pid, :kill)
+        await_worker_down(worker_monitor, worker_pid)
+    end
+  end
+
+  defp await_worker_down(worker_monitor, worker_pid) do
+    receive do
+      {:DOWN, ^worker_monitor, :process, ^worker_pid, _reason} -> :ok
+    end
+  end
+
+  defp finish_persistent_mutation(inflight, result, state) do
+    {reply, new_state} = complete_persistent_mutation(inflight.completion, result, state)
     GenServer.reply(inflight.from, reply)
 
     state_without_inflight = %{new_state | inflight_mutation: nil}
@@ -573,7 +614,8 @@ defmodule Arbor.Memory.Index do
 
         :pgvector ->
           writer_call =
-            {Embedding, state.agent_id, entry, with_requested_id(normalized_metadata, entry_id)}
+            {:single, state.persistent_writer, state.agent_id, entry,
+             with_requested_id(normalized_metadata, entry_id)}
 
           {:async, writer_call, {:pgvector_index, insertion_sequence}}
 
@@ -583,7 +625,7 @@ defmodule Arbor.Memory.Index do
 
           with {:ok, pending_admission} <- plan_pending_group_admission(state, [group]) do
             writer_call =
-              {state.persistent_writer, state.agent_id, group.canonical_entry,
+              {:single, state.persistent_writer, state.agent_id, group.canonical_entry,
                with_requested_id(group.canonical_entry.metadata, group.requested_id)}
 
             {:async, writer_call, {:dual_index, entry_id, group, pending_admission}}
@@ -592,7 +634,23 @@ defmodule Arbor.Memory.Index do
     end
   end
 
-  defp complete_persistent_index({:pgvector_index, insertion_sequence}, result, state) do
+  defp complete_persistent_mutation(completion, result, state) do
+    case completion do
+      {:pgvector_index, insertion_sequence} ->
+        complete_pgvector_index(insertion_sequence, result, state)
+
+      {:dual_index, entry_id, group, pending_admission} ->
+        complete_dual_index(entry_id, group, pending_admission, result, state)
+
+      {:batch_index, prepared, groups, pending_admission} ->
+        complete_batch_index(prepared, groups, pending_admission, result, state)
+
+      {:sync_to_persistent, groups, converged_count} ->
+        complete_persistent_sync(groups, converged_count, result, state)
+    end
+  end
+
+  defp complete_pgvector_index(insertion_sequence, result, state) do
     case result do
       {:ok, authoritative_id} ->
         {{:ok, authoritative_id}, advance_insertion_sequence(state, insertion_sequence)}
@@ -608,11 +666,7 @@ defmodule Arbor.Memory.Index do
     end
   end
 
-  defp complete_persistent_index(
-         {:dual_index, entry_id, group, pending_admission},
-         result,
-         state
-       ) do
+  defp complete_dual_index(entry_id, group, pending_admission, result, state) do
     case result do
       {:ok, authoritative_id} ->
         with :ok <-
@@ -805,10 +859,10 @@ defmodule Arbor.Memory.Index do
           end
 
         :pgvector ->
-          commit_persistent_batch(prepared, state, Embedding)
+          prepare_persistent_batch(prepared, state, state.persistent_writer)
 
         :dual ->
-          commit_persistent_batch(prepared, state, state.persistent_writer)
+          prepare_persistent_batch(prepared, state, state.persistent_writer)
       end
     end
   end
@@ -929,28 +983,43 @@ defmodule Arbor.Memory.Index do
     {:ok, Enum.map(prepared, & &1.entry.id), new_state}
   end
 
-  defp commit_persistent_batch([], state, _writer), do: {:ok, [], state}
+  defp prepare_persistent_batch([], state, _writer), do: {:ok, [], state}
 
-  defp commit_persistent_batch(prepared, state, writer) do
+  defp prepare_persistent_batch(prepared, state, writer) do
     groups = group_prepared_batch_entries(prepared, state)
     entries = Enum.map(groups, &prepared_group_batch_entry/1)
 
     with {:ok, pending_admission} <- plan_persistent_batch_admission(state, groups) do
-      case batch_store_with_ids(state, writer, entries) do
-        {:ok, authoritative_ids} ->
-          with {:ok, bindings} <-
-                 validate_authoritative_bindings(state, groups, authoritative_ids),
-               {:ok, admitted_state} <- cache_authoritative_bindings(state, bindings) do
-            ids = expand_batch_authoritative_ids(bindings)
+      writer_call = {:batch, writer, state.agent_id, entries}
+      completion = {:batch_index, prepared, groups, pending_admission}
+      {:async, writer_call, completion}
+    end
+  end
 
-            new_state = advance_prepared_batch_sequence(admitted_state, prepared)
+  defp complete_batch_index(prepared, groups, pending_admission, result, state) do
+    case result do
+      {:ok, authoritative_ids} ->
+        with {:ok, bindings} <-
+               validate_authoritative_bindings(state, groups, authoritative_ids),
+             {:ok, admitted_state} <- cache_authoritative_bindings(state, bindings) do
+          ids = expand_batch_authoritative_ids(bindings)
+          new_state = advance_prepared_batch_sequence(admitted_state, prepared)
+          {{:ok, ids}, new_state}
+        else
+          {:error, reason} -> {{:error, reason}, state}
+        end
 
-            {:ok, ids, new_state}
-          end
-
-        {:error, reason} ->
-          maybe_commit_pending_batch(prepared, groups, pending_admission, state, reason)
-      end
+      {:error, reason} ->
+        case maybe_commit_pending_batch(
+               prepared,
+               groups,
+               pending_admission,
+               state,
+               reason
+             ) do
+          {:ok, ids, new_state} -> {{:ok, ids}, new_state}
+          {:error, error_reason} -> {{:error, error_reason}, state}
+        end
     end
   end
 
@@ -1387,15 +1456,38 @@ defmodule Arbor.Memory.Index do
   end
 
   defp do_sync_to_persistent(state) do
+    case pending_sync_plan(state) do
+      {:complete, count, new_state} ->
+        {:ok, count, new_state}
+
+      {:write, groups, entries, converged_count} ->
+        state
+        |> batch_store_with_ids(entries)
+        |> finish_pending_sync(groups, converged_count, state)
+    end
+  end
+
+  defp prepare_persistent_sync(state) do
+    case pending_sync_plan(state) do
+      {:complete, count, new_state} ->
+        {:ok, count, new_state}
+
+      {:write, groups, entries, converged_count} ->
+        writer_call = {:batch, state.persistent_writer, state.agent_id, entries}
+        {:async, writer_call, {:sync_to_persistent, groups, converged_count}}
+    end
+  end
+
+  defp pending_sync_plan(state) do
     pending_ids = state.pending_sync |> MapSet.to_list() |> Enum.sort()
 
     if pending_ids == [] do
-      {:ok, 0, state}
+      {:complete, 0, state}
     else
       pending_entries = Enum.flat_map(pending_ids, &collect_pending_entry(&1, state))
 
       if pending_entries == [] do
-        {:ok, 0,
+        {:complete, 0,
          %{
            state
            | pending_sync: MapSet.new(),
@@ -1406,31 +1498,37 @@ defmodule Arbor.Memory.Index do
         groups = group_pending_entries(pending_entries)
         entries = Enum.map(groups, &pending_group_batch_entry/1)
         converged_count = pending_converged_count(state, pending_ids)
-
-        case batch_store_with_ids(state, entries) do
-          {:ok, authoritative_ids} ->
-            with {:ok, bindings} <-
-                   validate_authoritative_bindings(state, groups, authoritative_ids) do
-              new_state =
-                Enum.reduce(bindings, state, fn {group, authoritative_id}, acc ->
-                  converge_pending_group(acc, group, authoritative_id)
-                end)
-
-              {:ok, converged_count, new_state}
-            end
-
-          {:error, {:permanent, reason}} ->
-            {:error, reason}
-
-          {:error, {:malformed, reason}} ->
-            {:error, reason}
-
-          {:error, reason} ->
-            {:error, reason}
-        end
+        {:write, groups, entries, converged_count}
       end
     end
   end
+
+  defp complete_persistent_sync(groups, converged_count, result, state) do
+    case finish_pending_sync(result, groups, converged_count, state) do
+      {:ok, count, new_state} -> {{:ok, count}, new_state}
+      {:error, reason} -> {{:error, reason}, state}
+    end
+  end
+
+  defp finish_pending_sync({:ok, authoritative_ids}, groups, converged_count, state) do
+    with {:ok, bindings} <- validate_authoritative_bindings(state, groups, authoritative_ids) do
+      new_state =
+        Enum.reduce(bindings, state, fn {group, authoritative_id}, acc ->
+          converge_pending_group(acc, group, authoritative_id)
+        end)
+
+      {:ok, converged_count, new_state}
+    end
+  end
+
+  defp finish_pending_sync({:error, {:permanent, reason}}, _groups, _count, _state),
+    do: {:error, reason}
+
+  defp finish_pending_sync({:error, {:malformed, reason}}, _groups, _count, _state),
+    do: {:error, reason}
+
+  defp finish_pending_sync({:error, reason}, _groups, _count, _state),
+    do: {:error, reason}
 
   defp warm_from_pgvector(limit, state) do
     # Get a sample embedding to search with (or use a zero vector)
@@ -1677,9 +1775,18 @@ defmodule Arbor.Memory.Index do
     _kind, _reason -> {:error, :invalid_entry_identity}
   end
 
-  defp run_persistent_writer_call({writer, agent_id, entry, metadata}) do
+  defp run_persistent_writer_call({:single, writer, agent_id, entry, metadata}) do
     writer.store(agent_id, entry.content, entry.embedding, metadata)
     |> normalize_single_writer_result()
+  rescue
+    _error -> {:error, :persistence_indeterminate}
+  catch
+    _kind, _reason -> {:error, :persistence_indeterminate}
+  end
+
+  defp run_persistent_writer_call({:batch, writer, agent_id, entries}) do
+    writer.store_batch_with_ids(agent_id, entries)
+    |> normalize_batch_writer_result(length(entries))
   rescue
     _error -> {:error, :persistence_indeterminate}
   catch
@@ -1702,6 +1809,9 @@ defmodule Arbor.Memory.Index do
 
   defp normalize_writer_error(:protected_vector_row),
     do: {:error, {:permanent, :protected_vector_row}}
+
+  defp normalize_writer_error(:legacy_embedding_id_conflict),
+    do: {:error, {:permanent, :legacy_embedding_id_conflict}}
 
   defp normalize_writer_error(_reason), do: {:error, :persistence_indeterminate}
 

@@ -10,6 +10,8 @@ defmodule Arbor.Persistence.LegacyEmbeddingStore do
 
   require Logger
 
+  @legacy_id_constraints ["memory_embeddings_pkey", "memory_embeddings_id_index"]
+
   @spec store(String.t(), String.t(), [float()], map(), keyword()) ::
           {:ok, String.t()} | {:error, term()}
   def store(agent_id, content, embedding, metadata, opts \\ []) do
@@ -269,9 +271,16 @@ defmodule Arbor.Persistence.LegacyEmbeddingStore do
       {:error, :protected_vector_row} ->
         {:error, :protected_vector_row}
 
-      {:error, changeset} ->
-        Logger.warning("Failed to store embedding: #{inspect(changeset.errors)}")
-        {:error, changeset.errors}
+      {:error, %Ecto.Changeset{} = changeset} ->
+        if legacy_id_conflict_changeset?(changeset) do
+          {:error, :legacy_embedding_id_conflict}
+        else
+          Logger.warning("Failed to store embedding: #{inspect(changeset.errors)}")
+          {:error, changeset.errors}
+        end
+
+      {:error, :legacy_embedding_id_conflict} ->
+        {:error, :legacy_embedding_id_conflict}
     end
   end
 
@@ -333,8 +342,12 @@ defmodule Arbor.Persistence.LegacyEmbeddingStore do
     end
   rescue
     error ->
-      Logger.error("Batch store failed: #{inspect(error)}")
-      {:error, error}
+      if legacy_id_conflict_exception?(error) do
+        {:error, :legacy_embedding_id_conflict}
+      else
+        Logger.error("Batch store failed: #{inspect(error)}")
+        {:error, error}
+      end
   end
 
   defp insert_batch_or_rollback(repo, rows) do
@@ -392,7 +405,44 @@ defmodule Arbor.Persistence.LegacyEmbeddingStore do
       else
         reraise(error, __STACKTRACE__)
       end
+
+    error ->
+      if legacy_id_conflict_exception?(error) do
+        {:error, :legacy_embedding_id_conflict}
+      else
+        reraise(error, __STACKTRACE__)
+      end
   end
+
+  defp legacy_id_conflict_changeset?(%Ecto.Changeset{errors: errors}) do
+    Enum.any?(errors, fn
+      {:id, {_message, metadata}} ->
+        Keyword.get(metadata, :constraint) == :unique and
+          to_string(Keyword.get(metadata, :constraint_name)) in @legacy_id_constraints
+
+      _other ->
+        false
+    end)
+  end
+
+  defp legacy_id_conflict_exception?(%Ecto.ConstraintError{
+         type: :unique,
+         constraint: constraint
+       })
+       when constraint in @legacy_id_constraints,
+       do: true
+
+  defp legacy_id_conflict_exception?(%Postgrex.Error{
+         postgres: %{code: :unique_violation, constraint: "memory_embeddings_pkey"}
+       }),
+       do: true
+
+  defp legacy_id_conflict_exception?(%Exqlite.Error{
+         message: "UNIQUE constraint failed: memory_embeddings.id"
+       }),
+       do: true
+
+  defp legacy_id_conflict_exception?(_error), do: false
 
   defp protected_vector_hash?(repo, agent_id, content_hash) do
     repo.exists?(

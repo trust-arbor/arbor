@@ -43,5 +43,7 @@ defmodule Arbor.Persistence.Schemas.MemoryEmbedding do
     |> validate_length(:content_hash, is: 64)
     |> validate_length(:memory_type, max: 50)
     |> validate_length(:source, max: 255)
+    |> unique_constraint(:id, name: "memory_embeddings_pkey")
+    |> unique_constraint(:id, name: "memory_embeddings_id_index")
   end
 end

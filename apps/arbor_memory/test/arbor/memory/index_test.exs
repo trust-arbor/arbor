@@ -41,6 +41,13 @@ defmodule Arbor.Memory.IndexTest do
             6_000 -> {:ok, requested_id(metadata)}
           end
 
+        {:block_for_kill, owner} ->
+          send(owner, {:writer_waiting_for_kill, agent_id, self()})
+
+          receive do
+            :never_sent -> {:ok, requested_id(metadata)}
+          end
+
         :success ->
           {:ok, requested_id(metadata)}
 
@@ -61,6 +68,19 @@ defmodule Arbor.Memory.IndexTest do
       :counters.add(counter, 1, 1)
 
       case mode do
+        {:block_batch, owner} ->
+          send(owner, {:batch_writer_started, agent_id, self()})
+
+          receive do
+            :release_batch ->
+              {:ok,
+               Enum.map(entries, fn {_content, _embedding, metadata} ->
+                 requested_id(metadata)
+               end)}
+          after
+            6_000 -> {:error, :injected_batch_timeout}
+          end
+
         :success ->
           {:ok,
            Enum.map(entries, fn {_content, _embedding, metadata} -> requested_id(metadata) end)}
@@ -171,6 +191,104 @@ defmodule Arbor.Memory.IndexTest do
       send(writer_pid, :release_writer)
       assert_receive {:index_outcome, {:ok, ^entry_id}}, 1_000
       assert {:ok, %{id: ^entry_id}} = Index.get(pid, entry_id)
+    end
+
+    test "ownership regression: killed dual writer becomes pending without killing Index" do
+      agent_id = "killed_dual_writer_#{System.unique_integer([:positive])}"
+      entry_id = "mem_killed_dual_writer"
+      ControlledWriter.configure(agent_id, {:block_for_kill, self()})
+
+      {:ok, pid} =
+        Index.start_link(
+          agent_id: agent_id,
+          backend: :dual,
+          persistent_writer: ControlledWriter,
+          entry_id_generator: fn -> entry_id end,
+          name: nil
+        )
+
+      on_exit(fn ->
+        ControlledWriter.disarm(agent_id)
+        if Process.alive?(pid), do: GenServer.stop(pid)
+      end)
+
+      parent = self()
+
+      spawn(fn ->
+        result =
+          try do
+            Index.index(pid, "Killed dual writer", %{}, embedding: valid_persistent_embedding())
+          catch
+            :exit, reason -> {:caller_exit, reason}
+          end
+
+        send(parent, {:killed_dual_result, result})
+      end)
+
+      assert_receive {:writer_waiting_for_kill, ^agent_id, writer_pid}, 1_000
+      Process.exit(writer_pid, :kill)
+
+      assert_receive {:killed_dual_result, {:ok, ^entry_id}}, 1_000
+      assert Process.alive?(pid)
+      assert {:ok, %{id: ^entry_id, content: "Killed dual writer"}} = Index.get(pid, entry_id)
+      assert :sys.get_state(pid).pending_sync == MapSet.new([entry_id])
+
+      ControlledWriter.set_mode(agent_id, :success)
+      assert {:ok, 1} = Index.sync_to_persistent(pid)
+      assert :sys.get_state(pid).pending_sync == MapSet.new()
+      assert Process.alive?(pid)
+    end
+
+    test "ownership regression: killed persistent-only writer returns indeterminate and Index remains usable" do
+      agent_id = "killed_persistent_writer_#{System.unique_integer([:positive])}"
+      entry_id = "mem_killed_persistent_writer"
+      ControlledWriter.configure(agent_id, {:block_for_kill, self()})
+
+      {:ok, pid} =
+        Index.start_link(
+          agent_id: agent_id,
+          backend: :pgvector,
+          persistent_writer: ControlledWriter,
+          entry_id_generator: fn -> entry_id end,
+          name: nil
+        )
+
+      on_exit(fn ->
+        ControlledWriter.disarm(agent_id)
+        if Process.alive?(pid), do: GenServer.stop(pid)
+      end)
+
+      parent = self()
+
+      spawn(fn ->
+        result =
+          try do
+            Index.index(pid, "Killed persistent writer", %{},
+              embedding: valid_persistent_embedding()
+            )
+          catch
+            :exit, reason -> {:caller_exit, reason}
+          end
+
+        send(parent, {:killed_persistent_result, result})
+      end)
+
+      assert_receive {:writer_waiting_for_kill, ^agent_id, writer_pid}, 1_000
+      Process.exit(writer_pid, :kill)
+
+      assert_receive {:killed_persistent_result, {:error, :persistence_indeterminate}}, 1_000
+      assert Process.alive?(pid)
+      assert %{entry_count: 0} = Index.stats(pid)
+      assert :pgvector = Index.backend_mode(pid)
+
+      ControlledWriter.set_mode(agent_id, :success)
+
+      assert {:ok, ^entry_id} =
+               Index.index(pid, "Usable after killed writer", %{},
+                 embedding: valid_persistent_embedding()
+               )
+
+      assert Process.alive?(pid)
     end
 
     test "security regression: single generated ID collision rejects before writer dispatch" do
@@ -444,6 +562,67 @@ defmodule Arbor.Memory.IndexTest do
       assert state_after.next_insertion_sequence == state_before.next_insertion_sequence
       assert {:error, :not_found} = Index.get(duplicate_pid, duplicate_id)
     end
+
+    test "responsiveness regression: slow persistent batch leaves reads live and mutations ordered" do
+      agent_id = "slow_batch_writer_#{System.unique_integer([:positive])}"
+      [first_id, second_id, later_id] = ids = ["mem_batch_first", "mem_batch_second", "mem_later"]
+      ControlledWriter.configure(agent_id, {:block_batch, self()})
+
+      {:ok, pid} =
+        Index.start_link(
+          agent_id: agent_id,
+          backend: :dual,
+          persistent_writer: ControlledWriter,
+          entry_id_generator: sequence_callback(ids),
+          name: nil
+        )
+
+      on_exit(fn ->
+        ControlledWriter.disarm(agent_id)
+        if Process.alive?(pid), do: GenServer.stop(pid)
+      end)
+
+      parent = self()
+
+      spawn(fn ->
+        send(
+          parent,
+          {:slow_batch_result,
+           Index.batch_index(
+             pid,
+             [{"Slow batch first", %{type: :first}}, {"Slow batch second", %{type: :second}}],
+             embedding: valid_persistent_embedding()
+           )}
+        )
+      end)
+
+      assert_receive {:batch_writer_started, ^agent_id, batch_writer_pid}, 1_000
+
+      spawn(fn -> send(parent, {:stats_during_batch, Index.stats(pid)}) end)
+
+      spawn(fn ->
+        send(
+          parent,
+          {:later_mutation_result,
+           Index.index(pid, "Mutation after batch", %{type: :later},
+             embedding: valid_persistent_embedding()
+           )}
+        )
+      end)
+
+      assert_receive {:stats_during_batch, %{entry_count: 0}}, 250
+      refute_received {:later_mutation_result, _result}
+
+      ControlledWriter.set_mode(agent_id, :success)
+      send(batch_writer_pid, :release_batch)
+
+      assert_receive {:slow_batch_result, {:ok, [^first_id, ^second_id]}}, 1_000
+      assert_receive {:later_mutation_result, {:ok, ^later_id}}, 1_000
+      assert Index.stats(pid).entry_count == 3
+      assert {:ok, %{id: ^first_id}} = Index.get(pid, first_id)
+      assert {:ok, %{id: ^second_id}} = Index.get(pid, second_id)
+      assert {:ok, %{id: ^later_id}} = Index.get(pid, later_id)
+    end
   end
 
   describe "stats/1" do
@@ -546,4 +725,15 @@ defmodule Arbor.Memory.IndexTest do
   end
 
   defp valid_persistent_embedding, do: List.duplicate(0.5, @persistent_dimension)
+
+  defp sequence_callback(values) do
+    {:ok, sequence} = Agent.start_link(fn -> values end)
+
+    fn ->
+      Agent.get_and_update(sequence, fn
+        [value | rest] -> {value, rest}
+        [] -> raise "deterministic ID sequence exhausted"
+      end)
+    end
+  end
 end

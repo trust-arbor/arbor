@@ -354,6 +354,104 @@ defmodule Arbor.Memory.IndexDualTest do
                )
     end
 
+    test "integrity regression: durable ID collision is a permanent rejection without pending state" do
+      agent_id = durable_unique("test_durable_id_collision")
+      collision_id = "mem_#{durable_unique("collision")}"
+      original_content = "Existing durable identity owner"
+      original_embedding = generate_embedding(101)
+
+      assert {:ok, ^collision_id} =
+               Embedding.store(agent_id, original_content, original_embedding, %{
+                 id: collision_id,
+                 type: :existing
+               })
+
+      {:ok, pid} =
+        Index.start_link(
+          agent_id: agent_id,
+          backend: :dual,
+          entry_id_generator: fn -> collision_id end,
+          name: nil
+        )
+
+      on_exit(fn ->
+        if Process.alive?(pid), do: GenServer.stop(pid)
+        Embedding.delete_all(agent_id)
+      end)
+
+      assert {:error, :legacy_embedding_id_conflict} =
+               Index.index(pid, "Different content cannot claim durable ID", %{type: :new},
+                 embedding: generate_embedding(102)
+               )
+
+      assert Process.alive?(pid)
+      assert %{entry_count: 0} = Index.stats(pid)
+
+      assert %{
+               pending_sync: pending_sync,
+               pending_group_members: %{},
+               pending_entry_orders: %{},
+               id_aliases: %{},
+               next_insertion_sequence: 0
+             } = :sys.get_state(pid)
+
+      assert pending_sync == MapSet.new()
+      assert {:error, :not_found} = Index.get(pid, collision_id)
+      assert Embedding.count(agent_id) == 1
+
+      assert {:ok, %{id: ^collision_id, content: ^original_content, metadata: metadata}} =
+               Embedding.get(agent_id, collision_id)
+
+      assert metadata["type"] == "existing" or metadata[:type] == :existing
+    end
+
+    test "integrity regression: item-N durable ID collision rolls back the whole batch" do
+      agent_id = durable_unique("test_batch_durable_id_collision")
+      collision_id = "mem_#{durable_unique("batch_collision")}"
+      unrelated_id = "mem_#{durable_unique("batch_unrelated")}"
+      original_content = "Existing row before colliding batch"
+
+      assert {:ok, ^collision_id} =
+               Embedding.store(agent_id, original_content, generate_embedding(103), %{
+                 id: collision_id
+               })
+
+      {:ok, pid} =
+        Index.start_link(
+          agent_id: agent_id,
+          backend: :dual,
+          entry_id_generator: sequence_callback([unrelated_id, collision_id]),
+          name: nil
+        )
+
+      on_exit(fn ->
+        if Process.alive?(pid), do: GenServer.stop(pid)
+        Embedding.delete_all(agent_id)
+      end)
+
+      assert {:error, :legacy_embedding_id_conflict} =
+               Index.batch_index(
+                 pid,
+                 [
+                   {"Unrelated first batch item", %{type: :first}},
+                   {"Different content colliding at item N", %{type: :second}}
+                 ],
+                 embedding: generate_embedding(104)
+               )
+
+      assert Process.alive?(pid)
+      assert %{entry_count: 0} = Index.stats(pid)
+      assert :sys.get_state(pid).pending_sync == MapSet.new()
+      assert :sys.get_state(pid).next_insertion_sequence == 0
+      assert {:error, :not_found} = Index.get(pid, unrelated_id)
+      assert {:error, :not_found} = Embedding.get(agent_id, unrelated_id)
+
+      assert {:ok, %{id: ^collision_id, content: ^original_content}} =
+               Embedding.get(agent_id, collision_id)
+
+      assert Embedding.count(agent_id) == 1
+    end
+
     test "recall checks ETS first (cache hit)", %{pid: pid, agent_id: agent_id} do
       embedding = generate_embedding(1)
       {:ok, id} = Index.index(pid, "Cache hit test", %{type: :fact}, embedding: embedding)
