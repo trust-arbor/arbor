@@ -7,14 +7,18 @@ defmodule Arbor.Memory.WorkingMemoryStore do
   adding labels to working-memory content or prompt projections.
   """
 
+  alias Arbor.Contracts.Persistence.Record
   alias Arbor.Contracts.Security.{Taint, TaintEnvelope, TaintedValue}
   alias Arbor.Memory.{MemoryStore, Provenance, Signals, WorkingMemory}
 
   @working_memory_ets :arbor_working_memory
   @namespace "working_memory"
-  @wrapper_version 1
+  @wrapper_version 2
+  @legacy_wrapper_version 1
   @max_agent_id_bytes 256
   @max_item_id_bytes 128
+  @max_cas_attempts 12
+  @transition_lock_retries 50
   @base_domain :working_memory_base
   @aggregate_domain :working_memory_aggregate
   @base_sidecar_id "base"
@@ -23,10 +27,16 @@ defmodule Arbor.Memory.WorkingMemoryStore do
   # These caps stay below the C0 envelope's worst-case node budget even when
   # every label carries the maximum provenance chain.
   @collection_specs [
-    {:recent_thoughts, "recent_thoughts", :working_memory_thought, 64},
-    {:active_goals, "active_goals", :working_memory_goal, 24},
-    {:active_skills, "active_skills", :working_memory_skill, 8}
+    {:recent_thoughts, "recent_thoughts", :working_memory_thought, 64, nil},
+    {:active_goals, "active_goals", :working_memory_goal, 24, nil},
+    {:active_skills, "active_skills", :working_memory_skill, 8, nil},
+    {:concerns, "concerns", :working_memory_concern, 16, :concern_ids},
+    {:curiosity, "curiosity", :working_memory_curiosity, 32, :curiosity_ids}
   ]
+  @itemized_payload_keys Enum.map(@collection_specs, &elem(&1, 1)) ++
+                           ["concern_ids", "curiosity_ids"]
+  @working_memory_domains [@base_domain, @aggregate_domain] ++
+                            Enum.map(@collection_specs, &elem(&1, 2))
 
   @wrapper_keys ["payload", "provenance", "version"]
   @provenance_keys [
@@ -34,10 +44,18 @@ defmodule Arbor.Memory.WorkingMemoryStore do
     "active_skills",
     "aggregate",
     "base",
+    "concerns",
+    "curiosity",
+    "recent_thoughts"
+  ]
+  @legacy_provenance_keys [
+    "active_goals",
+    "active_skills",
+    "aggregate",
+    "base",
     "recent_thoughts"
   ]
   @entry_keys ["envelope", "status"]
-  @statuses [:verified, :legacy_unlabeled, :invalid_durable_provenance]
 
   @type provenance_status ::
           :verified | :legacy_unlabeled | :invalid_durable_provenance
@@ -54,7 +72,9 @@ defmodule Arbor.Memory.WorkingMemoryStore do
           items: %{
             recent_thoughts: [tainted_item()],
             active_goals: [tainted_item()],
-            active_skills: [tainted_item()]
+            active_skills: [tainted_item()],
+            concerns: [tainted_item()],
+            curiosity: [tainted_item()]
           }
         }
 
@@ -68,18 +88,22 @@ defmodule Arbor.Memory.WorkingMemoryStore do
   end
 
   @doc """
-  Return live working memory with aggregate and per-item provenance.
+  Return authoritative working memory with aggregate and per-item provenance.
 
-  Missing live sidecar entries resolve as legacy-unlabeled. Payload-mismatched
-  or malformed entries resolve as invalid durable provenance.
+  The durable wrapper is the inventory authority. A successful read refreshes
+  the ETS and sidecar projection; malformed or mismatched durable provenance
+  fails closed.
   """
   @spec get_working_memory_tainted(String.t()) ::
           {:ok, tainted_read()} | {:error, term()}
   def get_working_memory_tainted(agent_id) do
-    with {:ok, wm} <- lookup_raw_result(agent_id),
-         {:ok, prepared} <- prepare_working_memory(agent_id, wm) do
-      {:ok, prepared |> resolve_live_snapshot() |> public_read()}
+    with :ok <- validate_agent_id(agent_id) do
+      with_agent_transition(agent_id, fn -> authoritative_read(agent_id, :existing, []) end)
     end
+  rescue
+    _ -> error(:load_failed)
+  catch
+    _, _ -> error(:load_failed)
   end
 
   @doc """
@@ -119,19 +143,16 @@ defmodule Arbor.Memory.WorkingMemoryStore do
   @doc """
   Load working memory with aggregate and per-item provenance.
 
-  A sidecar restart is repaired from the durable wrapper when its exact payload
-  still matches ETS. Legacy raw records are migrated once with stable IDs and
-  conservative labels. Invalid durable records never restore permissive labels.
+  A successful authoritative read repairs ETS and sidecars from the durable
+  wrapper. Legacy raw records are migrated once with stable IDs and conservative
+  labels. Invalid durable records never restore permissive labels.
   """
   @spec load_working_memory_tainted(String.t(), keyword()) ::
           {:ok, tainted_read()} | {:error, term()}
   def load_working_memory_tainted(agent_id, opts \\ []) do
     with :ok <- validate_agent_id(agent_id),
          true <- Keyword.keyword?(opts) do
-      case lookup_raw(agent_id) do
-        {:ok, wm} -> load_with_live_value(agent_id, wm)
-        :not_found -> load_without_live_value(agent_id, opts)
-      end
+      with_agent_transition(agent_id, fn -> authoritative_read(agent_id, :create, opts) end)
     else
       _ -> error(:invalid_request)
     end
@@ -147,50 +168,49 @@ defmodule Arbor.Memory.WorkingMemoryStore do
   @spec load_working_memory(String.t(), keyword()) :: WorkingMemory.t()
   def load_working_memory(agent_id, opts \\ []) do
     case load_working_memory_tainted(agent_id, opts) do
-      {:ok, %{value: %TaintedValue{value: %WorkingMemory{} = wm}}} -> wm
-      {:error, _reason} -> fresh_working_memory(agent_id, opts)
+      {:ok, %{value: %TaintedValue{value: %WorkingMemory{} = wm}}} ->
+        wm
+
+      {:error, _reason} ->
+        fresh_working_memory(agent_id, opts)
     end
   end
 
   @doc """
   Delete working memory and only the sidecar entries owned by this domain.
   """
-  @spec delete_working_memory(String.t()) :: :ok
+  @spec delete_working_memory(String.t()) :: :ok | {:error, term()}
   def delete_working_memory(agent_id) do
-    snapshots = deletion_snapshots(agent_id)
-
-    :ok = MemoryStore.delete(@namespace, agent_id)
-    safe_ets_delete(agent_id)
-
-    snapshots
-    |> Enum.flat_map(&sidecar_keys/1)
-    |> Enum.uniq()
-    |> Enum.each(fn {domain, item_id} ->
-      _ = Provenance.delete(domain, agent_id, item_id)
-    end)
-
-    # Reserved entries exist even for an empty working memory.
-    _ = Provenance.delete(@base_domain, agent_id, @base_sidecar_id)
-    _ = Provenance.delete(@aggregate_domain, agent_id, @aggregate_sidecar_id)
-    :ok
+    with :ok <- validate_agent_id(agent_id) do
+      with_agent_transition(agent_id, fn -> delete_authoritative(agent_id) end)
+    end
   rescue
-    _ -> :ok
+    _ -> error(:delete_failed)
   catch
-    _, _ -> :ok
+    _, _ -> error(:delete_failed)
   end
 
   # -- Save --------------------------------------------------------------------
 
   defp do_save(agent_id, working_memory, supplied_taint) do
     with :ok <- validate_agent_id(agent_id),
-         {:ok, prepared} <- prepare_working_memory(agent_id, working_memory),
-         {:ok, previous} <- previous_snapshot(agent_id),
-         {:ok, snapshot} <- reconcile_snapshot(prepared, previous, supplied_taint),
-         {:ok, wrapper} <- build_wrapper(snapshot),
-         :ok <- persist_wrapper(agent_id, wrapper, snapshot.aggregate.taint),
-         :ok <- install_snapshot(agent_id, snapshot, previous) do
-      Signals.emit_working_memory_saved(agent_id, WorkingMemory.stats(snapshot.prepared.wm))
-      :ok
+         {:ok, prepared} <- prepare_working_memory(agent_id, working_memory) do
+      with_agent_transition(agent_id, fn ->
+        result = save_authoritative(agent_id, prepared, supplied_taint, @max_cas_attempts)
+
+        case result do
+          {:ok, snapshot} ->
+            Signals.emit_working_memory_saved(
+              agent_id,
+              WorkingMemory.stats(snapshot.prepared.wm)
+            )
+
+            :ok
+
+          {:error, _reason} = error ->
+            error
+        end
+      end)
     else
       {:error, _reason} = error -> error
       _ -> error(:save_failed)
@@ -201,54 +221,69 @@ defmodule Arbor.Memory.WorkingMemoryStore do
     _, _ -> error(:save_failed)
   end
 
-  defp previous_snapshot(agent_id) do
-    case lookup_raw(agent_id) do
-      {:ok, wm} ->
-        case prepare_working_memory(agent_id, wm) do
-          {:ok, prepared} ->
-            live = resolve_live_snapshot(prepared)
+  defp save_authoritative(_agent_id, _prepared, _supplied_taint, 0),
+    do: error(:conflict)
 
-            if live.sidecar_absent? do
-              case load_durable_snapshot(agent_id) do
-                {:ok, snapshot, _source} when snapshot.prepared.payload == prepared.payload ->
-                  {:ok, snapshot}
-
-                {:ok, _snapshot, :invalid} ->
-                  {:ok, fallback_snapshot(prepared, TaintEnvelope.invalid_fallback())}
-
-                {:ok, _snapshot, _source} ->
-                  {:ok, live}
-
-                :not_found ->
-                  {:ok, live}
-
-                {:error, {:working_memory_store, :durable_unavailable}} ->
-                  {:ok, live}
-
-                {:error, _reason} = error ->
-                  error
-              end
-            else
-              {:ok, live}
-            end
-
-          {:error, _reason} ->
-            {:ok, invalid_previous_snapshot(agent_id)}
-        end
+  defp save_authoritative(agent_id, prepared, supplied_taint, attempts) do
+    case load_durable_snapshot(agent_id) do
+      {:ok, previous, _source, reference} ->
+        commit_authoritative_snapshot(
+          agent_id,
+          prepared,
+          previous,
+          reference.record,
+          supplied_taint,
+          attempts
+        )
 
       :not_found ->
-        case load_durable_snapshot(agent_id) do
-          {:ok, snapshot, _source} -> {:ok, snapshot}
-          :not_found -> {:ok, nil}
-          {:error, {:working_memory_store, :durable_unavailable}} -> {:ok, nil}
-          {:error, _reason} = error -> error
-        end
+        commit_authoritative_snapshot(
+          agent_id,
+          prepared,
+          nil,
+          :not_found,
+          supplied_taint,
+          attempts
+        )
+
+      {:error, _reason} = error ->
+        error
     end
   end
 
-  defp invalid_previous_snapshot(agent_id) do
-    prepared = blank_prepared(agent_id)
-    fallback_snapshot(prepared, TaintEnvelope.invalid_fallback())
+  defp commit_authoritative_snapshot(
+         agent_id,
+         prepared,
+         previous,
+         expected_record,
+         supplied_taint,
+         attempts
+       ) do
+    with {:ok, snapshot} <- reconcile_snapshot(prepared, previous, supplied_taint),
+         {:ok, wrapper} <- build_wrapper(snapshot) do
+      case MemoryStore.compare_and_swap_tainted(
+             @namespace,
+             agent_id,
+             expected_record,
+             wrapper,
+             taint: snapshot.aggregate.taint
+           ) do
+        {:ok, %Record{}} ->
+          case install_snapshot(agent_id, snapshot) do
+            :ok -> {:ok, snapshot}
+            {:error, _reason} = error -> error
+          end
+
+        {:error, {:memory_store, :critical, :conflict}} ->
+          save_authoritative(agent_id, prepared, supplied_taint, attempts - 1)
+
+        {:error, _reason} = error ->
+          map_memory_store_error(error)
+
+        _ ->
+          error(:persistence_failed)
+      end
+    end
   end
 
   defp reconcile_snapshot(prepared, previous, supplied_taint) do
@@ -256,7 +291,7 @@ defmodule Arbor.Memory.WorkingMemoryStore do
     base = reconcile_base(prepared, previous, supplied)
 
     items =
-      Map.new(@collection_specs, fn {field, _durable_key, _domain, _max} ->
+      Map.new(@collection_specs, fn {field, _durable_key, _domain, _max, _id_field} ->
         previous_items = previous_items_by_id(previous, field)
 
         labelled =
@@ -321,125 +356,143 @@ defmodule Arbor.Memory.WorkingMemoryStore do
     Map.new(previous.items[field], &{&1.id, &1})
   end
 
-  defp persist_wrapper(agent_id, wrapper, aggregate_taint) do
-    case MemoryStore.persist(@namespace, agent_id, wrapper, taint: aggregate_taint) do
-      :ok -> :ok
-      {:error, _reason} -> error(:persistence_failed)
-      _ -> error(:persistence_failed)
-    end
-  end
-
   # -- Load --------------------------------------------------------------------
 
-  defp load_with_live_value(agent_id, wm) do
-    with {:ok, prepared} <- prepare_working_memory(agent_id, wm) do
-      live = resolve_live_snapshot(prepared)
-
-      if live.sidecar_absent? do
-        case load_durable_snapshot(agent_id) do
-          {:ok, durable, source} when durable.prepared.payload == prepared.payload ->
-            restore_snapshot(agent_id, durable, source, :silent)
-
-          {:ok, _durable, :invalid} ->
-            prepared
-            |> fallback_snapshot(TaintEnvelope.invalid_fallback())
-            |> then(&restore_snapshot(agent_id, &1, :invalid, :silent))
-
-          {:error, _reason} = error ->
-            error
-
-          _ ->
-            {:ok, public_read(live)}
-        end
-      else
-        {:ok, public_read(live)}
-      end
-    end
+  defp authoritative_read(agent_id, mode, opts) do
+    authoritative_read(agent_id, mode, opts, @max_cas_attempts)
   end
 
-  defp load_without_live_value(agent_id, opts) do
+  defp authoritative_read(_agent_id, _mode, _opts, 0), do: error(:conflict)
+
+  defp authoritative_read(agent_id, mode, opts, attempts) do
     case load_durable_snapshot(agent_id) do
-      {:ok, snapshot, source} ->
-        restore_snapshot(agent_id, snapshot, source, :restored)
+      {:ok, snapshot, source, reference} ->
+        restore_authoritative_snapshot(
+          agent_id,
+          snapshot,
+          source,
+          reference,
+          mode,
+          opts,
+          attempts
+        )
 
-      :not_found ->
-        wm = WorkingMemory.new(agent_id, opts)
+      :not_found when mode == :existing ->
+        error(:not_found)
 
-        case save_working_memory(agent_id, wm) do
-          :ok ->
-            Signals.emit_working_memory_loaded(agent_id, :created)
-            get_working_memory_tainted(agent_id)
-
-          {:error, _reason} = error ->
-            error
-        end
+      :not_found when mode == :create ->
+        create_authoritative_snapshot(agent_id, opts, attempts)
 
       {:error, _reason} = error ->
         error
     end
   end
 
-  defp restore_snapshot(agent_id, snapshot, source, signal_mode) do
-    with :ok <- maybe_persist_legacy(agent_id, snapshot, source),
-         :ok <- install_snapshot(agent_id, snapshot, current_snapshot(agent_id)) do
-      if signal_mode == :restored do
-        Signals.emit_working_memory_loaded(agent_id, :restored)
-      end
+  defp create_authoritative_snapshot(agent_id, opts, attempts) do
+    with %WorkingMemory{} = wm <- fresh_working_memory(agent_id, opts),
+         {:ok, prepared} <- prepare_working_memory(agent_id, wm),
+         {:ok, snapshot} <-
+           reconcile_snapshot(prepared, nil, TaintEnvelope.missing_fallback()),
+         {:ok, wrapper} <- build_wrapper(snapshot) do
+      case MemoryStore.compare_and_swap_tainted(
+             @namespace,
+             agent_id,
+             :not_found,
+             wrapper,
+             taint: snapshot.aggregate.taint
+           ) do
+        {:ok, %Record{}} ->
+          with :ok <- install_snapshot(agent_id, snapshot) do
+            Signals.emit_working_memory_loaded(agent_id, :created)
+            {:ok, public_read(snapshot)}
+          end
 
-      {:ok, public_read(resolve_live_snapshot(snapshot.prepared))}
+        {:error, {:memory_store, :critical, :conflict}} ->
+          authoritative_read(agent_id, :create, opts, attempts - 1)
+
+        {:error, _reason} = error ->
+          map_memory_store_error(error)
+
+        _ ->
+          error(:persistence_failed)
+      end
     else
       {:error, _reason} = error -> error
+      _ -> error(:load_failed)
     end
   end
 
-  defp maybe_persist_legacy(agent_id, snapshot, :legacy) do
+  defp restore_authoritative_snapshot(
+         agent_id,
+         snapshot,
+         :invalid,
+         _reference,
+         _mode,
+         _opts,
+         _attempts
+       ) do
+    with :ok <- install_snapshot(agent_id, snapshot) do
+      Signals.emit_working_memory_loaded(agent_id, :restored)
+      {:ok, public_read(snapshot)}
+    end
+  end
+
+  defp restore_authoritative_snapshot(
+         agent_id,
+         snapshot,
+         source,
+         reference,
+         mode,
+         opts,
+         attempts
+       ) do
+    if source == :verified do
+      with :ok <- install_snapshot(agent_id, snapshot) do
+        {:ok, public_read(snapshot)}
+      end
+    else
+      migrate_authoritative_snapshot(agent_id, snapshot, reference, mode, opts, attempts)
+    end
+  end
+
+  defp migrate_authoritative_snapshot(agent_id, snapshot, reference, mode, opts, attempts) do
     with {:ok, wrapper} <- build_wrapper(snapshot) do
-      persist_wrapper(agent_id, wrapper, snapshot.aggregate.taint)
-    end
-  end
+      case MemoryStore.compare_and_swap_tainted(
+             @namespace,
+             agent_id,
+             reference.record,
+             wrapper,
+             taint: snapshot.aggregate.taint
+           ) do
+        {:ok, %Record{}} ->
+          with :ok <- install_snapshot(agent_id, snapshot) do
+            Signals.emit_working_memory_loaded(agent_id, :restored)
+            {:ok, public_read(snapshot)}
+          end
 
-  defp maybe_persist_legacy(_agent_id, _snapshot, _source), do: :ok
+        {:error, {:memory_store, :critical, :conflict}} ->
+          authoritative_read(agent_id, mode, opts, attempts - 1)
 
-  defp current_snapshot(agent_id) do
-    case lookup_raw(agent_id) do
-      {:ok, wm} ->
-        case prepare_working_memory(agent_id, wm) do
-          {:ok, prepared} -> resolve_live_snapshot(prepared)
-          {:error, _reason} -> nil
-        end
+        {:error, _reason} = error ->
+          map_memory_store_error(error)
 
-      :not_found ->
-        nil
+        _ ->
+          error(:persistence_failed)
+      end
     end
   end
 
   defp load_durable_snapshot(agent_id) do
-    if MemoryStore.available?() do
-      do_load_durable_snapshot(agent_id)
-    else
-      error(:durable_unavailable)
-    end
-  end
-
-  defp do_load_durable_snapshot(agent_id) do
-    case MemoryStore.load_tainted_with_status(@namespace, agent_id) do
-      {:ok, %TaintedValue{value: data, taint: outer_taint}, :verified} ->
-        case decode_wrapper(agent_id, data, outer_taint) do
-          {:ok, snapshot} -> {:ok, snapshot, :verified}
-          {:error, _reason} -> {:ok, fallback_from_data(agent_id, data, :invalid), :invalid}
-        end
-
-      {:ok, %TaintedValue{value: data}, :legacy_unlabeled} ->
-        {:ok, fallback_from_data(agent_id, data, :legacy), :legacy}
-
-      {:ok, %TaintedValue{value: data}, :invalid_durable_provenance} ->
-        {:ok, fallback_from_data(agent_id, data, :invalid), :invalid}
+    case MemoryStore.load_tainted_authoritative_with_status(@namespace, agent_id) do
+      {:ok, %TaintedValue{value: data, taint: outer_taint}, status, %Record{} = record, location} ->
+        reference = %{record: record, location: location}
+        decode_durable_value(agent_id, data, outer_taint, status, reference)
 
       {:error, :not_found} ->
         :not_found
 
-      {:error, _reason} ->
-        error(:durable_load_failed)
+      {:error, _reason} = error ->
+        map_memory_store_error(error)
 
       _ ->
         error(:durable_load_failed)
@@ -448,6 +501,39 @@ defmodule Arbor.Memory.WorkingMemoryStore do
     _ -> error(:durable_load_failed)
   catch
     _, _ -> error(:durable_load_failed)
+  end
+
+  defp decode_durable_value(agent_id, data, outer_taint, :verified, reference) do
+    case decode_wrapper(agent_id, data, outer_taint) do
+      {:ok, snapshot} ->
+        source = if data["version"] == @wrapper_version, do: :verified, else: :legacy_wrapper
+        {:ok, snapshot, source, reference}
+
+      {:error, _reason} ->
+        {:ok, fallback_from_data(agent_id, data, :invalid), :invalid, reference}
+    end
+  end
+
+  defp decode_durable_value(agent_id, data, _outer_taint, :legacy_unlabeled, reference) do
+    if wrapper_shaped?(data) do
+      case decode_wrapper(agent_id, data, :ignore) do
+        {:ok, snapshot} ->
+          {:ok, conservative_inner_snapshot(snapshot), :legacy_inner, reference}
+
+        {:error, _reason} ->
+          {:ok, fallback_from_data(agent_id, data, :invalid), :invalid, reference}
+      end
+    else
+      {:ok, fallback_from_data(agent_id, data, :legacy), :legacy_payload, reference}
+    end
+  end
+
+  defp decode_durable_value(agent_id, data, _outer_taint, :invalid_durable_provenance, reference) do
+    {:ok, fallback_from_data(agent_id, data, :invalid), :invalid, reference}
+  end
+
+  defp decode_durable_value(agent_id, data, _outer_taint, _status, reference) do
+    {:ok, fallback_from_data(agent_id, data, :invalid), :invalid, reference}
   end
 
   # -- Durable wrapper ---------------------------------------------------------
@@ -478,7 +564,8 @@ defmodule Arbor.Memory.WorkingMemoryStore do
   end
 
   defp encode_collection_entries(snapshot) do
-    Enum.reduce_while(@collection_specs, {:ok, %{}}, fn {field, durable_key, _domain, _max},
+    Enum.reduce_while(@collection_specs, {:ok, %{}}, fn {field, durable_key, _domain, _max,
+                                                         _id_field},
                                                         {:ok, acc} ->
       result =
         Enum.reduce_while(snapshot.items[field], {:ok, %{}}, fn item, {:ok, entries} ->
@@ -504,25 +591,18 @@ defmodule Arbor.Memory.WorkingMemoryStore do
 
   defp decode_wrapper(agent_id, data, outer_taint) do
     with true <- exact_string_keys?(data, @wrapper_keys),
-         true <- data["version"] == @wrapper_version,
          payload when is_map(payload) <- data["payload"],
-         provenance when is_map(provenance) <- data["provenance"],
-         true <- exact_string_keys?(provenance, @provenance_keys),
-         {:ok, prepared} <- prepare_exact_payload(agent_id, payload),
-         {:ok, base} <- decode_entry(provenance["base"], prepared.base_payload),
-         {:ok, items} <- decode_collection_entries(prepared, provenance),
-         {:ok, aggregate} <- decode_entry(provenance["aggregate"], prepared.payload),
-         component_aggregate <- aggregate_label(base, items),
-         true <- label_dominates?(aggregate, component_aggregate),
-         true <- outer_taint == aggregate.taint do
-      {:ok,
-       %{
-         prepared: prepared,
-         base: base,
-         items: items,
-         aggregate: aggregate,
-         sidecar_absent?: false
-       }}
+         provenance when is_map(provenance) <- data["provenance"] do
+      case data["version"] do
+        @wrapper_version ->
+          decode_current_wrapper(agent_id, payload, provenance, outer_taint)
+
+        @legacy_wrapper_version ->
+          decode_legacy_wrapper(agent_id, payload, provenance, outer_taint)
+
+        _ ->
+          error(:invalid_wrapper)
+      end
     else
       _ -> error(:invalid_wrapper)
     end
@@ -532,9 +612,72 @@ defmodule Arbor.Memory.WorkingMemoryStore do
     _, _ -> error(:invalid_wrapper)
   end
 
-  defp decode_collection_entries(prepared, provenance) do
-    Enum.reduce_while(@collection_specs, {:ok, %{}}, fn {field, durable_key, _domain, _max},
-                                                        {:ok, acc} ->
+  defp decode_current_wrapper(agent_id, payload, provenance, outer_taint) do
+    with true <- exact_string_keys?(provenance, @provenance_keys),
+         {:ok, prepared} <- prepare_exact_payload(agent_id, payload),
+         {:ok, base} <- decode_entry(provenance["base"], prepared.base_payload),
+         {:ok, items} <- decode_collection_entries(prepared, provenance, @collection_specs),
+         {:ok, aggregate} <- decode_entry(provenance["aggregate"], prepared.payload),
+         component_aggregate <- aggregate_label(base, items),
+         true <- label_dominates?(aggregate, component_aggregate),
+         true <- outer_taint_matches?(outer_taint, aggregate.taint) do
+      {:ok, snapshot(prepared, base, items, aggregate)}
+    else
+      _ -> error(:invalid_wrapper)
+    end
+  end
+
+  defp decode_legacy_wrapper(agent_id, payload, provenance, outer_taint) do
+    legacy_specs = Enum.take(@collection_specs, 3)
+
+    with true <- exact_string_keys?(provenance, @legacy_provenance_keys),
+         {:ok, prepared} <- prepare_legacy_payload(agent_id, payload),
+         legacy_base_payload <-
+           Map.drop(payload, ["recent_thoughts", "active_goals", "active_skills"]),
+         {:ok, base} <- decode_entry(provenance["base"], legacy_base_payload),
+         {:ok, legacy_items} <- decode_collection_entries(prepared, provenance, legacy_specs),
+         items <- add_legacy_scalar_items(prepared, legacy_items, base),
+         {:ok, aggregate} <- decode_entry(provenance["aggregate"], payload),
+         component_aggregate <- aggregate_label(base, items),
+         true <- label_dominates?(aggregate, component_aggregate),
+         true <- outer_taint_matches?(outer_taint, aggregate.taint) do
+      {:ok, snapshot(prepared, base, items, aggregate)}
+    else
+      _ -> error(:invalid_wrapper)
+    end
+  end
+
+  defp snapshot(prepared, base, items, aggregate) do
+    %{
+      prepared: prepared,
+      base: base,
+      items: items,
+      aggregate: aggregate,
+      sidecar_absent?: false
+    }
+  end
+
+  defp add_legacy_scalar_items(prepared, items, base) do
+    Enum.reduce([:concerns, :curiosity], items, fn field, acc ->
+      labelled = Enum.map(prepared.collections[field].items, &Map.put(&1, :label, base))
+      Map.put(acc, field, labelled)
+    end)
+  end
+
+  defp prepare_legacy_payload(agent_id, payload) do
+    wm = WorkingMemory.deserialize(payload)
+
+    with {:ok, prepared} <- prepare_working_memory(agent_id, wm),
+         true <- Map.drop(prepared.payload, ["concern_ids", "curiosity_ids"]) == payload do
+      {:ok, prepared}
+    else
+      _ -> error(:invalid_wrapper)
+    end
+  end
+
+  defp decode_collection_entries(prepared, provenance, specs) do
+    Enum.reduce_while(specs, {:ok, %{}}, fn {field, durable_key, _domain, _max, _id_field},
+                                            {:ok, acc} ->
       persisted = provenance[durable_key]
       expected_ids = Enum.map(prepared.collections[field].items, & &1.id)
 
@@ -592,6 +735,15 @@ defmodule Arbor.Memory.WorkingMemoryStore do
     end
   end
 
+  defp outer_taint_matches?(:ignore, _aggregate_taint), do: true
+  defp outer_taint_matches?(outer_taint, aggregate_taint), do: outer_taint == aggregate_taint
+
+  defp wrapper_shaped?(data) when is_map(data) do
+    Enum.any?(["payload", "provenance", :payload, :provenance], &Map.has_key?(data, &1))
+  end
+
+  defp wrapper_shaped?(_data), do: false
+
   defp fallback_from_data(agent_id, data, kind) do
     prepared = fallback_prepared(agent_id, data)
 
@@ -631,7 +783,7 @@ defmodule Arbor.Memory.WorkingMemoryStore do
     label = label_record(taint, status_for_taint(taint))
 
     items =
-      Map.new(@collection_specs, fn {field, _durable_key, _domain, _max} ->
+      Map.new(@collection_specs, fn {field, _durable_key, _domain, _max, _id_field} ->
         {field, Enum.map(prepared.collections[field].items, &Map.put(&1, :label, label))}
       end)
 
@@ -644,101 +796,44 @@ defmodule Arbor.Memory.WorkingMemoryStore do
     }
   end
 
-  # -- Live sidecar ------------------------------------------------------------
+  defp conservative_inner_snapshot(snapshot) do
+    missing =
+      TaintEnvelope.missing_fallback()
+      |> then(&label_record(&1, status_for_taint(&1)))
 
-  defp resolve_live_snapshot(prepared) do
-    base =
-      resolve_sidecar(
-        @base_domain,
-        prepared.wm.agent_id,
-        @base_sidecar_id,
-        prepared.base_payload
-      )
+    base = join_label_records([snapshot.base, missing])
 
     items =
-      Map.new(@collection_specs, fn {field, _durable_key, domain, _max} ->
+      Map.new(@collection_specs, fn {field, _durable_key, _domain, _max, _id_field} ->
         labelled =
-          Enum.map(prepared.collections[field].items, fn item ->
-            label = resolve_sidecar(domain, prepared.wm.agent_id, item.id, item.payload)
-            Map.put(item, :label, label)
+          Enum.map(snapshot.items[field], fn item ->
+            Map.update!(item, :label, &join_label_records([&1, missing]))
           end)
 
         {field, labelled}
       end)
 
-    expected = aggregate_label(base, items)
+    component_aggregate = aggregate_label(base, items)
+    aggregate = join_label_records([snapshot.aggregate, missing, component_aggregate])
 
-    stored_aggregate =
-      resolve_sidecar(
-        @aggregate_domain,
-        prepared.wm.agent_id,
-        @aggregate_sidecar_id,
-        prepared.payload
-      )
-
-    aggregate = resolve_live_aggregate(expected, stored_aggregate)
-
-    labels =
-      [base, stored_aggregate] ++
-        Enum.flat_map(@collection_specs, fn {field, _key, _domain, _max} ->
-          Enum.map(items[field], & &1.label)
-        end)
-
-    %{
-      prepared: prepared,
-      base: base,
-      items: items,
-      aggregate: aggregate,
-      sidecar_absent?: Enum.all?(labels, &(&1.raw_status == :legacy_unlabeled))
-    }
+    %{snapshot | base: base, items: items, aggregate: aggregate}
   end
 
-  defp resolve_sidecar(domain, agent_id, item_id, payload) do
-    case Provenance.resolve(domain, agent_id, item_id, payload) do
-      {:ok, taint, raw_status} ->
-        label_record(taint, effective_status(taint, raw_status), raw_status)
+  defp install_snapshot(agent_id, snapshot) do
+    with :ok <- put_snapshot_sidecars(agent_id, snapshot),
+         :ok <- delete_stale_sidecars(agent_id, snapshot),
+         :ok <- safe_ets_insert(agent_id, snapshot.prepared.wm) do
+      :ok
+    else
+      {:error, _reason} = error ->
+        _ = clear_working_memory_sidecars(agent_id)
+        _ = safe_ets_delete(agent_id)
+        error
 
       _ ->
-        label_record(
-          TaintEnvelope.invalid_fallback(),
-          :invalid_durable_provenance,
-          :invalid_durable_provenance
-        )
-    end
-  end
-
-  defp resolve_live_aggregate(expected, stored) do
-    cond do
-      stored.raw_status == :verified and label_dominates?(stored, expected) ->
-        stored
-
-      stored.raw_status == :legacy_unlabeled ->
-        join_label_records([expected, stored])
-
-      true ->
-        label_record(
-          TaintEnvelope.invalid_fallback(),
-          :invalid_durable_provenance,
-          stored.raw_status
-        )
-    end
-  end
-
-  defp install_snapshot(agent_id, snapshot, previous) do
-    case put_snapshot_sidecars(agent_id, snapshot) do
-      :ok ->
-        case safe_ets_insert(agent_id, snapshot.prepared.wm) do
-          :ok ->
-            delete_stale_sidecars(agent_id, previous, snapshot)
-
-          {:error, _reason} = error ->
-            clear_snapshot_sidecars(agent_id, previous, snapshot)
-            error
-        end
-
-      {:error, _reason} = error ->
-        clear_snapshot_sidecars(agent_id, previous, snapshot)
-        error
+        _ = clear_working_memory_sidecars(agent_id)
+        _ = safe_ets_delete(agent_id)
+        error(:sidecar_unavailable)
     end
   end
 
@@ -747,7 +842,7 @@ defmodule Arbor.Memory.WorkingMemoryStore do
       [
         {@base_domain, @base_sidecar_id, snapshot.prepared.base_payload, snapshot.base.taint}
       ] ++
-        Enum.flat_map(@collection_specs, fn {field, _key, domain, _max} ->
+        Enum.flat_map(@collection_specs, fn {field, _key, domain, _max, _id_field} ->
           Enum.map(snapshot.items[field], &{domain, &1.id, &1.payload, &1.label.taint})
         end) ++
         [
@@ -764,41 +859,57 @@ defmodule Arbor.Memory.WorkingMemoryStore do
     end)
   end
 
-  defp delete_stale_sidecars(_agent_id, nil, _snapshot), do: :ok
+  defp delete_stale_sidecars(agent_id, snapshot) do
+    Enum.reduce_while(sidecar_inventory(snapshot), :ok, fn {domain, expected_ids}, :ok ->
+      case Provenance.list_item_ids(domain, agent_id) do
+        {:ok, existing_ids} ->
+          expected = MapSet.new(expected_ids)
 
-  defp delete_stale_sidecars(agent_id, previous, snapshot) do
-    current = MapSet.new(sidecar_keys(snapshot))
+          result =
+            Enum.reduce_while(existing_ids, :ok, fn item_id, :ok ->
+              if MapSet.member?(expected, item_id) do
+                {:cont, :ok}
+              else
+                case Provenance.delete(domain, agent_id, item_id) do
+                  :ok -> {:cont, :ok}
+                  {:error, _reason} -> {:halt, error(:sidecar_unavailable)}
+                  _ -> {:halt, error(:sidecar_unavailable)}
+                end
+              end
+            end)
 
-    previous
-    |> sidecar_keys()
-    |> Enum.reject(&MapSet.member?(current, &1))
-    |> Enum.each(fn {domain, item_id} ->
-      _ = Provenance.delete(domain, agent_id, item_id)
+          case result do
+            :ok -> {:cont, :ok}
+            {:error, _reason} = error -> {:halt, error}
+          end
+
+        {:error, _reason} ->
+          {:halt, error(:sidecar_unavailable)}
+
+        _ ->
+          {:halt, error(:sidecar_unavailable)}
+      end
     end)
-
-    :ok
   end
 
-  defp clear_snapshot_sidecars(agent_id, previous, snapshot) do
-    [previous, snapshot]
-    |> Enum.reject(&is_nil/1)
-    |> Enum.flat_map(&sidecar_keys/1)
-    |> Enum.uniq()
-    |> Enum.each(fn {domain, item_id} ->
-      _ = Provenance.delete(domain, agent_id, item_id)
-    end)
-
-    :ok
-  end
-
-  defp sidecar_keys(snapshot) do
+  defp sidecar_inventory(snapshot) do
     [
-      {@base_domain, @base_sidecar_id},
-      {@aggregate_domain, @aggregate_sidecar_id}
+      {@base_domain, [@base_sidecar_id]},
+      {@aggregate_domain, [@aggregate_sidecar_id]}
     ] ++
-      Enum.flat_map(@collection_specs, fn {field, _key, domain, _max} ->
-        Enum.map(snapshot.items[field], &{domain, &1.id})
+      Enum.map(@collection_specs, fn {field, _key, domain, _max, _id_field} ->
+        {domain, Enum.map(snapshot.items[field], & &1.id)}
       end)
+  end
+
+  defp clear_working_memory_sidecars(agent_id) do
+    Enum.reduce(@working_memory_domains, :ok, fn domain, result ->
+      case Provenance.delete_domain_agent(domain, agent_id) do
+        :ok -> result
+        {:error, _reason} -> error(:sidecar_unavailable)
+        _ -> error(:sidecar_unavailable)
+      end
+    end)
   end
 
   # -- Preparation and labels -------------------------------------------------
@@ -814,7 +925,7 @@ defmodule Arbor.Memory.WorkingMemoryStore do
        %{
          wm: wm,
          payload: payload,
-         base_payload: Map.drop(payload, ["recent_thoughts", "active_goals", "active_skills"]),
+         base_payload: Map.drop(payload, @itemized_payload_keys),
          collections: collections
        }}
     else
@@ -831,23 +942,27 @@ defmodule Arbor.Memory.WorkingMemoryStore do
     do: error(:invalid_working_memory)
 
   defp prepare_collections(wm, payload) do
-    Enum.reduce_while(@collection_specs, {:ok, %{}}, fn {field, durable_key, domain, max},
+    Enum.reduce_while(@collection_specs, {:ok, %{}}, fn {field, durable_key, domain, max,
+                                                         id_field},
                                                         {:ok, acc} ->
       values = Map.get(wm, field)
       serialized = Map.get(payload, durable_key)
+      ids = collection_ids(wm, values, id_field)
 
       valid_shape =
-        is_list(values) and is_list(serialized) and length(values) == length(serialized) and
+        is_list(values) and is_list(serialized) and is_list(ids) and
+          length(values) == length(serialized) and length(values) == length(ids) and
           length(values) <= max
 
       if valid_shape do
         items =
-          Enum.zip(values, serialized)
-          |> Enum.map(fn {value, item_payload} ->
-            %{id: Map.get(value, :id), value: value, payload: item_payload, domain: domain}
+          Enum.zip([values, serialized, ids])
+          |> Enum.map(fn {value, item_payload, id} ->
+            payload = bind_item_payload(id, item_payload, id_field)
+            %{id: id, value: value, payload: payload, domain: domain}
           end)
 
-        case validate_prepared_items(items) do
+        case validate_prepared_items(items, id_field) do
           :ok -> {:cont, {:ok, Map.put(acc, field, %{domain: domain, items: items})}}
           {:error, _reason} = error -> {:halt, error}
         end
@@ -857,16 +972,36 @@ defmodule Arbor.Memory.WorkingMemoryStore do
     end)
   end
 
-  defp validate_prepared_items(items) do
+  defp collection_ids(_wm, values, nil) when is_list(values) do
+    Enum.map(values, fn
+      value when is_map(value) -> Map.get(value, :id)
+      _ -> nil
+    end)
+  end
+
+  defp collection_ids(wm, _values, id_field), do: Map.get(wm, id_field)
+
+  defp validate_prepared_items(items, id_field) do
     ids = Enum.map(items, & &1.id)
 
     valid =
       Enum.all?(items, fn item ->
-        valid_item_id?(item.id) and is_map(item.payload) and item.payload["id"] == item.id
+        valid_item_id?(item.id) and valid_item_payload_identity?(item, id_field)
       end) and length(ids) == MapSet.size(MapSet.new(ids))
 
     if valid, do: :ok, else: error(:invalid_item_identity)
   end
+
+  defp valid_item_payload_identity?(item, nil) do
+    is_map(item.payload) and item.payload["id"] == item.id
+  end
+
+  defp valid_item_payload_identity?(item, _id_field) do
+    exact_string_keys?(item.payload, ["id", "value"]) and item.payload["id"] == item.id
+  end
+
+  defp bind_item_payload(_id, item_payload, nil), do: item_payload
+  defp bind_item_payload(id, item_payload, _id_field), do: %{"id" => id, "value" => item_payload}
 
   defp valid_item_id?(item_id) when is_binary(item_id) do
     byte_size(item_id) <= @max_item_id_bytes and String.valid?(item_id) and
@@ -878,7 +1013,7 @@ defmodule Arbor.Memory.WorkingMemoryStore do
   defp aggregate_label(base, items) do
     labels =
       [base] ++
-        Enum.flat_map(@collection_specs, fn {field, _key, _domain, _max} ->
+        Enum.flat_map(@collection_specs, fn {field, _key, _domain, _max, _id_field} ->
           Enum.map(items[field], & &1.label)
         end)
 
@@ -914,9 +1049,7 @@ defmodule Arbor.Memory.WorkingMemoryStore do
     end
   end
 
-  defp label_record(taint, status, raw_status \\ :verified) do
-    %{taint: taint, status: status, raw_status: raw_status}
-  end
+  defp label_record(taint, status), do: %{taint: taint, status: status}
 
   defp status_for_taint(taint) do
     labels = [taint.source | taint.chain]
@@ -927,13 +1060,6 @@ defmodule Arbor.Memory.WorkingMemoryStore do
       true -> :verified
     end
   end
-
-  defp effective_status(taint, raw_status) do
-    worst_status([status_for_taint(taint), normalize_status(raw_status)])
-  end
-
-  defp normalize_status(status) when status in @statuses, do: status
-  defp normalize_status(_status), do: :invalid_durable_provenance
 
   defp worst_status(statuses) do
     cond do
@@ -953,7 +1079,7 @@ defmodule Arbor.Memory.WorkingMemoryStore do
 
   defp public_read(snapshot) do
     items =
-      Map.new(@collection_specs, fn {field, _key, _domain, _max} ->
+      Map.new(@collection_specs, fn {field, _key, _domain, _max, _id_field} ->
         values =
           Enum.map(snapshot.items[field], fn item ->
             %{
@@ -973,30 +1099,62 @@ defmodule Arbor.Memory.WorkingMemoryStore do
     }
   end
 
-  # -- Bounded compatibility helpers -----------------------------------------
+  # -- Bounded process and compatibility helpers -----------------------------
 
-  defp deletion_snapshots(agent_id) do
-    live =
-      case lookup_raw(agent_id) do
-        {:ok, wm} ->
-          case prepare_working_memory(agent_id, wm) do
-            {:ok, prepared} -> [fallback_snapshot(prepared, TaintEnvelope.missing_fallback())]
-            {:error, _reason} -> []
-          end
+  defp delete_authoritative(agent_id) do
+    case MemoryStore.delete_tainted_authoritative(@namespace, agent_id) do
+      :ok ->
+        with :ok <- clear_working_memory_sidecars(agent_id),
+             :ok <- safe_ets_delete(agent_id) do
+          :ok
+        end
 
-        :not_found ->
-          []
-      end
+      {:error, _reason} = error ->
+        map_memory_store_error(error)
 
-    durable =
-      case load_durable_snapshot(agent_id) do
-        {:ok, snapshot, _source} -> [snapshot]
-        :not_found -> []
-        {:error, _reason} -> []
-      end
-
-    live ++ durable
+      _ ->
+        error(:delete_failed)
+    end
   end
+
+  # The local lock serializes same-node projection transitions. Multi-node
+  # writers are fenced by the authoritative Record generation+revision CAS;
+  # every conflict restarts from a fresh durable observation.
+  defp with_agent_transition(agent_id, fun) when is_function(fun, 0) do
+    lock_id = {{__MODULE__, agent_id}, self()}
+
+    case :global.trans(lock_id, fun, [node()], @transition_lock_retries) do
+      :aborted -> error(:transition_busy)
+      {:aborted, _reason} -> error(:transition_busy)
+      result -> result
+    end
+  rescue
+    _ -> error(:transition_failed)
+  catch
+    :exit, _ -> error(:transition_failed)
+    _, _ -> error(:transition_failed)
+  end
+
+  defp map_memory_store_error({:error, {:memory_store, :critical, reason}})
+       when reason in [
+              :conflict,
+              :durable_unavailable,
+              :insufficient_durability,
+              :inventory_limit_exceeded,
+              :invalid_record,
+              :ambiguous_record
+            ],
+       do: error(reason)
+
+  defp map_memory_store_error({:error, {:memory_store, :invalid_durable_provenance, _reason}}),
+    do: error(:invalid_provenance)
+
+  defp map_memory_store_error({:error, {:memory_store, :invalid_request, _reason}}),
+    do: error(:invalid_request)
+
+  defp map_memory_store_error({:error, :not_found}), do: error(:not_found)
+  defp map_memory_store_error({:error, _reason}), do: error(:durable_load_failed)
+  defp map_memory_store_error(_other), do: error(:durable_load_failed)
 
   defp blank_prepared(agent_id) do
     {:ok, prepared} =
@@ -1042,13 +1200,6 @@ defmodule Arbor.Memory.WorkingMemoryStore do
     end
   rescue
     ArgumentError -> :not_found
-  end
-
-  defp lookup_raw_result(agent_id) do
-    case lookup_raw(agent_id) do
-      {:ok, wm} -> {:ok, wm}
-      :not_found -> {:error, :not_found}
-    end
   end
 
   defp safe_ets_insert(agent_id, wm) do

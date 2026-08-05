@@ -106,7 +106,9 @@ defmodule Arbor.Memory.WorkingMemory do
           active_skills: [active_skill()],
           relationship_context: String.t() | map() | nil,
           concerns: [String.t()],
+          concern_ids: [String.t()],
           curiosity: [String.t()],
+          curiosity_ids: [String.t()],
           engagement_level: float(),
           max_tokens: TokenBudget.spec() | nil,
           model: String.t() | nil,
@@ -126,7 +128,9 @@ defmodule Arbor.Memory.WorkingMemory do
     active_skills: [],
     relationship_context: nil,
     concerns: [],
+    concern_ids: [],
     curiosity: [],
+    curiosity_ids: [],
     engagement_level: 0.5,
     max_tokens: nil,
     model: nil,
@@ -474,9 +478,20 @@ defmodule Arbor.Memory.WorkingMemory do
   """
   @spec add_concern(t(), String.t(), keyword()) :: t()
   def add_concern(wm, concern, opts \\ []) do
+    wm = migrate(wm)
     max = Keyword.get(opts, :max_concerns, @default_max_concerns)
-    new_concerns = [concern | wm.concerns] |> Enum.uniq() |> Enum.take(max)
-    %{wm | concerns: new_concerns}
+
+    existing_id =
+      wm
+      |> scalar_pairs(:concerns)
+      |> Enum.find_value(fn {value, id} -> if value == concern, do: id end)
+
+    pairs =
+      [{concern, existing_id || generate_item_id("concern")} | scalar_pairs(wm, :concerns)]
+      |> Enum.uniq_by(&elem(&1, 0))
+      |> Enum.take(max)
+
+    put_scalar_pairs(wm, :concerns, pairs)
   end
 
   @doc """
@@ -484,7 +499,9 @@ defmodule Arbor.Memory.WorkingMemory do
   """
   @spec resolve_concern(t(), String.t()) :: t()
   def resolve_concern(wm, concern) do
-    %{wm | concerns: Enum.reject(wm.concerns, &(&1 == concern))}
+    wm = migrate(wm)
+    pairs = Enum.reject(scalar_pairs(wm, :concerns), &(elem(&1, 0) == concern))
+    put_scalar_pairs(wm, :concerns, pairs)
   end
 
   @doc """
@@ -492,9 +509,20 @@ defmodule Arbor.Memory.WorkingMemory do
   """
   @spec add_curiosity(t(), String.t(), keyword()) :: t()
   def add_curiosity(wm, item, opts \\ []) do
+    wm = migrate(wm)
     max = Keyword.get(opts, :max_curiosity, @default_max_curiosity)
-    new_curiosity = [item | wm.curiosity] |> Enum.uniq() |> Enum.take(max)
-    %{wm | curiosity: new_curiosity}
+
+    existing_id =
+      wm
+      |> scalar_pairs(:curiosity)
+      |> Enum.find_value(fn {value, id} -> if value == item, do: id end)
+
+    pairs =
+      [{item, existing_id || generate_item_id("curiosity")} | scalar_pairs(wm, :curiosity)]
+      |> Enum.uniq_by(&elem(&1, 0))
+      |> Enum.take(max)
+
+    put_scalar_pairs(wm, :curiosity, pairs)
   end
 
   @doc """
@@ -502,7 +530,9 @@ defmodule Arbor.Memory.WorkingMemory do
   """
   @spec satisfy_curiosity(t(), String.t()) :: t()
   def satisfy_curiosity(wm, item) do
-    %{wm | curiosity: Enum.reject(wm.curiosity, &(&1 == item))}
+    wm = migrate(wm)
+    pairs = Enum.reject(scalar_pairs(wm, :curiosity), &(elem(&1, 0) == item))
+    put_scalar_pairs(wm, :curiosity, pairs)
   end
 
   # ============================================================================
@@ -646,7 +676,9 @@ defmodule Arbor.Memory.WorkingMemory do
       "active_skills" => Enum.map(wm.active_skills, &serialize_active_skill/1),
       "relationship_context" => wm.relationship_context,
       "concerns" => wm.concerns,
+      "concern_ids" => wm.concern_ids,
       "curiosity" => wm.curiosity,
+      "curiosity_ids" => wm.curiosity_ids,
       "engagement_level" => wm.engagement_level,
       "max_tokens" => serialize_token_spec(wm.max_tokens),
       "model" => wm.model,
@@ -670,6 +702,8 @@ defmodule Arbor.Memory.WorkingMemory do
     started_at = parse_datetime(get_field(data, :started_at))
     item_fallback_datetime = started_at || @legacy_epoch
     owner_seed = legacy_owner_seed(agent_id, item_fallback_datetime)
+    concerns = proper_list(get_field(data, :concerns, []))
+    curiosity = proper_list(get_field(data, :curiosity, []))
 
     %__MODULE__{
       agent_id: agent_id,
@@ -698,8 +732,22 @@ defmodule Arbor.Memory.WorkingMemory do
           item_fallback_datetime
         ),
       relationship_context: get_field(data, :relationship_context),
-      concerns: proper_list(get_field(data, :concerns, [])),
-      curiosity: proper_list(get_field(data, :curiosity, [])),
+      concerns: concerns,
+      concern_ids:
+        stable_scalar_ids(
+          concerns,
+          get_field(data, :concern_ids, []),
+          :concern,
+          owner_seed
+        ),
+      curiosity: curiosity,
+      curiosity_ids:
+        stable_scalar_ids(
+          curiosity,
+          get_field(data, :curiosity_ids, []),
+          :curiosity,
+          owner_seed
+        ),
       engagement_level: numeric_or_default(get_field(data, :engagement_level), 0.5),
       max_tokens: deserialize_token_spec(get_field(data, :max_tokens)),
       model: get_field(data, :model),
@@ -742,8 +790,10 @@ defmodule Arbor.Memory.WorkingMemory do
       | recent_thoughts: wm.recent_thoughts || [],
         active_goals: wm.active_goals || [],
         active_skills: wm.active_skills || [],
-        curiosity: wm.curiosity || [],
-        concerns: wm.concerns || [],
+        curiosity: proper_list(wm.curiosity || []),
+        curiosity_ids: proper_list(wm.curiosity_ids || []),
+        concerns: proper_list(wm.concerns || []),
+        concern_ids: proper_list(wm.concern_ids || []),
         engagement_level: wm.engagement_level || 0.5,
         started_at: wm.started_at,
         thought_count: wm.thought_count || 0
@@ -766,7 +816,9 @@ defmodule Arbor.Memory.WorkingMemory do
         active_goals:
           deserialize_collection(wm.active_goals, :goal, owner_seed, item_fallback_datetime),
         active_skills:
-          deserialize_collection(wm.active_skills, :skill, owner_seed, item_fallback_datetime)
+          deserialize_collection(wm.active_skills, :skill, owner_seed, item_fallback_datetime),
+        concern_ids: stable_scalar_ids(wm.concerns, wm.concern_ids, :concern, owner_seed),
+        curiosity_ids: stable_scalar_ids(wm.curiosity, wm.curiosity_ids, :curiosity, owner_seed)
     }
   end
 
@@ -1187,7 +1239,7 @@ defmodule Arbor.Memory.WorkingMemory do
       wm
     else
       trimmed = Enum.take(list, length(list) - 1)
-      new_wm = Map.put(wm, field, trimmed)
+      new_wm = put_trimmed_list(wm, field, trimmed)
       current_tokens = TokenBudget.estimate_tokens(to_prompt_text(new_wm))
 
       if current_tokens <= max_tokens do
@@ -1412,6 +1464,63 @@ defmodule Arbor.Memory.WorkingMemory do
   defp item_id_prefix(:thought), do: "thought"
   defp item_id_prefix(:goal), do: "goal"
   defp item_id_prefix(:skill), do: "skill"
+  defp item_id_prefix(:concern), do: "concern"
+  defp item_id_prefix(:curiosity), do: "curiosity"
+
+  defp stable_scalar_ids(values, raw_ids, kind, owner_seed) do
+    ids = proper_list(raw_ids)
+    missing_count = max(length(values) - length(ids), 0)
+    existing_count = length(ids)
+
+    values
+    |> Enum.with_index()
+    |> Enum.reduce({[], MapSet.new()}, fn {_value, index}, {acc, seen_ids} ->
+      candidate =
+        if index < missing_count do
+          unique_legacy_item_id(kind, owner_seed, existing_count + index, seen_ids)
+        else
+          ids
+          |> Enum.at(index - missing_count)
+          |> valid_id_or_fallback(unique_legacy_item_id(kind, owner_seed, index, seen_ids))
+        end
+
+      id =
+        if MapSet.member?(seen_ids, candidate) do
+          unique_legacy_item_id(kind, owner_seed, index, seen_ids, index + 1)
+        else
+          candidate
+        end
+
+      {[id | acc], MapSet.put(seen_ids, id)}
+    end)
+    |> elem(0)
+    |> Enum.reverse()
+  end
+
+  defp scalar_pairs(wm, :concerns), do: Enum.zip(wm.concerns, wm.concern_ids)
+  defp scalar_pairs(wm, :curiosity), do: Enum.zip(wm.curiosity, wm.curiosity_ids)
+
+  defp put_scalar_pairs(wm, :concerns, pairs) do
+    %{wm | concerns: Enum.map(pairs, &elem(&1, 0)), concern_ids: Enum.map(pairs, &elem(&1, 1))}
+  end
+
+  defp put_scalar_pairs(wm, :curiosity, pairs) do
+    %{
+      wm
+      | curiosity: Enum.map(pairs, &elem(&1, 0)),
+        curiosity_ids: Enum.map(pairs, &elem(&1, 1))
+    }
+  end
+
+  defp put_trimmed_list(wm, :concerns, trimmed) do
+    %{wm | concerns: trimmed, concern_ids: Enum.take(wm.concern_ids, length(trimmed))}
+  end
+
+  defp put_trimmed_list(wm, :curiosity, trimmed) do
+    %{wm | curiosity: trimmed, curiosity_ids: Enum.take(wm.curiosity_ids, length(trimmed))}
+  end
+
+  defp put_trimmed_list(wm, field, trimmed), do: Map.put(wm, field, trimmed)
 
   defp ensure_runtime_item_id(item, prefix) do
     Map.update(item, :id, generate_item_id(prefix), &valid_id_or_new(&1, prefix))

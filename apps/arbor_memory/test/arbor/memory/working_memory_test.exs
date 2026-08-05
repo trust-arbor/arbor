@@ -18,7 +18,9 @@ defmodule Arbor.Memory.WorkingMemoryTest do
       assert wm.active_goals == []
       assert wm.relationship_context == nil
       assert wm.concerns == []
+      assert wm.concern_ids == []
       assert wm.curiosity == []
+      assert wm.curiosity_ids == []
       assert wm.engagement_level == 0.5
       assert wm.version == 4
       assert wm.name == nil
@@ -513,6 +515,8 @@ defmodule Arbor.Memory.WorkingMemoryTest do
         |> WorkingMemory.add_concern("Concern 1")
 
       assert wm.concerns == ["Concern 1", "Concern 2"]
+      assert length(wm.concern_ids) == 2
+      assert length(Enum.uniq(wm.concern_ids)) == 2
     end
 
     test "resolve_concern/2 removes concern" do
@@ -523,6 +527,7 @@ defmodule Arbor.Memory.WorkingMemoryTest do
         |> WorkingMemory.resolve_concern("A")
 
       assert wm.concerns == ["B"]
+      assert length(wm.concern_ids) == 1
     end
   end
 
@@ -535,6 +540,8 @@ defmodule Arbor.Memory.WorkingMemoryTest do
         |> WorkingMemory.add_curiosity("Item 1")
 
       assert wm.curiosity == ["Item 1", "Item 2"]
+      assert length(wm.curiosity_ids) == 2
+      assert length(Enum.uniq(wm.curiosity_ids)) == 2
     end
 
     test "satisfy_curiosity/2 removes item" do
@@ -545,6 +552,7 @@ defmodule Arbor.Memory.WorkingMemoryTest do
         |> WorkingMemory.satisfy_curiosity("A")
 
       assert wm.curiosity == ["B"]
+      assert length(wm.curiosity_ids) == 1
     end
   end
 
@@ -688,6 +696,8 @@ defmodule Arbor.Memory.WorkingMemoryTest do
       assert context.active_goals == ["Goal 1"]
       assert context.recent_thoughts == ["Thought 1"]
       assert is_float(context.engagement_level)
+      refute Map.has_key?(context, :concern_ids)
+      refute Map.has_key?(context, :curiosity_ids)
     end
   end
 
@@ -725,7 +735,9 @@ defmodule Arbor.Memory.WorkingMemoryTest do
       assert deserialized.current_conversation == original.current_conversation
       assert deserialized.relationship_context == original.relationship_context
       assert deserialized.concerns == original.concerns
+      assert deserialized.concern_ids == original.concern_ids
       assert deserialized.curiosity == original.curiosity
+      assert deserialized.curiosity_ids == original.curiosity_ids
       assert deserialized.engagement_level == original.engagement_level
       assert deserialized.version == original.version
       assert deserialized.thought_count == original.thought_count
@@ -806,6 +818,8 @@ defmodule Arbor.Memory.WorkingMemoryTest do
         "active_skills" => [
           %{"name" => "research", "description" => "", "body" => "legacy body"}
         ],
+        "concerns" => ["legacy concern", "second concern"],
+        "curiosity" => ["legacy curiosity"],
         "version" => 3
       }
 
@@ -818,7 +832,9 @@ defmodule Arbor.Memory.WorkingMemoryTest do
         %{
           thoughts: Enum.map(wm.recent_thoughts, & &1.id),
           goals: Enum.map(wm.active_goals, & &1.id),
-          skills: Enum.map(wm.active_skills, & &1.id)
+          skills: Enum.map(wm.active_skills, & &1.id),
+          concerns: wm.concern_ids,
+          curiosity: wm.curiosity_ids
         }
       end
 
@@ -847,6 +863,34 @@ defmodule Arbor.Memory.WorkingMemoryTest do
       assert Enum.all?(ids, &(byte_size(&1) <= 128))
     end
 
+    test "concern and curiosity IDs survive deduplication, trim, and round trip" do
+      wm =
+        WorkingMemory.new("agent_scalar_ids", rebuild_from_signals: false)
+        |> WorkingMemory.add_concern("one")
+        |> WorkingMemory.add_concern("two")
+        |> WorkingMemory.add_curiosity("alpha")
+        |> WorkingMemory.add_curiosity("beta")
+
+      concern_one_id = Enum.at(wm.concern_ids, 1)
+      curiosity_alpha_id = Enum.at(wm.curiosity_ids, 1)
+
+      wm =
+        wm
+        |> WorkingMemory.add_concern("one", max_concerns: 2)
+        |> WorkingMemory.add_curiosity("alpha", max_curiosity: 2)
+
+      assert wm.concerns == ["one", "two"]
+      assert hd(wm.concern_ids) == concern_one_id
+      assert wm.curiosity == ["alpha", "beta"]
+      assert hd(wm.curiosity_ids) == curiosity_alpha_id
+
+      restored = wm |> WorkingMemory.serialize() |> WorkingMemory.deserialize()
+      assert restored.concern_ids == wm.concern_ids
+      assert restored.curiosity_ids == wm.curiosity_ids
+      assert restored.concerns == wm.concerns
+      assert restored.curiosity == wm.curiosity
+    end
+
     test "deserialize and migrate remain total for malformed legacy records" do
       assert %WorkingMemory{version: 4, recent_thoughts: [], active_goals: []} =
                WorkingMemory.deserialize(%{
@@ -865,6 +909,7 @@ defmodule Arbor.Memory.WorkingMemoryTest do
       assert %WorkingMemory{
                recent_thoughts: [],
                active_goals: [],
+               active_skills: [],
                concerns: [],
                curiosity: []
              } =
@@ -872,8 +917,11 @@ defmodule Arbor.Memory.WorkingMemoryTest do
                  "agent_id" => "agent_improper",
                  "recent_thoughts" => improper,
                  "active_goals" => improper,
+                 "active_skills" => improper,
                  "concerns" => improper,
-                 "curiosity" => improper
+                 "concern_ids" => improper,
+                 "curiosity" => improper,
+                 "curiosity_ids" => improper
                })
     end
 
