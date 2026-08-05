@@ -217,19 +217,21 @@ defmodule Arbor.Memory.GoalIntentOps do
   defdelegate unlock_stale_intents(agent_id, timeout_ms \\ 60_000), to: IntentStore
 
   @doc """
-  Export non-completed intents with status info for Seed capture.
+  Export non-completed intents with payload-bound provenance for Seed capture.
 
-  Returns serializable maps suitable for `import_intents/2`.
+  Returns versioned serializable entries whose intent and status envelopes retain
+  their exact labels through `import_intents/2`.
   """
   @spec export_pending_intents(String.t()) :: [map()]
   defdelegate export_pending_intents(agent_id), to: IntentStore
 
   @doc """
-  Import intents from a previous export, restoring pending work.
+  Import intents from a versioned export, restoring pending work and exact labels.
 
-  Skips intents that already exist (by ID).
+  Skips intents that already exist (by ID). Legacy flattened entries receive
+  conservative missing-provenance labels.
   """
-  @spec import_intents(String.t(), [map()]) :: :ok
+  @spec import_intents(String.t(), [map()]) :: :ok | {:error, atom()}
   defdelegate import_intents(agent_id, intent_maps), to: IntentStore
 
   # ============================================================================

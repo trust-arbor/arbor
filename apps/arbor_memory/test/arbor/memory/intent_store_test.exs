@@ -1,13 +1,18 @@
 defmodule Arbor.Memory.IntentStoreTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Arbor.Contracts.Memory.Intent
   alias Arbor.Contracts.Memory.Percept
   alias Arbor.Memory.IntentStore
+  alias Arbor.Persistence.BufferedStore
 
   @moduletag :fast
 
   setup do
+    start_supervised!(
+      {BufferedStore, name: :arbor_memory_durable, backend: nil, write_mode: :sync}
+    )
+
     agent_id = "test_agent_#{System.unique_integer([:positive])}"
     on_exit(fn -> IntentStore.clear(agent_id) end)
     %{agent_id: agent_id}
