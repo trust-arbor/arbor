@@ -32,6 +32,12 @@ defmodule Arbor.Persistence.VectorStore.EctoSQLiteTest do
       adapter: Ecto.Adapters.SQLite3
   end
 
+  defmodule RollbackRepo do
+    use Ecto.Repo,
+      otp_app: :arbor_persistence,
+      adapter: Ecto.Adapters.SQLite3
+  end
+
   setup_all do
     database =
       Path.join(
@@ -129,6 +135,63 @@ defmodule Arbor.Persistence.VectorStore.EctoSQLiteTest do
              WHERE type = 'index'
                AND name = 'memory_embeddings_agent_id_content_hash_index'
              """)
+  end
+
+  test "security regression: preparation rollback refuses to destroy V1 state" do
+    database =
+      Path.join(
+        System.tmp_dir!(),
+        "arbor-vector-rollback-#{System.unique_integer([:positive])}.sqlite3"
+      )
+
+    start_supervised!(
+      {RollbackRepo,
+       database: database, pool: DBConnection.ConnectionPool, pool_size: 1, busy_timeout: 5_000}
+    )
+
+    on_exit(fn ->
+      Enum.each([database, database <> "-shm", database <> "-wal"], &File.rm/1)
+    end)
+
+    create_legacy_table!(RollbackRepo)
+
+    assert :ok ==
+             Ecto.Migrator.up(RollbackRepo, @migration_version, @migration_module, log: false)
+
+    now = DateTime.utc_now() |> DateTime.to_iso8601()
+
+    RollbackRepo.query!("""
+    INSERT INTO memory_embeddings (
+      id, agent_id, content, content_hash, embedding,
+      source_namespace, source_key, generation, revision, tombstone,
+      inserted_at, updated_at
+    ) VALUES (
+      'vec_rollback', 'agent_rollback', '{}', '#{String.duplicate("a", 64)}', '[1.0]',
+      'voice', 'source', 1, 1, 0, '#{now}', '#{now}'
+    )
+    """)
+
+    RollbackRepo.query!("""
+    INSERT INTO vector_operation_receipts (
+      operation_fingerprint, agent_id, operation_kind,
+      operation_json, operation_digest, receipt_json, receipt_digest, inserted_at
+    ) VALUES (
+      '#{String.duplicate("b", 64)}', 'agent_rollback', 'insert',
+      '{}', '#{String.duplicate("c", 64)}', '{}', '#{String.duplicate("d", 64)}', '#{now}'
+    )
+    """)
+
+    assert_raise RuntimeError, ~r/irreversible migration/, fn ->
+      Ecto.Migrator.down(RollbackRepo, @migration_version, @migration_module, log: false)
+    end
+
+    assert %{rows: [[1]]} =
+             RollbackRepo.query!(
+               "SELECT COUNT(*) FROM memory_embeddings WHERE id = 'vec_rollback'"
+             )
+
+    assert %{rows: [[1]]} =
+             RollbackRepo.query!("SELECT COUNT(*) FROM vector_operation_receipts")
   end
 
   test "equal payloads persist under distinct logical identities", %{agent_id: agent_id} do
@@ -275,8 +338,8 @@ defmodule Arbor.Persistence.VectorStore.EctoSQLiteTest do
     end
   end
 
-  defp create_legacy_table! do
-    SQLiteRepo.query!("""
+  defp create_legacy_table!(repo \\ SQLiteRepo) do
+    repo.query!("""
     CREATE TABLE memory_embeddings (
       id TEXT PRIMARY KEY,
       agent_id TEXT NOT NULL,
@@ -291,7 +354,7 @@ defmodule Arbor.Persistence.VectorStore.EctoSQLiteTest do
     )
     """)
 
-    SQLiteRepo.query!("""
+    repo.query!("""
     CREATE UNIQUE INDEX memory_embeddings_agent_id_content_hash_index
     ON memory_embeddings (agent_id, content_hash)
     """)

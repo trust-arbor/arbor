@@ -6,10 +6,17 @@ the vector-store protocol and does not remove or reinterpret the existing
 index.
 
 New vector-store writes populate the nullable V1 columns and dual-write the
-legacy non-null columns. `source_namespace IS NOT NULL` marks a V1-managed row.
-The legacy `content_hash` mirror is identity-scoped so equal canonical payloads
-can exist under distinct logical identities; `payload_digest` remains the exact
-canonical payload digest.
+legacy non-null columns. The backend-owned `vector_protocol` value
+`arbor_vector_store_v1` marks a V1-managed row; legacy operations additionally
+require a null `source_namespace`. The legacy `content_hash` mirror is
+identity-scoped so equal canonical payloads can exist under distinct logical
+identities; `payload_digest` remains the exact canonical payload digest.
+
+The preparation and protocol-isolation migrations are intentionally
+irreversible. Their `down/0` callbacks refuse to drop authority columns,
+protocol markers, or immutable receipts. Reversal requires a separately
+approved migration that drains writers, exports and verifies V1 state, and
+defines how every receipt remains reconcilable.
 
 A later operator-approved maintenance window must:
 

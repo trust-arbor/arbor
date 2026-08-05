@@ -63,27 +63,10 @@ defmodule Arbor.Persistence.Repo.Migrations.PrepareVectorStoreV1 do
   end
 
   def down do
-    remove_immutable_ledger_guards()
-    drop(table(:vector_operation_receipts))
-
-    execute("DROP INDEX IF EXISTS memory_embeddings_vector_768_hnsw_index")
-    execute("DROP INDEX IF EXISTS memory_embeddings_vector_list_index")
-    execute("DROP INDEX IF EXISTS memory_embeddings_vector_identity_index")
-
-    remove_column_if_exists(:memory_embeddings, :tombstone)
-    remove_column_if_exists(:memory_embeddings, :revision)
-    remove_column_if_exists(:memory_embeddings, :generation)
-    remove_column_if_exists(:memory_embeddings, :category)
-    remove_column_if_exists(:memory_embeddings, :encoding)
-    remove_column_if_exists(:memory_embeddings, :dimensions)
-    remove_column_if_exists(:memory_embeddings, :model_id)
-    remove_column_if_exists(:memory_embeddings, :vector_digest)
-    remove_column_if_exists(:memory_embeddings, :vector_bytes)
-    remove_column_if_exists(:memory_embeddings, :vector_768)
-    remove_column_if_exists(:memory_embeddings, :payload_digest)
-    remove_column_if_exists(:memory_embeddings, :canonical_payload)
-    remove_column_if_exists(:memory_embeddings, :source_key)
-    remove_column_if_exists(:memory_embeddings, :source_namespace)
+    raise """
+    irreversible migration: vector-store V1 rows and immutable operation receipts may
+    contain committed state; use a separately approved reversal migration
+    """
   end
 
   defp add_vector_768_if_missing do
@@ -131,20 +114,6 @@ defmodule Arbor.Persistence.Repo.Migrations.PrepareVectorStoreV1 do
         SELECT RAISE(ABORT, 'vector_operation_receipts is immutable');
       END
       """)
-    end
-  end
-
-  defp remove_immutable_ledger_guards do
-    if postgres?() do
-      execute(
-        "DROP TRIGGER IF EXISTS vector_operation_receipts_reject_mutation " <>
-          "ON vector_operation_receipts"
-      )
-
-      execute("DROP FUNCTION IF EXISTS arbor_vector_receipt_ledger_immutable()")
-    else
-      execute("DROP TRIGGER IF EXISTS vector_operation_receipts_reject_update")
-      execute("DROP TRIGGER IF EXISTS vector_operation_receipts_reject_delete")
     end
   end
 end
