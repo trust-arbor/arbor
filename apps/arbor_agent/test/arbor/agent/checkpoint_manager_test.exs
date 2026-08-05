@@ -1,9 +1,12 @@
 defmodule Arbor.Agent.CheckpointManagerTest do
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   alias Arbor.Agent.CheckpointManager
   alias Arbor.Agent.Seed
   alias Arbor.Agent.Test.TestAgent
+  alias Arbor.Memory
   alias Arbor.Persistence.Checkpoint
   alias Arbor.Persistence.Checkpoint.Store.Agent, as: CheckpointStoreAgent
   alias Arbor.Persistence.Checkpoint.Store.ETS, as: CheckpointStoreETS
@@ -272,6 +275,76 @@ defmodule Arbor.Agent.CheckpointManagerTest do
 
       # Should return original state since from_map won't find agent_id
       assert is_map(restored)
+    end
+
+    test "security regression: rejected Seed restore leaves agent state unchanged" do
+      state = seed_state(%{query_count: 10, responded_to_last_user_message: true})
+
+      checkpoint_data = %{
+        "id" => "seed_rejected_restore",
+        "agent_id" => "test-seed-agent",
+        "seed_version" => 1,
+        "version" => 1,
+        "metadata" => %{
+          "query_count" => 42,
+          "responded_to_last_user_message" => false
+        },
+        "working_memory" => nil,
+        "goals" => %{"snapshot_kind" => "arbor_goal_provenance"},
+        "recent_intents" => [],
+        "recent_percepts" => []
+      }
+
+      assert CheckpointManager.apply_checkpoint(state, checkpoint_data) == state
+    end
+
+    test "security regression: cross-agent Seed checkpoint is rejected pre-effect" do
+      local_agent_id = "checkpoint_local_agent"
+      foreign_agent_id = "checkpoint_foreign_agent"
+      state = seed_state(%{id: local_agent_id, query_count: 10})
+
+      _ = Memory.delete_working_memory(local_agent_id)
+      _ = Memory.delete_working_memory(foreign_agent_id)
+
+      on_exit(fn ->
+        _ = Memory.delete_working_memory(local_agent_id)
+        _ = Memory.delete_working_memory(foreign_agent_id)
+      end)
+
+      foreign_working_memory = %{
+        "agent_id" => foreign_agent_id,
+        "recent_thoughts" => ["must not be restored"]
+      }
+
+      checkpoint_data = %{
+        "id" => "seed_cross_agent",
+        "agent_id" => foreign_agent_id,
+        "seed_version" => 1,
+        "version" => 1,
+        "metadata" => %{"query_count" => 42},
+        "working_memory" => foreign_working_memory,
+        "goals" => [],
+        "recent_intents" => [],
+        "recent_percepts" => []
+      }
+
+      parent = self()
+
+      log =
+        capture_log([format: "$message $metadata\n", metadata: :all], fn ->
+          send(
+            parent,
+            {:applied_state, CheckpointManager.apply_checkpoint(state, checkpoint_data)}
+          )
+        end)
+
+      assert_receive {:applied_state, ^state}
+      assert Memory.get_working_memory(local_agent_id) == nil
+      assert Memory.get_working_memory(foreign_agent_id) == nil
+      assert log =~ "Checkpoint Seed identity mismatch"
+      refute log =~ local_agent_id
+      refute log =~ foreign_agent_id
+      refute log =~ "must not be restored"
     end
   end
 

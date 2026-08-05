@@ -34,6 +34,7 @@ defmodule Arbor.Agent.Seed do
   require Logger
 
   alias Arbor.Common.SafeAtom
+  alias Arbor.Contracts.Security.TaintEnvelope
   alias Arbor.Memory
 
   @seed_version 1
@@ -244,6 +245,9 @@ defmodule Arbor.Agent.Seed do
   Restore seed state to all subsystems.
 
   Pushes captured data back to WorkingMemory, KnowledgeGraph, GoalStore, etc.
+  WorkingMemory and goal provenance are both validated before either domain is
+  mutated. Runtime failures while applying valid snapshots are surfaced, but
+  the independent stores do not provide a cross-domain transaction.
 
   ## Options
 
@@ -257,8 +261,9 @@ defmodule Arbor.Agent.Seed do
     emit = Keyword.get(opts, :emit_signals, true)
     agent_id = seed.agent_id
 
-    with :ok <- maybe_restore_working_memory(skip, agent_id, seed.working_memory),
-         :ok <- if(:goals in skip, do: :ok, else: restore_goals(agent_id, seed.goals)) do
+    with :ok <- preflight_restore(skip, agent_id, seed.working_memory, seed.goals),
+         :ok <- maybe_restore_working_memory(skip, agent_id, seed.working_memory),
+         :ok <- maybe_restore_goals(skip, agent_id, seed.goals) do
       unless :knowledge_graph in skip do
         restore_knowledge_graph(agent_id, seed.knowledge_graph)
       end
@@ -652,6 +657,88 @@ defmodule Arbor.Agent.Seed do
   # ============================================================================
   # Private — Restore Helpers
   # ============================================================================
+
+  defp preflight_restore(skip, agent_id, working_memory, goals) do
+    with :ok <- preflight_working_memory(skip, agent_id, working_memory),
+         :ok <- preflight_goals(skip, agent_id, goals) do
+      :ok
+    end
+  end
+
+  defp preflight_working_memory(skip, agent_id, working_memory) when is_list(skip) do
+    if :working_memory in skip,
+      do: :ok,
+      else: validate_working_memory_before_restore(agent_id, working_memory)
+  end
+
+  defp validate_working_memory_before_restore(_agent_id, nil), do: :ok
+
+  defp validate_working_memory_before_restore(agent_id, working_memory) do
+    if Memory.working_memory_provenance_snapshot?(working_memory) do
+      case Memory.validate_working_memory_provenance_snapshot(agent_id, working_memory) do
+        :ok -> :ok
+        _ -> {:error, :working_memory_snapshot_invalid}
+      end
+    else
+      validate_legacy_working_memory(agent_id, working_memory)
+    end
+  rescue
+    _ -> working_memory_preflight_error(working_memory)
+  catch
+    _, _ -> working_memory_preflight_error(working_memory)
+  end
+
+  defp validate_legacy_working_memory(agent_id, working_memory) when is_map(working_memory) do
+    restored = Memory.deserialize_working_memory(working_memory)
+
+    with ^agent_id <- Map.get(restored, :agent_id),
+         serialized when is_map(serialized) <- Memory.serialize_working_memory(restored),
+         {:ok, _digest} <- TaintEnvelope.payload_sha256(serialized) do
+      :ok
+    else
+      _ -> {:error, :working_memory_restore_failed}
+    end
+  rescue
+    _ -> {:error, :working_memory_restore_failed}
+  catch
+    _, _ -> {:error, :working_memory_restore_failed}
+  end
+
+  defp validate_legacy_working_memory(_agent_id, _working_memory),
+    do: {:error, :working_memory_restore_failed}
+
+  defp working_memory_preflight_error(working_memory) do
+    if Memory.working_memory_provenance_snapshot?(working_memory),
+      do: {:error, :working_memory_snapshot_invalid},
+      else: {:error, :working_memory_restore_failed}
+  end
+
+  defp preflight_goals(skip, agent_id, goals) when is_list(skip) do
+    if :goals in skip do
+      :ok
+    else
+      result =
+        cond do
+          goals == [] ->
+            :ok
+
+          Memory.goal_provenance_snapshot?(goals) ->
+            Memory.validate_goal_provenance_snapshot(agent_id, goals)
+
+          true ->
+            Memory.validate_goal_import(agent_id, goals)
+        end
+
+      case result do
+        :ok -> :ok
+        _ -> {:error, :invalid_provenance}
+      end
+    end
+  rescue
+    _ -> {:error, :invalid_provenance}
+  catch
+    _, _ -> {:error, :invalid_provenance}
+  end
 
   defp maybe_restore_working_memory(skip, agent_id, working_memory) do
     if :working_memory in skip,

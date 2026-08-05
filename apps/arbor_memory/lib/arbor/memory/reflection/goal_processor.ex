@@ -112,7 +112,7 @@ defmodule Arbor.Memory.Reflection.GoalProcessor do
         Logger.info("New goal created via reflection",
           agent_id: agent_id,
           goal_id: saved_goal.id,
-          description: goal_data["description"]
+          status: saved_goal.status
         )
 
       _ ->

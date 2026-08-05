@@ -341,6 +341,80 @@ defmodule Arbor.Agent.SeedTest do
       assert :ok = GoalStore.clear_goals(@agent_id)
     end
 
+    test "security regression: corrupt exact working memory cannot partially restore valid goals" do
+      {seed, current_working_memory, current_goals} = cross_domain_seed_fixture()
+
+      corrupt_working_memory =
+        put_in(
+          seed.working_memory,
+          ["outer_envelope", "payload_sha256"],
+          String.duplicate("0", 64)
+        )
+
+      assert {:error, {:restore_failed, :working_memory_snapshot_invalid}} =
+               Seed.restore(%{seed | working_memory: corrupt_working_memory})
+
+      assert {:ok, ^current_working_memory} =
+               Memory.export_working_memory_provenance_snapshot(@agent_id)
+
+      assert {:ok, ^current_goals} = Memory.export_goal_provenance_snapshot(@agent_id)
+    end
+
+    test "security regression: corrupt or partial goals cannot partially restore valid working memory" do
+      {seed, current_working_memory, current_goals} = cross_domain_seed_fixture()
+
+      corrupt_goals =
+        put_in(
+          seed.goals,
+          ["outer_envelope", "payload_sha256"],
+          String.duplicate("0", 64)
+        )
+
+      [exact_record] = seed.goals["goal_store"]["goals"]
+      partial_goals = [Map.delete(exact_record, "provenance")]
+
+      for malformed_goals <- [corrupt_goals, partial_goals] do
+        assert {:error, {:restore_failed, :invalid_goal_snapshot}} =
+                 Seed.restore(%{seed | goals: malformed_goals})
+
+        assert {:ok, ^current_working_memory} =
+                 Memory.export_working_memory_provenance_snapshot(@agent_id)
+
+        assert {:ok, ^current_goals} = Memory.export_goal_provenance_snapshot(@agent_id)
+      end
+    end
+
+    test "exact snapshot preflight honors each independent skip option" do
+      {seed, current_working_memory, current_goals} = cross_domain_seed_fixture()
+
+      corrupt_working_memory =
+        put_in(
+          seed.working_memory,
+          ["outer_envelope", "payload_sha256"],
+          String.duplicate("0", 64)
+        )
+
+      corrupt_goals =
+        put_in(
+          seed.goals,
+          ["outer_envelope", "payload_sha256"],
+          String.duplicate("0", 64)
+        )
+
+      assert {:ok, _seed} =
+               Seed.restore(%{seed | working_memory: corrupt_working_memory, goals: []},
+                 skip: [:working_memory]
+               )
+
+      assert {:ok, _seed} =
+               Seed.restore(%{seed | working_memory: nil, goals: corrupt_goals}, skip: [:goals])
+
+      assert {:ok, ^current_working_memory} =
+               Memory.export_working_memory_provenance_snapshot(@agent_id)
+
+      assert {:ok, ^current_goals} = Memory.export_goal_provenance_snapshot(@agent_id)
+    end
+
     test "security regression: corrupt exact goal snapshot fails restore" do
       goal = Goal.new("Corrupt exact Seed goal", id: "goal_seed_corrupt_exact")
 
@@ -556,6 +630,69 @@ defmodule Arbor.Agent.SeedTest do
 
       assert {:ok, _} = Seed.restore(seed)
     end
+  end
+
+  defp cross_domain_seed_fixture do
+    {:ok, hostile} =
+      Taint.new(%{
+        level: :hostile,
+        sensitivity: :restricted,
+        sanitizations: 0,
+        confidence: :unverified,
+        source: "seed_cross_domain_incoming",
+        chain: []
+      })
+
+    incoming_memory =
+      @agent_id
+      |> WorkingMemory.new(rebuild_from_signals: false)
+      |> WorkingMemory.add_thought("incoming hostile working memory")
+
+    incoming_goal = Goal.new("incoming hostile goal", id: "goal_seed_cross_domain_incoming")
+
+    assert :ok =
+             WorkingMemoryStore.save_working_memory_tainted(
+               @agent_id,
+               incoming_memory,
+               hostile
+             )
+
+    assert {:ok, ^incoming_goal} =
+             GoalStore.add_goal_tainted(@agent_id, incoming_goal, hostile)
+
+    assert {:ok, seed} = Seed.capture(@agent_id)
+
+    assert :ok = Memory.delete_working_memory(@agent_id)
+    assert :ok = GoalStore.clear_goals(@agent_id)
+
+    {:ok, trusted} =
+      Taint.new(%{
+        level: :trusted,
+        sensitivity: :internal,
+        sanitizations: 0,
+        confidence: :verified,
+        source: "seed_cross_domain_current",
+        chain: []
+      })
+
+    current_memory =
+      @agent_id
+      |> WorkingMemory.new(rebuild_from_signals: false)
+      |> WorkingMemory.add_thought("current working memory must remain")
+
+    current_goal = Goal.new("current goal must remain", id: "goal_seed_cross_domain_current")
+
+    assert :ok =
+             WorkingMemoryStore.save_working_memory_tainted(@agent_id, current_memory, trusted)
+
+    assert {:ok, ^current_goal} = GoalStore.add_goal_tainted(@agent_id, current_goal, trusted)
+
+    assert {:ok, current_working_memory} =
+             Memory.export_working_memory_provenance_snapshot(@agent_id)
+
+    assert {:ok, current_goals} = Memory.export_goal_provenance_snapshot(@agent_id)
+
+    {seed, current_working_memory, current_goals}
   end
 
   defp ensure_goal_runtime do

@@ -106,7 +106,10 @@ defmodule Arbor.Memory.GoalStore do
   @doc "Per-agent goal limit. Reads from Application config, defaults to 50."
   @spec goal_limit() :: pos_integer()
   def goal_limit do
-    Application.get_env(:arbor_memory, :goal_limit_per_agent, @default_goal_limit)
+    case Application.get_env(:arbor_memory, :goal_limit_per_agent, @default_goal_limit) do
+      limit when is_integer(limit) and limit > 0 -> limit
+      _invalid -> @default_goal_limit
+    end
   end
 
   @doc """
@@ -652,6 +655,7 @@ defmodule Arbor.Memory.GoalStore do
   def export_goal_provenance_snapshot(agent_id) do
     with true <- valid_identifier?(agent_id),
          {:ok, entries} <- get_all_goals_tainted(agent_id),
+         :ok <- bounded_goal_snapshot_inventory(entries),
          {:ok, records} <- export_goal_records(entries),
          {:ok, aggregate_taint} <- goal_snapshot_aggregate_taint(entries),
          {:ok, snapshot} <- encode_goal_provenance_snapshot(agent_id, records, aggregate_taint) do
@@ -685,7 +689,13 @@ defmodule Arbor.Memory.GoalStore do
     _, _ -> {:error, :invalid_provenance}
   end
 
-  @doc "Import a previously validated, agent-bound goal provenance snapshot."
+  @doc """
+  Import an agent-bound goal snapshot using additive/upsert semantics.
+
+  Empty snapshots are explicit no-ops, and goals absent from the snapshot remain
+  unchanged. Full replacement requires an atomic durable batch primitive; this
+  API does not emulate replacement with destructive clear-then-import behavior.
+  """
   @spec import_goal_provenance_snapshot(String.t(), term()) ::
           :ok | {:error, persistence_mutation_error()}
   def import_goal_provenance_snapshot(agent_id, snapshot) do
@@ -726,10 +736,13 @@ defmodule Arbor.Memory.GoalStore do
     _, _ -> false
   end
 
+  def goal_provenance_snapshot?(_value), do: false
+
   @doc "Validate legacy or per-record goal import data without performing effects."
   @spec validate_goal_import(String.t(), term()) :: :ok | {:error, :invalid_provenance}
-  def validate_goal_import(agent_id, goal_maps) when is_list(goal_maps) do
+  def validate_goal_import(agent_id, goal_maps) do
     with true <- valid_identifier?(agent_id),
+         :ok <- bounded_goal_snapshot_inventory(goal_maps),
          false <- Enum.any?(goal_maps, &ambiguous_import_goal_identifier?/1),
          {:ok, entries} <- prepare_import_goals(goal_maps),
          true <- length(entries) == length(goal_maps) do
@@ -743,8 +756,6 @@ defmodule Arbor.Memory.GoalStore do
     _, _ -> {:error, :invalid_provenance}
   end
 
-  def validate_goal_import(_agent_id, _goal_maps), do: {:error, :invalid_provenance}
-
   @doc """
   Import goals from serializable maps.
 
@@ -752,28 +763,23 @@ defmodule Arbor.Memory.GoalStore do
   """
   @spec import_goals(String.t(), [map()]) ::
           :ok | {:error, persistence_mutation_error()}
-  def import_goals(agent_id, goal_maps) when is_list(goal_maps) do
-    cond do
-      not valid_identifier?(agent_id) ->
-        {:error, :invalid_provenance}
-
-      Enum.any?(goal_maps, &ambiguous_import_goal_identifier?/1) ->
-        {:error, :invalid_provenance}
-
-      true ->
-        case prepare_import_goals(goal_maps) do
-          {:ok, []} -> :ok
-          {:ok, entries} -> call_owner({:import_goals, agent_id, entries}, :mutation)
-          {:error, _reason} -> {:error, :invalid_provenance}
-        end
+  def import_goals(agent_id, goal_maps) do
+    with true <- valid_identifier?(agent_id),
+         :ok <- bounded_goal_snapshot_inventory(goal_maps),
+         false <- Enum.any?(goal_maps, &ambiguous_import_goal_identifier?/1),
+         {:ok, entries} <- prepare_import_goals(goal_maps) do
+      case entries do
+        [] -> :ok
+        _ -> call_owner({:import_goals, agent_id, entries}, :mutation)
+      end
+    else
+      _ -> {:error, :invalid_provenance}
     end
   rescue
     _ -> {:error, :invalid_provenance}
   catch
     _, _ -> {:error, :invalid_provenance}
   end
-
-  def import_goals(_agent_id, _goal_maps), do: {:error, :invalid_provenance}
 
   # ============================================================================
   # GenServer Callbacks
@@ -1848,7 +1854,8 @@ defmodule Arbor.Memory.GoalStore do
        when is_list(records) do
     payload = %{"agent_id" => agent_id, "goals" => records}
 
-    with {:ok, envelope} <- TaintEnvelope.new(payload, aggregate_taint),
+    with :ok <- bounded_goal_snapshot_inventory(records),
+         {:ok, envelope} <- TaintEnvelope.new(payload, aggregate_taint),
          {:ok, outer_envelope} <- TaintEnvelope.to_map(envelope) do
       {:ok,
        %{
@@ -1872,7 +1879,8 @@ defmodule Arbor.Memory.GoalStore do
          payload when is_map(payload) <- snapshot["goal_store"],
          true <- exact_string_keys?(payload, @goal_snapshot_payload_keys),
          ^agent_id <- payload["agent_id"],
-         records when is_list(records) <- payload["goals"],
+         records = payload["goals"],
+         :ok <- bounded_goal_snapshot_inventory(records),
          {:ok, outer_envelope} <- TaintEnvelope.verify(snapshot["outer_envelope"], payload),
          {:ok, entries} <- prepare_exact_goal_records(records),
          {:ok, aggregate_taint} <- goal_snapshot_aggregate_taint(entries),
@@ -1888,17 +1896,19 @@ defmodule Arbor.Memory.GoalStore do
   end
 
   defp prepare_exact_goal_records(records) when is_list(records) do
-    Enum.reduce_while(records, {:ok, []}, fn record, {:ok, entries} ->
-      with true <- exact_string_keys?(record, @seed_goal_record_keys),
-           {:ok, entry} <- prepare_exact_goal_record(record) do
-        {:cont, {:ok, [entry | entries]}}
-      else
-        _ -> {:halt, {:error, :invalid_provenance}}
+    with :ok <- bounded_goal_snapshot_inventory(records) do
+      Enum.reduce_while(records, {:ok, []}, fn record, {:ok, entries} ->
+        with true <- exact_string_keys?(record, @seed_goal_record_keys),
+             {:ok, entry} <- prepare_exact_goal_record(record) do
+          {:cont, {:ok, [entry | entries]}}
+        else
+          _ -> {:halt, {:error, :invalid_provenance}}
+        end
+      end)
+      |> case do
+        {:ok, entries} -> {:ok, Enum.reverse(entries)}
+        {:error, _reason} = error -> error
       end
-    end)
-    |> case do
-      {:ok, entries} -> {:ok, Enum.reverse(entries)}
-      {:error, _reason} = error -> error
     end
   rescue
     _ -> {:error, :invalid_provenance}
@@ -1931,21 +1941,23 @@ defmodule Arbor.Memory.GoalStore do
   defp goal_snapshot_aggregate_taint([]), do: {:ok, TaintEnvelope.missing_fallback()}
 
   defp goal_snapshot_aggregate_taint(entries) when is_list(entries) do
-    entries
-    |> Enum.reduce_while({:ok, []}, fn
-      {%TaintedValue{taint: %Taint{} = taint}, status}, {:ok, taints}
-      when status in [:verified, :legacy_unlabeled, :invalid_durable_provenance] ->
-        {:cont, {:ok, [taint | taints]}}
+    with :ok <- bounded_goal_snapshot_inventory(entries) do
+      entries
+      |> Enum.reduce_while({:ok, []}, fn
+        {%TaintedValue{taint: %Taint{} = taint}, status}, {:ok, taints}
+        when status in [:verified, :legacy_unlabeled, :invalid_durable_provenance] ->
+          {:cont, {:ok, [taint | taints]}}
 
-      {%Goal{}, _payload, %Taint{} = taint}, {:ok, taints} ->
-        {:cont, {:ok, [taint | taints]}}
+        {%Goal{}, _payload, %Taint{} = taint}, {:ok, taints} ->
+          {:cont, {:ok, [taint | taints]}}
 
-      _entry, _acc ->
-        {:halt, {:error, :invalid_provenance}}
-    end)
-    |> case do
-      {:ok, taints} -> taints |> Enum.reverse() |> Taint.join_many()
-      {:error, _reason} = error -> error
+        _entry, _acc ->
+          {:halt, {:error, :invalid_provenance}}
+      end)
+      |> case do
+        {:ok, taints} -> taints |> Enum.reverse() |> Taint.join_many()
+        {:error, _reason} = error -> error
+      end
     end
   rescue
     _ -> {:error, :invalid_provenance}
@@ -1957,25 +1969,24 @@ defmodule Arbor.Memory.GoalStore do
 
   defp exact_string_keys?(value, expected_keys)
        when is_map(value) and not is_struct(value) and is_list(expected_keys) do
-    keys = Map.keys(value)
-
-    length(keys) == length(expected_keys) and
-      Enum.all?(keys, &is_binary/1) and
-      MapSet.new(keys) == MapSet.new(expected_keys)
+    map_size(value) == length(expected_keys) and
+      Enum.all?(expected_keys, &Map.has_key?(value, &1))
   end
 
   defp exact_string_keys?(_value, _expected_keys), do: false
 
   defp export_goal_records(entries) when is_list(entries) do
-    Enum.reduce_while(entries, {:ok, []}, fn entry, {:ok, exported} ->
-      case export_goal_record(entry) do
-        {:ok, record} -> {:cont, {:ok, [record | exported]}}
-        {:error, _reason} = error -> {:halt, error}
+    with :ok <- bounded_goal_snapshot_inventory(entries) do
+      Enum.reduce_while(entries, {:ok, []}, fn entry, {:ok, exported} ->
+        case export_goal_record(entry) do
+          {:ok, record} -> {:cont, {:ok, [record | exported]}}
+          {:error, _reason} = error -> {:halt, error}
+        end
+      end)
+      |> case do
+        {:ok, exported} -> {:ok, Enum.reverse(exported)}
+        {:error, _reason} = error -> error
       end
-    end)
-    |> case do
-      {:ok, exported} -> {:ok, Enum.reverse(exported)}
-      {:error, _reason} = error -> error
     end
   end
 
@@ -2000,16 +2011,18 @@ defmodule Arbor.Memory.GoalStore do
   defp export_goal_record(_entry), do: {:error, :invalid_provenance}
 
   defp prepare_import_goals(goal_maps) do
-    Enum.reduce_while(goal_maps, {:ok, []}, fn goal_map, {:ok, entries} ->
-      case prepare_import_goal(goal_map) do
-        {:ok, entry} -> {:cont, {:ok, [entry | entries]}}
-        :skip -> {:cont, {:ok, entries}}
-        {:error, _reason} = error -> {:halt, error}
+    with :ok <- bounded_goal_snapshot_inventory(goal_maps) do
+      Enum.reduce_while(goal_maps, {:ok, []}, fn goal_map, {:ok, entries} ->
+        case prepare_import_goal(goal_map) do
+          {:ok, entry} -> {:cont, {:ok, [entry | entries]}}
+          :skip -> {:cont, {:ok, entries}}
+          {:error, _reason} = error -> {:halt, error}
+        end
+      end)
+      |> case do
+        {:ok, entries} -> {:ok, Enum.reverse(entries)}
+        {:error, _reason} = error -> error
       end
-    end)
-    |> case do
-      {:ok, entries} -> {:ok, Enum.reverse(entries)}
-      {:error, _reason} = error -> error
     end
   rescue
     _ -> {:error, :invalid_provenance}
@@ -2090,6 +2103,27 @@ defmodule Arbor.Memory.GoalStore do
   end
 
   defp ambiguous_import_goal_identifier?(_goal_map), do: false
+
+  defp bounded_goal_snapshot_inventory(values) do
+    with configured_limit when is_integer(configured_limit) and configured_limit > 0 <-
+           goal_limit(),
+         taint_limit when is_integer(taint_limit) and taint_limit > 0 <- Taint.max_join_inputs() do
+      bounded_proper_list(values, min(configured_limit, taint_limit), 0)
+    else
+      _ -> {:error, :invalid_provenance}
+    end
+  rescue
+    _ -> {:error, :invalid_provenance}
+  catch
+    _, _ -> {:error, :invalid_provenance}
+  end
+
+  defp bounded_proper_list([], _limit, _count), do: :ok
+
+  defp bounded_proper_list([_value | rest], limit, count) when count < limit,
+    do: bounded_proper_list(rest, limit, count + 1)
+
+  defp bounded_proper_list(_values, _limit, _count), do: {:error, :invalid_provenance}
 
   defp do_import_goals(agent_id, entries, state) do
     Enum.reduce_while(entries, {:ok, state}, fn

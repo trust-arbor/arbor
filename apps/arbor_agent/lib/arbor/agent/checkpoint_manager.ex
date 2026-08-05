@@ -333,36 +333,50 @@ defmodule Arbor.Agent.CheckpointManager do
     agent_id = state[:id] || state[:agent_id]
 
     case Seed.from_map(checkpoint_data) do
-      {:ok, seed} ->
-        # Restore subsystem state (WM, KG, Preferences, Goals)
-        Seed.restore(seed, emit_signals: false)
+      {:ok, %Seed{agent_id: seed_agent_id} = seed}
+      when is_binary(agent_id) and seed_agent_id == agent_id ->
+        case Seed.restore(seed, emit_signals: false) do
+          {:ok, _restored_seed} ->
+            apply_restored_seed_state(state, seed, agent_id)
 
-        # Extract timing fields from seed metadata
-        meta = seed.metadata || %{}
+          {:error, reason} ->
+            Logger.warning("Checkpoint Seed restore rejected for #{agent_id}",
+              restore_error: inspect(reason)
+            )
 
-        state =
-          Map.merge(state, %{
-            last_user_message_at: parse_datetime(meta_get(meta, :last_user_message_at)),
-            last_assistant_output_at: parse_datetime(meta_get(meta, :last_assistant_output_at)),
-            responded_to_last_user_message: meta_get(meta, :responded_to_last_user_message, true),
-            query_count: meta_get(meta, :query_count, 0)
-          })
+            state
+        end
 
-        # Restore context window if present in seed
-        state = maybe_restore_context_window(state, seed.context_window)
-
-        Logger.info("Checkpoint applied for #{agent_id}",
-          seed_id: seed.id,
-          goals: Seed.stats(seed).goal_count,
-          query_count: state.query_count
-        )
-
+      {:ok, %Seed{}} ->
+        Logger.warning("Checkpoint Seed identity mismatch", reason: :agent_id_mismatch)
         state
 
       {:error, reason} ->
         Logger.warning("Failed to reconstruct Seed from checkpoint: #{inspect(reason)}")
         state
     end
+  end
+
+  defp apply_restored_seed_state(state, seed, agent_id) do
+    meta = seed.metadata || %{}
+
+    state =
+      Map.merge(state, %{
+        last_user_message_at: parse_datetime(meta_get(meta, :last_user_message_at)),
+        last_assistant_output_at: parse_datetime(meta_get(meta, :last_assistant_output_at)),
+        responded_to_last_user_message: meta_get(meta, :responded_to_last_user_message, true),
+        query_count: meta_get(meta, :query_count, 0)
+      })
+
+    state = maybe_restore_context_window(state, seed.context_window)
+
+    Logger.info("Checkpoint applied for #{agent_id}",
+      seed_id: seed.id,
+      goals: Seed.stats(seed).goal_count,
+      query_count: state.query_count
+    )
+
+    state
   end
 
   defp apply_jido_checkpoint(state, checkpoint_data) do

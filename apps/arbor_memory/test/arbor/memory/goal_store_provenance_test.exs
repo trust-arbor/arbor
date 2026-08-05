@@ -1,6 +1,8 @@
 defmodule Arbor.Memory.GoalStoreProvenanceTest do
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   alias Arbor.Contracts.Memory.Goal
   alias Arbor.Contracts.Persistence.Record
   alias Arbor.Contracts.Security.{Taint, TaintedValue, TaintEnvelope}
@@ -1226,6 +1228,7 @@ defmodule Arbor.Memory.GoalStoreProvenanceTest do
     assert {:ok, sidecars_before} = Provenance.list_item_ids(:goal, agent_id)
 
     assert :ok = Arbor.Memory.validate_goal_provenance_snapshot(agent_id, snapshot)
+    refute GoalStore.goal_provenance_snapshot?([])
 
     assert {:error, :invalid_provenance} =
              Arbor.Memory.validate_goal_provenance_snapshot("#{agent_id}_other", snapshot)
@@ -1247,6 +1250,83 @@ defmodule Arbor.Memory.GoalStoreProvenanceTest do
     assert projection_before == :ets.lookup(@goals_ets, {agent_id, goal.id})
     assert {:ok, ^sidecars_before} = Provenance.list_item_ids(:goal, agent_id)
     assert {:ok, ^snapshot} = GoalStore.export_goal_provenance_snapshot(agent_id)
+  end
+
+  test "security regression: goal snapshot inventories are bounded proper lists", %{
+    agent_id: agent_id
+  } do
+    original_limit = Application.get_env(:arbor_memory, :goal_limit_per_agent)
+
+    on_exit(fn ->
+      if is_nil(original_limit) do
+        Application.delete_env(:arbor_memory, :goal_limit_per_agent)
+      else
+        Application.put_env(:arbor_memory, :goal_limit_per_agent, original_limit)
+      end
+    end)
+
+    Application.put_env(:arbor_memory, :goal_limit_per_agent, 2)
+
+    first = Goal.new("bounded snapshot first", id: goal_id("snapshot-bound-first"))
+    second = Goal.new("bounded snapshot second", id: goal_id("snapshot-bound-second"))
+
+    assert {:ok, ^first} = GoalStore.add_goal(agent_id, first)
+    assert {:ok, ^second} = GoalStore.add_goal(agent_id, second)
+    assert {:ok, snapshot} = GoalStore.export_goal_provenance_snapshot(agent_id)
+
+    Application.put_env(:arbor_memory, :goal_limit_per_agent, 1)
+
+    assert {:error, :invalid_provenance} =
+             GoalStore.validate_goal_provenance_snapshot(agent_id, snapshot)
+
+    assert {:error, :invalid_provenance} =
+             GoalStore.import_goal_provenance_snapshot(agent_id, snapshot)
+
+    legacy = goal_payload(first)
+
+    for inventory <- [[legacy, legacy], [legacy | :improper_tail]] do
+      assert {:error, :invalid_provenance} = GoalStore.validate_goal_import(agent_id, inventory)
+      assert {:error, :invalid_provenance} = GoalStore.import_goals(agent_id, inventory)
+    end
+
+    Application.put_env(
+      :arbor_memory,
+      :goal_limit_per_agent,
+      Taint.max_join_inputs() + 1
+    )
+
+    over_join_limit = List.duplicate(legacy, Taint.max_join_inputs() + 1)
+
+    assert {:error, :invalid_provenance} =
+             GoalStore.validate_goal_import(agent_id, over_join_limit)
+
+    assert {:ok, ^first} = GoalStore.get_goal(agent_id, first.id)
+    assert {:ok, ^second} = GoalStore.get_goal(agent_id, second.id)
+  end
+
+  test "exact snapshot import is additive and empty snapshots are no-ops", %{
+    agent_id: agent_id
+  } do
+    imported = Goal.new("snapshot import", id: goal_id("snapshot-import"))
+    imported_taint = taint(:hostile, :restricted, "snapshot_import")
+
+    assert {:ok, ^imported} = GoalStore.add_goal_tainted(agent_id, imported, imported_taint)
+    assert {:ok, snapshot} = GoalStore.export_goal_provenance_snapshot(agent_id)
+    assert :ok = GoalStore.clear_goals(agent_id)
+
+    retained = Goal.new("retained outside snapshot", id: goal_id("snapshot-retained"))
+    retained_taint = taint(:trusted, :internal, "snapshot_retained", :verified)
+
+    assert {:ok, ^retained} = GoalStore.add_goal_tainted(agent_id, retained, retained_taint)
+    assert :ok = GoalStore.import_goal_provenance_snapshot(agent_id, snapshot)
+    assert_goal_taint(agent_id, imported, imported_taint, :verified)
+    assert_goal_taint(agent_id, retained, retained_taint, :verified)
+
+    assert :ok = GoalStore.clear_goals(agent_id)
+    assert {:ok, empty_snapshot} = GoalStore.export_goal_provenance_snapshot(agent_id)
+    assert {:ok, ^retained} = GoalStore.add_goal_tainted(agent_id, retained, retained_taint)
+    assert :ok = GoalStore.import_goal_provenance_snapshot(agent_id, empty_snapshot)
+    assert_goal_taint(agent_id, retained, retained_taint, :verified)
   end
 
   test "distributed targeted reload reads backend authority instead of stale named-store cache",
@@ -1544,6 +1624,30 @@ defmodule Arbor.Memory.GoalStoreProvenanceTest do
 
     assert_receive {:goal_signal, :reflection_goal_update, reflected_update}, 1_000
     assert_routing_only_goal_signal(reflected_update, secret)
+  end
+
+  test "security regression: reflection goal logs omit goal content", %{agent_id: agent_id} do
+    previous_level = Logger.level()
+    Logger.configure(level: :info)
+    on_exit(fn -> Logger.configure(level: previous_level) end)
+
+    secret = "secret-reflection-goal-log-#{System.unique_integer([:positive])}"
+
+    log =
+      capture_log([level: :info, format: "$message $metadata\n", metadata: :all], fn ->
+        Arbor.Memory.Reflection.GoalProcessor.process_new_goals(agent_id, [
+          %{
+            "description" => secret,
+            "type" => "achieve",
+            "priority" => "high",
+            "success_criteria" => secret,
+            "note" => secret
+          }
+        ])
+      end)
+
+    refute log =~ secret
+    assert log =~ "New goal created via reflection"
   end
 
   test "security regression: restart sweeps stale goal sidecars before hydration", %{
