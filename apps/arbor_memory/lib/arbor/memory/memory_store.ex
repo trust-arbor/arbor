@@ -44,6 +44,9 @@ defmodule Arbor.Memory.MemoryStore do
   @max_critical_key_bytes 1_024
   @max_inventory_physical_key_bytes @max_critical_namespace_bytes + 1 + @max_critical_key_bytes
   @max_inventory_record_id_bytes byte_size("memory:") + @max_inventory_physical_key_bytes
+  @critical_authority_key "arbor_memory_authority"
+  @critical_authority_atom_key :arbor_memory_authority
+  @critical_authority_marker %{"mode" => "tainted_cas", "version" => 1}
 
   @type provenance_status :: :verified | :legacy_unlabeled | :invalid_durable_provenance
   @type authoritative_location :: :namespaced | :legacy_bare
@@ -497,10 +500,10 @@ defmodule Arbor.Memory.MemoryStore do
   @doc """
   Validate taint and atomically CAS one authoritative structured record.
 
-  On success the namespaced record is committed first, then any bare legacy
-  compatibility key is removed with acknowledgement. Once the CAS returns its
-  stored receipt, cleanup is best-effort maintenance and cannot turn a known
-  business commit into a retryable error.
+  On success the namespaced record is committed and its stored receipt is
+  returned immediately. Bare legacy residue is inert because authoritative
+  reads always give the namespaced record precedence; later delete or
+  maintenance operations may remove it without delaying the business commit.
   """
   @spec compare_and_swap_tainted(
           String.t(),
@@ -513,15 +516,7 @@ defmodule Arbor.Memory.MemoryStore do
 
   def compare_and_swap_tainted(namespace, key, expected, data, opts)
       when is_binary(namespace) and is_binary(key) do
-    case commit_tainted_compare_and_swap(namespace, key, expected, data, opts) do
-      {:ok, %Record{} = stored} ->
-        committed = {:ok, stored}
-        _ = observe_legacy_cleanup(namespace, key)
-        committed
-
-      {:error, _reason} = error ->
-        error
-    end
+    commit_tainted_compare_and_swap(namespace, key, expected, data, opts)
   end
 
   def compare_and_swap_tainted(_namespace, _key, _expected, _data, _opts),
@@ -532,23 +527,18 @@ defmodule Arbor.Memory.MemoryStore do
          :ok <- validate_critical_key(key),
          true <- keyword_options?(opts),
          {:ok, metadata} <- build_taint_metadata(data, opts),
+         metadata <- Map.put(metadata, @critical_authority_key, @critical_authority_marker),
          :ok <- ensure_critical_authority(),
          composite_key <- composite_key(namespace, key),
          {:ok, cas_expected, replacement} <-
-           build_cas_record(namespace, key, composite_key, expected, data, metadata),
-         {:ok, %Record{} = stored} <-
-           Persistence.buffered_store_acknowledged_compare_and_swap(
-             @store_name,
-             composite_key,
-             cas_expected,
-             replacement
-           ) do
-      {:ok, stored}
+           build_cas_record(namespace, key, composite_key, expected, data, metadata) do
+      perform_tainted_compare_and_swap(composite_key, cas_expected, replacement)
     else
       false -> critical_error(:invalid_options)
       {:error, {:memory_store, _kind, _reason}} = error -> error
       {:error, :conflict} -> critical_error(:conflict)
       {:error, :key_mismatch} -> critical_error(:invalid_record)
+      {:error, :outcome_unknown} -> critical_error(:outcome_unknown)
       {:error, _reason} -> critical_error(:durable_unavailable)
       _ -> critical_error(:invalid_record)
     end
@@ -572,7 +562,7 @@ defmodule Arbor.Memory.MemoryStore do
     with :ok <- validate_critical_namespace(namespace),
          :ok <- validate_critical_key(key),
          :ok <- ensure_critical_authority() do
-      delete_tainted_authoritative(namespace, key, @critical_delete_attempts)
+      perform_tainted_delete(namespace, key)
     else
       {:error, {:memory_store, _kind, _reason}} = error -> error
       {:error, _reason} -> critical_error(:durable_unavailable)
@@ -595,7 +585,7 @@ defmodule Arbor.Memory.MemoryStore do
     if available?() do
       composite_key = "#{namespace}:#{key}"
       _ = cleanup_owned_legacy_bare_compat(namespace, key, @legacy_cleanup_attempts)
-      BufferedStore.delete(composite_key, name: @store_name)
+      _ = delete_compatibility_record(composite_key)
     end
 
     :ok
@@ -765,7 +755,7 @@ defmodule Arbor.Memory.MemoryStore do
       record = Record.new(composite_key, data, id: "memory:#{composite_key}", metadata: metadata)
 
       try do
-        BufferedStore.put(composite_key, record, name: @store_name)
+        persist_compatibility_record(composite_key, record)
       rescue
         _ -> :ok
       catch
@@ -776,6 +766,79 @@ defmodule Arbor.Memory.MemoryStore do
       :ok
     end
   end
+
+  defp persist_compatibility_record(physical_key, replacement) do
+    case Persistence.buffered_store_authoritative_get(@store_name, physical_key) do
+      {:error, :not_found} ->
+        compatibility_compare_and_swap(physical_key, :not_found, replacement)
+
+      {:ok, %Record{} = current} ->
+        if current_namespaced_record?(current, physical_key) and
+             not critical_authority_record?(current) do
+          compatibility_compare_and_swap(physical_key, {:value, current}, replacement)
+        else
+          {:error, {:memory_store, :compatibility, :protected_authority}}
+        end
+
+      {:ok, _other} ->
+        {:error, {:memory_store, :compatibility, :invalid_authority}}
+
+      {:error, _reason} ->
+        :ok
+    end
+  end
+
+  defp compatibility_compare_and_swap(physical_key, expected, replacement) do
+    case Persistence.buffered_store_acknowledged_compare_and_swap(
+           @store_name,
+           physical_key,
+           expected,
+           replacement
+         ) do
+      {:ok, %Record{}} ->
+        :ok
+
+      {:error, :conflict} ->
+        {:error, {:memory_store, :compatibility, :conflict}}
+
+      {:error, :key_mismatch} ->
+        {:error, {:memory_store, :compatibility, :invalid_record}}
+
+      {:error, :outcome_unknown} ->
+        {:error, {:memory_store, :compatibility, :outcome_unknown}}
+
+      {:error, :inventory_limit_exceeded} ->
+        {:error, {:memory_store, :compatibility, :inventory_limit_exceeded}}
+
+      {:error, _reason} ->
+        :ok
+
+      _other ->
+        {:error, {:memory_store, :compatibility, :outcome_unknown}}
+    end
+  end
+
+  defp delete_compatibility_record(physical_key) do
+    case Persistence.buffered_store_authoritative_get(@store_name, physical_key) do
+      {:ok, %Record{} = current} ->
+        if current_namespaced_record?(current, physical_key) and
+             not critical_authority_record?(current) do
+          _ = acknowledged_compare_and_delete(physical_key, current)
+        end
+
+        :ok
+
+      _other ->
+        :ok
+    end
+  end
+
+  defp critical_authority_record?(%Record{metadata: metadata}) when is_map(metadata) do
+    Map.has_key?(metadata, @critical_authority_key) or
+      Map.has_key?(metadata, @critical_authority_atom_key)
+  end
+
+  defp critical_authority_record?(%Record{}), do: true
 
   defp ensure_critical_authority do
     case Persistence.buffered_store_authority_mode(@store_name) do
@@ -1045,6 +1108,34 @@ defmodule Arbor.Memory.MemoryStore do
   defp build_cas_record(_namespace, _key, _composite_key, _expected, _data, _metadata),
     do: critical_error(:invalid_record)
 
+  defp perform_tainted_compare_and_swap(composite_key, expected, replacement) do
+    case Persistence.buffered_store_acknowledged_compare_and_swap(
+           @store_name,
+           composite_key,
+           expected,
+           replacement
+         ) do
+      {:ok, %Record{} = stored} -> {:ok, stored}
+      {:error, :conflict} -> critical_error(:conflict)
+      {:error, :key_mismatch} -> critical_error(:invalid_record)
+      {:error, :outcome_unknown} -> critical_error(:outcome_unknown)
+      {:error, _reason} -> critical_error(:durable_unavailable)
+      _ -> critical_error(:outcome_unknown)
+    end
+  rescue
+    _ -> critical_error(:outcome_unknown)
+  catch
+    _, _ -> critical_error(:outcome_unknown)
+  end
+
+  defp perform_tainted_delete(namespace, key) do
+    delete_tainted_authoritative(namespace, key, @critical_delete_attempts)
+  rescue
+    _ -> critical_error(:outcome_unknown)
+  catch
+    _, _ -> critical_error(:outcome_unknown)
+  end
+
   defp classify_authoritative_bare(namespace, key) do
     case Persistence.buffered_store_authoritative_get(@store_name, key) do
       {:ok, %Record{} = record} ->
@@ -1063,72 +1154,24 @@ defmodule Arbor.Memory.MemoryStore do
     end
   end
 
-  defp cleanup_owned_legacy_bare(_namespace, _key, 0),
-    do: {:error, :legacy_cleanup_failed}
-
-  defp cleanup_owned_legacy_bare(namespace, key, attempts) do
-    case classify_authoritative_bare(namespace, key) do
-      {:ok, {:owned, record}} ->
-        case acknowledged_compare_and_delete(key, record) do
-          :ok ->
-            :ok
-
-          {:error, {:memory_store, :critical, :conflict}} ->
-            cleanup_owned_legacy_bare(namespace, key, attempts - 1)
-
-          {:error, _reason} ->
-            {:error, :legacy_cleanup_failed}
-        end
-
-      {:ok, classification} when classification in [:absent, :not_owned] ->
-        :ok
-
-      {:error, _reason} ->
-        {:error, :legacy_cleanup_failed}
-    end
-  end
-
-  defp observe_legacy_cleanup(namespace, key) do
-    try do
-      case cleanup_owned_legacy_bare(namespace, key, @legacy_cleanup_attempts) do
-        :ok -> :ok
-        _failure -> log_deferred_legacy_cleanup()
-      end
-    rescue
-      _ -> log_deferred_legacy_cleanup()
-    catch
-      _, _ -> log_deferred_legacy_cleanup()
-    end
-
-    :ok
-  end
-
-  defp log_deferred_legacy_cleanup do
-    try do
-      Logger.warning("MemoryStore deferred legacy cleanup after committed CAS")
-    rescue
-      _ -> :ok
-    catch
-      _, _ -> :ok
-    end
-
-    :ok
-  end
-
   defp cleanup_owned_legacy_bare_compat(_namespace, _key, 0), do: :ok
 
   defp cleanup_owned_legacy_bare_compat(namespace, key, attempts) do
     case classify_authoritative_bare(namespace, key) do
       {:ok, {:owned, record}} ->
-        case acknowledged_compare_and_delete(key, record) do
-          :ok ->
-            :ok
+        if critical_authority_record?(record) do
+          :ok
+        else
+          case acknowledged_compare_and_delete(key, record) do
+            :ok ->
+              :ok
 
-          {:error, {:memory_store, :critical, :conflict}} ->
-            cleanup_owned_legacy_bare_compat(namespace, key, attempts - 1)
+            {:error, {:memory_store, :critical, :conflict}} ->
+              cleanup_owned_legacy_bare_compat(namespace, key, attempts - 1)
 
-          {:error, _reason} ->
-            :ok
+            {:error, _reason} ->
+              :ok
+          end
         end
 
       _ ->
@@ -1188,9 +1231,14 @@ defmodule Arbor.Memory.MemoryStore do
       :ok -> :ok
       {:error, :conflict} -> critical_error(:conflict)
       {:error, :key_mismatch} -> critical_error(:invalid_record)
+      {:error, :outcome_unknown} -> critical_error(:outcome_unknown)
       {:error, _reason} -> critical_error(:durable_unavailable)
-      _ -> critical_error(:durable_unavailable)
+      _ -> critical_error(:outcome_unknown)
     end
+  rescue
+    _ -> critical_error(:outcome_unknown)
+  catch
+    _, _ -> critical_error(:outcome_unknown)
   end
 
   defp composite_key(namespace, key), do: "#{namespace}:#{key}"

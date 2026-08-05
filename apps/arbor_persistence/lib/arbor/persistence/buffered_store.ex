@@ -220,11 +220,12 @@ defmodule Arbor.Persistence.BufferedStore do
           | {:error, atom()}
   def authority_mode(opts) do
     store = store_name!(opts)
-    authority_call(store, :authority_mode)
+    authority_call(store, :authority_mode, :read)
   end
 
   @doc """
-  Read the configured backend authoritatively, or owner ETS in ephemeral mode.
+  Read the configured backend authoritatively, or owner-private state in
+  ephemeral mode.
 
   A configured backend error never falls back to the cache.
   """
@@ -232,14 +233,14 @@ defmodule Arbor.Persistence.BufferedStore do
           {:ok, term()} | {:error, :not_found | atom()}
   def authoritative_get(key, opts \\ []) do
     store = store_name!(opts)
-    authority_call(store, {:authoritative_get, key})
+    authority_call(store, {:authoritative_get, key}, :read)
   end
 
   @doc "Return a deterministic, bounded authoritative key inventory."
   @spec authoritative_list(keyword()) :: {:ok, [String.t()]} | {:error, atom()}
   def authoritative_list(opts \\ []) do
     store = store_name!(opts)
-    authority_call(store, {:authoritative_list, nil})
+    authority_call(store, {:authoritative_list, nil}, :read)
   end
 
   @doc "Return a deterministic, bounded authoritative key inventory by prefix."
@@ -250,7 +251,7 @@ defmodule Arbor.Persistence.BufferedStore do
   def authoritative_list_by_prefix(prefix, opts)
       when is_binary(prefix) and byte_size(prefix) <= @max_prefix_bytes do
     store = store_name!(opts)
-    authority_call(store, {:authoritative_list, prefix})
+    authority_call(store, {:authoritative_list, prefix}, :read)
   end
 
   def authoritative_list_by_prefix(_prefix, _opts), do: {:error, :invalid_prefix}
@@ -260,7 +261,7 @@ defmodule Arbor.Persistence.BufferedStore do
           {:ok, [{String.t(), term()}]} | {:error, atom()}
   def authoritative_entries(opts \\ []) do
     store = store_name!(opts)
-    authority_call(store, :authoritative_entries)
+    authority_call(store, :authoritative_entries, :read)
   end
 
   @doc """
@@ -277,7 +278,7 @@ defmodule Arbor.Persistence.BufferedStore do
       {:error, :key_mismatch}
     else
       store = store_name!(opts)
-      authority_call(store, {:acknowledged_put, key, value})
+      authority_call(store, {:acknowledged_put, key, value}, :mutation)
     end
   end
 
@@ -287,7 +288,7 @@ defmodule Arbor.Persistence.BufferedStore do
   @spec acknowledged_delete(String.t(), keyword()) :: :ok | {:error, atom()}
   def acknowledged_delete(key, opts \\ []) do
     store = store_name!(opts)
-    authority_call(store, {:acknowledged_delete, key})
+    authority_call(store, {:acknowledged_delete, key}, :mutation)
   end
 
   @doc """
@@ -309,7 +310,12 @@ defmodule Arbor.Persistence.BufferedStore do
       {:error, :key_mismatch}
     else
       store = store_name!(opts)
-      authority_call(store, {:acknowledged_compare_and_swap, key, expected, replacement})
+
+      authority_call(
+        store,
+        {:acknowledged_compare_and_swap, key, expected, replacement},
+        :mutation
+      )
     end
   end
 
@@ -317,8 +323,9 @@ defmodule Arbor.Persistence.BufferedStore do
   Atomically delete an observed value and only then evict the named-store cache.
 
   Configured backends must export `compare_and_delete/3`. Ephemeral stores
-  compare structured `Record` generation/revision in the owner process and
-  retain the deleted generation internally for ABA-safe reinsertion.
+  compare structured `Record` generation/revision in the owner process;
+  reinsertion receives a BEAM-monotonic generation for ABA fencing without
+  retaining unbounded tombstones.
   """
   @spec acknowledged_compare_and_delete(String.t(), term(), keyword()) ::
           :ok | {:error, atom()}
@@ -327,7 +334,7 @@ defmodule Arbor.Persistence.BufferedStore do
       {:error, :key_mismatch}
     else
       store = store_name!(opts)
-      authority_call(store, {:acknowledged_compare_and_delete, key, expected})
+      authority_call(store, {:acknowledged_compare_and_delete, key, expected}, :mutation)
     end
   end
 
@@ -359,8 +366,7 @@ defmodule Arbor.Persistence.BufferedStore do
       ack_mode: ack_mode,
       collection: collection,
       distributed: distributed,
-      ephemeral_authority: %{},
-      authority_tombstones: %{}
+      ephemeral_authority: %{}
     }
 
     load_from_backend(state)
@@ -388,7 +394,7 @@ defmodule Arbor.Persistence.BufferedStore do
           {:reply, :ok, state}
 
         {:error, _reason} = error ->
-          {:reply, error, state}
+          {:reply, error, converge_ephemeral_projection(state, key)}
       end
     end
   end
@@ -525,7 +531,7 @@ defmodule Arbor.Persistence.BufferedStore do
   defp authority_mode_for(%{backend: backend} = state) do
     durability =
       if Code.ensure_loaded?(backend) and function_exported?(backend, :durability_class, 1) do
-        case guarded_backend_call(fn -> backend.durability_class(backend_call_opts(state)) end) do
+        case guarded_backend_read(fn -> backend.durability_class(backend_call_opts(state)) end) do
           class
           when class in [:volatile, :process_lifetime, :application_restart, :node_restart] ->
             class
@@ -540,17 +546,23 @@ defmodule Arbor.Persistence.BufferedStore do
     {:backend, durability}
   end
 
-  defp do_authoritative_get(%{backend: nil, ephemeral_authority: authority}, key) do
+  defp do_authoritative_get(%{backend: nil, ephemeral_authority: authority} = state, key) do
     case Map.fetch(authority, key) do
-      {:ok, value} -> {:ok, value}
-      :error -> {:error, :not_found}
+      {:ok, value} ->
+        true = :ets.insert(state.table, {key, value})
+        {:ok, value}
+
+      :error ->
+        true = :ets.delete(state.table, key)
+        {:error, :not_found}
     end
   end
 
   defp do_authoritative_get(%{backend: backend} = state, key) do
-    case guarded_backend_call(fn -> backend.get(key, backend_call_opts(state)) end) do
+    case guarded_backend_read(fn -> backend.get(key, backend_call_opts(state)) end) do
       {:ok, value} ->
         if Revision.key_mismatch?(key, value) do
+          true = :ets.delete(state.table, key)
           {:error, :invalid_backend_record}
         else
           true = :ets.insert(state.table, {key, value})
@@ -562,9 +574,13 @@ defmodule Arbor.Persistence.BufferedStore do
         not_found
 
       {:error, _reason} ->
+        # Availability failure reveals nothing about the cached value. Keep the
+        # compatibility projection; authoritative callers still receive an
+        # error and never fall back to it.
         {:error, :backend_unavailable}
 
       _other ->
+        true = :ets.delete(state.table, key)
         {:error, :invalid_backend_response}
     end
   end
@@ -577,7 +593,7 @@ defmodule Arbor.Persistence.BufferedStore do
     opts =
       Keyword.put(backend_call_opts(state), :authoritative_limit, @max_authoritative_keys + 1)
 
-    case guarded_backend_call(fn -> backend.list(opts) end) do
+    case guarded_backend_read(fn -> backend.list(opts) end) do
       {:ok, keys} when is_list(keys) -> normalize_authoritative_keys(keys, prefix)
       {:error, :inventory_limit_exceeded} -> {:error, :inventory_limit_exceeded}
       {:error, _reason} -> {:error, :backend_unavailable}
@@ -603,7 +619,7 @@ defmodule Arbor.Persistence.BufferedStore do
           @max_authoritative_keys + 1
         )
 
-      case guarded_backend_call(fn -> backend.query(filter, opts) end) do
+      case guarded_backend_read(fn -> backend.query(filter, opts) end) do
         {:ok, records} -> normalize_authoritative_records(records, state)
         {:error, :inventory_limit_exceeded} -> {:error, :inventory_limit_exceeded}
         {:error, _reason} -> {:error, :backend_unavailable}
@@ -682,6 +698,10 @@ defmodule Arbor.Persistence.BufferedStore do
     case reduce_authoritative_records(records, [], MapSet.new(), 0) do
       {:ok, entries} ->
         entries = Enum.sort_by(entries, &elem(&1, 0))
+
+        # Reconcile only after the complete bounded snapshot validates so a
+        # malformed backend response cannot erase an otherwise usable cache.
+        true = :ets.delete_all_objects(state.table)
         true = :ets.insert(state.table, entries)
         {:ok, entries}
 
@@ -729,12 +749,12 @@ defmodule Arbor.Persistence.BufferedStore do
         {{:ok, stored}, state}
 
       {:error, reason} ->
-        {{:error, reason}, state}
+        {{:error, reason}, converge_ephemeral_projection(state, key)}
     end
   end
 
   defp do_acknowledged_put(%{backend: backend} = state, key, value) do
-    case guarded_backend_call(fn -> backend.put(key, value, backend_call_opts(state)) end) do
+    case guarded_backend_mutation(fn -> backend.put(key, value, backend_call_opts(state)) end) do
       :ok ->
         case do_authoritative_get(state, key) do
           {:ok, stored} ->
@@ -742,14 +762,17 @@ defmodule Arbor.Persistence.BufferedStore do
             {{:ok, stored}, state}
 
           {:error, _reason} ->
+            true = :ets.delete(state.table, key)
             {{:error, :outcome_unknown}, state}
         end
 
       {:error, _reason} ->
-        {{:error, :backend_unavailable}, state}
+        true = :ets.delete(state.table, key)
+        {{:error, :outcome_unknown}, state}
 
       _other ->
-        {{:error, :invalid_backend_response}, state}
+        true = :ets.delete(state.table, key)
+        {{:error, :outcome_unknown}, state}
     end
   end
 
@@ -761,17 +784,19 @@ defmodule Arbor.Persistence.BufferedStore do
   end
 
   defp do_acknowledged_delete(%{backend: backend} = state, key) do
-    case guarded_backend_call(fn -> backend.delete(key, backend_call_opts(state)) end) do
+    case guarded_backend_mutation(fn -> backend.delete(key, backend_call_opts(state)) end) do
       :ok ->
         true = :ets.delete(state.table, key)
         emit_distributed_signal(state, :cache_delete, key)
         {:ok, state}
 
       {:error, _reason} ->
-        {{:error, :backend_unavailable}, state}
+        true = :ets.delete(state.table, key)
+        {{:error, :outcome_unknown}, state}
 
       _other ->
-        {{:error, :invalid_backend_response}, state}
+        true = :ets.delete(state.table, key)
+        {{:error, :outcome_unknown}, state}
     end
   end
 
@@ -779,37 +804,38 @@ defmodule Arbor.Persistence.BufferedStore do
     current =
       case Map.fetch(state.ephemeral_authority, key) do
         {:ok, value} -> {:value, value}
-        :error -> Map.get(state.authority_tombstones, key, :not_found)
+        :error -> :not_found
       end
 
-    with {:ok, stored} <- ephemeral_cas(current, expected, replacement) do
-      authority = Map.put(state.ephemeral_authority, key, stored)
-      true = :ets.insert(state.table, {key, stored})
-      emit_distributed_signal(state, :cache_put, key)
+    with :ok <- ensure_ephemeral_capacity(state, key) do
+      case ephemeral_cas(current, expected, replacement) do
+        {:ok, stored} ->
+          authority = Map.put(state.ephemeral_authority, key, stored)
+          true = :ets.insert(state.table, {key, stored})
+          emit_distributed_signal(state, :cache_put, key)
+          state = %{state | ephemeral_authority: authority}
+          {{:ok, stored}, state}
 
-      state = %{
-        state
-        | ephemeral_authority: authority,
-          authority_tombstones: Map.delete(state.authority_tombstones, key)
-      }
-
-      {{:ok, stored}, state}
+        {:error, :conflict} = error ->
+          {error, converge_ephemeral_projection(state, key)}
+      end
     else
-      {:error, _reason} = error -> {error, state}
+      {:error, _reason} = error -> {error, converge_ephemeral_projection(state, key)}
     end
   end
 
   defp do_acknowledged_compare_and_swap(%{backend: backend} = state, key, expected, replacement) do
     if Code.ensure_loaded?(backend) and function_exported?(backend, :compare_and_swap, 4) do
       result =
-        guarded_backend_call(fn ->
+        guarded_backend_mutation(fn ->
           backend.compare_and_swap(key, expected, replacement, backend_call_opts(state))
         end)
 
       case result do
         {:ok, stored} ->
           if Revision.key_mismatch?(key, stored) do
-            {{:error, :invalid_backend_record}, state}
+            true = :ets.delete(state.table, key)
+            {{:error, :outcome_unknown}, state}
           else
             true = :ets.insert(state.table, {key, stored})
             emit_distributed_signal(state, :cache_put, key)
@@ -817,16 +843,19 @@ defmodule Arbor.Persistence.BufferedStore do
           end
 
         {:error, :conflict} ->
+          true = :ets.delete(state.table, key)
           {{:error, :conflict}, state}
 
         {:error, :key_mismatch} ->
           {{:error, :key_mismatch}, state}
 
         {:error, _reason} ->
-          {{:error, :backend_unavailable}, state}
+          true = :ets.delete(state.table, key)
+          {{:error, :outcome_unknown}, state}
 
         _other ->
-          {{:error, :invalid_backend_response}, state}
+          true = :ets.delete(state.table, key)
+          {{:error, :outcome_unknown}, state}
       end
     else
       {{:error, :unsupported}, state}
@@ -834,11 +863,7 @@ defmodule Arbor.Persistence.BufferedStore do
   end
 
   defp ephemeral_cas(:not_found, :not_found, replacement) do
-    {:ok, Revision.advance_cas_insert(replacement)}
-  end
-
-  defp ephemeral_cas({:tombstone, generation}, :not_found, replacement) do
-    {:ok, Revision.advance_cas_insert_from_tombstone(generation, replacement)}
+    {:ok, Revision.advance_ephemeral_insert(replacement)}
   end
 
   defp ephemeral_cas({:value, current}, {:value, expected}, replacement) do
@@ -869,18 +894,18 @@ defmodule Arbor.Persistence.BufferedStore do
           emit_distributed_signal(state, :cache_delete, key)
           {:ok, state}
         else
-          {{:error, :conflict}, state}
+          {{:error, :conflict}, converge_ephemeral_projection(state, key)}
         end
 
       :error ->
-        {{:error, :conflict}, state}
+        {{:error, :conflict}, converge_ephemeral_projection(state, key)}
     end
   end
 
   defp do_acknowledged_compare_and_delete(%{backend: backend} = state, key, expected) do
     if Code.ensure_loaded?(backend) and function_exported?(backend, :compare_and_delete, 3) do
       result =
-        guarded_backend_call(fn ->
+        guarded_backend_mutation(fn ->
           backend.compare_and_delete(key, expected, backend_call_opts(state))
         end)
 
@@ -891,16 +916,19 @@ defmodule Arbor.Persistence.BufferedStore do
           {:ok, state}
 
         {:error, :conflict} ->
+          true = :ets.delete(state.table, key)
           {{:error, :conflict}, state}
 
         {:error, :key_mismatch} ->
           {{:error, :key_mismatch}, state}
 
         {:error, _reason} ->
-          {{:error, :backend_unavailable}, state}
+          true = :ets.delete(state.table, key)
+          {{:error, :outcome_unknown}, state}
 
         _other ->
-          {{:error, :invalid_backend_response}, state}
+          true = :ets.delete(state.table, key)
+          {{:error, :outcome_unknown}, state}
       end
     else
       {{:error, :unsupported}, state}
@@ -908,58 +936,70 @@ defmodule Arbor.Persistence.BufferedStore do
   end
 
   defp put_ephemeral_authority(state, key, value) do
-    current =
-      case Map.fetch(state.ephemeral_authority, key) do
-        {:ok, current} -> current
-        :error -> Map.get(state.authority_tombstones, key, :absent)
-      end
+    with :ok <- ensure_ephemeral_capacity(state, key),
+         {:ok, stored} <- apply_ephemeral_put(state.ephemeral_authority, key, value) do
+      state = %{state | ephemeral_authority: Map.put(state.ephemeral_authority, key, stored)}
+      {:ok, stored, state}
+    end
+  end
 
-    case Revision.apply_put(current, value) do
-      {:ok, stored} ->
-        state = %{
-          state
-          | ephemeral_authority: Map.put(state.ephemeral_authority, key, stored),
-            authority_tombstones: Map.delete(state.authority_tombstones, key)
-        }
+  defp apply_ephemeral_put(authority, key, value) do
+    case {Map.fetch(authority, key), value} do
+      {{:ok, %Record{} = current}, %Record{} = replacement} ->
+        Revision.advance_cas_update(current, replacement)
 
-        {:ok, stored, state}
+      {{:ok, _non_record}, %Record{} = replacement} ->
+        {:ok, Revision.advance_ephemeral_insert(replacement)}
 
-      {:error, _reason} = error ->
-        error
+      {{:ok, current}, replacement} ->
+        Revision.apply_put(current, replacement)
+
+      {:error, replacement} ->
+        {:ok, Revision.advance_ephemeral_insert(replacement)}
+    end
+  end
+
+  defp ensure_ephemeral_capacity(%{ephemeral_authority: authority}, key) do
+    if Map.has_key?(authority, key) or map_size(authority) < @max_authoritative_keys do
+      :ok
+    else
+      {:error, :inventory_limit_exceeded}
     end
   end
 
   defp delete_ephemeral_authority(state, key) do
-    state = retain_ephemeral_tombstone(state, key)
     %{state | ephemeral_authority: Map.delete(state.ephemeral_authority, key)}
   end
 
-  defp retain_ephemeral_tombstone(state, key) do
+  defp converge_ephemeral_projection(state, key) do
     case Map.fetch(state.ephemeral_authority, key) do
-      {:ok, %Record{generation: generation}}
-      when is_integer(generation) and generation >= 0 ->
-        %{
-          state
-          | authority_tombstones:
-              Map.put(state.authority_tombstones, key, {:tombstone, generation})
-        }
-
-      _other ->
-        %{state | authority_tombstones: Map.delete(state.authority_tombstones, key)}
+      {:ok, current} -> true = :ets.insert(state.table, {key, current})
+      :error -> true = :ets.delete(state.table, key)
     end
+
+    state
   end
 
   defp backend_call_opts(state) do
     Keyword.merge(state.backend_opts, name: state.collection)
   end
 
-  defp guarded_backend_call(fun) do
+  defp guarded_backend_read(fun) do
     fun.()
   rescue
     _ -> {:error, :backend_unavailable}
   catch
     :exit, _ -> {:error, :backend_unavailable}
     :throw, _ -> {:error, :backend_unavailable}
+  end
+
+  defp guarded_backend_mutation(fun) do
+    fun.()
+  rescue
+    _ -> {:error, :outcome_unknown}
+  catch
+    :exit, _ -> {:error, :outcome_unknown}
+    :throw, _ -> {:error, :outcome_unknown}
   end
 
   # No backend = trivially healthy (ETS-only is always reachable).
@@ -989,43 +1029,45 @@ defmodule Arbor.Persistence.BufferedStore do
 
   defp load_from_backend(%{backend: nil}), do: :ok
 
-  defp load_from_backend(%{
-         backend: backend,
-         backend_opts: backend_opts,
-         collection: collection,
-         table: table
-       }) do
-    opts = Keyword.merge(backend_opts, name: collection)
+  defp load_from_backend(%{backend: backend} = state) do
+    result =
+      if Code.ensure_loaded?(backend) and function_exported?(backend, :query, 2) do
+        do_authoritative_entries(state)
+      else
+        load_from_non_query_backend(state)
+      end
 
-    case backend.list(opts) do
-      {:ok, keys} ->
-        Enum.each(keys, fn key ->
-          case backend.get(key, opts) do
-            {:ok, value} ->
-              :ets.insert(table, {key, value})
-
-            {:error, reason} ->
-              Logger.warning("BufferedStore: failed to load key #{key}: #{inspect(reason)}")
-          end
-        end)
-
-      {:error, reason} ->
-        Logger.warning("BufferedStore: failed to list keys from backend: #{inspect(reason)}")
+    case result do
+      {:ok, _entries} -> :ok
+      {:error, _reason} -> log_backend_load_failure()
+      _other -> log_backend_load_failure()
     end
   rescue
-    e ->
-      Logger.warning("BufferedStore: backend load failed: #{inspect(e)}")
+    _ -> log_backend_load_failure()
   catch
-    # Catch :exit and :throw too — without these, an Ecto Repo / Sandbox
-    # not-checked-out failure (which signals via :exit, not via raised
-    # exceptions) crashes init/1 and the BufferedStore process dies.
-    # Logging + continuing matches the moduledoc's stated contract:
-    # "Init: Loads all data from backend into ETS (backend failure → start empty)".
-    :exit, reason ->
-      Logger.warning("BufferedStore: backend load exit: #{inspect(reason)}")
+    _, _ -> log_backend_load_failure()
+  end
 
-    :throw, value ->
-      Logger.warning("BufferedStore: backend load throw: #{inspect(value)}")
+  defp load_from_non_query_backend(state) do
+    with {:ok, keys} <- do_authoritative_list(state, nil) do
+      Enum.each(keys, fn key ->
+        _ = do_authoritative_get(state, key)
+      end)
+
+      {:ok, keys}
+    end
+  end
+
+  defp log_backend_load_failure do
+    try do
+      Logger.warning("BufferedStore backend hydration failed")
+    rescue
+      _ -> :ok
+    catch
+      _, _ -> :ok
+    end
+
+    :ok
   end
 
   defp backend_put(%{backend: nil, ack_mode: :backend}, _key, _value),
@@ -1204,26 +1246,35 @@ defmodule Arbor.Persistence.BufferedStore do
   defp apply_remote_cache_signal(:cache_put, data, state) do
     key = Map.get(data, :key)
     reload_key_from_backend(state, key)
-
-    Logger.debug(
-      "BufferedStore[#{state.collection}]: reloaded #{key} from remote #{data.origin_node}"
-    )
-
+    safe_remote_cache_log(state, :cache_put, key, Map.get(data, :origin_node))
     state
   end
 
   defp apply_remote_cache_signal(:cache_delete, data, state) do
     key = Map.get(data, :key)
     true = :ets.delete(state.table, key)
-
-    Logger.debug(
-      "BufferedStore[#{state.collection}]: deleted #{key} from remote #{data.origin_node}"
-    )
-
+    safe_remote_cache_log(state, :cache_delete, key, Map.get(data, :origin_node))
     state
   end
 
   defp apply_remote_cache_signal(_type, _data, state), do: state
+
+  defp safe_remote_cache_log(state, type, key, origin) do
+    try do
+      Logger.debug(fn ->
+        "BufferedStore remote cache event " <>
+          inspect(%{collection: state.collection, type: type, key: key, origin: origin},
+            limit: 20
+          )
+      end)
+    rescue
+      _ -> :ok
+    catch
+      _, _ -> :ok
+    end
+
+    :ok
+  end
 
   defp reload_key_from_backend(%{backend: nil, table: table}, key) do
     # No backend — just delete the stale ETS entry
@@ -1292,17 +1343,23 @@ defmodule Arbor.Persistence.BufferedStore do
     Keyword.fetch!(opts, :name)
   end
 
-  defp authority_call(store, message) do
+  defp authority_call(store, message, operation) when operation in [:read, :mutation] do
     # The configured backend owns its operation timeout. Returning early from
     # GenServer.call would be ambiguous: the queued/backend effect could still
     # commit after the caller observed a timeout error.
-    GenServer.call(store, message, :infinity)
+    case Process.whereis(store) do
+      pid when is_pid(pid) -> GenServer.call(pid, message, :infinity)
+      nil -> {:error, :store_unavailable}
+    end
   rescue
-    _ -> {:error, :store_unavailable}
+    _ -> authority_call_failure(operation)
   catch
-    :exit, _ -> {:error, :store_unavailable}
-    :throw, _ -> {:error, :store_unavailable}
+    :exit, _ -> authority_call_failure(operation)
+    :throw, _ -> authority_call_failure(operation)
   end
+
+  defp authority_call_failure(:read), do: {:error, :store_unavailable}
+  defp authority_call_failure(:mutation), do: {:error, :outcome_unknown}
 
   defp ets_table!(opts) do
     # The ETS table name is the same as the GenServer name

@@ -414,14 +414,18 @@ defmodule Arbor.Persistence.Store.CASFencingTest do
       r1 = Record.new("k", %{"n" => 1})
       assert :ok = BufferedStore.put("k", r1, name: name)
 
-      assert {:ok, %Record{generation: 1, revision: 1, data: %{"n" => 1}}} =
+      assert {:ok, %Record{revision: 1, data: %{"n" => 1}} = stored} =
                BufferedStore.get("k", name: name)
+
+      assert stored.generation > 0
 
       r2 = Record.new("k", %{"n" => 2})
       assert :ok = BufferedStore.put("k", r2, name: name)
 
-      assert {:ok, %Record{generation: 1, revision: 2, data: %{"n" => 2}}} =
+      assert {:ok, %Record{revision: 2, data: %{"n" => 2}} = updated} =
                BufferedStore.get("k", name: name)
+
+      assert updated.generation == stored.generation
     end
 
     test "async + backend accepts structured Record values" do

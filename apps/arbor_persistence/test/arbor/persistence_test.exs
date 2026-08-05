@@ -61,6 +61,26 @@ defmodule Arbor.PersistenceTest do
     def durability_class(_opts), do: :node_restart
   end
 
+  defmodule AuthoritativeGetResponseBackend do
+    @moduledoc false
+    @behaviour Arbor.Contracts.Persistence.Store
+
+    @impl true
+    def put(_key, _value, _opts), do: :ok
+
+    @impl true
+    def get(_key, opts), do: Agent.get(Keyword.fetch!(opts, :name), & &1)
+
+    @impl true
+    def delete(_key, _opts), do: :ok
+
+    @impl true
+    def list(_opts), do: {:ok, []}
+
+    @impl true
+    def durability_class(_opts), do: :node_restart
+  end
+
   defmodule PutThenUnreadableBackend do
     @moduledoc false
     @behaviour Arbor.Contracts.Persistence.Store
@@ -185,12 +205,80 @@ defmodule Arbor.PersistenceTest do
           |> update_in([:calls, :query], &(&1 + 1))
           |> Map.put(:last_filter, filter)
 
-        {{:ok, Filter.apply(filter, Map.values(state.records))}, state}
+        response =
+          Map.get(state, :query_response, Filter.apply(filter, Map.values(state.records)))
+
+        {{:ok, response}, state}
       end)
     end
 
     @impl true
     def durability_class(_opts), do: :node_restart
+  end
+
+  defmodule AmbiguousMutationBackend do
+    @moduledoc false
+    @behaviour Arbor.Contracts.Persistence.Store
+
+    alias Arbor.Persistence.QueryableStore.ETS
+
+    @impl true
+    def put(key, value, opts) do
+      key |> ETS.put(value, opts) |> after_mutation(:put, opts)
+    end
+
+    @impl true
+    def get(key, opts), do: ETS.get(key, opts)
+
+    @impl true
+    def delete(key, opts) do
+      key |> ETS.delete(opts) |> after_mutation(:delete, opts)
+    end
+
+    @impl true
+    def list(opts), do: ETS.list(opts)
+
+    @impl true
+    def query(filter, opts), do: ETS.query(filter, opts)
+
+    @impl true
+    def compare_and_swap(key, expected, replacement, opts) do
+      key
+      |> ETS.compare_and_swap(expected, replacement, opts)
+      |> after_mutation(:compare_and_swap, opts)
+    end
+
+    @impl true
+    def compare_and_delete(key, expected, opts) do
+      key
+      |> ETS.compare_and_delete(expected, opts)
+      |> after_mutation(:compare_and_delete, opts)
+    end
+
+    @impl true
+    def durability_class(_opts), do: :node_restart
+
+    defp after_mutation(result, operation, opts) do
+      selected = Keyword.get(opts, :operation, :compare_and_swap)
+
+      if selected == operation and successful_mutation?(operation, result) do
+        Agent.update(Keyword.fetch!(opts, :counter), &(&1 + 1))
+
+        case Keyword.fetch!(opts, :failure) do
+          :raise -> raise "post-commit backend failure"
+          :exit -> exit(:post_commit_backend_failure)
+          :throw -> throw(:post_commit_backend_failure)
+          :kill_owner -> Process.exit(self(), :kill)
+          :return_error -> {:error, :transport_lost}
+        end
+      else
+        result
+      end
+    end
+
+    defp successful_mutation?(:compare_and_swap, {:ok, _stored}), do: true
+    defp successful_mutation?(_operation, :ok), do: true
+    defp successful_mutation?(_operation, _result), do: false
   end
 
   describe "Store facade" do
@@ -223,6 +311,21 @@ defmodule Arbor.PersistenceTest do
   end
 
   describe "named BufferedStore authority facade" do
+    test "preflight absence is store unavailable rather than outcome unknown" do
+      missing = unique_name(:missing_buffered_authority)
+
+      assert {:error, :store_unavailable} =
+               Persistence.buffered_store_authoritative_get(missing, "k")
+
+      assert {:error, :store_unavailable} =
+               Persistence.buffered_store_acknowledged_compare_and_swap(
+                 missing,
+                 "k",
+                 :not_found,
+                 Record.new("k")
+               )
+    end
+
     test "deliberate backend nil mode provides acknowledged ephemeral CAS" do
       name = unique_name(:buffered_ephemeral_authority)
       start_supervised!({BufferedStore, name: name, backend: nil})
@@ -232,7 +335,7 @@ defmodule Arbor.PersistenceTest do
 
       initial = Record.new("k", %{"value" => "one"})
 
-      assert {:ok, %Record{generation: 1, revision: 1} = stored} =
+      assert {:ok, %Record{revision: 1} = stored} =
                Persistence.buffered_store_acknowledged_compare_and_swap(
                  name,
                  "k",
@@ -240,15 +343,19 @@ defmodule Arbor.PersistenceTest do
                  initial
                )
 
+      assert stored.generation > 0
+
       replacement = Record.update(stored, %{"value" => "two"})
 
-      assert {:ok, %Record{generation: 1, revision: 2} = updated} =
+      assert {:ok, %Record{revision: 2} = updated} =
                Persistence.buffered_store_acknowledged_compare_and_swap(
                  name,
                  "k",
                  {:value, stored},
                  replacement
                )
+
+      assert updated.generation == stored.generation
 
       assert {:ok, ^updated} = Persistence.buffered_store_authoritative_get(name, "k")
       assert {:ok, ["k"]} = Persistence.buffered_store_authoritative_list(name)
@@ -270,13 +377,82 @@ defmodule Arbor.PersistenceTest do
 
       assert {:error, :not_found} = Persistence.buffered_store_authoritative_get(name, "k")
 
-      assert {:ok, %Record{generation: 2, revision: 1}} =
+      assert {:ok, %Record{revision: 1} = reinserted} =
                Persistence.buffered_store_acknowledged_compare_and_swap(
                  name,
                  "k",
                  :not_found,
                  Record.new("k", %{"value" => "new-incarnation"})
                )
+
+      assert reinserted.generation > updated.generation
+    end
+
+    test "security regression: ephemeral structured incarnations fence plain transitions" do
+      name = unique_name(:buffered_ephemeral_plain_transition)
+      start_supervised!({BufferedStore, name: name, backend: nil})
+
+      assert {:ok, %Record{} = first} =
+               Persistence.buffered_store_acknowledged_compare_and_swap(
+                 name,
+                 "k",
+                 :not_found,
+                 Record.new("k", %{"incarnation" => 1})
+               )
+
+      assert :ok = BufferedStore.put("k", :plain_compatibility_value, name: name)
+      assert :ok = BufferedStore.put("k", Record.new("k", %{"incarnation" => 2}), name: name)
+
+      assert {:ok, %Record{} = second} =
+               Persistence.buffered_store_authoritative_get(name, "k")
+
+      assert second.generation > first.generation
+
+      assert {:error, :conflict} =
+               Persistence.buffered_store_acknowledged_compare_and_swap(
+                 name,
+                 "k",
+                 {:value, first},
+                 Record.update(first, %{"stale" => true})
+               )
+
+      assert {:ok, ^second} = Persistence.buffered_store_authoritative_get(name, "k")
+    end
+
+    test "security regression: ephemeral owner restart preserves ABA fencing in the BEAM" do
+      name = unique_name(:buffered_ephemeral_restart)
+      start_supervised!({BufferedStore, name: name, backend: nil})
+
+      assert {:ok, %Record{} = before_restart} =
+               Persistence.buffered_store_acknowledged_compare_and_swap(
+                 name,
+                 "k",
+                 :not_found,
+                 Record.new("k", %{"incarnation" => 1})
+               )
+
+      stop_supervised!(BufferedStore)
+      start_supervised!({BufferedStore, name: name, backend: nil})
+
+      assert {:ok, %Record{} = after_restart} =
+               Persistence.buffered_store_acknowledged_compare_and_swap(
+                 name,
+                 "k",
+                 :not_found,
+                 Record.new("k", %{"incarnation" => 2})
+               )
+
+      assert after_restart.generation > before_restart.generation
+
+      assert {:error, :conflict} =
+               Persistence.buffered_store_acknowledged_compare_and_swap(
+                 name,
+                 "k",
+                 {:value, before_restart},
+                 Record.update(before_restart, %{"stale" => true})
+               )
+
+      assert {:ok, ^after_restart} = Persistence.buffered_store_authoritative_get(name, "k")
     end
 
     test "configured backend CAS returns backend-owned record before cache projection" do
@@ -322,6 +498,109 @@ defmodule Arbor.PersistenceTest do
       assert {:error, :not_found} = BufferedStore.get("k", name: store_name)
     end
 
+    test "security regression: invalid authoritative point reads evict stale projections" do
+      backend_name = unique_name(:authoritative_get_response_backend)
+      store_name = unique_name(:authoritative_get_response_store)
+      stale = Record.new("k", %{"value" => "stale-projection"})
+
+      start_supervised!(%{
+        id: backend_name,
+        start:
+          {Agent, :start_link,
+           [
+             fn -> {:ok, Record.new("different-key", %{"value" => "mismatch"})} end,
+             [name: backend_name]
+           ]}
+      })
+
+      start_supervised!(
+        {BufferedStore,
+         name: store_name, backend: AuthoritativeGetResponseBackend, collection: backend_name}
+      )
+
+      true = :ets.insert(store_name, {"k", stale})
+
+      assert {:error, :invalid_backend_record} =
+               Persistence.buffered_store_authoritative_get(store_name, "k")
+
+      assert {:error, :not_found} = BufferedStore.get("k", name: store_name)
+
+      true = :ets.insert(store_name, {"k", stale})
+      Agent.update(backend_name, fn _ -> :invalid_backend_response end)
+
+      assert {:error, :invalid_backend_response} =
+               Persistence.buffered_store_authoritative_get(store_name, "k")
+
+      assert {:error, :not_found} = BufferedStore.get("k", name: store_name)
+
+      true = :ets.insert(store_name, {"k", stale})
+      Agent.update(backend_name, fn _ -> {:error, :forced_outage} end)
+
+      assert {:error, :backend_unavailable} =
+               Persistence.buffered_store_authoritative_get(store_name, "k")
+
+      assert {:ok, ^stale} = BufferedStore.get("k", name: store_name)
+    end
+
+    test "security regression: configured conflicts evict projections proven stale" do
+      backend_name = unique_name(:buffered_conflict_backend)
+      store_name = unique_name(:buffered_conflict_store)
+
+      start_supervised!({QueryableStore.ETS, name: backend_name})
+
+      start_supervised!(
+        {BufferedStore, name: store_name, backend: QueryableStore.ETS, collection: backend_name}
+      )
+
+      assert {:ok, %Record{} = local} =
+               Persistence.buffered_store_acknowledged_compare_and_swap(
+                 store_name,
+                 "k",
+                 :not_found,
+                 Record.new("k", %{"value" => "local"})
+               )
+
+      assert {:ok, %Record{} = remote} =
+               QueryableStore.ETS.compare_and_swap(
+                 "k",
+                 {:value, local},
+                 Record.update(local, %{"value" => "remote"}),
+                 name: backend_name
+               )
+
+      assert {:error, :conflict} =
+               Persistence.buffered_store_acknowledged_compare_and_swap(
+                 store_name,
+                 "k",
+                 {:value, local},
+                 Record.update(local, %{"value" => "stale-local"})
+               )
+
+      assert {:error, :not_found} = BufferedStore.get("k", name: store_name)
+      assert {:ok, ^remote} = Persistence.buffered_store_authoritative_get(store_name, "k")
+      assert {:ok, ^remote} = BufferedStore.get("k", name: store_name)
+
+      assert {:ok, %Record{} = remote_updated} =
+               QueryableStore.ETS.compare_and_swap(
+                 "k",
+                 {:value, remote},
+                 Record.update(remote, %{"value" => "remote-updated"}),
+                 name: backend_name
+               )
+
+      assert {:error, :conflict} =
+               Persistence.buffered_store_acknowledged_compare_and_delete(
+                 store_name,
+                 "k",
+                 remote
+               )
+
+      assert {:error, :not_found} = BufferedStore.get("k", name: store_name)
+
+      assert {:ok, ^remote_updated} =
+               Persistence.buffered_store_authoritative_get(store_name, "k")
+    end
+
     test "security regression: configured backend failure cannot mutate acknowledged cache" do
       name = unique_name(:buffered_authority_failure)
 
@@ -348,10 +627,10 @@ defmodule Arbor.PersistenceTest do
       assert {:error, :unsupported} =
                Persistence.buffered_store_authoritative_entries(name)
 
-      assert {:error, :backend_unavailable} =
+      assert {:error, :outcome_unknown} =
                Persistence.buffered_store_acknowledged_put(name, "k", hostile)
 
-      assert {:error, :backend_unavailable} =
+      assert {:error, :outcome_unknown} =
                Persistence.buffered_store_acknowledged_compare_and_swap(
                  name,
                  "k",
@@ -359,13 +638,13 @@ defmodule Arbor.PersistenceTest do
                  hostile
                )
 
-      assert {:error, :backend_unavailable} =
+      assert {:error, :outcome_unknown} =
                Persistence.buffered_store_acknowledged_delete(name, "k")
 
-      assert {:error, :backend_unavailable} =
+      assert {:error, :outcome_unknown} =
                Persistence.buffered_store_acknowledged_compare_and_delete(name, "k", cached)
 
-      assert {:ok, ^cached} = BufferedStore.get("k", name: name)
+      assert {:error, :not_found} = BufferedStore.get("k", name: name)
     end
 
     test "put success followed by confirmation failure reports outcome unknown" do
@@ -393,8 +672,200 @@ defmodule Arbor.PersistenceTest do
       assert {:error, :outcome_unknown} =
                Persistence.buffered_store_acknowledged_put(store_name, "k", committed)
 
-      assert {:ok, ^cached} = BufferedStore.get("k", name: store_name)
+      assert {:error, :not_found} = BufferedStore.get("k", name: store_name)
       assert ^committed = Agent.get(backend_name, &Map.fetch!(&1, "k"))
+    end
+
+    test "security regression: ambiguous acknowledged mutations evict stale projection" do
+      for operation <- [:put, :delete, :compare_and_swap, :compare_and_delete] do
+        backend_name = unique_name(:ambiguous_projection_backend)
+        store_name = unique_name(:ambiguous_projection_store)
+        counter = unique_name(:ambiguous_projection_counter)
+        baseline = Record.new("k", %{"value" => "baseline"})
+
+        start_supervised!(%{
+          id: backend_name,
+          start: {QueryableStore.ETS, :start_link, [[name: backend_name]]}
+        })
+
+        assert :ok = QueryableStore.ETS.put("k", baseline, name: backend_name)
+        assert {:ok, %Record{} = observed} = QueryableStore.ETS.get("k", name: backend_name)
+
+        start_supervised!(%{
+          id: counter,
+          start: {Agent, :start_link, [fn -> 0 end, [name: counter]]}
+        })
+
+        start_supervised!(%{
+          id: store_name,
+          start:
+            {BufferedStore, :start_link,
+             [
+               [
+                 name: store_name,
+                 backend: AmbiguousMutationBackend,
+                 backend_opts: [counter: counter, failure: :raise, operation: operation],
+                 collection: backend_name
+               ]
+             ]}
+        })
+
+        assert {:ok, ^observed} = BufferedStore.get("k", name: store_name)
+
+        result =
+          case operation do
+            :put ->
+              Persistence.buffered_store_acknowledged_put(
+                store_name,
+                "k",
+                Record.new("k", %{"value" => "put"})
+              )
+
+            :delete ->
+              Persistence.buffered_store_acknowledged_delete(store_name, "k")
+
+            :compare_and_swap ->
+              Persistence.buffered_store_acknowledged_compare_and_swap(
+                store_name,
+                "k",
+                {:value, observed},
+                Record.update(observed, %{"value" => "cas"})
+              )
+
+            :compare_and_delete ->
+              Persistence.buffered_store_acknowledged_compare_and_delete(
+                store_name,
+                "k",
+                observed
+              )
+          end
+
+        assert {:error, :outcome_unknown} = result
+        assert {:error, :not_found} = BufferedStore.get("k", name: store_name)
+        assert Agent.get(counter, & &1) == 1
+      end
+    end
+
+    test "security regression: exceptional post-commit backend outcomes remain unknown" do
+      for failure <- [:raise, :exit, :throw] do
+        backend_name = unique_name(:ambiguous_mutation_backend)
+        store_name = unique_name(:ambiguous_mutation_store)
+        counter = unique_name(:ambiguous_mutation_counter)
+
+        start_supervised!(%{
+          id: backend_name,
+          start: {QueryableStore.ETS, :start_link, [[name: backend_name]]}
+        })
+
+        start_supervised!(%{
+          id: counter,
+          start: {Agent, :start_link, [fn -> 0 end, [name: counter]]}
+        })
+
+        start_supervised!(%{
+          id: store_name,
+          start:
+            {BufferedStore, :start_link,
+             [
+               [
+                 name: store_name,
+                 backend: AmbiguousMutationBackend,
+                 backend_opts: [counter: counter, failure: failure],
+                 collection: backend_name
+               ]
+             ]}
+        })
+
+        assert {:error, :outcome_unknown} =
+                 Persistence.buffered_store_acknowledged_compare_and_swap(
+                   store_name,
+                   "k",
+                   :not_found,
+                   Record.new("k", %{"failure" => to_string(failure)})
+                 )
+
+        assert Agent.get(counter, & &1) == 1
+        assert {:ok, %Record{revision: 1}} = QueryableStore.ETS.get("k", name: backend_name)
+        assert Process.alive?(Process.whereis(store_name))
+      end
+    end
+
+    test "security regression: returned transport error after commit remains outcome unknown" do
+      backend_name = unique_name(:returned_error_backend)
+      store_name = unique_name(:returned_error_store)
+      counter = unique_name(:returned_error_counter)
+
+      start_supervised!({QueryableStore.ETS, name: backend_name})
+
+      start_supervised!(%{
+        id: counter,
+        start: {Agent, :start_link, [fn -> 0 end, [name: counter]]}
+      })
+
+      start_supervised!(
+        {BufferedStore,
+         name: store_name,
+         backend: AmbiguousMutationBackend,
+         backend_opts: [counter: counter, failure: :return_error],
+         collection: backend_name}
+      )
+
+      replacement = Record.new("k", %{"value" => "committed"})
+
+      assert {:error, :outcome_unknown} =
+               Persistence.buffered_store_acknowledged_compare_and_swap(
+                 store_name,
+                 "k",
+                 :not_found,
+                 replacement
+               )
+
+      assert Agent.get(counter, & &1) == 1
+      assert {:error, :not_found} = BufferedStore.get("k", name: store_name)
+
+      assert {:ok, %Record{generation: 1, revision: 1, data: %{"value" => "committed"}}} =
+               QueryableStore.ETS.get("k", name: backend_name)
+    end
+
+    test "security regression: owner death after backend commit reports outcome unknown once" do
+      backend_name = unique_name(:owner_death_backend)
+      store_name = unique_name(:owner_death_store)
+      counter = unique_name(:owner_death_counter)
+
+      start_supervised!(%{
+        id: backend_name,
+        start: {QueryableStore.ETS, :start_link, [[name: backend_name]]}
+      })
+
+      start_supervised!(%{
+        id: counter,
+        start: {Agent, :start_link, [fn -> 0 end, [name: counter]]}
+      })
+
+      start_supervised!(%{
+        id: store_name,
+        start:
+          {BufferedStore, :start_link,
+           [
+             [
+               name: store_name,
+               backend: AmbiguousMutationBackend,
+               backend_opts: [counter: counter, failure: :kill_owner],
+               collection: backend_name
+             ]
+           ]}
+      })
+
+      assert {:error, :outcome_unknown} =
+               Persistence.buffered_store_acknowledged_compare_and_swap(
+                 store_name,
+                 "k",
+                 :not_found,
+                 Record.new("k", %{"committed" => true})
+               )
+
+      assert Agent.get(counter, & &1) == 1
+      assert {:ok, %Record{revision: 1}} = QueryableStore.ETS.get("k", name: backend_name)
     end
 
     test "security regression: public ETS cannot forge or erase ephemeral authority" do
@@ -403,13 +874,15 @@ defmodule Arbor.PersistenceTest do
 
       initial = Record.new("k", %{"value" => "owner"})
 
-      assert {:ok, %Record{generation: 1, revision: 1} = stored} =
+      assert {:ok, %Record{revision: 1} = stored} =
                Persistence.buffered_store_acknowledged_compare_and_swap(
                  name,
                  "k",
                  :not_found,
                  initial
                )
+
+      assert stored.generation > 0
 
       forged = Record.new("k", %{"value" => "forged"}, generation: 99, revision: 99)
       true = :ets.insert(name, {"k", forged})
@@ -420,12 +893,13 @@ defmodule Arbor.PersistenceTest do
       true = :ets.insert(name, forged_rows)
 
       assert {:ok, ^stored} = Persistence.buffered_store_authoritative_get(name, "k")
+      assert {:ok, ^stored} = BufferedStore.get("k", name: name)
       assert {:ok, ["k"]} = Persistence.buffered_store_authoritative_list(name)
       assert {:ok, [{"k", ^stored}]} = Persistence.buffered_store_authoritative_entries(name)
 
       replacement = Record.update(stored, %{"value" => "updated"})
 
-      assert {:ok, %Record{generation: 1, revision: 2} = updated} =
+      assert {:ok, %Record{revision: 2} = updated} =
                Persistence.buffered_store_acknowledged_compare_and_swap(
                  name,
                  "k",
@@ -433,20 +907,34 @@ defmodule Arbor.PersistenceTest do
                  replacement
                )
 
+      assert updated.generation == stored.generation
+
+      true = :ets.insert(name, {"k", forged})
+
+      assert {:error, :conflict} =
+               Persistence.buffered_store_acknowledged_compare_and_swap(
+                 name,
+                 "k",
+                 {:value, stored},
+                 Record.update(stored, %{"value" => "stale-cas"})
+               )
+
+      assert {:ok, ^updated} = BufferedStore.get("k", name: name)
       true = :ets.insert(name, {"k", forged})
 
       assert {:error, :conflict} =
                Persistence.buffered_store_acknowledged_compare_and_delete(name, "k", stored)
 
-      true = :ets.delete(name, "k")
+      assert {:ok, ^updated} = BufferedStore.get("k", name: name)
 
       assert :ok =
                Persistence.buffered_store_acknowledged_compare_and_delete(name, "k", updated)
 
       true = :ets.insert(name, {"k", forged})
       assert {:error, :not_found} = Persistence.buffered_store_authoritative_get(name, "k")
+      assert {:error, :not_found} = BufferedStore.get("k", name: name)
 
-      assert {:ok, %Record{generation: 2, revision: 1}} =
+      assert {:ok, %Record{revision: 1} = reinserted} =
                Persistence.buffered_store_acknowledged_compare_and_swap(
                  name,
                  "k",
@@ -454,11 +942,15 @@ defmodule Arbor.PersistenceTest do
                  Record.new("k", %{"value" => "new incarnation"})
                )
 
+      assert reinserted.generation > updated.generation
+
       assert :ok =
                BufferedStore.put("compat", Record.new("compat", %{"owner" => true}), name: name)
 
-      assert {:ok, %Record{generation: 1, revision: 1, data: %{"owner" => true}}} =
+      assert {:ok, %Record{revision: 1, data: %{"owner" => true}} = compatibility} =
                Persistence.buffered_store_authoritative_get(name, "compat")
+
+      assert compatibility.generation > 0
 
       true = :ets.delete(name, "compat")
       assert :ok = BufferedStore.delete("compat", name: name)
@@ -469,15 +961,39 @@ defmodule Arbor.PersistenceTest do
       oversized = unique_name(:buffered_authority_oversized)
       start_supervised!({BufferedStore, name: oversized, backend: nil})
 
-      for index <- 1..10_001 do
+      for index <- 1..10_000 do
         assert :ok = BufferedStore.put("key-#{index}", index, name: oversized)
       end
 
-      assert {:error, :inventory_limit_exceeded} =
-               Persistence.buffered_store_authoritative_list(oversized)
+      true = :ets.insert(oversized, {"key-10001", :forged_overflow})
 
       assert {:error, :inventory_limit_exceeded} =
-               Persistence.buffered_store_authoritative_entries(oversized)
+               BufferedStore.put("key-10001", 10_001, name: oversized)
+
+      assert {:error, :not_found} = BufferedStore.get("key-10001", name: oversized)
+
+      true = :ets.insert(oversized, {"key-10001", :forged_overflow})
+
+      assert {:error, :inventory_limit_exceeded} =
+               Persistence.buffered_store_acknowledged_compare_and_swap(
+                 oversized,
+                 "key-10001",
+                 :not_found,
+                 Record.new("key-10001")
+               )
+
+      assert {:error, :not_found} = BufferedStore.get("key-10001", name: oversized)
+
+      assert :ok = BufferedStore.put("key-1", :replacement, name: oversized)
+
+      assert {:ok, keys} = Persistence.buffered_store_authoritative_list(oversized)
+      assert length(keys) == 10_000
+
+      assert {:ok, entries} = Persistence.buffered_store_authoritative_entries(oversized)
+      assert length(entries) == 10_000
+
+      assert :ok = BufferedStore.delete("key-2", name: oversized)
+      assert :ok = BufferedStore.put("key-10001", 10_001, name: oversized)
 
       malformed = unique_name(:buffered_authority_malformed)
 
@@ -533,6 +1049,17 @@ defmodule Arbor.PersistenceTest do
            ]}
       })
 
+      assert %{calls: %{query: 1, list: 0, get: 0}, last_filter: startup_filter} =
+               Agent.get(backend_name, & &1)
+
+      assert %Filter{order_by: {:key, :asc}, limit: 10_001, offset: 0} = startup_filter
+      assert {:ok, %Record{key: "a"}} = BufferedStore.get("a", name: store_name)
+      assert {:ok, %Record{key: "b"}} = BufferedStore.get("b", name: store_name)
+
+      forged = Record.new("forged", %{"value" => "caller-writable"})
+      true = :ets.insert(store_name, {"forged", forged})
+      true = :ets.delete(store_name, "a")
+
       Agent.update(backend_name, fn state ->
         %{state | calls: %{get: 0, list: 0, query: 0}, last_filter: nil}
       end)
@@ -544,6 +1071,20 @@ defmodule Arbor.PersistenceTest do
                Agent.get(backend_name, & &1)
 
       assert %Filter{order_by: {:key, :asc}, limit: 10_001, offset: 0} = filter
+      assert {:ok, %Record{key: "a"}} = BufferedStore.get("a", name: store_name)
+      assert {:error, :not_found} = BufferedStore.get("forged", name: store_name)
+
+      retained = Record.new("retained", %{"value" => "projection"})
+      true = :ets.insert(store_name, {"retained", retained})
+
+      Agent.update(backend_name, fn state ->
+        Map.put(state, :query_response, [records["a"] | :improper_tail])
+      end)
+
+      assert {:error, :invalid_backend_response} =
+               Persistence.buffered_store_authoritative_entries(store_name)
+
+      assert {:ok, ^retained} = BufferedStore.get("retained", name: store_name)
     end
 
     test "security regression: non-query backend inventory is rejected without N+1 reads" do

@@ -88,6 +88,21 @@ defmodule Arbor.Persistence.Store.Revision do
   def advance_cas_insert(value), do: value
 
   @doc false
+  @spec advance_ephemeral_insert(term()) :: term()
+  def advance_ephemeral_insert(%Record{} = record) do
+    now = DateTime.utc_now()
+
+    %{
+      record
+      | generation: System.unique_integer([:positive, :monotonic]),
+        revision: 1,
+        updated_at: now
+    }
+  end
+
+  def advance_ephemeral_insert(value), do: value
+
+  @doc false
   @spec advance_cas_insert_from_tombstone(non_neg_integer(), term()) :: term()
   def advance_cas_insert_from_tombstone(prev_gen, %Record{} = record)
       when is_integer(prev_gen) and prev_gen >= 0 do

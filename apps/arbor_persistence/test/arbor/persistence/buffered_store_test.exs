@@ -93,8 +93,10 @@ defmodule Arbor.Persistence.BufferedStoreTest do
 
       assert :ok = BufferedStore.put("key1", record, name: name)
 
-      assert {:ok, %Record{generation: 1, revision: 1, data: %{"value" => "hello"}}} =
+      assert {:ok, %Record{revision: 1, data: %{"value" => "hello"}} = stored} =
                BufferedStore.get("key1", name: name)
+
+      assert stored.generation > 0
     end
 
     test "get returns not_found for missing key", %{name: name} do
@@ -137,8 +139,10 @@ defmodule Arbor.Persistence.BufferedStoreTest do
       :ok = BufferedStore.put("key1", r1, name: name)
       :ok = BufferedStore.put("key1", r2, name: name)
 
-      assert {:ok, %Record{generation: 1, revision: 2, data: %{"v" => 2}}} =
+      assert {:ok, %Record{revision: 2, data: %{"v" => 2}} = stored} =
                BufferedStore.get("key1", name: name)
+
+      assert stored.generation > 0
     end
 
     test "security regression: put rejects Record physical-key mismatch and does not mutate",
@@ -157,8 +161,10 @@ defmodule Arbor.Persistence.BufferedStoreTest do
       valid = Record.new("k", %{"ok" => true})
       assert :ok = BufferedStore.put("k", valid, name: name)
 
-      assert {:ok, %Record{generation: 1, revision: 1, data: %{"ok" => true}} = stored} =
+      assert {:ok, %Record{revision: 1, data: %{"ok" => true}} = stored} =
                BufferedStore.get("k", name: name)
+
+      assert stored.generation > 0
 
       # A later mismatch still must not overwrite the valid entry.
       assert {:error, :key_mismatch} =
