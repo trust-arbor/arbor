@@ -334,6 +334,9 @@ defmodule Arbor.Memory do
   defdelegate delete_working_memory(agent_id), to: SessionOps
   defdelegate export_working_memory_provenance_snapshot(agent_id), to: SessionOps
 
+  defdelegate validate_working_memory_provenance_snapshot(agent_id, snapshot),
+    to: SessionOps
+
   defdelegate import_working_memory_provenance_snapshot(agent_id, snapshot),
     to: SessionOps
 

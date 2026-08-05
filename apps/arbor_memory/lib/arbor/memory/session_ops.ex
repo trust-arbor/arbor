@@ -45,6 +45,10 @@ defmodule Arbor.Memory.SessionOps do
   @doc "Export a versioned, payload-bound working-memory provenance snapshot."
   defdelegate export_working_memory_provenance_snapshot(agent_id), to: WorkingMemoryStore
 
+  @doc "Validate a working-memory provenance snapshot without applying it."
+  defdelegate validate_working_memory_provenance_snapshot(agent_id, snapshot),
+    to: WorkingMemoryStore
+
   @doc "Import a versioned, payload-bound working-memory provenance snapshot."
   defdelegate import_working_memory_provenance_snapshot(agent_id, snapshot),
     to: WorkingMemoryStore

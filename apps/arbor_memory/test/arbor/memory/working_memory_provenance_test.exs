@@ -11,7 +11,6 @@ defmodule Arbor.Memory.WorkingMemoryProvenanceTest do
     WorkingMemoryStore
   }
 
-  alias Arbor.Persistence
   alias Arbor.Persistence.BufferedStore
 
   @moduletag :fast
@@ -155,6 +154,42 @@ defmodule Arbor.Memory.WorkingMemoryProvenanceTest do
     assert {:ok, read} = WorkingMemoryStore.get_working_memory_tainted(agent_id)
     assert read.value.value == wm
     assert read.value.taint == trusted
+  end
+
+  test "public snapshot validation is agent-bound and has zero effects", %{agent_id: agent_id} do
+    label = taint(:hostile, "snapshot-validator", sensitivity: :restricted)
+    wm = %{new_working_memory(agent_id) | recent_thoughts: [thought("validator", "bound")]}
+
+    assert :ok = WorkingMemoryStore.save_working_memory_tainted(agent_id, wm, label)
+    assert {:ok, exported} = Arbor.Memory.export_working_memory_provenance_snapshot(agent_id)
+    assert {:ok, %Record{} = before_record} = durable_record(agent_id)
+
+    before_projection = :ets.lookup(@working_memory_ets, agent_id)
+    before_sidecars = sidecar_inventory(agent_id)
+
+    assert :ok =
+             Arbor.Memory.validate_working_memory_provenance_snapshot(agent_id, exported)
+
+    assert {:error, {:working_memory_store, :invalid_provenance_snapshot}} =
+             Arbor.Memory.validate_working_memory_provenance_snapshot(
+               "#{agent_id}_other",
+               exported
+             )
+
+    assert {:error, {:working_memory_store, :invalid_provenance_snapshot}} =
+             Arbor.Memory.validate_working_memory_provenance_snapshot(
+               agent_id,
+               %{"snapshot_kind" => "arbor_working_memory_provenance"}
+             )
+
+    corrupt = put_in(exported, ["outer_envelope", "payload_sha256"], String.duplicate("0", 64))
+
+    assert {:error, {:working_memory_store, :invalid_provenance_snapshot}} =
+             Arbor.Memory.validate_working_memory_provenance_snapshot(agent_id, corrupt)
+
+    assert {:ok, ^before_record} = durable_record(agent_id)
+    assert :ets.lookup(@working_memory_ets, agent_id) == before_projection
+    assert sidecar_inventory(agent_id) == before_sidecars
   end
 
   test "all reserved portable snapshot keys force strict snapshot classification" do
@@ -1357,30 +1392,25 @@ defmodule Arbor.Memory.WorkingMemoryProvenanceTest do
   end
 
   defp replace_durable_data(agent_id, data, outer_taint) do
-    physical_key = "working_memory:#{agent_id}"
-
     assert {:ok, %Record{} = current} =
-             Persistence.buffered_store_authoritative_get(@store_name, physical_key)
+             durable_record(agent_id)
 
-    metadata =
+    opts =
       case outer_taint do
         :missing_outer ->
-          Map.delete(current.metadata, "taint")
+          []
 
         %Taint{} = taint ->
-          assert {:ok, envelope} = TaintEnvelope.new(data, taint)
-          assert {:ok, persisted} = TaintEnvelope.to_map(envelope)
-          Map.put(current.metadata, "taint", persisted)
+          [taint: taint]
       end
 
-    replacement = Record.update(current, data, metadata: metadata)
-
     assert {:ok, %Record{}} =
-             Persistence.buffered_store_acknowledged_compare_and_swap(
-               @store_name,
-               physical_key,
-               {:value, current},
-               replacement
+             MemoryStore.compare_and_swap_tainted(
+               "working_memory",
+               agent_id,
+               current,
+               data,
+               opts
              )
 
     :ok
@@ -1470,6 +1500,13 @@ defmodule Arbor.Memory.WorkingMemoryProvenanceTest do
       :working_memory_concern,
       :working_memory_curiosity
     ]
+  end
+
+  defp sidecar_inventory(agent_id) do
+    Map.new(working_memory_domains(), fn domain ->
+      assert {:ok, ids} = Provenance.list_item_ids(domain, agent_id)
+      {domain, ids}
+    end)
   end
 
   defp unique_name(prefix) do

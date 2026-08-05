@@ -211,6 +211,20 @@ defmodule Arbor.Memory.WorkingMemoryStore do
     _, _ -> error(:snapshot_export_failed)
   end
 
+  @doc "Validate an exact provenance snapshot without reading or mutating memory state."
+  @spec validate_working_memory_provenance_snapshot(String.t(), term()) ::
+          :ok | {:error, term()}
+  def validate_working_memory_provenance_snapshot(agent_id, exported) do
+    with :ok <- validate_agent_id(agent_id),
+         {:ok, _snapshot} <- decode_provenance_snapshot(agent_id, exported) do
+      :ok
+    end
+  rescue
+    _ -> error(:invalid_provenance_snapshot)
+  catch
+    _, _ -> error(:invalid_provenance_snapshot)
+  end
+
   @doc "Import a versioned, payload-bound WorkingMemory provenance snapshot."
   @spec import_working_memory_provenance_snapshot(String.t(), term()) ::
           :ok | {:error, term()}
