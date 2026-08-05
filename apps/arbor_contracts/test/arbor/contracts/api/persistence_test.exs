@@ -18,4 +18,22 @@ defmodule Arbor.Contracts.API.PersistenceTest do
              :optional_callbacks
            )
   end
+
+  test "validated vector boundaries are optional facade callbacks" do
+    callbacks = Persistence.behaviour_info(:callbacks)
+    optional = Persistence.behaviour_info(:optional_callbacks)
+
+    expected = [
+      execute_validated_vector_operation_for_agent: 3,
+      reconcile_validated_vector_operation_for_agent: 3,
+      retrieve_vector_record_by_logical_identity_for_agent: 4,
+      list_vector_records_for_agent: 2,
+      search_vector_records_by_exact_descriptor_for_agent: 3
+    ]
+
+    for callback <- expected do
+      assert callback in callbacks
+      assert callback in optional
+    end
+  end
 end

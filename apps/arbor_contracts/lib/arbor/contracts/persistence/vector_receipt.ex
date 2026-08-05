@@ -55,7 +55,8 @@ defmodule Arbor.Contracts.Persistence.VectorReceipt do
     with true <- is_nil(receipt.record),
          true <- VectorValidation.valid_digest?(receipt.operation_fingerprint),
          {:ok, receipts} <- validate_receipt_list(receipt.receipts),
-         true <- receipts == receipt.receipts do
+         true <- receipts == receipt.receipts,
+         true <- receipt.operation_fingerprint == batch_fingerprint(receipts) do
       {:ok, receipt}
     else
       _invalid -> invalid()
@@ -240,6 +241,14 @@ defmodule Arbor.Contracts.Persistence.VectorReceipt do
     do: invalid()
 
   defp validate_receipt_list(_improper, _receipts, _count, _bytes), do: invalid()
+
+  defp batch_fingerprint(receipts) do
+    VectorValidation.fingerprint([
+      "batch",
+      Integer.to_string(length(receipts))
+      | Enum.map(receipts, & &1.operation_fingerprint)
+    ])
+  end
 
   defp invalid, do: {:error, :invalid_vector_receipt}
 end

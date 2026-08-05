@@ -57,6 +57,29 @@ defmodule Arbor.Contracts.API.Persistence do
   @typedoc "Stable exact-ID identity for reconciling an EventLog append."
   @type append_operation :: Arbor.Contracts.Persistence.AppendOperation.t()
 
+  @typedoc "Canonical vector mutation or bounded atomic batch."
+  @type vector_operation :: Arbor.Contracts.Persistence.VectorOperation.t()
+
+  @typedoc "Immutable vector mutation result bound to its original operation."
+  @type vector_receipt :: Arbor.Contracts.Persistence.VectorReceipt.t()
+
+  @typedoc "Validated transport-only vector row."
+  @type vector_record :: Arbor.Contracts.Persistence.VectorRecord.t()
+
+  @typedoc "Validated vector search result."
+  @type vector_match :: Arbor.Contracts.Persistence.VectorMatch.t()
+
+  @typedoc "Closed public vector-boundary failures."
+  @type vector_error ::
+          :backend_failure
+          | :conflict
+          | :indeterminate
+          | :invalid_backend_result
+          | :invalid_request
+          | :not_found
+          | :tenant_mismatch
+          | :unsupported
+
   @typedoc "Name of a field to aggregate over."
   @type field_name :: atom()
 
@@ -375,6 +398,44 @@ defmodule Arbor.Contracts.API.Persistence do
             ) :: {:ok, non_neg_integer()}
 
   # ===========================================================================
+  # VectorStore Operations (optional)
+  # ===========================================================================
+
+  @doc "Execute a canonical vector operation only for its bound tenant."
+  @callback execute_validated_vector_operation_for_agent(
+              agent_id :: String.t(),
+              vector_operation(),
+              opts()
+            ) :: {:ok, vector_receipt()} | {:error, vector_error()}
+
+  @doc "Reconcile using the original canonical operation, not a fingerprint alone."
+  @callback reconcile_validated_vector_operation_for_agent(
+              agent_id :: String.t(),
+              vector_operation(),
+              opts()
+            ) ::
+              {:ok, vector_receipt()} | {:ok, :absent} | {:error, vector_error()}
+
+  @doc "Retrieve one validated row by its exact tenant-owned logical identity."
+  @callback retrieve_vector_record_by_logical_identity_for_agent(
+              agent_id :: String.t(),
+              source_namespace :: String.t(),
+              source_key :: String.t(),
+              opts()
+            ) :: {:ok, vector_record()} | {:error, vector_error()}
+
+  @doc "List a bounded, fully validated set of rows owned by one tenant."
+  @callback list_vector_records_for_agent(agent_id :: String.t(), opts()) ::
+              {:ok, [vector_record()]} | {:error, vector_error()}
+
+  @doc "Search with an exact model/dimension/encoding/category descriptor."
+  @callback search_vector_records_by_exact_descriptor_for_agent(
+              agent_id :: String.t(),
+              normalized_vector :: [float()],
+              opts()
+            ) :: {:ok, [vector_match()]} | {:error, vector_error()}
+
+  # ===========================================================================
   # Optional Callbacks
   # ===========================================================================
 
@@ -397,6 +458,12 @@ defmodule Arbor.Contracts.API.Persistence do
     get_stream_version_using_backend: 4,
     list_all_streams_using_backend: 3,
     get_stream_count_using_backend: 3,
-    get_event_count_using_backend: 3
+    get_event_count_using_backend: 3,
+    # VectorStore operations
+    execute_validated_vector_operation_for_agent: 3,
+    reconcile_validated_vector_operation_for_agent: 3,
+    retrieve_vector_record_by_logical_identity_for_agent: 4,
+    list_vector_records_for_agent: 2,
+    search_vector_records_by_exact_descriptor_for_agent: 3
   ]
 end

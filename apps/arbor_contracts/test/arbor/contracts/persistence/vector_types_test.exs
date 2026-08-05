@@ -386,6 +386,17 @@ defmodule Arbor.Contracts.Persistence.VectorTypesTest do
       assert {:error, :invalid_vector_receipt} = VectorReceipt.validate(nested)
     end
 
+    test "standalone validation rejects a forged batch parent fingerprint" do
+      operation = operation!(:insert, record!())
+      batch = batch!([operation])
+      child = receipt!(operation, rebuild_record!(operation.record, generation: 1, revision: 1))
+      assert {:ok, batch_receipt} = VectorReceipt.new(%{operation: batch, receipts: [child]})
+
+      forged = %{batch_receipt | operation_fingerprint: String.duplicate("f", 64)}
+
+      assert {:error, :invalid_vector_receipt} = VectorReceipt.validate(forged)
+    end
+
     test "standalone validation rejects a forged byte-oversized batch receipt" do
       receipts =
         Enum.map(oversized_batch_operations(), fn operation ->
