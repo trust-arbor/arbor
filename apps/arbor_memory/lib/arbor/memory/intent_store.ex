@@ -79,7 +79,9 @@ defmodule Arbor.Memory.IntentStore do
       {:ok, intent} = IntentStore.record_intent("agent_001", intent)
   """
   @spec record_intent(String.t(), Intent.t()) ::
-          {:ok, Intent.t()} | {:error, :invalid_request | :invalid_payload | :store_unavailable}
+          {:ok, Intent.t()}
+          | {:error,
+             :invalid_request | :invalid_payload | :store_unavailable | :commit_outcome_unknown}
   def record_intent(agent_id, %Intent{} = intent) do
     record_with_fallback(:intent, agent_id, intent)
   end
@@ -89,7 +91,11 @@ defmodule Arbor.Memory.IntentStore do
   @doc "Records an intent with an exact caller-supplied taint label."
   @spec record_intent_tainted(String.t(), Intent.t(), Taint.t()) ::
           {:ok, Intent.t()}
-          | {:error, :invalid_request | :invalid_provenance | :store_unavailable}
+          | {:error,
+             :invalid_request
+             | :invalid_provenance
+             | :store_unavailable
+             | :commit_outcome_unknown}
   def record_intent_tainted(agent_id, %Intent{} = intent, taint) do
     record_tainted(:intent, agent_id, intent, taint)
   end
@@ -108,7 +114,9 @@ defmodule Arbor.Memory.IntentStore do
       {:ok, percept} = IntentStore.record_percept("agent_001", percept)
   """
   @spec record_percept(String.t(), Percept.t()) ::
-          {:ok, Percept.t()} | {:error, :invalid_request | :invalid_payload | :store_unavailable}
+          {:ok, Percept.t()}
+          | {:error,
+             :invalid_request | :invalid_payload | :store_unavailable | :commit_outcome_unknown}
   def record_percept(agent_id, %Percept{} = percept) do
     record_with_fallback(:percept, agent_id, percept)
   end
@@ -118,7 +126,11 @@ defmodule Arbor.Memory.IntentStore do
   @doc "Records a percept with an exact caller-supplied taint label."
   @spec record_percept_tainted(String.t(), Percept.t(), Taint.t()) ::
           {:ok, Percept.t()}
-          | {:error, :invalid_request | :invalid_provenance | :store_unavailable}
+          | {:error,
+             :invalid_request
+             | :invalid_provenance
+             | :store_unavailable
+             | :commit_outcome_unknown}
   def record_percept_tainted(agent_id, %Percept{} = percept, taint) do
     record_tainted(:percept, agent_id, percept, taint)
   end
@@ -151,17 +163,9 @@ defmodule Arbor.Memory.IntentStore do
   @spec recent_intents_tainted(String.t(), keyword()) ::
           {:ok, [tainted_item()]} | {:error, :invalid_request | :store_unavailable}
   def recent_intents_tainted(agent_id, opts \\ []) do
-    with :ok <- validate_reader_request(agent_id, opts),
-         {:ok, aggregate, aggregate_status} <-
-           load_durable_aggregate(agent_id, Taint.max_join_inputs()) do
-      items =
-        aggregate.items
-        |> filter_decoded_items(:intent, opts)
-        |> Enum.map(&tainted_decoded_item(agent_id, &1, aggregate_status))
-
-      {:ok, items}
+    with :ok <- validate_reader_request(agent_id, opts) do
+      safe_server_call({:recent_tainted, :intent, agent_id, opts})
     else
-      {:error, :not_found} -> {:ok, []}
       {:error, :invalid_request} -> {:error, :invalid_request}
       _ -> {:error, :store_unavailable}
     end
@@ -197,17 +201,9 @@ defmodule Arbor.Memory.IntentStore do
   @spec recent_percepts_tainted(String.t(), keyword()) ::
           {:ok, [tainted_item()]} | {:error, :invalid_request | :store_unavailable}
   def recent_percepts_tainted(agent_id, opts \\ []) do
-    with :ok <- validate_reader_request(agent_id, opts),
-         {:ok, aggregate, aggregate_status} <-
-           load_durable_aggregate(agent_id, Taint.max_join_inputs()) do
-      items =
-        aggregate.items
-        |> filter_decoded_items(:percept, opts)
-        |> Enum.map(&tainted_decoded_item(agent_id, &1, aggregate_status))
-
-      {:ok, items}
+    with :ok <- validate_reader_request(agent_id, opts) do
+      safe_server_call({:recent_tainted, :percept, agent_id, opts})
     else
-      {:error, :not_found} -> {:ok, []}
       {:error, :invalid_request} -> {:error, :invalid_request}
       _ -> {:error, :store_unavailable}
     end
@@ -329,7 +325,8 @@ defmodule Arbor.Memory.IntentStore do
   Mark an intent as completed. Terminal state.
   """
   @spec complete_intent(String.t(), String.t()) ::
-          :ok | {:error, :invalid_request | :not_found | :store_unavailable}
+          :ok
+          | {:error, :invalid_request | :not_found | :store_unavailable | :commit_outcome_unknown}
   def complete_intent(agent_id, intent_id) do
     with :ok <- validate_identifier(agent_id),
          :ok <- validate_identifier(intent_id) do
@@ -346,7 +343,7 @@ defmodule Arbor.Memory.IntentStore do
   """
   @spec fail_intent(String.t(), String.t(), String.t()) ::
           {:ok, non_neg_integer()}
-          | {:error, :invalid_request | :not_found | :store_unavailable}
+          | {:error, :invalid_request | :not_found | :store_unavailable | :commit_outcome_unknown}
   def fail_intent(agent_id, intent_id, reason \\ "unknown")
 
   def fail_intent(agent_id, intent_id, reason)
@@ -359,7 +356,12 @@ defmodule Arbor.Memory.IntentStore do
   @doc "Marks an intent as failed with provenance for the exact failure reason."
   @spec fail_intent_tainted(String.t(), String.t(), String.t(), Taint.t()) ::
           {:ok, non_neg_integer()}
-          | {:error, :invalid_request | :invalid_provenance | :not_found | :store_unavailable}
+          | {:error,
+             :invalid_request
+             | :invalid_provenance
+             | :not_found
+             | :store_unavailable
+             | :commit_outcome_unknown}
   def fail_intent_tainted(agent_id, intent_id, reason, taint)
       when is_binary(reason) and byte_size(reason) <= @max_failure_reason_bytes do
     fail_with_taint(agent_id, intent_id, reason, taint, :tainted)
@@ -374,7 +376,8 @@ defmodule Arbor.Memory.IntentStore do
   Returns the count of unlocked intents.
   """
   @spec unlock_stale_intents(String.t(), pos_integer()) ::
-          non_neg_integer() | {:error, :invalid_request | :store_unavailable}
+          non_neg_integer()
+          | {:error, :invalid_request | :store_unavailable | :commit_outcome_unknown}
   def unlock_stale_intents(agent_id, timeout_ms \\ 60_000)
 
   def unlock_stale_intents(agent_id, timeout_ms) when is_integer(timeout_ms) and timeout_ms > 0 do
@@ -454,7 +457,8 @@ defmodule Arbor.Memory.IntentStore do
       count = IntentStore.prune_stale("agent_001", :timer.hours(1))
   """
   @spec prune_stale(String.t(), pos_integer()) ::
-          non_neg_integer() | {:error, :invalid_request | :store_unavailable}
+          non_neg_integer()
+          | {:error, :invalid_request | :store_unavailable | :commit_outcome_unknown}
   def prune_stale(agent_id, max_age_ms) when is_integer(max_age_ms) and max_age_ms > 0 do
     with :ok <- validate_identifier(agent_id) do
       safe_server_call({:prune_stale, agent_id, max_age_ms})
@@ -517,6 +521,16 @@ defmodule Arbor.Memory.IntentStore do
   end
 
   @impl true
+  def handle_call({:recent_tainted, domain, agent_id, opts}, _from, state)
+      when domain in [:intent, :percept] do
+    {:reply, read_tainted_items(domain, agent_id, opts, state.buffer_size), state}
+  rescue
+    _ -> {:reply, {:error, :store_unavailable}, state}
+  catch
+    _, _ -> {:reply, {:error, :store_unavailable}, state}
+  end
+
+  @impl true
   def handle_call({:record_prepared, domain, agent_id, prepared}, _from, state)
       when domain in [:intent, :percept] do
     with {:ok, baseline} <- load_mutation_baseline(agent_id, state.buffer_size) do
@@ -544,8 +558,8 @@ defmodule Arbor.Memory.IntentStore do
 
           {:reply, {:ok, prepared.value}, state}
 
-        {:error, _reason} ->
-          {:reply, {:error, :store_unavailable}, state}
+        {:error, reason} ->
+          {:reply, public_commit_error(reason), state}
       end
     else
       _ -> {:reply, {:error, :store_unavailable}, state}
@@ -639,7 +653,7 @@ defmodule Arbor.Memory.IntentStore do
                  {:status, intent_id} => :inherit_item
                }) do
             :ok -> {:reply, {:ok, intent}, state}
-            {:error, _reason} -> {:reply, {:error, :store_unavailable}, state}
+            {:error, reason} -> {:reply, public_commit_error(reason), state}
           end
 
         {_intent, _other} ->
@@ -670,7 +684,7 @@ defmodule Arbor.Memory.IntentStore do
                {:status, intent_id} => :inherit_item
              }) do
           :ok -> {:reply, :ok, state}
-          {:error, _reason} -> {:reply, {:error, :store_unavailable}, state}
+          {:error, reason} -> {:reply, public_commit_error(reason), state}
         end
       else
         {:reply, {:error, :not_found}, state}
@@ -704,7 +718,7 @@ defmodule Arbor.Memory.IntentStore do
                {:status, intent_id} => reason_taint
              }) do
           :ok -> {:reply, {:ok, retry_count}, state}
-          {:error, _reason} -> {:reply, {:error, :store_unavailable}, state}
+          {:error, reason} -> {:reply, public_commit_error(reason), state}
         end
       else
         {:reply, {:error, :not_found}, state}
@@ -758,8 +772,8 @@ defmodule Arbor.Memory.IntentStore do
             Logger.info("IntentStore imported intents", count: length(new_items))
             {:reply, :ok, state}
 
-          {:error, _reason} ->
-            {:reply, {:error, :store_unavailable}, state}
+          {:error, reason} ->
+            {:reply, public_commit_error(reason), state}
         end
       else
         {:reply, :ok, state}
@@ -798,7 +812,7 @@ defmodule Arbor.Memory.IntentStore do
 
         case commit_status_data(agent_id, baseline, updated, updated_ids, status_overrides) do
           :ok -> {:reply, count, state}
-          {:error, _reason} -> {:reply, {:error, :store_unavailable}, state}
+          {:error, reason} -> {:reply, public_commit_error(reason), state}
         end
       else
         {:reply, count, state}
@@ -838,8 +852,8 @@ defmodule Arbor.Memory.IntentStore do
             Logger.info("IntentStore pruned stale intents", count: count)
             {:reply, count, state}
 
-          {:error, _reason} ->
-            {:reply, {:error, :store_unavailable}, state}
+          {:error, reason} ->
+            {:reply, public_commit_error(reason), state}
         end
       else
         {:reply, count, state}
@@ -861,6 +875,9 @@ defmodule Arbor.Memory.IntentStore do
   defp normalize_buffer_size(_value), do: @default_buffer_size
 
   defp load_mutation_baseline(agent_id, buffer_size) do
+    # C3D integration point: the CAS callback must reload this baseline and
+    # recompute the operation on every conflict retry. Never reuse a candidate
+    # derived from an earlier authoritative record.
     case load_durable_aggregate(agent_id, buffer_size) do
       {:ok, aggregate, _status} ->
         with :ok <- ensure_baseline_provenance(agent_id, aggregate) do
@@ -1065,15 +1082,35 @@ defmodule Arbor.Memory.IntentStore do
     |> Enum.take(limit)
   end
 
-  defp tainted_decoded_item(agent_id, item, aggregate_status) do
-    case reconcile_durable_provenance(agent_id, item) do
-      :ok -> durable_tainted_item(item, aggregate_status)
-      {:error, _reason} -> hostile_decoded_item(item)
+  defp read_tainted_items(domain, agent_id, opts, buffer_size) do
+    current = get_agent_data(agent_id)
+
+    case load_durable_aggregate(agent_id, buffer_size) do
+      {:ok, aggregate, aggregate_status} ->
+        with :ok <- restore_decoded_agent(agent_id, current, aggregate) do
+          items =
+            aggregate.items
+            |> filter_decoded_items(domain, opts)
+            |> Enum.map(&durable_tainted_item(&1, aggregate_status))
+
+          {:ok, items}
+        else
+          _ -> {:error, :store_unavailable}
+        end
+
+      {:error, :not_found} ->
+        case clear_live_agent(agent_id, current) do
+          :ok -> {:ok, []}
+          _ -> {:error, :store_unavailable}
+        end
+
+      {:error, _reason} ->
+        {:error, :store_unavailable}
     end
   rescue
-    _ -> hostile_decoded_item(item)
+    _ -> {:error, :store_unavailable}
   catch
-    _, _ -> hostile_decoded_item(item)
+    _, _ -> {:error, :store_unavailable}
   end
 
   defp reconcile_durable_provenance(agent_id, item) do
@@ -1102,10 +1139,8 @@ defmodule Arbor.Memory.IntentStore do
     {TaintedValue.wrap(item.value, item.taint), status}
   end
 
-  defp hostile_decoded_item(item) do
-    taint = TaintEnvelope.invalid_fallback()
-    {TaintedValue.wrap(item.value, taint), :invalid_durable_provenance}
-  end
+  defp public_commit_error(:commit_outcome_unknown), do: {:error, :commit_outcome_unknown}
+  defp public_commit_error(_reason), do: {:error, :store_unavailable}
 
   defp normalize_provenance_status(taint, status) do
     cond do
@@ -1138,28 +1173,47 @@ defmodule Arbor.Memory.IntentStore do
   defp commit_encoded_aggregate(agent_id, original, encoded) do
     case persist_encoded_aggregate(agent_id, encoded) do
       :ok ->
-        case install_live_aggregate(agent_id, original, encoded) do
+        case verify_committed_candidate(agent_id, encoded) do
           :ok ->
-            :ok
+            case install_live_aggregate(agent_id, original, encoded) do
+              :ok ->
+                :ok
+
+              {:error, _reason} ->
+                case recover_after_live_install_failure(agent_id, original, encoded) do
+                  :ok ->
+                    :ok
+
+                  {:error, _reason} ->
+                    Logger.warning(
+                      "IntentStore committed aggregate; live projection recovery is pending"
+                    )
+
+                    :ok
+                end
+            end
 
           {:error, _reason} ->
-            recover_after_live_install_failure(agent_id, original, encoded)
-            {:error, :commit_failed}
+            # C3D integration point: an operation receipt will reconcile an
+            # owner loss or concurrent replacement here. This explicit result
+            # must not be collapsed into the ordinary retryable store error.
+            {:error, :commit_outcome_unknown}
         end
 
       _ ->
         {:error, :commit_failed}
     end
   rescue
-    _ -> {:error, :commit_failed}
+    _ -> {:error, :commit_outcome_unknown}
   catch
-    _, _ -> {:error, :commit_failed}
+    _, _ -> {:error, :commit_outcome_unknown}
   end
 
   defp persist_encoded_aggregate(agent_id, encoded) do
     # C3D integration point: replace this cache acknowledgement with the shared
     # backend-acknowledged CAS/update primitive. The CAS must join against the
-    # current durable aggregate so node-local writers cannot lower its label.
+    # current durable aggregate so node-local writers cannot lower its label,
+    # and every conflict retry must recompute the operation from that snapshot.
     if MemoryStore.available?() do
       MemoryStore.persist("intents", agent_id, encoded.persisted, taint: encoded.aggregate_taint)
     else
@@ -1169,8 +1223,9 @@ defmodule Arbor.Memory.IntentStore do
 
   defp delete_persisted_aggregate(agent_id) do
     # C3D integration point: replace this cache acknowledgement with the shared
-    # critical-delete primitive, which distinguishes acknowledged ephemeral
-    # deletion from a configured durable backend failure.
+    # compare-delete primitive, which distinguishes acknowledged ephemeral
+    # deletion from a configured durable backend failure and never reuses a
+    # stale clear predecessor.
     if MemoryStore.available?() do
       MemoryStore.delete("intents", agent_id)
     else
@@ -1196,29 +1251,40 @@ defmodule Arbor.Memory.IntentStore do
     _, _ -> {:error, :live_install_failed}
   end
 
+  defp verify_committed_candidate(agent_id, encoded) do
+    case MemoryStore.load_tainted_with_status("intents", agent_id) do
+      {:ok,
+       %TaintedValue{
+         value: persisted,
+         taint: aggregate_taint
+       }, :verified}
+      when persisted == encoded.persisted and aggregate_taint == encoded.aggregate_taint ->
+        :ok
+
+      _ ->
+        {:error, :candidate_not_current}
+    end
+  rescue
+    _ -> {:error, :candidate_not_current}
+  catch
+    _, _ -> {:error, :candidate_not_current}
+  end
+
   defp recover_after_live_install_failure(agent_id, original, encoded) do
     true = :ets.delete(@ets_table, agent_id)
     purge_intent_store_provenance(agent_id, original)
     delete_item_provenance(agent_id, encoded.data)
 
-    with {:ok, %TaintedValue{value: persisted, taint: outer_taint}, outer_status} <-
-           MemoryStore.load_tainted_with_status("intents", agent_id),
-         {:ok, decoded, _status} <-
-           decode_durable_aggregate(
-             persisted,
-             outer_taint,
-             outer_status,
-             Taint.max_join_inputs()
-           ),
-         :ok <- restore_decoded_agent(agent_id, empty_agent_data(), decoded) do
+    with :ok <- verify_committed_candidate(agent_id, encoded),
+         :ok <- restore_decoded_agent(agent_id, empty_agent_data(), encoded) do
       :ok
     else
-      _ -> :ok
+      _ -> {:error, :projection_unavailable}
     end
   rescue
-    _ -> :ok
+    _ -> {:error, :projection_unavailable}
   catch
-    _, _ -> :ok
+    _, _ -> {:error, :projection_unavailable}
   end
 
   defp commit_current_data(agent_id, baseline, candidate) do
@@ -1247,6 +1313,7 @@ defmodule Arbor.Memory.IntentStore do
          :ok <- commit_encoded_aggregate(agent_id, baseline.data, encoded) do
       {:ok, committed_taint}
     else
+      {:error, :commit_outcome_unknown} = error -> error
       _ -> {:error, :commit_failed}
     end
   rescue
@@ -1377,6 +1444,8 @@ defmodule Arbor.Memory.IntentStore do
   end
 
   defp purge_intent_store_provenance(agent_id, _current) do
+    # C3D integration point: replace these global domain scans with the shared
+    # owner-indexed bounded list/delete primitive and definitive owner calls.
     [:intent, :percept, :intent_status]
     |> Enum.reduce_while(:ok, fn domain, :ok ->
       case Provenance.delete_domain_agent(domain, agent_id) do
@@ -1888,6 +1957,7 @@ defmodule Arbor.Memory.IntentStore do
 
   defp decode_verified_statuses(statuses, intents) when is_map(statuses) do
     intent_ids = MapSet.new(Enum.map(intents, & &1.id))
+    intent_taints = Map.new(intents, &{&1.id, &1.taint})
 
     if valid_status_ids?(statuses, intent_ids) do
       statuses
@@ -1898,7 +1968,10 @@ defmodule Arbor.Memory.IntentStore do
              {:ok, canonical} <- canonical_payload(payload),
              true <- canonical == payload,
              {:ok, info} <- decode_status_payload(id, payload),
-             {:ok, envelope} <- TaintEnvelope.verify(persisted["provenance"], payload) do
+             {:ok, envelope} <- TaintEnvelope.verify(persisted["provenance"], payload),
+             {:ok, intent_taint} <- Map.fetch(intent_taints, id),
+             {:ok, joined_taint} <- Taint.join(intent_taint, envelope.taint),
+             true <- joined_taint == envelope.taint do
           decoded = %{
             domain: :intent_status,
             id: id,
