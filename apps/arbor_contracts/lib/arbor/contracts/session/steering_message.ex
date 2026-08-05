@@ -25,9 +25,9 @@ defmodule Arbor.Contracts.Session.SteeringMessage do
 
   @max_content_bytes 32_768
   @max_engagement_id_bytes 256
-  @max_taint_source_bytes 128
-  @max_taint_chain_entries 16
-  @max_taint_chain_entry_bytes 128
+  @max_taint_source_bytes Taint.max_source_bytes()
+  @max_taint_chain_entries Taint.max_chain_entries()
+  @max_taint_chain_entry_bytes Taint.max_chain_entry_bytes()
   @max_messages_per_boundary 4
   @max_bytes_per_boundary 32_768
   @max_messages_per_turn 16
@@ -198,11 +198,8 @@ defmodule Arbor.Contracts.Session.SteeringMessage do
   defp validate_content(_), do: {:error, :invalid_content}
 
   defp validate_taint(%Taint{} = taint) do
-    with true <- exact_struct_shape?(taint, Taint, @taint_fields),
-         true <- taint.level in Taint.levels(),
-         true <- taint.sensitivity in Taint.sensitivities(),
-         true <- taint.confidence in Taint.confidences(),
-         true <- is_integer(taint.sanitizations) and taint.sanitizations in 0..255,
+    with :ok <- Taint.validate(taint),
+         true <- exact_struct_shape?(taint, Taint, @taint_fields),
          true <- valid_optional_label?(taint.source, @max_taint_source_bytes),
          true <- valid_chain?(taint.chain) do
       :ok

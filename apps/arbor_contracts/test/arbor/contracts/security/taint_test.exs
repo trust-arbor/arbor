@@ -84,6 +84,146 @@ defmodule Arbor.Contracts.Security.TaintTest do
     end
   end
 
+  describe "exact validation and joins" do
+    test "canonicalizes exact atom and string-keyed maps without creating atoms" do
+      attrs = %{
+        level: :untrusted,
+        sensitivity: :restricted,
+        sanitizations: 3,
+        confidence: :verified,
+        source: "api",
+        chain: ["ingress"]
+      }
+
+      assert {:ok, taint} = Taint.canonicalize(attrs)
+      assert taint.level == :untrusted
+      assert {:ok, ^taint} = Taint.canonicalize(%{attrs | level: "untrusted"})
+
+      key = "taint_key_that_must_not_be_created_#{System.unique_integer([:positive])}"
+      before = :erlang.system_info(:atom_count)
+      assert {:error, :invalid_taint_shape} = Taint.canonicalize(Map.put(attrs, key, :value))
+      assert :erlang.system_info(:atom_count) == before
+    end
+
+    test "rejects malformed and unbounded taints" do
+      taint = %Taint{}
+
+      for invalid <- [
+            %{taint | level: :unknown},
+            %{taint | sanitizations: -1},
+            %{taint | sanitizations: 256},
+            %{taint | source: String.duplicate("x", Taint.max_source_bytes() + 1)},
+            %{taint | chain: List.duplicate("x", Taint.max_chain_entries() + 1)},
+            Map.put(taint, :extra, :value),
+            %{taint | chain: [<<255>>]}
+          ] do
+        assert {:error, :invalid_taint} = Taint.canonicalize(invalid)
+      end
+    end
+
+    test "joins dimensions monotonically and sanitizations by intersection" do
+      left = %Taint{
+        level: :untrusted,
+        sensitivity: :confidential,
+        sanitizations: 0b0111,
+        confidence: :verified,
+        source: "z-source",
+        chain: ["shared", "left"]
+      }
+
+      right = %Taint{
+        level: :hostile,
+        sensitivity: :restricted,
+        sanitizations: 0b0101,
+        confidence: :plausible,
+        source: "a-source",
+        chain: ["shared", "right"]
+      }
+
+      assert {:ok, joined} = Taint.join(left, right)
+      assert joined.level == :hostile
+      assert joined.sensitivity == :restricted
+      assert joined.sanitizations == 0b0101
+      assert joined.confidence == :plausible
+      assert joined.source == "a-source"
+      assert joined.chain == ["left", "right", "shared", "z-source"]
+    end
+
+    test "whole-struct join is commutative, associative, and idempotent" do
+      a = %Taint{source: "a", chain: ["a1"], sanitizations: 0b111}
+      b = %Taint{source: "b", chain: ["b1"], level: :derived, sanitizations: 0b011}
+      c = %Taint{source: "c", chain: ["c1"], sensitivity: :confidential, sanitizations: 0b001}
+
+      assert {:ok, ab} = Taint.join(a, b)
+      assert {:ok, ba} = Taint.join(b, a)
+      assert ab == ba
+      assert {:ok, aa} = Taint.join(a, a)
+      assert aa == a
+
+      assert {:ok, left} = Taint.join(ab, c)
+      assert {:ok, bc} = Taint.join(b, c)
+      assert {:ok, right} = Taint.join(a, bc)
+      assert left == right
+      assert {:ok, same} = Taint.join(left, left)
+      assert same == left
+    end
+
+    test "equivalent differently ordered provenance labels converge" do
+      left = %Taint{source: "root", chain: ["b", "a"]}
+      right = %Taint{source: "root", chain: ["a", "b"]}
+
+      assert {:ok, joined_left} = Taint.join(left, right)
+      assert {:ok, joined_right} = Taint.join(right, left)
+      assert joined_left == joined_right
+      assert Taint.validate(joined_left) == :ok
+    end
+
+    test "provenance overflow returns an absorbing invalid durable taint" do
+      left = %Taint{source: "left", chain: Enum.map(1..16, &"left-#{&1}")}
+      right = %Taint{source: "right"}
+
+      assert {:ok, invalid} = Taint.join(left, right)
+      assert invalid == Taint.invalid_durable_provenance()
+      assert {:ok, ^invalid} = Taint.join(invalid, %Taint{source: "later"})
+    end
+
+    test "a max-chain union remains valid when the source is already present" do
+      max_chain = %Taint{source: "shared", chain: Enum.map(1..16, &"label-#{&1}")}
+
+      assert {:ok, joined} = Taint.join(max_chain, %Taint{source: "shared"})
+      assert Taint.validate(joined) == :ok
+
+      assert Enum.sort([joined.source | joined.chain]) == [
+               "label-1",
+               "label-10",
+               "label-11",
+               "label-12",
+               "label-13",
+               "label-14",
+               "label-15",
+               "label-16",
+               "label-2",
+               "label-3",
+               "label-4",
+               "label-5",
+               "label-6",
+               "label-7",
+               "label-8",
+               "label-9",
+               "shared"
+             ]
+
+      assert {:ok, invalid} = Taint.join(max_chain, %Taint{source: "seventeenth"})
+      assert invalid == Taint.invalid_durable_provenance()
+    end
+
+    test "rejects improper chains at the public validation boundary" do
+      taint = %Taint{chain: ["bounded" | :improper_tail]}
+      assert {:error, :invalid_taint} = Taint.validate(taint)
+      assert {:error, :invalid_taint} = Taint.canonicalize(taint)
+    end
+  end
+
   describe "Jason encoding" do
     test "encodes to JSON" do
       taint = %Taint{level: :untrusted, source: "api"}
