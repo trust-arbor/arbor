@@ -46,8 +46,18 @@ defmodule Arbor.Memory.IndexDualTest do
   defmodule MaliciousWriter do
     @behaviour Arbor.Memory.Index.PersistentWriter
 
-    def configure(agent_id, mode), do: :persistent_term.put({__MODULE__, agent_id}, mode)
-    def disarm(agent_id), do: :persistent_term.erase({__MODULE__, agent_id})
+    def configure(agent_id, mode) do
+      :persistent_term.put({__MODULE__, agent_id}, mode)
+      :persistent_term.put({__MODULE__, :batch_calls, agent_id}, 0)
+    end
+
+    def batch_call_count(agent_id),
+      do: :persistent_term.get({__MODULE__, :batch_calls, agent_id}, 0)
+
+    def disarm(agent_id) do
+      :persistent_term.erase({__MODULE__, agent_id})
+      :persistent_term.erase({__MODULE__, :batch_calls, agent_id})
+    end
 
     @impl true
     def store(agent_id, content, embedding, metadata) do
@@ -77,6 +87,11 @@ defmodule Arbor.Memory.IndexDualTest do
 
     @impl true
     def store_batch_with_ids(agent_id, entries) do
+      :persistent_term.put(
+        {__MODULE__, :batch_calls, agent_id},
+        batch_call_count(agent_id) + 1
+      )
+
       requested_ids =
         Enum.map(entries, fn {_content, _embedding, metadata} ->
           Map.get(metadata, :id) || Map.get(metadata, "id")
@@ -292,6 +307,114 @@ defmodule Arbor.Memory.IndexDualTest do
       MaliciousWriter.configure(agent_id, :delegate)
       assert {:ok, 2} = Index.sync_to_persistent(pid)
       assert Embedding.count(agent_id) == 2
+    end
+
+    test "security regression: fresh batch authoritative IDs cannot swap content groups" do
+      agent_id = durable_unique("test_dual_fresh_authority_swap")
+      suffix = :crypto.strong_rand_bytes(8) |> Base.encode16(case: :lower)
+      first_id = "mem_first_#{suffix}"
+      second_id = "mem_second_#{suffix}"
+      MaliciousWriter.configure(agent_id, :cross_group_batch)
+
+      {:ok, pid} =
+        Index.start_link(
+          agent_id: agent_id,
+          backend: :dual,
+          persistent_writer: MaliciousWriter,
+          entry_id_generator: sequence_callback([first_id, second_id]),
+          name: {:via, Registry, {Arbor.Memory.Registry, {:test_fresh_swap, agent_id}}}
+        )
+
+      on_exit(fn ->
+        MaliciousWriter.disarm(agent_id)
+        if Process.alive?(pid), do: GenServer.stop(pid)
+        Embedding.delete_all(agent_id)
+      end)
+
+      state_before = :sys.get_state(pid)
+      table_before = :ets.tab2list(state_before.table)
+
+      assert {:error, :malformed_persistence_result} =
+               Index.batch_index(
+                 pid,
+                 [
+                   {"Fresh authority first", %{type: :first}},
+                   {"Fresh authority second", %{type: :second}}
+                 ],
+                 embedding: generate_embedding(81)
+               )
+
+      state_after = :sys.get_state(pid)
+      assert MaliciousWriter.batch_call_count(agent_id) == 1
+      assert :ets.tab2list(state_after.table) == table_before
+      assert state_after.entry_count == state_before.entry_count
+      assert state_after.pending_sync == state_before.pending_sync
+      assert state_after.pending_entry_orders == state_before.pending_entry_orders
+      assert state_after.id_aliases == state_before.id_aliases
+      assert state_after.next_insertion_sequence == state_before.next_insertion_sequence
+      assert {:error, :not_found} = Index.get(pid, first_id)
+      assert {:error, :not_found} = Index.get(pid, second_id)
+      assert Embedding.count(agent_id) == 0
+    end
+
+    test "security regression: batch IDs cannot collide with pending authority before dispatch" do
+      agent_id = durable_unique("test_dual_batch_pending_collision")
+      suffix = :crypto.strong_rand_bytes(8) |> Base.encode16(case: :lower)
+      pending_id = "mem_pending_#{suffix}"
+      other_id = "mem_other_#{suffix}"
+      MaliciousWriter.configure(agent_id, :fail)
+
+      {:ok, pid} =
+        Index.start_link(
+          agent_id: agent_id,
+          backend: :dual,
+          persistent_writer: MaliciousWriter,
+          entry_id_generator: sequence_callback([pending_id, pending_id, other_id]),
+          name:
+            {:via, Registry, {Arbor.Memory.Registry, {:test_batch_pending_collision, agent_id}}}
+        )
+
+      on_exit(fn ->
+        MaliciousWriter.disarm(agent_id)
+        if Process.alive?(pid), do: GenServer.stop(pid)
+        Embedding.delete_all(agent_id)
+      end)
+
+      pending_embedding = generate_embedding(82)
+
+      assert {:ok, ^pending_id} =
+               Index.index(pid, "Existing pending authority", %{type: :pending},
+                 embedding: pending_embedding
+               )
+
+      state_before = :sys.get_state(pid)
+      table_before = :ets.tab2list(state_before.table)
+
+      assert {:error, :invalid_batch_identity} =
+               Index.batch_index(
+                 pid,
+                 [
+                   {"Colliding batch identity", %{type: :collision}},
+                   {"Other batch identity", %{type: :other}}
+                 ],
+                 embedding: generate_embedding(83)
+               )
+
+      state_after = :sys.get_state(pid)
+      assert MaliciousWriter.batch_call_count(agent_id) == 0
+      assert :ets.tab2list(state_after.table) == table_before
+      assert state_after.entry_count == state_before.entry_count
+      assert state_after.pending_sync == state_before.pending_sync
+      assert state_after.pending_entry_orders == state_before.pending_entry_orders
+      assert state_after.id_aliases == state_before.id_aliases
+      assert state_after.next_insertion_sequence == state_before.next_insertion_sequence
+
+      assert {:ok, %{id: ^pending_id, embedding: stored_embedding}} =
+               Index.get(pid, pending_id)
+
+      assert_vector_close(stored_embedding, pending_embedding)
+      assert {:error, :not_found} = Index.get(pid, other_id)
+      assert Embedding.count(agent_id) == 0
     end
   end
 

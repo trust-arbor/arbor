@@ -717,8 +717,16 @@ defmodule Arbor.Memory.Index do
         {:halt, {:error, :invalid_batch}}
     end)
     |> case do
-      {:ok, prepared} -> {:ok, Enum.reverse(prepared)}
-      error -> error
+      {:ok, prepared} ->
+        prepared = Enum.reverse(prepared)
+
+        case validate_prepared_batch_identities(prepared, state) do
+          :ok -> {:ok, prepared}
+          {:error, reason} -> {:error, reason}
+        end
+
+      error ->
+        error
     end
   rescue
     _error -> {:error, :invalid_batch}
@@ -727,6 +735,23 @@ defmodule Arbor.Memory.Index do
   end
 
   defp prepare_batch_entries(_items, _opts, _state), do: {:error, :invalid_batch}
+
+  defp validate_prepared_batch_identities(prepared, state) do
+    ids = Enum.map(prepared, & &1.entry.id)
+
+    occupied_ids =
+      state.pending_sync
+      |> MapSet.union(MapSet.new(Map.keys(state.id_aliases)))
+      |> MapSet.union(MapSet.new(Map.values(state.id_aliases)))
+      |> MapSet.union(MapSet.new(:ets.select(state.table, [{{:"$1", :_}, [], [:"$1"]}])))
+
+    if length(ids) == MapSet.size(MapSet.new(ids)) and
+         Enum.all?(ids, &(not MapSet.member?(occupied_ids, &1))) do
+      :ok
+    else
+      {:error, :invalid_batch_identity}
+    end
+  end
 
   defp commit_ets_batch(prepared, eviction_ids, state) do
     new_state =
@@ -1132,10 +1157,19 @@ defmodule Arbor.Memory.Index do
     do: latest_sequence
 
   defp validate_authoritative_bindings(state, groups, authoritative_ids) do
-    validate_authoritative_bindings(state, groups, authoritative_ids, MapSet.new(), [])
+    with {:ok, member_owners} <- prepared_member_owners(groups) do
+      validate_authoritative_bindings(
+        state,
+        groups,
+        authoritative_ids,
+        member_owners,
+        MapSet.new(),
+        []
+      )
+    end
   end
 
-  defp validate_authoritative_bindings(_state, [], [], _seen_ids, bindings) do
+  defp validate_authoritative_bindings(_state, [], [], _member_owners, _seen_ids, bindings) do
     {:ok, Enum.reverse(bindings)}
   end
 
@@ -1143,10 +1177,12 @@ defmodule Arbor.Memory.Index do
          state,
          [group | groups],
          [authoritative_id | authoritative_ids],
+         member_owners,
          seen_ids,
          bindings
        ) do
     with false <- MapSet.member?(seen_ids, authoritative_id),
+         :ok <- validate_prepared_member_owner(group, authoritative_id, member_owners),
          :ok <-
            validate_authoritative_binding(
              state,
@@ -1157,6 +1193,7 @@ defmodule Arbor.Memory.Index do
         state,
         groups,
         authoritative_ids,
+        member_owners,
         MapSet.put(seen_ids, authoritative_id),
         [{group, authoritative_id} | bindings]
       )
@@ -1165,8 +1202,45 @@ defmodule Arbor.Memory.Index do
     end
   end
 
-  defp validate_authoritative_bindings(_state, _groups, _ids, _seen_ids, _bindings),
-    do: {:error, :malformed_persistence_result}
+  defp validate_authoritative_bindings(
+         _state,
+         _groups,
+         _ids,
+         _member_owners,
+         _seen_ids,
+         _bindings
+       ),
+       do: {:error, :malformed_persistence_result}
+
+  defp prepared_member_owners(groups) do
+    Enum.reduce_while(groups, {:ok, %{}}, fn group, {:ok, owners} ->
+      owner = group_owner(group)
+
+      Enum.reduce_while(group.member_ids, {:ok, owners}, fn member_id, {:ok, acc} ->
+        case Map.fetch(acc, member_id) do
+          :error -> {:cont, {:ok, Map.put(acc, member_id, owner)}}
+          {:ok, ^owner} -> {:cont, {:ok, acc}}
+          {:ok, _other_owner} -> {:halt, {:error, :malformed_persistence_result}}
+        end
+      end)
+      |> case do
+        {:ok, updated} -> {:cont, {:ok, updated}}
+        error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp validate_prepared_member_owner(group, authoritative_id, member_owners) do
+    expected_owner = group_owner(group)
+
+    case Map.fetch(member_owners, authoritative_id) do
+      :error -> :ok
+      {:ok, ^expected_owner} -> :ok
+      {:ok, _other_owner} -> {:error, :malformed_persistence_result}
+    end
+  end
+
+  defp group_owner(group), do: {group.content_digest, group.order_key}
 
   defp validate_authoritative_binding(state, expected_content, authoritative_id) do
     with true <- valid_entry_id?(authoritative_id),

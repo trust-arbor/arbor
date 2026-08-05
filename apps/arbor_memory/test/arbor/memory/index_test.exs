@@ -127,6 +127,37 @@ defmodule Arbor.Memory.IndexTest do
       assert length(ids) == 3
       Enum.each(ids, &assert(String.starts_with?(&1, "mem_")))
     end
+
+    test "security regression: duplicate generated IDs reject before ETS mutation" do
+      duplicate_id = "mem_duplicate_batch_identity"
+
+      {:ok, duplicate_pid} =
+        Index.start_link(
+          agent_id: "duplicate_batch_agent",
+          entry_id_generator: fn -> duplicate_id end,
+          name: nil
+        )
+
+      on_exit(fn ->
+        if Process.alive?(duplicate_pid), do: GenServer.stop(duplicate_pid)
+      end)
+
+      state_before = :sys.get_state(duplicate_pid)
+      table_before = :ets.tab2list(state_before.table)
+
+      assert {:error, :invalid_batch_identity} =
+               Index.batch_index(
+                 duplicate_pid,
+                 [{"Duplicate first", %{type: :first}}, {"Duplicate second", %{type: :second}}],
+                 embedding: List.duplicate(0.5, 128)
+               )
+
+      state_after = :sys.get_state(duplicate_pid)
+      assert :ets.tab2list(state_after.table) == table_before
+      assert state_after.entry_count == state_before.entry_count
+      assert state_after.next_insertion_sequence == state_before.next_insertion_sequence
+      assert {:error, :not_found} = Index.get(duplicate_pid, duplicate_id)
+    end
   end
 
   describe "stats/1" do
