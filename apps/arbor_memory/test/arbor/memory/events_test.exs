@@ -1,7 +1,9 @@
 defmodule Arbor.Memory.EventsTest do
   use ExUnit.Case
 
+  alias Arbor.Contracts.Security.Taint
   alias Arbor.Memory.Events
+  alias Arbor.Memory.Test.DurableEventLog
 
   @moduletag :fast
 
@@ -139,6 +141,43 @@ defmodule Arbor.Memory.EventsTest do
 
       {:ok, count} = Events.count_by_type(agent_id, :identity_changed)
       assert count >= 1
+    end
+  end
+
+  describe "maintenance archive identity" do
+    test "security regression scopes the same maintenance identity to each agent" do
+      DurableEventLog.start!()
+
+      first_agent = "archive_identity_first_#{System.unique_integer([:positive])}"
+      second_agent = "archive_identity_second_#{System.unique_integer([:positive])}"
+      occurred_at = ~U[2026-08-05 12:00:00Z]
+
+      entry = %{
+        archive_payload: %{
+          "node_id" => "shared-node",
+          "content" => "same archived content",
+          "reason" => "low_relevance"
+        },
+        idempotency_key: {"shared-operation", "shared-node", :low_relevance},
+        provenance_status: :verified,
+        taint: %Taint{
+          level: :trusted,
+          sensitivity: :public,
+          sanitizations: 0,
+          confidence: :verified,
+          source: "archive_identity_test",
+          chain: []
+        }
+      }
+
+      assert :ok = Events.archive_knowledge_once(first_agent, entry, occurred_at)
+      assert :ok = Events.archive_knowledge_once(second_agent, entry, occurred_at)
+
+      assert {:ok, [first_event]} = Events.get_by_type(first_agent, :knowledge_archived)
+      assert {:ok, [second_event]} = Events.get_by_type(second_agent, :knowledge_archived)
+      assert first_event.id != second_event.id
+      assert first_event.data["agent_id"] == first_agent
+      assert second_event.data["agent_id"] == second_agent
     end
   end
 end

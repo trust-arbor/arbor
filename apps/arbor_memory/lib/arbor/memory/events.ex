@@ -241,15 +241,17 @@ defmodule Arbor.Memory.Events do
         },
         %DateTime{} = occurred_at
       ) do
+    archive_stream = stream_id(agent_id)
+
     with {:ok, target} <- Config.maintenance_archive_target(),
          :ok <- require_archive_durability(target),
          true <- provenance_status in [:verified, :legacy_unlabeled, :invalid_durable_provenance],
          {:ok, envelope} <- TaintEnvelope.new(archive_payload, taint),
          {:ok, envelope} <- TaintEnvelope.to_map(envelope),
-         {:ok, event_id} <- archive_event_id(idempotency_key),
+         {:ok, event_id} <- archive_event_id(agent_id, archive_stream, idempotency_key),
          %Event{} = event <-
            Event.new(
-             stream_id(agent_id),
+             archive_stream,
              "knowledge_archived",
              %{
                "agent_id" => agent_id,
@@ -261,7 +263,7 @@ defmodule Arbor.Memory.Events do
              metadata: %{"source" => "knowledge_graph_maintenance"}
            ),
          :ok <-
-           append_exact_archive(target, stream_id(agent_id), event, @archive_append_attempts) do
+           append_exact_archive(target, archive_stream, event, @archive_append_attempts) do
       :ok
     else
       {:error, _reason} = error -> error
@@ -460,10 +462,11 @@ defmodule Arbor.Memory.Events do
   # Private Helpers
   # ============================================================================
 
-  defp archive_event_id({operation_id, node_id, reason})
-       when is_binary(operation_id) and is_binary(node_id) and is_atom(reason) do
+  defp archive_event_id(agent_id, stream_id, {operation_id, node_id, reason})
+       when is_binary(agent_id) and is_binary(stream_id) and is_binary(operation_id) and
+              is_binary(node_id) and is_atom(reason) do
     digest =
-      {:knowledge_graph_archive, operation_id, node_id, reason}
+      {:knowledge_graph_archive, agent_id, stream_id, operation_id, node_id, reason}
       |> :erlang.term_to_binary([:deterministic])
       |> then(&:crypto.hash(:sha256, &1))
       |> Base.encode16(case: :lower)
@@ -475,7 +478,8 @@ defmodule Arbor.Memory.Events do
     _, _ -> {:error, :invalid_archive_effect}
   end
 
-  defp archive_event_id(_identity), do: {:error, :invalid_archive_effect}
+  defp archive_event_id(_agent_id, _stream_id, _identity),
+    do: {:error, :invalid_archive_effect}
 
   defp append_exact_archive(_target, _stream_id, _event, 0),
     do: {:error, :archive_outcome_unknown}
