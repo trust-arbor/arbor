@@ -24,9 +24,8 @@ defmodule Arbor.Signals.Taint do
 
   ## Propagation Rules
 
-  - Output taint is at least as severe as the most severe input
-  - If any input is `:untrusted`, output is at least `:derived`
-  - `:hostile` input taints the entire output as `:hostile`
+  - Propagation returns exactly the maximum input level under the contract ordering
+  - `:hostile` input therefore taints the entire output as `:hostile`
 
   ## Usage Examples
 
@@ -36,7 +35,7 @@ defmodule Arbor.Signals.Taint do
       Arbor.Signals.Taint.can_use_as?(:untrusted, :data)    # => true
 
       # Propagate taint through a transformation
-      Arbor.Signals.Taint.propagate([:trusted, :untrusted]) # => :derived
+      Arbor.Signals.Taint.propagate([:trusted, :untrusted]) # => :untrusted
 
       # Reduce taint level with justification
       Arbor.Signals.Taint.reduce(:untrusted, :derived, :consensus)
@@ -47,8 +46,9 @@ defmodule Arbor.Signals.Taint do
   @type role :: :control | :data
   @type reduction_reason :: :human_review | :consensus | :verified_pipeline
 
-  @levels_ordered [:trusted, :derived, :untrusted, :hostile]
   @valid_roles [:control, :data]
+  @taint_struct Arbor.Contracts.Security.Taint
+  @taint_envelope Arbor.Contracts.Security.TaintEnvelope
 
   # =============================================================================
   # Level Predicates
@@ -58,7 +58,7 @@ defmodule Arbor.Signals.Taint do
   Returns the ordered list of taint levels from lowest to highest severity.
   """
   @spec levels() :: [level()]
-  def levels, do: @levels_ordered
+  def levels, do: @taint_struct.levels()
 
   @doc """
   Returns the list of valid taint roles.
@@ -78,8 +78,7 @@ defmodule Arbor.Signals.Taint do
       false
   """
   @spec valid_level?(term()) :: boolean()
-  def valid_level?(level) when level in @levels_ordered, do: true
-  def valid_level?(_), do: false
+  def valid_level?(level), do: level in levels()
 
   @doc """
   Check if a value is a valid taint role.
@@ -108,10 +107,12 @@ defmodule Arbor.Signals.Taint do
       3
   """
   @spec severity(level()) :: non_neg_integer()
-  def severity(:trusted), do: 0
-  def severity(:derived), do: 1
-  def severity(:untrusted), do: 2
-  def severity(:hostile), do: 3
+  def severity(level) do
+    case Enum.find_index(levels(), &(&1 == level)) do
+      nil -> 3
+      rank -> rank
+    end
+  end
 
   # =============================================================================
   # Comparison / Propagation
@@ -130,14 +131,19 @@ defmodule Arbor.Signals.Taint do
   """
   @spec max_taint(level(), level()) :: level()
   def max_taint(level_a, level_b) do
-    if severity(level_a) >= severity(level_b), do: level_a, else: level_b
+    if valid_level?(level_a) and valid_level?(level_b) do
+      if severity(level_a) >= severity(level_b), do: level_a, else: level_b
+    else
+      :hostile
+    end
   end
 
   @doc """
   Propagate taint from a list of input levels to determine output taint.
 
-  The output taint is the maximum of all input taints, with the additional rule
-  that if any input is `:untrusted` or higher, the output is at least `:derived`.
+  The output taint is exactly the maximum of all valid input taints under the
+  authoritative contract ordering. Improper or malformed input fails closed as
+  `:hostile`.
 
   ## Examples
 
@@ -145,7 +151,7 @@ defmodule Arbor.Signals.Taint do
       :trusted
 
       iex> Arbor.Signals.Taint.propagate([:trusted, :untrusted])
-      :derived
+      :untrusted
 
       iex> Arbor.Signals.Taint.propagate([:hostile])
       :hostile
@@ -156,19 +162,10 @@ defmodule Arbor.Signals.Taint do
   @spec propagate([level()]) :: level()
   def propagate([]), do: :trusted
 
-  def propagate(input_levels) when is_list(input_levels) do
-    max_level = Enum.reduce(input_levels, :trusted, &max_taint/2)
+  def propagate(input_levels) when is_list(input_levels),
+    do: propagate_levels(input_levels, :trusted, 0)
 
-    # If any input was untrusted but max isn't hostile, output is at least derived
-    has_untrusted =
-      Enum.any?(input_levels, fn level -> severity(level) >= severity(:untrusted) end)
-
-    cond do
-      max_level == :hostile -> :hostile
-      has_untrusted and max_level == :untrusted -> :derived
-      true -> max_level
-    end
-  end
+  def propagate(_input_levels), do: :hostile
 
   # =============================================================================
   # Role Enforcement
@@ -339,25 +336,20 @@ defmodule Arbor.Signals.Taint do
   # Struct-Aware Functions (Phase 1 Taint Extension)
   # =============================================================================
 
-  # Alias for the 4-dimensional taint struct in contracts
-  @taint_struct Arbor.Contracts.Security.Taint
-
-  @sensitivity_ordered [:public, :internal, :confidential, :restricted]
-  @confidence_ordered [:unverified, :plausible, :corroborated, :verified]
-
   # ── Sensitivity ──────────────────────────────────────────────────────
 
   @doc "Check if a value is a valid sensitivity level."
   @spec valid_sensitivity?(term()) :: boolean()
-  def valid_sensitivity?(s) when s in @sensitivity_ordered, do: true
-  def valid_sensitivity?(_), do: false
+  def valid_sensitivity?(s), do: s in @taint_struct.sensitivities()
 
   @doc "Get numeric rank for a sensitivity level (0=public, 3=restricted)."
   @spec sensitivity_severity(atom()) :: non_neg_integer()
-  def sensitivity_severity(:public), do: 0
-  def sensitivity_severity(:internal), do: 1
-  def sensitivity_severity(:confidential), do: 2
-  def sensitivity_severity(:restricted), do: 3
+  def sensitivity_severity(sensitivity) do
+    case Enum.find_index(@taint_struct.sensitivities(), &(&1 == sensitivity)) do
+      nil -> 3
+      rank -> rank
+    end
+  end
 
   @doc "Return the higher sensitivity of two levels."
   @spec max_sensitivity(atom(), atom()) :: atom()
@@ -369,15 +361,16 @@ defmodule Arbor.Signals.Taint do
 
   @doc "Check if a value is a valid confidence level."
   @spec valid_confidence?(term()) :: boolean()
-  def valid_confidence?(c) when c in @confidence_ordered, do: true
-  def valid_confidence?(_), do: false
+  def valid_confidence?(confidence), do: confidence in @taint_struct.confidences()
 
   @doc "Get numeric rank for a confidence level (0=unverified, 3=verified)."
   @spec confidence_rank(atom()) :: non_neg_integer()
-  def confidence_rank(:unverified), do: 0
-  def confidence_rank(:plausible), do: 1
-  def confidence_rank(:corroborated), do: 2
-  def confidence_rank(:verified), do: 3
+  def confidence_rank(confidence) do
+    case Enum.find_index(@taint_struct.confidences(), &(&1 == confidence)) do
+      nil -> 0
+      rank -> rank
+    end
+  end
 
   @doc "Return the lower confidence of two levels (conservative merge)."
   @spec min_confidence(atom(), atom()) :: atom()
@@ -422,37 +415,42 @@ defmodule Arbor.Signals.Taint do
   - sanitizations: band(inputs) — only keep sanitizations present in ALL inputs
   - confidence: min(inputs) — conservative
 
-  Chain is concatenated from all inputs.
+  Provenance is canonicalized by the contract, with the first sorted label in
+  `source` and the remaining bounded labels in `chain`.
   """
   @spec propagate_taint([struct()]) :: struct()
-  def propagate_taint([]) do
-    struct(@taint_struct, level: :trusted, sensitivity: :public, confidence: :verified)
-  end
+  def propagate_taint([]), do: identity_taint()
 
   def propagate_taint(inputs) when is_list(inputs) do
-    Enum.reduce(inputs, nil, fn taint, acc ->
-      if acc == nil do
-        taint
-      else
-        struct(@taint_struct,
-          level: max_taint(acc.level, taint.level),
-          sensitivity: max_sensitivity(acc.sensitivity, taint.sensitivity),
-          sanitizations: intersect_sanitizations(acc.sanitizations, taint.sanitizations),
-          confidence: min_confidence(acc.confidence, taint.confidence),
-          source: acc.source || taint.source,
-          chain: Enum.uniq(acc.chain ++ taint.chain)
-        )
-      end
-    end)
+    case validate_propagation_inputs(inputs, 0) do
+      :ok ->
+        case @taint_struct.join_many(inputs) do
+          {:ok, result} ->
+            if invalid_durable_taint?(result),
+              do: @taint_struct.invalid_durable_provenance(),
+              else: result
+
+          {:error, _reason} ->
+            @taint_struct.invalid_durable_provenance()
+        end
+
+      {:error, _reason} ->
+        @taint_struct.invalid_durable_provenance()
+    end
+  rescue
+    _ -> @taint_struct.invalid_durable_provenance()
   end
+
+  def propagate_taint(_inputs), do: @taint_struct.invalid_durable_provenance()
 
   # ── Data Hash Binding ──────────────────────────────────────────────
 
   @doc """
-  Compute a SHA-256 hash of arbitrary data for integrity binding.
+  Compute the legacy SHA-256 Erlang-term hash of arbitrary data.
 
-  Used alongside taint metadata to detect if data has been tampered with
-  after taint classification was applied.
+  This versionless `term_to_binary` hash is retained for compatibility with
+  existing records and MUST NOT be used for new durable records. New durable
+  provenance must use `bind_durable_provenance/2`.
   """
   @spec data_hash(term()) :: String.t()
   def data_hash(data) do
@@ -463,9 +461,11 @@ defmodule Arbor.Signals.Taint do
   end
 
   @doc """
-  Verify a stored data hash against recomputed hash.
+  Verify a legacy Erlang-term data hash against recomputed hash.
 
   Returns `:ok` if hashes match, `{:error, :hash_mismatch}` if they differ.
+  This versionless compatibility API MUST NOT be used for new durable records;
+  use `verify_durable_provenance/2` instead.
   """
   @spec verify_data_hash(term(), String.t()) :: :ok | {:error, :hash_mismatch}
   def verify_data_hash(data, stored_hash) when is_binary(stored_hash) do
@@ -476,54 +476,100 @@ defmodule Arbor.Signals.Taint do
     end
   end
 
+  def verify_data_hash(_data, _stored_hash), do: {:error, :hash_mismatch}
+
   # ── Serialization (JSONB persistence) ────────────────────────────────
 
   @doc """
-  Convert a Taint struct to a string-keyed map suitable for JSONB storage.
+  Convert a Taint struct to the versionless legacy string-keyed map used by
+  existing JSONB records.
 
   Atom fields are converted to strings for safe JSON round-tripping.
+  This compatibility format is not payload-bound and MUST NOT be used for new
+  durable records; use `bind_durable_provenance/2` instead.
 
   ## Options
 
   - `:data_hash` - When provided, includes a `"taint_data_hash"` key in the output.
   """
   @spec to_persistable(struct(), keyword()) :: map()
-  def to_persistable(taint, opts \\ [])
+  def to_persistable(taint, opts \\ []) do
+    taint = canonical_or_invalid(taint)
 
-  def to_persistable(%{__struct__: @taint_struct} = taint, opts) do
     base = %{
-      "taint_level" => to_string(taint.level),
-      "taint_sensitivity" => to_string(taint.sensitivity),
+      "taint_level" => Atom.to_string(taint.level),
+      "taint_sensitivity" => Atom.to_string(taint.sensitivity),
       "taint_sanitizations" => taint.sanitizations,
-      "taint_confidence" => to_string(taint.confidence),
+      "taint_confidence" => Atom.to_string(taint.confidence),
       "taint_source" => taint.source,
       "taint_chain" => taint.chain
     }
 
-    case Keyword.get(opts, :data_hash) do
-      nil -> base
-      hash when is_binary(hash) -> Map.put(base, "taint_data_hash", hash)
+    case legacy_data_hash(opts) do
+      {:ok, nil} -> base
+      {:ok, hash} -> Map.put(base, "taint_data_hash", hash)
+      :error -> base
     end
+  rescue
+    _ -> legacy_persistable(@taint_struct.invalid_durable_provenance())
   end
 
   @doc """
-  Restore a Taint struct from a persistable map.
+  Restore a Taint struct from the versionless legacy persistable map.
 
-  Uses `String.to_existing_atom/1` for safe deserialization.
-  Fail-closed: corrupt values get the most restrictive defaults.
+  Accepts only the exact legacy string-keyed representation (plus the optional
+  legacy data hash). Missing, mixed, corrupt, or unbounded values fail closed as
+  the whole `:invalid_durable_provenance` label; fields are never repaired
+  independently. This compatibility API MUST NOT be used for new durable
+  records; use `resolve_durable_provenance/2` instead.
   """
   @spec from_persistable(map()) :: struct()
   def from_persistable(map) when is_map(map) do
-    struct(@taint_struct,
-      level: safe_atom(map["taint_level"], :hostile, @levels_ordered),
-      sensitivity:
-        safe_atom(map["taint_sensitivity"], :restricted, @sensitivity_ordered),
-      sanitizations: safe_integer(map["taint_sanitizations"], 0),
-      confidence:
-        safe_atom(map["taint_confidence"], :unverified, @confidence_ordered),
-      source: map["taint_source"],
-      chain: safe_list(map["taint_chain"])
-    )
+    with {:ok, legacy} <- exact_legacy_persistable(map),
+         {:ok, taint} <-
+           @taint_struct.canonicalize(%{
+             "level" => legacy["taint_level"],
+             "sensitivity" => legacy["taint_sensitivity"],
+             "sanitizations" => legacy["taint_sanitizations"],
+             "confidence" => legacy["taint_confidence"],
+             "source" => legacy["taint_source"],
+             "chain" => legacy["taint_chain"]
+           }) do
+      taint
+    else
+      _ -> @taint_struct.invalid_durable_provenance()
+    end
+  rescue
+    _ -> @taint_struct.invalid_durable_provenance()
+  end
+
+  def from_persistable(_map), do: @taint_struct.invalid_durable_provenance()
+
+  @doc "Bind an exact canonical-json-v1 envelope for durable provenance."
+  @spec bind_durable_provenance(term(), struct()) :: {:ok, map()} | {:error, atom()}
+  def bind_durable_provenance(payload, taint) do
+    with {:ok, envelope} <- @taint_envelope.new(payload, taint) do
+      @taint_envelope.to_map(envelope)
+    end
+  rescue
+    _ -> {:error, :invalid_envelope}
+  end
+
+  @doc "Strictly verify a durable provenance envelope against its payload."
+  @spec verify_durable_provenance(term(), term()) :: {:ok, struct()} | {:error, atom()}
+  def verify_durable_provenance(persisted, payload) do
+    @taint_envelope.verify(persisted, payload)
+  rescue
+    _ -> {:error, :invalid_envelope}
+  end
+
+  @doc "Resolve durable provenance conservatively, including missing legacy data."
+  @spec resolve_durable_provenance(:missing | term(), term()) ::
+          {:ok, struct(), atom()}
+  def resolve_durable_provenance(persisted, payload) do
+    @taint_envelope.resolve(persisted, payload)
+  rescue
+    _ -> {:ok, @taint_struct.invalid_durable_provenance(), :invalid_durable_provenance}
   end
 
   # ── LLM Output Taint ────────────────────────────────────────────────
@@ -532,19 +578,38 @@ defmodule Arbor.Signals.Taint do
   Create taint for LLM output.
 
   Wipes ALL sanitization bits (council decision #6: LLM output cannot be
-  assumed to preserve any input sanitization). Inherits worst level,
-  sensitivity, and confidence from the input taint.
+  assumed to preserve any input sanitization). The level is floored at
+  `:derived`, confidence is capped at `:plausible`, sensitivity is preserved,
+  and bounded `llm_output` provenance is added. Malformed or overflowing
+  provenance returns the invalid durable-provenance fallback.
   """
   @spec for_llm_output(struct()) :: struct()
-  def for_llm_output(%{__struct__: @taint_struct} = input_taint) do
-    struct(@taint_struct,
-      level: max_taint(input_taint.level, :derived),
-      sensitivity: input_taint.sensitivity,
-      sanitizations: 0,
-      confidence: min_confidence(input_taint.confidence, :plausible),
-      source: "llm_output",
-      chain: input_taint.chain ++ [input_taint.source || "llm"]
-    )
+  def for_llm_output(input_taint) do
+    with {:ok, input} <- @taint_struct.canonicalize(input_taint),
+         {:ok, joined} <-
+           @taint_struct.join(input, %@taint_struct{
+             level: :derived,
+             sensitivity: :public,
+             sanitizations: 0,
+             confidence: :plausible,
+             source: "llm_output",
+             chain: []
+           }),
+         {:ok, output} <-
+           @taint_struct.new(%{
+             level: joined.level,
+             sensitivity: joined.sensitivity,
+             sanitizations: joined.sanitizations,
+             confidence: joined.confidence,
+             source: "llm_output",
+             chain: input.chain ++ [input.source || "llm"]
+           }) do
+      output
+    else
+      _ -> @taint_struct.invalid_durable_provenance()
+    end
+  rescue
+    _ -> @taint_struct.invalid_durable_provenance()
   end
 
   # ── Bridge: atom → struct ────────────────────────────────────────────
@@ -555,27 +620,137 @@ defmodule Arbor.Signals.Taint do
   Used at boundaries where legacy atom-based taint meets the new struct system.
   """
   @spec from_level(level()) :: struct()
-  def from_level(level) when level in @levels_ordered do
-    struct(@taint_struct, level: level)
+  def from_level(level) do
+    if valid_level?(level),
+      do: struct(@taint_struct, level: level),
+      else: @taint_struct.invalid_durable_provenance()
   end
 
   # ── Private helpers ──────────────────────────────────────────────────
 
-  defp safe_atom(nil, fallback, _allowed), do: fallback
-  defp safe_atom(value, fallback, allowed) when is_binary(value) do
-    atom = String.to_existing_atom(value)
-    if atom in allowed, do: atom, else: fallback
-  rescue
-    ArgumentError -> fallback
-  end
-  defp safe_atom(value, fallback, allowed) when is_atom(value) do
-    if value in allowed, do: value, else: fallback
-  end
-  defp safe_atom(_, fallback, _allowed), do: fallback
+  defp identity_taint do
+    {:ok, taint} =
+      @taint_struct.new(%{
+        level: :trusted,
+        sensitivity: :public,
+        sanitizations: 0,
+        confidence: :verified,
+        source: nil,
+        chain: []
+      })
 
-  defp safe_integer(value, _fallback) when is_integer(value) and value >= 0, do: value
-  defp safe_integer(_, fallback), do: fallback
+    taint
+  end
 
-  defp safe_list(value) when is_list(value), do: value
-  defp safe_list(_), do: []
+  defp propagate_levels([], level, _count), do: level
+
+  defp propagate_levels([head | rest], level, count) do
+    if count < @taint_struct.max_join_inputs() and valid_level?(head) do
+      propagate_levels(rest, max_taint(level, head), count + 1)
+    else
+      :hostile
+    end
+  end
+
+  defp propagate_levels(_improper_tail, _level, _count), do: :hostile
+
+  defp validate_propagation_inputs([], _count), do: :ok
+
+  defp validate_propagation_inputs([head | rest], count) do
+    if count < @taint_struct.max_join_inputs() do
+      with {:ok, taint} <- @taint_struct.canonicalize(head),
+           false <- invalid_durable_taint?(taint),
+           :ok <- validate_propagation_inputs(rest, count + 1) do
+        :ok
+      else
+        _ -> {:error, :invalid_taint}
+      end
+    else
+      {:error, :taint_join_limit_exceeded}
+    end
+  end
+
+  defp validate_propagation_inputs(_improper_tail, _count),
+    do: {:error, :invalid_taint_list}
+
+  defp invalid_durable_taint?(taint),
+    do: taint == @taint_struct.invalid_durable_provenance()
+
+  defp canonical_or_invalid(value) do
+    case @taint_struct.canonicalize(value) do
+      {:ok, taint} -> taint
+      {:error, _reason} -> @taint_struct.invalid_durable_provenance()
+    end
+  end
+
+  defp legacy_persistable(taint) do
+    %{
+      "taint_level" => Atom.to_string(taint.level),
+      "taint_sensitivity" => Atom.to_string(taint.sensitivity),
+      "taint_sanitizations" => taint.sanitizations,
+      "taint_confidence" => Atom.to_string(taint.confidence),
+      "taint_source" => taint.source,
+      "taint_chain" => taint.chain
+    }
+  end
+
+  defp legacy_data_hash(opts) when is_list(opts) do
+    if Keyword.keyword?(opts) do
+      case Keyword.get(opts, :data_hash) do
+        nil -> {:ok, nil}
+        hash when is_binary(hash) -> {:ok, hash}
+        _ -> :error
+      end
+    else
+      {:ok, nil}
+    end
+  end
+
+  defp legacy_data_hash(_opts), do: {:ok, nil}
+
+  defp exact_legacy_persistable(map) do
+    required = [
+      "taint_level",
+      "taint_sensitivity",
+      "taint_sanitizations",
+      "taint_confidence",
+      "taint_source",
+      "taint_chain"
+    ]
+
+    keys = Map.keys(map)
+
+    allowed = required ++ ["taint_data_hash"]
+
+    cond do
+      not Enum.all?(keys, &is_binary/1) ->
+        {:error, :invalid_legacy_taint}
+
+      MapSet.equal?(MapSet.new(keys), MapSet.new(required)) ->
+        if valid_legacy_values?(map), do: {:ok, map}, else: {:error, :invalid_legacy_taint}
+
+      MapSet.equal?(MapSet.new(keys), MapSet.new(allowed)) and is_binary(map["taint_data_hash"]) ->
+        if valid_legacy_values?(map), do: {:ok, map}, else: {:error, :invalid_legacy_taint}
+
+      true ->
+        {:error, :invalid_legacy_taint}
+    end
+  end
+
+  defp valid_legacy_values?(map) do
+    is_binary(map["taint_level"]) and
+      is_binary(map["taint_sensitivity"]) and
+      is_integer(map["taint_sanitizations"]) and
+      is_binary(map["taint_confidence"]) and
+      (is_nil(map["taint_source"]) or is_binary(map["taint_source"])) and
+      valid_legacy_chain?(map["taint_chain"], @taint_struct.max_chain_entries())
+  end
+
+  defp valid_legacy_chain?([], _remaining), do: true
+
+  defp valid_legacy_chain?([entry | rest], remaining)
+       when remaining > 0 and is_binary(entry),
+       do: valid_legacy_chain?(rest, remaining - 1)
+
+  defp valid_legacy_chain?(_chain, _remaining), do: false
 end

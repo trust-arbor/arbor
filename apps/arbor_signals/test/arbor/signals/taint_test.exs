@@ -88,9 +88,9 @@ defmodule Arbor.Signals.TaintTest do
       assert Taint.propagate([:trusted, :derived]) == :derived
     end
 
-    test "untrusted becomes derived (not untrusted) when propagated" do
-      assert Taint.propagate([:trusted, :untrusted]) == :derived
-      assert Taint.propagate([:untrusted]) == :derived
+    test "security regression: propagation preserves the maximum input level" do
+      assert Taint.propagate([:trusted, :untrusted]) == :untrusted
+      assert Taint.propagate([:untrusted]) == :untrusted
     end
 
     test "hostile stays hostile" do
@@ -99,9 +99,25 @@ defmodule Arbor.Signals.TaintTest do
       assert Taint.propagate([:untrusted, :hostile]) == :hostile
     end
 
+    test "security regression: over-limit input fails closed" do
+      assert Taint.propagate(List.duplicate(:trusted, 257)) == :hostile
+    end
+
+    test "malformed direct max_taint input fails closed" do
+      assert Taint.max_taint(:trusted, :unknown) == :hostile
+      assert Taint.max_taint(:unknown, :trusted) == :hostile
+    end
+
     test "mixed levels propagate correctly" do
-      assert Taint.propagate([:trusted, :derived, :untrusted]) == :derived
+      assert Taint.propagate([:trusted, :derived, :untrusted]) == :untrusted
       assert Taint.propagate([:trusted, :trusted, :hostile]) == :hostile
+    end
+
+    test "security regression: malformed and improper input fails closed" do
+      assert Taint.propagate([:trusted | :malformed_tail]) == :hostile
+      assert Taint.propagate([:trusted, :unknown]) == :hostile
+      assert Taint.propagate(:untrusted) == :hostile
+      assert Taint.propagate(%{}) == :hostile
     end
   end
 

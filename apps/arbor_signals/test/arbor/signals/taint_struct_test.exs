@@ -157,8 +157,20 @@ defmodule Arbor.Signals.TaintStructTest do
     end
 
     test "intersects sanitizations (only keeps common ones)" do
-      a = %TaintStruct{level: :trusted, sensitivity: :public, sanitizations: 0b00010011, confidence: :verified}
-      b = %TaintStruct{level: :trusted, sensitivity: :public, sanitizations: 0b00010001, confidence: :verified}
+      a = %TaintStruct{
+        level: :trusted,
+        sensitivity: :public,
+        sanitizations: 0b00010011,
+        confidence: :verified
+      }
+
+      b = %TaintStruct{
+        level: :trusted,
+        sensitivity: :public,
+        sanitizations: 0b00010001,
+        confidence: :verified
+      }
+
       result = Taint.propagate_taint([a, b])
       assert result.sanitizations == 0b00010001
     end
@@ -174,8 +186,19 @@ defmodule Arbor.Signals.TaintStructTest do
       a = %TaintStruct{level: :trusted, sensitivity: :public, confidence: :verified, chain: ["a"]}
       b = %TaintStruct{level: :trusted, sensitivity: :public, confidence: :verified, chain: ["b"]}
       result = Taint.propagate_taint([a, b])
-      assert "a" in result.chain
-      assert "b" in result.chain
+      assert result.source == "a"
+      assert result.chain == ["b"]
+    end
+
+    test "security regression: malformed and over-limit inputs fail closed" do
+      malformed = %TaintStruct{level: :trusted, sensitivity: :public, chain: {:bad, []}}
+      oversized = List.duplicate(%TaintStruct{level: :trusted}, 257)
+
+      assert Taint.propagate_taint([malformed]) == TaintStruct.invalid_durable_provenance()
+      assert Taint.propagate_taint(oversized) == TaintStruct.invalid_durable_provenance()
+
+      assert Taint.propagate_taint([%TaintStruct{}, :not_a_taint]) ==
+               TaintStruct.invalid_durable_provenance()
     end
   end
 
@@ -241,37 +264,38 @@ defmodule Arbor.Signals.TaintStructTest do
       assert restored.chain == original.chain
     end
 
-    test "fail-closed: corrupt level defaults to :hostile" do
-      result = Taint.from_persistable(%{"taint_level" => "garbage"})
-      assert result.level == :hostile
+    test "fail-closed: corrupt level returns the invalid durable provenance label" do
+      result = Taint.from_persistable(valid_persistable(%{"taint_level" => "garbage"}))
+      assert result == TaintStruct.invalid_durable_provenance()
     end
 
-    test "fail-closed: corrupt sensitivity defaults to :restricted" do
-      result = Taint.from_persistable(%{"taint_sensitivity" => "garbage"})
-      assert result.sensitivity == :restricted
+    test "fail-closed: corrupt sensitivity returns the invalid durable provenance label" do
+      result = Taint.from_persistable(valid_persistable(%{"taint_sensitivity" => "garbage"}))
+      assert result == TaintStruct.invalid_durable_provenance()
     end
 
-    test "fail-closed: corrupt confidence defaults to :unverified" do
-      result = Taint.from_persistable(%{"taint_confidence" => "garbage"})
-      assert result.confidence == :unverified
+    test "fail-closed: corrupt confidence returns the invalid durable provenance label" do
+      result = Taint.from_persistable(valid_persistable(%{"taint_confidence" => "garbage"}))
+      assert result == TaintStruct.invalid_durable_provenance()
     end
 
-    test "handles nil values gracefully" do
+    test "security regression: missing fields do not receive field-by-field repair" do
       result = Taint.from_persistable(%{})
-      assert result.level == :hostile
-      assert result.sensitivity == :restricted
-      assert result.confidence == :unverified
-      assert result.sanitizations == 0
-      assert result.chain == []
+      assert result == TaintStruct.invalid_durable_provenance()
     end
 
-    test "handles atom values (already deserialized)" do
-      result = Taint.from_persistable(%{
-        "taint_level" => :trusted,
-        "taint_sensitivity" => :public
-      })
-      assert result.level == :trusted
-      assert result.sensitivity == :public
+    test "security regression: atom-valued legacy input fails closed without atom creation" do
+      result =
+        Taint.from_persistable(%{
+          "taint_level" => :trusted,
+          "taint_sensitivity" => :public,
+          "taint_sanitizations" => 0,
+          "taint_confidence" => :verified,
+          "taint_source" => nil,
+          "taint_chain" => []
+        })
+
+      assert result == TaintStruct.invalid_durable_provenance()
     end
   end
 
@@ -303,6 +327,12 @@ defmodule Arbor.Signals.TaintStructTest do
       assert result.level == :hostile
     end
 
+    test "untrusted input remains untrusted" do
+      input = %TaintStruct{level: :untrusted, sensitivity: :public, confidence: :verified}
+      result = Taint.for_llm_output(input)
+      assert result.level == :untrusted
+    end
+
     test "confidence capped at plausible" do
       input = %TaintStruct{level: :trusted, sensitivity: :public, confidence: :verified}
       result = Taint.for_llm_output(input)
@@ -316,9 +346,41 @@ defmodule Arbor.Signals.TaintStructTest do
     end
 
     test "source is set to llm_output" do
-      input = %TaintStruct{level: :trusted, sensitivity: :public, confidence: :verified, source: "user"}
+      input = %TaintStruct{
+        level: :trusted,
+        sensitivity: :public,
+        confidence: :verified,
+        source: "user"
+      }
+
       result = Taint.for_llm_output(input)
       assert result.source == "llm_output"
+    end
+
+    test "security regression: malformed or provenance-overflow input fails closed" do
+      malformed = %TaintStruct{level: :trusted, sensitivity: :public, chain: {:bad, []}}
+
+      overflowing = %TaintStruct{
+        level: :trusted,
+        sensitivity: :public,
+        chain: List.duplicate("x", 16)
+      }
+
+      assert Taint.for_llm_output(malformed) == TaintStruct.invalid_durable_provenance()
+      assert Taint.for_llm_output(overflowing) == TaintStruct.invalid_durable_provenance()
+    end
+
+    test "security regression: a valid max-length chain uses conservative overflow fallback" do
+      input = %TaintStruct{
+        level: :trusted,
+        sensitivity: :public,
+        confidence: :verified,
+        chain: List.duplicate("provenance", 16)
+      }
+
+      # The output always adds an llm marker. Refusing to truncate the existing
+      # chain keeps provenance loss explicit and fail-closed.
+      assert Taint.for_llm_output(input) == TaintStruct.invalid_durable_provenance()
     end
   end
 
@@ -390,6 +452,65 @@ defmodule Arbor.Signals.TaintStructTest do
       result2 = Taint.to_persistable(taint, [])
       assert result1 == result2
     end
+
+    test "security regression: malformed taint fails closed as one durable label" do
+      result = Taint.to_persistable(%TaintStruct{level: :trusted, chain: {:bad, []}})
+
+      assert result ==
+               Taint.to_persistable(TaintStruct.invalid_durable_provenance())
+    end
+  end
+
+  describe "durable provenance" do
+    test "binds and strictly verifies a valid envelope" do
+      payload = %{"message" => "hello", "turn" => 1}
+      taint = %TaintStruct{level: :derived, sensitivity: :internal, confidence: :plausible}
+
+      assert {:ok, persisted} = Taint.bind_durable_provenance(payload, taint)
+      assert {:ok, verified} = Taint.verify_durable_provenance(persisted, payload)
+      assert verified.taint.level == :derived
+      assert {:ok, _taint, :verified} = Taint.resolve_durable_provenance(persisted, payload)
+    end
+
+    test "reports payload mismatch strictly and resolves it conservatively" do
+      payload = %{"message" => "hello"}
+      assert {:ok, persisted} = Taint.bind_durable_provenance(payload, %TaintStruct{})
+
+      assert {:error, :payload_mismatch} =
+               Taint.verify_durable_provenance(persisted, %{"message" => "tampered"})
+
+      assert {:ok, taint, :invalid_durable_provenance} =
+               Taint.resolve_durable_provenance(persisted, %{"message" => "tampered"})
+
+      assert taint == TaintStruct.invalid_durable_provenance()
+    end
+
+    test "resolves missing provenance to the legacy-unlabeled fallback" do
+      assert {:ok, taint, :legacy_unlabeled} = Taint.resolve_durable_provenance(:missing, %{})
+      assert taint.level == :untrusted
+      assert taint.source == "legacy_unlabeled"
+    end
+
+    test "malformed persisted provenance is invalid rather than repaired" do
+      assert {:error, :invalid_envelope_shape} = Taint.verify_durable_provenance(%{}, %{})
+
+      assert {:ok, taint, :invalid_durable_provenance} =
+               Taint.resolve_durable_provenance(%{"taint" => %{}}, %{})
+
+      assert taint == TaintStruct.invalid_durable_provenance()
+    end
+  end
+
+  defp valid_persistable(overrides) do
+    %{
+      "taint_level" => "trusted",
+      "taint_sensitivity" => "public",
+      "taint_sanitizations" => 0,
+      "taint_confidence" => "verified",
+      "taint_source" => nil,
+      "taint_chain" => []
+    }
+    |> Map.merge(overrides)
   end
 
   # ── Bridge ──────────────────────────────────────────────────────────
