@@ -2,7 +2,7 @@ defmodule Arbor.Memory.KnowledgeGraph.Operation do
   @moduledoc false
 
   alias Arbor.Memory.KnowledgeGraph
-  alias Arbor.Memory.KnowledgeGraph.{Codec, GraphSearch}
+  alias Arbor.Memory.KnowledgeGraph.{Codec, GraphSearch, Maintenance}
 
   @max_operation_bytes 1_048_576
   @max_identifier_bytes 256
@@ -18,8 +18,16 @@ defmodule Arbor.Memory.KnowledgeGraph.Operation do
     :skip_dedup,
     :type
   ]
+  @pending_learning_keys [:confidence, :content, :metadata, :source]
   @edge_option_keys [:metadata, :strength]
   @cascade_option_keys [:decay_factor, :max_depth, :min_boost]
+  @basic_maintenance_keys [:prune_threshold]
+  @enhanced_maintenance_keys [
+    :archive,
+    :prune_threshold,
+    :reinforce_boost,
+    :reinforce_window_hours
+  ]
   @accepted_proposal_key "$arbor_accepted_proposal_id"
 
   # Generic receipts guarantee exactly-once effects within this FIFO horizon.
@@ -31,12 +39,15 @@ defmodule Arbor.Memory.KnowledgeGraph.Operation do
   @type t ::
           {:initialize, KnowledgeGraph.t()}
           | {:add_node, String.t(), map(), String.t(), DateTime.t()}
+          | {:add_pending_learning, String.t(), map(), String.t(), DateTime.t()}
           | {:add_edge, String.t(), String.t(), String.t(), atom() | String.t(), keyword(),
              String.t(), DateTime.t()}
+          | {:merge_node_metadata, String.t(), String.t(), map()}
           | {:reinforce, String.t(), String.t(), DateTime.t()}
           | {:approve_pending, String.t(), String.t(), String.t(), DateTime.t()}
           | {:reject_pending, String.t(), String.t()}
           | {:cascade_recall, String.t(), String.t(), number(), keyword(), DateTime.t()}
+          | {:consolidate, String.t(), :basic | :enhanced, keyword(), DateTime.t()}
 
   @spec initialize(KnowledgeGraph.t()) :: {:ok, t()} | {:error, atom()}
   def initialize(%KnowledgeGraph{} = graph), do: validate_new({:initialize, graph})
@@ -51,6 +62,15 @@ defmodule Arbor.Memory.KnowledgeGraph.Operation do
 
       validate_new(operation)
     end
+  end
+
+  @spec add_pending_learning(String.t(), map()) :: {:ok, t()} | {:error, atom()}
+  def add_pending_learning(operation_id, learning_data) do
+    operation =
+      {:add_pending_learning, operation_id, learning_data, generated_id("pend_"),
+       DateTime.utc_now()}
+
+    validate_new(operation)
   end
 
   @spec add_edge(String.t(), String.t(), String.t(), atom() | String.t(), keyword()) ::
@@ -68,6 +88,12 @@ defmodule Arbor.Memory.KnowledgeGraph.Operation do
   @spec reinforce(String.t(), String.t()) :: {:ok, t()} | {:error, atom()}
   def reinforce(operation_id, node_id) do
     validate_new({:reinforce, operation_id, node_id, DateTime.utc_now()})
+  end
+
+  @spec merge_node_metadata(String.t(), String.t(), map()) ::
+          {:ok, t()} | {:error, atom()}
+  def merge_node_metadata(operation_id, node_id, fields) do
+    validate_new({:merge_node_metadata, operation_id, node_id, fields})
   end
 
   @spec approve_pending(String.t()) :: {:ok, t()} | {:error, atom()}
@@ -94,6 +120,18 @@ defmodule Arbor.Memory.KnowledgeGraph.Operation do
     end
   end
 
+  @spec consolidate(String.t(), :basic | :enhanced, keyword()) ::
+          {:ok, t()} | {:error, atom()}
+  def consolidate(operation_id, mode, opts) when mode in [:basic, :enhanced] do
+    allowed_keys = maintenance_keys(mode)
+
+    with {:ok, opts} <- normalize_keyword(opts, allowed_keys) do
+      validate_new({:consolidate, operation_id, mode, opts, DateTime.utc_now()})
+    end
+  end
+
+  def consolidate(_operation_id, _mode, _opts), do: {:error, :invalid_graph}
+
   @spec validate(t()) :: :ok | {:error, atom()}
   def validate({:initialize, %KnowledgeGraph{agent_id: agent_id} = graph}) do
     with :ok <- validate_identifier(agent_id),
@@ -115,6 +153,30 @@ defmodule Arbor.Memory.KnowledgeGraph.Operation do
          :ok <- validate_identifier(node_id),
          {:ok, graph, _node_id} <-
            KnowledgeGraph.add_node_transition(graph, node_data, node_id, occurred_at),
+         {:ok, _prepared} <- Codec.prepare(validation_agent, graph) do
+      :ok
+    else
+      _ -> {:error, :invalid_graph}
+    end
+  end
+
+  def validate(
+        {:add_pending_learning, operation_id, learning_data, pending_id,
+         %DateTime{} = occurred_at}
+      ) do
+    validation_agent = "agent_operation_validation"
+    graph = KnowledgeGraph.new(validation_agent, auto_embed: false)
+
+    with :ok <- validate_identifier(operation_id),
+         :ok <- validate_identifier(pending_id),
+         :ok <- validate_pending_learning_shape(learning_data),
+         {:ok, graph, _pending_id} <-
+           KnowledgeGraph.add_pending_learning_transition(
+             graph,
+             learning_data,
+             pending_id,
+             occurred_at
+           ),
          {:ok, _prepared} <- Codec.prepare(validation_agent, graph) do
       :ok
     else
@@ -156,6 +218,23 @@ defmodule Arbor.Memory.KnowledgeGraph.Operation do
     with :ok <- validate_identifier(operation_id), do: validate_identifier(node_id)
   end
 
+  def validate({:merge_node_metadata, operation_id, node_id, fields}) do
+    validation_agent = "agent_operation_validation"
+    occurred_at = ~U[2026-01-01 00:00:00Z]
+    graph = validation_graph(validation_agent, occurred_at)
+
+    with :ok <- validate_identifier(operation_id),
+         :ok <- validate_identifier(node_id),
+         true <- valid_node_metadata?(fields),
+         {:ok, graph, _node} <-
+           KnowledgeGraph.merge_node_metadata_transition(graph, "a", fields),
+         {:ok, _prepared} <- Codec.prepare(validation_agent, graph) do
+      :ok
+    else
+      _ -> {:error, :invalid_graph}
+    end
+  end
+
   def validate({:approve_pending, operation_id, pending_id, nonce, %DateTime{}}) do
     with :ok <- validate_identifier(operation_id),
          :ok <- validate_identifier(pending_id),
@@ -178,6 +257,22 @@ defmodule Arbor.Memory.KnowledgeGraph.Operation do
          true <- valid_depth?(Keyword.get(opts, :max_depth, 3)),
          true <- valid_ratio?(Keyword.get(opts, :min_boost, 0.05)),
          true <- valid_ratio?(Keyword.get(opts, :decay_factor, 0.5)) do
+      :ok
+    else
+      _ -> {:error, :invalid_graph}
+    end
+  end
+
+  def validate({:consolidate, operation_id, mode, opts, %DateTime{} = occurred_at})
+      when mode in [:basic, :enhanced] do
+    validation_agent = "agent_operation_validation"
+    graph = validation_graph(validation_agent, occurred_at)
+
+    with :ok <- validate_identifier(operation_id),
+         :ok <- validate_keyword(opts, maintenance_keys(mode)),
+         :ok <- validate_maintenance_opts(mode, opts),
+         {:ok, graph, _result} <- Maintenance.run(graph, mode, opts, occurred_at),
+         {:ok, _prepared} <- Codec.prepare(validation_agent, graph) do
       :ok
     else
       _ -> {:error, :invalid_graph}
@@ -233,12 +328,24 @@ defmodule Arbor.Memory.KnowledgeGraph.Operation do
              fingerprint: fingerprint,
              result: receipt_result
            }) do
-      {:ok, graph, result, :changed}
+      {:ok, graph, finalize_result(kind, result, graph), :changed}
     end
   end
 
   defp apply_once({:add_node, _operation_id, node_data, node_id, occurred_at}, graph) do
     KnowledgeGraph.add_node_transition(graph, node_data, node_id, occurred_at)
+  end
+
+  defp apply_once(
+         {:add_pending_learning, _operation_id, learning_data, pending_id, occurred_at},
+         graph
+       ) do
+    KnowledgeGraph.add_pending_learning_transition(
+      graph,
+      learning_data,
+      pending_id,
+      occurred_at
+    )
   end
 
   defp apply_once(
@@ -264,6 +371,10 @@ defmodule Arbor.Memory.KnowledgeGraph.Operation do
     KnowledgeGraph.reinforce_at(graph, node_id, occurred_at)
   end
 
+  defp apply_once({:merge_node_metadata, _operation_id, node_id, fields}, graph) do
+    KnowledgeGraph.merge_node_metadata_transition(graph, node_id, fields)
+  end
+
   defp apply_once(
          {:approve_pending, _operation_id, pending_id, nonce, occurred_at},
          graph
@@ -286,6 +397,12 @@ defmodule Arbor.Memory.KnowledgeGraph.Operation do
     {:ok, graph, KnowledgeGraph.stats(graph)}
   end
 
+  defp apply_once({:consolidate, _operation_id, mode, opts, occurred_at}, graph) do
+    with {:ok, graph, result} <- Maintenance.run(graph, mode, opts, occurred_at) do
+      {:ok, graph, Map.put(result, :graph, graph)}
+    end
+  end
+
   defp receipt_identity(operation) do
     with {:ok, operation_id, kind, logical_input} <- logical_operation(operation),
          {:ok, fingerprint} <- fingerprint(logical_input) do
@@ -297,6 +414,11 @@ defmodule Arbor.Memory.KnowledgeGraph.Operation do
     do: {:ok, operation_id, "add_node", {:add_node, node_data}}
 
   defp logical_operation(
+         {:add_pending_learning, operation_id, learning_data, _pending_id, _occurred_at}
+       ),
+       do: {:ok, operation_id, "add_pending_learning", {:add_pending_learning, learning_data}}
+
+  defp logical_operation(
          {:add_edge, operation_id, source_id, target_id, relationship, opts, _edge_id,
           _occurred_at}
        ),
@@ -304,6 +426,9 @@ defmodule Arbor.Memory.KnowledgeGraph.Operation do
 
   defp logical_operation({:reinforce, operation_id, node_id, _occurred_at}),
     do: {:ok, operation_id, "reinforce", {:reinforce, node_id}}
+
+  defp logical_operation({:merge_node_metadata, operation_id, node_id, fields}),
+    do: {:ok, operation_id, "merge_node_metadata", {:merge_node_metadata, node_id, fields}}
 
   defp logical_operation({:approve_pending, operation_id, pending_id, _nonce, _occurred_at}),
     do: {:ok, operation_id, "approve_pending", {:approve_pending, pending_id}}
@@ -316,6 +441,9 @@ defmodule Arbor.Memory.KnowledgeGraph.Operation do
        ),
        do: {:ok, operation_id, "cascade_recall", {:cascade_recall, node_id, boost_amount, opts}}
 
+  defp logical_operation({:consolidate, operation_id, mode, opts, _occurred_at}),
+    do: {:ok, operation_id, "consolidate", {:consolidate, mode, opts}}
+
   defp logical_operation(_operation), do: {:error, :invalid_graph}
 
   defp fingerprint(logical_input) do
@@ -327,28 +455,43 @@ defmodule Arbor.Memory.KnowledgeGraph.Operation do
     _, _ -> {:error, :invalid_graph}
   end
 
-  defp receipt_result("add_node", node_id) when is_binary(node_id), do: {:ok, node_id}
-  defp receipt_result("approve_pending", node_id) when is_binary(node_id), do: {:ok, node_id}
-  defp receipt_result("reinforce", %{id: node_id}) when is_binary(node_id), do: {:ok, node_id}
+  defp receipt_result(kind, item_id)
+       when kind in ["add_node", "add_pending_learning", "approve_pending"] and
+              is_binary(item_id),
+       do: {:ok, item_id}
+
+  defp receipt_result(kind, %{id: node_id})
+       when kind in ["merge_node_metadata", "reinforce"] and is_binary(node_id),
+       do: {:ok, node_id}
+
   defp receipt_result(kind, :ok) when kind in ["add_edge", "reject_pending"], do: {:ok, "ok"}
   defp receipt_result("cascade_recall", result) when is_map(result), do: {:ok, "ok"}
+  defp receipt_result("consolidate", result) when is_map(result), do: {:ok, "ok"}
   defp receipt_result(_kind, _result), do: {:error, :invalid_graph}
 
-  defp replay_result(kind, node_id, graph) when kind in ["add_node", "approve_pending"],
-    do: {:ok, graph, node_id, :replayed}
+  defp finalize_result("consolidate", result, graph), do: Map.put(result, :graph, graph)
+  defp finalize_result(_kind, result, _graph), do: result
 
-  defp replay_result(kind, "ok", graph) when kind in ["add_edge", "reject_pending"],
-    do: {:ok, graph, :ok, :replayed}
+  defp replay_result(kind, item_id, graph)
+       when kind in ["add_node", "add_pending_learning", "approve_pending"],
+       do: {:ok, graph, item_id, :replayed}
 
-  defp replay_result("reinforce", node_id, graph) do
+  defp replay_result(kind, node_id, graph)
+       when kind in ["merge_node_metadata", "reinforce"] do
     case Map.fetch(graph.nodes, node_id) do
       {:ok, node} -> {:ok, graph, node, :replayed}
       :error -> {:error, :operation_result_unavailable}
     end
   end
 
+  defp replay_result(kind, "ok", graph) when kind in ["add_edge", "reject_pending"],
+    do: {:ok, graph, :ok, :replayed}
+
   defp replay_result("cascade_recall", "ok", graph),
     do: {:ok, graph, KnowledgeGraph.stats(graph), :replayed}
+
+  defp replay_result("consolidate", "ok", graph),
+    do: {:ok, graph, Maintenance.replay(graph) |> Map.put(:graph, graph), :replayed}
 
   defp replay_result(_kind, _result, _graph), do: {:error, :invalid_graph}
 
@@ -409,6 +552,22 @@ defmodule Arbor.Memory.KnowledgeGraph.Operation do
 
   defp validate_node_data_shape(_node_data), do: {:error, :invalid_graph}
 
+  defp validate_pending_learning_shape(data)
+       when is_map(data) and not is_struct(data) and
+              map_size(data) <= length(@pending_learning_keys) do
+    with true <- Enum.all?(Map.keys(data), &(&1 in @pending_learning_keys)),
+         true <- valid_content?(Map.get(data, :content)),
+         true <- valid_ratio?(Map.get(data, :confidence, 0.5)),
+         true <- valid_source?(Map.get(data, :source)),
+         true <- valid_node_metadata?(Map.get(data, :metadata, %{})) do
+      :ok
+    else
+      _ -> {:error, :invalid_graph}
+    end
+  end
+
+  defp validate_pending_learning_shape(_data), do: {:error, :invalid_graph}
+
   defp normalize_keyword(value, allowed_keys) do
     with :ok <- validate_keyword(value, allowed_keys) do
       {:ok, Enum.sort_by(value, fn {key, _value} -> key end)}
@@ -434,6 +593,41 @@ defmodule Arbor.Memory.KnowledgeGraph.Operation do
 
   defp valid_node_metadata?(metadata),
     do: valid_metadata?(metadata) and not Map.has_key?(metadata, @accepted_proposal_key)
+
+  defp valid_content?(value) when is_binary(value),
+    do: byte_size(value) > 0 and byte_size(value) <= 65_536 and String.valid?(value)
+
+  defp valid_content?(_value), do: false
+
+  defp valid_source?(nil), do: true
+
+  defp valid_source?(value) when is_binary(value),
+    do: byte_size(value) <= 65_536 and String.valid?(value)
+
+  defp valid_source?(_value), do: false
+
+  defp maintenance_keys(:basic), do: @basic_maintenance_keys
+  defp maintenance_keys(:enhanced), do: @enhanced_maintenance_keys
+
+  defp validate_maintenance_opts(:basic, opts) do
+    if valid_ratio?(Keyword.get(opts, :prune_threshold, 0.1)),
+      do: :ok,
+      else: {:error, :invalid_graph}
+  end
+
+  defp validate_maintenance_opts(:enhanced, opts) do
+    with true <- valid_ratio?(Keyword.get(opts, :prune_threshold, 0.1)),
+         true <- valid_ratio?(Keyword.get(opts, :reinforce_boost, 0.1)),
+         true <- valid_window_hours?(Keyword.get(opts, :reinforce_window_hours, 24)),
+         true <- is_boolean(Keyword.get(opts, :archive, true)) do
+      :ok
+    else
+      _ -> {:error, :invalid_graph}
+    end
+  end
+
+  defp valid_window_hours?(value),
+    do: is_integer(value) and value >= 0 and value <= 8_760
 
   defp validation_graph(agent_id, occurred_at) do
     graph = KnowledgeGraph.new(agent_id, auto_embed: false)

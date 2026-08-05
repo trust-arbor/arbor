@@ -362,6 +362,24 @@ defmodule Arbor.Memory.KnowledgeGraph do
     end
   end
 
+  @doc false
+  @spec merge_node_metadata_transition(t(), node_id(), map()) ::
+          {:ok, t(), knowledge_node()} | {:error, :not_found | :invalid_graph}
+  def merge_node_metadata_transition(graph, node_id, fields)
+      when is_map(fields) and not is_struct(fields) do
+    case Map.fetch(graph.nodes, node_id) do
+      {:ok, node} ->
+        updated = %{node | metadata: Map.merge(node.metadata, fields)}
+        {:ok, %{graph | nodes: Map.put(graph.nodes, node_id, updated)}, updated}
+
+      :error ->
+        {:error, :not_found}
+    end
+  end
+
+  def merge_node_metadata_transition(_graph, _node_id, _fields),
+    do: {:error, :invalid_graph}
+
   @doc """
   Remove a node and all its edges from the graph.
   """
@@ -786,6 +804,39 @@ defmodule Arbor.Memory.KnowledgeGraph do
     {:ok, new_graph, pending_id}
   end
 
+  @doc false
+  @spec add_pending_learning_transition(t(), map(), String.t(), DateTime.t()) ::
+          {:ok, t(), String.t()} | {:error, term()}
+  def add_pending_learning_transition(
+        graph,
+        learning_data,
+        pending_id,
+        %DateTime{} = occurred_at
+      )
+      when is_map(learning_data) and is_binary(pending_id) do
+    with {:ok, content} <- validate_content(learning_data),
+         false <- pending_id_exists?(graph, pending_id) do
+      pending = %{
+        id: pending_id,
+        type: :learning,
+        content: content,
+        confidence: Map.get(learning_data, :confidence, 0.5),
+        source: Map.get(learning_data, :source),
+        extracted_at: occurred_at,
+        metadata: Map.get(learning_data, :metadata, %{})
+      }
+
+      {:ok, %{graph | pending_learnings: [pending | graph.pending_learnings]}, pending_id}
+    else
+      true -> {:error, :id_conflict}
+      {:error, _reason} = error -> error
+      _ -> {:error, :invalid_graph}
+    end
+  end
+
+  def add_pending_learning_transition(_graph, _learning_data, _pending_id, _occurred_at),
+    do: {:error, :invalid_graph}
+
   @doc """
   Approve a pending item and add it to the graph as a node.
   """
@@ -1085,6 +1136,11 @@ defmodule Arbor.Memory.KnowledgeGraph do
 
   defp generate_pending_id do
     "pend_" <> Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
+  end
+
+  defp pending_id_exists?(graph, pending_id) do
+    Enum.any?(graph.pending_facts, &(&1.id == pending_id)) or
+      Enum.any?(graph.pending_learnings, &(&1.id == pending_id))
   end
 
   defp maybe_update(node, key, updates) do

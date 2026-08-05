@@ -69,6 +69,14 @@ defmodule Arbor.Memory.KnowledgeGraphStore do
     end
   end
 
+  @spec add_pending_learning(String.t(), String.t(), map()) ::
+          {:ok, String.t()} | {:error, term()}
+  def add_pending_learning(agent_id, operation_id, learning_data) do
+    with {:ok, operation} <- Operation.add_pending_learning(operation_id, learning_data) do
+      call_operation(agent_id, operation)
+    end
+  end
+
   @spec add_edge(
           String.t(),
           String.t(),
@@ -89,6 +97,14 @@ defmodule Arbor.Memory.KnowledgeGraphStore do
   @spec reinforce(String.t(), String.t(), String.t()) :: {:ok, map()} | {:error, term()}
   def reinforce(agent_id, operation_id, node_id) do
     with {:ok, operation} <- Operation.reinforce(operation_id, node_id) do
+      call_operation(agent_id, operation)
+    end
+  end
+
+  @spec merge_node_metadata(String.t(), String.t(), String.t(), map()) ::
+          {:ok, map()} | {:error, term()}
+  def merge_node_metadata(agent_id, operation_id, node_id, fields) do
+    with {:ok, operation} <- Operation.merge_node_metadata(operation_id, node_id, fields) do
       call_operation(agent_id, operation)
     end
   end
@@ -114,6 +130,16 @@ defmodule Arbor.Memory.KnowledgeGraphStore do
     with {:ok, operation} <-
            Operation.cascade_recall(operation_id, node_id, boost_amount, opts) do
       call_operation(agent_id, operation)
+    end
+  end
+
+  @spec consolidate(String.t(), String.t(), :basic | :enhanced, keyword()) ::
+          {:ok, KnowledgeGraph.t(), map()} | {:error, term()}
+  def consolidate(agent_id, operation_id, mode, opts \\ []) do
+    with {:ok, operation} <- Operation.consolidate(operation_id, mode, opts),
+         {:ok, %{graph: %KnowledgeGraph{} = graph} = result} <-
+           call_operation(agent_id, operation) do
+      {:ok, graph, Map.delete(result, :graph)}
     end
   end
 

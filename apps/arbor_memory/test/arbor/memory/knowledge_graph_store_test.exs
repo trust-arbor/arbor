@@ -708,6 +708,68 @@ defmodule Arbor.Memory.KnowledgeGraphStoreTest do
     assert authoritative_revision(agent_id) == revision_before_replay
   end
 
+  test "typed E3 mutations persist metadata, pending learning, and maintenance exactly once", %{
+    agent_id: agent_id
+  } do
+    graph = graph_with_node(agent_id, "maintenance", "archive after durable commit")
+    graph = put_in(graph.nodes["maintenance"].relevance, 0.05)
+    assert :ok = KnowledgeGraphStore.save_graph(agent_id, graph)
+
+    blocked_at = ~U[2026-08-05 13:00:00Z]
+
+    assert {:ok, %{metadata: metadata}} =
+             KnowledgeGraphStore.merge_node_metadata(
+               agent_id,
+               "metadata_operation",
+               "maintenance",
+               %{promotion_blocked: true, blocked_at: blocked_at}
+             )
+
+    assert metadata.promotion_blocked
+    assert metadata.blocked_at == blocked_at
+
+    assert {:ok, pending_id} =
+             KnowledgeGraphStore.add_pending_learning(
+               agent_id,
+               "pending_learning_operation",
+               %{
+                 content: "bounded pending learning",
+                 confidence: 0.8,
+                 source: "test",
+                 metadata: %{pattern_type: :repeated_sequence}
+               }
+             )
+
+    assert {:ok, updated, result} =
+             KnowledgeGraphStore.consolidate(
+               agent_id,
+               "basic_maintenance_operation",
+               :basic,
+               prune_threshold: 0.1
+             )
+
+    assert updated.nodes == %{}
+    assert Enum.map(updated.pending_learnings, & &1.id) == [pending_id]
+    assert result.metrics.pruned_count == 1
+    assert result.metrics.archived_count == 1
+    assert [%{node: %{id: "maintenance"}, reason: :low_relevance}] = result.archive_entries
+    refute result.replayed
+
+    revision_after_commit = authoritative_revision(agent_id)
+
+    assert {:ok, ^updated, replay} =
+             KnowledgeGraphStore.consolidate(
+               agent_id,
+               "basic_maintenance_operation",
+               :basic,
+               prune_threshold: 0.1
+             )
+
+    assert replay.replayed
+    assert replay.archive_entries == []
+    assert authoritative_revision(agent_id) == revision_after_commit
+  end
+
   test "expired queued mutation cannot start after a delayed authoritative call", %{
     agent_id: agent_id
   } do

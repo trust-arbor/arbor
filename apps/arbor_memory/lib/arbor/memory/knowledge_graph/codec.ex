@@ -32,7 +32,10 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
   @edge_keys ~w(created_at id metadata relationship source_id strength target_id)
   @pending_keys ~w(confidence content extracted_at id metadata source type)
   @operation_receipt_keys ~w(fingerprint kind result)
-  @operation_kinds ~w(add_edge add_node approve_pending cascade_recall reinforce reject_pending)
+  @operation_kinds ~w(
+    add_edge add_node add_pending_learning approve_pending cascade_recall consolidate
+    merge_node_metadata reinforce reject_pending
+  )
   @config_keys ~w(auto_embed decay_rate max_nodes_per_type prune_threshold)
   @legacy_node_keys @node_keys ++ ["embedding"]
   @legacy_edge_keys @edge_keys ++ ["weight"]
