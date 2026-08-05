@@ -1104,9 +1104,14 @@ defmodule Arbor.Memory.WorkingMemoryStore do
   defp delete_authoritative(agent_id) do
     case MemoryStore.delete_tainted_authoritative(@namespace, agent_id) do
       :ok ->
-        with :ok <- clear_working_memory_sidecars(agent_id),
-             :ok <- safe_ets_delete(agent_id) do
-          :ok
+        projection_result = safe_ets_delete(agent_id)
+        sidecar_result = clear_working_memory_sidecars(agent_id)
+
+        case {projection_result, sidecar_result} do
+          {:ok, :ok} -> :ok
+          {{:error, _reason} = error, _sidecar_result} -> error
+          {_projection_result, {:error, _reason} = error} -> error
+          _ -> error(:delete_failed)
         end
 
       {:error, _reason} = error ->
@@ -1213,6 +1218,9 @@ defmodule Arbor.Memory.WorkingMemoryStore do
     :ok
   rescue
     ArgumentError -> :ok
+    _ -> error(:ets_failed)
+  catch
+    _, _ -> error(:ets_failed)
   end
 
   defp error(reason), do: {:error, {:working_memory_store, reason}}

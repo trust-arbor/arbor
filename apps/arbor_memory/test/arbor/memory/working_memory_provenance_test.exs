@@ -930,6 +930,47 @@ defmodule Arbor.Memory.WorkingMemoryProvenanceTest do
     assert :ok = Provenance.delete(:goal, agent_id, "unrelated-goal")
   end
 
+  test "security regression: durable delete evicts raw projection when sidecar cleanup fails", %{
+    agent_id: agent_id
+  } do
+    label = taint(:hostile, "delete-projection", sensitivity: :restricted)
+    wm = %{new_working_memory(agent_id) | concerns: ["must be deleted"]}
+
+    assert :ok = WorkingMemoryStore.save_working_memory_tainted(agent_id, wm, label)
+
+    assert %WorkingMemory{concerns: ["must be deleted"]} =
+             WorkingMemoryStore.get_working_memory(agent_id)
+
+    provenance_pid = Process.whereis(Provenance)
+    assert is_pid(provenance_pid)
+    assert Process.unregister(Provenance)
+
+    failing_owner = spawn(fn -> failing_provenance_owner() end)
+    failing_monitor = Process.monitor(failing_owner)
+    assert Process.register(failing_owner, Provenance)
+
+    try do
+      assert {:error, {:working_memory_store, :sidecar_unavailable}} =
+               WorkingMemoryStore.delete_working_memory(agent_id)
+
+      assert WorkingMemoryStore.get_working_memory(agent_id) == nil
+
+      assert {:error, :not_found} =
+               MemoryStore.load_tainted_authoritative_with_status("working_memory", agent_id)
+    after
+      if Process.whereis(Provenance) == failing_owner do
+        Process.unregister(Provenance)
+      end
+
+      Process.exit(failing_owner, :kill)
+      assert_receive {:DOWN, ^failing_monitor, :process, ^failing_owner, _reason}, 1_000
+
+      if Process.alive?(provenance_pid) and Process.whereis(Provenance) == nil do
+        Process.register(provenance_pid, Provenance)
+      end
+    end
+  end
+
   test "collection limits reject before any write and redact content", %{agent_id: agent_id} do
     wm = %{
       new_working_memory(agent_id)
@@ -1279,6 +1320,14 @@ defmodule Arbor.Memory.WorkingMemoryProvenanceTest do
 
     Enum.each(pids, &send(&1, :concurrent_go))
     Enum.map(tasks, &Task.await(&1, 10_000))
+  end
+
+  defp failing_provenance_owner do
+    receive do
+      {:"$gen_call", from, _request} ->
+        GenServer.reply(from, {:error, :forced_sidecar_failure})
+        failing_provenance_owner()
+    end
   end
 
   defp working_memory_domains do
