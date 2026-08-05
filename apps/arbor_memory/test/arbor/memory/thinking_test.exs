@@ -117,7 +117,7 @@ defmodule Arbor.Memory.ThinkingTest do
         assert {:ok, _entry} = Thinking.record_thinking(agent_id, "Thought #{i}")
       end
 
-      all = Thinking.recent_thinking(agent_id, limit: 100)
+      all = Thinking.recent_thinking(agent_id, limit: Thinking.max_entries())
       assert length(all) == 50
     end
   end
