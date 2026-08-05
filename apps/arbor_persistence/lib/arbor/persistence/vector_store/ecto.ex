@@ -18,6 +18,7 @@ defmodule Arbor.Persistence.VectorStore.Ecto do
   @vector_protocol "arbor_vector_store_v1"
   @repo_config_key :vector_store_repo
   @known_transaction_errors [:backend_failure, :conflict, :indeterminate]
+  @fence_claim_event [:arbor, :persistence, :vector_store, :fence_claim]
 
   @impl true
   def execute(%VectorOperation{} = operation, []) do
@@ -304,6 +305,7 @@ defmodule Arbor.Persistence.VectorStore.Ecto do
       )
 
     with {:ok, attrs} <- update_attrs(result, repo),
+         :ok <- emit_fence_claim(repo, operation),
          {1, _rows} <- repo.update_all(query, set: Map.to_list(attrs)),
          {:ok, ^result} <- load_record(repo, VectorRecord.identity(result)) do
       :ok
@@ -338,6 +340,26 @@ defmodule Arbor.Persistence.VectorStore.Ecto do
     with {:ok, attrs} <- value_attrs(record, repo) do
       {:ok, Map.put(attrs, :updated_at, DateTime.utc_now() |> DateTime.truncate(:microsecond))}
     end
+  end
+
+  defp emit_fence_claim(repo, operation) do
+    if postgres_repo?(repo) do
+      :telemetry.execute(
+        @fence_claim_event,
+        %{monotonic_time: System.monotonic_time()},
+        %{
+          operation_fingerprint: operation.fingerprint,
+          operation_kind: operation.kind,
+          agent_id: operation.record.agent_id,
+          source_namespace: operation.record.source_namespace,
+          source_key: operation.record.source_key,
+          expected_generation: operation.expected_generation,
+          expected_revision: operation.expected_revision
+        }
+      )
+    end
+
+    :ok
   end
 
   defp value_attrs(record, repo) do
