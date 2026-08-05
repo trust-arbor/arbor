@@ -2457,8 +2457,9 @@ defmodule Arbor.Actions do
     end)
   end
 
-  # Batch-selected children inherit invocation authority and the complete
-  # manifest constraint, never the parent node's current-action elevation.
+  # Batch-selected children inherit authenticated identity/provenance and the
+  # complete manifest constraint, never the parent node's current-action or
+  # one-use approval elevation.
   # authorize_and_execute/4 rebinds both transient authorization fields for the
   # selected child after principal consistency checks.
   defp batch_child_context!(context) when is_map(context) and not is_struct(context) do
@@ -2469,6 +2470,8 @@ defmodule Arbor.Actions do
       "pinned_action_binding",
       :action_authorization,
       "action_authorization",
+      :approved_invocation,
+      "approved_invocation",
       @action_authorization_resource_key
     ])
   end

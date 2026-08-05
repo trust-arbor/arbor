@@ -5,6 +5,7 @@ defmodule Arbor.Actions.BatchContextSecurityRegressionTest do
   alias Arbor.Contracts.Security.{AuthContext, SignedRequest, Taint}
 
   @parse_resource "arbor://action/coding/design_checkpoint/parse"
+  @orchestrator_resource "arbor://orchestrator/execute"
   @shell_capability "arbor://shell/exec/**"
   @shell_rule "arbor://shell/exec"
 
@@ -29,6 +30,7 @@ defmodule Arbor.Actions.BatchContextSecurityRegressionTest do
         | rules:
             Map.merge(profile.rules, %{
               "arbor://fs/write" => :auto,
+              @orchestrator_resource => :ask,
               @parse_resource => :auto,
               @shell_rule => :auto
             })
@@ -36,6 +38,7 @@ defmodule Arbor.Actions.BatchContextSecurityRegressionTest do
 
     for resource <- [
           "arbor://fs/write#{workspace}/**",
+          @orchestrator_resource,
           @parse_resource,
           @shell_capability
         ] do
@@ -74,6 +77,59 @@ defmodule Arbor.Actions.BatchContextSecurityRegressionTest do
 
     assert [{^spec, {:error, :pipeline_internal_not_exposed}}] =
              Arbor.Actions.execute_batch([spec], agent_id: principal, context: context)
+  end
+
+  test "security regression: batch cannot replay parent approved invocation for selected children",
+       %{principal: principal} do
+    previous_guard = Application.get_env(:arbor_trust, :approval_guard_enabled)
+    previous_escalation = Application.get_env(:arbor_security, :consensus_escalation_enabled)
+
+    Application.put_env(:arbor_trust, :approval_guard_enabled, true)
+    Application.put_env(:arbor_security, :consensus_escalation_enabled, false)
+
+    on_exit(fn ->
+      restore_env(:arbor_trust, :approval_guard_enabled, previous_guard)
+      restore_env(:arbor_security, :consensus_escalation_enabled, previous_escalation)
+    end)
+
+    approval = %{
+      request_id: "irq_parent_route_actions_once",
+      principal_id: principal,
+      resource_uri: @orchestrator_resource,
+      decision: :approved
+    }
+
+    spec = %{
+      "type" => "session_exec_route_actions",
+      "params" => %{"agent_id" => principal, "actions" => []}
+    }
+
+    results =
+      Enum.map([:approved_invocation, "approved_invocation"], fn key ->
+        context = %{
+          key => approval,
+          task_id: "task_audit_provenance",
+          session_id: "session_audit_provenance",
+          node_id: "parent_route_node",
+          approval_provenance: %{request_id: approval.request_id}
+        }
+
+        {key,
+         Arbor.Actions.execute_batch(List.duplicate(spec, 2),
+           agent_id: principal,
+           context: context
+         )}
+      end)
+
+    unauthorized_children = [
+      {spec, {:error, :unauthorized}},
+      {spec, {:error, :unauthorized}}
+    ]
+
+    assert [
+             {:approved_invocation, ^unauthorized_children},
+             {"approved_invocation", ^unauthorized_children}
+           ] = results
   end
 
   test "batch preserves a matching verified SignedRequest and AuthContext for authenticated child",
@@ -274,4 +330,7 @@ defmodule Arbor.Actions.BatchContextSecurityRegressionTest do
       action_authorization: %{action_module: __MODULE__}
     }
   end
+
+  defp restore_env(app, key, nil), do: Application.delete_env(app, key)
+  defp restore_env(app, key, value), do: Application.put_env(app, key, value)
 end
