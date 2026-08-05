@@ -1698,9 +1698,8 @@ defmodule Arbor.Memory.IntentStoreProvenanceTest do
       |> Map.put(:error, "signal-secret-error")
       |> Map.put(:summary, "signal-secret-summary")
 
-    supplied = taint(:hostile, :restricted, 0, :unverified, "signal_redaction")
-    assert {:ok, ^intent} = IntentStore.record_intent_tainted(agent_id, intent, supplied)
-    assert {:ok, ^percept} = IntentStore.record_percept_tainted(agent_id, percept, supplied)
+    assert {:ok, ^intent} = IntentStore.record_intent(agent_id, intent)
+    assert {:ok, ^percept} = IntentStore.record_percept(agent_id, percept)
 
     assert_receive {:intent_signal, %Signal{data: intent_data}}
     assert_receive {:percept_signal, %Signal{data: percept_data}}
