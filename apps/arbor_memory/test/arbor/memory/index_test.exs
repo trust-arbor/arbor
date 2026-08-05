@@ -437,6 +437,62 @@ defmodule Arbor.Memory.IndexTest do
       assert Process.alive?(pid)
     end
 
+    test "coordinator crash regression: owner kills a trap-exit writer before returning" do
+      agent_id = "trap_writer_coordinator_#{System.unique_integer([:positive])}"
+      entry_id = "mem_trap_writer_coordinator"
+      ControlledWriter.configure(agent_id, {:trap_until_cancelled, self()})
+
+      {:ok, pid} =
+        Index.start_link(
+          agent_id: agent_id,
+          backend: :pgvector,
+          persistent_writer: ControlledWriter,
+          entry_id_generator: fn -> entry_id end,
+          operation_timeout_ms: 2_000,
+          name: nil
+        )
+
+      on_exit(fn ->
+        ControlledWriter.disarm(agent_id)
+        if Process.alive?(pid), do: GenServer.stop(pid)
+      end)
+
+      parent = self()
+
+      spawn(fn ->
+        send(
+          parent,
+          {:trap_writer_result,
+           Index.index(pid, "Trap-exit durable writer", %{},
+             embedding: valid_persistent_embedding()
+           )}
+        )
+      end)
+
+      assert_receive {:writer_trapping_exit, ^agent_id, writer_pid}, 1_000
+
+      on_exit(fn ->
+        if Process.alive?(writer_pid), do: Process.exit(writer_pid, :kill)
+      end)
+
+      %{inflight_mutation: %{coordinator_pid: coordinator_pid}} = :sys.get_state(pid)
+      writer_monitor = Process.monitor(writer_pid)
+      Process.exit(coordinator_pid, :kill)
+
+      assert_receive {:trap_writer_result, {:error, :persistence_indeterminate}}, 1_000
+      refute Process.alive?(writer_pid)
+      assert_receive {:DOWN, ^writer_monitor, :process, ^writer_pid, _reason}, 1_000
+
+      ControlledWriter.set_mode(agent_id, :success)
+
+      assert {:ok, ^entry_id} =
+               Index.index(pid, "Mutation after coordinator crash", %{},
+                 embedding: valid_persistent_embedding()
+               )
+
+      assert Process.alive?(pid)
+    end
+
     test "security regression: single generated ID collision rejects before writer dispatch" do
       agent_id = "single_collision_#{System.unique_integer([:positive])}"
       duplicate_id = "mem_duplicate_single_identity"
@@ -984,6 +1040,51 @@ defmodule Arbor.Memory.IndexTest do
                      1_000
 
       await_recall_count(pid, 0)
+      assert {:ok, []} = Index.recall(pid, retry_query)
+      assert Process.alive?(pid)
+    end
+
+    test "coordinator crash regression: owner kills a trap-exit recall provider before reply" do
+      blocked_query = "trap provider coordinator crash"
+      retry_query = "recall after coordinator crash"
+      ControlledProvider.configure(blocked_query, {:trap_until_cancelled, self()})
+      ControlledProvider.configure(retry_query, :success)
+
+      {:ok, pid} =
+        Index.start_link(
+          agent_id: "trap_recall_coordinator_#{System.unique_integer([:positive])}",
+          embedding_provider: ControlledProvider,
+          max_concurrent_recalls: 1,
+          operation_timeout_ms: 2_000,
+          name: nil
+        )
+
+      on_exit(fn ->
+        ControlledProvider.disarm(blocked_query)
+        ControlledProvider.disarm(retry_query)
+        if Process.alive?(pid), do: GenServer.stop(pid)
+      end)
+
+      parent = self()
+
+      spawn(fn ->
+        send(parent, {:trap_recall_result, Index.recall(pid, blocked_query)})
+      end)
+
+      assert_receive {:provider_trapping_exit, ^blocked_query, provider_pid}, 1_000
+
+      on_exit(fn ->
+        if Process.alive?(provider_pid), do: Process.exit(provider_pid, :kill)
+      end)
+
+      [{_operation_ref, recall}] = Map.to_list(:sys.get_state(pid).inflight_recalls)
+      provider_monitor = Process.monitor(provider_pid)
+      Process.exit(recall.coordinator_pid, :kill)
+
+      assert_receive {:trap_recall_result, {:error, :operation_failed}}, 1_000
+      refute Process.alive?(provider_pid)
+      assert_receive {:DOWN, ^provider_monitor, :process, ^provider_pid, _reason}, 1_000
+
       assert {:ok, []} = Index.recall(pid, retry_query)
       assert Process.alive?(pid)
     end

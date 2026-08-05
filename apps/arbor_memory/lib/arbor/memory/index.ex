@@ -461,7 +461,12 @@ defmodule Arbor.Memory.Index do
       inflight.terminal_result || inflight.cancellation_result ||
         background_failure_result(inflight.worker_call)
 
-    inflight = %{inflight | coordinator_down?: true, terminal_result: result}
+    inflight =
+      inflight
+      |> Map.put(:coordinator_down?, true)
+      |> Map.put(:terminal_result, result)
+      |> kill_unsettled_worker()
+
     maybe_finish_mutation(%{state | inflight_mutation: inflight})
   end
 
@@ -493,7 +498,12 @@ defmodule Arbor.Memory.Index do
           recall.terminal_result || recall.cancellation_result ||
             background_failure_result(recall.worker_call)
 
-        recall = %{recall | coordinator_down?: true, terminal_result: result}
+        recall =
+          recall
+          |> Map.put(:coordinator_down?, true)
+          |> Map.put(:terminal_result, result)
+          |> kill_unsettled_worker()
+
         maybe_finish_recall(put_in(state.inflight_recalls[operation_ref], recall), operation_ref)
 
       {:worker, operation_ref, recall} ->
@@ -531,8 +541,6 @@ defmodule Arbor.Memory.Index do
 
   def handle_info({:mutation_deadline, _mutation_ref}, state), do: {:noreply, state}
 
-  def handle_info({:recall_deadline, _operation_ref}, state), do: {:noreply, state}
-
   @impl true
   def terminate(_reason, state) do
     :ets.delete(state.table)
@@ -557,38 +565,42 @@ defmodule Arbor.Memory.Index do
 
       worker_call = {:recall, context, query, opts}
 
-      {operation_ref, coordinator_pid, coordinator_monitor_ref, worker_pid, worker_monitor_ref} =
-        start_background_operation(worker_call)
+      case start_background_operation(worker_call) do
+        {:ok,
+         {operation_ref, coordinator_pid, coordinator_monitor_ref, worker_pid, worker_monitor_ref}} ->
+          caller_pid = elem(from, 0)
+          caller_monitor_ref = Process.monitor(caller_pid)
 
-      caller_pid = elem(from, 0)
-      caller_monitor_ref = Process.monitor(caller_pid)
+          timer_ref =
+            Process.send_after(
+              self(),
+              {:recall_deadline, operation_ref},
+              state.operation_timeout_ms
+            )
 
-      timer_ref =
-        Process.send_after(
-          self(),
-          {:recall_deadline, operation_ref},
-          state.operation_timeout_ms
-        )
+          recall = %{
+            operation_ref: operation_ref,
+            coordinator_pid: coordinator_pid,
+            coordinator_monitor_ref: coordinator_monitor_ref,
+            coordinator_down?: false,
+            worker_pid: worker_pid,
+            worker_monitor_ref: worker_monitor_ref,
+            worker_down?: false,
+            worker_call: worker_call,
+            from: from,
+            caller_pid: caller_pid,
+            caller_monitor_ref: caller_monitor_ref,
+            timer_ref: timer_ref,
+            cancellation_result: nil,
+            terminal_result: nil
+          }
 
-      recall = %{
-        operation_ref: operation_ref,
-        coordinator_pid: coordinator_pid,
-        coordinator_monitor_ref: coordinator_monitor_ref,
-        coordinator_down?: false,
-        worker_pid: worker_pid,
-        worker_monitor_ref: worker_monitor_ref,
-        worker_down?: false,
-        worker_call: worker_call,
-        from: from,
-        caller_pid: caller_pid,
-        caller_monitor_ref: caller_monitor_ref,
-        timer_ref: timer_ref,
-        cancellation_result: nil,
-        terminal_result: nil
-      }
+          activate_background_operation(coordinator_pid, operation_ref)
+          {:noreply, put_in(state.inflight_recalls[operation_ref], recall)}
 
-      activate_background_operation(coordinator_pid, operation_ref)
-      {:noreply, put_in(state.inflight_recalls[operation_ref], recall)}
+        {:error, reason} ->
+          {:reply, {:error, reason}, state}
+      end
     end
   end
 
@@ -665,15 +677,14 @@ defmodule Arbor.Memory.Index do
       {:preflight_index, state.backend, state.agent_id, state.embedding_provider,
        state.entry_id_generator, state.clock, content, metadata, opts}
 
-    {:noreply,
-     start_persistent_mutation(
-       worker_call,
-       :preflight_index,
-       :preflight,
-       from,
-       deadline,
-       state
-     )}
+    start_persistent_mutation(
+      worker_call,
+      :preflight_index,
+      :preflight,
+      from,
+      deadline,
+      state
+    )
   end
 
   defp execute_mutation_call({:batch_index, items, opts}, from, deadline, state) do
@@ -681,15 +692,14 @@ defmodule Arbor.Memory.Index do
       {:preflight_batch, state.backend, state.agent_id, state.embedding_provider,
        state.entry_id_generator, state.clock, items, opts}
 
-    {:noreply,
-     start_persistent_mutation(
-       worker_call,
-       :preflight_batch,
-       :preflight,
-       from,
-       deadline,
-       state
-     )}
+    start_persistent_mutation(
+      worker_call,
+      :preflight_batch,
+      :preflight,
+      from,
+      deadline,
+      state
+    )
   end
 
   defp execute_mutation_call(:clear, _from, _deadline, state) do
@@ -712,8 +722,7 @@ defmodule Arbor.Memory.Index do
         {:reply, :ok, new_state}
 
       {:async, worker_call, completion, phase} ->
-        {:noreply,
-         start_persistent_mutation(worker_call, completion, phase, from, deadline, state)}
+        start_persistent_mutation(worker_call, completion, phase, from, deadline, state)
 
       {:error, reason} ->
         {:reply, {:error, reason}, state}
@@ -725,15 +734,14 @@ defmodule Arbor.Memory.Index do
       worker_call =
         {:warm_cache, state.agent_id, state.embedding_provider, opts}
 
-      {:noreply,
-       start_persistent_mutation(
-         worker_call,
-         {:warm_cache, Keyword.fetch!(opts, :limit)},
-         :preflight,
-         from,
-         deadline,
-         state
-       )}
+      start_persistent_mutation(
+        worker_call,
+        {:warm_cache, Keyword.fetch!(opts, :limit)},
+        :preflight,
+        from,
+        deadline,
+        state
+      )
     else
       {:reply, {:error, :backend_not_persistent}, state}
     end
@@ -746,15 +754,14 @@ defmodule Arbor.Memory.Index do
           {:reply, {:ok, count}, new_state}
 
         {:async, writer_call, completion} ->
-          {:noreply,
-           start_persistent_mutation(
-             writer_call,
-             completion,
-             :durable,
-             from,
-             deadline,
-             state
-           )}
+          start_persistent_mutation(
+            writer_call,
+            completion,
+            :durable,
+            from,
+            deadline,
+            state
+          )
       end
     else
       {:reply, {:error, :not_dual_backend}, state}
@@ -765,16 +772,23 @@ defmodule Arbor.Memory.Index do
     mutation_ref = make_ref()
     timer_ref = schedule_mutation_deadline(mutation_ref, deadline)
 
-    start_persistent_stage(
-      worker_call,
-      completion,
-      phase,
-      from,
-      deadline,
-      mutation_ref,
-      timer_ref,
-      state
-    )
+    case start_persistent_stage(
+           worker_call,
+           completion,
+           phase,
+           from,
+           deadline,
+           mutation_ref,
+           timer_ref,
+           state
+         ) do
+      {:ok, new_state} ->
+        {:noreply, new_state}
+
+      {:error, reason} ->
+        cancel_mutation_deadline(timer_ref)
+        {:reply, {:error, reason}, state}
+    end
   end
 
   defp start_persistent_stage(
@@ -787,31 +801,37 @@ defmodule Arbor.Memory.Index do
          timer_ref,
          state
        ) do
-    {operation_ref, coordinator_pid, coordinator_monitor_ref, worker_pid, worker_monitor_ref} =
-      start_background_operation(worker_call)
-
-    %{
-      state
-      | inflight_mutation: %{
-          mutation_ref: mutation_ref,
-          operation_ref: operation_ref,
-          coordinator_pid: coordinator_pid,
-          coordinator_monitor_ref: coordinator_monitor_ref,
-          coordinator_down?: false,
-          worker_pid: worker_pid,
-          worker_monitor_ref: worker_monitor_ref,
-          worker_down?: false,
-          worker_call: worker_call,
-          timer_ref: timer_ref,
-          deadline: deadline,
-          from: from,
-          completion: completion,
-          phase: phase,
-          cancellation_result: nil,
-          terminal_result: nil
+    case start_background_operation(worker_call) do
+      {:ok,
+       {operation_ref, coordinator_pid, coordinator_monitor_ref, worker_pid, worker_monitor_ref}} ->
+        new_state = %{
+          state
+          | inflight_mutation: %{
+              mutation_ref: mutation_ref,
+              operation_ref: operation_ref,
+              coordinator_pid: coordinator_pid,
+              coordinator_monitor_ref: coordinator_monitor_ref,
+              coordinator_down?: false,
+              worker_pid: worker_pid,
+              worker_monitor_ref: worker_monitor_ref,
+              worker_down?: false,
+              worker_call: worker_call,
+              timer_ref: timer_ref,
+              deadline: deadline,
+              from: from,
+              completion: completion,
+              phase: phase,
+              cancellation_result: nil,
+              terminal_result: nil
+            }
         }
-    }
-    |> tap(fn _state -> activate_background_operation(coordinator_pid, operation_ref) end)
+
+        activate_background_operation(coordinator_pid, operation_ref)
+        {:ok, new_state}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
   end
 
   defp start_background_operation(worker_call) do
@@ -827,7 +847,11 @@ defmodule Arbor.Memory.Index do
       {:background_operation_ready, ^operation_ref, ^coordinator_pid, worker_pid} ->
         worker_monitor_ref = Process.monitor(worker_pid)
 
-        {operation_ref, coordinator_pid, coordinator_monitor_ref, worker_pid, worker_monitor_ref}
+        {:ok,
+         {operation_ref, coordinator_pid, coordinator_monitor_ref, worker_pid, worker_monitor_ref}}
+
+      {:DOWN, ^coordinator_monitor_ref, :process, ^coordinator_pid, _reason} ->
+        {:error, :operation_failed}
     end
   end
 
@@ -987,6 +1011,14 @@ defmodule Arbor.Memory.Index do
     %{operation | terminal_result: operation.cancellation_result || result}
   end
 
+  defp kill_unsettled_worker(%{worker_pid: worker_pid, worker_down?: false} = operation)
+       when is_pid(worker_pid) do
+    Process.exit(worker_pid, :kill)
+    operation
+  end
+
+  defp kill_unsettled_worker(operation), do: operation
+
   defp maybe_finish_mutation(%{inflight_mutation: inflight} = state) do
     if operation_finished?(inflight) do
       cleanup_operation_monitors(inflight)
@@ -1044,17 +1076,24 @@ defmodule Arbor.Memory.Index do
         else
           next_state = %{new_state | inflight_mutation: nil}
 
-          {:noreply,
-           start_persistent_stage(
-             worker_call,
-             completion,
-             phase,
-             inflight.from,
-             inflight.deadline,
-             inflight.mutation_ref,
-             inflight.timer_ref,
-             next_state
-           )}
+          case start_persistent_stage(
+                 worker_call,
+                 completion,
+                 phase,
+                 inflight.from,
+                 inflight.deadline,
+                 inflight.mutation_ref,
+                 inflight.timer_ref,
+                 next_state
+               ) do
+            {:ok, started_state} ->
+              {:noreply, started_state}
+
+            {:error, reason} ->
+              cancel_mutation_deadline(inflight.timer_ref)
+              GenServer.reply(inflight.from, {:error, reason})
+              continue_mutation_queue(next_state)
+          end
         end
 
       {:final, reply, new_state} ->
