@@ -83,34 +83,37 @@ defmodule Arbor.Orchestrator.Session.SessionPartialTaintProductionSecurityRegres
   for mode <- [:cancel, :timeout, :fail] do
     test "security regression: production #{mode} partial preserves hostile input evidence",
          ctx do
-      mode = unquote(mode)
-      ControlledAdapter.configure(self(), mode)
-      {pid, engagement_id} = start_hostile_session!(ctx, mode)
-
-      caller =
-        Task.async(fn ->
-          message =
-            UserMessage.from_string("interrupted current input")
-            |> UserMessage.with_engagement(engagement_id)
-
-          Session.send_message(pid, message)
-        end)
-
-      assert_receive {:partial_provider_started, provider_pid, request}, 2_000
-      assert Enum.all?(request.messages, &(&1.metadata == %{}))
-
-      send(pid, {:stream_chunk, "partial source-owned output"})
-      assert Session.get_state(pid).streaming_buffer.content == "partial source-owned output"
-
-      case mode do
-        :cancel -> assert :ok = Session.cancel_turn(pid)
-        :timeout -> :ok
-        :fail -> send(provider_pid, :fail_now)
-      end
-
-      assert {:error, _reason} = Task.await(caller, 3_000)
-      assert_hostile_partial_batch(engagement_id)
+      exercise_partial_mode(unquote(mode), ctx)
     end
+  end
+
+  defp exercise_partial_mode(mode, ctx) do
+    ControlledAdapter.configure(self(), mode)
+    {pid, engagement_id} = start_hostile_session!(ctx, mode)
+
+    caller =
+      Task.async(fn ->
+        message =
+          UserMessage.from_string("interrupted current input")
+          |> UserMessage.with_engagement(engagement_id)
+
+        Session.send_message(pid, message)
+      end)
+
+    assert_receive {:partial_provider_started, provider_pid, request}, 2_000
+    assert Enum.all?(request.messages, &(&1.metadata == %{}))
+
+    send(pid, {:stream_chunk, "partial source-owned output"})
+    assert Session.get_state(pid).streaming_buffer.content == "partial source-owned output"
+
+    case mode do
+      :cancel -> assert :ok = Session.cancel_turn(pid)
+      :timeout -> :ok
+      :fail -> send(provider_pid, :fail_now)
+    end
+
+    assert {:error, _reason} = Task.await(caller, 3_000)
+    assert_hostile_partial_batch(engagement_id)
   end
 
   defp start_hostile_session!(ctx, mode) do
