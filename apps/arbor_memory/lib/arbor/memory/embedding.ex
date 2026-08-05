@@ -57,6 +57,14 @@ defmodule Arbor.Memory.Embedding do
     # Allow caller to provide an ID (for dual-mode consistency with ETS)
     id = Map.get(metadata, :id) || Map.get(metadata, "id") || Identifiers.generate_id("emb_")
 
+    if is_binary(id) and protected_vector_id?(id) do
+      {:error, :protected_vector_row}
+    else
+      store_legacy_embedding(agent_id, id, content, content_hash, embedding, metadata)
+    end
+  end
+
+  defp store_legacy_embedding(agent_id, id, content, content_hash, embedding, metadata) do
     attrs = %{
       id: id,
       agent_id: agent_id,
@@ -70,15 +78,22 @@ defmodule Arbor.Memory.Embedding do
 
     changeset = MemoryEmbedding.changeset(%MemoryEmbedding{}, attrs)
 
-    # Upsert: on conflict with same agent_id + content_hash, update the embedding
+    # A conditional upsert prevents a legacy uniqueness collision from updating
+    # a vector-store-owned row.
     case Repo.insert(changeset,
-           on_conflict: {:replace, [:embedding, :memory_type, :source, :metadata, :updated_at]},
+           on_conflict: legacy_conflict_query(),
            conflict_target: [:agent_id, :content_hash],
            returning: true
          ) do
-      {:ok, record} ->
-        Logger.debug("Stored embedding #{record.id} for agent #{agent_id}")
-        {:ok, record.id}
+      {:ok, _record} ->
+        case legacy_by_hash(agent_id, content_hash) do
+          %MemoryEmbedding{} = record ->
+            Logger.debug("Stored embedding #{record.id} for agent #{agent_id}")
+            {:ok, record.id}
+
+          nil ->
+            {:error, :protected_vector_row}
+        end
 
       {:error, changeset} ->
         Logger.warning("Failed to store embedding: #{inspect(changeset.errors)}")
@@ -111,7 +126,7 @@ defmodule Arbor.Memory.Embedding do
     query_vector = Pgvector.new(query_embedding)
 
     base_query =
-      from(e in MemoryEmbedding,
+      from(e in legacy_rows(),
         where: e.agent_id == ^agent_id,
         select: %{
           id: e.id,
@@ -174,7 +189,7 @@ defmodule Arbor.Memory.Embedding do
   @spec delete(String.t(), String.t()) :: :ok | {:error, term()}
   def delete(agent_id, embedding_id) do
     query =
-      from(e in MemoryEmbedding,
+      from(e in legacy_rows(),
         where: e.agent_id == ^agent_id and e.id == ^embedding_id
       )
 
@@ -184,7 +199,9 @@ defmodule Arbor.Memory.Embedding do
         :ok
 
       {0, _} ->
-        {:error, :not_found}
+        if protected_vector_id?(agent_id, embedding_id),
+          do: {:error, :protected_vector_row},
+          else: {:error, :not_found}
     end
   end
 
@@ -198,7 +215,7 @@ defmodule Arbor.Memory.Embedding do
   @spec count(String.t()) :: non_neg_integer()
   def count(agent_id) do
     query =
-      from(e in MemoryEmbedding,
+      from(e in legacy_rows(),
         where: e.agent_id == ^agent_id,
         select: count(e.id)
       )
@@ -220,7 +237,7 @@ defmodule Arbor.Memory.Embedding do
   def stats(agent_id) do
     # Total count
     total_query =
-      from(e in MemoryEmbedding,
+      from(e in legacy_rows(),
         where: e.agent_id == ^agent_id,
         select: count(e.id)
       )
@@ -229,7 +246,7 @@ defmodule Arbor.Memory.Embedding do
 
     # Count by type
     type_query =
-      from(e in MemoryEmbedding,
+      from(e in legacy_rows(),
         where: e.agent_id == ^agent_id and not is_nil(e.memory_type),
         group_by: e.memory_type,
         select: {e.memory_type, count(e.id)}
@@ -239,7 +256,7 @@ defmodule Arbor.Memory.Embedding do
 
     # Time bounds
     bounds_query =
-      from(e in MemoryEmbedding,
+      from(e in legacy_rows(),
         where: e.agent_id == ^agent_id,
         select: {min(e.inserted_at), max(e.inserted_at)}
       )
@@ -296,12 +313,16 @@ defmodule Arbor.Memory.Embedding do
     try do
       {count, _} =
         Repo.insert_all(MemoryEmbedding, rows,
-          on_conflict: {:replace, [:embedding, :memory_type, :source, :metadata, :updated_at]},
+          on_conflict: legacy_conflict_query(),
           conflict_target: [:agent_id, :content_hash]
         )
 
-      Logger.debug("Batch stored #{count} embeddings for agent #{agent_id}")
-      {:ok, count}
+      if count == length(rows) do
+        Logger.debug("Batch stored #{count} embeddings for agent #{agent_id}")
+        {:ok, count}
+      else
+        {:error, :protected_vector_row}
+      end
     rescue
       e ->
         Logger.error("Batch store failed: #{inspect(e)}")
@@ -319,7 +340,7 @@ defmodule Arbor.Memory.Embedding do
   @spec get(String.t(), String.t()) :: {:ok, map()} | {:error, :not_found}
   def get(agent_id, embedding_id) do
     query =
-      from(e in MemoryEmbedding,
+      from(e in legacy_rows(),
         where: e.agent_id == ^agent_id and e.id == ^embedding_id
       )
 
@@ -356,7 +377,7 @@ defmodule Arbor.Memory.Embedding do
   @spec delete_all(String.t()) :: {:ok, non_neg_integer()}
   def delete_all(agent_id) do
     query =
-      from(e in MemoryEmbedding,
+      from(e in legacy_rows(),
         where: e.agent_id == ^agent_id
       )
 
@@ -372,6 +393,54 @@ defmodule Arbor.Memory.Embedding do
   @spec compute_content_hash(String.t()) :: String.t()
   defp compute_content_hash(content) do
     :crypto.hash(:sha256, content) |> Base.encode16(case: :lower)
+  end
+
+  defp legacy_rows do
+    from(e in MemoryEmbedding,
+      where: is_nil(e.vector_protocol) and is_nil(e.source_namespace)
+    )
+  end
+
+  defp legacy_by_hash(agent_id, content_hash) do
+    Repo.one(
+      from(e in legacy_rows(),
+        where: e.agent_id == ^agent_id and e.content_hash == ^content_hash,
+        limit: 1
+      )
+    )
+  end
+
+  defp protected_vector_id?(agent_id, id) do
+    Repo.exists?(
+      from(e in MemoryEmbedding,
+        where: e.agent_id == ^agent_id and e.id == ^id,
+        where: not is_nil(e.vector_protocol) or not is_nil(e.source_namespace)
+      )
+    )
+  end
+
+  defp protected_vector_id?(id) do
+    Repo.exists?(
+      from(e in MemoryEmbedding,
+        where: e.id == ^id,
+        where: not is_nil(e.vector_protocol) or not is_nil(e.source_namespace)
+      )
+    )
+  end
+
+  defp legacy_conflict_query do
+    from(e in MemoryEmbedding,
+      update: [
+        set: [
+          embedding: fragment("EXCLUDED.embedding"),
+          memory_type: fragment("EXCLUDED.memory_type"),
+          source: fragment("EXCLUDED.source"),
+          metadata: fragment("EXCLUDED.metadata"),
+          updated_at: fragment("EXCLUDED.updated_at")
+        ]
+      ],
+      where: is_nil(e.vector_protocol) and is_nil(e.source_namespace)
+    )
   end
 
   defp safe_to_string(nil), do: nil

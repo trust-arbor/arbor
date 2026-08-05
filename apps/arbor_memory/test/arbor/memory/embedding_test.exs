@@ -10,7 +10,9 @@ defmodule Arbor.Memory.EmbeddingTest do
 
   @moduletag :database
 
+  alias Arbor.Contracts.Persistence.{VectorOperation, VectorRecord}
   alias Arbor.Memory.Embedding
+  alias Arbor.Persistence.Repo
 
   @test_agent_id "test_agent_embedding"
   @dimension 768
@@ -265,5 +267,149 @@ defmodule Arbor.Memory.EmbeddingTest do
       assert deleted == 5
       assert Embedding.count(@test_agent_id) == 0
     end
+  end
+
+  describe "vector-store V1 isolation security regression" do
+    test "legacy reads and deletes cannot observe or remove a V1 tombstone" do
+      source_key = "isolated_#{System.unique_integer([:positive])}"
+      forged_agent = "forged_agent_#{System.unique_integer([:positive])}"
+
+      payload = %{
+        "content" => "V1 authority",
+        "metadata" => %{
+          "agent_id" => forged_agent,
+          "source_namespace" => "legacy",
+          "source_key" => "forged",
+          "vector_protocol" => "legacy"
+        },
+        "caller_metadata" => %{"provenance" => "trusted"}
+      }
+
+      insert = vector_insert_operation!(@test_agent_id, source_key, payload)
+      assert {:ok, inserted} = Arbor.Persistence.execute_vector_operation(@test_agent_id, insert)
+
+      assert %{rows: [["arbor_vector_store_v1"]]} =
+               Repo.query!("SELECT vector_protocol FROM memory_embeddings WHERE id = $1", [
+                 inserted.record.id
+               ])
+
+      assert inserted.record.agent_id == @test_agent_id
+      assert inserted.record.source_namespace == "voice"
+
+      assert {:error, :not_found} =
+               Arbor.Persistence.fetch_vector_record(forged_agent, "legacy", "forged")
+
+      assert {:ok, []} =
+               Embedding.search(@test_agent_id, inserted.record.vector, threshold: 0.0)
+
+      delete = vector_delete_operation!(inserted.record)
+      assert {:ok, deleted} = Arbor.Persistence.execute_vector_operation(@test_agent_id, delete)
+
+      assert {:ok, []} =
+               Embedding.search(@test_agent_id, inserted.record.vector, threshold: 0.0)
+
+      assert Embedding.count(@test_agent_id) == 0
+      assert Embedding.stats(@test_agent_id).total == 0
+      assert {:error, :not_found} = Embedding.get(@test_agent_id, inserted.record.id)
+
+      assert {:error, :protected_vector_row} =
+               Embedding.delete(@test_agent_id, inserted.record.id)
+
+      assert {:ok, 0} = Embedding.delete_all(@test_agent_id)
+
+      assert {:error, :protected_vector_row} =
+               Embedding.store(
+                 @test_agent_id,
+                 "legacy overwrite",
+                 generate_embedding(20),
+                 %{id: inserted.record.id}
+               )
+
+      deleted_record = deleted.record
+
+      assert {:ok, ^deleted_record} =
+               Arbor.Persistence.fetch_vector_record(@test_agent_id, "voice", source_key,
+                 include_tombstone: true
+               )
+
+      assert {:ok, ^inserted} =
+               Arbor.Persistence.reconcile_vector_operation(@test_agent_id, insert)
+    end
+
+    test "legacy single and batch upserts cannot update a V1-owned conflict" do
+      source_key = "conflict_#{System.unique_integer([:positive])}"
+      insert = vector_insert_operation!(@test_agent_id, source_key, %{"content" => "owned"})
+      assert {:ok, inserted} = Arbor.Persistence.execute_vector_operation(@test_agent_id, insert)
+
+      legacy_content = "forced collision #{System.unique_integer([:positive])}"
+      collision_hash = :crypto.hash(:sha256, legacy_content) |> Base.encode16(case: :lower)
+
+      Repo.query!("UPDATE memory_embeddings SET content_hash = $1 WHERE id = $2", [
+        collision_hash,
+        inserted.record.id
+      ])
+
+      assert {:error, :protected_vector_row} =
+               Embedding.store(@test_agent_id, legacy_content, generate_embedding(21), %{
+                 type: "single-overwrite"
+               })
+
+      assert {:error, :protected_vector_row} =
+               Embedding.store_batch(@test_agent_id, [
+                 {legacy_content, generate_embedding(22), %{type: "batch-overwrite"}}
+               ])
+
+      assert %{rows: [[nil, %{}]]} =
+               Repo.query!("SELECT memory_type, metadata FROM memory_embeddings WHERE id = $1", [
+                 inserted.record.id
+               ])
+    end
+  end
+
+  defp vector_insert_operation!(agent_id, source_key, payload) do
+    vector = generate_embedding(99)
+    {:ok, payload_digest} = VectorRecord.payload_digest(payload)
+    {:ok, vector_digest} = VectorRecord.vector_digest(vector)
+
+    {:ok, record} =
+      VectorRecord.new(%{
+        id: "vec_#{System.unique_integer([:positive])}",
+        agent_id: agent_id,
+        source_namespace: "voice",
+        source_key: source_key,
+        payload: payload,
+        vector: vector,
+        payload_digest: payload_digest,
+        vector_digest: vector_digest,
+        model_id: "provider/model-v1",
+        dimensions: VectorRecord.dimensions(),
+        encoding: VectorRecord.encoding(),
+        category: "voice",
+        generation: 0,
+        revision: 0,
+        tombstone: false
+      })
+
+    {:ok, operation} =
+      VectorOperation.new(%{
+        kind: :insert,
+        record: record,
+        expected_generation: nil,
+        expected_revision: nil
+      })
+
+    operation
+  end
+
+  defp vector_delete_operation!(record) do
+    {:ok, operation} =
+      VectorOperation.new(%{
+        kind: :delete,
+        record: record,
+        expected_generation: record.generation,
+        expected_revision: record.revision
+      })
+
+    operation
   end
 end

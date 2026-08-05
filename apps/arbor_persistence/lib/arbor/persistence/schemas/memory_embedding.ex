@@ -14,13 +14,17 @@ defmodule Arbor.Persistence.Schemas.MemoryEmbedding do
   @timestamps_opts [type: :utc_datetime_usec]
 
   schema "memory_embeddings" do
-    field :agent_id, :string
-    field :content, :string
-    field :content_hash, :string
-    field :embedding, Pgvector.Ecto.Vector
-    field :memory_type, :string
-    field :source, :string
-    field :metadata, :map, default: %{}
+    field(:agent_id, :string)
+    field(:content, :string)
+    field(:content_hash, :string)
+    field(:embedding, Pgvector.Ecto.Vector)
+    field(:memory_type, :string)
+    field(:source, :string)
+    field(:metadata, :map, default: %{})
+
+    # Read-only ownership markers. Legacy changesets deliberately cannot set them.
+    field(:vector_protocol, :string)
+    field(:source_namespace, :string)
 
     timestamps()
   end

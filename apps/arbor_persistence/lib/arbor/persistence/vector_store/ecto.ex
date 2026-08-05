@@ -15,6 +15,7 @@ defmodule Arbor.Persistence.VectorStore.Ecto do
   alias __MODULE__.{Codec, OperationReceiptRow, VectorRow}
 
   @encoding Atom.to_string(VectorRecord.encoding())
+  @vector_protocol "arbor_vector_store_v1"
   @repo_config_key :vector_store_repo
   @known_transaction_errors [:backend_failure, :conflict, :indeterminate]
 
@@ -93,7 +94,7 @@ defmodule Arbor.Persistence.VectorStore.Ecto do
       query =
         from(row in VectorRow,
           where: row.agent_id == ^agent_id,
-          where: not is_nil(row.source_namespace),
+          where: row.vector_protocol == ^@vector_protocol,
           order_by: [asc: row.source_namespace, asc: row.source_key, asc: row.id],
           limit: ^limit
         )
@@ -176,7 +177,7 @@ defmodule Arbor.Persistence.VectorStore.Ecto do
         where: row.encoding == ^encoded_encoding,
         where: row.category == ^category,
         where: row.tombstone == false,
-        where: not is_nil(row.source_namespace),
+        where: row.vector_protocol == ^@vector_protocol,
         where: not is_nil(row.vector_768),
         order_by: [
           asc: fragment("? <=> ?", row.vector_768, ^query_vector),
@@ -295,6 +296,7 @@ defmodule Arbor.Persistence.VectorStore.Ecto do
         where: row.agent_id == ^operation.record.agent_id,
         where: row.source_namespace == ^operation.record.source_namespace,
         where: row.source_key == ^operation.record.source_key,
+        where: row.vector_protocol == ^@vector_protocol,
         where: row.id == ^operation.record.id,
         where: row.generation == ^operation.expected_generation,
         where: row.revision == ^operation.expected_revision,
@@ -320,6 +322,7 @@ defmodule Arbor.Persistence.VectorStore.Ecto do
        Map.merge(attrs, %{
          id: record.id,
          agent_id: record.agent_id,
+         vector_protocol: @vector_protocol,
          source_namespace: record.source_namespace,
          source_key: record.source_key,
          memory_type: nil,
@@ -343,6 +346,7 @@ defmodule Arbor.Persistence.VectorStore.Ecto do
          {:ok, stored_vector} <- stored_vector(repo, record.vector) do
       {:ok,
        %{
+         vector_protocol: @vector_protocol,
          content: payload_bytes,
          content_hash: compatibility_hash(record),
          embedding: stored_vector,
@@ -384,12 +388,14 @@ defmodule Arbor.Persistence.VectorStore.Ecto do
       where: row.agent_id == ^agent_id,
       where: row.source_namespace == ^source_namespace,
       where: row.source_key == ^source_key,
+      where: row.vector_protocol == ^@vector_protocol,
       limit: 1
     )
   end
 
   defp row_to_record(%VectorRow{} = row, repo) do
-    with true <- is_binary(row.canonical_payload),
+    with true <- row.vector_protocol == @vector_protocol,
+         true <- is_binary(row.canonical_payload),
          {:ok, payload} <- Jason.decode(row.canonical_payload),
          {:ok, canonical_payload} <- VectorRecord.canonical_payload_bytes(payload),
          true <- canonical_payload == row.canonical_payload,

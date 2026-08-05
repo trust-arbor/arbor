@@ -26,7 +26,8 @@ defmodule Arbor.Persistence.VectorStore.Ecto.VectorRow do
     field(:source, :string)
     field(:metadata, :map, default: %{})
 
-    # C3G1A staged authority columns. Null source_namespace marks a legacy row.
+    # C3G1A staged authority columns. The protocol marker is backend-owned.
+    field(:vector_protocol, :string)
     field(:source_namespace, :string)
     field(:source_key, :string)
     field(:canonical_payload, :string)

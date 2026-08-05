@@ -7,6 +7,8 @@ defmodule Arbor.Persistence.VectorStore.EctoSQLiteTest do
   @migration_module Arbor.Persistence.Repo.Migrations.PrepareVectorStoreV1
   @widen_migration_version 20_260_805_000_002
   @widen_migration_module Arbor.Persistence.Repo.Migrations.WidenVectorAgentIds
+  @isolation_migration_version 20_260_805_000_003
+  @isolation_migration_module Arbor.Persistence.Repo.Migrations.IsolateVectorStoreV1Rows
   @migration_file Path.expand(
                     "../../../../priv/repo/migrations/20260805000001_prepare_vector_store_v1.exs",
                     __DIR__
@@ -15,9 +17,14 @@ defmodule Arbor.Persistence.VectorStore.EctoSQLiteTest do
                           "../../../../priv/repo/migrations/20260805000002_widen_vector_agent_ids.exs",
                           __DIR__
                         )
+  @isolation_migration_file Path.expand(
+                              "../../../../priv/repo/migrations/20260805000003_isolate_vector_store_v1_rows.exs",
+                              __DIR__
+                            )
 
   Code.require_file(@migration_file)
   Code.require_file(@widen_migration_file)
+  Code.require_file(@isolation_migration_file)
 
   defmodule SQLiteRepo do
     use Ecto.Repo,
@@ -51,6 +58,14 @@ defmodule Arbor.Persistence.VectorStore.EctoSQLiteTest do
                SQLiteRepo,
                @widen_migration_version,
                @widen_migration_module,
+               log: false
+             )
+
+    assert :ok ==
+             Ecto.Migrator.up(
+               SQLiteRepo,
+               @isolation_migration_version,
+               @isolation_migration_module,
                log: false
              )
 
@@ -99,6 +114,7 @@ defmodule Arbor.Persistence.VectorStore.EctoSQLiteTest do
           "payload_digest",
           "vector_768",
           "vector_bytes",
+          "vector_protocol",
           "generation",
           "revision",
           "tombstone"

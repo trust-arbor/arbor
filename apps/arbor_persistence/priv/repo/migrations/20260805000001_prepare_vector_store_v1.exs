@@ -3,8 +3,8 @@ defmodule Arbor.Persistence.Repo.Migrations.PrepareVectorStoreV1 do
   Adds the nullable C3G vector authority columns and immutable receipt ledger.
 
   Existing memory rows and the legacy `(agent_id, content_hash)` uniqueness
-  remain untouched. Rows enter the new protocol only when source_namespace is
-  populated by the vector-store adapter.
+  remain untouched. A later additive migration installs and backfills the
+  backend-owned protocol discriminator before the vector-store adapter runs.
   """
 
   use Ecto.Migration
