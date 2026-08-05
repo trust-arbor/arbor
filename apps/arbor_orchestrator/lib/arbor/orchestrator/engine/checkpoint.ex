@@ -22,12 +22,14 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
   `current_node`, and `graph_hash` to prevent checkpoint replay across
   different pipelines or modified graphs.
 
-  Durable context provenance is bound per key to every exact serialized context
-  value through `Arbor.Contracts.Security.TaintEnvelope`. Missing provenance is
-  reconstructed conservatively with `TaintEnvelope.missing_fallback/0`. A
-  malformed, ambiguous, orphaned, or payload-mismatched label rejects the whole
-  checkpoint; resume never retains a value while silently discarding its
-  provenance.
+  Durable context provenance is bound through
+  `Arbor.Contracts.Security.TaintEnvelope` to a closed descriptor containing
+  the exact context key, explicit presence, and a deterministic digest of the
+  final JSON value projection. Ambient provenance binds the key's absence.
+  Missing provenance is reconstructed conservatively with
+  `TaintEnvelope.missing_fallback/0`. A malformed, ambiguous, or
+  payload-mismatched label rejects the whole checkpoint; resume never retains a
+  value while silently discarding its provenance.
 
   Peer replication (when enabled) is best-effort only and is never treated as
   durable crash recovery.
@@ -78,6 +80,7 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
 
   alias Arbor.Contracts.Persistence.Record, as: PersistenceRecord
   alias Arbor.Contracts.Security.{Taint, TaintEnvelope}
+  alias Arbor.Orchestrator.DurableJson
   alias Arbor.Orchestrator.Engine.{Context, Outcome}
 
   @default_store_name :arbor_orchestrator_checkpoints
@@ -204,6 +207,9 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
   @internal_keys ~w(__adapted_graph__ __completed_nodes__)
   @internal_atom_keys [:__adapted_graph__, :__completed_nodes__]
   @taint_envelope_keys ~w(version payload_encoding payload_sha256 taint)
+  @context_taint_binding_kind "arbor_context_taint_binding"
+  @context_taint_binding_version 1
+  @context_taint_key_encoding "utf8_bytes_v1"
 
   @legacy_context_taint_keys ~w(
     taint_level
@@ -649,9 +655,14 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
   end
 
   defp serialize(%__MODULE__{} = checkpoint) do
-    with {:ok, context_values} <- serialize_context_values(checkpoint.context_values),
+    with {:ok, context_values, context_value_digests} <-
+           serialize_context_values(checkpoint.context_values),
          {:ok, context_taint} <-
-           serialize_context_taint(checkpoint.context_taint, context_values) do
+           serialize_context_taint(
+             checkpoint.context_taint,
+             context_values,
+             context_value_digests
+           ) do
       encoded_outcomes =
         checkpoint.node_outcomes
         |> Enum.map(fn {node_id, outcome} ->
@@ -694,26 +705,30 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
   defp serialize_context_values(values) when is_map(values) and not is_struct(values) do
     values = drop_internal_context_keys(values)
 
-    with :ok <- validate_context_keys(values, :invalid_context_key) do
-      {:ok, values}
+    with :ok <- validate_context_keys(values, :invalid_context_key),
+         {:ok, projected, digests} <- project_context_values(values) do
+      {:ok, projected, digests}
     end
   end
 
   defp serialize_context_values(_values), do: {:error, :invalid_context_values}
 
-  defp serialize_context_taint(taint, context_values)
-       when is_map(taint) and not is_struct(taint) and is_map(context_values) do
+  defp serialize_context_taint(taint, context_values, context_value_digests)
+       when is_map(taint) and not is_struct(taint) and is_map(context_values) and
+              is_map(context_value_digests) do
     taint = drop_internal_context_keys(taint)
 
     with :ok <- validate_context_keys(taint, :invalid_context_taint_key),
-         {:ok, taint} <- canonical_context_taint_map(taint, context_values) do
+         {:ok, taint} <- canonical_context_taint_map(taint) do
       context_values
-      |> Enum.sort_by(fn {key, _value} -> key end)
-      |> Enum.reduce_while({:ok, %{}}, fn {key, value}, {:ok, acc} ->
+      |> context_taint_keys(taint)
+      |> Enum.reduce_while({:ok, %{}}, fn key, {:ok, acc} ->
         label = Map.get(taint, key, TaintEnvelope.missing_fallback())
 
-        with {:ok, label} <- canonical_context_taint(label),
-             {:ok, envelope} <- TaintEnvelope.new(value, label),
+        with {:ok, binding} <-
+               context_taint_binding(context_values, context_value_digests, key),
+             {:ok, label} <- canonical_context_taint(label),
+             {:ok, envelope} <- TaintEnvelope.new(binding, label),
              {:ok, persisted} <- TaintEnvelope.to_map(envelope) do
           {:cont, {:ok, Map.put(acc, key, persisted)}}
         else
@@ -723,15 +738,14 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
     end
   end
 
-  defp serialize_context_taint(_taint, _context_values),
+  defp serialize_context_taint(_taint, _context_values, _context_value_digests),
     do: {:error, :invalid_context_taint}
 
-  defp canonical_context_taint_map(taint, context_values) do
+  defp canonical_context_taint_map(taint) do
     taint
     |> Enum.sort_by(fn {key, _label} -> key end)
     |> Enum.reduce_while({:ok, %{}}, fn {key, label}, {:ok, acc} ->
-      with {:ok, _value} <- fetch_context_value(context_values, key),
-           {:ok, label} <- canonical_context_taint(label) do
+      with {:ok, label} <- canonical_context_taint(label) do
         {:cont, {:ok, Map.put(acc, key, label)}}
       else
         {:error, reason} -> {:halt, {:error, reason}}
@@ -739,11 +753,68 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
     end)
   end
 
-  defp fetch_context_value(context_values, key) do
-    case Map.fetch(context_values, key) do
-      {:ok, value} -> {:ok, value}
-      :error -> {:error, :orphan_context_taint}
+  defp context_taint_keys(context_values, taint) do
+    context_values
+    |> Map.keys()
+    |> Kernel.++(Map.keys(taint))
+    |> Enum.uniq()
+    |> Enum.sort()
+  end
+
+  defp context_taint_binding(context_values, context_value_digests, key)
+       when is_binary(key) do
+    with {:ok, key_binding} <- context_key_binding(key) do
+      case {Map.fetch(context_values, key), Map.fetch(context_value_digests, key)} do
+        {{:ok, _value}, {:ok, digest_binding}} ->
+          {:ok,
+           %{
+             "kind" => @context_taint_binding_kind,
+             "version" => @context_taint_binding_version,
+             "key" => key_binding,
+             "presence" => "present",
+             "value_encoding" => digest_binding.encoding,
+             "value_digest" => digest_binding.digest_algorithm,
+             "value_sha256" => digest_binding.sha256
+           }}
+
+        {:error, :error} ->
+          {:ok,
+           %{
+             "kind" => @context_taint_binding_kind,
+             "version" => @context_taint_binding_version,
+             "key" => key_binding,
+             "presence" => "absent"
+           }}
+
+        _mismatched_projection ->
+          {:error, :invalid_context_value_projection}
+      end
     end
+  end
+
+  defp context_key_binding(key) when is_binary(key) do
+    {:ok,
+     %{
+       "encoding" => @context_taint_key_encoding,
+       "bytes" => byte_size(key),
+       "sha256" => key |> then(&:crypto.hash(:sha256, &1)) |> Base.encode16(case: :lower)
+     }}
+  end
+
+  defp project_context_values(values) when is_map(values) do
+    values
+    |> Enum.sort_by(fn {key, _value} -> key end)
+    |> Enum.reduce_while({:ok, %{}, %{}}, fn {key, value}, {:ok, projected, digests} ->
+      case DurableJson.project_and_digest(value) do
+        {:ok, %{projection: projection} = digest_binding} ->
+          {:cont,
+           {:ok, Map.put(projected, key, projection),
+            Map.put(digests, key, Map.delete(digest_binding, :projection))}}
+
+        {:error, reason} ->
+          {:halt, {:error, reason}}
+      end
+    end)
   end
 
   defp canonical_context_taint(label) do
@@ -1240,12 +1311,13 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
   # ---------------------------------------------------------------------------
 
   defp deserialize(decoded) when is_map(decoded) do
-    with {:ok, context_values} <-
+    with {:ok, context_values, context_value_digests} <-
            deserialize_context_values(Map.get(decoded, "context_values", %{})),
          {:ok, context_taint} <-
            deserialize_context_taint(
              Map.get(decoded, "context_taint", %{}),
-             context_values
+             context_values,
+             context_value_digests
            ) do
       outcomes =
         decoded
@@ -1296,18 +1368,21 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
 
   defp deserialize_context_values(values) when is_map(values) and not is_struct(values) do
     with :ok <- validate_context_keys(values, :invalid_context_key),
-         :ok <- reject_internal_context_keys(values, :invalid_context_values) do
-      {:ok, values}
+         :ok <- reject_internal_context_keys(values, :invalid_context_values),
+         {:ok, projected, digests} <- project_context_values(values) do
+      {:ok, projected, digests}
     end
   end
 
   defp deserialize_context_values(_values), do: {:error, :invalid_context_values}
 
-  defp deserialize_context_taint(taint, context_values)
-       when is_map(taint) and not is_struct(taint) and is_map(context_values) do
+  defp deserialize_context_taint(taint, context_values, context_value_digests)
+       when is_map(taint) and not is_struct(taint) and is_map(context_values) and
+              is_map(context_value_digests) do
     with :ok <- validate_context_keys(taint, :invalid_context_taint_key),
          :ok <- reject_internal_context_keys(taint, :invalid_context_taint) do
-      with {:ok, decoded_taint} <- decode_context_taint_map(taint, context_values) do
+      with {:ok, decoded_taint} <-
+             decode_context_taint_map(taint, context_values, context_value_digests) do
         fallback_taint =
           Map.new(context_values, fn {key, _value} ->
             {key, TaintEnvelope.missing_fallback()}
@@ -1318,15 +1393,16 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
     end
   end
 
-  defp deserialize_context_taint(_taint, _context_values),
+  defp deserialize_context_taint(_taint, _context_values, _context_value_digests),
     do: {:error, :invalid_context_taint}
 
-  defp decode_context_taint_map(taint, context_values) do
+  defp decode_context_taint_map(taint, context_values, context_value_digests) do
     taint
     |> Enum.sort_by(fn {key, _persisted} -> key end)
     |> Enum.reduce_while({:ok, %{}}, fn {key, persisted}, {:ok, acc} ->
-      with {:ok, value} <- fetch_context_value(context_values, key),
-           {:ok, label} <- decode_context_taint(persisted, value) do
+      with {:ok, binding} <-
+             context_taint_binding(context_values, context_value_digests, key),
+           {:ok, label} <- decode_context_taint(persisted, binding) do
         {:cont, {:ok, Map.put(acc, key, label)}}
       else
         {:error, reason} -> {:halt, {:error, reason}}
@@ -1334,10 +1410,10 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
     end)
   end
 
-  defp decode_context_taint(persisted, payload) when is_map(persisted) do
+  defp decode_context_taint(persisted, binding) when is_map(persisted) do
     cond do
       current_taint_envelope_candidate?(persisted) ->
-        case TaintEnvelope.verify(persisted, payload) do
+        case TaintEnvelope.verify(persisted, binding) do
           {:ok, %TaintEnvelope{taint: %Taint{} = taint}} -> {:ok, taint}
           {:error, reason} -> {:error, reason}
         end
@@ -1350,7 +1426,8 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
     end
   end
 
-  defp decode_context_taint(_persisted, _payload), do: {:error, :invalid_context_taint}
+  defp decode_context_taint(_persisted, _binding),
+    do: {:error, :invalid_context_taint}
 
   # Only the exact historical Checkpoint/Signals six-key map is migratable.
   # Any map carrying even one current-envelope marker is handled exclusively as

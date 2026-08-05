@@ -5,6 +5,7 @@ defmodule Arbor.Orchestrator.Engine.CheckpointContextTaintEnvelopeSecurityRegres
 
   alias Arbor.Contracts.Persistence.Record, as: PersistenceRecord
   alias Arbor.Contracts.Security.{Taint, TaintEnvelope}
+  alias Arbor.Orchestrator.DurableJson
   alias Arbor.Orchestrator.Engine.{Checkpoint, Context}
 
   defmodule SpyStore do
@@ -139,8 +140,11 @@ defmodule Arbor.Orchestrator.Engine.CheckpointContextTaintEnvelopeSecurityRegres
     assert Enum.sort(Map.keys(envelope)) ==
              ~w(payload_encoding payload_sha256 taint version)
 
+    binding =
+      expected_context_binding("bound", {:present, payload["context_values"]["bound"]})
+
     assert {:ok, %TaintEnvelope{taint: ^label}} =
-             TaintEnvelope.verify(envelope, payload["context_values"]["bound"])
+             TaintEnvelope.verify(envelope, binding)
 
     assert {:ok, loaded} = Checkpoint.load(path, store: nil)
     assert loaded.context_taint == %{"bound" => label}
@@ -168,8 +172,9 @@ defmodule Arbor.Orchestrator.Engine.CheckpointContextTaintEnvelopeSecurityRegres
     value = payload["context_values"]["unlabelled"]
     envelope = payload["context_taint"]["unlabelled"]
     fallback = TaintEnvelope.missing_fallback()
+    binding = expected_context_binding("unlabelled", {:present, value})
 
-    assert {:ok, %TaintEnvelope{taint: ^fallback}} = TaintEnvelope.verify(envelope, value)
+    assert {:ok, %TaintEnvelope{taint: ^fallback}} = TaintEnvelope.verify(envelope, binding)
     assert {:ok, loaded} = Checkpoint.load(path, store: nil)
     assert loaded.context_taint == %{"unlabelled" => fallback}
   end
@@ -180,6 +185,86 @@ defmodule Arbor.Orchestrator.Engine.CheckpointContextTaintEnvelopeSecurityRegres
 
     tampered = put_in(payload, ["context_values", "bound"], "attacker replacement")
     rewrite_payload(path, tampered)
+
+    assert {:error, :payload_mismatch} = Checkpoint.load(path, store: nil)
+  end
+
+  test "security regression: equal-value context envelopes cannot be swapped between keys", %{
+    root: root
+  } do
+    left_label = label()
+    right_label = %{label() | source: "other_source"}
+
+    context =
+      Context.new(%{"left" => "same", "right" => "same"},
+        taint: %{"left" => left_label, "right" => right_label}
+      )
+
+    {path, payload} =
+      context
+      |> checkpoint("run_equal_value_swap")
+      |> write_and_decode(root)
+
+    left_envelope = payload["context_taint"]["left"]
+    right_envelope = payload["context_taint"]["right"]
+
+    tampered =
+      payload
+      |> put_in(["context_taint", "left"], right_envelope)
+      |> put_in(["context_taint", "right"], left_envelope)
+
+    rewrite_payload(path, tampered)
+
+    assert {:error, :payload_mismatch} = Checkpoint.load(path, store: nil)
+  end
+
+  test "security regression: large context key round-trips and key tampering fails closed", %{
+    root: root
+  } do
+    key = String.duplicate("K", TaintEnvelope.limits().max_string_bytes + 1)
+    changed_key = "Y" <> binary_part(key, 1, byte_size(key) - 1)
+
+    context = Context.new(%{key => "value"}, taint: %{key => label()})
+
+    {path, payload} =
+      context
+      |> checkpoint("run_large_context_key")
+      |> write_and_decode(root)
+
+    assert payload["context_values"][key] == "value"
+    envelope = payload["context_taint"][key]
+    binding = expected_context_binding(key, {:present, "value"})
+    assert {:ok, %TaintEnvelope{taint: expected}} = TaintEnvelope.verify(envelope, binding)
+    assert expected == label()
+
+    assert {:ok, loaded} = Checkpoint.load(path, store: nil)
+    assert loaded.context_values == %{key => "value"}
+    assert loaded.context_taint == %{key => label()}
+
+    tampered =
+      payload
+      |> update_in(["context_values"], fn values ->
+        values |> Map.delete(key) |> Map.put(changed_key, "value")
+      end)
+      |> update_in(["context_taint"], fn taint ->
+        taint |> Map.delete(key) |> Map.put(changed_key, envelope)
+      end)
+
+    rewrite_payload(path, tampered)
+    assert {:error, :payload_mismatch} = Checkpoint.load(path, store: nil)
+  end
+
+  test "security regression: unpublished raw-value envelope is not a current format", %{
+    root: root
+  } do
+    {path, payload} = write_and_decode(labelled_checkpoint("value"), root)
+    value = payload["context_values"]["bound"]
+    assert {:ok, raw_envelope} = TaintEnvelope.new(value, label())
+    assert {:ok, raw_persisted} = TaintEnvelope.to_map(raw_envelope)
+
+    payload
+    |> put_in(["context_taint", "bound"], raw_persisted)
+    |> then(&rewrite_payload(path, &1))
 
     assert {:error, :payload_mismatch} = Checkpoint.load(path, store: nil)
   end
@@ -202,13 +287,61 @@ defmodule Arbor.Orchestrator.Engine.CheckpointContextTaintEnvelopeSecurityRegres
     assert {:error, :invalid_taint} = Checkpoint.load(path, store: nil)
   end
 
-  test "security regression: orphan context label rejects checkpoint", %{root: root} do
+  test "security regression: forged ambient label with another key's envelope fails closed", %{
+    root: root
+  } do
     {path, payload} = write_and_decode(labelled_checkpoint("value"), root)
     envelope = payload["context_taint"]["bound"]
     tampered = put_in(payload, ["context_taint", "orphan"], envelope)
     rewrite_payload(path, tampered)
 
-    assert {:error, :orphan_context_taint} = Checkpoint.load(path, store: nil)
+    assert {:error, :payload_mismatch} = Checkpoint.load(path, store: nil)
+  end
+
+  test "security regression: current ambient provenance binds absence without value collision", %{
+    root: root
+  } do
+    former_sentinel = %{"kind" => "arbor_context_absent_v1", "key" => "present"}
+    ambient_label = %{label() | source: "ambient_floor"}
+
+    context =
+      Context.new(%{"present" => former_sentinel},
+        taint: %{"present" => label(), "ambient" => ambient_label}
+      )
+
+    {path, payload} =
+      context
+      |> checkpoint("run_current_ambient")
+      |> write_and_decode(root)
+
+    present_envelope = payload["context_taint"]["present"]
+    ambient_envelope = payload["context_taint"]["ambient"]
+
+    present_binding =
+      expected_context_binding("present", {:present, payload["context_values"]["present"]})
+
+    ambient_binding = expected_context_binding("ambient", :absent)
+
+    assert {:ok, %TaintEnvelope{taint: present_taint}} =
+             TaintEnvelope.verify(present_envelope, present_binding)
+
+    assert {:ok, %TaintEnvelope{taint: ^ambient_label}} =
+             TaintEnvelope.verify(ambient_envelope, ambient_binding)
+
+    assert present_taint == label()
+    refute present_envelope["payload_sha256"] == ambient_envelope["payload_sha256"]
+
+    assert {:ok, loaded} = Checkpoint.load(path, store: nil)
+    assert loaded.context_values["present"] == former_sentinel
+    assert loaded.context_taint["ambient"] == ambient_label
+
+    removed_value = update_in(payload, ["context_values"], &Map.delete(&1, "present"))
+    rewrite_payload(path, removed_value)
+    assert {:error, :payload_mismatch} = Checkpoint.load(path, store: nil)
+
+    added_value = put_in(payload, ["context_values", "ambient"], former_sentinel)
+    rewrite_payload(path, added_value)
+    assert {:error, :payload_mismatch} = Checkpoint.load(path, store: nil)
   end
 
   test "security regression: partial current envelope cannot enter legacy decoder", %{root: root} do
@@ -257,8 +390,14 @@ defmodule Arbor.Orchestrator.Engine.CheckpointContextTaintEnvelopeSecurityRegres
 
     refute Map.has_key?(migrated, "taint_level")
 
+    binding =
+      expected_context_binding(
+        "bound",
+        {:present, migrated_payload["context_values"]["bound"]}
+      )
+
     assert {:ok, %TaintEnvelope{taint: ^expected}} =
-             TaintEnvelope.verify(migrated, migrated_payload["context_values"]["bound"])
+             TaintEnvelope.verify(migrated, binding)
   end
 
   test "security regression: legacy context value absent from taint map gets missing fallback", %{
@@ -300,7 +439,56 @@ defmodule Arbor.Orchestrator.Engine.CheckpointContextTaintEnvelopeSecurityRegres
            }
   end
 
-  test "malformed and orphan in-memory labels fail before creating a file", %{root: root} do
+  test "security regression: legacy ambient label migrates conservatively and binds absence", %{
+    root: root
+  } do
+    legacy = %Taint{
+      level: :trusted,
+      sensitivity: :public,
+      sanitizations: 0xFF,
+      confidence: :verified,
+      source: "legacy_ambient",
+      chain: ["legacy_origin"]
+    }
+
+    context = Context.new(%{"live" => "value"}, taint: %{"ambient" => legacy})
+
+    {path, payload} =
+      context
+      |> checkpoint("run_legacy_ambient")
+      |> write_and_decode(root)
+
+    legacy_payload =
+      put_in(
+        payload,
+        ["context_taint", "ambient"],
+        Arbor.Signals.Taint.to_persistable(legacy)
+      )
+
+    rewrite_payload(path, legacy_payload)
+
+    assert {:ok, expected} = Taint.join(TaintEnvelope.missing_fallback(), legacy)
+    assert {:ok, loaded} = Checkpoint.load(path, store: nil)
+    assert loaded.context_values == %{"live" => "value"}
+    assert loaded.context_taint["ambient"] == expected
+    assert expected.level == :untrusted
+    assert expected.sensitivity == :restricted
+    assert expected.sanitizations == 0
+
+    migrated_root = Path.join(root, "legacy_ambient_migrated")
+    {migrated_path, migrated_payload} = write_and_decode(loaded, migrated_root)
+    migrated_envelope = migrated_payload["context_taint"]["ambient"]
+    ambient_binding = expected_context_binding("ambient", :absent)
+
+    assert {:ok, %TaintEnvelope{taint: ^expected}} =
+             TaintEnvelope.verify(migrated_envelope, ambient_binding)
+
+    tampered = put_in(migrated_payload, ["context_values", "ambient"], "now present")
+    rewrite_payload(migrated_path, tampered)
+    assert {:error, :payload_mismatch} = Checkpoint.load(migrated_path, store: nil)
+  end
+
+  test "malformed in-memory label fails before creating a file", %{root: root} do
     malformed =
       labelled_checkpoint("value")
       |> Map.put(:context_taint, %{"bound" => :untrusted})
@@ -311,17 +499,6 @@ defmodule Arbor.Orchestrator.Engine.CheckpointContextTaintEnvelopeSecurityRegres
              Checkpoint.write(malformed, malformed_root, store: nil)
 
     refute File.exists?(Path.join(malformed_root, "checkpoint.json"))
-
-    orphan =
-      labelled_checkpoint("value")
-      |> Map.put(:context_taint, %{"missing" => label()})
-
-    orphan_root = Path.join(root, "orphan")
-
-    assert {:error, :orphan_context_taint} =
-             Checkpoint.write(orphan, orphan_root, store: nil)
-
-    refute File.exists?(Path.join(orphan_root, "checkpoint.json"))
   end
 
   test "malformed context key fails closed without exposing its value", %{root: root} do
@@ -359,17 +536,84 @@ defmodule Arbor.Orchestrator.Engine.CheckpointContextTaintEnvelopeSecurityRegres
     refute File.exists?(write_root)
   end
 
-  test "security regression: oversized labelled value is rejected before configured-store effects",
-       %{root: root, store_name: store_name} do
-    oversize = String.duplicate("x", TaintEnvelope.limits().max_string_bytes + 1)
-    checkpoint = labelled_checkpoint(oversize)
-    attempt_root = Path.join(root, "oversized")
+  test "security regression: duplicate normalized value keys fail before persistence effects", %{
+    root: root,
+    store_name: store_name
+  } do
+    checkpoint =
+      Context.new(%{"duplicate" => %{:same => 1, "same" => 2}})
+      |> checkpoint("run_duplicate_normalized_value_keys")
 
-    assert {:error, :payload_string_limit} =
+    attempt_root = Path.join(root, "duplicate_normalized_value_keys")
+
+    assert {:error, :duplicate_json_key} =
              Checkpoint.persist(checkpoint, attempt_root, configured_store_opts(store_name))
 
     assert SpyStore.events(store_name) == []
     refute File.exists?(attempt_root)
+  end
+
+  test "security regression: one megabyte value keeps conservative provenance and detects tamper",
+       %{root: root} do
+    value = String.duplicate("X", 1_000_000)
+
+    checkpoint =
+      Context.new(%{"blob" => value})
+      |> checkpoint("run_large_context_value")
+
+    {path, payload} = write_and_decode(checkpoint, root)
+    assert payload["context_values"]["blob"] == value
+
+    fallback = TaintEnvelope.missing_fallback()
+    binding = expected_context_binding("blob", {:present, value})
+
+    assert {:ok, %TaintEnvelope{taint: ^fallback}} =
+             TaintEnvelope.verify(payload["context_taint"]["blob"], binding)
+
+    assert {:ok, loaded} = Checkpoint.load(path, store: nil)
+    assert loaded.context_values["blob"] == value
+    assert loaded.context_taint["blob"] == fallback
+
+    changed = "Y" <> binary_part(value, 1, byte_size(value) - 1)
+    tampered = put_in(payload, ["context_values", "blob"], changed)
+    rewrite_payload(path, tampered)
+
+    assert {:error, :payload_mismatch} = Checkpoint.load(path, store: nil)
+  end
+
+  test "checkpoint descriptor accepts values beyond ordinary TaintEnvelope traversal limits", %{
+    root: root
+  } do
+    large_array = Enum.to_list(1..300)
+    large_object = Map.new(1..300, &{"key_#{&1}", &1})
+    many_nodes = Enum.map(1..256, fn _ -> Enum.to_list(1..20) end)
+
+    assert {:error, :payload_array_limit} = TaintEnvelope.new(large_array, label())
+    assert {:error, :payload_object_limit} = TaintEnvelope.new(large_object, label())
+    assert {:error, :payload_node_limit} = TaintEnvelope.new(many_nodes, label())
+
+    values = %{
+      "large_array" => large_array,
+      "large_object" => large_object,
+      "many_nodes" => many_nodes
+    }
+
+    checkpoint =
+      Context.new(values)
+      |> checkpoint("run_large_structured_context_values")
+
+    {path, payload} = write_and_decode(checkpoint, root)
+    assert payload["context_values"] == values
+    assert {:ok, loaded} = Checkpoint.load(path, store: nil)
+    assert loaded.context_values == values
+
+    fallback = TaintEnvelope.missing_fallback()
+
+    assert loaded.context_taint == %{
+             "large_array" => fallback,
+             "large_object" => fallback,
+             "many_nodes" => fallback
+           }
   end
 
   test "configured store persists the exact file projection and restores in-memory taint", %{
@@ -395,11 +639,14 @@ defmodule Arbor.Orchestrator.Engine.CheckpointContextTaintEnvelopeSecurityRegres
              "nested" => %{"state" => "ready"}
            }
 
+    binding =
+      expected_context_binding(
+        "bound",
+        {:present, stored_payload["context_values"]["bound"]}
+      )
+
     assert {:ok, %TaintEnvelope{taint: expected_taint}} =
-             TaintEnvelope.verify(
-               stored_payload["context_taint"]["bound"],
-               stored_payload["context_values"]["bound"]
-             )
+             TaintEnvelope.verify(stored_payload["context_taint"]["bound"], binding)
 
     assert {:ok, loaded} =
              Checkpoint.load(Path.join(root, "checkpoint.json"),
@@ -506,6 +753,38 @@ defmodule Arbor.Orchestrator.Engine.CheckpointContextTaintEnvelopeSecurityRegres
 
   defp rewrite_payload(path, payload) do
     File.write!(path, Jason.encode!(payload, pretty: true))
+  end
+
+  defp expected_context_binding(key, :absent) do
+    %{
+      "kind" => "arbor_context_taint_binding",
+      "version" => 1,
+      "key" => expected_key_binding(key),
+      "presence" => "absent"
+    }
+  end
+
+  defp expected_context_binding(key, {:present, projected_value}) do
+    assert {:ok, digest} = DurableJson.project_and_digest(projected_value)
+    assert digest.projection == projected_value
+
+    %{
+      "kind" => "arbor_context_taint_binding",
+      "version" => 1,
+      "key" => expected_key_binding(key),
+      "presence" => "present",
+      "value_encoding" => digest.encoding,
+      "value_digest" => digest.digest_algorithm,
+      "value_sha256" => digest.sha256
+    }
+  end
+
+  defp expected_key_binding(key) do
+    %{
+      "encoding" => "utf8_bytes_v1",
+      "bytes" => byte_size(key),
+      "sha256" => key |> then(&:crypto.hash(:sha256, &1)) |> Base.encode16(case: :lower)
+    }
   end
 
   defp configured_store_opts(store_name, extra \\ []) do
