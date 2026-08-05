@@ -2,7 +2,17 @@ defmodule Arbor.Memory.ReflectionProcessorTest do
   use ExUnit.Case, async: false
 
   alias Arbor.Contracts.Memory.Goal
-  alias Arbor.Memory.{GoalStore, IdentityConsolidator, ReflectionProcessor, Relationship, SelfKnowledge, WorkingMemory}
+
+  alias Arbor.Memory.{
+    GoalStore,
+    IdentityConsolidator,
+    ReflectionProcessor,
+    Relationship,
+    SelfKnowledge,
+    WorkingMemory
+  }
+
+  alias Arbor.Persistence.BufferedStore
 
   @moduletag :fast
 
@@ -11,6 +21,10 @@ defmodule Arbor.Memory.ReflectionProcessorTest do
   defp thought_content(c) when is_binary(c), do: c
 
   setup do
+    start_supervised!(
+      {BufferedStore, name: :arbor_memory_durable, backend: nil, write_mode: :sync}
+    )
+
     # Ensure ETS table exists
     if :ets.whereis(:arbor_reflections) == :undefined do
       try do
@@ -95,9 +109,7 @@ defmodule Arbor.Memory.ReflectionProcessorTest do
     test "respects include_self_knowledge option", %{agent_id: agent_id} do
       # Should not error when self_knowledge is not available
       {:ok, reflection} =
-        ReflectionProcessor.reflect(agent_id, "Test",
-          include_self_knowledge: true
-        )
+        ReflectionProcessor.reflect(agent_id, "Test", include_self_knowledge: true)
 
       assert is_binary(reflection.analysis)
     end
@@ -435,7 +447,11 @@ defmodule Arbor.Memory.ReflectionProcessorTest do
       ])
 
       updated_wm = Arbor.Memory.get_working_memory(agent_id)
-      assert Enum.any?(updated_wm.recent_thoughts, &String.contains?(thought_content(&1), "Important insight"))
+
+      assert Enum.any?(
+               updated_wm.recent_thoughts,
+               &String.contains?(thought_content(&1), "Important insight")
+             )
     end
 
     test "skips low-importance insights", %{agent_id: agent_id} do
@@ -472,7 +488,11 @@ defmodule Arbor.Memory.ReflectionProcessorTest do
       ])
 
       updated_wm = Arbor.Memory.get_working_memory(agent_id)
-      assert Enum.any?(updated_wm.recent_thoughts, &String.contains?(thought_content(&1), "[Technical Learning]"))
+
+      assert Enum.any?(
+               updated_wm.recent_thoughts,
+               &String.contains?(thought_content(&1), "[Technical Learning]")
+             )
     end
 
     test "skips low-confidence learnings", %{agent_id: agent_id} do
@@ -1122,7 +1142,11 @@ defmodule Arbor.Memory.ReflectionProcessorTest do
       Arbor.Memory.save_working_memory(agent_id, wm)
 
       ReflectionProcessor.integrate_learnings(agent_id, [
-        %{"content" => "Pattern matching is powerful", "confidence" => 0.9, "category" => "technical"}
+        %{
+          "content" => "Pattern matching is powerful",
+          "confidence" => 0.9,
+          "category" => "technical"
+        }
       ])
 
       {:ok, stats} = Arbor.Memory.knowledge_stats(agent_id)
@@ -1154,7 +1178,11 @@ defmodule Arbor.Memory.ReflectionProcessorTest do
       ])
 
       updated_wm = Arbor.Memory.get_working_memory(agent_id)
-      assert Enum.any?(updated_wm.recent_thoughts, &String.contains?(thought_content(&1), "Test learning"))
+
+      assert Enum.any?(
+               updated_wm.recent_thoughts,
+               &String.contains?(thought_content(&1), "Test learning")
+             )
     end
 
     test "unknown category does not error", %{agent_id: agent_id} do
@@ -1167,7 +1195,11 @@ defmodule Arbor.Memory.ReflectionProcessorTest do
       ])
 
       updated_wm = Arbor.Memory.get_working_memory(agent_id)
-      assert Enum.any?(updated_wm.recent_thoughts, &String.contains?(thought_content(&1), "Mystery learning"))
+
+      assert Enum.any?(
+               updated_wm.recent_thoughts,
+               &String.contains?(thought_content(&1), "Mystery learning")
+             )
     end
   end
 
@@ -1427,9 +1459,12 @@ defmodule Arbor.Memory.ReflectionProcessorTest do
         {:ok, _} = ReflectionProcessor.deep_reflect(agent_id)
 
         updated_wm = Arbor.Memory.get_working_memory(agent_id)
+
         suggestion_count =
           updated_wm.recent_thoughts
-          |> Enum.count(fn t -> String.starts_with?(thought_content(t), "[Insight Suggestion]") end)
+          |> Enum.count(fn t ->
+            String.starts_with?(thought_content(t), "[Insight Suggestion]")
+          end)
 
         # Should be 2: one existing + one new (not duplicate)
         assert suggestion_count == 2
@@ -1487,9 +1522,12 @@ defmodule Arbor.Memory.ReflectionProcessorTest do
         {:ok, _} = ReflectionProcessor.deep_reflect(agent_id)
 
         updated_wm = Arbor.Memory.get_working_memory(agent_id)
+
         suggestion_count =
           updated_wm.recent_thoughts
-          |> Enum.count(fn t -> String.starts_with?(thought_content(t), "[Insight Suggestion]") end)
+          |> Enum.count(fn t ->
+            String.starts_with?(thought_content(t), "[Insight Suggestion]")
+          end)
 
         # 9 existing + at most 1 new = 10 (capped)
         assert suggestion_count == 10
@@ -1532,9 +1570,12 @@ defmodule Arbor.Memory.ReflectionProcessorTest do
         {:ok, _} = ReflectionProcessor.deep_reflect(agent_id)
 
         updated_wm = Arbor.Memory.get_working_memory(agent_id)
+
         suggestion_count =
           updated_wm.recent_thoughts
-          |> Enum.count(fn t -> String.starts_with?(thought_content(t), "[Insight Suggestion]") end)
+          |> Enum.count(fn t ->
+            String.starts_with?(thought_content(t), "[Insight Suggestion]")
+          end)
 
         assert suggestion_count == 2
       after

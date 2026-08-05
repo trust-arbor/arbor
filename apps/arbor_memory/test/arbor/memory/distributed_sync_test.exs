@@ -7,12 +7,17 @@ defmodule Arbor.Memory.DistributedSyncTest do
 
   alias Arbor.Memory.{DistributedSync, WorkingMemoryStore, GraphOps, GoalStore, WorkingMemory}
   alias Arbor.Contracts.Memory.Goal
+  alias Arbor.Persistence.BufferedStore
 
   @working_memory_ets :arbor_working_memory
   @graph_ets :arbor_memory_graphs
   @goals_ets :arbor_memory_goals
 
   setup do
+    start_supervised!(
+      {BufferedStore, name: :arbor_memory_durable, backend: nil, write_mode: :sync}
+    )
+
     ensure_ets(@working_memory_ets)
     ensure_ets(@graph_ets)
     ensure_ets(@goals_ets)
@@ -35,46 +40,57 @@ defmodule Arbor.Memory.DistributedSyncTest do
     test "invalidates working memory on remote signal" do
       agent_id = "agent_dist_wm_#{System.unique_integer([:positive])}"
       wm = WorkingMemory.new(agent_id)
-      :ets.insert(@working_memory_ets, {agent_id, wm})
+      assert :ok = WorkingMemoryStore.save_working_memory(agent_id, wm)
 
       # Confirm it's cached
-      assert WorkingMemoryStore.get_working_memory(agent_id) != nil
+      assert [{^agent_id, %WorkingMemory{}}] = :ets.lookup(@working_memory_ets, agent_id)
 
       # Simulate a remote working_memory_saved signal
-      send(Process.whereis(DistributedSync), {:signal_received, %{
-        type: :working_memory_saved,
-        data: %{
-          agent_id: agent_id,
-          origin_node: :remote@node
-        }
-      }})
+      send(
+        Process.whereis(DistributedSync),
+        {:signal_received,
+         %{
+           type: :working_memory_saved,
+           data: %{
+             agent_id: agent_id,
+             origin_node: :remote@node
+           }
+         }}
+      )
 
       Process.sleep(10)
 
-      # Should be invalidated — ETS entry deleted
-      assert WorkingMemoryStore.get_working_memory(agent_id) == nil
+      # The projection is invalidated; an authoritative read repairs it.
+      assert :ets.lookup(@working_memory_ets, agent_id) == []
+      assert %WorkingMemory{} = WorkingMemoryStore.get_working_memory(agent_id)
+      assert :ok = WorkingMemoryStore.delete_working_memory(agent_id)
     end
 
     test "ignores working memory signals from own node" do
       agent_id = "agent_dist_wm_self_#{System.unique_integer([:positive])}"
       wm = WorkingMemory.new(agent_id)
-      :ets.insert(@working_memory_ets, {agent_id, wm})
+      assert :ok = WorkingMemoryStore.save_working_memory(agent_id, wm)
 
-      send(Process.whereis(DistributedSync), {:signal_received, %{
-        type: :working_memory_saved,
-        data: %{
-          agent_id: agent_id,
-          origin_node: node()
-        }
-      }})
+      send(
+        Process.whereis(DistributedSync),
+        {:signal_received,
+         %{
+           type: :working_memory_saved,
+           data: %{
+             agent_id: agent_id,
+             origin_node: node()
+           }
+         }}
+      )
 
       Process.sleep(10)
 
       # Should still be cached — signal from own node is ignored
-      assert WorkingMemoryStore.get_working_memory(agent_id) != nil
+      assert [{^agent_id, %WorkingMemory{}}] = :ets.lookup(@working_memory_ets, agent_id)
+      assert %WorkingMemory{} = WorkingMemoryStore.get_working_memory(agent_id)
 
       # Cleanup
-      :ets.delete(@working_memory_ets, agent_id)
+      assert :ok = WorkingMemoryStore.delete_working_memory(agent_id)
     end
   end
 
@@ -89,15 +105,19 @@ defmodule Arbor.Memory.DistributedSyncTest do
 
       assert {:ok, _} = GraphOps.get_graph(agent_id)
 
-      send(Process.whereis(DistributedSync), {:signal_received, %{
-        type: :knowledge_added,
-        data: %{
-          agent_id: agent_id,
-          origin_node: :remote@node,
-          node_id: "node_123",
-          node_type: :fact
-        }
-      }})
+      send(
+        Process.whereis(DistributedSync),
+        {:signal_received,
+         %{
+           type: :knowledge_added,
+           data: %{
+             agent_id: agent_id,
+             origin_node: :remote@node,
+             node_id: "node_123",
+             node_type: :fact
+           }
+         }}
+      )
 
       Process.sleep(10)
 
@@ -110,15 +130,19 @@ defmodule Arbor.Memory.DistributedSyncTest do
       graph = Arbor.Memory.KnowledgeGraph.new("test_agent")
       :ets.insert(@graph_ets, {agent_id, graph})
 
-      send(Process.whereis(DistributedSync), {:signal_received, %{
-        type: :knowledge_linked,
-        data: %{
-          agent_id: agent_id,
-          origin_node: :remote@node,
-          source_id: "node_a",
-          target_id: "node_b"
-        }
-      }})
+      send(
+        Process.whereis(DistributedSync),
+        {:signal_received,
+         %{
+           type: :knowledge_linked,
+           data: %{
+             agent_id: agent_id,
+             origin_node: :remote@node,
+             source_id: "node_a",
+             target_id: "node_b"
+           }
+         }}
+      )
 
       Process.sleep(10)
 
@@ -134,14 +158,18 @@ defmodule Arbor.Memory.DistributedSyncTest do
       goal_id = "goal_#{System.unique_integer([:positive])}"
 
       # Simulate a remote goal_created signal for a goal we don't have yet
-      send(Process.whereis(DistributedSync), {:signal_received, %{
-        type: :goal_created,
-        data: %{
-          agent_id: agent_id,
-          goal_id: goal_id,
-          origin_node: :remote@node
-        }
-      }})
+      send(
+        Process.whereis(DistributedSync),
+        {:signal_received,
+         %{
+           type: :goal_created,
+           data: %{
+             agent_id: agent_id,
+             goal_id: goal_id,
+             origin_node: :remote@node
+           }
+         }}
+      )
 
       Process.sleep(10)
 
@@ -155,15 +183,19 @@ defmodule Arbor.Memory.DistributedSyncTest do
       goal = Goal.new("Test distributed goal", type: :achieve, priority: 80)
       :ets.insert(@goals_ets, {{agent_id, goal.id}, goal})
 
-      send(Process.whereis(DistributedSync), {:signal_received, %{
-        type: :goal_progress,
-        data: %{
-          agent_id: agent_id,
-          goal_id: goal.id,
-          origin_node: :remote@node,
-          progress: 0.5
-        }
-      }})
+      send(
+        Process.whereis(DistributedSync),
+        {:signal_received,
+         %{
+           type: :goal_progress,
+           data: %{
+             agent_id: agent_id,
+             goal_id: goal.id,
+             origin_node: :remote@node,
+             progress: 0.5
+           }
+         }}
+      )
 
       Process.sleep(10)
 
@@ -179,14 +211,18 @@ defmodule Arbor.Memory.DistributedSyncTest do
       goal = Goal.new("Keep this goal", type: :achieve)
       :ets.insert(@goals_ets, {{agent_id, goal.id}, goal})
 
-      send(Process.whereis(DistributedSync), {:signal_received, %{
-        type: :goal_achieved,
-        data: %{
-          agent_id: agent_id,
-          goal_id: goal.id,
-          origin_node: node()
-        }
-      }})
+      send(
+        Process.whereis(DistributedSync),
+        {:signal_received,
+         %{
+           type: :goal_achieved,
+           data: %{
+             agent_id: agent_id,
+             goal_id: goal.id,
+             origin_node: node()
+           }
+         }}
+      )
 
       Process.sleep(10)
 
@@ -202,12 +238,16 @@ defmodule Arbor.Memory.DistributedSyncTest do
 
   describe "robustness" do
     test "handles unknown signal types gracefully" do
-      send(Process.whereis(DistributedSync), {:signal_received, %{
-        type: :completely_unknown_type,
-        data: %{
-          origin_node: :remote@node
-        }
-      }})
+      send(
+        Process.whereis(DistributedSync),
+        {:signal_received,
+         %{
+           type: :completely_unknown_type,
+           data: %{
+             origin_node: :remote@node
+           }
+         }}
+      )
 
       Process.sleep(10)
 
@@ -215,10 +255,14 @@ defmodule Arbor.Memory.DistributedSyncTest do
     end
 
     test "handles malformed signal data gracefully" do
-      send(Process.whereis(DistributedSync), {:signal_received, %{
-        type: :working_memory_saved,
-        data: %{origin_node: :remote@node}
-      }})
+      send(
+        Process.whereis(DistributedSync),
+        {:signal_received,
+         %{
+           type: :working_memory_saved,
+           data: %{origin_node: :remote@node}
+         }}
+      )
 
       Process.sleep(10)
 
