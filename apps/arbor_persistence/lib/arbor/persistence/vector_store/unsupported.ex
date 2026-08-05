@@ -1,6 +1,6 @@
 defmodule Arbor.Persistence.VectorStore.Unsupported do
   @moduledoc """
-  Explicit fail-closed vector backend used until a concrete adapter is wired.
+  Explicit fail-closed vector backend for deployments that disable vector storage.
   """
 
   @behaviour Arbor.Persistence.VectorStore

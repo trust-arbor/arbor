@@ -4,8 +4,7 @@ defmodule Arbor.Persistence.VectorStore do
 
   Backends receive only canonical Contracts values and closed, normalized
   options from the public facade. Implementations remain responsible for
-  atomic storage effects; this checkpoint intentionally provides no database
-  adapter.
+  atomic storage effects and validating durable values before return.
   """
 
   alias Arbor.Contracts.Persistence.{VectorMatch, VectorOperation, VectorReceipt, VectorRecord}

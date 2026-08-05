@@ -10,6 +10,13 @@ defmodule Arbor.Persistence.VectorArchitectureTest do
     "vector_boundary.ex"
   ]
 
+  @ecto_sources [
+    "vector_store/ecto.ex",
+    "vector_store/ecto/codec.ex",
+    "vector_store/ecto/vector_row.ex",
+    "vector_store/ecto/operation_receipt_row.ex"
+  ]
+
   test "new vector boundary has no Repo, schema, Ecto, Pgvector, Memory, or runtime bridge" do
     root = Path.expand("../../../lib/arbor/persistence", __DIR__)
 
@@ -45,5 +52,19 @@ defmodule Arbor.Persistence.VectorArchitectureTest do
   test "Persistence adds no Memory dependency for vector storage" do
     mix_source = File.read!(Path.expand("../../../mix.exs", __DIR__))
     refute mix_source =~ "{:arbor_memory"
+  end
+
+  test "Ecto vector storage stays library-owned and does not import Memory or persistence_ecto" do
+    root = Path.expand("../../../lib/arbor/persistence", __DIR__)
+
+    for filename <- @ecto_sources do
+      source = File.read!(Path.join(root, filename))
+
+      refute source =~ "Arbor.Memory"
+      refute source =~ "arbor_persistence_ecto"
+      refute source =~ "Arbor.Persistence.Schemas.MemoryEmbedding"
+      refute source =~ "Code.ensure_loaded"
+      refute source =~ ~r/\bapply\s*\(/
+    end
   end
 end
