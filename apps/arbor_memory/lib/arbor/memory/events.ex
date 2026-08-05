@@ -42,6 +42,7 @@ defmodule Arbor.Memory.Events do
   """
 
   alias Arbor.Contracts.Security.{Taint, TaintEnvelope}
+  alias Arbor.Memory.ArchiveReadView
   alias Arbor.Memory.Config
   alias Arbor.Persistence.Event
 
@@ -385,14 +386,19 @@ defmodule Arbor.Memory.Events do
 
   ## Options
 
-  - `:limit` - Maximum events to return
-  - `:from` - Start from this event number
+  - `:limit` - Maximum events to return (default 100, capped at 1,000)
+  - `:from` - Inclusive event number applied independently to the legacy and
+    exact durable archive sources; it is not a cursor over the merged view
   - `:direction` - `:forward` (oldest first) or `:backward` (newest first)
+
+  The legacy event log is the first logical source epoch and exact durable
+  archives are the second. Each epoch retains its own event-number order;
+  caller-controlled event timestamps do not reorder either epoch.
   """
   @spec get_history(String.t(), keyword()) :: {:ok, [Event.t()]} | {:error, term()}
   def get_history(agent_id, opts \\ []) do
-    with {:ok, events} <- read_archive_view(agent_id, opts) do
-      {:ok, apply_read_options(events, opts)}
+    with {:ok, read} <- ArchiveReadView.normalize_options(opts) do
+      read_archive_view(agent_id, read)
     end
   end
 
@@ -402,28 +408,21 @@ defmodule Arbor.Memory.Events do
   ## Examples
 
       {:ok, changes} = Arbor.Memory.Events.get_by_type("agent_001", :identity_changed)
+
+  `:limit` applies after type filtering. A source page widens only as needed to
+  fill the filtered result and never beyond the 1,000-event public read cap.
   """
   @spec get_by_type(String.t(), atom(), keyword()) :: {:ok, [Event.t()]} | {:error, term()}
   def get_by_type(agent_id, event_type, opts \\ [])
 
-  def get_by_type(agent_id, :knowledge_archived, opts) do
-    with {:ok, events} <- read_archive_view(agent_id, opts) do
-      events
-      |> filter_by_type(:knowledge_archived)
-      |> apply_read_options(opts)
-      |> then(&{:ok, &1})
+  def get_by_type(agent_id, event_type, opts) when is_atom(event_type) do
+    with {:ok, read} <- ArchiveReadView.normalize_options(opts) do
+      read_archive_view(agent_id, read, event_type)
     end
   end
 
-  def get_by_type(agent_id, event_type, opts) do
-    case get_history(agent_id, opts) do
-      {:ok, events} ->
-        {:ok, filter_by_type(events, event_type)}
-
-      error ->
-        error
-    end
-  end
+  def get_by_type(_agent_id, _event_type, _opts),
+    do: {:error, :invalid_archive_read_options}
 
   @doc """
   Get the most recent events for an agent.
@@ -453,75 +452,102 @@ defmodule Arbor.Memory.Events do
   # Private Helpers
   # ============================================================================
 
-  defp read_archive_view(agent_id, opts) do
-    read_opts = opts |> Keyword.delete(:limit) |> Keyword.put(:direction, :forward)
+  defp read_archive_view(agent_id, read, event_type \\ nil) do
+    read_opts = ArchiveReadView.source_options(read)
 
     with {:ok, target} <- Config.maintenance_archive_target(),
          {:ok, legacy_events} <-
-           read_event_stream(@event_log_name, @event_log_backend, agent_id, read_opts),
-         {:ok, archive_events} <- read_archive_target(target, agent_id, read_opts) do
-      legacy_events
-      |> merge_archive_events(archive_events)
-      |> then(&{:ok, &1})
+           read_event_stream(
+             @event_log_name,
+             @event_log_backend,
+             agent_id,
+             read_opts,
+             event_type,
+             read.limit
+           ),
+         {:ok, archive_events} <-
+           read_archive_target(target, agent_id, read_opts, read.limit) do
+      ArchiveReadView.merge(legacy_events, archive_events, read, event_type)
     end
   end
 
-  defp read_archive_target(target, _agent_id, _read_opts)
+  defp read_archive_target(target, _agent_id, _read_opts, _desired_limit)
        when target.name == @event_log_name and target.backend == @event_log_backend,
        do: {:ok, []}
 
-  defp read_archive_target(target, agent_id, read_opts) do
+  defp read_archive_target(target, agent_id, read_opts, desired_limit) do
     with {:ok, events} <-
            read_event_stream(
              target.name,
              target.backend,
              agent_id,
-             Keyword.merge(read_opts, target.opts)
+             Keyword.merge(target.opts, read_opts),
+             :knowledge_archived,
+             desired_limit
            ) do
       {:ok, filter_by_type(events, :knowledge_archived)}
     end
   end
 
-  defp read_event_stream(name, backend, agent_id, opts) do
-    Arbor.Persistence.read_stream(name, backend, stream_id(agent_id), opts)
-  rescue
-    error -> {:error, {:event_log_unavailable, error}}
-  catch
-    :exit, reason -> {:error, {:event_log_unavailable, reason}}
-  end
+  defp read_event_stream(name, backend, agent_id, opts, event_type, desired_limit) do
+    expected_stream_id = stream_id(agent_id)
 
-  defp merge_archive_events(legacy_events, archive_events) do
-    (legacy_events ++ archive_events)
-    |> Enum.uniq_by(& &1.id)
-    |> Enum.sort_by(&event_sort_key/1)
-  end
+    case Arbor.Persistence.read_stream(name, backend, expected_stream_id, opts) do
+      {:ok, events} when is_list(events) ->
+        source_limit = Keyword.fetch!(opts, :limit)
+        events = Enum.take(events, source_limit)
 
-  defp event_sort_key(%Event{} = event) do
-    {
-      timestamp_sort_key(event.timestamp),
-      event.event_number || 0,
-      event.global_position || -1,
-      event.id
-    }
-  end
+        cond do
+          not Enum.all?(events, &valid_source_event?(&1, expected_stream_id)) ->
+            {:error, :archive_read_unavailable}
 
-  defp timestamp_sort_key(%DateTime{} = timestamp),
-    do: DateTime.to_unix(timestamp, :microsecond)
+          source_page_needs_expansion?(events, event_type, desired_limit, source_limit) ->
+            case ArchiveReadView.expand_source_options(opts) do
+              {:ok, expanded_opts} ->
+                read_event_stream(
+                  name,
+                  backend,
+                  agent_id,
+                  expanded_opts,
+                  event_type,
+                  desired_limit
+                )
 
-  defp timestamp_sort_key(_timestamp), do: 0
+              :source_limit_reached ->
+                {:ok, events}
+            end
 
-  defp apply_read_options(events, opts) do
-    events =
-      case Keyword.get(opts, :direction, :forward) do
-        :backward -> Enum.reverse(events)
-        _forward -> events
-      end
+          true ->
+            {:ok, events}
+        end
 
-    case Keyword.get(opts, :limit) do
-      nil -> events
-      limit -> Enum.take(events, limit)
+      _backend_error_or_invalid_reply ->
+        {:error, :archive_read_unavailable}
     end
+  rescue
+    _error -> {:error, :archive_read_unavailable}
+  catch
+    _kind, _reason -> {:error, :archive_read_unavailable}
   end
+
+  defp valid_source_event?(
+         %Event{id: id, stream_id: stream_id, type: type, event_number: event_number},
+         expected_stream_id
+       ) do
+    is_binary(id) and id != "" and stream_id == expected_stream_id and is_binary(type) and
+      is_integer(event_number) and event_number >= 0
+  end
+
+  defp valid_source_event?(_event, _expected_stream_id), do: false
+
+  defp source_page_needs_expansion?(_events, nil, _desired_limit, _source_limit), do: false
+
+  defp source_page_needs_expansion?(events, event_type, desired_limit, source_limit) do
+    length(events) == source_limit and
+      Enum.count(events, &event_type?(&1, event_type)) < desired_limit
+  end
+
+  defp event_type?(%Event{type: type}, event_type), do: type == to_string(event_type)
 
   defp archive_event_id(agent_id, stream_id, {operation_id, node_id, reason})
        when is_binary(agent_id) and is_binary(stream_id) and is_binary(operation_id) and
@@ -603,7 +629,7 @@ defmodule Arbor.Memory.Events do
 
   defp filter_by_type(events, event_type) do
     type_string = to_string(event_type)
-    Enum.filter(events, &(to_string(&1.type) == type_string))
+    Enum.filter(events, &(&1.type == type_string))
   end
 
   # Dual-emit: write to the local :memory_events EventLog (for queries)

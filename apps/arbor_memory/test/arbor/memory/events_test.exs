@@ -200,7 +200,7 @@ defmodule Arbor.Memory.EventsTest do
         opts: []
       })
 
-      assert {:error, :store_unavailable} =
+      assert {:error, :archive_read_unavailable} =
                Events.get_history("archive_read_failure_#{System.unique_integer([:positive])}")
     end
 
