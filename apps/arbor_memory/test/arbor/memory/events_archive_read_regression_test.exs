@@ -19,7 +19,17 @@ defmodule Arbor.Memory.EventsArchiveReadRegressionTest do
 
     def read_stream_range(_stream_id, opts) do
       notify(opts, :read_stream_range)
-      Keyword.get(opts, :probe_range_reply, {:ok, []})
+
+      cond do
+        Keyword.has_key?(opts, :probe_range_reply) ->
+          Keyword.fetch!(opts, :probe_range_reply)
+
+        events = Keyword.get(opts, :probe_events) ->
+          {:ok, select_range(events, opts)}
+
+        true ->
+          {:ok, []}
+      end
     end
 
     def event_identity(_stream_id, event_id, opts) do
@@ -32,6 +42,18 @@ defmodule Arbor.Memory.EventsArchiveReadRegressionTest do
       if probe_pid = Keyword.get(opts, :probe_pid) do
         send(probe_pid, {:archive_read_probe, Keyword.get(opts, :probe_ref), operation, opts})
       end
+    end
+
+    defp select_range(events, opts) do
+      from = Keyword.fetch!(opts, :from)
+      to = Keyword.fetch!(opts, :to)
+      limit = Keyword.fetch!(opts, :limit)
+      sorter = if Keyword.fetch!(opts, :direction) == :forward, do: :asc, else: :desc
+
+      events
+      |> Enum.filter(&(&1.event_number >= from and &1.event_number <= to))
+      |> Enum.sort_by(& &1.event_number, sorter)
+      |> Enum.take(limit)
     end
   end
 
@@ -298,11 +320,29 @@ defmodule Arbor.Memory.EventsArchiveReadRegressionTest do
     assert_receive {:archive_read_probe, ^probe_ref, :read_stream_range, range_opts}
     assert Keyword.get(range_opts, :limit) == 1_000
 
+    drain_probe_messages(probe_ref)
+
+    lease_probe_target(probe_ref,
+      probe_version_reply: {:ok, 2_000},
+      probe_events: events
+    )
+
+    assert {:ok, defaulted} = Events.get_history(agent_id, limit: nil)
+    assert length(defaulted) == 100
+
+    assert_receive {:archive_read_probe, ^probe_ref, :read_stream_range, default_opts}
+    assert Keyword.get(default_opts, :limit) == 100
+
+    assert {:ok, []} = Events.get_history(agent_id, limit: 0)
+    drain_probe_messages(probe_ref)
+
+    for read <- [&Events.get_history/2, &Events.get_history_page/2] do
+      assert {:error, :archive_scalar_cursor_unsupported} = read.(agent_id, from: 1)
+    end
+
     for invalid_opts <- [
-          [limit: 0],
           [limit: -1],
           [limit: "many"],
-          [from: 1],
           [direction: :sideways],
           [unknown: true],
           [{:limit, 1} | :improper]
@@ -378,6 +418,155 @@ defmodule Arbor.Memory.EventsArchiveReadRegressionTest do
              )
 
     assert backward_id == backward_archive.id
+  end
+
+  test "typed convenience reports an incomplete legacy scan and its page reaches durable data" do
+    %{target: target} = DurableEventLog.start!()
+    agent_id = unique_id("typed_incomplete")
+    base = ~U[2026-08-05 12:00:00Z]
+
+    legacy_events =
+      for number <- 1..1_000 do
+        ordinary_event(agent_id, number, DateTime.add(base, number, :second))
+      end
+
+    append_legacy_batch!(legacy_events)
+
+    durable =
+      append_target!(
+        target,
+        archive_event(agent_id, unique_id("durable_after_nonmatches"),
+          timestamp: DateTime.add(base, 2_000, :second)
+        )
+      )
+
+    assert {:error, :archive_read_incomplete} =
+             Events.get_by_type(agent_id, :knowledge_archived, limit: 1)
+
+    assert {:ok, %{events: [], next_cursor: cursor}} =
+             Events.get_by_type_page(agent_id, :knowledge_archived, limit: 1)
+
+    assert is_binary(cursor)
+
+    assert {:ok, %{events: [%Event{id: durable_id}], next_cursor: nil}} =
+             Events.get_by_type_page(agent_id, :knowledge_archived,
+               limit: 1,
+               cursor: cursor
+             )
+
+    assert durable_id == durable.id
+  end
+
+  test "filtered scans use bounded chunks rather than one backend call per nonmatch" do
+    agent_id = unique_id("filtered_chunks")
+    probe_ref = make_ref()
+    base = ~U[2026-08-05 12:00:00Z]
+
+    events =
+      for number <- 1..1_001 do
+        type = if number == 1_001, do: "knowledge_archived", else: "identity_changed"
+
+        Event.new(
+          stream_id(agent_id),
+          type,
+          %{"sequence" => number},
+          id: unique_id("filtered_probe_event"),
+          event_number: number,
+          timestamp: DateTime.add(base, number, :second)
+        )
+      end
+
+    lease_probe_target(probe_ref,
+      probe_version_reply: {:ok, 1_001},
+      probe_events: events
+    )
+
+    assert {:ok, %{events: [], next_cursor: cursor}} =
+             Events.get_by_type_page(agent_id, :knowledge_archived, limit: 1)
+
+    first_messages = take_probe_messages(probe_ref)
+
+    range_opts =
+      for {:archive_read_probe, ^probe_ref, :read_stream_range, opts} <- first_messages,
+          do: opts
+
+    assert length(range_opts) == 8
+    assert Enum.all?(range_opts, &(Keyword.fetch!(&1, :limit) <= 128))
+    assert range_opts |> List.first() |> Keyword.fetch!(:from) == 1
+    assert range_opts |> List.last() |> Keyword.fetch!(:from) == 897
+    assert range_opts |> List.last() |> Keyword.fetch!(:limit) == 104
+
+    assert {:ok, %{events: [%Event{event_number: 1_001}], next_cursor: nil}} =
+             Events.get_by_type_page(agent_id, :knowledge_archived,
+               limit: 1,
+               cursor: cursor
+             )
+
+    second_messages = take_probe_messages(probe_ref)
+
+    assert [second_range_opts] =
+             for(
+               {:archive_read_probe, ^probe_ref, :read_stream_range, opts} <- second_messages,
+               do: opts
+             )
+
+    assert Keyword.fetch!(second_range_opts, :from) == 1_001
+    assert Keyword.fetch!(second_range_opts, :limit) == 1
+  end
+
+  test "filtered overfetch advances only through the match returned on each page" do
+    agent_id = unique_id("filtered_overfetch")
+    probe_ref = make_ref()
+    base = ~U[2026-08-05 12:00:00Z]
+
+    events =
+      for number <- 1..130 do
+        type = if number in [2, 3], do: "knowledge_archived", else: "identity_changed"
+
+        Event.new(
+          stream_id(agent_id),
+          type,
+          %{"sequence" => number},
+          id: unique_id("overfetch_probe_event"),
+          event_number: number,
+          timestamp: DateTime.add(base, number, :second)
+        )
+      end
+
+    lease_probe_target(probe_ref,
+      probe_version_reply: {:ok, 130},
+      probe_events: events
+    )
+
+    assert {:ok, %{events: [%Event{event_number: 2}], next_cursor: cursor}} =
+             Events.get_by_type_page(agent_id, :knowledge_archived, limit: 1)
+
+    first_messages = take_probe_messages(probe_ref)
+
+    assert [first_range_opts] =
+             for(
+               {:archive_read_probe, ^probe_ref, :read_stream_range, opts} <- first_messages,
+               do: opts
+             )
+
+    assert Keyword.fetch!(first_range_opts, :from) == 1
+    assert Keyword.fetch!(first_range_opts, :limit) == 128
+
+    assert {:ok, %{events: [%Event{event_number: 3}]}} =
+             Events.get_by_type_page(agent_id, :knowledge_archived,
+               limit: 1,
+               cursor: cursor
+             )
+
+    second_messages = take_probe_messages(probe_ref)
+
+    assert [second_range_opts] =
+             for(
+               {:archive_read_probe, ^probe_ref, :read_stream_range, opts} <- second_messages,
+               do: opts
+             )
+
+    assert Keyword.fetch!(second_range_opts, :from) == 3
   end
 
   test "snapshot cursors reach more than 1000 legacy and durable events in both directions" do
@@ -674,6 +863,15 @@ defmodule Arbor.Memory.EventsArchiveReadRegressionTest do
       {:archive_read_probe, ^probe_ref, _operation, _opts} -> drain_probe_messages(probe_ref)
     after
       0 -> :ok
+    end
+  end
+
+  defp take_probe_messages(probe_ref, messages \\ []) do
+    receive do
+      {:archive_read_probe, ^probe_ref, _operation, _opts} = message ->
+        take_probe_messages(probe_ref, [message | messages])
+    after
+      0 -> Enum.reverse(messages)
     end
   end
 

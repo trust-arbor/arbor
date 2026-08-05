@@ -49,6 +49,7 @@ defmodule Arbor.Memory.Events do
   @event_log_name :memory_events
   @event_log_backend Arbor.Persistence.EventLog.ETS
   @archive_append_attempts 2
+  @filtered_scan_chunk 128
 
   # ============================================================================
   # Event Recording (Dual-Emit)
@@ -387,19 +388,25 @@ defmodule Arbor.Memory.Events do
   ## Options
 
   - `:limit` - Maximum events to return (default 100, capped at 1,000)
-  - `:direction` - `:forward` (oldest first) or `:backward` (newest first)
+  - `:direction` - `:forward` (legacy then durable, each with increasing source
+    event numbers) or `:backward` (durable then legacy, each decreasing)
 
   This convenience API returns the first bounded page. Independent source
   event numbers are deliberately not exposed as one integer cursor. Use
   `get_history_page/2` to traverse a stable snapshot; `from: 0` remains a
-  first-page compatibility value, while positive integer offsets are rejected.
+  first-page compatibility value, while positive integer offsets return
+  `{:error, :archive_scalar_cursor_unsupported}`.
+
+  If duplicate projection filtering exhausts the bounded scan before this
+  convenience call can satisfy `:limit`, it returns
+  `{:error, :archive_read_incomplete}`. Use `get_history_page/2` to continue.
   """
   @spec get_history(String.t(), keyword()) :: {:ok, [Event.t()]} | {:error, term()}
   def get_history(agent_id, opts \\ []) do
     with {:ok, read} <- ArchiveReadView.normalize_options(opts),
          true <- is_nil(read.cursor),
          {:ok, page} <- read_archive_page(agent_id, read) do
-      {:ok, page.events}
+      complete_convenience_page(read, page)
     else
       false -> {:error, :invalid_archive_read_options}
       {:error, _reason} = error -> error
@@ -435,7 +442,9 @@ defmodule Arbor.Memory.Events do
       {:ok, changes} = Arbor.Memory.Events.get_by_type("agent_001", :identity_changed)
 
   `:limit` applies after type filtering. At most 1,000 source records are
-  inspected by this first-page convenience call.
+  inspected by this first-page convenience call. If that bound is reached
+  before the requested result is complete, this function returns
+  `{:error, :archive_read_incomplete}`; use `get_by_type_page/3` to continue.
   """
   @spec get_by_type(String.t(), atom(), keyword()) :: {:ok, [Event.t()]} | {:error, term()}
   def get_by_type(agent_id, event_type, opts \\ [])
@@ -444,7 +453,7 @@ defmodule Arbor.Memory.Events do
     with {:ok, read} <- ArchiveReadView.normalize_options(opts),
          true <- is_nil(read.cursor),
          {:ok, page} <- read_archive_page(agent_id, read, event_type) do
-      {:ok, page.events}
+      complete_convenience_page(read, page)
     else
       false -> {:error, :invalid_archive_read_options}
       {:error, _reason} = error -> error
@@ -472,7 +481,9 @@ defmodule Arbor.Memory.Events do
   @doc """
   Get the most recent events for an agent.
 
-  Convenience function that returns events in reverse chronological order.
+  The selected backward page is returned in forward source-epoch order,
+  preserving the historical behavior of this helper. Cross-source event
+  timestamps do not define a global chronological order.
   """
   @spec get_recent(String.t(), non_neg_integer()) :: {:ok, [Event.t()]} | {:error, term()}
   def get_recent(agent_id, limit \\ 10) do
@@ -494,6 +505,15 @@ defmodule Arbor.Memory.Events do
   # ============================================================================
   # Private Helpers
   # ============================================================================
+
+  defp complete_convenience_page(read, page) do
+    cond do
+      read.limit == 0 -> {:ok, page.events}
+      length(page.events) >= read.limit -> {:ok, page.events}
+      is_nil(page.next_cursor) -> {:ok, page.events}
+      true -> {:error, :archive_read_incomplete}
+    end
+  end
 
   defp read_archive_page(agent_id, read, event_type \\ nil) do
     expected_stream_id = stream_id(agent_id)
@@ -587,6 +607,12 @@ defmodule Arbor.Memory.Events do
     )
   end
 
+  defp source_request_limit(nil, remaining, scan_left), do: min(remaining, scan_left)
+
+  defp source_request_limit(_event_type, remaining, scan_left) do
+    min(max(remaining, @filtered_scan_chunk), scan_left)
+  end
+
   defp collect_archive_page(state, _target, _event_type, 0, _scan_left, events) do
     {:ok, Enum.reverse(events), ArchiveReadView.next_state(state)}
   end
@@ -596,7 +622,7 @@ defmodule Arbor.Memory.Events do
   end
 
   defp collect_archive_page(state, target, event_type, remaining, scan_left, events) do
-    request_limit = min(remaining, scan_left)
+    request_limit = source_request_limit(event_type, remaining, scan_left)
 
     case ArchiveReadView.source_range(state, request_limit) do
       :done ->
@@ -605,16 +631,23 @@ defmodule Arbor.Memory.Events do
       {:ok, source, range_opts, requested} ->
         with {:ok, source_events} <-
                read_source_range(source, target, state.stream_id, range_opts, requested),
-             {:ok, accepted} <-
-               accept_source_events(source_events, source, target, state, event_type) do
-          next_state = ArchiveReadView.advance(state, source, source_events)
+             {:ok, accepted, consumed} <-
+               consume_source_events(
+                 source_events,
+                 source,
+                 target,
+                 state,
+                 event_type,
+                 remaining
+               ) do
+          next_state = ArchiveReadView.advance(state, source, consumed)
 
           collect_archive_page(
             next_state,
             target,
             event_type,
             remaining - length(accepted),
-            scan_left - length(source_events),
+            scan_left - length(consumed),
             Enum.reverse(accepted, events)
           )
         end
@@ -643,27 +676,37 @@ defmodule Arbor.Memory.Events do
     end
   end
 
-  defp accept_source_events(events, source, target, cursor, event_type) do
-    Enum.reduce_while(events, {:ok, []}, fn event, {:ok, accepted} ->
-      case event_identity_decision(source, event, target, cursor) do
-        :include ->
-          accepted =
-            if visible_event?(event, source, event_type),
-              do: [event | accepted],
-              else: accepted
+  defp consume_source_events(events, source, target, cursor, event_type, remaining) do
+    Enum.reduce_while(events, {:ok, [], [], 0}, fn event,
+                                                   {:ok, accepted, consumed, accepted_count} ->
+      consumed = [event | consumed]
 
-          {:cont, {:ok, accepted}}
+      if visible_event?(event, source, event_type) do
+        case event_identity_decision(source, event, target, cursor) do
+          :include ->
+            accepted = [event | accepted]
+            accepted_count = accepted_count + 1
 
-        :duplicate_projection ->
-          {:cont, {:ok, accepted}}
+            if accepted_count == remaining,
+              do: {:halt, {:ok, accepted, consumed, accepted_count}},
+              else: {:cont, {:ok, accepted, consumed, accepted_count}}
 
-        {:error, _reason} = error ->
-          {:halt, error}
+          :duplicate_projection ->
+            {:cont, {:ok, accepted, consumed, accepted_count}}
+
+          {:error, _reason} = error ->
+            {:halt, error}
+        end
+      else
+        {:cont, {:ok, accepted, consumed, accepted_count}}
       end
     end)
     |> case do
-      {:ok, accepted} -> {:ok, Enum.reverse(accepted)}
-      {:error, _reason} = error -> error
+      {:ok, accepted, consumed, _accepted_count} ->
+        {:ok, Enum.reverse(accepted), Enum.reverse(consumed)}
+
+      {:error, _reason} = error ->
+        error
     end
   end
 

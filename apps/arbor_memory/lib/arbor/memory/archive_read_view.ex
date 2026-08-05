@@ -49,7 +49,7 @@ defmodule Arbor.Memory.ArchiveReadView do
   defstruct [:limit, :direction, :cursor]
 
   @type t :: %__MODULE__{
-          limit: pos_integer(),
+          limit: non_neg_integer(),
           direction: :forward | :backward | nil,
           cursor: Cursor.t() | nil
         }
@@ -60,7 +60,8 @@ defmodule Arbor.Memory.ArchiveReadView do
   def max_limit, do: @max_limit
 
   @spec normalize_options(term()) ::
-          {:ok, t()} | {:error, :invalid_archive_read_options}
+          {:ok, t()}
+          | {:error, :archive_scalar_cursor_unsupported | :invalid_archive_read_options}
   def normalize_options(opts) when is_list(opts) do
     with true <- Keyword.keyword?(opts),
          true <- closed_unique_options?(opts),
@@ -70,6 +71,7 @@ defmodule Arbor.Memory.ArchiveReadView do
          {:ok, direction} <- normalize_direction(opts, cursor) do
       {:ok, %__MODULE__{limit: limit, direction: direction, cursor: cursor}}
     else
+      {:error, :archive_scalar_cursor_unsupported} = error -> error
       _invalid -> {:error, :invalid_archive_read_options}
     end
   end
@@ -232,7 +234,9 @@ defmodule Arbor.Memory.ArchiveReadView do
     :erlang.term_to_binary({:archive_target_v1, name, backend, opts}, [:deterministic])
   end
 
-  defp normalize_limit(limit) when is_integer(limit) and limit > 0,
+  defp normalize_limit(nil), do: {:ok, @default_limit}
+
+  defp normalize_limit(limit) when is_integer(limit) and limit >= 0,
     do: {:ok, min(limit, @max_limit)}
 
   defp normalize_limit(_limit), do: :error
@@ -262,6 +266,10 @@ defmodule Arbor.Memory.ArchiveReadView do
   end
 
   defp validate_legacy_from(0), do: :ok
+
+  defp validate_legacy_from(from) when is_integer(from) and from > 0,
+    do: {:error, :archive_scalar_cursor_unsupported}
+
   defp validate_legacy_from(_from), do: :error
 
   defp closed_unique_options?(opts) do
