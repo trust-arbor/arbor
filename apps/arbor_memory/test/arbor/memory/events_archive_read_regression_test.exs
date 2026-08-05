@@ -12,96 +12,133 @@ defmodule Arbor.Memory.EventsArchiveReadRegressionTest do
   defmodule ProbeEventLog do
     @moduledoc false
 
-    def read_stream(_stream_id, opts) do
-      if probe_pid = Keyword.get(opts, :probe_pid) do
-        send(probe_pid, {:archive_read_probe, Keyword.get(opts, :probe_ref), opts})
-      end
+    def stream_version(_stream_id, opts) do
+      notify(opts, :stream_version)
+      Keyword.get(opts, :probe_version_reply, {:ok, 0})
+    end
 
-      Keyword.get(opts, :probe_reply, {:ok, []})
+    def read_stream_range(_stream_id, opts) do
+      notify(opts, :read_stream_range)
+      Keyword.get(opts, :probe_range_reply, {:ok, []})
+    end
+
+    def event_identity(_stream_id, event_id, opts) do
+      identities = Keyword.get(opts, :probe_identities, %{})
+      {:ok, Map.get(identities, event_id)}
+    end
+
+    defp notify(opts, operation) do
+      if probe_pid = Keyword.get(opts, :probe_pid) do
+        send(probe_pid, {:archive_read_probe, Keyword.get(opts, :probe_ref), operation, opts})
+      end
     end
   end
 
   defmodule RaisingEventLog do
     @moduledoc false
-    def read_stream(_stream_id, _opts), do: raise("secret database exception")
+    def stream_version(_stream_id, _opts), do: raise("secret database exception")
   end
 
   defmodule ExitingEventLog do
     @moduledoc false
-    def read_stream(_stream_id, _opts), do: exit({:secret_database_exit, "credential"})
+    def stream_version(_stream_id, _opts), do: exit({:secret_database_exit, "credential"})
   end
 
   defmodule RawEctoErrorEventLog do
     @moduledoc false
 
-    def read_stream(_stream_id, _opts) do
+    def stream_version(_stream_id, _opts) do
       {:error, {:read_failed, %RuntimeError{message: "secret Ecto error"}}}
     end
   end
 
-  test "source reads retain a bounded caller page and ETS scan ceiling" do
+  test "source range reads retain the bounded caller page and override target offsets" do
     agent_id = unique_id("bounded_sources")
-    stream_id = stream_id(agent_id)
     probe_ref = make_ref()
+    base = ~U[2026-08-05 12:00:00Z]
+
+    events =
+      for number <- 20..14//-1 do
+        Event.new(
+          stream_id(agent_id),
+          "knowledge_archived",
+          %{"sequence" => number},
+          id: unique_id("probe_event"),
+          event_number: number,
+          timestamp: DateTime.add(base, number, :second)
+        )
+      end
 
     lease_probe_target(probe_ref,
+      probe_version_reply: {:ok, 20},
+      probe_range_reply: {:ok, events},
       limit: 700,
-      max_scan: 700,
       from: 700,
+      to: 700,
       direction: :forward
     )
 
-    memory_events = Process.whereis(:memory_events)
-    assert is_pid(memory_events)
-    :ok = :sys.suspend(memory_events)
-    on_exit(fn -> safely_resume(memory_events) end)
+    assert {:ok, page} =
+             Events.get_history_page(agent_id, limit: 7, direction: :backward)
 
-    task =
-      Task.async(fn ->
-        Events.get_history(agent_id, limit: 7, from: 2, direction: :backward)
-      end)
+    assert Enum.map(page.events, & &1.event_number) == Enum.to_list(20..14//-1)
 
-    legacy_opts = await_queued_read_opts(memory_events, stream_id)
-    assert Keyword.get(legacy_opts, :limit) == 7
-    assert Keyword.get(legacy_opts, :max_scan) == 7
-    assert Keyword.get(legacy_opts, :from) == 2
-    assert Keyword.get(legacy_opts, :direction) == :backward
-
-    :ok = :sys.resume(memory_events)
-    assert {:ok, []} = Task.await(task, 1_000)
-
-    assert_receive {:archive_read_probe, ^probe_ref, durable_opts}
+    assert_receive {:archive_read_probe, ^probe_ref, :stream_version, _head_opts}
+    assert_receive {:archive_read_probe, ^probe_ref, :read_stream_range, durable_opts}
     assert Keyword.get(durable_opts, :limit) == 7
-    assert Keyword.get(durable_opts, :max_scan) == 7
-    assert Keyword.get(durable_opts, :from) == 2
+    assert Keyword.get(durable_opts, :from) == 1
+    assert Keyword.get(durable_opts, :to) == 20
     assert Keyword.get(durable_opts, :direction) == :backward
   end
 
-  test "read limits are capped and malformed options fail before backend dispatch" do
+  test "read limits are capped and scalar cross-source offsets fail before dispatch" do
     agent_id = unique_id("bounded_options")
     probe_ref = make_ref()
-    lease_probe_target(probe_ref)
+    base = ~U[2026-08-05 12:00:00Z]
 
-    assert {:ok, []} = Events.get_history(agent_id, limit: 10_000)
-    assert_receive {:archive_read_probe, ^probe_ref, capped_opts}
-    assert Keyword.get(capped_opts, :limit) == 1_000
-    assert Keyword.get(capped_opts, :max_scan) == 1_000
+    events =
+      for number <- 1..1_000 do
+        Event.new(
+          stream_id(agent_id),
+          "knowledge_archived",
+          %{"sequence" => number},
+          id: unique_id("capped_event"),
+          event_number: number,
+          timestamp: DateTime.add(base, number, :second)
+        )
+      end
+
+    lease_probe_target(probe_ref,
+      probe_version_reply: {:ok, 2_000},
+      probe_range_reply: {:ok, events}
+    )
+
+    assert {:ok, %{events: capped, next_cursor: next_cursor}} =
+             Events.get_history_page(agent_id, limit: 10_000)
+
+    assert length(capped) == 1_000
+    assert not is_nil(next_cursor)
+    assert_receive {:archive_read_probe, ^probe_ref, :stream_version, _head_opts}
+    assert_receive {:archive_read_probe, ^probe_ref, :read_stream_range, range_opts}
+    assert Keyword.get(range_opts, :limit) == 1_000
 
     for invalid_opts <- [
+          [limit: 0],
           [limit: -1],
           [limit: "many"],
-          [from: -1],
+          [from: 1],
           [direction: :sideways],
+          [unknown: true],
           [{:limit, 1} | :improper]
         ] do
       assert {:error, :invalid_archive_read_options} =
-               Events.get_history(agent_id, invalid_opts)
+               Events.get_history_page(agent_id, invalid_opts)
     end
 
-    refute_receive {:archive_read_probe, ^probe_ref, _opts}
+    refute_receive {:archive_read_probe, ^probe_ref, _operation, _opts}
   end
 
-  test "legacy history keeps event-number order across forward, backward, limit, and from" do
+  test "legacy first-page helpers retain source order and recent direction" do
     agent_id = unique_id("legacy_order")
     lease_probe_target(make_ref())
     base = ~U[2026-08-05 12:00:00Z]
@@ -123,42 +160,23 @@ defmodule Arbor.Memory.EventsArchiveReadRegressionTest do
     assert {:ok, backward} = Events.get_history(agent_id, direction: :backward, limit: 2)
     assert Enum.map(backward, & &1.id) == ids |> Enum.reverse() |> Enum.take(2)
 
-    assert {:ok, from_forward} = Events.get_history(agent_id, from: 3, limit: 2)
-    assert Enum.map(from_forward, & &1.id) == Enum.slice(ids, 2, 2)
-
-    assert {:ok, from_backward} =
-             Events.get_history(agent_id, from: 3, direction: :backward, limit: 2)
-
-    assert Enum.map(from_backward, & &1.id) ==
-             ids |> Enum.drop(2) |> Enum.reverse() |> Enum.take(2)
-
     assert {:ok, recent} = Events.get_recent(agent_id, 2)
     assert Enum.map(recent, & &1.id) == Enum.take(ids, -2)
   end
 
-  test "typed archive pages widen within the source cap in both directions" do
+  test "typed pages scan a bounded page for matches in either direction" do
     lease_probe_target(make_ref())
     base = ~U[2026-08-05 12:00:00Z]
 
     forward_agent = unique_id("typed_forward")
 
     for number <- 1..4 do
-      append_legacy!(
-        Event.new(
-          stream_id(forward_agent),
-          "identity_changed",
-          %{"sequence" => number},
-          id: unique_id("non_archive"),
-          timestamp: DateTime.add(base, number, :second)
-        )
-      )
+      append_legacy!(ordinary_event(forward_agent, number, DateTime.add(base, number, :second)))
     end
 
     forward_archive =
       forward_agent
-      |> archive_event(unique_id("forward_archive"),
-        timestamp: DateTime.add(base, 5, :second)
-      )
+      |> archive_event(unique_id("forward_archive"), timestamp: DateTime.add(base, 5, :second))
       |> append_legacy!()
 
     assert {:ok, [%Event{id: forward_id}]} =
@@ -174,15 +192,7 @@ defmodule Arbor.Memory.EventsArchiveReadRegressionTest do
       |> append_legacy!()
 
     for number <- 1..4 do
-      append_legacy!(
-        Event.new(
-          stream_id(backward_agent),
-          "identity_changed",
-          %{"sequence" => number},
-          id: unique_id("non_archive"),
-          timestamp: DateTime.add(base, number, :second)
-        )
-      )
+      append_legacy!(ordinary_event(backward_agent, number, DateTime.add(base, number, :second)))
     end
 
     assert {:ok, [%Event{id: backward_id}]} =
@@ -194,47 +204,69 @@ defmodule Arbor.Memory.EventsArchiveReadRegressionTest do
     assert backward_id == backward_archive.id
   end
 
-  test "legacy and exact archives form deterministic source-local epochs" do
+  test "snapshot cursors reach more than 1000 legacy and durable events in both directions" do
     %{target: target} = DurableEventLog.start!()
-    agent_id = unique_id("merged_epochs")
+    agent_id = unique_id("large_snapshot")
     base = ~U[2026-08-05 12:00:00Z]
 
-    legacy_ids =
-      for number <- 1..2 do
-        agent_id
-        |> archive_event("legacy-epoch-#{number}",
-          timestamp: DateTime.add(base, 100 - number, :second),
+    legacy_events =
+      for number <- 1..1_005 do
+        archive_event(agent_id, "legacy-page-#{number}",
+          timestamp: DateTime.add(base, number, :second),
           data: %{"source" => "legacy", "sequence" => number}
         )
-        |> append_legacy!()
-        |> Map.fetch!(:id)
       end
 
-    durable_ids =
-      for number <- 1..2 do
-        event =
-          archive_event(agent_id, "durable-epoch-#{number}",
-            timestamp: DateTime.add(base, number - 100, :second),
-            data: %{"source" => "durable", "sequence" => number}
-          )
-
-        append_target!(target, event).id
+    durable_events =
+      for number <- 1..11 do
+        archive_event(agent_id, "durable-page-#{number}",
+          timestamp: DateTime.add(base, 2_000 + number, :second),
+          data: %{"source" => "durable", "sequence" => number}
+        )
       end
 
-    assert {:ok, forward} = Events.get_history(agent_id, limit: 10)
-    assert Enum.map(forward, & &1.id) == legacy_ids ++ durable_ids
+    legacy_ids = append_legacy_batch!(legacy_events)
+    durable_ids = append_target_batch!(target, durable_events)
+    expected = legacy_ids ++ durable_ids
 
-    assert {:ok, backward} = Events.get_history(agent_id, direction: :backward, limit: 3)
-    assert Enum.map(backward, & &1.id) == Enum.take(Enum.reverse(legacy_ids ++ durable_ids), 3)
+    forward = collect_history_pages(agent_id, :forward, 137)
+    backward = collect_history_pages(agent_id, :backward, 131)
 
-    assert {:ok, source_local_from} = Events.get_history(agent_id, from: 2, limit: 10)
-    assert Enum.map(source_local_from, & &1.id) == [List.last(legacy_ids), List.last(durable_ids)]
-
-    assert {:ok, recent} = Events.get_recent(agent_id, 3)
-    assert Enum.map(recent, & &1.id) == Enum.take(legacy_ids ++ durable_ids, -3)
+    assert forward == expected
+    assert backward == Enum.reverse(expected)
+    assert length(Enum.uniq(forward)) == 1_016
+    assert {:ok, 1_016} = Events.count_by_type(agent_id, :knowledge_archived)
   end
 
-  test "equal immutable event identities deduplicate even when source positions differ" do
+  test "cursor high-water marks exclude writes appended after the first page" do
+    DurableEventLog.start!()
+    agent_id = unique_id("snapshot_high_water")
+    base = ~U[2026-08-05 12:00:00Z]
+
+    initial_ids =
+      1..3
+      |> Enum.map(fn number ->
+        archive_event(agent_id, "snapshot-#{number}",
+          timestamp: DateTime.add(base, number, :second)
+        )
+      end)
+      |> append_legacy_batch!()
+
+    assert {:ok, %{events: first, next_cursor: cursor}} =
+             Events.get_history_page(agent_id, limit: 2)
+
+    late =
+      agent_id
+      |> archive_event("snapshot-late", timestamp: DateTime.add(base, 10, :second))
+      |> append_legacy!()
+
+    remaining = collect_history_pages(agent_id, :forward, 2, cursor)
+
+    assert Enum.map(first, & &1.id) ++ remaining == initial_ids
+    refute late.id in remaining
+  end
+
+  test "legacy identity is global authority for equal cross-source duplicates" do
     %{target: target} = DurableEventLog.start!()
     agent_id = unique_id("equal_identity")
     shared_id = unique_id("shared_event")
@@ -248,20 +280,23 @@ defmodule Arbor.Memory.EventsArchiveReadRegressionTest do
 
     append_legacy!(shared)
 
-    target
-    |> append_target!(
-      archive_event(agent_id, unique_id("durable_predecessor"),
-        timestamp: DateTime.add(timestamp, -1, :second)
+    predecessor =
+      append_target!(
+        target,
+        archive_event(agent_id, unique_id("durable_predecessor"),
+          timestamp: DateTime.add(timestamp, -1, :second)
+        )
       )
-    )
 
     append_target!(target, shared)
 
     assert {:ok, events} = Events.get_history(agent_id, limit: 10)
     assert Enum.count(events, &(&1.id == shared_id)) == 1
+    assert Enum.map(events, & &1.id) == [shared_id, predecessor.id]
+    assert {:ok, 2} = Events.count_by_type(agent_id, :knowledge_archived)
   end
 
-  test "conflicting payloads for one event ID fail the coherent read closed" do
+  test "a conflicting same ID is detected without counterpart page overlap" do
     %{target: target} = DurableEventLog.start!()
     agent_id = unique_id("identity_conflict")
     shared_id = unique_id("conflicting_event")
@@ -274,6 +309,15 @@ defmodule Arbor.Memory.EventsArchiveReadRegressionTest do
       )
     )
 
+    predecessors =
+      for number <- 1..1_000 do
+        archive_event(agent_id, "conflict-prefix-#{number}",
+          timestamp: DateTime.add(timestamp, number, :second)
+        )
+      end
+
+    append_target_batch!(target, predecessors)
+
     append_target!(
       target,
       archive_event(agent_id, shared_id,
@@ -282,7 +326,24 @@ defmodule Arbor.Memory.EventsArchiveReadRegressionTest do
       )
     )
 
-    assert {:error, :archive_event_conflict} = Events.get_history(agent_id, limit: 10)
+    assert {:error, :archive_event_conflict} =
+             Events.get_history_page(agent_id, limit: 1, direction: :forward)
+  end
+
+  test "count_by_type traverses every bounded page instead of returning a capped count" do
+    DurableEventLog.start!()
+    agent_id = unique_id("exact_count")
+    base = ~U[2026-08-05 12:00:00Z]
+
+    events =
+      for number <- 1..1_007 do
+        ordinary_event(agent_id, number, DateTime.add(base, number, :second))
+      end
+
+    append_legacy_batch!(events)
+
+    assert {:ok, 1_007} = Events.count_by_type(agent_id, :identity_changed)
+    assert {:ok, 0} = Events.count_by_type(agent_id, :knowledge_archived)
   end
 
   test "backend exceptions, exits, and raw Ecto errors are redacted to one public atom" do
@@ -307,6 +368,21 @@ defmodule Arbor.Memory.EventsArchiveReadRegressionTest do
     })
   end
 
+  defp collect_history_pages(agent_id, direction, limit, cursor \\ nil, events \\ []) do
+    opts = [direction: direction, limit: limit]
+    opts = if cursor, do: Keyword.put(opts, :cursor, cursor), else: opts
+
+    assert {:ok, page} = Events.get_history_page(agent_id, opts)
+    ids = Enum.map(page.events, & &1.id)
+    events = events ++ ids
+
+    case page.next_cursor do
+      nil -> events
+      ^cursor -> flunk("archive cursor did not advance")
+      next_cursor -> collect_history_pages(agent_id, direction, limit, next_cursor, events)
+    end
+  end
+
   defp archive_event(agent_id, id, opts) do
     Event.new(
       stream_id(agent_id),
@@ -317,11 +393,32 @@ defmodule Arbor.Memory.EventsArchiveReadRegressionTest do
     )
   end
 
+  defp ordinary_event(agent_id, number, timestamp) do
+    Event.new(
+      stream_id(agent_id),
+      "identity_changed",
+      %{"sequence" => number},
+      id: "ordinary-#{agent_id}-#{number}",
+      timestamp: timestamp
+    )
+  end
+
   defp append_legacy!(event) do
     assert {:ok, [persisted]} =
              Persistence.append(:memory_events, ETS, event.stream_id, event)
 
     persisted
+  end
+
+  defp append_legacy_batch!(events) do
+    events
+    |> Enum.chunk_every(1_000)
+    |> Enum.flat_map(fn chunk ->
+      assert {:ok, persisted} =
+               Persistence.append(:memory_events, ETS, hd(chunk).stream_id, chunk)
+
+      Enum.map(persisted, & &1.id)
+    end)
   end
 
   defp append_target!(target, event) do
@@ -337,27 +434,21 @@ defmodule Arbor.Memory.EventsArchiveReadRegressionTest do
     persisted
   end
 
-  defp await_queued_read_opts(pid, stream_id, attempts \\ 100)
+  defp append_target_batch!(target, events) do
+    events
+    |> Enum.chunk_every(1_000)
+    |> Enum.flat_map(fn chunk ->
+      assert {:ok, persisted} =
+               Persistence.append(
+                 target.name,
+                 target.backend,
+                 hd(chunk).stream_id,
+                 chunk,
+                 target.opts
+               )
 
-  defp await_queued_read_opts(_pid, _stream_id, 0), do: flunk("legacy read was not queued")
-
-  defp await_queued_read_opts(pid, stream_id, attempts) do
-    {:messages, messages} = Process.info(pid, :messages)
-
-    Enum.find_value(messages, fn
-      {:"$gen_call", _from, {:read_stream, ^stream_id, opts}} -> opts
-      _other -> nil
-    end) ||
-      (
-        Process.sleep(1)
-        await_queued_read_opts(pid, stream_id, attempts - 1)
-      )
-  end
-
-  defp safely_resume(pid) do
-    :sys.resume(pid)
-  catch
-    :exit, _reason -> :ok
+      Enum.map(persisted, & &1.id)
+    end)
   end
 
   defp stream_id(agent_id), do: "memory:#{agent_id}"

@@ -35,6 +35,24 @@ defmodule Arbor.Memory.Test.NodeRestartEventLog do
     end
   end
 
+  def read_stream_range(stream_id, opts) do
+    with {:ok, storage_opts} <- storage_opts(opts) do
+      ETS.read_stream_range(stream_id, storage_opts)
+    end
+  end
+
+  def event_identity(stream_id, event_id, opts) do
+    with {:ok, storage_opts} <- storage_opts(opts) do
+      ETS.event_identity(stream_id, event_id, storage_opts)
+    end
+  end
+
+  def stream_version(stream_id, opts) do
+    with {:ok, storage_opts} <- storage_opts(opts) do
+      ETS.stream_version(stream_id, storage_opts)
+    end
+  end
+
   def durability_class(_opts), do: :node_restart
 
   defp storage_opts(opts) do

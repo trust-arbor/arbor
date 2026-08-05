@@ -387,18 +387,39 @@ defmodule Arbor.Memory.Events do
   ## Options
 
   - `:limit` - Maximum events to return (default 100, capped at 1,000)
-  - `:from` - Inclusive event number applied independently to the legacy and
-    exact durable archive sources; it is not a cursor over the merged view
   - `:direction` - `:forward` (oldest first) or `:backward` (newest first)
 
-  The legacy event log is the first logical source epoch and exact durable
-  archives are the second. Each epoch retains its own event-number order;
-  caller-controlled event timestamps do not reorder either epoch.
+  This convenience API returns the first bounded page. Independent source
+  event numbers are deliberately not exposed as one integer cursor. Use
+  `get_history_page/2` to traverse a stable snapshot; `from: 0` remains a
+  first-page compatibility value, while positive integer offsets are rejected.
   """
   @spec get_history(String.t(), keyword()) :: {:ok, [Event.t()]} | {:error, term()}
   def get_history(agent_id, opts \\ []) do
+    with {:ok, read} <- ArchiveReadView.normalize_options(opts),
+         true <- is_nil(read.cursor),
+         {:ok, page} <- read_archive_page(agent_id, read) do
+      {:ok, page.events}
+    else
+      false -> {:error, :invalid_archive_read_options}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  @doc """
+  Read one page from a stable two-source history snapshot.
+
+  The returned opaque `next_cursor` records each source's initial high-water
+  mark, direction, current epoch, and source-local position. Forward pages
+  traverse legacy then durable; backward pages traverse durable then legacy.
+  Events appended after the first page are excluded from that cursor's snapshot.
+  """
+  @spec get_history_page(String.t(), keyword()) ::
+          {:ok, %{events: [Event.t()], next_cursor: ArchiveReadView.Cursor.t() | nil}}
+          | {:error, term()}
+  def get_history_page(agent_id, opts \\ []) do
     with {:ok, read} <- ArchiveReadView.normalize_options(opts) do
-      read_archive_view(agent_id, read)
+      read_archive_page(agent_id, read)
     end
   end
 
@@ -409,19 +430,39 @@ defmodule Arbor.Memory.Events do
 
       {:ok, changes} = Arbor.Memory.Events.get_by_type("agent_001", :identity_changed)
 
-  `:limit` applies after type filtering. A source page widens only as needed to
-  fill the filtered result and never beyond the 1,000-event public read cap.
+  `:limit` applies after type filtering. At most 1,000 source records are
+  inspected by this first-page convenience call.
   """
   @spec get_by_type(String.t(), atom(), keyword()) :: {:ok, [Event.t()]} | {:error, term()}
   def get_by_type(agent_id, event_type, opts \\ [])
 
   def get_by_type(agent_id, event_type, opts) when is_atom(event_type) do
-    with {:ok, read} <- ArchiveReadView.normalize_options(opts) do
-      read_archive_view(agent_id, read, event_type)
+    with {:ok, read} <- ArchiveReadView.normalize_options(opts),
+         true <- is_nil(read.cursor),
+         {:ok, page} <- read_archive_page(agent_id, read, event_type) do
+      {:ok, page.events}
+    else
+      false -> {:error, :invalid_archive_read_options}
+      {:error, _reason} = error -> error
     end
   end
 
   def get_by_type(_agent_id, _event_type, _opts),
+    do: {:error, :invalid_archive_read_options}
+
+  @doc "Read one stable snapshot page filtered to an event type."
+  @spec get_by_type_page(String.t(), atom(), keyword()) ::
+          {:ok, %{events: [Event.t()], next_cursor: ArchiveReadView.Cursor.t() | nil}}
+          | {:error, term()}
+  def get_by_type_page(agent_id, event_type, opts \\ [])
+
+  def get_by_type_page(agent_id, event_type, opts) when is_atom(event_type) do
+    with {:ok, read} <- ArchiveReadView.normalize_options(opts) do
+      read_archive_page(agent_id, read, event_type)
+    end
+  end
+
+  def get_by_type_page(_agent_id, _event_type, _opts),
     do: {:error, :invalid_archive_read_options}
 
   @doc """
@@ -438,91 +479,31 @@ defmodule Arbor.Memory.Events do
   end
 
   @doc """
-  Count events of a specific type for an agent.
+  Count every distinct event of a specific type in a stable source snapshot.
   """
   @spec count_by_type(String.t(), atom()) :: {:ok, non_neg_integer()} | {:error, term()}
-  def count_by_type(agent_id, event_type) do
-    case get_by_type(agent_id, event_type) do
-      {:ok, events} -> {:ok, length(events)}
-      error -> error
-    end
-  end
+  def count_by_type(agent_id, event_type) when is_atom(event_type),
+    do: count_type_pages(agent_id, event_type, nil, 0)
+
+  def count_by_type(_agent_id, _event_type), do: {:error, :invalid_archive_read_options}
 
   # ============================================================================
   # Private Helpers
   # ============================================================================
 
-  defp read_archive_view(agent_id, read, event_type \\ nil) do
-    read_opts = ArchiveReadView.source_options(read)
-
-    with {:ok, target} <- Config.maintenance_archive_target(),
-         {:ok, legacy_events} <-
-           read_event_stream(
-             @event_log_name,
-             @event_log_backend,
-             agent_id,
-             read_opts,
-             event_type,
-             read.limit
-           ),
-         {:ok, archive_events} <-
-           read_archive_target(target, agent_id, read_opts, read.limit) do
-      ArchiveReadView.merge(legacy_events, archive_events, read, event_type)
-    end
-  end
-
-  defp read_archive_target(target, _agent_id, _read_opts, _desired_limit)
-       when target.name == @event_log_name and target.backend == @event_log_backend,
-       do: {:ok, []}
-
-  defp read_archive_target(target, agent_id, read_opts, desired_limit) do
-    with {:ok, events} <-
-           read_event_stream(
-             target.name,
-             target.backend,
-             agent_id,
-             Keyword.merge(target.opts, read_opts),
-             :knowledge_archived,
-             desired_limit
-           ) do
-      {:ok, filter_by_type(events, :knowledge_archived)}
-    end
-  end
-
-  defp read_event_stream(name, backend, agent_id, opts, event_type, desired_limit) do
+  defp read_archive_page(agent_id, read, event_type \\ nil) do
     expected_stream_id = stream_id(agent_id)
 
-    case Arbor.Persistence.read_stream(name, backend, expected_stream_id, opts) do
-      {:ok, events} when is_list(events) ->
-        source_limit = Keyword.fetch!(opts, :limit)
-        events = Enum.take(events, source_limit)
-
-        cond do
-          not Enum.all?(events, &valid_source_event?(&1, expected_stream_id)) ->
-            {:error, :archive_read_unavailable}
-
-          source_page_needs_expansion?(events, event_type, desired_limit, source_limit) ->
-            case ArchiveReadView.expand_source_options(opts) do
-              {:ok, expanded_opts} ->
-                read_event_stream(
-                  name,
-                  backend,
-                  agent_id,
-                  expanded_opts,
-                  event_type,
-                  desired_limit
-                )
-
-              :source_limit_reached ->
-                {:ok, events}
-            end
-
-          true ->
-            {:ok, events}
-        end
-
-      _backend_error_or_invalid_reply ->
-        {:error, :archive_read_unavailable}
+    with {:ok, target} <- Config.maintenance_archive_target(),
+         {:ok, cursor} <- prepare_archive_cursor(read, expected_stream_id, event_type, target),
+         {:ok, events, next_cursor} <-
+           collect_archive_page(cursor, target, event_type, read.limit) do
+      {:ok, %{events: events, next_cursor: next_cursor}}
+    else
+      {:error, :invalid_archive_cursor} = error -> error
+      {:error, :invalid_archive_read_options} = error -> error
+      {:error, :archive_event_conflict} = error -> error
+      _backend_or_projection_failure -> {:error, :archive_read_unavailable}
     end
   rescue
     _error -> {:error, :archive_read_unavailable}
@@ -530,24 +511,249 @@ defmodule Arbor.Memory.Events do
     _kind, _reason -> {:error, :archive_read_unavailable}
   end
 
+  defp prepare_archive_cursor(%ArchiveReadView{cursor: nil} = read, stream_id, event_type, target) do
+    with {:ok, heads} <- read_source_heads(target, stream_id) do
+      {:ok, ArchiveReadView.new_cursor(stream_id, event_type, read.direction, target, heads)}
+    end
+  end
+
+  defp prepare_archive_cursor(%ArchiveReadView{cursor: cursor}, stream_id, event_type, target) do
+    with {:ok, cursor} <- ArchiveReadView.validate_cursor(cursor, stream_id, event_type, target),
+         true <- cursor.direction in [:forward, :backward],
+         {:ok, current_heads} <- read_source_heads(target, stream_id),
+         true <-
+           current_heads.legacy >= cursor.legacy_head and
+             current_heads.durable >= cursor.durable_head do
+      {:ok, cursor}
+    else
+      {:error, :invalid_archive_cursor} = error -> error
+      _invalid_or_rewound_source -> {:error, :archive_read_unavailable}
+    end
+  end
+
+  defp read_source_heads(target, stream_id) do
+    legacy = legacy_target()
+
+    with {:ok, legacy_head} <- read_source_head(legacy, stream_id),
+         {:ok, durable_head} <- read_durable_head(target, stream_id) do
+      {:ok, %{legacy: legacy_head, durable: durable_head}}
+    end
+  end
+
+  defp read_durable_head(target, stream_id) do
+    if ArchiveReadView.same_target?(target),
+      do: {:ok, 0},
+      else: read_source_head(target, stream_id)
+  end
+
+  defp read_source_head(target, stream_id) do
+    case Arbor.Persistence.stream_version(
+           target.name,
+           target.backend,
+           stream_id,
+           target.opts
+         ) do
+      {:ok, version} when is_integer(version) and version >= 0 -> {:ok, version}
+      _invalid_or_failed -> {:error, :archive_read_unavailable}
+    end
+  end
+
+  defp collect_archive_page(cursor, target, event_type, limit) do
+    collect_archive_page(
+      cursor,
+      target,
+      event_type,
+      limit,
+      ArchiveReadView.max_limit(),
+      []
+    )
+  end
+
+  defp collect_archive_page(cursor, _target, _event_type, 0, _scan_left, events) do
+    {:ok, Enum.reverse(events), ArchiveReadView.next_cursor(cursor)}
+  end
+
+  defp collect_archive_page(cursor, _target, _event_type, _remaining, 0, events) do
+    {:ok, Enum.reverse(events), ArchiveReadView.next_cursor(cursor)}
+  end
+
+  defp collect_archive_page(cursor, target, event_type, remaining, scan_left, events) do
+    request_limit = min(remaining, scan_left)
+
+    case ArchiveReadView.source_range(cursor, request_limit) do
+      :done ->
+        {:ok, Enum.reverse(events), nil}
+
+      {:ok, source, range_opts, requested} ->
+        with {:ok, source_events} <-
+               read_source_range(source, target, cursor.stream_id, range_opts, requested),
+             {:ok, accepted} <-
+               accept_source_events(source_events, source, target, cursor, event_type) do
+          next_cursor = ArchiveReadView.advance(cursor, source, source_events)
+
+          collect_archive_page(
+            next_cursor,
+            target,
+            event_type,
+            remaining - length(accepted),
+            scan_left - length(source_events),
+            Enum.reverse(accepted, events)
+          )
+        end
+    end
+  end
+
+  defp read_source_range(source, target, stream_id, range_opts, requested) do
+    source_target = if source == :legacy, do: legacy_target(), else: target
+    opts = Keyword.merge(source_target.opts, range_opts)
+
+    case Arbor.Persistence.read_stream_range(
+           source_target.name,
+           source_target.backend,
+           stream_id,
+           opts
+         ) do
+      {:ok, events} when is_list(events) and length(events) <= requested ->
+        if valid_source_page?(events, stream_id, range_opts) and
+             not (events == [] and range_has_events?(range_opts)) do
+          {:ok, events}
+        else
+          {:error, :archive_read_unavailable}
+        end
+
+      _invalid_or_failed ->
+        {:error, :archive_read_unavailable}
+    end
+  end
+
+  defp accept_source_events(events, source, target, cursor, event_type) do
+    Enum.reduce_while(events, {:ok, []}, fn event, {:ok, accepted} ->
+      case event_identity_decision(source, event, target, cursor.stream_id) do
+        :include ->
+          accepted =
+            if visible_event?(event, source, event_type),
+              do: [event | accepted],
+              else: accepted
+
+          {:cont, {:ok, accepted}}
+
+        :duplicate_projection ->
+          {:cont, {:ok, accepted}}
+
+        {:error, _reason} = error ->
+          {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, accepted} -> {:ok, Enum.reverse(accepted)}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp event_identity_decision(source, event, target, stream_id) do
+    if ArchiveReadView.same_target?(target) do
+      :include
+    else
+      counterpart = if source == :legacy, do: target, else: legacy_target()
+      fingerprint = Arbor.Persistence.EventLog.event_fingerprint(stream_id, event)
+
+      case read_counterpart_identity(counterpart, stream_id, event.id) do
+        {:ok, nil} when is_binary(fingerprint) ->
+          :include
+
+        {:ok, ^fingerprint} when source == :legacy ->
+          :include
+
+        {:ok, ^fingerprint} when source == :durable ->
+          :duplicate_projection
+
+        {:ok, _different_or_invalid} ->
+          {:error, :archive_event_conflict}
+
+        {:error, _reason} ->
+          {:error, :archive_read_unavailable}
+      end
+    end
+  end
+
+  defp read_counterpart_identity(target, stream_id, event_id) do
+    case Arbor.Persistence.event_identity(
+           target.name,
+           target.backend,
+           stream_id,
+           event_id,
+           target.opts
+         ) do
+      {:ok, nil} ->
+        {:ok, nil}
+
+      {:ok, fingerprint} when is_binary(fingerprint) and byte_size(fingerprint) == 64 ->
+        {:ok, fingerprint}
+
+      _invalid_or_failed ->
+        {:error, :archive_read_unavailable}
+    end
+  end
+
+  defp count_type_pages(agent_id, event_type, cursor, count) do
+    opts =
+      [limit: ArchiveReadView.max_limit(), direction: :forward]
+      |> then(fn opts -> if cursor, do: Keyword.put(opts, :cursor, cursor), else: opts end)
+
+    case get_by_type_page(agent_id, event_type, opts) do
+      {:ok, %{events: events, next_cursor: nil}} ->
+        {:ok, count + length(events)}
+
+      {:ok, %{events: events, next_cursor: next_cursor}} when next_cursor != cursor ->
+        count_type_pages(agent_id, event_type, next_cursor, count + length(events))
+
+      {:ok, %{next_cursor: ^cursor}} ->
+        {:error, :archive_read_unavailable}
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp valid_source_page?(events, expected_stream_id, opts) do
+    from = Keyword.fetch!(opts, :from)
+    to = Keyword.fetch!(opts, :to)
+    direction = Keyword.fetch!(opts, :direction)
+
+    numbers = Enum.map(events, &Map.get(&1, :event_number))
+
+    Enum.all?(events, &valid_source_event?(&1, expected_stream_id, from, to)) and
+      length(numbers) == MapSet.size(MapSet.new(numbers)) and
+      ordered_event_numbers?(numbers, direction)
+  end
+
   defp valid_source_event?(
          %Event{id: id, stream_id: stream_id, type: type, event_number: event_number},
-         expected_stream_id
+         expected_stream_id,
+         from,
+         to
        ) do
     is_binary(id) and id != "" and stream_id == expected_stream_id and is_binary(type) and
-      is_integer(event_number) and event_number >= 0
+      is_integer(event_number) and event_number >= from and event_number <= to
   end
 
-  defp valid_source_event?(_event, _expected_stream_id), do: false
+  defp valid_source_event?(_event, _expected_stream_id, _from, _to), do: false
 
-  defp source_page_needs_expansion?(_events, nil, _desired_limit, _source_limit), do: false
+  defp ordered_event_numbers?(numbers, :forward), do: numbers == Enum.sort(numbers)
+  defp ordered_event_numbers?(numbers, :backward), do: numbers == Enum.sort(numbers, :desc)
 
-  defp source_page_needs_expansion?(events, event_type, desired_limit, source_limit) do
-    length(events) == source_limit and
-      Enum.count(events, &event_type?(&1, event_type)) < desired_limit
+  defp range_has_events?(opts),
+    do: Keyword.fetch!(opts, :from) <= Keyword.fetch!(opts, :to)
+
+  defp visible_event?(%Event{type: type}, source, event_type) do
+    source_visible = source == :legacy or type == "knowledge_archived"
+    type_visible = is_nil(event_type) or type == Atom.to_string(event_type)
+    source_visible and type_visible
   end
 
-  defp event_type?(%Event{type: type}, event_type), do: type == to_string(event_type)
+  defp legacy_target do
+    %{name: @event_log_name, backend: @event_log_backend, opts: []}
+  end
 
   defp archive_event_id(agent_id, stream_id, {operation_id, node_id, reason})
        when is_binary(agent_id) and is_binary(stream_id) and is_binary(operation_id) and
@@ -625,11 +831,6 @@ defmodule Arbor.Memory.Events do
     _ -> {:error, :archive_sink_durability_unknown}
   catch
     _, _ -> {:error, :archive_sink_durability_unknown}
-  end
-
-  defp filter_by_type(events, event_type) do
-    type_string = to_string(event_type)
-    Enum.filter(events, &(&1.type == type_string))
   end
 
   # Dual-emit: write to the local :memory_events EventLog (for queries)
