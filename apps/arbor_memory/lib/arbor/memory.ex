@@ -67,6 +67,7 @@ defmodule Arbor.Memory do
     IntentStore,
     KnowledgeGraph,
     KnowledgeOps,
+    Provenance,
     SessionOps,
     Signals,
     WorkingMemoryStore
@@ -156,6 +157,7 @@ defmodule Arbor.Memory do
     IndexSupervisor.stop_index(agent_id)
     :ets.delete(:arbor_memory_graphs, agent_id)
     WorkingMemoryStore.delete_working_memory(agent_id)
+    _ = Provenance.delete_agent(agent_id)
     Signals.emit_memory_cleaned_up(agent_id)
     Logger.debug("Cleaned up memory for agent #{agent_id}")
     :ok

@@ -26,6 +26,7 @@ defmodule Arbor.Memory.Application do
            backend: Application.get_env(:arbor_memory, :persistence_backend),
            write_mode: :async},
           {Registry, keys: :unique, name: Arbor.Memory.Registry},
+          {Arbor.Memory.Provenance, []},
           {Arbor.Memory.IndexSupervisor, []},
           {Arbor.Persistence.EventLog.ETS, name: :memory_events},
           # Seed/Host Phase 3 stores
