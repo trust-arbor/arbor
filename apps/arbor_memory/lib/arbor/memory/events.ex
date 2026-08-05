@@ -614,8 +614,7 @@ defmodule Arbor.Memory.Events do
            opts
          ) do
       {:ok, events} when is_list(events) and length(events) <= requested ->
-        if valid_source_page?(events, stream_id, range_opts) and
-             not (events == [] and range_has_events?(range_opts)) do
+        if valid_source_page?(events, stream_id, range_opts) do
           {:ok, events}
         else
           {:error, :archive_read_unavailable}
@@ -628,7 +627,7 @@ defmodule Arbor.Memory.Events do
 
   defp accept_source_events(events, source, target, cursor, event_type) do
     Enum.reduce_while(events, {:ok, []}, fn event, {:ok, accepted} ->
-      case event_identity_decision(source, event, target, cursor.stream_id) do
+      case event_identity_decision(source, event, target, cursor) do
         :include ->
           accepted =
             if visible_event?(event, source, event_type),
@@ -650,14 +649,16 @@ defmodule Arbor.Memory.Events do
     end
   end
 
-  defp event_identity_decision(source, event, target, stream_id) do
+  defp event_identity_decision(source, event, target, cursor) do
     if ArchiveReadView.same_target?(target) do
       :include
     else
       counterpart = if source == :legacy, do: target, else: legacy_target()
+      counterpart_head = if source == :legacy, do: cursor.durable_head, else: cursor.legacy_head
+      stream_id = cursor.stream_id
       fingerprint = Arbor.Persistence.EventLog.event_fingerprint(stream_id, event)
 
-      case read_counterpart_identity(counterpart, stream_id, event.id) do
+      case read_counterpart_identity(counterpart, stream_id, event.id, counterpart_head) do
         {:ok, nil} when is_binary(fingerprint) ->
           :include
 
@@ -676,13 +677,15 @@ defmodule Arbor.Memory.Events do
     end
   end
 
-  defp read_counterpart_identity(target, stream_id, event_id) do
+  defp read_counterpart_identity(target, stream_id, event_id, max_event_number) do
+    opts = Keyword.put(target.opts, :max_event_number, max_event_number)
+
     case Arbor.Persistence.event_identity(
            target.name,
            target.backend,
            stream_id,
            event_id,
-           target.opts
+           opts
          ) do
       {:ok, nil} ->
         {:ok, nil}
@@ -719,12 +722,13 @@ defmodule Arbor.Memory.Events do
     from = Keyword.fetch!(opts, :from)
     to = Keyword.fetch!(opts, :to)
     direction = Keyword.fetch!(opts, :direction)
+    limit = Keyword.fetch!(opts, :limit)
 
     numbers = Enum.map(events, &Map.get(&1, :event_number))
+    expected_numbers = expected_event_numbers(from, to, direction, limit)
 
     Enum.all?(events, &valid_source_event?(&1, expected_stream_id, from, to)) and
-      length(numbers) == MapSet.size(MapSet.new(numbers)) and
-      ordered_event_numbers?(numbers, direction)
+      numbers == expected_numbers
   end
 
   defp valid_source_event?(
@@ -739,11 +743,13 @@ defmodule Arbor.Memory.Events do
 
   defp valid_source_event?(_event, _expected_stream_id, _from, _to), do: false
 
-  defp ordered_event_numbers?(numbers, :forward), do: numbers == Enum.sort(numbers)
-  defp ordered_event_numbers?(numbers, :backward), do: numbers == Enum.sort(numbers, :desc)
+  defp expected_event_numbers(from, to, :forward, limit) do
+    Enum.to_list(from..min(to, from + limit - 1))
+  end
 
-  defp range_has_events?(opts),
-    do: Keyword.fetch!(opts, :from) <= Keyword.fetch!(opts, :to)
+  defp expected_event_numbers(from, to, :backward, limit) do
+    Enum.to_list(to..max(from, to - limit + 1)//-1)
+  end
 
   defp visible_event?(%Event{type: type}, source, event_type) do
     source_visible = source == :legacy or type == "knowledge_archived"

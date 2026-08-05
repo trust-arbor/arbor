@@ -91,6 +91,38 @@ defmodule Arbor.Memory.EventsArchiveReadRegressionTest do
     assert Keyword.get(durable_opts, :direction) == :backward
   end
 
+  test "gapped source pages fail closed in both directions" do
+    base = ~U[2026-08-05 12:00:00Z]
+
+    for direction <- [:forward, :backward] do
+      agent_id = unique_id("gapped_#{direction}")
+
+      events =
+        [1, 3]
+        |> then(fn numbers ->
+          if direction == :forward, do: numbers, else: Enum.reverse(numbers)
+        end)
+        |> Enum.map(fn number ->
+          Event.new(
+            stream_id(agent_id),
+            "knowledge_archived",
+            %{"sequence" => number},
+            id: unique_id("gapped_event"),
+            event_number: number,
+            timestamp: DateTime.add(base, number, :second)
+          )
+        end)
+
+      lease_probe_target(make_ref(),
+        probe_version_reply: {:ok, 3},
+        probe_range_reply: {:ok, events}
+      )
+
+      assert {:error, :archive_read_unavailable} =
+               Events.get_history_page(agent_id, limit: 3, direction: direction)
+    end
+  end
+
   test "read limits are capped and scalar cross-source offsets fail before dispatch" do
     agent_id = unique_id("bounded_options")
     probe_ref = make_ref()
@@ -264,6 +296,95 @@ defmodule Arbor.Memory.EventsArchiveReadRegressionTest do
 
     assert Enum.map(first, & &1.id) ++ remaining == initial_ids
     refute late.id in remaining
+  end
+
+  test "durable snapshot identities ignore matching and conflicting late legacy rows" do
+    base = ~U[2026-08-05 12:00:00Z]
+
+    for variant <- [:matching, :conflicting] do
+      %{target: target} = DurableEventLog.start!()
+      agent_id = unique_id("late_legacy_#{variant}")
+      shared_id = unique_id("late_legacy_shared")
+
+      shared =
+        archive_event(agent_id, shared_id,
+          timestamp: DateTime.add(base, 2, :second),
+          data: %{"version" => "snapshot"}
+        )
+
+      filler =
+        agent_id
+        |> archive_event(unique_id("legacy_filler"), timestamp: base)
+        |> append_legacy!()
+
+      append_target!(target, shared)
+
+      assert {:ok, %{events: [%Event{id: filler_id}], next_cursor: cursor}} =
+               Events.get_history_page(agent_id, limit: 1, direction: :forward)
+
+      assert filler_id == filler.id
+
+      late =
+        case variant do
+          :matching -> shared
+          :conflicting -> %Event{shared | data: %{"version" => "late-conflict"}}
+        end
+
+      append_legacy!(late)
+
+      assert {:ok, %{events: [%Event{id: ^shared_id}], next_cursor: nil}} =
+               Events.get_history_page(agent_id,
+                 limit: 1,
+                 direction: :forward,
+                 cursor: cursor
+               )
+    end
+  end
+
+  test "legacy snapshot identities ignore matching and conflicting late durable rows" do
+    base = ~U[2026-08-05 12:00:00Z]
+
+    for variant <- [:matching, :conflicting] do
+      %{target: target} = DurableEventLog.start!()
+      agent_id = unique_id("late_durable_#{variant}")
+      shared_id = unique_id("late_durable_shared")
+
+      shared =
+        archive_event(agent_id, shared_id,
+          timestamp: base,
+          data: %{"version" => "snapshot"}
+        )
+
+      append_legacy!(shared)
+
+      filler =
+        target
+        |> append_target!(
+          archive_event(agent_id, unique_id("durable_filler"),
+            timestamp: DateTime.add(base, 2, :second)
+          )
+        )
+
+      assert {:ok, %{events: [%Event{id: filler_id}], next_cursor: cursor}} =
+               Events.get_history_page(agent_id, limit: 1, direction: :backward)
+
+      assert filler_id == filler.id
+
+      late =
+        case variant do
+          :matching -> shared
+          :conflicting -> %Event{shared | data: %{"version" => "late-conflict"}}
+        end
+
+      append_target!(target, late)
+
+      assert {:ok, %{events: [%Event{id: ^shared_id}], next_cursor: nil}} =
+               Events.get_history_page(agent_id,
+                 limit: 1,
+                 direction: :backward,
+                 cursor: cursor
+               )
+    end
   end
 
   test "legacy identity is global authority for equal cross-source duplicates" do
