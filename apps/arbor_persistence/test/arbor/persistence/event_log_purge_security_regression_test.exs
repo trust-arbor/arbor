@@ -4,6 +4,7 @@ defmodule Arbor.Persistence.EventLogPurgeSecurityRegressionTest do
   alias Arbor.Persistence
   alias Arbor.Persistence.{Event, EventLog}
   alias Arbor.Persistence.EventLog.Agent, as: AgentEventLog
+  alias Arbor.Persistence.EventLog.BoundedWorker
   alias Arbor.Persistence.EventLog.ETS
 
   defmodule CommitThenBlockBackend do
@@ -19,6 +20,30 @@ defmodule Arbor.Persistence.EventLogPurgeSecurityRegressionTest do
 
       receive do
         :never_released -> :ok
+      end
+    end
+  end
+
+  defmodule BlockThenSideEffectBackend do
+    @moduledoc false
+    @controller_key {__MODULE__, :controller}
+
+    def install(controller) do
+      token = make_ref()
+      :persistent_term.put(@controller_key, {controller, token})
+      token
+    end
+
+    def clear, do: :persistent_term.erase(@controller_key)
+
+    def purge_stream(_stream_id, _opts) do
+      {controller, token} = :persistent_term.get(@controller_key)
+      send(controller, {:purge_worker_blocked, token, self(), BoundedWorker.active?()})
+
+      receive do
+        {:release_purge_worker, ^token} ->
+          send(controller, {:post_release_side_effect, token, self()})
+          :ok
       end
     end
   end
@@ -196,10 +221,108 @@ defmodule Arbor.Persistence.EventLogPurgeSecurityRegressionTest do
              )
 
     assert_receive {:purge_committed, worker}
+    worker_ref = Process.monitor(worker)
+    assert_receive {:DOWN, ^worker_ref, :process, ^worker, _reason}, 500
     refute Process.alive?(worker)
     refute_receive {:DOWN, _ref, :process, ^worker, _reason}
     assert {:ok, []} = Persistence.read_stream(name, AgentEventLog, stream_id)
     assert :ok = Persistence.purge_stream(name, AgentEventLog, stream_id)
+  end
+
+  test "security regression: caller death terminates the owned purge worker before release", %{
+    agent_name: name
+  } do
+    token = BlockThenSideEffectBackend.install(self())
+    on_exit(&BlockThenSideEffectBackend.clear/0)
+    parent = self()
+
+    caller =
+      spawn(fn ->
+        result =
+          Persistence.purge_stream(name, BlockThenSideEffectBackend, "purge-owner-death",
+            purge_timeout_ms: 5_000
+          )
+
+        send(parent, {:purge_caller_returned, self(), result})
+      end)
+
+    caller_ref = Process.monitor(caller)
+
+    on_exit(fn ->
+      if Process.alive?(caller), do: Process.exit(caller, :kill)
+    end)
+
+    assert_receive {:purge_worker_blocked, ^token, worker, true}, 1_000
+    worker_ref = Process.monitor(worker)
+
+    on_exit(fn ->
+      if Process.alive?(worker), do: Process.exit(worker, :kill)
+    end)
+
+    assert {:links, [coordinator]} = Process.info(worker, :links)
+    coordinator_ref = Process.monitor(coordinator)
+
+    Process.exit(caller, :kill)
+
+    assert_receive {:DOWN, ^caller_ref, :process, ^caller, :killed}, 500
+    assert_receive {:DOWN, ^worker_ref, :process, ^worker, _reason}, 500
+    assert_receive {:DOWN, ^coordinator_ref, :process, ^coordinator, _reason}, 500
+
+    send(worker, {:release_purge_worker, token})
+
+    refute_receive {:post_release_side_effect, ^token, ^worker}, 100
+    refute_receive {:purge_caller_returned, ^caller, _result}
+    refute_receive {:DOWN, _ref, :process, ^caller, _reason}
+    refute_receive {:DOWN, _ref, :process, ^worker, _reason}
+    refute_receive {:DOWN, _ref, :process, ^coordinator, _reason}
+  end
+
+  test "security regression: coordinator death terminates its worker without killing the caller",
+       %{
+         agent_name: name
+       } do
+    token = BlockThenSideEffectBackend.install(self())
+    on_exit(&BlockThenSideEffectBackend.clear/0)
+    parent = self()
+
+    caller =
+      spawn(fn ->
+        result =
+          Persistence.purge_stream(name, BlockThenSideEffectBackend, "purge-coordinator-death",
+            purge_timeout_ms: 5_000
+          )
+
+        send(parent, {:purge_caller_returned, self(), result})
+      end)
+
+    caller_ref = Process.monitor(caller)
+
+    on_exit(fn ->
+      if Process.alive?(caller), do: Process.exit(caller, :kill)
+    end)
+
+    assert_receive {:purge_worker_blocked, ^token, worker, true}, 1_000
+    worker_ref = Process.monitor(worker)
+
+    on_exit(fn ->
+      if Process.alive?(worker), do: Process.exit(worker, :kill)
+    end)
+
+    assert {:links, [coordinator]} = Process.info(worker, :links)
+    coordinator_ref = Process.monitor(coordinator)
+    Process.exit(coordinator, :kill)
+
+    assert_receive {:DOWN, ^coordinator_ref, :process, ^coordinator, :killed}, 500
+    assert_receive {:DOWN, ^worker_ref, :process, ^worker, _reason}, 500
+
+    assert_receive {:purge_caller_returned, ^caller,
+                    {:error, {:purge_indeterminate, "purge-coordinator-death"}}},
+                   500
+
+    assert_receive {:DOWN, ^caller_ref, :process, ^caller, :normal}, 500
+
+    send(worker, {:release_purge_worker, token})
+    refute_receive {:post_release_side_effect, ^token, ^worker}, 100
   end
 
   test "security regression: unsupported, malformed, and crashing backends fail closed", %{
