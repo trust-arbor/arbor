@@ -290,10 +290,17 @@ defmodule Arbor.Memory.KnowledgeGraphAuthorityArchitectureTest do
   defp module_named?(_module, _expected), do: false
 
   defp app_sources do
-    @root
-    |> Path.join("apps/*/lib/**/*.ex")
-    |> Path.wildcard()
-    |> Enum.sort()
+    case System.cmd("git", ["ls-files", "--", "apps"], cd: @root) do
+      {output, 0} ->
+        output
+        |> String.split("\n", trim: true)
+        |> Enum.filter(&Regex.match?(~r{\Aapps/[^/]+/lib/.+\.ex\z}, &1))
+        |> Enum.map(&Path.join(@root, &1))
+        |> Enum.sort()
+
+      {_output, _status} ->
+        raise "unable to enumerate tracked application sources"
+    end
   end
 
   defp relative_path(path), do: Path.relative_to(path, @root)
