@@ -21,6 +21,33 @@ defmodule Arbor.Memory.ProvenanceTest do
     assert {:ok, ^taint, :verified} = Provenance.resolve(:goal, agent_id, "goal-1", payload)
   end
 
+  test "intent status provenance is closed and bound to its exact payload", %{
+    agent_id: agent_id
+  } do
+    payload = %{
+      "intent_id" => "intent-1",
+      "status" => "locked",
+      "retry_count" => 0
+    }
+
+    taint = taint(:trusted, "intent_status")
+
+    assert :intent_status in Provenance.allowed_domains()
+    assert :ok = Provenance.put(:intent_status, agent_id, "intent-1", payload, taint)
+
+    assert {:ok, ^taint, :verified} =
+             Provenance.resolve(:intent_status, agent_id, "intent-1", payload)
+
+    assert_invalid(
+      Provenance.resolve(
+        :intent_status,
+        agent_id,
+        "intent-1",
+        Map.put(payload, "last_failure_reason", "mutated")
+      )
+    )
+  end
+
   test "overwriting replaces the payload binding and label", %{agent_id: agent_id} do
     old_payload = %{"content" => "old"}
     new_payload = %{"content" => "new"}
@@ -132,6 +159,7 @@ defmodule Arbor.Memory.ProvenanceTest do
 
     assert :ok = Provenance.delete(:goal, agent_id, "goal-1")
     assert :ok = Provenance.delete_agent(agent_id)
+    assert :ok = Provenance.delete_domain_agent(:goal, agent_id)
 
     assert {:ok, _pid} = Supervisor.restart_child(Arbor.Memory.Supervisor, Provenance)
   end
@@ -171,6 +199,7 @@ defmodule Arbor.Memory.ProvenanceTest do
     taint = taint(:untrusted, "input")
 
     assert :goal in Provenance.allowed_domains()
+    assert :intent_status in Provenance.allowed_domains()
     assert :thinking_entry in Provenance.allowed_domains()
     assert :code_item in Provenance.allowed_domains()
     assert :self_knowledge in Provenance.allowed_domains()
@@ -205,6 +234,11 @@ defmodule Arbor.Memory.ProvenanceTest do
 
     assert {:error, :invalid_item_id} =
              Provenance.delete(:goal, agent_id, String.duplicate("i", 257))
+
+    assert {:error, :invalid_domain} = Provenance.delete_domain_agent(:unknown, agent_id)
+
+    assert {:error, :invalid_agent_id} =
+             Provenance.delete_domain_agent(:goal, String.duplicate("a", 257))
 
     assert {:error, :invalid_agent_id} =
              Provenance.delete_agent(String.duplicate("a", 257))
@@ -388,9 +422,31 @@ defmodule Arbor.Memory.ProvenanceTest do
     assert_missing(Provenance.resolve(:goal, agent_id, "bad-taint", %{"ok" => true}))
   end
 
+  test "domain-agent cleanup removes only the targeted closed domain and agent", %{
+    agent_id: agent_a
+  } do
+    agent_b = "#{agent_a}_other"
+    payload = %{"content" => "domain cleanup"}
+    taint = taint(:hostile, "domain_cleanup")
+
+    on_exit(fn -> Provenance.delete_agent(agent_b) end)
+
+    assert :ok = Provenance.put(:intent, agent_a, "shared", payload, taint)
+    assert :ok = Provenance.put(:percept, agent_a, "shared", payload, taint)
+    assert :ok = Provenance.put(:intent, agent_b, "shared", payload, taint)
+
+    assert :ok = Provenance.delete_domain_agent(:intent, agent_a)
+    assert :ok = Provenance.delete_domain_agent(:intent, agent_a)
+
+    assert_missing(Provenance.resolve(:intent, agent_a, "shared", payload))
+    assert {:ok, ^taint, :verified} = Provenance.resolve(:percept, agent_a, "shared", payload)
+    assert {:ok, ^taint, :verified} = Provenance.resolve(:intent, agent_b, "shared", payload)
+  end
+
   test "agent cleanup removes only the targeted agent", %{agent_id: agent_a} do
     agent_b = "#{agent_a}_other"
     payload = %{"content" => "shared"}
+    status_payload = %{"intent_id" => "intent-1", "status" => "pending", "retry_count" => 0}
     taint = taint(:untrusted, "cleanup")
 
     on_exit(fn -> Arbor.Memory.cleanup_for_agent(agent_b) end)
@@ -398,13 +454,24 @@ defmodule Arbor.Memory.ProvenanceTest do
     assert :ok = Provenance.put(:knowledge_node, agent_a, "node-1", payload, taint)
     assert :ok = Provenance.put(:knowledge_node, agent_b, "node-1", payload, taint)
 
+    assert :ok =
+             Provenance.put(:intent_status, agent_a, "intent-1", status_payload, taint)
+
+    assert :ok =
+             Provenance.put(:intent_status, agent_b, "intent-1", status_payload, taint)
+
     assert :ok = Arbor.Memory.cleanup_for_agent(agent_a)
     assert :ok = Provenance.delete_agent(agent_a)
 
     assert_missing(Provenance.resolve(:knowledge_node, agent_a, "node-1", payload))
 
+    assert_missing(Provenance.resolve(:intent_status, agent_a, "intent-1", status_payload))
+
     assert {:ok, ^taint, :verified} =
              Provenance.resolve(:knowledge_node, agent_b, "node-1", payload)
+
+    assert {:ok, ^taint, :verified} =
+             Provenance.resolve(:intent_status, agent_b, "intent-1", status_payload)
   end
 
   test "serializes concurrent writes without losing valid bindings", %{agent_id: agent_id} do

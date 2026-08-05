@@ -113,8 +113,9 @@ defmodule Arbor.Memory.IntentStoreProvenanceTest do
     assert {:ok, status_envelope} =
              TaintEnvelope.verify(failed_status["provenance"], failed_status["payload"])
 
-    assert status_envelope.taint == fallback
-    assert {:ok, expected_outer} = Taint.join_many([trusted, fallback])
+    assert {:ok, expected_status} = Taint.join_many([trusted, fallback])
+    assert status_envelope.taint == expected_status
+    assert {:ok, expected_outer} = Taint.join_many([trusted, expected_status])
     assert verified_outer_taint(failed_record) == expected_outer
     refute expected_outer == trusted
     assert expected_outer.level == :untrusted
@@ -131,8 +132,228 @@ defmodule Arbor.Memory.IntentStoreProvenanceTest do
     assert {:ok, completed_envelope} =
              TaintEnvelope.verify(completed_status["provenance"], completed_status["payload"])
 
-    assert completed_envelope.taint == fallback
+    assert completed_envelope.taint == expected_status
     assert verified_outer_taint(completed_record) == expected_outer
+  end
+
+  test "strengthening an intent monotonically strengthens its existing status label", %{
+    agent_id: agent_id
+  } do
+    intent = Intent.think("strengthen linked status")
+    weak = taint(:trusted, :public, 0xFF, :verified, "weak_intent")
+    strong = taint(:hostile, :restricted, 0b0011, :unverified, "strong_intent")
+
+    assert {:ok, strengthened_intent} = Taint.join(weak, strong)
+    assert {:ok, ^intent} = IntentStore.record_intent_tainted(agent_id, intent, weak)
+    assert {:ok, ^intent} = IntentStore.lock_intent(agent_id, intent.id)
+
+    locked = durable_record(agent_id)
+    locked_status_taint = verified_nested_taint(locked.data["statuses"][intent.id])
+
+    assert {:ok, ^intent} = IntentStore.record_intent_tainted(agent_id, intent, strong)
+
+    strengthened = durable_record(agent_id)
+    strengthened_status = strengthened.data["statuses"][intent.id]
+
+    assert {:ok, expected_strengthened_status} =
+             Taint.join_many([strengthened_intent, locked_status_taint])
+
+    assert verified_nested_taint(strengthened_status) == expected_strengthened_status
+    assert expected_strengthened_status.level == :hostile
+    assert expected_strengthened_status.sensitivity == :restricted
+    assert expected_strengthened_status.sanitizations == 0b0011
+    assert expected_strengthened_status.confidence == :unverified
+
+    assert :ok = IntentStore.complete_intent(agent_id, intent.id)
+
+    completed = durable_record(agent_id)
+    completed_status = verified_nested_taint(completed.data["statuses"][intent.id])
+
+    assert {:ok, expected_completed_status} =
+             Taint.join_many([strengthened_intent, expected_strengthened_status])
+
+    assert completed_status == expected_completed_status
+    assert completed_status.level == :hostile
+    assert completed_status.sensitivity == :restricted
+    assert completed_status.sanitizations == 0b0011
+    assert completed_status.confidence == :unverified
+  end
+
+  test "security regression: public status ETS mutation cannot persist forged trusted provenance",
+       %{agent_id: agent_id} do
+    intent = Intent.think("trusted status")
+    trusted = taint(:trusted, :public, 0xFF, :verified, "trusted_status")
+
+    assert {:ok, ^intent} = IntentStore.record_intent_tainted(agent_id, intent, trusted)
+    assert {:ok, ^intent} = IntentStore.lock_intent(agent_id, intent.id)
+
+    durable_before = durable_record(agent_id)
+    status_payload = get_in(durable_before.data, ["statuses", intent.id, "payload"])
+
+    [{^agent_id, data}] = :ets.lookup(:arbor_memory_intents, agent_id)
+    forged_reason = "forged public ETS failure"
+    forged_status = Map.put(data.statuses[intent.id], :last_failure_reason, forged_reason)
+
+    forged_data =
+      data
+      |> put_in([:statuses, intent.id], forged_status)
+      |> Map.put(:status_taints, %{intent.id => trusted})
+
+    true = :ets.insert(:arbor_memory_intents, {agent_id, forged_data})
+
+    forged_payload = Map.put(status_payload, "last_failure_reason", forged_reason)
+
+    percept = Percept.success(intent.id, %{"result" => "must not commit"})
+
+    assert {:ok, ^percept} =
+             IntentStore.record_percept_tainted(agent_id, percept, trusted)
+
+    durable_after = durable_record(agent_id)
+
+    assert get_in(durable_after.data, ["statuses", intent.id, "payload"]) == status_payload
+    refute durable_after == durable_before
+    assert IntentStore.recent_percepts(agent_id) == [percept]
+
+    assert {:ok, hostile, :invalid_durable_provenance} =
+             Provenance.resolve(:intent_status, agent_id, intent.id, forged_payload)
+
+    assert hostile == TaintEnvelope.invalid_fallback()
+
+    assert {:ok, ^trusted, :verified} =
+             Provenance.resolve(:intent_status, agent_id, intent.id, status_payload)
+  end
+
+  test "security regression: deleting a hostile status cannot weaken its next transition", %{
+    agent_id: agent_id
+  } do
+    intent = Intent.think("hostile status predecessor")
+    trusted = taint(:trusted, :public, 0xFF, :verified, "trusted_intent")
+    hostile = taint(:hostile, :restricted, 0, :unverified, "hostile_reason")
+
+    assert {:ok, expected} = Taint.join(trusted, hostile)
+    assert {:ok, ^intent} = IntentStore.record_intent_tainted(agent_id, intent, trusted)
+    assert {:ok, ^intent} = IntentStore.lock_intent(agent_id, intent.id)
+
+    assert {:ok, 1} =
+             IntentStore.fail_intent_tainted(agent_id, intent.id, "hostile failure", hostile)
+
+    failed = durable_record(agent_id)
+    assert verified_nested_taint(failed.data["statuses"][intent.id]) == expected
+
+    [{^agent_id, data}] = :ets.lookup(:arbor_memory_intents, agent_id)
+    deleted_status = %{data | statuses: Map.delete(data.statuses, intent.id)}
+    true = :ets.insert(:arbor_memory_intents, {agent_id, deleted_status})
+
+    assert {:ok, ^intent} = IntentStore.lock_intent(agent_id, intent.id)
+
+    locked = durable_record(agent_id)
+    assert verified_nested_taint(locked.data["statuses"][intent.id]) == expected
+    assert verified_outer_taint(locked) == expected
+
+    assert :ok = IntentStore.complete_intent(agent_id, intent.id)
+    completed = durable_record(agent_id)
+    assert verified_nested_taint(completed.data["statuses"][intent.id]) == expected
+    assert verified_outer_taint(completed) == expected
+  end
+
+  test "security regression: deleting and reinserting an item cannot weaken its label", %{
+    agent_id: agent_id
+  } do
+    intent = Intent.think("stable hostile intent")
+    percept = Percept.success(intent.id, %{"result" => "stable hostile percept"})
+    hostile = taint(:hostile, :restricted, 0, :unverified, "hostile_item")
+    weaker = taint(:trusted, :public, 0xFF, :verified, "weaker_reinsert")
+
+    assert {:ok, expected} = Taint.join(hostile, weaker)
+    assert {:ok, ^intent} = IntentStore.record_intent_tainted(agent_id, intent, hostile)
+    assert {:ok, ^percept} = IntentStore.record_percept_tainted(agent_id, percept, hostile)
+
+    [{^agent_id, data}] = :ets.lookup(:arbor_memory_intents, agent_id)
+    without_intent = %{data | intents: Enum.reject(data.intents, &(&1.id == intent.id))}
+    true = :ets.insert(:arbor_memory_intents, {agent_id, without_intent})
+
+    assert {:ok, ^intent} = IntentStore.record_intent_tainted(agent_id, intent, weaker)
+
+    after_intent = durable_record(agent_id)
+
+    persisted_intent =
+      Enum.find(after_intent.data["intents"], &(&1["payload"]["id"] == intent.id))
+
+    assert verified_nested_taint(persisted_intent) == expected
+
+    [{^agent_id, data}] = :ets.lookup(:arbor_memory_intents, agent_id)
+    without_percept = %{data | percepts: Enum.reject(data.percepts, &(&1.id == percept.id))}
+    true = :ets.insert(:arbor_memory_intents, {agent_id, without_percept})
+
+    assert {:ok, ^percept} = IntentStore.record_percept_tainted(agent_id, percept, weaker)
+
+    after_percept = durable_record(agent_id)
+
+    persisted_percept =
+      Enum.find(after_percept.data["percepts"], &(&1["payload"]["id"] == percept.id))
+
+    assert verified_nested_taint(persisted_percept) == expected
+    assert verified_outer_taint(after_percept) == expected
+  end
+
+  test "security regression: taint-aware inventory survives public ETS item and row deletion", %{
+    agent_id: agent_id
+  } do
+    hostile_intent = Intent.think("hostile durable inventory")
+    trusted_intent = Intent.think("trusted durable inventory")
+    hostile_percept = Percept.success(hostile_intent.id, %{"result" => "hostile"})
+    trusted_percept = Percept.success(trusted_intent.id, %{"result" => "trusted"})
+
+    hostile = taint(:hostile, :restricted, 0, :unverified, "hostile_inventory")
+    trusted = taint(:trusted, :public, 0xFF, :verified, "trusted_inventory")
+
+    assert {:ok, ^hostile_intent} =
+             IntentStore.record_intent_tainted(agent_id, hostile_intent, hostile)
+
+    assert {:ok, ^trusted_intent} =
+             IntentStore.record_intent_tainted(agent_id, trusted_intent, trusted)
+
+    assert {:ok, ^hostile_percept} =
+             IntentStore.record_percept_tainted(agent_id, hostile_percept, hostile)
+
+    assert {:ok, ^trusted_percept} =
+             IntentStore.record_percept_tainted(agent_id, trusted_percept, trusted)
+
+    [{^agent_id, data}] = :ets.lookup(:arbor_memory_intents, agent_id)
+
+    projected = %{
+      data
+      | intents: Enum.reject(data.intents, &(&1.id == hostile_intent.id)),
+        percepts: Enum.reject(data.percepts, &(&1.id == hostile_percept.id))
+    }
+
+    true = :ets.insert(:arbor_memory_intents, {agent_id, projected})
+    assert Enum.map(IntentStore.recent_intents(agent_id), & &1.id) == [trusted_intent.id]
+    assert Enum.map(IntentStore.recent_percepts(agent_id), & &1.id) == [trusted_percept.id]
+
+    assert_tainted_inventory(agent_id, :intent, [
+      {trusted_intent.id, trusted},
+      {hostile_intent.id, hostile}
+    ])
+
+    assert_tainted_inventory(agent_id, :percept, [
+      {trusted_percept.id, trusted},
+      {hostile_percept.id, hostile}
+    ])
+
+    true = :ets.delete(:arbor_memory_intents, agent_id)
+    assert IntentStore.recent_intents(agent_id) == []
+    assert IntentStore.recent_percepts(agent_id) == []
+
+    assert_tainted_inventory(agent_id, :intent, [
+      {trusted_intent.id, trusted},
+      {hostile_intent.id, hostile}
+    ])
+
+    assert_tainted_inventory(agent_id, :percept, [
+      {trusted_percept.id, trusted},
+      {hostile_percept.id, hostile}
+    ])
   end
 
   test "invalid failure labels and non-closed imports are rejected atomically", %{
@@ -178,7 +399,7 @@ defmodule Arbor.Memory.IntentStoreProvenanceTest do
     assert {:error, :not_found} = IntentStore.get_intent(agent_id, imported.id)
   end
 
-  test "live payload mutation resolves as hostile instead of retaining its old label", %{
+  test "taint-aware reads use the durable item instead of a mutated live projection", %{
     agent_id: agent_id
   } do
     intent = Intent.think("original")
@@ -191,11 +412,13 @@ defmodule Arbor.Memory.IntentStoreProvenanceTest do
     mutated = %{stored | reasoning: "mutated after labeling"}
     true = :ets.insert(:arbor_memory_intents, {agent_id, %{data | intents: [mutated]}})
 
-    assert {:ok, [{value, :invalid_durable_provenance}]} =
+    assert [^mutated] = IntentStore.recent_intents(agent_id)
+
+    assert {:ok, [{value, :verified}]} =
              IntentStore.recent_intents_tainted(agent_id)
 
-    assert value.value == mutated
-    assert value.taint == TaintEnvelope.invalid_fallback()
+    assert value.value == intent
+    assert value.taint == supplied
   end
 
   test "invalid supplied labels are rejected before live, durable, sidecar, or embedding effects",
@@ -233,6 +456,35 @@ defmodule Arbor.Memory.IntentStoreProvenanceTest do
     assert fallback == TaintEnvelope.missing_fallback()
   end
 
+  test "missing supervised ephemeral authority rejects taint-aware reads writes and clear", %{
+    agent_id: agent_id
+  } do
+    existing = Intent.think("ephemeral authority predecessor")
+    rejected = Intent.think("must not become live")
+    supplied = taint(:untrusted, :restricted, 0, :verified, "ephemeral_authority")
+
+    assert {:ok, ^existing} =
+             IntentStore.record_intent_tainted(agent_id, existing, supplied)
+
+    ets_before = :ets.lookup(:arbor_memory_intents, agent_id)
+    stop_supervised!(BufferedStore)
+    assert Process.whereis(@store_name) == nil
+
+    assert {:error, :store_unavailable} = IntentStore.recent_intents_tainted(agent_id)
+
+    assert {:error, :store_unavailable} =
+             IntentStore.record_intent_tainted(agent_id, rejected, supplied)
+
+    assert {:error, :store_unavailable} = IntentStore.complete_intent(agent_id, existing.id)
+    assert {:error, :store_unavailable} = IntentStore.clear(agent_id)
+    assert :ets.lookup(:arbor_memory_intents, agent_id) == ets_before
+
+    assert {:ok, ^supplied, :verified} =
+             Provenance.resolve(:intent, agent_id, existing.id, intent_payload(existing))
+
+    assert_missing_sidecar(:intent, agent_id, rejected)
+  end
+
   test "status mutations persist across restart without changing item provenance", %{
     agent_id: agent_id
   } do
@@ -247,6 +499,13 @@ defmodule Arbor.Memory.IntentStoreProvenanceTest do
     assert {:ok, ^intent} = IntentStore.lock_intent(agent_id, intent.id)
     assert :ok = IntentStore.complete_intent(agent_id, intent.id)
 
+    before_restart = durable_record(agent_id)
+    status_payload = get_in(before_restart.data, ["statuses", intent.id, "payload"])
+    status_taint = verified_nested_taint(before_restart.data["statuses"][intent.id])
+
+    assert {:ok, ^status_taint, :verified} =
+             Provenance.resolve(:intent_status, agent_id, intent.id, status_payload)
+
     restart_intent_store()
 
     assert {:ok, restored, status} = IntentStore.get_intent(agent_id, intent.id)
@@ -257,6 +516,165 @@ defmodule Arbor.Memory.IntentStoreProvenanceTest do
 
     assert {:ok, [{value, :verified}]} = IntentStore.recent_intents_tainted(agent_id)
     assert value.taint == supplied
+
+    assert {:ok, ^status_taint, :verified} =
+             Provenance.resolve(:intent_status, agent_id, intent.id, status_payload)
+  end
+
+  test "restart with a smaller buffer verifies the full aggregate before consistent truncation",
+       %{
+         agent_id: agent_id
+       } do
+    original_state = :sys.get_state(IntentStore)
+    :sys.replace_state(IntentStore, &%{&1 | buffer_size: 3})
+
+    on_exit(fn ->
+      if Process.whereis(IntentStore), do: restart_intent_store()
+    end)
+
+    first = Intent.think("oldest durable intent")
+    second = Intent.think("middle durable intent")
+    newest = Intent.think("newest durable intent")
+
+    first_taint = taint(:trusted, :internal, 0b1111, :verified, "oldest")
+    second_taint = taint(:derived, :confidential, 0b0111, :corroborated, "middle")
+    newest_taint = taint(:hostile, :restricted, 0, :unverified, "newest")
+
+    assert {:ok, ^first} = IntentStore.record_intent_tainted(agent_id, first, first_taint)
+    assert {:ok, ^second} = IntentStore.record_intent_tainted(agent_id, second, second_taint)
+    assert {:ok, ^newest} = IntentStore.record_intent_tainted(agent_id, newest, newest_taint)
+    assert {:ok, ^first} = IntentStore.lock_intent(agent_id, first.id)
+    assert {:ok, ^newest} = IntentStore.lock_intent(agent_id, newest.id)
+
+    durable_before = durable_record(agent_id)
+    assert length(durable_before.data["intents"]) == 3
+    assert map_size(durable_before.data["statuses"]) == 2
+    verified_outer_taint(durable_before)
+
+    newest_status = durable_before.data["statuses"][newest.id]
+    newest_status_taint = verified_nested_taint(newest_status)
+    first_status_payload = durable_before.data["statuses"][first.id]["payload"]
+
+    restart_provenance()
+    restart_intent_store(buffer_size: 1)
+
+    assert :sys.get_state(IntentStore).buffer_size == 1
+    assert Enum.map(IntentStore.recent_intents(agent_id, limit: 10), & &1.id) == [newest.id]
+    assert {:ok, ^newest, %{status: :locked}} = IntentStore.get_intent(agent_id, newest.id)
+    assert {:error, :not_found} = IntentStore.get_intent(agent_id, first.id)
+    assert {:error, :not_found} = IntentStore.get_intent(agent_id, second.id)
+
+    [{^agent_id, restored}] = :ets.lookup(:arbor_memory_intents, agent_id)
+    assert Map.keys(restored.statuses) == [newest.id]
+    assert durable_record(agent_id) == durable_before
+
+    assert {:ok, ^newest_taint, :verified} =
+             Provenance.resolve(:intent, agent_id, newest.id, intent_payload(newest))
+
+    assert {:ok, ^newest_status_taint, :verified} =
+             Provenance.resolve(
+               :intent_status,
+               agent_id,
+               newest.id,
+               newest_status["payload"]
+             )
+
+    assert_missing_sidecar(:intent, agent_id, first)
+    assert_missing_status_sidecar(agent_id, first.id, first_status_payload)
+
+    restart_intent_store(buffer_size: original_state.buffer_size)
+  end
+
+  test "missing status sidecar is rebound from the verified durable mutation baseline", %{
+    agent_id: agent_id
+  } do
+    intent = Intent.think("status sidecar reload")
+    supplied = taint(:trusted, :internal, 0b1100, :verified, "status_reload")
+
+    assert {:ok, ^intent} = IntentStore.record_intent_tainted(agent_id, intent, supplied)
+    assert {:ok, ^intent} = IntentStore.lock_intent(agent_id, intent.id)
+
+    durable_before = durable_record(agent_id)
+    status_payload = get_in(durable_before.data, ["statuses", intent.id, "payload"])
+    status_taint = verified_nested_taint(durable_before.data["statuses"][intent.id])
+
+    assert :ok = Provenance.delete(:intent_status, agent_id, intent.id)
+    assert_missing_status_sidecar(agent_id, intent.id, status_payload)
+
+    assert :ok = IntentStore.complete_intent(agent_id, intent.id)
+
+    completed = durable_record(agent_id)
+    completed_payload = get_in(completed.data, ["statuses", intent.id, "payload"])
+
+    assert {:ok, ^status_taint, :verified} =
+             Provenance.resolve(:intent_status, agent_id, intent.id, completed_payload)
+
+    assert completed_payload["status"] == "completed"
+    assert completed != durable_before
+  end
+
+  test "post-persist live install failure clears partial state and reloads the aggregate", %{
+    agent_id: agent_id
+  } do
+    intent = Intent.think("install after persistence")
+    supplied = taint(:untrusted, :restricted, 0, :verified, "install_failure")
+
+    assert :ok = Supervisor.terminate_child(Arbor.Memory.Supervisor, Provenance)
+
+    on_exit(fn ->
+      if Process.whereis(Provenance) == nil do
+        Supervisor.restart_child(Arbor.Memory.Supervisor, Provenance)
+      end
+    end)
+
+    assert {:error, :store_unavailable} =
+             IntentStore.record_intent_tainted(agent_id, intent, supplied)
+
+    assert IntentStore.recent_intents(agent_id) == []
+
+    persisted = durable_record(agent_id)
+    assert get_in(persisted.data, ["intents", Access.at(0), "payload", "id"]) == intent.id
+
+    assert {:ok, pid} = Supervisor.restart_child(Arbor.Memory.Supervisor, Provenance)
+    assert Process.alive?(pid)
+    assert :ok = IntentStore.reload_for_agent(agent_id)
+
+    assert {:ok, [{restored, :verified}]} = IntentStore.recent_intents_tainted(agent_id)
+    assert restored.value == intent
+    assert restored.taint == supplied
+  end
+
+  @tag :slow
+  test "owner call waits past the default timeout for its definitive mutation reply", %{
+    agent_id: agent_id
+  } do
+    test_pid = self()
+    original_state = :sys.get_state(IntentStore)
+
+    :sys.replace_state(IntentStore, fn state ->
+      %{
+        state
+        | embedding_fun: fn _namespace, _key, _content, _opts ->
+            send(test_pid, :mutation_installed)
+            Process.sleep(5_100)
+            :ok
+          end
+      }
+    end)
+
+    on_exit(fn -> restore_intent_store_state(original_state) end)
+
+    intent = Intent.think("definitive owner reply")
+    supplied = taint(:untrusted, :restricted, 0, :verified, "slow_owner")
+
+    task =
+      Task.async(fn ->
+        IntentStore.record_intent_tainted(agent_id, intent, supplied)
+      end)
+
+    assert_receive :mutation_installed
+    assert {:ok, ^intent} = Task.await(task, 7_000)
+    assert [^intent] = IntentStore.recent_intents(agent_id)
   end
 
   test "ring eviction and pruning remove only deleted sidecars", %{agent_id: agent_id} do
@@ -273,6 +691,11 @@ defmodule Arbor.Memory.IntentStoreProvenanceTest do
     third_taint = taint(:untrusted, :restricted, 0b0011, :plausible, "third")
 
     assert {:ok, ^first} = IntentStore.record_intent_tainted(agent_id, first, first_taint)
+    assert {:ok, ^first} = IntentStore.lock_intent(agent_id, first.id)
+
+    first_status_payload =
+      get_in(durable_record(agent_id).data, ["statuses", first.id, "payload"])
+
     assert {:ok, ^second} = IntentStore.record_intent_tainted(agent_id, second, second_taint)
     assert {:ok, ^third} = IntentStore.record_intent_tainted(agent_id, third, third_taint)
 
@@ -282,6 +705,7 @@ defmodule Arbor.Memory.IntentStoreProvenanceTest do
            ]
 
     assert_missing_sidecar(:intent, agent_id, first)
+    assert_missing_status_sidecar(agent_id, first.id, first_status_payload)
 
     assert {:ok, values} = IntentStore.recent_intents_tainted(agent_id, limit: 10)
 
@@ -293,8 +717,14 @@ defmodule Arbor.Memory.IntentStoreProvenanceTest do
     old = Intent.think("prune", created_at: ~U[2020-01-01 00:00:00Z])
     old_taint = taint(:hostile, :restricted, 0, :unverified, "old")
     assert {:ok, ^old} = IntentStore.record_intent_tainted(agent_id, old, old_taint)
+
+    assert {:ok, 1} =
+             IntentStore.fail_intent_tainted(agent_id, old.id, "old failure", old_taint)
+
+    old_status_payload = get_in(durable_record(agent_id).data, ["statuses", old.id, "payload"])
     assert 1 = IntentStore.prune_stale(agent_id, 1_000)
     assert_missing_sidecar(:intent, agent_id, old)
+    assert_missing_status_sidecar(agent_id, old.id, old_status_payload)
 
     assert {:ok, [{survivor, :verified}]} =
              IntentStore.recent_intents_tainted(agent_id, limit: 10)
@@ -324,6 +754,56 @@ defmodule Arbor.Memory.IntentStoreProvenanceTest do
                {third_percept.id, third_taint, :verified},
                {second_percept.id, second_taint, :verified}
              ]
+  end
+
+  test "clear removes current and stale intent-domain sidecars", %{agent_id: agent_id} do
+    intent = Intent.think("clear status sidecar")
+    supplied = taint(:derived, :internal, 0b1010, :verified, "clear_status")
+    stale_payload = %{"content" => "not present in the live projection"}
+
+    assert {:ok, ^intent} = IntentStore.record_intent_tainted(agent_id, intent, supplied)
+    assert {:ok, ^intent} = IntentStore.lock_intent(agent_id, intent.id)
+
+    assert :ok = Provenance.put(:intent, agent_id, "stale-intent", stale_payload, supplied)
+    assert :ok = Provenance.put(:percept, agent_id, "stale-percept", stale_payload, supplied)
+
+    assert :ok =
+             Provenance.put(
+               :intent_status,
+               agent_id,
+               "stale-status",
+               stale_payload,
+               supplied
+             )
+
+    status_payload = get_in(durable_record(agent_id).data, ["statuses", intent.id, "payload"])
+
+    assert :ok = IntentStore.clear(agent_id)
+    assert_missing_sidecar(:intent, agent_id, intent)
+    assert_missing_status_sidecar(agent_id, intent.id, status_payload)
+    assert_missing_provenance(:intent, agent_id, "stale-intent", stale_payload)
+    assert_missing_provenance(:percept, agent_id, "stale-percept", stale_payload)
+    assert_missing_provenance(:intent_status, agent_id, "stale-status", stale_payload)
+  end
+
+  test "reload converges live state after the durable aggregate is deleted", %{
+    agent_id: agent_id
+  } do
+    intent = Intent.think("remote delete convergence")
+    supplied = taint(:trusted, :internal, 0b1111, :verified, "remote_delete")
+
+    assert {:ok, ^intent} = IntentStore.record_intent_tainted(agent_id, intent, supplied)
+    assert {:ok, ^intent} = IntentStore.lock_intent(agent_id, intent.id)
+
+    status_payload = get_in(durable_record(agent_id).data, ["statuses", intent.id, "payload"])
+
+    assert :ok = BufferedStore.delete("intents:#{agent_id}", name: @store_name)
+    assert :ok = IntentStore.reload_for_agent(agent_id)
+
+    assert IntentStore.recent_intents(agent_id) == []
+    assert {:error, :not_found} = IntentStore.get_intent(agent_id, intent.id)
+    assert_missing_sidecar(:intent, agent_id, intent)
+    assert_missing_status_sidecar(agent_id, intent.id, status_payload)
   end
 
   test "raw import preserves surviving labels and gives imported items an explicit fallback", %{
@@ -492,30 +972,174 @@ defmodule Arbor.Memory.IntentStoreProvenanceTest do
     assert {:ok, ^intent} = IntentStore.record_intent_tainted(agent_id, intent, trusted)
     record = durable_record(agent_id)
     put_durable(agent_id, record.data, %{})
+    assert {:ok, expected} = Taint.join(trusted, TaintEnvelope.missing_fallback())
 
     assert :ok = IntentStore.reload_for_agent(agent_id)
     assert {:ok, [{value, :legacy_unlabeled}]} = IntentStore.recent_intents_tainted(agent_id)
-    assert value.taint == TaintEnvelope.missing_fallback()
+    assert value.taint == expected
+    assert value.taint.level == :untrusted
+    assert value.taint.sensitivity == :restricted
+    assert value.taint.sanitizations == 0
+    assert value.taint.confidence == :unverified
   end
 
-  test "sidecar restart blocks mutation until verified durable reload restores exact labels", %{
+  test "valid hostile inner labels survive a missing outer aggregate envelope", %{
+    agent_id: agent_id
+  } do
+    intent = Intent.think("hostile nested provenance")
+    hostile = taint(:hostile, :restricted, 0, :unverified, "hostile_nested")
+    fallback = TaintEnvelope.missing_fallback()
+
+    assert {:ok, ^intent} = IntentStore.record_intent_tainted(agent_id, intent, hostile)
+
+    assert {:ok, 1} =
+             IntentStore.fail_intent_tainted(agent_id, intent.id, "hostile reason", hostile)
+
+    record = durable_record(agent_id)
+    inner_item_taint = verified_nested_taint(hd(record.data["intents"]))
+    status = record.data["statuses"][intent.id]
+    inner_status_taint = verified_nested_taint(status)
+
+    assert {:ok, expected_item_taint} = Taint.join(inner_item_taint, fallback)
+    assert {:ok, expected_status_taint} = Taint.join(inner_status_taint, fallback)
+
+    put_durable(agent_id, record.data, %{})
+    assert :ok = IntentStore.reload_for_agent(agent_id)
+
+    assert {:ok, [{value, :legacy_unlabeled}]} = IntentStore.recent_intents_tainted(agent_id)
+    assert value.value == intent
+    assert value.taint == expected_item_taint
+    assert value.taint.level == :hostile
+    assert value.taint.sensitivity == :restricted
+    assert value.taint.sanitizations == 0
+    assert value.taint.confidence == :unverified
+
+    assert {:ok, ^expected_status_taint, :verified} =
+             Provenance.resolve(
+               :intent_status,
+               agent_id,
+               intent.id,
+               status["payload"]
+             )
+  end
+
+  test "verified durable reader restores the exact hostile item label after sidecar restart", %{
     agent_id: agent_id
   } do
     intent = Intent.think("sidecar restart")
-    supplied = taint(:untrusted, :restricted, 0b0101, :verified, "restart_source")
+    supplied = taint(:hostile, :restricted, 0, :unverified, "restart_source")
+    stale = taint(:trusted, :public, 0xFF, :verified, "stale_sidecar")
 
     assert {:ok, ^intent} = IntentStore.record_intent_tainted(agent_id, intent, supplied)
+
+    assert :ok =
+             Provenance.put(:intent, agent_id, intent.id, intent_payload(intent), stale)
+
+    assert {:ok, [{reconciled, :verified}]} = IntentStore.recent_intents_tainted(agent_id)
+    assert reconciled.taint == supplied
+
     restart_provenance()
 
-    assert {:ok, [{missing, :legacy_unlabeled}]} = IntentStore.recent_intents_tainted(agent_id)
-    assert missing.taint == TaintEnvelope.missing_fallback()
-    assert {:error, :store_unavailable} = IntentStore.complete_intent(agent_id, intent.id)
-    assert {:ok, _intent, %{status: :pending}} = IntentStore.get_intent(agent_id, intent.id)
-
-    assert :ok = IntentStore.reload_for_agent(agent_id)
     assert {:ok, [{restored, :verified}]} = IntentStore.recent_intents_tainted(agent_id)
+    assert restored.value == intent
     assert restored.taint == supplied
+
+    assert {:ok, ^supplied, :verified} =
+             Provenance.resolve(:intent, agent_id, intent.id, intent_payload(intent))
+  end
+
+  test "verified durable baseline replaces stale protected item and status labels", %{
+    agent_id: agent_id
+  } do
+    intent = Intent.think("stale protected baseline")
+    hostile = taint(:hostile, :restricted, 0, :unverified, "durable_hostile")
+    weaker = taint(:trusted, :public, 0xFF, :verified, "stale_weaker")
+
+    assert {:ok, expected_item_taint} = Taint.join(hostile, weaker)
+    assert {:ok, ^intent} = IntentStore.record_intent_tainted(agent_id, intent, hostile)
+
+    assert {:ok, 1} =
+             IntentStore.fail_intent_tainted(agent_id, intent.id, "hostile status", hostile)
+
+    failed = durable_record(agent_id)
+    status_payload = failed.data["statuses"][intent.id]["payload"]
+    status_taint = verified_nested_taint(failed.data["statuses"][intent.id])
+
+    assert :ok = Provenance.put(:intent, agent_id, intent.id, intent_payload(intent), weaker)
+    assert :ok = Provenance.put(:intent_status, agent_id, intent.id, status_payload, weaker)
+
+    assert {:ok, ^intent} = IntentStore.record_intent_tainted(agent_id, intent, weaker)
+
+    after_record = durable_record(agent_id)
+    assert verified_nested_taint(hd(after_record.data["intents"])) == expected_item_taint
+
+    assert {:ok, expected_status_after_record} =
+             Taint.join_many([expected_item_taint, status_taint])
+
+    assert verified_nested_taint(after_record.data["statuses"][intent.id]) ==
+             expected_status_after_record
+
+    current_status_payload = after_record.data["statuses"][intent.id]["payload"]
+
+    assert :ok =
+             Provenance.put(:intent_status, agent_id, intent.id, current_status_payload, weaker)
+
     assert :ok = IntentStore.complete_intent(agent_id, intent.id)
+    completed = durable_record(agent_id)
+
+    assert {:ok, expected_completed_status} =
+             Taint.join_many([expected_item_taint, expected_status_after_record])
+
+    assert verified_nested_taint(completed.data["statuses"][intent.id]) ==
+             expected_completed_status
+  end
+
+  test "record and status mutations rebind hostile durable labels after sidecar restart", %{
+    agent_id: agent_id
+  } do
+    intent = Intent.think("hostile durable mutation baseline")
+    hostile = taint(:hostile, :restricted, 0, :unverified, "hostile_baseline")
+    weaker = taint(:trusted, :public, 0xFF, :verified, "weaker_mutation")
+
+    assert {:ok, expected_item_taint} = Taint.join(hostile, weaker)
+    assert {:ok, ^intent} = IntentStore.record_intent_tainted(agent_id, intent, hostile)
+
+    assert {:ok, 1} =
+             IntentStore.fail_intent_tainted(agent_id, intent.id, "hostile failure", hostile)
+
+    status_before = durable_record(agent_id).data["statuses"][intent.id]
+    status_taint = verified_nested_taint(status_before)
+
+    restart_provenance()
+
+    assert {:ok, ^intent} = IntentStore.record_intent_tainted(agent_id, intent, weaker)
+
+    after_record = durable_record(agent_id)
+    assert verified_nested_taint(hd(after_record.data["intents"])) == expected_item_taint
+
+    assert {:ok, expected_status_after_record} =
+             Taint.join_many([expected_item_taint, status_taint])
+
+    assert verified_nested_taint(after_record.data["statuses"][intent.id]) ==
+             expected_status_after_record
+
+    restart_provenance()
+
+    assert :ok = IntentStore.complete_intent(agent_id, intent.id)
+
+    after_complete = durable_record(agent_id)
+    completed_status = after_complete.data["statuses"][intent.id]
+    assert completed_status["payload"]["status"] == "completed"
+
+    assert {:ok, expected_completed_status} =
+             Taint.join_many([expected_item_taint, expected_status_after_record])
+
+    assert verified_nested_taint(completed_status) == expected_completed_status
+
+    assert {:ok, expected_outer_taint} =
+             Taint.join_many([expected_item_taint, expected_completed_status])
+
+    assert verified_outer_taint(after_complete) == expected_outer_taint
   end
 
   test "intent embeddings receive provenance bound to the exact emitted content", %{
@@ -545,6 +1169,15 @@ defmodule Arbor.Memory.IntentStoreProvenanceTest do
     assert {:ok, verified} = TaintEnvelope.verify(envelope, content)
     assert verified.taint == supplied
     assert {:error, :payload_mismatch} = TaintEnvelope.verify(envelope, content <> " changed")
+
+    weaker = taint(:trusted, :public, 0xFF, :verified, "embedding_rewrite")
+    assert {:ok, expected} = Taint.join(supplied, weaker)
+    assert {:ok, ^intent} = IntentStore.record_intent_tainted(agent_id, intent, weaker)
+
+    assert_receive {:embedding, "intents", ^key, ^content, rewritten_envelope, rewritten_opts}
+    assert rewritten_opts[:taint] == expected
+    assert {:ok, rewritten} = TaintEnvelope.verify(rewritten_envelope, content)
+    assert rewritten.taint == expected
   end
 
   defp durable_record(agent_id) do
@@ -557,6 +1190,24 @@ defmodule Arbor.Memory.IntentStoreProvenanceTest do
   defp verified_outer_taint(%Record{data: data, metadata: %{"taint" => persisted}}) do
     assert {:ok, envelope} = TaintEnvelope.verify(persisted, data)
     envelope.taint
+  end
+
+  defp verified_nested_taint(%{"payload" => payload, "provenance" => persisted}) do
+    assert {:ok, envelope} = TaintEnvelope.verify(persisted, payload)
+    envelope.taint
+  end
+
+  defp assert_tainted_inventory(agent_id, domain, expected) do
+    result =
+      case domain do
+        :intent -> IntentStore.recent_intents_tainted(agent_id, limit: 10)
+        :percept -> IntentStore.recent_percepts_tainted(agent_id, limit: 10)
+      end
+
+    assert {:ok, values} = result
+
+    assert Enum.map(values, fn {value, status} -> {value.value.id, value.taint, status} end) ==
+             Enum.map(expected, fn {id, taint} -> {id, taint, :verified} end)
   end
 
   defp corrupt_record(:outer_payload_mismatch, record, _outer_taint) do
@@ -635,9 +1286,27 @@ defmodule Arbor.Memory.IntentStoreProvenanceTest do
     assert taint == TaintEnvelope.missing_fallback()
   end
 
-  defp restart_intent_store do
+  defp assert_missing_status_sidecar(agent_id, intent_id, payload) do
+    assert {:ok, taint, :legacy_unlabeled} =
+             Provenance.resolve(:intent_status, agent_id, intent_id, payload)
+
+    assert taint == TaintEnvelope.missing_fallback()
+  end
+
+  defp assert_missing_provenance(domain, agent_id, item_id, payload) do
+    assert {:ok, taint, :legacy_unlabeled} =
+             Provenance.resolve(domain, agent_id, item_id, payload)
+
+    assert taint == TaintEnvelope.missing_fallback()
+  end
+
+  defp restart_intent_store(opts \\ []) do
     assert :ok = Supervisor.terminate_child(Arbor.Memory.Supervisor, IntentStore)
-    assert {:ok, pid} = Supervisor.restart_child(Arbor.Memory.Supervisor, IntentStore)
+    assert :ok = Supervisor.delete_child(Arbor.Memory.Supervisor, IntentStore)
+
+    assert {:ok, pid} =
+             Supervisor.start_child(Arbor.Memory.Supervisor, {IntentStore, opts})
+
     assert Process.alive?(pid)
   end
 

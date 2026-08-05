@@ -19,6 +19,7 @@ defmodule Arbor.Memory.Provenance do
   @allowed_domains [
     :goal,
     :intent,
+    :intent_status,
     :percept,
     :working_memory_base,
     :working_memory_aggregate,
@@ -44,6 +45,7 @@ defmodule Arbor.Memory.Provenance do
   @type domain ::
           :goal
           | :intent
+          | :intent_status
           | :percept
           | :working_memory_base
           | :working_memory_aggregate
