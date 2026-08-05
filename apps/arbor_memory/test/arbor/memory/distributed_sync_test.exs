@@ -16,16 +16,14 @@ defmodule Arbor.Memory.DistributedSyncTest do
   }
 
   alias Arbor.Contracts.Memory.Goal
-  alias Arbor.Persistence.BufferedStore
+  alias Arbor.Memory.Test.DurableGraphAuthority
 
   @working_memory_ets :arbor_working_memory
   @graph_ets :arbor_memory_graphs
   @goals_ets :arbor_memory_goals
 
   setup do
-    start_supervised!(
-      {BufferedStore, name: :arbor_memory_durable, backend: nil, write_mode: :sync}
-    )
+    DurableGraphAuthority.start!()
 
     ensure_ets(@working_memory_ets)
     ensure_ets(@graph_ets)

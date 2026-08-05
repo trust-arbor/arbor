@@ -2,14 +2,12 @@ defmodule Arbor.Memory.ActionPatternsTest do
   use ExUnit.Case, async: false
 
   alias Arbor.Memory.{ActionPatterns, KnowledgeGraph, KnowledgeGraphStore, Proposal}
-  alias Arbor.Persistence.BufferedStore
+  alias Arbor.Memory.Test.DurableGraphAuthority
 
   @moduletag :fast
 
   setup do
-    start_supervised!(
-      {BufferedStore, name: :arbor_memory_durable, backend: nil, write_mode: :sync}
-    )
+    DurableGraphAuthority.start!()
 
     # Ensure ETS tables exist
     if :ets.whereis(:arbor_memory_graphs) == :undefined do

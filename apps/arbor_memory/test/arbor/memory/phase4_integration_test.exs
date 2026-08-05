@@ -9,15 +9,12 @@ defmodule Arbor.Memory.Phase4IntegrationTest do
 
   alias Arbor.Memory
   alias Arbor.Memory.{BackgroundChecks, KnowledgeGraph, Proposal}
-  alias Arbor.Persistence.BufferedStore
+  alias Arbor.Memory.Test.DurableGraphAuthority
 
   @moduletag :integration
 
   setup do
-    start_supervised!({
-      BufferedStore,
-      name: :arbor_memory_durable, backend: nil, write_mode: :sync
-    })
+    DurableGraphAuthority.start!()
 
     # Ensure ETS tables exist
     ensure_ets_tables()

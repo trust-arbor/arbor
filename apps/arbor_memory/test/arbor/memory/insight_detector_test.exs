@@ -2,14 +2,12 @@ defmodule Arbor.Memory.InsightDetectorTest do
   use ExUnit.Case, async: false
 
   alias Arbor.Memory.{InsightDetector, KnowledgeGraph, KnowledgeGraphStore, Proposal}
-  alias Arbor.Persistence.BufferedStore
+  alias Arbor.Memory.Test.DurableGraphAuthority
 
   @moduletag :fast
 
   setup do
-    start_supervised!(
-      {BufferedStore, name: :arbor_memory_durable, backend: nil, write_mode: :sync}
-    )
+    DurableGraphAuthority.start!()
 
     if :ets.whereis(:arbor_memory_proposals) == :undefined do
       :ets.new(:arbor_memory_proposals, [:named_table, :public, :set])

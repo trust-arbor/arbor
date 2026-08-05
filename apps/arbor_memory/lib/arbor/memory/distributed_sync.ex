@@ -24,7 +24,6 @@ defmodule Arbor.Memory.DistributedSync do
   alias Arbor.Memory.KnowledgeGraphStore
 
   @working_memory_ets :arbor_working_memory
-  @goals_ets :arbor_memory_goals
 
   # Signal types we subscribe to and their categories
   @subscribed_types [

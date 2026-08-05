@@ -1,14 +1,13 @@
 defmodule Arbor.Memory.ReadSelfTest do
   use ExUnit.Case, async: false
 
-  alias Arbor.Contracts.Memory.Goal
-  alias Arbor.Memory.{GoalStore, KnowledgeGraph, SelfKnowledge, WorkingMemory}
-  alias Arbor.Persistence.BufferedStore
+  alias Arbor.Memory.{GoalStore, KnowledgeGraph, KnowledgeGraphStore, Provenance, WorkingMemory}
+  alias Arbor.Memory.Test.DurableGraphAuthority
 
   @moduletag :fast
 
   setup do
-    start_supervised!({BufferedStore, name: :arbor_memory_durable, backend: nil})
+    DurableGraphAuthority.start!()
     agent_id = "test_agent_#{System.unique_integer([:positive])}"
 
     # Ensure ETS tables exist
@@ -22,6 +21,7 @@ defmodule Arbor.Memory.ReadSelfTest do
       safe_delete(:arbor_working_memory, agent_id)
       safe_delete(:arbor_memory_preferences, agent_id)
       GoalStore.clear_goals(agent_id)
+      Provenance.delete_agent(agent_id)
     end)
 
     %{agent_id: agent_id}
@@ -68,7 +68,7 @@ defmodule Arbor.Memory.ReadSelfTest do
         |> KnowledgeGraph.add_node(%{type: :insight, content: "Test insight"})
         |> elem(1)
 
-      :ets.insert(:arbor_memory_graphs, {agent_id, graph})
+      assert :ok = KnowledgeGraphStore.save_graph(agent_id, graph)
 
       {:ok, result} = Arbor.Memory.read_self(agent_id, :memory_system)
 

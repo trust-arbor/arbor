@@ -3,14 +3,12 @@ defmodule Arbor.Memory.ConsolidationTest do
 
   alias Arbor.Contracts.Security.Taint
   alias Arbor.Memory.{Consolidation, Events, KnowledgeGraph, KnowledgeGraphStore}
-  alias Arbor.Persistence.BufferedStore
+  alias Arbor.Memory.Test.DurableGraphAuthority
 
   @moduletag :fast
 
   setup do
-    start_supervised!(
-      {BufferedStore, name: :arbor_memory_durable, backend: nil, write_mode: :sync}
-    )
+    DurableGraphAuthority.start!()
 
     :ok
   end

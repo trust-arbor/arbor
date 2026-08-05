@@ -9,14 +9,12 @@ defmodule Arbor.Memory.IdentityConsolidatorTest do
     SelfKnowledge
   }
 
-  alias Arbor.Persistence.BufferedStore
+  alias Arbor.Memory.Test.DurableGraphAuthority
 
   @moduletag :fast
 
   setup do
-    start_supervised!(
-      {BufferedStore, name: :arbor_memory_durable, backend: nil, write_mode: :sync}
-    )
+    DurableGraphAuthority.start!()
 
     # Ensure ETS tables exist
     for table <- [

@@ -3,14 +3,13 @@ defmodule Arbor.Memory.KnowledgeGraphAuthorityRegressionTest do
 
   alias Arbor.Memory
   alias Arbor.Memory.KnowledgeGraph
-  alias Arbor.Persistence.BufferedStore
+  alias Arbor.Memory.Test.DurableGraphAuthority
 
   @moduletag :fast
-  @store_name :arbor_memory_durable
   @graph_ets :arbor_memory_graphs
 
   setup do
-    start_supervised!({BufferedStore, name: @store_name, backend: nil, write_mode: :sync})
+    DurableGraphAuthority.start!()
 
     agent_id = "agent_public_graph_authority_#{System.unique_integer([:positive])}"
 

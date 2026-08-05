@@ -6,6 +6,7 @@ defmodule Arbor.Memory.KnowledgeGraphStoreTest do
 
   alias Arbor.Memory.{Events, KnowledgeGraph, KnowledgeGraphStore, MemoryStore, Provenance}
   alias Arbor.Memory.KnowledgeGraph.{Codec, Operation}
+  alias Arbor.Memory.Test.DurableGraphAuthority
   alias Arbor.Persistence.BufferedStore
 
   @moduletag :fast
@@ -249,7 +250,7 @@ defmodule Arbor.Memory.KnowledgeGraphStoreTest do
   end
 
   setup do
-    start_supervised!({BufferedStore, name: @store_name, backend: nil, write_mode: :sync})
+    DurableGraphAuthority.start!()
 
     agent_id = "agent_kg_store_#{System.unique_integer([:positive])}"
     :ok = KnowledgeGraphStore.delete_graph(agent_id)

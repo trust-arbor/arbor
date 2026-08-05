@@ -2,14 +2,12 @@ defmodule Arbor.Memory.PatternsTest do
   use ExUnit.Case, async: false
 
   alias Arbor.Memory.{KnowledgeGraph, KnowledgeGraphStore, Patterns}
-  alias Arbor.Persistence.BufferedStore
+  alias Arbor.Memory.Test.DurableGraphAuthority
 
   @moduletag :fast
 
   setup do
-    start_supervised!(
-      {BufferedStore, name: :arbor_memory_durable, backend: nil, write_mode: :sync}
-    )
+    DurableGraphAuthority.start!()
 
     agent_id = "test_agent_#{System.unique_integer([:positive])}"
 

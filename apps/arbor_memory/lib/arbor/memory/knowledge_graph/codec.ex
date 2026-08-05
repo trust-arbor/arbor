@@ -78,7 +78,8 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
     :precedes,
     :related_to,
     :relates_to,
-    :supports
+    :supports,
+    :uses
   ]
 
   # Extensible metadata should use string keys/values. Atom preservation is

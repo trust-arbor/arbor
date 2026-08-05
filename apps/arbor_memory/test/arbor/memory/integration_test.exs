@@ -3,15 +3,12 @@ defmodule Arbor.Memory.IntegrationTest do
 
   alias Arbor.Memory
   alias Arbor.Memory.{IndexSupervisor, KnowledgeGraphStore}
-  alias Arbor.Persistence.BufferedStore
+  alias Arbor.Memory.Test.DurableGraphAuthority
 
   @moduletag :integration
 
   setup do
-    start_supervised!({
-      BufferedStore,
-      name: :arbor_memory_durable, backend: nil, write_mode: :sync
-    })
+    DurableGraphAuthority.start!()
 
     :ok
   end

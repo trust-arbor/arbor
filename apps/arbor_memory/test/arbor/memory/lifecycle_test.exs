@@ -3,15 +3,13 @@ defmodule Arbor.Memory.LifecycleTest do
 
   alias Arbor.Memory
   alias Arbor.Memory.Lifecycle
+  alias Arbor.Memory.Test.DurableGraphAuthority
   alias Arbor.Memory.WorkingMemory
-  alias Arbor.Persistence.BufferedStore
 
   @moduletag :fast
 
   setup do
-    start_supervised!(
-      {BufferedStore, name: :arbor_memory_durable, backend: nil, write_mode: :sync}
-    )
+    DurableGraphAuthority.start!()
 
     # Use unique agent IDs to avoid test interference
     agent_id = "lifecycle_test_#{System.unique_integer([:positive])}"

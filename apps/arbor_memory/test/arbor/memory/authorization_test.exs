@@ -7,6 +7,8 @@ defmodule Arbor.Memory.AuthorizationTest do
   # with `Arbor.Security.healthy?() == true`.
   use ExUnit.Case, async: false
 
+  alias Arbor.Memory.Test.DurableGraphAuthority
+
   @moduletag :fast
   @moduletag :integration
 
@@ -47,6 +49,8 @@ defmodule Arbor.Memory.AuthorizationTest do
   end
 
   setup do
+    DurableGraphAuthority.start!()
+
     # Bring up the Security infrastructure required for real authorization.
     # These are normally started by Arbor.Security.Application, but
     # start_children: false in test config disables that.

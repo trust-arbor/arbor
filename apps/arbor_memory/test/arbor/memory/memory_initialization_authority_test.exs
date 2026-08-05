@@ -14,6 +14,7 @@ defmodule Arbor.Memory.InitializationAuthorityTest do
   }
 
   alias Arbor.Memory.KnowledgeGraph.Codec
+  alias Arbor.Memory.Test.DurableGraphAuthority
   alias Arbor.Persistence.BufferedStore
 
   @moduletag :fast
@@ -72,7 +73,7 @@ defmodule Arbor.Memory.InitializationAuthorityTest do
   end
 
   setup do
-    start_supervised!({BufferedStore, name: @store_name, backend: nil, write_mode: :sync})
+    DurableGraphAuthority.start!()
 
     agent_id = "agent_init_authority_#{System.unique_integer([:positive])}"
 

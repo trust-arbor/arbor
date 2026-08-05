@@ -11,7 +11,7 @@ defmodule Arbor.Memory.ReflectionProcessorTest do
     WorkingMemory
   }
 
-  alias Arbor.Persistence.BufferedStore
+  alias Arbor.Memory.Test.DurableGraphAuthority
 
   @moduletag :fast
 
@@ -20,9 +20,7 @@ defmodule Arbor.Memory.ReflectionProcessorTest do
   defp thought_content(c) when is_binary(c), do: c
 
   setup do
-    start_supervised!(
-      {BufferedStore, name: :arbor_memory_durable, backend: nil, write_mode: :sync}
-    )
+    DurableGraphAuthority.start!()
 
     # Ensure ETS table exists
     if :ets.whereis(:arbor_reflections) == :undefined do

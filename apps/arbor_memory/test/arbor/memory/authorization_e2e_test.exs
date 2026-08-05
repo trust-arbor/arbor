@@ -11,7 +11,7 @@ defmodule Arbor.Memory.AuthorizationE2ETest do
 
   use ExUnit.Case, async: false
 
-  alias Arbor.Persistence.BufferedStore
+  alias Arbor.Memory.Test.DurableGraphAuthority
 
   @moduletag :fast
 
@@ -54,10 +54,7 @@ defmodule Arbor.Memory.AuthorizationE2ETest do
   end
 
   setup do
-    start_supervised!({
-      BufferedStore,
-      name: :arbor_memory_durable, backend: nil, write_mode: :sync
-    })
+    DurableGraphAuthority.start!()
 
     # Start the security infrastructure required for authorization.
     # These are normally started by Arbor.Security.Application but
