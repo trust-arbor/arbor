@@ -57,6 +57,17 @@ defmodule Arbor.Persistence.EventLogPublicBoundarySecurityRegressionTest do
     end
   end
 
+  defmodule CrashingRepo do
+    @moduledoc false
+
+    def __adapter__, do: Ecto.Adapters.Postgres
+    def transaction(_fun), do: raise("simulated unavailable Repo")
+    def transaction(_fun, _opts), do: raise("simulated unavailable Repo")
+    def rollback(reason), do: throw({:rollback, reason})
+    def one(_query), do: nil
+    def insert!(_changeset), do: raise("unreachable")
+  end
+
   setup do
     name = :"event_log_public_deadline_#{System.unique_integer([:positive])}"
     ets_name = :"event_log_public_ets_deadline_#{System.unique_integer([:positive])}"
@@ -123,6 +134,18 @@ defmodule Arbor.Persistence.EventLogPublicBoundarySecurityRegressionTest do
              Persistence.reconcile_append(name, CommitThenRaiseBackend, operation)
 
     assert committed_id == event.id
+  end
+
+  test "security regression: an unavailable Ecto Repo cannot terminate the caller" do
+    event = Event.new("crashing-repo", "arbor.review.ordinary", %{value: 1})
+
+    assert {:error, {:append_indeterminate, _operation}} =
+             EctoEventLog.append("crashing-repo", event,
+               repo: CrashingRepo,
+               append_timeout_ms: 1_000
+             )
+
+    assert Process.alive?(self())
   end
 
   test "security regression: public strings are valid UTF-8 and fit every backend schema", %{

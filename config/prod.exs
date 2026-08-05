@@ -19,6 +19,10 @@ config :arbor_security,
 # egress_modes provisioning for stricter control, and/or gate_on_premises_egress.
 config :arbor_trust, default_egress_modes: %{external_provider: :allow}
 
+# Production maintenance archives use the Ecto EventLog below, so the
+# configured Repo must be part of the persistence supervision tree.
+config :arbor_persistence, start_repo: true
+
 config :arbor_memory,
   embedding_dedup_enabled: true,
   maintenance_archive_target: [

@@ -166,17 +166,25 @@ defmodule Arbor.Persistence.EventLog.Ecto do
   defp run_bounded(fun, operation, deadline_mono) do
     case EventLog.remaining_timeout(deadline_mono) do
       {:ok, timeout} ->
-        task = Task.async(fn -> EventLog.stamp_completion(fun.()) end)
+        parent = self()
+        result_ref = make_ref()
 
-        case Task.yield(task, timeout) do
-          {:ok, completion} ->
+        {worker, monitor_ref} =
+          spawn_monitor(fn ->
+            send(parent, {result_ref, EventLog.stamp_completion(fun.())})
+          end)
+
+        receive do
+          {^result_ref, completion} ->
+            Process.demonitor(monitor_ref, [:flush])
             EventLog.accept_completion(completion, operation, deadline_mono)
 
-          {:exit, _reason} ->
+          {:DOWN, ^monitor_ref, :process, ^worker, _reason} ->
             EventLog.indeterminate(operation)
-
-          nil ->
-            _ = Task.shutdown(task, :brutal_kill)
+        after
+          timeout ->
+            Process.exit(worker, :kill)
+            Process.demonitor(monitor_ref, [:flush])
             EventLog.indeterminate(operation)
         end
 
