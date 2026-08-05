@@ -7,6 +7,7 @@ for child <- [
   Supervisor.start_child(Arbor.Persistence.Supervisor, child)
 end
 
-# Exclude database tests by default (require PostgreSQL setup)
-# Run with: mix test --include database
-ExUnit.start(exclude: [:database, :llm, :llm_local])
+# Exclude database and isolated-repo tests by default.
+# Run database tests with: mix test --include database
+# Run the real SQLite pool proof with: mix test --include database --include isolated_repo
+ExUnit.start(exclude: [:database, :isolated_repo, :llm, :llm_local])

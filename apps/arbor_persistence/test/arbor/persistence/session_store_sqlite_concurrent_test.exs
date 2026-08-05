@@ -2,7 +2,8 @@ defmodule Arbor.Persistence.SessionStoreSQLiteConcurrentTest do
   @moduledoc """
   Runs the public SessionStore append boundary against a real multi-connection
   SQLite pool. DatabaseCase deliberately shares one sandbox connection, so it
-  cannot prove writer serialization.
+  cannot prove writer serialization. Run this module standalone with both
+  `--include database --include isolated_repo`.
   """
 
   use ExUnit.Case, async: false
@@ -15,32 +16,30 @@ defmodule Arbor.Persistence.SessionStoreSQLiteConcurrentTest do
   alias Arbor.Persistence.{Repo, SessionStore}
 
   setup_all do
-    if GenServer.whereis(Repo) do
-      {:skip, "Arbor.Persistence.Repo is already running; run this file standalone"}
-    else
-      database =
-        Path.join(
-          System.tmp_dir!(),
-          "arbor-session-concurrent-#{System.unique_integer([:positive])}.sqlite3"
-        )
+    assert GenServer.whereis(Repo) == nil,
+           "Arbor.Persistence.Repo must be absent; run this isolated pool proof standalone"
 
-      File.rm(database)
-
-      start_supervised!(
-        {Repo,
-         database: database,
-         pool: DBConnection.ConnectionPool,
-         pool_size: 8,
-         busy_timeout: 5_000,
-         journal_mode: :wal}
+    database =
+      Path.join(
+        System.tmp_dir!(),
+        "arbor-session-concurrent-#{System.unique_integer([:positive])}.sqlite3"
       )
 
-      assert [_ | _] =
-               Ecto.Migrator.run(Repo, @migrations_path, :up, all: true, log: false)
+    File.rm(database)
 
-      on_exit(fn -> File.rm(database) end)
-      :ok
-    end
+    start_supervised!(
+      {Repo,
+       database: database,
+       pool: DBConnection.ConnectionPool,
+       pool_size: 8,
+       busy_timeout: 5_000,
+       journal_mode: :wal}
+    )
+
+    assert [_ | _] = Ecto.Migrator.run(Repo, @migrations_path, :up, all: true, log: false)
+
+    on_exit(fn -> File.rm(database) end)
+    :ok
   end
 
   test "public same-session appends are gap-free across real SQLite connections" do
