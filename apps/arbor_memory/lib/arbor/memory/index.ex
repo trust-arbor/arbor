@@ -486,7 +486,7 @@ defmodule Arbor.Memory.Index do
     operation_ref = make_ref()
 
     {worker_pid, monitor_ref} =
-      spawn_opt(
+      :erlang.spawn_opt(
         fn ->
           result = run_persistent_writer_call(writer_call)
           send(owner, {:persistent_index_result, operation_ref, result})
