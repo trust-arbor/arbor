@@ -151,6 +151,8 @@ defmodule Arbor.Memory.Index do
   The whole batch is preflighted before mutation. Persistent backends commit
   through the writer's all-or-nothing batch operation. In dual mode, a durable
   error admits the whole batch locally as pending or admits none at capacity.
+  Same-content fallback members share one pending authority while every returned
+  ID remains usable as an alias; admission is reserved before durable dispatch.
   Fresh rows request the index-generated `mem_*` IDs; durable content dedupe can
   instead return an existing authoritative ID for every matching input item.
 
@@ -303,6 +305,8 @@ defmodule Arbor.Memory.Index do
       pending_entry_orders: %{},
       # Track entries not yet synced to persistent (for dual mode)
       pending_sync: MapSet.new(),
+      # Unsynced caller-visible IDs represented by each pending authority.
+      pending_group_members: %{},
       # A failed eager write can later deduplicate to a different durable ID.
       id_aliases: %{}
     }
@@ -361,6 +365,7 @@ defmodule Arbor.Memory.Index do
        | entry_count: 0,
          pending_sync: MapSet.new(),
          pending_entry_orders: %{},
+         pending_group_members: %{},
          id_aliases: %{}
      }}
   end
@@ -473,23 +478,23 @@ defmodule Arbor.Memory.Index do
           end
 
         :dual ->
-          with :ok <- ensure_authoritative_outcome_possible(state, [entry]) do
-            index_dual_mode(entry_id, entry, insertion_sequence, state)
+          candidate = %{entry: entry, insertion_sequence: insertion_sequence, position: 0}
+          [group] = group_prepared_batch_entries([candidate], state)
+
+          with {:ok, pending_admission} <- plan_pending_group_admission(state, [group]) do
+            index_dual_mode(entry_id, group, pending_admission, state)
           end
       end
     end
   end
 
-  defp index_dual_mode(entry_id, entry, insertion_sequence, state) do
-    metadata_with_id = Map.put(entry.metadata, :id, entry_id)
+  defp index_dual_mode(entry_id, group, pending_admission, state) do
+    entry = group.canonical_entry
+    insertion_sequence = group.canonical_sequence
+    metadata_with_id = Map.put(entry.metadata, :id, group.requested_id)
 
     case eager_store(state, entry, metadata_with_id) do
       {:ok, authoritative_id} ->
-        group = %{
-          canonical_entry: entry,
-          canonical_sequence: insertion_sequence
-        }
-
         with :ok <- validate_authoritative_binding(state, entry.content, authoritative_id),
              {:ok, admitted_state} <-
                cache_authoritative_bindings(state, [{group, authoritative_id}]) do
@@ -501,17 +506,13 @@ defmodule Arbor.Memory.Index do
       {:error, reason} ->
         log_dual_write_failure(entry_id, reason)
 
-        with {:ok, eviction_ids} <- plan_local_admission(state, [entry_id]) do
-          candidate = %{entry: entry, insertion_sequence: insertion_sequence}
+        new_state =
+          state
+          |> apply_local_admission(pending_admission.eviction_ids)
+          |> cache_pending_groups([group], pending_admission)
+          |> advance_insertion_sequence(insertion_sequence)
 
-          new_state =
-            state
-            |> apply_local_admission(eviction_ids)
-            |> put_pending_entry(candidate)
-            |> advance_insertion_sequence(insertion_sequence)
-
-          {:ok, entry_id, new_state}
-        end
+        {:ok, entry_id, new_state}
     end
   end
 
@@ -765,10 +766,10 @@ defmodule Arbor.Memory.Index do
   defp commit_persistent_batch([], state, _writer), do: {:ok, [], state}
 
   defp commit_persistent_batch(prepared, state, writer) do
-    groups = group_prepared_batch_entries(prepared)
+    groups = group_prepared_batch_entries(prepared, state)
     entries = Enum.map(groups, &prepared_group_batch_entry/1)
 
-    with :ok <- ensure_persistent_batch_outcome_possible(state, groups) do
+    with {:ok, pending_admission} <- plan_persistent_batch_admission(state, groups) do
       case batch_store_with_ids(state, writer, entries) do
         {:ok, authoritative_ids} ->
           with {:ok, bindings} <-
@@ -782,51 +783,93 @@ defmodule Arbor.Memory.Index do
           end
 
         {:error, reason} ->
-          maybe_commit_pending_batch(prepared, state, reason)
+          maybe_commit_pending_batch(prepared, groups, pending_admission, state, reason)
       end
     end
   end
 
-  defp maybe_commit_pending_batch(prepared, %{backend: :dual} = state, reason) do
-    with {:ok, eviction_ids} <- plan_prepared_batch_admission(state, prepared) do
-      commit_pending_batch(prepared, eviction_ids, state, reason)
-    end
-  end
+  defp maybe_commit_pending_batch(
+         prepared,
+         groups,
+         pending_admission,
+         %{backend: :dual} = state,
+         reason
+       ),
+       do: commit_pending_batch(prepared, groups, pending_admission, state, reason)
 
-  defp maybe_commit_pending_batch(_prepared, _state, reason), do: {:error, reason}
+  defp maybe_commit_pending_batch(_prepared, _groups, _admission, _state, reason),
+    do: {:error, reason}
 
-  defp commit_pending_batch(prepared, eviction_ids, state, reason) do
+  defp commit_pending_batch(prepared, groups, pending_admission, state, reason) do
     Enum.each(prepared, fn %{entry: entry} -> log_dual_write_failure(entry.id, reason) end)
 
     new_state =
-      prepared
-      |> Enum.reduce(apply_local_admission(state, eviction_ids), fn candidate, acc ->
-        put_pending_entry(acc, candidate)
-      end)
+      state
+      |> apply_local_admission(pending_admission.eviction_ids)
+      |> cache_pending_groups(groups, pending_admission)
       |> advance_prepared_batch_sequence(prepared)
 
     {:ok, Enum.map(prepared, & &1.entry.id), new_state}
   end
 
-  defp group_prepared_batch_entries(prepared) do
+  defp group_prepared_batch_entries(prepared, state) do
     prepared
     |> Enum.group_by(fn %{entry: entry} -> :crypto.hash(:sha256, entry.content) end)
     |> Enum.map(fn {content_digest, members} ->
       ordered_members = Enum.sort_by(members, & &1.insertion_sequence)
       first = hd(ordered_members)
       latest = List.last(ordered_members)
+      local_member_ids = local_content_ids(state, latest.entry.content)
+
+      {requested_id, first_sequence} =
+        prepared_group_identity(state, local_member_ids, first)
+
+      prepared_member_ids = Enum.map(ordered_members, & &1.entry.id)
 
       %{
         content_digest: content_digest,
-        member_ids: Enum.map(ordered_members, & &1.entry.id),
+        member_ids: Enum.uniq(local_member_ids ++ prepared_member_ids),
+        prepared_member_ids: prepared_member_ids,
         member_positions: Enum.map(ordered_members, & &1.position),
-        requested_id: first.entry.id,
+        requested_id: requested_id,
+        first_sequence: first_sequence,
         canonical_entry: latest.entry,
         canonical_sequence: latest.insertion_sequence,
         order_key: first.insertion_sequence
       }
     end)
     |> Enum.sort_by(& &1.order_key)
+  end
+
+  defp prepared_group_identity(state, local_member_ids, first) do
+    synced_ids =
+      Enum.reject(local_member_ids, &MapSet.member?(state.pending_sync, &1))
+
+    pending_members =
+      Enum.flat_map(local_member_ids, fn id ->
+        case Map.fetch(state.pending_entry_orders, id) do
+          {:ok, order} -> [{id, order}]
+          :error -> []
+        end
+      end)
+
+    first_sequence =
+      case pending_members do
+        [] -> first.insertion_sequence
+        members -> members |> Enum.map(fn {_id, order} -> order.first end) |> Enum.min()
+      end
+
+    cond do
+      synced_ids != [] ->
+        {Enum.min(synced_ids), first_sequence}
+
+      pending_members != [] ->
+        {id, order} = Enum.min_by(pending_members, fn {_id, order} -> order.first end)
+        {id, order.first}
+
+      true ->
+        {first.entry.id, first.insertion_sequence}
+    end
   end
 
   defp prepared_group_batch_entry(group) do
@@ -856,10 +899,7 @@ defmodule Arbor.Memory.Index do
 
           if replacement_ids == [] do
             authoritative_entry = %{group.canonical_entry | id: authoritative_id}
-
-            acc
-            |> put_local_entry(authoritative_entry)
-            |> refresh_pending_entry_order(authoritative_id, group.canonical_sequence)
+            put_local_entry(acc, authoritative_entry)
           else
             converge_local_members(
               acc,
@@ -874,6 +914,36 @@ defmodule Arbor.Memory.Index do
     else
       {:error, :capacity_exceeded} -> {:error, :indeterminate_persistence_result}
     end
+  end
+
+  defp cache_pending_groups(state, groups, admission) do
+    Enum.reduce(groups, state, fn group, acc ->
+      authoritative_id = group.requested_id
+
+      pending_members =
+        Enum.reduce(group.member_ids, MapSet.new(group.prepared_member_ids), fn member_id,
+                                                                                members ->
+          MapSet.union(
+            members,
+            Map.get(acc.pending_group_members, member_id, MapSet.new())
+          )
+        end)
+
+      member_ids =
+        admission.replacement_ids
+        |> Map.fetch!(authoritative_id)
+        |> Kernel.++(group.member_ids)
+        |> Enum.uniq()
+
+      acc
+      |> converge_local_members(member_ids, group.canonical_entry, authoritative_id)
+      |> mark_pending_group(
+        authoritative_id,
+        group.first_sequence,
+        group.canonical_sequence,
+        pending_members
+      )
+    end)
   end
 
   defp advance_prepared_batch_sequence(state, []), do: state
@@ -957,34 +1027,14 @@ defmodule Arbor.Memory.Index do
     plan_local_admission(state, Enum.map(prepared, & &1.entry.id))
   end
 
-  defp ensure_persistent_batch_outcome_possible(%{backend: :pgvector}, _groups), do: :ok
+  defp plan_persistent_batch_admission(%{backend: :pgvector}, _groups), do: {:ok, nil}
 
-  defp ensure_persistent_batch_outcome_possible(state, groups) do
-    ensure_authoritative_outcome_possible(state, Enum.map(groups, & &1.canonical_entry))
-  end
+  defp plan_persistent_batch_admission(state, groups),
+    do: plan_pending_group_admission(state, groups)
 
-  defp ensure_authoritative_outcome_possible(state, entries) do
-    local_replacement_ids =
-      entries
-      |> Enum.flat_map(&local_content_ids(state, &1.content))
-      |> MapSet.new()
-
-    potential_growth =
-      Enum.count(entries, fn entry -> local_content_ids(state, entry.content) == [] end)
-
-    current_count = :ets.info(state.table, :size)
-    slots_to_free = max(current_count + potential_growth - state.max_entries, 0)
-
-    available_evictions =
-      state
-      |> safely_evictable_entries()
-      |> Enum.count(fn {id, _entry} -> not MapSet.member?(local_replacement_ids, id) end)
-
-    if slots_to_free <= available_evictions do
-      :ok
-    else
-      {:error, :capacity_exceeded}
-    end
+  defp plan_pending_group_admission(state, groups) do
+    bindings = Enum.map(groups, &{&1, &1.requested_id})
+    plan_authoritative_admission(state, bindings)
   end
 
   defp plan_authoritative_admission(state, bindings) do
@@ -992,22 +1042,12 @@ defmodule Arbor.Memory.Index do
 
     replacement_ids =
       Map.new(bindings, fn {group, authoritative_id} ->
-        replacements =
-          if MapSet.member?(current_ids, authoritative_id) do
-            []
-          else
-            local_content_ids(state, group.canonical_entry.content)
-          end
-
-        {authoritative_id, replacements}
+        {authoritative_id, local_content_ids(state, group.canonical_entry.content)}
       end)
 
     removed_ids = replacement_ids |> Map.values() |> List.flatten() |> MapSet.new()
 
-    additions =
-      Enum.count(bindings, fn {_group, authoritative_id} ->
-        not MapSet.member?(current_ids, authoritative_id)
-      end)
+    additions = length(bindings)
 
     projected_count = MapSet.size(current_ids) - MapSet.size(removed_ids) + additions
     slots_to_free = max(projected_count - state.max_entries, 0)
@@ -1130,10 +1170,17 @@ defmodule Arbor.Memory.Index do
       pending_entries = Enum.flat_map(pending_ids, &collect_pending_entry(&1, state))
 
       if pending_entries == [] do
-        {:ok, 0, %{state | pending_sync: MapSet.new()}}
+        {:ok, 0,
+         %{
+           state
+           | pending_sync: MapSet.new(),
+             pending_entry_orders: %{},
+             pending_group_members: %{}
+         }}
       else
         groups = group_pending_entries(pending_entries)
         entries = Enum.map(groups, &pending_group_batch_entry/1)
+        converged_count = pending_converged_count(state, pending_ids)
 
         case batch_store_with_ids(state, entries) do
           {:ok, authoritative_ids} ->
@@ -1144,7 +1191,7 @@ defmodule Arbor.Memory.Index do
                   converge_pending_group(acc, group, authoritative_id)
                 end)
 
-              {:ok, length(pending_entries), new_state}
+              {:ok, converged_count, new_state}
             end
 
           {:error, reason} ->
@@ -1251,6 +1298,12 @@ defmodule Arbor.Memory.Index do
       entry.embedding,
       Map.put(entry.metadata, :id, group.requested_id)
     }
+  end
+
+  defp pending_converged_count(state, pending_ids) do
+    Enum.reduce(pending_ids, 0, fn id, count ->
+      count + MapSet.size(Map.get(state.pending_group_members, id, MapSet.new([id])))
+    end)
   end
 
   defp pending_identity_order_key({_id, _entry, first_sequence, _latest_sequence}),
@@ -1451,6 +1504,7 @@ defmodule Arbor.Memory.Index do
       | entry_count: :ets.info(state.table, :size),
         pending_sync: pending_sync,
         pending_entry_orders: Map.drop(state.pending_entry_orders, member_ids),
+        pending_group_members: Map.drop(state.pending_group_members, member_ids),
         id_aliases: aliases
     }
   end
@@ -1465,36 +1519,21 @@ defmodule Arbor.Memory.Index do
     %{state | entry_count: :ets.info(state.table, :size)}
   end
 
-  defp put_pending_entry(state, %{entry: entry, insertion_sequence: insertion_sequence}) do
-    state = put_local_entry(state, entry)
-
+  defp mark_pending_group(state, id, first_sequence, latest_sequence, pending_members) do
     %{
       state
-      | pending_sync: MapSet.put(state.pending_sync, entry.id),
+      | pending_sync: MapSet.put(state.pending_sync, id),
         pending_entry_orders:
-          Map.put(state.pending_entry_orders, entry.id, %{
-            first: insertion_sequence,
-            latest: insertion_sequence
-          })
+          Map.put(state.pending_entry_orders, id, %{
+            first: first_sequence,
+            latest: latest_sequence
+          }),
+        pending_group_members: Map.put(state.pending_group_members, id, pending_members)
     }
   end
 
   defp advance_insertion_sequence(state, insertion_sequence) do
     %{state | next_insertion_sequence: insertion_sequence + 1}
-  end
-
-  defp refresh_pending_entry_order(state, id, insertion_sequence) do
-    if MapSet.member?(state.pending_sync, id) do
-      %{
-        state
-        | pending_entry_orders:
-            Map.update!(state.pending_entry_orders, id, fn order ->
-              %{order | latest: insertion_sequence}
-            end)
-      }
-    else
-      state
-    end
   end
 
   defp resolve_entry_id(entry_id, state), do: Map.get(state.id_aliases, entry_id, entry_id)
@@ -1562,6 +1601,7 @@ defmodule Arbor.Memory.Index do
       | entry_count: :ets.info(state.table, :size),
         pending_sync: MapSet.delete(state.pending_sync, canonical_id),
         pending_entry_orders: Map.delete(state.pending_entry_orders, canonical_id),
+        pending_group_members: Map.delete(state.pending_group_members, canonical_id),
         id_aliases: aliases
     }
   end

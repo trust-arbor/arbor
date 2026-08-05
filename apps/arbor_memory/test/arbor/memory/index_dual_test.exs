@@ -65,7 +65,22 @@ defmodule Arbor.Memory.IndexDualTest do
         {:store_sequence, [result | rest]} ->
           next_mode = if rest == [], do: :delegate, else: {:store_sequence, rest}
           :persistent_term.put({__MODULE__, agent_id}, next_mode)
-          result
+
+          case result do
+            {:delegate_as, id} ->
+              Arbor.Memory.Embedding.store(
+                agent_id,
+                content,
+                embedding,
+                Map.put(metadata, :id, id)
+              )
+
+            {:exit, reason} ->
+              exit(reason)
+
+            other ->
+              other
+          end
 
         {:partial_batch_failure, 0} ->
           :persistent_term.put({__MODULE__, agent_id}, {:partial_batch_failure, 1})
@@ -265,7 +280,7 @@ defmodule Arbor.Memory.IndexDualTest do
 
       MaliciousWriter.configure(
         agent_id,
-        {:store_sequence, [{:error, :injected_eager_failure}, {:ok, first_id}]}
+        {:store_sequence, [{:error, :injected_eager_failure}, {:delegate_as, first_id}]}
       )
 
       {:ok, pid} =
@@ -295,8 +310,9 @@ defmodule Arbor.Memory.IndexDualTest do
 
       state = :sys.get_state(pid)
       assert state.entry_count == 1
-      assert state.pending_sync == MapSet.new([first_id])
-      assert state.pending_entry_orders[first_id] == %{first: 0, latest: 1}
+      assert state.pending_sync == MapSet.new()
+      assert state.pending_entry_orders == %{}
+      assert state.pending_group_members == %{}
       assert state.next_insertion_sequence == 2
       assert {:error, :not_found} = Index.get(pid, generated_retry_id)
 
@@ -304,8 +320,128 @@ defmodule Arbor.Memory.IndexDualTest do
                Index.get(pid, first_id)
 
       assert_vector_close(stored_embedding, latest_embedding)
-      assert {:ok, 1} = Index.sync_to_persistent(pid)
       assert {:ok, %{id: ^first_id}} = Embedding.get(agent_id, first_id)
+      assert {:ok, 0} = Index.sync_to_persistent(pid)
+    end
+
+    test "ack-loss regression: same-content eager error retains one retryable authority at max one" do
+      agent_id = durable_unique("test_dual_ack_loss_capacity")
+      suffix = :crypto.strong_rand_bytes(8) |> Base.encode16(case: :lower)
+      first_id = "mem_z_#{suffix}"
+      retry_id = "mem_a_#{suffix}"
+
+      MaliciousWriter.configure(
+        agent_id,
+        {:store_sequence, [{:error, :injected_eager_failure}, {:exit, :injected_commit_ack_loss}]}
+      )
+
+      {:ok, pid} =
+        Index.start_link(
+          agent_id: agent_id,
+          backend: :dual,
+          max_entries: 1,
+          persistent_writer: MaliciousWriter,
+          entry_id_generator: sequence_callback([first_id, retry_id]),
+          name: {:via, Registry, {Arbor.Memory.Registry, {:test_ack_loss_capacity, agent_id}}}
+        )
+
+      on_exit(fn ->
+        MaliciousWriter.disarm(agent_id)
+        if Process.alive?(pid), do: GenServer.stop(pid)
+        Embedding.delete_all(agent_id)
+      end)
+
+      content = "Ack loss at capacity"
+      latest_embedding = generate_embedding(97)
+
+      assert {:ok, ^first_id} =
+               Index.index(pid, content, %{type: :first}, embedding: generate_embedding(96))
+
+      assert {:ok, ^retry_id} =
+               Index.index(pid, content, %{type: :latest}, embedding: latest_embedding)
+
+      state = :sys.get_state(pid)
+      assert state.entry_count == 1
+      assert state.pending_sync == MapSet.new([first_id])
+      assert state.pending_entry_orders == %{first_id => %{first: 0, latest: 1}}
+      assert state.pending_group_members == %{first_id => MapSet.new([first_id, retry_id])}
+      assert state.id_aliases == %{retry_id => first_id}
+      assert state.next_insertion_sequence == 2
+
+      for acknowledged_id <- [first_id, retry_id] do
+        assert {:ok, %{id: ^first_id, metadata: %{type: :latest}, embedding: stored_embedding}} =
+                 Index.get(pid, acknowledged_id)
+
+        assert_vector_close(stored_embedding, latest_embedding)
+      end
+
+      MaliciousWriter.configure(agent_id, :delegate)
+      assert {:ok, 2} = Index.sync_to_persistent(pid)
+
+      assert {:ok, %{id: ^first_id, metadata: %{"type" => "latest"}}} =
+               Embedding.get(agent_id, first_id)
+
+      assert :ok = Index.delete(pid, retry_id)
+      assert {:error, :not_found} = Index.get(pid, first_id)
+      assert {:error, :not_found} = Index.get(pid, retry_id)
+    end
+
+    test "ack-loss regression: same-content batch fallback uses one tight-capacity authority" do
+      agent_id = durable_unique("test_dual_batch_ack_loss_capacity")
+      suffix = :crypto.strong_rand_bytes(8) |> Base.encode16(case: :lower)
+      first_id = "mem_z_#{suffix}"
+      latest_id = "mem_a_#{suffix}"
+      MaliciousWriter.configure(agent_id, :fail)
+
+      {:ok, pid} =
+        Index.start_link(
+          agent_id: agent_id,
+          backend: :dual,
+          max_entries: 1,
+          persistent_writer: MaliciousWriter,
+          entry_id_generator: sequence_callback([first_id, latest_id]),
+          name:
+            {:via, Registry, {Arbor.Memory.Registry, {:test_batch_ack_loss_capacity, agent_id}}}
+        )
+
+      on_exit(fn ->
+        MaliciousWriter.disarm(agent_id)
+        if Process.alive?(pid), do: GenServer.stop(pid)
+        Embedding.delete_all(agent_id)
+      end)
+
+      content = "Batch ack loss at capacity"
+      embedding = generate_embedding(98)
+
+      assert {:ok, [^first_id, ^latest_id]} =
+               Index.batch_index(
+                 pid,
+                 [{content, %{type: :first}}, {content, %{type: :latest}}],
+                 embedding: embedding
+               )
+
+      state = :sys.get_state(pid)
+      assert state.entry_count == 1
+      assert state.pending_sync == MapSet.new([first_id])
+      assert state.pending_entry_orders == %{first_id => %{first: 0, latest: 1}}
+      assert state.pending_group_members == %{first_id => MapSet.new([first_id, latest_id])}
+      assert state.id_aliases == %{latest_id => first_id}
+      assert state.next_insertion_sequence == 2
+
+      for acknowledged_id <- [first_id, latest_id] do
+        assert {:ok, %{id: ^first_id, metadata: %{type: :latest}}} =
+                 Index.get(pid, acknowledged_id)
+      end
+
+      MaliciousWriter.configure(agent_id, :delegate)
+      assert {:ok, 2} = Index.sync_to_persistent(pid)
+
+      assert {:ok, %{id: ^first_id, metadata: %{"type" => "latest"}}} =
+               Embedding.get(agent_id, first_id)
+
+      assert :ok = Index.delete(pid, latest_id)
+      assert {:error, :not_found} = Index.get(pid, first_id)
+      assert {:error, :not_found} = Index.get(pid, latest_id)
     end
 
     test "capacity regression: same-content batch dedupe reserves authoritative groups only" do
@@ -888,7 +1024,22 @@ defmodule Arbor.Memory.IndexDualTest do
       assert middle_id < latest_id
       assert MapSet.size(MapSet.new([first_id, unrelated_id, middle_id, latest_id])) == 4
       assert Embedding.count(agent_id) == 0
-      assert Index.stats(pid).entry_count == 4
+      assert Index.stats(pid).entry_count == 2
+
+      state = :sys.get_state(pid)
+      assert state.pending_sync == MapSet.new([first_id, unrelated_id])
+
+      assert state.pending_group_members[first_id] ==
+               MapSet.new([first_id, middle_id, latest_id])
+
+      assert state.pending_group_members[unrelated_id] == MapSet.new([unrelated_id])
+      assert state.id_aliases[middle_id] == first_id
+      assert state.id_aliases[latest_id] == first_id
+
+      for acknowledged_id <- [first_id, middle_id, latest_id] do
+        assert {:ok, %{id: ^first_id, metadata: %{type: :latest}}} =
+                 Index.get(pid, acknowledged_id)
+      end
 
       assert {:ok, 4} = Index.sync_to_persistent(pid)
       assert Embedding.count(agent_id) == 2
@@ -939,7 +1090,7 @@ defmodule Arbor.Memory.IndexDualTest do
       assert Index.stats(pid).entry_count == 0
     end
 
-    test "authority regression: eager dedupe preserves first identity and refreshes latest value" do
+    test "authority regression: eager success converges every same-content local identity" do
       agent_id = durable_unique("test_dual_eager_pending_order")
       suffix = :crypto.strong_rand_bytes(8) |> Base.encode16(case: :lower)
       first_id = "mem_z_#{suffix}"
@@ -952,7 +1103,7 @@ defmodule Arbor.Memory.IndexDualTest do
          [
            {:error, :injected_eager_failure},
            {:error, :injected_eager_failure},
-           {:ok, first_id}
+           {:delegate_as, first_id}
          ]}
       )
 
@@ -1005,9 +1156,17 @@ defmodule Arbor.Memory.IndexDualTest do
                Index.get(pid, first_id)
 
       assert_vector_close(local_vector, latest_embedding)
-      assert Embedding.count(agent_id) == 0
+      assert {:ok, %{id: ^first_id, metadata: %{type: :latest}}} = Index.get(pid, second_id)
 
-      assert {:ok, 2} = Index.sync_to_persistent(pid)
+      state = :sys.get_state(pid)
+      assert state.entry_count == 1
+      assert state.pending_sync == MapSet.new()
+      assert state.pending_entry_orders == %{}
+      assert state.pending_group_members == %{}
+      assert state.id_aliases == %{second_id => first_id}
+      assert state.next_insertion_sequence == 3
+      assert Embedding.count(agent_id) == 1
+      assert {:ok, 0} = Index.sync_to_persistent(pid)
 
       assert {:ok, %{id: ^first_id, metadata: %{value: "latest"}, embedding: persisted_vector}} =
                Index.get(pid, second_id)
@@ -1027,8 +1186,9 @@ defmodule Arbor.Memory.IndexDualTest do
       suffix = :crypto.strong_rand_bytes(8) |> Base.encode16(case: :lower)
       first_id = "mem_z_#{suffix}"
       latest_id = "mem_a_#{suffix}"
-      rejected_id = "mem_rejected_#{suffix}"
       unrelated_id = "mem_unrelated_#{suffix}"
+      rejected_id = "mem_rejected_#{suffix}"
+      second_unrelated_id = "mem_unrelated_again_#{suffix}"
       second_rejected_id = "mem_rejected_again_#{suffix}"
 
       FailFirstWriter.arm(agent_id, 3)
@@ -1043,8 +1203,9 @@ defmodule Arbor.Memory.IndexDualTest do
             sequence_callback([
               first_id,
               latest_id,
-              rejected_id,
               unrelated_id,
+              rejected_id,
+              second_unrelated_id,
               second_rejected_id
             ]),
           name: {:via, Registry, {Arbor.Memory.Registry, {:test_pending_capacity, agent_id}}}
@@ -1066,18 +1227,17 @@ defmodule Arbor.Memory.IndexDualTest do
       assert {:ok, ^latest_id} =
                Index.index(pid, content, %{type: :latest}, embedding: latest_embedding)
 
-      assert {:error, :capacity_exceeded} =
-               Index.index(pid, "Rejected while all pending", %{type: :rejected},
+      assert {:ok, ^unrelated_id} =
+               Index.index(pid, "Unrelated pending", %{type: :unrelated},
                  embedding: generate_embedding(78)
                )
 
-      assert Index.stats(pid).entry_count == 2
-      assert {:ok, %{id: ^first_id, metadata: %{type: :first}}} = Index.get(pid, first_id)
-      assert {:ok, %{id: ^latest_id, metadata: %{type: :latest}}} = Index.get(pid, latest_id)
-      assert {:error, :not_found} = Index.get(pid, rejected_id)
+      assert {:error, :capacity_exceeded} =
+               Index.index(pid, "Rejected while all pending", %{type: :rejected},
+                 embedding: generate_embedding(79)
+               )
 
-      assert {:ok, 2} = Index.sync_to_persistent(pid)
-      assert Index.stats(pid).entry_count == 1
+      assert Index.stats(pid).entry_count == 2
 
       for acknowledged_id <- [first_id, latest_id] do
         assert {:ok, %{id: ^first_id, metadata: %{type: :latest}, embedding: stored_embedding}} =
@@ -1086,21 +1246,35 @@ defmodule Arbor.Memory.IndexDualTest do
         assert_vector_close(stored_embedding, latest_embedding)
       end
 
+      assert {:ok, %{id: ^unrelated_id, metadata: %{type: :unrelated}}} =
+               Index.get(pid, unrelated_id)
+
+      assert {:error, :not_found} = Index.get(pid, rejected_id)
+
+      assert {:ok, 3} = Index.sync_to_persistent(pid)
+      assert Index.stats(pid).entry_count == 2
+
       assert {:ok, persisted} = Embedding.get(agent_id, first_id)
       assert persisted.metadata["type"] == "latest"
       assert_vector_close(Pgvector.to_list(persisted.embedding), latest_embedding)
+      assert {:ok, %{id: ^unrelated_id}} = Embedding.get(agent_id, unrelated_id)
 
-      assert {:ok, ^unrelated_id} =
-               Index.index(pid, "Unrelated pending", %{type: :unrelated},
-                 embedding: generate_embedding(79)
+      assert :ok = Index.delete(pid, unrelated_id)
+      assert Index.stats(pid).entry_count == 1
+
+      FailFirstWriter.arm(agent_id)
+
+      assert {:ok, ^second_unrelated_id} =
+               Index.index(pid, "Second unrelated pending", %{type: :unrelated_again},
+                 embedding: generate_embedding(80)
                )
 
       assert {:error, :capacity_exceeded} =
                Index.index(pid, "Rejected beside alias", %{type: :rejected_again},
-                 embedding: generate_embedding(80)
+                 embedding: generate_embedding(81)
                )
 
-      for acknowledged_id <- [first_id, latest_id, unrelated_id] do
+      for acknowledged_id <- [first_id, latest_id, second_unrelated_id] do
         assert {:ok, _entry} = Index.get(pid, acknowledged_id)
       end
 
@@ -1108,14 +1282,16 @@ defmodule Arbor.Memory.IndexDualTest do
       assert Index.stats(pid).entry_count == 2
 
       assert {:ok, 1} = Index.sync_to_persistent(pid)
-      assert {:ok, %{id: ^unrelated_id}} = Embedding.get(agent_id, unrelated_id)
+
+      assert {:ok, %{id: ^second_unrelated_id}} =
+               Embedding.get(agent_id, second_unrelated_id)
 
       assert :ok = Index.delete(pid, latest_id)
       assert {:error, :not_found} = Index.get(pid, first_id)
       assert {:error, :not_found} = Index.get(pid, latest_id)
-      assert {:ok, %{id: ^unrelated_id}} = Index.get(pid, unrelated_id)
+      assert {:ok, %{id: ^second_unrelated_id}} = Index.get(pid, second_unrelated_id)
 
-      assert :ok = Index.delete(pid, unrelated_id)
+      assert :ok = Index.delete(pid, second_unrelated_id)
       assert Index.stats(pid).entry_count == 0
     end
 
