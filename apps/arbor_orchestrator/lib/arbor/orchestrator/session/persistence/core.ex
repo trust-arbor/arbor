@@ -16,6 +16,7 @@ defmodule Arbor.Orchestrator.Session.Persistence.Core do
   @assistant_text_context_keys ["session.response", "last_response"]
   @assistant_tool_context_keys ["session.tool_calls"]
   @partial_statuses [:interrupted, :cancelled, :failed]
+  @prompt_roles ~w(system user assistant tool)
 
   @type entry :: map()
 
@@ -83,6 +84,72 @@ defmodule Arbor.Orchestrator.Session.Persistence.Core do
   end
 
   def build_turn_entries(_params), do: {:error, :invalid_turn_entries}
+
+  @doc "Build the labeled live Session projection for one admitted turn."
+  @spec build_live_turn_messages(map()) ::
+          {:ok,
+           %{
+             messages: [map()],
+             user_message: map(),
+             assistant_message: map() | nil
+           }}
+          | {:error, atom()}
+  def build_live_turn_messages(params) when is_map(params) do
+    history = Map.fetch!(params, :history)
+    user_message = Map.fetch!(params, :user_message)
+    assistant_projection = Map.get(params, :assistant_projection)
+    assistant_message = Map.fetch!(params, :assistant_message)
+    run_result = Map.get(params, :run_result)
+
+    with true <- is_list(history),
+         true <- is_map(user_message),
+         true <- is_nil(assistant_projection) or is_map(assistant_projection),
+         %AssistantMessage{} <- assistant_message,
+         {:ok, user_taint, assistant_taint} <-
+           derive_turn_taints(
+             message_content(user_message),
+             assistant_message,
+             run_result
+           ) do
+      labeled_user = label_live_message(user_message, user_taint)
+
+      labeled_assistant =
+        if is_map(assistant_projection) do
+          label_live_message(assistant_projection, assistant_taint)
+        end
+
+      messages = history ++ [labeled_user] ++ List.wrap(labeled_assistant)
+
+      {:ok,
+       %{
+         messages: messages,
+         user_message: labeled_user,
+         assistant_message: labeled_assistant
+       }}
+    else
+      _ -> {:error, :live_turn_provenance_unavailable}
+    end
+  rescue
+    _ -> {:error, :invalid_live_turn}
+  catch
+    _, _ -> {:error, :invalid_live_turn}
+  end
+
+  def build_live_turn_messages(_params), do: {:error, :invalid_live_turn}
+
+  @doc "Project Session messages to JSON-clean role/content maps for Engine and providers."
+  @spec prompt_messages([term()]) :: [map()]
+  def prompt_messages(messages) when is_list(messages) do
+    Enum.reduce(messages, [], fn message, acc ->
+      case prompt_message(message) do
+        {:ok, projected} -> [projected | acc]
+        :error -> acc
+      end
+    end)
+    |> Enum.reverse()
+  end
+
+  def prompt_messages(_messages), do: []
 
   @doc "Wrap text in the canonical SessionEntry content-block representation."
   @spec wrap_content(term()) :: list()
@@ -205,6 +272,61 @@ defmodule Arbor.Orchestrator.Session.Persistence.Core do
   end
 
   defp metadata_has_taint?(_metadata), do: false
+
+  defp label_live_message(message, taint) do
+    message
+    |> Map.drop([:taint, "taint", :taint_status, "taint_status"])
+    |> Map.put("taint", taint)
+    |> Map.put("taint_status", :verified)
+  end
+
+  defp prompt_message(message) when is_map(message) do
+    with {:ok, role} <- unambiguous_message_field(message, :role),
+         {:ok, role} <- normalize_prompt_role(role),
+         {:ok, content} <- unambiguous_message_field(message, :content),
+         true <- json_clean?(content) do
+      {:ok, %{"role" => role, "content" => content}}
+    else
+      _ -> :error
+    end
+  end
+
+  defp prompt_message(_message), do: :error
+
+  defp unambiguous_message_field(message, key) do
+    string_key = Atom.to_string(key)
+
+    case {Map.fetch(message, key), Map.fetch(message, string_key)} do
+      {{:ok, _value}, {:ok, _other}} -> :error
+      {{:ok, value}, :error} -> {:ok, value}
+      {:error, {:ok, value}} -> {:ok, value}
+      {:error, :error} -> :error
+    end
+  end
+
+  defp normalize_prompt_role(role) when is_atom(role),
+    do: role |> Atom.to_string() |> normalize_prompt_role()
+
+  defp normalize_prompt_role(role) when role in @prompt_roles, do: {:ok, role}
+  defp normalize_prompt_role(_role), do: :error
+
+  defp json_clean?(value) when is_binary(value), do: String.valid?(value)
+
+  defp json_clean?(value)
+       when is_integer(value) or is_float(value) or is_boolean(value) or is_nil(value),
+       do: true
+
+  defp json_clean?(value) when is_atom(value), do: true
+
+  defp json_clean?(value) when is_map(value) and not is_struct(value) do
+    Enum.all?(value, fn {key, nested} ->
+      ((is_binary(key) and String.valid?(key)) or is_atom(key)) and json_clean?(nested)
+    end)
+  end
+
+  defp json_clean?([]), do: true
+  defp json_clean?([head | tail]), do: json_clean?(head) and json_clean?(tail)
+  defp json_clean?(_value), do: false
 
   defp derive_turn_taints(
          user_content,

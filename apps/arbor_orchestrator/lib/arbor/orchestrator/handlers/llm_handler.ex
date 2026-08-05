@@ -1253,8 +1253,8 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
     msgs
     |> Enum.reject(&empty_assistant?/1)
     |> Enum.map(fn
-      %Message{} = m ->
-        m
+      %Message{role: role, content: content} ->
+        Message.new(role, content)
 
       %{"role" => role, "content" => content} ->
         Message.new(String.to_existing_atom(role), content)

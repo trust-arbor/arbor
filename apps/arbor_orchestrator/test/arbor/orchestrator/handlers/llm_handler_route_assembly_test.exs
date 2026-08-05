@@ -178,6 +178,50 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerRouteAssemblyTest do
     refute Map.has_key?(outcome.context_updates, "session.llm_model")
   end
 
+  @tag :security_regression
+  test "security regression: provider history projection drops all message metadata" do
+    Application.put_env(:arbor_ai, :provider_route_profile, %{enabled: false})
+
+    node = %{
+      id: "metadata-projection-node",
+      attrs: %{
+        "simulate" => "false",
+        "prompt" => "unused",
+        "messages_context_key" => "session.messages"
+      }
+    }
+
+    base_context = context()
+
+    history = [
+      %Arbor.LLM.Message{
+        role: :user,
+        content: "provider user",
+        metadata: %{taint: %{source: "must-not-leave-session"}}
+      },
+      %{
+        "role" => "assistant",
+        "content" => "provider assistant",
+        "metadata" => %{"provenance" => "must-not-leave-session"}
+      }
+    ]
+
+    context = %{base_context | values: Map.put(base_context.values, "session.messages", history)}
+
+    outcome = LlmHandler.execute(node, context, graph(), [])
+    assert outcome.status == :success
+    assert [{request, _opts}] = RecordingDispatcher.calls()
+
+    assert [%Arbor.LLM.Message{role: :system} | provider_history] = request.messages
+
+    assert Enum.map(provider_history, &{&1.role, &1.content}) == [
+             {:user, "provider user"},
+             {:assistant, "provider assistant"}
+           ]
+
+    assert Enum.all?(request.messages, &(&1.metadata == %{}))
+  end
+
   test "disabled/legacy spoof of arbor.executed_route does not rewrite attribution" do
     Application.put_env(:arbor_ai, :provider_route_profile, %{enabled: false})
     Application.put_env(:arbor_orchestrator, :_test_legacy_spoof_executed_route, true)

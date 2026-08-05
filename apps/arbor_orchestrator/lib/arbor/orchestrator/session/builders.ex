@@ -14,8 +14,9 @@ defmodule Arbor.Orchestrator.Session.Builders do
 
   alias Arbor.Orchestrator.Engine
   alias Arbor.Orchestrator.Session.ContextBuilder
-  alias Arbor.Orchestrator.Session.ResultProcessor
   alias Arbor.Orchestrator.Session.Persistence
+  alias Arbor.Orchestrator.Session.Persistence.Core, as: PersistenceCore
+  alias Arbor.Orchestrator.Session.ResultProcessor
 
   # ── Compactor initialization ─────────────────────────────────────────
 
@@ -45,9 +46,13 @@ defmodule Arbor.Orchestrator.Session.Builders do
       "timestamp" => DateTime.to_iso8601(now)
     }
 
-    # Use compactor's projected view if available, otherwise all messages
-    messages = ContextBuilder.compactor_llm_messages(state)
-    messages_with_input = messages ++ [user_msg]
+    # Session owns the rich provenance-carrying history. Engine and providers
+    # receive only its JSON-clean prompt projection.
+    messages_with_input =
+      state
+      |> ContextBuilder.compactor_llm_messages()
+      |> Kernel.++([user_msg])
+      |> PersistenceCore.prompt_messages()
 
     base = ContextBuilder.session_base_values(state)
 
@@ -296,11 +301,11 @@ defmodule Arbor.Orchestrator.Session.Builders do
       end
 
     # ── Functional core ──────────────────────────────────────────────────────
-    # Every *decision* about what this turn becomes — display messages, the typed
-    # assistant envelope, the new message list, working memory, turn count, and
-    # persistence timestamps — is made here, purely, in one call. (The assistant
-    # display msg gets `now`; the user msg its real send time, so they diverge
-    # and the SessionStore query gets a real ordering.)
+    # SessionCore decides the turn payloads, working memory, count, and
+    # timestamps. PersistenceCore then attaches source-owned labels while
+    # retaining the Session-owned history outside Engine context.
+    history = ContextBuilder.compactor_llm_messages(state)
+
     commit =
       SessionCore.commit_turn(%{
         message: message,
@@ -312,6 +317,22 @@ defmodule Arbor.Orchestrator.Session.Builders do
         user_sent_at: user_sent_at,
         envelope_builder: &AssistantMessage.from_result_ctx/3
       })
+
+    {:ok, live_turn} =
+      PersistenceCore.build_live_turn_messages(%{
+        history: history,
+        user_message: commit.user_msg,
+        assistant_projection: commit.assistant_msg,
+        assistant_message: commit.assistant_message,
+        run_result: result
+      })
+
+    commit = %{
+      commit
+      | messages: live_turn.messages,
+        user_msg: live_turn.user_message,
+        assistant_msg: live_turn.assistant_message
+    }
 
     # ── Imperative shell ─────────────────────────────────────────────────────
     # Side effects + state adoption, driven entirely by the pure commit.

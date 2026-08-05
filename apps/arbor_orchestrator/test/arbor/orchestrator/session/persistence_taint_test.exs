@@ -322,13 +322,22 @@ defmodule Arbor.Orchestrator.Session.PersistenceTaintTest do
   describe "persistence shell" do
     test "the turn builder carries admitted Engine taint into the atomic batch" do
       parent = self()
+      prior_taint = taint("prior_live_message", :untrusted, :internal, 0, :unverified)
       input_taint = taint("wired_input", :untrusted, :internal, 0, :unverified)
       output_taint = taint("wired_output", :derived, :internal, 0, :plausible)
+
+      prior_message = %{
+        "role" => "assistant",
+        "content" => "prior live message",
+        "taint" => prior_taint,
+        "taint_status" => :verified
+      }
 
       state = %Arbor.Orchestrator.Session{
         session_id: "tenant-session-builder",
         agent_id: "agent-builder-owner",
         current_engagement_id: "engagement-c6a",
+        messages: [prior_message],
         adapters: %{
           ensure_session: fn session_id, agent_id, [] ->
             {:ok, %{id: "builder-session-uuid", session_id: session_id, agent_id: agent_id}}
@@ -359,6 +368,12 @@ defmodule Arbor.Orchestrator.Session.PersistenceTaintTest do
       updated = Builders.apply_turn_result(state, "builder user", result)
       assert updated.turn_count == 1
 
+      assert [^prior_message, live_user, live_assistant] = updated.messages
+      assert live_user["content"] == "builder user"
+      assert live_assistant["content"] == "builder assistant"
+      assert live_user["taint_status"] == :verified
+      assert live_assistant["taint_status"] == :verified
+
       assert_receive {:builder_batch, "builder-session-uuid", [user_entry, assistant_entry]},
                      1_000
 
@@ -375,6 +390,38 @@ defmodule Arbor.Orchestrator.Session.PersistenceTaintTest do
 
       assert source_labels(assistant_envelope.taint) ==
                MapSet.new(["wired_input", "wired_output"])
+
+      assert live_user["taint"] == user_envelope.taint
+      assert live_assistant["taint"] == assistant_envelope.taint
+    end
+
+    @tag :security_regression
+    test "security regression: Engine message context contains role and content only" do
+      history_taint = taint("session_owned_history", :hostile, :restricted, 0, :unverified)
+
+      state = %Arbor.Orchestrator.Session{
+        session_id: "tenant-session-prompt-projection",
+        agent_id: "agent-prompt-projection",
+        messages: [
+          %{
+            "role" => "user",
+            "content" => "labeled history",
+            "timestamp" => "2026-08-05T12:00:00Z",
+            "metadata" => %{"taint" => %{"durable" => "envelope"}},
+            "taint" => history_taint,
+            "taint_status" => :verified
+          }
+        ]
+      }
+
+      values = Builders.build_turn_values(state, "new input", @completed_at)
+
+      assert values["session.messages"] == [
+               %{"role" => "user", "content" => "labeled history"},
+               %{"role" => "user", "content" => "new input"}
+             ]
+
+      assert {:ok, _canonical_json} = TaintEnvelope.canonical_json(values)
     end
 
     test "preserves session ownership and refuses to append after an owner mismatch" do
