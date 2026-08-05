@@ -120,12 +120,20 @@ defmodule Arbor.Memory.KnowledgeGraph do
           metadata: map()
         }
 
+  @type operation_receipt :: %{
+          kind: String.t(),
+          fingerprint: String.t(),
+          result: String.t()
+        }
+
   @type t :: %__MODULE__{
           agent_id: String.t(),
           nodes: %{node_id() => knowledge_node()},
           edges: %{node_id() => [edge()]},
           pending_facts: [pending_item()],
           pending_learnings: [pending_item()],
+          operation_receipts: %{String.t() => operation_receipt()},
+          operation_receipt_order: [String.t()],
           config: map(),
           active_set: [node_id()],
           max_active: non_neg_integer(),
@@ -141,6 +149,8 @@ defmodule Arbor.Memory.KnowledgeGraph do
     edges: %{},
     pending_facts: [],
     pending_learnings: [],
+    operation_receipts: %{},
+    operation_receipt_order: [],
     config: %{},
     active_set: [],
     max_active: 50,
@@ -264,7 +274,6 @@ defmodule Arbor.Memory.KnowledgeGraph do
     with {:ok, type} <- validate_node_type(node_data),
          {:ok, content} <- validate_content(node_data),
          :ok <- check_quota(graph, type) do
-      skip_dedup = Map.get(node_data, :skip_dedup, false)
       metadata = Map.get(node_data, :metadata, %{})
       text = node_to_text(content, metadata, type)
 
@@ -275,41 +284,49 @@ defmodule Arbor.Memory.KnowledgeGraph do
           nil
         end
 
-      # Check for duplicates unless skipped
-      case maybe_find_duplicate(graph, type, content, embedding, skip_dedup) do
-        {:duplicate, existing_id} ->
-          # Boost existing node instead of creating duplicate
-          boosted = boost_node(graph, existing_id, 0.1)
-          {:ok, boosted, existing_id}
-
-        :no_duplicate ->
-          node_id = generate_node_id(type)
-          now = DateTime.utc_now()
-
-          node = %{
-            id: node_id,
-            type: type,
-            content: content,
-            relevance: Map.get(node_data, :relevance, 1.0),
-            confidence: Map.get(node_data, :confidence, 0.5),
-            access_count: 0,
-            created_at: now,
-            last_accessed: now,
-            metadata: metadata,
-            pinned: Map.get(node_data, :pinned, false),
-            embedding: embedding,
-            cached_tokens: TokenBudget.estimate_tokens(text),
-            referenced_date: Map.get(node_data, :referenced_date)
-          }
-
-          new_graph =
-            %{graph | nodes: Map.put(graph.nodes, node_id, node)}
-            |> maybe_add_to_active_set(node)
-
-          {:ok, new_graph, node_id}
-      end
+      add_validated_node(
+        graph,
+        node_data,
+        type,
+        content,
+        text,
+        embedding,
+        generate_node_id(type),
+        DateTime.utc_now()
+      )
     end
   end
+
+  @doc false
+  @spec add_node_transition(t(), map(), node_id(), DateTime.t()) ::
+          {:ok, t(), node_id()} | {:error, term()}
+  def add_node_transition(graph, node_data, node_id, %DateTime{} = occurred_at) do
+    with {:ok, type} <- validate_node_type(node_data),
+         {:ok, content} <- validate_content(node_data),
+         :ok <- check_quota(graph, type),
+         false <- Map.has_key?(graph.nodes, node_id) do
+      metadata = Map.get(node_data, :metadata, %{})
+      text = node_to_text(content, metadata, type)
+
+      add_validated_node(
+        graph,
+        node_data,
+        type,
+        content,
+        text,
+        nil,
+        node_id,
+        occurred_at
+      )
+    else
+      true -> {:error, :id_conflict}
+      {:error, _reason} = error -> error
+      _ -> {:error, :invalid_graph}
+    end
+  end
+
+  def add_node_transition(_graph, _node_data, _node_id, _occurred_at),
+    do: {:error, :invalid_graph}
 
   @doc """
   Get a node by ID.
@@ -400,6 +417,36 @@ defmodule Arbor.Memory.KnowledgeGraph do
   @spec add_edge(t(), node_id(), node_id(), atom(), keyword()) ::
           {:ok, t()} | {:error, term()}
   def add_edge(graph, source_id, target_id, relationship, opts \\ []) do
+    add_edge_transition(
+      graph,
+      source_id,
+      target_id,
+      relationship,
+      opts,
+      generate_edge_id(),
+      DateTime.utc_now()
+    )
+  end
+
+  @doc false
+  @spec add_edge_transition(
+          t(),
+          node_id(),
+          node_id(),
+          atom(),
+          keyword(),
+          edge_id(),
+          DateTime.t()
+        ) :: {:ok, t()} | {:error, term()}
+  def add_edge_transition(
+        graph,
+        source_id,
+        target_id,
+        relationship,
+        opts,
+        edge_id,
+        %DateTime{} = occurred_at
+      ) do
     with {:ok, _source} <- get_node(graph, source_id),
          {:ok, _target} <- get_node(graph, target_id) do
       existing_edges = Map.get(graph.edges, source_id, [])
@@ -413,12 +460,12 @@ defmodule Arbor.Memory.KnowledgeGraph do
         nil ->
           # New edge
           edge = %{
-            id: generate_edge_id(),
+            id: edge_id,
             source_id: source_id,
             target_id: target_id,
             relationship: relationship,
             strength: strength,
-            created_at: DateTime.utc_now(),
+            created_at: occurred_at,
             metadata: edge_metadata
           }
 
@@ -442,6 +489,17 @@ defmodule Arbor.Memory.KnowledgeGraph do
       end
     end
   end
+
+  def add_edge_transition(
+        _graph,
+        _source_id,
+        _target_id,
+        _relationship,
+        _opts,
+        _edge_id,
+        _occurred_at
+      ),
+      do: {:error, :invalid_graph}
 
   @doc """
   Get all edges from a node.
@@ -529,17 +587,21 @@ defmodule Arbor.Memory.KnowledgeGraph do
   through access-based reinforcement.
   """
   @spec reinforce(t(), node_id()) :: {:ok, t(), knowledge_node()} | {:error, :not_found}
-  def reinforce(graph, node_id) do
+  def reinforce(graph, node_id), do: reinforce_at(graph, node_id, DateTime.utc_now())
+
+  @doc false
+  @spec reinforce_at(t(), node_id(), DateTime.t()) ::
+          {:ok, t(), knowledge_node()} | {:error, :not_found}
+  def reinforce_at(graph, node_id, %DateTime{} = occurred_at) do
     case Map.fetch(graph.nodes, node_id) do
       {:ok, node} ->
-        now = DateTime.utc_now()
         new_relevance = min(1.0, node.relevance + @default_reinforce_amount)
 
         updated_node = %{
           node
           | relevance: new_relevance,
             access_count: node.access_count + 1,
-            last_accessed: now
+            last_accessed: occurred_at
         }
 
         new_graph =
@@ -553,6 +615,8 @@ defmodule Arbor.Memory.KnowledgeGraph do
     end
   end
 
+  def reinforce_at(_graph, _node_id, _occurred_at), do: {:error, :not_found}
+
   @doc """
   Boost a node's relevance by a specific amount.
 
@@ -561,6 +625,13 @@ defmodule Arbor.Memory.KnowledgeGraph do
   """
   @spec boost_node(t(), node_id(), float()) :: t()
   def boost_node(graph, node_id, boost_amount) when is_number(boost_amount) do
+    boost_node_at(graph, node_id, boost_amount, DateTime.utc_now())
+  end
+
+  @doc false
+  @spec boost_node_at(t(), node_id(), number(), DateTime.t()) :: t()
+  def boost_node_at(graph, node_id, boost_amount, %DateTime{} = occurred_at)
+      when is_number(boost_amount) do
     case Map.get(graph.nodes, node_id) do
       nil ->
         graph
@@ -571,13 +642,15 @@ defmodule Arbor.Memory.KnowledgeGraph do
         updated_node = %{
           node
           | relevance: new_relevance,
-            last_accessed: DateTime.utc_now()
+            last_accessed: occurred_at
         }
 
         %{graph | nodes: Map.put(graph.nodes, node_id, updated_node)}
         |> maybe_add_to_active_set(updated_node)
     end
   end
+
+  def boost_node_at(graph, _node_id, _boost_amount, _occurred_at), do: graph
 
   @doc """
   Get total token count across all nodes in the graph.
@@ -737,6 +810,40 @@ defmodule Arbor.Memory.KnowledgeGraph do
     end
   end
 
+  @doc false
+  @spec approve_pending_transition(t(), String.t(), String.t(), DateTime.t()) ::
+          {:ok, t(), node_id()} | {:error, term()}
+  def approve_pending_transition(graph, pending_id, id_nonce, %DateTime{} = occurred_at)
+      when is_binary(id_nonce) do
+    case find_and_remove_pending(graph, pending_id) do
+      {:ok, pending, new_graph} ->
+        node_type = pending_type_to_node_type(pending.type)
+
+        add_node_transition(
+          new_graph,
+          %{
+            type: node_type,
+            content: pending.content,
+            metadata:
+              Map.merge(pending.metadata, %{
+                :source => pending.source,
+                :original_confidence => pending.confidence,
+                "$arbor_accepted_proposal_id" => pending_id
+              }),
+            skip_dedup: true
+          },
+          "node_#{node_type}_#{id_nonce}",
+          occurred_at
+        )
+
+      :error ->
+        {:error, :not_found}
+    end
+  end
+
+  def approve_pending_transition(_graph, _pending_id, _id_nonce, _occurred_at),
+    do: {:error, :invalid_graph}
+
   @doc """
   Reject a pending item (remove without adding to graph).
   """
@@ -828,6 +935,8 @@ defmodule Arbor.Memory.KnowledgeGraph do
       edges: graph.edges,
       pending_facts: graph.pending_facts,
       pending_learnings: graph.pending_learnings,
+      operation_receipts: graph.operation_receipts,
+      operation_receipt_order: graph.operation_receipt_order,
       config: graph.config,
       active_set: graph.active_set,
       max_active: graph.max_active,
@@ -852,6 +961,8 @@ defmodule Arbor.Memory.KnowledgeGraph do
       edges: edges,
       pending_facts: get_field(data, :pending_facts, []),
       pending_learnings: get_field(data, :pending_learnings, []),
+      operation_receipts: get_field(data, :operation_receipts, %{}),
+      operation_receipt_order: get_field(data, :operation_receipt_order, []),
       config: get_field(data, :config, %{}),
       active_set: get_field(data, :active_set, []),
       max_active: get_field(data, :max_active, 50),
@@ -865,6 +976,47 @@ defmodule Arbor.Memory.KnowledgeGraph do
   # ============================================================================
   # Private Helpers
   # ============================================================================
+
+  defp add_validated_node(
+         graph,
+         node_data,
+         type,
+         content,
+         text,
+         embedding,
+         node_id,
+         occurred_at
+       ) do
+    skip_dedup = Map.get(node_data, :skip_dedup, false)
+
+    case maybe_find_duplicate(graph, type, content, embedding, skip_dedup) do
+      {:duplicate, existing_id} ->
+        {:ok, boost_node_at(graph, existing_id, 0.1, occurred_at), existing_id}
+
+      :no_duplicate ->
+        node = %{
+          id: node_id,
+          type: type,
+          content: content,
+          relevance: Map.get(node_data, :relevance, 1.0),
+          confidence: Map.get(node_data, :confidence, 0.5),
+          access_count: 0,
+          created_at: occurred_at,
+          last_accessed: occurred_at,
+          metadata: Map.get(node_data, :metadata, %{}),
+          pinned: Map.get(node_data, :pinned, false),
+          embedding: embedding,
+          cached_tokens: TokenBudget.estimate_tokens(text),
+          referenced_date: Map.get(node_data, :referenced_date)
+        }
+
+        new_graph =
+          %{graph | nodes: Map.put(graph.nodes, node_id, node)}
+          |> maybe_add_to_active_set(node)
+
+        {:ok, new_graph, node_id}
+    end
+  end
 
   # Deserialization helpers for from_map/1
 

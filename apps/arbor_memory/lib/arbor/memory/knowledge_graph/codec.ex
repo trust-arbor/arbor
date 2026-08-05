@@ -11,6 +11,7 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
   # ceiling even when every label has a maximum-length provenance chain.
   @max_content_items 64
   @max_edges 256
+  @max_operation_receipts 256
   @max_identifier_bytes 256
   @max_generic_nodes 512
   @max_generic_depth 16
@@ -21,7 +22,8 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
   @entry_keys ~w(envelope status)
   @payload_keys ~w(
     active_set agent_id config dedup_threshold edges last_decay_at max_active
-    max_tokens nodes pending_facts pending_learnings type_quotas
+    max_tokens nodes operation_receipt_order operation_receipts pending_facts
+    pending_learnings type_quotas
   )
   @node_keys ~w(
     access_count cached_tokens confidence content created_at id last_accessed metadata
@@ -29,6 +31,8 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
   )
   @edge_keys ~w(created_at id metadata relationship source_id strength target_id)
   @pending_keys ~w(confidence content extracted_at id metadata source type)
+  @operation_receipt_keys ~w(fingerprint kind result)
+  @operation_kinds ~w(add_edge add_node approve_pending cascade_recall reinforce reject_pending)
   @config_keys ~w(auto_embed decay_rate max_nodes_per_type prune_threshold)
   @legacy_node_keys @node_keys ++ ["embedding"]
   @legacy_edge_keys @edge_keys ++ ["weight"]
@@ -189,6 +193,12 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
          {:ok, edges} <- encode_edges(graph.edges, Map.keys(nodes)),
          {:ok, pending_facts} <- encode_pending(graph.pending_facts, :fact),
          {:ok, pending_learnings} <- encode_pending(graph.pending_learnings, :learning),
+         {:ok, operation_receipts} <- encode_operation_receipts(graph.operation_receipts),
+         {:ok, operation_receipt_order} <-
+           encode_operation_receipt_order(
+             graph.operation_receipt_order,
+             operation_receipts
+           ),
          {:ok, active_set} <- encode_active_set(graph.active_set, Map.keys(nodes)),
          {:ok, config} <- encode_config(graph.config),
          {:ok, max_tokens} <- encode_max_tokens(graph.max_tokens),
@@ -201,6 +211,8 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
         "edges" => edges,
         "pending_facts" => pending_facts,
         "pending_learnings" => pending_learnings,
+        "operation_receipts" => operation_receipts,
+        "operation_receipt_order" => operation_receipt_order,
         "config" => config,
         "active_set" => active_set,
         "max_active" => graph.max_active,
@@ -506,6 +518,13 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
          {:ok, pending_facts} <- decode_pending(payload["pending_facts"], :fact),
          {:ok, pending_learnings} <- decode_pending(payload["pending_learnings"], :learning),
          :ok <- ensure_decoded_pending_ids_disjoint(pending_facts, pending_learnings),
+         {:ok, operation_receipts} <-
+           decode_operation_receipts(payload["operation_receipts"]),
+         {:ok, operation_receipt_order} <-
+           decode_operation_receipt_order(
+             payload["operation_receipt_order"],
+             operation_receipts
+           ),
          {:ok, config} <- decode_config(payload["config"]),
          true <- valid_max_active?(payload["max_active"]),
          {:ok, active_set} <- decode_active_set(payload["active_set"], nodes),
@@ -521,6 +540,8 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
          edges: edges,
          pending_facts: pending_facts,
          pending_learnings: pending_learnings,
+         operation_receipts: operation_receipts,
+         operation_receipt_order: operation_receipt_order,
          config: config,
          active_set: active_set,
          max_active: payload["max_active"],
@@ -895,6 +916,104 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
     end
   end
 
+  defp encode_operation_receipts(receipts)
+       when is_map(receipts) and not is_struct(receipts) and
+              map_size(receipts) <= @max_operation_receipts do
+    Enum.reduce_while(receipts, {:ok, %{}}, fn {operation_id, receipt}, {:ok, acc} ->
+      with :ok <- validate_identifier(operation_id),
+           {:ok, normalized} <- normalize_operation_receipt(receipt) do
+        encoded = %{
+          "kind" => normalized.kind,
+          "fingerprint" => normalized.fingerprint,
+          "result" => normalized.result
+        }
+
+        {:cont, {:ok, Map.put(acc, operation_id, encoded)}}
+      else
+        _ -> {:halt, {:error, :invalid_graph}}
+      end
+    end)
+  end
+
+  defp encode_operation_receipts(_receipts), do: {:error, :graph_limit_exceeded}
+
+  defp decode_operation_receipts(receipts)
+       when is_map(receipts) and not is_struct(receipts) and
+              map_size(receipts) <= @max_operation_receipts do
+    Enum.reduce_while(receipts, {:ok, %{}}, fn {operation_id, receipt}, {:ok, acc} ->
+      with :ok <- validate_identifier(operation_id),
+           true <- exact_string_keys?(receipt, @operation_receipt_keys),
+           {:ok, normalized} <- normalize_operation_receipt(receipt) do
+        {:cont, {:ok, Map.put(acc, operation_id, normalized)}}
+      else
+        _ -> {:halt, {:error, :invalid_graph}}
+      end
+    end)
+  end
+
+  defp decode_operation_receipts(_receipts), do: {:error, :graph_limit_exceeded}
+
+  defp normalize_operation_receipts(receipts)
+       when is_map(receipts) and not is_struct(receipts) and
+              map_size(receipts) <= @max_operation_receipts do
+    Enum.reduce_while(receipts, {:ok, %{}}, fn {operation_id, receipt}, {:ok, acc} ->
+      with :ok <- validate_identifier(operation_id),
+           true <- is_map(receipt) and not is_struct(receipt),
+           :ok <- validate_legacy_map_shape(receipt, @operation_receipt_keys),
+           {:ok, normalized} <- normalize_operation_receipt(receipt) do
+        {:cont, {:ok, Map.put(acc, operation_id, normalized)}}
+      else
+        _ -> {:halt, {:error, :invalid_graph}}
+      end
+    end)
+  end
+
+  defp normalize_operation_receipts(_receipts), do: {:error, :graph_limit_exceeded}
+
+  defp normalize_operation_receipt(receipt) when is_map(receipt) and not is_struct(receipt) do
+    kind = field(receipt, :kind)
+    fingerprint = field(receipt, :fingerprint)
+    result = field(receipt, :result)
+
+    kind = if is_atom(kind), do: Atom.to_string(kind), else: kind
+
+    with true <- kind in @operation_kinds,
+         true <- valid_fingerprint?(fingerprint),
+         :ok <- validate_identifier(result) do
+      {:ok, %{kind: kind, fingerprint: fingerprint, result: result}}
+    else
+      _ -> {:error, :invalid_graph}
+    end
+  end
+
+  defp normalize_operation_receipt(_receipt), do: {:error, :invalid_graph}
+
+  defp encode_operation_receipt_order(order, receipts) do
+    reduce_bounded_list(order, @max_operation_receipts, {:ok, [], MapSet.new()}, fn operation_id,
+                                                                                    {:ok, acc,
+                                                                                     seen} ->
+      with :ok <- validate_identifier(operation_id),
+           true <- Map.has_key?(receipts, operation_id),
+           false <- MapSet.member?(seen, operation_id) do
+        {:ok, [operation_id | acc], MapSet.put(seen, operation_id)}
+      else
+        _ -> {:error, :invalid_graph}
+      end
+    end)
+    |> case do
+      {:ok, reversed, seen} ->
+        if map_size(receipts) == MapSet.size(seen),
+          do: {:ok, Enum.reverse(reversed)},
+          else: {:error, :invalid_graph}
+
+      _ ->
+        {:error, :invalid_graph}
+    end
+  end
+
+  defp decode_operation_receipt_order(order, receipts),
+    do: encode_operation_receipt_order(order, receipts)
+
   defp encode_active_set(active_set, node_ids) do
     node_ids = MapSet.new(node_ids)
 
@@ -948,6 +1067,13 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
          {:ok, fact_ids} <- legacy_pending_preflight(pending_facts, :fact),
          {:ok, learning_ids} <- legacy_pending_preflight(pending_learnings, :learning),
          true <- MapSet.disjoint?(fact_ids, learning_ids),
+         :ok <-
+           legacy_operation_receipts_preflight(field(data, :operation_receipts, %{})),
+         :ok <-
+           legacy_operation_receipt_order_preflight(
+             field(data, :operation_receipt_order, []),
+             field(data, :operation_receipts, %{})
+           ),
          :ok <- legacy_config_preflight(field(data, :config, %{})),
          :ok <- legacy_type_quotas_preflight(field(data, :type_quotas, %{})) do
       :ok
@@ -1024,6 +1150,19 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
         _ -> {:halt, {:error, :invalid_graph}}
       end
     end)
+  end
+
+  defp legacy_operation_receipts_preflight(receipts) do
+    with {:ok, _normalized} <- normalize_operation_receipts(receipts) do
+      :ok
+    end
+  end
+
+  defp legacy_operation_receipt_order_preflight(order, receipts) do
+    with {:ok, receipts} <- normalize_operation_receipts(receipts),
+         {:ok, _order} <- encode_operation_receipt_order(order, receipts) do
+      :ok
+    end
   end
 
   defp legacy_config_preflight(config) when is_map(config) and not is_struct(config) do
@@ -1234,8 +1373,22 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
 
   defp normalize_legacy_graph(%KnowledgeGraph{} = graph) do
     with {:ok, config} <- normalize_legacy_config(graph.config),
-         {:ok, type_quotas} <- normalize_type_quotas(graph.type_quotas) do
-      {:ok, %{graph | config: config, type_quotas: type_quotas}}
+         {:ok, type_quotas} <- normalize_type_quotas(graph.type_quotas),
+         {:ok, operation_receipts} <-
+           normalize_operation_receipts(graph.operation_receipts),
+         {:ok, operation_receipt_order} <-
+           encode_operation_receipt_order(
+             graph.operation_receipt_order,
+             operation_receipts
+           ) do
+      {:ok,
+       %{
+         graph
+         | config: config,
+           type_quotas: type_quotas,
+           operation_receipts: operation_receipts,
+           operation_receipt_order: operation_receipt_order
+       }}
     end
   end
 
@@ -1710,6 +1863,8 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
         :max_active,
         :max_tokens,
         :nodes,
+        :operation_receipts,
+        :operation_receipt_order,
         :pending_facts,
         :pending_learnings,
         :type_quotas
@@ -1724,6 +1879,11 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
   end
 
   defp validate_identifier(_value), do: {:error, :invalid_graph}
+
+  defp valid_fingerprint?(value) when is_binary(value),
+    do: byte_size(value) == 64 and value =~ ~r/\A[0-9a-f]+\z/
+
+  defp valid_fingerprint?(_value), do: false
 
   defp valid_string?(value),
     do: is_binary(value) and String.valid?(value) and byte_size(value) <= 65_536

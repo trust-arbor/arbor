@@ -149,6 +149,19 @@ defmodule Arbor.Memory.KnowledgeGraph.GraphSearch do
           KnowledgeGraph.t()
   def cascade_recall(graph, node_id, boost_amount, opts \\ [])
       when is_number(boost_amount) do
+    cascade_recall_at(graph, node_id, boost_amount, DateTime.utc_now(), opts)
+  end
+
+  @doc false
+  @spec cascade_recall_at(
+          KnowledgeGraph.t(),
+          KnowledgeGraph.node_id(),
+          float(),
+          DateTime.t(),
+          keyword()
+        ) :: KnowledgeGraph.t()
+  def cascade_recall_at(graph, node_id, boost_amount, %DateTime{} = occurred_at, opts \\ [])
+      when is_number(boost_amount) do
     boost_amount = boost_amount / 1
     max_depth = Keyword.get(opts, :max_depth, 3)
     min_boost = Keyword.get(opts, :min_boost, 0.05)
@@ -161,7 +174,8 @@ defmodule Arbor.Memory.KnowledgeGraph.GraphSearch do
       max_depth,
       min_boost,
       decay_factor,
-      MapSet.new()
+      MapSet.new(),
+      occurred_at
     )
   end
 
@@ -620,16 +634,46 @@ defmodule Arbor.Memory.KnowledgeGraph.GraphSearch do
   end
 
   # Spreading activation -- recursive frontier-based
-  defp spread_activation(graph, _frontier, _boost, 0, _min_boost, _decay, _visited), do: graph
-  defp spread_activation(graph, [], _boost, _depth, _min_boost, _decay, _visited), do: graph
+  defp spread_activation(
+         graph,
+         _frontier,
+         _boost,
+         0,
+         _min_boost,
+         _decay,
+         _visited,
+         _occurred_at
+       ),
+       do: graph
 
-  defp spread_activation(graph, frontier, boost, depth, min_boost, decay_factor, visited) do
+  defp spread_activation(
+         graph,
+         [],
+         _boost,
+         _depth,
+         _min_boost,
+         _decay,
+         _visited,
+         _occurred_at
+       ),
+       do: graph
+
+  defp spread_activation(
+         graph,
+         frontier,
+         boost,
+         depth,
+         min_boost,
+         decay_factor,
+         visited,
+         occurred_at
+       ) do
     if boost < min_boost do
       graph
     else
       {graph, next_frontier} =
         Enum.reduce(frontier, {graph, []}, fn node_id, {g, next} ->
-          boost_unvisited_node(g, next, node_id, boost, visited)
+          boost_unvisited_node(g, next, node_id, boost, visited, occurred_at)
         end)
 
       new_visited = Enum.reduce(frontier, visited, &MapSet.put(&2, &1))
@@ -641,16 +685,17 @@ defmodule Arbor.Memory.KnowledgeGraph.GraphSearch do
         depth - 1,
         min_boost,
         decay_factor,
-        new_visited
+        new_visited,
+        occurred_at
       )
     end
   end
 
-  defp boost_unvisited_node(graph, next, node_id, boost, visited) do
+  defp boost_unvisited_node(graph, next, node_id, boost, visited, occurred_at) do
     if node_id in visited do
       {graph, next}
     else
-      graph = KnowledgeGraph.boost_node(graph, node_id, boost)
+      graph = KnowledgeGraph.boost_node_at(graph, node_id, boost, occurred_at)
       neighbors = get_neighbor_ids(graph, node_id) -- MapSet.to_list(visited)
       {graph, neighbors ++ next}
     end
