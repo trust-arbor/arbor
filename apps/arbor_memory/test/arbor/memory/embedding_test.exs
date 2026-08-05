@@ -365,6 +365,36 @@ defmodule Arbor.Memory.EmbeddingTest do
                  inserted.record.id
                ])
     end
+
+    test "authority regression: mixed protected batch rolls back unrelated inserts" do
+      source_key = durable_unique("atomic_conflict")
+      insert = vector_insert_operation!(@test_agent_id, source_key, %{"content" => "owned"})
+      assert {:ok, inserted} = Arbor.Persistence.execute_vector_operation(@test_agent_id, insert)
+
+      protected_content = durable_unique("protected_content")
+      protected_hash = :crypto.hash(:sha256, protected_content) |> Base.encode16(case: :lower)
+
+      Repo.query!("UPDATE memory_embeddings SET content_hash = $1 WHERE id = $2", [
+        protected_hash,
+        inserted.record.id
+      ])
+
+      unrelated_content = durable_unique("must_roll_back")
+
+      assert {:error, :protected_vector_row} =
+               Embedding.store_batch(@test_agent_id, [
+                 {unrelated_content, generate_embedding(31), %{type: "unrelated"}},
+                 {protected_content, generate_embedding(32), %{type: "protected"}}
+               ])
+
+      assert Embedding.count(@test_agent_id) == 0
+
+      assert %{rows: [[0]]} =
+               Repo.query!(
+                 "SELECT COUNT(*) FROM memory_embeddings WHERE agent_id = $1 AND content = $2",
+                 [@test_agent_id, unrelated_content]
+               )
+    end
   end
 
   defp vector_insert_operation!(agent_id, source_key, payload) do

@@ -39,6 +39,12 @@ defmodule Arbor.Memory.Embedding do
   def store_batch(agent_id, entries),
     do: Persistence.store_legacy_embedding_batch(agent_id, entries)
 
+  @doc false
+  @spec store_batch_with_ids(String.t(), [{String.t(), [float()], map()}]) ::
+          {:ok, [String.t()]} | {:error, term()}
+  def store_batch_with_ids(agent_id, entries),
+    do: Persistence.store_legacy_embedding_batch_with_ids(agent_id, entries)
+
   @doc "Fetch one embedding by its durable row ID."
   @spec get(String.t(), String.t()) :: {:ok, map()} | {:error, :not_found}
   def get(agent_id, embedding_id),

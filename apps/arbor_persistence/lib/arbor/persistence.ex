@@ -95,6 +95,10 @@ defmodule Arbor.Persistence do
   def store_legacy_embedding_batch(agent_id, entries),
     do: LegacyEmbeddingStore.store_batch(agent_id, entries)
 
+  @doc "Store a legacy embedding batch and return authoritative IDs in input order."
+  def store_legacy_embedding_batch_with_ids(agent_id, entries),
+    do: LegacyEmbeddingStore.store_batch_with_ids(agent_id, entries)
+
   @doc "Fetch one tenant-owned legacy memory embedding by durable row ID."
   def fetch_legacy_embedding(agent_id, embedding_id),
     do: LegacyEmbeddingStore.get(agent_id, embedding_id)

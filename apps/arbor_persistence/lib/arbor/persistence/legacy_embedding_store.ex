@@ -143,46 +143,24 @@ defmodule Arbor.Persistence.LegacyEmbeddingStore do
 
   @spec store_batch(String.t(), [{String.t(), [float()], map()}]) ::
           {:ok, non_neg_integer()} | {:error, term()}
-  def store_batch(_agent_id, []), do: {:ok, 0}
-
-  def store_batch(agent_id, entries) when is_list(entries) do
-    now = DateTime.utc_now()
-
-    rows =
-      Enum.map(entries, fn {content, embedding, metadata} ->
-        %{
-          id: Identifiers.generate_id("emb_"),
-          agent_id: agent_id,
-          content: content,
-          content_hash: compute_content_hash(content),
-          embedding: Pgvector.new(embedding),
-          memory_type: safe_to_string(get_in(metadata, [:type]) || Map.get(metadata, "type")),
-          source: safe_to_string(get_in(metadata, [:source]) || Map.get(metadata, "source")),
-          metadata: metadata,
-          inserted_at: now,
-          updated_at: now
-        }
-      end)
-
-    try do
-      {count, _} =
-        Repo.insert_all(MemoryEmbedding, rows,
-          on_conflict: legacy_conflict_query(),
-          conflict_target: [:agent_id, :content_hash]
-        )
-
-      if count == length(rows) do
-        Logger.debug("Batch stored #{count} embeddings for agent #{agent_id}")
-        {:ok, count}
-      else
-        {:error, :protected_vector_row}
-      end
-    rescue
-      error ->
-        Logger.error("Batch store failed: #{inspect(error)}")
-        {:error, error}
+  def store_batch(agent_id, entries) do
+    with {:ok, ids} <- store_batch_with_ids(agent_id, entries) do
+      {:ok, length(ids)}
     end
   end
+
+  @spec store_batch_with_ids(String.t(), [{String.t(), [float()], map()}]) ::
+          {:ok, [String.t()]} | {:error, term()}
+  def store_batch_with_ids(_agent_id, []), do: {:ok, []}
+
+  def store_batch_with_ids(agent_id, entries) when is_binary(agent_id) and is_list(entries) do
+    with {:ok, rows} <- build_batch_rows(agent_id, entries),
+         :ok <- validate_distinct_batch_hashes(rows) do
+      transact_batch(agent_id, rows)
+    end
+  end
+
+  def store_batch_with_ids(_agent_id, _entries), do: {:error, :invalid_batch}
 
   @spec get(String.t(), String.t()) :: {:ok, map()} | {:error, :not_found}
   def get(agent_id, embedding_id) do
@@ -253,6 +231,104 @@ defmodule Arbor.Persistence.LegacyEmbeddingStore do
       {:error, changeset} ->
         Logger.warning("Failed to store embedding: #{inspect(changeset.errors)}")
         {:error, changeset.errors}
+    end
+  end
+
+  defp build_batch_rows(agent_id, entries) do
+    now = DateTime.utc_now()
+
+    entries
+    |> Enum.reduce_while({:ok, []}, fn
+      {content, embedding, metadata}, {:ok, rows}
+      when is_binary(content) and is_list(embedding) and is_map(metadata) ->
+        id = Map.get(metadata, :id) || Map.get(metadata, "id") || Identifiers.generate_id("emb_")
+
+        if is_binary(id) do
+          row = %{
+            id: id,
+            agent_id: agent_id,
+            content: content,
+            content_hash: compute_content_hash(content),
+            embedding: Pgvector.new(embedding),
+            memory_type: safe_to_string(get_in(metadata, [:type]) || Map.get(metadata, "type")),
+            source: safe_to_string(get_in(metadata, [:source]) || Map.get(metadata, "source")),
+            metadata: metadata,
+            inserted_at: now,
+            updated_at: now
+          }
+
+          {:cont, {:ok, [row | rows]}}
+        else
+          {:halt, {:error, :invalid_batch}}
+        end
+
+      _invalid, _acc ->
+        {:halt, {:error, :invalid_batch}}
+    end)
+    |> case do
+      {:ok, rows} -> {:ok, Enum.reverse(rows)}
+      error -> error
+    end
+  rescue
+    _error -> {:error, :invalid_batch}
+  end
+
+  defp validate_distinct_batch_hashes(rows) do
+    hashes = Enum.map(rows, & &1.content_hash)
+    if length(hashes) == length(Enum.uniq(hashes)), do: :ok, else: {:error, :invalid_batch}
+  end
+
+  defp transact_batch(agent_id, rows) do
+    case Repo.transaction(fn -> insert_batch_or_rollback(rows) end) do
+      {:ok, ids} ->
+        Logger.debug("Batch stored #{length(ids)} embeddings for agent #{agent_id}")
+        {:ok, ids}
+
+      {:error, :protected_vector_row} ->
+        {:error, :protected_vector_row}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  rescue
+    error ->
+      Logger.error("Batch store failed: #{inspect(error)}")
+      {:error, error}
+  end
+
+  defp insert_batch_or_rollback(rows) do
+    if Enum.any?(rows, &protected_vector_id?(&1.id)) do
+      Repo.rollback(:protected_vector_row)
+    end
+
+    {count, returned_rows} =
+      Repo.insert_all(MemoryEmbedding, rows,
+        on_conflict: legacy_conflict_query(),
+        conflict_target: [:agent_id, :content_hash],
+        returning: [:id, :content_hash]
+      )
+
+    with true <- count == length(rows),
+         true <- length(returned_rows) == length(rows),
+         {:ok, ids} <- authoritative_batch_ids(rows, returned_rows) do
+      ids
+    else
+      _protected_or_malformed -> Repo.rollback(:protected_vector_row)
+    end
+  end
+
+  defp authoritative_batch_ids(rows, returned_rows) do
+    ids_by_hash = Map.new(returned_rows, &{&1.content_hash, &1.id})
+
+    Enum.reduce_while(rows, {:ok, []}, fn row, {:ok, ids} ->
+      case Map.fetch(ids_by_hash, row.content_hash) do
+        {:ok, id} when is_binary(id) -> {:cont, {:ok, [id | ids]}}
+        _missing -> {:halt, {:error, :malformed_return}}
+      end
+    end)
+    |> case do
+      {:ok, ids} -> {:ok, Enum.reverse(ids)}
+      error -> error
     end
   end
 
