@@ -47,6 +47,7 @@ defmodule Arbor.Agent.MessageFacade do
           | :invalid_sender
           | :invalid_engagement_id
           | :unauthorized
+          | :delivery_ambiguous
           | :delivery_failed
 
   @type mode :: :text | :response
@@ -58,8 +59,8 @@ defmodule Arbor.Agent.MessageFacade do
           required(:chat) => (term(), String.t(), keyword() -> term()),
           required(:chat_response) => (term(), String.t(), keyword() -> term()),
           required(:chat_authenticated) => (term(), String.t(), term(), keyword() -> term()),
-          required(:chat_response_authenticated) =>
-            (term(), String.t(), term(), keyword() -> term())
+          required(:chat_response_authenticated) => (term(), String.t(), term(), keyword() ->
+                                                       term())
         }
 
   @doc false
@@ -523,6 +524,17 @@ defmodule Arbor.Agent.MessageFacade do
   defp admit_authenticated_result({:ok, _other}, _mode, _secrets, collaborators, receipt) do
     discard_receipt(collaborators, receipt)
     {:error, :delivery_failed}
+  end
+
+  defp admit_authenticated_result(
+         {:error, :delivery_ambiguous},
+         _mode,
+         _secrets,
+         collaborators,
+         receipt
+       ) do
+    discard_receipt(collaborators, receipt)
+    {:error, :delivery_ambiguous}
   end
 
   defp admit_authenticated_result({:error, _reason}, _mode, _secrets, collaborators, receipt) do

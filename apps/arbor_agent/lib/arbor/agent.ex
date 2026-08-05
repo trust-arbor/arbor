@@ -145,6 +145,8 @@ defmodule Arbor.Agent do
   ## Returns
 
   - `{:ok, reply_text}` when delivery returns a binary reply
+  - `{:error, :delivery_ambiguous}` when an authenticated delivery reaches its
+    timeout after dispatch and therefore may already have been accepted
   - `{:error, reason}` with a closed atom vocabulary (no content/capability leakage)
   """
   @spec send_message(
@@ -164,6 +166,7 @@ defmodule Arbor.Agent do
              | :invalid_sender
              | :invalid_engagement_id
              | :unauthorized
+             | :delivery_ambiguous
              | :delivery_failed}
   def send_message(caller_id, target_agent_id, message, opts \\ []) do
     # Fixed production collaborators only — never selectable via public opts or
@@ -202,6 +205,7 @@ defmodule Arbor.Agent do
              | :invalid_sender
              | :invalid_engagement_id
              | :unauthorized
+             | :delivery_ambiguous
              | :delivery_failed}
   def send_message_response(caller_id, target_agent_id, message, opts \\ []) do
     Arbor.Agent.MessageFacade.deliver_response(caller_id, target_agent_id, message, opts)

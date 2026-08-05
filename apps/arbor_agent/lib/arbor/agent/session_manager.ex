@@ -22,6 +22,7 @@ defmodule Arbor.Agent.SessionManager do
 
   @session_module Arbor.Orchestrator.Session
   @table __MODULE__
+  @authenticated_call_grace_ms 1_000
 
   # ── Public API ──────────────────────────────────────────────────
 
@@ -145,15 +146,22 @@ defmodule Arbor.Agent.SessionManager do
 
   Looks up the session pid from the owner-protected ETS table (reads open;
   writes owner-only) and invokes the configured Session module's
-  `send_authenticated_message/4` **in the caller's process** (no GenServer hop
-  through SessionManager for the send itself). This preserves the original
-  facade caller PID so Session's caller monitor observes the real caller.
+  `send_authenticated_message/4` in a linked per-call Task. The Task is the
+  process observed by Session's caller monitor and cannot outlive the real
+  caller or the requested delivery timeout.
+
+  The injected Session call receives a fixed bounded grace period beyond the
+  public timeout. If the public timeout wins, the Task is brutally terminated
+  before this function returns and the outcome is reported as ambiguous; a
+  late Session reply is never admitted as success.
 
   Returns:
   - the Session module's result on success/error
   - `{:error, :no_session}` when no live session is registered
+  - `{:error, :delivery_ambiguous}` when the per-call proxy reaches the
+    requested timeout
   - `{:error, :session_unavailable}` when the runtime bridge is missing or the
-    call raises/throws/exits (including GenServer call timeout)
+    injected call raises/throws/exits
   - `{:error, :invalid_args}` for non-positive timeout or wrong argument shapes
 
   Does not create sessions, store the receipt, or fall back to APIAgent.
@@ -165,7 +173,8 @@ defmodule Arbor.Agent.SessionManager do
           pos_integer()
         ) ::
           {:ok, term()}
-          | {:error, :no_session | :session_unavailable | :invalid_args | term()}
+          | {:error,
+             :no_session | :delivery_ambiguous | :session_unavailable | :invalid_args | term()}
   def send_authenticated_message(agent_id, message, receipt, timeout_ms)
       when is_binary(agent_id) and is_integer(timeout_ms) and timeout_ms > 0 and
              is_struct(message, Arbor.Contracts.Session.UserMessage) and
@@ -175,12 +184,13 @@ defmodule Arbor.Agent.SessionManager do
 
       if Code.ensure_loaded?(session_mod) and
            function_exported?(session_mod, :send_authenticated_message, 4) do
-        apply(session_mod, :send_authenticated_message, [
+        send_authenticated_message_via_proxy(
+          session_mod,
           session_pid,
           message,
           receipt,
           timeout_ms
-        ])
+        )
       else
         {:error, :session_unavailable}
       end
@@ -194,6 +204,57 @@ defmodule Arbor.Agent.SessionManager do
 
   def send_authenticated_message(_agent_id, _message, _receipt, _timeout_ms),
     do: {:error, :invalid_args}
+
+  defp send_authenticated_message_via_proxy(
+         session_mod,
+         session_pid,
+         message,
+         receipt,
+         timeout_ms
+       ) do
+    session_timeout_ms = timeout_ms + @authenticated_call_grace_ms
+
+    task =
+      Task.async(fn ->
+        invoke_authenticated_session(
+          session_mod,
+          session_pid,
+          message,
+          receipt,
+          session_timeout_ms
+        )
+      end)
+
+    case Task.yield(task, timeout_ms) do
+      {:ok, {:session_result, result}} ->
+        result
+
+      {:ok, :session_unavailable} ->
+        {:error, :session_unavailable}
+
+      {:exit, _reason} ->
+        {:error, :session_unavailable}
+
+      nil ->
+        _ = Task.shutdown(task, :brutal_kill)
+        {:error, :delivery_ambiguous}
+    end
+  end
+
+  defp invoke_authenticated_session(session_mod, session_pid, message, receipt, timeout_ms) do
+    {:session_result,
+     apply(session_mod, :send_authenticated_message, [
+       session_pid,
+       message,
+       receipt,
+       timeout_ms
+     ])}
+  rescue
+    _ -> :session_unavailable
+  catch
+    :throw, _ -> :session_unavailable
+    :exit, _ -> :session_unavailable
+  end
 
   defp session_module do
     Application.get_env(:arbor_agent, :orchestrator_session_module, @session_module)

@@ -395,7 +395,9 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
       end)
 
     %{
-      authorize: fn _c, _r, _a, _o -> flunk("ordinary authorize must not be called on auth path") end,
+      authorize: fn _c, _r, _a, _o ->
+        flunk("ordinary authorize must not be called on auth path")
+      end,
       issue_receipt: issue_receipt,
       discard_receipt: discard_receipt,
       chat: fn _m, _s, _o -> flunk("ordinary chat must not be called on auth path") end,
@@ -666,8 +668,9 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
       assert_receive {:legit_got, from_pid, %UserMessage{} = seen, %DeliveryReceipt{} = receipt},
                      1_000
 
-      assert from_pid == facade_caller
+      refute from_pid == facade_caller
       refute from_pid == Process.whereis(SessionManager)
+      refute Process.alive?(from_pid)
       assert seen == message
       assert seen.engagement_id == nil
       assert is_struct(receipt, DeliveryReceipt)
@@ -700,7 +703,7 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
       {:ok, session_pid} =
         FakeAuthSession.start_link(parent, fn from_pid, request ->
           send(parent, {:from_pid, from_pid})
-          assert from_pid == facade_caller
+          refute from_pid == facade_caller
 
           assert match?(
                    {:send_authenticated_message, %UserMessage{}, %DeliveryReceipt{}},
@@ -731,8 +734,14 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
                  session_token: token
                )
 
-      assert_receive {:auth_session_call, ^facade_caller,
-                      {:send_authenticated_message, %UserMessage{} = seen, %DeliveryReceipt{} = receipt}}
+      assert_receive {:auth_session_call, proxy_pid,
+                      {:send_authenticated_message, %UserMessage{} = seen,
+                       %DeliveryReceipt{} = receipt}}
+
+      assert_receive {:from_pid, ^proxy_pid}
+      refute proxy_pid == facade_caller
+      refute proxy_pid == Process.whereis(SessionManager)
+      refute Process.alive?(proxy_pid)
 
       assert seen == message
       assert seen.engagement_id == nil
@@ -767,7 +776,7 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
 
       {:ok, session_pid} =
         FakeAuthSession.start_link(parent, fn from_pid, {_tag, _msg, receipt} ->
-          assert from_pid == facade_caller
+          refute from_pid == facade_caller
           _ = Security.consume_delivery_receipt(receipt, resource, :chat)
           {:ok, clean}
         end)
@@ -788,6 +797,12 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
                  timeout: 5_000,
                  session_token: token
                )
+
+      assert_receive {:auth_session_call, proxy_pid,
+                      {:send_authenticated_message, ^message, %DeliveryReceipt{}}}
+
+      refute proxy_pid == facade_caller
+      refute Process.alive?(proxy_pid)
 
       assert PipelineResponse.content(response) == "structured-ok"
       assert response.content == "structured-ok"
@@ -926,7 +941,7 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
       refute_receive {:query_seen, _, _}, 50
     end
 
-    test "security regression: caller PID is original facade caller not Manager/SessionManager" do
+    test "security regression: Session observes a retired per-delivery proxy" do
       n = System.unique_integer([:positive])
       caller = register_active_human!()
       target = "agent_msgfacade_pid_#{n}"
@@ -966,8 +981,9 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
                )
 
       assert_receive {:observed_caller, observed}
-      assert observed == facade_caller
+      refute observed == facade_caller
       refute observed == Process.whereis(SessionManager)
+      refute Process.alive?(observed)
     end
 
     test "security regression: text and structured success emit one user and one assistant signal" do
@@ -1018,12 +1034,10 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
                  session_token: token
                )
 
-      assert_receive {:agent_signal,
-                      %{data: %{role: :user, content: "signal path"}}},
+      assert_receive {:agent_signal, %{data: %{role: :user, content: "signal path"}}},
                      1_000
 
-      assert_receive {:agent_signal,
-                      %{data: %{role: :assistant, content: "signal-ok"}}},
+      assert_receive {:agent_signal, %{data: %{role: :assistant, content: "signal-ok"}}},
                      1_000
 
       refute_receive {:agent_signal, _}, 100
@@ -1044,12 +1058,10 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
                  session_token: token2
                )
 
-      assert_receive {:agent_signal,
-                      %{data: %{role: :user, content: "signal path"}}},
+      assert_receive {:agent_signal, %{data: %{role: :user, content: "signal path"}}},
                      1_000
 
-      assert_receive {:agent_signal,
-                      %{data: %{role: :assistant, content: "signal-struct"}}},
+      assert_receive {:agent_signal, %{data: %{role: :assistant, content: "signal-struct"}}},
                      1_000
 
       refute_receive {:agent_signal, _}, 100
@@ -1177,7 +1189,7 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
       end
     end
 
-    test "security regression: delivery faults discard receipt and return :delivery_failed", %{
+    test "security regression: non-ambiguous delivery faults discard and stay collapsed", %{
       caller: caller,
       target: target
     } do
@@ -1189,6 +1201,8 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
         fn _m, _s, _r, _o -> {:error, :agent_not_found} end,
         fn _m, _s, _r, _o -> {:error, :no_session} end,
         fn _m, _s, _r, _o -> {:error, :session_unavailable} end,
+        fn _m, _s, _r, _o -> {:error, {:delivery_ambiguous, :nested}} end,
+        fn _m, _s, _r, _o -> :delivery_ambiguous end,
         fn _m, _s, _r, _o -> {:ok, %{text: "not-a-response"}} end,
         fn _m, _s, _r, _o -> :ok end,
         fn _m, _s, _r, _o -> raise "delivery boom" end,
@@ -1216,6 +1230,51 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
 
         assert :counters.get(discard_counter, 1) == 1
         assert_receive {:discard_seen, %DeliveryReceipt{}}
+      end
+    end
+
+    test "security regression: only exact delivery ambiguity escapes closed projection", %{
+      caller: caller,
+      target: target
+    } do
+      message = build_route_free_message(caller)
+      token = "proof-ambiguous-#{System.unique_integer([:positive])}"
+      discard_counter = :counters.new(1, [])
+
+      for mode <- [:text, :response] do
+        :counters.put(discard_counter, 1, 0)
+
+        collab =
+          auth_collaborators(
+            discard_counter: discard_counter,
+            on_chat: fn _m, _s, _r, _o -> {:error, :delivery_ambiguous} end
+          )
+
+        result =
+          case mode do
+            :text ->
+              MessageFacade.deliver_text(
+                caller,
+                target,
+                message,
+                [session_token: token],
+                collab
+              )
+
+            :response ->
+              MessageFacade.deliver_response(
+                caller,
+                target,
+                message,
+                [session_token: token],
+                collab
+              )
+          end
+
+        assert {:error, :delivery_ambiguous} = result
+        assert :counters.get(discard_counter, 1) == 1
+        assert_receive {:discard_seen, %DeliveryReceipt{}}
+        assert_no_secret_leak(result, [token])
       end
     end
 

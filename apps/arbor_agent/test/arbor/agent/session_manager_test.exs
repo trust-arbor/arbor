@@ -193,10 +193,15 @@ defmodule Arbor.Agent.SessionManagerTest do
     @moduledoc false
     def send_authenticated_message(session, message, receipt, timeout_ms)
         when is_integer(timeout_ms) and timeout_ms > 0 do
-      GenServer.call(session, {:send_authenticated_message, message, receipt}, timeout_ms)
+      GenServer.call(
+        session,
+        {:send_authenticated_message, message, receipt, timeout_ms},
+        timeout_ms
+      )
     end
 
-    def send_authenticated_message(_, _, _, _), do: {:error, :invalid_authenticated_message_request}
+    def send_authenticated_message(_, _, _, _),
+      do: {:error, :invalid_authenticated_message_request}
   end
 
   defmodule AuthFakeSession do
@@ -209,15 +214,41 @@ defmodule Arbor.Agent.SessionManagerTest do
     def init(test_pid), do: {:ok, test_pid}
 
     @impl true
-    def handle_call({:send_authenticated_message, message, receipt}, {from_pid, _}, test_pid) do
-      send(test_pid, {:auth_send, from_pid, message, receipt})
+    def handle_call(
+          {:send_authenticated_message, message, receipt, timeout_ms},
+          {from_pid, _},
+          test_pid
+        ) do
+      send(test_pid, {:auth_send, from_pid, message, receipt, timeout_ms})
       {:reply, {:ok, %{content: "bridged"}}, test_pid}
+    end
+  end
+
+  defmodule BlockingAuthSession do
+    @moduledoc false
+
+    def start(parent) when is_pid(parent) do
+      spawn(fn -> await_call(parent) end)
+    end
+
+    defp await_call(parent) do
+      receive do
+        {:"$gen_call", {from_pid, _ref} = from,
+         {:send_authenticated_message, message, receipt, timeout_ms}} ->
+          send(parent, {:auth_send_blocked, self(), from_pid, from, message, receipt, timeout_ms})
+
+          receive do
+            {:reply, result} -> GenServer.reply(from, result)
+          end
+      end
     end
   end
 
   describe "send_authenticated_message/4" do
     @tag voice_id: "VOICE-17"
-    test "bridges in original caller process and returns Session result", %{agent_id: agent_id} do
+    test "uses a bounded per-call proxy and retires it before returning Session result", %{
+      agent_id: agent_id
+    } do
       prev = Application.get_env(:arbor_agent, :orchestrator_session_module)
       Application.put_env(:arbor_agent, :orchestrator_session_module, AuthSessionBridge)
 
@@ -247,8 +278,13 @@ defmodule Arbor.Agent.SessionManagerTest do
         assert {:ok, %{content: "bridged"}} =
                  SessionManager.send_authenticated_message(agent_id, message, receipt, 1_000)
 
-        assert_receive {:auth_send, from_pid, ^message, ^receipt}, 1_000
-        assert from_pid == caller
+        assert_receive {:auth_send, proxy_pid, ^message, ^receipt, session_timeout_ms}, 1_000
+        assert is_pid(proxy_pid)
+        refute proxy_pid == caller
+        refute proxy_pid == Process.whereis(SessionManager)
+        refute Process.alive?(proxy_pid)
+        assert session_timeout_ms > 1_000
+        assert session_timeout_ms <= 2_000
       after
         delete_session!(agent_id)
 
@@ -275,7 +311,9 @@ defmodule Arbor.Agent.SessionManagerTest do
     end
 
     @tag voice_id: "VOICE-17"
-    test "normalizes GenServer.call timeout/exit to :session_unavailable", %{agent_id: agent_id} do
+    test "timeout brutally retires the proxy and late replies cannot become success", %{
+      agent_id: agent_id
+    } do
       prev = Application.get_env(:arbor_agent, :orchestrator_session_module)
       Application.put_env(:arbor_agent, :orchestrator_session_module, AuthSessionBridge)
 
@@ -286,13 +324,7 @@ defmodule Arbor.Agent.SessionManagerTest do
         end
       end)
 
-      # Bare process that never replies — GenServer.call will exit :timeout
-      hang =
-        spawn(fn ->
-          receive do
-            {:"$gen_call", _from, _req} -> Process.sleep(10_000)
-          end
-        end)
+      hang = BlockingAuthSession.start(self())
 
       insert_session!(agent_id, hang)
 
@@ -307,8 +339,75 @@ defmodule Arbor.Agent.SessionManagerTest do
                Arbor.Contracts.Security.DeliveryReceipt.new(token: :crypto.strong_rand_bytes(32))
 
       try do
-        assert {:error, :session_unavailable} =
+        assert {:error, :delivery_ambiguous} =
                  SessionManager.send_authenticated_message(agent_id, message, receipt, 50)
+
+        assert_receive {:auth_send_blocked, ^hang, proxy_pid, _from, ^message, ^receipt,
+                        session_timeout_ms},
+                       1_000
+
+        refute Process.alive?(proxy_pid)
+        assert session_timeout_ms > 50
+        assert session_timeout_ms <= 1_050
+
+        send(hang, {:reply, {:ok, %{content: "too late"}}})
+        refute_receive {_task_ref, {:session_result, {:ok, _}}}, 50
+      after
+        delete_session!(agent_id)
+        if Process.alive?(hang), do: Process.exit(hang, :kill)
+      end
+    end
+
+    @tag voice_id: "VOICE-17"
+    test "real caller death kills its linked delivery proxy", %{agent_id: agent_id} do
+      prev = Application.get_env(:arbor_agent, :orchestrator_session_module)
+      Application.put_env(:arbor_agent, :orchestrator_session_module, AuthSessionBridge)
+
+      on_exit(fn ->
+        case prev do
+          nil -> Application.delete_env(:arbor_agent, :orchestrator_session_module)
+          mod -> Application.put_env(:arbor_agent, :orchestrator_session_module, mod)
+        end
+      end)
+
+      hang = BlockingAuthSession.start(self())
+      insert_session!(agent_id, hang)
+
+      message = %Arbor.Contracts.Session.UserMessage{
+        content: "hello",
+        sent_at: ~U[2026-08-01 12:00:00Z],
+        sender_id: "human_test",
+        engagement_id: nil
+      }
+
+      assert {:ok, receipt} =
+               Arbor.Contracts.Security.DeliveryReceipt.new(token: :crypto.strong_rand_bytes(32))
+
+      parent = self()
+
+      {caller, caller_ref} =
+        spawn_monitor(fn ->
+          result = SessionManager.send_authenticated_message(agent_id, message, receipt, 5_000)
+          send(parent, {:unexpected_delivery_result, result})
+        end)
+
+      try do
+        assert_receive {:auth_send_blocked, ^hang, proxy_pid, _from, ^message, ^receipt,
+                        session_timeout_ms},
+                       1_000
+
+        assert is_pid(proxy_pid)
+        refute proxy_pid == caller
+        assert Process.alive?(proxy_pid)
+        assert session_timeout_ms > 5_000
+
+        proxy_ref = Process.monitor(proxy_pid)
+        Process.exit(caller, :kill)
+
+        assert_receive {:DOWN, ^caller_ref, :process, ^caller, :killed}, 1_000
+        assert_receive {:DOWN, ^proxy_ref, :process, ^proxy_pid, _reason}, 1_000
+        refute Process.alive?(proxy_pid)
+        refute_receive {:unexpected_delivery_result, _}, 50
       after
         delete_session!(agent_id)
         if Process.alive?(hang), do: Process.exit(hang, :kill)
