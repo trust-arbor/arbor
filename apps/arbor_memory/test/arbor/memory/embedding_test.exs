@@ -271,8 +271,8 @@ defmodule Arbor.Memory.EmbeddingTest do
 
   describe "vector-store V1 isolation security regression" do
     test "legacy reads and deletes cannot observe or remove a V1 tombstone" do
-      source_key = "isolated_#{System.unique_integer([:positive])}"
-      forged_agent = "forged_agent_#{System.unique_integer([:positive])}"
+      source_key = durable_unique("isolated")
+      forged_agent = durable_unique("forged_agent")
 
       payload = %{
         "content" => "V1 authority",
@@ -337,11 +337,11 @@ defmodule Arbor.Memory.EmbeddingTest do
     end
 
     test "legacy single and batch upserts cannot update a V1-owned conflict" do
-      source_key = "conflict_#{System.unique_integer([:positive])}"
+      source_key = durable_unique("conflict")
       insert = vector_insert_operation!(@test_agent_id, source_key, %{"content" => "owned"})
       assert {:ok, inserted} = Arbor.Persistence.execute_vector_operation(@test_agent_id, insert)
 
-      legacy_content = "forced collision #{System.unique_integer([:positive])}"
+      legacy_content = durable_unique("forced collision")
       collision_hash = :crypto.hash(:sha256, legacy_content) |> Base.encode16(case: :lower)
 
       Repo.query!("UPDATE memory_embeddings SET content_hash = $1 WHERE id = $2", [
@@ -373,7 +373,7 @@ defmodule Arbor.Memory.EmbeddingTest do
 
     {:ok, record} =
       VectorRecord.new(%{
-        id: "vec_#{System.unique_integer([:positive])}",
+        id: durable_unique("vec"),
         agent_id: agent_id,
         source_namespace: "voice",
         source_key: source_key,
@@ -411,5 +411,10 @@ defmodule Arbor.Memory.EmbeddingTest do
       })
 
     operation
+  end
+
+  defp durable_unique(prefix) do
+    suffix = :crypto.strong_rand_bytes(16) |> Base.encode16(case: :lower)
+    "#{prefix}_#{suffix}"
   end
 end

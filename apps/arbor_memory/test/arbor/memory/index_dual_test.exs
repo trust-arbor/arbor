@@ -111,7 +111,7 @@ defmodule Arbor.Memory.IndexDualTest do
 
   describe "pgvector backend mode" do
     test "regression: index returns the exact row id stored by pgvector" do
-      agent_id = "test_pg_id_#{System.unique_integer([:positive])}"
+      agent_id = durable_unique("test_pg_id")
 
       {:ok, pid} =
         Index.start_link(
@@ -212,5 +212,10 @@ defmodule Arbor.Memory.IndexDualTest do
       # The pgvector entry uses the same ID; ETS removal is the assertion this
       # test guards (delete-to-pgvector propagation is covered elsewhere).
     end
+  end
+
+  defp durable_unique(prefix) do
+    suffix = :crypto.strong_rand_bytes(16) |> Base.encode16(case: :lower)
+    "#{prefix}_#{suffix}"
   end
 end

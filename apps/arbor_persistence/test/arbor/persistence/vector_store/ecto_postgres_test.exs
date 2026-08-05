@@ -286,7 +286,10 @@ defmodule Arbor.Persistence.VectorStore.EctoPostgresTest do
     List.replace_at(List.duplicate(0.0, VectorRecord.dimensions()), index, 1.0)
   end
 
-  defp unique(prefix), do: "#{prefix}_#{System.unique_integer([:positive, :monotonic])}"
+  defp unique(prefix) do
+    suffix = :crypto.strong_rand_bytes(16) |> Base.encode16(case: :lower)
+    "#{prefix}_#{suffix}"
+  end
 
   defp restore_env(key, :not_configured), do: Application.delete_env(:arbor_persistence, key)
   defp restore_env(key, value), do: Application.put_env(:arbor_persistence, key, value)
