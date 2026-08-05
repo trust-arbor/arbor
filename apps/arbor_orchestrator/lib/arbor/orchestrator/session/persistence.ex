@@ -66,12 +66,11 @@ defmodule Arbor.Orchestrator.Session.Persistence do
   @doc false
   def restore_checkpoint_conversation(state, data) do
     engagement = cp_fetch(data, "current_engagement_id")
-    messages = cp_fetch(data, "messages")
+    messages = restore_checkpoint_messages(state, data, engagement)
 
     case {engagement, messages} do
       {{:ok, engagement_id}, {:ok, restored_messages}}
-      when (is_binary(engagement_id) or is_nil(engagement_id)) and
-             is_list(restored_messages) ->
+      when is_binary(engagement_id) or is_nil(engagement_id) ->
         %{state | current_engagement_id: engagement_id, messages: restored_messages}
         |> rebuild_compactor_from_checkpoint()
 
@@ -83,8 +82,17 @@ defmodule Arbor.Orchestrator.Session.Persistence do
         %{state | current_engagement_id: engagement_id, messages: []}
         |> rebuild_compactor_from_checkpoint()
 
-      {_engagement, {:ok, restored_messages}} when is_list(restored_messages) ->
+      {:error, {:ok, restored_messages}} ->
         %{state | messages: restored_messages}
+        |> rebuild_compactor_from_checkpoint()
+
+      {{:ok, engagement_id}, {:error, _reason}}
+      when is_binary(engagement_id) or is_nil(engagement_id) ->
+        %{state | current_engagement_id: engagement_id, messages: []}
+        |> rebuild_compactor_from_checkpoint()
+
+      {_engagement, {:error, _reason}} ->
+        %{state | messages: []}
         |> rebuild_compactor_from_checkpoint()
 
       _ ->
@@ -113,15 +121,13 @@ defmodule Arbor.Orchestrator.Session.Persistence do
     checkpoint_fn = get_in(state, [Access.key(:adapters), Access.key(:checkpoint_save)])
 
     if is_function(checkpoint_fn, 2) and should_checkpoint?(state) do
-      data = extract_checkpoint_data(state)
+      case extract_checkpoint_data(state) do
+        data when is_map(data) ->
+          Task.start(fn -> save_checkpoint(checkpoint_fn, state.session_id, data) end)
 
-      Task.start(fn ->
-        try do
-          checkpoint_fn.(state.session_id, data)
-        rescue
-          e -> Logger.warning("[Session] Checkpoint save failed: #{Exception.message(e)}")
-        end
-      end)
+        {:error, _reason} ->
+          Logger.warning("[Session] Checkpoint construction failed")
+      end
     end
 
     state
@@ -129,15 +135,23 @@ defmodule Arbor.Orchestrator.Session.Persistence do
 
   @doc false
   def extract_checkpoint_data(state) do
-    %{
-      "messages" => ContextBuilder.get_messages(state),
-      "current_engagement_id" => Map.get(state, :current_engagement_id),
-      "working_memory" => ContextBuilder.get_working_memory(state),
-      "goals" => ContextBuilder.get_goals(state),
-      "turn_count" => ContextBuilder.get_turn_count(state),
-      "cognitive_mode" => to_string(ContextBuilder.get_cognitive_mode(state)),
-      "checkpoint_at" => DateTime.to_iso8601(DateTime.utc_now())
-    }
+    engagement_id = Map.get(state, :current_engagement_id)
+    scope = checkpoint_scope(state, engagement_id)
+
+    with {:ok, messages} <-
+           Core.encode_checkpoint_messages(ContextBuilder.get_messages(state), scope) do
+      %{
+        "messages" => messages,
+        "current_engagement_id" => engagement_id,
+        "working_memory" => ContextBuilder.get_working_memory(state),
+        "goals" => ContextBuilder.get_goals(state),
+        "turn_count" => ContextBuilder.get_turn_count(state),
+        "cognitive_mode" => to_string(ContextBuilder.get_cognitive_mode(state)),
+        "checkpoint_at" => DateTime.to_iso8601(DateTime.utc_now())
+      }
+    else
+      {:error, _reason} -> {:error, :checkpoint_provenance_unavailable}
+    end
   end
 
   @doc false
@@ -165,6 +179,48 @@ defmodule Arbor.Orchestrator.Session.Persistence do
       :error -> Map.fetch(data, field)
       found -> found
     end
+  end
+
+  defp restore_checkpoint_messages(state, data, engagement) do
+    case cp_fetch(data, "messages") do
+      :error ->
+        :missing
+
+      {:ok, persisted_messages} ->
+        case engagement do
+          {:ok, engagement_id} when is_binary(engagement_id) or is_nil(engagement_id) ->
+            Core.restore_checkpoint_messages(
+              persisted_messages,
+              checkpoint_scope(state, engagement_id)
+            )
+
+          :error ->
+            Core.restore_checkpoint_messages(persisted_messages, :missing)
+
+          {:ok, _invalid_engagement} ->
+            {:error, :invalid_checkpoint_engagement}
+        end
+    end
+  end
+
+  defp checkpoint_scope(state, engagement_id) do
+    %{
+      "agent_id" => Map.get(state, :agent_id),
+      "current_engagement_id" => engagement_id,
+      "session_id" => Map.get(state, :session_id)
+    }
+  end
+
+  defp save_checkpoint(checkpoint_fn, session_id, data) do
+    case checkpoint_fn.(session_id, data) do
+      :ok -> :ok
+      {:ok, _receipt} -> :ok
+      _other -> Logger.warning("[Session] Checkpoint save failed")
+    end
+  rescue
+    _ -> Logger.warning("[Session] Checkpoint save failed")
+  catch
+    _, _ -> Logger.warning("[Session] Checkpoint save failed")
   end
 
   defp drop_active_engagement_stash(state) do

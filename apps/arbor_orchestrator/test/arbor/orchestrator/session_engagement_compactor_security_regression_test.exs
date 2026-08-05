@@ -1,6 +1,7 @@
 defmodule Arbor.Orchestrator.SessionEngagementCompactorSecurityRegressionTest do
   use ExUnit.Case, async: false
 
+  alias Arbor.Contracts.Security.Taint
   alias Arbor.Contracts.Session.UserMessage
   alias Arbor.LLM.{Client, ContentPart, Request, Response}
   alias Arbor.Orchestrator.Session
@@ -70,7 +71,10 @@ defmodule Arbor.Orchestrator.SessionEngagementCompactorSecurityRegressionTest do
         |> Enum.filter(&(&1.role == :user))
         |> Enum.map(& &1.content)
 
-      send(:persistent_term.get(@parent_key), {:provider_prompt, user_texts})
+      send(
+        :persistent_term.get(@parent_key),
+        {:provider_prompt, user_texts, request.messages}
+      )
 
       {:ok,
        %Response{
@@ -173,19 +177,59 @@ defmodule Arbor.Orchestrator.SessionEngagementCompactorSecurityRegressionTest do
     assert state.compactors["eng_named"].summary == "engagement-summary-1"
   end
 
-  test "security regression: checkpoint retains active engagement provenance", ctx do
-    checkpoint = %{
-      "messages" => [
-        %{"role" => "user", "content" => "checkpoint-alpha"},
-        %{"role" => "assistant", "content" => "checkpoint-response"}
-      ],
-      "current_engagement_id" => "eng_checkpoint_alpha"
+  test "security regression: restart and engagement switches preserve Session-owned labels",
+       ctx do
+    agent_id = "agent_checkpoint_switch_#{System.unique_integer([:positive, :monotonic])}"
+    session_id = "session-#{agent_id}"
+    hostile = taint("checkpoint_hostile", :hostile)
+    response_taint = taint("checkpoint_response", :untrusted)
+
+    checkpoint_messages = [
+      %{
+        "role" => "user",
+        "content" => "checkpoint-alpha",
+        "taint" => hostile,
+        "taint_status" => :verified
+      },
+      %{
+        "role" => "assistant",
+        "content" => "checkpoint-response",
+        "taint" => response_taint,
+        "taint_status" => :verified
+      }
+    ]
+
+    checkpoint =
+      Persistence.extract_checkpoint_data(%Session{
+        session_id: session_id,
+        agent_id: agent_id,
+        messages: checkpoint_messages,
+        current_engagement_id: "eng_checkpoint_alpha"
+      })
+
+    adapters = %{
+      ensure_session: fn ^session_id, ^agent_id, [] -> {:ok, %{id: "checkpoint-uuid"}} end,
+      append_session_entries: fn "checkpoint-uuid", entries -> {:ok, length(entries)} end,
+      load_recent_session_messages: fn ^session_id, _opts -> [] end
     }
 
-    pid = start_session!(ctx, compactor: compactor_spec(), checkpoint: checkpoint)
+    pid =
+      start_session!(ctx,
+        agent_id: agent_id,
+        session_id: session_id,
+        compactor: compactor_spec(),
+        checkpoint: checkpoint,
+        adapters: adapters
+      )
+
     restored = Session.get_state(pid)
 
     assert restored.current_engagement_id == "eng_checkpoint_alpha"
+    assert [restored_user, restored_assistant] = restored.messages
+    assert restored_user["taint"] == hostile
+    assert restored_user["taint_status"] == :verified
+    assert restored_assistant["taint"] == response_taint
+    assert restored_assistant["taint_status"] == :verified
 
     assert Enum.map(restored.compactor.full_transcript, & &1["content"]) == [
              "checkpoint-alpha",
@@ -195,20 +239,42 @@ defmodule Arbor.Orchestrator.SessionEngagementCompactorSecurityRegressionTest do
     assert Persistence.extract_checkpoint_data(restored)["current_engagement_id"] ==
              "eng_checkpoint_alpha"
 
-    assert {:ok, %{content: "isolated-response"}} =
-             Session.send_message(pid, "default-after-checkpoint")
+    send_engagement!(pid, "eng_checkpoint_beta", "beta-after-restart")
+    assert_prompt(["beta-after-restart"])
 
-    assert_prompt(["default-after-checkpoint"])
+    beta_state = Session.get_state(pid)
+    assert [stashed_user | _] = beta_state.transcripts["eng_checkpoint_alpha"]
+    assert stashed_user["taint"] == hostile
+    assert stashed_user["taint_status"] == :verified
+
+    send_engagement!(pid, "eng_checkpoint_alpha", "alpha-after-restart")
+    assert_prompt(["checkpoint-alpha", "alpha-after-restart"])
+
+    alpha_state = Session.get_state(pid)
+    assert [alpha_user | _] = alpha_state.messages
+    assert alpha_user["taint"] == hostile
+    assert alpha_user["taint_status"] == :verified
+
+    assert Enum.all?(alpha_state.transcripts["eng_checkpoint_beta"], fn message ->
+             match?(%Taint{}, message["taint"]) and message["taint_status"] == :verified
+           end)
   end
 
   defp start_session!(ctx, opts \\ []) do
-    agent_id = "agent_engagement_compactor_#{System.unique_integer([:positive, :monotonic])}"
+    agent_id =
+      Keyword.get(
+        opts,
+        :agent_id,
+        "agent_engagement_compactor_#{System.unique_integer([:positive, :monotonic])}"
+      )
+
+    session_id = Keyword.get(opts, :session_id, "session-#{agent_id}")
     Arbor.Orchestrator.TestCapabilities.grant_orchestrator_access(agent_id)
     on_exit(fn -> Arbor.Orchestrator.TestCapabilities.revoke_all(agent_id) end)
 
     session_opts =
       [
-        session_id: "session-#{agent_id}",
+        session_id: session_id,
         agent_id: agent_id,
         turn_dot: ctx.turn_path,
         config: %{
@@ -233,11 +299,26 @@ defmodule Arbor.Orchestrator.SessionEngagementCompactorSecurityRegressionTest do
   end
 
   defp assert_prompt(expected_user_texts) do
-    assert_receive {:provider_prompt, user_texts}, 2_000
+    assert_receive {:provider_prompt, user_texts, provider_messages}, 2_000
     assert user_texts == expected_user_texts
+    assert Enum.all?(provider_messages, &(&1.metadata == %{}))
   end
 
   defp compactor_spec, do: {TestCompactor, marker: :configured}
+
+  defp taint(source, level) do
+    {:ok, taint} =
+      Taint.new(%{
+        level: level,
+        sensitivity: :restricted,
+        sanitizations: 0,
+        confidence: :unverified,
+        source: source,
+        chain: []
+      })
+
+    taint
+  end
 
   defp turn_dot do
     """

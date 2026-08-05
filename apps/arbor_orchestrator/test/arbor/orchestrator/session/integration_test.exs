@@ -7,6 +7,7 @@ defmodule Arbor.Orchestrator.Session.IntegrationTest do
   """
   use ExUnit.Case, async: true
 
+  alias Arbor.Contracts.Security.TaintEnvelope
   alias Arbor.Orchestrator.Session
 
   @moduletag :session_integration
@@ -160,7 +161,10 @@ defmodule Arbor.Orchestrator.Session.IntegrationTest do
 
       :ok = Session.restore_checkpoint(pid, %{"session.messages" => messages})
       state = Session.get_state(pid)
-      assert state.messages == messages
+
+      assert [%{"role" => "user", "content" => "saved msg"} = restored] = state.messages
+      assert restored["taint"] == TaintEnvelope.missing_fallback()
+      assert restored["taint_status"] == :legacy_unlabeled
     end
 
     test "restores working_memory", ctx do

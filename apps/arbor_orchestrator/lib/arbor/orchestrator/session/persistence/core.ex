@@ -10,6 +10,7 @@ defmodule Arbor.Orchestrator.Session.Persistence.Core do
   alias Arbor.Contracts.LLM.TokenUsage
   alias Arbor.Contracts.Security.{Taint, TaintEnvelope}
   alias Arbor.Contracts.Session.AssistantMessage
+  alias Arbor.Orchestrator.DurableJson
 
   @admitted_statuses [:success, :partial_success]
   @user_context_keys ["session.input", "session.query"]
@@ -17,6 +18,10 @@ defmodule Arbor.Orchestrator.Session.Persistence.Core do
   @assistant_tool_context_keys ["session.tool_calls"]
   @partial_statuses [:interrupted, :cancelled, :failed]
   @prompt_roles ~w(system user assistant tool)
+  @checkpoint_message_keys ["envelope", "payload", "status"]
+  @checkpoint_message_domain "arbor.session.checkpoint.message.v1"
+  @checkpoint_scope_keys ["agent_id", "current_engagement_id", "session_id"]
+  @taint_statuses [:verified, :legacy_unlabeled, :invalid_durable_provenance]
 
   @type entry :: map()
 
@@ -151,6 +156,56 @@ defmodule Arbor.Orchestrator.Session.Persistence.Core do
 
   def prompt_messages(_messages), do: []
 
+  @doc "Encode live Session messages as exact payload-bound checkpoint records."
+  @spec encode_checkpoint_messages([term()], map()) ::
+          {:ok, [map()]} | {:error, atom()}
+  def encode_checkpoint_messages(messages, scope) when is_list(messages) do
+    with {:ok, scope_binding} <- checkpoint_scope_binding(scope) do
+      messages
+      |> Enum.with_index()
+      |> Enum.reduce_while({:ok, []}, fn {message, position}, {:ok, encoded} ->
+        case encode_checkpoint_message(message, position, scope_binding) do
+          {:ok, checkpoint_message} -> {:cont, {:ok, [checkpoint_message | encoded]}}
+          {:error, _reason} = error -> {:halt, error}
+        end
+      end)
+      |> case do
+        {:ok, encoded} -> {:ok, Enum.reverse(encoded)}
+        {:error, _reason} = error -> error
+      end
+    end
+  rescue
+    _ -> {:error, :invalid_checkpoint_messages}
+  catch
+    _, _ -> {:error, :invalid_checkpoint_messages}
+  end
+
+  def encode_checkpoint_messages(_messages, _scope),
+    do: {:error, :invalid_checkpoint_messages}
+
+  @doc "Strictly restore current checkpoint records or conservatively label legacy rows."
+  @spec restore_checkpoint_messages(term(), map() | :missing) ::
+          {:ok, [map()]} | {:error, atom()}
+  def restore_checkpoint_messages(messages, scope) when is_list(messages) do
+    with {:ok, scope_binding} <- checkpoint_scope_binding(scope) do
+      restored =
+        messages
+        |> Enum.with_index()
+        |> Enum.map(fn {message, position} ->
+          restore_checkpoint_message(message, position, scope_binding)
+        end)
+
+      {:ok, restored}
+    end
+  rescue
+    _ -> {:error, :invalid_checkpoint_messages}
+  catch
+    _, _ -> {:error, :invalid_checkpoint_messages}
+  end
+
+  def restore_checkpoint_messages(_messages, _scope),
+    do: {:error, :invalid_checkpoint_messages}
+
   @doc "Wrap text in the canonical SessionEntry content-block representation."
   @spec wrap_content(term()) :: list()
   def wrap_content(text) when is_binary(text), do: [%{"type" => "text", "text" => text}]
@@ -272,6 +327,213 @@ defmodule Arbor.Orchestrator.Session.Persistence.Core do
   end
 
   defp metadata_has_taint?(_metadata), do: false
+
+  defp encode_checkpoint_message(message, position, scope_binding)
+       when is_map(message) and not is_struct(message) do
+    raw_payload = checkpoint_payload(message)
+    {taint, status} = checkpoint_label(message)
+    persisted_status = Atom.to_string(status)
+
+    with {:ok, payload_digest} <- DurableJson.project_and_digest(raw_payload),
+         payload = payload_digest.projection,
+         {:ok, descriptor} <-
+           checkpoint_descriptor(payload_digest, persisted_status, position, scope_binding),
+         {:ok, envelope} <- TaintEnvelope.new(descriptor, taint),
+         {:ok, persisted} <- TaintEnvelope.to_map(envelope) do
+      {:ok,
+       %{
+         "payload" => payload,
+         "envelope" => persisted,
+         "status" => persisted_status
+       }}
+    else
+      _ -> {:error, :checkpoint_provenance_unavailable}
+    end
+  end
+
+  defp encode_checkpoint_message(_message, _position, _scope_binding),
+    do: {:error, :invalid_checkpoint_message}
+
+  defp restore_checkpoint_message(message, position, scope_binding)
+       when is_map(message) and not is_struct(message) do
+    if checkpoint_wrapper_shaped?(message) do
+      restore_current_checkpoint_message(message, position, scope_binding)
+    else
+      message
+      |> checkpoint_payload()
+      |> put_checkpoint_label(TaintEnvelope.missing_fallback(), :legacy_unlabeled)
+    end
+  end
+
+  defp restore_checkpoint_message(_message, _position, _scope_binding) do
+    put_checkpoint_label(
+      %{"role" => nil, "content" => ""},
+      TaintEnvelope.invalid_fallback(),
+      :invalid_durable_provenance
+    )
+  end
+
+  defp restore_current_checkpoint_message(message, position, scope_binding) do
+    with true <- exact_string_keys?(message, @checkpoint_message_keys),
+         payload when is_map(payload) and not is_struct(payload) <- message["payload"],
+         {:ok, payload_digest} <- DurableJson.project_and_digest(payload),
+         true <- payload_digest.projection === payload,
+         {:ok, status} <- normalize_persisted_taint_status(message["status"]),
+         {:ok, descriptor} <-
+           checkpoint_descriptor(payload_digest, message["status"], position, scope_binding),
+         {:ok, envelope} <- TaintEnvelope.verify(message["envelope"], descriptor),
+         true <- valid_taint_status?(envelope.taint, status) do
+      put_checkpoint_label(payload, envelope.taint, status)
+    else
+      _ ->
+        message
+        |> checkpoint_fallback_payload()
+        |> put_checkpoint_label(
+          TaintEnvelope.invalid_fallback(),
+          :invalid_durable_provenance
+        )
+    end
+  end
+
+  defp checkpoint_scope_binding(:missing), do: {:ok, :missing}
+
+  defp checkpoint_scope_binding(scope) when is_map(scope) and not is_struct(scope) do
+    with true <- exact_string_keys?(scope, @checkpoint_scope_keys),
+         session_id when is_binary(session_id) <- scope["session_id"],
+         agent_id when is_binary(agent_id) <- scope["agent_id"],
+         engagement_id when is_binary(engagement_id) or is_nil(engagement_id) <-
+           scope["current_engagement_id"],
+         {:ok, scope_digest} <- DurableJson.project_and_digest(scope),
+         true <- scope_digest.projection === scope do
+      durable_digest_descriptor(scope_digest)
+    else
+      _ -> {:error, :invalid_checkpoint_scope}
+    end
+  end
+
+  defp checkpoint_scope_binding(_scope), do: {:error, :invalid_checkpoint_scope}
+
+  defp checkpoint_descriptor(payload_digest, status, position, scope_binding)
+       when is_map(scope_binding) do
+    with {:ok, payload_binding} <- durable_digest_descriptor(payload_digest) do
+      {:ok,
+       %{
+         "domain" => @checkpoint_message_domain,
+         "payload_digest" => payload_binding,
+         "position" => position,
+         "scope_digest" => scope_binding,
+         "status" => status
+       }}
+    end
+  end
+
+  defp checkpoint_descriptor(_payload_digest, _status, _position, _scope_binding),
+    do: {:error, :missing_checkpoint_scope}
+
+  defp durable_digest_descriptor(%{
+         encoding: encoding,
+         digest_algorithm: digest_algorithm,
+         sha256: sha256
+       })
+       when is_binary(encoding) and is_binary(digest_algorithm) and is_binary(sha256) do
+    {:ok,
+     %{
+       "digest_algorithm" => digest_algorithm,
+       "encoding" => encoding,
+       "sha256" => sha256
+     }}
+  end
+
+  defp durable_digest_descriptor(_digest), do: {:error, :invalid_durable_json_digest}
+
+  defp checkpoint_payload(message) do
+    Map.drop(message, [:taint, "taint", :taint_status, "taint_status"])
+  end
+
+  defp checkpoint_fallback_payload(message) do
+    case fetch_alias(message, :payload) do
+      {:ok, payload} when is_map(payload) and not is_struct(payload) ->
+        checkpoint_payload(payload)
+
+      _ ->
+        %{"role" => nil, "content" => ""}
+    end
+  end
+
+  defp checkpoint_label(message) do
+    case {fetch_alias(message, :taint), fetch_alias(message, :taint_status)} do
+      {:error, :error} ->
+        {TaintEnvelope.missing_fallback(), :legacy_unlabeled}
+
+      {{:ok, taint}, {:ok, status}} ->
+        with {:ok, taint} <- Taint.canonicalize(taint),
+             {:ok, status} <- normalize_taint_status(status),
+             true <- valid_taint_status?(taint, status) do
+          {taint, status}
+        else
+          _ -> {TaintEnvelope.invalid_fallback(), :invalid_durable_provenance}
+        end
+
+      _ ->
+        {TaintEnvelope.invalid_fallback(), :invalid_durable_provenance}
+    end
+  end
+
+  defp put_checkpoint_label(payload, taint, status) do
+    payload
+    |> checkpoint_payload()
+    |> Map.put("taint", taint)
+    |> Map.put("taint_status", status)
+  end
+
+  defp checkpoint_wrapper_shaped?(message) do
+    Enum.any?(["payload", :payload, "envelope", :envelope], &Map.has_key?(message, &1))
+  end
+
+  defp exact_string_keys?(value, expected) when is_map(value) and not is_struct(value) do
+    Enum.all?(Map.keys(value), &is_binary/1) and Enum.sort(Map.keys(value)) == Enum.sort(expected)
+  end
+
+  defp exact_string_keys?(_value, _expected), do: false
+
+  defp fetch_alias(message, key) do
+    string_key = Atom.to_string(key)
+
+    case {Map.fetch(message, key), Map.fetch(message, string_key)} do
+      {{:ok, _value}, {:ok, _other}} -> :error
+      {{:ok, value}, :error} -> {:ok, value}
+      {:error, {:ok, value}} -> {:ok, value}
+      {:error, :error} -> :error
+    end
+  end
+
+  defp normalize_taint_status(status) when status in @taint_statuses, do: {:ok, status}
+
+  defp normalize_taint_status(status) when is_binary(status) do
+    case status do
+      "verified" -> {:ok, :verified}
+      "legacy_unlabeled" -> {:ok, :legacy_unlabeled}
+      "invalid_durable_provenance" -> {:ok, :invalid_durable_provenance}
+      _ -> :error
+    end
+  end
+
+  defp normalize_taint_status(_status), do: :error
+
+  defp normalize_persisted_taint_status(status) when is_binary(status),
+    do: normalize_taint_status(status)
+
+  defp normalize_persisted_taint_status(_status), do: :error
+
+  defp valid_taint_status?(_taint, :verified), do: true
+
+  defp valid_taint_status?(taint, :legacy_unlabeled),
+    do: taint == TaintEnvelope.missing_fallback()
+
+  defp valid_taint_status?(taint, :invalid_durable_provenance),
+    do: taint == TaintEnvelope.invalid_fallback()
+
+  defp valid_taint_status?(_taint, _status), do: false
 
   defp label_live_message(message, taint) do
     message
