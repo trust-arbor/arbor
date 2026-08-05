@@ -27,18 +27,19 @@ defmodule Arbor.Persistence.Repo do
         database: Path.expand("~/.arbor/arbor_dev.db")
   """
 
+  @repo_adapter Application.compile_env(
+                  :arbor_persistence,
+                  :repo_adapter,
+                  Ecto.Adapters.Postgres
+                )
+
   use Ecto.Repo,
     otp_app: :arbor_persistence,
-    adapter:
-      Application.compile_env(
-        :arbor_persistence,
-        :repo_adapter,
-        Ecto.Adapters.Postgres
-      )
+    adapter: @repo_adapter
 
-  @impl true
-  def init(_context, config) do
-    if __adapter__() == Ecto.Adapters.SQLite3 do
+  if @repo_adapter == Ecto.Adapters.SQLite3 do
+    @impl true
+    def init(_context, config) do
       custom_pragmas =
         config
         |> Keyword.get(:custom_pragmas, [])
@@ -46,7 +47,10 @@ defmodule Arbor.Persistence.Repo do
         |> Keyword.put(:recursive_triggers, true)
 
       {:ok, Keyword.put(config, :custom_pragmas, custom_pragmas)}
-    else
+    end
+  else
+    @impl true
+    def init(_context, config) do
       {:ok, config}
     end
   end
