@@ -77,8 +77,10 @@ defmodule Arbor.Memory.Index do
   @default_limit 10
   @default_operation_timeout_ms 15_000
   @default_max_pending_mutations 16
+  @default_max_concurrent_recalls 4
   @max_operation_timeout_ms 120_000
   @max_pending_mutations 64
+  @max_concurrent_recalls 32
   # Shared VectorRecord IDs and the legacy memory_embeddings primary key are varchar(255).
   @max_entry_id_bytes 255
 
@@ -101,6 +103,7 @@ defmodule Arbor.Memory.Index do
   - `:clock` - Zero-arity UTC clock (default: `DateTime.utc_now/0`)
   - `:operation_timeout_ms` - Finite deadline for one serialized mutation (default: 15s)
   - `:max_pending_mutations` - Bounded mutation queue depth (default: 16)
+  - `:max_concurrent_recalls` - Bounded concurrent recall workers (default: 4)
 
   ## Examples
 
@@ -152,10 +155,8 @@ defmodule Arbor.Memory.Index do
   @spec recall(GenServer.server(), String.t(), keyword()) ::
           {:ok, [recall_result()]} | {:error, term()}
   def recall(server, query, opts \\ []) do
-    with {:ok, {query, opts}} <- Input.recall(query, opts),
-         {:ok, context} <- GenServer.call(server, :recall_context),
-         result <- run_owned_call({:recall, context, query, opts}, context.operation_timeout_ms) do
-      result
+    with {:ok, {query, opts}} <- Input.recall(query, opts) do
+      GenServer.call(server, {:recall, query, opts}, :infinity)
     end
   end
 
@@ -217,7 +218,9 @@ defmodule Arbor.Memory.Index do
   """
   @spec get(GenServer.server(), entry_id()) :: {:ok, entry()} | {:error, :not_found}
   def get(server, entry_id) do
-    GenServer.call(server, {:get, entry_id})
+    with {:ok, entry_id} <- Input.get(entry_id) do
+      GenServer.call(server, {:get, entry_id})
+    end
   end
 
   @doc """
@@ -316,6 +319,9 @@ defmodule Arbor.Memory.Index do
     max_pending_mutations =
       Keyword.get(opts, :max_pending_mutations, @default_max_pending_mutations)
 
+    max_concurrent_recalls =
+      Keyword.get(opts, :max_concurrent_recalls, @default_max_concurrent_recalls)
+
     valid_options? =
       is_integer(max_entries) and max_entries > 0 and
         is_number(threshold) and
@@ -323,7 +329,9 @@ defmodule Arbor.Memory.Index do
         is_integer(operation_timeout_ms) and operation_timeout_ms > 0 and
         operation_timeout_ms <= @max_operation_timeout_ms and
         is_integer(max_pending_mutations) and max_pending_mutations >= 0 and
-        max_pending_mutations <= @max_pending_mutations
+        max_pending_mutations <= @max_pending_mutations and
+        is_integer(max_concurrent_recalls) and max_concurrent_recalls > 0 and
+        max_concurrent_recalls <= @max_concurrent_recalls
 
     unless valid_options?, do: raise(ArgumentError, "invalid memory index options")
 
@@ -343,6 +351,7 @@ defmodule Arbor.Memory.Index do
       clock: Keyword.get(opts, :clock, &DateTime.utc_now/0),
       operation_timeout_ms: operation_timeout_ms,
       max_pending_mutations: max_pending_mutations,
+      max_concurrent_recalls: max_concurrent_recalls,
       # Local ordering only; never persisted or copied into caller metadata.
       next_insertion_sequence: 0,
       pending_entry_orders: %{},
@@ -355,7 +364,8 @@ defmodule Arbor.Memory.Index do
       # At most one durable mutation runs outside the GenServer. Other mutations
       # retain invocation order; reads continue against acknowledged ETS state.
       inflight_mutation: nil,
-      mutation_queue: :queue.new()
+      mutation_queue: :queue.new(),
+      inflight_recalls: %{}
     }
 
     Logger.debug("Started memory index for agent #{agent_id} with backend #{backend}")
@@ -370,18 +380,10 @@ defmodule Arbor.Memory.Index do
   def handle_call({:index, _content, _metadata, _opts} = request, from, state),
     do: dispatch_mutation_call(request, from, state)
 
-  def handle_call(:recall_context, _from, state) do
-    context = %{
-      agent_id: state.agent_id,
-      table: state.table,
-      backend: state.backend,
-      default_threshold: state.default_threshold,
-      embedding_provider: state.embedding_provider,
-      operation_timeout_ms: state.operation_timeout_ms
-    }
+  def handle_call({:recall, query, opts}, from, state),
+    do: dispatch_recall(query, opts, from, state)
 
-    {:reply, {:ok, context}, state}
-  end
+  def handle_call(:recall_context, _from, state), do: {:reply, {:error, :unsupported}, state}
 
   def handle_call({:batch_index, _items, _opts} = request, from, state),
     do: dispatch_mutation_call(request, from, state)
@@ -435,35 +437,101 @@ defmodule Arbor.Memory.Index do
 
   @impl true
   def handle_info(
-        {:persistent_mutation_result, operation_ref, result},
+        {:background_operation_result, operation_ref, result},
         %{inflight_mutation: %{operation_ref: operation_ref} = inflight} = state
       ) do
-    Process.demonitor(inflight.monitor_ref, [:flush])
-    advance_persistent_mutation(inflight, result, state)
+    inflight = put_operation_result(inflight, result)
+    maybe_finish_mutation(%{state | inflight_mutation: inflight})
+  end
+
+  def handle_info(
+        {:background_operation_cancelled, operation_ref},
+        %{inflight_mutation: %{operation_ref: operation_ref} = inflight} = state
+      ) do
+    result = inflight.cancellation_result || background_failure_result(inflight.worker_call)
+    inflight = %{inflight | terminal_result: result}
+    maybe_finish_mutation(%{state | inflight_mutation: inflight})
   end
 
   def handle_info(
         {:DOWN, monitor_ref, :process, _pid, _reason},
-        %{inflight_mutation: %{monitor_ref: monitor_ref} = inflight} = state
+        %{inflight_mutation: %{coordinator_monitor_ref: monitor_ref} = inflight} = state
       ) do
-    advance_persistent_mutation(inflight, worker_down_result(inflight.phase), state)
+    result =
+      inflight.terminal_result || inflight.cancellation_result ||
+        background_failure_result(inflight.worker_call)
+
+    inflight = %{inflight | coordinator_down?: true, terminal_result: result}
+    maybe_finish_mutation(%{state | inflight_mutation: inflight})
+  end
+
+  def handle_info(
+        {:DOWN, monitor_ref, :process, _pid, _reason},
+        %{inflight_mutation: %{worker_monitor_ref: monitor_ref} = inflight} = state
+      ) do
+    inflight = %{inflight | worker_down?: true}
+    maybe_finish_mutation(%{state | inflight_mutation: inflight})
+  end
+
+  def handle_info({:background_operation_result, operation_ref, result}, state) do
+    update_recall_operation(state, operation_ref, fn recall ->
+      put_operation_result(recall, result)
+    end)
+  end
+
+  def handle_info({:background_operation_cancelled, operation_ref}, state) do
+    update_recall_operation(state, operation_ref, fn recall ->
+      result = recall.cancellation_result || background_failure_result(recall.worker_call)
+      %{recall | terminal_result: result}
+    end)
+  end
+
+  def handle_info({:DOWN, monitor_ref, :process, _pid, _reason}, state) do
+    case recall_monitor_owner(state.inflight_recalls, monitor_ref) do
+      {:coordinator, operation_ref, recall} ->
+        result =
+          recall.terminal_result || recall.cancellation_result ||
+            background_failure_result(recall.worker_call)
+
+        recall = %{recall | coordinator_down?: true, terminal_result: result}
+        maybe_finish_recall(put_in(state.inflight_recalls[operation_ref], recall), operation_ref)
+
+      {:worker, operation_ref, recall} ->
+        recall = %{recall | worker_down?: true}
+        maybe_finish_recall(put_in(state.inflight_recalls[operation_ref], recall), operation_ref)
+
+      {:caller, operation_ref, _recall} ->
+        cancel_recall_operation(state, operation_ref, :caller_down)
+
+      nil ->
+        {:noreply, state}
+    end
   end
 
   def handle_info(
         {:mutation_deadline, mutation_ref},
         %{inflight_mutation: %{mutation_ref: mutation_ref} = inflight} = state
       ) do
-    Process.exit(inflight.coordinator_pid, :kill)
-    Process.demonitor(inflight.monitor_ref, [:flush])
-    advance_persistent_mutation(inflight, deadline_result(inflight.phase), state)
+    result = deadline_result(inflight.phase)
+    cancel_background_operation(inflight.coordinator_pid, inflight.operation_ref)
+
+    inflight = %{
+      inflight
+      | cancellation_result: result,
+        terminal_result: result,
+        timer_ref: nil
+    }
+
+    maybe_finish_mutation(%{state | inflight_mutation: inflight})
   end
 
-  def handle_info({:persistent_mutation_result, _operation_ref, _result}, state),
-    do: {:noreply, state}
-
-  def handle_info({:DOWN, _monitor_ref, :process, _pid, _reason}, state), do: {:noreply, state}
+  def handle_info({:recall_deadline, operation_ref}, state) do
+    cancel_recall_operation(state, operation_ref, {:error, :operation_timeout})
+  end
 
   def handle_info({:mutation_deadline, _mutation_ref}, state), do: {:noreply, state}
+
+  def handle_info({:recall_deadline, _operation_ref}, state), do: {:noreply, state}
 
   @impl true
   def terminate(_reason, state) do
@@ -474,6 +542,107 @@ defmodule Arbor.Memory.Index do
   # ============================================================================
   # Private Implementation
   # ============================================================================
+
+  defp dispatch_recall(query, opts, from, state) do
+    if map_size(state.inflight_recalls) >= state.max_concurrent_recalls do
+      {:reply, {:error, :recall_saturated}, state}
+    else
+      context = %{
+        agent_id: state.agent_id,
+        table: state.table,
+        backend: state.backend,
+        default_threshold: state.default_threshold,
+        embedding_provider: state.embedding_provider
+      }
+
+      worker_call = {:recall, context, query, opts}
+
+      {operation_ref, coordinator_pid, coordinator_monitor_ref, worker_pid, worker_monitor_ref} =
+        start_background_operation(worker_call)
+
+      caller_pid = elem(from, 0)
+      caller_monitor_ref = Process.monitor(caller_pid)
+
+      timer_ref =
+        Process.send_after(
+          self(),
+          {:recall_deadline, operation_ref},
+          state.operation_timeout_ms
+        )
+
+      recall = %{
+        operation_ref: operation_ref,
+        coordinator_pid: coordinator_pid,
+        coordinator_monitor_ref: coordinator_monitor_ref,
+        coordinator_down?: false,
+        worker_pid: worker_pid,
+        worker_monitor_ref: worker_monitor_ref,
+        worker_down?: false,
+        worker_call: worker_call,
+        from: from,
+        caller_pid: caller_pid,
+        caller_monitor_ref: caller_monitor_ref,
+        timer_ref: timer_ref,
+        cancellation_result: nil,
+        terminal_result: nil
+      }
+
+      activate_background_operation(coordinator_pid, operation_ref)
+      {:noreply, put_in(state.inflight_recalls[operation_ref], recall)}
+    end
+  end
+
+  defp update_recall_operation(state, operation_ref, update) do
+    case Map.fetch(state.inflight_recalls, operation_ref) do
+      {:ok, recall} ->
+        recall = update.(recall)
+        maybe_finish_recall(put_in(state.inflight_recalls[operation_ref], recall), operation_ref)
+
+      :error ->
+        {:noreply, state}
+    end
+  end
+
+  defp cancel_recall_operation(state, operation_ref, result) do
+    case Map.fetch(state.inflight_recalls, operation_ref) do
+      {:ok, %{cancellation_result: nil} = recall} ->
+        cancel_background_operation(recall.coordinator_pid, operation_ref)
+        cancel_mutation_deadline(recall.timer_ref)
+
+        recall = %{
+          recall
+          | cancellation_result: result,
+            terminal_result: result,
+            timer_ref: nil
+        }
+
+        maybe_finish_recall(put_in(state.inflight_recalls[operation_ref], recall), operation_ref)
+
+      {:ok, _recall} ->
+        {:noreply, state}
+
+      :error ->
+        {:noreply, state}
+    end
+  end
+
+  defp recall_monitor_owner(recalls, monitor_ref) do
+    Enum.find_value(recalls, fn {operation_ref, recall} ->
+      cond do
+        recall.coordinator_monitor_ref == monitor_ref ->
+          {:coordinator, operation_ref, recall}
+
+        recall.worker_monitor_ref == monitor_ref ->
+          {:worker, operation_ref, recall}
+
+        recall.caller_monitor_ref == monitor_ref ->
+          {:caller, operation_ref, recall}
+
+        true ->
+          nil
+      end
+    end)
+  end
 
   defp dispatch_mutation_call(request, from, state) do
     deadline = monotonic_milliseconds() + state.operation_timeout_ms
@@ -618,13 +787,8 @@ defmodule Arbor.Memory.Index do
          timer_ref,
          state
        ) do
-    owner = self()
-    operation_ref = make_ref()
-
-    coordinator_pid =
-      spawn(fn -> coordinate_persistent_mutation(owner, operation_ref, worker_call) end)
-
-    monitor_ref = Process.monitor(coordinator_pid)
+    {operation_ref, coordinator_pid, coordinator_monitor_ref, worker_pid, worker_monitor_ref} =
+      start_background_operation(worker_call)
 
     %{
       state
@@ -632,43 +796,47 @@ defmodule Arbor.Memory.Index do
           mutation_ref: mutation_ref,
           operation_ref: operation_ref,
           coordinator_pid: coordinator_pid,
-          monitor_ref: monitor_ref,
+          coordinator_monitor_ref: coordinator_monitor_ref,
+          coordinator_down?: false,
+          worker_pid: worker_pid,
+          worker_monitor_ref: worker_monitor_ref,
+          worker_down?: false,
+          worker_call: worker_call,
           timer_ref: timer_ref,
           deadline: deadline,
           from: from,
           completion: completion,
-          phase: phase
+          phase: phase,
+          cancellation_result: nil,
+          terminal_result: nil
         }
     }
+    |> tap(fn _state -> activate_background_operation(coordinator_pid, operation_ref) end)
   end
 
-  defp run_owned_call(worker_call, timeout_ms) do
+  defp start_background_operation(worker_call) do
     owner = self()
     operation_ref = make_ref()
 
-    {coordinator_pid, monitor_ref} =
-      spawn_monitor(fn -> coordinate_persistent_mutation(owner, operation_ref, worker_call) end)
+    coordinator_pid =
+      spawn(fn -> coordinate_background_operation(owner, operation_ref, worker_call) end)
+
+    coordinator_monitor_ref = Process.monitor(coordinator_pid)
 
     receive do
-      {:persistent_mutation_result, ^operation_ref, result} ->
-        Process.demonitor(monitor_ref, [:flush])
-        result
+      {:background_operation_ready, ^operation_ref, ^coordinator_pid, worker_pid} ->
+        worker_monitor_ref = Process.monitor(worker_pid)
 
-      {:DOWN, ^monitor_ref, :process, ^coordinator_pid, _reason} ->
-        {:error, :operation_failed}
-    after
-      timeout_ms ->
-        Process.exit(coordinator_pid, :kill)
-        await_process_down(monitor_ref, coordinator_pid)
-        {:error, :operation_timeout}
+        {operation_ref, coordinator_pid, coordinator_monitor_ref, worker_pid, worker_monitor_ref}
     end
   end
 
-  defp coordinate_persistent_mutation(owner, operation_ref, writer_call) do
+  defp coordinate_background_operation(owner, operation_ref, worker_call) do
+    Process.flag(:trap_exit, true)
     owner_monitor = Process.monitor(owner)
 
     if owner_available?(owner, owner_monitor) do
-      coordinate_live_owner(owner, owner_monitor, operation_ref, writer_call)
+      coordinate_live_owner(owner, owner_monitor, operation_ref, worker_call)
     end
   end
 
@@ -691,41 +859,106 @@ defmodule Arbor.Memory.Index do
     {worker_pid, worker_monitor} =
       :erlang.spawn_opt(
         fn ->
-          result = run_background_call(worker_call)
-          send(coordinator, {:writer_result, self(), result})
+          receive do
+            {:run_background_operation, ^coordinator} ->
+              result = run_background_call(worker_call)
+              send(coordinator, {:background_worker_result, self(), result})
+          end
         end,
         [:link, :monitor]
       )
 
+    send(owner, {:background_operation_ready, operation_ref, coordinator, worker_pid})
+
+    coordinate_inactive_worker(
+      owner,
+      owner_monitor,
+      operation_ref,
+      worker_call,
+      worker_pid,
+      worker_monitor
+    )
+  end
+
+  defp coordinate_inactive_worker(
+         owner,
+         owner_monitor,
+         operation_ref,
+         worker_call,
+         worker_pid,
+         worker_monitor
+       ) do
     receive do
-      {:writer_result, ^worker_pid, result} ->
-        Process.demonitor(worker_monitor, [:flush])
+      {:activate_background_operation, ^operation_ref} ->
+        send(worker_pid, {:run_background_operation, self()})
+
+        coordinate_active_worker(
+          owner,
+          owner_monitor,
+          operation_ref,
+          worker_call,
+          worker_pid,
+          worker_monitor
+        )
+
+      {:cancel_background_operation, ^operation_ref} ->
+        stop_worker(worker_pid, worker_monitor)
         Process.demonitor(owner_monitor, [:flush])
-        send(owner, {:persistent_mutation_result, operation_ref, result})
+        send(owner, {:background_operation_cancelled, operation_ref})
+
+      {:DOWN, ^owner_monitor, :process, ^owner, _reason} ->
+        stop_worker(worker_pid, worker_monitor)
 
       {:DOWN, ^worker_monitor, :process, ^worker_pid, _reason} ->
         Process.demonitor(owner_monitor, [:flush])
 
         send(
           owner,
-          {:persistent_mutation_result, operation_ref, background_failure_result(worker_call)}
+          {:background_operation_result, operation_ref, background_failure_result(worker_call)}
         )
+    end
+  end
+
+  defp coordinate_active_worker(
+         owner,
+         owner_monitor,
+         operation_ref,
+         worker_call,
+         worker_pid,
+         worker_monitor
+       ) do
+    receive do
+      {:background_worker_result, ^worker_pid, result} ->
+        await_worker_down(worker_monitor, worker_pid)
+        Process.demonitor(owner_monitor, [:flush])
+        send(owner, {:background_operation_result, operation_ref, result})
+
+      {:cancel_background_operation, ^operation_ref} ->
+        stop_worker(worker_pid, worker_monitor)
+        Process.demonitor(owner_monitor, [:flush])
+        send(owner, {:background_operation_cancelled, operation_ref})
 
       {:DOWN, ^owner_monitor, :process, ^owner, _reason} ->
-        Process.exit(worker_pid, :kill)
-        await_worker_down(worker_monitor, worker_pid)
+        stop_worker(worker_pid, worker_monitor)
+
+      {:DOWN, ^worker_monitor, :process, ^worker_pid, _reason} ->
+        Process.demonitor(owner_monitor, [:flush])
+
+        send(
+          owner,
+          {:background_operation_result, operation_ref, background_failure_result(worker_call)}
+        )
     end
+  end
+
+  defp stop_worker(worker_pid, worker_monitor) do
+    Process.exit(worker_pid, :kill)
+    await_worker_down(worker_monitor, worker_pid)
   end
 
   defp await_worker_down(worker_monitor, worker_pid) do
     receive do
       {:DOWN, ^worker_monitor, :process, ^worker_pid, _reason} -> :ok
-    end
-  end
-
-  defp await_process_down(monitor_ref, pid) do
-    receive do
-      {:DOWN, ^monitor_ref, :process, ^pid, _reason} -> :ok
     end
   end
 
@@ -739,6 +972,67 @@ defmodule Arbor.Memory.Index do
     do: {:error, :persistence_indeterminate}
 
   defp background_failure_result(_read_or_preflight), do: {:error, :operation_failed}
+
+  defp activate_background_operation(coordinator_pid, operation_ref) do
+    send(coordinator_pid, {:activate_background_operation, operation_ref})
+    :ok
+  end
+
+  defp cancel_background_operation(coordinator_pid, operation_ref) do
+    send(coordinator_pid, {:cancel_background_operation, operation_ref})
+    :ok
+  end
+
+  defp put_operation_result(operation, result) do
+    %{operation | terminal_result: operation.cancellation_result || result}
+  end
+
+  defp maybe_finish_mutation(%{inflight_mutation: inflight} = state) do
+    if operation_finished?(inflight) do
+      cleanup_operation_monitors(inflight)
+      advance_persistent_mutation(inflight, inflight.terminal_result, state)
+    else
+      {:noreply, state}
+    end
+  end
+
+  defp maybe_finish_recall(state, operation_ref) do
+    recall = Map.fetch!(state.inflight_recalls, operation_ref)
+
+    if operation_finished?(recall) do
+      cleanup_operation_monitors(recall)
+      cancel_mutation_deadline(recall.timer_ref)
+
+      state = %{state | inflight_recalls: Map.delete(state.inflight_recalls, operation_ref)}
+
+      if recall.terminal_result != :caller_down and caller_alive?(recall.from) do
+        GenServer.reply(recall.from, recall.terminal_result)
+      end
+
+      {:noreply, state}
+    else
+      {:noreply, state}
+    end
+  end
+
+  defp operation_finished?(operation) do
+    not is_nil(operation.terminal_result) and operation.coordinator_down? and
+      (is_nil(operation.worker_pid) or operation.worker_down?)
+  end
+
+  defp cleanup_operation_monitors(operation) do
+    demonitor(operation.coordinator_monitor_ref)
+    demonitor(operation.worker_monitor_ref)
+
+    if Map.has_key?(operation, :caller_monitor_ref) do
+      demonitor(operation.caller_monitor_ref)
+    end
+
+    :ok
+  end
+
+  defp demonitor(nil), do: :ok
+  defp demonitor(monitor_ref), do: Process.demonitor(monitor_ref, [:flush])
 
   defp advance_persistent_mutation(inflight, result, state) do
     case complete_mutation_stage(inflight.completion, result, state) do
@@ -809,12 +1103,10 @@ defmodule Arbor.Memory.Index do
     Process.send_after(self(), {:mutation_deadline, mutation_ref}, remaining)
   end
 
+  defp cancel_mutation_deadline(nil), do: :ok
   defp cancel_mutation_deadline(timer_ref), do: Process.cancel_timer(timer_ref)
 
   defp monotonic_milliseconds, do: System.monotonic_time(:millisecond)
-
-  defp worker_down_result(:preflight), do: {:error, :operation_failed}
-  defp worker_down_result(:durable), do: {:error, :persistence_indeterminate}
 
   defp deadline_result(:preflight), do: {:error, :operation_timeout}
   defp deadline_result(:durable), do: {:error, :persistence_indeterminate}

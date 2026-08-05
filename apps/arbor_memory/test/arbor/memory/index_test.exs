@@ -48,6 +48,22 @@ defmodule Arbor.Memory.IndexTest do
             :never_sent -> {:ok, requested_id(metadata)}
           end
 
+        {:trap_until_cancelled, owner} ->
+          Process.flag(:trap_exit, true)
+          send(owner, {:writer_trapping_exit, agent_id, self()})
+
+          receive do
+            :never_sent -> {:ok, requested_id(metadata)}
+          end
+
+        {:report_overlap, owner, prior_writer_pid} ->
+          send(
+            owner,
+            {:writer_overlap_observed, agent_id, Process.alive?(prior_writer_pid)}
+          )
+
+          {:ok, requested_id(metadata)}
+
         {:block_until_commit, owner} ->
           send(owner, {:writer_waiting_to_commit, agent_id, self()})
 
@@ -150,6 +166,14 @@ defmodule Arbor.Memory.IndexTest do
 
         {:block_forever, owner} ->
           send(owner, {:provider_stalled, content, self()})
+
+          receive do
+            :never_sent -> {:ok, %{embedding: List.duplicate(0.5, 768)}}
+          end
+
+        {:trap_until_cancelled, owner} ->
+          Process.flag(:trap_exit, true)
+          send(owner, {:provider_trapping_exit, content, self()})
 
           receive do
             :never_sent -> {:ok, %{embedding: List.duplicate(0.5, 768)}}
@@ -740,6 +764,66 @@ defmodule Arbor.Memory.IndexTest do
       assert :sys.get_state(pid).pending_sync == MapSet.new()
     end
 
+    test "deadline regression: cancelled writer terminates before the next mutation starts" do
+      agent_id = "cancel_before_next_#{System.unique_integer([:positive])}"
+      first_id = "mem_cancelled_first"
+      second_id = "mem_after_cancel"
+      ControlledWriter.configure(agent_id, {:trap_until_cancelled, self()})
+
+      {:ok, pid} =
+        Index.start_link(
+          agent_id: agent_id,
+          backend: :dual,
+          persistent_writer: ControlledWriter,
+          entry_id_generator: sequence_callback([first_id, second_id]),
+          operation_timeout_ms: 100,
+          name: nil
+        )
+
+      on_exit(fn ->
+        ControlledWriter.disarm(agent_id)
+        if Process.alive?(pid), do: GenServer.stop(pid)
+      end)
+
+      parent = self()
+
+      spawn(fn ->
+        send(
+          parent,
+          {:cancelled_first_result,
+           Index.index(pid, "First timed durable write", %{},
+             embedding: valid_persistent_embedding()
+           )}
+        )
+      end)
+
+      assert_receive {:writer_trapping_exit, ^agent_id, first_writer_pid}, 1_000
+      first_writer_monitor = Process.monitor(first_writer_pid)
+
+      on_exit(fn ->
+        if Process.alive?(first_writer_pid), do: Process.exit(first_writer_pid, :kill)
+      end)
+
+      assert_receive {:cancelled_first_result, {:ok, ^first_id}}, 1_000
+      ControlledWriter.set_mode(agent_id, {:report_overlap, self(), first_writer_pid})
+
+      spawn(fn ->
+        send(
+          parent,
+          {:after_cancel_result,
+           Index.index(pid, "Mutation after deadline", %{},
+             embedding: valid_persistent_embedding()
+           )}
+        )
+      end)
+
+      assert_receive {:writer_overlap_observed, ^agent_id, false}, 1_000
+      assert_receive {:after_cancel_result, {:ok, ^second_id}}, 1_000
+      assert_receive {:DOWN, ^first_writer_monitor, :process, ^first_writer_pid, _reason}, 1_000
+      assert {:ok, %{id: ^first_id}} = Index.get(pid, first_id)
+      assert {:ok, %{id: ^second_id}} = Index.get(pid, second_id)
+    end
+
     test "ownership regression: owner death terminates coordinator and durable writer" do
       agent_id = "dead_index_owner_#{System.unique_integer([:positive])}"
       ControlledWriter.configure(agent_id, {:block_until_commit, self()})
@@ -782,6 +866,128 @@ defmodule Arbor.Memory.IndexTest do
   end
 
   describe "recall/2" do
+    test "authority regression: raw recall context is never exposed" do
+      {:ok, pid} =
+        Index.start_link(
+          agent_id: "recall_context_#{System.unique_integer([:positive])}",
+          name: nil
+        )
+
+      on_exit(fn ->
+        if Process.alive?(pid), do: GenServer.stop(pid)
+      end)
+
+      assert {:error, :unsupported} = GenServer.call(pid, :recall_context)
+      assert Process.alive?(pid)
+    end
+
+    test "resource regression: recall admission is bounded before provider dispatch" do
+      first_query = "bounded recall first"
+      second_query = "bounded recall rejected"
+      ControlledProvider.configure(first_query, {:block, self()})
+      ControlledProvider.configure(second_query, :success)
+
+      {:ok, pid} =
+        Index.start_link(
+          agent_id: "bounded_recall_#{System.unique_integer([:positive])}",
+          embedding_provider: ControlledProvider,
+          max_concurrent_recalls: 1,
+          operation_timeout_ms: 2_000,
+          name: nil
+        )
+
+      on_exit(fn ->
+        ControlledProvider.disarm(first_query)
+        ControlledProvider.disarm(second_query)
+        if Process.alive?(pid), do: GenServer.stop(pid)
+      end)
+
+      parent = self()
+      spawn(fn -> send(parent, {:bounded_recall_result, Index.recall(pid, first_query)}) end)
+
+      assert_receive {:provider_started, ^first_query, provider_pid}, 1_000
+      assert {:error, :recall_saturated} = Index.recall(pid, second_query)
+      assert ControlledProvider.call_count(second_query) == 0
+      assert %{entry_count: 0} = Index.stats(pid)
+
+      send(provider_pid, :release_provider)
+      assert_receive {:bounded_recall_result, {:ok, []}}, 1_000
+      assert Process.alive?(pid)
+    end
+
+    test "deadline regression: recall provider is dead before timeout is acknowledged" do
+      query = "recall provider cancelled before reply"
+      ControlledProvider.configure(query, {:trap_until_cancelled, self()})
+
+      {:ok, pid} =
+        Index.start_link(
+          agent_id: "recall_cancel_#{System.unique_integer([:positive])}",
+          embedding_provider: ControlledProvider,
+          operation_timeout_ms: 100,
+          name: nil
+        )
+
+      on_exit(fn ->
+        ControlledProvider.disarm(query)
+        if Process.alive?(pid), do: GenServer.stop(pid)
+      end)
+
+      parent = self()
+      spawn(fn -> send(parent, {:cancelled_recall_result, Index.recall(pid, query)}) end)
+
+      assert_receive {:provider_trapping_exit, ^query, provider_pid}, 1_000
+      provider_monitor = Process.monitor(provider_pid)
+
+      on_exit(fn ->
+        if Process.alive?(provider_pid), do: Process.exit(provider_pid, :kill)
+      end)
+
+      assert_receive {:cancelled_recall_result, {:error, :operation_timeout}}, 1_000
+      refute Process.alive?(provider_pid)
+      assert_receive {:DOWN, ^provider_monitor, :process, ^provider_pid, _reason}, 1_000
+      assert Process.alive?(pid)
+    end
+
+    test "ownership regression: dead recall caller cancels owned worker and frees admission" do
+      blocked_query = "recall caller dies"
+      retry_query = "recall after caller death"
+      ControlledProvider.configure(blocked_query, {:block_forever, self()})
+      ControlledProvider.configure(retry_query, :success)
+
+      {:ok, pid} =
+        Index.start_link(
+          agent_id: "recall_caller_death_#{System.unique_integer([:positive])}",
+          embedding_provider: ControlledProvider,
+          max_concurrent_recalls: 1,
+          operation_timeout_ms: 2_000,
+          name: nil
+        )
+
+      on_exit(fn ->
+        ControlledProvider.disarm(blocked_query)
+        ControlledProvider.disarm(retry_query)
+        if Process.alive?(pid), do: GenServer.stop(pid)
+      end)
+
+      caller_pid = spawn(fn -> Index.recall(pid, blocked_query) end)
+      assert_receive {:provider_stalled, ^blocked_query, provider_pid}, 1_000
+
+      [{_operation_ref, recall}] = Map.to_list(:sys.get_state(pid).inflight_recalls)
+      coordinator_monitor = Process.monitor(recall.coordinator_pid)
+      provider_monitor = Process.monitor(provider_pid)
+
+      Process.exit(caller_pid, :kill)
+
+      assert_receive {:DOWN, ^provider_monitor, :process, ^provider_pid, _reason}, 1_000
+
+      assert_receive {:DOWN, ^coordinator_monitor, :process, _coordinator_pid, _reason},
+                     1_000
+
+      await_recall_count(pid, 0)
+      assert {:ok, []} = Index.recall(pid, retry_query)
+      assert Process.alive?(pid)
+    end
+
     test "responsiveness regression: slow recall provider cannot monopolize the index" do
       query = "blocked recall provider"
       ControlledProvider.configure(query, {:block, self()})
@@ -1066,6 +1272,15 @@ defmodule Arbor.Memory.IndexTest do
   end
 
   describe "get/2" do
+    test "resource regression: malformed IDs are rejected before mailbox admission" do
+      oversized_id = String.duplicate("x", 256)
+
+      assert {:error, :not_found} =
+               Index.get(:index_server_that_must_not_be_called, oversized_id)
+
+      assert {:error, :not_found} = Index.get(:index_server_that_must_not_be_called, <<255>>)
+    end
+
     test "returns entry by id", %{pid: pid} do
       {:ok, entry_id} = Index.index(pid, "Test content", %{type: :fact})
 
@@ -1217,5 +1432,20 @@ defmodule Arbor.Memory.IndexTest do
 
   defp await_mutation_queue_length(_pid, expected, 0) do
     flunk("mutation queue did not reach #{expected}")
+  end
+
+  defp await_recall_count(pid, expected, attempts \\ 100)
+
+  defp await_recall_count(pid, expected, attempts) when attempts > 0 do
+    if map_size(:sys.get_state(pid).inflight_recalls) == expected do
+      :ok
+    else
+      Process.sleep(5)
+      await_recall_count(pid, expected, attempts - 1)
+    end
+  end
+
+  defp await_recall_count(_pid, expected, 0) do
+    flunk("inflight recall count did not reach #{expected}")
   end
 end

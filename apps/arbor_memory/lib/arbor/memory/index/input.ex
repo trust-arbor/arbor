@@ -66,6 +66,13 @@ defmodule Arbor.Memory.Index.Input do
       else: {:error, :invalid_entry_identity}
   end
 
+  @spec get(term()) :: {:ok, String.t()} | {:error, :not_found}
+  def get(entry_id) do
+    if valid_text?(entry_id, VectorRecord.limits().id_bytes),
+      do: {:ok, entry_id},
+      else: {:error, :not_found}
+  end
+
   @spec warm(term()) :: {:ok, keyword()} | {:error, :invalid_options}
   def warm(opts) do
     with {:ok, opts} <- exact_keyword(opts, [:limit, :query]),
