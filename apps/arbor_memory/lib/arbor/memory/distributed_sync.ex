@@ -35,7 +35,9 @@ defmodule Arbor.Memory.DistributedSync do
     "memory.goal_created",
     "memory.goal_progress",
     "memory.goal_achieved",
-    "memory.goal_abandoned"
+    "memory.goal_abandoned",
+    "memory.goal_deleted",
+    "memory.goals_cleared"
   ]
 
   # ============================================================================
@@ -103,8 +105,18 @@ defmodule Arbor.Memory.DistributedSync do
 
   # Goals — reload specific goal from Postgres
   defp handle_remote_signal(type, %{agent_id: agent_id, goal_id: goal_id})
-       when type in [:goal_created, :goal_progress, :goal_achieved, :goal_abandoned] do
+       when type in [
+              :goal_created,
+              :goal_progress,
+              :goal_achieved,
+              :goal_abandoned,
+              :goal_deleted
+            ] do
     reload_goal(agent_id, goal_id)
+  end
+
+  defp handle_remote_signal(:goals_cleared, %{agent_id: agent_id}) do
+    reload_agent_goals(agent_id)
   end
 
   defp handle_remote_signal(type, _data) do
@@ -149,6 +161,22 @@ defmodule Arbor.Memory.DistributedSync do
   rescue
     _ ->
       Logger.warning("[DistributedSync] Failed to reload goal #{goal_id}")
+      :ok
+  end
+
+  defp reload_agent_goals(agent_id) do
+    case GoalStore.reload_for_agent(agent_id) do
+      :ok ->
+        Logger.debug("[DistributedSync] Reloaded goals for #{agent_id}")
+
+      {:error, _reason} ->
+        Logger.warning("[DistributedSync] Failed to reload goals for #{agent_id}")
+    end
+
+    :ok
+  rescue
+    _ ->
+      Logger.warning("[DistributedSync] Failed to reload goals")
       :ok
   end
 

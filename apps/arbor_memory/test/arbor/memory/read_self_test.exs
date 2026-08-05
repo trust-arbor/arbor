@@ -1,12 +1,14 @@
 defmodule Arbor.Memory.ReadSelfTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Arbor.Contracts.Memory.Goal
   alias Arbor.Memory.{GoalStore, KnowledgeGraph, SelfKnowledge, WorkingMemory}
+  alias Arbor.Persistence.BufferedStore
 
   @moduletag :fast
 
   setup do
+    start_supervised!({BufferedStore, name: :arbor_memory_durable, backend: nil})
     agent_id = "test_agent_#{System.unique_integer([:positive])}"
 
     # Ensure ETS tables exist

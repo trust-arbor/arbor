@@ -106,7 +106,9 @@ defmodule Arbor.Test.BehavioralCase do
     end
 
     ensure_started(Arbor.Memory.Supervisor, [
+      {Arbor.Persistence.BufferedStore, name: :arbor_memory_durable, backend: nil},
       {Registry, keys: :unique, name: Arbor.Memory.Registry},
+      {Arbor.Memory.Provenance, []},
       {Arbor.Memory.IndexSupervisor, []},
       {Arbor.Memory.GoalStore, []},
       {Arbor.Memory.IntentStore, []},

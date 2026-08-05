@@ -6,7 +6,16 @@ defmodule Arbor.Agent.SeedTest do
   alias Arbor.Contracts.Memory.Goal
   alias Arbor.Contracts.Security.Taint
   alias Arbor.Memory
-  alias Arbor.Memory.{KnowledgeGraph, Preferences, Provenance, WorkingMemory, WorkingMemoryStore}
+
+  alias Arbor.Memory.{
+    GoalStore,
+    KnowledgeGraph,
+    Preferences,
+    Provenance,
+    WorkingMemory,
+    WorkingMemoryStore
+  }
+
   alias Arbor.Persistence.BufferedStore
 
   @agent_id "test_seed_agent"
@@ -238,6 +247,24 @@ defmodule Arbor.Agent.SeedTest do
   # ============================================================================
 
   describe "restore/2" do
+    test "GoalStore owner routing preserves public Seed goal roundtrip" do
+      ensure_goal_runtime()
+
+      goal = Goal.new("Seed compatibility goal", id: "goal_seed_owner_compat")
+
+      assert {:ok, ^goal} = Memory.add_goal(@agent_id, goal)
+      assert {:ok, seed} = Seed.capture(@agent_id)
+      assert Enum.any?(seed.goals, &(&1.id == goal.id))
+
+      assert :ok = GoalStore.clear_goals(@agent_id)
+      assert {:error, :not_found} = Memory.get_goal(@agent_id, goal.id)
+
+      assert {:ok, _restored_seed} = Seed.restore(seed)
+      assert {:ok, ^goal} = Memory.get_goal(@agent_id, goal.id)
+
+      assert :ok = GoalStore.clear_goals(@agent_id)
+    end
+
     test "restores working_memory via Memory facade" do
       wm = WorkingMemory.new(@agent_id)
       wm_map = Memory.serialize_working_memory(wm)
@@ -424,6 +451,20 @@ defmodule Arbor.Agent.SeedTest do
       }
 
       assert {:ok, _} = Seed.restore(seed)
+    end
+  end
+
+  defp ensure_goal_runtime do
+    if Process.whereis(:arbor_memory_durable) == nil do
+      start_supervised!({BufferedStore, name: :arbor_memory_durable, backend: nil})
+    end
+
+    if Process.whereis(Provenance) == nil do
+      start_supervised!(Provenance)
+    end
+
+    if Process.whereis(GoalStore) == nil do
+      start_supervised!(GoalStore)
     end
   end
 

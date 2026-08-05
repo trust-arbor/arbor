@@ -1,12 +1,14 @@
 defmodule Arbor.Memory.GoalStoreTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Arbor.Contracts.Memory.Goal
   alias Arbor.Memory.GoalStore
+  alias Arbor.Persistence.BufferedStore
 
   @moduletag :fast
 
   setup do
+    start_supervised!({BufferedStore, name: :arbor_memory_durable, backend: nil})
     agent_id = "test_agent_#{System.unique_integer([:positive])}"
     on_exit(fn -> GoalStore.clear_goals(agent_id) end)
     %{agent_id: agent_id}

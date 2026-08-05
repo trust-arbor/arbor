@@ -155,6 +155,19 @@ defmodule Arbor.Behavioral.HeartbeatCycleTest do
   end
 
   describe "scenario: goal store lifecycle" do
+    test "heartbeat-facing Memory facade remains compatible with owner-routed raw goals" do
+      agent_id = "agent_test_goal_facade_#{:erlang.unique_integer([:positive])}"
+
+      assert {:ok, goal} =
+               Arbor.Memory.add_goal(
+                 agent_id,
+                 Arbor.Contracts.Memory.Goal.new("Heartbeat facade goal")
+               )
+
+      assert Enum.any?(Arbor.Memory.get_active_goals(agent_id), &(&1.id == goal.id))
+      assert :ok = GoalStore.clear_goals(agent_id)
+    end
+
     test "goals can be created and queried per agent" do
       agent_id = "agent_test_goal_lifecycle_#{:erlang.unique_integer([:positive])}"
 
