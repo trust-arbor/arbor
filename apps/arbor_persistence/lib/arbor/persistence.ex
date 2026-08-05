@@ -25,10 +25,49 @@ defmodule Arbor.Persistence do
   @behaviour Arbor.Contracts.API.Persistence
 
   alias Arbor.Contracts.Persistence.{AppendOperation, Filter, Record}
-  alias Arbor.Persistence.{BufferedStore, Event, EventLog}
+  alias Arbor.Persistence.{BufferedStore, Event, EventLog, VectorBoundary}
   alias Arbor.Persistence.Repo
   alias Arbor.Persistence.Schemas.Session
   alias Arbor.Persistence.SessionStore
+
+  # ---------------------------------------------------------------
+  # Validated vector-store boundary (C3G1A0)
+  # ---------------------------------------------------------------
+
+  @doc "Execute one canonical vector mutation or bounded atomic batch."
+  @spec execute_vector_operation(String.t(), term(), keyword()) ::
+          {:ok, Arbor.Contracts.Persistence.VectorReceipt.t()}
+          | {:error, Arbor.Contracts.API.Persistence.vector_error()}
+  def execute_vector_operation(agent_id, operation, opts \\ []),
+    do: VectorBoundary.execute(agent_id, operation, opts)
+
+  @doc "Reconcile an indeterminate mutation using its original canonical operation."
+  @spec reconcile_vector_operation(String.t(), term(), keyword()) ::
+          {:ok, Arbor.Contracts.Persistence.VectorReceipt.t()}
+          | {:ok, :absent}
+          | {:error, Arbor.Contracts.API.Persistence.vector_error()}
+  def reconcile_vector_operation(agent_id, operation, opts \\ []),
+    do: VectorBoundary.reconcile(agent_id, operation, opts)
+
+  @doc "Fetch one row by exact `{agent_id, source_namespace, source_key}` identity."
+  @spec fetch_vector_record(String.t(), String.t(), String.t(), keyword()) ::
+          {:ok, Arbor.Contracts.Persistence.VectorRecord.t()}
+          | {:error, Arbor.Contracts.API.Persistence.vector_error()}
+  def fetch_vector_record(agent_id, source_namespace, source_key, opts \\ []),
+    do: VectorBoundary.fetch(agent_id, source_namespace, source_key, opts)
+
+  @doc "List a bounded, fully validated tenant-owned vector-record set."
+  @spec list_vector_records(String.t(), keyword()) ::
+          {:ok, [Arbor.Contracts.Persistence.VectorRecord.t()]}
+          | {:error, Arbor.Contracts.API.Persistence.vector_error()}
+  def list_vector_records(agent_id, opts \\ []), do: VectorBoundary.list(agent_id, opts)
+
+  @doc "Search using a normalized 768-dimensional vector and exact descriptor options."
+  @spec search_vector_records(String.t(), term(), keyword()) ::
+          {:ok, [Arbor.Contracts.Persistence.VectorMatch.t()]}
+          | {:error, Arbor.Contracts.API.Persistence.vector_error()}
+  def search_vector_records(agent_id, vector, opts \\ []),
+    do: VectorBoundary.search(agent_id, vector, opts)
 
   # ---------------------------------------------------------------
   # Session transcript facade (VP-04A)
@@ -963,6 +1002,33 @@ defmodule Arbor.Persistence do
   @impl Arbor.Contracts.API.Persistence
   def get_event_count_using_backend(name, backend, opts),
     do: event_count(name, backend, opts)
+
+  # -- VectorStore (optional) --
+
+  @impl Arbor.Contracts.API.Persistence
+  def execute_validated_vector_operation_for_agent(agent_id, operation, opts),
+    do: execute_vector_operation(agent_id, operation, opts)
+
+  @impl Arbor.Contracts.API.Persistence
+  def reconcile_validated_vector_operation_for_agent(agent_id, operation, opts),
+    do: reconcile_vector_operation(agent_id, operation, opts)
+
+  @impl Arbor.Contracts.API.Persistence
+  def retrieve_vector_record_by_logical_identity_for_agent(
+        agent_id,
+        source_namespace,
+        source_key,
+        opts
+      ),
+      do: fetch_vector_record(agent_id, source_namespace, source_key, opts)
+
+  @impl Arbor.Contracts.API.Persistence
+  def list_vector_records_for_agent(agent_id, opts),
+    do: list_vector_records(agent_id, opts)
+
+  @impl Arbor.Contracts.API.Persistence
+  def search_vector_records_by_exact_descriptor_for_agent(agent_id, vector, opts),
+    do: search_vector_records(agent_id, vector, opts)
 
   defp normalize_authorization_opts(opts) do
     case EventLog.normalize_opts(opts) do
