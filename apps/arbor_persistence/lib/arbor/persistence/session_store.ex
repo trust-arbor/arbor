@@ -15,10 +15,27 @@ defmodule Arbor.Persistence.SessionStore do
 
   import Ecto.Query
 
+  alias Arbor.Contracts.Security.TaintEnvelope
   alias Arbor.Persistence.Repo
   alias Arbor.Persistence.Schemas.{Session, SessionEntry}
 
   require Logger
+
+  @max_entry_ordinal 9_223_372_036_854_775_807
+  @entry_fields [
+    :id,
+    :session_id,
+    :parent_entry_id,
+    :entry_type,
+    :role,
+    :content,
+    :model,
+    :stop_reason,
+    :token_usage,
+    :timestamp,
+    :metadata,
+    :entry_ordinal
+  ]
 
   # ── Session lifecycle ──────────────────────────────────────────────
 
@@ -170,38 +187,204 @@ defmodule Arbor.Persistence.SessionStore do
     `:parent_entry_id`, `:metadata`
   """
   @spec append_entry(Ecto.UUID.t(), map()) :: {:ok, SessionEntry.t()} | {:error, term()}
-  def append_entry(session_uuid, attrs) do
-    attrs
-    |> Map.put(:session_id, session_uuid)
-    |> Map.put_new(:timestamp, DateTime.utc_now())
-    |> then(&SessionEntry.changeset(%SessionEntry{}, &1))
-    |> Repo.insert()
+  def append_entry(session_uuid, attrs) when is_map(attrs) do
+    case append_entries_internal(session_uuid, [attrs]) do
+      {:ok, [entry]} -> {:ok, entry}
+      {:error, _reason} = error -> error
+    end
   end
+
+  def append_entry(_session_uuid, _attrs), do: {:error, :invalid_entry}
 
   @doc """
   Bulk-insert multiple entries for a session (single transaction).
   """
   @spec append_entries(Ecto.UUID.t(), [map()]) :: {:ok, non_neg_integer()} | {:error, term()}
   def append_entries(session_uuid, entries) when is_list(entries) do
-    now = DateTime.utc_now()
-
-    rows =
-      Enum.map(entries, fn attrs ->
-        attrs
-        |> Map.put(:session_id, session_uuid)
-        |> Map.put_new(:timestamp, now)
-        |> Map.put_new(:id, Ecto.UUID.generate())
-      end)
-
-    case Repo.insert_all(SessionEntry, rows) do
-      {count, _} -> {:ok, count}
+    if proper_list?(entries) do
+      case append_entries_internal(session_uuid, entries) do
+        {:ok, persisted} -> {:ok, length(persisted)}
+        {:error, _reason} = error -> error
+      end
+    else
+      {:error, :improper_entries}
     end
-  rescue
-    e -> {:error, Exception.message(e)}
   end
 
+  def append_entries(_session_uuid, _entries), do: {:error, :invalid_entries}
+
+  defp append_entries_internal(_session_uuid, []), do: {:ok, []}
+
+  defp append_entries_internal(session_uuid, entries) do
+    with {:ok, prepared} <- prepare_entries(session_uuid, entries) do
+      try do
+        case transaction(Repo, fn -> append_prepared(session_uuid, prepared) end) do
+          {:ok, result} -> {:ok, result}
+          {:error, reason} -> {:error, public_error(reason)}
+        end
+      rescue
+        _error -> {:error, :database_error}
+      end
+    end
+  end
+
+  defp prepare_entries(session_uuid, entries) do
+    now = DateTime.utc_now()
+
+    entries
+    |> Enum.with_index()
+    |> Enum.reduce_while({:ok, []}, fn {attrs, index}, {:ok, prepared} ->
+      case prepare_entry(session_uuid, attrs, now) do
+        {:ok, entry} -> {:cont, {:ok, [entry | prepared]}}
+        {:error, reason} -> {:halt, {:error, {:invalid_entry, index, reason}}}
+      end
+    end)
+    |> case do
+      {:ok, prepared} -> {:ok, Enum.reverse(prepared)}
+      {:error, _reason} = error -> error
+    end
+  rescue
+    _ -> {:error, {:invalid_entry, 0, :malformed_entry}}
+  end
+
+  defp prepare_entry(session_uuid, attrs, now) when is_map(attrs) do
+    attrs =
+      attrs
+      |> Map.delete(:entry_ordinal)
+      |> Map.delete("entry_ordinal")
+      |> Map.put(:session_id, session_uuid)
+      |> Map.put_new(:timestamp, now)
+
+    changeset = SessionEntry.changeset(%SessionEntry{}, attrs)
+
+    with {:ok, entry} <- Ecto.Changeset.apply_action(changeset, :insert),
+         {:ok, entry} <- ensure_entry_id(entry, attrs),
+         :ok <- verify_durable_provenance(entry.metadata, entry.content) do
+      {:ok, entry}
+    else
+      {:error, %Ecto.Changeset{}} -> {:error, :invalid_entry}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp prepare_entry(_session_uuid, _attrs, _now), do: {:error, :malformed_entry}
+
+  defp ensure_entry_id(%SessionEntry{id: nil} = entry, attrs) do
+    id =
+      case Map.get(attrs, :id) do
+        value when is_binary(value) -> value
+        _ -> Ecto.UUID.generate()
+      end
+
+    {:ok, %{entry | id: id}}
+  end
+
+  defp ensure_entry_id(%SessionEntry{} = entry, _attrs), do: {:ok, entry}
+
+  defp verify_durable_provenance(metadata, content) when is_map(metadata) do
+    cond do
+      Map.has_key?(metadata, :taint) ->
+        {:error, :ambiguous_taint_metadata_key}
+
+      not Map.has_key?(metadata, "taint") ->
+        :ok
+
+      true ->
+        case TaintEnvelope.verify(Map.get(metadata, "taint"), content) do
+          {:ok, _envelope} -> :ok
+          {:error, reason} -> {:error, {:invalid_durable_provenance, reason}}
+        end
+    end
+  end
+
+  defp verify_durable_provenance(_metadata, _content), do: {:error, :invalid_metadata}
+
+  defp append_prepared(session_uuid, prepared) do
+    with {:ok, _session} <- lock_session(session_uuid),
+         {:ok, ordinals} <- allocate_ordinals(session_uuid, length(prepared)) do
+      entries =
+        prepared
+        |> Enum.zip(ordinals)
+        |> Enum.map(fn {entry, ordinal} -> %{entry | entry_ordinal: ordinal} end)
+
+      case entries do
+        [entry] ->
+          case Repo.insert(SessionEntry.changeset(entry, %{})) do
+            {:ok, persisted} -> [persisted]
+            {:error, _changeset} -> Repo.rollback(:database_error)
+          end
+
+        entries ->
+          rows = Enum.map(entries, &Map.take(&1, @entry_fields))
+
+          case Repo.insert_all(SessionEntry, rows) do
+            {count, _} when count == length(rows) -> entries
+            {count, _} -> Repo.rollback({:insert_count_mismatch, count})
+          end
+      end
+    else
+      {:error, reason} -> Repo.rollback(reason)
+    end
+  end
+
+  defp lock_session(session_uuid) do
+    query = from(s in Session, where: s.id == ^session_uuid)
+    query = if postgres_repo?(Repo), do: from(s in query, lock: "FOR UPDATE"), else: query
+
+    case Repo.one(query) do
+      nil -> {:error, :not_found}
+      session -> {:ok, session}
+    end
+  end
+
+  defp allocate_ordinals(session_uuid, count) when is_integer(count) and count > 0 do
+    current =
+      Repo.one(
+        from(e in SessionEntry,
+          where: e.session_id == ^session_uuid,
+          select: max(e.entry_ordinal)
+        )
+      ) || 0
+
+    cond do
+      not is_integer(current) or current < 0 -> {:error, :invalid_entry_ordinal_state}
+      current > @max_entry_ordinal - count -> {:error, :entry_ordinal_overflow}
+      true -> {:ok, Enum.to_list((current + 1)..(current + count))}
+    end
+  end
+
+  defp allocate_ordinals(_session_uuid, 0), do: {:ok, []}
+
+  defp transaction(repo, fun) do
+    opts = if sqlite_repo?(repo), do: [mode: :immediate], else: []
+    repo.transaction(fun, opts)
+  end
+
+  defp public_error({:invalid_entry, index, reason}) when is_integer(index) and is_atom(reason),
+    do: {:invalid_entry, index, reason}
+
+  defp public_error({:invalid_entry, index, {:invalid_durable_provenance, reason}})
+       when is_integer(index) and is_atom(reason),
+       do: {:invalid_entry, index, {:invalid_durable_provenance, reason}}
+
+  defp public_error(reason)
+       when reason in [
+              :not_found,
+              :entry_ordinal_overflow,
+              :invalid_entry_ordinal_state,
+              :database_error,
+              :improper_entries,
+              :invalid_entries
+            ],
+       do: reason
+
+  defp public_error(_reason), do: :database_error
+
   @doc """
-  Load entries for a session, ordered by timestamp ascending.
+  Load entries for a session, ordered by durable entry ordinal ascending.
+
+  Timestamps remain available as a compatibility filter, but they are not the
+  transcript ordering authority.
 
   ## Options
 
@@ -218,7 +401,7 @@ defmodule Arbor.Persistence.SessionStore do
     query =
       from(e in SessionEntry,
         where: e.session_id == ^session_uuid,
-        order_by: [asc: e.timestamp],
+        order_by: [asc: e.entry_ordinal],
         limit: ^limit
       )
 
@@ -289,7 +472,7 @@ defmodule Arbor.Persistence.SessionStore do
 
         query = maybe_before_timestamp(query, before_ts)
         query = maybe_engagement_filter(query, engagement_id)
-        query = from(e in query, order_by: [desc: e.timestamp], limit: ^limit)
+        query = from(e in query, order_by: [desc: e.entry_ordinal], limit: ^limit)
 
         Repo.all(query)
         |> Enum.reverse()
@@ -364,6 +547,8 @@ defmodule Arbor.Persistence.SessionStore do
 
   # Convert a SessionEntry to a display-ready map for the dashboard
   defp entry_to_display_map(entry) do
+    {taint, taint_status} = resolve_entry_taint(entry.metadata, entry.content)
+
     role =
       case entry.role do
         "user" -> :user
@@ -378,20 +563,52 @@ defmodule Arbor.Persistence.SessionStore do
       content: unwrap_content(entry.content),
       timestamp: entry.timestamp,
       model: entry.model,
-      token_usage: entry.token_usage
+      token_usage: entry.token_usage,
+      metadata: entry.metadata,
+      taint: taint,
+      taint_status: taint_status,
+      entry_ordinal: entry.entry_ordinal
     }
   rescue
     # If atom conversion fails, keep as string
     _ ->
+      {taint, taint_status} = resolve_entry_taint(entry.metadata, entry.content)
+
       %{
         id: entry.id,
         role: entry.role,
         content: unwrap_content(entry.content),
         timestamp: entry.timestamp,
         model: entry.model,
-        token_usage: entry.token_usage
+        token_usage: entry.token_usage,
+        metadata: entry.metadata,
+        taint: taint,
+        taint_status: taint_status,
+        entry_ordinal: entry.entry_ordinal
       }
   end
+
+  defp resolve_entry_taint(metadata, content) when is_map(metadata) do
+    if Map.has_key?(metadata, :taint) do
+      {TaintEnvelope.invalid_fallback(), :invalid_durable_provenance}
+    else
+      TaintEnvelope.resolve(Map.get(metadata, "taint", :missing), content)
+      |> case do
+        {:ok, taint, status} -> {taint, status}
+        _ -> {TaintEnvelope.invalid_fallback(), :invalid_durable_provenance}
+      end
+    end
+  end
+
+  defp resolve_entry_taint(_metadata, _content),
+    do: {TaintEnvelope.invalid_fallback(), :invalid_durable_provenance}
+
+  defp proper_list?([]), do: true
+  defp proper_list?([_head | tail]), do: proper_list?(tail)
+  defp proper_list?(_tail), do: false
+
+  defp postgres_repo?(repo), do: repo_adapter(repo) == Ecto.Adapters.Postgres
+  defp sqlite_repo?(repo), do: repo_adapter(repo) == Ecto.Adapters.SQLite3
 
   # Unwrap content blocks to plain text for display.
   # Content may be: [%{"type" => "text", "text" => "hello"}], a plain string, or nil.

@@ -17,17 +17,18 @@ defmodule Arbor.Persistence.Schemas.SessionEntry do
   @primary_key {:id, Ecto.UUID, autogenerate: true}
 
   schema "session_entries" do
-    belongs_to :session, Session, type: Ecto.UUID
-    belongs_to :parent_entry, __MODULE__, type: Ecto.UUID
+    belongs_to(:session, Session, type: Ecto.UUID)
+    belongs_to(:parent_entry, __MODULE__, type: Ecto.UUID)
 
-    field :entry_type, :string
-    field :role, :string
-    field :content, {:array, :map}, default: []
-    field :model, :string
-    field :stop_reason, :string
-    field :token_usage, :map
-    field :timestamp, :utc_datetime_usec
-    field :metadata, :map, default: %{}
+    field(:entry_type, :string)
+    field(:role, :string)
+    field(:content, {:array, :map}, default: [])
+    field(:model, :string)
+    field(:stop_reason, :string)
+    field(:token_usage, :map)
+    field(:timestamp, :utc_datetime_usec)
+    field(:metadata, :map, default: %{})
+    field(:entry_ordinal, :integer)
   end
 
   @required_fields [:entry_type, :timestamp]
