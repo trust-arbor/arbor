@@ -33,6 +33,8 @@ defmodule Arbor.Comms do
   alias Arbor.Comms.PresenceTracker
   alias Arbor.Contracts.Comms.Engagement
   alias Arbor.Contracts.Comms.Interaction
+  alias Arbor.Contracts.Security.Taint
+  alias Arbor.Contracts.Security.TaintEnvelope
   require Logger
 
   alias Arbor.Comms.Config
@@ -715,6 +717,8 @@ defmodule Arbor.Comms do
   @content_max_bytes 8192
   # Default per-value bound for transport/backend/mode (both roles).
   @metadata_value_max_bytes 1024
+  # Caller metadata budgets are measured in encoded JSON bytes, the durable
+  # representation, rather than VM-specific external-term bytes.
   # User whole-map budget (transport/backend/mode only).
   @user_metadata_max_bytes 2048
   # Closed public-boundary contract for assistant delegation metadata.
@@ -726,14 +730,12 @@ defmodule Arbor.Comms do
   @delegation_control_chars ~r/[\x00-\x1F\x7F]/
   @delegation_provider_values MapSet.new(["grok"])
   @delegation_outcome_values MapSet.new(["dispatched"])
-  # Assistant whole-map budget: exact smallest measured ceiling that admits a
-  # maximal valid delegation receipt plus transport/backend/mode at their
-  # per-value ceilings. Measured on the pinned OTP/Elixir runtime as
-  # byte_size(:erlang.term_to_binary(max_meta)) == 4537 for:
-  #   transport="voice", backend/mode at 1024, delegation_task at 2048,
-  #   delegation_task_id at 256, provider/outcome enums.
-  # Do not globally raise per-value bounds for transport/backend/mode.
-  @assistant_metadata_max_bytes 4537
+  # Six KiB admits every assistant field at its semantic per-value maximum.
+  @assistant_metadata_max_bytes 6144
+  # The final source-owned metadata budget includes caller metadata plus the
+  # engagement stamp and closed durable provenance envelope. Keeping this at
+  # eight KiB guarantees a two KiB reserve above the assistant caller budget.
+  @engagement_metadata_max_bytes 8192
   @user_metadata_keys [:transport, :backend, :mode]
   # Shared atom source for assistant allowlist + all-or-none receipt keys.
   @delegation_receipt_key_atoms [
@@ -781,7 +783,10 @@ defmodule Arbor.Comms do
   appended session entries under `"agent-session-\#{agent_id}"`.
 
   Both entries are stamped with `metadata["engagement_id"] = engagement_id`
-  (source-owned, never overridable). `user_entry` and `assistant_entry` are
+  and a payload-bound `metadata["taint"]` envelope (source-owned, never
+  overridable). User content is always labeled untrusted/internal/unverified;
+  assistant provenance is derived monotonically from that label as LLM output.
+  `user_entry` and `assistant_entry` are
   maps of the shape `%{content: String.t(), sent_at | completed_at: DateTime.t(),
   metadata: map()}` (the user entry uses `:sent_at`, the assistant entry uses
   `:completed_at`). `content` must be nonblank, valid UTF-8, and within
@@ -807,13 +812,23 @@ defmodule Arbor.Comms do
          :ok <- validate_id(engagement_id, :engagement_id),
          {:ok, user_attrs} <- build_turn_entry_attrs(:user, user_entry),
          {:ok, assistant_attrs} <- build_turn_entry_attrs(:assistant, assistant_entry),
-         :ok <- validate_chronological(user_attrs.timestamp, assistant_attrs.timestamp) do
+         :ok <- validate_chronological(user_attrs.timestamp, assistant_attrs.timestamp),
+         {:ok, user_taint, assistant_taint} <- engagement_turn_taints(),
+         {:ok, stamped_user} <-
+           stamp_entry_with_provenance(
+             user_attrs,
+             engagement_id,
+             derive_utterance_end_at(user_attrs.timestamp),
+             user_taint
+           ),
+         {:ok, stamped_assistant} <-
+           stamp_entry_with_provenance(
+             assistant_attrs,
+             engagement_id,
+             %{},
+             assistant_taint
+           ) do
       persistence = Keyword.get(opts, :persistence, Arbor.Persistence)
-
-      stamped_user =
-        stamp_entry(user_attrs, engagement_id, derive_utterance_end_at(user_attrs.timestamp))
-
-      stamped_assistant = stamp_entry(assistant_attrs, engagement_id, %{})
       session_id = "agent-session-#{agent_id}"
 
       with {:ok, session} <- persistence.ensure_session(session_id, agent_id, []) do
@@ -1050,7 +1065,7 @@ defmodule Arbor.Comms do
   # Byte-size is checked FIRST, before String.valid?/1 — same reasoning as
   # validate_id/2 and validate_content/2 above: bound each individual
   # caller-supplied metadata string BEFORE it is scanned for UTF-8 validity or
-  # folded into the whole-map `:erlang.term_to_binary/1` size check below, so
+  # folded into the whole-map canonical JSON size check below, so
   # an oversized single value never reaches either scan.
   defp validate_metadata_value(_kind, key, v)
        when key in ["transport", "backend", "mode"] and is_binary(v) do
@@ -1126,11 +1141,15 @@ defmodule Arbor.Comms do
   defp validate_metadata_size(kind, metadata) do
     ceiling = metadata_size_ceiling(kind)
 
-    if byte_size(:erlang.term_to_binary(metadata)) <= ceiling do
-      :ok
-    else
-      {:error, :metadata_too_large}
+    case TaintEnvelope.canonical_json(metadata) do
+      {:ok, encoded} when byte_size(encoded) <= ceiling -> :ok
+      {:ok, _encoded} -> {:error, :metadata_too_large}
+      {:error, _reason} -> {:error, :invalid_metadata_value}
     end
+  rescue
+    _ -> {:error, :invalid_metadata_value}
+  catch
+    _, _ -> {:error, :invalid_metadata_value}
   end
 
   defp metadata_size_ceiling(:user), do: @user_metadata_max_bytes
@@ -1143,12 +1162,66 @@ defmodule Arbor.Comms do
     %{"utterance_end_at" => DateTime.to_iso8601(sent_at)}
   end
 
-  defp stamp_entry(attrs, engagement_id, extra_metadata) do
+  defp engagement_turn_taints do
+    with {:ok, user_taint} <-
+           Taint.new(%{
+             level: :untrusted,
+             sensitivity: :internal,
+             sanitizations: 0,
+             confidence: :unverified,
+             source: "engagement_user_input",
+             chain: []
+           }),
+         assistant_taint <- Arbor.Signals.Taint.for_llm_output(user_taint),
+         {:ok, assistant_taint} <- Taint.canonicalize(assistant_taint) do
+      {:ok, user_taint, assistant_taint}
+    else
+      _ -> {:error, :durable_provenance_unavailable}
+    end
+  rescue
+    _ -> {:error, :durable_provenance_unavailable}
+  catch
+    _, _ -> {:error, :durable_provenance_unavailable}
+  end
+
+  defp stamp_entry_with_provenance(attrs, engagement_id, extra_metadata, taint) do
     metadata =
       attrs.metadata
       |> Map.merge(extra_metadata)
       |> Map.put("engagement_id", engagement_id)
 
-    %{attrs | metadata: metadata}
+    with {:ok, envelope} <- bind_source_provenance(attrs.content, taint),
+         final_metadata <- Map.put(metadata, "taint", envelope),
+         :ok <- validate_final_metadata_size(final_metadata) do
+      {:ok, %{attrs | metadata: final_metadata}}
+    end
+  end
+
+  defp bind_source_provenance(payload, taint) do
+    with {:ok, adapter} <- Config.engagement_provenance_adapter(),
+         {:ok, envelope} when is_map(envelope) <-
+           apply(adapter, :bind_durable_provenance, [payload, taint]),
+         {:ok, verified} <- Arbor.Signals.Taint.verify_durable_provenance(envelope, payload),
+         true <- Map.get(verified, :taint) == taint do
+      {:ok, envelope}
+    else
+      _ -> {:error, :durable_provenance_unavailable}
+    end
+  rescue
+    _ -> {:error, :durable_provenance_unavailable}
+  catch
+    _, _ -> {:error, :durable_provenance_unavailable}
+  end
+
+  defp validate_final_metadata_size(metadata) do
+    case TaintEnvelope.canonical_json(metadata) do
+      {:ok, encoded} when byte_size(encoded) <= @engagement_metadata_max_bytes -> :ok
+      {:ok, _encoded} -> {:error, :engagement_metadata_too_large}
+      {:error, _reason} -> {:error, :durable_provenance_unavailable}
+    end
+  rescue
+    _ -> {:error, :durable_provenance_unavailable}
+  catch
+    _, _ -> {:error, :durable_provenance_unavailable}
   end
 end

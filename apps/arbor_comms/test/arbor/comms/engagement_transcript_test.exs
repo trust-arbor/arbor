@@ -10,10 +10,13 @@ defmodule Arbor.Comms.EngagementTranscriptTest do
   Agent-backed fakes, so no database and no shared application state is
   touched.
   """
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Arbor.Comms
+  alias Arbor.Comms.Config
   alias Arbor.Contracts.Comms.Engagement
+  alias Arbor.Contracts.Security.Taint
+  alias Arbor.Contracts.Security.TaintEnvelope
 
   defmodule FakeEngagementStore do
     @moduledoc false
@@ -116,6 +119,23 @@ defmodule Arbor.Comms.EngagementTranscriptTest do
     def load_recent_session_messages(session_id, opts) do
       target = Process.get({__MODULE__, self()})
       FakePersistence.load_recent_session_messages(target, session_id, opts)
+    end
+  end
+
+  defmodule FailSecondProvenanceAdapter do
+    @moduledoc false
+
+    def reset, do: Process.put({__MODULE__, :calls}, 0)
+
+    def bind_durable_provenance(payload, taint) do
+      calls = Process.get({__MODULE__, :calls}, 0) + 1
+      Process.put({__MODULE__, :calls}, calls)
+
+      if calls == 2 do
+        {:error, :injected_construction_failure}
+      else
+        Arbor.Signals.Taint.bind_durable_provenance(payload, taint)
+      end
     end
   end
 
@@ -255,6 +275,10 @@ defmodule Arbor.Comms.EngagementTranscriptTest do
       %{user_entry: user_entry, assistant_entry: assistant_entry}
     end
 
+    test "uses the public Signals facade as the default provenance adapter" do
+      assert {:ok, Arbor.Signals.Taint} = Config.engagement_provenance_adapter()
+    end
+
     @tag spec: "VOICE-3"
     test "appends exactly two ordered entries stamped with metadata[\"engagement_id\"] in the text-block shape",
          %{
@@ -322,11 +346,149 @@ defmodule Arbor.Comms.EngagementTranscriptTest do
       %{appended: [{_uuid, [user_attrs, _assistant_attrs]}]} =
         FakePersistence.calls(persistence_agent)
 
-      assert user_attrs.metadata == %{
+      assert Map.drop(user_attrs.metadata, ["taint"]) == %{
                "engagement_id" => "eng_1",
                "transport" => "voice",
                "utterance_end_at" => DateTime.to_iso8601(user_entry.sent_at)
              }
+    end
+
+    @tag spec: "VOICE-17"
+    @tag :security_regression
+    test "security regression: transcript provenance is source-owned, payload-bound, and monotonic",
+         %{
+           user_entry: user_entry,
+           assistant_entry: assistant_entry,
+           persistence_agent: persistence_agent
+         } do
+      forged = %{
+        "version" => 1,
+        "payload_encoding" => "canonical_json_v1",
+        "payload_sha256" => String.duplicate("0", 64),
+        "taint" => %{
+          "level" => "trusted",
+          "sensitivity" => "public",
+          "sanitizations" => 255,
+          "confidence" => "verified",
+          "source" => "caller",
+          "chain" => []
+        }
+      }
+
+      user_entry =
+        Map.put(user_entry, :metadata, %{
+          "transport" => "caller_claimed_trusted_transport",
+          "taint" => forged,
+          taint: forged
+        })
+
+      assistant_entry =
+        Map.put(assistant_entry, :metadata, %{
+          "backend" => "caller_claimed_backend",
+          "taint" => forged,
+          taint: forged
+        })
+
+      assert {:ok, 2} =
+               Comms.record_engagement_turn(
+                 "agent_1",
+                 "eng_1",
+                 user_entry,
+                 assistant_entry,
+                 persistence: PersistenceAdapter
+               )
+
+      %{appended: [{_uuid, [user_attrs, assistant_attrs]}]} =
+        FakePersistence.calls(persistence_agent)
+
+      refute user_attrs.metadata["taint"] == forged
+      refute assistant_attrs.metadata["taint"] == forged
+
+      assert {:ok, user_envelope} =
+               Arbor.Signals.Taint.verify_durable_provenance(
+                 user_attrs.metadata["taint"],
+                 user_attrs.content
+               )
+
+      assert {:ok, assistant_envelope} =
+               Arbor.Signals.Taint.verify_durable_provenance(
+                 assistant_attrs.metadata["taint"],
+                 assistant_attrs.content
+               )
+
+      assert {:error, :payload_mismatch} =
+               Arbor.Signals.Taint.verify_durable_provenance(
+                 user_attrs.metadata["taint"],
+                 user_entry.content
+               )
+
+      assert user_envelope.taint == %Taint{
+               level: :untrusted,
+               sensitivity: :internal,
+               sanitizations: 0,
+               confidence: :unverified,
+               source: "engagement_user_input",
+               chain: []
+             }
+
+      assert assistant_envelope.taint == %Taint{
+               level: :untrusted,
+               sensitivity: :internal,
+               sanitizations: 0,
+               confidence: :unverified,
+               source: "llm_output",
+               chain: ["engagement_user_input"]
+             }
+
+      user_taint = user_envelope.taint
+      assistant_taint = assistant_envelope.taint
+
+      assert rank(Taint.levels(), assistant_taint.level) >= rank(Taint.levels(), user_taint.level)
+
+      assert rank(Taint.sensitivities(), assistant_taint.sensitivity) >=
+               rank(Taint.sensitivities(), user_taint.sensitivity)
+
+      assert assistant_taint.sanitizations == 0
+      assert Bitwise.band(assistant_taint.sanitizations, user_taint.sanitizations) == 0
+
+      assert rank(Taint.confidences(), assistant_taint.confidence) <=
+               rank(Taint.confidences(), user_taint.confidence)
+    end
+
+    @tag spec: "VOICE-17"
+    @tag :security_regression
+    test "security regression: a second envelope construction failure makes zero persistence calls",
+         %{
+           user_entry: user_entry,
+           assistant_entry: assistant_entry,
+           persistence_agent: persistence_agent
+         } do
+      previous = Application.fetch_env(:arbor_comms, :engagement_provenance_adapter)
+
+      on_exit(fn ->
+        restore_application_env(:engagement_provenance_adapter, previous)
+      end)
+
+      Application.put_env(
+        :arbor_comms,
+        :engagement_provenance_adapter,
+        FailSecondProvenanceAdapter
+      )
+
+      FailSecondProvenanceAdapter.reset()
+
+      assert {:error, :durable_provenance_unavailable} =
+               Comms.record_engagement_turn(
+                 "agent_1",
+                 "eng_1",
+                 user_entry,
+                 assistant_entry,
+                 persistence: PersistenceAdapter
+               )
+
+      calls = FakePersistence.calls(persistence_agent)
+      assert calls.appended == []
+      assert Map.get(calls, :ensure_session) == nil
     end
 
     @tag spec: "VOICE-10"
@@ -430,12 +592,11 @@ defmodule Arbor.Comms.EngagementTranscriptTest do
            assistant_entry: assistant_entry,
            persistence_agent: persistence_agent
          } do
-      # Exact smallest measured whole-map ceiling for the maximal valid receipt
-      # on the pinned OTP/Elixir runtime (matches Arbor.Comms constant).
-      assistant_metadata_max_bytes = 4537
+      assistant_metadata_max_bytes = 6144
+      final_metadata_max_bytes = 8192
 
       max_meta = %{
-        "transport" => "voice",
+        "transport" => String.duplicate("v", 1024),
         "backend" => String.duplicate("b", 1024),
         "mode" => String.duplicate("m", 1024),
         "delegation_provider" => "grok",
@@ -444,16 +605,27 @@ defmodule Arbor.Comms.EngagementTranscriptTest do
         "delegation_outcome" => "dispatched"
       }
 
-      assert byte_size(:erlang.term_to_binary(max_meta)) == assistant_metadata_max_bytes
+      assert {:ok, encoded_max_meta} = TaintEnvelope.canonical_json(max_meta)
+      assert byte_size(encoded_max_meta) <= assistant_metadata_max_bytes
+
+      maximal_engagement_id = String.duplicate("e", 256)
 
       assert {:ok, 2} =
                Comms.record_engagement_turn(
                  "agent_1",
-                 "eng_1",
+                 maximal_engagement_id,
                  user_entry,
                  Map.put(assistant_entry, :metadata, max_meta),
                  persistence: PersistenceAdapter
                )
+
+      %{appended: [{_uuid, [_user_attrs, maximal_assistant_attrs]}]} =
+        FakePersistence.calls(persistence_agent)
+
+      assert {:ok, encoded_final_metadata} =
+               TaintEnvelope.canonical_json(maximal_assistant_attrs.metadata)
+
+      assert byte_size(encoded_final_metadata) <= final_metadata_max_bytes
 
       for bad_meta <- [
             Map.put(max_meta, "delegation_provider", "openai"),
@@ -479,14 +651,12 @@ defmodule Arbor.Comms.EngagementTranscriptTest do
                  )
       end
 
-      # Exact +1-byte over-bound: keep every other admitted field unchanged and
-      # only grow transport from "voice" (5) to "voice!" (6). Encoded size must
-      # be exactly 4538 and reject before persistence.
-      oversize_meta = Map.put(max_meta, "transport", "voice!")
-      assert byte_size(:erlang.term_to_binary(oversize_meta)) == assistant_metadata_max_bytes + 1
-      assert byte_size(:erlang.term_to_binary(oversize_meta)) == 4538
+      # The canonical JSON boundary rejects integers outside its exact range
+      # before attempting an unbounded decimal expansion.
+      oversized_number = 9_007_199_254_740_992
+      oversize_meta = %{"transport" => oversized_number}
 
-      assert {:error, {:invalid_assistant_entry, :metadata_too_large}} =
+      assert {:error, {:invalid_assistant_entry, :invalid_metadata_value}} =
                Comms.record_engagement_turn(
                  "agent_1",
                  "eng_1",
@@ -698,6 +868,35 @@ defmodule Arbor.Comms.EngagementTranscriptTest do
                )
     end
 
+    test "preserves Persistence provenance projection unchanged" do
+      taint = %Taint{
+        level: :untrusted,
+        sensitivity: :internal,
+        sanitizations: 0,
+        confidence: :unverified,
+        source: "engagement_user_input",
+        chain: []
+      }
+
+      projected = %{
+        id: "e1",
+        role: :user,
+        content: "hi",
+        metadata: %{"taint" => %{"version" => 1}},
+        taint: taint,
+        taint_status: :verified,
+        entry_ordinal: 7
+      }
+
+      {:ok, persistence_agent} = FakePersistence.start_link(load_result: [projected])
+      PersistenceAdapter.start(persistence_agent)
+
+      assert [^projected] =
+               Comms.load_engagement_transcript("agent_1", "eng_1",
+                 persistence: PersistenceAdapter
+               )
+    end
+
     test "returns an explicit error for a blank/oversized id — not []" do
       assert {:error, {:invalid_id, :agent_id, :blank}} =
                Comms.load_engagement_transcript("", "eng_1", persistence: PersistenceAdapter)
@@ -719,4 +918,11 @@ defmodule Arbor.Comms.EngagementTranscriptTest do
                Comms.load_engagement_transcript("agent_1", "eng_1", %{limit: 1})
     end
   end
+
+  defp rank(order, value), do: Enum.find_index(order, &(&1 == value))
+
+  defp restore_application_env(key, :error), do: Application.delete_env(:arbor_comms, key)
+
+  defp restore_application_env(key, {:ok, value}),
+    do: Application.put_env(:arbor_comms, key, value)
 end

@@ -6,6 +6,7 @@ defmodule Arbor.Comms.Config do
   """
 
   @default_durable_interaction_store_namespace :durable_interactions
+  @default_engagement_provenance_adapter Arbor.Signals.Taint
   @default_durable_interaction_store_max_data_bytes 65_536
   @default_durable_interaction_store_max_items 1_000
   @default_durable_dispatch_sweep_interval_ms 1_000
@@ -42,6 +43,19 @@ defmodule Arbor.Comms.Config do
   @spec channel_config(atom()) :: keyword()
   def channel_config(channel) do
     Application.get_env(:arbor_comms, channel, [])
+  end
+
+  @doc false
+  @spec engagement_provenance_adapter() :: {:ok, module()} | {:error, :invalid_config}
+  def engagement_provenance_adapter do
+    case Application.get_env(
+           :arbor_comms,
+           :engagement_provenance_adapter,
+           @default_engagement_provenance_adapter
+         ) do
+      module when is_atom(module) and module not in [nil, true, false] -> {:ok, module}
+      _other -> {:error, :invalid_config}
+    end
   end
 
   @doc "Returns the poll interval for a channel in milliseconds."
