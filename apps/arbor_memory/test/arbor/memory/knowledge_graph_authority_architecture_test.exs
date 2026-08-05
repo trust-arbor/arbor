@@ -34,7 +34,7 @@ defmodule Arbor.Memory.KnowledgeGraphAuthorityArchitectureTest do
     ]
   }
 
-  test "GraphOps cannot regain ETS or raw MemoryStore authority" do
+  test "GraphOps contains none of the covered ETS or raw MemoryStore access forms" do
     source = source!("apps/arbor_memory/lib/arbor/memory/graph_ops.ex")
 
     assert projection_operations(source) == []
@@ -57,12 +57,22 @@ defmodule Arbor.Memory.KnowledgeGraphAuthorityArchitectureTest do
            )
   end
 
-  test "raw knowledge_graph MemoryStore authority is confined repository-wide" do
+  test "covered raw knowledge_graph MemoryStore forms are confined repository-wide" do
     assert repository_accesses(&raw_authority_operations/1) == @raw_authority_allowlist
   end
 
-  test "projection access is confined repository-wide to explicit operations" do
+  test "covered projection access forms are confined to explicit operations" do
     assert repository_accesses(&projection_operations/1) == @projection_allowlist
+  end
+
+  test "repository scan inventory is exactly the tracked runtime Elixir sources" do
+    expected = Enum.filter(git_tracked_paths(), &runtime_app_source?/1)
+    actual = Enum.map(app_sources(), &relative_path/1)
+
+    assert actual == expected
+    assert "apps/arbor_memory/lib/arbor/memory/graph_ops.ex" in actual
+    refute Enum.any?(actual, &String.contains?(&1, "/test/"))
+    refute Enum.any?(actual, &String.contains?(&1, "/_build/"))
   end
 
   test "AST projection detector catches indirection and alternate ETS operations" do
@@ -137,6 +147,43 @@ defmodule Arbor.Memory.KnowledgeGraphAuthorityArchitectureTest do
     assert raw_authority_operations(source) == [:put]
   end
 
+  test "AST detector catches remote apply and module-returning helper bypasses" do
+    kernel_apply_source = """
+    alias :ets, as: TableStore
+    write_op = :insert
+    Kernel.apply(TableStore, write_op, [:arbor_memory_graphs, {:agent, :value}])
+    """
+
+    erlang_apply_source = """
+    defp graph_table, do: :arbor_memory_graphs
+    write_op = :insert_new
+    :erlang.apply(:ets, write_op, [graph_table(), {:agent, :value}])
+    """
+
+    module_helper_source = """
+    defp table_backend, do: :ets
+    table_backend().select_replace(:arbor_memory_graphs, [{{:_, :_}, [], [true]}])
+    """
+
+    authority_helper_source = """
+    alias Arbor.Memory.MemoryStore, as: Store
+    defp authority_backend, do: Store
+    authority_backend().put("knowledge_graph", "agent", :forged)
+    """
+
+    assert %{
+             kernel_apply: projection_operations(kernel_apply_source),
+             erlang_apply: projection_operations(erlang_apply_source),
+             module_helper: projection_operations(module_helper_source),
+             authority_helper: raw_authority_operations(authority_helper_source)
+           } == %{
+             kernel_apply: [:apply],
+             erlang_apply: [:apply],
+             module_helper: [:select_replace],
+             authority_helper: [:put]
+           }
+  end
+
   test "create-only compatibility save remains confined to C3B initialization" do
     callers =
       app_sources()
@@ -176,6 +223,15 @@ defmodule Arbor.Memory.KnowledgeGraphAuthorityArchitectureTest do
 
     {_ast, operations} =
       Macro.prewalk(ast, MapSet.new(), fn
+        {{:., _, [dispatcher, :apply]}, _, [module, _operation, arguments]} = node, operations ->
+          if apply_dispatcher_reference?(dispatcher, bindings) and
+               module_reference?(module, module_matcher, bindings) and
+               resource_reference?(arguments, resource, bindings) do
+            {node, MapSet.put(operations, :apply)}
+          else
+            {node, operations}
+          end
+
         {{:., _, [module, operation]}, _, [first_arg | _]} = node, operations
         when is_atom(operation) ->
           if module_reference?(module, module_matcher, bindings) and
@@ -185,9 +241,9 @@ defmodule Arbor.Memory.KnowledgeGraphAuthorityArchitectureTest do
             {node, operations}
           end
 
-        {:apply, _, [module, _operation | args]} = node, operations ->
+        {:apply, _, [module, _operation, arguments]} = node, operations ->
           if module_reference?(module, module_matcher, bindings) and
-               resource_reference?(args, resource, bindings) do
+               resource_reference?(arguments, resource, bindings) do
             {node, MapSet.put(operations, :apply)}
           else
             {node, operations}
@@ -233,7 +289,8 @@ defmodule Arbor.Memory.KnowledgeGraphAuthorityArchitectureTest do
         module_attributes: MapSet.new(),
         modules: MapSet.new(),
         aliases: aliases,
-        functions: MapSet.new()
+        functions: MapSet.new(),
+        module_functions: MapSet.new()
       },
       0
     )
@@ -301,7 +358,10 @@ defmodule Arbor.Memory.KnowledgeGraphAuthorityArchitectureTest do
           {node, acc}
       end)
 
-    next = mark_returning_functions(next, resource, definitions)
+    next =
+      next
+      |> mark_returning_functions(resource, definitions)
+      |> mark_returning_module_functions(module_matcher, definitions)
 
     if next == bindings,
       do: bindings,
@@ -379,10 +439,33 @@ defmodule Arbor.Memory.KnowledgeGraphAuthorityArchitectureTest do
     %{bindings | functions: functions}
   end
 
+  defp mark_returning_module_functions(bindings, module_matcher, definitions) do
+    module_functions =
+      Enum.reduce(definitions, bindings.module_functions, fn {key, definitions}, functions ->
+        if Enum.any?(definitions, &module_return_expression?(&1.body, module_matcher, bindings)),
+          do: MapSet.put(functions, key),
+          else: functions
+      end)
+
+    %{bindings | module_functions: module_functions}
+  end
+
   defp resource_return_expression?(nil, _resource, _bindings), do: false
 
   defp resource_return_expression?(expression, resource, bindings),
     do: resource_reference?(expression, resource, bindings)
+
+  defp module_return_expression?(nil, _module_matcher, _bindings), do: false
+
+  defp module_return_expression?({:__block__, _, expressions}, module_matcher, bindings) do
+    case List.last(expressions) do
+      nil -> false
+      expression -> module_reference?(expression, module_matcher, bindings)
+    end
+  end
+
+  defp module_return_expression?(expression, module_matcher, bindings),
+    do: module_reference?(expression, module_matcher, bindings)
 
   defp resource_reference?(term, resource, _bindings) when term === resource, do: true
 
@@ -410,9 +493,9 @@ defmodule Arbor.Memory.KnowledgeGraphAuthorityArchitectureTest do
   defp module_reference?(term, module_matcher, _bindings) when is_atom(term),
     do: module_matcher.(term)
 
-  defp module_reference?({:__aliases__, _, [name]}, module_matcher, bindings) do
+  defp module_reference?({:__aliases__, _, [name]} = term, module_matcher, bindings) do
     case Map.get(bindings.aliases, name) do
-      nil -> false
+      nil -> module_matcher.(term)
       target -> module_matcher.(target)
     end
   end
@@ -424,6 +507,10 @@ defmodule Arbor.Memory.KnowledgeGraphAuthorityArchitectureTest do
     do:
       MapSet.member?(bindings.module_attributes, name) or
         module_alias_reference?(name, module_matcher, bindings)
+
+  defp module_reference?({name, _, args}, _module_matcher, bindings)
+       when is_atom(name) and is_list(args),
+       do: MapSet.member?(bindings.module_functions, {name, length(args)})
 
   defp module_reference?({name, _, context}, _module_matcher, bindings)
        when is_atom(name) and (is_atom(context) or is_nil(context)),
@@ -437,6 +524,15 @@ defmodule Arbor.Memory.KnowledgeGraphAuthorityArchitectureTest do
       target -> module_matcher.(target)
     end
   end
+
+  defp apply_dispatcher_reference?(:erlang, _bindings), do: true
+
+  defp apply_dispatcher_reference?(dispatcher, bindings),
+    do: module_reference?(dispatcher, &kernel_module?/1, bindings)
+
+  defp kernel_module?(Kernel), do: true
+  defp kernel_module?({:__aliases__, _, [:Kernel]}), do: true
+  defp kernel_module?(_module), do: false
 
   defp module_aliases(ast) do
     {_ast, aliases} =
@@ -484,16 +580,25 @@ defmodule Arbor.Memory.KnowledgeGraphAuthorityArchitectureTest do
   defp module_named?(_module, _expected), do: false
 
   defp app_sources do
-    case System.cmd("git", ["ls-files", "--", "apps"], cd: @root) do
-      {output, 0} ->
-        output
-        |> String.split("\n", trim: true)
-        |> Enum.filter(&Regex.match?(~r{\Aapps/[^/]+/lib/.+\.ex\z}, &1))
-        |> Enum.map(&Path.join(@root, &1))
-        |> Enum.sort()
+    git_tracked_paths()
+    |> Enum.filter(&runtime_app_source?/1)
+    |> Enum.map(&Path.join(@root, &1))
+  end
 
-      {_output, _status} ->
-        raise "unable to enumerate tracked application sources"
+  defp git_tracked_paths do
+    case System.cmd("git", ["ls-files", "--", "apps"], cd: @root) do
+      {output, 0} -> output |> String.split("\n", trim: true) |> Enum.sort()
+      {_output, _status} -> raise "unable to enumerate tracked application sources"
+    end
+  end
+
+  defp runtime_app_source?(path) do
+    case Path.split(path) do
+      ["apps", app, "lib" | source_path] when app != "" and source_path != [] ->
+        Path.extname(path) == ".ex"
+
+      _other ->
+        false
     end
   end
 
