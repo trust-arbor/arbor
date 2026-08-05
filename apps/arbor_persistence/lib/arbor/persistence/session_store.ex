@@ -822,8 +822,39 @@ defmodule Arbor.Persistence.SessionStore do
       {:error, error} -> raise error
     end
   catch
-    :exit, _reason -> :ok
+    :exit, reason ->
+      if nested_reason?(reason, :noproc) or sqlite_connection_closed?(reason),
+        do: :ok,
+        else: exit(reason)
   end
+
+  defp sqlite_connection_closed?(value) when is_binary(value) do
+    String.contains?(String.downcase(value), "connection is closed")
+  end
+
+  defp sqlite_connection_closed?(%{__exception__: true} = error) do
+    error |> Exception.message() |> sqlite_connection_closed?()
+  end
+
+  defp sqlite_connection_closed?(value) when is_tuple(value) do
+    value |> Tuple.to_list() |> Enum.any?(&sqlite_connection_closed?/1)
+  end
+
+  defp sqlite_connection_closed?(value) when is_list(value),
+    do: Enum.any?(value, &sqlite_connection_closed?/1)
+
+  defp sqlite_connection_closed?(_value), do: false
+
+  defp nested_reason?(value, expected) when value == expected, do: true
+
+  defp nested_reason?(value, expected) when is_tuple(value) do
+    value |> Tuple.to_list() |> Enum.any?(&nested_reason?(&1, expected))
+  end
+
+  defp nested_reason?(value, expected) when is_list(value),
+    do: Enum.any?(value, &nested_reason?(&1, expected))
+
+  defp nested_reason?(_value, _expected), do: false
 
   defp mark_effect_started do
     case Process.get(@effect_marker_key) do
