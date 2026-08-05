@@ -3,14 +3,16 @@ defmodule Arbor.Memory.ConsolidationTest do
 
   alias Arbor.Contracts.Security.Taint
   alias Arbor.Memory.{Consolidation, Events, KnowledgeGraph, KnowledgeGraphStore}
-  alias Arbor.Memory.Test.DurableGraphAuthority
+  alias Arbor.Memory.Test.{DurableEventLog, DurableGraphAuthority, IndeterminateEventLog}
+  alias Arbor.Persistence.EventLog.ETS
 
   @moduletag :fast
 
   setup do
     DurableGraphAuthority.start!()
+    archive_sink = DurableEventLog.start!()
 
-    :ok
+    %{archive_sink: archive_sink}
   end
 
   # Helper to create a graph with some nodes
@@ -28,6 +30,17 @@ defmodule Arbor.Memory.ConsolidationTest do
       {:ok, new_graph, _id} = KnowledgeGraph.add_node(graph, node_data)
       new_graph
     end)
+  end
+
+  defp source_taint(source) do
+    %Taint{
+      level: :trusted,
+      sensitivity: :public,
+      sanitizations: 0,
+      confidence: :verified,
+      source: source,
+      chain: []
+    }
   end
 
   describe "consolidate/3" do
@@ -200,6 +213,88 @@ defmodule Arbor.Memory.ConsolidationTest do
       assert {:ok, nil} = KnowledgeGraphStore.pending_maintenance_effect(agent_id)
       assert {:ok, %{nodes: nodes}} = KnowledgeGraphStore.get_graph(agent_id)
       assert nodes == %{}
+    end
+
+    test "security regression keeps archive across sink restart before fenced ack", %{
+      archive_sink: archive_sink
+    } do
+      agent_id = "agent_archive_restart_#{System.unique_integer([:positive])}"
+      operation_id = "archive_restart_operation"
+      source_taint = source_taint("archive_restart")
+      graph = graph_with_nodes(agent_id, [{:fact, "survive archive restart", 0.05}])
+
+      assert :ok = KnowledgeGraphStore.save_graph_tainted(agent_id, graph, source_taint)
+
+      assert {:ok, _graph, effect} =
+               KnowledgeGraphStore.consolidate(
+                 agent_id,
+                 operation_id,
+                 :basic,
+                 prune_threshold: 0.1
+               )
+
+      assert [entry] = effect.archive_entries
+      assert :ok = Events.archive_knowledge_once(agent_id, entry, effect.occurred_at)
+      assert {:ok, [_event]} = Events.get_by_type(agent_id, :knowledge_archived)
+
+      assert {:ok, %{operation_id: ^operation_id}} =
+               KnowledgeGraphStore.pending_maintenance_effect(agent_id)
+
+      DurableEventLog.restart_default_memory_events!()
+      DurableEventLog.restart_front!(archive_sink)
+
+      assert {:ok, [surviving_event]} = Events.get_by_type(agent_id, :knowledge_archived)
+      assert surviving_event.data["agent_id"] == agent_id
+
+      assert {:ok, %{operation_id: ^operation_id}} =
+               KnowledgeGraphStore.pending_maintenance_effect(agent_id)
+
+      assert :ok = KnowledgeGraphStore.acknowledge_maintenance_effect(agent_id, operation_id)
+      assert {:ok, nil} = KnowledgeGraphStore.pending_maintenance_effect(agent_id)
+    end
+
+    test "weak archive sink leaves committed maintenance effect pending" do
+      DurableEventLog.lease_target!(%{name: :memory_events, backend: ETS, opts: []})
+
+      agent_id = "agent_archive_weak_#{System.unique_integer([:positive])}"
+      operation_id = "archive_weak_sink_operation"
+      graph = graph_with_nodes(agent_id, [{:fact, "retain weak sink outbox", 0.05}])
+
+      assert :ok = KnowledgeGraphStore.save_graph(agent_id, graph)
+
+      assert {:error, :archive_sink_insufficient_durability} =
+               Consolidation.consolidate_basic(
+                 agent_id,
+                 operation_id: operation_id,
+                 prune_threshold: 0.1
+               )
+
+      assert {:ok, %{operation_id: ^operation_id}} =
+               KnowledgeGraphStore.pending_maintenance_effect(agent_id)
+    end
+
+    test "indeterminate archive append never acknowledges the maintenance effect" do
+      DurableEventLog.lease_target!(%{
+        name: :indeterminate_memory_archive,
+        backend: IndeterminateEventLog,
+        opts: []
+      })
+
+      agent_id = "agent_archive_unknown_#{System.unique_integer([:positive])}"
+      operation_id = "archive_unknown_operation"
+      graph = graph_with_nodes(agent_id, [{:fact, "retain unknown outbox", 0.05}])
+
+      assert :ok = KnowledgeGraphStore.save_graph(agent_id, graph)
+
+      assert {:error, {:append_indeterminate, _operation}} =
+               Consolidation.consolidate_basic(
+                 agent_id,
+                 operation_id: operation_id,
+                 prune_threshold: 0.1
+               )
+
+      assert {:ok, %{operation_id: ^operation_id}} =
+               KnowledgeGraphStore.pending_maintenance_effect(agent_id)
     end
   end
 

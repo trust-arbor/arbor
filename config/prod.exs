@@ -20,6 +20,11 @@ config :arbor_security,
 config :arbor_trust, default_egress_modes: %{external_provider: :allow}
 
 config :arbor_memory,
-  embedding_dedup_enabled: true
+  embedding_dedup_enabled: true,
+  maintenance_archive_target: [
+    name: :memory_events_durable,
+    backend: Arbor.Persistence.EventLog.Ecto,
+    opts: [repo: Arbor.Persistence.Repo]
+  ]
 
 import_config "provider_route_profile.exs"

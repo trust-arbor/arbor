@@ -1,6 +1,7 @@
 {:ok, _started} = Application.ensure_all_started(:arbor_signals)
 
 Code.require_file("support/durable_graph_authority.ex", __DIR__)
+Code.require_file("support/durable_event_log.ex", __DIR__)
 
 # Add children to the empty app supervisor (start_children: false leaves it empty)
 # Create ETS tables first (same as Application.start/2 does)

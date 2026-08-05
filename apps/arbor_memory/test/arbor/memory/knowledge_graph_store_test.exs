@@ -6,7 +6,7 @@ defmodule Arbor.Memory.KnowledgeGraphStoreTest do
 
   alias Arbor.Memory.{Events, KnowledgeGraph, KnowledgeGraphStore, MemoryStore, Provenance}
   alias Arbor.Memory.KnowledgeGraph.{Codec, Operation}
-  alias Arbor.Memory.Test.DurableGraphAuthority
+  alias Arbor.Memory.Test.{DurableEventLog, DurableGraphAuthority}
   alias Arbor.Persistence.BufferedStore
 
   @moduletag :fast
@@ -1035,6 +1035,7 @@ defmodule Arbor.Memory.KnowledgeGraphStoreTest do
        %{
          agent_id: agent_id
        } do
+    DurableEventLog.start!()
     stop_supervised!(BufferedStore)
     backend_name = unique_name(:kg_maintenance_ambiguity_backend)
     control = unique_name(:kg_maintenance_ambiguity_control)

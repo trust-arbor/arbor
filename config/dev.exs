@@ -69,6 +69,15 @@ else
     embedding_dedup_enabled: false
 end
 
+# Maintenance archives use a synchronously confirmed crash-durable EventLog.
+# The graph outbox refuses to acknowledge against weaker or unknown targets.
+config :arbor_memory,
+  maintenance_archive_target: [
+    name: :memory_events_durable,
+    backend: Arbor.Persistence.EventLog.Ecto,
+    opts: [repo: Arbor.Persistence.Repo]
+  ]
+
 # Dashboard — local dev server on port 4001
 # LiveView debug annotations for Tidewave AI integration
 config :phoenix_live_view,

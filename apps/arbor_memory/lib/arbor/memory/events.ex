@@ -41,8 +41,9 @@ defmodule Arbor.Memory.Events do
       {:ok, events} = Arbor.Memory.Events.get_history("agent_001", limit: 50)
   """
 
-  alias Arbor.Persistence.Event
   alias Arbor.Contracts.Security.{Taint, TaintEnvelope}
+  alias Arbor.Memory.Config
+  alias Arbor.Persistence.Event
 
   @event_log_name :memory_events
   @event_log_backend Arbor.Persistence.EventLog.ETS
@@ -240,7 +241,9 @@ defmodule Arbor.Memory.Events do
         },
         %DateTime{} = occurred_at
       ) do
-    with true <- provenance_status in [:verified, :legacy_unlabeled, :invalid_durable_provenance],
+    with {:ok, target} <- Config.maintenance_archive_target(),
+         :ok <- require_archive_durability(target),
+         true <- provenance_status in [:verified, :legacy_unlabeled, :invalid_durable_provenance],
          {:ok, envelope} <- TaintEnvelope.new(archive_payload, taint),
          {:ok, envelope} <- TaintEnvelope.to_map(envelope),
          {:ok, event_id} <- archive_event_id(idempotency_key),
@@ -257,7 +260,8 @@ defmodule Arbor.Memory.Events do
              timestamp: occurred_at,
              metadata: %{"source" => "knowledge_graph_maintenance"}
            ),
-         :ok <- append_exact_archive(stream_id(agent_id), event, @archive_append_attempts) do
+         :ok <-
+           append_exact_archive(target, stream_id(agent_id), event, @archive_append_attempts) do
       :ok
     else
       {:error, _reason} = error -> error
@@ -403,17 +407,25 @@ defmodule Arbor.Memory.Events do
       {:ok, changes} = Arbor.Memory.Events.get_by_type("agent_001", :identity_changed)
   """
   @spec get_by_type(String.t(), atom(), keyword()) :: {:ok, [Event.t()]} | {:error, term()}
-  def get_by_type(agent_id, event_type, opts \\ []) do
-    type_string = to_string(event_type)
+  def get_by_type(agent_id, event_type, opts \\ [])
 
+  def get_by_type(agent_id, :knowledge_archived, opts) do
+    with {:ok, target} <- Config.maintenance_archive_target(),
+         {:ok, events} <-
+           Arbor.Persistence.read_stream(
+             target.name,
+             target.backend,
+             stream_id(agent_id),
+             Keyword.merge(opts, target.opts)
+           ) do
+      {:ok, filter_by_type(events, :knowledge_archived)}
+    end
+  end
+
+  def get_by_type(agent_id, event_type, opts) do
     case get_history(agent_id, opts) do
       {:ok, events} ->
-        filtered =
-          Enum.filter(events, fn event ->
-            to_string(event.type) == type_string
-          end)
-
-        {:ok, filtered}
+        {:ok, filter_by_type(events, event_type)}
 
       error ->
         error
@@ -465,45 +477,22 @@ defmodule Arbor.Memory.Events do
 
   defp archive_event_id(_identity), do: {:error, :invalid_archive_effect}
 
-  defp append_exact_archive(_stream_id, _event, 0),
+  defp append_exact_archive(_target, _stream_id, _event, 0),
     do: {:error, :archive_outcome_unknown}
 
-  defp append_exact_archive(stream_id, event, attempts) do
-    if Process.whereis(@event_log_name) do
-      case Arbor.Persistence.append(
-             @event_log_name,
-             @event_log_backend,
-             stream_id,
-             event
-           ) do
-        {:ok, [%Event{id: event_id}]} when event_id == event.id ->
-          :ok
-
-        {:error, {:append_indeterminate, operation}} ->
-          reconcile_archive_append(stream_id, event, operation, attempts)
-
-        {:error, _reason} = error ->
-          error
-
-        _ ->
-          {:error, :archive_outcome_unknown}
-      end
-    else
-      {:error, :archive_sink_unavailable}
-    end
-  end
-
-  defp reconcile_archive_append(stream_id, event, operation, attempts) do
-    case Arbor.Persistence.reconcile_append(
-           @event_log_name,
-           @event_log_backend,
-           operation
+  defp append_exact_archive(target, stream_id, event, attempts) do
+    case Arbor.Persistence.append(
+           target.name,
+           target.backend,
+           stream_id,
+           event,
+           target.opts
          ) do
-      {:ok, {:committed, [%Event{id: event_id}]}} when event_id == event.id ->
+      {:ok, [%Event{id: event_id}]} when event_id == event.id ->
         :ok
 
-      {:ok, :absent} ->
-        append_exact_archive(stream_id, event, attempts - 1)
+      {:error, {:append_indeterminate, operation}} ->
+        reconcile_archive_append(target, stream_id, event, operation, attempts)
 
       {:error, _reason} = error ->
         error
@@ -511,6 +500,45 @@ defmodule Arbor.Memory.Events do
       _ ->
         {:error, :archive_outcome_unknown}
     end
+  end
+
+  defp reconcile_archive_append(target, stream_id, event, operation, attempts) do
+    case Arbor.Persistence.reconcile_append(
+           target.name,
+           target.backend,
+           operation,
+           target.opts
+         ) do
+      {:ok, {:committed, [%Event{id: event_id}]}} when event_id == event.id ->
+        :ok
+
+      {:ok, :absent} ->
+        append_exact_archive(target, stream_id, event, attempts - 1)
+
+      {:error, _reason} = error ->
+        error
+
+      _ ->
+        {:error, :archive_outcome_unknown}
+    end
+  end
+
+  defp require_archive_durability(target) do
+    case Arbor.Persistence.durability_class(target.name, target.backend, target.opts) do
+      {:ok, :node_restart} -> :ok
+      {:ok, _weaker} -> {:error, :archive_sink_insufficient_durability}
+      {:error, _reason} -> {:error, :archive_sink_durability_unknown}
+      _ -> {:error, :archive_sink_durability_unknown}
+    end
+  rescue
+    _ -> {:error, :archive_sink_durability_unknown}
+  catch
+    _, _ -> {:error, :archive_sink_durability_unknown}
+  end
+
+  defp filter_by_type(events, event_type) do
+    type_string = to_string(event_type)
+    Enum.filter(events, &(to_string(&1.type) == type_string))
   end
 
   # Dual-emit: write to the local :memory_events EventLog (for queries)
