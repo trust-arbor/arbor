@@ -7,12 +7,8 @@ defmodule Arbor.Persistence.VectorStore.EctoPostgresTest do
   @moduletag :integration
   @moduletag :postgres
 
-  setup_all do
-    if Arbor.Persistence.Repo.__adapter__() == Ecto.Adapters.Postgres do
-      :ok
-    else
-      {:skip, "PostgreSQL vector-store coverage requires ARBOR_DB=postgres"}
-    end
+  if Arbor.Persistence.Repo.__adapter__() != Ecto.Adapters.Postgres do
+    @moduletag skip: "PostgreSQL vector-store coverage requires ARBOR_DB=postgres"
   end
 
   setup do

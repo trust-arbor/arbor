@@ -1,7 +1,7 @@
 defmodule Arbor.Persistence.VectorStore.EctoSQLiteTest do
   use ExUnit.Case, async: false
 
-  alias Arbor.Contracts.Persistence.{VectorOperation, VectorRecord}
+  alias Arbor.Contracts.Persistence.{VectorOperation, VectorReceipt, VectorRecord}
   alias Arbor.Persistence.VectorStore.Ecto.Codec
 
   @migration_version 20_260_805_000_001
@@ -264,6 +264,53 @@ defmodule Arbor.Persistence.VectorStore.EctoSQLiteTest do
 
     assert {:ok, ^inserted} =
              Arbor.Persistence.reconcile_vector_operation(agent_id, insert)
+  end
+
+  test "response loss and duplicate execution recover the exact original receipt", %{
+    agent_id: agent_id
+  } do
+    operation = insert_operation!(record!(agent_id, source_key: "response-loss"))
+    expected_record = rebuild_record!(operation.record, generation: 1, revision: 1)
+    {:ok, expected_receipt} = VectorReceipt.new(%{operation: operation, record: expected_record})
+
+    assert :response_lost = execute_and_discard_response(agent_id, operation)
+
+    assert {:ok, ^expected_receipt} =
+             Arbor.Persistence.execute_vector_operation(agent_id, operation)
+
+    update_record = rebuild_record!(expected_record, payload: %{"content" => "later update"})
+    update = operation!(:update, update_record)
+    assert {:ok, _updated} = Arbor.Persistence.execute_vector_operation(agent_id, update)
+
+    assert {:ok, ^expected_receipt} =
+             Arbor.Persistence.reconcile_vector_operation(agent_id, operation)
+  end
+
+  test "SQLite stale-fence CAS rejects a second claimant without a concurrency claim", %{
+    agent_id: agent_id
+  } do
+    insert = insert_operation!(record!(agent_id, source_key: "stale-fence"))
+    assert {:ok, inserted} = Arbor.Persistence.execute_vector_operation(agent_id, insert)
+
+    winner_record = rebuild_record!(inserted.record, payload: %{"claimant" => "winner"})
+    stale_record = rebuild_record!(inserted.record, payload: %{"claimant" => "stale"})
+
+    assert {:ok, winner} =
+             Arbor.Persistence.execute_vector_operation(
+               agent_id,
+               operation!(:update, winner_record)
+             )
+
+    assert {:error, :conflict} =
+             Arbor.Persistence.execute_vector_operation(
+               agent_id,
+               operation!(:update, stale_record)
+             )
+
+    winner_record = winner.record
+
+    assert {:ok, ^winner_record} =
+             Arbor.Persistence.fetch_vector_record(agent_id, "voice", "stale-fence")
   end
 
   test "tenant filters hold and a malformed durable row fails the whole read", %{
@@ -580,6 +627,13 @@ defmodule Arbor.Persistence.VectorStore.EctoSQLiteTest do
   defp vector, do: List.duplicate(0.25, VectorRecord.dimensions())
   defp fence(record), do: {record.generation, record.revision, record.tombstone}
   defp unique(prefix), do: "#{prefix}_#{System.unique_integer([:positive, :monotonic])}"
+
+  defp execute_and_discard_response(agent_id, operation) do
+    case Arbor.Persistence.execute_vector_operation(agent_id, operation) do
+      {:ok, _discarded_receipt} -> :response_lost
+      error -> error
+    end
+  end
 
   defp restore_env(key, :not_configured), do: Application.delete_env(:arbor_persistence, key)
   defp restore_env(key, value), do: Application.put_env(:arbor_persistence, key, value)
