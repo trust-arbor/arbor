@@ -138,9 +138,12 @@ defmodule Arbor.Orchestrator.SessionEngagementCompactorSecurityRegressionTest do
     assert state.compactors["eng_b"].summary == "engagement-summary-1"
     assert map_size(state.compactors) <= map_size(state.transcripts)
 
-    checkpoint = state |> Persistence.extract_checkpoint_data() |> Map.put("turn_count", 99)
-    assert :ok = Session.restore_checkpoint(pid, checkpoint)
-    assert Session.get_state(pid).compactor.summary == "engagement-summary-2"
+    assert :ok = Session.restore_checkpoint(pid, %{"turn_count" => 99})
+
+    restored = Session.get_state(pid)
+    assert restored.messages == []
+    assert restored.compactor.summary == nil
+    assert restored.turn_count == 99
   end
 
   test "security regression: disabled compactor keeps A to B to A prompts isolated", ctx do
