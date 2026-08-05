@@ -213,6 +213,225 @@ defmodule Arbor.Memory.IndexDualTest do
       assert {:error, :not_found} = Index.get(pid, durable_id)
     end
 
+    test "capacity regression: eager authoritative replacement does not evict unrelated LRU" do
+      agent_id = durable_unique("test_dual_eager_replacement_capacity")
+
+      {:ok, pid} =
+        Index.start_link(
+          agent_id: agent_id,
+          backend: :dual,
+          max_entries: 2,
+          name: {:via, Registry, {Arbor.Memory.Registry, {:test_eager_replacement, agent_id}}}
+        )
+
+      on_exit(fn ->
+        if Process.alive?(pid), do: GenServer.stop(pid)
+        Embedding.delete_all(agent_id)
+      end)
+
+      content = "Eager replacement at capacity"
+      unrelated_content = "Unrelated LRU survives"
+
+      assert {:ok, authoritative_id} =
+               Index.index(pid, content, %{type: :first}, embedding: generate_embedding(84))
+
+      assert {:ok, unrelated_id} =
+               Index.index(pid, unrelated_content, %{type: :unrelated},
+                 embedding: generate_embedding(85)
+               )
+
+      assert {:ok, %{id: ^authoritative_id}} = Index.get(pid, authoritative_id)
+
+      assert {:ok, ^authoritative_id} =
+               Index.index(pid, content, %{type: :latest}, embedding: generate_embedding(86))
+
+      assert Index.stats(pid).entry_count == 2
+
+      assert {:ok, %{id: ^unrelated_id, content: ^unrelated_content}} =
+               Index.get(pid, unrelated_id)
+
+      assert {:ok, %{id: ^authoritative_id, metadata: %{type: :latest}}} =
+               Index.get(pid, authoritative_id)
+
+      assert {:ok, %{id: ^unrelated_id}} = Embedding.get(agent_id, unrelated_id)
+      assert Embedding.count(agent_id) == 2
+    end
+
+    test "capacity regression: successful retry can replace its pending identity at max one" do
+      agent_id = durable_unique("test_dual_pending_replacement_capacity")
+      suffix = :crypto.strong_rand_bytes(8) |> Base.encode16(case: :lower)
+      first_id = "mem_z_#{suffix}"
+      generated_retry_id = "mem_a_#{suffix}"
+
+      MaliciousWriter.configure(
+        agent_id,
+        {:store_sequence, [{:error, :injected_eager_failure}, {:ok, first_id}]}
+      )
+
+      {:ok, pid} =
+        Index.start_link(
+          agent_id: agent_id,
+          backend: :dual,
+          max_entries: 1,
+          persistent_writer: MaliciousWriter,
+          entry_id_generator: sequence_callback([first_id, generated_retry_id]),
+          name: {:via, Registry, {Arbor.Memory.Registry, {:test_pending_replacement, agent_id}}}
+        )
+
+      on_exit(fn ->
+        MaliciousWriter.disarm(agent_id)
+        if Process.alive?(pid), do: GenServer.stop(pid)
+        Embedding.delete_all(agent_id)
+      end)
+
+      content = "Pending replacement at capacity"
+      latest_embedding = generate_embedding(88)
+
+      assert {:ok, ^first_id} =
+               Index.index(pid, content, %{type: :first}, embedding: generate_embedding(87))
+
+      assert {:ok, ^first_id} =
+               Index.index(pid, content, %{type: :latest}, embedding: latest_embedding)
+
+      state = :sys.get_state(pid)
+      assert state.entry_count == 1
+      assert state.pending_sync == MapSet.new([first_id])
+      assert state.pending_entry_orders[first_id] == %{first: 0, latest: 1}
+      assert state.next_insertion_sequence == 2
+      assert {:error, :not_found} = Index.get(pid, generated_retry_id)
+
+      assert {:ok, %{id: ^first_id, metadata: %{type: :latest}, embedding: stored_embedding}} =
+               Index.get(pid, first_id)
+
+      assert_vector_close(stored_embedding, latest_embedding)
+      assert {:ok, 1} = Index.sync_to_persistent(pid)
+      assert {:ok, %{id: ^first_id}} = Embedding.get(agent_id, first_id)
+    end
+
+    test "capacity regression: same-content batch dedupe reserves authoritative groups only" do
+      agent_id = durable_unique("test_dual_batch_replacement_capacity")
+
+      {:ok, pid} =
+        Index.start_link(
+          agent_id: agent_id,
+          backend: :dual,
+          max_entries: 2,
+          name: {:via, Registry, {Arbor.Memory.Registry, {:test_batch_replacement, agent_id}}}
+        )
+
+      on_exit(fn ->
+        if Process.alive?(pid), do: GenServer.stop(pid)
+        Embedding.delete_all(agent_id)
+      end)
+
+      content = "Batch replacement at capacity"
+      unrelated_content = "Batch unrelated LRU survives"
+
+      assert {:ok, authoritative_id} =
+               Index.index(pid, content, %{type: :initial}, embedding: generate_embedding(89))
+
+      assert {:ok, unrelated_id} =
+               Index.index(pid, unrelated_content, %{type: :unrelated},
+                 embedding: generate_embedding(90)
+               )
+
+      assert {:ok, %{id: ^authoritative_id}} = Index.get(pid, authoritative_id)
+
+      assert {:ok, [^authoritative_id, ^authoritative_id]} =
+               Index.batch_index(
+                 pid,
+                 [
+                   {content, %{type: :batch_first}},
+                   {content, %{type: :batch_latest}}
+                 ],
+                 embedding: generate_embedding(91)
+               )
+
+      assert Index.stats(pid).entry_count == 2
+
+      assert {:ok, %{id: ^unrelated_id, content: ^unrelated_content}} =
+               Index.get(pid, unrelated_id)
+
+      assert {:ok, %{id: ^authoritative_id, metadata: %{type: :batch_latest}}} =
+               Index.get(pid, authoritative_id)
+
+      assert {:ok, %{id: ^unrelated_id}} = Embedding.get(agent_id, unrelated_id)
+      assert Embedding.count(agent_id) == 2
+    end
+
+    test "capacity regression: batch preflight cannot spend a replacement row as an eviction" do
+      agent_id = durable_unique("test_dual_batch_capacity_preflight")
+      suffix = :crypto.strong_rand_bytes(8) |> Base.encode16(case: :lower)
+      replacement_id = "mem_replacement_#{suffix}"
+      pending_id = "mem_pending_#{suffix}"
+      generated_update_id = "mem_update_#{suffix}"
+      generated_new_id = "mem_new_#{suffix}"
+
+      MaliciousWriter.configure(
+        agent_id,
+        {:store_sequence, [{:ok, replacement_id}, {:error, :injected_eager_failure}]}
+      )
+
+      {:ok, pid} =
+        Index.start_link(
+          agent_id: agent_id,
+          backend: :dual,
+          max_entries: 2,
+          persistent_writer: MaliciousWriter,
+          entry_id_generator:
+            sequence_callback([
+              replacement_id,
+              pending_id,
+              generated_update_id,
+              generated_new_id
+            ]),
+          name: {:via, Registry, {Arbor.Memory.Registry, {:test_capacity_preflight, agent_id}}}
+        )
+
+      on_exit(fn ->
+        MaliciousWriter.disarm(agent_id)
+        if Process.alive?(pid), do: GenServer.stop(pid)
+        Embedding.delete_all(agent_id)
+      end)
+
+      replacement_content = "Reserved replacement row"
+      pending_content = "Protected pending row"
+
+      assert {:ok, ^replacement_id} =
+               Index.index(pid, replacement_content, %{type: :stored},
+                 embedding: generate_embedding(92)
+               )
+
+      assert {:ok, ^pending_id} =
+               Index.index(pid, pending_content, %{type: :pending},
+                 embedding: generate_embedding(93)
+               )
+
+      state_before = :sys.get_state(pid)
+      table_before = :ets.tab2list(state_before.table)
+
+      assert {:error, :capacity_exceeded} =
+               Index.batch_index(
+                 pid,
+                 [
+                   {replacement_content, %{type: :updated}},
+                   {"Unrepresentable new row", %{type: :new}}
+                 ],
+                 embedding: generate_embedding(94)
+               )
+
+      state_after = :sys.get_state(pid)
+      assert MaliciousWriter.batch_call_count(agent_id) == 0
+      assert :ets.tab2list(state_after.table) == table_before
+      assert state_after.entry_count == state_before.entry_count
+      assert state_after.pending_sync == state_before.pending_sync
+      assert state_after.pending_entry_orders == state_before.pending_entry_orders
+      assert state_after.id_aliases == state_before.id_aliases
+      assert state_after.next_insertion_sequence == state_before.next_insertion_sequence
+      assert {:error, :not_found} = Index.get(pid, generated_update_id)
+      assert {:error, :not_found} = Index.get(pid, generated_new_id)
+    end
+
     test "atomicity regression: malformed item-N durable response leaves no hidden batch prefix" do
       agent_id = durable_unique("test_dual_atomic_batch")
       suffix = :crypto.strong_rand_bytes(8) |> Base.encode16(case: :lower)
