@@ -1253,16 +1253,38 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
     msgs
     |> Enum.reject(&empty_assistant?/1)
     |> Enum.map(fn
-      %Message{role: role, content: content} ->
-        Message.new(role, content)
+      %Message{role: role, content: content, metadata: metadata} ->
+        provider_message(role, content, metadata)
 
-      %{"role" => role, "content" => content} ->
-        Message.new(String.to_existing_atom(role), content)
+      %{"role" => role, "content" => content} = message ->
+        provider_message(
+          String.to_existing_atom(role),
+          content,
+          Map.get(message, "metadata", %{})
+        )
 
-      %{role: role, content: content} ->
-        Message.new(role, content)
+      %{role: role, content: content} = message ->
+        provider_message(role, content, Map.get(message, :metadata, %{}))
     end)
   end
+
+  defp provider_message(role, content, metadata) do
+    Message.new(role, content, provider_protocol_metadata(role, metadata))
+  end
+
+  # Provider adapters read only the tool-result correlation id from message
+  # metadata. Keep that protocol field while dropping provenance and all other
+  # Session/internal metadata before dispatch.
+  defp provider_protocol_metadata(:tool, metadata) when is_map(metadata) do
+    case {Map.fetch(metadata, "tool_call_id"), Map.fetch(metadata, :tool_call_id)} do
+      {{:ok, _string_id}, {:ok, _atom_id}} -> %{}
+      {{:ok, id}, :error} when is_binary(id) and id != "" -> %{"tool_call_id" => id}
+      {:error, {:ok, id}} when is_binary(id) and id != "" -> %{"tool_call_id" => id}
+      _ -> %{}
+    end
+  end
+
+  defp provider_protocol_metadata(_role, _metadata), do: %{}
 
   defp empty_assistant?(%{"role" => "assistant", "content" => c}) when c in [nil, ""], do: true
   defp empty_assistant?(%{role: :assistant, content: c}) when c in [nil, ""], do: true

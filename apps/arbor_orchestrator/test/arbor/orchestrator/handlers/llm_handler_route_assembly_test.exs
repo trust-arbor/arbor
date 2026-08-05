@@ -179,7 +179,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerRouteAssemblyTest do
   end
 
   @tag :security_regression
-  test "security regression: provider history projection drops all message metadata" do
+  test "security regression: provider projection preserves only tool correlation metadata" do
     Application.put_env(:arbor_ai, :provider_route_profile, %{enabled: false})
 
     node = %{
@@ -203,6 +203,16 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerRouteAssemblyTest do
         "role" => "assistant",
         "content" => "provider assistant",
         "metadata" => %{"provenance" => "must-not-leave-session"}
+      },
+      %Arbor.LLM.Message{
+        role: :tool,
+        content: "provider tool result",
+        metadata: %{
+          "tool_call_id" => "call-provider-123",
+          "taint" => %{source: "must-not-leave-session"},
+          "provenance" => "must-not-leave-session",
+          "internal_trace" => "must-not-leave-session"
+        }
       }
     ]
 
@@ -216,10 +226,29 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerRouteAssemblyTest do
 
     assert Enum.map(provider_history, &{&1.role, &1.content}) == [
              {:user, "provider user"},
-             {:assistant, "provider assistant"}
+             {:assistant, "provider assistant"},
+             {:tool, "provider tool result"}
            ]
 
-    assert Enum.all?(request.messages, &(&1.metadata == %{}))
+    assert Enum.map(provider_history, & &1.metadata) == [
+             %{},
+             %{},
+             %{"tool_call_id" => "call-provider-123"}
+           ]
+
+    refute Enum.any?(request.messages, fn message ->
+             Enum.any?(
+               [
+                 {"taint", :taint},
+                 {"provenance", :provenance},
+                 {"internal_trace", :internal_trace}
+               ],
+               fn {string_key, atom_key} ->
+                 Map.has_key?(message.metadata, string_key) or
+                   Map.has_key?(message.metadata, atom_key)
+               end
+             )
+           end)
   end
 
   test "disabled/legacy spoof of arbor.executed_route does not rewrite attribution" do
