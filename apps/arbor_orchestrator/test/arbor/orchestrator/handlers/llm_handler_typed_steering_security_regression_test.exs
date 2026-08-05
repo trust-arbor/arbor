@@ -146,8 +146,8 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerTypedSteeringSecurityRegressionT
   end
 
   test "security regression: LlmHandler passes dynamic steering taint to arity-2 turn authorization" do
-    # Candidate/base selector: candidate authorizes provider/tool attempts with
-    # hostile aggregate taint after steering; base has only request-only wiring.
+    # Candidate/base selector: candidate returns the final hostile aggregate as
+    # Outcome evidence; base leaves the pre-steer LLM output label in place.
     parent = self()
     hostile = steering_message(1, :hostile, :restricted)
 
@@ -168,6 +168,9 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerTypedSteeringSecurityRegressionT
       )
 
     assert outcome.status == :success
+    assert outcome.output_taint.level == :hostile
+    assert outcome.output_taint.sensitivity == :restricted
+    refute Enum.any?(Map.values(outcome.context_updates), &is_struct(&1, Taint))
 
     authorizations = collect_tag(:turn_authorized)
 
@@ -307,6 +310,34 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerTypedSteeringSecurityRegressionT
     attempts = collect_tag(:handler_adapter_attempt)
     assert Enum.map(attempts, &elem(&1, 2)) == ["primary-model", "primary-model"]
     assert length(collect_tag(:post_steer_boundary)) == 1
+  end
+
+  test "security regression: Session-read steering ambiguity suppresses fallback replay" do
+    # Candidate/base selector: candidate projects the closed Session-read
+    # ambiguity; base reports the callback result as malformed.
+    parent = self()
+
+    steer_check = fn descriptor ->
+      send(parent, {:session_read_boundary, descriptor})
+      {:error, :steering_read_ambiguous}
+    end
+
+    outcome =
+      execute_tool_node(:pre_steer_fallback,
+        steer_check: steer_check,
+        fallback_chain: [%{model: "fallback-model"}]
+      )
+
+    assert outcome.status == :fail
+    assert outcome.failure_reason =~ "steering_delivery_ambiguous"
+    assert outcome.failure_reason =~ "session_read"
+
+    assert [{:handler_adapter_attempt, _, "primary-model", 0, _, _}] =
+             collect_tag(:handler_adapter_attempt)
+
+    assert length(collect_tag(:handler_tool_attempt)) == 1
+    assert [{:session_read_boundary, {attempt_ref, 1}}] = collect_tag(:session_read_boundary)
+    assert is_reference(attempt_ref)
   end
 
   test "provider failure before accepted steering preserves fallback and creates a fresh attempt ref" do

@@ -582,7 +582,8 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
         %Outcome{
           status: :success,
           notes: response_text,
-          context_updates: updates
+          context_updates: updates,
+          output_taint: if(use_tools, do: response.taint)
         }
 
       {:error, reason} ->

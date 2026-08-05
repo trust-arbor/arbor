@@ -229,6 +229,8 @@ defmodule Arbor.LLM.ToolLoopTypedSteeringSecurityRegressionTest do
        {:invalid_steering_envelope, :expected_exact_struct}},
       {fn _ -> {:ok, [%{valid | content: ""}]} end,
        {:invalid_steering_envelope, :invalid_content}},
+      {fn _ -> {:error, :other_read_failure} end,
+       {:invalid_steering_callback_result, :expected_none_or_nonempty_message_list}},
       {fn _ -> raise "fault" end, {:steering_callback_failed, :raised}}
     ]
 
@@ -356,12 +358,16 @@ defmodule Arbor.LLM.ToolLoopTypedSteeringSecurityRegressionTest do
       :allow
     end
 
-    assert {:ok, %{content: "done"}} =
+    assert {:ok, %{content: "done", taint: %Taint{} = final_taint}} =
              run(ThreeRoundAdapter,
                on_steer_check: steer_check,
                llm_call_authorizer: authorizer,
                tool_taint: initial
              )
+
+    assert final_taint.level == :hostile
+    assert final_taint.sensitivity == :restricted
+    assert final_taint.sanitizations == 0
 
     provider_taints = collect_tag(:provider_taint)
 
@@ -404,7 +410,7 @@ defmodule Arbor.LLM.ToolLoopTypedSteeringSecurityRegressionTest do
       :allow
     end
 
-    assert {:ok, %{content: "done"}} =
+    assert {:ok, %{content: "done", taint: nil}} =
              run(ImmediateAdapter, tools: [], llm_call_authorizer: authorizer)
 
     assert_receive {:default_authorizer_taint,
@@ -430,6 +436,19 @@ defmodule Arbor.LLM.ToolLoopTypedSteeringSecurityRegressionTest do
              )
 
     assert length(collect_tag(:adapter_attempt)) == 3
+    assert length(collect_tag(:tool_attempt)) == 2
+  end
+
+  test "security regression: Session read ambiguity maps once after accepted steering" do
+    check = fn
+      {_attempt_ref, 1} -> {:ok, [steering_message(400, "accepted steering")]}
+      {_attempt_ref, 2} -> {:error, :steering_read_ambiguous}
+    end
+
+    assert {:error, {:steering_delivery_ambiguous, :session_read}} =
+             run(ThreeRoundAdapter, on_steer_check: check)
+
+    assert length(collect_tag(:adapter_attempt)) == 2
     assert length(collect_tag(:tool_attempt)) == 2
   end
 

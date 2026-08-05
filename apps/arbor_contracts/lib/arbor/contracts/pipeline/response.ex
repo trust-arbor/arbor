@@ -27,6 +27,10 @@ defmodule Arbor.Contracts.Pipeline.Response do
       {response.content}  # Always a binary, never a map
   """
 
+  alias Arbor.Contracts.Security.Taint
+
+  @taint_fields [:level, :sensitivity, :sanitizations, :confidence, :source, :chain]
+
   @type t :: %__MODULE__{
           content: String.t(),
           tool_history: [map()],
@@ -36,7 +40,8 @@ defmodule Arbor.Contracts.Pipeline.Response do
           content_parts: [map()],
           raw: map() | nil,
           discovered_tools: [String.t()],
-          metadata: map()
+          metadata: map(),
+          taint: Taint.t() | nil
         }
 
   @enforce_keys [:content]
@@ -48,7 +53,8 @@ defmodule Arbor.Contracts.Pipeline.Response do
             content_parts: [],
             raw: nil,
             discovered_tools: [],
-            metadata: %{}
+            metadata: %{},
+            taint: nil
 
   @doc """
   Normalize any LLM pipeline output into a `%Response{}`.
@@ -56,7 +62,9 @@ defmodule Arbor.Contracts.Pipeline.Response do
   Handles all known formats from ToolLoop, LlmHandler, APIAgent, and Session.
   """
   @spec normalize(term()) :: t()
-  def normalize(%__MODULE__{} = response), do: response
+  def normalize(%__MODULE__{} = response) do
+    %{response | taint: normalize_taint(response.taint)}
+  end
 
   def normalize(text) when is_binary(text) do
     %__MODULE__{content: text}
@@ -96,7 +104,8 @@ defmodule Arbor.Contracts.Pipeline.Response do
     %__MODULE__{
       content: text,
       tool_rounds: Map.get(inner_map, :tool_rounds, 0) || 0,
-      tool_history: Map.get(inner_map, :tool_history, []) || []
+      tool_history: Map.get(inner_map, :tool_history, []) || [],
+      taint: get_taint(inner_map)
     }
   end
 
@@ -130,8 +139,38 @@ defmodule Arbor.Contracts.Pipeline.Response do
       content_parts: get_list(map, :content_parts, "content_parts"),
       raw: Map.get(map, :raw) || Map.get(map, "raw"),
       discovered_tools: get_list(map, :discovered_tools, "discovered_tools"),
-      metadata: Map.get(map, :metadata) || Map.get(map, "metadata", %{})
+      metadata: Map.get(map, :metadata) || Map.get(map, "metadata", %{}),
+      taint: get_taint(map)
     }
+  end
+
+  # Taint is a process-local typed field, not a JSON decoding surface. Reject
+  # ambiguous keys, plain maps, forged struct shapes, and invalid dimensions.
+  defp get_taint(map) do
+    case {Map.fetch(map, :taint), Map.fetch(map, "taint")} do
+      {{:ok, taint}, :error} -> normalize_taint(taint)
+      {:error, {:ok, taint}} -> normalize_taint(taint)
+      _missing_or_ambiguous -> nil
+    end
+  end
+
+  defp normalize_taint(nil), do: nil
+
+  defp normalize_taint(%Taint{} = taint) do
+    if exact_valid_taint?(taint), do: taint, else: nil
+  end
+
+  defp normalize_taint(_malformed), do: nil
+
+  defp exact_valid_taint?(taint) do
+    map_size(taint) == length(@taint_fields) + 1 and
+      Enum.sort(Map.keys(taint)) == Enum.sort([:__struct__ | @taint_fields]) and
+      taint.level in Taint.levels() and
+      taint.sensitivity in Taint.sensitivities() and
+      is_integer(taint.sanitizations) and taint.sanitizations in 0..255 and
+      taint.confidence in Taint.confidences() and
+      (is_nil(taint.source) or is_binary(taint.source)) and
+      is_list(taint.chain) and Enum.all?(taint.chain, &is_binary/1)
   end
 
   defp get_list(map, atom_key, string_key) do

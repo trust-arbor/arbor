@@ -37,8 +37,10 @@ defmodule Arbor.LLM.ToolLoop do
     * `:on_steer_check` - Optional process-local arity-1 callback invoked exactly
       once after each completed tool round with
       `{attempt_ref, positive_boundary_sequence}`. It returns `:none` or
-      `{:ok, [%Arbor.Contracts.Session.SteeringMessage{}]}`. Accepted messages
-      are atomically bounded, appended as user messages in order, joined into
+      `{:ok, [%Arbor.Contracts.Session.SteeringMessage{}]}`. A closed
+      `{:error, :steering_read_ambiguous}` Session-read result maps to
+      `{:steering_delivery_ambiguous, :session_read}`. Accepted messages are
+      atomically bounded, appended as user messages in order, joined into
       aggregate tool/provider taint, and audited without content.
     * `:llm_call_authorizer` - Optional process-local arity-1 or arity-2 callback
       invoked immediately before every individual `Client.complete/3` or
@@ -106,7 +108,8 @@ defmodule Arbor.LLM.ToolLoop do
     max_list_items: 10_000
   ]
 
-  @spec run(Client.t(), Request.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  @spec run(Client.t(), Request.t(), keyword()) ::
+          {:ok, PipelineResponse.t()} | {:error, term()}
   def run(client, %Request{} = request, opts \\ []) do
     with :ok <- validate_credential_exclusivity(opts),
          {:ok, identity} <- execution_identity(opts),
@@ -723,7 +726,8 @@ defmodule Arbor.LLM.ToolLoop do
              usage: merge_usage_maps(state.total_usage, response.usage),
              tool_rounds: turn,
              finish_reason: :max_turns,
-             discovered_tools: state.discovered_tools
+             discovered_tools: state.discovered_tools,
+             taint: state.tool_taint
            }}
 
         # Authorization failures must not be masked by accumulated-text fallback.
@@ -744,7 +748,8 @@ defmodule Arbor.LLM.ToolLoop do
                usage: state.total_usage,
                tool_rounds: turn,
                finish_reason: :max_turns,
-               discovered_tools: state.discovered_tools
+               discovered_tools: state.discovered_tools,
+               taint: state.tool_taint
              }}
           else
             {:error, {:max_turns_reached, turn, state.total_usage}}
@@ -863,7 +868,8 @@ defmodule Arbor.LLM.ToolLoop do
                    usage: state.total_usage,
                    tool_rounds: state.turn + 1,
                    raw: response.raw,
-                   discovered_tools: state.discovered_tools
+                   discovered_tools: state.discovered_tools,
+                   taint: state.tool_taint
                  }}
 
               {:error, reason} ->
@@ -1001,7 +1007,8 @@ defmodule Arbor.LLM.ToolLoop do
                    usage: state.total_usage,
                    tool_rounds: state.turn + 1,
                    raw: response.raw,
-                   discovered_tools: state.discovered_tools
+                   discovered_tools: state.discovered_tools,
+                   taint: state.tool_taint
                  }}
             end
         end
@@ -1369,6 +1376,9 @@ defmodule Arbor.LLM.ToolLoop do
   end
 
   defp normalize_steering_result(:none, _state), do: {:ok, []}
+
+  defp normalize_steering_result({:error, :steering_read_ambiguous}, _state),
+    do: {:error, {:steering_delivery_ambiguous, :session_read}}
 
   defp normalize_steering_result({:ok, messages}, state)
        when is_list(messages) and messages != [] do
