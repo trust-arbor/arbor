@@ -20,6 +20,9 @@ defmodule Arbor.Memory.IntentStoreProvenanceTest do
     end
 
     @impl true
+    def durability_class(_opts), do: :node_restart
+
+    @impl true
     def put(key, value, opts) do
       table = Keyword.fetch!(opts, :table)
       true = :ets.insert(table, {key, value})
@@ -426,8 +429,16 @@ defmodule Arbor.Memory.IntentStoreProvenanceTest do
     }
 
     true = :ets.insert(:arbor_memory_intents, {agent_id, projected})
-    assert Enum.map(IntentStore.recent_intents(agent_id), & &1.id) == [trusted_intent.id]
-    assert Enum.map(IntentStore.recent_percepts(agent_id), & &1.id) == [trusted_percept.id]
+
+    assert Enum.map(IntentStore.recent_intents(agent_id, limit: 10), & &1.id) == [
+             trusted_intent.id,
+             hostile_intent.id
+           ]
+
+    assert Enum.map(IntentStore.recent_percepts(agent_id, limit: 10), & &1.id) == [
+             trusted_percept.id,
+             hostile_percept.id
+           ]
 
     assert_tainted_inventory(agent_id, :intent, [
       {trusted_intent.id, trusted},
@@ -440,8 +451,16 @@ defmodule Arbor.Memory.IntentStoreProvenanceTest do
     ])
 
     true = :ets.delete(:arbor_memory_intents, agent_id)
-    assert IntentStore.recent_intents(agent_id) == []
-    assert IntentStore.recent_percepts(agent_id) == []
+
+    assert Enum.map(IntentStore.recent_intents(agent_id, limit: 10), & &1.id) == [
+             trusted_intent.id,
+             hostile_intent.id
+           ]
+
+    assert Enum.map(IntentStore.recent_percepts(agent_id, limit: 10), & &1.id) == [
+             trusted_percept.id,
+             hostile_percept.id
+           ]
 
     assert_tainted_inventory(agent_id, :intent, [
       {trusted_intent.id, trusted},
@@ -497,9 +516,10 @@ defmodule Arbor.Memory.IntentStoreProvenanceTest do
     assert {:error, :not_found} = IntentStore.get_intent(agent_id, imported.id)
   end
 
-  test "taint-aware reads use the durable item instead of a mutated live projection", %{
-    agent_id: agent_id
-  } do
+  test "security regression: compatibility and taint-aware reads reject a forged public ETS item",
+       %{
+         agent_id: agent_id
+       } do
     intent = Intent.think("original")
     supplied = taint(:trusted, :public, 0, :verified, "trusted_input")
 
@@ -510,13 +530,16 @@ defmodule Arbor.Memory.IntentStoreProvenanceTest do
     mutated = %{stored | reasoning: "mutated after labeling"}
     true = :ets.insert(:arbor_memory_intents, {agent_id, %{data | intents: [mutated]}})
 
-    assert [^mutated] = IntentStore.recent_intents(agent_id)
+    assert [^intent] = IntentStore.recent_intents(agent_id)
 
     assert {:ok, [{value, :verified}]} =
              IntentStore.recent_intents_tainted(agent_id)
 
     assert value.value == intent
     assert value.taint == supplied
+
+    assert [{^agent_id, repaired}] = :ets.lookup(:arbor_memory_intents, agent_id)
+    assert repaired.intents == [intent]
   end
 
   test "security regression: taint-aware read reconciliation is serialized with mutations", %{
@@ -780,7 +803,7 @@ defmodule Arbor.Memory.IntentStoreProvenanceTest do
     assert {:ok, ^intent} =
              IntentStore.record_intent_tainted(agent_id, intent, supplied)
 
-    assert IntentStore.recent_intents(agent_id) == []
+    assert IntentStore.recent_intents(agent_id) == [intent]
 
     persisted = durable_record(agent_id)
     assert get_in(persisted.data, ["intents", Access.at(0), "payload", "id"]) == intent.id

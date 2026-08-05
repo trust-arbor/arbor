@@ -36,6 +36,7 @@ defmodule Arbor.Memory.IntentStore do
   @aggregate_version 1
   @max_identifier_bytes 256
   @max_failure_reason_bytes 4_096
+  @max_inventory_items Taint.max_join_inputs()
   @intent_types [:think, :act, :wait, :reflect, :internal]
   @percept_types [:action_result, :environment, :interrupt, :error, :timeout]
   @percept_outcomes [:success, :failure, :partial, :blocked, :interrupted]
@@ -51,6 +52,8 @@ defmodule Arbor.Memory.IntentStore do
   @status_fields ~w(status locked_at completed_at failed_at retry_count last_failure_reason)
   @status_payload_fields ["intent_id" | @status_fields]
   @import_fields @intent_payload_fields ++ ~w(status retry_count)
+  @reader_option_keys [:limit, :type, :since]
+  @pending_option_keys [:limit, :max_retries]
 
   @type provenance_status :: :verified | :legacy_unlabeled | :invalid_durable_provenance
   @type tainted_item :: {TaintedValue.t(), provenance_status()}
@@ -148,15 +151,10 @@ defmodule Arbor.Memory.IntentStore do
   """
   @spec recent_intents(String.t(), keyword()) :: [Intent.t()]
   def recent_intents(agent_id, opts \\ []) do
-    limit = Keyword.get(opts, :limit, 10)
-    type = Keyword.get(opts, :type)
-    since = Keyword.get(opts, :since)
-
-    get_agent_data(agent_id)
-    |> Map.get(:intents, [])
-    |> maybe_filter_type(type)
-    |> maybe_filter_since(since)
-    |> Enum.take(limit)
+    case recent_intents_tainted(agent_id, opts) do
+      {:ok, items} -> Enum.map(items, fn {%TaintedValue{value: value}, _status} -> value end)
+      {:error, _reason} -> []
+    end
   end
 
   @doc "Returns recent intents with item-specific taint and provenance status."
@@ -186,15 +184,10 @@ defmodule Arbor.Memory.IntentStore do
   """
   @spec recent_percepts(String.t(), keyword()) :: [Percept.t()]
   def recent_percepts(agent_id, opts \\ []) do
-    limit = Keyword.get(opts, :limit, 10)
-    type = Keyword.get(opts, :type)
-    since = Keyword.get(opts, :since)
-
-    get_agent_data(agent_id)
-    |> Map.get(:percepts, [])
-    |> maybe_filter_type(type)
-    |> maybe_filter_since(since)
-    |> Enum.take(limit)
+    case recent_percepts_tainted(agent_id, opts) do
+      {:ok, items} -> Enum.map(items, fn {%TaintedValue{value: value}, _status} -> value end)
+      {:error, _reason} -> []
+    end
   end
 
   @doc "Returns recent percepts with item-specific taint and provenance status."
@@ -219,14 +212,13 @@ defmodule Arbor.Memory.IntentStore do
   Returns the most recent percept linked to the given intent_id.
   """
   @spec get_percept_for_intent(String.t(), String.t()) ::
-          {:ok, Percept.t()} | {:error, :not_found}
+          {:ok, Percept.t()} | {:error, :not_found | :store_unavailable | :invalid_request}
   def get_percept_for_intent(agent_id, intent_id) do
-    get_agent_data(agent_id)
-    |> Map.get(:percepts, [])
-    |> Enum.find(&(&1.intent_id == intent_id))
-    |> case do
-      nil -> {:error, :not_found}
-      percept -> {:ok, percept}
+    with :ok <- validate_identifier(agent_id),
+         :ok <- validate_identifier(intent_id) do
+      safe_server_call({:compat_read, :percept_for_intent, agent_id, intent_id}, :read)
+    else
+      _ -> {:error, :invalid_request}
     end
   end
 
@@ -243,15 +235,14 @@ defmodule Arbor.Memory.IntentStore do
   """
   @spec pending_intents_for_goal(String.t(), String.t()) :: [Intent.t()]
   def pending_intents_for_goal(agent_id, goal_id) do
-    data = get_agent_data(agent_id)
-    statuses = Map.get(data, :statuses, %{})
-
-    data
-    |> Map.get(:intents, [])
-    |> Enum.filter(fn intent ->
-      intent.goal_id == goal_id and
-        not intent_terminal?(intent.id, statuses)
-    end)
+    with :ok <- validate_identifier(agent_id),
+         :ok <- validate_identifier(goal_id),
+         {:ok, intents} <-
+           safe_server_call({:compat_read, :pending_for_goal, agent_id, goal_id}, :read) do
+      intents
+    else
+      _ -> []
+    end
   end
 
   defp intent_terminal?(intent_id, statuses) do
@@ -266,17 +257,15 @@ defmodule Arbor.Memory.IntentStore do
   @doc """
   Get a specific intent by ID.
   """
-  @spec get_intent(String.t(), String.t()) :: {:ok, Intent.t(), map()} | {:error, :not_found}
+  @spec get_intent(String.t(), String.t()) ::
+          {:ok, Intent.t(), map()}
+          | {:error, :not_found | :store_unavailable | :invalid_request}
   def get_intent(agent_id, intent_id) do
-    data = get_agent_data(agent_id)
-
-    case Enum.find(data.intents, &(&1.id == intent_id)) do
-      nil ->
-        {:error, :not_found}
-
-      intent ->
-        status_info = get_intent_status(data, intent_id)
-        {:ok, intent, status_info}
+    with :ok <- validate_identifier(agent_id),
+         :ok <- validate_identifier(intent_id) do
+      safe_server_call({:compat_read, :intent, agent_id, intent_id}, :read)
+    else
+      _ -> {:error, :invalid_request}
     end
   end
 
@@ -287,23 +276,14 @@ defmodule Arbor.Memory.IntentStore do
   """
   @spec pending_intentions(String.t(), keyword()) :: [{Intent.t(), map()}]
   def pending_intentions(agent_id, opts \\ []) do
-    limit = Keyword.get(opts, :limit, 10)
-    max_retries = Keyword.get(opts, :max_retries, 5)
-    data = get_agent_data(agent_id)
-    statuses = Map.get(data, :statuses, %{})
-
-    data.intents
-    |> Enum.filter(fn intent ->
-      status = Map.get(statuses, intent.id, %{})
-
-      Map.get(status, :status, :pending) == :pending and
-        Map.get(status, :retry_count, 0) < max_retries
-    end)
-    |> Enum.sort_by(& &1.urgency, :desc)
-    |> Enum.take(limit)
-    |> Enum.map(fn intent ->
-      {intent, get_intent_status(data, intent.id)}
-    end)
+    with :ok <- validate_identifier(agent_id),
+         :ok <- validate_pending_options(opts),
+         {:ok, intentions} <-
+           safe_server_call({:compat_read, :pending_intentions, agent_id, opts}, :read) do
+      intentions
+    else
+      _ -> []
+    end
   end
 
   @doc """
@@ -402,22 +382,12 @@ defmodule Arbor.Memory.IntentStore do
   """
   @spec export_pending_intents(String.t()) :: [map()]
   def export_pending_intents(agent_id) do
-    data = get_agent_data(agent_id)
-    statuses = Map.get(data, :statuses, %{})
-
-    data
-    |> Map.get(:intents, [])
-    |> Enum.reject(fn intent ->
-      status_info = Map.get(statuses, intent.id, %{})
-      Map.get(status_info, :status, :pending) == :completed
-    end)
-    |> Enum.map(fn intent ->
-      status_info = Map.get(statuses, intent.id, %{status: :pending, retry_count: 0})
-
-      serialize_intent(intent)
-      |> Map.put("status", to_string(Map.get(status_info, :status, :pending)))
-      |> Map.put("retry_count", Map.get(status_info, :retry_count, 0))
-    end)
+    with :ok <- validate_identifier(agent_id),
+         {:ok, exported} <- safe_server_call({:compat_read, :export, agent_id, nil}, :read) do
+      exported
+    else
+      _ -> []
+    end
   end
 
   @doc """
@@ -435,7 +405,7 @@ defmodule Arbor.Memory.IntentStore do
     with :ok <- validate_identifier(agent_id),
          true <- proper_bounded_list?(intent_maps, Taint.max_join_inputs()),
          {:ok, prepared} <- prepare_imports(intent_maps) do
-      safe_server_call({:import_intents, agent_id, prepared})
+      safe_server_call({:import_intents, agent_id, prepared}, :mutation)
     else
       _ -> {:error, :invalid_request}
     end
@@ -472,11 +442,17 @@ defmodule Arbor.Memory.IntentStore do
   @doc """
   Clear all intents and percepts for an agent.
   """
-  @spec clear(String.t()) :: :ok | {:error, :store_unavailable}
+  @spec clear(String.t()) ::
+          :ok | {:error, :invalid_request | :store_unavailable | :commit_outcome_unknown}
   def clear(agent_id) do
-    case safe_server_call({:clear, agent_id}) do
-      :ok -> :ok
-      _ -> {:error, :store_unavailable}
+    with :ok <- validate_identifier(agent_id) do
+      case safe_server_call({:clear, agent_id}, :mutation) do
+        :ok -> :ok
+        {:error, :commit_outcome_unknown} = error -> error
+        _ -> {:error, :store_unavailable}
+      end
+    else
+      _ -> {:error, :invalid_request}
     end
   end
 
@@ -524,6 +500,29 @@ defmodule Arbor.Memory.IntentStore do
   def handle_call({:recent_tainted, domain, agent_id, opts}, _from, state)
       when domain in [:intent, :percept] do
     {:reply, read_tainted_items(domain, agent_id, opts, state.buffer_size), state}
+  rescue
+    _ -> {:reply, {:error, :store_unavailable}, state}
+  catch
+    _, _ -> {:reply, {:error, :store_unavailable}, state}
+  end
+
+  @impl true
+  def handle_call({:compat_read, request, agent_id, argument}, _from, state) do
+    reply =
+      case load_durable_aggregate(agent_id, state.buffer_size) do
+        {:ok, aggregate, _aggregate_status} ->
+          _ = project_authoritative_read(agent_id, aggregate)
+          compat_read(request, aggregate, argument)
+
+        {:error, :not_found} ->
+          _ = evict_live_projection(agent_id)
+          compat_read(request, empty_decoded_aggregate(), argument)
+
+        {:error, _reason} ->
+          {:error, :store_unavailable}
+      end
+
+    {:reply, reply, state}
   rescue
     _ -> {:reply, {:error, :store_unavailable}, state}
   catch
@@ -875,9 +874,6 @@ defmodule Arbor.Memory.IntentStore do
   defp normalize_buffer_size(_value), do: @default_buffer_size
 
   defp load_mutation_baseline(agent_id, buffer_size) do
-    # C3D integration point: the CAS callback must reload this baseline and
-    # recompute the operation on every conflict retry. Never reuse a candidate
-    # derived from an earlier authoritative record.
     case load_durable_aggregate(agent_id, buffer_size) do
       {:ok, aggregate, _status} ->
         with :ok <- ensure_baseline_provenance(agent_id, aggregate) do
@@ -885,7 +881,7 @@ defmodule Arbor.Memory.IntentStore do
         end
 
       {:error, :not_found} ->
-        {:ok, empty_decoded_aggregate()}
+        {:ok, Map.merge(empty_decoded_aggregate(), %{expected_record: :not_found, location: nil})}
 
       {:error, _reason} ->
         {:error, :baseline_unavailable}
@@ -906,15 +902,18 @@ defmodule Arbor.Memory.IntentStore do
   end
 
   defp load_durable_aggregate(agent_id, buffer_size) do
-    # C3D integration point: replace this cache read with the authoritative
-    # snapshot returned by the shared CAS/read primitive. It must distinguish
-    # an acknowledged ephemeral miss or durable deletion from backend failure.
-    case MemoryStore.load_tainted_with_status("intents", agent_id) do
-      {:ok, %TaintedValue{value: persisted, taint: outer_taint}, outer_status} ->
-        decode_durable_aggregate(persisted, outer_taint, outer_status, buffer_size)
+    case MemoryStore.load_tainted_authoritative_with_status("intents", agent_id) do
+      {:ok, %TaintedValue{value: persisted, taint: outer_taint}, outer_status, record, location} ->
+        case decode_durable_aggregate(persisted, outer_taint, outer_status, buffer_size) do
+          {:ok, decoded, status} ->
+            {:ok, Map.merge(decoded, %{expected_record: record, location: location}), status}
+
+          {:error, _reason} = error ->
+            error
+        end
 
       {:error, :not_found} ->
-        if MemoryStore.available?(), do: {:error, :not_found}, else: {:error, :store_unavailable}
+        {:error, :not_found}
 
       {:error, _reason} ->
         {:error, :store_unavailable}
@@ -1021,17 +1020,15 @@ defmodule Arbor.Memory.IntentStore do
 
   defp prepare_import(_intent_map), do: {:error, :invalid_import}
 
-  defp safe_server_call(message) do
+  defp safe_server_call(message, mode \\ :read)
+
+  defp safe_server_call(message, mode) when mode in [:read, :mutation] do
     case Process.whereis(server_name()) do
       pid when is_pid(pid) ->
         try do
-          # C3D writes may wait on a backend-owned definitive result. A caller
-          # timeout must not race a commit that the owner can still complete.
-          # Owner death after backend acknowledgement still requires C3D
-          # operation-id reconciliation at this boundary.
           GenServer.call(pid, message, :infinity)
         catch
-          :exit, _reason -> {:error, :store_unavailable}
+          :exit, _reason -> owner_call_exit(pid, mode)
         end
 
       nil ->
@@ -1039,14 +1036,47 @@ defmodule Arbor.Memory.IntentStore do
     end
   end
 
+  defp safe_server_call(_message, _mode), do: {:error, :store_unavailable}
+
+  defp owner_call_exit(_pid, :read), do: {:error, :store_unavailable}
+
+  defp owner_call_exit(pid, :mutation) do
+    if Process.whereis(server_name()) == pid and Process.alive?(pid),
+      do: {:error, :store_unavailable},
+      else: {:error, :commit_outcome_unknown}
+  end
+
   defp validate_reader_request(agent_id, opts) do
     with :ok <- validate_identifier(agent_id),
          true <- is_list(opts) and Keyword.keyword?(opts),
-         limit when is_integer(limit) and limit >= 0 <- Keyword.get(opts, :limit, 10),
+         true <- Keyword.keys(opts) |> Enum.uniq() |> length() == length(opts),
+         true <- Enum.all?(Keyword.keys(opts), &(&1 in @reader_option_keys)),
+         limit when is_integer(limit) and limit >= 0 and limit <= @max_inventory_items <-
+           Keyword.get(opts, :limit, 10),
          type <- Keyword.get(opts, :type),
          true <- is_nil(type) or is_atom(type),
          since <- Keyword.get(opts, :since),
          true <- is_nil(since) or match?(%DateTime{}, since) do
+      :ok
+    else
+      _ -> {:error, :invalid_request}
+    end
+  rescue
+    _ -> {:error, :invalid_request}
+  catch
+    _, _ -> {:error, :invalid_request}
+  end
+
+  defp validate_pending_options(opts) do
+    with true <- is_list(opts) and Keyword.keyword?(opts),
+         true <- Keyword.keys(opts) |> Enum.uniq() |> length() == length(opts),
+         true <- Enum.all?(Keyword.keys(opts), &(&1 in @pending_option_keys)),
+         limit when is_integer(limit) and limit >= 0 and limit <= @max_inventory_items <-
+           Keyword.get(opts, :limit, 10),
+         max_retries
+         when is_integer(max_retries) and max_retries >= 0 and
+                max_retries <= @max_inventory_items <-
+           Keyword.get(opts, :max_retries, 5) do
       :ok
     else
       _ -> {:error, :invalid_request}
@@ -1082,27 +1112,88 @@ defmodule Arbor.Memory.IntentStore do
     |> Enum.take(limit)
   end
 
-  defp read_tainted_items(domain, agent_id, opts, buffer_size) do
-    current = get_agent_data(agent_id)
+  defp compat_read(:percept_for_intent, aggregate, intent_id) do
+    aggregate.data.percepts
+    |> Enum.find(&(&1.intent_id == intent_id))
+    |> case do
+      nil -> {:error, :not_found}
+      percept -> {:ok, percept}
+    end
+  end
 
+  defp compat_read(:pending_for_goal, aggregate, goal_id) do
+    statuses = aggregate.data.statuses
+
+    intents =
+      Enum.filter(aggregate.data.intents, fn intent ->
+        intent.goal_id == goal_id and not intent_terminal?(intent.id, statuses)
+      end)
+
+    {:ok, intents}
+  end
+
+  defp compat_read(:intent, aggregate, intent_id) do
+    case Enum.find(aggregate.data.intents, &(&1.id == intent_id)) do
+      nil -> {:error, :not_found}
+      intent -> {:ok, intent, get_intent_status(aggregate.data, intent_id)}
+    end
+  end
+
+  defp compat_read(:pending_intentions, aggregate, opts) do
+    limit = Keyword.get(opts, :limit, 10)
+    max_retries = Keyword.get(opts, :max_retries, 5)
+    statuses = aggregate.data.statuses
+
+    intentions =
+      aggregate.data.intents
+      |> Enum.filter(fn intent ->
+        status = Map.get(statuses, intent.id, %{})
+
+        Map.get(status, :status, :pending) == :pending and
+          Map.get(status, :retry_count, 0) < max_retries
+      end)
+      |> Enum.sort_by(& &1.urgency, :desc)
+      |> Enum.take(limit)
+      |> Enum.map(&{&1, get_intent_status(aggregate.data, &1.id)})
+
+    {:ok, intentions}
+  end
+
+  defp compat_read(:export, aggregate, _argument), do: {:ok, export_legacy_pending(aggregate)}
+  defp compat_read(_request, _aggregate, _argument), do: {:error, :invalid_request}
+
+  defp export_legacy_pending(aggregate) do
+    aggregate.data.intents
+    |> Enum.reject(fn intent ->
+      aggregate.data.statuses
+      |> Map.get(intent.id, %{})
+      |> Map.get(:status, :pending)
+      |> Kernel.==(:completed)
+    end)
+    |> Enum.map(fn intent ->
+      status_info = get_intent_status(aggregate.data, intent.id)
+
+      serialize_intent(intent)
+      |> Map.put("status", to_string(Map.get(status_info, :status, :pending)))
+      |> Map.put("retry_count", Map.get(status_info, :retry_count, 0))
+    end)
+  end
+
+  defp read_tainted_items(domain, agent_id, opts, buffer_size) do
     case load_durable_aggregate(agent_id, buffer_size) do
       {:ok, aggregate, aggregate_status} ->
-        with :ok <- restore_decoded_agent(agent_id, current, aggregate) do
-          items =
-            aggregate.items
-            |> filter_decoded_items(domain, opts)
-            |> Enum.map(&durable_tainted_item(&1, aggregate_status))
+        _ = project_authoritative_read(agent_id, aggregate)
 
-          {:ok, items}
-        else
-          _ -> {:error, :store_unavailable}
-        end
+        items =
+          aggregate.items
+          |> filter_decoded_items(domain, opts)
+          |> Enum.map(&durable_tainted_item(&1, aggregate_status))
+
+        {:ok, items}
 
       {:error, :not_found} ->
-        case clear_live_agent(agent_id, current) do
-          :ok -> {:ok, []}
-          _ -> {:error, :store_unavailable}
-        end
+        _ = evict_live_projection(agent_id)
+        {:ok, []}
 
       {:error, _reason} ->
         {:error, :store_unavailable}
@@ -1111,6 +1202,26 @@ defmodule Arbor.Memory.IntentStore do
     _ -> {:error, :store_unavailable}
   catch
     _, _ -> {:error, :store_unavailable}
+  end
+
+  defp project_authoritative_read(agent_id, aggregate) do
+    case restore_decoded_agent(agent_id, get_agent_data(agent_id), aggregate) do
+      :ok -> :ok
+      {:error, _reason} -> evict_live_projection(agent_id)
+    end
+  rescue
+    _ -> evict_live_projection(agent_id)
+  catch
+    _, _ -> evict_live_projection(agent_id)
+  end
+
+  defp evict_live_projection(agent_id) do
+    true = :ets.delete(@ets_table, agent_id)
+    purge_intent_store_provenance(agent_id, empty_agent_data())
+  rescue
+    _ -> {:error, :projection_unavailable}
+  catch
+    _, _ -> {:error, :projection_unavailable}
   end
 
   defp reconcile_durable_provenance(agent_id, item) do
@@ -1527,15 +1638,6 @@ defmodule Arbor.Memory.IntentStore do
   defp stale_lock?(locked_at, now, timeout_ms) do
     diff_ms = DateTime.diff(now, locked_at, :millisecond)
     diff_ms > timeout_ms
-  end
-
-  defp maybe_filter_type(items, nil), do: items
-  defp maybe_filter_type(items, type), do: Enum.filter(items, &(&1.type == type))
-
-  defp maybe_filter_since(items, nil), do: items
-
-  defp maybe_filter_since(items, since) do
-    Enum.filter(items, &(DateTime.compare(&1.created_at, since) in [:gt, :eq]))
   end
 
   # ============================================================================
@@ -2592,35 +2694,33 @@ defmodule Arbor.Memory.IntentStore do
   end
 
   defp load_from_postgres(buffer_size) do
-    if MemoryStore.available?() do
-      case MemoryStore.load_all_tainted("intents") do
-        {:ok, entries} ->
-          loaded =
-            Enum.count(entries, fn
-              {agent_id, %TaintedValue{value: persisted, taint: outer_taint}, outer_status} ->
-                with :ok <- validate_identifier(agent_id),
-                     {:ok, decoded, _status} <-
-                       decode_durable_aggregate(
-                         persisted,
-                         outer_taint,
-                         outer_status,
-                         buffer_size
-                       ),
-                     :ok <- restore_decoded_agent(agent_id, empty_agent_data(), decoded) do
-                  true
-                else
-                  _ -> false
-                end
+    case MemoryStore.load_all_tainted_authoritative("intents") do
+      {:ok, entries} ->
+        loaded =
+          Enum.count(entries, fn
+            {agent_id, %TaintedValue{value: persisted, taint: outer_taint}, outer_status} ->
+              with :ok <- validate_identifier(agent_id),
+                   {:ok, decoded, _status} <-
+                     decode_durable_aggregate(
+                       persisted,
+                       outer_taint,
+                       outer_status,
+                       buffer_size
+                     ),
+                   :ok <- restore_decoded_agent(agent_id, empty_agent_data(), decoded) do
+                true
+              else
+                _ -> false
+              end
 
-              _ ->
-                false
-            end)
+            _ ->
+              false
+          end)
 
-          Logger.info("IntentStore loaded durable aggregates", count: loaded)
+        Logger.info("IntentStore loaded durable aggregates", count: loaded)
 
-        _ ->
-          :ok
-      end
+      _ ->
+        :ok
     end
   rescue
     _ ->
