@@ -123,8 +123,11 @@ defmodule Arbor.Memory.KnowledgeGraph.Operation do
 
   @spec approve_pending(String.t()) :: {:ok, t()} | {:error, atom()}
   def approve_pending(pending_id) do
-    operation_id = stable_operation_id("approve_pending", pending_id)
+    approve_pending(stable_operation_id("approve_pending", pending_id), pending_id)
+  end
 
+  @spec approve_pending(String.t(), String.t()) :: {:ok, t()} | {:error, atom()}
+  def approve_pending(operation_id, pending_id) do
     validate_new(
       {:approve_pending, operation_id, pending_id, generated_nonce(), DateTime.utc_now()}
     )
@@ -393,9 +396,23 @@ defmodule Arbor.Memory.KnowledgeGraph.Operation do
         %KnowledgeGraph{} = graph,
         taint
       ) do
-    case accepted_proposal_node(graph, pending_id) do
-      {:ok, node_id} -> {:ok, graph, node_id, :replayed}
-      :not_found -> apply_with_receipt(operation, graph, taint)
+    with {:ok, operation_id, kind, fingerprint} <- receipt_identity(operation, taint) do
+      case Map.fetch(graph.operation_receipts, operation_id) do
+        {:ok, %{kind: ^kind, fingerprint: ^fingerprint, result: result}} ->
+          replay_result(operation_id, kind, result, graph)
+
+        {:ok, _different_receipt} ->
+          {:error, :operation_id_conflict}
+
+        :error ->
+          case accepted_proposal_node(graph, pending_id) do
+            {:ok, node_id} ->
+              {:ok, graph, node_id, :replayed}
+
+            :not_found ->
+              apply_and_record(operation, operation_id, kind, fingerprint, graph)
+          end
+      end
     end
   end
 

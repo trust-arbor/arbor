@@ -709,6 +709,57 @@ defmodule Arbor.Memory.KnowledgeGraphStoreTest do
     assert authoritative_revision(agent_id) == revision_before_replay
   end
 
+  test "approval receipt precedence security regression rejects a reused operation id", %{
+    agent_id: agent_id
+  } do
+    graph = KnowledgeGraph.new(agent_id, auto_embed: false)
+
+    assert {:ok, graph, pending_id} =
+             KnowledgeGraph.add_pending_fact(graph, %{
+               content: "receipt-bound proposal",
+               source: "test"
+             })
+
+    assert :ok = KnowledgeGraphStore.save_graph(agent_id, graph)
+
+    reused_operation_id = "operation_already_bound_to_tainted_add"
+    trusted = trusted_taint("receipt_source")
+
+    assert {:ok, unrelated_node_id} =
+             KnowledgeGraphStore.add_node_tainted(
+               agent_id,
+               reused_operation_id,
+               %{type: :fact, content: "unrelated mutation", skip_dedup: true},
+               trusted
+             )
+
+    assert {:ok, accepted_node_id} = KnowledgeGraphStore.approve_pending(agent_id, pending_id)
+    revision_after_accept = authoritative_revision(agent_id)
+
+    assert {:ok, ^accepted_node_id} = KnowledgeGraphStore.approve_pending(agent_id, pending_id)
+    assert authoritative_revision(agent_id) == revision_after_accept
+
+    assert {:ok, generated_approval} = Operation.approve_pending(pending_id)
+    reused_id_approval = put_elem(generated_approval, 1, reused_operation_id)
+    assert {:ok, committed} = KnowledgeGraphStore.get_graph(agent_id)
+
+    assert {:error, :operation_id_conflict} =
+             Operation.apply(reused_id_approval, committed, Codec.missing_taint())
+
+    assert {:error, :operation_id_conflict} =
+             KnowledgeGraphStore.approve_pending(
+               agent_id,
+               reused_operation_id,
+               pending_id
+             )
+
+    assert authoritative_revision(agent_id) == revision_after_accept
+    assert {:ok, unchanged} = KnowledgeGraphStore.get_graph(agent_id)
+    assert Map.has_key?(unchanged.nodes, unrelated_node_id)
+    assert Map.has_key?(unchanged.nodes, accepted_node_id)
+    assert map_size(unchanged.nodes) == 2
+  end
+
   test "typed E3 mutations persist metadata, pending learning, and maintenance exactly once", %{
     agent_id: agent_id
   } do

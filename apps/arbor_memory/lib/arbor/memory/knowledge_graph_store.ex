@@ -181,6 +181,14 @@ defmodule Arbor.Memory.KnowledgeGraphStore do
     end
   end
 
+  @spec approve_pending(String.t(), String.t(), String.t()) ::
+          {:ok, String.t()} | {:error, term()}
+  def approve_pending(agent_id, operation_id, pending_id) do
+    with {:ok, operation} <- Operation.approve_pending(operation_id, pending_id) do
+      call_operation(agent_id, operation)
+    end
+  end
+
   @spec reject_pending(String.t(), String.t()) :: :ok | {:error, term()}
   def reject_pending(agent_id, pending_id) do
     with {:ok, operation} <- Operation.reject_pending(pending_id),
