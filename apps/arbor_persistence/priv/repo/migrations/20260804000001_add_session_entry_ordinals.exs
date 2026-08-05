@@ -22,23 +22,7 @@ defmodule Arbor.Persistence.Repo.Migrations.AddSessionEntryOrdinals do
 
     execute("UPDATE session_entries SET entry_ordinal = NULL")
 
-    execute("""
-    WITH ranked AS (
-      SELECT id,
-             ROW_NUMBER() OVER (
-               PARTITION BY session_id
-               ORDER BY timestamp ASC, id ASC
-             ) AS ordinal
-      FROM session_entries
-    )
-    UPDATE session_entries
-    SET entry_ordinal = (
-      SELECT ordinal
-      FROM ranked
-      WHERE ranked.id = session_entries.id
-    )
-    WHERE entry_ordinal IS NULL
-    """)
+    backfill_entry_ordinals!()
 
     if postgres?() do
       execute("ALTER TABLE session_entries ALTER COLUMN entry_ordinal SET NOT NULL")
@@ -97,5 +81,40 @@ defmodule Arbor.Persistence.Repo.Migrations.AddSessionEntryOrdinals do
     )
 
     execute("CREATE INDEX session_entries_entry_type_index ON session_entries (entry_type)")
+  end
+
+  defp backfill_entry_ordinals! do
+    ranked_entries = """
+    SELECT id,
+           ROW_NUMBER() OVER (
+             PARTITION BY session_id
+             ORDER BY timestamp ASC, id ASC
+           ) AS ordinal
+    FROM session_entries
+    """
+
+    if postgres?() do
+      # PostgreSQL does not decorrelate the SQLite-compatible subquery below;
+      # UPDATE FROM computes the window once instead of once per target row.
+      execute("""
+      WITH ranked AS (#{ranked_entries})
+      UPDATE session_entries AS target
+      SET entry_ordinal = ranked.ordinal
+      FROM ranked
+      WHERE ranked.id = target.id
+        AND target.entry_ordinal IS NULL
+      """)
+    else
+      execute("""
+      WITH ranked AS (#{ranked_entries})
+      UPDATE session_entries
+      SET entry_ordinal = (
+        SELECT ordinal
+        FROM ranked
+        WHERE ranked.id = session_entries.id
+      )
+      WHERE entry_ordinal IS NULL
+      """)
+    end
   end
 end
