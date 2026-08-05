@@ -1,73 +1,63 @@
 defmodule Arbor.Memory.GraphOps do
   @moduledoc """
-  Knowledge graph operations with ETS persistence and signal emission.
+  Knowledge graph compatibility operations backed by durable authority.
 
-  Wraps `KnowledgeGraph` calls with the load/save/signal pattern that
-  the facade previously handled inline. All functions take `agent_id`
-  as the first parameter and handle ETS lookup + save automatically.
+  `KnowledgeGraphStore` owns authoritative state. ETS is only its replaceable
+  projection; callers never read or write it through this module. Typed writes
+  use one operation identity per invocation and reuse it when reconciling an
+  ambiguous durable outcome.
   """
 
-  alias Arbor.Memory.{KnowledgeGraph, MemoryStore, Signals}
-
-  @graph_ets :arbor_memory_graphs
+  alias Arbor.Memory.{KnowledgeGraph, KnowledgeGraphStore, Signals}
+  alias Arbor.Memory.KnowledgeGraph.Codec
 
   # ============================================================================
-  # Graph ETS Helpers
+  # Graph Authority Helpers
   # ============================================================================
 
   @doc """
-  Get the knowledge graph for an agent from ETS.
+  Get the authoritative knowledge graph for an agent.
   """
-  @spec get_graph(String.t()) :: {:ok, KnowledgeGraph.t()} | {:error, :graph_not_initialized}
-  def get_graph(agent_id) do
-    case :ets.lookup(@graph_ets, agent_id) do
-      [{^agent_id, graph}] -> {:ok, graph}
-      [] -> {:error, :graph_not_initialized}
+  @spec get_graph(String.t()) :: {:ok, KnowledgeGraph.t()} | {:error, term()}
+  def get_graph(agent_id), do: KnowledgeGraphStore.get_graph(agent_id)
+
+  @doc """
+  Initialize an agent's authoritative knowledge graph if none exists.
+
+  Whole-graph replacement is intentionally unsupported. Existing graphs must
+  be changed through typed operations so concurrent updates cannot be lost.
+  """
+  @spec save_graph(String.t(), KnowledgeGraph.t()) :: :ok | {:error, term()}
+  def save_graph(agent_id, graph) do
+    case KnowledgeGraphStore.save_graph(agent_id, graph) do
+      :ok -> :ok
+      {:error, :outcome_unknown} -> reconcile_ambiguous_initialization(agent_id, graph)
+      {:error, _reason} = error -> error
     end
   end
 
   @doc """
-  Save the knowledge graph for an agent to ETS.
-  """
-  @spec save_graph(String.t(), KnowledgeGraph.t()) :: :ok
-  def save_graph(agent_id, graph) do
-    :ets.insert(@graph_ets, {agent_id, graph})
-    :ok
-  end
+  Preserve the legacy persistence hook after durable-authority migration.
 
-  @doc """
-  Persist the knowledge graph to Postgres asynchronously.
-
-  Serializes via `KnowledgeGraph.to_map/1` and writes through MemoryStore.
-  Failures are logged but never affect the caller.
+  Typed writes and initialization are already durable before returning, and the
+  owner schedules projection convergence itself. There is no second write to
+  enqueue.
   """
   @spec persist_graph_async(String.t()) :: :ok
-  def persist_graph_async(agent_id) do
-    case get_graph(agent_id) do
-      {:ok, graph} ->
-        graph_map = KnowledgeGraph.to_map(graph)
-        MemoryStore.persist_async("knowledge_graph", agent_id, graph_map)
-
-      {:error, _} ->
-        :ok
-    end
-  end
+  def persist_graph_async(_agent_id), do: :ok
 
   @doc """
-  Load a persisted knowledge graph from Postgres.
+  Load the authoritative durable knowledge graph.
 
   Returns `{:ok, graph}` if found, `{:error, :not_found}` otherwise.
   Used during agent restart to recover learned knowledge.
   """
-  @spec load_persisted_graph(String.t()) :: {:ok, KnowledgeGraph.t()} | {:error, :not_found}
+  @spec load_persisted_graph(String.t()) :: {:ok, KnowledgeGraph.t()} | {:error, term()}
   def load_persisted_graph(agent_id) do
-    case MemoryStore.load("knowledge_graph", agent_id) do
-      {:ok, graph_map} when is_map(graph_map) ->
-        graph = KnowledgeGraph.from_map(graph_map)
-        {:ok, graph}
-
-      _ ->
-        {:error, :not_found}
+    case KnowledgeGraphStore.get_graph(agent_id) do
+      {:ok, graph} -> {:ok, graph}
+      {:error, :graph_not_initialized} -> {:error, :not_found}
+      {:error, _reason} = error -> error
     end
   end
 
@@ -76,25 +66,21 @@ defmodule Arbor.Memory.GraphOps do
   """
   @spec has_graph?(String.t()) :: boolean()
   def has_graph?(agent_id) do
-    case :ets.lookup(@graph_ets, agent_id) do
-      [{^agent_id, _}] -> true
-      [] -> false
+    case KnowledgeGraphStore.get_graph(agent_id) do
+      {:ok, _graph} -> true
+      {:error, _reason} -> false
     end
   end
 
   @doc """
-  Fetch graph with safe ETS access (returns nil on missing table or agent).
+  Fetch authoritative graph, returning nil on absence or authority failure.
   """
   @spec fetch_graph(String.t()) :: KnowledgeGraph.t() | nil
   def fetch_graph(agent_id) do
-    if :ets.whereis(@graph_ets) != :undefined do
-      case :ets.lookup(@graph_ets, agent_id) do
-        [{^agent_id, graph}] -> graph
-        [] -> nil
-      end
+    case KnowledgeGraphStore.get_graph(agent_id) do
+      {:ok, graph} -> graph
+      {:error, _reason} -> nil
     end
-  rescue
-    _ -> nil
   end
 
   # ============================================================================
@@ -121,12 +107,17 @@ defmodule Arbor.Memory.GraphOps do
   """
   @spec add_knowledge(String.t(), map()) :: {:ok, String.t()} | {:error, term()}
   def add_knowledge(agent_id, node_data) do
-    with {:ok, graph} <- get_graph(agent_id),
-         {:ok, new_graph, node_id} <- KnowledgeGraph.add_node(graph, node_data) do
-      save_graph(agent_id, new_graph)
-      persist_graph_async(agent_id)
-      Signals.emit_knowledge_added(agent_id, node_id, node_data[:type])
-      {:ok, node_id}
+    operation_id = new_operation_id("add_node")
+
+    case reconcile_ambiguous(fn ->
+           KnowledgeGraphStore.add_node(agent_id, operation_id, node_data)
+         end) do
+      {:ok, node_id} = success ->
+        safe_emit(fn -> Signals.emit_knowledge_added(agent_id, node_id, node_data[:type]) end)
+        success
+
+      {:error, _reason} = error ->
+        error
     end
   end
 
@@ -140,13 +131,27 @@ defmodule Arbor.Memory.GraphOps do
   @spec link_knowledge(String.t(), String.t(), String.t(), atom(), keyword()) ::
           :ok | {:error, term()}
   def link_knowledge(agent_id, source_id, target_id, relationship, opts \\ []) do
-    with {:ok, graph} <- get_graph(agent_id),
-         {:ok, new_graph} <-
-           KnowledgeGraph.add_edge(graph, source_id, target_id, relationship, opts) do
-      save_graph(agent_id, new_graph)
-      persist_graph_async(agent_id)
-      Signals.emit_knowledge_linked(agent_id, source_id, target_id, relationship)
-      :ok
+    operation_id = new_operation_id("add_edge")
+
+    case reconcile_ambiguous(fn ->
+           KnowledgeGraphStore.add_edge(
+             agent_id,
+             operation_id,
+             source_id,
+             target_id,
+             relationship,
+             opts
+           )
+         end) do
+      :ok ->
+        safe_emit(fn ->
+          Signals.emit_knowledge_linked(agent_id, source_id, target_id, relationship)
+        end)
+
+        :ok
+
+      {:error, _reason} = error ->
+        error
     end
   end
 
@@ -156,12 +161,11 @@ defmodule Arbor.Memory.GraphOps do
   @spec reinforce_knowledge(String.t(), String.t()) ::
           {:ok, map()} | {:error, term()}
   def reinforce_knowledge(agent_id, node_id) do
-    with {:ok, graph} <- get_graph(agent_id),
-         {:ok, new_graph, node} <- KnowledgeGraph.reinforce(graph, node_id) do
-      save_graph(agent_id, new_graph)
-      persist_graph_async(agent_id)
-      {:ok, node}
-    end
+    operation_id = new_operation_id("reinforce")
+
+    reconcile_ambiguous(fn ->
+      KnowledgeGraphStore.reinforce(agent_id, operation_id, node_id)
+    end)
   end
 
   @doc """
@@ -209,12 +213,13 @@ defmodule Arbor.Memory.GraphOps do
   @spec approve_pending(String.t(), String.t()) ::
           {:ok, String.t()} | {:error, term()}
   def approve_pending(agent_id, pending_id) do
-    with {:ok, graph} <- get_graph(agent_id),
-         {:ok, new_graph, node_id} <- KnowledgeGraph.approve_pending(graph, pending_id) do
-      save_graph(agent_id, new_graph)
-      persist_graph_async(agent_id)
-      Signals.emit_pending_approved(agent_id, pending_id, node_id)
-      {:ok, node_id}
+    case reconcile_ambiguous(fn -> KnowledgeGraphStore.approve_pending(agent_id, pending_id) end) do
+      {:ok, node_id} = success ->
+        safe_emit(fn -> Signals.emit_pending_approved(agent_id, pending_id, node_id) end)
+        success
+
+      {:error, _reason} = error ->
+        error
     end
   end
 
@@ -223,12 +228,13 @@ defmodule Arbor.Memory.GraphOps do
   """
   @spec reject_pending(String.t(), String.t()) :: :ok | {:error, term()}
   def reject_pending(agent_id, pending_id) do
-    with {:ok, graph} <- get_graph(agent_id),
-         {:ok, new_graph} <- KnowledgeGraph.reject_pending(graph, pending_id) do
-      save_graph(agent_id, new_graph)
-      persist_graph_async(agent_id)
-      Signals.emit_pending_rejected(agent_id, pending_id)
-      :ok
+    case reconcile_ambiguous(fn -> KnowledgeGraphStore.reject_pending(agent_id, pending_id) end) do
+      :ok ->
+        safe_emit(fn -> Signals.emit_pending_rejected(agent_id, pending_id) end)
+        :ok
+
+      {:error, _reason} = error ->
+        error
     end
   end
 
@@ -261,12 +267,11 @@ defmodule Arbor.Memory.GraphOps do
   @spec cascade_recall(String.t(), String.t(), float(), keyword()) ::
           {:ok, map()} | {:error, term()}
   def cascade_recall(agent_id, node_id, boost_amount, opts \\ []) do
-    with {:ok, graph} <- get_graph(agent_id) do
-      updated_graph = KnowledgeGraph.cascade_recall(graph, node_id, boost_amount, opts)
-      save_graph(agent_id, updated_graph)
-      persist_graph_async(agent_id)
-      {:ok, KnowledgeGraph.stats(updated_graph)}
-    end
+    operation_id = new_operation_id("cascade_recall")
+
+    reconcile_ambiguous(fn ->
+      KnowledgeGraphStore.cascade_recall(agent_id, operation_id, node_id, boost_amount, opts)
+    end)
   end
 
   @doc """
@@ -291,7 +296,7 @@ defmodule Arbor.Memory.GraphOps do
 
   Used by `Arbor.Agent.Seed.capture/2` to snapshot graph state.
   """
-  @spec export_knowledge_graph(String.t()) :: {:ok, map()} | {:error, :graph_not_initialized}
+  @spec export_knowledge_graph(String.t()) :: {:ok, map()} | {:error, term()}
   def export_knowledge_graph(agent_id) do
     case get_graph(agent_id) do
       {:ok, graph} -> {:ok, KnowledgeGraph.to_map(graph)}
@@ -304,10 +309,53 @@ defmodule Arbor.Memory.GraphOps do
 
   Used by `Arbor.Agent.Seed.restore/2` to restore graph state.
   """
-  @spec import_knowledge_graph(String.t(), map()) :: :ok
+  @spec import_knowledge_graph(String.t(), map()) :: :ok | {:error, term()}
   def import_knowledge_graph(agent_id, graph_map) do
-    graph = KnowledgeGraph.from_map(graph_map)
-    save_graph(agent_id, graph)
-    persist_graph_async(agent_id)
+    case KnowledgeGraphStore.import_legacy_graph(agent_id, graph_map) do
+      :ok -> :ok
+      {:error, :outcome_unknown} -> reconcile_ambiguous_import(agent_id, graph_map)
+      {:error, _reason} = error -> error
+    end
+  end
+
+  # A typed replay is a fresh authority read, not a blind retry of the
+  # ambiguous CAS. The durable receipt suppresses a second effect if the first
+  # call committed before its transport failed.
+  defp reconcile_ambiguous(operation) do
+    case operation.() do
+      {:error, :outcome_unknown} -> operation.()
+      result -> result
+    end
+  end
+
+  defp reconcile_ambiguous_import(agent_id, graph_map) do
+    with {:ok, expected} <- Codec.decode_legacy_graph(agent_id, graph_map),
+         {:ok, current} <- KnowledgeGraphStore.get_graph(agent_id) do
+      if current == expected, do: :ok, else: {:error, :conflict}
+    else
+      _ -> {:error, :outcome_unknown}
+    end
+  end
+
+  defp reconcile_ambiguous_initialization(agent_id, expected) do
+    case KnowledgeGraphStore.get_graph(agent_id) do
+      {:ok, ^expected} -> :ok
+      {:ok, _different} -> {:error, :conflict}
+      {:error, _reason} -> {:error, :outcome_unknown}
+    end
+  end
+
+  defp new_operation_id(kind) do
+    nonce = :crypto.strong_rand_bytes(16) |> Base.encode16(case: :lower)
+    "graph_ops_#{kind}_#{nonce}"
+  end
+
+  defp safe_emit(emit) do
+    _ = emit.()
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
   end
 end
