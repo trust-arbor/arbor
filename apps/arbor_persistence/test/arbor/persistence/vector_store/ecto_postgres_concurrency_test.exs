@@ -15,6 +15,7 @@ defmodule Arbor.Persistence.VectorStore.EctoPostgresConcurrencyTest do
   alias Arbor.Persistence.Repo
   alias Ecto.Adapters.SQL.Sandbox
 
+  @operation_transaction_event [:arbor, :persistence, :vector_store, :operation_transaction]
   @fence_claim_event [:arbor, :persistence, :vector_store, :fence_claim]
 
   @moduletag :database
@@ -131,7 +132,7 @@ defmodule Arbor.Persistence.VectorStore.EctoPostgresConcurrencyTest do
       end
 
     {results, overlap} =
-      run_with_fence_overlap(
+      run_with_transaction_overlap(
         batches,
         fn {claimant, batch} ->
           {claimant, batch, execute(agent_id, batch)}
@@ -139,7 +140,7 @@ defmodule Arbor.Persistence.VectorStore.EctoPostgresConcurrencyTest do
         agent_id
       )
 
-    assert_fence_overlap(overlap)
+    assert_transaction_overlap(overlap)
 
     outcomes = Enum.map(results, &summarize_batch_result/1)
     successes = Enum.filter(results, &match?({_claimant, _batch, {:ok, _receipt}}, &1))
@@ -202,22 +203,44 @@ defmodule Arbor.Persistence.VectorStore.EctoPostgresConcurrencyTest do
   end
 
   defp run_with_fence_overlap(inputs, callback, agent_id) do
+    run_with_observed_overlap(
+      inputs,
+      callback,
+      agent_id,
+      @fence_claim_event,
+      &__MODULE__.handle_fence_claim/4,
+      :fence_claim
+    )
+  end
+
+  defp run_with_transaction_overlap(inputs, callback, agent_id) do
+    run_with_observed_overlap(
+      inputs,
+      callback,
+      agent_id,
+      @operation_transaction_event,
+      &__MODULE__.handle_operation_transaction/4,
+      :operation_transaction
+    )
+  end
+
+  defp run_with_observed_overlap(inputs, callback, agent_id, event, handler, point) do
     handler_id = {__MODULE__, make_ref()}
 
     :ok =
       :telemetry.attach(
         handler_id,
-        @fence_claim_event,
-        &__MODULE__.handle_fence_claim/4,
-        %{parent: self(), handler_id: handler_id, agent_id: agent_id}
+        event,
+        handler,
+        %{parent: self(), handler_id: handler_id, agent_id: agent_id, point: point}
       )
 
     try do
       tasks = Enum.map(inputs, fn input -> Task.async(fn -> callback.(input) end) end)
-      claims = await_fence_claims(length(inputs), handler_id, tasks, [])
+      claims = await_overlap(length(inputs), handler_id, tasks, point, [])
 
       Enum.each(claims, fn claim ->
-        send(claim.process_id, {:release_fence_claim, handler_id})
+        send(claim.process_id, {:release_overlap, handler_id})
       end)
 
       results = Enum.map(tasks, &Task.await(&1, 20_000))
@@ -227,30 +250,41 @@ defmodule Arbor.Persistence.VectorStore.EctoPostgresConcurrencyTest do
     end
   end
 
-  defp await_fence_claims(0, _handler_id, _tasks, claims), do: Enum.reverse(claims)
+  defp await_overlap(0, _handler_id, _tasks, _point, claims), do: Enum.reverse(claims)
 
-  defp await_fence_claims(remaining, handler_id, tasks, claims) do
+  defp await_overlap(remaining, handler_id, tasks, point, claims) do
     receive do
-      {:fence_claim_ready, ^handler_id, claim} ->
-        await_fence_claims(remaining - 1, handler_id, tasks, [claim | claims])
+      {:overlap_ready, ^handler_id, claim} ->
+        await_overlap(remaining - 1, handler_id, tasks, point, [claim | claims])
     after
       5_000 ->
         Enum.each(claims, fn claim ->
-          send(claim.process_id, {:release_fence_claim, handler_id})
+          send(claim.process_id, {:release_overlap, handler_id})
         end)
 
         Enum.each(tasks, &Task.shutdown(&1, :brutal_kill))
-        flunk("claimants did not overlap at the fenced update; observed: #{inspect(claims)}")
+
+        flunk("claimants did not overlap at #{point}; observed: #{inspect(claims)}")
     end
   end
 
   defp assert_fence_overlap(claims) do
+    assert_independent_transactions(claims)
     assert length(claims) == 2
+    assert claims |> Enum.map(& &1.operation_fingerprint) |> Enum.uniq() |> length() == 2
+    assert claims |> Enum.map(& &1.expected_fence) |> Enum.uniq() == [{1, 1}]
+  end
+
+  defp assert_transaction_overlap(claims) do
+    assert_independent_transactions(claims)
+    assert length(claims) == 2
+    assert claims |> Enum.map(& &1.operation_fingerprint) |> Enum.uniq() |> length() == 2
+  end
+
+  defp assert_independent_transactions(claims) do
     assert claims |> Enum.map(& &1.process_id) |> Enum.uniq() |> length() == 2
     assert claims |> Enum.map(& &1.backend_pid) |> Enum.uniq() |> length() == 2
     assert claims |> Enum.map(& &1.transaction_id) |> Enum.uniq() |> length() == 2
-    assert claims |> Enum.map(& &1.operation_fingerprint) |> Enum.uniq() |> length() == 2
-    assert claims |> Enum.map(& &1.expected_fence) |> Enum.uniq() == [{1, 1}]
   end
 
   @doc false
@@ -260,27 +294,48 @@ defmodule Arbor.Persistence.VectorStore.EctoPostgresConcurrencyTest do
         %{agent_id: agent_id} = metadata,
         %{agent_id: agent_id} = config
       ) do
-    %{rows: [[transaction_id, backend_pid]]} =
-      Repo.query!("SELECT txid_current(), pg_backend_pid()")
-
-    claim = %{
-      process_id: self(),
-      backend_pid: backend_pid,
-      transaction_id: transaction_id,
-      operation_fingerprint: metadata.operation_fingerprint,
+    observe_overlap(metadata, config,
       expected_fence: {metadata.expected_generation, metadata.expected_revision}
-    }
-
-    send(config.parent, {:fence_claim_ready, config.handler_id, claim})
-
-    receive do
-      {:release_fence_claim, handler_id} when handler_id == config.handler_id -> :ok
-    after
-      10_000 -> raise "fence claim release timed out"
-    end
+    )
   end
 
   def handle_fence_claim(_event, _measurements, _metadata, _config), do: :ok
+
+  @doc false
+  def handle_operation_transaction(
+        _event,
+        _measurements,
+        %{agent_id: agent_id} = metadata,
+        %{agent_id: agent_id} = config
+      ) do
+    observe_overlap(metadata, config, [])
+  end
+
+  def handle_operation_transaction(_event, _measurements, _metadata, _config), do: :ok
+
+  defp observe_overlap(metadata, config, extra) do
+    %{rows: [[transaction_id, backend_pid]]} =
+      Repo.query!("SELECT txid_current(), pg_backend_pid()")
+
+    claim =
+      Map.merge(
+        %{
+          process_id: self(),
+          backend_pid: backend_pid,
+          transaction_id: transaction_id,
+          operation_fingerprint: metadata.operation_fingerprint
+        },
+        Map.new(extra)
+      )
+
+    send(config.parent, {:overlap_ready, config.handler_id, claim})
+
+    receive do
+      {:release_overlap, handler_id} when handler_id == config.handler_id -> :ok
+    after
+      10_000 -> raise "#{config.point} release timed out"
+    end
+  end
 
   defp execute(agent_id, operation),
     do: Arbor.Persistence.execute_vector_operation(agent_id, operation)

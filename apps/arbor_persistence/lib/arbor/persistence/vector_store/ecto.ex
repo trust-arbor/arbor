@@ -18,6 +18,7 @@ defmodule Arbor.Persistence.VectorStore.Ecto do
   @vector_protocol "arbor_vector_store_v1"
   @repo_config_key :vector_store_repo
   @known_transaction_errors [:backend_failure, :conflict, :indeterminate]
+  @operation_transaction_event [:arbor, :persistence, :vector_store, :operation_transaction]
   @fence_claim_event [:arbor, :persistence, :vector_store, :fence_claim]
 
   @impl true
@@ -202,6 +203,8 @@ defmodule Arbor.Persistence.VectorStore.Ecto do
   end
 
   defp execute_in_transaction(repo, operation) do
+    :ok = emit_operation_transaction(repo, operation)
+
     case read_ledger(repo, operation) do
       {:ok, %VectorReceipt{} = receipt} ->
         {:ok, receipt}
@@ -355,6 +358,22 @@ defmodule Arbor.Persistence.VectorStore.Ecto do
           source_key: operation.record.source_key,
           expected_generation: operation.expected_generation,
           expected_revision: operation.expected_revision
+        }
+      )
+    end
+
+    :ok
+  end
+
+  defp emit_operation_transaction(repo, operation) do
+    if postgres_repo?(repo) do
+      :telemetry.execute(
+        @operation_transaction_event,
+        %{monotonic_time: System.monotonic_time()},
+        %{
+          operation_fingerprint: operation.fingerprint,
+          operation_kind: operation.kind,
+          agent_id: VectorOperation.agent_id(operation)
         }
       )
     end
