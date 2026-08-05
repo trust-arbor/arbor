@@ -6,16 +6,14 @@ defmodule Arbor.Persistence.VectorStore.Ecto.VectorRow do
   @primary_key {:id, :string, autogenerate: false}
   @timestamps_opts [type: :utc_datetime_usec]
 
-  @vector_type case(
-                 Application.compile_env(
-                   :arbor_persistence,
-                   :repo_adapter,
-                   Ecto.Adapters.Postgres
-                 )
-               ) do
-    Ecto.Adapters.Postgres -> Pgvector.Ecto.Vector
-    _other -> :string
-  end
+  @vector_type (case Application.compile_env(
+                       :arbor_persistence,
+                       :repo_adapter,
+                       Ecto.Adapters.Postgres
+                     ) do
+                  Ecto.Adapters.Postgres -> Pgvector.Ecto.Vector
+                  _other -> :string
+                end)
 
   schema "memory_embeddings" do
     field(:agent_id, :string)
