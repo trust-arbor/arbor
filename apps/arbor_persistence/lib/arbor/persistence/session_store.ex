@@ -22,6 +22,10 @@ defmodule Arbor.Persistence.SessionStore do
   require Logger
 
   @max_entry_ordinal 9_223_372_036_854_775_807
+  @sqlite_transaction_max_attempts 5
+  @sqlite_transaction_initial_backoff_ms 2
+  @sqlite_transaction_max_backoff_ms 50
+  @effect_marker_key {__MODULE__, :effect_marker}
   @entry_fields [
     :id,
     :session_id,
@@ -219,11 +223,17 @@ defmodule Arbor.Persistence.SessionStore do
     with {:ok, prepared} <- prepare_entries(session_uuid, entries) do
       try do
         case transaction(Repo, fn -> append_prepared(session_uuid, prepared) end) do
-          {:ok, result} -> {:ok, result}
-          {:error, reason} -> {:error, public_error(reason)}
+          {:ok, result} ->
+            {:ok, result}
+
+          {:error, reason} ->
+            {:error, public_error(reason)}
         end
       rescue
         _error -> {:error, :database_error}
+      catch
+        :exit, _reason -> {:error, :database_error}
+        :throw, _reason -> {:error, :database_error}
       end
     end
   end
@@ -309,6 +319,8 @@ defmodule Arbor.Persistence.SessionStore do
 
       case entries do
         [entry] ->
+          mark_effect_started()
+
           case Repo.insert(SessionEntry.changeset(entry, %{})) do
             {:ok, persisted} -> [persisted]
             {:error, _changeset} -> Repo.rollback(:database_error)
@@ -316,6 +328,7 @@ defmodule Arbor.Persistence.SessionStore do
 
         entries ->
           rows = Enum.map(entries, &Map.take(&1, @entry_fields))
+          mark_effect_started()
 
           case Repo.insert_all(SessionEntry, rows) do
             {count, _} when count == length(rows) -> entries
@@ -356,8 +369,40 @@ defmodule Arbor.Persistence.SessionStore do
   defp allocate_ordinals(_session_uuid, 0), do: {:ok, []}
 
   defp transaction(repo, fun) do
-    opts = if sqlite_repo?(repo), do: [mode: :immediate], else: []
-    repo.transaction(fun, opts)
+    if sqlite_repo?(repo) do
+      sqlite_transaction(repo, fun, 1)
+    else
+      repo.transaction(fun)
+    end
+  end
+
+  defp sqlite_transaction(repo, fun, attempt) do
+    effect_marker = {__MODULE__, make_ref()}
+    Process.put(@effect_marker_key, effect_marker)
+
+    try do
+      repo.transaction(fun, mode: :immediate)
+    rescue
+      error ->
+        if retryable_sqlite_failure?(attempt, effect_marker, error) do
+          backoff_and_retry(repo, fun, attempt)
+        else
+          reraise(error, __STACKTRACE__)
+        end
+    catch
+      :exit, reason ->
+        if retryable_sqlite_failure?(attempt, effect_marker, reason) do
+          backoff_and_retry(repo, fun, attempt)
+        else
+          exit(reason)
+        end
+
+      :throw, reason ->
+        throw(reason)
+    after
+      Process.delete(effect_marker)
+      Process.delete(@effect_marker_key)
+    end
   end
 
   defp public_error({:invalid_entry, index, reason}) when is_integer(index) and is_atom(reason),
@@ -609,6 +654,55 @@ defmodule Arbor.Persistence.SessionStore do
 
   defp postgres_repo?(repo), do: repo_adapter(repo) == Ecto.Adapters.Postgres
   defp sqlite_repo?(repo), do: repo_adapter(repo) == Ecto.Adapters.SQLite3
+
+  defp sqlite_lock_failure?(%{__exception__: true} = error) do
+    error
+    |> Exception.message()
+    |> sqlite_lock_message?()
+  end
+
+  defp sqlite_lock_failure?(value) when is_tuple(value) do
+    value |> Tuple.to_list() |> Enum.any?(&sqlite_lock_failure?/1)
+  end
+
+  defp sqlite_lock_failure?(value) when is_list(value),
+    do: Enum.any?(value, &sqlite_lock_failure?/1)
+
+  defp sqlite_lock_failure?(_value), do: false
+
+  defp sqlite_lock_message?(message) when is_binary(message) do
+    normalized = String.downcase(message)
+
+    String.contains?(normalized, "database is busy") or
+      String.contains?(normalized, "database busy") or
+      String.contains?(normalized, "database is locked") or
+      String.contains?(normalized, "database table is locked")
+  end
+
+  defp sqlite_lock_message?(_message), do: false
+
+  defp retryable_sqlite_failure?(attempt, marker, failure) do
+    attempt < @sqlite_transaction_max_attempts and
+      Process.get(marker) != true and sqlite_lock_failure?(failure)
+  end
+
+  defp backoff_and_retry(repo, fun, attempt) do
+    backoff_ms =
+      min(
+        @sqlite_transaction_initial_backoff_ms * Integer.pow(2, attempt - 1),
+        @sqlite_transaction_max_backoff_ms
+      )
+
+    Process.sleep(backoff_ms)
+    sqlite_transaction(repo, fun, attempt + 1)
+  end
+
+  defp mark_effect_started do
+    case Process.get(@effect_marker_key) do
+      marker when is_tuple(marker) -> Process.put(marker, true)
+      _ -> :ok
+    end
+  end
 
   # Unwrap content blocks to plain text for display.
   # Content may be: [%{"type" => "text", "text" => "hello"}], a plain string, or nil.
