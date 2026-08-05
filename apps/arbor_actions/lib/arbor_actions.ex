@@ -1131,8 +1131,9 @@ defmodule Arbor.Actions do
   end
 
   # Pipeline-internal actions are graph syscalls. Ordinary MCP/agent tool
-  # surfaces must not execute them; Engine-pinned execution sets
-  # `:allow_pipeline_internal` (or a pinned binding) on the context.
+  # surfaces must not execute them; Engine-pinned execution sets a current-node
+  # `:allow_pipeline_internal` or singular `:pinned_action_binding`. The plural
+  # binding index constrains code identity but does not grant node exposure.
   defp reject_unexposed_pipeline_internal(action_module, context) do
     if pipeline_internal_action?(action_module) and not pipeline_internal_allowed?(context) do
       {:error, :pipeline_internal_not_exposed}
@@ -1144,8 +1145,7 @@ defmodule Arbor.Actions do
   defp pipeline_internal_allowed?(context) when is_map(context) do
     Map.get(context, :allow_pipeline_internal) == true or
       Map.get(context, "allow_pipeline_internal") == true or
-      not is_nil(Map.get(context, :pinned_action_binding)) or
-      is_map(Map.get(context, :pinned_action_bindings))
+      not is_nil(Map.get(context, :pinned_action_binding))
   end
 
   defp pipeline_internal_allowed?(_), do: false
@@ -2423,8 +2423,8 @@ defmodule Arbor.Actions do
   ## Options
 
     * `:agent_id` (required) — the agent executing the actions
-    * `:context` (optional) — authenticated execution context forwarded unchanged
-      to each child action; defaults to `%{}`
+    * `:context` (optional) — authenticated parent execution context from which a
+      child context is derived; must be a plain map and defaults to `%{}`
 
   ## Examples
 
@@ -2438,10 +2438,7 @@ defmodule Arbor.Actions do
   def execute_batch(action_specs, opts \\ []) do
     agent_id = Keyword.fetch!(opts, :agent_id)
     context = Keyword.get(opts, :context, %{})
-
-    unless is_map(context) do
-      raise ArgumentError, ":context must be a map"
-    end
+    child_context = batch_child_context!(context)
 
     Enum.map(List.wrap(action_specs), fn spec ->
       type = Map.get(spec, "type") || Map.get(spec, :type, "")
@@ -2450,7 +2447,7 @@ defmodule Arbor.Actions do
       result =
         case name_to_module(type) do
           {:ok, module} ->
-            authorize_and_execute(agent_id, module, params, context)
+            authorize_and_execute(agent_id, module, params, child_context)
 
           {:error, :unknown_action} ->
             {:error, {:unknown_action, type}}
@@ -2458,6 +2455,26 @@ defmodule Arbor.Actions do
 
       {spec, result}
     end)
+  end
+
+  # Batch-selected children inherit invocation authority and the complete
+  # manifest constraint, never the parent node's current-action elevation.
+  # authorize_and_execute/4 rebinds both transient authorization fields for the
+  # selected child after principal consistency checks.
+  defp batch_child_context!(context) when is_map(context) and not is_struct(context) do
+    Map.drop(context, [
+      :allow_pipeline_internal,
+      "allow_pipeline_internal",
+      :pinned_action_binding,
+      "pinned_action_binding",
+      :action_authorization,
+      "action_authorization",
+      @action_authorization_resource_key
+    ])
+  end
+
+  defp batch_child_context!(_context) do
+    raise ArgumentError, ":context must be a plain map"
   end
 
   @doc """
