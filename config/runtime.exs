@@ -33,6 +33,91 @@ if File.exists?(dotenv_path) do
   end)
 end
 
+# ============================================================================
+# Production persistence
+# ============================================================================
+
+if config_env() == :prod do
+  database_backend = System.get_env("ARBOR_DB", "sqlite")
+
+  runtime_adapter =
+    case database_backend do
+      "sqlite" -> Ecto.Adapters.SQLite3
+      "postgres" -> Ecto.Adapters.Postgres
+      other -> raise "unsupported production ARBOR_DB value: #{inspect(other)}"
+    end
+
+  compiled_adapter =
+    Application.get_env(:arbor_persistence, :repo_adapter, Ecto.Adapters.SQLite3)
+
+  if compiled_adapter != runtime_adapter do
+    raise """
+    ARBOR_DB=#{database_backend} does not match the compiled persistence adapter.
+    Rebuild with ARBOR_DB=#{database_backend}.
+    """
+  end
+
+  positive_integer = fn env_name, default ->
+    value = System.get_env(env_name, Integer.to_string(default))
+
+    case Integer.parse(value) do
+      {integer, ""} when integer > 0 -> integer
+      _ -> raise "#{env_name} must be a positive integer"
+    end
+  end
+
+  pool_size = positive_integer.("ARBOR_DB_POOL_SIZE", 5)
+
+  repo_config =
+    case runtime_adapter do
+      Ecto.Adapters.SQLite3 ->
+        data_dir =
+          System.get_env("ARBOR_DATA_DIR") ||
+            Path.join(System.user_home!(), ".arbor")
+
+        database =
+          System.get_env("ARBOR_SQLITE_PATH") ||
+            Path.join(data_dir, "arbor_prod.sqlite3")
+
+        database = Path.expand(database)
+        File.mkdir_p!(Path.dirname(database))
+
+        [
+          database: database,
+          pool_size: pool_size,
+          busy_timeout: positive_integer.("ARBOR_SQLITE_BUSY_TIMEOUT_MS", 5_000),
+          journal_mode: :wal,
+          cache_size: -64_000,
+          temp_store: :memory
+        ]
+
+      Ecto.Adapters.Postgres ->
+        connection =
+          case System.get_env("DATABASE_URL") do
+            url when is_binary(url) and url != "" ->
+              [url: url]
+
+            _ ->
+              [
+                database: System.fetch_env!("ARBOR_DB_NAME"),
+                username: System.fetch_env!("DB_USER"),
+                password: System.fetch_env!("DB_PASS"),
+                hostname: System.get_env("DB_HOST", "localhost"),
+                port: positive_integer.("DB_PORT", 5432)
+              ]
+          end
+
+        connection ++
+          [
+            pool_size: pool_size,
+            types: Arbor.Persistence.PostgrexTypes,
+            ssl: System.get_env("DB_SSL", "true") != "false"
+          ]
+    end
+
+  config :arbor_persistence, Arbor.Persistence.Repo, repo_config
+end
+
 # Optional operator surface for the Apple Container runtime. Test VMs must not
 # inherit the live operator journal through an ambient parent-process env.
 if config_env() != :test do

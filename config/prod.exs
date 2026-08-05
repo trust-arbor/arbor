@@ -19,9 +19,20 @@ config :arbor_security,
 # egress_modes provisioning for stricter control, and/or gate_on_premises_egress.
 config :arbor_trust, default_egress_modes: %{external_provider: :allow}
 
-# Production maintenance archives use the Ecto EventLog below, so the
-# configured Repo must be part of the persistence supervision tree.
-config :arbor_persistence, start_repo: true
+# The Repo adapter is compile-time Ecto state. Production builds default to
+# isolated SQLite and opt into Postgres explicitly with ARBOR_DB=postgres.
+prod_repo_adapter =
+  case System.get_env("ARBOR_DB", "sqlite") do
+    "sqlite" -> Ecto.Adapters.SQLite3
+    "postgres" -> Ecto.Adapters.Postgres
+    other -> raise "unsupported production ARBOR_DB value: #{inspect(other)}"
+  end
+
+# Runtime credentials and paths are configured in runtime.exs so release builds
+# never capture the build host's home directory or database credentials.
+config :arbor_persistence,
+  start_repo: true,
+  repo_adapter: prod_repo_adapter
 
 config :arbor_memory,
   embedding_dedup_enabled: true,
