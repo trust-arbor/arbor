@@ -57,6 +57,13 @@ defmodule Arbor.Memory.IndexDualTest do
           :persistent_term.put({__MODULE__, agent_id}, next_mode)
           result
 
+        {:partial_batch_failure, 0} ->
+          :persistent_term.put({__MODULE__, agent_id}, {:partial_batch_failure, 1})
+          Arbor.Memory.Embedding.store(agent_id, content, embedding, metadata)
+
+        {:partial_batch_failure, 1} ->
+          {:ok, String.duplicate("x", 256)}
+
         {:eager_id, id} ->
           {:ok, id}
 
@@ -87,6 +94,10 @@ defmodule Arbor.Memory.IndexDualTest do
         :duplicate_batch ->
           [first, _second] = requested_ids
           {:ok, [first, first]}
+
+        {:partial_batch_failure, _store_count} ->
+          [first, _second] = requested_ids
+          {:ok, [first, String.duplicate("x", 256)]}
 
         :delegate ->
           Arbor.Memory.Embedding.store_batch_with_ids(agent_id, entries)
@@ -185,6 +196,55 @@ defmodule Arbor.Memory.IndexDualTest do
       assert :ok = Index.delete(pid, durable_id)
       assert {:error, :not_found} = Embedding.get(agent_id, durable_id)
       assert {:error, :not_found} = Index.get(pid, durable_id)
+    end
+
+    test "atomicity regression: malformed item-N durable response leaves no hidden batch prefix" do
+      agent_id = durable_unique("test_dual_atomic_batch")
+      suffix = :crypto.strong_rand_bytes(8) |> Base.encode16(case: :lower)
+      first_id = "mem_first_#{suffix}"
+      second_id = "mem_second_#{suffix}"
+      MaliciousWriter.configure(agent_id, {:partial_batch_failure, 0})
+
+      {:ok, pid} =
+        Index.start_link(
+          agent_id: agent_id,
+          backend: :dual,
+          persistent_writer: MaliciousWriter,
+          entry_id_generator: sequence_callback([first_id, second_id]),
+          name: {:via, Registry, {Arbor.Memory.Registry, {:test_atomic_batch, agent_id}}}
+        )
+
+      on_exit(fn ->
+        MaliciousWriter.disarm(agent_id)
+        if Process.alive?(pid), do: GenServer.stop(pid)
+        Embedding.delete_all(agent_id)
+      end)
+
+      state_before = :sys.get_state(pid)
+      table_before = :ets.tab2list(state_before.table)
+
+      assert {:error, :malformed_persistence_result} =
+               Index.batch_index(
+                 pid,
+                 [
+                   {"Atomic batch first", %{type: :first}},
+                   {"Atomic batch second", %{type: :second}}
+                 ],
+                 embedding: generate_embedding(74)
+               )
+
+      state_after = :sys.get_state(pid)
+
+      assert :ets.tab2list(state_after.table) == table_before
+      assert state_after.entry_count == state_before.entry_count
+      assert state_after.pending_sync == state_before.pending_sync
+      assert state_after.pending_entry_orders == state_before.pending_entry_orders
+      assert state_after.id_aliases == state_before.id_aliases
+      assert state_after.next_insertion_sequence == state_before.next_insertion_sequence
+      assert Index.stats(pid).entry_count == 0
+      assert {:error, :not_found} = Index.get(pid, first_id)
+      assert {:error, :not_found} = Index.get(pid, second_id)
+      assert Embedding.count(agent_id) == 0
     end
   end
 

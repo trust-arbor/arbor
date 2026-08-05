@@ -148,6 +148,8 @@ defmodule Arbor.Memory.Index do
   Index multiple items in a batch.
 
   Each item should be a tuple of `{content, metadata}`.
+  The whole batch is preflighted before mutation. Persistent backends commit
+  through the writer's all-or-nothing batch operation.
 
   ## Examples
 
@@ -658,24 +660,151 @@ defmodule Arbor.Memory.Index do
   end
 
   defp do_batch_index(items, opts, state) do
-    results =
-      Enum.reduce_while(items, {:ok, [], state}, fn {content, metadata}, {:ok, ids, acc_state} ->
-        case do_index(content, metadata, opts, acc_state) do
-          {:ok, entry_id, new_state} ->
-            {:cont, {:ok, [entry_id | ids], new_state}}
+    with {:ok, prepared} <- prepare_batch_entries(items, opts, state) do
+      case state.backend do
+        :ets -> commit_ets_batch(prepared, state)
+        :pgvector -> commit_persistent_batch(prepared, state, Embedding)
+        :dual -> commit_persistent_batch(prepared, state, state.persistent_writer)
+      end
+    end
+  end
 
-          {:error, reason} ->
-            {:halt, {:error, reason}}
+  defp prepare_batch_entries(items, opts, state) when is_list(items) do
+    items
+    |> Enum.with_index()
+    |> Enum.reduce_while({:ok, []}, fn
+      {{content, metadata}, offset}, {:ok, prepared}
+      when is_binary(content) and is_map(metadata) ->
+        with {:ok, embedding} <- get_or_compute_embedding(content, opts),
+             {:ok, entry_id, now} <- generate_entry_identity(state) do
+          insertion_sequence = state.next_insertion_sequence + offset
+
+          entry = %{
+            id: entry_id,
+            content: content,
+            embedding: embedding,
+            metadata: normalize_metadata(metadata),
+            indexed_at: now,
+            accessed_at: now,
+            access_count: 0
+          }
+
+          candidate = %{
+            entry: entry,
+            insertion_sequence: insertion_sequence,
+            position: offset
+          }
+
+          {:cont, {:ok, [candidate | prepared]}}
+        else
+          {:error, reason} -> {:halt, {:error, reason}}
         end
-      end)
 
-    case results do
-      {:ok, ids, final_state} ->
-        {:ok, Enum.reverse(ids), final_state}
+      _invalid_item, _acc ->
+        {:halt, {:error, :invalid_batch}}
+    end)
+    |> case do
+      {:ok, prepared} -> {:ok, Enum.reverse(prepared)}
+      error -> error
+    end
+  rescue
+    _error -> {:error, :invalid_batch}
+  catch
+    _kind, _reason -> {:error, :invalid_batch}
+  end
+
+  defp prepare_batch_entries(_items, _opts, _state), do: {:error, :invalid_batch}
+
+  defp commit_ets_batch(prepared, state) do
+    new_state =
+      Enum.reduce(prepared, state, fn %{entry: entry}, acc ->
+        acc
+        |> maybe_evict()
+        |> put_local_entry(entry)
+      end)
+      |> advance_prepared_batch_sequence(prepared)
+
+    {:ok, Enum.map(prepared, & &1.entry.id), new_state}
+  end
+
+  defp commit_persistent_batch([], state, _writer), do: {:ok, [], state}
+
+  defp commit_persistent_batch(prepared, state, writer) do
+    groups = group_prepared_batch_entries(prepared)
+    entries = Enum.map(groups, &prepared_group_batch_entry/1)
+
+    case batch_store_with_ids(state, writer, entries) do
+      {:ok, authoritative_ids} ->
+        with {:ok, bindings} <-
+               validate_authoritative_bindings(state, groups, authoritative_ids) do
+          ids = expand_batch_authoritative_ids(bindings)
+
+          new_state =
+            state
+            |> cache_persistent_batch(bindings)
+            |> advance_prepared_batch_sequence(prepared)
+
+          {:ok, ids, new_state}
+        end
 
       {:error, reason} ->
         {:error, reason}
     end
+  end
+
+  defp group_prepared_batch_entries(prepared) do
+    prepared
+    |> Enum.group_by(fn %{entry: entry} -> :crypto.hash(:sha256, entry.content) end)
+    |> Enum.map(fn {content_digest, members} ->
+      ordered_members = Enum.sort_by(members, & &1.insertion_sequence)
+      first = hd(ordered_members)
+      latest = List.last(ordered_members)
+
+      %{
+        content_digest: content_digest,
+        member_ids: Enum.map(ordered_members, & &1.entry.id),
+        member_positions: Enum.map(ordered_members, & &1.position),
+        requested_id: first.entry.id,
+        canonical_entry: latest.entry,
+        canonical_sequence: latest.insertion_sequence,
+        order_key: first.insertion_sequence
+      }
+    end)
+    |> Enum.sort_by(& &1.order_key)
+  end
+
+  defp prepared_group_batch_entry(group) do
+    entry = group.canonical_entry
+    {entry.content, entry.embedding, Map.put(entry.metadata, :id, group.requested_id)}
+  end
+
+  defp expand_batch_authoritative_ids(bindings) do
+    bindings
+    |> Enum.flat_map(fn {group, authoritative_id} ->
+      Enum.map(group.member_positions, &{&1, authoritative_id})
+    end)
+    |> Enum.sort_by(&elem(&1, 0))
+    |> Enum.map(&elem(&1, 1))
+  end
+
+  defp cache_persistent_batch(state, _bindings) when state.backend == :pgvector, do: state
+
+  defp cache_persistent_batch(state, bindings) do
+    Enum.reduce(bindings, state, fn {group, authoritative_id}, acc ->
+      authoritative_entry = %{group.canonical_entry | id: authoritative_id}
+
+      acc
+      |> maybe_evict()
+      |> put_local_entry(authoritative_entry)
+      |> refresh_pending_entry_order(authoritative_id, group.canonical_sequence)
+    end)
+  end
+
+  defp advance_prepared_batch_sequence(state, []), do: state
+
+  defp advance_prepared_batch_sequence(state, prepared) do
+    %{insertion_sequence: insertion_sequence} = List.last(prepared)
+    advance_insertion_sequence(state, insertion_sequence)
   end
 
   @spec get_or_compute_embedding(String.t(), keyword()) :: {:ok, [float()]} | {:error, term()}
@@ -1061,7 +1190,11 @@ defmodule Arbor.Memory.Index do
   end
 
   defp batch_store_with_ids(state, entries) do
-    state.persistent_writer.store_batch_with_ids(state.agent_id, entries)
+    batch_store_with_ids(state, state.persistent_writer, entries)
+  end
+
+  defp batch_store_with_ids(state, writer, entries) do
+    writer.store_batch_with_ids(state.agent_id, entries)
   rescue
     error -> {:error, error}
   catch
