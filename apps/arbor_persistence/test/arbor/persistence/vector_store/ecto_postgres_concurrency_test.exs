@@ -76,7 +76,7 @@ defmodule Arbor.Persistence.VectorStore.EctoPostgresConcurrencyTest do
         |> operation_for_record!(:update)
       end
 
-    {results, overlap} = run_with_fence_overlap(claims, &execute(agent_id, &1), agent_id)
+    {results, overlap} = run_with_fence_overlap(claims, &execute(agent_id, &1))
     assert_fence_overlap(overlap)
     outcomes = Enum.map(results, &summarize_result/1)
 
@@ -136,8 +136,7 @@ defmodule Arbor.Persistence.VectorStore.EctoPostgresConcurrencyTest do
         batches,
         fn {claimant, batch} ->
           {claimant, batch, execute(agent_id, batch)}
-        end,
-        agent_id
+        end
       )
 
     assert_transaction_overlap(overlap)
@@ -181,6 +180,61 @@ defmodule Arbor.Persistence.VectorStore.EctoPostgresConcurrencyTest do
              Arbor.Persistence.reconcile_vector_operation(agent_id, losing_batch)
   end
 
+  test "security regression: vector telemetry omits raw logical identity", %{
+    agent_id: agent_id
+  } do
+    insert = insert_operation!(record!(agent_id, source_key: "telemetry-metadata"))
+    assert {:ok, inserted} = Arbor.Persistence.execute_vector_operation(agent_id, insert)
+
+    update =
+      inserted.record
+      |> rebuild_record!(payload: %{"telemetry" => "bounded"})
+      |> operation_for_record!(:update)
+
+    handler_id = {__MODULE__, make_ref()}
+    expected_fingerprints = MapSet.new([update.fingerprint])
+
+    :ok =
+      :telemetry.attach_many(
+        handler_id,
+        [@operation_transaction_event, @fence_claim_event],
+        &__MODULE__.handle_metadata_capture/4,
+        %{parent: self(), handler_id: handler_id, expected_fingerprints: expected_fingerprints}
+      )
+
+    captured =
+      try do
+        assert {:ok, _receipt} = execute(agent_id, update)
+
+        for _event <- 1..2, into: %{} do
+          assert_receive {:vector_telemetry_metadata, ^handler_id, event, metadata}, 5_000
+          {event, metadata}
+        end
+      after
+        :telemetry.detach(handler_id)
+      end
+
+    transaction_metadata = Map.fetch!(captured, @operation_transaction_event)
+    fence_metadata = Map.fetch!(captured, @fence_claim_event)
+
+    assert MapSet.new(Map.keys(transaction_metadata)) ==
+             MapSet.new([:operation_fingerprint, :operation_kind])
+
+    assert MapSet.new(Map.keys(fence_metadata)) ==
+             MapSet.new([
+               :operation_fingerprint,
+               :operation_kind,
+               :expected_generation,
+               :expected_revision
+             ])
+
+    assert transaction_metadata.operation_fingerprint == update.fingerprint
+    assert transaction_metadata.operation_kind == :update
+    assert fence_metadata.operation_fingerprint == update.fingerprint
+    assert fence_metadata.operation_kind == :update
+    assert {fence_metadata.expected_generation, fence_metadata.expected_revision} == {1, 1}
+  end
+
   defp run_started_together(inputs, callback) do
     parent = self()
 
@@ -202,29 +256,41 @@ defmodule Arbor.Persistence.VectorStore.EctoPostgresConcurrencyTest do
     Enum.map(tasks, &Task.await(&1, 20_000))
   end
 
-  defp run_with_fence_overlap(inputs, callback, agent_id) do
+  defp run_with_fence_overlap(inputs, callback) do
+    expected_fingerprints = MapSet.new(Enum.map(inputs, & &1.fingerprint))
+
     run_with_observed_overlap(
       inputs,
       callback,
-      agent_id,
+      expected_fingerprints,
       @fence_claim_event,
       &__MODULE__.handle_fence_claim/4,
       :fence_claim
     )
   end
 
-  defp run_with_transaction_overlap(inputs, callback, agent_id) do
+  defp run_with_transaction_overlap(inputs, callback) do
+    expected_fingerprints =
+      MapSet.new(Enum.map(inputs, fn {_claimant, operation} -> operation.fingerprint end))
+
     run_with_observed_overlap(
       inputs,
       callback,
-      agent_id,
+      expected_fingerprints,
       @operation_transaction_event,
       &__MODULE__.handle_operation_transaction/4,
       :operation_transaction
     )
   end
 
-  defp run_with_observed_overlap(inputs, callback, agent_id, event, handler, point) do
+  defp run_with_observed_overlap(
+         inputs,
+         callback,
+         expected_fingerprints,
+         event,
+         handler,
+         point
+       ) do
     handler_id = {__MODULE__, make_ref()}
 
     :ok =
@@ -232,7 +298,12 @@ defmodule Arbor.Persistence.VectorStore.EctoPostgresConcurrencyTest do
         handler_id,
         event,
         handler,
-        %{parent: self(), handler_id: handler_id, agent_id: agent_id, point: point}
+        %{
+          parent: self(),
+          handler_id: handler_id,
+          expected_fingerprints: expected_fingerprints,
+          point: point
+        }
       )
 
     try do
@@ -291,12 +362,14 @@ defmodule Arbor.Persistence.VectorStore.EctoPostgresConcurrencyTest do
   def handle_fence_claim(
         _event,
         _measurements,
-        %{agent_id: agent_id} = metadata,
-        %{agent_id: agent_id} = config
+        %{operation_fingerprint: fingerprint} = metadata,
+        %{expected_fingerprints: expected_fingerprints} = config
       ) do
-    observe_overlap(metadata, config,
-      expected_fence: {metadata.expected_generation, metadata.expected_revision}
-    )
+    if MapSet.member?(expected_fingerprints, fingerprint) do
+      observe_overlap(metadata, config,
+        expected_fence: {metadata.expected_generation, metadata.expected_revision}
+      )
+    end
   end
 
   def handle_fence_claim(_event, _measurements, _metadata, _config), do: :ok
@@ -305,13 +378,33 @@ defmodule Arbor.Persistence.VectorStore.EctoPostgresConcurrencyTest do
   def handle_operation_transaction(
         _event,
         _measurements,
-        %{agent_id: agent_id} = metadata,
-        %{agent_id: agent_id} = config
+        %{operation_fingerprint: fingerprint} = metadata,
+        %{expected_fingerprints: expected_fingerprints} = config
       ) do
-    observe_overlap(metadata, config, [])
+    if MapSet.member?(expected_fingerprints, fingerprint) do
+      observe_overlap(metadata, config, [])
+    end
   end
 
   def handle_operation_transaction(_event, _measurements, _metadata, _config), do: :ok
+
+  @doc false
+  def handle_metadata_capture(
+        event,
+        _measurements,
+        %{operation_fingerprint: fingerprint} = metadata,
+        %{
+          parent: parent,
+          handler_id: handler_id,
+          expected_fingerprints: expected_fingerprints
+        }
+      ) do
+    if MapSet.member?(expected_fingerprints, fingerprint) do
+      send(parent, {:vector_telemetry_metadata, handler_id, event, metadata})
+    end
+  end
+
+  def handle_metadata_capture(_event, _measurements, _metadata, _config), do: :ok
 
   defp observe_overlap(metadata, config, extra) do
     %{rows: [[transaction_id, backend_pid]]} =

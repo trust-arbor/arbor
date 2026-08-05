@@ -353,9 +353,6 @@ defmodule Arbor.Persistence.VectorStore.Ecto do
         %{
           operation_fingerprint: operation.fingerprint,
           operation_kind: operation.kind,
-          agent_id: operation.record.agent_id,
-          source_namespace: operation.record.source_namespace,
-          source_key: operation.record.source_key,
           expected_generation: operation.expected_generation,
           expected_revision: operation.expected_revision
         }
@@ -372,8 +369,7 @@ defmodule Arbor.Persistence.VectorStore.Ecto do
         %{monotonic_time: System.monotonic_time()},
         %{
           operation_fingerprint: operation.fingerprint,
-          operation_kind: operation.kind,
-          agent_id: VectorOperation.agent_id(operation)
+          operation_kind: operation.kind
         }
       )
     end
