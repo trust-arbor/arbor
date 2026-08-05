@@ -120,7 +120,7 @@ defmodule Arbor.Memory.GoalIntentOps do
   defdelegate get_goal_tree(agent_id, goal_id), to: GoalStore
 
   # ============================================================================
-  # Intents & Percepts (Seed/Host Phase 3)
+  # Intents & Percepts
   # ============================================================================
 
   @doc """
@@ -217,10 +217,11 @@ defmodule Arbor.Memory.GoalIntentOps do
   defdelegate unlock_stale_intents(agent_id, timeout_ms \\ 60_000), to: IntentStore
 
   @doc """
-  Export non-completed intents with payload-bound provenance for Seed capture.
+  Export non-completed intents with payload-bound provenance for explicit portability.
 
   Returns versioned serializable entries whose intent and status envelopes retain
-  their exact labels through `import_intents/2`.
+  their exact labels through `import_intents/2`. Percept history is not included,
+  and these APIs are not yet wired into `Arbor.Agent.Seed`; C3I owns that audit.
   """
   @spec export_pending_intents(String.t()) :: [map()]
   defdelegate export_pending_intents(agent_id), to: IntentStore
@@ -229,7 +230,8 @@ defmodule Arbor.Memory.GoalIntentOps do
   Import intents from a versioned export, restoring pending work and exact labels.
 
   Skips intents that already exist (by ID). Legacy flattened entries receive
-  conservative missing-provenance labels.
+  conservative missing-provenance labels. `Arbor.Agent.Seed` does not currently
+  invoke this API; C3I owns that integration audit.
   """
   @spec import_intents(String.t(), [map()]) :: :ok | {:error, atom()}
   defdelegate import_intents(agent_id, intent_maps), to: IntentStore

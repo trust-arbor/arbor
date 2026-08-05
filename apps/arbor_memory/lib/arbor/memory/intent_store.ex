@@ -379,11 +379,14 @@ defmodule Arbor.Memory.IntentStore do
   def unlock_stale_intents(_agent_id, _timeout_ms), do: {:error, :invalid_request}
 
   @doc """
-  Export non-completed intents with payload-bound provenance for Seed capture.
+  Export non-completed intents with payload-bound provenance for explicit portability.
 
   Each versioned entry contains independently verified `"intent"` and `"status"`
   envelopes. Importing the entry preserves their exact labels. Read or validation
   failures preserve the legacy compatibility shape by returning an empty list.
+
+  This API is not currently wired into `Arbor.Agent.Seed`, and it does not export
+  percept history. Seed capture/restore wiring remains part of the C3I audit.
 
   ## Examples
 
@@ -402,9 +405,11 @@ defmodule Arbor.Memory.IntentStore do
   @doc """
   Import intents from a previous versioned export, restoring status and provenance.
 
-  Used during Seed restore to recover pending work after a restart.
   Already-existing intents (by ID) are skipped.
   Legacy flattened entries remain accepted with conservative missing-provenance labels.
+
+  This API is not currently invoked by `Arbor.Agent.Seed`; that integration remains
+  part of the C3I audit.
 
   ## Examples
 
