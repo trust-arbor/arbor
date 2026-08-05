@@ -20,6 +20,7 @@ end
 
 for child <- [
       {Registry, keys: :unique, name: Arbor.Memory.Registry},
+      {Arbor.Memory.ArchiveCursorSigner, []},
       {Arbor.Memory.Provenance, []},
       {Arbor.Memory.KnowledgeGraphStore, []},
       {Arbor.Memory.IndexSupervisor, []},

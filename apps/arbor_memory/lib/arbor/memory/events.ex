@@ -409,10 +409,14 @@ defmodule Arbor.Memory.Events do
   @doc """
   Read one page from a stable two-source history snapshot.
 
-  The returned opaque `next_cursor` records each source's initial high-water
-  mark, direction, current epoch, and source-local position. Forward pages
-  traverse legacy then durable; backward pages traverse durable then legacy.
-  Events appended after the first page are excluded from that cursor's snapshot.
+  The returned `next_cursor` is a signed JSON-safe string. It contains no
+  configured backend target or options. Forward pages traverse legacy then
+  durable; backward pages traverse durable then legacy. Events appended after
+  the first page are excluded from that cursor's snapshot.
+
+  A cursor is bound to the configured archive target and the current cursor
+  signer lifetime. Changing the target or restarting the signer/runtime
+  invalidates existing cursors before any event-log read.
   """
   @spec get_history_page(String.t(), keyword()) ::
           {:ok, %{events: [Event.t()], next_cursor: ArchiveReadView.Cursor.t() | nil}}
@@ -495,9 +499,9 @@ defmodule Arbor.Memory.Events do
     expected_stream_id = stream_id(agent_id)
 
     with {:ok, target} <- Config.maintenance_archive_target(),
-         {:ok, cursor} <- prepare_archive_cursor(read, expected_stream_id, event_type, target),
-         {:ok, events, next_cursor} <-
-           collect_archive_page(cursor, target, event_type, read.limit) do
+         {:ok, state} <- prepare_archive_cursor(read, expected_stream_id, event_type, target),
+         {:ok, events, next_state} <- collect_archive_page(state, target, event_type, read.limit),
+         {:ok, next_cursor} <- encode_next_cursor(next_state, target) do
       {:ok, %{events: events, next_cursor: next_cursor}}
     else
       {:error, :invalid_archive_cursor} = error -> error
@@ -513,18 +517,29 @@ defmodule Arbor.Memory.Events do
 
   defp prepare_archive_cursor(%ArchiveReadView{cursor: nil} = read, stream_id, event_type, target) do
     with {:ok, heads} <- read_source_heads(target, stream_id) do
-      {:ok, ArchiveReadView.new_cursor(stream_id, event_type, read.direction, target, heads)}
+      {:ok, ArchiveReadView.new_state(stream_id, event_type, read.direction, heads)}
     end
   end
 
-  defp prepare_archive_cursor(%ArchiveReadView{cursor: cursor}, stream_id, event_type, target) do
-    with {:ok, cursor} <- ArchiveReadView.validate_cursor(cursor, stream_id, event_type, target),
-         true <- cursor.direction in [:forward, :backward],
+  defp prepare_archive_cursor(
+         %ArchiveReadView{cursor: cursor, direction: requested_direction},
+         stream_id,
+         event_type,
+         target
+       ) do
+    with {:ok, state} <-
+           ArchiveReadView.decode_cursor(
+             cursor,
+             stream_id,
+             event_type,
+             target,
+             requested_direction
+           ),
          {:ok, current_heads} <- read_source_heads(target, stream_id),
          true <-
-           current_heads.legacy >= cursor.legacy_head and
-             current_heads.durable >= cursor.durable_head do
-      {:ok, cursor}
+           current_heads.legacy >= state.legacy_head and
+             current_heads.durable >= state.durable_head do
+      {:ok, state}
     else
       {:error, :invalid_archive_cursor} = error -> error
       _invalid_or_rewound_source -> {:error, :archive_read_unavailable}
@@ -558,9 +573,12 @@ defmodule Arbor.Memory.Events do
     end
   end
 
-  defp collect_archive_page(cursor, target, event_type, limit) do
+  defp encode_next_cursor(nil, _target), do: {:ok, nil}
+  defp encode_next_cursor(state, target), do: ArchiveReadView.encode_cursor(state, target)
+
+  defp collect_archive_page(state, target, event_type, limit) do
     collect_archive_page(
-      cursor,
+      state,
       target,
       event_type,
       limit,
@@ -569,30 +587,30 @@ defmodule Arbor.Memory.Events do
     )
   end
 
-  defp collect_archive_page(cursor, _target, _event_type, 0, _scan_left, events) do
-    {:ok, Enum.reverse(events), ArchiveReadView.next_cursor(cursor)}
+  defp collect_archive_page(state, _target, _event_type, 0, _scan_left, events) do
+    {:ok, Enum.reverse(events), ArchiveReadView.next_state(state)}
   end
 
-  defp collect_archive_page(cursor, _target, _event_type, _remaining, 0, events) do
-    {:ok, Enum.reverse(events), ArchiveReadView.next_cursor(cursor)}
+  defp collect_archive_page(state, _target, _event_type, _remaining, 0, events) do
+    {:ok, Enum.reverse(events), ArchiveReadView.next_state(state)}
   end
 
-  defp collect_archive_page(cursor, target, event_type, remaining, scan_left, events) do
+  defp collect_archive_page(state, target, event_type, remaining, scan_left, events) do
     request_limit = min(remaining, scan_left)
 
-    case ArchiveReadView.source_range(cursor, request_limit) do
+    case ArchiveReadView.source_range(state, request_limit) do
       :done ->
         {:ok, Enum.reverse(events), nil}
 
       {:ok, source, range_opts, requested} ->
         with {:ok, source_events} <-
-               read_source_range(source, target, cursor.stream_id, range_opts, requested),
+               read_source_range(source, target, state.stream_id, range_opts, requested),
              {:ok, accepted} <-
-               accept_source_events(source_events, source, target, cursor, event_type) do
-          next_cursor = ArchiveReadView.advance(cursor, source, source_events)
+               accept_source_events(source_events, source, target, state, event_type) do
+          next_state = ArchiveReadView.advance(state, source, source_events)
 
           collect_archive_page(
-            next_cursor,
+            next_state,
             target,
             event_type,
             remaining - length(accepted),

@@ -23,6 +23,7 @@ defmodule Arbor.Memory.EventsArchiveReadRegressionTest do
     end
 
     def event_identity(_stream_id, event_id, opts) do
+      notify(opts, :event_identity)
       identities = Keyword.get(opts, :probe_identities, %{})
       {:ok, Map.get(identities, event_id)}
     end
@@ -121,6 +122,149 @@ defmodule Arbor.Memory.EventsArchiveReadRegressionTest do
       assert {:error, :archive_read_unavailable} =
                Events.get_history_page(agent_id, limit: 3, direction: direction)
     end
+  end
+
+  test "security regression: signed cursors hide targets and reject forged snapshot authority" do
+    agent_id = unique_id("signed_cursor")
+    stream_id = stream_id(agent_id)
+    probe_ref = make_ref()
+    sentinel = "cursor-secret-sentinel-#{System.unique_integer([:positive])}"
+    base = ~U[2026-08-05 12:00:00Z]
+    shared_id = unique_id("signed_cursor_conflict")
+
+    filler =
+      agent_id
+      |> archive_event(unique_id("signed_cursor_filler"), timestamp: base)
+      |> append_legacy!()
+
+    middle =
+      agent_id
+      |> archive_event(unique_id("signed_cursor_middle"),
+        timestamp: DateTime.add(base, 1, :second)
+      )
+      |> append_legacy!()
+
+    append_legacy!(
+      archive_event(agent_id, shared_id,
+        timestamp: DateTime.add(base, 2, :second),
+        data: %{"version" => "legacy"}
+      )
+    )
+
+    durable_conflict =
+      archive_event(agent_id, shared_id,
+        timestamp: DateTime.add(base, 2, :second),
+        data: %{"version" => "durable"}
+      )
+
+    durable_fingerprint =
+      Arbor.Persistence.EventLog.event_fingerprint(stream_id, durable_conflict)
+
+    target = %{
+      name: unique_name(:signed_cursor_probe),
+      backend: ProbeEventLog,
+      opts: [
+        probe_pid: self(),
+        probe_ref: probe_ref,
+        probe_version_reply: {:ok, 1},
+        probe_identities: %{shared_id => durable_fingerprint},
+        credential: sentinel
+      ]
+    }
+
+    DurableEventLog.lease_target!(target)
+
+    assert {:ok, %{events: [%Event{id: filler_id}], next_cursor: first_cursor}} =
+             Events.get_history_page(agent_id, limit: 1)
+
+    assert filler_id == filler.id
+    assert is_binary(first_cursor)
+    refute term_contains_binary?(first_cursor, sentinel)
+    refute String.contains?(inspect(first_cursor), sentinel)
+
+    decoded_cursor = decode_cursor_payload(first_cursor)
+    refute Map.has_key?(decoded_cursor, :target)
+    refute term_contains_binary?(decoded_cursor, sentinel)
+
+    assert {:ok, %{events: [%Event{id: middle_id}], next_cursor: cursor}} =
+             Events.get_history_page(agent_id, limit: 1, cursor: first_cursor)
+
+    assert middle_id == middle.id
+    drain_probe_messages(probe_ref)
+
+    mutations = [
+      {:legacy_head, 0},
+      {:durable_head, 0},
+      {:legacy_position, 1},
+      {:durable_position, 0},
+      {:direction, :backward},
+      {:event_type, :knowledge_archived},
+      {:stream_id, "memory:forged"},
+      {:epoch, :durable},
+      {:version, 2}
+    ]
+
+    for {field, value} <- mutations do
+      forged = tamper_cursor(cursor, &Map.put(&1, field, value))
+
+      assert {:error, :invalid_archive_cursor} =
+               Events.get_history_page(agent_id, limit: 1, cursor: forged)
+
+      refute_receive {:archive_read_probe, ^probe_ref, _operation, _opts}, 0
+    end
+
+    assert {:error, :invalid_archive_cursor} =
+             Events.get_history_page(agent_id,
+               limit: 1,
+               direction: :backward,
+               cursor: cursor
+             )
+
+    refute_receive {:archive_read_probe, ^probe_ref, _operation, _opts}, 0
+
+    assert {:error, :invalid_archive_cursor} =
+             Events.get_history_page("different-agent", limit: 1, cursor: cursor)
+
+    refute_receive {:archive_read_probe, ^probe_ref, _operation, _opts}, 0
+
+    assert {:error, :invalid_archive_cursor} =
+             Events.get_by_type_page(agent_id, :knowledge_archived,
+               limit: 1,
+               cursor: cursor
+             )
+
+    refute_receive {:archive_read_probe, ^probe_ref, _operation, _opts}, 0
+
+    assert {:error, :archive_event_conflict} =
+             Events.get_history_page(agent_id, limit: 1, cursor: cursor)
+
+    drain_probe_messages(probe_ref)
+
+    changed_target = put_in(target.opts[:credential], sentinel <> "-changed")
+    Application.put_env(:arbor_memory, :maintenance_archive_target, changed_target)
+
+    assert {:error, :invalid_archive_cursor} =
+             Events.get_history_page(agent_id, limit: 1, cursor: cursor)
+
+    refute_receive {:archive_read_probe, ^probe_ref, _operation, _opts}, 0
+    Application.put_env(:arbor_memory, :maintenance_archive_target, target)
+
+    assert :ok =
+             Supervisor.terminate_child(
+               Arbor.Memory.Supervisor,
+               Arbor.Memory.ArchiveCursorSigner
+             )
+
+    assert {:ok, _pid} =
+             Supervisor.restart_child(
+               Arbor.Memory.Supervisor,
+               Arbor.Memory.ArchiveCursorSigner
+             )
+
+    assert {:error, :invalid_archive_cursor} =
+             Events.get_history_page(agent_id, limit: 1, cursor: cursor)
+
+    refute_receive {:archive_read_probe, ^probe_ref, _operation, _opts}, 0
   end
 
   test "read limits are capped and scalar cross-source offsets fail before dispatch" do
@@ -503,6 +647,52 @@ defmodule Arbor.Memory.EventsArchiveReadRegressionTest do
       next_cursor -> collect_history_pages(agent_id, direction, limit, next_cursor, events)
     end
   end
+
+  defp tamper_cursor(cursor, mutation) do
+    [prefix, _encoded_payload, encoded_mac] = String.split(cursor, ".", parts: 3)
+
+    mutated_payload =
+      cursor
+      |> decode_cursor_payload()
+      |> mutation.()
+      |> :erlang.term_to_binary([:deterministic])
+      |> Base.url_encode64(padding: false)
+
+    Enum.join([prefix, mutated_payload, encoded_mac], ".")
+  end
+
+  defp decode_cursor_payload(cursor) do
+    [_prefix, encoded_payload, _encoded_mac] = String.split(cursor, ".", parts: 3)
+
+    encoded_payload
+    |> Base.url_decode64!(padding: false)
+    |> :erlang.binary_to_term([:safe])
+  end
+
+  defp drain_probe_messages(probe_ref) do
+    receive do
+      {:archive_read_probe, ^probe_ref, _operation, _opts} -> drain_probe_messages(probe_ref)
+    after
+      0 -> :ok
+    end
+  end
+
+  defp term_contains_binary?(term, sentinel) when is_binary(term),
+    do: String.contains?(term, sentinel)
+
+  defp term_contains_binary?(term, sentinel) when is_map(term) do
+    Enum.any?(term, fn {key, value} ->
+      term_contains_binary?(key, sentinel) or term_contains_binary?(value, sentinel)
+    end)
+  end
+
+  defp term_contains_binary?(term, sentinel) when is_tuple(term),
+    do: term |> Tuple.to_list() |> term_contains_binary?(sentinel)
+
+  defp term_contains_binary?(term, sentinel) when is_list(term),
+    do: Enum.any?(term, &term_contains_binary?(&1, sentinel))
+
+  defp term_contains_binary?(_term, _sentinel), do: false
 
   defp archive_event(agent_id, id, opts) do
     Event.new(
