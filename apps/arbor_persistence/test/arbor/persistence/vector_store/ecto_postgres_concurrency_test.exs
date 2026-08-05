@@ -4,7 +4,9 @@ defmodule Arbor.Persistence.VectorStore.EctoPostgresConcurrencyTest do
 
   The SQL sandbox runs in `:auto` mode here so concurrent Tasks check out
   separate connections. SQLite coverage intentionally makes no concurrency
-  claim.
+  claim. Because `:auto` commits and the receipt ledger is immutable, every
+  durable fixture uses runtime cryptographic identifiers to isolate fresh BEAM
+  runs without deleting protected receipts.
   """
 
   use ExUnit.Case, async: false
@@ -72,9 +74,13 @@ defmodule Arbor.Persistence.VectorStore.EctoPostgresConcurrencyTest do
       end
 
     results = run_concurrently(claims, &execute(agent_id, &1))
+    outcomes = Enum.map(results, &summarize_result/1)
 
-    assert Enum.count(results, &match?({:ok, _receipt}, &1)) == 1
-    assert Enum.count(results, &(&1 == {:error, :conflict})) == 1
+    assert Enum.count(results, &match?({:ok, _receipt}, &1)) == 1,
+           "expected one CAS winner, got: #{inspect(outcomes)}"
+
+    assert Enum.count(results, &(&1 == {:error, :conflict})) == 1,
+           "expected one CAS conflict, got: #{inspect(outcomes)}"
 
     assert {:ok, current} =
              Arbor.Persistence.fetch_vector_record(agent_id, "voice", "shared-cas")
@@ -89,7 +95,9 @@ defmodule Arbor.Persistence.VectorStore.EctoPostgresConcurrencyTest do
     operation = insert_operation!(record!(agent_id, source_key: "duplicate-operation"))
     results = run_concurrently([operation, operation], &execute(agent_id, &1))
 
-    assert [{:ok, first}, {:ok, second}] = results
+    assert [{:ok, first}, {:ok, second}] = results,
+           "expected two exact duplicate receipts, got: #{inspect(Enum.map(results, &summarize_result/1))}"
+
     assert first == second
     assert first.operation_fingerprint == operation.fingerprint
 
@@ -124,11 +132,18 @@ defmodule Arbor.Persistence.VectorStore.EctoPostgresConcurrencyTest do
         {claimant, batch, execute(agent_id, batch)}
       end)
 
-    assert [{winner, winning_batch, {:ok, winning_receipt}}] =
-             Enum.filter(results, &match?({_claimant, _batch, {:ok, _receipt}}, &1))
+    outcomes = Enum.map(results, &summarize_batch_result/1)
+    successes = Enum.filter(results, &match?({_claimant, _batch, {:ok, _receipt}}, &1))
+    conflicts = Enum.filter(results, &match?({_claimant, _batch, {:error, :conflict}}, &1))
 
-    assert [{loser, losing_batch, {:error, :conflict}}] =
-             Enum.filter(results, &match?({_claimant, _batch, {:error, :conflict}}, &1))
+    assert length(successes) == 1,
+           "expected one whole-batch winner, got: #{inspect(outcomes)}"
+
+    assert length(conflicts) == 1,
+           "expected one rolled-back batch conflict, got: #{inspect(outcomes)}"
+
+    [{winner, winning_batch, {:ok, winning_receipt}}] = successes
+    [{loser, losing_batch, {:error, :conflict}}] = conflicts
 
     assert winner != loser
 
@@ -255,7 +270,18 @@ defmodule Arbor.Persistence.VectorStore.EctoPostgresConcurrencyTest do
     List.replace_at(List.duplicate(0.0, VectorRecord.dimensions()), index, 1.0)
   end
 
-  defp unique(prefix), do: "#{prefix}_#{System.unique_integer([:positive, :monotonic])}"
+  defp unique(prefix) do
+    suffix = :crypto.strong_rand_bytes(16) |> Base.encode16(case: :lower)
+    "#{prefix}_#{suffix}"
+  end
+
+  defp summarize_result({:ok, receipt}), do: {:ok, receipt.operation_fingerprint}
+  defp summarize_result(error), do: error
+
+  defp summarize_batch_result({claimant, _batch, {:ok, receipt}}),
+    do: {claimant, {:ok, receipt.operation_fingerprint}}
+
+  defp summarize_batch_result({claimant, _batch, error}), do: {claimant, error}
 
   defp start_repo! do
     case Repo.start_link() do
