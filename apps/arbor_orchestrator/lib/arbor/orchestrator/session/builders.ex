@@ -304,7 +304,7 @@ defmodule Arbor.Orchestrator.Session.Builders do
     # SessionCore decides the turn payloads, working memory, count, and
     # timestamps. PersistenceCore then attaches source-owned labels while
     # retaining the Session-owned history outside Engine context.
-    history = ContextBuilder.compactor_llm_messages(state)
+    history = ContextBuilder.get_messages(state)
 
     commit =
       SessionCore.commit_turn(%{

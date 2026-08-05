@@ -12,6 +12,7 @@ defmodule Arbor.Orchestrator.SessionCompactorTest do
   use ExUnit.Case, async: true
   @moduletag :fast
 
+  alias Arbor.Contracts.Security.Taint
   alias Arbor.Orchestrator.Session.Builders
 
   # ── Mock Compactor ────────────────────────────────────────────
@@ -59,6 +60,41 @@ defmodule Arbor.Orchestrator.SessionCompactorTest do
             else: 1.0
           ),
         compactions_performed: c.compact_count
+      }
+    end
+  end
+
+  defmodule SummaryCompactor do
+    @behaviour Arbor.Contracts.AI.Compactor
+
+    defstruct transcript: [], summary: []
+
+    @impl true
+    def new(opts) do
+      %__MODULE__{summary: Keyword.fetch!(opts, :summary)}
+    end
+
+    @impl true
+    def append(%__MODULE__{} = compactor, message) do
+      %{compactor | transcript: compactor.transcript ++ [message]}
+    end
+
+    @impl true
+    def maybe_compact(%__MODULE__{} = compactor), do: compactor
+
+    @impl true
+    def llm_messages(%__MODULE__{summary: summary}), do: summary
+
+    @impl true
+    def full_transcript(%__MODULE__{transcript: transcript}), do: transcript
+
+    @impl true
+    def stats(%__MODULE__{} = compactor) do
+      %{
+        total_messages: length(compactor.transcript),
+        visible_messages: length(compactor.summary),
+        compression_ratio: 1.0,
+        compactions_performed: 1
       }
     end
   end
@@ -190,6 +226,54 @@ defmodule Arbor.Orchestrator.SessionCompactorTest do
       visible = TestCompactor.llm_messages(state.compactor)
       assert length(visible) < 10
     end
+
+    @tag :security_regression
+    test "security regression: synthetic compactor projection never replaces live labeled history" do
+      prior_user = labeled_message("user", "original question", "prior_user")
+      prior_assistant = labeled_message("assistant", "original answer", "prior_assistant")
+
+      summary = [
+        %{"role" => "system", "content" => "synthetic provider-only summary"}
+      ]
+
+      compactor = SummaryCompactor.new(summary: summary)
+
+      state =
+        build_state(
+          messages: [prior_user, prior_assistant],
+          compactor: compactor,
+          adapters: persistence_adapters()
+        )
+
+      assert Builders.build_turn_values(state, "follow-up")["session.messages"] ==
+               summary ++ [%{"role" => "user", "content" => "follow-up"}]
+
+      input_taint = taint("current_user")
+      output_taint = taint("current_assistant")
+
+      result = %{
+        final_outcome: %{status: :success},
+        context: %{
+          "session.input" => "follow-up",
+          "session.response" => "new answer"
+        },
+        taint: %{
+          "session.input" => input_taint,
+          "session.response" => output_taint
+        }
+      }
+
+      updated = Builders.apply_turn_result(state, "follow-up", result)
+
+      assert [^prior_user, ^prior_assistant, live_user, live_assistant] = updated.messages
+      refute Enum.any?(updated.messages, &(&1["content"] == "synthetic provider-only summary"))
+      assert live_user["content"] == "follow-up"
+      assert live_user["taint"] == input_taint
+      assert live_user["taint_status"] == :verified
+      assert live_assistant["content"] == "new answer"
+      assert live_assistant["taint_status"] == :verified
+      assert live_assistant["taint"].level == :untrusted
+    end
   end
 
   # ── Helpers ───────────────────────────────────────────────────
@@ -217,5 +301,35 @@ defmodule Arbor.Orchestrator.SessionCompactorTest do
     }
 
     struct(Arbor.Orchestrator.Session, Map.new(Enum.into(overrides, defaults)))
+  end
+
+  defp labeled_message(role, content, source) do
+    %{
+      "role" => role,
+      "content" => content,
+      "taint" => taint(source),
+      "taint_status" => :verified
+    }
+  end
+
+  defp taint(source) do
+    {:ok, taint} =
+      Taint.new(%{
+        level: :untrusted,
+        sensitivity: :restricted,
+        sanitizations: 0,
+        confidence: :unverified,
+        source: source,
+        chain: []
+      })
+
+    taint
+  end
+
+  defp persistence_adapters do
+    %{
+      ensure_session: fn _session_id, _agent_id, [] -> {:ok, %{id: "session-uuid"}} end,
+      append_session_entries: fn _session_uuid, entries -> {:ok, length(entries)} end
+    }
   end
 end
