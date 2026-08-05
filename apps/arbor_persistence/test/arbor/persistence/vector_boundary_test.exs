@@ -268,18 +268,12 @@ defmodule Arbor.Persistence.VectorBoundaryTest do
              Arbor.Persistence.search_vector_records("agent_alpha", query, search_opts())
   end
 
-  test "concrete default, explicit unsupported adapter, and malformed config stay bounded" do
+  test "activation regression: default vector backend stays fail-closed until operator config" do
     operation = operation!(:insert, record!())
     Application.delete_env(:arbor_persistence, :vector_store_backend)
 
-    assert {:ok, Arbor.Persistence.VectorStore.Ecto} =
+    assert {:ok, Arbor.Persistence.VectorStore.Unsupported} =
              Arbor.Persistence.Config.vector_store_backend()
-
-    Application.put_env(
-      :arbor_persistence,
-      :vector_store_backend,
-      Arbor.Persistence.VectorStore.Unsupported
-    )
 
     assert {:error, :unsupported} =
              Arbor.Persistence.execute_vector_operation("agent_alpha", operation)
