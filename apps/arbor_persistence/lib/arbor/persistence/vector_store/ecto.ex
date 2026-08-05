@@ -11,7 +11,7 @@ defmodule Arbor.Persistence.VectorStore.Ecto do
 
   import Ecto.Query
 
-  alias Arbor.Contracts.Persistence.{VectorOperation, VectorReceipt, VectorRecord}
+  alias Arbor.Contracts.Persistence.{VectorMatch, VectorOperation, VectorReceipt, VectorRecord}
   alias __MODULE__.{Codec, OperationReceiptRow, VectorRow}
 
   @encoding Atom.to_string(VectorRecord.encoding())
@@ -116,7 +116,88 @@ defmodule Arbor.Persistence.VectorStore.Ecto do
   def list(_agent_id, _opts), do: {:error, :backend_failure}
 
   @impl true
-  def search(_agent_id, _vector, _opts), do: {:error, :unsupported}
+  def search(
+        agent_id,
+        vector,
+        model_id: model_id,
+        dimensions: dimensions,
+        encoding: encoding,
+        category: category,
+        limit: limit
+      )
+      when is_binary(agent_id) and is_integer(limit) and limit > 0 and limit <= 100 do
+    with {:ok, normalized_vector} <- VectorRecord.normalize_vector(vector),
+         {:ok, {^model_id, ^dimensions, normalized_encoding, ^category}} <-
+           VectorRecord.validate_descriptor(model_id, dimensions, encoding, category),
+         {:ok, repo} <- configured_repo() do
+      if postgres_repo?(repo) do
+        search_postgres(
+          repo,
+          agent_id,
+          normalized_vector,
+          model_id,
+          dimensions,
+          normalized_encoding,
+          category,
+          limit
+        )
+      else
+        {:error, :unsupported}
+      end
+    else
+      _invalid -> {:error, :backend_failure}
+    end
+  rescue
+    _error -> {:error, :backend_failure}
+  catch
+    _kind, _reason -> {:error, :backend_failure}
+  end
+
+  def search(_agent_id, _vector, _opts), do: {:error, :backend_failure}
+
+  defp search_postgres(
+         repo,
+         agent_id,
+         vector,
+         model_id,
+         dimensions,
+         encoding,
+         category,
+         limit
+       ) do
+    query_vector = Pgvector.new(vector)
+    encoded_encoding = Atom.to_string(encoding)
+
+    query =
+      from(row in VectorRow,
+        where: row.agent_id == ^agent_id,
+        where: row.model_id == ^model_id,
+        where: row.dimensions == ^dimensions,
+        where: row.encoding == ^encoded_encoding,
+        where: row.category == ^category,
+        where: row.tombstone == false,
+        where: not is_nil(row.source_namespace),
+        where: not is_nil(row.vector_768),
+        order_by: [
+          asc: fragment("? <=> ?", row.vector_768, ^query_vector),
+          asc: row.id
+        ],
+        limit: ^limit,
+        select: {row, fragment("? <=> ?", row.vector_768, ^query_vector)}
+      )
+
+    query
+    |> repo.all()
+    |> decode_matches(
+      repo,
+      agent_id,
+      model_id,
+      dimensions,
+      encoding,
+      category,
+      []
+    )
+  end
 
   defp execute_in_transaction(repo, operation) do
     case read_ledger(repo, operation) do
@@ -472,6 +553,64 @@ defmodule Arbor.Persistence.VectorStore.Ecto do
       {:error, :malformed_row} -> {:error, :backend_failure}
     end
   end
+
+  defp decode_matches(
+         [],
+         _repo,
+         _agent_id,
+         _model_id,
+         _dimensions,
+         _encoding,
+         _category,
+         matches
+       ),
+       do: {:ok, Enum.reverse(matches)}
+
+  defp decode_matches(
+         [{%VectorRow{} = row, distance} | rows],
+         repo,
+         agent_id,
+         model_id,
+         dimensions,
+         encoding,
+         category,
+         matches
+       )
+       when is_number(distance) do
+    with {:ok, record} <- row_to_record(row, repo),
+         true <- record.agent_id == agent_id,
+         true <- record.model_id == model_id,
+         true <- record.dimensions == dimensions,
+         true <- record.encoding == encoding,
+         true <- record.category == category,
+         false <- record.tombstone,
+         {:ok, match} <- VectorMatch.new(%{record: record, similarity: 1.0 - distance}) do
+      decode_matches(
+        rows,
+        repo,
+        agent_id,
+        model_id,
+        dimensions,
+        encoding,
+        category,
+        [match | matches]
+      )
+    else
+      _invalid -> {:error, :backend_failure}
+    end
+  end
+
+  defp decode_matches(
+         _malformed,
+         _repo,
+         _agent_id,
+         _model_id,
+         _dimensions,
+         _encoding,
+         _category,
+         _matches
+       ),
+       do: {:error, :backend_failure}
 
   defp maybe_filter_category(query, nil), do: query
   defp maybe_filter_category(query, category), do: where(query, [row], row.category == ^category)

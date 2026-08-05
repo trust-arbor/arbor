@@ -5,12 +5,19 @@ defmodule Arbor.Persistence.VectorStore.EctoSQLiteTest do
 
   @migration_version 20_260_805_000_001
   @migration_module Arbor.Persistence.Repo.Migrations.PrepareVectorStoreV1
+  @widen_migration_version 20_260_805_000_002
+  @widen_migration_module Arbor.Persistence.Repo.Migrations.WidenVectorAgentIds
   @migration_file Path.expand(
                     "../../../../priv/repo/migrations/20260805000001_prepare_vector_store_v1.exs",
                     __DIR__
                   )
+  @widen_migration_file Path.expand(
+                          "../../../../priv/repo/migrations/20260805000002_widen_vector_agent_ids.exs",
+                          __DIR__
+                        )
 
   Code.require_file(@migration_file)
+  Code.require_file(@widen_migration_file)
 
   defmodule SQLiteRepo do
     use Ecto.Repo,
@@ -38,6 +45,14 @@ defmodule Arbor.Persistence.VectorStore.EctoSQLiteTest do
 
     assert :ok ==
              Ecto.Migrator.up(SQLiteRepo, @migration_version, @migration_module, log: false)
+
+    assert :ok ==
+             Ecto.Migrator.up(
+               SQLiteRepo,
+               @widen_migration_version,
+               @widen_migration_module,
+               log: false
+             )
 
     on_exit(fn ->
       Enum.each([database, database <> "-shm", database <> "-wal"], &File.rm/1)
