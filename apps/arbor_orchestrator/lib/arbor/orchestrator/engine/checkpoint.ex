@@ -22,6 +22,11 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
   `current_node`, and `graph_hash` to prevent checkpoint replay across
   different pipelines or modified graphs.
 
+  Durable context provenance is bound per key to the exact serialized context
+  value through `Arbor.Contracts.Security.TaintEnvelope`. A malformed,
+  ambiguous, orphaned, or payload-mismatched label rejects the whole checkpoint;
+  resume never retains a value while silently discarding its provenance.
+
   Peer replication (when enabled) is best-effort only and is never treated as
   durable crash recovery.
   """
@@ -70,7 +75,7 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
   require Logger
 
   alias Arbor.Contracts.Persistence.Record, as: PersistenceRecord
-  alias Arbor.Contracts.Security.Taint
+  alias Arbor.Contracts.Security.{Taint, TaintEnvelope}
   alias Arbor.Orchestrator.Engine.{Context, Outcome}
 
   @default_store_name :arbor_orchestrator_checkpoints
@@ -192,6 +197,17 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
   # Keys that contain non-serializable structs (e.g., %Graph{}) and must be
   # stripped before JSON encoding.
   @internal_keys ~w(__adapted_graph__ __completed_nodes__)
+  @internal_atom_keys [:__adapted_graph__, :__completed_nodes__]
+  @taint_envelope_keys ~w(version payload_encoding payload_sha256 taint)
+
+  @legacy_context_taint_keys ~w(
+    taint_level
+    taint_sensitivity
+    taint_sanitizations
+    taint_confidence
+    taint_source
+    taint_chain
+  )
 
   @doc """
   Persist a checkpoint with an honest bounded receipt.
@@ -214,9 +230,9 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
           {:ok, bounded_receipt()} | {:error, term()}
   def persist(%__MODULE__{} = checkpoint, logs_root, opts \\ []) when is_binary(logs_root) do
     with :ok <- validate_checkpoint_run_id(checkpoint.run_id),
-         {:ok, store_cfg} <- resolve_store_config(opts) do
+         {:ok, store_cfg} <- resolve_store_config(opts),
+         {:ok, payload_map} <- build_payload(checkpoint, opts) do
       durability = durability_status(opts)
-      payload_map = build_payload(checkpoint, opts)
 
       store_result = maybe_put_store(checkpoint.run_id, payload_map, store_cfg)
       file_result = write_to_file(payload_map, logs_root)
@@ -570,72 +586,133 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
   # ---------------------------------------------------------------------------
 
   defp build_payload(%__MODULE__{} = checkpoint, opts) do
-    payload_map = serialize(checkpoint)
+    with {:ok, payload_map} <- serialize(checkpoint) do
+      case Keyword.get(opts, :hmac_secret) do
+        nil ->
+          {:ok, payload_map}
 
-    case Keyword.get(opts, :hmac_secret) do
-      nil ->
-        payload_map
+        secret when is_binary(secret) ->
+          aad_opts = [
+            run_id: checkpoint.run_id,
+            current_node: checkpoint.current_node,
+            graph_hash: checkpoint.graph_hash
+          ]
 
-      secret ->
-        aad_opts = [
-          run_id: checkpoint.run_id,
-          current_node: checkpoint.current_node,
-          graph_hash: checkpoint.graph_hash
-        ]
+          {:ok, sign(payload_map, secret, aad_opts)}
 
-        sign(payload_map, secret, aad_opts)
+        _invalid ->
+          {:error, {:invalid_option, :hmac_secret_not_binary}}
+      end
     end
+  rescue
+    _ -> {:error, :checkpoint_serialization_failed}
+  catch
+    _, _ -> {:error, :checkpoint_serialization_failed}
   end
 
   defp serialize(%__MODULE__{} = checkpoint) do
-    encoded_outcomes =
-      checkpoint.node_outcomes
-      |> Enum.map(fn {node_id, outcome} ->
-        sanitized =
-          outcome
-          |> Map.from_struct()
-          |> Map.update(:context_updates, %{}, &Map.drop(&1, @internal_keys))
-          # taint_reductions is a list of {key, target, reason} tuples — transient
-          # (applied immediately by the engine; its effect persists in
-          # context_taint) and NOT reconstructed on deserialize. Drop it so the
-          # checkpoint JSON/HMAC doesn't choke on tuples.
-          |> Map.put(:taint_reductions, [])
-          # Persist output_taint in a closed form so digest-bearing Outcomes
-          # round-trip exactly (bare level atom or full %Taint{}).
-          |> Map.update(:output_taint, nil, &serialize_output_taint/1)
+    with {:ok, context_values} <- serialize_context_values(checkpoint.context_values),
+         {:ok, context_taint} <-
+           serialize_context_taint(checkpoint.context_taint, context_values) do
+      encoded_outcomes =
+        checkpoint.node_outcomes
+        |> Enum.map(fn {node_id, outcome} ->
+          sanitized =
+            outcome
+            |> Map.from_struct()
+            |> Map.update(:context_updates, %{}, &Map.drop(&1, @internal_keys))
+            # taint_reductions is a list of {key, target, reason} tuples — transient
+            # (applied immediately by the engine; its effect persists in
+            # context_taint) and NOT reconstructed on deserialize. Drop it so the
+            # checkpoint JSON/HMAC doesn't choke on tuples.
+            |> Map.put(:taint_reductions, [])
+            # Persist output_taint in its established closed form so digest-bearing
+            # Outcomes round-trip exactly. C6C changes context provenance only.
+            |> Map.update(:output_taint, nil, &serialize_output_taint/1)
 
-        {node_id, sanitized}
+          {node_id, sanitized}
+        end)
+        |> Map.new()
+
+      lineage = serialize_lineage(checkpoint.context_lineage)
+
+      serialized =
+        checkpoint
+        |> Map.from_struct()
+        |> Map.put(:node_outcomes, encoded_outcomes)
+        |> Map.put(:context_values, context_values)
+        |> Map.put(:context_taint, context_taint)
+        |> maybe_encode_pipeline_started_at()
+        |> Map.put(:context_lineage, lineage)
+
+      {:ok, serialized}
+    end
+  rescue
+    _ -> {:error, :invalid_checkpoint}
+  catch
+    _, _ -> {:error, :invalid_checkpoint}
+  end
+
+  defp serialize_context_values(values) when is_map(values) and not is_struct(values) do
+    values = drop_internal_context_keys(values)
+
+    with :ok <- validate_context_keys(values, :invalid_context_key) do
+      {:ok, values}
+    end
+  end
+
+  defp serialize_context_values(_values), do: {:error, :invalid_context_values}
+
+  defp serialize_context_taint(taint, context_values)
+       when is_map(taint) and not is_struct(taint) and is_map(context_values) do
+    taint = drop_internal_context_keys(taint)
+
+    with :ok <- validate_context_keys(taint, :invalid_context_taint_key) do
+      taint
+      |> Enum.sort_by(fn {key, _label} -> key end)
+      |> Enum.reduce_while({:ok, %{}}, fn {key, label}, {:ok, acc} ->
+        with {:ok, value} <- fetch_context_value(context_values, key),
+             {:ok, label} <- canonical_context_taint(label),
+             {:ok, envelope} <- TaintEnvelope.new(value, label),
+             {:ok, persisted} <- TaintEnvelope.to_map(envelope) do
+          {:cont, {:ok, Map.put(acc, key, persisted)}}
+        else
+          {:error, reason} -> {:halt, {:error, reason}}
+        end
       end)
-      |> Map.new()
-
-    lineage = serialize_lineage(checkpoint.context_lineage)
-
-    checkpoint
-    |> Map.from_struct()
-    |> Map.put(:node_outcomes, encoded_outcomes)
-    |> Map.update(:context_values, %{}, &Map.drop(&1, @internal_keys))
-    |> Map.update(:context_taint, %{}, &serialize_taint/1)
-    |> maybe_encode_pipeline_started_at()
-    |> Map.put(:context_lineage, lineage)
+    end
   end
 
-  # Provenance is a map of context-key -> %Taint{} struct. Persist each struct
-  # via Signals.Taint.to_persistable (string-keyed map, deterministic for JSON +
-  # HMAC). from_persistable fails closed (corrupt values -> most restrictive
-  # defaults: :hostile level, :restricted sensitivity) on the way back in.
-  defp serialize_taint(taint) when is_map(taint) do
-    Map.new(taint, fn {key, struct} -> {key, Arbor.Signals.Taint.to_persistable(struct)} end)
+  defp serialize_context_taint(_taint, _context_values),
+    do: {:error, :invalid_context_taint}
+
+  defp fetch_context_value(context_values, key) do
+    case Map.fetch(context_values, key) do
+      {:ok, value} -> {:ok, value}
+      :error -> {:error, :orphan_context_taint}
+    end
   end
 
-  defp serialize_taint(_), do: %{}
+  defp canonical_context_taint(label) do
+    case Taint.canonicalize(label) do
+      {:ok, %Taint{} = taint} -> {:ok, taint}
+      {:error, _reason} -> {:error, :invalid_context_taint}
+    end
+  end
 
-  defp deserialize_taint(taint) when is_map(taint) do
-    Map.new(taint, fn {key, persisted} ->
-      {key, Arbor.Signals.Taint.from_persistable(persisted)}
+  defp validate_context_keys(map, error) when is_map(map) and is_atom(error) do
+    Enum.reduce_while(Map.keys(map), :ok, fn key, :ok ->
+      if is_binary(key) and String.valid?(key) do
+        {:cont, :ok}
+      else
+        {:halt, {:error, error}}
+      end
     end)
   end
 
-  defp deserialize_taint(_), do: %{}
+  defp drop_internal_context_keys(map) when is_map(map) do
+    Map.drop(map, @internal_keys ++ @internal_atom_keys)
+  end
 
   defp serialize_lineage(lineage) when is_map(lineage) do
     Map.new(lineage, fn {key, entry} ->
@@ -1110,53 +1187,152 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
   # Private — deserialization
   # ---------------------------------------------------------------------------
 
-  defp deserialize(decoded) do
-    outcomes =
-      decoded
-      |> Map.get("node_outcomes", %{})
-      |> Enum.map(fn {node_id, outcome_map} ->
-        {node_id,
-         %Outcome{
-           status: parse_status(Map.get(outcome_map, "status", "success")),
-           preferred_label: Map.get(outcome_map, "preferred_label"),
-           suggested_next_ids: Map.get(outcome_map, "suggested_next_ids", []),
-           context_updates: Map.get(outcome_map, "context_updates", %{}),
-           notes: Map.get(outcome_map, "notes"),
-           failure_reason: Map.get(outcome_map, "failure_reason"),
-           # Digest-bearing field: must round-trip exactly for effect recovery.
-           # Transient reductions stay empty (engine applied them live).
-           output_taint: parse_output_taint(Map.get(outcome_map, "output_taint")),
-           taint_reductions: []
-         }}
-      end)
-      |> Map.new()
+  defp deserialize(decoded) when is_map(decoded) do
+    with {:ok, context_values} <-
+           deserialize_context_values(Map.get(decoded, "context_values", %{})),
+         {:ok, context_taint} <-
+           deserialize_context_taint(
+             Map.get(decoded, "context_taint", %{}),
+             context_values
+           ) do
+      outcomes =
+        decoded
+        |> Map.get("node_outcomes", %{})
+        |> Enum.map(fn {node_id, outcome_map} ->
+          {node_id,
+           %Outcome{
+             status: parse_status(Map.get(outcome_map, "status", "success")),
+             preferred_label: Map.get(outcome_map, "preferred_label"),
+             suggested_next_ids: Map.get(outcome_map, "suggested_next_ids", []),
+             context_updates: Map.get(outcome_map, "context_updates", %{}),
+             notes: Map.get(outcome_map, "notes"),
+             failure_reason: Map.get(outcome_map, "failure_reason"),
+             # Digest-bearing field: must round-trip exactly for effect recovery.
+             # Transient reductions stay empty (engine applied them live).
+             output_taint: parse_output_taint(Map.get(outcome_map, "output_taint")),
+             taint_reductions: []
+           }}
+        end)
+        |> Map.new()
 
-    {:ok,
-     %__MODULE__{
-       timestamp: Map.get(decoded, "timestamp", ""),
-       run_id: Map.get(decoded, "run_id"),
-       graph_hash: Map.get(decoded, "graph_hash"),
-       run_authorization: Map.get(decoded, "run_authorization"),
-       current_node: Map.get(decoded, "current_node", ""),
-       completed_nodes: Map.get(decoded, "completed_nodes", []),
-       node_retries: Map.get(decoded, "node_retries", %{}),
-       context_values: Map.get(decoded, "context_values", %{}),
-       context_taint: deserialize_taint(Map.get(decoded, "context_taint", %{})),
-       node_outcomes: outcomes,
-       context_lineage: deserialize_lineage(Map.get(decoded, "context_lineage", %{})),
-       pipeline_started_at: parse_optional_datetime(Map.get(decoded, "pipeline_started_at")),
-       content_hashes: Map.get(decoded, "content_hashes", %{}),
-       pending_intents: deserialize_intents(Map.get(decoded, "pending_intents", %{})),
-       execution_digests: deserialize_digests(Map.get(decoded, "execution_digests", %{}))
-     }}
+      {:ok,
+       %__MODULE__{
+         timestamp: Map.get(decoded, "timestamp", ""),
+         run_id: Map.get(decoded, "run_id"),
+         graph_hash: Map.get(decoded, "graph_hash"),
+         run_authorization: Map.get(decoded, "run_authorization"),
+         current_node: Map.get(decoded, "current_node", ""),
+         completed_nodes: Map.get(decoded, "completed_nodes", []),
+         node_retries: Map.get(decoded, "node_retries", %{}),
+         context_values: context_values,
+         context_taint: context_taint,
+         node_outcomes: outcomes,
+         context_lineage: deserialize_lineage(Map.get(decoded, "context_lineage", %{})),
+         pipeline_started_at: parse_optional_datetime(Map.get(decoded, "pipeline_started_at")),
+         content_hashes: Map.get(decoded, "content_hashes", %{}),
+         pending_intents: deserialize_intents(Map.get(decoded, "pending_intents", %{})),
+         execution_digests: deserialize_digests(Map.get(decoded, "execution_digests", %{}))
+       }}
+    end
+  rescue
+    _ -> {:error, :invalid_checkpoint_payload}
+  catch
+    _, _ -> {:error, :invalid_checkpoint_payload}
+  end
+
+  defp deserialize(_decoded), do: {:error, :invalid_checkpoint_payload}
+
+  defp deserialize_context_values(values) when is_map(values) and not is_struct(values) do
+    with :ok <- validate_context_keys(values, :invalid_context_key),
+         :ok <- reject_internal_context_keys(values, :invalid_context_values) do
+      {:ok, values}
+    end
+  end
+
+  defp deserialize_context_values(_values), do: {:error, :invalid_context_values}
+
+  defp deserialize_context_taint(taint, context_values)
+       when is_map(taint) and not is_struct(taint) and is_map(context_values) do
+    with :ok <- validate_context_keys(taint, :invalid_context_taint_key),
+         :ok <- reject_internal_context_keys(taint, :invalid_context_taint) do
+      taint
+      |> Enum.sort_by(fn {key, _persisted} -> key end)
+      |> Enum.reduce_while({:ok, %{}}, fn {key, persisted}, {:ok, acc} ->
+        with {:ok, value} <- fetch_context_value(context_values, key),
+             {:ok, label} <- decode_context_taint(persisted, value) do
+          {:cont, {:ok, Map.put(acc, key, label)}}
+        else
+          {:error, reason} -> {:halt, {:error, reason}}
+        end
+      end)
+    end
+  end
+
+  defp deserialize_context_taint(_taint, _context_values),
+    do: {:error, :invalid_context_taint}
+
+  defp decode_context_taint(persisted, payload) when is_map(persisted) do
+    cond do
+      current_taint_envelope_candidate?(persisted) ->
+        case TaintEnvelope.verify(persisted, payload) do
+          {:ok, %TaintEnvelope{taint: %Taint{} = taint}} -> {:ok, taint}
+          {:error, reason} -> {:error, reason}
+        end
+
+      exact_legacy_context_taint?(persisted) ->
+        migrate_legacy_context_taint(persisted)
+
+      true ->
+        {:error, :invalid_context_taint}
+    end
+  end
+
+  defp decode_context_taint(_persisted, _payload), do: {:error, :invalid_context_taint}
+
+  # Only the exact historical Checkpoint/Signals six-key map is migratable.
+  # Any map carrying even one current-envelope marker is handled exclusively as
+  # a current envelope, so a partial v1 shape can never fall through to legacy.
+  defp current_taint_envelope_candidate?(persisted) do
+    Enum.any?(@taint_envelope_keys, &Map.has_key?(persisted, &1))
+  end
+
+  defp exact_legacy_context_taint?(persisted) do
+    map_size(persisted) == length(@legacy_context_taint_keys) and
+      Enum.sort(Map.keys(persisted)) == Enum.sort(@legacy_context_taint_keys)
+  end
+
+  defp migrate_legacy_context_taint(persisted) do
+    legacy = %{
+      "level" => persisted["taint_level"],
+      "sensitivity" => persisted["taint_sensitivity"],
+      "sanitizations" => persisted["taint_sanitizations"],
+      "confidence" => persisted["taint_confidence"],
+      "source" => persisted["taint_source"],
+      "chain" => persisted["taint_chain"]
+    }
+
+    with {:ok, legacy} <- Taint.canonicalize(legacy),
+         {:ok, migrated} <- Taint.join(TaintEnvelope.missing_fallback(), legacy) do
+      {:ok, migrated}
+    else
+      {:error, _reason} -> {:error, :invalid_legacy_context_taint}
+    end
+  end
+
+  defp reject_internal_context_keys(map, error) when is_map(map) and is_atom(error) do
+    if Enum.any?(@internal_keys, &Map.has_key?(map, &1)) do
+      {:error, error}
+    else
+      :ok
+    end
   end
 
   # ---------------------------------------------------------------------------
   # Outcome.output_taint — closed serialize / fail-closed deserialize
   # ---------------------------------------------------------------------------
 
-  # Bare level atoms stay atoms (JSON encodes as strings). Full %Taint{} uses
-  # the same persistable map as context_taint for a single closed form.
+  # Bare level atoms stay atoms (JSON encodes as strings). Full %Taint{} keeps
+  # the established closed outcome field; C6C does not envelope Outcome taint.
   defp serialize_output_taint(nil), do: nil
 
   defp serialize_output_taint(level) when level in @output_taint_levels, do: level
