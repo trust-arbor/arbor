@@ -195,6 +195,12 @@ defmodule Arbor.Persistence.VectorStore.EctoSQLiteTest do
              RollbackRepo.query!("SELECT COUNT(*) FROM vector_operation_receipts")
   end
 
+  test "widening migration refuses to fake a destructive rollback" do
+    assert_raise RuntimeError, ~r/irreversible migration/, fn ->
+      @widen_migration_module.down()
+    end
+  end
+
   test "equal payloads persist under distinct logical identities", %{agent_id: agent_id} do
     payload = %{"content" => "same canonical payload"}
     first = insert_operation!(record!(agent_id, source_key: "one", payload: payload))

@@ -22,7 +22,10 @@ defmodule Arbor.Persistence.Repo.Migrations.WidenVectorAgentIds do
     end
   end
 
-  # Narrowing after 256-character identifiers have committed would destroy the
-  # compatibility guarantee. Any later rollback requires an operator audit.
-  def down, do: :ok
+  def down do
+    raise """
+    irreversible migration: 256-character vector tenant identifiers may have
+    committed; use a separately approved narrowing migration after an operator audit
+    """
+  end
 end
