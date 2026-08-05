@@ -2,7 +2,7 @@ defmodule Arbor.Persistence.EventLogPublicBoundarySecurityRegressionTest do
   use ExUnit.Case, async: true
 
   alias Arbor.Persistence
-  alias Arbor.Persistence.Event
+  alias Arbor.Persistence.{Event, EventLog}
   alias Arbor.Persistence.EventLog.Agent, as: AgentEventLog
   alias Arbor.Persistence.EventLog.Ecto, as: EctoEventLog
   alias Arbor.Persistence.EventLog.ETS
@@ -148,6 +148,33 @@ defmodule Arbor.Persistence.EventLogPublicBoundarySecurityRegressionTest do
     assert Process.alive?(self())
   end
 
+  test "timeout cleanup waits for DOWN and drains the crossing worker completion" do
+    result_ref = make_ref()
+    parent = self()
+
+    {worker, monitor_ref} =
+      spawn_monitor(fn ->
+        send(parent, {result_ref, EventLog.stamp_completion(:late_completion)})
+        send(parent, {:completion_crossed_timeout, result_ref})
+        Process.sleep(:infinity)
+      end)
+
+    assert_receive {:completion_crossed_timeout, ^result_ref}
+    assert mailbox_contains_result_ref?(result_ref)
+
+    assert :ok =
+             Arbor.Persistence.EventLog.BoundedWorker.terminate(
+               worker,
+               monitor_ref,
+               result_ref
+             )
+
+    refute Process.alive?(worker)
+    refute mailbox_contains_result_ref?(result_ref)
+    refute_receive {^result_ref, _completion}
+    refute_receive {:DOWN, ^monitor_ref, :process, ^worker, _reason}
+  end
+
   test "security regression: public strings are valid UTF-8 and fit every backend schema", %{
     name: name,
     ets_name: ets_name
@@ -204,5 +231,10 @@ defmodule Arbor.Persistence.EventLogPublicBoundarySecurityRegressionTest do
 
     assert {:error, :invalid_precondition} =
              EctoEventLog.append("invalid-loaded-repo", event, repo: String)
+  end
+
+  defp mailbox_contains_result_ref?(result_ref) do
+    {:messages, messages} = Process.info(self(), :messages)
+    Enum.any?(messages, &match?({^result_ref, _completion}, &1))
   end
 end

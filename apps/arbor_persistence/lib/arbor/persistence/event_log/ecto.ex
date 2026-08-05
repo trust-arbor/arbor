@@ -52,6 +52,7 @@ defmodule Arbor.Persistence.EventLog.Ecto do
 
   alias Arbor.Contracts.Persistence.AppendOperation
   alias Arbor.Persistence.{Event, EventLog}
+  alias Arbor.Persistence.EventLog.BoundedWorker
   alias Arbor.Persistence.Repo
   alias Arbor.Persistence.Schemas.Event, as: EventSchema
   alias Arbor.Persistence.Schemas.EventLogOperation, as: OperationSchema
@@ -180,11 +181,11 @@ defmodule Arbor.Persistence.EventLog.Ecto do
             EventLog.accept_completion(completion, operation, deadline_mono)
 
           {:DOWN, ^monitor_ref, :process, ^worker, _reason} ->
+            BoundedWorker.drain_result(result_ref)
             EventLog.indeterminate(operation)
         after
           timeout ->
-            Process.exit(worker, :kill)
-            Process.demonitor(monitor_ref, [:flush])
+            BoundedWorker.terminate(worker, monitor_ref, result_ref)
             EventLog.indeterminate(operation)
         end
 
