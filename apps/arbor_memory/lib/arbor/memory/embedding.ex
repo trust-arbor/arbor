@@ -81,14 +81,12 @@ defmodule Arbor.Memory.Embedding do
     # A conditional upsert prevents a legacy uniqueness collision from updating
     # a vector-store-owned row.
     case insert_legacy_changeset(changeset, agent_id, content_hash) do
-      {:ok, _record} ->
-        case legacy_by_hash(agent_id, content_hash) do
-          %MemoryEmbedding{} = record ->
-            Logger.debug("Stored embedding #{record.id} for agent #{agent_id}")
-            {:ok, record.id}
-
-          nil ->
-            {:error, :protected_vector_row}
+      {:ok, %MemoryEmbedding{} = record} ->
+        if is_nil(record.vector_protocol) and is_nil(record.source_namespace) do
+          Logger.debug("Stored embedding #{record.id} for agent #{agent_id}")
+          {:ok, record.id}
+        else
+          {:error, :protected_vector_row}
         end
 
       {:error, :protected_vector_row} ->
@@ -397,15 +395,6 @@ defmodule Arbor.Memory.Embedding do
   defp legacy_rows do
     from(e in MemoryEmbedding,
       where: is_nil(e.vector_protocol) and is_nil(e.source_namespace)
-    )
-  end
-
-  defp legacy_by_hash(agent_id, content_hash) do
-    Repo.one(
-      from(e in legacy_rows(),
-        where: e.agent_id == ^agent_id and e.content_hash == ^content_hash,
-        limit: 1
-      )
     )
   end
 

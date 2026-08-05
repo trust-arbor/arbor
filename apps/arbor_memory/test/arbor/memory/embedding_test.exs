@@ -52,10 +52,11 @@ defmodule Arbor.Memory.EmbeddingTest do
       embedding2 = generate_embedding(2)
       content = "Same content"
 
-      {:ok, _id1} = Embedding.store(@test_agent_id, content, embedding1, %{type: "fact"})
-      {:ok, _id2} = Embedding.store(@test_agent_id, content, embedding2, %{type: "fact"})
+      {:ok, id1} = Embedding.store(@test_agent_id, content, embedding1, %{type: "fact"})
+      {:ok, id2} = Embedding.store(@test_agent_id, content, embedding2, %{type: "fact"})
 
       # Should only have one record (upserted)
+      assert id2 == id1
       assert Embedding.count(@test_agent_id) == 1
     end
 
