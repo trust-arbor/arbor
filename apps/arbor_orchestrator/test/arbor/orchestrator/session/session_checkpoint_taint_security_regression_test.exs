@@ -206,6 +206,9 @@ defmodule Arbor.Orchestrator.Session.SessionCheckpointTaintSecurityRegressionTes
 
     emptied = Map.put(checkpoint, "messages", [])
     assert Persistence.apply_checkpoint(target, emptied).messages == []
+
+    stripped = Map.drop(checkpoint, ["messages", "messages_manifest"])
+    assert Persistence.apply_checkpoint(target, stripped).messages == []
   end
 
   test "security regression: same-scope checkpoint records cannot be spliced" do
@@ -365,7 +368,7 @@ defmodule Arbor.Orchestrator.Session.SessionCheckpointTaintSecurityRegressionTes
       })
 
     assert same_engagement.current_engagement_id == "eng-old"
-    assert same_engagement.messages == [prior]
+    assert same_engagement.messages == []
     assert same_engagement.turn_count == 8
   end
 

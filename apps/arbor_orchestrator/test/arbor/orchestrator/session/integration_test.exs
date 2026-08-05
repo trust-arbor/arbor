@@ -9,6 +9,7 @@ defmodule Arbor.Orchestrator.Session.IntegrationTest do
 
   alias Arbor.Contracts.Security.TaintEnvelope
   alias Arbor.Orchestrator.Session
+  alias Arbor.Orchestrator.Session.Persistence
 
   @moduletag :session_integration
 
@@ -220,15 +221,19 @@ defmodule Arbor.Orchestrator.Session.IntegrationTest do
       assert state.cognitive_mode == :consolidation
     end
 
-    test "ignores nil values in checkpoint", ctx do
+    test "full checkpoint preserves transcript while restoring turn count", ctx do
       {:ok, pid} = start_session(ctx)
 
       # Send a message first to have some state
       {:ok, _} = Session.send_message(pid, "before checkpoint")
       state_before = Session.get_state(pid)
 
-      # Checkpoint with only turn_count — other fields should be unchanged
-      :ok = Session.restore_checkpoint(pid, %{"session.turn_count" => 99})
+      checkpoint =
+        state_before
+        |> Persistence.extract_checkpoint_data()
+        |> Map.put("turn_count", 99)
+
+      :ok = Session.restore_checkpoint(pid, checkpoint)
       state_after = Session.get_state(pid)
 
       assert state_after.turn_count == 99

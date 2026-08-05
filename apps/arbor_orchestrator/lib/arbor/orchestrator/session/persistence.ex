@@ -74,19 +74,6 @@ defmodule Arbor.Orchestrator.Session.Persistence do
         %{state | current_engagement_id: engagement_id, messages: restored_messages}
         |> rebuild_compactor_from_checkpoint()
 
-      {{:ok, engagement_id}, :missing}
-      when (is_binary(engagement_id) or is_nil(engagement_id)) and
-             engagement_id != state.current_engagement_id ->
-        # Never relabel the active transcript when provenance changes without
-        # carrying its matching messages.
-        %{state | current_engagement_id: engagement_id, messages: []}
-        |> rebuild_compactor_from_checkpoint()
-
-      {{:ok, engagement_id}, :missing}
-      when (is_binary(engagement_id) or is_nil(engagement_id)) and
-             engagement_id == state.current_engagement_id ->
-        state
-
       {:error, {:ok, restored_messages}} ->
         %{state | messages: restored_messages}
         |> rebuild_compactor_from_checkpoint()
@@ -190,7 +177,10 @@ defmodule Arbor.Orchestrator.Session.Persistence do
   defp restore_checkpoint_messages(state, data, engagement) do
     case {cp_fetch(data, "messages"), cp_fetch(data, "messages_manifest")} do
       {:error, :error} ->
-        :missing
+        # Omission cannot distinguish a legacy partial update from a stripped
+        # current checkpoint. Legacy compatibility requires a present plain
+        # message list, which Core reconstructs conservatively.
+        {:error, :checkpoint_transcript_missing}
 
       {:error, {:ok, _orphaned_manifest}} ->
         {:error, :checkpoint_messages_missing}
