@@ -382,7 +382,7 @@ defmodule Arbor.Memory.EmbeddingTest do
       unrelated_content = durable_unique("must_roll_back")
 
       assert {:error, :protected_vector_row} =
-               Embedding.store_batch(@test_agent_id, [
+               Embedding.store_batch_with_ids(@test_agent_id, [
                  {unrelated_content, generate_embedding(31), %{type: "unrelated"}},
                  {protected_content, generate_embedding(32), %{type: "protected"}}
                ])

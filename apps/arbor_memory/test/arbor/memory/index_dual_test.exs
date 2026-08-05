@@ -246,6 +246,53 @@ defmodule Arbor.Memory.IndexDualTest do
       assert {:error, :not_found} = Index.get(pid, second_id)
       assert Embedding.count(agent_id) == 0
     end
+
+    test "compatibility regression: durable batch failure atomically falls back to pending" do
+      agent_id = durable_unique("test_dual_pending_batch")
+      suffix = :crypto.strong_rand_bytes(8) |> Base.encode16(case: :lower)
+      first_id = "mem_first_#{suffix}"
+      second_id = "mem_second_#{suffix}"
+      MaliciousWriter.configure(agent_id, :fail)
+
+      {:ok, pid} =
+        Index.start_link(
+          agent_id: agent_id,
+          backend: :dual,
+          persistent_writer: MaliciousWriter,
+          entry_id_generator: sequence_callback([first_id, second_id]),
+          name: {:via, Registry, {Arbor.Memory.Registry, {:test_pending_batch, agent_id}}}
+        )
+
+      on_exit(fn ->
+        MaliciousWriter.disarm(agent_id)
+        if Process.alive?(pid), do: GenServer.stop(pid)
+        Embedding.delete_all(agent_id)
+      end)
+
+      assert {:ok, [^first_id, ^second_id]} =
+               Index.batch_index(
+                 pid,
+                 [
+                   {"Pending batch first", %{type: :first}},
+                   {"Pending batch second", %{type: :second}}
+                 ],
+                 embedding: generate_embedding(75)
+               )
+
+      state = :sys.get_state(pid)
+      assert state.entry_count == 2
+      assert state.pending_sync == MapSet.new([first_id, second_id])
+      assert state.pending_entry_orders[first_id] == %{first: 0, latest: 0}
+      assert state.pending_entry_orders[second_id] == %{first: 1, latest: 1}
+      assert state.next_insertion_sequence == 2
+      assert {:ok, %{id: ^first_id}} = Index.get(pid, first_id)
+      assert {:ok, %{id: ^second_id}} = Index.get(pid, second_id)
+      assert Embedding.count(agent_id) == 0
+
+      MaliciousWriter.configure(agent_id, :delegate)
+      assert {:ok, 2} = Index.sync_to_persistent(pid)
+      assert Embedding.count(agent_id) == 2
+    end
   end
 
   describe "pgvector backend mode" do
@@ -593,6 +640,103 @@ defmodule Arbor.Memory.IndexDualTest do
       assert {:error, :not_found} = Index.get(pid, first_id)
       assert {:error, :not_found} = Index.get(pid, second_id)
       assert {:error, :not_found} = Embedding.get(agent_id, first_id)
+    end
+
+    test "capacity regression: pending identities, latest values, and aliases are not evicted" do
+      agent_id = durable_unique("test_dual_pending_capacity")
+      suffix = :crypto.strong_rand_bytes(8) |> Base.encode16(case: :lower)
+      first_id = "mem_z_#{suffix}"
+      latest_id = "mem_a_#{suffix}"
+      rejected_id = "mem_rejected_#{suffix}"
+      unrelated_id = "mem_unrelated_#{suffix}"
+      second_rejected_id = "mem_rejected_again_#{suffix}"
+
+      FailFirstWriter.arm(agent_id, 3)
+
+      {:ok, pid} =
+        Index.start_link(
+          agent_id: agent_id,
+          backend: :dual,
+          max_entries: 2,
+          persistent_writer: FailFirstWriter,
+          entry_id_generator:
+            sequence_callback([
+              first_id,
+              latest_id,
+              rejected_id,
+              unrelated_id,
+              second_rejected_id
+            ]),
+          name: {:via, Registry, {Arbor.Memory.Registry, {:test_pending_capacity, agent_id}}}
+        )
+
+      on_exit(fn ->
+        FailFirstWriter.disarm(agent_id)
+        if Process.alive?(pid), do: GenServer.stop(pid)
+        Embedding.delete_all(agent_id)
+      end)
+
+      content = "Capacity duplicate"
+      first_embedding = generate_embedding(76)
+      latest_embedding = generate_embedding(77)
+
+      assert {:ok, ^first_id} =
+               Index.index(pid, content, %{type: :first}, embedding: first_embedding)
+
+      assert {:ok, ^latest_id} =
+               Index.index(pid, content, %{type: :latest}, embedding: latest_embedding)
+
+      assert {:error, :capacity_exceeded} =
+               Index.index(pid, "Rejected while all pending", %{type: :rejected},
+                 embedding: generate_embedding(78)
+               )
+
+      assert Index.stats(pid).entry_count == 2
+      assert {:ok, %{id: ^first_id, metadata: %{type: :first}}} = Index.get(pid, first_id)
+      assert {:ok, %{id: ^latest_id, metadata: %{type: :latest}}} = Index.get(pid, latest_id)
+      assert {:error, :not_found} = Index.get(pid, rejected_id)
+
+      assert {:ok, 2} = Index.sync_to_persistent(pid)
+      assert Index.stats(pid).entry_count == 1
+
+      for acknowledged_id <- [first_id, latest_id] do
+        assert {:ok, %{id: ^first_id, metadata: %{type: :latest}, embedding: stored_embedding}} =
+                 Index.get(pid, acknowledged_id)
+
+        assert_vector_close(stored_embedding, latest_embedding)
+      end
+
+      assert {:ok, persisted} = Embedding.get(agent_id, first_id)
+      assert persisted.metadata["type"] == "latest"
+      assert_vector_close(Pgvector.to_list(persisted.embedding), latest_embedding)
+
+      assert {:ok, ^unrelated_id} =
+               Index.index(pid, "Unrelated pending", %{type: :unrelated},
+                 embedding: generate_embedding(79)
+               )
+
+      assert {:error, :capacity_exceeded} =
+               Index.index(pid, "Rejected beside alias", %{type: :rejected_again},
+                 embedding: generate_embedding(80)
+               )
+
+      for acknowledged_id <- [first_id, latest_id, unrelated_id] do
+        assert {:ok, _entry} = Index.get(pid, acknowledged_id)
+      end
+
+      assert {:error, :not_found} = Index.get(pid, second_rejected_id)
+      assert Index.stats(pid).entry_count == 2
+
+      assert {:ok, 1} = Index.sync_to_persistent(pid)
+      assert {:ok, %{id: ^unrelated_id}} = Embedding.get(agent_id, unrelated_id)
+
+      assert :ok = Index.delete(pid, latest_id)
+      assert {:error, :not_found} = Index.get(pid, first_id)
+      assert {:error, :not_found} = Index.get(pid, latest_id)
+      assert {:ok, %{id: ^unrelated_id}} = Index.get(pid, unrelated_id)
+
+      assert :ok = Index.delete(pid, unrelated_id)
+      assert Index.stats(pid).entry_count == 0
     end
 
     test "security regression: malformed authoritative batch IDs preserve all pending state" do

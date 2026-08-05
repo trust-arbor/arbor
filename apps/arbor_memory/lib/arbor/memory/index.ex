@@ -149,7 +149,8 @@ defmodule Arbor.Memory.Index do
 
   Each item should be a tuple of `{content, metadata}`.
   The whole batch is preflighted before mutation. Persistent backends commit
-  through the writer's all-or-nothing batch operation.
+  through the writer's all-or-nothing batch operation. In dual mode, a durable
+  error admits the whole batch locally as pending or admits none at capacity.
 
   ## Examples
 
@@ -443,14 +444,15 @@ defmodule Arbor.Memory.Index do
       # Store based on backend mode
       case state.backend do
         :ets ->
-          # ETS only
-          new_state =
-            state
-            |> maybe_evict()
-            |> put_local_entry(entry)
-            |> advance_insertion_sequence(insertion_sequence)
+          with {:ok, eviction_ids} <- plan_local_admission(state, [entry_id]) do
+            new_state =
+              state
+              |> apply_local_admission(eviction_ids)
+              |> put_local_entry(entry)
+              |> advance_insertion_sequence(insertion_sequence)
 
-          {:ok, entry_id, new_state}
+            {:ok, entry_id, new_state}
+          end
 
         :pgvector ->
           # pgvector only
@@ -465,12 +467,14 @@ defmodule Arbor.Memory.Index do
           end
 
         :dual ->
-          index_dual_mode(entry_id, entry, insertion_sequence, state)
+          with {:ok, eviction_ids} <- plan_local_admission(state, [entry_id]) do
+            index_dual_mode(entry_id, entry, insertion_sequence, eviction_ids, state)
+          end
       end
     end
   end
 
-  defp index_dual_mode(entry_id, entry, insertion_sequence, state) do
+  defp index_dual_mode(entry_id, entry, insertion_sequence, eviction_ids, state) do
     metadata_with_id = Map.put(entry.metadata, :id, entry_id)
 
     case eager_store(state, entry, metadata_with_id) do
@@ -480,7 +484,7 @@ defmodule Arbor.Memory.Index do
 
           new_state =
             state
-            |> maybe_evict()
+            |> apply_local_admission(eviction_ids)
             |> put_local_entry(authoritative_entry)
             |> advance_insertion_sequence(insertion_sequence)
             |> refresh_pending_entry_order(authoritative_id, insertion_sequence)
@@ -493,7 +497,7 @@ defmodule Arbor.Memory.Index do
 
         state =
           state
-          |> maybe_evict()
+          |> apply_local_admission(eviction_ids)
           |> put_local_entry(entry)
           |> advance_insertion_sequence(insertion_sequence)
 
@@ -662,9 +666,18 @@ defmodule Arbor.Memory.Index do
   defp do_batch_index(items, opts, state) do
     with {:ok, prepared} <- prepare_batch_entries(items, opts, state) do
       case state.backend do
-        :ets -> commit_ets_batch(prepared, state)
-        :pgvector -> commit_persistent_batch(prepared, state, Embedding)
-        :dual -> commit_persistent_batch(prepared, state, state.persistent_writer)
+        :ets ->
+          with {:ok, eviction_ids} <- plan_prepared_batch_admission(state, prepared) do
+            commit_ets_batch(prepared, eviction_ids, state)
+          end
+
+        :pgvector ->
+          commit_persistent_batch(prepared, state, Embedding)
+
+        :dual ->
+          with {:ok, eviction_ids} <- plan_prepared_batch_admission(state, prepared) do
+            commit_persistent_batch(prepared, eviction_ids, state, state.persistent_writer)
+          end
       end
     end
   end
@@ -715,12 +728,11 @@ defmodule Arbor.Memory.Index do
 
   defp prepare_batch_entries(_items, _opts, _state), do: {:error, :invalid_batch}
 
-  defp commit_ets_batch(prepared, state) do
+  defp commit_ets_batch(prepared, eviction_ids, state) do
     new_state =
-      Enum.reduce(prepared, state, fn %{entry: entry}, acc ->
-        acc
-        |> maybe_evict()
-        |> put_local_entry(entry)
+      prepared
+      |> Enum.reduce(apply_local_admission(state, eviction_ids), fn %{entry: entry}, acc ->
+        put_local_entry(acc, entry)
       end)
       |> advance_prepared_batch_sequence(prepared)
 
@@ -730,6 +742,10 @@ defmodule Arbor.Memory.Index do
   defp commit_persistent_batch([], state, _writer), do: {:ok, [], state}
 
   defp commit_persistent_batch(prepared, state, writer) do
+    commit_persistent_batch(prepared, [], state, writer)
+  end
+
+  defp commit_persistent_batch(prepared, eviction_ids, state, writer) do
     groups = group_prepared_batch_entries(prepared)
     entries = Enum.map(groups, &prepared_group_batch_entry/1)
 
@@ -741,6 +757,7 @@ defmodule Arbor.Memory.Index do
 
           new_state =
             state
+            |> apply_local_admission(eviction_ids)
             |> cache_persistent_batch(bindings)
             |> advance_prepared_batch_sequence(prepared)
 
@@ -748,8 +765,25 @@ defmodule Arbor.Memory.Index do
         end
 
       {:error, reason} ->
-        {:error, reason}
+        if state.backend == :dual do
+          commit_pending_batch(prepared, eviction_ids, state, reason)
+        else
+          {:error, reason}
+        end
     end
+  end
+
+  defp commit_pending_batch(prepared, eviction_ids, state, reason) do
+    Enum.each(prepared, fn %{entry: entry} -> log_dual_write_failure(entry.id, reason) end)
+
+    new_state =
+      prepared
+      |> Enum.reduce(apply_local_admission(state, eviction_ids), fn candidate, acc ->
+        put_pending_entry(acc, candidate)
+      end)
+      |> advance_prepared_batch_sequence(prepared)
+
+    {:ok, Enum.map(prepared, & &1.entry.id), new_state}
   end
 
   defp group_prepared_batch_entries(prepared) do
@@ -794,7 +828,6 @@ defmodule Arbor.Memory.Index do
       authoritative_entry = %{group.canonical_entry | id: authoritative_id}
 
       acc
-      |> maybe_evict()
       |> put_local_entry(authoritative_entry)
       |> refresh_pending_entry_order(authoritative_id, group.canonical_sequence)
     end)
@@ -877,36 +910,38 @@ defmodule Arbor.Memory.Index do
     0.0
   end
 
-  defp maybe_evict(%{entry_count: count, max_entries: max} = state) when count >= max do
-    # Find least recently accessed entries and remove them
-    entries_to_remove = div(max, 10)
-
-    all_entries =
-      :ets.foldl(
-        fn {id, entry}, acc -> [{id, entry.accessed_at} | acc] end,
-        [],
-        state.table
-      )
-
-    to_remove =
-      all_entries
-      |> Enum.sort_by(fn {_id, accessed_at} -> accessed_at end, DateTime)
-      |> Enum.take(entries_to_remove)
-      |> Enum.map(fn {id, _} -> id end)
-
-    Enum.each(to_remove, &:ets.delete(state.table, &1))
-
-    pending_sync = Enum.reduce(to_remove, state.pending_sync, &MapSet.delete(&2, &1))
-
-    %{
-      state
-      | entry_count: count - length(to_remove),
-        pending_sync: pending_sync,
-        pending_entry_orders: Map.drop(state.pending_entry_orders, to_remove)
-    }
+  defp plan_prepared_batch_admission(state, prepared) do
+    plan_local_admission(state, Enum.map(prepared, & &1.entry.id))
   end
 
-  defp maybe_evict(state), do: state
+  defp plan_local_admission(state, incoming_ids) do
+    current_count = :ets.info(state.table, :size)
+    slots_to_free = max(current_count + length(incoming_ids) - state.max_entries, 0)
+    candidates = safely_evictable_entries(state)
+
+    if slots_to_free <= length(candidates) do
+      {:ok, candidates |> Enum.take(slots_to_free) |> Enum.map(&elem(&1, 0))}
+    else
+      {:error, :capacity_exceeded}
+    end
+  end
+
+  defp safely_evictable_entries(state) do
+    protected_ids =
+      state.pending_sync
+      |> MapSet.union(MapSet.new(Map.keys(state.id_aliases)))
+      |> MapSet.union(MapSet.new(Map.values(state.id_aliases)))
+
+    state.table
+    |> :ets.tab2list()
+    |> Enum.reject(fn {id, _entry} -> MapSet.member?(protected_ids, id) end)
+    |> Enum.sort_by(fn {_id, entry} -> entry.accessed_at end, DateTime)
+  end
+
+  defp apply_local_admission(state, eviction_ids) do
+    Enum.each(eviction_ids, &:ets.delete(state.table, &1))
+    %{state | entry_count: :ets.info(state.table, :size)}
+  end
 
   defp generate_entry_id do
     "mem_" <> Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
@@ -1247,6 +1282,20 @@ defmodule Arbor.Memory.Index do
   defp put_local_entry(state, entry) do
     :ets.insert(state.table, {entry.id, entry})
     %{state | entry_count: :ets.info(state.table, :size)}
+  end
+
+  defp put_pending_entry(state, %{entry: entry, insertion_sequence: insertion_sequence}) do
+    state = put_local_entry(state, entry)
+
+    %{
+      state
+      | pending_sync: MapSet.put(state.pending_sync, entry.id),
+        pending_entry_orders:
+          Map.put(state.pending_entry_orders, entry.id, %{
+            first: insertion_sequence,
+            latest: insertion_sequence
+          })
+    }
   end
 
   defp advance_insertion_sequence(state, insertion_sequence) do

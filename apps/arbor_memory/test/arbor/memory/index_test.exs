@@ -196,6 +196,20 @@ defmodule Arbor.Memory.IndexTest do
   end
 
   describe "LRU eviction" do
+    test "capacity regression: a one-entry cache evicts one synced row" do
+      agent_id = "single_eviction_test_#{System.unique_integer([:positive])}"
+      {:ok, pid} = Index.start_link(agent_id: agent_id, max_entries: 1, name: nil)
+
+      assert {:ok, first_id} = Index.index(pid, "First", %{})
+      assert {:ok, second_id} = Index.index(pid, "Second", %{})
+
+      assert Index.stats(pid).entry_count == 1
+      assert {:error, :not_found} = Index.get(pid, first_id)
+      assert {:ok, %{id: ^second_id}} = Index.get(pid, second_id)
+
+      GenServer.stop(pid)
+    end
+
     test "evicts least recently accessed entries when at capacity" do
       agent_id = "eviction_test_#{System.unique_integer([:positive])}"
       # Small max to test eviction
