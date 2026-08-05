@@ -151,6 +151,12 @@ defmodule Arbor.Memory.Index do
   The whole batch is preflighted before mutation. Persistent backends commit
   through the writer's all-or-nothing batch operation. In dual mode, a durable
   error admits the whole batch locally as pending or admits none at capacity.
+  Fresh rows request the index-generated `mem_*` IDs; durable content dedupe can
+  instead return an existing authoritative ID for every matching input item.
+
+  A writer exception or exit can represent commit-acknowledgement loss. Pending
+  retry is idempotent and may reconcile a whole prior commit; callers must not
+  interpret the fallback acknowledgement as proof that no durable write occurred.
 
   ## Examples
 

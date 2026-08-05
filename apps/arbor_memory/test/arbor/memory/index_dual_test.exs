@@ -661,6 +661,44 @@ defmodule Arbor.Memory.IndexDualTest do
       assert {:ok, %{id: ^stored_id, content: "Authoritative row id"}} =
                Embedding.get(agent_id, stored_id)
     end
+
+    test "batch_index exposes requested mem IDs for fresh pgvector rows" do
+      agent_id = durable_unique("test_pg_batch_ids")
+      suffix = :crypto.strong_rand_bytes(8) |> Base.encode16(case: :lower)
+      first_id = "mem_first_#{suffix}"
+      second_id = "mem_second_#{suffix}"
+
+      {:ok, pid} =
+        Index.start_link(
+          agent_id: agent_id,
+          backend: :pgvector,
+          entry_id_generator: sequence_callback([first_id, second_id]),
+          name: {:via, Registry, {Arbor.Memory.Registry, {:test_pg_batch_ids, agent_id}}}
+        )
+
+      on_exit(fn ->
+        if Process.alive?(pid), do: GenServer.stop(pid)
+        Embedding.delete_all(agent_id)
+      end)
+
+      assert {:ok, [^first_id, ^second_id]} =
+               Index.batch_index(
+                 pid,
+                 [
+                   {"Fresh pgvector batch first", %{type: :first}},
+                   {"Fresh pgvector batch second", %{type: :second}}
+                 ],
+                 embedding: generate_embedding(95)
+               )
+
+      assert {:ok, %{id: ^first_id, content: "Fresh pgvector batch first"}} =
+               Embedding.get(agent_id, first_id)
+
+      assert {:ok, %{id: ^second_id, content: "Fresh pgvector batch second"}} =
+               Embedding.get(agent_id, second_id)
+
+      assert Embedding.count(agent_id) == 2
+    end
   end
 
   describe "warm_cache/2" do
