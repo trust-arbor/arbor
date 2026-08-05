@@ -20,7 +20,7 @@ defmodule Arbor.Orchestrator.Session.Persistence.Core do
   @partial_evidence_keys [:kind, :user_content, :user_taint]
   @prompt_roles ~w(system user assistant tool)
   @checkpoint_message_keys ["envelope", "payload", "status"]
-  @checkpoint_message_domain "arbor.session.checkpoint.message.v1"
+  @checkpoint_message_domain "arbor.session.checkpoint.message.v2"
   @checkpoint_scope_keys ["agent_id", "current_engagement_id", "session_id"]
   @taint_statuses [:verified, :legacy_unlabeled, :invalid_durable_provenance]
 
@@ -221,10 +221,12 @@ defmodule Arbor.Orchestrator.Session.Persistence.Core do
           {:ok, [map()]} | {:error, atom()}
   def encode_checkpoint_messages(messages, scope) when is_list(messages) do
     with {:ok, scope_binding} <- checkpoint_scope_binding(scope) do
+      message_count = length(messages)
+
       messages
       |> Enum.with_index()
       |> Enum.reduce_while({:ok, []}, fn {message, position}, {:ok, encoded} ->
-        case encode_checkpoint_message(message, position, scope_binding) do
+        case encode_checkpoint_message(message, position, message_count, scope_binding) do
           {:ok, checkpoint_message} -> {:cont, {:ok, [checkpoint_message | encoded]}}
           {:error, _reason} = error -> {:halt, error}
         end
@@ -248,11 +250,13 @@ defmodule Arbor.Orchestrator.Session.Persistence.Core do
           {:ok, [map()]} | {:error, atom()}
   def restore_checkpoint_messages(messages, scope) when is_list(messages) do
     with {:ok, scope_binding} <- checkpoint_scope_binding(scope) do
+      message_count = length(messages)
+
       restored =
         messages
         |> Enum.with_index()
         |> Enum.map(fn {message, position} ->
-          restore_checkpoint_message(message, position, scope_binding)
+          restore_checkpoint_message(message, position, message_count, scope_binding)
         end)
 
       {:ok, restored}
@@ -388,7 +392,7 @@ defmodule Arbor.Orchestrator.Session.Persistence.Core do
 
   defp metadata_has_taint?(_metadata), do: false
 
-  defp encode_checkpoint_message(message, position, scope_binding)
+  defp encode_checkpoint_message(message, position, message_count, scope_binding)
        when is_map(message) and not is_struct(message) do
     raw_payload = checkpoint_payload(message)
     {taint, status} = checkpoint_label(message)
@@ -397,7 +401,13 @@ defmodule Arbor.Orchestrator.Session.Persistence.Core do
     with {:ok, payload_digest} <- DurableJson.project_and_digest(raw_payload),
          payload = payload_digest.projection,
          {:ok, descriptor} <-
-           checkpoint_descriptor(payload_digest, persisted_status, position, scope_binding),
+           checkpoint_descriptor(
+             payload_digest,
+             persisted_status,
+             position,
+             message_count,
+             scope_binding
+           ),
          {:ok, envelope} <- TaintEnvelope.new(descriptor, taint),
          {:ok, persisted} <- TaintEnvelope.to_map(envelope) do
       {:ok,
@@ -411,13 +421,13 @@ defmodule Arbor.Orchestrator.Session.Persistence.Core do
     end
   end
 
-  defp encode_checkpoint_message(_message, _position, _scope_binding),
+  defp encode_checkpoint_message(_message, _position, _message_count, _scope_binding),
     do: {:error, :invalid_checkpoint_message}
 
-  defp restore_checkpoint_message(message, position, scope_binding)
+  defp restore_checkpoint_message(message, position, message_count, scope_binding)
        when is_map(message) and not is_struct(message) do
     if checkpoint_wrapper_shaped?(message) do
-      restore_current_checkpoint_message(message, position, scope_binding)
+      restore_current_checkpoint_message(message, position, message_count, scope_binding)
     else
       message
       |> checkpoint_payload()
@@ -425,7 +435,7 @@ defmodule Arbor.Orchestrator.Session.Persistence.Core do
     end
   end
 
-  defp restore_checkpoint_message(_message, _position, _scope_binding) do
+  defp restore_checkpoint_message(_message, _position, _message_count, _scope_binding) do
     put_checkpoint_label(
       %{"role" => nil, "content" => ""},
       TaintEnvelope.invalid_fallback(),
@@ -433,14 +443,20 @@ defmodule Arbor.Orchestrator.Session.Persistence.Core do
     )
   end
 
-  defp restore_current_checkpoint_message(message, position, scope_binding) do
+  defp restore_current_checkpoint_message(message, position, message_count, scope_binding) do
     with true <- exact_string_keys?(message, @checkpoint_message_keys),
          payload when is_map(payload) and not is_struct(payload) <- message["payload"],
          {:ok, payload_digest} <- DurableJson.project_and_digest(payload),
          true <- payload_digest.projection === payload,
          {:ok, status} <- normalize_persisted_taint_status(message["status"]),
          {:ok, descriptor} <-
-           checkpoint_descriptor(payload_digest, message["status"], position, scope_binding),
+           checkpoint_descriptor(
+             payload_digest,
+             message["status"],
+             position,
+             message_count,
+             scope_binding
+           ),
          {:ok, envelope} <- TaintEnvelope.verify(message["envelope"], descriptor),
          true <- valid_taint_status?(envelope.taint, status) do
       put_checkpoint_label(payload, envelope.taint, status)
@@ -473,12 +489,14 @@ defmodule Arbor.Orchestrator.Session.Persistence.Core do
 
   defp checkpoint_scope_binding(_scope), do: {:error, :invalid_checkpoint_scope}
 
-  defp checkpoint_descriptor(payload_digest, status, position, scope_binding)
-       when is_map(scope_binding) do
+  defp checkpoint_descriptor(payload_digest, status, position, message_count, scope_binding)
+       when is_integer(position) and position >= 0 and is_integer(message_count) and
+              message_count > position and is_map(scope_binding) do
     with {:ok, payload_binding} <- durable_digest_descriptor(payload_digest) do
       {:ok,
        %{
          "domain" => @checkpoint_message_domain,
+         "message_count" => message_count,
          "payload_digest" => payload_binding,
          "position" => position,
          "scope_digest" => scope_binding,
@@ -487,8 +505,14 @@ defmodule Arbor.Orchestrator.Session.Persistence.Core do
     end
   end
 
-  defp checkpoint_descriptor(_payload_digest, _status, _position, _scope_binding),
-    do: {:error, :missing_checkpoint_scope}
+  defp checkpoint_descriptor(
+         _payload_digest,
+         _status,
+         _position,
+         _message_count,
+         _scope_binding
+       ),
+       do: {:error, :missing_checkpoint_scope}
 
   defp durable_digest_descriptor(%{
          encoding: encoding,

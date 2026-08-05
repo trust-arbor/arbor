@@ -169,6 +169,29 @@ defmodule Arbor.Orchestrator.Session.SessionCheckpointTaintSecurityRegressionTes
     Enum.each(restored.messages, &assert_invalid/1)
   end
 
+  test "security regression: suffix truncation invalidates every remaining message label" do
+    messages = [
+      labeled_message("user", "first complete message", taint("complete_first", :hostile)),
+      labeled_message(
+        "assistant",
+        "second complete message",
+        taint("complete_second", :untrusted)
+      ),
+      labeled_message("user", "required suffix", taint("complete_suffix", :hostile))
+    ]
+
+    checkpoint = Persistence.extract_checkpoint_data(session(messages, "eng-completeness"))
+    truncated = update_in(checkpoint["messages"], &Enum.drop(&1, -1))
+    restored = Persistence.apply_checkpoint(session([], "eng-completeness"), truncated)
+
+    assert Enum.map(restored.messages, & &1["content"]) == [
+             "first complete message",
+             "second complete message"
+           ]
+
+    Enum.each(restored.messages, &assert_invalid/1)
+  end
+
   test "security regression: current records are bound to their exact engagement" do
     checkpoint =
       [labeled_message("user", "engagement-bound", taint("engagement_a", :hostile))]
