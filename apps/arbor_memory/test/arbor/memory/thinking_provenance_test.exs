@@ -196,6 +196,34 @@ defmodule Arbor.Memory.ThinkingProvenanceTest do
     assert decoded_taint.level == :hostile
     assert decoded_taint.sensitivity == :restricted
     assert decoded_taint.confidence == :unverified
+
+    put_raw("thinking:#{agent_id}", aggregate, %{})
+    assert :ok = Thinking.reload_from_durable()
+
+    assert {:ok,
+            [
+              {%TaintedValue{value: %{id: "thk_inner_hostile"}, taint: ^expected},
+               :legacy_unlabeled}
+            ]} = Thinking.recent_thinking_tainted(agent_id)
+
+    appended_taint = %Taint{level: :trusted, sensitivity: :public, source: "status_append"}
+
+    assert {:ok, appended} =
+             Thinking.record_thinking_tainted(
+               agent_id,
+               "append without upgrading retained status",
+               appended_taint
+             )
+
+    assert {:ok, reread} = Thinking.recent_thinking_tainted(agent_id, limit: 10)
+
+    statuses =
+      Map.new(reread, fn {%TaintedValue{value: entry, taint: taint}, status} ->
+        {entry.id, {taint, status}}
+      end)
+
+    assert statuses["thk_inner_hostile"] == {expected, :legacy_unlabeled}
+    assert statuses[appended.id] == {appended_taint, :verified}
   end
 
   test "security regression: taint-aware read restores a deleted whole ETS row", %{
@@ -387,6 +415,31 @@ defmodule Arbor.Memory.ThinkingProvenanceTest do
       appended.id => appended_taint,
       durable_entry.id => durable_taint
     })
+  end
+
+  test "security regression: wrong-shape ETS rows fail closed without crashing the owner", %{
+    agent_id: agent_id
+  } do
+    label = %Taint{level: :hostile, sensitivity: :restricted, source: "shape_authority"}
+    assert {:ok, entry} = Thinking.record_thinking_tainted(agent_id, "durable shape", label)
+    owner = Process.whereis(Thinking)
+    assert is_pid(owner)
+
+    true = :ets.insert(:arbor_memory_thinking, {agent_id, :not_a_projection, :extra_field})
+    assert Thinking.recent_thinking(agent_id) == []
+    assert Process.alive?(owner)
+
+    assert {:ok, [{%TaintedValue{value: repaired, taint: ^label}, :verified}]} =
+             Thinking.recent_thinking_tainted(agent_id)
+
+    assert repaired.id == entry.id
+    assert Process.alive?(owner)
+
+    true = :ets.insert(:arbor_memory_thinking, {agent_id, [entry | :improper_tail]})
+    assert Thinking.recent_thinking(agent_id) == []
+    assert :ok = Thinking.clear(agent_id)
+    assert Process.alive?(owner)
+    assert :ets.lookup(:arbor_memory_thinking, agent_id) == []
   end
 
   test "security regression: cross-agent ETS tamper cannot launder retained provenance", %{
@@ -593,6 +646,42 @@ defmodule Arbor.Memory.ThinkingProvenanceTest do
     assert actual == expected
   end
 
+  test "stream accumulation checks byte bounds before concatenation", %{agent_id: agent_id} do
+    max_bytes = ThinkingCodec.max_text_bytes()
+    label = %Taint{level: :derived, sensitivity: :internal, source: "stream_boundary"}
+    prefix = String.duplicate("x", max_bytes - 1)
+
+    assert :ok = Thinking.process_stream_chunk_tainted(agent_id, prefix, label)
+    assert :ok = Thinking.process_stream_chunk_tainted(agent_id, "y", label)
+
+    stream = :sys.get_state(Thinking).streams[agent_id]
+    assert byte_size(stream.text) == max_bytes
+
+    assert {:error, :invalid_payload} =
+             Thinking.process_stream_chunk_tainted(agent_id, "z", label)
+
+    assert byte_size(:sys.get_state(Thinking).streams[agent_id].text) == max_bytes
+
+    oversized_agent = "#{agent_id}_oversized"
+
+    assert {:error, :invalid_payload} =
+             Thinking.process_stream_chunk_tainted(
+               oversized_agent,
+               String.duplicate("o", max_bytes + 1),
+               label
+             )
+
+    refute Map.has_key?(:sys.get_state(Thinking).streams, oversized_agent)
+
+    assert {:ok, entry} =
+             Thinking.process_stream_chunk_tainted(agent_id, "", label, complete: true)
+
+    assert byte_size(entry.text) == max_bytes
+
+    assert {:ok, [{%TaintedValue{taint: ^label}, :verified}]} =
+             Thinking.recent_thinking_tainted(agent_id)
+  end
+
   test "incomplete streams are capped while existing streams can finish and clear", %{
     agent_id: agent_id
   } do
@@ -647,6 +736,44 @@ defmodule Arbor.Memory.ThinkingProvenanceTest do
              Thinking.recent_thinking_tainted(agent_id)
   end
 
+  test "security regression: reload cleanup uses bounded owned inventory", %{
+    agent_id: agent_id
+  } do
+    label = %Taint{level: :derived, sensitivity: :internal, source: "owned_inventory"}
+    assert {:ok, entry} = Thinking.record_thinking_tainted(agent_id, "owned row", label)
+
+    attacker_ids =
+      Enum.map(1..(Thinking.loaded_agent_limit() * 2), fn index ->
+        "attacker_projection_#{agent_id}_#{index}"
+      end)
+
+    on_exit(fn ->
+      Enum.each(attacker_ids, &:ets.delete(:arbor_memory_thinking, &1))
+    end)
+
+    attacker_rows = Enum.map(attacker_ids, &{&1, :wrong_shape})
+    true = :ets.insert(:arbor_memory_thinking, attacker_rows)
+
+    assert :ok = Thinking.reload_from_durable()
+    owner_state = :sys.get_state(Thinking)
+    assert owner_state.owned_agents == MapSet.new([agent_id])
+    assert MapSet.size(owner_state.owned_agents) <= Thinking.loaded_agent_limit()
+
+    assert [{_, :wrong_shape}] =
+             :ets.lookup(:arbor_memory_thinking, List.first(attacker_ids))
+
+    assert [{_, :wrong_shape}] =
+             :ets.lookup(:arbor_memory_thinking, List.last(attacker_ids))
+
+    assert {:ok, [{%TaintedValue{value: reloaded, taint: ^label}, :verified}]} =
+             Thinking.recent_thinking_tainted(agent_id)
+
+    assert reloaded.id == entry.id
+    assert Process.alive?(Process.whereis(Thinking))
+
+    Enum.each(attacker_ids, &:ets.delete(:arbor_memory_thinking, &1))
+  end
+
   test "post-persistence live install failure is fail-closed and reloadable", %{
     agent_id: agent_id
   } do
@@ -677,6 +804,91 @@ defmodule Arbor.Memory.ThinkingProvenanceTest do
     assert {:ok,
             [{%TaintedValue{value: %{text: "recoverable projection"}, taint: ^label}, :verified}]} =
              Thinking.recent_thinking_tainted(agent_id)
+  end
+
+  test "configured maximum fits C0 and byte-heavy aggregates evict the oldest tail", %{
+    agent_id: agent_id
+  } do
+    max_entries = Thinking.max_entries()
+    assert max_entries == ThinkingCodec.max_entries()
+    original_buffer_size = :sys.get_state(Thinking).buffer_size
+
+    on_exit(fn ->
+      if Process.whereis(Thinking) do
+        :sys.replace_state(Thinking, &%{&1 | buffer_size: original_buffer_size})
+      end
+    end)
+
+    :sys.replace_state(Thinking, &%{&1 | buffer_size: max_entries})
+    full_chain = Enum.map(1..Taint.max_chain_entries(), &"capacity_chain_#{&1}")
+    label = %Taint{level: :derived, source: "capacity_source", chain: full_chain}
+    timestamp = DateTime.utc_now()
+
+    labelled_entries =
+      Enum.map(1..max_entries, fn index ->
+        entry = %{
+          id: "thk_capacity_#{index}",
+          agent_id: agent_id,
+          text: "capacity item #{index}",
+          significant: false,
+          created_at: timestamp,
+          metadata: %{}
+        }
+
+        {entry, label}
+      end)
+
+    assert {:ok, aggregate, outer_taint} = ThinkingCodec.encode_aggregate(labelled_entries)
+    assert length(aggregate["entries"]) == max_entries
+    assert :ok = MemoryStore.persist("thinking", agent_id, aggregate, taint: outer_taint)
+    assert :ok = Thinking.reload_from_durable()
+    assert {:ok, loaded} = Thinking.recent_thinking_tainted(agent_id, limit: max_entries)
+    assert length(loaded) == max_entries
+
+    evicted_entry = labelled_entries |> List.last() |> elem(0)
+    assert {:ok, evicted_payload} = ThinkingCodec.entry_payload(evicted_entry)
+
+    assert {:ok, newest} =
+             Thinking.record_thinking_tainted(agent_id, "protected newest", label)
+
+    assert {:ok, after_count_eviction} =
+             Thinking.recent_thinking_tainted(agent_id, limit: max_entries)
+
+    assert length(after_count_eviction) == max_entries
+    assert Enum.any?(after_count_eviction, fn {value, _status} -> value.value.id == newest.id end)
+
+    refute Enum.any?(after_count_eviction, fn {value, _status} ->
+             value.value.id == evicted_entry.id
+           end)
+
+    assert {:ok, evicted_taint, :legacy_unlabeled} =
+             Provenance.resolve(
+               :thinking_entry,
+               agent_id,
+               evicted_entry.id,
+               evicted_payload
+             )
+
+    assert evicted_taint.source == "legacy_unlabeled"
+    assert :ok = Thinking.clear(agent_id)
+
+    maximum_text = String.duplicate("b", ThinkingCodec.max_text_bytes())
+    assert {:ok, first} = Thinking.record_thinking_tainted(agent_id, maximum_text, label)
+    assert {:ok, second} = Thinking.record_thinking_tainted(agent_id, maximum_text, label)
+    assert {:ok, third} = Thinking.record_thinking_tainted(agent_id, maximum_text, label)
+    assert {:ok, first_payload} = ThinkingCodec.entry_payload(first)
+
+    assert {:ok, byte_fitted} = Thinking.recent_thinking_tainted(agent_id, limit: max_entries)
+
+    assert Enum.map(byte_fitted, fn {value, _status} -> value.value.id end) == [
+             third.id,
+             second.id
+           ]
+
+    assert {:ok, removed_taint, :legacy_unlabeled} =
+             Provenance.resolve(:thinking_entry, agent_id, first.id, first_payload)
+
+    assert removed_taint.source == "legacy_unlabeled"
   end
 
   test "eviction and clear remove owned sidecars and durable aggregate", %{agent_id: agent_id} do

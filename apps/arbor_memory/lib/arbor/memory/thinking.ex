@@ -36,7 +36,8 @@ defmodule Arbor.Memory.Thinking do
 
   @ets_table :arbor_memory_thinking
   @default_buffer_size 50
-  @max_entries 256
+  @max_entries 96
+  @max_text_bytes 65_536
   @max_cleanup_entries @max_entries * 2 + 1
   @max_loaded_agents 1_024
   @max_active_streams 1_024
@@ -78,6 +79,14 @@ defmodule Arbor.Memory.Thinking do
   @doc false
   @spec active_stream_limit() :: pos_integer()
   def active_stream_limit, do: @max_active_streams
+
+  @doc false
+  @spec max_entries() :: pos_integer()
+  def max_entries, do: @max_entries
+
+  @doc false
+  @spec loaded_agent_limit() :: pos_integer()
+  def loaded_agent_limit, do: @max_loaded_agents
 
   @doc """
   Record a thinking block for an agent.
@@ -246,15 +255,24 @@ defmodule Arbor.Memory.Thinking do
   def init(opts) do
     ensure_ets_table()
     buffer_size = normalize_buffer_size(Keyword.get(opts, :buffer_size, @default_buffer_size))
-    _loaded = load_from_durable(buffer_size, false)
-    {:ok, %{buffer_size: buffer_size, streams: %{}}}
+
+    owned_agents =
+      case load_from_durable(buffer_size, false, MapSet.new()) do
+        {:ok, loaded_agents} -> loaded_agents
+        {:error, _reason} -> MapSet.new()
+      end
+
+    {:ok, %{buffer_size: buffer_size, streams: %{}, owned_agents: owned_agents}}
   end
 
   @impl true
   def handle_call({:record, agent_id, text, taint, opts}, _from, state) do
     case store_entry(agent_id, text, taint, opts, state) do
-      {:ok, entry} -> {:reply, {:ok, entry}, state}
-      {:error, reason} -> {:reply, {:error, reason}, state}
+      {:ok, entry} ->
+        {:reply, {:ok, entry}, put_owned_agent(state, agent_id)}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
     end
   end
 
@@ -283,7 +301,20 @@ defmodule Arbor.Memory.Thinking do
 
   @impl true
   def handle_call({:recent_tainted, agent_id, opts}, _from, state) do
-    {:reply, authoritative_tainted_read(agent_id, opts, state.buffer_size), state}
+    if owned_agent_capacity?(state, agent_id) do
+      case authoritative_tainted_read(agent_id, opts, state.buffer_size) do
+        {:ok, items, true} ->
+          {:reply, {:ok, items}, put_owned_agent(state, agent_id)}
+
+        {:ok, items, false} ->
+          {:reply, {:ok, items}, drop_owned_agent(state, agent_id)}
+
+        {:error, reason} ->
+          {:reply, {:error, reason}, state}
+      end
+    else
+      {:reply, {:error, :projection_capacity}, state}
+    end
   end
 
   @impl true
@@ -296,7 +327,13 @@ defmodule Arbor.Memory.Thinking do
       :ok ->
         :ets.delete(@ets_table, agent_id)
         cleanup_thinking_sidecars_after_clear(agent_id, cleanup_entries)
-        {:reply, :ok, %{state | streams: Map.delete(state.streams, agent_id)}}
+
+        next_state =
+          state
+          |> drop_owned_agent(agent_id)
+          |> Map.update!(:streams, &Map.delete(&1, agent_id))
+
+        {:reply, :ok, next_state}
 
       {:error, reason} ->
         {:reply, {:error, normalize_store_error(reason)}, state}
@@ -305,9 +342,12 @@ defmodule Arbor.Memory.Thinking do
 
   @impl true
   def handle_call(:reload_from_durable, _from, state) do
-    case load_from_durable(state.buffer_size, true) do
-      :ok -> {:reply, :ok, %{state | streams: %{}}}
-      {:error, reason} -> {:reply, {:error, reason}, state}
+    case load_from_durable(state.buffer_size, true, state.owned_agents) do
+      {:ok, owned_agents} ->
+        {:reply, :ok, %{state | streams: %{}, owned_agents: owned_agents}}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
     end
   end
 
@@ -316,6 +356,16 @@ defmodule Arbor.Memory.Thinking do
   # ============================================================================
 
   defp server_name, do: __MODULE__
+
+  defp owned_agent_capacity?(%{owned_agents: owned_agents}, agent_id) do
+    MapSet.member?(owned_agents, agent_id) or MapSet.size(owned_agents) < @max_loaded_agents
+  end
+
+  defp put_owned_agent(%{owned_agents: owned_agents} = state, agent_id),
+    do: %{state | owned_agents: MapSet.put(owned_agents, agent_id)}
+
+  defp drop_owned_agent(%{owned_agents: owned_agents} = state, agent_id),
+    do: %{state | owned_agents: MapSet.delete(owned_agents, agent_id)}
 
   defp ensure_ets_table do
     if :ets.whereis(@ets_table) == :undefined do
@@ -327,10 +377,39 @@ defmodule Arbor.Memory.Thinking do
 
   defp get_agent_entries(agent_id) do
     case :ets.lookup(@ets_table, agent_id) do
-      [{^agent_id, entries}] -> entries
-      [] -> []
+      [{^agent_id, entries}] ->
+        case bounded_projection_entries(entries, agent_id, [], 0) do
+          {:ok, safe_entries} -> safe_entries
+          {:error, :projection_corrupt} -> []
+        end
+
+      [] ->
+        []
+
+      _wrong_shape ->
+        []
+    end
+  rescue
+    _ -> []
+  catch
+    _, _ -> []
+  end
+
+  defp bounded_projection_entries([], _agent_id, acc, _count),
+    do: {:ok, Enum.reverse(acc)}
+
+  defp bounded_projection_entries([entry | rest], agent_id, acc, count)
+       when count < @max_entries do
+    with %{agent_id: ^agent_id} <- entry,
+         {:ok, _payload} <- ThinkingCodec.entry_payload(entry) do
+      bounded_projection_entries(rest, agent_id, [entry | acc], count + 1)
+    else
+      _ -> {:error, :projection_corrupt}
     end
   end
+
+  defp bounded_projection_entries(_entries, _agent_id, _acc, _count),
+    do: {:error, :projection_corrupt}
 
   defp build_entry(agent_id, text, opts) do
     %{
@@ -374,17 +453,20 @@ defmodule Arbor.Memory.Thinking do
   defp store_entry(agent_id, text, taint, opts, state) do
     entry = build_entry(agent_id, text, opts)
 
-    with {:ok, _payload} <- ThinkingCodec.entry_payload(entry),
+    with true <- owned_agent_capacity?(state, agent_id),
+         {:ok, _payload} <- ThinkingCodec.entry_payload(entry),
          {:ok, retained} <- mutation_base(agent_id, state.buffer_size) do
       all_labelled = [{entry, taint} | retained]
-      labelled_entries = Enum.take(all_labelled, state.buffer_size)
-      evicted = all_labelled |> Enum.drop(state.buffer_size) |> Enum.map(&elem(&1, 0))
+      candidates = Enum.take(all_labelled, state.buffer_size)
+      overflow_evicted = all_labelled |> Enum.drop(state.buffer_size) |> Enum.map(&elem(&1, 0))
 
       result =
-        with {:ok, aggregate, aggregate_taint} <-
-               ThinkingCodec.encode_aggregate(labelled_entries),
+        with {:ok, aggregate, aggregate_taint, labelled_entries, capacity_evicted} <-
+               encode_fitting_aggregate(candidates),
              :ok <-
                persist_aggregate_before_live_install(agent_id, aggregate, aggregate_taint) do
+          evicted = overflow_evicted ++ capacity_evicted
+
           install_entry_after_persist(
             agent_id,
             entry,
@@ -399,12 +481,45 @@ defmodule Arbor.Memory.Thinking do
         other -> other
       end
     else
+      false -> {:error, :projection_capacity}
       {:error, reason} -> {:error, normalize_store_error(reason)}
     end
   rescue
     _ -> {:error, :store_unavailable}
   catch
     _, _ -> {:error, :store_unavailable}
+  end
+
+  defp encode_fitting_aggregate(items), do: encode_fitting_aggregate(items, [])
+
+  defp encode_fitting_aggregate([], _evicted), do: {:error, :invalid_aggregate}
+
+  defp encode_fitting_aggregate(items, evicted) do
+    case ThinkingCodec.encode_aggregate(items) do
+      {:ok, aggregate, aggregate_taint} ->
+        {:ok, aggregate, aggregate_taint, items, Enum.reverse(evicted)}
+
+      {:error, _reason} ->
+        case remove_oldest_unprotected(items) do
+          {:ok, retained, evicted_entry} ->
+            encode_fitting_aggregate(retained, [evicted_entry | evicted])
+
+          :protected_only ->
+            {:error, :invalid_aggregate}
+        end
+    end
+  end
+
+  defp remove_oldest_unprotected([_newest]), do: :protected_only
+
+  defp remove_oldest_unprotected(items) do
+    case Enum.reverse(items) do
+      [oldest | retained_reversed] ->
+        {:ok, Enum.reverse(retained_reversed), elem(oldest, 0)}
+
+      _ ->
+        :protected_only
+    end
   end
 
   defp mutation_base(agent_id, buffer_size) do
@@ -586,27 +701,31 @@ defmodule Arbor.Memory.Thinking do
   end
 
   defp append_stream(nil, chunk, taint) do
-    validate_stream_value(chunk, taint)
+    with :ok <- validate_stream_text(chunk),
+         {:ok, taint} <- Taint.canonicalize(taint) do
+      {:ok, chunk, taint}
+    end
   end
 
   defp append_stream(%{text: accumulated, taint: accumulated_taint}, chunk, taint)
        when is_binary(accumulated) do
-    with {:ok, joined} <- Taint.join(accumulated_taint, taint) do
-      validate_stream_value(accumulated <> chunk, joined)
+    accumulated_bytes = byte_size(accumulated)
+
+    with :ok <- validate_stream_text(accumulated),
+         :ok <- validate_stream_text(chunk),
+         true <- byte_size(chunk) <= @max_text_bytes - accumulated_bytes,
+         {:ok, joined} <- Taint.join(accumulated_taint, taint) do
+      {:ok, accumulated <> chunk, joined}
     end
   end
 
   defp append_stream(_current, _chunk, _taint), do: {:error, :invalid_payload}
 
-  defp validate_stream_value(text, taint) do
-    with {:ok, taint} <- Taint.canonicalize(taint),
-         true <- byte_size(text) <= 65_536,
-         true <- String.valid?(text) do
-      {:ok, text, taint}
-    else
-      _ -> {:error, :invalid_payload}
-    end
-  end
+  defp validate_stream_text(text)
+       when is_binary(text) and byte_size(text) <= @max_text_bytes,
+       do: if(String.valid?(text), do: :ok, else: {:error, :invalid_payload})
+
+  defp validate_stream_text(_text), do: {:error, :invalid_payload}
 
   defp finish_stream(agent_id, text, stream_taint, opts, state) do
     if String.trim(text) == "" do
@@ -614,7 +733,12 @@ defmodule Arbor.Memory.Thinking do
     else
       case store_entry(agent_id, text, stream_taint, opts, state) do
         {:ok, entry} ->
-          {:reply, {:ok, entry}, %{state | streams: Map.delete(state.streams, agent_id)}}
+          next_state =
+            state
+            |> put_owned_agent(agent_id)
+            |> Map.update!(:streams, &Map.delete(&1, agent_id))
+
+          {:reply, {:ok, entry}, next_state}
 
         {:error, reason} ->
           {:reply, {:error, reason}, state}
@@ -642,8 +766,11 @@ defmodule Arbor.Memory.Thinking do
 
   defp reconcile_durable_read(agent_id, durable_items, opts, buffer_size) do
     case reconcile_authoritative_projection(agent_id, durable_items, buffer_size) do
-      {:ok, projection} -> {:ok, filter_decoded_items(projection, opts)}
-      {:error, reason} -> {:error, reason}
+      {:ok, projection} ->
+        {:ok, filter_decoded_items(projection, opts), projection != []}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -720,27 +847,29 @@ defmodule Arbor.Memory.Thinking do
 
   defp entry_since?(_entry, _since), do: false
 
-  defp load_from_durable(buffer_size, replace?) do
+  defp load_from_durable(buffer_size, replace?, owned_agents) do
     if MemoryStore.available?() do
       with {:ok, records} <- MemoryStore.load_all_tainted("thinking"),
            {:ok, plans} <- decode_records(records, buffer_size, 0, []),
            {:ok, installation} <- prepare_installation(plans, MapSet.new(), [], []) do
-        if replace?, do: clear_live_projection()
+        loaded_agents = installation_owned_agents(installation)
+
+        if replace?, do: clear_owned_projection(owned_agents)
 
         case commit_installation(installation) do
           :ok ->
             Logger.info("Thinking durable projection loaded", record_count: length(plans))
-            :ok
+            {:ok, loaded_agents}
 
           {:error, reason} ->
-            clear_live_projection()
+            clear_owned_projection(MapSet.union(owned_agents, loaded_agents))
             {:error, reason}
         end
       else
         _ -> {:error, :invalid_durable_state}
       end
     else
-      if replace?, do: {:error, :store_unavailable}, else: :ok
+      if replace?, do: {:error, :store_unavailable}, else: {:ok, owned_agents}
     end
   rescue
     _ -> {:error, :store_unavailable}
@@ -853,6 +982,13 @@ defmodule Arbor.Memory.Thinking do
       {:error, :store_unavailable}
   end
 
+  defp installation_owned_agents(%{rows: rows}) do
+    Enum.reduce(rows, MapSet.new(), fn
+      {agent_id, [_entry | _rest]}, acc -> MapSet.put(acc, agent_id)
+      {_agent_id, []}, acc -> acc
+    end)
+  end
+
   defp bind_installation([], _bound), do: :ok
 
   defp bind_installation([{agent_id, entry_id, payload, taint} = binding | rest], bound) do
@@ -881,18 +1017,19 @@ defmodule Arbor.Memory.Thinking do
     _, _ -> :ok
   end
 
-  defp clear_live_projection do
-    @ets_table
-    |> :ets.tab2list()
-    |> Enum.each(fn
-      {agent_id, entries} when is_binary(agent_id) and is_list(entries) ->
-        cleanup_labels(agent_id, entries)
+  defp clear_owned_projection(%MapSet{} = owned_agents) do
+    if MapSet.size(owned_agents) <= @max_loaded_agents do
+      Enum.each(owned_agents, fn agent_id ->
+        cleanup_labels(agent_id, get_agent_entries(agent_id))
+        :ets.delete(@ets_table, agent_id)
+      end)
+    end
 
-      _ ->
-        :ok
-    end)
-
-    :ets.delete_all_objects(@ets_table)
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
   end
 
   defp cleanup_thinking_sidecars_after_clear(agent_id, entries) do

@@ -4,7 +4,11 @@ defmodule Arbor.Memory.ThinkingCodec do
   alias Arbor.Contracts.Security.{Taint, TaintEnvelope}
 
   @version 1
-  @max_entries 256
+  # C0 permits 256 raw array items, but each thinking item expands into payload,
+  # envelope, taint, and chain nodes. Ninety-six leaves headroom under C0's
+  # 4,096-node ceiling even for a full valid taint chain; byte-heavy aggregates
+  # are reduced further by Thinking's protected-head tail eviction.
+  @max_entries 96
   @max_identifier_bytes 256
   @max_text_bytes 65_536
   @max_metadata_bytes 131_072
@@ -22,6 +26,9 @@ defmodule Arbor.Memory.ThinkingCodec do
 
   @spec max_entries() :: pos_integer()
   def max_entries, do: @max_entries
+
+  @spec max_text_bytes() :: pos_integer()
+  def max_text_bytes, do: @max_text_bytes
 
   @spec entry_payload(term()) :: {:ok, map()} | {:error, :invalid_payload}
   def entry_payload(entry) when is_map(entry) and not is_struct(entry) do
@@ -130,16 +137,31 @@ defmodule Arbor.Memory.ThinkingCodec do
   end
 
   @spec status_for(Taint.t(), provenance_status()) :: provenance_status()
-  def status_for(%Taint{source: "invalid_durable_provenance"}, _status),
-    do: :invalid_durable_provenance
+  def status_for(taint, status) do
+    case Taint.canonicalize(taint) do
+      {:ok, %Taint{} = taint} ->
+        cond do
+          provenance_marker?(taint, "invalid_durable_provenance") ->
+            :invalid_durable_provenance
 
-  def status_for(%Taint{source: "legacy_unlabeled"}, _status), do: :legacy_unlabeled
+          provenance_marker?(taint, "legacy_unlabeled") ->
+            :legacy_unlabeled
 
-  def status_for(%Taint{}, status)
-      when status in [:verified, :legacy_unlabeled, :invalid_durable_provenance],
-      do: status
+          status in [:verified, :legacy_unlabeled, :invalid_durable_provenance] ->
+            status
 
-  def status_for(_taint, _status), do: :invalid_durable_provenance
+          true ->
+            :invalid_durable_provenance
+        end
+
+      _ ->
+        :invalid_durable_provenance
+    end
+  rescue
+    _ -> :invalid_durable_provenance
+  catch
+    _, _ -> :invalid_durable_provenance
+  end
 
   defp encode_items([], persisted, taints), do: {:ok, persisted, taints}
 
@@ -325,6 +347,21 @@ defmodule Arbor.Memory.ThinkingCodec do
   defp label_entries(entries, taint, status) do
     Enum.map(entries, &{&1, taint, status})
   end
+
+  defp provenance_marker?(%Taint{source: marker}, marker), do: true
+
+  defp provenance_marker?(%Taint{chain: chain}, marker),
+    do: chain_marker?(chain, marker, Taint.max_chain_entries())
+
+  defp chain_marker?([], _marker, _remaining), do: false
+
+  defp chain_marker?([marker | _rest], marker, remaining) when remaining > 0,
+    do: true
+
+  defp chain_marker?([_entry | rest], marker, remaining) when remaining > 0,
+    do: chain_marker?(rest, marker, remaining - 1)
+
+  defp chain_marker?(_chain, _marker, _remaining), do: false
 
   defp unique_persisted_ids?(items) do
     ids = Enum.map(items, &get_in(&1, ["payload", "id"]))
