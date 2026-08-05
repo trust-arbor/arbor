@@ -145,6 +145,65 @@ defmodule Arbor.Memory.EventsTest do
   end
 
   describe "maintenance archive identity" do
+    test "legacy knowledge archives remain visible through the durable read view" do
+      DurableEventLog.start!()
+      agent_id = "archive_legacy_read_#{System.unique_integer([:positive])}"
+
+      assert :ok =
+               Events.record_knowledge_archived(agent_id, %{
+                 node_id: "legacy-node",
+                 type: :fact,
+                 content: "legacy archive",
+                 relevance: 0.1,
+                 reason: :low_relevance
+               })
+
+      assert {:ok, [%Arbor.Persistence.Event{data: data}]} =
+               Events.get_by_type(agent_id, :knowledge_archived)
+
+      assert data["agent_id"] == agent_id
+      assert data["node_id"] == "legacy-node"
+    end
+
+    test "exact durable knowledge archives are visible through history and recent reads" do
+      DurableEventLog.start!()
+      agent_id = "archive_durable_read_#{System.unique_integer([:positive])}"
+      occurred_at = ~U[2026-08-05 12:00:00Z]
+
+      entry = %{
+        archive_payload: %{"node_id" => "durable-node", "reason" => "low_relevance"},
+        idempotency_key: {"archive-read", "durable-node", :low_relevance},
+        provenance_status: :verified,
+        taint: %Taint{
+          level: :trusted,
+          sensitivity: :public,
+          sanitizations: 0,
+          confidence: :verified,
+          source: "archive_read_test",
+          chain: []
+        }
+      }
+
+      assert :ok = Events.archive_knowledge_once(agent_id, entry, occurred_at)
+      assert {:ok, [history_event]} = Events.get_history(agent_id)
+      assert {:ok, [recent_event]} = Events.get_recent(agent_id, 1)
+      assert history_event.id == recent_event.id
+      assert history_event.data["agent_id"] == agent_id
+    end
+
+    test "durable archive read failures are returned instead of hidden by legacy history" do
+      DurableEventLog.start!()
+
+      DurableEventLog.lease_target!(%{
+        name: :missing_archive_read_target,
+        backend: Arbor.Memory.Test.NodeRestartEventLog,
+        opts: []
+      })
+
+      assert {:error, :store_unavailable} =
+               Events.get_history("archive_read_failure_#{System.unique_integer([:positive])}")
+    end
+
     test "security regression scopes the same maintenance identity to each agent" do
       DurableEventLog.start!()
 

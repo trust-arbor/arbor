@@ -391,14 +391,9 @@ defmodule Arbor.Memory.Events do
   """
   @spec get_history(String.t(), keyword()) :: {:ok, [Event.t()]} | {:error, term()}
   def get_history(agent_id, opts \\ []) do
-    stream_id = stream_id(agent_id)
-
-    Arbor.Persistence.read_stream(
-      @event_log_name,
-      @event_log_backend,
-      stream_id,
-      opts
-    )
+    with {:ok, events} <- read_archive_view(agent_id, opts) do
+      {:ok, apply_read_options(events, opts)}
+    end
   end
 
   @doc """
@@ -412,15 +407,11 @@ defmodule Arbor.Memory.Events do
   def get_by_type(agent_id, event_type, opts \\ [])
 
   def get_by_type(agent_id, :knowledge_archived, opts) do
-    with {:ok, target} <- Config.maintenance_archive_target(),
-         {:ok, events} <-
-           Arbor.Persistence.read_stream(
-             target.name,
-             target.backend,
-             stream_id(agent_id),
-             Keyword.merge(opts, target.opts)
-           ) do
-      {:ok, filter_by_type(events, :knowledge_archived)}
+    with {:ok, events} <- read_archive_view(agent_id, opts) do
+      events
+      |> filter_by_type(:knowledge_archived)
+      |> apply_read_options(opts)
+      |> then(&{:ok, &1})
     end
   end
 
@@ -461,6 +452,76 @@ defmodule Arbor.Memory.Events do
   # ============================================================================
   # Private Helpers
   # ============================================================================
+
+  defp read_archive_view(agent_id, opts) do
+    read_opts = opts |> Keyword.delete(:limit) |> Keyword.put(:direction, :forward)
+
+    with {:ok, target} <- Config.maintenance_archive_target(),
+         {:ok, legacy_events} <-
+           read_event_stream(@event_log_name, @event_log_backend, agent_id, read_opts),
+         {:ok, archive_events} <- read_archive_target(target, agent_id, read_opts) do
+      legacy_events
+      |> merge_archive_events(archive_events)
+      |> then(&{:ok, &1})
+    end
+  end
+
+  defp read_archive_target(target, _agent_id, _read_opts)
+       when target.name == @event_log_name and target.backend == @event_log_backend,
+       do: {:ok, []}
+
+  defp read_archive_target(target, agent_id, read_opts) do
+    with {:ok, events} <-
+           read_event_stream(
+             target.name,
+             target.backend,
+             agent_id,
+             Keyword.merge(read_opts, target.opts)
+           ) do
+      {:ok, filter_by_type(events, :knowledge_archived)}
+    end
+  end
+
+  defp read_event_stream(name, backend, agent_id, opts) do
+    Arbor.Persistence.read_stream(name, backend, stream_id(agent_id), opts)
+  rescue
+    error -> {:error, {:event_log_unavailable, error}}
+  catch
+    :exit, reason -> {:error, {:event_log_unavailable, reason}}
+  end
+
+  defp merge_archive_events(legacy_events, archive_events) do
+    (legacy_events ++ archive_events)
+    |> Enum.uniq_by(& &1.id)
+    |> Enum.sort_by(&event_sort_key/1)
+  end
+
+  defp event_sort_key(%Event{} = event) do
+    {
+      timestamp_sort_key(event.timestamp),
+      event.event_number || 0,
+      event.global_position || -1,
+      event.id
+    }
+  end
+
+  defp timestamp_sort_key(%DateTime{} = timestamp),
+    do: DateTime.to_unix(timestamp, :microsecond)
+
+  defp timestamp_sort_key(_timestamp), do: 0
+
+  defp apply_read_options(events, opts) do
+    events =
+      case Keyword.get(opts, :direction, :forward) do
+        :backward -> Enum.reverse(events)
+        _forward -> events
+      end
+
+    case Keyword.get(opts, :limit) do
+      nil -> events
+      limit -> Enum.take(events, limit)
+    end
+  end
 
   defp archive_event_id(agent_id, stream_id, {operation_id, node_id, reason})
        when is_binary(agent_id) and is_binary(stream_id) and is_binary(operation_id) and
