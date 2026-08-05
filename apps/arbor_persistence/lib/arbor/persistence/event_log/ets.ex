@@ -394,6 +394,7 @@ defmodule Arbor.Persistence.EventLog.ETS do
         state.stream_table,
         state.global_table,
         stream_id,
+        Map.get(state.stream_versions, stream_id, 0),
         from_num,
         limit,
         direction,
@@ -1321,20 +1322,34 @@ defmodule Arbor.Persistence.EventLog.ETS do
          stream_table,
          global_table,
          stream_id,
+         stream_version,
          from_num,
          limit,
          direction,
          max_scan
        ) do
-    # Walk the stream table to collect global_position pointers, then
-    # dereference each one via the global table to get the full event.
-    # See moduledoc for why stream table holds pointers, not events.
-    events = collect_stream_events(stream_table, global_table, stream_id, from_num, [], max_scan)
-
     events =
       case direction do
-        :forward -> events
-        :backward -> Enum.reverse(events)
+        :forward ->
+          collect_stream_events(
+            stream_table,
+            global_table,
+            stream_id,
+            from_num,
+            [],
+            effective_scan_limit(limit, max_scan)
+          )
+
+        :backward ->
+          collect_stream_events_backward(
+            stream_table,
+            global_table,
+            stream_id,
+            stream_version + 1,
+            from_num,
+            [],
+            effective_scan_limit(limit, max_scan)
+          )
       end
 
     case limit do
@@ -1381,6 +1396,52 @@ defmodule Arbor.Persistence.EventLog.ETS do
         end
     end
   end
+
+  defp collect_stream_events_backward(_st, _gt, _sid, _before, _from, acc, 0),
+    do: Enum.reverse(acc)
+
+  defp collect_stream_events_backward(
+         stream_table,
+         global_table,
+         stream_id,
+         before_event_number,
+         from_num,
+         acc,
+         remaining
+       ) do
+    case :ets.prev(stream_table, {stream_id, before_event_number}) do
+      {^stream_id, event_number} = key when event_number >= from_num ->
+        case :ets.lookup(stream_table, key) do
+          [{^key, global_position}] ->
+            case :ets.lookup(global_table, global_position) do
+              [{^global_position, event}] ->
+                collect_stream_events_backward(
+                  stream_table,
+                  global_table,
+                  stream_id,
+                  event_number,
+                  from_num,
+                  [event | acc],
+                  decrement_limit(remaining)
+                )
+
+              [] ->
+                Enum.reverse(acc)
+            end
+
+          [] ->
+            Enum.reverse(acc)
+        end
+
+      _outside_stream_or_range ->
+        Enum.reverse(acc)
+    end
+  end
+
+  defp effective_scan_limit(nil, nil), do: nil
+  defp effective_scan_limit(limit, nil), do: limit
+  defp effective_scan_limit(nil, max_scan), do: max_scan
+  defp effective_scan_limit(limit, max_scan), do: min(limit, max_scan)
 
   defp do_read_all(table, from_pos, limit) do
     events = collect_global_events(table, from_pos, limit, [])

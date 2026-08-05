@@ -462,6 +462,34 @@ defmodule Arbor.Persistence.EventLog.ETSTest do
       assert numbers == [3, 2, 1]
     end
 
+    test "bounded backward reads start at the stream tail and retain an inclusive from", %{
+      name: name
+    } do
+      events = for i <- 1..10, do: Event.new("s1", "t", %{i: i})
+      ETS.append("s1", events, name: name)
+
+      assert {:ok, tail} =
+               ETS.read_stream("s1",
+                 name: name,
+                 direction: :backward,
+                 limit: 3,
+                 max_scan: 3
+               )
+
+      assert Enum.map(tail, & &1.event_number) == [10, 9, 8]
+
+      assert {:ok, bounded_from} =
+               ETS.read_stream("s1",
+                 name: name,
+                 from: 9,
+                 direction: :backward,
+                 limit: 3,
+                 max_scan: 3
+               )
+
+      assert Enum.map(bounded_from, & &1.event_number) == [10, 9]
+    end
+
     test "security regression (max_scan): bounds how many events are walked into memory",
          %{name: name} do
       # codex resource-exhaustion.historian-taint-query-full-scan: without a
