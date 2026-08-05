@@ -1,13 +1,15 @@
 defmodule Arbor.Memory.KnowledgeGraph.Codec do
   @moduledoc false
 
-  alias Arbor.Common.SafeAtom
   alias Arbor.Contracts.Security.{Taint, TaintEnvelope}
   alias Arbor.Memory.KnowledgeGraph
 
   @kind "arbor_knowledge_graph"
   @version 1
-  @max_content_items 256
+  # The durable wrapper carries one payload plus one provenance envelope per
+  # content item. Sixty-four remains encodable under TaintEnvelope's 4,096-node
+  # ceiling even when every label has a maximum-length provenance chain.
+  @max_content_items 64
   @max_edges 256
   @max_identifier_bytes 256
   @max_generic_nodes 512
@@ -27,6 +29,9 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
   )
   @edge_keys ~w(created_at id metadata relationship source_id strength target_id)
   @pending_keys ~w(confidence content extracted_at id metadata source type)
+  @config_keys ~w(auto_embed decay_rate max_nodes_per_type prune_threshold)
+  @legacy_node_keys @node_keys ++ ["embedding"]
+  @legacy_edge_keys @edge_keys ++ ["weight"]
 
   @allowed_node_types [
     :fact,
@@ -39,6 +44,103 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
     :trait,
     :intention
   ]
+
+  @allowed_relationships [
+    :associated_with,
+    :causes,
+    :contradicts,
+    :depends_on,
+    :derived_from,
+    :enables,
+    :example_of,
+    :follows,
+    :part_of,
+    :precedes,
+    :related_to,
+    :relates_to,
+    :supports
+  ]
+
+  # Extensible metadata should use string keys/values. Atom preservation is
+  # deliberately limited to this load-order-independent semantic registry.
+  @semantic_atoms Enum.uniq(
+                    @allowed_node_types ++
+                      @allowed_relationships ++
+                      [
+                        :accepted,
+                        :action,
+                        :auto_embed,
+                        :capability,
+                        :category,
+                        :confidence,
+                        :context,
+                        :conversation_id,
+                        :count,
+                        :created_by,
+                        :decay_rate,
+                        :description,
+                        :detection_source,
+                        :evidence,
+                        :failure,
+                        :failure_then_success,
+                        :feedback,
+                        :fixed,
+                        :goal_id,
+                        :long_sequence,
+                        :low_relevance,
+                        :memory_id,
+                        :max_nodes_per_type,
+                        :min_max,
+                        :name,
+                        :occurrences,
+                        :original_confidence,
+                        :outcome,
+                        :pattern_analysis,
+                        :pattern_type,
+                        :percentage,
+                        :personality,
+                        :preference,
+                        :preserved,
+                        :prune_threshold,
+                        :query_used,
+                        :reason,
+                        :reflection,
+                        :reflection_learning,
+                        :rejected,
+                        :repeated_sequence,
+                        :required,
+                        :review,
+                        :self,
+                        :skill,
+                        :source,
+                        :success,
+                        :tags,
+                        :task_id,
+                        :technical,
+                        :tool,
+                        :tool_name,
+                        :tools,
+                        :trait,
+                        :unlimited,
+                        :updated_at,
+                        :value,
+                        :working_memory
+                      ]
+                  )
+  @semantic_atoms_by_name Map.new(@semantic_atoms, &{Atom.to_string(&1), &1})
+
+  @capacity_probe_taint %Taint{
+    level: :hostile,
+    sensitivity: :restricted,
+    sanitizations: 0,
+    confidence: :unverified,
+    source: String.duplicate("s", Taint.max_source_bytes()),
+    chain:
+      List.duplicate(
+        String.duplicate("c", Taint.max_chain_entry_bytes()),
+        Taint.max_chain_entries()
+      )
+  }
 
   @type provenance_status :: :verified | :legacy_unlabeled | :invalid_durable_provenance
   @type label :: %{taint: Taint.t(), status: provenance_status()}
@@ -88,9 +190,9 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
          {:ok, pending_facts} <- encode_pending(graph.pending_facts, :fact),
          {:ok, pending_learnings} <- encode_pending(graph.pending_learnings, :learning),
          {:ok, active_set} <- encode_active_set(graph.active_set, Map.keys(nodes)),
-         {:ok, config} <- encode_generic(graph.config),
+         {:ok, config} <- encode_config(graph.config),
          {:ok, max_tokens} <- encode_max_tokens(graph.max_tokens),
-         {:ok, type_quotas} <- encode_generic(graph.type_quotas),
+         {:ok, type_quotas} <- encode_type_quotas(graph.type_quotas),
          {:ok, last_decay_at} <- encode_optional_datetime(graph.last_decay_at),
          :ok <- validate_graph_scalars(graph) do
       payload = %{
@@ -108,17 +210,21 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
         "last_decay_at" => last_decay_at
       }
 
-      with {:ok, _bytes} <- TaintEnvelope.canonical_json(payload),
+      with :ok <- ensure_pending_ids_disjoint(pending_facts, pending_learnings),
+           {:ok, _bytes} <- TaintEnvelope.canonical_json(payload),
            {:ok, normalized_graph} <- decode_graph_payload(agent_id, payload) do
-        {:ok,
-         %{
-           graph: normalized_graph,
-           payload: payload,
-           base_payload: base_payload(payload),
-           nodes: nodes,
-           pending_facts: index_pending(pending_facts),
-           pending_learnings: index_pending(pending_learnings)
-         }}
+        prepared = %{
+          graph: normalized_graph,
+          payload: payload,
+          base_payload: base_payload(payload),
+          nodes: nodes,
+          pending_facts: index_pending(pending_facts),
+          pending_learnings: index_pending(pending_learnings)
+        }
+
+        with :ok <- validate_prepared_capacity(prepared) do
+          {:ok, prepared}
+        end
       else
         _ -> {:error, :graph_limit_exceeded}
       end
@@ -176,14 +282,18 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
           prior -> join_labels([prior | components])
         end
 
-      {:ok,
-       Map.merge(prepared, %{
-         base: base,
-         aggregate: aggregate,
-         nodes: nodes,
-         pending_facts: pending_facts,
-         pending_learnings: pending_learnings
-       })}
+      snapshot =
+        Map.merge(prepared, %{
+          base: base,
+          aggregate: aggregate,
+          nodes: nodes,
+          pending_facts: pending_facts,
+          pending_learnings: pending_learnings
+        })
+
+      with {:ok, _wrapper} <- encode(snapshot) do
+        {:ok, snapshot}
+      end
     else
       {:error, _reason} = error -> error
       _ -> {:error, :invalid_graph}
@@ -307,6 +417,7 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
   defp decode_legacy(agent_id, data, outer_taint, outer_status) do
     with :ok <- legacy_preflight(agent_id, data),
          %KnowledgeGraph{} = graph <- KnowledgeGraph.from_map(data),
+         {:ok, graph} <- normalize_legacy_graph(graph),
          {:ok, prepared} <- prepare(agent_id, graph),
          {:ok, outer_taint} <- Taint.canonicalize(outer_taint) do
       floor =
@@ -394,14 +505,14 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
          {:ok, edges} <- decode_edges(payload["edges"], nodes),
          {:ok, pending_facts} <- decode_pending(payload["pending_facts"], :fact),
          {:ok, pending_learnings} <- decode_pending(payload["pending_learnings"], :learning),
-         {:ok, config} <- decode_generic(payload["config"]),
-         true <- is_map(config) and not is_struct(config),
+         :ok <- ensure_decoded_pending_ids_disjoint(pending_facts, pending_learnings),
+         {:ok, config} <- decode_config(payload["config"]),
+         true <- valid_max_active?(payload["max_active"]),
          {:ok, active_set} <- decode_active_set(payload["active_set"], nodes),
-         true <- valid_non_negative_integer?(payload["max_active"]),
-         true <- finite_number?(payload["dedup_threshold"]),
+         true <- length(active_set) <= payload["max_active"],
+         true <- valid_ratio?(payload["dedup_threshold"]),
          {:ok, max_tokens} <- decode_max_tokens(payload["max_tokens"]),
-         {:ok, type_quotas} <- decode_generic(payload["type_quotas"]),
-         true <- is_map(type_quotas) and not is_struct(type_quotas),
+         {:ok, type_quotas} <- decode_type_quotas(payload["type_quotas"]),
          {:ok, last_decay_at} <- decode_optional_datetime(payload["last_decay_at"]) do
       {:ok,
        %KnowledgeGraph{
@@ -445,8 +556,8 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
     with {:ok, type} <- normalize_node_type(field(node, :type)),
          content when is_binary(content) <- field(node, :content),
          true <- valid_string?(content),
-         true <- finite_number?(field(node, :relevance)),
-         true <- finite_number?(field(node, :confidence, 0.5)),
+         true <- valid_ratio?(field(node, :relevance)),
+         true <- valid_ratio?(field(node, :confidence, 0.5)),
          true <- valid_non_negative_integer?(field(node, :access_count, 0)),
          {:ok, created_at} <- encode_datetime(field(node, :created_at)),
          {:ok, last_accessed} <- encode_datetime(field(node, :last_accessed)),
@@ -498,8 +609,8 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
          true <- node["id"] == id,
          {:ok, type} <- normalize_node_type(node["type"]),
          true <- valid_string?(node["content"]),
-         true <- finite_number?(node["relevance"]),
-         true <- finite_number?(node["confidence"]),
+         true <- valid_ratio?(node["relevance"]),
+         true <- valid_ratio?(node["confidence"]),
          true <- valid_non_negative_integer?(node["access_count"]),
          {:ok, created_at} <- decode_datetime(node["created_at"]),
          {:ok, last_accessed} <- decode_datetime(node["last_accessed"]),
@@ -533,17 +644,27 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
     node_ids = MapSet.new(node_ids)
 
     with true <- map_size(edges) <= MapSet.size(node_ids),
-         {:ok, encoded, _count, _ids} <-
-           Enum.reduce_while(edges, {:ok, %{}, 0, MapSet.new()}, fn {source_id, source_edges},
-                                                                    {:ok, acc, count, ids} ->
-             with true <- MapSet.member?(node_ids, source_id),
-                  {:ok, values, count, ids} <-
-                    encode_edge_list(source_edges, source_id, node_ids, count, ids) do
-               {:cont, {:ok, Map.put(acc, source_id, values), count, ids}}
-             else
-               _ -> {:halt, {:error, :invalid_graph}}
+         {:ok, encoded, _count, _ids, _logical_edges} <-
+           Enum.reduce_while(
+             edges,
+             {:ok, %{}, 0, MapSet.new(), MapSet.new()},
+             fn {source_id, source_edges}, {:ok, acc, count, ids, logical_edges} ->
+               with true <- MapSet.member?(node_ids, source_id),
+                    {:ok, values, count, ids, logical_edges} <-
+                      encode_edge_list(
+                        source_edges,
+                        source_id,
+                        node_ids,
+                        count,
+                        ids,
+                        logical_edges
+                      ) do
+                 {:cont, {:ok, Map.put(acc, source_id, values), count, ids, logical_edges}}
+               else
+                 _ -> {:halt, {:error, :invalid_graph}}
+               end
              end
-           end) do
+           ) do
       {:ok, encoded}
     else
       _ -> {:error, :invalid_graph}
@@ -552,19 +673,29 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
 
   defp encode_edges(_edges, _node_ids), do: {:error, :invalid_graph}
 
-  defp encode_edge_list(edges, source_id, node_ids, count, ids) do
-    reduce_bounded_list(edges, @max_edges - count, {:ok, [], count, ids}, fn edge,
-                                                                             {:ok, acc, n, seen} ->
-      with {:ok, encoded} <- encode_edge(edge, source_id, node_ids),
-           false <- MapSet.member?(seen, encoded["id"]) do
-        {:ok, [encoded | acc], n + 1, MapSet.put(seen, encoded["id"])}
-      else
-        _ -> {:error, :invalid_graph}
+  defp encode_edge_list(edges, source_id, node_ids, count, ids, logical_edges) do
+    reduce_bounded_list(
+      edges,
+      @max_edges - count,
+      {:ok, [], count, ids, logical_edges},
+      fn edge, {:ok, acc, n, seen_ids, seen_logical} ->
+        with {:ok, encoded} <- encode_edge(edge, source_id, node_ids),
+             logical <- {source_id, encoded["target_id"], encoded["relationship"]},
+             false <- MapSet.member?(seen_ids, encoded["id"]),
+             false <- MapSet.member?(seen_logical, logical) do
+          {:ok, [encoded | acc], n + 1, MapSet.put(seen_ids, encoded["id"]),
+           MapSet.put(seen_logical, logical)}
+        else
+          _ -> {:error, :invalid_graph}
+        end
       end
-    end)
+    )
     |> case do
-      {:ok, values, total, seen} -> {:ok, Enum.reverse(values), total, seen}
-      {:error, _reason} = error -> error
+      {:ok, values, total, seen_ids, seen_logical} ->
+        {:ok, Enum.reverse(values), total, seen_ids, seen_logical}
+
+      {:error, _reason} = error ->
+        error
     end
   end
 
@@ -574,8 +705,8 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
          true <- field(edge, :source_id) == source_id,
          target_id when is_binary(target_id) <- field(edge, :target_id),
          true <- MapSet.member?(node_ids, target_id),
-         {:ok, relationship} <- normalize_existing_atom(field(edge, :relationship)),
-         true <- finite_number?(field(edge, :strength, field(edge, :weight, 1.0))),
+         {:ok, relationship} <- normalize_relationship(field(edge, :relationship)),
+         true <- valid_edge_strength?(field(edge, :strength, field(edge, :weight, 1.0))),
          {:ok, created_at} <- encode_datetime(field(edge, :created_at)),
          {:ok, metadata} <- encode_generic(field(edge, :metadata, %{})) do
       {:ok,
@@ -599,17 +730,27 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
     node_ids = Map.keys(nodes) |> MapSet.new()
 
     with true <- map_size(edges) <= MapSet.size(node_ids),
-         {:ok, decoded, _count, _ids} <-
-           Enum.reduce_while(edges, {:ok, %{}, 0, MapSet.new()}, fn {source_id, source_edges},
-                                                                    {:ok, acc, count, ids} ->
-             with true <- MapSet.member?(node_ids, source_id),
-                  {:ok, values, count, ids} <-
-                    decode_edge_list(source_edges, source_id, node_ids, count, ids) do
-               {:cont, {:ok, Map.put(acc, source_id, values), count, ids}}
-             else
-               _ -> {:halt, {:error, :invalid_graph}}
+         {:ok, decoded, _count, _ids, _logical_edges} <-
+           Enum.reduce_while(
+             edges,
+             {:ok, %{}, 0, MapSet.new(), MapSet.new()},
+             fn {source_id, source_edges}, {:ok, acc, count, ids, logical_edges} ->
+               with true <- MapSet.member?(node_ids, source_id),
+                    {:ok, values, count, ids, logical_edges} <-
+                      decode_edge_list(
+                        source_edges,
+                        source_id,
+                        node_ids,
+                        count,
+                        ids,
+                        logical_edges
+                      ) do
+                 {:cont, {:ok, Map.put(acc, source_id, values), count, ids, logical_edges}}
+               else
+                 _ -> {:halt, {:error, :invalid_graph}}
+               end
              end
-           end) do
+           ) do
       {:ok, decoded}
     else
       _ -> {:error, :invalid_graph}
@@ -618,19 +759,29 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
 
   defp decode_edges(_edges, _nodes), do: {:error, :invalid_graph}
 
-  defp decode_edge_list(edges, source_id, node_ids, count, ids) do
-    reduce_bounded_list(edges, @max_edges - count, {:ok, [], count, ids}, fn edge,
-                                                                             {:ok, acc, n, seen} ->
-      with {:ok, decoded} <- decode_edge(edge, source_id, node_ids),
-           false <- MapSet.member?(seen, decoded.id) do
-        {:ok, [decoded | acc], n + 1, MapSet.put(seen, decoded.id)}
-      else
-        _ -> {:error, :invalid_graph}
+  defp decode_edge_list(edges, source_id, node_ids, count, ids, logical_edges) do
+    reduce_bounded_list(
+      edges,
+      @max_edges - count,
+      {:ok, [], count, ids, logical_edges},
+      fn edge, {:ok, acc, n, seen_ids, seen_logical} ->
+        with {:ok, decoded} <- decode_edge(edge, source_id, node_ids),
+             logical <- {source_id, decoded.target_id, decoded.relationship},
+             false <- MapSet.member?(seen_ids, decoded.id),
+             false <- MapSet.member?(seen_logical, logical) do
+          {:ok, [decoded | acc], n + 1, MapSet.put(seen_ids, decoded.id),
+           MapSet.put(seen_logical, logical)}
+        else
+          _ -> {:error, :invalid_graph}
+        end
       end
-    end)
+    )
     |> case do
-      {:ok, values, total, seen} -> {:ok, Enum.reverse(values), total, seen}
-      {:error, _reason} = error -> error
+      {:ok, values, total, seen_ids, seen_logical} ->
+        {:ok, Enum.reverse(values), total, seen_ids, seen_logical}
+
+      {:error, _reason} = error ->
+        error
     end
   end
 
@@ -639,8 +790,8 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
          :ok <- validate_identifier(edge["id"]),
          true <- edge["source_id"] == source_id,
          true <- MapSet.member?(node_ids, edge["target_id"]),
-         {:ok, relationship} <- normalize_existing_atom(edge["relationship"]),
-         true <- finite_number?(edge["strength"]),
+         {:ok, relationship} <- normalize_relationship(edge["relationship"]),
+         true <- valid_edge_strength?(edge["strength"]),
          {:ok, created_at} <- decode_datetime(edge["created_at"]),
          {:ok, metadata} <- decode_generic(edge["metadata"]),
          true <- is_map(metadata) and not is_struct(metadata) do
@@ -681,7 +832,7 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
          type <- field(item, :type),
          true <- type in [expected_type, Atom.to_string(expected_type)],
          true <- valid_string?(field(item, :content)),
-         true <- finite_number?(field(item, :confidence, 0.5)),
+         true <- valid_ratio?(field(item, :confidence, 0.5)),
          source <- field(item, :source),
          true <- is_nil(source) or valid_string?(source),
          {:ok, extracted_at} <- encode_datetime(field(item, :extracted_at)),
@@ -724,7 +875,7 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
          :ok <- validate_identifier(item["id"]),
          true <- item["type"] == Atom.to_string(expected_type),
          true <- valid_string?(item["content"]),
-         true <- finite_number?(item["confidence"]),
+         true <- valid_ratio?(item["confidence"]),
          true <- is_nil(item["source"]) or valid_string?(item["source"]),
          {:ok, extracted_at} <- decode_datetime(item["extracted_at"]),
          {:ok, metadata} <- decode_generic(item["metadata"]),
@@ -785,18 +936,20 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
     do: validate_content_inventory(nodes, pending_facts, pending_learnings)
 
   defp legacy_preflight(agent_id, data) when is_map(data) and not is_struct(data) do
-    allowed = Enum.flat_map(@payload_keys, &[&1, String.to_atom(&1)])
-
-    with true <- map_size(data) <= length(@payload_keys),
-         true <- Enum.all?(Map.keys(data), &(&1 in allowed)),
-         true <- no_alias_keys?(data, @payload_keys),
+    with :ok <- validate_legacy_map_shape(data, @payload_keys),
          true <- field(data, :agent_id) == agent_id,
          nodes when is_map(nodes) and not is_struct(nodes) <- field(data, :nodes),
          edges when is_map(edges) and not is_struct(edges) <- field(data, :edges),
          pending_facts when is_list(pending_facts) <- field(data, :pending_facts, []),
          pending_learnings when is_list(pending_learnings) <- field(data, :pending_learnings, []),
          :ok <- validate_content_inventory(nodes, pending_facts, pending_learnings),
-         :ok <- legacy_edge_preflight(edges) do
+         :ok <- legacy_node_preflight(nodes),
+         :ok <- legacy_edge_preflight(edges),
+         {:ok, fact_ids} <- legacy_pending_preflight(pending_facts, :fact),
+         {:ok, learning_ids} <- legacy_pending_preflight(pending_learnings, :learning),
+         true <- MapSet.disjoint?(fact_ids, learning_ids),
+         :ok <- legacy_config_preflight(field(data, :config, %{})),
+         :ok <- legacy_type_quotas_preflight(field(data, :type_quotas, %{})) do
       :ok
     else
       _ -> {:error, :invalid_graph}
@@ -805,11 +958,31 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
 
   defp legacy_preflight(_agent_id, _data), do: {:error, :invalid_graph}
 
+  defp legacy_node_preflight(nodes) do
+    Enum.reduce_while(nodes, :ok, fn {id, node}, :ok ->
+      with :ok <- validate_identifier(id),
+           true <- is_map(node) and not is_struct(node),
+           :ok <- validate_legacy_map_shape(node, @legacy_node_keys),
+           true <- field(node, :id) == id,
+           metadata when is_map(metadata) and not is_struct(metadata) <-
+             field(node, :metadata, %{}),
+           {:ok, _encoded} <- encode_generic(metadata) do
+        {:cont, :ok}
+      else
+        _ -> {:halt, {:error, :invalid_graph}}
+      end
+    end)
+  end
+
   defp legacy_edge_preflight(edges) when map_size(edges) <= @max_content_items do
-    Enum.reduce_while(edges, {:ok, 0}, fn {_source_id, values}, {:ok, count} ->
-      case bounded_list_count(values, @max_edges - count) do
-        {:ok, value_count} -> {:cont, {:ok, count + value_count}}
-        {:error, _reason} -> {:halt, {:error, :graph_limit_exceeded}}
+    Enum.reduce_while(edges, {:ok, 0}, fn {source_id, values}, {:ok, count} ->
+      with :ok <- validate_identifier(source_id),
+           {:ok, value_count} <- bounded_list_count(values, @max_edges - count),
+           :ok <- legacy_edge_list_preflight(values) do
+        {:cont, {:ok, count + value_count}}
+      else
+        {:error, _reason} = error -> {:halt, error}
+        _ -> {:halt, {:error, :invalid_graph}}
       end
     end)
     |> case do
@@ -819,6 +992,75 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
   end
 
   defp legacy_edge_preflight(_edges), do: {:error, :graph_limit_exceeded}
+
+  defp legacy_edge_list_preflight(edges) do
+    Enum.reduce_while(edges, :ok, fn edge, :ok ->
+      with true <- is_map(edge) and not is_struct(edge),
+           :ok <- validate_legacy_map_shape(edge, @legacy_edge_keys),
+           metadata when is_map(metadata) and not is_struct(metadata) <-
+             field(edge, :metadata, %{}),
+           {:ok, _encoded} <- encode_generic(metadata) do
+        {:cont, :ok}
+      else
+        _ -> {:halt, {:error, :invalid_graph}}
+      end
+    end)
+  end
+
+  defp legacy_pending_preflight(items, expected_type) do
+    Enum.reduce_while(items, {:ok, MapSet.new()}, fn item, {:ok, ids} ->
+      with true <- is_map(item) and not is_struct(item),
+           :ok <- validate_legacy_map_shape(item, @pending_keys),
+           id when is_binary(id) <- field(item, :id),
+           :ok <- validate_identifier(id),
+           false <- MapSet.member?(ids, id),
+           type <- field(item, :type),
+           true <- type in [expected_type, Atom.to_string(expected_type)],
+           metadata when is_map(metadata) and not is_struct(metadata) <-
+             field(item, :metadata, %{}),
+           {:ok, _encoded} <- encode_generic(metadata) do
+        {:cont, {:ok, MapSet.put(ids, id)}}
+      else
+        _ -> {:halt, {:error, :invalid_graph}}
+      end
+    end)
+  end
+
+  defp legacy_config_preflight(config) when is_map(config) and not is_struct(config) do
+    with :ok <- validate_legacy_map_shape(config, @config_keys),
+         {:ok, normalized} <- normalize_legacy_config(config),
+         :ok <- validate_config(normalized) do
+      :ok
+    end
+  end
+
+  defp legacy_config_preflight(_config), do: {:error, :invalid_graph}
+
+  defp legacy_type_quotas_preflight(quotas) when is_map(quotas) and not is_struct(quotas) do
+    with {:ok, normalized} <- normalize_type_quotas(quotas),
+         :ok <- validate_type_quotas(normalized) do
+      :ok
+    end
+  end
+
+  defp legacy_type_quotas_preflight(_quotas), do: {:error, :invalid_graph}
+
+  defp validate_legacy_map_shape(map, allowed_keys) do
+    names =
+      Enum.map(Map.keys(map), fn
+        key when is_atom(key) -> Atom.to_string(key)
+        key when is_binary(key) -> key
+        _key -> :invalid
+      end)
+
+    cond do
+      map_size(map) > length(allowed_keys) -> {:error, :invalid_graph}
+      :invalid in names -> {:error, :invalid_graph}
+      Enum.any?(names, &(&1 not in allowed_keys)) -> {:error, :invalid_graph}
+      not no_alias_keys?(map, allowed_keys) -> {:error, :invalid_graph}
+      true -> :ok
+    end
+  end
 
   defp encode_labelled_inventory(inventory) when is_map(inventory) and not is_struct(inventory) do
     if map_size(inventory) <= @max_content_items do
@@ -972,6 +1214,140 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
 
   defp index_pending(items), do: Map.new(items, &{&1["id"], &1})
 
+  defp ensure_pending_ids_disjoint(facts, learnings) do
+    fact_ids = MapSet.new(facts, & &1["id"])
+    learning_ids = MapSet.new(learnings, & &1["id"])
+
+    if MapSet.disjoint?(fact_ids, learning_ids),
+      do: :ok,
+      else: {:error, :invalid_graph}
+  end
+
+  defp ensure_decoded_pending_ids_disjoint(facts, learnings) do
+    fact_ids = MapSet.new(facts, & &1.id)
+    learning_ids = MapSet.new(learnings, & &1.id)
+
+    if MapSet.disjoint?(fact_ids, learning_ids),
+      do: :ok,
+      else: {:error, :invalid_graph}
+  end
+
+  defp normalize_legacy_graph(%KnowledgeGraph{} = graph) do
+    with {:ok, config} <- normalize_legacy_config(graph.config),
+         {:ok, type_quotas} <- normalize_type_quotas(graph.type_quotas) do
+      {:ok, %{graph | config: config, type_quotas: type_quotas}}
+    end
+  end
+
+  defp normalize_legacy_config(config) when is_map(config) and not is_struct(config) do
+    normalized = %{
+      auto_embed: field(config, :auto_embed, true),
+      decay_rate: field(config, :decay_rate, 0.10),
+      max_nodes_per_type: field(config, :max_nodes_per_type, 500),
+      prune_threshold: field(config, :prune_threshold, 0.10)
+    }
+
+    case validate_config(normalized) do
+      :ok -> {:ok, normalized}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp normalize_legacy_config(_config), do: {:error, :invalid_graph}
+
+  defp encode_config(config) do
+    with :ok <- validate_config(config) do
+      encode_generic(config)
+    end
+  end
+
+  defp decode_config(encoded) do
+    with {:ok, config} <- decode_generic(encoded),
+         :ok <- validate_config(config) do
+      {:ok, config}
+    end
+  end
+
+  defp validate_config(config) when is_map(config) and not is_struct(config) do
+    if Map.keys(config) |> Enum.sort() ==
+         [:auto_embed, :decay_rate, :max_nodes_per_type, :prune_threshold] do
+      cond do
+        not is_boolean(config.auto_embed) -> {:error, :invalid_graph}
+        not valid_ratio?(config.decay_rate) -> {:error, :invalid_graph}
+        not valid_positive_integer?(config.max_nodes_per_type) -> {:error, :invalid_graph}
+        config.max_nodes_per_type > 1_000_000 -> {:error, :invalid_graph}
+        not valid_ratio?(config.prune_threshold) -> {:error, :invalid_graph}
+        true -> :ok
+      end
+    else
+      {:error, :invalid_graph}
+    end
+  end
+
+  defp validate_config(_config), do: {:error, :invalid_graph}
+
+  defp encode_type_quotas(quotas) do
+    with :ok <- validate_type_quotas(quotas) do
+      encode_generic(quotas)
+    end
+  end
+
+  defp decode_type_quotas(encoded) do
+    with {:ok, quotas} <- decode_generic(encoded),
+         :ok <- validate_type_quotas(quotas) do
+      {:ok, quotas}
+    end
+  end
+
+  defp normalize_type_quotas(quotas) when is_map(quotas) and not is_struct(quotas) do
+    Enum.reduce_while(quotas, {:ok, %{}}, fn {key, value}, {:ok, acc} ->
+      with {:ok, type} <- normalize_node_type(key),
+           false <- Map.has_key?(acc, type) do
+        {:cont, {:ok, Map.put(acc, type, value)}}
+      else
+        _ -> {:halt, {:error, :invalid_graph}}
+      end
+    end)
+  end
+
+  defp normalize_type_quotas(_quotas), do: {:error, :invalid_graph}
+
+  defp validate_type_quotas(quotas) when is_map(quotas) and not is_struct(quotas) do
+    valid_entries? =
+      map_size(quotas) <= length(@allowed_node_types) and
+        Enum.all?(quotas, fn {type, fraction} ->
+          type in @allowed_node_types and valid_ratio?(fraction)
+        end)
+
+    total = Enum.reduce(quotas, 0.0, fn {_type, fraction}, acc -> acc + fraction end)
+
+    if valid_entries? and total <= 1.000_000_1,
+      do: :ok,
+      else: {:error, :invalid_graph}
+  rescue
+    _ -> {:error, :invalid_graph}
+  end
+
+  defp validate_type_quotas(_quotas), do: {:error, :invalid_graph}
+
+  defp validate_prepared_capacity(prepared) do
+    label = label_record(@capacity_probe_taint, status_for_taint(@capacity_probe_taint))
+
+    snapshot =
+      Map.merge(prepared, %{
+        base: label,
+        aggregate: label,
+        nodes: label_inventory(prepared.nodes, label),
+        pending_facts: label_inventory(prepared.pending_facts, label),
+        pending_learnings: label_inventory(prepared.pending_learnings, label)
+      })
+
+    case encode(snapshot) do
+      {:ok, _wrapper} -> :ok
+      {:error, _reason} -> {:error, :graph_limit_exceeded}
+    end
+  end
+
   defp encode_generic(value) do
     case encode_generic(value, %{nodes: 0}, 0) do
       {:ok, encoded, _state} -> {:ok, encoded}
@@ -1026,8 +1402,7 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
     end
   end
 
-  defp encode_generic(value, state, _depth)
-       when is_atom(value) and not is_boolean(value) and not is_nil(value) do
+  defp encode_generic(value, state, _depth) when value in @semantic_atoms do
     with {:ok, state} <- enter_generic_node(state) do
       {:ok, %{"$atom" => Atom.to_string(value)}, state}
     end
@@ -1050,7 +1425,9 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
 
   defp encode_generic_map([{key, value} | rest], state, depth, acc) do
     with {:ok, key} <- encode_generic_key(key),
-         false <- Enum.any?(acc, &(hd(&1) == key)),
+         logical_key <- generic_encoded_key_name(key),
+         false <-
+           Enum.any?(acc, &(generic_encoded_key_name(hd(&1)) == logical_key)),
          {:ok, value, state} <- encode_generic(value, state, depth + 1) do
       encode_generic_map(rest, state, depth, [[key, value] | acc])
     else
@@ -1058,13 +1435,17 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
     end
   end
 
-  defp encode_generic_key(key) when is_atom(key), do: {:ok, "a:" <> Atom.to_string(key)}
+  defp encode_generic_key(key) when key in @semantic_atoms,
+    do: {:ok, "a:" <> Atom.to_string(key)}
 
   defp encode_generic_key(key) when is_binary(key) do
     if valid_string?(key), do: {:ok, "s:" <> key}, else: {:error, :invalid_graph}
   end
 
   defp encode_generic_key(_key), do: {:error, :invalid_graph}
+
+  defp generic_encoded_key_name("a:" <> value), do: value
+  defp generic_encoded_key_name("s:" <> value), do: value
 
   defp encode_generic_list([], state, _depth, _count, _limit, acc), do: {:ok, acc, state}
 
@@ -1098,7 +1479,7 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
 
   defp decode_generic(%{"$atom" => value} = tagged, state, _depth)
        when map_size(tagged) == 1 do
-    with {:ok, atom} <- SafeAtom.to_existing(value),
+    with {:ok, atom} <- semantic_atom(value),
          {:ok, state} <- enter_generic_node(state) do
       {:ok, atom, state}
     else
@@ -1150,7 +1531,9 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
   defp decode_generic_map([[key, value] | rest], state, depth, count, limit, acc)
        when count < limit do
     with {:ok, key} <- decode_generic_key(key),
-         false <- Map.has_key?(acc, key),
+         logical_key <- generic_decoded_key_name(key),
+         false <-
+           Enum.any?(Map.keys(acc), &(generic_decoded_key_name(&1) == logical_key)),
          {:ok, value, state} <- decode_generic(value, state, depth + 1) do
       decode_generic_map(rest, state, depth, count + 1, limit, Map.put(acc, key, value))
     else
@@ -1162,7 +1545,7 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
     do: {:error, :graph_limit_exceeded}
 
   defp decode_generic_key("a:" <> value) do
-    case SafeAtom.to_existing(value) do
+    case semantic_atom(value) do
       {:ok, atom} -> {:ok, atom}
       _ -> {:error, :invalid_graph}
     end
@@ -1173,6 +1556,9 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
   end
 
   defp decode_generic_key(_key), do: {:error, :invalid_graph}
+
+  defp generic_decoded_key_name(key) when is_atom(key), do: Atom.to_string(key)
+  defp generic_decoded_key_name(key) when is_binary(key), do: key
 
   defp decode_generic_list([], state, _depth, _count, _limit, acc), do: {:ok, acc, state}
 
@@ -1218,13 +1604,16 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
   defp valid_token_budget?(_value), do: false
 
   defp validate_graph_scalars(graph) do
-    if valid_non_negative_integer?(graph.max_active) and finite_number?(graph.dedup_threshold) and
-         (is_nil(graph.max_tokens) or valid_token_budget?(graph.max_tokens)) and
-         is_map(graph.config) and not is_struct(graph.config) and is_map(graph.type_quotas) and
-         not is_struct(graph.type_quotas) do
+    with true <- valid_max_active?(graph.max_active),
+         {:ok, active_count} <- bounded_list_count(graph.active_set, @max_content_items),
+         true <- active_count <= graph.max_active,
+         true <- valid_ratio?(graph.dedup_threshold),
+         true <- is_nil(graph.max_tokens) or valid_token_budget?(graph.max_tokens),
+         :ok <- validate_config(graph.config),
+         :ok <- validate_type_quotas(graph.type_quotas) do
       :ok
     else
-      {:error, :invalid_graph}
+      _ -> {:error, :invalid_graph}
     end
   end
 
@@ -1254,21 +1643,34 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
 
   defp normalize_node_type(value) when value in @allowed_node_types, do: {:ok, value}
 
-  defp normalize_node_type(value) when is_binary(value),
-    do: SafeAtom.to_allowed(value, @allowed_node_types)
-
-  defp normalize_node_type(_value), do: {:error, :invalid_graph}
-
-  defp normalize_existing_atom(value) when is_atom(value), do: {:ok, value}
-
-  defp normalize_existing_atom(value) when is_binary(value) do
-    case SafeAtom.to_existing(value) do
-      {:ok, atom} -> {:ok, atom}
+  defp normalize_node_type(value) when is_binary(value) do
+    case Map.fetch(@semantic_atoms_by_name, value) do
+      {:ok, type} when type in @allowed_node_types -> {:ok, type}
       _ -> {:error, :invalid_graph}
     end
   end
 
-  defp normalize_existing_atom(_value), do: {:error, :invalid_graph}
+  defp normalize_node_type(_value), do: {:error, :invalid_graph}
+
+  defp normalize_relationship(value) when value in @allowed_relationships, do: {:ok, value}
+
+  defp normalize_relationship(value) when is_binary(value) do
+    case Map.fetch(@semantic_atoms_by_name, value) do
+      {:ok, relationship} when relationship in @allowed_relationships -> {:ok, relationship}
+      _ -> {:error, :invalid_graph}
+    end
+  end
+
+  defp normalize_relationship(_value), do: {:error, :invalid_graph}
+
+  defp semantic_atom(value) when is_binary(value) do
+    case Map.fetch(@semantic_atoms_by_name, value) do
+      {:ok, atom} -> {:ok, atom}
+      :error -> {:error, :invalid_graph}
+    end
+  end
+
+  defp semantic_atom(_value), do: {:error, :invalid_graph}
 
   defp field(map, key, default \\ nil) do
     atom? = Map.has_key?(map, key)
@@ -1338,6 +1740,16 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
 
   defp valid_non_negative_integer?(value),
     do: is_integer(value) and value >= 0 and value <= 9_007_199_254_740_991
+
+  defp valid_positive_integer?(value), do: valid_non_negative_integer?(value) and value > 0
+
+  defp valid_max_active?(value),
+    do: valid_non_negative_integer?(value) and value <= @max_content_items
+
+  defp valid_ratio?(value), do: finite_number?(value) and value >= 0 and value <= 1
+
+  defp valid_edge_strength?(value),
+    do: finite_number?(value) and value >= 0 and value <= 10
 
   defp valid_scalar?(value) when is_binary(value), do: valid_string?(value)
   defp valid_scalar?(value) when is_integer(value) or is_float(value), do: finite_number?(value)
