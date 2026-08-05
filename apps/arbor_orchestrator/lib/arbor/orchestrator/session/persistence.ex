@@ -8,18 +8,11 @@ defmodule Arbor.Orchestrator.Session.Persistence do
 
   require Logger
 
-  alias Arbor.Contracts.LLM.TokenUsage
   alias Arbor.Orchestrator.Session.ContextBuilder
+  alias Arbor.Orchestrator.Session.Persistence.Core
 
-  # Runtime-resolved so tests can inject a fake module via the
-  # `:session_store_module` application env. Default is the real one.
-  defp session_store do
-    Application.get_env(
-      :arbor_orchestrator,
-      :session_store_module,
-      Arbor.Persistence.SessionStore
-    )
-  end
+  # Matches the bounded history admitted by the legacy load_entries path.
+  @engagement_transcript_limit 1_000
 
   # ── Checkpoint application ────────────────────────────────────────
 
@@ -184,93 +177,59 @@ defmodule Arbor.Orchestrator.Session.Persistence do
     }
   end
 
-  # ── Session entry persistence (runtime bridge) ────────────────────
+  # ── Session entry persistence ─────────────────────────────────────
 
   @doc false
-  def persist_turn_entries(state, user_msg, assistant_message, _result_ctx, opts \\ []) do
-    persist_entry = get_persist_entry_fn(state)
-
-    # Distinct timestamps for user vs assistant entries:
-    #   - `user_sent_at`: when the user actually sent the message (carried by
-    #     the UserMessage envelope from the transport adapter, falling back
-    #     to apply-time if no envelope was provided)
-    #   - `assistant_completed_at`: when the turn finished and the assistant
-    #     reply was ready
-    #
-    # These naturally diverge across LLM call latency, giving SessionStore a
-    # real ordering on equal-timestamp ties. The previous +1µs workaround
-    # (commit 24246be2) is removed in favor of this real divergence.
+  def persist_turn_entries(state, user_msg, assistant_message, run_result, opts \\ []) do
     user_sent_at = Keyword.get(opts, :user_sent_at) || DateTime.utc_now()
     assistant_completed_at = Keyword.get(opts, :assistant_completed_at) || DateTime.utc_now()
 
-    if persist_entry do
-      Task.start(fn ->
-        try do
-          # Persist user message entry. The engagement_id stamps which
-          # conversation this turn belongs to (single-mind model: one agent, many
-          # engagements) — the provenance that makes per-engagement history and
-          # "show me my conversations" queryable.
-          persist_entry.(%{
-            entry_type: "user",
-            role: "user",
-            content: wrap_content(user_msg["content"]),
-            timestamp: user_sent_at,
-            metadata: engagement_metadata(state)
-          })
+    case Core.build_turn_entries(%{
+           user_message: user_msg,
+           assistant_message: assistant_message,
+           run_result: run_result,
+           user_sent_at: user_sent_at,
+           assistant_completed_at: assistant_completed_at,
+           engagement_id: Map.get(state, :current_engagement_id),
+           turn_count: ContextBuilder.get_turn_count(state)
+         }) do
+      {:ok, [_, _] = entries} ->
+        start_turn_persistence(state, entries)
 
-          # Assistant entry from the typed AssistantMessage envelope — typed
-          # field reads (content / tool_calls / model / finish_reason / usage)
-          # instead of magic-string Map.get into result_ctx. (The `llm.usage` /
-          # `llm.content` dead-letter reads lived in this exact spot.)
-          assistant_content =
-            build_assistant_content(assistant_message.content, assistant_message.tool_calls)
-
-          token_usage =
-            if is_nil(assistant_message.usage) or TokenUsage.empty?(assistant_message.usage),
-              do: nil,
-              else: TokenUsage.to_persistence(assistant_message.usage)
-
-          persist_entry.(%{
-            entry_type: "assistant",
-            role: "assistant",
-            content: assistant_content,
-            model: assistant_message.model,
-            stop_reason: assistant_message.finish_reason,
-            token_usage: token_usage,
-            timestamp: assistant_completed_at,
-            metadata: assistant_entry_metadata(state, assistant_message)
-          })
-        rescue
-          e -> Logger.warning("[Session] Turn entry persistence failed: #{Exception.message(e)}")
-        end
-      end)
+      {:error, _reason} ->
+        Logger.warning("[Session] Turn entry construction failed")
+        {:error, :turn_persistence_unavailable}
     end
   end
 
-  # Persist the assistant turn's status so restored history / eval-replay can tell
-  # :complete from :interrupted (system failure) from :cancelled (user). Carries
-  # the interrupted_reason for the non-complete cases. Lives in metadata so no
-  # SessionEntry schema change is needed.
-  defp assistant_entry_metadata(state, assistant_message) do
-    base =
-      %{
-        "turn_count" => ContextBuilder.get_turn_count(state) + 1,
-        "status" => to_string(assistant_message.status)
-      }
-      |> Map.merge(engagement_metadata(state))
+  defp start_turn_persistence(state, entries) do
+    ensure_session = get_ensure_session_fn(state)
+    append_entries = get_persist_entries_fn(state)
 
-    if assistant_message.status != :complete and not is_nil(assistant_message.interrupted_reason) do
-      Map.put(base, "interrupted_reason", inspect(assistant_message.interrupted_reason))
+    Task.start(fn ->
+      persist_turn_batch(
+        ensure_session,
+        append_entries,
+        state.session_id,
+        state.agent_id,
+        entries
+      )
+    end)
+  end
+
+  defp persist_turn_batch(ensure_session, append_entries, session_id, agent_id, entries) do
+    with {:ok, %{id: session_uuid}} when is_binary(session_uuid) <-
+           ensure_session.(session_id, agent_id, []),
+         {:ok, 2} <- append_entries.(session_uuid, entries) do
+      :ok
     else
-      base
+      _other ->
+        Logger.warning("[Session] Atomic turn entry persistence failed")
     end
-  end
-
-  # Engagement provenance stamped on every persisted entry. nil for the default
-  # (back-compat single conversation); a real id once an adapter resolves and
-  # tags an engagement.
-  defp engagement_metadata(state) do
-    %{"engagement_id" => Map.get(state, :current_engagement_id)}
+  rescue
+    _ -> Logger.warning("[Session] Atomic turn entry persistence failed")
+  catch
+    _, _ -> Logger.warning("[Session] Atomic turn entry persistence failed")
   end
 
   @doc false
@@ -286,27 +245,31 @@ defmodule Arbor.Orchestrator.Session.Persistence do
           new_goals = Map.get(result_ctx, "session.new_goals", [])
           actions = Map.get(result_ctx, "session.actions", [])
 
-          persist_entry.(%{
-            entry_type: "heartbeat",
-            role: "assistant",
-            # `last_response` is what LlmHandler actually writes; `llm.content`
-            # was a dead-letter read kept around from an earlier design.
-            content: wrap_content(Map.get(result_ctx, "last_response", "")),
-            model: Map.get(result_ctx, "llm.model"),
-            timestamp: DateTime.utc_now(),
-            metadata: %{
-              "cognitive_mode" => cognitive_mode,
-              "memory_notes_count" => length(List.wrap(memory_notes)),
-              "goal_updates_count" =>
-                length(List.wrap(goal_updates)) + length(List.wrap(new_goals)),
-              "actions_count" => length(List.wrap(actions))
-            }
-          })
+          result =
+            persist_entry.(%{
+              entry_type: "heartbeat",
+              role: "assistant",
+              # `last_response` is what LlmHandler actually writes; `llm.content`
+              # was a dead-letter read kept around from an earlier design.
+              content: wrap_content(Map.get(result_ctx, "last_response", "")),
+              model: Map.get(result_ctx, "llm.model"),
+              timestamp: DateTime.utc_now(),
+              metadata: %{
+                "cognitive_mode" => cognitive_mode,
+                "memory_notes_count" => length(List.wrap(memory_notes)),
+                "goal_updates_count" =>
+                  length(List.wrap(goal_updates)) + length(List.wrap(new_goals)),
+                "actions_count" => length(List.wrap(actions))
+              }
+            })
+
+          if result not in [:ok, {:ok, 1}] do
+            Logger.warning("[Session] Heartbeat entry persistence failed")
+          end
         rescue
-          e ->
-            Logger.warning(
-              "[Session] Heartbeat entry persistence failed: #{Exception.message(e)}"
-            )
+          _ -> Logger.warning("[Session] Heartbeat entry persistence failed")
+        catch
+          _, _ -> Logger.warning("[Session] Heartbeat entry persistence failed")
         end
       end)
     end
@@ -315,43 +278,60 @@ defmodule Arbor.Orchestrator.Session.Persistence do
   @doc """
   Restore an engagement's transcript from the durable store.
 
-  Loads the session's persisted entries and keeps only those stamped with this
-  `engagement_id` (the provenance written by `persist_turn_entries/5`), rebuilt
-  into the `%{"role" => ..., "content" => ...}` message shape the turn loop uses
-  (mirrors `Arbor.Agent.SessionConfig`'s recover path). Used by the Session on the
-  first switch to an engagement, so a resumed conversation isn't empty after a
+  Loads the public display projection with an exact `engagement_id` filter and
+  rebuilds machine-readable message maps retaining metadata, taint, and
+  taint-status fields alongside role and content. Used by the Session on the
+  first switch to an engagement, so a resumed conversation is not empty after a
   restart. Best-effort: returns `[]` if the store is unavailable or on any error.
   """
   @spec load_engagement_transcript(map(), String.t() | nil) :: [map()]
   def load_engagement_transcript(_state, nil), do: []
 
   def load_engagement_transcript(state, engagement_id) do
-    if session_store_available?() do
-      apply(session_store(), :load_entries_by_session_id, [state.session_id])
-      |> List.wrap()
-      |> Enum.filter(&(entry_engagement_id(&1) == engagement_id))
-      |> Enum.map(fn entry ->
-        %{"role" => entry.role || entry.entry_type, "content" => entry.content || ""}
-      end)
-    else
-      []
+    load_messages = get_load_session_messages_fn(state)
+
+    case load_messages.(
+           state.session_id,
+           engagement_id: engagement_id,
+           limit: @engagement_transcript_limit
+         ) do
+      messages when is_list(messages) -> Core.restore_messages(messages)
+      _other -> []
     end
   rescue
-    e ->
-      Logger.debug("[Session] engagement transcript restore failed: #{Exception.message(e)}")
+    _ ->
+      Logger.debug("[Session] engagement transcript restore failed")
       []
   catch
-    :exit, _ -> []
+    _, _ ->
+      Logger.debug("[Session] engagement transcript restore failed")
+      []
   end
 
-  defp entry_engagement_id(entry) do
-    meta = Map.get(entry, :metadata) || %{}
-    Map.get(meta, "engagement_id") || Map.get(meta, :engagement_id)
+  @doc false
+  def get_persist_entries_fn(state) do
+    case get_in(state, [Access.key(:adapters), Access.key(:append_session_entries)]) do
+      fun when is_function(fun, 2) -> fun
+      _other -> &Arbor.Persistence.append_session_entries/2
+    end
+  end
+
+  defp get_ensure_session_fn(state) do
+    case get_in(state, [Access.key(:adapters), Access.key(:ensure_session)]) do
+      fun when is_function(fun, 3) -> fun
+      _other -> &Arbor.Persistence.ensure_session/3
+    end
+  end
+
+  defp get_load_session_messages_fn(state) do
+    case get_in(state, [Access.key(:adapters), Access.key(:load_recent_session_messages)]) do
+      fun when is_function(fun, 2) -> fun
+      _other -> &Arbor.Persistence.load_recent_session_messages/2
+    end
   end
 
   @doc false
   def get_persist_entry_fn(state) do
-    # Check adapter first, then fall back to runtime bridge
     case get_in(state, [Access.key(:adapters), Access.key(:persist_entry)]) do
       fun when is_function(fun, 1) ->
         fun
@@ -363,30 +343,19 @@ defmodule Arbor.Orchestrator.Session.Persistence do
 
   @doc false
   def build_persist_fn_from_store(state) do
-    if session_store_available?() do
-      # Create the SessionStore session row if it doesn't exist yet — the
-      # first turn for a fresh agent needs the row to anchor entries to.
-      # The legacy `maybe_persist_turn` (removed in 6087feaf) used to do
-      # this; without it, fresh sessions silently dropped every entry and
-      # restored chat history was empty.
-      case ensure_session_uuid(state.session_id, state.agent_id) do
-        nil -> nil
-        uuid -> fn attrs -> apply(session_store(), :append_entry, [uuid, attrs]) end
-      end
+    append_entries = get_persist_entries_fn(state)
+
+    case ensure_session_uuid(state) do
+      nil -> nil
+      uuid -> fn attrs -> append_entries.(uuid, [attrs]) end
     end
   end
 
   @doc false
   def ensure_session_uuid(session_id, agent_id) do
-    case apply(session_store(), :get_session, [session_id]) do
-      {:ok, session} ->
-        session.id
-
-      {:error, :not_found} ->
-        case apply(session_store(), :create_session, [agent_id, [session_id: session_id]]) do
-          {:ok, session} -> session.id
-          _ -> nil
-        end
+    case Arbor.Persistence.ensure_session(session_id, agent_id, []) do
+      {:ok, %{id: session_uuid}} when is_binary(session_uuid) ->
+        session_uuid
 
       _ ->
         nil
@@ -397,11 +366,12 @@ defmodule Arbor.Orchestrator.Session.Persistence do
     :exit, _ -> nil
   end
 
-  @doc false
-  def get_session_uuid(session_id) do
-    case apply(session_store(), :get_session, [session_id]) do
-      {:ok, session} -> session.id
-      _ -> nil
+  defp ensure_session_uuid(state) do
+    ensure_session = get_ensure_session_fn(state)
+
+    case ensure_session.(state.session_id, state.agent_id, []) do
+      {:ok, %{id: session_uuid}} when is_binary(session_uuid) -> session_uuid
+      _other -> nil
     end
   rescue
     _ -> nil
@@ -410,35 +380,10 @@ defmodule Arbor.Orchestrator.Session.Persistence do
   end
 
   @doc false
-  def session_store_available? do
-    Code.ensure_loaded?(session_store()) and
-      function_exported?(session_store(), :available?, 0) and
-      apply(session_store(), :available?, [])
-  end
+  defdelegate wrap_content(content), to: Core
 
   @doc false
-  def wrap_content(text) when is_binary(text), do: [%{"type" => "text", "text" => text}]
-  def wrap_content(content) when is_list(content), do: content
-  def wrap_content(_), do: []
-
-  @doc false
-  def build_assistant_content(text, tool_calls) when is_list(tool_calls) and tool_calls != [] do
-    text_block = if text && text != "", do: [%{"type" => "text", "text" => text}], else: []
-
-    tool_blocks =
-      Enum.map(tool_calls, fn tc ->
-        %{
-          "type" => "tool_use",
-          "id" => Map.get(tc, "id", Map.get(tc, :id)),
-          "name" => Map.get(tc, "name", Map.get(tc, :name)),
-          "input" => Map.get(tc, "input", Map.get(tc, :input, %{}))
-        }
-      end)
-
-    text_block ++ tool_blocks
-  end
-
-  def build_assistant_content(text, _), do: wrap_content(text)
+  defdelegate build_assistant_content(text, tool_calls), to: Core
 
   # ── Private helpers ───────────────────────────────────────────────
 

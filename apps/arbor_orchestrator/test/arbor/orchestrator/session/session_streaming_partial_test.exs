@@ -11,12 +11,13 @@ defmodule Arbor.Orchestrator.Session.StreamingPartialTest do
   use ExUnit.Case, async: false
   @moduletag :fast
 
+  alias Arbor.Contracts.Security.TaintEnvelope
   alias Arbor.Contracts.Session.UserMessage
   alias Arbor.Orchestrator.Session
   alias Arbor.Orchestrator.Session.Builders
 
-  # In-memory SessionStore stand-in (same pattern as persistence_fresh_session_test).
-  defmodule FakeSessionStore do
+  # In-memory public persistence facade stand-in.
+  defmodule FakePersistence do
     use Agent
 
     def start_link(_ \\ []),
@@ -28,27 +29,29 @@ defmodule Arbor.Orchestrator.Session.StreamingPartialTest do
       :exit, _ -> :ok
     end
 
-    def available?, do: true
+    def ensure_session(session_id, agent_id, []) do
+      Agent.get_and_update(__MODULE__, fn state ->
+        case Map.get(state.sessions, session_id) do
+          nil ->
+            session = %{id: "uuid_#{session_id}", agent_id: agent_id, session_id: session_id}
+            {{:ok, session}, %{state | sessions: Map.put(state.sessions, session_id, session)}}
 
-    def get_session(session_id) do
-      Agent.get(__MODULE__, fn s ->
-        case Map.get(s.sessions, session_id) do
-          nil -> {:error, :not_found}
-          uuid -> {:ok, %{id: uuid}}
+          %{agent_id: ^agent_id} = session ->
+            {{:ok, session}, state}
+
+          _other_owner ->
+            {{:error, :session_owner_mismatch}, state}
         end
       end)
     end
 
-    def create_session(agent_id, opts) do
-      session_id = Keyword.fetch!(opts, :session_id)
-      uuid = "uuid_#{session_id}"
-      Agent.update(__MODULE__, fn s -> %{s | sessions: Map.put(s.sessions, session_id, uuid)} end)
-      {:ok, %{id: uuid, agent_id: agent_id, session_id: session_id}}
-    end
+    def append_session_entries(uuid, entries) do
+      Agent.update(__MODULE__, fn state ->
+        appended = Enum.map(entries, &{uuid, &1})
+        %{state | entries: Enum.reverse(appended) ++ state.entries}
+      end)
 
-    def append_entry(uuid, attrs) do
-      Agent.update(__MODULE__, fn s -> %{s | entries: [{uuid, attrs} | s.entries]} end)
-      :ok
+      {:ok, length(entries)}
     end
 
     def entries, do: Agent.get(__MODULE__, & &1.entries) |> Enum.reverse()
@@ -58,16 +61,10 @@ defmodule Arbor.Orchestrator.Session.StreamingPartialTest do
   end
 
   setup do
-    prev = Application.get_env(:arbor_orchestrator, :session_store_module)
-    Application.put_env(:arbor_orchestrator, :session_store_module, FakeSessionStore)
-    {:ok, _} = FakeSessionStore.start_link()
+    {:ok, _} = FakePersistence.start_link()
 
     on_exit(fn ->
-      FakeSessionStore.stop()
-
-      if prev,
-        do: Application.put_env(:arbor_orchestrator, :session_store_module, prev),
-        else: Application.delete_env(:arbor_orchestrator, :session_store_module)
+      FakePersistence.stop()
     end)
 
     :ok
@@ -90,6 +87,10 @@ defmodule Arbor.Orchestrator.Session.StreamingPartialTest do
       turn_started_at: System.monotonic_time(),
       turn_user_message: UserMessage.from_string("explain the thing"),
       config: %{},
+      adapters: %{
+        ensure_session: &FakePersistence.ensure_session/3,
+        append_session_entries: &FakePersistence.append_session_entries/2
+      },
       session_state: nil,
       behavior: nil
     }
@@ -130,15 +131,26 @@ defmodule Arbor.Orchestrator.Session.StreamingPartialTest do
       :ok = Builders.apply_turn_interruption(state, :interrupted, :task_crashed)
       settle()
 
-      assert %{content: user_content} = FakeSessionStore.entry("user")
+      assert %{content: user_content} = user_entry = FakePersistence.entry("user")
       assert flatten_text(user_content) =~ "explain the thing"
 
-      assistant = FakeSessionStore.entry("assistant")
+      assistant = FakePersistence.entry("assistant")
       assert assistant, "the partial assistant entry must be persisted"
       assert flatten_text(assistant[:content]) =~ "partial reasoning so f"
       # status persists so restored history / eval-replay can distinguish it
       assert assistant[:metadata]["status"] == "interrupted"
       assert assistant[:metadata]["interrupted_reason"] =~ "task_crashed"
+
+      assert {:ok, user_envelope} =
+               TaintEnvelope.verify(user_entry.metadata["taint"], user_entry.content)
+
+      assert {:ok, assistant_envelope} =
+               TaintEnvelope.verify(assistant.metadata["taint"], assistant.content)
+
+      assert user_envelope.taint.level == :untrusted
+      assert user_envelope.taint.sensitivity == :restricted
+      assert assistant_envelope.taint.level == :untrusted
+      assert assistant_envelope.taint.sensitivity == :restricted
     end
 
     test ":cancelled persists the partial too, distinguishable from a system interruption" do
@@ -149,7 +161,7 @@ defmodule Arbor.Orchestrator.Session.StreamingPartialTest do
       :ok = Builders.apply_turn_interruption(state, :cancelled, :user_cancelled)
       settle()
 
-      assistant = FakeSessionStore.entry("assistant")
+      assistant = FakePersistence.entry("assistant")
       assert flatten_text(assistant[:content]) =~ "half an answer"
 
       assert assistant[:metadata]["status"] == "cancelled",
@@ -163,7 +175,7 @@ defmodule Arbor.Orchestrator.Session.StreamingPartialTest do
       state = session(streaming_buffer: buffer("")) |> Map.from_struct()
       :ok = Builders.apply_turn_interruption(state, :interrupted, :timeout)
       settle()
-      assert FakeSessionStore.entry("assistant")
+      assert FakePersistence.entry("assistant")
     end
   end
 
@@ -176,7 +188,10 @@ defmodule Arbor.Orchestrator.Session.StreamingPartialTest do
         Session.handle_info({:DOWN, ref, :process, self(), :killed}, state)
 
       settle()
-      assert flatten_text(FakeSessionStore.entry("assistant")[:content]) =~ "crashed mid-thought"
+
+      assert flatten_text(FakePersistence.entry("assistant")[:content]) =~
+               "crashed mid-thought"
+
       assert new_state.streaming_buffer == nil
       assert new_state.turn_in_flight == false
       assert new_state.turn_task_ref == nil
@@ -195,7 +210,7 @@ defmodule Arbor.Orchestrator.Session.StreamingPartialTest do
       {:noreply, new_state} = Session.handle_info({:turn_timeout, ref}, state)
 
       settle()
-      assert flatten_text(FakeSessionStore.entry("assistant")[:content]) =~ "timed out partway"
+      assert flatten_text(FakePersistence.entry("assistant")[:content]) =~ "timed out partway"
       assert new_state.streaming_buffer == nil
       assert new_state.turn_in_flight == false
     end
@@ -207,7 +222,7 @@ defmodule Arbor.Orchestrator.Session.StreamingPartialTest do
       assert {:noreply, ^state} = Session.handle_info({:turn_timeout, stale}, state)
       settle()
       # nothing persisted, buffer intact
-      assert FakeSessionStore.entry("assistant") == nil
+      assert FakePersistence.entry("assistant") == nil
       assert state.streaming_buffer.content == "keep me"
     end
 
@@ -222,7 +237,7 @@ defmodule Arbor.Orchestrator.Session.StreamingPartialTest do
 
       assert reply == :ok
       settle()
-      assert flatten_text(FakeSessionStore.entry("assistant")[:content]) =~ "user bailed"
+      assert flatten_text(FakePersistence.entry("assistant")[:content]) =~ "user bailed"
       assert new_state.streaming_buffer == nil
       assert new_state.turn_in_flight == false
     end

@@ -279,7 +279,7 @@ defmodule Arbor.Orchestrator.Session.Builders do
         ) :: Arbor.Orchestrator.Session.t()
   def apply_turn_result(state, message, result, opts \\ [])
 
-  def apply_turn_result(state, message, %{context: result_ctx}, opts) do
+  def apply_turn_result(state, message, %{context: result_ctx} = result, opts) do
     alias Arbor.Contracts.Session.{AssistantMessage, UserMessage}
     alias Arbor.Orchestrator.SessionCore
 
@@ -336,7 +336,7 @@ defmodule Arbor.Orchestrator.Session.Builders do
       state,
       commit.user_msg,
       commit.assistant_message,
-      result_ctx,
+      result,
       user_sent_at: commit.user_sent_at,
       assistant_completed_at: commit.assistant_completed_at
     )

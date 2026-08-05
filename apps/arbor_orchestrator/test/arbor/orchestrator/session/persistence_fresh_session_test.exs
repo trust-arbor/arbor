@@ -26,12 +26,12 @@ defmodule Arbor.Orchestrator.Session.PersistenceFreshSessionTest do
   alias Arbor.Contracts.Session.AssistantMessage
   alias Arbor.Orchestrator.Session.Persistence
 
-  defmodule FakeSessionStore do
+  defmodule FakePersistence do
     @moduledoc """
-    In-memory stand-in for `Arbor.Persistence.SessionStore`. Tracks calls
+    In-memory stand-in for the public `Arbor.Persistence` session API. Tracks calls
     in an Agent so the test can assert exactly which functions were
     invoked and with what arguments. The interface mirrors the subset of
-    SessionStore that `Persistence` actually uses.
+    facade that `Persistence` actually uses.
     """
 
     use Agent
@@ -54,41 +54,45 @@ defmodule Arbor.Orchestrator.Session.PersistenceFreshSessionTest do
       :exit, _ -> :ok
     end
 
-    # ---- Mirrored API ------------------------------------------------------
+    # ---- Public facade-shaped API ------------------------------------------
 
-    def available?, do: true
+    def ensure_session(session_id, agent_id, []) do
+      record_call({:ensure_session, session_id, agent_id})
 
-    def get_session(session_id) do
-      record_call({:get_session, session_id})
+      Agent.get_and_update(__MODULE__, fn state ->
+        case Map.get(state.sessions_by_session_id, session_id) do
+          nil ->
+            session = %{
+              id: "uuid_for_#{session_id}",
+              agent_id: agent_id,
+              session_id: session_id
+            }
 
-      Agent.get(__MODULE__, fn s ->
-        case Map.get(s.sessions_by_session_id, session_id) do
-          nil -> {:error, :not_found}
-          uuid -> {:ok, %{id: uuid}}
+            {{:ok, session},
+             %{
+               state
+               | sessions_by_session_id:
+                   Map.put(state.sessions_by_session_id, session_id, session)
+             }}
+
+          %{agent_id: ^agent_id} = session ->
+            {{:ok, session}, state}
+
+          _other_owner ->
+            {{:error, :session_owner_mismatch}, state}
         end
       end)
     end
 
-    def create_session(agent_id, opts \\ []) do
-      session_id = Keyword.fetch!(opts, :session_id)
-      uuid = "uuid_for_#{session_id}"
-      record_call({:create_session, agent_id, session_id})
+    def append_session_entries(uuid, entries) do
+      record_call({:append_session_entries, uuid, Enum.map(entries, & &1.entry_type)})
 
-      Agent.update(__MODULE__, fn s ->
-        %{s | sessions_by_session_id: Map.put(s.sessions_by_session_id, session_id, uuid)}
+      Agent.update(__MODULE__, fn state ->
+        appended = Enum.map(entries, &{uuid, &1})
+        %{state | appended_entries: Enum.reverse(appended) ++ state.appended_entries}
       end)
 
-      {:ok, %{id: uuid, agent_id: agent_id, session_id: session_id}}
-    end
-
-    def append_entry(uuid, attrs) do
-      record_call({:append_entry, uuid, attrs[:entry_type] || attrs["entry_type"]})
-
-      Agent.update(__MODULE__, fn s ->
-        %{s | appended_entries: [{uuid, attrs} | s.appended_entries]}
-      end)
-
-      :ok
+      {:ok, length(entries)}
     end
 
     # ---- Test introspection ------------------------------------------------
@@ -102,24 +106,14 @@ defmodule Arbor.Orchestrator.Session.PersistenceFreshSessionTest do
     end
   end
 
-  setup do
-    prev = Application.get_env(:arbor_orchestrator, :session_store_module)
-    Application.put_env(:arbor_orchestrator, :session_store_module, FakeSessionStore)
-
-    on_exit(fn ->
-      if prev,
-        do: Application.put_env(:arbor_orchestrator, :session_store_module, prev),
-        else: Application.delete_env(:arbor_orchestrator, :session_store_module)
-    end)
-
-    :ok
-  end
-
   defp build_state(session_id, agent_id) do
     %{
       session_id: session_id,
       agent_id: agent_id,
-      adapters: nil,
+      adapters: %{
+        ensure_session: &FakePersistence.ensure_session/3,
+        append_session_entries: &FakePersistence.append_session_entries/2
+      },
       # ContextBuilder.get_turn_count/1 reads this; persist_turn_entries
       # references it for the assistant entry's metadata.turn_count.
       turn_count: 0,
@@ -129,8 +123,8 @@ defmodule Arbor.Orchestrator.Session.PersistenceFreshSessionTest do
 
   describe "build_persist_fn_from_store/1 (regression guard for 6087feaf)" do
     test "creates a SessionStore session row on first call when none exists" do
-      {:ok, _} = FakeSessionStore.start_link()
-      on_exit(&FakeSessionStore.stop/0)
+      {:ok, _} = FakePersistence.start_link()
+      on_exit(&FakePersistence.stop/0)
 
       state = build_state("agent-session-fresh_agent_42", "fresh_agent_42")
 
@@ -140,38 +134,32 @@ defmodule Arbor.Orchestrator.Session.PersistenceFreshSessionTest do
 
       # The session row must now exist
       assert Map.has_key?(
-               FakeSessionStore.sessions_by_session_id(),
+               FakePersistence.sessions_by_session_id(),
                "agent-session-fresh_agent_42"
              )
 
-      # And the calls must include both the get_session probe and the create_session
-      calls = FakeSessionStore.calls()
-      assert Enum.any?(calls, &match?({:get_session, "agent-session-fresh_agent_42"}, &1))
-
-      assert Enum.any?(
-               calls,
-               &match?({:create_session, "fresh_agent_42", "agent-session-fresh_agent_42"}, &1)
-             )
+      assert {:ensure_session, "agent-session-fresh_agent_42", "fresh_agent_42"} in FakePersistence.calls()
     end
 
     test "the persist function from a fresh-session call actually appends entries" do
-      {:ok, _} = FakeSessionStore.start_link()
-      on_exit(&FakeSessionStore.stop/0)
+      {:ok, _} = FakePersistence.start_link()
+      on_exit(&FakePersistence.stop/0)
 
       state = build_state("agent-session-fresh_writer_7", "fresh_writer_7")
       persist_fn = Persistence.build_persist_fn_from_store(state)
       assert is_function(persist_fn, 1)
 
-      :ok = persist_fn.(%{entry_type: "user", role: "user", content: [%{"text" => "hi"}]})
+      assert {:ok, 1} =
+               persist_fn.(%{entry_type: "user", role: "user", content: [%{"text" => "hi"}]})
 
-      :ok =
-        persist_fn.(%{
-          entry_type: "assistant",
-          role: "assistant",
-          content: [%{"text" => "hello"}]
-        })
+      assert {:ok, 1} =
+               persist_fn.(%{
+                 entry_type: "assistant",
+                 role: "assistant",
+                 content: [%{"text" => "hello"}]
+               })
 
-      entries = FakeSessionStore.appended_entries()
+      entries = FakePersistence.appended_entries()
       assert length(entries) == 2
 
       assert Enum.any?(entries, fn {_uuid, attrs} -> attrs[:entry_type] == "user" end)
@@ -180,24 +168,26 @@ defmodule Arbor.Orchestrator.Session.PersistenceFreshSessionTest do
 
     test "reuses the existing session row when it already exists" do
       {:ok, _} =
-        FakeSessionStore.start_link(
-          existing_sessions: %{"agent-session-existing_8" => "uuid_pre_existing"}
+        FakePersistence.start_link(
+          existing_sessions: %{
+            "agent-session-existing_8" => %{
+              id: "uuid_pre_existing",
+              agent_id: "existing_8",
+              session_id: "agent-session-existing_8"
+            }
+          }
         )
 
-      on_exit(&FakeSessionStore.stop/0)
+      on_exit(&FakePersistence.stop/0)
 
       state = build_state("agent-session-existing_8", "existing_8")
       persist_fn = Persistence.build_persist_fn_from_store(state)
       assert is_function(persist_fn, 1)
 
-      # No second create_session call
-      calls = FakeSessionStore.calls()
-      refute Enum.any?(calls, &match?({:create_session, _, _}, &1))
-
       # The persist fn writes against the pre-existing uuid
-      :ok = persist_fn.(%{entry_type: "user", role: "user", content: []})
+      assert {:ok, 1} = persist_fn.(%{entry_type: "user", role: "user", content: []})
 
-      [{uuid, _attrs}] = FakeSessionStore.appended_entries()
+      [{uuid, _attrs}] = FakePersistence.appended_entries()
       assert uuid == "uuid_pre_existing"
     end
   end
@@ -222,9 +212,17 @@ defmodule Arbor.Orchestrator.Session.PersistenceFreshSessionTest do
 
     test "user_sent_at is used for the user entry timestamp" do
       {:ok, _} =
-        FakeSessionStore.start_link(existing_sessions: %{"agent-session-ordering_a" => "uuid_a"})
+        FakePersistence.start_link(
+          existing_sessions: %{
+            "agent-session-ordering_a" => %{
+              id: "uuid_a",
+              agent_id: "ordering_a",
+              session_id: "agent-session-ordering_a"
+            }
+          }
+        )
 
-      on_exit(&FakeSessionStore.stop/0)
+      on_exit(&FakePersistence.stop/0)
 
       state = build_state("agent-session-ordering_a", "ordering_a")
       sent_at = ~U[2026-04-08 15:00:00.000000Z]
@@ -242,7 +240,7 @@ defmodule Arbor.Orchestrator.Session.PersistenceFreshSessionTest do
       # persist_turn_entries spawns a Task — give it a moment to land
       :timer.sleep(50)
 
-      entries = FakeSessionStore.appended_entries()
+      entries = FakePersistence.appended_entries()
       assert length(entries) == 2
 
       user_entry =
@@ -269,9 +267,17 @@ defmodule Arbor.Orchestrator.Session.PersistenceFreshSessionTest do
 
     test "user timestamp is strictly less than assistant timestamp (real divergence, not +1µs)" do
       {:ok, _} =
-        FakeSessionStore.start_link(existing_sessions: %{"agent-session-ordering_b" => "uuid_b"})
+        FakePersistence.start_link(
+          existing_sessions: %{
+            "agent-session-ordering_b" => %{
+              id: "uuid_b",
+              agent_id: "ordering_b",
+              session_id: "agent-session-ordering_b"
+            }
+          }
+        )
 
-      on_exit(&FakeSessionStore.stop/0)
+      on_exit(&FakePersistence.stop/0)
 
       state = build_state("agent-session-ordering_b", "ordering_b")
       sent_at = ~U[2026-04-08 15:00:00.000000Z]
@@ -288,7 +294,7 @@ defmodule Arbor.Orchestrator.Session.PersistenceFreshSessionTest do
 
       :timer.sleep(50)
 
-      entries = FakeSessionStore.appended_entries()
+      entries = FakePersistence.appended_entries()
 
       user_ts =
         Enum.find_value(entries, fn {_uuid, attrs} ->
@@ -316,9 +322,17 @@ defmodule Arbor.Orchestrator.Session.PersistenceFreshSessionTest do
 
     test "missing opts fall back to DateTime.utc_now/0 for backwards compat" do
       {:ok, _} =
-        FakeSessionStore.start_link(existing_sessions: %{"agent-session-ordering_c" => "uuid_c"})
+        FakePersistence.start_link(
+          existing_sessions: %{
+            "agent-session-ordering_c" => %{
+              id: "uuid_c",
+              agent_id: "ordering_c",
+              session_id: "agent-session-ordering_c"
+            }
+          }
+        )
 
-      on_exit(&FakeSessionStore.stop/0)
+      on_exit(&FakePersistence.stop/0)
 
       state = build_state("agent-session-ordering_c", "ordering_c")
       before = DateTime.utc_now()
@@ -333,7 +347,7 @@ defmodule Arbor.Orchestrator.Session.PersistenceFreshSessionTest do
       :timer.sleep(50)
       after_time = DateTime.utc_now()
 
-      entries = FakeSessionStore.appended_entries()
+      entries = FakePersistence.appended_entries()
       assert length(entries) == 2
 
       Enum.each(entries, fn {_uuid, attrs} ->

@@ -67,6 +67,7 @@ defmodule Arbor.Orchestrator.SessionTest do
   end
 
   alias Arbor.Orchestrator
+  alias Arbor.Contracts.Security.{Taint, TaintEnvelope}
   alias Arbor.Contracts.Session.UserMessage
   alias Arbor.Orchestrator.Engine
   alias Arbor.Orchestrator.Engine.Context
@@ -1427,43 +1428,62 @@ defmodule Arbor.Orchestrator.SessionTest do
     test "restores an engagement's transcript from the durable store on first switch" do
       alias Arbor.Contracts.Session.UserMessage
 
-      defmodule FakeEngagementStore do
-        def available?, do: true
+      {:ok, verified_taint} =
+        Taint.new(%{
+          level: :untrusted,
+          sensitivity: :internal,
+          sanitizations: 0,
+          confidence: :plausible,
+          source: "restored_session_input",
+          chain: []
+        })
 
-        def load_entries_by_session_id(_session_id) do
-          [
-            %{
-              role: "user",
-              content: "restored A1",
-              entry_type: "user",
-              metadata: %{"engagement_id" => "eng_restore"}
-            },
-            %{
-              role: "assistant",
-              content: "restored A2",
-              entry_type: "assistant",
-              metadata: %{"engagement_id" => "eng_restore"}
-            },
-            %{
-              role: "user",
-              content: "other engagement",
-              entry_type: "user",
-              metadata: %{"engagement_id" => "eng_other"}
-            }
-          ]
+      parent = self()
+
+      by_engagement = %{
+        "eng_restore" => [
+          %{
+            role: :user,
+            content: "restored A1",
+            metadata: %{"engagement_id" => "eng_restore", "entry" => 1},
+            taint: verified_taint,
+            taint_status: :verified
+          },
+          %{
+            role: :assistant,
+            content: "restored A2",
+            metadata: %{"engagement_id" => "eng_restore", "entry" => 2},
+            taint: TaintEnvelope.missing_fallback(),
+            taint_status: :legacy_unlabeled
+          }
+        ],
+        "eng_other" => [
+          %{
+            role: :user,
+            content: "other engagement",
+            metadata: %{"engagement_id" => "eng_other"},
+            taint: TaintEnvelope.missing_fallback(),
+            taint_status: :legacy_unlabeled
+          }
+        ]
+      }
+
+      adapters = %{
+        load_recent_session_messages: fn session_id, opts ->
+          send(parent, {:load_recent_session_messages, session_id, opts})
+          Map.fetch!(by_engagement, Keyword.fetch!(opts, :engagement_id))
+        end,
+        ensure_session: fn session_id, agent_id, [] ->
+          {:ok, %{id: "restore-session-uuid", session_id: session_id, agent_id: agent_id}}
+        end,
+        append_session_entries: fn "restore-session-uuid", entries ->
+          {:ok, length(entries)}
         end
-      end
+      }
 
-      prev = Application.get_env(:arbor_orchestrator, :session_store_module)
-      Application.put_env(:arbor_orchestrator, :session_store_module, FakeEngagementStore)
-
-      {pid, tmp_dir} = start_session([])
+      {pid, tmp_dir} = start_session(adapters: adapters)
 
       on_exit(fn ->
-        if prev,
-          do: Application.put_env(:arbor_orchestrator, :session_store_module, prev),
-          else: Application.delete_env(:arbor_orchestrator, :session_store_module)
-
         if Process.alive?(pid), do: GenServer.stop(pid)
         File.rm_rf(tmp_dir)
       end)
@@ -1473,11 +1493,30 @@ defmodule Arbor.Orchestrator.SessionTest do
 
       state = Arbor.Orchestrator.Session.get_state(pid)
       contents = Enum.map(state.messages, & &1["content"])
+      session_id = state.session_id
+
+      assert_receive {:load_recent_session_messages, ^session_id,
+                      [engagement_id: "eng_restore", limit: 1_000]}
 
       # This engagement's prior entries are restored; another engagement's are not.
       assert "restored A1" in contents
       assert "restored A2" in contents
       refute "other engagement" in contents
+
+      restored_user = Enum.find(state.messages, &(&1["content"] == "restored A1"))
+      restored_assistant = Enum.find(state.messages, &(&1["content"] == "restored A2"))
+
+      assert restored_user["metadata"] == %{
+               "engagement_id" => "eng_restore",
+               "entry" => 1
+             }
+
+      assert restored_user["taint"] == verified_taint
+      assert restored_user["taint_status"] == :verified
+      assert restored_assistant["taint"] == TaintEnvelope.missing_fallback()
+      assert restored_assistant["taint_status"] == :legacy_unlabeled
+      assert restored_user["content"] == "restored A1"
+      assert restored_assistant["content"] == "restored A2"
     end
 
     test "untagged messages use the default conversation (engagement_id stays nil)" do
