@@ -1,9 +1,19 @@
 defmodule Arbor.Memory.ConsolidationTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
-  alias Arbor.Memory.{Consolidation, KnowledgeGraph}
+  alias Arbor.Contracts.Security.Taint
+  alias Arbor.Memory.{Consolidation, Events, KnowledgeGraph, KnowledgeGraphStore}
+  alias Arbor.Persistence.BufferedStore
 
   @moduletag :fast
+
+  setup do
+    start_supervised!(
+      {BufferedStore, name: :arbor_memory_durable, backend: nil, write_mode: :sync}
+    )
+
+    :ok
+  end
 
   # Helper to create a graph with some nodes
   defp graph_with_nodes(agent_id, node_specs) do
@@ -133,6 +143,65 @@ defmodule Arbor.Memory.ConsolidationTest do
       assert Map.has_key?(metrics, :duration_ms)
       assert Map.has_key?(metrics, :total_nodes)
       assert Map.has_key?(metrics, :average_relevance)
+    end
+  end
+
+  describe "durable consolidation" do
+    test "archives once and suppresses duplicate completion on typed replay" do
+      agent_id = "agent_consolidation_authority_#{System.unique_integer([:positive])}"
+      operation_id = "consolidation_public_replay"
+      parent = self()
+
+      source_taint = %Taint{
+        level: :trusted,
+        sensitivity: :public,
+        sanitizations: 0,
+        confidence: :verified,
+        source: "consolidation_test",
+        chain: []
+      }
+
+      graph = graph_with_nodes(agent_id, [{:fact, "archive exactly once", 0.15}])
+      assert :ok = KnowledgeGraphStore.save_graph_tainted(agent_id, graph, source_taint)
+
+      assert {:ok, subscription_id} =
+               Arbor.Signals.subscribe("memory.consolidation_completed", fn signal ->
+                 if signal.data.agent_id == agent_id,
+                   do: send(parent, {:consolidation_completed, signal})
+
+                 :ok
+               end)
+
+      on_exit(fn -> Arbor.Signals.unsubscribe(subscription_id) end)
+
+      assert {:ok, first_metrics} =
+               Consolidation.consolidate_basic(
+                 agent_id,
+                 operation_id: operation_id,
+                 prune_threshold: 0.1
+               )
+
+      assert first_metrics.pruned_count == 1
+      assert first_metrics.archived_count == 1
+      assert_receive {:consolidation_completed, first_signal}
+      assert first_signal.data.pruned_count == 1
+
+      assert {:ok, replay_metrics} =
+               Consolidation.consolidate_basic(
+                 agent_id,
+                 operation_id: operation_id,
+                 prune_threshold: 0.1
+               )
+
+      assert Map.drop(replay_metrics, [:duration_ms]) ==
+               Map.drop(first_metrics, [:duration_ms])
+
+      refute_receive {:consolidation_completed, _signal}, 50
+      assert {:ok, [_archive]} = Events.get_by_type(agent_id, :knowledge_archived)
+      assert {:ok, [_completion]} = Events.get_by_type(agent_id, :consolidation_completed)
+      assert {:ok, nil} = KnowledgeGraphStore.pending_maintenance_effect(agent_id)
+      assert {:ok, %{nodes: nodes}} = KnowledgeGraphStore.get_graph(agent_id)
+      assert nodes == %{}
     end
   end
 

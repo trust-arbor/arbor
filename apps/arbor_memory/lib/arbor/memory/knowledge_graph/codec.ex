@@ -44,11 +44,13 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
   @maintenance_modes ~w(basic enhanced)
   @maintenance_reasons ~w(low_relevance quota_exceeded)
   @operation_kinds ~w(
-    add_edge add_node add_pending_fact add_pending_learning approve_pending cascade_recall consolidate
-    merge_node_metadata reinforce reject_pending
+    add_edge add_node add_pending_fact add_pending_learning add_pending_learning_batch
+    approve_pending cascade_recall consolidate merge_node_metadata merge_node_metadata_batch
+    reinforce reject_pending
   )
   @config_keys ~w(auto_embed decay_rate max_nodes_per_type prune_threshold)
   @legacy_node_keys @node_keys ++ ["embedding"]
+  @accepted_proposal_key "$arbor_accepted_proposal_id"
   @legacy_edge_keys @edge_keys ++ ["weight"]
 
   @allowed_node_types [
@@ -92,6 +94,7 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
                         :average_relevance,
                         :basic,
                         :blocked_at,
+                        :blocked_reason,
                         :capability,
                         :category,
                         :confidence,
@@ -127,6 +130,7 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
                         :preference,
                         :preserved,
                         :promotion_blocked,
+                        :promoted_at,
                         :pruned_count,
                         :prune_threshold,
                         :quota_exceeded,
@@ -1430,6 +1434,7 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
            true <- field(node, :id) == id,
            metadata when is_map(metadata) and not is_struct(metadata) <-
              field(node, :metadata, %{}),
+           false <- Map.has_key?(metadata, @accepted_proposal_key),
            {:ok, _encoded} <- encode_generic(metadata) do
         {:cont, :ok}
       else

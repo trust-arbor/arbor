@@ -1,15 +1,15 @@
 defmodule Arbor.Memory.BackgroundChecksTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
-  alias Arbor.Memory.{BackgroundChecks, KnowledgeGraph, Proposal}
+  alias Arbor.Memory.{BackgroundChecks, KnowledgeGraph, KnowledgeGraphStore, Proposal}
+  alias Arbor.Persistence.BufferedStore
 
   @moduletag :fast
 
   setup do
-    # Ensure ETS tables exist
-    if :ets.whereis(:arbor_memory_graphs) == :undefined do
-      :ets.new(:arbor_memory_graphs, [:named_table, :public, :set])
-    end
+    start_supervised!(
+      {BufferedStore, name: :arbor_memory_durable, backend: nil, write_mode: :sync}
+    )
 
     if :ets.whereis(:arbor_memory_proposals) == :undefined do
       :ets.new(:arbor_memory_proposals, [:named_table, :public, :set])
@@ -19,7 +19,6 @@ defmodule Arbor.Memory.BackgroundChecksTest do
 
     on_exit(fn ->
       Proposal.delete_all(agent_id)
-      :ets.delete(:arbor_memory_graphs, agent_id)
     end)
 
     {:ok, agent_id: agent_id}
@@ -34,7 +33,7 @@ defmodule Arbor.Memory.BackgroundChecksTest do
         new_g
       end)
 
-    :ets.insert(:arbor_memory_graphs, {agent_id, graph})
+    :ok = KnowledgeGraphStore.save_graph(agent_id, graph)
     graph
   end
 
@@ -68,13 +67,13 @@ defmodule Arbor.Memory.BackgroundChecksTest do
     test "returns action when consolidation needed", %{agent_id: agent_id} do
       # Create graph with many nodes
       nodes =
-        for i <- 1..110 do
+        for i <- 1..55 do
           %{type: :fact, content: "Fact #{i}"}
         end
 
       create_graph_with_nodes(agent_id, nodes)
 
-      result = BackgroundChecks.check_consolidation(agent_id, size_threshold: 100)
+      result = BackgroundChecks.check_consolidation(agent_id, size_threshold: 50)
 
       assert length(result.actions) == 1
       action = hd(result.actions)
@@ -114,9 +113,10 @@ defmodule Arbor.Memory.BackgroundChecksTest do
           %{new_g | nodes: Map.put(new_g.nodes, node_id, updated_node)}
         end)
 
-      :ets.insert(:arbor_memory_graphs, {agent_id, graph})
+      :ok = KnowledgeGraphStore.save_graph(agent_id, graph)
 
-      result = BackgroundChecks.check_unused_pins(agent_id, access_threshold: 3, days_threshold: 7)
+      result =
+        BackgroundChecks.check_unused_pins(agent_id, access_threshold: 3, days_threshold: 7)
 
       assert length(result.warnings) == 1
       warning = hd(result.warnings)
@@ -139,7 +139,7 @@ defmodule Arbor.Memory.BackgroundChecksTest do
       updated_node = %{node | access_count: 10}
       graph = %{graph | nodes: Map.put(graph.nodes, node_id, updated_node)}
 
-      :ets.insert(:arbor_memory_graphs, {agent_id, graph})
+      :ok = KnowledgeGraphStore.save_graph(agent_id, graph)
 
       result = BackgroundChecks.check_unused_pins(agent_id, access_threshold: 3)
 
@@ -197,7 +197,11 @@ defmodule Arbor.Memory.BackgroundChecksTest do
           }
         end
 
-      result = BackgroundChecks.check_action_patterns(agent_id, action_history: history, min_occurrences: 3)
+      result =
+        BackgroundChecks.check_action_patterns(agent_id,
+          action_history: history,
+          min_occurrences: 3
+        )
 
       # Should find suggestions from detected patterns
       if result.suggestions != [] do
@@ -247,7 +251,7 @@ defmodule Arbor.Memory.BackgroundChecksTest do
   describe "skip options" do
     test "skip_consolidation prevents consolidation check", %{agent_id: agent_id} do
       nodes =
-        for i <- 1..110 do
+        for i <- 1..55 do
           %{type: :fact, content: "Fact #{i}"}
         end
 

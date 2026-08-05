@@ -851,6 +851,87 @@ defmodule Arbor.Memory.KnowledgeGraphStoreTest do
     end
   end
 
+  test "typed batches commit atomically and replay without duplicate effects", %{
+    agent_id: agent_id
+  } do
+    graph = KnowledgeGraph.new(agent_id, auto_embed: false)
+
+    assert {:ok, graph, first_id} =
+             KnowledgeGraph.add_node(graph, %{
+               type: :insight,
+               content: "first batch node",
+               skip_dedup: true
+             })
+
+    assert {:ok, graph, second_id} =
+             KnowledgeGraph.add_node(graph, %{
+               type: :insight,
+               content: "second batch node",
+               skip_dedup: true
+             })
+
+    assert :ok = KnowledgeGraphStore.save_graph(agent_id, graph)
+
+    assert {:error, :not_found} =
+             KnowledgeGraphStore.merge_node_metadata_batch(
+               agent_id,
+               "metadata_batch_rejected",
+               [{first_id, %{promotion_blocked: true}}, {"missing", %{promotion_blocked: true}}]
+             )
+
+    assert {:ok, unchanged} = KnowledgeGraphStore.get_graph(agent_id)
+    refute unchanged.nodes[first_id].metadata[:promotion_blocked]
+
+    updates = [
+      {first_id, %{promotion_blocked: true}},
+      {second_id, %{promotion_blocked: true}}
+    ]
+
+    assert :ok =
+             KnowledgeGraphStore.merge_node_metadata_batch(
+               agent_id,
+               "metadata_batch_committed",
+               updates
+             )
+
+    revision = authoritative_revision(agent_id)
+
+    assert :ok =
+             KnowledgeGraphStore.merge_node_metadata_batch(
+               agent_id,
+               "metadata_batch_committed",
+               updates
+             )
+
+    assert authoritative_revision(agent_id) == revision
+
+    learning_data = [
+      %{content: "first pending batch item", source: "test"},
+      %{content: "second pending batch item", source: "test"}
+    ]
+
+    assert {:ok, pending_ids} =
+             KnowledgeGraphStore.add_pending_learning_batch(
+               agent_id,
+               "pending_learning_batch",
+               learning_data
+             )
+
+    assert length(pending_ids) == 2
+    pending_revision = authoritative_revision(agent_id)
+
+    assert {:ok, ^pending_ids} =
+             KnowledgeGraphStore.add_pending_learning_batch(
+               agent_id,
+               "pending_learning_batch",
+               learning_data
+             )
+
+    assert authoritative_revision(agent_id) == pending_revision
+    assert {:ok, current} = KnowledgeGraphStore.get_graph(agent_id)
+    assert Enum.map(current.pending_learnings, & &1.id) |> Enum.sort() == Enum.sort(pending_ids)
+  end
+
   test "security regression accepted labels transfer only from typed operation authority", %{
     agent_id: agent_id
   } do

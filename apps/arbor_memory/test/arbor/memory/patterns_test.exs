@@ -1,21 +1,17 @@
 defmodule Arbor.Memory.PatternsTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
-  alias Arbor.Memory.{KnowledgeGraph, Patterns}
+  alias Arbor.Memory.{KnowledgeGraph, KnowledgeGraphStore, Patterns}
+  alias Arbor.Persistence.BufferedStore
 
   @moduletag :fast
 
   setup do
-    # Ensure ETS table exists
-    if :ets.whereis(:arbor_memory_graphs) == :undefined do
-      :ets.new(:arbor_memory_graphs, [:named_table, :public, :set])
-    end
+    start_supervised!(
+      {BufferedStore, name: :arbor_memory_durable, backend: nil, write_mode: :sync}
+    )
 
     agent_id = "test_agent_#{System.unique_integer([:positive])}"
-
-    on_exit(fn ->
-      :ets.delete(:arbor_memory_graphs, agent_id)
-    end)
 
     {:ok, agent_id: agent_id}
   end
@@ -29,7 +25,7 @@ defmodule Arbor.Memory.PatternsTest do
         new_g
       end)
 
-    :ets.insert(:arbor_memory_graphs, {agent_id, graph})
+    :ok = KnowledgeGraphStore.save_graph(agent_id, graph)
     graph
   end
 
@@ -183,7 +179,7 @@ defmodule Arbor.Memory.PatternsTest do
       updated_node = %{node | last_accessed: old_time, access_count: 1}
       graph = %{graph | nodes: Map.put(graph.nodes, node_id, updated_node)}
 
-      :ets.insert(:arbor_memory_graphs, {agent_id, graph})
+      :ok = KnowledgeGraphStore.save_graph(agent_id, graph)
 
       pins = Patterns.unused_pins(agent_id, access_threshold: 3, days_threshold: 7)
 
@@ -206,7 +202,7 @@ defmodule Arbor.Memory.PatternsTest do
       updated_node = %{node | access_count: 10}
       graph = %{graph | nodes: Map.put(graph.nodes, node_id, updated_node)}
 
-      :ets.insert(:arbor_memory_graphs, {agent_id, graph})
+      :ok = KnowledgeGraphStore.save_graph(agent_id, graph)
 
       pins = Patterns.unused_pins(agent_id, access_threshold: 3)
 

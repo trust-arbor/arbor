@@ -89,6 +89,15 @@ defmodule Arbor.Memory.KnowledgeGraphStore do
     end
   end
 
+  @spec add_pending_learning_batch(String.t(), String.t(), [map()]) ::
+          {:ok, [String.t()]} | {:error, term()}
+  def add_pending_learning_batch(agent_id, operation_id, learning_data) do
+    with {:ok, operation} <-
+           Operation.add_pending_learning_batch(operation_id, learning_data) do
+      call_operation(agent_id, operation)
+    end
+  end
+
   @spec add_pending_fact(String.t(), String.t(), map()) ::
           {:ok, String.t()} | {:error, term()}
   def add_pending_fact(agent_id, operation_id, fact_data) do
@@ -153,6 +162,15 @@ defmodule Arbor.Memory.KnowledgeGraphStore do
   def merge_node_metadata(agent_id, operation_id, node_id, fields) do
     with {:ok, operation} <- Operation.merge_node_metadata(operation_id, node_id, fields) do
       call_operation(agent_id, operation)
+    end
+  end
+
+  @spec merge_node_metadata_batch(String.t(), String.t(), [{String.t(), map()}]) ::
+          :ok | {:error, term()}
+  def merge_node_metadata_batch(agent_id, operation_id, updates) do
+    with {:ok, operation} <- Operation.merge_node_metadata_batch(operation_id, updates),
+         {:ok, :ok} <- call_operation(agent_id, operation) do
+      :ok
     end
   end
 

@@ -1,15 +1,15 @@
 defmodule Arbor.Memory.InsightDetectorTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
-  alias Arbor.Memory.{InsightDetector, KnowledgeGraph, Proposal}
+  alias Arbor.Memory.{InsightDetector, KnowledgeGraph, KnowledgeGraphStore, Proposal}
+  alias Arbor.Persistence.BufferedStore
 
   @moduletag :fast
 
   setup do
-    # Ensure ETS tables exist
-    if :ets.whereis(:arbor_memory_graphs) == :undefined do
-      :ets.new(:arbor_memory_graphs, [:named_table, :public, :set])
-    end
+    start_supervised!(
+      {BufferedStore, name: :arbor_memory_durable, backend: nil, write_mode: :sync}
+    )
 
     if :ets.whereis(:arbor_memory_proposals) == :undefined do
       :ets.new(:arbor_memory_proposals, [:named_table, :public, :set])
@@ -19,7 +19,6 @@ defmodule Arbor.Memory.InsightDetectorTest do
 
     on_exit(fn ->
       Proposal.delete_all(agent_id)
-      :ets.delete(:arbor_memory_graphs, agent_id)
     end)
 
     {:ok, agent_id: agent_id}
@@ -34,7 +33,7 @@ defmodule Arbor.Memory.InsightDetectorTest do
         new_g
       end)
 
-    :ets.insert(:arbor_memory_graphs, {agent_id, graph})
+    :ok = KnowledgeGraphStore.save_graph(agent_id, graph)
     graph
   end
 
@@ -101,7 +100,8 @@ defmodule Arbor.Memory.InsightDetectorTest do
 
       create_graph_with_nodes(agent_id, nodes)
 
-      insights = InsightDetector.detect(agent_id, max_suggestions: 2, include_low_confidence: true)
+      insights =
+        InsightDetector.detect(agent_id, max_suggestions: 2, include_low_confidence: true)
 
       assert length(insights) <= 2
     end

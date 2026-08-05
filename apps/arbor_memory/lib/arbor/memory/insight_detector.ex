@@ -26,7 +26,7 @@ defmodule Arbor.Memory.InsightDetector do
       {:ok, proposals} = Arbor.Memory.InsightDetector.detect_and_queue("agent_001")
   """
 
-  alias Arbor.Memory.{Proposal, Signals}
+  alias Arbor.Memory.{GraphOps, Proposal, Signals}
 
   @type insight_category :: :personality | :capability | :value | :preference
 
@@ -37,9 +37,6 @@ defmodule Arbor.Memory.InsightDetector do
           evidence: [String.t()],
           source: :pattern_analysis | :reflection | :feedback
         }
-
-  # Graph ETS table
-  @graph_ets :arbor_memory_graphs
 
   # Minimum nodes to attempt insight detection
   @min_nodes_for_insights 10
@@ -196,8 +193,9 @@ defmodule Arbor.Memory.InsightDetector do
           if total > 50 do
             [
               %{
-                content: "You maintain a substantial knowledge base (#{total} memories). " <>
-                  "This indicates a thorough approach to information retention.",
+                content:
+                  "You maintain a substantial knowledge base (#{total} memories). " <>
+                    "This indicates a thorough approach to information retention.",
                 category: :personality,
                 confidence: min(0.7, 0.4 + total / 200),
                 evidence: ["#{total} total memories stored"],
@@ -231,8 +229,9 @@ defmodule Arbor.Memory.InsightDetector do
 
       Enum.map(themes, fn {theme, count, words} ->
         %{
-          content: "Your memories frequently mention #{theme} " <>
-            "(#{count} references). This may indicate an interest or focus area.",
+          content:
+            "Your memories frequently mention #{theme} " <>
+              "(#{count} references). This may indicate an interest or focus area.",
           category: :preference,
           confidence: min(0.7, 0.4 + count / 20),
           evidence: ["Common words: #{Enum.join(Enum.take(words, 3), ", ")}"],
@@ -487,17 +486,24 @@ defmodule Arbor.Memory.InsightDetector do
     end
   end
 
-  defp build_suggestion_from_category({category, keywords, template}, combined, min_hits, thought_count) do
+  defp build_suggestion_from_category(
+         {category, keywords, template},
+         combined,
+         min_hits,
+         thought_count
+       ) do
     hits = count_keyword_hits(combined, keywords)
 
     if hits >= min_hits do
-      [%{
-        content: template,
-        category: category,
-        confidence: min(0.9, 0.4 + hits * 0.1),
-        source: :working_memory,
-        evidence: ["#{hits} keyword matches in #{thought_count} recent thoughts"]
-      }]
+      [
+        %{
+          content: template,
+          category: category,
+          confidence: min(0.9, 0.4 + hits * 0.1),
+          source: :working_memory,
+          evidence: ["#{hits} keyword matches in #{thought_count} recent thoughts"]
+        }
+      ]
     else
       []
     end
@@ -505,17 +511,13 @@ defmodule Arbor.Memory.InsightDetector do
 
   defp categories do
     [
-      {:curiosity,
-       ~w(why how wonder curious question explore what if interesting),
+      {:curiosity, ~w(why how wonder curious question explore what if interesting),
        "Agent shows curiosity-driven behavior, frequently asking questions and exploring"},
-      {:methodical,
-       ~w(step first then next plan systematic structure organize sequence),
+      {:methodical, ~w(step first then next plan systematic structure organize sequence),
        "Agent follows methodical, step-by-step approaches to problem solving"},
-      {:caution,
-       ~w(careful check verify confirm test validate safe ensure double-check),
+      {:caution, ~w(careful check verify confirm test validate safe ensure double-check),
        "Agent demonstrates cautious behavior, verifying before acting"},
-      {:learning,
-       ~w(learned discovered realized understand now know figured found insight),
+      {:learning, ~w(learned discovered realized understand now know figured found insight),
        "Agent actively synthesizes new understanding from experiences"}
     ]
   end
@@ -528,7 +530,7 @@ defmodule Arbor.Memory.InsightDetector do
     if :ets.whereis(:arbor_working_memory) != :undefined do
       case :ets.lookup(:arbor_working_memory, agent_id) do
         [{^agent_id, wm}] ->
-          (Map.get(wm, :recent_thoughts, []))
+          Map.get(wm, :recent_thoughts, [])
           |> Enum.map(&extract_thought_text/1)
           |> Enum.reject(&(&1 == ""))
 
@@ -598,12 +600,7 @@ defmodule Arbor.Memory.InsightDetector do
   # Private Helpers
   # ============================================================================
 
-  defp get_graph(agent_id) do
-    case :ets.lookup(@graph_ets, agent_id) do
-      [{^agent_id, graph}] -> {:ok, graph}
-      [] -> {:error, :graph_not_initialized}
-    end
-  end
+  defp get_graph(agent_id), do: GraphOps.get_graph(agent_id)
 
   # Make type_distribution_impl available to this module
   # by copying the logic (avoiding circular dependency)

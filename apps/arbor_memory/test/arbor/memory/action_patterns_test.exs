@@ -1,11 +1,16 @@
 defmodule Arbor.Memory.ActionPatternsTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
-  alias Arbor.Memory.{ActionPatterns, KnowledgeGraph, Proposal}
+  alias Arbor.Memory.{ActionPatterns, KnowledgeGraph, KnowledgeGraphStore, Proposal}
+  alias Arbor.Persistence.BufferedStore
 
   @moduletag :fast
 
   setup do
+    start_supervised!(
+      {BufferedStore, name: :arbor_memory_durable, backend: nil, write_mode: :sync}
+    )
+
     # Ensure ETS tables exist
     if :ets.whereis(:arbor_memory_graphs) == :undefined do
       :ets.new(:arbor_memory_graphs, [:named_table, :public, :set])
@@ -19,11 +24,10 @@ defmodule Arbor.Memory.ActionPatternsTest do
 
     # Initialize a graph for this agent
     graph = KnowledgeGraph.new(agent_id)
-    :ets.insert(:arbor_memory_graphs, {agent_id, graph})
+    :ok = KnowledgeGraphStore.save_graph(agent_id, graph)
 
     on_exit(fn ->
       Proposal.delete_all(agent_id)
-      :ets.delete(:arbor_memory_graphs, agent_id)
     end)
 
     {:ok, agent_id: agent_id}
@@ -251,7 +255,8 @@ defmodule Arbor.Memory.ActionPatternsTest do
           {"Edit", :success}
         ])
 
-      {:ok, proposals} = ActionPatterns.analyze_and_queue(agent_id, history, min_occurrences: 3, use_llm: false)
+      {:ok, proposals} =
+        ActionPatterns.analyze_and_queue(agent_id, history, min_occurrences: 3, use_llm: false)
 
       assert proposals != []
       assert Enum.all?(proposals, fn p -> p.type == :learning end)
@@ -267,6 +272,32 @@ defmodule Arbor.Memory.ActionPatternsTest do
     end
   end
 
+  describe "add_to_pending_learnings/3" do
+    test "commits synthesized learnings through durable authority", %{agent_id: agent_id} do
+      patterns = [
+        %{
+          type: :repeated_sequence,
+          tools: ["Read", "Edit"],
+          occurrences: 4,
+          confidence: 0.8,
+          description: "Read then Edit"
+        }
+      ]
+
+      assert {:ok, [pending_id]} =
+               ActionPatterns.add_to_pending_learnings(agent_id, patterns, use_llm: false)
+
+      true =
+        :ets.insert(
+          :arbor_memory_graphs,
+          {agent_id, KnowledgeGraph.new(agent_id, auto_embed: false)}
+        )
+
+      assert {:ok, graph} = KnowledgeGraphStore.get_graph(agent_id)
+      assert Enum.any?(graph.pending_learnings, &(&1.id == pending_id))
+    end
+  end
+
   # ============================================================================
   # LLM Synthesis Tests
   # ============================================================================
@@ -274,8 +305,13 @@ defmodule Arbor.Memory.ActionPatternsTest do
   describe "build_synthesis_prompt/1" do
     test "includes repeated sequence patterns" do
       patterns = [
-        %{type: :repeated_sequence, tools: ["Read", "Edit"], occurrences: 5, confidence: 0.8,
-          description: "Read → Edit (5x)"}
+        %{
+          type: :repeated_sequence,
+          tools: ["Read", "Edit"],
+          occurrences: 5,
+          confidence: 0.8,
+          description: "Read → Edit (5x)"
+        }
       ]
 
       prompt = ActionPatterns.build_synthesis_prompt(patterns)
@@ -286,8 +322,13 @@ defmodule Arbor.Memory.ActionPatternsTest do
 
     test "includes failure recovery patterns" do
       patterns = [
-        %{type: :failure_then_success, tools: ["Grep", "Read"], occurrences: 3, confidence: 0.7,
-          description: "Grep fails, Read succeeds (3x)"}
+        %{
+          type: :failure_then_success,
+          tools: ["Grep", "Read"],
+          occurrences: 3,
+          confidence: 0.7,
+          description: "Grep fails, Read succeeds (3x)"
+        }
       ]
 
       prompt = ActionPatterns.build_synthesis_prompt(patterns)
@@ -297,8 +338,13 @@ defmodule Arbor.Memory.ActionPatternsTest do
 
     test "includes long sequence patterns" do
       patterns = [
-        %{type: :long_sequence, tools: ["A", "B", "C", "D", "E"], occurrences: 1, confidence: 0.5,
-          description: "5-tool sequence: A→B→C→D→E"}
+        %{
+          type: :long_sequence,
+          tools: ["A", "B", "C", "D", "E"],
+          occurrences: 1,
+          confidence: 0.5,
+          description: "5-tool sequence: A→B→C→D→E"
+        }
       ]
 
       prompt = ActionPatterns.build_synthesis_prompt(patterns)
@@ -314,8 +360,20 @@ defmodule Arbor.Memory.ActionPatternsTest do
 
   describe "parse_llm_learnings/3" do
     test "parses valid JSON response" do
-      response = %{text: ~s([{"content": "Use Read before Edit for context", "tool_name": "Edit", "confidence": 0.85}])}
-      patterns = [%{type: :repeated_sequence, tools: ["Read", "Edit"], occurrences: 5, confidence: 0.8, description: "test"}]
+      response = %{
+        text:
+          ~s([{"content": "Use Read before Edit for context", "tool_name": "Edit", "confidence": 0.85}])
+      }
+
+      patterns = [
+        %{
+          type: :repeated_sequence,
+          tools: ["Read", "Edit"],
+          occurrences: 5,
+          confidence: 0.8,
+          description: "test"
+        }
+      ]
 
       learnings = ActionPatterns.parse_llm_learnings(response, patterns, 5)
       assert length(learnings) == 1
@@ -333,9 +391,15 @@ defmodule Arbor.Memory.ActionPatternsTest do
     test "returns empty list for text with no JSON array" do
       # extract_json returns "[]" which decodes to empty list
       response = %{text: "not valid json at all"}
+
       patterns = [
-        %{type: :repeated_sequence, tools: ["Read", "Edit"], occurrences: 5, confidence: 0.8,
-          description: "Read → Edit (5x)"}
+        %{
+          type: :repeated_sequence,
+          tools: ["Read", "Edit"],
+          occurrences: 5,
+          confidence: 0.8,
+          description: "Read → Edit (5x)"
+        }
       ]
 
       learnings = ActionPatterns.parse_llm_learnings(response, patterns, 5)
@@ -346,9 +410,15 @@ defmodule Arbor.Memory.ActionPatternsTest do
     test "falls back to templates on truly invalid JSON" do
       # Provide text that contains [ and ] but isn't valid JSON
       response = %{text: "[not: valid, json: here]"}
+
       patterns = [
-        %{type: :repeated_sequence, tools: ["Read", "Edit"], occurrences: 5, confidence: 0.8,
-          description: "Read → Edit (5x)"}
+        %{
+          type: :repeated_sequence,
+          tools: ["Read", "Edit"],
+          occurrences: 5,
+          confidence: 0.8,
+          description: "Read → Edit (5x)"
+        }
       ]
 
       learnings = ActionPatterns.parse_llm_learnings(response, patterns, 5)
@@ -370,7 +440,11 @@ defmodule Arbor.Memory.ActionPatternsTest do
     end
 
     test "filters empty content" do
-      response = %{text: ~s([{"content": "", "confidence": 0.8}, {"content": "Valid learning content here", "confidence": 0.7}])}
+      response = %{
+        text:
+          ~s([{"content": "", "confidence": 0.8}, {"content": "Valid learning content here", "confidence": 0.7}])
+      }
+
       patterns = []
 
       learnings = ActionPatterns.parse_llm_learnings(response, patterns, 5)
@@ -395,6 +469,7 @@ defmodule Arbor.Memory.ActionPatternsTest do
         {"content": "learning 2"}
       ]
       """
+
       result = ActionPatterns.extract_json(text)
       assert {:ok, parsed} = Jason.decode(result)
       assert length(parsed) == 2

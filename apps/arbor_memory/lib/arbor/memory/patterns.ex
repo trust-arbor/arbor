@@ -25,7 +25,7 @@ defmodule Arbor.Memory.Patterns do
       gini = Arbor.Memory.Patterns.access_concentration("agent_001")
   """
 
-  # KnowledgeGraph accessed via ETS directly for this module
+  alias Arbor.Memory.GraphOps
 
   @type analysis :: %{
           type_distribution: map(),
@@ -34,9 +34,6 @@ defmodule Arbor.Memory.Patterns do
           unused_pins: [map()],
           suggestions: [String.t()]
         }
-
-  # Graph ETS table (same as facade)
-  @graph_ets :arbor_memory_graphs
 
   # Thresholds for analysis
   @decay_warning_threshold 0.25
@@ -267,7 +264,12 @@ defmodule Arbor.Memory.Patterns do
       prune_threshold: prune_threshold,
       at_risk_nodes:
         Enum.map(at_risk, fn n ->
-          %{id: n.id, type: n.type, relevance: n.relevance, content_preview: String.slice(n.content, 0, 50)}
+          %{
+            id: n.id,
+            type: n.type,
+            relevance: n.relevance,
+            content_preview: String.slice(n.content, 0, 50)
+          }
         end)
     }
   end
@@ -397,10 +399,5 @@ defmodule Arbor.Memory.Patterns do
   # Private Helpers
   # ============================================================================
 
-  defp get_graph(agent_id) do
-    case :ets.lookup(@graph_ets, agent_id) do
-      [{^agent_id, graph}] -> {:ok, graph}
-      [] -> {:error, :graph_not_initialized}
-    end
-  end
+  defp get_graph(agent_id), do: GraphOps.get_graph(agent_id)
 end

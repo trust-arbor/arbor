@@ -11,17 +11,18 @@ defmodule Arbor.Memory.Consolidation do
 
   1. **Decay** — Reduce relevance of all non-pinned nodes
   2. **Reinforce** — Boost recently-accessed nodes (based on last_accessed)
-  3. **Prune** — Remove nodes below threshold (archive to EventLog first)
+  3. **Prune** — Remove nodes below threshold while creating a labelled archive outbox
   4. **Quota check** — Evict lowest-relevance nodes if over type quotas
+  5. **Drain** — Archive committed outbox entries idempotently, then acknowledge them
 
   ## Design Decisions
 
   - **Relationships don't decay** — This module only operates on KnowledgeGraph nodes.
     Relationships are permanent fixtures stored in RelationshipStore.
-  - **Archive before prune** — Pruned nodes are recorded in EventLog before removal,
-    so nothing is silently lost.
-  - **Pure functions** — This module has no state. Callers are responsible for
-    loading/saving the KnowledgeGraph.
+  - **Durable state before effects** — The graph mutation and exact labelled archive
+    outbox commit atomically. EventLog archival happens only after that commit.
+  - **Pure transition plus authority shell** — `consolidate/3` previews the pure
+    transition; agent-level functions use `KnowledgeGraphStore` typed operations.
 
   ## Usage
 
@@ -32,15 +33,13 @@ defmodule Arbor.Memory.Consolidation do
       end
   """
 
-  alias Arbor.Memory.{Events, GraphOps, KnowledgeGraph, Signals}
+  alias Arbor.Memory.{Events, GraphOps, KnowledgeGraph, KnowledgeGraphStore, Signals}
+  alias Arbor.Memory.KnowledgeGraph.{Codec, Maintenance}
 
   require Logger
 
-  @default_reinforce_window_hours 24
-  @default_reinforce_boost 0.1
   @default_prune_threshold 0.1
   @default_min_interval_minutes 60
-  @default_size_threshold 100
 
   # ============================================================================
   # Main Consolidation Function
@@ -53,8 +52,8 @@ defmodule Arbor.Memory.Consolidation do
 
   1. Apply decay to all non-pinned nodes
   2. Reinforce recently-accessed nodes
-  3. Archive nodes below threshold to EventLog
-  4. Prune archived nodes from graph
+  3. Build labelled archive effects for nodes below threshold
+  4. Prune those nodes from the returned graph
   5. Check type quotas and evict if needed
 
   ## Options
@@ -81,54 +80,18 @@ defmodule Arbor.Memory.Consolidation do
   def consolidate(agent_id, graph, opts \\ []) do
     start_time = System.monotonic_time(:millisecond)
 
-    prune_threshold = Keyword.get(opts, :prune_threshold, @default_prune_threshold)
-    reinforce_window = Keyword.get(opts, :reinforce_window_hours, @default_reinforce_window_hours)
-    reinforce_boost = Keyword.get(opts, :reinforce_boost, @default_reinforce_boost)
-    should_archive = Keyword.get(opts, :archive, true)
+    with {:ok, updated, result} <- Maintenance.run(graph, :enhanced, opts, DateTime.utc_now()) do
+      metrics =
+        Map.put(result.metrics, :duration_ms, System.monotonic_time(:millisecond) - start_time)
 
-    initial_count = map_size(graph.nodes)
-
-    # Step 1: Apply decay
-    decayed_graph = KnowledgeGraph.decay(graph)
-
-    # Step 2: Reinforce recently-accessed nodes
-    {reinforced_graph, reinforced_count} =
-      reinforce_recent(decayed_graph, reinforce_window, reinforce_boost)
-
-    # Step 3 & 4: Archive and prune low-relevance nodes
-    {final_graph, archived_count, pruned_count} =
-      archive_and_prune(
-        agent_id,
-        reinforced_graph,
-        prune_threshold,
-        should_archive
+      Logger.debug(
+        "Consolidation completed for #{agent_id}: " <>
+          "decayed=#{metrics.decayed_count}, reinforced=#{metrics.reinforced_count}, " <>
+          "pruned=#{metrics.pruned_count}, evicted=#{metrics.evicted_count}"
       )
 
-    # Step 5: Check type quotas
-    {quota_graph, evicted_count} = enforce_quotas(agent_id, final_graph, should_archive)
-
-    # Calculate metrics
-    duration_ms = System.monotonic_time(:millisecond) - start_time
-    final_stats = KnowledgeGraph.stats(quota_graph)
-
-    metrics = %{
-      decayed_count: initial_count,
-      reinforced_count: reinforced_count,
-      archived_count: archived_count,
-      pruned_count: pruned_count,
-      evicted_count: evicted_count,
-      duration_ms: duration_ms,
-      total_nodes: final_stats.node_count,
-      average_relevance: final_stats.average_relevance
-    }
-
-    Logger.debug(
-      "Consolidation completed for #{agent_id}: " <>
-        "decayed=#{initial_count}, reinforced=#{reinforced_count}, " <>
-        "pruned=#{pruned_count}, evicted=#{evicted_count}"
-    )
-
-    {:ok, quota_graph, metrics}
+      {:ok, updated, metrics}
+    end
   end
 
   # ============================================================================
@@ -144,13 +107,13 @@ defmodule Arbor.Memory.Consolidation do
 
   ## Options
 
-  - `:size_threshold` - Consolidate if node count exceeds this (default: 100)
+  - `:size_threshold` - Consolidate if node count reaches 75% of the strict content capacity
   - `:min_interval_minutes` - Minimum minutes between consolidations (default: 60)
   - `:last_consolidation` - DateTime of last consolidation (default: nil)
   """
   @spec should_consolidate?(KnowledgeGraph.t(), keyword()) :: boolean()
   def should_consolidate?(graph, opts \\ []) do
-    size_threshold = Keyword.get(opts, :size_threshold, @default_size_threshold)
+    size_threshold = Keyword.get(opts, :size_threshold, default_size_threshold())
     min_interval = Keyword.get(opts, :min_interval_minutes, @default_min_interval_minutes)
     last_consolidation = Keyword.get(opts, :last_consolidation)
 
@@ -228,67 +191,14 @@ defmodule Arbor.Memory.Consolidation do
   def consolidate_basic(agent_id, opts \\ []) do
     start_time = System.monotonic_time(:millisecond)
 
-    Signals.emit_consolidation_started(agent_id)
-
-    with {:ok, graph} <- GraphOps.get_graph(agent_id) do
-      # Apply decay
-      decayed_graph = KnowledgeGraph.decay(graph)
-      decayed_count = map_size(graph.nodes)
-
-      # Identify nodes that will be pruned (for archival)
-      threshold = Keyword.get(opts, :prune_threshold, 0.1)
-
-      to_prune =
-        decayed_graph.nodes
-        |> Map.values()
-        |> Enum.reject(fn node -> node.pinned or node.relevance >= threshold end)
-
-      # Archive pruned nodes to Historian before removal
-      Enum.each(to_prune, fn node ->
-        Events.record_knowledge_archived(agent_id, %{
-          node_id: node.id,
-          type: node.type,
-          content: node.content,
-          relevance: node.relevance,
-          created_at: node.created_at,
-          last_accessed: node.last_accessed,
-          access_count: node.access_count,
-          reason: :low_relevance
-        })
-      end)
-
-      # Prune
-      {pruned_graph, pruned_count} = KnowledgeGraph.prune(decayed_graph, threshold)
-
-      # Save to ETS + persist to Postgres
-      GraphOps.save_graph(agent_id, pruned_graph)
-      GraphOps.persist_graph_async(agent_id)
-
-      # Calculate duration
-      duration_ms = System.monotonic_time(:millisecond) - start_time
-
-      # Get final stats
-      stats = KnowledgeGraph.stats(pruned_graph)
-
-      metrics = %{
-        decayed_count: decayed_count,
-        pruned_count: pruned_count,
-        duration_ms: duration_ms,
-        total_nodes: stats.node_count,
-        average_relevance: stats.average_relevance
-      }
-
-      # Emit signals
-      Signals.emit_consolidation_completed(agent_id, metrics)
-      Signals.emit_knowledge_decayed(agent_id, stats)
-
-      if pruned_count > 0 do
-        Signals.emit_knowledge_pruned(agent_id, pruned_count)
-      end
-
-      # Record permanent event
-      Events.record_consolidation_completed(agent_id, metrics)
-
+    with :ok <- drain_prior_effect(agent_id),
+         {operation_id, maintenance_opts} <- maintenance_request(opts, "basic"),
+         {:ok, _graph, effect} <-
+           reconcile_maintenance(agent_id, operation_id, :basic, maintenance_opts),
+         {:ok, drain_status} <- drain_and_ack(agent_id, effect),
+         {:ok, graph} <- KnowledgeGraphStore.get_graph(agent_id) do
+      metrics = with_duration(effect.metrics, start_time)
+      maybe_emit_completion(agent_id, graph, metrics, drain_status, :basic)
       {:ok, metrics}
     end
   end
@@ -302,25 +212,17 @@ defmodule Arbor.Memory.Consolidation do
   @spec run_enhanced(String.t(), keyword()) ::
           {:ok, KnowledgeGraph.t(), map()} | {:error, term()}
   def run_enhanced(agent_id, opts \\ []) do
-    Signals.emit_consolidation_started(agent_id)
+    start_time = System.monotonic_time(:millisecond)
 
-    with {:ok, graph} <- GraphOps.get_graph(agent_id),
-         {:ok, new_graph, metrics} <- consolidate(agent_id, graph, opts) do
-      # Save updated graph to ETS + Postgres
-      GraphOps.save_graph(agent_id, new_graph)
-      GraphOps.persist_graph_async(agent_id)
-
-      # Emit completion signals
-      Signals.emit_consolidation_completed(agent_id, metrics)
-
-      if metrics.pruned_count > 0 do
-        Signals.emit_knowledge_pruned(agent_id, metrics.pruned_count)
-      end
-
-      # Record permanent event
-      Events.record_consolidation_completed(agent_id, metrics)
-
-      {:ok, new_graph, metrics}
+    with :ok <- drain_prior_effect(agent_id),
+         {operation_id, maintenance_opts} <- maintenance_request(opts, "enhanced"),
+         {:ok, _graph, effect} <-
+           reconcile_maintenance(agent_id, operation_id, :enhanced, maintenance_opts),
+         {:ok, drain_status} <- drain_and_ack(agent_id, effect),
+         {:ok, graph} <- KnowledgeGraphStore.get_graph(agent_id) do
+      metrics = with_duration(effect.metrics, start_time)
+      maybe_emit_completion(agent_id, graph, metrics, drain_status, :enhanced)
+      {:ok, graph, metrics}
     end
   end
 
@@ -350,118 +252,89 @@ defmodule Arbor.Memory.Consolidation do
   # Private Helpers
   # ============================================================================
 
-  # Reinforce nodes that were accessed within the window
-  defp reinforce_recent(graph, window_hours, boost) do
-    cutoff = DateTime.add(DateTime.utc_now(), -window_hours, :hour)
-
-    {new_nodes, count} =
-      Enum.reduce(graph.nodes, {%{}, 0}, fn {id, node}, {acc, cnt} ->
-        if DateTime.compare(node.last_accessed, cutoff) == :gt do
-          new_relevance = min(1.0, node.relevance + boost)
-          {Map.put(acc, id, %{node | relevance: new_relevance}), cnt + 1}
-        else
-          {Map.put(acc, id, node), cnt}
-        end
-      end)
-
-    {%{graph | nodes: new_nodes}, count}
+  defp drain_prior_effect(agent_id) do
+    case KnowledgeGraphStore.pending_maintenance_effect(agent_id) do
+      {:ok, nil} -> :ok
+      {:ok, effect} -> drain_and_ack(agent_id, effect) |> normalize_prior_drain(agent_id, effect)
+      {:error, _reason} = error -> error
+    end
   end
 
-  # Archive nodes to EventLog then prune them
-  defp archive_and_prune(agent_id, graph, threshold, should_archive) do
-    to_prune = candidates_for_pruning(graph, threshold)
+  defp normalize_prior_drain({:ok, status}, agent_id, effect) do
+    maybe_emit_completion(agent_id, nil, effect.metrics, status, effect.mode)
+    :ok
+  end
 
-    # Archive to EventLog if requested
-    archived_count =
-      if should_archive do
-        Enum.each(to_prune, fn node ->
-          Events.record_knowledge_archived(agent_id, %{
-            node_id: node.id,
-            type: node.type,
-            content: node.content,
-            relevance: node.relevance,
-            created_at: node.created_at,
-            last_accessed: node.last_accessed,
-            access_count: node.access_count,
-            reason: :low_relevance
-          })
-        end)
+  defp normalize_prior_drain({:error, _reason} = error, _agent_id, _effect), do: error
 
-        length(to_prune)
-      else
-        0
+  defp reconcile_maintenance(agent_id, operation_id, mode, opts) do
+    case KnowledgeGraphStore.consolidate(agent_id, operation_id, mode, opts) do
+      {:error, :outcome_unknown} ->
+        KnowledgeGraphStore.consolidate(agent_id, operation_id, mode, opts)
+
+      result ->
+        result
+    end
+  end
+
+  defp drain_and_ack(_agent_id, %{drained: true}), do: {:ok, :already_drained}
+
+  defp drain_and_ack(agent_id, effect) do
+    with :ok <- drain_archive_entries(agent_id, effect),
+         :ok <- reconcile_ack(agent_id, effect.operation_id) do
+      {:ok, :drained_now}
+    end
+  end
+
+  defp drain_archive_entries(agent_id, effect) do
+    Enum.reduce_while(effect.archive_entries, :ok, fn entry, :ok ->
+      case Events.archive_knowledge_once(agent_id, entry, effect.occurred_at) do
+        :ok -> {:cont, :ok}
+        {:error, _reason} = error -> {:halt, error}
       end
-
-    # Actually prune
-    {pruned_graph, pruned_count} = KnowledgeGraph.prune(graph, threshold)
-
-    {pruned_graph, archived_count, pruned_count}
-  end
-
-  # Enforce type quotas by evicting lowest-relevance nodes
-  defp enforce_quotas(agent_id, graph, should_archive) do
-    max_per_type = Map.get(graph.config, :max_nodes_per_type, 500)
-
-    nodes_by_type =
-      graph.nodes
-      |> Map.values()
-      |> Enum.group_by(& &1.type)
-
-    {new_nodes, total_evicted} =
-      Enum.reduce(nodes_by_type, {graph.nodes, 0}, fn {_type, nodes}, {acc_nodes, evict_count} ->
-        evict_type_quota(nodes, max_per_type, agent_id, should_archive, acc_nodes, evict_count)
-      end)
-
-    # Also clean up edges to evicted nodes
-    evicted_ids =
-      MapSet.difference(
-        MapSet.new(Map.keys(graph.nodes)),
-        MapSet.new(Map.keys(new_nodes))
-      )
-
-    new_edges =
-      graph.edges
-      |> Enum.reject(fn {source_id, _} -> source_id in evicted_ids end)
-      |> Map.new(fn {source_id, edges} ->
-        {source_id, Enum.reject(edges, &(&1.target_id in evicted_ids))}
-      end)
-
-    {%{graph | nodes: new_nodes, edges: new_edges}, total_evicted}
-  end
-
-  defp evict_type_quota(nodes, max_per_type, _agent_id, _should_archive, acc_nodes, evict_count)
-       when length(nodes) <= max_per_type do
-    {acc_nodes, evict_count}
-  end
-
-  defp evict_type_quota(nodes, max_per_type, agent_id, should_archive, acc_nodes, evict_count) do
-    sorted = Enum.sort_by(nodes, & &1.relevance)
-    to_evict = Enum.take(sorted, length(nodes) - max_per_type)
-
-    maybe_archive_evicted(to_evict, agent_id, should_archive)
-
-    evict_ids = MapSet.new(to_evict, & &1.id)
-    remaining = Map.reject(acc_nodes, fn {id, _} -> id in evict_ids end)
-
-    {remaining, evict_count + length(to_evict)}
-  end
-
-  defp maybe_archive_evicted(_to_evict, _agent_id, false), do: :ok
-
-  defp maybe_archive_evicted(to_evict, agent_id, true) do
-    Enum.each(to_evict, fn node ->
-      Events.record_knowledge_archived(agent_id, %{
-        node_id: node.id,
-        type: node.type,
-        content: node.content,
-        relevance: node.relevance,
-        created_at: node.created_at,
-        last_accessed: node.last_accessed,
-        access_count: node.access_count,
-        reason: :quota_exceeded
-      })
     end)
   end
+
+  defp reconcile_ack(agent_id, operation_id) do
+    case KnowledgeGraphStore.acknowledge_maintenance_effect(agent_id, operation_id) do
+      {:error, :outcome_unknown} ->
+        KnowledgeGraphStore.acknowledge_maintenance_effect(agent_id, operation_id)
+
+      result ->
+        result
+    end
+  end
+
+  defp maybe_emit_completion(_agent_id, _graph, _metrics, :already_drained, _mode), do: :ok
+
+  defp maybe_emit_completion(agent_id, graph, metrics, :drained_now, mode) do
+    if mode == :basic and graph do
+      Signals.emit_knowledge_decayed(agent_id, KnowledgeGraph.stats(graph))
+    end
+
+    if metrics.pruned_count > 0 do
+      Signals.emit_knowledge_pruned(agent_id, metrics.pruned_count)
+    end
+
+    Events.record_consolidation_completed(agent_id, metrics)
+    :ok
+  end
+
+  defp maintenance_request(opts, mode) do
+    {operation_id, maintenance_opts} = Keyword.pop(opts, :operation_id)
+    {operation_id || new_operation_id(mode), maintenance_opts}
+  end
+
+  defp new_operation_id(mode) do
+    nonce = :crypto.strong_rand_bytes(16) |> Base.encode16(case: :lower)
+    "knowledge_consolidation_#{mode}_#{nonce}"
+  end
+
+  defp with_duration(metrics, start_time) do
+    Map.put(metrics, :duration_ms, System.monotonic_time(:millisecond) - start_time)
+  end
+
+  defp default_size_threshold, do: div(Codec.max_content_items() * 3, 4)
 
   defp avg_relevance(graph) do
     nodes = Map.values(graph.nodes)

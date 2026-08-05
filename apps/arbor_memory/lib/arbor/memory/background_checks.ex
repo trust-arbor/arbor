@@ -44,6 +44,7 @@ defmodule Arbor.Memory.BackgroundChecks do
   alias Arbor.Memory.{
     ActionPatterns,
     Consolidation,
+    GraphOps,
     InsightDetector,
     Patterns,
     Preconscious,
@@ -79,9 +80,6 @@ defmodule Arbor.Memory.BackgroundChecks do
           warnings: [warning()],
           suggestions: [suggestion()]
         }
-
-  # Graph ETS table
-  @graph_ets :arbor_memory_graphs
 
   # Thresholds
   @pending_pileup_threshold 10
@@ -135,15 +133,16 @@ defmodule Arbor.Memory.BackgroundChecks do
     preconscious_result = maybe_check_preconscious(agent_id, opts)
 
     # Merge all results
-    result = merge_results([
-      consolidation_result,
-      pins_result,
-      decay_result,
-      patterns_result,
-      introspection_result,
-      insights_result,
-      preconscious_result
-    ])
+    result =
+      merge_results([
+        consolidation_result,
+        pins_result,
+        decay_result,
+        patterns_result,
+        introspection_result,
+        insights_result,
+        preconscious_result
+      ])
 
     duration_ms = System.monotonic_time(:millisecond) - start_time
 
@@ -506,10 +505,5 @@ defmodule Arbor.Memory.BackgroundChecks do
     end)
   end
 
-  defp get_graph(agent_id) do
-    case :ets.lookup(@graph_ets, agent_id) do
-      [{^agent_id, graph}] -> {:ok, graph}
-      [] -> {:error, :graph_not_initialized}
-    end
-  end
+  defp get_graph(agent_id), do: GraphOps.get_graph(agent_id)
 end

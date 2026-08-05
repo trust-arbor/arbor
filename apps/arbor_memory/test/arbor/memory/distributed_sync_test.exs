@@ -5,7 +5,16 @@ defmodule Arbor.Memory.DistributedSyncTest do
   use ExUnit.Case, async: false
   @moduletag :fast
 
-  alias Arbor.Memory.{DistributedSync, WorkingMemoryStore, GraphOps, GoalStore, WorkingMemory}
+  alias Arbor.Memory.{
+    DistributedSync,
+    GoalStore,
+    GraphOps,
+    KnowledgeGraph,
+    KnowledgeGraphStore,
+    WorkingMemory,
+    WorkingMemoryStore
+  }
+
   alias Arbor.Contracts.Memory.Goal
   alias Arbor.Persistence.BufferedStore
 
@@ -100,10 +109,11 @@ defmodule Arbor.Memory.DistributedSyncTest do
     test "invalidates knowledge graph on remote knowledge_added signal" do
       agent_id = "agent_dist_kg_#{System.unique_integer([:positive])}"
 
-      graph = Arbor.Memory.KnowledgeGraph.new("test_agent")
-      :ets.insert(@graph_ets, {agent_id, graph})
+      graph = KnowledgeGraph.new(agent_id, auto_embed: false)
+      assert :ok = KnowledgeGraphStore.save_graph(agent_id, graph)
 
-      assert {:ok, _} = GraphOps.get_graph(agent_id)
+      forged = KnowledgeGraph.new(agent_id, auto_embed: false, decay_rate: 0.9)
+      :ets.insert(@graph_ets, {agent_id, forged})
 
       send(
         Process.whereis(DistributedSync),
@@ -121,14 +131,18 @@ defmodule Arbor.Memory.DistributedSyncTest do
 
       Process.sleep(10)
 
-      assert {:error, :graph_not_initialized} = GraphOps.get_graph(agent_id)
+      assert {:ok, ^graph} = GraphOps.get_graph(agent_id)
+      assert [{^agent_id, ^graph}] = :ets.lookup(@graph_ets, agent_id)
     end
 
     test "invalidates knowledge graph on remote knowledge_linked signal" do
       agent_id = "agent_dist_kg_link_#{System.unique_integer([:positive])}"
 
-      graph = Arbor.Memory.KnowledgeGraph.new("test_agent")
-      :ets.insert(@graph_ets, {agent_id, graph})
+      graph = KnowledgeGraph.new(agent_id, auto_embed: false)
+      assert :ok = KnowledgeGraphStore.save_graph(agent_id, graph)
+
+      forged = KnowledgeGraph.new(agent_id, auto_embed: false, decay_rate: 0.9)
+      :ets.insert(@graph_ets, {agent_id, forged})
 
       send(
         Process.whereis(DistributedSync),
@@ -146,7 +160,8 @@ defmodule Arbor.Memory.DistributedSyncTest do
 
       Process.sleep(10)
 
-      assert {:error, :graph_not_initialized} = GraphOps.get_graph(agent_id)
+      assert {:ok, ^graph} = GraphOps.get_graph(agent_id)
+      assert [{^agent_id, ^graph}] = :ets.lookup(@graph_ets, agent_id)
     end
   end
 

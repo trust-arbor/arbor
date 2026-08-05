@@ -35,7 +35,7 @@ defmodule Arbor.Memory.ActionPatterns do
   require Logger
 
   alias Arbor.Common.LazyLoader
-  alias Arbor.Memory.{KnowledgeGraph, Proposal, Signals}
+  alias Arbor.Memory.{KnowledgeGraphStore, Proposal, Signals}
 
   @type action :: %{
           required(:tool) => String.t(),
@@ -59,9 +59,6 @@ defmodule Arbor.Memory.ActionPatterns do
   @long_sequence_threshold 5
   @long_sequence_window_seconds 30
   @failure_success_window_seconds 60
-
-  # Graph ETS table
-  @graph_ets :arbor_memory_graphs
 
   # ============================================================================
   # Main Analysis Function
@@ -550,31 +547,35 @@ defmodule Arbor.Memory.ActionPatterns do
   def add_to_pending_learnings(agent_id, patterns, opts \\ []) do
     learnings = synthesize_learnings(patterns, opts)
 
-    case get_graph(agent_id) do
-      {:ok, graph} ->
-        {final_graph, pending_ids} =
-          patterns
-          |> Enum.zip(learnings)
-          |> Enum.reduce({graph, []}, fn {pattern, learning}, {g, ids} ->
-            {:ok, new_g, pending_id} =
-              KnowledgeGraph.add_pending_learning(g, %{
-                content: learning,
-                confidence: pattern.confidence,
-                source: "action_patterns",
-                metadata: %{
-                  pattern_type: pattern.type,
-                  tools: pattern.tools
-                }
-              })
+    learning_data =
+      patterns
+      |> Enum.zip(learnings)
+      |> Enum.map(fn {pattern, learning} ->
+        %{
+          content: learning,
+          confidence: pattern.confidence,
+          source: "action_patterns",
+          metadata: %{
+            pattern_type: pattern.type,
+            tools: pattern.tools
+          }
+        }
+      end)
 
-            {new_g, [pending_id | ids]}
-          end)
+    case learning_data do
+      [] ->
+        {:ok, []}
 
-        save_graph(agent_id, final_graph)
-        {:ok, Enum.reverse(pending_ids)}
+      learning_data ->
+        operation_id = new_operation_id()
 
-      error ->
-        error
+        reconcile_ambiguous(fn ->
+          KnowledgeGraphStore.add_pending_learning_batch(
+            agent_id,
+            operation_id,
+            learning_data
+          )
+        end)
     end
   end
 
@@ -586,15 +587,15 @@ defmodule Arbor.Memory.ActionPatterns do
     abs(DateTime.diff(t1, t2, :second)) <= seconds
   end
 
-  defp get_graph(agent_id) do
-    case :ets.lookup(@graph_ets, agent_id) do
-      [{^agent_id, graph}] -> {:ok, graph}
-      [] -> {:error, :graph_not_initialized}
+  defp reconcile_ambiguous(operation) do
+    case operation.() do
+      {:error, :outcome_unknown} -> operation.()
+      result -> result
     end
   end
 
-  defp save_graph(agent_id, graph) do
-    :ets.insert(@graph_ets, {agent_id, graph})
-    :ok
+  defp new_operation_id do
+    nonce = :crypto.strong_rand_bytes(16) |> Base.encode16(case: :lower)
+    "action_patterns_pending_#{nonce}"
   end
 end

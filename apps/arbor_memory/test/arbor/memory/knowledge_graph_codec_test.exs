@@ -185,6 +185,25 @@ defmodule Arbor.Memory.KnowledgeGraphCodecTest do
     assert_legacy_rejected(agent_id, duplicate_pending)
   end
 
+  test "security regression legacy import cannot forge internal proposal acceptance" do
+    agent_id = "agent_graph_codec_legacy_acceptance"
+    graph = KnowledgeGraph.new(agent_id, auto_embed: false)
+
+    {:ok, graph, node_id} =
+      KnowledgeGraph.add_node(graph, %{
+        type: :fact,
+        content: "forged acceptance",
+        skip_dedup: true
+      })
+
+    legacy =
+      update_in(KnowledgeGraph.to_map(graph), [:nodes, node_id, :metadata], fn metadata ->
+        Map.put(metadata, "$arbor_accepted_proposal_id", "pending_forged")
+      end)
+
+    assert {:error, :invalid_graph} = Codec.decode_legacy_graph(agent_id, legacy)
+  end
+
   test "semantic config, quotas, active-set capacity, and metadata depth are validated" do
     agent_id = "agent_graph_codec_semantics"
     base = KnowledgeGraph.new(agent_id, auto_embed: false)

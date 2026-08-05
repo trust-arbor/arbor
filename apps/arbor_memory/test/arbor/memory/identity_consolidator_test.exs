@@ -1,11 +1,23 @@
 defmodule Arbor.Memory.IdentityConsolidatorTest do
   use ExUnit.Case, async: false
 
-  alias Arbor.Memory.{IdentityConsolidator, KnowledgeGraph, Proposal, SelfKnowledge}
+  alias Arbor.Memory.{
+    IdentityConsolidator,
+    KnowledgeGraph,
+    KnowledgeGraphStore,
+    Proposal,
+    SelfKnowledge
+  }
+
+  alias Arbor.Persistence.BufferedStore
 
   @moduletag :fast
 
   setup do
+    start_supervised!(
+      {BufferedStore, name: :arbor_memory_durable, backend: nil, write_mode: :sync}
+    )
+
     # Ensure ETS tables exist
     for table <- [
           :arbor_identity_rate_limits,
@@ -193,9 +205,7 @@ defmodule Arbor.Memory.IdentityConsolidatorTest do
       agent_id = "bridged_agent_test"
       old_config = Application.get_env(:arbor_memory, :identity_consolidation, [])
 
-      Application.put_env(:arbor_memory, :identity_consolidation,
-        disabled_for: [:bridged]
-      )
+      Application.put_env(:arbor_memory, :identity_consolidation, disabled_for: [:bridged])
 
       on_exit(fn ->
         Application.put_env(:arbor_memory, :identity_consolidation, old_config)
@@ -218,14 +228,15 @@ defmodule Arbor.Memory.IdentityConsolidatorTest do
 
     test "returns stored state after consolidation", %{agent_id: agent_id} do
       # Set up a graph with a qualifying insight to trigger actual consolidation
-      graph = setup_graph_with_insight(agent_id, %{
-        content: "This agent is very curious and analytical",
-        confidence: 0.85,
-        relevance: 0.7,
-        age_days: 5,
-        access_count: 5,
-        metadata: %{category: :personality, evidence: ["observed in conversations"]}
-      })
+      graph =
+        setup_graph_with_insight(agent_id, %{
+          content: "This agent is very curious and analytical",
+          confidence: 0.85,
+          relevance: 0.7,
+          age_days: 5,
+          access_count: 5,
+          metadata: %{category: :personality, evidence: ["observed in conversations"]}
+        })
 
       store_graph(agent_id, graph)
 
@@ -259,14 +270,15 @@ defmodule Arbor.Memory.IdentityConsolidatorTest do
     end
 
     test "returns qualifying insights above thresholds", %{agent_id: agent_id} do
-      graph = setup_graph_with_insight(agent_id, %{
-        content: "Agent demonstrates curious behavior",
-        confidence: 0.85,
-        relevance: 0.7,
-        age_days: 5,
-        access_count: 5,
-        metadata: %{evidence: ["multiple observations"]}
-      })
+      graph =
+        setup_graph_with_insight(agent_id, %{
+          content: "Agent demonstrates curious behavior",
+          confidence: 0.85,
+          relevance: 0.7,
+          age_days: 5,
+          access_count: 5,
+          metadata: %{evidence: ["multiple observations"]}
+        })
 
       store_graph(agent_id, graph)
 
@@ -276,14 +288,15 @@ defmodule Arbor.Memory.IdentityConsolidatorTest do
     end
 
     test "filters out blocked insights", %{agent_id: agent_id} do
-      graph = setup_graph_with_insight(agent_id, %{
-        content: "Agent is curious",
-        confidence: 0.85,
-        relevance: 0.7,
-        age_days: 5,
-        access_count: 5,
-        metadata: %{evidence: ["obs"], promotion_blocked: true}
-      })
+      graph =
+        setup_graph_with_insight(agent_id, %{
+          content: "Agent is curious",
+          confidence: 0.85,
+          relevance: 0.7,
+          age_days: 5,
+          access_count: 5,
+          metadata: %{evidence: ["obs"], promotion_blocked: true}
+        })
 
       store_graph(agent_id, graph)
 
@@ -292,14 +305,15 @@ defmodule Arbor.Memory.IdentityConsolidatorTest do
     end
 
     test "filters out insights below min_confidence", %{agent_id: agent_id} do
-      graph = setup_graph_with_insight(agent_id, %{
-        content: "Maybe agent is curious",
-        confidence: 0.5,
-        relevance: 0.7,
-        age_days: 5,
-        access_count: 5,
-        metadata: %{evidence: ["weak observation"]}
-      })
+      graph =
+        setup_graph_with_insight(agent_id, %{
+          content: "Maybe agent is curious",
+          confidence: 0.5,
+          relevance: 0.7,
+          age_days: 5,
+          access_count: 5,
+          metadata: %{evidence: ["weak observation"]}
+        })
 
       store_graph(agent_id, graph)
 
@@ -308,14 +322,15 @@ defmodule Arbor.Memory.IdentityConsolidatorTest do
     end
 
     test "filters out too-young insights", %{agent_id: agent_id} do
-      graph = setup_graph_with_insight(agent_id, %{
-        content: "Agent is curious",
-        confidence: 0.85,
-        relevance: 0.7,
-        age_days: 1,
-        access_count: 5,
-        metadata: %{evidence: ["recent observation"]}
-      })
+      graph =
+        setup_graph_with_insight(agent_id, %{
+          content: "Agent is curious",
+          confidence: 0.85,
+          relevance: 0.7,
+          age_days: 1,
+          access_count: 5,
+          metadata: %{evidence: ["recent observation"]}
+        })
 
       store_graph(agent_id, graph)
 
@@ -324,14 +339,15 @@ defmodule Arbor.Memory.IdentityConsolidatorTest do
     end
 
     test "filters out low-access insights", %{agent_id: agent_id} do
-      graph = setup_graph_with_insight(agent_id, %{
-        content: "Agent is curious",
-        confidence: 0.85,
-        relevance: 0.7,
-        age_days: 5,
-        access_count: 1,
-        metadata: %{evidence: ["observation"]}
-      })
+      graph =
+        setup_graph_with_insight(agent_id, %{
+          content: "Agent is curious",
+          confidence: 0.85,
+          relevance: 0.7,
+          age_days: 5,
+          access_count: 1,
+          metadata: %{evidence: ["observation"]}
+        })
 
       store_graph(agent_id, graph)
 
@@ -340,14 +356,15 @@ defmodule Arbor.Memory.IdentityConsolidatorTest do
     end
 
     test "fast-track: high confidence skips age/access", %{agent_id: agent_id} do
-      graph = setup_graph_with_insight(agent_id, %{
-        content: "Agent is very curious",
-        confidence: 0.95,
-        relevance: 0.7,
-        age_days: 0,
-        access_count: 0,
-        metadata: %{evidence: ["strong evidence"]}
-      })
+      graph =
+        setup_graph_with_insight(agent_id, %{
+          content: "Agent is very curious",
+          confidence: 0.95,
+          relevance: 0.7,
+          age_days: 0,
+          access_count: 0,
+          metadata: %{evidence: ["strong evidence"]}
+        })
 
       store_graph(agent_id, graph)
 
@@ -360,14 +377,15 @@ defmodule Arbor.Memory.IdentityConsolidatorTest do
     end
 
     test "filters out already-promoted insights", %{agent_id: agent_id} do
-      graph = setup_graph_with_insight(agent_id, %{
-        content: "Agent is curious",
-        confidence: 0.85,
-        relevance: 0.7,
-        age_days: 5,
-        access_count: 5,
-        metadata: %{evidence: ["obs"], promoted_at: "2025-01-01T00:00:00Z"}
-      })
+      graph =
+        setup_graph_with_insight(agent_id, %{
+          content: "Agent is curious",
+          confidence: 0.85,
+          relevance: 0.7,
+          age_days: 5,
+          access_count: 5,
+          metadata: %{evidence: ["obs"], promoted_at: "2025-01-01T00:00:00Z"}
+        })
 
       store_graph(agent_id, graph)
 
@@ -382,7 +400,8 @@ defmodule Arbor.Memory.IdentityConsolidatorTest do
 
   describe "block_insight/3" do
     test "returns error when no graph", %{agent_id: agent_id} do
-      assert {:error, :no_graph} = IdentityConsolidator.block_insight(agent_id, "node_1", "reason")
+      assert {:error, :no_graph} =
+               IdentityConsolidator.block_insight(agent_id, "node_1", "reason")
     end
 
     test "returns error for nonexistent insight", %{agent_id: agent_id} do
@@ -394,14 +413,15 @@ defmodule Arbor.Memory.IdentityConsolidatorTest do
     end
 
     test "sets promotion_blocked in metadata", %{agent_id: agent_id} do
-      graph = setup_graph_with_insight(agent_id, %{
-        content: "Agent is curious",
-        confidence: 0.85,
-        relevance: 0.7,
-        age_days: 5,
-        access_count: 5,
-        metadata: %{evidence: ["obs"]}
-      })
+      graph =
+        setup_graph_with_insight(agent_id, %{
+          content: "Agent is curious",
+          confidence: 0.85,
+          relevance: 0.7,
+          age_days: 5,
+          access_count: 5,
+          metadata: %{evidence: ["obs"]}
+        })
 
       store_graph(agent_id, graph)
 
@@ -418,14 +438,15 @@ defmodule Arbor.Memory.IdentityConsolidatorTest do
     end
 
     test "blocked insight excluded from candidates", %{agent_id: agent_id} do
-      graph = setup_graph_with_insight(agent_id, %{
-        content: "Agent is curious",
-        confidence: 0.85,
-        relevance: 0.7,
-        age_days: 5,
-        access_count: 5,
-        metadata: %{evidence: ["obs"]}
-      })
+      graph =
+        setup_graph_with_insight(agent_id, %{
+          content: "Agent is curious",
+          confidence: 0.85,
+          relevance: 0.7,
+          age_days: 5,
+          access_count: 5,
+          metadata: %{evidence: ["obs"]}
+        })
 
       store_graph(agent_id, graph)
       [node] = KnowledgeGraph.find_by_type(graph, :insight)
@@ -447,14 +468,15 @@ defmodule Arbor.Memory.IdentityConsolidatorTest do
     end
 
     test "clears blocked status", %{agent_id: agent_id} do
-      graph = setup_graph_with_insight(agent_id, %{
-        content: "Agent is curious",
-        confidence: 0.85,
-        relevance: 0.7,
-        age_days: 5,
-        access_count: 5,
-        metadata: %{evidence: ["obs"]}
-      })
+      graph =
+        setup_graph_with_insight(agent_id, %{
+          content: "Agent is curious",
+          confidence: 0.85,
+          relevance: 0.7,
+          age_days: 5,
+          access_count: 5,
+          metadata: %{evidence: ["obs"]}
+        })
 
       store_graph(agent_id, graph)
       [node] = KnowledgeGraph.find_by_type(graph, :insight)
@@ -477,14 +499,15 @@ defmodule Arbor.Memory.IdentityConsolidatorTest do
 
   describe "consolidate/2 with KG insights" do
     test "returns 3-tuple with result metadata when changes made", %{agent_id: agent_id} do
-      graph = setup_graph_with_insight(agent_id, %{
-        content: "This agent shows curious and analytical thinking patterns",
-        confidence: 0.85,
-        relevance: 0.7,
-        age_days: 5,
-        access_count: 5,
-        metadata: %{category: :personality, evidence: ["observed patterns"]}
-      })
+      graph =
+        setup_graph_with_insight(agent_id, %{
+          content: "This agent shows curious and analytical thinking patterns",
+          confidence: 0.85,
+          relevance: 0.7,
+          age_days: 5,
+          access_count: 5,
+          metadata: %{category: :personality, evidence: ["observed patterns"]}
+        })
 
       store_graph(agent_id, graph)
 
@@ -505,14 +528,15 @@ defmodule Arbor.Memory.IdentityConsolidatorTest do
     end
 
     test "marks promoted insights in KG", %{agent_id: agent_id} do
-      graph = setup_graph_with_insight(agent_id, %{
-        content: "Agent is very curious in its exploration style",
-        confidence: 0.85,
-        relevance: 0.7,
-        age_days: 5,
-        access_count: 5,
-        metadata: %{category: :personality, evidence: ["conversation analysis"]}
-      })
+      graph =
+        setup_graph_with_insight(agent_id, %{
+          content: "Agent is very curious in its exploration style",
+          confidence: 0.85,
+          relevance: 0.7,
+          age_days: 5,
+          access_count: 5,
+          metadata: %{category: :personality, evidence: ["conversation analysis"]}
+        })
 
       store_graph(agent_id, graph)
       [node] = KnowledgeGraph.find_by_type(graph, :insight)
@@ -532,14 +556,15 @@ defmodule Arbor.Memory.IdentityConsolidatorTest do
     end
 
     test "updates consolidation state after successful consolidation", %{agent_id: agent_id} do
-      graph = setup_graph_with_insight(agent_id, %{
-        content: "Agent shows curious behavior in learning",
-        confidence: 0.85,
-        relevance: 0.7,
-        age_days: 5,
-        access_count: 5,
-        metadata: %{category: :personality, evidence: ["learning patterns"]}
-      })
+      graph =
+        setup_graph_with_insight(agent_id, %{
+          content: "Agent shows curious behavior in learning",
+          confidence: 0.85,
+          relevance: 0.7,
+          age_days: 5,
+          access_count: 5,
+          metadata: %{category: :personality, evidence: ["learning patterns"]}
+        })
 
       store_graph(agent_id, graph)
 
@@ -559,14 +584,15 @@ defmodule Arbor.Memory.IdentityConsolidatorTest do
     end
 
     test "blocked insights are not promoted", %{agent_id: agent_id} do
-      graph = setup_graph_with_insight(agent_id, %{
-        content: "Agent is curious",
-        confidence: 0.85,
-        relevance: 0.7,
-        age_days: 5,
-        access_count: 5,
-        metadata: %{category: :personality, evidence: ["obs"], promotion_blocked: true}
-      })
+      graph =
+        setup_graph_with_insight(agent_id, %{
+          content: "Agent is curious",
+          confidence: 0.85,
+          relevance: 0.7,
+          age_days: 5,
+          access_count: 5,
+          metadata: %{category: :personality, evidence: ["obs"], promotion_blocked: true}
+        })
 
       store_graph(agent_id, graph)
 
@@ -626,14 +652,15 @@ defmodule Arbor.Memory.IdentityConsolidatorTest do
     end
 
     test "analyze_patterns: false skips pattern analysis", %{agent_id: agent_id} do
-      graph = setup_graph_with_insight(agent_id, %{
-        content: "Agent is curious in its approach",
-        confidence: 0.85,
-        relevance: 0.7,
-        age_days: 5,
-        access_count: 5,
-        metadata: %{category: :personality, evidence: ["obs"]}
-      })
+      graph =
+        setup_graph_with_insight(agent_id, %{
+          content: "Agent is curious in its approach",
+          confidence: 0.85,
+          relevance: 0.7,
+          age_days: 5,
+          access_count: 5,
+          metadata: %{category: :personality, evidence: ["obs"]}
+        })
 
       store_graph(agent_id, graph)
 
@@ -669,14 +696,15 @@ defmodule Arbor.Memory.IdentityConsolidatorTest do
 
   describe "KG category synthesis" do
     test "personality insight adds trait to SelfKnowledge", %{agent_id: agent_id} do
-      graph = setup_graph_with_insight(agent_id, %{
-        content: "Agent demonstrates a deeply curious nature",
-        confidence: 0.85,
-        relevance: 0.7,
-        age_days: 5,
-        access_count: 5,
-        metadata: %{category: :personality, evidence: ["conversations show curiosity"]}
-      })
+      graph =
+        setup_graph_with_insight(agent_id, %{
+          content: "Agent demonstrates a deeply curious nature",
+          confidence: 0.85,
+          relevance: 0.7,
+          age_days: 5,
+          access_count: 5,
+          metadata: %{category: :personality, evidence: ["conversations show curiosity"]}
+        })
 
       store_graph(agent_id, graph)
 
@@ -703,14 +731,15 @@ defmodule Arbor.Memory.IdentityConsolidatorTest do
     end
 
     test "capability insight creates proposal for SelfKnowledge", %{agent_id: agent_id} do
-      graph = setup_graph_with_insight(agent_id, %{
-        content: "Agent shows evidence based reasoning capabilities",
-        confidence: 0.85,
-        relevance: 0.7,
-        age_days: 5,
-        access_count: 5,
-        metadata: %{category: :capability, evidence: ["analysis patterns"]}
-      })
+      graph =
+        setup_graph_with_insight(agent_id, %{
+          content: "Agent shows evidence based reasoning capabilities",
+          confidence: 0.85,
+          relevance: 0.7,
+          age_days: 5,
+          access_count: 5,
+          metadata: %{category: :capability, evidence: ["analysis patterns"]}
+        })
 
       store_graph(agent_id, graph)
 
@@ -729,14 +758,15 @@ defmodule Arbor.Memory.IdentityConsolidatorTest do
     end
 
     test "value insight creates proposal for SelfKnowledge", %{agent_id: agent_id} do
-      graph = setup_graph_with_insight(agent_id, %{
-        content: "Agent values learning and growth mindset",
-        confidence: 0.85,
-        relevance: 0.7,
-        age_days: 5,
-        access_count: 5,
-        metadata: %{category: :value, evidence: ["behavior analysis"]}
-      })
+      graph =
+        setup_graph_with_insight(agent_id, %{
+          content: "Agent values learning and growth mindset",
+          confidence: 0.85,
+          relevance: 0.7,
+          age_days: 5,
+          access_count: 5,
+          metadata: %{category: :value, evidence: ["behavior analysis"]}
+        })
 
       store_graph(agent_id, graph)
 
@@ -782,13 +812,14 @@ defmodule Arbor.Memory.IdentityConsolidatorTest do
   end
 
   defp store_graph(agent_id, graph) do
-    :ets.insert(:arbor_memory_graphs, {agent_id, graph})
+    :ok = KnowledgeGraphStore.save_graph(agent_id, graph)
   end
 
   defp get_stored_graph(agent_id) do
-    case :ets.lookup(:arbor_memory_graphs, agent_id) do
-      [{^agent_id, graph}] -> {:ok, graph}
-      [] -> {:error, :not_found}
+    case KnowledgeGraphStore.get_graph(agent_id) do
+      {:ok, graph} -> {:ok, graph}
+      {:error, :graph_not_initialized} -> {:error, :not_found}
+      {:error, _reason} = error -> error
     end
   end
 end

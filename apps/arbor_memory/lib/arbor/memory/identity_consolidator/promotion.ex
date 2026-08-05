@@ -7,7 +7,7 @@ defmodule Arbor.Memory.IdentityConsolidator.Promotion do
   including maturation checks, blocking/unblocking, and post-consolidation analysis.
   """
 
-  alias Arbor.Memory.{Events, KnowledgeGraph, Patterns, Signals}
+  alias Arbor.Memory.{Events, GraphOps, KnowledgeGraph, KnowledgeGraphStore, Patterns, Signals}
 
   # Promotion thresholds (matching arbor_seed defaults)
   @default_min_age_days 3
@@ -20,7 +20,6 @@ defmodule Arbor.Memory.IdentityConsolidator.Promotion do
   @rate_limit_ets :arbor_identity_rate_limits
   @self_knowledge_ets :arbor_self_knowledge
   @consolidation_state_ets :arbor_consolidation_state
-  @graph_ets :arbor_memory_graphs
 
   # ============================================================================
   # Promotion Candidates (KG-based)
@@ -50,7 +49,8 @@ defmodule Arbor.Memory.IdentityConsolidator.Promotion do
           min_age_days: Keyword.get(opts, :min_age_days, @default_min_age_days),
           min_access_count: Keyword.get(opts, :min_access_count, @default_min_access_count),
           fast_track: Keyword.get(opts, :fast_track, false),
-          fast_track_confidence: Keyword.get(opts, :fast_track_confidence, @default_fast_track_confidence),
+          fast_track_confidence:
+            Keyword.get(opts, :fast_track_confidence, @default_fast_track_confidence),
           now: DateTime.utc_now()
         }
 
@@ -118,24 +118,30 @@ defmodule Arbor.Memory.IdentityConsolidator.Promotion do
   """
   @spec block_insight(String.t(), String.t(), String.t()) :: :ok | {:error, term()}
   def block_insight(agent_id, insight_id, reason) do
-    case get_graph(agent_id) do
-      {:ok, graph} ->
-        case merge_node_metadata(graph, insight_id, %{
+    operation_id = new_operation_id("block_insight")
+    blocked_at = DateTime.utc_now()
+
+    case reconcile_ambiguous(fn ->
+           KnowledgeGraphStore.merge_node_metadata(
+             agent_id,
+             operation_id,
+             insight_id,
+             %{
                promotion_blocked: true,
                blocked_reason: reason,
-               blocked_at: DateTime.utc_now()
-             }) do
-          {:ok, updated_graph} ->
-            save_graph(agent_id, updated_graph)
-            Signals.emit_insight_blocked(agent_id, insight_id, reason)
-            :ok
+               blocked_at: blocked_at
+             }
+           )
+         end) do
+      {:ok, _node} ->
+        Signals.emit_insight_blocked(agent_id, insight_id, reason)
+        :ok
 
-          {:error, _} = error ->
-            error
-        end
-
-      {:error, _} ->
+      {:error, :graph_not_initialized} ->
         {:error, :no_graph}
+
+      {:error, _reason} = error ->
+        error
     end
   end
 
@@ -144,23 +150,23 @@ defmodule Arbor.Memory.IdentityConsolidator.Promotion do
   """
   @spec unblock_insight(String.t(), String.t()) :: :ok | {:error, term()}
   def unblock_insight(agent_id, insight_id) do
-    case get_graph(agent_id) do
-      {:ok, graph} ->
-        case merge_node_metadata(graph, insight_id, %{
+    operation_id = new_operation_id("unblock_insight")
+
+    case reconcile_ambiguous(fn ->
+           KnowledgeGraphStore.merge_node_metadata(
+             agent_id,
+             operation_id,
+             insight_id,
+             %{
                promotion_blocked: false,
                blocked_reason: nil,
                blocked_at: nil
-             }) do
-          {:ok, updated_graph} ->
-            save_graph(agent_id, updated_graph)
-            :ok
-
-          {:error, _} = error ->
-            error
-        end
-
-      {:error, _} ->
-        {:error, :no_graph}
+             }
+           )
+         end) do
+      {:ok, _node} -> :ok
+      {:error, :graph_not_initialized} -> {:error, :no_graph}
+      {:error, _reason} = error -> error
     end
   end
 
@@ -255,37 +261,53 @@ defmodule Arbor.Memory.IdentityConsolidator.Promotion do
   Mark promoted KG insight nodes to prevent re-promotion.
   """
   def mark_insights_promoted(agent_id, promoted_candidates) do
-    case get_graph(agent_id) do
-      {:ok, graph} ->
-        now = DateTime.utc_now()
+    now = DateTime.utc_now()
 
-        updated_graph =
-          Enum.reduce(promoted_candidates, graph, fn node, acc_graph ->
-            promote_single_node(acc_graph, agent_id, node, now)
-          end)
+    updates =
+      Enum.map(promoted_candidates, fn node ->
+        {node.id,
+         %{
+           promoted_at: DateTime.to_iso8601(now),
+           promotion_blocked: true
+         }}
+      end)
 
-        save_graph(agent_id, updated_graph)
+    case updates do
+      [] ->
         :ok
 
-      _ ->
-        :ok
+      updates ->
+        operation_id = new_operation_id("mark_promoted")
+
+        case reconcile_ambiguous(fn ->
+               KnowledgeGraphStore.merge_node_metadata_batch(
+                 agent_id,
+                 operation_id,
+                 updates
+               )
+             end) do
+          :ok ->
+            Enum.each(promoted_candidates, fn node ->
+              Signals.emit_insight_promoted(agent_id, node.id, %{confidence: node.confidence})
+            end)
+
+            :ok
+
+          {:error, _reason} = error ->
+            error
+        end
     end
   end
 
   @doc """
   Mark a single node as promoted in the KnowledgeGraph.
   """
-  def promote_single_node(graph, agent_id, node, now) do
+  def promote_single_node(graph, _agent_id, node, now) do
     case merge_node_metadata(graph, node.id, %{
            promoted_at: DateTime.to_iso8601(now),
            promotion_blocked: true
          }) do
       {:ok, new_graph} ->
-        Signals.emit_insight_promoted(agent_id, node.id, %{
-          content: node.content,
-          confidence: node.confidence
-        })
-
         new_graph
 
       {:error, _} ->
@@ -334,27 +356,11 @@ defmodule Arbor.Memory.IdentityConsolidator.Promotion do
 
   @doc false
   def get_graph(agent_id) do
-    ensure_ets_exists()
-
-    if :ets.whereis(@graph_ets) != :undefined do
-      case :ets.lookup(@graph_ets, agent_id) do
-        [{^agent_id, graph}] -> {:ok, graph}
-        [] -> {:error, :no_graph}
-      end
-    else
-      {:error, :no_graph}
+    case GraphOps.get_graph(agent_id) do
+      {:ok, graph} -> {:ok, graph}
+      {:error, :graph_not_initialized} -> {:error, :no_graph}
+      {:error, _reason} = error -> error
     end
-  end
-
-  @doc false
-  def save_graph(agent_id, graph) do
-    ensure_ets_exists()
-
-    if :ets.whereis(@graph_ets) != :undefined do
-      :ets.insert(@graph_ets, {agent_id, graph})
-    end
-
-    :ok
   end
 
   @doc false
@@ -388,6 +394,18 @@ defmodule Arbor.Memory.IdentityConsolidator.Promotion do
       is_binary(evidence) and evidence != "" -> true
       true -> false
     end
+  end
+
+  defp reconcile_ambiguous(operation) do
+    case operation.() do
+      {:error, :outcome_unknown} -> operation.()
+      result -> result
+    end
+  end
+
+  defp new_operation_id(kind) do
+    nonce = :crypto.strong_rand_bytes(16) |> Base.encode16(case: :lower)
+    "identity_promotion_#{kind}_#{nonce}"
   end
 
   @doc false

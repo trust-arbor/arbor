@@ -21,8 +21,10 @@ defmodule Arbor.Memory.DistributedSync do
 
   require Logger
 
+  alias Arbor.Memory.KnowledgeGraphStore
+
   @working_memory_ets :arbor_working_memory
-  @graph_ets :arbor_memory_graphs
+  @goals_ets :arbor_memory_goals
 
   # Signal types we subscribe to and their categories
   @subscribed_types [
@@ -139,10 +141,14 @@ defmodule Arbor.Memory.DistributedSync do
   end
 
   defp invalidate_knowledge_graph(agent_id) do
-    if ets_exists?(@graph_ets) do
-      # Delete the cached graph — next get_graph will miss and trigger reload
-      :ets.delete(@graph_ets, agent_id)
-      Logger.debug("[DistributedSync] Invalidated knowledge graph for #{agent_id}")
+    case KnowledgeGraphStore.converge_projection(agent_id) do
+      :ok ->
+        Logger.debug("[DistributedSync] Converged knowledge graph for #{agent_id}")
+
+      {:error, reason} ->
+        Logger.warning(
+          "[DistributedSync] Knowledge graph convergence failed for #{agent_id}: #{inspect(reason)}"
+        )
     end
 
     :ok

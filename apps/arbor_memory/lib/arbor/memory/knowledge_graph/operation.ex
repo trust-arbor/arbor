@@ -43,9 +43,11 @@ defmodule Arbor.Memory.KnowledgeGraph.Operation do
           | {:add_node, String.t(), map(), String.t(), DateTime.t()}
           | {:add_pending_fact, String.t(), map(), String.t(), DateTime.t()}
           | {:add_pending_learning, String.t(), map(), String.t(), DateTime.t()}
+          | {:add_pending_learning_batch, String.t(), [map()], DateTime.t()}
           | {:add_edge, String.t(), String.t(), String.t(), atom() | String.t(), keyword(),
              String.t(), DateTime.t()}
           | {:merge_node_metadata, String.t(), String.t(), map()}
+          | {:merge_node_metadata_batch, String.t(), [{String.t(), map()}]}
           | {:reinforce, String.t(), String.t(), DateTime.t()}
           | {:approve_pending, String.t(), String.t(), String.t(), DateTime.t()}
           | {:reject_pending, String.t(), String.t()}
@@ -77,6 +79,11 @@ defmodule Arbor.Memory.KnowledgeGraph.Operation do
     validate_new(operation)
   end
 
+  @spec add_pending_learning_batch(String.t(), [map()]) :: {:ok, t()} | {:error, atom()}
+  def add_pending_learning_batch(operation_id, learning_data) do
+    validate_new({:add_pending_learning_batch, operation_id, learning_data, DateTime.utc_now()})
+  end
+
   @spec add_pending_fact(String.t(), map()) :: {:ok, t()} | {:error, atom()}
   def add_pending_fact(operation_id, fact_data) do
     operation =
@@ -106,6 +113,12 @@ defmodule Arbor.Memory.KnowledgeGraph.Operation do
           {:ok, t()} | {:error, atom()}
   def merge_node_metadata(operation_id, node_id, fields) do
     validate_new({:merge_node_metadata, operation_id, node_id, fields})
+  end
+
+  @spec merge_node_metadata_batch(String.t(), [{String.t(), map()}]) ::
+          {:ok, t()} | {:error, atom()}
+  def merge_node_metadata_batch(operation_id, updates) do
+    validate_new({:merge_node_metadata_batch, operation_id, updates})
   end
 
   @spec approve_pending(String.t()) :: {:ok, t()} | {:error, atom()}
@@ -225,6 +238,24 @@ defmodule Arbor.Memory.KnowledgeGraph.Operation do
   end
 
   def validate(
+        {:add_pending_learning_batch, operation_id, learning_data, %DateTime{} = occurred_at}
+      ) do
+    validation_agent = "agent_operation_validation"
+    graph = KnowledgeGraph.new(validation_agent, auto_embed: false)
+
+    with :ok <- validate_identifier(operation_id),
+         {:ok, count} <- bounded_list_count(learning_data, Codec.max_content_items()),
+         true <- count > 0,
+         {:ok, graph, _pending_ids} <-
+           apply_pending_learning_batch(graph, operation_id, learning_data, occurred_at),
+         {:ok, _prepared} <- Codec.prepare(validation_agent, graph) do
+      :ok
+    else
+      _ -> {:error, :invalid_graph}
+    end
+  end
+
+  def validate(
         {:add_edge, operation_id, source_id, target_id, relationship, opts, edge_id,
          %DateTime{} = occurred_at}
       ) do
@@ -269,6 +300,15 @@ defmodule Arbor.Memory.KnowledgeGraph.Operation do
          {:ok, graph, _node} <-
            KnowledgeGraph.merge_node_metadata_transition(graph, "a", fields),
          {:ok, _prepared} <- Codec.prepare(validation_agent, graph) do
+      :ok
+    else
+      _ -> {:error, :invalid_graph}
+    end
+  end
+
+  def validate({:merge_node_metadata_batch, operation_id, updates}) do
+    with :ok <- validate_identifier(operation_id),
+         :ok <- validate_metadata_update_batch(updates) do
       :ok
     else
       _ -> {:error, :invalid_graph}
@@ -425,6 +465,13 @@ defmodule Arbor.Memory.KnowledgeGraph.Operation do
   end
 
   defp apply_once(
+         {:add_pending_learning_batch, operation_id, learning_data, occurred_at},
+         graph
+       ) do
+    apply_pending_learning_batch(graph, operation_id, learning_data, occurred_at)
+  end
+
+  defp apply_once(
          {:add_edge, _operation_id, source_id, target_id, relationship, opts, edge_id,
           occurred_at},
          graph
@@ -449,6 +496,15 @@ defmodule Arbor.Memory.KnowledgeGraph.Operation do
 
   defp apply_once({:merge_node_metadata, _operation_id, node_id, fields}, graph) do
     KnowledgeGraph.merge_node_metadata_transition(graph, node_id, fields)
+  end
+
+  defp apply_once({:merge_node_metadata_batch, _operation_id, updates}, graph) do
+    Enum.reduce_while(updates, {:ok, graph, :ok}, fn {node_id, fields}, {:ok, graph, :ok} ->
+      case KnowledgeGraph.merge_node_metadata_transition(graph, node_id, fields) do
+        {:ok, graph, _node} -> {:cont, {:ok, graph, :ok}}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
   end
 
   defp apply_once(
@@ -503,6 +559,13 @@ defmodule Arbor.Memory.KnowledgeGraph.Operation do
        do: {:ok, operation_id, "add_pending_learning", {:add_pending_learning, learning_data}}
 
   defp logical_operation(
+         {:add_pending_learning_batch, operation_id, learning_data, _occurred_at}
+       ),
+       do:
+         {:ok, operation_id, "add_pending_learning_batch",
+          {:add_pending_learning_batch, learning_data}}
+
+  defp logical_operation(
          {:add_edge, operation_id, source_id, target_id, relationship, opts, _edge_id,
           _occurred_at}
        ),
@@ -513,6 +576,9 @@ defmodule Arbor.Memory.KnowledgeGraph.Operation do
 
   defp logical_operation({:merge_node_metadata, operation_id, node_id, fields}),
     do: {:ok, operation_id, "merge_node_metadata", {:merge_node_metadata, node_id, fields}}
+
+  defp logical_operation({:merge_node_metadata_batch, operation_id, updates}),
+    do: {:ok, operation_id, "merge_node_metadata_batch", {:merge_node_metadata_batch, updates}}
 
   defp logical_operation({:approve_pending, operation_id, pending_id, _nonce, _occurred_at}),
     do: {:ok, operation_id, "approve_pending", {:approve_pending, pending_id}}
@@ -544,11 +610,24 @@ defmodule Arbor.Memory.KnowledgeGraph.Operation do
               is_binary(item_id),
        do: {:ok, item_id}
 
+  defp receipt_result("add_pending_learning_batch", item_ids) when is_list(item_ids) do
+    with {:ok, count} <- bounded_list_count(item_ids, Codec.max_content_items()),
+         true <- count > 0,
+         true <- Enum.all?(item_ids, &(validate_identifier(&1) == :ok)) do
+      {:ok, "batch_count:#{count}"}
+    else
+      _ -> {:error, :invalid_graph}
+    end
+  end
+
   defp receipt_result(kind, %{id: node_id})
        when kind in ["merge_node_metadata", "reinforce"] and is_binary(node_id),
        do: {:ok, node_id}
 
-  defp receipt_result(kind, :ok) when kind in ["add_edge", "reject_pending"], do: {:ok, "ok"}
+  defp receipt_result(kind, :ok)
+       when kind in ["add_edge", "merge_node_metadata_batch", "reject_pending"],
+       do: {:ok, "ok"}
+
   defp receipt_result("cascade_recall", result) when is_map(result), do: {:ok, "ok"}
 
   defp receipt_result("consolidate", %{metrics: metrics}) when is_map(metrics),
@@ -565,6 +644,23 @@ defmodule Arbor.Memory.KnowledgeGraph.Operation do
        when kind in ["add_node", "add_pending_fact", "add_pending_learning", "approve_pending"],
        do: {:ok, graph, item_id, :replayed}
 
+  defp replay_result(
+         operation_id,
+         "add_pending_learning_batch",
+         "batch_count:" <> count,
+         graph
+       ) do
+    case Integer.parse(count) do
+      {count, ""} when count > 0 ->
+        if count <= Codec.max_content_items(),
+          do: {:ok, graph, batch_pending_ids(operation_id, count), :replayed},
+          else: {:error, :invalid_graph}
+
+      _ ->
+        {:error, :invalid_graph}
+    end
+  end
+
   defp replay_result(_operation_id, kind, node_id, graph)
        when kind in ["merge_node_metadata", "reinforce"] do
     case Map.fetch(graph.nodes, node_id) do
@@ -574,7 +670,7 @@ defmodule Arbor.Memory.KnowledgeGraph.Operation do
   end
 
   defp replay_result(_operation_id, kind, "ok", graph)
-       when kind in ["add_edge", "reject_pending"],
+       when kind in ["add_edge", "merge_node_metadata_batch", "reject_pending"],
        do: {:ok, graph, :ok, :replayed}
 
   defp replay_result(_operation_id, "cascade_recall", "ok", graph),
@@ -725,6 +821,78 @@ defmodule Arbor.Memory.KnowledgeGraph.Operation do
     else
       {:error, _reason} = error -> error
       _ -> {:error, :graph_limit_exceeded}
+    end
+  end
+
+  defp apply_pending_learning_batch(graph, operation_id, learning_data, occurred_at) do
+    with {:ok, count} <- bounded_list_count(learning_data, Codec.max_content_items()),
+         true <- count > 0 do
+      pending_ids = batch_pending_ids(operation_id, count)
+
+      learning_data
+      |> Enum.zip(pending_ids)
+      |> Enum.reduce_while({:ok, graph, []}, fn {data, pending_id}, {:ok, graph, ids} ->
+        with :ok <- validate_pending_learning_shape(data),
+             {:ok, graph, ^pending_id} <-
+               KnowledgeGraph.add_pending_learning_transition(
+                 graph,
+                 data,
+                 pending_id,
+                 occurred_at
+               ) do
+          {:cont, {:ok, graph, [pending_id | ids]}}
+        else
+          {:error, _reason} = error -> {:halt, error}
+          _ -> {:halt, {:error, :invalid_graph}}
+        end
+      end)
+      |> case do
+        {:ok, graph, reversed_ids} -> {:ok, graph, Enum.reverse(reversed_ids)}
+        {:error, _reason} = error -> error
+      end
+    else
+      _ -> {:error, :invalid_graph}
+    end
+  end
+
+  defp batch_pending_ids(operation_id, count) do
+    Enum.map(0..(count - 1), fn index ->
+      digest =
+        :crypto.hash(:sha256, "#{operation_id}:#{index}")
+        |> Base.encode16(case: :lower)
+
+      "pend_" <> binary_part(digest, 0, 32)
+    end)
+  end
+
+  defp validate_metadata_update_batch(updates) do
+    validation_agent = "agent_operation_validation"
+    occurred_at = ~U[2026-01-01 00:00:00Z]
+    graph = validation_graph(validation_agent, occurred_at)
+
+    with {:ok, count} <- bounded_list_count(updates, Codec.max_content_items()),
+         true <- count > 0 do
+      Enum.reduce_while(updates, {:ok, MapSet.new()}, fn
+        {node_id, fields}, {:ok, seen} ->
+          with :ok <- validate_identifier(node_id),
+               false <- MapSet.member?(seen, node_id),
+               true <- valid_node_metadata?(fields),
+               {:ok, _graph, _node} <-
+                 KnowledgeGraph.merge_node_metadata_transition(graph, "a", fields) do
+            {:cont, {:ok, MapSet.put(seen, node_id)}}
+          else
+            _ -> {:halt, {:error, :invalid_graph}}
+          end
+
+        _invalid, _acc ->
+          {:halt, {:error, :invalid_graph}}
+      end)
+      |> case do
+        {:ok, _seen} -> :ok
+        {:error, _reason} = error -> error
+      end
+    else
+      _ -> {:error, :invalid_graph}
     end
   end
 
