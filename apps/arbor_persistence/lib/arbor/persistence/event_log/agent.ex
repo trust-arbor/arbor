@@ -82,7 +82,7 @@ defmodule Arbor.Persistence.EventLog.Agent do
       {events, measurements} =
         Agent.get(name, fn state ->
           bounded_range(
-            Map.get(state.streams, stream_id, []),
+            Map.get(state.stream_index, stream_id, %{}),
             Map.get(state.versions, stream_id, 0),
             range
           )
@@ -180,6 +180,7 @@ defmodule Arbor.Persistence.EventLog.Agent do
       fn ->
         %{
           streams: %{},
+          stream_index: %{},
           global: [],
           versions: %{},
           global_position: 0,
@@ -227,44 +228,25 @@ defmodule Arbor.Persistence.EventLog.Agent do
     end
   end
 
-  defp select_range(events, stream_version, lower, upper, limit, :forward) do
+  defp select_range(index, _stream_version, lower, upper, limit, :forward) do
     selected_upper = min(upper, lower + limit - 1)
-    offset = stream_version - selected_upper
-    count = selected_upper - lower + 1
-    {selected, visited, materialized} = bounded_slice(events, offset, count)
-    {Enum.reverse(selected), visited, materialized}
+    indexed_slice(index, lower..selected_upper)
   end
 
-  defp select_range(events, stream_version, lower, upper, limit, :backward) do
+  defp select_range(index, _stream_version, lower, upper, limit, :backward) do
     selected_lower = max(lower, upper - limit + 1)
-    offset = stream_version - upper
-    count = upper - selected_lower + 1
-    bounded_slice(events, offset, count)
+    indexed_slice(index, upper..selected_lower//-1)
   end
 
-  defp bounded_slice(events, offset, count) do
-    drop_for_slice(events, offset, count, 0)
-  end
+  defp indexed_slice(index, positions) do
+    {selected, visited, materialized} =
+      Enum.reduce(positions, {[], 0, 0}, fn position, {selected, visited, materialized} ->
+        case Map.fetch(index, position) do
+          {:ok, event} -> {[event | selected], visited + 1, materialized + 1}
+          :error -> {selected, visited + 1, materialized}
+        end
+      end)
 
-  defp drop_for_slice(events, 0, count, visited) do
-    take_for_slice(events, count, [], visited, 0)
-  end
-
-  defp drop_for_slice([_event | rest], offset, count, visited) do
-    drop_for_slice(rest, offset - 1, count, visited + 1)
-  end
-
-  defp drop_for_slice([], _offset, _count, visited), do: {[], visited, 0}
-
-  defp take_for_slice(_events, 0, selected, visited, materialized) do
-    {Enum.reverse(selected), visited, materialized}
-  end
-
-  defp take_for_slice([event | rest], count, selected, visited, materialized) do
-    take_for_slice(rest, count - 1, [event | selected], visited + 1, materialized + 1)
-  end
-
-  defp take_for_slice([], _count, selected, visited, materialized) do
     {Enum.reverse(selected), visited, materialized}
   end
 
@@ -293,6 +275,11 @@ defmodule Arbor.Persistence.EventLog.Agent do
     streams =
       Map.update(state.streams, stream_id, persisted_reversed, &(persisted_reversed ++ &1))
 
+    stream_index =
+      Enum.reduce(persisted, Map.get(state.stream_index, stream_id, %{}), fn event, index ->
+        Map.put(index, event.event_number, event)
+      end)
+
     event_index =
       Enum.reduce(persisted, state.event_index, fn event, index ->
         Map.put(index, event.id, event)
@@ -301,6 +288,7 @@ defmodule Arbor.Persistence.EventLog.Agent do
     state = %{
       state
       | streams: streams,
+        stream_index: Map.put(state.stream_index, stream_id, stream_index),
         global: persisted_reversed ++ state.global,
         versions: Map.put(state.versions, stream_id, final_version),
         global_position: final_global_pos,

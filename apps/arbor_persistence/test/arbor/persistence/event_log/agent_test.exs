@@ -305,10 +305,14 @@ defmodule Arbor.Persistence.EventLog.AgentTest do
   end
 
   describe "read_stream_range/2" do
-    test "traverses and allocates only the requested newest page", %{name: name} do
-      events = for i <- 1..1_000, do: Event.new("bounded-range", "event", %{index: i})
-      assert {:ok, persisted} = ELAgent.append("bounded-range", events, name: name)
-      assert length(persisted) == 1_000
+    test "uses one indexed lookup for either end of a large stream", %{name: name} do
+      for first <- 1..10_000//1_000 do
+        events =
+          for i <- first..(first + 999), do: Event.new("bounded-range", "event", %{index: i})
+
+        assert {:ok, persisted} = ELAgent.append("bounded-range", events, name: name)
+        assert length(persisted) == 1_000
+      end
 
       handler_id = {__MODULE__, self(), make_ref()}
       test_pid = self()
@@ -329,30 +333,45 @@ defmodule Arbor.Persistence.EventLog.AgentTest do
                ELAgent.read_stream_range("bounded-range",
                  name: name,
                  from: 1,
-                 to: 1_000,
+                 to: 10_000,
+                 limit: 1,
+                 direction: :forward
+               )
+
+      assert event.event_number == 1
+
+      assert_receive {:range_read,
+                      %{visited_events: 1, materialized_events: 1, stream_size: 10_000},
+                      %{stream_id: "bounded-range", direction: :forward}}
+
+      assert {:ok, [event]} =
+               ELAgent.read_stream_range("bounded-range",
+                 name: name,
+                 from: 1,
+                 to: 10_000,
                  limit: 1,
                  direction: :backward
                )
 
-      assert event.event_number == 1_000
+      assert event.event_number == 10_000
 
       assert_receive {:range_read,
-                      %{visited_events: 1, materialized_events: 1, stream_size: 1_000},
+                      %{visited_events: 1, materialized_events: 1, stream_size: 10_000},
                       %{stream_id: "bounded-range", direction: :backward}}
 
       assert {:ok, forward} =
                ELAgent.read_stream_range("bounded-range",
                  name: name,
-                 from: 997,
-                 to: 1_000,
+                 from: 9_997,
+                 to: 10_000,
                  limit: 2,
                  direction: :forward
                )
 
-      assert Enum.map(forward, & &1.event_number) == [997, 998]
+      assert Enum.map(forward, & &1.event_number) == [9_997, 9_998]
 
       assert_receive {:range_read,
-                      %{visited_events: 4, materialized_events: 2, stream_size: 1_000},
+                      %{visited_events: 2, materialized_events: 2, stream_size: 10_000},
                       %{stream_id: "bounded-range", direction: :forward}}
     end
   end
