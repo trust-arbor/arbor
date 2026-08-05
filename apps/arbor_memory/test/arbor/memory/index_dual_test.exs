@@ -52,9 +52,19 @@ defmodule Arbor.Memory.IndexDualTest do
     @impl true
     def store(agent_id, content, embedding, metadata) do
       case :persistent_term.get({__MODULE__, agent_id}, :fail) do
-        {:eager_id, id} -> {:ok, id}
-        :delegate -> Arbor.Memory.Embedding.store(agent_id, content, embedding, metadata)
-        _mode -> {:error, :injected_eager_failure}
+        {:store_sequence, [result | rest]} ->
+          next_mode = if rest == [], do: :delegate, else: {:store_sequence, rest}
+          :persistent_term.put({__MODULE__, agent_id}, next_mode)
+          result
+
+        {:eager_id, id} ->
+          {:ok, id}
+
+        :delegate ->
+          Arbor.Memory.Embedding.store(agent_id, content, embedding, metadata)
+
+        _mode ->
+          {:error, :injected_eager_failure}
       end
     end
 
@@ -440,6 +450,89 @@ defmodule Arbor.Memory.IndexDualTest do
       assert :ok = Index.delete(pid, unrelated_id)
       assert {:error, :not_found} = Embedding.get(agent_id, unrelated_id)
       assert Index.stats(pid).entry_count == 0
+    end
+
+    test "authority regression: eager dedupe preserves first identity and refreshes latest value" do
+      agent_id = durable_unique("test_dual_eager_pending_order")
+      suffix = :crypto.strong_rand_bytes(8) |> Base.encode16(case: :lower)
+      first_id = "mem_z_#{suffix}"
+      second_id = "mem_a_#{suffix}"
+      generated_third_id = "mem_m_#{suffix}"
+
+      MaliciousWriter.configure(
+        agent_id,
+        {:store_sequence,
+         [
+           {:error, :injected_eager_failure},
+           {:error, :injected_eager_failure},
+           {:ok, first_id}
+         ]}
+      )
+
+      {:ok, pid} =
+        Index.start_link(
+          agent_id: agent_id,
+          backend: :dual,
+          persistent_writer: MaliciousWriter,
+          entry_id_generator: sequence_callback([first_id, second_id, generated_third_id]),
+          clock:
+            sequence_callback([
+              ~U[2026-08-05 10:00:02.000000Z],
+              ~U[2026-08-05 10:00:02.000000Z],
+              ~U[2026-08-05 09:59:59.000000Z]
+            ]),
+          name:
+            {:via, Registry, {Arbor.Memory.Registry, {:test_dual_eager_pending_order, agent_id}}}
+        )
+
+      on_exit(fn ->
+        MaliciousWriter.disarm(agent_id)
+        if Process.alive?(pid), do: GenServer.stop(pid)
+        Embedding.delete_all(agent_id)
+      end)
+
+      content = "Eager pending order"
+      first_embedding = generate_embedding(71)
+      second_embedding = generate_embedding(72)
+      latest_embedding = generate_embedding(73)
+
+      assert {:ok, ^first_id} =
+               Index.index(pid, content, %{type: :first, value: "first"},
+                 embedding: first_embedding
+               )
+
+      assert {:ok, ^second_id} =
+               Index.index(pid, content, %{type: :second, value: "second"},
+                 embedding: second_embedding
+               )
+
+      assert {:ok, ^first_id} =
+               Index.index(pid, content, %{type: :latest, value: "latest"},
+                 embedding: latest_embedding
+               )
+
+      assert first_id > second_id
+      assert {:error, :not_found} = Index.get(pid, generated_third_id)
+
+      assert {:ok, %{id: ^first_id, metadata: %{type: :latest}, embedding: local_vector}} =
+               Index.get(pid, first_id)
+
+      assert_vector_close(local_vector, latest_embedding)
+      assert Embedding.count(agent_id) == 0
+
+      assert {:ok, 2} = Index.sync_to_persistent(pid)
+
+      assert {:ok, %{id: ^first_id, metadata: %{value: "latest"}, embedding: persisted_vector}} =
+               Index.get(pid, second_id)
+
+      assert_vector_close(persisted_vector, latest_embedding)
+      assert {:ok, %{id: ^first_id}} = Embedding.get(agent_id, first_id)
+      assert {:error, :not_found} = Embedding.get(agent_id, second_id)
+
+      assert :ok = Index.delete(pid, second_id)
+      assert {:error, :not_found} = Index.get(pid, first_id)
+      assert {:error, :not_found} = Index.get(pid, second_id)
+      assert {:error, :not_found} = Embedding.get(agent_id, first_id)
     end
 
     test "security regression: malformed authoritative batch IDs preserve all pending state" do

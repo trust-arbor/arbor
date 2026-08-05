@@ -291,7 +291,7 @@ defmodule Arbor.Memory.Index do
       clock: Keyword.get(opts, :clock, &DateTime.utc_now/0),
       # Local ordering only; never persisted or copied into caller metadata.
       next_insertion_sequence: 0,
-      pending_insertion_sequences: %{},
+      pending_entry_orders: %{},
       # Track entries not yet synced to persistent (for dual mode)
       pending_sync: MapSet.new(),
       # A failed eager write can later deduplicate to a different durable ID.
@@ -351,7 +351,7 @@ defmodule Arbor.Memory.Index do
        state
        | entry_count: 0,
          pending_sync: MapSet.new(),
-         pending_insertion_sequences: %{},
+         pending_entry_orders: %{},
          id_aliases: %{}
      }}
   end
@@ -481,7 +481,7 @@ defmodule Arbor.Memory.Index do
             |> maybe_evict()
             |> put_local_entry(authoritative_entry)
             |> advance_insertion_sequence(insertion_sequence)
-            |> refresh_pending_insertion_sequence(authoritative_id, insertion_sequence)
+            |> refresh_pending_entry_order(authoritative_id, insertion_sequence)
 
           {:ok, authoritative_id, new_state}
         end
@@ -498,8 +498,11 @@ defmodule Arbor.Memory.Index do
         new_state = %{
           state
           | pending_sync: MapSet.put(state.pending_sync, entry_id),
-            pending_insertion_sequences:
-              Map.put(state.pending_insertion_sequences, entry_id, insertion_sequence)
+            pending_entry_orders:
+              Map.put(state.pending_entry_orders, entry_id, %{
+                first: insertion_sequence,
+                latest: insertion_sequence
+              })
         }
 
         {:ok, entry_id, new_state}
@@ -770,7 +773,7 @@ defmodule Arbor.Memory.Index do
       state
       | entry_count: count - length(to_remove),
         pending_sync: pending_sync,
-        pending_insertion_sequences: Map.drop(state.pending_insertion_sequences, to_remove)
+        pending_entry_orders: Map.drop(state.pending_entry_orders, to_remove)
     }
   end
 
@@ -916,9 +919,9 @@ defmodule Arbor.Memory.Index do
   end
 
   defp collect_pending_entry(id, state) do
-    case {:ets.lookup(state.table, id), Map.fetch(state.pending_insertion_sequences, id)} do
-      {[{^id, entry}], {:ok, insertion_sequence}} ->
-        [{id, entry, insertion_sequence}]
+    case {:ets.lookup(state.table, id), Map.fetch(state.pending_entry_orders, id)} do
+      {[{^id, entry}], {:ok, %{first: first_sequence, latest: latest_sequence}}} ->
+        [{id, entry, first_sequence, latest_sequence}]
 
       _missing_entry_or_sequence ->
         []
@@ -927,15 +930,19 @@ defmodule Arbor.Memory.Index do
 
   defp group_pending_entries(pending_entries) do
     pending_entries
-    |> Enum.group_by(fn {_id, entry, _sequence} -> :crypto.hash(:sha256, entry.content) end)
+    |> Enum.group_by(fn {_id, entry, _first, _latest} ->
+      :crypto.hash(:sha256, entry.content)
+    end)
     |> Enum.map(fn {content_digest, members} ->
-      ordered_members = Enum.sort_by(members, &pending_entry_order_key/1)
-      [{requested_id, _earliest_entry, earliest_sequence} | _rest] = ordered_members
-      {_latest_id, canonical_entry, _latest_sequence} = List.last(ordered_members)
+      {requested_id, _earliest_entry, earliest_sequence, _earliest_latest} =
+        Enum.min_by(members, &pending_identity_order_key/1)
+
+      {_latest_id, canonical_entry, _latest_first, _latest_sequence} =
+        Enum.max_by(members, &pending_value_order_key/1)
 
       %{
         content_digest: content_digest,
-        member_ids: Enum.map(ordered_members, fn {id, _entry, _sequence} -> id end),
+        member_ids: Enum.map(members, fn {id, _entry, _first, _latest} -> id end),
         requested_id: requested_id,
         canonical_entry: canonical_entry,
         order_key: earliest_sequence
@@ -954,7 +961,11 @@ defmodule Arbor.Memory.Index do
     }
   end
 
-  defp pending_entry_order_key({_id, _entry, insertion_sequence}), do: insertion_sequence
+  defp pending_identity_order_key({_id, _entry, first_sequence, _latest_sequence}),
+    do: first_sequence
+
+  defp pending_value_order_key({_id, _entry, _first_sequence, latest_sequence}),
+    do: latest_sequence
 
   defp validate_authoritative_bindings(state, groups, authoritative_ids) do
     validate_authoritative_bindings(state, groups, authoritative_ids, MapSet.new(), [])
@@ -1090,7 +1101,7 @@ defmodule Arbor.Memory.Index do
       state
       | entry_count: :ets.info(state.table, :size),
         pending_sync: pending_sync,
-        pending_insertion_sequences: Map.drop(state.pending_insertion_sequences, member_ids),
+        pending_entry_orders: Map.drop(state.pending_entry_orders, member_ids),
         id_aliases: aliases
     }
   end
@@ -1109,12 +1120,14 @@ defmodule Arbor.Memory.Index do
     %{state | next_insertion_sequence: insertion_sequence + 1}
   end
 
-  defp refresh_pending_insertion_sequence(state, id, insertion_sequence) do
+  defp refresh_pending_entry_order(state, id, insertion_sequence) do
     if MapSet.member?(state.pending_sync, id) do
       %{
         state
-        | pending_insertion_sequences:
-            Map.put(state.pending_insertion_sequences, id, insertion_sequence)
+        | pending_entry_orders:
+            Map.update!(state.pending_entry_orders, id, fn order ->
+              %{order | latest: insertion_sequence}
+            end)
       }
     else
       state
@@ -1185,7 +1198,7 @@ defmodule Arbor.Memory.Index do
       state
       | entry_count: :ets.info(state.table, :size),
         pending_sync: MapSet.delete(state.pending_sync, canonical_id),
-        pending_insertion_sequences: Map.delete(state.pending_insertion_sequences, canonical_id),
+        pending_entry_orders: Map.delete(state.pending_entry_orders, canonical_id),
         id_aliases: aliases
     }
   end
