@@ -80,11 +80,7 @@ defmodule Arbor.Memory.Embedding do
 
     # A conditional upsert prevents a legacy uniqueness collision from updating
     # a vector-store-owned row.
-    case Repo.insert(changeset,
-           on_conflict: legacy_conflict_query(),
-           conflict_target: [:agent_id, :content_hash],
-           returning: true
-         ) do
+    case insert_legacy_changeset(changeset, agent_id, content_hash) do
       {:ok, _record} ->
         case legacy_by_hash(agent_id, content_hash) do
           %MemoryEmbedding{} = record ->
@@ -94,6 +90,9 @@ defmodule Arbor.Memory.Embedding do
           nil ->
             {:error, :protected_vector_row}
         end
+
+      {:error, :protected_vector_row} ->
+        {:error, :protected_vector_row}
 
       {:error, changeset} ->
         Logger.warning("Failed to store embedding: #{inspect(changeset.errors)}")
@@ -406,6 +405,30 @@ defmodule Arbor.Memory.Embedding do
       from(e in legacy_rows(),
         where: e.agent_id == ^agent_id and e.content_hash == ^content_hash,
         limit: 1
+      )
+    )
+  end
+
+  defp insert_legacy_changeset(changeset, agent_id, content_hash) do
+    Repo.insert(changeset,
+      on_conflict: legacy_conflict_query(),
+      conflict_target: [:agent_id, :content_hash],
+      returning: true
+    )
+  rescue
+    error in Ecto.StaleEntryError ->
+      if protected_vector_hash?(agent_id, content_hash) do
+        {:error, :protected_vector_row}
+      else
+        reraise(error, __STACKTRACE__)
+      end
+  end
+
+  defp protected_vector_hash?(agent_id, content_hash) do
+    Repo.exists?(
+      from(e in MemoryEmbedding,
+        where: e.agent_id == ^agent_id and e.content_hash == ^content_hash,
+        where: not is_nil(e.vector_protocol) or not is_nil(e.source_namespace)
       )
     )
   end
