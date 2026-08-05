@@ -5,6 +5,7 @@ defmodule Arbor.Persistence.BufferedStore.DistributedTest do
   use ExUnit.Case, async: false
   @moduletag :fast
 
+  alias Arbor.Contracts.Persistence.Record
   alias Arbor.Persistence.BufferedStore
 
   @test_store :buffered_store_dist_test
@@ -24,14 +25,18 @@ defmodule Arbor.Persistence.BufferedStore.DistributedTest do
 
       # Simulate a remote cache_put signal
       # Since we have no backend, this will just delete the key
-      send(Process.whereis(@test_store), {:signal_received, %{
-        type: :cache_put,
-        data: %{
-          collection: to_string(@test_store),
-          key: "key1",
-          origin_node: :remote@node
-        }
-      }})
+      send(
+        Process.whereis(@test_store),
+        {:signal_received,
+         %{
+           type: :cache_put,
+           data: %{
+             collection: to_string(@test_store),
+             key: "key1",
+             origin_node: :remote@node
+           }
+         }}
+      )
 
       Process.sleep(10)
 
@@ -39,17 +44,81 @@ defmodule Arbor.Persistence.BufferedStore.DistributedTest do
       assert {:error, :not_found} = BufferedStore.get("key1", name: @test_store)
     end
 
+    test "security regression: remote invalidation evicts private ephemeral authority" do
+      record = Record.new("private-key", %{"value" => "stale"})
+
+      assert {:ok, %Record{} = stored} =
+               BufferedStore.acknowledged_put("private-key", record, name: @test_store)
+
+      assert {:ok, ^stored} =
+               BufferedStore.authoritative_get("private-key", name: @test_store)
+
+      send(
+        Process.whereis(@test_store),
+        {:signal_received,
+         %{
+           type: :cache_put,
+           data: %{
+             collection: to_string(@test_store),
+             key: "private-key",
+             origin_node: :remote@node
+           }
+         }}
+      )
+
+      assert {:error, :not_found} =
+               BufferedStore.authoritative_get("private-key", name: @test_store)
+
+      replacement = Record.update(stored, %{"value" => "must-conflict"})
+
+      assert {:error, :conflict} =
+               BufferedStore.acknowledged_compare_and_swap(
+                 "private-key",
+                 {:value, stored},
+                 replacement,
+                 name: @test_store
+               )
+    end
+
+    test "malformed recognized signal cannot roll back private invalidation" do
+      record = Record.new("malformed-signal-key", %{"value" => "stale"})
+
+      assert {:ok, %Record{}} =
+               BufferedStore.acknowledged_put("malformed-signal-key", record, name: @test_store)
+
+      send(
+        Process.whereis(@test_store),
+        {:signal_received,
+         %{
+           type: :cache_delete,
+           data: %{
+             collection: to_string(@test_store),
+             key: "malformed-signal-key"
+           }
+         }}
+      )
+
+      assert {:error, :not_found} =
+               BufferedStore.authoritative_get("malformed-signal-key", name: @test_store)
+
+      assert Process.alive?(Process.whereis(@test_store))
+    end
+
     test "ignores put signals from own node" do
       :ok = BufferedStore.put("key2", "my_value", name: @test_store)
 
-      send(Process.whereis(@test_store), {:signal_received, %{
-        type: :cache_put,
-        data: %{
-          collection: to_string(@test_store),
-          key: "key2",
-          origin_node: node()
-        }
-      }})
+      send(
+        Process.whereis(@test_store),
+        {:signal_received,
+         %{
+           type: :cache_put,
+           data: %{
+             collection: to_string(@test_store),
+             key: "key2",
+             origin_node: node()
+           }
+         }}
+      )
 
       Process.sleep(10)
 
@@ -60,14 +129,18 @@ defmodule Arbor.Persistence.BufferedStore.DistributedTest do
     test "ignores signals for other collections" do
       :ok = BufferedStore.put("key3", "keep_me", name: @test_store)
 
-      send(Process.whereis(@test_store), {:signal_received, %{
-        type: :cache_put,
-        data: %{
-          collection: "different_collection",
-          key: "key3",
-          origin_node: :remote@node
-        }
-      }})
+      send(
+        Process.whereis(@test_store),
+        {:signal_received,
+         %{
+           type: :cache_put,
+           data: %{
+             collection: "different_collection",
+             key: "key3",
+             origin_node: :remote@node
+           }
+         }}
+      )
 
       Process.sleep(10)
 
@@ -83,14 +156,18 @@ defmodule Arbor.Persistence.BufferedStore.DistributedTest do
       :ok = BufferedStore.put("key4", "delete_me", name: @test_store)
       assert {:ok, "delete_me"} = BufferedStore.get("key4", name: @test_store)
 
-      send(Process.whereis(@test_store), {:signal_received, %{
-        type: :cache_delete,
-        data: %{
-          collection: to_string(@test_store),
-          key: "key4",
-          origin_node: :remote@node
-        }
-      }})
+      send(
+        Process.whereis(@test_store),
+        {:signal_received,
+         %{
+           type: :cache_delete,
+           data: %{
+             collection: to_string(@test_store),
+             key: "key4",
+             origin_node: :remote@node
+           }
+         }}
+      )
 
       Process.sleep(10)
 
@@ -119,13 +196,17 @@ defmodule Arbor.Persistence.BufferedStore.DistributedTest do
 
   describe "robustness" do
     test "handles unknown signal types gracefully" do
-      send(Process.whereis(@test_store), {:signal_received, %{
-        type: :unknown_type,
-        data: %{
-          collection: to_string(@test_store),
-          origin_node: :remote@node
-        }
-      }})
+      send(
+        Process.whereis(@test_store),
+        {:signal_received,
+         %{
+           type: :unknown_type,
+           data: %{
+             collection: to_string(@test_store),
+             origin_node: :remote@node
+           }
+         }}
+      )
 
       Process.sleep(10)
 

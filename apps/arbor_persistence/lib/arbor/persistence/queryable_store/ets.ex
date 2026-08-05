@@ -10,8 +10,9 @@ defmodule Arbor.Persistence.QueryableStore.ETS do
         {Arbor.Persistence.QueryableStore.ETS, name: :my_queryable_store}
       ]
 
-  Durability class: `:process_lifetime`. Linearizable CAS and generation+revision
-  advancement are GenServer-serialized. Delete leaves a generation tombstone.
+  Durability class: `:process_lifetime`. Linearizable CAS, generation+revision
+  advancement, and bounded authoritative snapshots are GenServer-serialized.
+  Delete leaves a generation tombstone.
   """
 
   use GenServer
@@ -97,26 +98,15 @@ defmodule Arbor.Persistence.QueryableStore.ETS do
   @impl true
   def query(%Filter{} = filter, opts) do
     name = Keyword.fetch!(opts, :name)
-    table = GenServer.call(name, :table)
 
     with {:ok, limit} <- Revision.authoritative_list_limit(opts) do
-      if is_integer(limit) and :ets.info(table, :size) > limit do
-        {:error, :inventory_limit_exceeded}
-      else
-        records =
-          :ets.foldl(
-            fn {_k, entry}, acc ->
-              case Revision.live_value(entry) do
-                {:ok, record} -> [record | acc]
-                :not_found -> acc
-              end
-            end,
-            [],
-            table
-          )
-          |> then(&Filter.apply(filter, &1))
+      case limit do
+        nil ->
+          table = GenServer.call(name, :table)
+          query_table(table, filter, nil)
 
-        {:ok, records}
+        limit ->
+          GenServer.call(name, {:authoritative_query, filter, limit})
       end
     end
   end
@@ -238,6 +228,10 @@ defmodule Arbor.Persistence.QueryableStore.ETS do
     {:reply, reply, state}
   end
 
+  def handle_call({:authoritative_query, filter, limit}, _from, %{table: table} = state) do
+    {:reply, safe_authoritative_query(table, filter, limit), state}
+  end
+
   def handle_call(
         {:compare_and_swap, key, :not_found, replacement},
         _from,
@@ -321,6 +315,35 @@ defmodule Arbor.Persistence.QueryableStore.ETS do
   end
 
   defp cas_store(_current, _replacement), do: {:error, :conflict}
+
+  defp query_table(table, filter, limit) do
+    if is_integer(limit) and :ets.info(table, :size) > limit do
+      {:error, :inventory_limit_exceeded}
+    else
+      records =
+        :ets.foldl(
+          fn {_key, entry}, acc ->
+            case Revision.live_value(entry) do
+              {:ok, record} -> [record | acc]
+              :not_found -> acc
+            end
+          end,
+          [],
+          table
+        )
+        |> then(&Filter.apply(filter, &1))
+
+      {:ok, records}
+    end
+  end
+
+  defp safe_authoritative_query(table, filter, limit) do
+    query_table(table, filter, limit)
+  rescue
+    _ -> {:error, :invalid_query}
+  catch
+    _, _ -> {:error, :invalid_query}
+  end
 
   defp bounded_ets_keys(entries, continuation, limit, keys, visited) do
     with {:ok, keys, visited} <- bounded_ets_chunk(entries, limit, keys, visited) do

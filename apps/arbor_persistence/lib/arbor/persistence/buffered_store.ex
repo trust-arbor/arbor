@@ -1181,29 +1181,10 @@ defmodule Arbor.Persistence.BufferedStore do
   defp handle_distributed_signal(%{data: data} = signal, state) do
     collection = Map.get(data, :collection)
 
-    if collection == state.collection do
-      key = Map.get(data, :key)
-
-      case signal.type do
-        :cache_put ->
-          # Reload from backend to update local ETS cache
-          reload_key_from_backend(state, key)
-
-          Logger.debug(
-            "BufferedStore[#{state.collection}]: reloaded #{key} from remote #{data.origin_node}"
-          )
-
-        :cache_delete ->
-          :ets.delete(state.table, key)
-
-          Logger.debug(
-            "BufferedStore[#{state.collection}]: deleted #{key} from remote #{data.origin_node}"
-          )
-
-        _ ->
-          :ok
-      end
-    end
+    state =
+      if collection == state.collection,
+        do: apply_remote_cache_signal(signal.type, data, state),
+        else: state
 
     {:noreply, state}
   rescue
@@ -1211,6 +1192,38 @@ defmodule Arbor.Persistence.BufferedStore do
       Logger.warning("BufferedStore[#{state.collection}]: error handling signal: #{inspect(e)}")
       {:noreply, state}
   end
+
+  defp apply_remote_cache_signal(type, data, %{backend: nil} = state)
+       when type in [:cache_put, :cache_delete] do
+    key = Map.get(data, :key)
+    state = delete_ephemeral_authority(state, key)
+    true = :ets.delete(state.table, key)
+    state
+  end
+
+  defp apply_remote_cache_signal(:cache_put, data, state) do
+    key = Map.get(data, :key)
+    reload_key_from_backend(state, key)
+
+    Logger.debug(
+      "BufferedStore[#{state.collection}]: reloaded #{key} from remote #{data.origin_node}"
+    )
+
+    state
+  end
+
+  defp apply_remote_cache_signal(:cache_delete, data, state) do
+    key = Map.get(data, :key)
+    true = :ets.delete(state.table, key)
+
+    Logger.debug(
+      "BufferedStore[#{state.collection}]: deleted #{key} from remote #{data.origin_node}"
+    )
+
+    state
+  end
+
+  defp apply_remote_cache_signal(_type, _data, state), do: state
 
   defp reload_key_from_backend(%{backend: nil, table: table}, key) do
     # No backend — just delete the stale ETS entry

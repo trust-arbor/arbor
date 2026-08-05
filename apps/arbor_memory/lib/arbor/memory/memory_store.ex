@@ -41,7 +41,9 @@ defmodule Arbor.Memory.MemoryStore do
   @critical_delete_attempts 12
   @legacy_cleanup_attempts 4
   @max_critical_namespace_bytes 256
-  @max_inventory_identifier_bytes 1_024
+  @max_critical_key_bytes 1_024
+  @max_inventory_physical_key_bytes @max_critical_namespace_bytes + 1 + @max_critical_key_bytes
+  @max_inventory_record_id_bytes byte_size("memory:") + @max_inventory_physical_key_bytes
 
   @type provenance_status :: :verified | :legacy_unlabeled | :invalid_durable_provenance
   @type authoritative_location :: :namespaced | :legacy_bare
@@ -433,10 +435,11 @@ defmodule Arbor.Memory.MemoryStore do
           | {:error, term()}
   def load_tainted_authoritative_with_status(namespace, key)
       when is_binary(namespace) and is_binary(key) do
-    composite_key = composite_key(namespace, key)
-
     with :ok <- validate_critical_namespace(namespace),
+         :ok <- validate_critical_key(key),
          :ok <- ensure_critical_authority() do
+      composite_key = composite_key(namespace, key)
+
       case Persistence.buffered_store_authoritative_get(@store_name, composite_key) do
         {:ok, %Record{} = record} ->
           if current_namespaced_record?(record, composite_key),
@@ -526,6 +529,7 @@ defmodule Arbor.Memory.MemoryStore do
 
   defp commit_tainted_compare_and_swap(namespace, key, expected, data, opts) do
     with :ok <- validate_critical_namespace(namespace),
+         :ok <- validate_critical_key(key),
          true <- keyword_options?(opts),
          {:ok, metadata} <- build_taint_metadata(data, opts),
          :ok <- ensure_critical_authority(),
@@ -566,6 +570,7 @@ defmodule Arbor.Memory.MemoryStore do
   def delete_tainted_authoritative(namespace, key)
       when is_binary(namespace) and is_binary(key) do
     with :ok <- validate_critical_namespace(namespace),
+         :ok <- validate_critical_key(key),
          :ok <- ensure_critical_authority() do
       delete_tainted_authoritative(namespace, key, @critical_delete_attempts)
     else
@@ -829,14 +834,25 @@ defmodule Arbor.Memory.MemoryStore do
     end)
   end
 
-  defp classify_inventory_row(namespace, physical_key, %Record{key: physical_key} = record) do
+  defp classify_inventory_row(namespace, physical_key, %Record{key: physical_key} = record)
+       when is_binary(physical_key) do
+    with :ok <- validate_inventory_identifier(physical_key, @max_inventory_physical_key_bytes),
+         :ok <- validate_inventory_identifier(record.id, @max_inventory_record_id_bytes) do
+      classify_valid_inventory_row(namespace, physical_key, record)
+    end
+  end
+
+  defp classify_inventory_row(_namespace, _physical_key, _value),
+    do: critical_error(:invalid_record)
+
+  defp classify_valid_inventory_row(namespace, physical_key, record) do
     namespaced_prefix = "#{namespace}:"
 
     cond do
       String.starts_with?(physical_key, namespaced_prefix) ->
         logical_key = String.replace_prefix(physical_key, namespaced_prefix, "")
 
-        if logical_key != "" and current_namespaced_record?(record, physical_key) do
+        if valid_critical_key?(logical_key) and current_namespaced_record?(record, physical_key) do
           {:ok, {:namespaced, logical_key, record}}
         else
           critical_error(:invalid_record)
@@ -847,15 +863,19 @@ defmodule Arbor.Memory.MemoryStore do
 
       true ->
         case legacy_bare_owner(record, physical_key) do
-          {:ok, ^namespace} -> {:ok, {:legacy_bare, physical_key, record}}
-          {:ok, _foreign_namespace} -> {:ok, :foreign}
-          :error -> critical_error(:invalid_record)
+          {:ok, ^namespace} ->
+            if valid_critical_key?(physical_key),
+              do: {:ok, {:legacy_bare, physical_key, record}},
+              else: critical_error(:invalid_record)
+
+          {:ok, _foreign_namespace} ->
+            {:ok, :foreign}
+
+          :error ->
+            critical_error(:invalid_record)
         end
     end
   end
-
-  defp classify_inventory_row(_namespace, _physical_key, _value),
-    do: critical_error(:invalid_record)
 
   defp current_namespaced_record?(%Record{id: id}, physical_key) do
     id in [physical_key, "memory:#{physical_key}"]
@@ -909,14 +929,16 @@ defmodule Arbor.Memory.MemoryStore do
     end
   end
 
-  defp validate_inventory_identifier(value) do
-    if byte_size(value) > 0 and byte_size(value) <= @max_inventory_identifier_bytes and
-         String.valid?(value) do
+  defp validate_inventory_identifier(value, max_bytes) when is_binary(value) do
+    if byte_size(value) > 0 and byte_size(value) <= max_bytes and String.valid?(value) do
       :ok
     else
-      critical_error(:invalid_request)
+      critical_error(:invalid_record)
     end
   end
+
+  defp validate_inventory_identifier(_value, _max_bytes),
+    do: critical_error(:invalid_record)
 
   # Critical physical keys use the historical "namespace:key" encoding. Keeping
   # ':' out of the admitted namespace grammar makes that encoding injective while
@@ -933,8 +955,26 @@ defmodule Arbor.Memory.MemoryStore do
 
   defp validate_critical_namespace(_namespace), do: critical_error(:invalid_request)
 
+  defp validate_critical_key(key) when is_binary(key) do
+    if valid_critical_key?(key), do: :ok, else: critical_error(:invalid_request)
+  end
+
+  defp validate_critical_key(_key), do: critical_error(:invalid_request)
+
+  defp valid_critical_key?(key) when is_binary(key) do
+    byte_size(key) > 0 and byte_size(key) <= @max_critical_key_bytes and String.valid?(key) and
+      String.trim(key) != ""
+  end
+
+  defp valid_critical_key?(_key), do: false
+
   defp validate_optional_inventory_prefix(nil), do: :ok
-  defp validate_optional_inventory_prefix(prefix), do: validate_inventory_identifier(prefix)
+
+  defp validate_optional_inventory_prefix(prefix) when is_binary(prefix) do
+    if valid_critical_key?(prefix), do: :ok, else: critical_error(:invalid_request)
+  end
+
+  defp validate_optional_inventory_prefix(_prefix), do: critical_error(:invalid_request)
 
   defp load_authoritative_bare_record(namespace, key) do
     case classify_authoritative_bare(namespace, key) do
@@ -1103,7 +1143,10 @@ defmodule Arbor.Memory.MemoryStore do
       {:ok, _value, _status, record, :legacy_bare} ->
         case acknowledged_compare_and_delete(key, record) do
           :ok ->
-            :ok
+            # A legacy migration writes the namespaced key independently of the
+            # bare-key fence. Re-observe so a migration that committed while the
+            # bare delete was in flight is ordered before this delete and removed.
+            delete_tainted_authoritative(namespace, key, attempts - 1)
 
           {:error, {:memory_store, :critical, :conflict}} ->
             delete_tainted_authoritative(namespace, key, attempts - 1)

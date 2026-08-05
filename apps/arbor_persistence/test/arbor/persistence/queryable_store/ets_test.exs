@@ -88,6 +88,37 @@ defmodule Arbor.Persistence.QueryableStore.ETSTest do
       {:ok, results} = ETS.query(filter, name: name)
       assert length(results) == 2
     end
+
+    test "security regression: bounded authoritative query is owner-serialized", %{name: name} do
+      owner = Process.whereis(name)
+      assert :erlang.trace(owner, true, [:receive]) == 1
+
+      try do
+        assert {:ok, results} =
+                 ETS.query(Filter.new(), name: name, authoritative_limit: 10_001)
+
+        assert length(results) == 3
+
+        assert_receive {:trace, ^owner, :receive,
+                        {:"$gen_call", _from, {:authoritative_query, _filter, 10_001}}}
+
+        refute_receive {:trace, ^owner, :receive, {:"$gen_call", _from, :table}}, 0
+      after
+        :erlang.trace(owner, false, [:receive])
+      end
+    end
+
+    test "malformed bounded filter fails without crashing the authoritative owner", %{name: name} do
+      owner = Process.whereis(name)
+      malformed = %{Filter.new() | conditions: :not_a_list}
+
+      assert {:error, :invalid_query} =
+               ETS.query(malformed, name: name, authoritative_limit: 10_001)
+
+      assert Process.alive?(owner)
+      assert {:ok, results} = ETS.query(Filter.new(), name: name, authoritative_limit: 10_001)
+      assert length(results) == 3
+    end
   end
 
   describe "count/2" do

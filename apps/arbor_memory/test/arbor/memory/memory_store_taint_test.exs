@@ -144,6 +144,52 @@ defmodule Arbor.Memory.MemoryStoreTaintTest do
     def durability_class(_opts), do: :node_restart
   end
 
+  defmodule LegacyDeleteRaceBackend do
+    @moduledoc false
+    @behaviour Arbor.Contracts.Persistence.Store
+
+    alias Arbor.Persistence.QueryableStore.ETS
+
+    @impl true
+    def put(key, value, opts), do: ETS.put(key, value, opts)
+
+    @impl true
+    def get(key, opts), do: ETS.get(key, opts)
+
+    @impl true
+    def delete(key, opts), do: ETS.delete(key, opts)
+
+    @impl true
+    def list(opts), do: ETS.list(opts)
+
+    @impl true
+    def query(filter, opts), do: ETS.query(filter, opts)
+
+    @impl true
+    def compare_and_swap(key, expected, replacement, opts) do
+      ETS.compare_and_swap(key, expected, replacement, opts)
+    end
+
+    @impl true
+    def compare_and_delete(key, expected, opts) do
+      if key == Keyword.fetch!(opts, :race_key) do
+        test_pid = Keyword.fetch!(opts, :test_pid)
+        send(test_pid, {:legacy_delete_ready, self()})
+
+        receive do
+          :continue_legacy_delete -> ETS.compare_and_delete(key, expected, opts)
+        after
+          5_000 -> {:error, :test_timeout}
+        end
+      else
+        ETS.compare_and_delete(key, expected, opts)
+      end
+    end
+
+    @impl true
+    def durability_class(_opts), do: :node_restart
+  end
+
   setup do
     start_supervised!({BufferedStore, name: @store_name, backend: nil, write_mode: :sync})
     :ok
@@ -393,6 +439,24 @@ defmodule Arbor.Memory.MemoryStoreTaintTest do
                MemoryStore.load_all_tainted_authoritative("inventory")
     end
 
+    test "security regression: oversized and malformed inventory keys fail closed" do
+      invalid_physical_keys = [
+        "inventory:" <> String.duplicate("k", 1_025),
+        String.duplicate("p", 1_282),
+        <<"inventory:", 255>>
+      ]
+
+      for physical_key <- invalid_physical_keys do
+        record = Record.new(physical_key, %{}, id: "memory:" <> physical_key)
+        assert :ok = BufferedStore.put(physical_key, record, name: @store_name)
+
+        assert {:error, {:memory_store, :critical, :invalid_record}} =
+                 MemoryStore.load_all_tainted_authoritative("inventory")
+
+        assert :ok = BufferedStore.delete(physical_key, name: @store_name)
+      end
+    end
+
     test "fails bounded when the authoritative inventory exceeds its cap" do
       for index <- 1..10_001 do
         key = "other:#{index}"
@@ -474,6 +538,47 @@ defmodule Arbor.Memory.MemoryStoreTaintTest do
   end
 
   describe "authoritative ownership and migration" do
+    test "security regression: critical logical keys are bounded before authority effects" do
+      label = %Taint{level: :hostile, source: "bounded-key"}
+      assert {:ok, []} = BufferedStore.authoritative_entries(name: @store_name)
+
+      for invalid_key <- ["", "   ", <<255>>, String.duplicate("k", 1_025), :not_binary] do
+        assert {:error, {:memory_store, :critical, :invalid_request}} =
+                 MemoryStore.load_tainted_authoritative_with_status("bounded", invalid_key)
+
+        assert {:error, {:memory_store, :critical, :invalid_request}} =
+                 MemoryStore.compare_and_swap_tainted(
+                   "bounded",
+                   invalid_key,
+                   :not_found,
+                   %{"value" => "must-not-write"},
+                   taint: label
+                 )
+
+        assert {:error, {:memory_store, :critical, :invalid_request}} =
+                 MemoryStore.delete_tainted_authoritative("bounded", invalid_key)
+      end
+
+      assert {:ok, []} = BufferedStore.authoritative_entries(name: @store_name)
+
+      maximum_key = String.duplicate("k", 1_024)
+
+      assert {:ok, %Record{} = stored} =
+               MemoryStore.compare_and_swap_tainted(
+                 "bounded",
+                 maximum_key,
+                 :not_found,
+                 %{"value" => "accepted"},
+                 taint: label
+               )
+
+      assert {:ok, value, :verified, ^stored, :namespaced} =
+               MemoryStore.load_tainted_authoritative_with_status("bounded", maximum_key)
+
+      assert value.value == %{"value" => "accepted"}
+      assert :ok = MemoryStore.delete_tainted_authoritative("bounded", maximum_key)
+    end
+
     test "security regression: critical namespace grammar prevents composite-key aliases" do
       label = %Taint{level: :hostile, sensitivity: :restricted, source: "namespace-owner"}
       original = %{"owner" => "a", "logical_key" => "b:c"}
@@ -593,6 +698,66 @@ defmodule Arbor.Memory.MemoryStoreTaintTest do
 
       assert {:ok, %Record{data: %{"version" => 2}}} =
                BufferedStore.get("migration:legacy", name: @store_name)
+    end
+
+    test "security regression: legacy delete re-observes a concurrent namespaced migration" do
+      stop_supervised!(BufferedStore)
+      backend_name = unique_name(:legacy_delete_race_backend)
+      namespace = "delete_race"
+      key = "legacy"
+      legacy_data = %{"version" => 1}
+      migrated_data = %{"version" => 2}
+      label = %Taint{level: :hostile, source: "concurrent-migration"}
+
+      start_supervised!({Arbor.Persistence.QueryableStore.ETS, name: backend_name})
+
+      {:ok, legacy_envelope} = TaintModule.bind_durable_provenance(legacy_data, label)
+
+      legacy =
+        Record.new(key, legacy_data,
+          id: "memory:#{namespace}:#{key}",
+          metadata: %{"taint" => legacy_envelope}
+        )
+
+      assert :ok =
+               Arbor.Persistence.QueryableStore.ETS.put(key, legacy, name: backend_name)
+
+      start_supervised!(
+        {BufferedStore,
+         name: @store_name,
+         backend: LegacyDeleteRaceBackend,
+         backend_opts: [race_key: key, test_pid: self()],
+         collection: backend_name}
+      )
+
+      delete_task = Task.async(fn -> MemoryStore.delete_tainted_authoritative(namespace, key) end)
+      assert_receive {:legacy_delete_ready, backend_call}, 1_000
+
+      namespaced_key = "#{namespace}:#{key}"
+      {:ok, migrated_envelope} = TaintModule.bind_durable_provenance(migrated_data, label)
+
+      migrated =
+        Record.new(namespaced_key, migrated_data,
+          id: "memory:#{namespaced_key}",
+          metadata: %{"taint" => migrated_envelope}
+        )
+
+      assert {:ok, %Record{}} =
+               Arbor.Persistence.QueryableStore.ETS.compare_and_swap(
+                 namespaced_key,
+                 :not_found,
+                 migrated,
+                 name: backend_name
+               )
+
+      send(backend_call, :continue_legacy_delete)
+      assert :ok = Task.await(delete_task, 5_000)
+
+      assert {:error, :not_found} =
+               Arbor.Persistence.QueryableStore.ETS.get(key, name: backend_name)
+
+      assert {:error, :not_found} =
+               Arbor.Persistence.QueryableStore.ETS.get(namespaced_key, name: backend_name)
     end
 
     test "security regression: committed CAS succeeds once when legacy cleanup is deferred" do
