@@ -17,26 +17,28 @@ defmodule Arbor.Memory.Signals.Lifecycle do
   """
   @spec emit_goal_created(String.t(), struct()) :: :ok
   def emit_goal_created(agent_id, goal) do
-    Arbor.Memory.Signals.emit_memory_signal(agent_id, :goal_created, %{
-      goal_id: goal.id,
-      description: goal.description,
-      type: goal.type,
-      priority: goal.priority,
-      parent_id: goal.parent_id,
-      created_at: DateTime.utc_now()
-    }, scope: :cluster)
+    Arbor.Memory.Signals.emit_memory_signal(
+      agent_id,
+      :goal_created,
+      %{
+        goal_id: goal.id,
+        status: goal.status
+      },
+      scope: :cluster
+    )
   end
 
   @doc """
   Emit a signal when goal progress is updated.
   """
   @spec emit_goal_progress(String.t(), String.t(), float()) :: :ok
-  def emit_goal_progress(agent_id, goal_id, progress) do
-    Arbor.Memory.Signals.emit_memory_signal(agent_id, :goal_progress, %{
-      goal_id: goal_id,
-      progress: progress,
-      updated_at: DateTime.utc_now()
-    }, scope: :cluster)
+  def emit_goal_progress(agent_id, goal_id, _progress) do
+    Arbor.Memory.Signals.emit_memory_signal(
+      agent_id,
+      :goal_progress,
+      %{goal_id: goal_id},
+      scope: :cluster
+    )
   end
 
   @doc """
@@ -44,23 +46,37 @@ defmodule Arbor.Memory.Signals.Lifecycle do
   """
   @spec emit_goal_achieved(String.t(), String.t()) :: :ok
   def emit_goal_achieved(agent_id, goal_id) do
-    Arbor.Memory.Signals.emit_memory_signal(agent_id, :goal_achieved, %{
-      goal_id: goal_id,
-      achieved_at: DateTime.utc_now()
-    }, scope: :cluster)
+    Arbor.Memory.Signals.emit_memory_signal(
+      agent_id,
+      :goal_achieved,
+      %{
+        goal_id: goal_id,
+        status: :achieved
+      },
+      scope: :cluster
+    )
   end
 
   @doc """
   Emit a signal when a goal is abandoned.
   """
-  @spec emit_goal_abandoned(String.t(), String.t(), String.t() | nil) :: :ok
-  def emit_goal_abandoned(agent_id, goal_id, reason) do
-    Arbor.Memory.Signals.emit_memory_signal(agent_id, :goal_abandoned, %{
-      goal_id: goal_id,
-      reason: reason,
-      abandoned_at: DateTime.utc_now()
-    }, scope: :cluster)
+  @spec emit_goal_abandoned(String.t(), String.t(), term()) :: :ok
+  def emit_goal_abandoned(agent_id, goal_id, status_or_reason) do
+    Arbor.Memory.Signals.emit_memory_signal(
+      agent_id,
+      :goal_abandoned,
+      %{
+        goal_id: goal_id,
+        status: conservative_goal_status(status_or_reason)
+      },
+      scope: :cluster
+    )
   end
+
+  defp conservative_goal_status(status) when status in [:abandoned, :failed, :blocked],
+    do: status
+
+  defp conservative_goal_status(_status_or_reason), do: :abandoned
 
   # ============================================================================
   # Intent & Percept Signals

@@ -256,6 +256,7 @@ defmodule Arbor.Memory do
   defdelegate update_goal_metadata(agent_id, goal_id, metadata), to: GoalIntentOps
   defdelegate add_goal_note(agent_id, goal_id, note), to: GoalIntentOps
   defdelegate export_all_goals(agent_id), to: GoalIntentOps
+  defdelegate export_all_goals_exact(agent_id), to: GoalStore
   defdelegate import_goals(agent_id, goal_maps), to: GoalIntentOps
   defdelegate get_goal_tree(agent_id, goal_id), to: GoalIntentOps
   defdelegate record_intent(agent_id, intent), to: GoalIntentOps

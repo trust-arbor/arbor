@@ -4,7 +4,7 @@ defmodule Arbor.Agent.SeedTest do
 
   alias Arbor.Agent.Seed
   alias Arbor.Contracts.Memory.Goal
-  alias Arbor.Contracts.Security.Taint
+  alias Arbor.Contracts.Security.{Taint, TaintedValue}
   alias Arbor.Memory
 
   alias Arbor.Memory.{
@@ -41,6 +41,23 @@ defmodule Arbor.Agent.SeedTest do
     def durability_class(_opts), do: :node_restart
   end
 
+  defmodule UnavailableBackend do
+    @moduledoc false
+    @behaviour Arbor.Contracts.Persistence.Store
+
+    def put(_key, _value, _opts), do: {:error, :configured_unavailable}
+    def get(_key, _opts), do: {:error, :configured_unavailable}
+    def delete(_key, _opts), do: {:error, :configured_unavailable}
+    def list(_opts), do: {:error, :configured_unavailable}
+    def query(_filter, _opts), do: {:error, :configured_unavailable}
+
+    def compare_and_swap(_key, _expected, _replacement, _opts),
+      do: {:error, :configured_unavailable}
+
+    def compare_and_delete(_key, _expected, _opts), do: {:error, :configured_unavailable}
+    def durability_class(_opts), do: :node_restart
+  end
+
   @ets_tables [
     :arbor_working_memory,
     :arbor_memory_graphs,
@@ -56,6 +73,8 @@ defmodule Arbor.Agent.SeedTest do
     _ = Memory.delete_working_memory(@agent_id)
     _ = Provenance.delete_agent(@agent_id)
     Enum.each(@ets_tables, &clean_ets/1)
+    ensure_goal_runtime()
+    assert :ok = GoalStore.clear_goals(@agent_id)
 
     on_exit(fn ->
       _ = Memory.delete_working_memory(@agent_id)
@@ -173,6 +192,13 @@ defmodule Arbor.Agent.SeedTest do
       assert seed.working_memory == nil
     end
 
+    test "security regression: configured goal authority outage fails capture" do
+      use_unavailable_goal_store!()
+
+      assert {:error, {:capture_failed, :goal_store_unavailable}} =
+               Seed.capture(@agent_id)
+    end
+
     test "security regression: configured WorkingMemory outage fails Seed capture explicitly" do
       assert :ok = stop_supervised!(BufferedStore)
 
@@ -196,14 +222,14 @@ defmodule Arbor.Agent.SeedTest do
 
     test "captures goals from GoalStore" do
       goal = Goal.new("Test goal", type: :achieve, priority: 80)
-      :ets.insert(:arbor_memory_goals, {{@agent_id, goal.id}, goal})
+      assert {:ok, ^goal} = Memory.add_goal(@agent_id, goal)
 
       {:ok, seed} = Seed.capture(@agent_id)
 
       assert length(seed.goals) == 1
       [exported_goal] = seed.goals
-      assert exported_goal[:description] == "Test goal"
-      assert exported_goal[:type] == :achieve
+      assert get_in(exported_goal, ["payload", Access.key(:description)]) == "Test goal"
+      assert get_in(exported_goal, ["payload", Access.key(:type)]) == :achieve
     end
 
     test "handles missing subsystems gracefully" do
@@ -254,7 +280,10 @@ defmodule Arbor.Agent.SeedTest do
 
       assert {:ok, ^goal} = Memory.add_goal(@agent_id, goal)
       assert {:ok, seed} = Seed.capture(@agent_id)
-      assert Enum.any?(seed.goals, &(&1.id == goal.id))
+
+      assert Enum.any?(seed.goals, fn record ->
+               get_in(record, ["payload", Access.key(:id)]) == goal.id
+             end)
 
       assert :ok = GoalStore.clear_goals(@agent_id)
       assert {:error, :not_found} = Memory.get_goal(@agent_id, goal.id)
@@ -263,6 +292,62 @@ defmodule Arbor.Agent.SeedTest do
       assert {:ok, ^goal} = Memory.get_goal(@agent_id, goal.id)
 
       assert :ok = GoalStore.clear_goals(@agent_id)
+    end
+
+    test "security regression: public Seed roundtrip preserves hostile goal provenance" do
+      ensure_goal_runtime()
+
+      goal = Goal.new("Hostile Seed provenance", id: "goal_seed_hostile_provenance")
+
+      {:ok, hostile} =
+        Taint.new(%{
+          level: :hostile,
+          sensitivity: :restricted,
+          sanitizations: 0,
+          confidence: :unverified,
+          source: "seed_hostile_roundtrip",
+          chain: []
+        })
+
+      assert {:ok, ^goal} = GoalStore.add_goal_tainted(@agent_id, goal, hostile)
+      assert {:ok, seed} = Seed.capture(@agent_id)
+      assert {:ok, decoded} = seed |> Seed.serialize() |> Seed.deserialize()
+
+      assert :ok = GoalStore.clear_goals(@agent_id)
+      assert {:ok, _restored_seed} = Seed.restore(decoded)
+
+      assert {:ok, %TaintedValue{value: ^goal, taint: ^hostile}, :verified} =
+               GoalStore.get_goal_tainted(@agent_id, goal.id)
+
+      assert :ok = GoalStore.clear_goals(@agent_id)
+    end
+
+    test "security regression: corrupt exact goal snapshot fails restore" do
+      goal = Goal.new("Corrupt exact Seed goal", id: "goal_seed_corrupt_exact")
+
+      seed = %Seed{
+        id: "seed_corrupt_goal",
+        agent_id: @agent_id,
+        goals: [%{version: 1, payload: goal |> Map.from_struct()}]
+      }
+
+      assert {:error, {:restore_failed, :invalid_goal_snapshot}} = Seed.restore(seed)
+      assert {:error, :not_found} = Memory.get_goal(@agent_id, goal.id)
+    end
+
+    test "security regression: configured goal authority outage fails restore" do
+      goal = Goal.new("Unavailable Seed restore", id: "goal_seed_unavailable_restore")
+
+      seed = %Seed{
+        id: "seed_unavailable_goal",
+        agent_id: @agent_id,
+        goals: [goal |> Map.from_struct()]
+      }
+
+      use_unavailable_goal_store!()
+
+      assert {:error, {:restore_failed, :goal_store_unavailable}} = Seed.restore(seed)
+      assert [] = :ets.lookup(:arbor_memory_goals, {@agent_id, goal.id})
     end
 
     test "restores working_memory via Memory facade" do
@@ -466,6 +551,19 @@ defmodule Arbor.Agent.SeedTest do
     if Process.whereis(GoalStore) == nil do
       start_supervised!(GoalStore)
     end
+  end
+
+  defp use_unavailable_goal_store! do
+    assert :ok = stop_supervised!(BufferedStore)
+
+    start_supervised!(
+      {BufferedStore,
+       name: :arbor_memory_durable,
+       backend: UnavailableBackend,
+       collection: :seed_unavailable,
+       write_mode: :async,
+       ack_mode: :cache}
+    )
   end
 
   # ============================================================================
@@ -853,7 +951,7 @@ defmodule Arbor.Agent.SeedTest do
       Arbor.Memory.save_working_memory(@agent_id, wm)
 
       goal = Goal.new("Lifecycle goal", type: :explore)
-      :ets.insert(:arbor_memory_goals, {{@agent_id, goal.id}, goal})
+      assert {:ok, ^goal} = Memory.add_goal(@agent_id, goal)
 
       # Capture
       {:ok, seed} =

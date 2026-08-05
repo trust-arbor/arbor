@@ -70,19 +70,29 @@ defmodule Arbor.Memory.GoalStoreProvenanceTest do
     end
 
     def compare_and_swap(key, expected, replacement, opts) do
-      update_state(opts, fn state ->
-        if state.available? do
-          case apply_cas(Map.get(state.records, key), expected, replacement) do
-            {:ok, stored} ->
-              {{:ok, stored}, put_in(state, [:records, key], stored)}
+      result =
+        update_state(opts, fn state ->
+          state = %{state | cas_calls: state.cas_calls + 1}
 
-            {:error, _reason} = error ->
-              {error, state}
+          cond do
+            state.force_cas_outcome_unknown? ->
+              {{:error, :outcome_unknown}, %{state | force_cas_outcome_unknown?: false}}
+
+            state.available? ->
+              case apply_cas(Map.get(state.records, key), expected, replacement) do
+                {:ok, stored} ->
+                  {{:ok, stored}, put_in(state, [:records, key], stored)}
+
+                {:error, _reason} = error ->
+                  {error, state}
+              end
+
+            true ->
+              {{:error, :forced_unavailable}, state}
           end
-        else
-          {{:error, :forced_unavailable}, state}
-        end
-      end)
+        end)
+
+      maybe_kill_goal_store_after_cas(opts, result)
     end
 
     def compare_and_delete(key, expected, opts) do
@@ -144,11 +154,35 @@ defmodule Arbor.Memory.GoalStoreProvenanceTest do
       end)
     end
 
+    def kill_goal_store_after_next_cas(name, goal_store_pid) when is_pid(goal_store_pid) do
+      Agent.update(name, &%{&1 | kill_goal_store_after_cas: goal_store_pid})
+    end
+
+    def return_outcome_unknown_on_next_cas(name) do
+      Agent.update(name, &%{&1 | force_cas_outcome_unknown?: true})
+    end
+
+    def cas_calls(name), do: Agent.get(name, & &1.cas_calls)
+
     defp update_state(opts, fun) do
       opts
       |> Keyword.fetch!(:name)
       |> Agent.get_and_update(fun)
     end
+
+    defp maybe_kill_goal_store_after_cas(opts, {:ok, %Record{}} = result) do
+      name = Keyword.fetch!(opts, :name)
+
+      pid =
+        Agent.get_and_update(name, fn state ->
+          {state.kill_goal_store_after_cas, %{state | kill_goal_store_after_cas: nil}}
+        end)
+
+      if is_pid(pid), do: Process.exit(pid, :kill)
+      result
+    end
+
+    defp maybe_kill_goal_store_after_cas(_opts, result), do: result
 
     defp apply_read_action(state, key) do
       case Map.get(state.read_actions, key) do
@@ -511,10 +545,12 @@ defmodule Arbor.Memory.GoalStoreProvenanceTest do
                MemoryStore.load_tainted_with_status("goals", "#{agent_id}:#{goal_id}")
     end
 
-    assert :ok = GoalStore.reload_for_agent(agent_id)
+    assert {:error, :invalid_provenance} = GoalStore.reload_for_agent(agent_id)
 
     for payload <- malformed_payloads do
-      assert {:error, :not_found} = GoalStore.get_goal(agent_id, payload.id)
+      assert {:error, :invalid_provenance} = GoalStore.get_goal_tainted(agent_id, payload.id)
+      assert {:error, :store_unavailable} = GoalStore.get_goal(agent_id, payload.id)
+      assert [] = :ets.lookup(@goals_ets, {agent_id, payload.id})
     end
 
     assert_missing(Provenance.resolve(:goal, agent_id, stale.id, stale_payload))
@@ -675,30 +711,86 @@ defmodule Arbor.Memory.GoalStoreProvenanceTest do
     assert taint == TaintEnvelope.missing_fallback()
   end
 
-  test "security regression: Provenance-down commit leaves no unlabeled live projection", %{
+  test "security regression: committed mutations do not require projection retries", %{
     agent_id: agent_id
   } do
-    original = Goal.new("live before projection failure", id: goal_id("projection-failure"))
-    goal = %{original | description: "committed before projection"}
+    original = Goal.new("live before projection failure", id: goal_id("projection-receipt"))
     taint = taint(:hostile, :restricted, "projection_failure")
-    payload = goal_payload(goal)
+    note = "exactly once after the durable receipt"
 
     assert {:ok, ^original} = GoalStore.add_goal_tainted(agent_id, original, taint)
     stop_provenance()
 
-    assert {:error, :projection_failed} = GoalStore.add_goal_tainted(agent_id, goal, taint)
-    assert {:error, :not_found} = GoalStore.get_goal(agent_id, goal.id)
+    assert {:ok, noted} = GoalStore.add_note_tainted(agent_id, original.id, note, taint)
+    assert noted.notes == [note]
 
-    assert {:ok, %TaintedValue{value: ^payload, taint: ^taint}, :verified} =
-             MemoryStore.load_tainted_with_status("goals", durable_key(agent_id, goal))
+    assert {:ok, achieved} = GoalStore.achieve_goal_tainted(agent_id, original.id, taint)
+    assert achieved.notes == [note]
+    assert %DateTime{} = achieved.achieved_at
+
+    assert {:error, :store_unavailable} = GoalStore.get_goal(agent_id, original.id)
+
+    assert {:ok, %TaintedValue{value: payload, taint: ^taint}, :verified} =
+             MemoryStore.load_tainted_with_status("goals", durable_key(agent_id, original))
+
+    assert payload[:notes] == [note]
+    assert payload[:achieved_at] == DateTime.to_iso8601(achieved.achieved_at)
 
     restart_provenance()
 
-    assert :ok = GoalStore.reload_goal_from_durable(agent_id, goal.id)
-    assert_goal_taint(agent_id, goal, taint, :verified)
+    assert eventually(fn ->
+             GoalStore.get_goal(agent_id, original.id) == {:ok, achieved}
+           end)
+
+    assert_goal_taint(agent_id, achieved, taint, :verified)
   end
 
-  test "raw add and import return bounded projection errors without losing fallback labels", %{
+  test "security regression: a later projection failure rearms exhausted convergence", %{
+    agent_id: agent_id
+  } do
+    first = Goal.new("first pending projection", id: goal_id("rearm-first"))
+    second = Goal.new("later pending projection", id: goal_id("rearm-second"))
+    taint = taint(:untrusted, :restricted, "projection_rearm")
+
+    stop_provenance()
+
+    assert {:ok, ^first} = GoalStore.add_goal_tainted(agent_id, first, taint)
+
+    assert eventually(fn ->
+             state = :sys.get_state(GoalStore)
+
+             MapSet.member?(state.pending_convergence, agent_id) and
+               not MapSet.member?(state.scheduled_convergence, agent_id)
+           end)
+
+    Process.sleep(150)
+    exhausted_state = :sys.get_state(GoalStore)
+    assert MapSet.member?(exhausted_state.pending_convergence, agent_id)
+    refute MapSet.member?(exhausted_state.scheduled_convergence, agent_id)
+
+    assert {:ok, ^second} = GoalStore.add_goal_tainted(agent_id, second, taint)
+
+    rearmed_state = :sys.get_state(GoalStore)
+    assert MapSet.member?(rearmed_state.pending_convergence, agent_id)
+    assert MapSet.member?(rearmed_state.scheduled_convergence, agent_id)
+
+    restart_provenance()
+
+    assert eventually(fn ->
+             state = :sys.get_state(GoalStore)
+
+             not MapSet.member?(state.pending_convergence, agent_id) and
+               :ets.lookup(@goals_ets, {agent_id, first.id}) == [{{agent_id, first.id}, first}] and
+               :ets.lookup(@goals_ets, {agent_id, second.id}) == [
+                 {{agent_id, second.id}, second}
+               ]
+           end)
+
+    assert_goal_taint(agent_id, first, taint, :verified)
+    assert_goal_taint(agent_id, second, taint, :verified)
+  end
+
+  test "raw add and import return committed receipts without losing fallback labels", %{
     agent_id: agent_id
   } do
     added = Goal.new("raw add while sidecar is down", id: goal_id("raw-projection"))
@@ -707,13 +799,11 @@ defmodule Arbor.Memory.GoalStoreProvenanceTest do
 
     stop_provenance()
 
-    assert {:error, :projection_failed} = GoalStore.add_goal(agent_id, added)
+    assert {:ok, ^added} = GoalStore.add_goal(agent_id, added)
+    assert :ok = GoalStore.import_goals(agent_id, [goal_payload(imported)])
 
-    assert {:error, :projection_failed} =
-             GoalStore.import_goals(agent_id, [goal_payload(imported)])
-
-    assert {:error, :not_found} = GoalStore.get_goal(agent_id, added.id)
-    assert {:error, :not_found} = GoalStore.get_goal(agent_id, imported.id)
+    assert {:error, :store_unavailable} = GoalStore.get_goal(agent_id, added.id)
+    assert {:error, :store_unavailable} = GoalStore.get_goal(agent_id, imported.id)
 
     for goal <- [added, imported] do
       payload = goal_payload(goal)
@@ -806,7 +896,7 @@ defmodule Arbor.Memory.GoalStoreProvenanceTest do
 
     assert {:ok, ^goal} = GoalStore.add_goal_tainted(agent_id, goal, taint)
     true = :ets.delete(@goals_ets, {agent_id, goal.id})
-    assert {:error, :not_found} = GoalStore.get_goal(agent_id, goal.id)
+    assert {:ok, ^goal} = GoalStore.get_goal(agent_id, goal.id)
     assert_goal_taint(agent_id, goal, taint, :verified)
   end
 
@@ -822,7 +912,9 @@ defmodule Arbor.Memory.GoalStoreProvenanceTest do
 
     match_spec = [{{{agent_id, :_}, :_}, [], [true]}]
     assert 2 = :ets.select_delete(@goals_ets, match_spec)
-    assert [] = GoalStore.get_all_goals(agent_id)
+
+    assert Enum.sort(Enum.map(GoalStore.get_all_goals(agent_id), & &1.id)) ==
+             Enum.sort([first.id, second.id])
 
     assert {:ok, tainted_goals} = GoalStore.get_all_goals_tainted(agent_id)
 
@@ -891,7 +983,9 @@ defmodule Arbor.Memory.GoalStoreProvenanceTest do
     assert {:ok, []} = GoalStore.get_all_goals_tainted(agent_id)
     assert [] = GoalStore.get_all_goals(agent_id)
 
-    assert Enum.all?(attacker_rows, fn {key, value} ->
+    assert [] = :ets.lookup(@goals_ets, hd(attacker_keys))
+
+    assert Enum.all?(tl(attacker_rows), fn {key, value} ->
              :ets.lookup(@goals_ets, key) == [{key, value}]
            end)
 
@@ -948,7 +1042,7 @@ defmodule Arbor.Memory.GoalStoreProvenanceTest do
 
     AuthoritativeBackend.fail_compare_delete_after(backend, 1)
 
-    assert {:error, :store_unavailable} = GoalStore.clear_goals(agent_id)
+    assert {:error, :outcome_unknown} = GoalStore.clear_goals(agent_id)
 
     assert {:error, :not_found} = GoalStore.get_goal(agent_id, deleted.id)
     assert {:error, :not_found} = GoalStore.get_goal_tainted(agent_id, deleted.id)
@@ -999,7 +1093,7 @@ defmodule Arbor.Memory.GoalStoreProvenanceTest do
                taint: taint
              )
 
-    assert {:ok, ^goal} = GoalStore.get_goal(agent_id, goal.id)
+    assert {:ok, ^updated} = GoalStore.get_goal(agent_id, goal.id)
     assert_goal_taint(agent_id, updated, taint, :verified)
   end
 
@@ -1042,8 +1136,8 @@ defmodule Arbor.Memory.GoalStoreProvenanceTest do
     assert {:error, :store_unavailable} =
              GoalStore.import_goals(agent_id, [goal_payload(imported)])
 
-    assert {:error, :not_found} = GoalStore.get_goal(agent_id, added.id)
-    assert {:error, :not_found} = GoalStore.get_goal(agent_id, imported.id)
+    assert {:error, :store_unavailable} = GoalStore.get_goal(agent_id, added.id)
+    assert {:error, :store_unavailable} = GoalStore.get_goal(agent_id, imported.id)
 
     start_ephemeral_store!()
   end
@@ -1097,10 +1191,23 @@ defmodule Arbor.Memory.GoalStoreProvenanceTest do
     AuthoritativeBackend.set_available(backend, false)
 
     assert {:error, :store_unavailable} = GoalStore.add_goal(agent_id, replacement)
-    assert {:ok, ^original} = GoalStore.get_goal(agent_id, original.id)
+    assert {:error, :store_unavailable} = GoalStore.get_goal(agent_id, original.id)
 
     AuthoritativeBackend.set_available(backend, true)
+    assert {:ok, ^original} = GoalStore.get_goal(agent_id, original.id)
     assert_goal_taint(agent_id, original, strong, :verified)
+  end
+
+  test "security regression: exact export distinguishes empty authority from outage", %{
+    agent_id: agent_id
+  } do
+    assert {:ok, []} = GoalStore.export_all_goals_exact(agent_id)
+
+    backend = use_authoritative_backend!()
+    AuthoritativeBackend.set_available(backend, false)
+
+    assert {:error, :store_unavailable} = GoalStore.export_all_goals_exact(agent_id)
+    assert [] = GoalStore.export_all_goals(agent_id)
   end
 
   test "distributed targeted reload reads backend authority instead of stale named-store cache",
@@ -1194,6 +1301,249 @@ defmodule Arbor.Memory.GoalStoreProvenanceTest do
     assert_missing(Provenance.resolve(:goal, agent_id, cleared.id, goal_payload(cleared)))
   end
 
+  test "security regression: compatibility reads reject forged and stale ETS goals", %{
+    agent_id: agent_id
+  } do
+    backend = use_authoritative_backend!()
+    original = Goal.new("authoritative raw read", id: goal_id("raw-authority"))
+    remote = %{original | description: "remote authoritative update", progress: 0.8}
+    forged = Goal.new("forged projection only", id: goal_id("raw-forged"))
+    taint = taint(:hostile, :restricted, "raw_authority")
+    physical_key = "goals:#{durable_key(agent_id, original)}"
+
+    assert {:ok, ^original} = GoalStore.add_goal_tainted(agent_id, original, taint)
+
+    :ets.insert(@goals_ets, {{agent_id, original.id}, %{original | description: "stale ETS"}})
+    :ets.insert(@goals_ets, {{agent_id, forged.id}, forged})
+
+    AuthoritativeBackend.update_now(backend, physical_key, backend_goal_update(remote, taint))
+
+    assert {:ok, ^remote} = GoalStore.get_goal(agent_id, original.id)
+    assert {:error, :not_found} = GoalStore.get_goal(agent_id, forged.id)
+    assert [^remote] = GoalStore.get_active_goals(agent_id)
+    assert [^remote] = GoalStore.get_all_goals(agent_id)
+
+    assert [{{^agent_id, original_id}, ^remote}] =
+             :ets.lookup(@goals_ets, {agent_id, original.id})
+
+    assert original_id == original.id
+    assert [] = :ets.lookup(@goals_ets, {agent_id, forged.id})
+  end
+
+  test "security regression: post-commit GoalStore death returns outcome unknown", %{
+    agent_id: agent_id
+  } do
+    backend = use_authoritative_backend!()
+    goal = Goal.new("owner death after commit", id: goal_id("outcome-unknown"))
+    taint = taint(:untrusted, :restricted, "owner_death")
+    old_owner = Process.whereis(GoalStore)
+
+    assert {:ok, ^goal} = GoalStore.add_goal_tainted(agent_id, goal, taint)
+    AuthoritativeBackend.kill_goal_store_after_next_cas(backend, old_owner)
+
+    assert {:error, :outcome_unknown} =
+             GoalStore.add_note_tainted(agent_id, goal.id, "committed once", taint)
+
+    assert eventually(fn ->
+             owner = Process.whereis(GoalStore)
+             is_pid(owner) and owner != old_owner
+           end)
+
+    assert eventually(fn ->
+             case GoalStore.get_goal_tainted(agent_id, goal.id) do
+               {:ok, %TaintedValue{value: value}, :verified} ->
+                 value.notes == ["committed once"]
+
+               _ ->
+                 false
+             end
+           end)
+  end
+
+  test "security regression: lower outcome unknown is preserved without retry", %{
+    agent_id: agent_id
+  } do
+    backend = use_authoritative_backend!()
+    goal = Goal.new("backend outcome unknown", id: goal_id("lower-outcome-unknown"))
+    taint = taint(:untrusted, :restricted, "lower_outcome_unknown")
+
+    assert {:ok, ^goal} = GoalStore.add_goal_tainted(agent_id, goal, taint)
+    calls_before = AuthoritativeBackend.cas_calls(backend)
+    AuthoritativeBackend.return_outcome_unknown_on_next_cas(backend)
+
+    assert {:error, :outcome_unknown} =
+             GoalStore.add_note_tainted(agent_id, goal.id, "must not retry", taint)
+
+    assert AuthoritativeBackend.cas_calls(backend) == calls_before + 1
+    assert_goal_taint(agent_id, goal, taint, :verified)
+  end
+
+  test "security regression: seed goal records preserve hostile and corrupt provenance", %{
+    agent_id: agent_id
+  } do
+    hostile_goal = Goal.new("hostile seed goal", id: goal_id("seed-hostile"))
+    hostile = taint(:hostile, :restricted, "seed_hostile")
+
+    assert {:ok, ^hostile_goal} =
+             GoalStore.add_goal_tainted(agent_id, hostile_goal, hostile)
+
+    assert [
+             %{
+               "version" => 1,
+               "payload" => hostile_payload,
+               "provenance" => hostile_provenance
+             } = exported
+           ] = GoalStore.export_all_goals(agent_id)
+
+    assert hostile_payload == goal_payload(hostile_goal)
+
+    assert {:ok, ^hostile, :verified} =
+             TaintEnvelope.resolve(hostile_provenance, hostile_payload)
+
+    assert :ok = GoalStore.clear_goals(agent_id)
+    assert :ok = GoalStore.import_goals(agent_id, [exported])
+    assert_goal_taint(agent_id, hostile_goal, hostile, :verified)
+
+    legacy = Goal.new("legacy seed shape", id: goal_id("seed-legacy"))
+    assert :ok = GoalStore.import_goals(agent_id, [goal_payload(legacy)])
+
+    assert {:ok, %TaintedValue{value: ^legacy, taint: legacy_taint}, :legacy_unlabeled} =
+             GoalStore.get_goal_tainted(agent_id, legacy.id)
+
+    assert legacy_taint == TaintEnvelope.missing_fallback()
+
+    corrupt = Goal.new("corrupt seed provenance", id: goal_id("seed-corrupt"))
+
+    corrupt_record = %{
+      "version" => 1,
+      "payload" => goal_payload(corrupt),
+      "provenance" => Map.put(hostile_provenance, "payload_sha256", String.duplicate("0", 64))
+    }
+
+    assert :ok = GoalStore.import_goals(agent_id, [corrupt_record])
+
+    assert {:ok, %TaintedValue{value: ^corrupt, taint: corrupt_taint},
+            :invalid_durable_provenance} =
+             GoalStore.get_goal_tainted(agent_id, corrupt.id)
+
+    assert corrupt_taint == TaintEnvelope.invalid_fallback()
+
+    reserved = Goal.new("reserved atom seed key", id: goal_id("seed-reserved-atom"))
+    partial_snapshot = Map.put(goal_payload(reserved), :version, 1)
+
+    assert {:error, :invalid_provenance} =
+             GoalStore.import_goals(agent_id, [partial_snapshot])
+
+    assert {:error, :not_found} = GoalStore.get_goal(agent_id, reserved.id)
+  end
+
+  test "security regression: goal and reflection signals contain routing data only", %{
+    agent_id: agent_id
+  } do
+    parent = self()
+    secret = "secret-goal-content-#{System.unique_integer([:positive])}"
+    reason = "sensitive abandonment #{secret}"
+    goal = Goal.new(secret, id: goal_id("redacted-signal"))
+
+    subscriptions =
+      for pattern <- [
+            "memory.goal_created",
+            "memory.goal_progress",
+            "memory.goal_abandoned",
+            "memory.reflection_goal_created",
+            "memory.reflection_goal_update"
+          ] do
+        assert {:ok, subscription_id} =
+                 Arbor.Signals.subscribe(
+                   pattern,
+                   fn signal ->
+                     if signal.data[:agent_id] == agent_id,
+                       do: send(parent, {:goal_signal, signal.type, signal.data})
+
+                     :ok
+                   end,
+                   async: false
+                 )
+
+        subscription_id
+      end
+
+    on_exit(fn -> Enum.each(subscriptions, &Arbor.Signals.unsubscribe/1) end)
+
+    assert {:ok, ^goal} = GoalStore.add_goal(agent_id, goal)
+    assert_receive {:goal_signal, :goal_created, created}, 1_000
+    assert_routing_only_goal_signal(created, secret)
+
+    assert {:ok, _updated} = GoalStore.update_goal_progress(agent_id, goal.id, 0.5)
+    assert_receive {:goal_signal, :goal_progress, progress}, 1_000
+    assert_routing_only_goal_signal(progress, secret)
+
+    assert {:ok, _abandoned} = GoalStore.abandon_goal(agent_id, goal.id, reason)
+    assert_receive {:goal_signal, :goal_abandoned, abandoned}, 1_000
+    assert_routing_only_goal_signal(abandoned, secret)
+    refute inspect(abandoned) =~ reason
+
+    assert :ok =
+             Arbor.Memory.Signals.emit_reflection_goal_created(agent_id, goal.id, %{
+               "description" => secret,
+               "priority" => 99,
+               "notes" => [secret]
+             })
+
+    assert_receive {:goal_signal, :reflection_goal_created, reflected_created}, 1_000
+    assert_routing_only_goal_signal(reflected_created, secret)
+
+    assert :ok =
+             Arbor.Memory.Signals.emit_reflection_goal_update(agent_id, goal.id, %{
+               "new_progress" => 0.9,
+               "status" => "blocked",
+               "blockers" => [secret]
+             })
+
+    assert_receive {:goal_signal, :reflection_goal_update, reflected_update}, 1_000
+    assert_routing_only_goal_signal(reflected_update, secret)
+  end
+
+  test "security regression: restart sweeps stale goal sidecars before hydration", %{
+    agent_id: agent_id
+  } do
+    goal = Goal.new("authoritative survivor", id: goal_id("cleanup-survivor"))
+    stale_id = goal_id("cleanup-stale")
+    taint = taint(:hostile, :restricted, "cleanup_restart")
+    stale_payload = %{id: stale_id, description: "stale sidecar only"}
+
+    assert {:ok, ^goal} = GoalStore.add_goal_tainted(agent_id, goal, taint)
+    assert :ok = Provenance.put(:goal, agent_id, stale_id, stale_payload, taint)
+    assert {:ok, ids} = Provenance.list_item_ids(:goal, agent_id)
+    assert Enum.sort(ids) == Enum.sort([goal.id, stale_id])
+
+    restart_goal_store()
+
+    assert {:ok, [survivor_id]} = Provenance.list_item_ids(:goal, agent_id)
+    assert survivor_id == goal.id
+    assert_goal_taint(agent_id, goal, taint, :verified)
+    assert_missing(Provenance.resolve(:goal, agent_id, stale_id, stale_payload))
+  end
+
+  test "security regression: authoritative miss rediscovers stale delete cleanup", %{
+    agent_id: agent_id
+  } do
+    goal = Goal.new("deleted authority", id: goal_id("cleanup-delete"))
+    taint = taint(:untrusted, :restricted, "cleanup_delete")
+    payload = goal_payload(goal)
+
+    assert {:ok, ^goal} = GoalStore.add_goal_tainted(agent_id, goal, taint)
+    assert :ok = GoalStore.delete_goal(agent_id, goal.id)
+
+    assert :ok = Provenance.put(:goal, agent_id, goal.id, payload, taint)
+    assert {:ok, [goal_id]} = Provenance.list_item_ids(:goal, agent_id)
+    assert goal_id == goal.id
+
+    assert {:error, :not_found} = GoalStore.get_goal(agent_id, goal.id)
+    assert {:ok, []} = Provenance.list_item_ids(:goal, agent_id)
+    assert_missing(Provenance.resolve(:goal, agent_id, goal.id, payload))
+  end
+
   defp start_ephemeral_store! do
     start_supervised!({BufferedStore, name: @store_name, backend: nil, write_mode: :sync})
   end
@@ -1212,7 +1562,10 @@ defmodule Arbor.Memory.GoalStoreProvenanceTest do
                read_actions: %{},
                available?: true,
                compare_delete_fail_after: nil,
-               compare_delete_successes: 0
+               compare_delete_successes: 0,
+               kill_goal_store_after_cas: nil,
+               force_cas_outcome_unknown?: false,
+               cas_calls: 0
              }
            end,
            [name: @backend_state]
@@ -1310,6 +1663,23 @@ defmodule Arbor.Memory.GoalStoreProvenanceTest do
   defp assert_missing(result) do
     assert {:ok, taint, :legacy_unlabeled} = result
     assert taint == TaintEnvelope.missing_fallback()
+  end
+
+  defp assert_routing_only_goal_signal(data, secret) when is_map(data) do
+    allowed = [
+      :agent_id,
+      :origin_node,
+      :goal_id,
+      :status
+    ]
+
+    assert Map.keys(data) -- allowed == []
+
+    for forbidden <- [:description, :content, :reason, :notes, :blockers, :priority, :progress] do
+      refute Map.has_key?(data, forbidden)
+    end
+
+    refute inspect(data) =~ secret
   end
 
   defp taint(level, sensitivity, source, confidence \\ :unverified) do

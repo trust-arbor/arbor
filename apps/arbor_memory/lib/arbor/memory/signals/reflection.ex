@@ -66,9 +66,7 @@ defmodule Arbor.Memory.Signals.Reflection do
   def emit_reflection_goal_update(agent_id, goal_id, update) do
     Signals.emit_memory_signal(agent_id, :reflection_goal_update, %{
       goal_id: goal_id,
-      new_progress: update["new_progress"],
-      status: update["status"],
-      updated_at: DateTime.utc_now()
+      status: conservative_goal_status(update["status"] || update[:status])
     })
   end
 
@@ -76,14 +74,23 @@ defmodule Arbor.Memory.Signals.Reflection do
   Emit a signal when a new goal is created during reflection.
   """
   @spec emit_reflection_goal_created(String.t(), String.t(), map()) :: :ok
-  def emit_reflection_goal_created(agent_id, goal_id, data) do
+  def emit_reflection_goal_created(agent_id, goal_id, _data) do
     Signals.emit_memory_signal(agent_id, :reflection_goal_created, %{
       goal_id: goal_id,
-      description: data["description"],
-      priority: data["priority"],
-      created_at: DateTime.utc_now()
+      status: :active
     })
   end
+
+  defp conservative_goal_status(status)
+       when status in [:active, :achieved, :failed, :abandoned, :blocked],
+       do: status
+
+  defp conservative_goal_status("active"), do: :active
+  defp conservative_goal_status("achieved"), do: :achieved
+  defp conservative_goal_status("failed"), do: :failed
+  defp conservative_goal_status("abandoned"), do: :abandoned
+  defp conservative_goal_status("blocked"), do: :blocked
+  defp conservative_goal_status(_status), do: :unknown
 
   @doc """
   Emit a signal when knowledge graph is updated during reflection.

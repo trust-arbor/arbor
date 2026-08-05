@@ -57,6 +57,9 @@ defmodule Arbor.Memory.GoalStore do
   @max_goal_notes 128
   @max_projected_goals_per_agent 512
   @critical_write_attempts 12
+  @seed_goal_record_version 1
+  @projection_convergence_attempts 4
+  @projection_convergence_delay_ms 25
 
   @type provenance_status ::
           :verified | :legacy_unlabeled | :invalid_durable_provenance
@@ -139,7 +142,7 @@ defmodule Arbor.Memory.GoalStore do
     with true <- valid_identifier?(agent_id),
          true <- valid_identifier?(goal.id),
          {:ok, payload, taint} <- prepare_labeled_goal(goal, taint) do
-      call_owner({:add_goal, agent_id, goal, payload, taint})
+      call_owner({:add_goal, agent_id, goal, payload, taint}, :mutation)
     else
       _ -> {:error, :invalid_provenance}
     end
@@ -173,22 +176,23 @@ defmodule Arbor.Memory.GoalStore do
   @doc """
   Get a goal by ID.
   """
-  @spec get_goal(String.t(), String.t()) :: {:ok, Goal.t()} | {:error, :not_found}
+  @spec get_goal(String.t(), String.t()) ::
+          {:ok, Goal.t()} | {:error, :not_found | :store_unavailable}
   def get_goal(agent_id, goal_id) do
     if valid_identifier?(agent_id) and valid_identifier?(goal_id) do
-      case :ets.lookup(@ets_table, {agent_id, goal_id}) do
-        [{{^agent_id, ^goal_id}, %Goal{} = goal}] -> {:ok, goal}
-        _ -> {:error, :not_found}
+      case call_owner({:get_goal_tainted, agent_id, goal_id}) do
+        {:ok, %TaintedValue{value: %Goal{} = goal}, _status} -> {:ok, goal}
+        {:error, :not_found} = error -> error
+        {:error, _reason} -> {:error, :store_unavailable}
+        _ -> {:error, :store_unavailable}
       end
     else
       {:error, :not_found}
     end
   rescue
-    # Missing ETS table (arbor_memory not booted) — treat as no goals
-    # present. Mirrors the resilience pattern in `at_goal_limit?` above
-    # so isolated test envs (where arbor_memory is a sibling that doesn't
-    # start) and transient ETS issues don't crash the read path.
-    ArgumentError -> {:error, :not_found}
+    _ -> {:error, :store_unavailable}
+  catch
+    _, _ -> {:error, :store_unavailable}
   end
 
   @doc """
@@ -366,12 +370,7 @@ defmodule Arbor.Memory.GoalStore do
   @spec get_active_goals(String.t()) :: [Goal.t()]
   def get_active_goals(agent_id) do
     if valid_identifier?(agent_id) do
-      match_spec = [{{{agent_id, :_}, :"$1"}, [], [:"$1"]}]
-
-      @ets_table
-      |> :ets.select(match_spec)
-      |> Enum.filter(&match?(%Goal{status: :active}, &1))
-      |> Enum.sort_by(& &1.priority, :desc)
+      compatibility_goal_list(agent_id, :active)
     else
       []
     end
@@ -394,8 +393,7 @@ defmodule Arbor.Memory.GoalStore do
   @spec get_all_goals(String.t()) :: [Goal.t()]
   def get_all_goals(agent_id) do
     if valid_identifier?(agent_id) do
-      match_spec = [{{{agent_id, :_}, :"$1"}, [], [:"$1"]}]
-      @ets_table |> :ets.select(match_spec) |> Enum.filter(&match?(%Goal{}, &1))
+      compatibility_goal_list(agent_id, :all)
     else
       []
     end
@@ -437,7 +435,7 @@ defmodule Arbor.Memory.GoalStore do
           :ok | {:error, :invalid_provenance | :persistence_failed | :store_unavailable}
   def delete_goal(agent_id, goal_id) do
     if valid_identifier?(agent_id) and valid_identifier?(goal_id),
-      do: call_owner({:delete_goal, agent_id, goal_id}),
+      do: call_owner({:delete_goal, agent_id, goal_id}, :mutation),
       else: {:error, :invalid_provenance}
   end
 
@@ -448,7 +446,7 @@ defmodule Arbor.Memory.GoalStore do
           :ok | {:error, :invalid_provenance | :persistence_failed | :store_unavailable}
   def clear_goals(agent_id) do
     if valid_identifier?(agent_id),
-      do: call_owner({:clear_goals, agent_id}),
+      do: call_owner({:clear_goals, agent_id}, :mutation),
       else: {:error, :invalid_provenance}
   end
 
@@ -564,13 +562,35 @@ defmodule Arbor.Memory.GoalStore do
   """
   @spec export_all_goals(String.t()) :: [map()]
   def export_all_goals(agent_id) do
-    get_all_goals(agent_id)
-    |> Enum.flat_map(fn goal ->
-      case serialize_goal(goal) do
-        {:ok, payload} -> [payload]
-        {:error, _reason} -> []
-      end
-    end)
+    case export_all_goals_exact(agent_id) do
+      {:ok, exported} -> exported
+      {:error, _reason} -> []
+    end
+  rescue
+    _ -> []
+  catch
+    _, _ -> []
+  end
+
+  @doc "Export all goals without collapsing authority or provenance failures to an empty list."
+  @spec export_all_goals_exact(String.t()) ::
+          {:ok, [map()]} | {:error, :invalid_provenance | :store_unavailable}
+  def export_all_goals_exact(agent_id) do
+    with true <- valid_identifier?(agent_id),
+         {:ok, entries} <- get_all_goals_tainted(agent_id),
+         {:ok, exported} <- export_goal_records(entries) do
+      {:ok, exported}
+    else
+      false -> {:error, :invalid_provenance}
+      {:error, :invalid_provenance} -> {:error, :invalid_provenance}
+      {:error, _reason} -> {:error, :store_unavailable}
+      _ -> {:error, :invalid_provenance}
+    end
+  rescue
+    _ -> {:error, :invalid_provenance}
+  catch
+    :exit, _reason -> {:error, :store_unavailable}
+    _, _ -> {:error, :invalid_provenance}
   end
 
   @doc """
@@ -590,8 +610,9 @@ defmodule Arbor.Memory.GoalStore do
 
       true ->
         case prepare_import_goals(goal_maps) do
-          [] -> :ok
-          entries -> call_owner({:import_goals, agent_id, entries})
+          {:ok, []} -> :ok
+          {:ok, entries} -> call_owner({:import_goals, agent_id, entries}, :mutation)
+          {:error, _reason} -> {:error, :invalid_provenance}
         end
     end
   rescue
@@ -600,7 +621,7 @@ defmodule Arbor.Memory.GoalStore do
     _, _ -> {:error, :invalid_provenance}
   end
 
-  def import_goals(_agent_id, _goal_maps), do: :ok
+  def import_goals(_agent_id, _goal_maps), do: {:error, :invalid_provenance}
 
   # ============================================================================
   # GenServer Callbacks
@@ -609,8 +630,15 @@ defmodule Arbor.Memory.GoalStore do
   @impl true
   def init(_opts) do
     ensure_ets_table()
-    projected_ids = load_goals_from_authoritative_store()
-    {:ok, %{projected_ids: projected_ids}}
+    {projected_ids, pending_convergence} = load_goals_from_authoritative_store()
+
+    state = %{
+      projected_ids: projected_ids,
+      pending_convergence: pending_convergence,
+      scheduled_convergence: MapSet.new()
+    }
+
+    {:ok, schedule_pending_convergence(state)}
   end
 
   @impl true
@@ -638,10 +666,10 @@ defmodule Arbor.Memory.GoalStore do
     case do_get_goal_list_tainted(agent_id, scope) do
       {:reconciled, reply, goal_ids} ->
         {reply, state} = reconcile_projected_ids(reply, state, agent_id, goal_ids)
-        {:reply, reply, state}
+        {:reply, reply, clear_convergence_pending(state, agent_id)}
 
       {:error, _reason} = error ->
-        {:reply, error, state}
+        {:reply, error, fail_agent_projection(state, agent_id)}
 
       _ ->
         {:reply, {:error, :invalid_provenance}, state}
@@ -680,10 +708,10 @@ defmodule Arbor.Memory.GoalStore do
     case do_reload_for_agent(agent_id) do
       {:reconciled, reply, goal_ids} ->
         {reply, state} = reconcile_projected_ids(reply, state, agent_id, goal_ids)
-        {:reply, reply, state}
+        {:reply, reply, clear_convergence_pending(state, agent_id)}
 
       {:error, _reason} = error ->
-        {:reply, error, state}
+        {:reply, error, fail_agent_projection(state, agent_id)}
 
       _ ->
         {:reply, {:error, :invalid_provenance}, state}
@@ -700,7 +728,12 @@ defmodule Arbor.Memory.GoalStore do
           {:reply, :ok, untrack_projected_id(state, agent_id, goal_id)}
 
         {:error, reason} = error when reason in [:invalid_provenance, :projection_failed] ->
-          {:reply, error, untrack_projected_id(state, agent_id, goal_id)}
+          state =
+            state
+            |> untrack_projected_id(agent_id, goal_id)
+            |> mark_convergence_pending(agent_id)
+
+          {:reply, error, state}
 
         {:error, _reason} = error ->
           {:reply, error, state}
@@ -712,6 +745,38 @@ defmodule Arbor.Memory.GoalStore do
       {:error, _reason} = error -> {:reply, error, state}
     end
   end
+
+  @impl true
+  def handle_info({:mark_goal_convergence, agent_id}, state) do
+    {:noreply, mark_convergence_pending(state, agent_id)}
+  end
+
+  def handle_info({:converge_goal_agent, agent_id, attempts}, state) do
+    state = clear_scheduled_convergence(state, agent_id)
+
+    if convergence_pending?(state, agent_id) do
+      case do_reload_for_agent(agent_id, false) do
+        {:reconciled, :ok, goal_ids} ->
+          {_reply, state} = reconcile_projected_ids(:ok, state, agent_id, goal_ids)
+          {:noreply, clear_convergence_pending(state, agent_id)}
+
+        _failure when attempts > 1 ->
+          state =
+            state
+            |> fail_agent_projection(agent_id, false)
+            |> schedule_convergence(agent_id, attempts - 1)
+
+          {:noreply, state}
+
+        _failure ->
+          {:noreply, fail_agent_projection(state, agent_id, false)}
+      end
+    else
+      {:noreply, state}
+    end
+  end
+
+  def handle_info(_message, state), do: {:noreply, state}
 
   # ============================================================================
   # Private Helpers
@@ -725,16 +790,47 @@ defmodule Arbor.Memory.GoalStore do
     ArgumentError -> :ok
   end
 
-  defp call_owner(message) do
+  defp call_owner(message, mode \\ :read) when mode in [:read, :mutation] do
     case Process.whereis(__MODULE__) do
-      pid when is_pid(pid) -> GenServer.call(pid, message, :infinity)
+      pid when is_pid(pid) -> call_live_owner(pid, message, mode)
       nil -> {:error, :store_unavailable}
     end
   rescue
     _ -> {:error, :store_unavailable}
   catch
-    :exit, _ -> {:error, :store_unavailable}
+    :exit, _ -> owner_exit_result(mode)
     _, _ -> {:error, :store_unavailable}
+  end
+
+  defp call_live_owner(pid, message, mode) do
+    GenServer.call(pid, message, :infinity)
+  catch
+    :exit, _reason -> owner_exit_result(mode)
+  end
+
+  defp owner_exit_result(:mutation), do: {:error, :outcome_unknown}
+  defp owner_exit_result(:read), do: {:error, :store_unavailable}
+
+  defp compatibility_goal_list(agent_id, scope) when scope in [:active, :all] do
+    case call_owner({:get_goal_list_tainted, agent_id, scope}) do
+      {:ok, entries} when is_list(entries) -> unwrap_compatibility_goals(entries)
+      _ -> []
+    end
+  end
+
+  defp unwrap_compatibility_goals(entries) do
+    Enum.reduce_while(entries, [], fn
+      {%TaintedValue{value: %Goal{} = goal}, _status}, goals ->
+        {:cont, [goal | goals]}
+
+      _invalid, _goals ->
+        {:halt, []}
+    end)
+    |> Enum.reverse()
+  rescue
+    _ -> []
+  catch
+    _, _ -> []
   end
 
   defp ensure_projection_slot(state, agent_id, goal_id) do
@@ -755,8 +851,16 @@ defmodule Arbor.Memory.GoalStore do
 
   defp track_goal_write_result(result, state, agent_id, goal_id) do
     case result do
-      {:ok, %Goal{}} ->
-        {result, track_projected_id(state, agent_id, goal_id)}
+      {:ok, %Goal{} = goal, :projected} ->
+        {{:ok, goal}, track_projected_id(state, agent_id, goal_id)}
+
+      {:ok, %Goal{} = goal, :convergence_pending} ->
+        state =
+          state
+          |> untrack_projected_id(agent_id, goal_id)
+          |> mark_convergence_pending(agent_id)
+
+        {{:ok, goal}, state}
 
       {:error, reason} when reason in [:not_found, :invalid_provenance, :projection_failed] ->
         _ = remove_live_goal(agent_id, goal_id)
@@ -848,23 +952,104 @@ defmodule Arbor.Memory.GoalStore do
     %{state | projected_ids: Map.delete(projected_ids, agent_id)}
   end
 
+  defp fail_agent_projection(state, agent_id, rearm? \\ true) do
+    projected_ids_for_agent(state, agent_id)
+    |> Enum.each(&remove_live_goal(agent_id, &1, rearm?))
+
+    state
+    |> clear_projected_ids(agent_id)
+    |> mark_convergence_pending(agent_id, rearm?)
+  end
+
+  defp mark_convergence_pending(state, agent_id, rearm? \\ true)
+
+  defp mark_convergence_pending(%{pending_convergence: pending} = state, agent_id, rearm?) do
+    cond do
+      not valid_identifier?(agent_id) ->
+        state
+
+      true ->
+        state = Map.put(state, :pending_convergence, MapSet.put(pending, agent_id))
+
+        if rearm?,
+          do: schedule_convergence(state, agent_id, @projection_convergence_attempts),
+          else: state
+    end
+  end
+
+  defp clear_convergence_pending(
+         %{pending_convergence: pending, scheduled_convergence: scheduled} = state,
+         agent_id
+       ) do
+    %{
+      state
+      | pending_convergence: MapSet.delete(pending, agent_id),
+        scheduled_convergence: MapSet.delete(scheduled, agent_id)
+    }
+  end
+
+  defp schedule_pending_convergence(%{pending_convergence: pending} = state) do
+    Enum.reduce(pending, state, fn agent_id, state ->
+      schedule_convergence(state, agent_id, @projection_convergence_attempts)
+    end)
+  end
+
+  defp schedule_convergence(
+         %{scheduled_convergence: scheduled} = state,
+         agent_id,
+         attempts
+       )
+       when is_integer(attempts) and attempts > 0 do
+    if MapSet.member?(scheduled, agent_id) do
+      state
+    else
+      _ =
+        Process.send_after(
+          self(),
+          {:converge_goal_agent, agent_id, attempts},
+          @projection_convergence_delay_ms
+        )
+
+      %{state | scheduled_convergence: MapSet.put(scheduled, agent_id)}
+    end
+  end
+
+  defp schedule_convergence(state, _agent_id, _attempts), do: state
+
+  defp clear_scheduled_convergence(%{scheduled_convergence: scheduled} = state, agent_id) do
+    %{state | scheduled_convergence: MapSet.delete(scheduled, agent_id)}
+  end
+
+  defp convergence_pending?(%{pending_convergence: pending}, agent_id) do
+    MapSet.member?(pending, agent_id)
+  end
+
+  defp request_goal_convergence(agent_id) do
+    send(self(), {:mark_goal_convergence, agent_id})
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
+  end
+
   defp do_add_goal(agent_id, %Goal{} = goal, supplied_taint, enforce_limit?) do
     with {:ok, taint, existing?} <- join_existing_goal_taint(agent_id, goal.id, supplied_taint),
          :ok <- check_goal_limit(agent_id, existing?, enforce_limit?),
          {:ok, payload, taint} <- prepare_labeled_goal(goal, taint),
-         {:ok, committed} <-
+         {:ok, committed, projection_status} <-
            commit_labeled_goal(agent_id, goal, payload, taint, {:upsert, goal}) do
       emit_after_commit(fn -> Signals.emit_goal_created(agent_id, committed) end)
       Logger.debug("Goal added for #{agent_id}: #{committed.id}")
-      {:ok, committed}
+      {:ok, committed, projection_status}
     else
       {:error, _reason} = error -> error
       _ -> {:error, :invalid_provenance}
     end
   rescue
-    _ -> {:error, :invalid_provenance}
+    _ -> {:error, :outcome_unknown}
   catch
-    _, _ -> {:error, :invalid_provenance}
+    _, _ -> {:error, :outcome_unknown}
   end
 
   defp check_goal_limit(_agent_id, true, _enforce_limit?), do: :ok
@@ -889,7 +1074,7 @@ defmodule Arbor.Memory.GoalStore do
     with true <- valid_identifier?(agent_id),
          true <- valid_identifier?(goal_id),
          {:ok, supplied_taint} <- canonical_taint(supplied_taint) do
-      call_owner({:mutate_goal, agent_id, goal_id, supplied_taint, operation})
+      call_owner({:mutate_goal, agent_id, goal_id, supplied_taint, operation}, :mutation)
     else
       _ -> {:error, :invalid_provenance}
     end
@@ -904,7 +1089,7 @@ defmodule Arbor.Memory.GoalStore do
            load_authoritative_goal(agent_id, goal_id),
          {:ok, %Goal{} = goal} <- goal_from_map(durable_payload),
          {:ok, payload, supplied_taint} <- prepare_labeled_goal(goal, supplied_taint),
-         {:ok, updated} <-
+         {:ok, updated, projection_status} <-
            commit_labeled_goal(
              agent_id,
              goal,
@@ -913,16 +1098,16 @@ defmodule Arbor.Memory.GoalStore do
              {:mutate, operation}
            ) do
       emit_mutation_signal(agent_id, goal_id, operation)
-      {:ok, updated}
+      {:ok, updated, projection_status}
     else
       {:error, :not_found} = error -> error
       {:error, _reason} = error -> error
       _ -> {:error, :invalid_provenance}
     end
   rescue
-    _ -> {:error, :invalid_provenance}
+    _ -> {:error, :outcome_unknown}
   catch
-    _, _ -> {:error, :invalid_provenance}
+    _, _ -> {:error, :outcome_unknown}
   end
 
   defp apply_goal_update(%Goal{} = goal, {:progress, progress}),
@@ -953,17 +1138,20 @@ defmodule Arbor.Memory.GoalStore do
   defp emit_mutation_signal(agent_id, goal_id, :achieve),
     do: emit_after_commit(fn -> Signals.emit_goal_achieved(agent_id, goal_id) end)
 
-  defp emit_mutation_signal(agent_id, goal_id, {:abandon, reason}),
-    do: emit_after_commit(fn -> Signals.emit_goal_abandoned(agent_id, goal_id, reason) end)
-
-  defp emit_mutation_signal(agent_id, goal_id, {:fail, reason}),
+  defp emit_mutation_signal(agent_id, goal_id, {:abandon, _reason}),
     do:
       emit_after_commit(fn ->
-        Signals.emit_goal_abandoned(agent_id, goal_id, reason || "failed")
+        Signals.emit_goal_abandoned(agent_id, goal_id, :abandoned)
+      end)
+
+  defp emit_mutation_signal(agent_id, goal_id, {:fail, _reason}),
+    do:
+      emit_after_commit(fn ->
+        Signals.emit_goal_abandoned(agent_id, goal_id, :failed)
       end)
 
   defp emit_mutation_signal(agent_id, goal_id, {:block, _blockers}),
-    do: emit_after_commit(fn -> Signals.emit_goal_abandoned(agent_id, goal_id, "blocked") end)
+    do: emit_after_commit(fn -> Signals.emit_goal_abandoned(agent_id, goal_id, :blocked) end)
 
   defp emit_mutation_signal(_agent_id, _goal_id, _operation), do: :ok
 
@@ -1004,11 +1192,16 @@ defmodule Arbor.Memory.GoalStore do
 
   defp commit_labeled_goal(agent_id, %Goal{} = goal, payload, %Taint{} = taint, transition) do
     with {:ok, committed_goal, committed_payload, committed_taint} <-
-           commit_goal_record(agent_id, goal, payload, taint, transition),
-         :ok <-
-           install_live_goal(agent_id, committed_goal, committed_payload, committed_taint) do
+           commit_goal_record(agent_id, goal, payload, taint, transition) do
+      projection_status =
+        case install_live_goal(agent_id, committed_goal, committed_payload, committed_taint) do
+          :ok -> :projected
+          {:error, _reason} -> :convergence_pending
+          _ -> :convergence_pending
+        end
+
       queue_goal_embedding(agent_id, committed_goal, committed_taint)
-      {:ok, committed_goal}
+      {:ok, committed_goal, projection_status}
     else
       {:error, _reason} = error -> error
       _ -> {:error, :persistence_failed}
@@ -1071,6 +1264,9 @@ defmodule Arbor.Memory.GoalStore do
       {:error, :invalid_provenance} ->
         {:error, :invalid_provenance}
 
+      {:error, :outcome_unknown} ->
+        {:error, :outcome_unknown}
+
       {:error, {:memory_store, :critical, reason}}
       when reason in [:durable_unavailable, :insufficient_durability] ->
         {:error, :store_unavailable}
@@ -1106,6 +1302,12 @@ defmodule Arbor.Memory.GoalStore do
       {:ok, _record} ->
         {:ok, goal, payload, taint}
 
+      {:error, {:memory_store, :critical, :outcome_unknown}} ->
+        {:error, :outcome_unknown}
+
+      {:error, :outcome_unknown} ->
+        {:error, :outcome_unknown}
+
       {:error, {:memory_store, :critical, :conflict}} ->
         compare_and_swap_goal(
           agent_id,
@@ -1126,6 +1328,10 @@ defmodule Arbor.Memory.GoalStore do
       _ ->
         {:error, :persistence_failed}
     end
+  rescue
+    _ -> {:error, :outcome_unknown}
+  catch
+    _, _ -> {:error, :outcome_unknown}
   end
 
   defp load_named_goal_context(agent_id, goal_id) do
@@ -1197,16 +1403,27 @@ defmodule Arbor.Memory.GoalStore do
   defp context_expected(:not_found), do: :not_found
   defp context_expected(%{record: %Record{} = record}), do: record
 
-  defp install_live_goal(agent_id, %Goal{} = goal, payload, %Taint{} = taint) do
-    case Provenance.put(:goal, agent_id, goal.id, payload, taint) do
-      :ok -> insert_live_goal(agent_id, goal)
-      {:error, _reason} -> fail_live_projection(agent_id, goal.id)
-      _ -> fail_live_projection(agent_id, goal.id)
+  defp install_live_goal(agent_id, goal, payload, taint),
+    do: install_live_goal(agent_id, goal, payload, taint, true)
+
+  defp install_live_goal(
+         agent_id,
+         %Goal{} = goal,
+         payload,
+         %Taint{} = taint,
+         request_convergence?
+       ) do
+    with :ok <- Provenance.put(:goal, agent_id, goal.id, payload, taint),
+         {:ok, ^taint, :verified} <- Provenance.resolve(:goal, agent_id, goal.id, payload),
+         :ok <- insert_live_goal(agent_id, goal) do
+      :ok
+    else
+      _ -> fail_live_projection(agent_id, goal.id, request_convergence?)
     end
   rescue
-    _ -> fail_live_projection(agent_id, goal.id)
+    _ -> fail_live_projection(agent_id, goal.id, request_convergence?)
   catch
-    _, _ -> fail_live_projection(agent_id, goal.id)
+    _, _ -> fail_live_projection(agent_id, goal.id, request_convergence?)
   end
 
   defp insert_live_goal(agent_id, %Goal{} = goal) do
@@ -1221,9 +1438,8 @@ defmodule Arbor.Memory.GoalStore do
     _, _ -> fail_live_projection(agent_id, goal.id)
   end
 
-  defp fail_live_projection(agent_id, goal_id) do
-    _ = safe_ets_delete({agent_id, goal_id})
-    _ = Provenance.delete(:goal, agent_id, goal_id)
+  defp fail_live_projection(agent_id, goal_id, request_convergence? \\ true) do
+    _ = remove_live_goal(agent_id, goal_id, request_convergence?)
     {:error, :projection_failed}
   end
 
@@ -1267,7 +1483,7 @@ defmodule Arbor.Memory.GoalStore do
     with true <- valid_identifier?(agent_id),
          {:ok, records} <- load_authoritative_goal_records(agent_id),
          :ok <- bounded_authoritative_records(records),
-         {:ok, entries, errors} <- reconcile_authoritative_goal_records(agent_id, records) do
+         {:ok, entries} <- hydrate_authoritative_goal_records(agent_id, records) do
       selected =
         case scope do
           :active ->
@@ -1279,14 +1495,7 @@ defmodule Arbor.Memory.GoalStore do
             entries
         end
 
-      reply =
-        cond do
-          :projection_failed in errors -> {:error, :projection_failed}
-          errors != [] -> {:error, :invalid_provenance}
-          true -> {:ok, selected}
-        end
-
-      {:reconciled, reply, projected_goal_ids(entries)}
+      {:reconciled, {:ok, selected}, projected_goal_ids(entries)}
     else
       false -> {:error, :invalid_provenance}
       {:error, _reason} = error -> error
@@ -1298,22 +1507,37 @@ defmodule Arbor.Memory.GoalStore do
     _, _ -> {:error, :invalid_provenance}
   end
 
-  defp project_authoritative_goal(agent_id, goal_id, %TaintedValue{} = value, status) do
+  defp project_authoritative_goal(agent_id, goal_id, value, status),
+    do: project_authoritative_goal(agent_id, goal_id, value, status, true)
+
+  defp project_authoritative_goal(
+         agent_id,
+         goal_id,
+         %TaintedValue{} = value,
+         status,
+         request_convergence?
+       ) do
     case decode_authoritative_goal(goal_id, value, status) do
       {:ok, %Goal{} = goal, payload, taint, provenance_status} ->
-        case install_live_goal(agent_id, goal, payload, taint) do
+        case install_live_goal(agent_id, goal, payload, taint, request_convergence?) do
           :ok -> {:ok, TaintedValue.wrap(goal, taint), provenance_status}
           {:error, _reason} = error -> error
-          _ -> fail_live_projection(agent_id, goal_id)
+          _ -> fail_live_projection(agent_id, goal_id, request_convergence?)
         end
 
       {:error, _reason} ->
-        invalidate_live_goal(agent_id, goal_id)
+        invalidate_live_goal(agent_id, goal_id, request_convergence?)
     end
   end
 
-  defp project_authoritative_goal(agent_id, goal_id, _value, _status) do
-    invalidate_live_goal(agent_id, goal_id)
+  defp project_authoritative_goal(
+         agent_id,
+         goal_id,
+         _value,
+         _status,
+         request_convergence?
+       ) do
+    invalidate_live_goal(agent_id, goal_id, request_convergence?)
   end
 
   defp decode_authoritative_goal(
@@ -1367,78 +1591,80 @@ defmodule Arbor.Memory.GoalStore do
   end
 
   defp load_goals_from_authoritative_store do
-    case load_authoritative_goal_records(nil) do
-      {:ok, records} ->
-        {projected_ids, loaded} =
-          Enum.reduce(records, {%{}, 0}, fn record, {projected_ids, loaded} ->
-            with %{logical_key: key} <- record,
-                 {:ok, agent_id, goal_id} <- agent_and_goal_from_key(key),
-                 ids <- Map.get(projected_ids, agent_id, MapSet.new()),
-                 true <- MapSet.size(ids) < @max_projected_goals_per_agent,
-                 {:ok, ^agent_id, ^goal_id} <- restore_goal_record(record) do
-              {Map.put(projected_ids, agent_id, MapSet.put(ids, goal_id)), loaded + 1}
+    with {:ok, records} <- load_authoritative_goal_records(nil),
+         {:ok, grouped} <- group_authoritative_goal_records(records) do
+      {projected_ids, pending, loaded} =
+        Enum.reduce(grouped, {%{}, MapSet.new(), 0}, fn
+          {agent_id, agent_records}, {projected_ids, pending, loaded} ->
+            with :ok <- bounded_authoritative_records(agent_records),
+                 {:ok, entries} <- hydrate_authoritative_goal_records(agent_id, agent_records),
+                 {:ok, ids} <- bounded_projected_id_set(projected_goal_ids(entries)) do
+              {
+                Map.put(projected_ids, agent_id, ids),
+                pending,
+                loaded + MapSet.size(ids)
+              }
             else
-              _ -> {projected_ids, loaded}
+              _ -> {projected_ids, MapSet.put(pending, agent_id), loaded}
             end
-          end)
+        end)
 
-        Logger.info("GoalStore: loaded #{loaded} goals from authoritative store")
-        projected_ids
-
-      _ ->
-        %{}
+      Logger.info("GoalStore: loaded #{loaded} goals from authoritative store")
+      {projected_ids, pending}
+    else
+      _ -> {%{}, MapSet.new()}
     end
   rescue
     _ ->
       Logger.warning("GoalStore: failed to load goals from authoritative store")
-      %{}
+      {%{}, MapSet.new()}
   catch
     _, _ ->
       Logger.warning("GoalStore: failed to load goals from authoritative store")
-      %{}
+      {%{}, MapSet.new()}
   end
 
-  defp restore_goal_record(%{logical_key: key, value: value, status: status}) do
-    with %TaintedValue{} <- value,
-         {:ok, agent_id, goal_id} <- agent_and_goal_from_key(key),
-         :ok <- restore_tainted_goal(agent_id, goal_id, value, status) do
-      {:ok, agent_id, goal_id}
-    else
-      _ ->
-        with {:ok, agent_id, goal_id} <- agent_and_goal_from_key(key) do
-          invalidate_live_goal(agent_id, goal_id)
-        else
-          _ -> {:error, :invalid_provenance}
+  defp group_authoritative_goal_records(records) when is_list(records) do
+    Enum.reduce_while(records, {:ok, %{}}, fn
+      %{logical_key: key} = record, {:ok, grouped} ->
+        case agent_and_goal_from_key(key) do
+          {:ok, agent_id, _goal_id} ->
+            {:cont, {:ok, Map.update(grouped, agent_id, [record], &[record | &1])}}
+
+          _ ->
+            {:halt, {:error, :invalid_provenance}}
         end
-    end
+
+      _invalid, _acc ->
+        {:halt, {:error, :invalid_provenance}}
+    end)
   end
 
-  defp restore_goal_record(_entry), do: {:error, :invalid_provenance}
+  defp group_authoritative_goal_records(_records), do: {:error, :invalid_provenance}
 
-  defp restore_tainted_goal(agent_id, goal_id, %TaintedValue{} = value, status) do
-    case project_authoritative_goal(agent_id, goal_id, value, status) do
-      {:ok, %TaintedValue{}, _provenance_status} -> :ok
-      {:error, _reason} = error -> error
-      _ -> invalidate_live_goal(agent_id, goal_id)
+  defp remove_live_goal(agent_id, goal_id, request_convergence? \\ true) do
+    _ = safe_ets_delete({agent_id, goal_id})
+
+    case Provenance.delete(:goal, agent_id, goal_id) do
+      :ok ->
+        :ok
+
+      _failure ->
+        if request_convergence?, do: request_goal_convergence(agent_id)
+        {:error, :projection_failed}
     end
   rescue
-    _ -> invalidate_live_goal(agent_id, goal_id)
+    _ ->
+      if request_convergence?, do: request_goal_convergence(agent_id)
+      {:error, :projection_failed}
   catch
-    _, _ -> invalidate_live_goal(agent_id, goal_id)
+    _, _ ->
+      if request_convergence?, do: request_goal_convergence(agent_id)
+      {:error, :projection_failed}
   end
 
-  defp restore_tainted_goal(agent_id, goal_id, _value, _status) do
-    invalidate_live_goal(agent_id, goal_id)
-  end
-
-  defp remove_live_goal(agent_id, goal_id) do
-    _ = safe_ets_delete({agent_id, goal_id})
-    _ = Provenance.delete(:goal, agent_id, goal_id)
-    :ok
-  end
-
-  defp invalidate_live_goal(agent_id, goal_id) do
-    _ = remove_live_goal(agent_id, goal_id)
+  defp invalidate_live_goal(agent_id, goal_id, request_convergence? \\ true) do
+    _ = remove_live_goal(agent_id, goal_id, request_convergence?)
     {:error, :invalid_provenance}
   end
 
@@ -1466,21 +1692,124 @@ defmodule Arbor.Memory.GoalStore do
     end
   end
 
-  defp prepare_import_goals(goal_maps) do
-    Enum.reduce(goal_maps, [], fn goal_map, acc ->
-      with {:ok, goal} <- goal_from_map(goal_map),
-           {:ok, payload, taint} <-
-             prepare_labeled_goal(goal, TaintEnvelope.missing_fallback()) do
-        [{goal, payload, taint} | acc]
-      else
-        _ -> acc
+  defp export_goal_records(entries) when is_list(entries) do
+    Enum.reduce_while(entries, {:ok, []}, fn entry, {:ok, exported} ->
+      case export_goal_record(entry) do
+        {:ok, record} -> {:cont, {:ok, [record | exported]}}
+        {:error, _reason} = error -> {:halt, error}
       end
     end)
-    |> Enum.reverse()
+    |> case do
+      {:ok, exported} -> {:ok, Enum.reverse(exported)}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp export_goal_records(_entries), do: {:error, :invalid_provenance}
+
+  defp export_goal_record({%TaintedValue{value: %Goal{} = goal, taint: %Taint{} = taint}, status})
+       when status in [:verified, :legacy_unlabeled, :invalid_durable_provenance] do
+    with {:ok, payload} <- serialize_goal(goal),
+         {:ok, envelope} <- TaintEnvelope.new(payload, taint),
+         {:ok, provenance} <- TaintEnvelope.to_map(envelope) do
+      {:ok,
+       %{
+         "version" => @seed_goal_record_version,
+         "payload" => payload,
+         "provenance" => provenance
+       }}
+    else
+      _ -> {:error, :invalid_provenance}
+    end
+  end
+
+  defp export_goal_record(_entry), do: {:error, :invalid_provenance}
+
+  defp prepare_import_goals(goal_maps) do
+    Enum.reduce_while(goal_maps, {:ok, []}, fn goal_map, {:ok, entries} ->
+      case prepare_import_goal(goal_map) do
+        {:ok, entry} -> {:cont, {:ok, [entry | entries]}}
+        :skip -> {:cont, {:ok, entries}}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, entries} -> {:ok, Enum.reverse(entries)}
+      {:error, _reason} = error -> error
+    end
+  rescue
+    _ -> {:error, :invalid_provenance}
+  catch
+    _, _ -> {:error, :invalid_provenance}
+  end
+
+  defp prepare_import_goal(goal_map) when is_map(goal_map) do
+    if seed_goal_record?(goal_map) do
+      prepare_seed_goal_record(goal_map)
+    else
+      prepare_legacy_goal_record(goal_map)
+    end
+  end
+
+  defp prepare_import_goal(_goal_map), do: :skip
+
+  defp prepare_seed_goal_record(record) when is_map(record) and map_size(record) == 3 do
+    with {:ok, @seed_goal_record_version} <- reserved_seed_value(record, "version", :version),
+         {:ok, payload} <- reserved_seed_value(record, "payload", :payload),
+         true <- is_map(payload),
+         {:ok, provenance} <- reserved_seed_value(record, "provenance", :provenance),
+         {:ok, %Goal{} = goal} <- goal_from_map(payload),
+         {:ok, canonical_payload} <- serialize_goal(goal),
+         :ok <- equivalent_goal_payload(payload, canonical_payload),
+         {:ok, taint, _status} <- TaintEnvelope.resolve(provenance, payload),
+         {:ok, ^canonical_payload, ^taint} <- prepare_labeled_goal(goal, taint) do
+      {:ok, {goal, canonical_payload, taint}}
+    else
+      _ -> {:error, :invalid_provenance}
+    end
+  end
+
+  defp prepare_seed_goal_record(_record), do: {:error, :invalid_provenance}
+
+  defp prepare_legacy_goal_record(goal_map) do
+    with {:ok, %Goal{} = goal} <- goal_from_map(goal_map),
+         {:ok, payload, taint} <-
+           prepare_labeled_goal(goal, TaintEnvelope.missing_fallback()) do
+      {:ok, {goal, payload, taint}}
+    else
+      _ -> :skip
+    end
+  end
+
+  defp equivalent_goal_payload(payload, canonical_payload) do
+    with {:ok, payload_digest} <- TaintEnvelope.payload_sha256(payload),
+         {:ok, canonical_digest} <- TaintEnvelope.payload_sha256(canonical_payload),
+         true <- payload_digest == canonical_digest do
+      :ok
+    else
+      _ -> {:error, :invalid_provenance}
+    end
+  end
+
+  defp seed_goal_record?(goal_map) do
+    Enum.any?(
+      ["version", "payload", "provenance", :version, :payload, :provenance],
+      &Map.has_key?(goal_map, &1)
+    )
+  end
+
+  defp reserved_seed_value(record, string_key, atom_key) do
+    case {Map.fetch(record, string_key), Map.fetch(record, atom_key)} do
+      {{:ok, value}, :error} -> {:ok, value}
+      {:error, {:ok, value}} -> {:ok, value}
+      _ -> {:error, :invalid_provenance}
+    end
   end
 
   defp ambiguous_import_goal_identifier?(goal_map) when is_map(goal_map) do
-    Enum.any?([Map.get(goal_map, :id), Map.get(goal_map, "id")], fn
+    payload = Map.get(goal_map, "payload", Map.get(goal_map, :payload, goal_map))
+
+    Enum.any?([Map.get(payload, :id), Map.get(payload, "id")], fn
       value when is_binary(value) -> String.contains?(value, ":")
       _ -> false
     end)
@@ -1513,9 +1842,9 @@ defmodule Arbor.Memory.GoalStore do
       _ -> {{:error, :invalid_provenance}, state}
     end
   rescue
-    _ -> {{:error, :invalid_provenance}, state}
+    _ -> {{:error, :outcome_unknown}, state}
   catch
-    _, _ -> {{:error, :invalid_provenance}, state}
+    _, _ -> {{:error, :outcome_unknown}, state}
   end
 
   defp do_delete_goal(agent_id, goal_id) do
@@ -1529,9 +1858,9 @@ defmodule Arbor.Memory.GoalStore do
       _ -> {:error, :persistence_failed}
     end
   rescue
-    _ -> {:error, :persistence_failed}
+    _ -> {:error, :outcome_unknown}
   catch
-    _, _ -> {:error, :persistence_failed}
+    _, _ -> {:error, :outcome_unknown}
   end
 
   defp do_clear_goals(agent_id, state) do
@@ -1550,9 +1879,9 @@ defmodule Arbor.Memory.GoalStore do
       _ -> {{:error, :persistence_failed}, state}
     end
   rescue
-    _ -> {{:error, :persistence_failed}, state}
+    _ -> {{:error, :outcome_unknown}, state}
   catch
-    _, _ -> {{:error, :persistence_failed}, state}
+    _, _ -> {{:error, :outcome_unknown}, state}
   end
 
   defp finalize_goal_clear(agent_id, state) do
@@ -1561,21 +1890,21 @@ defmodule Arbor.Memory.GoalStore do
 
     state = clear_projected_ids(state, agent_id)
 
+    emit_after_commit(fn ->
+      Signals.emit_memory_signal(
+        agent_id,
+        :goals_cleared,
+        %{status: :cleared},
+        scope: :cluster
+      )
+    end)
+
     case Provenance.delete_domain_agent(:goal, agent_id) do
       :ok ->
-        emit_after_commit(fn ->
-          Signals.emit_memory_signal(
-            agent_id,
-            :goals_cleared,
-            %{cleared_at: DateTime.utc_now()},
-            scope: :cluster
-          )
-        end)
-
-        {:ok, state}
+        {:ok, clear_convergence_pending(state, agent_id)}
 
       _ ->
-        {{:error, :projection_failed}, state}
+        {:ok, mark_convergence_pending(state, agent_id)}
     end
   end
 
@@ -1586,7 +1915,7 @@ defmodule Arbor.Memory.GoalStore do
       Signals.emit_memory_signal(
         agent_id,
         :goal_deleted,
-        %{goal_id: goal_id, deleted_at: DateTime.utc_now()},
+        %{goal_id: goal_id, status: :deleted},
         scope: :cluster
       )
     end)
@@ -1600,6 +1929,12 @@ defmodule Arbor.Memory.GoalStore do
       :ok ->
         :ok
 
+      {:error, {:memory_store, :critical, :outcome_unknown}} ->
+        {:error, :outcome_unknown}
+
+      {:error, :outcome_unknown} ->
+        {:error, :outcome_unknown}
+
       {:error, {:memory_store, :critical, reason}}
       when reason in [:durable_unavailable, :insufficient_durability] ->
         {:error, :store_unavailable}
@@ -1611,9 +1946,9 @@ defmodule Arbor.Memory.GoalStore do
         {:error, :persistence_failed}
     end
   rescue
-    _ -> {:error, :persistence_failed}
+    _ -> {:error, :outcome_unknown}
   catch
-    _, _ -> {:error, :persistence_failed}
+    _, _ -> {:error, :outcome_unknown}
   end
 
   defp delete_goal_records(_agent_id, [], state), do: {:ok, state}
@@ -1664,13 +1999,13 @@ defmodule Arbor.Memory.GoalStore do
     _, _ -> {:error, :invalid_provenance}
   end
 
-  defp do_reload_for_agent(agent_id) do
+  defp do_reload_for_agent(agent_id, request_convergence? \\ true) do
     with true <- valid_identifier?(agent_id),
          {:ok, records} <- load_authoritative_goal_records(agent_id),
          :ok <- bounded_authoritative_records(records),
-         {:ok, entries, errors} <- reconcile_authoritative_goal_records(agent_id, records) do
-      reply = if :projection_failed in errors, do: {:error, :projection_failed}, else: :ok
-      {:reconciled, reply, projected_goal_ids(entries)}
+         {:ok, entries} <-
+           hydrate_authoritative_goal_records(agent_id, records, request_convergence?) do
+      {:reconciled, :ok, projected_goal_ids(entries)}
     else
       false -> {:error, :invalid_provenance}
       {:error, _reason} = error -> error
@@ -1682,10 +2017,87 @@ defmodule Arbor.Memory.GoalStore do
     _, _ -> {:error, :store_unavailable}
   end
 
-  defp reconcile_authoritative_goal_records(agent_id, records) when is_list(records) do
+  defp hydrate_authoritative_goal_records(agent_id, records),
+    do: hydrate_authoritative_goal_records(agent_id, records, true)
+
+  defp hydrate_authoritative_goal_records(agent_id, records, request_convergence?)
+       when is_list(records) do
+    case Provenance.delete_domain_agent(:goal, agent_id) do
+      :ok -> hydrate_swept_goal_records(agent_id, records, request_convergence?)
+      _failure -> {:error, :projection_failed}
+    end
+  rescue
+    _ -> {:error, :projection_failed}
+  catch
+    _, _ -> {:error, :projection_failed}
+  end
+
+  defp hydrate_authoritative_goal_records(_agent_id, _records, _request_convergence?),
+    do: {:error, :invalid_provenance}
+
+  defp hydrate_swept_goal_records(agent_id, records, request_convergence?) do
+    case reconcile_authoritative_goal_records(agent_id, records, request_convergence?) do
+      {:ok, entries, []} ->
+        case verify_goal_provenance_inventory(agent_id, entries) do
+          :ok ->
+            {:ok, entries}
+
+          {:error, _reason} = error ->
+            evict_hydrated_goal_entries(agent_id, entries, error, request_convergence?)
+        end
+
+      {:ok, entries, errors} when is_list(errors) ->
+        reason =
+          if :projection_failed in errors, do: :projection_failed, else: :invalid_provenance
+
+        evict_hydrated_goal_entries(
+          agent_id,
+          entries,
+          {:error, reason},
+          request_convergence?
+        )
+
+      {:error, _reason} = error ->
+        error
+
+      _ ->
+        {:error, :invalid_provenance}
+    end
+  end
+
+  defp verify_goal_provenance_inventory(agent_id, entries) do
+    expected_ids = entries |> projected_goal_ids() |> Enum.sort()
+
+    case Provenance.list_item_ids(:goal, agent_id) do
+      {:ok, actual_ids} when is_list(actual_ids) ->
+        if Enum.sort(actual_ids) == expected_ids,
+          do: :ok,
+          else: {:error, :projection_failed}
+
+      _ ->
+        {:error, :projection_failed}
+    end
+  end
+
+  defp evict_hydrated_goal_entries(agent_id, entries, error, request_convergence?) do
+    _ = Provenance.delete_domain_agent(:goal, agent_id)
+
+    Enum.each(entries, fn
+      {%TaintedValue{value: %Goal{id: goal_id}}, _status} ->
+        _ = remove_live_goal(agent_id, goal_id, request_convergence?)
+
+      _ ->
+        :ok
+    end)
+
+    error
+  end
+
+  defp reconcile_authoritative_goal_records(agent_id, records, request_convergence?)
+       when is_list(records) do
     {entries, errors} =
       Enum.reduce(records, {[], []}, fn record, {entries, errors} ->
-        case project_authoritative_goal_record(agent_id, record) do
+        case project_authoritative_goal_record(agent_id, record, request_convergence?) do
           {:ok, %TaintedValue{} = value, status} ->
             {[{value, status} | entries], errors}
 
@@ -1700,21 +2112,22 @@ defmodule Arbor.Memory.GoalStore do
     {:ok, Enum.reverse(entries), Enum.uniq(errors)}
   end
 
-  defp reconcile_authoritative_goal_records(_agent_id, _records),
+  defp reconcile_authoritative_goal_records(_agent_id, _records, _request_convergence?),
     do: {:error, :invalid_provenance}
 
   defp project_authoritative_goal_record(
          agent_id,
-         %{logical_key: key, value: %TaintedValue{} = value, status: status}
+         %{logical_key: key, value: %TaintedValue{} = value, status: status},
+         request_convergence?
        ) do
     with {:ok, ^agent_id, goal_id} <- agent_and_goal_from_key(key) do
-      project_authoritative_goal(agent_id, goal_id, value, status)
+      project_authoritative_goal(agent_id, goal_id, value, status, request_convergence?)
     else
       _ -> {:error, :invalid_provenance}
     end
   end
 
-  defp project_authoritative_goal_record(_agent_id, _record),
+  defp project_authoritative_goal_record(_agent_id, _record, _request_convergence?),
     do: {:error, :invalid_provenance}
 
   defp projected_goal_ids(entries) do

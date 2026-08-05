@@ -459,7 +459,7 @@ defmodule Arbor.Agent.AgentSeed do
       seed_emit_signal(:goal_dead_letter, %{
         agent_id: agent_id,
         goal_id: goal_id,
-        reason: "all_intents_abandoned"
+        status: :dead_letter
       })
 
       Logger.warning("Goal #{goal_id} flagged as dead letter — all intents abandoned",

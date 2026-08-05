@@ -223,7 +223,9 @@ defmodule Arbor.Memory.GoalStoreTest do
 
       exported = GoalStore.export_all_goals(agent_id)
       assert [exported_goal] = exported
-      assert exported_goal[:deadline] == "2026-03-15T10:00:00Z"
+
+      assert get_in(exported_goal, ["payload", Access.key(:deadline)]) ==
+               "2026-03-15T10:00:00Z"
 
       GoalStore.clear_goals(agent_id)
       GoalStore.import_goals(agent_id, exported)

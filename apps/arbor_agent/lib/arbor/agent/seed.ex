@@ -190,7 +190,8 @@ defmodule Arbor.Agent.Seed do
     reason = Keyword.get(opts, :reason, :manual)
     intent_limit = Keyword.get(opts, :intent_limit, 100)
 
-    with {:ok, working_memory} <- capture_working_memory(agent_id) do
+    with {:ok, working_memory} <- capture_working_memory(agent_id),
+         {:ok, goals} <- capture_goals(agent_id) do
       seed = %__MODULE__{
         id: generate_id(),
         agent_id: agent_id,
@@ -207,7 +208,7 @@ defmodule Arbor.Agent.Seed do
         knowledge_graph: capture_knowledge_graph(agent_id),
         self_knowledge: capture_self_knowledge(agent_id),
         preferences: capture_preferences(agent_id),
-        goals: capture_goals(agent_id),
+        goals: goals,
         recent_intents: capture_intents(agent_id, intent_limit),
         recent_percepts: capture_percepts(agent_id, intent_limit),
         version: 1
@@ -221,11 +222,18 @@ defmodule Arbor.Agent.Seed do
     else
       {:error, :working_memory_snapshot_unavailable} ->
         {:error, {:capture_failed, :working_memory_snapshot_unavailable}}
+
+      {:error, goal_error} ->
+        error = goal_snapshot_error(goal_error)
+        Logger.warning("Seed capture rejected for #{agent_id}: #{error}")
+        {:error, {:capture_failed, error}}
     end
   rescue
     e ->
       Logger.error("Seed capture failed for #{agent_id}: #{inspect(e)}")
-      {:error, {:capture_failed, e}}
+      {:error, {:capture_failed, :internal_error}}
+  catch
+    _, _ -> {:error, {:capture_failed, :internal_error}}
   end
 
   # ============================================================================
@@ -249,17 +257,14 @@ defmodule Arbor.Agent.Seed do
     emit = Keyword.get(opts, :emit_signals, true)
     agent_id = seed.agent_id
 
-    with :ok <- maybe_restore_working_memory(skip, agent_id, seed.working_memory) do
+    with :ok <- maybe_restore_working_memory(skip, agent_id, seed.working_memory),
+         :ok <- if(:goals in skip, do: :ok, else: restore_goals(agent_id, seed.goals)) do
       unless :knowledge_graph in skip do
         restore_knowledge_graph(agent_id, seed.knowledge_graph)
       end
 
       unless :preferences in skip do
         restore_preferences(agent_id, seed.preferences)
-      end
-
-      unless :goals in skip do
-        restore_goals(agent_id, seed.goals)
       end
 
       # context_window, self_knowledge, intents, and percepts are stored
@@ -274,12 +279,21 @@ defmodule Arbor.Agent.Seed do
 
       {:ok, seed}
     else
-      {:error, reason} -> {:error, {:restore_failed, reason}}
+      {:error, reason}
+      when reason in [:working_memory_snapshot_invalid, :working_memory_restore_failed] ->
+        {:error, {:restore_failed, reason}}
+
+      {:error, goal_error} ->
+        error = goal_snapshot_error(goal_error)
+        Logger.warning("Seed restore rejected for #{agent_id}: #{error}")
+        {:error, {:restore_failed, error}}
     end
   rescue
     e ->
       Logger.error("Seed restore failed for #{seed.agent_id}: #{inspect(e)}")
-      {:error, {:restore_failed, e}}
+      {:error, {:restore_failed, :internal_error}}
+  catch
+    _, _ -> {:error, {:restore_failed, :internal_error}}
   end
 
   # ============================================================================
@@ -611,9 +625,11 @@ defmodule Arbor.Agent.Seed do
   end
 
   defp capture_goals(agent_id) do
-    Memory.export_all_goals(agent_id)
+    Memory.export_all_goals_exact(agent_id)
   rescue
-    _ -> []
+    _ -> {:error, :store_unavailable}
+  catch
+    _, _ -> {:error, :store_unavailable}
   end
 
   defp capture_intents(agent_id, limit) do
@@ -700,12 +716,22 @@ defmodule Arbor.Agent.Seed do
   defp restore_goals(_agent_id, []), do: :ok
 
   defp restore_goals(agent_id, goals) do
-    Memory.import_goals(agent_id, goals)
+    case Memory.import_goals(agent_id, goals) do
+      :ok -> :ok
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :store_unavailable}
+    end
   rescue
-    e ->
-      Logger.warning("Failed to restore goals for #{agent_id}: #{inspect(e)}")
-      :ok
+    _ -> {:error, :store_unavailable}
+  catch
+    _, _ -> {:error, :store_unavailable}
   end
+
+  defp goal_snapshot_error(:invalid_provenance), do: :invalid_goal_snapshot
+  defp goal_snapshot_error(:store_unavailable), do: :goal_store_unavailable
+  defp goal_snapshot_error(:persistence_failed), do: :goal_persistence_failed
+  defp goal_snapshot_error(:outcome_unknown), do: :goal_store_outcome_unknown
+  defp goal_snapshot_error(_reason), do: :goal_store_unavailable
 
   # ============================================================================
   # Private — from_map Builders (extracted for complexity reduction)

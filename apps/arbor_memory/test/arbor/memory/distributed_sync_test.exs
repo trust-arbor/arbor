@@ -181,7 +181,7 @@ defmodule Arbor.Memory.DistributedSyncTest do
     test "handles goal_progress signal from remote node" do
       agent_id = "agent_dist_goal_progress_#{System.unique_integer([:positive])}"
       goal = Goal.new("Test distributed goal", type: :achieve, priority: 80)
-      :ets.insert(@goals_ets, {{agent_id, goal.id}, goal})
+      assert {:ok, ^goal} = GoalStore.add_goal(agent_id, goal)
 
       send(
         Process.whereis(DistributedSync),
@@ -202,14 +202,13 @@ defmodule Arbor.Memory.DistributedSyncTest do
       # Should still be alive and functional
       assert Process.alive?(Process.whereis(DistributedSync))
 
-      # Cleanup
-      :ets.delete(@goals_ets, {agent_id, goal.id})
+      assert :ok = GoalStore.clear_goals(agent_id)
     end
 
     test "ignores goal signals from own node" do
       agent_id = "agent_dist_goal_self_#{System.unique_integer([:positive])}"
       goal = Goal.new("Keep this goal", type: :achieve)
-      :ets.insert(@goals_ets, {{agent_id, goal.id}, goal})
+      assert {:ok, ^goal} = GoalStore.add_goal(agent_id, goal)
 
       send(
         Process.whereis(DistributedSync),
@@ -229,8 +228,7 @@ defmodule Arbor.Memory.DistributedSyncTest do
       # Should still have the original goal (self-signal ignored)
       assert {:ok, ^goal} = GoalStore.get_goal(agent_id, goal.id)
 
-      # Cleanup
-      :ets.delete(@goals_ets, {agent_id, goal.id})
+      assert :ok = GoalStore.clear_goals(agent_id)
     end
   end
 
