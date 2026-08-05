@@ -81,6 +81,13 @@ defmodule Arbor.Persistence.VectorBoundaryTest do
     assert {:error, :invalid_request} =
              Arbor.Persistence.search_vector_records("agent_alpha", [0.0], search_opts())
 
+    assert {:error, :invalid_request} =
+             Arbor.Persistence.search_vector_records(
+               "agent_alpha",
+               List.duplicate(0.0, VectorRecord.dimensions()),
+               search_opts()
+             )
+
     refute_receive {:vector_backend_called, _callback, _args}
   end
 

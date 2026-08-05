@@ -35,4 +35,22 @@ defmodule Arbor.Persistence.VectorPublicBoundarySecurityRegressionTest do
 
     refute_receive {:regression_backend_called, _agent_id, _vector, _opts}
   end
+
+  test "security regression: zero-norm vector input never reaches a backend" do
+    opts = [
+      model_id: "provider/model-v1",
+      dimensions: 768,
+      encoding: :ieee754_float32_be_v1,
+      category: "goal"
+    ]
+
+    assert {:error, :invalid_request} =
+             Arbor.Persistence.search_vector_records(
+               "agent_alpha",
+               List.duplicate(0.0, 768),
+               opts
+             )
+
+    refute_receive {:regression_backend_called, _agent_id, _vector, _opts}
+  end
 end

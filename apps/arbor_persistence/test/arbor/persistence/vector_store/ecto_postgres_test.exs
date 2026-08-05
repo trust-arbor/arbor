@@ -127,6 +127,37 @@ defmodule Arbor.Persistence.VectorStore.EctoPostgresTest do
              )
   end
 
+  test "PostgreSQL rejects zero-norm queries and searches ordinary signed vectors", %{
+    agent_id: agent_id
+  } do
+    zero_vector = List.duplicate(0.0, VectorRecord.dimensions())
+
+    assert {:error, :invalid_request} =
+             Arbor.Persistence.search_vector_records(
+               agent_id,
+               zero_vector,
+               search_opts(limit: 1)
+             )
+
+    signed_vector = [-1.0, 1.0 | List.duplicate(0.0, 766)]
+    signed_record = record!(agent_id, source_key: "signed", vector: signed_vector)
+
+    assert {:ok, _receipt} =
+             Arbor.Persistence.execute_vector_operation(
+               agent_id,
+               insert_operation!(signed_record)
+             )
+
+    assert {:ok, [%VectorMatch{record: %{id: signed_id}}]} =
+             Arbor.Persistence.search_vector_records(
+               agent_id,
+               signed_vector,
+               search_opts(limit: 1)
+             )
+
+    assert signed_id == signed_record.id
+  end
+
   test "PostgreSQL stores the full 256-byte contract-valid tenant id" do
     agent_id = String.duplicate("a", VectorRecord.limits().agent_id_bytes)
     record = record!(agent_id, source_key: unique("max-agent"))

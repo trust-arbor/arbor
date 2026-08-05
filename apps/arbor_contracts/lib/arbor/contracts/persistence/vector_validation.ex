@@ -51,7 +51,7 @@ defmodule Arbor.Contracts.Persistence.VectorValidation do
   @spec normalize_vector(term(), pos_integer()) ::
           {:ok, [float()], binary()} | {:error, :invalid_vector}
   def normalize_vector(vector, dimensions) when is_list(vector) and is_integer(dimensions) do
-    normalize_vector_items(vector, dimensions, 0, [], [])
+    normalize_vector_items(vector, dimensions, 0, [], [], false)
   end
 
   def normalize_vector(_vector, _dimensions), do: {:error, :invalid_vector}
@@ -143,17 +143,31 @@ defmodule Arbor.Contracts.Persistence.VectorValidation do
 
   defp require_exact_keys(:error, _required_keys), do: :error
 
-  defp normalize_vector_items([], dimensions, dimensions, values, bytes) do
+  defp normalize_vector_items([], dimensions, dimensions, values, bytes, true) do
     {:ok, Enum.reverse(values), bytes |> Enum.reverse() |> IO.iodata_to_binary()}
   end
 
-  defp normalize_vector_items([], _dimensions, _count, _values, _bytes),
+  defp normalize_vector_items([], _dimensions, _count, _values, _bytes, _non_zero?),
     do: {:error, :invalid_vector}
 
-  defp normalize_vector_items(_remaining, dimensions, dimensions, _values, _bytes),
-    do: {:error, :invalid_vector}
+  defp normalize_vector_items(
+         _remaining,
+         dimensions,
+         dimensions,
+         _values,
+         _bytes,
+         _non_zero?
+       ),
+       do: {:error, :invalid_vector}
 
-  defp normalize_vector_items([value | rest], dimensions, count, values, bytes) do
+  defp normalize_vector_items(
+         [value | rest],
+         dimensions,
+         count,
+         values,
+         bytes,
+         non_zero?
+       ) do
     case normalize_float32(value) do
       {:ok, normalized, encoded} ->
         normalize_vector_items(
@@ -161,7 +175,8 @@ defmodule Arbor.Contracts.Persistence.VectorValidation do
           dimensions,
           count + 1,
           [normalized | values],
-          [encoded | bytes]
+          [encoded | bytes],
+          non_zero? or normalized != 0.0
         )
 
       {:error, :invalid_float} ->
@@ -169,8 +184,15 @@ defmodule Arbor.Contracts.Persistence.VectorValidation do
     end
   end
 
-  defp normalize_vector_items(_improper, _dimensions, _count, _values, _bytes),
-    do: {:error, :invalid_vector}
+  defp normalize_vector_items(
+         _improper,
+         _dimensions,
+         _count,
+         _values,
+         _bytes,
+         _non_zero?
+       ),
+       do: {:error, :invalid_vector}
 
   defp encode_part(part) when is_binary(part), do: [<<byte_size(part)::unsigned-size(32)>>, part]
 end

@@ -50,6 +50,26 @@ defmodule Arbor.Contracts.Persistence.VectorTypesTest do
       end
     end
 
+    test "regression: rejects normalized zero-norm records and queries but accepts signed vectors" do
+      zero_vector = List.duplicate(0.0, VectorRecord.dimensions())
+      zero_bytes = :binary.copy(<<0>>, VectorRecord.dimensions() * 4)
+
+      zero_attrs =
+        record_attrs()
+        |> Map.put(:vector, zero_vector)
+        |> Map.put(:vector_digest, VectorValidation.sha256(zero_bytes))
+
+      assert {:error, :invalid_vector} = VectorRecord.normalize_vector(zero_vector)
+      assert {:error, :invalid_vector} = VectorRecord.vector_digest(zero_vector)
+      assert {:error, :invalid_vector_record} = VectorRecord.new(zero_attrs)
+
+      signed_vector = [-1.0, 1.0 | List.duplicate(0.0, 766)]
+      assert {:ok, ^signed_vector} = VectorRecord.normalize_vector(signed_vector)
+
+      assert {:ok, %VectorRecord{vector: ^signed_vector}} =
+               VectorRecord.new(record_attrs(vector: signed_vector))
+    end
+
     test "rejects short, oversized, and improper vectors" do
       short = List.duplicate(0.0, 767)
       oversized = List.duplicate(0.0, 769)

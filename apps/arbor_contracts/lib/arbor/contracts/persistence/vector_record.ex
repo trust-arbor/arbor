@@ -4,8 +4,9 @@ defmodule Arbor.Contracts.Persistence.VectorRecord do
 
   Logical identity is exactly `{agent_id, source_namespace, source_key}`. The
   payload is stored as its normalized JSON representation, while the vector is
-  rounded to the exact IEEE-754 float32 values whose big-endian bytes determine
-  `vector_digest`. This struct contains no database or Memory provenance state.
+  rounded to non-zero-norm IEEE-754 float32 values whose exact big-endian bytes
+  determine `vector_digest`. This struct contains no database or Memory
+  provenance state.
   """
 
   use TypedStruct
@@ -206,7 +207,7 @@ defmodule Arbor.Contracts.Persistence.VectorRecord do
     end
   end
 
-  @doc "Rounds a vector to its exact finite float32 values."
+  @doc "Rounds a vector to exact finite float32 values and rejects zero norm."
   @spec normalize_vector(term()) :: {:ok, [float()]} | {:error, :invalid_vector}
   def normalize_vector(vector) do
     case VectorValidation.normalize_vector(vector, @dimensions) do
