@@ -34,9 +34,13 @@ defmodule Arbor.Memory.IntentStore do
   @ets_table :arbor_memory_intents
   @default_buffer_size 100
   @aggregate_version 1
+  @export_version 1
   @max_identifier_bytes 256
   @max_failure_reason_bytes 4_096
   @max_inventory_items Taint.max_join_inputs()
+  @max_item_payload_bytes 256_000
+  @max_aggregate_bytes 4_000_000
+  @max_export_entry_bytes 1_048_576
   @max_cas_attempts 8
   @max_projection_attempts 4
   @projection_retry_ms 25
@@ -55,6 +59,7 @@ defmodule Arbor.Memory.IntentStore do
   @status_fields ~w(status locked_at completed_at failed_at retry_count last_failure_reason)
   @status_payload_fields ["intent_id" | @status_fields]
   @import_fields @intent_payload_fields ++ ~w(status retry_count)
+  @export_fields ~w(version intent status)
   @reader_option_keys [:limit, :type, :since]
   @pending_option_keys [:limit, :max_retries]
 
@@ -164,7 +169,7 @@ defmodule Arbor.Memory.IntentStore do
   @spec recent_intents_tainted(String.t(), keyword()) ::
           {:ok, [tainted_item()]} | {:error, :invalid_request | :store_unavailable}
   def recent_intents_tainted(agent_id, opts \\ []) do
-    with :ok <- validate_reader_request(agent_id, opts) do
+    with :ok <- validate_reader_request(agent_id, opts, :intent) do
       safe_server_call({:recent_tainted, :intent, agent_id, opts})
     else
       {:error, :invalid_request} -> {:error, :invalid_request}
@@ -197,7 +202,7 @@ defmodule Arbor.Memory.IntentStore do
   @spec recent_percepts_tainted(String.t(), keyword()) ::
           {:ok, [tainted_item()]} | {:error, :invalid_request | :store_unavailable}
   def recent_percepts_tainted(agent_id, opts \\ []) do
-    with :ok <- validate_reader_request(agent_id, opts) do
+    with :ok <- validate_reader_request(agent_id, opts, :percept) do
       safe_server_call({:recent_tainted, :percept, agent_id, opts})
     else
       {:error, :invalid_request} -> {:error, :invalid_request}
@@ -776,7 +781,7 @@ defmodule Arbor.Memory.IntentStore do
         status_overrides =
           new_items
           |> Enum.filter(&MapSet.member?(retained_ids, &1.id))
-          |> Map.new(&{{:status, &1.id}, &1.taint})
+          |> Map.new(&{{:status, &1.id}, &1.status_taint})
 
         overrides = Map.merge(overrides, status_overrides)
         protected_keys = Enum.map(new_items, &{:intent, &1.id})
@@ -1048,6 +1053,21 @@ defmodule Arbor.Memory.IntentStore do
     _, _ -> {:error, :invalid_import}
   end
 
+  defp prepare_import(%{"version" => @export_version} = intent_map) do
+    with :ok <- exact_keys(intent_map, @export_fields),
+         :ok <- bounded_json(intent_map, @max_export_entry_bytes),
+         {:ok, [intent_item]} <- decode_items(:intent, [intent_map["intent"]], 1),
+         {:ok, [status_item]} <-
+           decode_verified_statuses(%{intent_item.id => intent_map["status"]}, [intent_item]) do
+      {:ok,
+       intent_item
+       |> Map.put(:status, status_item.value)
+       |> Map.put(:status_taint, status_item.taint)}
+    else
+      _ -> {:error, :invalid_import}
+    end
+  end
+
   defp prepare_import(intent_map) when is_map(intent_map) do
     intent_payload = Map.take(intent_map, @intent_payload_fields)
 
@@ -1060,7 +1080,8 @@ defmodule Arbor.Memory.IntentStore do
       {:ok,
        encoded
        |> Map.put(:value, intent)
-       |> Map.put(:status, %{status: status, retry_count: retry_count})}
+       |> Map.put(:status, %{status: status, retry_count: retry_count})
+       |> Map.put(:status_taint, TaintEnvelope.missing_fallback())}
     else
       _ -> {:error, :invalid_import}
     end
@@ -1094,7 +1115,7 @@ defmodule Arbor.Memory.IntentStore do
       else: {:error, :commit_outcome_unknown}
   end
 
-  defp validate_reader_request(agent_id, opts) do
+  defp validate_reader_request(agent_id, opts, domain) when domain in [:intent, :percept] do
     with :ok <- validate_identifier(agent_id),
          true <- is_list(opts) and Keyword.keyword?(opts),
          true <- Keyword.keys(opts) |> Enum.uniq() |> length() == length(opts),
@@ -1102,7 +1123,7 @@ defmodule Arbor.Memory.IntentStore do
          limit when is_integer(limit) and limit >= 0 and limit <= @max_inventory_items <-
            Keyword.get(opts, :limit, 10),
          type <- Keyword.get(opts, :type),
-         true <- is_nil(type) or is_atom(type),
+         true <- valid_reader_type?(domain, type),
          since <- Keyword.get(opts, :since),
          true <- is_nil(since) or match?(%DateTime{}, since) do
       :ok
@@ -1114,6 +1135,12 @@ defmodule Arbor.Memory.IntentStore do
   catch
     _, _ -> {:error, :invalid_request}
   end
+
+  defp validate_reader_request(_agent_id, _opts, _domain), do: {:error, :invalid_request}
+
+  defp valid_reader_type?(_domain, nil), do: true
+  defp valid_reader_type?(:intent, type), do: type in @intent_types
+  defp valid_reader_type?(:percept, type), do: type in @percept_types
 
   defp validate_pending_options(opts) do
     with true <- is_list(opts) and Keyword.keyword?(opts),
@@ -1207,10 +1234,17 @@ defmodule Arbor.Memory.IntentStore do
     {:ok, intentions}
   end
 
-  defp compat_read(:export, aggregate, _argument), do: {:ok, export_legacy_pending(aggregate)}
+  defp compat_read(:export, aggregate, _argument), do: export_pending(aggregate)
   defp compat_read(_request, _aggregate, _argument), do: {:error, :invalid_request}
 
-  defp export_legacy_pending(aggregate) do
+  defp export_pending(aggregate) do
+    intent_items =
+      aggregate.items
+      |> Enum.filter(&(&1.domain == :intent))
+      |> Map.new(&{&1.id, &1})
+
+    status_items = Map.new(aggregate.status_items, &{&1.id, &1})
+
     aggregate.data.intents
     |> Enum.reject(fn intent ->
       aggregate.data.statuses
@@ -1218,13 +1252,42 @@ defmodule Arbor.Memory.IntentStore do
       |> Map.get(:status, :pending)
       |> Kernel.==(:completed)
     end)
-    |> Enum.map(fn intent ->
-      status_info = get_intent_status(aggregate.data, intent.id)
-
-      serialize_intent(intent)
-      |> Map.put("status", to_string(Map.get(status_info, :status, :pending)))
-      |> Map.put("retry_count", Map.get(status_info, :retry_count, 0))
+    |> Enum.reduce_while({:ok, []}, fn intent, {:ok, acc} ->
+      with {:ok, intent_item} <- Map.fetch(intent_items, intent.id),
+           {:ok, status_item} <- export_status_item(aggregate, intent_item, status_items),
+           entry <- %{
+             "version" => @export_version,
+             "intent" => intent_item.persisted,
+             "status" => status_item.persisted
+           },
+           :ok <- bounded_json(entry, @max_export_entry_bytes) do
+        {:cont, {:ok, [entry | acc]}}
+      else
+        _ -> {:halt, {:error, :invalid_export}}
+      end
     end)
+    |> case do
+      {:ok, entries} -> {:ok, Enum.reverse(entries)}
+      {:error, _reason} -> {:error, :invalid_export}
+    end
+  rescue
+    _ -> {:error, :invalid_export}
+  catch
+    _, _ -> {:error, :invalid_export}
+  end
+
+  defp export_status_item(aggregate, intent_item, status_items) do
+    case Map.fetch(status_items, intent_item.id) do
+      {:ok, status_item} ->
+        {:ok, status_item}
+
+      :error ->
+        status = get_intent_status(aggregate.data, intent_item.id)
+
+        with {:ok, payload} <- status_payload(intent_item.id, status) do
+          encode_status(intent_item.id, payload, intent_item.taint)
+        end
+    end
   end
 
   defp read_tainted_items(domain, agent_id, opts, buffer_size) do
@@ -1693,19 +1756,23 @@ defmodule Arbor.Memory.IntentStore do
   defp item_payload(:intent, %Intent{} = intent) do
     intent
     |> serialize_intent()
-    |> canonical_payload()
+    |> canonical_item_payload()
   end
 
   defp item_payload(:percept, %Percept{} = percept) do
     percept
     |> serialize_percept()
-    |> canonical_payload()
+    |> canonical_item_payload()
   end
 
   defp item_payload(_domain, _item), do: {:error, :invalid_item}
 
-  defp canonical_payload(payload) do
+  defp canonical_payload(payload), do: canonical_payload(payload, @max_aggregate_bytes)
+  defp canonical_item_payload(payload), do: canonical_payload(payload, @max_item_payload_bytes)
+
+  defp canonical_payload(payload, max_bytes) when is_integer(max_bytes) and max_bytes > 0 do
     with {:ok, json} <- TaintEnvelope.canonical_json(payload),
+         true <- byte_size(json) <= max_bytes,
          {:ok, decoded} <- Jason.decode(json) do
       {:ok, decoded}
     else
@@ -1715,6 +1782,19 @@ defmodule Arbor.Memory.IntentStore do
     _ -> {:error, :invalid_payload}
   catch
     _, _ -> {:error, :invalid_payload}
+  end
+
+  defp bounded_json(value, max_bytes) when is_integer(max_bytes) and max_bytes > 0 do
+    with {:ok, json} <- TaintEnvelope.canonical_json(value),
+         true <- byte_size(json) <= max_bytes do
+      :ok
+    else
+      _ -> {:error, :payload_too_large}
+    end
+  rescue
+    _ -> {:error, :payload_too_large}
+  catch
+    _, _ -> {:error, :payload_too_large}
   end
 
   defp encode_aggregate(agent_id, baseline, data, overrides) do
@@ -1840,7 +1920,7 @@ defmodule Arbor.Memory.IntentStore do
     info
     |> serialize_status_info()
     |> Map.put("intent_id", id)
-    |> canonical_payload()
+    |> canonical_item_payload()
   end
 
   defp resolve_status_taint(
@@ -2013,7 +2093,7 @@ defmodule Arbor.Memory.IntentStore do
       Enum.reduce_while(items, {:ok, []}, fn persisted, {:ok, acc} ->
         with :ok <- exact_keys(persisted, @item_fields),
              payload when is_map(payload) <- persisted["payload"],
-             {:ok, canonical} <- canonical_payload(payload),
+             {:ok, canonical} <- canonical_item_payload(payload),
              true <- canonical == payload,
              {:ok, item} <- deserialize_item(domain, payload),
              {:ok, envelope} <- TaintEnvelope.verify(persisted["provenance"], payload) do
@@ -2052,7 +2132,7 @@ defmodule Arbor.Memory.IntentStore do
       |> Enum.reduce_while({:ok, []}, fn {id, persisted}, {:ok, acc} ->
         with :ok <- exact_keys(persisted, @item_fields),
              payload when is_map(payload) <- persisted["payload"],
-             {:ok, canonical} <- canonical_payload(payload),
+             {:ok, canonical} <- canonical_item_payload(payload),
              true <- canonical == payload,
              {:ok, info} <- decode_status_payload(id, payload),
              {:ok, envelope} <- TaintEnvelope.verify(persisted["provenance"], payload),
@@ -2192,21 +2272,25 @@ defmodule Arbor.Memory.IntentStore do
   defp maybe_put_failure_reason(info, _value), do: info
 
   defp decode_durable_aggregate(persisted, outer_taint, outer_status, buffer_size) do
-    case outer_status do
-      :verified ->
-        case decode_verified_aggregate(persisted, outer_taint, buffer_size) do
-          {:ok, decoded} -> {:ok, decoded, :verified}
-          {:error, _reason} -> recover_corrupt_aggregate(persisted, buffer_size)
-        end
+    with :ok <- bounded_json(persisted, @max_aggregate_bytes) do
+      case outer_status do
+        :verified ->
+          case decode_verified_aggregate(persisted, outer_taint, buffer_size) do
+            {:ok, decoded} -> {:ok, decoded, :verified}
+            {:error, _reason} -> recover_corrupt_aggregate(persisted, buffer_size)
+          end
 
-      :legacy_unlabeled ->
-        decode_unlabeled_aggregate(persisted, buffer_size)
+        :legacy_unlabeled ->
+          decode_unlabeled_aggregate(persisted, buffer_size)
 
-      :invalid_durable_provenance ->
-        recover_corrupt_aggregate(persisted, buffer_size)
+        :invalid_durable_provenance ->
+          recover_corrupt_aggregate(persisted, buffer_size)
 
-      _ ->
-        recover_corrupt_aggregate(persisted, buffer_size)
+        _ ->
+          recover_corrupt_aggregate(persisted, buffer_size)
+      end
+    else
+      _ -> {:error, :invalid_aggregate}
     end
   rescue
     _ -> {:error, :invalid_aggregate}
@@ -2328,10 +2412,10 @@ defmodule Arbor.Memory.IntentStore do
 
   defp structural_payload(_persisted, _mode), do: nil
 
-  defp canonical_structural_payload(payload, :legacy), do: canonical_payload(payload)
+  defp canonical_structural_payload(payload, :legacy), do: canonical_item_payload(payload)
 
   defp canonical_structural_payload(payload, :versioned) do
-    with {:ok, canonical} <- canonical_payload(payload),
+    with {:ok, canonical} <- canonical_item_payload(payload),
          true <- canonical == payload do
       {:ok, canonical}
     else

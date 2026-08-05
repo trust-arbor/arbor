@@ -6,6 +6,8 @@ defmodule Arbor.Memory.IntentStoreProvenanceTest do
   alias Arbor.Contracts.Security.{Taint, TaintEnvelope}
   alias Arbor.Memory.{IntentStore, Provenance}
   alias Arbor.Persistence.BufferedStore
+  alias Arbor.Signals, as: SignalBus
+  alias Arbor.Signals.Signal
 
   @moduletag :fast
   @store_name :arbor_memory_durable
@@ -18,6 +20,11 @@ defmodule Arbor.Memory.IntentStoreProvenanceTest do
 
     def arm(table, test_pid) do
       true = :ets.insert(table, {:fail_next_put, test_pid})
+      :ok
+    end
+
+    def arm_conflict(table, key, replacement, test_pid) do
+      true = :ets.insert(table, {{:conflict_next, key}, {replacement, test_pid}})
       :ok
     end
 
@@ -73,30 +80,7 @@ defmodule Arbor.Memory.IntentStoreProvenanceTest do
     def compare_and_swap(key, expected, replacement, opts) do
       table = Keyword.fetch!(opts, :table)
 
-      result =
-        case {:ets.lookup(table, key), expected} do
-          {[], :not_found} ->
-            stored = Revision.advance_cas_insert(replacement)
-            true = :ets.insert(table, {key, stored})
-            {:ok, stored}
-
-          {[{^key, current}], {:value, expected_value}} ->
-            if Revision.cas_matches?(current, expected_value) do
-              case Revision.advance_cas_update(current, replacement) do
-                {:ok, stored} ->
-                  true = :ets.insert(table, {key, stored})
-                  {:ok, stored}
-
-                {:error, _reason} = error ->
-                  error
-              end
-            else
-              {:error, :conflict}
-            end
-
-          _ ->
-            {:error, :conflict}
-        end
+      result = inject_conflict(table, key) || perform_cas(table, key, expected, replacement)
 
       case result do
         {:ok, _stored} -> maybe_fail_projection(table, key)
@@ -134,6 +118,72 @@ defmodule Arbor.Memory.IntentStoreProvenanceTest do
           :ok
       end
     end
+
+    defp inject_conflict(table, key) do
+      case :ets.take(table, {:conflict_next, key}) do
+        [{{:conflict_next, ^key}, {replacement, test_pid}}] ->
+          [{^key, current}] = :ets.lookup(table, key)
+          {:ok, stored} = Revision.advance_cas_update(current, replacement)
+          true = :ets.insert(table, {key, stored})
+          send(test_pid, {:backend_conflict_installed, key})
+          {:error, :conflict}
+
+        [] ->
+          nil
+      end
+    end
+
+    defp perform_cas(table, key, expected, replacement) do
+      case {:ets.lookup(table, key), expected} do
+        {[], :not_found} ->
+          stored = Revision.advance_cas_insert(replacement)
+          true = :ets.insert(table, {key, stored})
+          {:ok, stored}
+
+        {[{^key, current}], {:value, expected_value}} ->
+          if Revision.cas_matches?(current, expected_value) do
+            case Revision.advance_cas_update(current, replacement) do
+              {:ok, stored} ->
+                true = :ets.insert(table, {key, stored})
+                {:ok, stored}
+
+              {:error, _reason} = error ->
+                error
+            end
+          else
+            {:error, :conflict}
+          end
+
+        _ ->
+          {:error, :conflict}
+      end
+    end
+  end
+
+  defmodule FailingAuthorityBackend do
+    @moduledoc false
+    @behaviour Arbor.Contracts.Persistence.Store
+
+    @impl true
+    def durability_class(_opts), do: :node_restart
+
+    @impl true
+    def put(_key, _value, _opts), do: {:error, :offline}
+
+    @impl true
+    def get(_key, _opts), do: {:error, :offline}
+
+    @impl true
+    def delete(_key, _opts), do: {:error, :offline}
+
+    @impl true
+    def list(_opts), do: {:error, :offline}
+
+    @impl true
+    def compare_and_swap(_key, _expected, _replacement, _opts), do: {:error, :offline}
+
+    @impl true
+    def compare_and_delete(_key, _expected, _opts), do: {:error, :offline}
   end
 
   setup do
@@ -917,16 +967,7 @@ defmodule Arbor.Memory.IntentStoreProvenanceTest do
     assert Process.alive?(pid)
     assert :ok = IntentStore.reload_for_agent(agent_id)
 
-    caller_result =
-      case first_result do
-        {:ok, _retry_count} = success ->
-          success
-
-        {:error, _reason} ->
-          IntentStore.fail_intent_tainted(agent_id, intent.id, "commit once", supplied)
-      end
-
-    assert caller_result == {:ok, 1}
+    assert first_result == {:ok, 1}
 
     persisted_status = durable_record(agent_id).data["statuses"][intent.id]["payload"]
     assert persisted_status["retry_count"] == 1
@@ -1467,6 +1508,300 @@ defmodule Arbor.Memory.IntentStoreProvenanceTest do
     assert rewritten_opts[:taint] == expected
     assert {:ok, rewritten} = TaintEnvelope.verify(rewritten_envelope, content)
     assert rewritten.taint == expected
+  end
+
+  test "security regression: CAS conflict reapplies an intent write to the fresh hostile baseline",
+       %{agent_id: agent_id} do
+    stop_supervised!(BufferedStore)
+    backend_table = :ets.new(:intent_cas_conflict_backend, [:set, :public])
+
+    start_supervised!(
+      {BufferedStore,
+       name: @store_name,
+       backend: ProjectionFailureBackend,
+       backend_opts: [table: backend_table],
+       write_mode: :sync,
+       ack_mode: :backend}
+    )
+
+    intent = Intent.think("conflict must preserve hostile authority")
+    weak = taint(:trusted, :public, 0xFF, :verified, "weak_before_conflict")
+    hostile = taint(:hostile, :restricted, 0, :unverified, "concurrent_hostile")
+    incoming = taint(:derived, :internal, 0b0111, :corroborated, "retrying_writer")
+
+    assert {:ok, ^intent} = IntentStore.record_intent_tainted(agent_id, intent, weak)
+    current = durable_record(agent_id)
+    assert {:ok, competing_taint} = Taint.join(weak, hostile)
+    assert {:ok, expected} = Taint.join(competing_taint, incoming)
+
+    [persisted_intent] = current.data["intents"]
+    competing_intent = nested_entry_with_taint(persisted_intent["payload"], competing_taint)
+    competing_data = Map.put(current.data, "intents", [competing_intent])
+
+    replacement = %{
+      current
+      | data: competing_data,
+        metadata: outer_metadata(competing_data, competing_taint)
+    }
+
+    assert :ok =
+             ProjectionFailureBackend.arm_conflict(
+               backend_table,
+               "intents:#{agent_id}",
+               replacement,
+               self()
+             )
+
+    assert {:ok, ^intent} = IntentStore.record_intent_tainted(agent_id, intent, incoming)
+    assert_receive {:backend_conflict_installed, "intents:" <> ^agent_id}
+
+    [stored] = durable_record(agent_id).data["intents"]
+    assert verified_nested_taint(stored) == expected
+  end
+
+  test "security regression: configured backend failure never falls back to forged ETS", %{
+    agent_id: agent_id
+  } do
+    stop_supervised!(BufferedStore)
+
+    start_supervised!(
+      {BufferedStore,
+       name: @store_name, backend: FailingAuthorityBackend, write_mode: :sync, ack_mode: :backend}
+    )
+
+    forged = Intent.think("forged cache-only intent")
+    forged_data = %{intents: [forged], percepts: [], statuses: %{}}
+    true = :ets.insert(:arbor_memory_intents, {agent_id, forged_data})
+
+    physical_key = "intents:#{agent_id}"
+    forged_record = Record.new(physical_key, %{"forged" => true}, id: "memory:#{physical_key}")
+    true = :ets.insert(@store_name, {physical_key, forged_record})
+
+    on_exit(fn -> :ets.delete(:arbor_memory_intents, agent_id) end)
+
+    assert IntentStore.recent_intents(agent_id) == []
+    assert {:error, :store_unavailable} = IntentStore.recent_intents_tainted(agent_id)
+
+    rejected = Intent.think("must not use cache fallback")
+    supplied = taint(:trusted, :public, 0xFF, :verified, "configured_outage")
+
+    assert {:error, :store_unavailable} =
+             IntentStore.record_intent_tainted(agent_id, rejected, supplied)
+
+    assert Process.alive?(Process.whereis(IntentStore))
+  end
+
+  test "security regression: owner death after durable commit returns outcome unknown", %{
+    agent_id: agent_id
+  } do
+    test_pid = self()
+    original_state = :sys.get_state(IntentStore)
+
+    :sys.replace_state(IntentStore, fn state ->
+      %{
+        state
+        | embedding_fun: fn _namespace, _key, _content, _opts ->
+            send(test_pid, :intent_committed_before_reply)
+
+            receive do
+              :never_released -> :ok
+            end
+          end
+      }
+    end)
+
+    on_exit(fn -> restore_intent_store_state(original_state) end)
+
+    intent = Intent.think("owner dies after acknowledged CAS")
+    supplied = taint(:hostile, :restricted, 0, :unverified, "owner_death")
+    owner = Process.whereis(IntentStore)
+
+    task = Task.async(fn -> IntentStore.record_intent_tainted(agent_id, intent, supplied) end)
+    assert_receive :intent_committed_before_reply
+
+    Process.exit(owner, :kill)
+    assert {:error, :commit_outcome_unknown} = Task.await(task, 2_000)
+
+    assert wait_until(fn ->
+             replacement = Process.whereis(IntentStore)
+             is_pid(replacement) and replacement != owner
+           end)
+
+    [persisted] = durable_record(agent_id).data["intents"]
+    assert persisted["payload"]["id"] == intent.id
+    assert verified_nested_taint(persisted) == supplied
+  end
+
+  test "security regression: durable clear succeeds when projection cleanup is unavailable", %{
+    agent_id: agent_id
+  } do
+    intent = Intent.think("clear remains committed")
+    supplied = taint(:hostile, :restricted, 0, :unverified, "clear_cleanup")
+    assert {:ok, ^intent} = IntentStore.record_intent_tainted(agent_id, intent, supplied)
+
+    assert :ok = Supervisor.terminate_child(Arbor.Memory.Supervisor, Provenance)
+
+    on_exit(fn ->
+      if Process.whereis(Provenance) == nil do
+        Supervisor.restart_child(Arbor.Memory.Supervisor, Provenance)
+      end
+    end)
+
+    assert :ok = IntentStore.clear(agent_id)
+
+    assert {:error, :not_found} =
+             Arbor.Memory.MemoryStore.load_tainted_authoritative_with_status("intents", agent_id)
+
+    assert :ets.lookup(:arbor_memory_intents, agent_id) == []
+
+    assert {:ok, pid} = Supervisor.restart_child(Arbor.Memory.Supervisor, Provenance)
+    assert Process.alive?(pid)
+    assert IntentStore.recent_intents(agent_id) == []
+  end
+
+  test "security regression: intent and percept signals contain routing and metrics only", %{
+    agent_id: agent_id
+  } do
+    test_pid = self()
+
+    {:ok, intent_sub} =
+      SignalBus.subscribe(
+        "agent.intent_formed",
+        fn signal ->
+          send(test_pid, {:intent_signal, signal})
+          :ok
+        end,
+        async: false
+      )
+
+    {:ok, percept_sub} =
+      SignalBus.subscribe(
+        "agent.percept_received",
+        fn signal ->
+          send(test_pid, {:percept_signal, signal})
+          :ok
+        end,
+        async: false
+      )
+
+    on_exit(fn ->
+      SignalBus.unsubscribe(intent_sub)
+      SignalBus.unsubscribe(percept_sub)
+    end)
+
+    intent =
+      Intent.action(:shell_execute, %{"command" => "signal-secret-command"})
+      |> Map.put(:reasoning, "signal-secret-reasoning")
+
+    percept =
+      Percept.success(intent.id, %{"result" => "signal-secret-result"})
+      |> Map.put(:error, "signal-secret-error")
+      |> Map.put(:summary, "signal-secret-summary")
+
+    supplied = taint(:hostile, :restricted, 0, :unverified, "signal_redaction")
+    assert {:ok, ^intent} = IntentStore.record_intent_tainted(agent_id, intent, supplied)
+    assert {:ok, ^percept} = IntentStore.record_percept_tainted(agent_id, percept, supplied)
+
+    assert_receive {:intent_signal, %Signal{data: intent_data}}
+    assert_receive {:percept_signal, %Signal{data: percept_data}}
+
+    assert MapSet.new(Map.keys(intent_data)) ==
+             MapSet.new([:agent_id, :intent_id, :intent_type, :goal_id, :urgency, :formed_at])
+
+    assert MapSet.new(Map.keys(percept_data)) ==
+             MapSet.new([
+               :agent_id,
+               :percept_id,
+               :percept_type,
+               :intent_id,
+               :outcome,
+               :duration_ms,
+               :received_at
+             ])
+
+    emitted = inspect({intent_data, percept_data})
+    refute emitted =~ "signal-secret"
+    refute Map.has_key?(intent_data, :action)
+  end
+
+  test "security regression: versioned hostile export/import preserves exact payload-bound labels",
+       %{agent_id: agent_id} do
+    intent = Intent.think("hostile portable intent")
+    intent_taint = taint(:hostile, :restricted, 0, :unverified, "portable_intent")
+    reason_taint = taint(:untrusted, :confidential, 0b0011, :plausible, "portable_reason")
+
+    assert {:ok, ^intent} = IntentStore.record_intent_tainted(agent_id, intent, intent_taint)
+
+    assert {:ok, 1} =
+             IntentStore.fail_intent_tainted(
+               agent_id,
+               intent.id,
+               "portable hostile failure",
+               reason_taint
+             )
+
+    assert [entry] = IntentStore.export_pending_intents(agent_id)
+    assert Map.keys(entry) |> Enum.sort() == ["intent", "status", "version"]
+    assert entry["version"] == 1
+
+    assert {:ok, intent_envelope} =
+             TaintEnvelope.verify(entry["intent"]["provenance"], entry["intent"]["payload"])
+
+    assert {:ok, status_envelope} =
+             TaintEnvelope.verify(entry["status"]["provenance"], entry["status"]["payload"])
+
+    assert intent_envelope.taint == intent_taint
+    assert {:ok, expected_status_taint} = Taint.join(intent_taint, reason_taint)
+    assert status_envelope.taint == expected_status_taint
+
+    target = "#{agent_id}_portable_target"
+    tampered_target = "#{agent_id}_tampered_target"
+
+    on_exit(fn ->
+      IntentStore.clear(target)
+      IntentStore.clear(tampered_target)
+    end)
+
+    assert :ok = IntentStore.import_intents(target, [entry])
+    assert {:ok, [{imported, :verified}]} = IntentStore.recent_intents_tainted(target)
+    assert imported.value == intent
+    assert imported.taint == intent_taint
+
+    target_record = durable_record(target)
+    assert hd(target_record.data["intents"]) == entry["intent"]
+    assert target_record.data["statuses"][intent.id] == entry["status"]
+
+    tampered = put_in(entry, ["intent", "payload", "reasoning"], "tampered export")
+    assert {:error, :invalid_request} = IntentStore.import_intents(tampered_target, [tampered])
+    assert {:error, :not_found} = IntentStore.get_intent(tampered_target, intent.id)
+  end
+
+  test "security regression: public inventories and portable payloads fail closed at bounds", %{
+    agent_id: agent_id
+  } do
+    assert {:error, :invalid_request} =
+             IntentStore.recent_intents_tainted(agent_id, limit: Taint.max_join_inputs() + 1)
+
+    assert {:error, :invalid_request} =
+             IntentStore.recent_intents_tainted(agent_id, type: :unknown_intent_type)
+
+    assert {:error, :invalid_request} =
+             IntentStore.recent_percepts_tainted(agent_id, limit: 1, limit: 2)
+
+    oversized = Intent.think(String.duplicate("x", 256_001))
+    supplied = taint(:hostile, :restricted, 0, :unverified, "oversized_item")
+
+    assert {:error, :invalid_provenance} =
+             IntentStore.record_intent_tainted(agent_id, oversized, supplied)
+
+    oversized_entry = %{
+      "version" => 1,
+      "intent" => %{"padding" => String.duplicate("x", 1_048_576)},
+      "status" => %{}
+    }
+
+    assert {:error, :invalid_request} = IntentStore.import_intents(agent_id, [oversized_entry])
+    assert {:error, :not_found} = IntentStore.get_intent(agent_id, oversized.id)
   end
 
   defp durable_record(agent_id) do
