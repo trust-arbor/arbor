@@ -8,6 +8,8 @@ defmodule Arbor.Persistence.EventLogPublicBoundarySecurityRegressionTest do
   alias Arbor.Persistence.EventLog.Ecto, as: EctoEventLog
   alias Arbor.Persistence.EventLog.ETS
 
+  @legacy_timeout_hook_key {BoundedWorker, :timeout_hook}
+
   defmodule DeadlineExtendingBackend do
     @moduledoc false
 
@@ -227,29 +229,54 @@ defmodule Arbor.Persistence.EventLogPublicBoundarySecurityRegressionTest do
     refute_receive {:DOWN, ^monitor_ref, :process, ^worker, _reason}
   end
 
-  test "security regression: timeout cleanup exposes no caller hook before kill" do
-    refute function_exported?(BoundedWorker, :with_timeout_hook, 2)
-  end
-
-  test "public facade kills an Ecto worker before returning from timeout" do
+  test "security regression: public timeout ignores caller hook and leaves no worker messages" do
     token = CompletionCrossingRepo.install(self())
     on_exit(&CompletionCrossingRepo.clear/0)
 
-    event = Event.new("completion-crossing-repo", "arbor.review.ordinary", %{value: 1})
+    parent = self()
+    event = Event.new("caller-hook-timeout", "arbor.review.ordinary", %{value: 1})
 
-    assert {:error, {:append_indeterminate, _operation}} =
-             Persistence.append(
-               :public_ecto_timeout,
-               EctoEventLog,
-               "completion-crossing-repo",
-               event,
-               repo: CompletionCrossingRepo,
-               append_timeout_ms: 250
-             )
+    task =
+      Task.async(fn ->
+        Process.put(@legacy_timeout_hook_key, fn worker, monitor_ref, result_ref ->
+          send(parent, {:legacy_timeout_hook_invoked, worker, monitor_ref, result_ref})
+          Process.sleep(2_000)
+        end)
+
+        result =
+          Persistence.append(
+            :public_ecto_timeout_hook,
+            EctoEventLog,
+            "caller-hook-timeout",
+            event,
+            repo: CompletionCrossingRepo,
+            append_timeout_ms: 100
+          )
+
+        Process.sleep(10)
+        {:messages, messages} = Process.info(self(), :messages)
+        {result, messages}
+      end)
 
     assert_receive {:completion_crossing_repo_waiting, ^token, worker}, 1_000
-    assert Process.alive?(self())
+
+    on_exit(fn ->
+      if Process.alive?(task.pid) do
+        Process.exit(task.pid, :kill)
+      end
+
+      if Process.alive?(worker) do
+        Process.exit(worker, :kill)
+      end
+    end)
+
+    assert {:ok, {{:error, {:append_indeterminate, _operation}}, []}} = Task.yield(task, 750)
+
     refute Process.alive?(worker)
+    refute_receive {:legacy_timeout_hook_invoked, ^worker, _monitor_ref, _result_ref}
+
+    assert Code.ensure_loaded?(BoundedWorker)
+    refute function_exported?(BoundedWorker, :with_timeout_hook, 2)
   end
 
   test "security regression: public strings are valid UTF-8 and fit every backend schema", %{
