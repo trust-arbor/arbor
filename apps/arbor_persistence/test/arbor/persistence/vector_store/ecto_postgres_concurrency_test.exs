@@ -177,13 +177,18 @@ defmodule Arbor.Persistence.VectorStore.EctoPostgresConcurrencyTest do
     tasks =
       Enum.map(inputs, fn input ->
         Task.async(fn ->
-          send(parent, {:ready, self()})
+          Repo.checkout(fn ->
+            # Signal readiness only after each claimant owns an independent
+            # database connection. Releasing both owners together makes the
+            # transaction overlap deterministic rather than scheduler-lucky.
+            send(parent, {:ready, self()})
 
-          receive do
-            :go -> callback.(input)
-          after
-            5_000 -> flunk("concurrency barrier timed out")
-          end
+            receive do
+              :go -> callback.(input)
+            after
+              5_000 -> flunk("concurrency barrier timed out")
+            end
+          end)
         end)
       end)
 
