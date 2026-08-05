@@ -21,6 +21,18 @@ defmodule Arbor.Persistence.VectorStore.EctoPostgresConcurrencyTest do
     @moduletag skip: "independent-session vector CAS coverage requires PostgreSQL"
   end
 
+  setup_all do
+    {repo_pid, repo_owned?} = start_repo!()
+
+    on_exit(fn ->
+      if repo_owned? and Process.alive?(repo_pid) do
+        Supervisor.stop(repo_pid, :normal, 5_000)
+      end
+    end)
+
+    :ok
+  end
+
   setup do
     original_backend =
       Application.get_env(:arbor_persistence, :vector_store_backend, :not_configured)
@@ -40,7 +52,7 @@ defmodule Arbor.Persistence.VectorStore.EctoPostgresConcurrencyTest do
     on_exit(fn ->
       restore_env(:vector_store_backend, original_backend)
       restore_env(:vector_store_repo, original_repo)
-      Sandbox.mode(Repo, :manual)
+      restore_sandbox_mode()
     end)
 
     {:ok, agent_id: unique("agent")}
@@ -244,6 +256,29 @@ defmodule Arbor.Persistence.VectorStore.EctoPostgresConcurrencyTest do
   end
 
   defp unique(prefix), do: "#{prefix}_#{System.unique_integer([:positive, :monotonic])}"
+
+  defp start_repo! do
+    case Repo.start_link() do
+      {:ok, pid} ->
+        Process.unlink(pid)
+        {pid, true}
+
+      {:error, {:already_started, pid}} ->
+        _ = Process.unlink(pid)
+        {pid, false}
+
+      {:error, reason} ->
+        raise "PostgreSQL vector concurrency prerequisite unavailable: #{inspect(reason)}"
+    end
+  end
+
+  defp restore_sandbox_mode do
+    if Process.whereis(Repo) do
+      Sandbox.mode(Repo, :manual)
+    end
+  catch
+    :exit, _reason -> :ok
+  end
 
   defp restore_env(key, :not_configured), do: Application.delete_env(:arbor_persistence, key)
   defp restore_env(key, value), do: Application.put_env(:arbor_persistence, key, value)
