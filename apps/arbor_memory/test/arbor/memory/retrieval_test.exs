@@ -3,12 +3,18 @@ defmodule Arbor.Memory.RetrievalTest do
 
   alias Arbor.Memory
   alias Arbor.Memory.Retrieval
+  alias Arbor.Persistence.BufferedStore
 
   @moduletag :fast
 
   @agent_id "retrieval_test_agent"
 
   setup do
+    start_supervised!({
+      BufferedStore,
+      name: :arbor_memory_durable, backend: nil, write_mode: :sync
+    })
+
     # Initialize memory for the test agent
     {:ok, _pid} = Memory.init_for_agent(@agent_id)
 

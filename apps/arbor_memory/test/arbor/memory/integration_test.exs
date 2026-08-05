@@ -2,11 +2,22 @@ defmodule Arbor.Memory.IntegrationTest do
   use ExUnit.Case
 
   alias Arbor.Memory
+  alias Arbor.Memory.{IndexSupervisor, KnowledgeGraphStore}
+  alias Arbor.Persistence.BufferedStore
 
   @moduletag :integration
 
+  setup do
+    start_supervised!({
+      BufferedStore,
+      name: :arbor_memory_durable, backend: nil, write_mode: :sync
+    })
+
+    :ok
+  end
+
   describe "facade lifecycle" do
-    test "init_for_agent starts index and graph, cleanup removes them" do
+    test "init starts runtime index and cleanup preserves durable graph" do
       agent_id = "integration_#{System.unique_integer([:positive])}"
 
       {:ok, pid} = Memory.init_for_agent(agent_id)
@@ -14,7 +25,8 @@ defmodule Arbor.Memory.IntegrationTest do
       assert Memory.initialized?(agent_id)
 
       :ok = Memory.cleanup_for_agent(agent_id)
-      refute Memory.initialized?(agent_id)
+      refute IndexSupervisor.has_index?(agent_id)
+      assert {:ok, _graph} = KnowledgeGraphStore.get_graph(agent_id)
     end
 
     test "index and graph work together through facade" do

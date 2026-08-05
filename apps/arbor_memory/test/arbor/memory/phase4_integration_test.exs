@@ -9,10 +9,16 @@ defmodule Arbor.Memory.Phase4IntegrationTest do
 
   alias Arbor.Memory
   alias Arbor.Memory.{BackgroundChecks, KnowledgeGraph, Proposal}
+  alias Arbor.Persistence.BufferedStore
 
   @moduletag :integration
 
   setup do
+    start_supervised!({
+      BufferedStore,
+      name: :arbor_memory_durable, backend: nil, write_mode: :sync
+    })
+
     # Ensure ETS tables exist
     ensure_ets_tables()
 
@@ -128,13 +134,14 @@ defmodule Arbor.Memory.Phase4IntegrationTest do
     end
 
     test "consolidation check triggers when graph is large", %{agent_id: agent_id} do
-      # Add many nodes
-      for i <- 1..105 do
-        Memory.add_knowledge(agent_id, %{type: :fact, content: "Fact #{i}"})
+      # Stay within the strict 64-item authority bound while crossing the trigger.
+      for i <- 1..45 do
+        assert {:ok, _node_id} =
+                 Memory.add_knowledge(agent_id, %{type: :fact, content: "Fact #{i}"})
       end
 
       # Run background checks
-      result = BackgroundChecks.check_consolidation(agent_id, size_threshold: 100)
+      result = BackgroundChecks.check_consolidation(agent_id, size_threshold: 40)
 
       assert length(result.actions) == 1
       action = hd(result.actions)
@@ -144,7 +151,7 @@ defmodule Arbor.Memory.Phase4IntegrationTest do
       {:ok, _graph, metrics} = Memory.run_consolidation(agent_id)
 
       assert metrics.decayed_count > 0
-      assert metrics.total_nodes <= 105
+      assert metrics.total_nodes <= 45
     end
 
     test "decay risk warning when many nodes at low relevance", %{agent_id: agent_id} do

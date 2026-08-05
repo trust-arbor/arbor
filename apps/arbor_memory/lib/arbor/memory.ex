@@ -100,46 +100,27 @@ defmodule Arbor.Memory do
       {:ok, pid} = Arbor.Memory.init_for_agent("agent_001")
       {:ok, pid} = Arbor.Memory.init_for_agent("agent_001", reload_persisted: true)
   """
-  @spec init_for_agent(String.t(), keyword()) :: {:ok, pid()} | {:error, term()}
+  @spec init_for_agent(String.t(), keyword()) :: {:ok, pid() | nil} | {:error, term()}
   def init_for_agent(agent_id, opts \\ []) do
     opts = merge_config_defaults(opts)
 
     index_enabled = Keyword.get(opts, :index_enabled, true)
     graph_enabled = Keyword.get(opts, :graph_enabled, true)
 
-    index_result =
-      if index_enabled do
-        IndexSupervisor.start_index(agent_id, opts)
-      else
-        {:ok, nil}
-      end
+    # Admit durable authority before starting a process owned by this attempt.
+    # An unavailable or malformed graph can therefore fail without leaking an index.
+    with :ok <- initialize_knowledge_graph(agent_id, opts, graph_enabled),
+         {:ok, _pid} = index_result <- initialize_index(agent_id, opts, index_enabled) do
+      reload_persisted_memory(agent_id, opts)
 
-    if graph_enabled do
-      case GraphOps.load_persisted_graph(agent_id) do
-        {:ok, graph} ->
-          # Restore from Postgres into ETS for runtime access
-          GraphOps.save_graph(agent_id, graph)
+      Signals.emit_memory_initialized(agent_id, %{
+        index_enabled: index_enabled,
+        graph_enabled: graph_enabled
+      })
 
-        {:error, _} ->
-          graph = KnowledgeGraph.new(agent_id, opts)
-          GraphOps.save_graph(agent_id, graph)
-      end
+      Logger.debug("Initialized memory for agent #{agent_id}")
+      index_result
     end
-
-    # Optionally reload persisted goals/intents from Postgres into ETS.
-    # Used on agent restart — fresh creates don't need this.
-    if Keyword.get(opts, :reload_persisted, false) do
-      GoalStore.reload_for_agent(agent_id)
-      IntentStore.reload_for_agent(agent_id)
-    end
-
-    Signals.emit_memory_initialized(agent_id, %{
-      index_enabled: index_enabled,
-      graph_enabled: graph_enabled
-    })
-
-    Logger.debug("Initialized memory for agent #{agent_id}")
-    index_result
   end
 
   @doc """
@@ -598,5 +579,36 @@ defmodule Arbor.Memory do
     ]
 
     Keyword.merge(defaults, opts)
+  end
+
+  defp initialize_knowledge_graph(_agent_id, _opts, false), do: :ok
+
+  defp initialize_knowledge_graph(agent_id, opts, true) do
+    case GraphOps.load_persisted_graph(agent_id) do
+      {:ok, %KnowledgeGraph{}} ->
+        :ok
+
+      {:ok, _invalid_graph} ->
+        {:error, :invalid_graph}
+
+      {:error, :not_found} ->
+        graph = KnowledgeGraph.new(agent_id, opts)
+        GraphOps.save_graph(agent_id, graph)
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp initialize_index(_agent_id, _opts, false), do: {:ok, nil}
+  defp initialize_index(agent_id, opts, true), do: IndexSupervisor.start_index(agent_id, opts)
+
+  defp reload_persisted_memory(agent_id, opts) do
+    if Keyword.get(opts, :reload_persisted, false) do
+      GoalStore.reload_for_agent(agent_id)
+      IntentStore.reload_for_agent(agent_id)
+    end
+
+    :ok
   end
 end

@@ -11,6 +11,8 @@ defmodule Arbor.Memory.AuthorizationE2ETest do
 
   use ExUnit.Case, async: false
 
+  alias Arbor.Persistence.BufferedStore
+
   @moduletag :fast
 
   @agent_id "e2e_auth_agent"
@@ -52,6 +54,11 @@ defmodule Arbor.Memory.AuthorizationE2ETest do
   end
 
   setup do
+    start_supervised!({
+      BufferedStore,
+      name: :arbor_memory_durable, backend: nil, write_mode: :sync
+    })
+
     # Start the security infrastructure required for authorization.
     # These are normally started by Arbor.Security.Application but
     # start_children: false in test config disables that.
@@ -698,7 +705,8 @@ defmodule Arbor.Memory.AuthorizationE2ETest do
 
       # Cleanup
       assert :ok = Arbor.Memory.authorize_cleanup(caller, agent_id)
-      refute Arbor.Memory.initialized?(agent_id)
+      refute Arbor.Memory.IndexSupervisor.has_index?(agent_id)
+      assert {:ok, _graph} = Arbor.Memory.KnowledgeGraphStore.get_graph(agent_id)
     end
   end
 
