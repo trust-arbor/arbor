@@ -57,6 +57,13 @@ defmodule Arbor.Memory.IndexTest do
               {:ok, requested_id(metadata)}
           end
 
+        {:block_then_error, owner} ->
+          send(owner, {:writer_waiting_to_fail, agent_id, self()})
+
+          receive do
+            :release_with_error -> {:error, :injected_transient_failure}
+          end
+
         :success ->
           {:ok, requested_id(metadata)}
 
@@ -106,6 +113,49 @@ defmodule Arbor.Memory.IndexTest do
     end
 
     defp requested_id(metadata), do: Map.get(metadata, :id) || Map.get(metadata, "id")
+  end
+
+  defmodule ControlledProvider do
+    def configure(content, mode) do
+      counter = :counters.new(1, [:atomics])
+      :persistent_term.put({__MODULE__, content}, {mode, counter})
+    end
+
+    def set_mode(content, mode) do
+      {_old_mode, counter} = :persistent_term.get({__MODULE__, content})
+      :persistent_term.put({__MODULE__, content}, {mode, counter})
+    end
+
+    def call_count(content) do
+      {_mode, counter} = :persistent_term.get({__MODULE__, content})
+      :counters.get(counter, 1)
+    end
+
+    def disarm(content), do: :persistent_term.erase({__MODULE__, content})
+
+    def embed(content) do
+      {mode, counter} = :persistent_term.get({__MODULE__, content})
+      :counters.add(counter, 1, 1)
+
+      case mode do
+        :success ->
+          {:ok, %{embedding: List.duplicate(0.5, 768)}}
+
+        {:block, owner} ->
+          send(owner, {:provider_started, content, self()})
+
+          receive do
+            :release_provider -> {:ok, %{embedding: List.duplicate(0.5, 768)}}
+          end
+
+        {:block_forever, owner} ->
+          send(owner, {:provider_stalled, content, self()})
+
+          receive do
+            :never_sent -> {:ok, %{embedding: List.duplicate(0.5, 768)}}
+          end
+      end
+    end
   end
 
   setup do
@@ -526,9 +576,248 @@ defmodule Arbor.Memory.IndexTest do
       assert :sys.get_state(pid).pending_sync == MapSet.new()
       assert Process.alive?(pid)
     end
+
+    test "resource regression: oversized calls reject before provider or writer dispatch" do
+      agent_id = "bounded_input_#{System.unique_integer([:positive])}"
+      oversized_content = String.duplicate("c", 65_537)
+      aggregate_content = String.duplicate("b", 60_000)
+      count_content = "count bounded"
+
+      Enum.each([oversized_content, aggregate_content, count_content], fn content ->
+        ControlledProvider.configure(content, :success)
+      end)
+
+      ControlledWriter.configure(agent_id, :success)
+
+      {:ok, pid} =
+        Index.start_link(
+          agent_id: agent_id,
+          backend: :dual,
+          embedding_provider: ControlledProvider,
+          persistent_writer: ControlledWriter,
+          name: nil
+        )
+
+      on_exit(fn ->
+        Enum.each([oversized_content, aggregate_content, count_content], fn content ->
+          ControlledProvider.disarm(content)
+        end)
+
+        ControlledWriter.disarm(agent_id)
+        if Process.alive?(pid), do: GenServer.stop(pid)
+      end)
+
+      assert {:error, {:invalid_legacy_embedding, :invalid_content}} =
+               Index.index(pid, oversized_content)
+
+      assert {:error, :invalid_batch} =
+               Index.batch_index(pid, List.duplicate({count_content, %{}}, 101))
+
+      aggregate_batch = List.duplicate({aggregate_content, %{}}, 70)
+      assert {:error, :invalid_batch} = Index.batch_index(pid, aggregate_batch)
+
+      assert ControlledProvider.call_count(oversized_content) == 0
+      assert ControlledProvider.call_count(aggregate_content) == 0
+      assert ControlledProvider.call_count(count_content) == 0
+      assert ControlledWriter.call_count(agent_id) == 0
+      assert Index.stats(pid).entry_count == 0
+    end
+
+    test "resource regression: bounded mutation admission rejects queue saturation" do
+      blocked_content = "queue blocked provider"
+      ControlledProvider.configure(blocked_content, {:block, self()})
+
+      ids = ["mem_queue_first", "mem_queue_second"]
+
+      {:ok, pid} =
+        Index.start_link(
+          agent_id: "queue_bound_#{System.unique_integer([:positive])}",
+          embedding_provider: ControlledProvider,
+          entry_id_generator: sequence_callback(ids),
+          max_pending_mutations: 1,
+          operation_timeout_ms: 5_000,
+          name: nil
+        )
+
+      on_exit(fn ->
+        ControlledProvider.disarm(blocked_content)
+        if Process.alive?(pid), do: GenServer.stop(pid)
+      end)
+
+      parent = self()
+
+      spawn(fn -> send(parent, {:queue_first, Index.index(pid, blocked_content)}) end)
+      assert_receive {:provider_started, ^blocked_content, provider_pid}, 1_000
+
+      spawn(fn ->
+        send(
+          parent,
+          {:queue_second,
+           Index.index(pid, "queued second", %{}, embedding: List.duplicate(0.5, 128))}
+        )
+      end)
+
+      await_mutation_queue_length(pid, 1)
+
+      assert {:error, :mutation_queue_full} =
+               Index.index(pid, "rejected third", %{}, embedding: List.duplicate(0.5, 128))
+
+      send(provider_pid, :release_provider)
+      assert_receive {:queue_first, {:ok, "mem_queue_first"}}, 1_000
+      assert_receive {:queue_second, {:ok, "mem_queue_second"}}, 1_000
+      assert Index.stats(pid).entry_count == 2
+    end
+
+    test "resource regression: stalled preflight completes at its finite deadline" do
+      content = "stalled preflight"
+      ControlledProvider.configure(content, {:block_forever, self()})
+
+      {:ok, pid} =
+        Index.start_link(
+          agent_id: "preflight_deadline_#{System.unique_integer([:positive])}",
+          embedding_provider: ControlledProvider,
+          operation_timeout_ms: 100,
+          name: nil
+        )
+
+      on_exit(fn ->
+        ControlledProvider.disarm(content)
+        if Process.alive?(pid), do: GenServer.stop(pid)
+      end)
+
+      parent = self()
+      spawn(fn -> send(parent, {:stalled_preflight_result, Index.index(pid, content)}) end)
+
+      assert_receive {:provider_stalled, ^content, provider_pid}, 1_000
+      provider_monitor = Process.monitor(provider_pid)
+
+      assert_receive {:stalled_preflight_result, {:error, :operation_timeout}}, 1_000
+      assert_receive {:DOWN, ^provider_monitor, :process, ^provider_pid, _reason}, 1_000
+      assert Process.alive?(pid)
+      assert Index.stats(pid).entry_count == 0
+    end
+
+    test "resource regression: durable deadline preserves retryable lost-ack state" do
+      agent_id = "durable_deadline_#{System.unique_integer([:positive])}"
+      entry_id = "mem_durable_deadline"
+      ControlledWriter.configure(agent_id, {:block_for_kill, self()})
+
+      {:ok, pid} =
+        Index.start_link(
+          agent_id: agent_id,
+          backend: :dual,
+          persistent_writer: ControlledWriter,
+          entry_id_generator: fn -> entry_id end,
+          operation_timeout_ms: 100,
+          name: nil
+        )
+
+      on_exit(fn ->
+        ControlledWriter.disarm(agent_id)
+        if Process.alive?(pid), do: GenServer.stop(pid)
+      end)
+
+      parent = self()
+
+      spawn(fn ->
+        send(
+          parent,
+          {:durable_deadline_result,
+           Index.index(pid, "Durable deadline", %{}, embedding: valid_persistent_embedding())}
+        )
+      end)
+
+      assert_receive {:writer_waiting_for_kill, ^agent_id, writer_pid}, 1_000
+      writer_monitor = Process.monitor(writer_pid)
+
+      assert_receive {:durable_deadline_result, {:ok, ^entry_id}}, 1_000
+      assert_receive {:DOWN, ^writer_monitor, :process, ^writer_pid, _reason}, 1_000
+      assert :sys.get_state(pid).pending_sync == MapSet.new([entry_id])
+      assert {:ok, %{id: ^entry_id}} = Index.get(pid, entry_id)
+
+      ControlledWriter.set_mode(agent_id, :success)
+      assert {:ok, 1} = Index.sync_to_persistent(pid)
+      assert :sys.get_state(pid).pending_sync == MapSet.new()
+    end
+
+    test "ownership regression: owner death terminates coordinator and durable writer" do
+      agent_id = "dead_index_owner_#{System.unique_integer([:positive])}"
+      ControlledWriter.configure(agent_id, {:block_until_commit, self()})
+
+      {:ok, pid} =
+        Index.start_link(
+          agent_id: agent_id,
+          backend: :pgvector,
+          persistent_writer: ControlledWriter,
+          operation_timeout_ms: 5_000,
+          name: nil
+        )
+
+      Process.unlink(pid)
+
+      on_exit(fn ->
+        ControlledWriter.disarm(agent_id)
+        if Process.alive?(pid), do: Process.exit(pid, :kill)
+      end)
+
+      spawn(fn ->
+        Index.index(pid, "Owner-bound durable write", %{},
+          embedding: valid_persistent_embedding()
+        )
+      end)
+
+      assert_receive {:writer_waiting_to_commit, ^agent_id, writer_pid}, 1_000
+      %{inflight_mutation: %{coordinator_pid: coordinator_pid}} = :sys.get_state(pid)
+
+      coordinator_monitor = Process.monitor(coordinator_pid)
+      writer_monitor = Process.monitor(writer_pid)
+      Process.exit(pid, :kill)
+
+      assert_receive {:DOWN, ^coordinator_monitor, :process, ^coordinator_pid, _reason}, 1_000
+      assert_receive {:DOWN, ^writer_monitor, :process, ^writer_pid, _reason}, 1_000
+
+      send(writer_pid, :commit)
+      refute_receive {:writer_committed, ^agent_id, ^writer_pid}, 100
+    end
   end
 
   describe "recall/2" do
+    test "responsiveness regression: slow recall provider cannot monopolize the index" do
+      query = "blocked recall provider"
+      ControlledProvider.configure(query, {:block, self()})
+
+      {:ok, pid} =
+        Index.start_link(
+          agent_id: "recall_provider_#{System.unique_integer([:positive])}",
+          embedding_provider: ControlledProvider,
+          operation_timeout_ms: 2_000,
+          name: nil
+        )
+
+      on_exit(fn ->
+        ControlledProvider.disarm(query)
+        if Process.alive?(pid), do: GenServer.stop(pid)
+      end)
+
+      assert {:ok, entry_id} =
+               Index.index(pid, "Recall cache entry", %{type: :fact},
+                 embedding: valid_persistent_embedding()
+               )
+
+      parent = self()
+      spawn(fn -> send(parent, {:recall_provider_result, Index.recall(pid, query)}) end)
+
+      assert_receive {:provider_started, ^query, provider_pid}, 1_000
+      assert %{entry_count: 1} = Index.stats(pid)
+      assert {:ok, %{id: ^entry_id}} = Index.get(pid, entry_id)
+      refute_received {:recall_provider_result, _result}
+
+      send(provider_pid, :release_provider)
+      assert_receive {:recall_provider_result, {:ok, results}}, 1_000
+      assert Enum.any?(results, &(&1.id == entry_id))
+      assert Process.alive?(pid)
+    end
+
     test "returns similar content", %{pid: pid} do
       {:ok, _} = Index.index(pid, "The sky is blue", %{type: :fact})
       {:ok, _} = Index.index(pid, "Grass is green", %{type: :fact})
@@ -695,6 +984,58 @@ defmodule Arbor.Memory.IndexTest do
       assert {:ok, %{id: ^second_id}} = Index.get(pid, second_id)
       assert {:ok, %{id: ^later_id}} = Index.get(pid, later_id)
     end
+
+    test "responsiveness regression: slow batch provider preflight leaves reads live" do
+      first_content = "slow batch provider first"
+      second_content = "slow batch provider second"
+      ControlledProvider.configure(first_content, {:block, self()})
+      ControlledProvider.configure(second_content, :success)
+
+      ids = ["mem_preflight_existing", "mem_preflight_first", "mem_preflight_second"]
+
+      {:ok, pid} =
+        Index.start_link(
+          agent_id: "slow_batch_preflight_#{System.unique_integer([:positive])}",
+          embedding_provider: ControlledProvider,
+          entry_id_generator: sequence_callback(ids),
+          operation_timeout_ms: 5_000,
+          name: nil
+        )
+
+      on_exit(fn ->
+        ControlledProvider.disarm(first_content)
+        ControlledProvider.disarm(second_content)
+        if Process.alive?(pid), do: GenServer.stop(pid)
+      end)
+
+      assert {:ok, existing_id} =
+               Index.index(pid, "existing before batch", %{},
+                 embedding: valid_persistent_embedding()
+               )
+
+      parent = self()
+
+      spawn(fn ->
+        send(
+          parent,
+          {:batch_preflight_result,
+           Index.batch_index(pid, [{first_content, %{}}, {second_content, %{}}])}
+        )
+      end)
+
+      assert_receive {:provider_started, ^first_content, provider_pid}, 1_000
+      assert %{entry_count: 1} = Index.stats(pid)
+      assert {:ok, %{id: ^existing_id}} = Index.get(pid, existing_id)
+      refute_received {:batch_preflight_result, _result}
+
+      send(provider_pid, :release_provider)
+
+      assert_receive {:batch_preflight_result,
+                      {:ok, ["mem_preflight_first", "mem_preflight_second"]}},
+                     1_000
+
+      assert Index.stats(pid).entry_count == 3
+    end
   end
 
   describe "stats/1" do
@@ -764,6 +1105,60 @@ defmodule Arbor.Memory.IndexTest do
   end
 
   describe "LRU eviction" do
+    test "LRU regression: fallback admission uses access order at the commit point" do
+      agent_id = "fresh_lru_#{System.unique_integer([:positive])}"
+      ControlledWriter.configure(agent_id, :success)
+
+      clock_values = [
+        ~U[2020-01-01 00:00:00Z],
+        ~U[2020-01-01 00:00:01Z],
+        ~U[2020-01-01 00:00:02Z]
+      ]
+
+      {:ok, pid} =
+        Index.start_link(
+          agent_id: agent_id,
+          backend: :dual,
+          persistent_writer: ControlledWriter,
+          entry_id_generator:
+            sequence_callback(["mem_lru_first", "mem_lru_second", "mem_lru_new"]),
+          clock: sequence_callback(clock_values),
+          max_entries: 2,
+          operation_timeout_ms: 5_000,
+          name: nil
+        )
+
+      on_exit(fn ->
+        ControlledWriter.disarm(agent_id)
+        if Process.alive?(pid), do: GenServer.stop(pid)
+      end)
+
+      embedding = valid_persistent_embedding()
+      assert {:ok, "mem_lru_first"} = Index.index(pid, "LRU first", %{}, embedding: embedding)
+      assert {:ok, "mem_lru_second"} = Index.index(pid, "LRU second", %{}, embedding: embedding)
+
+      ControlledWriter.set_mode(agent_id, {:block_then_error, self()})
+      parent = self()
+
+      spawn(fn ->
+        send(
+          parent,
+          {:fresh_lru_result, Index.index(pid, "LRU pending", %{}, embedding: embedding)}
+        )
+      end)
+
+      assert_receive {:writer_waiting_to_fail, ^agent_id, writer_pid}, 1_000
+
+      assert {:ok, %{id: "mem_lru_first"}} = Index.get(pid, "mem_lru_first")
+      send(writer_pid, :release_with_error)
+
+      assert_receive {:fresh_lru_result, {:ok, "mem_lru_new"}}, 1_000
+      assert {:ok, %{id: "mem_lru_first"}} = Index.get(pid, "mem_lru_first")
+      assert {:error, :not_found} = Index.get(pid, "mem_lru_second")
+      assert {:ok, %{id: "mem_lru_new"}} = Index.get(pid, "mem_lru_new")
+      assert :sys.get_state(pid).pending_sync == MapSet.new(["mem_lru_new"])
+    end
+
     test "capacity regression: a one-entry cache evicts one synced row" do
       agent_id = "single_eviction_test_#{System.unique_integer([:positive])}"
       {:ok, pid} = Index.start_link(agent_id: agent_id, max_entries: 1, name: nil)
@@ -807,5 +1202,20 @@ defmodule Arbor.Memory.IndexTest do
         [] -> raise "deterministic ID sequence exhausted"
       end)
     end
+  end
+
+  defp await_mutation_queue_length(pid, expected, attempts \\ 100)
+
+  defp await_mutation_queue_length(pid, expected, attempts) when attempts > 0 do
+    if :queue.len(:sys.get_state(pid).mutation_queue) == expected do
+      :ok
+    else
+      Process.sleep(5)
+      await_mutation_queue_length(pid, expected, attempts - 1)
+    end
+  end
+
+  defp await_mutation_queue_length(_pid, expected, 0) do
+    flunk("mutation queue did not reach #{expected}")
   end
 end

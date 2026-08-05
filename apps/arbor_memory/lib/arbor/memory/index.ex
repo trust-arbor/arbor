@@ -46,8 +46,10 @@ defmodule Arbor.Memory.Index do
 
   use GenServer
 
+  alias Arbor.Contracts.Persistence.VectorRecord
   alias Arbor.Common.SafeAtom
   alias Arbor.Memory.Embedding
+  alias Arbor.Memory.Index.Input
 
   require Logger
 
@@ -73,6 +75,10 @@ defmodule Arbor.Memory.Index do
   @default_max_entries 10_000
   @default_threshold 0.3
   @default_limit 10
+  @default_operation_timeout_ms 15_000
+  @default_max_pending_mutations 16
+  @max_operation_timeout_ms 120_000
+  @max_pending_mutations 64
   # Shared VectorRecord IDs and the legacy memory_embeddings primary key are varchar(255).
   @max_entry_id_bytes 255
 
@@ -90,8 +96,11 @@ defmodule Arbor.Memory.Index do
   - `:threshold` - Default similarity threshold for recall (default: 0.3)
   - `:name` - Optional name for the GenServer
   - `:persistent_writer` - Legacy durable writer module (default: `Embedding`)
+  - `:embedding_provider` - Embedding provider module (default: `Arbor.AI`)
   - `:entry_id_generator` - Zero-arity entry ID generator (default: random `mem_` ID)
   - `:clock` - Zero-arity UTC clock (default: `DateTime.utc_now/0`)
+  - `:operation_timeout_ms` - Finite deadline for one serialized mutation (default: 15s)
+  - `:max_pending_mutations` - Bounded mutation queue depth (default: 16)
 
   ## Examples
 
@@ -120,7 +129,9 @@ defmodule Arbor.Memory.Index do
   @spec index(GenServer.server(), String.t(), map(), keyword()) ::
           {:ok, entry_id()} | {:error, term()}
   def index(server, content, metadata \\ %{}, opts \\ []) do
-    GenServer.call(server, {:index, content, metadata, opts}, :infinity)
+    with {:ok, {content, metadata, opts}} <- Input.index(content, metadata, opts) do
+      GenServer.call(server, {:index, content, metadata, opts}, :infinity)
+    end
   end
 
   @doc """
@@ -141,7 +152,11 @@ defmodule Arbor.Memory.Index do
   @spec recall(GenServer.server(), String.t(), keyword()) ::
           {:ok, [recall_result()]} | {:error, term()}
   def recall(server, query, opts \\ []) do
-    GenServer.call(server, {:recall, query, opts})
+    with {:ok, {query, opts}} <- Input.recall(query, opts),
+         {:ok, context} <- GenServer.call(server, :recall_context),
+         result <- run_owned_call({:recall, context, query, opts}, context.operation_timeout_ms) do
+      result
+    end
   end
 
   @doc """
@@ -171,7 +186,9 @@ defmodule Arbor.Memory.Index do
   @spec batch_index(GenServer.server(), [{String.t(), map()}], keyword()) ::
           {:ok, [entry_id()]} | {:error, term()}
   def batch_index(server, items, opts \\ []) do
-    GenServer.call(server, {:batch_index, items, opts}, :infinity)
+    with {:ok, {items, opts}} <- Input.batch(items, opts) do
+      GenServer.call(server, {:batch_index, items, opts}, :infinity)
+    end
   end
 
   @doc """
@@ -208,7 +225,9 @@ defmodule Arbor.Memory.Index do
   """
   @spec delete(GenServer.server(), entry_id()) :: :ok | {:error, :not_found}
   def delete(server, entry_id) do
-    GenServer.call(server, {:delete, entry_id}, :infinity)
+    with {:ok, entry_id} <- Input.delete(entry_id) do
+      GenServer.call(server, {:delete, entry_id}, :infinity)
+    end
   end
 
   @doc """
@@ -229,7 +248,9 @@ defmodule Arbor.Memory.Index do
   """
   @spec warm_cache(GenServer.server(), keyword()) :: :ok | {:error, term()}
   def warm_cache(server, opts \\ []) do
-    GenServer.call(server, {:warm_cache, opts}, :infinity)
+    with {:ok, opts} <- Input.warm(opts) do
+      GenServer.call(server, {:warm_cache, opts}, :infinity)
+    end
   end
 
   @doc """
@@ -256,7 +277,9 @@ defmodule Arbor.Memory.Index do
   @spec sync_to_persistent(GenServer.server(), keyword()) ::
           {:ok, non_neg_integer()} | {:error, term()}
   def sync_to_persistent(server, opts \\ []) do
-    GenServer.call(server, {:sync_to_persistent, opts}, :infinity)
+    with {:ok, opts} <- Input.sync(opts) do
+      GenServer.call(server, {:sync_to_persistent, opts}, :infinity)
+    end
   end
 
   @doc """
@@ -287,6 +310,23 @@ defmodule Arbor.Memory.Index do
     threshold = Keyword.get(opts, :threshold, @default_threshold)
     backend = Keyword.get(opts, :backend, get_backend_config())
 
+    operation_timeout_ms =
+      Keyword.get(opts, :operation_timeout_ms, @default_operation_timeout_ms)
+
+    max_pending_mutations =
+      Keyword.get(opts, :max_pending_mutations, @default_max_pending_mutations)
+
+    valid_options? =
+      is_integer(max_entries) and max_entries > 0 and
+        is_number(threshold) and
+        backend in [:ets, :pgvector, :dual] and
+        is_integer(operation_timeout_ms) and operation_timeout_ms > 0 and
+        operation_timeout_ms <= @max_operation_timeout_ms and
+        is_integer(max_pending_mutations) and max_pending_mutations >= 0 and
+        max_pending_mutations <= @max_pending_mutations
+
+    unless valid_options?, do: raise(ArgumentError, "invalid memory index options")
+
     # Create ETS table for this index
     table = :ets.new(:memory_index, [:set, :protected])
 
@@ -298,8 +338,11 @@ defmodule Arbor.Memory.Index do
       entry_count: 0,
       backend: backend,
       persistent_writer: Keyword.get(opts, :persistent_writer, Embedding),
+      embedding_provider: Keyword.get(opts, :embedding_provider, Arbor.AI),
       entry_id_generator: Keyword.get(opts, :entry_id_generator, &generate_entry_id/0),
       clock: Keyword.get(opts, :clock, &DateTime.utc_now/0),
+      operation_timeout_ms: operation_timeout_ms,
+      max_pending_mutations: max_pending_mutations,
       # Local ordering only; never persisted or copied into caller metadata.
       next_insertion_sequence: 0,
       pending_entry_orders: %{},
@@ -327,9 +370,17 @@ defmodule Arbor.Memory.Index do
   def handle_call({:index, _content, _metadata, _opts} = request, from, state),
     do: dispatch_mutation_call(request, from, state)
 
-  def handle_call({:recall, query, opts}, _from, state) do
-    result = do_recall(query, opts, state)
-    {:reply, result, state}
+  def handle_call(:recall_context, _from, state) do
+    context = %{
+      agent_id: state.agent_id,
+      table: state.table,
+      backend: state.backend,
+      default_threshold: state.default_threshold,
+      embedding_provider: state.embedding_provider,
+      operation_timeout_ms: state.operation_timeout_ms
+    }
+
+    {:reply, {:ok, context}, state}
   end
 
   def handle_call({:batch_index, _items, _opts} = request, from, state),
@@ -388,15 +439,31 @@ defmodule Arbor.Memory.Index do
         %{inflight_mutation: %{operation_ref: operation_ref} = inflight} = state
       ) do
     Process.demonitor(inflight.monitor_ref, [:flush])
-    finish_persistent_mutation(inflight, result, state)
+    advance_persistent_mutation(inflight, result, state)
   end
 
   def handle_info(
         {:DOWN, monitor_ref, :process, _pid, _reason},
         %{inflight_mutation: %{monitor_ref: monitor_ref} = inflight} = state
       ) do
-    finish_persistent_mutation(inflight, {:error, :persistence_indeterminate}, state)
+    advance_persistent_mutation(inflight, worker_down_result(inflight.phase), state)
   end
+
+  def handle_info(
+        {:mutation_deadline, mutation_ref},
+        %{inflight_mutation: %{mutation_ref: mutation_ref} = inflight} = state
+      ) do
+    Process.exit(inflight.coordinator_pid, :kill)
+    Process.demonitor(inflight.monitor_ref, [:flush])
+    advance_persistent_mutation(inflight, deadline_result(inflight.phase), state)
+  end
+
+  def handle_info({:persistent_mutation_result, _operation_ref, _result}, state),
+    do: {:noreply, state}
+
+  def handle_info({:DOWN, _monitor_ref, :process, _pid, _reason}, state), do: {:noreply, state}
+
+  def handle_info({:mutation_deadline, _mutation_ref}, state), do: {:noreply, state}
 
   @impl true
   def terminate(_reason, state) do
@@ -408,41 +475,55 @@ defmodule Arbor.Memory.Index do
   # Private Implementation
   # ============================================================================
 
-  defp dispatch_mutation_call(request, from, %{inflight_mutation: nil} = state),
-    do: execute_mutation_call(request, from, state)
-
   defp dispatch_mutation_call(request, from, state) do
-    queued_state = %{state | mutation_queue: :queue.in({request, from}, state.mutation_queue)}
-    {:noreply, queued_state}
-  end
+    deadline = monotonic_milliseconds() + state.operation_timeout_ms
 
-  defp execute_mutation_call({:index, content, metadata, opts}, from, state) do
-    case do_index(content, metadata, opts, state) do
-      {:ok, entry_id, new_state} ->
-        {:reply, {:ok, entry_id}, new_state}
+    cond do
+      is_nil(state.inflight_mutation) ->
+        execute_mutation_call(request, from, deadline, state)
 
-      {:async, writer_call, completion} ->
-        {:noreply, start_persistent_mutation(writer_call, completion, from, state)}
+      :queue.len(state.mutation_queue) < state.max_pending_mutations ->
+        queued = :queue.in({request, from, deadline}, state.mutation_queue)
+        {:noreply, %{state | mutation_queue: queued}}
 
-      {:error, reason} ->
-        {:reply, {:error, reason}, state}
+      true ->
+        {:reply, {:error, :mutation_queue_full}, state}
     end
   end
 
-  defp execute_mutation_call({:batch_index, items, opts}, from, state) do
-    case do_batch_index(items, opts, state) do
-      {:ok, ids, new_state} ->
-        {:reply, {:ok, ids}, new_state}
+  defp execute_mutation_call({:index, content, metadata, opts}, from, deadline, state) do
+    worker_call =
+      {:preflight_index, state.backend, state.agent_id, state.embedding_provider,
+       state.entry_id_generator, state.clock, content, metadata, opts}
 
-      {:async, writer_call, completion} ->
-        {:noreply, start_persistent_mutation(writer_call, completion, from, state)}
-
-      {:error, reason} ->
-        {:reply, {:error, reason}, state}
-    end
+    {:noreply,
+     start_persistent_mutation(
+       worker_call,
+       :preflight_index,
+       :preflight,
+       from,
+       deadline,
+       state
+     )}
   end
 
-  defp execute_mutation_call(:clear, _from, state) do
+  defp execute_mutation_call({:batch_index, items, opts}, from, deadline, state) do
+    worker_call =
+      {:preflight_batch, state.backend, state.agent_id, state.embedding_provider,
+       state.entry_id_generator, state.clock, items, opts}
+
+    {:noreply,
+     start_persistent_mutation(
+       worker_call,
+       :preflight_batch,
+       :preflight,
+       from,
+       deadline,
+       state
+     )}
+  end
+
+  defp execute_mutation_call(:clear, _from, _deadline, state) do
     :ets.delete_all_objects(state.table)
 
     {:reply, :ok,
@@ -456,59 +537,131 @@ defmodule Arbor.Memory.Index do
      }}
   end
 
-  defp execute_mutation_call({:delete, entry_id}, _from, state) do
-    case delete_entry(entry_id, state) do
-      {:ok, new_state} -> {:reply, :ok, new_state}
-      {:error, reason, new_state} -> {:reply, {:error, reason}, new_state}
+  defp execute_mutation_call({:delete, entry_id}, from, deadline, state) do
+    case prepare_delete(entry_id, state) do
+      {:ok, new_state} ->
+        {:reply, :ok, new_state}
+
+      {:async, worker_call, completion, phase} ->
+        {:noreply,
+         start_persistent_mutation(worker_call, completion, phase, from, deadline, state)}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
     end
   end
 
-  defp execute_mutation_call({:warm_cache, opts}, _from, state) do
+  defp execute_mutation_call({:warm_cache, opts}, from, deadline, state) do
     if state.backend in [:pgvector, :dual] do
-      {:reply, do_warm_cache(opts, state), state}
+      worker_call =
+        {:warm_cache, state.agent_id, state.embedding_provider, opts}
+
+      {:noreply,
+       start_persistent_mutation(
+         worker_call,
+         {:warm_cache, Keyword.fetch!(opts, :limit)},
+         :preflight,
+         from,
+         deadline,
+         state
+       )}
     else
       {:reply, {:error, :backend_not_persistent}, state}
     end
   end
 
-  defp execute_mutation_call({:sync_to_persistent, _opts}, from, state) do
+  defp execute_mutation_call({:sync_to_persistent, _opts}, from, deadline, state) do
     if state.backend == :dual do
       case prepare_persistent_sync(state) do
         {:ok, count, new_state} ->
           {:reply, {:ok, count}, new_state}
 
         {:async, writer_call, completion} ->
-          {:noreply, start_persistent_mutation(writer_call, completion, from, state)}
+          {:noreply,
+           start_persistent_mutation(
+             writer_call,
+             completion,
+             :durable,
+             from,
+             deadline,
+             state
+           )}
       end
     else
       {:reply, {:error, :not_dual_backend}, state}
     end
   end
 
-  defp start_persistent_mutation(writer_call, completion, from, state) do
+  defp start_persistent_mutation(worker_call, completion, phase, from, deadline, state) do
+    mutation_ref = make_ref()
+    timer_ref = schedule_mutation_deadline(mutation_ref, deadline)
+
+    start_persistent_stage(
+      worker_call,
+      completion,
+      phase,
+      from,
+      deadline,
+      mutation_ref,
+      timer_ref,
+      state
+    )
+  end
+
+  defp start_persistent_stage(
+         worker_call,
+         completion,
+         phase,
+         from,
+         deadline,
+         mutation_ref,
+         timer_ref,
+         state
+       ) do
     owner = self()
     operation_ref = make_ref()
 
     coordinator_pid =
-      spawn(fn ->
-        receive do
-          {:start, ^owner} -> coordinate_persistent_mutation(owner, operation_ref, writer_call)
-        end
-      end)
+      spawn(fn -> coordinate_persistent_mutation(owner, operation_ref, worker_call) end)
 
     monitor_ref = Process.monitor(coordinator_pid)
-    send(coordinator_pid, {:start, owner})
 
     %{
       state
       | inflight_mutation: %{
+          mutation_ref: mutation_ref,
           operation_ref: operation_ref,
           coordinator_pid: coordinator_pid,
           monitor_ref: monitor_ref,
+          timer_ref: timer_ref,
+          deadline: deadline,
           from: from,
-          completion: completion
+          completion: completion,
+          phase: phase
         }
     }
+  end
+
+  defp run_owned_call(worker_call, timeout_ms) do
+    owner = self()
+    operation_ref = make_ref()
+
+    {coordinator_pid, monitor_ref} =
+      spawn_monitor(fn -> coordinate_persistent_mutation(owner, operation_ref, worker_call) end)
+
+    receive do
+      {:persistent_mutation_result, ^operation_ref, result} ->
+        Process.demonitor(monitor_ref, [:flush])
+        result
+
+      {:DOWN, ^monitor_ref, :process, ^coordinator_pid, _reason} ->
+        {:error, :operation_failed}
+    after
+      timeout_ms ->
+        Process.exit(coordinator_pid, :kill)
+        await_process_down(monitor_ref, coordinator_pid)
+        {:error, :operation_timeout}
+    end
   end
 
   defp coordinate_persistent_mutation(owner, operation_ref, writer_call) do
@@ -532,13 +685,13 @@ defmodule Arbor.Memory.Index do
     end
   end
 
-  defp coordinate_live_owner(owner, owner_monitor, operation_ref, writer_call) do
+  defp coordinate_live_owner(owner, owner_monitor, operation_ref, worker_call) do
     coordinator = self()
 
     {worker_pid, worker_monitor} =
       :erlang.spawn_opt(
         fn ->
-          result = run_persistent_writer_call(writer_call)
+          result = run_background_call(worker_call)
           send(coordinator, {:writer_result, self(), result})
         end,
         [:link, :monitor]
@@ -555,7 +708,7 @@ defmodule Arbor.Memory.Index do
 
         send(
           owner,
-          {:persistent_mutation_result, operation_ref, {:error, :persistence_indeterminate}}
+          {:persistent_mutation_result, operation_ref, background_failure_result(worker_call)}
         )
 
       {:DOWN, ^owner_monitor, :process, ^owner, _reason} ->
@@ -570,30 +723,77 @@ defmodule Arbor.Memory.Index do
     end
   end
 
-  defp finish_persistent_mutation(inflight, result, state) do
-    {reply, new_state} = complete_persistent_mutation(inflight.completion, result, state)
-    GenServer.reply(inflight.from, reply)
+  defp await_process_down(monitor_ref, pid) do
+    receive do
+      {:DOWN, ^monitor_ref, :process, ^pid, _reason} -> :ok
+    end
+  end
 
-    state_without_inflight = %{new_state | inflight_mutation: nil}
-    continue_mutation_queue(state_without_inflight)
+  defp background_failure_result({:single, _writer, _agent_id, _entry, _metadata}),
+    do: {:error, :persistence_indeterminate}
+
+  defp background_failure_result({:batch, _writer, _agent_id, _entries}),
+    do: {:error, :persistence_indeterminate}
+
+  defp background_failure_result({:delete, _agent_id, _entry_id}),
+    do: {:error, :persistence_indeterminate}
+
+  defp background_failure_result(_read_or_preflight), do: {:error, :operation_failed}
+
+  defp advance_persistent_mutation(inflight, result, state) do
+    case complete_mutation_stage(inflight.completion, result, state) do
+      {:continue, worker_call, completion, phase, new_state} ->
+        if inflight.deadline <= monotonic_milliseconds() do
+          cancel_mutation_deadline(inflight.timer_ref)
+          GenServer.reply(inflight.from, {:error, :operation_timeout})
+          continue_mutation_queue(%{new_state | inflight_mutation: nil})
+        else
+          next_state = %{new_state | inflight_mutation: nil}
+
+          {:noreply,
+           start_persistent_stage(
+             worker_call,
+             completion,
+             phase,
+             inflight.from,
+             inflight.deadline,
+             inflight.mutation_ref,
+             inflight.timer_ref,
+             next_state
+           )}
+        end
+
+      {:final, reply, new_state} ->
+        cancel_mutation_deadline(inflight.timer_ref)
+        GenServer.reply(inflight.from, reply)
+
+        state_without_inflight = %{new_state | inflight_mutation: nil}
+        continue_mutation_queue(state_without_inflight)
+    end
   end
 
   defp continue_mutation_queue(state) do
     case :queue.out(state.mutation_queue) do
-      {{:value, {request, from}}, remaining} ->
+      {{:value, {request, from, deadline}}, remaining} ->
         state = %{state | mutation_queue: remaining}
 
-        if caller_alive?(from) do
-          case execute_mutation_call(request, from, state) do
-            {:reply, reply, new_state} ->
-              GenServer.reply(from, reply)
-              continue_mutation_queue(new_state)
+        cond do
+          not caller_alive?(from) ->
+            continue_mutation_queue(state)
 
-            {:noreply, new_state} ->
-              {:noreply, new_state}
-          end
-        else
-          continue_mutation_queue(state)
+          deadline <= monotonic_milliseconds() ->
+            GenServer.reply(from, {:error, :operation_timeout})
+            continue_mutation_queue(state)
+
+          true ->
+            case execute_mutation_call(request, from, deadline, state) do
+              {:reply, reply, new_state} ->
+                GenServer.reply(from, reply)
+                continue_mutation_queue(new_state)
+
+              {:noreply, new_state} ->
+                {:noreply, new_state}
+            end
         end
 
       {:empty, _queue} ->
@@ -604,19 +804,30 @@ defmodule Arbor.Memory.Index do
   defp caller_alive?({pid, _tag}) when is_pid(pid), do: Process.alive?(pid)
   defp caller_alive?(_from), do: false
 
-  defp do_index(content, metadata, opts, state) do
-    with {:ok, embedding} <- get_or_compute_embedding(content, opts),
-         {:ok, entry_id, now} <- generate_entry_identity(state),
-         :ok <- validate_new_entry_id(entry_id, state),
-         {:ok, normalized_embedding, normalized_metadata} <-
-           preflight_entry(state, content, embedding, metadata, entry_id) do
+  defp schedule_mutation_deadline(mutation_ref, deadline) do
+    remaining = max(deadline - monotonic_milliseconds(), 0)
+    Process.send_after(self(), {:mutation_deadline, mutation_ref}, remaining)
+  end
+
+  defp cancel_mutation_deadline(timer_ref), do: Process.cancel_timer(timer_ref, async: true)
+
+  defp monotonic_milliseconds, do: System.monotonic_time(:millisecond)
+
+  defp worker_down_result(:preflight), do: {:error, :operation_failed}
+  defp worker_down_result(:durable), do: {:error, :persistence_indeterminate}
+
+  defp deadline_result(:preflight), do: {:error, :operation_timeout}
+  defp deadline_result(:durable), do: {:error, :persistence_indeterminate}
+
+  defp do_index(%{entry_id: entry_id, now: now} = prepared, state) do
+    with :ok <- validate_new_entry_id(entry_id, state) do
       insertion_sequence = state.next_insertion_sequence
 
       entry = %{
         id: entry_id,
-        content: content,
-        embedding: normalized_embedding,
-        metadata: normalized_metadata,
+        content: prepared.content,
+        embedding: prepared.embedding,
+        metadata: prepared.metadata,
         indexed_at: now,
         accessed_at: now,
         access_count: 0
@@ -638,7 +849,7 @@ defmodule Arbor.Memory.Index do
         :pgvector ->
           writer_call =
             {:single, state.persistent_writer, state.agent_id, entry,
-             with_requested_id(normalized_metadata, entry_id)}
+             with_requested_id(prepared.metadata, entry_id)}
 
           {:async, writer_call, {:pgvector_index, insertion_sequence}}
 
@@ -655,6 +866,87 @@ defmodule Arbor.Memory.Index do
           end
       end
     end
+  end
+
+  defp complete_mutation_stage(:preflight_index, result, state) do
+    case result do
+      {:ok, prepared} ->
+        case do_index(prepared, state) do
+          {:ok, entry_id, new_state} ->
+            {:final, {:ok, entry_id}, new_state}
+
+          {:async, worker_call, completion} ->
+            {:continue, worker_call, completion, :durable, state}
+
+          {:error, reason} ->
+            {:final, {:error, reason}, state}
+        end
+
+      {:error, reason} ->
+        {:final, {:error, reason}, state}
+    end
+  end
+
+  defp complete_mutation_stage(:preflight_batch, result, state) do
+    case result do
+      {:ok, preflighted} ->
+        case do_batch_index(preflighted, state) do
+          {:ok, ids, new_state} ->
+            {:final, {:ok, ids}, new_state}
+
+          {:async, worker_call, completion} ->
+            {:continue, worker_call, completion, :durable, state}
+
+          {:error, reason} ->
+            {:final, {:error, reason}, state}
+        end
+
+      {:error, reason} ->
+        {:final, {:error, reason}, state}
+    end
+  end
+
+  defp complete_mutation_stage({:warm_cache, limit}, result, state) do
+    case result do
+      {:ok, entries} ->
+        case commit_warm_cache(entries, limit, state) do
+          {:ok, new_state} -> {:final, :ok, new_state}
+          {:error, reason} -> {:final, {:error, reason}, state}
+        end
+
+      {:error, reason} ->
+        {:final, {:error, reason}, state}
+    end
+  end
+
+  defp complete_mutation_stage(
+         {:sync_then_delete, requested_id, groups, converged_count},
+         result,
+         state
+       ) do
+    case finish_pending_sync(result, groups, converged_count, state) do
+      {:ok, _count, synced_state} ->
+        durable_id = resolve_entry_id(requested_id, synced_state)
+
+        {:continue, {:delete, synced_state.agent_id, durable_id},
+         {:delete_persistent, durable_id, true}, :durable, synced_state}
+
+      {:error, reason} ->
+        {:final, {:error, reason}, state}
+    end
+  end
+
+  defp complete_mutation_stage({:delete_persistent, durable_id, remove_local?}, result, state) do
+    case result do
+      :ok when remove_local? -> {:final, :ok, remove_local_entry(state, durable_id)}
+      :ok -> {:final, :ok, state}
+      {:error, reason} -> {:final, {:error, reason}, state}
+    end
+  end
+
+  defp complete_mutation_stage(completion, result, state) do
+    {reply, new_state} = complete_persistent_mutation(completion, result, state)
+    {:final, reply, new_state}
   end
 
   defp complete_persistent_mutation(completion, result, state) do
@@ -689,7 +981,7 @@ defmodule Arbor.Memory.Index do
     end
   end
 
-  defp complete_dual_index(entry_id, group, pending_admission, result, state) do
+  defp complete_dual_index(entry_id, group, _pending_admission, result, state) do
     case result do
       {:ok, authoritative_id} ->
         with :ok <-
@@ -715,13 +1007,19 @@ defmodule Arbor.Memory.Index do
       {:error, reason} ->
         log_dual_write_failure(entry_id, reason)
 
-        new_state =
-          state
-          |> apply_local_admission(pending_admission.eviction_ids)
-          |> cache_pending_groups([group], pending_admission)
-          |> advance_insertion_sequence(group.canonical_sequence)
+        case plan_pending_group_admission(state, [group]) do
+          {:ok, current_admission} ->
+            new_state =
+              state
+              |> apply_local_admission(current_admission.eviction_ids)
+              |> cache_pending_groups([group], current_admission)
+              |> advance_insertion_sequence(group.canonical_sequence)
 
-        {{:ok, entry_id}, new_state}
+            {{:ok, entry_id}, new_state}
+
+          {:error, :capacity_exceeded} ->
+            {{:error, :persistence_indeterminate}, state}
+        end
     end
   end
 
@@ -731,7 +1029,9 @@ defmodule Arbor.Memory.Index do
   end
 
   defp do_recall(query, opts, state) do
-    with {:ok, query_embedding} <- get_or_compute_embedding(query, opts) do
+    with {:ok, query_embedding} <-
+           get_or_compute_embedding(query, opts, state.embedding_provider),
+         {:ok, query_embedding} <- normalize_recall_embedding(state.backend, query_embedding) do
       threshold = Keyword.get(opts, :threshold, state.default_threshold)
       limit = Keyword.get(opts, :limit, @default_limit)
       type_filter = get_type_filter(opts)
@@ -749,6 +1049,15 @@ defmodule Arbor.Memory.Index do
           # Two-tier: check ETS first, then pgvector for additional results
           do_dual_recall(query_embedding, type_filter, threshold, limit, state)
       end
+    end
+  end
+
+  defp normalize_recall_embedding(:ets, embedding), do: {:ok, embedding}
+
+  defp normalize_recall_embedding(_persistent_backend, embedding) do
+    case VectorRecord.normalize_vector(embedding) do
+      {:ok, normalized} -> {:ok, normalized}
+      {:error, :invalid_vector} -> {:error, :invalid_embedding}
     end
   end
 
@@ -873,8 +1182,8 @@ defmodule Arbor.Memory.Index do
     }
   end
 
-  defp do_batch_index(items, opts, state) do
-    with {:ok, prepared} <- prepare_batch_entries(items, opts, state) do
+  defp do_batch_index(preflighted, state) do
+    with {:ok, prepared} <- prepare_batch_entries(preflighted, state) do
       case state.backend do
         :ets ->
           with {:ok, eviction_ids} <- plan_prepared_batch_admission(state, prepared) do
@@ -890,60 +1199,34 @@ defmodule Arbor.Memory.Index do
     end
   end
 
-  defp prepare_batch_entries(items, opts, state) when is_list(items) do
-    items
-    |> Enum.with_index()
-    |> Enum.reduce_while({:ok, []}, fn
-      {{content, metadata}, offset}, {:ok, prepared}
-      when is_binary(content) and is_map(metadata) ->
-        with {:ok, embedding} <- get_or_compute_embedding(content, opts),
-             {:ok, entry_id, now} <- generate_entry_identity(state) do
-          insertion_sequence = state.next_insertion_sequence + offset
+  defp prepare_batch_entries(preflighted, state) when is_list(preflighted) do
+    prepared =
+      Enum.map(preflighted, fn item ->
+        entry = %{
+          id: item.entry_id,
+          content: item.content,
+          embedding: item.embedding,
+          metadata: item.metadata,
+          indexed_at: item.now,
+          accessed_at: item.now,
+          access_count: 0
+        }
 
-          entry = %{
-            id: entry_id,
-            content: content,
-            embedding: embedding,
-            metadata: normalize_metadata(metadata),
-            indexed_at: now,
-            accessed_at: now,
-            access_count: 0
-          }
+        %{
+          entry: entry,
+          insertion_sequence: state.next_insertion_sequence + item.position,
+          position: item.position
+        }
+      end)
 
-          candidate = %{
-            entry: entry,
-            input_metadata: metadata,
-            insertion_sequence: insertion_sequence,
-            position: offset
-          }
-
-          {:cont, {:ok, [candidate | prepared]}}
-        else
-          {:error, reason} -> {:halt, {:error, reason}}
-        end
-
-      _invalid_item, _acc ->
-        {:halt, {:error, :invalid_batch}}
-    end)
-    |> case do
-      {:ok, prepared} ->
-        prepared = Enum.reverse(prepared)
-
-        with :ok <- validate_prepared_batch_identities(prepared, state),
-             {:ok, preflighted} <- preflight_prepared_batch(prepared, state) do
-          {:ok, preflighted}
-        end
-
-      error ->
-        error
-    end
+    with :ok <- validate_prepared_batch_identities(prepared, state), do: {:ok, prepared}
   rescue
     _error -> {:error, :invalid_batch}
   catch
     _kind, _reason -> {:error, :invalid_batch}
   end
 
-  defp prepare_batch_entries(_items, _opts, _state), do: {:error, :invalid_batch}
+  defp prepare_batch_entries(_preflighted, _state), do: {:error, :invalid_batch}
 
   defp validate_prepared_batch_identities(prepared, state) do
     ids = Enum.map(prepared, & &1.entry.id)
@@ -954,44 +1237,6 @@ defmodule Arbor.Memory.Index do
       :ok
     else
       {:error, :invalid_batch_identity}
-    end
-  end
-
-  defp preflight_prepared_batch(prepared, %{backend: :ets}) do
-    {:ok, Enum.map(prepared, &Map.delete(&1, :input_metadata))}
-  end
-
-  defp preflight_prepared_batch(prepared, state) do
-    Enum.reduce_while(prepared, {:ok, []}, fn candidate, {:ok, validated} ->
-      entry = candidate.entry
-
-      case Embedding.validate(
-             state.agent_id,
-             entry.content,
-             entry.embedding,
-             candidate.input_metadata
-           ) do
-        {:ok, normalized_embedding} ->
-          normalized_entry = %{
-            entry
-            | embedding: normalized_embedding,
-              metadata: sanitize_entry_metadata(candidate.input_metadata)
-          }
-
-          normalized_candidate =
-            candidate
-            |> Map.delete(:input_metadata)
-            |> Map.put(:entry, normalized_entry)
-
-          {:cont, {:ok, [normalized_candidate | validated]}}
-
-        {:error, reason} ->
-          {:halt, {:error, reason}}
-      end
-    end)
-    |> case do
-      {:ok, validated} -> {:ok, Enum.reverse(validated)}
-      error -> error
     end
   end
 
@@ -1068,16 +1313,22 @@ defmodule Arbor.Memory.Index do
     end
   end
 
-  defp commit_pending_batch(prepared, groups, pending_admission, state, reason) do
+  defp commit_pending_batch(prepared, groups, _pending_admission, state, reason) do
     Enum.each(prepared, fn %{entry: entry} -> log_dual_write_failure(entry.id, reason) end)
 
-    new_state =
-      state
-      |> apply_local_admission(pending_admission.eviction_ids)
-      |> cache_pending_groups(groups, pending_admission)
-      |> advance_prepared_batch_sequence(prepared)
+    case plan_pending_group_admission(state, groups) do
+      {:ok, current_admission} ->
+        new_state =
+          state
+          |> apply_local_admission(current_admission.eviction_ids)
+          |> cache_pending_groups(groups, current_admission)
+          |> advance_prepared_batch_sequence(prepared)
 
-    {:ok, Enum.map(prepared, & &1.entry.id), new_state}
+        {:ok, Enum.map(prepared, & &1.entry.id), new_state}
+
+      {:error, :capacity_exceeded} ->
+        {:error, :persistence_indeterminate}
+    end
   end
 
   defp group_prepared_batch_entries(prepared, state) do
@@ -1221,11 +1472,12 @@ defmodule Arbor.Memory.Index do
     advance_insertion_sequence(state, insertion_sequence)
   end
 
-  @spec get_or_compute_embedding(String.t(), keyword()) :: {:ok, [float()]} | {:error, term()}
-  defp get_or_compute_embedding(content, opts) do
+  @spec get_or_compute_embedding(String.t(), keyword(), module()) ::
+          {:ok, [float()]} | {:error, term()}
+  defp get_or_compute_embedding(content, opts, provider) do
     case Keyword.get(opts, :embedding) do
       nil ->
-        compute_embedding(content)
+        compute_embedding(content, provider)
 
       embedding when is_list(embedding) ->
         {:ok, embedding}
@@ -1235,11 +1487,11 @@ defmodule Arbor.Memory.Index do
     end
   end
 
-  defp preflight_entry(%{backend: :ets}, _content, embedding, metadata, _entry_id),
+  defp preflight_entry(:ets, _agent_id, _content, embedding, metadata),
     do: {:ok, embedding, normalize_metadata(metadata)}
 
-  defp preflight_entry(state, content, embedding, metadata, _entry_id) do
-    case Embedding.validate(state.agent_id, content, embedding, metadata) do
+  defp preflight_entry(_backend, agent_id, content, embedding, metadata) do
+    case Embedding.validate(agent_id, content, embedding, metadata) do
       {:ok, normalized_embedding} ->
         {:ok, normalized_embedding, sanitize_entry_metadata(metadata)}
 
@@ -1248,28 +1500,22 @@ defmodule Arbor.Memory.Index do
     end
   end
 
-  @spec compute_embedding(String.t()) :: {:ok, [float()]} | {:error, term()}
-  defp compute_embedding(""), do: {:error, :empty_content}
+  @spec compute_embedding(String.t(), module()) :: {:ok, [float()]} | {:error, term()}
+  defp compute_embedding("", _provider), do: {:error, :empty_content}
 
-  defp compute_embedding(content) do
-    if embedding_service_enabled?() do
-      compute_embedding_via_provider(content)
-    else
-      # Hermetic test lane (config :arbor_memory, :embedding_service_enabled false):
-      # skip the live embedding backend. A synchronous Arbor.AI.embed here runs
-      # INSIDE this GenServer's {:index}/{:recall} handle_call, so when the backend
-      # (Ollama) hangs on Finch under load it blocks past the caller's 5s timeout
-      # (the IndexTest/PreconsciousTest flakes). The deterministic hash fallback
-      # keeps index/recall functional offline.
+  defp compute_embedding(content, provider) do
+    if provider == Arbor.AI and not embedding_service_enabled?() do
       {:ok, hash_fallback_embedding(content)}
+    else
+      compute_embedding_via_provider(content, provider)
     end
   end
 
   defp embedding_service_enabled?,
     do: Application.get_env(:arbor_memory, :embedding_service_enabled, true)
 
-  defp compute_embedding_via_provider(content) do
-    case Arbor.AI.embed(content) do
+  defp compute_embedding_via_provider(content, provider) do
+    case provider.embed(content) do
       {:ok, %{embedding: embedding}} ->
         {:ok, embedding}
 
@@ -1462,34 +1708,6 @@ defmodule Arbor.Memory.Index do
   # Dual Backend Helpers
   # ============================================================================
 
-  defp do_warm_cache(opts, state) do
-    limit = Keyword.get(opts, :limit, 1000)
-
-    # Use a simple search with a very low threshold to get recent entries
-    # We can't directly query "most recent" without modifying the Embedding module,
-    # so we'll use the stats to understand what's available
-    stats = Embedding.stats(state.agent_id)
-
-    if stats.total == 0 do
-      Logger.debug("No embeddings to warm cache for agent #{state.agent_id}")
-      :ok
-    else
-      warm_from_pgvector(limit, state)
-    end
-  end
-
-  defp do_sync_to_persistent(state) do
-    case pending_sync_plan(state) do
-      {:complete, count, new_state} ->
-        {:ok, count, new_state}
-
-      {:write, groups, entries, converged_count} ->
-        state
-        |> batch_store_with_ids(entries)
-        |> finish_pending_sync(groups, converged_count, state)
-    end
-  end
-
   defp prepare_persistent_sync(state) do
     case pending_sync_plan(state) do
       {:complete, count, new_state} ->
@@ -1553,61 +1771,111 @@ defmodule Arbor.Memory.Index do
   defp finish_pending_sync({:error, reason}, _groups, _count, _state),
     do: {:error, reason}
 
-  defp warm_from_pgvector(limit, state) do
-    # Get a sample embedding to search with (or use a zero vector)
-    # This is a bit of a workaround - ideally we'd have a "list recent" function
-    # For now, we'll load entries by doing a broad search
-    dimension = Application.get_env(:arbor_persistence, :embedding_dimension, 768)
-    zero_vector = List.duplicate(0.0, dimension)
+  defp fetch_warm_cache_entries(agent_id, provider, opts) do
+    limit = Keyword.fetch!(opts, :limit)
 
-    case Embedding.search(state.agent_id, zero_vector, limit: limit, threshold: 0.0) do
-      {:ok, results} ->
-        loaded_count = Enum.reduce(results, 0, &load_cache_entry(&1, &2, state))
+    case Embedding.stats(agent_id) do
+      %{total: 0} ->
+        {:ok, []}
 
-        Logger.info("Warmed cache with #{loaded_count} entries for agent #{state.agent_id}")
-        :ok
+      %{total: total} when is_integer(total) and total > 0 ->
+        with {:ok, query_embedding} <- warm_query_embedding(provider, opts),
+             {:ok, results} <-
+               Embedding.search(agent_id, query_embedding, limit: limit, threshold: 0.0) do
+          results
+          |> Enum.take(limit)
+          |> Enum.reduce_while({:ok, []}, fn result, {:ok, entries} ->
+            case fetch_warm_cache_entry(agent_id, result) do
+              {:ok, entry} -> {:cont, {:ok, [entry | entries]}}
+              {:error, :not_found} -> {:cont, {:ok, entries}}
+              {:error, reason} -> {:halt, {:error, reason}}
+            end
+          end)
+          |> case do
+            {:ok, entries} -> {:ok, Enum.reverse(entries)}
+            error -> error
+          end
+        end
+
+      _malformed_stats ->
+        {:error, :operation_failed}
+    end
+  end
+
+  defp warm_query_embedding(provider, opts) do
+    case Keyword.get(opts, :query) do
+      nil ->
+        {:ok, List.duplicate(0.5, VectorRecord.dimensions())}
+
+      query ->
+        with {:ok, embedding} <- get_or_compute_embedding(query, [], provider),
+             {:ok, normalized} <- VectorRecord.normalize_vector(embedding) do
+          {:ok, normalized}
+        end
+    end
+  end
+
+  defp fetch_warm_cache_entry(agent_id, %{id: id}) when is_binary(id) do
+    case Embedding.get(agent_id, id) do
+      {:ok, full_record} ->
+        embedding =
+          if is_list(full_record.embedding),
+            do: full_record.embedding,
+            else: Pgvector.to_list(full_record.embedding)
+
+        with true <- valid_entry_id?(full_record.id),
+             true <- is_binary(full_record.content),
+             true <- is_map(full_record.metadata || %{}),
+             {:ok, normalized_embedding} <- VectorRecord.normalize_vector(embedding) do
+          now = DateTime.utc_now()
+
+          {:ok,
+           %{
+             id: full_record.id,
+             content: full_record.content,
+             embedding: normalized_embedding,
+             metadata: full_record.metadata || %{},
+             indexed_at: full_record.inserted_at || now,
+             accessed_at: now,
+             access_count: 0
+           }}
+        else
+          _invalid -> {:error, :malformed_persistence_result}
+        end
 
       {:error, reason} ->
-        Logger.warning("Failed to warm cache: #{inspect(reason)}")
         {:error, reason}
     end
   end
 
-  defp load_cache_entry(result, acc, state) do
-    # Don't overwrite entries already in ETS
-    case :ets.lookup(state.table, result.id) do
-      [] ->
-        # Fetch full embedding to store in ETS
-        case Embedding.get(state.agent_id, result.id) do
-          {:ok, full_record} ->
-            now = DateTime.utc_now()
+  defp fetch_warm_cache_entry(_agent_id, _result),
+    do: {:error, :malformed_persistence_result}
 
-            entry = %{
-              id: full_record.id,
-              content: full_record.content,
-              embedding:
-                if(is_list(full_record.embedding),
-                  do: full_record.embedding,
-                  else: Pgvector.to_list(full_record.embedding)
-                ),
-              metadata: full_record.metadata || %{},
-              indexed_at: full_record.inserted_at || now,
-              accessed_at: now,
-              access_count: 0
-            }
+  defp commit_warm_cache(entries, limit, state) when is_list(entries) do
+    incoming =
+      entries
+      |> Enum.take(limit)
+      |> Enum.reject(fn entry -> :ets.member(state.table, entry.id) end)
 
-            :ets.insert(state.table, {full_record.id, entry})
-            acc + 1
+    ids = Enum.map(incoming, & &1.id)
 
-          {:error, _} ->
-            acc
-        end
+    with true <- length(ids) == MapSet.size(MapSet.new(ids)),
+         true <- Enum.all?(ids, &valid_entry_id?/1),
+         {:ok, eviction_ids} <- plan_local_admission(state, ids) do
+      new_state =
+        Enum.reduce(incoming, apply_local_admission(state, eviction_ids), fn entry, acc ->
+          put_local_entry(acc, entry)
+        end)
 
-      _ ->
-        # Already in ETS
-        acc
+      {:ok, new_state}
+    else
+      false -> {:error, :malformed_persistence_result}
+      {:error, reason} -> {:error, reason}
     end
   end
+
+  defp commit_warm_cache(_entries, _limit, _state),
+    do: {:error, :malformed_persistence_result}
 
   defp collect_pending_entry(id, state) do
     case {:ets.lookup(state.table, id), Map.fetch(state.pending_entry_orders, id)} do
@@ -1783,9 +2051,9 @@ defmodule Arbor.Memory.Index do
 
   defp valid_entry_id?(_id), do: false
 
-  defp generate_entry_identity(state) do
-    entry_id = state.entry_id_generator.()
-    now = state.clock.()
+  defp generate_entry_identity(entry_id_generator, clock) do
+    entry_id = entry_id_generator.()
+    now = clock.()
 
     if valid_entry_id?(entry_id) and match?(%DateTime{}, now) do
       {:ok, entry_id, now}
@@ -1798,7 +2066,92 @@ defmodule Arbor.Memory.Index do
     _kind, _reason -> {:error, :invalid_entry_identity}
   end
 
-  defp run_persistent_writer_call({:single, writer, agent_id, entry, metadata}) do
+  defp run_background_call(
+         {:preflight_index, backend, agent_id, provider, entry_id_generator, clock, content,
+          metadata, opts}
+       ) do
+    with {:ok, embedding} <- get_or_compute_embedding(content, opts, provider),
+         {:ok, entry_id, now} <- generate_entry_identity(entry_id_generator, clock),
+         {:ok, normalized_embedding, normalized_metadata} <-
+           preflight_entry(backend, agent_id, content, embedding, metadata) do
+      {:ok,
+       %{
+         entry_id: entry_id,
+         now: now,
+         content: content,
+         embedding: normalized_embedding,
+         metadata: normalized_metadata
+       }}
+    end
+  rescue
+    _error -> {:error, :operation_failed}
+  catch
+    _kind, _reason -> {:error, :operation_failed}
+  end
+
+  defp run_background_call(
+         {:preflight_batch, backend, agent_id, provider, entry_id_generator, clock, items, opts}
+       ) do
+    items
+    |> Enum.with_index()
+    |> Enum.reduce_while({:ok, []}, fn {{content, metadata}, position}, {:ok, acc} ->
+      with {:ok, embedding} <- get_or_compute_embedding(content, opts, provider),
+           {:ok, entry_id, now} <- generate_entry_identity(entry_id_generator, clock),
+           {:ok, normalized_embedding, normalized_metadata} <-
+             preflight_entry(backend, agent_id, content, embedding, metadata) do
+        prepared = %{
+          entry_id: entry_id,
+          now: now,
+          content: content,
+          embedding: normalized_embedding,
+          metadata: normalized_metadata,
+          position: position
+        }
+
+        {:cont, {:ok, [prepared | acc]}}
+      else
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, prepared} -> {:ok, Enum.reverse(prepared)}
+      error -> error
+    end
+  rescue
+    _error -> {:error, :operation_failed}
+  catch
+    _kind, _reason -> {:error, :operation_failed}
+  end
+
+  defp run_background_call({:recall, context, query, opts}) do
+    do_recall(query, opts, context)
+  rescue
+    _error -> {:error, :operation_failed}
+  catch
+    _kind, _reason -> {:error, :operation_failed}
+  end
+
+  defp run_background_call({:warm_cache, agent_id, provider, opts}) do
+    fetch_warm_cache_entries(agent_id, provider, opts)
+  rescue
+    _error -> {:error, :operation_failed}
+  catch
+    _kind, _reason -> {:error, :operation_failed}
+  end
+
+  defp run_background_call({:delete, agent_id, entry_id}) do
+    case Embedding.delete(agent_id, entry_id) do
+      :ok -> :ok
+      {:error, reason} -> {:error, reason}
+      _malformed -> {:error, :persistence_indeterminate}
+    end
+  rescue
+    _error -> {:error, :persistence_indeterminate}
+  catch
+    _kind, _reason -> {:error, :persistence_indeterminate}
+  end
+
+  defp run_background_call({:single, writer, agent_id, entry, metadata}) do
     writer.store(agent_id, entry.content, entry.embedding, metadata)
     |> normalize_single_writer_result()
   rescue
@@ -1807,7 +2160,7 @@ defmodule Arbor.Memory.Index do
     _kind, _reason -> {:error, :persistence_indeterminate}
   end
 
-  defp run_persistent_writer_call({:batch, writer, agent_id, entries}) do
+  defp run_background_call({:batch, writer, agent_id, entries}) do
     writer.store_batch_with_ids(agent_id, entries)
     |> normalize_batch_writer_result(length(entries))
   rescue
@@ -1837,19 +2190,6 @@ defmodule Arbor.Memory.Index do
     do: {:error, {:permanent, :legacy_embedding_id_conflict}}
 
   defp normalize_writer_error(_reason), do: {:error, :persistence_indeterminate}
-
-  defp batch_store_with_ids(state, entries) do
-    batch_store_with_ids(state, state.persistent_writer, entries)
-  end
-
-  defp batch_store_with_ids(state, writer, entries) do
-    writer.store_batch_with_ids(state.agent_id, entries)
-    |> normalize_batch_writer_result(length(entries))
-  rescue
-    _error -> {:error, :persistence_indeterminate}
-  catch
-    _kind, _reason -> {:error, :persistence_indeterminate}
-  end
 
   defp normalize_batch_writer_result({:ok, authoritative_ids}, expected_count)
        when is_list(authoritative_ids) do
@@ -1939,51 +2279,42 @@ defmodule Arbor.Memory.Index do
 
   defp resolve_entry_id(entry_id, state), do: Map.get(state.id_aliases, entry_id, entry_id)
 
-  defp delete_entry(entry_id, %{backend: :pgvector} = state) do
-    case Embedding.delete(state.agent_id, entry_id) do
-      :ok -> {:ok, state}
-      {:error, reason} -> {:error, reason, state}
-    end
+  defp prepare_delete(entry_id, %{backend: :pgvector} = state) do
+    {:async, {:delete, state.agent_id, entry_id}, {:delete_persistent, entry_id, false}, :durable}
   end
 
-  defp delete_entry(entry_id, state) do
+  defp prepare_delete(entry_id, state) do
     canonical_id = resolve_entry_id(entry_id, state)
 
     case :ets.lookup(state.table, canonical_id) do
       [] ->
-        {:error, :not_found, state}
+        {:error, :not_found}
 
       [{^canonical_id, _entry}] when state.backend == :ets ->
         {:ok, remove_local_entry(state, canonical_id)}
 
       [{^canonical_id, _entry}] ->
-        delete_synced_entry(entry_id, canonical_id, state)
+        prepare_persistent_delete(entry_id, canonical_id, state)
     end
   end
 
-  defp delete_synced_entry(requested_id, canonical_id, state) do
-    case ensure_entry_synced(canonical_id, state) do
-      {:ok, synced_state} ->
-        durable_id = resolve_entry_id(requested_id, synced_state)
-
-        case Embedding.delete(synced_state.agent_id, durable_id) do
-          :ok -> {:ok, remove_local_entry(synced_state, durable_id)}
-          {:error, reason} -> {:error, reason, synced_state}
-        end
-
-      {:error, reason} ->
-        {:error, reason, state}
-    end
-  end
-
-  defp ensure_entry_synced(canonical_id, state) do
+  defp prepare_persistent_delete(requested_id, canonical_id, state) do
     if MapSet.member?(state.pending_sync, canonical_id) do
-      case do_sync_to_persistent(state) do
-        {:ok, _count, synced_state} -> {:ok, synced_state}
-        {:error, reason} -> {:error, reason}
+      case pending_sync_plan(state) do
+        {:complete, _count, synced_state} ->
+          durable_id = resolve_entry_id(requested_id, synced_state)
+
+          {:async, {:delete, synced_state.agent_id, durable_id},
+           {:delete_persistent, durable_id, true}, :durable}
+
+        {:write, groups, entries, converged_count} ->
+          writer_call = {:batch, state.persistent_writer, state.agent_id, entries}
+          completion = {:sync_then_delete, requested_id, groups, converged_count}
+          {:async, writer_call, completion, :durable}
       end
     else
-      {:ok, state}
+      {:async, {:delete, state.agent_id, canonical_id}, {:delete_persistent, canonical_id, true},
+       :durable}
     end
   end
 
