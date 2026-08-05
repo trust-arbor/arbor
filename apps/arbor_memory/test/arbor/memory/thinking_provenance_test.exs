@@ -460,7 +460,9 @@ defmodule Arbor.Memory.ThinkingProvenanceTest do
              Thinking.record_thinking_tainted(agent_id, "whole row trusted", trusted)
 
     true = :ets.delete(:arbor_memory_thinking, agent_id)
-    assert Thinking.recent_thinking(agent_id) == []
+
+    assert Enum.map(Thinking.recent_thinking(agent_id), & &1.id) ==
+             [trusted_entry.id, hostile_entry.id]
 
     assert {:ok, items} = Thinking.recent_thinking_tainted(agent_id, limit: 10)
     assert_taints_by_id(items, %{hostile_entry.id => hostile, trusted_entry.id => trusted})
@@ -506,7 +508,9 @@ defmodule Arbor.Memory.ThinkingProvenanceTest do
 
     [{^agent_id, [newest, _deleted]}] = :ets.lookup(:arbor_memory_thinking, agent_id)
     true = :ets.insert(:arbor_memory_thinking, {agent_id, [newest]})
-    assert Enum.map(Thinking.recent_thinking(agent_id), & &1.id) == [trusted_entry.id]
+
+    assert Enum.map(Thinking.recent_thinking(agent_id), & &1.id) ==
+             [trusted_entry.id, hostile_entry.id]
 
     assert {:ok, items} = Thinking.recent_thinking_tainted(agent_id, limit: 10)
     assert_taints_by_id(items, %{hostile_entry.id => hostile, trusted_entry.id => trusted})
@@ -633,16 +637,17 @@ defmodule Arbor.Memory.ThinkingProvenanceTest do
     })
   end
 
-  test "security regression: wrong-shape ETS rows fail closed without crashing the owner", %{
-    agent_id: agent_id
-  } do
+  test "security regression: wrong-shape ETS rows repair from authority without crashing the owner",
+       %{
+         agent_id: agent_id
+       } do
     label = %Taint{level: :hostile, sensitivity: :restricted, source: "shape_authority"}
     assert {:ok, entry} = Thinking.record_thinking_tainted(agent_id, "durable shape", label)
     owner = Process.whereis(Thinking)
     assert is_pid(owner)
 
     true = :ets.insert(:arbor_memory_thinking, {agent_id, :not_a_projection, :extra_field})
-    assert Thinking.recent_thinking(agent_id) == []
+    assert Enum.map(Thinking.recent_thinking(agent_id), & &1.id) == [entry.id]
     assert Process.alive?(owner)
 
     assert {:ok, [{%TaintedValue{value: repaired, taint: ^label}, :verified}]} =
@@ -652,7 +657,7 @@ defmodule Arbor.Memory.ThinkingProvenanceTest do
     assert Process.alive?(owner)
 
     true = :ets.insert(:arbor_memory_thinking, {agent_id, [entry | :improper_tail]})
-    assert Thinking.recent_thinking(agent_id) == []
+    assert Enum.map(Thinking.recent_thinking(agent_id), & &1.id) == [entry.id]
     assert :ok = Thinking.clear(agent_id)
     assert Process.alive?(owner)
     assert :ets.lookup(:arbor_memory_thinking, agent_id) == []
