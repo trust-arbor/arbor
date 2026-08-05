@@ -3,12 +3,13 @@ defmodule Arbor.Memory.IntegrationTest do
 
   alias Arbor.Memory
   alias Arbor.Memory.{IndexSupervisor, KnowledgeGraphStore}
-  alias Arbor.Memory.Test.DurableGraphAuthority
+  alias Arbor.Memory.Test.{DurableEventLog, DurableGraphAuthority}
 
   @moduletag :integration
 
   setup do
     DurableGraphAuthority.start!()
+    DurableEventLog.start!()
 
     :ok
   end
