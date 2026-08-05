@@ -1354,9 +1354,17 @@ defmodule Arbor.Orchestrator.SessionTest do
                  {make_ref(), 1}
                )
 
-      state = Arbor.Orchestrator.Session.get_state(pid)
-      assert state.turn_queue == []
-      assert fake_from in state.steer_froms
+      public_state = Arbor.Orchestrator.Session.get_state(pid)
+      assert public_state.turn_queue == []
+      assert public_state.steer_froms == nil
+      assert public_state.steer_caller_ownership == nil
+
+      internal_state = :sys.get_state(pid)
+      assert fake_from in internal_state.steer_froms
+
+      assert Enum.any?(internal_state.steer_caller_ownership, fn owner ->
+               owner.from == fake_from and is_reference(owner.monitor_ref)
+             end)
 
       assert :none ==
                Arbor.Orchestrator.Session.take_steering(

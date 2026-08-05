@@ -36,7 +36,7 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
       pid =
         spawn_link(fn ->
           receive do
-            {:"$gen_call", {from_pid, ref} = from, request} ->
+            {:"$gen_call", {from_pid, _ref} = from, request} ->
               send(parent, {:auth_session_call, from_pid, request})
               reply = reply_fun.(from_pid, request)
               GenServer.reply(from, reply)
