@@ -28,6 +28,8 @@ defmodule Arbor.Memory.Provenance do
     :working_memory_skill,
     :working_memory_concern,
     :working_memory_curiosity,
+    :knowledge_graph_base,
+    :knowledge_graph_aggregate,
     :knowledge_node,
     :knowledge_pending_fact,
     :knowledge_pending_learning,
@@ -54,6 +56,8 @@ defmodule Arbor.Memory.Provenance do
           | :working_memory_skill
           | :working_memory_concern
           | :working_memory_curiosity
+          | :knowledge_graph_base
+          | :knowledge_graph_aggregate
           | :knowledge_node
           | :knowledge_pending_fact
           | :knowledge_pending_learning

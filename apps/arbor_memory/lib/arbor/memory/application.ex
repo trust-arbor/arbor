@@ -27,6 +27,7 @@ defmodule Arbor.Memory.Application do
            write_mode: :async},
           {Registry, keys: :unique, name: Arbor.Memory.Registry},
           {Arbor.Memory.Provenance, []},
+          {Arbor.Memory.KnowledgeGraphStore, []},
           {Arbor.Memory.IndexSupervisor, []},
           {Arbor.Persistence.EventLog.ETS, name: :memory_events},
           # Seed/Host Phase 3 stores
