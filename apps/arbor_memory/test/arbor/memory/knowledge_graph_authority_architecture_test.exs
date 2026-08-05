@@ -147,6 +147,22 @@ defmodule Arbor.Memory.KnowledgeGraphAuthorityArchitectureTest do
     assert raw_authority_operations(source) == [:put]
   end
 
+  test "AST raw authority aliases remain lexical across sibling modules" do
+    source = """
+    defmodule UnauthorizedWriter do
+      alias Arbor.Memory.MemoryStore, as: Store
+      def write, do: Store.put("knowledge_graph", "agent", :forged)
+    end
+
+    defmodule LaterAlias do
+      alias Arbor.Memory.Provenance, as: Store
+      def wrap(value), do: Store.wrap(value)
+    end
+    """
+
+    assert raw_authority_operations(source) == [:put]
+  end
+
   test "AST detector catches remote apply and module-returning helper bypasses" do
     kernel_apply_source = """
     alias :ets, as: TableStore
@@ -218,7 +234,16 @@ defmodule Arbor.Memory.KnowledgeGraphAuthorityArchitectureTest do
   end
 
   defp resource_operations(source, resource, module_matcher) do
-    ast = Code.string_to_quoted!(source)
+    ast = source |> Code.string_to_quoted!() |> expand_lexical_aliases()
+
+    ast
+    |> analysis_scopes()
+    |> Enum.flat_map(&resource_operations_in_scope(&1, resource, module_matcher))
+    |> Enum.uniq()
+    |> Enum.sort()
+  end
+
+  defp resource_operations_in_scope(ast, resource, module_matcher) do
     bindings = resource_bindings(ast, resource, module_matcher)
 
     {_ast, operations} =
@@ -253,7 +278,7 @@ defmodule Arbor.Memory.KnowledgeGraphAuthorityArchitectureTest do
           {node, operations}
       end)
 
-    operations |> MapSet.to_list() |> Enum.sort()
+    MapSet.to_list(operations)
   end
 
   defp remote_call_operations(source, module_name) do
@@ -276,7 +301,6 @@ defmodule Arbor.Memory.KnowledgeGraphAuthorityArchitectureTest do
 
   defp resource_bindings(ast, resource, module_matcher) do
     definitions = function_definitions(ast)
-    aliases = module_aliases(ast)
 
     converge_bindings(
       ast,
@@ -288,7 +312,7 @@ defmodule Arbor.Memory.KnowledgeGraphAuthorityArchitectureTest do
         variables: MapSet.new(),
         module_attributes: MapSet.new(),
         modules: MapSet.new(),
-        aliases: aliases,
+        aliases: %{},
         functions: MapSet.new(),
         module_functions: MapSet.new()
       },
@@ -534,31 +558,109 @@ defmodule Arbor.Memory.KnowledgeGraphAuthorityArchitectureTest do
   defp kernel_module?({:__aliases__, _, [:Kernel]}), do: true
   defp kernel_module?(_module), do: false
 
-  defp module_aliases(ast) do
-    {_ast, aliases} =
-      Macro.prewalk(ast, %{}, fn
-        {:alias, _, [{{:., _, [prefix, :{}]}, _, modules}]} = node, aliases ->
-          aliases =
-            Enum.reduce(modules, aliases, fn module, aliases ->
-              name = alias_name(module, module)
-              target = append_module_alias(prefix, module)
-              Map.put(aliases, name, target)
-            end)
+  defp analysis_scopes({:__block__, metadata, expressions}) do
+    {modules, top_level} =
+      Enum.reduce(expressions, {[], []}, fn
+        {:defmodule, _, _} = module, {modules, top_level} ->
+          {[module | modules], top_level}
 
-          {node, aliases}
-
-        {:alias, _, [module, opts]} = node, aliases when is_list(opts) ->
-          {node, Map.put(aliases, alias_name(Keyword.get(opts, :as), module), module)}
-
-        {:alias, _, [module]} = node, aliases ->
-          {node, Map.put(aliases, alias_name(nil, module), module)}
-
-        node, aliases ->
-          {node, aliases}
+        expression, {modules, top_level} ->
+          {modules, [expression | top_level]}
       end)
 
-    aliases
+    top_level_scope =
+      case Enum.reverse(top_level) do
+        [] -> []
+        expressions -> [{:__block__, metadata, expressions}]
+      end
+
+    top_level_scope ++ Enum.reverse(modules)
   end
+
+  defp analysis_scopes(ast), do: [ast]
+
+  defp expand_lexical_aliases(ast) do
+    {expanded, _aliases} = expand_aliases(ast, %{})
+    expanded
+  end
+
+  defp expand_aliases({:__block__, metadata, expressions}, aliases) do
+    {expressions, aliases} =
+      Enum.map_reduce(expressions, aliases, fn expression, aliases ->
+        expand_aliases(expression, aliases)
+      end)
+
+    {{:__block__, metadata, expressions}, aliases}
+  end
+
+  defp expand_aliases(
+         {:alias, metadata, [{{:., dot_meta, [prefix, :{}]}, call_meta, modules}]},
+         aliases
+       ) do
+    prefix = expand_alias_reference(prefix, aliases)
+
+    aliases =
+      Enum.reduce(modules, aliases, fn module, aliases ->
+        target = append_module_alias(prefix, module)
+        Map.put(aliases, module |> module_parts() |> List.last(), target)
+      end)
+
+    {{:alias, metadata, [{{:., dot_meta, [prefix, :{}]}, call_meta, modules}]}, aliases}
+  end
+
+  defp expand_aliases({:alias, metadata, [module, opts]}, aliases) when is_list(opts) do
+    module = expand_alias_reference(module, aliases)
+    name = opts |> Keyword.get(:as) |> alias_name(module)
+    {{:alias, metadata, [module, opts]}, Map.put(aliases, name, module)}
+  end
+
+  defp expand_aliases({:alias, metadata, [module]}, aliases) do
+    module = expand_alias_reference(module, aliases)
+    name = alias_name(nil, module)
+    {{:alias, metadata, [module]}, Map.put(aliases, name, module)}
+  end
+
+  defp expand_aliases({kind, metadata, arguments}, aliases)
+       when kind in [:defmodule, :def, :defp, :defmacro, :defmacrop] and is_list(arguments) do
+    {arguments, _scoped_aliases} = expand_alias_list(arguments, aliases)
+    {{kind, metadata, arguments}, aliases}
+  end
+
+  defp expand_aliases({:__aliases__, _, _} = reference, aliases),
+    do: {expand_alias_reference(reference, aliases), aliases}
+
+  defp expand_aliases(tuple, aliases) when is_tuple(tuple) do
+    {elements, _aliases} =
+      tuple
+      |> Tuple.to_list()
+      |> expand_alias_list(aliases)
+
+    {List.to_tuple(elements), aliases}
+  end
+
+  defp expand_aliases(list, aliases) when is_list(list) do
+    {list, _aliases} = expand_alias_list(list, aliases)
+    {list, aliases}
+  end
+
+  defp expand_aliases(term, aliases), do: {term, aliases}
+
+  defp expand_alias_list(elements, aliases) do
+    Enum.map_reduce(elements, aliases, fn element, aliases ->
+      {expanded, _nested_aliases} = expand_aliases(element, aliases)
+      {expanded, aliases}
+    end)
+  end
+
+  defp expand_alias_reference({:__aliases__, metadata, [name | rest]} = reference, aliases) do
+    case Map.get(aliases, name) do
+      nil -> reference
+      target when is_atom(target) and rest == [] -> target
+      target -> {:__aliases__, metadata, module_parts(target) ++ rest}
+    end
+  end
+
+  defp expand_alias_reference(reference, _aliases), do: reference
 
   defp append_module_alias(prefix, module) do
     {:__aliases__, [], module_parts(prefix) ++ module_parts(module)}
