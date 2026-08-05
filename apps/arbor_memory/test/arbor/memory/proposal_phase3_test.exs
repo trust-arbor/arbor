@@ -1,11 +1,16 @@
 defmodule Arbor.Memory.ProposalPhase3Test do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
-  alias Arbor.Memory.{KnowledgeGraph, Proposal}
+  alias Arbor.Memory.{IntentStore, KnowledgeGraph, Proposal}
+  alias Arbor.Persistence.BufferedStore
 
   @moduletag :fast
 
   setup do
+    start_supervised!(
+      {BufferedStore, name: :arbor_memory_durable, backend: nil, write_mode: :sync}
+    )
+
     ensure_ets_tables()
     agent_id = "test_agent_p3_#{System.unique_integer([:positive])}"
     graph = KnowledgeGraph.new(agent_id)
@@ -13,6 +18,7 @@ defmodule Arbor.Memory.ProposalPhase3Test do
 
     on_exit(fn ->
       Proposal.delete_all(agent_id)
+      IntentStore.clear(agent_id)
       :ets.delete(:arbor_memory_graphs, agent_id)
     end)
 
