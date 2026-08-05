@@ -458,7 +458,9 @@ defmodule Arbor.Persistence.EventLog.ETS do
           end
 
         [] ->
-          {:ok, nil}
+          if identity_history_unavailable?(state),
+            do: {:error, :identity_history_unavailable},
+            else: {:ok, nil}
       end
 
     {:reply, reply, state}

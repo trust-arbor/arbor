@@ -136,6 +136,25 @@ defmodule Arbor.Persistence.EventLogPublicBoundarySecurityRegressionTest do
     refute ETS.stream_exists?("public-ets-deadline", name: name)
   end
 
+  test "security regression: incomplete ETS identity history cannot claim absence", %{
+    ets_name: name
+  } do
+    assert {:ok, {:identity_history_unavailable, _details}} =
+             ETS.rehydrate_metadata(
+               %{stream_versions: %{"durable-stream" => 2}, global_position: 2},
+               name: name
+             )
+
+    assert {:error, :identity_history_unavailable} =
+             Persistence.event_identity(
+               name,
+               ETS,
+               "durable-stream",
+               "missing-event",
+               max_event_number: 2
+             )
+  end
+
   test "security regression: malformed authorization opts are rejected before authorization", %{
     name: name
   } do

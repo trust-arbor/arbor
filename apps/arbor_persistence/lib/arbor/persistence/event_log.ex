@@ -131,7 +131,9 @@ defmodule Arbor.Persistence.EventLog do
   callback lets projections compare identities without scanning an event log.
   `:max_event_number` optionally limits the lookup to identities at or before
   that inclusive stream position, allowing callers to preserve a captured
-  stream snapshot while comparing projections.
+  stream snapshot while comparing projections. A backend with incomplete
+  identity history returns `{:error, :identity_history_unavailable}` rather
+  than claiming a missing identity is absent.
   """
   @callback event_identity(stream_id(), event_id :: String.t(), opts()) ::
               {:ok, String.t() | nil} | {:error, term()}
