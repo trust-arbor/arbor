@@ -17,11 +17,12 @@ defmodule Arbor.Memory.DistributedSync do
 
   use GenServer
 
+  alias Arbor.Memory.GoalStore
+
   require Logger
 
   @working_memory_ets :arbor_working_memory
   @graph_ets :arbor_memory_graphs
-  @goals_ets :arbor_memory_goals
 
   # Signal types we subscribe to and their categories
   @subscribed_types [
@@ -84,8 +85,8 @@ defmodule Arbor.Memory.DistributedSync do
     handle_remote_signal(type, data)
     {:noreply, state}
   rescue
-    e ->
-      Logger.warning("[DistributedSync] Error handling signal #{inspect(signal.type)}: #{inspect(e)}")
+    _ ->
+      Logger.warning("[DistributedSync] Error handling signal #{inspect(signal.type)}")
       {:noreply, state}
   end
 
@@ -136,33 +137,18 @@ defmodule Arbor.Memory.DistributedSync do
   end
 
   defp reload_goal(agent_id, goal_id) do
-    if ets_exists?(@goals_ets) do
-      # Reload this specific goal from Postgres via GoalStore
-      # GoalStore.reload_for_agent loads all goals for the agent,
-      # but we only need one. For now, do a targeted reload.
-      memory_store = Arbor.Memory.MemoryStore
+    case GoalStore.reload_goal_from_durable(agent_id, goal_id) do
+      :ok ->
+        Logger.debug("[DistributedSync] Reloaded goal #{goal_id} for #{agent_id}")
 
-      if memory_store.available?() do
-        key = "#{agent_id}:#{goal_id}"
-
-        case memory_store.load("goals", key) do
-          {:ok, goal_map} when is_map(goal_map) ->
-            goal = goal_from_map(goal_map)
-            :ets.insert(@goals_ets, {{agent_id, goal.id}, goal})
-            Logger.debug("[DistributedSync] Reloaded goal #{goal_id} for #{agent_id}")
-
-          _ ->
-            # Goal may have been deleted — remove from ETS
-            :ets.delete(@goals_ets, {agent_id, goal_id})
-            Logger.debug("[DistributedSync] Removed goal #{goal_id} for #{agent_id}")
-        end
-      end
+      {:error, _reason} ->
+        Logger.warning("[DistributedSync] Failed to reload goal #{goal_id} for #{agent_id}")
     end
 
     :ok
   rescue
-    e ->
-      Logger.warning("[DistributedSync] Failed to reload goal #{goal_id}: #{inspect(e)}")
+    _ ->
+      Logger.warning("[DistributedSync] Failed to reload goal #{goal_id}")
       :ok
   end
 
@@ -184,7 +170,9 @@ defmodule Arbor.Memory.DistributedSync do
           end)
         end
 
-        Logger.info("[DistributedSync] Subscribed to #{length(@subscribed_types)} memory signal types")
+        Logger.info(
+          "[DistributedSync] Subscribed to #{length(@subscribed_types)} memory signal types"
+        )
       end
     end
 
@@ -208,57 +196,4 @@ defmodule Arbor.Memory.DistributedSync do
   rescue
     _ -> false
   end
-
-  # Goal deserialization — mirrors GoalStore.goal_from_map/1
-  defp goal_from_map(map) do
-    alias Arbor.Contracts.Memory.Goal
-
-    map = atomize_keys(map)
-
-    %Goal{
-      id: map[:id],
-      description: map[:description],
-      type: safe_atom(map[:type], :achieve),
-      status: safe_atom(map[:status], :active),
-      priority: map[:priority] || 50,
-      parent_id: map[:parent_id],
-      progress: map[:progress] || 0.0,
-      created_at: parse_datetime(map[:created_at]),
-      achieved_at: parse_datetime(map[:achieved_at]),
-      deadline: parse_datetime(map[:deadline]),
-      success_criteria: map[:success_criteria],
-      notes: map[:notes] || [],
-      assigned_by: safe_atom(map[:assigned_by], nil),
-      metadata: map[:metadata] || %{}
-    }
-  end
-
-  defp atomize_keys(map) when is_map(map) do
-    Map.new(map, fn
-      {k, v} when is_binary(k) -> {String.to_existing_atom(k), v}
-      {k, v} when is_atom(k) -> {k, v}
-    end)
-  end
-
-  defp safe_atom(val, _default) when is_atom(val), do: val
-
-  defp safe_atom(val, default) when is_binary(val) do
-    String.to_existing_atom(val)
-  rescue
-    ArgumentError -> default
-  end
-
-  defp safe_atom(_, default), do: default
-
-  defp parse_datetime(nil), do: nil
-  defp parse_datetime(%DateTime{} = dt), do: dt
-
-  defp parse_datetime(str) when is_binary(str) do
-    case DateTime.from_iso8601(str) do
-      {:ok, dt, _} -> dt
-      _ -> nil
-    end
-  end
-
-  defp parse_datetime(_), do: nil
 end

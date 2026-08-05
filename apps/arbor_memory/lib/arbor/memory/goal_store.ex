@@ -22,13 +22,41 @@ defmodule Arbor.Memory.GoalStore do
 
   use GenServer
 
+  alias Arbor.Common.SafeAtom
   alias Arbor.Contracts.Memory.Goal
-  alias Arbor.Memory.MemoryStore
-  alias Arbor.Memory.Signals
+  alias Arbor.Contracts.Security.{Taint, TaintedValue, TaintEnvelope}
+  alias Arbor.Memory.{MemoryStore, Provenance, Signals}
 
   require Logger
 
   @ets_table :arbor_memory_goals
+  @goal_fields [
+    :id,
+    :description,
+    :type,
+    :status,
+    :priority,
+    :parent_id,
+    :progress,
+    :created_at,
+    :achieved_at,
+    :deadline,
+    :success_criteria,
+    :notes,
+    :assigned_by,
+    :metadata,
+    :referenced_date
+  ]
+  @goal_types [:achieve, :maintain, :explore, :learn, :avoid]
+  @goal_statuses [:active, :achieved, :failed, :abandoned, :blocked]
+  @max_identifier_bytes 256
+  @max_goal_text_bytes 1_048_576
+  @max_goal_note_bytes 65_536
+  @max_goal_notes 128
+
+  @type provenance_status ::
+          :verified | :legacy_unlabeled | :invalid_durable_provenance
+  @type tainted_goal :: {TaintedValue.t(), provenance_status()}
 
   # Per-agent hard cap on goal count. Configurable via Application config:
   #
@@ -75,28 +103,15 @@ defmodule Arbor.Memory.GoalStore do
 
       {:ok, goal} = GoalStore.add_goal("agent_001", "Fix the login bug", type: :achieve)
   """
-  @spec add_goal(String.t(), Goal.t()) :: {:ok, Goal.t()} | {:error, :goal_limit_reached}
+  @spec add_goal(String.t(), Goal.t()) ::
+          {:ok, Goal.t()} | {:error, :goal_limit_reached | :invalid_provenance}
   def add_goal(agent_id, %Goal{} = goal) do
-    if at_goal_limit?(agent_id) do
-      Logger.warning(
-        "[GoalStore] Refusing to add goal for #{agent_id}: at limit (#{goal_limit()}). " <>
-          "Description: #{goal.description}"
-      )
-
-      {:error, :goal_limit_reached}
-    else
-      :ets.insert(@ets_table, {{agent_id, goal.id}, goal})
-      persist_goal_async(agent_id, goal)
-
-      Signals.emit_goal_created(agent_id, goal)
-      Logger.debug("Goal added for #{agent_id}: #{goal.id} - #{goal.description}")
-
-      {:ok, goal}
-    end
+    add_goal_tainted(agent_id, goal, TaintEnvelope.missing_fallback())
   end
 
   @spec add_goal(String.t(), String.t(), keyword()) ::
-          {:ok, Goal.t()} | {:error, :empty_description | :goal_limit_reached}
+          {:ok, Goal.t()}
+          | {:error, :empty_description | :goal_limit_reached | :invalid_provenance}
   def add_goal(agent_id, description, opts \\ []) when is_binary(description) do
     if String.trim(description) == "" do
       {:error, :empty_description}
@@ -105,6 +120,61 @@ defmodule Arbor.Memory.GoalStore do
       add_goal(agent_id, goal)
     end
   end
+
+  @doc """
+  Add a goal with an explicit provenance label.
+
+  The label is validated against the exact serialized goal payload and the
+  embedded description before any live or durable state is changed.
+  """
+  @spec add_goal_tainted(String.t(), Goal.t(), Taint.t()) ::
+          {:ok, Goal.t()} | {:error, :goal_limit_reached | :invalid_provenance}
+  def add_goal_tainted(agent_id, %Goal{} = goal, taint) do
+    with {:ok, _payload, taint} <- prepare_labeled_goal(goal, taint),
+         {:ok, taint} <- join_existing_goal_taint(agent_id, goal.id, taint) do
+      if at_goal_limit?(agent_id) do
+        Logger.warning(
+          "[GoalStore] Refusing to add goal for #{agent_id}: at limit (#{goal_limit()})"
+        )
+
+        {:error, :goal_limit_reached}
+      else
+        with {:ok, payload, taint} <- prepare_labeled_goal(goal, taint),
+             :ok <- commit_labeled_goal(agent_id, goal, payload, taint) do
+          Signals.emit_goal_created(agent_id, goal)
+          Logger.debug("Goal added for #{agent_id}: #{goal.id}")
+          {:ok, goal}
+        end
+      end
+    else
+      _ -> {:error, :invalid_provenance}
+    end
+  rescue
+    _ -> {:error, :invalid_provenance}
+  catch
+    _, _ -> {:error, :invalid_provenance}
+  end
+
+  def add_goal_tainted(_agent_id, _goal, _taint), do: {:error, :invalid_provenance}
+
+  @spec add_goal_tainted(String.t(), String.t(), keyword(), Taint.t()) ::
+          {:ok, Goal.t()}
+          | {:error, :empty_description | :goal_limit_reached | :invalid_provenance}
+  def add_goal_tainted(agent_id, description, opts, taint)
+      when is_binary(description) and is_list(opts) do
+    if String.trim(description) == "" do
+      {:error, :empty_description}
+    else
+      add_goal_tainted(agent_id, Goal.new(description, opts), taint)
+    end
+  rescue
+    _ -> {:error, :invalid_provenance}
+  catch
+    _, _ -> {:error, :invalid_provenance}
+  end
+
+  def add_goal_tainted(_agent_id, _description, _opts, _taint),
+    do: {:error, :invalid_provenance}
 
   # Count active goals for an agent and check against the cap.
   defp at_goal_limit?(agent_id) do
@@ -134,27 +204,64 @@ defmodule Arbor.Memory.GoalStore do
   end
 
   @doc """
+  Get a goal with its live provenance and explicit provenance status.
+
+  The sidecar is verified against the exact serialized goal payload. Missing
+  provenance remains legacy-unlabeled; malformed or mismatched provenance is
+  returned with the hostile invalid-durable-provenance label.
+  """
+  @spec get_goal_tainted(String.t(), String.t()) ::
+          {:ok, TaintedValue.t(), provenance_status()}
+          | {:error, :not_found | :invalid_provenance}
+  def get_goal_tainted(agent_id, goal_id)
+      when is_binary(agent_id) and is_binary(goal_id) do
+    with {:ok, %Goal{} = goal} <- get_goal(agent_id, goal_id),
+         {:ok, payload} <- serialize_goal(goal),
+         {:ok, taint, status} <- Provenance.resolve(:goal, agent_id, goal_id, payload) do
+      {:ok, TaintedValue.wrap(goal, taint), provenance_status(taint, status)}
+    else
+      {:error, :not_found} = error -> error
+      _ -> {:error, :invalid_provenance}
+    end
+  rescue
+    _ -> {:error, :invalid_provenance}
+  catch
+    _, _ -> {:error, :invalid_provenance}
+  end
+
+  def get_goal_tainted(_agent_id, _goal_id), do: {:error, :invalid_provenance}
+
+  @doc """
   Update goal progress (0.0 to 1.0).
 
   Emits a `{:memory, :goal_progress}` signal.
   """
   @spec update_goal_progress(String.t(), String.t(), float()) ::
-          {:ok, Goal.t()} | {:error, :not_found}
+          {:ok, Goal.t()} | {:error, :not_found | :invalid_provenance}
   def update_goal_progress(agent_id, goal_id, progress)
       when is_float(progress) and progress >= 0.0 and progress <= 1.0 do
-    case get_goal(agent_id, goal_id) do
-      {:ok, goal} ->
-        updated = Goal.update_progress(goal, progress)
-        :ets.insert(@ets_table, {{agent_id, goal_id}, updated})
-        persist_goal_async(agent_id, updated)
+    update_goal_progress_tainted(
+      agent_id,
+      goal_id,
+      progress,
+      TaintEnvelope.missing_fallback()
+    )
+  end
 
-        Signals.emit_goal_progress(agent_id, goal_id, progress)
-        {:ok, updated}
-
-      error ->
-        error
+  @doc "Update goal progress while monotonically joining an explicit label."
+  @spec update_goal_progress_tainted(String.t(), String.t(), float(), Taint.t()) ::
+          {:ok, Goal.t()} | {:error, :not_found | :invalid_provenance}
+  def update_goal_progress_tainted(agent_id, goal_id, progress, taint)
+      when is_float(progress) and progress >= 0.0 and progress <= 1.0 do
+    with {:ok, updated} <-
+           mutate_goal(agent_id, goal_id, taint, &Goal.update_progress(&1, progress)) do
+      Signals.emit_goal_progress(agent_id, goal_id, progress)
+      {:ok, updated}
     end
   end
+
+  def update_goal_progress_tainted(_agent_id, _goal_id, _progress, _taint),
+    do: {:error, :invalid_provenance}
 
   @doc """
   Mark a goal as achieved.
@@ -162,19 +269,19 @@ defmodule Arbor.Memory.GoalStore do
   Sets progress to 1.0, status to `:achieved`, and records the timestamp.
   Emits a `{:memory, :goal_achieved}` signal.
   """
-  @spec achieve_goal(String.t(), String.t()) :: {:ok, Goal.t()} | {:error, :not_found}
+  @spec achieve_goal(String.t(), String.t()) ::
+          {:ok, Goal.t()} | {:error, :not_found | :invalid_provenance}
   def achieve_goal(agent_id, goal_id) do
-    case get_goal(agent_id, goal_id) do
-      {:ok, goal} ->
-        updated = Goal.achieve(goal)
-        :ets.insert(@ets_table, {{agent_id, goal_id}, updated})
-        persist_goal_async(agent_id, updated)
+    achieve_goal_tainted(agent_id, goal_id, TaintEnvelope.missing_fallback())
+  end
 
-        Signals.emit_goal_achieved(agent_id, goal_id)
-        {:ok, updated}
-
-      error ->
-        error
+  @doc "Mark a goal achieved while monotonically joining an explicit label."
+  @spec achieve_goal_tainted(String.t(), String.t(), Taint.t()) ::
+          {:ok, Goal.t()} | {:error, :not_found | :invalid_provenance}
+  def achieve_goal_tainted(agent_id, goal_id, taint) do
+    with {:ok, updated} <- mutate_goal(agent_id, goal_id, taint, &Goal.achieve/1) do
+      Signals.emit_goal_achieved(agent_id, goal_id)
+      {:ok, updated}
     end
   end
 
@@ -184,19 +291,18 @@ defmodule Arbor.Memory.GoalStore do
   Emits a `{:memory, :goal_abandoned}` signal.
   """
   @spec abandon_goal(String.t(), String.t(), String.t() | nil) ::
-          {:ok, Goal.t()} | {:error, :not_found}
+          {:ok, Goal.t()} | {:error, :not_found | :invalid_provenance}
   def abandon_goal(agent_id, goal_id, reason \\ nil) do
-    case get_goal(agent_id, goal_id) do
-      {:ok, goal} ->
-        updated = Goal.abandon(goal, reason)
-        :ets.insert(@ets_table, {{agent_id, goal_id}, updated})
-        persist_goal_async(agent_id, updated)
+    abandon_goal_tainted(agent_id, goal_id, reason, TaintEnvelope.missing_fallback())
+  end
 
-        Signals.emit_goal_abandoned(agent_id, goal_id, reason)
-        {:ok, updated}
-
-      error ->
-        error
+  @doc "Abandon a goal while monotonically joining an explicit label."
+  @spec abandon_goal_tainted(String.t(), String.t(), String.t() | nil, Taint.t()) ::
+          {:ok, Goal.t()} | {:error, :not_found | :invalid_provenance}
+  def abandon_goal_tainted(agent_id, goal_id, reason, taint) do
+    with {:ok, updated} <- mutate_goal(agent_id, goal_id, taint, &Goal.abandon(&1, reason)) do
+      Signals.emit_goal_abandoned(agent_id, goal_id, reason)
+      {:ok, updated}
     end
   end
 
@@ -207,19 +313,18 @@ defmodule Arbor.Memory.GoalStore do
   Emits a `{:memory, :goal_failed}` signal.
   """
   @spec fail_goal(String.t(), String.t(), String.t() | nil) ::
-          {:ok, Goal.t()} | {:error, :not_found}
+          {:ok, Goal.t()} | {:error, :not_found | :invalid_provenance}
   def fail_goal(agent_id, goal_id, reason \\ nil) do
-    case get_goal(agent_id, goal_id) do
-      {:ok, goal} ->
-        updated = Goal.fail(goal, reason)
-        :ets.insert(@ets_table, {{agent_id, goal_id}, updated})
-        persist_goal_async(agent_id, updated)
+    fail_goal_tainted(agent_id, goal_id, reason, TaintEnvelope.missing_fallback())
+  end
 
-        Signals.emit_goal_abandoned(agent_id, goal_id, reason || "failed")
-        {:ok, updated}
-
-      error ->
-        error
+  @doc "Fail a goal while monotonically joining an explicit label."
+  @spec fail_goal_tainted(String.t(), String.t(), String.t() | nil, Taint.t()) ::
+          {:ok, Goal.t()} | {:error, :not_found | :invalid_provenance}
+  def fail_goal_tainted(agent_id, goal_id, reason, taint) do
+    with {:ok, updated} <- mutate_goal(agent_id, goal_id, taint, &Goal.fail(&1, reason)) do
+      Signals.emit_goal_abandoned(agent_id, goal_id, reason || "failed")
+      {:ok, updated}
     end
   end
 
@@ -229,18 +334,16 @@ defmodule Arbor.Memory.GoalStore do
   Prepends the note to the goal's notes field.
   """
   @spec add_note(String.t(), String.t(), String.t()) ::
-          {:ok, Goal.t()} | {:error, :not_found}
+          {:ok, Goal.t()} | {:error, :not_found | :invalid_provenance}
   def add_note(agent_id, goal_id, note) when is_binary(note) do
-    case get_goal(agent_id, goal_id) do
-      {:ok, goal} ->
-        updated = Goal.add_note(goal, note)
-        :ets.insert(@ets_table, {{agent_id, goal_id}, updated})
-        persist_goal_async(agent_id, updated)
-        {:ok, updated}
+    add_note_tainted(agent_id, goal_id, note, TaintEnvelope.missing_fallback())
+  end
 
-      error ->
-        error
-    end
+  @doc "Add a note while monotonically joining an explicit label."
+  @spec add_note_tainted(String.t(), String.t(), String.t(), Taint.t()) ::
+          {:ok, Goal.t()} | {:error, :not_found | :invalid_provenance}
+  def add_note_tainted(agent_id, goal_id, note, taint) when is_binary(note) do
+    mutate_goal(agent_id, goal_id, taint, &Goal.add_note(&1, note))
   end
 
   @doc """
@@ -253,20 +356,23 @@ defmodule Arbor.Memory.GoalStore do
       {:ok, goal} = GoalStore.block_goal("agent_001", goal_id, ["waiting on API key"])
   """
   @spec block_goal(String.t(), String.t(), [String.t()] | nil) ::
-          {:ok, Goal.t()} | {:error, :not_found}
+          {:ok, Goal.t()} | {:error, :not_found | :invalid_provenance}
   def block_goal(agent_id, goal_id, blockers \\ nil) do
-    case get_goal(agent_id, goal_id) do
-      {:ok, goal} ->
-        updated_metadata = Map.put(goal.metadata || %{}, :blockers, blockers || [])
-        updated = %{goal | status: :blocked, metadata: updated_metadata}
-        :ets.insert(@ets_table, {{agent_id, goal_id}, updated})
-        persist_goal_async(agent_id, updated)
+    block_goal_tainted(agent_id, goal_id, blockers, TaintEnvelope.missing_fallback())
+  end
 
-        Signals.emit_goal_abandoned(agent_id, goal_id, "blocked")
-        {:ok, updated}
+  @doc "Block a goal while monotonically joining an explicit label."
+  @spec block_goal_tainted(String.t(), String.t(), [String.t()] | nil, Taint.t()) ::
+          {:ok, Goal.t()} | {:error, :not_found | :invalid_provenance}
+  def block_goal_tainted(agent_id, goal_id, blockers, taint) do
+    update = fn goal ->
+      updated_metadata = Map.put(goal.metadata || %{}, :blockers, blockers || [])
+      %{goal | status: :blocked, metadata: updated_metadata}
+    end
 
-      error ->
-        error
+    with {:ok, updated} <- mutate_goal(agent_id, goal_id, taint, update) do
+      Signals.emit_goal_abandoned(agent_id, goal_id, "blocked")
+      {:ok, updated}
     end
   end
 
@@ -278,19 +384,24 @@ defmodule Arbor.Memory.GoalStore do
       {:ok, goal} = GoalStore.update_goal_metadata("agent_001", goal_id, %{decomposition_failed: true})
   """
   @spec update_goal_metadata(String.t(), String.t(), map()) ::
-          {:ok, Goal.t()} | {:error, :not_found}
+          {:ok, Goal.t()} | {:error, :not_found | :invalid_provenance}
   def update_goal_metadata(agent_id, goal_id, new_metadata) when is_map(new_metadata) do
-    case get_goal(agent_id, goal_id) do
-      {:ok, goal} ->
-        merged = Map.merge(goal.metadata || %{}, new_metadata)
-        updated = %{goal | metadata: merged}
-        :ets.insert(@ets_table, {{agent_id, goal_id}, updated})
-        persist_goal_async(agent_id, updated)
-        {:ok, updated}
+    update_goal_metadata_tainted(
+      agent_id,
+      goal_id,
+      new_metadata,
+      TaintEnvelope.missing_fallback()
+    )
+  end
 
-      error ->
-        error
-    end
+  @doc "Update metadata while monotonically joining an explicit label."
+  @spec update_goal_metadata_tainted(String.t(), String.t(), map(), Taint.t()) ::
+          {:ok, Goal.t()} | {:error, :not_found | :invalid_provenance}
+  def update_goal_metadata_tainted(agent_id, goal_id, new_metadata, taint)
+      when is_map(new_metadata) do
+    mutate_goal(agent_id, goal_id, taint, fn goal ->
+      %{goal | metadata: Map.merge(goal.metadata || %{}, new_metadata)}
+    end)
   end
 
   @doc """
@@ -308,6 +419,15 @@ defmodule Arbor.Memory.GoalStore do
     ArgumentError -> []
   end
 
+  @doc "Get active goals with per-goal taint and explicit provenance status."
+  @spec get_active_goals_tainted(String.t()) ::
+          {:ok, [tainted_goal()]} | {:error, :invalid_provenance}
+  def get_active_goals_tainted(agent_id) do
+    agent_id
+    |> get_active_goals()
+    |> taint_goal_list(agent_id)
+  end
+
   @doc """
   Get all goals for an agent (any status).
   """
@@ -317,6 +437,15 @@ defmodule Arbor.Memory.GoalStore do
     :ets.select(@ets_table, match_spec)
   rescue
     ArgumentError -> []
+  end
+
+  @doc "Get all goals with per-goal taint and explicit provenance status."
+  @spec get_all_goals_tainted(String.t()) ::
+          {:ok, [tainted_goal()]} | {:error, :invalid_provenance}
+  def get_all_goals_tainted(agent_id) do
+    agent_id
+    |> get_all_goals()
+    |> taint_goal_list(agent_id)
   end
 
   @doc """
@@ -343,6 +472,7 @@ defmodule Arbor.Memory.GoalStore do
   @spec delete_goal(String.t(), String.t()) :: :ok
   def delete_goal(agent_id, goal_id) do
     _ = safe_ets_delete({agent_id, goal_id})
+    _ = Provenance.delete(:goal, agent_id, goal_id)
     MemoryStore.delete("goals", "#{agent_id}:#{goal_id}")
     :ok
   end
@@ -352,9 +482,11 @@ defmodule Arbor.Memory.GoalStore do
   """
   @spec clear_goals(String.t()) :: :ok
   def clear_goals(agent_id) do
+    goal_ids = goal_ids_for_agent(agent_id)
     match_spec = [{{{agent_id, :_}, :_}, [], [true]}]
     _ = safe_ets_select_delete(match_spec)
-    MemoryStore.delete_by_prefix("goals", agent_id)
+    Enum.each(goal_ids, &Provenance.delete(:goal, agent_id, &1))
+    MemoryStore.delete_by_prefix("goals", "#{agent_id}:")
     :ok
   end
 
@@ -442,13 +574,16 @@ defmodule Arbor.Memory.GoalStore do
     if MemoryStore.available?() do
       prefix = "#{agent_id}:"
 
-      case MemoryStore.load_all("goals") do
-        {:ok, pairs} ->
-          pairs
-          |> Enum.filter(fn {key, _} -> String.starts_with?(key, prefix) end)
-          |> Enum.each(fn {_key, goal_map} ->
-            goal = goal_from_map(goal_map)
-            :ets.insert(@ets_table, {{agent_id, goal.id}, goal})
+      case MemoryStore.load_by_prefix_tainted("goals", prefix) do
+        {:ok, entries} ->
+          Enum.each(entries, fn
+            {key, %TaintedValue{} = value, status} ->
+              with {:ok, goal_id} <- goal_id_from_agent_key(key, prefix) do
+                _ = restore_tainted_goal(agent_id, goal_id, value, status)
+              end
+
+            _malformed ->
+              :ok
           end)
 
         _ ->
@@ -458,13 +593,44 @@ defmodule Arbor.Memory.GoalStore do
 
     :ok
   rescue
-    e ->
-      Logger.warning(
-        "[GoalStore] reload_for_agent failed for #{agent_id}: #{Exception.message(e)}"
-      )
-
+    _ ->
+      Logger.warning("[GoalStore] reload_for_agent failed for #{agent_id}")
       :ok
   end
+
+  @doc false
+  @spec reload_goal_from_durable(String.t(), String.t()) ::
+          :ok | {:error, :invalid_provenance | :store_unavailable}
+  def reload_goal_from_durable(agent_id, goal_id)
+      when is_binary(agent_id) and is_binary(goal_id) do
+    if MemoryStore.available?() do
+      key = "#{agent_id}:#{goal_id}"
+
+      case MemoryStore.load_tainted_with_status("goals", key) do
+        {:ok, %TaintedValue{} = value, status} ->
+          restore_tainted_goal(agent_id, goal_id, value, status)
+
+        {:error, :not_found} ->
+          _ = safe_ets_delete({agent_id, goal_id})
+          _ = Provenance.delete(:goal, agent_id, goal_id)
+          :ok
+
+        {:error, _reason} ->
+          {:error, :store_unavailable}
+
+        _ ->
+          {:error, :invalid_provenance}
+      end
+    else
+      {:error, :store_unavailable}
+    end
+  rescue
+    _ -> {:error, :invalid_provenance}
+  catch
+    _, _ -> {:error, :invalid_provenance}
+  end
+
+  def reload_goal_from_durable(_agent_id, _goal_id), do: {:error, :invalid_provenance}
 
   # ============================================================================
   # Export / Import (for Seed capture & restore)
@@ -478,12 +644,11 @@ defmodule Arbor.Memory.GoalStore do
   @spec export_all_goals(String.t()) :: [map()]
   def export_all_goals(agent_id) do
     get_all_goals(agent_id)
-    |> Enum.map(fn goal ->
-      goal
-      |> Map.from_struct()
-      |> Map.update(:created_at, nil, &maybe_to_iso8601/1)
-      |> Map.update(:achieved_at, nil, &maybe_to_iso8601/1)
-      |> Map.update(:deadline, nil, &maybe_to_iso8601/1)
+    |> Enum.flat_map(fn goal ->
+      case serialize_goal(goal) do
+        {:ok, payload} -> [payload]
+        {:error, _reason} -> []
+      end
     end)
   end
 
@@ -493,68 +658,23 @@ defmodule Arbor.Memory.GoalStore do
   Used by `Arbor.Agent.Seed.restore/2` to restore goal state.
   """
   @spec import_goals(String.t(), [map()]) :: :ok
-  def import_goals(agent_id, goal_maps) do
+  def import_goals(agent_id, goal_maps) when is_list(goal_maps) do
     Enum.each(goal_maps, fn goal_map ->
-      goal = goal_from_map(goal_map)
-      :ets.insert(@ets_table, {{agent_id, goal.id}, goal})
+      with {:ok, goal} <- goal_from_map(goal_map),
+           {:ok, payload, taint} <-
+             prepare_labeled_goal(goal, TaintEnvelope.missing_fallback()) do
+        _ = commit_live_goal(agent_id, goal, payload, taint)
+      end
     end)
 
     :ok
-  end
-
-  defp maybe_to_iso8601(nil), do: nil
-  defp maybe_to_iso8601(%DateTime{} = dt), do: DateTime.to_iso8601(dt)
-  defp maybe_to_iso8601(other), do: other
-
-  defp goal_from_map(map) do
-    map = atomize_keys(map)
-
-    %Goal{
-      id: map[:id],
-      description: map[:description],
-      type: safe_atom(map[:type], :achieve),
-      status: safe_atom(map[:status], :active),
-      priority: map[:priority] || 50,
-      parent_id: map[:parent_id],
-      progress: map[:progress] || 0.0,
-      created_at: parse_datetime(map[:created_at]),
-      achieved_at: parse_datetime(map[:achieved_at]),
-      deadline: parse_datetime(map[:deadline]),
-      success_criteria: map[:success_criteria],
-      notes: map[:notes] || [],
-      assigned_by: safe_atom(map[:assigned_by], nil),
-      metadata: map[:metadata] || %{}
-    }
-  end
-
-  defp atomize_keys(map) when is_map(map) do
-    Map.new(map, fn
-      {k, v} when is_binary(k) -> {String.to_existing_atom(k), v}
-      {k, v} when is_atom(k) -> {k, v}
-    end)
-  end
-
-  defp safe_atom(val, _default) when is_atom(val), do: val
-
-  defp safe_atom(val, default) when is_binary(val) do
-    String.to_existing_atom(val)
   rescue
-    ArgumentError -> default
+    _ -> :ok
+  catch
+    _, _ -> :ok
   end
 
-  defp safe_atom(_, default), do: default
-
-  defp parse_datetime(nil), do: nil
-  defp parse_datetime(%DateTime{} = dt), do: dt
-
-  defp parse_datetime(str) when is_binary(str) do
-    case DateTime.from_iso8601(str) do
-      {:ok, dt, _} -> dt
-      _ -> nil
-    end
-  end
-
-  defp parse_datetime(_), do: nil
+  def import_goals(_agent_id, _goal_maps), do: :ok
 
   # ============================================================================
   # GenServer Callbacks
@@ -579,46 +699,503 @@ defmodule Arbor.Memory.GoalStore do
     ArgumentError -> :ok
   end
 
-  defp persist_goal_async(agent_id, %Goal{} = goal) do
+  defp mutate_goal(agent_id, goal_id, supplied_taint, update) do
+    with {:ok, supplied_taint} <- canonical_taint(supplied_taint),
+         {:ok, %TaintedValue{value: %Goal{} = goal, taint: prior_taint}, _status} <-
+           get_goal_tainted(agent_id, goal_id),
+         {:ok, taint} <- Taint.join(prior_taint, supplied_taint),
+         {:ok, updated} <- apply_goal_update(goal, update),
+         {:ok, payload, taint} <- prepare_labeled_goal(updated, taint),
+         :ok <- commit_labeled_goal(agent_id, updated, payload, taint) do
+      {:ok, updated}
+    else
+      {:error, :not_found} = error -> error
+      _ -> {:error, :invalid_provenance}
+    end
+  rescue
+    _ -> {:error, :invalid_provenance}
+  catch
+    _, _ -> {:error, :invalid_provenance}
+  end
+
+  defp apply_goal_update(%Goal{} = goal, update) when is_function(update, 1) do
+    case update.(goal) do
+      %Goal{} = updated -> {:ok, updated}
+      _ -> {:error, :invalid_goal}
+    end
+  rescue
+    _ -> {:error, :invalid_goal}
+  catch
+    _, _ -> {:error, :invalid_goal}
+  end
+
+  defp prepare_labeled_goal(%Goal{} = goal, taint) do
+    with {:ok, payload} <- serialize_goal(goal),
+         {:ok, taint} <- canonical_taint(taint),
+         {:ok, _goal_envelope} <- TaintEnvelope.new(payload, taint),
+         {:ok, _embedding_envelope} <- TaintEnvelope.new(goal.description, taint) do
+      {:ok, payload, taint}
+    else
+      _ -> {:error, :invalid_provenance}
+    end
+  end
+
+  defp canonical_taint(taint) do
+    case Taint.canonicalize(taint) do
+      {:ok, %Taint{} = canonical} -> {:ok, canonical}
+      _ -> {:error, :invalid_provenance}
+    end
+  rescue
+    _ -> {:error, :invalid_provenance}
+  catch
+    _, _ -> {:error, :invalid_provenance}
+  end
+
+  defp join_existing_goal_taint(agent_id, goal_id, supplied_taint) do
+    case get_goal_tainted(agent_id, goal_id) do
+      {:ok, %TaintedValue{taint: prior_taint}, _status} ->
+        case Taint.join(prior_taint, supplied_taint) do
+          {:ok, %Taint{} = taint} -> {:ok, taint}
+          _ -> {:error, :invalid_provenance}
+        end
+
+      {:error, :not_found} ->
+        {:ok, supplied_taint}
+
+      _ ->
+        {:error, :invalid_provenance}
+    end
+  end
+
+  defp commit_labeled_goal(agent_id, %Goal{} = goal, payload, %Taint{} = taint) do
+    with :ok <- commit_live_goal(agent_id, goal, payload, taint),
+         :ok <- persist_goal_async(agent_id, goal, payload, taint) do
+      :ok
+    else
+      _ -> {:error, :invalid_provenance}
+    end
+  end
+
+  defp commit_live_goal(agent_id, %Goal{} = goal, payload, %Taint{} = taint) do
+    with :ok <- Provenance.put(:goal, agent_id, goal.id, payload, taint),
+         true <- :ets.insert(@ets_table, {{agent_id, goal.id}, goal}) do
+      :ok
+    else
+      _ ->
+        _ = Provenance.delete(:goal, agent_id, goal.id)
+        {:error, :invalid_provenance}
+    end
+  rescue
+    _ ->
+      _ = Provenance.delete(:goal, agent_id, goal.id)
+      {:error, :invalid_provenance}
+  catch
+    _, _ ->
+      _ = Provenance.delete(:goal, agent_id, goal.id)
+      {:error, :invalid_provenance}
+  end
+
+  defp persist_goal_async(agent_id, %Goal{} = goal, payload, %Taint{} = taint) do
     key = "#{agent_id}:#{goal.id}"
 
-    goal_map =
-      goal
-      |> Map.from_struct()
-      |> Map.update(:created_at, nil, &maybe_to_iso8601/1)
-      |> Map.update(:achieved_at, nil, &maybe_to_iso8601/1)
-      |> Map.update(:deadline, nil, &maybe_to_iso8601/1)
-
-    MemoryStore.persist_async("goals", key, goal_map)
-    MemoryStore.embed_async("goals", key, goal.description, agent_id: agent_id, type: :goal)
+    with :ok <- MemoryStore.persist_async("goals", key, payload, taint: taint),
+         :ok <-
+           MemoryStore.embed_async("goals", key, goal.description,
+             agent_id: agent_id,
+             type: :goal,
+             taint: taint
+           ) do
+      :ok
+    else
+      _ -> {:error, :invalid_provenance}
+    end
   end
 
   defp load_goals_from_postgres do
     if MemoryStore.available?() do
-      case MemoryStore.load_all("goals") do
-        {:ok, pairs} ->
-          Enum.each(pairs, &restore_goal_from_pair/1)
-          Logger.info("GoalStore: loaded #{length(pairs)} goals from Postgres")
+      case MemoryStore.load_all_tainted("goals") do
+        {:ok, entries} ->
+          loaded = Enum.count(entries, &restore_goal_entry/1)
+          Logger.info("GoalStore: loaded #{loaded} goals from Postgres")
 
         _ ->
           :ok
       end
     end
   rescue
-    e ->
-      Logger.warning("GoalStore: failed to load from Postgres: #{inspect(e)}")
+    _ -> Logger.warning("GoalStore: failed to load goals from Postgres")
+  catch
+    _, _ -> Logger.warning("GoalStore: failed to load goals from Postgres")
   end
 
-  defp restore_goal_from_pair({key, goal_map}) do
-    case String.split(key, ":", parts: 2) do
-      [agent_id, _goal_id] ->
-        goal = goal_from_map(goal_map)
-        :ets.insert(@ets_table, {{agent_id, goal.id}, goal})
-
-      _ ->
-        Logger.warning("GoalStore: invalid key format from Postgres: #{key}")
+  defp restore_goal_entry({key, %TaintedValue{} = value, status}) do
+    with {:ok, agent_id, goal_id} <- agent_and_goal_from_key(key),
+         :ok <- restore_tainted_goal(agent_id, goal_id, value, status) do
+      true
+    else
+      _ -> false
     end
   end
+
+  defp restore_goal_entry(_entry), do: false
+
+  defp restore_tainted_goal(
+         agent_id,
+         goal_id,
+         %TaintedValue{value: goal_map, taint: taint},
+         status
+       )
+       when status in [:verified, :legacy_unlabeled, :invalid_durable_provenance] do
+    with {:ok, %Goal{id: ^goal_id} = goal} <- goal_from_map(goal_map),
+         {:ok, payload} <- serialize_goal(goal),
+         {:ok, taint} <- reload_taint(goal_map, payload, taint, status),
+         {:ok, ^payload, ^taint} <- prepare_labeled_goal(goal, taint),
+         :ok <- commit_live_goal(agent_id, goal, payload, taint) do
+      :ok
+    else
+      _ -> invalidate_live_goal(agent_id, goal_id)
+    end
+  rescue
+    _ -> invalidate_live_goal(agent_id, goal_id)
+  catch
+    _, _ -> invalidate_live_goal(agent_id, goal_id)
+  end
+
+  defp restore_tainted_goal(agent_id, goal_id, _value, _status) do
+    invalidate_live_goal(agent_id, goal_id)
+  end
+
+  defp invalidate_live_goal(agent_id, goal_id) do
+    _ = safe_ets_delete({agent_id, goal_id})
+    _ = Provenance.delete(:goal, agent_id, goal_id)
+    {:error, :invalid_provenance}
+  end
+
+  defp reload_taint(_durable_payload, _canonical_payload, _taint, :legacy_unlabeled),
+    do: {:ok, TaintEnvelope.missing_fallback()}
+
+  defp reload_taint(
+         _durable_payload,
+         _canonical_payload,
+         _taint,
+         :invalid_durable_provenance
+       ),
+       do: {:ok, TaintEnvelope.invalid_fallback()}
+
+  defp reload_taint(durable_payload, canonical_payload, taint, :verified) do
+    with {:ok, durable_digest} <- TaintEnvelope.payload_sha256(durable_payload),
+         {:ok, canonical_digest} <- TaintEnvelope.payload_sha256(canonical_payload) do
+      if durable_digest == canonical_digest do
+        canonical_taint(taint)
+      else
+        {:ok, TaintEnvelope.invalid_fallback()}
+      end
+    else
+      _ -> {:ok, TaintEnvelope.invalid_fallback()}
+    end
+  end
+
+  defp serialize_goal(%Goal{} = goal) do
+    with true <- exact_goal_shape?(goal),
+         {:ok, _validated} <- decode_normalized_goal(Map.from_struct(goal)),
+         {:ok, created_at} <- serialize_datetime(goal.created_at),
+         {:ok, achieved_at} <- serialize_datetime(goal.achieved_at),
+         {:ok, deadline} <- serialize_datetime(goal.deadline),
+         {:ok, referenced_date} <- serialize_datetime(goal.referenced_date) do
+      payload =
+        goal
+        |> Map.from_struct()
+        |> Map.put(:created_at, created_at)
+        |> Map.put(:achieved_at, achieved_at)
+        |> Map.put(:deadline, deadline)
+        |> Map.put(:referenced_date, referenced_date)
+
+      {:ok, payload}
+    else
+      _ -> {:error, :invalid_goal}
+    end
+  rescue
+    _ -> {:error, :invalid_goal}
+  catch
+    _, _ -> {:error, :invalid_goal}
+  end
+
+  defp serialize_goal(_goal), do: {:error, :invalid_goal}
+
+  defp exact_goal_shape?(%Goal{} = goal) do
+    map_size(goal) == length(@goal_fields) + 1 and
+      Enum.sort(Map.keys(goal)) == Enum.sort([:__struct__ | @goal_fields])
+  end
+
+  defp goal_from_map(%Goal{} = goal) do
+    case serialize_goal(goal) do
+      {:ok, _payload} -> {:ok, goal}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp goal_from_map(map) when is_map(map) and not is_struct(map) do
+    with :ok <- validate_goal_map_keys(map),
+         normalized <- SafeAtom.atomize_keys(map, @goal_fields),
+         {:ok, goal} <- decode_normalized_goal(normalized) do
+      {:ok, goal}
+    else
+      _ -> {:error, :invalid_goal}
+    end
+  rescue
+    _ -> {:error, :invalid_goal}
+  catch
+    _, _ -> {:error, :invalid_goal}
+  end
+
+  defp goal_from_map(_map), do: {:error, :invalid_goal}
+
+  defp validate_goal_map_keys(map) do
+    allowed_strings = Enum.map(@goal_fields, &Atom.to_string/1)
+
+    valid_keys? =
+      Enum.all?(Map.keys(map), fn key ->
+        key in @goal_fields or key in allowed_strings
+      end)
+
+    duplicate_alias? =
+      Enum.any?(@goal_fields, fn key ->
+        Map.has_key?(map, key) and Map.has_key?(map, Atom.to_string(key))
+      end)
+
+    if valid_keys? and not duplicate_alias?, do: :ok, else: {:error, :invalid_goal}
+  end
+
+  defp decode_normalized_goal(map) do
+    with {:ok, id} <- required_field(map, :id, &identifier_value/1),
+         {:ok, description} <- required_field(map, :description, &description_value/1),
+         {:ok, type} <- optional_field(map, :type, :achieve, &enum_value(&1, @goal_types)),
+         {:ok, status} <- optional_field(map, :status, :active, &enum_value(&1, @goal_statuses)),
+         {:ok, priority} <- optional_field(map, :priority, 50, &priority_value/1),
+         {:ok, parent_id} <- optional_field(map, :parent_id, nil, &optional_identifier_value/1),
+         {:ok, progress} <- optional_field(map, :progress, 0.0, &progress_value/1),
+         {:ok, created_at} <- required_field(map, :created_at, &datetime_value/1),
+         {:ok, achieved_at} <- optional_field(map, :achieved_at, nil, &optional_datetime_value/1),
+         {:ok, deadline} <- optional_field(map, :deadline, nil, &optional_datetime_value/1),
+         {:ok, success_criteria} <-
+           optional_field(map, :success_criteria, nil, &optional_binary_value/1),
+         {:ok, notes} <- optional_field(map, :notes, [], &notes_value/1),
+         {:ok, assigned_by} <- optional_field(map, :assigned_by, nil, &assigned_by_value/1),
+         {:ok, metadata} <- optional_field(map, :metadata, %{}, &metadata_value/1),
+         {:ok, referenced_date} <-
+           optional_field(map, :referenced_date, nil, &optional_datetime_value/1) do
+      {:ok,
+       %Goal{
+         id: id,
+         description: description,
+         type: type,
+         status: status,
+         priority: priority,
+         parent_id: parent_id,
+         progress: progress,
+         created_at: created_at,
+         achieved_at: achieved_at,
+         deadline: deadline,
+         success_criteria: success_criteria,
+         notes: notes,
+         assigned_by: assigned_by,
+         metadata: metadata,
+         referenced_date: referenced_date
+       }}
+    else
+      _ -> {:error, :invalid_goal}
+    end
+  end
+
+  defp required_field(map, key, validator) do
+    case Map.fetch(map, key) do
+      {:ok, value} -> validator.(value)
+      :error -> {:error, :invalid_goal}
+    end
+  end
+
+  defp optional_field(map, key, default, validator) do
+    case Map.fetch(map, key) do
+      {:ok, value} -> validator.(value)
+      :error -> {:ok, default}
+    end
+  end
+
+  defp identifier_value(value) when is_binary(value) do
+    if byte_size(value) <= @max_identifier_bytes and String.valid?(value) and
+         String.trim(value) != "" do
+      {:ok, value}
+    else
+      {:error, :invalid_goal}
+    end
+  end
+
+  defp identifier_value(_value), do: {:error, :invalid_goal}
+
+  defp description_value(value) when is_binary(value) do
+    if byte_size(value) <= @max_goal_text_bytes and String.valid?(value) and
+         String.trim(value) != "" do
+      {:ok, value}
+    else
+      {:error, :invalid_goal}
+    end
+  end
+
+  defp description_value(_value), do: {:error, :invalid_goal}
+
+  defp optional_identifier_value(nil), do: {:ok, nil}
+  defp optional_identifier_value(value), do: identifier_value(value)
+
+  defp optional_binary_value(nil), do: {:ok, nil}
+
+  defp optional_binary_value(value) when is_binary(value) do
+    if byte_size(value) <= @max_goal_text_bytes and String.valid?(value),
+      do: {:ok, value},
+      else: {:error, :invalid_goal}
+  end
+
+  defp optional_binary_value(_value), do: {:error, :invalid_goal}
+
+  defp enum_value(value, allowed) do
+    case SafeAtom.to_allowed(value, allowed) do
+      {:ok, atom} -> {:ok, atom}
+      {:error, _reason} -> {:error, :invalid_goal}
+    end
+  end
+
+  defp priority_value(value) when is_integer(value) and value >= 0 and value <= 100,
+    do: {:ok, value}
+
+  defp priority_value(_value), do: {:error, :invalid_goal}
+
+  defp progress_value(value) when is_float(value) and value >= 0.0 and value <= 1.0,
+    do: {:ok, value}
+
+  defp progress_value(_value), do: {:error, :invalid_goal}
+
+  defp datetime_value(%DateTime{} = datetime) do
+    case serialize_datetime(datetime) do
+      {:ok, _serialized} -> {:ok, datetime}
+      _ -> {:error, :invalid_goal}
+    end
+  end
+
+  defp datetime_value(value) when is_binary(value) and byte_size(value) <= 128 do
+    case DateTime.from_iso8601(value) do
+      {:ok, datetime, _offset} -> {:ok, datetime}
+      _ -> {:error, :invalid_goal}
+    end
+  end
+
+  defp datetime_value(_value), do: {:error, :invalid_goal}
+
+  defp optional_datetime_value(nil), do: {:ok, nil}
+  defp optional_datetime_value(value), do: datetime_value(value)
+
+  defp notes_value(value) do
+    case validate_notes(value, 0) do
+      :ok -> {:ok, value}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp validate_notes([], _count), do: :ok
+
+  defp validate_notes([note | rest], count) when count < @max_goal_notes do
+    if is_binary(note) and byte_size(note) <= @max_goal_note_bytes and String.valid?(note) do
+      validate_notes(rest, count + 1)
+    else
+      {:error, :invalid_goal}
+    end
+  end
+
+  defp validate_notes(_value, _count), do: {:error, :invalid_goal}
+
+  defp assigned_by_value(nil), do: {:ok, nil}
+
+  defp assigned_by_value(value) when is_binary(value) or is_atom(value) do
+    case SafeAtom.to_existing(value) do
+      {:ok, atom} -> {:ok, atom}
+      {:error, _reason} -> {:error, :invalid_goal}
+    end
+  end
+
+  defp assigned_by_value(_value), do: {:error, :invalid_goal}
+
+  defp metadata_value(value) when is_map(value) and not is_struct(value), do: {:ok, value}
+  defp metadata_value(_value), do: {:error, :invalid_goal}
+
+  defp serialize_datetime(nil), do: {:ok, nil}
+  defp serialize_datetime(%DateTime{} = datetime), do: {:ok, DateTime.to_iso8601(datetime)}
+  defp serialize_datetime(_value), do: {:error, :invalid_goal}
+
+  defp provenance_status(taint, status) do
+    cond do
+      taint == TaintEnvelope.invalid_fallback() -> :invalid_durable_provenance
+      taint == TaintEnvelope.missing_fallback() -> :legacy_unlabeled
+      true -> status
+    end
+  end
+
+  defp taint_goal_list(goals, agent_id) when is_list(goals) do
+    Enum.reduce_while(goals, {:ok, []}, fn
+      %Goal{id: goal_id}, {:ok, acc} ->
+        case get_goal_tainted(agent_id, goal_id) do
+          {:ok, value, status} -> {:cont, {:ok, [{value, status} | acc]}}
+          _ -> {:halt, {:error, :invalid_provenance}}
+        end
+
+      _invalid, _acc ->
+        {:halt, {:error, :invalid_provenance}}
+    end)
+    |> case do
+      {:ok, entries} -> {:ok, Enum.reverse(entries)}
+      error -> error
+    end
+  end
+
+  defp taint_goal_list(_goals, _agent_id), do: {:error, :invalid_provenance}
+
+  defp goal_ids_for_agent(agent_id) do
+    match_spec = [{{{agent_id, :"$1"}, :_}, [], [:"$1"]}]
+
+    @ets_table
+    |> :ets.select(match_spec)
+    |> Enum.filter(&is_binary/1)
+  rescue
+    ArgumentError -> []
+  end
+
+  defp goal_id_from_agent_key(key, prefix) when is_binary(key) and is_binary(prefix) do
+    if String.starts_with?(key, prefix) do
+      goal_id = String.replace_prefix(key, prefix, "")
+      if valid_identifier?(goal_id), do: {:ok, goal_id}, else: {:error, :invalid_key}
+    else
+      {:error, :invalid_key}
+    end
+  end
+
+  defp goal_id_from_agent_key(_key, _prefix), do: {:error, :invalid_key}
+
+  defp agent_and_goal_from_key(key) when is_binary(key) do
+    case String.split(key, ":", parts: 2) do
+      [agent_id, goal_id] ->
+        if valid_identifier?(agent_id) and valid_identifier?(goal_id),
+          do: {:ok, agent_id, goal_id},
+          else: {:error, :invalid_key}
+
+      _ ->
+        {:error, :invalid_key}
+    end
+  end
+
+  defp agent_and_goal_from_key(_key), do: {:error, :invalid_key}
+
+  defp valid_identifier?(value) when is_binary(value) do
+    match?({:ok, ^value}, identifier_value(value))
+  end
+
+  defp valid_identifier?(_value), do: false
 
   defp build_tree(goal, all_goals) do
     children =
