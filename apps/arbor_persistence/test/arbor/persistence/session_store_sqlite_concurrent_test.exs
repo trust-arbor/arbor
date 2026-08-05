@@ -2,13 +2,12 @@ defmodule Arbor.Persistence.SessionStoreSQLiteConcurrentTest do
   @moduledoc """
   Runs the public SessionStore append boundary against a real multi-connection
   SQLite pool. DatabaseCase deliberately shares one sandbox connection, so it
-  cannot prove writer serialization. Run this module standalone with both
-  `--include database --include isolated_repo`.
+  cannot prove writer serialization. Run this module standalone with
+  `--include isolated_repo`.
   """
 
   use ExUnit.Case, async: false
 
-  @moduletag :database
   @moduletag :isolated_repo
 
   @migrations_path Path.expand("../../../priv/repo/migrations", __DIR__)

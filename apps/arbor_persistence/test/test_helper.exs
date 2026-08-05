@@ -9,5 +9,5 @@ end
 
 # Exclude database and isolated-repo tests by default.
 # Run database tests with: mix test --include database
-# Run the real SQLite pool proof with: mix test --include database --include isolated_repo
+# Run the real SQLite pool proof with: mix test --include isolated_repo
 ExUnit.start(exclude: [:database, :isolated_repo, :llm, :llm_local])

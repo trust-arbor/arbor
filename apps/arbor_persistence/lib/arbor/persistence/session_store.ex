@@ -18,13 +18,16 @@ defmodule Arbor.Persistence.SessionStore do
   alias Arbor.Contracts.Security.TaintEnvelope
   alias Arbor.Persistence.Repo
   alias Arbor.Persistence.Schemas.{Session, SessionEntry}
+  alias Ecto.{Adapter, Adapters.SQL}
 
   require Logger
 
   @max_entry_ordinal 9_223_372_036_854_775_807
-  @sqlite_transaction_max_attempts 5
+  @sqlite_transaction_budget_ms 5_000
   @sqlite_transaction_initial_backoff_ms 2
   @sqlite_transaction_max_backoff_ms 50
+  @sqlite_busy_slice_ms 5
+  @sqlite_pragma_timeout_ms 25
   @effect_marker_key {__MODULE__, :effect_marker}
   @entry_fields [
     :id,
@@ -370,29 +373,67 @@ defmodule Arbor.Persistence.SessionStore do
 
   defp transaction(repo, fun) do
     if sqlite_repo?(repo) do
-      sqlite_transaction(repo, fun, 1)
+      deadline = System.monotonic_time(:millisecond) + @sqlite_transaction_budget_ms
+      sqlite_transaction(repo, fun, deadline, 1)
     else
       repo.transaction(fun)
     end
   end
 
-  defp sqlite_transaction(repo, fun, attempt) do
+  defp sqlite_transaction(repo, fun, deadline, attempt) do
     effect_marker = {__MODULE__, make_ref()}
     Process.put(@effect_marker_key, effect_marker)
 
     try do
-      repo.transaction(fun, mode: :immediate)
+      case remaining_sqlite_timeout(deadline) do
+        {:ok, checkout_timeout} ->
+          checkout_sql_connection(repo, checkout_timeout, deadline, fn ->
+            original_busy_timeout = sqlite_busy_timeout(repo, deadline)
+            bounded_busy_timeout = sqlite_attempt_busy_timeout(deadline)
+
+            set_sqlite_busy_timeout(repo, bounded_busy_timeout, deadline)
+
+            try do
+              case remaining_sqlite_timeout(deadline) do
+                {:ok, transaction_timeout} ->
+                  repo.transaction(fun,
+                    mode: :immediate,
+                    timeout: transaction_timeout,
+                    deadline: deadline
+                  )
+
+                :expired ->
+                  {:error, :database_error}
+              end
+            after
+              reset_sqlite_busy_timeout(repo, original_busy_timeout)
+            end
+          end)
+
+        :expired ->
+          {:error, :database_error}
+      end
+    else
+      {:error, reason} = result ->
+        if retryable_sqlite_failure?(attempt, effect_marker, deadline, reason) do
+          backoff_and_retry(repo, fun, deadline, attempt)
+        else
+          result
+        end
+
+      result ->
+        result
     rescue
       error ->
-        if retryable_sqlite_failure?(attempt, effect_marker, error) do
-          backoff_and_retry(repo, fun, attempt)
+        if retryable_sqlite_failure?(attempt, effect_marker, deadline, error) do
+          backoff_and_retry(repo, fun, deadline, attempt)
         else
           reraise(error, __STACKTRACE__)
         end
     catch
       :exit, reason ->
-        if retryable_sqlite_failure?(attempt, effect_marker, reason) do
-          backoff_and_retry(repo, fun, attempt)
+        if retryable_sqlite_failure?(attempt, effect_marker, deadline, reason) do
+          backoff_and_retry(repo, fun, deadline, attempt)
         else
           exit(reason)
         end
@@ -681,20 +722,107 @@ defmodule Arbor.Persistence.SessionStore do
 
   defp sqlite_lock_message?(_message), do: false
 
-  defp retryable_sqlite_failure?(attempt, marker, failure) do
-    attempt < @sqlite_transaction_max_attempts and
-      Process.get(marker) != true and sqlite_lock_failure?(failure)
+  defp retryable_sqlite_failure?(_attempt, marker, deadline, failure) do
+    Process.get(marker) != true and
+      sqlite_acquisition_failure?(failure) and
+      remaining_sqlite_timeout(deadline) != :expired
   end
 
-  defp backoff_and_retry(repo, fun, attempt) do
+  defp sqlite_acquisition_failure?(failure) do
+    sqlite_lock_failure?(failure) or sqlite_pool_unavailable?(failure)
+  end
+
+  defp sqlite_pool_unavailable?(%{__exception__: true} = error) do
+    error |> Exception.message() |> sqlite_pool_unavailable?()
+  end
+
+  defp sqlite_pool_unavailable?(message) when is_binary(message) do
+    normalized = String.downcase(message)
+
+    String.contains?(normalized, "connection not available") or
+      String.contains?(normalized, "queuing is disabled") or
+      String.contains?(normalized, "timed out") or
+      String.contains?(normalized, "timeout")
+  end
+
+  defp sqlite_pool_unavailable?(value) when is_tuple(value) do
+    value |> Tuple.to_list() |> Enum.any?(&sqlite_pool_unavailable?/1)
+  end
+
+  defp sqlite_pool_unavailable?(value) when is_list(value),
+    do: Enum.any?(value, &sqlite_pool_unavailable?/1)
+
+  defp sqlite_pool_unavailable?(_value), do: false
+
+  defp backoff_and_retry(repo, fun, deadline, attempt) do
     backoff_ms =
       min(
-        @sqlite_transaction_initial_backoff_ms * Integer.pow(2, attempt - 1),
-        @sqlite_transaction_max_backoff_ms
+        @sqlite_transaction_initial_backoff_ms * Integer.pow(2, min(attempt - 1, 5)),
+        min(@sqlite_transaction_max_backoff_ms, remaining_sqlite_timeout!(deadline))
       )
 
     Process.sleep(backoff_ms)
-    sqlite_transaction(repo, fun, attempt + 1)
+    sqlite_transaction(repo, fun, deadline, attempt + 1)
+  end
+
+  defp remaining_sqlite_timeout(deadline) do
+    case deadline - System.monotonic_time(:millisecond) do
+      timeout when timeout > 0 -> {:ok, timeout}
+      _ -> :expired
+    end
+  end
+
+  defp remaining_sqlite_timeout!(deadline) do
+    case remaining_sqlite_timeout(deadline) do
+      {:ok, timeout} -> timeout
+      :expired -> 1
+    end
+  end
+
+  defp checkout_sql_connection(repo, timeout, deadline, fun) do
+    repo.get_dynamic_repo()
+    |> Adapter.lookup_meta()
+    |> SQL.checkout([timeout: timeout, deadline: deadline, queue: false], fun)
+  end
+
+  defp sqlite_busy_timeout(repo, deadline) do
+    case repo.query("PRAGMA busy_timeout", [],
+           timeout: @sqlite_pragma_timeout_ms,
+           deadline: deadline
+         ) do
+      {:ok, %{rows: [[timeout]]}} when is_integer(timeout) -> timeout
+      {:ok, _result} -> raise "unexpected SQLite busy_timeout result"
+      {:error, error} -> raise error
+    end
+  end
+
+  defp sqlite_attempt_busy_timeout(deadline) do
+    case remaining_sqlite_timeout(deadline) do
+      {:ok, remaining_ms} -> max(1, min(remaining_ms, @sqlite_busy_slice_ms))
+      :expired -> 1
+    end
+  end
+
+  defp set_sqlite_busy_timeout(repo, timeout, deadline) do
+    case repo.query(
+           "PRAGMA busy_timeout = #{timeout}",
+           [],
+           timeout: @sqlite_pragma_timeout_ms,
+           deadline: deadline
+         ) do
+      {:ok, _result} -> :ok
+      {:error, error} -> raise error
+    end
+  end
+
+  defp reset_sqlite_busy_timeout(repo, timeout) do
+    case repo.query("PRAGMA busy_timeout = #{timeout}", [], timeout: @sqlite_pragma_timeout_ms) do
+      {:ok, _result} -> :ok
+      {:error, %DBConnection.ConnectionError{}} -> :ok
+      {:error, error} -> raise error
+    end
+  catch
+    :exit, _reason -> :ok
   end
 
   defp mark_effect_started do
