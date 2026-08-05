@@ -809,7 +809,7 @@ defmodule Arbor.Memory.Index do
     Process.send_after(self(), {:mutation_deadline, mutation_ref}, remaining)
   end
 
-  defp cancel_mutation_deadline(timer_ref), do: Process.cancel_timer(timer_ref, async: true)
+  defp cancel_mutation_deadline(timer_ref), do: Process.cancel_timer(timer_ref)
 
   defp monotonic_milliseconds, do: System.monotonic_time(:millisecond)
 
