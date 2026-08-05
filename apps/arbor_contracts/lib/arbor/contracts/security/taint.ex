@@ -16,6 +16,12 @@ defmodule Arbor.Contracts.Security.Taint do
   - `:internal` sensitivity (not public by default)
   - 0 sanitizations (nothing has been cleaned)
   - `:unverified` confidence (we don't know how reliable the classification is)
+
+  ## JSON compatibility
+
+  The explicit Jason encoder preserves transient compatibility for validated
+  taints and `TaintedValue`. It is not a durable representation. Durable callers
+  must bind their payload through `Arbor.Contracts.Security.TaintEnvelope.to_map/1`.
   """
 
   use TypedStruct
@@ -50,8 +56,8 @@ defmodule Arbor.Contracts.Security.Taint do
   @max_source_bytes 128
   @max_chain_entries 16
   @max_chain_entry_bytes 128
+  @max_join_inputs 256
 
-  @derive Jason.Encoder
   typedstruct enforce: true do
     field(:level, level(), default: :trusted)
     field(:sensitivity, sensitivity(), default: :internal)
@@ -76,6 +82,10 @@ defmodule Arbor.Contracts.Security.Taint do
   @doc "Returns the maximum byte length of one provenance-chain entry."
   @spec max_chain_entry_bytes() :: pos_integer()
   def max_chain_entry_bytes, do: @max_chain_entry_bytes
+
+  @doc "Returns the maximum number of taints accepted by one monotonic join."
+  @spec max_join_inputs() :: pos_integer()
+  def max_join_inputs, do: @max_join_inputs
 
   @doc "Returns the absorbing fail-closed durable-provenance taint."
   @spec invalid_durable_provenance() :: t()
@@ -149,12 +159,17 @@ defmodule Arbor.Contracts.Security.Taint do
     end
   end
 
-  @doc "Returns the monotonic join of a non-empty list of taints."
+  @doc "Returns the bounded monotonic join of a non-empty proper list of taints."
   @spec join_many([term()]) :: {:ok, t()} | {:error, atom()}
-  def join_many([first | rest]),
-    do: Enum.reduce_while(rest, canonicalize(first), &join_many_step/2)
+  def join_many([]), do: {:error, :empty_taint_list}
 
-  def join_many(_values), do: {:error, :invalid_taint}
+  def join_many([first | rest]) do
+    with {:ok, first} <- canonicalize(first) do
+      join_many(rest, first, 1)
+    end
+  end
+
+  def join_many(_values), do: {:error, :invalid_taint_list}
 
   @doc "Returns the exact string-keyed taint representation used by durable envelopes."
   @spec to_persisted(term()) :: {:ok, map()} | {:error, atom()}
@@ -202,20 +217,21 @@ defmodule Arbor.Contracts.Security.Taint do
   def confidences, do: [:unverified, :plausible, :corroborated, :verified]
 
   defp exact_attributes(attrs) when is_map(attrs) and not is_struct(attrs) do
-    keys = Map.keys(attrs)
+    if map_size(attrs) != length(@taint_fields) do
+      {:error, :invalid_taint_shape}
+    else
+      keys = Map.keys(attrs)
 
-    cond do
-      map_size(attrs) != length(@taint_fields) ->
-        {:error, :invalid_taint_shape}
+      cond do
+        Enum.all?(keys, &(&1 in @taint_fields)) ->
+          {:ok, attrs}
 
-      Enum.all?(keys, &(&1 in @taint_fields)) ->
-        {:ok, attrs}
+        Enum.all?(keys, &(&1 in @string_taint_fields)) ->
+          {:ok, Map.new(attrs, fn {key, value} -> {String.to_existing_atom(key), value} end)}
 
-      Enum.all?(keys, &(&1 in @string_taint_fields)) ->
-        {:ok, Map.new(attrs, fn {key, value} -> {String.to_existing_atom(key), value} end)}
-
-      true ->
-        {:error, :invalid_taint_shape}
+        true ->
+          {:error, :invalid_taint_shape}
+      end
     end
   rescue
     ArgumentError -> {:error, :invalid_taint_shape}
@@ -369,12 +385,33 @@ defmodule Arbor.Contracts.Security.Taint do
 
   defp invalid_durable?(_taint), do: false
 
-  defp join_many_step(value, {:ok, acc}) do
-    case join(acc, value) do
-      {:ok, joined} -> {:cont, {:ok, joined}}
-      {:error, reason} -> {:halt, {:error, reason}}
+  defp join_many([], acc, _count), do: {:ok, acc}
+
+  defp join_many([_next | _rest], _acc, @max_join_inputs),
+    do: {:error, :taint_join_limit_exceeded}
+
+  defp join_many([next | rest], acc, count) when count < @max_join_inputs do
+    with {:ok, joined} <- join(acc, next) do
+      join_many(rest, joined, count + 1)
     end
   end
 
-  defp join_many_step(_value, {:error, reason}), do: {:halt, {:error, reason}}
+  defp join_many(_improper_tail, _acc, _count), do: {:error, :invalid_taint_list}
+end
+
+defimpl Jason.Encoder, for: Arbor.Contracts.Security.Taint do
+  alias Arbor.Contracts.Security.Taint
+
+  def encode(taint, opts) do
+    case Taint.to_persisted(taint) do
+      {:ok, persisted} ->
+        Jason.Encode.map(persisted, opts)
+
+      {:error, _reason} ->
+        raise Protocol.UndefinedError,
+          protocol: Jason.Encoder,
+          value: taint,
+          description: "invalid taint cannot be encoded"
+    end
+  end
 end

@@ -87,6 +87,7 @@ defmodule Arbor.Contracts.Security.TaintEnvelopeTest do
       Map.put(valid, "version", 2),
       Map.put(valid, "payload_encoding", "json"),
       Map.put(valid, "payload_sha256", String.duplicate("A", 64)),
+      Map.put(valid, "payload_sha256", String.duplicate("a", 1_000_000)),
       Map.put(valid, "extra", true),
       Map.put(valid, :version, valid["version"]),
       put_in(valid, ["taint", :level], "hostile"),
@@ -227,6 +228,19 @@ defmodule Arbor.Contracts.Security.TaintEnvelopeTest do
                String.duplicate("x", TaintEnvelope.limits().max_string_bytes + 1)
              )
 
+    oversized_key = String.duplicate("k", TaintEnvelope.limits().max_string_bytes + 1)
+    assert {:error, :invalid_payload_key} = TaintEnvelope.canonical_json(%{oversized_key => nil})
+
+    oversized_object =
+      Map.new(0..TaintEnvelope.limits().max_object_keys, &{"key-#{&1}", nil})
+
+    assert {:error, :payload_object_limit} =
+             TaintEnvelope.canonical_json(oversized_object)
+
+    sixteen_fields = Map.new(1..16, &{"key-#{&1}", nil})
+    node_heavy = List.duplicate(sixteen_fields, TaintEnvelope.limits().max_array_items)
+    assert {:error, :payload_node_limit} = TaintEnvelope.canonical_json(node_heavy)
+
     assert {:error, :payload_byte_limit} =
              TaintEnvelope.canonical_json(List.duplicate(String.duplicate("x", 65_536), 17))
   end
@@ -243,5 +257,10 @@ defmodule Arbor.Contracts.Security.TaintEnvelopeTest do
     assert {:ok, envelope} = TaintEnvelope.new(payload(), taint())
     forged = %{envelope | payload_sha256: <<255>>}
     assert {:error, :invalid_envelope} = TaintEnvelope.to_map(forged)
+  end
+
+  test "security regression: oversized constructor maps reject before key enumeration" do
+    oversized = Map.new(1..100_000, &{&1, &1})
+    assert {:error, :invalid_envelope_input} = TaintEnvelope.new(oversized)
   end
 end

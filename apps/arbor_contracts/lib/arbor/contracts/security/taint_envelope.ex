@@ -9,6 +9,11 @@ defmodule Arbor.Contracts.Security.TaintEnvelope do
   `canonical_json_v1` orders object keys by Erlang binary order (the UTF-8 byte
   order of their normalized string keys). It is deterministic but intentionally
   is not an RFC 8785 implementation.
+
+  Per-container key/item ceilings and the global node ceiling jointly bound total
+  traversal. Separate total key/item counters are intentionally omitted because
+  every key or item leads to a counted value node, so equal-sized total counters
+  would be unreachable policy behind `max_nodes`.
   """
 
   use TypedStruct
@@ -21,8 +26,6 @@ defmodule Arbor.Contracts.Security.TaintEnvelope do
   @max_nodes 4_096
   @max_object_keys 256
   @max_array_items 256
-  @max_total_object_keys 4_096
-  @max_total_array_items 4_096
   @max_string_bytes 65_536
   @max_payload_bytes 1_048_576
   @max_integer 9_007_199_254_740_991
@@ -63,8 +66,6 @@ defmodule Arbor.Contracts.Security.TaintEnvelope do
       max_nodes: @max_nodes,
       max_object_keys: @max_object_keys,
       max_array_items: @max_array_items,
-      max_total_object_keys: @max_total_object_keys,
-      max_total_array_items: @max_total_array_items,
       max_string_bytes: @max_string_bytes,
       max_payload_bytes: @max_payload_bytes,
       max_integer: @max_integer
@@ -195,11 +196,15 @@ defmodule Arbor.Contracts.Security.TaintEnvelope do
   def decode_persisted(_value), do: {:error, :invalid_envelope}
 
   defp exact_input_attributes(attrs) when is_map(attrs) and not is_struct(attrs) do
-    keys = Map.keys(attrs)
+    if map_size(attrs) != length(@input_fields) do
+      {:error, :invalid_envelope_input}
+    else
+      keys = Map.keys(attrs)
 
-    if map_size(attrs) == length(@input_fields) and Enum.sort(keys) == Enum.sort(@input_fields),
-      do: {:ok, attrs},
-      else: {:error, :invalid_envelope_input}
+      if Enum.sort(keys) == Enum.sort(@input_fields),
+        do: {:ok, attrs},
+        else: {:error, :invalid_envelope_input}
+    end
   end
 
   defp exact_input_attributes(attrs) when is_list(attrs), do: collect_input_keyword(attrs, %{})
@@ -241,9 +246,12 @@ defmodule Arbor.Contracts.Security.TaintEnvelope do
   defp validate_encoding(_value), do: {:error, :unsupported_encoding}
 
   defp validate_digest(value) when is_binary(value) do
-    if String.valid?(value) and Regex.match?(@sha256_pattern, value),
-      do: :ok,
-      else: {:error, :invalid_hash}
+    cond do
+      byte_size(value) != 64 -> {:error, :invalid_hash}
+      not String.valid?(value) -> {:error, :invalid_hash}
+      Regex.match?(@sha256_pattern, value) -> :ok
+      true -> {:error, :invalid_hash}
+    end
   end
 
   defp validate_digest(_value), do: {:error, :invalid_hash}
@@ -309,7 +317,7 @@ defmodule Arbor.Contracts.Security.TaintEnvelope do
       Enum.sort(Map.keys(envelope)) == Enum.sort([:__struct__ | @fields])
   end
 
-  defp initial_state, do: %{nodes: 0, bytes: 0, object_keys: 0, array_items: 0}
+  defp initial_state, do: %{nodes: 0, bytes: 0}
 
   defp canonicalize_json(_value, _state, depth) when depth > @max_depth,
     do: {:error, :payload_depth_exceeded}
@@ -345,11 +353,11 @@ defmodule Arbor.Contracts.Security.TaintEnvelope do
 
   defp canonicalize_json(value, state, _depth) when is_binary(value) do
     cond do
-      not String.valid?(value) ->
-        {:error, :invalid_payload_string}
-
       byte_size(value) > @max_string_bytes ->
         {:error, :payload_string_limit}
+
+      not String.valid?(value) ->
+        {:error, :invalid_payload_string}
 
       true ->
         with {:ok, state} <- enter_node(state),
@@ -438,12 +446,14 @@ defmodule Arbor.Contracts.Security.TaintEnvelope do
   defp canonicalize_list(_improper, _state, _depth, _count, _acc), do: {:error, :improper_payload}
 
   defp canonical_key(key) when is_binary(key) do
-    if String.valid?(key) and byte_size(key) <= @max_string_bytes,
-      do: {:ok, key},
-      else: {:error, :invalid_payload_key}
+    cond do
+      byte_size(key) > @max_string_bytes -> {:error, :invalid_payload_key}
+      not String.valid?(key) -> {:error, :invalid_payload_key}
+      true -> {:ok, key}
+    end
   end
 
-  defp canonical_key(key) when is_atom(key), do: {:ok, Atom.to_string(key)}
+  defp canonical_key(key) when is_atom(key), do: key |> Atom.to_string() |> canonical_key()
   defp canonical_key(_key), do: {:error, :unsupported_payload_key}
 
   defp enter_node(%{nodes: nodes} = state) when nodes < @max_nodes,
@@ -451,25 +461,9 @@ defmodule Arbor.Contracts.Security.TaintEnvelope do
 
   defp enter_node(_state), do: {:error, :payload_node_limit}
 
-  defp add_object_key(%{object_keys: keys} = state, key) when keys < @max_total_object_keys do
-    if byte_size(key) <= @max_string_bytes do
-      with {:ok, state} <- add_estimated_bytes(state, byte_size(key) * 6 + 3) do
-        {:ok, %{state | object_keys: keys + 1}}
-      end
-    else
-      {:error, :invalid_payload_key}
-    end
-  end
+  defp add_object_key(state, key), do: add_estimated_bytes(state, byte_size(key) * 6 + 3)
 
-  defp add_object_key(_state, _key), do: {:error, :payload_key_limit}
-
-  defp add_array_item(%{array_items: items} = state) when items < @max_total_array_items do
-    with {:ok, state} <- add_estimated_bytes(state, 1) do
-      {:ok, %{state | array_items: items + 1}}
-    end
-  end
-
-  defp add_array_item(_state), do: {:error, :payload_item_limit}
+  defp add_array_item(state), do: add_estimated_bytes(state, 1)
 
   defp add_estimated_bytes(%{bytes: bytes} = state, amount)
        when is_integer(amount) and amount >= 0 and bytes + amount <= @max_payload_bytes,

@@ -222,6 +222,29 @@ defmodule Arbor.Contracts.Security.TaintTest do
       assert {:error, :invalid_taint} = Taint.validate(taint)
       assert {:error, :invalid_taint} = Taint.canonicalize(taint)
     end
+
+    test "security regression: join_many rejects improper and empty lists without raising" do
+      assert {:error, :empty_taint_list} = Taint.join_many([])
+
+      assert {:error, :invalid_taint_list} =
+               Taint.join_many([%Taint{} | :improper_tail])
+    end
+
+    test "security regression: join_many enforces its exact input ceiling" do
+      max = Taint.max_join_inputs()
+      taint = %Taint{source: "bounded"}
+
+      assert max == 256
+      assert {:ok, ^taint} = Taint.join_many(List.duplicate(taint, max))
+
+      over_limit = List.duplicate(taint, max) ++ [taint | :unvisited_tail]
+      assert {:error, :taint_join_limit_exceeded} = Taint.join_many(over_limit)
+    end
+
+    test "security regression: oversized taint maps reject before key enumeration" do
+      oversized = Map.new(1..100_000, &{&1, &1})
+      assert {:error, :invalid_taint_shape} = Taint.canonicalize(oversized)
+    end
   end
 
   describe "Jason encoding" do
@@ -254,6 +277,11 @@ defmodule Arbor.Contracts.Security.TaintTest do
       assert decoded["sensitivity"] == "restricted"
       assert decoded["sanitizations"] == 0b00010001
       assert decoded["confidence"] == "verified"
+    end
+
+    test "security regression: invalid taint cannot bypass validation through Jason" do
+      invalid = %Taint{sanitizations: 999}
+      assert {:error, %Protocol.UndefinedError{}} = Jason.encode(invalid)
     end
   end
 end
