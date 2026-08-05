@@ -37,6 +37,9 @@ defmodule Arbor.Memory.IntentStore do
   @max_identifier_bytes 256
   @max_failure_reason_bytes 4_096
   @max_inventory_items Taint.max_join_inputs()
+  @max_cas_attempts 8
+  @max_projection_attempts 4
+  @projection_retry_ms 25
   @intent_types [:think, :act, :wait, :reflect, :internal]
   @percept_types [:action_result, :environment, :interrupt, :error, :timeout]
   @percept_outcomes [:success, :failure, :partial, :blocked, :interrupted]
@@ -295,7 +298,7 @@ defmodule Arbor.Memory.IntentStore do
   def lock_intent(agent_id, intent_id) do
     with :ok <- validate_identifier(agent_id),
          :ok <- validate_identifier(intent_id) do
-      safe_server_call({:lock_intent, agent_id, intent_id})
+      safe_server_call({:lock_intent, agent_id, intent_id}, :mutation)
     else
       _ -> {:error, :invalid_request}
     end
@@ -310,7 +313,7 @@ defmodule Arbor.Memory.IntentStore do
   def complete_intent(agent_id, intent_id) do
     with :ok <- validate_identifier(agent_id),
          :ok <- validate_identifier(intent_id) do
-      safe_server_call({:complete_intent, agent_id, intent_id})
+      safe_server_call({:complete_intent, agent_id, intent_id}, :mutation)
     else
       _ -> {:error, :invalid_request}
     end
@@ -362,7 +365,7 @@ defmodule Arbor.Memory.IntentStore do
 
   def unlock_stale_intents(agent_id, timeout_ms) when is_integer(timeout_ms) and timeout_ms > 0 do
     with :ok <- validate_identifier(agent_id) do
-      safe_server_call({:unlock_stale, agent_id, timeout_ms})
+      safe_server_call({:unlock_stale, agent_id, timeout_ms}, :mutation)
     else
       _ -> {:error, :invalid_request}
     end
@@ -431,7 +434,7 @@ defmodule Arbor.Memory.IntentStore do
           | {:error, :invalid_request | :store_unavailable | :commit_outcome_unknown}
   def prune_stale(agent_id, max_age_ms) when is_integer(max_age_ms) and max_age_ms > 0 do
     with :ok <- validate_identifier(agent_id) do
-      safe_server_call({:prune_stale, agent_id, max_age_ms})
+      safe_server_call({:prune_stale, agent_id, max_age_ms}, :mutation)
     else
       _ -> {:error, :invalid_request}
     end
@@ -492,7 +495,8 @@ defmodule Arbor.Memory.IntentStore do
     {:ok,
      %{
        buffer_size: buffer_size,
-       embedding_fun: Keyword.get(opts, :embedding_fun, &MemoryStore.embed_async/4)
+       embedding_fun: Keyword.get(opts, :embedding_fun, &MemoryStore.embed_async/4),
+       pending_projection: %{}
      }}
   end
 
@@ -532,36 +536,28 @@ defmodule Arbor.Memory.IntentStore do
   @impl true
   def handle_call({:record_prepared, domain, agent_id, prepared}, _from, state)
       when domain in [:intent, :percept] do
-    with {:ok, baseline} <- load_mutation_baseline(agent_id, state.buffer_size) do
-      candidate =
-        put_prepared_item(baseline.data, domain, prepared.value, state.buffer_size)
-
+    operation = fn baseline ->
+      candidate = put_prepared_item(baseline.data, domain, prepared.value, state.buffer_size)
       overrides = %{{domain, prepared.id} => prepared.taint}
 
-      case commit_record_data(
-             agent_id,
-             baseline,
-             candidate,
-             overrides,
-             Map.keys(overrides),
-             domain,
-             prepared.id
-           ) do
-        {:ok, committed_taint} ->
-          emit_record_effects(
-            state,
-            domain,
-            agent_id,
-            Map.put(prepared, :taint, committed_taint)
-          )
-
-          {:reply, {:ok, prepared.value}, state}
-
-        {:error, reason} ->
-          {:reply, public_commit_error(reason), state}
+      result = fn encoded ->
+        case Enum.find(encoded.items, &(&1.domain == domain and &1.id == prepared.id)) do
+          %{taint: committed_taint} -> {:recorded, prepared.value, committed_taint}
+          _ -> {:error, :commit_failed}
+        end
       end
-    else
-      _ -> {:reply, {:error, :store_unavailable}, state}
+
+      {:commit, candidate, overrides, Map.keys(overrides), result}
+    end
+
+    case mutate_authoritative(agent_id, state.buffer_size, operation) do
+      {:ok, {:recorded, value, committed_taint}, projection} ->
+        state = track_projection(state, agent_id, projection)
+        safe_emit_record_effects(state, domain, agent_id, %{prepared | taint: committed_taint})
+        {:reply, {:ok, value}, state}
+
+      {:error, reason} ->
+        {:reply, public_commit_error(reason), state}
     end
   rescue
     _ -> {:reply, {:error, :store_unavailable}, state}
@@ -571,14 +567,18 @@ defmodule Arbor.Memory.IntentStore do
 
   @impl true
   def handle_call({:clear, agent_id}, _from, state) do
-    data = get_agent_data(agent_id)
-
     case delete_persisted_aggregate(agent_id) do
       :ok ->
-        case clear_live_agent(agent_id, data) do
-          :ok -> {:reply, :ok, state}
-          {:error, _reason} -> {:reply, {:error, :store_unavailable}, state}
-        end
+        projection =
+          case evict_live_projection(agent_id) do
+            :ok -> :projected
+            _ -> :convergence_pending
+          end
+
+        {:reply, :ok, track_projection(state, agent_id, projection)}
+
+      {:error, :commit_outcome_unknown} ->
+        {:reply, {:error, :commit_outcome_unknown}, state}
 
       {:error, _reason} ->
         {:reply, {:error, :store_unavailable}, state}
@@ -628,7 +628,7 @@ defmodule Arbor.Memory.IntentStore do
 
   @impl true
   def handle_call({:lock_intent, agent_id, intent_id}, _from, state) do
-    with {:ok, baseline} <- load_mutation_baseline(agent_id, state.buffer_size) do
+    operation = fn baseline ->
       data = baseline.data
       statuses = Map.get(data, :statuses, %{})
       current = Map.get(statuses, intent_id, %{status: :pending})
@@ -636,7 +636,7 @@ defmodule Arbor.Memory.IntentStore do
 
       case {intent, current.status} do
         {nil, _status} ->
-          {:reply, {:error, :not_found}, state}
+          {:error, :not_found}
 
         {%Intent{} = intent, :pending} ->
           status_info = %{
@@ -648,24 +648,29 @@ defmodule Arbor.Memory.IntentStore do
           updated_statuses = Map.put(statuses, intent_id, status_info)
           updated = Map.put(data, :statuses, updated_statuses)
 
-          case commit_status_data(agent_id, baseline, updated, [intent_id], %{
-                 {:status, intent_id} => :inherit_item
-               }) do
-            :ok -> {:reply, {:ok, intent}, state}
-            {:error, reason} -> {:reply, public_commit_error(reason), state}
-          end
+          {:commit, updated, %{{:status, intent_id} => :inherit_item}, [{:intent, intent_id}],
+           fn _encoded -> {:locked, intent} end}
 
         {_intent, _other} ->
-          {:reply, {:error, :not_lockable}, state}
+          {:error, :not_lockable}
       end
-    else
-      _ -> {:reply, {:error, :store_unavailable}, state}
+    end
+
+    case mutate_authoritative(agent_id, state.buffer_size, operation) do
+      {:ok, {:locked, intent}, projection} ->
+        {:reply, {:ok, intent}, track_projection(state, agent_id, projection)}
+
+      {:error, reason} when reason in [:not_found, :not_lockable] ->
+        {:reply, {:error, reason}, state}
+
+      {:error, reason} ->
+        {:reply, public_commit_error(reason), state}
     end
   end
 
   @impl true
   def handle_call({:complete_intent, agent_id, intent_id}, _from, state) do
-    with {:ok, baseline} <- load_mutation_baseline(agent_id, state.buffer_size) do
+    operation = fn baseline ->
       data = baseline.data
       statuses = Map.get(data, :statuses, %{})
 
@@ -679,23 +684,28 @@ defmodule Arbor.Memory.IntentStore do
         updated_statuses = Map.put(statuses, intent_id, status_info)
         updated = Map.put(data, :statuses, updated_statuses)
 
-        case commit_status_data(agent_id, baseline, updated, [intent_id], %{
-               {:status, intent_id} => :inherit_item
-             }) do
-          :ok -> {:reply, :ok, state}
-          {:error, reason} -> {:reply, public_commit_error(reason), state}
-        end
+        {:commit, updated, %{{:status, intent_id} => :inherit_item}, [{:intent, intent_id}],
+         fn _encoded -> :completed end}
       else
-        {:reply, {:error, :not_found}, state}
+        {:error, :not_found}
       end
-    else
-      _ -> {:reply, {:error, :store_unavailable}, state}
+    end
+
+    case mutate_authoritative(agent_id, state.buffer_size, operation) do
+      {:ok, :completed, projection} ->
+        {:reply, :ok, track_projection(state, agent_id, projection)}
+
+      {:error, :not_found} ->
+        {:reply, {:error, :not_found}, state}
+
+      {:error, reason} ->
+        {:reply, public_commit_error(reason), state}
     end
   end
 
   @impl true
   def handle_call({:fail_intent, agent_id, intent_id, reason, reason_taint}, _from, state) do
-    with {:ok, baseline} <- load_mutation_baseline(agent_id, state.buffer_size) do
+    operation = fn baseline ->
       data = baseline.data
       statuses = Map.get(data, :statuses, %{})
 
@@ -713,23 +723,28 @@ defmodule Arbor.Memory.IntentStore do
         updated_statuses = Map.put(statuses, intent_id, status_info)
         updated = Map.put(data, :statuses, updated_statuses)
 
-        case commit_status_data(agent_id, baseline, updated, [intent_id], %{
-               {:status, intent_id} => reason_taint
-             }) do
-          :ok -> {:reply, {:ok, retry_count}, state}
-          {:error, reason} -> {:reply, public_commit_error(reason), state}
-        end
+        {:commit, updated, %{{:status, intent_id} => reason_taint}, [{:intent, intent_id}],
+         fn _encoded -> {:failed, retry_count} end}
       else
-        {:reply, {:error, :not_found}, state}
+        {:error, :not_found}
       end
-    else
-      _ -> {:reply, {:error, :store_unavailable}, state}
+    end
+
+    case mutate_authoritative(agent_id, state.buffer_size, operation) do
+      {:ok, {:failed, retry_count}, projection} ->
+        {:reply, {:ok, retry_count}, track_projection(state, agent_id, projection)}
+
+      {:error, :not_found} ->
+        {:reply, {:error, :not_found}, state}
+
+      {:error, commit_reason} ->
+        {:reply, public_commit_error(commit_reason), state}
     end
   end
 
   @impl true
   def handle_call({:import_intents, agent_id, prepared_items}, _from, state) do
-    with {:ok, baseline} <- load_mutation_baseline(agent_id, state.buffer_size) do
+    operation = fn baseline ->
       data = baseline.data
       initial_ids = MapSet.new(Enum.map(data.intents, & &1.id))
 
@@ -766,25 +781,26 @@ defmodule Arbor.Memory.IntentStore do
         overrides = Map.merge(overrides, status_overrides)
         protected_keys = Enum.map(new_items, &{:intent, &1.id})
 
-        case commit_candidate_data(agent_id, baseline, updated, overrides, protected_keys) do
-          :ok ->
-            Logger.info("IntentStore imported intents", count: length(new_items))
-            {:reply, :ok, state}
-
-          {:error, reason} ->
-            {:reply, public_commit_error(reason), state}
-        end
+        {:commit, updated, overrides, protected_keys,
+         fn _encoded -> {:imported, length(new_items)} end}
       else
-        {:reply, :ok, state}
+        {:noop, {:imported, 0}}
       end
-    else
-      _ -> {:reply, {:error, :store_unavailable}, state}
+    end
+
+    case mutate_authoritative(agent_id, state.buffer_size, operation) do
+      {:ok, {:imported, count}, projection} ->
+        if count > 0, do: Logger.info("IntentStore imported intents", count: count)
+        {:reply, :ok, track_projection(state, agent_id, projection)}
+
+      {:error, reason} ->
+        {:reply, public_commit_error(reason), state}
     end
   end
 
   @impl true
   def handle_call({:unlock_stale, agent_id, timeout_ms}, _from, state) do
-    with {:ok, baseline} <- load_mutation_baseline(agent_id, state.buffer_size) do
+    operation = fn baseline ->
       data = baseline.data
       statuses = Map.get(data, :statuses, %{})
       now = DateTime.utc_now()
@@ -809,21 +825,25 @@ defmodule Arbor.Memory.IntentStore do
 
         status_overrides = Map.new(updated_ids, &{{:status, &1}, :inherit_item})
 
-        case commit_status_data(agent_id, baseline, updated, updated_ids, status_overrides) do
-          :ok -> {:reply, count, state}
-          {:error, reason} -> {:reply, public_commit_error(reason), state}
-        end
+        protected_keys = Enum.map(updated_ids, &{:intent, &1})
+        {:commit, updated, status_overrides, protected_keys, fn _encoded -> count end}
       else
-        {:reply, count, state}
+        {:noop, count}
       end
-    else
-      _ -> {:reply, {:error, :store_unavailable}, state}
+    end
+
+    case mutate_authoritative(agent_id, state.buffer_size, operation) do
+      {:ok, count, projection} ->
+        {:reply, count, track_projection(state, agent_id, projection)}
+
+      {:error, reason} ->
+        {:reply, public_commit_error(reason), state}
     end
   end
 
   @impl true
   def handle_call({:prune_stale, agent_id, max_age_ms}, _from, state) do
-    with {:ok, baseline} <- load_mutation_baseline(agent_id, state.buffer_size) do
+    operation = fn baseline ->
       data = baseline.data
       statuses = Map.get(data, :statuses, %{})
       now = DateTime.utc_now()
@@ -846,21 +866,54 @@ defmodule Arbor.Memory.IntentStore do
         cleaned_statuses = Map.drop(statuses, pruned_ids)
         updated = %{data | intents: Enum.reverse(surviving_intents), statuses: cleaned_statuses}
 
-        case commit_current_data(agent_id, baseline, updated) do
-          :ok ->
-            Logger.info("IntentStore pruned stale intents", count: count)
-            {:reply, count, state}
-
-          {:error, reason} ->
-            {:reply, public_commit_error(reason), state}
-        end
+        {:commit, updated, %{}, [], fn _encoded -> count end}
       else
-        {:reply, count, state}
+        {:noop, count}
       end
-    else
-      _ -> {:reply, {:error, :store_unavailable}, state}
+    end
+
+    case mutate_authoritative(agent_id, state.buffer_size, operation) do
+      {:ok, count, projection} ->
+        if count > 0, do: Logger.info("IntentStore pruned stale intents", count: count)
+        {:reply, count, track_projection(state, agent_id, projection)}
+
+      {:error, reason} ->
+        {:reply, public_commit_error(reason), state}
     end
   end
+
+  @impl true
+  def handle_info({:converge_projection, agent_id}, state) do
+    attempts = Map.get(state.pending_projection, agent_id, 1)
+
+    result =
+      case load_durable_aggregate(agent_id, state.buffer_size) do
+        {:ok, aggregate, _status} -> project_authoritative_read(agent_id, aggregate)
+        {:error, :not_found} -> evict_live_projection(agent_id)
+        {:error, _reason} -> {:error, :store_unavailable}
+      end
+
+    cond do
+      result == :ok ->
+        {:noreply, %{state | pending_projection: Map.delete(state.pending_projection, agent_id)}}
+
+      attempts < @max_projection_attempts ->
+        Process.send_after(self(), {:converge_projection, agent_id}, @projection_retry_ms)
+
+        {:noreply,
+         %{state | pending_projection: Map.put(state.pending_projection, agent_id, attempts + 1)}}
+
+      true ->
+        {:noreply, %{state | pending_projection: Map.delete(state.pending_projection, agent_id)}}
+    end
+  rescue
+    _ -> {:noreply, %{state | pending_projection: Map.delete(state.pending_projection, agent_id)}}
+  catch
+    _, _ ->
+      {:noreply, %{state | pending_projection: Map.delete(state.pending_projection, agent_id)}}
+  end
+
+  def handle_info(_message, state), do: {:noreply, state}
 
   # ============================================================================
   # Private Helpers
@@ -876,9 +929,7 @@ defmodule Arbor.Memory.IntentStore do
   defp load_mutation_baseline(agent_id, buffer_size) do
     case load_durable_aggregate(agent_id, buffer_size) do
       {:ok, aggregate, _status} ->
-        with :ok <- ensure_baseline_provenance(agent_id, aggregate) do
-          {:ok, aggregate}
-        end
+        {:ok, aggregate}
 
       {:error, :not_found} ->
         {:ok, Map.merge(empty_decoded_aggregate(), %{expected_record: :not_found, location: nil})}
@@ -886,19 +937,6 @@ defmodule Arbor.Memory.IntentStore do
       {:error, _reason} ->
         {:error, :baseline_unavailable}
     end
-  end
-
-  defp ensure_baseline_provenance(agent_id, aggregate) do
-    Enum.reduce_while(aggregate.items ++ aggregate.status_items, :ok, fn item, :ok ->
-      case reconcile_durable_provenance(agent_id, item) do
-        :ok -> {:cont, :ok}
-        {:error, _reason} -> {:halt, {:error, :baseline_unavailable}}
-      end
-    end)
-  rescue
-    _ -> {:error, :baseline_unavailable}
-  catch
-    _, _ -> {:error, :baseline_unavailable}
   end
 
   defp load_durable_aggregate(agent_id, buffer_size) do
@@ -933,17 +971,27 @@ defmodule Arbor.Memory.IntentStore do
 
   defp record_with_fallback(domain, agent_id, item) do
     case prepare_record(domain, agent_id, item, TaintEnvelope.missing_fallback()) do
-      {:ok, prepared} -> safe_server_call({:record_prepared, domain, agent_id, prepared})
-      {:error, :invalid_request} -> {:error, :invalid_request}
-      {:error, _reason} -> {:error, :invalid_payload}
+      {:ok, prepared} ->
+        safe_server_call({:record_prepared, domain, agent_id, prepared}, :mutation)
+
+      {:error, :invalid_request} ->
+        {:error, :invalid_request}
+
+      {:error, _reason} ->
+        {:error, :invalid_payload}
     end
   end
 
   defp record_tainted(domain, agent_id, item, taint) do
     case prepare_record(domain, agent_id, item, taint) do
-      {:ok, prepared} -> safe_server_call({:record_prepared, domain, agent_id, prepared})
-      {:error, :invalid_request} -> {:error, :invalid_request}
-      {:error, _reason} -> {:error, :invalid_provenance}
+      {:ok, prepared} ->
+        safe_server_call({:record_prepared, domain, agent_id, prepared}, :mutation)
+
+      {:error, :invalid_request} ->
+        {:error, :invalid_request}
+
+      {:error, _reason} ->
+        {:error, :invalid_provenance}
     end
   end
 
@@ -970,7 +1018,7 @@ defmodule Arbor.Memory.IntentStore do
          true <- String.valid?(reason),
          {:ok, taint} <- Taint.canonicalize(taint),
          {:ok, _envelope} <- TaintEnvelope.new(reason, taint) do
-      safe_server_call({:fail_intent, agent_id, intent_id, reason, taint})
+      safe_server_call({:fail_intent, agent_id, intent_id, reason, taint}, :mutation)
     else
       {:error, :invalid_identifier} -> {:error, :invalid_request}
       false -> {:error, :invalid_request}
@@ -1224,27 +1272,6 @@ defmodule Arbor.Memory.IntentStore do
     _, _ -> {:error, :projection_unavailable}
   end
 
-  defp reconcile_durable_provenance(agent_id, item) do
-    case Provenance.resolve(item.domain, agent_id, item.id, item.payload) do
-      {:ok, taint, :verified} when taint == item.taint ->
-        :ok
-
-      _stale_or_missing ->
-        with :ok <- Provenance.put(item.domain, agent_id, item.id, item.payload, item.taint),
-             {:ok, taint, :verified} <-
-               Provenance.resolve(item.domain, agent_id, item.id, item.payload),
-             true <- taint == item.taint do
-          :ok
-        else
-          _ -> {:error, :provenance_unavailable}
-        end
-    end
-  rescue
-    _ -> {:error, :provenance_unavailable}
-  catch
-    _, _ -> {:error, :provenance_unavailable}
-  end
-
   defp durable_tainted_item(item, aggregate_status) do
     status = normalize_provenance_status(item.taint, aggregate_status)
     {TaintedValue.wrap(item.value, item.taint), status}
@@ -1281,74 +1308,181 @@ defmodule Arbor.Memory.IntentStore do
     %{data | percepts: Enum.take(percepts, buffer_size)}
   end
 
-  defp commit_encoded_aggregate(agent_id, original, encoded) do
-    case persist_encoded_aggregate(agent_id, encoded) do
-      :ok ->
-        case verify_committed_candidate(agent_id, encoded) do
-          :ok ->
-            case install_live_aggregate(agent_id, original, encoded) do
-              :ok ->
-                :ok
-
-              {:error, _reason} ->
-                case recover_after_live_install_failure(agent_id, original, encoded) do
-                  :ok ->
-                    :ok
-
-                  {:error, _reason} ->
-                    Logger.warning(
-                      "IntentStore committed aggregate; live projection recovery is pending"
-                    )
-
-                    :ok
-                end
-            end
-
-          {:error, _reason} ->
-            # C3D integration point: an operation receipt will reconcile an
-            # owner loss or concurrent replacement here. This explicit result
-            # must not be collapsed into the ordinary retryable store error.
-            {:error, :commit_outcome_unknown}
-        end
-
-      _ ->
-        {:error, :commit_failed}
-    end
-  rescue
-    _ -> {:error, :commit_outcome_unknown}
-  catch
-    _, _ -> {:error, :commit_outcome_unknown}
+  defp mutate_authoritative(agent_id, buffer_size, operation) do
+    mutate_authoritative(agent_id, buffer_size, operation, @max_cas_attempts)
   end
 
-  defp persist_encoded_aggregate(agent_id, encoded) do
-    # C3D integration point: replace this cache acknowledgement with the shared
-    # backend-acknowledged CAS/update primitive. The CAS must join against the
-    # current durable aggregate so node-local writers cannot lower its label,
-    # and every conflict retry must recompute the operation from that snapshot.
-    if MemoryStore.available?() do
-      MemoryStore.persist("intents", agent_id, encoded.persisted, taint: encoded.aggregate_taint)
+  defp mutate_authoritative(_agent_id, _buffer_size, _operation, 0),
+    do: {:error, :store_unavailable}
+
+  defp mutate_authoritative(agent_id, buffer_size, operation, attempts)
+       when is_function(operation, 1) do
+    with {:ok, baseline} <- load_mutation_baseline(agent_id, buffer_size) do
+      case operation.(baseline) do
+        {:noop, result} ->
+          {:ok, result, project_baseline(agent_id, baseline)}
+
+        {:error, reason} ->
+          {:error, reason}
+
+        {:commit, candidate, overrides, protected_keys, result_fun}
+        when is_map(candidate) and is_map(overrides) and is_list(protected_keys) and
+               is_function(result_fun, 1) ->
+          commit_authoritative_candidate(
+            agent_id,
+            buffer_size,
+            operation,
+            attempts,
+            baseline,
+            candidate,
+            overrides,
+            protected_keys,
+            result_fun
+          )
+
+        _ ->
+          {:error, :store_unavailable}
+      end
     else
-      {:error, :store_unavailable}
+      {:error, :commit_outcome_unknown} -> {:error, :commit_outcome_unknown}
+      {:error, _reason} -> {:error, :store_unavailable}
+    end
+  rescue
+    _ -> {:error, :store_unavailable}
+  catch
+    _, _ -> {:error, :store_unavailable}
+  end
+
+  defp commit_authoritative_candidate(
+         agent_id,
+         buffer_size,
+         operation,
+         attempts,
+         baseline,
+         candidate,
+         overrides,
+         protected_keys,
+         result_fun
+       ) do
+    with {:ok, encoded} <-
+           encode_bounded_aggregate(
+             agent_id,
+             baseline,
+             candidate,
+             overrides,
+             MapSet.new(protected_keys)
+           ),
+         {:ok, result} <- prepare_committed_result(result_fun, encoded) do
+      case MemoryStore.compare_and_swap_tainted(
+             "intents",
+             agent_id,
+             baseline.expected_record,
+             encoded.persisted,
+             taint: encoded.aggregate_taint
+           ) do
+        {:ok, _stored_record} ->
+          {:ok, result, install_committed_projection(agent_id, encoded)}
+
+        {:error, {:memory_store, :critical, :conflict}} ->
+          mutate_authoritative(agent_id, buffer_size, operation, attempts - 1)
+
+        {:error, {:memory_store, :critical, :outcome_unknown}} ->
+          {:error, :commit_outcome_unknown}
+
+        {:error, :outcome_unknown} ->
+          {:error, :commit_outcome_unknown}
+
+        {:error, _reason} ->
+          {:error, :store_unavailable}
+
+        _ ->
+          {:error, :commit_outcome_unknown}
+      end
+    else
+      {:error, _reason} -> {:error, :store_unavailable}
+      _ -> {:error, :store_unavailable}
+    end
+  rescue
+    _ -> {:error, :store_unavailable}
+  catch
+    _, _ -> {:error, :store_unavailable}
+  end
+
+  defp prepare_committed_result(result_fun, encoded) do
+    case result_fun.(encoded) do
+      {:error, _reason} -> {:error, :invalid_result}
+      result -> {:ok, result}
+    end
+  rescue
+    _ -> {:error, :invalid_result}
+  catch
+    _, _ -> {:error, :invalid_result}
+  end
+
+  defp project_baseline(agent_id, %{expected_record: :not_found}) do
+    case evict_live_projection(agent_id) do
+      :ok -> :projected
+      _ -> :convergence_pending
+    end
+  end
+
+  defp project_baseline(agent_id, baseline), do: install_committed_projection(agent_id, baseline)
+
+  defp install_committed_projection(agent_id, aggregate) do
+    case install_live_aggregate(agent_id, get_agent_data(agent_id), aggregate) do
+      :ok ->
+        :projected
+
+      {:error, _reason} ->
+        _ = evict_live_projection(agent_id)
+        :convergence_pending
+    end
+  rescue
+    _ ->
+      _ = evict_live_projection(agent_id)
+      :convergence_pending
+  catch
+    _, _ ->
+      _ = evict_live_projection(agent_id)
+      :convergence_pending
+  end
+
+  defp track_projection(state, agent_id, :projected) do
+    %{state | pending_projection: Map.delete(state.pending_projection, agent_id)}
+  end
+
+  defp track_projection(state, agent_id, :convergence_pending) do
+    if Map.has_key?(state.pending_projection, agent_id) do
+      state
+    else
+      Process.send_after(self(), {:converge_projection, agent_id}, @projection_retry_ms)
+      %{state | pending_projection: Map.put(state.pending_projection, agent_id, 1)}
     end
   end
 
   defp delete_persisted_aggregate(agent_id) do
-    # C3D integration point: replace this cache acknowledgement with the shared
-    # compare-delete primitive, which distinguishes acknowledged ephemeral
-    # deletion from a configured durable backend failure and never reuses a
-    # stale clear predecessor.
-    if MemoryStore.available?() do
-      MemoryStore.delete("intents", agent_id)
-    else
-      {:error, :delete_failed}
+    case MemoryStore.delete_tainted_authoritative("intents", agent_id) do
+      :ok ->
+        :ok
+
+      {:error, {:memory_store, :critical, :outcome_unknown}} ->
+        {:error, :commit_outcome_unknown}
+
+      {:error, :outcome_unknown} ->
+        {:error, :commit_outcome_unknown}
+
+      {:error, _reason} ->
+        {:error, :store_unavailable}
     end
   rescue
-    _ -> {:error, :delete_failed}
+    _ -> {:error, :store_unavailable}
   catch
-    _, _ -> {:error, :delete_failed}
+    _, _ -> {:error, :store_unavailable}
   end
 
   defp install_live_aggregate(agent_id, original, encoded) do
+    true = :ets.delete(@ets_table, agent_id)
+
     with :ok <- purge_intent_store_provenance(agent_id, original),
          :ok <- put_aggregate_provenance(agent_id, encoded) do
       true = :ets.insert(@ets_table, {agent_id, encoded.data})
@@ -1360,114 +1494,6 @@ defmodule Arbor.Memory.IntentStore do
     _ -> {:error, :live_install_failed}
   catch
     _, _ -> {:error, :live_install_failed}
-  end
-
-  defp verify_committed_candidate(agent_id, encoded) do
-    case MemoryStore.load_tainted_with_status("intents", agent_id) do
-      {:ok,
-       %TaintedValue{
-         value: persisted,
-         taint: aggregate_taint
-       }, :verified}
-      when persisted == encoded.persisted and aggregate_taint == encoded.aggregate_taint ->
-        :ok
-
-      _ ->
-        {:error, :candidate_not_current}
-    end
-  rescue
-    _ -> {:error, :candidate_not_current}
-  catch
-    _, _ -> {:error, :candidate_not_current}
-  end
-
-  defp recover_after_live_install_failure(agent_id, original, encoded) do
-    true = :ets.delete(@ets_table, agent_id)
-    purge_intent_store_provenance(agent_id, original)
-    delete_item_provenance(agent_id, encoded.data)
-
-    with :ok <- verify_committed_candidate(agent_id, encoded),
-         :ok <- restore_decoded_agent(agent_id, empty_agent_data(), encoded) do
-      :ok
-    else
-      _ -> {:error, :projection_unavailable}
-    end
-  rescue
-    _ -> {:error, :projection_unavailable}
-  catch
-    _, _ -> {:error, :projection_unavailable}
-  end
-
-  defp commit_current_data(agent_id, baseline, candidate) do
-    commit_candidate_data(agent_id, baseline, candidate, %{}, [])
-  end
-
-  defp commit_record_data(
-         agent_id,
-         baseline,
-         candidate,
-         overrides,
-         protected_keys,
-         domain,
-         item_id
-       ) do
-    with {:ok, encoded} <-
-           encode_bounded_aggregate(
-             agent_id,
-             baseline,
-             candidate,
-             overrides,
-             MapSet.new(protected_keys)
-           ),
-         %{taint: committed_taint} <-
-           Enum.find(encoded.items, &(&1.domain == domain and &1.id == item_id)),
-         :ok <- commit_encoded_aggregate(agent_id, baseline.data, encoded) do
-      {:ok, committed_taint}
-    else
-      {:error, :commit_outcome_unknown} = error -> error
-      _ -> {:error, :commit_failed}
-    end
-  rescue
-    _ -> {:error, :commit_failed}
-  catch
-    _, _ -> {:error, :commit_failed}
-  end
-
-  defp commit_status_data(agent_id, baseline, candidate, intent_ids, overrides) do
-    protected_keys = Enum.map(intent_ids, &{:intent, &1})
-    commit_candidate_data(agent_id, baseline, candidate, overrides, protected_keys)
-  end
-
-  defp commit_candidate_data(agent_id, baseline, candidate, overrides, protected_keys) do
-    original = baseline.data
-
-    if candidate.intents == [] and candidate.percepts == [] do
-      case delete_persisted_aggregate(agent_id) do
-        :ok ->
-          case clear_live_agent(agent_id, original) do
-            :ok -> :ok
-            {:error, _reason} -> {:error, :commit_failed}
-          end
-
-        {:error, _reason} ->
-          {:error, :commit_failed}
-      end
-    else
-      with {:ok, encoded} <-
-             encode_bounded_aggregate(
-               agent_id,
-               baseline,
-               candidate,
-               overrides,
-               MapSet.new(protected_keys)
-             ) do
-        commit_encoded_aggregate(agent_id, original, encoded)
-      end
-    end
-  rescue
-    _ -> {:error, :commit_failed}
-  catch
-    _, _ -> {:error, :commit_failed}
   end
 
   defp encode_bounded_aggregate(agent_id, baseline, data, overrides, protected_keys) do
@@ -1579,12 +1605,6 @@ defmodule Arbor.Memory.IntentStore do
     put_item_provenance(agent_id, aggregate.items ++ aggregate.status_items)
   end
 
-  defp delete_item_provenance(agent_id, data) do
-    Enum.each(data.intents, &Provenance.delete(:intent, agent_id, &1.id))
-    Enum.each(data.percepts, &Provenance.delete(:percept, agent_id, &1.id))
-    Enum.each(Map.keys(data.statuses), &Provenance.delete(:intent_status, agent_id, &1))
-  end
-
   defp emit_record_effects(state, :intent, agent_id, prepared) do
     state.embedding_fun.(
       "intents",
@@ -1604,6 +1624,15 @@ defmodule Arbor.Memory.IntentStore do
     Signals.emit_percept_received(agent_id, prepared.value)
     Logger.debug("Percept recorded")
     state
+  end
+
+  defp safe_emit_record_effects(state, domain, agent_id, prepared) do
+    _ = emit_record_effects(state, domain, agent_id, prepared)
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
   end
 
   defp ensure_ets_table do
@@ -1702,9 +1731,8 @@ defmodule Arbor.Memory.IntentStore do
              intents,
              overrides
            ),
-         labels when labels != [] <-
-           Enum.map(intents ++ percepts ++ encoded_statuses, & &1.taint),
-         {:ok, aggregate_taint} <- Taint.join_many(labels),
+         labels <- Enum.map(intents ++ percepts ++ encoded_statuses, & &1.taint),
+         {:ok, aggregate_taint} <- aggregate_taint(labels),
          persisted <- %{
            "version" => @aggregate_version,
            "intents" => Enum.map(intents, & &1.persisted),
@@ -1722,7 +1750,6 @@ defmodule Arbor.Memory.IntentStore do
          status_items: encoded_statuses
        }}
     else
-      [] -> {:error, :empty_aggregate}
       {:error, reason} -> {:error, reason}
       _ -> {:error, :invalid_aggregate}
     end
@@ -1817,7 +1844,7 @@ defmodule Arbor.Memory.IntentStore do
   end
 
   defp resolve_status_taint(
-         agent_id,
+         _agent_id,
          id,
          payload,
          baseline_statuses,
@@ -1829,7 +1856,7 @@ defmodule Arbor.Memory.IntentStore do
     with {:ok, intent_taint} <- fetch_intent_taint(intent_taints, id) do
       case Map.fetch(baseline_statuses, id) do
         {:ok, baseline} ->
-          with {:ok, previous} <- resolve_existing_status_taint(agent_id, baseline),
+          with {:ok, previous} <- canonicalize_status_taint(baseline.taint),
                :ok <- authorize_status_transition(baseline.payload, payload, incoming) do
             join_status_components(intent_taint, previous, incoming)
           end
@@ -1842,24 +1869,6 @@ defmodule Arbor.Memory.IntentStore do
     _ -> {:error, :invalid_live_status_provenance}
   catch
     _, _ -> {:error, :invalid_live_status_provenance}
-  end
-
-  defp resolve_existing_status_taint(agent_id, baseline) do
-    case Provenance.resolve(
-           :intent_status,
-           agent_id,
-           baseline.id,
-           baseline.payload
-         ) do
-      {:ok, taint, :verified} when taint == baseline.taint ->
-        canonicalize_status_taint(taint)
-
-      {:ok, _taint, :legacy_unlabeled} ->
-        {:error, :live_status_provenance_missing}
-
-      _ ->
-        {:error, :invalid_live_status_provenance}
-    end
   end
 
   defp authorize_status_transition(payload, payload, :error), do: :ok
@@ -1909,7 +1918,7 @@ defmodule Arbor.Memory.IntentStore do
 
   defp resolve_item_taint(
          domain,
-         agent_id,
+         _agent_id,
          item_id,
          payload,
          baseline_items,
@@ -1919,31 +1928,18 @@ defmodule Arbor.Memory.IntentStore do
 
     case Map.fetch(baseline_items, item_id) do
       {:ok, baseline} ->
-        with {:ok, previous} <- resolve_existing_item_taint(agent_id, baseline),
+        with {:ok, previous} <- Taint.canonicalize(baseline.taint),
              :ok <- authorize_item_transition(baseline.payload, payload, incoming) do
           apply_item_taint(previous, incoming)
         end
 
       :error ->
-        resolve_new_item_taint(domain, agent_id, item_id, payload, incoming)
+        resolve_new_item_taint(incoming)
     end
   rescue
     _ -> {:error, :invalid_live_provenance}
   catch
     _, _ -> {:error, :invalid_live_provenance}
-  end
-
-  defp resolve_existing_item_taint(agent_id, baseline) do
-    case Provenance.resolve(
-           baseline.domain,
-           agent_id,
-           baseline.id,
-           baseline.payload
-         ) do
-      {:ok, taint, :verified} when taint == baseline.taint -> Taint.canonicalize(taint)
-      {:ok, _taint, :legacy_unlabeled} -> {:error, :live_provenance_missing}
-      _ -> {:error, :invalid_live_provenance}
-    end
   end
 
   defp authorize_item_transition(payload, payload, :error), do: :ok
@@ -1959,28 +1955,14 @@ defmodule Arbor.Memory.IntentStore do
     end
   end
 
-  defp resolve_new_item_taint(domain, agent_id, item_id, payload, incoming) do
-    case Provenance.resolve(domain, agent_id, item_id, payload) do
-      {:ok, _taint, :legacy_unlabeled} ->
-        case incoming do
-          {:ok, taint} -> Taint.canonicalize(taint)
-          :error -> {:error, :live_provenance_missing}
-        end
-
-      {:ok, taint, :verified} ->
-        apply_item_taint(taint, incoming)
-
-      _ ->
-        {:error, :invalid_live_provenance}
-    end
-  end
+  defp resolve_new_item_taint({:ok, taint}), do: Taint.canonicalize(taint)
+  defp resolve_new_item_taint(:error), do: {:error, :live_provenance_missing}
 
   defp decode_verified_aggregate(persisted, outer_taint, buffer_size)
        when is_integer(buffer_size) and buffer_size > 0 do
     with {:ok, decoded} <- decode_versioned_inner_aggregate(persisted),
-         labels when labels != [] <-
-           Enum.map(decoded.items ++ decoded.status_items, & &1.taint),
-         {:ok, expected_taint} <- Taint.join_many(labels),
+         labels <- Enum.map(decoded.items ++ decoded.status_items, & &1.taint),
+         {:ok, expected_taint} <- aggregate_taint(labels),
          true <- expected_taint == outer_taint do
       {:ok, truncate_decoded_aggregate(decoded, buffer_size)}
     else
@@ -1994,6 +1976,9 @@ defmodule Arbor.Memory.IntentStore do
 
   defp decode_verified_aggregate(_persisted, _outer_taint, _buffer_size),
     do: {:error, :invalid_aggregate}
+
+  defp aggregate_taint([]), do: {:ok, TaintEnvelope.missing_fallback()}
+  defp aggregate_taint(labels), do: Taint.join_many(labels)
 
   defp decode_versioned_inner_aggregate(persisted) do
     protocol_limit = Taint.max_join_inputs()

@@ -14,6 +14,8 @@ defmodule Arbor.Memory.IntentStoreProvenanceTest do
     @moduledoc false
     @behaviour Arbor.Contracts.Persistence.Store
 
+    alias Arbor.Persistence.Store.Revision
+
     def arm(table, test_pid) do
       true = :ets.insert(table, {:fail_next_put, test_pid})
       :ok
@@ -65,6 +67,72 @@ defmodule Arbor.Memory.IntentStoreProvenanceTest do
         end)
 
       {:ok, keys}
+    end
+
+    @impl true
+    def compare_and_swap(key, expected, replacement, opts) do
+      table = Keyword.fetch!(opts, :table)
+
+      result =
+        case {:ets.lookup(table, key), expected} do
+          {[], :not_found} ->
+            stored = Revision.advance_cas_insert(replacement)
+            true = :ets.insert(table, {key, stored})
+            {:ok, stored}
+
+          {[{^key, current}], {:value, expected_value}} ->
+            if Revision.cas_matches?(current, expected_value) do
+              case Revision.advance_cas_update(current, replacement) do
+                {:ok, stored} ->
+                  true = :ets.insert(table, {key, stored})
+                  {:ok, stored}
+
+                {:error, _reason} = error ->
+                  error
+              end
+            else
+              {:error, :conflict}
+            end
+
+          _ ->
+            {:error, :conflict}
+        end
+
+      case result do
+        {:ok, _stored} -> maybe_fail_projection(table, key)
+        _ -> :ok
+      end
+
+      result
+    end
+
+    @impl true
+    def compare_and_delete(key, expected, opts) do
+      table = Keyword.fetch!(opts, :table)
+
+      case :ets.lookup(table, key) do
+        [{^key, current}] ->
+          if Revision.cas_matches?(current, expected) do
+            true = :ets.delete(table, key)
+            :ok
+          else
+            {:error, :conflict}
+          end
+
+        [] ->
+          {:error, :conflict}
+      end
+    end
+
+    defp maybe_fail_projection(table, key) do
+      case :ets.take(table, :fail_next_put) do
+        [{:fail_next_put, test_pid}] ->
+          send(test_pid, {:backend_committed, key})
+          :ok = Supervisor.terminate_child(Arbor.Memory.Supervisor, Arbor.Memory.Provenance)
+
+        [] ->
+          :ok
+      end
     end
   end
 
