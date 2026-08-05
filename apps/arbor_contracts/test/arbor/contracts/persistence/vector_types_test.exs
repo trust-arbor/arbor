@@ -279,11 +279,7 @@ defmodule Arbor.Contracts.Persistence.VectorTypesTest do
       operations = oversized_batch_operations()
 
       assert length(operations) < VectorOperation.limits().max_batch_operations
-
-      assert Enum.reduce(operations, 16, fn operation, total ->
-               {:ok, bytes} = VectorOperation.transport_size_bytes(operation)
-               total + 4 + bytes
-             end) > VectorOperation.limits().max_batch_bytes
+      assert aggregate_operation_bytes(operations) > VectorOperation.limits().max_batch_bytes
 
       assert {:error, :invalid_vector_operation} =
                VectorOperation.new(%{kind: :batch, operations: operations})
@@ -398,8 +394,11 @@ defmodule Arbor.Contracts.Persistence.VectorTypesTest do
     end
 
     test "standalone validation rejects a forged byte-oversized batch receipt" do
+      operations = oversized_batch_operations()
+      assert aggregate_operation_bytes(operations) > VectorOperation.limits().max_batch_bytes
+
       receipts =
-        Enum.map(oversized_batch_operations(), fn operation ->
+        Enum.map(operations, fn operation ->
           result = rebuild_record!(operation.record, generation: 1, revision: 1)
           receipt!(operation, result)
         end)
@@ -544,10 +543,17 @@ defmodule Arbor.Contracts.Persistence.VectorTypesTest do
   end
 
   defp oversized_batch_operations do
-    payload = List.duplicate(String.duplicate("x", 60_000), 16)
+    payload = List.duplicate(String.duplicate("x", 60_000), 2)
 
-    Enum.map(1..5, fn index ->
+    Enum.map(1..36, fn index ->
       operation!(:insert, record!(source_key: "large_#{index}", payload: payload))
+    end)
+  end
+
+  defp aggregate_operation_bytes(operations) do
+    Enum.reduce(operations, 16, fn operation, total ->
+      {:ok, bytes} = VectorOperation.transport_size_bytes(operation)
+      total + 4 + bytes
     end)
   end
 end
