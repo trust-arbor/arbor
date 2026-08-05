@@ -223,6 +223,31 @@ defmodule Arbor.Orchestrator.Session.SessionCheckpointTaintSecurityRegressionTes
     assert restored.messages == []
   end
 
+  test "security regression: engagement-only checkpoint cannot retain or relabel another transcript" do
+    prior = labeled_message("user", "hostile prior transcript", taint("prior_hostile", :hostile))
+    state = session([prior], "eng-old")
+
+    rebound =
+      Persistence.apply_checkpoint(state, %{
+        "current_engagement_id" => "eng-new",
+        "turn_count" => 7
+      })
+
+    assert rebound.current_engagement_id == "eng-new"
+    assert rebound.messages == []
+    assert rebound.turn_count == 7
+
+    same_engagement =
+      Persistence.apply_checkpoint(state, %{
+        "current_engagement_id" => "eng-old",
+        "turn_count" => 8
+      })
+
+    assert same_engagement.current_engagement_id == "eng-old"
+    assert same_engagement.messages == [prior]
+    assert same_engagement.turn_count == 8
+  end
+
   defp session(messages, engagement_id, opts \\ []) do
     %Session{
       session_id: Keyword.get(opts, :session_id, "checkpoint-session"),

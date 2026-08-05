@@ -74,13 +74,18 @@ defmodule Arbor.Orchestrator.Session.Persistence do
         %{state | current_engagement_id: engagement_id, messages: restored_messages}
         |> rebuild_compactor_from_checkpoint()
 
-      {{:ok, engagement_id}, :error}
+      {{:ok, engagement_id}, :missing}
       when (is_binary(engagement_id) or is_nil(engagement_id)) and
              engagement_id != state.current_engagement_id ->
         # Never relabel the active transcript when provenance changes without
         # carrying its matching messages.
         %{state | current_engagement_id: engagement_id, messages: []}
         |> rebuild_compactor_from_checkpoint()
+
+      {{:ok, engagement_id}, :missing}
+      when (is_binary(engagement_id) or is_nil(engagement_id)) and
+             engagement_id == state.current_engagement_id ->
+        state
 
       {:error, {:ok, restored_messages}} ->
         %{state | messages: restored_messages}
