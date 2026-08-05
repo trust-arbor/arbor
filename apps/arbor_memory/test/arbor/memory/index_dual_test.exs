@@ -18,6 +18,29 @@ defmodule Arbor.Memory.IndexDualTest do
   # tests actually ran against Postgres.)
   @dimension 768
 
+  defmodule FailFirstWriter do
+    @behaviour Arbor.Memory.Index.PersistentWriter
+
+    def arm(agent_id), do: :persistent_term.put({__MODULE__, agent_id}, :fail)
+    def disarm(agent_id), do: :persistent_term.erase({__MODULE__, agent_id})
+
+    @impl true
+    def store(agent_id, content, embedding, metadata) do
+      case :persistent_term.get({__MODULE__, agent_id}, :pass) do
+        :fail ->
+          :persistent_term.put({__MODULE__, agent_id}, :pass)
+          {:error, :injected_eager_failure}
+
+        :pass ->
+          Arbor.Memory.Embedding.store(agent_id, content, embedding, metadata)
+      end
+    end
+
+    @impl true
+    def store_batch_with_ids(agent_id, entries),
+      do: Arbor.Memory.Embedding.store_batch_with_ids(agent_id, entries)
+  end
+
   setup do
     agent_id = durable_unique("test_agent_dual_index")
 
@@ -47,24 +70,6 @@ defmodule Arbor.Memory.IndexDualTest do
     end
   end
 
-  # Poll until `fun` returns true — a deterministic replacement for the fixed
-  # `Process.sleep` calls that waited on the best-effort eager pgvector write.
-  # Returns as soon as the condition holds (no wasted wall-clock) and flunks if
-  # it never does, so the eager write has provably landed before we assert and
-  # the test can't end with an in-flight write hitting a closed sandbox conn.
-  defp eventually(fun, timeout_ms \\ 2_000, interval_ms \\ 10) do
-    deadline = System.monotonic_time(:millisecond) + timeout_ms
-    do_eventually(fun, deadline, interval_ms)
-  end
-
-  defp do_eventually(fun, deadline, interval_ms) do
-    cond do
-      fun.() -> :ok
-      System.monotonic_time(:millisecond) >= deadline -> flunk("condition not met within timeout")
-      true -> Process.sleep(interval_ms) && do_eventually(fun, deadline, interval_ms)
-    end
-  end
-
   describe "dual backend mode" do
     test "reports correct backend mode", %{pid: pid} do
       assert Index.backend_mode(pid) == :dual
@@ -77,8 +82,7 @@ defmodule Arbor.Memory.IndexDualTest do
       # ETS write is synchronous
       assert Index.stats(pid).entry_count == 1
 
-      # pgvector write is eager + async — wait deterministically for it to land
-      eventually(fn -> match?({:ok, %{id: ^id}}, Embedding.get(agent_id, id)) end)
+      assert {:ok, %{id: ^id}} = Embedding.get(agent_id, id)
       assert Embedding.count(agent_id) == 1
     end
 
@@ -91,7 +95,7 @@ defmodule Arbor.Memory.IndexDualTest do
 
       assert results != []
       assert hd(results).content == "Cache hit test"
-      eventually(fn -> match?({:ok, %{id: ^id}}, Embedding.get(agent_id, id)) end)
+      assert {:ok, %{id: ^id}} = Embedding.get(agent_id, id)
     end
 
     test "recall falls back to pgvector on cache miss", %{pid: pid, agent_id: agent_id} do
@@ -108,6 +112,23 @@ defmodule Arbor.Memory.IndexDualTest do
 
       # Should find the pgvector entry
       assert results != []
+    end
+
+    test "authority regression: content dedupe returns and deletes by the durable row id", %{
+      pid: pid,
+      agent_id: agent_id
+    } do
+      content = "Durable dedupe identity"
+      embedding = generate_embedding(17)
+      assert {:ok, durable_id} = Embedding.store(agent_id, content, embedding, %{type: "fact"})
+
+      assert {:ok, ^durable_id} =
+               Index.index(pid, content, %{type: :updated}, embedding: generate_embedding(18))
+
+      assert {:ok, %{id: ^durable_id}} = Index.get(pid, durable_id)
+      assert :ok = Index.delete(pid, durable_id)
+      assert {:error, :not_found} = Embedding.get(agent_id, durable_id)
+      assert {:error, :not_found} = Index.get(pid, durable_id)
     end
   end
 
@@ -170,19 +191,47 @@ defmodule Arbor.Memory.IndexDualTest do
   end
 
   describe "sync_to_persistent/2" do
-    test "flushes pending entries to pgvector", %{pid: pid, agent_id: agent_id} do
+    test "successful eager writes leave no pending retry", %{pid: pid, agent_id: agent_id} do
       embedding = generate_embedding(1)
 
-      # Index with embedding (this creates a pending sync entry)
       {:ok, id} = Index.index(pid, "Sync test", %{type: :fact}, embedding: embedding)
-      eventually(fn -> match?({:ok, %{id: ^id}}, Embedding.get(agent_id, id)) end)
+      assert {:ok, %{id: ^id}} = Embedding.get(agent_id, id)
 
-      # Explicitly flush pending entries — this is the function under test, and
-      # it's synchronous, so no sleep/race.
-      assert {:ok, _count} = Index.sync_to_persistent(pid)
+      assert {:ok, 0} = Index.sync_to_persistent(pid)
 
-      # Verify it's in pgvector
       assert Embedding.count(agent_id) == 1
+    end
+
+    test "authority regression: failed eager write retries with the acknowledged id" do
+      agent_id = durable_unique("test_dual_retry")
+      FailFirstWriter.arm(agent_id)
+
+      {:ok, pid} =
+        Index.start_link(
+          agent_id: agent_id,
+          backend: :dual,
+          persistent_writer: FailFirstWriter,
+          name: {:via, Registry, {Arbor.Memory.Registry, {:test_dual_retry, agent_id}}}
+        )
+
+      on_exit(fn ->
+        FailFirstWriter.disarm(agent_id)
+        if Process.alive?(pid), do: GenServer.stop(pid)
+        Embedding.delete_all(agent_id)
+      end)
+
+      assert {:ok, acknowledged_id} =
+               Index.index(pid, "Retry identity", %{type: :fact},
+                 embedding: generate_embedding(27)
+               )
+
+      assert {:error, :not_found} = Embedding.get(agent_id, acknowledged_id)
+      assert {:ok, 1} = Index.sync_to_persistent(pid)
+      assert {:ok, %{id: ^acknowledged_id}} = Embedding.get(agent_id, acknowledged_id)
+      assert {:ok, %{id: ^acknowledged_id}} = Index.get(pid, acknowledged_id)
+
+      assert :ok = Index.delete(pid, acknowledged_id)
+      assert {:error, :not_found} = Embedding.get(agent_id, acknowledged_id)
     end
 
     test "returns error for non-dual backend" do
@@ -204,16 +253,28 @@ defmodule Arbor.Memory.IndexDualTest do
       embedding = generate_embedding(1)
       {:ok, id} = Index.index(pid, "Delete test", %{type: :fact}, embedding: embedding)
 
-      # Wait for the eager pgvector write to land before deleting
-      eventually(fn -> match?({:ok, %{id: ^id}}, Embedding.get(agent_id, id)) end)
+      assert {:ok, %{id: ^id}} = Embedding.get(agent_id, id)
 
       # Delete
       :ok = Index.delete(pid, id)
 
       # Verify removed from ETS
       assert {:error, :not_found} = Index.get(pid, id)
-      # The pgvector entry uses the same ID; ETS removal is the assertion this
-      # test guards (delete-to-pgvector propagation is covered elsewhere).
+      assert {:error, :not_found} = Embedding.get(agent_id, id)
+    end
+
+    test "authority regression: durable delete failure preserves the ETS entry", %{
+      pid: pid,
+      agent_id: agent_id
+    } do
+      assert {:ok, id} =
+               Index.index(pid, "Delete failure", %{type: :fact},
+                 embedding: generate_embedding(35)
+               )
+
+      assert :ok = Embedding.delete(agent_id, id)
+      assert {:error, :not_found} = Index.delete(pid, id)
+      assert {:ok, %{id: ^id, content: "Delete failure"}} = Index.get(pid, id)
     end
   end
 

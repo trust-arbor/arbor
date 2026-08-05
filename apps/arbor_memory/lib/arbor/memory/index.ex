@@ -87,6 +87,7 @@ defmodule Arbor.Memory.Index do
   - `:max_entries` - Max entries before LRU eviction (default: 10_000)
   - `:threshold` - Default similarity threshold for recall (default: 0.3)
   - `:name` - Optional name for the GenServer
+  - `:persistent_writer` - Legacy durable writer module (default: `Embedding`)
 
   ## Examples
 
@@ -270,8 +271,11 @@ defmodule Arbor.Memory.Index do
       default_threshold: threshold,
       entry_count: 0,
       backend: backend,
+      persistent_writer: Keyword.get(opts, :persistent_writer, Embedding),
       # Track entries not yet synced to persistent (for dual mode)
-      pending_sync: MapSet.new()
+      pending_sync: MapSet.new(),
+      # A failed eager write can later deduplicate to a different durable ID.
+      id_aliases: %{}
     }
 
     Logger.debug("Started memory index for agent #{agent_id} with backend #{backend}")
@@ -321,12 +325,14 @@ defmodule Arbor.Memory.Index do
 
   def handle_call(:clear, _from, state) do
     :ets.delete_all_objects(state.table)
-    {:reply, :ok, %{state | entry_count: 0}}
+    {:reply, :ok, %{state | entry_count: 0, pending_sync: MapSet.new(), id_aliases: %{}}}
   end
 
   def handle_call({:get, entry_id}, _from, state) do
-    case :ets.lookup(state.table, entry_id) do
-      [{^entry_id, entry}] ->
+    canonical_id = resolve_entry_id(entry_id, state)
+
+    case :ets.lookup(state.table, canonical_id) do
+      [{^canonical_id, entry}] ->
         # Update access time and count
         updated_entry = %{
           entry
@@ -334,7 +340,7 @@ defmodule Arbor.Memory.Index do
             access_count: entry.access_count + 1
         }
 
-        :ets.insert(state.table, {entry_id, updated_entry})
+        :ets.insert(state.table, {canonical_id, updated_entry})
         {:reply, {:ok, updated_entry}, state}
 
       [] ->
@@ -343,22 +349,9 @@ defmodule Arbor.Memory.Index do
   end
 
   def handle_call({:delete, entry_id}, _from, state) do
-    case :ets.lookup(state.table, entry_id) do
-      [{^entry_id, _entry}] ->
-        :ets.delete(state.table, entry_id)
-
-        # Also delete from persistent backend if configured
-        if state.backend in [:pgvector, :dual] do
-          Embedding.delete(state.agent_id, entry_id)
-        end
-
-        new_pending = MapSet.delete(state.pending_sync, entry_id)
-
-        {:reply, :ok,
-         %{state | entry_count: max(0, state.entry_count - 1), pending_sync: new_pending}}
-
-      [] ->
-        {:reply, {:error, :not_found}, state}
+    case delete_entry(entry_id, state) do
+      {:ok, new_state} -> {:reply, :ok, new_state}
+      {:error, reason, new_state} -> {:reply, {:error, reason}, new_state}
     end
   end
 
@@ -376,8 +369,8 @@ defmodule Arbor.Memory.Index do
       result = do_sync_to_persistent(state)
 
       case result do
-        {:ok, count} ->
-          {:reply, {:ok, count}, %{state | pending_sync: MapSet.new()}}
+        {:ok, count, new_state} ->
+          {:reply, {:ok, count}, new_state}
 
         error ->
           {:reply, error, state}
@@ -424,8 +417,7 @@ defmodule Arbor.Memory.Index do
       case new_state.backend do
         :ets ->
           # ETS only
-          :ets.insert(new_state.table, {entry_id, entry})
-          {:ok, entry_id, %{new_state | entry_count: new_state.entry_count + 1}}
+          {:ok, entry_id, put_local_entry(new_state, entry)}
 
         :pgvector ->
           # pgvector only
@@ -444,36 +436,23 @@ defmodule Arbor.Memory.Index do
   end
 
   defp index_dual_mode(entry_id, entry, state) do
-    # Write to both ETS and pgvector
-    :ets.insert(state.table, {entry_id, entry})
-
-    # Async write to pgvector with error logging (pass entry_id for consistency)
     metadata_with_id = Map.put(entry.metadata, :id, entry_id)
 
-    Task.start(fn ->
-      # Best-effort eager persist. `Embedding.store` can RAISE (not just return
-      # {:error, _}) — e.g. a DB/connection error — so wrap it. An unhandled
-      # raise here used to crash the detached Task with a loud stacktrace (noisy
-      # in tests when a sandbox connection closes mid-flight; a transient blip in
-      # prod). Degrade any failure to a single warning, matching the {:error, _}
-      # path. The entry is already in `pending_sync` for a later
-      # `sync_to_persistent/2` flush, so a dropped eager write is recoverable.
-      try do
-        case Embedding.store(state.agent_id, entry.content, entry.embedding, metadata_with_id) do
-          {:ok, _id} -> :ok
-          {:error, reason} -> log_dual_write_failure(entry_id, reason)
-        end
-      rescue
-        e -> log_dual_write_failure(entry_id, e)
-      end
-    end)
+    case eager_store(state, entry, metadata_with_id) do
+      {:ok, authoritative_id} when is_binary(authoritative_id) ->
+        authoritative_entry = %{entry | id: authoritative_id}
+        {:ok, authoritative_id, put_local_entry(state, authoritative_entry)}
 
-    {:ok, entry_id,
-     %{
-       state
-       | entry_count: state.entry_count + 1,
-         pending_sync: MapSet.put(state.pending_sync, entry_id)
-     }}
+      {:ok, _malformed_id} ->
+        log_dual_write_failure(entry_id, :malformed_persistence_result)
+        state = put_local_entry(state, entry)
+        {:ok, entry_id, %{state | pending_sync: MapSet.put(state.pending_sync, entry_id)}}
+
+      {:error, reason} ->
+        log_dual_write_failure(entry_id, reason)
+        state = put_local_entry(state, entry)
+        {:ok, entry_id, %{state | pending_sync: MapSet.put(state.pending_sync, entry_id)}}
+    end
   end
 
   defp log_dual_write_failure(entry_id, reason) do
@@ -793,14 +772,36 @@ defmodule Arbor.Memory.Index do
     pending_ids = MapSet.to_list(state.pending_sync)
 
     if pending_ids == [] do
-      {:ok, 0}
+      {:ok, 0, state}
     else
-      entries = Enum.flat_map(pending_ids, &collect_pending_entry(&1, state))
+      pending_entries = Enum.flat_map(pending_ids, &collect_pending_entry(&1, state))
 
-      if entries == [] do
-        {:ok, 0}
+      if pending_entries == [] do
+        {:ok, 0, %{state | pending_sync: MapSet.new()}}
       else
-        Embedding.store_batch(state.agent_id, entries)
+        entries =
+          Enum.map(pending_entries, fn {id, entry} ->
+            {entry.content, entry.embedding, Map.put(entry.metadata, :id, id)}
+          end)
+
+        case batch_store_with_ids(state, entries) do
+          {:ok, authoritative_ids}
+          when is_list(authoritative_ids) and length(authoritative_ids) == length(entries) ->
+            new_state =
+              pending_entries
+              |> Enum.zip(authoritative_ids)
+              |> Enum.reduce(state, fn {{requested_id, entry}, authoritative_id}, acc ->
+                converge_entry_id(acc, requested_id, authoritative_id, entry)
+              end)
+
+            {:ok, length(authoritative_ids), new_state}
+
+          {:ok, _malformed_ids} ->
+            {:error, :malformed_persistence_result}
+
+          {:error, reason} ->
+            {:error, reason}
+        end
       end
     end
   end
@@ -864,10 +865,128 @@ defmodule Arbor.Memory.Index do
   defp collect_pending_entry(id, state) do
     case :ets.lookup(state.table, id) do
       [{^id, entry}] ->
-        [{entry.content, entry.embedding, entry.metadata}]
+        [{id, entry}]
 
       [] ->
         []
     end
+  end
+
+  defp eager_store(state, entry, metadata) do
+    state.persistent_writer.store(state.agent_id, entry.content, entry.embedding, metadata)
+  rescue
+    error -> {:error, error}
+  catch
+    kind, reason -> {:error, {kind, reason}}
+  end
+
+  defp batch_store_with_ids(state, entries) do
+    state.persistent_writer.store_batch_with_ids(state.agent_id, entries)
+  rescue
+    error -> {:error, error}
+  catch
+    kind, reason -> {:error, {kind, reason}}
+  end
+
+  defp converge_entry_id(state, requested_id, authoritative_id, entry)
+       when is_binary(authoritative_id) do
+    if requested_id != authoritative_id do
+      :ets.delete(state.table, requested_id)
+    end
+
+    :ets.insert(state.table, {authoritative_id, %{entry | id: authoritative_id}})
+
+    aliases =
+      state.id_aliases
+      |> Map.new(fn
+        {alias_id, ^requested_id} -> {alias_id, authoritative_id}
+        pair -> pair
+      end)
+      |> maybe_put_alias(requested_id, authoritative_id)
+
+    %{
+      state
+      | entry_count: :ets.info(state.table, :size),
+        pending_sync: MapSet.delete(state.pending_sync, requested_id),
+        id_aliases: aliases
+    }
+  end
+
+  defp maybe_put_alias(aliases, id, id), do: aliases
+
+  defp maybe_put_alias(aliases, requested_id, authoritative_id),
+    do: Map.put(aliases, requested_id, authoritative_id)
+
+  defp put_local_entry(state, entry) do
+    :ets.insert(state.table, {entry.id, entry})
+    %{state | entry_count: :ets.info(state.table, :size)}
+  end
+
+  defp resolve_entry_id(entry_id, state), do: Map.get(state.id_aliases, entry_id, entry_id)
+
+  defp delete_entry(entry_id, %{backend: :pgvector} = state) do
+    case Embedding.delete(state.agent_id, entry_id) do
+      :ok -> {:ok, state}
+      {:error, reason} -> {:error, reason, state}
+    end
+  end
+
+  defp delete_entry(entry_id, state) do
+    canonical_id = resolve_entry_id(entry_id, state)
+
+    case :ets.lookup(state.table, canonical_id) do
+      [] ->
+        {:error, :not_found, state}
+
+      [{^canonical_id, _entry}] when state.backend == :ets ->
+        {:ok, remove_local_entry(state, canonical_id)}
+
+      [{^canonical_id, _entry}] ->
+        delete_synced_entry(entry_id, canonical_id, state)
+    end
+  end
+
+  defp delete_synced_entry(requested_id, canonical_id, state) do
+    case ensure_entry_synced(canonical_id, state) do
+      {:ok, synced_state} ->
+        durable_id = resolve_entry_id(requested_id, synced_state)
+
+        case Embedding.delete(synced_state.agent_id, durable_id) do
+          :ok -> {:ok, remove_local_entry(synced_state, durable_id)}
+          {:error, reason} -> {:error, reason, synced_state}
+        end
+
+      {:error, reason} ->
+        {:error, reason, state}
+    end
+  end
+
+  defp ensure_entry_synced(canonical_id, state) do
+    if MapSet.member?(state.pending_sync, canonical_id) do
+      case do_sync_to_persistent(state) do
+        {:ok, _count, synced_state} -> {:ok, synced_state}
+        {:error, reason} -> {:error, reason}
+      end
+    else
+      {:ok, state}
+    end
+  end
+
+  defp remove_local_entry(state, canonical_id) do
+    :ets.delete(state.table, canonical_id)
+
+    aliases =
+      state.id_aliases
+      |> Enum.reject(fn {alias_id, target_id} ->
+        alias_id == canonical_id or target_id == canonical_id
+      end)
+      |> Map.new()
+
+    %{
+      state
+      | entry_count: :ets.info(state.table, :size),
+        pending_sync: MapSet.delete(state.pending_sync, canonical_id),
+        id_aliases: aliases
+    }
   end
 end

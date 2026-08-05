@@ -9,7 +9,10 @@ defmodule Arbor.Memory.Embedding do
 
   alias Arbor.Persistence
 
+  @behaviour Arbor.Memory.Index.PersistentWriter
+
   @doc "Store or deduplicate one embedding."
+  @impl true
   @spec store(String.t(), String.t(), [float()], map()) ::
           {:ok, String.t()} | {:error, term()}
   def store(agent_id, content, embedding, metadata \\ %{}),
@@ -40,6 +43,7 @@ defmodule Arbor.Memory.Embedding do
     do: Persistence.store_legacy_embedding_batch(agent_id, entries)
 
   @doc false
+  @impl true
   @spec store_batch_with_ids(String.t(), [{String.t(), [float()], map()}]) ::
           {:ok, [String.t()]} | {:error, term()}
   def store_batch_with_ids(agent_id, entries),
