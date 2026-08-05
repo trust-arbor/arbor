@@ -5,6 +5,7 @@ defmodule Arbor.Orchestrator.Session.TurnEgress do
   # authorizer, and initial-taint derivation. Process-local only; never enters
   # Engine JSON context or public Session state.
 
+  alias Arbor.Contracts.Security.Taint
   alias Arbor.Contracts.Session.TurnAuthority
 
   @route_keys [:destination, :provider, :runtime, :model]
@@ -14,6 +15,15 @@ defmodule Arbor.Orchestrator.Session.TurnEgress do
   @admitted_frozen_tiers MapSet.new([:on_host, :external_provider])
   @max_route_field_bytes 256
   @user_taint_keys ~w(session.input session.query session.messages session.user_media session.task_id)
+  @taint_keys [
+    :__struct__,
+    :level,
+    :sensitivity,
+    :sanitizations,
+    :confidence,
+    :source,
+    :chain
+  ]
 
   @type scalar_route :: %{
           destination: String.t(),
@@ -528,6 +538,16 @@ defmodule Arbor.Orchestrator.Session.TurnEgress do
   @doc false
   @spec build_authorizer(map()) :: (term() -> :allow | {:error, term()})
   def build_authorizer(bindings) when is_map(bindings) do
+    taint_authorizer = build_taint_authorizer(bindings)
+    conservative_taint = %Taint{level: :untrusted, sensitivity: :internal}
+
+    fn route -> taint_authorizer.(route, conservative_taint) end
+  end
+
+  @doc false
+  @spec build_taint_authorizer(map()) ::
+          (term(), Taint.t() -> :allow | {:error, term()})
+  def build_taint_authorizer(bindings) when is_map(bindings) do
     fence = Map.fetch!(bindings, :fence)
     frozen = Map.fetch!(bindings, :frozen_route)
     frozen_tier = Map.fetch!(bindings, :frozen_tier)
@@ -537,23 +557,56 @@ defmodule Arbor.Orchestrator.Session.TurnEgress do
     human_id = Map.get(bindings, :human_id)
     disclosure_id = Map.get(bindings, :disclosure_capability_id)
 
-    fn route ->
-      authorize_turn_egress(
-        route,
-        fence,
-        frozen,
-        frozen_tier,
-        agent_id,
-        session_id,
-        turn_id,
-        human_id,
-        disclosure_id
-      )
+    fn route, taint ->
+      case validated_taint_level(taint) do
+        {:ok, taint_level} ->
+          authorize_turn_egress(
+            route,
+            taint_level,
+            fence,
+            frozen,
+            frozen_tier,
+            agent_id,
+            session_id,
+            turn_id,
+            human_id,
+            disclosure_id
+          )
+
+        :error ->
+          {:error, {:egress_blocked, :external_provider, :invalid_taint}}
+      end
     end
   end
 
+  defp validated_taint_level(%Taint{} = taint) do
+    if map_size(taint) == length(@taint_keys) and
+         Enum.sort(Map.keys(taint)) == Enum.sort(@taint_keys) and
+         taint.level in Taint.levels() and
+         taint.sensitivity in Taint.sensitivities() and
+         taint.confidence in Taint.confidences() and
+         is_integer(taint.sanitizations) and taint.sanitizations in 0..255 and
+         valid_taint_source?(taint.source) and valid_taint_chain?(taint.chain) do
+      {:ok, taint.level}
+    else
+      :error
+    end
+  end
+
+  defp validated_taint_level(_taint), do: :error
+
+  defp valid_taint_source?(nil), do: true
+  defp valid_taint_source?(source), do: is_binary(source) and String.valid?(source)
+
+  defp valid_taint_chain?(chain) when is_list(chain) do
+    Enum.all?(chain, &(is_binary(&1) and String.valid?(&1)))
+  end
+
+  defp valid_taint_chain?(_chain), do: false
+
   defp authorize_turn_egress(
          route,
+         taint_level,
          fence,
          frozen,
          frozen_tier,
@@ -579,6 +632,7 @@ defmodule Arbor.Orchestrator.Session.TurnEgress do
                 agent_id,
                 scalar,
                 frozen_tier,
+                taint_level,
                 session_id,
                 turn_id,
                 human_id,
@@ -604,6 +658,7 @@ defmodule Arbor.Orchestrator.Session.TurnEgress do
          agent_id,
          route,
          frozen_tier,
+         taint_level,
          session_id,
          turn_id,
          human_id,
@@ -615,7 +670,7 @@ defmodule Arbor.Orchestrator.Session.TurnEgress do
     else
       opts =
         [
-          egress_taint: :untrusted,
+          egress_taint: taint_level,
           egress_destination: route.destination,
           egress_provider: route.provider,
           egress_runtime: route.runtime,

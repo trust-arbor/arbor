@@ -122,14 +122,10 @@ defmodule Arbor.Orchestrator.Session.Builders do
 
     opts = build_credential_opts(opts, state)
 
-    # Steering (mirrors signer): a 0-arity closure the tool loop calls at iteration boundaries
-    # to fold mid-turn user messages into the active turn. Put in the CONTEXT (opts get
-    # function-stripped for RPC; local turns aren't checkpointed so the closure survives).
-    # self() is the Session process here — build_engine_opts runs in it before the turn task
-    # spawns, so the closure targets the right GenServer.
-    session_pid = self()
-    steer_check = fn -> Arbor.Orchestrator.Session.take_steering(session_pid) end
-    opts = Keyword.put(opts, :steer_check, steer_check)
+    # Only a live Session turn supplies a process-local steering binding. The
+    # reference and engagement are captured by the callback and are never
+    # inserted into Engine values or returned as standalone options.
+    opts = maybe_put_steer_check(opts, opts_overrides)
     opts = Keyword.put(opts, :initial_values, initial_values)
 
     # Wire streaming callback with source tag so the dashboard can
@@ -144,6 +140,26 @@ defmodule Arbor.Orchestrator.Session.Builders do
       opts
     else
       Keyword.put(opts, :on_stream, build_stream_callback(state, source))
+    end
+  end
+
+  defp maybe_put_steer_check(opts, opts_overrides) do
+    case {Keyword.get(opts_overrides, :source), Keyword.get(opts_overrides, :steering_binding)} do
+      {:turn, {turn_token, engagement_id}}
+      when is_reference(turn_token) and (is_binary(engagement_id) or is_nil(engagement_id)) ->
+        session_pid = self()
+
+        Keyword.put(opts, :steer_check, fn boundary ->
+          Arbor.Orchestrator.Session.take_steering(
+            session_pid,
+            turn_token,
+            engagement_id,
+            boundary
+          )
+        end)
+
+      _ ->
+        opts
     end
   end
 

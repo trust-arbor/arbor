@@ -1258,7 +1258,7 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
   end
 
   describe "security regression: queue steering and reset" do
-    test "authenticated queue head is never folded; nil-nil still steers", %{
+    test "removed unbound steering shape never folds any authority class", %{
       agent_id: agent_id,
       human_id: human_id
     } do
@@ -1298,7 +1298,7 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
 
       assert still_active.turn_queue == active_auth.turn_queue
 
-      # Both nil: fold.
+      # Both nil also fail closed through the removed unbound callback shape.
       both_nil =
         session_state(agent_id,
           turn_in_flight: true,
@@ -1307,11 +1307,11 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
           turn_queue: [{UserMessage.from_string("steer me"), nil, nil_from}]
         )
 
-      assert {:reply, "steer me", folded} =
+      assert {:reply, :none, folded} =
                Session.handle_call(:take_steering, {self(), make_ref()}, both_nil)
 
-      assert folded.turn_queue == []
-      assert nil_from in folded.steer_froms
+      assert folded.turn_queue == both_nil.turn_queue
+      assert folded.steer_froms == []
     end
 
     test "authority retained in queue through drain head; reset clears active authority", %{

@@ -1320,7 +1320,7 @@ defmodule Arbor.Orchestrator.SessionTest do
       assert state.turn_count == 2
     end
 
-    test "take_steering pops a queued mid-turn message and folds its caller into steer_froms" do
+    test "take_steering returns a turn-bound typed batch and folds caller ownership" do
       {pid, tmp_dir} = start_session([])
 
       on_exit(fn ->
@@ -1329,80 +1329,45 @@ defmodule Arbor.Orchestrator.SessionTest do
       end)
 
       fake_from = {self(), make_ref()}
+      turn_token = make_ref()
+      queued_message = UserMessage.from_string("also check the config")
 
       # Simulate a mid-turn message already queued during an in-flight turn.
       :sys.replace_state(pid, fn state ->
         %{
           state
           | turn_in_flight: true,
-            turn_queue: [{%{content: "also check the config"}, nil, fake_from}],
+            turn_token: turn_token,
+            current_engagement_id: nil,
+            turn_user_message: UserMessage.from_string("active"),
+            turn_queue: [{queued_message, nil, fake_from}],
             turn_authority: nil,
             steer_froms: []
         }
       end)
 
-      # First call: pop the message as steering + fold its caller into the active turn.
-      assert "also check the config" == Arbor.Orchestrator.Session.take_steering(pid)
+      assert {:ok, [%Arbor.Contracts.Session.SteeringMessage{content: "also check the config"}]} =
+               Arbor.Orchestrator.Session.take_steering(
+                 pid,
+                 turn_token,
+                 nil,
+                 {make_ref(), 1}
+               )
 
       state = Arbor.Orchestrator.Session.get_state(pid)
       assert state.turn_queue == []
       assert fake_from in state.steer_froms
 
-      # Empty queue → :none (nothing left to fold in).
-      assert :none == Arbor.Orchestrator.Session.take_steering(pid)
+      assert :none ==
+               Arbor.Orchestrator.Session.take_steering(
+                 pid,
+                 turn_token,
+                 nil,
+                 {make_ref(), 2}
+               )
     end
 
-    test "END-TO-END: a queued mid-turn message steers a live tool loop via the real closure" do
-      {pid, tmp_dir} = start_session([])
-
-      on_exit(fn ->
-        if Process.alive?(pid), do: GenServer.stop(pid)
-        File.rm_rf(tmp_dir)
-      end)
-
-      fake_from = {self(), make_ref()}
-
-      # A mid-turn message already queued during an in-flight turn.
-      :sys.replace_state(pid, fn s ->
-        %{
-          s
-          | turn_in_flight: true,
-            turn_queue: [{%{content: "STEER: also verify config"}, nil, fake_from}],
-            turn_authority: nil,
-            steer_froms: []
-        }
-      end)
-
-      # The EXACT closure build_engine_opts wires into the turn context.
-      steer_check = fn -> Arbor.Orchestrator.Session.take_steering(pid) end
-
-      client =
-        Arbor.LLM.Client.new(default_provider: SteerIntegAdapter.provider())
-        |> Arbor.LLM.Client.register_adapter(SteerIntegAdapter)
-
-      request = %Arbor.LLM.Request{
-        provider: SteerIntegAdapter.provider(),
-        model: "test",
-        messages: [Arbor.LLM.Message.new(:user, "do the task")]
-      }
-
-      # Turn 1: the noop tool. At the boundary, the real steer_check -> real Session.take_steering
-      # pops the queued message and the tool loop folds it in. Turn 2: the model sees it.
-      {:ok, result} =
-        Arbor.LLM.ToolLoop.run(client, request,
-          tool_executor: MockSteerTools,
-          on_steer_check: steer_check
-        )
-
-      assert result.content =~ "Acknowledged: STEER: also verify config"
-
-      # The real Session drained its queue and folded the caller into the active turn.
-      state = Arbor.Orchestrator.Session.get_state(pid)
-      assert state.turn_queue == []
-      assert fake_from in state.steer_froms
-    end
-
-    test "build_engine_opts keeps steering callback process-local" do
+    test "build_engine_opts omits steering without an exact live-turn binding" do
       {pid, tmp_dir} = start_session([])
 
       on_exit(fn ->
@@ -1413,7 +1378,7 @@ defmodule Arbor.Orchestrator.SessionTest do
       state = Arbor.Orchestrator.Session.get_state(pid)
       opts = Arbor.Orchestrator.Session.Builders.build_engine_opts(state, %{})
 
-      assert is_function(opts[:steer_check], 0)
+      refute Keyword.has_key?(opts, :steer_check)
       refute Map.has_key?(get_in(opts, [:initial_values]), "session.steer_check")
     end
 

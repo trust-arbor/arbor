@@ -80,6 +80,8 @@ defmodule Arbor.Orchestrator.Session do
   alias Arbor.Contracts.Pipeline.Response, as: PipelineResponse
   alias Arbor.Contracts.Comms.Engagement
   alias Arbor.Contracts.Security.DeliveryReceipt
+  alias Arbor.Contracts.Security.Taint
+  alias Arbor.Contracts.Session.SteeringMessage
   alias Arbor.Contracts.Session.TurnAuthority
   alias Arbor.Contracts.Session.UserMessage
   alias Arbor.Identifiers
@@ -167,6 +169,12 @@ defmodule Arbor.Orchestrator.Session do
     # the exact reference; stale/detached/forged results are ignored. Never
     # public, never Engine context.
     turn_token: nil,
+    # VP-05D2B: process-local steering replay/resource accounting. Boundary
+    # references and counters never enter Engine values, checkpoints, or the
+    # public state projection.
+    steering_boundaries: MapSet.new(),
+    steering_message_count: 0,
+    steering_byte_count: 0,
     streaming_buffer: nil,
     turn_task_pid: nil,
     turn_timeout_ref: nil,
@@ -239,6 +247,9 @@ defmodule Arbor.Orchestrator.Session do
           turn_authority: TurnAuthority.t() | nil,
           turn_egress_fence: term() | nil,
           turn_token: reference() | nil,
+          steering_boundaries: MapSet.t() | nil,
+          steering_message_count: non_neg_integer() | nil,
+          steering_byte_count: non_neg_integer() | nil,
           streaming_buffer: map() | nil,
           turn_task_pid: pid() | nil,
           turn_timeout_ref: reference() | nil
@@ -412,15 +423,21 @@ defmodule Arbor.Orchestrator.Session do
   def cancel_task(_session, _task_id), do: {:error, :invalid_task_id}
 
   @doc """
-  Pop the next queued mid-turn message as a STEERING message (its content), folding its caller
-  into the active turn's reply set — or `:none` if the queue is empty. Called by the tool loop's
-  `steer_check` closure (wired in `build_engine_opts`) at each iteration boundary. Best-effort:
-  any Session unavailability returns `:none` so steering simply doesn't happen and never crashes
-  the turn.
+  Take a bounded batch of queued messages for one active-turn boundary.
+
+  The process-local turn token and source-owned engagement must exactly match
+  the active turn. A boundary is an exact `{attempt_ref, positive_sequence}`
+  tuple and may be observed only once. Invalid, stale, duplicate, unavailable,
+  or over-limit reads fail closed as `:none`.
   """
-  @spec take_steering(GenServer.server()) :: String.t() | :none
-  def take_steering(session) do
-    GenServer.call(session, :take_steering, 5_000)
+  @spec take_steering(GenServer.server(), reference(), String.t() | nil, term()) ::
+          :none | {:ok, [SteeringMessage.t()]}
+  def take_steering(session, turn_token, engagement_id, boundary) do
+    GenServer.call(
+      session,
+      {:take_steering, turn_token, engagement_id, boundary},
+      5_000
+    )
   catch
     :exit, _ -> :none
   end
@@ -713,30 +730,34 @@ defmodule Arbor.Orchestrator.Session do
       {:reply, {:error, :unauthenticated}, state}
   end
 
-  # STEERING: the running tool loop calls this (via the steer_check closure built in
-  # build_engine_opts) at each iteration boundary to pull the next mid-turn user message off
-  # turn_queue and fold it into the ACTIVE turn. The message's caller is added to steer_froms
-  # so it receives the same turn result as the primary caller (rather than a separate follow-up
-  # turn). Returns :none when the queue is empty — the message is consumed here instead of
-  # being drained as its own turn later, so no double-processing.
-  # Skip (and cancel-reply) any leading queue entries whose task_id is tombstoned.
-  # Fold only when both active and queued authorities are nil; otherwise leave head.
-  def handle_call(:take_steering, _from, %{turn_queue: [_ | _]} = state) do
-    case pop_steering_message(state) do
-      {:ok, content, new_state} ->
-        require Logger
+  # STEERING: one process-local callback is bound to the exact live turn and
+  # engagement. A valid boundary is marked before scanning, including when no
+  # message is eligible. Invalid/stale/duplicate reads do not touch the queue.
+  def handle_call(
+        {:take_steering, turn_token, engagement_id, boundary},
+        _from,
+        state
+      ) do
+    case admit_steering_boundary(state, turn_token, engagement_id, boundary) do
+      {:ok, boundary_state} ->
+        {messages, new_state} = take_steering_batch(boundary_state, engagement_id)
 
-        Logger.info(
-          "[Session] steering: folding a mid-turn message into the active turn for #{state.agent_id}"
-        )
+        if messages == [] do
+          {:reply, :none, new_state}
+        else
+          Logger.info(
+            "[Session] steering: folding #{length(messages)} mid-turn message(s) into the active turn for #{state.agent_id}"
+          )
 
-        {:reply, content, new_state}
+          {:reply, {:ok, messages}, new_state}
+        end
 
-      {:none, new_state} ->
-        {:reply, :none, new_state}
+      :error ->
+        {:reply, :none, state}
     end
   end
 
+  # Removed unbound and malformed callback shapes fail closed.
   def handle_call(:take_steering, _from, state), do: {:reply, :none, state}
 
   def handle_call({:send_message, message}, from, state) do
@@ -886,7 +907,7 @@ defmodule Arbor.Orchestrator.Session do
     # values, or preprocessor maps. Only process-local function opts + taint.
     engine_opts = prepared.engine_opts
     fence = prepared.fence
-    turn_token = make_ref()
+    turn_token = prepared.turn_token
 
     session_pid = self()
     turn_graph = state.turn_graph
@@ -943,6 +964,9 @@ defmodule Arbor.Orchestrator.Session do
         turn_authority: turn_authority,
         turn_egress_fence: fence,
         turn_token: turn_token,
+        steering_boundaries: MapSet.new(),
+        steering_message_count: 0,
+        steering_byte_count: 0,
         streaming_buffer: %{content: "", started_at: DateTime.utc_now(), first_token_at: nil},
         turn_timeout_ref: timeout_ref
     }
@@ -1370,29 +1394,279 @@ defmodule Arbor.Orchestrator.Session do
     end
   end
 
-  # Pop the next non-tombstoned queue entry for steering. Cancel-reply and skip
-  # any leading entries whose task was cancelled while queued.
-  # Authority-bearing active turn or queue head: leave head, return :none.
-  defp pop_steering_message(%{turn_queue: []} = state), do: {:none, state}
+  @turn_authority_keys [
+    :__struct__,
+    :turn_id,
+    :authenticated_principal_id,
+    :disclosure_capability_id
+  ]
 
-  defp pop_steering_message(
-         %{turn_queue: [{user_message, queued_authority, caller_from} | rest]} = state
-       ) do
-    if task_cancelled?(state, user_message_task_id(user_message)) do
-      state = %{state | turn_queue: rest}
-      safe_reply(caller_from, {:error, :cancelled})
-      pop_steering_message(state)
-    else
-      if is_nil(state.turn_authority) and is_nil(queued_authority) do
-        state = %{state | turn_queue: rest}
-        new_state = %{state | steer_froms: [caller_from | state.steer_froms]}
-        {:ok, user_message.content, new_state}
-      else
-        # Do not consume or reorder an authority-bearing boundary.
-        {:none, state}
-      end
+  defp admit_steering_boundary(state, turn_token, engagement_id, boundary) do
+    boundaries = state.steering_boundaries
+
+    cond do
+      not matching_turn_token?(state, turn_token) ->
+        :error
+
+      not active_steering_engagement?(state, engagement_id) ->
+        :error
+
+      not valid_steering_boundary?(boundary) ->
+        :error
+
+      not match?(%MapSet{}, boundaries) ->
+        :error
+
+      not valid_steering_counters?(state) ->
+        :error
+
+      MapSet.member?(boundaries, boundary) ->
+        :error
+
+      MapSet.size(boundaries) >= SteeringMessage.max_boundaries_per_turn() ->
+        :error
+
+      true ->
+        {:ok, %{state | steering_boundaries: MapSet.put(boundaries, boundary)}}
     end
   end
+
+  defp active_steering_engagement?(
+         %{
+           turn_in_flight: true,
+           current_engagement_id: engagement_id,
+           turn_user_message: %UserMessage{engagement_id: engagement_id}
+         },
+         engagement_id
+       ),
+       do: true
+
+  defp active_steering_engagement?(_state, _engagement_id), do: false
+
+  defp valid_steering_boundary?({attempt_ref, sequence}) do
+    is_reference(attempt_ref) and is_integer(sequence) and sequence > 0
+  end
+
+  defp valid_steering_boundary?(_boundary), do: false
+
+  defp valid_steering_counters?(state) do
+    is_integer(state.steering_message_count) and state.steering_message_count >= 0 and
+      state.steering_message_count <= SteeringMessage.max_messages_per_turn() and
+      is_integer(state.steering_byte_count) and state.steering_byte_count >= 0 and
+      state.steering_byte_count <= SteeringMessage.max_bytes_per_turn()
+  end
+
+  # Scan the whole queue once. Cross-engagement, authority-ineligible, malformed,
+  # and over-limit entries retain their original relative order. Dead and
+  # cancelled entries are removed wherever they occur, so an eligible later
+  # same-engagement message cannot be starved by an unrelated head.
+  defp take_steering_batch(state, engagement_id) do
+    acc = %{
+      queue_rev: [],
+      messages_rev: [],
+      froms_rev: [],
+      boundary_message_count: 0,
+      boundary_byte_count: 0
+    }
+
+    acc =
+      scan_steering_queue(
+        state.turn_queue || [],
+        state,
+        engagement_id,
+        acc
+      )
+
+    messages = Enum.reverse(acc.messages_rev)
+    accepted_froms = Enum.reverse(acc.froms_rev)
+
+    new_state = %{
+      state
+      | turn_queue: Enum.reverse(acc.queue_rev),
+        steer_froms: (state.steer_froms || []) ++ accepted_froms,
+        steering_message_count: state.steering_message_count + acc.boundary_message_count,
+        steering_byte_count: state.steering_byte_count + acc.boundary_byte_count
+    }
+
+    {messages, new_state}
+  end
+
+  defp scan_steering_queue([], _state, _engagement_id, acc), do: acc
+
+  defp scan_steering_queue(
+         [{user_message, queued_authority, caller_from} = entry | rest],
+         state,
+         engagement_id,
+         acc
+       ) do
+    cond do
+      task_cancelled?(state, user_message_task_id(user_message)) ->
+        safe_reply(caller_from, {:error, :cancelled})
+        scan_steering_queue(rest, state, engagement_id, acc)
+
+      not caller_alive?(caller_from) ->
+        scan_steering_queue(rest, state, engagement_id, acc)
+
+      steering_entry_eligible?(
+        user_message,
+        queued_authority,
+        state,
+        engagement_id
+      ) ->
+        case maybe_build_steering_message(user_message, state, acc) do
+          {:ok, message, byte_count} ->
+            next_acc = %{
+              acc
+              | messages_rev: [message | acc.messages_rev],
+                froms_rev: [caller_from | acc.froms_rev],
+                boundary_message_count: acc.boundary_message_count + 1,
+                boundary_byte_count: acc.boundary_byte_count + byte_count
+            }
+
+            scan_steering_queue(rest, state, engagement_id, next_acc)
+
+          :error ->
+            scan_steering_queue(rest, state, engagement_id, %{
+              acc
+              | queue_rev: [entry | acc.queue_rev]
+            })
+        end
+
+      true ->
+        scan_steering_queue(rest, state, engagement_id, %{
+          acc
+          | queue_rev: [entry | acc.queue_rev]
+        })
+    end
+  end
+
+  defp scan_steering_queue([entry | rest], state, engagement_id, acc) do
+    scan_steering_queue(rest, state, engagement_id, %{
+      acc
+      | queue_rev: [entry | acc.queue_rev]
+    })
+  end
+
+  defp steering_entry_eligible?(
+         %UserMessage{engagement_id: engagement_id} = queued_message,
+         queued_authority,
+         state,
+         engagement_id
+       ) do
+    steering_authority_match?(
+      state.turn_authority,
+      queued_authority,
+      state.turn_user_message,
+      queued_message
+    )
+  end
+
+  defp steering_entry_eligible?(_message, _authority, _state, _engagement_id), do: false
+
+  defp steering_authority_match?(nil, nil, _active_message, _queued_message), do: true
+
+  defp steering_authority_match?(
+         active_authority,
+         queued_authority,
+         active_message,
+         queued_message
+       ) do
+    with {:ok, active} <- canonical_turn_authority(active_authority),
+         {:ok, queued} <- canonical_turn_authority(queued_authority),
+         true <- active.authenticated_principal_id == queued.authenticated_principal_id,
+         true <- authenticated_message_owner?(active_message, active),
+         true <- authenticated_message_owner?(queued_message, queued) do
+      true
+    else
+      _ -> false
+    end
+  end
+
+  defp canonical_turn_authority(%TurnAuthority{} = authority) do
+    if map_size(authority) == length(@turn_authority_keys) and
+         Enum.sort(Map.keys(authority)) == Enum.sort(@turn_authority_keys) do
+      attrs = %{
+        turn_id: authority.turn_id,
+        authenticated_principal_id: authority.authenticated_principal_id,
+        disclosure_capability_id: authority.disclosure_capability_id
+      }
+
+      case TurnAuthority.new(attrs) do
+        {:ok, ^authority} -> {:ok, authority}
+        _ -> :error
+      end
+    else
+      :error
+    end
+  end
+
+  defp canonical_turn_authority(_authority), do: :error
+
+  defp authenticated_message_owner?(
+         %UserMessage{sender_id: principal_id},
+         %TurnAuthority{authenticated_principal_id: principal_id}
+       ),
+       do: true
+
+  defp authenticated_message_owner?(_message, _authority), do: false
+
+  defp maybe_build_steering_message(%UserMessage{content: content} = user_message, state, acc)
+       when is_binary(content) do
+    byte_count = byte_size(content)
+
+    if steering_capacity?(state, acc, byte_count) do
+      taint = %Taint{
+        level: :untrusted,
+        sensitivity: :internal,
+        sanitizations: 0,
+        confidence: :unverified,
+        source: steering_transport_label(user_message),
+        chain: ["session_steering"]
+      }
+
+      case SteeringMessage.new(%{
+             message_id: Identifiers.generate_id("steer_"),
+             engagement_id: user_message.engagement_id,
+             content: content,
+             taint: taint
+           }) do
+        {:ok, message} -> {:ok, message, byte_count}
+        {:error, _} -> :error
+      end
+    else
+      :error
+    end
+  rescue
+    _ -> :error
+  catch
+    _, _ -> :error
+  end
+
+  defp maybe_build_steering_message(_user_message, _state, _acc), do: :error
+
+  defp steering_capacity?(state, acc, byte_count) do
+    acc.boundary_message_count < SteeringMessage.max_messages_per_boundary() and
+      acc.boundary_byte_count + byte_count <= SteeringMessage.max_bytes_per_boundary() and
+      state.steering_message_count + acc.boundary_message_count <
+        SteeringMessage.max_messages_per_turn() and
+      state.steering_byte_count + acc.boundary_byte_count + byte_count <=
+        SteeringMessage.max_bytes_per_turn()
+  end
+
+  defp steering_transport_label(%UserMessage{transport: :dashboard}),
+    do: "session_steering_dashboard"
+
+  defp steering_transport_label(%UserMessage{transport: :cli}), do: "session_steering_cli"
+  defp steering_transport_label(%UserMessage{transport: :acp}), do: "session_steering_acp"
+  defp steering_transport_label(%UserMessage{transport: :signal}), do: "session_steering_signal"
+
+  defp steering_transport_label(%UserMessage{transport: :discord}),
+    do: "session_steering_discord"
+
+  defp steering_transport_label(%UserMessage{transport: :slack}), do: "session_steering_slack"
+  defp steering_transport_label(%UserMessage{transport: :http}), do: "session_steering_http"
+  defp steering_transport_label(%UserMessage{transport: :voice}), do: "session_steering_voice"
+  defp steering_transport_label(_message), do: "session_steering_unknown"
 
   # Engine consumption of the preprocessor: override the turn's tool list based on
   # tier / retrieved tools. `LlmHandler.resolve_tools/3` reads "session.tools" first,
@@ -1633,7 +1907,11 @@ defmodule Arbor.Orchestrator.Session do
     if caller_alive?(from) do
       case authorize_orchestrator(state) do
         :ok ->
-          case prepare_live_turn(user_message, turn_authority, state) do
+          # Allocate once before preparation. Builders closes over this exact
+          # token, the task result carries it, and Session stores it for matching.
+          turn_token = make_ref()
+
+          case prepare_live_turn(user_message, turn_authority, turn_token, state) do
             {:ok, prepared} ->
               case do_send_message_async(
                      user_message,
@@ -1673,7 +1951,8 @@ defmodule Arbor.Orchestrator.Session do
   # source-owned route, derive final-value taint, issue D2A0 only for
   # authenticated external, install process-local fence + authorizer.
   # Any fault after disclosure issue deactivates the fence and revokes the cap.
-  defp prepare_live_turn(user_message, turn_authority, state) do
+  defp prepare_live_turn(user_message, turn_authority, turn_token, state)
+       when is_reference(turn_token) do
     pre_values =
       state
       |> Builders.build_turn_values(user_message.content)
@@ -1696,7 +1975,7 @@ defmodule Arbor.Orchestrator.Session do
            ) do
       try do
         authorizer =
-          TurnEgress.build_authorizer(%{
+          TurnEgress.build_taint_authorizer(%{
             fence: fence,
             frozen_route: route,
             frozen_tier: frozen_tier,
@@ -1709,7 +1988,10 @@ defmodule Arbor.Orchestrator.Session do
 
         engine_opts =
           state
-          |> Builders.build_engine_opts(final_values)
+          |> Builders.build_engine_opts(final_values,
+            source: :turn,
+            steering_binding: {turn_token, user_message.engagement_id}
+          )
           |> Keyword.put(:initial_taint, initial_taint)
           |> Keyword.put(:frozen_egress_route, route)
           |> Keyword.put(:turn_egress_authorizer, authorizer)
@@ -1720,6 +2002,7 @@ defmodule Arbor.Orchestrator.Session do
            authority: authority,
            fence: fence,
            cap_id: cap_id,
+           turn_token: turn_token,
            engine_opts: engine_opts,
            values: final_values
          }}
@@ -1924,6 +2207,9 @@ defmodule Arbor.Orchestrator.Session do
       | turn_authority: nil,
         turn_egress_fence: nil,
         turn_token: nil,
+        steering_boundaries: nil,
+        steering_message_count: nil,
+        steering_byte_count: nil,
         turn_user_message: sanitized_turn_message,
         turn_queue: sanitized_queue
     }
@@ -1961,6 +2247,9 @@ defmodule Arbor.Orchestrator.Session do
         turn_authority: nil,
         turn_egress_fence: nil,
         turn_token: nil,
+        steering_boundaries: MapSet.new(),
+        steering_message_count: 0,
+        steering_byte_count: 0,
         streaming_buffer: nil,
         turn_timeout_ref: nil
     }
