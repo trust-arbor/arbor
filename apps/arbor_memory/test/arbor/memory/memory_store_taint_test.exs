@@ -1,7 +1,7 @@
 defmodule Arbor.Memory.MemoryStoreTaintTest do
   use ExUnit.Case, async: false
 
-  alias Arbor.Contracts.Persistence.{Record}
+  alias Arbor.Contracts.Persistence.Record
   alias Arbor.Contracts.Security.{Taint, TaintedValue}
   alias Arbor.Memory.MemoryStore
   alias Arbor.Persistence.BufferedStore
@@ -9,6 +9,140 @@ defmodule Arbor.Memory.MemoryStoreTaintTest do
 
   @moduletag :fast
   @store_name :arbor_memory_durable
+
+  defmodule FailingNodeRestartBackend do
+    @moduledoc false
+    @behaviour Arbor.Contracts.Persistence.Store
+
+    @impl true
+    def put(_key, _value, _opts), do: {:error, :forced_failure}
+
+    @impl true
+    def get(_key, _opts), do: {:error, :forced_failure}
+
+    @impl true
+    def delete(_key, _opts), do: {:error, :forced_failure}
+
+    @impl true
+    def list(_opts), do: {:error, :forced_failure}
+
+    @impl true
+    def compare_and_swap(_key, _expected, _replacement, _opts),
+      do: {:error, :forced_failure}
+
+    @impl true
+    def compare_and_delete(_key, _expected, _opts), do: {:error, :forced_failure}
+
+    @impl true
+    def durability_class(_opts), do: :node_restart
+  end
+
+  defmodule CountingNodeRestartBackend do
+    @moduledoc false
+    @behaviour Arbor.Contracts.Persistence.Store
+
+    alias Arbor.Contracts.Persistence.Filter
+
+    @impl true
+    def put(key, value, opts) do
+      Agent.update(Keyword.fetch!(opts, :name), fn state ->
+        put_in(state, [:records, key], value)
+      end)
+
+      :ok
+    end
+
+    @impl true
+    def get(key, opts) do
+      Agent.get_and_update(Keyword.fetch!(opts, :name), fn state ->
+        state = update_in(state, [:calls, :get], &(&1 + 1))
+        {Map.fetch(state.records, key), state}
+      end)
+      |> case do
+        {:ok, value} -> {:ok, value}
+        :error -> {:error, :not_found}
+      end
+    end
+
+    @impl true
+    def delete(key, opts) do
+      Agent.update(Keyword.fetch!(opts, :name), fn state ->
+        %{state | records: Map.delete(state.records, key)}
+      end)
+
+      :ok
+    end
+
+    @impl true
+    def list(opts) do
+      Agent.get_and_update(Keyword.fetch!(opts, :name), fn state ->
+        state = update_in(state, [:calls, :list], &(&1 + 1))
+        {{:ok, Map.keys(state.records)}, state}
+      end)
+    end
+
+    @impl true
+    def query(%Filter{} = filter, opts) do
+      Agent.get_and_update(Keyword.fetch!(opts, :name), fn state ->
+        state = update_in(state, [:calls, :query], &(&1 + 1))
+        {{:ok, Filter.apply(filter, Map.values(state.records))}, state}
+      end)
+    end
+
+    @impl true
+    def durability_class(_opts), do: :node_restart
+  end
+
+  defmodule CleanupFailingNodeRestartBackend do
+    @moduledoc false
+    @behaviour Arbor.Contracts.Persistence.Store
+
+    alias Arbor.Persistence.QueryableStore.ETS
+
+    @impl true
+    def put(key, value, opts), do: ETS.put(key, value, opts)
+
+    @impl true
+    def get(key, opts), do: ETS.get(key, opts)
+
+    @impl true
+    def delete(key, opts), do: ETS.delete(key, opts)
+
+    @impl true
+    def list(opts), do: ETS.list(opts)
+
+    @impl true
+    def query(filter, opts), do: ETS.query(filter, opts)
+
+    @impl true
+    def compare_and_swap(key, expected, replacement, opts) do
+      Agent.update(
+        Keyword.fetch!(opts, :counter),
+        &Map.update!(&1, :cas, fn count -> count + 1 end)
+      )
+
+      ETS.compare_and_swap(key, expected, replacement, opts)
+    end
+
+    @impl true
+    def compare_and_delete(_key, _expected, opts) do
+      call =
+        Agent.get_and_update(
+          Keyword.fetch!(opts, :counter),
+          fn state ->
+            next = state.compare_delete + 1
+            {next, %{state | compare_delete: next}}
+          end
+        )
+
+      if call == 1,
+        do: raise("forced cleanup exception"),
+        else: {:error, :forced_cleanup_failure}
+    end
+
+    @impl true
+    def durability_class(_opts), do: :node_restart
+  end
 
   setup do
     start_supervised!({BufferedStore, name: @store_name, backend: nil, write_mode: :sync})
@@ -215,6 +349,314 @@ defmodule Arbor.Memory.MemoryStoreTaintTest do
     end
   end
 
+  describe "authoritative tainted inventory" do
+    test "merges mixed namespaced and owned bare rows with namespaced precedence" do
+      namespace = "inventory"
+      duplicate_key = "duplicate"
+      namespaced_taint = %Taint{level: :hostile, source: "namespaced"}
+      legacy_taint = %Taint{level: :trusted, source: "legacy"}
+
+      assert :ok =
+               MemoryStore.persist(namespace, duplicate_key, %{"source" => "namespaced"},
+                 taint: namespaced_taint
+               )
+
+      put_legacy_bare(
+        namespace,
+        duplicate_key,
+        %{"source" => "legacy-duplicate"},
+        legacy_taint
+      )
+
+      put_legacy_bare(namespace, "legacy-only", %{"source" => "legacy"}, legacy_taint)
+      put_legacy_bare("foreign", "foreign-only", %{"source" => "foreign"}, legacy_taint)
+
+      assert {:ok, entries} = MemoryStore.load_all_tainted_authoritative(namespace)
+      assert Enum.map(entries, &elem(&1, 0)) == ["duplicate", "legacy-only"]
+
+      assert {"duplicate", duplicate, :verified} = List.keyfind(entries, duplicate_key, 0)
+      assert duplicate.value == %{"source" => "namespaced"}
+      assert duplicate.taint.level == :hostile
+
+      assert {"legacy-only", legacy, :verified} = List.keyfind(entries, "legacy-only", 0)
+      assert legacy.value == %{"source" => "legacy"}
+
+      assert {:ok, [{"legacy-only", _value, :verified}]} =
+               MemoryStore.load_by_prefix_tainted_authoritative(namespace, "legacy")
+    end
+
+    test "fails closed on malformed structural rows" do
+      malformed = Record.new("bad", %{"value" => "ambiguous"}, id: "not-an-owned-shape")
+      assert :ok = BufferedStore.put("bad", malformed, name: @store_name)
+
+      assert {:error, {:memory_store, :critical, :invalid_record}} =
+               MemoryStore.load_all_tainted_authoritative("inventory")
+    end
+
+    test "fails bounded when the authoritative inventory exceeds its cap" do
+      for index <- 1..10_001 do
+        key = "other:#{index}"
+
+        assert :ok =
+                 BufferedStore.put(key, Record.new(key, %{}, id: "memory:#{key}"),
+                   name: @store_name
+                 )
+      end
+
+      assert {:error, {:memory_store, :critical, :inventory_limit_exceeded}} =
+               MemoryStore.load_all_tainted_authoritative("inventory")
+    end
+
+    test "configured backend outage never falls back to caller-writable cache" do
+      stop_supervised!(BufferedStore)
+
+      start_supervised!(
+        {BufferedStore,
+         name: @store_name,
+         backend: FailingNodeRestartBackend,
+         write_mode: :async,
+         ack_mode: :cache}
+      )
+
+      cached = Record.new("inventory:cached", %{"secret" => "cache-only"})
+      true = :ets.insert(@store_name, {"inventory:cached", cached})
+
+      assert {:error, {:memory_store, :critical, :durable_unavailable}} =
+               MemoryStore.load_all_tainted_authoritative("inventory")
+    end
+
+    test "public inventory classifies one authoritative snapshot without N+1 calls" do
+      stop_supervised!(BufferedStore)
+
+      backend_name = unique_name(:memory_inventory_snapshot)
+      data = %{"value" => "authoritative"}
+
+      {:ok, envelope} =
+        TaintModule.bind_durable_provenance(data, %Taint{level: :hostile, source: "backend"})
+
+      record =
+        Record.new("inventory:one", data,
+          id: "memory:inventory:one",
+          metadata: %{"taint" => envelope}
+        )
+
+      start_supervised!(%{
+        id: backend_name,
+        start:
+          {Agent, :start_link,
+           [
+             fn ->
+               %{
+                 records: %{"inventory:one" => record},
+                 calls: %{get: 0, list: 0, query: 0}
+               }
+             end,
+             [name: backend_name]
+           ]}
+      })
+
+      start_supervised!(
+        {BufferedStore,
+         name: @store_name, backend: CountingNodeRestartBackend, collection: backend_name}
+      )
+
+      Agent.update(backend_name, fn state ->
+        %{state | calls: %{get: 0, list: 0, query: 0}}
+      end)
+
+      assert {:ok, [{"one", value, :verified}]} =
+               MemoryStore.load_all_tainted_authoritative("inventory")
+
+      assert value.value == data
+      assert value.taint.level == :hostile
+      assert %{calls: %{query: 1, list: 0, get: 0}} = Agent.get(backend_name, & &1)
+    end
+  end
+
+  describe "authoritative ownership and migration" do
+    test "security regression: critical namespace grammar prevents composite-key aliases" do
+      label = %Taint{level: :hostile, sensitivity: :restricted, source: "namespace-owner"}
+      original = %{"owner" => "a", "logical_key" => "b:c"}
+
+      assert {:ok, %Record{} = retained} =
+               MemoryStore.compare_and_swap_tainted(
+                 "a",
+                 "b:c",
+                 :not_found,
+                 original,
+                 taint: label
+               )
+
+      assert {:error, {:memory_store, :critical, :invalid_request}} =
+               MemoryStore.compare_and_swap_tainted(
+                 "a:b",
+                 "c",
+                 :not_found,
+                 %{"owner" => "alias"},
+                 taint: %Taint{level: :trusted, source: "alias"}
+               )
+
+      assert {:error, {:memory_store, :critical, :invalid_request}} =
+               MemoryStore.load_tainted_authoritative_with_status("a:b", "c")
+
+      assert {:error, {:memory_store, :critical, :invalid_request}} =
+               MemoryStore.load_all_tainted_authoritative("a:b")
+
+      assert {:error, {:memory_store, :critical, :invalid_request}} =
+               MemoryStore.load_by_prefix_tainted_authoritative("a:b", "c")
+
+      assert {:error, {:memory_store, :critical, :invalid_request}} =
+               MemoryStore.delete_tainted_authoritative("a:b", "c")
+
+      assert {:ok, ^retained} = BufferedStore.get("a:b:c", name: @store_name)
+
+      assert {:ok, value, :verified, ^retained, :namespaced} =
+               MemoryStore.load_tainted_authoritative_with_status("a", "b:c")
+
+      assert value.value == original
+      assert value.taint == label
+    end
+
+    test "malformed namespaced identity is rejected by load, CAS, and delete" do
+      physical_key = "target:malformed-id"
+
+      malformed =
+        Record.new(physical_key, %{"value" => "foreign-id"}, id: "memory:foreign:malformed-id")
+
+      assert :ok = BufferedStore.put(physical_key, malformed, name: @store_name)
+      assert {:ok, retained} = BufferedStore.get(physical_key, name: @store_name)
+
+      assert {:error, {:memory_store, :critical, :invalid_record}} =
+               MemoryStore.load_tainted_authoritative_with_status("target", "malformed-id")
+
+      assert {:error, {:memory_store, :critical, :invalid_record}} =
+               MemoryStore.compare_and_swap_tainted(
+                 "target",
+                 "malformed-id",
+                 malformed,
+                 %{"value" => "replacement"},
+                 taint: %Taint{level: :hostile}
+               )
+
+      assert {:error, {:memory_store, :critical, :invalid_record}} =
+               MemoryStore.delete_tainted_authoritative("target", "malformed-id")
+
+      assert {:ok, ^retained} = BufferedStore.get(physical_key, name: @store_name)
+    end
+
+    test "foreign bare row survives another namespace CAS, critical delete, and raw delete" do
+      key = "shared-key"
+      foreign = put_legacy_bare("foreign", key, %{"owner" => "foreign"}, %Taint{})
+      label = %Taint{level: :untrusted, source: "target"}
+
+      assert {:ok, %Record{}} =
+               MemoryStore.compare_and_swap_tainted(
+                 "target",
+                 key,
+                 :not_found,
+                 %{"owner" => "target"},
+                 taint: label
+               )
+
+      assert {:ok, ^foreign} = BufferedStore.get(key, name: @store_name)
+
+      assert :ok = MemoryStore.delete_tainted_authoritative("target", key)
+      assert {:ok, ^foreign} = BufferedStore.get(key, name: @store_name)
+
+      assert :ok = MemoryStore.persist("target", key, %{"owner" => "raw-target"})
+      assert :ok = MemoryStore.delete("target", key)
+      assert {:ok, ^foreign} = BufferedStore.get(key, name: @store_name)
+    end
+
+    test "legacy bare baseline migrates through namespaced not-found CAS and owned cleanup" do
+      namespace = "migration"
+      key = "legacy"
+      label = %Taint{level: :hostile, source: "legacy-hostile"}
+
+      put_legacy_bare(namespace, key, %{"version" => 1}, label)
+
+      assert {:ok, value, :verified, %Record{} = legacy_record, :legacy_bare} =
+               MemoryStore.load_tainted_authoritative_with_status(namespace, key)
+
+      assert value.taint.level == :hostile
+
+      assert {:ok, %Record{key: "migration:legacy"}} =
+               MemoryStore.compare_and_swap_tainted(
+                 namespace,
+                 key,
+                 legacy_record,
+                 %{"version" => 2},
+                 taint: label
+               )
+
+      assert {:error, :not_found} = BufferedStore.get(key, name: @store_name)
+
+      assert {:ok, %Record{data: %{"version" => 2}}} =
+               BufferedStore.get("migration:legacy", name: @store_name)
+    end
+
+    test "security regression: committed CAS succeeds once when legacy cleanup is deferred" do
+      stop_supervised!(BufferedStore)
+      backend_name = unique_name(:cleanup_failure_backend)
+      counter = unique_name(:cleanup_failure_counter)
+      namespace = "intent_retry"
+      key = "intent:one"
+      label = %Taint{level: :untrusted, source: "intent-transition"}
+      legacy_data = %{"retry_count" => 0}
+      replacement = %{"retry_count" => 1}
+
+      start_supervised!({Arbor.Persistence.QueryableStore.ETS, name: backend_name})
+
+      start_supervised!(%{
+        id: counter,
+        start: {Agent, :start_link, [fn -> %{cas: 0, compare_delete: 0} end, [name: counter]]}
+      })
+
+      {:ok, legacy_envelope} = TaintModule.bind_durable_provenance(legacy_data, label)
+
+      legacy =
+        Record.new(key, legacy_data,
+          id: "memory:#{namespace}:#{key}",
+          metadata: %{"taint" => legacy_envelope}
+        )
+
+      assert :ok =
+               Arbor.Persistence.QueryableStore.ETS.put(key, legacy, name: backend_name)
+
+      start_supervised!(
+        {BufferedStore,
+         name: @store_name,
+         backend: CleanupFailingNodeRestartBackend,
+         backend_opts: [counter: counter],
+         collection: backend_name}
+      )
+
+      assert {:ok, value, :verified, %Record{} = observed, :legacy_bare} =
+               MemoryStore.load_tainted_authoritative_with_status(namespace, key)
+
+      assert value.value == legacy_data
+
+      assert {:ok, %Record{generation: 1, revision: 1, data: ^replacement} = stored} =
+               MemoryStore.compare_and_swap_tainted(
+                 namespace,
+                 key,
+                 observed,
+                 replacement,
+                 taint: label
+               )
+
+      assert %{cas: 1, compare_delete: 1} = Agent.get(counter, & &1)
+
+      assert {:ok, authoritative, :verified, ^stored, :namespaced} =
+               MemoryStore.load_tainted_authoritative_with_status(namespace, key)
+
+      assert authoritative.value == replacement
+
+      assert {:ok, %Record{data: ^legacy_data}} =
+               Arbor.Persistence.QueryableStore.ETS.get(key, name: backend_name)
+    end
+  end
+
   describe "legacy taint compatibility helpers" do
     test "preserves all fields through the versionless compatibility format" do
       original = %Taint{
@@ -279,6 +721,20 @@ defmodule Arbor.Memory.MemoryStoreTaintTest do
     assert :ok = BufferedStore.put(key, record, name: @store_name)
   end
 
+  defp put_legacy_bare(namespace, key, data, taint) do
+    {:ok, envelope} = TaintModule.bind_durable_provenance(data, taint)
+
+    record =
+      Record.new(key, data,
+        id: "memory:#{namespace}:#{key}",
+        metadata: %{"taint" => envelope}
+      )
+
+    assert :ok = BufferedStore.put(key, record, name: @store_name)
+    assert {:ok, stored} = BufferedStore.get(key, name: @store_name)
+    stored
+  end
+
   defp eventually(fun, attempts \\ 20)
   defp eventually(_fun, 0), do: false
 
@@ -289,5 +745,10 @@ defmodule Arbor.Memory.MemoryStoreTaintTest do
       Process.sleep(10)
       eventually(fun, attempts - 1)
     end
+  end
+
+  defp unique_name(prefix) do
+    # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+    String.to_atom("#{prefix}_#{System.unique_integer([:positive])}")
   end
 end

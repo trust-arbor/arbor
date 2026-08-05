@@ -25,7 +25,7 @@ defmodule Arbor.Persistence do
   @behaviour Arbor.Contracts.API.Persistence
 
   alias Arbor.Contracts.Persistence.{AppendOperation, Filter, Record}
-  alias Arbor.Persistence.{Event, EventLog}
+  alias Arbor.Persistence.{BufferedStore, Event, EventLog}
   alias Arbor.Persistence.Repo
   alias Arbor.Persistence.Schemas.Session
   alias Arbor.Persistence.SessionStore
@@ -498,6 +498,106 @@ defmodule Arbor.Persistence do
   # ---------------------------------------------------------------
   # Store operations
   # ---------------------------------------------------------------
+
+  @doc """
+  Return the code-owned authority mode of a named BufferedStore.
+
+  Callers cannot override whether the store is deliberate ETS-only state or a
+  configured backend, nor the backend's durability classification.
+  """
+  @spec buffered_store_authority_mode(atom()) ::
+          {:ok,
+           :ephemeral
+           | {:backend,
+              :volatile | :process_lifetime | :application_restart | :node_restart | :unknown}}
+          | {:error, atom()}
+  def buffered_store_authority_mode(name) when is_atom(name) do
+    BufferedStore.authority_mode(name: name)
+  end
+
+  def buffered_store_authority_mode(_name), do: {:error, :invalid_store}
+
+  @doc "Authoritatively read a key through a named BufferedStore."
+  @spec buffered_store_authoritative_get(atom(), String.t()) ::
+          {:ok, term()} | {:error, :not_found | atom()}
+  def buffered_store_authoritative_get(name, key) when is_atom(name) and is_binary(key) do
+    BufferedStore.authoritative_get(key, name: name)
+  end
+
+  def buffered_store_authoritative_get(_name, _key), do: {:error, :invalid_request}
+
+  @doc "Return a bounded deterministic authoritative key inventory from a named BufferedStore."
+  @spec buffered_store_authoritative_list(atom()) :: {:ok, [String.t()]} | {:error, atom()}
+  def buffered_store_authoritative_list(name) when is_atom(name) do
+    BufferedStore.authoritative_list(name: name)
+  end
+
+  def buffered_store_authoritative_list(_name), do: {:error, :invalid_store}
+
+  @doc "Return a bounded deterministic authoritative key inventory matching a prefix."
+  @spec buffered_store_authoritative_list_by_prefix(atom(), String.t()) ::
+          {:ok, [String.t()]} | {:error, atom()}
+  def buffered_store_authoritative_list_by_prefix(name, prefix)
+      when is_atom(name) and is_binary(prefix) do
+    BufferedStore.authoritative_list_by_prefix(prefix, name: name)
+  end
+
+  def buffered_store_authoritative_list_by_prefix(_name, _prefix),
+    do: {:error, :invalid_request}
+
+  @doc "Return a bounded deterministic authoritative key/value snapshot."
+  @spec buffered_store_authoritative_entries(atom()) ::
+          {:ok, [{String.t(), term()}]} | {:error, atom()}
+  def buffered_store_authoritative_entries(name) when is_atom(name) do
+    BufferedStore.authoritative_entries(name: name)
+  end
+
+  def buffered_store_authoritative_entries(_name), do: {:error, :invalid_store}
+
+  @doc "Synchronously acknowledge a named BufferedStore put before cache projection."
+  @spec buffered_store_acknowledged_put(atom(), String.t(), term()) ::
+          {:ok, term()} | {:error, atom()}
+  def buffered_store_acknowledged_put(name, key, value)
+      when is_atom(name) and is_binary(key) do
+    BufferedStore.acknowledged_put(key, value, name: name)
+  end
+
+  def buffered_store_acknowledged_put(_name, _key, _value),
+    do: {:error, :invalid_request}
+
+  @doc "Synchronously acknowledge a named BufferedStore delete before cache projection."
+  @spec buffered_store_acknowledged_delete(atom(), String.t()) :: :ok | {:error, atom()}
+  def buffered_store_acknowledged_delete(name, key) when is_atom(name) and is_binary(key) do
+    BufferedStore.acknowledged_delete(key, name: name)
+  end
+
+  def buffered_store_acknowledged_delete(_name, _key), do: {:error, :invalid_request}
+
+  @doc "Perform acknowledged CAS through a named BufferedStore and update its cache."
+  @spec buffered_store_acknowledged_compare_and_swap(
+          atom(),
+          String.t(),
+          :not_found | {:value, term()},
+          term()
+        ) :: {:ok, term()} | {:error, atom()}
+  def buffered_store_acknowledged_compare_and_swap(name, key, expected, replacement)
+      when is_atom(name) and is_binary(key) do
+    BufferedStore.acknowledged_compare_and_swap(key, expected, replacement, name: name)
+  end
+
+  def buffered_store_acknowledged_compare_and_swap(_name, _key, _expected, _replacement),
+    do: {:error, :invalid_request}
+
+  @doc "Atomically compare-delete through a named BufferedStore and evict its cache on success."
+  @spec buffered_store_acknowledged_compare_and_delete(atom(), String.t(), term()) ::
+          :ok | {:error, atom()}
+  def buffered_store_acknowledged_compare_and_delete(name, key, expected)
+      when is_atom(name) and is_binary(key) do
+    BufferedStore.acknowledged_compare_and_delete(key, expected, name: name)
+  end
+
+  def buffered_store_acknowledged_compare_and_delete(_name, _key, _expected),
+    do: {:error, :invalid_request}
 
   @doc "Store a value under the given key using the specified backend."
   @spec put(atom(), module(), String.t(), term(), keyword()) :: :ok | {:error, term()}

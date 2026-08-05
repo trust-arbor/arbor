@@ -42,8 +42,8 @@ defmodule Arbor.Persistence.QueryableStore.Postgres do
   The `:name` option is used as the namespace. When called via the facade,
   this is the atom name passed to `Arbor.Persistence.put(:jobs, Postgres, ...)`.
 
-  Durability class: `:node_restart`. Supports linearizable compare-and-swap as
-  one atomic SQL insert-or-update decision (generation+revision predicate +
+  Durability class: `:node_restart`. Supports linearizable compare-and-swap and
+  compare-and-delete as atomic SQL decisions (generation+revision predicate +
   affected rows), scoped by true `(namespace, key)`.
   """
 
@@ -115,6 +115,47 @@ defmodule Arbor.Persistence.QueryableStore.Postgres do
   end
 
   @impl true
+  def compare_and_delete(key, expected, opts \\ [])
+
+  def compare_and_delete(key, %Record{} = expected, opts) do
+    if Revision.key_mismatch?(key, expected) do
+      {:error, :key_mismatch}
+    else
+      case expected do
+        %Record{generation: generation, revision: revision}
+        when is_integer(generation) and generation >= 0 and is_integer(revision) and
+               revision >= 0 ->
+          namespace = namespace_from_opts(opts)
+          repo = repo_from_opts(opts)
+          now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+          query =
+            from(r in RecordSchema,
+              where:
+                r.namespace == ^namespace and r.key == ^key and
+                  r.generation == ^generation and r.revision == ^revision and
+                  is_nil(r.deleted_at)
+            )
+
+          case repo.update_all(query, set: [deleted_at: now, updated_at: now]) do
+            {1, _rows} -> :ok
+            {0, _rows} -> {:error, :conflict}
+            _other -> {:error, :invalid_backend_response}
+          end
+
+        _ ->
+          {:error, :conflict}
+      end
+    end
+  rescue
+    e ->
+      Logger.error("Failed to compare_and_delete record: #{inspect(e)}")
+      {:error, {:compare_and_delete_failed, e}}
+  end
+
+  def compare_and_delete(_key, _expected, _opts), do: {:error, :conflict}
+
+  @impl true
   def durability_class(_opts), do: :node_restart
 
   @impl true
@@ -161,15 +202,17 @@ defmodule Arbor.Persistence.QueryableStore.Postgres do
     namespace = namespace_from_opts(opts)
     repo = repo_from_opts(opts)
 
-    keys =
-      from(r in RecordSchema,
-        where: r.namespace == ^namespace and is_nil(r.deleted_at),
-        select: r.key,
-        order_by: r.key
-      )
-      |> repo.all()
+    with {:ok, limit} <- Revision.authoritative_list_limit(opts) do
+      query =
+        from(r in RecordSchema,
+          where: r.namespace == ^namespace and is_nil(r.deleted_at),
+          select: r.key,
+          order_by: r.key
+        )
 
-    {:ok, keys}
+      query = if is_integer(limit), do: limit(query, ^limit), else: query
+      {:ok, repo.all(query)}
+    end
   rescue
     e ->
       Logger.error("Failed to list keys: #{inspect(e)}")
@@ -196,23 +239,32 @@ defmodule Arbor.Persistence.QueryableStore.Postgres do
     namespace = namespace_from_opts(opts)
     repo = repo_from_opts(opts)
 
-    records =
-      base_query(namespace)
-      |> apply_conditions(filter.conditions)
-      |> apply_since(filter.since)
-      |> apply_until(filter.until)
-      |> apply_order(filter.order_by)
-      |> apply_offset(filter.offset)
-      |> apply_limit(filter.limit)
-      |> repo.all()
-      |> Enum.map(&RecordSchema.to_record/1)
+    with {:ok, authoritative_limit} <- Revision.authoritative_list_limit(opts) do
+      limit = effective_query_limit(filter.limit, authoritative_limit)
 
-    {:ok, records}
+      records =
+        base_query(namespace)
+        |> apply_conditions(filter.conditions)
+        |> apply_since(filter.since)
+        |> apply_until(filter.until)
+        |> apply_order(filter.order_by)
+        |> apply_offset(filter.offset)
+        |> apply_limit(limit)
+        |> repo.all()
+        |> Enum.map(&RecordSchema.to_record/1)
+
+      {:ok, records}
+    end
   rescue
     e ->
       Logger.error("Failed to query records: #{inspect(e)}")
       {:error, {:query_failed, e}}
   end
+
+  defp effective_query_limit(nil, nil), do: nil
+  defp effective_query_limit(limit, nil), do: limit
+  defp effective_query_limit(nil, authoritative_limit), do: authoritative_limit
+  defp effective_query_limit(limit, authoritative_limit), do: min(limit, authoritative_limit)
 
   @impl true
   def count(%Filter{} = filter, opts \\ []) do

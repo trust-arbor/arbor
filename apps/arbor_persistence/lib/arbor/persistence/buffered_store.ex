@@ -2,7 +2,7 @@ defmodule Arbor.Persistence.BufferedStore do
   @moduledoc """
   ETS-cached persistence with pluggable durable backend.
 
-  A GenServer that keeps an ETS table as the authoritative read cache,
+  A GenServer that keeps a public ETS table as a compatibility read projection,
   with writes flowing through to a configurable backend implementing
   `Arbor.Contracts.Persistence.Store`.
 
@@ -41,6 +41,9 @@ defmodule Arbor.Persistence.BufferedStore do
   alias Arbor.Persistence.Store.Revision
 
   @behaviour Arbor.Contracts.Persistence.Store
+
+  @max_authoritative_keys 10_000
+  @max_prefix_bytes 1_024
 
   # ===========================================================================
   # Client API — Store behaviour callbacks
@@ -199,6 +202,135 @@ defmodule Arbor.Persistence.BufferedStore do
     GenServer.call(store, :backend_healthy?)
   end
 
+  @doc """
+  Return the code-owned authority mode for a named store.
+
+  `:ephemeral` means the store was deliberately configured without a backend;
+  acknowledged operations are serialized against owner-private state and then
+  projected to ETS.
+  `{:backend, class}` means acknowledged operations bypass cache-ack settings
+  and synchronously use the configured backend. The durability class comes
+  from the backend callback and cannot be supplied by callers.
+  """
+  @spec authority_mode(keyword()) ::
+          {:ok,
+           :ephemeral
+           | {:backend,
+              :volatile | :process_lifetime | :application_restart | :node_restart | :unknown}}
+          | {:error, atom()}
+  def authority_mode(opts) do
+    store = store_name!(opts)
+    authority_call(store, :authority_mode)
+  end
+
+  @doc """
+  Read the configured backend authoritatively, or owner ETS in ephemeral mode.
+
+  A configured backend error never falls back to the cache.
+  """
+  @spec authoritative_get(String.t(), keyword()) ::
+          {:ok, term()} | {:error, :not_found | atom()}
+  def authoritative_get(key, opts \\ []) do
+    store = store_name!(opts)
+    authority_call(store, {:authoritative_get, key})
+  end
+
+  @doc "Return a deterministic, bounded authoritative key inventory."
+  @spec authoritative_list(keyword()) :: {:ok, [String.t()]} | {:error, atom()}
+  def authoritative_list(opts \\ []) do
+    store = store_name!(opts)
+    authority_call(store, {:authoritative_list, nil})
+  end
+
+  @doc "Return a deterministic, bounded authoritative key inventory by prefix."
+  @spec authoritative_list_by_prefix(String.t(), keyword()) ::
+          {:ok, [String.t()]} | {:error, atom()}
+  def authoritative_list_by_prefix(prefix, opts \\ [])
+
+  def authoritative_list_by_prefix(prefix, opts)
+      when is_binary(prefix) and byte_size(prefix) <= @max_prefix_bytes do
+    store = store_name!(opts)
+    authority_call(store, {:authoritative_list, prefix})
+  end
+
+  def authoritative_list_by_prefix(_prefix, _opts), do: {:error, :invalid_prefix}
+
+  @doc "Return a deterministic bounded authoritative key/value snapshot."
+  @spec authoritative_entries(keyword()) ::
+          {:ok, [{String.t(), term()}]} | {:error, atom()}
+  def authoritative_entries(opts \\ []) do
+    store = store_name!(opts)
+    authority_call(store, :authoritative_entries)
+  end
+
+  @doc """
+  Perform an acknowledged put and then update the named store cache.
+
+  Configured backends are called synchronously regardless of the store's
+  compatibility `write_mode`/`ack_mode`. Ephemeral stores serialize the put in
+  the owner process and return the exact retained value.
+  """
+  @spec acknowledged_put(String.t(), term(), keyword()) ::
+          {:ok, term()} | {:error, atom()}
+  def acknowledged_put(key, value, opts \\ []) do
+    if Revision.key_mismatch?(key, value) do
+      {:error, :key_mismatch}
+    else
+      store = store_name!(opts)
+      authority_call(store, {:acknowledged_put, key, value})
+    end
+  end
+
+  @doc """
+  Perform an acknowledged delete before removing the named store cache entry.
+  """
+  @spec acknowledged_delete(String.t(), keyword()) :: :ok | {:error, atom()}
+  def acknowledged_delete(key, opts \\ []) do
+    store = store_name!(opts)
+    authority_call(store, {:acknowledged_delete, key})
+  end
+
+  @doc """
+  Perform an acknowledged structured compare-and-swap.
+
+  Configured backends must export `compare_and_swap/4`. Ephemeral stores use
+  the same `Record` generation/revision matching inside the owner process. This
+  API does not make BufferedStore a Store-behaviour CAS backend; it is a narrow
+  named-store authority primitive that also updates the local projection.
+  """
+  @spec acknowledged_compare_and_swap(
+          String.t(),
+          :not_found | {:value, term()},
+          term(),
+          keyword()
+        ) :: {:ok, term()} | {:error, atom()}
+  def acknowledged_compare_and_swap(key, expected, replacement, opts \\ []) do
+    if Revision.cas_operands_key_mismatch?(key, expected, replacement) do
+      {:error, :key_mismatch}
+    else
+      store = store_name!(opts)
+      authority_call(store, {:acknowledged_compare_and_swap, key, expected, replacement})
+    end
+  end
+
+  @doc """
+  Atomically delete an observed value and only then evict the named-store cache.
+
+  Configured backends must export `compare_and_delete/3`. Ephemeral stores
+  compare structured `Record` generation/revision in the owner process and
+  retain the deleted generation internally for ABA-safe reinsertion.
+  """
+  @spec acknowledged_compare_and_delete(String.t(), term(), keyword()) ::
+          :ok | {:error, atom()}
+  def acknowledged_compare_and_delete(key, expected, opts \\ []) do
+    if Revision.key_mismatch?(key, expected) do
+      {:error, :key_mismatch}
+    else
+      store = store_name!(opts)
+      authority_call(store, {:acknowledged_compare_and_delete, key, expected})
+    end
+  end
+
   # ===========================================================================
   # GenServer callbacks
   # ===========================================================================
@@ -226,7 +358,9 @@ defmodule Arbor.Persistence.BufferedStore do
       write_mode: write_mode,
       ack_mode: ack_mode,
       collection: collection,
-      distributed: distributed
+      distributed: distributed,
+      ephemeral_authority: %{},
+      authority_tombstones: %{}
     }
 
     load_from_backend(state)
@@ -239,9 +373,29 @@ defmodule Arbor.Persistence.BufferedStore do
   end
 
   @impl true
+  def handle_call(
+        {:put, key, value},
+        _from,
+        %{backend: nil, ack_mode: :cache} = state
+      ) do
+    if Revision.key_mismatch?(key, value) do
+      {:reply, {:error, :key_mismatch}, state}
+    else
+      case put_ephemeral_authority(state, key, value) do
+        {:ok, stored, state} ->
+          true = :ets.insert(state.table, {key, stored})
+          emit_distributed_signal(state, :cache_put, key)
+          {:reply, :ok, state}
+
+        {:error, _reason} = error ->
+          {:reply, error, state}
+      end
+    end
+  end
+
   def handle_call({:put, key, value}, _from, state) do
     # Defense in depth: client put/3 already rejects mismatches; never mutate
-    # the cache-authoritative ETS table or durable backend on key mismatch.
+    # the public projection or durable backend on key mismatch.
     if Revision.key_mismatch?(key, value) do
       {:reply, {:error, :key_mismatch}, state}
     else
@@ -267,6 +421,13 @@ defmodule Arbor.Persistence.BufferedStore do
   end
 
   @impl true
+  def handle_call({:delete, key}, _from, %{backend: nil, ack_mode: :cache} = state) do
+    state = delete_ephemeral_authority(state, key)
+    true = :ets.delete(state.table, key)
+    emit_distributed_signal(state, :cache_delete, key)
+    {:reply, :ok, state}
+  end
+
   def handle_call({:delete, key}, _from, state) do
     case state.ack_mode do
       :cache ->
@@ -293,6 +454,58 @@ defmodule Arbor.Persistence.BufferedStore do
     {:reply, do_backend_healthy?(state), state}
   end
 
+  def handle_call(:authority_mode, _from, state) do
+    {:reply, {:ok, authority_mode_for(state)}, state}
+  end
+
+  def handle_call({:authoritative_get, key}, _from, state) do
+    {:reply, do_authoritative_get(state, key), state}
+  end
+
+  def handle_call({:authoritative_list, prefix}, _from, state) do
+    {:reply, do_authoritative_list(state, prefix), state}
+  end
+
+  def handle_call(:authoritative_entries, _from, state) do
+    {:reply, do_authoritative_entries(state), state}
+  end
+
+  def handle_call({:acknowledged_put, key, value}, _from, state) do
+    if Revision.key_mismatch?(key, value) do
+      {:reply, {:error, :key_mismatch}, state}
+    else
+      {reply, state} = do_acknowledged_put(state, key, value)
+      {:reply, reply, state}
+    end
+  end
+
+  def handle_call({:acknowledged_delete, key}, _from, state) do
+    {reply, state} = do_acknowledged_delete(state, key)
+    {:reply, reply, state}
+  end
+
+  def handle_call(
+        {:acknowledged_compare_and_swap, key, expected, replacement},
+        _from,
+        state
+      ) do
+    if Revision.cas_operands_key_mismatch?(key, expected, replacement) do
+      {:reply, {:error, :key_mismatch}, state}
+    else
+      {reply, state} = do_acknowledged_compare_and_swap(state, key, expected, replacement)
+      {:reply, reply, state}
+    end
+  end
+
+  def handle_call({:acknowledged_compare_and_delete, key, expected}, _from, state) do
+    if Revision.key_mismatch?(key, expected) do
+      {:reply, {:error, :key_mismatch}, state}
+    else
+      {reply, state} = do_acknowledged_compare_and_delete(state, key, expected)
+      {:reply, reply, state}
+    end
+  end
+
   @impl true
   def handle_info({:signal_received, signal}, state) do
     handle_distributed_signal(signal, state)
@@ -306,6 +519,448 @@ defmodule Arbor.Persistence.BufferedStore do
   # ===========================================================================
   # Backend operations
   # ===========================================================================
+
+  defp authority_mode_for(%{backend: nil}), do: :ephemeral
+
+  defp authority_mode_for(%{backend: backend} = state) do
+    durability =
+      if Code.ensure_loaded?(backend) and function_exported?(backend, :durability_class, 1) do
+        case guarded_backend_call(fn -> backend.durability_class(backend_call_opts(state)) end) do
+          class
+          when class in [:volatile, :process_lifetime, :application_restart, :node_restart] ->
+            class
+
+          _ ->
+            :unknown
+        end
+      else
+        :unknown
+      end
+
+    {:backend, durability}
+  end
+
+  defp do_authoritative_get(%{backend: nil, ephemeral_authority: authority}, key) do
+    case Map.fetch(authority, key) do
+      {:ok, value} -> {:ok, value}
+      :error -> {:error, :not_found}
+    end
+  end
+
+  defp do_authoritative_get(%{backend: backend} = state, key) do
+    case guarded_backend_call(fn -> backend.get(key, backend_call_opts(state)) end) do
+      {:ok, value} ->
+        if Revision.key_mismatch?(key, value) do
+          {:error, :invalid_backend_record}
+        else
+          true = :ets.insert(state.table, {key, value})
+          {:ok, value}
+        end
+
+      {:error, :not_found} = not_found ->
+        true = :ets.delete(state.table, key)
+        not_found
+
+      {:error, _reason} ->
+        {:error, :backend_unavailable}
+
+      _other ->
+        {:error, :invalid_backend_response}
+    end
+  end
+
+  defp do_authoritative_list(%{backend: nil, ephemeral_authority: authority}, prefix) do
+    normalize_ephemeral_authority(authority, prefix, :keys)
+  end
+
+  defp do_authoritative_list(%{backend: backend} = state, prefix) do
+    opts =
+      Keyword.put(backend_call_opts(state), :authoritative_limit, @max_authoritative_keys + 1)
+
+    case guarded_backend_call(fn -> backend.list(opts) end) do
+      {:ok, keys} when is_list(keys) -> normalize_authoritative_keys(keys, prefix)
+      {:error, :inventory_limit_exceeded} -> {:error, :inventory_limit_exceeded}
+      {:error, _reason} -> {:error, :backend_unavailable}
+      _other -> {:error, :invalid_backend_response}
+    end
+  end
+
+  defp do_authoritative_entries(%{backend: nil, ephemeral_authority: authority}) do
+    normalize_ephemeral_authority(authority, nil, :entries)
+  end
+
+  defp do_authoritative_entries(%{backend: backend} = state) do
+    if Code.ensure_loaded?(backend) and function_exported?(backend, :query, 2) do
+      filter =
+        Filter.new()
+        |> Filter.order_by(:key, :asc)
+        |> Filter.limit(@max_authoritative_keys + 1)
+
+      opts =
+        Keyword.put(
+          backend_call_opts(state),
+          :authoritative_limit,
+          @max_authoritative_keys + 1
+        )
+
+      case guarded_backend_call(fn -> backend.query(filter, opts) end) do
+        {:ok, records} -> normalize_authoritative_records(records, state)
+        {:error, :inventory_limit_exceeded} -> {:error, :inventory_limit_exceeded}
+        {:error, _reason} -> {:error, :backend_unavailable}
+        _other -> {:error, :invalid_backend_response}
+      end
+    else
+      {:error, :unsupported}
+    end
+  end
+
+  defp normalize_authoritative_keys(keys, prefix) do
+    reduce_authoritative_backend_keys(keys, prefix, [], 0)
+  rescue
+    _ -> {:error, :invalid_backend_response}
+  catch
+    _, _ -> {:error, :invalid_backend_response}
+  end
+
+  defp normalize_ephemeral_authority(authority, prefix, return) do
+    if map_size(authority) > @max_authoritative_keys do
+      {:error, :inventory_limit_exceeded}
+    else
+      authority
+      |> Enum.reduce_while({:ok, []}, fn
+        {key, value}, {:ok, acc} when is_binary(key) ->
+          cond do
+            is_binary(prefix) and not String.starts_with?(key, prefix) ->
+              {:cont, {:ok, acc}}
+
+            return == :keys ->
+              {:cont, {:ok, [key | acc]}}
+
+            true ->
+              {:cont, {:ok, [{key, value} | acc]}}
+          end
+
+        _entry, _acc ->
+          {:halt, {:error, :invalid_cache_state}}
+      end)
+      |> case do
+        {:ok, values} when return == :keys -> {:ok, Enum.sort(values)}
+        {:ok, values} -> {:ok, Enum.sort_by(values, &elem(&1, 0))}
+        {:error, _reason} = error -> error
+      end
+    end
+  rescue
+    _ -> {:error, :invalid_cache_state}
+  catch
+    _, _ -> {:error, :invalid_cache_state}
+  end
+
+  defp reduce_authoritative_backend_keys([], _prefix, acc, _visited),
+    do: {:ok, Enum.sort(acc)}
+
+  defp reduce_authoritative_backend_keys(_keys, _prefix, _acc, visited)
+       when visited >= @max_authoritative_keys,
+       do: {:error, :inventory_limit_exceeded}
+
+  defp reduce_authoritative_backend_keys([key | rest], prefix, acc, visited)
+       when is_binary(key) do
+    acc =
+      if is_binary(prefix) and not String.starts_with?(key, prefix),
+        do: acc,
+        else: [key | acc]
+
+    reduce_authoritative_backend_keys(rest, prefix, acc, visited + 1)
+  end
+
+  defp reduce_authoritative_backend_keys([_invalid | _rest], _prefix, _acc, _visited),
+    do: {:error, :invalid_backend_response}
+
+  defp reduce_authoritative_backend_keys(_improper, _prefix, _acc, _visited),
+    do: {:error, :invalid_backend_response}
+
+  defp normalize_authoritative_records(records, state) do
+    case reduce_authoritative_records(records, [], MapSet.new(), 0) do
+      {:ok, entries} ->
+        entries = Enum.sort_by(entries, &elem(&1, 0))
+        true = :ets.insert(state.table, entries)
+        {:ok, entries}
+
+      {:error, _reason} = error ->
+        error
+    end
+  rescue
+    _ -> {:error, :invalid_backend_response}
+  catch
+    _, _ -> {:error, :invalid_backend_response}
+  end
+
+  defp reduce_authoritative_records([], acc, _seen, _count),
+    do: {:ok, Enum.reverse(acc)}
+
+  defp reduce_authoritative_records(_records, _acc, _seen, count)
+       when count >= @max_authoritative_keys,
+       do: {:error, :inventory_limit_exceeded}
+
+  defp reduce_authoritative_records(
+         [%Record{key: key} = record | rest],
+         acc,
+         seen,
+         count
+       )
+       when is_binary(key) do
+    if MapSet.member?(seen, key) do
+      {:error, :invalid_backend_response}
+    else
+      reduce_authoritative_records(rest, [{key, record} | acc], MapSet.put(seen, key), count + 1)
+    end
+  end
+
+  defp reduce_authoritative_records([_invalid | _rest], _acc, _seen, _count),
+    do: {:error, :invalid_backend_response}
+
+  defp reduce_authoritative_records(_improper, _acc, _seen, _count),
+    do: {:error, :invalid_backend_response}
+
+  defp do_acknowledged_put(%{backend: nil} = state, key, value) do
+    case put_ephemeral_authority(state, key, value) do
+      {:ok, stored, state} ->
+        true = :ets.insert(state.table, {key, stored})
+        emit_distributed_signal(state, :cache_put, key)
+        {{:ok, stored}, state}
+
+      {:error, reason} ->
+        {{:error, reason}, state}
+    end
+  end
+
+  defp do_acknowledged_put(%{backend: backend} = state, key, value) do
+    case guarded_backend_call(fn -> backend.put(key, value, backend_call_opts(state)) end) do
+      :ok ->
+        case do_authoritative_get(state, key) do
+          {:ok, stored} ->
+            emit_distributed_signal(state, :cache_put, key)
+            {{:ok, stored}, state}
+
+          {:error, _reason} ->
+            {{:error, :outcome_unknown}, state}
+        end
+
+      {:error, _reason} ->
+        {{:error, :backend_unavailable}, state}
+
+      _other ->
+        {{:error, :invalid_backend_response}, state}
+    end
+  end
+
+  defp do_acknowledged_delete(%{backend: nil} = state, key) do
+    state = delete_ephemeral_authority(state, key)
+    true = :ets.delete(state.table, key)
+    emit_distributed_signal(state, :cache_delete, key)
+    {:ok, state}
+  end
+
+  defp do_acknowledged_delete(%{backend: backend} = state, key) do
+    case guarded_backend_call(fn -> backend.delete(key, backend_call_opts(state)) end) do
+      :ok ->
+        true = :ets.delete(state.table, key)
+        emit_distributed_signal(state, :cache_delete, key)
+        {:ok, state}
+
+      {:error, _reason} ->
+        {{:error, :backend_unavailable}, state}
+
+      _other ->
+        {{:error, :invalid_backend_response}, state}
+    end
+  end
+
+  defp do_acknowledged_compare_and_swap(%{backend: nil} = state, key, expected, replacement) do
+    current =
+      case Map.fetch(state.ephemeral_authority, key) do
+        {:ok, value} -> {:value, value}
+        :error -> Map.get(state.authority_tombstones, key, :not_found)
+      end
+
+    with {:ok, stored} <- ephemeral_cas(current, expected, replacement) do
+      authority = Map.put(state.ephemeral_authority, key, stored)
+      true = :ets.insert(state.table, {key, stored})
+      emit_distributed_signal(state, :cache_put, key)
+
+      state = %{
+        state
+        | ephemeral_authority: authority,
+          authority_tombstones: Map.delete(state.authority_tombstones, key)
+      }
+
+      {{:ok, stored}, state}
+    else
+      {:error, _reason} = error -> {error, state}
+    end
+  end
+
+  defp do_acknowledged_compare_and_swap(%{backend: backend} = state, key, expected, replacement) do
+    if Code.ensure_loaded?(backend) and function_exported?(backend, :compare_and_swap, 4) do
+      result =
+        guarded_backend_call(fn ->
+          backend.compare_and_swap(key, expected, replacement, backend_call_opts(state))
+        end)
+
+      case result do
+        {:ok, stored} ->
+          if Revision.key_mismatch?(key, stored) do
+            {{:error, :invalid_backend_record}, state}
+          else
+            true = :ets.insert(state.table, {key, stored})
+            emit_distributed_signal(state, :cache_put, key)
+            {{:ok, stored}, state}
+          end
+
+        {:error, :conflict} ->
+          {{:error, :conflict}, state}
+
+        {:error, :key_mismatch} ->
+          {{:error, :key_mismatch}, state}
+
+        {:error, _reason} ->
+          {{:error, :backend_unavailable}, state}
+
+        _other ->
+          {{:error, :invalid_backend_response}, state}
+      end
+    else
+      {{:error, :unsupported}, state}
+    end
+  end
+
+  defp ephemeral_cas(:not_found, :not_found, replacement) do
+    {:ok, Revision.advance_cas_insert(replacement)}
+  end
+
+  defp ephemeral_cas({:tombstone, generation}, :not_found, replacement) do
+    {:ok, Revision.advance_cas_insert_from_tombstone(generation, replacement)}
+  end
+
+  defp ephemeral_cas({:value, current}, {:value, expected}, replacement) do
+    if Revision.cas_matches?(current, expected) do
+      case {current, replacement} do
+        {%Record{} = current_record, %Record{} = replacement_record} ->
+          Revision.advance_cas_update(current_record, replacement_record)
+
+        {_current, %Record{}} ->
+          {:error, :conflict}
+
+        {_current, replacement} ->
+          {:ok, replacement}
+      end
+    else
+      {:error, :conflict}
+    end
+  end
+
+  defp ephemeral_cas(_current, _expected, _replacement), do: {:error, :conflict}
+
+  defp do_acknowledged_compare_and_delete(%{backend: nil} = state, key, expected) do
+    case Map.fetch(state.ephemeral_authority, key) do
+      {:ok, current} ->
+        if Revision.cas_matches?(current, expected) do
+          state = delete_ephemeral_authority(state, key)
+          true = :ets.delete(state.table, key)
+          emit_distributed_signal(state, :cache_delete, key)
+          {:ok, state}
+        else
+          {{:error, :conflict}, state}
+        end
+
+      :error ->
+        {{:error, :conflict}, state}
+    end
+  end
+
+  defp do_acknowledged_compare_and_delete(%{backend: backend} = state, key, expected) do
+    if Code.ensure_loaded?(backend) and function_exported?(backend, :compare_and_delete, 3) do
+      result =
+        guarded_backend_call(fn ->
+          backend.compare_and_delete(key, expected, backend_call_opts(state))
+        end)
+
+      case result do
+        :ok ->
+          true = :ets.delete(state.table, key)
+          emit_distributed_signal(state, :cache_delete, key)
+          {:ok, state}
+
+        {:error, :conflict} ->
+          {{:error, :conflict}, state}
+
+        {:error, :key_mismatch} ->
+          {{:error, :key_mismatch}, state}
+
+        {:error, _reason} ->
+          {{:error, :backend_unavailable}, state}
+
+        _other ->
+          {{:error, :invalid_backend_response}, state}
+      end
+    else
+      {{:error, :unsupported}, state}
+    end
+  end
+
+  defp put_ephemeral_authority(state, key, value) do
+    current =
+      case Map.fetch(state.ephemeral_authority, key) do
+        {:ok, current} -> current
+        :error -> Map.get(state.authority_tombstones, key, :absent)
+      end
+
+    case Revision.apply_put(current, value) do
+      {:ok, stored} ->
+        state = %{
+          state
+          | ephemeral_authority: Map.put(state.ephemeral_authority, key, stored),
+            authority_tombstones: Map.delete(state.authority_tombstones, key)
+        }
+
+        {:ok, stored, state}
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp delete_ephemeral_authority(state, key) do
+    state = retain_ephemeral_tombstone(state, key)
+    %{state | ephemeral_authority: Map.delete(state.ephemeral_authority, key)}
+  end
+
+  defp retain_ephemeral_tombstone(state, key) do
+    case Map.fetch(state.ephemeral_authority, key) do
+      {:ok, %Record{generation: generation}}
+      when is_integer(generation) and generation >= 0 ->
+        %{
+          state
+          | authority_tombstones:
+              Map.put(state.authority_tombstones, key, {:tombstone, generation})
+        }
+
+      _other ->
+        %{state | authority_tombstones: Map.delete(state.authority_tombstones, key)}
+    end
+  end
+
+  defp backend_call_opts(state) do
+    Keyword.merge(state.backend_opts, name: state.collection)
+  end
+
+  defp guarded_backend_call(fun) do
+    fun.()
+  rescue
+    _ -> {:error, :backend_unavailable}
+  catch
+    :exit, _ -> {:error, :backend_unavailable}
+    :throw, _ -> {:error, :backend_unavailable}
+  end
 
   # No backend = trivially healthy (ETS-only is always reachable).
   defp do_backend_healthy?(%{backend: nil}), do: true
@@ -622,6 +1277,18 @@ defmodule Arbor.Persistence.BufferedStore do
 
   defp store_name!(opts) do
     Keyword.fetch!(opts, :name)
+  end
+
+  defp authority_call(store, message) do
+    # The configured backend owns its operation timeout. Returning early from
+    # GenServer.call would be ambiguous: the queued/backend effect could still
+    # commit after the caller observed a timeout error.
+    GenServer.call(store, message, :infinity)
+  rescue
+    _ -> {:error, :store_unavailable}
+  catch
+    :exit, _ -> {:error, :store_unavailable}
+    :throw, _ -> {:error, :store_unavailable}
   end
 
   defp ets_table!(opts) do

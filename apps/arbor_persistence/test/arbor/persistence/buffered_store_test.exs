@@ -92,7 +92,9 @@ defmodule Arbor.Persistence.BufferedStoreTest do
       record = Record.new("key1", %{"value" => "hello"})
 
       assert :ok = BufferedStore.put("key1", record, name: name)
-      assert {:ok, ^record} = BufferedStore.get("key1", name: name)
+
+      assert {:ok, %Record{generation: 1, revision: 1, data: %{"value" => "hello"}}} =
+               BufferedStore.get("key1", name: name)
     end
 
     test "get returns not_found for missing key", %{name: name} do
@@ -135,13 +137,14 @@ defmodule Arbor.Persistence.BufferedStoreTest do
       :ok = BufferedStore.put("key1", r1, name: name)
       :ok = BufferedStore.put("key1", r2, name: name)
 
-      assert {:ok, ^r2} = BufferedStore.get("key1", name: name)
+      assert {:ok, %Record{generation: 1, revision: 2, data: %{"v" => 2}}} =
+               BufferedStore.get("key1", name: name)
     end
 
     test "security regression: put rejects Record physical-key mismatch and does not mutate",
          %{name: name} do
       # Physical store key must equal Record.key. A mismatched Record must not
-      # land in the cache-authoritative ETS table (or any backend).
+      # land in owner authority, the public ETS projection, or any backend.
       mismatched = Record.new("other-key", %{"secret" => true})
 
       assert {:error, :key_mismatch} =
@@ -150,16 +153,18 @@ defmodule Arbor.Persistence.BufferedStoreTest do
       assert {:error, :not_found} = BufferedStore.get("k", name: name)
       assert {:ok, []} = BufferedStore.list(name: name)
 
-      # Valid put still round-trips the exact caller value (cache-authoritative).
+      # A valid owner put advances the private authoritative fence and projection.
       valid = Record.new("k", %{"ok" => true})
       assert :ok = BufferedStore.put("k", valid, name: name)
-      assert {:ok, ^valid} = BufferedStore.get("k", name: name)
+
+      assert {:ok, %Record{generation: 1, revision: 1, data: %{"ok" => true}} = stored} =
+               BufferedStore.get("k", name: name)
 
       # A later mismatch still must not overwrite the valid entry.
       assert {:error, :key_mismatch} =
                BufferedStore.put("k", mismatched, name: name)
 
-      assert {:ok, ^valid} = BufferedStore.get("k", name: name)
+      assert {:ok, ^stored} = BufferedStore.get("k", name: name)
     end
   end
 

@@ -79,14 +79,22 @@ defmodule Arbor.Persistence.QueryableStore.Agent do
   def list(opts) do
     name = Keyword.fetch!(opts, :name)
 
-    keys =
-      Agent.get(name, fn map ->
-        map
-        |> Enum.filter(fn {_k, v} -> match?({:ok, _}, Revision.live_value(v)) end)
-        |> Enum.map(fn {k, _} -> k end)
-      end)
+    with {:ok, limit} <- Revision.authoritative_list_limit(opts) do
+      case limit do
+        nil ->
+          keys =
+            Agent.get(name, fn map ->
+              map
+              |> Enum.filter(fn {_k, v} -> match?({:ok, _}, Revision.live_value(v)) end)
+              |> Enum.map(fn {k, _} -> k end)
+            end)
 
-    {:ok, keys}
+          {:ok, keys}
+
+        limit ->
+          Agent.get(name, &bounded_keys(&1, limit))
+      end
+    end
   end
 
   @impl true
@@ -105,20 +113,26 @@ defmodule Arbor.Persistence.QueryableStore.Agent do
   def query(%Filter{} = filter, opts) do
     name = Keyword.fetch!(opts, :name)
 
-    records =
+    with {:ok, limit} <- Revision.authoritative_list_limit(opts) do
       Agent.get(name, fn map ->
-        map
-        |> Map.values()
-        |> Enum.flat_map(fn entry ->
-          case Revision.live_value(entry) do
-            {:ok, value} -> [value]
-            :not_found -> []
-          end
-        end)
-      end)
-      |> then(&Filter.apply(filter, &1))
+        if is_integer(limit) and map_size(map) > limit do
+          {:error, :inventory_limit_exceeded}
+        else
+          records =
+            map
+            |> Map.values()
+            |> Enum.flat_map(fn entry ->
+              case Revision.live_value(entry) do
+                {:ok, value} -> [value]
+                :not_found -> []
+              end
+            end)
+            |> then(&Filter.apply(filter, &1))
 
-    {:ok, records}
+          {:ok, records}
+        end
+      end)
+    end
   end
 
   @impl true
@@ -158,6 +172,32 @@ defmodule Arbor.Persistence.QueryableStore.Agent do
 
       Agent.get_and_update(name, fn map ->
         do_cas(map, key, expected, replacement)
+      end)
+    end
+  end
+
+  @impl true
+  def compare_and_delete(key, expected, opts) do
+    if Revision.key_mismatch?(key, expected) do
+      {:error, :key_mismatch}
+    else
+      name = Keyword.fetch!(opts, :name)
+
+      Agent.get_and_update(name, fn map ->
+        case Map.fetch(map, key) do
+          {:ok, current} ->
+            if Revision.cas_matches?(current, expected) do
+              case Revision.to_tombstone(current) do
+                :absent -> {:ok, Map.delete(map, key)}
+                tombstone -> {:ok, Map.put(map, key, tombstone)}
+              end
+            else
+              {{:error, :conflict}, map}
+            end
+
+          :error ->
+            {{:error, :conflict}, map}
+        end
       end)
     end
   end
@@ -221,4 +261,20 @@ defmodule Arbor.Persistence.QueryableStore.Agent do
   end
 
   defp cas_store(_current, _replacement), do: {:error, :conflict}
+
+  defp bounded_keys(map, limit) do
+    map
+    |> Enum.reduce_while({:ok, [], 0}, fn {key, entry}, {:ok, keys, visited} ->
+      if visited >= limit do
+        {:halt, {:error, :inventory_limit_exceeded}}
+      else
+        keys = if match?({:ok, _}, Revision.live_value(entry)), do: [key | keys], else: keys
+        {:cont, {:ok, keys, visited + 1}}
+      end
+    end)
+    |> case do
+      {:ok, keys, _visited} -> {:ok, keys}
+      {:error, _reason} = error -> error
+    end
+  end
 end

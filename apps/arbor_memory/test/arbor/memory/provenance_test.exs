@@ -136,6 +136,36 @@ defmodule Arbor.Memory.ProvenanceTest do
     assert {:ok, _pid} = Supervisor.restart_child(Arbor.Memory.Supervisor, Provenance)
   end
 
+  @tag timeout: 10_000
+  test "security regression: blocked owner returns only after delete has a definitive outcome", %{
+    agent_id: agent_id
+  } do
+    payload = %{"content" => "blocked-delete"}
+
+    assert :ok =
+             Provenance.put(:goal, agent_id, "blocked", payload, taint(:hostile, "blocked"))
+
+    :ok = :sys.suspend(Provenance)
+
+    on_exit(fn ->
+      case Process.whereis(Provenance) do
+        pid when is_pid(pid) ->
+          if Process.alive?(pid), do: :sys.resume(pid)
+
+        nil ->
+          :ok
+      end
+    end)
+
+    task = Task.async(fn -> Provenance.delete(:goal, agent_id, "blocked") end)
+    Process.sleep(5_100)
+
+    assert Task.yield(task, 0) == nil
+    :ok = :sys.resume(Provenance)
+    assert :ok = Task.await(task, 2_000)
+    assert_missing(Provenance.resolve(:goal, agent_id, "blocked", payload))
+  end
+
   test "accepts only closed domains and bounded binary identifiers", %{agent_id: agent_id} do
     payload = %{"content" => "bounded"}
     taint = taint(:untrusted, "input")
@@ -146,6 +176,8 @@ defmodule Arbor.Memory.ProvenanceTest do
     assert :self_knowledge in Provenance.allowed_domains()
     assert :working_memory_base in Provenance.allowed_domains()
     assert :working_memory_aggregate in Provenance.allowed_domains()
+    assert :working_memory_concern in Provenance.allowed_domains()
+    assert :working_memory_curiosity in Provenance.allowed_domains()
 
     assert :ok =
              Provenance.put(:working_memory_base, agent_id, "base", payload, taint)
@@ -178,6 +210,168 @@ defmodule Arbor.Memory.ProvenanceTest do
              Provenance.delete_agent(String.duplicate("a", 257))
 
     assert_invalid(Provenance.resolve(:unknown, agent_id, "one", payload))
+  end
+
+  test "domain-agent inventory and cleanup stay within the selected domain", %{
+    agent_id: agent_id
+  } do
+    taint = taint(:untrusted, "inventory")
+
+    assert :ok =
+             Provenance.put(
+               :working_memory_concern,
+               agent_id,
+               "concern-2",
+               "second",
+               taint
+             )
+
+    assert :ok =
+             Provenance.put(
+               :working_memory_concern,
+               agent_id,
+               "concern-1",
+               "first",
+               taint
+             )
+
+    assert :ok =
+             Provenance.put(
+               :working_memory_curiosity,
+               agent_id,
+               "curiosity-1",
+               "question",
+               taint
+             )
+
+    assert {:ok, ["concern-1", "concern-2"]} =
+             Provenance.list_item_ids(:working_memory_concern, agent_id)
+
+    assert :ok = Provenance.delete_domain_agent(:working_memory_concern, agent_id)
+    assert {:ok, []} = Provenance.list_item_ids(:working_memory_concern, agent_id)
+
+    assert {:ok, ^taint, :verified} =
+             Provenance.resolve(
+               :working_memory_curiosity,
+               agent_id,
+               "curiosity-1",
+               "question"
+             )
+  end
+
+  test "domain-agent capacity is enforced at insertion and recovers after delete", %{
+    agent_id: agent_id
+  } do
+    label = taint(:untrusted, "capacity")
+
+    for index <- 1..512 do
+      assert :ok =
+               Provenance.put(
+                 :working_memory_concern,
+                 agent_id,
+                 "concern-#{index}",
+                 %{"index" => index},
+                 label
+               )
+    end
+
+    assert {:error, :domain_inventory_limit_exceeded} =
+             Provenance.put(
+               :working_memory_concern,
+               agent_id,
+               "concern-overflow",
+               %{"index" => 513},
+               label
+             )
+
+    replacement = taint(:hostile, "replacement")
+
+    assert :ok =
+             Provenance.put(
+               :working_memory_concern,
+               agent_id,
+               "concern-1",
+               %{"index" => "replacement"},
+               replacement
+             )
+
+    assert :ok =
+             Provenance.put(
+               :working_memory_curiosity,
+               agent_id,
+               "curiosity-cross-domain",
+               %{"value" => "independent"},
+               label
+             )
+
+    assert :ok = Provenance.delete(:working_memory_concern, agent_id, "concern-2")
+
+    assert :ok =
+             Provenance.put(
+               :working_memory_concern,
+               agent_id,
+               "concern-after-delete",
+               %{"index" => 514},
+               label
+             )
+
+    assert {:ok, concern_ids} =
+             Provenance.list_item_ids(:working_memory_concern, agent_id)
+
+    assert length(concern_ids) == 512
+    assert "concern-after-delete" in concern_ids
+    refute "concern-2" in concern_ids
+
+    assert {:ok, ["curiosity-cross-domain"]} =
+             Provenance.list_item_ids(:working_memory_curiosity, agent_id)
+  end
+
+  test "owner-indexed list and delete ignore more than 512 entries owned elsewhere", %{
+    agent_id: agent_id
+  } do
+    other_agent = "#{agent_id}_other"
+    label = taint(:untrusted, "owner-index")
+
+    on_exit(fn -> Provenance.delete_agent(other_agent) end)
+
+    for index <- 1..512 do
+      assert :ok =
+               Provenance.put(
+                 :working_memory_concern,
+                 other_agent,
+                 "other-concern-#{index}",
+                 %{"index" => index},
+                 label
+               )
+    end
+
+    for index <- 1..8 do
+      assert :ok =
+               Provenance.put(
+                 :working_memory_curiosity,
+                 other_agent,
+                 "other-curiosity-#{index}",
+                 %{"index" => index},
+                 label
+               )
+    end
+
+    assert :ok = Provenance.put(:goal, agent_id, "small-1", %{"value" => 1}, label)
+    assert :ok = Provenance.put(:goal, agent_id, "small-2", %{"value" => 2}, label)
+    assert {:ok, ["small-1", "small-2"]} = Provenance.list_item_ids(:goal, agent_id)
+
+    assert :ok = Provenance.delete_domain_agent(:goal, agent_id)
+    assert {:ok, []} = Provenance.list_item_ids(:goal, agent_id)
+
+    assert {:ok, concern_ids} =
+             Provenance.list_item_ids(:working_memory_concern, other_agent)
+
+    assert length(concern_ids) == 512
+
+    assert {:ok, curiosity_ids} =
+             Provenance.list_item_ids(:working_memory_curiosity, other_agent)
+
+    assert length(curiosity_ids) == 8
   end
 
   test "rejects invalid payloads and labels before writing", %{agent_id: agent_id} do

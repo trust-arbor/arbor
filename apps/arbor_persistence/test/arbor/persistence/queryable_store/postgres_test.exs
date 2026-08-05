@@ -99,6 +99,82 @@ defmodule Arbor.Persistence.QueryableStore.PostgresTest do
     end
   end
 
+  describe "compare_and_delete/3" do
+    test "stale and missing expectations conflict without deleting", %{name: name} do
+      assert :ok =
+               Postgres.put("fenced-delete", Record.new("fenced-delete", %{"n" => 1}),
+                 name: name,
+                 repo: Repo
+               )
+
+      assert {:ok, %Record{} = stale} =
+               Postgres.get("fenced-delete", name: name, repo: Repo)
+
+      assert :ok =
+               Postgres.put("fenced-delete", Record.new("fenced-delete", %{"n" => 2}),
+                 name: name,
+                 repo: Repo
+               )
+
+      assert {:error, :conflict} =
+               Postgres.compare_and_delete("fenced-delete", stale, name: name, repo: Repo)
+
+      assert {:ok, %Record{data: %{"n" => 2}}} =
+               Postgres.get("fenced-delete", name: name, repo: Repo)
+
+      assert {:error, :conflict} =
+               Postgres.compare_and_delete("missing", Record.new("missing"),
+                 name: name,
+                 repo: Repo
+               )
+    end
+
+    test "soft-delete tombstone fences ABA reinsertion", %{name: name} do
+      assert :ok =
+               Postgres.put("aba-delete", Record.new("aba-delete", %{"n" => 1}),
+                 name: name,
+                 repo: Repo
+               )
+
+      assert {:ok, %Record{generation: 1, revision: 1} = generation_one} =
+               Postgres.get("aba-delete", name: name, repo: Repo)
+
+      assert :ok =
+               Postgres.compare_and_delete("aba-delete", generation_one,
+                 name: name,
+                 repo: Repo
+               )
+
+      assert {:error, :not_found} = Postgres.get("aba-delete", name: name, repo: Repo)
+
+      assert {:ok, %Record{generation: 2, revision: 1}} =
+               Postgres.compare_and_swap(
+                 "aba-delete",
+                 :not_found,
+                 Record.new("aba-delete", %{"n" => 2}),
+                 name: name,
+                 repo: Repo
+               )
+
+      assert {:error, :conflict} =
+               Postgres.compare_and_delete("aba-delete", generation_one,
+                 name: name,
+                 repo: Repo
+               )
+    end
+
+    test "delete is scoped by the true namespace and key pair" do
+      assert :ok = Postgres.put("same", Record.new("same", %{"ns" => "a"}), name: "a", repo: Repo)
+      assert :ok = Postgres.put("same", Record.new("same", %{"ns" => "b"}), name: "b", repo: Repo)
+
+      assert {:ok, %Record{} = observed_a} = Postgres.get("same", name: "a", repo: Repo)
+      assert :ok = Postgres.compare_and_delete("same", observed_a, name: "a", repo: Repo)
+
+      assert {:error, :not_found} = Postgres.get("same", name: "a", repo: Repo)
+      assert {:ok, %Record{data: %{"ns" => "b"}}} = Postgres.get("same", name: "b", repo: Repo)
+    end
+  end
+
   describe "list/1" do
     test "returns all keys in namespace", %{name: name} do
       for key <- ["c", "a", "b"] do
@@ -120,6 +196,18 @@ defmodule Arbor.Persistence.QueryableStore.PostgresTest do
 
       {:ok, keys} = Postgres.list(name: :ns1, repo: Repo)
       assert keys == ["a"]
+    end
+
+    test "internal authoritative limit is applied by SQL and validated", %{name: name} do
+      for key <- ["c", "a", "b"] do
+        assert :ok = Postgres.put(key, Record.new(key), name: name, repo: Repo)
+      end
+
+      assert {:ok, ["a", "b"]} =
+               Postgres.list(name: name, repo: Repo, authoritative_limit: 2)
+
+      assert {:error, :invalid_authoritative_limit} =
+               Postgres.list(name: name, repo: Repo, authoritative_limit: 10_002)
     end
   end
 
@@ -234,6 +322,24 @@ defmodule Arbor.Persistence.QueryableStore.PostgresTest do
 
       assert length(results) == 2
       assert hd(results).key == "job-1"
+    end
+
+    test "authoritative snapshot limit is applied in the ordered SQL query", %{name: name} do
+      filter = Filter.new() |> Filter.order_by(:key, :asc) |> Filter.limit(4)
+
+      assert {:ok, [%Record{key: "job-1"}, %Record{key: "job-2"}]} =
+               Postgres.query(filter,
+                 name: name,
+                 repo: Repo,
+                 authoritative_limit: 2
+               )
+
+      assert {:error, :invalid_authoritative_limit} =
+               Postgres.query(filter,
+                 name: name,
+                 repo: Repo,
+                 authoritative_limit: 10_002
+               )
     end
 
     test "applies offset", %{name: name} do

@@ -14,7 +14,7 @@ defmodule Arbor.Memory.Provenance do
 
   @table :arbor_memory_provenance
   @max_identifier_bytes 256
-  @call_timeout 5_000
+  @max_domain_agent_entries 512
 
   @allowed_domains [
     :goal,
@@ -25,6 +25,8 @@ defmodule Arbor.Memory.Provenance do
     :working_memory_thought,
     :working_memory_goal,
     :working_memory_skill,
+    :working_memory_concern,
+    :working_memory_curiosity,
     :knowledge_node,
     :knowledge_pending_fact,
     :knowledge_pending_learning,
@@ -48,6 +50,8 @@ defmodule Arbor.Memory.Provenance do
           | :working_memory_thought
           | :working_memory_goal
           | :working_memory_skill
+          | :working_memory_concern
+          | :working_memory_curiosity
           | :knowledge_node
           | :knowledge_pending_fact
           | :knowledge_pending_learning
@@ -115,6 +119,24 @@ defmodule Arbor.Memory.Provenance do
     end
   end
 
+  @doc "Return a bounded owner-mediated inventory for one domain and agent."
+  @spec list_item_ids(domain(), String.t()) :: {:ok, [String.t()]} | {:error, atom()}
+  def list_item_ids(domain, agent_id) do
+    with :ok <- validate_domain(domain),
+         :ok <- validate_identifier(agent_id, :invalid_agent_id) do
+      call_owner({:list_item_ids, domain, agent_id})
+    end
+  end
+
+  @doc "Delete every live entry for exactly one domain and agent."
+  @spec delete_domain_agent(domain(), String.t()) :: :ok | {:error, atom()}
+  def delete_domain_agent(domain, agent_id) do
+    with :ok <- validate_domain(domain),
+         :ok <- validate_identifier(agent_id, :invalid_agent_id) do
+      delete_through_owner({:delete_domain_agent, domain, agent_id})
+    end
+  end
+
   @doc "Deletes every live provenance entry owned by an agent."
   @spec delete_agent(String.t()) :: :ok | {:error, atom()}
   def delete_agent(agent_id) do
@@ -134,24 +156,106 @@ defmodule Arbor.Memory.Provenance do
         write_concurrency: true
       ])
 
-    {:ok, %{table: table}}
+    {:ok, %{table: table, owners: %{}, agents: %{}}}
   end
 
   @impl true
-  def handle_call({:put, key, persisted}, _from, %{table: table} = state) do
-    true = :ets.insert(table, {key, persisted})
-    {:reply, :ok, state}
+  def handle_call(
+        {:put, {domain, agent_id, _item_id} = key, persisted},
+        _from,
+        %{table: table, owners: owners, agents: agents} = state
+      ) do
+    owner = {domain, agent_id}
+    item_id = elem(key, 2)
+    owner_ids = Map.get(owners, owner, MapSet.new())
+
+    cond do
+      MapSet.member?(owner_ids, item_id) ->
+        true = :ets.insert(table, {key, persisted})
+        {:reply, :ok, state}
+
+      MapSet.size(owner_ids) >= @max_domain_agent_entries ->
+        {:reply, {:error, :domain_inventory_limit_exceeded}, state}
+
+      true ->
+        true = :ets.insert(table, {key, persisted})
+
+        owners = Map.put(owners, owner, MapSet.put(owner_ids, item_id))
+        agents = Map.update(agents, agent_id, MapSet.new([domain]), &MapSet.put(&1, domain))
+
+        {:reply, :ok, %{state | owners: owners, agents: agents}}
+    end
   end
 
-  def handle_call({:delete, key}, _from, %{table: table} = state) do
+  def handle_call(
+        {:delete, {domain, agent_id, _item_id} = key},
+        _from,
+        %{table: table} = state
+      ) do
     true = :ets.delete(table, key)
-    {:reply, :ok, state}
+    {:reply, :ok, remove_owner_item(state, domain, agent_id, elem(key, 2))}
   end
 
-  def handle_call({:delete_agent, agent_id}, _from, %{table: table} = state) do
-    match_spec = [{{{:_, agent_id, :_}, :_}, [], [true]}]
-    _deleted = :ets.select_delete(table, match_spec)
-    {:reply, :ok, state}
+  def handle_call({:list_item_ids, domain, agent_id}, _from, %{owners: owners} = state) do
+    ids = owners |> Map.get({domain, agent_id}, MapSet.new()) |> MapSet.to_list() |> Enum.sort()
+    {:reply, {:ok, ids}, state}
+  end
+
+  def handle_call(
+        {:delete_domain_agent, domain, agent_id},
+        _from,
+        %{table: table, owners: owners} = state
+      ) do
+    owners
+    |> Map.get({domain, agent_id}, MapSet.new())
+    |> Enum.each(&:ets.delete(table, {domain, agent_id, &1}))
+
+    {:reply, :ok, remove_owner(state, domain, agent_id)}
+  end
+
+  def handle_call(
+        {:delete_agent, agent_id},
+        _from,
+        %{table: table, owners: owners, agents: agents} = state
+      ) do
+    domains = Map.get(agents, agent_id, MapSet.new())
+
+    Enum.each(domains, fn domain ->
+      owners
+      |> Map.get({domain, agent_id}, MapSet.new())
+      |> Enum.each(&:ets.delete(table, {domain, agent_id, &1}))
+    end)
+
+    owners = Enum.reduce(domains, owners, &Map.delete(&2, {&1, agent_id}))
+    {:reply, :ok, %{state | owners: owners, agents: Map.delete(agents, agent_id)}}
+  end
+
+  defp remove_owner_item(%{owners: owners} = state, domain, agent_id, item_id) do
+    owner = {domain, agent_id}
+    owner_ids = Map.get(owners, owner, MapSet.new())
+
+    if MapSet.member?(owner_ids, item_id) do
+      remaining = MapSet.delete(owner_ids, item_id)
+
+      if MapSet.size(remaining) == 0 do
+        remove_owner(state, domain, agent_id)
+      else
+        %{state | owners: Map.put(owners, owner, remaining)}
+      end
+    else
+      state
+    end
+  end
+
+  defp remove_owner(%{owners: owners, agents: agents} = state, domain, agent_id) do
+    domains = agents |> Map.get(agent_id, MapSet.new()) |> MapSet.delete(domain)
+
+    agents =
+      if MapSet.size(domains) == 0,
+        do: Map.delete(agents, agent_id),
+        else: Map.put(agents, agent_id, domains)
+
+    %{state | owners: Map.delete(owners, {domain, agent_id}), agents: agents}
   end
 
   defp validate_key(domain, agent_id, item_id) do
@@ -179,7 +283,7 @@ defmodule Arbor.Memory.Provenance do
     case Process.whereis(__MODULE__) do
       pid when is_pid(pid) ->
         try do
-          GenServer.call(pid, message, @call_timeout)
+          GenServer.call(pid, message, :infinity)
         catch
           :exit, _reason ->
             if Process.whereis(__MODULE__) == pid,

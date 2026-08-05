@@ -60,18 +60,27 @@ defmodule Arbor.Persistence.QueryableStore.ETS do
   @impl true
   def list(opts) do
     name = Keyword.fetch!(opts, :name)
-    table = GenServer.call(name, :table)
 
-    keys =
-      :ets.foldl(
-        fn {k, v}, acc ->
-          if match?({:ok, _}, Revision.live_value(v)), do: [k | acc], else: acc
-        end,
-        [],
-        table
-      )
+    with {:ok, limit} <- Revision.authoritative_list_limit(opts) do
+      case limit do
+        nil ->
+          table = GenServer.call(name, :table)
 
-    {:ok, keys}
+          keys =
+            :ets.foldl(
+              fn {k, v}, acc ->
+                if match?({:ok, _}, Revision.live_value(v)), do: [k | acc], else: acc
+              end,
+              [],
+              table
+            )
+
+          {:ok, keys}
+
+        limit ->
+          GenServer.call(name, {:bounded_list, limit})
+      end
+    end
   end
 
   @impl true
@@ -90,20 +99,26 @@ defmodule Arbor.Persistence.QueryableStore.ETS do
     name = Keyword.fetch!(opts, :name)
     table = GenServer.call(name, :table)
 
-    records =
-      :ets.foldl(
-        fn {_k, entry}, acc ->
-          case Revision.live_value(entry) do
-            {:ok, record} -> [record | acc]
-            :not_found -> acc
-          end
-        end,
-        [],
-        table
-      )
-      |> then(&Filter.apply(filter, &1))
+    with {:ok, limit} <- Revision.authoritative_list_limit(opts) do
+      if is_integer(limit) and :ets.info(table, :size) > limit do
+        {:error, :inventory_limit_exceeded}
+      else
+        records =
+          :ets.foldl(
+            fn {_k, entry}, acc ->
+              case Revision.live_value(entry) do
+                {:ok, record} -> [record | acc]
+                :not_found -> acc
+              end
+            end,
+            [],
+            table
+          )
+          |> then(&Filter.apply(filter, &1))
 
-    {:ok, records}
+        {:ok, records}
+      end
+    end
   end
 
   @impl true
@@ -141,6 +156,16 @@ defmodule Arbor.Persistence.QueryableStore.ETS do
     else
       name = Keyword.fetch!(opts, :name)
       GenServer.call(name, {:compare_and_swap, key, expected, replacement})
+    end
+  end
+
+  @impl true
+  def compare_and_delete(key, expected, opts) do
+    if Revision.key_mismatch?(key, expected) do
+      {:error, :key_mismatch}
+    else
+      name = Keyword.fetch!(opts, :name)
+      GenServer.call(name, {:compare_and_delete, key, expected})
     end
   end
 
@@ -201,6 +226,18 @@ defmodule Arbor.Persistence.QueryableStore.ETS do
     {:reply, table, state}
   end
 
+  def handle_call({:bounded_list, limit}, _from, %{table: table} = state) do
+    match_spec = [{{:"$1", :"$2"}, [], [{{:"$1", :"$2"}}]}]
+
+    reply =
+      case :ets.select(table, match_spec, 256) do
+        :"$end_of_table" -> {:ok, []}
+        {entries, continuation} -> bounded_ets_keys(entries, continuation, limit, [], 0)
+      end
+
+    {:reply, reply, state}
+  end
+
   def handle_call(
         {:compare_and_swap, key, :not_found, replacement},
         _from,
@@ -253,6 +290,28 @@ defmodule Arbor.Persistence.QueryableStore.ETS do
     {:reply, reply, state}
   end
 
+  def handle_call({:compare_and_delete, key, expected}, _from, %{table: table} = state) do
+    reply =
+      case :ets.lookup(table, key) do
+        [{^key, current}] ->
+          if Revision.cas_matches?(current, expected) do
+            case Revision.to_tombstone(current) do
+              :absent -> :ets.delete(table, key)
+              tombstone -> :ets.insert(table, {key, tombstone})
+            end
+
+            :ok
+          else
+            {:error, :conflict}
+          end
+
+        _ ->
+          {:error, :conflict}
+      end
+
+    {:reply, reply, state}
+  end
+
   defp cas_store(%Record{} = current, %Record{} = replacement) do
     Revision.advance_cas_update(current, replacement)
   end
@@ -262,4 +321,33 @@ defmodule Arbor.Persistence.QueryableStore.ETS do
   end
 
   defp cas_store(_current, _replacement), do: {:error, :conflict}
+
+  defp bounded_ets_keys(entries, continuation, limit, keys, visited) do
+    with {:ok, keys, visited} <- bounded_ets_chunk(entries, limit, keys, visited) do
+      case continuation do
+        :"$end_of_table" ->
+          {:ok, keys}
+
+        continuation ->
+          case :ets.select(continuation) do
+            :"$end_of_table" ->
+              {:ok, keys}
+
+            {next, next_continuation} ->
+              bounded_ets_keys(next, next_continuation, limit, keys, visited)
+          end
+      end
+    end
+  end
+
+  defp bounded_ets_chunk([], _limit, keys, visited), do: {:ok, keys, visited}
+
+  defp bounded_ets_chunk([{key, entry} | rest], limit, keys, visited) do
+    if visited >= limit do
+      {:error, :inventory_limit_exceeded}
+    else
+      keys = if match?({:ok, _}, Revision.live_value(entry)), do: [key | keys], else: keys
+      bounded_ets_chunk(rest, limit, keys, visited + 1)
+    end
+  end
 end

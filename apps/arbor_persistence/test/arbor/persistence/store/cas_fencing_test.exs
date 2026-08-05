@@ -210,7 +210,14 @@ defmodule Arbor.Persistence.Store.CASFencingTest do
 
   describe "compare-and-delete fencing" do
     test "Store.Agent and Store.ETS delete only the exact observed live value" do
-      for {backend, start_backend} <- [{Store.Agent, Store.Agent}, {Store.ETS, Store.ETS}] do
+      backends = [
+        {Store.Agent, Store.Agent},
+        {Store.ETS, Store.ETS},
+        {QueryableStore.Agent, QueryableStore.Agent},
+        {QueryableStore.ETS, QueryableStore.ETS}
+      ]
+
+      for {backend, start_backend} <- backends do
         # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
         name = :"compare_delete_#{:erlang.unique_integer([:positive])}"
         start_supervised!({start_backend, name: name})
@@ -226,7 +233,14 @@ defmodule Arbor.Persistence.Store.CASFencingTest do
     end
 
     test "structured Record compare-delete leaves a generation tombstone" do
-      for {backend, start_backend} <- [{Store.Agent, Store.Agent}, {Store.ETS, Store.ETS}] do
+      backends = [
+        {Store.Agent, Store.Agent},
+        {Store.ETS, Store.ETS},
+        {QueryableStore.Agent, QueryableStore.Agent},
+        {QueryableStore.ETS, QueryableStore.ETS}
+      ]
+
+      for {backend, start_backend} <- backends do
         # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
         name = :"compare_delete_record_#{:erlang.unique_integer([:positive])}"
         start_supervised!({start_backend, name: name})
@@ -251,7 +265,14 @@ defmodule Arbor.Persistence.Store.CASFencingTest do
     end
 
     test "exactly one concurrent compare-delete succeeds" do
-      for {backend, start_backend} <- [{Store.Agent, Store.Agent}, {Store.ETS, Store.ETS}] do
+      backends = [
+        {Store.Agent, Store.Agent},
+        {Store.ETS, Store.ETS},
+        {QueryableStore.Agent, QueryableStore.Agent},
+        {QueryableStore.ETS, QueryableStore.ETS}
+      ]
+
+      for {backend, start_backend} <- backends do
         # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
         name = :"compare_delete_winner_#{:erlang.unique_integer([:positive])}"
         start_supervised!({start_backend, name: name})
@@ -385,20 +406,22 @@ defmodule Arbor.Persistence.Store.CASFencingTest do
   end
 
   describe "BufferedStore coherence" do
-    test "ETS-only put returns exact caller Record (cache-authoritative, no fencing)" do
-      # BufferedStore is a process-lifetime cache wrapper — it does not own CAS
-      # tokens. put/get must round-trip the exact caller value.
+    test "ETS-only owner put advances the private authoritative Record fence" do
       # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       name = :"buf_#{:erlang.unique_integer([:positive])}"
       start_supervised!({BufferedStore, name: name, backend: nil})
 
       r1 = Record.new("k", %{"n" => 1})
       assert :ok = BufferedStore.put("k", r1, name: name)
-      assert {:ok, ^r1} = BufferedStore.get("k", name: name)
+
+      assert {:ok, %Record{generation: 1, revision: 1, data: %{"n" => 1}}} =
+               BufferedStore.get("k", name: name)
 
       r2 = Record.new("k", %{"n" => 2})
       assert :ok = BufferedStore.put("k", r2, name: name)
-      assert {:ok, ^r2} = BufferedStore.get("k", name: name)
+
+      assert {:ok, %Record{generation: 1, revision: 2, data: %{"n" => 2}}} =
+               BufferedStore.get("k", name: name)
     end
 
     test "async + backend accepts structured Record values" do

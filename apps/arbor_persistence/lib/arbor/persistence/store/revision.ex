@@ -10,6 +10,8 @@ defmodule Arbor.Persistence.Store.Revision do
 
   alias Arbor.Contracts.Persistence.Record
 
+  @max_authoritative_list_limit 10_001
+
   @type entry :: Record.t() | {:tombstone, non_neg_integer()} | term()
 
   @doc false
@@ -140,6 +142,31 @@ defmodule Arbor.Persistence.Store.Revision do
   def absent_for_cas?(:absent), do: true
   def absent_for_cas?({:tombstone, _}), do: true
   def absent_for_cas?(_), do: false
+
+  @doc false
+  @spec authoritative_list_limit(keyword()) ::
+          {:ok, nil | pos_integer()} | {:error, :invalid_authoritative_limit}
+  def authoritative_list_limit(opts) do
+    if Keyword.keyword?(opts) do
+      case Keyword.fetch(opts, :authoritative_limit) do
+        :error ->
+          {:ok, nil}
+
+        {:ok, limit}
+        when is_integer(limit) and limit > 0 and limit <= @max_authoritative_list_limit ->
+          {:ok, limit}
+
+        {:ok, _invalid} ->
+          {:error, :invalid_authoritative_limit}
+      end
+    else
+      {:error, :invalid_authoritative_limit}
+    end
+  rescue
+    _ -> {:error, :invalid_authoritative_limit}
+  catch
+    _, _ -> {:error, :invalid_authoritative_limit}
+  end
 
   defp do_apply_record(:absent, %Record{} = record) do
     now = DateTime.utc_now()
