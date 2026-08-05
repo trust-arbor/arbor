@@ -105,10 +105,19 @@ defmodule Arbor.Test.BehavioralCase do
       end
     end
 
+    if Process.whereis(:arbor_memory_durable) == nil do
+      start_supervised!(
+        {Arbor.Persistence.BufferedStore,
+         name: :arbor_memory_durable, backend: nil, write_mode: :sync}
+      )
+    end
+
+    if Process.whereis(Arbor.Memory.Provenance) == nil do
+      start_supervised!({Arbor.Memory.Provenance, []})
+    end
+
     ensure_started(Arbor.Memory.Supervisor, [
-      {Arbor.Persistence.BufferedStore, name: :arbor_memory_durable, backend: nil},
       {Registry, keys: :unique, name: Arbor.Memory.Registry},
-      {Arbor.Memory.Provenance, []},
       {Arbor.Memory.IndexSupervisor, []},
       {Arbor.Memory.GoalStore, []},
       {Arbor.Memory.IntentStore, []},

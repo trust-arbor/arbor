@@ -746,6 +746,10 @@ defmodule Arbor.Agent.Seed do
       else: restore_working_memory(agent_id, working_memory)
   end
 
+  defp maybe_restore_goals(skip, agent_id, goals) do
+    if :goals in skip, do: :ok, else: restore_goals(agent_id, goals)
+  end
+
   defp restore_working_memory(_agent_id, nil), do: :ok
 
   defp restore_working_memory(agent_id, wm_map) do

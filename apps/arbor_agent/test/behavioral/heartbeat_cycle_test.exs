@@ -118,7 +118,7 @@ defmodule Arbor.Behavioral.HeartbeatCycleTest do
   end
 
   describe "scenario: working memory persistence" do
-    test "working memory survives write-read cycle via ETS" do
+    test "working memory survives an authoritative write-read cycle" do
       agent_id = "agent_test_wm_#{:erlang.unique_integer([:positive])}"
 
       # Load creates a fresh WorkingMemory if none exists
@@ -126,13 +126,13 @@ defmodule Arbor.Behavioral.HeartbeatCycleTest do
       assert wm != nil
 
       # Modify and save
-      updated = Map.put(wm, :custom_data, "test_value")
-      Arbor.Memory.save_working_memory(agent_id, updated)
+      updated = %{wm | current_conversation: %{"custom_data" => "test_value"}}
+      assert :ok = Arbor.Memory.save_working_memory(agent_id, updated)
 
       # Read back — should get the updated version
       loaded = Arbor.Memory.load_working_memory(agent_id)
       assert loaded != nil
-      assert Map.get(loaded, :custom_data) == "test_value"
+      assert loaded.current_conversation["custom_data"] == "test_value"
     end
 
     test "working memory is agent-scoped (isolation)" do
@@ -143,14 +143,14 @@ defmodule Arbor.Behavioral.HeartbeatCycleTest do
       wm_b = Arbor.Memory.load_working_memory(agent_b)
 
       # Save distinct data for each
-      Arbor.Memory.save_working_memory(agent_a, Map.put(wm_a, :tag, "alpha"))
-      Arbor.Memory.save_working_memory(agent_b, Map.put(wm_b, :tag, "beta"))
+      assert :ok = Arbor.Memory.save_working_memory(agent_a, %{wm_a | name: "alpha"})
+      assert :ok = Arbor.Memory.save_working_memory(agent_b, %{wm_b | name: "beta"})
 
       loaded_a = Arbor.Memory.load_working_memory(agent_a)
       loaded_b = Arbor.Memory.load_working_memory(agent_b)
 
-      assert Map.get(loaded_a, :tag) == "alpha"
-      assert Map.get(loaded_b, :tag) == "beta"
+      assert loaded_a.name == "alpha"
+      assert loaded_b.name == "beta"
     end
   end
 
