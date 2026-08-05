@@ -58,12 +58,26 @@ defmodule Arbor.Memory.GoalStore do
   @max_projected_goals_per_agent 512
   @critical_write_attempts 12
   @seed_goal_record_version 1
+  @goal_snapshot_kind "arbor_goal_provenance"
+  @goal_snapshot_version 1
+  @goal_snapshot_keys ["goal_store", "outer_envelope", "snapshot_kind", "snapshot_version"]
+  @goal_snapshot_payload_keys ["agent_id", "goals"]
+  @seed_goal_record_keys ["payload", "provenance", "version"]
   @projection_convergence_attempts 4
   @projection_convergence_delay_ms 25
 
   @type provenance_status ::
           :verified | :legacy_unlabeled | :invalid_durable_provenance
   @type tainted_goal :: {TaintedValue.t(), provenance_status()}
+  @type mutation_error ::
+          :not_found
+          | persistence_mutation_error()
+  @type persistence_mutation_error ::
+          :invalid_provenance
+          | :persistence_failed
+          | :projection_failed
+          | :store_unavailable
+          | :outcome_unknown
 
   # Per-agent hard cap on goal count. Configurable via Application config:
   #
@@ -111,14 +125,28 @@ defmodule Arbor.Memory.GoalStore do
       {:ok, goal} = GoalStore.add_goal("agent_001", "Fix the login bug", type: :achieve)
   """
   @spec add_goal(String.t(), Goal.t()) ::
-          {:ok, Goal.t()} | {:error, :goal_limit_reached | :invalid_provenance}
+          {:ok, Goal.t()}
+          | {:error,
+             :goal_limit_reached
+             | :invalid_provenance
+             | :persistence_failed
+             | :projection_failed
+             | :store_unavailable
+             | :outcome_unknown}
   def add_goal(agent_id, %Goal{} = goal) do
     add_goal_tainted(agent_id, goal, TaintEnvelope.missing_fallback())
   end
 
   @spec add_goal(String.t(), String.t(), keyword()) ::
           {:ok, Goal.t()}
-          | {:error, :empty_description | :goal_limit_reached | :invalid_provenance}
+          | {:error,
+             :empty_description
+             | :goal_limit_reached
+             | :invalid_provenance
+             | :persistence_failed
+             | :projection_failed
+             | :store_unavailable
+             | :outcome_unknown}
   def add_goal(agent_id, description, opts \\ []) when is_binary(description) do
     if String.trim(description) == "" do
       {:error, :empty_description}
@@ -137,7 +165,12 @@ defmodule Arbor.Memory.GoalStore do
   @spec add_goal_tainted(String.t(), Goal.t(), Taint.t()) ::
           {:ok, Goal.t()}
           | {:error,
-             :goal_limit_reached | :invalid_provenance | :persistence_failed | :store_unavailable}
+             :goal_limit_reached
+             | :invalid_provenance
+             | :persistence_failed
+             | :projection_failed
+             | :store_unavailable
+             | :outcome_unknown}
   def add_goal_tainted(agent_id, %Goal{} = goal, taint) do
     with true <- valid_identifier?(agent_id),
          true <- valid_identifier?(goal.id),
@@ -156,7 +189,14 @@ defmodule Arbor.Memory.GoalStore do
 
   @spec add_goal_tainted(String.t(), String.t(), keyword(), Taint.t()) ::
           {:ok, Goal.t()}
-          | {:error, :empty_description | :goal_limit_reached | :invalid_provenance}
+          | {:error,
+             :empty_description
+             | :goal_limit_reached
+             | :invalid_provenance
+             | :persistence_failed
+             | :projection_failed
+             | :store_unavailable
+             | :outcome_unknown}
   def add_goal_tainted(agent_id, description, opts, taint)
       when is_binary(description) and is_list(opts) do
     if String.trim(description) == "" do
@@ -204,7 +244,7 @@ defmodule Arbor.Memory.GoalStore do
   """
   @spec get_goal_tainted(String.t(), String.t()) ::
           {:ok, TaintedValue.t(), provenance_status()}
-          | {:error, :not_found | :invalid_provenance}
+          | {:error, :not_found | :invalid_provenance | :projection_failed | :store_unavailable}
   def get_goal_tainted(agent_id, goal_id)
       when is_binary(agent_id) and is_binary(goal_id) do
     if valid_identifier?(agent_id) and valid_identifier?(goal_id),
@@ -220,7 +260,7 @@ defmodule Arbor.Memory.GoalStore do
   Emits a `{:memory, :goal_progress}` signal.
   """
   @spec update_goal_progress(String.t(), String.t(), float()) ::
-          {:ok, Goal.t()} | {:error, :not_found | :invalid_provenance}
+          {:ok, Goal.t()} | {:error, mutation_error()}
   def update_goal_progress(agent_id, goal_id, progress)
       when is_float(progress) and progress >= 0.0 and progress <= 1.0 do
     update_goal_progress_tainted(
@@ -233,7 +273,7 @@ defmodule Arbor.Memory.GoalStore do
 
   @doc "Update goal progress while monotonically joining an explicit label."
   @spec update_goal_progress_tainted(String.t(), String.t(), float(), Taint.t()) ::
-          {:ok, Goal.t()} | {:error, :not_found | :invalid_provenance}
+          {:ok, Goal.t()} | {:error, mutation_error()}
   def update_goal_progress_tainted(agent_id, goal_id, progress, taint)
       when is_float(progress) and progress >= 0.0 and progress <= 1.0 do
     mutate_goal(agent_id, goal_id, taint, {:progress, progress})
@@ -249,14 +289,14 @@ defmodule Arbor.Memory.GoalStore do
   Emits a `{:memory, :goal_achieved}` signal.
   """
   @spec achieve_goal(String.t(), String.t()) ::
-          {:ok, Goal.t()} | {:error, :not_found | :invalid_provenance}
+          {:ok, Goal.t()} | {:error, mutation_error()}
   def achieve_goal(agent_id, goal_id) do
     achieve_goal_tainted(agent_id, goal_id, TaintEnvelope.missing_fallback())
   end
 
   @doc "Mark a goal achieved while monotonically joining an explicit label."
   @spec achieve_goal_tainted(String.t(), String.t(), Taint.t()) ::
-          {:ok, Goal.t()} | {:error, :not_found | :invalid_provenance}
+          {:ok, Goal.t()} | {:error, mutation_error()}
   def achieve_goal_tainted(agent_id, goal_id, taint) do
     mutate_goal(agent_id, goal_id, taint, :achieve)
   end
@@ -267,14 +307,14 @@ defmodule Arbor.Memory.GoalStore do
   Emits a `{:memory, :goal_abandoned}` signal.
   """
   @spec abandon_goal(String.t(), String.t(), String.t() | nil) ::
-          {:ok, Goal.t()} | {:error, :not_found | :invalid_provenance}
+          {:ok, Goal.t()} | {:error, mutation_error()}
   def abandon_goal(agent_id, goal_id, reason \\ nil) do
     abandon_goal_tainted(agent_id, goal_id, reason, TaintEnvelope.missing_fallback())
   end
 
   @doc "Abandon a goal while monotonically joining an explicit label."
   @spec abandon_goal_tainted(String.t(), String.t(), String.t() | nil, Taint.t()) ::
-          {:ok, Goal.t()} | {:error, :not_found | :invalid_provenance}
+          {:ok, Goal.t()} | {:error, mutation_error()}
   def abandon_goal_tainted(agent_id, goal_id, reason, taint) do
     mutate_goal(agent_id, goal_id, taint, {:abandon, reason})
   end
@@ -286,14 +326,14 @@ defmodule Arbor.Memory.GoalStore do
   Emits a `{:memory, :goal_failed}` signal.
   """
   @spec fail_goal(String.t(), String.t(), String.t() | nil) ::
-          {:ok, Goal.t()} | {:error, :not_found | :invalid_provenance}
+          {:ok, Goal.t()} | {:error, mutation_error()}
   def fail_goal(agent_id, goal_id, reason \\ nil) do
     fail_goal_tainted(agent_id, goal_id, reason, TaintEnvelope.missing_fallback())
   end
 
   @doc "Fail a goal while monotonically joining an explicit label."
   @spec fail_goal_tainted(String.t(), String.t(), String.t() | nil, Taint.t()) ::
-          {:ok, Goal.t()} | {:error, :not_found | :invalid_provenance}
+          {:ok, Goal.t()} | {:error, mutation_error()}
   def fail_goal_tainted(agent_id, goal_id, reason, taint) do
     mutate_goal(agent_id, goal_id, taint, {:fail, reason})
   end
@@ -304,14 +344,14 @@ defmodule Arbor.Memory.GoalStore do
   Prepends the note to the goal's notes field.
   """
   @spec add_note(String.t(), String.t(), String.t()) ::
-          {:ok, Goal.t()} | {:error, :not_found | :invalid_provenance}
+          {:ok, Goal.t()} | {:error, mutation_error()}
   def add_note(agent_id, goal_id, note) when is_binary(note) do
     add_note_tainted(agent_id, goal_id, note, TaintEnvelope.missing_fallback())
   end
 
   @doc "Add a note while monotonically joining an explicit label."
   @spec add_note_tainted(String.t(), String.t(), String.t(), Taint.t()) ::
-          {:ok, Goal.t()} | {:error, :not_found | :invalid_provenance}
+          {:ok, Goal.t()} | {:error, mutation_error()}
   def add_note_tainted(agent_id, goal_id, note, taint) when is_binary(note) do
     mutate_goal(agent_id, goal_id, taint, {:note, note})
   end
@@ -326,14 +366,14 @@ defmodule Arbor.Memory.GoalStore do
       {:ok, goal} = GoalStore.block_goal("agent_001", goal_id, ["waiting on API key"])
   """
   @spec block_goal(String.t(), String.t(), [String.t()] | nil) ::
-          {:ok, Goal.t()} | {:error, :not_found | :invalid_provenance}
+          {:ok, Goal.t()} | {:error, mutation_error()}
   def block_goal(agent_id, goal_id, blockers \\ nil) do
     block_goal_tainted(agent_id, goal_id, blockers, TaintEnvelope.missing_fallback())
   end
 
   @doc "Block a goal while monotonically joining an explicit label."
   @spec block_goal_tainted(String.t(), String.t(), [String.t()] | nil, Taint.t()) ::
-          {:ok, Goal.t()} | {:error, :not_found | :invalid_provenance}
+          {:ok, Goal.t()} | {:error, mutation_error()}
   def block_goal_tainted(agent_id, goal_id, blockers, taint) do
     mutate_goal(agent_id, goal_id, taint, {:block, blockers})
   end
@@ -346,7 +386,7 @@ defmodule Arbor.Memory.GoalStore do
       {:ok, goal} = GoalStore.update_goal_metadata("agent_001", goal_id, %{decomposition_failed: true})
   """
   @spec update_goal_metadata(String.t(), String.t(), map()) ::
-          {:ok, Goal.t()} | {:error, :not_found | :invalid_provenance}
+          {:ok, Goal.t()} | {:error, mutation_error()}
   def update_goal_metadata(agent_id, goal_id, new_metadata) when is_map(new_metadata) do
     update_goal_metadata_tainted(
       agent_id,
@@ -358,7 +398,7 @@ defmodule Arbor.Memory.GoalStore do
 
   @doc "Update metadata while monotonically joining an explicit label."
   @spec update_goal_metadata_tainted(String.t(), String.t(), map(), Taint.t()) ::
-          {:ok, Goal.t()} | {:error, :not_found | :invalid_provenance}
+          {:ok, Goal.t()} | {:error, mutation_error()}
   def update_goal_metadata_tainted(agent_id, goal_id, new_metadata, taint)
       when is_map(new_metadata) do
     mutate_goal(agent_id, goal_id, taint, {:metadata, new_metadata})
@@ -380,7 +420,8 @@ defmodule Arbor.Memory.GoalStore do
 
   @doc "Get active goals with per-goal taint and explicit provenance status."
   @spec get_active_goals_tainted(String.t()) ::
-          {:ok, [tainted_goal()]} | {:error, :invalid_provenance}
+          {:ok, [tainted_goal()]}
+          | {:error, :invalid_provenance | :projection_failed | :store_unavailable}
   def get_active_goals_tainted(agent_id) do
     if valid_identifier?(agent_id),
       do: call_owner({:get_goal_list_tainted, agent_id, :active}),
@@ -403,7 +444,8 @@ defmodule Arbor.Memory.GoalStore do
 
   @doc "Get all goals with per-goal taint and explicit provenance status."
   @spec get_all_goals_tainted(String.t()) ::
-          {:ok, [tainted_goal()]} | {:error, :invalid_provenance}
+          {:ok, [tainted_goal()]}
+          | {:error, :invalid_provenance | :projection_failed | :store_unavailable}
   def get_all_goals_tainted(agent_id) do
     if valid_identifier?(agent_id),
       do: call_owner({:get_goal_list_tainted, agent_id, :all}),
@@ -415,7 +457,8 @@ defmodule Arbor.Memory.GoalStore do
 
   Returns the goal and all its descendants (children, grandchildren, etc.).
   """
-  @spec get_goal_tree(String.t(), String.t()) :: {:ok, map()} | {:error, :not_found}
+  @spec get_goal_tree(String.t(), String.t()) ::
+          {:ok, map()} | {:error, :not_found | :store_unavailable}
   def get_goal_tree(agent_id, goal_id) do
     case get_goal(agent_id, goal_id) do
       {:ok, root} ->
@@ -432,7 +475,9 @@ defmodule Arbor.Memory.GoalStore do
   Delete a goal.
   """
   @spec delete_goal(String.t(), String.t()) ::
-          :ok | {:error, :invalid_provenance | :persistence_failed | :store_unavailable}
+          :ok
+          | {:error,
+             :invalid_provenance | :persistence_failed | :store_unavailable | :outcome_unknown}
   def delete_goal(agent_id, goal_id) do
     if valid_identifier?(agent_id) and valid_identifier?(goal_id),
       do: call_owner({:delete_goal, agent_id, goal_id}, :mutation),
@@ -443,7 +488,13 @@ defmodule Arbor.Memory.GoalStore do
   Delete all goals for an agent.
   """
   @spec clear_goals(String.t()) ::
-          :ok | {:error, :invalid_provenance | :persistence_failed | :store_unavailable}
+          :ok
+          | {:error,
+             :invalid_provenance
+             | :persistence_failed
+             | :projection_failed
+             | :store_unavailable
+             | :outcome_unknown}
   def clear_goals(agent_id) do
     if valid_identifier?(agent_id),
       do: call_owner({:clear_goals, agent_id}, :mutation),
@@ -524,7 +575,7 @@ defmodule Arbor.Memory.GoalStore do
   GoalStore's init didn't find them (e.g., MemoryStore wasn't available).
   """
   @spec reload_for_agent(String.t()) ::
-          :ok | {:error, :invalid_provenance | :store_unavailable}
+          :ok | {:error, :invalid_provenance | :projection_failed | :store_unavailable}
   def reload_for_agent(agent_id) do
     if valid_identifier?(agent_id),
       do: call_owner({:reload_for_agent, agent_id}),
@@ -537,7 +588,7 @@ defmodule Arbor.Memory.GoalStore do
 
   @doc false
   @spec reload_goal_from_durable(String.t(), String.t()) ::
-          :ok | {:error, :invalid_provenance | :store_unavailable}
+          :ok | {:error, :invalid_provenance | :projection_failed | :store_unavailable}
   def reload_goal_from_durable(agent_id, goal_id)
       when is_binary(agent_id) and is_binary(goal_id) do
     if valid_identifier?(agent_id) and valid_identifier?(goal_id),
@@ -558,7 +609,9 @@ defmodule Arbor.Memory.GoalStore do
   @doc """
   Export all goals for an agent as serializable maps.
 
-  Used by `Arbor.Agent.Seed.capture/2` to snapshot goal state.
+  Compatibility projection for callers that still consume the legacy list shape.
+  Seed capture uses `export_goal_provenance_snapshot/1` so empty snapshots remain
+  agent-bound and authority failures remain distinguishable.
   """
   @spec export_all_goals(String.t()) :: [map()]
   def export_all_goals(agent_id) do
@@ -593,13 +646,112 @@ defmodule Arbor.Memory.GoalStore do
     _, _ -> {:error, :invalid_provenance}
   end
 
+  @doc "Export an agent-bound, versioned snapshot of authoritative goal provenance."
+  @spec export_goal_provenance_snapshot(String.t()) ::
+          {:ok, map()} | {:error, :invalid_provenance | :store_unavailable}
+  def export_goal_provenance_snapshot(agent_id) do
+    with true <- valid_identifier?(agent_id),
+         {:ok, entries} <- get_all_goals_tainted(agent_id),
+         {:ok, records} <- export_goal_records(entries),
+         {:ok, aggregate_taint} <- goal_snapshot_aggregate_taint(entries),
+         {:ok, snapshot} <- encode_goal_provenance_snapshot(agent_id, records, aggregate_taint) do
+      {:ok, snapshot}
+    else
+      false -> {:error, :invalid_provenance}
+      {:error, :invalid_provenance} -> {:error, :invalid_provenance}
+      {:error, _reason} -> {:error, :store_unavailable}
+      _ -> {:error, :invalid_provenance}
+    end
+  rescue
+    _ -> {:error, :invalid_provenance}
+  catch
+    :exit, _reason -> {:error, :store_unavailable}
+    _, _ -> {:error, :invalid_provenance}
+  end
+
+  @doc "Validate an exact goal provenance snapshot without reading or mutating store state."
+  @spec validate_goal_provenance_snapshot(String.t(), term()) ::
+          :ok | {:error, :invalid_provenance}
+  def validate_goal_provenance_snapshot(agent_id, snapshot) do
+    with true <- valid_identifier?(agent_id),
+         {:ok, _entries} <- decode_goal_provenance_snapshot(agent_id, snapshot) do
+      :ok
+    else
+      _ -> {:error, :invalid_provenance}
+    end
+  rescue
+    _ -> {:error, :invalid_provenance}
+  catch
+    _, _ -> {:error, :invalid_provenance}
+  end
+
+  @doc "Import a previously validated, agent-bound goal provenance snapshot."
+  @spec import_goal_provenance_snapshot(String.t(), term()) ::
+          :ok | {:error, persistence_mutation_error()}
+  def import_goal_provenance_snapshot(agent_id, snapshot) do
+    with true <- valid_identifier?(agent_id),
+         {:ok, entries} <- decode_goal_provenance_snapshot(agent_id, snapshot) do
+      case entries do
+        [] -> :ok
+        _ -> call_owner({:import_goals, agent_id, entries}, :mutation)
+      end
+    else
+      _ -> {:error, :invalid_provenance}
+    end
+  rescue
+    _ -> {:error, :invalid_provenance}
+  catch
+    _, _ -> {:error, :invalid_provenance}
+  end
+
+  @doc "Return true when a value declares or resembles the exact goal snapshot format."
+  @spec goal_provenance_snapshot?(term()) :: boolean()
+  def goal_provenance_snapshot?(value) when is_map(value) and not is_struct(value) do
+    Enum.any?(
+      [
+        "goal_store",
+        "outer_envelope",
+        "snapshot_kind",
+        "snapshot_version",
+        :goal_store,
+        :outer_envelope,
+        :snapshot_kind,
+        :snapshot_version
+      ],
+      &Map.has_key?(value, &1)
+    )
+  rescue
+    _ -> false
+  catch
+    _, _ -> false
+  end
+
+  @doc "Validate legacy or per-record goal import data without performing effects."
+  @spec validate_goal_import(String.t(), term()) :: :ok | {:error, :invalid_provenance}
+  def validate_goal_import(agent_id, goal_maps) when is_list(goal_maps) do
+    with true <- valid_identifier?(agent_id),
+         false <- Enum.any?(goal_maps, &ambiguous_import_goal_identifier?/1),
+         {:ok, entries} <- prepare_import_goals(goal_maps),
+         true <- length(entries) == length(goal_maps) do
+      :ok
+    else
+      _ -> {:error, :invalid_provenance}
+    end
+  rescue
+    _ -> {:error, :invalid_provenance}
+  catch
+    _, _ -> {:error, :invalid_provenance}
+  end
+
+  def validate_goal_import(_agent_id, _goal_maps), do: {:error, :invalid_provenance}
+
   @doc """
   Import goals from serializable maps.
 
   Used by `Arbor.Agent.Seed.restore/2` to restore goal state.
   """
   @spec import_goals(String.t(), [map()]) ::
-          :ok | {:error, :invalid_provenance | :persistence_failed | :store_unavailable}
+          :ok | {:error, persistence_mutation_error()}
   def import_goals(agent_id, goal_maps) when is_list(goal_maps) do
     cond do
       not valid_identifier?(agent_id) ->
@@ -1691,6 +1843,128 @@ defmodule Arbor.Memory.GoalStore do
       _ -> {:ok, TaintEnvelope.invalid_fallback()}
     end
   end
+
+  defp encode_goal_provenance_snapshot(agent_id, records, %Taint{} = aggregate_taint)
+       when is_list(records) do
+    payload = %{"agent_id" => agent_id, "goals" => records}
+
+    with {:ok, envelope} <- TaintEnvelope.new(payload, aggregate_taint),
+         {:ok, outer_envelope} <- TaintEnvelope.to_map(envelope) do
+      {:ok,
+       %{
+         "snapshot_kind" => @goal_snapshot_kind,
+         "snapshot_version" => @goal_snapshot_version,
+         "goal_store" => payload,
+         "outer_envelope" => outer_envelope
+       }}
+    else
+      _ -> {:error, :invalid_provenance}
+    end
+  end
+
+  defp encode_goal_provenance_snapshot(_agent_id, _records, _aggregate_taint),
+    do: {:error, :invalid_provenance}
+
+  defp decode_goal_provenance_snapshot(agent_id, snapshot) do
+    with true <- exact_string_keys?(snapshot, @goal_snapshot_keys),
+         @goal_snapshot_kind <- snapshot["snapshot_kind"],
+         @goal_snapshot_version <- snapshot["snapshot_version"],
+         payload when is_map(payload) <- snapshot["goal_store"],
+         true <- exact_string_keys?(payload, @goal_snapshot_payload_keys),
+         ^agent_id <- payload["agent_id"],
+         records when is_list(records) <- payload["goals"],
+         {:ok, outer_envelope} <- TaintEnvelope.verify(snapshot["outer_envelope"], payload),
+         {:ok, entries} <- prepare_exact_goal_records(records),
+         {:ok, aggregate_taint} <- goal_snapshot_aggregate_taint(entries),
+         true <- outer_envelope.taint == aggregate_taint do
+      {:ok, entries}
+    else
+      _ -> {:error, :invalid_provenance}
+    end
+  rescue
+    _ -> {:error, :invalid_provenance}
+  catch
+    _, _ -> {:error, :invalid_provenance}
+  end
+
+  defp prepare_exact_goal_records(records) when is_list(records) do
+    Enum.reduce_while(records, {:ok, []}, fn record, {:ok, entries} ->
+      with true <- exact_string_keys?(record, @seed_goal_record_keys),
+           {:ok, entry} <- prepare_exact_goal_record(record) do
+        {:cont, {:ok, [entry | entries]}}
+      else
+        _ -> {:halt, {:error, :invalid_provenance}}
+      end
+    end)
+    |> case do
+      {:ok, entries} -> {:ok, Enum.reverse(entries)}
+      {:error, _reason} = error -> error
+    end
+  rescue
+    _ -> {:error, :invalid_provenance}
+  catch
+    _, _ -> {:error, :invalid_provenance}
+  end
+
+  defp prepare_exact_goal_records(_records), do: {:error, :invalid_provenance}
+
+  defp prepare_exact_goal_record(record) do
+    with @seed_goal_record_version <- record["version"],
+         payload when is_map(payload) <- record["payload"],
+         provenance when is_map(provenance) <- record["provenance"],
+         {:ok, %Goal{} = goal} <- goal_from_map(payload),
+         {:ok, canonical_payload} <- serialize_goal(goal),
+         :ok <- equivalent_goal_payload(payload, canonical_payload),
+         {:ok, envelope} <- TaintEnvelope.verify(provenance, payload),
+         {:ok, ^canonical_payload, canonical_taint} <-
+           prepare_labeled_goal(goal, envelope.taint) do
+      {:ok, {goal, canonical_payload, canonical_taint}}
+    else
+      _ -> {:error, :invalid_provenance}
+    end
+  rescue
+    _ -> {:error, :invalid_provenance}
+  catch
+    _, _ -> {:error, :invalid_provenance}
+  end
+
+  defp goal_snapshot_aggregate_taint([]), do: {:ok, TaintEnvelope.missing_fallback()}
+
+  defp goal_snapshot_aggregate_taint(entries) when is_list(entries) do
+    entries
+    |> Enum.reduce_while({:ok, []}, fn
+      {%TaintedValue{taint: %Taint{} = taint}, status}, {:ok, taints}
+      when status in [:verified, :legacy_unlabeled, :invalid_durable_provenance] ->
+        {:cont, {:ok, [taint | taints]}}
+
+      {%Goal{}, _payload, %Taint{} = taint}, {:ok, taints} ->
+        {:cont, {:ok, [taint | taints]}}
+
+      _entry, _acc ->
+        {:halt, {:error, :invalid_provenance}}
+    end)
+    |> case do
+      {:ok, taints} -> taints |> Enum.reverse() |> Taint.join_many()
+      {:error, _reason} = error -> error
+    end
+  rescue
+    _ -> {:error, :invalid_provenance}
+  catch
+    _, _ -> {:error, :invalid_provenance}
+  end
+
+  defp goal_snapshot_aggregate_taint(_entries), do: {:error, :invalid_provenance}
+
+  defp exact_string_keys?(value, expected_keys)
+       when is_map(value) and not is_struct(value) and is_list(expected_keys) do
+    keys = Map.keys(value)
+
+    length(keys) == length(expected_keys) and
+      Enum.all?(keys, &is_binary/1) and
+      MapSet.new(keys) == MapSet.new(expected_keys)
+  end
+
+  defp exact_string_keys?(_value, _expected_keys), do: false
 
   defp export_goal_records(entries) when is_list(entries) do
     Enum.reduce_while(entries, {:ok, []}, fn entry, {:ok, exported} ->

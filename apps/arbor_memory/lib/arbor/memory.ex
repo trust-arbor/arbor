@@ -257,6 +257,11 @@ defmodule Arbor.Memory do
   defdelegate add_goal_note(agent_id, goal_id, note), to: GoalIntentOps
   defdelegate export_all_goals(agent_id), to: GoalIntentOps
   defdelegate export_all_goals_exact(agent_id), to: GoalStore
+  defdelegate export_goal_provenance_snapshot(agent_id), to: GoalStore
+  defdelegate validate_goal_provenance_snapshot(agent_id, snapshot), to: GoalStore
+  defdelegate import_goal_provenance_snapshot(agent_id, snapshot), to: GoalStore
+  defdelegate goal_provenance_snapshot?(snapshot), to: GoalStore
+  defdelegate validate_goal_import(agent_id, goal_maps), to: GoalStore
   defdelegate import_goals(agent_id, goal_maps), to: GoalIntentOps
   defdelegate get_goal_tree(agent_id, goal_id), to: GoalIntentOps
   defdelegate record_intent(agent_id, intent), to: GoalIntentOps

@@ -110,7 +110,7 @@ defmodule Arbor.Agent.Seed do
           knowledge_graph: map() | nil,
           self_knowledge: map() | nil,
           preferences: map() | nil,
-          goals: [map()],
+          goals: map() | [map()],
           recent_intents: [map()],
           recent_percepts: [map()],
           consolidation_state: map(),
@@ -548,7 +548,7 @@ defmodule Arbor.Agent.Seed do
       has_self_knowledge: seed.self_knowledge != nil,
       has_preferences: seed.preferences != nil,
       has_profile: seed.profile != nil,
-      goal_count: length(seed.goals),
+      goal_count: goal_count(seed.goals),
       intent_count: length(seed.recent_intents),
       percept_count: length(seed.recent_percepts),
       learned_capability_count: map_size(seed.learned_capabilities),
@@ -625,7 +625,7 @@ defmodule Arbor.Agent.Seed do
   end
 
   defp capture_goals(agent_id) do
-    Memory.export_all_goals_exact(agent_id)
+    Memory.export_goal_provenance_snapshot(agent_id)
   rescue
     _ -> {:error, :store_unavailable}
   catch
@@ -715,7 +715,19 @@ defmodule Arbor.Agent.Seed do
 
   defp restore_goals(_agent_id, []), do: :ok
 
-  defp restore_goals(agent_id, goals) do
+  defp restore_goals(agent_id, goals) when is_map(goals) do
+    case Memory.import_goal_provenance_snapshot(agent_id, goals) do
+      :ok -> :ok
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :store_unavailable}
+    end
+  rescue
+    _ -> {:error, :store_unavailable}
+  catch
+    _, _ -> {:error, :store_unavailable}
+  end
+
+  defp restore_goals(agent_id, goals) when is_list(goals) do
     case Memory.import_goals(agent_id, goals) do
       :ok -> :ok
       {:error, reason} -> {:error, reason}
@@ -727,11 +739,19 @@ defmodule Arbor.Agent.Seed do
     _, _ -> {:error, :store_unavailable}
   end
 
+  defp restore_goals(_agent_id, _goals), do: {:error, :invalid_provenance}
+
   defp goal_snapshot_error(:invalid_provenance), do: :invalid_goal_snapshot
   defp goal_snapshot_error(:store_unavailable), do: :goal_store_unavailable
   defp goal_snapshot_error(:persistence_failed), do: :goal_persistence_failed
   defp goal_snapshot_error(:outcome_unknown), do: :goal_store_outcome_unknown
   defp goal_snapshot_error(_reason), do: :goal_store_unavailable
+
+  defp goal_count(%{"goal_store" => %{"goals" => goals}}) when is_list(goals),
+    do: length(goals)
+
+  defp goal_count(goals) when is_list(goals), do: length(goals)
+  defp goal_count(_goals), do: 0
 
   # ============================================================================
   # Private — from_map Builders (extracted for complexity reduction)

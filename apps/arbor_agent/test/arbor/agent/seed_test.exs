@@ -58,6 +58,23 @@ defmodule Arbor.Agent.SeedTest do
     def durability_class(_opts), do: :node_restart
   end
 
+  defmodule GoalExportUnavailableBackend do
+    @moduledoc false
+    @behaviour Arbor.Contracts.Persistence.Store
+
+    def put(_key, _value, _opts), do: {:error, :configured_unavailable}
+    def get(_key, _opts), do: {:error, :not_found}
+    def delete(_key, _opts), do: {:error, :configured_unavailable}
+    def list(_opts), do: {:error, :configured_unavailable}
+    def query(_filter, _opts), do: {:error, :configured_unavailable}
+
+    def compare_and_swap(_key, _expected, _replacement, _opts),
+      do: {:error, :configured_unavailable}
+
+    def compare_and_delete(_key, _expected, _opts), do: {:error, :configured_unavailable}
+    def durability_class(_opts), do: :node_restart
+  end
+
   @ets_tables [
     :arbor_working_memory,
     :arbor_memory_graphs,
@@ -193,7 +210,7 @@ defmodule Arbor.Agent.SeedTest do
     end
 
     test "security regression: configured goal authority outage fails capture" do
-      use_unavailable_goal_store!()
+      use_unavailable_goal_export!()
 
       assert {:error, {:capture_failed, :goal_store_unavailable}} =
                Seed.capture(@agent_id)
@@ -226,8 +243,9 @@ defmodule Arbor.Agent.SeedTest do
 
       {:ok, seed} = Seed.capture(@agent_id)
 
-      assert length(seed.goals) == 1
-      [exported_goal] = seed.goals
+      assert seed.goals["snapshot_kind"] == "arbor_goal_provenance"
+      assert seed.goals["goal_store"]["agent_id"] == @agent_id
+      [exported_goal] = seed.goals["goal_store"]["goals"]
       assert get_in(exported_goal, ["payload", Access.key(:description)]) == "Test goal"
       assert get_in(exported_goal, ["payload", Access.key(:type)]) == :achieve
     end
@@ -239,7 +257,8 @@ defmodule Arbor.Agent.SeedTest do
       assert seed.knowledge_graph == nil
       assert seed.self_knowledge == nil
       assert seed.preferences == nil
-      assert seed.goals == []
+      assert seed.goals["goal_store"]["agent_id"] == @agent_id
+      assert seed.goals["goal_store"]["goals"] == []
       assert seed.recent_intents == []
       assert seed.recent_percepts == []
     end
@@ -281,7 +300,7 @@ defmodule Arbor.Agent.SeedTest do
       assert {:ok, ^goal} = Memory.add_goal(@agent_id, goal)
       assert {:ok, seed} = Seed.capture(@agent_id)
 
-      assert Enum.any?(seed.goals, fn record ->
+      assert Enum.any?(seed.goals["goal_store"]["goals"], fn record ->
                get_in(record, ["payload", Access.key(:id)]) == goal.id
              end)
 
@@ -561,6 +580,19 @@ defmodule Arbor.Agent.SeedTest do
        name: :arbor_memory_durable,
        backend: UnavailableBackend,
        collection: :seed_unavailable,
+       write_mode: :async,
+       ack_mode: :cache}
+    )
+  end
+
+  defp use_unavailable_goal_export! do
+    assert :ok = stop_supervised!(BufferedStore)
+
+    start_supervised!(
+      {BufferedStore,
+       name: :arbor_memory_durable,
+       backend: GoalExportUnavailableBackend,
+       collection: :seed_goal_export_unavailable,
        write_mode: :async,
        ack_mode: :cache}
     )
@@ -969,7 +1001,7 @@ defmodule Arbor.Agent.SeedTest do
       assert restored.name == "LifecycleBot"
       assert restored.capture_reason == :periodic
       assert restored.working_memory != nil
-      assert length(restored.goals) == 1
+      assert Seed.stats(restored).goal_count == 1
     end
 
     test "capture → to_map → from_map preserves state" do

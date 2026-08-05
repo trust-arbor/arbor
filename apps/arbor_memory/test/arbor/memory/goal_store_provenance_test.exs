@@ -1210,6 +1210,45 @@ defmodule Arbor.Memory.GoalStoreProvenanceTest do
     assert [] = GoalStore.export_all_goals(agent_id)
   end
 
+  test "security regression: exact goal snapshot validation is agent-bound and pre-effect", %{
+    agent_id: agent_id
+  } do
+    goal = Goal.new("agent-bound exact goal", id: goal_id("snapshot-bound"))
+    hostile = taint(:hostile, :restricted, "snapshot_bound")
+
+    assert {:ok, ^goal} = GoalStore.add_goal_tainted(agent_id, goal, hostile)
+    assert {:ok, snapshot} = GoalStore.export_goal_provenance_snapshot(agent_id)
+    assert snapshot["snapshot_kind"] == "arbor_goal_provenance"
+    assert snapshot["goal_store"]["agent_id"] == agent_id
+    assert [_record] = snapshot["goal_store"]["goals"]
+
+    projection_before = :ets.lookup(@goals_ets, {agent_id, goal.id})
+    assert {:ok, sidecars_before} = Provenance.list_item_ids(:goal, agent_id)
+
+    assert :ok = Arbor.Memory.validate_goal_provenance_snapshot(agent_id, snapshot)
+
+    assert {:error, :invalid_provenance} =
+             Arbor.Memory.validate_goal_provenance_snapshot("#{agent_id}_other", snapshot)
+
+    for key <- [
+          "goal_store",
+          "outer_envelope",
+          "snapshot_kind",
+          "snapshot_version",
+          :goal_store,
+          :outer_envelope,
+          :snapshot_kind,
+          :snapshot_version
+        ] do
+      assert {:error, :invalid_provenance} =
+               Arbor.Memory.validate_goal_provenance_snapshot(agent_id, %{key => :partial})
+    end
+
+    assert projection_before == :ets.lookup(@goals_ets, {agent_id, goal.id})
+    assert {:ok, ^sidecars_before} = Provenance.list_item_ids(:goal, agent_id)
+    assert {:ok, ^snapshot} = GoalStore.export_goal_provenance_snapshot(agent_id)
+  end
+
   test "distributed targeted reload reads backend authority instead of stale named-store cache",
        %{
          agent_id: agent_id
@@ -1428,11 +1467,14 @@ defmodule Arbor.Memory.GoalStoreProvenanceTest do
 
     assert corrupt_taint == TaintEnvelope.invalid_fallback()
 
-    reserved = Goal.new("reserved atom seed key", id: goal_id("seed-reserved-atom"))
-    partial_snapshot = Map.put(goal_payload(reserved), :version, 1)
+    reserved = Goal.new("reserved exact seed key", id: goal_id("seed-reserved"))
 
-    assert {:error, :invalid_provenance} =
-             GoalStore.import_goals(agent_id, [partial_snapshot])
+    for key <- ["version", "payload", "provenance", :version, :payload, :provenance] do
+      partial_snapshot = Map.put(goal_payload(reserved), key, :partial)
+
+      assert {:error, :invalid_provenance} =
+               GoalStore.import_goals(agent_id, [partial_snapshot])
+    end
 
     assert {:error, :not_found} = GoalStore.get_goal(agent_id, reserved.id)
   end

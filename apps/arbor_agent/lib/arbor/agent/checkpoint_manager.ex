@@ -353,7 +353,7 @@ defmodule Arbor.Agent.CheckpointManager do
 
         Logger.info("Checkpoint applied for #{agent_id}",
           seed_id: seed.id,
-          goals: length(seed.goals),
+          goals: Seed.stats(seed).goal_count,
           query_count: state.query_count
         )
 
