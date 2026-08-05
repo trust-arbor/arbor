@@ -430,8 +430,8 @@ defmodule Arbor.Memory.Index do
         :pgvector ->
           # pgvector only
           case Embedding.store(new_state.agent_id, content, embedding, normalized_metadata) do
-            {:ok, _id} ->
-              {:ok, entry_id, new_state}
+            {:ok, stored_id} ->
+              {:ok, stored_id, new_state}
 
             {:error, reason} ->
               {:error, reason}

@@ -109,6 +109,32 @@ defmodule Arbor.Memory.IndexDualTest do
     end
   end
 
+  describe "pgvector backend mode" do
+    test "regression: index returns the exact row id stored by pgvector" do
+      agent_id = "test_pg_id_#{System.unique_integer([:positive])}"
+
+      {:ok, pid} =
+        Index.start_link(
+          agent_id: agent_id,
+          backend: :pgvector,
+          name: {:via, Registry, {Arbor.Memory.Registry, {:test_pg_id, agent_id}}}
+        )
+
+      on_exit(fn ->
+        if Process.alive?(pid), do: GenServer.stop(pid)
+        Embedding.delete_all(agent_id)
+      end)
+
+      assert {:ok, stored_id} =
+               Index.index(pid, "Authoritative row id", %{type: :fact},
+                 embedding: generate_embedding(41)
+               )
+
+      assert {:ok, %{id: ^stored_id, content: "Authoritative row id"}} =
+               Embedding.get(agent_id, stored_id)
+    end
+  end
+
   describe "warm_cache/2" do
     test "loads entries from pgvector into ETS", %{pid: pid} do
       # First, store some entries in pgvector directly
