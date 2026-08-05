@@ -1392,8 +1392,8 @@ defmodule Arbor.Memory.WorkingMemoryProvenanceTest do
   end
 
   defp replace_durable_data(agent_id, data, outer_taint) do
-    assert {:ok, %Record{} = current} =
-             durable_record(agent_id)
+    assert {:ok, _value, _status, %Record{} = current, :namespaced} =
+             MemoryStore.load_tainted_authoritative_with_status("working_memory", agent_id)
 
     opts =
       case outer_taint do
