@@ -88,7 +88,9 @@ defmodule Arbor.Orchestrator.Session do
 
   alias Arbor.Orchestrator.Engine
   alias Arbor.Orchestrator.Session.Builders
+  alias Arbor.Orchestrator.Session.ContextBuilder
   alias Arbor.Orchestrator.Session.Persistence
+  alias Arbor.Orchestrator.Session.Persistence.Core, as: PersistenceCore
   alias Arbor.Orchestrator.Session.TurnEgress
 
   # ── Contract module availability (runtime bridge) ──────────────────
@@ -2142,7 +2144,11 @@ defmodule Arbor.Orchestrator.Session do
       |> maybe_put_user_message_task_id(user_message)
 
     final_values = maybe_preprocess(pre_values, user_message.content)
-    initial_taint = TurnEgress.derive_initial_taint(pre_values, final_values)
+
+    initial_taint =
+      pre_values
+      |> TurnEgress.derive_initial_taint(final_values)
+      |> PersistenceCore.join_authoritative_history_taint(ContextBuilder.get_messages(state))
 
     with {:ok, %{route: route, provider_route_input: route_input}} <-
            TurnEgress.resolve_frozen_route(state, state.turn_graph),

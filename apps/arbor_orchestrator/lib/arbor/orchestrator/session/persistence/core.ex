@@ -156,6 +156,28 @@ defmodule Arbor.Orchestrator.Session.Persistence.Core do
 
   def prompt_messages(_messages), do: []
 
+  @doc "Join Session-owned history provenance into the out-of-band Engine taint map."
+  @spec join_authoritative_history_taint(map(), [term()]) :: map()
+  def join_authoritative_history_taint(initial_taint, messages)
+      when is_map(initial_taint) and is_list(messages) and messages != [] do
+    taints =
+      [initial_context_taint(Map.get(initial_taint, "session.messages"))] ++
+        Enum.map(messages, &authoritative_message_taint/1)
+
+    joined =
+      case Taint.join_many(taints) do
+        {:ok, taint} -> taint
+        {:error, _reason} -> TaintEnvelope.invalid_fallback()
+      end
+
+    Map.put(initial_taint, "session.messages", joined)
+  end
+
+  def join_authoritative_history_taint(initial_taint, _messages) when is_map(initial_taint),
+    do: initial_taint
+
+  def join_authoritative_history_taint(_initial_taint, _messages), do: %{}
+
   @doc "Encode live Session messages as exact payload-bound checkpoint records."
   @spec encode_checkpoint_messages([term()], map()) ::
           {:ok, [map()]} | {:error, atom()}
@@ -478,6 +500,25 @@ defmodule Arbor.Orchestrator.Session.Persistence.Core do
         {TaintEnvelope.invalid_fallback(), :invalid_durable_provenance}
     end
   end
+
+  defp authoritative_message_taint(message) when is_map(message) do
+    {taint, _status} = checkpoint_label(message)
+    taint
+  end
+
+  defp authoritative_message_taint(_message), do: TaintEnvelope.invalid_fallback()
+
+  defp initial_context_taint(%Taint{} = taint) do
+    case Taint.canonicalize(taint) do
+      {:ok, canonical} -> canonical
+      {:error, _reason} -> TaintEnvelope.invalid_fallback()
+    end
+  end
+
+  defp initial_context_taint(level) when level in [:trusted, :derived, :untrusted, :hostile],
+    do: %Taint{level: level}
+
+  defp initial_context_taint(_taint), do: TaintEnvelope.missing_fallback()
 
   defp put_checkpoint_label(payload, taint, status) do
     payload

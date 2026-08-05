@@ -260,6 +260,57 @@ defmodule Arbor.Orchestrator.SessionEngagementCompactorSecurityRegressionTest do
            end)
   end
 
+  test "security regression: restarted and switched history taints the next Engine run", ctx do
+    parent = self()
+    agent_id = "agent_history_taint_#{System.unique_integer([:positive, :monotonic])}"
+    session_id = "session-#{agent_id}"
+    hostile = taint("restored_hostile_history", :hostile)
+
+    checkpoint =
+      Persistence.extract_checkpoint_data(%Session{
+        session_id: session_id,
+        agent_id: agent_id,
+        current_engagement_id: "eng-hostile",
+        messages: [
+          %{
+            "role" => "user",
+            "content" => "hostile restored history",
+            "taint" => hostile,
+            "taint_status" => :verified
+          }
+        ]
+      })
+
+    adapters = %{
+      ensure_session: fn ^session_id, ^agent_id, [] -> {:ok, %{id: "history-taint-uuid"}} end,
+      append_session_entries: fn "history-taint-uuid", entries ->
+        send(parent, {:history_taint_batch, entries})
+        {:ok, length(entries)}
+      end,
+      load_recent_session_messages: fn ^session_id, _opts -> [] end
+    }
+
+    pid =
+      start_session!(ctx,
+        agent_id: agent_id,
+        session_id: session_id,
+        checkpoint: checkpoint,
+        adapters: adapters
+      )
+
+    send_engagement!(pid, "eng-hostile", "after restart")
+    assert_prompt(["hostile restored history", "after restart"])
+    assert_hostile_assistant_batch("eng-hostile")
+
+    send_engagement!(pid, "eng-clean", "other engagement")
+    assert_prompt(["other engagement"])
+    assert_receive {:history_taint_batch, _clean_entries}, 1_000
+
+    send_engagement!(pid, "eng-hostile", "after switch")
+    assert_prompt(["hostile restored history", "after restart", "after switch"])
+    assert_hostile_assistant_batch("eng-hostile")
+  end
+
   defp start_session!(ctx, opts \\ []) do
     agent_id =
       Keyword.get(
@@ -302,6 +353,20 @@ defmodule Arbor.Orchestrator.SessionEngagementCompactorSecurityRegressionTest do
     assert_receive {:provider_prompt, user_texts, provider_messages}, 2_000
     assert user_texts == expected_user_texts
     assert Enum.all?(provider_messages, &(&1.metadata == %{}))
+  end
+
+  defp assert_hostile_assistant_batch(engagement_id) do
+    assert_receive {:history_taint_batch, [_user_entry, assistant_entry]}, 1_000
+    assert assistant_entry.metadata["engagement_id"] == engagement_id
+
+    assert {:ok, envelope} =
+             Arbor.Contracts.Security.TaintEnvelope.verify(
+               assistant_entry.metadata["taint"],
+               assistant_entry.content
+             )
+
+    assert envelope.taint.level == :hostile
+    assert envelope.taint.sensitivity == :restricted
   end
 
   defp compactor_spec, do: {TestCompactor, marker: :configured}
