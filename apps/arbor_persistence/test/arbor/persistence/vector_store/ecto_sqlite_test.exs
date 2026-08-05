@@ -22,6 +22,11 @@ defmodule Arbor.Persistence.VectorStore.EctoSQLiteTest do
                               "../../../../priv/repo/migrations/20260805000003_isolate_vector_store_v1_rows.exs",
                               __DIR__
                             )
+  @receipt_guard_migration_version 20_260_805_000_004
+  @receipt_guard_migration_file Path.expand(
+                                  "../../../../priv/repo/migrations/20260805000004_harden_vector_receipt_inserts.exs",
+                                  __DIR__
+                                )
 
   Code.require_file(@migration_file)
   Code.require_file(@widen_migration_file)
@@ -77,11 +82,13 @@ defmodule Arbor.Persistence.VectorStore.EctoSQLiteTest do
                log: false
              )
 
+    maybe_install_receipt_insert_guard!()
+
     on_exit(fn ->
       Enum.each([database, database <> "-shm", database <> "-wal"], &File.rm/1)
     end)
 
-    :ok
+    {:ok, database: database}
   end
 
   setup do
@@ -523,34 +530,67 @@ defmodule Arbor.Persistence.VectorStore.EctoSQLiteTest do
     end
   end
 
-  test "security regression: SQLite replace cannot bypass immutable receipt triggers", %{
-    agent_id: agent_id
-  } do
-    assert %{rows: [[1]]} = SQLiteRepo.query!("PRAGMA recursive_triggers")
-
+  test "security regression: SQLite replace cannot bypass immutable receipts with recursive triggers off",
+       %{
+         agent_id: agent_id,
+         database: database
+       } do
     operation = insert_operation!(record!(agent_id, source_key: "immutable-replace-ledger"))
 
     assert {:ok, original_receipt} =
              Arbor.Persistence.execute_vector_operation(agent_id, operation)
 
-    assert_raise Exqlite.Error, fn ->
-      SQLiteRepo.query!(
-        """
-        INSERT OR REPLACE INTO vector_operation_receipts (
-          operation_fingerprint, agent_id, operation_kind,
-          operation_json, operation_digest, receipt_json, receipt_digest, inserted_at
-        )
-        SELECT operation_fingerprint, agent_id, operation_kind,
-               operation_json, operation_digest, receipt_json, ?, inserted_at
-        FROM vector_operation_receipts
-        WHERE operation_fingerprint = ?
-        """,
-        [String.duplicate("0", 64), operation.fingerprint]
+    {:ok, connection} = Exqlite.Sqlite3.open(database)
+
+    try do
+      assert :ok = Exqlite.Sqlite3.execute(connection, "PRAGMA recursive_triggers = OFF")
+      assert 0 == sqlite_scalar!(connection, "PRAGMA recursive_triggers")
+
+      replace_sql = """
+      INSERT OR REPLACE INTO vector_operation_receipts (
+        operation_fingerprint, agent_id, operation_kind,
+        operation_json, operation_digest, receipt_json, receipt_digest, inserted_at
       )
+      SELECT operation_fingerprint, agent_id, operation_kind,
+             operation_json, operation_digest, receipt_json,
+             '#{String.duplicate("0", 64)}', inserted_at
+      FROM vector_operation_receipts
+      WHERE operation_fingerprint = '#{operation.fingerprint}'
+      """
+
+      assert {:error, reason} = Exqlite.Sqlite3.execute(connection, replace_sql)
+      assert to_string(reason) =~ "vector_operation_receipts is immutable"
+    after
+      Exqlite.Sqlite3.close(connection)
     end
 
     assert {:ok, ^original_receipt} =
              Arbor.Persistence.reconcile_vector_operation(agent_id, operation)
+  end
+
+  defp maybe_install_receipt_insert_guard! do
+    if File.exists?(@receipt_guard_migration_file) do
+      Code.require_file(@receipt_guard_migration_file)
+
+      assert :ok ==
+               Ecto.Migrator.up(
+                 SQLiteRepo,
+                 @receipt_guard_migration_version,
+                 Arbor.Persistence.Repo.Migrations.HardenVectorReceiptInserts,
+                 log: false
+               )
+    end
+  end
+
+  defp sqlite_scalar!(connection, sql) do
+    {:ok, statement} = Exqlite.Sqlite3.prepare(connection, sql)
+
+    try do
+      {:row, [value]} = Exqlite.Sqlite3.step(connection, statement)
+      value
+    after
+      Exqlite.Sqlite3.release(connection, statement)
+    end
   end
 
   defp create_legacy_table!(repo \\ SQLiteRepo) do
