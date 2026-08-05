@@ -727,6 +727,27 @@ defmodule Arbor.Memory.ReflectionProcessorTest do
       assert {:ok, _} = Jason.decode(text)
     end
 
+    test "load-order regression: loads configured generate_text collaborator before dispatch" do
+      module = ReflectionProcessor.MockLLM
+
+      :code.purge(module)
+      :code.delete(module)
+      refute :code.is_loaded(module)
+
+      Application.put_env(:arbor_memory, :reflection_llm_module, module)
+
+      assert {:ok, text} = ReflectionProcessor.call_llm("test prompt", [])
+      assert {:ok, %{"thinking" => "Mock reflection thinking..."}} = Jason.decode(text)
+      assert {:file, _path} = :code.is_loaded(module)
+    end
+
+    test "returns a generic error for an invalid configured module" do
+      Application.put_env(:arbor_memory, :reflection_llm_module, "untrusted.module.name")
+
+      assert {:error, :reflection_llm_unavailable} =
+               ReflectionProcessor.call_llm("test prompt", [])
+    end
+
     test "returns error when LLM module fails" do
       defmodule ErrorMock do
         def generate_text(_prompt, _opts), do: {:error, :api_error}

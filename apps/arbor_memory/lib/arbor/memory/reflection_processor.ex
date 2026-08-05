@@ -535,13 +535,24 @@ defmodule Arbor.Memory.ReflectionProcessor do
     end
   end
 
-  defp call_mock_llm(mock_module, prompt, opts) do
-    if function_exported?(mock_module, :generate_text, 2) do
-      mock_module.generate_text(prompt, opts)
-    else
-      call_mock_reflect_fallback(mock_module, prompt)
+  defp call_mock_llm(mock_module, prompt, opts) when is_atom(mock_module) do
+    cond do
+      not Code.ensure_loaded?(mock_module) ->
+        {:error, :reflection_llm_unavailable}
+
+      function_exported?(mock_module, :generate_text, 2) ->
+        mock_module.generate_text(prompt, opts)
+
+      function_exported?(mock_module, :reflect, 2) ->
+        call_mock_reflect_fallback(mock_module, prompt)
+
+      true ->
+        {:error, :reflection_llm_unavailable}
     end
   end
+
+  defp call_mock_llm(_mock_module, _prompt, _opts),
+    do: {:error, :reflection_llm_unavailable}
 
   defp call_mock_reflect_fallback(mock_module, prompt) do
     case mock_module.reflect(prompt, %{}) do
