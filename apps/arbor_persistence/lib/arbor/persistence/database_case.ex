@@ -14,8 +14,10 @@ defmodule Arbor.Persistence.DatabaseCase do
   - **Starts the Repo lazily**, only when a `:database` test actually runs, in
     `setup_all`. Doing it here rather than in app boot keeps the Repo's startup
     from interfering with non-database app initialization (e.g. `Signals.Store`).
-  - **Skips the whole module** (rather than crashing) when the database is
-    unreachable, so a missing/down database degrades to skipped, not red.
+  - **Fails setup explicitly** when the selected database is unreachable.
+    ExUnit has no runtime setup callback return for skipping; adapter-specific
+    suites use compile-time `@moduletag skip: reason` when their adapter is not
+    selected. A selected but unreachable database is a failed prerequisite.
   - **Sets `:manual` Sandbox mode** and checks out a per-test connection via
     `start_owner!`/`stop_owner` — the modern API that ties the connection's
     ownership to a helper process stopped on exit. This avoids the
@@ -68,15 +70,24 @@ defmodule Arbor.Persistence.DatabaseCase do
         # startup ordering and restarts.
         case wait_for_repo_ready(@repo_ready_timeout_ms) do
           :ok ->
-            set_manual_mode()
+            case set_manual_mode() do
+              :ok -> :ok
+              {:error, reason} -> raise_unavailable_database!(reason)
+            end
 
           {:error, reason} ->
-            {:skip, "database not available: #{inspect(reason)}"}
+            raise_unavailable_database!(reason)
         end
 
       {:error, reason} ->
-        {:skip, "database not available: #{inspect(reason)}"}
+        raise_unavailable_database!(reason)
     end
+  end
+
+  @doc false
+  @spec raise_unavailable_database!(term()) :: no_return()
+  def raise_unavailable_database!(reason) do
+    raise RuntimeError, "database test prerequisite unavailable: #{inspect(reason)}"
   end
 
   # Start the Repo if it isn't already, and ALWAYS return it unlinked from the
@@ -139,14 +150,14 @@ defmodule Arbor.Persistence.DatabaseCase do
   # after wait_for_repo_ready/1, the pool can briefly be unavailable across a
   # restart, so we retry on the `no process`/noproc exit instead of letting it
   # crash setup_all (which previously took down every test in the module). On a
-  # genuinely-absent database the module degrades to skipped, not red.
+  # genuinely absent database the caller raises one explicit setup failure.
   defp set_manual_mode(remaining_ms) when remaining_ms <= 0 do
-    # Last attempt — let any error surface as a skip rather than a crash.
+    # Last attempt: normalize an exit so setup_all can report one clear failure.
     try do
       Sandbox.mode(Arbor.Persistence.Repo, :manual)
       :ok
     catch
-      :exit, reason -> {:skip, "database sandbox not ready: #{inspect(reason)}"}
+      :exit, reason -> {:error, {:database_sandbox_not_ready, reason}}
     end
   end
 
