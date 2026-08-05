@@ -45,7 +45,7 @@ defmodule Arbor.Actions.SessionExecution do
       ]
 
     @impl true
-    def run(params, _context) do
+    def run(params, context) do
       agent_id = params[:agent_id] || params["agent_id"] || params["session.agent_id"]
 
       unless agent_id do
@@ -72,7 +72,7 @@ defmodule Arbor.Actions.SessionExecution do
           Arbor.Actions.SessionMemory.bridge(
             Arbor.Actions,
             :execute_batch,
-            [actions, [agent_id: agent_id]],
+            [actions, [agent_id: agent_id, context: context]],
             :ok
           )
 
@@ -112,7 +112,7 @@ defmodule Arbor.Actions.SessionExecution do
       ]
 
     @impl true
-    def run(params, _context) do
+    def run(params, context) do
       agent_id = params[:agent_id] || params["agent_id"] || params["session.agent_id"]
 
       unless agent_id do
@@ -135,7 +135,7 @@ defmodule Arbor.Actions.SessionExecution do
           Arbor.Actions.SessionMemory.bridge(
             Arbor.Actions,
             :execute_batch,
-            [actions, [agent_id: agent_id]],
+            [actions, [agent_id: agent_id, context: context]],
             []
           )
 

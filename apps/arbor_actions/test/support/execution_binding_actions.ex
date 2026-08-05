@@ -152,3 +152,24 @@ defmodule Arbor.Actions.TestFixtures.BoundBatchCompositeAction do
     result
   end
 end
+
+defmodule Arbor.Actions.TestFixtures.BoundContextBatchCompositeAction do
+  @moduledoc false
+
+  use Jido.Action,
+    name: "bound_context_batch_composite_action",
+    description: "Composite action used to verify context-preserving batch bindings",
+    schema: []
+
+  @impl true
+  def run(_params, context) do
+    [{_spec, result}] =
+      Arbor.Actions.execute_batch(
+        [%{"type" => "session_classify", "params" => %{"input" => "nested"}}],
+        agent_id: Map.fetch!(context, :agent_id),
+        context: context
+      )
+
+    result
+  end
+end

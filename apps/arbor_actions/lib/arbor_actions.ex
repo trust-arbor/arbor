@@ -2423,6 +2423,8 @@ defmodule Arbor.Actions do
   ## Options
 
     * `:agent_id` (required) — the agent executing the actions
+    * `:context` (optional) — authenticated execution context forwarded unchanged
+      to each child action; defaults to `%{}`
 
   ## Examples
 
@@ -2435,6 +2437,11 @@ defmodule Arbor.Actions do
   @spec execute_batch([map()], keyword()) :: [{map(), {:ok, any()} | {:error, term()}}]
   def execute_batch(action_specs, opts \\ []) do
     agent_id = Keyword.fetch!(opts, :agent_id)
+    context = Keyword.get(opts, :context, %{})
+
+    unless is_map(context) do
+      raise ArgumentError, ":context must be a map"
+    end
 
     Enum.map(List.wrap(action_specs), fn spec ->
       type = Map.get(spec, "type") || Map.get(spec, :type, "")
@@ -2443,7 +2450,7 @@ defmodule Arbor.Actions do
       result =
         case name_to_module(type) do
           {:ok, module} ->
-            authorize_and_execute(agent_id, module, params)
+            authorize_and_execute(agent_id, module, params, context)
 
           {:error, :unknown_action} ->
             {:error, {:unknown_action, type}}

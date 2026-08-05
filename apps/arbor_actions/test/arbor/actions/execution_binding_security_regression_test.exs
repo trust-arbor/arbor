@@ -7,6 +7,7 @@ defmodule Arbor.Actions.ExecutionBindingSecurityRegressionTest do
   alias Arbor.Actions.TestFixtures.{
     BoundBatchCompositeAction,
     BoundCompositeAction,
+    BoundContextBatchCompositeAction,
     BoundLineageCompositeAction,
     BoundNestedInnerAction,
     BoundNestedOtherAction,
@@ -28,6 +29,13 @@ defmodule Arbor.Actions.ExecutionBindingSecurityRegressionTest do
 
     assert {:error, {:execution_binding_rejected, :nested_action_binding_removed}} =
              Arbor.Actions.execute_action(BoundBatchCompositeAction, %{}, context)
+  end
+
+  test "security regression: context-preserving batch still enforces the bound manifest" do
+    context = bound_context([BoundContextBatchCompositeAction])
+
+    assert {:error, {:execution_binding_rejected, {:missing_action_binding, "session_classify"}}} =
+             Arbor.Actions.execute_action(BoundContextBatchCompositeAction, %{}, context)
   end
 
   test "security regression: nested composite cannot execute an action absent from the bound manifest" do
