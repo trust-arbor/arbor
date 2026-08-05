@@ -25,7 +25,7 @@ defmodule Arbor.Persistence do
   @behaviour Arbor.Contracts.API.Persistence
 
   alias Arbor.Contracts.Persistence.{AppendOperation, Filter, Record}
-  alias Arbor.Persistence.{BufferedStore, Event, EventLog, VectorBoundary}
+  alias Arbor.Persistence.{BufferedStore, Event, EventLog, LegacyEmbeddingStore, VectorBoundary}
   alias Arbor.Persistence.Repo
   alias Arbor.Persistence.Schemas.Session
   alias Arbor.Persistence.SessionStore
@@ -68,6 +68,39 @@ defmodule Arbor.Persistence do
           | {:error, Arbor.Contracts.API.Persistence.vector_error()}
   def search_vector_records(agent_id, vector, opts \\ []),
     do: VectorBoundary.search(agent_id, vector, opts)
+
+  # ---------------------------------------------------------------
+  # Legacy memory embeddings
+  # ---------------------------------------------------------------
+
+  @doc "Store or deduplicate one legacy memory embedding."
+  def store_legacy_embedding(agent_id, content, embedding, metadata \\ %{}),
+    do: LegacyEmbeddingStore.store(agent_id, content, embedding, metadata)
+
+  @doc "Search tenant-owned legacy memory embeddings by cosine similarity."
+  def search_legacy_embeddings(agent_id, query_embedding, opts \\ []),
+    do: LegacyEmbeddingStore.search(agent_id, query_embedding, opts)
+
+  @doc "Delete one tenant-owned legacy memory embedding by durable row ID."
+  def delete_legacy_embedding(agent_id, embedding_id),
+    do: LegacyEmbeddingStore.delete(agent_id, embedding_id)
+
+  @doc "Count tenant-owned legacy memory embeddings."
+  def count_legacy_embeddings(agent_id), do: LegacyEmbeddingStore.count(agent_id)
+
+  @doc "Return aggregate statistics for tenant-owned legacy memory embeddings."
+  def legacy_embedding_stats(agent_id), do: LegacyEmbeddingStore.stats(agent_id)
+
+  @doc "Store or deduplicate a batch of tenant-owned legacy memory embeddings."
+  def store_legacy_embedding_batch(agent_id, entries),
+    do: LegacyEmbeddingStore.store_batch(agent_id, entries)
+
+  @doc "Fetch one tenant-owned legacy memory embedding by durable row ID."
+  def fetch_legacy_embedding(agent_id, embedding_id),
+    do: LegacyEmbeddingStore.get(agent_id, embedding_id)
+
+  @doc "Delete all tenant-owned legacy memory embeddings."
+  def delete_all_legacy_embeddings(agent_id), do: LegacyEmbeddingStore.delete_all(agent_id)
 
   # ---------------------------------------------------------------
   # Session transcript facade (VP-04A)

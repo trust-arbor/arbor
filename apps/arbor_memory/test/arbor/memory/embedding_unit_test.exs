@@ -9,6 +9,16 @@ defmodule Arbor.Memory.EmbeddingUnitTest do
 
   @moduletag :fast
 
+  test "persistence authority stays behind the public facade" do
+    source = File.read!(Path.expand("../../../lib/arbor/memory/embedding.ex", __DIR__))
+
+    assert source =~ "alias Arbor.Persistence"
+    refute source =~ "Arbor.Persistence.Repo"
+    refute source =~ "Arbor.Persistence.Schemas"
+    refute source =~ "Ecto.Query"
+    refute source =~ "Pgvector"
+  end
+
   describe "content_hash generation" do
     test "produces deterministic hash" do
       content = "Hello world"
