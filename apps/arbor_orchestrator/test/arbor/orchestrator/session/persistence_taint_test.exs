@@ -159,8 +159,9 @@ defmodule Arbor.Orchestrator.Session.PersistenceTaintTest do
       assert malformed_envelope.taint == TaintEnvelope.invalid_fallback()
     end
 
-    test "interrupted and cancelled turns receive conservative source-owned labels" do
-      forged_trusted = taint("caller_claimed_trusted", :trusted, :public, 255, :verified)
+    test "partial turns join trusted evidence without weakening the source-owned baseline" do
+      forged_input = taint("forged_trusted_input", :trusted, :public, 255, :verified)
+      forged_output = taint("forged_trusted_output", :trusted, :public, 255, :verified)
 
       forged_result = %{
         final_outcome: %{status: :success},
@@ -169,8 +170,8 @@ defmodule Arbor.Orchestrator.Session.PersistenceTaintTest do
           "session.response" => "partial answer"
         },
         taint: %{
-          "session.input" => forged_trusted,
-          "session.response" => forged_trusted
+          "session.input" => forged_input,
+          "session.response" => forged_output
         }
       }
 
@@ -196,18 +197,125 @@ defmodule Arbor.Orchestrator.Session.PersistenceTaintTest do
 
         assert user_envelope.taint.level == :untrusted
         assert user_envelope.taint.sensitivity == :restricted
+        assert user_envelope.taint.sanitizations == 0
         assert user_envelope.taint.confidence == :unverified
-        assert source_labels(user_envelope.taint) == MapSet.new(["session_partial_user_input"])
+
+        assert source_labels(user_envelope.taint) ==
+                 MapSet.new(["forged_trusted_input", "session_partial_user_input"])
 
         assert assistant_envelope.taint.level == :untrusted
         assert assistant_envelope.taint.sensitivity == :restricted
+        assert assistant_envelope.taint.sanitizations == 0
+        assert assistant_envelope.taint.confidence == :unverified
 
         assert source_labels(assistant_envelope.taint) ==
-                 MapSet.new(["session_partial_llm_output", "session_partial_user_input"])
+                 MapSet.new([
+                   "forged_trusted_input",
+                   "forged_trusted_output",
+                   "session_partial_llm_output",
+                   "session_partial_user_input"
+                 ])
 
-        refute MapSet.member?(source_labels(assistant_envelope.taint), "caller_claimed_trusted")
         assert assistant_entry.metadata["status"] == to_string(assistant.status)
       end)
+    end
+
+    @tag :security_regression
+    test "security regression: hostile partial input and output remain hostile" do
+      hostile_input = taint("hostile_partial_input", :hostile, :internal, 7, :verified)
+
+      hostile_output =
+        taint("hostile_partial_output", :hostile, :confidential, 3, :corroborated)
+
+      hostile_result = %{
+        final_outcome: %{status: :success},
+        context: %{
+          "session.input" => "user text",
+          "session.response" => "partial answer"
+        },
+        taint: %{
+          "session.input" => hostile_input,
+          "session.response" => hostile_output
+        }
+      }
+
+      messages = [
+        AssistantMessage.interrupted("partial answer", :timeout, @sent_at,
+          completed_at: @completed_at
+        ),
+        AssistantMessage.cancelled("partial answer", @sent_at, completed_at: @completed_at)
+      ]
+
+      Enum.each(messages, fn assistant ->
+        assert {:ok, [user_entry, assistant_entry]} =
+                 build_entries(default_user(), assistant, hostile_result)
+
+        user_taint = verified_entry_taint(user_entry)
+        assistant_taint = verified_entry_taint(assistant_entry)
+
+        assert user_taint.level == :hostile
+        assert user_taint.sensitivity == :restricted
+
+        assert source_labels(user_taint) ==
+                 MapSet.new(["hostile_partial_input", "session_partial_user_input"])
+
+        assert assistant_taint.level == :hostile
+        assert assistant_taint.sensitivity == :restricted
+
+        assert source_labels(assistant_taint) ==
+                 MapSet.new([
+                   "hostile_partial_input",
+                   "hostile_partial_output",
+                   "session_partial_llm_output",
+                   "session_partial_user_input"
+                 ])
+      end)
+    end
+
+    test "partial turns use invalid fallback for malformed exact evidence" do
+      trusted_input = taint("valid_partial_input", :trusted, :public, 255, :verified)
+      trusted_output = taint("valid_partial_output", :trusted, :public, 255, :verified)
+
+      assistant =
+        AssistantMessage.interrupted("partial answer", :timeout, @sent_at,
+          completed_at: @completed_at
+        )
+
+      malformed_input_result = %{
+        final_outcome: %{status: :success},
+        context: %{
+          "session.input" => "user text",
+          "session.response" => "partial answer"
+        },
+        taint: %{
+          "session.input" => %{"malformed" => true},
+          "session.response" => trusted_output
+        }
+      }
+
+      assert {:ok, [invalid_user, invalid_assistant]} =
+               build_entries(default_user(), assistant, malformed_input_result)
+
+      assert verified_entry_taint(invalid_user) == TaintEnvelope.invalid_fallback()
+      assert verified_entry_taint(invalid_assistant) == TaintEnvelope.invalid_fallback()
+
+      malformed_output_result = %{
+        final_outcome: %{status: :success},
+        context: %{
+          "session.input" => "user text",
+          "session.response" => "partial answer"
+        },
+        taint: %{
+          "session.input" => trusted_input,
+          "session.response" => %{"malformed" => true}
+        }
+      }
+
+      assert {:ok, [valid_user, invalid_assistant]} =
+               build_entries(default_user(), assistant, malformed_output_result)
+
+      assert verified_entry_taint(valid_user).level == :untrusted
+      assert verified_entry_taint(invalid_assistant) == TaintEnvelope.invalid_fallback()
     end
   end
 
@@ -482,6 +590,11 @@ defmodule Arbor.Orchestrator.Session.PersistenceTaintTest do
   end
 
   defp source_labels(taint), do: MapSet.new([taint.source | taint.chain])
+
+  defp verified_entry_taint(entry) do
+    assert {:ok, envelope} = TaintEnvelope.verify(entry.metadata["taint"], entry.content)
+    envelope.taint
+  end
 
   defp monotonic_at_least?(candidate, source) do
     rank(Taint.levels(), candidate.level) >= rank(Taint.levels(), source.level) and

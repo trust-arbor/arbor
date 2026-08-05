@@ -206,16 +206,61 @@ defmodule Arbor.Orchestrator.Session.Persistence.Core do
 
   defp metadata_has_taint?(_metadata), do: false
 
-  defp derive_turn_taints(_user_content, %AssistantMessage{status: status}, _run_result)
+  defp derive_turn_taints(
+         user_content,
+         %AssistantMessage{status: status} = assistant_message,
+         run_result
+       )
        when status in @partial_statuses do
-    with {:ok, user_taint} <- source_owned_partial_taint("session_partial_user_input"),
+    with {:ok, user_baseline} <- source_owned_partial_taint("session_partial_user_input"),
          {:ok, output_taint} <- source_owned_partial_taint("session_partial_llm_output"),
-         {:ok, assistant_taint} <- Taint.join(user_taint, output_taint) do
-      {:ok, user_taint, assistant_taint}
+         {:ok, assistant_baseline} <- Taint.join(user_baseline, output_taint) do
+      join_partial_evidence(
+        user_content,
+        assistant_message,
+        run_result,
+        user_baseline,
+        assistant_baseline
+      )
     end
   end
 
   defp derive_turn_taints(user_content, assistant_message, run_result) do
+    with {:ok, user_taint, assistant_taint} <-
+           derive_admitted_taints(user_content, assistant_message, run_result) do
+      {:ok, user_taint, assistant_taint}
+    else
+      _ ->
+        fallback = TaintEnvelope.missing_fallback()
+        {:ok, fallback, fallback}
+    end
+  end
+
+  defp join_partial_evidence(
+         user_content,
+         assistant_message,
+         run_result,
+         user_baseline,
+         assistant_baseline
+       ) do
+    case derive_admitted_taints(user_content, assistant_message, run_result) do
+      {:ok, user_evidence, assistant_evidence} ->
+        with {:ok, user_taint} <- Taint.join(user_baseline, user_evidence),
+             {:ok, assistant_taint} <- Taint.join(assistant_baseline, assistant_evidence) do
+          {:ok, user_taint, assistant_taint}
+        else
+          _ -> invalid_turn_taints()
+        end
+
+      {:error, :unadmitted_run_result} ->
+        {:ok, user_baseline, assistant_baseline}
+
+      {:error, _reason} ->
+        invalid_turn_taints()
+    end
+  end
+
+  defp derive_admitted_taints(user_content, assistant_message, run_result) do
     with {:ok, context, taint_map} <- admitted_evidence(run_result),
          user_taint <- exact_alias_taint(context, taint_map, @user_context_keys, user_content),
          assistant_component_taints <-
@@ -223,11 +268,12 @@ defmodule Arbor.Orchestrator.Session.Persistence.Core do
          {:ok, assistant_taint} <-
            join_taints([user_taint | assistant_component_taints]) do
       {:ok, user_taint, assistant_taint}
-    else
-      _ ->
-        fallback = TaintEnvelope.missing_fallback()
-        {:ok, fallback, fallback}
     end
+  end
+
+  defp invalid_turn_taints do
+    fallback = TaintEnvelope.invalid_fallback()
+    {:ok, fallback, fallback}
   end
 
   defp admitted_evidence(%{
