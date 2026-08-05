@@ -73,6 +73,8 @@ defmodule Arbor.Memory.Index do
   @default_max_entries 10_000
   @default_threshold 0.3
   @default_limit 10
+  # Shared VectorRecord IDs and the legacy memory_embeddings primary key are varchar(255).
+  @max_entry_id_bytes 255
 
   # ============================================================================
   # Client API
@@ -410,8 +412,7 @@ defmodule Arbor.Memory.Index do
 
   defp do_index(content, metadata, opts, state) do
     with {:ok, embedding} <- get_or_compute_embedding(content, opts),
-         entry_id <- state.entry_id_generator.(),
-         now <- state.clock.() do
+         {:ok, entry_id, now} <- generate_entry_identity(state) do
       normalized_metadata = normalize_metadata(metadata)
 
       entry = %{
@@ -424,27 +425,26 @@ defmodule Arbor.Memory.Index do
         access_count: 0
       }
 
-      # Check if we need to evict
-      new_state = maybe_evict(state)
-
       # Store based on backend mode
-      case new_state.backend do
+      case state.backend do
         :ets ->
           # ETS only
-          {:ok, entry_id, put_local_entry(new_state, entry)}
+          {:ok, entry_id, state |> maybe_evict() |> put_local_entry(entry)}
 
         :pgvector ->
           # pgvector only
-          case Embedding.store(new_state.agent_id, content, embedding, normalized_metadata) do
+          case Embedding.store(state.agent_id, content, embedding, normalized_metadata) do
             {:ok, stored_id} ->
-              {:ok, stored_id, new_state}
+              if valid_entry_id?(stored_id),
+                do: {:ok, stored_id, state},
+                else: {:error, :malformed_persistence_result}
 
             {:error, reason} ->
               {:error, reason}
           end
 
         :dual ->
-          index_dual_mode(entry_id, entry, new_state)
+          index_dual_mode(entry_id, entry, state)
       end
     end
   end
@@ -453,18 +453,16 @@ defmodule Arbor.Memory.Index do
     metadata_with_id = Map.put(entry.metadata, :id, entry_id)
 
     case eager_store(state, entry, metadata_with_id) do
-      {:ok, authoritative_id} when is_binary(authoritative_id) ->
-        authoritative_entry = %{entry | id: authoritative_id}
-        {:ok, authoritative_id, put_local_entry(state, authoritative_entry)}
-
-      {:ok, _malformed_id} ->
-        log_dual_write_failure(entry_id, :malformed_persistence_result)
-        state = put_local_entry(state, entry)
-        {:ok, entry_id, %{state | pending_sync: MapSet.put(state.pending_sync, entry_id)}}
+      {:ok, authoritative_id} ->
+        with :ok <- validate_authoritative_binding(state, entry.content, authoritative_id) do
+          authoritative_entry = %{entry | id: authoritative_id}
+          new_state = state |> maybe_evict() |> put_local_entry(authoritative_entry)
+          {:ok, authoritative_id, new_state}
+        end
 
       {:error, reason} ->
         log_dual_write_failure(entry_id, reason)
-        state = put_local_entry(state, entry)
+        state = state |> maybe_evict() |> put_local_entry(entry)
         {:ok, entry_id, %{state | pending_sync: MapSet.put(state.pending_sync, entry_id)}}
     end
   end
@@ -797,23 +795,16 @@ defmodule Arbor.Memory.Index do
         entries = Enum.map(groups, &pending_group_batch_entry/1)
 
         case batch_store_with_ids(state, entries) do
-          {:ok, authoritative_ids}
-          when is_list(authoritative_ids) and length(authoritative_ids) == length(entries) ->
-            if Enum.all?(authoritative_ids, &is_binary/1) do
+          {:ok, authoritative_ids} ->
+            with {:ok, bindings} <-
+                   validate_authoritative_bindings(state, groups, authoritative_ids) do
               new_state =
-                groups
-                |> Enum.zip(authoritative_ids)
-                |> Enum.reduce(state, fn {group, authoritative_id}, acc ->
+                Enum.reduce(bindings, state, fn {group, authoritative_id}, acc ->
                   converge_pending_group(acc, group, authoritative_id)
                 end)
 
               {:ok, length(pending_entries), new_state}
-            else
-              {:error, :malformed_persistence_result}
             end
-
-          {:ok, _malformed_ids} ->
-            {:error, :malformed_persistence_result}
 
           {:error, reason} ->
             {:error, reason}
@@ -919,6 +910,91 @@ defmodule Arbor.Memory.Index do
 
   defp pending_entry_order_key({id, entry}) do
     {DateTime.to_unix(entry.indexed_at, :microsecond), id}
+  end
+
+  defp validate_authoritative_bindings(state, groups, authoritative_ids) do
+    validate_authoritative_bindings(state, groups, authoritative_ids, MapSet.new(), [])
+  end
+
+  defp validate_authoritative_bindings(_state, [], [], _seen_ids, bindings) do
+    {:ok, Enum.reverse(bindings)}
+  end
+
+  defp validate_authoritative_bindings(
+         state,
+         [group | groups],
+         [authoritative_id | authoritative_ids],
+         seen_ids,
+         bindings
+       ) do
+    with false <- MapSet.member?(seen_ids, authoritative_id),
+         :ok <-
+           validate_authoritative_binding(
+             state,
+             group.canonical_entry.content,
+             authoritative_id
+           ) do
+      validate_authoritative_bindings(
+        state,
+        groups,
+        authoritative_ids,
+        MapSet.put(seen_ids, authoritative_id),
+        [{group, authoritative_id} | bindings]
+      )
+    else
+      _invalid -> {:error, :malformed_persistence_result}
+    end
+  end
+
+  defp validate_authoritative_bindings(_state, _groups, _ids, _seen_ids, _bindings),
+    do: {:error, :malformed_persistence_result}
+
+  defp validate_authoritative_binding(state, expected_content, authoritative_id) do
+    with true <- valid_entry_id?(authoritative_id),
+         false <- Map.has_key?(state.id_aliases, authoritative_id),
+         :ok <- validate_authoritative_local_collision(state, expected_content, authoritative_id) do
+      :ok
+    else
+      _invalid -> {:error, :malformed_persistence_result}
+    end
+  end
+
+  defp validate_authoritative_local_collision(state, expected_content, authoritative_id) do
+    case :ets.lookup(state.table, authoritative_id) do
+      [{^authoritative_id, %{content: ^expected_content}}] ->
+        :ok
+
+      [{^authoritative_id, _other_entry}] ->
+        {:error, :malformed_persistence_result}
+
+      [] ->
+        if MapSet.member?(state.pending_sync, authoritative_id),
+          do: {:error, :malformed_persistence_result},
+          else: :ok
+    end
+  end
+
+  defp valid_entry_id?(id) when is_binary(id) do
+    size = byte_size(id)
+
+    size > 0 and size <= @max_entry_id_bytes and String.valid?(id) and String.trim(id) != ""
+  end
+
+  defp valid_entry_id?(_id), do: false
+
+  defp generate_entry_identity(state) do
+    entry_id = state.entry_id_generator.()
+    now = state.clock.()
+
+    if valid_entry_id?(entry_id) and match?(%DateTime{}, now) do
+      {:ok, entry_id, now}
+    else
+      {:error, :invalid_entry_identity}
+    end
+  rescue
+    _error -> {:error, :invalid_entry_identity}
+  catch
+    _kind, _reason -> {:error, :invalid_entry_identity}
   end
 
   defp eager_store(state, entry, metadata) do
