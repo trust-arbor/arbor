@@ -114,7 +114,7 @@ defmodule Arbor.Memory.ThinkingTest do
     test "evicts oldest entries when buffer is full", %{agent_id: agent_id} do
       # Default buffer is 50
       for i <- 1..55 do
-        Thinking.record_thinking(agent_id, "Thought #{i}")
+        assert {:ok, _entry} = Thinking.record_thinking(agent_id, "Thought #{i}")
       end
 
       all = Thinking.recent_thinking(agent_id, limit: 100)
