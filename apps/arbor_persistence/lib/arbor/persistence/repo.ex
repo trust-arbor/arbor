@@ -35,4 +35,19 @@ defmodule Arbor.Persistence.Repo do
         :repo_adapter,
         Ecto.Adapters.Postgres
       )
+
+  @impl true
+  def init(_context, config) do
+    if __adapter__() == Ecto.Adapters.SQLite3 do
+      custom_pragmas =
+        config
+        |> Keyword.get(:custom_pragmas, [])
+        |> Keyword.delete(:recursive_triggers)
+        |> Keyword.put(:recursive_triggers, true)
+
+      {:ok, Keyword.put(config, :custom_pragmas, custom_pragmas)}
+    else
+      {:ok, config}
+    end
+  end
 end

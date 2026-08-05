@@ -52,7 +52,8 @@ defmodule Arbor.Persistence.VectorStore.EctoSQLiteTest do
        pool: DBConnection.ConnectionPool,
        pool_size: 1,
        busy_timeout: 5_000,
-       journal_mode: :wal}
+       journal_mode: :wal,
+       custom_pragmas: [recursive_triggers: true]}
     )
 
     create_legacy_table!()
@@ -147,7 +148,11 @@ defmodule Arbor.Persistence.VectorStore.EctoSQLiteTest do
 
     start_supervised!(
       {RollbackRepo,
-       database: database, pool: DBConnection.ConnectionPool, pool_size: 1, busy_timeout: 5_000}
+       database: database,
+       pool: DBConnection.ConnectionPool,
+       pool_size: 1,
+       busy_timeout: 5_000,
+       custom_pragmas: [recursive_triggers: true]}
     )
 
     on_exit(fn ->
@@ -516,6 +521,36 @@ defmodule Arbor.Persistence.VectorStore.EctoSQLiteTest do
         [operation.fingerprint]
       )
     end
+  end
+
+  test "security regression: SQLite replace cannot bypass immutable receipt triggers", %{
+    agent_id: agent_id
+  } do
+    assert %{rows: [[1]]} = SQLiteRepo.query!("PRAGMA recursive_triggers")
+
+    operation = insert_operation!(record!(agent_id, source_key: "immutable-replace-ledger"))
+
+    assert {:ok, original_receipt} =
+             Arbor.Persistence.execute_vector_operation(agent_id, operation)
+
+    assert_raise Exqlite.Error, fn ->
+      SQLiteRepo.query!(
+        """
+        INSERT OR REPLACE INTO vector_operation_receipts (
+          operation_fingerprint, agent_id, operation_kind,
+          operation_json, operation_digest, receipt_json, receipt_digest, inserted_at
+        )
+        SELECT operation_fingerprint, agent_id, operation_kind,
+               operation_json, operation_digest, receipt_json, ?, inserted_at
+        FROM vector_operation_receipts
+        WHERE operation_fingerprint = ?
+        """,
+        [String.duplicate("0", 64), operation.fingerprint]
+      )
+    end
+
+    assert {:ok, ^original_receipt} =
+             Arbor.Persistence.reconcile_vector_operation(agent_id, operation)
   end
 
   defp create_legacy_table!(repo \\ SQLiteRepo) do

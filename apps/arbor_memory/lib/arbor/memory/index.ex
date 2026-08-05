@@ -120,7 +120,7 @@ defmodule Arbor.Memory.Index do
   @spec index(GenServer.server(), String.t(), map(), keyword()) ::
           {:ok, entry_id()} | {:error, term()}
   def index(server, content, metadata \\ %{}, opts \\ []) do
-    GenServer.call(server, {:index, content, metadata, opts})
+    GenServer.call(server, {:index, content, metadata, opts}, :infinity)
   end
 
   @doc """
@@ -192,7 +192,7 @@ defmodule Arbor.Memory.Index do
   """
   @spec clear(GenServer.server()) :: :ok
   def clear(server) do
-    GenServer.call(server, :clear)
+    GenServer.call(server, :clear, :infinity)
   end
 
   @doc """
@@ -208,7 +208,7 @@ defmodule Arbor.Memory.Index do
   """
   @spec delete(GenServer.server(), entry_id()) :: :ok | {:error, :not_found}
   def delete(server, entry_id) do
-    GenServer.call(server, {:delete, entry_id})
+    GenServer.call(server, {:delete, entry_id}, :infinity)
   end
 
   @doc """
@@ -308,7 +308,11 @@ defmodule Arbor.Memory.Index do
       # Unsynced caller-visible IDs represented by each pending authority.
       pending_group_members: %{},
       # A failed eager write can later deduplicate to a different durable ID.
-      id_aliases: %{}
+      id_aliases: %{},
+      # At most one durable mutation runs outside the GenServer. Other mutations
+      # retain invocation order; reads continue against acknowledged ETS state.
+      inflight_mutation: nil,
+      mutation_queue: :queue.new()
     }
 
     Logger.debug("Started memory index for agent #{agent_id} with backend #{backend}")
@@ -320,30 +324,16 @@ defmodule Arbor.Memory.Index do
   end
 
   @impl true
-  def handle_call({:index, content, metadata, opts}, _from, state) do
-    case do_index(content, metadata, opts, state) do
-      {:ok, entry_id, new_state} ->
-        {:reply, {:ok, entry_id}, new_state}
-
-      {:error, reason} ->
-        {:reply, {:error, reason}, state}
-    end
-  end
+  def handle_call({:index, _content, _metadata, _opts} = request, from, state),
+    do: dispatch_mutation_call(request, from, state)
 
   def handle_call({:recall, query, opts}, _from, state) do
     result = do_recall(query, opts, state)
     {:reply, result, state}
   end
 
-  def handle_call({:batch_index, items, opts}, _from, state) do
-    case do_batch_index(items, opts, state) do
-      {:ok, ids, new_state} ->
-        {:reply, {:ok, ids}, new_state}
-
-      {:error, reason} ->
-        {:reply, {:error, reason}, state}
-    end
-  end
+  def handle_call({:batch_index, _items, _opts} = request, from, state),
+    do: dispatch_mutation_call(request, from, state)
 
   def handle_call(:stats, _from, state) do
     stats = %{
@@ -356,19 +346,8 @@ defmodule Arbor.Memory.Index do
     {:reply, stats, state}
   end
 
-  def handle_call(:clear, _from, state) do
-    :ets.delete_all_objects(state.table)
-
-    {:reply, :ok,
-     %{
-       state
-       | entry_count: 0,
-         pending_sync: MapSet.new(),
-         pending_entry_orders: %{},
-         pending_group_members: %{},
-         id_aliases: %{}
-     }}
-  end
+  def handle_call(:clear = request, from, state),
+    do: dispatch_mutation_call(request, from, state)
 
   def handle_call({:get, entry_id}, _from, state) do
     canonical_id = resolve_entry_id(entry_id, state)
@@ -390,44 +369,42 @@ defmodule Arbor.Memory.Index do
     end
   end
 
-  def handle_call({:delete, entry_id}, _from, state) do
-    case delete_entry(entry_id, state) do
-      {:ok, new_state} -> {:reply, :ok, new_state}
-      {:error, reason, new_state} -> {:reply, {:error, reason}, new_state}
-    end
-  end
+  def handle_call({:delete, _entry_id} = request, from, state),
+    do: dispatch_mutation_call(request, from, state)
 
-  def handle_call({:warm_cache, opts}, _from, state) do
-    if state.backend in [:pgvector, :dual] do
-      result = do_warm_cache(opts, state)
-      {:reply, result, state}
-    else
-      {:reply, {:error, :backend_not_persistent}, state}
-    end
-  end
+  def handle_call({:warm_cache, _opts} = request, from, state),
+    do: dispatch_mutation_call(request, from, state)
 
-  def handle_call({:sync_to_persistent, _opts}, _from, state) do
-    if state.backend == :dual do
-      result = do_sync_to_persistent(state)
-
-      case result do
-        {:ok, count, new_state} ->
-          {:reply, {:ok, count}, new_state}
-
-        error ->
-          {:reply, error, state}
-      end
-    else
-      {:reply, {:error, :not_dual_backend}, state}
-    end
-  end
+  def handle_call({:sync_to_persistent, _opts} = request, from, state),
+    do: dispatch_mutation_call(request, from, state)
 
   def handle_call(:backend_mode, _from, state) do
     {:reply, state.backend, state}
   end
 
   @impl true
+  def handle_info(
+        {:persistent_index_result, operation_ref, result},
+        %{inflight_mutation: %{operation_ref: operation_ref} = inflight} = state
+      ) do
+    Process.demonitor(inflight.monitor_ref, [:flush])
+    finish_persistent_index(inflight, result, state)
+  end
+
+  def handle_info(
+        {:DOWN, monitor_ref, :process, _pid, _reason},
+        %{inflight_mutation: %{monitor_ref: monitor_ref} = inflight} = state
+      ) do
+    finish_persistent_index(inflight, {:error, :persistence_indeterminate}, state)
+  end
+
+  @impl true
   def terminate(_reason, state) do
+    case state.inflight_mutation do
+      %{worker_pid: worker_pid} -> Process.exit(worker_pid, :shutdown)
+      nil -> :ok
+    end
+
     :ets.delete(state.table)
     :ok
   end
@@ -436,16 +413,145 @@ defmodule Arbor.Memory.Index do
   # Private Implementation
   # ============================================================================
 
+  defp dispatch_mutation_call(request, from, %{inflight_mutation: nil} = state),
+    do: execute_mutation_call(request, from, state)
+
+  defp dispatch_mutation_call(request, from, state) do
+    queued_state = %{state | mutation_queue: :queue.in({request, from}, state.mutation_queue)}
+    {:noreply, queued_state}
+  end
+
+  defp execute_mutation_call({:index, content, metadata, opts}, from, state) do
+    case do_index(content, metadata, opts, state) do
+      {:ok, entry_id, new_state} ->
+        {:reply, {:ok, entry_id}, new_state}
+
+      {:async, writer_call, completion} ->
+        {:noreply, start_persistent_index(writer_call, completion, from, state)}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  defp execute_mutation_call({:batch_index, items, opts}, _from, state) do
+    case do_batch_index(items, opts, state) do
+      {:ok, ids, new_state} -> {:reply, {:ok, ids}, new_state}
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  defp execute_mutation_call(:clear, _from, state) do
+    :ets.delete_all_objects(state.table)
+
+    {:reply, :ok,
+     %{
+       state
+       | entry_count: 0,
+         pending_sync: MapSet.new(),
+         pending_entry_orders: %{},
+         pending_group_members: %{},
+         id_aliases: %{}
+     }}
+  end
+
+  defp execute_mutation_call({:delete, entry_id}, _from, state) do
+    case delete_entry(entry_id, state) do
+      {:ok, new_state} -> {:reply, :ok, new_state}
+      {:error, reason, new_state} -> {:reply, {:error, reason}, new_state}
+    end
+  end
+
+  defp execute_mutation_call({:warm_cache, opts}, _from, state) do
+    if state.backend in [:pgvector, :dual] do
+      {:reply, do_warm_cache(opts, state), state}
+    else
+      {:reply, {:error, :backend_not_persistent}, state}
+    end
+  end
+
+  defp execute_mutation_call({:sync_to_persistent, _opts}, _from, state) do
+    if state.backend == :dual do
+      case do_sync_to_persistent(state) do
+        {:ok, count, new_state} -> {:reply, {:ok, count}, new_state}
+        error -> {:reply, error, state}
+      end
+    else
+      {:reply, {:error, :not_dual_backend}, state}
+    end
+  end
+
+  defp start_persistent_index(writer_call, completion, from, state) do
+    owner = self()
+    operation_ref = make_ref()
+
+    {worker_pid, monitor_ref} =
+      spawn_opt(
+        fn ->
+          result = run_persistent_writer_call(writer_call)
+          send(owner, {:persistent_index_result, operation_ref, result})
+        end,
+        [:link, :monitor]
+      )
+
+    %{
+      state
+      | inflight_mutation: %{
+          operation_ref: operation_ref,
+          worker_pid: worker_pid,
+          monitor_ref: monitor_ref,
+          from: from,
+          completion: completion
+        }
+    }
+  end
+
+  defp finish_persistent_index(inflight, result, state) do
+    {reply, new_state} = complete_persistent_index(inflight.completion, result, state)
+    GenServer.reply(inflight.from, reply)
+
+    state_without_inflight = %{new_state | inflight_mutation: nil}
+    continue_mutation_queue(state_without_inflight)
+  end
+
+  defp continue_mutation_queue(state) do
+    case :queue.out(state.mutation_queue) do
+      {{:value, {request, from}}, remaining} ->
+        state = %{state | mutation_queue: remaining}
+
+        if caller_alive?(from) do
+          case execute_mutation_call(request, from, state) do
+            {:reply, reply, new_state} ->
+              GenServer.reply(from, reply)
+              continue_mutation_queue(new_state)
+
+            {:noreply, new_state} ->
+              {:noreply, new_state}
+          end
+        else
+          continue_mutation_queue(state)
+        end
+
+      {:empty, _queue} ->
+        {:noreply, state}
+    end
+  end
+
+  defp caller_alive?({pid, _tag}) when is_pid(pid), do: Process.alive?(pid)
+  defp caller_alive?(_from), do: false
+
   defp do_index(content, metadata, opts, state) do
     with {:ok, embedding} <- get_or_compute_embedding(content, opts),
-         {:ok, entry_id, now} <- generate_entry_identity(state) do
+         {:ok, entry_id, now} <- generate_entry_identity(state),
+         :ok <- validate_new_entry_id(entry_id, state),
+         {:ok, normalized_embedding, normalized_metadata} <-
+           preflight_entry(state, content, embedding, metadata, entry_id) do
       insertion_sequence = state.next_insertion_sequence
-      normalized_metadata = normalize_metadata(metadata)
 
       entry = %{
         id: entry_id,
         content: content,
-        embedding: embedding,
+        embedding: normalized_embedding,
         metadata: normalized_metadata,
         indexed_at: now,
         accessed_at: now,
@@ -466,42 +572,68 @@ defmodule Arbor.Memory.Index do
           end
 
         :pgvector ->
-          # pgvector only
-          case Embedding.store(state.agent_id, content, embedding, normalized_metadata) do
-            {:ok, stored_id} ->
-              if valid_entry_id?(stored_id),
-                do: {:ok, stored_id, advance_insertion_sequence(state, insertion_sequence)},
-                else: {:error, :malformed_persistence_result}
+          writer_call =
+            {Embedding, state.agent_id, entry, with_requested_id(normalized_metadata, entry_id)}
 
-            {:error, reason} ->
-              {:error, reason}
-          end
+          {:async, writer_call, {:pgvector_index, insertion_sequence}}
 
         :dual ->
           candidate = %{entry: entry, insertion_sequence: insertion_sequence, position: 0}
           [group] = group_prepared_batch_entries([candidate], state)
 
           with {:ok, pending_admission} <- plan_pending_group_admission(state, [group]) do
-            index_dual_mode(entry_id, group, pending_admission, state)
+            writer_call =
+              {state.persistent_writer, state.agent_id, group.canonical_entry,
+               with_requested_id(group.canonical_entry.metadata, group.requested_id)}
+
+            {:async, writer_call, {:dual_index, entry_id, group, pending_admission}}
           end
       end
     end
   end
 
-  defp index_dual_mode(entry_id, group, pending_admission, state) do
-    entry = group.canonical_entry
-    insertion_sequence = group.canonical_sequence
-    metadata_with_id = Map.put(entry.metadata, :id, group.requested_id)
-
-    case eager_store(state, entry, metadata_with_id) do
+  defp complete_persistent_index({:pgvector_index, insertion_sequence}, result, state) do
+    case result do
       {:ok, authoritative_id} ->
-        with :ok <- validate_authoritative_binding(state, entry.content, authoritative_id),
+        {{:ok, authoritative_id}, advance_insertion_sequence(state, insertion_sequence)}
+
+      {:error, {:permanent, reason}} ->
+        {{:error, reason}, state}
+
+      {:error, {:malformed, reason}} ->
+        {{:error, reason}, state}
+
+      {:error, reason} ->
+        {{:error, reason}, state}
+    end
+  end
+
+  defp complete_persistent_index(
+         {:dual_index, entry_id, group, pending_admission},
+         result,
+         state
+       ) do
+    case result do
+      {:ok, authoritative_id} ->
+        with :ok <-
+               validate_authoritative_binding(
+                 state,
+                 group.canonical_entry.content,
+                 authoritative_id
+               ),
              {:ok, admitted_state} <-
                cache_authoritative_bindings(state, [{group, authoritative_id}]) do
-          new_state = advance_insertion_sequence(admitted_state, insertion_sequence)
-
-          {:ok, authoritative_id, new_state}
+          new_state = advance_insertion_sequence(admitted_state, group.canonical_sequence)
+          {{:ok, authoritative_id}, new_state}
+        else
+          {:error, reason} -> {{:error, reason}, state}
         end
+
+      {:error, {:permanent, reason}} ->
+        {{:error, reason}, state}
+
+      {:error, {:malformed, reason}} ->
+        {{:error, reason}, state}
 
       {:error, reason} ->
         log_dual_write_failure(entry_id, reason)
@@ -510,9 +642,9 @@ defmodule Arbor.Memory.Index do
           state
           |> apply_local_admission(pending_admission.eviction_ids)
           |> cache_pending_groups([group], pending_admission)
-          |> advance_insertion_sequence(insertion_sequence)
+          |> advance_insertion_sequence(group.canonical_sequence)
 
-        {:ok, entry_id, new_state}
+        {{:ok, entry_id}, new_state}
     end
   end
 
@@ -703,6 +835,7 @@ defmodule Arbor.Memory.Index do
 
           candidate = %{
             entry: entry,
+            input_metadata: metadata,
             insertion_sequence: insertion_sequence,
             position: offset
           }
@@ -719,9 +852,9 @@ defmodule Arbor.Memory.Index do
       {:ok, prepared} ->
         prepared = Enum.reverse(prepared)
 
-        case validate_prepared_batch_identities(prepared, state) do
-          :ok -> {:ok, prepared}
-          {:error, reason} -> {:error, reason}
+        with :ok <- validate_prepared_batch_identities(prepared, state),
+             {:ok, preflighted} <- preflight_prepared_batch(prepared, state) do
+          {:ok, preflighted}
         end
 
       error ->
@@ -737,18 +870,51 @@ defmodule Arbor.Memory.Index do
 
   defp validate_prepared_batch_identities(prepared, state) do
     ids = Enum.map(prepared, & &1.entry.id)
-
-    occupied_ids =
-      state.pending_sync
-      |> MapSet.union(MapSet.new(Map.keys(state.id_aliases)))
-      |> MapSet.union(MapSet.new(Map.values(state.id_aliases)))
-      |> MapSet.union(MapSet.new(:ets.select(state.table, [{{:"$1", :_}, [], [:"$1"]}])))
+    occupied_ids = occupied_entry_ids(state)
 
     if length(ids) == MapSet.size(MapSet.new(ids)) and
          Enum.all?(ids, &(not MapSet.member?(occupied_ids, &1))) do
       :ok
     else
       {:error, :invalid_batch_identity}
+    end
+  end
+
+  defp preflight_prepared_batch(prepared, %{backend: :ets}) do
+    {:ok, Enum.map(prepared, &Map.delete(&1, :input_metadata))}
+  end
+
+  defp preflight_prepared_batch(prepared, state) do
+    Enum.reduce_while(prepared, {:ok, []}, fn candidate, {:ok, validated} ->
+      entry = candidate.entry
+
+      case Embedding.validate(
+             state.agent_id,
+             entry.content,
+             entry.embedding,
+             candidate.input_metadata
+           ) do
+        {:ok, normalized_embedding} ->
+          normalized_entry = %{
+            entry
+            | embedding: normalized_embedding,
+              metadata: sanitize_entry_metadata(candidate.input_metadata)
+          }
+
+          normalized_candidate =
+            candidate
+            |> Map.delete(:input_metadata)
+            |> Map.put(:entry, normalized_entry)
+
+          {:cont, {:ok, [normalized_candidate | validated]}}
+
+        {:error, reason} ->
+          {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, validated} -> {:ok, Enum.reverse(validated)}
+      error -> error
     end
   end
 
@@ -794,11 +960,21 @@ defmodule Arbor.Memory.Index do
          pending_admission,
          %{backend: :dual} = state,
          reason
-       ),
-       do: commit_pending_batch(prepared, groups, pending_admission, state, reason)
+       ) do
+    case reason do
+      {:permanent, permanent_reason} -> {:error, permanent_reason}
+      {:malformed, malformed_reason} -> {:error, malformed_reason}
+      _indeterminate -> commit_pending_batch(prepared, groups, pending_admission, state, reason)
+    end
+  end
 
-  defp maybe_commit_pending_batch(_prepared, _groups, _admission, _state, reason),
-    do: {:error, reason}
+  defp maybe_commit_pending_batch(_prepared, _groups, _admission, _state, reason) do
+    case reason do
+      {:permanent, permanent_reason} -> {:error, permanent_reason}
+      {:malformed, malformed_reason} -> {:error, malformed_reason}
+      other -> {:error, other}
+    end
+  end
 
   defp commit_pending_batch(prepared, groups, pending_admission, state, reason) do
     Enum.each(prepared, fn %{entry: entry} -> log_dual_write_failure(entry.id, reason) end)
@@ -874,7 +1050,7 @@ defmodule Arbor.Memory.Index do
 
   defp prepared_group_batch_entry(group) do
     entry = group.canonical_entry
-    {entry.content, entry.embedding, Map.put(entry.metadata, :id, group.requested_id)}
+    {entry.content, entry.embedding, with_requested_id(entry.metadata, group.requested_id)}
   end
 
   defp expand_batch_authoritative_ids(bindings) do
@@ -961,6 +1137,22 @@ defmodule Arbor.Memory.Index do
 
       embedding when is_list(embedding) ->
         {:ok, embedding}
+
+      _invalid_embedding ->
+        {:error, :invalid_embedding}
+    end
+  end
+
+  defp preflight_entry(%{backend: :ets}, _content, embedding, metadata, _entry_id),
+    do: {:ok, embedding, normalize_metadata(metadata)}
+
+  defp preflight_entry(state, content, embedding, metadata, _entry_id) do
+    case Embedding.validate(state.agent_id, content, embedding, metadata) do
+      {:ok, normalized_embedding} ->
+        {:ok, normalized_embedding, sanitize_entry_metadata(metadata)}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -1106,6 +1298,25 @@ defmodule Arbor.Memory.Index do
     end)
   end
 
+  defp validate_new_entry_id(entry_id, state) do
+    if MapSet.member?(occupied_entry_ids(state), entry_id),
+      do: {:error, :invalid_entry_identity},
+      else: :ok
+  end
+
+  defp occupied_entry_ids(state) do
+    pending_member_ids =
+      state.pending_group_members
+      |> Map.values()
+      |> Enum.reduce(MapSet.new(), &MapSet.union(&2, &1))
+
+    state.pending_sync
+    |> MapSet.union(pending_member_ids)
+    |> MapSet.union(MapSet.new(Map.keys(state.id_aliases)))
+    |> MapSet.union(MapSet.new(Map.values(state.id_aliases)))
+    |> MapSet.union(MapSet.new(:ets.select(state.table, [{{:"$1", :_}, [], [:"$1"]}])))
+  end
+
   defp apply_local_admission(state, eviction_ids) do
     Enum.each(eviction_ids, &:ets.delete(state.table, &1))
     %{state | entry_count: :ets.info(state.table, :size)}
@@ -1122,6 +1333,20 @@ defmodule Arbor.Memory.Index do
   end
 
   defp normalize_metadata(_), do: %{}
+
+  defp sanitize_entry_metadata(metadata) do
+    metadata
+    |> normalize_metadata()
+    |> Map.drop([:id, "id"])
+  end
+
+  defp with_requested_id(metadata, requested_id) when is_map(metadata) do
+    metadata
+    |> Map.drop([:id, "id"])
+    |> Map.put(:id, requested_id)
+  end
+
+  defp with_requested_id(metadata, _requested_id), do: metadata
 
   defp get_type_filter(opts) do
     cond do
@@ -1193,6 +1418,12 @@ defmodule Arbor.Memory.Index do
 
               {:ok, converged_count, new_state}
             end
+
+          {:error, {:permanent, reason}} ->
+            {:error, reason}
+
+          {:error, {:malformed, reason}} ->
+            {:error, reason}
 
           {:error, reason} ->
             {:error, reason}
@@ -1446,13 +1677,33 @@ defmodule Arbor.Memory.Index do
     _kind, _reason -> {:error, :invalid_entry_identity}
   end
 
-  defp eager_store(state, entry, metadata) do
-    state.persistent_writer.store(state.agent_id, entry.content, entry.embedding, metadata)
+  defp run_persistent_writer_call({writer, agent_id, entry, metadata}) do
+    writer.store(agent_id, entry.content, entry.embedding, metadata)
+    |> normalize_single_writer_result()
   rescue
-    error -> {:error, error}
+    _error -> {:error, :persistence_indeterminate}
   catch
-    kind, reason -> {:error, {kind, reason}}
+    _kind, _reason -> {:error, :persistence_indeterminate}
   end
+
+  defp normalize_single_writer_result({:ok, authoritative_id}) do
+    if valid_entry_id?(authoritative_id),
+      do: {:ok, authoritative_id},
+      else: {:error, {:malformed, :malformed_persistence_result}}
+  end
+
+  defp normalize_single_writer_result({:error, reason}), do: normalize_writer_error(reason)
+
+  defp normalize_single_writer_result(_malformed),
+    do: {:error, {:malformed, :malformed_persistence_result}}
+
+  defp normalize_writer_error({:invalid_legacy_embedding, reason}) when is_atom(reason),
+    do: {:error, {:permanent, {:invalid_legacy_embedding, reason}}}
+
+  defp normalize_writer_error(:protected_vector_row),
+    do: {:error, {:permanent, :protected_vector_row}}
+
+  defp normalize_writer_error(_reason), do: {:error, :persistence_indeterminate}
 
   defp batch_store_with_ids(state, entries) do
     batch_store_with_ids(state, state.persistent_writer, entries)
@@ -1460,11 +1711,28 @@ defmodule Arbor.Memory.Index do
 
   defp batch_store_with_ids(state, writer, entries) do
     writer.store_batch_with_ids(state.agent_id, entries)
+    |> normalize_batch_writer_result(length(entries))
   rescue
-    error -> {:error, error}
+    _error -> {:error, :persistence_indeterminate}
   catch
-    kind, reason -> {:error, {kind, reason}}
+    _kind, _reason -> {:error, :persistence_indeterminate}
   end
+
+  defp normalize_batch_writer_result({:ok, authoritative_ids}, expected_count)
+       when is_list(authoritative_ids) do
+    if length(authoritative_ids) == expected_count and
+         Enum.all?(authoritative_ids, &valid_entry_id?/1) do
+      {:ok, authoritative_ids}
+    else
+      {:error, {:malformed, :malformed_persistence_result}}
+    end
+  end
+
+  defp normalize_batch_writer_result({:error, reason}, _expected_count),
+    do: normalize_writer_error(reason)
+
+  defp normalize_batch_writer_result(_malformed, _expected_count),
+    do: {:error, {:malformed, :malformed_persistence_result}}
 
   defp converge_pending_group(state, group, authoritative_id) do
     converge_local_members(state, group.member_ids, group.canonical_entry, authoritative_id)

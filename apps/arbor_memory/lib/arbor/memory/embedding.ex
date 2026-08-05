@@ -11,6 +11,12 @@ defmodule Arbor.Memory.Embedding do
 
   @behaviour Arbor.Memory.Index.PersistentWriter
 
+  @doc "Validate and normalize one durable legacy embedding without dispatching a write."
+  @spec validate(String.t(), String.t(), term(), term()) ::
+          {:ok, [float()]} | {:error, {:invalid_legacy_embedding, atom()}}
+  def validate(agent_id, content, embedding, metadata),
+    do: Persistence.validate_legacy_embedding(agent_id, content, embedding, metadata)
+
   @doc "Store or deduplicate one embedding."
   @impl true
   @spec store(String.t(), String.t(), [float()], map()) ::

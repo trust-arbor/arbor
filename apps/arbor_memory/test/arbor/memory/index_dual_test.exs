@@ -18,6 +18,83 @@ defmodule Arbor.Memory.IndexDualTest do
   # tests actually ran against Postgres.)
   @dimension 768
 
+  defmodule AckCommitRepo do
+    use Ecto.Repo,
+      otp_app: :arbor_persistence,
+      adapter: Ecto.Adapters.Postgres
+  end
+
+  defmodule AckObserverRepo do
+    use Ecto.Repo,
+      otp_app: :arbor_persistence,
+      adapter: Ecto.Adapters.Postgres
+  end
+
+  defmodule IndependentAckLossWriter do
+    @behaviour Arbor.Memory.Index.PersistentWriter
+
+    def configure(agent_id, owner, repo) do
+      :persistent_term.put({__MODULE__, agent_id}, {:commit_then_exit, owner, repo})
+    end
+
+    def acknowledge_lost(agent_id, writer_pid) do
+      {:commit_then_exit, _owner, repo} = :persistent_term.get({__MODULE__, agent_id})
+      :persistent_term.put({__MODULE__, agent_id}, {:delegate, repo})
+      send(writer_pid, :lose_acknowledgement)
+    end
+
+    def disarm(agent_id), do: :persistent_term.erase({__MODULE__, agent_id})
+
+    @impl true
+    def store(agent_id, content, embedding, metadata) do
+      case :persistent_term.get({__MODULE__, agent_id}) do
+        {:commit_then_exit, owner, repo} ->
+          case Arbor.Persistence.store_legacy_embedding(
+                 agent_id,
+                 content,
+                 embedding,
+                 metadata,
+                 repo: repo
+               ) do
+            {:ok, authoritative_id} ->
+              send(owner, {:independent_row_committed, agent_id, authoritative_id, self()})
+
+              receive do
+                :lose_acknowledgement -> exit(:commit_acknowledgement_lost)
+              after
+                5_000 -> exit(:commit_acknowledgement_lost)
+              end
+
+            error ->
+              error
+          end
+
+        {:delegate, repo} ->
+          Arbor.Persistence.store_legacy_embedding(
+            agent_id,
+            content,
+            embedding,
+            metadata,
+            repo: repo
+          )
+      end
+    end
+
+    @impl true
+    def store_batch_with_ids(agent_id, entries) do
+      {_mode, repo} = delegate_mode(agent_id)
+
+      Arbor.Persistence.store_legacy_embedding_batch_with_ids(agent_id, entries, repo: repo)
+    end
+
+    defp delegate_mode(agent_id) do
+      case :persistent_term.get({__MODULE__, agent_id}) do
+        {:delegate, repo} -> {:delegate, repo}
+        {:commit_then_exit, _owner, repo} -> {:delegate, repo}
+      end
+    end
+  end
+
   defmodule FailFirstWriter do
     @behaviour Arbor.Memory.Index.PersistentWriter
 
@@ -154,6 +231,19 @@ defmodule Arbor.Memory.IndexDualTest do
     end
   end
 
+  setup_all do
+    independent_config =
+      Arbor.Persistence.Repo.config()
+      |> Keyword.drop([:adapter, :name, :otp_app, :repo])
+      |> Keyword.put(:pool, DBConnection.ConnectionPool)
+      |> Keyword.put(:pool_size, 1)
+
+    start_supervised!({AckCommitRepo, independent_config})
+    start_supervised!({AckObserverRepo, independent_config})
+
+    :ok
+  end
+
   setup do
     agent_id = durable_unique("test_agent_dual_index")
 
@@ -197,6 +287,71 @@ defmodule Arbor.Memory.IndexDualTest do
 
       assert {:ok, %{id: ^id}} = Embedding.get(agent_id, id)
       assert Embedding.count(agent_id) == 1
+    end
+
+    test "acknowledgement regression: independently committed row converges after lost reply" do
+      agent_id = durable_unique("test_independent_ack_loss")
+      requested_id = "mem_#{durable_unique("ack")}"
+      content = "Independent commit before acknowledgement loss"
+      embedding = generate_embedding(97)
+
+      assert {:ok, 0} =
+               Arbor.Persistence.delete_all_legacy_embeddings(agent_id, repo: AckCommitRepo)
+
+      IndependentAckLossWriter.configure(agent_id, self(), AckCommitRepo)
+
+      {:ok, pid} =
+        Index.start_link(
+          agent_id: agent_id,
+          backend: :dual,
+          max_entries: 1,
+          persistent_writer: IndependentAckLossWriter,
+          entry_id_generator: fn -> requested_id end,
+          name: nil
+        )
+
+      on_exit(fn ->
+        IndependentAckLossWriter.disarm(agent_id)
+        if Process.alive?(pid), do: GenServer.stop(pid)
+
+        Arbor.Persistence.delete_all_legacy_embeddings(agent_id, repo: AckCommitRepo)
+      end)
+
+      parent = self()
+
+      spawn(fn ->
+        send(
+          parent,
+          {:independent_index_result,
+           Index.index(pid, content, %{type: :fact}, embedding: embedding)}
+        )
+      end)
+
+      assert_receive {:independent_row_committed, ^agent_id, ^requested_id, writer_pid}, 5_000
+
+      assert {:ok, %{id: ^requested_id, content: ^content}} =
+               Arbor.Persistence.fetch_legacy_embedding(agent_id, requested_id,
+                 repo: AckObserverRepo
+               )
+
+      assert Arbor.Persistence.count_legacy_embeddings(agent_id, repo: AckObserverRepo) == 1
+      refute_received {:independent_index_result, _result}
+      assert %{entry_count: 0} = Index.stats(pid)
+
+      IndependentAckLossWriter.acknowledge_lost(agent_id, writer_pid)
+      assert_receive {:independent_index_result, {:ok, ^requested_id}}, 2_000
+
+      assert {:ok, %{id: ^requested_id, content: ^content}} = Index.get(pid, requested_id)
+      assert :sys.get_state(pid).pending_sync == MapSet.new([requested_id])
+
+      assert {:ok, 1} = Index.sync_to_persistent(pid)
+      assert :sys.get_state(pid).pending_sync == MapSet.new()
+      assert Arbor.Persistence.count_legacy_embeddings(agent_id, repo: AckObserverRepo) == 1
+
+      assert {:ok, %{id: ^requested_id, content: ^content}} =
+               Arbor.Persistence.fetch_legacy_embedding(agent_id, requested_id,
+                 repo: AckObserverRepo
+               )
     end
 
     test "recall checks ETS first (cache hit)", %{pid: pid, agent_id: agent_id} do

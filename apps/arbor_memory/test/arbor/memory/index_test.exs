@@ -4,6 +4,80 @@ defmodule Arbor.Memory.IndexTest do
   alias Arbor.Memory.Index
 
   @moduletag :fast
+  @persistent_dimension 768
+
+  defmodule ControlledWriter do
+    @behaviour Arbor.Memory.Index.PersistentWriter
+
+    def configure(agent_id, mode) do
+      counter = :counters.new(1, [:atomics])
+      :persistent_term.put({__MODULE__, agent_id}, {mode, counter})
+    end
+
+    def set_mode(agent_id, mode) do
+      {_old_mode, counter} = :persistent_term.get({__MODULE__, agent_id})
+      :persistent_term.put({__MODULE__, agent_id}, {mode, counter})
+    end
+
+    def call_count(agent_id) do
+      {_mode, counter} = :persistent_term.get({__MODULE__, agent_id})
+      :counters.get(counter, 1)
+    end
+
+    def disarm(agent_id), do: :persistent_term.erase({__MODULE__, agent_id})
+
+    @impl true
+    def store(agent_id, _content, _embedding, metadata) do
+      {mode, counter} = :persistent_term.get({__MODULE__, agent_id})
+      :counters.add(counter, 1, 1)
+
+      case mode do
+        {:block, owner} ->
+          send(owner, {:writer_started, agent_id, self()})
+
+          receive do
+            :release_writer -> {:ok, requested_id(metadata)}
+          after
+            6_000 -> {:ok, requested_id(metadata)}
+          end
+
+        :success ->
+          {:ok, requested_id(metadata)}
+
+        :transient_error ->
+          {:error, :injected_transient_failure}
+
+        :permanent_error ->
+          {:error, :protected_vector_row}
+
+        :bare_ok ->
+          :ok
+      end
+    end
+
+    @impl true
+    def store_batch_with_ids(agent_id, entries) do
+      {mode, counter} = :persistent_term.get({__MODULE__, agent_id})
+      :counters.add(counter, 1, 1)
+
+      case mode do
+        :success ->
+          {:ok,
+           Enum.map(entries, fn {_content, _embedding, metadata} -> requested_id(metadata) end)}
+
+        :transient_error ->
+          {:error, :injected_transient_failure}
+
+        :permanent_error ->
+          {:error, :protected_vector_row}
+
+        :bare_ok ->
+          :ok
+      end
+    end
+
+    defp requested_id(metadata), do: Map.get(metadata, :id) || Map.get(metadata, "id")
+  end
 
   setup do
     agent_id = "test_agent_#{System.unique_integer([:positive])}"
@@ -49,6 +123,218 @@ defmodule Arbor.Memory.IndexTest do
 
       {:ok, entry} = Index.get(pid, entry_id)
       assert entry.embedding == embedding
+    end
+
+    test "acknowledgement regression: a slow durable writer does not time out or block reads" do
+      agent_id = "slow_writer_#{System.unique_integer([:positive])}"
+      entry_id = "mem_slow_writer"
+      ControlledWriter.configure(agent_id, {:block, self()})
+
+      {:ok, pid} =
+        Index.start_link(
+          agent_id: agent_id,
+          backend: :dual,
+          persistent_writer: ControlledWriter,
+          entry_id_generator: fn -> entry_id end,
+          name: nil
+        )
+
+      on_exit(fn ->
+        ControlledWriter.disarm(agent_id)
+        if Process.alive?(pid), do: GenServer.stop(pid)
+      end)
+
+      parent = self()
+
+      spawn(fn ->
+        result =
+          try do
+            Index.index(pid, "Slow durable acknowledgement", %{type: :fact},
+              embedding: valid_persistent_embedding()
+            )
+          catch
+            :exit, reason -> {:caller_exit, reason}
+          end
+
+        send(parent, {:index_outcome, result})
+      end)
+
+      assert_receive {:writer_started, ^agent_id, writer_pid}, 1_000
+
+      spawn(fn -> send(parent, {:stats_during_write, Index.stats(pid)}) end)
+
+      Process.sleep(5_250)
+      refute_received {:index_outcome, _result}
+      assert_received {:stats_during_write, %{entry_count: 0}}
+      assert Process.alive?(pid)
+
+      send(writer_pid, :release_writer)
+      assert_receive {:index_outcome, {:ok, ^entry_id}}, 1_000
+      assert {:ok, %{id: ^entry_id}} = Index.get(pid, entry_id)
+    end
+
+    test "security regression: single generated ID collision rejects before writer dispatch" do
+      agent_id = "single_collision_#{System.unique_integer([:positive])}"
+      duplicate_id = "mem_duplicate_single_identity"
+      ControlledWriter.configure(agent_id, :success)
+
+      {:ok, pid} =
+        Index.start_link(
+          agent_id: agent_id,
+          backend: :dual,
+          persistent_writer: ControlledWriter,
+          entry_id_generator: fn -> duplicate_id end,
+          name: nil
+        )
+
+      on_exit(fn ->
+        ControlledWriter.disarm(agent_id)
+        if Process.alive?(pid), do: GenServer.stop(pid)
+      end)
+
+      embedding = valid_persistent_embedding()
+
+      assert {:ok, ^duplicate_id} =
+               Index.index(pid, "First collision owner", %{type: :first}, embedding: embedding)
+
+      assert {:error, :invalid_entry_identity} =
+               Index.index(pid, "Second collision owner", %{type: :second}, embedding: embedding)
+
+      assert ControlledWriter.call_count(agent_id) == 1
+      assert {:ok, %{content: "First collision owner"}} = Index.get(pid, duplicate_id)
+      assert Process.alive?(pid)
+    end
+
+    test "validation regression: permanent caller errors consume no pending state or dispatch" do
+      agent_id = "preflight_#{System.unique_integer([:positive])}"
+      ControlledWriter.configure(agent_id, :success)
+
+      {:ok, pid} =
+        Index.start_link(
+          agent_id: agent_id,
+          backend: :dual,
+          persistent_writer: ControlledWriter,
+          name: nil
+        )
+
+      on_exit(fn ->
+        ControlledWriter.disarm(agent_id)
+        if Process.alive?(pid), do: GenServer.stop(pid)
+      end)
+
+      valid_embedding = valid_persistent_embedding()
+
+      assert {:error, {:invalid_legacy_embedding, :invalid_embedding}} =
+               Index.index(pid, "Wrong dimensions", %{}, embedding: [0.5])
+
+      assert {:error, {:invalid_legacy_embedding, :invalid_metadata}} =
+               Index.index(pid, "Non JSON metadata", %{pid: self()}, embedding: valid_embedding)
+
+      assert {:error, {:invalid_legacy_embedding, :invalid_metadata}} =
+               Index.index(
+                 pid,
+                 "Oversized metadata",
+                 %{value: String.duplicate("m", 65_537)},
+                 embedding: valid_embedding
+               )
+
+      assert {:error, {:invalid_legacy_embedding, :invalid_content}} =
+               Index.index(pid, String.duplicate("c", 65_537), %{}, embedding: valid_embedding)
+
+      assert {:error, {:invalid_legacy_embedding, :invalid_metadata}} =
+               Index.batch_index(
+                 pid,
+                 [
+                   {"Valid batch member", %{type: :valid}},
+                   {"Invalid batch member", %{pid: self()}}
+                 ],
+                 embedding: valid_embedding
+               )
+
+      assert ControlledWriter.call_count(agent_id) == 0
+      assert Index.stats(pid).entry_count == 0
+
+      state = :sys.get_state(pid)
+      assert state.pending_sync == MapSet.new()
+      assert state.pending_group_members == %{}
+      assert state.id_aliases == %{}
+      assert state.next_insertion_sequence == 0
+      assert Process.alive?(pid)
+    end
+
+    test "malformed writer envelopes never acknowledge durability or crash the index" do
+      agent_id = "malformed_writer_#{System.unique_integer([:positive])}"
+      ControlledWriter.configure(agent_id, :bare_ok)
+
+      {:ok, pid} =
+        Index.start_link(
+          agent_id: agent_id,
+          backend: :dual,
+          persistent_writer: ControlledWriter,
+          name: nil
+        )
+
+      on_exit(fn ->
+        ControlledWriter.disarm(agent_id)
+        if Process.alive?(pid), do: GenServer.stop(pid)
+      end)
+
+      embedding = valid_persistent_embedding()
+
+      assert {:error, :malformed_persistence_result} =
+               Index.index(pid, "Malformed eager", %{}, embedding: embedding)
+
+      assert {:error, :malformed_persistence_result} =
+               Index.batch_index(pid, [{"Malformed batch", %{type: :batch}}],
+                 embedding: embedding
+               )
+
+      assert Index.stats(pid).entry_count == 0
+      ControlledWriter.set_mode(agent_id, :transient_error)
+
+      assert {:ok, pending_id} =
+               Index.index(pid, "Pending for malformed sync", %{type: :pending},
+                 embedding: embedding
+               )
+
+      pending_state = :sys.get_state(pid)
+      ControlledWriter.set_mode(agent_id, :bare_ok)
+      assert {:error, :malformed_persistence_result} = Index.sync_to_persistent(pid)
+
+      state_after = :sys.get_state(pid)
+      assert state_after.pending_sync == pending_state.pending_sync
+      assert state_after.pending_entry_orders == pending_state.pending_entry_orders
+      assert state_after.pending_group_members == pending_state.pending_group_members
+      assert state_after.id_aliases == pending_state.id_aliases
+      assert {:ok, %{id: ^pending_id}} = Index.get(pid, pending_id)
+      assert Process.alive?(pid)
+    end
+
+    test "permanent writer rejection is not acknowledged as retryable pending state" do
+      agent_id = "permanent_writer_#{System.unique_integer([:positive])}"
+      ControlledWriter.configure(agent_id, :permanent_error)
+
+      {:ok, pid} =
+        Index.start_link(
+          agent_id: agent_id,
+          backend: :dual,
+          persistent_writer: ControlledWriter,
+          name: nil
+        )
+
+      on_exit(fn ->
+        ControlledWriter.disarm(agent_id)
+        if Process.alive?(pid), do: GenServer.stop(pid)
+      end)
+
+      assert {:error, :protected_vector_row} =
+               Index.index(pid, "Protected durable conflict", %{},
+                 embedding: valid_persistent_embedding()
+               )
+
+      assert Index.stats(pid).entry_count == 0
+      assert :sys.get_state(pid).pending_sync == MapSet.new()
+      assert Process.alive?(pid)
     end
   end
 
@@ -258,4 +544,6 @@ defmodule Arbor.Memory.IndexTest do
       GenServer.stop(pid)
     end
   end
+
+  defp valid_persistent_embedding, do: List.duplicate(0.5, @persistent_dimension)
 end

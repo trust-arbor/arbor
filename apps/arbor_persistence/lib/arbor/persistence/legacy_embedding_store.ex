@@ -3,22 +3,48 @@ defmodule Arbor.Persistence.LegacyEmbeddingStore do
 
   import Ecto.Query
 
+  alias Arbor.Contracts.Persistence.VectorRecord
   alias Arbor.Identifiers
   alias Arbor.Persistence.Repo
   alias Arbor.Persistence.Schemas.MemoryEmbedding
 
   require Logger
 
-  @spec store(String.t(), String.t(), [float()], map()) ::
+  @spec store(String.t(), String.t(), [float()], map(), keyword()) ::
           {:ok, String.t()} | {:error, term()}
-  def store(agent_id, content, embedding, metadata) do
-    content_hash = compute_content_hash(content)
-    id = Map.get(metadata, :id) || Map.get(metadata, "id") || Identifiers.generate_id("emb_")
+  def store(agent_id, content, embedding, metadata, opts \\ []) do
+    with {:ok, repo} <- repo_from_opts(opts),
+         {:ok, normalized_embedding} <- validate(agent_id, content, embedding, metadata) do
+      content_hash = compute_content_hash(content)
+      id = Map.get(metadata, :id) || Map.get(metadata, "id") || Identifiers.generate_id("emb_")
 
-    if is_binary(id) and protected_vector_id?(id) do
-      {:error, :protected_vector_row}
-    else
-      store_legacy_embedding(agent_id, id, content, content_hash, embedding, metadata)
+      if protected_vector_global_id?(repo, id) do
+        {:error, :protected_vector_row}
+      else
+        store_legacy_embedding(
+          repo,
+          agent_id,
+          id,
+          content,
+          content_hash,
+          normalized_embedding,
+          metadata
+        )
+      end
+    end
+  end
+
+  @spec validate(String.t(), String.t(), [float()], map()) ::
+          {:ok, [float()]} | {:error, {:invalid_legacy_embedding, atom()}}
+  def validate(agent_id, content, embedding, metadata) do
+    with :ok <- validate_agent_id(agent_id),
+         :ok <- validate_content(content),
+         :ok <- validate_metadata(metadata),
+         :ok <- validate_requested_id(metadata),
+         :ok <- validate_metadata_column(metadata, :type, 50),
+         :ok <- validate_metadata_column(metadata, :source, 255),
+         {:ok, normalized_embedding} <- normalize_embedding(embedding) do
+      {:ok, normalized_embedding}
     end
   end
 
@@ -93,21 +119,23 @@ defmodule Arbor.Persistence.LegacyEmbeddingStore do
         :ok
 
       {0, _} ->
-        if protected_vector_id?(agent_id, embedding_id),
+        if protected_vector_agent_id?(agent_id, embedding_id),
           do: {:error, :protected_vector_row},
           else: {:error, :not_found}
     end
   end
 
-  @spec count(String.t()) :: non_neg_integer()
-  def count(agent_id) do
-    query =
-      from(e in legacy_rows(),
-        where: e.agent_id == ^agent_id,
-        select: count(e.id)
-      )
+  @spec count(String.t(), keyword()) :: non_neg_integer() | {:error, :invalid_options}
+  def count(agent_id, opts \\ []) do
+    with {:ok, repo} <- repo_from_opts(opts) do
+      query =
+        from(e in legacy_rows(),
+          where: e.agent_id == ^agent_id,
+          select: count(e.id)
+        )
 
-    Repo.one(query) || 0
+      repo.one(query) || 0
+    end
   end
 
   @spec stats(String.t()) :: map()
@@ -149,60 +177,73 @@ defmodule Arbor.Persistence.LegacyEmbeddingStore do
     end
   end
 
-  @spec store_batch_with_ids(String.t(), [{String.t(), [float()], map()}]) ::
+  @spec store_batch_with_ids(String.t(), [{String.t(), [float()], map()}], keyword()) ::
           {:ok, [String.t()]} | {:error, term()}
-  def store_batch_with_ids(_agent_id, []), do: {:ok, []}
+  def store_batch_with_ids(agent_id, entries, opts \\ [])
 
-  def store_batch_with_ids(agent_id, entries) when is_binary(agent_id) and is_list(entries) do
-    with {:ok, rows} <- build_batch_rows(agent_id, entries),
+  def store_batch_with_ids(_agent_id, [], opts) do
+    with {:ok, _repo} <- repo_from_opts(opts), do: {:ok, []}
+  end
+
+  def store_batch_with_ids(agent_id, entries, opts)
+      when is_binary(agent_id) and is_list(entries) do
+    with {:ok, repo} <- repo_from_opts(opts),
+         {:ok, normalized_entries} <- validate_batch(agent_id, entries),
+         {:ok, rows} <- build_batch_rows(agent_id, normalized_entries),
          :ok <- validate_distinct_batch_hashes(rows) do
-      transact_batch(agent_id, rows)
+      transact_batch(repo, agent_id, rows)
     end
   end
 
-  def store_batch_with_ids(_agent_id, _entries), do: {:error, :invalid_batch}
+  def store_batch_with_ids(_agent_id, _entries, _opts), do: {:error, :invalid_batch}
 
-  @spec get(String.t(), String.t()) :: {:ok, map()} | {:error, :not_found}
-  def get(agent_id, embedding_id) do
-    query =
-      from(e in legacy_rows(),
-        where: e.agent_id == ^agent_id and e.id == ^embedding_id
-      )
+  @spec get(String.t(), String.t(), keyword()) ::
+          {:ok, map()} | {:error, :not_found | :invalid_options}
+  def get(agent_id, embedding_id, opts \\ []) do
+    with {:ok, repo} <- repo_from_opts(opts) do
+      query =
+        from(e in legacy_rows(),
+          where: e.agent_id == ^agent_id and e.id == ^embedding_id
+        )
 
-    case Repo.one(query) do
-      nil ->
-        {:error, :not_found}
+      case repo.one(query) do
+        nil ->
+          {:error, :not_found}
 
-      record ->
-        {:ok,
-         %{
-           id: record.id,
-           agent_id: record.agent_id,
-           content: record.content,
-           content_hash: record.content_hash,
-           embedding: record.embedding,
-           memory_type: record.memory_type,
-           source: record.source,
-           metadata: record.metadata,
-           inserted_at: record.inserted_at,
-           updated_at: record.updated_at
-         }}
+        record ->
+          {:ok,
+           %{
+             id: record.id,
+             agent_id: record.agent_id,
+             content: record.content,
+             content_hash: record.content_hash,
+             embedding: record.embedding,
+             memory_type: record.memory_type,
+             source: record.source,
+             metadata: record.metadata,
+             inserted_at: record.inserted_at,
+             updated_at: record.updated_at
+           }}
+      end
     end
   end
 
-  @spec delete_all(String.t()) :: {:ok, non_neg_integer()}
-  def delete_all(agent_id) do
-    query =
-      from(e in legacy_rows(),
-        where: e.agent_id == ^agent_id
-      )
+  @spec delete_all(String.t(), keyword()) ::
+          {:ok, non_neg_integer()} | {:error, :invalid_options}
+  def delete_all(agent_id, opts \\ []) do
+    with {:ok, repo} <- repo_from_opts(opts) do
+      query =
+        from(e in legacy_rows(),
+          where: e.agent_id == ^agent_id
+        )
 
-    {count, _} = Repo.delete_all(query)
-    Logger.info("Deleted #{count} embeddings for agent #{agent_id}")
-    {:ok, count}
+      {count, _} = repo.delete_all(query)
+      Logger.info("Deleted #{count} embeddings for agent #{agent_id}")
+      {:ok, count}
+    end
   end
 
-  defp store_legacy_embedding(agent_id, id, content, content_hash, embedding, metadata) do
+  defp store_legacy_embedding(repo, agent_id, id, content, content_hash, embedding, metadata) do
     attrs = %{
       id: id,
       agent_id: agent_id,
@@ -216,7 +257,7 @@ defmodule Arbor.Persistence.LegacyEmbeddingStore do
 
     changeset = MemoryEmbedding.changeset(%MemoryEmbedding{}, attrs)
 
-    case insert_legacy_changeset(changeset, agent_id, content_hash) do
+    case insert_legacy_changeset(repo, changeset, agent_id, content_hash) do
       {:ok, %MemoryEmbedding{} = record} ->
         if is_nil(record.vector_protocol) and is_nil(record.source_namespace) do
           Logger.debug("Stored embedding #{record.id} for agent #{agent_id}")
@@ -278,8 +319,8 @@ defmodule Arbor.Persistence.LegacyEmbeddingStore do
     if length(hashes) == length(Enum.uniq(hashes)), do: :ok, else: {:error, :invalid_batch}
   end
 
-  defp transact_batch(agent_id, rows) do
-    case Repo.transaction(fn -> insert_batch_or_rollback(rows) end) do
+  defp transact_batch(repo, agent_id, rows) do
+    case repo.transaction(fn -> insert_batch_or_rollback(repo, rows) end) do
       {:ok, ids} ->
         Logger.debug("Batch stored #{length(ids)} embeddings for agent #{agent_id}")
         {:ok, ids}
@@ -296,13 +337,13 @@ defmodule Arbor.Persistence.LegacyEmbeddingStore do
       {:error, error}
   end
 
-  defp insert_batch_or_rollback(rows) do
-    if Enum.any?(rows, &protected_vector_id?(&1.id)) do
-      Repo.rollback(:protected_vector_row)
+  defp insert_batch_or_rollback(repo, rows) do
+    if Enum.any?(rows, &protected_vector_global_id?(repo, &1.id)) do
+      repo.rollback(:protected_vector_row)
     end
 
     {count, returned_rows} =
-      Repo.insert_all(MemoryEmbedding, rows,
+      repo.insert_all(MemoryEmbedding, rows,
         on_conflict: legacy_conflict_query(),
         conflict_target: [:agent_id, :content_hash],
         returning: [:id, :content_hash]
@@ -313,7 +354,7 @@ defmodule Arbor.Persistence.LegacyEmbeddingStore do
          {:ok, ids} <- authoritative_batch_ids(rows, returned_rows) do
       ids
     else
-      _protected_or_malformed -> Repo.rollback(:protected_vector_row)
+      _protected_or_malformed -> repo.rollback(:protected_vector_row)
     end
   end
 
@@ -338,23 +379,23 @@ defmodule Arbor.Persistence.LegacyEmbeddingStore do
     )
   end
 
-  defp insert_legacy_changeset(changeset, agent_id, content_hash) do
-    Repo.insert(changeset,
+  defp insert_legacy_changeset(repo, changeset, agent_id, content_hash) do
+    repo.insert(changeset,
       on_conflict: legacy_conflict_query(),
       conflict_target: [:agent_id, :content_hash],
       returning: true
     )
   rescue
     error in Ecto.StaleEntryError ->
-      if protected_vector_hash?(agent_id, content_hash) do
+      if protected_vector_hash?(repo, agent_id, content_hash) do
         {:error, :protected_vector_row}
       else
         reraise(error, __STACKTRACE__)
       end
   end
 
-  defp protected_vector_hash?(agent_id, content_hash) do
-    Repo.exists?(
+  defp protected_vector_hash?(repo, agent_id, content_hash) do
+    repo.exists?(
       from(e in MemoryEmbedding,
         where: e.agent_id == ^agent_id and e.content_hash == ^content_hash,
         where: not is_nil(e.vector_protocol) or not is_nil(e.source_namespace)
@@ -362,7 +403,7 @@ defmodule Arbor.Persistence.LegacyEmbeddingStore do
     )
   end
 
-  defp protected_vector_id?(agent_id, id) do
+  defp protected_vector_agent_id?(agent_id, id) do
     Repo.exists?(
       from(e in MemoryEmbedding,
         where: e.agent_id == ^agent_id and e.id == ^id,
@@ -371,14 +412,146 @@ defmodule Arbor.Persistence.LegacyEmbeddingStore do
     )
   end
 
-  defp protected_vector_id?(id) do
-    Repo.exists?(
+  defp protected_vector_global_id?(repo, id) do
+    repo.exists?(
       from(e in MemoryEmbedding,
         where: e.id == ^id,
         where: not is_nil(e.vector_protocol) or not is_nil(e.source_namespace)
       )
     )
   end
+
+  defp repo_from_opts([]), do: {:ok, Repo}
+  defp repo_from_opts(repo: repo) when is_atom(repo), do: {:ok, repo}
+  defp repo_from_opts(_opts), do: {:error, :invalid_options}
+
+  defp validate_batch(agent_id, entries) do
+    Enum.reduce_while(entries, {:ok, []}, fn
+      {content, embedding, metadata}, {:ok, normalized} ->
+        case validate(agent_id, content, embedding, metadata) do
+          {:ok, normalized_embedding} ->
+            {:cont, {:ok, [{content, normalized_embedding, metadata} | normalized]}}
+
+          {:error, _reason} = error ->
+            {:halt, error}
+        end
+
+      _invalid, _acc ->
+        {:halt, invalid(:invalid_batch)}
+    end)
+    |> case do
+      {:ok, normalized} -> {:ok, Enum.reverse(normalized)}
+      error -> error
+    end
+  rescue
+    _error -> invalid(:invalid_batch)
+  catch
+    _kind, _reason -> invalid(:invalid_batch)
+  end
+
+  defp validate_agent_id(agent_id) do
+    case VectorRecord.validate_identity(agent_id, "legacy", "legacy") do
+      {:ok, _identity} -> :ok
+      {:error, :invalid_vector_identity} -> invalid(:invalid_agent_id)
+    end
+  end
+
+  defp validate_content(content) when is_binary(content) do
+    with true <- String.valid?(content),
+         true <- String.trim(content) != "",
+         {:ok, _bytes} <- VectorRecord.canonical_payload_bytes(content) do
+      :ok
+    else
+      _invalid -> invalid(:invalid_content)
+    end
+  end
+
+  defp validate_content(_content), do: invalid(:invalid_content)
+
+  defp validate_metadata(metadata) when is_map(metadata) and not is_struct(metadata) do
+    case VectorRecord.canonical_payload_bytes(metadata) do
+      {:ok, _bytes} -> :ok
+      {:error, _reason} -> invalid(:invalid_metadata)
+    end
+  end
+
+  defp validate_metadata(_metadata), do: invalid(:invalid_metadata)
+
+  defp validate_requested_id(metadata) do
+    case aliased_metadata_value(metadata, :id) do
+      :missing ->
+        :ok
+
+      {:ok, id} ->
+        if valid_text?(id, VectorRecord.limits().id_bytes),
+          do: :ok,
+          else: invalid(:invalid_id)
+
+      :collision ->
+        invalid(:invalid_metadata)
+    end
+  end
+
+  defp validate_metadata_column(metadata, key, max_bytes) do
+    case aliased_metadata_value(metadata, key) do
+      :missing ->
+        :ok
+
+      {:ok, nil} ->
+        :ok
+
+      {:ok, value} ->
+        case bounded_legacy_text(value, max_bytes) do
+          {:ok, _text} -> :ok
+          :error -> invalid(legacy_column_error(key))
+        end
+
+      :collision ->
+        invalid(:invalid_metadata)
+    end
+  end
+
+  defp normalize_embedding(embedding) do
+    case VectorRecord.normalize_vector(embedding) do
+      {:ok, normalized_embedding} -> {:ok, normalized_embedding}
+      {:error, :invalid_vector} -> invalid(:invalid_embedding)
+    end
+  end
+
+  defp aliased_metadata_value(metadata, key) do
+    string_key = Atom.to_string(key)
+
+    case {Map.fetch(metadata, key), Map.fetch(metadata, string_key)} do
+      {:error, :error} -> :missing
+      {{:ok, value}, :error} -> {:ok, value}
+      {:error, {:ok, value}} -> {:ok, value}
+      {{:ok, _atom_value}, {:ok, _string_value}} -> :collision
+    end
+  end
+
+  defp bounded_legacy_text(value, max_bytes)
+       when is_binary(value) or is_atom(value) or is_integer(value) or is_float(value) or
+              is_boolean(value) do
+    text = to_string(value)
+
+    if byte_size(text) <= max_bytes and String.valid?(text), do: {:ok, text}, else: :error
+  rescue
+    _error -> :error
+  end
+
+  defp bounded_legacy_text(_value, _max_bytes), do: :error
+
+  defp valid_text?(value, max_bytes) when is_binary(value) do
+    byte_size(value) > 0 and byte_size(value) <= max_bytes and String.valid?(value) and
+      String.trim(value) != ""
+  end
+
+  defp valid_text?(_value, _max_bytes), do: false
+
+  defp legacy_column_error(:type), do: :invalid_memory_type
+  defp legacy_column_error(:source), do: :invalid_source
+
+  defp invalid(reason), do: {:error, {:invalid_legacy_embedding, reason}}
 
   defp legacy_conflict_query do
     from(e in MemoryEmbedding,

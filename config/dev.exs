@@ -61,7 +61,8 @@ else
     busy_timeout: 5_000,
     journal_mode: :wal,
     cache_size: -64_000,
-    temp_store: :memory
+    temp_store: :memory,
+    custom_pragmas: [recursive_triggers: true]
 
   config :arbor_memory,
     persistence_backend: Arbor.Persistence.QueryableStore.Postgres,

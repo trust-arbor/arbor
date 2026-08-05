@@ -176,7 +176,8 @@ else
     database: Path.expand("~/.arbor/arbor_test.db"),
     pool: Ecto.Adapters.SQL.Sandbox,
     busy_timeout: 5_000,
-    journal_mode: :wal
+    journal_mode: :wal,
+    custom_pragmas: [recursive_triggers: true]
 end
 
 # Memory tests use ETS by default (no database required)
