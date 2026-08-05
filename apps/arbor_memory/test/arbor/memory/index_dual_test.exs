@@ -21,17 +21,19 @@ defmodule Arbor.Memory.IndexDualTest do
   defmodule FailFirstWriter do
     @behaviour Arbor.Memory.Index.PersistentWriter
 
-    def arm(agent_id), do: :persistent_term.put({__MODULE__, agent_id}, :fail)
+    def arm(agent_id, failures \\ 1) when is_integer(failures) and failures > 0,
+      do: :persistent_term.put({__MODULE__, agent_id}, failures)
+
     def disarm(agent_id), do: :persistent_term.erase({__MODULE__, agent_id})
 
     @impl true
     def store(agent_id, content, embedding, metadata) do
-      case :persistent_term.get({__MODULE__, agent_id}, :pass) do
-        :fail ->
-          :persistent_term.put({__MODULE__, agent_id}, :pass)
+      case :persistent_term.get({__MODULE__, agent_id}, 0) do
+        failures when failures > 0 ->
+          :persistent_term.put({__MODULE__, agent_id}, failures - 1)
           {:error, :injected_eager_failure}
 
-        :pass ->
+        0 ->
           Arbor.Memory.Embedding.store(agent_id, content, embedding, metadata)
       end
     end
@@ -272,6 +274,77 @@ defmodule Arbor.Memory.IndexDualTest do
       assert {:error, :not_found} = Embedding.get(agent_id, authoritative_id)
       assert {:error, :not_found} = Index.get(pid, acknowledged_id)
       assert {:error, :not_found} = Index.get(pid, authoritative_id)
+      assert Index.stats(pid).entry_count == 0
+    end
+
+    test "authority regression: same-content pending writes converge every acknowledged id" do
+      agent_id = durable_unique("test_dual_pending_dedupe")
+      FailFirstWriter.arm(agent_id, 3)
+
+      {:ok, pid} =
+        Index.start_link(
+          agent_id: agent_id,
+          backend: :dual,
+          persistent_writer: FailFirstWriter,
+          name: {:via, Registry, {Arbor.Memory.Registry, {:test_dual_pending_dedupe, agent_id}}}
+        )
+
+      on_exit(fn ->
+        FailFirstWriter.disarm(agent_id)
+        if Process.alive?(pid), do: GenServer.stop(pid)
+        Embedding.delete_all(agent_id)
+      end)
+
+      duplicate_content = "Pending duplicate identity"
+      unrelated_content = "Pending unrelated identity"
+
+      assert {:ok, first_id} =
+               Index.index(pid, duplicate_content, %{type: :first},
+                 embedding: generate_embedding(51)
+               )
+
+      assert {:ok, unrelated_id} =
+               Index.index(pid, unrelated_content, %{type: :unrelated},
+                 embedding: generate_embedding(52)
+               )
+
+      assert {:ok, second_id} =
+               Index.index(pid, duplicate_content, %{type: :second},
+                 embedding: generate_embedding(53)
+               )
+
+      assert MapSet.size(MapSet.new([first_id, unrelated_id, second_id])) == 3
+      assert Embedding.count(agent_id) == 0
+      assert Index.stats(pid).entry_count == 3
+
+      authoritative_id = min(first_id, second_id)
+      old_alias_id = max(first_id, second_id)
+
+      assert {:ok, 3} = Index.sync_to_persistent(pid)
+      assert Embedding.count(agent_id) == 2
+      assert Index.stats(pid).entry_count == 2
+
+      assert {:ok, %{id: ^authoritative_id, content: ^duplicate_content}} =
+               Index.get(pid, first_id)
+
+      assert {:ok, %{id: ^authoritative_id, content: ^duplicate_content}} =
+               Index.get(pid, second_id)
+
+      assert {:ok, %{id: ^unrelated_id, content: ^unrelated_content}} =
+               Index.get(pid, unrelated_id)
+
+      assert {:ok, %{id: ^authoritative_id}} = Embedding.get(agent_id, authoritative_id)
+      assert {:ok, %{id: ^unrelated_id}} = Embedding.get(agent_id, unrelated_id)
+
+      assert :ok = Index.delete(pid, old_alias_id)
+      assert {:error, :not_found} = Index.get(pid, first_id)
+      assert {:error, :not_found} = Index.get(pid, second_id)
+      assert {:error, :not_found} = Embedding.get(agent_id, authoritative_id)
+      assert {:ok, %{id: ^unrelated_id}} = Index.get(pid, unrelated_id)
+      assert Index.stats(pid).entry_count == 1
+
+      assert :ok = Index.delete(pid, unrelated_id)
+      assert {:error, :not_found} = Embedding.get(agent_id, unrelated_id)
       assert Index.stats(pid).entry_count == 0
     end
 

@@ -223,6 +223,10 @@ defmodule Arbor.Memory.Index do
   Flushes entries that haven't been persisted yet to pgvector.
   Only useful in `:dual` backend mode.
 
+  The returned count is the number of acknowledged local entries that
+  converged. Same-content entries may converge to one durable row while each
+  acknowledged ID remains usable as an alias.
+
   ## Examples
 
       {:ok, count} = Arbor.Memory.Index.sync_to_persistent(pid)
@@ -769,7 +773,7 @@ defmodule Arbor.Memory.Index do
   end
 
   defp do_sync_to_persistent(state) do
-    pending_ids = MapSet.to_list(state.pending_sync)
+    pending_ids = state.pending_sync |> MapSet.to_list() |> Enum.sort()
 
     if pending_ids == [] do
       {:ok, 0, state}
@@ -779,22 +783,24 @@ defmodule Arbor.Memory.Index do
       if pending_entries == [] do
         {:ok, 0, %{state | pending_sync: MapSet.new()}}
       else
-        entries =
-          Enum.map(pending_entries, fn {id, entry} ->
-            {entry.content, entry.embedding, Map.put(entry.metadata, :id, id)}
-          end)
+        groups = group_pending_entries(pending_entries)
+        entries = Enum.map(groups, &pending_group_batch_entry/1)
 
         case batch_store_with_ids(state, entries) do
           {:ok, authoritative_ids}
           when is_list(authoritative_ids) and length(authoritative_ids) == length(entries) ->
-            new_state =
-              pending_entries
-              |> Enum.zip(authoritative_ids)
-              |> Enum.reduce(state, fn {{requested_id, entry}, authoritative_id}, acc ->
-                converge_entry_id(acc, requested_id, authoritative_id, entry)
-              end)
+            if Enum.all?(authoritative_ids, &is_binary/1) do
+              new_state =
+                groups
+                |> Enum.zip(authoritative_ids)
+                |> Enum.reduce(state, fn {group, authoritative_id}, acc ->
+                  converge_pending_group(acc, group, authoritative_id)
+                end)
 
-            {:ok, length(authoritative_ids), new_state}
+              {:ok, length(pending_entries), new_state}
+            else
+              {:error, :malformed_persistence_result}
+            end
 
           {:ok, _malformed_ids} ->
             {:error, :malformed_persistence_result}
@@ -872,6 +878,31 @@ defmodule Arbor.Memory.Index do
     end
   end
 
+  defp group_pending_entries(pending_entries) do
+    pending_entries
+    |> Enum.group_by(fn {_id, entry} -> :crypto.hash(:sha256, entry.content) end)
+    |> Enum.map(fn {_content_digest, members} ->
+      [{representative_id, representative_entry} | _rest] = Enum.sort_by(members, &elem(&1, 0))
+
+      %{
+        member_ids: Enum.map(members, &elem(&1, 0)),
+        representative_id: representative_id,
+        representative_entry: representative_entry
+      }
+    end)
+    |> Enum.sort_by(& &1.representative_id)
+  end
+
+  defp pending_group_batch_entry(group) do
+    entry = group.representative_entry
+
+    {
+      entry.content,
+      entry.embedding,
+      Map.put(entry.metadata, :id, group.representative_id)
+    }
+  end
+
   defp eager_store(state, entry, metadata) do
     state.persistent_writer.store(state.agent_id, entry.content, entry.embedding, metadata)
   rescue
@@ -888,26 +919,39 @@ defmodule Arbor.Memory.Index do
     kind, reason -> {:error, {kind, reason}}
   end
 
-  defp converge_entry_id(state, requested_id, authoritative_id, entry)
-       when is_binary(authoritative_id) do
-    if requested_id != authoritative_id do
-      :ets.delete(state.table, requested_id)
-    end
+  defp converge_pending_group(state, group, authoritative_id) do
+    member_ids = Enum.sort(group.member_ids)
+    member_id_set = MapSet.new(member_ids)
 
-    :ets.insert(state.table, {authoritative_id, %{entry | id: authoritative_id}})
+    Enum.each(member_ids, &:ets.delete(state.table, &1))
+
+    authoritative_entry = %{group.representative_entry | id: authoritative_id}
+    :ets.insert(state.table, {authoritative_id, authoritative_entry})
 
     aliases =
       state.id_aliases
+      |> Enum.reject(fn {alias_id, _target_id} -> alias_id == authoritative_id end)
       |> Map.new(fn
-        {alias_id, ^requested_id} -> {alias_id, authoritative_id}
-        pair -> pair
+        {alias_id, target_id} ->
+          if MapSet.member?(member_id_set, target_id),
+            do: {alias_id, authoritative_id},
+            else: {alias_id, target_id}
       end)
-      |> maybe_put_alias(requested_id, authoritative_id)
+      |> then(fn aliases ->
+        Enum.reduce(member_ids, aliases, fn member_id, acc ->
+          maybe_put_alias(acc, member_id, authoritative_id)
+        end)
+      end)
+
+    pending_sync =
+      Enum.reduce(member_ids, state.pending_sync, fn member_id, pending ->
+        MapSet.delete(pending, member_id)
+      end)
 
     %{
       state
       | entry_count: :ets.info(state.table, :size),
-        pending_sync: MapSet.delete(state.pending_sync, requested_id),
+        pending_sync: pending_sync,
         id_aliases: aliases
     }
   end
