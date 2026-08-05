@@ -7,7 +7,6 @@ defmodule Arbor.Memory.ReflectionProcessorTest do
     GoalStore,
     IdentityConsolidator,
     ReflectionProcessor,
-    Relationship,
     SelfKnowledge,
     WorkingMemory
   }
