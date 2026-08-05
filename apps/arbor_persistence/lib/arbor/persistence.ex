@@ -878,7 +878,7 @@ defmodule Arbor.Persistence do
   def event_identity(name, backend, stream_id, event_id, opts \\ []) do
     with :ok <- validate_store_name(name),
          :ok <- validate_backend(backend, :event_identity, 3),
-         :ok <- EventLog.validate_identity_read(stream_id, event_id) do
+         {:ok, _max_event_number} <- EventLog.validate_identity_read(stream_id, event_id, opts) do
       backend.event_identity(stream_id, event_id, Keyword.put(opts, :name, name))
     end
   end

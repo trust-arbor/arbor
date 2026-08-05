@@ -709,7 +709,7 @@ defmodule Arbor.Persistence.EventLog.Ecto do
 
   @impl Arbor.Persistence.EventLog
   def event_identity(stream_id, event_id, opts \\ []) do
-    with :ok <- EventLog.validate_identity_read(stream_id, event_id) do
+    with {:ok, max_event_number} <- EventLog.validate_identity_read(stream_id, event_id, opts) do
       repo = Keyword.get(opts, :repo, Repo)
 
       identity =
@@ -717,6 +717,7 @@ defmodule Arbor.Persistence.EventLog.Ecto do
           where: e.stream_id == ^stream_id and e.id == ^event_id,
           limit: 1
         )
+        |> maybe_bound_identity(max_event_number)
         |> repo.one()
         |> case do
           nil ->
@@ -735,6 +736,12 @@ defmodule Arbor.Persistence.EventLog.Ecto do
     e ->
       Logger.error("Failed to read event identity for #{stream_id}: #{inspect(e)}")
       {:error, {:read_failed, e}}
+  end
+
+  defp maybe_bound_identity(query, nil), do: query
+
+  defp maybe_bound_identity(query, max_event_number) do
+    from(e in query, where: e.event_number <= ^max_event_number)
   end
 
   @doc """

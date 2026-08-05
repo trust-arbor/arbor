@@ -520,6 +520,13 @@ defmodule Arbor.Persistence.EventLog.ETSTest do
       expected = Arbor.Persistence.EventLog.event_fingerprint("s1", event)
 
       assert {:ok, ^expected} = ETS.event_identity("s1", event.id, name: name)
+
+      assert {:ok, ^expected} =
+               ETS.event_identity("s1", event.id, name: name, max_event_number: 5)
+
+      assert {:ok, nil} =
+               ETS.event_identity("s1", event.id, name: name, max_event_number: 4)
+
       assert {:ok, nil} = ETS.event_identity("other-stream", event.id, name: name)
       assert {:ok, nil} = ETS.event_identity("s1", "missing-event", name: name)
     end

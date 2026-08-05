@@ -96,9 +96,9 @@ defmodule Arbor.Persistence.EventLog.ETS do
 
   @impl Arbor.Persistence.EventLog
   def event_identity(stream_id, event_id, opts) do
-    with :ok <- EventLog.validate_identity_read(stream_id, event_id) do
+    with {:ok, max_event_number} <- EventLog.validate_identity_read(stream_id, event_id, opts) do
       name = Keyword.fetch!(opts, :name)
-      GenServer.call(name, {:event_identity, stream_id, event_id})
+      GenServer.call(name, {:event_identity, stream_id, event_id, max_event_number})
     end
   end
 
@@ -435,13 +435,17 @@ defmodule Arbor.Persistence.EventLog.ETS do
     {:reply, {:ok, events}, state}
   end
 
-  def handle_call({:event_identity, stream_id, event_id}, _from, state) do
+  def handle_call({:event_identity, stream_id, event_id, max_event_number}, _from, state) do
     reply =
       case :ets.lookup(state.id_table, event_id) do
         [{^event_id, identity}] ->
           case normalize_identity(identity) do
-            {:ok, fingerprint, ^stream_id, _event_number, _global_position} ->
+            {:ok, fingerprint, ^stream_id, event_number, _global_position}
+            when is_nil(max_event_number) or event_number <= max_event_number ->
               {:ok, fingerprint}
+
+            {:ok, _fingerprint, ^stream_id, _event_number, _global_position} ->
+              {:ok, nil}
 
             {:ok, _fingerprint, nil, _event_number, _global_position} ->
               {:error, :identity_stream_unavailable}

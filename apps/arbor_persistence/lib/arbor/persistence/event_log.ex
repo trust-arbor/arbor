@@ -129,6 +129,9 @@ defmodule Arbor.Persistence.EventLog do
 
   `nil` means that exact stream-scoped identity is absent. This optional
   callback lets projections compare identities without scanning an event log.
+  `:max_event_number` optionally limits the lookup to identities at or before
+  that inclusive stream position, allowing callers to preserve a captured
+  stream snapshot while comparing projections.
   """
   @callback event_identity(stream_id(), event_id :: String.t(), opts()) ::
               {:ok, String.t() | nil} | {:error, term()}
@@ -322,13 +325,20 @@ defmodule Arbor.Persistence.EventLog do
   end
 
   @doc false
-  @spec validate_identity_read(stream_id(), term()) :: :ok | {:error, :invalid_precondition}
-  def validate_identity_read(stream_id, event_id) do
+  @spec validate_identity_read(stream_id(), term(), term()) ::
+          {:ok, non_neg_integer() | nil} | {:error, :invalid_precondition}
+  def validate_identity_read(stream_id, event_id, opts \\ []) do
     with :ok <- validate_stream_id(stream_id),
          true <-
            is_binary(event_id) and byte_size(event_id) > 0 and
-             byte_size(event_id) <= @max_string_bytes and String.valid?(event_id) do
-      :ok
+             byte_size(event_id) <= @max_string_bytes and String.valid?(event_id),
+         {:ok, opts} <- normalize_opts(opts),
+         max_event_number <- Keyword.get(opts, :max_event_number),
+         true <-
+           is_nil(max_event_number) or
+             (is_integer(max_event_number) and max_event_number >= 0 and
+                max_event_number <= @max_stream_position) do
+      {:ok, max_event_number}
     else
       _invalid -> {:error, :invalid_precondition}
     end

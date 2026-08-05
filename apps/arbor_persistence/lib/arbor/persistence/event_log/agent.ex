@@ -92,12 +92,13 @@ defmodule Arbor.Persistence.EventLog.Agent do
 
   @impl Arbor.Persistence.EventLog
   def event_identity(stream_id, event_id, opts) do
-    with :ok <- EventLog.validate_identity_read(stream_id, event_id) do
+    with {:ok, max_event_number} <- EventLog.validate_identity_read(stream_id, event_id, opts) do
       name = Keyword.fetch!(opts, :name)
 
       Agent.get(name, fn state ->
         case Map.get(state.event_index, event_id) do
-          %Event{stream_id: ^stream_id} = event ->
+          %Event{stream_id: ^stream_id, event_number: event_number} = event
+          when is_nil(max_event_number) or event_number <= max_event_number ->
             {:ok, EventLog.event_fingerprint(stream_id, event)}
 
           _absent_or_other_stream ->

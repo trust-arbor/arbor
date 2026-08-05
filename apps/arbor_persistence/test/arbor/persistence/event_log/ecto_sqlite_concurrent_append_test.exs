@@ -230,6 +230,32 @@ defmodule Arbor.Persistence.EventLog.EctoSQLiteConcurrentAppendTest do
     assert Enum.map(persisted, & &1.event_number) == Enum.to_list(1..writer_count)
   end
 
+  test "event identity lookups honor an inclusive snapshot event number" do
+    stream_id = "sqlite-identity-snapshot-#{System.unique_integer([:positive])}"
+
+    events = [
+      Event.new(stream_id, "ordinary", %{sequence: 1}),
+      Event.new(stream_id, "ordinary", %{sequence: 2})
+    ]
+
+    assert {:ok, [_first, second]} =
+             EventLog.append(stream_id, events, repo: SQLitePoolRepo)
+
+    expected = Arbor.Persistence.EventLog.event_fingerprint(stream_id, second)
+
+    assert {:ok, nil} =
+             EventLog.event_identity(stream_id, second.id,
+               repo: SQLitePoolRepo,
+               max_event_number: 1
+             )
+
+    assert {:ok, ^expected} =
+             EventLog.event_identity(stream_id, second.id,
+               repo: SQLitePoolRepo,
+               max_event_number: 2
+             )
+  end
+
   test "pooled exact-version appends retain one-winner CAS" do
     writer_count = 24
     stream_id = "sqlite-cas-#{System.unique_integer([:positive])}"
