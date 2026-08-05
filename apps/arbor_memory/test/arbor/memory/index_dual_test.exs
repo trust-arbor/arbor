@@ -16,28 +16,29 @@ defmodule Arbor.Memory.IndexDualTest do
   # Must match the pgvector column dimension (vector(768)); pgvector rejects a
   # mismatched insert. (Was 128, which crashed the dual-backend write once the
   # tests actually ran against Postgres.)
-  @test_agent_id "test_agent_dual_index"
   @dimension 768
 
   setup do
+    agent_id = durable_unique("test_agent_dual_index")
+
     # Repo is started + a Sandbox connection is checked out by DatabaseCase.
     # Clean up any existing test data
-    Embedding.delete_all(@test_agent_id)
+    Embedding.delete_all(agent_id)
 
     # Start an index in dual mode
     {:ok, pid} =
       Index.start_link(
-        agent_id: @test_agent_id,
+        agent_id: agent_id,
         backend: :dual,
-        name: {:via, Registry, {Arbor.Memory.Registry, {:test_dual, @test_agent_id}}}
+        name: {:via, Registry, {Arbor.Memory.Registry, {:test_dual, agent_id}}}
       )
 
     on_exit(fn ->
       if Process.alive?(pid), do: GenServer.stop(pid)
-      Embedding.delete_all(@test_agent_id)
+      Embedding.delete_all(agent_id)
     end)
 
-    {:ok, pid: pid}
+    {:ok, pid: pid, agent_id: agent_id}
   end
 
   defp generate_embedding(seed) do
@@ -69,34 +70,35 @@ defmodule Arbor.Memory.IndexDualTest do
       assert Index.backend_mode(pid) == :dual
     end
 
-    test "index writes to both ETS and pgvector", %{pid: pid} do
+    test "index writes to both ETS and pgvector", %{pid: pid, agent_id: agent_id} do
       embedding = generate_embedding(1)
-      {:ok, _id} = Index.index(pid, "Dual backend test", %{type: :fact}, embedding: embedding)
+      {:ok, id} = Index.index(pid, "Dual backend test", %{type: :fact}, embedding: embedding)
 
       # ETS write is synchronous
       assert Index.stats(pid).entry_count == 1
 
       # pgvector write is eager + async — wait deterministically for it to land
-      eventually(fn -> Embedding.count(@test_agent_id) == 1 end)
-      assert Embedding.count(@test_agent_id) == 1
+      eventually(fn -> match?({:ok, %{id: ^id}}, Embedding.get(agent_id, id)) end)
+      assert Embedding.count(agent_id) == 1
     end
 
-    test "recall checks ETS first (cache hit)", %{pid: pid} do
+    test "recall checks ETS first (cache hit)", %{pid: pid, agent_id: agent_id} do
       embedding = generate_embedding(1)
-      {:ok, _id} = Index.index(pid, "Cache hit test", %{type: :fact}, embedding: embedding)
+      {:ok, id} = Index.index(pid, "Cache hit test", %{type: :fact}, embedding: embedding)
 
       # Recall should find it in ETS
       {:ok, results} = Index.recall(pid, "Cache hit test", embedding: embedding, threshold: 0.0)
 
       assert results != []
       assert hd(results).content == "Cache hit test"
+      eventually(fn -> match?({:ok, %{id: ^id}}, Embedding.get(agent_id, id)) end)
     end
 
-    test "recall falls back to pgvector on cache miss", %{pid: pid} do
+    test "recall falls back to pgvector on cache miss", %{pid: pid, agent_id: agent_id} do
       embedding = generate_embedding(1)
 
       # Store directly in pgvector (bypassing ETS)
-      {:ok, _id} = Embedding.store(@test_agent_id, "Pgvector only", embedding, %{type: "fact"})
+      {:ok, _id} = Embedding.store(agent_id, "Pgvector only", embedding, %{type: "fact"})
 
       # Clear the ETS cache
       Index.clear(pid)
@@ -136,10 +138,10 @@ defmodule Arbor.Memory.IndexDualTest do
   end
 
   describe "warm_cache/2" do
-    test "loads entries from pgvector into ETS", %{pid: pid} do
+    test "loads entries from pgvector into ETS", %{pid: pid, agent_id: agent_id} do
       # First, store some entries in pgvector directly
       for i <- 1..5 do
-        Embedding.store(@test_agent_id, "Entry #{i}", generate_embedding(i), %{type: "fact"})
+        Embedding.store(agent_id, "Entry #{i}", generate_embedding(i), %{type: "fact"})
       end
 
       # Clear ETS
@@ -168,18 +170,19 @@ defmodule Arbor.Memory.IndexDualTest do
   end
 
   describe "sync_to_persistent/2" do
-    test "flushes pending entries to pgvector", %{pid: pid} do
+    test "flushes pending entries to pgvector", %{pid: pid, agent_id: agent_id} do
       embedding = generate_embedding(1)
 
       # Index with embedding (this creates a pending sync entry)
-      {:ok, _id} = Index.index(pid, "Sync test", %{type: :fact}, embedding: embedding)
+      {:ok, id} = Index.index(pid, "Sync test", %{type: :fact}, embedding: embedding)
+      eventually(fn -> match?({:ok, %{id: ^id}}, Embedding.get(agent_id, id)) end)
 
       # Explicitly flush pending entries — this is the function under test, and
       # it's synchronous, so no sleep/race.
       assert {:ok, _count} = Index.sync_to_persistent(pid)
 
       # Verify it's in pgvector
-      assert Embedding.count(@test_agent_id) >= 1
+      assert Embedding.count(agent_id) == 1
     end
 
     test "returns error for non-dual backend" do
@@ -197,12 +200,12 @@ defmodule Arbor.Memory.IndexDualTest do
   end
 
   describe "delete propagation" do
-    test "delete removes from both ETS and pgvector", %{pid: pid} do
+    test "delete removes from both ETS and pgvector", %{pid: pid, agent_id: agent_id} do
       embedding = generate_embedding(1)
       {:ok, id} = Index.index(pid, "Delete test", %{type: :fact}, embedding: embedding)
 
       # Wait for the eager pgvector write to land before deleting
-      eventually(fn -> Embedding.count(@test_agent_id) == 1 end)
+      eventually(fn -> match?({:ok, %{id: ^id}}, Embedding.get(agent_id, id)) end)
 
       # Delete
       :ok = Index.delete(pid, id)
