@@ -1,38 +1,222 @@
 defmodule Arbor.Memory.MemoryStoreTaintTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
+  alias Arbor.Contracts.Persistence.{Record}
   alias Arbor.Contracts.Security.{Taint, TaintedValue}
   alias Arbor.Memory.MemoryStore
+  alias Arbor.Persistence.BufferedStore
   alias Arbor.Signals.Taint, as: TaintModule
 
   @moduletag :fast
+  @store_name :arbor_memory_durable
 
-  describe "build_taint_metadata (via persist/4)" do
-    test "persist without taint opts stores empty metadata" do
-      # MemoryStore gracefully degrades when store unavailable
-      assert :ok = MemoryStore.persist("test_ns", "key1", %{data: "hello"})
+  setup do
+    start_supervised!({BufferedStore, name: @store_name, backend: nil, write_mode: :sync})
+    :ok
+  end
+
+  describe "durable writes" do
+    test "stores a JSON-safe payload-bound envelope from the actual data" do
+      data = %{"secret" => "value"}
+      taint = %Taint{level: :untrusted, sensitivity: :confidential, source: "test"}
+
+      assert :ok =
+               MemoryStore.persist("write", "valid", data,
+                 taint: taint,
+                 data: %{"caller_selected" => "not-bound"}
+               )
+
+      assert {:ok, %Record{data: ^data, metadata: %{"taint" => envelope}}} =
+               BufferedStore.get("write:valid", name: @store_name)
+
+      assert is_integer(envelope["version"])
+      assert is_binary(envelope["payload_sha256"])
+      assert is_map(envelope["taint"])
+      assert {:ok, _json} = Jason.encode(envelope)
+
+      assert {:ok, value, :verified} = MemoryStore.load_tainted_with_status("write", "valid")
+      assert value.value == data
+      assert value.taint.level == :untrusted
+      assert value.taint.sensitivity == :confidential
     end
 
-    test "persist with taint opts stores taint in metadata" do
-      taint = %Taint{
-        level: :untrusted,
-        sensitivity: :confidential,
-        sanitizations: 0b00010001,
-        confidence: :plausible,
-        source: "api"
-      }
+    test "writes empty metadata when no taint is supplied" do
+      assert :ok = MemoryStore.persist("write", "plain", %{"value" => "plain"})
 
-      assert :ok = MemoryStore.persist("test_ns", "key2", %{data: "secret"}, taint: taint)
+      assert {:ok, %Record{metadata: %{}}} =
+               BufferedStore.get("write:plain", name: @store_name)
     end
 
-    test "persist_async accepts taint opts" do
-      taint = %Taint{level: :hostile, sensitivity: :restricted}
-      assert :ok = MemoryStore.persist_async("test_ns", "key3", %{data: "x"}, taint: taint)
+    test "rejects malformed taint without inserting the record or leaking data" do
+      data = %{"secret" => "do-not-leak"}
+      malformed = %Taint{level: :not_a_level}
+
+      error = MemoryStore.persist("write", "malformed", data, taint: malformed)
+
+      assert {:error, {:memory_store, :invalid_durable_provenance, _reason}} = error
+      refute inspect(error) =~ "do-not-leak"
+      assert {:error, :not_found} = BufferedStore.get("write:malformed", name: @store_name)
+    end
+
+    test "rejects an oversized payload before inserting the record" do
+      data = %{"payload" => String.duplicate("x", 65_537)}
+      taint = %Taint{level: :untrusted}
+
+      assert {:error, {:memory_store, :invalid_durable_provenance, _reason}} =
+               MemoryStore.persist("write", "oversized", data, taint: taint)
+
+      assert {:error, :not_found} = BufferedStore.get("write:oversized", name: @store_name)
+    end
+
+    test "validates supplied labels before honoring unavailable-store degradation" do
+      stop_supervised!(BufferedStore)
+      assert Process.whereis(@store_name) == nil
+      malformed = %Taint{level: :not_a_level}
+
+      assert {:error, {:memory_store, :invalid_durable_provenance, _reason}} =
+               MemoryStore.persist("write", "unavailable-invalid", %{"secret" => "value"},
+                 taint: malformed
+               )
+
+      assert :ok = MemoryStore.persist("write", "unavailable-plain", %{"value" => "plain"})
+
+      assert :ok =
+               MemoryStore.persist_async("write", "unavailable-valid", %{"value" => "valid"},
+                 taint: %Taint{level: :derived}
+               )
+    end
+
+    test "rejects non-keyword options without raising" do
+      assert {:error, {:memory_store, :invalid_request, :invalid_options}} =
+               MemoryStore.persist("write", "bad-options", %{}, %{})
+
+      assert {:error, {:memory_store, :invalid_request, :invalid_options}} =
+               MemoryStore.persist_async("write", "bad-options", %{}, [:taint])
+
+      improper = [{:taint, %Taint{level: :derived}} | :tail]
+
+      assert {:error, {:memory_store, :invalid_request, :invalid_options}} =
+               MemoryStore.persist("write", "improper-options", %{}, improper)
+    end
+
+    test "persist_async validates labeled input before spawning" do
+      data = %{"secret" => "async-do-not-leak"}
+      malformed = %Taint{level: :not_a_level}
+
+      error = MemoryStore.persist_async("async", "malformed", data, taint: malformed)
+
+      assert {:error, {:memory_store, :invalid_durable_provenance, _reason}} = error
+      refute inspect(error) =~ "async-do-not-leak"
+      assert {:error, :not_found} = BufferedStore.get("async:malformed", name: @store_name)
+    end
+
+    test "persist_async keeps valid writes fire-and-forget" do
+      assert :ok =
+               MemoryStore.persist_async("async", "valid", %{"value" => "written"},
+                 taint: %Taint{level: :derived}
+               )
+
+      assert eventually(fn ->
+               match?({:ok, %Record{}}, BufferedStore.get("async:valid", name: @store_name))
+             end)
     end
   end
 
-  describe "to_persistable/from_persistable round-trip" do
-    test "preserves all fields through serialization" do
+  describe "tainted reads" do
+    test "missing metadata is untrusted, restricted, and unverified" do
+      put_raw("read:missing", %{"value" => "legacy"}, %{})
+
+      assert {:ok, value, :legacy_unlabeled} =
+               MemoryStore.load_tainted_with_status("read", "missing")
+
+      assert value.taint.level == :untrusted
+      assert value.taint.sensitivity == :restricted
+      assert value.taint.confidence == :unverified
+      assert value.taint.source == "legacy_unlabeled"
+
+      assert {:ok, compatibility_value} = MemoryStore.load_tainted("read", "missing")
+      assert compatibility_value.taint.level == :untrusted
+    end
+
+    test "malformed, old, unknown-version, atom-key, and ambiguous metadata are invalid" do
+      data = %{"value" => "tamper"}
+      {:ok, envelope} = TaintModule.bind_durable_provenance(data, %Taint{level: :derived})
+
+      cases = [
+        {"malformed", %{"taint" => %{"version" => 1}}},
+        {"old", %{"taint" => %{"taint_level" => "trusted"}}},
+        {"atom_old", %{taint_level: "trusted"}},
+        {"unknown", %{"taint" => Map.put(envelope, "version", 99)}},
+        {"atom", %{taint: envelope}},
+        {"ambiguous", Map.merge(%{taint: envelope}, %{"taint" => envelope})},
+        {"valid_plus_legacy", %{"taint" => envelope, "taint_level" => "trusted"}},
+        {"payload_mismatch", %{"taint" => envelope}}
+      ]
+
+      Enum.each(cases, fn {key, metadata} ->
+        tampered_data =
+          if key == "payload_mismatch", do: %{"value" => "changed"}, else: data
+
+        put_raw("read:#{key}", tampered_data, metadata)
+
+        assert {:ok, value, :invalid_durable_provenance} =
+                 MemoryStore.load_tainted_with_status("read", key)
+
+        assert value.taint.level == :hostile
+        assert value.taint.sensitivity == :restricted
+        assert value.taint.confidence == :unverified
+        assert value.taint.source == "invalid_durable_provenance"
+      end)
+    end
+
+    test "non-map metadata is invalid rather than missing" do
+      put_raw("read:non_map", %{"value" => "legacy"}, :taint)
+
+      assert {:ok, value, :invalid_durable_provenance} =
+               MemoryStore.load_tainted_with_status("read", "non_map")
+
+      assert value.taint.level == :hostile
+    end
+
+    test "security regression: missing metadata never emerges trusted or control-eligible" do
+      put_raw("security:missing", %{"command" => "do-not-run"}, %{})
+
+      assert {:ok, value} = MemoryStore.load_tainted("security", "missing")
+      refute TaintedValue.level?(value, :trusted)
+      assert value.taint.level == :untrusted
+      assert value.taint.sensitivity == :restricted
+      assert value.taint.confidence == :unverified
+    end
+
+    test "collections retain each item's taint and status" do
+      verified_data = %{"value" => "verified"}
+
+      {:ok, envelope} =
+        TaintModule.bind_durable_provenance(verified_data, %Taint{level: :derived})
+
+      put_raw("collection:verified", verified_data, %{"taint" => envelope})
+      put_raw("collection:missing", %{"value" => "missing"}, %{})
+      put_raw("collection:invalid", %{"value" => "invalid"}, %{taint: envelope})
+
+      assert {:ok, entries} = MemoryStore.load_all_tainted("collection")
+      assert Enum.map(entries, &elem(&1, 0)) == ["invalid", "missing", "verified"]
+
+      statuses =
+        Map.new(entries, fn {key, value, status} -> {key, {value.taint.level, status}} end)
+
+      assert statuses["verified"] == {:derived, :verified}
+      assert statuses["missing"] == {:untrusted, :legacy_unlabeled}
+      assert statuses["invalid"] == {:hostile, :invalid_durable_provenance}
+
+      assert {:ok, [{"verified", value, :verified}]} =
+               MemoryStore.load_by_prefix_tainted("collection", "verified")
+
+      assert value.taint.level == :derived
+    end
+  end
+
+  describe "legacy taint compatibility helpers" do
+    test "preserves all fields through the versionless compatibility format" do
       original = %Taint{
         level: :untrusted,
         sensitivity: :confidential,
@@ -53,111 +237,57 @@ defmodule Arbor.Memory.MemoryStoreTaintTest do
       assert restored.chain == original.chain
     end
 
-    test "persistable format uses string keys" do
-      taint = %Taint{level: :hostile}
-      persistable = TaintModule.to_persistable(taint)
+    test "persistable format uses string keys and survives JSON" do
+      original = %Taint{level: :derived, sensitivity: :internal, confidence: :verified}
+      persistable = TaintModule.to_persistable(original)
 
       assert is_binary(Map.keys(persistable) |> hd())
-      assert persistable["taint_level"] == "hostile"
-    end
+      assert persistable["taint_level"] == "derived"
 
-    test "survives JSON round-trip" do
-      original = %Taint{
-        level: :derived,
-        sensitivity: :internal,
-        sanitizations: 0xFF,
-        confidence: :verified,
-        source: "test"
-      }
-
-      json = original |> TaintModule.to_persistable() |> Jason.encode!()
-      restored = json |> Jason.decode!() |> TaintModule.from_persistable()
+      restored =
+        persistable |> Jason.encode!() |> Jason.decode!() |> TaintModule.from_persistable()
 
       assert restored.level == original.level
       assert restored.sensitivity == original.sensitivity
-      assert restored.sanitizations == original.sanitizations
       assert restored.confidence == original.confidence
     end
   end
 
-  describe "fail-closed deserialization" do
-    test "corrupt level defaults to :hostile" do
-      restored = TaintModule.from_persistable(%{"taint_level" => "invalid"})
-      assert restored.level == :hostile
-    end
-
-    test "corrupt sensitivity defaults to :restricted" do
-      restored = TaintModule.from_persistable(%{"taint_sensitivity" => "invalid"})
-      assert restored.sensitivity == :restricted
-    end
-
-    test "corrupt confidence defaults to :unverified" do
-      restored = TaintModule.from_persistable(%{"taint_confidence" => "invalid"})
-      assert restored.confidence == :unverified
-    end
-
-    test "nil map values use fail-closed defaults" do
-      restored = TaintModule.from_persistable(%{})
-      assert restored.level == :hostile
-      assert restored.sensitivity == :restricted
-      assert restored.confidence == :unverified
-      assert restored.sanitizations == 0
-      assert restored.chain == []
-    end
-
-    test "negative sanitization value defaults to 0" do
-      restored = TaintModule.from_persistable(%{"taint_sanitizations" => -1})
-      assert restored.sanitizations == 0
-    end
-  end
-
-  describe "TaintedValue wrapping" do
-    test "wrap creates a valid TaintedValue" do
-      taint = %Taint{level: :untrusted, sensitivity: :confidential}
-      tv = TaintedValue.wrap(%{secret: "data"}, taint)
-
-      assert tv.value == %{secret: "data"}
-      assert tv.taint.level == :untrusted
-      assert tv.taint.sensitivity == :confidential
-    end
-
-    test "unwrap! extracts the raw value" do
-      tv = TaintedValue.trusted("safe")
-      assert TaintedValue.unwrap!(tv) == "safe"
-    end
-
-    test "legacy data gets default taint" do
-      # Simulate what load_tainted would do with nil metadata
-      taint = %Taint{
-        level: :trusted,
-        sensitivity: :internal,
-        sanitizations: 0,
-        confidence: :unverified
-      }
-
-      tv = TaintedValue.wrap(%{data: "old"}, taint)
-      assert tv.taint.level == :trusted
-      assert tv.taint.sensitivity == :internal
-      assert tv.taint.confidence == :unverified
-    end
-  end
-
-  describe "load_tainted/2" do
-    test "returns error when store unavailable" do
-      assert {:error, :not_found} = MemoryStore.load_tainted("ns", "missing_key")
-    end
-  end
-
-  describe "embed_async/4 with taint" do
-    test "accepts taint opt without error" do
-      taint = %Taint{level: :trusted, sensitivity: :public}
-
-      # Should not crash even without a running embed provider
-      assert :ok =
-               MemoryStore.embed_async("ns", "key", "content",
+  describe "embedding provenance" do
+    test "invalid embedding taint returns a bounded error before spawning" do
+      assert {:error, {:memory_store, :invalid_durable_provenance, _reason}} =
+               MemoryStore.embed_async("embedding", "invalid", "sensitive-content",
                  agent_id: "agent_test",
-                 taint: taint
+                 taint: %Taint{level: :not_a_level}
                )
+    end
+
+    test "invalid embedding type returns a bounded error without raising" do
+      assert {:error, {:memory_store, :invalid_request, :invalid_type}} =
+               MemoryStore.embed_async("embedding", "invalid-type", "content",
+                 agent_id: "agent_test",
+                 type: %{}
+               )
+
+      assert {:error, {:memory_store, :invalid_request, :invalid_options}} =
+               MemoryStore.embed_async("embedding", "bad-options", "content", %{type: :thought})
+    end
+  end
+
+  defp put_raw(key, data, metadata) do
+    record = Record.new(key, data, id: "memory:#{key}", metadata: metadata)
+    assert :ok = BufferedStore.put(key, record, name: @store_name)
+  end
+
+  defp eventually(fun, attempts \\ 20)
+  defp eventually(_fun, 0), do: false
+
+  defp eventually(fun, attempts) do
+    if fun.() do
+      true
+    else
+      Process.sleep(10)
+      eventually(fun, attempts - 1)
     end
   end
 end

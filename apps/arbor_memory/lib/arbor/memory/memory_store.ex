@@ -19,47 +19,89 @@ defmodule Arbor.Memory.MemoryStore do
   require Logger
 
   @store_name :arbor_memory_durable
+  @legacy_taint_keys ~w(
+    taint_level
+    taint_sensitivity
+    taint_sanitizations
+    taint_confidence
+    taint_source
+    taint_chain
+    taint_data_hash
+  )
+  @legacy_taint_atom_keys [
+    :taint_level,
+    :taint_sensitivity,
+    :taint_sanitizations,
+    :taint_confidence,
+    :taint_source,
+    :taint_chain,
+    :taint_data_hash
+  ]
 
   @doc """
   Persist a record to the durable store (sync).
 
   Returns `:ok` on success or if the store is unavailable (graceful degradation).
+  Supplied taint or payload validation failures return a bounded error before
+  any write.
 
   ## Options
 
   - `:taint` - A `Arbor.Contracts.Security.Taint` struct to persist alongside
     the data. Stored in `record.metadata["taint"]` as a string-keyed map.
   """
-  @spec persist(String.t(), String.t(), map(), keyword()) :: :ok
-  def persist(namespace, key, data, opts \\ []) when is_binary(namespace) and is_binary(key) do
-    if available?() do
-      composite_key = "#{namespace}:#{key}"
-      metadata = build_taint_metadata(opts)
-      record = Record.new(composite_key, data, id: "memory:#{composite_key}", metadata: metadata)
-      BufferedStore.put(composite_key, record, name: @store_name)
+  @spec persist(String.t(), String.t(), term(), keyword()) :: :ok | {:error, term()}
+  def persist(namespace, key, data, opts \\ [])
+
+  def persist(namespace, key, data, opts) when is_binary(namespace) and is_binary(key) do
+    if keyword_options?(opts) do
+      case build_taint_metadata(data, opts) do
+        {:ok, metadata} ->
+          if available?(), do: persist_record(namespace, key, data, metadata), else: :ok
+
+        {:error, _reason} = error ->
+          error
+      end
+    else
+      {:error, {:memory_store, :invalid_request, :invalid_options}}
     end
-
-    :ok
-  catch
-    kind, reason ->
-      Logger.warning(
-        "MemoryStore.persist failed for #{namespace}/#{key}: #{inspect({kind, reason})}"
-      )
-
-      :ok
   end
+
+  def persist(_namespace, _key, _data, _opts),
+    do: {:error, {:memory_store, :invalid_request, :invalid_arguments}}
 
   @doc """
   Persist a record asynchronously.
 
-  Spawns a Task to write. Failures are logged but don't affect the caller.
-  Accepts the same options as `persist/4`.
+  Spawns a Task to write. Backend failures remain fire-and-forget, while
+  supplied taint or payload validation failures return a bounded error before
+  spawning. Accepts the same options as `persist/4`.
   """
-  @spec persist_async(String.t(), String.t(), map(), keyword()) :: :ok
-  def persist_async(namespace, key, data, opts \\ []) do
-    Task.start(fn -> persist(namespace, key, data, opts) end)
-    :ok
+  @spec persist_async(String.t(), String.t(), term(), keyword()) :: :ok | {:error, term()}
+  def persist_async(namespace, key, data, opts \\ [])
+
+  def persist_async(namespace, key, data, opts)
+      when is_binary(namespace) and is_binary(key) and is_list(opts) do
+    if keyword_options?(opts) do
+      case build_taint_metadata(data, opts) do
+        {:ok, metadata} ->
+          if available?() do
+            Task.start(fn -> persist_record(namespace, key, data, metadata) end)
+            :ok
+          else
+            :ok
+          end
+
+        {:error, _reason} = error ->
+          error
+      end
+    else
+      {:error, {:memory_store, :invalid_request, :invalid_options}}
+    end
   end
+
+  def persist_async(_namespace, _key, _data, _opts),
+    do: {:error, {:memory_store, :invalid_request, :invalid_arguments}}
 
   @doc """
   Load a single record by namespace and key.
@@ -164,6 +206,80 @@ defmodule Arbor.Memory.MemoryStore do
       {:ok, []}
   end
 
+  @doc """
+  Load all records for a namespace with per-item taint and provenance status.
+
+  Each item has the stable shape {key, tainted_value, status}, where status
+  is :verified, :legacy_unlabeled, or :invalid_durable_provenance.
+  """
+  @spec load_all_tainted(String.t()) ::
+          {:ok, [{String.t(), Arbor.Contracts.Security.TaintedValue.t(), atom()}]}
+  def load_all_tainted(namespace) when is_binary(namespace) do
+    if available?() do
+      prefix = "#{namespace}:"
+      {:ok, keys} = BufferedStore.list(name: @store_name)
+
+      prefixed = Enum.filter(keys, &String.starts_with?(&1, prefix))
+
+      records =
+        if prefixed != [] do
+          load_prefixed_record_entries(prefixed, prefix)
+        else
+          load_compat_record_entries(keys, prefix)
+        end
+
+      {:ok, tainted_entries(records)}
+    else
+      {:ok, []}
+    end
+  catch
+    kind, reason ->
+      Logger.warning(
+        "MemoryStore.load_all_tainted failed for #{namespace}: #{inspect({kind, reason})}"
+      )
+
+      {:ok, []}
+  end
+
+  def load_all_tainted(_namespace), do: {:ok, []}
+
+  @doc """
+  Load records matching a key prefix with per-item taint and provenance status.
+
+  Each item has the stable shape {key, tainted_value, status}. A malformed
+  item is retained with the invalid fail-closed status rather than dropped.
+  """
+  @spec load_by_prefix_tainted(String.t(), String.t()) ::
+          {:ok, [{String.t(), Arbor.Contracts.Security.TaintedValue.t(), atom()}]}
+  def load_by_prefix_tainted(namespace, prefix) when is_binary(namespace) and is_binary(prefix) do
+    if available?() do
+      full_prefix = "#{namespace}:#{prefix}"
+      {:ok, keys} = BufferedStore.list(name: @store_name)
+
+      prefixed = Enum.filter(keys, &String.starts_with?(&1, full_prefix))
+
+      records =
+        if prefixed != [] do
+          load_prefixed_record_entries(prefixed, "#{namespace}:")
+        else
+          load_compat_record_entries_by_prefix(keys, prefix, full_prefix)
+        end
+
+      {:ok, tainted_entries(records)}
+    else
+      {:ok, []}
+    end
+  catch
+    kind, reason ->
+      Logger.warning(
+        "MemoryStore.load_by_prefix_tainted failed for #{namespace}/#{prefix}: #{inspect({kind, reason})}"
+      )
+
+      {:ok, []}
+  end
+
+  def load_by_prefix_tainted(_namespace, _prefix), do: {:ok, []}
+
   # ── Record loading helpers ──────────────────────────────────────────
 
   defp load_prefixed_records(prefixed_keys, prefix) do
@@ -204,30 +320,84 @@ defmodule Arbor.Memory.MemoryStore do
     end)
   end
 
+  defp load_prefixed_record_entries(prefixed_keys, prefix) do
+    Enum.reduce(prefixed_keys, [], fn composite_key, acc ->
+      case BufferedStore.get(composite_key, name: @store_name) do
+        {:ok, %Record{key: k} = record} ->
+          [{String.replace_prefix(k, prefix, ""), record} | acc]
+
+        _ ->
+          acc
+      end
+    end)
+    |> Enum.reverse()
+  end
+
+  defp load_compat_record_entries(keys, prefix) do
+    Enum.reduce(keys, [], fn ets_key, acc ->
+      case BufferedStore.get(ets_key, name: @store_name) do
+        {:ok, %Record{id: id, key: k} = record} when is_binary(id) ->
+          if String.starts_with?(id, prefix), do: [{k, record} | acc], else: acc
+
+        _ ->
+          acc
+      end
+    end)
+    |> Enum.reverse()
+  end
+
+  defp load_compat_record_entries_by_prefix(keys, key_prefix, id_prefix) do
+    keys
+    |> Enum.filter(&String.starts_with?(&1, key_prefix))
+    |> Enum.reduce([], fn ets_key, acc ->
+      case BufferedStore.get(ets_key, name: @store_name) do
+        {:ok, %Record{id: id, key: k} = record} when is_binary(id) ->
+          if String.starts_with?(id, id_prefix), do: [{k, record} | acc], else: acc
+
+        _ ->
+          acc
+      end
+    end)
+    |> Enum.reverse()
+  end
+
   @doc """
   Load a single record with taint metadata as a TaintedValue.
 
   Unlike `load/2`, this returns the data wrapped in a `TaintedValue` struct
-  that carries the persisted taint metadata. Legacy data (without taint metadata)
-  gets conservative defaults: `:trusted` level, `:internal` sensitivity,
-  `:unverified` confidence.
+  that carries the persisted taint metadata. Legacy data without taint
+  metadata gets an untrusted, restricted, unverified fallback and is reported
+  as :legacy_unlabeled by the status-bearing primitive.
 
   Returns `{:ok, TaintedValue.t()}` or `{:error, term()}`.
   """
   @spec load_tainted(String.t(), String.t()) :: {:ok, term()} | {:error, term()}
   def load_tainted(namespace, key) do
+    case load_tainted_with_status(namespace, key) do
+      {:ok, tainted_value, _status} -> {:ok, tainted_value}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  @doc """
+  Load a single record with its tainted value and provenance status.
+
+  Missing metadata is reported as :legacy_unlabeled with an untrusted,
+  restricted, unverified fallback. Malformed, versionless, unknown-version,
+  and payload-mismatched envelopes are reported as
+  :invalid_durable_provenance with a hostile fail-closed taint.
+  """
+  @spec load_tainted_with_status(String.t(), String.t()) ::
+          {:ok, Arbor.Contracts.Security.TaintedValue.t(),
+           :verified | :legacy_unlabeled | :invalid_durable_provenance}
+          | {:error, term()}
+  def load_tainted_with_status(namespace, key) do
     if available?() do
       composite_key = "#{namespace}:#{key}"
 
       case load_record_with_metadata(composite_key, key) do
-        {:ok, data, metadata} ->
-          taint = restore_taint(metadata)
-          verify_stored_data_hash(data, metadata, namespace, key)
-          tainted_value = wrap_tainted(data, taint)
-          {:ok, tainted_value}
-
-        {:error, _} = error ->
-          error
+        {:ok, %Record{} = record} -> resolve_tainted_record(record)
+        {:error, _} = error -> error
       end
     else
       {:error, :not_found}
@@ -235,7 +405,7 @@ defmodule Arbor.Memory.MemoryStore do
   catch
     kind, reason ->
       Logger.warning(
-        "MemoryStore.load_tainted failed for #{namespace}/#{key}: #{inspect({kind, reason})}"
+        "MemoryStore.load_tainted_with_status failed for #{namespace}/#{key}: #{inspect({kind, reason})}"
       )
 
       {:error, :not_found}
@@ -296,7 +466,8 @@ defmodule Arbor.Memory.MemoryStore do
 
   Generates an embedding via `Arbor.AI.embed/2` and stores it in the
   `memory_embeddings` table for semantic search. Fire-and-forget —
-  failures are logged at debug level and never affect the caller.
+  failures are logged at debug level and never affect the caller. An invalid
+  supplied taint returns a bounded error before spawning.
 
   ## Parameters
 
@@ -307,38 +478,47 @@ defmodule Arbor.Memory.MemoryStore do
     - `:agent_id` - Agent that owns this memory
     - `:type` - Semantic type hint (e.g., :goal, :thought, :intent)
   """
-  @spec embed_async(String.t(), String.t(), String.t(), keyword()) :: :ok
-  def embed_async(namespace, key, content, opts \\ []) do
-    agent_id = Keyword.get(opts, :agent_id)
-    type = Keyword.get(opts, :type)
+  @spec embed_async(String.t(), String.t(), String.t(), keyword()) :: :ok | {:error, term()}
+  def embed_async(namespace, key, content, opts \\ [])
 
-    if agent_id && content && content != "" do
-      Task.start(fn ->
-        try do
-          case Arbor.AI.embed(content) do
-            {:ok, %{embedding: embedding}} ->
-              metadata =
-                %{
-                  type: type && to_string(type),
-                  source: namespace
-                }
-                |> maybe_add_taint_to_embedding(opts)
+  def embed_async(namespace, key, content, opts)
+      when is_binary(namespace) and is_binary(key) do
+    if keyword_options?(opts) do
+      agent_id = Keyword.get(opts, :agent_id)
+      type = Keyword.get(opts, :type)
 
-              Embedding.store(agent_id, content, embedding, metadata)
+      with {:ok, type} <- normalize_embedding_type(type),
+           base_metadata <- %{type: type, source: namespace},
+           {:ok, metadata} <- maybe_add_taint_to_embedding(base_metadata, content, opts) do
+        if agent_id && is_binary(content) && content != "" do
+          Task.start(fn ->
+            try do
+              case Arbor.AI.embed(content) do
+                {:ok, %{embedding: embedding}} ->
+                  Embedding.store(agent_id, content, embedding, metadata)
 
-            {:error, reason} ->
-              Logger.debug("Embedding failed for #{namespace}/#{key}: #{inspect(reason)}")
-          end
-        rescue
-          e -> Logger.debug("embed_async error: #{Exception.message(e)}")
-        catch
-          kind, reason -> Logger.debug("embed_async #{kind}: #{inspect(reason)}")
+                {:error, reason} ->
+                  Logger.debug("Embedding failed for #{namespace}/#{key}: #{inspect(reason)}")
+              end
+            rescue
+              e -> Logger.debug("embed_async error: #{Exception.message(e)}")
+            catch
+              kind, reason -> Logger.debug("embed_async #{kind}: #{inspect(reason)}")
+            end
+          end)
         end
-      end)
-    end
 
-    :ok
+        :ok
+      else
+        {:error, _reason} = error -> error
+      end
+    else
+      {:error, {:memory_store, :invalid_request, :invalid_options}}
+    end
   end
+
+  def embed_async(_namespace, _key, _content, _opts),
+    do: {:error, {:memory_store, :invalid_request, :invalid_arguments}}
 
   @doc """
   Search memory by semantic similarity.
@@ -402,58 +582,73 @@ defmodule Arbor.Memory.MemoryStore do
 
   # ── Taint persistence helpers ────────────────────────────────────────
 
-  defp build_taint_metadata(opts) do
+  defp persist_record(namespace, key, data, metadata) do
+    if available?() do
+      composite_key = "#{namespace}:#{key}"
+      record = Record.new(composite_key, data, id: "memory:#{composite_key}", metadata: metadata)
+
+      try do
+        BufferedStore.put(composite_key, record, name: @store_name)
+      rescue
+        _ -> :ok
+      catch
+        :exit, _ -> :ok
+        :throw, _ -> :ok
+      end
+    else
+      :ok
+    end
+  end
+
+  defp build_taint_metadata(data, opts) do
     case Keyword.get(opts, :taint) do
       nil ->
-        %{}
+        {:ok, %{}}
 
       taint ->
-        hash_opts =
-          case Keyword.get(opts, :data) do
-            nil -> []
-            data -> [data_hash: Arbor.Signals.Taint.data_hash(data)]
-          end
+        case Arbor.Signals.Taint.bind_durable_provenance(data, taint) do
+          {:ok, envelope} when is_map(envelope) ->
+            {:ok, %{"taint" => envelope}}
 
-        %{"taint" => Arbor.Signals.Taint.to_persistable(taint, hash_opts)}
+          {:error, reason} when is_atom(reason) ->
+            {:error, {:memory_store, :invalid_durable_provenance, reason}}
+
+          _ ->
+            {:error, {:memory_store, :invalid_durable_provenance, :invalid_envelope}}
+        end
     end
+  rescue
+    _ -> {:error, {:memory_store, :invalid_durable_provenance, :invalid_envelope}}
+  catch
+    _, _ -> {:error, {:memory_store, :invalid_durable_provenance, :invalid_envelope}}
   end
 
-  defp restore_taint(metadata) when is_map(metadata) do
-    case Map.get(metadata, "taint") do
-      nil ->
-        # Legacy data — conservative default taint
-        default_taint_struct()
-
-      taint_map when is_map(taint_map) ->
-        Arbor.Signals.Taint.from_persistable(taint_map)
-    end
+  defp tainted_entries(entries) do
+    Enum.map(entries, fn {key, %Record{} = record} ->
+      {:ok, tainted_value, status} = resolve_tainted_record(record)
+      {key, tainted_value, status}
+    end)
   end
 
-  defp restore_taint(_), do: default_taint_struct()
+  defp resolve_tainted_record(%Record{data: data, metadata: metadata}) do
+    persisted = persisted_taint(metadata)
 
-  defp default_taint_struct do
-    struct(Arbor.Contracts.Security.Taint,
-      level: :trusted,
-      sensitivity: :internal,
-      sanitizations: 0,
-      confidence: :unverified
-    )
-  end
+    {:ok, taint, status} =
+      Arbor.Signals.Taint.resolve_durable_provenance(persisted, data)
 
-  defp wrap_tainted(data, taint) do
-    Arbor.Contracts.Security.TaintedValue.wrap(data, taint)
+    {:ok, Arbor.Contracts.Security.TaintedValue.wrap(data, taint), status}
   end
 
   defp load_record_with_metadata(composite_key, bare_key) do
     case BufferedStore.get(composite_key, name: @store_name) do
-      {:ok, %Record{data: data, metadata: metadata}} ->
-        {:ok, data, metadata || %{}}
+      {:ok, %Record{} = record} ->
+        {:ok, record}
 
       {:error, :not_found} ->
         # Fallback: try bare key
         case BufferedStore.get(bare_key, name: @store_name) do
-          {:ok, %Record{data: data, metadata: metadata}} ->
-            {:ok, data, metadata || %{}}
+          {:ok, %Record{} = record} ->
+            {:ok, record}
 
           _ ->
             {:error, :not_found}
@@ -464,24 +659,78 @@ defmodule Arbor.Memory.MemoryStore do
     end
   end
 
-  defp maybe_add_taint_to_embedding(metadata, opts) do
+  defp persisted_taint(metadata) when is_map(metadata) do
+    atom_taint? = Map.has_key?(metadata, :taint)
+    string_taint? = Map.has_key?(metadata, "taint")
+
+    cond do
+      atom_taint? ->
+        :malformed
+
+      legacy_taint_metadata?(metadata) ->
+        :malformed
+
+      string_taint? ->
+        if legacy_taint_map?(Map.get(metadata, "taint")),
+          do: :malformed,
+          else: Map.get(metadata, "taint")
+
+      true ->
+        :missing
+    end
+  end
+
+  defp persisted_taint(_metadata), do: :malformed
+
+  defp legacy_taint_map?(value) when is_map(value) do
+    Enum.any?(@legacy_taint_keys ++ @legacy_taint_atom_keys, &Map.has_key?(value, &1))
+  end
+
+  defp legacy_taint_map?(_value), do: false
+
+  defp legacy_taint_metadata?(metadata) do
+    Enum.any?(@legacy_taint_keys ++ @legacy_taint_atom_keys, &Map.has_key?(metadata, &1))
+  end
+
+  defp maybe_add_taint_to_embedding(metadata, content, opts) do
     case Keyword.get(opts, :taint) do
       nil ->
-        metadata
+        {:ok, metadata}
 
       taint ->
-        Map.put(metadata, :taint, Arbor.Signals.Taint.to_persistable(taint))
+        case Arbor.Signals.Taint.bind_durable_provenance(content, taint) do
+          {:ok, envelope} ->
+            {:ok, Map.put(metadata, "taint", envelope)}
+
+          {:error, reason} when is_atom(reason) ->
+            {:error, {:memory_store, :invalid_durable_provenance, reason}}
+
+          _ ->
+            {:error, {:memory_store, :invalid_durable_provenance, :invalid_envelope}}
+        end
     end
+  rescue
+    _ -> {:error, {:memory_store, :invalid_durable_provenance, :invalid_envelope}}
+  catch
+    _, _ -> {:error, {:memory_store, :invalid_durable_provenance, :invalid_envelope}}
   end
 
-  defp verify_stored_data_hash(data, metadata, namespace, key) do
-    with %{"taint" => %{"taint_data_hash" => stored_hash}} when is_binary(stored_hash) <- metadata,
-         {:error, :hash_mismatch} <- Arbor.Signals.Taint.verify_data_hash(data, stored_hash) do
-      Logger.warning(
-        "Data hash mismatch for #{namespace}/#{key} — data may have been modified after taint classification"
-      )
-    else
-      _ -> :ok
-    end
+  defp normalize_embedding_type(nil), do: {:ok, nil}
+  defp normalize_embedding_type(type) when is_binary(type), do: {:ok, type}
+  defp normalize_embedding_type(type) when is_atom(type), do: {:ok, Atom.to_string(type)}
+  defp normalize_embedding_type(type) when is_integer(type), do: {:ok, Integer.to_string(type)}
+  defp normalize_embedding_type(type) when is_float(type), do: {:ok, Float.to_string(type)}
+
+  defp normalize_embedding_type(_type),
+    do: {:error, {:memory_store, :invalid_request, :invalid_type}}
+
+  defp keyword_options?(opts) when is_list(opts) do
+    Keyword.keyword?(opts)
+  rescue
+    _ -> false
+  catch
+    _, _ -> false
   end
+
+  defp keyword_options?(_opts), do: false
 end
