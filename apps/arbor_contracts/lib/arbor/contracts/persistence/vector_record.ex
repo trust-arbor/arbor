@@ -199,6 +199,10 @@ defmodule Arbor.Contracts.Persistence.VectorRecord do
     end
   end
 
+  @doc "Decodes exact canonical payload bytes after byte and nesting preflight checks."
+  @spec decode_canonical_payload(term()) :: {:ok, term()} | {:error, :invalid_payload}
+  def decode_canonical_payload(encoded), do: VectorValidation.decode_canonical_payload(encoded)
+
   @doc "Computes the lowercase SHA-256 digest of a canonical payload."
   @spec payload_digest(term()) :: {:ok, String.t()} | {:error, atom()}
   def payload_digest(payload) do

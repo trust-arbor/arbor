@@ -45,6 +45,27 @@ defmodule Arbor.Contracts.Persistence.VectorValidation do
     _kind, _reason -> {:error, :invalid_payload}
   end
 
+  @spec decode_canonical_payload(term()) :: {:ok, term()} | {:error, :invalid_payload}
+  def decode_canonical_payload(encoded) when is_binary(encoded) do
+    limits = TaintEnvelope.limits()
+
+    with true <- byte_size(encoded) > 0,
+         true <- byte_size(encoded) <= limits.max_payload_bytes,
+         :ok <- validate_json_nesting(encoded, limits.max_depth + 1),
+         {:ok, payload} <- Jason.decode(encoded),
+         {:ok, normalized, ^encoded} <- canonical_payload(payload) do
+      {:ok, normalized}
+    else
+      _invalid -> {:error, :invalid_payload}
+    end
+  rescue
+    _error -> {:error, :invalid_payload}
+  catch
+    _kind, _reason -> {:error, :invalid_payload}
+  end
+
+  def decode_canonical_payload(_encoded), do: {:error, :invalid_payload}
+
   @spec payload_limits() :: map()
   def payload_limits, do: TaintEnvelope.limits()
 
@@ -195,4 +216,46 @@ defmodule Arbor.Contracts.Persistence.VectorValidation do
        do: {:error, :invalid_vector}
 
   defp encode_part(part) when is_binary(part), do: [<<byte_size(part)::unsigned-size(32)>>, part]
+
+  defp validate_json_nesting(encoded, max_containers),
+    do: scan_json(encoded, [], false, false, max_containers)
+
+  defp scan_json(<<>>, [], false, false, _max_containers), do: :ok
+  defp scan_json(<<>>, _stack, _in_string?, _escaped?, _max_containers), do: :error
+
+  defp scan_json(<<_byte, rest::binary>>, stack, true, true, max_containers),
+    do: scan_json(rest, stack, true, false, max_containers)
+
+  defp scan_json(<<?\\, rest::binary>>, stack, true, false, max_containers),
+    do: scan_json(rest, stack, true, true, max_containers)
+
+  defp scan_json(<<?\", rest::binary>>, stack, true, false, max_containers),
+    do: scan_json(rest, stack, false, false, max_containers)
+
+  defp scan_json(<<_byte, rest::binary>>, stack, true, false, max_containers),
+    do: scan_json(rest, stack, true, false, max_containers)
+
+  defp scan_json(<<?\", rest::binary>>, stack, false, false, max_containers),
+    do: scan_json(rest, stack, true, false, max_containers)
+
+  defp scan_json(<<open, rest::binary>>, stack, false, false, max_containers)
+       when open == ?{ or open == ?[ do
+    if length(stack) < max_containers do
+      close = if open == ?{, do: ?}, else: ?]
+      scan_json(rest, [close | stack], false, false, max_containers)
+    else
+      :error
+    end
+  end
+
+  defp scan_json(<<close, rest::binary>>, [close | stack], false, false, max_containers)
+       when close == ?} or close == ?],
+       do: scan_json(rest, stack, false, false, max_containers)
+
+  defp scan_json(<<close, _rest::binary>>, _stack, false, false, _max_containers)
+       when close == ?} or close == ?],
+       do: :error
+
+  defp scan_json(<<_byte, rest::binary>>, stack, false, false, max_containers),
+    do: scan_json(rest, stack, false, false, max_containers)
 end

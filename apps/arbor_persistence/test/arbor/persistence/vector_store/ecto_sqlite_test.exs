@@ -2,6 +2,7 @@ defmodule Arbor.Persistence.VectorStore.EctoSQLiteTest do
   use ExUnit.Case, async: false
 
   alias Arbor.Contracts.Persistence.{VectorOperation, VectorRecord}
+  alias Arbor.Persistence.VectorStore.Ecto.Codec
 
   @migration_version 20_260_805_000_001
   @migration_module Arbor.Persistence.Repo.Migrations.PrepareVectorStoreV1
@@ -290,6 +291,132 @@ defmodule Arbor.Persistence.VectorStore.EctoSQLiteTest do
     assert {:ok, ^receipt} = Arbor.Persistence.reconcile_vector_operation(agent_id, operation)
   end
 
+  test "security regression: public reads reject oversized and deeply nested payload JSON", %{
+    agent_id: agent_id
+  } do
+    limits = VectorRecord.limits().payload
+    oversized_record = record!(agent_id, source_key: "oversized-payload")
+    deep_record = record!(agent_id, source_key: "deep-payload")
+
+    for record <- [oversized_record, deep_record] do
+      assert {:ok, _receipt} =
+               Arbor.Persistence.execute_vector_operation(agent_id, insert_operation!(record))
+    end
+
+    oversized = "\"" <> String.duplicate("x", limits.max_payload_bytes) <> "\""
+
+    deeply_nested =
+      String.duplicate("[", limits.max_depth + 2) <>
+        "0" <> String.duplicate("]", limits.max_depth + 2)
+
+    SQLiteRepo.query!(
+      "UPDATE memory_embeddings SET canonical_payload = ?, content = ? WHERE id = ?",
+      [oversized, oversized, oversized_record.id]
+    )
+
+    SQLiteRepo.query!(
+      "UPDATE memory_embeddings SET canonical_payload = ?, content = ? WHERE id = ?",
+      [deeply_nested, deeply_nested, deep_record.id]
+    )
+
+    assert {:error, :backend_failure} =
+             Arbor.Persistence.fetch_vector_record(
+               agent_id,
+               oversized_record.source_namespace,
+               oversized_record.source_key
+             )
+
+    assert {:error, :backend_failure} =
+             Arbor.Persistence.fetch_vector_record(
+               agent_id,
+               deep_record.source_namespace,
+               deep_record.source_key
+             )
+
+    assert {:error, :backend_failure} = Arbor.Persistence.list_vector_records(agent_id)
+  end
+
+  test "security regression: SQLite mirrors reject oversized and deeply nested JSON", %{
+    agent_id: agent_id
+  } do
+    oversized_record = record!(agent_id, source_key: "oversized-mirror")
+    deep_record = record!(agent_id, source_key: "deep-mirror")
+
+    for record <- [oversized_record, deep_record] do
+      assert {:ok, _receipt} =
+               Arbor.Persistence.execute_vector_operation(agent_id, insert_operation!(record))
+    end
+
+    oversized =
+      "\"" <> String.duplicate("x", VectorRecord.limits().payload.max_payload_bytes) <> "\""
+
+    deeply_nested = String.duplicate("[", 64) <> "1" <> String.duplicate("]", 64)
+
+    SQLiteRepo.query!(
+      "UPDATE memory_embeddings SET vector_768 = ?, embedding = ? WHERE id = ?",
+      [oversized, oversized, oversized_record.id]
+    )
+
+    SQLiteRepo.query!(
+      "UPDATE memory_embeddings SET vector_768 = ?, embedding = ? WHERE id = ?",
+      [deeply_nested, deeply_nested, deep_record.id]
+    )
+
+    assert {:error, :backend_failure} =
+             Arbor.Persistence.fetch_vector_record(
+               agent_id,
+               oversized_record.source_namespace,
+               oversized_record.source_key
+             )
+
+    assert {:error, :backend_failure} =
+             Arbor.Persistence.fetch_vector_record(
+               agent_id,
+               deep_record.source_namespace,
+               deep_record.source_key
+             )
+  end
+
+  test "security regression: immutable ledger JSON is bounded before reconciliation", %{
+    agent_id: agent_id
+  } do
+    limits = Codec.limits()
+    oversized = "\"" <> String.duplicate("x", limits.max_ledger_json_bytes) <> "\""
+
+    deeply_nested =
+      String.duplicate("[", limits.max_ledger_json_containers + 1) <>
+        "0" <> String.duplicate("]", limits.max_ledger_json_containers + 1)
+
+    assert {:error, :invalid_codec} = Codec.preflight_ledger_json(oversized)
+    assert {:error, :invalid_codec} = Codec.preflight_ledger_json(deeply_nested)
+    assert :ok = Codec.preflight_ledger_json(~s({"literal":"[{}]"}))
+
+    corruptions = [
+      {:operation_json, oversized},
+      {:operation_json, deeply_nested},
+      {:receipt_json, oversized},
+      {:receipt_json, deeply_nested}
+    ]
+
+    for {{field, corrupt_json}, index} <- Enum.with_index(corruptions, 1) do
+      operation =
+        insert_operation!(record!(agent_id, source_key: "ledger-corrupt-#{index}"))
+
+      {:ok, valid_operation_json} = Codec.encode_operation(operation)
+
+      {operation_json, receipt_json} =
+        case field do
+          :operation_json -> {corrupt_json, "{}"}
+          :receipt_json -> {valid_operation_json, corrupt_json}
+        end
+
+      insert_forged_ledger!(operation, operation_json, receipt_json)
+
+      assert {:error, :indeterminate} =
+               Arbor.Persistence.reconcile_vector_operation(agent_id, operation)
+    end
+  end
+
   test "a conflicting child rolls back the full bounded batch", %{agent_id: agent_id} do
     shared_id = unique("vec")
     blocker = insert_operation!(record!(agent_id, id: shared_id, source_key: "blocker"))
@@ -358,6 +485,27 @@ defmodule Arbor.Persistence.VectorStore.EctoSQLiteTest do
     CREATE UNIQUE INDEX memory_embeddings_agent_id_content_hash_index
     ON memory_embeddings (agent_id, content_hash)
     """)
+  end
+
+  defp insert_forged_ledger!(operation, operation_json, receipt_json) do
+    SQLiteRepo.query!(
+      """
+      INSERT INTO vector_operation_receipts (
+        operation_fingerprint, agent_id, operation_kind,
+        operation_json, operation_digest, receipt_json, receipt_digest, inserted_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      """,
+      [
+        operation.fingerprint,
+        VectorOperation.agent_id(operation),
+        Atom.to_string(operation.kind),
+        operation_json,
+        Codec.digest(operation_json),
+        receipt_json,
+        Codec.digest(receipt_json),
+        DateTime.utc_now() |> DateTime.to_iso8601()
+      ]
+    )
   end
 
   defp record!(agent_id, overrides) do

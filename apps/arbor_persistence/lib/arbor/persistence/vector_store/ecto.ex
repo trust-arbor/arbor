@@ -396,15 +396,11 @@ defmodule Arbor.Persistence.VectorStore.Ecto do
   defp row_to_record(%VectorRow{} = row, repo) do
     with true <- row.vector_protocol == @vector_protocol,
          true <- is_binary(row.canonical_payload),
-         {:ok, payload} <- Jason.decode(row.canonical_payload),
-         {:ok, canonical_payload} <- VectorRecord.canonical_payload_bytes(payload),
-         true <- canonical_payload == row.canonical_payload,
-         true <- row.content == canonical_payload,
+         {:ok, payload} <- VectorRecord.decode_canonical_payload(row.canonical_payload),
+         true <- row.content == row.canonical_payload,
          {:ok, vector} <- Codec.vector_from_bytes(row.vector_bytes),
-         {:ok, stored_vector} <- load_stored_vector(repo, row.vector_768),
-         {:ok, legacy_vector} <- load_stored_vector(repo, row.embedding),
-         true <- stored_vector == vector,
-         true <- legacy_vector == vector,
+         :ok <- validate_stored_vector(repo, row.vector_768, vector),
+         :ok <- validate_stored_vector(repo, row.embedding, vector),
          true <- row.content_hash == compatibility_hash(row),
          {:ok, record} <-
            VectorRecord.new(%{
@@ -430,20 +426,23 @@ defmodule Arbor.Persistence.VectorStore.Ecto do
     end
   end
 
-  defp load_stored_vector(repo, stored) do
-    vector =
-      if postgres_repo?(repo) do
-        Pgvector.to_list(stored)
+  defp validate_stored_vector(repo, stored, expected) do
+    if postgres_repo?(repo) do
+      with vector <- Pgvector.to_list(stored),
+           {:ok, ^expected} <- VectorRecord.normalize_vector(vector) do
+        :ok
       else
-        case Jason.decode(stored) do
-          {:ok, decoded} -> decoded
-          _invalid -> :invalid
-        end
+        _invalid -> {:error, :malformed_row}
       end
-
-    case VectorRecord.normalize_vector(vector) do
-      {:ok, normalized} -> {:ok, normalized}
-      _invalid -> {:error, :malformed_row}
+    else
+      with true <- is_binary(stored),
+           {:ok, encoded} <- Jason.encode(expected),
+           true <- byte_size(stored) == byte_size(encoded),
+           true <- stored == encoded do
+        :ok
+      else
+        _invalid -> {:error, :malformed_row}
+      end
     end
   rescue
     _error -> {:error, :malformed_row}
@@ -504,6 +503,8 @@ defmodule Arbor.Persistence.VectorStore.Ecto do
   defp decode_ledger(%OperationReceiptRow{} = row, operation) do
     with true <- row.agent_id == VectorOperation.agent_id(operation),
          true <- row.operation_kind == Atom.to_string(operation.kind),
+         :ok <- Codec.preflight_ledger_json(row.operation_json),
+         :ok <- Codec.preflight_ledger_json(row.receipt_json),
          true <- row.operation_digest == Codec.digest(row.operation_json),
          true <- row.receipt_digest == Codec.digest(row.receipt_json),
          {:ok, persisted_operation} <- Codec.decode_operation(row.operation_json),

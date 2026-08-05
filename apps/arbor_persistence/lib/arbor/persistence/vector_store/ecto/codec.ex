@@ -4,15 +4,18 @@ defmodule Arbor.Persistence.VectorStore.Ecto.Codec do
   alias Arbor.Contracts.Persistence.{VectorOperation, VectorReceipt, VectorRecord}
 
   @format_version 1
-  @max_ledger_json_bytes 8_388_608
+  @max_transport_bytes VectorOperation.limits().max_batch_bytes
+  @max_ledger_json_bytes @max_transport_bytes * 2
+  @max_ledger_json_containers 8
   @max_batch_operations VectorOperation.max_batch_operations()
   @vector_bytes VectorRecord.dimensions() * 4
+  @max_payload_bytes VectorRecord.limits().payload.max_payload_bytes
 
   @spec encode_operation(VectorOperation.t()) :: {:ok, binary()} | {:error, :invalid_codec}
   def encode_operation(%VectorOperation{} = operation) do
     with {:ok, ^operation} <- VectorOperation.validate(operation),
          {:ok, encoded} <- Jason.encode(operation_map(operation)),
-         true <- bounded_json?(encoded) do
+         :ok <- preflight_ledger_json(encoded) do
       {:ok, encoded}
     else
       _invalid -> invalid()
@@ -27,7 +30,7 @@ defmodule Arbor.Persistence.VectorStore.Ecto.Codec do
 
   @spec decode_operation(term()) :: {:ok, VectorOperation.t()} | {:error, :invalid_codec}
   def decode_operation(encoded) when is_binary(encoded) do
-    with true <- bounded_json?(encoded),
+    with :ok <- preflight_ledger_json(encoded),
          {:ok, decoded} <- Jason.decode(encoded),
          {:ok, operation} <- operation_from_map(decoded) do
       {:ok, operation}
@@ -47,7 +50,7 @@ defmodule Arbor.Persistence.VectorStore.Ecto.Codec do
   def encode_receipt(%VectorReceipt{} = receipt, %VectorOperation{} = operation) do
     with {:ok, ^receipt} <- VectorReceipt.validate_for_operation(receipt, operation),
          {:ok, encoded} <- Jason.encode(receipt_map(receipt)),
-         true <- bounded_json?(encoded) do
+         :ok <- preflight_ledger_json(encoded) do
       {:ok, encoded}
     else
       _invalid -> invalid()
@@ -63,7 +66,7 @@ defmodule Arbor.Persistence.VectorStore.Ecto.Codec do
   @spec decode_receipt(term(), VectorOperation.t()) ::
           {:ok, VectorReceipt.t()} | {:error, :invalid_codec}
   def decode_receipt(encoded, %VectorOperation{} = operation) when is_binary(encoded) do
-    with true <- bounded_json?(encoded),
+    with :ok <- preflight_ledger_json(encoded),
          {:ok, decoded} <- Jason.decode(encoded),
          {:ok, receipt} <- receipt_from_map(decoded, operation),
          {:ok, ^receipt} <- VectorReceipt.validate_for_operation(receipt, operation) do
@@ -78,6 +81,23 @@ defmodule Arbor.Persistence.VectorStore.Ecto.Codec do
   end
 
   def decode_receipt(_encoded, _operation), do: invalid()
+
+  @spec preflight_ledger_json(term()) :: :ok | {:error, :invalid_codec}
+  def preflight_ledger_json(encoded) do
+    case preflight_json(encoded, @max_ledger_json_bytes, @max_ledger_json_containers) do
+      :ok -> :ok
+      :error -> invalid()
+    end
+  end
+
+  @spec limits() :: map()
+  def limits do
+    %{
+      max_ledger_json_bytes: @max_ledger_json_bytes,
+      max_ledger_json_containers: @max_ledger_json_containers,
+      max_payload_bytes: @max_payload_bytes
+    }
+  end
 
   @spec vector_from_bytes(term()) :: {:ok, [float()]} | {:error, :invalid_codec}
   def vector_from_bytes(bytes)
@@ -284,10 +304,9 @@ defmodule Arbor.Persistence.VectorStore.Ecto.Codec do
          } = map
        )
        when map_size(map) == 15 do
-    with {:ok, payload_bytes} <- decode_base64(encoded_payload),
-         {:ok, payload} <- Jason.decode(payload_bytes),
-         {:ok, ^payload_bytes} <- VectorRecord.canonical_payload_bytes(payload),
-         {:ok, vector_bytes} <- decode_base64(encoded_vector),
+    with {:ok, payload_bytes} <- decode_base64(encoded_payload, @max_payload_bytes),
+         {:ok, payload} <- VectorRecord.decode_canonical_payload(payload_bytes),
+         {:ok, vector_bytes} <- decode_base64(encoded_vector, @vector_bytes),
          {:ok, vector} <- vector_from_bytes(vector_bytes),
          {:ok, record} <-
            VectorRecord.new(%{
@@ -315,18 +334,72 @@ defmodule Arbor.Persistence.VectorStore.Ecto.Codec do
 
   defp record_from_map(_map), do: invalid()
 
-  defp decode_base64(value) when is_binary(value), do: Base.decode64(value)
-  defp decode_base64(_value), do: :error
+  defp decode_base64(value, max_decoded_bytes)
+       when is_binary(value) and is_integer(max_decoded_bytes) and max_decoded_bytes >= 0 do
+    max_encoded_bytes = div(max_decoded_bytes + 2, 3) * 4
+
+    with true <- byte_size(value) <= max_encoded_bytes,
+         {:ok, decoded} <- Base.decode64(value),
+         true <- byte_size(decoded) <= max_decoded_bytes,
+         true <- Base.encode64(decoded) == value do
+      {:ok, decoded}
+    else
+      _invalid -> :error
+    end
+  end
+
+  defp decode_base64(_value, _max_decoded_bytes), do: :error
 
   defp collect_vector(<<>>, vector), do: {:ok, Enum.reverse(vector)}
 
   defp collect_vector(<<value::float-size(32), rest::binary>>, vector),
     do: collect_vector(rest, [value | vector])
 
-  defp bounded_json?(encoded),
-    do:
-      is_binary(encoded) and byte_size(encoded) > 0 and
-        byte_size(encoded) <= @max_ledger_json_bytes
+  defp preflight_json(encoded, max_bytes, max_containers)
+       when is_binary(encoded) and byte_size(encoded) > 0 and byte_size(encoded) <= max_bytes do
+    scan_json(encoded, [], false, false, max_containers)
+  end
+
+  defp preflight_json(_encoded, _max_bytes, _max_containers), do: :error
+
+  defp scan_json(<<>>, [], false, false, _max_containers), do: :ok
+  defp scan_json(<<>>, _stack, _in_string?, _escaped?, _max_containers), do: :error
+
+  defp scan_json(<<_byte, rest::binary>>, stack, true, true, max_containers),
+    do: scan_json(rest, stack, true, false, max_containers)
+
+  defp scan_json(<<?\\, rest::binary>>, stack, true, false, max_containers),
+    do: scan_json(rest, stack, true, true, max_containers)
+
+  defp scan_json(<<?\", rest::binary>>, stack, true, false, max_containers),
+    do: scan_json(rest, stack, false, false, max_containers)
+
+  defp scan_json(<<_byte, rest::binary>>, stack, true, false, max_containers),
+    do: scan_json(rest, stack, true, false, max_containers)
+
+  defp scan_json(<<?\", rest::binary>>, stack, false, false, max_containers),
+    do: scan_json(rest, stack, true, false, max_containers)
+
+  defp scan_json(<<open, rest::binary>>, stack, false, false, max_containers)
+       when open == ?{ or open == ?[ do
+    if length(stack) < max_containers do
+      close = if open == ?{, do: ?}, else: ?]
+      scan_json(rest, [close | stack], false, false, max_containers)
+    else
+      :error
+    end
+  end
+
+  defp scan_json(<<close, rest::binary>>, [close | stack], false, false, max_containers)
+       when close == ?} or close == ?],
+       do: scan_json(rest, stack, false, false, max_containers)
+
+  defp scan_json(<<close, _rest::binary>>, _stack, false, false, _max_containers)
+       when close == ?} or close == ?],
+       do: :error
+
+  defp scan_json(<<_byte, rest::binary>>, stack, false, false, max_containers),
+    do: scan_json(rest, stack, false, false, max_containers)
 
   defp invalid, do: {:error, :invalid_codec}
 end

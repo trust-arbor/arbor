@@ -99,6 +99,28 @@ defmodule Arbor.Contracts.Persistence.VectorTypesTest do
       assert {:error, _reason} = VectorRecord.payload_digest(%{:same => 1, "same" => 1})
     end
 
+    test "security regression: canonical payload decode is byte- and depth-bounded" do
+      limits = VectorRecord.limits().payload
+
+      payload = %{
+        "content" => "bounded",
+        "literal" => ~s([{"key":"value"}]),
+        "nested" => [%{"value" => 1}]
+      }
+
+      assert {:ok, encoded} = VectorRecord.canonical_payload_bytes(payload)
+      assert {:ok, ^payload} = VectorRecord.decode_canonical_payload(encoded)
+
+      oversized = "\"" <> String.duplicate("x", limits.max_payload_bytes) <> "\""
+
+      too_deep =
+        String.duplicate("[", limits.max_depth + 2) <>
+          "0" <> String.duplicate("]", limits.max_depth + 2)
+
+      assert {:error, :invalid_payload} = VectorRecord.decode_canonical_payload(oversized)
+      assert {:error, :invalid_payload} = VectorRecord.decode_canonical_payload(too_deep)
+    end
+
     test "rejects malformed identifiers, descriptors, and digest values" do
       max = VectorRecord.limits()
 

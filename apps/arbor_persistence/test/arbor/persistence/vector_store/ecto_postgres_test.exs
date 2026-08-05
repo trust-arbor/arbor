@@ -127,6 +127,35 @@ defmodule Arbor.Persistence.VectorStore.EctoPostgresTest do
              )
   end
 
+  test "security regression: PostgreSQL search rejects oversized and deeply nested payload JSON" do
+    limits = VectorRecord.limits().payload
+    oversized = "\"" <> String.duplicate("x", limits.max_payload_bytes) <> "\""
+
+    deeply_nested =
+      String.duplicate("[", limits.max_depth + 2) <>
+        "0" <> String.duplicate("]", limits.max_depth + 2)
+
+    for {suffix, corrupt_json} <- [oversized: oversized, deep: deeply_nested] do
+      agent_id = unique("agent_#{suffix}")
+      record = record!(agent_id, source_key: "corrupt", vector: unit_vector(0))
+
+      assert {:ok, _receipt} =
+               Arbor.Persistence.execute_vector_operation(agent_id, insert_operation!(record))
+
+      Arbor.Persistence.Repo.query!(
+        "UPDATE memory_embeddings SET canonical_payload = $1, content = $1 WHERE id = $2",
+        [corrupt_json, record.id]
+      )
+
+      assert {:error, :backend_failure} =
+               Arbor.Persistence.search_vector_records(
+                 agent_id,
+                 unit_vector(0),
+                 search_opts(limit: 10)
+               )
+    end
+  end
+
   test "PostgreSQL rejects zero-norm queries and searches ordinary signed vectors", %{
     agent_id: agent_id
   } do
