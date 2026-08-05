@@ -179,7 +179,7 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
       {nil, _} ->
         {:error, :tampered}
 
-      {stored_hmac, clean} ->
+      {stored_hmac, clean} when is_binary(stored_hmac) ->
         derived_key = derive_key(secret, aad_opts)
         canonical = canonical_json(clean)
 
@@ -191,6 +191,9 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
         else
           {:error, :tampered}
         end
+
+      {_malformed_hmac, _clean} ->
+        {:error, :tampered}
     end
   end
 
@@ -231,11 +234,11 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
   def persist(%__MODULE__{} = checkpoint, logs_root, opts \\ []) when is_binary(logs_root) do
     with :ok <- validate_checkpoint_run_id(checkpoint.run_id),
          {:ok, store_cfg} <- resolve_store_config(opts),
-         {:ok, payload_map} <- build_payload(checkpoint, opts) do
+         {:ok, payload_map, payload_json} <- build_payload(checkpoint, opts) do
       durability = durability_status(opts)
 
       store_result = maybe_put_store(checkpoint.run_id, payload_map, store_cfg)
-      file_result = write_to_file(payload_map, logs_root)
+      file_result = write_to_file(payload_json, logs_root)
 
       case {store_result, file_result} do
         {{:ok, _}, :ok} ->
@@ -586,28 +589,61 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
   # ---------------------------------------------------------------------------
 
   defp build_payload(%__MODULE__{} = checkpoint, opts) do
-    with {:ok, payload_map} <- serialize(checkpoint) do
-      case Keyword.get(opts, :hmac_secret) do
-        nil ->
-          {:ok, payload_map}
+    hmac_secret = Keyword.get(opts, :hmac_secret)
 
-        secret when is_binary(secret) ->
-          aad_opts = [
-            run_id: checkpoint.run_id,
-            current_node: checkpoint.current_node,
-            graph_hash: checkpoint.graph_hash
-          ]
-
-          {:ok, sign(payload_map, secret, aad_opts)}
-
-        _invalid ->
-          {:error, {:invalid_option, :hmac_secret_not_binary}}
-      end
+    with {:ok, payload_map} <- serialize(checkpoint),
+         {:ok, payload_map} <- maybe_sign_payload(payload_map, checkpoint, hmac_secret),
+         {:ok, payload_json} <- encode_payload(payload_map),
+         {:ok, projected_payload} <- decode_preflighted_payload(payload_json),
+         {:ok, verified_payload} <- maybe_verify(projected_payload, hmac_secret),
+         {:ok, _validated_checkpoint} <- deserialize(verified_payload) do
+      {:ok, projected_payload, payload_json}
     end
   rescue
     _ -> {:error, :checkpoint_serialization_failed}
   catch
     _, _ -> {:error, :checkpoint_serialization_failed}
+  end
+
+  defp maybe_sign_payload(payload_map, _checkpoint, nil), do: {:ok, payload_map}
+
+  defp maybe_sign_payload(payload_map, checkpoint, secret) when is_binary(secret) do
+    aad_opts = [
+      run_id: checkpoint.run_id,
+      current_node: checkpoint.current_node,
+      graph_hash: checkpoint.graph_hash
+    ]
+
+    {:ok, sign(payload_map, secret, aad_opts)}
+  end
+
+  defp maybe_sign_payload(_payload_map, _checkpoint, _invalid),
+    do: {:error, {:invalid_option, :hmac_secret_not_binary}}
+
+  # Produce the exact durable JSON artifact before any durability probe, store
+  # operation, directory creation, file write, or peer replication. The decoded
+  # projection is what stores receive, so store and file recovery bind labels to
+  # the same final context values.
+  defp encode_payload(payload_map) when is_map(payload_map) do
+    case Jason.encode(payload_map, pretty: true) do
+      {:ok, payload_json} -> {:ok, payload_json}
+      {:error, _reason} -> {:error, :checkpoint_serialization_failed}
+    end
+  rescue
+    _ -> {:error, :checkpoint_serialization_failed}
+  catch
+    _, _ -> {:error, :checkpoint_serialization_failed}
+  end
+
+  defp encode_payload(_payload_map), do: {:error, :checkpoint_serialization_failed}
+
+  defp decode_preflighted_payload(payload_json) when is_binary(payload_json) do
+    case Jason.decode(payload_json) do
+      {:ok, payload_map} when is_map(payload_map) -> {:ok, payload_map}
+      _other -> {:error, :checkpoint_serialization_failed}
+    end
+  rescue
+    _ -> {:error, :checkpoint_serialization_failed}
   end
 
   defp serialize(%__MODULE__{} = checkpoint) do
@@ -954,7 +990,7 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
     case store_get(cfg, key) do
       {:ok, value} ->
         with {:ok, data} <- unwrap_store_value(value),
-             decoded <- normalize_keys(data),
+             {:ok, decoded} <- normalize_keys(data),
              {:ok, decoded} <- maybe_verify(decoded, hmac_secret) do
           deserialize(decoded)
         end
@@ -983,7 +1019,7 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
         with :ok <- validate_persisted_record_key(value, key),
              {:ok, data} <- unwrap_store_value(value),
              {:ok, data} <- ensure_checkpoint_payload_map(data),
-             decoded <- normalize_keys(data),
+             {:ok, decoded} <- normalize_keys(data),
              {:ok, decoded} <- maybe_verify(decoded, hmac_secret),
              {:ok, decoded} <- ensure_checkpoint_payload_map(decoded),
              :ok <- validate_payload_run_id(decoded, requested_run_id) do
@@ -1130,14 +1166,13 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
   # Atomic same-directory replacement following CodingPlan.ArtifactStore:
   # exclusive create, chmod 0600 before payload write, rename, exact-path
   # cleanup only (never wildcard-delete sibling temps).
-  defp write_to_file(payload_map, logs_root) do
+  defp write_to_file(payload_json, logs_root) when is_binary(payload_json) do
     path = Path.join(logs_root, @checkpoint_filename)
     tmp = temporary_checkpoint_path(path)
 
     try do
       with :ok <- File.mkdir_p(logs_root),
-           {:ok, payload} <- Jason.encode(payload_map, pretty: true),
-           :ok <- write_secure_temp(tmp, payload),
+           :ok <- write_secure_temp(tmp, payload_json),
            :ok <- File.rename(tmp, path) do
         :ok
       else
@@ -1546,20 +1581,55 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
   defp parse_operation(atom) when is_atom(atom), do: atom
   defp parse_operation(_), do: :set
 
-  defp normalize_keys(data) when is_map(data) do
-    data
-    |> Enum.map(fn
-      {k, v} when is_atom(k) -> {Atom.to_string(k), normalize_keys(v)}
-      {k, v} -> {k, normalize_keys(v)}
+  defp normalize_keys(data), do: normalize_keys(data, :checkpoint_root)
+
+  defp normalize_keys(data, location) when is_map(data) and not is_struct(data) do
+    Enum.reduce_while(data, {:ok, %{}}, fn {key, value}, {:ok, acc} ->
+      with {:ok, key} <- normalize_map_key(key),
+           false <- Map.has_key?(acc, key),
+           {:ok, value} <- normalize_nested_value(value, location, key) do
+        {:cont, {:ok, Map.put(acc, key, value)}}
+      else
+        true -> {:halt, {:error, :mixed_keys}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
     end)
-    |> Map.new()
   end
 
-  defp normalize_keys(data), do: data
+  defp normalize_keys(data, _location) when is_map(data),
+    do: {:error, :invalid_checkpoint_payload}
+
+  defp normalize_keys(data, _location) when is_list(data), do: normalize_list(data, [])
+
+  defp normalize_keys(data, _location), do: {:ok, data}
+
+  defp normalize_list([], acc), do: {:ok, Enum.reverse(acc)}
+
+  defp normalize_list([value | rest], acc) do
+    with {:ok, value} <- normalize_keys(value, :nested) do
+      normalize_list(rest, [value | acc])
+    end
+  end
+
+  defp normalize_list(_improper, _acc), do: {:error, :invalid_checkpoint_payload}
+
+  # Current and legacy durable taint maps are closed string-keyed shapes. Keep
+  # their field keys untouched so atom or mixed-key corruption reaches the
+  # strict envelope/legacy decoder instead of being normalized into validity.
+  defp normalize_nested_value(value, :checkpoint_root, "context_taint"), do: {:ok, value}
+  defp normalize_nested_value(value, _location, _key), do: normalize_keys(value, :nested)
+
+  defp normalize_map_key(key) when is_atom(key), do: {:ok, Atom.to_string(key)}
+
+  defp normalize_map_key(key) when is_binary(key) do
+    if String.valid?(key), do: {:ok, key}, else: {:error, :invalid_checkpoint_payload}
+  end
+
+  defp normalize_map_key(_key), do: {:error, :invalid_checkpoint_payload}
 
   defp maybe_verify(decoded, nil), do: {:ok, decoded}
 
-  defp maybe_verify(decoded, secret) do
+  defp maybe_verify(decoded, secret) when is_map(decoded) and is_binary(secret) do
     # Extract AAD from the checkpoint data itself
     aad_opts = [
       run_id: Map.get(decoded, "run_id"),
@@ -1569,6 +1639,9 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
 
     verify(decoded, secret, aad_opts)
   end
+
+  defp maybe_verify(_decoded, _secret),
+    do: {:error, {:invalid_option, :hmac_secret_not_binary}}
 
   defp parse_status(status)
        when status in [:success, :partial_success, :retry, :fail, :skipped],

@@ -3,8 +3,91 @@ defmodule Arbor.Orchestrator.Engine.CheckpointContextTaintEnvelopeSecurityRegres
 
   @moduletag :fast
 
+  alias Arbor.Contracts.Persistence.Record, as: PersistenceRecord
   alias Arbor.Contracts.Security.{Taint, TaintEnvelope}
   alias Arbor.Orchestrator.Engine.{Checkpoint, Context}
+
+  defmodule SpyStore do
+    @moduledoc false
+    use GenServer
+
+    def child_spec(opts) do
+      name = Keyword.fetch!(opts, :name)
+      %{id: name, start: {__MODULE__, :start_link, [opts]}}
+    end
+
+    def start_link(opts) do
+      name = Keyword.fetch!(opts, :name)
+      GenServer.start_link(__MODULE__, %{data: %{}, events: []}, name: name)
+    end
+
+    def durability_class(opts) do
+      opts |> Keyword.fetch!(:name) |> GenServer.call(:durability_class)
+    end
+
+    def put(key, value, opts) do
+      GenServer.call(Keyword.fetch!(opts, :name), {:put, key, value})
+    end
+
+    def get(key, opts) do
+      GenServer.call(Keyword.fetch!(opts, :name), {:get, key})
+    end
+
+    def delete(key, opts) do
+      GenServer.call(Keyword.fetch!(opts, :name), {:delete, key})
+    end
+
+    def list(opts) do
+      opts |> Keyword.fetch!(:name) |> GenServer.call(:list)
+    end
+
+    def events(name), do: GenServer.call(name, :events)
+    def fetch(name, key), do: GenServer.call(name, {:fetch, key})
+    def replace(name, key, value), do: GenServer.call(name, {:replace, key, value})
+
+    @impl true
+    def init(state), do: {:ok, state}
+
+    @impl true
+    def handle_call(:durability_class, _from, state) do
+      {:reply, :process_lifetime, record_event(state, :durability_class)}
+    end
+
+    def handle_call({:put, key, value}, _from, state) do
+      state = state |> put_in([:data, key], value) |> record_event({:put, key})
+      {:reply, :ok, state}
+    end
+
+    def handle_call({:get, key}, _from, state) do
+      state = record_event(state, {:get, key})
+
+      case Map.fetch(state.data, key) do
+        {:ok, value} -> {:reply, {:ok, value}, state}
+        :error -> {:reply, {:error, :not_found}, state}
+      end
+    end
+
+    def handle_call({:delete, key}, _from, state) do
+      state = state |> update_in([:data], &Map.delete(&1, key)) |> record_event({:delete, key})
+      {:reply, :ok, state}
+    end
+
+    def handle_call(:list, _from, state) do
+      {:reply, {:ok, Map.keys(state.data)}, record_event(state, :list)}
+    end
+
+    def handle_call(:events, _from, state), do: {:reply, Enum.reverse(state.events), state}
+
+    def handle_call({:fetch, key}, _from, state) do
+      {:reply, Map.fetch!(state.data, key), state}
+    end
+
+    def handle_call({:replace, key, value}, _from, state) do
+      {:reply, :ok, put_in(state, [:data, key], value)}
+    end
+
+    defp record_event(state, event), do: update_in(state.events, &[event | &1])
+  end
 
   setup do
     root =
@@ -15,7 +98,12 @@ defmodule Arbor.Orchestrator.Engine.CheckpointContextTaintEnvelopeSecurityRegres
 
     File.mkdir_p!(root)
     on_exit(fn -> File.rm_rf(root) end)
-    %{root: root}
+
+    suffix = System.unique_integer([:positive, :monotonic])
+    store_name = :"checkpoint_taint_envelope_store_#{suffix}"
+    start_supervised!({SpyStore, name: store_name})
+
+    %{root: root, store_name: store_name}
   end
 
   test "security regression: exact context taint envelope round-trips against final value", %{
@@ -192,6 +280,147 @@ defmodule Arbor.Orchestrator.Engine.CheckpointContextTaintEnvelopeSecurityRegres
     refute File.exists?(Path.join(root, "checkpoint.json"))
   end
 
+  test "security regression: unencodable unlabeled value has zero persist or write effects", %{
+    root: root,
+    store_name: store_name
+  } do
+    checkpoint =
+      Context.new(%{"unlabelled" => self()})
+      |> checkpoint("run_unencodable_unlabelled")
+
+    persist_root = Path.join(root, "persist_unencodable")
+
+    assert {:error, :checkpoint_serialization_failed} =
+             Checkpoint.persist(checkpoint, persist_root, configured_store_opts(store_name))
+
+    assert SpyStore.events(store_name) == []
+    refute File.exists?(persist_root)
+
+    write_root = Path.join(root, "write_unencodable")
+
+    assert {:error, :checkpoint_serialization_failed} =
+             Checkpoint.write(checkpoint, write_root, configured_store_opts(store_name))
+
+    assert SpyStore.events(store_name) == []
+    refute File.exists?(write_root)
+  end
+
+  test "security regression: oversized labelled value is rejected before configured-store effects",
+       %{root: root, store_name: store_name} do
+    oversize = String.duplicate("x", TaintEnvelope.limits().max_string_bytes + 1)
+    checkpoint = labelled_checkpoint(oversize)
+    attempt_root = Path.join(root, "oversized")
+
+    assert {:error, :payload_string_limit} =
+             Checkpoint.persist(checkpoint, attempt_root, configured_store_opts(store_name))
+
+    assert SpyStore.events(store_name) == []
+    refute File.exists?(attempt_root)
+  end
+
+  test "configured store persists the exact file projection and restores in-memory taint", %{
+    root: root,
+    store_name: store_name
+  } do
+    run_id = "run_configured_store_envelope"
+    checkpoint = labelled_checkpoint(%{"nested" => %{state: :ready}})
+    checkpoint = %{checkpoint | run_id: run_id}
+    opts = configured_store_opts(store_name)
+
+    assert {:ok, receipt} = Checkpoint.persist(checkpoint, root, opts)
+    assert receipt.store == :ok
+    assert receipt.file == :ok
+
+    key = "checkpoint:#{run_id}"
+    assert %PersistenceRecord{data: stored_payload} = SpyStore.fetch(store_name, key)
+    file_payload = root |> Path.join("checkpoint.json") |> File.read!() |> Jason.decode!()
+
+    assert stored_payload == file_payload
+
+    assert stored_payload["context_values"]["bound"] == %{
+             "nested" => %{"state" => "ready"}
+           }
+
+    assert {:ok, %TaintEnvelope{taint: expected_taint}} =
+             TaintEnvelope.verify(
+               stored_payload["context_taint"]["bound"],
+               stored_payload["context_values"]["bound"]
+             )
+
+    assert {:ok, loaded} =
+             Checkpoint.load(Path.join(root, "checkpoint.json"),
+               run_id: run_id,
+               store: SpyStore,
+               store_name: store_name
+             )
+
+    assert loaded.context_values == stored_payload["context_values"]
+    assert loaded.context_taint == %{"bound" => expected_taint}
+  end
+
+  test "security regression: configured-store mixed envelope keys reject the checkpoint", %{
+    root: root,
+    store_name: store_name
+  } do
+    run_id = "run_mixed_envelope_keys"
+    checkpoint = labelled_checkpoint("value") |> Map.put(:run_id, run_id)
+    opts = configured_store_opts(store_name)
+    assert {:ok, _receipt} = Checkpoint.persist(checkpoint, root, opts)
+
+    key = "checkpoint:#{run_id}"
+    record = SpyStore.fetch(store_name, key)
+    envelope = record.data["context_taint"]["bound"]
+    mixed = envelope |> Map.delete("version") |> Map.put(:version, envelope["version"])
+    tampered_data = put_in(record.data, ["context_taint", "bound"], mixed)
+    :ok = SpyStore.replace(store_name, key, %{record | data: tampered_data})
+
+    assert {:error, :mixed_keys} =
+             Checkpoint.load(Path.join(root, "checkpoint.json"),
+               run_id: run_id,
+               store: SpyStore,
+               store_name: store_name
+             )
+  end
+
+  test "HMAC covers the final configured-store envelope structure", %{
+    root: root,
+    store_name: store_name
+  } do
+    run_id = "run_hmac_envelope"
+    secret = "checkpoint-hmac-secret"
+    checkpoint = labelled_checkpoint("signed value") |> Map.put(:run_id, run_id)
+    opts = configured_store_opts(store_name, hmac_secret: secret)
+
+    assert {:ok, _receipt} = Checkpoint.persist(checkpoint, root, opts)
+
+    assert {:ok, loaded} =
+             Checkpoint.load(Path.join(root, "checkpoint.json"),
+               run_id: run_id,
+               store: SpyStore,
+               store_name: store_name,
+               hmac_secret: secret
+             )
+
+    assert loaded.context_taint == %{"bound" => label()}
+
+    key = "checkpoint:#{run_id}"
+    record = SpyStore.fetch(store_name, key)
+    assert is_binary(record.data["__hmac"])
+
+    tampered_data =
+      put_in(record.data, ["context_values", "bound"], "attacker replacement")
+
+    :ok = SpyStore.replace(store_name, key, %{record | data: tampered_data})
+
+    assert {:error, :tampered} =
+             Checkpoint.load(Path.join(root, "checkpoint.json"),
+               run_id: run_id,
+               store: SpyStore,
+               store_name: store_name,
+               hmac_secret: secret
+             )
+  end
+
   defp labelled_checkpoint(value) do
     Context.new(%{"bound" => value}, taint: %{"bound" => label()})
     |> checkpoint("run_context_taint_envelope")
@@ -223,5 +452,9 @@ defmodule Arbor.Orchestrator.Engine.CheckpointContextTaintEnvelopeSecurityRegres
 
   defp rewrite_payload(path, payload) do
     File.write!(path, Jason.encode!(payload, pretty: true))
+  end
+
+  defp configured_store_opts(store_name, extra \\ []) do
+    Keyword.merge([store: SpyStore, store_name: store_name], extra)
   end
 end
