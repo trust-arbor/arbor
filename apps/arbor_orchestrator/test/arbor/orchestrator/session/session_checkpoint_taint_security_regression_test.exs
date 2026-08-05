@@ -192,6 +192,104 @@ defmodule Arbor.Orchestrator.Session.SessionCheckpointTaintSecurityRegressionTes
     Enum.each(restored.messages, &assert_invalid/1)
   end
 
+  test "security regression: complete message-list deletion cannot retain a prior transcript" do
+    checkpoint =
+      [labeled_message("user", "checkpoint transcript", taint("deleted_list", :hostile))]
+      |> session("eng-delete-list")
+      |> Persistence.extract_checkpoint_data()
+
+    prior = labeled_message("assistant", "must be cleared", taint("prior_transcript", :hostile))
+    target = session([prior], "eng-delete-list")
+
+    removed = Map.delete(checkpoint, "messages")
+    assert Persistence.apply_checkpoint(target, removed).messages == []
+
+    emptied = Map.put(checkpoint, "messages", [])
+    assert Persistence.apply_checkpoint(target, emptied).messages == []
+  end
+
+  test "security regression: same-scope checkpoint records cannot be spliced" do
+    checkpoint_a =
+      [
+        labeled_message("user", "checkpoint A user", taint("checkpoint_a_user", :hostile)),
+        labeled_message(
+          "assistant",
+          "checkpoint A assistant",
+          taint("checkpoint_a_assistant", :untrusted)
+        )
+      ]
+      |> session("eng-splice")
+      |> Persistence.extract_checkpoint_data()
+
+    checkpoint_b =
+      [
+        labeled_message("user", "checkpoint B user", taint("checkpoint_b_user", :untrusted)),
+        labeled_message(
+          "assistant",
+          "checkpoint B assistant",
+          taint("checkpoint_b_assistant", :hostile)
+        )
+      ]
+      |> session("eng-splice")
+      |> Persistence.extract_checkpoint_data()
+
+    [first_a, _second_a] = checkpoint_a["messages"]
+    [_first_b, second_b] = checkpoint_b["messages"]
+    spliced = Map.put(checkpoint_a, "messages", [first_a, second_b])
+    restored = Persistence.apply_checkpoint(session([], "eng-splice"), spliced)
+
+    assert Enum.map(restored.messages, & &1["content"]) == [
+             "checkpoint A user",
+             "checkpoint B assistant"
+           ]
+
+    Enum.each(restored.messages, &assert_invalid/1)
+  end
+
+  test "security regression: a valid empty transcript carries a zero-count manifest" do
+    checkpoint = Persistence.extract_checkpoint_data(session([], "eng-empty"))
+
+    assert checkpoint["messages"] == []
+
+    assert %{
+             "payload" => %{
+               "domain" => "arbor.session.checkpoint.transcript.v1",
+               "message_count" => 0,
+               "records_digest" => %{},
+               "scope_digest" => %{}
+             },
+             "envelope" => %{}
+           } = checkpoint["messages_manifest"]
+
+    prior = labeled_message("user", "empty replaces this", taint("empty_prior", :hostile))
+    restored = Persistence.apply_checkpoint(session([prior], "eng-empty"), checkpoint)
+
+    assert restored.messages == []
+  end
+
+  test "security regression: corrupt or removed transcript manifests invalidate current labels" do
+    checkpoint =
+      [labeled_message("user", "manifest-bound", taint("manifest_bound", :hostile))]
+      |> session("eng-manifest")
+      |> Persistence.extract_checkpoint_data()
+
+    corrupted =
+      Map.put(checkpoint, "messages_manifest", %{
+        "payload" => %{"malformed" => true},
+        "envelope" => %{}
+      })
+
+    removed = Map.delete(checkpoint, "messages_manifest")
+
+    for candidate <- [corrupted, removed] do
+      assert [message] =
+               Persistence.apply_checkpoint(session([], "eng-manifest"), candidate).messages
+
+      assert message["content"] == "manifest-bound"
+      assert_invalid(message)
+    end
+  end
+
   test "security regression: current records are bound to their exact engagement" do
     checkpoint =
       [labeled_message("user", "engagement-bound", taint("engagement_a", :hostile))]

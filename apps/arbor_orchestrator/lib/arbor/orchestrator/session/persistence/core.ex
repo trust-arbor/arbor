@@ -21,8 +21,19 @@ defmodule Arbor.Orchestrator.Session.Persistence.Core do
   @prompt_roles ~w(system user assistant tool)
   @checkpoint_message_keys ["envelope", "payload", "status"]
   @checkpoint_message_domain "arbor.session.checkpoint.message.v2"
+  @checkpoint_manifest_keys ["envelope", "payload"]
+  @checkpoint_manifest_domain "arbor.session.checkpoint.transcript.v1"
   @checkpoint_scope_keys ["agent_id", "current_engagement_id", "session_id"]
   @taint_statuses [:verified, :legacy_unlabeled, :invalid_durable_provenance]
+
+  @checkpoint_manifest_taint %Taint{
+    level: :derived,
+    sensitivity: :internal,
+    sanitizations: 0,
+    confidence: :verified,
+    source: "session_checkpoint_transcript_manifest",
+    chain: []
+  }
 
   @type entry :: map()
 
@@ -216,25 +227,14 @@ defmodule Arbor.Orchestrator.Session.Persistence.Core do
     }
   end
 
-  @doc "Encode live Session messages as exact payload-bound checkpoint records."
+  @doc "Encode live Session messages and their payload-bound transcript manifest."
   @spec encode_checkpoint_messages([term()], map()) ::
-          {:ok, [map()]} | {:error, atom()}
+          {:ok, %{messages: [map()], manifest: map()}} | {:error, atom()}
   def encode_checkpoint_messages(messages, scope) when is_list(messages) do
-    with {:ok, scope_binding} <- checkpoint_scope_binding(scope) do
-      message_count = length(messages)
-
-      messages
-      |> Enum.with_index()
-      |> Enum.reduce_while({:ok, []}, fn {message, position}, {:ok, encoded} ->
-        case encode_checkpoint_message(message, position, message_count, scope_binding) do
-          {:ok, checkpoint_message} -> {:cont, {:ok, [checkpoint_message | encoded]}}
-          {:error, _reason} = error -> {:halt, error}
-        end
-      end)
-      |> case do
-        {:ok, encoded} -> {:ok, Enum.reverse(encoded)}
-        {:error, _reason} = error -> error
-      end
+    with {:ok, scope_binding} <- checkpoint_scope_binding(scope),
+         {:ok, encoded} <- encode_checkpoint_message_list(messages, scope_binding),
+         {:ok, manifest} <- encode_checkpoint_manifest(encoded, scope_binding) do
+      {:ok, %{messages: encoded, manifest: manifest}}
     end
   rescue
     _ -> {:error, :invalid_checkpoint_messages}
@@ -245,19 +245,24 @@ defmodule Arbor.Orchestrator.Session.Persistence.Core do
   def encode_checkpoint_messages(_messages, _scope),
     do: {:error, :invalid_checkpoint_messages}
 
-  @doc "Strictly restore current checkpoint records or conservatively label legacy rows."
-  @spec restore_checkpoint_messages(term(), map() | :missing) ::
+  @doc "Verify the transcript manifest before restoring current checkpoint records."
+  @spec restore_checkpoint_messages(term(), term(), map() | :missing) ::
           {:ok, [map()]} | {:error, atom()}
-  def restore_checkpoint_messages(messages, scope) when is_list(messages) do
+  def restore_checkpoint_messages(messages, manifest, scope) when is_list(messages) do
     with {:ok, scope_binding} <- checkpoint_scope_binding(scope) do
       message_count = length(messages)
 
       restored =
-        messages
-        |> Enum.with_index()
-        |> Enum.map(fn {message, position} ->
-          restore_checkpoint_message(message, position, message_count, scope_binding)
-        end)
+        case checkpoint_manifest_status(messages, manifest, scope_binding) do
+          :verified ->
+            restore_bound_checkpoint_messages(messages, message_count, scope_binding)
+
+          :legacy ->
+            restore_bound_checkpoint_messages(messages, message_count, scope_binding)
+
+          :invalid ->
+            Enum.map(messages, &invalidate_checkpoint_message/1)
+        end
 
       {:ok, restored}
     end
@@ -267,7 +272,7 @@ defmodule Arbor.Orchestrator.Session.Persistence.Core do
     _, _ -> {:error, :invalid_checkpoint_messages}
   end
 
-  def restore_checkpoint_messages(_messages, _scope),
+  def restore_checkpoint_messages(_messages, _manifest, _scope),
     do: {:error, :invalid_checkpoint_messages}
 
   @doc "Wrap text in the canonical SessionEntry content-block representation."
@@ -391,6 +396,117 @@ defmodule Arbor.Orchestrator.Session.Persistence.Core do
   end
 
   defp metadata_has_taint?(_metadata), do: false
+
+  defp encode_checkpoint_message_list(messages, scope_binding) do
+    message_count = length(messages)
+
+    messages
+    |> Enum.with_index()
+    |> Enum.reduce_while({:ok, []}, fn {message, position}, {:ok, encoded} ->
+      case encode_checkpoint_message(message, position, message_count, scope_binding) do
+        {:ok, checkpoint_message} -> {:cont, {:ok, [checkpoint_message | encoded]}}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, encoded} -> {:ok, Enum.reverse(encoded)}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp encode_checkpoint_manifest(messages, scope_binding) do
+    with {:ok, descriptor} <- checkpoint_manifest_descriptor(messages, scope_binding),
+         {:ok, envelope} <- TaintEnvelope.new(descriptor, @checkpoint_manifest_taint),
+         {:ok, persisted} <- TaintEnvelope.to_map(envelope) do
+      {:ok, %{"payload" => descriptor, "envelope" => persisted}}
+    else
+      _ -> {:error, :checkpoint_manifest_unavailable}
+    end
+  end
+
+  defp restore_bound_checkpoint_messages(messages, message_count, scope_binding) do
+    messages
+    |> Enum.with_index()
+    |> Enum.map(fn {message, position} ->
+      restore_checkpoint_message(message, position, message_count, scope_binding)
+    end)
+  end
+
+  defp checkpoint_manifest_status(messages, :missing, _scope_binding) do
+    if Enum.any?(messages, fn
+         message when is_map(message) -> checkpoint_wrapper_shaped?(message)
+         _message -> false
+       end) do
+      :invalid
+    else
+      :legacy
+    end
+  end
+
+  defp checkpoint_manifest_status(messages, manifest, scope_binding) do
+    case verify_checkpoint_manifest(messages, manifest, scope_binding) do
+      :ok -> :verified
+      {:error, _reason} -> :invalid
+    end
+  end
+
+  defp verify_checkpoint_manifest(messages, manifest, scope_binding)
+       when is_map(manifest) and not is_struct(manifest) do
+    with true <- exact_string_keys?(manifest, @checkpoint_manifest_keys),
+         payload when is_map(payload) and not is_struct(payload) <- manifest["payload"],
+         {:ok, expected} <- checkpoint_manifest_descriptor(messages, scope_binding),
+         true <- payload === expected,
+         {:ok, envelope} <- TaintEnvelope.verify(manifest["envelope"], expected),
+         true <- envelope.taint === @checkpoint_manifest_taint do
+      :ok
+    else
+      _ -> {:error, :invalid_checkpoint_manifest}
+    end
+  end
+
+  defp verify_checkpoint_manifest(_messages, _manifest, _scope_binding),
+    do: {:error, :invalid_checkpoint_manifest}
+
+  defp checkpoint_manifest_descriptor(messages, scope_binding)
+       when is_list(messages) and is_map(scope_binding) do
+    with {:ok, records_digest} <- DurableJson.project_and_digest(messages),
+         true <- records_digest.projection === messages,
+         {:ok, records_binding} <- durable_digest_descriptor(records_digest) do
+      {:ok,
+       %{
+         "domain" => @checkpoint_manifest_domain,
+         "message_count" => length(messages),
+         "records_digest" => records_binding,
+         "scope_digest" => scope_binding
+       }}
+    else
+      _ -> {:error, :invalid_checkpoint_manifest_payload}
+    end
+  end
+
+  defp checkpoint_manifest_descriptor(_messages, _scope_binding),
+    do: {:error, :missing_checkpoint_scope}
+
+  defp invalidate_checkpoint_message(message) when is_map(message) and not is_struct(message) do
+    payload =
+      if checkpoint_wrapper_shaped?(message),
+        do: checkpoint_fallback_payload(message),
+        else: checkpoint_payload(message)
+
+    put_checkpoint_label(
+      payload,
+      TaintEnvelope.invalid_fallback(),
+      :invalid_durable_provenance
+    )
+  end
+
+  defp invalidate_checkpoint_message(_message) do
+    put_checkpoint_label(
+      %{"role" => nil, "content" => ""},
+      TaintEnvelope.invalid_fallback(),
+      :invalid_durable_provenance
+    )
+  end
 
   defp encode_checkpoint_message(message, position, message_count, scope_binding)
        when is_map(message) and not is_struct(message) do

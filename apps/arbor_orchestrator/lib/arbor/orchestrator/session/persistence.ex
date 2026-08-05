@@ -143,10 +143,11 @@ defmodule Arbor.Orchestrator.Session.Persistence do
     engagement_id = Map.get(state, :current_engagement_id)
     scope = checkpoint_scope(state, engagement_id)
 
-    with {:ok, messages} <-
+    with {:ok, %{messages: messages, manifest: manifest}} <-
            Core.encode_checkpoint_messages(ContextBuilder.get_messages(state), scope) do
       %{
         "messages" => messages,
+        "messages_manifest" => manifest,
         "current_engagement_id" => engagement_id,
         "working_memory" => ContextBuilder.get_working_memory(state),
         "goals" => ContextBuilder.get_goals(state),
@@ -187,20 +188,30 @@ defmodule Arbor.Orchestrator.Session.Persistence do
   end
 
   defp restore_checkpoint_messages(state, data, engagement) do
-    case cp_fetch(data, "messages") do
-      :error ->
+    case {cp_fetch(data, "messages"), cp_fetch(data, "messages_manifest")} do
+      {:error, :error} ->
         :missing
 
-      {:ok, persisted_messages} ->
+      {:error, {:ok, _orphaned_manifest}} ->
+        {:error, :checkpoint_messages_missing}
+
+      {{:ok, persisted_messages}, manifest} ->
+        persisted_manifest =
+          case manifest do
+            {:ok, value} -> value
+            :error -> :missing
+          end
+
         case engagement do
           {:ok, engagement_id} when is_binary(engagement_id) or is_nil(engagement_id) ->
             Core.restore_checkpoint_messages(
               persisted_messages,
+              persisted_manifest,
               checkpoint_scope(state, engagement_id)
             )
 
           :error ->
-            Core.restore_checkpoint_messages(persisted_messages, :missing)
+            Core.restore_checkpoint_messages(persisted_messages, persisted_manifest, :missing)
 
           {:ok, _invalid_engagement} ->
             {:error, :invalid_checkpoint_engagement}
