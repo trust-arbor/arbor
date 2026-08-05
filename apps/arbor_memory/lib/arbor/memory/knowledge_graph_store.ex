@@ -299,7 +299,7 @@ defmodule Arbor.Memory.KnowledgeGraphStore do
       {:reply, {:ok, result}, project_or_schedule(state, agent_id, snapshot)}
     else
       {:error, reason} = error ->
-        {:reply, error, invalidate_after_mutation(state, agent_id, reason, :initialize)}
+        {:reply, error, invalidate_after_mutation(state, agent_id, reason)}
 
       _ ->
         {:reply, {:error, :invalid_graph}, state}
@@ -322,7 +322,7 @@ defmodule Arbor.Memory.KnowledgeGraphStore do
       {:reply, {:ok, result}, project_or_schedule(state, agent_id, snapshot)}
     else
       {:error, reason} = error ->
-        {:reply, error, invalidate_after_mutation(state, agent_id, reason, :operate)}
+        {:reply, error, invalidate_after_mutation(state, agent_id, reason)}
 
       _ ->
         {:reply, {:error, :invalid_graph}, state}
@@ -345,7 +345,7 @@ defmodule Arbor.Memory.KnowledgeGraphStore do
       {:reply, {:ok, result}, project_or_schedule(state, agent_id, snapshot)}
     else
       {:error, reason} = error ->
-        {:reply, error, invalidate_after_mutation(state, agent_id, reason, :initialize)}
+        {:reply, error, invalidate_after_mutation(state, agent_id, reason)}
 
       _ ->
         {:reply, {:error, :invalid_graph}, state}
@@ -702,7 +702,7 @@ defmodule Arbor.Memory.KnowledgeGraphStore do
       else: state
   end
 
-  defp invalidate_after_mutation(state, agent_id, reason, mode) do
+  defp invalidate_after_mutation(state, agent_id, reason) do
     invalidate? =
       reason in [
         :conflict,
@@ -711,7 +711,7 @@ defmodule Arbor.Memory.KnowledgeGraphStore do
         :invalid_provenance,
         :outcome_unknown,
         :store_unavailable
-      ] and not (mode == :initialize and reason == :conflict)
+      ]
 
     if invalidate? do
       state = invalidate_projection(state, agent_id)
