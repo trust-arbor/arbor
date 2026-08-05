@@ -73,6 +73,41 @@ defmodule Arbor.Persistence.EventLog.Agent do
   end
 
   @impl Arbor.Persistence.EventLog
+  def read_stream_range(stream_id, opts) do
+    with {:ok, range} <- EventLog.validate_stream_range(stream_id, opts) do
+      name = Keyword.fetch!(opts, :name)
+
+      events =
+        Agent.get(name, fn state ->
+          state.streams
+          |> Map.get(stream_id, [])
+          |> project_direction(range.direction)
+          |> Enum.filter(&(&1.event_number >= range.from and &1.event_number <= range.to))
+          |> Enum.take(range.limit)
+        end)
+
+      {:ok, events}
+    end
+  end
+
+  @impl Arbor.Persistence.EventLog
+  def event_identity(stream_id, event_id, opts) do
+    with :ok <- EventLog.validate_identity_read(stream_id, event_id) do
+      name = Keyword.fetch!(opts, :name)
+
+      Agent.get(name, fn state ->
+        case Map.get(state.event_index, event_id) do
+          %Event{stream_id: ^stream_id} = event ->
+            {:ok, EventLog.event_fingerprint(stream_id, event)}
+
+          _absent_or_other_stream ->
+            {:ok, nil}
+        end
+      end)
+    end
+  end
+
+  @impl Arbor.Persistence.EventLog
   def read_stream_head(stream_id, opts) do
     with {:ok, max_current_age_ms} <- EventLog.validate_head_read(stream_id, opts) do
       name = Keyword.fetch!(opts, :name)

@@ -861,6 +861,28 @@ defmodule Arbor.Persistence do
     backend.read_stream(stream_id, Keyword.put(opts, :name, name))
   end
 
+  @doc "Read a bounded page from an inclusive stream event-number range."
+  @spec read_stream_range(atom(), module(), String.t(), keyword()) ::
+          {:ok, [Event.t()]} | {:error, term()}
+  def read_stream_range(name, backend, stream_id, opts \\ []) do
+    with :ok <- validate_store_name(name),
+         :ok <- validate_backend(backend, :read_stream_range, 2),
+         {:ok, _range} <- EventLog.validate_stream_range(stream_id, opts) do
+      backend.read_stream_range(stream_id, Keyword.put(opts, :name, name))
+    end
+  end
+
+  @doc "Read one stream-scoped immutable event fingerprint by exact ID."
+  @spec event_identity(atom(), module(), String.t(), String.t(), keyword()) ::
+          {:ok, String.t() | nil} | {:error, term()}
+  def event_identity(name, backend, stream_id, event_id, opts \\ []) do
+    with :ok <- validate_store_name(name),
+         :ok <- validate_backend(backend, :event_identity, 3),
+         :ok <- EventLog.validate_identity_read(stream_id, event_id) do
+      backend.event_identity(stream_id, event_id, Keyword.put(opts, :name, name))
+    end
+  end
+
   @doc "Read the current stream head, optionally bounded by backend-owned freshness."
   @spec read_stream_head(atom(), module(), String.t(), keyword()) ::
           {:ok, Event.t() | nil} | {:error, term()}

@@ -490,6 +490,40 @@ defmodule Arbor.Persistence.EventLog.ETSTest do
       assert Enum.map(bounded_from, & &1.event_number) == [10, 9]
     end
 
+    test "bounded range pages honor both inclusive bounds in either direction", %{name: name} do
+      events = for i <- 1..10, do: Event.new("s1", "t", %{i: i})
+      assert {:ok, persisted} = ETS.append("s1", events, name: name)
+
+      assert {:ok, forward} =
+               ETS.read_stream_range("s1",
+                 name: name,
+                 from: 3,
+                 to: 7,
+                 direction: :forward,
+                 limit: 3
+               )
+
+      assert Enum.map(forward, & &1.event_number) == [3, 4, 5]
+
+      assert {:ok, backward} =
+               ETS.read_stream_range("s1",
+                 name: name,
+                 from: 3,
+                 to: 7,
+                 direction: :backward,
+                 limit: 3
+               )
+
+      assert Enum.map(backward, & &1.event_number) == [7, 6, 5]
+
+      event = Enum.at(persisted, 4)
+      expected = Arbor.Persistence.EventLog.event_fingerprint("s1", event)
+
+      assert {:ok, ^expected} = ETS.event_identity("s1", event.id, name: name)
+      assert {:ok, nil} = ETS.event_identity("other-stream", event.id, name: name)
+      assert {:ok, nil} = ETS.event_identity("s1", "missing-event", name: name)
+    end
+
     test "security regression (max_scan): bounds how many events are walked into memory",
          %{name: name} do
       # codex resource-exhaustion.historian-taint-query-full-scan: without a

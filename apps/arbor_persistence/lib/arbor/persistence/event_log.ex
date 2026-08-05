@@ -114,6 +114,26 @@ defmodule Arbor.Persistence.EventLog do
   @callback read_stream(stream_id(), opts()) :: {:ok, [Event.t()]} | {:error, term()}
 
   @doc """
+  Read one bounded page from an inclusive event-number range.
+
+  This optional callback is for callers that need a stable upper bound while
+  paging backward. Implementations require a positive `:limit`; `:from` and
+  `:to` are inclusive non-negative event numbers, and `:direction` is
+  `:forward` or `:backward`.
+  """
+  @callback read_stream_range(stream_id(), opts()) ::
+              {:ok, [Event.t()]} | {:error, term()}
+
+  @doc """
+  Return the immutable fingerprint for one event ID in one stream.
+
+  `nil` means that exact stream-scoped identity is absent. This optional
+  callback lets projections compare identities without scanning an event log.
+  """
+  @callback event_identity(stream_id(), event_id :: String.t(), opts()) ::
+              {:ok, String.t() | nil} | {:error, term()}
+
+  @doc """
   Read at most the current head event for a stream.
 
   With no freshness option this returns the ordinary current head. With
@@ -183,6 +203,8 @@ defmodule Arbor.Persistence.EventLog do
 
   @optional_callbacks [
     reconcile_append: 2,
+    read_stream_range: 2,
+    event_identity: 3,
     subscribe: 3,
     list_streams: 1,
     stream_count: 1,
@@ -273,6 +295,44 @@ defmodule Arbor.Persistence.EventLog do
   @doc false
   @spec normalize_opts(term()) :: {:ok, keyword()} | {:error, :invalid_precondition}
   def normalize_opts(opts), do: bounded_opts(opts, 0, [])
+
+  @doc false
+  @spec validate_stream_range(stream_id(), term()) ::
+          {:ok,
+           %{
+             direction: :forward | :backward,
+             from: non_neg_integer(),
+             limit: pos_integer(),
+             to: non_neg_integer()
+           }}
+          | {:error, :invalid_precondition}
+  def validate_stream_range(stream_id, opts) do
+    with :ok <- validate_stream_id(stream_id),
+         {:ok, opts} <- normalize_opts(opts),
+         from when is_integer(from) and from >= 0 <- Keyword.get(opts, :from, 0),
+         to when is_integer(to) and to >= from <- Keyword.get(opts, :to),
+         limit when is_integer(limit) and limit > 0 and limit <= 1_000 <-
+           Keyword.get(opts, :limit),
+         direction when direction in [:forward, :backward] <-
+           Keyword.get(opts, :direction, :forward) do
+      {:ok, %{from: from, to: to, limit: limit, direction: direction}}
+    else
+      _invalid -> {:error, :invalid_precondition}
+    end
+  end
+
+  @doc false
+  @spec validate_identity_read(stream_id(), term()) :: :ok | {:error, :invalid_precondition}
+  def validate_identity_read(stream_id, event_id) do
+    with :ok <- validate_stream_id(stream_id),
+         true <-
+           is_binary(event_id) and byte_size(event_id) > 0 and
+             byte_size(event_id) <= @max_string_bytes and String.valid?(event_id) do
+      :ok
+    else
+      _invalid -> {:error, :invalid_precondition}
+    end
+  end
 
   @doc false
   @spec build_operation(stream_id(), term()) ::

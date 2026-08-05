@@ -683,6 +683,60 @@ defmodule Arbor.Persistence.EventLog.Ecto do
       {:error, {:read_failed, e}}
   end
 
+  @impl Arbor.Persistence.EventLog
+  def read_stream_range(stream_id, opts \\ []) do
+    with {:ok, range} <- EventLog.validate_stream_range(stream_id, opts) do
+      repo = Keyword.get(opts, :repo, Repo)
+
+      events =
+        from(e in EventSchema,
+          where:
+            e.stream_id == ^stream_id and e.event_number >= ^range.from and
+              e.event_number <= ^range.to,
+          order_by: ^order_by_direction(:event_number, range.direction),
+          limit: ^range.limit
+        )
+        |> repo.all()
+        |> Enum.map(&EventSchema.to_event/1)
+
+      {:ok, events}
+    end
+  rescue
+    e ->
+      Logger.error("Failed to read bounded stream range #{stream_id}: #{inspect(e)}")
+      {:error, {:read_failed, e}}
+  end
+
+  @impl Arbor.Persistence.EventLog
+  def event_identity(stream_id, event_id, opts \\ []) do
+    with :ok <- EventLog.validate_identity_read(stream_id, event_id) do
+      repo = Keyword.get(opts, :repo, Repo)
+
+      identity =
+        from(e in EventSchema,
+          where: e.stream_id == ^stream_id and e.id == ^event_id,
+          limit: 1
+        )
+        |> repo.one()
+        |> case do
+          nil ->
+            nil
+
+          schema ->
+            event = EventSchema.to_event(schema)
+            EventLog.event_fingerprint(stream_id, event)
+        end
+
+      if is_nil(identity) or is_binary(identity),
+        do: {:ok, identity},
+        else: {:error, :identity_unavailable}
+    end
+  rescue
+    e ->
+      Logger.error("Failed to read event identity for #{stream_id}: #{inspect(e)}")
+      {:error, {:read_failed, e}}
+  end
+
   @doc """
   Read the current stream head, optionally requiring backend-owned freshness.
 

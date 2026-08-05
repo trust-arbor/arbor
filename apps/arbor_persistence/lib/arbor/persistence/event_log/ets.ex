@@ -87,6 +87,22 @@ defmodule Arbor.Persistence.EventLog.ETS do
   end
 
   @impl Arbor.Persistence.EventLog
+  def read_stream_range(stream_id, opts) do
+    with {:ok, _range} <- EventLog.validate_stream_range(stream_id, opts) do
+      name = Keyword.fetch!(opts, :name)
+      GenServer.call(name, {:read_stream_range, stream_id, opts})
+    end
+  end
+
+  @impl Arbor.Persistence.EventLog
+  def event_identity(stream_id, event_id, opts) do
+    with :ok <- EventLog.validate_identity_read(stream_id, event_id) do
+      name = Keyword.fetch!(opts, :name)
+      GenServer.call(name, {:event_identity, stream_id, event_id})
+    end
+  end
+
+  @impl Arbor.Persistence.EventLog
   def read_stream_head(stream_id, opts) do
     with {:ok, max_current_age_ms} <- EventLog.validate_head_read(stream_id, opts) do
       name = Keyword.fetch!(opts, :name)
@@ -402,6 +418,46 @@ defmodule Arbor.Persistence.EventLog.ETS do
       )
 
     {:reply, {:ok, events}, state}
+  end
+
+  def handle_call({:read_stream_range, stream_id, opts}, _from, state) do
+    {:ok, range} = EventLog.validate_stream_range(stream_id, opts)
+
+    events =
+      do_read_stream_range(
+        state.stream_table,
+        state.global_table,
+        stream_id,
+        Map.get(state.stream_versions, stream_id, 0),
+        range
+      )
+
+    {:reply, {:ok, events}, state}
+  end
+
+  def handle_call({:event_identity, stream_id, event_id}, _from, state) do
+    reply =
+      case :ets.lookup(state.id_table, event_id) do
+        [{^event_id, identity}] ->
+          case normalize_identity(identity) do
+            {:ok, fingerprint, ^stream_id, _event_number, _global_position} ->
+              {:ok, fingerprint}
+
+            {:ok, _fingerprint, nil, _event_number, _global_position} ->
+              {:error, :identity_stream_unavailable}
+
+            {:ok, _fingerprint, _other_stream, _event_number, _global_position} ->
+              {:ok, nil}
+
+            {:error, :invalid_identity} ->
+              {:error, :identity_unavailable}
+          end
+
+        [] ->
+          {:ok, nil}
+      end
+
+    {:reply, reply, state}
   end
 
   def handle_call({:read_stream_head, stream_id, max_current_age_ms}, _from, state) do
@@ -1355,6 +1411,32 @@ defmodule Arbor.Persistence.EventLog.ETS do
     case limit do
       nil -> events
       n -> Enum.take(events, n)
+    end
+  end
+
+  defp do_read_stream_range(
+         stream_table,
+         global_table,
+         stream_id,
+         stream_version,
+         %{from: from_num, to: to_num, limit: limit, direction: direction}
+       ) do
+    case direction do
+      :forward ->
+        stream_table
+        |> collect_stream_events(global_table, stream_id, from_num, [], limit)
+        |> Enum.take_while(&(&1.event_number <= to_num))
+
+      :backward ->
+        collect_stream_events_backward(
+          stream_table,
+          global_table,
+          stream_id,
+          min(stream_version, to_num) + 1,
+          from_num,
+          [],
+          limit
+        )
     end
   end
 
