@@ -165,6 +165,9 @@ defmodule Arbor.Orchestrator.Session do
     # the turn-timeout timer. On crash/cancel/timeout the partial is finalized as
     # an :interrupted/:cancelled AssistantMessage instead of being lost.
     turn_user_message: nil,
+    # Exact process-local input provenance captured before Engine.run/2. Used
+    # only if this turn terminates before an admitted result is available.
+    turn_taint_evidence: nil,
     # Process-local authenticated-turn identity (nil for direct/unauthenticated sends).
     # Never enters Engine values, checkpoints, signals, or public errors.
     turn_authority: nil,
@@ -261,6 +264,7 @@ defmodule Arbor.Orchestrator.Session do
           discovered_tools: MapSet.t(),
           pid: pid() | nil,
           turn_user_message: Arbor.Contracts.Session.UserMessage.t() | nil,
+          turn_taint_evidence: map() | nil,
           turn_authority: TurnAuthority.t() | nil,
           turn_egress_fence: term() | nil,
           turn_token: reference() | nil,
@@ -990,6 +994,7 @@ defmodule Arbor.Orchestrator.Session do
         turn_caller_ref: caller_ref,
         turn_started_at: System.monotonic_time(),
         turn_user_message: user_message,
+        turn_taint_evidence: prepared.turn_taint_evidence,
         turn_authority: turn_authority,
         turn_egress_fence: fence,
         turn_token: turn_token,
@@ -2150,6 +2155,13 @@ defmodule Arbor.Orchestrator.Session do
       |> TurnEgress.derive_initial_taint(final_values)
       |> PersistenceCore.join_authoritative_history_taint(ContextBuilder.get_messages(state))
 
+    turn_taint_evidence =
+      PersistenceCore.build_partial_turn_evidence(
+        final_values,
+        initial_taint,
+        user_message.content
+      )
+
     with {:ok, %{route: route, provider_route_input: route_input}} <-
            TurnEgress.resolve_frozen_route(state, state.turn_graph),
          {:ok, frozen_tier} <-
@@ -2193,6 +2205,7 @@ defmodule Arbor.Orchestrator.Session do
            cap_id: cap_id,
            turn_token: turn_token,
            engine_opts: engine_opts,
+           turn_taint_evidence: turn_taint_evidence,
            values: final_values
          }}
       rescue
@@ -2410,6 +2423,7 @@ defmodule Arbor.Orchestrator.Session do
         steering_message_count: nil,
         steering_byte_count: nil,
         turn_user_message: sanitized_turn_message,
+        turn_taint_evidence: nil,
         turn_queue: sanitized_queue
     }
   end
@@ -2445,6 +2459,7 @@ defmodule Arbor.Orchestrator.Session do
         turn_caller_ref: nil,
         turn_started_at: nil,
         turn_user_message: nil,
+        turn_taint_evidence: nil,
         turn_authority: nil,
         turn_egress_fence: nil,
         turn_token: nil,

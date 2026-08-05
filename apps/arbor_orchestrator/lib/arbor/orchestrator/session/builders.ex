@@ -427,7 +427,11 @@ defmodule Arbor.Orchestrator.Session.Builders do
           )
       end
 
-    Persistence.persist_turn_entries(state, user_msg, assistant_message, %{},
+    Persistence.persist_turn_entries(
+      state,
+      user_msg,
+      assistant_message,
+      Map.get(state, :turn_taint_evidence) || %{},
       user_sent_at: user_sent_at,
       assistant_completed_at: now
     )

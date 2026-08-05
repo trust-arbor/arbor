@@ -17,6 +17,7 @@ defmodule Arbor.Orchestrator.Session.Persistence.Core do
   @assistant_text_context_keys ["session.response", "last_response"]
   @assistant_tool_context_keys ["session.tool_calls"]
   @partial_statuses [:interrupted, :cancelled, :failed]
+  @partial_evidence_keys [:kind, :user_content, :user_taint]
   @prompt_roles ~w(system user assistant tool)
   @checkpoint_message_keys ["envelope", "payload", "status"]
   @checkpoint_message_domain "arbor.session.checkpoint.message.v1"
@@ -177,6 +178,43 @@ defmodule Arbor.Orchestrator.Session.Persistence.Core do
     do: initial_taint
 
   def join_authoritative_history_taint(_initial_taint, _messages), do: %{}
+
+  @doc "Capture exact process-local input taint for an in-flight partial turn."
+  @spec build_partial_turn_evidence(map(), map(), term()) :: map()
+  def build_partial_turn_evidence(values, initial_taint, user_content)
+      when is_map(values) and is_map(initial_taint) do
+    alias_labels =
+      @user_context_keys
+      |> Enum.filter(&(Map.get(values, &1) === user_content))
+      |> Enum.map(&initial_context_taint(Map.get(initial_taint, &1)))
+
+    message_labels =
+      if current_user_in_messages?(Map.get(values, "session.messages"), user_content) do
+        [initial_context_taint(Map.get(initial_taint, "session.messages"))]
+      else
+        []
+      end
+
+    user_taint =
+      case alias_labels ++ message_labels do
+        [] -> TaintEnvelope.missing_fallback()
+        labels -> join_or_invalid(labels)
+      end
+
+    %{
+      kind: :session_turn_start,
+      user_content: user_content,
+      user_taint: user_taint
+    }
+  end
+
+  def build_partial_turn_evidence(_values, _initial_taint, user_content) do
+    %{
+      kind: :session_turn_start,
+      user_content: user_content,
+      user_taint: TaintEnvelope.invalid_fallback()
+    }
+  end
 
   @doc "Encode live Session messages as exact payload-bound checkpoint records."
   @spec encode_checkpoint_messages([term()], map()) ::
@@ -518,7 +556,18 @@ defmodule Arbor.Orchestrator.Session.Persistence.Core do
   defp initial_context_taint(level) when level in [:trusted, :derived, :untrusted, :hostile],
     do: %Taint{level: level}
 
-  defp initial_context_taint(_taint), do: TaintEnvelope.missing_fallback()
+  defp initial_context_taint(nil), do: TaintEnvelope.missing_fallback()
+  defp initial_context_taint(_taint), do: TaintEnvelope.invalid_fallback()
+
+  defp current_user_in_messages?(messages, user_content) when is_list(messages) do
+    case List.last(messages) do
+      %{"role" => "user", "content" => content} -> content === user_content
+      %{role: :user, content: content} -> content === user_content
+      _ -> false
+    end
+  end
+
+  defp current_user_in_messages?(_messages, _user_content), do: false
 
   defp put_checkpoint_label(payload, taint, status) do
     payload
@@ -678,12 +727,56 @@ defmodule Arbor.Orchestrator.Session.Persistence.Core do
         end
 
       {:error, :unadmitted_run_result} ->
-        {:ok, user_baseline, assistant_baseline}
+        join_partial_start_evidence(
+          user_content,
+          run_result,
+          user_baseline,
+          assistant_baseline
+        )
 
       {:error, _reason} ->
         invalid_turn_taints()
     end
   end
+
+  defp join_partial_start_evidence(
+         user_content,
+         evidence,
+         user_baseline,
+         assistant_baseline
+       ) do
+    case partial_start_user_taint(evidence, user_content) do
+      {:ok, user_evidence} ->
+        with {:ok, user_taint} <- Taint.join(user_baseline, user_evidence),
+             {:ok, assistant_taint} <- Taint.join(assistant_baseline, user_evidence) do
+          {:ok, user_taint, assistant_taint}
+        else
+          _ -> invalid_turn_taints()
+        end
+
+      :unavailable ->
+        {:ok, user_baseline, assistant_baseline}
+
+      :invalid ->
+        invalid_turn_taints()
+    end
+  end
+
+  defp partial_start_user_taint(evidence, user_content)
+       when is_map(evidence) and map_size(evidence) == length(@partial_evidence_keys) do
+    if Enum.sort(Map.keys(evidence)) == Enum.sort(@partial_evidence_keys) and
+         evidence.kind == :session_turn_start and evidence.user_content === user_content do
+      case Taint.canonicalize(evidence.user_taint) do
+        {:ok, taint} -> {:ok, taint}
+        {:error, _reason} -> :invalid
+      end
+    else
+      :invalid
+    end
+  end
+
+  defp partial_start_user_taint(%{kind: :session_turn_start}, _user_content), do: :invalid
+  defp partial_start_user_taint(_evidence, _user_content), do: :unavailable
 
   defp derive_admitted_taints(user_content, assistant_message, run_result) do
     with {:ok, context, taint_map} <- admitted_evidence(run_result),
