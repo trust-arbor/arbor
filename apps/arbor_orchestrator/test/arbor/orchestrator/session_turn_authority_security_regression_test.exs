@@ -891,6 +891,36 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
       assert returned_replay.turn_authority == nil
     end
 
+    test "security regression: authenticated mid-turn queue rejects the 129th entry",
+         %{
+           agent_id: agent_id,
+           human_id: human_id,
+           resource: resource
+         } do
+      full_queue =
+        Enum.map(1..128, fn index ->
+          {UserMessage.from_string("queued-#{index}"), nil, {self(), make_ref()}}
+        end)
+
+      state =
+        session_state(agent_id,
+          turn_in_flight: true,
+          turn_from: {self(), make_ref()},
+          turn_user_message: UserMessage.from_string("active"),
+          turn_queue: full_queue
+        )
+
+      receipt = issue_receipt!(human_id, resource)
+      message = user_message!(human_id, "authenticated overflow")
+
+      assert {:reply, {:error, :turn_queue_full}, ^state} =
+               Session.handle_call(
+                 {:send_authenticated_message, message, receipt},
+                 {self(), make_ref()},
+                 state
+               )
+    end
+
     test "security regression: distinct authenticated humans bind distinct private engagements",
          %{
            agent_id: agent_id,

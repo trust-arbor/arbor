@@ -10,6 +10,7 @@ defmodule Arbor.Orchestrator.SessionBoundedSteeringSecurityRegressionTest do
   alias Arbor.Identifiers
   alias Arbor.Orchestrator.Session
   alias Arbor.Orchestrator.Session.Builders
+  alias Arbor.Orchestrator.Session.TurnEgress
 
   @turn_dot """
   digraph Turn {
@@ -56,7 +57,8 @@ defmodule Arbor.Orchestrator.SessionBoundedSteeringSecurityRegressionTest do
       user_message("private steering content", engagement_id, principal_id, :voice)
       |> Map.put(:transport_metadata, %{
         message_id: "caller_steer_id",
-        taint: %Taint{level: :trusted}
+        taint: %Taint{level: :trusted},
+        task_id: "task_private_steering_owner"
       })
 
     unknown_transport_message =
@@ -105,6 +107,14 @@ defmodule Arbor.Orchestrator.SessionBoundedSteeringSecurityRegressionTest do
     internal = :sys.get_state(session)
     assert internal.turn_queue == []
     assert internal.steer_froms == [caller, unknown_caller]
+
+    assert [
+             %{from: ^caller, monitor_ref: caller_ref, task_id: "task_private_steering_owner"},
+             %{from: ^unknown_caller, monitor_ref: unknown_ref, task_id: nil}
+           ] = internal.steer_caller_ownership
+
+    assert is_reference(caller_ref)
+    assert is_reference(unknown_ref)
     assert internal.steering_message_count == 2
 
     assert internal.steering_byte_count ==
@@ -112,11 +122,71 @@ defmodule Arbor.Orchestrator.SessionBoundedSteeringSecurityRegressionTest do
 
     assert MapSet.member?(internal.steering_boundaries, boundary)
 
+    private_task_ref = make_ref()
+    private_caller_ref = make_ref()
+    private_timeout_ref = make_ref()
+
+    :sys.replace_state(session, fn state ->
+      %{
+        state
+        | turn_task_ref: private_task_ref,
+          turn_caller_ref: private_caller_ref,
+          turn_timeout_ref: private_timeout_ref
+      }
+    end)
+
     public = Session.get_state(session)
+    assert Map.get(public, :turn_from) == nil
+    assert Map.get(public, :steer_froms) == nil
+    assert Map.get(public, :steer_caller_ownership) == nil
+    assert Map.get(public, :turn_task_ref) == nil
+    assert Map.get(public, :turn_task_pid) == nil
+    assert Map.get(public, :turn_caller_ref) == nil
+    assert Map.get(public, :turn_timeout_ref) == nil
     assert Map.get(public, :turn_token) == nil
     assert Map.get(public, :steering_boundaries) == nil
     assert Map.get(public, :steering_message_count) == nil
     assert Map.get(public, :steering_byte_count) == nil
+    refute inspect(public, limit: :infinity) =~ "task_private_steering_owner"
+  end
+
+  test "security regression: compatibility queue caps at 128 and over-limit scans fail closed",
+       %{session: session} do
+    engagement_id = Identifiers.generate_id("eng_")
+
+    full_queue =
+      Enum.map(1..128, fn index ->
+        {user_message("queued-#{index}", engagement_id), nil, live_from()}
+      end)
+
+    state =
+      session
+      |> :sys.get_state()
+      |> Map.merge(%{turn_in_flight: true, turn_queue: full_queue})
+
+    assert {:reply, {:error, :turn_queue_full}, ^state} =
+             Session.handle_call(
+               {:send_message, user_message("overflow", engagement_id)},
+               live_from(),
+               state
+             )
+
+    over_limit_queue =
+      full_queue ++ [{user_message("injected-over-limit", engagement_id), nil, live_from()}]
+
+    token = put_active(session, engagement_id: engagement_id, queue: over_limit_queue)
+
+    assert :none = take_steering(session, token, engagement_id, {make_ref(), 1})
+    assert :sys.get_state(session).turn_queue == over_limit_queue
+  end
+
+  test "security regression: steering callback process exit reports delivery ambiguity" do
+    dead_session = spawn(fn -> :ok end)
+    monitor = Process.monitor(dead_session)
+    assert_receive {:DOWN, ^monitor, :process, ^dead_session, :normal}
+
+    assert {:error, :steering_delivery_ambiguous} =
+             Session.take_steering(dead_session, make_ref(), nil, {make_ref(), 1})
   end
 
   test "cross-engagement head is retained while an eligible later entry is accepted", %{
@@ -263,6 +333,116 @@ defmodule Arbor.Orchestrator.SessionBoundedSteeringSecurityRegressionTest do
     assert :sys.get_state(session).turn_queue == []
   end
 
+  test "security regression: cancelling an accepted steering task cancels the influenced turn",
+       %{session: session} do
+    engagement_id = Identifiers.generate_id("eng_")
+    task_id = "task_accepted_steering_cancel"
+    primary_from = live_from()
+    steering_from = live_from()
+
+    steering_message =
+      user_message("accepted task instruction", engagement_id)
+      |> Map.put(:transport_metadata, %{task_id: task_id})
+
+    token =
+      put_active(session,
+        engagement_id: engagement_id,
+        queue: [{steering_message, nil, steering_from}]
+      )
+
+    {task_pid, fence} = install_live_turn(session, primary_from)
+    on_exit(fn -> if Process.alive?(task_pid), do: Process.exit(task_pid, :kill) end)
+
+    assert {:ok, [%SteeringMessage{content: "accepted task instruction"}]} =
+             take_steering(session, token, engagement_id, {make_ref(), 1})
+
+    assert [%{task_id: ^task_id}] = :sys.get_state(session).steer_caller_ownership
+    assert TurnEgress.fence_active?(fence)
+    assert Process.alive?(task_pid)
+
+    assert :ok = Session.cancel_task(session, task_id)
+
+    assert_receive {primary_tag, {:error, :cancelled}}
+    assert primary_tag == elem(primary_from, 1)
+    assert_receive {steering_tag, {:error, :cancelled}}
+    assert steering_tag == elem(steering_from, 1)
+
+    refute Process.alive?(task_pid)
+    refute TurnEgress.fence_active?(fence)
+
+    reset = :sys.get_state(session)
+    refute reset.turn_in_flight
+    assert reset.steer_froms == []
+    assert reset.steer_caller_ownership == []
+    refute self() in monitored_processes(session)
+  end
+
+  test "security regression: accepted steering caller DOWN cancels and fences the active turn",
+       %{session: session} do
+    engagement_id = Identifiers.generate_id("eng_")
+    primary_from = live_from()
+    steering_caller = spawn_caller()
+    steering_from = {steering_caller, make_ref()}
+
+    on_exit(fn ->
+      if Process.alive?(steering_caller), do: Process.exit(steering_caller, :kill)
+    end)
+
+    token =
+      put_active(session,
+        engagement_id: engagement_id,
+        queue: [{user_message("caller-owned steering", engagement_id), nil, steering_from}]
+      )
+
+    {task_pid, fence} = install_live_turn(session, primary_from)
+    on_exit(fn -> if Process.alive?(task_pid), do: Process.exit(task_pid, :kill) end)
+
+    assert {:ok, [%SteeringMessage{content: "caller-owned steering"}]} =
+             take_steering(session, token, engagement_id, {make_ref(), 1})
+
+    send(steering_caller, :stop)
+
+    assert_receive {primary_tag, {:error, :steering_delivery_ambiguous}}
+    assert primary_tag == elem(primary_from, 1)
+    refute Process.alive?(task_pid)
+    refute TurnEgress.fence_active?(fence)
+    refute :sys.get_state(session).turn_in_flight
+  end
+
+  test "security regression: primary caller DOWN after compatibility steering kills the turn",
+       %{session: session} do
+    engagement_id = Identifiers.generate_id("eng_")
+    primary_caller = spawn_caller()
+    primary_from = {primary_caller, make_ref()}
+    steering_from = live_from()
+    on_exit(fn -> if Process.alive?(primary_caller), do: Process.exit(primary_caller, :kill) end)
+
+    token =
+      put_active(session,
+        engagement_id: engagement_id,
+        queue: [{user_message("influential steering", engagement_id), nil, steering_from}]
+      )
+
+    {task_pid, fence} = install_live_turn(session, primary_from)
+    on_exit(fn -> if Process.alive?(task_pid), do: Process.exit(task_pid, :kill) end)
+
+    assert {:ok, [%SteeringMessage{content: "influential steering"}]} =
+             take_steering(session, token, engagement_id, {make_ref(), 1})
+
+    # Normal exits must follow the same ownership-loss path as crashes.
+    send(primary_caller, :stop)
+
+    assert_receive {steering_tag, {:error, :steering_delivery_ambiguous}}
+    assert steering_tag == elem(steering_from, 1)
+    refute Process.alive?(task_pid)
+    refute TurnEgress.fence_active?(fence)
+
+    reset = :sys.get_state(session)
+    refute reset.turn_in_flight
+    assert reset.steer_froms == []
+    assert reset.steer_caller_ownership == []
+  end
+
   test "boundary and turn message and byte overflow remain queued", %{session: session} do
     engagement_id = Identifiers.generate_id("eng_")
 
@@ -316,6 +496,9 @@ defmodule Arbor.Orchestrator.SessionBoundedSteeringSecurityRegressionTest do
       assert length(batch) == 4
     end
 
+    assert length(:sys.get_state(session).steer_caller_ownership) ==
+             SteeringMessage.max_messages_per_turn()
+
     assert :none = take_steering(session, token, engagement_id, {make_ref(), 5})
     assert length(:sys.get_state(session).turn_queue) == 1
 
@@ -365,6 +548,7 @@ defmodule Arbor.Orchestrator.SessionBoundedSteeringSecurityRegressionTest do
 
     boundary = {make_ref(), 1}
     assert {:ok, [_]} = take_steering(session, token, engagement_id, boundary)
+    assert self() in monitored_processes(session)
     assert :none = take_steering(session, token, engagement_id, boundary)
     assert :ok = Session.cancel_turn(session)
 
@@ -377,6 +561,8 @@ defmodule Arbor.Orchestrator.SessionBoundedSteeringSecurityRegressionTest do
     assert reset.steering_message_count == 0
     assert reset.steering_byte_count == 0
     assert reset.steer_froms == []
+    assert reset.steer_caller_ownership == []
+    refute self() in monitored_processes(session)
   end
 
   test "Builders installs only a process-local arity-1 live-turn closure", %{session: session} do
@@ -447,6 +633,7 @@ defmodule Arbor.Orchestrator.SessionBoundedSteeringSecurityRegressionTest do
         current_engagement_id: engagement_id,
         turn_queue: queue,
         steer_froms: [],
+        steer_caller_ownership: [],
         cancelled_task_ids: cancelled_task_ids,
         cancelled_task_id_order: Map.keys(cancelled_task_ids),
         steering_boundaries: MapSet.new(),
@@ -460,6 +647,49 @@ defmodule Arbor.Orchestrator.SessionBoundedSteeringSecurityRegressionTest do
 
   defp put_queue(session, queue) do
     :sys.replace_state(session, &Map.put(&1, :turn_queue, queue))
+  end
+
+  defp install_live_turn(session, primary_from) do
+    task_pid = spawn(fn -> Process.sleep(:infinity) end)
+    fence = TurnEgress.new_fence()
+    parent = self()
+
+    :sys.replace_state(session, fn state ->
+      task_ref = Process.monitor(task_pid)
+      caller_ref = Process.monitor(elem(primary_from, 0))
+
+      send(parent, {:live_turn_installed, task_ref, caller_ref})
+
+      %{
+        state
+        | turn_from: primary_from,
+          turn_task_pid: task_pid,
+          turn_task_ref: task_ref,
+          turn_caller_ref: caller_ref,
+          turn_egress_fence: fence,
+          turn_timeout_ref: nil
+      }
+    end)
+
+    assert_receive {:live_turn_installed, task_ref, caller_ref}
+    assert is_reference(task_ref)
+    assert is_reference(caller_ref)
+
+    {task_pid, fence}
+  end
+
+  defp spawn_caller do
+    spawn(fn ->
+      receive do
+        :stop -> :ok
+      end
+    end)
+  end
+
+  defp monitored_processes(session) do
+    {:monitors, monitors} = Process.info(session, :monitors)
+
+    for {:process, pid} <- monitors, do: pid
   end
 
   defp user_message(content, engagement_id, principal_id \\ nil, transport \\ :voice) do

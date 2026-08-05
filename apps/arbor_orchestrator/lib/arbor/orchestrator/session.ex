@@ -136,6 +136,10 @@ defmodule Arbor.Orchestrator.Session do
     # Callers whose mid-turn messages were folded into THIS turn as steering — they receive
     # the same turn result as turn_from when it completes.
     steer_froms: [],
+    # Process-local ownership for accepted steering callers. Each bounded record
+    # retains the caller monitor and source task id; no steering content or
+    # provenance is retained here or projected publicly.
+    steer_caller_ownership: [],
     turn_task_ref: nil,
     # Monitor ref for the GenServer.call caller (so we can clean in_flight state
     # if the caller times out or dies, preventing permanent :turn_in_progress lock)
@@ -202,6 +206,15 @@ defmodule Arbor.Orchestrator.Session do
   # TaskStore has marked the task cancelled the runner is dead, so a short
   # retention window is enough for in-flight queue/start races.
   @max_cancelled_task_ids 64
+
+  # Reversible process-local admission policy. Bounding queued turns also bounds
+  # every steering scan, including cross-engagement retention scans.
+  @max_turn_queue_entries 128
+
+  # A callback process exit/timeout cannot prove whether Session accepted a
+  # boundary before the caller lost the reply. Keep one closed local error for
+  # the ToolLoop worker to classify as delivery ambiguity.
+  @steering_delivery_ambiguous {:error, :steering_delivery_ambiguous}
 
   # Admitted Engine terminal statuses for Session turn application.
   # Engine.run/2 returning {:ok, run_result} alone is not success.
@@ -406,6 +419,8 @@ defmodule Arbor.Orchestrator.Session do
 
     * If the active turn carries `task_id` in `UserMessage.transport_metadata`
       (also exposed as `session.task_id` in the engine context), cancel it.
+    * If an accepted steering caller owns `task_id`, cancel the whole active
+      turn because that instruction may already have influenced effects.
     * If an unrelated active/interactive turn is running, leave it alone.
     * Matching queued turns are removed and their callers receive
       `{:error, :cancelled}`.
@@ -427,11 +442,15 @@ defmodule Arbor.Orchestrator.Session do
 
   The process-local turn token and source-owned engagement must exactly match
   the active turn. A boundary is an exact `{attempt_ref, positive_sequence}`
-  tuple and may be observed only once. Invalid, stale, duplicate, unavailable,
-  or over-limit reads fail closed as `:none`.
+  tuple and may be observed only once. Invalid, stale, duplicate, or over-limit
+  reads fail closed as `:none`. Session call exits/timeouts return the closed
+  process-local `{:error, :steering_delivery_ambiguous}` result instead of
+  claiming that no message was present.
   """
   @spec take_steering(GenServer.server(), reference(), String.t() | nil, term()) ::
-          :none | {:ok, [SteeringMessage.t()]}
+          :none
+          | {:ok, [SteeringMessage.t()]}
+          | {:error, :steering_delivery_ambiguous}
   def take_steering(session, turn_token, engagement_id, boundary) do
     GenServer.call(
       session,
@@ -439,7 +458,7 @@ defmodule Arbor.Orchestrator.Session do
       5_000
     )
   catch
-    :exit, _ -> :none
+    :exit, _ -> @steering_delivery_ambiguous
   end
 
   @doc """
@@ -710,7 +729,10 @@ defmodule Arbor.Orchestrator.Session do
     if task_cancelled?(state, user_message_task_id(user_message)) do
       {:reply, {:error, :cancelled}, state}
     else
-      {:noreply, %{state | turn_queue: state.turn_queue ++ [{user_message, nil, from}]}}
+      case enqueue_turn(state, {user_message, nil, from}) do
+        {:ok, queued_state} -> {:noreply, queued_state}
+        {:error, :turn_queue_full} -> {:reply, {:error, :turn_queue_full}, state}
+      end
     end
   end
 
@@ -800,7 +822,9 @@ defmodule Arbor.Orchestrator.Session do
       |> purge_queued_task(task_id)
 
     state =
-      if state.turn_in_flight and active_turn_task_id(state) == task_id do
+      if state.turn_in_flight and
+           (active_turn_task_id(state) == task_id or
+              accepted_steering_task_id?(state, task_id)) do
         do_cancel_active_turn(state, :task_cancelled)
       else
         state
@@ -964,6 +988,8 @@ defmodule Arbor.Orchestrator.Session do
         turn_authority: turn_authority,
         turn_egress_fence: fence,
         turn_token: turn_token,
+        steer_froms: [],
+        steer_caller_ownership: [],
         steering_boundaries: MapSet.new(),
         steering_message_count: 0,
         steering_byte_count: 0,
@@ -1028,6 +1054,28 @@ defmodule Arbor.Orchestrator.Session do
 
   defp metadata_value(_map, _key), do: nil
 
+  # Queue admission is shared by compatibility and authenticated mid-turn
+  # ingress. The bounded length walk inspects at most limit + 1 cells and fails
+  # closed for malformed/improper queues.
+  defp enqueue_turn(state, entry) do
+    case bounded_list_length(state.turn_queue, @max_turn_queue_entries) do
+      {:ok, count} when count < @max_turn_queue_entries ->
+        {:ok, %{state | turn_queue: state.turn_queue ++ [entry]}}
+
+      _ ->
+        {:error, :turn_queue_full}
+    end
+  end
+
+  defp bounded_list_length(list, limit), do: bounded_list_length(list, limit, 0)
+
+  defp bounded_list_length([], _limit, count), do: {:ok, count}
+
+  defp bounded_list_length([_entry | rest], limit, count) when count < limit,
+    do: bounded_list_length(rest, limit, count + 1)
+
+  defp bounded_list_length(_malformed_or_over_limit, _limit, _count), do: :error
+
   # ── Task-scoped cancellation helpers ─────────────────────────────────
 
   defp task_cancelled?(_state, nil), do: false
@@ -1036,6 +1084,16 @@ defmodule Arbor.Orchestrator.Session do
   defp task_cancelled?(state, task_id) when is_binary(task_id) do
     Map.has_key?(state.cancelled_task_ids || %{}, task_id)
   end
+
+  defp accepted_steering_task_id?(state, task_id)
+       when is_binary(task_id) and task_id != "" do
+    Enum.any?(state.steer_caller_ownership || [], fn
+      %{task_id: ^task_id} -> true
+      _ -> false
+    end)
+  end
+
+  defp accepted_steering_task_id?(_state, _task_id), do: false
 
   defp mark_task_cancelled(state, task_id) when is_binary(task_id) and task_id != "" do
     # Newest-first FIFO; drop oldest beyond the cap so cancellation state stays bounded.
@@ -1062,16 +1120,16 @@ defmodule Arbor.Orchestrator.Session do
     %{state | turn_queue: kept}
   end
 
-  defp do_cancel_active_turn(state, reason) do
+  defp do_cancel_active_turn(state, reason, reply \\ {:error, :cancelled}) do
     new_state = transition_phase(state, :processing, :complete, :idle)
     # Fence → kill (await DOWN) → revoke, then finalize/reply/reset so the
     # task cannot authorize another wave during partial persistence.
     state = cleanup_turn_terminal(state, kill_task?: true)
     lifecycle_probe(:before_finalize, %{reason: reason})
     finalize_partial(state, :cancelled, reason)
-    lifecycle_probe(:before_reply, %{reply: :cancelled})
-    reply_turn(state, {:error, :cancelled})
-    lifecycle_probe(:after_reply, %{reply: :cancelled})
+    lifecycle_probe(:before_reply, %{reply: reply})
+    reply_turn(state, reply)
+    lifecycle_probe(:after_reply, %{reply: reply})
 
     # Cancelling the active turn frees the mind — let queued turns proceed.
     send(self(), :drain_queue)
@@ -1144,22 +1202,14 @@ defmodule Arbor.Orchestrator.Session do
   # Legacy results carry no process-local authority token and always fail closed.
   def handle_info({:turn_result, _user_message, _result}, state), do: {:noreply, state}
 
-  # Handle Task DOWN messages
-  def handle_info({:DOWN, ref, :process, _pid, :normal}, state) do
-    # Clean up turn_task_ref if it matches
-    if ref == state.turn_task_ref do
-      {:noreply, %{state | turn_task_ref: nil}}
-    else
-      {:noreply, state}
-    end
-  end
-
-  # Non-normal :DOWN — either the turn task crashed, or the send_message caller
-  # died/timed out (finite timeout). Both must clear in-flight state so the
-  # session accepts future turns. Single clause because both match the same
-  # {:DOWN, ...} pattern — a separate clause would be unreachable.
+  # One DOWN classifier covers normal and abnormal exits. Caller ownership is
+  # determined by exact monitor references, so a normal caller exit cannot be
+  # mistaken for a successfully completed turn task or silently ignored.
   def handle_info({:DOWN, ref, :process, _pid, reason}, state) do
     cond do
+      ref == state.turn_task_ref and reason == :normal ->
+        {:noreply, %{state | turn_task_ref: nil}}
+
       ref == state.turn_task_ref ->
         # Turn task died non-normally (exit/kill/linked death the task's rescue
         # didn't catch) — fence/revoke first (task already dead), then partial.
@@ -1172,6 +1222,9 @@ defmodule Arbor.Orchestrator.Session do
 
       not is_nil(state.turn_caller_ref) and ref == state.turn_caller_ref ->
         handle_caller_down(state)
+
+      accepted_steering_monitor_ref?(state, ref) ->
+        handle_steering_caller_down(state)
 
       true ->
         {:noreply, state}
@@ -1293,6 +1346,7 @@ defmodule Arbor.Orchestrator.Session do
       end
 
       if state.turn_caller_ref, do: Process.demonitor(state.turn_caller_ref, [:flush])
+      demonitor_steering_callers(state)
     rescue
       _ -> :ok
     catch
@@ -1368,9 +1422,45 @@ defmodule Arbor.Orchestrator.Session do
 
   defp await_task_down(_), do: :ok
 
+  defp demonitor_steering_callers(state) do
+    Enum.each(state.steer_caller_ownership || [], fn
+      %{monitor_ref: ref} when is_reference(ref) -> Process.demonitor(ref, [:flush])
+      _ -> :ok
+    end)
+
+    :ok
+  end
+
+  defp accepted_steering_monitor_ref?(state, ref) when is_reference(ref) do
+    Enum.any?(state.steer_caller_ownership || [], fn
+      %{monitor_ref: ^ref} -> true
+      _ -> false
+    end)
+  end
+
+  defp accepted_steering_monitor_ref?(_state, _ref), do: false
+
+  defp accepted_steering?(state) do
+    (is_integer(state.steering_message_count) and state.steering_message_count > 0) or
+      state.steer_froms not in [nil, []] or state.steer_caller_ownership not in [nil, []]
+  end
+
+  defp handle_steering_caller_down(state) do
+    Logger.info(
+      "[Session] accepted steering caller exited for #{state.agent_id}; cancelling the influenced turn"
+    )
+
+    {:noreply,
+     do_cancel_active_turn(
+       state,
+       :steering_caller_down,
+       @steering_delivery_ambiguous
+     )}
+  end
+
   # Nil-authority: deactivate fence (task-owned waves cannot authorize), detach
-  # monitors, leave task running (P2 background continuation).
-  # Authority-bearing: fence/kill task before revoke so no later wave authorizes.
+  # monitors, and leave the task running only before any steering was accepted.
+  # Authority-bearing or steering-influenced turns are fenced/killed before reset.
   defp handle_caller_down(state) do
     Logger.info(
       "[Session] send_message caller died (timeout or crash) for #{state.agent_id}; clearing in-flight state to unblock future turns"
@@ -1378,19 +1468,29 @@ defmodule Arbor.Orchestrator.Session do
 
     new_state = transition_phase(state, :processing, :complete, :idle)
 
-    if match?(%TurnAuthority{}, state.turn_authority) do
-      _ = cleanup_turn_terminal(state, kill_task?: true)
-      lifecycle_probe(:after_reply, %{reply: :caller_down_auth})
-      reset_and_drain(new_state)
-    else
-      # Task continues; fence deactivation is the load-bearing close for any
-      # process-local authorizer the task still holds.
-      TurnEgress.deactivate_fence(state.turn_egress_fence)
-      lifecycle_probe(:fence_deactivated, %{task_alive?: task_alive?(state.turn_task_pid)})
-      if state.turn_task_ref, do: Process.demonitor(state.turn_task_ref, [:flush])
-      if state.turn_caller_ref, do: Process.demonitor(state.turn_caller_ref, [:flush])
-      lifecycle_probe(:after_reply, %{reply: :caller_down_nil})
-      reset_and_drain(new_state)
+    cond do
+      accepted_steering?(state) ->
+        {:noreply,
+         do_cancel_active_turn(
+           state,
+           :primary_caller_down_after_steering,
+           @steering_delivery_ambiguous
+         )}
+
+      match?(%TurnAuthority{}, state.turn_authority) ->
+        _ = cleanup_turn_terminal(state, kill_task?: true)
+        lifecycle_probe(:after_reply, %{reply: :caller_down_auth})
+        reset_and_drain(new_state)
+
+      true ->
+        # Task continues; fence deactivation is the load-bearing close for any
+        # process-local authorizer the task still holds.
+        TurnEgress.deactivate_fence(state.turn_egress_fence)
+        lifecycle_probe(:fence_deactivated, %{task_alive?: task_alive?(state.turn_task_pid)})
+        if state.turn_task_ref, do: Process.demonitor(state.turn_task_ref, [:flush])
+        if state.turn_caller_ref, do: Process.demonitor(state.turn_caller_ref, [:flush])
+        lifecycle_probe(:after_reply, %{reply: :caller_down_nil})
+        reset_and_drain(new_state)
     end
   end
 
@@ -1417,7 +1517,13 @@ defmodule Arbor.Orchestrator.Session do
       not match?(%MapSet{}, boundaries) ->
         :error
 
+      not match?({:ok, _}, bounded_list_length(state.turn_queue, @max_turn_queue_entries)) ->
+        :error
+
       not valid_steering_counters?(state) ->
+        :error
+
+      not valid_steering_ownership?(state) ->
         :error
 
       MapSet.member?(boundaries, boundary) ->
@@ -1456,6 +1562,36 @@ defmodule Arbor.Orchestrator.Session do
       state.steering_byte_count <= SteeringMessage.max_bytes_per_turn()
   end
 
+  defp valid_steering_ownership?(state) do
+    maximum = SteeringMessage.max_messages_per_turn()
+
+    with {:ok, from_count} <- bounded_list_length(state.steer_froms, maximum),
+         {:ok, owner_count} <- bounded_list_length(state.steer_caller_ownership, maximum),
+         true <- from_count == owner_count,
+         true <- owner_count == state.steering_message_count,
+         true <- Enum.all?(state.steer_froms, &valid_caller_from?/1),
+         true <- Enum.all?(state.steer_caller_ownership, &valid_steering_owner?/1),
+         true <- Enum.map(state.steer_caller_ownership, & &1.from) == state.steer_froms do
+      true
+    else
+      _ -> false
+    end
+  end
+
+  defp valid_caller_from?({pid, _tag}) when is_pid(pid), do: true
+  defp valid_caller_from?(_from), do: false
+
+  defp valid_steering_owner?(%{
+         from: from,
+         monitor_ref: monitor_ref,
+         task_id: task_id
+       }) do
+    valid_caller_from?(from) and is_reference(monitor_ref) and
+      (is_nil(task_id) or (is_binary(task_id) and task_id != ""))
+  end
+
+  defp valid_steering_owner?(_owner), do: false
+
   # Scan the whole queue once. Cross-engagement, authority-ineligible, malformed,
   # and over-limit entries retain their original relative order. After an eligible
   # active-engagement entry hits capacity, later eligible entries from that
@@ -1466,6 +1602,7 @@ defmodule Arbor.Orchestrator.Session do
       queue_rev: [],
       messages_rev: [],
       froms_rev: [],
+      ownership_sources_rev: [],
       boundary_message_count: 0,
       boundary_byte_count: 0,
       active_engagement_capacity_blocked?: false
@@ -1482,10 +1619,16 @@ defmodule Arbor.Orchestrator.Session do
     messages = Enum.reverse(acc.messages_rev)
     accepted_froms = Enum.reverse(acc.froms_rev)
 
+    accepted_ownership =
+      acc.ownership_sources_rev
+      |> Enum.reverse()
+      |> Enum.map(fn {from, task_id} -> monitor_steering_caller(from, task_id) end)
+
     new_state = %{
       state
       | turn_queue: Enum.reverse(acc.queue_rev),
         steer_froms: (state.steer_froms || []) ++ accepted_froms,
+        steer_caller_ownership: (state.steer_caller_ownership || []) ++ accepted_ownership,
         steering_message_count: state.steering_message_count + acc.boundary_message_count,
         steering_byte_count: state.steering_byte_count + acc.boundary_byte_count
     }
@@ -1527,6 +1670,10 @@ defmodule Arbor.Orchestrator.Session do
                 acc
                 | messages_rev: [message | acc.messages_rev],
                   froms_rev: [caller_from | acc.froms_rev],
+                  ownership_sources_rev: [
+                    {caller_from, user_message_task_id(user_message)}
+                    | acc.ownership_sources_rev
+                  ],
                   boundary_message_count: acc.boundary_message_count + 1,
                   boundary_byte_count: acc.boundary_byte_count + byte_count
               }
@@ -1561,6 +1708,10 @@ defmodule Arbor.Orchestrator.Session do
       acc
       | queue_rev: [entry | acc.queue_rev]
     })
+  end
+
+  defp monitor_steering_caller({pid, _tag} = from, task_id) when is_pid(pid) do
+    %{from: from, monitor_ref: Process.monitor(pid), task_id: task_id}
   end
 
   defp steering_entry_eligible?(
@@ -1827,6 +1978,10 @@ defmodule Arbor.Orchestrator.Session do
   # as steering — they all get the same result for the turn they contributed to.
   defp reply_turn(state, reply) do
     safe_reply(state.turn_from, reply)
+    reply_steering_callers(state, reply)
+  end
+
+  defp reply_steering_callers(state, reply) do
     Enum.each(state.steer_froms || [], &safe_reply(&1, reply))
   end
 
@@ -2091,7 +2246,10 @@ defmodule Arbor.Orchestrator.Session do
         {:reply, {:error, :cancelled}, state}
       else
         if state.turn_in_flight do
-          {:noreply, %{state | turn_queue: state.turn_queue ++ [{user_message, authority, from}]}}
+          case enqueue_turn(state, {user_message, authority, from}) do
+            {:ok, queued_state} -> {:noreply, queued_state}
+            {:error, :turn_queue_full} -> {:reply, {:error, :turn_queue_full}, state}
+          end
         else
           start_turn(user_message, authority, from, state)
         end
@@ -2220,7 +2378,14 @@ defmodule Arbor.Orchestrator.Session do
 
     %{
       state
-      | turn_authority: nil,
+      | turn_from: nil,
+        steer_froms: nil,
+        steer_caller_ownership: nil,
+        turn_task_ref: nil,
+        turn_task_pid: nil,
+        turn_caller_ref: nil,
+        turn_timeout_ref: nil,
+        turn_authority: nil,
         turn_egress_fence: nil,
         turn_token: nil,
         steering_boundaries: nil,
@@ -2249,12 +2414,14 @@ defmodule Arbor.Orchestrator.Session do
 
   defp reset_turn(state) do
     cancel_turn_timeout(state)
+    demonitor_steering_callers(state)
 
     %{
       state
       | turn_in_flight: false,
         turn_from: nil,
         steer_froms: [],
+        steer_caller_ownership: [],
         turn_task_ref: nil,
         turn_task_pid: nil,
         turn_caller_ref: nil,
