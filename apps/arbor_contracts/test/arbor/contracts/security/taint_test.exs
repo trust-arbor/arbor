@@ -224,10 +224,10 @@ defmodule Arbor.Contracts.Security.TaintTest do
     end
 
     test "security regression: join_many rejects improper and empty lists without raising" do
-      assert {:error, :empty_taint_list} = Taint.join_many([])
-
       assert {:error, :invalid_taint_list} =
                Taint.join_many([%Taint{} | :improper_tail])
+
+      assert {:error, :empty_taint_list} = Taint.join_many([])
     end
 
     test "security regression: join_many enforces its exact input ceiling" do
