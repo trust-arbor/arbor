@@ -27,6 +27,11 @@ defmodule Arbor.Persistence.VectorStore.EctoSQLiteTest do
                                   "../../../../priv/repo/migrations/20260805000004_harden_vector_receipt_inserts.exs",
                                   __DIR__
                                 )
+  @receipt_rowid_guard_migration_version 20_260_805_000_005
+  @receipt_rowid_guard_migration_file Path.expand(
+                                        "../../../../priv/repo/migrations/20260805000005_harden_vector_receipt_rowids.exs",
+                                        __DIR__
+                                      )
 
   Code.require_file(@migration_file)
   Code.require_file(@widen_migration_file)
@@ -568,18 +573,71 @@ defmodule Arbor.Persistence.VectorStore.EctoSQLiteTest do
              Arbor.Persistence.reconcile_vector_operation(agent_id, operation)
   end
 
-  defp maybe_install_receipt_insert_guard! do
-    if File.exists?(@receipt_guard_migration_file) do
-      Code.require_file(@receipt_guard_migration_file)
+  test "security regression: SQLite rowid replace cannot move an immutable receipt", %{
+    agent_id: agent_id,
+    database: database
+  } do
+    operation = insert_operation!(record!(agent_id, source_key: "immutable-rowid-ledger"))
 
-      assert :ok ==
-               Ecto.Migrator.up(
-                 SQLiteRepo,
-                 @receipt_guard_migration_version,
-                 Arbor.Persistence.Repo.Migrations.HardenVectorReceiptInserts,
-                 log: false
-               )
+    assert {:ok, original_receipt} =
+             Arbor.Persistence.execute_vector_operation(agent_id, operation)
+
+    {:ok, connection} = Exqlite.Sqlite3.open(database)
+
+    try do
+      assert :ok = Exqlite.Sqlite3.execute(connection, "PRAGMA recursive_triggers = OFF")
+      assert 0 == sqlite_scalar!(connection, "PRAGMA recursive_triggers")
+
+      exact_retry_sql = """
+      INSERT INTO vector_operation_receipts (
+        operation_fingerprint, agent_id, operation_kind,
+        operation_json, operation_digest, receipt_json, receipt_digest, inserted_at
+      )
+      SELECT operation_fingerprint, agent_id, operation_kind,
+             operation_json, operation_digest, receipt_json, receipt_digest, inserted_at
+      FROM vector_operation_receipts
+      WHERE operation_fingerprint = '#{operation.fingerprint}'
+      ON CONFLICT(operation_fingerprint) DO NOTHING
+      """
+
+      assert :ok = Exqlite.Sqlite3.execute(connection, exact_retry_sql)
+
+      replacement_fingerprint = String.duplicate("e", 64)
+
+      rowid_replace_sql = """
+      INSERT OR REPLACE INTO vector_operation_receipts (
+        rowid, operation_fingerprint, agent_id, operation_kind,
+        operation_json, operation_digest, receipt_json, receipt_digest, inserted_at
+      )
+      SELECT rowid, '#{replacement_fingerprint}', agent_id, operation_kind,
+             operation_json, operation_digest, receipt_json,
+             '#{String.duplicate("0", 64)}', inserted_at
+      FROM vector_operation_receipts
+      WHERE operation_fingerprint = '#{operation.fingerprint}'
+      """
+
+      assert {:error, reason} = Exqlite.Sqlite3.execute(connection, rowid_replace_sql)
+      assert to_string(reason) =~ "vector_operation_receipts is immutable"
+    after
+      Exqlite.Sqlite3.close(connection)
     end
+
+    assert {:ok, ^original_receipt} =
+             Arbor.Persistence.reconcile_vector_operation(agent_id, operation)
+  end
+
+  defp maybe_install_receipt_insert_guard! do
+    migrations = [
+      {@receipt_guard_migration_version, @receipt_guard_migration_file},
+      {@receipt_rowid_guard_migration_version, @receipt_rowid_guard_migration_file}
+    ]
+
+    Enum.each(migrations, fn {version, file} ->
+      if File.exists?(file) do
+        [{module, _bytecode}] = Code.require_file(file)
+        assert :ok == Ecto.Migrator.up(SQLiteRepo, version, module, log: false)
+      end
+    end)
   end
 
   defp sqlite_scalar!(connection, sql) do
