@@ -81,7 +81,7 @@ defmodule Arbor.Memory.EventsArchiveReadRegressionTest do
     base = ~U[2026-08-05 12:00:00Z]
 
     events =
-      for number <- 20..14//-1 do
+      for number <- 1..20 do
         Event.new(
           stream_id(agent_id),
           "knowledge_archived",
@@ -94,7 +94,7 @@ defmodule Arbor.Memory.EventsArchiveReadRegressionTest do
 
     lease_probe_target(probe_ref,
       probe_version_reply: {:ok, 20},
-      probe_range_reply: {:ok, events},
+      probe_events: events,
       limit: 700,
       from: 700,
       to: 700,
@@ -108,7 +108,7 @@ defmodule Arbor.Memory.EventsArchiveReadRegressionTest do
 
     assert_receive {:archive_read_probe, ^probe_ref, :stream_version, _head_opts}
     assert_receive {:archive_read_probe, ^probe_ref, :read_stream_range, durable_opts}
-    assert Keyword.get(durable_opts, :limit) == 7
+    assert Keyword.get(durable_opts, :limit) == 20
     assert Keyword.get(durable_opts, :from) == 1
     assert Keyword.get(durable_opts, :to) == 20
     assert Keyword.get(durable_opts, :direction) == :backward
@@ -331,7 +331,7 @@ defmodule Arbor.Memory.EventsArchiveReadRegressionTest do
     assert length(defaulted) == 100
 
     assert_receive {:archive_read_probe, ^probe_ref, :read_stream_range, default_opts}
-    assert Keyword.get(default_opts, :limit) == 100
+    assert Keyword.get(default_opts, :limit) == 128
 
     assert {:ok, []} = Events.get_history(agent_id, limit: 0)
     drain_probe_messages(probe_ref)
@@ -567,6 +567,126 @@ defmodule Arbor.Memory.EventsArchiveReadRegressionTest do
              )
 
     assert Keyword.fetch!(second_range_opts, :from) == 3
+  end
+
+  test "typed pages fail closed on a hidden conflicting projection" do
+    %{target: target} = DurableEventLog.start!()
+    agent_id = unique_id("hidden_conflict")
+    shared_id = unique_id("hidden_conflict_event")
+    base = ~U[2026-08-05 12:00:00Z]
+
+    hidden_legacy =
+      Event.new(
+        stream_id(agent_id),
+        "identity_changed",
+        %{"version" => "legacy"},
+        id: shared_id,
+        timestamp: base
+      )
+
+    append_legacy!(hidden_legacy)
+
+    append_target!(
+      target,
+      archive_event(agent_id, unique_id("visible_before_hidden_conflict"),
+        timestamp: DateTime.add(base, 1, :second)
+      )
+    )
+
+    append_target!(
+      target,
+      %Event{hidden_legacy | data: %{"version" => "durable"}}
+    )
+
+    assert {:error, :archive_event_conflict} =
+             Events.get_by_type_page(agent_id, :knowledge_archived,
+               limit: 1,
+               direction: :backward
+             )
+  end
+
+  test "untyped duplicate and hidden scans use bounded range chunks" do
+    agent_id = unique_id("untyped_chunks")
+    probe_ref = make_ref()
+    base = ~U[2026-08-05 12:00:00Z]
+
+    shared =
+      for number <- 1..500 do
+        archive_event(agent_id, unique_id("untyped_duplicate"),
+          timestamp: DateTime.add(base, number, :second),
+          data: %{"sequence" => number}
+        )
+      end
+
+    append_legacy_batch!(shared)
+
+    duplicate_rows =
+      shared
+      |> Enum.with_index(2)
+      |> Enum.map(fn {%Event{} = event, event_number} ->
+        %Event{event | event_number: event_number}
+      end)
+
+    hidden_rows =
+      for offset <- 1..500 do
+        event_number = 501 + offset
+
+        Event.new(
+          stream_id(agent_id),
+          "identity_changed",
+          %{"sequence" => offset},
+          id: unique_id("untyped_hidden"),
+          event_number: event_number,
+          timestamp: DateTime.add(base, 1_000 + offset, :second)
+        )
+      end
+
+    unique =
+      Event.new(
+        stream_id(agent_id),
+        "knowledge_archived",
+        %{"unique" => true},
+        id: unique_id("untyped_unique"),
+        event_number: 1,
+        timestamp: DateTime.add(base, 2_000, :second)
+      )
+
+    lease_probe_target(probe_ref,
+      probe_version_reply: {:ok, 1_001},
+      probe_events: [unique | duplicate_rows ++ hidden_rows]
+    )
+
+    assert {:ok, %{events: [], next_cursor: cursor}} =
+             Events.get_history_page(agent_id, limit: 1, direction: :backward)
+
+    first_messages = take_probe_messages(probe_ref)
+
+    range_opts =
+      for {:archive_read_probe, ^probe_ref, :read_stream_range, opts} <- first_messages,
+          do: opts
+
+    assert length(range_opts) == 8
+    assert Enum.all?(range_opts, &(Keyword.fetch!(&1, :limit) <= 128))
+
+    assert {:ok, %{events: [%Event{id: unique_id}]}} =
+             Events.get_history_page(agent_id,
+               limit: 1,
+               direction: :backward,
+               cursor: cursor
+             )
+
+    assert unique_id == unique.id
+
+    second_messages = take_probe_messages(probe_ref)
+
+    assert [second_range_opts] =
+             for(
+               {:archive_read_probe, ^probe_ref, :read_stream_range, opts} <- second_messages,
+               do: opts
+             )
+
+    assert Keyword.fetch!(second_range_opts, :to) == 1
+    assert Keyword.fetch!(second_range_opts, :limit) == 1
   end
 
   test "snapshot cursors reach more than 1000 legacy and durable events in both directions" do

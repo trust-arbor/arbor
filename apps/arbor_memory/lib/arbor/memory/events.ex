@@ -49,7 +49,7 @@ defmodule Arbor.Memory.Events do
   @event_log_name :memory_events
   @event_log_backend Arbor.Persistence.EventLog.ETS
   @archive_append_attempts 2
-  @filtered_scan_chunk 128
+  @archive_scan_chunk 128
 
   # ============================================================================
   # Event Recording (Dual-Emit)
@@ -607,10 +607,8 @@ defmodule Arbor.Memory.Events do
     )
   end
 
-  defp source_request_limit(nil, remaining, scan_left), do: min(remaining, scan_left)
-
   defp source_request_limit(_event_type, remaining, scan_left) do
-    min(max(remaining, @filtered_scan_chunk), scan_left)
+    min(max(remaining, @archive_scan_chunk), scan_left)
   end
 
   defp collect_archive_page(state, _target, _event_type, 0, _scan_left, events) do
@@ -681,24 +679,24 @@ defmodule Arbor.Memory.Events do
                                                    {:ok, accepted, consumed, accepted_count} ->
       consumed = [event | consumed]
 
-      if visible_event?(event, source, event_type) do
-        case event_identity_decision(source, event, target, cursor) do
-          :include ->
+      case event_identity_decision(source, event, target, cursor) do
+        :include ->
+          if visible_event?(event, source, event_type) do
             accepted = [event | accepted]
             accepted_count = accepted_count + 1
 
             if accepted_count == remaining,
               do: {:halt, {:ok, accepted, consumed, accepted_count}},
               else: {:cont, {:ok, accepted, consumed, accepted_count}}
-
-          :duplicate_projection ->
+          else
             {:cont, {:ok, accepted, consumed, accepted_count}}
+          end
 
-          {:error, _reason} = error ->
-            {:halt, error}
-        end
-      else
-        {:cont, {:ok, accepted, consumed, accepted_count}}
+        :duplicate_projection ->
+          {:cont, {:ok, accepted, consumed, accepted_count}}
+
+        {:error, _reason} = error ->
+          {:halt, error}
       end
     end)
     |> case do
