@@ -217,7 +217,8 @@ defmodule Arbor.Agent.SeedTest do
     end
 
     test "security regression: configured WorkingMemory outage fails Seed capture explicitly" do
-      assert :ok = stop_supervised!(BufferedStore)
+      take_authority_ownership!()
+      _ = stop_supervised(BufferedStore)
 
       start_supervised!(
         {BufferedStore, name: @memory_store, backend: CaptureFailingBackend, write_mode: :sync}
@@ -695,6 +696,25 @@ defmodule Arbor.Agent.SeedTest do
     {seed, current_working_memory, current_goals}
   end
 
+  # test_helper starts a suite-wide :arbor_memory_durable via
+  # Arbor.Memory.TestBootstrap — 18 tests in this app (Lifecycle.create,
+  # TrustPresetApply) need it. The outage simulations below must still be able
+  # to OWN that name, so they hand it to ExUnit's supervisor first.
+  defp take_authority_ownership! do
+    # Releasing the name is a no-op ({:error, :not_found}) when Memory.Supervisor
+    # does not own it, so this needs no detection heuristic — just always release
+    # and always restore.
+    case Supervisor.terminate_child(Arbor.Memory.Supervisor, Arbor.Persistence.BufferedStore) do
+      :ok ->
+        ExUnit.Callbacks.on_exit(fn ->
+          Supervisor.restart_child(Arbor.Memory.Supervisor, Arbor.Persistence.BufferedStore)
+        end)
+
+      {:error, _} ->
+        :ok
+    end
+  end
+
   defp ensure_goal_runtime do
     if Process.whereis(:arbor_memory_durable) == nil do
       start_supervised!({BufferedStore, name: :arbor_memory_durable, backend: nil})
@@ -710,7 +730,8 @@ defmodule Arbor.Agent.SeedTest do
   end
 
   defp use_unavailable_goal_store! do
-    assert :ok = stop_supervised!(BufferedStore)
+    take_authority_ownership!()
+    _ = stop_supervised(BufferedStore)
 
     start_supervised!(
       {BufferedStore,
@@ -723,7 +744,8 @@ defmodule Arbor.Agent.SeedTest do
   end
 
   defp use_unavailable_goal_export! do
-    assert :ok = stop_supervised!(BufferedStore)
+    take_authority_ownership!()
+    _ = stop_supervised(BufferedStore)
 
     start_supervised!(
       {BufferedStore,

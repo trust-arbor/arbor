@@ -18,11 +18,7 @@ end
 # "arbor_memory is a sibling app, not a dep of arbor_agent" — it IS a dep.
 # GoalStore creates that table in its own init/1, so starting the real store is
 # both simpler and closer to production. See Arbor.Memory.TestBootstrap.
-# authority: false — SeedTest owns :arbor_memory_durable per-test so it can
-# swap in a deliberately-failing backend for its outage security regressions. A
-# suite-wide instance would make its start_supervised! a no-op and the matching
-# stop_supervised! raise "not found".
-Arbor.Memory.TestBootstrap.start!(authority: false)
+Arbor.Memory.TestBootstrap.start!()
 
 if :ets.whereis(:arbor_memory_goals) == :undefined do
   raise "test_helper: :arbor_memory_goals missing after TestBootstrap (GoalStore did not start)"
