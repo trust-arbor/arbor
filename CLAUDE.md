@@ -113,36 +113,20 @@ L8  arbor_commands, arbor_voice
 L9  arbor_dashboard
 ```
 
-Notes:
-- `arbor_orchestrator` is NOT standalone — it deps contracts/common/llm/
-  persistence/signals AND **arbor_actions/security/ai/memory/trust/shell/comms** (it
-  executes Jido actions via `exec` nodes, authorizes capabilities + egress,
-  routes LLMs/ACP, reads goals/percepts, trust policy, resolves authenticated
-  source-owned engagements, and runs sandboxed
-  shell; the old runtime `Code.ensure_loaded?`/`apply` indirection was dropped
-  for real deps in the 2026-06-17 runtime-bridge sweep). Only `arbor_commands`,
-  `arbor_dashboard`, and (as of VP-02) `arbor_voice` depend on orchestrator, so
-  it sits high (L7), not as a low kernel.
-- `arbor_gateway` moved L6→L7 in the 2026-06-17 sweep — it now deps
-  **arbor_actions** (MCP tool execution via `Arbor.Actions.authorize_and_execute`;
-  acyclic — actions does not dep gateway).
-- `arbor_voice` sits at L8 — its highest in-umbrella deps remain
-  `arbor_orchestrator`/`arbor_agent` (L7). It also directly depends on
-  **arbor_ai/security/trust** for source-owned realtime route classification,
-  exact capability authorization, disclosure validation, and egress policy;
-  these are compile-time facade calls, not optional runtime bridges.
-- The 2026-06-17 sweep also added (all acyclic, no level change): `arbor_agent`
-  → arbor_llm; `arbor_consensus` → arbor_security; `arbor_dashboard` →
-  arbor_security (was already transitive).
-- `arbor_ai` (L4) and `arbor_consensus` (L4) are deep, not standalone.
-  (`arbor_consensus` is L4, not L5: its `mix.exs` does NOT declare `arbor_ai` —
-  that dep is commented out / optional-at-runtime via a DI seam — so ai doesn't
-  raise its compile-time level. The drift-guard test computes from real mix.exs.)
-- `arbor_monitor` is the only truly dep-free app besides `arbor_contracts`.
-- `apps/arbor_integrations/` exists on dev machines but is **gitignored** (private
-  business integrations) — intentionally NOT part of the committed umbrella, so it
-  is excluded from this hierarchy. The drift-guard test parses git-TRACKED mix.exs
-  only, so don't add it here (it would re-break the guard in CI).
+Notes (the counterintuitive parts; the levels themselves are machine-checked by
+`apps/arbor_contracts/test/arbor/contracts/dependency_hierarchy_test.exs`):
+- **Nothing is standalone except `arbor_contracts` and `arbor_monitor` (L0).**
+  In particular `arbor_orchestrator` is L7, not a low kernel — it really deps
+  arbor_actions/security/ai/memory/trust/shell/comms (exec nodes, capability +
+  egress authorization, LLM/ACP routing, goals/percepts, sandboxed shell), and
+  only commands/dashboard/voice sit above it.
+- `arbor_consensus` is L4, not L5: its `mix.exs` does NOT declare `arbor_ai`
+  (commented out, optional-at-runtime via a DI seam), so ai doesn't raise its
+  compile-time level. The guard computes from real mix.exs and caught this.
+- `apps/arbor_integrations/` exists on dev machines but is **gitignored**
+  (private business integrations) — intentionally NOT part of the committed
+  umbrella. The guard parses git-TRACKED mix.exs only, so don't add it here (it
+  would re-break the guard in CI).
 
 No cycles. Deps point only to lower levels. Always check each library's `mix.exs`
 for the exact, current deps — this graph is a snapshot.
@@ -248,7 +232,7 @@ Ideas and work items go in `.arbor/roadmap/` (`0-inbox/` → `1-brainstorming/` 
 
 ## Applied Learning
 
-This section is the always-loaded working set: 12 broad cross-task rules measuring 938 words. The set is deliberately above the roughly 600-word target because these rules recur across roadmap/source verification, planning, toolchain, Git, security URI matching, and patching; subsystem incidents remain behind the index. Read the linked skill before working in a specialized area; the linked files retain every other entry verbatim. The inventory is [`.claude/skills/applied-learning-inventory.json`](.claude/skills/applied-learning-inventory.json), and its validator is [`.claude/validate_applied_learning.rb`](.claude/validate_applied_learning.rb).
+The always-loaded working set: 12 broad cross-task rules. Subsystem incidents stay behind the index below — read the linked skill before working in that area; those files retain every other entry verbatim. Budgets are enforced, not aspirational: [`.claude/validate_applied_learning.rb`](.claude/validate_applied_learning.rb) is the single authority (this file ≤ 4,000 words; working set exactly 12 entries ≤ 950 words), and it runs in pre-commit and CI over [`.claude/skills/applied-learning-inventory.json`](.claude/skills/applied-learning-inventory.json). Adding a rule here means demoting one.
 
 | Read when | Load this skill |
 | --- | --- |

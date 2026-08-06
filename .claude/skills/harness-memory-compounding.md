@@ -9,7 +9,7 @@ migrate into Arbor (learning loop + memory import) as those land.
 
 | Surface | Role | Health rule |
 |---|---|---|
-| `CLAUDE.md` | Working memory — always loaded, every session, both harnesses | **Budgeted**: ≤ ~3,500 words. Every addition displaces or demotes something |
+| `CLAUDE.md` | Working memory — always loaded, every session, both harnesses | **Budgeted and enforced**: ≤ 4,000 words. Every addition displaces or demotes something |
 | `.claude/skills/*.md` | Procedural memory — loaded on demand | The promotion target for anything too long for CLAUDE.md |
 | `.arbor/decisions/` | Semantic long-term — immutable, superseded-not-edited | Healthy; keep cross-citing |
 | `.arbor/roadmap/` | Intentions | Docs age; code is truth (see decay rules) |
@@ -25,16 +25,55 @@ migrate into Arbor (learning loop + memory import) as those land.
    die with the transcript.
 2. **Applied Learning admission rule:** behavioral rules only ("when X, do
    Y"), dated, with the motivating incident. Not observations, not history.
-3. **Cap and demote:** Applied Learning holds ~12 entries / ~600 words.
-   Overflow and entries stale >3 months demote into the relevant skill file
-   (procedure) or decision doc (rationale). CLAUDE.md is a working set, not
-   a journal.
+3. **Cap and demote:** Applied Learning holds exactly 12 entries, ≤ 950
+   words. Overflow and entries stale >3 months demote into the relevant skill
+   file (procedure) or decision doc (rationale). CLAUDE.md is a working set,
+   not a journal.
 4. **Skill graduation:** 2+ Applied Learning entries about one subsystem →
    merge into a skill file (the `agent-security-gates.md` pattern,
    generalized).
 5. **The completion toll:** moving a roadmap item to `5-completed/`
    requires a `lesson:` frontmatter line (one sentence, or `lesson: none`).
    An archive without extracted lessons is a graveyard with good signage.
+
+**The budgets above are the only ones.** `.claude/validate_applied_learning.rb`
+is the single authority (CLAUDE.md ≤ 4,000 words; working set exactly 12
+entries ≤ 950 words) and runs in `.git/hooks/pre-commit` and CI. It existed
+unenforced from 2026-07 until 2026-08-06 and was silently red the whole time —
+three different word budgets were in circulation (3,500/600 here, 4,000/950 in
+the validator, a hand-written "938" in CLAUDE.md). If you want a different
+budget, change the validator; do not restate a number in prose.
+
+## What NOT to capture
+
+Adapted from hermes-agent's background-review prompt (`agent/background_review.py`),
+which is battle-tested on an automatic capture loop. Every rule written down
+becomes a persistent self-imposed constraint that bites later when the
+environment changes. Do not capture:
+
+- **Environment-dependent failures** — missing binaries, fresh-install errors,
+  post-migration path mismatches, "command not found", unconfigured
+  credentials, uninstalled packages. A human can fix these; they are not
+  durable rules.
+- **Negative claims about tools or features** — "the browser tools don't work",
+  "X is broken", "you can't do Y from Z". These harden into refusals the agent
+  cites against itself for months after the actual problem was fixed. This is
+  the worst failure mode of any accumulating-lesson system and the reason this
+  section exists.
+- **Session-specific transient errors that resolved before the session ended.**
+  If retrying worked, the lesson is the retry pattern, not the original failure.
+- **One-off task narratives.** "Audited subsystem X today" is not a class of
+  work that warrants a rule.
+
+If a tool failed because of setup state, capture the **fix** (install command,
+config step, env var) in the relevant skill file — never "this tool doesn't
+work" as a standalone constraint.
+
+Corollary for naming: **if the proposed name only makes sense for today's task,
+it's wrong.** Prefer, in order — patch a skill that was actually loaded this
+session → patch an existing umbrella file → add a supporting file under it →
+only then create a new class-level skill. A library of hundreds of narrow
+one-session entries is a failure of the library, not a rich one.
 
 ## Retention & decay
 

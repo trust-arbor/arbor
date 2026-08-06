@@ -213,18 +213,12 @@ defmodule Arbor.Orchestrator.Session.ContextBuilder do
 
   def stringify_value(v), do: v
 
+  @kg_context_limit 20
+
   def load_knowledge_graph(agent_id) do
     case Arbor.Memory.export_knowledge_graph(agent_id) do
       {:ok, %{nodes: nodes}} when is_map(nodes) and map_size(nodes) > 0 ->
-        nodes
-        |> Enum.take(20)
-        |> Enum.map(fn {_id, node} ->
-          %{
-            "content" => node["content"] || Map.get(node, :content, ""),
-            "type" => node["type"] || to_string(Map.get(node, :type, "")),
-            "confidence" => node["confidence"] || Map.get(node, :confidence, 0.5)
-          }
-        end)
+        rank_knowledge_nodes(nodes, @kg_context_limit)
 
       _ ->
         []
@@ -233,6 +227,57 @@ defmodule Arbor.Orchestrator.Session.ContextBuilder do
     _ -> []
   catch
     :exit, _ -> []
+  end
+
+  @doc """
+  Select the highest-value knowledge-graph nodes for prompt inclusion.
+
+  `export_knowledge_graph/1` returns nodes in arbitrary map order, so taking a
+  prefix without ranking made "top KG nodes" a lie: a pinned, high-relevance
+  learning could be invisible while noise was shown. Rank pinned nodes first,
+  then by `relevance` descending (the same ordering `KnowledgeGraph.active_nodes/1`
+  uses), then by `confidence` descending so ties resolve deterministically.
+
+  Accepts atom-keyed nodes (the live `to_map/1` shape) and string-keyed nodes
+  (a JSON round-trip), matching the caller's existing defensive reads.
+  """
+  @spec rank_knowledge_nodes(map(), pos_integer()) :: [map()]
+  def rank_knowledge_nodes(nodes, limit) when is_map(nodes) and is_integer(limit) do
+    nodes
+    |> Enum.map(fn {_id, node} -> node end)
+    |> Enum.sort_by(
+      fn node ->
+        {if(node_field(node, "pinned", :pinned, false), do: 0, else: 1),
+         -node_number(node, "relevance", :relevance, 0.0),
+         -node_number(node, "confidence", :confidence, 0.5)}
+      end,
+      :asc
+    )
+    |> Enum.take(limit)
+    |> Enum.map(fn node ->
+      %{
+        "content" => node_field(node, "content", :content, ""),
+        "type" => to_string(node_field(node, "type", :type, "")),
+        "confidence" => node_number(node, "confidence", :confidence, 0.5)
+      }
+    end)
+  end
+
+  # Nodes arrive atom-keyed from KnowledgeGraph.to_map/1 and string-keyed from a
+  # JSON round-trip. A present-but-nil value is treated as absent, matching the
+  # `node["k"] || Map.get(node, :k, default)` reads this replaced.
+  defp node_field(node, string_key, atom_key, default) do
+    case Map.get(node, string_key) do
+      nil -> Map.get(node, atom_key) || default
+      value -> value
+    end
+  end
+
+  defp node_number(node, string_key, atom_key, default) do
+    case node_field(node, string_key, atom_key, default) do
+      value when is_number(value) -> value
+      _ -> default
+    end
   end
 
   def load_pending_proposals(agent_id) do

@@ -24,6 +24,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Pure-Ruby text check over CLAUDE.md + .claude/skills — needs no Elixir
+      # toolchain and no deps, so it runs first and fails in seconds. This gate
+      # existed unenforced from 2026-07 to 2026-08-06 and was silently red that
+      # whole time; the local .git/hooks/pre-commit copy is untracked, so CI is
+      # the only durable enforcement.
+      - name: Applied Learning budget + integrity
+        run: ruby .claude/validate_applied_learning.rb
+
       - name: Set up toolchain (mise → .tool-versions)
         run: |
           mise install

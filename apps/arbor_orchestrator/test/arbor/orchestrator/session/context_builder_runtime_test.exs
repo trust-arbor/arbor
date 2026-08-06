@@ -94,4 +94,73 @@ defmodule Arbor.Orchestrator.Session.ContextBuilderRuntimeTest do
       assert values["session.llm_fallback_chain"] == chain
     end
   end
+
+  # Padding a graph past the limit with low-value nodes: an unranked
+  # `Enum.take(20)` over 40+ nodes drops the valuable ones on map order alone.
+  defp kg_nodes(count, high_value) do
+    filler =
+      Map.new(1..count, fn i ->
+        {"noise_#{i}",
+         %{content: "noise #{i}", type: :observation, relevance: 0.1, confidence: 0.1}}
+      end)
+
+    Enum.reduce(high_value, filler, fn {id, node}, acc -> Map.put(acc, id, node) end)
+  end
+
+  describe "rank_knowledge_nodes/2 — prompt-inclusion ranking" do
+    test "keeps the highest-relevance node when the graph exceeds the limit" do
+      nodes =
+        kg_nodes(40, [
+          {"gold",
+           %{content: "load-bearing learning", type: :skill, relevance: 0.99, confidence: 0.9}}
+        ])
+
+      ranked = ContextBuilder.rank_knowledge_nodes(nodes, 20)
+
+      assert length(ranked) == 20
+      assert hd(ranked)["content"] == "load-bearing learning"
+    end
+
+    test "pinned nodes outrank higher-relevance unpinned nodes" do
+      nodes =
+        kg_nodes(40, [
+          {"hot", %{content: "hot but unpinned", type: :fact, relevance: 1.0, confidence: 0.9}},
+          {"pin",
+           %{content: "pinned", type: :trait, relevance: 0.2, confidence: 0.5, pinned: true}}
+        ])
+
+      ranked = ContextBuilder.rank_knowledge_nodes(nodes, 20)
+
+      top_two = ranked |> Enum.map(& &1["content"]) |> Enum.take(2)
+      assert top_two == ["pinned", "hot but unpinned"]
+    end
+
+    test "ranks string-keyed nodes from a JSON round-trip" do
+      nodes =
+        kg_nodes(40, [
+          {"gold",
+           %{
+             "content" => "json learning",
+             "type" => "skill",
+             "relevance" => 0.98,
+             "confidence" => 0.88
+           }}
+        ])
+
+      ranked = ContextBuilder.rank_knowledge_nodes(nodes, 20)
+
+      assert hd(ranked) == %{
+               "content" => "json learning",
+               "type" => "skill",
+               "confidence" => 0.88
+             }
+    end
+
+    test "tolerates nodes missing relevance and confidence" do
+      nodes = %{"bare" => %{content: "bare node"}}
+
+      assert [%{"content" => "bare node", "type" => "", "confidence" => 0.5}] =
+               ContextBuilder.rank_knowledge_nodes(nodes, 20)
+    end
+  end
 end
