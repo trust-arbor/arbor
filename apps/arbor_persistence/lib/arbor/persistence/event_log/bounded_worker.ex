@@ -77,7 +77,13 @@ defmodule Arbor.Persistence.EventLog.BoundedWorker do
       {worker, worker_ref} =
         :erlang.spawn_opt(
           fn ->
-            run_worker(coordinator, worker_start_ref, worker_result_ref, fun)
+            run_worker(
+              coordinator,
+              worker_start_ref,
+              worker_result_ref,
+              fun,
+              deadline_mono
+            )
           end,
           [:link, :monitor]
         )
@@ -101,15 +107,21 @@ defmodule Arbor.Persistence.EventLog.BoundedWorker do
     end
   end
 
-  defp run_worker(coordinator, start_ref, result_ref, fun) do
+  defp run_worker(coordinator, start_ref, result_ref, fun, deadline_mono) do
     receive do
       {^start_ref, :start} ->
-        Process.put(@active_key, true)
+        case remaining_timeout(deadline_mono) do
+          {:ok, _remaining_ms} ->
+            Process.put(@active_key, true)
 
-        try do
-          send(coordinator, {result_ref, fun.()})
-        after
-          Process.delete(@active_key)
+            try do
+              send(coordinator, {result_ref, {:callback_result, fun.()}})
+            after
+              Process.delete(@active_key)
+            end
+
+          {:error, :operation_timeout} ->
+            send(coordinator, {result_ref, :deadline_expired})
         end
     end
   end
@@ -296,10 +308,13 @@ defmodule Arbor.Persistence.EventLog.BoundedWorker do
 
     response =
       case {reason, result_state, remaining_timeout(deadline_mono)} do
-        {:normal, {:ready, result}, {:ok, _remaining_ms}} ->
+        {:normal, {:ready, :deadline_expired}, _deadline_state} ->
+          {:error, :operation_timeout}
+
+        {:normal, {:ready, {:callback_result, result}}, {:ok, _remaining_ms}} ->
           {:ok, result}
 
-        {:normal, {:ready, _result}, {:error, :operation_timeout}} ->
+        {:normal, {:ready, {:callback_result, _result}}, {:error, :operation_timeout}} ->
           {:error, :operation_timeout}
 
         _worker_failed_or_malformed ->
