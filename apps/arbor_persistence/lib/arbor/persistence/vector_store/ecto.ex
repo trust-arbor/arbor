@@ -136,8 +136,7 @@ defmodule Arbor.Persistence.VectorStore.Ecto do
            VectorRecord.validate_search_descriptor(model_id, dimensions, encoding, category),
          true <- is_nil(category) or is_binary(category),
          true <- is_nil(source_namespace) or is_binary(source_namespace),
-         true <- is_nil(threshold) or is_float(threshold),
-         :ok <- ensure_canonical_threshold(threshold),
+         true <- valid_backend_threshold?(threshold),
          {:ok, repo} <- configured_repo() do
       if postgres_repo?(repo) do
         search_postgres(
@@ -166,14 +165,15 @@ defmodule Arbor.Persistence.VectorStore.Ecto do
 
   def search(_agent_id, _vector, _opts), do: {:error, :backend_failure}
 
-  defp ensure_canonical_threshold(nil), do: :ok
+  # Cheap closed-shape/range check only. Boundary is the sole canonical producer
+  # of float32 thresholds via VectorMatch.normalize_similarity/1.
+  defp valid_backend_threshold?(nil), do: true
 
-  defp ensure_canonical_threshold(threshold) when is_float(threshold) do
-    case VectorMatch.normalize_similarity(threshold) do
-      {:ok, ^threshold} -> :ok
-      _invalid -> :error
-    end
-  end
+  defp valid_backend_threshold?(threshold)
+       when is_float(threshold) and threshold >= -1.0 and threshold <= 1.0,
+       do: true
+
+  defp valid_backend_threshold?(_threshold), do: false
 
   defp search_postgres(
          repo,
@@ -190,7 +190,10 @@ defmodule Arbor.Persistence.VectorStore.Ecto do
     query_vector = Pgvector.new(vector)
     encoded_encoding = Atom.to_string(encoding)
 
-    query =
+    # Stage 1: scope filters + sole pgvector scoring expression.
+    # Subqueries project only scalars — Ecto rejects embedding a source/struct
+    # as a map value inside subquery/2 (Ecto.SubQueryError).
+    inner =
       from(row in VectorRow,
         where: row.agent_id == ^agent_id,
         where: row.model_id == ^model_id,
@@ -202,13 +205,41 @@ defmodule Arbor.Persistence.VectorStore.Ecto do
       )
       |> maybe_filter_category(category)
       |> maybe_filter_namespace(source_namespace)
-      |> maybe_filter_threshold(threshold, query_vector)
-      |> order_by([row], [
-        asc: fragment("? <=> ?", row.vector_768, ^query_vector),
-        asc: row.id
-      ])
+      |> select([row], %{
+        sort_id: row.id,
+        distance: fragment("? <=> ?", row.vector_768, ^query_vector)
+      })
+
+    # Stage 2: canonical float32 similarity from the projected distance.
+    middle =
+      from(s in subquery(inner),
+        select: %{
+          sort_id: s.sort_id,
+          distance: s.distance,
+          similarity: fragment("CAST((1.0 - ?) AS real)", s.distance)
+        }
+      )
+
+    # Stage 3: threshold on canonical similarity, order by raw distance, limit
+    # (still scalar-only), then join VectorRow back by PK for decode.
+    ranked =
+      from(r in subquery(middle))
+      |> maybe_filter_canonical_similarity(threshold)
+      |> order_by([r], asc: r.distance, asc: r.sort_id)
       |> limit(^limit)
-      |> select([row], {row, fragment("? <=> ?", row.vector_768, ^query_vector)})
+      |> select([r], %{
+        sort_id: r.sort_id,
+        distance: r.distance,
+        similarity: r.similarity
+      })
+
+    query =
+      from(r in subquery(ranked),
+        join: row in VectorRow,
+        on: row.id == r.sort_id,
+        order_by: [asc: r.distance, asc: r.sort_id],
+        select: {row, r.similarity}
+      )
 
     query
     |> repo.all()
@@ -225,11 +256,10 @@ defmodule Arbor.Persistence.VectorStore.Ecto do
     )
   end
 
-  defp maybe_filter_threshold(query, nil, _query_vector), do: query
+  defp maybe_filter_canonical_similarity(query, nil), do: query
 
-  defp maybe_filter_threshold(query, threshold, query_vector) when is_float(threshold) do
-    max_distance = 1.0 - threshold
-    where(query, [row], fragment("? <=> ?", row.vector_768, ^query_vector) <= ^max_distance)
+  defp maybe_filter_canonical_similarity(query, threshold) when is_float(threshold) do
+    where(query, [r], r.similarity >= ^threshold)
   end
 
   defp execute_in_transaction(repo, operation) do
@@ -643,7 +673,7 @@ defmodule Arbor.Persistence.VectorStore.Ecto do
        do: {:ok, Enum.reverse(matches)}
 
   defp decode_matches(
-         [{%VectorRow{} = row, distance} | rows],
+         [{%VectorRow{} = row, similarity} | rows],
          repo,
          agent_id,
          model_id,
@@ -654,7 +684,7 @@ defmodule Arbor.Persistence.VectorStore.Ecto do
          threshold,
          matches
        )
-       when is_number(distance) do
+       when is_number(similarity) do
     with {:ok, record} <- row_to_record(row, repo),
          true <- record.agent_id == agent_id,
          true <- record.model_id == model_id,
@@ -663,7 +693,7 @@ defmodule Arbor.Persistence.VectorStore.Ecto do
          true <- is_nil(category) or record.category == category,
          true <- is_nil(source_namespace) or record.source_namespace == source_namespace,
          false <- record.tombstone,
-         {:ok, match} <- VectorMatch.new(%{record: record, similarity: 1.0 - distance}),
+         {:ok, match} <- VectorMatch.new(%{record: record, similarity: similarity}),
          true <- is_nil(threshold) or match.similarity >= threshold do
       decode_matches(
         rows,

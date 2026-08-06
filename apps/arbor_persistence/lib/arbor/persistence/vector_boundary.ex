@@ -78,10 +78,20 @@ defmodule Arbor.Persistence.VectorBoundary do
 
   @spec search(term(), term(), term()) ::
           {:ok, [VectorMatch.t()]} | {:error, vector_error()}
-  def search(agent_id, vector, opts) do
+  def search(agent_id, vector, opts),
+    do: do_search(agent_id, vector, opts, :allow_nil_category)
+
+  @doc false
+  @spec search_exact_category(term(), term(), term()) ::
+          {:ok, [VectorMatch.t()]} | {:error, vector_error()}
+  def search_exact_category(agent_id, vector, opts),
+    do: do_search(agent_id, vector, opts, :require_non_nil_category)
+
+  defp do_search(agent_id, vector, opts, category_mode)
+       when category_mode in [:allow_nil_category, :require_non_nil_category] do
     with :ok <- validate_agent_id(agent_id),
          {:ok, normalized_vector} <- normalize_query_vector(vector),
-         {:ok, backend_opts} <- normalize_search_options(opts),
+         {:ok, backend_opts} <- normalize_search_options(opts, category_mode),
          {:ok, backend_result} <-
            dispatch(fn backend -> backend.search(agent_id, normalized_vector, backend_opts) end) do
       validate_search_result(backend_result, agent_id, backend_opts)
@@ -153,7 +163,8 @@ defmodule Arbor.Persistence.VectorBoundary do
     end
   end
 
-  defp normalize_search_options(opts) do
+  defp normalize_search_options(opts, category_mode)
+       when category_mode in [:allow_nil_category, :require_non_nil_category] do
     with {:ok, values} <- normalize_options(opts, @search_option_keys),
          {:ok, model_id} <- Map.fetch(values, :model_id),
          {:ok, dimensions} <- Map.fetch(values, :dimensions),
@@ -167,19 +178,30 @@ defmodule Arbor.Persistence.VectorBoundary do
            VectorRecord.validate_search_descriptor(model_id, dimensions, encoding, category),
          true <-
            valid_optional_text?(source_namespace, VectorRecord.limits().source_namespace_bytes),
-         {:ok, threshold} <- normalize_search_threshold(threshold) do
-      {:ok,
-       [
-         model_id: model_id,
-         dimensions: dimensions,
-         encoding: encoding,
-         category: category,
-         source_namespace: source_namespace,
-         threshold: threshold,
-         limit: limit
-       ]}
+         {:ok, threshold} <- normalize_search_threshold(threshold),
+         backend_opts =
+           [
+             model_id: model_id,
+             dimensions: dimensions,
+             encoding: encoding,
+             category: category,
+             source_namespace: source_namespace,
+             threshold: threshold,
+             limit: limit
+           ],
+         :ok <- require_category_mode(backend_opts, category_mode) do
+      {:ok, backend_opts}
     else
       _invalid -> {:error, :invalid_request}
+    end
+  end
+
+  defp require_category_mode(_backend_opts, :allow_nil_category), do: :ok
+
+  defp require_category_mode(backend_opts, :require_non_nil_category) do
+    case Keyword.fetch!(backend_opts, :category) do
+      category when is_binary(category) -> :ok
+      _nil_or_invalid -> :error
     end
   end
 

@@ -37,6 +37,7 @@ defmodule Arbor.Persistence.VectorSearchScopeSecurityRegressionTest do
     {:ok, note_match} = VectorMatch.new(%{record: note, similarity: 0.9})
     {:ok, forged_ns_match} = VectorMatch.new(%{record: forged_ns, similarity: 0.99})
     {:ok, forged_cat_match} = VectorMatch.new(%{record: forged_cat, similarity: 0.98})
+
     low =
       record!(source_key: "low", category: "goal", source_namespace: "goals")
 
@@ -102,6 +103,44 @@ defmodule Arbor.Persistence.VectorSearchScopeSecurityRegressionTest do
                encoding: VectorRecord.encoding(),
                threshold: 0.5
              )
+  end
+
+  # Measured bands (valid 768-d query vector):
+  #   repair oversized reject: O(1) after first unknown key + vector-norm cost, << cap
+  #   c300c9df parent: facade scan_exact_category/2 walks every noise pair before Boundary
+  #     rejects, so reductions grow with N (N=250_000 exceeds the cap)
+  # Cap sits above vector-normalization + bounded collect_options cost and below parent scan.
+  @exact_descriptor_oversized_reduction_cap 100_000
+  @exact_descriptor_oversized_noise_pairs 250_000
+
+  test "security regression: exact-descriptor oversized opts are reduction-bounded and never dispatch" do
+    query = vector()
+
+    oversized_opts =
+      List.duplicate({:noise, 0}, @exact_descriptor_oversized_noise_pairs) ++
+        [
+          model_id: "provider/model-v1",
+          dimensions: VectorRecord.dimensions(),
+          encoding: VectorRecord.encoding(),
+          category: "goal"
+        ]
+
+    {:reductions, reductions_before} = Process.info(self(), :reductions)
+
+    assert {:error, :invalid_request} =
+             Arbor.Persistence.search_vector_records_by_exact_descriptor_for_agent(
+               "agent_alpha",
+               query,
+               oversized_opts
+             )
+
+    {:reductions, reductions_after} = Process.info(self(), :reductions)
+    reduction_delta = reductions_after - reductions_before
+
+    assert reduction_delta < @exact_descriptor_oversized_reduction_cap,
+           "expected bounded option admission (< #{@exact_descriptor_oversized_reduction_cap} reductions), got #{reduction_delta}"
+
+    refute_receive {:regression_backend_called, _agent_id, _vector, _opts}
   end
 
   defp respond(response), do: Process.put({RegressionBackend, :response}, response)

@@ -274,12 +274,85 @@ defmodule Arbor.Persistence.VectorStore.EctoPostgresTest do
 
     assert distant_id in Enum.map(unthresholded, & &1.record.id)
 
+    # Exact-threshold retention: identical vectors yield similarity 1.0; threshold 1.0 keeps them.
+    assert {:ok, exact_threshold} =
+             Arbor.Persistence.search_vector_records(
+               agent_id,
+               query_vector,
+               search_opts(
+                 category: "goal",
+                 source_namespace: "voice",
+                 threshold: 1.0,
+                 limit: 10
+               )
+             )
+
+    exact_ids = Enum.map(exact_threshold, & &1.record.id)
+    assert goal_id in exact_ids
+    refute distant_id in exact_ids
+    assert Enum.all?(exact_threshold, &(&1.similarity >= 1.0))
+
+    # Scopes apply before nearest-neighbor limit: out-of-scope exact match must not win limit:1.
+    assert {:ok, [%VectorMatch{record: limited}]} =
+             Arbor.Persistence.search_vector_records(
+               agent_id,
+               query_vector,
+               search_opts(category: "goal", source_namespace: "voice", limit: 1)
+             )
+
+    assert limited.id == goal_id
+    assert limited.source_namespace == "voice"
+
     assert {:ok, _} =
              Arbor.Persistence.search_vector_records(
                agent_id,
                query_vector,
                search_opts(limit: 1000)
              )
+  end
+
+  test "PostgreSQL search emits a single pgvector scoring expression under threshold", %{
+    agent_id: agent_id
+  } do
+    query_vector = unit_vector(0)
+    record = record!(agent_id, source_key: "scored", vector: query_vector)
+
+    assert {:ok, _receipt} =
+             Arbor.Persistence.execute_vector_operation(agent_id, insert_operation!(record))
+
+    parent = self()
+    handler_id = "vector-search-single-score-#{System.unique_integer([:positive])}"
+
+    :ok =
+      :telemetry.attach(
+        handler_id,
+        Arbor.Persistence.Repo.config()[:telemetry_prefix] ++ [:query],
+        fn _event, _measurements, metadata, _config ->
+          send(parent, {:ecto_query, metadata[:query]})
+        end,
+        nil
+      )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+
+    assert {:ok, [%VectorMatch{record: %{id: matched_id}}]} =
+             Arbor.Persistence.search_vector_records(
+               agent_id,
+               query_vector,
+               search_opts(threshold: 0.5, limit: 5)
+             )
+
+    assert matched_id == record.id
+
+    search_sql =
+      receive_ecto_search_sql(deadline: System.monotonic_time(:millisecond) + 2_000)
+
+    assert search_sql =~ "<=>"
+    assert length(String.split(search_sql, "<=>")) - 1 == 1
+
+    assert String.contains?(String.upcase(search_sql), "CAST") or
+             String.contains?(search_sql, "::real") or
+             String.contains?(String.downcase(search_sql), " as real")
   end
 
   test "PostgreSQL rejects zero-norm queries and searches ordinary signed vectors", %{
@@ -437,6 +510,29 @@ defmodule Arbor.Persistence.VectorStore.EctoPostgresTest do
       })
 
     operation
+  end
+
+  defp receive_ecto_search_sql(deadline: deadline) do
+    remaining = deadline - System.monotonic_time(:millisecond)
+
+    if remaining <= 0 do
+      flunk("timed out waiting for Ecto search SQL telemetry containing <=>")
+    else
+      receive do
+        {:ecto_query, query} when is_binary(query) ->
+          if String.contains?(query, "<=>") and String.contains?(query, "memory_embeddings") do
+            query
+          else
+            receive_ecto_search_sql(deadline: deadline)
+          end
+
+        {:ecto_query, _other} ->
+          receive_ecto_search_sql(deadline: deadline)
+      after
+        max(remaining, 1) ->
+          flunk("timed out waiting for Ecto search SQL telemetry containing <=>")
+      end
+    end
   end
 
   defp search_opts(overrides) do

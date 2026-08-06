@@ -390,7 +390,10 @@ defmodule Arbor.Persistence.VectorBoundaryTest do
   test "search rejects forged namespace, category, and below-threshold backend members" do
     query = vector()
     valid = record!(source_key: "valid", generation: 1, revision: 1)
-    forged_ns = record!(source_key: "forged_ns", source_namespace: "other", generation: 1, revision: 1)
+
+    forged_ns =
+      record!(source_key: "forged_ns", source_namespace: "other", generation: 1, revision: 1)
+
     forged_cat = record!(source_key: "forged_cat", category: "other", generation: 1, revision: 1)
 
     low = record!(source_key: "low", generation: 1, revision: 1)
@@ -438,10 +441,28 @@ defmodule Arbor.Persistence.VectorBoundaryTest do
                search_opts()
              )
 
-    assert_receive {:vector_backend_called, :search, _args}
+    assert_receive {:vector_backend_called, :search,
+                    [
+                      "agent_alpha",
+                      _vector,
+                      [
+                        model_id: "provider/model-v1",
+                        dimensions: 768,
+                        encoding: :ieee754_float32_be_v1,
+                        category: "goal",
+                        source_namespace: nil,
+                        threshold: nil,
+                        limit: 20
+                      ]
+                    ]}
 
     for opts <- [
-          %{model_id: "provider/model-v1", dimensions: 768, encoding: :ieee754_float32_be_v1, category: "goal"},
+          %{
+            model_id: "provider/model-v1",
+            dimensions: 768,
+            encoding: :ieee754_float32_be_v1,
+            category: "goal"
+          },
           [{:model_id, "provider/model-v1"} | :improper],
           [
             model_id: "provider/model-v1",
@@ -449,7 +470,9 @@ defmodule Arbor.Persistence.VectorBoundaryTest do
             encoding: VectorRecord.encoding()
           ],
           search_opts(category: nil),
-          search_opts() ++ [category: "goal"]
+          search_opts() ++ [category: "goal"],
+          search_opts() ++ [unknown: "x"],
+          List.duplicate({:noise, 0}, 100) ++ search_opts()
         ] do
       assert {:error, :invalid_request} =
                Arbor.Persistence.search_vector_records_by_exact_descriptor_for_agent(
