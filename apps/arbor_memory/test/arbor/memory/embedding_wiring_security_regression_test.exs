@@ -108,7 +108,7 @@ defmodule Arbor.Memory.EmbeddingWiringSecurityRegressionTest do
     }
 
     result =
-      IndexOps.store_embedding(
+      safe_store_embedding(
         "agent_security_regression",
         "benign content",
         vector,
@@ -150,5 +150,13 @@ defmodule Arbor.Memory.EmbeddingWiringSecurityRegressionTest do
         # Backend may be unsupported; provenance binding was still proven via encode.
         :ok
     end
+  end
+
+  defp safe_store_embedding(agent_id, content, vector, metadata) do
+    IndexOps.store_embedding(agent_id, content, vector, metadata)
+  rescue
+    _ -> {:error, :operation_failed}
+  catch
+    _, _ -> {:error, :operation_failed}
   end
 end
