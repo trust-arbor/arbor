@@ -28,7 +28,7 @@ digraph HeartbeatBare {
   start [shape=Mdiamond]
 
   // ── Background checks (memory health, timing, etc.) ───────
-  bg_checks [type="exec", target="action", action="background_checks_run",
+  bg_checks [type="exec", target="action", action="harness_diagnostics_run",
              output_prefix="session"]
 
   // ── Cognitive mode selection ──────────────────────────────

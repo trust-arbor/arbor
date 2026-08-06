@@ -55,9 +55,16 @@ digraph Heartbeat {
   // ── Entry ──────────────────────────────────────────────────
   start [shape=Mdiamond]
 
-  // ── Background checks (memory health, timing, etc.) ───────
-  bg_checks [type="exec", target="action", action="background_checks_run",
-             output_prefix="session"]
+  // NOTE (2026-08-06): a `bg_checks` node used to sit between start and
+  // select_mode, calling action "background_checks_run". That name resolved to
+  // Arbor.Actions.BackgroundChecks.Run — a Claude Code HARNESS diagnostic that
+  // reads ~/.claude session JSONL, arbor-personal, and the repo. It had nothing
+  // to do with agent memory, and it is gated on arbor://shell/exec, which
+  // carries a system-enforced :ask ceiling and so can never authorize in an
+  // autonomous cycle. The memory learning producer it was presumably meant to
+  // call is Arbor.Memory.BackgroundChecks.run/2 (action patterns, insight
+  // detection, preconscious), which remains UNWIRED pending an :action_history
+  // source. See .arbor/decisions/2026-08-06-harness-learning-enforcement.md.
 
   // ── Cognitive mode selection ──────────────────────────────
   select_mode [type="exec", target="action", action="session.mode_select",
@@ -141,7 +148,7 @@ digraph Heartbeat {
   // ══════════════════════════════════════════════════════════════
 
   // Linear lead-in: checks -> mode selection -> routing
-  start -> bg_checks -> select_mode -> mode_router
+  start -> select_mode -> mode_router
 
   // Conditional fan-out by cognitive mode
   // All three LLM modes share one build_prompt + llm_call pair

@@ -2075,8 +2075,8 @@ defmodule Arbor.Actions do
         Arbor.Actions.Coding.ReviewTree.Search,
         Arbor.Actions.Coding.SubmitReviewReport
       ],
-      background_checks: [
-        Arbor.Actions.BackgroundChecks.Run
+      harness_diagnostics: [
+        Arbor.Actions.HarnessDiagnostics.Run
       ],
       judge: [
         Arbor.Actions.Judge.Evaluate,
@@ -3149,7 +3149,7 @@ defmodule Arbor.Actions do
     Arbor.Actions.Coding.SubmitReviewReport => "arbor://action/coding/review/submit",
 
     # Background checks — routes through shell
-    Arbor.Actions.BackgroundChecks.Run => "arbor://shell/exec",
+    Arbor.Actions.HarnessDiagnostics.Run => "arbor://shell/exec",
 
     # Pipeline execution and validation are distinct privileges.
     Arbor.Actions.Pipeline.Run => "arbor://action/pipeline/run",

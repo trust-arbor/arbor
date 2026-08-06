@@ -52,7 +52,7 @@ digraph BDICycle {
   bg_checks [
     type="exec",
     target="action",
-    action="background_checks_run",
+    action="harness_diagnostics_run",
     context_keys="session.agent_id",
     output_prefix="session"
   ]

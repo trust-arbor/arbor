@@ -23,8 +23,8 @@ defmodule Arbor.Agent.Executor.ActionDispatch do
       iex> ActionDispatch.canonical_action_name(:file_read)
       {:ok, "file.read"}
 
-      iex> ActionDispatch.canonical_action_name(:background_checks_run)
-      {:ok, "background_checks.run"}
+      iex> ActionDispatch.canonical_action_name(:harness_diagnostics_run)
+      {:ok, "harness_diagnostics.run"}
 
       iex> ActionDispatch.canonical_action_name(:unknown_thing)
       :error
@@ -32,7 +32,7 @@ defmodule Arbor.Agent.Executor.ActionDispatch do
   @spec canonical_action_name(atom() | String.t()) :: {:ok, String.t()} | :error
   def canonical_action_name(action) when is_atom(action) do
     # Check hardcoded dispatch mappings first (compound names like
-    # :background_checks_run that find_action_module can't discover,
+    # :harness_diagnostics_run that find_action_module can't discover,
     # and inline-handled actions like :proposal_status), then fall back
     # to naming convention discovery.
     case hardcoded_canonical_name(action) do
@@ -95,8 +95,8 @@ defmodule Arbor.Agent.Executor.ActionDispatch do
       iex> ActionDispatch.module_to_dotted_name(Arbor.Actions.File.Read)
       "file.read"
 
-      iex> ActionDispatch.module_to_dotted_name(Arbor.Actions.BackgroundChecks.Run)
-      "background_checks.run"
+      iex> ActionDispatch.module_to_dotted_name(Arbor.Actions.HarnessDiagnostics.Run)
+      "harness_diagnostics.run"
   """
   @spec module_to_dotted_name(module()) :: String.t()
   def module_to_dotted_name(module) do
@@ -148,12 +148,12 @@ defmodule Arbor.Agent.Executor.ActionDispatch do
     do_proposal_status(proposal_id)
   end
 
-  # Background checks — compound module name doesn't match single-underscore naming convention
-  def dispatch(:background_checks_run, params, agent_id) do
+  # Harness diagnostics — compound module name doesn't match single-underscore naming convention
+  def dispatch(:harness_diagnostics_run, params, agent_id) do
     run_runtime_action(
-      Arbor.Actions.BackgroundChecks.Run,
+      Arbor.Actions.HarnessDiagnostics.Run,
       params,
-      :background_checks_failed,
+      :harness_diagnostics_failed,
       :health_checks_unavailable,
       agent_id
     )
@@ -192,7 +192,7 @@ defmodule Arbor.Agent.Executor.ActionDispatch do
   end
 
   # H7: pre-fix, run_runtime_action called `apply(action_mod, :run, [params, %{}])`
-  # directly — proposal_submit, code_hot_load, background_checks_run all
+  # directly — proposal_submit, code_hot_load, harness_diagnostics_run all
   # bypassed action-layer taint enforcement, resource binding, invocation
   # receipts, and facade-level checks. Generic discovered actions DID go
   # through Arbor.Actions.authorize_and_execute; only the hardcoded compound
@@ -276,7 +276,12 @@ defmodule Arbor.Agent.Executor.ActionDispatch do
     agent_id = Process.get(:arbor_executor_agent_id)
 
     if agent_id do
-      case Arbor.Actions.authorize_and_execute(agent_id, action_module, params, executor_context()) do
+      case Arbor.Actions.authorize_and_execute(
+             agent_id,
+             action_module,
+             params,
+             executor_context()
+           ) do
         {:ok, :pending_approval, _} -> {:error, {:pending_approval, action}}
         {:error, :unauthorized} -> {:error, {:unauthorized, action}}
         result -> result
@@ -292,9 +297,9 @@ defmodule Arbor.Agent.Executor.ActionDispatch do
   end
 
   # Map actions with hardcoded dispatch clauses to canonical dotted names.
-  # Covers compound namespace modules (BackgroundChecks.Run) and inline-handled
+  # Covers compound namespace modules (HarnessDiagnostics.Run) and inline-handled
   # actions (proposal_status) that find_action_module can't discover.
-  defp hardcoded_canonical_name(:background_checks_run), do: {:ok, "background_checks.run"}
+  defp hardcoded_canonical_name(:harness_diagnostics_run), do: {:ok, "harness_diagnostics.run"}
   defp hardcoded_canonical_name(:proposal_submit), do: {:ok, "proposal.submit"}
   defp hardcoded_canonical_name(:code_hot_load), do: {:ok, "code.hot_load"}
 

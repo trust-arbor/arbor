@@ -1,9 +1,9 @@
-defmodule Arbor.Actions.BackgroundChecks.Run.Checks do
+defmodule Arbor.Actions.HarnessDiagnostics.Run.Checks do
   @moduledoc """
-  Individual health check implementations for BackgroundChecks.Run.
+  Individual health check implementations for HarnessDiagnostics.Run.
 
   Contains 6 diagnostic checks, their helpers, result manipulation functions,
-  and markdown formatting. Extracted from BackgroundChecks.Run to reduce module
+  and markdown formatting. Extracted from HarnessDiagnostics.Run to reduce module
   size and improve testability.
   """
 

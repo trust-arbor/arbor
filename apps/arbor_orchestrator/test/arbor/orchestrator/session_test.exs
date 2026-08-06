@@ -309,12 +309,14 @@ defmodule Arbor.Orchestrator.SessionTest do
       dot = read_dot!(@heartbeat_dot_path)
       assert {:ok, graph} = Orchestrator.parse(dot)
 
-      # heartbeat.dot defines: start, bg_checks, select_mode, mode_router,
+      # heartbeat.dot defines: start, select_mode, mode_router,
       # build_prompt, llm_call, consolidate, process, store_decompositions,
       # route_intents, process_proposals, update_wm, execute_actions,
       # update_goals, prune_intents, check_loop, build_followup,
-      # llm_followup, done = 19 nodes
-      assert map_size(graph.nodes) == 19
+      # llm_followup, done = 18 nodes
+      # (was 19 until 2026-08-06, when the bg_checks harness-diagnostic node
+      # was removed — see the note in heartbeat.dot)
+      assert map_size(graph.nodes) == 18
 
       # Verify mode-specific nodes exist
       assert Map.has_key?(graph.nodes, "build_prompt")
@@ -344,8 +346,15 @@ defmodule Arbor.Orchestrator.SessionTest do
     test "heartbeat exec nodes have correct action attributes" do
       graph = parse!(@heartbeat_dot_path)
 
-      assert graph.nodes["bg_checks"].attrs["type"] == "exec"
-      assert graph.nodes["bg_checks"].attrs["action"] == "background_checks_run"
+      # The heartbeat must NOT call the Claude Code harness diagnostic. It is
+      # gated on arbor://shell/exec (system :ask ceiling, un-authorizable in an
+      # autonomous cycle) and inspects harness files, not agent memory.
+      # Removed 2026-08-06; see the note in heartbeat.dot.
+      refute Map.has_key?(graph.nodes, "bg_checks")
+
+      refute Enum.any?(graph.nodes, fn {_id, node} ->
+               node.attrs["action"] in ["background_checks_run", "harness_diagnostics_run"]
+             end)
 
       assert graph.nodes["select_mode"].attrs["type"] == "exec"
       assert graph.nodes["select_mode"].attrs["action"] == "session.mode_select"

@@ -1,4 +1,4 @@
-defmodule Arbor.Actions.BackgroundChecks do
+defmodule Arbor.Actions.HarnessDiagnostics do
   @moduledoc """
   Background health checks for Claude Code's file-based data sources.
 
@@ -44,9 +44,9 @@ defmodule Arbor.Actions.BackgroundChecks do
     """
 
     use Jido.Action,
-      name: "background_checks_run",
+      name: "harness_diagnostics_run",
       description: "Run background health checks on Claude Code's file-based data sources",
-      category: "background_checks",
+      category: "harness_diagnostics",
       tags: ["background", "health", "diagnostics", "heartbeat"],
       schema: [
         skip: [
@@ -75,7 +75,7 @@ defmodule Arbor.Actions.BackgroundChecks do
 
     require Logger
 
-    alias Arbor.Actions.BackgroundChecks.Run.Checks
+    alias Arbor.Actions.HarnessDiagnostics.Run.Checks
 
     # ============================================================================
     # Taint Roles

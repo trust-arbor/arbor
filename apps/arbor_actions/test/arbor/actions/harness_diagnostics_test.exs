@@ -1,7 +1,7 @@
-defmodule Arbor.Actions.BackgroundChecksTest do
+defmodule Arbor.Actions.HarnessDiagnosticsTest do
   use Arbor.Actions.ActionCase, async: true
 
-  alias Arbor.Actions.BackgroundChecks
+  alias Arbor.Actions.HarnessDiagnostics
 
   @moduletag :fast
 
@@ -23,7 +23,7 @@ defmodule Arbor.Actions.BackgroundChecksTest do
         extra_params
       )
 
-    BackgroundChecks.Run.run(params, %{})
+    HarnessDiagnostics.Run.run(params, %{})
   end
 
   defp old_erl_datetime(days_ago) do
@@ -39,19 +39,19 @@ defmodule Arbor.Actions.BackgroundChecksTest do
 
   describe "metadata" do
     test "action name" do
-      assert BackgroundChecks.Run.name() == "background_checks_run"
+      assert HarnessDiagnostics.Run.name() == "harness_diagnostics_run"
     end
 
     test "category" do
-      assert BackgroundChecks.Run.category() == "background_checks"
+      assert HarnessDiagnostics.Run.category() == "harness_diagnostics"
     end
 
     test "tags include background" do
-      assert "background" in BackgroundChecks.Run.tags()
+      assert "background" in HarnessDiagnostics.Run.tags()
     end
 
     test "all taint_roles are :data" do
-      roles = BackgroundChecks.Run.taint_roles()
+      roles = HarnessDiagnostics.Run.taint_roles()
       assert Enum.all?(Map.values(roles), &(&1 == :data))
     end
   end
@@ -63,7 +63,7 @@ defmodule Arbor.Actions.BackgroundChecksTest do
   describe "result structure" do
     test "returns {:ok, result} with all expected keys", %{tmp_dir: tmp_dir} do
       assert {:ok, result} =
-               BackgroundChecks.Run.run(
+               HarnessDiagnostics.Run.run(
                  %{personal_dir: tmp_dir, session_dir: tmp_dir, project_dir: tmp_dir},
                  %{}
                )
@@ -79,7 +79,7 @@ defmodule Arbor.Actions.BackgroundChecksTest do
 
     test "markdown starts with report header", %{tmp_dir: tmp_dir} do
       {:ok, result} =
-        BackgroundChecks.Run.run(
+        HarnessDiagnostics.Run.run(
           %{personal_dir: tmp_dir, session_dir: tmp_dir, project_dir: tmp_dir},
           %{}
         )
@@ -386,7 +386,7 @@ defmodule Arbor.Actions.BackgroundChecksTest do
   describe "skip parameter" do
     test "skips all checks when all names provided", %{tmp_dir: tmp_dir} do
       {:ok, result} =
-        BackgroundChecks.Run.run(
+        HarnessDiagnostics.Run.run(
           %{
             personal_dir: tmp_dir,
             session_dir: tmp_dir,
@@ -411,7 +411,7 @@ defmodule Arbor.Actions.BackgroundChecksTest do
   describe "graceful degradation" do
     test "non-existent paths don't crash", _ctx do
       assert {:ok, result} =
-               BackgroundChecks.Run.run(
+               HarnessDiagnostics.Run.run(
                  %{
                    personal_dir: "/nonexistent/path/#{System.unique_integer([:positive])}",
                    session_dir: "/nonexistent/session/#{System.unique_integer([:positive])}",

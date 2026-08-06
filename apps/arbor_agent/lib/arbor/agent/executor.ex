@@ -362,7 +362,7 @@ defmodule Arbor.Agent.Executor do
     params_with_sandbox = Map.put(params || %{}, :sandbox, sandbox_level)
 
     # H7: thread agent_id so ActionDispatch can route hardcoded actions
-    # (proposal_submit, code_hot_load, background_checks_run) through
+    # (proposal_submit, code_hot_load, harness_diagnostics_run) through
     # Arbor.Actions.authorize_and_execute instead of bypassing it with a
     # direct apply.
     ActionDispatch.dispatch(action, params_with_sandbox, agent_id)
