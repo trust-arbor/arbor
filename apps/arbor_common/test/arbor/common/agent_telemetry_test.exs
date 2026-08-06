@@ -515,4 +515,56 @@ defmodule Arbor.Common.AgentTelemetry.StoreTest do
       assert map_size(t.tool_stats) > 0
     end
   end
+
+  # These guard the 2026-08-06 fix. query_events/2 built raw SQL with Postgres
+  # positional placeholders and rescued EVERY failure into {:ok, []}. On the
+  # DEFAULT dev/test adapter (SQLite unless ARBOR_DB=postgres) that meant every
+  # query failed and reported "no events" — a silent, total telemetry blackout.
+  # agent_task_runner.ex had already worked around it by reading signals instead.
+  describe "query_events/2 adapter portability (regression)" do
+    test "SQLite gets anonymous placeholders, not Postgres positional ones" do
+      {clauses, params, _idx} =
+        Store.build_query_conditions("agent_x", [event_type: :tool_call], Ecto.Adapters.SQLite3)
+
+      sql = Enum.join(clauses, " AND ")
+
+      refute sql =~ "$1", "SQLite cannot bind Postgres positional placeholders"
+      refute sql =~ ~r/\$\d/
+      assert sql == "agent_id = ? AND event_type = ?"
+      assert params == ["agent_x", "tool_call"]
+    end
+
+    test "Postgres keeps positional placeholders, numbered in order" do
+      {clauses, params, _idx} =
+        Store.build_query_conditions(
+          "agent_x",
+          [event_type: :tool_call, since: ~U[2026-01-01 00:00:00Z]],
+          Ecto.Adapters.Postgres
+        )
+
+      assert Enum.join(clauses, " AND ") ==
+               "agent_id = $1 AND event_type = $2 AND timestamp >= $3"
+
+      assert length(params) == 3
+    end
+
+    test "an unknown adapter falls back to anonymous placeholders" do
+      {clauses, _params, _idx} = Store.build_query_conditions("agent_x", [], :some_other_adapter)
+      assert clauses == ["agent_id = ?"]
+    end
+  end
+
+  describe "query_events/2 failure reporting (regression)" do
+    test "a missing repo is an error, never an empty result set" do
+      # "no events" and "the query broke" must stay distinguishable; conflating
+      # them is what let the blackout above go unnoticed.
+      if Process.whereis(Arbor.Persistence.Repo) do
+        assert {:ok, events} = Store.query_events("agent_nonexistent_#{System.unique_integer()}")
+        assert is_list(events)
+      else
+        assert {:error, :repo_unavailable} =
+                 Store.query_events("agent_nonexistent_#{System.unique_integer()}")
+      end
+    end
+  end
 end

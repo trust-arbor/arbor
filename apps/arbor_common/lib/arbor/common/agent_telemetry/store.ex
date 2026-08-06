@@ -207,6 +207,12 @@ defmodule Arbor.Common.AgentTelemetry.Store do
   - `:until` - only events before this `DateTime`
   - `:limit` - max number of events (default 100)
   - `:order` - `:asc` or `:desc` (default `:desc`)
+
+  Returns `{:error, :repo_unavailable}` when no repo is running and
+  `{:error, reason}` when the query itself fails. It deliberately does NOT
+  report a failure as an empty result: "no events" and "the query broke" are
+  different facts, and conflating them hid a total telemetry blackout on the
+  default SQLite adapter for months.
   """
   @spec query_events(String.t(), keyword()) :: {:ok, [map()]} | {:error, term()}
   def query_events(agent_id, opts \\ []) when is_binary(agent_id) do
@@ -214,7 +220,8 @@ defmodule Arbor.Common.AgentTelemetry.Store do
       limit_val = Keyword.get(opts, :limit, 100)
       order = if Keyword.get(opts, :order, :desc) == :asc, do: "ASC", else: "DESC"
 
-      {where_clauses, params, _idx} = build_query_conditions(agent_id, opts)
+      {where_clauses, params, _idx} =
+        build_query_conditions(agent_id, opts, repo_adapter(repo))
 
       sql = """
       SELECT id, agent_id, event_type, timestamp, data
@@ -240,15 +247,17 @@ defmodule Arbor.Common.AgentTelemetry.Store do
           {:ok, events}
 
         {:error, reason} ->
+          Logger.warning("[Telemetry.Store] Event query failed: #{inspect(reason)}")
           {:error, reason}
       end
     else
-      _ -> {:ok, []}
+      {:error, :unavailable} -> {:error, :repo_unavailable}
+      other -> other
     end
   rescue
     e ->
-      Logger.debug("[Telemetry.Store] Failed to query events: #{Exception.message(e)}")
-      {:ok, []}
+      Logger.warning("[Telemetry.Store] Failed to query events: #{Exception.message(e)}")
+      {:error, e}
   end
 
   # ===========================================================================
@@ -303,27 +312,58 @@ defmodule Arbor.Common.AgentTelemetry.Store do
     end
   end
 
-  defp build_query_conditions(agent_id, opts) do
-    clauses = ["agent_id = $1"]
+  # Placeholder syntax is adapter-specific: Postgres wants positional $1/$2,
+  # SQLite3 wants anonymous `?`. arbor_common (L0/L1) cannot depend on
+  # arbor_persistence, so these queries are raw SQL executed through the repo
+  # by apply/3 — which means the placeholder style has to be chosen here rather
+  # than by Ecto. Hardcoding $n made every query fail on the DEFAULT dev
+  # adapter (config/dev.exs: SQLite unless ARBOR_DB=postgres); the failure was
+  # swallowed into an empty list, so callers saw "no telemetry" instead of an
+  # error. See agent_task_runner.ex, which worked around it by reading signals.
+  defp placeholder(Ecto.Adapters.Postgres, idx), do: "$#{idx}"
+  defp placeholder(_adapter, _idx), do: "?"
+
+  defp repo_adapter(repo) do
+    repo.__adapter__()
+  rescue
+    _ -> :unknown
+  end
+
+  @doc false
+  # Public only so the adapter-portability regression can assert on the emitted
+  # placeholder style without standing up two live repos.
+  def build_query_conditions(agent_id, opts, adapter) do
+    clauses = ["agent_id = #{placeholder(adapter, 1)}"]
     params = [agent_id]
     idx = 2
 
     {clauses, params, idx} =
       case Keyword.get(opts, :event_type) do
-        nil -> {clauses, params, idx}
-        type -> {clauses ++ ["event_type = $#{idx}"], params ++ [to_string(type)], idx + 1}
+        nil ->
+          {clauses, params, idx}
+
+        type ->
+          {clauses ++ ["event_type = #{placeholder(adapter, idx)}"], params ++ [to_string(type)],
+           idx + 1}
       end
 
     {clauses, params, idx} =
       case Keyword.get(opts, :since) do
-        nil -> {clauses, params, idx}
-        since -> {clauses ++ ["timestamp >= $#{idx}"], params ++ [since], idx + 1}
+        nil ->
+          {clauses, params, idx}
+
+        since ->
+          {clauses ++ ["timestamp >= #{placeholder(adapter, idx)}"], params ++ [since], idx + 1}
       end
 
     {clauses, params, _idx} =
       case Keyword.get(opts, :until) do
-        nil -> {clauses, params, idx}
-        until_dt -> {clauses ++ ["timestamp <= $#{idx}"], params ++ [until_dt], idx + 1}
+        nil ->
+          {clauses, params, idx}
+
+        until_dt ->
+          {clauses ++ ["timestamp <= #{placeholder(adapter, idx)}"], params ++ [until_dt],
+           idx + 1}
       end
 
     {clauses, params, idx}

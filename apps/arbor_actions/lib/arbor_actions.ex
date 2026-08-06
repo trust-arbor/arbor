@@ -3148,8 +3148,12 @@ defmodule Arbor.Actions do
     Arbor.Actions.Coding.ReviewTree.Search => "arbor://action/coding/review_tree/search",
     Arbor.Actions.Coding.SubmitReviewReport => "arbor://action/coding/review/submit",
 
-    # Background checks — routes through shell
-    Arbor.Actions.HarnessDiagnostics.Run => "arbor://shell/exec",
+    # Harness diagnostics — READS files, never shells out. It was mapped to
+    # arbor://shell/exec, which is inaccurate (no System.cmd/Port anywhere in
+    # it) and carries a system-enforced :ask ceiling, so it could never run
+    # without an approval escalation. It reads like File.Read/Glob/Search do,
+    # so it maps where they map. Corrected 2026-08-06.
+    Arbor.Actions.HarnessDiagnostics.Run => "arbor://fs/read",
 
     # Pipeline execution and validation are distinct privileges.
     Arbor.Actions.Pipeline.Run => "arbor://action/pipeline/run",
