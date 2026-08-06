@@ -16,11 +16,32 @@ defmodule Mix.Tasks.Arbor.OrchestrateSecurityRegressionTest do
   }
   """
 
+  # `ensure_oidc_config/0` falls back to OIDC_ISSUER / OIDC_CLIENT_ID from the
+  # SYSTEM env when the application env is empty (arbor.orchestrate.ex:521).
+  # Clearing only the application env left this suite's "no OIDC configured"
+  # premise false on any machine that exports those — a developer with them in
+  # .env got {:oidc_authentication_failed, {:invalid_issuer, :scheme_not_allowed}}
+  # instead of :oidc_not_configured, and the security regression looked broken
+  # when the code was behaving correctly. The assertions are unchanged; only the
+  # precondition is now actually established.
+  @oidc_env_vars ~w(OIDC_ISSUER OIDC_CLIENT_ID OIDC_CLIENT_SECRET OIDC_SCOPES)
+
   setup do
     previous_oidc = Application.get_env(:arbor_security, :oidc)
     Application.delete_env(:arbor_security, :oidc)
 
-    on_exit(fn -> restore_oidc(previous_oidc) end)
+    previous_env = Map.new(@oidc_env_vars, &{&1, System.get_env(&1)})
+    Enum.each(@oidc_env_vars, &System.delete_env/1)
+
+    on_exit(fn ->
+      restore_oidc(previous_oidc)
+
+      Enum.each(previous_env, fn
+        {name, nil} -> System.delete_env(name)
+        {name, value} -> System.put_env(name, value)
+      end)
+    end)
+
     :ok
   end
 
