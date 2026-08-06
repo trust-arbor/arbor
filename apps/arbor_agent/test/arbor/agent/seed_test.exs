@@ -229,8 +229,14 @@ defmodule Arbor.Agent.SeedTest do
     end
 
     test "captures knowledge_graph when initialized" do
-      graph = KnowledgeGraph.new(@agent_id)
-      :ets.insert(:arbor_memory_graphs, {@agent_id, graph})
+      # Create the graph through the real API, as the working_memory sibling
+      # above does. Inserting into :arbor_memory_graphs directly stopped working
+      # when the durable graph authority landed (2026-08-05): that table is now
+      # a write-only PROJECTION maintained by KnowledgeGraphStore, which reads
+      # from the durable store and never from ETS. A direct insert is invisible
+      # to Memory.export_knowledge_graph/1, so capture saw nil.
+      assert {:ok, _pid} = Memory.init_for_agent(@agent_id)
+      assert {:ok, _node_id} = Memory.add_knowledge(@agent_id, %{type: :fact, content: "seeded"})
 
       {:ok, seed} = Seed.capture(@agent_id)
 
