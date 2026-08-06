@@ -235,10 +235,16 @@ defmodule Arbor.Agent.SeedTest do
       # a write-only PROJECTION maintained by KnowledgeGraphStore, which reads
       # from the durable store and never from ETS. A direct insert is invisible
       # to Memory.export_knowledge_graph/1, so capture saw nil.
-      assert {:ok, _pid} = Memory.init_for_agent(@agent_id)
-      assert {:ok, _node_id} = Memory.add_knowledge(@agent_id, %{type: :fact, content: "seeded"})
+      # A DEDICATED agent id, not @agent_id. The graph now lives in the durable
+      # store rather than a per-test ETS table, so seeding the shared id leaks
+      # into sibling tests — "handles missing subsystems gracefully" asserts
+      # knowledge_graph == nil and went order-dependently red.
+      agent_id = "seed_kg_#{System.unique_integer([:positive])}"
+      assert {:ok, _pid} = Memory.init_for_agent(agent_id)
+      assert {:ok, _node_id} = Memory.add_knowledge(agent_id, %{type: :fact, content: "seeded"})
+      on_exit(fn -> Memory.cleanup_for_agent(agent_id) end)
 
-      {:ok, seed} = Seed.capture(@agent_id)
+      {:ok, seed} = Seed.capture(agent_id)
 
       assert seed.knowledge_graph != nil
       assert is_map(seed.knowledge_graph)
@@ -258,13 +264,22 @@ defmodule Arbor.Agent.SeedTest do
     end
 
     test "handles missing subsystems gracefully" do
-      {:ok, seed} = Seed.capture(@agent_id)
+      # A PRISTINE agent id. This test asserts ABSENCE, so it cannot share
+      # @agent_id with siblings that populate it — the restore/2 tests put a
+      # knowledge graph there. That used to be harmless because the graph lived
+      # in a per-test ETS table; since the durable graph authority landed
+      # (2026-08-05) it persists, and this test went order-dependently red
+      # roughly one run in three.
+      agent_id = "seed_missing_#{System.unique_integer([:positive])}"
+      on_exit(fn -> Memory.cleanup_for_agent(agent_id) end)
+
+      {:ok, seed} = Seed.capture(agent_id)
 
       assert seed.working_memory == nil
       assert seed.knowledge_graph == nil
       assert seed.self_knowledge == nil
       assert seed.preferences == nil
-      assert seed.goals["goal_store"]["agent_id"] == @agent_id
+      assert seed.goals["goal_store"]["agent_id"] == agent_id
       assert seed.goals["goal_store"]["goals"] == []
       assert seed.recent_intents == []
       assert seed.recent_percepts == []
