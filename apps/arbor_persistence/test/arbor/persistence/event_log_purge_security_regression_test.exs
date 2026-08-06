@@ -7,6 +7,8 @@ defmodule Arbor.Persistence.EventLogPurgeSecurityRegressionTest do
   alias Arbor.Persistence.EventLog.BoundedWorker
   alias Arbor.Persistence.EventLog.ETS
 
+  @ownership_regression_timeout_ms 5_000
+
   defmodule CommitThenBlockBackend do
     @moduledoc false
     @controller_key {__MODULE__, :controller}
@@ -344,6 +346,28 @@ defmodule Arbor.Persistence.EventLogPurgeSecurityRegressionTest do
     assert worker_stopped
   end
 
+  for {label, backend, context_key} <- [
+        {:agent, AgentEventLog, :agent_name},
+        {:ets, ETS, :ets_name}
+      ] do
+    test "security regression: #{label} rejects a queued purge after coordinator death",
+         context do
+      assert_queued_real_backend_purge_is_cancelled(
+        Map.fetch!(context, unquote(context_key)),
+        unquote(backend),
+        :coordinator
+      )
+    end
+
+    test "security regression: #{label} rejects a queued purge after caller death", context do
+      assert_queued_real_backend_purge_is_cancelled(
+        Map.fetch!(context, unquote(context_key)),
+        unquote(backend),
+        :caller
+      )
+    end
+  end
+
   test "security regression: timeout directly kills a trap-exit purge worker before return", %{
     agent_name: name
   } do
@@ -415,5 +439,137 @@ defmodule Arbor.Persistence.EventLogPurgeSecurityRegressionTest do
 
     assert {:error, :invalid_precondition} =
              Persistence.purge_stream(name, AgentEventLog, "invalid-timeout", purge_timeout_ms: 0)
+  end
+
+  defp assert_queued_real_backend_purge_is_cancelled(name, backend, death) do
+    suffix = System.unique_integer([:positive])
+    target = "queued-owner-target-#{suffix}"
+    survivor = "queued-owner-survivor-#{suffix}"
+    target_event = Event.new(target, "target.created", %{"stream" => "target"})
+    survivor_event = Event.new(survivor, "survivor.created", %{"stream" => "survivor"})
+
+    assert {:ok, [persisted_target]} = Persistence.append(name, backend, target, target_event)
+
+    assert {:ok, [persisted_survivor]} =
+             Persistence.append(name, backend, survivor, survivor_event)
+
+    backend_owner = Process.whereis(name)
+    assert is_pid(backend_owner)
+    assert :ok = :sys.suspend(backend_owner)
+    on_exit(fn -> safe_sys_resume(backend_owner) end)
+
+    operation_ref = make_ref()
+    parent = self()
+    started_mono = System.monotonic_time(:millisecond)
+
+    caller =
+      spawn(fn ->
+        result =
+          Persistence.purge_stream(name, backend, target,
+            purge_timeout_ms: @ownership_regression_timeout_ms
+          )
+
+        send(parent, {operation_ref, :purge_returned, self(), result})
+      end)
+
+    caller_ref = Process.monitor(caller)
+
+    on_exit(fn ->
+      if Process.alive?(caller), do: Process.exit(caller, :kill)
+      safe_sys_resume(backend_owner)
+    end)
+
+    {worker, coordinator} = await_queued_purge_owner(backend_owner)
+    worker_ref = Process.monitor(worker)
+    coordinator_ref = Process.monitor(coordinator)
+
+    on_exit(fn ->
+      Enum.each([worker, coordinator], fn process ->
+        if Process.alive?(process), do: Process.exit(process, :kill)
+      end)
+
+      safe_sys_resume(backend_owner)
+    end)
+
+    case death do
+      :coordinator ->
+        Process.exit(coordinator, :kill)
+        assert_receive {:DOWN, ^coordinator_ref, :process, ^coordinator, :killed}, 1_000
+
+        assert_receive {^operation_ref, :purge_returned, ^caller,
+                        {:error, {:purge_indeterminate, ^target}}},
+                       1_000
+
+        assert_receive {:DOWN, ^caller_ref, :process, ^caller, :normal}, 1_000
+        assert_receive {:DOWN, ^worker_ref, :process, ^worker, _reason}, 1_000
+
+      :caller ->
+        Process.exit(caller, :kill)
+        assert_receive {:DOWN, ^caller_ref, :process, ^caller, :killed}, 1_000
+        assert_receive {:DOWN, ^worker_ref, :process, ^worker, _reason}, 1_000
+        assert_receive {:DOWN, ^coordinator_ref, :process, ^coordinator, _reason}, 1_000
+        refute_receive {^operation_ref, :purge_returned, ^caller, _result}
+    end
+
+    refute Process.alive?(worker)
+    refute Process.alive?(coordinator)
+
+    elapsed_ms = System.monotonic_time(:millisecond) - started_mono
+    assert elapsed_ms < @ownership_regression_timeout_ms
+    assert :ok = :sys.resume(backend_owner)
+
+    assert {:ok, [remaining_target]} = Persistence.read_stream(name, backend, target)
+    assert remaining_target.id == persisted_target.id
+    assert remaining_target.global_position == persisted_target.global_position
+    assert {:ok, 1} = Persistence.stream_version(name, backend, target)
+
+    assert {:ok, [remaining_survivor]} = Persistence.read_stream(name, backend, survivor)
+    assert remaining_survivor.id == persisted_survivor.id
+    assert remaining_survivor.global_position == persisted_survivor.global_position
+    assert {:ok, 1} = Persistence.stream_version(name, backend, survivor)
+  end
+
+  defp await_queued_purge_owner(backend_owner, attempts \\ 1_000)
+
+  defp await_queued_purge_owner(_backend_owner, 0),
+    do: flunk("real backend purge call was not queued")
+
+  defp await_queued_purge_owner(backend_owner, attempts) do
+    worker =
+      backend_owner
+      |> Process.info(:messages)
+      |> case do
+        {:messages, messages} -> Enum.find_value(messages, &gen_call_sender/1)
+        _owner_down -> nil
+      end
+
+    if is_pid(worker) do
+      case Process.info(worker, :links) do
+        {:links, [coordinator]} when is_pid(coordinator) -> {worker, coordinator}
+        _not_ready -> retry_queued_purge_owner(backend_owner, attempts)
+      end
+    else
+      retry_queued_purge_owner(backend_owner, attempts)
+    end
+  end
+
+  defp gen_call_sender({:"$gen_call", {sender, _reply_tag}, _request}) when is_pid(sender),
+    do: sender
+
+  defp gen_call_sender(_message), do: nil
+
+  defp retry_queued_purge_owner(backend_owner, attempts) do
+    Process.sleep(1)
+    await_queued_purge_owner(backend_owner, attempts - 1)
+  end
+
+  defp safe_sys_resume(process) do
+    if Process.alive?(process) do
+      try do
+        :sys.resume(process, 500)
+      catch
+        :exit, _reason -> :ok
+      end
+    end
   end
 end
