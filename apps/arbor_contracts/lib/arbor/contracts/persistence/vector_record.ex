@@ -180,10 +180,24 @@ defmodule Arbor.Contracts.Persistence.VectorRecord do
           {:ok, {String.t(), pos_integer(), encoding(), String.t()}}
           | {:error, :invalid_vector_descriptor}
   def validate_descriptor(model_id, dimensions, encoding, category) do
+    with {:ok, {model_id, dimensions, encoding, category}} <-
+           validate_search_descriptor(model_id, dimensions, encoding, category),
+         false <- is_nil(category) do
+      {:ok, {model_id, dimensions, encoding, category}}
+    else
+      _invalid -> {:error, :invalid_vector_descriptor}
+    end
+  end
+
+  @doc "Validates an exact model/dimension/encoding search descriptor and optional category."
+  @spec validate_search_descriptor(term(), term(), term(), term()) ::
+          {:ok, {String.t(), pos_integer(), encoding(), String.t() | nil}}
+          | {:error, :invalid_vector_descriptor}
+  def validate_search_descriptor(model_id, dimensions, encoding, category) do
     with true <- VectorValidation.valid_text?(model_id, @max_model_id_bytes),
          true <- dimensions == @dimensions,
          {:ok, normalized_encoding} <- normalize_encoding(encoding),
-         true <- VectorValidation.valid_text?(category, @max_category_bytes) do
+         true <- is_nil(category) or VectorValidation.valid_text?(category, @max_category_bytes) do
       {:ok, {model_id, @dimensions, normalized_encoding, category}}
     else
       _invalid -> {:error, :invalid_vector_descriptor}

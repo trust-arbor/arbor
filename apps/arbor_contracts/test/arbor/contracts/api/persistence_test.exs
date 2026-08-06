@@ -38,7 +38,8 @@ defmodule Arbor.Contracts.API.PersistenceTest do
       reconcile_validated_vector_operation_for_agent: 3,
       retrieve_vector_record_by_logical_identity_for_agent: 4,
       list_vector_records_for_agent: 2,
-      search_vector_records_by_exact_descriptor_for_agent: 3
+      search_vector_records_by_exact_descriptor_for_agent: 3,
+      search_vector_records_by_exact_model_descriptor_and_scope_for_agent: 3
     ]
 
     for callback <- expected do

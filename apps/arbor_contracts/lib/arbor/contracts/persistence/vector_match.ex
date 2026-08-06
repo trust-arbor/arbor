@@ -29,8 +29,7 @@ defmodule Arbor.Contracts.Persistence.VectorMatch do
     with {:ok, attrs} <- VectorValidation.normalize_attrs(attrs, @attribute_aliases, @fields),
          {:ok, record} <- VectorRecord.validate(attrs.record),
          false <- record.tombstone,
-         {:ok, similarity, _bytes} <- VectorValidation.normalize_float32(attrs.similarity),
-         true <- similarity >= -1.0 and similarity <= 1.0 do
+         {:ok, similarity} <- normalize_similarity(attrs.similarity) do
       {:ok, %__MODULE__{record: record, similarity: similarity}}
     else
       _invalid -> {:error, :invalid_vector_match}
@@ -55,4 +54,15 @@ defmodule Arbor.Contracts.Persistence.VectorMatch do
   @doc "Returns true only for a canonical vector match."
   @spec valid?(term()) :: boolean()
   def valid?(match), do: match?({:ok, %__MODULE__{}}, validate(match))
+
+  @doc "Normalizes a finite cosine similarity to float32 within the closed range [-1, 1]."
+  @spec normalize_similarity(term()) :: {:ok, float()} | {:error, :invalid_similarity}
+  def normalize_similarity(similarity) do
+    with {:ok, normalized, _bytes} <- VectorValidation.normalize_float32(similarity),
+         true <- normalized >= -1.0 and normalized <= 1.0 do
+      {:ok, normalized}
+    else
+      _invalid -> {:error, :invalid_similarity}
+    end
+  end
 end

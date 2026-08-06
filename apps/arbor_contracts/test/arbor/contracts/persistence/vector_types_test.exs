@@ -28,6 +28,42 @@ defmodule Arbor.Contracts.Persistence.VectorTypesTest do
       assert VectorRecord.valid?(record)
     end
 
+    test "validates exact search descriptors with an optional category" do
+      assert {:ok, {"provider/model-v1", 768, :ieee754_float32_be_v1, nil}} =
+               VectorRecord.validate_search_descriptor(
+                 "provider/model-v1",
+                 768,
+                 "ieee754_float32_be_v1",
+                 nil
+               )
+
+      assert {:ok, {"provider/model-v1", 768, :ieee754_float32_be_v1, "goal"}} =
+               VectorRecord.validate_search_descriptor(
+                 "provider/model-v1",
+                 768,
+                 :ieee754_float32_be_v1,
+                 "goal"
+               )
+
+      for descriptor <- [
+            {nil, 768, :ieee754_float32_be_v1, nil},
+            {"provider/model-v1", 767, :ieee754_float32_be_v1, nil},
+            {"provider/model-v1", 768, :unknown, nil},
+            {"provider/model-v1", 768, :ieee754_float32_be_v1, ""}
+          ] do
+        assert {:error, :invalid_vector_descriptor} =
+                 apply(VectorRecord, :validate_search_descriptor, Tuple.to_list(descriptor))
+      end
+
+      assert {:error, :invalid_vector_descriptor} =
+               VectorRecord.validate_descriptor(
+                 "provider/model-v1",
+                 768,
+                 :ieee754_float32_be_v1,
+                 nil
+               )
+    end
+
     test "normalizes finite values to exact big-endian float32 bytes" do
       vector = [0.1, -0.0, 1.0] ++ List.duplicate(0.25, 765)
       assert {:ok, record} = VectorRecord.new(record_attrs(vector: vector))
@@ -488,6 +524,13 @@ defmodule Arbor.Contracts.Persistence.VectorTypesTest do
       assert match.record == record
       assert VectorMatch.valid?(match)
       assert {:ok, record.vector_digest} == VectorRecord.vector_digest(match.record.vector)
+
+      <<normalized::float-size(32)>> = <<0.9::float-size(32)>>
+      assert {:ok, ^normalized} = VectorMatch.normalize_similarity(0.9)
+
+      for invalid <- [-1.01, 1.01, :nan, :positive_infinity, "0.5"] do
+        assert {:error, :invalid_similarity} = VectorMatch.normalize_similarity(invalid)
+      end
     end
 
     test "rejects tombstones, out-of-range/non-finite scores, mixed keys, and forged scores" do

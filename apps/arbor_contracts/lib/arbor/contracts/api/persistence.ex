@@ -464,6 +464,13 @@ defmodule Arbor.Contracts.API.Persistence do
               opts()
             ) :: {:ok, [vector_match()]} | {:error, vector_error()}
 
+  @doc "Search with an exact model descriptor and optional category, namespace, and threshold scopes."
+  @callback search_vector_records_by_exact_model_descriptor_and_scope_for_agent(
+              agent_id :: String.t(),
+              normalized_vector :: [float()],
+              opts()
+            ) :: {:ok, [vector_match()]} | {:error, vector_error()}
+
   # ===========================================================================
   # Optional Callbacks
   # ===========================================================================
@@ -494,6 +501,7 @@ defmodule Arbor.Contracts.API.Persistence do
     reconcile_validated_vector_operation_for_agent: 3,
     retrieve_vector_record_by_logical_identity_for_agent: 4,
     list_vector_records_for_agent: 2,
-    search_vector_records_by_exact_descriptor_for_agent: 3
+    search_vector_records_by_exact_descriptor_for_agent: 3,
+    search_vector_records_by_exact_model_descriptor_and_scope_for_agent: 3
   ]
 end
