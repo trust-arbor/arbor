@@ -1079,6 +1079,10 @@ defmodule Arbor.Persistence do
     do: reconcile_append(name, backend, operation, opts)
 
   @impl Arbor.Contracts.API.Persistence
+  def purge_complete_event_stream_using_backend(name, backend, stream_id, opts),
+    do: purge_stream(name, backend, stream_id, opts)
+
+  @impl Arbor.Contracts.API.Persistence
   def read_events_from_stream_using_backend(name, backend, stream_id, opts),
     do: read_stream(name, backend, stream_id, opts)
 

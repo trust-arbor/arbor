@@ -57,6 +57,20 @@ defmodule Arbor.Contracts.API.Persistence do
   @typedoc "Stable exact-ID identity for reconciling an EventLog append."
   @type append_operation :: Arbor.Contracts.Persistence.AppendOperation.t()
 
+  @typedoc "Closed public failures for permanent whole-stream EventLog purge."
+  @type event_stream_purge_error ::
+          :backend_unavailable
+          | :invalid_precondition
+          | :invalid_stream_id
+          | :purge_not_supported
+          | :purge_verification_failed
+
+  @typedoc "Result of proving that one complete EventLog stream is absent."
+  @type event_stream_purge_result ::
+          :ok
+          | {:error, {:purge_indeterminate, stream_id()}}
+          | {:error, event_stream_purge_error()}
+
   @typedoc "Canonical vector mutation or bounded atomic batch."
   @type vector_operation :: Arbor.Contracts.Persistence.VectorOperation.t()
 
@@ -305,6 +319,21 @@ defmodule Arbor.Contracts.API.Persistence do
               | {:error, :event_identity_conflict | term()}
 
   @doc """
+  Permanently purge one complete event stream using the specified backend.
+
+  Success proves that every backend-owned event, version, identity, and
+  operation-fence surface for the stream is absent. An indeterminate result
+  means dispatch occurred but absence could not be proved; retrying the same
+  stream is idempotent.
+  """
+  @callback purge_complete_event_stream_using_backend(
+              store_name(),
+              backend(),
+              stream_id(),
+              opts()
+            ) :: event_stream_purge_result()
+
+  @doc """
   Read all events from a specific stream using the specified backend.
 
   Returns events ordered by event number within the stream.
@@ -451,6 +480,7 @@ defmodule Arbor.Contracts.API.Persistence do
     # EventLog operations
     append_events_to_stream_using_backend: 5,
     reconcile_event_append_using_backend: 4,
+    purge_complete_event_stream_using_backend: 4,
     read_events_from_stream_using_backend: 4,
     read_current_stream_head_using_backend: 4,
     read_all_events_using_backend: 3,

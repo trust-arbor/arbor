@@ -19,6 +19,16 @@ defmodule Arbor.Contracts.API.PersistenceTest do
            )
   end
 
+  test "complete event stream purge is an optional facade callback" do
+    assert {:purge_complete_event_stream_using_backend, 4} in Persistence.behaviour_info(
+             :callbacks
+           )
+
+    assert {:purge_complete_event_stream_using_backend, 4} in Persistence.behaviour_info(
+             :optional_callbacks
+           )
+  end
+
   test "validated vector boundaries are optional facade callbacks" do
     callbacks = Persistence.behaviour_info(:callbacks)
     optional = Persistence.behaviour_info(:optional_callbacks)

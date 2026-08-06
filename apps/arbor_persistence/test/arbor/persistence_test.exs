@@ -1413,6 +1413,19 @@ defmodule Arbor.PersistenceTest do
 
       assert {:ok, 1} = Persistence.get_stream_count_using_backend(name, backend, [])
       assert {:ok, 1} = Persistence.get_event_count_using_backend(name, backend, [])
+
+      assert :ok =
+               Persistence.purge_complete_event_stream_using_backend(
+                 name,
+                 backend,
+                 "s1",
+                 []
+               )
+
+      assert {:ok, []} =
+               Persistence.read_events_from_stream_using_backend(name, backend, "s1", [])
+
+      refute Persistence.check_stream_exists_using_backend(name, backend, "s1", [])
     end
 
     test "queryable store callbacks" do
