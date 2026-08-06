@@ -54,10 +54,10 @@ defmodule Arbor.Actions.Canary.ContinuityCanaryTest do
   @planted_fact "Hysun deploys Arbor with Postgres, never SQLite, because the telemetry queries need it"
   @s3_question "Which database should I use for this deployment?"
 
-  # Test config sets `arbor_memory: start_children: false`, so the app's
-  # supervisor comes up empty and ensure_all_started/1 is not enough. Start only
-  # the children the index -> recall path needs, scoped to this module, so the
-  # rest of the arbor_actions suite keeps its existing boot profile.
+  # test_helper.exs starts the memory stores and the durable graph authority for
+  # the whole suite. This block is a self-contained fallback so the canary keeps
+  # working if that boot profile changes — it needs only the index -> recall
+  # path, which is a much smaller set. Already-started children are a no-op.
   setup_all do
     for table <- [:arbor_memory_graphs, :arbor_working_memory] do
       if :ets.whereis(table) == :undefined do
