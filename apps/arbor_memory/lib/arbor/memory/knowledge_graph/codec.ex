@@ -90,6 +90,12 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
                       [
                         :accepted,
                         :action,
+                        # Written by Arbor.Actions.Memory.Remember on EVERY agent
+                        # remember call (metadata: %{source: :agent_tool}). Missing
+                        # from this list until 2026-08-06, which made every such
+                        # call fail with :invalid_graph. Guarded by
+                        # test/arbor/memory/knowledge_graph/metadata_atom_encoding_test.exs
+                        :agent_tool,
                         :archived_count,
                         :auto_embed,
                         :average_relevance,
