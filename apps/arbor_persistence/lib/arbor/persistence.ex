@@ -63,7 +63,13 @@ defmodule Arbor.Persistence do
           | {:error, Arbor.Contracts.API.Persistence.vector_error()}
   def list_vector_records(agent_id, opts \\ []), do: VectorBoundary.list(agent_id, opts)
 
-  @doc "Search using a normalized 768-dimensional vector and exact descriptor options."
+  @doc """
+  Search using a normalized 768-dimensional vector and exact model descriptor.
+
+  Requires `:model_id`, `:dimensions`, and `:encoding`. Optionally accepts
+  independent `:category`, `:source_namespace`, and cosine-similarity
+  `:threshold` scopes. Default limit is 20; maximum admitted limit is 1000.
+  """
   @spec search_vector_records(String.t(), term(), keyword()) ::
           {:ok, [Arbor.Contracts.Persistence.VectorMatch.t()]}
           | {:error, Arbor.Contracts.API.Persistence.vector_error()}
@@ -1138,8 +1144,45 @@ defmodule Arbor.Persistence do
     do: list_vector_records(agent_id, opts)
 
   @impl Arbor.Contracts.API.Persistence
-  def search_vector_records_by_exact_descriptor_for_agent(agent_id, vector, opts),
+  def search_vector_records_by_exact_descriptor_for_agent(agent_id, vector, opts) do
+    case exact_category_opts_present?(opts) do
+      true -> search_vector_records(agent_id, vector, opts)
+      false -> {:error, :invalid_request}
+    end
+  end
+
+  @impl Arbor.Contracts.API.Persistence
+  def search_vector_records_by_exact_model_descriptor_and_scope_for_agent(agent_id, vector, opts),
     do: search_vector_records(agent_id, vector, opts)
+
+  # Total: never raises; true only for a proper keyword list with exactly one
+  # non-nil :category entry (value shape validated later by VectorBoundary).
+  defp exact_category_opts_present?(opts) when is_list(opts),
+    do: scan_exact_category(opts, :absent)
+
+  defp exact_category_opts_present?(_opts), do: false
+
+  defp scan_exact_category([], :present), do: true
+  defp scan_exact_category([], _state), do: false
+
+  defp scan_exact_category([{key, value} | rest], state)
+       when is_atom(key) and not is_nil(key) do
+    cond do
+      key != :category ->
+        scan_exact_category(rest, state)
+
+      state == :present ->
+        false
+
+      is_nil(value) ->
+        false
+
+      true ->
+        scan_exact_category(rest, :present)
+    end
+  end
+
+  defp scan_exact_category(_improper_or_non_pair, _state), do: false
 
   defp normalize_authorization_opts(opts) do
     case EventLog.normalize_opts(opts) do

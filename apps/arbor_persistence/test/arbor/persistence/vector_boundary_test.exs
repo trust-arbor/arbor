@@ -256,6 +256,8 @@ defmodule Arbor.Persistence.VectorBoundaryTest do
                         dimensions: 768,
                         encoding: :ieee754_float32_be_v1,
                         category: "goal",
+                        source_namespace: nil,
+                        threshold: nil,
                         limit: 1
                       ]
                     ]}
@@ -266,6 +268,222 @@ defmodule Arbor.Persistence.VectorBoundaryTest do
 
     assert {:error, :invalid_backend_result} =
              Arbor.Persistence.search_vector_records("agent_alpha", query, search_opts())
+  end
+
+  test "search admits optional scopes, closed grammar, limit ceiling, and canonical thresholds" do
+    goal = record!(source_key: "goal_1", category: "goal", generation: 1, revision: 1)
+    note = record!(source_key: "note_1", category: "note", generation: 1, revision: 1)
+    {:ok, goal_match} = VectorMatch.new(%{record: goal, similarity: 0.95})
+    {:ok, note_match} = VectorMatch.new(%{record: note, similarity: 0.9})
+    respond({:ok, [goal_match, note_match]})
+
+    query = vector()
+
+    assert {:ok, [^goal_match, ^note_match]} =
+             Arbor.Persistence.search_vector_records(
+               "agent_alpha",
+               query,
+               search_opts()
+               |> Keyword.delete(:category)
+               |> Keyword.put(:source_namespace, "goals")
+               |> Keyword.put(:limit, 1000)
+             )
+
+    assert_receive {:vector_backend_called, :search,
+                    [
+                      "agent_alpha",
+                      _vector,
+                      [
+                        model_id: "provider/model-v1",
+                        dimensions: 768,
+                        encoding: :ieee754_float32_be_v1,
+                        category: nil,
+                        source_namespace: "goals",
+                        threshold: nil,
+                        limit: 1000
+                      ]
+                    ]}
+
+    assert {:error, :invalid_request} =
+             Arbor.Persistence.search_vector_records(
+               "agent_alpha",
+               query,
+               search_opts(limit: 1001)
+             )
+
+    refute_receive {:vector_backend_called, :search, _args}
+
+    assert {:error, :invalid_request} =
+             Arbor.Persistence.search_vector_records(
+               "agent_alpha",
+               query,
+               search_opts() ++ [unknown: true]
+             )
+
+    refute_receive {:vector_backend_called, :search, _args}
+
+    for raw_threshold <- [-1, 0, 1, -1.0, 0.0, 1.0, 0.5] do
+      respond({:ok, []})
+      {:ok, expected} = VectorMatch.normalize_similarity(raw_threshold)
+
+      assert {:ok, []} =
+               Arbor.Persistence.search_vector_records(
+                 "agent_alpha",
+                 query,
+                 search_opts(threshold: raw_threshold)
+               )
+
+      assert_receive {:vector_backend_called, :search,
+                      [
+                        "agent_alpha",
+                        _vector,
+                        [
+                          model_id: "provider/model-v1",
+                          dimensions: 768,
+                          encoding: :ieee754_float32_be_v1,
+                          category: "goal",
+                          source_namespace: nil,
+                          threshold: ^expected,
+                          limit: 20
+                        ]
+                      ]}
+
+      assert is_float(expected)
+    end
+
+    for bad_threshold <- [1.5, -1.5, :atom, "0.5", %{v: 0.5}] do
+      assert {:error, :invalid_request} =
+               Arbor.Persistence.search_vector_records(
+                 "agent_alpha",
+                 query,
+                 search_opts(threshold: bad_threshold)
+               )
+
+      refute_receive {:vector_backend_called, :search, _args}
+    end
+
+    respond({:ok, []})
+
+    assert {:ok, []} =
+             Arbor.Persistence.search_vector_records(
+               "agent_alpha",
+               query,
+               search_opts() |> Keyword.delete(:category) |> Keyword.delete(:limit)
+             )
+
+    assert_receive {:vector_backend_called, :search,
+                    [
+                      "agent_alpha",
+                      _vector,
+                      [
+                        model_id: "provider/model-v1",
+                        dimensions: 768,
+                        encoding: :ieee754_float32_be_v1,
+                        category: nil,
+                        source_namespace: nil,
+                        threshold: nil,
+                        limit: 20
+                      ]
+                    ]}
+  end
+
+  test "search rejects forged namespace, category, and below-threshold backend members" do
+    query = vector()
+    valid = record!(source_key: "valid", generation: 1, revision: 1)
+    forged_ns = record!(source_key: "forged_ns", source_namespace: "other", generation: 1, revision: 1)
+    forged_cat = record!(source_key: "forged_cat", category: "other", generation: 1, revision: 1)
+
+    low = record!(source_key: "low", generation: 1, revision: 1)
+    {:ok, valid_match} = VectorMatch.new(%{record: valid, similarity: 0.95})
+    {:ok, ns_match} = VectorMatch.new(%{record: forged_ns, similarity: 0.94})
+    {:ok, cat_match} = VectorMatch.new(%{record: forged_cat, similarity: 0.93})
+    {:ok, low_match} = VectorMatch.new(%{record: low, similarity: 0.1})
+
+    respond({:ok, [valid_match, ns_match]})
+
+    assert {:error, :invalid_backend_result} =
+             Arbor.Persistence.search_vector_records(
+               "agent_alpha",
+               query,
+               search_opts(source_namespace: "goals")
+             )
+
+    respond({:ok, [valid_match, cat_match]})
+
+    assert {:error, :invalid_backend_result} =
+             Arbor.Persistence.search_vector_records(
+               "agent_alpha",
+               query,
+               search_opts(category: "goal")
+             )
+
+    respond({:ok, [valid_match, low_match]})
+
+    assert {:error, :invalid_backend_result} =
+             Arbor.Persistence.search_vector_records(
+               "agent_alpha",
+               query,
+               search_opts(threshold: 0.5)
+             )
+  end
+
+  test "exact-descriptor verbose callback requires total non-nil category presence" do
+    query = vector()
+    respond({:ok, []})
+
+    assert {:ok, []} =
+             Arbor.Persistence.search_vector_records_by_exact_descriptor_for_agent(
+               "agent_alpha",
+               query,
+               search_opts()
+             )
+
+    assert_receive {:vector_backend_called, :search, _args}
+
+    for opts <- [
+          %{model_id: "provider/model-v1", dimensions: 768, encoding: :ieee754_float32_be_v1, category: "goal"},
+          [{:model_id, "provider/model-v1"} | :improper],
+          [
+            model_id: "provider/model-v1",
+            dimensions: VectorRecord.dimensions(),
+            encoding: VectorRecord.encoding()
+          ],
+          search_opts(category: nil),
+          search_opts() ++ [category: "goal"]
+        ] do
+      assert {:error, :invalid_request} =
+               Arbor.Persistence.search_vector_records_by_exact_descriptor_for_agent(
+                 "agent_alpha",
+                 query,
+                 opts
+               )
+
+      refute_receive {:vector_backend_called, :search, _args}
+    end
+
+    respond({:ok, []})
+
+    assert {:ok, []} =
+             Arbor.Persistence.search_vector_records_by_exact_model_descriptor_and_scope_for_agent(
+               "agent_alpha",
+               query,
+               search_opts() |> Keyword.delete(:category)
+             )
+
+    assert_receive {:vector_backend_called, :search,
+                    [
+                      "agent_alpha",
+                      _vector,
+                      [
+                        model_id: "provider/model-v1",
+                        dimensions: 768,
+                        encoding: :ieee754_float32_be_v1,
+                        category: nil,
+                        source_namespace: nil,
+                        threshold: nil,
+                        limit: 20
+                      ]
+                    ]}
   end
 
   test "activation regression: default vector backend stays fail-closed until operator config" do

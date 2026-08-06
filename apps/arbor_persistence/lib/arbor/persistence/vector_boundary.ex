@@ -7,13 +7,21 @@ defmodule Arbor.Persistence.VectorBoundary do
   @default_list_limit 100
   @max_list_limit 1_000
   @default_search_limit 20
-  @max_search_limit 100
+  @max_search_limit 1_000
   @mutation_errors [:backend_failure, :conflict, :indeterminate, :unsupported]
   @read_errors [:backend_failure, :not_found, :unsupported]
   @collection_errors [:backend_failure, :unsupported]
   @fetch_option_keys [:include_tombstone]
   @list_option_keys [:category, :source_namespace, :include_tombstones, :limit]
-  @search_option_keys [:model_id, :dimensions, :encoding, :category, :limit]
+  @search_option_keys [
+    :model_id,
+    :dimensions,
+    :encoding,
+    :category,
+    :source_namespace,
+    :threshold,
+    :limit
+  ]
 
   @type vector_error ::
           :backend_failure
@@ -150,21 +158,37 @@ defmodule Arbor.Persistence.VectorBoundary do
          {:ok, model_id} <- Map.fetch(values, :model_id),
          {:ok, dimensions} <- Map.fetch(values, :dimensions),
          {:ok, encoding} <- Map.fetch(values, :encoding),
-         {:ok, category} <- Map.fetch(values, :category),
+         category = Map.get(values, :category),
+         source_namespace = Map.get(values, :source_namespace),
+         threshold = Map.get(values, :threshold),
          limit = Map.get(values, :limit, @default_search_limit),
          true <- valid_limit?(limit, @max_search_limit),
          {:ok, {model_id, dimensions, encoding, category}} <-
-           VectorRecord.validate_descriptor(model_id, dimensions, encoding, category) do
+           VectorRecord.validate_search_descriptor(model_id, dimensions, encoding, category),
+         true <-
+           valid_optional_text?(source_namespace, VectorRecord.limits().source_namespace_bytes),
+         {:ok, threshold} <- normalize_search_threshold(threshold) do
       {:ok,
        [
          model_id: model_id,
          dimensions: dimensions,
          encoding: encoding,
          category: category,
+         source_namespace: source_namespace,
+         threshold: threshold,
          limit: limit
        ]}
     else
       _invalid -> {:error, :invalid_request}
+    end
+  end
+
+  defp normalize_search_threshold(nil), do: {:ok, nil}
+
+  defp normalize_search_threshold(threshold) do
+    case VectorMatch.normalize_similarity(threshold) do
+      {:ok, normalized} -> {:ok, normalized}
+      {:error, :invalid_similarity} -> {:error, :invalid_request}
     end
   end
 
@@ -328,7 +352,11 @@ defmodule Arbor.Persistence.VectorBoundary do
            true <- record.model_id == opts[:model_id],
            true <- record.dimensions == opts[:dimensions],
            true <- record.encoding == opts[:encoding],
-           true <- record.category == opts[:category],
+           true <- is_nil(opts[:category]) or record.category == opts[:category],
+           true <-
+             is_nil(opts[:source_namespace]) or
+               record.source_namespace == opts[:source_namespace],
+           true <- is_nil(opts[:threshold]) or match.similarity >= opts[:threshold],
            identity = VectorRecord.identity(record),
            false <- MapSet.member?(identities, identity) do
         collect_matches(
