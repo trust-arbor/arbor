@@ -706,6 +706,79 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
           reply
       end
     end
+
+    # Authority-horizon preflight uses enumeration, not authorize/4.
+    # Default: permanent covering authority so existing executor tests stay green.
+    def list_capabilities(principal_id, opts \\ []) do
+      case Process.get(:coding_executor_list_capabilities) do
+        nil ->
+          case Application.get_env(:arbor_orchestrator, :coding_executor_list_capabilities) do
+            nil ->
+              {:ok, [permanent_cap(principal_id, opts)]}
+
+            fun when is_function(fun, 2) ->
+              fun.(principal_id, opts)
+
+            reply ->
+              reply
+          end
+
+        fun when is_function(fun, 2) ->
+          fun.(principal_id, opts)
+
+        reply ->
+          reply
+      end
+    end
+
+    def capability_authorizes?(capability, resource, opts \\ []) do
+      case Process.get(:coding_executor_capability_authorizes) do
+        nil ->
+          case Application.get_env(:arbor_orchestrator, :coding_executor_capability_authorizes) do
+            nil ->
+              default_capability_authorizes?(capability, resource, opts)
+
+            fun when is_function(fun, 3) ->
+              fun.(capability, resource, opts)
+
+            value when is_boolean(value) ->
+              value
+          end
+
+        fun when is_function(fun, 3) ->
+          fun.(capability, resource, opts)
+
+        value when is_boolean(value) ->
+          value
+      end
+    end
+
+    def normalize_authorization_resource_uri(resource, _opts), do: {:ok, resource}
+
+    defp permanent_cap(principal_id, opts) do
+      %{
+        id: "fake-cap-#{principal_id}",
+        principal_id: principal_id,
+        resource_uri: "arbor://**",
+        expires_at: nil,
+        task_id: Keyword.get(opts, :task_id),
+        session_id: Keyword.get(opts, :session_id),
+        cover_all: true
+      }
+    end
+
+    defp default_capability_authorizes?(capability, _resource, _opts) do
+      case capability do
+        %{cover_all: true, expires_at: expires_at} ->
+          is_nil(expires_at) or match?(%DateTime{}, expires_at)
+
+        %{expires_at: _} ->
+          true
+
+        _ ->
+          false
+      end
+    end
   end
 
   defmodule FakeReconciliationResourceFacade do
@@ -866,6 +939,10 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     Process.delete(:coding_task_control_calls)
     Process.delete(:coding_task_control_reply)
     Process.delete(:coding_reconciliation_resource_inventory_reply)
+    Process.delete(:coding_executor_list_capabilities)
+    Process.delete(:coding_executor_capability_authorizes)
+    Application.delete_env(:arbor_orchestrator, :coding_executor_list_capabilities)
+    Application.delete_env(:arbor_orchestrator, :coding_executor_capability_authorizes)
 
     for key <- [
           :security_available,
@@ -2036,6 +2113,80 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
   # Engine opts / identity
   # ---------------------------------------------------------------------------
 
+  # Runtime per-node/cached-node CapabilityCheck reauthorization is intentionally
+  # unchanged by the horizon preflight; this suite only proves the early gate.
+  describe "authority horizon security" do
+    test "security regression: rejects before runner when distinct caller cap expires before horizon" do
+      # Execution principal: permanent covering authority.
+      # Distinct caller: authorizes now but expires before run_deadline + cleanup.
+      Process.put(:coding_executor_list_capabilities, fn principal_id, opts ->
+        task_id = Keyword.get(opts, :task_id)
+
+        cond do
+          principal_id == "agent_exec" ->
+            {:ok,
+             [
+               %{
+                 cover_all: true,
+                 expires_at: nil,
+                 principal_id: principal_id,
+                 task_id: task_id
+               }
+             ]}
+
+          principal_id == "caller_expiring" ->
+            # Far enough to authorize "now", near enough to miss the horizon
+            # (run wall clock is plan budgets wall_clock_ms, typically large).
+            expires_at = DateTime.add(DateTime.utc_now(), 2, :second)
+
+            {:ok,
+             [
+               %{
+                 cover_all: true,
+                 expires_at: expires_at,
+                 principal_id: principal_id,
+                 task_id: task_id
+               }
+             ]}
+
+          true ->
+            {:ok, []}
+        end
+      end)
+
+      Process.put(:coding_executor_capability_authorizes, fn capability, _resource, _opts ->
+        match?(%{cover_all: true}, capability)
+      end)
+
+      # Short wall clock so horizon is soon; caller expiry at +2s falls before
+      # deadline + cleanup_reserve once wall clock is several minutes.
+      # Use context timeout to shrink effective timeout / deadline.
+      result =
+        CodingTaskExecutor.run(
+          "agent_exec",
+          valid_task(),
+          valid_context(%{
+            "caller_id" => "caller_expiring",
+            "timeout" => 5_000
+          })
+        )
+
+      detail =
+        assert_coding_admission_failed(
+          result,
+          "authority_horizon",
+          "authority_horizon_expiring"
+        )
+
+      assert detail["diagnostic"]["message"] =~ "authenticated_caller" or
+               detail["diagnostic"]["evidence_ref"] =~ "expiring_n="
+
+      # Prove rejection before Engine runner (workspace/ACP not started).
+      assert Process.get(:coding_executor_last_run) == nil
+      refute_receive {:coding_executor_captured_run, _path, _opts}, 50
+    end
+  end
+
   describe "workspace scope security" do
     test "security regression: rejects repositories outside configured roots" do
       outside_repo =
@@ -2243,6 +2394,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       :ok = Security.register_identity(Identity.public_only(identity))
       :ok = Security.store_signing_key(identity.agent_id, identity.private_key)
       :ok = Arbor.Orchestrator.TestCapabilities.grant_orchestrator_access(identity.agent_id)
+      :ok = Arbor.Orchestrator.TestCapabilities.grant_capability(identity.agent_id, "arbor://**")
 
       Application.put_env(:arbor_orchestrator, :security_module, Security)
       Application.put_env(:arbor_orchestrator, :coding_pipeline_runner, ReloadingRunner)

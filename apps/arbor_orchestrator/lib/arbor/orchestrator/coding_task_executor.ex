@@ -77,6 +77,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   alias Arbor.Orchestrator.CodingPlan.{
     ActionCatalog,
     ArtifactStore,
+    AuthorityHorizon,
     BudgetPolicy,
     CandidateVerificationCore,
     Compilation,
@@ -293,7 +294,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
              {:ok, artifacts} <-
                archive_compilation(logs_root, canonical_plan, compilation)
                |> map_post_readiness_immutable_failure(readiness_report, :archive),
-             {:ok, {pinned_action_bindings, pinned_handler_bindings}} <-
+             {:ok, {pinned_action_bindings, pinned_handler_bindings, compiled_graph}} <-
                verify_execution_boundary(
                  Map.fetch!(artifacts, "coding_pipeline_path"),
                  canonical_plan,
@@ -315,6 +316,15 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
                  pinned_handler_bindings
                ),
              :ok <- validate_authority_signing(security, authority),
+             :ok <-
+               authority_horizon_preflight(
+                 security,
+                 agent_id,
+                 exec_ctx,
+                 opts,
+                 compiled_graph,
+                 compilation.execution_manifest
+               ),
              # Startup URI registration is a snapshot; reconcile hot-loaded actions.
              :ok <- reconcile_action_uri_prefixes(),
              {:ok, engine_result} <-
@@ -1806,7 +1816,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
            ),
          {:ok, pinned_handler_bindings} <-
            ExecutionManifest.handler_binding_index(compilation.execution_manifest) do
-      {:ok, {pinned_action_bindings, pinned_handler_bindings}}
+      {:ok, {pinned_action_bindings, pinned_handler_bindings, compiled_graph}}
     else
       false -> {:error, {:coding_execution_preflight_failed, :archived_graph_mismatch}}
       {:error, reason} -> {:error, {:coding_execution_preflight_failed, reason}}
@@ -1817,6 +1827,56 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
       {:error, {:coding_execution_preflight_failed, Exception.message(exception)}}
   catch
     kind, reason -> {:error, {:coding_execution_preflight_failed, {kind, reason}}}
+  end
+
+  # Fail-closed early gate: every required principal must hold horizon-covering
+  # authority for the complete compiled resource set before the runner can
+  # acquire a workspace or open an ACP worker. Runtime per-node reauthorization
+  # remains unchanged.
+  defp authority_horizon_preflight(
+         security,
+         agent_id,
+         exec_ctx,
+         opts,
+         compiled_graph,
+         execution_manifest
+       ) do
+    initial_values = Keyword.get(opts, :initial_values, %{})
+    run_deadline = Map.get(initial_values, "session.run_deadline_unix_ms")
+    cleanup_reserve = Map.get(initial_values, "coding_budget.cleanup_ms")
+
+    preflight_opts = [
+      security: security,
+      execution_principal: agent_id,
+      caller_id: Keyword.get(opts, :caller_id) || Map.get(exec_ctx, :caller_id),
+      task_id: exec_ctx.task_id,
+      session_id: Keyword.get(opts, :session_id),
+      compiled_graph: compiled_graph,
+      execution_manifest: execution_manifest,
+      run_deadline_unix_ms: run_deadline,
+      cleanup_reserve_ms: cleanup_reserve
+    ]
+
+    case AuthorityHorizon.preflight(preflight_opts) do
+      :ok ->
+        :ok
+
+      {:error, {:authority_horizon_diagnostic, diagnostic}} ->
+        coding_admission_error(diagnostic)
+
+      {:error, _reason} ->
+        coding_admission_error(%{
+          "version" => Diagnostic.schema_version(),
+          "gate_id" => "authority_horizon",
+          "phase" => "preflight",
+          "decision" => "blocked",
+          "code" => "authority_horizon_missing",
+          "observed_at" => DateTime.utc_now() |> DateTime.to_iso8601(:extended),
+          "message" => "authority horizon preflight failed",
+          "remediation" =>
+            "Grant permanent or horizon-covering capabilities for required resources."
+        })
+    end
   end
 
   # Re-derive the compiler's complete semantic policy projection from the
