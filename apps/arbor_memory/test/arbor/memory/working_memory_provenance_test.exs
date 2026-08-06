@@ -1437,25 +1437,12 @@ defmodule Arbor.Memory.WorkingMemoryProvenanceTest do
   end
 
   defp restart_provenance do
-    old_pid = Process.whereis(Provenance)
-    monitor = Process.monitor(old_pid)
-    Process.exit(old_pid, :kill)
-    assert_receive {:DOWN, ^monitor, :process, ^old_pid, :killed}
-    wait_for_provenance(old_pid)
-  end
-
-  defp wait_for_provenance(old_pid, attempts \\ 100)
-  defp wait_for_provenance(_old_pid, 0), do: flunk("provenance sidecar did not restart")
-
-  defp wait_for_provenance(old_pid, attempts) do
-    case Process.whereis(Provenance) do
-      pid when is_pid(pid) and pid != old_pid ->
-        pid
-
-      _ ->
-        Process.sleep(10)
-        wait_for_provenance(old_pid, attempts - 1)
-    end
+    # This is controlled test setup, not a crash-recovery assertion. Avoid
+    # consuming the shared application supervisor's restart-intensity budget.
+    assert :ok = Supervisor.terminate_child(Arbor.Memory.Supervisor, Provenance)
+    assert {:ok, pid} = Supervisor.restart_child(Arbor.Memory.Supervisor, Provenance)
+    assert Process.alive?(pid)
+    pid
   end
 
   defp run_concurrently(functions) do
