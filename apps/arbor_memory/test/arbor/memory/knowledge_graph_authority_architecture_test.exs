@@ -23,7 +23,8 @@ defmodule Arbor.Memory.KnowledgeGraphAuthorityArchitectureTest do
       :insert,
       :whereis
     ],
-    "apps/arbor_memory/lib/arbor/memory/proposal.ex" => [:insert, :lookup]
+    "apps/arbor_memory/lib/arbor/memory/proposal.ex" => [:insert, :lookup],
+    "apps/arbor_memory/lib/arbor/memory/test_bootstrap.ex" => [:new, :whereis]
   }
 
   @raw_authority_allowlist %{
