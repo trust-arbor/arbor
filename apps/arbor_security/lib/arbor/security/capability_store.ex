@@ -269,23 +269,41 @@ defmodule Arbor.Security.CapabilityStore do
       :ok ->
         # Deduplicate: if a capability with the same principal+resource already exists,
         # replace it instead of appending (prevents unbounded growth from re-grants)
-        {state, replaced_id} = maybe_replace_existing(state, cap)
+        replaced_id = existing_capability_id(state, cap)
 
-        state =
-          state
-          |> put_in([:by_id, cap.id], cap)
-          |> update_in([:by_principal, cap.principal_id], fn
-            nil -> [cap.id]
-            ids when replaced_id != nil -> [cap.id | ids]
-            ids -> [cap.id | ids]
-          end)
-          |> index_by_issuer(cap)
-          |> index_by_parent(cap)
-          |> update_in([:stats, :total_granted], &(&1 + 1))
+        case replaced_id do
+          nil ->
+            state = add_capability_to_state(state, cap)
+            _ = persist_capability(cap, acknowledged: false)
+            emit_capability_signal(:capability_granted, cap)
+            {:reply, {:ok, :stored}, state}
 
-        persist_capability(cap)
-        emit_capability_signal(:capability_granted, cap)
-        {:reply, {:ok, :stored}, state}
+          id ->
+            existing_cap = Map.fetch!(state.by_id, id)
+
+            case replace_persisted_capability(existing_cap, cap) do
+              :ok ->
+                {state, ^id} = maybe_replace_existing(state, cap)
+                state = add_capability_to_state(state, cap)
+
+                emit_revocation_signal(
+                  :capability_revoked,
+                  [existing_cap.id],
+                  existing_cap.principal_id
+                )
+
+                emit_capability_signal(:capability_granted, cap)
+                {:reply, {:ok, :stored}, state}
+
+              {:error, reason} = error ->
+                Logger.error(
+                  "Capability replacement failed for #{cap.id}; " <>
+                    "superseded #{id} was retained: #{inspect(reason)}"
+                )
+
+                {:reply, error, state}
+            end
+        end
 
       {:error, _} = error ->
         {:reply, error, state}
@@ -892,7 +910,18 @@ defmodule Arbor.Security.CapabilityStore do
     state
     |> update_in([:by_id], &Map.delete(&1, cap_id))
     |> update_in([:by_principal, cap.principal_id], &List.delete(&1 || [], cap_id))
+    |> update_in([:by_usage], &Map.delete(&1, cap_id))
+    |> deindex_by_issuer(cap)
     |> deindex_by_parent(cap)
+  end
+
+  defp deindex_by_issuer(state, %{issuer_id: nil}), do: state
+
+  defp deindex_by_issuer(state, cap) do
+    update_in(state, [:by_issuer, cap.issuer_id], fn
+      nil -> nil
+      ids -> List.delete(ids, cap.id)
+    end)
   end
 
   # Remove a capability from its parent's children list
@@ -912,31 +941,42 @@ defmodule Arbor.Security.CapabilityStore do
   # If a capability with the same principal_id + resource_uri already exists,
   # remove the old one so re-grants don't cause unbounded growth.
   # Returns {updated_state, replaced_cap_id | nil}.
-  defp maybe_replace_existing(state, cap) do
+  defp existing_capability_id(state, cap) do
     cap_ids = Map.get(state.by_principal, cap.principal_id, [])
 
-    existing_id =
-      Enum.find(cap_ids, fn id ->
-        case Map.get(state.by_id, id) do
-          %{resource_uri: uri} -> uri == cap.resource_uri
-          _ -> false
-        end
-      end)
+    Enum.find(cap_ids, fn id ->
+      case Map.get(state.by_id, id) do
+        %{resource_uri: uri} -> uri == cap.resource_uri
+        _ -> false
+      end
+    end)
+  end
+
+  defp maybe_replace_existing(state, cap) do
+    existing_id = existing_capability_id(state, cap)
 
     case existing_id do
       nil ->
         {state, nil}
 
       id ->
-        state =
-          state
-          |> update_in([:by_id], &Map.delete(&1, id))
-          |> update_in([:by_principal, cap.principal_id], fn ids ->
-            Enum.reject(ids, &(&1 == id))
-          end)
+        existing_cap = Map.fetch!(state.by_id, id)
+        state = remove_capability_from_indexes(state, id, existing_cap)
 
         {state, id}
     end
+  end
+
+  defp add_capability_to_state(state, cap) do
+    state
+    |> put_in([:by_id, cap.id], cap)
+    |> update_in([:by_principal, cap.principal_id], fn
+      nil -> [cap.id]
+      ids -> [cap.id | ids]
+    end)
+    |> index_by_issuer(cap)
+    |> index_by_parent(cap)
+    |> update_in([:stats, :total_granted], &(&1 + 1))
   end
 
   defp check_quotas(state, cap) do
@@ -1037,6 +1077,7 @@ defmodule Arbor.Security.CapabilityStore do
 
     if cap_ids != [] do
       Logger.debug("[CapabilityStore] Evicting #{length(cap_ids)} remotely revoked capabilities")
+      Enum.each(cap_ids, &authoritative_delete_persisted_capability/1)
       revoke_capability_ids(state, cap_ids)
     else
       state
@@ -1130,18 +1171,119 @@ defmodule Arbor.Security.CapabilityStore do
 
   @cap_store :arbor_security_capabilities
 
-  defp persist_capability(cap) do
+  defp replace_persisted_capability(existing_cap, replacement_cap) do
+    with :ok <- persist_capability(replacement_cap, acknowledged: true),
+         :ok <- delete_replaced_persisted_capability(existing_cap.id, replacement_cap.id) do
+      :ok
+    else
+      {:error, reason} -> compensate_replacement(existing_cap, replacement_cap, reason)
+      other -> compensate_replacement(existing_cap, replacement_cap, {:invalid_result, other})
+    end
+  end
+
+  defp compensate_replacement(existing_cap, replacement_cap, original_reason) do
+    restore_result = persist_capability(existing_cap, acknowledged: true)
+
+    delete_result =
+      if existing_cap.id == replacement_cap.id do
+        :ok
+      else
+        authoritative_delete_persisted_capability(replacement_cap.id)
+      end
+
+    case {restore_result, delete_result} do
+      {:ok, :ok} ->
+        {:error, {:capability_replacement_failed, original_reason}}
+
+      _ ->
+        {:error,
+         {:capability_replacement_outcome_unknown,
+          %{
+            original: original_reason,
+            restore_existing: restore_result,
+            delete_replacement: delete_result
+          }}}
+    end
+  end
+
+  defp delete_replaced_persisted_capability(replaced_id, replacement_id)
+       when replaced_id == replacement_id,
+       do: :ok
+
+  defp delete_replaced_persisted_capability(replaced_id, _replacement_id) do
+    authoritative_delete_persisted_capability(replaced_id)
+  end
+
+  defp authoritative_delete_persisted_capability(capability_id) do
+    if Process.whereis(@cap_store) do
+      case apply(@buffered_store, :acknowledged_delete, [capability_id, [name: @cap_store]]) do
+        :ok ->
+          :ok
+
+        {:error, reason} = error ->
+          Logger.error(
+            "Failed to authoritatively delete capability #{capability_id}: " <>
+              "#{inspect(reason)}"
+          )
+
+          error
+
+        other ->
+          Logger.error(
+            "Invalid authoritative delete result for capability #{capability_id}: " <>
+              "#{inspect(other)}"
+          )
+
+          {:error, :invalid_persistence_result}
+      end
+    else
+      {:error, :capability_store_unavailable}
+    end
+  catch
+    _, reason ->
+      Logger.error(
+        "Authoritative delete failed for capability #{capability_id}: #{inspect(reason)}"
+      )
+
+      {:error, reason}
+  end
+
+  defp persist_capability(cap, opts) do
     if Process.whereis(@cap_store) do
       data = Serializer.serialize(cap)
       record = Record.new(cap.id, data)
-      apply(@buffered_store, :put, [cap.id, record, [name: @cap_store]])
-    end
 
-    :ok
+      result =
+        if Keyword.get(opts, :acknowledged, false) do
+          apply(@buffered_store, :acknowledged_put, [cap.id, record, [name: @cap_store]])
+        else
+          apply(@buffered_store, :put, [cap.id, record, [name: @cap_store]])
+        end
+
+      case result do
+        :ok ->
+          :ok
+
+        {:ok, _stored} ->
+          :ok
+
+        {:error, reason} = error ->
+          Logger.warning("Failed to persist capability #{cap.id}: #{inspect(reason)}")
+          error
+
+        other ->
+          Logger.warning("Invalid persistence result for capability #{cap.id}: #{inspect(other)}")
+          {:error, :invalid_persistence_result}
+      end
+    else
+      if Keyword.get(opts, :acknowledged, false),
+        do: {:error, :capability_store_unavailable},
+        else: :ok
+    end
   catch
     _, reason ->
       Logger.warning("Failed to persist capability #{cap.id}: #{inspect(reason)}")
-      :ok
+      {:error, reason}
   end
 
   defp delete_persisted_capability(cap_id) do
