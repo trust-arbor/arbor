@@ -104,12 +104,31 @@ jobs:
       # of intermittents while hygiene debt is paid down opportunistically.
       - name: Run test suite (hermetic — no LLM, no database)
         run: |
-          mix test \
-            --exclude llm --exclude llm_local --exclude integration_lm_studio \
-            --exclude external --exclude distributed --exclude database \
-            --timeout 120000 \
-          || { echo "::warning::test suite had failures — retrying failed tests once (flake guard)"; \
-               mix test --failed --timeout 120000; }
+          if mix test \
+               --exclude llm --exclude llm_local --exclude integration_lm_studio \
+               --exclude external --exclude distributed --exclude database \
+               --timeout 120000; then
+            exit 0
+          fi
+
+          echo "::warning::test suite had failures — retrying failed tests once (flake guard)"
+
+          # The retry MUST run per-app. `mix test --failed` from the umbrella
+          # root reads no child manifests: it prints "There are no tests to run"
+          # for all 27 apps and exits 0. Because the step's exit status was the
+          # retry's, this lane could not fail — any red suite became a green
+          # build from 2026-06-16 (040643969, when the guard was added) until
+          # 2026-08-06. Verified: a recorded child failure (in-app run exits 2)
+          # still yields exit 0 from a root `mix test --failed`.
+          #
+          # Failure manifests live at _build/test/lib/<app>/.mix/.mix_test_failures,
+          # so the retry has to be invoked from inside each app.
+          retry_failed=0
+          for app in apps/*/; do
+            [ -d "${app}test" ] || continue
+            ( cd "$app" && mix test --failed --timeout 120000 ) || retry_failed=1
+          done
+          exit $retry_failed
 
   # ── Database lane ───────────────────────────────────────────────────────────
   # Runs ONLY the :database-tagged tests against Postgres. These need the Repo
