@@ -512,15 +512,32 @@ defmodule Arbor.Persistence.VectorStore.EctoSQLiteTest do
   end
 
   test "SQLite search is explicitly unsupported", %{agent_id: agent_id} do
-    opts = [
+    before_count =
+      SQLiteRepo.query!("SELECT COUNT(*) FROM memory_embeddings").rows |> hd() |> hd()
+
+    expanded_opts = [
       model_id: "provider/model-v1",
       dimensions: VectorRecord.dimensions(),
       encoding: VectorRecord.encoding(),
-      category: "voice"
+      source_namespace: "voice",
+      threshold: 0.5,
+      limit: 1000
     ]
 
     assert {:error, :unsupported} =
-             Arbor.Persistence.search_vector_records(agent_id, vector(), opts)
+             Arbor.Persistence.search_vector_records(agent_id, vector(), expanded_opts)
+
+    assert {:error, :unsupported} =
+             Arbor.Persistence.search_vector_records(
+               agent_id,
+               vector(),
+               Keyword.put(expanded_opts, :category, "voice")
+             )
+
+    after_count =
+      SQLiteRepo.query!("SELECT COUNT(*) FROM memory_embeddings").rows |> hd() |> hd()
+
+    assert after_count == before_count
   end
 
   test "operation receipt ledger rejects mutation", %{agent_id: agent_id} do

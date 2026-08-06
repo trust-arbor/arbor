@@ -156,6 +156,205 @@ defmodule Arbor.Persistence.VectorStore.EctoPostgresTest do
     end
   end
 
+  test "PostgreSQL search supports optional namespace, category, threshold, and mixed-category recall",
+       %{
+         agent_id: agent_id
+       } do
+    query_vector = unit_vector(0)
+
+    goal =
+      record!(agent_id,
+        source_key: "goal",
+        category: "goal",
+        source_namespace: "voice",
+        vector: query_vector
+      )
+
+    note =
+      record!(agent_id,
+        source_key: "note",
+        category: "note",
+        source_namespace: "voice",
+        vector: unit_vector(0) |> List.replace_at(1, 0.01)
+      )
+
+    other_ns =
+      record!(agent_id,
+        source_key: "other-ns",
+        category: "goal",
+        source_namespace: "memory",
+        vector: query_vector
+      )
+
+    distant =
+      record!(agent_id,
+        source_key: "distant",
+        category: "goal",
+        source_namespace: "voice",
+        vector: unit_vector(1)
+      )
+
+    foreign = record!(unique("agent"), source_key: "foreign", vector: query_vector)
+    tombstone = record!(agent_id, source_key: "tombstone", vector: query_vector)
+    wrong_model = record!(agent_id, source_key: "wrong-model", model_id: "provider/model-v2")
+
+    for record <- [goal, note, other_ns, distant, foreign, tombstone, wrong_model] do
+      assert {:ok, _receipt} =
+               Arbor.Persistence.execute_vector_operation(
+                 record.agent_id,
+                 insert_operation!(record)
+               )
+    end
+
+    tombstone_delete = operation!(:delete, fetch!(agent_id, "tombstone"))
+
+    assert {:ok, _deleted} =
+             Arbor.Persistence.execute_vector_operation(agent_id, tombstone_delete)
+
+    assert {:ok, matches} =
+             Arbor.Persistence.search_vector_records(
+               agent_id,
+               query_vector,
+               model_id: "provider/model-v1",
+               dimensions: VectorRecord.dimensions(),
+               encoding: VectorRecord.encoding(),
+               source_namespace: "voice",
+               limit: 10
+             )
+
+    ids = Enum.map(matches, & &1.record.id)
+    assert goal.id in ids
+    assert note.id in ids
+    refute other_ns.id in ids
+    refute foreign.id in ids
+    refute wrong_model.id in ids
+    refute tombstone.id in ids
+
+    goal_id = goal.id
+    distant_id = distant.id
+
+    assert {:ok, [%VectorMatch{record: %{id: ^goal_id}} | _]} =
+             Arbor.Persistence.search_vector_records(
+               agent_id,
+               query_vector,
+               search_opts(category: "goal", source_namespace: "voice", limit: 10)
+             )
+
+    assert {:ok, category_filtered} =
+             Arbor.Persistence.search_vector_records(
+               agent_id,
+               query_vector,
+               search_opts(category: "goal", source_namespace: "voice", limit: 10)
+             )
+
+    refute Enum.any?(category_filtered, &(&1.record.category == "note"))
+
+    assert {:ok, high} =
+             Arbor.Persistence.search_vector_records(
+               agent_id,
+               query_vector,
+               search_opts(
+                 category: "goal",
+                 source_namespace: "voice",
+                 threshold: 0.99,
+                 limit: 10
+               )
+             )
+
+    high_ids = Enum.map(high, & &1.record.id)
+    assert goal_id in high_ids
+    refute distant_id in high_ids
+
+    assert {:ok, unthresholded} =
+             Arbor.Persistence.search_vector_records(
+               agent_id,
+               query_vector,
+               search_opts(category: "goal", source_namespace: "voice", limit: 10)
+             )
+
+    assert distant_id in Enum.map(unthresholded, & &1.record.id)
+
+    # Exact-threshold retention: identical vectors yield similarity 1.0; threshold 1.0 keeps them.
+    assert {:ok, exact_threshold} =
+             Arbor.Persistence.search_vector_records(
+               agent_id,
+               query_vector,
+               search_opts(
+                 category: "goal",
+                 source_namespace: "voice",
+                 threshold: 1.0,
+                 limit: 10
+               )
+             )
+
+    exact_ids = Enum.map(exact_threshold, & &1.record.id)
+    assert goal_id in exact_ids
+    refute distant_id in exact_ids
+    assert Enum.all?(exact_threshold, &(&1.similarity >= 1.0))
+
+    # Scopes apply before nearest-neighbor limit: out-of-scope exact match must not win limit:1.
+    assert {:ok, [%VectorMatch{record: limited}]} =
+             Arbor.Persistence.search_vector_records(
+               agent_id,
+               query_vector,
+               search_opts(category: "goal", source_namespace: "voice", limit: 1)
+             )
+
+    assert limited.id == goal_id
+    assert limited.source_namespace == "voice"
+
+    assert {:ok, _} =
+             Arbor.Persistence.search_vector_records(
+               agent_id,
+               query_vector,
+               search_opts(limit: 1000)
+             )
+  end
+
+  test "PostgreSQL search emits a single pgvector scoring expression under threshold", %{
+    agent_id: agent_id
+  } do
+    query_vector = unit_vector(0)
+    record = record!(agent_id, source_key: "scored", vector: query_vector)
+
+    assert {:ok, _receipt} =
+             Arbor.Persistence.execute_vector_operation(agent_id, insert_operation!(record))
+
+    parent = self()
+    handler_id = "vector-search-single-score-#{System.unique_integer([:positive])}"
+
+    :ok =
+      :telemetry.attach(
+        handler_id,
+        Arbor.Persistence.Repo.config()[:telemetry_prefix] ++ [:query],
+        fn _event, _measurements, metadata, _config ->
+          send(parent, {:ecto_query, metadata[:query]})
+        end,
+        nil
+      )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+
+    assert {:ok, [%VectorMatch{record: %{id: matched_id}}]} =
+             Arbor.Persistence.search_vector_records(
+               agent_id,
+               query_vector,
+               search_opts(threshold: 0.5, limit: 5)
+             )
+
+    assert matched_id == record.id
+
+    search_sql =
+      receive_ecto_search_sql(deadline: System.monotonic_time(:millisecond) + 2_000)
+
+    assert search_sql =~ "<=>"
+    assert length(String.split(search_sql, "<=>")) - 1 == 1
+
+    assert String.contains?(String.upcase(search_sql), "CAST") or
+             String.contains?(search_sql, "::real") or
+             String.contains?(String.downcase(search_sql), " as real")
+  end
+
   test "PostgreSQL rejects zero-norm queries and searches ordinary signed vectors", %{
     agent_id: agent_id
   } do
@@ -311,6 +510,29 @@ defmodule Arbor.Persistence.VectorStore.EctoPostgresTest do
       })
 
     operation
+  end
+
+  defp receive_ecto_search_sql(deadline: deadline) do
+    remaining = deadline - System.monotonic_time(:millisecond)
+
+    if remaining <= 0 do
+      flunk("timed out waiting for Ecto search SQL telemetry containing <=>")
+    else
+      receive do
+        {:ecto_query, query} when is_binary(query) ->
+          if String.contains?(query, "<=>") and String.contains?(query, "memory_embeddings") do
+            query
+          else
+            receive_ecto_search_sql(deadline: deadline)
+          end
+
+        {:ecto_query, _other} ->
+          receive_ecto_search_sql(deadline: deadline)
+      after
+        max(remaining, 1) ->
+          flunk("timed out waiting for Ecto search SQL telemetry containing <=>")
+      end
+    end
   end
 
   defp search_opts(overrides) do

@@ -63,7 +63,13 @@ defmodule Arbor.Persistence do
           | {:error, Arbor.Contracts.API.Persistence.vector_error()}
   def list_vector_records(agent_id, opts \\ []), do: VectorBoundary.list(agent_id, opts)
 
-  @doc "Search using a normalized 768-dimensional vector and exact descriptor options."
+  @doc """
+  Search using a normalized 768-dimensional vector and exact model descriptor.
+
+  Requires `:model_id`, `:dimensions`, and `:encoding`. Optionally accepts
+  independent `:category`, `:source_namespace`, and cosine-similarity
+  `:threshold` scopes. Default limit is 20; maximum admitted limit is 1000.
+  """
   @spec search_vector_records(String.t(), term(), keyword()) ::
           {:ok, [Arbor.Contracts.Persistence.VectorMatch.t()]}
           | {:error, Arbor.Contracts.API.Persistence.vector_error()}
@@ -1139,7 +1145,11 @@ defmodule Arbor.Persistence do
 
   @impl Arbor.Contracts.API.Persistence
   def search_vector_records_by_exact_descriptor_for_agent(agent_id, vector, opts),
-    do: search_vector_records(agent_id, vector, opts)
+    do: VectorBoundary.search_exact_category(agent_id, vector, opts)
+
+  @impl Arbor.Contracts.API.Persistence
+  def search_vector_records_by_exact_model_descriptor_and_scope_for_agent(agent_id, vector, opts),
+    do: VectorBoundary.search(agent_id, vector, opts)
 
   defp normalize_authorization_opts(opts) do
     case EventLog.normalize_opts(opts) do

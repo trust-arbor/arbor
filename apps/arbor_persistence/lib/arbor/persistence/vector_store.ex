@@ -35,7 +35,13 @@ defmodule Arbor.Persistence.VectorStore do
               {:ok, [VectorRecord.t()]}
               | {:error, :backend_failure | :unsupported}
 
-  @doc "Searches using an exact normalized vector and descriptor options."
+  @doc """
+  Searches using an exact normalized vector and closed Boundary options.
+
+  Options are the deterministic seven-key keyword list:
+  `model_id`, `dimensions`, `encoding`, `category`, `source_namespace`,
+  `threshold` (`float | nil`), `limit`.
+  """
   @callback search(String.t(), [float()], opts()) ::
               {:ok, [VectorMatch.t()]}
               | {:error, :backend_failure | :unsupported}
