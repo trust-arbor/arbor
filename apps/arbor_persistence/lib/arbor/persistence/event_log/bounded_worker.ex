@@ -2,9 +2,62 @@ defmodule Arbor.Persistence.EventLog.BoundedWorker do
   @moduledoc false
 
   @active_key {__MODULE__, :active}
+  @owner_identity_tag :event_log_bounded_worker_owner
+  @owner_check_tag {__MODULE__, :owner_check}
+  @owner_check_reply_tag {__MODULE__, :owner_check_reply}
+
+  @opaque owner_identity ::
+            {:event_log_bounded_worker_owner, pid(), pid(), pid(), reference(), integer()}
 
   @spec active?() :: boolean()
-  def active?, do: Process.get(@active_key) == true
+  def active?, do: match?({@owner_identity_tag, _, _, _, _, _}, Process.get(@active_key))
+
+  @spec owner_identity() :: {:ok, owner_identity()} | {:error, :owner_inactive}
+  def owner_identity do
+    case Process.get(@active_key) do
+      {@owner_identity_tag, coordinator, worker, owner, token, deadline_mono} = identity
+      when is_pid(coordinator) and is_pid(worker) and is_pid(owner) and is_reference(token) and
+             is_integer(deadline_mono) ->
+        {:ok, identity}
+
+      _inactive ->
+        {:error, :owner_inactive}
+    end
+  end
+
+  @spec owner_active?(owner_identity(), integer()) :: boolean()
+  def owner_active?(
+        {@owner_identity_tag, coordinator, worker, owner, token, identity_deadline},
+        deadline_mono
+      )
+      when is_pid(coordinator) and is_pid(worker) and is_pid(owner) and is_reference(token) and
+             is_integer(identity_deadline) and is_integer(deadline_mono) do
+    identity_deadline == deadline_mono and
+      System.monotonic_time(:millisecond) < deadline_mono and
+      Process.alive?(owner) and Process.alive?(coordinator) and Process.alive?(worker)
+  end
+
+  def owner_active?(_identity, _deadline_mono), do: false
+
+  @spec validate_owner(owner_identity(), integer()) :: :ok | {:error, :owner_inactive}
+  def validate_owner(
+        {@owner_identity_tag, coordinator, worker, owner, token, identity_deadline} = identity,
+        deadline_mono
+      ) do
+    if owner_active?(identity, deadline_mono) do
+      validate_owner_with_coordinator(
+        coordinator,
+        worker,
+        owner,
+        token,
+        identity_deadline
+      )
+    else
+      {:error, :owner_inactive}
+    end
+  end
+
+  def validate_owner(_identity, _deadline_mono), do: {:error, :owner_inactive}
 
   @spec run((-> result), integer()) ::
           {:ok, result} | {:error, :operation_timeout | :worker_exit}
@@ -71,6 +124,7 @@ defmodule Arbor.Persistence.EventLog.BoundedWorker do
 
     if Process.alive?(owner) do
       coordinator = self()
+      owner_token = make_ref()
       worker_start_ref = make_ref()
       worker_result_ref = make_ref()
 
@@ -79,6 +133,8 @@ defmodule Arbor.Persistence.EventLog.BoundedWorker do
           fn ->
             run_worker(
               coordinator,
+              owner,
+              owner_token,
               worker_start_ref,
               worker_result_ref,
               fun,
@@ -97,6 +153,7 @@ defmodule Arbor.Persistence.EventLog.BoundedWorker do
         response_ref,
         worker,
         worker_ref,
+        owner_token,
         worker_start_ref,
         worker_result_ref,
         deadline_mono
@@ -107,12 +164,23 @@ defmodule Arbor.Persistence.EventLog.BoundedWorker do
     end
   end
 
-  defp run_worker(coordinator, start_ref, result_ref, fun, deadline_mono) do
+  defp run_worker(
+         coordinator,
+         owner,
+         owner_token,
+         start_ref,
+         result_ref,
+         fun,
+         deadline_mono
+       ) do
     receive do
       {^start_ref, :start} ->
         case remaining_timeout(deadline_mono) do
           {:ok, _remaining_ms} ->
-            Process.put(@active_key, true)
+            Process.put(
+              @active_key,
+              {@owner_identity_tag, coordinator, self(), owner, owner_token, deadline_mono}
+            )
 
             try do
               send(coordinator, {result_ref, {:callback_result, fun.()}})
@@ -133,6 +201,7 @@ defmodule Arbor.Persistence.EventLog.BoundedWorker do
          response_ref,
          worker,
          worker_ref,
+         owner_token,
          worker_start_ref,
          result_ref,
          deadline_mono
@@ -150,6 +219,7 @@ defmodule Arbor.Persistence.EventLog.BoundedWorker do
               response_ref,
               worker,
               worker_ref,
+              owner_token,
               worker_start_ref,
               result_ref,
               deadline_mono
@@ -163,6 +233,7 @@ defmodule Arbor.Persistence.EventLog.BoundedWorker do
               response_ref,
               worker,
               worker_ref,
+              owner_token,
               worker_start_ref,
               result_ref,
               deadline_mono
@@ -196,6 +267,7 @@ defmodule Arbor.Persistence.EventLog.BoundedWorker do
          response_ref,
          worker,
          worker_ref,
+         owner_token,
          worker_start_ref,
          result_ref,
          deadline_mono
@@ -210,6 +282,7 @@ defmodule Arbor.Persistence.EventLog.BoundedWorker do
           response_ref,
           worker,
           worker_ref,
+          owner_token,
           result_ref,
           deadline_mono,
           :pending
@@ -227,6 +300,7 @@ defmodule Arbor.Persistence.EventLog.BoundedWorker do
          response_ref,
          worker,
          worker_ref,
+         owner_token,
          result_ref,
          deadline_mono,
          result_state
@@ -237,6 +311,22 @@ defmodule Arbor.Persistence.EventLog.BoundedWorker do
           {:DOWN, ^owner_ref, :process, ^owner, _reason} ->
             terminate(worker, worker_ref, result_ref)
 
+          {@owner_check_tag, ^owner_token, ^worker, ^owner, reply_alias}
+          when is_reference(reply_alias) ->
+            reply_owner_check(reply_alias, owner_token, owner, worker, deadline_mono)
+
+            coordinate_worker(
+              owner,
+              owner_ref,
+              response_ref,
+              worker,
+              worker_ref,
+              owner_token,
+              result_ref,
+              deadline_mono,
+              result_state
+            )
+
           {^result_ref, result} when result_state == :pending ->
             coordinate_worker(
               owner,
@@ -244,6 +334,7 @@ defmodule Arbor.Persistence.EventLog.BoundedWorker do
               response_ref,
               worker,
               worker_ref,
+              owner_token,
               result_ref,
               deadline_mono,
               {:ready, result}
@@ -256,6 +347,7 @@ defmodule Arbor.Persistence.EventLog.BoundedWorker do
               response_ref,
               worker,
               worker_ref,
+              owner_token,
               result_ref,
               deadline_mono,
               result_state
@@ -268,6 +360,7 @@ defmodule Arbor.Persistence.EventLog.BoundedWorker do
               response_ref,
               worker,
               worker_ref,
+              owner_token,
               result_ref,
               deadline_mono,
               result_state
@@ -760,6 +853,71 @@ defmodule Arbor.Persistence.EventLog.BoundedWorker do
 
       {:DOWN, ^coordinator_ref, :process, _coordinator, _reason} ->
         drain_private_protocol(startup_ref, response_ref, worker_ref, coordinator_ref)
+    after
+      0 -> :ok
+    end
+  end
+
+  defp validate_owner_with_coordinator(
+         coordinator,
+         worker,
+         owner,
+         token,
+         deadline_mono
+       ) do
+    case remaining_timeout(deadline_mono) do
+      {:ok, remaining_ms} ->
+        coordinator_ref = Process.monitor(coordinator)
+        reply_alias = Process.alias()
+        send(coordinator, {@owner_check_tag, token, worker, owner, reply_alias})
+
+        receive do
+          {@owner_check_reply_tag, ^token, :active} ->
+            Process.unalias(reply_alias)
+            Process.demonitor(coordinator_ref, [:flush])
+
+            identity =
+              {@owner_identity_tag, coordinator, worker, owner, token, deadline_mono}
+
+            if owner_active?(identity, deadline_mono),
+              do: :ok,
+              else: {:error, :owner_inactive}
+
+          {@owner_check_reply_tag, ^token, :inactive} ->
+            Process.unalias(reply_alias)
+            Process.demonitor(coordinator_ref, [:flush])
+            {:error, :owner_inactive}
+
+          {:DOWN, ^coordinator_ref, :process, ^coordinator, _reason} ->
+            Process.unalias(reply_alias)
+            drain_owner_check_reply(token)
+            {:error, :owner_inactive}
+        after
+          remaining_ms ->
+            Process.unalias(reply_alias)
+            Process.demonitor(coordinator_ref, [:flush])
+            drain_owner_check_reply(token)
+            {:error, :owner_inactive}
+        end
+
+      {:error, :operation_timeout} ->
+        {:error, :owner_inactive}
+    end
+  end
+
+  defp reply_owner_check(reply_alias, token, owner, worker, deadline_mono) do
+    status =
+      if Process.alive?(owner) and Process.alive?(worker) and
+           match?({:ok, _remaining_ms}, remaining_timeout(deadline_mono)),
+         do: :active,
+         else: :inactive
+
+    send(reply_alias, {@owner_check_reply_tag, token, status})
+  end
+
+  defp drain_owner_check_reply(token) do
+    receive do
+      {@owner_check_reply_tag, ^token, _status} -> drain_owner_check_reply(token)
     after
       0 -> :ok
     end

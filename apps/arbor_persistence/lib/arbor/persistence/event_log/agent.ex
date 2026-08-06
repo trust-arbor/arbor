@@ -19,6 +19,7 @@ defmodule Arbor.Persistence.EventLog.Agent do
 
   alias Arbor.Contracts.Persistence.AppendOperation
   alias Arbor.Persistence.{Event, EventLog}
+  alias Arbor.Persistence.EventLog.BoundedWorker
 
   @range_read_event [:arbor, :persistence, :event_log, :agent, :range_read]
 
@@ -61,7 +62,7 @@ defmodule Arbor.Persistence.EventLog.Agent do
       with {:ok, normalized_opts, ^deadline_mono} <-
              EventLog.prepare_purge(stream_id, normalized_opts),
            {:ok, name} <- fetch_name(normalized_opts) do
-        safe_purge(name, stream_id, deadline_mono)
+        run_bounded_purge(name, stream_id, deadline_mono)
       end
     end)
   end
@@ -447,14 +448,45 @@ defmodule Arbor.Persistence.EventLog.Agent do
     :exit, _reason -> EventLog.indeterminate(operation)
   end
 
-  defp safe_purge(name, stream_id, deadline_mono) do
+  defp run_bounded_purge(name, stream_id, deadline_mono) do
+    if BoundedWorker.active?() do
+      run_owned_purge(name, stream_id, deadline_mono)
+    else
+      case BoundedWorker.run(
+             fn ->
+               EventLog.with_inherited_deadline(deadline_mono, fn ->
+                 name
+                 |> run_owned_purge(stream_id, deadline_mono)
+                 |> EventLog.stamp_completion()
+               end)
+             end,
+             deadline_mono
+           ) do
+        {:ok, completion} ->
+          EventLog.accept_purge_completion(completion, stream_id, deadline_mono)
+
+        {:error, _uncertain} ->
+          EventLog.purge_indeterminate(stream_id)
+      end
+    end
+  end
+
+  defp run_owned_purge(name, stream_id, deadline_mono) do
+    with {:ok, owner_identity} <- BoundedWorker.owner_identity() do
+      safe_purge(name, stream_id, deadline_mono, owner_identity)
+    else
+      {:error, :owner_inactive} -> EventLog.purge_indeterminate(stream_id)
+    end
+  end
+
+  defp safe_purge(name, stream_id, deadline_mono, owner_identity) do
     with true <- is_pid(Process.whereis(name)),
          {:ok, timeout} <- EventLog.remaining_timeout(deadline_mono) do
       reply =
         Agent.get_and_update(
           name,
           fn state ->
-            case purge_candidate(state, stream_id, deadline_mono) do
+            case purge_candidate(state, stream_id, deadline_mono, owner_identity) do
               {:ok, candidate} ->
                 {EventLog.stamp_completion(:ok), candidate}
 
@@ -476,10 +508,12 @@ defmodule Arbor.Persistence.EventLog.Agent do
     :exit, _reason -> EventLog.purge_indeterminate(stream_id)
   end
 
-  defp purge_candidate(state, stream_id, deadline_mono) do
-    with {:ok, global} <- reject_stream_values(state.global, stream_id, deadline_mono),
+  defp purge_candidate(state, stream_id, deadline_mono, owner_identity) do
+    with :ok <- validate_purge_owner(owner_identity, deadline_mono),
+         {:ok, global} <-
+           reject_stream_values(state.global, stream_id, deadline_mono, owner_identity),
          {:ok, event_index} <-
-           reject_stream_index(state.event_index, stream_id, deadline_mono) do
+           reject_stream_index(state.event_index, stream_id, deadline_mono, owner_identity) do
       candidate = %{
         state
         | streams: Map.delete(state.streams, stream_id),
@@ -490,16 +524,23 @@ defmodule Arbor.Persistence.EventLog.Agent do
           head_inserted_mono: Map.delete(state.head_inserted_mono, stream_id)
       }
 
-      with :ok <- verify_agent_stream_absent(candidate, stream_id, deadline_mono) do
+      with :ok <-
+             verify_agent_stream_absent(
+               candidate,
+               stream_id,
+               deadline_mono,
+               owner_identity
+             ),
+           :ok <- validate_purge_owner(owner_identity, deadline_mono) do
         {:ok, candidate}
       end
     end
   end
 
-  defp reject_stream_values(events, stream_id, deadline_mono) do
+  defp reject_stream_values(events, stream_id, deadline_mono, owner_identity) do
     events
     |> Enum.reduce_while({:ok, [], 0}, fn event, {:ok, kept, count} ->
-      if deadline_check_due?(count) and deadline_expired?(deadline_mono) do
+      if deadline_check_due?(count) and purge_owner_inactive?(owner_identity, deadline_mono) do
         {:halt, {:error, :operation_timeout}}
       else
         kept = if event.stream_id == stream_id, do: kept, else: [event | kept]
@@ -512,10 +553,10 @@ defmodule Arbor.Persistence.EventLog.Agent do
     end
   end
 
-  defp reject_stream_index(index, stream_id, deadline_mono) do
+  defp reject_stream_index(index, stream_id, deadline_mono, owner_identity) do
     index
     |> Enum.reduce_while({:ok, %{}, 0}, fn {event_id, event}, {:ok, kept, count} ->
-      if deadline_check_due?(count) and deadline_expired?(deadline_mono) do
+      if deadline_check_due?(count) and purge_owner_inactive?(owner_identity, deadline_mono) do
         {:halt, {:error, :operation_timeout}}
       else
         kept = if event.stream_id == stream_id, do: kept, else: Map.put(kept, event_id, event)
@@ -528,28 +569,37 @@ defmodule Arbor.Persistence.EventLog.Agent do
     end
   end
 
-  defp verify_agent_stream_absent(state, stream_id, deadline_mono) do
+  defp verify_agent_stream_absent(state, stream_id, deadline_mono, owner_identity) do
     if Map.has_key?(state.streams, stream_id) or
          Map.has_key?(state.stream_index, stream_id) or
          Map.has_key?(state.versions, stream_id) or
          Map.has_key?(state.head_inserted_mono, stream_id) do
       {:error, :purge_verification_failed}
     else
-      with :ok <- bounded_all?(state.global, deadline_mono, &(&1.stream_id != stream_id)),
+      with :ok <-
+             bounded_all?(
+               state.global,
+               deadline_mono,
+               owner_identity,
+               &(&1.stream_id != stream_id)
+             ),
            :ok <-
-             bounded_all?(state.event_index, deadline_mono, fn {_event_id, event} ->
-               event.stream_id != stream_id
-             end) do
+             bounded_all?(
+               state.event_index,
+               deadline_mono,
+               owner_identity,
+               fn {_event_id, event} -> event.stream_id != stream_id end
+             ) do
         :ok
       end
     end
   end
 
-  defp bounded_all?(enumerable, deadline_mono, predicate) do
+  defp bounded_all?(enumerable, deadline_mono, owner_identity, predicate) do
     enumerable
     |> Enum.reduce_while({:ok, 0}, fn item, {:ok, count} ->
       cond do
-        deadline_check_due?(count) and deadline_expired?(deadline_mono) ->
+        deadline_check_due?(count) and purge_owner_inactive?(owner_identity, deadline_mono) ->
           {:halt, {:error, :operation_timeout}}
 
         predicate.(item) ->
@@ -567,8 +617,11 @@ defmodule Arbor.Persistence.EventLog.Agent do
 
   defp deadline_check_due?(count), do: rem(count, 128) == 0
 
-  defp deadline_expired?(deadline_mono),
-    do: System.monotonic_time(:millisecond) >= deadline_mono
+  defp validate_purge_owner(owner_identity, deadline_mono),
+    do: BoundedWorker.validate_owner(owner_identity, deadline_mono)
+
+  defp purge_owner_inactive?(owner_identity, deadline_mono),
+    do: not BoundedWorker.owner_active?(owner_identity, deadline_mono)
 
   defp fetch_name(opts) do
     case Keyword.fetch(opts, :name) do

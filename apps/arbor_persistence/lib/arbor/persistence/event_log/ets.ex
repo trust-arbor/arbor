@@ -39,6 +39,7 @@ defmodule Arbor.Persistence.EventLog.ETS do
 
   alias Arbor.Contracts.Persistence.AppendOperation
   alias Arbor.Persistence.{Event, EventLog}
+  alias Arbor.Persistence.EventLog.BoundedWorker
 
   @default_max_events 1_000_000
   @default_max_read 10_000
@@ -91,7 +92,7 @@ defmodule Arbor.Persistence.EventLog.ETS do
       with {:ok, normalized_opts, ^deadline_mono} <-
              EventLog.prepare_purge(stream_id, normalized_opts),
            {:ok, name} <- fetch_name(normalized_opts) do
-        safe_purge_call(name, stream_id, deadline_mono)
+        run_bounded_purge(name, stream_id, deadline_mono)
       end
     end)
   end
@@ -412,8 +413,12 @@ defmodule Arbor.Persistence.EventLog.ETS do
     {:reply, EventLog.stamp_completion(result), state}
   end
 
-  def handle_call({:purge_stream, stream_id, deadline_mono}, _from, state) do
-    {result, next_state} = purge_serialized(state, stream_id, deadline_mono)
+  def handle_call(
+        {:purge_stream, stream_id, deadline_mono, owner_identity},
+        _from,
+        state
+      ) do
+    {result, next_state} = purge_serialized(state, stream_id, deadline_mono, owner_identity)
     {:reply, EventLog.stamp_completion(result), next_state}
   end
 
@@ -975,10 +980,41 @@ defmodule Arbor.Persistence.EventLog.ETS do
     :exit, _reason -> EventLog.indeterminate(operation)
   end
 
-  defp safe_purge_call(name, stream_id, deadline_mono) do
+  defp run_bounded_purge(name, stream_id, deadline_mono) do
+    if BoundedWorker.active?() do
+      run_owned_purge(name, stream_id, deadline_mono)
+    else
+      case BoundedWorker.run(
+             fn ->
+               EventLog.with_inherited_deadline(deadline_mono, fn ->
+                 name
+                 |> run_owned_purge(stream_id, deadline_mono)
+                 |> EventLog.stamp_completion()
+               end)
+             end,
+             deadline_mono
+           ) do
+        {:ok, completion} ->
+          EventLog.accept_purge_completion(completion, stream_id, deadline_mono)
+
+        {:error, _uncertain} ->
+          EventLog.purge_indeterminate(stream_id)
+      end
+    end
+  end
+
+  defp run_owned_purge(name, stream_id, deadline_mono) do
+    with {:ok, owner_identity} <- BoundedWorker.owner_identity() do
+      safe_purge_call(name, stream_id, deadline_mono, owner_identity)
+    else
+      {:error, :owner_inactive} -> EventLog.purge_indeterminate(stream_id)
+    end
+  end
+
+  defp safe_purge_call(name, stream_id, deadline_mono, owner_identity) do
     with {:ok, timeout} <- EventLog.remaining_timeout(deadline_mono) do
       name
-      |> GenServer.call({:purge_stream, stream_id, deadline_mono}, timeout)
+      |> GenServer.call({:purge_stream, stream_id, deadline_mono, owner_identity}, timeout)
       |> EventLog.accept_purge_completion(stream_id, deadline_mono)
     else
       {:error, :operation_timeout} -> EventLog.purge_indeterminate(stream_id)
@@ -989,23 +1025,42 @@ defmodule Arbor.Persistence.EventLog.ETS do
     :exit, _reason -> EventLog.purge_indeterminate(stream_id)
   end
 
-  defp purge_serialized(state, stream_id, deadline_mono) do
+  defp purge_serialized(state, stream_id, deadline_mono, owner_identity) do
     stream_match = [{{{stream_id, :"$1"}, :"$2"}, [], [:"$_"]}]
     global_match = [{{:"$1", %{stream_id: stream_id}}, [], [:"$_"]}]
     identity_match = [{{:"$1", {:"$2", stream_id, :"$3", :"$4"}}, [], [:"$_"]}]
 
-    with {:ok, stream_entries} <- select_rows(state.stream_table, stream_match, deadline_mono),
-         {:ok, global_entries} <- select_rows(state.global_table, global_match, deadline_mono),
-         {:ok, identity_entries} <- select_rows(state.id_table, identity_match, deadline_mono),
+    with :ok <- validate_purge_owner(owner_identity, deadline_mono),
+         {:ok, stream_entries} <-
+           select_rows(state.stream_table, stream_match, deadline_mono, owner_identity),
+         {:ok, global_entries} <-
+           select_rows(state.global_table, global_match, deadline_mono, owner_identity),
+         {:ok, identity_entries} <-
+           select_rows(state.id_table, identity_match, deadline_mono, owner_identity),
          {:ok, stream_identity_entries} <-
-           select_rows(state.identity_stream_position_table, stream_match, deadline_mono) do
+           select_rows(
+             state.identity_stream_position_table,
+             stream_match,
+             deadline_mono,
+             owner_identity
+           ) do
       event_ids = purge_event_ids(global_entries, identity_entries, stream_identity_entries)
       global_positions = purge_global_positions(global_entries, identity_entries)
 
       with {:ok, identity_position_entries} <-
-             select_identity_positions(state.identity_position_table, event_ids, deadline_mono),
+             select_identity_positions(
+               state.identity_position_table,
+               event_ids,
+               deadline_mono,
+               owner_identity
+             ),
            {:ok, related_global_entries} <-
-             select_global_entries(state.global_table, event_ids, deadline_mono),
+             select_global_entries(
+               state.global_table,
+               event_ids,
+               deadline_mono,
+               owner_identity
+             ),
            :ok <-
              validate_purge_entries(
                state,
@@ -1014,27 +1069,44 @@ defmodule Arbor.Persistence.EventLog.ETS do
                related_global_entries,
                identity_entries,
                stream_identity_entries,
-               deadline_mono
+               deadline_mono,
+               owner_identity
              ),
+           :ok <- validate_purge_owner(owner_identity, deadline_mono),
            :ok <-
              delete_rows(
                state.stream_table,
                Enum.map(stream_entries, &elem(&1, 0)),
-               deadline_mono
+               deadline_mono,
+               owner_identity
              ),
-           :ok <- delete_rows(state.global_table, MapSet.to_list(global_positions), deadline_mono),
-           :ok <- delete_rows(state.id_table, MapSet.to_list(event_ids), deadline_mono),
+           :ok <-
+             delete_rows(
+               state.global_table,
+               MapSet.to_list(global_positions),
+               deadline_mono,
+               owner_identity
+             ),
+           :ok <-
+             delete_rows(
+               state.id_table,
+               MapSet.to_list(event_ids),
+               deadline_mono,
+               owner_identity
+             ),
            :ok <-
              delete_rows(
                state.identity_position_table,
                Enum.map(identity_position_entries, &elem(&1, 0)),
-               deadline_mono
+               deadline_mono,
+               owner_identity
              ),
            :ok <-
              delete_rows(
                state.identity_stream_position_table,
                Enum.map(stream_identity_entries, &elem(&1, 0)),
-               deadline_mono
+               deadline_mono,
+               owner_identity
              ),
            :ok <-
              verify_ets_stream_absence(
@@ -1043,8 +1115,10 @@ defmodule Arbor.Persistence.EventLog.ETS do
                global_match,
                identity_match,
                event_ids,
-               deadline_mono
-             ) do
+               deadline_mono,
+               owner_identity
+             ),
+           :ok <- validate_purge_owner(owner_identity, deadline_mono) do
         candidate = purge_ets_metadata(state, stream_id)
 
         if ets_stream_absent?(candidate, stream_id) do
@@ -1088,11 +1162,11 @@ defmodule Arbor.Persistence.EventLog.ETS do
     end)
   end
 
-  defp select_global_entries(table, event_ids, deadline_mono) do
+  defp select_global_entries(table, event_ids, deadline_mono, owner_identity) do
     if MapSet.size(event_ids) == 0 do
       {:ok, []}
     else
-      select_rows(table, [{:"$1", [], [:"$_"]}], deadline_mono, fn
+      select_rows(table, [{:"$1", [], [:"$_"]}], deadline_mono, owner_identity, fn
         {_position, %Event{id: event_id}} -> MapSet.member?(event_ids, event_id)
         _malformed -> false
       end)
@@ -1106,10 +1180,11 @@ defmodule Arbor.Persistence.EventLog.ETS do
          global_entries,
          identity_entries,
          stream_identity_entries,
-         deadline_mono
+         deadline_mono,
+         owner_identity
        ) do
     with :ok <-
-           validate_rows(stream_entries, deadline_mono, fn
+           validate_rows(stream_entries, deadline_mono, owner_identity, fn
              {{^stream_id, event_number}, position} ->
                case :ets.lookup(state.global_table, position) do
                  [{^position, %Event{stream_id: ^stream_id, event_number: ^event_number}}] -> true
@@ -1120,7 +1195,7 @@ defmodule Arbor.Persistence.EventLog.ETS do
                false
            end),
          :ok <-
-           validate_rows(global_entries, deadline_mono, fn
+           validate_rows(global_entries, deadline_mono, owner_identity, fn
              {position, %Event{id: event_id, stream_id: ^stream_id, event_number: event_number}} ->
                stream_pointer_safe_to_remove?(state, stream_id, event_number, position) and
                  identity_matches?(state, event_id, stream_id, event_number, position)
@@ -1129,7 +1204,7 @@ defmodule Arbor.Persistence.EventLog.ETS do
                false
            end),
          :ok <-
-           validate_rows(identity_entries, deadline_mono, fn
+           validate_rows(identity_entries, deadline_mono, owner_identity, fn
              {event_id, {_fingerprint, ^stream_id, event_number, position}} ->
                :ets.lookup(state.identity_position_table, position) == [{position, event_id}] and
                  :ets.lookup(state.identity_stream_position_table, {stream_id, event_number}) ==
@@ -1146,7 +1221,7 @@ defmodule Arbor.Persistence.EventLog.ETS do
                false
            end),
          :ok <-
-           validate_rows(stream_identity_entries, deadline_mono, fn
+           validate_rows(stream_identity_entries, deadline_mono, owner_identity, fn
              {{^stream_id, event_number}, event_id} ->
                case :ets.lookup(state.id_table, event_id) do
                  [] -> true
@@ -1163,17 +1238,17 @@ defmodule Arbor.Persistence.EventLog.ETS do
     end
   end
 
-  defp validate_rows(rows, deadline_mono, predicate) do
+  defp validate_rows(rows, deadline_mono, owner_identity, predicate) do
     rows
     |> Enum.chunk_every(128)
     |> Enum.reduce_while(:ok, fn chunk, :ok ->
-      case EventLog.remaining_timeout(deadline_mono) do
-        {:ok, _remaining} ->
+      case purge_owner_checkpoint(owner_identity, deadline_mono) do
+        :ok ->
           if Enum.all?(chunk, predicate),
             do: {:cont, :ok},
             else: {:halt, {:error, :purge_verification_failed}}
 
-        {:error, :operation_timeout} = error ->
+        {:error, _reason} = error ->
           {:halt, error}
       end
     end)
@@ -1207,22 +1282,28 @@ defmodule Arbor.Persistence.EventLog.ETS do
     end
   end
 
-  defp select_identity_positions(table, event_ids, deadline_mono) do
+  defp select_identity_positions(table, event_ids, deadline_mono, owner_identity) do
     if MapSet.size(event_ids) == 0 do
       {:ok, []}
     else
-      select_rows(table, [{:"$1", [], [:"$_"]}], deadline_mono, fn
+      select_rows(table, [{:"$1", [], [:"$_"]}], deadline_mono, owner_identity, fn
         {_position, event_id} -> MapSet.member?(event_ids, event_id)
         _malformed -> false
       end)
     end
   end
 
-  defp select_rows(table, match_spec, deadline_mono, filter \\ fn _row -> true end) do
-    with {:ok, _remaining} <- EventLog.remaining_timeout(deadline_mono) do
+  defp select_rows(
+         table,
+         match_spec,
+         deadline_mono,
+         owner_identity,
+         filter \\ fn _row -> true end
+       ) do
+    with :ok <- purge_owner_checkpoint(owner_identity, deadline_mono) do
       table
       |> :ets.select(match_spec, 128)
-      |> collect_selected_rows(deadline_mono, filter, [])
+      |> collect_selected_rows(deadline_mono, owner_identity, filter, [])
     end
   rescue
     _error -> {:error, :purge_verification_failed}
@@ -1230,33 +1311,36 @@ defmodule Arbor.Persistence.EventLog.ETS do
     :exit, _reason -> {:error, :purge_verification_failed}
   end
 
-  defp collect_selected_rows(:"$end_of_table", _deadline_mono, _filter, acc),
-    do: {:ok, Enum.reverse(acc)}
+  defp collect_selected_rows(:"$end_of_table", deadline_mono, owner_identity, _filter, acc) do
+    with :ok <- purge_owner_checkpoint(owner_identity, deadline_mono) do
+      {:ok, Enum.reverse(acc)}
+    end
+  end
 
-  defp collect_selected_rows({rows, continuation}, deadline_mono, filter, acc) do
-    with {:ok, _remaining} <- EventLog.remaining_timeout(deadline_mono) do
+  defp collect_selected_rows({rows, continuation}, deadline_mono, owner_identity, filter, acc) do
+    with :ok <- purge_owner_checkpoint(owner_identity, deadline_mono) do
       acc =
         Enum.reduce(rows, acc, fn row, kept -> if filter.(row), do: [row | kept], else: kept end)
 
       continuation
       |> :ets.select()
-      |> collect_selected_rows(deadline_mono, filter, acc)
+      |> collect_selected_rows(deadline_mono, owner_identity, filter, acc)
     end
   end
 
-  defp delete_rows(table, keys, deadline_mono) do
-    keys
-    |> Enum.chunk_every(128)
-    |> Enum.reduce_while(:ok, fn chunk, :ok ->
-      case EventLog.remaining_timeout(deadline_mono) do
-        {:ok, _remaining} ->
-          Enum.each(chunk, &:ets.delete(table, &1))
-          {:cont, :ok}
+  defp delete_rows(table, keys, deadline_mono, owner_identity) do
+    with :ok <- validate_purge_owner(owner_identity, deadline_mono) do
+      Enum.reduce_while(keys, :ok, fn key, :ok ->
+        case purge_owner_checkpoint(owner_identity, deadline_mono) do
+          :ok ->
+            true = :ets.delete(table, key)
+            {:cont, :ok}
 
-        {:error, :operation_timeout} = error ->
-          {:halt, error}
-      end
-    end)
+          {:error, _reason} = error ->
+            {:halt, error}
+        end
+      end)
+    end
   end
 
   defp verify_ets_stream_absence(
@@ -1265,19 +1349,42 @@ defmodule Arbor.Persistence.EventLog.ETS do
          global_match,
          identity_match,
          event_ids,
-         deadline_mono
+         deadline_mono,
+         owner_identity
        ) do
-    with {:ok, []} <- select_rows(state.stream_table, stream_match, deadline_mono),
-         {:ok, []} <- select_rows(state.global_table, global_match, deadline_mono),
-         {:ok, []} <- select_rows(state.id_table, identity_match, deadline_mono),
+    with {:ok, []} <-
+           select_rows(state.stream_table, stream_match, deadline_mono, owner_identity),
          {:ok, []} <-
-           select_rows(state.identity_stream_position_table, stream_match, deadline_mono),
+           select_rows(state.global_table, global_match, deadline_mono, owner_identity),
          {:ok, []} <-
-           select_identity_positions(state.identity_position_table, event_ids, deadline_mono) do
+           select_rows(state.id_table, identity_match, deadline_mono, owner_identity),
+         {:ok, []} <-
+           select_rows(
+             state.identity_stream_position_table,
+             stream_match,
+             deadline_mono,
+             owner_identity
+           ),
+         {:ok, []} <-
+           select_identity_positions(
+             state.identity_position_table,
+             event_ids,
+             deadline_mono,
+             owner_identity
+           ) do
       :ok
     else
       _present_or_uncertain -> {:error, :purge_verification_failed}
     end
+  end
+
+  defp validate_purge_owner(owner_identity, deadline_mono),
+    do: BoundedWorker.validate_owner(owner_identity, deadline_mono)
+
+  defp purge_owner_checkpoint(owner_identity, deadline_mono) do
+    if BoundedWorker.owner_active?(owner_identity, deadline_mono),
+      do: :ok,
+      else: {:error, :operation_timeout}
   end
 
   defp purge_ets_metadata(state, stream_id) do
