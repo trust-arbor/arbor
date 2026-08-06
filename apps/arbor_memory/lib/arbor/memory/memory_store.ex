@@ -12,8 +12,16 @@ defmodule Arbor.Memory.MemoryStore do
   (e.g., in tests), callers continue in ETS-only mode.
   """
 
-  alias Arbor.Contracts.Persistence.Record
-  alias Arbor.Memory.Embedding
+  alias Arbor.Contracts.Persistence.{Record, VectorMatch, VectorRecord}
+  alias Arbor.Contracts.Security.TaintEnvelope
+
+  alias Arbor.Memory.{
+    EmbeddingEvidence,
+    MemoryStoreIdentity,
+    StrictEmbeddingInput,
+    StrictVectorSeam
+  }
+
   alias Arbor.Persistence
   alias Arbor.Persistence.BufferedStore
 
@@ -631,10 +639,11 @@ defmodule Arbor.Memory.MemoryStore do
   @doc """
   Queue an embedding for a memory record (async).
 
-  Generates an embedding via `Arbor.AI.embed/2` and stores it in the
-  `memory_embeddings` table for semantic search. Fire-and-forget —
-  failures are logged at debug level and never affect the caller. An invalid
-  supplied taint returns a bounded error before spawning.
+  Generates an embedding via `Arbor.AI.embed/2` and stores it through the
+  strict vector seam. Logical identity is exactly
+  `{agent_id, namespace, key}`; `VectorRecord.id` is a deterministic
+  `ms_` digest. Fire-and-forget — provider failures are logged at debug
+  level. An invalid supplied taint returns a bounded error before spawning.
 
   ## Parameters
 
@@ -644,6 +653,7 @@ defmodule Arbor.Memory.MemoryStore do
   - `opts` - Additional metadata for the embedding
     - `:agent_id` - Agent that owns this memory
     - `:type` - Semantic type hint (e.g., :goal, :thought, :intent)
+    - `:taint` - Source-owned taint only (never from payload keys)
   """
   @spec embed_async(String.t(), String.t(), String.t(), keyword()) :: :ok | {:error, term()}
   def embed_async(namespace, key, content, opts \\ [])
@@ -655,18 +665,31 @@ defmodule Arbor.Memory.MemoryStore do
       type = Keyword.get(opts, :type)
 
       with {:ok, type} <- normalize_embedding_type(type),
-           base_metadata <- %{type: type, source: namespace},
-           {:ok, metadata} <- maybe_add_taint_to_embedding(base_metadata, content, opts) do
-        if agent_id && is_binary(content) && content != "" do
+           {:ok, taint} <- resolve_source_taint(opts) do
+        if is_binary(agent_id) and agent_id != "" and is_binary(content) and content != "" do
           Task.start(fn ->
             try do
-              case Arbor.AI.embed(content) do
-                {:ok, %{embedding: embedding}} ->
-                  Embedding.store(agent_id, content, embedding, metadata)
+              evidence =
+                case Arbor.AI.embed(content) do
+                  {:ok, result} ->
+                    case EmbeddingEvidence.from_provider_result(result) do
+                      {:ok, validated} -> validated
+                      {:error, _} -> EmbeddingEvidence.local_hash_fallback(content)
+                    end
 
-                {:error, reason} ->
-                  Logger.debug("Embedding failed for #{namespace}/#{key}: #{inspect(reason)}")
-              end
+                  {:error, _} ->
+                    EmbeddingEvidence.local_hash_fallback(content)
+                end
+
+              write_memory_store_embedding(
+                agent_id,
+                namespace,
+                key,
+                content,
+                type,
+                evidence,
+                taint
+              )
             rescue
               e -> Logger.debug("embed_async error: #{Exception.message(e)}")
             catch
@@ -688,63 +711,503 @@ defmodule Arbor.Memory.MemoryStore do
     do: {:error, {:memory_store, :invalid_request, :invalid_arguments}}
 
   @doc """
-  Search memory by semantic similarity.
+  Search memory by semantic similarity via the strict ANN seam.
 
-  Embeds the query text, then searches `memory_embeddings` using pgvector
-  cosine distance. Returns `{:ok, results}` or `{:ok, []}` on any failure.
+  Embeds the query text, then searches with exact descriptor and
+  `source_namespace: namespace`. Integrity failures (malformed, tenant,
+  namespace, invalid provenance) return `{:error, reason}`. Empty agent_id
+  or query still returns `{:ok, []}`.
 
   ## Options
 
   - `:agent_id` - Required. Scopes search to this agent's embeddings.
   - `:limit` - Max results (default 10)
   - `:threshold` - Minimum similarity 0.0–1.0 (default 0.3)
-  - `:type_filter` - Filter by memory_type (e.g., "goal", "intent", "thought")
+  - `:type_filter` - Filter by category (e.g., "goal", "intent", "thought")
   """
-  @spec semantic_search(String.t(), String.t(), keyword()) :: {:ok, [map()]}
+  @spec semantic_search(String.t(), String.t(), keyword()) ::
+          {:ok, [map()]} | {:error, term()}
   def semantic_search(query_text, namespace, opts \\ []) do
-    agent_id = Keyword.get(opts, :agent_id)
+    if keyword_options?(opts) do
+      agent_id = Keyword.get(opts, :agent_id)
 
-    if agent_id && query_text && query_text != "" do
-      do_semantic_search(query_text, agent_id, namespace, opts)
+      if is_binary(agent_id) and agent_id != "" and is_binary(namespace) and
+           is_binary(query_text) and query_text != "" do
+        do_semantic_search(query_text, agent_id, namespace, opts)
+      else
+        {:ok, []}
+      end
     else
-      {:ok, []}
+      {:error, {:memory_store, :invalid_request, :invalid_options}}
     end
-  catch
-    kind, reason ->
-      Logger.debug("semantic_search #{kind}: #{inspect(reason)}")
-      {:ok, []}
   end
 
-  defp do_semantic_search(query_text, agent_id, _namespace, opts) do
-    case Arbor.AI.embed(query_text) do
-      {:ok, %{embedding: embedding}} ->
-        search_opts =
-          [
-            limit: Keyword.get(opts, :limit, 10),
-            threshold: Keyword.get(opts, :threshold, 0.3)
-          ]
-          |> maybe_add_type_filter(opts)
+  @doc """
+  Delete one MemoryStore semantic embedding by original logical identity.
 
-        case Embedding.search(agent_id, embedding, search_opts) do
-          {:ok, results} ->
-            {:ok, results}
+  Fetches `{agent_id, namespace, key}`, builds a fenced tombstone delete, then
+  execute/reconcile. Never uses the deterministic row id as the fetch key.
+  """
+  @spec delete_embedding(String.t(), String.t(), keyword()) :: :ok | {:error, term()}
+  def delete_embedding(namespace, key, opts \\ [])
 
-          {:error, reason} ->
-            Logger.debug("Semantic search query failed: #{inspect(reason)}")
-            {:ok, []}
-        end
+  def delete_embedding(namespace, key, opts)
+      when is_binary(namespace) and is_binary(key) do
+    if keyword_options?(opts) do
+      agent_id = Keyword.get(opts, :agent_id)
 
-      {:error, reason} ->
-        Logger.debug("Semantic search embedding failed: #{inspect(reason)}")
+      if is_binary(agent_id) do
+        delete_semantic_embedding(agent_id, namespace, key)
+      else
+        {:error, {:memory_store, :invalid_request, :missing_agent_id}}
+      end
+    else
+      {:error, {:memory_store, :invalid_request, :invalid_options}}
+    end
+  end
+
+  def delete_embedding(_namespace, _key, _opts),
+    do: {:error, {:memory_store, :invalid_request, :invalid_arguments}}
+
+  defp do_semantic_search(query_text, agent_id, namespace, opts) do
+    with {:ok, evidence} <- embed_query_for_search(query_text),
+         {:ok, search_opts} <- memory_store_search_opts(evidence, namespace, opts),
+         seam <- StrictVectorSeam.resolve() do
+      case safe_vector_call(fn -> seam.search(agent_id, evidence.vector, search_opts) end) do
+        {:ok, matches} ->
+          # Integrity failures on a returned set are hard errors (never {:ok, []}).
+          validate_memory_store_matches(agent_id, namespace, matches, search_opts, evidence)
+
+        {:error, reason}
+        when reason in [
+               :tenant_mismatch,
+               :namespace_mismatch,
+               :category_mismatch,
+               :descriptor_mismatch,
+               :invalid_durable_provenance,
+               :malformed_persistence_result
+             ] ->
+          {:error, reason}
+
+        {:error, _backend_or_unavailable} ->
+          # Transport / unsupported backend remains soft-empty for callers.
+          {:ok, []}
+      end
+    else
+      {:error, reason}
+      when reason in [
+             :tenant_mismatch,
+             :namespace_mismatch,
+             :descriptor_mismatch,
+             :invalid_durable_provenance,
+             :malformed_persistence_result,
+             :invalid_provider_embedding,
+             :invalid_embedding
+           ] ->
+        {:error, reason}
+
+      {:error, _other} ->
         {:ok, []}
     end
   end
 
-  defp maybe_add_type_filter(search_opts, opts) do
-    case Keyword.get(opts, :type_filter) do
-      nil -> search_opts
-      filter -> Keyword.put(search_opts, :type_filter, to_string(filter))
+  defp embed_query_for_search(query_text) do
+    case Arbor.AI.embed(query_text) do
+      {:ok, result} ->
+        case EmbeddingEvidence.from_provider_result(result) do
+          {:ok, evidence} ->
+            {:ok, evidence}
+
+          {:error, _reason} ->
+            {:ok, EmbeddingEvidence.local_hash_fallback(query_text)}
+        end
+
+      {:error, _reason} ->
+        {:ok, EmbeddingEvidence.local_hash_fallback(query_text)}
     end
+  end
+
+  defp memory_store_search_opts(evidence, namespace, opts) when is_list(opts) do
+    with true <- Keyword.keyword?(opts),
+         limit when is_integer(limit) and limit > 0 <- Keyword.get(opts, :limit, 10),
+         threshold when is_number(threshold) and threshold >= -1.0 and threshold <= 1.0 <-
+           Keyword.get(opts, :threshold, 0.3) do
+      base = [
+        model_id: evidence.model_id,
+        dimensions: VectorRecord.dimensions(),
+        encoding: VectorRecord.encoding(),
+        source_namespace: namespace,
+        threshold: threshold,
+        limit: min(limit, 1000)
+      ]
+
+      search_opts =
+        case Keyword.get(opts, :type_filter) do
+          nil -> base
+          filter -> Keyword.put(base, :category, StrictEmbeddingInput.category_for_type(filter))
+        end
+
+      {:ok, search_opts}
+    else
+      _ -> {:error, :invalid_request}
+    end
+  end
+
+  defp memory_store_search_opts(_evidence, _namespace, _opts), do: {:error, :invalid_request}
+
+  defp validate_memory_store_matches(agent_id, namespace, matches, search_opts, evidence)
+       when is_list(matches) do
+    expected_category = Keyword.get(search_opts, :category)
+    expected_model = evidence.model_id
+    expected_dims = VectorRecord.dimensions()
+    expected_encoding = VectorRecord.encoding()
+
+    # Validate every returned member before any use.
+    matches
+    |> Enum.reduce_while({:ok, []}, fn item, {:ok, acc} ->
+      case item do
+        %{match: view, similarity: sim} when is_map(view) and is_number(sim) ->
+          view_agent_id = vector_field(view, :agent_id)
+          view_namespace = vector_field(view, :source_namespace)
+          source_key = vector_field(view, :source_key)
+          row_id = vector_field(view, :id)
+          category = vector_field(view, :category)
+          model_id = vector_field(view, :model_id)
+          dimensions = vector_field(view, :dimensions)
+          encoding = vector_field(view, :encoding)
+          tombstone = vector_field(view, :tombstone)
+          body = vector_field(view, :body)
+          provenance_status = vector_field(view, :provenance_status)
+
+          cond do
+            view_agent_id != agent_id ->
+              {:halt, {:error, :tenant_mismatch}}
+
+            view_namespace != namespace ->
+              {:halt, {:error, :namespace_mismatch}}
+
+            expected_category != nil and category != expected_category ->
+              {:halt, {:error, :category_mismatch}}
+
+            model_id != expected_model ->
+              {:halt, {:error, :descriptor_mismatch}}
+
+            dimensions != expected_dims ->
+              {:halt, {:error, :descriptor_mismatch}}
+
+            encoding != expected_encoding ->
+              {:halt, {:error, :descriptor_mismatch}}
+
+            tombstone != false ->
+              {:halt, {:error, :malformed_persistence_result}}
+
+            not valid_similarity?(sim) ->
+              {:halt, {:error, :malformed_persistence_result}}
+
+            not is_binary(source_key) or source_key == "" ->
+              {:halt, {:error, :malformed_persistence_result}}
+
+            not is_binary(row_id) or
+                row_id != MemoryStoreIdentity.row_id(agent_id, namespace, source_key) ->
+              {:halt, {:error, :malformed_persistence_result}}
+
+            not is_map(body) ->
+              {:halt, {:error, :malformed_persistence_result}}
+
+            not is_binary(Map.get(body, "content")) ->
+              {:halt, {:error, :malformed_persistence_result}}
+
+            not is_map(Map.get(body, "metadata", %{})) ->
+              {:halt, {:error, :malformed_persistence_result}}
+
+            provenance_status == :invalid_durable_provenance ->
+              {:halt, {:error, :invalid_durable_provenance}}
+
+            provenance_status not in [:verified, :legacy_unlabeled] ->
+              {:halt, {:error, :malformed_persistence_result}}
+
+            true ->
+              result = %{
+                id: source_key,
+                content: Map.get(body, "content", ""),
+                similarity: sim,
+                metadata: Map.get(body, "metadata", %{}),
+                model_id: model_id,
+                provenance_status: provenance_status,
+                source_namespace: view_namespace,
+                source_key: source_key
+              }
+
+              {:cont, {:ok, [result | acc]}}
+          end
+
+        _ ->
+          {:halt, {:error, :malformed_persistence_result}}
+      end
+    end)
+    |> case do
+      {:ok, results} -> {:ok, Enum.reverse(results)}
+      error -> error
+    end
+  end
+
+  defp validate_memory_store_matches(_agent_id, _namespace, _matches, _opts, _evidence),
+    do: {:error, :malformed_persistence_result}
+
+  defp delete_semantic_embedding(agent_id, namespace, key) do
+    seam = StrictVectorSeam.resolve()
+
+    case safe_vector_call(fn -> seam.fetch(agent_id, namespace, key, []) end) do
+      {:error, :not_found} ->
+        :ok
+
+      {:ok, view} ->
+        identity =
+          {agent_id, namespace, key, MemoryStoreIdentity.row_id(agent_id, namespace, key)}
+
+        with :ok <- validate_memory_store_view(view, identity, false),
+             closed <- memory_store_delete_input(view),
+             {:ok, operation, _view} <-
+               safe_vector_call(fn -> seam.encode_operation(closed) end),
+             {:ok, _receipt} <- execute_or_reconcile_exact(seam, agent_id, operation, identity) do
+          :ok
+        else
+          {:error, reason} -> {:error, reason}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp memory_store_delete_input(view) do
+    %{
+      kind: :delete,
+      id: vector_field(view, :id),
+      agent_id: vector_field(view, :agent_id),
+      source_namespace: vector_field(view, :source_namespace),
+      source_key: vector_field(view, :source_key),
+      payload: vector_field(view, :body),
+      vector: vector_field(view, :vector),
+      category: vector_field(view, :category),
+      generation: vector_field(view, :generation),
+      revision: vector_field(view, :revision),
+      tombstone: false,
+      expected_generation: vector_field(view, :generation),
+      expected_revision: vector_field(view, :revision),
+      model_evidence: {:model_id, vector_field(view, :model_id)},
+      taint: vector_field(view, :taint)
+    }
+  end
+
+  defp write_memory_store_embedding(agent_id, namespace, key, content, type, evidence, taint) do
+    seam = StrictVectorSeam.resolve()
+    identity = {agent_id, namespace, key, MemoryStoreIdentity.row_id(agent_id, namespace, key)}
+
+    attrs = %{
+      agent_id: agent_id,
+      namespace: namespace,
+      key: key,
+      content: content,
+      vector: evidence.vector,
+      type: type,
+      metadata: %{type: type, source: namespace},
+      model_evidence: evidence.model_evidence,
+      taint: taint
+    }
+
+    with {:ok, closed} <- memory_store_write_input(seam, attrs, identity),
+         {:ok, operation, _view} <- safe_vector_call(fn -> seam.encode_operation(closed) end),
+         {:ok, _receipt} <- execute_or_reconcile_exact(seam, agent_id, operation, identity) do
+      :ok
+    else
+      {:error, reason} ->
+        Logger.debug("strict embed write failed for #{namespace}/#{key}: #{inspect(reason)}")
+    end
+  end
+
+  defp memory_store_write_input(seam, attrs, {agent_id, namespace, key, _row_id} = identity) do
+    case safe_vector_call(fn ->
+           seam.fetch(agent_id, namespace, key, include_tombstone: true)
+         end) do
+      {:error, :not_found} ->
+        {:ok, StrictEmbeddingInput.memory_store_insert(attrs)}
+
+      {:ok, view} ->
+        with :ok <- validate_memory_store_view(view, identity, true) do
+          {:ok, StrictEmbeddingInput.memory_store_replace(attrs, view)}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+
+      _malformed ->
+        {:error, :malformed_persistence_result}
+    end
+  end
+
+  # A lost execute acknowledgement is reconciled against the immutable operation.
+  # If the ledger proves absence, retry that exact idempotent operation once; never
+  # acknowledge an absent reconcile as success.
+  defp execute_or_reconcile_exact(seam, agent_id, operation, identity),
+    do: execute_or_reconcile_exact(seam, agent_id, operation, identity, 1)
+
+  defp execute_or_reconcile_exact(seam, agent_id, operation, identity, retries_left) do
+    case safe_vector_call(fn -> seam.execute(agent_id, operation, []) end) do
+      {:ok, receipt} ->
+        with :ok <- validate_receipt_identity(receipt, identity), do: {:ok, receipt}
+
+      {:error, :indeterminate} ->
+        reconcile_exact(seam, agent_id, operation, identity, retries_left)
+
+      {:error, reason} ->
+        {:error, reason}
+
+      _malformed ->
+        {:error, :malformed_persistence_result}
+    end
+  end
+
+  defp reconcile_exact(seam, agent_id, operation, identity, retries_left) do
+    case safe_vector_call(fn -> seam.reconcile(agent_id, operation, []) end) do
+      {:ok, :absent} when retries_left > 0 ->
+        execute_or_reconcile_exact(seam, agent_id, operation, identity, retries_left - 1)
+
+      {:ok, :absent} ->
+        {:error, :persistence_indeterminate}
+
+      {:ok, receipt} ->
+        with :ok <- validate_receipt_identity(receipt, identity), do: {:ok, receipt}
+
+      {:error, reason} ->
+        {:error, reason}
+
+      _malformed ->
+        {:error, :persistence_indeterminate}
+    end
+  end
+
+  defp safe_vector_call(fun) do
+    fun.()
+  rescue
+    _ -> {:error, :indeterminate}
+  catch
+    _, _ -> {:error, :indeterminate}
+  end
+
+  defp validate_memory_store_view(view, {agent_id, namespace, key, row_id}, allow_tombstone?)
+       when is_map(view) and is_boolean(allow_tombstone?) do
+    view_agent_id = vector_field(view, :agent_id)
+    source_namespace = vector_field(view, :source_namespace)
+    source_key = vector_field(view, :source_key)
+    view_row_id = vector_field(view, :id)
+    tombstone = vector_field(view, :tombstone)
+    body = vector_field(view, :body)
+    vector = vector_field(view, :vector)
+    model_id = vector_field(view, :model_id)
+    dimensions = vector_field(view, :dimensions)
+    encoding = vector_field(view, :encoding)
+    category = vector_field(view, :category)
+    generation = vector_field(view, :generation)
+    revision = vector_field(view, :revision)
+
+    cond do
+      view_agent_id != agent_id ->
+        {:error, :tenant_mismatch}
+
+      source_namespace != namespace ->
+        {:error, :namespace_mismatch}
+
+      source_key != key ->
+        {:error, :malformed_persistence_result}
+
+      view_row_id != row_id ->
+        {:error, :malformed_persistence_result}
+
+      not is_boolean(tombstone) ->
+        {:error, :malformed_persistence_result}
+
+      tombstone and not allow_tombstone? ->
+        {:error, :malformed_persistence_result}
+
+      not is_map(body) or not is_binary(Map.get(body, "content")) or
+          not is_map(Map.get(body, "metadata", %{})) ->
+        {:error, :malformed_persistence_result}
+
+      not valid_contract_vector?(vector) ->
+        {:error, :malformed_persistence_result}
+
+      not is_binary(model_id) or model_id == "" or dimensions != VectorRecord.dimensions() or
+          encoding != VectorRecord.encoding() ->
+        {:error, :descriptor_mismatch}
+
+      not is_binary(category) or category == "" ->
+        {:error, :malformed_persistence_result}
+
+      not is_integer(generation) or generation < 1 ->
+        {:error, :malformed_persistence_result}
+
+      not is_integer(revision) or revision < 1 ->
+        {:error, :malformed_persistence_result}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp validate_memory_store_view(_view, _identity, _allow_tombstone?),
+    do: {:error, :malformed_persistence_result}
+
+  defp validate_receipt_identity(receipt, {agent_id, namespace, source_key, row_id}) do
+    with record when is_map(record) <- vector_field(receipt, :record),
+         ^agent_id <- vector_field(record, :agent_id),
+         ^namespace <- vector_field(record, :source_namespace),
+         ^source_key <- vector_field(record, :source_key),
+         ^row_id <- vector_field(record, :id) do
+      :ok
+    else
+      _ -> {:error, :malformed_persistence_result}
+    end
+  end
+
+  defp vector_field(map, key) when is_map(map) do
+    case Map.fetch(map, key) do
+      {:ok, value} -> value
+      :error -> Map.get(map, Atom.to_string(key))
+    end
+  end
+
+  defp vector_field(_value, _key), do: nil
+
+  defp valid_similarity?(similarity) do
+    match?({:ok, _normalized}, VectorMatch.normalize_similarity(similarity))
+  end
+
+  defp valid_contract_vector?(vector) do
+    match?({:ok, _normalized}, VectorRecord.normalize_vector(vector))
+  end
+
+  defp resolve_source_taint(opts) do
+    case Keyword.get(opts, :taint) do
+      nil ->
+        {:ok, TaintEnvelope.missing_fallback()}
+
+      taint ->
+        case Arbor.Contracts.Security.Taint.canonicalize(taint) do
+          {:ok, canonical} ->
+            {:ok, canonical}
+
+          {:error, reason} when is_atom(reason) ->
+            {:error, {:memory_store, :invalid_durable_provenance, reason}}
+
+          _ ->
+            {:error, {:memory_store, :invalid_durable_provenance, :invalid_taint}}
+        end
+    end
+  rescue
+    _ -> {:error, {:memory_store, :invalid_durable_provenance, :invalid_taint}}
+  catch
+    _, _ -> {:error, {:memory_store, :invalid_durable_provenance, :invalid_taint}}
   end
 
   # ── Taint persistence helpers ────────────────────────────────────────
@@ -1335,29 +1798,6 @@ defmodule Arbor.Memory.MemoryStore do
 
   defp legacy_taint_metadata?(metadata) do
     Enum.any?(@legacy_taint_keys ++ @legacy_taint_atom_keys, &Map.has_key?(metadata, &1))
-  end
-
-  defp maybe_add_taint_to_embedding(metadata, content, opts) do
-    case Keyword.get(opts, :taint) do
-      nil ->
-        {:ok, metadata}
-
-      taint ->
-        case Arbor.Signals.Taint.bind_durable_provenance(content, taint) do
-          {:ok, envelope} ->
-            {:ok, Map.put(metadata, "taint", envelope)}
-
-          {:error, reason} when is_atom(reason) ->
-            {:error, {:memory_store, :invalid_durable_provenance, reason}}
-
-          _ ->
-            {:error, {:memory_store, :invalid_durable_provenance, :invalid_envelope}}
-        end
-    end
-  rescue
-    _ -> {:error, {:memory_store, :invalid_durable_provenance, :invalid_envelope}}
-  catch
-    _, _ -> {:error, {:memory_store, :invalid_durable_provenance, :invalid_envelope}}
   end
 
   defp normalize_embedding_type(nil), do: {:ok, nil}

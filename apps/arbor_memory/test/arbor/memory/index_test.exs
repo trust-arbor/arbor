@@ -7,7 +7,8 @@ defmodule Arbor.Memory.IndexTest do
   @persistent_dimension 768
 
   defmodule ControlledWriter do
-    @behaviour Arbor.Memory.Index.PersistentWriter
+    @moduledoc false
+    # StrictVectorSeam fake preserving Index reliability injection modes.
 
     def configure(agent_id, mode) do
       counter = :counters.new(1, [:atomics])
@@ -26,26 +27,46 @@ defmodule Arbor.Memory.IndexTest do
 
     def disarm(agent_id), do: :persistent_term.erase({__MODULE__, agent_id})
 
-    @impl true
-    def store(agent_id, _content, _embedding, metadata) do
+    def encode_operation(input), do: Arbor.Memory.Embedding.encode_strict_operation(input)
+    def encode_batch(inputs), do: Arbor.Memory.Embedding.encode_strict_batch(inputs)
+
+    def execute(agent_id, operation, _opts) do
       {mode, counter} = :persistent_term.get({__MODULE__, agent_id})
       :counters.add(counter, 1, 1)
 
+      case operation do
+        %{kind: :batch, operations: ops} ->
+          dispatch_batch(agent_id, mode, ops)
+
+        %{record: %{source_key: key}} ->
+          dispatch_single(agent_id, mode, key)
+
+        _ ->
+          {:error, :invalid_request}
+      end
+    end
+
+    def reconcile(_agent_id, _operation, _opts), do: {:ok, :absent}
+    def search(_agent_id, _vector, _opts), do: {:ok, []}
+    def fetch(_agent_id, _ns, _key, _opts), do: {:error, :not_found}
+    def list(_agent_id, _opts), do: {:ok, []}
+
+    defp dispatch_single(agent_id, mode, key) do
       case mode do
         {:block, owner} ->
           send(owner, {:writer_started, agent_id, self()})
 
           receive do
-            :release_writer -> {:ok, requested_id(metadata)}
+            :release_writer -> ok_receipt(key)
           after
-            6_000 -> {:ok, requested_id(metadata)}
+            6_000 -> ok_receipt(key)
           end
 
         {:block_for_kill, owner} ->
           send(owner, {:writer_waiting_for_kill, agent_id, self()})
 
           receive do
-            :never_sent -> {:ok, requested_id(metadata)}
+            :never_sent -> ok_receipt(key)
           end
 
         {:trap_until_cancelled, owner} ->
@@ -53,7 +74,7 @@ defmodule Arbor.Memory.IndexTest do
           send(owner, {:writer_trapping_exit, agent_id, self()})
 
           receive do
-            :never_sent -> {:ok, requested_id(metadata)}
+            :never_sent -> ok_receipt(key)
           end
 
         {:report_overlap, owner, prior_writer_pid} ->
@@ -62,7 +83,7 @@ defmodule Arbor.Memory.IndexTest do
             {:writer_overlap_observed, agent_id, Process.alive?(prior_writer_pid)}
           )
 
-          {:ok, requested_id(metadata)}
+          ok_receipt(key)
 
         {:block_until_commit, owner} ->
           send(owner, {:writer_waiting_to_commit, agent_id, self()})
@@ -70,7 +91,7 @@ defmodule Arbor.Memory.IndexTest do
           receive do
             :commit ->
               send(owner, {:writer_committed, agent_id, self()})
-              {:ok, requested_id(metadata)}
+              ok_receipt(key)
           end
 
         {:block_then_error, owner} ->
@@ -81,7 +102,7 @@ defmodule Arbor.Memory.IndexTest do
           end
 
         :success ->
-          {:ok, requested_id(metadata)}
+          ok_receipt(key)
 
         :transient_error ->
           {:error, :injected_transient_failure}
@@ -91,31 +112,40 @@ defmodule Arbor.Memory.IndexTest do
 
         :bare_ok ->
           :ok
+
+        other ->
+          # batch modes used for single by mistake
+          case other do
+            {:block_batch, owner} ->
+              send(owner, {:batch_writer_started, agent_id, self()})
+
+              receive do
+                :release_batch -> ok_receipt(key)
+              after
+                6_000 -> {:error, :injected_batch_timeout}
+              end
+
+            _ ->
+              ok_receipt(key)
+          end
       end
     end
 
-    @impl true
-    def store_batch_with_ids(agent_id, entries) do
-      {mode, counter} = :persistent_term.get({__MODULE__, agent_id})
-      :counters.add(counter, 1, 1)
+    defp dispatch_batch(agent_id, mode, ops) do
+      keys = Enum.map(ops, fn op -> op.record.source_key end)
 
       case mode do
         {:block_batch, owner} ->
           send(owner, {:batch_writer_started, agent_id, self()})
 
           receive do
-            :release_batch ->
-              {:ok,
-               Enum.map(entries, fn {_content, _embedding, metadata} ->
-                 requested_id(metadata)
-               end)}
+            :release_batch -> ok_batch_receipt(keys)
           after
             6_000 -> {:error, :injected_batch_timeout}
           end
 
         :success ->
-          {:ok,
-           Enum.map(entries, fn {_content, _embedding, metadata} -> requested_id(metadata) end)}
+          ok_batch_receipt(keys)
 
         :transient_error ->
           {:error, :injected_transient_failure}
@@ -125,10 +155,18 @@ defmodule Arbor.Memory.IndexTest do
 
         :bare_ok ->
           :ok
+
+        _other ->
+          ok_batch_receipt(keys)
       end
     end
 
-    defp requested_id(metadata), do: Map.get(metadata, :id) || Map.get(metadata, "id")
+    defp ok_receipt(key), do: {:ok, %{kind: :insert, record: %{source_key: key, id: key}}}
+
+    defp ok_batch_receipt(keys) do
+      receipts = Enum.map(keys, fn k -> %{kind: :insert, record: %{source_key: k, id: k}} end)
+      {:ok, %{kind: :batch, receipts: receipts, record: nil}}
+    end
   end
 
   defmodule ControlledProvider do
@@ -153,22 +191,33 @@ defmodule Arbor.Memory.IndexTest do
       {mode, counter} = :persistent_term.get({__MODULE__, content})
       :counters.add(counter, 1, 1)
 
+      ok = fn ->
+        {:ok,
+         %{
+           embedding: List.duplicate(0.5, 768),
+           model: "test-embed",
+           provider: :test,
+           dimensions: 768,
+           usage: %{prompt_tokens: 1, total_tokens: 1}
+         }}
+      end
+
       case mode do
         :success ->
-          {:ok, %{embedding: List.duplicate(0.5, 768)}}
+          ok.()
 
         {:block, owner} ->
           send(owner, {:provider_started, content, self()})
 
           receive do
-            :release_provider -> {:ok, %{embedding: List.duplicate(0.5, 768)}}
+            :release_provider -> ok.()
           end
 
         {:block_forever, owner} ->
           send(owner, {:provider_stalled, content, self()})
 
           receive do
-            :never_sent -> {:ok, %{embedding: List.duplicate(0.5, 768)}}
+            :never_sent -> ok.()
           end
 
         {:trap_until_cancelled, owner} ->
@@ -176,7 +225,7 @@ defmodule Arbor.Memory.IndexTest do
           send(owner, {:provider_trapping_exit, content, self()})
 
           receive do
-            :never_sent -> {:ok, %{embedding: List.duplicate(0.5, 768)}}
+            :never_sent -> ok.()
           end
       end
     end
@@ -221,11 +270,12 @@ defmodule Arbor.Memory.IndexTest do
     end
 
     test "can use pre-computed embedding", %{pid: pid} do
-      embedding = List.duplicate(0.5, 128)
+      embedding = List.duplicate(0.5, 768)
       {:ok, entry_id} = Index.index(pid, "Test", %{}, embedding: embedding)
 
       {:ok, entry} = Index.get(pid, entry_id)
       assert entry.embedding == embedding
+      assert entry.model_id == "legacy:unspecified"
     end
 
     test "acknowledgement regression: a slow durable writer does not time out or block reads" do
@@ -237,7 +287,7 @@ defmodule Arbor.Memory.IndexTest do
         Index.start_link(
           agent_id: agent_id,
           backend: :dual,
-          persistent_writer: ControlledWriter,
+          strict_vector_seam: ControlledWriter,
           entry_id_generator: fn -> entry_id end,
           name: nil
         )
@@ -285,7 +335,7 @@ defmodule Arbor.Memory.IndexTest do
         Index.start_link(
           agent_id: agent_id,
           backend: :dual,
-          persistent_writer: ControlledWriter,
+          strict_vector_seam: ControlledWriter,
           entry_id_generator: fn -> entry_id end,
           name: nil
         )
@@ -331,7 +381,7 @@ defmodule Arbor.Memory.IndexTest do
         Index.start_link(
           agent_id: agent_id,
           backend: :pgvector,
-          persistent_writer: ControlledWriter,
+          strict_vector_seam: ControlledWriter,
           entry_id_generator: fn -> entry_id end,
           name: nil
         )
@@ -383,7 +433,7 @@ defmodule Arbor.Memory.IndexTest do
         Index.start_link(
           agent_id: agent_id,
           backend: :pgvector,
-          persistent_writer: ControlledWriter,
+          strict_vector_seam: ControlledWriter,
           entry_id_generator: fn -> entry_id end,
           name: nil
         )
@@ -446,7 +496,7 @@ defmodule Arbor.Memory.IndexTest do
         Index.start_link(
           agent_id: agent_id,
           backend: :pgvector,
-          persistent_writer: ControlledWriter,
+          strict_vector_seam: ControlledWriter,
           entry_id_generator: fn -> entry_id end,
           operation_timeout_ms: 2_000,
           name: nil
@@ -502,7 +552,7 @@ defmodule Arbor.Memory.IndexTest do
         Index.start_link(
           agent_id: agent_id,
           backend: :dual,
-          persistent_writer: ControlledWriter,
+          strict_vector_seam: ControlledWriter,
           entry_id_generator: fn -> duplicate_id end,
           name: nil
         )
@@ -533,7 +583,7 @@ defmodule Arbor.Memory.IndexTest do
         Index.start_link(
           agent_id: agent_id,
           backend: :dual,
-          persistent_writer: ControlledWriter,
+          strict_vector_seam: ControlledWriter,
           name: nil
         )
 
@@ -590,7 +640,7 @@ defmodule Arbor.Memory.IndexTest do
         Index.start_link(
           agent_id: agent_id,
           backend: :dual,
-          persistent_writer: ControlledWriter,
+          strict_vector_seam: ControlledWriter,
           name: nil
         )
 
@@ -638,7 +688,7 @@ defmodule Arbor.Memory.IndexTest do
         Index.start_link(
           agent_id: agent_id,
           backend: :dual,
-          persistent_writer: ControlledWriter,
+          strict_vector_seam: ControlledWriter,
           name: nil
         )
 
@@ -674,7 +724,7 @@ defmodule Arbor.Memory.IndexTest do
           agent_id: agent_id,
           backend: :dual,
           embedding_provider: ControlledProvider,
-          persistent_writer: ControlledWriter,
+          strict_vector_seam: ControlledWriter,
           name: nil
         )
 
@@ -733,14 +783,14 @@ defmodule Arbor.Memory.IndexTest do
         send(
           parent,
           {:queue_second,
-           Index.index(pid, "queued second", %{}, embedding: List.duplicate(0.5, 128))}
+           Index.index(pid, "queued second", %{}, embedding: List.duplicate(0.5, 768))}
         )
       end)
 
       await_mutation_queue_length(pid, 1)
 
       assert {:error, :mutation_queue_full} =
-               Index.index(pid, "rejected third", %{}, embedding: List.duplicate(0.5, 128))
+               Index.index(pid, "rejected third", %{}, embedding: List.duplicate(0.5, 768))
 
       send(provider_pid, :release_provider)
       assert_receive {:queue_first, {:ok, "mem_queue_first"}}, 1_000
@@ -786,7 +836,7 @@ defmodule Arbor.Memory.IndexTest do
         Index.start_link(
           agent_id: agent_id,
           backend: :dual,
-          persistent_writer: ControlledWriter,
+          strict_vector_seam: ControlledWriter,
           entry_id_generator: fn -> entry_id end,
           operation_timeout_ms: 100,
           name: nil
@@ -830,7 +880,7 @@ defmodule Arbor.Memory.IndexTest do
         Index.start_link(
           agent_id: agent_id,
           backend: :dual,
-          persistent_writer: ControlledWriter,
+          strict_vector_seam: ControlledWriter,
           entry_id_generator: sequence_callback([first_id, second_id]),
           operation_timeout_ms: 100,
           name: nil
@@ -888,7 +938,7 @@ defmodule Arbor.Memory.IndexTest do
         Index.start_link(
           agent_id: agent_id,
           backend: :pgvector,
-          persistent_writer: ControlledWriter,
+          strict_vector_seam: ControlledWriter,
           operation_timeout_ms: 5_000,
           name: nil
         )
@@ -1091,7 +1141,9 @@ defmodule Arbor.Memory.IndexTest do
 
     test "responsiveness regression: slow recall provider cannot monopolize the index" do
       query = "blocked recall provider"
+      entry_content = "Recall cache entry"
       ControlledProvider.configure(query, {:block, self()})
+      ControlledProvider.configure(entry_content, :success)
 
       {:ok, pid} =
         Index.start_link(
@@ -1103,13 +1155,12 @@ defmodule Arbor.Memory.IndexTest do
 
       on_exit(fn ->
         ControlledProvider.disarm(query)
+        ControlledProvider.disarm(entry_content)
         if Process.alive?(pid), do: GenServer.stop(pid)
       end)
 
       assert {:ok, entry_id} =
-               Index.index(pid, "Recall cache entry", %{type: :fact},
-                 embedding: valid_persistent_embedding()
-               )
+               Index.index(pid, entry_content, %{type: :fact})
 
       parent = self()
       spawn(fn -> send(parent, {:recall_provider_result, Index.recall(pid, query)}) end)
@@ -1221,7 +1272,7 @@ defmodule Arbor.Memory.IndexTest do
                Index.batch_index(
                  duplicate_pid,
                  [{"Duplicate first", %{type: :first}}, {"Duplicate second", %{type: :second}}],
-                 embedding: List.duplicate(0.5, 128)
+                 embedding: List.duplicate(0.5, 768)
                )
 
       state_after = :sys.get_state(duplicate_pid)
@@ -1240,7 +1291,7 @@ defmodule Arbor.Memory.IndexTest do
         Index.start_link(
           agent_id: agent_id,
           backend: :dual,
-          persistent_writer: ControlledWriter,
+          strict_vector_seam: ControlledWriter,
           entry_id_generator: sequence_callback(ids),
           name: nil
         )
@@ -1435,7 +1486,7 @@ defmodule Arbor.Memory.IndexTest do
         Index.start_link(
           agent_id: agent_id,
           backend: :dual,
-          persistent_writer: ControlledWriter,
+          strict_vector_seam: ControlledWriter,
           entry_id_generator:
             sequence_callback(["mem_lru_first", "mem_lru_second", "mem_lru_new"]),
           clock: sequence_callback(clock_values),

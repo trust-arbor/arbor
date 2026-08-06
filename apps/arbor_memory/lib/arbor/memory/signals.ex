@@ -193,14 +193,15 @@ defmodule Arbor.Memory.Signals do
 
   ## Metadata
 
-  - `:query` - The recall query
   - `:result_count` - Number of results returned
   - `:top_similarity` - Highest similarity score (optional)
+
+  Query text and semantic payload details are intentionally omitted.
   """
   @spec emit_recalled(String.t(), String.t(), non_neg_integer(), keyword()) :: :ok
-  def emit_recalled(agent_id, query, result_count, opts \\ []) do
+  def emit_recalled(agent_id, _query, result_count, opts \\ []) do
+    # Query content is intentionally omitted — operational signal only.
     emit_memory_signal(agent_id, :recalled, %{
-      query: query,
       result_count: result_count,
       top_similarity: Keyword.get(opts, :top_similarity)
     })

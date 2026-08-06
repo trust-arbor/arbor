@@ -57,9 +57,21 @@ defmodule Arbor.Memory.MemoryStoreTest do
 
     test "degrades gracefully when database unavailable" do
       # AI.embed succeeds (test fallback), but Embedding.search needs Postgres.
-      # The catch clause in semantic_search returns {:ok, []} on any error.
+      # Unsupported / unavailable backends remain soft-empty; integrity failures hard-error.
       assert {:ok, []} =
                MemoryStore.semantic_search("test query", "goals", agent_id: "agent_test")
+    end
+
+    test "rejects a malformed option list before keyword access" do
+      assert {:error, {:memory_store, :invalid_request, :invalid_options}} =
+               MemoryStore.semantic_search("query", "goals", [:not_a_keyword])
+    end
+  end
+
+  describe "delete_embedding/3" do
+    test "rejects a malformed option list before keyword access" do
+      assert {:error, {:memory_store, :invalid_request, :invalid_options}} =
+               MemoryStore.delete_embedding("goals", "goal_1", [:not_a_keyword])
     end
   end
 end

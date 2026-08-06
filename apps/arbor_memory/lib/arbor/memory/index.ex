@@ -26,8 +26,11 @@ defmodule Arbor.Memory.Index do
   Configure via `config :arbor_memory, :embedding_backend`:
 
   - `:ets` — ETS only (default, backward compatible)
-  - `:pgvector` — pgvector only
-  - `:dual` — Write to both, read from ETS first then pgvector
+  - `:pgvector` — durable strict vector store only
+  - `:dual` — Write to both, read from ETS first then durable ANN
+
+  Durable paths use `Arbor.Memory.StrictVectorSeam` (encode/execute/reconcile and
+  search/fetch/list). Logical identity is `{agent_id, "memory_index", entry_id}`.
 
   ## Examples
 
@@ -40,18 +43,23 @@ defmodule Arbor.Memory.Index do
       # Recall similar content
       {:ok, results} = Arbor.Memory.Index.recall(pid, "greeting")
 
-      # Warm cache from pgvector (in dual mode)
+      # Warm cache from durable store (in dual mode)
       :ok = Arbor.Memory.Index.warm_cache(pid, limit: 1000)
   """
 
   use GenServer
 
-  alias Arbor.Contracts.Persistence.VectorRecord
+  alias Arbor.Contracts.Persistence.{VectorMatch, VectorRecord}
   alias Arbor.Common.SafeAtom
-  alias Arbor.Memory.Embedding
+  alias Arbor.Contracts.Security.TaintEnvelope
+  alias Arbor.Memory.EmbeddingEvidence
   alias Arbor.Memory.Index.Input
+  alias Arbor.Memory.StrictEmbeddingInput
+  alias Arbor.Memory.StrictVectorSeam
 
   require Logger
+
+  @index_namespace "memory_index"
 
   @type entry_id :: String.t()
   @type entry :: %{
@@ -61,7 +69,14 @@ defmodule Arbor.Memory.Index do
           metadata: map(),
           indexed_at: DateTime.t(),
           accessed_at: DateTime.t(),
-          access_count: non_neg_integer()
+          access_count: non_neg_integer(),
+          model_id: String.t() | nil,
+          dimensions: pos_integer() | nil,
+          encoding: term() | nil,
+          category: String.t() | nil,
+          taint: term() | nil,
+          provenance_status: atom() | nil,
+          model_evidence: term() | nil
         }
 
   @type recall_result :: %{
@@ -97,7 +112,8 @@ defmodule Arbor.Memory.Index do
   - `:max_entries` - Max entries before LRU eviction (default: 10_000)
   - `:threshold` - Default similarity threshold for recall (default: 0.3)
   - `:name` - Optional name for the GenServer
-  - `:persistent_writer` - Legacy durable writer module (default: `Embedding`)
+  - `:strict_vector_seam` - Injectable strict vector seam (default: app env / Default).
+    Selected only from process start options or trusted application config.
   - `:embedding_provider` - Embedding provider module (default: `Arbor.AI`)
   - `:entry_id_generator` - Zero-arity entry ID generator (default: random `mem_` ID)
   - `:clock` - Zero-arity UTC clock (default: `DateTime.utc_now/0`)
@@ -165,16 +181,15 @@ defmodule Arbor.Memory.Index do
 
   Each item should be a tuple of `{content, metadata}`.
   The whole batch is preflighted before mutation. Persistent backends commit
-  through the writer's all-or-nothing batch operation. In dual mode, a durable
+  through the strict vector seam as one atomic batch. In dual mode, a durable
   error admits the whole batch locally as pending or admits none at capacity.
-  Same-content fallback members share one pending authority while every returned
-  ID remains usable as an alias; admission is reserved before durable dispatch.
-  Fresh rows request the index-generated `mem_*` IDs; durable content dedupe can
-  instead return an existing authoritative ID for every matching input item.
+  Each entry_id is its own durable identity — equal content under distinct keys
+  remains distinct. Admission is reserved before durable dispatch.
 
   A writer exception or exit can represent commit-acknowledgement loss. Pending
-  retry is idempotent and may reconcile a whole prior commit; callers must not
-  interpret the fallback acknowledgement as proof that no durable write occurred.
+  retry is idempotent and may reconcile a whole prior commit against exact
+  logical identity; callers must not interpret the fallback acknowledgement as
+  proof that no durable write occurred.
 
   ## Examples
 
@@ -263,15 +278,10 @@ defmodule Arbor.Memory.Index do
   Only useful in `:dual` backend mode.
 
   The returned count is the number of acknowledged local entries that
-  converged. Same-content entries may converge to one durable row while each
-  acknowledged ID remains usable as an alias. A same-content group requests
-  the earliest indexed ID and persists the latest indexed content, vector, and
-  ordinary metadata. Ordering comes from a process-local monotonic sequence
-  assigned by the serialized index, never from wall-clock timestamps or IDs.
-
-  This latest-value rule must not be extended to future C3G provenance labels.
-  Provenance, taint, and authority labels must conservatively join every group
-  member rather than using latest-wins semantics.
+  converged against exact logical identity
+  `{agent_id, "memory_index", entry_id}`. Equal content under distinct keys
+  remains distinct. Ordering comes from a process-local monotonic sequence
+  assigned by the serialized index, never from wall-clock timestamps.
 
   ## Examples
 
@@ -324,7 +334,7 @@ defmodule Arbor.Memory.Index do
 
     valid_options? =
       is_integer(max_entries) and max_entries > 0 and
-        is_number(threshold) and
+        is_number(threshold) and threshold >= -1.0 and threshold <= 1.0 and
         backend in [:ets, :pgvector, :dual] and
         is_integer(operation_timeout_ms) and operation_timeout_ms > 0 and
         operation_timeout_ms <= @max_operation_timeout_ms and
@@ -345,7 +355,7 @@ defmodule Arbor.Memory.Index do
       default_threshold: threshold,
       entry_count: 0,
       backend: backend,
-      persistent_writer: Keyword.get(opts, :persistent_writer, Embedding),
+      strict_vector_seam: StrictVectorSeam.resolve(opts),
       embedding_provider: Keyword.get(opts, :embedding_provider, Arbor.AI),
       entry_id_generator: Keyword.get(opts, :entry_id_generator, &generate_entry_id/0),
       clock: Keyword.get(opts, :clock, &DateTime.utc_now/0),
@@ -370,10 +380,6 @@ defmodule Arbor.Memory.Index do
 
     Logger.debug("Started memory index for agent #{agent_id} with backend #{backend}")
     {:ok, state}
-  end
-
-  defp get_backend_config do
-    Application.get_env(:arbor_memory, :embedding_backend, :ets)
   end
 
   @impl true
@@ -433,6 +439,10 @@ defmodule Arbor.Memory.Index do
 
   def handle_call(:backend_mode, _from, state) do
     {:reply, state.backend, state}
+  end
+
+  defp get_backend_config do
+    Application.get_env(:arbor_memory, :embedding_backend, :ets)
   end
 
   @impl true
@@ -560,7 +570,9 @@ defmodule Arbor.Memory.Index do
         table: state.table,
         backend: state.backend,
         default_threshold: state.default_threshold,
-        embedding_provider: state.embedding_provider
+        embedding_provider: state.embedding_provider,
+        strict_vector_seam: state.strict_vector_seam,
+        id_aliases: state.id_aliases
       }
 
       worker_call = {:recall, context, query, opts}
@@ -732,7 +744,7 @@ defmodule Arbor.Memory.Index do
   defp execute_mutation_call({:warm_cache, opts}, from, deadline, state) do
     if state.backend in [:pgvector, :dual] do
       worker_call =
-        {:warm_cache, state.agent_id, state.embedding_provider, opts}
+        {:warm_cache, state.strict_vector_seam, state.agent_id, state.embedding_provider, opts}
 
       start_persistent_mutation(
         worker_call,
@@ -986,6 +998,16 @@ defmodule Arbor.Memory.Index do
     end
   end
 
+  defp background_failure_result({:strict_write, _seam, _agent_id, _closed}),
+    do: {:error, :persistence_indeterminate}
+
+  defp background_failure_result({:strict_batch, _seam, _agent_id, _closed}),
+    do: {:error, :persistence_indeterminate}
+
+  defp background_failure_result({:strict_delete, _seam, _agent_id, _entry_id}),
+    do: {:error, :persistence_indeterminate}
+
+  # Legacy shapes retained so mixed-era tests/fakes still map correctly.
   defp background_failure_result({:single, _writer, _agent_id, _entry, _metadata}),
     do: {:error, :persistence_indeterminate}
 
@@ -1154,15 +1176,7 @@ defmodule Arbor.Memory.Index do
     with :ok <- validate_new_entry_id(entry_id, state) do
       insertion_sequence = state.next_insertion_sequence
 
-      entry = %{
-        id: entry_id,
-        content: prepared.content,
-        embedding: prepared.embedding,
-        metadata: prepared.metadata,
-        indexed_at: now,
-        accessed_at: now,
-        access_count: 0
-      }
+      entry = build_local_entry(entry_id, prepared, now)
 
       # Store based on backend mode
       case state.backend do
@@ -1178,25 +1192,56 @@ defmodule Arbor.Memory.Index do
           end
 
         :pgvector ->
-          writer_call =
-            {:single, state.persistent_writer, state.agent_id, entry,
-             with_requested_id(prepared.metadata, entry_id)}
+          closed = closed_index_insert(state.agent_id, entry)
 
-          {:async, writer_call, {:pgvector_index, insertion_sequence}}
+          {:async, {:strict_write, state.strict_vector_seam, state.agent_id, closed},
+           {:pgvector_index, insertion_sequence, entry_id}}
 
         :dual ->
           candidate = %{entry: entry, insertion_sequence: insertion_sequence, position: 0}
           [group] = group_prepared_batch_entries([candidate], state)
 
           with {:ok, pending_admission} <- plan_pending_group_admission(state, [group]) do
-            writer_call =
-              {:single, state.persistent_writer, state.agent_id, group.canonical_entry,
-               with_requested_id(group.canonical_entry.metadata, group.requested_id)}
+            closed = closed_index_insert(state.agent_id, group.canonical_entry)
 
-            {:async, writer_call, {:dual_index, entry_id, group, pending_admission}}
+            {:async, {:strict_write, state.strict_vector_seam, state.agent_id, closed},
+             {:dual_index, entry_id, group, pending_admission}}
           end
       end
     end
+  end
+
+  defp build_local_entry(entry_id, prepared, now) do
+    type = Map.get(prepared.metadata, :type) || Map.get(prepared.metadata, "type")
+
+    %{
+      id: entry_id,
+      content: prepared.content,
+      embedding: prepared.embedding,
+      metadata: prepared.metadata,
+      indexed_at: now,
+      accessed_at: now,
+      access_count: 0,
+      model_id: Map.get(prepared, :model_id),
+      dimensions: Map.get(prepared, :dimensions, VectorRecord.dimensions()),
+      encoding: Map.get(prepared, :encoding, VectorRecord.encoding()),
+      category: StrictEmbeddingInput.category_for_type(type),
+      taint: Map.get(prepared, :taint, TaintEnvelope.missing_fallback()),
+      provenance_status: Map.get(prepared, :provenance_status, :verified),
+      model_evidence: Map.get(prepared, :model_evidence, :absent)
+    }
+  end
+
+  defp closed_index_insert(agent_id, entry) do
+    StrictEmbeddingInput.index_insert(%{
+      agent_id: agent_id,
+      entry_id: entry.id,
+      content: entry.content,
+      vector: entry.embedding,
+      metadata: entry.metadata,
+      model_evidence: Map.get(entry, :model_evidence, :absent),
+      taint: Map.get(entry, :taint, TaintEnvelope.missing_fallback())
+    })
   end
 
   defp complete_mutation_stage(:preflight_index, result, state) do
@@ -1259,7 +1304,8 @@ defmodule Arbor.Memory.Index do
       {:ok, _count, synced_state} ->
         durable_id = resolve_entry_id(requested_id, synced_state)
 
-        {:continue, {:delete, synced_state.agent_id, durable_id},
+        {:continue,
+         {:strict_delete, synced_state.strict_vector_seam, synced_state.agent_id, durable_id},
          {:delete_persistent, durable_id, true}, :durable, synced_state}
 
       {:error, reason} ->
@@ -1282,8 +1328,11 @@ defmodule Arbor.Memory.Index do
 
   defp complete_persistent_mutation(completion, result, state) do
     case completion do
+      {:pgvector_index, insertion_sequence, entry_id} ->
+        complete_pgvector_index(insertion_sequence, entry_id, result, state)
+
       {:pgvector_index, insertion_sequence} ->
-        complete_pgvector_index(insertion_sequence, result, state)
+        complete_pgvector_index(insertion_sequence, nil, result, state)
 
       {:dual_index, entry_id, group, pending_admission} ->
         complete_dual_index(entry_id, group, pending_admission, result, state)
@@ -1296,10 +1345,18 @@ defmodule Arbor.Memory.Index do
     end
   end
 
-  defp complete_pgvector_index(insertion_sequence, result, state) do
+  defp complete_pgvector_index(insertion_sequence, entry_id, result, state) do
     case result do
       {:ok, authoritative_id} ->
-        {{:ok, authoritative_id}, advance_insertion_sequence(state, insertion_sequence)}
+        requested_id = if is_binary(entry_id), do: entry_id, else: authoritative_id
+
+        case validate_authoritative_identity(requested_id, authoritative_id) do
+          :ok ->
+            {{:ok, authoritative_id}, advance_insertion_sequence(state, insertion_sequence)}
+
+          {:error, reason} ->
+            {{:error, reason}, state}
+        end
 
       {:error, {:permanent, reason}} ->
         {{:error, reason}, state}
@@ -1316,11 +1373,7 @@ defmodule Arbor.Memory.Index do
     case result do
       {:ok, authoritative_id} ->
         with :ok <-
-               validate_authoritative_binding(
-                 state,
-                 group.canonical_entry.content,
-                 authoritative_id
-               ),
+               validate_authoritative_identity(group.requested_id, authoritative_id),
              {:ok, admitted_state} <-
                cache_authoritative_bindings(state, [{group, authoritative_id}]) do
           new_state = advance_insertion_sequence(admitted_state, group.canonical_sequence)
@@ -1360,40 +1413,26 @@ defmodule Arbor.Memory.Index do
   end
 
   defp do_recall(query, opts, state) do
-    with {:ok, query_embedding} <-
-           get_or_compute_embedding(query, opts, state.embedding_provider),
-         {:ok, query_embedding} <- normalize_recall_embedding(state.backend, query_embedding) do
+    with {:ok, evidence} <- get_or_compute_embedding(query, opts, state.embedding_provider) do
       threshold = Keyword.get(opts, :threshold, state.default_threshold)
       limit = Keyword.get(opts, :limit, @default_limit)
       type_filter = get_type_filter(opts)
 
       case state.backend do
         :ets ->
-          # ETS only
-          do_ets_recall(query_embedding, type_filter, threshold, limit, state)
+          do_ets_recall(evidence, type_filter, threshold, limit, state)
 
         :pgvector ->
-          # pgvector only
-          do_pgvector_recall(query_embedding, type_filter, threshold, limit, state)
+          do_pgvector_recall(evidence, type_filter, threshold, limit, state)
 
         :dual ->
-          # Two-tier: check ETS first, then pgvector for additional results
-          do_dual_recall(query_embedding, type_filter, threshold, limit, state)
+          do_dual_recall(evidence, type_filter, threshold, limit, state)
       end
     end
   end
 
-  defp normalize_recall_embedding(:ets, embedding), do: {:ok, embedding}
-
-  defp normalize_recall_embedding(_persistent_backend, embedding) do
-    case VectorRecord.normalize_vector(embedding) do
-      {:ok, normalized} -> {:ok, normalized}
-      {:error, :invalid_vector} -> {:error, :invalid_embedding}
-    end
-  end
-
-  defp do_ets_recall(query_embedding, type_filter, threshold, limit, state) do
-    results = find_matching_entries(state.table, query_embedding, type_filter, threshold)
+  defp do_ets_recall(evidence, type_filter, threshold, limit, state) do
+    results = find_matching_entries(state.table, evidence, type_filter, threshold)
 
     sorted =
       results
@@ -1403,27 +1442,14 @@ defmodule Arbor.Memory.Index do
     {:ok, sorted}
   end
 
-  defp do_pgvector_recall(query_embedding, type_filter, threshold, limit, state) do
-    type_filter_value =
-      case type_filter do
-        {:single, type} -> to_string(type)
-        _ -> nil
-      end
-
-    opts = [
-      limit: limit,
-      threshold: threshold,
-      type_filter: type_filter_value
-    ]
-
-    Embedding.search(state.agent_id, query_embedding, opts)
+  defp do_pgvector_recall(evidence, type_filter, threshold, limit, state) do
+    strict_ann_search(state, evidence, type_filter, threshold, limit)
   end
 
-  defp do_dual_recall(query_embedding, type_filter, threshold, limit, state) do
-    # First, search ETS (hot cache)
-    ets_results = find_matching_entries(state.table, query_embedding, type_filter, threshold)
+  defp do_dual_recall(evidence, type_filter, threshold, limit, state) do
+    ets_results =
+      find_matching_entries(state.table, evidence, type_filter, threshold)
 
-    # If we have enough results from ETS, return them
     if length(ets_results) >= limit do
       sorted =
         ets_results
@@ -1432,66 +1458,283 @@ defmodule Arbor.Memory.Index do
 
       {:ok, sorted}
     else
-      # Fall back to pgvector for additional results
-      recall_dual_mode(query_embedding, type_filter, threshold, limit, ets_results, state)
+      case strict_ann_search(state, evidence, type_filter, threshold, limit) do
+        {:ok, pgvector_results} ->
+          ets_ids = MapSet.new(ets_results, & &1.id)
+
+          unique_pgvector =
+            Enum.reject(pgvector_results, fn r -> MapSet.member?(ets_ids, r.id) end)
+
+          merged =
+            (ets_results ++ unique_pgvector)
+            |> Enum.sort_by(& &1.similarity, :desc)
+            |> Enum.take(limit)
+
+          {:ok, merged}
+
+        {:error, reason} when reason in [:backend_failure, :unsupported, :indeterminate] ->
+          sorted =
+            ets_results
+            |> Enum.sort_by(& &1.similarity, :desc)
+            |> Enum.take(limit)
+
+          {:ok, sorted}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
     end
   end
 
-  defp recall_dual_mode(query_embedding, type_filter, threshold, limit, ets_results, state) do
-    type_filter_value =
-      case type_filter do
-        {:single, type} -> to_string(type)
-        _ -> nil
-      end
+  defp strict_ann_search(state, evidence, type_filter, threshold, limit) do
+    descriptor = search_descriptor(evidence)
 
-    pgvector_opts = [
-      limit: limit,
+    base_opts = [
+      model_id: descriptor.model_id,
+      dimensions: descriptor.dimensions,
+      encoding: descriptor.encoding,
+      source_namespace: @index_namespace,
       threshold: threshold,
-      type_filter: type_filter_value
+      limit: min(limit, 1000)
     ]
 
-    case Embedding.search(state.agent_id, query_embedding, pgvector_opts) do
-      {:ok, pgvector_results} ->
-        # Merge results, deduplicating by content
-        # ETS results have priority (fresher access times)
-        ets_contents = MapSet.new(ets_results, & &1.content)
+    case type_filter do
+      :none ->
+        search_and_validate(state, evidence.vector, base_opts, nil, descriptor)
 
-        unique_pgvector =
-          Enum.reject(pgvector_results, fn r -> MapSet.member?(ets_contents, r.content) end)
+      {:single, type} ->
+        opts = Keyword.put(base_opts, :category, StrictEmbeddingInput.category_for_type(type))
+        search_and_validate(state, evidence.vector, opts, opts[:category], descriptor)
 
-        merged = ets_results ++ unique_pgvector
-
-        sorted =
-          merged
-          |> Enum.sort_by(& &1.similarity, :desc)
-          |> Enum.take(limit)
-
-        {:ok, sorted}
-
-      {:error, _reason} ->
-        # Fallback to ETS results only
-        sorted =
-          ets_results
-          |> Enum.sort_by(& &1.similarity, :desc)
-          |> Enum.take(limit)
-
-        {:ok, sorted}
+      {:multiple, types} ->
+        fan_out_category_search(state, evidence.vector, base_opts, types, limit, descriptor)
     end
   end
 
-  defp find_matching_entries(table, query_embedding, type_filter, threshold) do
+  defp search_descriptor(evidence) do
+    %{
+      model_id: evidence.model_id,
+      dimensions: VectorRecord.dimensions(),
+      encoding: VectorRecord.encoding()
+    }
+  end
+
+  defp fan_out_category_search(state, vector, base_opts, types, limit, descriptor) do
+    types
+    |> Enum.reduce_while({:ok, []}, fn type, {:ok, acc} ->
+      category = StrictEmbeddingInput.category_for_type(type)
+      opts = Keyword.put(base_opts, :category, category)
+
+      case search_and_validate(state, vector, opts, category, descriptor) do
+        {:ok, results} -> {:cont, {:ok, acc ++ results}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, results} ->
+        # Full set already validated; only then id-dedupe/sort/take.
+        deduped =
+          results
+          |> Enum.reduce(%{}, fn result, acc ->
+            case Map.fetch(acc, result.id) do
+              :error ->
+                Map.put(acc, result.id, result)
+
+              {:ok, existing} ->
+                if result.similarity > existing.similarity,
+                  do: Map.put(acc, result.id, result),
+                  else: acc
+            end
+          end)
+          |> Map.values()
+          |> Enum.sort_by(& &1.similarity, :desc)
+          |> Enum.take(limit)
+
+        {:ok, deduped}
+
+      error ->
+        error
+    end
+  end
+
+  defp search_and_validate(state, vector, opts, expected_category, descriptor) do
+    case state.strict_vector_seam.search(state.agent_id, vector, opts) do
+      {:ok, matches} ->
+        validate_strict_match_set(state, matches, expected_category, descriptor, for_cache: false)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp validate_strict_match_set(state, matches, expected_category, descriptor, opts)
+       when is_list(matches) do
+    for_cache? = Keyword.get(opts, :for_cache, false)
+
+    # Fail closed on the complete returned set before any take/cache/use.
+    matches
+    |> Enum.reduce_while({:ok, []}, fn item, {:ok, acc} ->
+      case validate_one_match(state, item, expected_category, descriptor, for_cache?) do
+        {:ok, result} -> {:cont, {:ok, [result | acc]}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, results} -> {:ok, Enum.reverse(results)}
+      error -> error
+    end
+  end
+
+  defp validate_strict_match_set(_state, _matches, _category, _descriptor, _opts),
+    do: {:error, :malformed_persistence_result}
+
+  defp validate_one_match(
+         state,
+         %{match: view, similarity: similarity},
+         expected_category,
+         descriptor,
+         for_cache?
+       )
+       when is_map(view) and is_number(similarity) do
+    view_agent_id = view_field(view, :agent_id)
+    source_namespace = view_field(view, :source_namespace)
+    source_key = view_field(view, :source_key)
+    row_id = view_field(view, :id)
+    category = view_field(view, :category)
+    model_id = view_field(view, :model_id)
+    dimensions = view_field(view, :dimensions)
+    encoding = view_field(view, :encoding)
+    tombstone = view_field(view, :tombstone)
+    body = view_field(view, :body)
+    provenance_status = view_field(view, :provenance_status)
+
+    cond do
+      view_agent_id != state.agent_id ->
+        {:error, :tenant_mismatch}
+
+      source_namespace != @index_namespace ->
+        {:error, :namespace_mismatch}
+
+      expected_category != nil and category != expected_category ->
+        {:error, :category_mismatch}
+
+      not is_binary(model_id) or model_id != descriptor.model_id ->
+        {:error, :descriptor_mismatch}
+
+      dimensions != descriptor.dimensions ->
+        {:error, :descriptor_mismatch}
+
+      encoding != descriptor.encoding ->
+        {:error, :descriptor_mismatch}
+
+      tombstone != false ->
+        {:error, :malformed_persistence_result}
+
+      not valid_similarity?(similarity) ->
+        {:error, :malformed_persistence_result}
+
+      not valid_entry_id?(source_key) ->
+        {:error, :malformed_persistence_result}
+
+      # Index durable identity: VectorRecord.id == source_key == entry_id
+      not is_binary(row_id) or row_id != source_key ->
+        {:error, :malformed_persistence_result}
+
+      not is_map(body) ->
+        {:error, :malformed_persistence_result}
+
+      not is_binary(Map.get(body, "content")) ->
+        {:error, :malformed_persistence_result}
+
+      not is_map(Map.get(body, "metadata", %{})) ->
+        {:error, :malformed_persistence_result}
+
+      provenance_status == :invalid_durable_provenance ->
+        {:error, :invalid_durable_provenance}
+
+      provenance_status not in [:verified, :legacy_unlabeled] ->
+        {:error, :malformed_persistence_result}
+
+      for_cache? and provenance_status != :verified ->
+        {:error, :unverified_strict_provenance}
+
+      true ->
+        {:ok, decoded_view_to_recall_result(view, similarity)}
+    end
+  end
+
+  defp validate_one_match(_state, _item, _category, _descriptor, _for_cache?),
+    do: {:error, :malformed_persistence_result}
+
+  defp view_field(map, key) when is_map(map) do
+    case Map.fetch(map, key) do
+      {:ok, value} -> value
+      :error -> Map.get(map, Atom.to_string(key))
+    end
+  end
+
+  defp view_field(_value, _key), do: nil
+
+  defp valid_similarity?(similarity) do
+    match?({:ok, _normalized}, VectorMatch.normalize_similarity(similarity))
+  end
+
+  defp valid_contract_vector?(vector) do
+    match?({:ok, _normalized}, VectorRecord.normalize_vector(vector))
+  end
+
+  defp decoded_view_to_recall_result(view, similarity) do
+    body = view_field(view, :body)
+    body = if is_map(body), do: body, else: %{}
+    metadata = Map.get(body, "metadata", %{})
+
+    metadata =
+      if is_map(metadata) do
+        normalize_metadata(atomize_metadata_keys(metadata))
+      else
+        %{}
+      end
+
+    %{
+      id: view_field(view, :source_key),
+      content: Map.get(body, "content", ""),
+      similarity: similarity,
+      metadata: metadata,
+      indexed_at: view_field(view, :indexed_at) || DateTime.utc_now()
+    }
+  end
+
+  defp atomize_metadata_keys(metadata) do
+    known = [:type, :source, :tags, :agent_id, :correlation_id]
+
+    Enum.reduce(metadata, %{}, fn
+      {k, v}, acc when is_atom(k) ->
+        Map.put(acc, k, v)
+
+      {k, v}, acc when is_binary(k) ->
+        case Enum.find(known, fn atom -> Atom.to_string(atom) == k end) do
+          nil -> Map.put(acc, k, v)
+          atom -> Map.put(acc, atom, v)
+        end
+
+      _, acc ->
+        acc
+    end)
+  end
+
+  defp find_matching_entries(table, evidence, type_filter, threshold) do
     :ets.foldl(
       fn {_id, entry}, acc ->
-        score_entry(entry, query_embedding, type_filter, threshold, acc)
+        score_entry(entry, evidence, type_filter, threshold, acc)
       end,
       [],
       table
     )
   end
 
-  defp score_entry(entry, query_embedding, type_filter, threshold, acc) do
-    if matches_type_filter?(entry, type_filter) do
-      similarity = cosine_similarity(query_embedding, entry.embedding)
+  defp score_entry(entry, evidence, type_filter, threshold, acc) do
+    if compatible_entry_descriptor?(entry, evidence) and matches_type_filter?(entry, type_filter) do
+      similarity = cosine_similarity(evidence.vector, entry.embedding)
 
       if similarity >= threshold do
         [entry_to_result(entry, similarity) | acc]
@@ -1501,6 +1744,12 @@ defmodule Arbor.Memory.Index do
     else
       acc
     end
+  end
+
+  defp compatible_entry_descriptor?(entry, evidence) do
+    Map.get(entry, :model_id) == evidence.model_id and
+      Map.get(entry, :dimensions) == VectorRecord.dimensions() and
+      Map.get(entry, :encoding) == VectorRecord.encoding()
   end
 
   defp entry_to_result(entry, similarity) do
@@ -1522,10 +1771,10 @@ defmodule Arbor.Memory.Index do
           end
 
         :pgvector ->
-          prepare_persistent_batch(prepared, state, state.persistent_writer)
+          prepare_persistent_batch(prepared, state, state.strict_vector_seam)
 
         :dual ->
-          prepare_persistent_batch(prepared, state, state.persistent_writer)
+          prepare_persistent_batch(prepared, state, state.strict_vector_seam)
       end
     end
   end
@@ -1533,15 +1782,7 @@ defmodule Arbor.Memory.Index do
   defp prepare_batch_entries(preflighted, state) when is_list(preflighted) do
     prepared =
       Enum.map(preflighted, fn item ->
-        entry = %{
-          id: item.entry_id,
-          content: item.content,
-          embedding: item.embedding,
-          metadata: item.metadata,
-          indexed_at: item.now,
-          accessed_at: item.now,
-          access_count: 0
-        }
+        entry = build_local_entry(item.entry_id, item, item.now)
 
         %{
           entry: entry,
@@ -1582,14 +1823,14 @@ defmodule Arbor.Memory.Index do
     {:ok, Enum.map(prepared, & &1.entry.id), new_state}
   end
 
-  defp prepare_persistent_batch([], state, _writer), do: {:ok, [], state}
+  defp prepare_persistent_batch([], state, _seam), do: {:ok, [], state}
 
-  defp prepare_persistent_batch(prepared, state, writer) do
+  defp prepare_persistent_batch(prepared, state, seam) do
     groups = group_prepared_batch_entries(prepared, state)
-    entries = Enum.map(groups, &prepared_group_batch_entry/1)
+    closed_inputs = Enum.map(groups, &prepared_group_closed_input(state.agent_id, &1))
 
     with {:ok, pending_admission} <- plan_persistent_batch_admission(state, groups) do
-      writer_call = {:batch, writer, state.agent_id, entries}
+      writer_call = {:strict_batch, seam, state.agent_id, closed_inputs}
       completion = {:batch_index, prepared, groups, pending_admission}
       {:async, writer_call, completion}
     end
@@ -1662,69 +1903,27 @@ defmodule Arbor.Memory.Index do
     end
   end
 
-  defp group_prepared_batch_entries(prepared, state) do
+  # One durable identity per entry_id — equal content under distinct keys stays distinct.
+  defp group_prepared_batch_entries(prepared, _state) do
     prepared
-    |> Enum.group_by(fn %{entry: entry} -> :crypto.hash(:sha256, entry.content) end)
-    |> Enum.map(fn {content_digest, members} ->
-      ordered_members = Enum.sort_by(members, & &1.insertion_sequence)
-      first = hd(ordered_members)
-      latest = List.last(ordered_members)
-      local_member_ids = local_content_ids(state, latest.entry.content)
-
-      {requested_id, first_sequence} =
-        prepared_group_identity(state, local_member_ids, first)
-
-      prepared_member_ids = Enum.map(ordered_members, & &1.entry.id)
-
+    |> Enum.sort_by(& &1.insertion_sequence)
+    |> Enum.map(fn item ->
       %{
-        content_digest: content_digest,
-        member_ids: Enum.uniq(local_member_ids ++ prepared_member_ids),
-        prepared_member_ids: prepared_member_ids,
-        member_positions: Enum.map(ordered_members, & &1.position),
-        requested_id: requested_id,
-        first_sequence: first_sequence,
-        canonical_entry: latest.entry,
-        canonical_sequence: latest.insertion_sequence,
-        order_key: first.insertion_sequence
+        content_digest: item.entry.id,
+        member_ids: [item.entry.id],
+        prepared_member_ids: [item.entry.id],
+        member_positions: [item.position],
+        requested_id: item.entry.id,
+        first_sequence: item.insertion_sequence,
+        canonical_entry: item.entry,
+        canonical_sequence: item.insertion_sequence,
+        order_key: item.insertion_sequence
       }
     end)
-    |> Enum.sort_by(& &1.order_key)
   end
 
-  defp prepared_group_identity(state, local_member_ids, first) do
-    synced_ids =
-      Enum.reject(local_member_ids, &MapSet.member?(state.pending_sync, &1))
-
-    pending_members =
-      Enum.flat_map(local_member_ids, fn id ->
-        case Map.fetch(state.pending_entry_orders, id) do
-          {:ok, order} -> [{id, order}]
-          :error -> []
-        end
-      end)
-
-    first_sequence =
-      case pending_members do
-        [] -> first.insertion_sequence
-        members -> members |> Enum.map(fn {_id, order} -> order.first end) |> Enum.min()
-      end
-
-    cond do
-      synced_ids != [] ->
-        {Enum.min(synced_ids), first_sequence}
-
-      pending_members != [] ->
-        {id, order} = Enum.min_by(pending_members, fn {_id, order} -> order.first end)
-        {id, order.first}
-
-      true ->
-        {first.entry.id, first.insertion_sequence}
-    end
-  end
-
-  defp prepared_group_batch_entry(group) do
-    entry = group.canonical_entry
-    {entry.content, entry.embedding, with_requested_id(entry.metadata, group.requested_id)}
+  defp prepared_group_closed_input(agent_id, group) do
+    closed_index_insert(agent_id, %{group.canonical_entry | id: group.requested_id})
   end
 
   defp expand_batch_authoritative_ids(bindings) do
@@ -1804,39 +2003,149 @@ defmodule Arbor.Memory.Index do
   end
 
   @spec get_or_compute_embedding(String.t(), keyword(), module()) ::
-          {:ok, [float()]} | {:error, term()}
+          {:ok, map()} | {:error, term()}
   defp get_or_compute_embedding(content, opts, provider) do
     case Keyword.get(opts, :embedding) do
       nil ->
         compute_embedding(content, provider)
 
       embedding when is_list(embedding) ->
-        {:ok, embedding}
+        case EmbeddingEvidence.from_precomputed(embedding) do
+          {:ok, evidence} ->
+            {:ok, evidence}
+
+          {:error, :invalid_embedding} ->
+            # Compatible public preflight shape used by dual/pgvector callers.
+            {:error, {:invalid_legacy_embedding, :invalid_embedding}}
+
+          {:error, reason} ->
+            {:error, reason}
+        end
 
       _invalid_embedding ->
-        {:error, :invalid_embedding}
+        {:error, {:invalid_legacy_embedding, :invalid_embedding}}
     end
   end
 
-  defp preflight_entry(:ets, _agent_id, _content, embedding, metadata),
-    do: {:ok, embedding, normalize_metadata(metadata)}
+  @max_content_bytes 65_536
+  @max_metadata_json_bytes 65_536
 
-  defp preflight_entry(_backend, agent_id, content, embedding, metadata) do
-    case Embedding.validate(agent_id, content, embedding, metadata) do
-      {:ok, normalized_embedding} ->
-        {:ok, normalized_embedding, sanitize_entry_metadata(metadata)}
+  defp preflight_entry(:ets, evidence, metadata) do
+    {:ok, evidence.vector, normalize_metadata(metadata), evidence}
+  end
+
+  defp preflight_entry(_backend, evidence, metadata) do
+    with {:ok, vector} <- VectorRecord.normalize_vector(evidence.vector),
+         {:ok, meta} <- validate_durable_metadata(metadata) do
+      {:ok, vector, meta, %{evidence | vector: vector}}
+    else
+      # Preserve legacy public preflight error shape for dual/pgvector callers.
+      {:error, :invalid_vector} ->
+        {:error, {:invalid_legacy_embedding, :invalid_embedding}}
+
+      {:error, :invalid_embedding} ->
+        {:error, {:invalid_legacy_embedding, :invalid_embedding}}
+
+      {:error, :invalid_metadata} ->
+        {:error, {:invalid_legacy_embedding, :invalid_metadata}}
+
+      {:error, :invalid_content} ->
+        {:error, {:invalid_legacy_embedding, :invalid_content}}
 
       {:error, reason} ->
         {:error, reason}
     end
   end
 
-  @spec compute_embedding(String.t(), module()) :: {:ok, [float()]} | {:error, term()}
+  defp validate_durable_metadata(metadata) when is_map(metadata) do
+    sanitized = sanitize_entry_metadata(metadata)
+
+    case safe_metadata_json(sanitized) do
+      {:ok, json} when byte_size(json) <= @max_metadata_json_bytes ->
+        {:ok, sanitized}
+
+      {:ok, _too_large} ->
+        {:error, :invalid_metadata}
+
+      :error ->
+        {:error, :invalid_metadata}
+    end
+  end
+
+  defp validate_durable_metadata(_), do: {:error, :invalid_metadata}
+
+  defp safe_metadata_json(metadata) do
+    case json_safe_map(metadata) do
+      {:ok, safe} ->
+        case Jason.encode(safe) do
+          {:ok, json} -> {:ok, json}
+          _ -> :error
+        end
+
+      :error ->
+        :error
+    end
+  rescue
+    _ -> :error
+  catch
+    _, _ -> :error
+  end
+
+  defp json_safe_map(map) when is_map(map) do
+    Enum.reduce_while(map, {:ok, %{}}, fn
+      {k, v}, {:ok, acc} when is_atom(k) or is_binary(k) ->
+        key = if is_atom(k), do: Atom.to_string(k), else: k
+
+        case json_safe_value(v) do
+          {:ok, safe_v} -> {:cont, {:ok, Map.put(acc, key, safe_v)}}
+          :error -> {:halt, :error}
+        end
+
+      _, _acc ->
+        {:halt, :error}
+    end)
+  end
+
+  defp json_safe_map(_), do: :error
+
+  defp json_safe_value(v) when is_binary(v) or is_number(v) or is_boolean(v) or is_nil(v),
+    do: {:ok, v}
+
+  defp json_safe_value(v) when is_atom(v), do: {:ok, Atom.to_string(v)}
+
+  defp json_safe_value(v) when is_list(v) do
+    Enum.reduce_while(v, {:ok, []}, fn item, {:ok, acc} ->
+      case json_safe_value(item) do
+        {:ok, safe} -> {:cont, {:ok, [safe | acc]}}
+        :error -> {:halt, :error}
+      end
+    end)
+    |> case do
+      {:ok, items} -> {:ok, Enum.reverse(items)}
+      :error -> :error
+    end
+  end
+
+  defp json_safe_value(v) when is_map(v), do: json_safe_map(v)
+  defp json_safe_value(_), do: :error
+
+  defp validate_durable_content(content) when is_binary(content) do
+    if byte_size(content) > 0 and byte_size(content) <= @max_content_bytes and
+         String.valid?(content) do
+      :ok
+    else
+      {:error, :invalid_content}
+    end
+  end
+
+  defp validate_durable_content(_), do: {:error, :invalid_content}
+
+  @spec compute_embedding(String.t(), module()) :: {:ok, map()} | {:error, term()}
   defp compute_embedding("", _provider), do: {:error, :empty_content}
 
   defp compute_embedding(content, provider) do
     if provider == Arbor.AI and not embedding_service_enabled?() do
-      {:ok, hash_fallback_embedding(content)}
+      {:ok, EmbeddingEvidence.local_hash_fallback(content)}
     else
       compute_embedding_via_provider(content, provider)
     end
@@ -1847,23 +2156,19 @@ defmodule Arbor.Memory.Index do
 
   defp compute_embedding_via_provider(content, provider) do
     case provider.embed(content) do
-      {:ok, %{embedding: embedding}} ->
-        {:ok, embedding}
+      {:ok, result} ->
+        case EmbeddingEvidence.from_provider_result(result) do
+          {:ok, evidence} ->
+            {:ok, evidence}
+
+          {:error, _reason} ->
+            Logger.warning("Embedding provider result invalid, using hash fallback")
+            {:ok, EmbeddingEvidence.local_hash_fallback(content)}
+        end
 
       {:error, reason} ->
         Logger.warning("Embedding provider failed, using hash fallback: #{inspect(reason)}")
-        {:ok, hash_fallback_embedding(content)}
-    end
-  end
-
-  # Hash-based fallback embedding when no provider is available.
-  # Deterministic but not semantically meaningful.
-  defp hash_fallback_embedding(text) do
-    dimension = Application.get_env(:arbor_persistence, :embedding_dimension, 768)
-    hash = :erlang.phash2(text, 1_000_000)
-
-    for i <- 0..(dimension - 1) do
-      :math.sin((hash + i) / 1000) * 0.5 + 0.5
+        {:ok, EmbeddingEvidence.local_hash_fallback(content)}
     end
   end
 
@@ -1903,7 +2208,15 @@ defmodule Arbor.Memory.Index do
 
     replacement_ids =
       Map.new(bindings, fn {group, authoritative_id} ->
-        {authoritative_id, local_content_ids(state, group.canonical_entry.content)}
+        # Identity-scoped and table-scoped: only existing local member ids are
+        # removed. Brand-new source keys must not inflate removed_ids or the
+        # projected capacity math skips LRU eviction at the commit point.
+        members = Map.get(group, :member_ids, [authoritative_id])
+
+        existing_members =
+          Enum.filter(members, fn id -> MapSet.member?(current_ids, id) end)
+
+        {authoritative_id, existing_members}
       end)
 
     removed_ids = replacement_ids |> Map.values() |> List.flatten() |> MapSet.new()
@@ -1958,15 +2271,6 @@ defmodule Arbor.Memory.Index do
     |> Enum.sort_by(fn {_id, entry} -> entry.accessed_at end, DateTime)
   end
 
-  defp local_content_ids(state, content) do
-    state.table
-    |> :ets.tab2list()
-    |> Enum.flat_map(fn
-      {id, %{content: ^content}} -> [id]
-      {_id, _entry} -> []
-    end)
-  end
-
   defp validate_new_entry_id(entry_id, state) do
     if MapSet.member?(occupied_entry_ids(state), entry_id),
       do: {:error, :invalid_entry_identity},
@@ -2004,18 +2308,10 @@ defmodule Arbor.Memory.Index do
   defp normalize_metadata(_), do: %{}
 
   defp sanitize_entry_metadata(metadata) do
-    metadata
-    |> normalize_metadata()
-    |> Map.drop([:id, "id"])
+    # Metadata is body data only; owner-generated top-level identity remains
+    # authoritative even when the payload contains an `id` key.
+    normalize_metadata(metadata)
   end
-
-  defp with_requested_id(metadata, requested_id) when is_map(metadata) do
-    metadata
-    |> Map.drop([:id, "id"])
-    |> Map.put(:id, requested_id)
-  end
-
-  defp with_requested_id(metadata, _requested_id), do: metadata
 
   defp get_type_filter(opts) do
     cond do
@@ -2044,8 +2340,10 @@ defmodule Arbor.Memory.Index do
       {:complete, count, new_state} ->
         {:ok, count, new_state}
 
-      {:write, groups, entries, converged_count} ->
-        writer_call = {:batch, state.persistent_writer, state.agent_id, entries}
+      {:write, groups, closed_inputs, converged_count} ->
+        writer_call =
+          {:strict_batch, state.strict_vector_seam, state.agent_id, closed_inputs}
+
         {:async, writer_call, {:sync_to_persistent, groups, converged_count}}
     end
   end
@@ -2068,9 +2366,9 @@ defmodule Arbor.Memory.Index do
          }}
       else
         groups = group_pending_entries(pending_entries)
-        entries = Enum.map(groups, &pending_group_batch_entry/1)
+        closed_inputs = Enum.map(groups, &pending_group_closed_input(state.agent_id, &1))
         converged_count = pending_converged_count(state, pending_ids)
-        {:write, groups, entries, converged_count}
+        {:write, groups, closed_inputs, converged_count}
       end
     end
   end
@@ -2102,84 +2400,169 @@ defmodule Arbor.Memory.Index do
   defp finish_pending_sync({:error, reason}, _groups, _count, _state),
     do: {:error, reason}
 
-  defp fetch_warm_cache_entries(agent_id, provider, opts) do
+  defp fetch_warm_cache_entries(seam, agent_id, provider, opts) do
     limit = Keyword.fetch!(opts, :limit)
 
-    case Embedding.stats(agent_id) do
-      %{total: 0} ->
-        {:ok, []}
-
-      %{total: total} when is_integer(total) and total > 0 ->
-        with {:ok, query_embedding} <- warm_query_embedding(provider, opts),
-             {:ok, results} <-
-               Embedding.search(agent_id, query_embedding, limit: limit, threshold: 0.0) do
-          results
-          |> Enum.take(limit)
-          |> Enum.reduce_while({:ok, []}, fn result, {:ok, entries} ->
-            case fetch_warm_cache_entry(agent_id, result) do
-              {:ok, entry} -> {:cont, {:ok, [entry | entries]}}
-              {:error, :not_found} -> {:cont, {:ok, entries}}
-              {:error, reason} -> {:halt, {:error, reason}}
-            end
-          end)
-          |> case do
-            {:ok, entries} -> {:ok, Enum.reverse(entries)}
-            error -> error
-          end
-        end
-
-      _malformed_stats ->
-        {:error, :operation_failed}
-    end
-  end
-
-  defp warm_query_embedding(provider, opts) do
     case Keyword.get(opts, :query) do
       nil ->
-        {:ok, List.duplicate(0.5, VectorRecord.dimensions())}
+        list_opts = [
+          source_namespace: @index_namespace,
+          limit: min(limit, 1000),
+          include_tombstones: false
+        ]
 
-      query ->
-        with {:ok, embedding} <- get_or_compute_embedding(query, [], provider),
-             {:ok, normalized} <- VectorRecord.normalize_vector(embedding) do
-          {:ok, normalized}
+        case seam.list(agent_id, list_opts) do
+          {:ok, views} ->
+            validate_warm_views(agent_id, views, limit, nil)
+
+          {:error, reason} ->
+            {:error, reason}
+        end
+
+      query when is_binary(query) ->
+        with {:ok, evidence} <- get_or_compute_embedding(query, [], provider),
+             descriptor = search_descriptor(evidence),
+             search_opts = [
+               model_id: descriptor.model_id,
+               dimensions: descriptor.dimensions,
+               encoding: descriptor.encoding,
+               source_namespace: @index_namespace,
+               threshold: 0.0,
+               limit: min(limit, 1000)
+             ],
+             {:ok, matches} <- seam.search(agent_id, evidence.vector, search_opts),
+             {:ok, views} <- warm_match_views(matches) do
+          validate_warm_views(agent_id, views, limit, descriptor)
         end
     end
   end
 
-  defp fetch_warm_cache_entry(agent_id, %{id: id}) when is_binary(id) do
-    case Embedding.get(agent_id, id) do
-      {:ok, full_record} ->
-        embedding =
-          if is_list(full_record.embedding),
-            do: full_record.embedding,
-            else: Pgvector.to_list(full_record.embedding)
+  defp warm_match_views(matches) when is_list(matches) do
+    Enum.reduce_while(matches, {:ok, []}, fn
+      %{match: view, similarity: similarity}, {:ok, acc}
+      when is_map(view) and is_number(similarity) ->
+        if valid_similarity?(similarity) do
+          {:cont, {:ok, [view | acc]}}
+        else
+          {:halt, {:error, :malformed_persistence_result}}
+        end
 
-        with true <- valid_entry_id?(full_record.id),
-             true <- is_binary(full_record.content),
-             true <- is_map(full_record.metadata || %{}),
-             {:ok, normalized_embedding} <- VectorRecord.normalize_vector(embedding) do
+      _malformed, _acc ->
+        {:halt, {:error, :malformed_persistence_result}}
+    end)
+    |> case do
+      {:ok, views} -> {:ok, Enum.reverse(views)}
+      error -> error
+    end
+  end
+
+  defp warm_match_views(_matches), do: {:error, :malformed_persistence_result}
+
+  defp validate_warm_views(agent_id, views, limit, descriptor) when is_list(views) do
+    # Validate the complete returned set before any take/admission.
+    case Enum.reduce_while(views, {:ok, []}, fn view, {:ok, acc} ->
+           case warm_view_to_entry(agent_id, view, descriptor) do
+             {:ok, entry} -> {:cont, {:ok, [entry | acc]}}
+             {:error, reason} -> {:halt, {:error, reason}}
+           end
+         end) do
+      {:ok, entries} ->
+        {:ok, entries |> Enum.reverse() |> Enum.take(limit)}
+
+      error ->
+        error
+    end
+  end
+
+  defp validate_warm_views(_agent_id, _views, _limit, _descriptor),
+    do: {:error, :malformed_persistence_result}
+
+  defp warm_view_to_entry(agent_id, view, descriptor) when is_map(view) do
+    view_agent_id = view_field(view, :agent_id)
+    source_namespace = view_field(view, :source_namespace)
+    source_key = view_field(view, :source_key)
+    row_id = view_field(view, :id)
+    model_id = view_field(view, :model_id)
+    dimensions = view_field(view, :dimensions)
+    encoding = view_field(view, :encoding)
+    tombstone = view_field(view, :tombstone)
+    body = view_field(view, :body)
+    vector = view_field(view, :vector)
+    provenance_status = view_field(view, :provenance_status)
+
+    cond do
+      view_agent_id != agent_id ->
+        {:error, :tenant_mismatch}
+
+      source_namespace != @index_namespace ->
+        {:error, :namespace_mismatch}
+
+      tombstone != false ->
+        {:error, :malformed_persistence_result}
+
+      provenance_status != :verified ->
+        {:error, :unverified_strict_provenance}
+
+      not is_binary(model_id) or model_id == "" ->
+        {:error, :descriptor_mismatch}
+
+      not valid_entry_id?(source_key) ->
+        {:error, :malformed_persistence_result}
+
+      not is_binary(row_id) or row_id != source_key ->
+        {:error, :malformed_persistence_result}
+
+      not is_map(body) ->
+        {:error, :malformed_persistence_result}
+
+      is_map(descriptor) and model_id != descriptor.model_id ->
+        {:error, :descriptor_mismatch}
+
+      is_map(descriptor) and dimensions != descriptor.dimensions ->
+        {:error, :descriptor_mismatch}
+
+      is_map(descriptor) and encoding != descriptor.encoding ->
+        {:error, :descriptor_mismatch}
+
+      dimensions != VectorRecord.dimensions() ->
+        {:error, :descriptor_mismatch}
+
+      encoding != VectorRecord.encoding() ->
+        {:error, :descriptor_mismatch}
+
+      true ->
+        content = Map.get(body, "content")
+        metadata = Map.get(body, "metadata", %{})
+
+        with true <- is_binary(content),
+             true <- is_map(metadata),
+             {:ok, vector} <- VectorRecord.normalize_vector(vector) do
           now = DateTime.utc_now()
 
           {:ok,
            %{
-             id: full_record.id,
-             content: full_record.content,
-             embedding: normalized_embedding,
-             metadata: full_record.metadata || %{},
-             indexed_at: full_record.inserted_at || now,
+             id: source_key,
+             content: content,
+             embedding: vector,
+             metadata: normalize_metadata(atomize_metadata_keys(metadata)),
+             indexed_at: now,
              accessed_at: now,
-             access_count: 0
+             access_count: 0,
+             model_id: model_id,
+             dimensions: dimensions,
+             encoding: encoding,
+             category: view_field(view, :category),
+             taint: view_field(view, :taint),
+             provenance_status: provenance_status,
+             model_evidence: {:model_id, model_id}
            }}
         else
           _invalid -> {:error, :malformed_persistence_result}
         end
-
-      {:error, reason} ->
-        {:error, reason}
     end
   end
 
-  defp fetch_warm_cache_entry(_agent_id, _result),
+  defp warm_view_to_entry(_agent_id, _view, _descriptor),
     do: {:error, :malformed_persistence_result}
 
   defp commit_warm_cache(entries, limit, state) when is_list(entries) do
@@ -2220,35 +2603,20 @@ defmodule Arbor.Memory.Index do
 
   defp group_pending_entries(pending_entries) do
     pending_entries
-    |> Enum.group_by(fn {_id, entry, _first, _latest} ->
-      :crypto.hash(:sha256, entry.content)
-    end)
-    |> Enum.map(fn {content_digest, members} ->
-      {requested_id, _earliest_entry, earliest_sequence, _earliest_latest} =
-        Enum.min_by(members, &pending_identity_order_key/1)
-
-      {_latest_id, canonical_entry, _latest_first, _latest_sequence} =
-        Enum.max_by(members, &pending_value_order_key/1)
-
+    |> Enum.map(fn {id, entry, first_sequence, _latest} ->
       %{
-        content_digest: content_digest,
-        member_ids: Enum.map(members, fn {id, _entry, _first, _latest} -> id end),
-        requested_id: requested_id,
-        canonical_entry: canonical_entry,
-        order_key: earliest_sequence
+        content_digest: id,
+        member_ids: [id],
+        requested_id: id,
+        canonical_entry: entry,
+        order_key: first_sequence
       }
     end)
     |> Enum.sort_by(& &1.order_key)
   end
 
-  defp pending_group_batch_entry(group) do
-    entry = group.canonical_entry
-
-    {
-      entry.content,
-      entry.embedding,
-      Map.put(entry.metadata, :id, group.requested_id)
-    }
+  defp pending_group_closed_input(agent_id, group) do
+    closed_index_insert(agent_id, %{group.canonical_entry | id: group.requested_id})
   end
 
   defp pending_converged_count(state, pending_ids) do
@@ -2256,12 +2624,6 @@ defmodule Arbor.Memory.Index do
       count + MapSet.size(Map.get(state.pending_group_members, id, MapSet.new([id])))
     end)
   end
-
-  defp pending_identity_order_key({_id, _entry, first_sequence, _latest_sequence}),
-    do: first_sequence
-
-  defp pending_value_order_key({_id, _entry, _first_sequence, latest_sequence}),
-    do: latest_sequence
 
   defp validate_authoritative_bindings(state, groups, authoritative_ids) do
     with {:ok, member_owners} <- prepared_member_owners(groups) do
@@ -2290,12 +2652,7 @@ defmodule Arbor.Memory.Index do
        ) do
     with false <- MapSet.member?(seen_ids, authoritative_id),
          :ok <- validate_prepared_member_owner(group, authoritative_id, member_owners),
-         :ok <-
-           validate_authoritative_binding(
-             state,
-             group.canonical_entry.content,
-             authoritative_id
-           ) do
+         :ok <- validate_authoritative_identity(group.requested_id, authoritative_id) do
       validate_authoritative_bindings(
         state,
         groups,
@@ -2318,6 +2675,14 @@ defmodule Arbor.Memory.Index do
          _bindings
        ),
        do: {:error, :malformed_persistence_result}
+
+  defp validate_authoritative_identity(requested_id, authoritative_id) do
+    if valid_entry_id?(authoritative_id) and authoritative_id == requested_id do
+      :ok
+    else
+      {:error, :malformed_persistence_result}
+    end
+  end
 
   defp prepared_member_owners(groups) do
     Enum.reduce_while(groups, {:ok, %{}}, fn group, {:ok, owners} ->
@@ -2349,31 +2714,6 @@ defmodule Arbor.Memory.Index do
 
   defp group_owner(group), do: {group.content_digest, group.order_key}
 
-  defp validate_authoritative_binding(state, expected_content, authoritative_id) do
-    with true <- valid_entry_id?(authoritative_id),
-         false <- Map.has_key?(state.id_aliases, authoritative_id),
-         :ok <- validate_authoritative_local_collision(state, expected_content, authoritative_id) do
-      :ok
-    else
-      _invalid -> {:error, :malformed_persistence_result}
-    end
-  end
-
-  defp validate_authoritative_local_collision(state, expected_content, authoritative_id) do
-    case :ets.lookup(state.table, authoritative_id) do
-      [{^authoritative_id, %{content: ^expected_content}}] ->
-        :ok
-
-      [{^authoritative_id, _other_entry}] ->
-        {:error, :malformed_persistence_result}
-
-      [] ->
-        if MapSet.member?(state.pending_sync, authoritative_id),
-          do: {:error, :malformed_persistence_result},
-          else: :ok
-    end
-  end
-
   defp valid_entry_id?(id) when is_binary(id) do
     size = byte_size(id)
 
@@ -2398,20 +2738,27 @@ defmodule Arbor.Memory.Index do
   end
 
   defp run_background_call(
-         {:preflight_index, backend, agent_id, provider, entry_id_generator, clock, content,
+         {:preflight_index, backend, _agent_id, provider, entry_id_generator, clock, content,
           metadata, opts}
        ) do
-    with {:ok, embedding} <- get_or_compute_embedding(content, opts, provider),
+    with :ok <- maybe_validate_durable_content(backend, content),
+         {:ok, evidence} <- get_or_compute_embedding(content, opts, provider),
          {:ok, entry_id, now} <- generate_entry_identity(entry_id_generator, clock),
-         {:ok, normalized_embedding, normalized_metadata} <-
-           preflight_entry(backend, agent_id, content, embedding, metadata) do
+         {:ok, normalized_embedding, normalized_metadata, evidence} <-
+           preflight_entry(backend, evidence, metadata) do
       {:ok,
        %{
          entry_id: entry_id,
          now: now,
          content: content,
          embedding: normalized_embedding,
-         metadata: normalized_metadata
+         metadata: normalized_metadata,
+         model_evidence: evidence.model_evidence,
+         model_id: evidence.model_id,
+         dimensions: VectorRecord.dimensions(),
+         encoding: VectorRecord.encoding(),
+         taint: TaintEnvelope.missing_fallback(),
+         provenance_status: :verified
        }}
     end
   rescue
@@ -2421,22 +2768,29 @@ defmodule Arbor.Memory.Index do
   end
 
   defp run_background_call(
-         {:preflight_batch, backend, agent_id, provider, entry_id_generator, clock, items, opts}
+         {:preflight_batch, backend, _agent_id, provider, entry_id_generator, clock, items, opts}
        ) do
     items
     |> Enum.with_index()
     |> Enum.reduce_while({:ok, []}, fn {{content, metadata}, position}, {:ok, acc} ->
-      with {:ok, embedding} <- get_or_compute_embedding(content, opts, provider),
+      with :ok <- maybe_validate_durable_content(backend, content),
+           {:ok, evidence} <- get_or_compute_embedding(content, opts, provider),
            {:ok, entry_id, now} <- generate_entry_identity(entry_id_generator, clock),
-           {:ok, normalized_embedding, normalized_metadata} <-
-             preflight_entry(backend, agent_id, content, embedding, metadata) do
+           {:ok, normalized_embedding, normalized_metadata, evidence} <-
+             preflight_entry(backend, evidence, metadata) do
         prepared = %{
           entry_id: entry_id,
           now: now,
           content: content,
           embedding: normalized_embedding,
           metadata: normalized_metadata,
-          position: position
+          position: position,
+          model_evidence: evidence.model_evidence,
+          model_id: evidence.model_id,
+          dimensions: VectorRecord.dimensions(),
+          encoding: VectorRecord.encoding(),
+          taint: TaintEnvelope.missing_fallback(),
+          provenance_status: :verified
         }
 
         {:cont, {:ok, [prepared | acc]}}
@@ -2462,19 +2816,29 @@ defmodule Arbor.Memory.Index do
     _kind, _reason -> {:error, :operation_failed}
   end
 
-  defp run_background_call({:warm_cache, agent_id, provider, opts}) do
-    fetch_warm_cache_entries(agent_id, provider, opts)
+  defp run_background_call({:warm_cache, seam, agent_id, provider, opts}) do
+    fetch_warm_cache_entries(seam, agent_id, provider, opts)
   rescue
     _error -> {:error, :operation_failed}
   catch
     _kind, _reason -> {:error, :operation_failed}
   end
 
-  defp run_background_call({:delete, agent_id, entry_id}) do
-    case Embedding.delete(agent_id, entry_id) do
-      :ok -> :ok
-      {:error, reason} -> {:error, reason}
-      _malformed -> {:error, :persistence_indeterminate}
+  defp run_background_call({:strict_delete, seam, agent_id, entry_id}) do
+    strict_delete_entry(seam, agent_id, entry_id)
+  rescue
+    _error -> {:error, :persistence_indeterminate}
+  catch
+    _kind, _reason -> {:error, :persistence_indeterminate}
+  end
+
+  defp run_background_call({:strict_write, seam, agent_id, closed_input}) do
+    case seam.encode_operation(closed_input) do
+      {:ok, operation, _view} ->
+        execute_or_reconcile_single(seam, agent_id, operation)
+
+      {:error, reason} ->
+        {:error, {:permanent, reason}}
     end
   rescue
     _error -> {:error, :persistence_indeterminate}
@@ -2482,61 +2846,295 @@ defmodule Arbor.Memory.Index do
     _kind, _reason -> {:error, :persistence_indeterminate}
   end
 
-  defp run_background_call({:single, writer, agent_id, entry, metadata}) do
-    writer.store(agent_id, entry.content, entry.embedding, metadata)
-    |> normalize_single_writer_result()
+  defp run_background_call({:strict_batch, seam, agent_id, closed_inputs}) do
+    case seam.encode_batch(closed_inputs) do
+      {:ok, operation, _views} ->
+        execute_or_reconcile_batch(seam, agent_id, operation, length(closed_inputs))
+
+      {:error, reason} ->
+        {:error, {:permanent, reason}}
+    end
   rescue
     _error -> {:error, :persistence_indeterminate}
   catch
     _kind, _reason -> {:error, :persistence_indeterminate}
   end
 
-  defp run_background_call({:batch, writer, agent_id, entries}) do
-    writer.store_batch_with_ids(agent_id, entries)
-    |> normalize_batch_writer_result(length(entries))
+  defp maybe_validate_durable_content(:ets, _content), do: :ok
+
+  defp maybe_validate_durable_content(_backend, content) do
+    case validate_durable_content(content) do
+      :ok -> :ok
+      {:error, :invalid_content} -> {:error, {:invalid_legacy_embedding, :invalid_content}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp execute_or_reconcile_single(seam, agent_id, operation),
+    do: execute_or_reconcile_single(seam, agent_id, operation, 1)
+
+  defp execute_or_reconcile_single(seam, agent_id, operation, retries_left) do
+    try do
+      case seam.execute(agent_id, operation, []) do
+        {:ok, receipt} ->
+          receipt_to_single_id(receipt, operation)
+
+        {:error, :indeterminate} ->
+          reconcile_single(seam, agent_id, operation, retries_left)
+
+        {:error, reason} ->
+          normalize_strict_error(reason)
+
+        malformed ->
+          # Bare :ok / non-receipt tuples are permanent malformation, not indeterminate.
+          _ = malformed
+          {:error, {:malformed, :malformed_persistence_result}}
+      end
+    rescue
+      _error -> reconcile_single(seam, agent_id, operation, retries_left)
+    catch
+      _kind, _reason -> reconcile_single(seam, agent_id, operation, retries_left)
+    end
+  end
+
+  defp execute_or_reconcile_batch(seam, agent_id, operation, expected_count),
+    do: execute_or_reconcile_batch(seam, agent_id, operation, expected_count, 1)
+
+  defp execute_or_reconcile_batch(seam, agent_id, operation, expected_count, retries_left) do
+    try do
+      case seam.execute(agent_id, operation, []) do
+        {:ok, receipt} ->
+          receipt_to_batch_ids(receipt, operation, expected_count)
+
+        {:error, :indeterminate} ->
+          reconcile_batch(seam, agent_id, operation, expected_count, retries_left)
+
+        {:error, reason} ->
+          normalize_strict_error(reason)
+
+        malformed ->
+          _ = malformed
+          {:error, {:malformed, :malformed_persistence_result}}
+      end
+    rescue
+      _error -> reconcile_batch(seam, agent_id, operation, expected_count, retries_left)
+    catch
+      _kind, _reason -> reconcile_batch(seam, agent_id, operation, expected_count, retries_left)
+    end
+  end
+
+  defp reconcile_single(seam, agent_id, operation, retries_left) do
+    case seam.reconcile(agent_id, operation, []) do
+      {:ok, :absent} when retries_left > 0 ->
+        execute_or_reconcile_single(seam, agent_id, operation, retries_left - 1)
+
+      {:ok, :absent} ->
+        {:error, :persistence_indeterminate}
+
+      {:ok, receipt} ->
+        receipt_to_single_id(receipt, operation)
+
+      {:error, reason} ->
+        normalize_strict_error(reason)
+
+      _ ->
+        {:error, :persistence_indeterminate}
+    end
   rescue
-    _error -> {:error, :persistence_indeterminate}
+    _ -> {:error, :persistence_indeterminate}
   catch
-    _kind, _reason -> {:error, :persistence_indeterminate}
+    _, _ -> {:error, :persistence_indeterminate}
   end
 
-  defp normalize_single_writer_result({:ok, authoritative_id}) do
-    if valid_entry_id?(authoritative_id),
-      do: {:ok, authoritative_id},
-      else: {:error, {:malformed, :malformed_persistence_result}}
+  defp reconcile_batch(seam, agent_id, operation, expected_count, retries_left) do
+    case seam.reconcile(agent_id, operation, []) do
+      {:ok, :absent} when retries_left > 0 ->
+        execute_or_reconcile_batch(seam, agent_id, operation, expected_count, retries_left - 1)
+
+      {:ok, :absent} ->
+        {:error, :persistence_indeterminate}
+
+      {:ok, receipt} ->
+        receipt_to_batch_ids(receipt, operation, expected_count)
+
+      {:error, reason} ->
+        normalize_strict_error(reason)
+
+      _ ->
+        {:error, :persistence_indeterminate}
+    end
+  rescue
+    _ -> {:error, :persistence_indeterminate}
+  catch
+    _, _ -> {:error, :persistence_indeterminate}
   end
 
-  defp normalize_single_writer_result({:error, reason}), do: normalize_writer_error(reason)
+  defp receipt_to_single_id(receipt, %{record: expected_record}) do
+    expected_key = expected_record.source_key
+    expected_id = expected_record.id
 
-  defp normalize_single_writer_result(_malformed),
-    do: {:error, {:malformed, :malformed_persistence_result}}
+    with {:ok, ^expected_key} <- receipt_source_key(receipt),
+         {:ok, ^expected_id} <- receipt_record_id(receipt) do
+      {:ok, expected_key}
+    else
+      _ -> {:error, {:malformed, :malformed_persistence_result}}
+    end
+  end
 
-  defp normalize_writer_error({:invalid_legacy_embedding, reason}) when is_atom(reason),
-    do: {:error, {:permanent, {:invalid_legacy_embedding, reason}}}
+  defp receipt_to_batch_ids(
+         %{kind: :batch, receipts: receipts},
+         %{kind: :batch, operations: operations},
+         expected_count
+       )
+       when is_list(receipts) and is_list(operations) do
+    pairs = Enum.zip(receipts, operations)
 
-  defp normalize_writer_error(:protected_vector_row),
-    do: {:error, {:permanent, :protected_vector_row}}
-
-  defp normalize_writer_error(:legacy_embedding_id_conflict),
-    do: {:error, {:permanent, :legacy_embedding_id_conflict}}
-
-  defp normalize_writer_error(_reason), do: {:error, :persistence_indeterminate}
-
-  defp normalize_batch_writer_result({:ok, authoritative_ids}, expected_count)
-       when is_list(authoritative_ids) do
-    if length(authoritative_ids) == expected_count and
-         Enum.all?(authoritative_ids, &valid_entry_id?/1) do
-      {:ok, authoritative_ids}
+    if length(receipts) == expected_count and length(operations) == expected_count and
+         length(pairs) == expected_count do
+      pairs
+      |> Enum.reduce_while({:ok, []}, fn {receipt, operation}, {:ok, ids} ->
+        case receipt_to_single_id(receipt, operation) do
+          {:ok, id} -> {:cont, {:ok, [id | ids]}}
+          {:error, _reason} = error -> {:halt, error}
+        end
+      end)
+      |> case do
+        {:ok, ids} -> {:ok, Enum.reverse(ids)}
+        error -> error
+      end
     else
       {:error, {:malformed, :malformed_persistence_result}}
     end
   end
 
-  defp normalize_batch_writer_result({:error, reason}, _expected_count),
-    do: normalize_writer_error(reason)
-
-  defp normalize_batch_writer_result(_malformed, _expected_count),
+  defp receipt_to_batch_ids(_receipt, _operation, _expected),
     do: {:error, {:malformed, :malformed_persistence_result}}
+
+  # Exact durable identity for Index is source_key (== entry_id). Prefer source_key
+  # over row id so reconcile/receipt convergence never confuses digest-style ids.
+  defp receipt_source_key(%{record: record}) when not is_nil(record) do
+    key =
+      cond do
+        is_map(record) and is_binary(Map.get(record, :source_key)) ->
+          Map.get(record, :source_key)
+
+        is_map(record) and is_binary(Map.get(record, "source_key")) ->
+          Map.get(record, "source_key")
+
+        true ->
+          nil
+      end
+
+    if valid_entry_id?(key), do: {:ok, key}, else: :error
+  end
+
+  defp receipt_source_key(_), do: :error
+
+  defp receipt_record_id(%{record: record}) when is_map(record) do
+    id = Map.get(record, :id) || Map.get(record, "id")
+    if valid_entry_id?(id), do: {:ok, id}, else: :error
+  end
+
+  defp receipt_record_id(_), do: :error
+
+  defp normalize_strict_error(reason)
+       when reason in [
+              :invalid_request,
+              :invalid_embedding_input,
+              :invalid_model_evidence,
+              :invalid_provenance,
+              :unverified_strict_provenance,
+              :tenant_mismatch,
+              :conflict,
+              :protected_vector_row,
+              :unsupported
+            ],
+       do: {:error, {:permanent, reason}}
+
+  defp normalize_strict_error(:indeterminate), do: {:error, :persistence_indeterminate}
+  defp normalize_strict_error(_reason), do: {:error, :persistence_indeterminate}
+
+  defp strict_delete_entry(seam, agent_id, entry_id) do
+    case seam.fetch(agent_id, @index_namespace, entry_id, []) do
+      {:error, :not_found} ->
+        :ok
+
+      {:ok, view} ->
+        with :ok <- validate_delete_view(agent_id, entry_id, view),
+             closed <- StrictEmbeddingInput.index_delete(view),
+             {:ok, operation, _view} <- seam.encode_operation(closed) do
+          case execute_or_reconcile_single(seam, agent_id, operation) do
+            {:ok, ^entry_id} -> :ok
+            {:ok, _other_id} -> {:error, {:malformed, :malformed_persistence_result}}
+            {:error, reason} -> {:error, reason}
+          end
+        else
+          {:error, reason} -> {:error, {:permanent, reason}}
+        end
+
+      {:error, reason} ->
+        normalize_strict_error(reason)
+    end
+  end
+
+  defp validate_delete_view(agent_id, entry_id, view) when is_map(view) do
+    view_agent_id = view_field(view, :agent_id)
+    source_namespace = view_field(view, :source_namespace)
+    source_key = view_field(view, :source_key)
+    row_id = view_field(view, :id)
+    tombstone = view_field(view, :tombstone)
+    body = view_field(view, :body)
+    vector = view_field(view, :vector)
+    model_id = view_field(view, :model_id)
+    dimensions = view_field(view, :dimensions)
+    encoding = view_field(view, :encoding)
+    category = view_field(view, :category)
+    generation = view_field(view, :generation)
+    revision = view_field(view, :revision)
+
+    cond do
+      view_agent_id != agent_id ->
+        {:error, :tenant_mismatch}
+
+      source_namespace != @index_namespace ->
+        {:error, :namespace_mismatch}
+
+      source_key != entry_id ->
+        {:error, :malformed_persistence_result}
+
+      row_id != entry_id ->
+        {:error, :malformed_persistence_result}
+
+      tombstone != false ->
+        {:error, :malformed_persistence_result}
+
+      not is_map(body) or not is_binary(Map.get(body, "content")) or
+          not is_map(Map.get(body, "metadata", %{})) ->
+        {:error, :malformed_persistence_result}
+
+      not valid_contract_vector?(vector) ->
+        {:error, :malformed_persistence_result}
+
+      not is_binary(model_id) or model_id == "" or dimensions != VectorRecord.dimensions() or
+          encoding != VectorRecord.encoding() ->
+        {:error, :descriptor_mismatch}
+
+      not is_binary(category) or category == "" ->
+        {:error, :malformed_persistence_result}
+
+      not is_integer(generation) or generation < 1 ->
+        {:error, :malformed_persistence_result}
+
+      not is_integer(revision) or revision < 1 ->
+        {:error, :malformed_persistence_result}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp validate_delete_view(_agent_id, _entry_id, _view),
+    do: {:error, :malformed_persistence_result}
 
   defp converge_pending_group(state, group, authoritative_id) do
     converge_local_members(state, group.member_ids, group.canonical_entry, authoritative_id)
@@ -2611,7 +3209,8 @@ defmodule Arbor.Memory.Index do
   defp resolve_entry_id(entry_id, state), do: Map.get(state.id_aliases, entry_id, entry_id)
 
   defp prepare_delete(entry_id, %{backend: :pgvector} = state) do
-    {:async, {:delete, state.agent_id, entry_id}, {:delete_persistent, entry_id, false}, :durable}
+    {:async, {:strict_delete, state.strict_vector_seam, state.agent_id, entry_id},
+     {:delete_persistent, entry_id, false}, :durable}
   end
 
   defp prepare_delete(entry_id, state) do
@@ -2635,17 +3234,20 @@ defmodule Arbor.Memory.Index do
         {:complete, _count, synced_state} ->
           durable_id = resolve_entry_id(requested_id, synced_state)
 
-          {:async, {:delete, synced_state.agent_id, durable_id},
+          {:async,
+           {:strict_delete, synced_state.strict_vector_seam, synced_state.agent_id, durable_id},
            {:delete_persistent, durable_id, true}, :durable}
 
-        {:write, groups, entries, converged_count} ->
-          writer_call = {:batch, state.persistent_writer, state.agent_id, entries}
+        {:write, groups, closed_inputs, converged_count} ->
+          writer_call =
+            {:strict_batch, state.strict_vector_seam, state.agent_id, closed_inputs}
+
           completion = {:sync_then_delete, requested_id, groups, converged_count}
           {:async, writer_call, completion, :durable}
       end
     else
-      {:async, {:delete, state.agent_id, canonical_id}, {:delete_persistent, canonical_id, true},
-       :durable}
+      {:async, {:strict_delete, state.strict_vector_seam, state.agent_id, canonical_id},
+       {:delete_persistent, canonical_id, true}, :durable}
     end
   end
 

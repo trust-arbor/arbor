@@ -9,6 +9,7 @@ defmodule Arbor.Memory.EmbeddingStrictBoundaryTest do
 
   test "legacy API exports remain present and facade stays behind Persistence" do
     source = File.read!(Path.expand("../../../lib/arbor/memory/embedding.ex", __DIR__))
+    Code.ensure_loaded!(Embedding)
 
     assert source =~ "alias Arbor.Persistence"
     assert source =~ "alias Arbor.Memory.EmbeddingCodec"
