@@ -11,55 +11,22 @@ for child <- children do
   Supervisor.start_child(Arbor.Agent.AppSupervisor, child)
 end
 
-# arbor_memory is a sibling app at Level 2, not a dep of arbor_agent,
-# so it doesn't start in this isolated test env. But arbor_agent's
-# Lifecycle.set_initial_goals/2 eventually calls
-# Arbor.Memory.GoalStore.{get_active_goals, add_goal}/_ which expect the
-# `:arbor_memory_goals` named ETS table to exist. The read path was made
-# resilient (returns [] on missing table) but writes need the table.
+# Memory stores + durable knowledge-graph authority.
 #
-# Supervised test-only owner (see Arbor.Agent.Test.MemoryGoalsTableOwner):
-# deterministic/idempotent startup under AppSupervisor, reaped on
-# application shutdown so the suite never leaks an unsupervised sleeper.
-ensure_memory_goals_table_owner = fn ->
-  if :ets.whereis(:arbor_memory_goals) != :undefined do
-    :ok
-  else
-    case Supervisor.start_child(
-           Arbor.Agent.AppSupervisor,
-           Arbor.Agent.Test.MemoryGoalsTableOwner
-         ) do
-      {:ok, _pid} ->
-        :ok
+# Replaces a hand-rolled MemoryGoalsTableOwner that existed only to create the
+# :arbor_memory_goals ETS table, on the since-outdated premise that
+# "arbor_memory is a sibling app, not a dep of arbor_agent" — it IS a dep.
+# GoalStore creates that table in its own init/1, so starting the real store is
+# both simpler and closer to production. See Arbor.Memory.TestBootstrap.
+# authority: false — SeedTest owns :arbor_memory_durable per-test so it can
+# swap in a deliberately-failing backend for its outage security regressions. A
+# suite-wide instance would make its start_supervised! a no-op and the matching
+# stop_supervised! raise "not found".
+Arbor.Memory.TestBootstrap.start!(authority: false)
 
-      {:error, {:already_started, _pid}} ->
-        :ok
-
-      {:error, {:already_present, _}} ->
-        case Supervisor.restart_child(
-               Arbor.Agent.AppSupervisor,
-               Arbor.Agent.Test.MemoryGoalsTableOwner
-             ) do
-          {:ok, _pid} -> :ok
-          {:ok, _pid, _info} -> :ok
-          {:error, {:already_started, _}} -> :ok
-          other -> raise "test_helper: failed to restart MemoryGoalsTableOwner: #{inspect(other)}"
-        end
-
-      other ->
-        raise "test_helper: failed to start MemoryGoalsTableOwner: #{inspect(other)}"
-    end
-  end
-
-  # Deterministic readiness: named table must exist before tests run.
-  if :ets.whereis(:arbor_memory_goals) == :undefined do
-    raise "test_helper: :arbor_memory_goals ETS table missing after owner start"
-  end
-
-  :ok
+if :ets.whereis(:arbor_memory_goals) == :undefined do
+  raise "test_helper: :arbor_memory_goals missing after TestBootstrap (GoalStore did not start)"
 end
-
-ensure_memory_goals_table_owner.()
 
 # :integration/:slow run by default (hermetic — gating CI runs plain `mix test`);
 # only backend-dependent tags are excluded. Fast loop: `mix test.fast`.

@@ -126,7 +126,9 @@ defmodule Arbor.Orchestrator.Pipelines.SessionDotTest do
     end
 
     test "has all expected nodes", %{graph: graph} do
-      expected = ~w(start bg_checks select_mode mode_router build_prompt llm_call
+      # bg_checks removed 2026-08-06 — it called the Claude Code harness
+      # diagnostic, which has moved out of the umbrella. See heartbeat.dot.
+      expected = ~w(start select_mode mode_router build_prompt llm_call
                     consolidate process store_decompositions route_intents process_proposals
                     update_wm execute_actions update_goals prune_intents check_loop
                     build_followup llm_followup done)

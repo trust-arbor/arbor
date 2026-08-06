@@ -5,59 +5,10 @@ for app <- [:arbor_persistence, :arbor_shell, :arbor_signals, :arbor_security] d
   {:ok, _started} = Application.ensure_all_started(app)
 end
 
-# Memory stores + the durable knowledge-graph authority.
-#
-# arbor_actions has five memory-backed action test modules that call
-# Arbor.Memory.init_for_agent/1. Since the durable graph authority landed
-# (2026-08-05, e4509485c / 030f398af) that call admits authority before starting
-# an index, and KnowledgeGraphStore fails closed without it — correctly. The
-# follow-up test commit updated arbor_memory's own 23 test files and swept no
-# other app, so all of these started failing {:error, :store_unavailable}: 103
-# failures in this suite, all @moduletag :fast and therefore NOT excluded by the
-# gating CI lane.
-#
-# Starting the processes alone is not sufficient. They all come up and
-# get_graph/1 still fails, because what matters is the BufferedStore's BACKEND
-# config. The arbor_memory test fixture's shape (backend: QueryableStore.ETS +
-# collection + ack_mode) does not work here; production's shape does. That
-# fixture also asserts exclusive ownership to force async: false, which its
-# graph tests need for isolation and consumer apps do not — consumers just need
-# an authority to exist, which is why this lives in test_helper.
-#
-# arbor_agent, arbor_gateway, and arbor_orchestrator have the same break and
-# still need the same treatment; see
-# .arbor/roadmap/0-inbox/durable-graph-authority-broke-cross-app-memory-tests.md
-{:ok, _} = Application.ensure_all_started(:arbor_memory)
-
-for table <- [
-      :arbor_memory_graphs,
-      :arbor_working_memory,
-      :arbor_memory_proposals,
-      :arbor_preferences
-    ] do
-  if :ets.whereis(table) == :undefined, do: :ets.new(table, [:named_table, :public, :set])
-end
-
-{:ok, _} =
-  Arbor.Persistence.BufferedStore.start_link(
-    name: :arbor_memory_durable,
-    backend: Application.get_env(:arbor_memory, :persistence_backend),
-    write_mode: :sync
-  )
-
-for child <- [
-      {Registry, keys: :unique, name: Arbor.Memory.Registry},
-      {Arbor.Memory.ArchiveCursorSigner, []},
-      {Arbor.Memory.Provenance, []},
-      {Arbor.Memory.KnowledgeGraphStore, []},
-      {Arbor.Memory.IndexSupervisor, []},
-      {Arbor.Memory.GoalStore, []},
-      {Arbor.Memory.IntentStore, []},
-      {Arbor.Memory.Thinking, []},
-      {Arbor.Memory.CodeStore, []}
-    ] do
-  Supervisor.start_child(Arbor.Memory.Supervisor, child)
-end
+# Memory stores + durable knowledge-graph authority. Five memory-backed action
+# test modules call Arbor.Memory.init_for_agent/1, which fails closed without
+# the authority. See Arbor.Memory.TestBootstrap for why this is not inline.
+:ok = Arbor.Memory.TestBootstrap.start!()
 
 # Test-only Linux baseline materializer Agent + shared WorkspaceLeaseRegistry
 # rewire. Production Application starts the registry with Arbor.Shell; tests

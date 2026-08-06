@@ -38,9 +38,17 @@ defmodule Arbor.Agent.CapabilitiesTest do
     test "resolves host-only capability" do
       assert {:ok, {:host_only, Arbor.Actions.Sandbox.Create}} =
                Capabilities.resolve("sandbox", :create)
+    end
 
-      assert {:ok, {:host_only, Arbor.Actions.BackgroundChecks.Run}} =
-               Capabilities.resolve("background_checks", :run)
+    test "background_checks is no longer a capability" do
+      # The Claude Code harness diagnostic moved out of the umbrella into the
+      # private arbor_integrations app on 2026-08-06 — it inspected ~/.claude
+      # paths that exist in no other installation. Nothing in Arbor should
+      # resolve it. (Arbor.Memory.BackgroundChecks is unrelated and keeps its
+      # name; it was never a capability.)
+      assert {:error, :unknown_capability} = Capabilities.resolve("background_checks", :run)
+      assert {:error, :unknown_capability} = Capabilities.resolve("harness_diagnostics", :run)
+      refute Capabilities.host_only?("background_checks")
     end
 
     test "returns error for unknown capability" do
@@ -117,7 +125,6 @@ defmodule Arbor.Agent.CapabilitiesTest do
 
     test "host_only? identifies host-only capabilities" do
       assert Capabilities.host_only?("sandbox")
-      assert Capabilities.host_only?("background_checks")
       assert Capabilities.host_only?("eval")
       refute Capabilities.host_only?("fs")
       refute Capabilities.host_only?("memory")

@@ -4,6 +4,10 @@
 #
 # :distributed tests require LocalCluster / multi-BEAM setup. Run them
 # explicitly with `--include distributed`.
+# Memory stores + durable knowledge-graph authority — cross_session_memory_test
+# calls Arbor.Memory.init_for_agent/1, which fails closed without the authority.
+Arbor.Memory.TestBootstrap.start!()
+
 ExUnit.start(exclude: [:llm, :llm_local, :integration_lm_studio, :distributed])
 
 if Process.whereis(Arbor.Shell.ExecutablePolicy) == nil and
