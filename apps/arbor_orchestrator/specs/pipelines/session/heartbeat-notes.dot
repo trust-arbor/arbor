@@ -26,8 +26,12 @@ digraph HeartbeatNotes {
   start [shape=Mdiamond]
 
   // ── Background checks ─────────────────────────────────────
-  bg_checks [type="exec", target="action", action="harness_diagnostics_run",
-             output_prefix="session"]
+  // The bg_checks node was removed 2026-08-06: it called the Claude Code
+  // harness diagnostic, which has moved out of the umbrella into the private
+  // arbor_integrations app (it reads ~/.claude paths that exist on no other
+  // installation). The memory learning producer, Arbor.Memory.BackgroundChecks
+  // .run/2, remains unwired pending an :action_history source. See
+  // .arbor/decisions/2026-08-06-harness-learning-enforcement.md.
 
   // ── Cognitive mode selection ──────────────────────────────
   select_mode [type="exec", target="action", action="session.mode_select",
@@ -86,7 +90,7 @@ digraph HeartbeatNotes {
   // Flow
   // ══════════════════════════════════════════════════════════════
 
-  start -> bg_checks -> select_mode -> mode_router
+  start -> select_mode -> mode_router
 
   // All three LLM modes share one build_prompt + llm_call pair
   mode_router -> build_prompt [condition="context.session.cognitive_mode=goal_pursuit"]

@@ -143,7 +143,6 @@ defmodule Arbor.Agent.Capabilities do
     {"memory_consolidate", :run} => :memory_consolidate_run,
     {"sandbox", :create} => Arbor.Actions.Sandbox.Create,
     {"sandbox", :destroy} => Arbor.Actions.Sandbox.Destroy,
-    {"harness_diagnostics", :run} => Arbor.Actions.HarnessDiagnostics.Run,
     {"monitor", :read} => Arbor.Actions.Monitor.Read,
     {"eval", :check} => Arbor.Actions.Eval.Check,
     {"eval", :list_runs} => Arbor.Actions.Eval.ListRuns,

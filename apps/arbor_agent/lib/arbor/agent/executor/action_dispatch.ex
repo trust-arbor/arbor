@@ -23,8 +23,8 @@ defmodule Arbor.Agent.Executor.ActionDispatch do
       iex> ActionDispatch.canonical_action_name(:file_read)
       {:ok, "file.read"}
 
-      iex> ActionDispatch.canonical_action_name(:harness_diagnostics_run)
-      {:ok, "harness_diagnostics.run"}
+      iex> ActionDispatch.canonical_action_name(:proposal_submit)
+      {:ok, "proposal.submit"}
 
       iex> ActionDispatch.canonical_action_name(:unknown_thing)
       :error
@@ -32,7 +32,7 @@ defmodule Arbor.Agent.Executor.ActionDispatch do
   @spec canonical_action_name(atom() | String.t()) :: {:ok, String.t()} | :error
   def canonical_action_name(action) when is_atom(action) do
     # Check hardcoded dispatch mappings first (compound names like
-    # :harness_diagnostics_run that find_action_module can't discover,
+    # :proposal_submit that find_action_module cannot discover,
     # and inline-handled actions like :proposal_status), then fall back
     # to naming convention discovery.
     case hardcoded_canonical_name(action) do
@@ -95,8 +95,8 @@ defmodule Arbor.Agent.Executor.ActionDispatch do
       iex> ActionDispatch.module_to_dotted_name(Arbor.Actions.File.Read)
       "file.read"
 
-      iex> ActionDispatch.module_to_dotted_name(Arbor.Actions.HarnessDiagnostics.Run)
-      "harness_diagnostics.run"
+      iex> ActionDispatch.module_to_dotted_name(Arbor.Actions.Proposal.Submit)
+      "proposal.submit"
   """
   @spec module_to_dotted_name(module()) :: String.t()
   def module_to_dotted_name(module) do
@@ -148,17 +148,6 @@ defmodule Arbor.Agent.Executor.ActionDispatch do
     do_proposal_status(proposal_id)
   end
 
-  # Harness diagnostics — compound module name doesn't match single-underscore naming convention
-  def dispatch(:harness_diagnostics_run, params, agent_id) do
-    run_runtime_action(
-      Arbor.Actions.HarnessDiagnostics.Run,
-      params,
-      :harness_diagnostics_failed,
-      :health_checks_unavailable,
-      agent_id
-    )
-  end
-
   # Generic action dispatch — try to find a matching action module
   def dispatch(action, params, _agent_id) when is_atom(action) do
     action_module = find_action_module(action)
@@ -192,7 +181,7 @@ defmodule Arbor.Agent.Executor.ActionDispatch do
   end
 
   # H7: pre-fix, run_runtime_action called `apply(action_mod, :run, [params, %{}])`
-  # directly — proposal_submit, code_hot_load, harness_diagnostics_run all
+  # directly — proposal_submit and code_hot_load all
   # bypassed action-layer taint enforcement, resource binding, invocation
   # receipts, and facade-level checks. Generic discovered actions DID go
   # through Arbor.Actions.authorize_and_execute; only the hardcoded compound
@@ -297,9 +286,8 @@ defmodule Arbor.Agent.Executor.ActionDispatch do
   end
 
   # Map actions with hardcoded dispatch clauses to canonical dotted names.
-  # Covers compound namespace modules (HarnessDiagnostics.Run) and inline-handled
+  # Covers compound namespace modules and inline-handled
   # actions (proposal_status) that find_action_module can't discover.
-  defp hardcoded_canonical_name(:harness_diagnostics_run), do: {:ok, "harness_diagnostics.run"}
   defp hardcoded_canonical_name(:proposal_submit), do: {:ok, "proposal.submit"}
   defp hardcoded_canonical_name(:code_hot_load), do: {:ok, "code.hot_load"}
 

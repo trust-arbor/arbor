@@ -48,14 +48,13 @@ digraph BDICycle {
 
   start [shape=Mdiamond]
 
-  // Background checks: memory health, timing, system state
-  bg_checks [
-    type="exec",
-    target="action",
-    action="harness_diagnostics_run",
-    context_keys="session.agent_id",
-    output_prefix="session"
-  ]
+  // The bg_checks node was removed 2026-08-06: it called the Claude Code
+  // harness diagnostic, which has moved out of the umbrella into the private
+  // arbor_integrations app (it reads ~/.claude paths that exist on no other
+  // installation). Despite the "memory health" comment it carried, it never
+  // touched agent memory. Arbor.Memory.BackgroundChecks.run/2 remains unwired
+  // pending an :action_history source. See
+  // .arbor/decisions/2026-08-06-harness-learning-enforcement.md.
 
   // Load current goals (Desires in BDI terms)
   load_goals [
@@ -312,7 +311,7 @@ digraph BDICycle {
   // ==================================================================
 
   // Phase 1: Perceive — sequential belief gathering
-  start -> bg_checks -> load_goals -> load_intents -> load_beliefs
+  start -> load_goals -> load_intents -> load_beliefs
 
   // Phase 2: Deliberate — mode selection from loaded context
   load_beliefs -> select_mode -> mode_router
