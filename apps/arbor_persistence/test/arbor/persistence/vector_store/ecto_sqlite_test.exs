@@ -1,6 +1,10 @@
 defmodule Arbor.Persistence.VectorStore.EctoSQLiteTest do
   use ExUnit.Case, async: false
 
+  @moduletag :database
+  @moduletag :integration
+  @moduletag :sqlite
+
   alias Arbor.Contracts.Persistence.{VectorOperation, VectorReceipt, VectorRecord}
   alias Arbor.Persistence.VectorStore.Ecto.Codec
 
@@ -93,7 +97,7 @@ defmodule Arbor.Persistence.VectorStore.EctoSQLiteTest do
       Enum.each([database, database <> "-shm", database <> "-wal"], &File.rm/1)
     end)
 
-    {:ok, database: database}
+    {:ok, database_path: database}
   end
 
   setup do
@@ -117,6 +121,9 @@ defmodule Arbor.Persistence.VectorStore.EctoSQLiteTest do
 
     {:ok, agent_id: unique("agent")}
   end
+
+  use Arbor.Persistence.VectorStore.LegacyIsolationConformance,
+    repo: SQLiteRepo
 
   test "migration is additive and leaves legacy identity intact" do
     columns =
@@ -538,7 +545,7 @@ defmodule Arbor.Persistence.VectorStore.EctoSQLiteTest do
   test "security regression: SQLite replace cannot bypass immutable receipts with recursive triggers off",
        %{
          agent_id: agent_id,
-         database: database
+         database_path: database
        } do
     operation = insert_operation!(record!(agent_id, source_key: "immutable-replace-ledger"))
 
@@ -575,7 +582,7 @@ defmodule Arbor.Persistence.VectorStore.EctoSQLiteTest do
 
   test "security regression: SQLite rowid replace cannot move an immutable receipt", %{
     agent_id: agent_id,
-    database: database
+    database_path: database
   } do
     operation = insert_operation!(record!(agent_id, source_key: "immutable-rowid-ledger"))
 

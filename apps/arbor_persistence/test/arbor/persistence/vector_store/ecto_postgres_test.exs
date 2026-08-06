@@ -33,6 +33,10 @@ defmodule Arbor.Persistence.VectorStore.EctoPostgresTest do
     {:ok, agent_id: unique("agent")}
   end
 
+  use Arbor.Persistence.VectorStore.LegacyIsolationConformance,
+    repo: Arbor.Persistence.Repo,
+    legacy_mutations: true
+
   test "regression: pgvector search returns the exact authoritative row id", %{
     agent_id: agent_id
   } do
@@ -208,6 +212,45 @@ defmodule Arbor.Persistence.VectorStore.EctoPostgresTest do
                AND table_name IN ('memory_embeddings', 'vector_operation_receipts')
              ORDER BY table_name
              """)
+  end
+
+  test "security regression: PostgreSQL-only legacy readers and single delete isolate V1 rows",
+       %{agent_id: agent_id} do
+    source_key = unique("legacy-isolation")
+    record = record!(agent_id, source_key: source_key, vector: unit_vector(0))
+    insert = insert_operation!(record)
+
+    assert {:ok, inserted} = Arbor.Persistence.execute_vector_operation(agent_id, insert)
+
+    assert {:ok, []} =
+             Arbor.Persistence.search_legacy_embeddings(agent_id, inserted.record.vector,
+               threshold: 0.0
+             )
+
+    assert %{total: 0, by_type: %{}} = Arbor.Persistence.legacy_embedding_stats(agent_id)
+
+    delete = operation!(:delete, inserted.record)
+    assert {:ok, deleted} = Arbor.Persistence.execute_vector_operation(agent_id, delete)
+
+    assert {:ok, []} =
+             Arbor.Persistence.search_legacy_embeddings(agent_id, inserted.record.vector,
+               threshold: 0.0
+             )
+
+    assert %{total: 0, by_type: %{}} = Arbor.Persistence.legacy_embedding_stats(agent_id)
+
+    assert {:error, :not_found} =
+             Arbor.Persistence.fetch_legacy_embedding(agent_id, inserted.record.id)
+
+    assert {:error, :protected_vector_row} =
+             Arbor.Persistence.delete_legacy_embedding(agent_id, inserted.record.id)
+
+    deleted_record = deleted.record
+
+    assert {:ok, ^deleted_record} =
+             Arbor.Persistence.fetch_vector_record(agent_id, "voice", source_key,
+               include_tombstone: true
+             )
   end
 
   defp record!(agent_id, overrides) do

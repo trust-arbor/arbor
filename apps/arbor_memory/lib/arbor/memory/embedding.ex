@@ -1,6 +1,6 @@
 defmodule Arbor.Memory.Embedding do
   @moduledoc """
-  Durable legacy embedding API for the memory index.
+  Durable legacy PostgreSQL/pgvector compatibility API for the memory index.
 
   Database ownership stays behind the `Arbor.Persistence` facade. This module
   preserves the established Memory API without importing persistence schemas,

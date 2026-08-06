@@ -35,7 +35,9 @@ the regression test a spec ID so the invariant is named, not just tested. See
 
 | Tag | When to use |
 |-----|-------------|
-| `:database` | Requires PostgreSQL (or pgvector) |
+| `:database` | Exercises a real database backend rather than an in-memory fake, including configured PostgreSQL and test-owned SQLite databases. Excluded by default. |
+| `:postgres` | Narrows a `:database` integration test to PostgreSQL or pgvector. Pair with `:database` and skip when the compiled Repo adapter is not PostgreSQL. |
+| `:sqlite` | Narrows a `:database` integration test to SQLite. Pair with `:database`; a test-owned temporary database still counts as real database coverage. |
 | `:external` | Requires external services or CLI binaries (e.g., Claude CLI) |
 | `:llm` | Makes cloud LLM API calls (costs money, rate-limited). **Excluded by default in all apps.** |
 | `:llm_local` | Requires a local LLM server (LM Studio, Ollama). Free but needs setup. **Excluded by default in all apps.** |
@@ -63,6 +65,8 @@ end
 defmodule MyRepoTest do
   use ExUnit.Case, async: false
   @moduletag :database
+  @moduletag :integration
+  @moduletag :postgres
   # ...
 end
 
@@ -129,6 +133,10 @@ mix test --include llm_local
 
 # Include database tests
 mix test --include database
+
+# Run one adapter lane
+ARBOR_DB=postgres ./bin/mix test --include database --only postgres
+ARBOR_DB=sqlite ./bin/mix test --include database --only sqlite
 
 # Run everything (all tags included)
 mix test.all

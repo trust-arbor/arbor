@@ -4,12 +4,18 @@ defmodule Arbor.Memory.IndexDualTest do
 
   These tests verify that the ETS + pgvector dual backend works correctly.
   Requires PostgreSQL with pgvector extension.
-  Run with: mix test --include database
+  Run with: ./bin/mix test --include database
   """
 
   use Arbor.Persistence.DatabaseCase
 
   @moduletag :database
+  @moduletag :integration
+  @moduletag :postgres
+
+  if Arbor.Persistence.Repo.__adapter__() != Ecto.Adapters.Postgres do
+    @moduletag skip: "dual pgvector coverage requires ARBOR_DB=postgres"
+  end
 
   alias Arbor.Memory.{Embedding, Index}
 
