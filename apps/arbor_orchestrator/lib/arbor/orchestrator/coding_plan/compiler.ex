@@ -119,6 +119,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
          validation_stage_timeout_ms =
            validation_program["static_parameters"]["stage_timeout"],
          :ok <- validate_supported_features(plan),
+         :ok <- validate_design_checkpoint_task(plan),
          {:ok, work_packet_json} <- canonical_work_packet_json(plan),
          {:ok, semantic_preflight_opts} <-
            semantic_preflight_options(
@@ -417,6 +418,18 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
 
       true ->
         :ok
+    end
+  end
+
+  defp validate_design_checkpoint_task(%Plan{task: task} = plan) do
+    max_bytes = Arbor.Actions.coding_design_checkpoint_max_task_bytes()
+
+    if checkpoint_policy(plan) == "design_required" and byte_size(task) > max_bytes do
+      {:error,
+       {:design_checkpoint_task_too_large,
+        %{"actual_bytes" => byte_size(task), "max_bytes" => max_bytes}}}
+    else
+      :ok
     end
   end
 

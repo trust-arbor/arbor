@@ -89,6 +89,13 @@ defmodule Arbor.ActionsTest do
     assert Actions.coding_design_max_bytes() == 32_768
   end
 
+  test "coding design checkpoint task limit is exposed through the public facade" do
+    assert Actions.coding_design_checkpoint_max_task_bytes() ==
+             Arbor.Actions.Coding.DesignCheckpoint.max_task_bytes()
+
+    assert Actions.coding_design_checkpoint_max_task_bytes() == 16_384
+  end
+
   test "coding design checkpoint max timeout is exposed through the public facade" do
     assert Actions.coding_design_checkpoint_max_timeout_ms() ==
              Arbor.Actions.Coding.DesignCheckpoint.max_timeout_ms()

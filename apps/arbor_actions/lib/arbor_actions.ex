@@ -195,6 +195,10 @@ defmodule Arbor.Actions do
   @spec coding_design_max_bytes() :: pos_integer()
   def coding_design_max_bytes, do: DesignCheckpoint.max_design_bytes()
 
+  @doc "Return the maximum admitted UTF-8 byte size for a design-checkpoint task."
+  @spec coding_design_checkpoint_max_task_bytes() :: pos_integer()
+  def coding_design_checkpoint_max_task_bytes, do: DesignCheckpoint.max_task_bytes()
+
   @doc """
   Reviewed hard maximum for coding design-checkpoint Open timeout (ms).
 

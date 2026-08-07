@@ -412,6 +412,27 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
              {:ok, 3_600_000}
   end
 
+  test "design-required task size is preflighted before checkpoint execution", ctx do
+    max_bytes = Arbor.Actions.coding_design_checkpoint_max_task_bytes()
+    oversized_task = String.duplicate("x", max_bytes + 1)
+
+    design_required =
+      v2_plan!(%{
+        "checkpoint_policy" => "design_required",
+        "task" => oversized_task
+      })
+
+    assert {:error,
+            {:design_checkpoint_task_too_large,
+             %{"actual_bytes" => actual_bytes, "max_bytes" => ^max_bytes}}} =
+             compile(design_required, ctx)
+
+    assert actual_bytes == max_bytes + 1
+
+    direct = v2_plan!(%{"task" => oversized_task})
+    assert {:ok, _compilation} = compile(direct, ctx)
+  end
+
   test "design-required plans activate exact checkpoint topology and canonical prompts", ctx do
     plan =
       v2_plan!(%{
