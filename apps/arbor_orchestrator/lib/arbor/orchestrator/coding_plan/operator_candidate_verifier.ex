@@ -703,10 +703,15 @@ defmodule Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifier do
     )
   end
 
-  defp cleanup_or_replace_error(error, request, reason) do
+  defp cleanup_or_replace_error({:error, original_reason} = error, request, reason) do
     case bounded_approval_cleanup(request, reason) do
-      :ok -> error
-      :unconfirmed -> {:error, :approval_cleanup_unconfirmed}
+      :ok ->
+        error
+
+      :unconfirmed ->
+        # Preserve the first failure so callers can diagnose the worker error
+        # that triggered cleanup; do not launder it into a cleanup-only atom.
+        {:error, {:approval_cleanup_unconfirmed, original_reason}}
     end
   end
 

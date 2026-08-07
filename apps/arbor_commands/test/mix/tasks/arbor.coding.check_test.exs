@@ -459,7 +459,56 @@ defmodule Mix.Tasks.Arbor.Coding.CheckTest do
                target_node: fn -> node() end
              )
 
-    assert error == command_error("verification", "check_failed")
+    assert error["error"] == "invalid_arbor_coding_check_command"
+    assert error["field"] == "verification"
+    assert error["reason"] == "check_failed"
+    assert is_binary(error["detail"])
+    assert error["detail"] != ""
+    assert error["detail"] != "check_failed"
+  end
+
+  test "safe_invoke surfaces underlying {:error, reason} in detail without changing reason" do
+    path = write_plan!(Plan.to_map(valid_plan!()))
+    on_exit(fn -> File.rm(path) end)
+
+    checker = fn _plan, _opts ->
+      {:error, {:approval_cleanup_unconfirmed, :workspace_inspection_failed}}
+    end
+
+    assert {:error, error} =
+             Check.execute(
+               ["--plan", path, "--static"],
+               readiness_checker: checker
+             )
+
+    assert error["error"] == "invalid_arbor_coding_check_command"
+    assert error["field"] == "readiness"
+    assert error["reason"] == "check_failed"
+    assert error["detail"] == "{:approval_cleanup_unconfirmed, :workspace_inspection_failed}"
+  end
+
+  test "safe_invoke surfaces rescued exceptions and exits as distinguishable detail" do
+    path = write_plan!(Plan.to_map(valid_plan!()))
+    on_exit(fn -> File.rm(path) end)
+
+    assert {:error, exception_error} =
+             Check.execute(
+               ["--plan", path, "--static"],
+               readiness_checker: fn _plan, _opts -> raise "injected_check_exception" end
+             )
+
+    assert exception_error["reason"] == "check_failed"
+    assert exception_error["detail"] =~ "RuntimeError"
+    assert exception_error["detail"] =~ "injected_check_exception"
+
+    assert {:error, exit_error} =
+             Check.execute(
+               ["--plan", path, "--static"],
+               readiness_checker: fn _plan, _opts -> exit(:injected_check_exit) end
+             )
+
+    assert exit_error["reason"] == "check_failed"
+    assert exit_error["detail"] == "{:exit, :injected_check_exit}"
   end
 
   test "security regression: timeout cancels through requester death before remote PID is known" do

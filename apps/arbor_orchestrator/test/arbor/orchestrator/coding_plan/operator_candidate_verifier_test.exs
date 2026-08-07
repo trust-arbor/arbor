@@ -332,8 +332,15 @@ defmodule Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifierTest do
       config = approval_config()
       send(config.observer, {:operator_candidate_approval_cleanup, task_id, opts})
       Process.sleep(Map.get(config, :cleanup_delay_ms, 0))
-      Agent.update(config.state, &Map.put(&1, :pending, false))
-      :ok
+
+      case Map.get(config, :cleanup_result, :ok) do
+        :ok ->
+          Agent.update(config.state, &Map.put(&1, :pending, false))
+          :ok
+
+        other ->
+          other
+      end
     end
 
     def pending_approval_inventory(opts) do
@@ -651,6 +658,23 @@ defmodule Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifierTest do
 
     assert {:error, :authority_not_found} =
              Security.sign_with_authority(authority, "after-error")
+  end
+
+  test "unconfirmed approval cleanup preserves the original worker error", ctx do
+    configure_executor(:inspection_error)
+    configure_approval(cleanup_result: :error)
+
+    assert {:error, {:approval_cleanup_unconfirmed, :workspace_inspection_failed}} =
+             verify_operator(plan!("default"), request(ctx.agent_id, "default"))
+
+    assert_receive {:operator_candidate_executor, "coding_workspace_inspect", _params, _opts,
+                    authority, {:ok, _signed_request}}
+
+    assert_receive {:operator_candidate_approval_cleanup, @task_id, cleanup_opts}
+    assert cleanup_opts[:cleanup_reason] == :task_termination
+
+    assert {:error, :authority_not_found} =
+             Security.sign_with_authority(authority, "after-unconfirmed-cleanup")
   end
 
   test "genuine authority is revoked when the code-owned wall-clock deadline expires", ctx do

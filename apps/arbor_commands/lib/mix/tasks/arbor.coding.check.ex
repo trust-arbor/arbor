@@ -32,6 +32,7 @@ defmodule Mix.Tasks.Arbor.Coding.Check do
   @requester_shutdown_timeout_ms 1_000
   @max_human_diagnostics 6
   @human_text_bytes 160
+  @max_failure_detail_bytes 500
   @readiness_runtime_options [
     :observed_at,
     :repo_roots,
@@ -737,17 +738,23 @@ defmodule Mix.Tasks.Arbor.Coding.Check do
       {:badrpc, _reason} when location in [:remote, :verification] ->
         command_error(location_field(location), "rpc_unavailable")
 
-      {:error, _reason} ->
-        command_error(location_field(location), "check_failed")
+      {:error, reason} ->
+        # Keep the stable CLI "reason" contract value; surface the real fault
+        # in a separate bounded "detail" field so consumers can diagnose.
+        command_error(location_field(location), "check_failed", reason)
 
       _other ->
         command_error(location_field(location), "invalid_check_response")
     end
   rescue
-    _exception -> command_error(location_field(location), "check_failed")
+    exception ->
+      command_error(location_field(location), "check_failed", exception)
   catch
-    :exit, _reason -> command_error(location_field(location), "check_failed")
-    _, _reason -> command_error(location_field(location), "check_failed")
+    :exit, reason ->
+      command_error(location_field(location), "check_failed", {:exit, reason})
+
+    kind, reason ->
+      command_error(location_field(location), "check_failed", {kind, reason})
   end
 
   defp safe_callback(fun) when is_function(fun, 0) do
@@ -887,5 +894,58 @@ defmodule Mix.Tasks.Arbor.Coding.Check do
        "field" => field,
        "reason" => reason
      }}
+  end
+
+  defp command_error(field, reason, detail) do
+    {:error,
+     %{
+       "error" => "invalid_arbor_coding_check_command",
+       "field" => field,
+       "reason" => reason,
+       "detail" => bounded_failure_detail(detail)
+     }}
+  end
+
+  # Bounded, JSON-safe representation of an underlying failure. Preserves atom
+  # names and nested tuples (e.g. {:approval_cleanup_unconfirmed, ...}) so the
+  # first fault remains diagnosable without expanding the stable "reason" enum.
+  defp bounded_failure_detail(detail) when is_atom(detail), do: Atom.to_string(detail)
+
+  defp bounded_failure_detail(detail) when is_binary(detail) do
+    text = if String.valid?(detail), do: detail, else: "invalid_utf8"
+    truncate_utf8_bytes(text, @max_failure_detail_bytes)
+  end
+
+  defp bounded_failure_detail(%{__exception__: true} = exception) do
+    bounded_failure_detail({exception.__struct__, Exception.message(exception)})
+  end
+
+  defp bounded_failure_detail(detail) do
+    detail
+    |> inspect(limit: 20, printable_limit: @max_failure_detail_bytes, structs: false, width: 80)
+    |> truncate_utf8_bytes(@max_failure_detail_bytes)
+  end
+
+  defp truncate_utf8_bytes(bin, max_bytes)
+       when is_binary(bin) and is_integer(max_bytes) and max_bytes >= 0 do
+    if byte_size(bin) <= max_bytes and String.valid?(bin) do
+      bin
+    else
+      do_truncate_utf8_bytes(bin, min(byte_size(bin), max_bytes))
+    end
+  end
+
+  defp truncate_utf8_bytes(_bin, _max_bytes), do: ""
+
+  defp do_truncate_utf8_bytes(_bin, size) when size <= 0, do: ""
+
+  defp do_truncate_utf8_bytes(bin, size) do
+    prefix = binary_part(bin, 0, size)
+
+    if String.valid?(prefix) do
+      prefix
+    else
+      do_truncate_utf8_bytes(bin, size - 1)
+    end
   end
 end
