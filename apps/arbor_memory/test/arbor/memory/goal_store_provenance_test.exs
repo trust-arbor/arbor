@@ -1650,9 +1650,12 @@ defmodule Arbor.Memory.GoalStoreProvenanceTest do
     assert log =~ "New goal created via reflection"
   end
 
-  test "security regression: restart sweeps stale goal sidecars before hydration", %{
+  test "security regression: restart hydrates survivor while retaining historical sidecars", %{
     agent_id: agent_id
   } do
+    # C3I0C1 content-only cleanup retains historical sidecars; additive restart
+    # hydration must reinstall the authoritative survivor without domain-purging
+    # extra same-agent labels. Explicit delete_goal still purges (next regression).
     goal = Goal.new("authoritative survivor", id: goal_id("cleanup-survivor"))
     stale_id = goal_id("cleanup-stale")
     taint = taint(:hostile, :restricted, "cleanup_restart")
@@ -1660,15 +1663,17 @@ defmodule Arbor.Memory.GoalStoreProvenanceTest do
 
     assert {:ok, ^goal} = GoalStore.add_goal_tainted(agent_id, goal, taint)
     assert :ok = Provenance.put(:goal, agent_id, stale_id, stale_payload, taint)
-    assert {:ok, ids} = Provenance.list_item_ids(:goal, agent_id)
-    assert Enum.sort(ids) == Enum.sort([goal.id, stale_id])
+    assert {:ok, ids_before} = Provenance.list_item_ids(:goal, agent_id)
+    assert Enum.sort(ids_before) == Enum.sort([goal.id, stale_id])
 
     restart_goal_store()
 
-    assert {:ok, [survivor_id]} = Provenance.list_item_ids(:goal, agent_id)
-    assert survivor_id == goal.id
+    assert {:ok, ids_after} = Provenance.list_item_ids(:goal, agent_id)
+    assert Enum.sort(ids_after) == Enum.sort([goal.id, stale_id])
     assert_goal_taint(agent_id, goal, taint, :verified)
-    assert_missing(Provenance.resolve(:goal, agent_id, stale_id, stale_payload))
+
+    assert {:ok, ^taint, :verified} =
+             Provenance.resolve(:goal, agent_id, stale_id, stale_payload)
   end
 
   test "security regression: authoritative miss rediscovers stale delete cleanup", %{

@@ -21,6 +21,7 @@ defmodule Arbor.Memory.KnowledgeGraphAuthorityArchitectureTest do
     "apps/arbor_memory/lib/arbor/memory/knowledge_graph_store.ex" => [
       :delete,
       :insert,
+      :lookup,
       :whereis
     ],
     "apps/arbor_memory/lib/arbor/memory/test_bootstrap.ex" => [:new, :whereis]

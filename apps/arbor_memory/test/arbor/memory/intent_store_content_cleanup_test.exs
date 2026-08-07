@@ -10,13 +10,30 @@ defmodule Arbor.Memory.IntentStoreContentCleanupTest do
   alias Arbor.Memory.{IntentStore, MemoryStore, Provenance}
   alias Arbor.Persistence.BufferedStore
 
+  require Supervisor
+
   @moduletag :fast
   @moduletag spec: "VP-05D2C3I0C1"
   @store_name :arbor_memory_durable
   @ets_table :arbor_memory_intents
 
+  @delete_errors [
+    :invalid_request,
+    :store_unavailable,
+    :commit_outcome_unknown,
+    :projection_failed
+  ]
+
+  @absence_errors [
+    :invalid_request,
+    :store_unavailable,
+    :absence_uncertain
+  ]
+
   setup do
-    start_supervised!({BufferedStore, name: @store_name, backend: nil, write_mode: :sync})
+    ensure_durable_store!()
+    ensure_intent_store!()
+    ensure_provenance!()
 
     uid = System.unique_integer([:positive])
     target = "agent_a_#{uid}"
@@ -29,9 +46,20 @@ defmodule Arbor.Memory.IntentStoreContentCleanupTest do
     end
 
     on_exit(fn ->
+      # Never call start_supervised!/2 from on_exit — ExUnit already stopped
+      # supervised children. Restore durable store only from the test process.
+      ensure_provenance!()
+      ensure_intent_store!()
+
+      # Sidecar cleanup is independent of durable availability.
       for agent <- [target, child, survivor] do
-        _ = IntentStore.clear(agent)
         _ = Provenance.delete_agent(agent)
+      end
+
+      if MemoryStore.available?() do
+        for agent <- [target, child, survivor] do
+          _ = IntentStore.clear(agent)
+        end
       end
     end)
 
@@ -67,7 +95,6 @@ defmodule Arbor.Memory.IntentStoreContentCleanupTest do
     assert :ok = IntentStore.delete_agent_content(target)
     assert {:ok, true} = IntentStore.agent_content_absent?(target)
 
-    # Prove content gone without compatibility reads that rehydrate/purge sidecars.
     assert [] = :ets.lookup(@ets_table, target)
 
     assert {:error, :not_found} =
@@ -79,7 +106,6 @@ defmodule Arbor.Memory.IntentStoreContentCleanupTest do
     assert sid == survivor_intent.id
     assert {:ok, false} = IntentStore.agent_content_absent?(child)
 
-    # Provenance retained after content deletion (before any rehydrate path)
     assert {:ok, ^intent_ids_before} = Provenance.list_item_ids(:intent, target)
 
     hostile_payload = %{"id" => "hostile-intent", "text" => "x"}
@@ -91,68 +117,109 @@ defmodule Arbor.Memory.IntentStoreContentCleanupTest do
              Provenance.resolve(:intent, target, "hostile-intent", hostile_payload)
   end
 
-  test "pending projection makes absence false until cleared", %{target: target} do
-    assert {:ok, true} = IntentStore.agent_content_absent?(target)
-
-    :sys.replace_state(IntentStore, fn state ->
-      pending = Map.put(state.pending_projection, target, 1)
-      %{state | pending_projection: pending}
-    end)
-
-    assert {:ok, false} = IntentStore.agent_content_absent?(target)
-    assert :ok = IntentStore.delete_agent_content(target)
-    assert {:ok, true} = IntentStore.agent_content_absent?(target)
-  end
-
-  test "stale converge_projection after content-only delete does not purge provenance", %{
-    target: target
-  } do
+  test "public cleanup disarms real pending; stale converge keeps provenance", %{target: target} do
     taint = taint(:trusted, :internal, "intent_stale_converge")
     intent = Intent.think("stale converge intent")
     assert {:ok, ^intent} = IntentStore.record_intent_tainted(target, intent, taint)
-
     assert {:ok, ids_before} = Provenance.list_item_ids(:intent, target)
-    assert intent.id in ids_before
+
+    # Real projection miss arms pending_projection (no manual pre-clear).
+    # Unregister (do not terminate) Provenance so ETS sidecars survive.
+    with_provenance_unregistered(fn ->
+      extra = Intent.think("arm pending while sidecar down")
+      assert {:ok, ^extra} = IntentStore.record_intent_tainted(target, extra, taint)
+      assert Map.has_key?(:sys.get_state(IntentStore).pending_projection, target)
+    end)
+
+    assert :ok = IntentStore.delete_agent_content(target)
+    refute Map.has_key?(:sys.get_state(IntentStore).pending_projection, target)
 
     pid = Process.whereis(IntentStore)
-    assert is_pid(pid)
-
-    # Arm pending retry, then queue the converge message before deletion while
-    # suspended so it cannot run until after content-only cleanup clears pending.
-    :sys.replace_state(pid, fn state ->
-      %{state | pending_projection: Map.put(state.pending_projection, target, 1)}
-    end)
-
-    :sys.suspend(pid)
     send(pid, {:converge_projection, target})
-
-    # Perform content-only cleanup effects under suspension (call would block).
-    assert :ok = MemoryStore.delete_tainted_authoritative("intents", target)
-    true = :ets.delete(@ets_table, target)
-
-    :sys.replace_state(pid, fn state ->
-      %{state | pending_projection: Map.delete(state.pending_projection, target)}
-    end)
-
-    :sys.resume(pid)
     _ = :sys.get_state(pid)
 
     assert {:ok, true} = IntentStore.agent_content_absent?(target)
     assert {:ok, ^ids_before} = Provenance.list_item_ids(:intent, target)
-
-    # Post-cleanup delivery also no-ops.
-    send(pid, {:converge_projection, target})
-    _ = :sys.get_state(pid)
-
-    assert {:ok, ^ids_before} = Provenance.list_item_ids(:intent, target)
-    assert {:ok, true} = IntentStore.agent_content_absent?(target)
   end
 
-  test "invalid agent id fails closed" do
-    assert {:error, :invalid_request} = IntentStore.delete_agent_content("")
+  test "public cleanup with malformed durable authority keeps pending disarmed and provenance",
+       %{
+         target: target
+       } do
+    taint = taint(:trusted, :internal, "intent_durable_fail")
+    intent = Intent.think("durable fail intent")
+    assert {:ok, ^intent} = IntentStore.record_intent_tainted(target, intent, taint)
+    assert {:ok, ids_before} = Provenance.list_item_ids(:intent, target)
 
-    assert {:error, :invalid_request} =
-             IntentStore.agent_content_absent?(String.duplicate("x", 300))
+    with_provenance_unregistered(fn ->
+      extra = Intent.think("pending before durable fail")
+      assert {:ok, ^extra} = IntentStore.record_intent_tainted(target, extra, taint)
+      assert Map.has_key?(:sys.get_state(IntentStore).pending_projection, target)
+    end)
+
+    # Malformed bare authority fails closed on delete (not success/absence).
+    bare = %{"not" => "a_record", "agent" => target}
+
+    assert {:ok, ^bare} =
+             Arbor.Persistence.buffered_store_acknowledged_put(@store_name, target, bare)
+
+    assert {:error, del_reason} = IntentStore.delete_agent_content(target)
+    assert del_reason in @delete_errors
+    refute Map.has_key?(:sys.get_state(IntentStore).pending_projection, target)
+
+    send(Process.whereis(IntentStore), {:converge_projection, target})
+    _ = :sys.get_state(IntentStore)
+
+    assert {:ok, ^ids_before} = Provenance.list_item_ids(:intent, target)
+    assert {:ok, ^bare} = Arbor.Persistence.buffered_store_authoritative_get(@store_name, target)
+  end
+
+  test "owner process down returns closed mutation/read errors", %{target: target} do
+    taint = taint(:trusted, :internal, "intent_owner_down")
+    intent = Intent.think("owner down")
+    assert {:ok, ^intent} = IntentStore.record_intent_tainted(target, intent, taint)
+    assert {:ok, ids_before} = Provenance.list_item_ids(:intent, target)
+
+    assert :ok = Supervisor.terminate_child(Arbor.Memory.Supervisor, IntentStore)
+    assert Process.whereis(IntentStore) == nil
+
+    assert {:error, del_reason} = IntentStore.delete_agent_content(target)
+    assert del_reason in @delete_errors
+
+    assert {:error, abs_reason} = IntentStore.agent_content_absent?(target)
+    assert abs_reason in @absence_errors
+
+    ensure_intent_store!()
+    assert {:ok, ^ids_before} = Provenance.list_item_ids(:intent, target)
+  end
+
+  test "public cleanup when durable store is stopped returns closed errors", %{target: target} do
+    taint = taint(:trusted, :internal, "intent_store_stopped")
+    intent = Intent.think("store stopped")
+    assert {:ok, ^intent} = IntentStore.record_intent_tainted(target, intent, taint)
+    assert {:ok, ids_before} = Provenance.list_item_ids(:intent, target)
+
+    # Deterministic ExUnit stop — not Process.exit/:kill (permanent child can restart).
+    assert :ok = stop_supervised(BufferedStore)
+    refute MemoryStore.available?()
+
+    assert {:error, del_reason} = IntentStore.delete_agent_content(target)
+    assert del_reason in @delete_errors
+
+    assert {:error, abs_reason} = IntentStore.agent_content_absent?(target)
+    assert abs_reason in @absence_errors
+
+    ensure_durable_store!()
+    assert MemoryStore.available?()
+    assert {:ok, ^ids_before} = Provenance.list_item_ids(:intent, target)
+  end
+
+  test "cleanup public errors are always closed atoms" do
+    assert {:error, del_reason} = IntentStore.delete_agent_content("")
+    assert del_reason in @delete_errors
+
+    assert {:error, abs_reason} = IntentStore.agent_content_absent?(String.duplicate("x", 300))
+    assert abs_reason in @absence_errors
   end
 
   test "compatibility clear still purges provenance", %{target: target} do
@@ -166,6 +233,99 @@ defmodule Arbor.Memory.IntentStoreContentCleanupTest do
     assert [] = IntentStore.recent_intents(target)
     assert {:ok, after_ids} = Provenance.list_item_ids(:intent, target)
     refute intent.id in after_ids
+  end
+
+  # Induce a name-resolution projection failure while retaining exact ETS sidecars.
+  # Never terminate Provenance here — that destroys its owned table.
+  defp with_provenance_unregistered(fun) when is_function(fun, 0) do
+    pid = Process.whereis(Provenance)
+    assert is_pid(pid)
+    assert Process.unregister(Provenance)
+
+    try do
+      fun.()
+    after
+      restore_provenance_registration!(pid)
+    end
+  end
+
+  defp restore_provenance_registration!(pid) when is_pid(pid) do
+    case Process.whereis(Provenance) do
+      ^pid ->
+        :ok
+
+      nil ->
+        unless Process.alive?(pid) do
+          flunk("captured Provenance pid died while unregistered: #{inspect(pid)}")
+        end
+
+        Process.register(pid, Provenance)
+
+      other ->
+        flunk(
+          "Provenance name owned by unexpected process #{inspect(other)}; " <>
+            "expected captured pid #{inspect(pid)}"
+        )
+    end
+
+    assert Process.whereis(Provenance) == pid
+  end
+
+  defp ensure_durable_store! do
+    case Process.whereis(@store_name) do
+      pid when is_pid(pid) ->
+        :ok
+
+      nil ->
+        assert is_pid(
+                 start_supervised!(
+                   {BufferedStore, name: @store_name, backend: nil, write_mode: :sync}
+                 )
+               )
+
+        :ok
+    end
+
+    assert MemoryStore.available?()
+  end
+
+  defp ensure_provenance! do
+    case Process.whereis(Provenance) do
+      pid when is_pid(pid) ->
+        :ok
+
+      nil ->
+        case Supervisor.restart_child(Arbor.Memory.Supervisor, Provenance) do
+          {:ok, _pid} -> :ok
+          {:error, {:already_started, _}} -> :ok
+          other -> flunk("failed to restart Provenance: #{inspect(other)}")
+        end
+    end
+  end
+
+  defp ensure_intent_store! do
+    case Process.whereis(IntentStore) do
+      pid when is_pid(pid) ->
+        :ok
+
+      nil ->
+        case Supervisor.restart_child(Arbor.Memory.Supervisor, IntentStore) do
+          {:ok, _pid} ->
+            :ok
+
+          {:error, {:already_started, _}} ->
+            :ok
+
+          {:error, :not_found} ->
+            assert {:ok, _pid} =
+                     Supervisor.start_child(Arbor.Memory.Supervisor, {IntentStore, []})
+
+            :ok
+
+          other ->
+            flunk("failed to restart IntentStore: #{inspect(other)}")
+        end
+    end
   end
 
   defp taint(level, sensitivity, source) do
