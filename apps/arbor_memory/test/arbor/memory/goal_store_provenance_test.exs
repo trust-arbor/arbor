@@ -1073,6 +1073,48 @@ defmodule Arbor.Memory.GoalStoreProvenanceTest do
     assert {:ok, []} = GoalStore.get_all_goals_tainted(agent_id)
   end
 
+  test "security regression: reload evicts later projections after one removal failure", %{
+    agent_id: agent_id
+  } do
+    taint = taint(:hostile, :restricted, "projection_cleanup_failure")
+
+    goals =
+      for suffix <- ["a", "b", "c"] do
+        Goal.new("stale projected goal #{suffix}", id: goal_id("projection-cleanup-#{suffix}"))
+      end
+
+    Enum.each(goals, fn goal ->
+      assert {:ok, ^goal} = GoalStore.add_goal_tainted(agent_id, goal, taint)
+
+      assert :ok =
+               MemoryStore.delete_tainted_authoritative(
+                 "goals",
+                 durable_key(agent_id, goal)
+               )
+    end)
+
+    valid_ids = Enum.map(goals, & &1.id)
+
+    invalid_id =
+      Enum.find([:invalid_projection, 0, "", " "], fn candidate ->
+        ids = MapSet.new([candidate | valid_ids]) |> Enum.to_list()
+        Enum.find_index(ids, &(&1 == candidate)) < length(valid_ids)
+      end)
+
+    assert invalid_id != nil
+
+    :sys.replace_state(GoalStore, fn state ->
+      projected_ids = Map.put(state.projected_ids, agent_id, MapSet.new([invalid_id | valid_ids]))
+      %{state | projected_ids: projected_ids}
+    end)
+
+    assert :ok = GoalStore.reload_for_agent(agent_id)
+
+    assert Enum.all?(goals, fn goal ->
+             :ets.lookup(@goals_ets, {agent_id, goal.id}) == []
+           end)
+  end
+
   test "security regression: tainted single read replaces a stale valid live pair", %{
     agent_id: agent_id
   } do
