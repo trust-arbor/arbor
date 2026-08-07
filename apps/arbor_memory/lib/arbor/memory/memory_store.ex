@@ -1606,8 +1606,10 @@ defmodule Arbor.Memory.MemoryStore do
           do: {:ok, {:owned, record}},
           else: {:ok, :not_owned}
 
+      # Non-Record backend reply is malformed/ambiguous, never :not_owned/:not_found.
+      # Preserve the durable row; callers must fail closed.
       {:ok, _other} ->
-        {:ok, :not_owned}
+        critical_error(:invalid_record)
 
       {:error, :not_found} ->
         {:ok, :absent}

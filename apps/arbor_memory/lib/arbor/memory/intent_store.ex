@@ -482,13 +482,28 @@ defmodule Arbor.Memory.IntentStore do
   must be closed and drained before invoke. This API is not race-free agent
   destruction.
   """
+  @content_delete_errors [
+    :invalid_request,
+    :store_unavailable,
+    :commit_outcome_unknown,
+    :projection_failed
+  ]
+
+  @content_absence_errors [
+    :invalid_request,
+    :store_unavailable,
+    :absence_uncertain
+  ]
+
   @spec delete_agent_content(String.t()) ::
-          :ok | {:error, :invalid_request | :store_unavailable | :commit_outcome_unknown}
+          :ok
+          | {:error,
+             :invalid_request | :store_unavailable | :commit_outcome_unknown | :projection_failed}
   def delete_agent_content(agent_id) do
     with :ok <- validate_identifier(agent_id) do
       case safe_server_call({:delete_agent_content, agent_id}, :mutation) do
         :ok -> :ok
-        {:error, :commit_outcome_unknown} = error -> error
+        {:error, reason} -> {:error, normalize_content_delete_error(reason)}
         _ -> {:error, :store_unavailable}
       end
     else
@@ -508,8 +523,7 @@ defmodule Arbor.Memory.IntentStore do
     with :ok <- validate_identifier(agent_id) do
       case safe_server_call({:agent_content_absent?, agent_id}, :read) do
         {:ok, present?} when is_boolean(present?) -> {:ok, present?}
-        {:error, :store_unavailable} = error -> error
-        {:error, :absence_uncertain} = error -> error
+        {:error, reason} -> {:error, normalize_content_absence_error(reason)}
         _ -> {:error, :store_unavailable}
       end
     else
@@ -649,25 +663,9 @@ defmodule Arbor.Memory.IntentStore do
 
   @impl true
   def handle_call({:delete_agent_content, agent_id}, _from, state) do
-    case delete_persisted_aggregate(agent_id) do
-      :ok ->
-        _ = evict_live_projection_content_only(agent_id)
-        state = clear_pending_projection_only(state, agent_id)
-        {:reply, :ok, state}
-
-      {:error, :commit_outcome_unknown} ->
-        # Conservative projection eviction; provenance intact.
-        _ = evict_live_projection_content_only(agent_id)
-        {:reply, {:error, :commit_outcome_unknown}, state}
-
-      {:error, _reason} ->
-        _ = evict_live_projection_content_only(agent_id)
-        {:reply, {:error, :store_unavailable}, state}
-    end
-  rescue
-    _ -> {:reply, {:error, :store_unavailable}, state}
-  catch
-    _, _ -> {:reply, {:error, :store_unavailable}, state}
+    # Disarm before backend/effects; exceptional returns must keep disarmed state.
+    disarmed = clear_pending_projection_only(state, agent_id)
+    delete_agent_content_after_disarm(agent_id, disarmed)
   end
 
   @impl true
@@ -1434,13 +1432,55 @@ defmodule Arbor.Memory.IntentStore do
   end
 
   # Content-only eviction: drops ETS projection without touching Provenance.
-  defp evict_live_projection_content_only(agent_id) do
-    true = :ets.delete(@ets_table, agent_id)
-    :ok
+  # Only initial :undefined is genuine absence; post-defined races fail closed.
+  defp delete_agent_content_after_disarm(agent_id, state) do
+    durable_result = delete_persisted_aggregate(agent_id)
+
+    projection_result =
+      case confirm_evict_live_projection_content_only(agent_id) do
+        :ok -> :ok
+        {:error, reason} -> {:error, reason}
+      end
+
+    reply =
+      case {durable_result, projection_result} do
+        {:ok, :ok} ->
+          :ok
+
+        {{:error, reason}, _} ->
+          {:error, normalize_content_delete_error(reason)}
+
+        {:ok, {:error, reason}} ->
+          {:error, normalize_content_delete_error(reason)}
+
+        _ ->
+          {:error, :store_unavailable}
+      end
+
+    {:reply, reply, state}
   rescue
-    _ -> :ok
+    _ -> {:reply, {:error, :store_unavailable}, state}
   catch
-    _, _ -> :ok
+    _, _ -> {:reply, {:error, :store_unavailable}, state}
+  end
+
+  defp confirm_evict_live_projection_content_only(agent_id) do
+    case :ets.whereis(@ets_table) do
+      :undefined ->
+        :ok
+
+      _tid ->
+        true = :ets.delete(@ets_table, agent_id)
+
+        case :ets.lookup(@ets_table, agent_id) do
+          [] -> :ok
+          _ -> {:error, :projection_failed}
+        end
+    end
+  rescue
+    ArgumentError -> {:error, :projection_failed}
+  catch
+    _, _ -> {:error, :projection_failed}
   end
 
   defp clear_pending_projection_only(%{pending_projection: pending} = state, agent_id) do
@@ -1463,17 +1503,37 @@ defmodule Arbor.Memory.IntentStore do
         {:ok, false}
 
       :absent ->
-        ets_absent? = :ets.lookup(@ets_table, agent_id) == []
-        deferred_absent? = not Map.has_key?(state.pending_projection, agent_id)
+        case intent_ets_absent?(agent_id) do
+          {:ok, true} ->
+            deferred_absent? = not Map.has_key?(state.pending_projection, agent_id)
+            if deferred_absent?, do: {:ok, true}, else: {:ok, false}
 
-        if ets_absent? and deferred_absent? do
-          {:ok, true}
-        else
-          {:ok, false}
+          {:ok, false} ->
+            {:ok, false}
+
+          {:error, _reason} ->
+            {:error, :absence_uncertain}
         end
     end
   rescue
     _ -> {:error, :absence_uncertain}
+  catch
+    _, _ -> {:error, :absence_uncertain}
+  end
+
+  defp intent_ets_absent?(agent_id) do
+    case :ets.whereis(@ets_table) do
+      :undefined ->
+        {:ok, true}
+
+      _tid ->
+        case :ets.lookup(@ets_table, agent_id) do
+          [] -> {:ok, true}
+          _ -> {:ok, false}
+        end
+    end
+  rescue
+    ArgumentError -> {:error, :absence_uncertain}
   catch
     _, _ -> {:error, :absence_uncertain}
   end
@@ -1512,6 +1572,12 @@ defmodule Arbor.Memory.IntentStore do
 
   defp public_commit_error(:commit_outcome_unknown), do: {:error, :commit_outcome_unknown}
   defp public_commit_error(_reason), do: {:error, :store_unavailable}
+
+  defp normalize_content_delete_error(reason) when reason in @content_delete_errors, do: reason
+  defp normalize_content_delete_error(_reason), do: :store_unavailable
+
+  defp normalize_content_absence_error(reason) when reason in @content_absence_errors, do: reason
+  defp normalize_content_absence_error(_reason), do: :store_unavailable
 
   defp normalize_provenance_status(taint, status) do
     cond do

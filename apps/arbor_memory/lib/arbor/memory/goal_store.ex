@@ -514,6 +514,20 @@ defmodule Arbor.Memory.GoalStore do
   must be closed and drained before invoke. This API is not race-free agent
   destruction.
   """
+  @content_delete_errors [
+    :invalid_provenance,
+    :persistence_failed,
+    :projection_failed,
+    :store_unavailable,
+    :outcome_unknown
+  ]
+
+  @content_absence_errors [
+    :invalid_provenance,
+    :projection_failed,
+    :store_unavailable
+  ]
+
   @spec delete_agent_content(String.t()) ::
           :ok
           | {:error,
@@ -523,9 +537,15 @@ defmodule Arbor.Memory.GoalStore do
              | :store_unavailable
              | :outcome_unknown}
   def delete_agent_content(agent_id) do
-    if valid_identifier?(agent_id),
-      do: call_owner({:delete_agent_content, agent_id}, :mutation),
-      else: {:error, :invalid_provenance}
+    if valid_identifier?(agent_id) do
+      case call_owner({:delete_agent_content, agent_id}, :mutation) do
+        :ok -> :ok
+        {:error, reason} -> {:error, normalize_content_delete_error(reason)}
+        _ -> {:error, :outcome_unknown}
+      end
+    else
+      {:error, :invalid_provenance}
+    end
   end
 
   @doc """
@@ -540,9 +560,15 @@ defmodule Arbor.Memory.GoalStore do
              | :projection_failed
              | :store_unavailable}
   def agent_content_absent?(agent_id) do
-    if valid_identifier?(agent_id),
-      do: call_owner({:agent_content_absent?, agent_id}, :read),
-      else: {:error, :invalid_provenance}
+    if valid_identifier?(agent_id) do
+      case call_owner({:agent_content_absent?, agent_id}, :read) do
+        {:ok, present?} when is_boolean(present?) -> {:ok, present?}
+        {:error, reason} -> {:error, normalize_content_absence_error(reason)}
+        _ -> {:error, :store_unavailable}
+      end
+    else
+      {:error, :invalid_provenance}
+    end
   end
 
   defp safe_ets_delete(key) do
@@ -835,9 +861,11 @@ defmodule Arbor.Memory.GoalStore do
       projected_ids: projected_ids,
       pending_convergence: pending_convergence,
       scheduled_convergence: MapSet.new(),
-      # Agents whose content-only cleanup completed. Queued mark/converge
-      # messages for these agents must no-op until new content is projected.
-      content_cleaned: MapSet.new()
+      # Monotonic owner generation + per-agent active tokens for deferred
+      # convergence. Tokens are never reused; active entries exist only while
+      # deferred work is armed.
+      owner_generation: 0,
+      active_tokens: %{}
     }
 
     {:ok, schedule_pending_convergence(state)}
@@ -867,8 +895,11 @@ defmodule Arbor.Memory.GoalStore do
   def handle_call({:get_goal_list_tainted, agent_id, scope}, _from, state) do
     case do_get_goal_list_tainted(agent_id, scope) do
       {:reconciled, reply, goal_ids} ->
-        {reply, state} = reconcile_projected_ids(reply, state, agent_id, goal_ids)
-        {:reply, reply, clear_convergence_pending(state, agent_id)}
+        {reply, state, rearm?} = reconcile_projected_ids(reply, state, agent_id, goal_ids)
+        state = clear_convergence_pending(state, agent_id)
+        # Re-arm after clear when projection removal failed (replaces async arm).
+        state = if rearm?, do: mark_convergence_pending(state, agent_id), else: state
+        {:reply, reply, state}
 
       {:error, _reason} = error ->
         {:reply, error, fail_agent_projection(state, agent_id)}
@@ -895,9 +926,22 @@ defmodule Arbor.Memory.GoalStore do
 
   def handle_call({:delete_goal, agent_id, goal_id}, _from, state) do
     case do_delete_goal(agent_id, goal_id) do
-      :ok -> {:reply, :ok, untrack_projected_id(state, agent_id, goal_id)}
-      {:error, _reason} = error -> {:reply, error, state}
-      _ -> {:reply, {:error, :persistence_failed}, state}
+      :ok ->
+        {:reply, :ok, untrack_projected_id(state, agent_id, goal_id)}
+
+      {:ok, :convergence_pending} ->
+        state =
+          state
+          |> untrack_projected_id(agent_id, goal_id)
+          |> mark_convergence_pending(agent_id)
+
+        {:reply, :ok, state}
+
+      {:error, _reason} = error ->
+        {:reply, error, state}
+
+      _ ->
+        {:reply, {:error, :persistence_failed}, state}
     end
   end
 
@@ -907,12 +951,8 @@ defmodule Arbor.Memory.GoalStore do
   end
 
   def handle_call({:delete_agent_content, agent_id}, _from, state) do
-    {reply, state} = do_delete_agent_content(agent_id, state)
-    {:reply, reply, state}
-  rescue
-    _ -> {:reply, {:error, :outcome_unknown}, state}
-  catch
-    _, _ -> {:reply, {:error, :outcome_unknown}, state}
+    {reply, next_state} = do_delete_agent_content(agent_id, state)
+    {:reply, reply, next_state}
   end
 
   def handle_call({:agent_content_absent?, agent_id}, _from, state) do
@@ -927,8 +967,10 @@ defmodule Arbor.Memory.GoalStore do
   def handle_call({:reload_for_agent, agent_id}, _from, state) do
     case do_reload_for_agent(agent_id) do
       {:reconciled, reply, goal_ids} ->
-        {reply, state} = reconcile_projected_ids(reply, state, agent_id, goal_ids)
-        {:reply, reply, clear_convergence_pending(state, agent_id)}
+        {reply, state, rearm?} = reconcile_projected_ids(reply, state, agent_id, goal_ids)
+        state = clear_convergence_pending(state, agent_id)
+        state = if rearm?, do: mark_convergence_pending(state, agent_id), else: state
+        {:reply, reply, state}
 
       {:error, _reason} = error ->
         {:reply, error, fail_agent_projection(state, agent_id)}
@@ -946,6 +988,14 @@ defmodule Arbor.Memory.GoalStore do
 
         {:reloaded, :absent} ->
           {:reply, :ok, untrack_projected_id(state, agent_id, goal_id)}
+
+        {:reloaded, :absent_needs_convergence} ->
+          state =
+            state
+            |> untrack_projected_id(agent_id, goal_id)
+            |> mark_convergence_pending(agent_id)
+
+          {:reply, :ok, state}
 
         {:error, reason} = error when reason in [:invalid_provenance, :projection_failed] ->
           state =
@@ -967,45 +1017,57 @@ defmodule Arbor.Memory.GoalStore do
   end
 
   @impl true
-  def handle_info({:mark_goal_convergence, agent_id}, state) do
-    # Stale after content-only cleanup: do not re-arm convergence that would
-    # hydrate via Provenance.delete_domain_agent and wipe retained sidecars.
-    if content_cleaned?(state, agent_id) do
-      {:noreply, state}
+  def handle_info({:mark_goal_convergence, agent_id, token}, state) do
+    # Tokened mark only: never mint. Stale pre-cleanup tokens are pure no-ops.
+    if active_token_match?(state, agent_id, token) do
+      pending = Map.get(state, :pending_convergence, MapSet.new())
+      state = Map.put(state, :pending_convergence, MapSet.put(pending, agent_id))
+      {:noreply, schedule_convergence(state, agent_id, @projection_convergence_attempts)}
     else
-      {:noreply, mark_convergence_pending(state, agent_id)}
+      {:noreply, state}
     end
   end
 
-  def handle_info({:converge_goal_agent, agent_id, attempts}, state) do
-    state = clear_scheduled_convergence(state, agent_id)
+  # Untokened mark/arm messages must never mint or re-arm after cleanup.
+  def handle_info({:mark_goal_convergence, _agent_id}, state), do: {:noreply, state}
+  def handle_info({:arm_goal_convergence, _agent_id}, state), do: {:noreply, state}
 
+  def handle_info({:converge_goal_agent, agent_id, attempts, token}, state) do
     cond do
-      content_cleaned?(state, agent_id) ->
-        {:noreply, clear_convergence_pending(state, agent_id)}
-
-      convergence_pending?(state, agent_id) ->
-        case do_reload_for_agent(agent_id, false) do
-          {:reconciled, :ok, goal_ids} ->
-            {_reply, state} = reconcile_projected_ids(:ok, state, agent_id, goal_ids)
-            {:noreply, clear_convergence_pending(state, agent_id)}
-
-          _failure when attempts > 1 ->
-            state =
-              state
-              |> fail_agent_projection(agent_id, false)
-              |> schedule_convergence(agent_id, attempts - 1)
-
-            {:noreply, state}
-
-          _failure ->
-            {:noreply, fail_agent_projection(state, agent_id, false)}
-        end
+      not active_token_match?(state, agent_id, token) ->
+        # True no-op: do not clear scheduler state belonging to a newer write.
+        {:noreply, state}
 
       true ->
-        {:noreply, state}
+        state = clear_scheduled_convergence(state, agent_id)
+
+        if convergence_pending?(state, agent_id) do
+          case do_reload_for_agent(agent_id) do
+            {:reconciled, :ok, goal_ids} ->
+              {_reply, state, rearm?} = reconcile_projected_ids(:ok, state, agent_id, goal_ids)
+              state = clear_convergence_pending(state, agent_id)
+              state = if rearm?, do: mark_convergence_pending(state, agent_id), else: state
+              {:noreply, state}
+
+            _failure when attempts > 1 ->
+              state =
+                state
+                |> fail_agent_projection(agent_id, false)
+                |> schedule_convergence(agent_id, attempts - 1)
+
+              {:noreply, state}
+
+            _failure ->
+              {:noreply, fail_agent_projection(state, agent_id, false)}
+          end
+        else
+          {:noreply, state}
+        end
     end
   end
+
+  # Legacy untokened converge messages are never processed.
+  def handle_info({:converge_goal_agent, _agent_id, _attempts}, state), do: {:noreply, state}
 
   def handle_info(_message, state), do: {:noreply, state}
 
@@ -1041,6 +1103,12 @@ defmodule Arbor.Memory.GoalStore do
 
   defp owner_exit_result(:mutation), do: {:error, :outcome_unknown}
   defp owner_exit_result(:read), do: {:error, :store_unavailable}
+
+  defp normalize_content_delete_error(reason) when reason in @content_delete_errors, do: reason
+  defp normalize_content_delete_error(_reason), do: :outcome_unknown
+
+  defp normalize_content_absence_error(reason) when reason in @content_absence_errors, do: reason
+  defp normalize_content_absence_error(_reason), do: :store_unavailable
 
   defp compatibility_goal_list(agent_id, scope) when scope in [:active, :all] do
     case call_owner({:get_goal_list_tainted, agent_id, scope}) do
@@ -1094,8 +1162,19 @@ defmodule Arbor.Memory.GoalStore do
         {{:ok, goal}, state}
 
       {:error, reason} when reason in [:not_found, :invalid_provenance, :projection_failed] ->
-        _ = remove_live_goal(agent_id, goal_id)
-        {result, untrack_projected_id(state, agent_id, goal_id)}
+        # Synchronous owner-state update only — never async-mint tokens.
+        remove_result = remove_live_goal(agent_id, goal_id)
+        state = untrack_projected_id(state, agent_id, goal_id)
+
+        state =
+          if remove_result == {:error, :projection_failed} or
+               reason in [:invalid_provenance, :projection_failed] do
+            mark_convergence_pending(state, agent_id)
+          else
+            state
+          end
+
+        {result, state}
 
       _ ->
         {result, state}
@@ -1108,30 +1187,45 @@ defmodule Arbor.Memory.GoalStore do
         {result, track_projected_id(state, agent_id, goal_id)}
 
       {:error, reason} when reason in [:not_found, :invalid_provenance, :projection_failed] ->
-        _ = remove_live_goal(agent_id, goal_id)
-        {result, untrack_projected_id(state, agent_id, goal_id)}
+        remove_result = remove_live_goal(agent_id, goal_id)
+        state = untrack_projected_id(state, agent_id, goal_id)
+
+        state =
+          if remove_result == {:error, :projection_failed} or
+               reason in [:invalid_provenance, :projection_failed] do
+            mark_convergence_pending(state, agent_id)
+          else
+            state
+          end
+
+        {result, state}
 
       _ ->
         {result, state}
     end
   end
 
+  # Returns {reply, state, rearm?} where rearm? means a projection-removal
+  # failure requires mark_convergence_pending after any subsequent clear.
   defp reconcile_projected_ids(reply, state, agent_id, goal_ids) do
     with {:ok, next_ids} <- bounded_projected_id_set(goal_ids) do
       previous_ids = projected_ids_for_agent(state, agent_id)
-
-      previous_ids
-      |> MapSet.difference(next_ids)
-      |> Enum.each(&remove_live_goal(agent_id, &1))
-
-      {reply, put_projected_ids(state, agent_id, next_ids)}
+      removed = MapSet.difference(previous_ids, next_ids)
+      rearm? = any_projection_removal_failed?(agent_id, removed)
+      {reply, put_projected_ids(state, agent_id, next_ids), rearm?}
     else
       _ ->
-        projected_ids_for_agent(state, agent_id)
-        |> Enum.each(&remove_live_goal(agent_id, &1))
-
-        {{:error, :projection_failed}, clear_projected_ids(state, agent_id)}
+        ids = projected_ids_for_agent(state, agent_id)
+        # Always attempt removal; total reconcile failure always re-arms.
+        _ = any_projection_removal_failed?(agent_id, ids)
+        {{:error, :projection_failed}, clear_projected_ids(state, agent_id), true}
     end
+  end
+
+  defp any_projection_removal_failed?(agent_id, goal_ids) do
+    Enum.any?(goal_ids, fn goal_id ->
+      match?({:error, :projection_failed}, remove_live_goal(agent_id, goal_id))
+    end)
   end
 
   defp bounded_projected_id_set(goal_ids) when is_list(goal_ids) do
@@ -1161,7 +1255,6 @@ defmodule Arbor.Memory.GoalStore do
   defp projected_ids_for_agent(_state, _agent_id), do: MapSet.new()
 
   defp track_projected_id(state, agent_id, goal_id) do
-    state = clear_content_cleaned(state, agent_id)
     projected_ids = Map.get(state, :projected_ids, %{})
     ids = projected_ids |> Map.get(agent_id, MapSet.new()) |> MapSet.put(goal_id)
     %{state | projected_ids: Map.put(projected_ids, agent_id, ids)}
@@ -1178,39 +1271,7 @@ defmodule Arbor.Memory.GoalStore do
         do: Map.delete(projected_ids, agent_id),
         else: Map.put(projected_ids, agent_id, ids)
 
-    state =
-      if MapSet.size(ids) == 0,
-        do: state,
-        else: clear_content_cleaned(state, agent_id)
-
     %{state | projected_ids: next}
-  end
-
-  defp content_cleaned?(state, agent_id) do
-    case Map.get(state, :content_cleaned, MapSet.new()) do
-      %MapSet{} = cleaned -> MapSet.member?(cleaned, agent_id)
-      _ -> false
-    end
-  end
-
-  defp mark_content_cleaned(state, agent_id) do
-    cleaned =
-      case Map.get(state, :content_cleaned, MapSet.new()) do
-        %MapSet{} = set -> set
-        _ -> MapSet.new()
-      end
-
-    Map.put(state, :content_cleaned, MapSet.put(cleaned, agent_id))
-  end
-
-  defp clear_content_cleaned(state, agent_id) do
-    cleaned =
-      case Map.get(state, :content_cleaned, MapSet.new()) do
-        %MapSet{} = set -> set
-        _ -> MapSet.new()
-      end
-
-    Map.put(state, :content_cleaned, MapSet.delete(cleaned, agent_id))
   end
 
   defp clear_projected_ids(%{projected_ids: projected_ids} = state, agent_id) do
@@ -1218,8 +1279,10 @@ defmodule Arbor.Memory.GoalStore do
   end
 
   defp fail_agent_projection(state, agent_id, rearm? \\ true) do
+    # Drop live rows; convergence re-arm is owned synchronously here (not via
+    # async tokenless messages from remove_live_goal/2).
     projected_ids_for_agent(state, agent_id)
-    |> Enum.each(&remove_live_goal(agent_id, &1, rearm?))
+    |> Enum.each(&remove_live_goal(agent_id, &1))
 
     state
     |> clear_projected_ids(agent_id)
@@ -1228,24 +1291,80 @@ defmodule Arbor.Memory.GoalStore do
 
   defp mark_convergence_pending(state, agent_id, rearm? \\ true)
 
-  defp mark_convergence_pending(%{pending_convergence: pending} = state, agent_id, rearm?) do
+  defp mark_convergence_pending(state, agent_id, rearm?) do
+    # Invariant: every pending/scheduled entry has an active token.
     cond do
       not valid_identifier?(agent_id) ->
         state
 
       true ->
+        {state, _token} = ensure_active_token(state, agent_id)
+        pending = Map.get(state, :pending_convergence, MapSet.new())
         state = Map.put(state, :pending_convergence, MapSet.put(pending, agent_id))
 
-        if rearm?,
-          do: schedule_convergence(state, agent_id, @projection_convergence_attempts),
-          else: state
+        if rearm? do
+          schedule_convergence(state, agent_id, @projection_convergence_attempts)
+        else
+          state
+        end
     end
   end
 
-  defp clear_convergence_pending(
-         %{pending_convergence: pending, scheduled_convergence: scheduled} = state,
-         agent_id
-       ) do
+  defp mint_active_token(state, agent_id) do
+    gen = Map.get(state, :owner_generation, 0) + 1
+    tokens = Map.get(state, :active_tokens, %{})
+
+    state = %{
+      state
+      | owner_generation: gen,
+        active_tokens: Map.put(tokens, agent_id, gen)
+    }
+
+    {state, gen}
+  end
+
+  defp ensure_active_token(state, agent_id) do
+    tokens = Map.get(state, :active_tokens, %{})
+
+    case Map.fetch(tokens, agent_id) do
+      {:ok, token} -> {state, token}
+      :error -> mint_active_token(state, agent_id)
+    end
+  end
+
+  defp active_token_match?(state, agent_id, token) do
+    case Map.fetch(Map.get(state, :active_tokens, %{}), agent_id) do
+      {:ok, ^token} -> true
+      _ -> false
+    end
+  end
+
+  defp disarm_agent_convergence(state, agent_id) do
+    gen = Map.get(state, :owner_generation, 0) + 1
+    tokens = Map.get(state, :active_tokens, %{})
+
+    state = %{
+      state
+      | owner_generation: gen,
+        active_tokens: Map.delete(tokens, agent_id)
+    }
+
+    clear_convergence_pending_only(state, agent_id)
+  end
+
+  defp clear_convergence_pending(state, agent_id) do
+    # Quiescence: drop active token entry; never reset owner_generation.
+    tokens = Map.get(state, :active_tokens, %{})
+
+    state
+    |> Map.put(:active_tokens, Map.delete(tokens, agent_id))
+    |> clear_convergence_pending_only(agent_id)
+  end
+
+  defp clear_convergence_pending_only(state, agent_id) do
+    pending = Map.get(state, :pending_convergence, MapSet.new())
+    scheduled = Map.get(state, :scheduled_convergence, MapSet.new())
+
     %{
       state
       | pending_convergence: MapSet.delete(pending, agent_id),
@@ -1255,47 +1374,47 @@ defmodule Arbor.Memory.GoalStore do
 
   defp schedule_pending_convergence(%{pending_convergence: pending} = state) do
     Enum.reduce(pending, state, fn agent_id, state ->
+      # Invariant: pending agents must have active tokens before schedule.
+      {state, _token} = ensure_active_token(state, agent_id)
       schedule_convergence(state, agent_id, @projection_convergence_attempts)
     end)
   end
 
-  defp schedule_convergence(
-         %{scheduled_convergence: scheduled} = state,
-         agent_id,
-         attempts
-       )
+  defp schedule_convergence(state, agent_id, attempts)
        when is_integer(attempts) and attempts > 0 do
+    scheduled = Map.get(state, :scheduled_convergence, MapSet.new())
+
     if MapSet.member?(scheduled, agent_id) do
       state
     else
-      _ =
-        Process.send_after(
-          self(),
-          {:converge_goal_agent, agent_id, attempts},
-          @projection_convergence_delay_ms
-        )
+      case Map.fetch(Map.get(state, :active_tokens, %{}), agent_id) do
+        {:ok, token} ->
+          _ =
+            Process.send_after(
+              self(),
+              {:converge_goal_agent, agent_id, attempts, token},
+              @projection_convergence_delay_ms
+            )
 
-      %{state | scheduled_convergence: MapSet.put(scheduled, agent_id)}
+          %{state | scheduled_convergence: MapSet.put(scheduled, agent_id)}
+
+        :error ->
+          # Refuse to schedule without an active token (invariant).
+          state
+      end
     end
   end
 
   defp schedule_convergence(state, _agent_id, _attempts), do: state
 
-  defp clear_scheduled_convergence(%{scheduled_convergence: scheduled} = state, agent_id) do
+  defp clear_scheduled_convergence(state, agent_id) do
+    scheduled = Map.get(state, :scheduled_convergence, MapSet.new())
     %{state | scheduled_convergence: MapSet.delete(scheduled, agent_id)}
   end
 
-  defp convergence_pending?(%{pending_convergence: pending}, agent_id) do
+  defp convergence_pending?(state, agent_id) do
+    pending = Map.get(state, :pending_convergence, MapSet.new())
     MapSet.member?(pending, agent_id)
-  end
-
-  defp request_goal_convergence(agent_id) do
-    send(self(), {:mark_goal_convergence, agent_id})
-    :ok
-  rescue
-    _ -> :ok
-  catch
-    _, _ -> :ok
   end
 
   defp do_add_goal(agent_id, %Goal{} = goal, supplied_taint, enforce_limit?) do
@@ -1668,27 +1787,18 @@ defmodule Arbor.Memory.GoalStore do
   defp context_expected(:not_found), do: :not_found
   defp context_expected(%{record: %Record{} = record}), do: record
 
-  defp install_live_goal(agent_id, goal, payload, taint),
-    do: install_live_goal(agent_id, goal, payload, taint, true)
-
-  defp install_live_goal(
-         agent_id,
-         %Goal{} = goal,
-         payload,
-         %Taint{} = taint,
-         request_convergence?
-       ) do
+  defp install_live_goal(agent_id, %Goal{} = goal, payload, %Taint{} = taint) do
     with :ok <- Provenance.put(:goal, agent_id, goal.id, payload, taint),
          {:ok, ^taint, :verified} <- Provenance.resolve(:goal, agent_id, goal.id, payload),
          :ok <- insert_live_goal(agent_id, goal) do
       :ok
     else
-      _ -> fail_live_projection(agent_id, goal.id, request_convergence?)
+      _ -> fail_live_projection(agent_id, goal.id)
     end
   rescue
-    _ -> fail_live_projection(agent_id, goal.id, request_convergence?)
+    _ -> fail_live_projection(agent_id, goal.id)
   catch
-    _, _ -> fail_live_projection(agent_id, goal.id, request_convergence?)
+    _, _ -> fail_live_projection(agent_id, goal.id)
   end
 
   defp insert_live_goal(agent_id, %Goal{} = goal) do
@@ -1703,8 +1813,10 @@ defmodule Arbor.Memory.GoalStore do
     _, _ -> fail_live_projection(agent_id, goal.id)
   end
 
-  defp fail_live_projection(agent_id, goal_id, request_convergence? \\ true) do
-    _ = remove_live_goal(agent_id, goal_id, request_convergence?)
+  # Stateless cleanup of a live row. Callers that own GenServer state must
+  # inspect the result and mark_convergence_pending/2 when :projection_failed.
+  defp fail_live_projection(agent_id, goal_id) do
+    _ = remove_live_goal(agent_id, goal_id)
     {:error, :projection_failed}
   end
 
@@ -1772,37 +1884,22 @@ defmodule Arbor.Memory.GoalStore do
     _, _ -> {:error, :invalid_provenance}
   end
 
-  defp project_authoritative_goal(agent_id, goal_id, value, status),
-    do: project_authoritative_goal(agent_id, goal_id, value, status, true)
-
-  defp project_authoritative_goal(
-         agent_id,
-         goal_id,
-         %TaintedValue{} = value,
-         status,
-         request_convergence?
-       ) do
+  defp project_authoritative_goal(agent_id, goal_id, %TaintedValue{} = value, status) do
     case decode_authoritative_goal(goal_id, value, status) do
       {:ok, %Goal{} = goal, payload, taint, provenance_status} ->
-        case install_live_goal(agent_id, goal, payload, taint, request_convergence?) do
+        case install_live_goal(agent_id, goal, payload, taint) do
           :ok -> {:ok, TaintedValue.wrap(goal, taint), provenance_status}
           {:error, _reason} = error -> error
-          _ -> fail_live_projection(agent_id, goal_id, request_convergence?)
+          _ -> fail_live_projection(agent_id, goal_id)
         end
 
       {:error, _reason} ->
-        invalidate_live_goal(agent_id, goal_id, request_convergence?)
+        invalidate_live_goal(agent_id, goal_id)
     end
   end
 
-  defp project_authoritative_goal(
-         agent_id,
-         goal_id,
-         _value,
-         _status,
-         request_convergence?
-       ) do
-    invalidate_live_goal(agent_id, goal_id, request_convergence?)
+  defp project_authoritative_goal(agent_id, goal_id, _value, _status) do
+    invalidate_live_goal(agent_id, goal_id)
   end
 
   defp decode_authoritative_goal(
@@ -1907,7 +2004,9 @@ defmodule Arbor.Memory.GoalStore do
 
   defp group_authoritative_goal_records(_records), do: {:error, :invalid_provenance}
 
-  defp remove_live_goal(agent_id, goal_id, request_convergence? \\ true) do
+  # Drop ETS + provenance label for one goal. Never async-arms convergence —
+  # state-owning callers must mark_convergence_pending/2 on {:error, :projection_failed}.
+  defp remove_live_goal(agent_id, goal_id) do
     _ = safe_ets_delete({agent_id, goal_id})
 
     case Provenance.delete(:goal, agent_id, goal_id) do
@@ -1915,21 +2014,18 @@ defmodule Arbor.Memory.GoalStore do
         :ok
 
       _failure ->
-        if request_convergence?, do: request_goal_convergence(agent_id)
         {:error, :projection_failed}
     end
   rescue
     _ ->
-      if request_convergence?, do: request_goal_convergence(agent_id)
       {:error, :projection_failed}
   catch
     _, _ ->
-      if request_convergence?, do: request_goal_convergence(agent_id)
       {:error, :projection_failed}
   end
 
-  defp invalidate_live_goal(agent_id, goal_id, request_convergence? \\ true) do
-    _ = remove_live_goal(agent_id, goal_id, request_convergence?)
+  defp invalidate_live_goal(agent_id, goal_id) do
+    _ = remove_live_goal(agent_id, goal_id)
     {:error, :invalid_provenance}
   end
 
@@ -2266,7 +2362,10 @@ defmodule Arbor.Memory.GoalStore do
     with true <- valid_identifier?(agent_id),
          true <- valid_identifier?(goal_id),
          :ok <- delete_goal_record(agent_id, goal_id) do
-      converge_deleted_goal(agent_id, goal_id)
+      case converge_deleted_goal(agent_id, goal_id) do
+        :ok -> :ok
+        {:error, :projection_failed} -> {:ok, :convergence_pending}
+      end
     else
       false -> {:error, :invalid_provenance}
       {:error, _reason} = error -> error
@@ -2299,30 +2398,47 @@ defmodule Arbor.Memory.GoalStore do
     _, _ -> {{:error, :outcome_unknown}, state}
   end
 
-  # Content-only C3I cleanup: durable first, then ETS + deferred state.
+  # Content-only C3I cleanup: durable first, then ETS. Deferred convergence is
+  # disarmed immediately after valid id (even on inventory/backend failure).
   # Never touches Provenance sidecars (unlike clear_goals/1).
   defp do_delete_agent_content(agent_id, state) do
-    with true <- valid_identifier?(agent_id),
-         {:ok, records} <- load_authoritative_goal_records(agent_id),
+    if valid_identifier?(agent_id) do
+      # Disarm BEFORE any backend/effect branch; exceptional returns must keep it.
+      disarmed = disarm_agent_convergence(state, agent_id)
+      delete_agent_content_after_disarm(agent_id, disarmed)
+    else
+      {{:error, :invalid_provenance}, state}
+    end
+  end
+
+  defp delete_agent_content_after_disarm(agent_id, state) do
+    with {:ok, records} <- load_authoritative_goal_records(agent_id),
          :ok <- bounded_authoritative_records(records),
-         {:ok, goal_ids} <- goal_ids_from_records(records, agent_id) do
+         {:ok, goal_ids} <- validate_authoritative_goal_inventory(agent_id, records) do
       case delete_goal_content_records(agent_id, goal_ids, state) do
         {:ok, state} ->
-          state = finalize_goal_content_clear(agent_id, state)
-          {:ok, state}
+          finalize_goal_content_clear(agent_id, state)
 
         {{:error, _reason} = error, state} ->
-          {error, state}
+          # Partial durable progress: still attempt projection confirmation.
+          case confirm_exact_agent_projection_evicted(agent_id) do
+            :ok ->
+              {error, clear_projected_ids(state, agent_id)}
+
+            {:error, proj_reason} ->
+              {{:error, proj_reason}, clear_projected_ids(state, agent_id)}
+          end
 
         _ ->
-          {{:error, :persistence_failed}, state}
+          _ = confirm_exact_agent_projection_evicted(agent_id)
+          {{:error, :persistence_failed}, clear_projected_ids(state, agent_id)}
       end
     else
-      false -> {{:error, :invalid_provenance}, state}
       {:error, _reason} = error -> {error, state}
       _ -> {{:error, :persistence_failed}, state}
     end
   rescue
+    # `state` is the already-disarmed argument — never re-arm pre-cleanup pending.
     _ -> {{:error, :outcome_unknown}, state}
   catch
     _, _ -> {{:error, :outcome_unknown}, state}
@@ -2332,16 +2448,20 @@ defmodule Arbor.Memory.GoalStore do
     with true <- valid_identifier?(agent_id),
          {:ok, records} <- load_authoritative_goal_records(agent_id),
          :ok <- bounded_authoritative_records(records),
-         {:ok, goal_ids} <- goal_ids_from_records(records, agent_id) do
+         {:ok, goal_ids} <- validate_authoritative_goal_inventory(agent_id, records) do
       durable_absent? = goal_ids == []
       projected_absent? = MapSet.size(projected_ids_for_agent(state, agent_id)) == 0
       deferred_absent? = not convergence_pending?(state, agent_id)
-      ets_absent? = exact_agent_ets_absent?(agent_id)
 
-      if durable_absent? and projected_absent? and deferred_absent? and ets_absent? do
-        {:ok, true}
-      else
-        {:ok, false}
+      case exact_agent_ets_absent?(agent_id) do
+        {:ok, true} when durable_absent? and projected_absent? and deferred_absent? ->
+          {:ok, true}
+
+        {:ok, _} ->
+          {:ok, false}
+
+        {:error, reason} ->
+          {:error, reason}
       end
     else
       false -> {:error, :invalid_provenance}
@@ -2359,18 +2479,24 @@ defmodule Arbor.Memory.GoalStore do
   defp delete_goal_content_records(agent_id, [goal_id | rest], state) do
     case delete_goal_record(agent_id, goal_id) do
       :ok ->
-        _ = safe_ets_delete({agent_id, goal_id})
-        state = untrack_projected_id(state, agent_id, goal_id)
-        delete_goal_content_records(agent_id, rest, state)
+        case content_ets_delete({agent_id, goal_id}) do
+          :ok ->
+            state = untrack_projected_id(state, agent_id, goal_id)
+            delete_goal_content_records(agent_id, rest, state)
+
+          {:error, reason} ->
+            state = untrack_projected_id(state, agent_id, goal_id)
+            {{:error, reason}, state}
+        end
 
       {:error, _reason} = error ->
-        # Conservative projection eviction; provenance intact; partial progress retryable.
-        _ = safe_ets_delete({agent_id, goal_id})
+        # Durable partial progress; best-effort projection drop; provenance intact.
+        _ = content_ets_delete({agent_id, goal_id})
         state = untrack_projected_id(state, agent_id, goal_id)
         {error, state}
 
       _ ->
-        _ = safe_ets_delete({agent_id, goal_id})
+        _ = content_ets_delete({agent_id, goal_id})
         state = untrack_projected_id(state, agent_id, goal_id)
         {{:error, :persistence_failed}, state}
     end
@@ -2381,43 +2507,99 @@ defmodule Arbor.Memory.GoalStore do
 
   defp finalize_goal_content_clear(agent_id, state) do
     projected_ids_for_agent(state, agent_id)
-    |> Enum.each(fn goal_id -> safe_ets_delete({agent_id, goal_id}) end)
+    |> Enum.each(fn goal_id -> content_ets_delete({agent_id, goal_id}) end)
 
-    # Also sweep any orphan ETS rows for this exact agent_id.
-    _ = sweep_exact_agent_ets(agent_id)
+    case confirm_exact_agent_projection_evicted(agent_id) do
+      :ok ->
+        {:ok, clear_projected_ids(state, agent_id)}
 
-    state
-    |> clear_projected_ids(agent_id)
-    |> clear_convergence_pending(agent_id)
-    |> mark_content_cleaned(agent_id)
+      {:error, reason} ->
+        {{:error, reason}, clear_projected_ids(state, agent_id)}
+    end
+  end
+
+  # Only initial :undefined is genuine absence. Once whereis observed a defined
+  # table, ArgumentError/disappearance is an uncertain race → projection error.
+  defp content_ets_delete(key) do
+    case :ets.whereis(@ets_table) do
+      :undefined ->
+        :ok
+
+      _tid ->
+        true = :ets.delete(@ets_table, key)
+        :ok
+    end
+  rescue
+    ArgumentError -> {:error, :projection_failed}
+  catch
+    _, _ -> {:error, :projection_failed}
   end
 
   defp exact_agent_ets_absent?(agent_id) do
-    case :ets.match(@ets_table, {{agent_id, :"$1"}, :_}) do
-      [] -> true
-      _ -> false
+    case :ets.whereis(@ets_table) do
+      :undefined ->
+        {:ok, true}
+
+      _tid ->
+        case :ets.match(@ets_table, {{agent_id, :"$1"}, :_}) do
+          [] -> {:ok, true}
+          _ -> {:ok, false}
+        end
     end
   rescue
-    ArgumentError -> true
+    ArgumentError -> {:error, :projection_failed}
   catch
-    _, _ -> false
+    _, _ -> {:error, :projection_failed}
+  end
+
+  defp confirm_exact_agent_projection_evicted(agent_id) do
+    case :ets.whereis(@ets_table) do
+      :undefined ->
+        :ok
+
+      _tid ->
+        case sweep_exact_agent_ets(agent_id) do
+          :ok ->
+            case exact_agent_ets_absent?(agent_id) do
+              {:ok, true} -> :ok
+              {:ok, false} -> {:error, :projection_failed}
+              {:error, reason} -> {:error, reason}
+            end
+
+          {:error, reason} ->
+            {:error, reason}
+        end
+    end
+  rescue
+    ArgumentError -> {:error, :projection_failed}
+  catch
+    _, _ -> {:error, :projection_failed}
   end
 
   defp sweep_exact_agent_ets(agent_id) do
-    @ets_table
-    |> :ets.match({{agent_id, :"$1"}, :_})
-    |> Enum.each(fn [goal_id] -> safe_ets_delete({agent_id, goal_id}) end)
+    case :ets.whereis(@ets_table) do
+      :undefined ->
+        :ok
 
-    :ok
+      _tid ->
+        @ets_table
+        |> :ets.match({{agent_id, :"$1"}, :_})
+        |> Enum.reduce_while(:ok, fn [goal_id], :ok ->
+          case content_ets_delete({agent_id, goal_id}) do
+            :ok -> {:cont, :ok}
+            {:error, reason} -> {:halt, {:error, reason}}
+          end
+        end)
+    end
   rescue
-    ArgumentError -> :ok
+    ArgumentError -> {:error, :projection_failed}
   catch
-    _, _ -> :ok
+    _, _ -> {:error, :projection_failed}
   end
 
   defp finalize_goal_clear(agent_id, state) do
-    projected_ids_for_agent(state, agent_id)
-    |> Enum.each(&remove_live_goal(agent_id, &1))
+    rearm? =
+      any_projection_removal_failed?(agent_id, projected_ids_for_agent(state, agent_id))
 
     state = clear_projected_ids(state, agent_id)
 
@@ -2431,6 +2613,9 @@ defmodule Arbor.Memory.GoalStore do
     end)
 
     case Provenance.delete_domain_agent(:goal, agent_id) do
+      :ok when rearm? ->
+        {:ok, mark_convergence_pending(state, agent_id)}
+
       :ok ->
         {:ok, clear_convergence_pending(state, agent_id)}
 
@@ -2440,7 +2625,7 @@ defmodule Arbor.Memory.GoalStore do
   end
 
   defp converge_deleted_goal(agent_id, goal_id) do
-    _ = remove_live_goal(agent_id, goal_id)
+    result = remove_live_goal(agent_id, goal_id)
 
     emit_after_commit(fn ->
       Signals.emit_memory_signal(
@@ -2450,6 +2635,8 @@ defmodule Arbor.Memory.GoalStore do
         scope: :cluster
       )
     end)
+
+    result
   end
 
   defp delete_goal_record(agent_id, goal_id) do
@@ -2487,8 +2674,17 @@ defmodule Arbor.Memory.GoalStore do
   defp delete_goal_records(agent_id, [goal_id | rest], state) do
     case delete_goal_record(agent_id, goal_id) do
       :ok ->
-        _ = converge_deleted_goal(agent_id, goal_id)
-        state = untrack_projected_id(state, agent_id, goal_id)
+        state =
+          case converge_deleted_goal(agent_id, goal_id) do
+            :ok ->
+              untrack_projected_id(state, agent_id, goal_id)
+
+            {:error, :projection_failed} ->
+              state
+              |> untrack_projected_id(agent_id, goal_id)
+              |> mark_convergence_pending(agent_id)
+          end
+
         delete_goal_records(agent_id, rest, state)
 
       {:error, _reason} = error ->
@@ -2512,8 +2708,10 @@ defmodule Arbor.Memory.GoalStore do
         end
 
       {:error, :not_found} ->
-        _ = remove_live_goal(agent_id, goal_id)
-        {:reloaded, :absent}
+        case remove_live_goal(agent_id, goal_id) do
+          :ok -> {:reloaded, :absent}
+          {:error, :projection_failed} -> {:reloaded, :absent_needs_convergence}
+        end
 
       {:error, :invalid_provenance} ->
         invalidate_live_goal(agent_id, goal_id)
@@ -2530,12 +2728,11 @@ defmodule Arbor.Memory.GoalStore do
     _, _ -> {:error, :invalid_provenance}
   end
 
-  defp do_reload_for_agent(agent_id, request_convergence? \\ true) do
+  defp do_reload_for_agent(agent_id) do
     with true <- valid_identifier?(agent_id),
          {:ok, records} <- load_authoritative_goal_records(agent_id),
          :ok <- bounded_authoritative_records(records),
-         {:ok, entries} <-
-           hydrate_authoritative_goal_records(agent_id, records, request_convergence?) do
+         {:ok, entries} <- hydrate_authoritative_goal_records(agent_id, records) do
       {:reconciled, :ok, projected_goal_ids(entries)}
     else
       false -> {:error, :invalid_provenance}
@@ -2548,45 +2745,27 @@ defmodule Arbor.Memory.GoalStore do
     _, _ -> {:error, :store_unavailable}
   end
 
-  defp hydrate_authoritative_goal_records(agent_id, records),
-    do: hydrate_authoritative_goal_records(agent_id, records, true)
-
-  defp hydrate_authoritative_goal_records(agent_id, records, request_convergence?)
-       when is_list(records) do
-    case Provenance.delete_domain_agent(:goal, agent_id) do
-      :ok -> hydrate_swept_goal_records(agent_id, records, request_convergence?)
-      _failure -> {:error, :projection_failed}
-    end
-  rescue
-    _ -> {:error, :projection_failed}
-  catch
-    _, _ -> {:error, :projection_failed}
-  end
-
-  defp hydrate_authoritative_goal_records(_agent_id, _records, _request_convergence?),
-    do: {:error, :invalid_provenance}
-
-  defp hydrate_swept_goal_records(agent_id, records, request_convergence?) do
-    case reconcile_authoritative_goal_records(agent_id, records, request_convergence?) do
+  # Additive rehydrate for authoritative current goals.
+  # Never domain-purge before rehydrate: content-only cleanup intentionally
+  # retains historical sidecars, and reload must not erase them. Compatibility
+  # clear_goals/delete_goal still purge explicitly via finalize_goal_clear /
+  # remove_live_goal.
+  defp hydrate_authoritative_goal_records(agent_id, records) when is_list(records) do
+    case reconcile_authoritative_goal_records(agent_id, records) do
       {:ok, entries, []} ->
         case verify_goal_provenance_inventory(agent_id, entries) do
           :ok ->
             {:ok, entries}
 
           {:error, _reason} = error ->
-            evict_hydrated_goal_entries(agent_id, entries, error, request_convergence?)
+            evict_hydrated_goal_entries(agent_id, entries, error)
         end
 
       {:ok, entries, errors} when is_list(errors) ->
         reason =
           if :projection_failed in errors, do: :projection_failed, else: :invalid_provenance
 
-        evict_hydrated_goal_entries(
-          agent_id,
-          entries,
-          {:error, reason},
-          request_convergence?
-        )
+        evict_hydrated_goal_entries(agent_id, entries, {:error, reason})
 
       {:error, _reason} = error ->
         error
@@ -2594,14 +2773,22 @@ defmodule Arbor.Memory.GoalStore do
       _ ->
         {:error, :invalid_provenance}
     end
+  rescue
+    _ -> {:error, :projection_failed}
+  catch
+    _, _ -> {:error, :projection_failed}
   end
 
+  defp hydrate_authoritative_goal_records(_agent_id, _records), do: {:error, :invalid_provenance}
+
   defp verify_goal_provenance_inventory(agent_id, entries) do
-    expected_ids = entries |> projected_goal_ids() |> Enum.sort()
+    expected_ids = entries |> projected_goal_ids() |> MapSet.new()
 
     case Provenance.list_item_ids(:goal, agent_id) do
       {:ok, actual_ids} when is_list(actual_ids) ->
-        if Enum.sort(actual_ids) == expected_ids,
+        # Every current authoritative goal id must be present; extra historical
+        # ids retained by content-only cleanup are intentional and allowed.
+        if MapSet.subset?(expected_ids, MapSet.new(actual_ids)),
           do: :ok,
           else: {:error, :projection_failed}
 
@@ -2610,12 +2797,13 @@ defmodule Arbor.Memory.GoalStore do
     end
   end
 
-  defp evict_hydrated_goal_entries(agent_id, entries, error, request_convergence?) do
-    _ = Provenance.delete_domain_agent(:goal, agent_id)
-
+  defp evict_hydrated_goal_entries(agent_id, entries, error) do
+    # Evict only labels/rows installed by this hydration attempt — never the
+    # whole agent domain (historical content-only sidecars must survive).
+    # Callers that own GenServer state re-arm via fail_agent_projection/2-3.
     Enum.each(entries, fn
       {%TaintedValue{value: %Goal{id: goal_id}}, _status} ->
-        _ = remove_live_goal(agent_id, goal_id, request_convergence?)
+        _ = remove_live_goal(agent_id, goal_id)
 
       _ ->
         :ok
@@ -2624,11 +2812,10 @@ defmodule Arbor.Memory.GoalStore do
     error
   end
 
-  defp reconcile_authoritative_goal_records(agent_id, records, request_convergence?)
-       when is_list(records) do
+  defp reconcile_authoritative_goal_records(agent_id, records) when is_list(records) do
     {entries, errors} =
       Enum.reduce(records, {[], []}, fn record, {entries, errors} ->
-        case project_authoritative_goal_record(agent_id, record, request_convergence?) do
+        case project_authoritative_goal_record(agent_id, record) do
           {:ok, %TaintedValue{} = value, status} ->
             {[{value, status} | entries], errors}
 
@@ -2643,23 +2830,21 @@ defmodule Arbor.Memory.GoalStore do
     {:ok, Enum.reverse(entries), Enum.uniq(errors)}
   end
 
-  defp reconcile_authoritative_goal_records(_agent_id, _records, _request_convergence?),
+  defp reconcile_authoritative_goal_records(_agent_id, _records),
     do: {:error, :invalid_provenance}
 
   defp project_authoritative_goal_record(
          agent_id,
-         %{logical_key: key, value: %TaintedValue{} = value, status: status},
-         request_convergence?
+         %{logical_key: key, value: %TaintedValue{} = value, status: status}
        ) do
     with {:ok, ^agent_id, goal_id} <- agent_and_goal_from_key(key) do
-      project_authoritative_goal(agent_id, goal_id, value, status, request_convergence?)
+      project_authoritative_goal(agent_id, goal_id, value, status)
     else
       _ -> {:error, :invalid_provenance}
     end
   end
 
-  defp project_authoritative_goal_record(_agent_id, _record, _request_convergence?),
-    do: {:error, :invalid_provenance}
+  defp project_authoritative_goal_record(_agent_id, _record), do: {:error, :invalid_provenance}
 
   defp projected_goal_ids(entries) do
     Enum.map(entries, fn {%TaintedValue{value: %Goal{id: goal_id}}, _status} -> goal_id end)
@@ -2679,10 +2864,51 @@ defmodule Arbor.Memory.GoalStore do
   defp bounded_authoritative_records(_records, _count), do: {:error, :projection_failed}
 
   defp goal_ids_from_records(records, agent_id) when is_list(records) do
+    # Legacy clear_goals path: key-only extraction. Content cleanup uses the
+    # full inventory validator below.
     collect_goal_ids(records, agent_id, [], MapSet.new())
   end
 
   defp goal_ids_from_records(_records, _agent_id), do: {:error, :invalid_provenance}
+
+  # Complete pre-delete inventory: closed shape/status, decode, Goal.id match.
+  defp validate_authoritative_goal_inventory(agent_id, records) when is_list(records) do
+    validate_goal_inventory_records(records, agent_id, [], MapSet.new())
+  end
+
+  defp validate_authoritative_goal_inventory(_agent_id, _records),
+    do: {:error, :invalid_provenance}
+
+  defp validate_goal_inventory_records([], _agent_id, goal_ids, _seen),
+    do: {:ok, Enum.reverse(goal_ids)}
+
+  defp validate_goal_inventory_records(
+         [
+           %{logical_key: key, value: %TaintedValue{} = value, status: status} = _record
+           | rest
+         ],
+         agent_id,
+         goal_ids,
+         seen
+       )
+       when status in [:verified, :legacy_unlabeled, :invalid_durable_provenance] do
+    with {:ok, ^agent_id, goal_id} <- agent_and_goal_from_key(key),
+         false <- MapSet.member?(seen, goal_id),
+         {:ok, %Goal{id: ^goal_id}, _payload, _taint, _prov} <-
+           decode_authoritative_goal(goal_id, value, status) do
+      validate_goal_inventory_records(
+        rest,
+        agent_id,
+        [goal_id | goal_ids],
+        MapSet.put(seen, goal_id)
+      )
+    else
+      _ -> {:error, :invalid_provenance}
+    end
+  end
+
+  defp validate_goal_inventory_records(_records, _agent_id, _goal_ids, _seen),
+    do: {:error, :invalid_provenance}
 
   defp collect_goal_ids([], _agent_id, goal_ids, _seen),
     do: {:ok, Enum.reverse(goal_ids)}

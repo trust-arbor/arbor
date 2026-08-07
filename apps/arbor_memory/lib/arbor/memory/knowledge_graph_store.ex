@@ -273,14 +273,37 @@ defmodule Arbor.Memory.KnowledgeGraphStore do
   must be closed and drained before invoke. This API is not race-free agent
   destruction.
   """
-  @spec delete_agent_content(String.t()) :: :ok | {:error, store_error()}
+  @content_cleanup_errors [
+    :invalid_graph,
+    :store_unavailable,
+    :outcome_unknown,
+    :conflict,
+    :invalid_provenance,
+    :graph_limit_exceeded,
+    :request_expired
+  ]
+
+  @type content_cleanup_error ::
+          :invalid_graph
+          | :store_unavailable
+          | :outcome_unknown
+          | :conflict
+          | :invalid_provenance
+          | :graph_limit_exceeded
+          | :request_expired
+
+  @spec delete_agent_content(String.t()) :: :ok | {:error, content_cleanup_error()}
   def delete_agent_content(agent_id) do
     if valid_agent_id?(agent_id) do
-      content_safe_call(
-        {:delete_agent_content, agent_id, request_deadline()},
-        :mutation,
-        agent_id
-      )
+      case content_safe_call(
+             {:delete_agent_content, agent_id, request_deadline()},
+             :mutation,
+             agent_id
+           ) do
+        :ok -> :ok
+        {:error, reason} -> {:error, normalize_content_cleanup_error(reason, :mutation)}
+        _ -> {:error, :outcome_unknown}
+      end
     else
       {:error, :invalid_graph}
     end
@@ -292,10 +315,14 @@ defmodule Arbor.Memory.KnowledgeGraphStore do
   exact-agent content remains.
   """
   @spec agent_content_absent?(String.t()) ::
-          {:ok, boolean()} | {:error, store_error()}
+          {:ok, boolean()} | {:error, content_cleanup_error()}
   def agent_content_absent?(agent_id) do
     if valid_agent_id?(agent_id) do
-      content_safe_call({:agent_content_absent?, agent_id}, :read, agent_id)
+      case content_safe_call({:agent_content_absent?, agent_id}, :read, agent_id) do
+        {:ok, present?} when is_boolean(present?) -> {:ok, present?}
+        {:error, reason} -> {:error, normalize_content_cleanup_error(reason, :read)}
+        _ -> {:error, :store_unavailable}
+      end
     else
       {:error, :invalid_graph}
     end
@@ -424,33 +451,22 @@ defmodule Arbor.Memory.KnowledgeGraphStore do
 
   def handle_call({:delete_agent_content, agent_id, deadline}, _from, state) do
     with :ok <- ensure_deadline(deadline) do
-      case MemoryStore.delete_tainted_authoritative(@namespace, agent_id) do
-        :ok ->
-          # Content-only: ETS + deferred only; provenance sidecars retained.
-          evict_projection(agent_id)
-          state = clear_pending_projection(state, agent_id)
-          {:reply, :ok, state}
-
-        {:error, _reason} = error ->
-          # Conservative projection eviction; provenance intact.
-          evict_projection(agent_id)
-          {:reply, map_store_error(error), state}
-
-        _ ->
-          evict_projection(agent_id)
-          {:reply, {:error, :outcome_unknown}, state}
-      end
+      # Disarm before backend/effects; exceptional returns must keep disarmed state.
+      disarmed = clear_pending_projection(state, agent_id)
+      delete_agent_content_after_disarm(agent_id, disarmed)
     else
       {:error, _reason} = error -> {:reply, error, state}
     end
-  rescue
-    _ -> {:reply, {:error, :outcome_unknown}, state}
-  catch
-    _, _ -> {:reply, {:error, :outcome_unknown}, state}
   end
 
   def handle_call({:agent_content_absent?, agent_id}, _from, state) do
-    reply = do_agent_content_absent?(agent_id, state)
+    reply =
+      case do_agent_content_absent?(agent_id, state) do
+        {:ok, present?} when is_boolean(present?) -> {:ok, present?}
+        {:error, reason} -> {:error, normalize_content_cleanup_error(reason, :read)}
+        _ -> {:error, :store_unavailable}
+      end
+
     {:reply, reply, state}
   rescue
     _ -> {:reply, {:error, :store_unavailable}, state}
@@ -822,19 +838,76 @@ defmodule Arbor.Memory.KnowledgeGraphStore do
     _, _ -> :ok
   end
 
+  # Content-only: confirmed eviction without provenance purge.
+  # Only initial :undefined is genuine absence; post-defined races fail closed.
+  defp delete_agent_content_after_disarm(agent_id, state) do
+    durable_result =
+      case MemoryStore.delete_tainted_authoritative(@namespace, agent_id) do
+        :ok -> :ok
+        {:error, _reason} = error -> map_store_error(error)
+        _ -> {:error, :outcome_unknown}
+      end
+
+    projection_result = confirm_evict_projection_content_only(agent_id)
+
+    reply =
+      case {durable_result, projection_result} do
+        {:ok, :ok} ->
+          :ok
+
+        {{:error, reason}, _} ->
+          {:error, normalize_content_cleanup_error(reason, :mutation)}
+
+        {:ok, {:error, reason}} ->
+          {:error, normalize_content_cleanup_error(reason, :mutation)}
+
+        _ ->
+          {:error, :outcome_unknown}
+      end
+
+    {:reply, reply, state}
+  rescue
+    # `state` is already pending-disarmed.
+    _ -> {:reply, {:error, :outcome_unknown}, state}
+  catch
+    _, _ -> {:reply, {:error, :outcome_unknown}, state}
+  end
+
+  defp confirm_evict_projection_content_only(agent_id) do
+    case :ets.whereis(@graph_ets) do
+      :undefined ->
+        :ok
+
+      _tid ->
+        true = :ets.delete(@graph_ets, agent_id)
+
+        case :ets.lookup(@graph_ets, agent_id) do
+          [] -> :ok
+          _ -> {:error, :store_unavailable}
+        end
+    end
+  rescue
+    ArgumentError -> {:error, :store_unavailable}
+  catch
+    _, _ -> {:error, :store_unavailable}
+  end
+
   defp do_agent_content_absent?(agent_id, state) do
     case durable_graph_presence(agent_id) do
       :present ->
         {:ok, false}
 
       :absent ->
-        ets_absent? = graph_ets_absent?(agent_id)
-        deferred_absent? = not Map.has_key?(state.pending_projection, agent_id)
+        case graph_ets_absent_result(agent_id) do
+          {:ok, true} ->
+            deferred_absent? = not Map.has_key?(state.pending_projection, agent_id)
+            if deferred_absent?, do: {:ok, true}, else: {:ok, false}
 
-        if ets_absent? and deferred_absent? do
-          {:ok, true}
-        else
-          {:ok, false}
+          {:ok, false} ->
+            {:ok, false}
+
+          {:error, reason} ->
+            {:error, reason}
         end
 
       {:error, reason} ->
@@ -869,15 +942,22 @@ defmodule Arbor.Memory.KnowledgeGraphStore do
     _, _ -> {:error, :store_unavailable}
   end
 
-  defp graph_ets_absent?(agent_id) do
+  # Fail closed: never convert post-defined ETS races into true absence.
+  defp graph_ets_absent_result(agent_id) do
     case :ets.whereis(@graph_ets) do
-      :undefined -> true
-      _ -> :ets.lookup(@graph_ets, agent_id) == []
+      :undefined ->
+        {:ok, true}
+
+      _tid ->
+        case :ets.lookup(@graph_ets, agent_id) do
+          [] -> {:ok, true}
+          _ -> {:ok, false}
+        end
     end
   rescue
-    _ -> true
+    ArgumentError -> {:error, :store_unavailable}
   catch
-    _, _ -> false
+    _, _ -> {:error, :store_unavailable}
   end
 
   defp valid_agent_id?(agent_id) when is_binary(agent_id) do
@@ -1038,6 +1118,14 @@ defmodule Arbor.Memory.KnowledgeGraphStore do
     evict_projection(agent_id)
     unavailable_for(mode)
   end
+
+  defp normalize_content_cleanup_error(reason, _mode) when reason in @content_cleanup_errors,
+    do: reason
+
+  defp normalize_content_cleanup_error(:graph_not_initialized, _mode), do: :store_unavailable
+  defp normalize_content_cleanup_error(_reason, :mutation), do: :outcome_unknown
+  defp normalize_content_cleanup_error(_reason, :read), do: :store_unavailable
+  defp normalize_content_cleanup_error(_reason, _mode), do: :store_unavailable
 
   # Authoritative backends own their finite operation timeout. Reads can also
   # perform a version-migration CAS, so every authority call must wait for that

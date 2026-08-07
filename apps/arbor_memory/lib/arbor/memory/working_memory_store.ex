@@ -198,6 +198,51 @@ defmodule Arbor.Memory.WorkingMemoryStore do
     _, _ -> error(:delete_failed)
   end
 
+  # Runtime-enforced closed sets for content-cleanup public APIs.
+  @content_delete_errors [
+    :invalid_agent_id,
+    :delete_failed,
+    :outcome_unknown,
+    :durable_unavailable,
+    :insufficient_durability,
+    :invalid_record,
+    :ambiguous_record,
+    :conflict,
+    :inventory_limit_exceeded,
+    :transition_busy,
+    :transition_failed,
+    :ets_failed,
+    :store_unavailable
+  ]
+
+  @content_absence_errors [
+    :invalid_agent_id,
+    :absence_uncertain,
+    :durable_unavailable,
+    :insufficient_durability,
+    :invalid_record,
+    :ambiguous_record,
+    :transition_busy,
+    :transition_failed,
+    :store_unavailable
+  ]
+
+  @type content_cleanup_error ::
+          :invalid_agent_id
+          | :delete_failed
+          | :outcome_unknown
+          | :durable_unavailable
+          | :insufficient_durability
+          | :invalid_record
+          | :ambiguous_record
+          | :conflict
+          | :inventory_limit_exceeded
+          | :transition_busy
+          | :transition_failed
+          | :ets_failed
+          | :store_unavailable
+          | :absence_uncertain
+
   @doc """
   Idempotent content-only deletion for exactly one agent.
 
@@ -208,30 +253,41 @@ defmodule Arbor.Memory.WorkingMemoryStore do
   must be closed and drained before invoke. This API is not race-free agent
   destruction.
   """
-  @spec delete_agent_content(String.t()) :: :ok | {:error, term()}
+  @spec delete_agent_content(String.t()) :: :ok | {:error, content_cleanup_error()}
   def delete_agent_content(agent_id) do
-    with :ok <- validate_agent_id(agent_id) do
-      with_agent_transition(agent_id, fn -> delete_authoritative_content_only(agent_id) end)
+    with :ok <- validate_agent_id_flat(agent_id) do
+      agent_id
+      |> with_agent_transition_flat(fn ->
+        delete_authoritative_content_only(agent_id)
+      end)
+      |> normalize_content_delete_result()
+    else
+      {:error, reason} -> {:error, normalize_content_delete_error(reason)}
     end
   rescue
-    _ -> error(:delete_failed)
+    _ -> {:error, :delete_failed}
   catch
-    _, _ -> error(:delete_failed)
+    _, _ -> {:error, :delete_failed}
   end
 
   @doc """
   Authoritative absence across durable working memory and ETS projection.
   Returns `{:ok, true}` only when no exact-agent content remains.
   """
-  @spec agent_content_absent?(String.t()) :: {:ok, boolean()} | {:error, term()}
+  @spec agent_content_absent?(String.t()) ::
+          {:ok, boolean()} | {:error, content_cleanup_error()}
   def agent_content_absent?(agent_id) do
-    with :ok <- validate_agent_id(agent_id) do
-      with_agent_transition(agent_id, fn -> do_agent_content_absent?(agent_id) end)
+    with :ok <- validate_agent_id_flat(agent_id) do
+      agent_id
+      |> with_agent_transition_flat(fn -> do_agent_content_absent?(agent_id) end)
+      |> normalize_content_absence_result()
+    else
+      {:error, reason} -> {:error, normalize_content_absence_error(reason)}
     end
   rescue
-    _ -> error(:absence_uncertain)
+    _ -> {:error, :absence_uncertain}
   catch
-    _, _ -> error(:absence_uncertain)
+    _, _ -> {:error, :absence_uncertain}
   end
 
   @doc "Export the exact versioned durable WorkingMemory provenance snapshot."
@@ -1394,26 +1450,35 @@ defmodule Arbor.Memory.WorkingMemoryStore do
     end
   end
 
-  # Content-only C3I cleanup: durable first, then ETS only. Never touches sidecars.
+  # Content-only C3I cleanup: durable first, then confirmed ETS. Never touches sidecars.
+  # Returns only closed flat atoms (or nested tuples that public normalizers whitelist).
   defp delete_authoritative_content_only(agent_id) do
-    case MemoryStore.delete_tainted_authoritative(@namespace, agent_id) do
-      :ok ->
-        _ = safe_ets_delete(agent_id)
+    durable_result =
+      case MemoryStore.delete_tainted_authoritative(@namespace, agent_id) do
+        :ok -> :ok
+        {:error, reason} -> {:error, map_content_backend_error(reason, :delete)}
+        _ -> {:error, :delete_failed}
+      end
+
+    projection_result = confirm_working_memory_ets_evicted(agent_id)
+
+    case {durable_result, projection_result} do
+      {:ok, :ok} ->
         :ok
 
-      {:error, _reason} = error ->
-        # Conservative projection eviction; provenance intact.
-        _ = safe_ets_delete(agent_id)
-        map_memory_store_error(error)
+      {{:error, reason}, _} ->
+        {:error, normalize_content_delete_error(reason)}
+
+      {:ok, {:error, reason}} ->
+        {:error, normalize_content_delete_error(reason)}
 
       _ ->
-        _ = safe_ets_delete(agent_id)
-        error(:delete_failed)
+        {:error, :delete_failed}
     end
   rescue
-    _ -> error(:delete_failed)
+    _ -> {:error, :delete_failed}
   catch
-    _, _ -> error(:delete_failed)
+    _, _ -> {:error, :delete_failed}
   end
 
   defp do_agent_content_absent?(agent_id) do
@@ -1422,34 +1487,159 @@ defmodule Arbor.Memory.WorkingMemoryStore do
         {:ok, false}
 
       {:error, :not_found} ->
-        ets_absent? =
-          case :ets.lookup(@working_memory_ets, agent_id) do
-            [] -> true
-            _ -> false
-          end
+        case working_memory_ets_absent?(agent_id) do
+          {:ok, true} -> {:ok, true}
+          {:ok, false} -> {:ok, false}
+          {:error, reason} -> {:error, normalize_content_absence_error(reason)}
+        end
 
-        if ets_absent?, do: {:ok, true}, else: {:ok, false}
-
-      {:error, _reason} = error ->
-        map_memory_store_error(error)
+      {:error, reason} ->
+        {:error, map_content_backend_error(reason, :absence)}
 
       _ ->
-        error(:absence_uncertain)
+        {:error, :absence_uncertain}
     end
   rescue
-    ArgumentError ->
-      # ETS table missing — treat projection as absent, still require durable check.
-      case MemoryStore.load_tainted_authoritative_with_status(@namespace, agent_id) do
-        {:ok, _value, _status, _record, _location} -> {:ok, false}
-        {:error, :not_found} -> {:ok, true}
-        {:error, _reason} = error -> map_memory_store_error(error)
-        _ -> error(:absence_uncertain)
-      end
-
     _ ->
-      error(:absence_uncertain)
+      {:error, :absence_uncertain}
   catch
-    _, _ -> error(:absence_uncertain)
+    _, _ -> {:error, :absence_uncertain}
+  end
+
+  defp normalize_content_delete_result(:ok), do: :ok
+
+  defp normalize_content_delete_result({:error, reason}),
+    do: {:error, normalize_content_delete_error(reason)}
+
+  defp normalize_content_delete_result(_), do: {:error, :delete_failed}
+
+  defp normalize_content_absence_result({:ok, present?}) when is_boolean(present?),
+    do: {:ok, present?}
+
+  defp normalize_content_absence_result({:error, reason}),
+    do: {:error, normalize_content_absence_error(reason)}
+
+  defp normalize_content_absence_result(_), do: {:error, :absence_uncertain}
+
+  defp normalize_content_delete_error(reason) when reason in @content_delete_errors, do: reason
+
+  defp normalize_content_delete_error({:working_memory_store, reason}),
+    do: normalize_content_delete_error(reason)
+
+  defp normalize_content_delete_error(:invalid_provenance), do: :invalid_record
+  defp normalize_content_delete_error(:invalid_request), do: :invalid_agent_id
+  defp normalize_content_delete_error(:not_found), do: :delete_failed
+  defp normalize_content_delete_error(:durable_load_failed), do: :durable_unavailable
+  defp normalize_content_delete_error(:absence_uncertain), do: :store_unavailable
+  defp normalize_content_delete_error(_reason), do: :delete_failed
+
+  defp normalize_content_absence_error(reason) when reason in @content_absence_errors, do: reason
+
+  defp normalize_content_absence_error({:working_memory_store, reason}),
+    do: normalize_content_absence_error(reason)
+
+  defp normalize_content_absence_error(:invalid_provenance), do: :invalid_record
+  defp normalize_content_absence_error(:invalid_request), do: :invalid_agent_id
+  defp normalize_content_absence_error(:not_found), do: :absence_uncertain
+  defp normalize_content_absence_error(:durable_load_failed), do: :durable_unavailable
+  defp normalize_content_absence_error(:delete_failed), do: :store_unavailable
+  defp normalize_content_absence_error(:ets_failed), do: :absence_uncertain
+  defp normalize_content_absence_error(:outcome_unknown), do: :absence_uncertain
+  defp normalize_content_absence_error(:conflict), do: :absence_uncertain
+  defp normalize_content_absence_error(:inventory_limit_exceeded), do: :store_unavailable
+  defp normalize_content_absence_error(_reason), do: :absence_uncertain
+
+  defp map_content_backend_error({:memory_store, :critical, reason}, mode)
+       when reason in [
+              :conflict,
+              :outcome_unknown,
+              :durable_unavailable,
+              :insufficient_durability,
+              :inventory_limit_exceeded,
+              :invalid_record,
+              :ambiguous_record
+            ] do
+    case mode do
+      :delete -> normalize_content_delete_error(reason)
+      :absence -> normalize_content_absence_error(reason)
+    end
+  end
+
+  defp map_content_backend_error({:memory_store, :critical, _reason}, :delete),
+    do: :delete_failed
+
+  defp map_content_backend_error({:memory_store, :critical, _reason}, :absence),
+    do: :absence_uncertain
+
+  defp map_content_backend_error({:memory_store, :invalid_durable_provenance, _}, :delete),
+    do: :invalid_record
+
+  defp map_content_backend_error({:memory_store, :invalid_durable_provenance, _}, :absence),
+    do: :invalid_record
+
+  defp map_content_backend_error({:memory_store, :invalid_request, _}, :delete),
+    do: :invalid_agent_id
+
+  defp map_content_backend_error({:memory_store, :invalid_request, _}, :absence),
+    do: :invalid_agent_id
+
+  defp map_content_backend_error(:not_found, :delete), do: :delete_failed
+  defp map_content_backend_error(:not_found, :absence), do: :absence_uncertain
+  defp map_content_backend_error(_reason, :delete), do: :delete_failed
+  defp map_content_backend_error(_reason, :absence), do: :absence_uncertain
+
+  # Only initial :undefined is genuine absence; post-defined races fail closed.
+  defp confirm_working_memory_ets_evicted(agent_id) do
+    case :ets.whereis(@working_memory_ets) do
+      :undefined ->
+        :ok
+
+      _tid ->
+        true = :ets.delete(@working_memory_ets, agent_id)
+
+        case :ets.lookup(@working_memory_ets, agent_id) do
+          [] -> :ok
+          _ -> {:error, :ets_failed}
+        end
+    end
+  rescue
+    ArgumentError -> {:error, :ets_failed}
+  catch
+    _, _ -> {:error, :ets_failed}
+  end
+
+  defp working_memory_ets_absent?(agent_id) do
+    case :ets.whereis(@working_memory_ets) do
+      :undefined ->
+        {:ok, true}
+
+      _tid ->
+        case :ets.lookup(@working_memory_ets, agent_id) do
+          [] -> {:ok, true}
+          _ -> {:ok, false}
+        end
+    end
+  rescue
+    ArgumentError -> {:error, :absence_uncertain}
+  catch
+    _, _ -> {:error, :absence_uncertain}
+  end
+
+  defp validate_agent_id_flat(agent_id) do
+    case validate_agent_id(agent_id) do
+      :ok -> :ok
+      _ -> {:error, :invalid_agent_id}
+    end
+  end
+
+  defp with_agent_transition_flat(agent_id, fun) do
+    case with_agent_transition(agent_id, fun) do
+      :ok -> :ok
+      {:ok, present?} when is_boolean(present?) -> {:ok, present?}
+      {:error, {:working_memory_store, reason}} -> {:error, reason}
+      {:error, reason} when is_atom(reason) -> {:error, reason}
+      _ -> {:error, :delete_failed}
+    end
   end
 
   # The local lock serializes same-node projection transitions. Multi-node

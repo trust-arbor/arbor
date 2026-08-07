@@ -232,22 +232,52 @@ defmodule Arbor.Memory.Thinking do
   must be closed and drained before invoke. This API is not race-free agent
   destruction.
   """
-  @spec delete_agent_content(String.t()) :: :ok | {:error, atom()}
+  @content_delete_errors [
+    :invalid_request,
+    :store_unavailable,
+    :outcome_unknown,
+    :conflict,
+    :projection_failed
+  ]
+
+  @content_absence_errors [:invalid_request, :store_unavailable]
+
+  @spec delete_agent_content(String.t()) ::
+          :ok
+          | {:error,
+             :invalid_request
+             | :store_unavailable
+             | :outcome_unknown
+             | :conflict
+             | :projection_failed}
   def delete_agent_content(agent_id) do
-    if valid_agent_id?(agent_id),
-      do: call_owner({:delete_agent_content, agent_id}, :mutation),
-      else: {:error, :invalid_request}
+    if valid_agent_id?(agent_id) do
+      case call_owner({:delete_agent_content, agent_id}, :mutation) do
+        :ok -> :ok
+        {:error, reason} -> {:error, normalize_content_delete_error(reason)}
+        _ -> {:error, :outcome_unknown}
+      end
+    else
+      {:error, :invalid_request}
+    end
   end
 
   @doc """
   Authoritative absence across durable thinking, ETS projection, and unfinished
   stream state. Returns `{:ok, true}` only when no exact-agent content remains.
   """
-  @spec agent_content_absent?(String.t()) :: {:ok, boolean()} | {:error, atom()}
+  @spec agent_content_absent?(String.t()) ::
+          {:ok, boolean()} | {:error, :invalid_request | :store_unavailable}
   def agent_content_absent?(agent_id) do
-    if valid_agent_id?(agent_id),
-      do: call_owner({:agent_content_absent?, agent_id}, :read),
-      else: {:error, :invalid_request}
+    if valid_agent_id?(agent_id) do
+      case call_owner({:agent_content_absent?, agent_id}, :read) do
+        {:ok, present?} when is_boolean(present?) -> {:ok, present?}
+        {:error, reason} -> {:error, normalize_content_absence_error(reason)}
+        _ -> {:error, :store_unavailable}
+      end
+    else
+      {:error, :invalid_request}
+    end
   end
 
   @doc "Reloads the complete Thinking projection from the durable memory store."
@@ -350,31 +380,20 @@ defmodule Arbor.Memory.Thinking do
 
   @impl true
   def handle_call({:delete_agent_content, agent_id}, _from, state) do
-    case delete_aggregate_before_live_clear(agent_id) do
-      :ok ->
-        _ = evict_thinking_content_only(agent_id)
-
-        next_state =
-          state
-          |> drop_owned_agent(agent_id)
-          |> Map.update!(:streams, &Map.delete(&1, agent_id))
-
-        {:reply, :ok, next_state}
-
-      {:error, reason} ->
-        # Conservative projection eviction; provenance and stream may remain.
-        _ = evict_thinking_content_only(agent_id)
-        {:reply, {:error, normalize_store_error(reason)}, state}
-    end
-  rescue
-    _ -> {:reply, {:error, :outcome_unknown}, state}
-  catch
-    _, _ -> {:reply, {:error, :outcome_unknown}, state}
+    # Disarm ownership before backend/effects; exceptional returns keep it.
+    disarmed = drop_owned_agent(state, agent_id)
+    delete_agent_content_after_disarm(agent_id, disarmed)
   end
 
   @impl true
   def handle_call({:agent_content_absent?, agent_id}, _from, state) do
-    reply = do_agent_content_absent?(agent_id, state)
+    reply =
+      case do_agent_content_absent?(agent_id, state) do
+        {:ok, present?} when is_boolean(present?) -> {:ok, present?}
+        {:error, reason} -> {:error, normalize_content_absence_error(reason)}
+        _ -> {:error, :store_unavailable}
+      end
+
     {:reply, reply, state}
   rescue
     _ -> {:reply, {:error, :store_unavailable}, state}
@@ -821,14 +840,61 @@ defmodule Arbor.Memory.Thinking do
       :convergence_pending
   end
 
-  # Content-only eviction: drops ETS without Provenance.delete_domain_agent.
-  defp evict_thinking_content_only(agent_id) do
-    :ets.delete(@ets_table, agent_id)
-    :ok
+  # Content-only eviction with confirmation; never touches Provenance.
+  # Only initial :undefined is genuine absence; post-defined races fail closed.
+  defp delete_agent_content_after_disarm(agent_id, state) do
+    # `state` argument is already ownership-disarmed.
+    durable_result = delete_aggregate_before_live_clear(agent_id)
+
+    # Content eviction after durable attempt (even on durable failure).
+    next_state = Map.update!(state, :streams, &Map.delete(&1, agent_id))
+
+    projection_result = confirm_evict_thinking_content_only(agent_id)
+
+    reply =
+      case {durable_result, projection_result} do
+        {:ok, :ok} ->
+          :ok
+
+        {{:error, reason}, _} ->
+          {:error, normalize_content_delete_error(reason)}
+
+        {:ok, {:error, reason}} ->
+          {:error, normalize_content_delete_error(reason)}
+
+        _ ->
+          {:error, :outcome_unknown}
+      end
+
+    {:reply, reply, next_state}
   rescue
-    _ -> :ok
+    # Preserve ownership disarm; also drop stream on exceptional path.
+    _ ->
+      {:reply, {:error, :outcome_unknown},
+       Map.update(state, :streams, %{}, &Map.delete(&1, agent_id))}
   catch
-    _, _ -> :ok
+    _, _ ->
+      {:reply, {:error, :outcome_unknown},
+       Map.update(state, :streams, %{}, &Map.delete(&1, agent_id))}
+  end
+
+  defp confirm_evict_thinking_content_only(agent_id) do
+    case :ets.whereis(@ets_table) do
+      :undefined ->
+        :ok
+
+      _tid ->
+        true = :ets.delete(@ets_table, agent_id)
+
+        case :ets.lookup(@ets_table, agent_id) do
+          [] -> :ok
+          _ -> {:error, :projection_failed}
+        end
+    end
+  rescue
+    ArgumentError -> {:error, :projection_failed}
+  catch
+    _, _ -> {:error, :projection_failed}
   end
 
   defp do_agent_content_absent?(agent_id, state) do
@@ -837,18 +903,18 @@ defmodule Arbor.Memory.Thinking do
         {:ok, false}
 
       :absent ->
-        ets_absent? =
-          case :ets.lookup(@ets_table, agent_id) do
-            [] -> true
-            _ -> false
-          end
-
+        owned? = MapSet.member?(Map.get(state, :owned_agents, MapSet.new()), agent_id)
         stream_absent? = not Map.has_key?(state.streams, agent_id)
 
-        if ets_absent? and stream_absent? do
-          {:ok, true}
-        else
-          {:ok, false}
+        case thinking_ets_absent?(agent_id) do
+          {:ok, true} when not owned? and stream_absent? ->
+            {:ok, true}
+
+          {:ok, _} ->
+            {:ok, false}
+
+          {:error, _reason} ->
+            {:error, :store_unavailable}
         end
 
       {:error, reason} ->
@@ -856,6 +922,23 @@ defmodule Arbor.Memory.Thinking do
     end
   rescue
     _ -> {:error, :store_unavailable}
+  catch
+    _, _ -> {:error, :store_unavailable}
+  end
+
+  defp thinking_ets_absent?(agent_id) do
+    case :ets.whereis(@ets_table) do
+      :undefined ->
+        {:ok, true}
+
+      _tid ->
+        case :ets.lookup(@ets_table, agent_id) do
+          [] -> {:ok, true}
+          _ -> {:ok, false}
+        end
+    end
+  rescue
+    ArgumentError -> {:error, :store_unavailable}
   catch
     _, _ -> {:error, :store_unavailable}
   end
@@ -1297,10 +1380,33 @@ defmodule Arbor.Memory.Thinking do
     do: :outcome_unknown
 
   defp normalize_store_error({:memory_store, :critical, :conflict}), do: :conflict
-  defp normalize_store_error(reason) when reason in [:outcome_unknown, :conflict], do: reason
+  defp normalize_store_error(:outcome_unknown), do: :outcome_unknown
+  defp normalize_store_error(:conflict), do: :conflict
+  defp normalize_store_error(:projection_failed), do: :projection_failed
   defp normalize_store_error(:projection_capacity), do: :projection_capacity
-
+  defp normalize_store_error({:memory_store, :critical, :invalid_record}), do: :store_unavailable
   defp normalize_store_error(_reason), do: :store_unavailable
+
+  # Cleanup-only: map every backend/store shape into the declared closed unions.
+  defp normalize_content_delete_error(reason) when reason in @content_delete_errors, do: reason
+
+  defp normalize_content_delete_error(reason) do
+    case normalize_store_error(reason) do
+      allowed when allowed in @content_delete_errors -> allowed
+      :invalid_payload -> :store_unavailable
+      :projection_capacity -> :store_unavailable
+      _ -> :outcome_unknown
+    end
+  end
+
+  defp normalize_content_absence_error(reason) when reason in @content_absence_errors, do: reason
+
+  defp normalize_content_absence_error(reason) do
+    case normalize_store_error(reason) do
+      allowed when allowed in @content_absence_errors -> allowed
+      _ -> :store_unavailable
+    end
+  end
 
   # ============================================================================
   # Multi-Provider Extraction (ported from Seed ThinkingBlockProcessor)
