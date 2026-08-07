@@ -1,4 +1,14 @@
 defmodule Arbor.AI.Runtime.DispatchTest do
+  # NOTE: ACP-runtime fixtures must name a provider that resolves to a real CLI.
+  # Since de5367f4c (2026-08-04) ACP routes are bound through
+  # Runtime.Acp.authorization_destination/2, which looks the provider up in a
+  # closed @provider_to_cli allowlist (anthropic/openai/google/google_vertex/
+  # google_vertex_anthropic/xai) and fails closed otherwise. The synthetic
+  # `:provider_b` used here stopped resolving on that date, so every ACP
+  # fallback assertion in this file failed with
+  # {:authorization_failed, :invalid_route}. `:google` resolves to :gemini and
+  # is otherwise unused in this file. Production is unaffected — real ACP
+  # providers are always allowlist names.
   use ExUnit.Case, async: false
   @moduletag :fast
 
@@ -663,7 +673,7 @@ defmodule Arbor.AI.Runtime.DispatchTest do
          name: concurrency_name,
          limits: %{
            provider_a: %{arbor: 32, acp: 32},
-           provider_b: %{arbor: 32, acp: 32},
+           google: %{arbor: 32, acp: 32},
            openai_oauth: %{arbor: 32},
            xai_oauth: %{arbor: 32}
          }}
@@ -753,7 +763,7 @@ defmodule Arbor.AI.Runtime.DispatchTest do
 
     test "fallback route is independently mapped and authorized after a transient failure" do
       primary = route_model("primary", :provider_a, "wire-primary", :arbor)
-      fallback = route_model("fallback", :provider_b, "wire-fallback", :acp)
+      fallback = route_model("fallback", :google, "wire-fallback", :acp)
       Application.put_env(:arbor_ai, :_test_router_fail_model, "wire-primary")
       test_pid = self()
 
@@ -775,7 +785,7 @@ defmodule Arbor.AI.Runtime.DispatchTest do
 
       assert_receive {:prepare,
                       %Request{
-                        provider: "provider_b",
+                        provider: "google",
                         model: "wire-fallback",
                         runtime: :acp
                       }}
@@ -800,7 +810,7 @@ defmodule Arbor.AI.Runtime.DispatchTest do
       on_exit(fn -> :telemetry.detach(handler_id) end)
 
       primary = route_model("primary", :provider_a, "wire-primary", :arbor)
-      fallback = route_model("fallback", :provider_b, "wire-fallback", :acp)
+      fallback = route_model("fallback", :google, "wire-fallback", :acp)
       Application.put_env(:arbor_ai, :_test_router_fail_model, "wire-primary")
 
       assert {:ok, _response} =
@@ -825,10 +835,10 @@ defmodule Arbor.AI.Runtime.DispatchTest do
 
       assert_receive {:route_telemetry, [:arbor, :runtime, :fallback], %{count: 1}, fallback_meta}
       assert fallback_meta.original_model == "original-model"
-      assert fallback_meta.override == %{model: "fallback", provider: :provider_b, runtime: :acp}
+      assert fallback_meta.override == %{model: "fallback", provider: :google, runtime: :acp}
 
       assert_receive {:route_telemetry, [:arbor, :runtime, :selected], %{count: 1},
-                      %{provider: :provider_b, provider_ref: "wire-fallback", runtime: :acp}}
+                      %{provider: :google, provider_ref: "wire-fallback", runtime: :acp}}
     end
 
     test "malformed, ineligible, and unmappable router requests never fall back to Selector" do
@@ -1055,7 +1065,7 @@ defmodule Arbor.AI.Runtime.DispatchTest do
 
     test "fallback success writes executed_route for the fallback attempt" do
       primary = route_model("primary", :provider_a, "wire-primary", :arbor)
-      fallback = route_model("fallback", :provider_b, "wire-fallback", :acp)
+      fallback = route_model("fallback", :google, "wire-fallback", :acp)
 
       Application.put_env(:arbor_ai, :_test_router_fail_model, "wire-primary")
 
@@ -1066,7 +1076,7 @@ defmodule Arbor.AI.Runtime.DispatchTest do
                )
 
       executed = response.usage["arbor.executed_route"]
-      assert executed["provider"] == "provider_b"
+      assert executed["provider"] == "google"
       assert executed["provider_ref"] == "wire-fallback"
       assert executed["model"] == "fallback"
       assert executed["runtime"] == "acp"
@@ -1151,7 +1161,7 @@ defmodule Arbor.AI.Runtime.DispatchTest do
 
     test "primary at-capacity may try ranked configured fallback after release" do
       primary = route_model("primary", :provider_a, "wire-primary", :arbor)
-      fallback = route_model("fallback", :provider_b, "wire-fallback", :acp)
+      fallback = route_model("fallback", :google, "wire-fallback", :acp)
       server = Process.get(:route_concurrency_server)
 
       # Saturate primary route capacity (limit 32 in setup — acquire all).
@@ -1213,7 +1223,7 @@ defmodule Arbor.AI.Runtime.DispatchTest do
 
     test "unavailable concurrency authority fails closed without fallback" do
       primary = route_model("primary", :provider_a, "wire-primary", :arbor)
-      fallback = route_model("fallback", :provider_b, "wire-fallback", :acp)
+      fallback = route_model("fallback", :google, "wire-fallback", :acp)
       dead = :"missing_route_concurrency_#{System.unique_integer([:positive])}"
 
       assert {:error, {:route_concurrency, :unavailable}} =
@@ -1440,14 +1450,14 @@ defmodule Arbor.AI.Runtime.DispatchTest do
          name: concurrency_name,
          limits: %{
            provider_a: %{arbor: 8, acp: 8},
-           provider_b: %{arbor: 8, acp: 8}
+           google: %{arbor: 8, acp: 8}
          }}
       )
 
       usage_ctx = %{principal_id: "agent_route", task_id: "task_route"}
       # Reuse ProviderRouter helpers from the router describe (same module defp).
       primary = usage_route_model("primary", :provider_a, "wire-primary", :arbor)
-      fallback = usage_route_model("fallback", :provider_b, "wire-fallback", :acp)
+      fallback = usage_route_model("fallback", :google, "wire-fallback", :acp)
 
       assert {:ok, _} =
                Dispatch.dispatch(build_request("ignored"),
@@ -1478,11 +1488,11 @@ defmodule Arbor.AI.Runtime.DispatchTest do
 
       start_supervised!(
         {Arbor.AI.RouteConcurrency,
-         name: concurrency_name, limits: %{provider_b: %{acp: 8, arbor: 8}}}
+         name: concurrency_name, limits: %{google: %{acp: 8, arbor: 8}}}
       )
 
       usage_ctx = %{principal_id: "agent_route_acp"}
-      primary = usage_route_model("primary", :provider_b, "wire-acp", :acp)
+      primary = usage_route_model("primary", :google, "wire-acp", :acp)
 
       assert {:ok, _} =
                Dispatch.dispatch(build_request("ignored"),

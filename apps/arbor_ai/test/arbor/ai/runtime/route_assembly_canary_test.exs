@@ -1,4 +1,14 @@
 defmodule Arbor.AI.Runtime.RouteAssemblyCanaryTest do
+  # NOTE: ACP-runtime fixtures must name a provider that resolves to a real CLI.
+  # Since de5367f4c (2026-08-04) ACP routes are bound through
+  # Runtime.Acp.authorization_destination/2, which looks the provider up in a
+  # closed @provider_to_cli allowlist (anthropic/openai/google/google_vertex/
+  # google_vertex_anthropic/xai) and fails closed otherwise. The synthetic
+  # `:provider_b` used here stopped resolving on that date, so every ACP
+  # fallback assertion in this file failed with
+  # {:authorization_failed, :invalid_route}. `:google` resolves to :gemini and
+  # is otherwise unused in this file. Production is unaffected — real ACP
+  # providers are always allowlist names.
   @moduledoc """
   Deterministic no-network canary: assemble → RoutePlan/Dispatch → authorize → fake runtime.
   """
@@ -64,7 +74,7 @@ defmodule Arbor.AI.Runtime.RouteAssemblyCanaryTest do
 
     start_supervised!(
       {RouteConcurrency,
-       name: concurrency_name, limits: %{provider_a: %{arbor: 1}, provider_b: %{acp: 1}}}
+       name: concurrency_name, limits: %{provider_a: %{arbor: 1}, google: %{acp: 1}}}
     )
 
     Application.put_env(:arbor_ai, :runtime_registry, %{
@@ -109,7 +119,7 @@ defmodule Arbor.AI.Runtime.RouteAssemblyCanaryTest do
     route_concurrency_server: concurrency_server
   } do
     primary = model("primary", :provider_a, "wire-primary", :arbor)
-    fallback = model("fallback", :provider_b, "wire-fallback", :acp)
+    fallback = model("fallback", :google, "wire-fallback", :acp)
     Application.put_env(:arbor_ai, :_canary_fail_model, "wire-primary")
 
     assert {:ok, input} = assemble([primary, fallback], healthy_evidence([primary, fallback]))
@@ -122,7 +132,7 @@ defmodule Arbor.AI.Runtime.RouteAssemblyCanaryTest do
              )
 
     executed = response.usage["arbor.executed_route"]
-    assert executed["provider"] == "provider_b"
+    assert executed["provider"] == "google"
     assert executed["model"] == "fallback"
     assert executed["attempt"] == "fallback"
   end
