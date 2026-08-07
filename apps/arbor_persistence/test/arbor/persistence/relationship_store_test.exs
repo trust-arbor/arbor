@@ -245,6 +245,33 @@ defmodule Arbor.Persistence.RelationshipStoreTest do
                )
     end
 
+    test "security regression: improper lists return a closed error without writing", %{
+      agent: agent
+    } do
+      moment = %{
+        summary: "bad list",
+        timestamp: nil,
+        emotional_markers: [],
+        salience: 0.5
+      }
+
+      malformed = [
+        base_attrs(%{id: "rel_bad_values", name: "BadValues", background: ["x" | :tail]}),
+        base_attrs(%{id: "rel_bad_moments", name: "BadMoments", key_moments: [moment | :tail]}),
+        base_attrs(%{
+          id: "rel_bad_markers",
+          name: "BadMarkers",
+          key_moments: [%{moment | emotional_markers: ["x" | :tail]}]
+        })
+      ]
+
+      for attrs <- malformed do
+        assert {:error, :invalid_request} = Persistence.put_relationship(agent, attrs)
+      end
+
+      assert {:ok, true} = Persistence.relationships_absent?(agent)
+    end
+
     test "content-free errors never include changeset payloads", %{agent: agent} do
       assert {:error, reason} =
                Persistence.put_relationship(agent, base_attrs(%{salience: 99.0}))
@@ -307,6 +334,21 @@ defmodule Arbor.Persistence.RelationshipStoreTest do
       assert {:error, :invalid_request} =
                Persistence.put_relationship(agent, base_attrs(%{name: "Huge", background: huge}))
 
+      assert {:ok, true} = Persistence.relationships_absent?(agent)
+    end
+
+    test "sparse put budgets defaults and retained identity before writing", %{agent: agent} do
+      background =
+        List.duplicate(String.duplicate("x", 1024), 63) ++ [String.duplicate("y", 650)]
+
+      attrs = %{
+        id: "rel_sparse_boundary",
+        name: "SparseBoundary",
+        background: background
+      }
+
+      assert {:error, :invalid_request} = Persistence.put_relationship(agent, attrs)
+      assert {:error, :not_found} = Persistence.fetch_relationship(agent, attrs.id)
       assert {:ok, true} = Persistence.relationships_absent?(agent)
     end
 
