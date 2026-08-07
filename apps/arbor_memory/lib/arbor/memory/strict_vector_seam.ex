@@ -27,6 +27,8 @@ defmodule Arbor.Memory.StrictVectorSeam do
 
   @callback list(agent_id(), opts()) :: {:ok, [map()]} | {:error, term()}
 
+  @callback destroy(agent_id(), opts()) :: :ok | {:error, term()}
+
   @doc "Resolve the trusted seam module for non-Index callers."
   @spec resolve() :: module()
   def resolve do

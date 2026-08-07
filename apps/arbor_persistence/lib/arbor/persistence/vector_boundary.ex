@@ -8,9 +8,10 @@ defmodule Arbor.Persistence.VectorBoundary do
   @max_list_limit 1_000
   @default_search_limit 20
   @max_search_limit 1_000
-  @mutation_errors [:backend_failure, :conflict, :indeterminate, :unsupported]
-  @read_errors [:backend_failure, :not_found, :unsupported]
-  @collection_errors [:backend_failure, :unsupported]
+  @mutation_errors [:backend_failure, :closed, :conflict, :indeterminate, :unsupported]
+  @read_errors [:backend_failure, :closed, :not_found, :unsupported]
+  @collection_errors [:backend_failure, :closed, :unsupported]
+  @destroy_errors [:backend_failure, :indeterminate, :unsupported]
   @fetch_option_keys [:include_tombstone]
   @list_option_keys [:category, :source_namespace, :include_tombstones, :limit]
   @search_option_keys [
@@ -25,6 +26,7 @@ defmodule Arbor.Persistence.VectorBoundary do
 
   @type vector_error ::
           :backend_failure
+          | :closed
           | :conflict
           | :indeterminate
           | :invalid_backend_result
@@ -41,6 +43,16 @@ defmodule Arbor.Persistence.VectorBoundary do
          {:ok, backend_result} <-
            dispatch(fn backend -> backend.execute(operation, []) end) do
       validate_mutation_result(backend_result, operation)
+    end
+  end
+
+  @spec destroy(term(), term()) :: :ok | {:error, vector_error()}
+  def destroy(agent_id, opts) do
+    with :ok <- validate_agent_id(agent_id),
+         {:ok, %{}} <- normalize_options(opts, []),
+         {:ok, backend_result} <-
+           dispatch(fn backend -> backend.destroy(agent_id, []) end) do
+      validate_destroy_result(backend_result)
     end
   end
 
@@ -251,6 +263,14 @@ defmodule Arbor.Persistence.VectorBoundary do
 
   defp validate_mutation_result({:error, _reason}, _operation), do: {:error, :backend_failure}
   defp validate_mutation_result(_result, _operation), do: {:error, :invalid_backend_result}
+
+  defp validate_destroy_result(:ok), do: :ok
+
+  defp validate_destroy_result({:error, reason}) when reason in @destroy_errors,
+    do: {:error, reason}
+
+  defp validate_destroy_result({:error, _reason}), do: {:error, :backend_failure}
+  defp validate_destroy_result(_result), do: {:error, :invalid_backend_result}
 
   defp validate_reconcile_result({:ok, :absent}, _operation), do: {:ok, :absent}
 

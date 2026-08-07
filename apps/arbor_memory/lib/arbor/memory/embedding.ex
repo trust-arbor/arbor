@@ -205,6 +205,14 @@ defmodule Arbor.Memory.Embedding do
     end
   end
 
+  @doc """
+  Destroy exact-agent strict vector rows and operation receipts through the
+  public Persistence facade.
+  """
+  @spec destroy_strict(String.t(), keyword()) :: :ok | {:error, term()}
+  def destroy_strict(agent_id, opts \\ []),
+    do: Persistence.destroy_vector_agent(agent_id, opts)
+
   # Raw VectorOperation admission requires every record (including batch members) to
   # decode as a strict wrapper with verified provenance. The exact validated
   # operation is preserved for reconcile; we never re-encode it.

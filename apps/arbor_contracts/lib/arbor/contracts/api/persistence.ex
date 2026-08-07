@@ -86,6 +86,7 @@ defmodule Arbor.Contracts.API.Persistence do
   @typedoc "Closed public vector-boundary failures."
   @type vector_error ::
           :backend_failure
+          | :closed
           | :conflict
           | :indeterminate
           | :invalid_backend_result
@@ -483,6 +484,15 @@ defmodule Arbor.Contracts.API.Persistence do
               opts()
             ) :: {:ok, [vector_match()]} | {:error, vector_error()}
 
+  @doc """
+  Idempotently delete every strict V1 vector record and content-bearing operation
+  receipt for exactly one agent, then close that agent's durable vector fence.
+  """
+  @callback delete_all_strict_vector_records_and_operation_receipts_for_agent(
+              agent_id :: String.t(),
+              opts()
+            ) :: :ok | {:error, vector_error()}
+
   # ===========================================================================
   # Relationship operations (optional)
   # ===========================================================================
@@ -586,6 +596,7 @@ defmodule Arbor.Contracts.API.Persistence do
     list_vector_records_for_agent: 2,
     search_vector_records_by_exact_descriptor_for_agent: 3,
     search_vector_records_by_exact_model_descriptor_and_scope_for_agent: 3,
+    delete_all_strict_vector_records_and_operation_receipts_for_agent: 2,
     # Relationship operations
     upsert_tenant_relationship_record_for_agent: 2,
     retrieve_tenant_relationship_record_by_id_for_agent: 3,

@@ -14,7 +14,8 @@ defmodule Arbor.Persistence.VectorArchitectureTest do
     "vector_store/ecto.ex",
     "vector_store/ecto/codec.ex",
     "vector_store/ecto/vector_row.ex",
-    "vector_store/ecto/operation_receipt_row.ex"
+    "vector_store/ecto/operation_receipt_row.ex",
+    "vector_store/ecto/agent_fence_row.ex"
   ]
 
   test "new vector boundary has no Repo, schema, Ecto, Pgvector, Memory, or runtime bridge" do
@@ -36,13 +37,16 @@ defmodule Arbor.Persistence.VectorArchitectureTest do
   test "public facade vector section is only a boundary delegate" do
     source = File.read!(Path.expand("../../../lib/arbor/persistence.ex", __DIR__))
     [_, after_marker] = String.split(source, "# Validated vector-store boundary", parts: 2)
-    [section, _] = String.split(after_marker, "# Session transcript facade", parts: 2)
+    # Vector section ends at the next domain section (relationship records sit
+    # between vector and session transcript; do not over-scan into it).
+    [section, _] = String.split(after_marker, "# Relationship records", parts: 2)
 
     assert section =~ "VectorBoundary.execute"
     assert section =~ "VectorBoundary.reconcile"
     assert section =~ "VectorBoundary.fetch"
     assert section =~ "VectorBoundary.list"
     assert section =~ "VectorBoundary.search"
+    assert section =~ "VectorBoundary.destroy"
     refute section =~ "Repo"
     refute section =~ "Schemas"
     refute section =~ "Ecto"

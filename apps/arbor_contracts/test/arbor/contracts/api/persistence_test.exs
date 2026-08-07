@@ -39,13 +39,21 @@ defmodule Arbor.Contracts.API.PersistenceTest do
       retrieve_vector_record_by_logical_identity_for_agent: 4,
       list_vector_records_for_agent: 2,
       search_vector_records_by_exact_descriptor_for_agent: 3,
-      search_vector_records_by_exact_model_descriptor_and_scope_for_agent: 3
+      search_vector_records_by_exact_model_descriptor_and_scope_for_agent: 3,
+      delete_all_strict_vector_records_and_operation_receipts_for_agent: 2
     ]
 
     for callback <- expected do
       assert callback in callbacks
       assert callback in optional
     end
+  end
+
+  test "vector error vocabulary includes closed" do
+    source =
+      File.read!(Path.expand("../../../../lib/arbor/contracts/api/persistence.ex", __DIR__))
+
+    assert source =~ ~r/@type vector_error ::[\s\S]*?:closed/
   end
 
   @tag spec: "VP-05D2C3I0A"

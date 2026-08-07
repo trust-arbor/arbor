@@ -180,6 +180,191 @@ defmodule Arbor.Persistence.VectorStore.EctoPostgresConcurrencyTest do
              Arbor.Persistence.reconcile_vector_operation(agent_id, losing_batch)
   end
 
+  test "admitted shared fence completes before destroy; later ops closed; other tenant safe", %{
+    agent_id: agent_id
+  } do
+    other_id = unique("agent")
+    insert = insert_operation!(record!(agent_id, source_key: "destroy-overlap"))
+    other = insert_operation!(record!(other_id, source_key: "destroy-other"))
+
+    assert {:ok, inserted} = Arbor.Persistence.execute_vector_operation(agent_id, insert)
+    assert {:ok, _} = Arbor.Persistence.execute_vector_operation(other_id, other)
+
+    update =
+      inserted.record
+      |> rebuild_record!(payload: %{"phase" => "held-shared-fence"})
+      |> operation_for_record!(:update)
+
+    parent = self()
+    handler_id = {__MODULE__, make_ref()}
+
+    :ok =
+      :telemetry.attach(
+        handler_id,
+        @operation_transaction_event,
+        fn _event, _measurements, metadata, config ->
+          if metadata.operation_fingerprint == update.fingerprint do
+            %{rows: [[backend_pid]]} = Repo.query!("SELECT pg_backend_pid()")
+            send(config.parent, {:held, self(), backend_pid})
+
+            receive do
+              :release -> :ok
+            after
+              10_000 -> raise "operation hold release timed out"
+            end
+          end
+        end,
+        %{parent: parent}
+      )
+
+    task = Task.async(fn -> execute(agent_id, update) end)
+    assert_receive {:held, holder, holder_backend_pid}, 5_000
+    destroy_task = Task.async(fn -> Arbor.Persistence.destroy_vector_agent(agent_id) end)
+
+    results =
+      try do
+        destroy_backend_pid = await_destroy_lock_wait!(holder_backend_pid)
+        assert is_integer(destroy_backend_pid)
+        refute Task.yield(destroy_task, 0)
+
+        released_at = NaiveDateTime.utc_now()
+        send(holder, :release)
+
+        update_result = Task.await(task, 20_000)
+        destroy_result = Task.await(destroy_task, 20_000)
+        {update_result, destroy_result, released_at}
+      after
+        if Process.alive?(task.pid), do: send(holder, :release)
+        if Process.alive?(task.pid), do: Task.shutdown(task, :brutal_kill)
+        if Process.alive?(destroy_task.pid), do: Task.shutdown(destroy_task, :brutal_kill)
+        :telemetry.detach(handler_id)
+      end
+
+    assert {{:ok, _receipt}, :ok, released_at} = results
+
+    assert %{rows: [[0]]} =
+             Repo.query!(
+               """
+               SELECT COUNT(*) FROM memory_embeddings
+               WHERE agent_id = $1 AND vector_protocol = 'arbor_vector_store_v1'
+               """,
+               [agent_id]
+             )
+
+    assert %{rows: [[0]]} =
+             Repo.query!(
+               "SELECT COUNT(*) FROM vector_operation_receipts WHERE agent_id = $1",
+               [agent_id]
+             )
+
+    assert %{rows: [["closed", closed_at]]} =
+             Repo.query!(
+               "SELECT state, closed_at FROM vector_agent_fences WHERE agent_id = $1",
+               [agent_id]
+             )
+
+    assert NaiveDateTime.compare(closed_at, released_at) in [:eq, :gt]
+
+    assert {:error, :closed} =
+             Arbor.Persistence.execute_vector_operation(
+               agent_id,
+               insert_operation!(record!(agent_id, source_key: "post-destroy"))
+             )
+
+    assert %{rows: [[1]]} =
+             Repo.query!(
+               """
+               SELECT COUNT(*) FROM memory_embeddings
+               WHERE agent_id = $1 AND vector_protocol = 'arbor_vector_store_v1'
+               """,
+               [other_id]
+             )
+  end
+
+  test "raw receipt insert trigger FOR KEY SHARE blocks destroy until holder commits", %{
+    agent_id: agent_id
+  } do
+    # Ensure open fence exists without holding locks.
+    Repo.query!(
+      """
+      INSERT INTO vector_agent_fences (agent_id, state, closed_at, updated_at)
+      VALUES ($1, 'open', NULL, CURRENT_TIMESTAMP)
+      ON CONFLICT (agent_id) DO NOTHING
+      """,
+      [agent_id]
+    )
+
+    parent = self()
+    fingerprint = :crypto.strong_rand_bytes(32) |> Base.encode16(case: :lower)
+
+    holder =
+      Task.async(fn ->
+        # One pinned connection owns insert + hold + release so FOR KEY SHARE
+        # remains held until the transaction commits.
+        result =
+          Repo.transaction(fn ->
+            {:ok, _} =
+              Repo.query(
+                """
+                INSERT INTO vector_operation_receipts (
+                  operation_fingerprint, agent_id, operation_kind,
+                  operation_json, operation_digest, receipt_json, receipt_digest, inserted_at
+                ) VALUES ($1, $2, 'insert', '{}', $3, '{}', $4, CURRENT_TIMESTAMP)
+                """,
+                [
+                  fingerprint,
+                  agent_id,
+                  String.duplicate("1", 64),
+                  String.duplicate("2", 64)
+                ]
+              )
+
+            %{rows: [[backend_pid]]} = Repo.query!("SELECT pg_backend_pid()")
+            send(parent, {:insert_held, self(), backend_pid})
+
+            receive do
+              :commit_insert -> :committed
+            after
+              15_000 -> Repo.rollback(:holder_timeout)
+            end
+          end)
+
+        case result do
+          {:ok, :committed} -> :committed
+          {:error, :holder_timeout} -> :timed_out
+          other -> other
+        end
+      end)
+
+    assert_receive {:insert_held, holder_pid, holder_backend_pid}, 5_000
+
+    destroy_task =
+      Task.async(fn ->
+        send(parent, {:destroy_started, self()})
+        Arbor.Persistence.destroy_vector_agent(agent_id)
+      end)
+
+    assert_receive {:destroy_started, _destroy_pid}, 5_000
+    assert is_integer(await_destroy_lock_wait!(holder_backend_pid))
+    refute Task.yield(destroy_task, 0)
+
+    send(holder_pid, :commit_insert)
+    assert :committed = Task.await(holder, 10_000)
+    assert :ok = Task.await(destroy_task, 20_000)
+
+    assert %{rows: [["closed"]]} =
+             Repo.query!(
+               "SELECT state FROM vector_agent_fences WHERE agent_id = $1",
+               [agent_id]
+             )
+
+    assert %{rows: [[0]]} =
+             Repo.query!(
+               "SELECT COUNT(*) FROM vector_operation_receipts WHERE agent_id = $1",
+               [agent_id]
+             )
+  end
+
   test "security regression: vector telemetry omits raw logical identity", %{
     agent_id: agent_id
   } do
@@ -432,6 +617,50 @@ defmodule Arbor.Persistence.VectorStore.EctoPostgresConcurrencyTest do
 
   defp execute(agent_id, operation),
     do: Arbor.Persistence.execute_vector_operation(agent_id, operation)
+
+  defp await_destroy_lock_wait!(holder_backend_pid) do
+    deadline = System.monotonic_time(:millisecond) + 5_000
+    await_destroy_lock_wait!(holder_backend_pid, deadline)
+  end
+
+  defp await_destroy_lock_wait!(holder_backend_pid, deadline) do
+    case Repo.query!(
+           """
+           SELECT activity.pid
+           FROM pg_stat_activity AS activity
+           WHERE activity.datname = current_database()
+             AND activity.wait_event_type = 'Lock'
+             AND $1 = ANY(pg_blocking_pids(activity.pid))
+             AND activity.query ILIKE '%vector_agent_fences%'
+             AND activity.query ILIKE '%FOR UPDATE%'
+           LIMIT 1
+           """,
+           [holder_backend_pid]
+         ) do
+      %{rows: [[blocked_pid]]} ->
+        blocked_pid
+
+      %{rows: []} ->
+        if System.monotonic_time(:millisecond) < deadline do
+          Process.sleep(20)
+          await_destroy_lock_wait!(holder_backend_pid, deadline)
+        else
+          %{rows: diagnostics} =
+            Repo.query!(
+              """
+              SELECT activity.pid, activity.wait_event_type, activity.wait_event,
+                     left(activity.query, 240)
+              FROM pg_stat_activity AS activity
+              WHERE activity.datname = current_database()
+                AND $1 = ANY(pg_blocking_pids(activity.pid))
+              """,
+              [holder_backend_pid]
+            )
+
+          flunk("destroy never reached the fence lock wait; observed: #{inspect(diagnostics)}")
+        end
+    end
+  end
 
   defp record!(agent_id, overrides) do
     overrides = Map.new(overrides)

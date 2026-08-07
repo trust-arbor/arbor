@@ -10,30 +10,35 @@ defmodule Arbor.Persistence.VectorStore do
   alias Arbor.Contracts.Persistence.{VectorMatch, VectorOperation, VectorReceipt, VectorRecord}
 
   @type backend_error ::
-          :backend_failure | :conflict | :indeterminate | :not_found | :unsupported
+          :backend_failure
+          | :closed
+          | :conflict
+          | :indeterminate
+          | :not_found
+          | :unsupported
   @type identity :: VectorRecord.identity()
   @type opts :: keyword()
 
   @doc "Executes one validated mutation or bounded atomic batch."
   @callback execute(VectorOperation.t(), opts()) ::
               {:ok, VectorReceipt.t()}
-              | {:error, :backend_failure | :conflict | :indeterminate | :unsupported}
+              | {:error, :backend_failure | :closed | :conflict | :indeterminate | :unsupported}
 
   @doc "Reconciles an operation from its canonical fingerprint-bound intent."
   @callback reconcile(VectorOperation.t(), opts()) ::
               {:ok, VectorReceipt.t()}
               | {:ok, :absent}
-              | {:error, :backend_failure | :conflict | :indeterminate | :unsupported}
+              | {:error, :backend_failure | :closed | :conflict | :indeterminate | :unsupported}
 
   @doc "Fetches one row by exact logical identity."
   @callback fetch(identity(), opts()) ::
               {:ok, VectorRecord.t()}
-              | {:error, :backend_failure | :not_found | :unsupported}
+              | {:error, :backend_failure | :closed | :not_found | :unsupported}
 
   @doc "Lists a bounded tenant-owned row set using normalized filter options."
   @callback list(String.t(), opts()) ::
               {:ok, [VectorRecord.t()]}
-              | {:error, :backend_failure | :unsupported}
+              | {:error, :backend_failure | :closed | :unsupported}
 
   @doc """
   Searches using an exact normalized vector and closed Boundary options.
@@ -44,5 +49,12 @@ defmodule Arbor.Persistence.VectorStore do
   """
   @callback search(String.t(), [float()], opts()) ::
               {:ok, [VectorMatch.t()]}
-              | {:error, :backend_failure | :unsupported}
+              | {:error, :backend_failure | :closed | :unsupported}
+
+  @doc """
+  Idempotently destroys exact-agent strict V1 rows and operation receipts, then
+  closes the durable agent fence.
+  """
+  @callback destroy(String.t(), opts()) ::
+              :ok | {:error, :backend_failure | :indeterminate | :unsupported}
 end

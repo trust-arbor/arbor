@@ -5,6 +5,16 @@ defmodule Arbor.Persistence.VectorStore.Ecto do
   Mutations and their exact receipts commit in one transaction. Logical row
   identity is `{agent_id, source_namespace, source_key}`; the legacy embedding
   columns are compatibility mirrors and are not provenance authority.
+
+  ## Agent-fence lock order
+
+  Every strict-vector operation runs inside one agent-fence transaction:
+
+  1. Ensure the exact `vector_agent_fences` row exists
+  2. Lock the agent fence first (PostgreSQL ordinary: `FOR KEY SHARE`;
+     destruction: `FOR UPDATE`; SQLite: immediate transaction only)
+  3. Existing fingerprint advisory lock (PostgreSQL execute/reconcile only)
+  4. Mutation / read / receipt / verification / state-transition effects
   """
 
   @behaviour Arbor.Persistence.VectorStore
@@ -12,20 +22,31 @@ defmodule Arbor.Persistence.VectorStore.Ecto do
   import Ecto.Query
 
   alias Arbor.Contracts.Persistence.{VectorMatch, VectorOperation, VectorReceipt, VectorRecord}
-  alias __MODULE__.{Codec, OperationReceiptRow, VectorRow}
+  alias __MODULE__.{AgentFenceRow, Codec, OperationReceiptRow, VectorRow}
 
   @encoding Atom.to_string(VectorRecord.encoding())
   @vector_protocol "arbor_vector_store_v1"
   @repo_config_key :vector_store_repo
-  @known_transaction_errors [:backend_failure, :conflict, :indeterminate]
+  @known_transaction_errors [
+    :backend_failure,
+    :closed,
+    :conflict,
+    :indeterminate,
+    :not_found,
+    :unsupported
+  ]
+  @destroy_transaction_errors [:backend_failure, :indeterminate]
   @operation_transaction_event [:arbor, :persistence, :vector_store, :operation_transaction]
   @fence_claim_event [:arbor, :persistence, :vector_store, :fence_claim]
+  @verify_hook_key :arbor_vector_destroy_residual_override
 
   @impl true
   def execute(%VectorOperation{} = operation, []) do
     with {:ok, ^operation} <- VectorOperation.validate(operation),
          {:ok, repo} <- configured_repo() do
-      run_transaction(repo, operation.fingerprint, fn ->
+      agent_id = VectorOperation.agent_id(operation)
+
+      run_open_fence_transaction(repo, agent_id, operation.fingerprint, fn ->
         execute_in_transaction(repo, operation)
       end)
     else
@@ -43,7 +64,11 @@ defmodule Arbor.Persistence.VectorStore.Ecto do
   def reconcile(%VectorOperation{} = operation, []) do
     with {:ok, ^operation} <- VectorOperation.validate(operation),
          {:ok, repo} <- configured_repo() do
-      run_transaction(repo, operation.fingerprint, fn -> read_ledger(repo, operation) end)
+      agent_id = VectorOperation.agent_id(operation)
+
+      run_open_fence_transaction(repo, agent_id, operation.fingerprint, fn ->
+        read_ledger(repo, operation)
+      end)
     else
       _invalid -> {:error, :backend_failure}
     end
@@ -63,15 +88,24 @@ defmodule Arbor.Persistence.VectorStore.Ecto do
       when is_boolean(include_tombstone) do
     with {:ok, ^identity} <-
            VectorRecord.validate_identity(agent_id, source_namespace, source_key),
-         {:ok, repo} <- configured_repo(),
-         %VectorRow{} = row <- repo.one(identity_query(identity)),
-         {:ok, record} <- row_to_record(row, repo),
-         true <- include_tombstone or not record.tombstone do
-      {:ok, record}
+         {:ok, repo} <- configured_repo() do
+      run_open_fence_transaction(repo, agent_id, nil, fn ->
+        case repo.one(identity_query(identity)) do
+          %VectorRow{} = row ->
+            with {:ok, record} <- row_to_record(row, repo),
+                 true <- include_tombstone or not record.tombstone do
+              {:ok, record}
+            else
+              false -> {:error, :not_found}
+              {:error, :malformed_row} -> {:error, :backend_failure}
+              _invalid -> {:error, :backend_failure}
+            end
+
+          nil ->
+            {:error, :not_found}
+        end
+      end)
     else
-      nil -> {:error, :not_found}
-      false -> {:error, :not_found}
-      {:error, :malformed_row} -> {:error, :backend_failure}
       _invalid -> {:error, :backend_failure}
     end
   rescue
@@ -93,20 +127,22 @@ defmodule Arbor.Persistence.VectorStore.Ecto do
       when is_binary(agent_id) and is_boolean(include_tombstones) and is_integer(limit) and
              limit > 0 and limit <= 1_000 do
     with {:ok, repo} <- configured_repo() do
-      query =
-        from(row in VectorRow,
-          where: row.agent_id == ^agent_id,
-          where: row.vector_protocol == ^@vector_protocol,
-          order_by: [asc: row.source_namespace, asc: row.source_key, asc: row.id],
-          limit: ^limit
-        )
-        |> maybe_filter_category(category)
-        |> maybe_filter_namespace(source_namespace)
-        |> maybe_filter_tombstones(include_tombstones)
+      run_open_fence_transaction(repo, agent_id, nil, fn ->
+        query =
+          from(row in VectorRow,
+            where: row.agent_id == ^agent_id,
+            where: row.vector_protocol == ^@vector_protocol,
+            order_by: [asc: row.source_namespace, asc: row.source_key, asc: row.id],
+            limit: ^limit
+          )
+          |> maybe_filter_category(category)
+          |> maybe_filter_namespace(source_namespace)
+          |> maybe_filter_tombstones(include_tombstones)
 
-      query
-      |> repo.all()
-      |> decode_rows(repo, [])
+        query
+        |> repo.all()
+        |> decode_rows(repo, [])
+      end)
     else
       _invalid -> {:error, :backend_failure}
     end
@@ -138,22 +174,24 @@ defmodule Arbor.Persistence.VectorStore.Ecto do
          true <- is_nil(source_namespace) or is_binary(source_namespace),
          true <- valid_backend_threshold?(threshold),
          {:ok, repo} <- configured_repo() do
-      if postgres_repo?(repo) do
-        search_postgres(
-          repo,
-          agent_id,
-          normalized_vector,
-          model_id,
-          dimensions,
-          normalized_encoding,
-          normalized_category,
-          source_namespace,
-          threshold,
-          limit
-        )
-      else
-        {:error, :unsupported}
-      end
+      run_open_fence_transaction(repo, agent_id, nil, fn ->
+        if postgres_repo?(repo) do
+          search_postgres(
+            repo,
+            agent_id,
+            normalized_vector,
+            model_id,
+            dimensions,
+            normalized_encoding,
+            normalized_category,
+            source_namespace,
+            threshold,
+            limit
+          )
+        else
+          {:error, :unsupported}
+        end
+      end)
     else
       _invalid -> {:error, :backend_failure}
     end
@@ -164,6 +202,46 @@ defmodule Arbor.Persistence.VectorStore.Ecto do
   end
 
   def search(_agent_id, _vector, _opts), do: {:error, :backend_failure}
+
+  @impl true
+  def destroy(agent_id, []) when is_binary(agent_id) and byte_size(agent_id) > 0 do
+    with {:ok, repo} <- configured_repo() do
+      run_destroy_transaction(repo, fn ->
+        with :ok <- ensure_fence_row(repo, agent_id),
+             {:ok, _fence} <- lock_fence(repo, agent_id, :update),
+             :ok <- mark_destroying(repo, agent_id),
+             :ok <- delete_strict_rows(repo, agent_id),
+             :ok <- delete_receipts(repo, agent_id),
+             :ok <- verify_absent(repo, agent_id),
+             :ok <- mark_closed(repo, agent_id) do
+          :ok
+        end
+      end)
+    else
+      _invalid -> {:error, :backend_failure}
+    end
+  rescue
+    _error -> {:error, :indeterminate}
+  catch
+    _kind, _reason -> {:error, :indeterminate}
+  end
+
+  def destroy(_agent_id, _opts), do: {:error, :backend_failure}
+
+  # Test-only residual override for destroy verification failure.
+  if Mix.env() == :test do
+    @doc false
+    def __set_post_destroy_residual_override__(true) do
+      Process.put(@verify_hook_key, true)
+      :ok
+    end
+
+    @doc false
+    def __clear_post_destroy_residual_override__ do
+      Process.delete(@verify_hook_key)
+      :ok
+    end
+  end
 
   # Cheap closed-shape/range check only. Boundary is the sole canonical producer
   # of float32 thresholds via VectorMatch.normalize_similarity/1.
@@ -615,17 +693,23 @@ defmodule Arbor.Persistence.VectorStore.Ecto do
     end
   end
 
-  defp run_transaction(repo, operation_fingerprint, callback) do
+  defp run_open_fence_transaction(repo, agent_id, operation_fingerprint, callback) do
     options = if sqlite_repo?(repo), do: [mode: :immediate], else: []
 
     result =
       repo.transaction(
         fn ->
-          :ok = lock_operation(repo, operation_fingerprint)
+          case admit_open_fence(repo, agent_id) do
+            :ok ->
+              :ok = lock_operation(repo, operation_fingerprint)
 
-          case callback.() do
-            {:ok, value} -> value
-            {:error, reason} -> repo.rollback(reason)
+              case callback.() do
+                {:ok, value} -> value
+                {:error, reason} -> repo.rollback(reason)
+              end
+
+            {:error, reason} ->
+              repo.rollback(reason)
           end
         end,
         options
@@ -638,7 +722,180 @@ defmodule Arbor.Persistence.VectorStore.Ecto do
     end
   end
 
-  defp lock_operation(repo, fingerprint) do
+  defp run_destroy_transaction(repo, callback) do
+    options = if sqlite_repo?(repo), do: [mode: :immediate], else: []
+
+    result =
+      repo.transaction(
+        fn ->
+          case callback.() do
+            :ok -> :ok
+            {:error, reason} -> repo.rollback(reason)
+          end
+        end,
+        options
+      )
+
+    case result do
+      {:ok, :ok} -> :ok
+      {:error, reason} when reason in @destroy_transaction_errors -> {:error, reason}
+      {:error, _reason} -> {:error, :indeterminate}
+    end
+  end
+
+  # Lock order: ensure fence row, agent fence lock, then fingerprint advisory.
+  defp admit_open_fence(repo, agent_id) do
+    with :ok <- ensure_fence_row(repo, agent_id),
+         {:ok, fence} <- lock_fence(repo, agent_id, :key_share) do
+      case fence.state do
+        "open" -> :ok
+        _closed_or_destroying -> {:error, :closed}
+      end
+    end
+  end
+
+  defp ensure_fence_row(repo, agent_id) do
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    repo.insert_all(
+      AgentFenceRow,
+      [
+        %{
+          agent_id: agent_id,
+          state: "open",
+          closed_at: nil,
+          updated_at: now
+        }
+      ],
+      on_conflict: :nothing,
+      conflict_target: :agent_id
+    )
+
+    :ok
+  rescue
+    _error -> {:error, :backend_failure}
+  end
+
+  defp lock_fence(repo, agent_id, mode) when mode in [:key_share, :update] do
+    query = from(fence in AgentFenceRow, where: fence.agent_id == ^agent_id)
+
+    query =
+      cond do
+        postgres_repo?(repo) and mode == :key_share ->
+          from(fence in query, lock: "FOR KEY SHARE")
+
+        postgres_repo?(repo) and mode == :update ->
+          from(fence in query, lock: "FOR UPDATE")
+
+        true ->
+          query
+      end
+
+    case repo.one(query) do
+      %AgentFenceRow{} = fence -> {:ok, fence}
+      nil -> {:error, :backend_failure}
+    end
+  rescue
+    _error -> {:error, :backend_failure}
+  end
+
+  defp mark_destroying(repo, agent_id) do
+    {1, _} =
+      from(fence in AgentFenceRow, where: fence.agent_id == ^agent_id)
+      |> repo.update_all(set: [state: "destroying", closed_at: nil, updated_at: utc_now()])
+
+    :ok
+  rescue
+    _error -> {:error, :backend_failure}
+  end
+
+  defp delete_strict_rows(repo, agent_id) do
+    from(row in VectorRow,
+      where: row.agent_id == ^agent_id,
+      where: row.vector_protocol == ^@vector_protocol
+    )
+    |> repo.delete_all()
+
+    :ok
+  rescue
+    _error -> {:error, :backend_failure}
+  end
+
+  defp delete_receipts(repo, agent_id) do
+    from(row in OperationReceiptRow, where: row.agent_id == ^agent_id)
+    |> repo.delete_all()
+
+    :ok
+  rescue
+    _error -> {:error, :backend_failure}
+  end
+
+  defp verify_absent(repo, agent_id) do
+    if residual_override?() do
+      {:error, :indeterminate}
+    else
+      strict_remaining =
+        from(row in VectorRow,
+          where: row.agent_id == ^agent_id,
+          where: row.vector_protocol == ^@vector_protocol,
+          select: count(row.id)
+        )
+        |> repo.one()
+
+      receipt_remaining =
+        from(row in OperationReceiptRow,
+          where: row.agent_id == ^agent_id,
+          select: count(row.operation_fingerprint)
+        )
+        |> repo.one()
+
+      if strict_remaining == 0 and receipt_remaining == 0 do
+        :ok
+      else
+        {:error, :indeterminate}
+      end
+    end
+  rescue
+    _error -> {:error, :indeterminate}
+  end
+
+  defp residual_override? do
+    Mix.env() == :test and Process.get(@verify_hook_key) == true
+  end
+
+  defp mark_closed(repo, agent_id) do
+    # Database-owned timestamp authority (not BEAM clock).
+    sql =
+      if postgres_repo?(repo) do
+        """
+        UPDATE vector_agent_fences
+        SET state = 'closed',
+            closed_at = clock_timestamp() AT TIME ZONE 'UTC',
+            updated_at = clock_timestamp() AT TIME ZONE 'UTC'
+        WHERE agent_id = $1
+        """
+      else
+        """
+        UPDATE vector_agent_fences
+        SET state = 'closed',
+            closed_at = CURRENT_TIMESTAMP,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE agent_id = ?
+        """
+      end
+
+    case repo.query(sql, [agent_id]) do
+      {:ok, %{num_rows: 1}} -> :ok
+      {:ok, %{num_rows: _other}} -> {:error, :indeterminate}
+      {:error, _reason} -> {:error, :backend_failure}
+    end
+  rescue
+    _error -> {:error, :backend_failure}
+  end
+
+  defp lock_operation(_repo, nil), do: :ok
+
+  defp lock_operation(repo, fingerprint) when is_binary(fingerprint) do
     if postgres_repo?(repo) do
       repo.query!(
         "SELECT pg_advisory_xact_lock(hashtextextended($1, 20260805))",
@@ -648,6 +905,8 @@ defmodule Arbor.Persistence.VectorStore.Ecto do
 
     :ok
   end
+
+  defp utc_now, do: DateTime.utc_now() |> DateTime.truncate(:microsecond)
 
   defp decode_rows([], _repo, records), do: {:ok, Enum.reverse(records)}
 

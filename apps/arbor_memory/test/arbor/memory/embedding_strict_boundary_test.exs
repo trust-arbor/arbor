@@ -37,6 +37,29 @@ defmodule Arbor.Memory.EmbeddingStrictBoundaryTest do
     assert function_exported?(Embedding, :fetch_strict, 4)
     assert function_exported?(Embedding, :list_strict, 2)
     assert function_exported?(Embedding, :search_strict, 3)
+    assert function_exported?(Embedding, :destroy_strict, 2)
+  end
+
+  test "destroy_strict and StrictVectorSeam.Default forward to public Persistence facade" do
+    source = File.read!(Path.expand("../../../lib/arbor/memory/embedding.ex", __DIR__))
+
+    default =
+      File.read!(Path.expand("../../../lib/arbor/memory/strict_vector_seam/default.ex", __DIR__))
+
+    seam = File.read!(Path.expand("../../../lib/arbor/memory/strict_vector_seam.ex", __DIR__))
+
+    assert seam =~ "destroy(agent_id(), opts())"
+    assert default =~ "def destroy(agent_id, opts \\\\ [])"
+    assert default =~ "Embedding.destroy_strict"
+    assert source =~ "Persistence.destroy_vector_agent"
+    refute source =~ "Arbor.Persistence.VectorStore"
+    refute source =~ "Arbor.Persistence.Repo"
+
+    assert {:error, :unsupported} =
+             Embedding.destroy_strict("agent_destroy_forward", [])
+
+    assert {:error, :unsupported} =
+             Arbor.Memory.StrictVectorSeam.Default.destroy("agent_destroy_forward", [])
   end
 
   test "strict public encode/decode round-trips through Arbor.Memory.Embedding" do

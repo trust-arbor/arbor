@@ -19,4 +19,7 @@ defmodule Arbor.Persistence.VectorStore.Unsupported do
 
   @impl true
   def search(_agent_id, _vector, _opts), do: {:error, :unsupported}
+
+  @impl true
+  def destroy(_agent_id, _opts), do: {:error, :unsupported}
 end

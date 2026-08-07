@@ -21,6 +21,9 @@ defmodule Arbor.Persistence.VectorBoundaryTest do
     @impl true
     def search(agent_id, vector, opts), do: invoke(:search, [agent_id, vector, opts])
 
+    @impl true
+    def destroy(agent_id, opts), do: invoke(:destroy, [agent_id, opts])
+
     defp invoke(callback, args) do
       send(self(), {:vector_backend_called, callback, args})
 
@@ -89,6 +92,62 @@ defmodule Arbor.Persistence.VectorBoundaryTest do
              )
 
     refute_receive {:vector_backend_called, _callback, _args}
+  end
+
+  test "destroy rejects invalid agent_id and improper opts without dispatch" do
+    assert {:error, :invalid_request} = Arbor.Persistence.destroy_vector_agent("")
+    assert {:error, :invalid_request} = Arbor.Persistence.destroy_vector_agent("   ")
+    assert {:error, :invalid_request} = Arbor.Persistence.destroy_vector_agent(nil)
+
+    assert {:error, :invalid_request} =
+             Arbor.Persistence.destroy_vector_agent(String.duplicate("a", 257))
+
+    assert {:error, :invalid_request} =
+             Arbor.Persistence.destroy_vector_agent("agent_alpha", bad: true)
+
+    assert {:error, :invalid_request} =
+             Arbor.Persistence.destroy_vector_agent("agent_alpha", [{:noop, true} | :improper])
+
+    assert {:error, :invalid_request} =
+             Arbor.Persistence.destroy_vector_agent("agent_alpha", %{not: :keyword})
+
+    refute_receive {:vector_backend_called, _callback, _args}
+  end
+
+  test "destroy normalizes injected backend outcomes and admitted errors" do
+    respond(:ok)
+    assert :ok = Arbor.Persistence.destroy_vector_agent("agent_alpha")
+    assert_receive {:vector_backend_called, :destroy, ["agent_alpha", []]}
+
+    respond({:error, :indeterminate})
+    assert {:error, :indeterminate} = Arbor.Persistence.destroy_vector_agent("agent_alpha")
+
+    respond({:error, :unsupported})
+    assert {:error, :unsupported} = Arbor.Persistence.destroy_vector_agent("agent_alpha")
+
+    respond({:error, :backend_failure})
+    assert {:error, :backend_failure} = Arbor.Persistence.destroy_vector_agent("agent_alpha")
+
+    respond({:error, {:database, "sqlstate leaked"}})
+    assert {:error, :backend_failure} = Arbor.Persistence.destroy_vector_agent("agent_alpha")
+
+    respond({:ok, :closed})
+
+    assert {:error, :invalid_backend_result} =
+             Arbor.Persistence.destroy_vector_agent("agent_alpha")
+
+    respond(:closed)
+
+    assert {:error, :invalid_backend_result} =
+             Arbor.Persistence.destroy_vector_agent("agent_alpha")
+
+    respond("ok")
+
+    assert {:error, :invalid_backend_result} =
+             Arbor.Persistence.destroy_vector_agent("agent_alpha")
+
+    respond({:raise, "destroy adapter blew up"})
+    assert {:error, :backend_failure} = Arbor.Persistence.destroy_vector_agent("agent_alpha")
   end
 
   test "canonical mutation dispatches the exact operation and verifies its receipt" do

@@ -85,6 +85,15 @@ defmodule Arbor.Persistence do
   def search_vector_records(agent_id, vector, opts \\ []),
     do: VectorBoundary.search(agent_id, vector, opts)
 
+  @doc """
+  Idempotently destroy exact-agent strict V1 vector rows and operation receipts,
+  then close the durable agent fence.
+  """
+  @spec destroy_vector_agent(String.t(), keyword()) ::
+          :ok | {:error, Arbor.Contracts.API.Persistence.vector_error()}
+  def destroy_vector_agent(agent_id, opts \\ []),
+    do: VectorBoundary.destroy(agent_id, opts)
+
   # ---------------------------------------------------------------
   # Relationship records (VP-05D2C3I0A)
   #
@@ -1241,6 +1250,10 @@ defmodule Arbor.Persistence do
   @impl Arbor.Contracts.API.Persistence
   def search_vector_records_by_exact_model_descriptor_and_scope_for_agent(agent_id, vector, opts),
     do: VectorBoundary.search(agent_id, vector, opts)
+
+  @impl Arbor.Contracts.API.Persistence
+  def delete_all_strict_vector_records_and_operation_receipts_for_agent(agent_id, opts),
+    do: destroy_vector_agent(agent_id, opts)
 
   # -- Relationships (optional) --
   #

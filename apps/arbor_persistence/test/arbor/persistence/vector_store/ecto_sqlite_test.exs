@@ -36,10 +36,16 @@ defmodule Arbor.Persistence.VectorStore.EctoSQLiteTest do
                                         "../../../../priv/repo/migrations/20260805000005_harden_vector_receipt_rowids.exs",
                                         __DIR__
                                       )
+  @fence_migration_version 20_260_807_000_001
+  @fence_migration_file Path.expand(
+                          "../../../../priv/repo/migrations/20260807000001_create_vector_agent_fences.exs",
+                          __DIR__
+                        )
 
   Code.require_file(@migration_file)
   Code.require_file(@widen_migration_file)
   Code.require_file(@isolation_migration_file)
+  Code.require_file(@fence_migration_file)
 
   defmodule SQLiteRepo do
     use Ecto.Repo,
@@ -48,6 +54,24 @@ defmodule Arbor.Persistence.VectorStore.EctoSQLiteTest do
   end
 
   defmodule RollbackRepo do
+    use Ecto.Repo,
+      otp_app: :arbor_persistence,
+      adapter: Ecto.Adapters.SQLite3
+  end
+
+  defmodule BackfillRepo do
+    use Ecto.Repo,
+      otp_app: :arbor_persistence,
+      adapter: Ecto.Adapters.SQLite3
+  end
+
+  defmodule RestartRepo do
+    use Ecto.Repo,
+      otp_app: :arbor_persistence,
+      adapter: Ecto.Adapters.SQLite3
+  end
+
+  defmodule CollisionRepo do
     use Ecto.Repo,
       otp_app: :arbor_persistence,
       adapter: Ecto.Adapters.SQLite3
@@ -92,6 +116,7 @@ defmodule Arbor.Persistence.VectorStore.EctoSQLiteTest do
              )
 
     maybe_install_receipt_insert_guard!()
+    maybe_install_fence_migration!()
 
     on_exit(fn ->
       Enum.each([database, database <> "-shm", database <> "-wal"], &File.rm/1)
@@ -559,6 +584,803 @@ defmodule Arbor.Persistence.VectorStore.EctoSQLiteTest do
     end
   end
 
+  test "destroy removes exact-agent strict rows and receipts, preserves legacy and survivors", %{
+    agent_id: agent_id
+  } do
+    survivor_id = unique("agent")
+    target = insert_operation!(record!(agent_id, source_key: "destroy-target"))
+    survivor = insert_operation!(record!(survivor_id, source_key: "destroy-survivor"))
+
+    assert {:ok, _} = Arbor.Persistence.execute_vector_operation(agent_id, target)
+    assert {:ok, _} = Arbor.Persistence.execute_vector_operation(survivor_id, survivor)
+
+    now = DateTime.utc_now() |> DateTime.to_iso8601()
+    legacy_id = unique("legacy")
+
+    SQLiteRepo.query!(
+      """
+      INSERT INTO memory_embeddings (
+        id, agent_id, content, content_hash, embedding,
+        vector_protocol, source_namespace, source_key,
+        generation, revision, tombstone, inserted_at, updated_at
+      ) VALUES (
+        ?, ?, '{}', ?, '[0.1]',
+        NULL, NULL, NULL,
+        NULL, NULL, NULL, ?, ?
+      )
+      """,
+      [legacy_id, agent_id, String.duplicate("a", 64), now, now]
+    )
+
+    assert :ok = Arbor.Persistence.destroy_vector_agent(agent_id)
+
+    assert %{rows: [[0]]} =
+             SQLiteRepo.query!(
+               """
+               SELECT COUNT(*) FROM memory_embeddings
+               WHERE agent_id = ? AND vector_protocol = 'arbor_vector_store_v1'
+               """,
+               [agent_id]
+             )
+
+    assert %{rows: [[0]]} =
+             SQLiteRepo.query!(
+               "SELECT COUNT(*) FROM vector_operation_receipts WHERE agent_id = ?",
+               [agent_id]
+             )
+
+    assert %{rows: [[1]]} =
+             SQLiteRepo.query!(
+               "SELECT COUNT(*) FROM memory_embeddings WHERE id = ?",
+               [legacy_id]
+             )
+
+    assert %{rows: [[1]]} =
+             SQLiteRepo.query!(
+               """
+               SELECT COUNT(*) FROM memory_embeddings
+               WHERE agent_id = ? AND vector_protocol = 'arbor_vector_store_v1'
+               """,
+               [survivor_id]
+             )
+
+    assert %{rows: [[1]]} =
+             SQLiteRepo.query!(
+               "SELECT COUNT(*) FROM vector_operation_receipts WHERE agent_id = ?",
+               [survivor_id]
+             )
+
+    assert %{rows: [["closed", closed_at]]} =
+             SQLiteRepo.query!(
+               "SELECT state, closed_at FROM vector_agent_fences WHERE agent_id = ?",
+               [agent_id]
+             )
+
+    assert is_binary(closed_at) and closed_at != ""
+
+    assert {:error, :closed} =
+             Arbor.Persistence.execute_vector_operation(
+               agent_id,
+               insert_operation!(record!(agent_id, source_key: "after-destroy"))
+             )
+
+    assert {:error, :closed} =
+             Arbor.Persistence.reconcile_vector_operation(agent_id, target)
+
+    assert {:error, :closed} =
+             Arbor.Persistence.fetch_vector_record(agent_id, "voice", "destroy-target")
+
+    assert {:error, :closed} = Arbor.Persistence.list_vector_records(agent_id)
+
+    assert {:error, :closed} =
+             Arbor.Persistence.search_vector_records(agent_id, vector(), search_opts())
+  end
+
+  test "security regression: public execute fails closed after destroy", %{agent_id: agent_id} do
+    operation = insert_operation!(record!(agent_id, source_key: "security-closed"))
+    assert {:ok, _} = Arbor.Persistence.execute_vector_operation(agent_id, operation)
+    assert :ok = Arbor.Persistence.destroy_vector_agent(agent_id)
+
+    assert {:error, :closed} =
+             Arbor.Persistence.execute_vector_operation(
+               agent_id,
+               insert_operation!(record!(agent_id, source_key: "security-closed-retry"))
+             )
+  end
+
+  test "security regression: public execute rejects a manually seeded closed fence", %{
+    agent_id: agent_id
+  } do
+    # Keep this fixture self-contained so the test-only parent can prove the old
+    # public execute path ignored durable fence state before the migration exists.
+    SQLiteRepo.query!("""
+    CREATE TABLE IF NOT EXISTS vector_agent_fences (
+      agent_id TEXT PRIMARY KEY NOT NULL,
+      state TEXT NOT NULL,
+      closed_at TEXT,
+      updated_at TEXT NOT NULL
+    )
+    """)
+
+    SQLiteRepo.query!(
+      """
+      INSERT INTO vector_agent_fences (agent_id, state, closed_at, updated_at)
+      VALUES (?, 'closed', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+      """,
+      [agent_id]
+    )
+
+    assert {:error, :closed} =
+             Arbor.Persistence.execute_vector_operation(
+               agent_id,
+               insert_operation!(record!(agent_id, source_key: "manual-closed-attempt"))
+             )
+
+    assert %{rows: [[0]]} =
+             SQLiteRepo.query!(
+               """
+               SELECT COUNT(*) FROM memory_embeddings
+               WHERE agent_id = ? AND vector_protocol = 'arbor_vector_store_v1'
+               """,
+               [agent_id]
+             )
+
+    assert %{rows: [[0]]} =
+             SQLiteRepo.query!(
+               "SELECT COUNT(*) FROM vector_operation_receipts WHERE agent_id = ?",
+               [agent_id]
+             )
+  end
+
+  test "idempotent destroy from closed cleans injected debris and recloses", %{
+    agent_id: agent_id
+  } do
+    operation = insert_operation!(record!(agent_id, source_key: "closed-retry"))
+    assert {:ok, _} = Arbor.Persistence.execute_vector_operation(agent_id, operation)
+    assert :ok = Arbor.Persistence.destroy_vector_agent(agent_id)
+    assert :ok = Arbor.Persistence.destroy_vector_agent(agent_id)
+
+    now = DateTime.utc_now() |> DateTime.to_iso8601()
+    debris_id = unique("debris")
+    fingerprint = String.duplicate("f", 64)
+
+    # Inject removable debris while fence is closed (simulates post-close debris).
+    SQLiteRepo.query!(
+      """
+      UPDATE vector_agent_fences
+      SET state = 'open', closed_at = NULL
+      WHERE agent_id = ?
+      """,
+      [agent_id]
+    )
+
+    SQLiteRepo.query!(
+      """
+      INSERT INTO memory_embeddings (
+        id, agent_id, content, content_hash, embedding,
+        vector_protocol, source_namespace, source_key,
+        generation, revision, tombstone, inserted_at, updated_at
+      ) VALUES (
+        ?, ?, '{}', ?, '[0.2]',
+        'arbor_vector_store_v1', 'voice', 'debris',
+        1, 1, 0, ?, ?
+      )
+      """,
+      [debris_id, agent_id, String.duplicate("b", 64), now, now]
+    )
+
+    SQLiteRepo.query!(
+      """
+      INSERT INTO vector_operation_receipts (
+        operation_fingerprint, agent_id, operation_kind,
+        operation_json, operation_digest, receipt_json, receipt_digest, inserted_at
+      ) VALUES (?, ?, 'insert', '{}', ?, '{}', ?, ?)
+      """,
+      [
+        fingerprint,
+        agent_id,
+        String.duplicate("c", 64),
+        String.duplicate("d", 64),
+        now
+      ]
+    )
+
+    SQLiteRepo.query!(
+      """
+      UPDATE vector_agent_fences
+      SET state = 'closed', closed_at = CURRENT_TIMESTAMP
+      WHERE agent_id = ?
+      """,
+      [agent_id]
+    )
+
+    assert :ok = Arbor.Persistence.destroy_vector_agent(agent_id)
+
+    assert %{rows: [[0]]} =
+             SQLiteRepo.query!(
+               """
+               SELECT COUNT(*) FROM memory_embeddings
+               WHERE agent_id = ? AND vector_protocol = 'arbor_vector_store_v1'
+               """,
+               [agent_id]
+             )
+
+    assert %{rows: [[0]]} =
+             SQLiteRepo.query!(
+               "SELECT COUNT(*) FROM vector_operation_receipts WHERE agent_id = ?",
+               [agent_id]
+             )
+
+    assert %{rows: [["closed"]]} =
+             SQLiteRepo.query!(
+               "SELECT state FROM vector_agent_fences WHERE agent_id = ?",
+               [agent_id]
+             )
+  end
+
+  test "destroy rollback is atomic and closed state survives repository restart" do
+    database =
+      Path.join(
+        System.tmp_dir!(),
+        "arbor-vector-restart-#{System.unique_integer([:positive])}.sqlite3"
+      )
+
+    original_backend =
+      Application.get_env(:arbor_persistence, :vector_store_backend, :not_configured)
+
+    original_repo = Application.get_env(:arbor_persistence, :vector_store_repo, :not_configured)
+
+    start_supervised!(
+      {RestartRepo,
+       database: database,
+       pool: DBConnection.ConnectionPool,
+       pool_size: 1,
+       busy_timeout: 5_000,
+       journal_mode: :wal,
+       custom_pragmas: [recursive_triggers: true]},
+      id: :vector_restart_repo
+    )
+
+    on_exit(fn ->
+      restore_env(:vector_store_backend, original_backend)
+      restore_env(:vector_store_repo, original_repo)
+      Enum.each([database, database <> "-shm", database <> "-wal"], &File.rm/1)
+    end)
+
+    create_legacy_table!(RestartRepo)
+    migrate_vector_chain!(RestartRepo)
+
+    Application.put_env(
+      :arbor_persistence,
+      :vector_store_backend,
+      Arbor.Persistence.VectorStore.Ecto
+    )
+
+    Application.put_env(:arbor_persistence, :vector_store_repo, RestartRepo)
+
+    agent_id = unique("agent")
+    operation = insert_operation!(record!(agent_id, source_key: "rollback-destroy"))
+    assert {:ok, _} = Arbor.Persistence.execute_vector_operation(agent_id, operation)
+
+    Arbor.Persistence.VectorStore.Ecto.__set_post_destroy_residual_override__(true)
+
+    try do
+      assert {:error, :indeterminate} = Arbor.Persistence.destroy_vector_agent(agent_id)
+    after
+      Arbor.Persistence.VectorStore.Ecto.__clear_post_destroy_residual_override__()
+    end
+
+    assert %{rows: [[1]]} =
+             RestartRepo.query!(
+               """
+               SELECT COUNT(*) FROM memory_embeddings
+               WHERE agent_id = ? AND vector_protocol = 'arbor_vector_store_v1'
+               """,
+               [agent_id]
+             )
+
+    assert %{rows: [[1]]} =
+             RestartRepo.query!(
+               "SELECT COUNT(*) FROM vector_operation_receipts WHERE agent_id = ?",
+               [agent_id]
+             )
+
+    assert %{rows: [["open"]]} =
+             RestartRepo.query!(
+               "SELECT state FROM vector_agent_fences WHERE agent_id = ?",
+               [agent_id]
+             )
+
+    assert :ok = Arbor.Persistence.destroy_vector_agent(agent_id)
+
+    # Dedicated RestartRepo only — never stop the setup_all shared SQLiteRepo.
+    case stop_supervised(:vector_restart_repo) do
+      :ok -> :ok
+      {:error, :not_found} -> :ok
+    end
+
+    Process.sleep(50)
+
+    start_supervised!(
+      {RestartRepo,
+       database: database,
+       pool: DBConnection.ConnectionPool,
+       pool_size: 1,
+       busy_timeout: 5_000,
+       journal_mode: :wal,
+       custom_pragmas: [recursive_triggers: true]},
+      restart: :temporary,
+      id: :vector_restart_repo_reopened
+    )
+
+    Application.put_env(:arbor_persistence, :vector_store_repo, RestartRepo)
+
+    assert %{rows: [["closed"]]} =
+             RestartRepo.query!(
+               "SELECT state FROM vector_agent_fences WHERE agent_id = ?",
+               [agent_id]
+             )
+
+    assert {:error, :closed} = Arbor.Persistence.list_vector_records(agent_id)
+  end
+
+  test "fence migration refuses destructive rollback" do
+    # Module is already loaded by setup_all's fence migration install.
+    assert_raise RuntimeError, ~r/irreversible migration/, fn ->
+      Arbor.Persistence.Repo.Migrations.CreateVectorAgentFences.down()
+    end
+  end
+
+  test "fence agent_id DB constraint rejects empty and oversize identifiers" do
+    assert_raise Exqlite.Error, fn ->
+      SQLiteRepo.query!("""
+      INSERT INTO vector_agent_fences (agent_id, state, closed_at, updated_at)
+      VALUES ('', 'open', NULL, CURRENT_TIMESTAMP)
+      """)
+    end
+
+    assert_raise Exqlite.Error, fn ->
+      SQLiteRepo.query!("""
+      INSERT INTO vector_agent_fences (agent_id, state, closed_at, updated_at)
+      VALUES ('   ', 'open', NULL, CURRENT_TIMESTAMP)
+      """)
+    end
+
+    oversize = String.duplicate("a", 257)
+
+    assert_raise Exqlite.Error, fn ->
+      SQLiteRepo.query!(
+        """
+        INSERT INTO vector_agent_fences (agent_id, state, closed_at, updated_at)
+        VALUES (?, 'open', NULL, CURRENT_TIMESTAMP)
+        """,
+        [oversize]
+      )
+    end
+
+    max_id = String.duplicate("b", 256)
+
+    assert %{num_rows: 1} =
+             SQLiteRepo.query!(
+               """
+               INSERT INTO vector_agent_fences (agent_id, state, closed_at, updated_at)
+               VALUES (?, 'open', NULL, CURRENT_TIMESTAMP)
+               """,
+               [max_id]
+             )
+
+    # Multibyte byte-boundary: 128 two-byte codepoints (256 UTF-8 bytes) accepted;
+    # 129 (258 bytes) rejected.
+    two_byte = "é"
+    assert byte_size(two_byte) == 2
+    accepted = String.duplicate(two_byte, 128)
+    rejected = String.duplicate(two_byte, 129)
+    assert byte_size(accepted) == 256
+    assert byte_size(rejected) == 258
+
+    assert %{num_rows: 1} =
+             SQLiteRepo.query!(
+               """
+               INSERT INTO vector_agent_fences (agent_id, state, closed_at, updated_at)
+               VALUES (?, 'open', NULL, CURRENT_TIMESTAMP)
+               """,
+               [accepted]
+             )
+
+    assert_raise Exqlite.Error, fn ->
+      SQLiteRepo.query!(
+        """
+        INSERT INTO vector_agent_fences (agent_id, state, closed_at, updated_at)
+        VALUES (?, 'open', NULL, CURRENT_TIMESTAMP)
+        """,
+        [rejected]
+      )
+    end
+  end
+
+  test "fence state/closed_at coherence constraints are enforced" do
+    assert_raise Exqlite.Error, fn ->
+      SQLiteRepo.query!("""
+      INSERT INTO vector_agent_fences (agent_id, state, closed_at, updated_at)
+      VALUES ('coherent_bad_closed', 'closed', NULL, CURRENT_TIMESTAMP)
+      """)
+    end
+
+    assert_raise Exqlite.Error, fn ->
+      SQLiteRepo.query!("""
+      INSERT INTO vector_agent_fences (agent_id, state, closed_at, updated_at)
+      VALUES ('coherent_bad_open', 'open', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+      """)
+    end
+
+    assert_raise Exqlite.Error, fn ->
+      SQLiteRepo.query!("""
+      INSERT INTO vector_agent_fences (agent_id, state, closed_at, updated_at)
+      VALUES ('coherent_bad_destroying', 'destroying', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+      """)
+    end
+
+    assert %{num_rows: 1} =
+             SQLiteRepo.query!("""
+             INSERT INTO vector_agent_fences (agent_id, state, closed_at, updated_at)
+             VALUES ('coherent_ok_closed', 'closed', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+             """)
+
+    assert %{num_rows: 1} =
+             SQLiteRepo.query!("""
+             INSERT INTO vector_agent_fences (agent_id, state, closed_at, updated_at)
+             VALUES ('coherent_ok_open', 'open', NULL, CURRENT_TIMESTAMP)
+             """)
+  end
+
+  test "ordinary ops fail closed while fence is destroying; destroy retry closes", %{
+    agent_id: agent_id
+  } do
+    operation = insert_operation!(record!(agent_id, source_key: "sqlite-destroying"))
+    assert {:ok, _} = Arbor.Persistence.execute_vector_operation(agent_id, operation)
+
+    SQLiteRepo.query!(
+      """
+      UPDATE vector_agent_fences
+      SET state = 'destroying', closed_at = NULL
+      WHERE agent_id = ?
+      """,
+      [agent_id]
+    )
+
+    assert {:error, :closed} =
+             Arbor.Persistence.execute_vector_operation(
+               agent_id,
+               insert_operation!(record!(agent_id, source_key: "while-destroying"))
+             )
+
+    assert {:error, :closed} =
+             Arbor.Persistence.fetch_vector_record(agent_id, "voice", "sqlite-destroying")
+
+    assert {:error, :closed} = Arbor.Persistence.list_vector_records(agent_id)
+
+    assert {:error, :closed} =
+             Arbor.Persistence.reconcile_vector_operation(agent_id, operation)
+
+    assert :ok = Arbor.Persistence.destroy_vector_agent(agent_id)
+
+    assert %{rows: [[0]]} =
+             SQLiteRepo.query!(
+               """
+               SELECT COUNT(*) FROM memory_embeddings
+               WHERE agent_id = ? AND vector_protocol = 'arbor_vector_store_v1'
+               """,
+               [agent_id]
+             )
+
+    assert %{rows: [[0]]} =
+             SQLiteRepo.query!(
+               "SELECT COUNT(*) FROM vector_operation_receipts WHERE agent_id = ?",
+               [agent_id]
+             )
+
+    assert %{rows: [["closed", closed_at]]} =
+             SQLiteRepo.query!(
+               "SELECT state, closed_at FROM vector_agent_fences WHERE agent_id = ?",
+               [agent_id]
+             )
+
+    assert is_binary(closed_at) and closed_at != ""
+  end
+
+  test "security regression: fence migration fails closed on pre-existing table collision" do
+    database =
+      Path.join(
+        System.tmp_dir!(),
+        "arbor-vector-fence-table-collision-#{System.unique_integer([:positive])}.sqlite3"
+      )
+
+    start_supervised!(
+      {CollisionRepo,
+       database: database,
+       pool: DBConnection.ConnectionPool,
+       pool_size: 1,
+       busy_timeout: 5_000,
+       custom_pragmas: [recursive_triggers: true]},
+      id: :sqlite_fence_table_collision_repo
+    )
+
+    on_exit(fn ->
+      Enum.each([database, database <> "-shm", database <> "-wal"], &File.rm/1)
+    end)
+
+    create_legacy_table!(CollisionRepo)
+    migrate_pre_fence_chain!(CollisionRepo)
+
+    CollisionRepo.query!("CREATE TABLE vector_agent_fences (agent_id TEXT PRIMARY KEY)")
+
+    error =
+      try do
+        Ecto.Migrator.up(
+          CollisionRepo,
+          @fence_migration_version,
+          Arbor.Persistence.Repo.Migrations.CreateVectorAgentFences,
+          log: false
+        )
+
+        flunk("expected table collision to fail closed")
+      rescue
+        e -> e
+      end
+
+    assert Exception.message(error) =~ ~r/already exists|table.*exists/i
+
+    # Wrong pre-existing definition retained (single column only).
+    columns =
+      CollisionRepo.query!("SELECT name FROM pragma_table_info('vector_agent_fences')").rows
+      |> List.flatten()
+
+    assert columns == ["agent_id"]
+  end
+
+  test "security regression: fence migration fails closed on pre-existing trigger collision" do
+    database =
+      Path.join(
+        System.tmp_dir!(),
+        "arbor-vector-fence-trigger-collision-#{System.unique_integer([:positive])}.sqlite3"
+      )
+
+    start_supervised!(
+      {CollisionRepo,
+       database: database,
+       pool: DBConnection.ConnectionPool,
+       pool_size: 1,
+       busy_timeout: 5_000,
+       custom_pragmas: [recursive_triggers: true]},
+      id: :sqlite_fence_trigger_collision_repo
+    )
+
+    on_exit(fn ->
+      Enum.each([database, database <> "-shm", database <> "-wal"], &File.rm/1)
+    end)
+
+    create_legacy_table!(CollisionRepo)
+    migrate_pre_fence_chain!(CollisionRepo)
+
+    CollisionRepo.query!("""
+    CREATE TRIGGER vector_operation_receipts_admit_insert
+    BEFORE INSERT ON vector_operation_receipts
+    FOR EACH ROW
+    BEGIN
+      SELECT RAISE(ABORT, 'dummy collision trigger');
+    END
+    """)
+
+    error =
+      try do
+        Ecto.Migrator.up(
+          CollisionRepo,
+          @fence_migration_version,
+          Arbor.Persistence.Repo.Migrations.CreateVectorAgentFences,
+          log: false
+        )
+
+        flunk("expected trigger collision to fail closed")
+      rescue
+        e -> e
+      end
+
+    assert Exception.message(error) =~ ~r/already exists|trigger.*exists/i
+
+    assert %{rows: [[1]]} =
+             CollisionRepo.query!("""
+             SELECT COUNT(*)
+             FROM sqlite_master
+             WHERE type = 'trigger'
+               AND name = 'vector_operation_receipts_admit_insert'
+               AND sql LIKE '%dummy collision trigger%'
+             """)
+  end
+
+  test "fence migration backfills strict V1 and receipt agents, excludes pure legacy" do
+    database =
+      Path.join(
+        System.tmp_dir!(),
+        "arbor-vector-fence-backfill-#{System.unique_integer([:positive])}.sqlite3"
+      )
+
+    start_supervised!(
+      {BackfillRepo,
+       database: database,
+       pool: DBConnection.ConnectionPool,
+       pool_size: 1,
+       busy_timeout: 5_000,
+       custom_pragmas: [recursive_triggers: true]},
+      id: :sqlite_backfill_repo
+    )
+
+    on_exit(fn ->
+      Enum.each([database, database <> "-shm", database <> "-wal"], &File.rm/1)
+    end)
+
+    create_legacy_table!(BackfillRepo)
+
+    assert :ok ==
+             Ecto.Migrator.up(BackfillRepo, @migration_version, @migration_module, log: false)
+
+    assert :ok ==
+             Ecto.Migrator.up(
+               BackfillRepo,
+               @widen_migration_version,
+               @widen_migration_module,
+               log: false
+             )
+
+    assert :ok ==
+             Ecto.Migrator.up(
+               BackfillRepo,
+               @isolation_migration_version,
+               @isolation_migration_module,
+               log: false
+             )
+
+    assert :ok ==
+             Ecto.Migrator.up(
+               BackfillRepo,
+               @receipt_guard_migration_version,
+               Arbor.Persistence.Repo.Migrations.HardenVectorReceiptInserts,
+               log: false
+             )
+
+    assert :ok ==
+             Ecto.Migrator.up(
+               BackfillRepo,
+               @receipt_rowid_guard_migration_version,
+               Arbor.Persistence.Repo.Migrations.HardenVectorReceiptRowids,
+               log: false
+             )
+
+    now = DateTime.utc_now() |> DateTime.to_iso8601()
+    strict_agent = unique("strict")
+    receipt_agent = unique("receipt")
+    legacy_agent = unique("legacy")
+
+    BackfillRepo.query!(
+      """
+      INSERT INTO memory_embeddings (
+        id, agent_id, content, content_hash, embedding,
+        vector_protocol, source_namespace, source_key,
+        generation, revision, tombstone, inserted_at, updated_at
+      ) VALUES (
+        ?, ?, '{}', ?, '[0.1]',
+        'arbor_vector_store_v1', 'voice', 'strict-key',
+        1, 1, 0, ?, ?
+      )
+      """,
+      [unique("vec"), strict_agent, String.duplicate("a", 64), now, now]
+    )
+
+    BackfillRepo.query!(
+      """
+      INSERT INTO memory_embeddings (
+        id, agent_id, content, content_hash, embedding,
+        vector_protocol, source_namespace, source_key,
+        generation, revision, tombstone, inserted_at, updated_at
+      ) VALUES (
+        ?, ?, '{}', ?, '[0.2]',
+        NULL, NULL, NULL,
+        NULL, NULL, NULL, ?, ?
+      )
+      """,
+      [unique("legacy"), legacy_agent, String.duplicate("b", 64), now, now]
+    )
+
+    # Receipt-only tenant (no strict V1 row) must still backfill an open fence.
+    # Fence table does not exist yet, so insert admission triggers are not installed.
+    # Insert receipts before fence migration; Harden* migrations only add insert conflict
+    # guards, not fence-open admission (that arrives with CreateVectorAgentFences).
+    BackfillRepo.query!(
+      """
+      INSERT INTO vector_operation_receipts (
+        operation_fingerprint, agent_id, operation_kind,
+        operation_json, operation_digest, receipt_json, receipt_digest, inserted_at
+      ) VALUES (?, ?, 'insert', '{}', ?, '{}', ?, ?)
+      """,
+      [
+        String.duplicate("c", 64),
+        receipt_agent,
+        String.duplicate("d", 64),
+        String.duplicate("e", 64),
+        now
+      ]
+    )
+
+    assert :ok ==
+             Ecto.Migrator.up(
+               BackfillRepo,
+               @fence_migration_version,
+               Arbor.Persistence.Repo.Migrations.CreateVectorAgentFences,
+               log: false
+             )
+
+    assert %{rows: [[1]]} =
+             BackfillRepo.query!(
+               "SELECT COUNT(*) FROM vector_agent_fences WHERE agent_id = ? AND state = 'open'",
+               [strict_agent]
+             )
+
+    assert %{rows: [[1]]} =
+             BackfillRepo.query!(
+               "SELECT COUNT(*) FROM vector_agent_fences WHERE agent_id = ? AND state = 'open'",
+               [receipt_agent]
+             )
+
+    assert %{rows: [[0]]} =
+             BackfillRepo.query!(
+               "SELECT COUNT(*) FROM vector_agent_fences WHERE agent_id = ?",
+               [legacy_agent]
+             )
+  end
+
+  test "raw receipt insert is rejected when fence is closed", %{agent_id: agent_id} do
+    assert :ok = Arbor.Persistence.destroy_vector_agent(agent_id)
+    now = DateTime.utc_now() |> DateTime.to_iso8601()
+
+    assert_raise Exqlite.Error, ~r/fence not open/, fn ->
+      SQLiteRepo.query!(
+        """
+        INSERT INTO vector_operation_receipts (
+          operation_fingerprint, agent_id, operation_kind,
+          operation_json, operation_digest, receipt_json, receipt_digest, inserted_at
+        ) VALUES (?, ?, 'insert', '{}', ?, '{}', ?, ?)
+        """,
+        [
+          String.duplicate("1", 64),
+          agent_id,
+          String.duplicate("2", 64),
+          String.duplicate("3", 64),
+          now
+        ]
+      )
+    end
+  end
+
+  test "invalid destroy inputs stay normalized at the boundary" do
+    assert {:error, :invalid_request} = Arbor.Persistence.destroy_vector_agent("")
+    assert {:error, :invalid_request} = Arbor.Persistence.destroy_vector_agent(nil)
+    assert {:error, :invalid_request} = Arbor.Persistence.destroy_vector_agent("agent", bad: true)
+
+    assert {:error, :unsupported} =
+             with_backend(Arbor.Persistence.VectorStore.Unsupported, fn ->
+               Arbor.Persistence.destroy_vector_agent(unique("agent"))
+             end)
+  end
+
+  test "indeterminate destroy residual override normalizes", %{agent_id: agent_id} do
+    Arbor.Persistence.VectorStore.Ecto.__set_post_destroy_residual_override__(true)
+
+    try do
+      assert {:error, :indeterminate} = Arbor.Persistence.destroy_vector_agent(agent_id)
+    after
+      Arbor.Persistence.VectorStore.Ecto.__clear_post_destroy_residual_override__()
+    end
+  end
+
   test "security regression: SQLite replace cannot bypass immutable receipts with recursive triggers off",
        %{
          agent_id: agent_id,
@@ -650,50 +1472,6 @@ defmodule Arbor.Persistence.VectorStore.EctoSQLiteTest do
              Arbor.Persistence.reconcile_vector_operation(agent_id, operation)
   end
 
-  test "security regression: public execute rejects a manually seeded closed fence", %{
-    agent_id: agent_id
-  } do
-    # Keep this fixture self-contained so the test-only parent can prove the old
-    # public execute path ignored durable fence state before the migration exists.
-    SQLiteRepo.query!("""
-    CREATE TABLE IF NOT EXISTS vector_agent_fences (
-      agent_id TEXT PRIMARY KEY NOT NULL,
-      state TEXT NOT NULL,
-      closed_at TEXT,
-      updated_at TEXT NOT NULL
-    )
-    """)
-
-    SQLiteRepo.query!(
-      """
-      INSERT INTO vector_agent_fences (agent_id, state, closed_at, updated_at)
-      VALUES (?, 'closed', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-      """,
-      [agent_id]
-    )
-
-    assert {:error, :closed} =
-             Arbor.Persistence.execute_vector_operation(
-               agent_id,
-               insert_operation!(record!(agent_id, source_key: "manual-closed-attempt"))
-             )
-
-    assert %{rows: [[0]]} =
-             SQLiteRepo.query!(
-               """
-               SELECT COUNT(*) FROM memory_embeddings
-               WHERE agent_id = ? AND vector_protocol = 'arbor_vector_store_v1'
-               """,
-               [agent_id]
-             )
-
-    assert %{rows: [[0]]} =
-             SQLiteRepo.query!(
-               "SELECT COUNT(*) FROM vector_operation_receipts WHERE agent_id = ?",
-               [agent_id]
-             )
-  end
-
   defp maybe_install_receipt_insert_guard! do
     migrations = [
       {@receipt_guard_migration_version, @receipt_guard_migration_file},
@@ -706,6 +1484,108 @@ defmodule Arbor.Persistence.VectorStore.EctoSQLiteTest do
         assert :ok == Ecto.Migrator.up(SQLiteRepo, version, module, log: false)
       end
     end)
+  end
+
+  defp maybe_install_fence_migration! do
+    if File.exists?(@fence_migration_file) do
+      _ = Code.require_file(@fence_migration_file)
+
+      assert :ok ==
+               Ecto.Migrator.up(
+                 SQLiteRepo,
+                 @fence_migration_version,
+                 Arbor.Persistence.Repo.Migrations.CreateVectorAgentFences,
+                 log: false
+               )
+    end
+  end
+
+  defp migrate_pre_fence_chain!(repo) do
+    assert :ok == Ecto.Migrator.up(repo, @migration_version, @migration_module, log: false)
+
+    assert :ok ==
+             Ecto.Migrator.up(repo, @widen_migration_version, @widen_migration_module, log: false)
+
+    assert :ok ==
+             Ecto.Migrator.up(
+               repo,
+               @isolation_migration_version,
+               @isolation_migration_module,
+               log: false
+             )
+
+    if File.exists?(@receipt_guard_migration_file) do
+      _ = Code.require_file(@receipt_guard_migration_file)
+
+      assert :ok ==
+               Ecto.Migrator.up(
+                 repo,
+                 @receipt_guard_migration_version,
+                 Arbor.Persistence.Repo.Migrations.HardenVectorReceiptInserts,
+                 log: false
+               )
+    end
+
+    if File.exists?(@receipt_rowid_guard_migration_file) do
+      _ = Code.require_file(@receipt_rowid_guard_migration_file)
+
+      assert :ok ==
+               Ecto.Migrator.up(
+                 repo,
+                 @receipt_rowid_guard_migration_version,
+                 Arbor.Persistence.Repo.Migrations.HardenVectorReceiptRowids,
+                 log: false
+               )
+    end
+  end
+
+  defp migrate_vector_chain!(repo) do
+    migrate_pre_fence_chain!(repo)
+    _ = Code.require_file(@fence_migration_file)
+
+    assert :ok ==
+             Ecto.Migrator.up(
+               repo,
+               @fence_migration_version,
+               Arbor.Persistence.Repo.Migrations.CreateVectorAgentFences,
+               log: false
+             )
+  end
+
+  defp with_backend(backend, fun) do
+    original = Application.get_env(:arbor_persistence, :vector_store_backend, :not_configured)
+    Application.put_env(:arbor_persistence, :vector_store_backend, backend)
+
+    try do
+      fun.()
+    after
+      restore_env(:vector_store_backend, original)
+    end
+  end
+
+  defp search_opts(overrides \\ []) do
+    Keyword.merge(
+      [
+        model_id: "provider/model-v1",
+        dimensions: VectorRecord.dimensions(),
+        encoding: VectorRecord.encoding(),
+        category: "voice",
+        source_namespace: "voice",
+        threshold: nil,
+        limit: 20
+      ],
+      overrides
+    )
+  end
+
+  defp ensure_open_fence!(agent_id) do
+    SQLiteRepo.query!(
+      """
+      INSERT OR IGNORE INTO vector_agent_fences (agent_id, state, closed_at, updated_at)
+      VALUES (?, 'open', NULL, CURRENT_TIMESTAMP)
+      """,
+      [agent_id]
+    )
   end
 
   defp sqlite_scalar!(connection, sql) do
@@ -742,6 +1622,9 @@ defmodule Arbor.Persistence.VectorStore.EctoSQLiteTest do
   end
 
   defp insert_forged_ledger!(operation, operation_json, receipt_json) do
+    agent_id = VectorOperation.agent_id(operation)
+    ensure_open_fence!(agent_id)
+
     SQLiteRepo.query!(
       """
       INSERT INTO vector_operation_receipts (
@@ -751,7 +1634,7 @@ defmodule Arbor.Persistence.VectorStore.EctoSQLiteTest do
       """,
       [
         operation.fingerprint,
-        VectorOperation.agent_id(operation),
+        agent_id,
         Atom.to_string(operation.kind),
         operation_json,
         Codec.digest(operation_json),

@@ -31,4 +31,7 @@ defmodule Arbor.Memory.StrictVectorSeam.Default do
 
   @impl true
   def list(agent_id, opts \\ []), do: Embedding.list_strict(agent_id, opts)
+
+  @impl true
+  def destroy(agent_id, opts \\ []), do: Embedding.destroy_strict(agent_id, opts)
 end
