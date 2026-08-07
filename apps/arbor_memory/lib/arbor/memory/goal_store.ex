@@ -1211,20 +1211,23 @@ defmodule Arbor.Memory.GoalStore do
     with {:ok, next_ids} <- bounded_projected_id_set(goal_ids) do
       previous_ids = projected_ids_for_agent(state, agent_id)
       removed = MapSet.difference(previous_ids, next_ids)
-      rearm? = any_projection_removal_failed?(agent_id, removed)
+      rearm? = match?({:error, :projection_failed}, remove_projected_goals(agent_id, removed))
       {reply, put_projected_ids(state, agent_id, next_ids), rearm?}
     else
       _ ->
         ids = projected_ids_for_agent(state, agent_id)
         # Always attempt removal; total reconcile failure always re-arms.
-        _ = any_projection_removal_failed?(agent_id, ids)
+        _ = remove_projected_goals(agent_id, ids)
         {{:error, :projection_failed}, clear_projected_ids(state, agent_id), true}
     end
   end
 
-  defp any_projection_removal_failed?(agent_id, goal_ids) do
-    Enum.any?(goal_ids, fn goal_id ->
-      match?({:error, :projection_failed}, remove_live_goal(agent_id, goal_id))
+  defp remove_projected_goals(agent_id, goal_ids) do
+    Enum.reduce(goal_ids, :ok, fn goal_id, result ->
+      case remove_live_goal(agent_id, goal_id) do
+        :ok -> result
+        _failure -> {:error, :projection_failed}
+      end
     end)
   end
 
@@ -2599,7 +2602,10 @@ defmodule Arbor.Memory.GoalStore do
 
   defp finalize_goal_clear(agent_id, state) do
     rearm? =
-      any_projection_removal_failed?(agent_id, projected_ids_for_agent(state, agent_id))
+      match?(
+        {:error, :projection_failed},
+        remove_projected_goals(agent_id, projected_ids_for_agent(state, agent_id))
+      )
 
     state = clear_projected_ids(state, agent_id)
 
