@@ -87,6 +87,8 @@ defmodule Arbor.Actions.SessionLlm do
       intents = get_list(params, :active_intents, "session.active_intents")
       thoughts = get_list(params, :recent_thinking, "session.recent_thinking")
       percepts = get_list(params, :recent_percepts, "session.recent_percepts")
+      suggestions = get_list(params, :background_suggestions, "session.background_suggestions")
+      self_knowledge = params[:self_knowledge] || params["session.self_knowledge"]
 
       mode =
         params[:cognitive_mode] || params["cognitive_mode"] || params["session.cognitive_mode"] ||
@@ -96,7 +98,19 @@ defmodule Arbor.Actions.SessionLlm do
         parse_int(params[:turn_count] || params["turn_count"] || params["session.turn_count"], 0)
 
       prompt =
-        build_heartbeat_context(goals, wm, kg, proposals, intents, thoughts, percepts, mode, turn)
+        build_heartbeat_context(
+          goals,
+          wm,
+          kg,
+          proposals,
+          intents,
+          thoughts,
+          percepts,
+          mode,
+          turn,
+          self_knowledge,
+          suggestions
+        )
 
       {:ok, %{heartbeat_prompt: prompt}}
     end
@@ -145,9 +159,14 @@ defmodule Arbor.Actions.SessionLlm do
            thoughts,
            percepts,
            mode,
-           turn
+           turn,
+           self_knowledge,
+           suggestions
          ) do
       goals_section = format_goals(goals)
+      self_knowledge_section = format_self_knowledge(self_knowledge)
+      patterns_section = format_detected_patterns(suggestions)
+      skills_section = format_active_skills(wm)
       wm_section = format_working_memory(wm)
       kg_section = format_knowledge_graph(kg)
       proposals_section = format_proposals(proposals)
@@ -161,11 +180,17 @@ defmodule Arbor.Actions.SessionLlm do
 
       #{mode_inst}
 
+      #{self_knowledge_section}
+
       #{goals_section}
 
       #{intents_section}
 
+      #{skills_section}
+
       #{wm_section}
+
+      #{patterns_section}
 
       #{kg_section}
 
@@ -209,12 +234,108 @@ defmodule Arbor.Actions.SessionLlm do
     defp format_working_memory(wm) when map_size(wm) == 0, do: ""
 
     defp format_working_memory(wm) do
+      # active_skills is rendered by format_active_skills/1 as its own section.
+      # Leaving it here too would emit the whole skill corpus a second time as
+      # an inspect/1 blob — noise, and a real token cost on every heartbeat.
       parts =
         wm
+        |> Enum.reject(fn {k, _v} -> k in [:active_skills, "active_skills"] end)
         |> Enum.map_join("\n", fn {k, v} -> "- #{k}: #{inspect(v)}" end)
 
-      "## Working Memory\n#{parts}"
+      if parts == "", do: "", else: "## Working Memory\n#{parts}"
     end
+
+    # Ported from Arbor.Agent.HeartbeatPrompt, which the offline eval harness
+    # uses but production never did: the live heartbeat only ever saw skills as
+    # an inspect/1 dump inside the working-memory blob. Of the three sections
+    # that builder has and this one lacked (self-knowledge, detected patterns,
+    # active skills), this is the only one with a live producer — see
+    # .arbor/roadmap/0-inbox/live-heartbeat-discards-identity-insights.md and
+    # the F1 action_history gap for why the other two are still blocked.
+    defp format_active_skills(wm) do
+      skills = Map.get(wm, :active_skills) || Map.get(wm, "active_skills") || []
+
+      case skills do
+        list when is_list(list) and list != [] ->
+          body =
+            list
+            |> Enum.map(&render_active_skill/1)
+            |> Enum.reject(&(&1 == ""))
+            |> Enum.join("\n\n")
+
+          if body == "",
+            do: "",
+            else:
+              String.trim_trailing("""
+              ## Active Skills
+
+              Skills currently activated for this session. Apply them to your work this turn.
+
+              #{body}
+              """)
+
+        _ ->
+          ""
+      end
+    end
+
+    defp render_active_skill(skill) when is_map(skill) do
+      name = Map.get(skill, :name) || Map.get(skill, "name") || "(unnamed)"
+      desc = Map.get(skill, :description) || Map.get(skill, "description") || ""
+      body = Map.get(skill, :body) || Map.get(skill, "body") || ""
+
+      desc_line = if desc != "", do: desc <> "\n\n", else: ""
+
+      String.trim_trailing("### #{name}\n#{desc_line}#{body}")
+    end
+
+    defp render_active_skill(_skill), do: ""
+
+    # Ported from Arbor.Agent.HeartbeatPrompt. Unlike that builder, this one does
+    # NOT fetch — the DOT node supplies session.self_knowledge, keeping the
+    # engine context an explicit, checkpointable input rather than hiding I/O
+    # inside an exec node.
+    #
+    # The live heartbeat only started PRODUCING self-knowledge on 2026-08-06,
+    # when heartbeat.dot gained a store_identity node; before that the prompt
+    # asked for identity_insights every beat and discarded them, so porting this
+    # reader earlier would have rendered nothing.
+    defp format_self_knowledge(nil), do: ""
+    defp format_self_knowledge(""), do: ""
+
+    defp format_self_knowledge(summary) when is_binary(summary) do
+      "## Self-Awareness\n#{summary}"
+    end
+
+    defp format_self_knowledge(_other), do: ""
+
+    # Also ported from HeartbeatPrompt, where it read state[:background_suggestions].
+    # Its producer is the memory_checks node (session_memory.background_checks);
+    # until that landed, nothing in the umbrella set this key — even the offline
+    # eval hardcoded [] — so this section had never rendered anywhere.
+    defp format_detected_patterns(suggestions) when is_list(suggestions) do
+      learning =
+        Enum.filter(suggestions, fn s ->
+          (s[:type] || s["type"]) in [:learning, "learning"]
+        end)
+
+      case learning do
+        [] ->
+          ""
+
+        items ->
+          lines =
+            Enum.map_join(items, "\n", fn s ->
+              conf = round((s[:confidence] || s["confidence"] || 0.5) * 100)
+              "- (#{conf}% confidence) #{s[:content] || s["content"] || ""}"
+            end)
+
+          "## Detected Action Patterns\n" <>
+            "These patterns were detected in your recent tool usage:\n#{lines}"
+      end
+    end
+
+    defp format_detected_patterns(_suggestions), do: ""
 
     defp format_knowledge_graph([]), do: ""
 

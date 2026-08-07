@@ -126,12 +126,12 @@ defmodule Arbor.Orchestrator.Pipelines.SessionDotTest do
     end
 
     test "has all expected nodes", %{graph: graph} do
-      # bg_checks removed 2026-08-06 — it called the Claude Code harness
-      # diagnostic, which has moved out of the umbrella. See heartbeat.dot.
-      expected = ~w(start select_mode mode_router build_prompt llm_call
+      # 2026-08-06: the harness-diagnostic bg_checks was removed; memory_checks
+      # (the real learning producer) and store_identity were added. See heartbeat.dot.
+      expected = ~w(start memory_checks select_mode mode_router build_prompt llm_call
                     consolidate process store_decompositions route_intents process_proposals
-                    update_wm execute_actions update_goals prune_intents check_loop
-                    build_followup llm_followup done)
+                    store_identity update_wm execute_actions update_goals prune_intents
+                    check_loop build_followup llm_followup done)
 
       for node_id <- expected do
         assert Map.has_key?(graph.nodes, node_id),
@@ -181,10 +181,11 @@ defmodule Arbor.Orchestrator.Pipelines.SessionDotTest do
     end
 
     test "post-processing tail is correctly ordered", %{graph: graph} do
-      # process -> store_decompositions -> route_intents -> process_proposals -> update_wm ->
-      # execute_actions -> update_goals -> prune_intents -> check_loop
-      chain = ~w(process store_decompositions route_intents process_proposals update_wm
-                 execute_actions update_goals prune_intents check_loop)
+      # process -> store_decompositions -> route_intents -> process_proposals ->
+      # store_identity -> update_wm -> execute_actions -> update_goals ->
+      # prune_intents -> check_loop
+      chain = ~w(process store_decompositions route_intents process_proposals store_identity
+                 update_wm execute_actions update_goals prune_intents check_loop)
 
       for [from, to] <- Enum.chunk_every(chain, 2, 1, :discard) do
         assert Enum.any?(edges_from(graph, from), &(&1.to == to)),

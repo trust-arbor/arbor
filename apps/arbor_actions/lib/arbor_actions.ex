@@ -2138,7 +2138,8 @@ defmodule Arbor.Actions do
         Arbor.Actions.SessionMemory.Update,
         Arbor.Actions.SessionMemory.Checkpoint,
         Arbor.Actions.SessionMemory.Consolidate,
-        Arbor.Actions.SessionMemory.UpdateWorkingMemory
+        Arbor.Actions.SessionMemory.UpdateWorkingMemory,
+        Arbor.Actions.SessionMemory.BackgroundChecks
       ],
       session_goals: [
         Arbor.Actions.SessionGoals.UpdateGoals,
@@ -3026,6 +3027,11 @@ defmodule Arbor.Actions do
     Arbor.Actions.Memory.Connect => "arbor://memory/write",
     Arbor.Actions.Memory.Reflect => "arbor://memory/read",
     Arbor.Actions.Memory.Consolidate => "arbor://memory/write",
+    # Queues :learning / :insight / :preconscious proposals — a memory write.
+    # Deliberately NOT arbor://shell/exec, which is what the harness diagnostic
+    # that used to occupy this slot in heartbeat.dot carried; that URI has a
+    # system-enforced :ask ceiling and can never authorize in an autonomous beat.
+    Arbor.Actions.SessionMemory.BackgroundChecks => "arbor://memory/write",
     Arbor.Actions.Memory.Index => "arbor://memory/index",
     Arbor.Actions.Memory.LoadWorking => "arbor://memory/read",
     Arbor.Actions.Memory.SaveWorking => "arbor://memory/write",

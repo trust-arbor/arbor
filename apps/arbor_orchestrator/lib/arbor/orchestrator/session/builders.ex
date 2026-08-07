@@ -83,6 +83,7 @@ defmodule Arbor.Orchestrator.Session.Builders do
     recent_thoughts = ContextBuilder.load_recent_thinking(agent_id)
 
     recent_percepts = ContextBuilder.load_recent_percepts(agent_id)
+    self_knowledge = ContextBuilder.load_self_knowledge(agent_id)
 
     base
     |> Map.put("session.messages", [])
@@ -94,6 +95,7 @@ defmodule Arbor.Orchestrator.Session.Builders do
     |> Map.put("session.active_intents", active_intents)
     |> Map.put("session.recent_thinking", recent_thoughts)
     |> Map.put("session.recent_percepts", recent_percepts)
+    |> Map.put("session.self_knowledge", self_knowledge)
   end
 
   @doc false

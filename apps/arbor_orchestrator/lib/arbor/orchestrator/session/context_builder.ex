@@ -280,6 +280,33 @@ defmodule Arbor.Orchestrator.Session.ContextBuilder do
     end
   end
 
+  @doc """
+  Load a rendered self-knowledge summary for the heartbeat prompt.
+
+  Returns a string (what `format_self_knowledge/1` renders) or `nil`.
+
+  The live heartbeat only began PERSISTING identity on 2026-08-06, when
+  heartbeat.dot gained a store_identity node — before that the prompt asked the
+  model for identity_insights every beat and dropped them, so this would have
+  had nothing to load. Producer and reader landed together deliberately.
+  """
+  def load_self_knowledge(agent_id) do
+    case Arbor.Memory.get_self_knowledge(agent_id) do
+      nil ->
+        nil
+
+      sk ->
+        case Arbor.Memory.summarize_self_knowledge(sk) do
+          summary when is_binary(summary) and summary != "" -> summary
+          _ -> nil
+        end
+    end
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
+  end
+
   def load_pending_proposals(agent_id) do
     case Arbor.Memory.get_proposals(agent_id) do
       {:ok, proposals} when is_list(proposals) ->

@@ -55,16 +55,23 @@ digraph Heartbeat {
   // ── Entry ──────────────────────────────────────────────────
   start [shape=Mdiamond]
 
-  // NOTE (2026-08-06): a `bg_checks` node used to sit between start and
-  // select_mode, calling action "background_checks_run". That name resolved to
-  // Arbor.Actions.BackgroundChecks.Run — a Claude Code HARNESS diagnostic that
-  // reads ~/.claude session JSONL, arbor-personal, and the repo. It had nothing
-  // to do with agent memory, and it is gated on arbor://shell/exec, which
-  // carries a system-enforced :ask ceiling and so can never authorize in an
-  // autonomous cycle. The memory learning producer it was presumably meant to
-  // call is Arbor.Memory.BackgroundChecks.run/2 (action patterns, insight
-  // detection, preconscious), which remains UNWIRED pending an :action_history
-  // source. See .arbor/decisions/2026-08-06-harness-learning-enforcement.md.
+  // ── Memory background checks (the learning producer) ───────
+  // Action-pattern detection, insight detection, preconscious anticipation,
+  // consolidation timing. Queues :learning / :insight / :preconscious proposals
+  // the agent reviews on a later beat; accepting one creates a :skill node.
+  //
+  // This slot previously held a `bg_checks` node calling "background_checks_run",
+  // which resolved to a Claude Code HARNESS diagnostic of the same name — file
+  // checks over ~/.claude, gated on arbor://shell/exec (system :ask ceiling, so
+  // never authorizable in an autonomous beat). The real producer,
+  // Arbor.Memory.BackgroundChecks.run/2, had zero non-test callers, so no
+  // learning proposals were ever produced. Restored 2026-08-06 with a memory
+  // capability and a telemetry-backed :action_history source — pattern
+  // detection returns nothing below 5 tool events, so wiring the checks without
+  // that source would have been a producer that produces nothing.
+  // See .arbor/decisions/2026-08-06-harness-learning-enforcement.md.
+  memory_checks [type="exec", target="action", action="session_memory.background_checks",
+                 context_keys="session.agent_id", output_prefix="session"]
 
   // ── Cognitive mode selection ──────────────────────────────
   select_mode [type="exec", target="action", action="session.mode_select",
@@ -76,7 +83,7 @@ digraph Heartbeat {
 
   // ── Build heartbeat prompt (shared by all LLM modes) ──────
   build_prompt [type="exec", target="action", action="session_llm.build_prompt",
-                context_keys="session.goals,session.working_memory,session.knowledge_graph,session.pending_proposals,session.active_intents,session.recent_thinking,session.recent_percepts,session.cognitive_mode,session.turn_count",
+                context_keys="session.goals,session.working_memory,session.knowledge_graph,session.pending_proposals,session.active_intents,session.recent_thinking,session.recent_percepts,session.cognitive_mode,session.turn_count,session.self_knowledge,session.background_suggestions",
                 param.mode="heartbeat", output_prefix="session"]
 
   // ── LLM call (uses prompt built by build_prompt) ──────────
@@ -108,6 +115,17 @@ digraph Heartbeat {
   process_proposals [type="exec", target="action", action="session_goals.process_proposal_decisions",
                      context_keys="session.proposal_decisions,session.agent_id",
                      output_prefix="session"]
+
+  // ── Post-processing: persist identity insights ──────────────
+  // Added 2026-08-06:
+  // the prompt has always ASKED for "identity_insights" and process_results has
+  // always parsed them into context, but heartbeat.dot had no node to store
+  // them — so production solicited self-discoveries every beat and dropped
+  // them. Only the eval-only -full/-identity arms persisted identity, which
+  // meant the ablation measured a capability production did not have.
+  store_identity [type="exec", target="action", action="session_goals.store_identity",
+                  context_keys="session.identity_insights,session.agent_id",
+                  output_prefix="session"]
 
   // ── Post-processing: update working memory (concerns, curiosity) ─
   update_wm [type="exec", target="action", action="session_memory.update_working_memory",
@@ -148,7 +166,7 @@ digraph Heartbeat {
   // ══════════════════════════════════════════════════════════════
 
   // Linear lead-in: checks -> mode selection -> routing
-  start -> select_mode -> mode_router
+  start -> memory_checks -> select_mode -> mode_router
 
   // Conditional fan-out by cognitive mode
   // All three LLM modes share one build_prompt + llm_call pair
@@ -164,7 +182,7 @@ digraph Heartbeat {
   consolidate -> process
 
   // Shared post-processing tail, then tool loop check
-  process -> store_decompositions -> route_intents -> process_proposals -> update_wm -> execute_actions -> update_goals -> prune_intents -> check_loop
+  process -> store_decompositions -> route_intents -> process_proposals -> store_identity -> update_wm -> execute_actions -> update_goals -> prune_intents -> check_loop
 
   // Tool loop: if actions produced results AND under 10 turns, follow up
   check_loop -> build_followup [condition="context.session.has_action_results=true && context.session.tool_turn<10"]

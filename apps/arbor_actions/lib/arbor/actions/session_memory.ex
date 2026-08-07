@@ -412,4 +412,140 @@ defmodule Arbor.Actions.SessionMemory do
     defp note_text(%{text: t}) when is_binary(t), do: t
     defp note_text(_), do: nil
   end
+
+  defmodule BackgroundChecks do
+    @moduledoc """
+    Run `Arbor.Memory`'s background checks for the heartbeat.
+
+    This is the memory LEARNING producer — action-pattern detection, insight
+    detection, preconscious anticipation, consolidation timing, unused-pin and
+    decay status. Accepting a proposal from it creates a `:skill` node in the
+    knowledge graph, which is how the agent's behaviour actually compounds.
+
+    ## Why this action exists
+
+    `heartbeat.dot` used to call `background_checks_run`, which resolved to a
+    Claude Code HARNESS diagnostic of the same name — a different module doing
+    filesystem checks over `~/.claude`, gated on `arbor://shell/exec` (a
+    system-enforced `:ask` ceiling, so it could never authorize autonomously).
+    `Arbor.Memory.BackgroundChecks.run/2`, the thing that was presumably meant,
+    had zero non-test callers. So the `:learning`, `:insight` and
+    `:preconscious` proposal types were never produced at runtime.
+
+    ## Why it fetches its own history
+
+    `check_action_patterns/2` needs `:action_history` and returns nothing below
+    five entries, so wiring the checks without a history source would ship a
+    producer that produces nothing. The only ordered source of tool executions
+    is `Arbor.Common.AgentTelemetry.Store.query_events/2` — the in-memory
+    telemetry struct keeps aggregate counts only, which cannot express the
+    sequences and failure→success transitions the detector looks for.
+
+    The fetch lives here rather than in `Arbor.Memory` because the pure
+    detection logic should keep taking history as an argument: side effects
+    belong in the action (syscall), not the core.
+
+    ## Parameters
+
+    | Name | Type | Required | Description |
+    |------|------|----------|-------------|
+    | `agent_id` | string | yes | Agent ID |
+    | `history_limit` | integer | no | Tool events to consider (default 200) |
+    """
+    use Jido.Action,
+      name: "session_memory_background_checks",
+      description: "Run memory background checks (patterns, insights, preconscious)",
+      schema: [
+        agent_id: [type: :string, required: true, doc: "Agent ID"],
+        history_limit: [
+          type: :non_neg_integer,
+          required: false,
+          doc: "Recent tool events to analyse"
+        ]
+      ]
+
+    @default_history_limit 200
+
+    @impl true
+    def run(params, _context) do
+      agent_id = params[:agent_id] || params["agent_id"] || params["session.agent_id"]
+
+      if is_nil(agent_id) or agent_id == "" do
+        {:error, :missing_agent_id}
+      else
+        limit =
+          params[:history_limit] || params["history_limit"] || @default_history_limit
+
+        history = load_action_history(agent_id, limit)
+
+        result =
+          Arbor.Actions.SessionMemory.bridge(
+            Arbor.Memory,
+            :run_background_checks,
+            [agent_id, [action_history: history]],
+            %{actions: [], warnings: [], suggestions: []}
+          )
+
+        {:ok,
+         %{
+           background_suggestions: Map.get(result, :suggestions, []),
+           background_warnings: Map.get(result, :warnings, []),
+           background_actions: Map.get(result, :actions, []),
+           action_history_count: length(history)
+         }}
+      end
+    end
+
+    @doc false
+    # Adapts telemetry events to Arbor.Memory.ActionPatterns' `action()` shape.
+    # Public so the mapping can be tested without a populated telemetry store.
+    @spec to_action_history([map()]) :: [map()]
+    def to_action_history(events) when is_list(events) do
+      events
+      |> Enum.map(&to_action/1)
+      |> Enum.reject(&is_nil/1)
+    end
+
+    defp to_action(%{data: data, timestamp: ts}) when is_map(data) do
+      tool = data["tool_name"] || data[:tool_name]
+
+      case {tool, to_datetime(ts)} do
+        {tool, %DateTime{} = at} when is_binary(tool) ->
+          %{tool: tool, status: to_status(data["result"] || data[:result]), timestamp: at}
+
+        _ ->
+          nil
+      end
+    end
+
+    defp to_action(_event), do: nil
+
+    # ActionPatterns compares timestamps with DateTime.diff/3, which raises on a
+    # NaiveDateTime — and telemetry_events rows come back naive.
+    defp to_datetime(%DateTime{} = dt), do: dt
+    defp to_datetime(%NaiveDateTime{} = ndt), do: DateTime.from_naive!(ndt, "Etc/UTC")
+    defp to_datetime(_), do: nil
+
+    # `record_tool/4` writes :ok | :error | :gated; ActionPatterns wants
+    # :success | :error. A gated call is a failure from the pattern detector's
+    # point of view — "denied, then worked another way" is exactly the
+    # failure→success transition it looks for.
+    defp to_status(status) when status in ["ok", :ok, "success", :success], do: :success
+    defp to_status(_status), do: :error
+
+    defp load_action_history(agent_id, limit) do
+      case Arbor.Common.AgentTelemetry.Store.query_events(agent_id,
+             event_type: :tool_call,
+             limit: limit,
+             order: :asc
+           ) do
+        {:ok, events} -> to_action_history(events)
+        {:error, _reason} -> []
+      end
+    rescue
+      _ -> []
+    catch
+      _, _ -> []
+    end
+  end
 end

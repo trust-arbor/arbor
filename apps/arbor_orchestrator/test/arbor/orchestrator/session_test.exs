@@ -309,14 +309,14 @@ defmodule Arbor.Orchestrator.SessionTest do
       dot = read_dot!(@heartbeat_dot_path)
       assert {:ok, graph} = Orchestrator.parse(dot)
 
-      # heartbeat.dot defines: start, select_mode, mode_router,
+      # heartbeat.dot defines: start, memory_checks, select_mode, mode_router,
       # build_prompt, llm_call, consolidate, process, store_decompositions,
-      # route_intents, process_proposals, update_wm, execute_actions,
-      # update_goals, prune_intents, check_loop, build_followup,
-      # llm_followup, done = 18 nodes
-      # (was 19 until 2026-08-06, when the bg_checks harness-diagnostic node
-      # was removed — see the note in heartbeat.dot)
-      assert map_size(graph.nodes) == 18
+      # route_intents, process_proposals, store_identity, update_wm,
+      # execute_actions, update_goals, prune_intents, check_loop,
+      # build_followup, llm_followup, done = 20 nodes
+      # (2026-08-06: harness bg_checks removed; memory_checks and store_identity
+      # added — see heartbeat.dot)
+      assert map_size(graph.nodes) == 20
 
       # Verify mode-specific nodes exist
       assert Map.has_key?(graph.nodes, "build_prompt")
