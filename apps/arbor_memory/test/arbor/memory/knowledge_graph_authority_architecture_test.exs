@@ -66,14 +66,22 @@ defmodule Arbor.Memory.KnowledgeGraphAuthorityArchitectureTest do
     assert repository_accesses(&projection_operations/1) == @projection_allowlist
   end
 
-  test "repository scan inventory is exactly the tracked runtime Elixir sources" do
-    expected = Enum.filter(git_tracked_paths(), &runtime_app_source?/1)
+  test "repository scan inventory is exactly the candidate runtime Elixir sources" do
+    expected = candidate_app_source_paths()
     actual = Enum.map(app_sources(), &relative_path/1)
 
     assert actual == expected
     assert "apps/arbor_memory/lib/arbor/memory/graph_ops.ex" in actual
     refute Enum.any?(actual, &String.contains?(&1, "/test/"))
     refute Enum.any?(actual, &String.contains?(&1, "/_build/"))
+  end
+
+  test "contained candidate inventory does not require host Git metadata" do
+    paths = candidate_app_source_paths(true)
+
+    assert "apps/arbor_memory/lib/arbor/memory/graph_ops.ex" in paths
+    assert paths == Enum.sort(paths)
+    refute Enum.any?(paths, &String.starts_with?(&1, ".git/"))
   end
 
   test "AST projection detector catches indirection and alternate ETS operations" do
@@ -683,15 +691,68 @@ defmodule Arbor.Memory.KnowledgeGraphAuthorityArchitectureTest do
   defp module_named?(_module, _expected), do: false
 
   defp app_sources do
-    git_tracked_paths()
-    |> Enum.filter(&runtime_app_source?/1)
+    candidate_app_source_paths()
     |> Enum.map(&Path.join(@root, &1))
   end
 
-  defp git_tracked_paths do
-    case System.cmd("git", ["ls-files", "--", "apps"], cd: @root) do
-      {output, 0} -> output |> String.split("\n", trim: true) |> Enum.sort()
-      {_output, _status} -> raise "unable to enumerate tracked application sources"
+  defp candidate_app_source_paths(contained? \\ System.get_env("ARBOR_MIX_CONTAINED") == "1") do
+    paths =
+      if contained? do
+        contained_app_source_paths()
+      else
+        git_candidate_paths()
+      end
+
+    paths
+    |> Enum.filter(&runtime_app_source?/1)
+    |> Enum.map(&require_regular_source!/1)
+    |> Enum.reject(&is_nil/1)
+    |> Enum.sort()
+  end
+
+  # Contained validation receives the exact candidate worktree as an
+  # owner-built read-only projection. Its .git file intentionally points to
+  # host metadata that is not projected into the guest, so source guards must
+  # inventory the projected tree rather than opening broader repository state.
+  defp contained_app_source_paths do
+    @root
+    |> Path.join("apps/*/lib/**/*.ex")
+    |> Path.wildcard(match_dot: true)
+    |> Enum.map(&relative_path/1)
+  end
+
+  defp git_candidate_paths do
+    tracked = git_paths!(["ls-files", "-z", "--", "apps"])
+    untracked = git_paths!(["ls-files", "--others", "--exclude-standard", "-z", "--", "apps"])
+
+    Enum.uniq(tracked ++ untracked)
+  end
+
+  defp git_paths!(args) do
+    env = [
+      {"GIT_DIR", nil},
+      {"GIT_WORK_TREE", nil},
+      {"GIT_INDEX_FILE", nil},
+      {"GIT_COMMON_DIR", nil},
+      {"GIT_CONFIG_GLOBAL", "/dev/null"},
+      {"GIT_CONFIG_SYSTEM", "/dev/null"},
+      {"GIT_CONFIG_NOSYSTEM", "1"},
+      {"GIT_TERMINAL_PROMPT", "0"},
+      {"LC_ALL", "C"}
+    ]
+
+    case System.cmd("git", ["-C", @root | args], env: env, stderr_to_stdout: true) do
+      {output, 0} -> String.split(output, <<0>>, trim: true)
+      {_output, _status} -> raise "unable to enumerate candidate application sources"
+    end
+  end
+
+  defp require_regular_source!(path) do
+    case File.lstat(Path.join(@root, path)) do
+      {:ok, %File.Stat{type: :regular}} -> path
+      {:ok, %File.Stat{type: type}} -> raise "non-regular runtime source: #{path} (#{type})"
+      {:error, :enoent} -> nil
+      {:error, reason} -> raise "unable to inspect runtime source #{path}: #{inspect(reason)}"
     end
   end
 
