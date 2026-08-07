@@ -25,7 +25,16 @@ defmodule Arbor.Persistence do
   @behaviour Arbor.Contracts.API.Persistence
 
   alias Arbor.Contracts.Persistence.{AppendOperation, Filter, Record}
-  alias Arbor.Persistence.{BufferedStore, Event, EventLog, LegacyEmbeddingStore, VectorBoundary}
+
+  alias Arbor.Persistence.{
+    BufferedStore,
+    Event,
+    EventLog,
+    LegacyEmbeddingStore,
+    RelationshipStore,
+    VectorBoundary
+  }
+
   alias Arbor.Persistence.EventLog.BoundedWorker
   alias Arbor.Persistence.Repo
   alias Arbor.Persistence.Schemas.Session
@@ -75,6 +84,88 @@ defmodule Arbor.Persistence do
           | {:error, Arbor.Contracts.API.Persistence.vector_error()}
   def search_vector_records(agent_id, vector, opts \\ []),
     do: VectorBoundary.search(agent_id, vector, opts)
+
+  # ---------------------------------------------------------------
+  # Relationship records (VP-05D2C3I0A)
+  #
+  # Closed plain-map boundary. agent_id is source-owned from the function
+  # argument and cannot be overridden by input data. No schema/Repo/Ecto
+  # values cross this facade.
+  # ---------------------------------------------------------------
+
+  @doc "Upsert one tenant-scoped relationship record by `{agent_id, name}`."
+  @spec put_relationship(String.t(), map()) ::
+          {:ok, map()} | {:error, Arbor.Contracts.API.Persistence.relationship_error()}
+  def put_relationship(agent_id, attrs), do: RelationshipStore.put(agent_id, attrs)
+
+  @doc "Fetch one tenant-scoped relationship by durable row id."
+  @spec fetch_relationship(String.t(), String.t()) ::
+          {:ok, map()} | {:error, Arbor.Contracts.API.Persistence.relationship_error()}
+  def fetch_relationship(agent_id, relationship_id),
+    do: RelationshipStore.fetch(agent_id, relationship_id)
+
+  @doc "Fetch one tenant-scoped relationship by exact name."
+  @spec fetch_relationship_by_name(String.t(), String.t()) ::
+          {:ok, map()} | {:error, Arbor.Contracts.API.Persistence.relationship_error()}
+  def fetch_relationship_by_name(agent_id, name),
+    do: RelationshipStore.fetch_by_name(agent_id, name)
+
+  @doc """
+  List a bounded page of tenant-owned relationships.
+
+  Options (closed allowlist): `:sort_by`, `:sort_dir`, `:limit`.
+  Default limit is 100; maximum is 1000. Absent limit is never unbounded.
+  """
+  @spec list_relationships(String.t(), keyword()) ::
+          {:ok, [map()]} | {:error, Arbor.Contracts.API.Persistence.relationship_error()}
+  def list_relationships(agent_id, opts \\ []),
+    do: RelationshipStore.list(agent_id, opts)
+
+  @doc "Update fields on one tenant-scoped relationship by durable row id."
+  @spec update_relationship(String.t(), String.t(), map()) ::
+          {:ok, map()} | {:error, Arbor.Contracts.API.Persistence.relationship_error()}
+  def update_relationship(agent_id, relationship_id, changes),
+    do: RelationshipStore.update(agent_id, relationship_id, changes)
+
+  @doc "Delete one tenant-scoped relationship by durable row id."
+  @spec delete_relationship(String.t(), String.t()) ::
+          :ok | {:error, Arbor.Contracts.API.Persistence.relationship_error()}
+  def delete_relationship(agent_id, relationship_id),
+    do: RelationshipStore.delete(agent_id, relationship_id)
+
+  @doc "Atomically touch access tracking for one tenant-scoped relationship."
+  @spec touch_relationship(String.t(), String.t()) ::
+          {:ok, map()} | {:error, Arbor.Contracts.API.Persistence.relationship_error()}
+  def touch_relationship(agent_id, relationship_id),
+    do: RelationshipStore.touch(agent_id, relationship_id)
+
+  @doc "Count tenant-owned relationship rows."
+  @spec count_relationships(String.t()) ::
+          {:ok, non_neg_integer()}
+          | {:error, Arbor.Contracts.API.Persistence.relationship_error()}
+  def count_relationships(agent_id), do: RelationshipStore.count(agent_id)
+
+  @doc "Fetch the highest-salience relationship for one tenant."
+  @spec fetch_primary_relationship(String.t()) ::
+          {:ok, map()} | {:error, Arbor.Contracts.API.Persistence.relationship_error()}
+  def fetch_primary_relationship(agent_id), do: RelationshipStore.fetch_primary(agent_id)
+
+  @doc """
+  Idempotently delete every relationship row for exactly one agent and verify
+  zero remaining rows in the same database transaction.
+
+  Content-only: does not touch provenance, identity, vectors, or other domains.
+  """
+  @spec delete_all_relationships(String.t()) ::
+          :ok | {:error, Arbor.Contracts.API.Persistence.relationship_error()}
+  def delete_all_relationships(agent_id), do: RelationshipStore.delete_all(agent_id)
+
+  @doc "Exact standalone absence check for an agent's relationship rows."
+  @spec relationships_absent?(String.t()) ::
+          {:ok, true}
+          | {:ok, false}
+          | {:error, Arbor.Contracts.API.Persistence.relationship_error()}
+  def relationships_absent?(agent_id), do: RelationshipStore.absent?(agent_id)
 
   # ---------------------------------------------------------------
   # Legacy memory embeddings
@@ -1150,6 +1241,109 @@ defmodule Arbor.Persistence do
   @impl Arbor.Contracts.API.Persistence
   def search_vector_records_by_exact_model_descriptor_and_scope_for_agent(agent_id, vector, opts),
     do: VectorBoundary.search(agent_id, vector, opts)
+
+  # -- Relationships (optional) --
+  #
+  # Trailing `opts` on long-form callbacks are closed allowlists. Fetch/update/
+  # delete/touch/count/primary/delete_all/absence admit only the empty keyword
+  # list; list admits the RelationshipStore list allowlist. Unknown, duplicate,
+  # non-keyword, or non-list opts return {:error, :invalid_options}.
+
+  @relationship_empty_opts_allowlist []
+  @relationship_list_opts_allowlist [:sort_by, :sort_dir, :limit]
+
+  @impl Arbor.Contracts.API.Persistence
+  def upsert_tenant_relationship_record_for_agent(agent_id, attrs),
+    do: put_relationship(agent_id, attrs)
+
+  @impl Arbor.Contracts.API.Persistence
+  def retrieve_tenant_relationship_record_by_id_for_agent(agent_id, relationship_id, opts) do
+    with :ok <- validate_relationship_opts(opts, @relationship_empty_opts_allowlist) do
+      fetch_relationship(agent_id, relationship_id)
+    end
+  end
+
+  @impl Arbor.Contracts.API.Persistence
+  def retrieve_tenant_relationship_record_by_name_for_agent(agent_id, name, opts) do
+    with :ok <- validate_relationship_opts(opts, @relationship_empty_opts_allowlist) do
+      fetch_relationship_by_name(agent_id, name)
+    end
+  end
+
+  @impl Arbor.Contracts.API.Persistence
+  def list_tenant_relationship_records_for_agent(agent_id, opts) do
+    with :ok <- validate_relationship_opts(opts, @relationship_list_opts_allowlist) do
+      list_relationships(agent_id, opts)
+    end
+  end
+
+  @impl Arbor.Contracts.API.Persistence
+  def update_tenant_relationship_record_for_agent(agent_id, relationship_id, changes, opts) do
+    with :ok <- validate_relationship_opts(opts, @relationship_empty_opts_allowlist) do
+      update_relationship(agent_id, relationship_id, changes)
+    end
+  end
+
+  @impl Arbor.Contracts.API.Persistence
+  def delete_tenant_relationship_record_for_agent(agent_id, relationship_id, opts) do
+    with :ok <- validate_relationship_opts(opts, @relationship_empty_opts_allowlist) do
+      delete_relationship(agent_id, relationship_id)
+    end
+  end
+
+  @impl Arbor.Contracts.API.Persistence
+  def touch_tenant_relationship_record_for_agent(agent_id, relationship_id, opts) do
+    with :ok <- validate_relationship_opts(opts, @relationship_empty_opts_allowlist) do
+      touch_relationship(agent_id, relationship_id)
+    end
+  end
+
+  @impl Arbor.Contracts.API.Persistence
+  def count_tenant_relationship_records_for_agent(agent_id, opts) do
+    with :ok <- validate_relationship_opts(opts, @relationship_empty_opts_allowlist) do
+      count_relationships(agent_id)
+    end
+  end
+
+  @impl Arbor.Contracts.API.Persistence
+  def retrieve_primary_tenant_relationship_record_for_agent(agent_id, opts) do
+    with :ok <- validate_relationship_opts(opts, @relationship_empty_opts_allowlist) do
+      fetch_primary_relationship(agent_id)
+    end
+  end
+
+  @impl Arbor.Contracts.API.Persistence
+  def delete_all_tenant_relationship_records_for_agent(agent_id, opts) do
+    with :ok <- validate_relationship_opts(opts, @relationship_empty_opts_allowlist) do
+      delete_all_relationships(agent_id)
+    end
+  end
+
+  @impl Arbor.Contracts.API.Persistence
+  def check_tenant_relationship_records_absent_for_agent(agent_id, opts) do
+    with :ok <- validate_relationship_opts(opts, @relationship_empty_opts_allowlist) do
+      relationships_absent?(agent_id)
+    end
+  end
+
+  defp validate_relationship_opts(opts, allowlist) do
+    cond do
+      not is_list(opts) ->
+        {:error, :invalid_options}
+
+      not Keyword.keyword?(opts) ->
+        {:error, :invalid_options}
+
+      length(Keyword.keys(opts)) != length(Enum.uniq(Keyword.keys(opts))) ->
+        {:error, :invalid_options}
+
+      Enum.any?(Keyword.keys(opts), &(&1 not in allowlist)) ->
+        {:error, :invalid_options}
+
+      true ->
+        :ok
+    end
+  end
 
   defp normalize_authorization_opts(opts) do
     case EventLog.normalize_opts(opts) do

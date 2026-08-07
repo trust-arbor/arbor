@@ -94,6 +94,18 @@ defmodule Arbor.Contracts.API.Persistence do
           | :tenant_mismatch
           | :unsupported
 
+  @typedoc "Closed content-free relationship-boundary failures."
+  @type relationship_error ::
+          :invalid_request
+          | :invalid_options
+          | :not_found
+          | :validation_failed
+          | :backend_failure
+          | :indeterminate
+
+  @typedoc "Bounded plain relationship record (atom keys only; no agent_id field)."
+  @type relationship_record :: map()
+
   @typedoc "Name of a field to aggregate over."
   @type field_name :: atom()
 
@@ -472,6 +484,77 @@ defmodule Arbor.Contracts.API.Persistence do
             ) :: {:ok, [vector_match()]} | {:error, vector_error()}
 
   # ===========================================================================
+  # Relationship operations (optional)
+  # ===========================================================================
+
+  @doc "Upsert one tenant-scoped relationship record by {agent_id, name}."
+  @callback upsert_tenant_relationship_record_for_agent(
+              agent_id :: String.t(),
+              relationship_record()
+            ) :: {:ok, relationship_record()} | {:error, relationship_error()}
+
+  @doc "Retrieve one tenant-scoped relationship by durable row id."
+  @callback retrieve_tenant_relationship_record_by_id_for_agent(
+              agent_id :: String.t(),
+              relationship_id :: String.t(),
+              opts()
+            ) :: {:ok, relationship_record()} | {:error, relationship_error()}
+
+  @doc "Retrieve one tenant-scoped relationship by exact name."
+  @callback retrieve_tenant_relationship_record_by_name_for_agent(
+              agent_id :: String.t(),
+              name :: String.t(),
+              opts()
+            ) :: {:ok, relationship_record()} | {:error, relationship_error()}
+
+  @doc "List a bounded page of tenant-owned relationship records."
+  @callback list_tenant_relationship_records_for_agent(agent_id :: String.t(), opts()) ::
+              {:ok, [relationship_record()]} | {:error, relationship_error()}
+
+  @doc "Update fields on one tenant-scoped relationship by durable row id."
+  @callback update_tenant_relationship_record_for_agent(
+              agent_id :: String.t(),
+              relationship_id :: String.t(),
+              changes :: map(),
+              opts()
+            ) :: {:ok, relationship_record()} | {:error, relationship_error()}
+
+  @doc "Delete one tenant-scoped relationship by durable row id."
+  @callback delete_tenant_relationship_record_for_agent(
+              agent_id :: String.t(),
+              relationship_id :: String.t(),
+              opts()
+            ) :: :ok | {:error, relationship_error()}
+
+  @doc "Atomically touch access tracking for one tenant-scoped relationship."
+  @callback touch_tenant_relationship_record_for_agent(
+              agent_id :: String.t(),
+              relationship_id :: String.t(),
+              opts()
+            ) :: {:ok, relationship_record()} | {:error, relationship_error()}
+
+  @doc "Count tenant-owned relationship rows."
+  @callback count_tenant_relationship_records_for_agent(agent_id :: String.t(), opts()) ::
+              {:ok, non_neg_integer()} | {:error, relationship_error()}
+
+  @doc "Retrieve the highest-salience relationship for one tenant."
+  @callback retrieve_primary_tenant_relationship_record_for_agent(
+              agent_id :: String.t(),
+              opts()
+            ) :: {:ok, relationship_record()} | {:error, relationship_error()}
+
+  @doc """
+  Idempotently delete every relationship row for exactly one agent and verify
+  zero remaining rows in the same database transaction.
+  """
+  @callback delete_all_tenant_relationship_records_for_agent(agent_id :: String.t(), opts()) ::
+              :ok | {:error, relationship_error()}
+
+  @doc "Exact standalone absence check for an agent's relationship rows."
+  @callback check_tenant_relationship_records_absent_for_agent(agent_id :: String.t(), opts()) ::
+              {:ok, true} | {:ok, false} | {:error, relationship_error()}
+
+  # ===========================================================================
   # Optional Callbacks
   # ===========================================================================
 
@@ -502,6 +585,18 @@ defmodule Arbor.Contracts.API.Persistence do
     retrieve_vector_record_by_logical_identity_for_agent: 4,
     list_vector_records_for_agent: 2,
     search_vector_records_by_exact_descriptor_for_agent: 3,
-    search_vector_records_by_exact_model_descriptor_and_scope_for_agent: 3
+    search_vector_records_by_exact_model_descriptor_and_scope_for_agent: 3,
+    # Relationship operations
+    upsert_tenant_relationship_record_for_agent: 2,
+    retrieve_tenant_relationship_record_by_id_for_agent: 3,
+    retrieve_tenant_relationship_record_by_name_for_agent: 3,
+    list_tenant_relationship_records_for_agent: 2,
+    update_tenant_relationship_record_for_agent: 4,
+    delete_tenant_relationship_record_for_agent: 3,
+    touch_tenant_relationship_record_for_agent: 3,
+    count_tenant_relationship_records_for_agent: 2,
+    retrieve_primary_tenant_relationship_record_for_agent: 2,
+    delete_all_tenant_relationship_records_for_agent: 2,
+    check_tenant_relationship_records_absent_for_agent: 2
   ]
 end

@@ -47,4 +47,29 @@ defmodule Arbor.Contracts.API.PersistenceTest do
       assert callback in optional
     end
   end
+
+  @tag spec: "VP-05D2C3I0A"
+  test "tenant relationship boundaries are optional facade callbacks" do
+    callbacks = Persistence.behaviour_info(:callbacks)
+    optional = Persistence.behaviour_info(:optional_callbacks)
+
+    expected = [
+      upsert_tenant_relationship_record_for_agent: 2,
+      retrieve_tenant_relationship_record_by_id_for_agent: 3,
+      retrieve_tenant_relationship_record_by_name_for_agent: 3,
+      list_tenant_relationship_records_for_agent: 2,
+      update_tenant_relationship_record_for_agent: 4,
+      delete_tenant_relationship_record_for_agent: 3,
+      touch_tenant_relationship_record_for_agent: 3,
+      count_tenant_relationship_records_for_agent: 2,
+      retrieve_primary_tenant_relationship_record_for_agent: 2,
+      delete_all_tenant_relationship_records_for_agent: 2,
+      check_tenant_relationship_records_absent_for_agent: 2
+    ]
+
+    for callback <- expected do
+      assert callback in callbacks
+      assert callback in optional
+    end
+  end
 end

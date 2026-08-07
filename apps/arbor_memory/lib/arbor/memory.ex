@@ -352,6 +352,8 @@ defmodule Arbor.Memory do
   defdelegate add_moment(agent_id, relationship_id, summary, opts \\ []), to: SessionOps
   defdelegate list_relationships(agent_id, opts \\ []), to: SessionOps
   defdelegate delete_relationship(agent_id, relationship_id), to: SessionOps
+  defdelegate delete_all_relationships(agent_id), to: SessionOps
+  defdelegate relationships_absent?(agent_id), to: SessionOps
   defdelegate run_background_checks(agent_id, opts \\ []), to: SessionOps
   defdelegate analyze_memory_patterns(agent_id), to: SessionOps
   defdelegate get_proposal(agent_id, proposal_id), to: SessionOps

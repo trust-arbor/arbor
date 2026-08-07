@@ -21,17 +21,18 @@ defmodule Arbor.Memory.RelationshipStoreTest do
   use Arbor.Persistence.DatabaseCase, async: false
 
   alias Arbor.Memory.{Relationship, RelationshipStore}
-  alias Arbor.Persistence.Schemas.Relationship, as: RelationshipSchema
 
   @moduletag :integration
   @moduletag :database
+  @moduletag spec: "VP-05D2C3I0A"
 
   setup do
-    # DatabaseCase starts the Repo + checks out a per-test Sandbox connection
-    # (consistent :manual mode with the other memory :database tests, so they
-    # can't conflict on sandbox mode in a shared run). The delete_all is
-    # redundant under per-test rollback but harmless.
-    Repo.delete_all(RelationshipSchema)
+    # DatabaseCase starts the Repo + checks out a per-test Sandbox connection.
+    # Cleanup goes through the public Persistence facade (no schema reach-through).
+    :ok = Arbor.Persistence.delete_all_relationships("test_agent_001")
+    :ok = Arbor.Persistence.delete_all_relationships("agent_a")
+    :ok = Arbor.Persistence.delete_all_relationships("agent_b")
+    :ok = Arbor.Persistence.delete_all_relationships("empty_agent")
     {:ok, agent_id: "test_agent_001"}
   end
 

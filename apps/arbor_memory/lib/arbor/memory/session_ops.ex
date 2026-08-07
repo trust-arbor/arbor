@@ -292,6 +292,22 @@ defmodule Arbor.Memory.SessionOps do
     to: Arbor.Memory.RelationshipStore,
     as: :delete
 
+  @doc """
+  Idempotently delete every relationship for exactly one agent (content-only).
+
+  Precondition for C3I coordinators: the future agent mutation gate must be
+  closed and drained before invoking this primitive. Does not implement that
+  gate and does not delete provenance, identity, profile, or events.
+  """
+  defdelegate delete_all_relationships(agent_id),
+    to: Arbor.Memory.RelationshipStore,
+    as: :delete_all
+
+  @doc "Authoritative absence check for an agent's relationship rows."
+  defdelegate relationships_absent?(agent_id),
+    to: Arbor.Memory.RelationshipStore,
+    as: :absent?
+
   # ============================================================================
   # Background Checks (Phase 4)
   # ============================================================================

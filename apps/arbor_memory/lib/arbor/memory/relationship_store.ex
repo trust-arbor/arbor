@@ -1,39 +1,15 @@
 defmodule Arbor.Memory.RelationshipStore do
   @moduledoc """
-  Postgres-backed persistence for relationships.
+  Memory-owned relationship adapter.
 
-  No decay, no eviction — relationships are permanent fixtures that persist
-  across sessions and restarts.
-
-  ## Usage
-
-      # Store a relationship
-      rel = Relationship.new("Hysun", relationship_dynamic: "Collaborative partnership")
-      {:ok, saved_rel} = RelationshipStore.put("agent_001", rel)
-
-      # Retrieve by ID
-      {:ok, rel} = RelationshipStore.get("agent_001", relationship_id)
-
-      # Retrieve by name
-      {:ok, rel} = RelationshipStore.get_by_name("agent_001", "Hysun")
-
-      # List all relationships (sorted by salience)
-      {:ok, rels} = RelationshipStore.list("agent_001", sort_by: :salience)
-
-      # Update a relationship
-      {:ok, rel} = RelationshipStore.update("agent_001", relationship_id, %{
-        salience: 0.9
-      })
-
-      # Delete a relationship
-      :ok = RelationshipStore.delete("agent_001", relationship_id)
+  Converts `Arbor.Memory.Relationship` structs to/from closed plain maps and
+  delegates durable effects to the public `Arbor.Persistence` facade. Tracks
+  access, emits signals, and records events. Does not reach into Persistence
+  internals (repo, queries, or relationship schema modules).
   """
 
   alias Arbor.Memory.{Events, Relationship, Signals}
-  alias Arbor.Persistence.Repo
-  alias Arbor.Persistence.Schemas.Relationship, as: RelationshipSchema
-
-  import Ecto.Query
+  alias Arbor.Persistence
 
   require Logger
 
@@ -49,25 +25,15 @@ defmodule Arbor.Memory.RelationshipStore do
   """
   @spec put(String.t(), Relationship.t()) :: {:ok, Relationship.t()} | {:error, term()}
   def put(agent_id, %Relationship{} = relationship) do
-    attrs = RelationshipSchema.from_relationship(relationship, agent_id)
+    attrs = relationship_to_attrs(relationship)
 
-    changeset = RelationshipSchema.changeset(%RelationshipSchema{}, attrs)
+    case Persistence.put_relationship(agent_id, attrs) do
+      {:ok, plain} ->
+        {:ok, attrs_to_relationship(plain)}
 
-    result =
-      Repo.insert(changeset,
-        on_conflict: {:replace_all_except, [:id, :agent_id, :inserted_at]},
-        conflict_target: [:agent_id, :name],
-        returning: true
-      )
-
-    case result do
-      {:ok, schema} ->
-        saved_rel = schema_to_relationship(schema)
-        {:ok, saved_rel}
-
-      {:error, changeset} ->
-        Logger.warning("Failed to save relationship: #{inspect(changeset.errors)}")
-        {:error, {:validation_failed, changeset.errors}}
+      {:error, reason} ->
+        Logger.warning("Failed to save relationship: #{inspect(reason)}")
+        {:error, reason}
     end
   end
 
@@ -76,14 +42,10 @@ defmodule Arbor.Memory.RelationshipStore do
   """
   @spec get(String.t(), String.t()) :: {:ok, Relationship.t()} | {:error, :not_found}
   def get(agent_id, relationship_id) do
-    query =
-      from(r in RelationshipSchema,
-        where: r.agent_id == ^agent_id and r.id == ^relationship_id
-      )
-
-    case Repo.one(query) do
-      nil -> {:error, :not_found}
-      schema -> {:ok, schema_to_relationship(schema)}
+    case Persistence.fetch_relationship(agent_id, relationship_id) do
+      {:ok, plain} -> {:ok, attrs_to_relationship(plain)}
+      {:error, :not_found} -> {:error, :not_found}
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -92,44 +54,28 @@ defmodule Arbor.Memory.RelationshipStore do
   """
   @spec get_by_name(String.t(), String.t()) :: {:ok, Relationship.t()} | {:error, :not_found}
   def get_by_name(agent_id, name) do
-    query =
-      from(r in RelationshipSchema,
-        where: r.agent_id == ^agent_id and r.name == ^name
-      )
-
-    case Repo.one(query) do
-      nil -> {:error, :not_found}
-      schema -> {:ok, schema_to_relationship(schema)}
+    case Persistence.fetch_relationship_by_name(agent_id, name) do
+      {:ok, plain} -> {:ok, attrs_to_relationship(plain)}
+      {:error, :not_found} -> {:error, :not_found}
+      {:error, reason} -> {:error, reason}
     end
   end
 
   @doc """
-  List all relationships for an agent.
+  List relationships for an agent.
 
   ## Options
 
   - `:sort_by` - Sort by field: `:salience` (default), `:last_interaction`, `:name`, `:access_count`
   - `:sort_dir` - Sort direction: `:desc` (default), `:asc`
-  - `:limit` - Maximum relationships to return (default: no limit)
+  - `:limit` - Maximum relationships to return (default: 100 via Persistence; max 1000)
   """
-  @spec list(String.t(), keyword()) :: {:ok, [Relationship.t()]}
+  @spec list(String.t(), keyword()) :: {:ok, [Relationship.t()]} | {:error, term()}
   def list(agent_id, opts \\ []) do
-    sort_by = Keyword.get(opts, :sort_by, :salience)
-    sort_dir = Keyword.get(opts, :sort_dir, :desc)
-    limit = Keyword.get(opts, :limit)
-
-    query =
-      from(r in RelationshipSchema,
-        where: r.agent_id == ^agent_id
-      )
-
-    query = apply_sort(query, sort_by, sort_dir)
-    query = if limit, do: from(r in query, limit: ^limit), else: query
-
-    schemas = Repo.all(query)
-    relationships = Enum.map(schemas, &schema_to_relationship/1)
-
-    {:ok, relationships}
+    case Persistence.list_relationships(agent_id, opts) do
+      {:ok, plains} -> {:ok, Enum.map(plains, &attrs_to_relationship/1)}
+      {:error, reason} -> {:error, reason}
+    end
   end
 
   @doc """
@@ -137,15 +83,7 @@ defmodule Arbor.Memory.RelationshipStore do
   """
   @spec delete(String.t(), String.t()) :: :ok | {:error, :not_found}
   def delete(agent_id, relationship_id) do
-    query =
-      from(r in RelationshipSchema,
-        where: r.agent_id == ^agent_id and r.id == ^relationship_id
-      )
-
-    case Repo.delete_all(query) do
-      {0, _} -> {:error, :not_found}
-      {_, _} -> :ok
-    end
+    Persistence.delete_relationship(agent_id, relationship_id)
   end
 
   @doc """
@@ -155,27 +93,11 @@ defmodule Arbor.Memory.RelationshipStore do
   """
   @spec update(String.t(), String.t(), map()) :: {:ok, Relationship.t()} | {:error, term()}
   def update(agent_id, relationship_id, changes) when is_map(changes) do
-    query =
-      from(r in RelationshipSchema,
-        where: r.agent_id == ^agent_id and r.id == ^relationship_id
-      )
+    attrs = prepare_update_attrs(changes)
 
-    case Repo.one(query) do
-      nil ->
-        {:error, :not_found}
-
-      schema ->
-        # Merge changes, being careful about nested structures
-        attrs = prepare_update_attrs(changes)
-        changeset = RelationshipSchema.changeset(schema, attrs)
-
-        case Repo.update(changeset) do
-          {:ok, updated_schema} ->
-            {:ok, schema_to_relationship(updated_schema)}
-
-          {:error, changeset} ->
-            {:error, {:validation_failed, changeset.errors}}
-        end
+    case Persistence.update_relationship(agent_id, relationship_id, attrs) do
+      {:ok, plain} -> {:ok, attrs_to_relationship(plain)}
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -184,16 +106,10 @@ defmodule Arbor.Memory.RelationshipStore do
   """
   @spec get_primary(String.t()) :: {:ok, Relationship.t()} | {:error, :not_found}
   def get_primary(agent_id) do
-    query =
-      from(r in RelationshipSchema,
-        where: r.agent_id == ^agent_id,
-        order_by: [desc: r.salience],
-        limit: 1
-      )
-
-    case Repo.one(query) do
-      nil -> {:error, :not_found}
-      schema -> {:ok, schema_to_relationship(schema)}
+    case Persistence.fetch_primary_relationship(agent_id) do
+      {:ok, plain} -> {:ok, attrs_to_relationship(plain)}
+      {:error, :not_found} -> {:error, :not_found}
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -204,46 +120,39 @@ defmodule Arbor.Memory.RelationshipStore do
   """
   @spec touch(String.t(), String.t()) :: {:ok, Relationship.t()} | {:error, term()}
   def touch(agent_id, relationship_id) do
-    now = DateTime.utc_now()
-
-    query =
-      from(r in RelationshipSchema,
-        where: r.agent_id == ^agent_id and r.id == ^relationship_id
-      )
-
-    case Repo.one(query) do
-      nil ->
-        {:error, :not_found}
-
-      schema ->
-        changeset =
-          RelationshipSchema.changeset(schema, %{
-            last_interaction: now,
-            access_count: schema.access_count + 1
-          })
-
-        case Repo.update(changeset) do
-          {:ok, updated_schema} ->
-            {:ok, schema_to_relationship(updated_schema)}
-
-          {:error, changeset} ->
-            {:error, {:validation_failed, changeset.errors}}
-        end
+    case Persistence.touch_relationship(agent_id, relationship_id) do
+      {:ok, plain} -> {:ok, attrs_to_relationship(plain)}
+      {:error, reason} -> {:error, reason}
     end
   end
 
   @doc """
   Count relationships for an agent.
   """
-  @spec count(String.t()) :: {:ok, non_neg_integer()}
+  @spec count(String.t()) :: {:ok, non_neg_integer()} | {:error, term()}
   def count(agent_id) do
-    query =
-      from(r in RelationshipSchema,
-        where: r.agent_id == ^agent_id,
-        select: count(r.id)
-      )
+    Persistence.count_relationships(agent_id)
+  end
 
-    {:ok, Repo.one(query)}
+  @doc """
+  Idempotently delete every relationship for exactly one agent.
+
+  Content-only: does not delete provenance, identity, profile, events, or any
+  other Memory domain. Precondition for C3I coordinators: the future agent
+  mutation gate must be closed and drained before invoking this primitive.
+  This module does not implement or check that gate.
+  """
+  @spec delete_all(String.t()) :: :ok | {:error, term()}
+  def delete_all(agent_id) do
+    Persistence.delete_all_relationships(agent_id)
+  end
+
+  @doc """
+  Authoritative absence check for an agent's relationship rows.
+  """
+  @spec absent?(String.t()) :: {:ok, true} | {:ok, false} | {:error, term()}
+  def absent?(agent_id) do
+    Persistence.relationships_absent?(agent_id)
   end
 
   # ============================================================================
@@ -303,16 +212,27 @@ defmodule Arbor.Memory.RelationshipStore do
 
   @doc """
   Save a relationship with signal/event emission for create vs update.
+
+  Fail-closed on existence reads: only `{:error, :not_found}` is treated as a
+  create. Any other read error (`:backend_failure`, `:indeterminate`, etc.) is
+  returned without putting or emitting created/updated signals/events.
   """
   @spec save(String.t(), Relationship.t()) ::
           {:ok, Relationship.t()} | {:error, term()}
   def save(agent_id, %Relationship{} = relationship) do
-    is_new =
-      case get(agent_id, relationship.id) do
-        {:ok, _} -> false
-        {:error, :not_found} -> true
-      end
+    case get(agent_id, relationship.id) do
+      {:ok, _} ->
+        put_and_emit(agent_id, relationship, _is_new = false)
 
+      {:error, :not_found} ->
+        put_and_emit(agent_id, relationship, _is_new = true)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp put_and_emit(agent_id, relationship, is_new) do
     case put(agent_id, relationship) do
       {:ok, saved_rel} ->
         if is_new do
@@ -364,84 +284,51 @@ defmodule Arbor.Memory.RelationshipStore do
   # Private Helpers
   # ============================================================================
 
-  defp schema_to_relationship(schema) do
-    data = RelationshipSchema.to_relationship(schema)
-
-    %Relationship{
-      id: data.id,
-      name: data.name,
-      preferred_name: data.preferred_name,
-      background: data.background,
-      values: data.values,
-      connections: data.connections,
-      key_moments: data.key_moments,
-      relationship_dynamic: data.relationship_dynamic,
-      personal_details: data.personal_details,
-      current_focus: data.current_focus,
-      uncertainties: data.uncertainties,
-      first_encountered: data.first_encountered,
-      last_interaction: data.last_interaction,
-      salience: data.salience,
-      access_count: data.access_count
+  defp relationship_to_attrs(%Relationship{} = rel) do
+    %{
+      id: rel.id,
+      name: rel.name,
+      preferred_name: rel.preferred_name,
+      background: rel.background,
+      values: rel.values,
+      connections: rel.connections,
+      key_moments: Enum.map(rel.key_moments, &moment_to_attrs/1),
+      relationship_dynamic: rel.relationship_dynamic,
+      personal_details: rel.personal_details,
+      current_focus: rel.current_focus,
+      uncertainties: rel.uncertainties,
+      first_encountered: rel.first_encountered,
+      last_interaction: rel.last_interaction,
+      salience: rel.salience,
+      access_count: rel.access_count
     }
   end
 
-  defp apply_sort(query, :salience, :desc), do: from(r in query, order_by: [desc: r.salience])
-  defp apply_sort(query, :salience, :asc), do: from(r in query, order_by: [asc: r.salience])
+  defp moment_to_attrs(moment) when is_map(moment) do
+    markers = Map.get(moment, :emotional_markers) || Map.get(moment, "emotional_markers") || []
 
-  defp apply_sort(query, :last_interaction, :desc),
-    do: from(r in query, order_by: [desc_nulls_last: r.last_interaction])
+    %{
+      summary: Map.get(moment, :summary) || Map.get(moment, "summary"),
+      timestamp: Map.get(moment, :timestamp) || Map.get(moment, "timestamp"),
+      emotional_markers: Enum.map(markers, &to_string/1),
+      salience: Map.get(moment, :salience) || Map.get(moment, "salience") || 0.5
+    }
+  end
 
-  defp apply_sort(query, :last_interaction, :asc),
-    do: from(r in query, order_by: [asc_nulls_last: r.last_interaction])
+  defp attrs_to_relationship(plain) when is_map(plain) do
+    Relationship.from_map(plain)
+  end
 
-  defp apply_sort(query, :name, :desc), do: from(r in query, order_by: [desc: r.name])
-  defp apply_sort(query, :name, :asc), do: from(r in query, order_by: [asc: r.name])
-
-  defp apply_sort(query, :access_count, :desc),
-    do: from(r in query, order_by: [desc: r.access_count])
-
-  defp apply_sort(query, :access_count, :asc),
-    do: from(r in query, order_by: [asc: r.access_count])
-
-  defp apply_sort(query, _, _), do: from(r in query, order_by: [desc: r.salience])
-
-  # Prepare update attrs, converting relationship struct fields if needed
-  defp prepare_update_attrs(changes) do
-    changes
-    |> Enum.map(fn
+  defp prepare_update_attrs(changes) when is_map(changes) do
+    Map.new(changes, fn
       {:key_moments, moments} when is_list(moments) ->
-        {:key_moments, serialize_moments(moments)}
+        {:key_moments, Enum.map(moments, &moment_to_attrs/1)}
+
+      {key, value} when is_atom(key) ->
+        {key, value}
 
       other ->
         other
     end)
-    |> Map.new()
   end
-
-  defp serialize_moments(moments) do
-    Enum.map(moments, &serialize_single_moment/1)
-  end
-
-  defp serialize_single_moment(moment) do
-    timestamp_str = serialize_moment_timestamp(moment_field(moment, :timestamp))
-    markers = moment_field(moment, :emotional_markers) || []
-
-    %{
-      "summary" => moment_field(moment, :summary),
-      "timestamp" => timestamp_str,
-      "emotional_markers" => Enum.map(markers, &to_string/1),
-      "salience" => moment_field(moment, :salience) || 0.5
-    }
-  end
-
-  defp moment_field(moment, key) when is_map(moment) do
-    Map.get(moment, key) || Map.get(moment, to_string(key))
-  end
-
-  defp moment_field(_moment, _key), do: nil
-
-  defp serialize_moment_timestamp(%DateTime{} = dt), do: DateTime.to_iso8601(dt)
-  defp serialize_moment_timestamp(str) when is_binary(str), do: str
-  defp serialize_moment_timestamp(_), do: nil
 end
