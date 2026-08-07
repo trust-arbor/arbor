@@ -53,6 +53,26 @@ defmodule Arbor.Persistence.RelationshipStore do
 
   @moment_keys MapSet.new([:summary, :timestamp, :emotional_markers, :salience])
 
+  @plain_record_defaults %{
+    preferred_name: nil,
+    background: [],
+    values: [],
+    connections: [],
+    key_moments: [],
+    relationship_dynamic: nil,
+    personal_details: [],
+    current_focus: [],
+    uncertainties: [],
+    first_encountered: nil,
+    last_interaction: nil,
+    salience: 0.5,
+    access_count: 0
+  }
+
+  # Upserts preserve an existing row id on a name conflict. Budget the worst
+  # JSON expansion of any valid retained id before writing.
+  @max_encoded_id_budget String.duplicate(<<0>>, @max_id_bytes)
+
   @verify_hook_key {__MODULE__, :post_delete_remaining_override}
 
   @type relationship_error ::
@@ -71,7 +91,7 @@ defmodule Arbor.Persistence.RelationshipStore do
   def put(agent_id, attrs) do
     with :ok <- validate_agent_id(agent_id),
          {:ok, normalized} <- validate_put_map(attrs),
-         :ok <- validate_record_bytes(normalized) do
+         :ok <- validate_put_record_bytes(normalized) do
       dispatch(fn -> do_put(agent_id, normalized) end)
     end
   end
@@ -443,12 +463,15 @@ defmodule Arbor.Persistence.RelationshipStore do
   end
 
   defp encode_rows(schemas) do
-    Enum.reduce_while(schemas, {:ok, [], 0}, fn schema, {:ok, acc, total} ->
+    # Two bytes account for the surrounding JSON array. Each row after the
+    # first adds one comma, so the page ceiling describes the actual envelope.
+    Enum.reduce_while(schemas, {:ok, [], 2}, fn schema, {:ok, acc, total} ->
       case encode_row(schema) do
         {:ok, plain} ->
           case canonical_bytes(plain) do
             {:ok, size} ->
-              next = total + size
+              separator_bytes = if acc == [], do: 0, else: 1
+              next = total + separator_bytes + size
 
               if next <= @max_page_bytes do
                 {:cont, {:ok, [plain | acc], next}}
@@ -476,6 +499,13 @@ defmodule Arbor.Persistence.RelationshipStore do
       {:ok, _} -> {:error, :invalid_request}
       {:error, _} -> {:error, :invalid_request}
     end
+  end
+
+  defp validate_put_record_bytes(normalized) do
+    @plain_record_defaults
+    |> Map.merge(normalized)
+    |> Map.put(:id, @max_encoded_id_budget)
+    |> validate_record_bytes()
   end
 
   defp canonical_bytes(value) do
@@ -646,7 +676,7 @@ defmodule Arbor.Persistence.RelationshipStore do
   defp normalize_optional_string(_), do: {:error, :invalid_request}
 
   defp normalize_string_list(list) when is_list(list) do
-    if length(list) > @max_list_elems do
+    if not bounded_proper_list?(list, @max_list_elems) do
       {:error, :invalid_request}
     else
       Enum.reduce_while(list, {:ok, []}, fn
@@ -670,7 +700,7 @@ defmodule Arbor.Persistence.RelationshipStore do
   defp normalize_string_list(_), do: {:error, :invalid_request}
 
   defp normalize_moments(list) when is_list(list) do
-    if length(list) > @max_moments do
+    if not bounded_proper_list?(list, @max_moments) do
       {:error, :invalid_request}
     else
       Enum.reduce_while(list, {:ok, []}, fn moment, {:ok, acc} ->
@@ -727,7 +757,7 @@ defmodule Arbor.Persistence.RelationshipStore do
   defp normalize_moment_salience(_), do: {:error, :invalid_request}
 
   defp normalize_markers(list) when is_list(list) do
-    if length(list) > @max_markers do
+    if not bounded_proper_list?(list, @max_markers) do
       {:error, :invalid_request}
     else
       Enum.reduce_while(list, {:ok, []}, fn
@@ -758,6 +788,15 @@ defmodule Arbor.Persistence.RelationshipStore do
   end
 
   defp normalize_markers(_), do: {:error, :invalid_request}
+
+  defp bounded_proper_list?(list, maximum), do: bounded_proper_list?(list, maximum, 0)
+
+  defp bounded_proper_list?([], _maximum, _count), do: true
+
+  defp bounded_proper_list?([_head | tail], maximum, count) when count < maximum,
+    do: bounded_proper_list?(tail, maximum, count + 1)
+
+  defp bounded_proper_list?(_list_or_tail, _maximum, _count), do: false
 
   defp normalize_timestamp(nil), do: {:ok, nil}
   defp normalize_timestamp(%DateTime{} = dt), do: {:ok, dt}

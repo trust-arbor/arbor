@@ -212,6 +212,17 @@ defmodule Arbor.Memory.RelationshipBoundarySourceGuardTest do
     assert detect_forbidden(Code.string_to_quoted!(source)) == []
   end
 
+  test "clean ordinary atom-returning helper is admitted" do
+    source = """
+    defmodule CleanAtomHelper do
+      def go, do: status()
+      defp status, do: :ok
+    end
+    """
+
+    assert detect_forbidden(Code.string_to_quoted!(source)) == []
+  end
+
   # ---------------------------------------------------------------------------
   # Detector (AST only)
   # ---------------------------------------------------------------------------
@@ -306,11 +317,12 @@ defmodule Arbor.Memory.RelationshipBoundarySourceGuardTest do
   # helper-returned module call: repo().all(...)
   defp hits_for_node(
          {{:., _, [{helper, _, helper_args}, _fun]}, _, _args},
-         aliases,
+         _aliases,
          module_returns,
          module_vars
        )
-       when is_atom(helper) and (is_list(helper_args) or is_nil(helper_args)) do
+       when is_atom(helper) and helper != :__aliases__ and
+              (is_list(helper_args) or is_nil(helper_args)) do
     arity = if is_list(helper_args), do: length(helper_args), else: 0
 
     cond do
@@ -510,20 +522,24 @@ defmodule Arbor.Memory.RelationshipBoundarySourceGuardTest do
   defp resolve_module(module, aliases, module_returns, module_vars)
 
   defp resolve_module({:__aliases__, _, parts}, aliases, _module_returns, _module_vars) do
-    mod =
-      case parts do
-        [head | tail] when is_atom(head) ->
-          case Map.fetch(aliases, head) do
-            {:ok, base} when tail == [] -> base
-            {:ok, base} -> Module.concat([base | tail])
-            :error -> Module.concat(parts)
-          end
+    if Enum.all?(parts, &is_atom/1) do
+      mod =
+        case parts do
+          [head | tail] ->
+            case Map.fetch(aliases, head) do
+              {:ok, base} when tail == [] -> base
+              {:ok, base} -> Module.concat([base | tail])
+              :error -> Module.concat(parts)
+            end
 
-        _ ->
-          Module.concat(parts)
-      end
+          [] ->
+            :invalid_alias
+        end
 
-    if forbidden_module_name?(mod), do: {:ok, mod}, else: :error
+      if forbidden_module_name?(mod), do: {:ok, mod}, else: :error
+    else
+      :error
+    end
   end
 
   defp resolve_module(mod, _aliases, _module_returns, _module_vars)
@@ -560,10 +576,10 @@ defmodule Arbor.Memory.RelationshipBoundarySourceGuardTest do
   defp forbidden_module_name?(_), do: false
 
   defp forbidden_by_suffix?(mod) do
-    case Module.split(mod) do
-      ["Arbor", "Persistence", "Repo"] -> true
-      ["Arbor", "Persistence", "Schemas", "Relationship"] -> true
-      ["Ecto", "Query"] -> true
+    case Atom.to_string(mod) do
+      "Elixir.Arbor.Persistence.Repo" -> true
+      "Elixir.Arbor.Persistence.Schemas.Relationship" -> true
+      "Elixir.Ecto.Query" -> true
       _ -> false
     end
   end
