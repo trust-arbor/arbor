@@ -104,6 +104,27 @@ defmodule Arbor.Trust.CapabilityProfileRegistry do
 
   defp not_profileable_reason(_uri_prefix, _owner, %CapabilityProfile{}), do: nil
 
+  # arbor://egress/disclose is deliberately NOT profile-governed. Per
+  # .arbor/decisions/2026-08-03-interactive-egress-disclosure-capability.md it is
+  # an exact, interactive-human-gated disclosure authority: issued only after an
+  # authenticated human entry boundary selects a canonical route, bound to agent
+  # + session + turn + human principal with short expiry and zero delegation,
+  # and revalidated immediately before every external effect. That decision
+  # states plainly that "trust standing and ordinary egress capabilities cannot
+  # perform this override".
+  #
+  # A risk profile expresses a posture trust policy applies to a prefix. Giving
+  # this one a profile would imply trust standing can reach it, which is exactly
+  # the property the design refuses. The generic reason below would also be
+  # wrong: it says no profile is declared "yet", implying one is owed.
+  defp not_profileable_reason("arbor://egress/disclose" <> _rest, _owner, nil) do
+    "owned by arbor_security; deliberately outside trust-profile governance — an " <>
+      "exact interactive-disclosure authority bound to agent/session/turn/human " <>
+      "principal and revalidated before every external effect. Trust standing " <>
+      "cannot perform this override by design; see " <>
+      ".arbor/decisions/2026-08-03-interactive-egress-disclosure-capability.md"
+  end
+
   defp not_profileable_reason(_uri_prefix, nil, nil), do: nil
 
   defp not_profileable_reason(_uri_prefix, owner, nil) do
@@ -111,6 +132,11 @@ defmodule Arbor.Trust.CapabilityProfileRegistry do
       "prefix yet, so it remains governed by facade authorization and explicit grants"
   end
 
+  # Missing until 2026-08-06: without an owner the coverage row can be completed
+  # by neither a profile nor an owner/reason pair, so arbor://egress/* silently
+  # failed the coverage guard from the day it was registered (2026-08-03).
+  defp owner_for_parsed(%CapabilityUri{domain: "egress"}), do: :arbor_security
+  defp owner_for_parsed(%CapabilityUri{domain: "voice"}), do: :arbor_voice
   defp owner_for_parsed(%CapabilityUri{domain: "shell"}), do: :arbor_shell
   defp owner_for_parsed(%CapabilityUri{domain: "historian"}), do: :arbor_historian
   defp owner_for_parsed(%CapabilityUri{domain: "persistence"}), do: :arbor_persistence

@@ -79,7 +79,18 @@ defmodule Arbor.Trust.CapabilityRiskProfiles do
     {"arbor://action/mix/format", :arbor_actions, :high, :reversible, :local_write, :confidential,
      true, :require_human, true, :cheap},
     {"arbor://action/code_review/apply_changes", :arbor_actions, :high, :reversible, :local_write,
-     :confidential, true, :require_human, true, :cheap}
+     :confidential, true, :require_human, true, :cheap},
+    # Opens/configures the persistent xAI Realtime connection (api.x.ai, provider
+    # xai, model grok-voice-latest — Arbor.Voice.EgressAuthority). Registered
+    # 2026-08-04 without a profile, which the coverage guard caught once CI could
+    # fail again. Rated alongside the other :network_egress capabilities
+    # (action/git/pr, action/github/pr): opening a live bidirectional channel to
+    # an external provider is not something an agent should do unattended.
+    # Session-scoped with a ~24h ceiling, so :reversible — the route capability
+    # covers connect/configure only; user-derived content on that channel needs a
+    # separate per-turn arbor://egress/disclose authority.
+    {"arbor://voice/realtime/xai", :arbor_voice, :high, :reversible, :network_egress,
+     :confidential, true, :require_human, true, :metered}
   ]
 
   @low_friction_profile_specs [
