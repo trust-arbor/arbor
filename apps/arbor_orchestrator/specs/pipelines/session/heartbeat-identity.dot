@@ -1,5 +1,10 @@
 // Heartbeat Variant: IDENTITY — Goals + working memory + self-knowledge persist
 //
+// Adds store_identity on top of notes, and (2026-08-06) session.self_knowledge
+// to build_prompt: this rung persisted identity but never read it back, so it
+// measured nothing. Deliberately NO memory_checks — background checks queue
+// proposals, i.e. they persist, and adding them here would break the
+// one-mechanism-per-rung property the ladder depends on.
 // Adds store_identity on top of notes. Identity insights (capabilities,
 // traits, values) accumulate across heartbeats, feeding into the
 // self-knowledge section of the prompt.
@@ -44,7 +49,7 @@ digraph HeartbeatIdentity {
 
   // ── Build heartbeat prompt (shared by all LLM modes) ──────
   build_prompt [type="exec", target="action", action="session_llm.build_prompt",
-                context_keys="session.goals,session.working_memory,session.knowledge_graph,session.pending_proposals,session.active_intents,session.recent_thinking,session.recent_percepts,session.cognitive_mode,session.turn_count",
+                context_keys="session.goals,session.working_memory,session.knowledge_graph,session.pending_proposals,session.active_intents,session.recent_thinking,session.recent_percepts,session.cognitive_mode,session.turn_count,session.self_knowledge",
                 param.mode="heartbeat", output_prefix="session"]
 
   // ── LLM call (uses prompt built by build_prompt) ──────────

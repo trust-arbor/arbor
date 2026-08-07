@@ -40,6 +40,13 @@ digraph HeartbeatFull {
   // .run/2, remains unwired pending an :action_history source. See
   // .arbor/decisions/2026-08-06-harness-learning-enforcement.md.
 
+  // ── Memory background checks (the learning producer) ───────
+  // Mirrors heartbeat.dot. This arm is the ablation CEILING — "everything
+  // persists" — so it has to carry every mechanism production has, or the
+  // ladder measures production as richer than its own upper bound.
+  memory_checks [type="exec", target="action", action="session_memory.background_checks",
+                 context_keys="session.agent_id", output_prefix="session"]
+
   // ── Cognitive mode selection ──────────────────────────────
   select_mode [type="exec", target="action", action="session.mode_select",
                context_keys="session.goals,session.working_memory,session.turn_count",
@@ -50,7 +57,7 @@ digraph HeartbeatFull {
 
   // ── Build heartbeat prompt (shared by all LLM modes) ──────
   build_prompt [type="exec", target="action", action="session_llm.build_prompt",
-                context_keys="session.goals,session.working_memory,session.knowledge_graph,session.pending_proposals,session.active_intents,session.recent_thinking,session.recent_percepts,session.cognitive_mode,session.turn_count",
+                context_keys="session.goals,session.working_memory,session.knowledge_graph,session.pending_proposals,session.active_intents,session.recent_thinking,session.recent_percepts,session.cognitive_mode,session.turn_count,session.self_knowledge,session.background_suggestions",
                 param.mode="heartbeat", output_prefix="session"]
 
   // ── LLM call (uses prompt built by build_prompt) ──────────
@@ -110,7 +117,7 @@ digraph HeartbeatFull {
   // Flow
   // ══════════════════════════════════════════════════════════════
 
-  start -> select_mode -> mode_router
+  start -> memory_checks -> select_mode -> mode_router
 
   // All three LLM modes share one build_prompt + llm_call pair
   mode_router -> build_prompt [condition="context.session.cognitive_mode=goal_pursuit"]
