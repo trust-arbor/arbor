@@ -289,23 +289,73 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
     {:ok, _pid} = CapabilityStore.start_link([])
   end
 
+  # This module terminates children on the SHARED Arbor.Security.Supervisor to
+  # occupy their registered names (production resolves the store by name, so
+  # intercepting requires taking the name). Restoring them afterwards is
+  # therefore load-bearing for every test that runs after this module.
+  #
+  # It previously guarded the restart on `is_nil(pid)` from which_children/1.
+  # Supervisor.which_children/1 reports a TERMINATED child as `:undefined`, not
+  # `nil`, so that predicate was never true and the function restarted nothing —
+  # a silent no-op. Every security test scheduled after this module then failed
+  # with `no process`, and because ExUnit shuffles module order by seed, the
+  # suite ranged from 0 to 290 failures run to run on the same commit.
+  #
+  # restart_child/2 already reports {:error, :running} when a child is up, so
+  # the correct shape is to call it unconditionally and treat "already running"
+  # as success — no inspection, no predicate to get wrong. The final assertion
+  # exists so that if restoration ever breaks again it fails HERE, loudly, in
+  # the module that caused it, rather than as a cascade of unrelated failures.
   defp restore_security_children do
     stop_named_process(CapabilityStore)
     stop_named_process(@capability_store)
 
-    Enum.each(@security_children, fn child_id ->
-      case Supervisor.which_children(@security_supervisor) do
-        children when is_list(children) ->
-          if Enum.any?(children, fn {id, pid, _type, _modules} ->
-               id == child_id and is_nil(pid)
-             end) do
-            {:ok, _pid} = Supervisor.restart_child(@security_supervisor, child_id)
-          end
+    Enum.each(@security_children, &restart_security_child!/1)
+    assert_security_children_alive!()
+  end
 
-        _ ->
-          :ok
-      end
-    end)
+  defp restart_security_child!(child_id) do
+    case Supervisor.restart_child(@security_supervisor, child_id) do
+      {:ok, _pid} -> :ok
+      {:ok, _pid, _info} -> :ok
+      # Already running, or never terminated in the first place.
+      {:error, :running} -> :ok
+      {:error, {:already_started, _pid}} -> :ok
+      # Not a child of this supervisor in this test profile.
+      {:error, :not_found} -> :ok
+      {:error, reason} -> raise "failed to restore #{inspect(child_id)}: #{inspect(reason)}"
+    end
+  end
+
+  defp assert_security_children_alive! do
+    dead =
+      Enum.filter(@security_children, fn child_id ->
+        case Process.whereis(child_id) do
+          nil -> child_id not in optional_children()
+          pid -> not Process.alive?(pid)
+        end
+      end)
+
+    if dead != [] do
+      raise """
+      security children left dead after this module: #{inspect(dead)}
+
+      Every subsequent test that touches them will fail with `no process`, and
+      the failure will look like it belongs to whichever module ExUnit happened
+      to schedule next. Fix the restore path here.
+      """
+    end
+  end
+
+  # Children that may legitimately be absent depending on the test profile.
+  defp optional_children do
+    [
+      :arbor_security_issuers,
+      Arbor.Security.IssuerRegistry,
+      Arbor.Security.SigningAuthorityStateOwner,
+      Arbor.Security.SigningAuthorityBroker,
+      Arbor.Security.DeliveryReceiptBroker
+    ]
   end
 
   defp stop_named_process(name) do
