@@ -650,6 +650,50 @@ defmodule Arbor.Persistence.VectorStore.EctoSQLiteTest do
              Arbor.Persistence.reconcile_vector_operation(agent_id, operation)
   end
 
+  test "security regression: public execute rejects a manually seeded closed fence", %{
+    agent_id: agent_id
+  } do
+    # Keep this fixture self-contained so the test-only parent can prove the old
+    # public execute path ignored durable fence state before the migration exists.
+    SQLiteRepo.query!("""
+    CREATE TABLE IF NOT EXISTS vector_agent_fences (
+      agent_id TEXT PRIMARY KEY NOT NULL,
+      state TEXT NOT NULL,
+      closed_at TEXT,
+      updated_at TEXT NOT NULL
+    )
+    """)
+
+    SQLiteRepo.query!(
+      """
+      INSERT INTO vector_agent_fences (agent_id, state, closed_at, updated_at)
+      VALUES (?, 'closed', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+      """,
+      [agent_id]
+    )
+
+    assert {:error, :closed} =
+             Arbor.Persistence.execute_vector_operation(
+               agent_id,
+               insert_operation!(record!(agent_id, source_key: "manual-closed-attempt"))
+             )
+
+    assert %{rows: [[0]]} =
+             SQLiteRepo.query!(
+               """
+               SELECT COUNT(*) FROM memory_embeddings
+               WHERE agent_id = ? AND vector_protocol = 'arbor_vector_store_v1'
+               """,
+               [agent_id]
+             )
+
+    assert %{rows: [[0]]} =
+             SQLiteRepo.query!(
+               "SELECT COUNT(*) FROM vector_operation_receipts WHERE agent_id = ?",
+               [agent_id]
+             )
+  end
+
   defp maybe_install_receipt_insert_guard! do
     migrations = [
       {@receipt_guard_migration_version, @receipt_guard_migration_file},
