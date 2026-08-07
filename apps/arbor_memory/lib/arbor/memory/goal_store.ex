@@ -504,6 +504,47 @@ defmodule Arbor.Memory.GoalStore do
       else: {:error, :invalid_provenance}
   end
 
+  @doc """
+  Idempotent content-only deletion for exactly one agent.
+
+  Removes durable goal content, ETS projection, and owner-local convergence
+  state. Retains every Provenance sidecar byte-for-byte.
+
+  C3I2A precondition (caller-owned, not enforced here): C3I1 mutation gate
+  must be closed and drained before invoke. This API is not race-free agent
+  destruction.
+  """
+  @spec delete_agent_content(String.t()) ::
+          :ok
+          | {:error,
+             :invalid_provenance
+             | :persistence_failed
+             | :projection_failed
+             | :store_unavailable
+             | :outcome_unknown}
+  def delete_agent_content(agent_id) do
+    if valid_identifier?(agent_id),
+      do: call_owner({:delete_agent_content, agent_id}, :mutation),
+      else: {:error, :invalid_provenance}
+  end
+
+  @doc """
+  Authoritative absence across durable goals, ETS projection, and owner
+  deferred convergence state. Returns `{:ok, true}` only when no exact-agent
+  content remains.
+  """
+  @spec agent_content_absent?(String.t()) ::
+          {:ok, boolean()}
+          | {:error,
+             :invalid_provenance
+             | :projection_failed
+             | :store_unavailable}
+  def agent_content_absent?(agent_id) do
+    if valid_identifier?(agent_id),
+      do: call_owner({:agent_content_absent?, agent_id}, :read),
+      else: {:error, :invalid_provenance}
+  end
+
   defp safe_ets_delete(key) do
     :ets.delete(@ets_table, key)
   rescue
@@ -793,7 +834,10 @@ defmodule Arbor.Memory.GoalStore do
     state = %{
       projected_ids: projected_ids,
       pending_convergence: pending_convergence,
-      scheduled_convergence: MapSet.new()
+      scheduled_convergence: MapSet.new(),
+      # Agents whose content-only cleanup completed. Queued mark/converge
+      # messages for these agents must no-op until new content is projected.
+      content_cleaned: MapSet.new()
     }
 
     {:ok, schedule_pending_convergence(state)}
@@ -862,6 +906,24 @@ defmodule Arbor.Memory.GoalStore do
     {:reply, reply, state}
   end
 
+  def handle_call({:delete_agent_content, agent_id}, _from, state) do
+    {reply, state} = do_delete_agent_content(agent_id, state)
+    {:reply, reply, state}
+  rescue
+    _ -> {:reply, {:error, :outcome_unknown}, state}
+  catch
+    _, _ -> {:reply, {:error, :outcome_unknown}, state}
+  end
+
+  def handle_call({:agent_content_absent?, agent_id}, _from, state) do
+    reply = do_agent_content_absent?(agent_id, state)
+    {:reply, reply, state}
+  rescue
+    _ -> {:reply, {:error, :store_unavailable}, state}
+  catch
+    _, _ -> {:reply, {:error, :store_unavailable}, state}
+  end
+
   def handle_call({:reload_for_agent, agent_id}, _from, state) do
     case do_reload_for_agent(agent_id) do
       {:reconciled, reply, goal_ids} ->
@@ -906,31 +968,42 @@ defmodule Arbor.Memory.GoalStore do
 
   @impl true
   def handle_info({:mark_goal_convergence, agent_id}, state) do
-    {:noreply, mark_convergence_pending(state, agent_id)}
+    # Stale after content-only cleanup: do not re-arm convergence that would
+    # hydrate via Provenance.delete_domain_agent and wipe retained sidecars.
+    if content_cleaned?(state, agent_id) do
+      {:noreply, state}
+    else
+      {:noreply, mark_convergence_pending(state, agent_id)}
+    end
   end
 
   def handle_info({:converge_goal_agent, agent_id, attempts}, state) do
     state = clear_scheduled_convergence(state, agent_id)
 
-    if convergence_pending?(state, agent_id) do
-      case do_reload_for_agent(agent_id, false) do
-        {:reconciled, :ok, goal_ids} ->
-          {_reply, state} = reconcile_projected_ids(:ok, state, agent_id, goal_ids)
-          {:noreply, clear_convergence_pending(state, agent_id)}
+    cond do
+      content_cleaned?(state, agent_id) ->
+        {:noreply, clear_convergence_pending(state, agent_id)}
 
-        _failure when attempts > 1 ->
-          state =
-            state
-            |> fail_agent_projection(agent_id, false)
-            |> schedule_convergence(agent_id, attempts - 1)
+      convergence_pending?(state, agent_id) ->
+        case do_reload_for_agent(agent_id, false) do
+          {:reconciled, :ok, goal_ids} ->
+            {_reply, state} = reconcile_projected_ids(:ok, state, agent_id, goal_ids)
+            {:noreply, clear_convergence_pending(state, agent_id)}
 
-          {:noreply, state}
+          _failure when attempts > 1 ->
+            state =
+              state
+              |> fail_agent_projection(agent_id, false)
+              |> schedule_convergence(agent_id, attempts - 1)
 
-        _failure ->
-          {:noreply, fail_agent_projection(state, agent_id, false)}
-      end
-    else
-      {:noreply, state}
+            {:noreply, state}
+
+          _failure ->
+            {:noreply, fail_agent_projection(state, agent_id, false)}
+        end
+
+      true ->
+        {:noreply, state}
     end
   end
 
@@ -1087,7 +1160,9 @@ defmodule Arbor.Memory.GoalStore do
 
   defp projected_ids_for_agent(_state, _agent_id), do: MapSet.new()
 
-  defp track_projected_id(%{projected_ids: projected_ids} = state, agent_id, goal_id) do
+  defp track_projected_id(state, agent_id, goal_id) do
+    state = clear_content_cleaned(state, agent_id)
+    projected_ids = Map.get(state, :projected_ids, %{})
     ids = projected_ids |> Map.get(agent_id, MapSet.new()) |> MapSet.put(goal_id)
     %{state | projected_ids: Map.put(projected_ids, agent_id, ids)}
   end
@@ -1103,7 +1178,39 @@ defmodule Arbor.Memory.GoalStore do
         do: Map.delete(projected_ids, agent_id),
         else: Map.put(projected_ids, agent_id, ids)
 
+    state =
+      if MapSet.size(ids) == 0,
+        do: state,
+        else: clear_content_cleaned(state, agent_id)
+
     %{state | projected_ids: next}
+  end
+
+  defp content_cleaned?(state, agent_id) do
+    case Map.get(state, :content_cleaned, MapSet.new()) do
+      %MapSet{} = cleaned -> MapSet.member?(cleaned, agent_id)
+      _ -> false
+    end
+  end
+
+  defp mark_content_cleaned(state, agent_id) do
+    cleaned =
+      case Map.get(state, :content_cleaned, MapSet.new()) do
+        %MapSet{} = set -> set
+        _ -> MapSet.new()
+      end
+
+    Map.put(state, :content_cleaned, MapSet.put(cleaned, agent_id))
+  end
+
+  defp clear_content_cleaned(state, agent_id) do
+    cleaned =
+      case Map.get(state, :content_cleaned, MapSet.new()) do
+        %MapSet{} = set -> set
+        _ -> MapSet.new()
+      end
+
+    Map.put(state, :content_cleaned, MapSet.delete(cleaned, agent_id))
   end
 
   defp clear_projected_ids(%{projected_ids: projected_ids} = state, agent_id) do
@@ -2190,6 +2297,122 @@ defmodule Arbor.Memory.GoalStore do
     _ -> {{:error, :outcome_unknown}, state}
   catch
     _, _ -> {{:error, :outcome_unknown}, state}
+  end
+
+  # Content-only C3I cleanup: durable first, then ETS + deferred state.
+  # Never touches Provenance sidecars (unlike clear_goals/1).
+  defp do_delete_agent_content(agent_id, state) do
+    with true <- valid_identifier?(agent_id),
+         {:ok, records} <- load_authoritative_goal_records(agent_id),
+         :ok <- bounded_authoritative_records(records),
+         {:ok, goal_ids} <- goal_ids_from_records(records, agent_id) do
+      case delete_goal_content_records(agent_id, goal_ids, state) do
+        {:ok, state} ->
+          state = finalize_goal_content_clear(agent_id, state)
+          {:ok, state}
+
+        {{:error, _reason} = error, state} ->
+          {error, state}
+
+        _ ->
+          {{:error, :persistence_failed}, state}
+      end
+    else
+      false -> {{:error, :invalid_provenance}, state}
+      {:error, _reason} = error -> {error, state}
+      _ -> {{:error, :persistence_failed}, state}
+    end
+  rescue
+    _ -> {{:error, :outcome_unknown}, state}
+  catch
+    _, _ -> {{:error, :outcome_unknown}, state}
+  end
+
+  defp do_agent_content_absent?(agent_id, state) do
+    with true <- valid_identifier?(agent_id),
+         {:ok, records} <- load_authoritative_goal_records(agent_id),
+         :ok <- bounded_authoritative_records(records),
+         {:ok, goal_ids} <- goal_ids_from_records(records, agent_id) do
+      durable_absent? = goal_ids == []
+      projected_absent? = MapSet.size(projected_ids_for_agent(state, agent_id)) == 0
+      deferred_absent? = not convergence_pending?(state, agent_id)
+      ets_absent? = exact_agent_ets_absent?(agent_id)
+
+      if durable_absent? and projected_absent? and deferred_absent? and ets_absent? do
+        {:ok, true}
+      else
+        {:ok, false}
+      end
+    else
+      false -> {:error, :invalid_provenance}
+      {:error, _reason} = error -> error
+      _ -> {:error, :store_unavailable}
+    end
+  rescue
+    _ -> {:error, :store_unavailable}
+  catch
+    _, _ -> {:error, :store_unavailable}
+  end
+
+  defp delete_goal_content_records(_agent_id, [], state), do: {:ok, state}
+
+  defp delete_goal_content_records(agent_id, [goal_id | rest], state) do
+    case delete_goal_record(agent_id, goal_id) do
+      :ok ->
+        _ = safe_ets_delete({agent_id, goal_id})
+        state = untrack_projected_id(state, agent_id, goal_id)
+        delete_goal_content_records(agent_id, rest, state)
+
+      {:error, _reason} = error ->
+        # Conservative projection eviction; provenance intact; partial progress retryable.
+        _ = safe_ets_delete({agent_id, goal_id})
+        state = untrack_projected_id(state, agent_id, goal_id)
+        {error, state}
+
+      _ ->
+        _ = safe_ets_delete({agent_id, goal_id})
+        state = untrack_projected_id(state, agent_id, goal_id)
+        {{:error, :persistence_failed}, state}
+    end
+  end
+
+  defp delete_goal_content_records(_agent_id, _goal_ids, state),
+    do: {{:error, :persistence_failed}, state}
+
+  defp finalize_goal_content_clear(agent_id, state) do
+    projected_ids_for_agent(state, agent_id)
+    |> Enum.each(fn goal_id -> safe_ets_delete({agent_id, goal_id}) end)
+
+    # Also sweep any orphan ETS rows for this exact agent_id.
+    _ = sweep_exact_agent_ets(agent_id)
+
+    state
+    |> clear_projected_ids(agent_id)
+    |> clear_convergence_pending(agent_id)
+    |> mark_content_cleaned(agent_id)
+  end
+
+  defp exact_agent_ets_absent?(agent_id) do
+    case :ets.match(@ets_table, {{agent_id, :"$1"}, :_}) do
+      [] -> true
+      _ -> false
+    end
+  rescue
+    ArgumentError -> true
+  catch
+    _, _ -> false
+  end
+
+  defp sweep_exact_agent_ets(agent_id) do
+    @ets_table
+    |> :ets.match({{agent_id, :"$1"}, :_})
+    |> Enum.each(fn [goal_id] -> safe_ets_delete({agent_id, goal_id}) end)
+
+    :ok
+  rescue
+    ArgumentError -> :ok
+  catch
+    _, _ -> :ok
   end
 
   defp finalize_goal_clear(agent_id, state) do

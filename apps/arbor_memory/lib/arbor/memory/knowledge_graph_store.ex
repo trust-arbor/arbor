@@ -262,6 +262,45 @@ defmodule Arbor.Memory.KnowledgeGraphStore do
     safe_call({:delete, agent_id, request_deadline()}, :mutation, agent_id)
   end
 
+  @doc """
+  Idempotent content-only deletion for exactly one agent.
+
+  Removes durable knowledge-graph aggregate content (nodes, pending facts/
+  learnings, maintenance effects, graph state), ETS projection, and owner-local
+  projection-retry state. Retains every Provenance sidecar byte-for-byte.
+
+  C3I2A precondition (caller-owned, not enforced here): C3I1 mutation gate
+  must be closed and drained before invoke. This API is not race-free agent
+  destruction.
+  """
+  @spec delete_agent_content(String.t()) :: :ok | {:error, store_error()}
+  def delete_agent_content(agent_id) do
+    if valid_agent_id?(agent_id) do
+      content_safe_call(
+        {:delete_agent_content, agent_id, request_deadline()},
+        :mutation,
+        agent_id
+      )
+    else
+      {:error, :invalid_graph}
+    end
+  end
+
+  @doc """
+  Authoritative absence across durable graph, ETS projection, and owner
+  deferred projection-retry state. Returns `{:ok, true}` only when no
+  exact-agent content remains.
+  """
+  @spec agent_content_absent?(String.t()) ::
+          {:ok, boolean()} | {:error, store_error()}
+  def agent_content_absent?(agent_id) do
+    if valid_agent_id?(agent_id) do
+      content_safe_call({:agent_content_absent?, agent_id}, :read, agent_id)
+    else
+      {:error, :invalid_graph}
+    end
+  end
+
   @spec converge_projection(String.t()) :: :ok | {:error, store_error()}
   def converge_projection(agent_id) do
     case safe_call({:converge, agent_id}, :read, agent_id) do
@@ -381,6 +420,42 @@ defmodule Arbor.Memory.KnowledgeGraphStore do
     else
       {:error, _reason} = error -> {:reply, error, state}
     end
+  end
+
+  def handle_call({:delete_agent_content, agent_id, deadline}, _from, state) do
+    with :ok <- ensure_deadline(deadline) do
+      case MemoryStore.delete_tainted_authoritative(@namespace, agent_id) do
+        :ok ->
+          # Content-only: ETS + deferred only; provenance sidecars retained.
+          evict_projection(agent_id)
+          state = clear_pending_projection(state, agent_id)
+          {:reply, :ok, state}
+
+        {:error, _reason} = error ->
+          # Conservative projection eviction; provenance intact.
+          evict_projection(agent_id)
+          {:reply, map_store_error(error), state}
+
+        _ ->
+          evict_projection(agent_id)
+          {:reply, {:error, :outcome_unknown}, state}
+      end
+    else
+      {:error, _reason} = error -> {:reply, error, state}
+    end
+  rescue
+    _ -> {:reply, {:error, :outcome_unknown}, state}
+  catch
+    _, _ -> {:reply, {:error, :outcome_unknown}, state}
+  end
+
+  def handle_call({:agent_content_absent?, agent_id}, _from, state) do
+    reply = do_agent_content_absent?(agent_id, state)
+    {:reply, reply, state}
+  rescue
+    _ -> {:reply, {:error, :store_unavailable}, state}
+  catch
+    _, _ -> {:reply, {:error, :store_unavailable}, state}
   end
 
   def handle_call({:converge, agent_id}, _from, state) do
@@ -747,6 +822,70 @@ defmodule Arbor.Memory.KnowledgeGraphStore do
     _, _ -> :ok
   end
 
+  defp do_agent_content_absent?(agent_id, state) do
+    case durable_graph_presence(agent_id) do
+      :present ->
+        {:ok, false}
+
+      :absent ->
+        ets_absent? = graph_ets_absent?(agent_id)
+        deferred_absent? = not Map.has_key?(state.pending_projection, agent_id)
+
+        if ets_absent? and deferred_absent? do
+          {:ok, true}
+        else
+          {:ok, false}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  rescue
+    _ -> {:error, :store_unavailable}
+  catch
+    _, _ -> {:error, :store_unavailable}
+  end
+
+  defp durable_graph_presence(agent_id) do
+    case MemoryStore.load_tainted_authoritative_with_status(@namespace, agent_id) do
+      {:ok, _value, _status, _record, _location} ->
+        :present
+
+      {:error, :not_found} ->
+        :absent
+
+      {:error, _reason} = error ->
+        case map_store_error(error) do
+          {:error, :graph_not_initialized} -> :absent
+          other -> other
+        end
+
+      _ ->
+        {:error, :store_unavailable}
+    end
+  rescue
+    _ -> {:error, :store_unavailable}
+  catch
+    _, _ -> {:error, :store_unavailable}
+  end
+
+  defp graph_ets_absent?(agent_id) do
+    case :ets.whereis(@graph_ets) do
+      :undefined -> true
+      _ -> :ets.lookup(@graph_ets, agent_id) == []
+    end
+  rescue
+    _ -> true
+  catch
+    _, _ -> false
+  end
+
+  defp valid_agent_id?(agent_id) when is_binary(agent_id) do
+    byte_size(agent_id) in 1..256 and String.valid?(agent_id) and String.trim(agent_id) != ""
+  end
+
+  defp valid_agent_id?(_agent_id), do: false
+
   defp schedule_projection(%{pending_projection: pending} = state, agent_id) do
     if Map.has_key?(pending, agent_id) do
       state
@@ -865,9 +1004,38 @@ defmodule Arbor.Memory.KnowledgeGraphStore do
     _, _ -> fail_closed_unavailable(agent_id, mode)
   end
 
+  # Content-only paths must never clear Provenance on owner loss.
+  defp content_safe_call(message, mode, agent_id) when mode in [:read, :mutation] do
+    case Process.whereis(__MODULE__) do
+      nil ->
+        content_fail_closed_unavailable(agent_id, mode)
+
+      pid ->
+        monitor = Process.monitor(pid)
+
+        try do
+          GenServer.call(pid, message, call_timeout(mode))
+        catch
+          :exit, _reason -> content_fail_closed_unavailable(agent_id, mode)
+        after
+          Process.demonitor(monitor, [:flush])
+        end
+    end
+  rescue
+    _ -> content_fail_closed_unavailable(agent_id, mode)
+  catch
+    _, _ -> content_fail_closed_unavailable(agent_id, mode)
+  end
+
   defp fail_closed_unavailable(agent_id, mode) do
     evict_projection(agent_id)
     _ = clear_projection_provenance(agent_id)
+    unavailable_for(mode)
+  end
+
+  defp content_fail_closed_unavailable(agent_id, mode) do
+    # Conservative ETS eviction only; provenance sidecars retained.
+    evict_projection(agent_id)
     unavailable_for(mode)
   end
 

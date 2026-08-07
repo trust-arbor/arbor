@@ -222,6 +222,34 @@ defmodule Arbor.Memory.Thinking do
       else: {:error, :invalid_request}
   end
 
+  @doc """
+  Idempotent content-only deletion for exactly one agent.
+
+  Removes durable thinking aggregate content, ETS projection, and unfinished
+  stream state. Retains every Provenance sidecar byte-for-byte.
+
+  C3I2A precondition (caller-owned, not enforced here): C3I1 mutation gate
+  must be closed and drained before invoke. This API is not race-free agent
+  destruction.
+  """
+  @spec delete_agent_content(String.t()) :: :ok | {:error, atom()}
+  def delete_agent_content(agent_id) do
+    if valid_agent_id?(agent_id),
+      do: call_owner({:delete_agent_content, agent_id}, :mutation),
+      else: {:error, :invalid_request}
+  end
+
+  @doc """
+  Authoritative absence across durable thinking, ETS projection, and unfinished
+  stream state. Returns `{:ok, true}` only when no exact-agent content remains.
+  """
+  @spec agent_content_absent?(String.t()) :: {:ok, boolean()} | {:error, atom()}
+  def agent_content_absent?(agent_id) do
+    if valid_agent_id?(agent_id),
+      do: call_owner({:agent_content_absent?, agent_id}, :read),
+      else: {:error, :invalid_request}
+  end
+
   @doc "Reloads the complete Thinking projection from the durable memory store."
   @spec reload_from_durable() :: :ok | {:error, atom()}
   def reload_from_durable do
@@ -321,6 +349,40 @@ defmodule Arbor.Memory.Thinking do
   end
 
   @impl true
+  def handle_call({:delete_agent_content, agent_id}, _from, state) do
+    case delete_aggregate_before_live_clear(agent_id) do
+      :ok ->
+        _ = evict_thinking_content_only(agent_id)
+
+        next_state =
+          state
+          |> drop_owned_agent(agent_id)
+          |> Map.update!(:streams, &Map.delete(&1, agent_id))
+
+        {:reply, :ok, next_state}
+
+      {:error, reason} ->
+        # Conservative projection eviction; provenance and stream may remain.
+        _ = evict_thinking_content_only(agent_id)
+        {:reply, {:error, normalize_store_error(reason)}, state}
+    end
+  rescue
+    _ -> {:reply, {:error, :outcome_unknown}, state}
+  catch
+    _, _ -> {:reply, {:error, :outcome_unknown}, state}
+  end
+
+  @impl true
+  def handle_call({:agent_content_absent?, agent_id}, _from, state) do
+    reply = do_agent_content_absent?(agent_id, state)
+    {:reply, reply, state}
+  rescue
+    _ -> {:reply, {:error, :store_unavailable}, state}
+  catch
+    _, _ -> {:reply, {:error, :store_unavailable}, state}
+  end
+
+  @impl true
   def handle_call(:reload_from_durable, _from, state) do
     case load_from_durable(state.buffer_size, true, state.owned_agents) do
       {:ok, owned_agents} ->
@@ -333,8 +395,11 @@ defmodule Arbor.Memory.Thinking do
 
   @impl true
   def handle_info({:converge_projection, agent_id}, state) do
+    # Exact ownership required. After content-only delete drops owned_agents,
+    # a stale converge message must be a no-op: reloading durable not_found
+    # would call install_empty_projection/1 and purge thinking Provenance.
     next_state =
-      if owned_agent_capacity?(state, agent_id) do
+      if MapSet.member?(state.owned_agents, agent_id) do
         case authoritative_tainted_read(agent_id, [], state.buffer_size) do
           {:ok, _items, true} -> put_owned_agent(state, agent_id)
           {:ok, _items, false} -> drop_owned_agent(state, agent_id)
@@ -754,6 +819,69 @@ defmodule Arbor.Memory.Thinking do
     _, _ ->
       fail_closed_agent_projection(agent_id)
       :convergence_pending
+  end
+
+  # Content-only eviction: drops ETS without Provenance.delete_domain_agent.
+  defp evict_thinking_content_only(agent_id) do
+    :ets.delete(@ets_table, agent_id)
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
+  end
+
+  defp do_agent_content_absent?(agent_id, state) do
+    case durable_thinking_presence(agent_id) do
+      :present ->
+        {:ok, false}
+
+      :absent ->
+        ets_absent? =
+          case :ets.lookup(@ets_table, agent_id) do
+            [] -> true
+            _ -> false
+          end
+
+        stream_absent? = not Map.has_key?(state.streams, agent_id)
+
+        if ets_absent? and stream_absent? do
+          {:ok, true}
+        else
+          {:ok, false}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  rescue
+    _ -> {:error, :store_unavailable}
+  catch
+    _, _ -> {:error, :store_unavailable}
+  end
+
+  defp durable_thinking_presence(agent_id) do
+    if MemoryStore.available?() do
+      case MemoryStore.load_tainted_authoritative_with_status("thinking", agent_id) do
+        {:ok, %TaintedValue{}, _status, %Record{}, _location} ->
+          :present
+
+        {:error, :not_found} ->
+          :absent
+
+        {:error, reason} ->
+          {:error, normalize_store_error(reason)}
+
+        _other ->
+          {:error, :store_unavailable}
+      end
+    else
+      {:error, :store_unavailable}
+    end
+  rescue
+    _ -> {:error, :store_unavailable}
+  catch
+    _, _ -> {:error, :store_unavailable}
   end
 
   defp append_stream(nil, chunk, taint) do

@@ -472,6 +472,52 @@ defmodule Arbor.Memory.IntentStore do
   end
 
   @doc """
+  Idempotent content-only deletion for exactly one agent.
+
+  Removes durable intent/percept aggregate content, ETS projection, and
+  owner-local projection-retry state. Retains every Provenance sidecar
+  byte-for-byte.
+
+  C3I2A precondition (caller-owned, not enforced here): C3I1 mutation gate
+  must be closed and drained before invoke. This API is not race-free agent
+  destruction.
+  """
+  @spec delete_agent_content(String.t()) ::
+          :ok | {:error, :invalid_request | :store_unavailable | :commit_outcome_unknown}
+  def delete_agent_content(agent_id) do
+    with :ok <- validate_identifier(agent_id) do
+      case safe_server_call({:delete_agent_content, agent_id}, :mutation) do
+        :ok -> :ok
+        {:error, :commit_outcome_unknown} = error -> error
+        _ -> {:error, :store_unavailable}
+      end
+    else
+      _ -> {:error, :invalid_request}
+    end
+  end
+
+  @doc """
+  Authoritative absence across durable aggregate, ETS projection, and owner
+  deferred projection-retry state. Returns `{:ok, true}` only when no
+  exact-agent content remains.
+  """
+  @spec agent_content_absent?(String.t()) ::
+          {:ok, boolean()}
+          | {:error, :invalid_request | :store_unavailable | :absence_uncertain}
+  def agent_content_absent?(agent_id) do
+    with :ok <- validate_identifier(agent_id) do
+      case safe_server_call({:agent_content_absent?, agent_id}, :read) do
+        {:ok, present?} when is_boolean(present?) -> {:ok, present?}
+        {:error, :store_unavailable} = error -> error
+        {:error, :absence_uncertain} = error -> error
+        _ -> {:error, :store_unavailable}
+      end
+    else
+      _ -> {:error, :invalid_request}
+    end
+  end
+
+  @doc """
   Reload intents for a specific agent from Postgres into ETS.
 
   Ensures persisted intents are available after agent restart.
@@ -599,6 +645,39 @@ defmodule Arbor.Memory.IntentStore do
     _ -> {:reply, {:error, :store_unavailable}, state}
   catch
     _, _ -> {:reply, {:error, :store_unavailable}, state}
+  end
+
+  @impl true
+  def handle_call({:delete_agent_content, agent_id}, _from, state) do
+    case delete_persisted_aggregate(agent_id) do
+      :ok ->
+        _ = evict_live_projection_content_only(agent_id)
+        state = clear_pending_projection_only(state, agent_id)
+        {:reply, :ok, state}
+
+      {:error, :commit_outcome_unknown} ->
+        # Conservative projection eviction; provenance intact.
+        _ = evict_live_projection_content_only(agent_id)
+        {:reply, {:error, :commit_outcome_unknown}, state}
+
+      {:error, _reason} ->
+        _ = evict_live_projection_content_only(agent_id)
+        {:reply, {:error, :store_unavailable}, state}
+    end
+  rescue
+    _ -> {:reply, {:error, :store_unavailable}, state}
+  catch
+    _, _ -> {:reply, {:error, :store_unavailable}, state}
+  end
+
+  @impl true
+  def handle_call({:agent_content_absent?, agent_id}, _from, state) do
+    reply = do_agent_content_absent?(agent_id, state)
+    {:reply, reply, state}
+  rescue
+    _ -> {:reply, {:error, :absence_uncertain}, state}
+  catch
+    _, _ -> {:reply, {:error, :absence_uncertain}, state}
   end
 
   @impl true
@@ -896,8 +975,27 @@ defmodule Arbor.Memory.IntentStore do
 
   @impl true
   def handle_info({:converge_projection, agent_id}, state) do
-    attempts = Map.get(state.pending_projection, agent_id, 1)
+    # Exact pending entry required. Stale messages after content-only cleanup
+    # (which clears pending_projection) must be no-ops so they cannot call
+    # evict_live_projection/1 and purge retained Provenance sidecars.
+    case Map.fetch(state.pending_projection, agent_id) do
+      :error ->
+        {:noreply, state}
 
+      {:ok, attempts} ->
+        run_pending_projection_convergence(agent_id, attempts, state)
+    end
+  rescue
+    _ ->
+      {:noreply, clear_pending_projection_only(state, agent_id)}
+  catch
+    _, _ ->
+      {:noreply, clear_pending_projection_only(state, agent_id)}
+  end
+
+  def handle_info(_message, state), do: {:noreply, state}
+
+  defp run_pending_projection_convergence(agent_id, attempts, state) do
     result =
       case load_durable_aggregate(agent_id, state.buffer_size) do
         {:ok, aggregate, _status} -> project_authoritative_read(agent_id, aggregate)
@@ -907,25 +1005,18 @@ defmodule Arbor.Memory.IntentStore do
 
     cond do
       result == :ok ->
-        {:noreply, %{state | pending_projection: Map.delete(state.pending_projection, agent_id)}}
+        {:noreply, clear_pending_projection_only(state, agent_id)}
 
-      attempts < @max_projection_attempts ->
+      is_integer(attempts) and attempts < @max_projection_attempts ->
         Process.send_after(self(), {:converge_projection, agent_id}, @projection_retry_ms)
 
         {:noreply,
          %{state | pending_projection: Map.put(state.pending_projection, agent_id, attempts + 1)}}
 
       true ->
-        {:noreply, %{state | pending_projection: Map.delete(state.pending_projection, agent_id)}}
+        {:noreply, clear_pending_projection_only(state, agent_id)}
     end
-  rescue
-    _ -> {:noreply, %{state | pending_projection: Map.delete(state.pending_projection, agent_id)}}
-  catch
-    _, _ ->
-      {:noreply, %{state | pending_projection: Map.delete(state.pending_projection, agent_id)}}
   end
-
-  def handle_info(_message, state), do: {:noreply, state}
 
   # ============================================================================
   # Private Helpers
@@ -1340,6 +1431,78 @@ defmodule Arbor.Memory.IntentStore do
     _ -> {:error, :projection_unavailable}
   catch
     _, _ -> {:error, :projection_unavailable}
+  end
+
+  # Content-only eviction: drops ETS projection without touching Provenance.
+  defp evict_live_projection_content_only(agent_id) do
+    true = :ets.delete(@ets_table, agent_id)
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
+  end
+
+  defp clear_pending_projection_only(%{pending_projection: pending} = state, agent_id) do
+    %{state | pending_projection: Map.delete(pending, agent_id)}
+  end
+
+  defp do_agent_content_absent?(agent_id, state) do
+    durable =
+      case load_durable_aggregate_presence(agent_id) do
+        :absent -> :absent
+        :present -> :present
+        {:error, reason} -> {:error, reason}
+      end
+
+    case durable do
+      {:error, _reason} = error ->
+        error
+
+      :present ->
+        {:ok, false}
+
+      :absent ->
+        ets_absent? = :ets.lookup(@ets_table, agent_id) == []
+        deferred_absent? = not Map.has_key?(state.pending_projection, agent_id)
+
+        if ets_absent? and deferred_absent? do
+          {:ok, true}
+        else
+          {:ok, false}
+        end
+    end
+  rescue
+    _ -> {:error, :absence_uncertain}
+  catch
+    _, _ -> {:error, :absence_uncertain}
+  end
+
+  defp load_durable_aggregate_presence(agent_id) do
+    case MemoryStore.load_tainted_authoritative_with_status("intents", agent_id) do
+      {:ok, _value, _status, _record, _location} ->
+        :present
+
+      {:error, :not_found} ->
+        :absent
+
+      {:error, {:memory_store, :critical, reason}}
+      when reason in [:durable_unavailable, :insufficient_durability] ->
+        {:error, :store_unavailable}
+
+      {:error, {:memory_store, :critical, :outcome_unknown}} ->
+        {:error, :absence_uncertain}
+
+      {:error, _reason} ->
+        {:error, :store_unavailable}
+
+      _ ->
+        {:error, :store_unavailable}
+    end
+  rescue
+    _ -> {:error, :store_unavailable}
+  catch
+    _, _ -> {:error, :store_unavailable}
   end
 
   defp durable_tainted_item(item, aggregate_status) do

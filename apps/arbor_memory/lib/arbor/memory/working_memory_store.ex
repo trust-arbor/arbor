@@ -198,6 +198,42 @@ defmodule Arbor.Memory.WorkingMemoryStore do
     _, _ -> error(:delete_failed)
   end
 
+  @doc """
+  Idempotent content-only deletion for exactly one agent.
+
+  Removes durable working-memory aggregate content and ETS projection.
+  Retains every Provenance sidecar byte-for-byte.
+
+  C3I2A precondition (caller-owned, not enforced here): C3I1 mutation gate
+  must be closed and drained before invoke. This API is not race-free agent
+  destruction.
+  """
+  @spec delete_agent_content(String.t()) :: :ok | {:error, term()}
+  def delete_agent_content(agent_id) do
+    with :ok <- validate_agent_id(agent_id) do
+      with_agent_transition(agent_id, fn -> delete_authoritative_content_only(agent_id) end)
+    end
+  rescue
+    _ -> error(:delete_failed)
+  catch
+    _, _ -> error(:delete_failed)
+  end
+
+  @doc """
+  Authoritative absence across durable working memory and ETS projection.
+  Returns `{:ok, true}` only when no exact-agent content remains.
+  """
+  @spec agent_content_absent?(String.t()) :: {:ok, boolean()} | {:error, term()}
+  def agent_content_absent?(agent_id) do
+    with :ok <- validate_agent_id(agent_id) do
+      with_agent_transition(agent_id, fn -> do_agent_content_absent?(agent_id) end)
+    end
+  rescue
+    _ -> error(:absence_uncertain)
+  catch
+    _, _ -> error(:absence_uncertain)
+  end
+
   @doc "Export the exact versioned durable WorkingMemory provenance snapshot."
   @spec export_working_memory_provenance_snapshot(String.t()) ::
           {:ok, map() | nil} | {:error, term()}
@@ -1356,6 +1392,64 @@ defmodule Arbor.Memory.WorkingMemoryStore do
       _ ->
         error(:delete_failed)
     end
+  end
+
+  # Content-only C3I cleanup: durable first, then ETS only. Never touches sidecars.
+  defp delete_authoritative_content_only(agent_id) do
+    case MemoryStore.delete_tainted_authoritative(@namespace, agent_id) do
+      :ok ->
+        _ = safe_ets_delete(agent_id)
+        :ok
+
+      {:error, _reason} = error ->
+        # Conservative projection eviction; provenance intact.
+        _ = safe_ets_delete(agent_id)
+        map_memory_store_error(error)
+
+      _ ->
+        _ = safe_ets_delete(agent_id)
+        error(:delete_failed)
+    end
+  rescue
+    _ -> error(:delete_failed)
+  catch
+    _, _ -> error(:delete_failed)
+  end
+
+  defp do_agent_content_absent?(agent_id) do
+    case MemoryStore.load_tainted_authoritative_with_status(@namespace, agent_id) do
+      {:ok, _value, _status, _record, _location} ->
+        {:ok, false}
+
+      {:error, :not_found} ->
+        ets_absent? =
+          case :ets.lookup(@working_memory_ets, agent_id) do
+            [] -> true
+            _ -> false
+          end
+
+        if ets_absent?, do: {:ok, true}, else: {:ok, false}
+
+      {:error, _reason} = error ->
+        map_memory_store_error(error)
+
+      _ ->
+        error(:absence_uncertain)
+    end
+  rescue
+    ArgumentError ->
+      # ETS table missing — treat projection as absent, still require durable check.
+      case MemoryStore.load_tainted_authoritative_with_status(@namespace, agent_id) do
+        {:ok, _value, _status, _record, _location} -> {:ok, false}
+        {:error, :not_found} -> {:ok, true}
+        {:error, _reason} = error -> map_memory_store_error(error)
+        _ -> error(:absence_uncertain)
+      end
+
+    _ ->
+      error(:absence_uncertain)
+  catch
+    _, _ -> error(:absence_uncertain)
   end
 
   # The local lock serializes same-node projection transitions. Multi-node
