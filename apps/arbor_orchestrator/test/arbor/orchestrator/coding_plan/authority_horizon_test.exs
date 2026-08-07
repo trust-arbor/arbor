@@ -67,6 +67,29 @@ defmodule Arbor.Orchestrator.CodingPlan.AuthorityHorizonTest do
       assert Enum.any?(resources, &String.starts_with?(&1, "arbor://"))
     end
 
+    test "entry/exit sentinels do not contribute a placeholder capability" do
+      # start [shape=Mdiamond] / done [shape=Msquare] carry no `type` attribute
+      # because they execute nothing. CapabilityCheck.capability_resources/1
+      # falls back to "arbor://orchestrator/execute/" <> type, defaulting the
+      # missing type to the literal string "unknown".
+      #
+      # At RUNTIME that default is deliberate fail-closed behaviour and must
+      # stay. In PREFLIGHT it made every coding dispatch demand
+      # `arbor://orchestrator/execute/unknown` from the caller — a parse
+      # placeholder, not a permission. Nobody would think to grant it, and
+      # granting it would be meaningless, so admission failed with
+      # authority_horizon_missing on an otherwise correctly authorized caller.
+      {:ok, graph} = minimal_compiled_graph()
+
+      manifest = %{"version" => 2, "capability_uris" => [], "nested_graphs" => []}
+
+      assert {:ok, resources} = AuthorityHorizon.derive_required_resources(graph, manifest)
+
+      refute "arbor://orchestrator/execute/unknown" in resources,
+             "sentinel nodes must not contribute a placeholder capability to the " <>
+               "caller's required set"
+    end
+
     test "hash-verifies a reviewed nested graph and includes its node-only resources" do
       {:ok, top} = minimal_compiled_graph()
       top_only = MapSet.new(top_node_resources(top))

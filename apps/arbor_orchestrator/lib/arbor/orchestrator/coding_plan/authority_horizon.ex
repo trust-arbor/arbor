@@ -188,10 +188,34 @@ defmodule Arbor.Orchestrator.CodingPlan.AuthorityHorizon do
   defp node_resources(%Graph{nodes: nodes}) when is_map(nodes) do
     nodes
     |> Map.values()
+    |> Enum.reject(&sentinel_node?/1)
     |> Enum.flat_map(&CapabilityCheck.capability_resources/1)
   end
 
   defp node_resources(_graph), do: []
+
+  # Entry/exit sentinels (`start [shape=Mdiamond]`, `done [shape=Msquare]`)
+  # carry no `type` attribute because they execute nothing.
+  #
+  # CapabilityCheck.capability_resources/1 falls back to
+  # "arbor://orchestrator/execute/" <> Map.get(attrs, "type", "unknown"). At
+  # RUNTIME that default is deliberate fail-closed behaviour: a node whose type
+  # is unrecognised demands a capability nobody holds, so it cannot execute.
+  # That behaviour is intentionally left alone.
+  #
+  # Preflight is different. It unions resources over EVERY node to derive what
+  # the caller must hold up front, so the sentinels contributed a literal
+  # `arbor://orchestrator/execute/unknown` to the required set. That is a parse
+  # placeholder, not a permission: no operator would think to grant it, and
+  # granting it would be meaningless. It made every coding dispatch fail
+  # admission with `authority_horizon_missing` until the caller held a
+  # nonsense capability. Sentinels are excluded here, not in the runtime gate.
+  defp sentinel_node?(node) do
+    attrs = Map.get(node, :attrs, %{})
+
+    is_nil(Map.get(attrs, "type")) and
+      Map.get(attrs, "shape") in ["Mdiamond", "Msquare"]
+  end
 
   defp collect_manifest_capability_uris(manifest) when is_map(manifest) do
     direct =

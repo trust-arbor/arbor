@@ -78,6 +78,109 @@ hard lifecycle operation with bounded worker/resource cleanup. Worker prose,
 terminal JSON, provider session identifiers, and a returned cancellation request
 are advisory evidence; the owner-observed task/workspace state is authoritative.
 
+## Caller prerequisites
+
+Dispatch has **two** independent authorization stages. Passing the first and
+failing the second is the common first-run experience, and the failure arrives
+after `arbor_dispatch_task` has already returned `ok: true`.
+
+### 1. Dispatch authority
+
+`arbor://agent/task/dispatch` (or the agent-scoped
+`arbor://agent/dispatch/<agent_id>`) with `:execute`. Without it the tool call
+itself is rejected.
+
+### 2. Authority horizon — the caller must hold what the graph will use
+
+Before execution, `AuthorityHorizon.preflight/1` derives the complete resource
+set the compiled graph will touch — union of top-level node resources, nested
+graph node resources, and the execution manifest's `capability_uris` — and
+requires the **calling principal** to hold every one of them for the whole run.
+Mid-run renewal is not accepted.
+
+Missing any of them fails admission in `preflight` with:
+
+```json
+{"code": "authority_horizon_missing",
+ "message": "authenticated_caller missing total_count=29; first=arbor://acp/tool",
+ "remediation": "Grant permanent or horizon-covering capabilities for the listed resources"}
+```
+
+For the standard `coding-change-v1` graph that set is 29 URIs: `arbor://acp/tool`,
+the `arbor://action/coding/*` family (workspace acquire/inspect/release/
+committed_change/recovery_summary, review_tree read/search, review/submit,
+reviewed_commit, dependency_baseline/check, design_checkpoint open/parse/
+capture/load/await), `arbor://action/git/commit`, `arbor://action/git/pr`,
+`arbor://action/mix/compile`, `arbor://action/council/review`,
+`arbor://action/consensus/decide_review`, and the
+`arbor://orchestrator/execute/*` handler URIs used by the graph.
+
+Derive the exact set for a plan rather than copying this list — it changes with
+the graph:
+
+```elixir
+{:ok, graph} = Arbor.Orchestrator.parse(File.read!("<task_dir>/coding-pipeline.dot"))
+manifest = File.read!("<task_dir>/coding-compile-manifest.json") |> Jason.decode!()
+
+{:ok, required} =
+  Arbor.Orchestrator.CodingPlan.AuthorityHorizon.derive_required_resources(
+    graph, manifest["execution_manifest"])
+```
+
+Grant them with `Arbor.Security.grant(principal: principal_id, resource: uri)`.
+
+### 3. Observation authority
+
+`arbor://agent/task/read` with `:read` is required by `arbor_task_status`,
+`arbor_task_result`, and `arbor_list_pending_approvals` — and it is **separate
+from dispatch authority**. A principal that can dispatch but lacks it gets
+`{:unauthorized, :task_read_required}` on every read, so the workflow in
+*Status, result, and approvals* below is unusable and a dispatched task's
+outcome is invisible.
+
+Grant `arbor://agent/task/read` alongside dispatch authority. There is no
+alternative read path: `arbor_status` has no task component.
+
+Related per-operation capabilities, only needed for those operations:
+`arbor://agent/task/cancel`, `arbor://agent/task/steer`,
+`arbor://agent/task/adopt` (the adopt grant is minted per task).
+
+### If a dispatch fails before you can read it
+
+`arbor_dispatch_task` returns `ok: true` once the task is accepted; admission
+failures happen afterwards. When reads are unauthorized, the terminal artifact
+is still on disk:
+
+```
+<coding_pipeline_logs_root>/task-<sha256(task_id)>/coding-task-terminal.json
+```
+
+`Arbor.Orchestrator.coding_pipeline_logs_root/0` returns the root. That
+directory also holds `coding-plan.json`, `coding-pipeline.dot`, and
+`coding-compile-manifest.json` for the compiled run.
+
+## Computing `work_packet_digest`
+
+Do not hand-compute it. The canonical encoding is owned by
+`Arbor.Contracts.Coding.WorkPacket`:
+
+```elixir
+{:ok, digest} = Arbor.Contracts.Coding.WorkPacket.digest(%{
+  "version" => 1,
+  "success_criteria" => ["..."],
+  "non_goals" => [],
+  "constraints" => [],
+  "architecture_refs" => [],
+  "required_evidence" => [],
+  "checkpoint_policy" => "direct"
+})
+# => "sha256:966e9d…"
+```
+
+`digest/1` normalizes through `new/1` before hashing, so the map you pass must
+be the same one you send in the plan. `canonical_bytes/1` returns the exact
+bytes hashed if you need to verify externally. `sha256/1` is an alias.
+
 ## Canonical payload
 
 Dispatch with a signed MCP request. The stable coding envelope is:
