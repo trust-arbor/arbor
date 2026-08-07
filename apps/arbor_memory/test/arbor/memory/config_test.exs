@@ -38,6 +38,23 @@ defmodule Arbor.Memory.ConfigTest do
             }} = Config.maintenance_archive_target()
   end
 
+  @tag packet: "VP-05D2C3I1A"
+  test "mutation admission namespace is fixed and backend defaults disabled" do
+    assert Config.fixed_mutation_admission_namespace() == :memory_mutation_admission
+    assert Config.mutation_admission_namespace() == {:ok, :memory_mutation_admission}
+    assert Config.mutation_admission_backend() == {:error, :disabled}
+    assert Config.validate_mutation_admission_backend(nil) == {:error, :disabled}
+
+    assert Config.validate_mutation_admission_backend(Arbor.Persistence.QueryableStore.Postgres) ==
+             {:ok, Arbor.Persistence.QueryableStore.Postgres}
+
+    assert Config.validate_mutation_admission_backend_opts(repo: Arbor.Persistence.Repo) ==
+             {:ok, [repo: Arbor.Persistence.Repo]}
+
+    assert Config.validate_mutation_admission_backend_opts(name: :x) ==
+             {:error, :invalid_config}
+  end
+
   test "rejects unknown, duplicate, and ambiguous target fields" do
     assert {:error, :invalid_event_log_target} =
              Config.normalize_event_log_target(%{

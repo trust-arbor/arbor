@@ -6,9 +6,16 @@ defmodule Arbor.Memory.Application do
   @graph_ets :arbor_memory_graphs
   @working_memory_ets :arbor_working_memory
   @preferences_ets :arbor_preferences
+  # BEAM-lifetime mutation-admission runtime fingerprint (VP-05D2C3I1A).
+  # Owned by the application process so it survives admission-subtree restarts.
+  @mutation_admission_runtime_ets :arbor_memory_mutation_admission_runtime
 
   @impl true
   def start(_type, _args) do
+    # Always ensure the runtime-fp table exists (even when start_children: false)
+    # so tests and shells can race-safely mint a BEAM-stable fingerprint.
+    ensure_ets(@mutation_admission_runtime_ets)
+
     children =
       if Application.get_env(:arbor_memory, :start_children, true) do
         # Create ETS tables eagerly to avoid race conditions.
@@ -26,6 +33,9 @@ defmodule Arbor.Memory.Application do
            backend: Application.get_env(:arbor_memory, :persistence_backend),
            write_mode: :async},
           {Registry, keys: :unique, name: Arbor.Memory.Registry},
+          {Registry, keys: :unique, name: Arbor.Memory.MutationAdmission.Registry},
+          {Arbor.Memory.MutationAdmission.GuardianSupervisor, []},
+          {Arbor.Memory.MutationAdmission, []},
           {Arbor.Memory.ArchiveCursorSigner, []},
           {Arbor.Memory.Provenance, []},
           {Arbor.Memory.Proposal.Store, []},

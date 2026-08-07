@@ -2,6 +2,7 @@
 
 Code.require_file("support/durable_graph_authority.ex", __DIR__)
 Code.require_file("support/durable_event_log.ex", __DIR__)
+Code.require_file("support/mutation_admission_fake_backend.ex", __DIR__)
 
 # Add children to the empty app supervisor (start_children: false leaves it empty)
 # Create ETS tables first (same as Application.start/2 does)
@@ -9,7 +10,9 @@ tables = [
   :arbor_memory_graphs,
   :arbor_working_memory,
   :arbor_memory_proposals,
-  :arbor_preferences
+  :arbor_preferences,
+  # VP-05D2C3I1A BEAM-lifetime runtime fingerprint table
+  :arbor_memory_mutation_admission_runtime
 ]
 
 for table <- tables do

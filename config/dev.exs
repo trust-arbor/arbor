@@ -77,7 +77,10 @@ config :arbor_memory,
     name: :memory_events_durable,
     backend: Arbor.Persistence.EventLog.Ecto,
     opts: [repo: Arbor.Persistence.Repo]
-  ]
+  ],
+  # VP-05D2C3I1A — durable mutation admission (QueryableStore Record authority)
+  mutation_admission_backend: Arbor.Persistence.QueryableStore.Postgres,
+  mutation_admission_backend_opts: [repo: Arbor.Persistence.Repo]
 
 # Dashboard — local dev server on port 4001
 # LiveView debug annotations for Tidewave AI integration
