@@ -1,11 +1,22 @@
 defmodule Arbor.Memory.PreconsciousTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
-  alias Arbor.Memory.{BackgroundChecks, Index, IndexSupervisor, Preconscious, Proposal, WorkingMemory}
+  alias Arbor.Memory.{
+    BackgroundChecks,
+    Index,
+    IndexSupervisor,
+    Preconscious,
+    Proposal,
+    WorkingMemory
+  }
+
+  alias Arbor.Memory.Test.DurableGraphAuthority
 
   @moduletag :fast
 
   setup do
+    DurableGraphAuthority.start!()
+
     agent_id = "test_agent_#{:erlang.unique_integer([:positive])}"
 
     # Ensure ETS tables exist
@@ -37,9 +48,7 @@ defmodule Arbor.Memory.PreconsciousTest do
   end
 
   defp cleanup_proposals(agent_id) do
-    if :ets.whereis(:arbor_memory_proposals) != :undefined do
-      :ets.match_delete(:arbor_memory_proposals, {{agent_id, :_}, :_})
-    end
+    _ = Proposal.delete_all(agent_id)
   end
 
   # ============================================================================
@@ -82,11 +91,13 @@ defmodule Arbor.Memory.PreconsciousTest do
 
       {:ok, context} = Preconscious.extract_context(agent_id)
 
-      assert [%{description: "Implement memory system"}, %{description: "Add vector search"}] = context.goals
+      assert [%{description: "Implement memory system"}, %{description: "Add vector search"}] =
+               context.goals
+
       # Goals should be included in search query
       assert String.contains?(context.combined_query, "memory") or
-             String.contains?(context.combined_query, "system") or
-             String.contains?(context.combined_query, "vector")
+               String.contains?(context.combined_query, "system") or
+               String.contains?(context.combined_query, "vector")
     end
 
     test "respects lookback option", %{agent_id: agent_id} do
@@ -136,8 +147,16 @@ defmodule Arbor.Memory.PreconsciousTest do
 
       # Index some content
       {:ok, pid} = IndexSupervisor.get_index(agent_id)
-      {:ok, _id1} = Index.index(pid, "Elixir GenServer patterns are useful", %{type: :fact}, embedding: embedding)
-      {:ok, _id2} = Index.index(pid, "OTP supervision trees help reliability", %{type: :fact}, embedding: embedding)
+
+      {:ok, _id1} =
+        Index.index(pid, "Elixir GenServer patterns are useful", %{type: :fact},
+          embedding: embedding
+        )
+
+      {:ok, _id2} =
+        Index.index(pid, "OTP supervision trees help reliability", %{type: :fact},
+          embedding: embedding
+        )
 
       # Set up working memory with related thoughts
       wm =
@@ -205,11 +224,12 @@ defmodule Arbor.Memory.PreconsciousTest do
 
   describe "configure/2" do
     test "sets custom configuration", %{agent_id: agent_id} do
-      :ok = Preconscious.configure(agent_id,
-        relevance_threshold: 0.6,
-        max_per_check: 5,
-        lookback_turns: 10
-      )
+      :ok =
+        Preconscious.configure(agent_id,
+          relevance_threshold: 0.6,
+          max_per_check: 5,
+          lookback_turns: 10
+        )
 
       config = Preconscious.get_config(agent_id)
 
@@ -261,8 +281,20 @@ defmodule Arbor.Memory.PreconsciousTest do
     test "creates proposals from anticipation results", %{agent_id: agent_id} do
       anticipation = %{
         memories: [
-          %{id: "mem_1", content: "Memory 1", similarity: 0.8, metadata: %{}, indexed_at: DateTime.utc_now()},
-          %{id: "mem_2", content: "Memory 2", similarity: 0.7, metadata: %{}, indexed_at: DateTime.utc_now()}
+          %{
+            id: "mem_1",
+            content: "Memory 1",
+            similarity: 0.8,
+            metadata: %{},
+            indexed_at: DateTime.utc_now()
+          },
+          %{
+            id: "mem_2",
+            content: "Memory 2",
+            similarity: 0.7,
+            metadata: %{},
+            indexed_at: DateTime.utc_now()
+          }
         ],
         query_used: "elixir patterns",
         relevance_score: 0.75,
@@ -343,7 +375,9 @@ defmodule Arbor.Memory.PreconsciousTest do
       embedding = for _ <- 1..768, do: :rand.uniform()
 
       {:ok, pid} = IndexSupervisor.get_index(agent_id)
-      {:ok, _id} = Index.index(pid, "Related memory content", %{type: :fact}, embedding: embedding)
+
+      {:ok, _id} =
+        Index.index(pid, "Related memory content", %{type: :fact}, embedding: embedding)
 
       wm =
         WorkingMemory.new(agent_id)
@@ -375,12 +409,13 @@ defmodule Arbor.Memory.PreconsciousTest do
         :ets.new(:arbor_memory_graphs, [:named_table, :public, :set])
       end
 
-      {:ok, proposal} = Proposal.create(agent_id, :preconscious, %{
-        content: "Surfaced memory",
-        confidence: 0.75,
-        source: "preconscious",
-        evidence: ["Topics: elixir"]
-      })
+      {:ok, proposal} =
+        Proposal.create(agent_id, :preconscious, %{
+          content: "Surfaced memory",
+          confidence: 0.75,
+          source: "preconscious",
+          evidence: ["Topics: elixir"]
+        })
 
       assert proposal.type == :preconscious
       assert proposal.content == "Surfaced memory"

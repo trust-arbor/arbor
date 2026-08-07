@@ -189,11 +189,10 @@ defmodule Arbor.Memory.Events do
   """
   @spec record_pending_rejected(String.t(), String.t(), atom(), String.t() | nil) ::
           :ok | {:error, term()}
-  def record_pending_rejected(agent_id, pending_id, pending_type, reason \\ nil) do
+  def record_pending_rejected(agent_id, pending_id, pending_type, _reason \\ nil) do
     dual_emit(agent_id, :pending_rejected, %{
       pending_id: pending_id,
-      pending_type: pending_type,
-      reason: reason
+      pending_type: pending_type
     })
   end
 

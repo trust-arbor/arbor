@@ -157,6 +157,17 @@ defmodule Arbor.Memory.KnowledgeGraphStore do
     end
   end
 
+  @spec reinforce_tainted(String.t(), String.t(), String.t(), Taint.t()) ::
+          {:ok, map()} | {:error, term()}
+  def reinforce_tainted(agent_id, operation_id, node_id, %Taint{} = taint) do
+    with {:ok, operation} <- Operation.reinforce(operation_id, node_id) do
+      call_operation(agent_id, operation, taint)
+    end
+  end
+
+  def reinforce_tainted(_agent_id, _operation_id, _node_id, _taint),
+    do: {:error, :invalid_graph}
+
   @spec merge_node_metadata(String.t(), String.t(), String.t(), map()) ::
           {:ok, map()} | {:error, term()}
   def merge_node_metadata(agent_id, operation_id, node_id, fields) do

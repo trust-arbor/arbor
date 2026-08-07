@@ -56,13 +56,13 @@ defmodule Arbor.Memory.Signals.Proposals do
 
   @doc """
   Emit a signal when an insight is detected.
+
+  Content is never included in the signal payload (content-free evidence).
   """
   @spec emit_insight_detected(String.t(), map()) :: :ok
   def emit_insight_detected(agent_id, suggestion) do
     Signals.emit_memory_signal(agent_id, :insight_detected, %{
       category: suggestion[:category],
-      content_preview: String.slice(suggestion[:content] || "", 0, 100),
-      confidence: suggestion[:confidence],
       detected_at: DateTime.utc_now()
     })
   end
@@ -75,9 +75,6 @@ defmodule Arbor.Memory.Signals.Proposals do
     Signals.emit_memory_signal(agent_id, :proposal_created, %{
       proposal_id: proposal.id,
       type: proposal.type,
-      content_preview: String.slice(proposal.content || "", 0, 100),
-      confidence: proposal.confidence,
-      source: proposal.source,
       created_at: DateTime.utc_now()
     })
   end
@@ -86,23 +83,25 @@ defmodule Arbor.Memory.Signals.Proposals do
   Emit a signal when a proposal is accepted.
   """
   @spec emit_proposal_accepted(String.t(), String.t(), String.t()) :: :ok
-  def emit_proposal_accepted(agent_id, proposal_id, node_id) do
+  def emit_proposal_accepted(agent_id, proposal_id, target_id) do
     Signals.emit_memory_signal(agent_id, :proposal_accepted, %{
       proposal_id: proposal_id,
-      node_id: node_id,
+      target_id: target_id,
       accepted_at: DateTime.utc_now()
     })
   end
 
   @doc """
   Emit a signal when a proposal is rejected.
+
+  The `reason` argument is accepted for source compatibility but is never
+  included in the signal payload (content-free evidence).
   """
   @spec emit_proposal_rejected(String.t(), String.t(), atom(), String.t() | nil) :: :ok
-  def emit_proposal_rejected(agent_id, proposal_id, proposal_type, reason) do
+  def emit_proposal_rejected(agent_id, proposal_id, proposal_type, _reason) do
     Signals.emit_memory_signal(agent_id, :proposal_rejected, %{
       proposal_id: proposal_id,
       proposal_type: proposal_type,
-      reason: reason,
       rejected_at: DateTime.utc_now()
     })
   end

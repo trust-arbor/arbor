@@ -123,10 +123,16 @@ defmodule Arbor.Memory.GraphOps do
   end
 
   @doc "Add a knowledge node with an authoritative source label."
-  @spec add_knowledge_tainted(String.t(), map(), Taint.t()) ::
+  @spec add_knowledge_tainted(String.t(), map(), Taint.t(), keyword()) ::
           {:ok, String.t()} | {:error, term()}
-  def add_knowledge_tainted(agent_id, node_data, %Taint{} = taint) do
-    operation_id = new_operation_id("add_node")
+  def add_knowledge_tainted(agent_id, node_data, taint, opts \\ [])
+
+  def add_knowledge_tainted(agent_id, node_data, %Taint{} = taint, opts) when is_list(opts) do
+    operation_id =
+      case Keyword.get(opts, :operation_id) do
+        id when is_binary(id) and id != "" -> id
+        _ -> new_operation_id("add_node")
+      end
 
     case reconcile_ambiguous(fn ->
            KnowledgeGraphStore.add_node_tainted(agent_id, operation_id, node_data, taint)
@@ -140,7 +146,7 @@ defmodule Arbor.Memory.GraphOps do
     end
   end
 
-  def add_knowledge_tainted(_agent_id, _node_data, _taint),
+  def add_knowledge_tainted(_agent_id, _node_data, _taint, _opts),
     do: {:error, :invalid_graph}
 
   @doc "Add a pending fact through durable authority using a conservative source label."
@@ -242,6 +248,33 @@ defmodule Arbor.Memory.GraphOps do
       KnowledgeGraphStore.reinforce(agent_id, operation_id, node_id)
     end)
   end
+
+  @doc """
+  Reinforce a knowledge node with an authoritative source label.
+
+  ## Options
+
+  - `:operation_id` — stable operation identity for exactly-once replay
+  """
+  @spec reinforce_knowledge_tainted(String.t(), String.t(), Taint.t(), keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def reinforce_knowledge_tainted(agent_id, node_id, taint, opts \\ [])
+
+  def reinforce_knowledge_tainted(agent_id, node_id, %Taint{} = taint, opts)
+      when is_list(opts) do
+    operation_id =
+      case Keyword.get(opts, :operation_id) do
+        id when is_binary(id) and id != "" -> id
+        _ -> new_operation_id("reinforce")
+      end
+
+    reconcile_ambiguous(fn ->
+      KnowledgeGraphStore.reinforce_tainted(agent_id, operation_id, node_id, taint)
+    end)
+  end
+
+  def reinforce_knowledge_tainted(_agent_id, _node_id, _taint, _opts),
+    do: {:error, :invalid_graph}
 
   @doc """
   Search knowledge graph by content.

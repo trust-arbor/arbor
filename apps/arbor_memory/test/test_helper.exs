@@ -22,6 +22,7 @@ for child <- [
       {Registry, keys: :unique, name: Arbor.Memory.Registry},
       {Arbor.Memory.ArchiveCursorSigner, []},
       {Arbor.Memory.Provenance, []},
+      {Arbor.Memory.Proposal.Store, []},
       {Arbor.Memory.KnowledgeGraphStore, []},
       {Arbor.Memory.IndexSupervisor, []},
       {Arbor.Persistence.EventLog.ETS, name: :memory_events},

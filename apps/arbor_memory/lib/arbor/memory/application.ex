@@ -5,7 +5,6 @@ defmodule Arbor.Memory.Application do
 
   @graph_ets :arbor_memory_graphs
   @working_memory_ets :arbor_working_memory
-  @proposals_ets :arbor_memory_proposals
   @preferences_ets :arbor_preferences
 
   @impl true
@@ -15,9 +14,10 @@ defmodule Arbor.Memory.Application do
         # Create ETS tables eagerly to avoid race conditions.
         # Tables must be owned by a long-lived process (the Application starter),
         # not by transient test or request processes.
+        # Note: :arbor_memory_proposals is intentionally not created — proposal
+        # authority is the supervised Proposal.Store process map.
         ensure_ets(@graph_ets)
         ensure_ets(@working_memory_ets)
-        ensure_ets(@proposals_ets)
         ensure_ets(@preferences_ets)
 
         [
@@ -28,6 +28,7 @@ defmodule Arbor.Memory.Application do
           {Registry, keys: :unique, name: Arbor.Memory.Registry},
           {Arbor.Memory.ArchiveCursorSigner, []},
           {Arbor.Memory.Provenance, []},
+          {Arbor.Memory.Proposal.Store, []},
           {Arbor.Memory.KnowledgeGraphStore, []},
           {Arbor.Memory.IndexSupervisor, []},
           {Arbor.Persistence.EventLog.ETS, name: :memory_events},

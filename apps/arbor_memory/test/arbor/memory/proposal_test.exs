@@ -1,37 +1,35 @@
 defmodule Arbor.Memory.ProposalTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
-  alias Arbor.Memory.{KnowledgeGraph, Proposal}
+  alias Arbor.Memory.{GraphOps, KnowledgeGraph, Proposal}
+  alias Arbor.Persistence.BufferedStore
 
   @moduletag :fast
 
   setup do
-    # Ensure ETS tables exist
-    ensure_ets_tables()
+    ensure_durable_store()
 
-    # Create a unique agent ID for each test
     agent_id = "test_agent_#{System.unique_integer([:positive])}"
-
-    # Initialize a graph for this agent
-    graph = KnowledgeGraph.new(agent_id)
-    :ets.insert(:arbor_memory_graphs, {agent_id, graph})
+    graph = KnowledgeGraph.new(agent_id, auto_embed: false)
+    assert :ok = GraphOps.save_graph(agent_id, graph)
 
     on_exit(fn ->
-      # Clean up
-      Proposal.delete_all(agent_id)
-      :ets.delete(:arbor_memory_graphs, agent_id)
+      _ = Proposal.delete_all(agent_id)
+      _ = GraphOps.export_knowledge_graph(agent_id)
     end)
 
     {:ok, agent_id: agent_id}
   end
 
-  defp ensure_ets_tables do
-    if :ets.whereis(:arbor_memory_graphs) == :undefined do
-      :ets.new(:arbor_memory_graphs, [:named_table, :public, :set])
-    end
+  defp ensure_durable_store do
+    case Process.whereis(:arbor_memory_durable) do
+      nil ->
+        start_supervised!(
+          {BufferedStore, name: :arbor_memory_durable, backend: nil, write_mode: :sync}
+        )
 
-    if :ets.whereis(:arbor_memory_proposals) == :undefined do
-      :ets.new(:arbor_memory_proposals, [:named_table, :public, :set])
+      _pid ->
+        :ok
     end
   end
 
@@ -78,30 +76,34 @@ defmodule Arbor.Memory.ProposalTest do
     test "creates a pattern proposal", %{agent_id: agent_id} do
       {:ok, proposal} =
         Proposal.create(agent_id, :pattern, %{
-          content: "Frequently uses Read before Edit",
-          confidence: 0.75
+          content: "Repeated shell-test cycle"
         })
 
       assert proposal.type == :pattern
     end
 
     test "rejects invalid type", %{agent_id: agent_id} do
-      {:error, {:invalid_type, :invalid, _}} =
-        Proposal.create(agent_id, :invalid, %{content: "test"})
+      assert {:error, {:invalid_type, :invalid, _}} =
+               Proposal.create(agent_id, :invalid, %{content: "test"})
     end
 
     test "requires content", %{agent_id: agent_id} do
-      {:error, :missing_content} = Proposal.create(agent_id, :fact, %{})
+      assert {:error, :missing_content} = Proposal.create(agent_id, :fact, %{})
     end
 
     test "uses default confidence", %{agent_id: agent_id} do
       {:ok, proposal} = Proposal.create(agent_id, :fact, %{content: "test"})
       assert proposal.confidence == 0.5
     end
+
+    test "returns proposal with id", %{agent_id: agent_id} do
+      {:ok, proposal} = Proposal.create(agent_id, :fact, %{content: "test id"})
+      assert is_binary(proposal.id)
+    end
   end
 
   describe "list_pending/2" do
-    test "lists all pending proposals", %{agent_id: agent_id} do
+    test "lists pending proposals", %{agent_id: agent_id} do
       {:ok, _} = Proposal.create(agent_id, :fact, %{content: "Fact 1"})
       {:ok, _} = Proposal.create(agent_id, :insight, %{content: "Insight 1"})
 
@@ -127,14 +129,14 @@ defmodule Arbor.Memory.ProposalTest do
       assert length(proposals) == 3
     end
 
-    test "sorts by created_at by default", %{agent_id: agent_id} do
+    test "sorts by created_at desc by default", %{agent_id: agent_id} do
       {:ok, p1} = Proposal.create(agent_id, :fact, %{content: "First"})
-      Process.sleep(1)
+      Process.sleep(2)
       {:ok, p2} = Proposal.create(agent_id, :fact, %{content: "Second"})
 
       {:ok, proposals} = Proposal.list_pending(agent_id)
-      # Default sort is descending by created_at
       assert hd(proposals).id == p2.id
+      assert List.last(proposals).id == p1.id
     end
 
     test "sorts by confidence", %{agent_id: agent_id} do
@@ -156,7 +158,7 @@ defmodule Arbor.Memory.ProposalTest do
     end
 
     test "returns error for non-existent proposal", %{agent_id: agent_id} do
-      {:error, :not_found} = Proposal.get(agent_id, "prop_nonexistent")
+      assert {:error, :not_found} = Proposal.get(agent_id, "prop_nonexistent")
     end
   end
 
@@ -170,14 +172,12 @@ defmodule Arbor.Memory.ProposalTest do
 
       {:ok, node_id} = Proposal.accept(agent_id, proposal.id)
 
-      assert node_id =~ ~r/^node_/
+      assert is_binary(node_id)
 
-      # Verify node was added to graph
-      [{^agent_id, graph}] = :ets.lookup(:arbor_memory_graphs, agent_id)
+      {:ok, graph} = GraphOps.get_graph(agent_id)
       {:ok, node} = KnowledgeGraph.get_node(graph, node_id)
 
       assert node.content == "Important fact"
-      # Confidence boost of 0.2 (0.7 + 0.2 = 0.9)
       assert_in_delta node.relevance, 0.9, 0.001
     end
 
@@ -190,23 +190,19 @@ defmodule Arbor.Memory.ProposalTest do
     end
 
     test "converts proposal types to node types correctly", %{agent_id: agent_id} do
-      # fact -> :fact
       {:ok, p1} = Proposal.create(agent_id, :fact, %{content: "F"})
       {:ok, n1_id} = Proposal.accept(agent_id, p1.id)
 
-      # insight -> :insight
       {:ok, p2} = Proposal.create(agent_id, :insight, %{content: "I"})
       {:ok, n2_id} = Proposal.accept(agent_id, p2.id)
 
-      # learning -> :skill
       {:ok, p3} = Proposal.create(agent_id, :learning, %{content: "L"})
       {:ok, n3_id} = Proposal.accept(agent_id, p3.id)
 
-      # pattern -> :experience
       {:ok, p4} = Proposal.create(agent_id, :pattern, %{content: "P"})
       {:ok, n4_id} = Proposal.accept(agent_id, p4.id)
 
-      [{^agent_id, graph}] = :ets.lookup(:arbor_memory_graphs, agent_id)
+      {:ok, graph} = GraphOps.get_graph(agent_id)
       {:ok, n1} = KnowledgeGraph.get_node(graph, n1_id)
       {:ok, n2} = KnowledgeGraph.get_node(graph, n2_id)
       {:ok, n3} = KnowledgeGraph.get_node(graph, n3_id)
@@ -216,6 +212,13 @@ defmodule Arbor.Memory.ProposalTest do
       assert n2.type == :insight
       assert n3.type == :skill
       assert n4.type == :experience
+    end
+
+    test "re-accept of completed transfer is idempotent", %{agent_id: agent_id} do
+      {:ok, proposal} = Proposal.create(agent_id, :fact, %{content: "Test"})
+      {:ok, target1} = Proposal.accept(agent_id, proposal.id)
+      {:ok, target2} = Proposal.accept(agent_id, proposal.id)
+      assert target1 == target2
     end
   end
 
@@ -283,7 +286,6 @@ defmodule Arbor.Memory.ProposalTest do
 
       assert length(results) == 1
 
-      # Check that insight is still pending
       {:ok, pending} = Proposal.list_pending(agent_id)
       assert length(pending) == 1
       assert hd(pending).type == :insight
@@ -329,20 +331,12 @@ defmodule Arbor.Memory.ProposalTest do
   end
 
   describe "status validation" do
-    test "cannot accept already accepted proposal", %{agent_id: agent_id} do
-      {:ok, proposal} = Proposal.create(agent_id, :fact, %{content: "Test"})
-      {:ok, _} = Proposal.accept(agent_id, proposal.id)
-
-      {:error, {:invalid_status, :accepted, :pending}} =
-        Proposal.accept(agent_id, proposal.id)
-    end
-
     test "cannot reject already rejected proposal", %{agent_id: agent_id} do
       {:ok, proposal} = Proposal.create(agent_id, :fact, %{content: "Test"})
       :ok = Proposal.reject(agent_id, proposal.id)
 
-      {:error, {:invalid_status, :rejected, :pending}} =
-        Proposal.reject(agent_id, proposal.id)
+      assert {:error, {:invalid_status, :rejected, :pending}} =
+               Proposal.reject(agent_id, proposal.id)
     end
   end
 end
