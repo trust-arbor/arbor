@@ -142,10 +142,10 @@ defmodule Arbor.Historian.StreamContentTest do
       record_call(name, :absent, stream_id)
 
       case take_script(name, :absent) do
-        :true ->
+        true ->
           {:ok, true}
 
-        :false ->
+        false ->
           {:ok, false}
 
         :ok ->
@@ -364,7 +364,7 @@ defmodule Arbor.Historian.StreamContentTest do
         {:durable_verify, :durable_name, :absent, :malformed, :none_proven_absent},
         {:durable_verify, :durable_name, :absent, :raise, :none_proven_absent},
         {:durable_verify, :durable_name, :absent, :exit, :none_proven_absent},
-        {:durable_verify, :durable_name, :absent, :false, :none_proven_absent},
+        {:durable_verify, :durable_name, :absent, false, :none_proven_absent},
         {:hot_delete, :hot_name, :purge, :indeterminate, :durable_proven_absent},
         {:hot_delete, :hot_name, :purge, :malformed, :durable_proven_absent},
         {:hot_delete, :hot_name, :purge, :raise, :durable_proven_absent},
@@ -373,7 +373,7 @@ defmodule Arbor.Historian.StreamContentTest do
         {:hot_verify, :hot_name, :absent, :malformed, :durable_proven_absent},
         {:hot_verify, :hot_name, :absent, :raise, :durable_proven_absent},
         {:hot_verify, :hot_name, :absent, :exit, :durable_proven_absent},
-        {:hot_verify, :hot_name, :absent, :false, :durable_proven_absent}
+        {:hot_verify, :hot_name, :absent, false, :durable_proven_absent}
       ] do
     test "inject #{stage}/#{inject} reports incomplete then retry converges", context do
       stage = unquote(stage)
@@ -526,7 +526,7 @@ defmodule Arbor.Historian.StreamContentTest do
   } do
     seed(durable_name, hot_name, "target")
     script(durable_name, :purge, [:ok])
-    script(durable_name, :absent, [:true])
+    script(durable_name, :absent, [true])
     script(hot_name, :purge, [:unavailable])
 
     assert {:error, {:delete_incomplete, "target", :hot_delete, :durable_proven_absent}} =
@@ -542,7 +542,7 @@ defmodule Arbor.Historian.StreamContentTest do
   } do
     seed(durable_name, hot_name, "target")
     script(durable_name, :purge, [:ok])
-    script(durable_name, :absent, [:true])
+    script(durable_name, :absent, [true])
     script(hot_name, :purge, [:not_supported])
 
     assert {:error, {:delete_incomplete, "target", :hot_delete, :durable_proven_absent}} =
@@ -634,12 +634,12 @@ defmodule Arbor.Historian.StreamContentTest do
 
       :hot_delete ->
         script(durable_name, :purge, [:ok])
-        script(durable_name, :absent, [:true])
+        script(durable_name, :absent, [true])
         script(name, op, [inject])
 
       :hot_verify ->
         script(durable_name, :purge, [:ok])
-        script(durable_name, :absent, [:true])
+        script(durable_name, :absent, [true])
         script(hot_name, :purge, [:ok])
         script(name, op, [inject])
     end

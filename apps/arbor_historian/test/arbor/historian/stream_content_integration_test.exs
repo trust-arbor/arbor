@@ -63,11 +63,14 @@ defmodule Arbor.Historian.StreamContentIntegrationTest do
     adapter = Repo.__adapter__()
 
     adapter_tag =
-      cond do
-        adapter == Ecto.Adapters.SQLite3 -> :sqlite
-        adapter == Ecto.Adapters.Postgres -> :postgres
-        true -> :unknown_adapter
-      end
+      Map.get(
+        %{
+          Ecto.Adapters.SQLite3 => :sqlite,
+          Ecto.Adapters.Postgres => :postgres
+        },
+        adapter,
+        :unknown_adapter
+      )
 
     {:ok, hot_name: hot_name, adapter: adapter, adapter_tag: adapter_tag}
   end
