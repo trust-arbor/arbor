@@ -5,6 +5,8 @@ defmodule Arbor.Persistence.EventLogBackendSecurityRegressionTest do
   alias Arbor.Persistence.EventLog.Agent, as: AgentEventLog
   alias Arbor.Persistence.EventLog.ETS
 
+  @queued_append_timeout_ms 1_000
+
   test "security regression: ETS expected_version is an atomic compare-and-append" do
     name = unique_name(:ets_cas_parent_proof)
     start_supervised!({ETS, name: name})
@@ -33,12 +35,12 @@ defmodule Arbor.Persistence.EventLogBackendSecurityRegressionTest do
       Task.async(fn ->
         ETS.append("queued", Event.new("queued", "must-not-commit", %{}),
           name: name,
-          append_timeout_ms: 20
+          append_timeout_ms: @queued_append_timeout_ms
         )
       end)
 
     wait_for_queued_call(Process.whereis(name))
-    Process.sleep(35)
+    Process.sleep(@queued_append_timeout_ms + 50)
     :ok = :sys.resume(name)
 
     assert {:error, {:append_indeterminate, _operation}} = Task.await(task, 1_000)
@@ -54,12 +56,12 @@ defmodule Arbor.Persistence.EventLogBackendSecurityRegressionTest do
       Task.async(fn ->
         AgentEventLog.append("queued", Event.new("queued", "must-not-commit", %{}),
           name: name,
-          append_timeout_ms: 20
+          append_timeout_ms: @queued_append_timeout_ms
         )
       end)
 
     wait_for_queued_call(Process.whereis(name))
-    Process.sleep(35)
+    Process.sleep(@queued_append_timeout_ms + 50)
     :ok = :sys.resume(name)
 
     assert {:error, {:append_indeterminate, _operation}} = Task.await(task, 1_000)
@@ -69,7 +71,7 @@ defmodule Arbor.Persistence.EventLogBackendSecurityRegressionTest do
   defp unique_name(prefix),
     do: :"#{prefix}_#{System.unique_integer([:positive])}"
 
-  defp wait_for_queued_call(pid, attempts \\ 100)
+  defp wait_for_queued_call(pid, attempts \\ 2_000)
 
   defp wait_for_queued_call(_pid, 0), do: flunk("append call was not queued")
 
