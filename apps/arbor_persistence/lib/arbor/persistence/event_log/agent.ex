@@ -68,6 +68,17 @@ defmodule Arbor.Persistence.EventLog.Agent do
   end
 
   @impl Arbor.Persistence.EventLog
+  def stream_absent(stream_id, opts) do
+    EventLog.with_operation_deadline(opts, :absence, fn normalized_opts, deadline_mono ->
+      with {:ok, normalized_opts, ^deadline_mono} <-
+             EventLog.prepare_absence(stream_id, normalized_opts),
+           {:ok, name} <- fetch_name(normalized_opts) do
+        run_bounded_absence(name, stream_id, deadline_mono)
+      end
+    end)
+  end
+
+  @impl Arbor.Persistence.EventLog
   def read_stream(stream_id, opts) do
     name = Keyword.fetch!(opts, :name)
     from_num = Keyword.get(opts, :from, 0)
@@ -506,6 +517,104 @@ defmodule Arbor.Persistence.EventLog.Agent do
     _error -> EventLog.purge_indeterminate(stream_id)
   catch
     :exit, _reason -> EventLog.purge_indeterminate(stream_id)
+  end
+
+  defp run_bounded_absence(name, stream_id, deadline_mono) do
+    if BoundedWorker.active?() do
+      run_owned_absence(name, stream_id, deadline_mono)
+    else
+      case BoundedWorker.run(
+             fn ->
+               EventLog.with_inherited_deadline(deadline_mono, fn ->
+                 name
+                 |> run_owned_absence(stream_id, deadline_mono)
+                 |> EventLog.stamp_completion()
+               end)
+             end,
+             deadline_mono
+           ) do
+        {:ok, completion} ->
+          EventLog.accept_absence_completion(completion, stream_id, deadline_mono)
+
+        {:error, _uncertain} ->
+          EventLog.absence_indeterminate(stream_id)
+      end
+    end
+  end
+
+  defp run_owned_absence(name, stream_id, deadline_mono) do
+    with {:ok, owner_identity} <- BoundedWorker.owner_identity() do
+      safe_absence(name, stream_id, deadline_mono, owner_identity)
+    else
+      {:error, :owner_inactive} -> EventLog.absence_indeterminate(stream_id)
+    end
+  end
+
+  defp safe_absence(name, stream_id, deadline_mono, owner_identity) do
+    with true <- is_pid(Process.whereis(name)),
+         {:ok, timeout} <- EventLog.remaining_timeout(deadline_mono) do
+      reply =
+        Agent.get(
+          name,
+          fn state ->
+            try do
+              case absence_candidate(state, stream_id, deadline_mono, owner_identity) do
+                {:ok, true} ->
+                  EventLog.stamp_completion({:ok, true})
+
+                {:ok, false} ->
+                  EventLog.stamp_completion({:ok, false})
+
+                {:error, :absence_verification_failed} = error ->
+                  EventLog.stamp_completion(error)
+
+                {:error, _uncertain} ->
+                  EventLog.stamp_completion(EventLog.absence_indeterminate(stream_id))
+              end
+            rescue
+              _error ->
+                EventLog.stamp_completion(EventLog.absence_indeterminate(stream_id))
+            catch
+              _kind, _reason ->
+                EventLog.stamp_completion(EventLog.absence_indeterminate(stream_id))
+            end
+          end,
+          timeout
+        )
+
+      EventLog.accept_absence_completion(reply, stream_id, deadline_mono)
+    else
+      false -> {:error, :backend_unavailable}
+      {:error, :operation_timeout} -> EventLog.absence_indeterminate(stream_id)
+    end
+  rescue
+    _error -> EventLog.absence_indeterminate(stream_id)
+  catch
+    :exit, _reason -> EventLog.absence_indeterminate(stream_id)
+  end
+
+  defp absence_candidate(state, stream_id, deadline_mono, owner_identity) do
+    with :ok <- validate_purge_owner(owner_identity, deadline_mono) do
+      case verify_agent_stream_absent(state, stream_id, deadline_mono, owner_identity) do
+        :ok ->
+          with :ok <- validate_purge_owner(owner_identity, deadline_mono) do
+            {:ok, true}
+          else
+            {:error, :owner_inactive} -> {:error, :operation_timeout}
+          end
+
+        {:error, :purge_verification_failed} ->
+          {:ok, false}
+
+        {:error, :operation_timeout} = error ->
+          error
+
+        {:error, _uncertain} = error ->
+          error
+      end
+    else
+      {:error, :owner_inactive} -> {:error, :operation_timeout}
+    end
   end
 
   defp purge_candidate(state, stream_id, deadline_mono, owner_identity) do

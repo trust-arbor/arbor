@@ -1064,6 +1064,46 @@ defmodule Arbor.Persistence do
     end)
   end
 
+  @doc """
+  Prove whether one complete EventLog stream is absent.
+
+  Read-only authority for every backend-owned event, version, identity,
+  subscriber, and operation-fence surface on the exact stream. Returns
+  `{:ok, true}` only after a serialized complete-state check proves absence,
+  `{:ok, false}` when retained state is observed, and a closed error for
+  unsupported backends or post-dispatch uncertainty.
+  """
+  @spec event_stream_absent?(atom(), module(), String.t(), keyword()) :: EventLog.absence_result()
+  def event_stream_absent?(name, backend, stream_id, opts \\ []) do
+    EventLog.with_operation_deadline(opts, :absence, fn normalized_opts, deadline_mono ->
+      backend_opts = Keyword.put(normalized_opts, :name, name)
+
+      with :ok <- validate_store_name(name),
+           {:ok, backend_opts, ^deadline_mono} <-
+             EventLog.prepare_absence(stream_id, backend_opts),
+           :ok <- validate_backend(backend, :stream_absent, 2) do
+        case BoundedWorker.run(
+               fn ->
+                 EventLog.with_inherited_deadline(deadline_mono, fn ->
+                   backend.stream_absent(stream_id, backend_opts)
+                   |> EventLog.stamp_completion()
+                 end)
+               end,
+               deadline_mono
+             ) do
+          {:ok, completion} ->
+            EventLog.accept_absence_completion(completion, stream_id, deadline_mono)
+
+          {:error, _uncertain} ->
+            EventLog.absence_indeterminate(stream_id)
+        end
+      else
+        {:error, :backend_unavailable} -> {:error, :absence_not_supported}
+        {:error, _reason} = error -> error
+      end
+    end)
+  end
+
   @doc "Read events from a stream."
   @spec read_stream(atom(), module(), String.t(), keyword()) ::
           {:ok, [Event.t()]} | {:error, term()}
@@ -1206,6 +1246,10 @@ defmodule Arbor.Persistence do
   @impl Arbor.Contracts.API.Persistence
   def purge_complete_event_stream_using_backend(name, backend, stream_id, opts),
     do: purge_stream(name, backend, stream_id, opts)
+
+  @impl Arbor.Contracts.API.Persistence
+  def check_complete_event_stream_absent_using_backend(name, backend, stream_id, opts),
+    do: event_stream_absent?(name, backend, stream_id, opts)
 
   @impl Arbor.Contracts.API.Persistence
   def read_events_from_stream_using_backend(name, backend, stream_id, opts),

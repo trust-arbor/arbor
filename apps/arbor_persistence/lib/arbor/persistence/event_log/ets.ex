@@ -98,6 +98,17 @@ defmodule Arbor.Persistence.EventLog.ETS do
   end
 
   @impl Arbor.Persistence.EventLog
+  def stream_absent(stream_id, opts) do
+    EventLog.with_operation_deadline(opts, :absence, fn normalized_opts, deadline_mono ->
+      with {:ok, normalized_opts, ^deadline_mono} <-
+             EventLog.prepare_absence(stream_id, normalized_opts),
+           {:ok, name} <- fetch_name(normalized_opts) do
+        run_bounded_absence(name, stream_id, deadline_mono)
+      end
+    end)
+  end
+
+  @impl Arbor.Persistence.EventLog
   def read_stream(stream_id, opts) do
     name = Keyword.fetch!(opts, :name)
     GenServer.call(name, {:read_stream, stream_id, opts})
@@ -420,6 +431,15 @@ defmodule Arbor.Persistence.EventLog.ETS do
       ) do
     {result, next_state} = purge_serialized(state, stream_id, deadline_mono, owner_identity)
     {:reply, EventLog.stamp_completion(result), next_state}
+  end
+
+  def handle_call(
+        {:stream_absent, stream_id, deadline_mono, owner_identity},
+        _from,
+        state
+      ) do
+    result = absence_serialized(state, stream_id, deadline_mono, owner_identity)
+    {:reply, EventLog.stamp_completion(result), state}
   end
 
   def handle_call({:read_stream, stream_id, opts}, _from, state) do
@@ -1023,6 +1043,114 @@ defmodule Arbor.Persistence.EventLog.ETS do
     _error -> EventLog.purge_indeterminate(stream_id)
   catch
     :exit, _reason -> EventLog.purge_indeterminate(stream_id)
+  end
+
+  defp run_bounded_absence(name, stream_id, deadline_mono) do
+    if BoundedWorker.active?() do
+      run_owned_absence(name, stream_id, deadline_mono)
+    else
+      case BoundedWorker.run(
+             fn ->
+               EventLog.with_inherited_deadline(deadline_mono, fn ->
+                 name
+                 |> run_owned_absence(stream_id, deadline_mono)
+                 |> EventLog.stamp_completion()
+               end)
+             end,
+             deadline_mono
+           ) do
+        {:ok, completion} ->
+          EventLog.accept_absence_completion(completion, stream_id, deadline_mono)
+
+        {:error, _uncertain} ->
+          EventLog.absence_indeterminate(stream_id)
+      end
+    end
+  end
+
+  defp run_owned_absence(name, stream_id, deadline_mono) do
+    with {:ok, owner_identity} <- BoundedWorker.owner_identity() do
+      safe_absence_call(name, stream_id, deadline_mono, owner_identity)
+    else
+      {:error, :owner_inactive} -> EventLog.absence_indeterminate(stream_id)
+    end
+  end
+
+  defp safe_absence_call(name, stream_id, deadline_mono, owner_identity) do
+    with {:ok, timeout} <- EventLog.remaining_timeout(deadline_mono) do
+      name
+      |> GenServer.call({:stream_absent, stream_id, deadline_mono, owner_identity}, timeout)
+      |> EventLog.accept_absence_completion(stream_id, deadline_mono)
+    else
+      {:error, :operation_timeout} -> EventLog.absence_indeterminate(stream_id)
+    end
+  rescue
+    _error -> EventLog.absence_indeterminate(stream_id)
+  catch
+    :exit, _reason -> EventLog.absence_indeterminate(stream_id)
+  end
+
+  defp absence_serialized(state, stream_id, deadline_mono, owner_identity) do
+    # One owner-serialized pass: each surface is observed once. False only when a
+    # successful select/metadata read positively shows target retention. Select
+    # failures, owner death, and timeouts never become {:ok, false}.
+    stream_match = [{{{stream_id, :"$1"}, :"$2"}, [], [:"$_"]}]
+    global_match = [{{:"$1", %{stream_id: stream_id}}, [], [:"$_"]}]
+    identity_match = [{{:"$1", {:"$2", stream_id, :"$3", :"$4"}}, [], [:"$_"]}]
+
+    with :ok <- validate_purge_owner(owner_identity, deadline_mono),
+         true <- not identity_history_unavailable?(state),
+         {:ok, stream_rows} <-
+           select_rows(state.stream_table, stream_match, deadline_mono, owner_identity),
+         {:ok, global_rows} <-
+           select_rows(state.global_table, global_match, deadline_mono, owner_identity),
+         {:ok, identity_rows} <-
+           select_rows(state.id_table, identity_match, deadline_mono, owner_identity),
+         {:ok, stream_identity_rows} <-
+           select_rows(
+             state.identity_stream_position_table,
+             stream_match,
+             deadline_mono,
+             owner_identity
+           ) do
+      event_ids = purge_event_ids(global_rows, identity_rows, stream_identity_rows)
+
+      with {:ok, identity_position_rows} <-
+             select_identity_positions(
+               state.identity_position_table,
+               event_ids,
+               deadline_mono,
+               owner_identity
+             ),
+           :ok <- validate_purge_owner(owner_identity, deadline_mono) do
+        retained? =
+          stream_rows != [] or global_rows != [] or identity_rows != [] or
+            stream_identity_rows != [] or identity_position_rows != [] or
+            not ets_stream_absent?(state, stream_id)
+
+        if retained?, do: {:ok, false}, else: {:ok, true}
+      else
+        {:error, :operation_timeout} -> EventLog.absence_indeterminate(stream_id)
+        {:error, :owner_inactive} -> EventLog.absence_indeterminate(stream_id)
+        {:error, :purge_verification_failed} -> EventLog.absence_indeterminate(stream_id)
+        {:error, _uncertain} -> EventLog.absence_indeterminate(stream_id)
+      end
+    else
+      false ->
+        {:error, :absence_verification_failed}
+
+      {:error, :operation_timeout} ->
+        EventLog.absence_indeterminate(stream_id)
+
+      {:error, :owner_inactive} ->
+        EventLog.absence_indeterminate(stream_id)
+
+      {:error, :purge_verification_failed} ->
+        EventLog.absence_indeterminate(stream_id)
+
+      {:error, _uncertain} ->
+        EventLog.absence_indeterminate(stream_id)
+    end
   end
 
   defp purge_serialized(state, stream_id, deadline_mono, owner_identity) do

@@ -71,6 +71,21 @@ defmodule Arbor.Contracts.API.Persistence do
           | {:error, {:purge_indeterminate, stream_id()}}
           | {:error, event_stream_purge_error()}
 
+  @typedoc "Closed public failures for complete EventLog stream absence checks."
+  @type event_stream_absence_error ::
+          :backend_unavailable
+          | :invalid_precondition
+          | :invalid_stream_id
+          | :absence_not_supported
+          | :absence_verification_failed
+
+  @typedoc "Result of a bounded complete EventLog stream absence check."
+  @type event_stream_absence_result ::
+          {:ok, true}
+          | {:ok, false}
+          | {:error, {:absence_indeterminate, stream_id()}}
+          | {:error, event_stream_absence_error()}
+
   @typedoc "Canonical vector mutation or bounded atomic batch."
   @type vector_operation :: Arbor.Contracts.Persistence.VectorOperation.t()
 
@@ -347,6 +362,23 @@ defmodule Arbor.Contracts.API.Persistence do
             ) :: event_stream_purge_result()
 
   @doc """
+  Prove whether one complete EventLog stream is absent on the specified backend.
+
+  Read-only. Success with true proves every backend-owned event, version,
+  identity, subscriber, and operation-fence surface for the exact stream is
+  absent. false means retained state. Indeterminate means dispatch occurred
+  but absence could not be proved. Unsupported backends fail before dispatch.
+
+  `:absence_timeout_ms` is the operation-specific absolute deadline (1..60000 ms).
+  """
+  @callback check_complete_event_stream_absent_using_backend(
+              store_name(),
+              backend(),
+              stream_id(),
+              opts()
+            ) :: event_stream_absence_result()
+
+  @doc """
   Read all events from a specific stream using the specified backend.
 
   Returns events ordered by event number within the stream.
@@ -581,6 +613,7 @@ defmodule Arbor.Contracts.API.Persistence do
     append_events_to_stream_using_backend: 5,
     reconcile_event_append_using_backend: 4,
     purge_complete_event_stream_using_backend: 4,
+    check_complete_event_stream_absent_using_backend: 4,
     read_events_from_stream_using_backend: 4,
     read_current_stream_head_using_backend: 4,
     read_all_events_using_backend: 3,

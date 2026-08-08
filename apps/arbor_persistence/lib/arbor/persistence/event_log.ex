@@ -66,6 +66,17 @@ defmodule Arbor.Persistence.EventLog do
           :ok
           | {:error, {:purge_indeterminate, stream_id()}}
           | {:error, purge_error()}
+  @type absence_error ::
+          :backend_unavailable
+          | :invalid_precondition
+          | :invalid_stream_id
+          | :absence_not_supported
+          | :absence_verification_failed
+  @type absence_result ::
+          {:ok, true}
+          | {:ok, false}
+          | {:error, {:absence_indeterminate, stream_id()}}
+          | {:error, absence_error()}
 
   @doc """
   Append one or more events to a stream.
@@ -126,6 +137,23 @@ defmodule Arbor.Persistence.EventLog do
   remain loadable. The public facade rejects those adapters before dispatch.
   """
   @callback purge_stream(stream_id(), opts()) :: purge_result()
+
+  @doc """
+  Prove whether one complete stream is absent on every backend-owned surface.
+
+  Read-only. Returns `{:ok, true}` only after events, versions, identities,
+  subscribers, and operation-fence rows owned by the backend for the exact
+  stream are proven absent under one serialized observation. Retained state
+  returns `{:ok, false}`. Post-dispatch uncertainty returns
+  `{:error, {:absence_indeterminate, stream_id}}`.
+
+  `:absence_timeout_ms` sets one absolute `1..60_000` millisecond deadline
+  (default `5_000`) across validation, dispatch, serialized reads,
+  verification, and reply. This callback is optional so adapters that cannot
+  prove complete absence remain loadable; the public facade rejects those
+  adapters before dispatch.
+  """
+  @callback stream_absent(stream_id(), opts()) :: absence_result()
 
   @doc """
   Read events from a stream.
@@ -233,6 +261,7 @@ defmodule Arbor.Persistence.EventLog do
   @optional_callbacks [
     reconcile_append: 2,
     purge_stream: 2,
+    stream_absent: 2,
     read_stream_range: 2,
     event_identity: 3,
     subscribe: 3,
@@ -256,12 +285,12 @@ defmodule Arbor.Persistence.EventLog do
   @doc false
   @spec with_operation_deadline(
           term(),
-          :append | :purge,
+          :append | :purge | :absence,
           (keyword(), integer() -> result)
         ) :: result | {:error, :invalid_precondition}
         when result: term()
   def with_operation_deadline(opts, operation, fun)
-      when operation in [:append, :purge] and is_function(fun, 2) do
+      when operation in [:append, :purge, :absence] and is_function(fun, 2) do
     started_mono = System.monotonic_time(:millisecond)
 
     with {:ok, normalized_opts} <- normalize_opts(opts),
@@ -362,6 +391,19 @@ defmodule Arbor.Persistence.EventLog do
          :ok <- validate_stream_id(stream_id),
          {:ok, normalized_opts} <- normalize_opts(opts),
          :ok <- validate_purge_opts(normalized_opts) do
+      {:ok, normalized_opts, deadline_mono}
+    end
+  end
+
+  @doc false
+  @spec prepare_absence(stream_id(), term()) ::
+          {:ok, keyword(), integer()}
+          | {:error, :invalid_stream_id | :invalid_precondition}
+  def prepare_absence(stream_id, opts) do
+    with {:ok, deadline_mono} <- require_active_deadline(),
+         :ok <- validate_stream_id(stream_id),
+         {:ok, normalized_opts} <- normalize_opts(opts),
+         :ok <- validate_absence_opts(normalized_opts) do
       {:ok, normalized_opts, deadline_mono}
     end
   end
@@ -511,6 +553,16 @@ defmodule Arbor.Persistence.EventLog do
   end
 
   @doc false
+  @spec absence_indeterminate(term()) ::
+          {:error, {:absence_indeterminate, stream_id()}}
+          | {:error, :invalid_stream_id}
+  def absence_indeterminate(stream_id) do
+    with :ok <- validate_stream_id(stream_id) do
+      {:error, {:absence_indeterminate, stream_id}}
+    end
+  end
+
+  @doc false
   @spec remaining_timeout(integer()) :: {:ok, pos_integer()} | {:error, :operation_timeout}
   def remaining_timeout(deadline_mono) when is_integer(deadline_mono) do
     remaining_ms = deadline_mono - System.monotonic_time(:millisecond)
@@ -600,6 +652,42 @@ defmodule Arbor.Persistence.EventLog do
     do: purge_indeterminate(stream_id)
 
   @doc false
+  @spec accept_absence_completion(term(), stream_id(), integer()) :: absence_result()
+  def accept_absence_completion(
+        {:event_log_completion, completed_mono, result},
+        stream_id,
+        deadline_mono
+      ) do
+    accept_absence_completion(result, stream_id, deadline_mono, completed_mono)
+  end
+
+  def accept_absence_completion(_invalid_reply, stream_id, _deadline_mono),
+    do: absence_indeterminate(stream_id)
+
+  @doc false
+  @spec accept_absence_completion(term(), stream_id(), integer(), integer()) :: absence_result()
+  def accept_absence_completion(
+        {:error, {:absence_indeterminate, stream_id}} = result,
+        stream_id,
+        _deadline_mono,
+        _completed_mono
+      ),
+      do: result
+
+  def accept_absence_completion(result, stream_id, deadline_mono, completed_mono)
+      when is_integer(deadline_mono) and is_integer(completed_mono) do
+    received_mono = System.monotonic_time(:millisecond)
+
+    if completed_mono < deadline_mono and received_mono < deadline_mono and
+         valid_absence_result?(result),
+       do: result,
+       else: absence_indeterminate(stream_id)
+  end
+
+  def accept_absence_completion(_result, stream_id, _deadline_mono, _completed_mono),
+    do: absence_indeterminate(stream_id)
+
+  @doc false
   @spec operation_deadline(term()) :: {:ok, integer()} | {:error, :invalid_precondition}
   def operation_deadline(opts) do
     started_mono = System.monotonic_time(:millisecond)
@@ -617,6 +705,17 @@ defmodule Arbor.Persistence.EventLog do
 
     with {:ok, normalized_opts} <- normalize_opts(opts),
          {:ok, timeout_ms} <- operation_timeout(:purge, normalized_opts) do
+      {:ok, started_mono + timeout_ms}
+    end
+  end
+
+  @doc false
+  @spec absence_deadline(term()) :: {:ok, integer()} | {:error, :invalid_precondition}
+  def absence_deadline(opts) do
+    started_mono = System.monotonic_time(:millisecond)
+
+    with {:ok, normalized_opts} <- normalize_opts(opts),
+         {:ok, timeout_ms} <- operation_timeout(:absence, normalized_opts) do
       {:ok, started_mono + timeout_ms}
     end
   end
@@ -943,6 +1042,15 @@ defmodule Arbor.Persistence.EventLog do
       else: {:error, :invalid_precondition}
   end
 
+  defp validate_absence_opts(opts) do
+    allowed = [:name, :repo, :absence_timeout_ms, :operation_timeout_ms, :call_timeout_ms]
+    keys = Keyword.keys(opts)
+
+    if length(keys) == length(Enum.uniq(keys)) and Enum.all?(keys, &(&1 in allowed)),
+      do: :ok,
+      else: {:error, :invalid_precondition}
+  end
+
   defp valid_purge_result?(:ok), do: true
 
   defp valid_purge_result?({:error, reason})
@@ -956,11 +1064,37 @@ defmodule Arbor.Persistence.EventLog do
 
   defp valid_purge_result?(_result), do: false
 
+  defp valid_absence_result?({:ok, true}), do: true
+  defp valid_absence_result?({:ok, false}), do: true
+
+  defp valid_absence_result?({:error, reason})
+       when reason in [
+              :backend_unavailable,
+              :invalid_precondition,
+              :invalid_stream_id,
+              :absence_not_supported,
+              :absence_verification_failed
+            ],
+       do: true
+
+  defp valid_absence_result?(_result), do: false
+
   defp operation_timeout(:append, opts), do: append_timeout(opts)
 
   defp operation_timeout(:purge, opts) do
     timeout =
       Keyword.get_lazy(opts, :purge_timeout_ms, fn ->
+        Keyword.get_lazy(opts, :operation_timeout_ms, fn ->
+          Keyword.get(opts, :call_timeout_ms, @default_append_timeout_ms)
+        end)
+      end)
+
+    bounded_timeout(timeout)
+  end
+
+  defp operation_timeout(:absence, opts) do
+    timeout =
+      Keyword.get_lazy(opts, :absence_timeout_ms, fn ->
         Keyword.get_lazy(opts, :operation_timeout_ms, fn ->
           Keyword.get(opts, :call_timeout_ms, @default_append_timeout_ms)
         end)

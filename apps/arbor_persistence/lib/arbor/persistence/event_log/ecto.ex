@@ -230,6 +230,17 @@ defmodule Arbor.Persistence.EventLog.Ecto do
     end)
   end
 
+  @impl Arbor.Persistence.EventLog
+  def stream_absent(stream_id, opts) do
+    EventLog.with_operation_deadline(opts, :absence, fn normalized_opts, deadline_mono ->
+      with {:ok, normalized_opts, ^deadline_mono} <-
+             EventLog.prepare_absence(stream_id, normalized_opts),
+           {:ok, repo} <- fetch_purge_repo(normalized_opts) do
+        run_bounded_absence(repo, stream_id, deadline_mono)
+      end
+    end)
+  end
+
   defp run_bounded_purge(repo, stream_id, deadline_mono) do
     if BoundedWorker.active?() do
       repo
@@ -252,6 +263,32 @@ defmodule Arbor.Persistence.EventLog.Ecto do
 
         {:error, _uncertain} ->
           EventLog.purge_indeterminate(stream_id)
+      end
+    end
+  end
+
+  defp run_bounded_absence(repo, stream_id, deadline_mono) do
+    if BoundedWorker.active?() do
+      repo
+      |> absence_in_transaction(stream_id, deadline_mono)
+      |> EventLog.stamp_completion()
+      |> EventLog.accept_absence_completion(stream_id, deadline_mono)
+    else
+      case BoundedWorker.run(
+             fn ->
+               EventLog.with_inherited_deadline(deadline_mono, fn ->
+                 repo
+                 |> absence_in_transaction(stream_id, deadline_mono)
+                 |> EventLog.stamp_completion()
+               end)
+             end,
+             deadline_mono
+           ) do
+        {:ok, completion} ->
+          EventLog.accept_absence_completion(completion, stream_id, deadline_mono)
+
+        {:error, _uncertain} ->
+          EventLog.absence_indeterminate(stream_id)
       end
     end
   end
@@ -326,6 +363,41 @@ defmodule Arbor.Persistence.EventLog.Ecto do
 
     repo_exists?(events, repo, deadline_mono) or
       repo_exists?(operations, repo, deadline_mono)
+  end
+
+  defp absence_in_transaction(repo, stream_id, deadline_mono) do
+    transaction(repo, deadline_mono, fn ->
+      case verify_protocol_epoch(repo, deadline_mono) do
+        :ok -> :ok
+        {:error, _reason} -> repo.rollback(:backend_unavailable)
+      end
+
+      case acquire_global_append_lock(repo, deadline_mono) do
+        :ok -> :ok
+        {:error, _reason} -> repo.rollback(:backend_unavailable)
+      end
+
+      ensure_before_deadline(repo, deadline_mono)
+
+      not stream_rows_exist?(repo, stream_id, deadline_mono)
+    end)
+    |> case do
+      {:ok, true} ->
+        {:ok, true}
+
+      {:ok, false} ->
+        {:ok, false}
+
+      {:error, reason} when reason in [:backend_unavailable, :absence_verification_failed] ->
+        {:error, reason}
+
+      _uncertain ->
+        EventLog.absence_indeterminate(stream_id)
+    end
+  rescue
+    _error -> EventLog.absence_indeterminate(stream_id)
+  catch
+    :exit, _reason -> EventLog.absence_indeterminate(stream_id)
   end
 
   # Concurrent appends to the SAME stream race on event_number assignment: the
