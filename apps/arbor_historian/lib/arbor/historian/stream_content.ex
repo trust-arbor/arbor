@@ -58,7 +58,8 @@ defmodule Arbor.Historian.StreamContent do
   end
 
   defp run_delete(stream_id, durable, hot, deadline_mono, progress) do
-    with :ok <- stage_purge(stream_id, :durable, :durable_delete, durable, deadline_mono, progress),
+    with :ok <-
+           stage_purge(stream_id, :durable, :durable_delete, durable, deadline_mono, progress),
          {:ok, progress} <-
            stage_verify(stream_id, :durable, :durable_verify, durable, deadline_mono, progress),
          :ok <- stage_purge(stream_id, :hot, :hot_delete, hot, deadline_mono, progress),

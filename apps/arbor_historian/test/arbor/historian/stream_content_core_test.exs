@@ -27,6 +27,7 @@ defmodule Arbor.Historian.StreamContent.CoreTest do
       assert {:error, :invalid_precondition} = Core.admit("s", timeout_ms: 60_001)
       assert {:error, :invalid_precondition} = Core.admit("s", repo: :nope)
       assert {:error, :invalid_precondition} = Core.admit("s", %{timeout_ms: 1})
+
       assert {:error, :invalid_precondition} =
                Core.admit("s", [{:timeout_ms, 1}, {:timeout_ms, 2}])
     end

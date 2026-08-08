@@ -68,17 +68,20 @@ defmodule Arbor.Historian.StreamContent.Core do
   @spec classify_purge_reply(source(), term()) :: purge_class()
   def classify_purge_reply(source, :ok) when source in [:durable, :hot], do: :dispatched_ok
 
-  def classify_purge_reply(source, {:error, :backend_unavailable}) when source in [:durable, :hot],
-    do: {:pre, source_unavailable(source)}
+  def classify_purge_reply(source, {:error, :backend_unavailable})
+      when source in [:durable, :hot],
+      do: {:pre, source_unavailable(source)}
 
-  def classify_purge_reply(source, {:error, :purge_not_supported}) when source in [:durable, :hot],
-    do: {:pre, :delete_not_supported}
+  def classify_purge_reply(source, {:error, :purge_not_supported})
+      when source in [:durable, :hot],
+      do: {:pre, :delete_not_supported}
 
   def classify_purge_reply(source, {:error, :invalid_stream_id}) when source in [:durable, :hot],
     do: {:pre, :invalid_stream_id}
 
-  def classify_purge_reply(source, {:error, :invalid_precondition}) when source in [:durable, :hot],
-    do: {:pre, :invalid_precondition}
+  def classify_purge_reply(source, {:error, :invalid_precondition})
+      when source in [:durable, :hot],
+      do: {:pre, :invalid_precondition}
 
   def classify_purge_reply(source, {:error, :purge_verification_failed})
       when source in [:durable, :hot],
@@ -106,8 +109,9 @@ defmodule Arbor.Historian.StreamContent.Core do
       when source in [:durable, :hot],
       do: {:pre, :absence_not_supported}
 
-  def classify_absence_reply(source, {:error, :invalid_stream_id}) when source in [:durable, :hot],
-    do: {:pre, :invalid_stream_id}
+  def classify_absence_reply(source, {:error, :invalid_stream_id})
+      when source in [:durable, :hot],
+      do: {:pre, :invalid_stream_id}
 
   def classify_absence_reply(source, {:error, :invalid_precondition})
       when source in [:durable, :hot],

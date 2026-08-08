@@ -75,7 +75,10 @@ defmodule Arbor.Historian do
     resource = "arbor://historian/query/#{stream}"
     {trace_id, _opts} = Keyword.pop(opts, :trace_id)
 
-    case Arbor.Security.authorize(agent_id, resource, :query, trace_id: trace_id, verify_identity: false) do
+    case Arbor.Security.authorize(agent_id, resource, :query,
+           trace_id: trace_id,
+           verify_identity: false
+         ) do
       {:ok, :authorized} ->
         query(query_opts)
 
@@ -114,7 +117,10 @@ defmodule Arbor.Historian do
     resource = "arbor://historian/query/#{category}"
     {trace_id, _opts} = Keyword.pop(opts, :trace_id)
 
-    case Arbor.Security.authorize(agent_id, resource, :query, trace_id: trace_id, verify_identity: false) do
+    case Arbor.Security.authorize(agent_id, resource, :query,
+           trace_id: trace_id,
+           verify_identity: false
+         ) do
       {:ok, :authorized} ->
         for_category(category, query_opts)
 
@@ -154,7 +160,10 @@ defmodule Arbor.Historian do
     resource = "arbor://historian/query/agent"
     {trace_id, _opts} = Keyword.pop(opts, :trace_id)
 
-    case Arbor.Security.authorize(caller_id, resource, :query, trace_id: trace_id, verify_identity: false) do
+    case Arbor.Security.authorize(caller_id, resource, :query,
+           trace_id: trace_id,
+           verify_identity: false
+         ) do
       {:ok, :authorized} ->
         for_agent(target_agent_id, query_opts)
 
@@ -192,7 +201,10 @@ defmodule Arbor.Historian do
     resource = "arbor://historian/query/global"
     {trace_id, _opts} = Keyword.pop(opts, :trace_id)
 
-    case Arbor.Security.authorize(agent_id, resource, :query, trace_id: trace_id, verify_identity: false) do
+    case Arbor.Security.authorize(agent_id, resource, :query,
+           trace_id: trace_id,
+           verify_identity: false
+         ) do
       {:ok, :authorized} ->
         recent(query_opts)
 
@@ -893,11 +905,15 @@ defmodule Arbor.Historian do
     remote =
       Task.yield_many(tasks, timeout + 1_000)
       |> Enum.flat_map(fn
-        {_task, {:ok, entries}} -> entries
+        {_task, {:ok, entries}} ->
+          entries
+
         {task, nil} ->
           Task.shutdown(task, :brutal_kill)
           []
-        _ -> []
+
+        _ ->
+          []
       end)
 
     # Merge and deduplicate by event ID, sort by timestamp descending
