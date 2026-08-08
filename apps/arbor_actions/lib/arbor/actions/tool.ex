@@ -199,13 +199,20 @@ defmodule Arbor.Actions.Tool do
            function_exported?(actions_mod, :pipeline_internal_action?, 1) do
         apply(actions_mod, :pipeline_internal_action?, [module])
       else
-        tags =
-          cond do
-            function_exported?(module, :tags, 0) -> module.tags()
-            true -> []
-          end
+        case Code.ensure_loaded(module) do
+          {:module, ^module} ->
+            tags =
+              if function_exported?(module, :tags, 0) do
+                module.tags()
+              else
+                []
+              end
 
-        "pipeline_internal" in Enum.map(List.wrap(tags), &to_string/1)
+            "pipeline_internal" in Enum.map(List.wrap(tags), &to_string/1)
+
+          _ ->
+            false
+        end
       end
     rescue
       _ -> false

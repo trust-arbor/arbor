@@ -15,15 +15,12 @@ defmodule Arbor.Memory.MutationAdmission do
   alias Arbor.Memory.MutationAdmission.Guardian
   alias Arbor.Memory.MutationAdmission.GuardianSupervisor
   alias Arbor.Memory.MutationAdmission.Lease
+  alias Arbor.Memory.MutationAdmission.RuntimeIdentity
   alias Arbor.Memory.MutationAdmissionCore, as: Core
   alias Arbor.Persistence
 
   @name __MODULE__
   @registry Arbor.Memory.MutationAdmission.Registry
-  # ETS table created by Arbor.Memory.Application (BEAM-lifetime, not erased on
-  # MutationAdmission / GuardianSupervisor / admission-subtree restart).
-  @runtime_ets :arbor_memory_mutation_admission_runtime
-  @runtime_key :runtime_fp
   @token_bytes 32
   @hash_hex_length 64
   # Logical Record.id bound (namespace-owned; never unbounded).
@@ -52,6 +49,8 @@ defmodule Arbor.Memory.MutationAdmission do
     :node_fp,
     :registry,
     :guardian_supervisor,
+    # Registered GenServer name (reconnect / guardian whereis binding).
+    :name,
     :bounds,
     drain_waiters: %{},
     pending_fences: %{},
@@ -204,33 +203,29 @@ defmodule Arbor.Memory.MutationAdmission do
   def init(opts) do
     registry = Keyword.get(opts, :registry, @registry)
     guardian_sup = Keyword.get(opts, :guardian_supervisor, GuardianSupervisor.name())
+    name = Keyword.get(opts, :name, @name)
 
-    case resolve_target_provenance(opts) do
-      {:ok, frozen_target, target_source} ->
-        case load_bounds() do
-          {:ok, bounds} ->
-            state = %__MODULE__{
-              frozen_target: frozen_target,
-              target_source: target_source,
-              runtime_fp: resolve_runtime_fp(opts),
-              node_fp: resolve_node_fp(opts),
-              registry: registry,
-              guardian_supervisor: guardian_sup,
-              bounds: bounds,
-              drain_waiters: %{},
-              pending_fences: %{},
-              drain_recheck_pending: %{}
-            }
+    with {:ok, frozen_target, target_source} <- resolve_target_provenance(opts),
+         {:ok, bounds} <- load_bounds(),
+         {:ok, runtime_fp} <- resolve_runtime_fp(opts) do
+      state = %__MODULE__{
+        frozen_target: frozen_target,
+        target_source: target_source,
+        runtime_fp: runtime_fp,
+        node_fp: resolve_node_fp(opts),
+        registry: registry,
+        guardian_supervisor: guardian_sup,
+        name: name,
+        bounds: bounds,
+        drain_waiters: %{},
+        pending_fences: %{},
+        drain_recheck_pending: %{}
+      }
 
-            # Reconnect surviving guardians that still point at a dead shell pid.
-            {:ok, state, {:continue, :reconnect_guardians}}
-
-          {:error, reason} ->
-            {:stop, reason}
-        end
-
-      {:error, reason} ->
-        {:stop, reason}
+      # Reconnect surviving guardians that still point at a dead shell pid.
+      {:ok, state, {:continue, :reconnect_guardians}}
+    else
+      {:error, reason} -> {:stop, reason}
     end
   end
 
@@ -242,7 +237,12 @@ defmodule Arbor.Memory.MutationAdmission do
 
   @impl true
   def handle_call(:readiness, _from, state) do
-    {:reply, attest(state), state}
+    reply =
+      with :ok <- ensure_frozen_target(state) do
+        attest(state)
+      end
+
+    {:reply, reply, state}
   end
 
   def handle_call({:acquire, agent_id, opts}, {caller, _}, state) do
@@ -252,9 +252,17 @@ defmodule Arbor.Memory.MutationAdmission do
            :ok <- ensure_local_pid(caller),
            :ok <- ensure_frozen_target(state) do
         case Keyword.get(opts, :lease) do
-          nil -> do_acquire_new(state, agent_id, caller)
-          %Lease{} = lease -> do_reenter(state, agent_id, caller, lease)
-          _ -> {:error, :invalid_lease}
+          nil ->
+            do_acquire_new(state, agent_id, caller)
+
+          %Lease{} = lease ->
+            # Validate complete shape once before any compare/hash/backend work.
+            with :ok <- validate_lease_shape(lease) do
+              do_reenter(state, agent_id, caller, lease)
+            end
+
+          _ ->
+            {:error, :invalid_lease}
         end
       end
 
@@ -313,7 +321,7 @@ defmodule Arbor.Memory.MutationAdmission do
             drain_waiters = Map.put(new_state.drain_waiters, agent_id, waiters)
             Process.send_after(self(), {:drain_timeout, agent_id, from, mon}, timeout)
             # Bounded rechecks so a peer authority's final release notifies us
-            # before the caller deadline (check_drain_ready is scheduled here).
+            # before the caller deadline (the internal drain recheck starts here).
             new_state = %{new_state | drain_waiters: drain_waiters}
             new_state = schedule_drain_recheck(new_state, agent_id)
             {:noreply, new_state}
@@ -358,35 +366,35 @@ defmodule Arbor.Memory.MutationAdmission do
   def handle_call(_msg, _from, state), do: {:reply, {:error, :invalid_request}, state}
 
   @impl true
-  def handle_cast({:holder_down_release, lease_hash, agent_id, guardian_pid}, state) do
-    # Async-only path from Guardian (never GenServer.call back). Results are
-    # cast to the guardian so release recovery never deadlocks with shell calls.
-    case durable_release_root(state, agent_id, lease_hash) do
-      {:ok, new_state} ->
-        notify_guardian_release(guardian_pid, :ok)
-        {:noreply, new_state}
+  def handle_cast({:holder_down_release, guardian_pid}, state) when is_pid(guardian_pid) do
+    # Wake-up only. Never trust lease_hash/agent_id from the cast payload.
+    # Resolve guardian via Registry, then synchronously claim release identity
+    # (shell → guardian call; guardian never calls shell).
+    case claim_holder_down_release(state, guardian_pid) do
+      {:ok, lease_hash, agent_id} ->
+        case durable_release_root(state, agent_id, lease_hash) do
+          {:ok, new_state} ->
+            notify_guardian_release(guardian_pid, :ok)
+            {:noreply, new_state}
 
-      {:error, :stale_lease} ->
-        notify_guardian_release(guardian_pid, :stale_lease)
-        {:noreply, state}
+          {:error, :stale_lease} ->
+            notify_guardian_release(guardian_pid, :stale_lease)
+            {:noreply, state}
 
-      {:error, _reason} ->
-        # Temporary unavailability — guardian keeps retrying forever with backoff.
-        notify_guardian_release(guardian_pid, :retry)
+          {:error, _reason} ->
+            # Temporary unavailability — guardian keeps retrying forever with backoff.
+            notify_guardian_release(guardian_pid, :retry)
+            {:noreply, state}
+        end
+
+      :ignore ->
         {:noreply, state}
     end
   end
 
-  def handle_cast({:check_drain_ready, agent_id}, state) do
-    # Re-attest frozen backend before any cast-path read/mutation.
-    with :ok <- ensure_frozen_target(state),
-         {:ok, _} <- attest(state),
-         {:ok, %{core: core}} <- load_snapshot(state, agent_id) do
-      {:noreply, maybe_notify_drain(state, agent_id, core)}
-    else
-      _ ->
-        {:noreply, state}
-    end
+  # Legacy forgeable 4-tuple payload — deliberately ignored (no durable effect).
+  def handle_cast({:holder_down_release, _lease_hash, _agent_id, _guardian_pid}, state) do
+    {:noreply, state}
   end
 
   def handle_cast(_msg, state), do: {:noreply, state}
@@ -564,6 +572,10 @@ defmodule Arbor.Memory.MutationAdmission do
           :ok
 
         {:outermost, ^lease_hash, agent_id} ->
+          # agent_id must come from the authenticated Guardian response — never
+          # from caller-controlled lease.agent_id (a holder can alter that field
+          # while keeping a valid token and would strand the real root on
+          # stale_lease + guardian stop).
           case durable_release_root(state, agent_id, lease_hash) do
             {:ok, new_state} ->
               notify_guardian_release(guardian, :ok)
@@ -597,9 +609,40 @@ defmodule Arbor.Memory.MutationAdmission do
     end
   end
 
+  # Wake-up → Registry resolve → synchronous claim (derived lease_hash/agent_id).
+  defp claim_holder_down_release(state, guardian_pid) when is_pid(guardian_pid) do
+    if not Process.alive?(guardian_pid) do
+      :ignore
+    else
+      case Registry.keys(state.registry, guardian_pid) do
+        [{:guardian, registry_hash}] when is_binary(registry_hash) ->
+          case Guardian.claim_release(guardian_pid) do
+            {:ok, %{lease_hash: ^registry_hash, agent_id: agent_id}}
+            when is_binary(agent_id) ->
+              {:ok, registry_hash, agent_id}
+
+            _ ->
+              :ignore
+          end
+
+        _ ->
+          :ignore
+      end
+    end
+  catch
+    :exit, _ -> :ignore
+  end
+
+  defp claim_holder_down_release(_state, _), do: :ignore
+
   defp notify_guardian_release(guardian_pid, result) when is_pid(guardian_pid) do
     if Process.alive?(guardian_pid) do
-      GenServer.cast(guardian_pid, {:release_attempt_result, result})
+      try do
+        # Authenticated shell → guardian call (not a forgeable cast).
+        Guardian.release_attempt_result(guardian_pid, result)
+      catch
+        :exit, _ -> :ok
+      end
     end
 
     :ok
@@ -1049,6 +1092,7 @@ defmodule Arbor.Memory.MutationAdmission do
          token: token,
          holder: holder,
          admission: self(),
+         admission_name: state.name,
          registry: state.registry,
          max_depth: state.bounds.max_nested_depth
        ]}
@@ -1202,64 +1246,19 @@ defmodule Arbor.Memory.MutationAdmission do
     end
   end
 
-  # BEAM-lifetime runtime fingerprint. Race-safe via ETS insert_new on an
-  # Application-owned named table. Never erased/rotated on MutationAdmission,
-  # GuardianSupervisor, or full admission-subtree restart. New BEAM ⇒ new table.
-  # Test-only start_link :runtime_fp is process-local and does not mutate the table.
+  # Test-only explicit identities remain process-local. Production reads only
+  # from the protected BEAM-lifetime authority bootstrapped by the application.
   defp resolve_runtime_fp(opts) do
-    case Keyword.get(opts, :runtime_fp) do
-      fp when is_binary(fp) and byte_size(fp) == @hash_hex_length ->
-        fp
-
-      _ ->
-        ensure_beam_runtime_fp()
-    end
-  end
-
-  defp ensure_beam_runtime_fp do
-    ensure_runtime_ets()
-
-    case :ets.lookup(@runtime_ets, @runtime_key) do
-      [{@runtime_key, fp}] when is_binary(fp) ->
-        fp
-
-      [] ->
-        candidate =
-          :crypto.hash(
-            :sha256,
-            "arbor.memory.mutation_admission.runtime:v1" <> :crypto.strong_rand_bytes(16)
-          )
-          |> Base.encode16(case: :lower)
-
-        case :ets.insert_new(@runtime_ets, {@runtime_key, candidate}) do
-          true ->
-            candidate
-
-          false ->
-            case :ets.lookup(@runtime_ets, @runtime_key) do
-              [{@runtime_key, fp}] when is_binary(fp) -> fp
-              _ -> candidate
-            end
-        end
-    end
-  end
-
-  defp ensure_runtime_ets do
-    case :ets.whereis(@runtime_ets) do
-      :undefined ->
-        try do
-          :ets.new(@runtime_ets, [
-            :named_table,
-            :public,
-            :set,
-            read_concurrency: true
-          ])
-        rescue
-          ArgumentError -> :ok
+    case Keyword.fetch(opts, :runtime_fp) do
+      {:ok, fingerprint} ->
+        if RuntimeIdentity.valid?(fingerprint) do
+          {:ok, fingerprint}
+        else
+          {:error, :invalid_runtime_identity}
         end
 
-      _tid ->
-        :ok
+      :error ->
+        RuntimeIdentity.current()
     end
   end
 
@@ -1323,7 +1322,11 @@ defmodule Arbor.Memory.MutationAdmission do
   defp validate_lease_shape(%Lease{token: token, agent_id: agent_id, admitted_gate_gen: gen})
        when is_binary(token) and byte_size(token) == @token_bytes and is_binary(agent_id) and
               is_integer(gen) and gen > 0 do
-    validate_agent_id(agent_id)
+    # Lease agent_id failures are always :invalid_lease (never leak :invalid_request).
+    case validate_agent_id(agent_id) do
+      :ok -> :ok
+      {:error, _} -> {:error, :invalid_lease}
+    end
   end
 
   defp validate_lease_shape(_), do: {:error, :invalid_lease}
@@ -1377,20 +1380,22 @@ defmodule Arbor.Memory.MutationAdmission do
 
   defp validate_opts(_, _), do: {:error, :invalid_request}
 
-  # Finding 7: invalid drain timeout bounds fail even with no stored record.
+  # Invalid drain timeout bounds fail even with no stored record.
+  # Invalid configured default fails closed even when caller supplies :timeout_ms.
   defp resolve_drain_timeout(opts) do
-    default = Config.mutation_admission_drain_default_timeout_ms()
     max = Config.mutation_admission_max_drain_timeout_ms()
 
-    case Keyword.fetch(opts, :timeout_ms) do
-      :error ->
-        {:ok, default}
+    with {:ok, default} <- Config.mutation_admission_drain_default_timeout_ms() do
+      case Keyword.fetch(opts, :timeout_ms) do
+        :error ->
+          {:ok, default}
 
-      {:ok, n} when is_integer(n) and n > 0 and n <= max ->
-        {:ok, n}
+        {:ok, n} when is_integer(n) and n > 0 and n <= max ->
+          {:ok, n}
 
-      {:ok, _} ->
-        {:error, :invalid_request}
+        {:ok, _} ->
+          {:error, :invalid_request}
+      end
     end
   end
 
@@ -1405,7 +1410,7 @@ defmodule Arbor.Memory.MutationAdmission do
     |> Base.encode16(case: :lower)
   end
 
-  defp put_waiters(map, _agent_id, []), do: map
+  defp put_waiters(map, agent_id, []), do: Map.delete(map, agent_id)
   defp put_waiters(map, agent_id, waiters), do: Map.put(map, agent_id, waiters)
 
   # Bounded unlinked monitored backend workers for attest/get/CAS.

@@ -158,15 +158,16 @@ defmodule Arbor.Memory.Config do
     end
   end
 
-  @spec mutation_admission_drain_default_timeout_ms() :: pos_integer()
+  @spec mutation_admission_drain_default_timeout_ms() ::
+          {:ok, pos_integer()} | {:error, :invalid_config}
   def mutation_admission_drain_default_timeout_ms do
     case Application.get_env(
            @app,
            :mutation_admission_drain_default_timeout_ms,
            @default_drain_timeout_ms
          ) do
-      n when is_integer(n) and n > 0 and n <= @max_drain_timeout_ms -> n
-      _ -> @default_drain_timeout_ms
+      n when is_integer(n) and n > 0 and n <= @max_drain_timeout_ms -> {:ok, n}
+      _ -> {:error, :invalid_config}
     end
   end
 

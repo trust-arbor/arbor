@@ -2229,13 +2229,23 @@ defmodule Arbor.Actions do
   """
   @spec pipeline_internal_action?(module()) :: boolean()
   def pipeline_internal_action?(module) when is_atom(module) do
-    tags =
-      cond do
-        function_exported?(module, :tags, 0) -> module.tags()
-        true -> []
-      end
+    # function_exported?/3 is false for not-yet-loaded modules; ensure load first
+    # so catalog/exposure checks do not silently treat valid pipeline_internal
+    # actions (e.g. DesignCheckpoint.Load) as ordinary tools.
+    case Code.ensure_loaded(module) do
+      {:module, ^module} ->
+        tags =
+          if function_exported?(module, :tags, 0) do
+            module.tags()
+          else
+            []
+          end
 
-    "pipeline_internal" in Enum.map(List.wrap(tags), &to_string/1)
+        "pipeline_internal" in Enum.map(List.wrap(tags), &to_string/1)
+
+      _ ->
+        false
+    end
   rescue
     _ -> false
   end
