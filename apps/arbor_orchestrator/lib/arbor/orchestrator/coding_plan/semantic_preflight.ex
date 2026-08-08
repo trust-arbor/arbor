@@ -3801,8 +3801,13 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       errors,
       graph,
       %{
-        "param.timeout" => validation_timeout_ms,
-        "param.warnings_as_errors" => true
+        "param.pinned_action" => "mix_compile",
+        "param.pinned_profile_id" => "default",
+        "param.pinned_params" => %{
+          "timeout" => validation_timeout_ms,
+          "warnings_as_errors" => true
+        },
+        "param.timeout" => validation_timeout_ms
       },
       "validation_parameter_violation"
     )
@@ -3824,8 +3829,13 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       errors,
       graph,
       %{
-        "param.timeout" => validation_timeout_ms,
-        "param.test_stage_timeout" => validation_test_stage_timeout_ms,
+        "param.pinned_action" => "coding_cross_app_validate",
+        "param.pinned_profile_id" => "cross_app",
+        "param.pinned_params" => %{
+          "timeout" => validation_timeout_ms,
+          "test_stage_timeout" => validation_test_stage_timeout_ms,
+          "stage_timeout" => validation_stage_timeout_ms
+        },
         "param.stage_timeout" => validation_stage_timeout_ms
       },
       "validation_parameter_violation"
@@ -4021,9 +4031,11 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
        %{
          "type" => "exec",
          "target" => "action",
-         "action" => "coding_security_regression_validate",
+         "action" => "coding_reviewed_validation",
          "context_keys" => "review_attestation_id",
-         "output_prefix" => "validation"
+         "output_prefix" => "validation",
+         "param.pinned_action" => "coding_security_regression_validate",
+         "param.pinned_profile_id" => "security_regression"
        }},
       {"post_validation_expected_commit",
        %{
@@ -4096,7 +4108,12 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       errors,
       graph,
       %{
-        "param.timeout" => validation_timeout_ms,
+        "param.pinned_action" => "coding_security_regression_validate",
+        "param.pinned_profile_id" => "security_regression",
+        "param.pinned_params" => %{
+          "timeout" => validation_timeout_ms,
+          "stage_timeout" => validation_stage_timeout_ms
+        },
         "param.stage_timeout" => validation_stage_timeout_ms
       },
       "security_validator_parameter_violation"
@@ -4117,17 +4134,69 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
           end)
           |> Map.new()
 
-        if actual == expected do
+        if validation_params_match?(actual, expected) do
           errors
         else
           [
             error(error_code, "validate", %{
               "expected" => expected,
-              "actual" => actual
+              "actual" => normalize_validation_params_for_error(actual)
             })
             | errors
           ]
         end
+    end
+  end
+
+  # Compare wrapper-and-pin shape: pinned_params_json is decoded and matched as
+  # a map so JSON key order cannot false-fail an otherwise exact pin.
+  defp validation_params_match?(actual, expected) when is_map(actual) and is_map(expected) do
+    expected_pin = Map.get(expected, "param.pinned_params")
+    actual_json = Map.get(actual, "param.pinned_params_json")
+
+    pin_ok? =
+      case {expected_pin, actual_json} do
+        {pin, json} when is_map(pin) and is_binary(json) ->
+          case Jason.decode(json) do
+            {:ok, decoded} when is_map(decoded) -> maps_equal_json_clean?(decoded, pin)
+            _ -> false
+          end
+
+        {nil, nil} ->
+          true
+
+        {nil, _json} ->
+          false
+
+        {_pin, nil} ->
+          false
+      end
+
+    rest_expected = Map.delete(expected, "param.pinned_params")
+    rest_actual = Map.delete(actual, "param.pinned_params_json")
+    pin_ok? and rest_actual == rest_expected
+  end
+
+  defp validation_params_match?(_actual, _expected), do: false
+
+  defp maps_equal_json_clean?(left, right)
+       when is_map(left) and is_map(right) and not is_struct(left) and not is_struct(right) do
+    Enum.sort(Map.keys(left)) == Enum.sort(Map.keys(right)) and
+      Enum.all?(left, fn {key, value} -> Map.get(right, key) == value end)
+  end
+
+  defp maps_equal_json_clean?(_left, _right), do: false
+
+  defp normalize_validation_params_for_error(actual) when is_map(actual) do
+    case Map.pop(actual, "param.pinned_params_json") do
+      {json, rest} when is_binary(json) ->
+        case Jason.decode(json) do
+          {:ok, decoded} -> Map.put(rest, "param.pinned_params", decoded)
+          _ -> Map.put(rest, "param.pinned_params_json", json)
+        end
+
+      {nil, rest} ->
+        rest
     end
   end
 
@@ -4269,11 +4338,25 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       {"validate",
        [
          {"status_validation_failed", "outcome=fail"},
-         {"status_validation_capacity_exceeded",
-          "outcome=success&&context.validation.reason=validation_capacity_exceeded"},
-         {"check_validation_passed",
-          "outcome=success&&context.validation.reason!=validation_capacity_exceeded"}
+         {"route_validation_interaction", "outcome=success"}
        ]},
+      {"route_validation_interaction",
+       [
+         {"status_validation_capacity_exceeded",
+          "context.validation.interaction_outcome=\"\"&&context.validation.reason=validation_capacity_exceeded"},
+         {"check_validation_passed",
+          "context.validation.interaction_outcome=\"\"&&context.validation.reason!=validation_capacity_exceeded"},
+         {"hoist_validation_approval_request_id", "context.validation.interaction_outcome=rework"},
+         {"hoist_validation_approval_request_id_denied",
+          "context.validation.interaction_outcome=denied"},
+         {"error_validation_interaction_invalid", nil}
+       ]},
+      {"hoist_validation_approval_request_id", [{"hoist_validation_approval_note", nil}]},
+      {"hoist_validation_approval_note", [{"remember_validation_reviewed_commit", nil}]},
+      {"hoist_validation_approval_request_id_denied",
+       [{"hoist_validation_approval_note_denied", nil}]},
+      {"hoist_validation_approval_note_denied", [{"status_validation_failed", nil}]},
+      {"error_validation_interaction_invalid", [{"status_pipeline_error_then_close", nil}]},
       {"check_validation_passed",
        [
          {"remember_validation_reviewed_commit", "outcome=fail"},

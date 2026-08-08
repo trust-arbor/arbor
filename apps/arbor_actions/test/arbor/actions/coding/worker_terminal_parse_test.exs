@@ -31,4 +31,25 @@ defmodule Arbor.Actions.Coding.WorkerTerminalParseTest do
     assert fields["valid"] == false
     assert fields["protocol_error"] == "text_required"
   end
+
+  test "invalid UTF-8 projects exact invalid_json bounded evidence without raising" do
+    text = <<0xFF, 0xFE, "not-json">>
+    assert {:ok, fields} = WorkerTerminalParse.run(%{text: text}, %{})
+    assert fields["valid"] == false
+    assert fields["protocol_error"] == "invalid_json"
+    assert fields["status"] == nil
+    assert fields["summary"] == nil
+    assert fields["text_byte_size"] == byte_size(text)
+    assert is_binary(fields["text_sha256"])
+    refute Map.has_key?(fields, "text")
+  end
+
+  test "oversized text projects oversized evidence without raising" do
+    text = :binary.copy("x", Arbor.Actions.Coding.WorkerTerminalEnvelopeCore.max_text_bytes() + 1)
+    assert {:ok, fields} = WorkerTerminalParse.run(%{text: text}, %{})
+    assert fields["valid"] == false
+    assert fields["protocol_error"] == "oversized"
+    assert fields["text_byte_size"] == byte_size(text)
+    refute Map.has_key?(fields, "text")
+  end
 end

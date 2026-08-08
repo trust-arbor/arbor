@@ -1984,8 +1984,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     bypassed =
       String.replace(
         ctx.template_source,
-        ~s(validate -> check_validation_passed [condition="outcome=success&&context.validation.reason!=validation_capacity_exceeded"]),
-        ~s(validate -> check_validation_passed [condition="outcome=success&&context.validation.reason!=validation_capacity_exceeded"]\n  validate -> prep_commit_path [condition="context.bypass_validation_result=true"])
+        ~s(validate -> route_validation_interaction [condition="outcome=success"]),
+        ~s(validate -> route_validation_interaction [condition="outcome=success"]\n  validate -> prep_commit_path [condition="context.bypass_validation_result=true"])
       )
 
     assert {:error, {:semantic_preflight_failed, errors}} = compile(plan!(), ctx, bypassed)
@@ -2373,7 +2373,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
            end)
   end
 
-  test "cross_app enforces exact compound timeouts and rejects missing/wrong values",
+  test "cross_app enforces exact compound wrapper pins and rejects missing/wrong values",
        ctx do
     plan = plan!(%{"validation_profile" => "cross_app"})
     assert {:ok, compilation} = compile(plan, ctx)
@@ -2390,9 +2390,11 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
                validation_stage_timeout_ms: 900_000
              )
 
-    # Wrong aggregate test-stage value fails closed.
+    # Wrong pin-internal test-stage value fails closed.
     wrong_test_stage =
-      update_in(graph.nodes["validate"].attrs, &Map.put(&1, "param.test_stage_timeout", 899_999))
+      mutate_pinned_params(graph, fn pinned ->
+        Map.put(pinned, "test_stage_timeout", 899_999)
+      end)
 
     assert {:error, {:semantic_preflight_failed, wrong_errors}} =
              preflight(wrong_test_stage, profile["semantic_policy"],
@@ -2404,7 +2406,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
 
     assert Enum.any?(wrong_errors, &(&1["code"] == "validation_parameter_violation"))
 
-    # Wrong whole-stage value fails closed.
+    # Wrong runtime stage_timeout binding fails closed.
     wrong_stage =
       update_in(graph.nodes["validate"].attrs, &Map.put(&1, "param.stage_timeout", 899_999))
 
@@ -2418,20 +2420,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
 
     assert Enum.any?(wrong_stage_errors, &(&1["code"] == "validation_parameter_violation"))
 
-    # Missing aggregate param fails closed when the profile requires it.
-    missing_test_stage =
-      update_in(graph.nodes["validate"].attrs, &Map.delete(&1, "param.test_stage_timeout"))
-
-    assert {:error, {:semantic_preflight_failed, missing_errors}} =
-             preflight(missing_test_stage, profile["semantic_policy"],
-               review_profile: "binding",
-               validation_timeout_ms: 900_000,
-               validation_test_stage_timeout_ms: 900_000,
-               validation_stage_timeout_ms: 900_000
-             )
-
-    assert Enum.any?(missing_errors, &(&1["code"] == "validation_parameter_violation"))
-
+    # Missing runtime stage_timeout binding fails closed.
     missing_stage =
       update_in(graph.nodes["validate"].attrs, &Map.delete(&1, "param.stage_timeout"))
 
@@ -2445,6 +2434,23 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
 
     assert Enum.any?(missing_stage_errors, &(&1["code"] == "validation_parameter_violation"))
 
+    # Legacy top-level compound param is forbidden (pin-only now).
+    legacy_extra =
+      update_in(
+        graph.nodes["validate"].attrs,
+        &Map.put(&1, "param.test_stage_timeout", 900_000)
+      )
+
+    assert {:error, {:semantic_preflight_failed, legacy_errors}} =
+             preflight(legacy_extra, profile["semantic_policy"],
+               review_profile: "binding",
+               validation_timeout_ms: 900_000,
+               validation_test_stage_timeout_ms: 900_000,
+               validation_stage_timeout_ms: 900_000
+             )
+
+    assert Enum.any?(legacy_errors, &(&1["code"] == "validation_parameter_violation"))
+
     # Omitting the compound preflight options for a cross_app graph fails closed.
     # Call SemanticPreflight directly so the test helper cannot backfill them.
     assert {:error, {:semantic_preflight_failed, absent_opt_errors}} =
@@ -2455,6 +2461,97 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
              )
 
     assert Enum.any?(absent_opt_errors, &(&1["code"] == "validation_parameter_violation"))
+  end
+
+  test "adversarial: wrapper pin shape fails closed on action, profile, JSON, and timeout drift",
+       ctx do
+    assert {:ok, compilation} = compile(plan!(), ctx)
+    graph = compiled_graph!(compilation.dot_source)
+    assert {:ok, profile} = Profiles.fetch_executable("default")
+    expected_timeout = graph.nodes["validate"].attrs["param.timeout"]
+
+    assert :ok = preflight(graph, profile["semantic_policy"], review_profile: "binding")
+
+    mutations = [
+      # Wrong wrapper action (underlying name is pin-only).
+      {"wrapper_action",
+       update_in(graph.nodes["validate"].attrs, &Map.put(&1, "action", "mix_compile"))},
+      # Wrong pin profile.
+      {"pinned_profile",
+       update_in(
+         graph.nodes["validate"].attrs,
+         &Map.put(&1, "param.pinned_profile_id", "cross_app")
+       )},
+      # Wrong pin action.
+      {"pinned_action",
+       update_in(
+         graph.nodes["validate"].attrs,
+         &Map.put(&1, "param.pinned_action", "coding_cross_app_validate")
+       )},
+      # Malformed pinned JSON.
+      {"malformed_pin_json",
+       update_in(
+         graph.nodes["validate"].attrs,
+         &Map.put(&1, "param.pinned_params_json", "not-json{")
+       )},
+      # Missing pinned JSON.
+      {"missing_pin_json",
+       update_in(graph.nodes["validate"].attrs, &Map.delete(&1, "param.pinned_params_json"))},
+      # Changed pin timeout.
+      {"changed_pin_timeout",
+       mutate_pinned_params(graph, fn pinned ->
+         Map.put(pinned, "timeout", expected_timeout - 1)
+       end)},
+      # Extra pin field.
+      {"extra_pin_field",
+       mutate_pinned_params(graph, fn pinned ->
+         Map.put(pinned, "unreviewed", true)
+       end)},
+      # Missing runtime timeout binding.
+      {"missing_runtime_timeout",
+       update_in(graph.nodes["validate"].attrs, &Map.delete(&1, "param.timeout"))},
+      # Wrong runtime timeout binding.
+      {"wrong_runtime_timeout",
+       update_in(
+         graph.nodes["validate"].attrs,
+         &Map.put(&1, "param.timeout", expected_timeout - 1)
+       )},
+      # Forbidden legacy top-level param.
+      {"legacy_extra_param",
+       update_in(
+         graph.nodes["validate"].attrs,
+         &Map.put(&1, "param.warnings_as_errors", true)
+       )}
+    ]
+
+    for {kind, mutated} <- mutations do
+      assert {:error, {:semantic_preflight_failed, errors}} =
+               preflight(mutated, profile["semantic_policy"], review_profile: "binding"),
+             "expected preflight failure for #{kind}"
+
+      assert Enum.any?(errors, fn err ->
+               err["code"] in [
+                 "validation_parameter_violation",
+                 "action_placement_violation",
+                 "forbidden_action",
+                 "security_binding_mismatch",
+                 "missing_action"
+               ] or
+                 (is_binary(err["code"]) and
+                    (String.contains?(err["code"], "action") or
+                       String.contains?(err["code"], "validation") or
+                       String.contains?(err["code"], "parameter")))
+             end),
+             "expected wrapper/pin violation for #{kind}, got: #{inspect(errors)}"
+    end
+  end
+
+  defp mutate_pinned_params(graph, fun) when is_function(fun, 1) do
+    update_in(graph.nodes["validate"].attrs, fn attrs ->
+      raw = Map.fetch!(attrs, "param.pinned_params_json")
+      {:ok, pinned} = Jason.decode(raw)
+      Map.put(attrs, "param.pinned_params_json", Jason.encode!(fun.(pinned)))
+    end)
   end
 
   defp compile(plan, ctx, template_source \\ nil) do

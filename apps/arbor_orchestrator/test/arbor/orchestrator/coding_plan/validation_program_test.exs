@@ -277,8 +277,10 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationProgramTest do
 
         assert {:ok, profile} = Profiles.fetch_executable(profile_id)
 
-        assert attrs["timeout_budget.param"] ==
-                 profile["validation_strategy"]["timeout_budget_param"]
+        binding = profile["validation_strategy"]["timeout_budget_param"]
+        assert attrs["timeout_budget.param"] == binding
+        assert is_integer(attrs["param.#{binding}"]) and attrs["param.#{binding}"] > 0
+        assert attrs["param.#{binding}"] == pinned[binding]
 
         refute Map.has_key?(attrs, "param.unreviewed")
         refute Map.has_key?(attrs, "arg.legacy")

@@ -1044,6 +1044,11 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert node_attrs(graph, "validate")["param.pinned_action"] == "mix_compile"
     assert node_attrs(graph, "validate")["param.pinned_profile_id"] == "default"
     assert is_binary(node_attrs(graph, "validate")["param.pinned_params_json"])
+    assert {:ok, default_pinned} =
+             Jason.decode(node_attrs(graph, "validate")["param.pinned_params_json"])
+
+    assert default_pinned["timeout"] == 900_000
+    assert node_attrs(graph, "validate")["param.timeout"] == 900_000
     assert node_attrs(graph, "review_change")["action"] == "council_review_change"
 
     assert node_attrs(graph, "open_design_checkpoint")
@@ -1176,7 +1181,8 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
              compilation.action_catalog_digest
 
     assert "coding_reviewed_validation" in compilation.manifest["action_names"]
-    assert "mix_compile" in compilation.manifest["action_names"]
+    # Nested validator is pin-transitive via execution_dependencies, not a graph node.
+    refute "mix_compile" in compilation.manifest["action_names"]
     assert "council_review_change" in compilation.manifest["action_names"]
     refute "mix_test" in compilation.manifest["action_names"]
     refute Map.has_key?(compilation.manifest, "capabilities")
@@ -1360,13 +1366,19 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     graph = parse!(compilation.dot_source)
 
     validate = node_attrs(graph, "validate")
-    assert validate["action"] == "coding_security_regression_validate"
+    assert validate["action"] == "coding_reviewed_validation"
+    assert validate["param.pinned_action"] == "coding_security_regression_validate"
+    assert validate["param.pinned_profile_id"] == "security_regression"
     assert validate["context_keys"] == "review_attestation_id"
-    assert validate["param.timeout"] == 600_000
-    assert validate["param.stage_timeout"] == plan.budgets["wall_clock_ms"]
+    assert {:ok, pinned} = Jason.decode(validate["param.pinned_params_json"])
+    assert pinned["timeout"] == 600_000
+    assert pinned["stage_timeout"] == plan.budgets["wall_clock_ms"]
+    assert pinned["stage_timeout"] == 900_000
+    # ExecHandler clamps the compiler-selected stage_timeout binding.
     assert validate["param.stage_timeout"] == 900_000
     assert validate["timeout_budget.param"] == "stage_timeout"
     refute Map.has_key?(validate, "param.warnings_as_errors")
+    refute Map.has_key?(validate, "param.timeout")
     refute validate["context_keys"] =~ "path"
     refute validate["context_keys"] =~ "test_paths"
 
@@ -1384,6 +1396,17 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
              "check_validation_total_budget",
              "context.total_rework_count<2"
            ) == "snapshot_validation_prior_commit"
+
+    # Soft-fail and validation-approval rework both record prior_reviewed_commit
+    # before the rework-budget path.
+    assert edge_target(graph, "check_validation_passed", "outcome=fail") ==
+             "remember_validation_reviewed_commit"
+
+    assert edge_target(graph, "hoist_validation_approval_note", nil) ==
+             "remember_validation_reviewed_commit"
+
+    assert edge_target(graph, "remember_validation_reviewed_commit", nil) ==
+             "check_validation_category_budget"
 
     assert edge_target(graph, "snapshot_validation_prior_candidate_commit", nil) ==
              "inc_validation_review_cycle"
@@ -1471,7 +1494,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
              compile(plan, ctx)
   end
 
-  test "cross_app rewrites validate to coding_cross_app_validate and drops security dormant nodes",
+  test "cross_app rewrites validate to coding_reviewed_validation pin and drops security dormant nodes",
        ctx do
     plan = plan!(%{"validation_profile" => "cross_app"})
 
@@ -1479,26 +1502,39 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     graph = parse!(compilation.dot_source)
 
     validate = node_attrs(graph, "validate")
-    assert validate["action"] == "coding_cross_app_validate"
+    assert validate["action"] == "coding_reviewed_validation"
+    assert validate["param.pinned_action"] == "coding_cross_app_validate"
+    assert validate["param.pinned_profile_id"] == "cross_app"
     assert validate["context_keys"] == "workspace_id"
     refute Map.has_key?(validate, "param.warnings_as_errors")
+    assert {:ok, pinned} = Jason.decode(validate["param.pinned_params_json"])
     # Intensive per-op max 1_200_000 and aggregate stage max 4_200_000, both min
     # with default wall-clock 900_000.
-    assert validate["param.timeout"] == 900_000
-    assert validate["param.test_stage_timeout"] == 900_000
+    assert pinned["timeout"] == 900_000
+    assert pinned["test_stage_timeout"] == 900_000
+    assert pinned["stage_timeout"] == 900_000
     assert validate["param.stage_timeout"] == 900_000
     assert validate["timeout_budget.param"] == "stage_timeout"
+    refute Map.has_key?(validate, "param.timeout")
+    refute Map.has_key?(validate, "param.test_stage_timeout")
     refute validate["context_keys"] =~ "path"
     refute validate["context_keys"] =~ "test_paths"
     assert_validation_capture_topology(graph, "prep_validation_path")
 
     assert Map.has_key?(graph.nodes, "status_validation_capacity_exceeded")
+    assert Map.has_key?(graph.nodes, "route_validation_interaction")
 
-    assert edge_condition(graph, "validate", "status_validation_capacity_exceeded") ==
-             "outcome=success&&context.validation.reason=validation_capacity_exceeded"
+    assert edge_condition(graph, "validate", "route_validation_interaction") == "outcome=success"
 
-    assert edge_condition(graph, "validate", "check_validation_passed") ==
-             "outcome=success&&context.validation.reason!=validation_capacity_exceeded"
+    assert edge_condition(
+             graph,
+             "route_validation_interaction",
+             "status_validation_capacity_exceeded"
+           ) ==
+             "context.validation.interaction_outcome=\"\"&&context.validation.reason=validation_capacity_exceeded"
+
+    assert edge_condition(graph, "route_validation_interaction", "check_validation_passed") ==
+             "context.validation.interaction_outcome=\"\"&&context.validation.reason!=validation_capacity_exceeded"
 
     assert Enum.any?(graph.edges, fn edge ->
              edge.from == "status_validation_capacity_exceeded" and
@@ -1525,7 +1561,8 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     refute Enum.any?(graph.edges, &submit_review_false_edge?/1)
     assert auto_proceed_target(graph) == "route_publish"
 
-    assert "coding_cross_app_validate" in compilation.manifest["action_names"]
+    assert "coding_reviewed_validation" in compilation.manifest["action_names"]
+    refute "coding_cross_app_validate" in compilation.manifest["action_names"]
     refute "mix_compile" in compilation.manifest["action_names"]
     refute "mix_test" in compilation.manifest["action_names"]
     refute "coding_security_regression_validate" in compilation.manifest["action_names"]
@@ -1544,9 +1581,11 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
 
     assert {:ok, compilation} = compile(plan, ctx)
     validate = node_attrs(parse!(compilation.dot_source), "validate")
+    assert {:ok, pinned} = Jason.decode(validate["param.pinned_params_json"])
 
-    assert validate["param.timeout"] == 120_000
-    assert validate["param.test_stage_timeout"] == 120_000
+    assert pinned["timeout"] == 120_000
+    assert pinned["test_stage_timeout"] == 120_000
+    assert pinned["stage_timeout"] == 120_000
     assert validate["param.stage_timeout"] == 120_000
   end
 
@@ -1559,12 +1598,14 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
 
     assert {:ok, compilation} = compile(plan, ctx)
     validate = node_attrs(parse!(compilation.dot_source), "validate")
+    assert {:ok, pinned} = Jason.decode(validate["param.pinned_params_json"])
 
     # Per-op intensive Shell max is 1_200_000; aggregate test-stage max is
     # 4_200_000; whole-stage max is three intensive children + test-stage.
     # All are further bounded by plan wall clock here.
-    assert validate["param.timeout"] == 1_200_000
-    assert validate["param.test_stage_timeout"] == 1_500_000
+    assert pinned["timeout"] == 1_200_000
+    assert pinned["test_stage_timeout"] == 1_500_000
+    assert pinned["stage_timeout"] == 1_500_000
     assert validate["param.stage_timeout"] == 1_500_000
   end
 
@@ -1579,19 +1620,21 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
 
     assert {:ok, compilation} = compile(plan, ctx)
     validate = node_attrs(parse!(compilation.dot_source), "validate")
+    assert {:ok, pinned} = Jason.decode(validate["param.pinned_params_json"])
 
-    assert validate["param.timeout"] == 1_200_000
-    assert validate["param.test_stage_timeout"] == 4_200_000
+    assert pinned["timeout"] == 1_200_000
+    assert pinned["test_stage_timeout"] == 4_200_000
+    assert pinned["stage_timeout"] == stage_max
     assert validate["param.stage_timeout"] == stage_max
 
-    assert validate["param.test_stage_timeout"] ==
+    assert pinned["test_stage_timeout"] ==
              Arbor.Actions.cross_app_maximum_test_stage_timeout_ms()
 
-    assert validate["param.stage_timeout"] ==
+    assert pinned["stage_timeout"] ==
              Arbor.Actions.cross_app_maximum_stage_timeout_ms()
 
-    assert validate["param.test_stage_timeout"] > validate["param.timeout"]
-    assert validate["param.stage_timeout"] > validate["param.test_stage_timeout"]
+    assert pinned["test_stage_timeout"] > pinned["timeout"]
+    assert pinned["stage_timeout"] > pinned["test_stage_timeout"]
   end
 
   test "cross_app whole-stage binds between test-stage and stage maxima", ctx do
@@ -1603,9 +1646,11 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
 
     assert {:ok, compilation} = compile(plan, ctx)
     validate = node_attrs(parse!(compilation.dot_source), "validate")
+    assert {:ok, pinned} = Jason.decode(validate["param.pinned_params_json"])
 
-    assert validate["param.timeout"] == 1_200_000
-    assert validate["param.test_stage_timeout"] == 4_200_000
+    assert pinned["timeout"] == 1_200_000
+    assert pinned["test_stage_timeout"] == 4_200_000
+    assert pinned["stage_timeout"] == 5_000_000
     assert validate["param.stage_timeout"] == 5_000_000
   end
 
@@ -1621,7 +1666,13 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
 
     assert auto_proceed_target(graph) == "route_human_review"
     refute Enum.any?(graph.edges, &submit_review_false_edge?/1)
-    assert node_attrs(graph, "validate")["action"] == "coding_cross_app_validate"
+    validate = node_attrs(graph, "validate")
+    assert validate["action"] == "coding_reviewed_validation"
+    assert validate["param.pinned_action"] == "coding_cross_app_validate"
+    assert validate["param.pinned_profile_id"] == "cross_app"
+    assert is_binary(validate["param.pinned_params_json"])
+    assert validate["timeout_budget.param"] == "stage_timeout"
+    assert is_integer(validate["param.stage_timeout"]) and validate["param.stage_timeout"] > 0
   end
 
   test "review profiles preserve council review and deterministically control routing", ctx do

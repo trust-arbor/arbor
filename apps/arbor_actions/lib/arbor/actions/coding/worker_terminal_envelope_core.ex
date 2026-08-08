@@ -53,43 +53,83 @@ defmodule Arbor.Actions.Coding.WorkerTerminalEnvelopeCore do
   """
   @spec parse(term()) :: {:ok, parse_ok()} | parse_error()
   def parse(text) when is_binary(text) do
-    trimmed = String.trim(text)
-
+    # Byte-size first so oversized invalid UTF-8 never raises in trim/decode.
     cond do
-      trimmed == "" ->
-        error("text_required", text)
-
       byte_size(text) > @max_text_bytes ->
         error("oversized", text)
 
       true ->
-        parse_trimmed(trimmed, text)
+        trimmed = trim_ascii_ws(text)
+
+        if trimmed == "" do
+          error("text_required", text)
+        else
+          parse_trimmed(trimmed, text)
+        end
     end
   end
 
   def parse(_text), do: error("text_required", "")
 
   defp parse_trimmed(trimmed, original) do
-    case Jason.decode(trimmed) do
+    # Never call String.* on untrusted input: invalid UTF-8 must return
+    # bounded invalid evidence, not raise ArgumentError.
+    case safe_json_decode(trimmed) do
       {:ok, object} when is_map(object) and not is_struct(object) ->
-        # Exact whole-message: re-encode must equal the trimmed input for the
-        # decoded object. Reject trailing/leading non-JSON and dual payloads by
-        # requiring the decoded value to re-encode to a single object and that
-        # no residual non-whitespace remains after one decode of the original
-        # trimmed string via Jason's complete consumption — Jason.decode/1
-        # already requires the full string to be one JSON value.
+        # Exact whole-message: Jason.decode/1 already requires the full string
+        # to be one JSON value (no residual non-JSON after the value).
         validate_object(object, original)
 
       {:ok, _other} ->
         error("not_object", original)
 
-      {:error, _reason} ->
+      :invalid_json ->
         # Distinguish residual garbage after a valid object from pure invalid JSON
         # by attempting a leading-object scan only for diagnostics — never accept.
         case leading_object_residue(trimmed) do
           :has_residue -> error("not_whole_message", original)
           :none -> error("invalid_json", original)
         end
+    end
+  end
+
+  defp safe_json_decode(text) when is_binary(text) do
+    try do
+      case Jason.decode(text) do
+        {:ok, value} -> {:ok, value}
+        {:error, _reason} -> :invalid_json
+      end
+    rescue
+      # Invalid UTF-8 or other binary faults must never raise to the graph.
+      _ -> :invalid_json
+    end
+  end
+
+  # ASCII whitespace trim that never raises on invalid UTF-8.
+  defp trim_ascii_ws(text) when is_binary(text) do
+    text
+    |> trim_leading_ascii_ws()
+    |> trim_trailing_ascii_ws()
+  end
+
+  defp trim_leading_ascii_ws(<<c, rest::binary>>) when c in [?\s, ?\t, ?\n, ?\r],
+    do: trim_leading_ascii_ws(rest)
+
+  defp trim_leading_ascii_ws(rest), do: rest
+
+  defp trim_trailing_ascii_ws(text) do
+    size = byte_size(text)
+
+    if size == 0 do
+      text
+    else
+      case :binary.at(text, size - 1) do
+        c when c in [?\s, ?\t, ?\n, ?\r] ->
+          trim_trailing_ascii_ws(binary_part(text, 0, size - 1))
+
+        _ ->
+          text
+      end
     end
   end
 
@@ -116,7 +156,7 @@ defmodule Arbor.Actions.Coding.WorkerTerminalEnvelopeCore do
       not is_binary(status) ->
         error("unknown_status", original)
 
-      String.trim(status) == "" ->
+      blank_binary?(status) ->
         error("blank_status", original)
 
       not MapSet.member?(@allowed_statuses, status) ->
@@ -141,12 +181,15 @@ defmodule Arbor.Actions.Coding.WorkerTerminalEnvelopeCore do
     end
   end
 
+  defp blank_binary?(value) when is_binary(value), do: trim_ascii_ws(value) == ""
+  defp blank_binary?(_value), do: true
+
   # If the string starts with a balanced object and then non-whitespace remains,
   # classify as not_whole_message (e.g. `{}{}` or `{} prose`).
   defp leading_object_residue(<<"{", _::binary>> = text) do
     case take_balanced_object(text) do
       {:ok, _object, rest} ->
-        if String.trim(rest) == "", do: :none, else: :has_residue
+        if trim_ascii_ws(rest) == "", do: :none, else: :has_residue
 
       :error ->
         :none

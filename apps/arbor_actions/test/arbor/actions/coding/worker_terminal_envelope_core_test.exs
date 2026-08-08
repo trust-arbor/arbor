@@ -50,4 +50,41 @@ defmodule Arbor.Actions.Coding.WorkerTerminalEnvelopeCoreTest do
     assert evidence["valid"] == false
     assert evidence["protocol_error"] == "text_required"
   end
+
+  test "invalid UTF-8 returns exact invalid_json bounded evidence without raising" do
+    # Lone continuation byte — invalid UTF-8.
+    text = <<0x80, 0x81, 0x82>>
+
+    assert {:error, "invalid_json", evidence} = WorkerTerminalEnvelopeCore.parse(text)
+    assert evidence["valid"] == false
+    assert evidence["protocol_error"] == "invalid_json"
+    assert evidence["status"] == nil
+    assert evidence["summary"] == nil
+    assert evidence["text_byte_size"] == byte_size(text)
+    assert is_binary(evidence["text_sha256"])
+    assert String.starts_with?(evidence["text_sha256"], "sha256:")
+    refute Map.has_key?(evidence, "text")
+  end
+
+  test "oversized input returns oversized evidence without raising" do
+    oversize = WorkerTerminalEnvelopeCore.max_text_bytes() + 1
+    text = :binary.copy("a", oversize)
+
+    assert {:error, "oversized", evidence} = WorkerTerminalEnvelopeCore.parse(text)
+    assert evidence["valid"] == false
+    assert evidence["protocol_error"] == "oversized"
+    assert evidence["text_byte_size"] == oversize
+    assert is_binary(evidence["text_sha256"])
+    # Evidence must never echo the full raw payload.
+    refute Map.has_key?(evidence, "text")
+  end
+
+  test "oversized invalid UTF-8 is classified oversized before decode" do
+    oversize = WorkerTerminalEnvelopeCore.max_text_bytes() + 8
+    text = :binary.copy(<<0x80>>, oversize)
+
+    assert {:error, "oversized", evidence} = WorkerTerminalEnvelopeCore.parse(text)
+    assert evidence["valid"] == false
+    assert evidence["text_byte_size"] == oversize
+  end
 end

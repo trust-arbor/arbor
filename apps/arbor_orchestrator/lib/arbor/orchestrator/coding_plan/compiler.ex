@@ -627,6 +627,15 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
              "remember_validation_reviewed_commit",
              "outcome=fail"
            ),
+         # Validation-approval rework must record prior_reviewed_commit before
+         # the freshness/rework-budget path (same as soft-fail validation rework).
+         {:ok, graph} <-
+           rewrite_unconditional_edge(
+             graph,
+             "hoist_validation_approval_note",
+             "check_validation_category_budget",
+             "remember_validation_reviewed_commit"
+           ),
          {:ok, graph} <-
            rewrite_edge(
              graph,

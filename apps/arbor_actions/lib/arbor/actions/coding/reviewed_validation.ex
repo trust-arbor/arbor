@@ -57,7 +57,13 @@ defmodule Arbor.Actions.Coding.ReviewedValidation do
       ],
       timeout: [
         type: :non_neg_integer,
-        doc: "Operator approval wait timeout"
+        doc:
+          "ExecHandler-clamped nested validator timeout binding (default profile); not approval wait"
+      ],
+      stage_timeout: [
+        type: :non_neg_integer,
+        doc:
+          "ExecHandler-clamped nested validator stage_timeout binding (cross_app/security profiles)"
       ]
     ]
 
@@ -92,7 +98,8 @@ defmodule Arbor.Actions.Coding.ReviewedValidation do
       path: {:control, requires: [:path_traversal]},
       workspace_id: :control,
       review_attestation_id: :control,
-      timeout: :control
+      timeout: :control,
+      stage_timeout: :control
     }
   end
 
@@ -262,8 +269,40 @@ defmodule Arbor.Actions.Coding.ReviewedValidation do
         :review_attestation_id,
         param_string(params, [:review_attestation_id, "review_attestation_id"])
       )
+      # ExecHandler clamps the compiler-selected timeout_budget.param onto this
+      # outer action at runtime. Prefer that live value over the static pin so
+      # every nested validator observes the exact remaining stage budget.
+      |> apply_clamped_deadline_binding(params)
 
     {:ok, nested}
+  end
+
+  # Admit either the default-profile `timeout` binding or the compound-profile
+  # `stage_timeout` binding. Only the present positive runtime value overrides
+  # the matching nested key; other static pin timeouts stay intact.
+  defp apply_clamped_deadline_binding(nested, params) do
+    case positive_int_param(params, [:stage_timeout, "stage_timeout"]) do
+      stage when is_integer(stage) ->
+        Map.put(nested, :stage_timeout, stage)
+
+      nil ->
+        case positive_int_param(params, [:timeout, "timeout"]) do
+          timeout when is_integer(timeout) ->
+            Map.put(nested, :timeout, timeout)
+
+          nil ->
+            nested
+        end
+    end
+  end
+
+  defp positive_int_param(params, keys) do
+    Enum.find_value(keys, fn key ->
+      case Map.get(params, key) do
+        n when is_integer(n) and n > 0 -> n
+        _ -> nil
+      end
+    end)
   end
 
   defp atomize_known_keys(map) when is_map(map) do
@@ -617,12 +656,21 @@ defmodule Arbor.Actions.Coding.ReviewedValidation do
 
   # -- helpers ---------------------------------------------------------------
 
-  defp approval_timeout(params, context) do
-    case Map.get(params, :timeout) || Map.get(params, "timeout") ||
-           context_value(context, :approval_timeout_ms) do
+  # Approval wait is owner/context-owned. Params `timeout` / `stage_timeout` are
+  # the nested validator deadline bindings (ExecHandler-clamped) and must never
+  # widen or replace the approval ceiling.
+  defp approval_timeout(_params, context) do
+    case context_value(context, :approval_timeout_ms) do
       n when is_integer(n) and n > 0 -> {:ok, n}
-      nil -> {:ok, @default_approval_timeout}
+      nil -> {:ok, configured_approval_timeout()}
       _ -> {:error, :invalid_approval_timeout}
+    end
+  end
+
+  defp configured_approval_timeout do
+    case Application.get_env(:arbor_actions, :approval_timeout_ms) do
+      n when is_integer(n) and n > 0 -> n
+      _ -> @default_approval_timeout
     end
   end
 

@@ -82,17 +82,24 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationProgram do
     with :ok <- validate(program),
          {:ok, strategy} <- canonical_strategy(program["profile_id"]),
          param when is_binary(param) <- strategy["timeout_budget_param"],
+         binding_value when is_integer(binding_value) and binding_value > 0 <-
+           program["static_parameters"][param],
          {:ok, pinned_params_json} <- Jason.encode(program["static_parameters"]) do
       # Compiler-owned pin: graph always invokes coding_reviewed_validation; the
       # underlying profile action + static params are immutable data, never
       # author-selectable module names. Pin fields are static node params.
+      #
+      # Also project the compiler-selected timeout_budget.param as a top-level
+      # param.* so ExecHandler can clamp that exact requested value against the
+      # remaining stage budget and pass the live value into ReviewedValidation.
       controlled_attrs = %{
         "action" => "coding_reviewed_validation",
         "context_keys" => Enum.join(program["context_keys"], ","),
         "output_prefix" => "validation",
         "param.pinned_action" => program["action"],
         "param.pinned_profile_id" => program["profile_id"],
-        "param.pinned_params_json" => pinned_params_json
+        "param.pinned_params_json" => pinned_params_json,
+        "param.#{param}" => binding_value
       }
 
       attrs =

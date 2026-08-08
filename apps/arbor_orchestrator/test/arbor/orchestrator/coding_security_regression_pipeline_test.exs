@@ -159,7 +159,12 @@ defmodule Arbor.Orchestrator.CodingSecurityRegressionPipelineTest do
               {false, "commit-2", "fp-commit-2"}
           end
 
-        s when s in [:validation_rework_dirty, :review_rework_dirty] ->
+        s
+        when s in [
+               :validation_rework_dirty,
+               :validation_approval_rework,
+               :review_rework_dirty
+             ] ->
           cond do
             implement_count == 0 and not post_turn? ->
               {false, "base-commit", "fp-base"}
@@ -259,13 +264,37 @@ defmodule Arbor.Orchestrator.CodingSecurityRegressionPipelineTest do
       end
     end
 
-    defp dispatch("coding_security_regression_validate", args, scenario, state) do
+    # Graph invokes the reviewed wrapper; nested pin is immutable evidence only.
+    defp dispatch("coding_reviewed_validation", args, scenario, state) do
       validation_index = bump(state, :validation)
 
+      pinned = args["pinned_action"] || args[:pinned_action]
+
+      if pinned != "coding_security_regression_validate" do
+        {:error, "unexpected pinned_action: #{inspect(pinned)}"}
+      else
+        security_reviewed_validation_result(args, scenario, validation_index)
+      end
+    end
+
+    defp security_reviewed_validation_result(args, scenario, validation_index) do
       cond do
+        scenario == :validation_approval_rework and validation_index == 1 ->
+          # Operator rework at the validation approval gate: zero nested
+          # evidence; graph must record prior_reviewed_commit before budget path.
+          {:ok,
+           %{
+             interaction_outcome: "rework",
+             request_id: "irq_security_validation_rework_1",
+             note: "fix the failing security assertion"
+           }}
+
         scenario == :validation_capacity ->
           {:ok,
            %{
+             interaction_outcome: "",
+             request_id: "",
+             note: "",
              passed: false,
              reason: "validation_capacity_exceeded",
              evidence_type: "reviewed_regression_evidence",
@@ -275,7 +304,8 @@ defmodule Arbor.Orchestrator.CodingSecurityRegressionPipelineTest do
                "output_limit_exceeded" => false,
                "cancelled" => false
              },
-             review_attestation_id: args["review_attestation_id"]
+             review_attestation_id:
+               args["review_attestation_id"] || args[:review_attestation_id]
            }}
 
         scenario in [
@@ -285,6 +315,9 @@ defmodule Arbor.Orchestrator.CodingSecurityRegressionPipelineTest do
         ] and validation_index == 1 ->
           {:ok,
            %{
+             interaction_outcome: "",
+             request_id: "",
+             note: "",
              passed: false,
              reason: "candidate_tests_failed",
              evidence_type: "reviewed_regression_evidence",
@@ -294,6 +327,9 @@ defmodule Arbor.Orchestrator.CodingSecurityRegressionPipelineTest do
         true ->
           {:ok,
            %{
+             interaction_outcome: "",
+             request_id: "",
+             note: "",
              passed: true,
              reason: "security_regression_validated",
              evidence_type: "reviewed_regression_evidence",
@@ -525,12 +561,16 @@ defmodule Arbor.Orchestrator.CodingSecurityRegressionPipelineTest do
     assert result.context["status"] == "change_committed",
            "pipeline stopped without success: #{inspect(current: result.context["current_node"], completed: result.completed_nodes, calls: calls)}"
 
-    assert [{"coding_security_regression_validate", validator_args}] =
-             calls_for(calls, "coding_security_regression_validate")
+    assert [{"coding_reviewed_validation", validator_args}] =
+             calls_for(calls, "coding_reviewed_validation")
 
     assert validator_args["review_attestation_id"] == "attestation-1"
-    assert validator_args["timeout"] == 600_000
+    assert validator_args["pinned_action"] == "coding_security_regression_validate"
+    assert validator_args["pinned_profile_id"] == "security_regression"
+    assert {:ok, pinned} = Jason.decode(validator_args["pinned_params_json"])
+    assert pinned["timeout"] == 600_000
     # Whole-stage budget is min(2 × standard child, wall_clock); wall is 900_000.
+    assert pinned["stage_timeout"] == 900_000
     assert validator_args["stage_timeout"] == 900_000
 
     assert [{"council_review_change", review_args}] =
@@ -562,7 +602,7 @@ defmodule Arbor.Orchestrator.CodingSecurityRegressionPipelineTest do
   test "eligible human review validates and rechecks before the human terminal", ctx do
     assert {{:ok, result}, calls} = run_fixture(:human_success, ctx, "human_required")
     assert result.context["status"] == "human_review_required"
-    assert called?(calls, "coding_security_regression_validate")
+    assert called?(calls, "coding_reviewed_validation")
     assert called?(calls, "coding_workspace_committed_change", 2)
     assert "post_validation_committed_change" in result.completed_nodes
   end
@@ -577,7 +617,7 @@ defmodule Arbor.Orchestrator.CodingSecurityRegressionPipelineTest do
     assert "status_validation_capacity_exceeded" in result.completed_nodes
     assert "prep_release_mode_retain" in result.completed_nodes
     assert "release_workspace" in result.completed_nodes
-    assert called?(calls, "coding_security_regression_validate", 1)
+    assert called?(calls, "coding_reviewed_validation", 1)
     # Capacity retains workspace and must not open ACP worker rework.
     refute called?(calls, "acp_send_message", 2)
     refute "build_validation_rework_prompt" in result.completed_nodes
@@ -597,13 +637,38 @@ defmodule Arbor.Orchestrator.CodingSecurityRegressionPipelineTest do
     assert result.context["status"] == "human_review_required",
            "expected human_review_required terminal, got: #{inspect(current: result.context["current_node"], status: result.context["status"], completed: result.completed_nodes, calls: calls)}"
 
-    refute called?(calls, "coding_security_regression_validate")
+    refute called?(calls, "coding_reviewed_validation")
     refute "validate" in result.completed_nodes
     refute "hoist_review_attestation_id" in result.completed_nodes
     refute "post_validation_committed_change" in result.completed_nodes
     assert "route_security_attested_human" in result.completed_nodes
     assert "status_human_review_required" in result.completed_nodes
     assert called?(calls, "council_review_change", 1)
+  end
+
+  test "validation approval rework records prior_reviewed_commit before rework budget path",
+       ctx do
+    assert {{:ok, result}, calls} = run_fixture(:validation_approval_rework, ctx)
+    assert result.context["status"] == "change_committed"
+    assert "hoist_validation_approval_note" in result.completed_nodes
+    assert "remember_validation_reviewed_commit" in result.completed_nodes
+    assert "check_validation_category_budget" in result.completed_nodes
+
+    remember_idx =
+      Enum.find_index(result.completed_nodes, &(&1 == "remember_validation_reviewed_commit"))
+
+    budget_idx =
+      Enum.find_index(result.completed_nodes, &(&1 == "check_validation_category_budget"))
+
+    assert is_integer(remember_idx) and is_integer(budget_idx)
+    assert remember_idx < budget_idx
+
+    assert result.context["prior_reviewed_commit"] in ["commit-1", "commit-2"]
+    assert result.context["approval_request_id"] == "irq_security_validation_rework_1"
+    assert result.context["approval_note"] == "fix the failing security assertion"
+    # First call is approval-rework (control only); second is post-rework approve.
+    assert called?(calls, "coding_reviewed_validation", 2)
+    assert_single_worker(calls, 2)
   end
 
   for {scenario, source} <- [
@@ -656,7 +721,7 @@ defmodule Arbor.Orchestrator.CodingSecurityRegressionPipelineTest do
 
       validator_ids =
         calls
-        |> calls_for("coding_security_regression_validate")
+        |> calls_for("coding_reviewed_validation")
         |> Enum.map(fn {_name, args} -> args["review_attestation_id"] end)
 
       if unquote(source) == :validation do
@@ -702,7 +767,7 @@ defmodule Arbor.Orchestrator.CodingSecurityRegressionPipelineTest do
   test "changed HEAD after validation fails closed before publication", ctx do
     assert {{:ok, result}, calls} = run_fixture(:post_validation_changed_head, ctx)
     assert result.context["status"] == "validation_failed"
-    assert called?(calls, "coding_security_regression_validate", 1)
+    assert called?(calls, "coding_reviewed_validation", 1)
     assert called?(calls, "coding_workspace_committed_change", 2)
     assert "error_post_validation_committed_change" in result.completed_nodes
     refute "status_change_committed" in result.completed_nodes
