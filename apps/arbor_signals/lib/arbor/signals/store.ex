@@ -22,6 +22,8 @@ defmodule Arbor.Signals.Store do
   require Logger
 
   alias Arbor.Signals.Signal
+  alias Arbor.Signals.Store.CheckpointIO
+  alias Arbor.Signals.Store.MemoryPrivacyCore
 
   @default_max_signals 10_000
   @default_ttl_seconds 3600
@@ -134,6 +136,70 @@ defmodule Arbor.Signals.Store do
   @spec restore(GenServer.server(), map()) :: :ok
   def restore(server \\ __MODULE__, snapshot_data) do
     GenServer.call(server, {:restore, snapshot_data})
+  end
+
+  @doc """
+  Delete retained `:memory` signal content for exactly one agent id.
+
+  Removes matching signals from the live map and order queue, preserves
+  survivors and aggregate stats, and when checkpointing is configured
+  synchronously saves and reads back the post-delete snapshot before
+  success.
+  """
+  @spec delete_memory_agent_content(String.t(), keyword()) ::
+          :ok
+          | {:error,
+             {:delete_indeterminate, String.t()}
+             | :invalid_agent_id
+             | :invalid_precondition
+             | :store_unavailable
+             | :checkpoint_configuration_invalid
+             | :checkpoint_unavailable
+             | :checkpoint_verification_failed}
+  def delete_memory_agent_content(agent_id, opts \\ []) do
+    with {:ok, agent_id} <- MemoryPrivacyCore.validate_agent_id(agent_id),
+         {:ok, timeout_ms} <- MemoryPrivacyCore.validate_timeout_ms(opts),
+         {:ok, server} <- store_server() do
+      deadline_mono = System.monotonic_time(:millisecond) + timeout_ms
+
+      call_privacy(
+        server,
+        {:delete_memory_agent_content, agent_id, deadline_mono},
+        deadline_mono,
+        agent_id,
+        :delete
+      )
+    end
+  end
+
+  @doc """
+  Read-only check that retained `:memory` signal content for one agent id is
+  absent from the live store and configured checkpoint.
+  """
+  @spec memory_agent_content_absent?(String.t(), keyword()) ::
+          {:ok, boolean()}
+          | {:error,
+             {:absence_indeterminate, String.t()}
+             | :invalid_agent_id
+             | :invalid_precondition
+             | :store_unavailable
+             | :checkpoint_configuration_invalid
+             | :checkpoint_unavailable
+             | :checkpoint_verification_failed}
+  def memory_agent_content_absent?(agent_id, opts \\ []) do
+    with {:ok, agent_id} <- MemoryPrivacyCore.validate_agent_id(agent_id),
+         {:ok, timeout_ms} <- MemoryPrivacyCore.validate_timeout_ms(opts),
+         {:ok, server} <- store_server() do
+      deadline_mono = System.monotonic_time(:millisecond) + timeout_ms
+
+      call_privacy(
+        server,
+        {:memory_agent_content_absent?, agent_id, deadline_mono},
+        deadline_mono,
+        agent_id,
+        :absence
+      )
+    end
   end
 
   # ============================================================================
@@ -322,6 +388,18 @@ defmodule Arbor.Signals.Store do
   end
 
   @impl true
+  def handle_call({:delete_memory_agent_content, agent_id, deadline_mono}, _from, state) do
+    {reply, new_state} = do_delete_memory_agent_content(state, agent_id, deadline_mono)
+    {:reply, reply, new_state}
+  end
+
+  @impl true
+  def handle_call({:memory_agent_content_absent?, agent_id, deadline_mono}, _from, state) do
+    reply = do_memory_agent_content_absent(state, agent_id, deadline_mono)
+    {:reply, reply, state}
+  end
+
+  @impl true
   def handle_info(:cleanup, state) do
     state = cleanup_expired(state)
     schedule_cleanup()
@@ -341,7 +419,174 @@ defmodule Arbor.Signals.Store do
     :ok
   end
 
-  # Private functions
+  # Private functions — privacy cleanup
+
+  defp call_privacy(server, request, deadline_mono, agent_id, kind) do
+    case CheckpointIO.remaining_ms(deadline_mono) do
+      {:error, :timeout} ->
+        {:error, :invalid_precondition}
+
+      {:ok, remaining} ->
+        # Once GenServer.call is issued, only a definite pre-accept noproc is
+        # :store_unavailable. :normal/:shutdown/timeout/kill may follow an
+        # accepted mutation and must be target-bound indeterminate.
+        try do
+          GenServer.call(server, request, remaining)
+        catch
+          :exit, {:noproc, _} ->
+            {:error, :store_unavailable}
+
+          :exit, {:timeout, _} ->
+            indeterminate(kind, agent_id)
+
+          :exit, {:normal, _} ->
+            indeterminate(kind, agent_id)
+
+          :exit, {:shutdown, _} ->
+            indeterminate(kind, agent_id)
+
+          :exit, _reason ->
+            indeterminate(kind, agent_id)
+        end
+    end
+  end
+
+  defp indeterminate(:delete, agent_id), do: {:error, {:delete_indeterminate, agent_id}}
+  defp indeterminate(:absence, agent_id), do: {:error, {:absence_indeterminate, agent_id}}
+
+  defp store_server do
+    case Process.whereis(__MODULE__) do
+      nil -> {:error, :store_unavailable}
+      pid when is_pid(pid) -> {:ok, __MODULE__}
+    end
+  end
+
+  defp do_delete_memory_agent_content(state, agent_id, deadline_mono) do
+    with :ok <- ensure_deadline(deadline_mono),
+         :ok <- MemoryPrivacyCore.validate_live_state(state),
+         {:ok, target_ids} <- MemoryPrivacyCore.select_target_ids(state.signals, agent_id),
+         {:ok, mode} <- resolve_checkpoint_mode() do
+      state2 = MemoryPrivacyCore.drop_targets(state, target_ids)
+
+      case mode do
+        :live_only ->
+          if MemoryPrivacyCore.has_exact_target?(state2.signals, agent_id) do
+            {{:error, {:delete_indeterminate, agent_id}}, state2}
+          else
+            {:ok, state2}
+          end
+
+        {:configured, module, store} ->
+          approved = MemoryPrivacyCore.build_snapshot(state2)
+
+          case run_save_and_load(module, store, approved, deadline_mono) do
+            {:ok, loaded} ->
+              case MemoryPrivacyCore.prove_delete_convergence(state2, approved, loaded, agent_id) do
+                :ok ->
+                  {:ok, state2}
+
+                :failed ->
+                  {{:error, {:delete_indeterminate, agent_id}}, state2}
+              end
+
+            {:error, _reason} ->
+              {{:error, {:delete_indeterminate, agent_id}}, state2}
+          end
+      end
+    else
+      {:error, reason} ->
+        {{:error, reason}, state}
+    end
+  end
+
+  defp do_memory_agent_content_absent(state, agent_id, deadline_mono) do
+    with :ok <- ensure_deadline(deadline_mono),
+         :ok <- MemoryPrivacyCore.validate_live_state(state),
+         {:ok, live_has_target?} <- MemoryPrivacyCore.live_has_target?(state.signals, agent_id),
+         {:ok, mode} <- resolve_checkpoint_mode() do
+      case mode do
+        :live_only ->
+          {:ok, not live_has_target?}
+
+        {:configured, module, store} ->
+          case run_load(module, store, deadline_mono) do
+            {:ok, loaded} ->
+              case MemoryPrivacyCore.validate_loaded_snapshot(loaded, agent_id) do
+                {:ok, cp_has_target?} ->
+                  {:ok, not live_has_target? and not cp_has_target?}
+
+                {:error, :invalid_precondition} ->
+                  # Loaded snapshot malformed/ambiguous after dispatch.
+                  {:error, {:absence_indeterminate, agent_id}}
+
+                {:error, reason} ->
+                  {:error, reason}
+              end
+
+            {:error, _reason} ->
+              {:error, {:absence_indeterminate, agent_id}}
+          end
+      end
+    end
+  end
+
+  defp ensure_deadline(deadline_mono) do
+    case CheckpointIO.remaining_ms(deadline_mono) do
+      {:ok, _} -> :ok
+      {:error, :timeout} -> {:error, :invalid_precondition}
+    end
+  end
+
+  defp resolve_checkpoint_mode do
+    module = Application.get_env(:arbor_signals, :checkpoint_module)
+    store = Application.get_env(:arbor_signals, :checkpoint_store)
+
+    cond do
+      is_nil(module) and is_nil(store) ->
+        {:ok, :live_only}
+
+      not is_nil(module) and not is_nil(store) ->
+        validate_configured_checkpoint(module, store)
+
+      true ->
+        {:error, :checkpoint_configuration_invalid}
+    end
+  end
+
+  defp validate_configured_checkpoint(module, store) do
+    cond do
+      not is_atom(module) or module in [true, false, nil] ->
+        {:error, :checkpoint_configuration_invalid}
+
+      not Code.ensure_loaded?(module) ->
+        {:error, :checkpoint_configuration_invalid}
+
+      not function_exported?(module, :save, 3) ->
+        {:error, :checkpoint_configuration_invalid}
+
+      not function_exported?(module, :load, 2) ->
+        {:error, :checkpoint_configuration_invalid}
+
+      true ->
+        {:ok, {:configured, module, store}}
+    end
+  end
+
+  defp run_save_and_load(module, store, snapshot, deadline_mono) do
+    case CheckpointIO.run({:save_and_load, module, store, snapshot}, deadline_mono) do
+      {:ok, {:loaded, loaded}} when is_map(loaded) -> {:ok, loaded}
+      {:ok, _} -> {:error, :malformed}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp run_load(module, store, deadline_mono) do
+    case CheckpointIO.run({:load, module, store}, deadline_mono) do
+      {:ok, {:loaded, loaded}} when is_map(loaded) -> {:ok, loaded}
+      {:ok, _} -> {:error, :malformed}
+      {:error, reason} -> {:error, reason}
+    end
+  end
 
   defp store_signal(state, signal) do
     state

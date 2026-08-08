@@ -232,6 +232,26 @@ defmodule Arbor.Signals do
   @spec recent(keyword()) :: {:ok, [Signal.t()]} | {:error, term()}
   def recent(opts \\ []), do: get_recent_signals_from_buffer(opts)
 
+  @doc """
+  Delete retained `:memory` signal content for exactly one agent id.
+
+  See `delete_retained_memory_signal_content_for_agent/2`.
+  """
+  @spec delete_memory_agent_content(String.t(), keyword()) ::
+          Arbor.Contracts.API.Signals.retained_memory_signal_delete_result()
+  def delete_memory_agent_content(agent_id, opts \\ []),
+    do: delete_retained_memory_signal_content_for_agent(agent_id, opts)
+
+  @doc """
+  Read-only check that retained `:memory` signal content for one agent is absent.
+
+  See `check_retained_memory_signal_content_absent_for_agent/2`.
+  """
+  @spec memory_agent_content_absent?(String.t(), keyword()) ::
+          Arbor.Contracts.API.Signals.retained_memory_signal_absence_result()
+  def memory_agent_content_absent?(agent_id, opts \\ []),
+    do: check_retained_memory_signal_content_absent_for_agent(agent_id, opts)
+
   # ===========================================================================
   # Contract implementations — verbose, AI-readable names
   # ===========================================================================
@@ -327,6 +347,16 @@ defmodule Arbor.Signals do
   @impl true
   def get_recent_signals_from_buffer(opts) do
     Store.recent(opts)
+  end
+
+  @impl true
+  def delete_retained_memory_signal_content_for_agent(agent_id, opts) do
+    Store.delete_memory_agent_content(agent_id, opts)
+  end
+
+  @impl true
+  def check_retained_memory_signal_content_absent_for_agent(agent_id, opts) do
+    Store.memory_agent_content_absent?(agent_id, opts)
   end
 
   # System API

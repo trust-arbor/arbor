@@ -34,6 +34,38 @@ defmodule Arbor.Contracts.API.Signals do
   @type pattern :: String.t()
   @type signal :: map()
   @type handler :: (signal() -> :ok | {:error, term()})
+  @type agent_id :: String.t()
+
+  @typedoc "Closed public failures for retained Memory signal content deletion."
+  @type retained_memory_signal_delete_error ::
+          :invalid_agent_id
+          | :invalid_precondition
+          | :store_unavailable
+          | :checkpoint_configuration_invalid
+          | :checkpoint_unavailable
+          | :checkpoint_verification_failed
+
+  @typedoc "Result of bounded exact-agent retained Memory signal content deletion."
+  @type retained_memory_signal_delete_result ::
+          :ok
+          | {:error, {:delete_indeterminate, agent_id()}}
+          | {:error, retained_memory_signal_delete_error()}
+
+  @typedoc "Closed public failures for retained Memory signal content absence checks."
+  @type retained_memory_signal_absence_error ::
+          :invalid_agent_id
+          | :invalid_precondition
+          | :store_unavailable
+          | :checkpoint_configuration_invalid
+          | :checkpoint_unavailable
+          | :checkpoint_verification_failed
+
+  @typedoc "Result of a bounded exact-agent retained Memory signal content absence check."
+  @type retained_memory_signal_absence_result ::
+          {:ok, true}
+          | {:ok, false}
+          | {:error, {:absence_indeterminate, agent_id()}}
+          | {:error, retained_memory_signal_absence_error()}
 
   @type emit_opts :: [
           source: String.t(),
@@ -121,6 +153,31 @@ defmodule Arbor.Contracts.API.Signals do
   """
   @callback clear_interrupt(target_id :: String.t()) :: :ok
 
+  @doc """
+  Delete retained `:memory` signal content for exactly one agent id from the
+  live Signals Store and its configured checkpoint.
+
+  Optional. Returns `:ok` only after definite live deletion and, when
+  checkpointing is configured, definite save/load convergence proving
+  absence. Post-dispatch uncertainty returns
+  `{:error, {:delete_indeterminate, agent_id}}`. Backend-native details never
+  escape.
+  """
+  @callback delete_retained_memory_signal_content_for_agent(agent_id(), opts :: keyword()) ::
+              retained_memory_signal_delete_result()
+
+  @doc """
+  Prove whether retained `:memory` signal content for exactly one agent id is
+  absent from the live Signals Store and its configured checkpoint.
+
+  Optional and read-only. Returns `{:ok, true}` only when every required
+  surface is independently validated target-free. Post-dispatch uncertainty
+  returns `{:error, {:absence_indeterminate, agent_id}}`. Backend-native
+  details never escape.
+  """
+  @callback check_retained_memory_signal_content_absent_for_agent(agent_id(), opts :: keyword()) ::
+              retained_memory_signal_absence_result()
+
   @optional_callbacks [
     emit_preconstructed_signal: 1,
     get_signal_by_id: 1,
@@ -128,6 +185,8 @@ defmodule Arbor.Contracts.API.Signals do
     get_recent_signals_from_buffer: 1,
     interrupt: 3,
     interrupted?: 1,
-    clear_interrupt: 1
+    clear_interrupt: 1,
+    delete_retained_memory_signal_content_for_agent: 2,
+    check_retained_memory_signal_content_absent_for_agent: 2
   ]
 end
