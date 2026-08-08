@@ -70,6 +70,7 @@ defmodule Arbor.AgentTest do
       # Positive cases require ProfileStore + Trust + Telemetry running
       # (covered by integration tests). Here we just verify the function
       # exists, takes a binary, and returns the documented error shape.
+      assert Code.ensure_loaded?(Arbor.Agent)
       assert function_exported?(Arbor.Agent, :summary, 1)
       assert {:error, :not_found} = Arbor.Agent.summary("nonexistent")
     end
