@@ -497,11 +497,37 @@ Derive them from the compiled graph with
 `arbor://action/council/review` and `arbor://action/consensus/decide_review` are
 also required.
 
-### Budgeting for human review
+### The commit gate is authorization; the council is the reviewer
 
-**Human review time is not its own budget — it is the remainder.** The approval
+Two stages are easy to conflate, and they are budgeted separately:
+
+| Stage | Node / action | Budget | What it asks |
+| --- | --- | --- | --- |
+| approval | `commit_change` / `coding_reviewed_commit` | `interaction_wait_ms`, reserve `approval_ms` | *may this agent commit?* |
+| review | `review_change` / `council_review_change` | `review_ms` (180,000 ms desired, cycles 1..3) | *is this change good?* |
+
+The order is `implement → validate → commit_change → council review →
+route_validated_review`, and it is the **council** that decides whether a person
+needs to look: its `tier_decision` routes to either `human_review` or
+`auto_proceed`.
+
+The commit gate calls `Arbor.Trust.authorize/4`. On `:authorized` it commits
+with **no wait at all** ("unattended authorize"). It escalates to a person only
+on `:pending_approval` — so whether a human is in the loop there is a function of
+your trust policy for the commit resource, not of the plan.
+
+Practical consequence: if you find yourself reading a full diff at the commit
+prompt, note that the council has not reviewed yet. That prompt is asking
+whether the agent may commit, not asking you to be the reviewer.
+
+### Budgeting the operator wait
+
+**Operator wait time is not its own budget — it is the remainder.** The approval
 stage gets whatever is left of `budgets.wall_clock_ms` after the worker and
-validation finish, minus a settlement reserve. Nothing reserves it up front.
+validation finish, minus a settlement reserve. There is a guaranteed floor
+underneath (the worker is clamped to leave the tail), but it is small: the whole
+tail — validation reserve, approval, council review, cleanup — is capped at 40%
+of the wall clock, so at the 900,000 ms default all four stages share 360 s.
 
 Measured on a real run with the default 900,000 ms wall clock:
 
@@ -516,11 +542,22 @@ The approval was killed at `run_deadline - approval_completion_reserve_ms` with
 enough to read a 230-line diff, verify that a newly-stricter function head was
 safe at its call sites, and re-run the changed tests.
 
-Note the incentive runs backwards: the slower and more complex the change, the
-less review time remains — yet that is exactly the change that needs the most.
+The 363 s was **leftover, not a guarantee** — the worker happened to finish
+early. Had it used its full budget, the wait would have collapsed toward the
+floor, which under the tail split is a fraction of that.
 
-If a plan is human-gated (`review_profile: "human_required"`, or `binding` where
-you intend to inspect the candidate), budget wall clock for **both** phases:
+Note the incentive runs backwards: the slower and more complex the change, the
+less time remains at the gate — yet that is exactly the change most likely to
+draw an escalation.
+
+Do **not** try to buy operator time by re-slicing the tail. That was attempted
+(`82ba95e00`) and reverted (`46f74fa2c`) because the budget it takes from is the
+council's, and the council is the reviewer. Raise the wall clock instead.
+
+If you expect an escalation at the commit gate — trust policy returns
+`:pending_approval` for the commit resource, or the plan is human-gated
+(`review_profile: "human_required"`, or `binding` where you intend to inspect
+the candidate) — budget wall clock for **both** phases:
 
 ```json
 {
@@ -532,8 +569,9 @@ you intend to inspect the candidate), budget wall clock for **both** phases:
 ```
 
 `BudgetPolicy` caps the desired approval share at 300,000 ms, so a larger wall
-clock buys at most five minutes at the approval stage — but it stops
-implementation from eating the review window entirely.
+clock buys at most five minutes of *guaranteed* wait — but it stops
+implementation from eating the window entirely, and it also grows the council's
+`review_ms` toward its own 180,000 ms desire.
 
 Nothing is destroyed on timeout: the workspace is `retained` and the branch
 `preserved` (24 h expiry), so a timed-out approval costs a worker run, not work.
