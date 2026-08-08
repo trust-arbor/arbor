@@ -223,10 +223,10 @@ defmodule Arbor.Memory.MutationAdmissionSupervisionTest do
     assert [{gpid, _}] = Registry.lookup(ctx.registry, {:guardian, hash})
 
     gref = Process.monitor(gpid)
-    # Terminate via supervisor (unlinked from test), await monitor — no sleep.
+    # Terminate via supervisor (unlinked from test), then await registry convergence.
     assert :ok = DynamicSupervisor.terminate_child(ctx.sup, gpid)
     assert_receive {:DOWN, ^gref, :process, ^gpid, _}, 2_000
-    assert Registry.lookup(ctx.registry, {:guardian, hash}) == []
+    assert wait_until(fn -> Registry.lookup(ctx.registry, {:guardian, hash}) == [] end)
 
     # Durable root remains; no guardian — release fails; drain cannot finish.
     assert {:error, :invalid_lease} =
@@ -267,7 +267,7 @@ defmodule Arbor.Memory.MutationAdmissionSupervisionTest do
         refute Process.alive?(gpid)
     end
 
-    assert Registry.lookup(ctx.registry, {:guardian, hash}) == []
+    assert wait_until(fn -> Registry.lookup(ctx.registry, {:guardian, hash}) == [] end)
     assert DynamicSupervisor.which_children(ctx.sup) == []
     # Durable prior-runtime root remains without live processes.
     assert %Record{data: still} = Fake.peek(ctx.agent_name, key)
