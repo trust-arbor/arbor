@@ -6,11 +6,52 @@ defmodule Arbor.Memory.PreferencesStore do
   `Application.start/2`. Owns the full CRUD + signal lifecycle.
   """
 
-  alias Arbor.Memory.{Preferences, Signals}
+  alias Arbor.Memory.{MemoryStore, Preferences, Signals}
 
   require Logger
 
   @preferences_ets :arbor_preferences
+  @namespace "preferences"
+  @max_agent_id_bytes 256
+
+  @content_delete_errors [
+    :invalid_agent_id,
+    :delete_failed,
+    :outcome_unknown,
+    :durable_unavailable,
+    :insufficient_durability,
+    :invalid_record,
+    :ambiguous_record,
+    :conflict,
+    :inventory_limit_exceeded,
+    :ets_failed,
+    :store_unavailable
+  ]
+
+  @content_absence_errors [
+    :invalid_agent_id,
+    :absence_uncertain,
+    :durable_unavailable,
+    :insufficient_durability,
+    :invalid_record,
+    :ambiguous_record,
+    :inventory_limit_exceeded,
+    :store_unavailable
+  ]
+
+  @type content_cleanup_error ::
+          :invalid_agent_id
+          | :delete_failed
+          | :outcome_unknown
+          | :durable_unavailable
+          | :insufficient_durability
+          | :invalid_record
+          | :ambiguous_record
+          | :conflict
+          | :inventory_limit_exceeded
+          | :ets_failed
+          | :store_unavailable
+          | :absence_uncertain
 
   # ============================================================================
   # Core CRUD
@@ -52,6 +93,47 @@ defmodule Arbor.Memory.PreferencesStore do
       prefs ->
         prefs
     end
+  end
+
+  # ============================================================================
+  # Content-only cleanup (C3I0C2)
+  # ============================================================================
+
+  @doc """
+  Idempotent content-only deletion for exactly one agent.
+
+  Removes durable preferences content and the exact ETS projection row.
+  Retains every Provenance sidecar byte-for-byte.
+
+  C3I2A precondition (caller-owned, not enforced here): C3I1 mutation gate
+  must be closed and drained before invoke. This API is not race-free agent
+  destruction.
+  """
+  @spec delete_agent_content(String.t()) :: :ok | {:error, content_cleanup_error()}
+  def delete_agent_content(agent_id) do
+    with :ok <- validate_agent_id(agent_id) do
+      delete_authoritative_content_only(agent_id)
+    end
+  rescue
+    _ -> {:error, :delete_failed}
+  catch
+    _, _ -> {:error, :delete_failed}
+  end
+
+  @doc """
+  Authoritative absence across durable preferences and ETS projection.
+  Returns `{:ok, true}` only when no exact-agent content remains.
+  """
+  @spec agent_content_absent?(String.t()) ::
+          {:ok, boolean()} | {:error, content_cleanup_error()}
+  def agent_content_absent?(agent_id) do
+    with :ok <- validate_agent_id(agent_id) do
+      do_agent_content_absent?(agent_id)
+    end
+  rescue
+    _ -> {:error, :absence_uncertain}
+  catch
+    _, _ -> {:error, :absence_uncertain}
   end
 
   # ============================================================================
@@ -190,7 +272,7 @@ defmodule Arbor.Memory.PreferencesStore do
   @spec restore_from_store() :: :ok
   def restore_from_store do
     if store_available?() do
-      case Arbor.Memory.MemoryStore.load_all("preferences") do
+      case MemoryStore.load_all(@namespace) do
         {:ok, pairs} when pairs != [] ->
           Enum.each(pairs, fn {key, data} ->
             agent_id = extract_agent_id(key)
@@ -222,7 +304,7 @@ defmodule Arbor.Memory.PreferencesStore do
       try do
         if store_available?() do
           data = Preferences.serialize(prefs)
-          Arbor.Memory.MemoryStore.persist("preferences", agent_id, data)
+          MemoryStore.persist(@namespace, agent_id, data)
         end
       rescue
         e ->
@@ -234,7 +316,7 @@ defmodule Arbor.Memory.PreferencesStore do
   end
 
   defp store_available? do
-    Arbor.Memory.MemoryStore.available?()
+    MemoryStore.available?()
   rescue
     _ -> false
   catch
@@ -250,4 +332,159 @@ defmodule Arbor.Memory.PreferencesStore do
   end
 
   defp extract_agent_id(_), do: nil
+
+  # Content-only C3I cleanup: durable first, then confirmed ETS. Never touches sidecars.
+  defp delete_authoritative_content_only(agent_id) do
+    durable_result =
+      case MemoryStore.delete_tainted_authoritative(@namespace, agent_id) do
+        :ok -> :ok
+        {:error, reason} -> {:error, map_content_backend_error(reason, :delete)}
+        _ -> {:error, :delete_failed}
+      end
+
+    projection_result = confirm_preferences_ets_evicted(agent_id)
+
+    case {durable_result, projection_result} do
+      {:ok, :ok} ->
+        :ok
+
+      {{:error, reason}, _} ->
+        {:error, normalize_content_delete_error(reason)}
+
+      {:ok, {:error, reason}} ->
+        {:error, normalize_content_delete_error(reason)}
+
+      _ ->
+        {:error, :delete_failed}
+    end
+  rescue
+    _ -> {:error, :delete_failed}
+  catch
+    _, _ -> {:error, :delete_failed}
+  end
+
+  defp do_agent_content_absent?(agent_id) do
+    case MemoryStore.load_tainted_authoritative_with_status(@namespace, agent_id) do
+      {:ok, _value, _status, _record, _location} ->
+        {:ok, false}
+
+      {:error, :not_found} ->
+        case preferences_ets_absent?(agent_id) do
+          {:ok, true} -> {:ok, true}
+          {:ok, false} -> {:ok, false}
+          {:error, reason} -> {:error, normalize_content_absence_error(reason)}
+        end
+
+      {:error, reason} ->
+        {:error, map_content_backend_error(reason, :absence)}
+
+      _ ->
+        {:error, :absence_uncertain}
+    end
+  rescue
+    _ -> {:error, :absence_uncertain}
+  catch
+    _, _ -> {:error, :absence_uncertain}
+  end
+
+  # Only initial :undefined is genuine absence; post-defined races fail closed.
+  defp confirm_preferences_ets_evicted(agent_id) do
+    case :ets.whereis(@preferences_ets) do
+      :undefined ->
+        :ok
+
+      _tid ->
+        true = :ets.delete(@preferences_ets, agent_id)
+
+        case :ets.lookup(@preferences_ets, agent_id) do
+          [] -> :ok
+          _ -> {:error, :ets_failed}
+        end
+    end
+  rescue
+    ArgumentError -> {:error, :ets_failed}
+  catch
+    _, _ -> {:error, :ets_failed}
+  end
+
+  defp preferences_ets_absent?(agent_id) do
+    case :ets.whereis(@preferences_ets) do
+      :undefined ->
+        {:ok, true}
+
+      _tid ->
+        case :ets.lookup(@preferences_ets, agent_id) do
+          [] -> {:ok, true}
+          _ -> {:ok, false}
+        end
+    end
+  rescue
+    ArgumentError -> {:error, :absence_uncertain}
+  catch
+    _, _ -> {:error, :absence_uncertain}
+  end
+
+  defp validate_agent_id(agent_id) when is_binary(agent_id) do
+    if byte_size(agent_id) > 0 and byte_size(agent_id) <= @max_agent_id_bytes and
+         String.valid?(agent_id) and String.trim(agent_id) != "" do
+      :ok
+    else
+      {:error, :invalid_agent_id}
+    end
+  end
+
+  defp validate_agent_id(_agent_id), do: {:error, :invalid_agent_id}
+
+  defp normalize_content_delete_error(reason) when reason in @content_delete_errors, do: reason
+  defp normalize_content_delete_error(:invalid_request), do: :invalid_agent_id
+  defp normalize_content_delete_error(:not_found), do: :delete_failed
+  defp normalize_content_delete_error(:absence_uncertain), do: :store_unavailable
+  defp normalize_content_delete_error(_reason), do: :delete_failed
+
+  defp normalize_content_absence_error(reason) when reason in @content_absence_errors, do: reason
+  defp normalize_content_absence_error(:invalid_request), do: :invalid_agent_id
+  defp normalize_content_absence_error(:not_found), do: :absence_uncertain
+  defp normalize_content_absence_error(:delete_failed), do: :store_unavailable
+  defp normalize_content_absence_error(:ets_failed), do: :absence_uncertain
+  defp normalize_content_absence_error(:outcome_unknown), do: :absence_uncertain
+  defp normalize_content_absence_error(:conflict), do: :absence_uncertain
+  defp normalize_content_absence_error(_reason), do: :absence_uncertain
+
+  defp map_content_backend_error({:memory_store, :critical, reason}, mode)
+       when reason in [
+              :conflict,
+              :outcome_unknown,
+              :durable_unavailable,
+              :insufficient_durability,
+              :inventory_limit_exceeded,
+              :invalid_record,
+              :ambiguous_record
+            ] do
+    case mode do
+      :delete -> normalize_content_delete_error(reason)
+      :absence -> normalize_content_absence_error(reason)
+    end
+  end
+
+  defp map_content_backend_error({:memory_store, :critical, _reason}, :delete), do: :delete_failed
+
+  defp map_content_backend_error({:memory_store, :critical, _reason}, :absence),
+    do: :absence_uncertain
+
+  defp map_content_backend_error({:memory_store, :invalid_durable_provenance, _}, :delete),
+    do: :invalid_record
+
+  defp map_content_backend_error({:memory_store, :invalid_durable_provenance, _}, :absence),
+    do: :invalid_record
+
+  defp map_content_backend_error({:memory_store, :invalid_request, _}, :delete),
+    do: :invalid_agent_id
+
+  defp map_content_backend_error({:memory_store, :invalid_request, _}, :absence),
+    do: :invalid_agent_id
+
+  defp map_content_backend_error(:not_found, :delete), do: :delete_failed
+  defp map_content_backend_error(:not_found, :absence), do: :absence_uncertain
+  defp map_content_backend_error(_reason, :delete), do: :delete_failed
+  defp map_content_backend_error(_reason, :absence), do: :absence_uncertain
 end
