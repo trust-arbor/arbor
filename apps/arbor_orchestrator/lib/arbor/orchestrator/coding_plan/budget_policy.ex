@@ -19,13 +19,37 @@ defmodule Arbor.Orchestrator.CodingPlan.BudgetPolicy do
   The guaranteed tail reserve (validation_reserve + approval + review +
   cleanup) is capped at 40% of the effective wall clock so the worker phase
   always keeps the majority of the budget. When the desired total would
-  exceed that cap, the cap itself is distributed across the four reserve
-  stages by approximate share (validation 55%, approval 25%, review 15%,
-  cleanup 5%) using the largest-remainder method, so the allocation is exact
-  (sums to the cap), deterministic, and never negative.
+  exceed that cap, the cap itself is distributed across the reserve stages
+  using the largest-remainder method, so the allocation is exact (sums to the
+  cap), deterministic, and never negative.
 
   `worker_completion_reserve_ms` includes only the guaranteed validation
   reserve (not the larger opportunistic action cap).
+
+  ## Why approval is allocated before the proportional split
+
+  Approval is the one stage measured in *human* time, and human review time
+  does not scale with the machine budget: a 230-line diff takes the same time
+  to read whether the worker ran for five minutes or fifty. Under a purely
+  proportional split its 25% share of a 40% tail made the guaranteed human
+  review floor **10% of the wall clock** — 90s on the 900s default, which is
+  not enough to read a diff, check the call sites, and re-run tests.
+
+  The incentive also ran backwards: the slower and more complex the change,
+  the less review time remained, yet that is exactly the change that most
+  needs review. (Measured 2026-08-07 on `task_d3e06b44`; register F-139.)
+
+  So approval is satisfied first, up to `@desired_approval_ms`, bounded by
+  `@approval_tail_share_max_*` so it can never starve the machine stages.
+  The remainder is apportioned across validation/review/cleanup by their
+  existing relative shares. Note this trades guaranteed *validation reserve*
+  for guaranteed *review time*; the opportunistic validation action cap
+  (`validation_ms`) is a separate number and is unaffected.
+
+  This does not make a short wall clock sufficient for human review — at 900s
+  the honest ceiling on the whole tail is 360s. A plan that gates on a human
+  must budget wall clock for one. See
+  `.arbor/decisions/2026-08-07-human-review-budget-floor.md`.
   """
 
   @desired_validation_max_ms 600_000
@@ -37,8 +61,16 @@ defmodule Arbor.Orchestrator.CodingPlan.BudgetPolicy do
   @tail_reserve_max_ratio_num 2
   @tail_reserve_max_ratio_den 5
 
-  @stage_order [:validation, :approval, :review, :cleanup]
+  # Ceiling on approval's share OF THE TAIL when the tail is scaled down, so
+  # protecting human review can never starve validation/review/cleanup: 1/2.
+  @approval_tail_share_max_num 1
+  @approval_tail_share_max_den 2
+
   @shares %{validation: 55, approval: 25, review: 15, cleanup: 5}
+
+  # Stages sharing the tail remaining after approval is satisfied, and their
+  # relative weights (the original shares, renormalized by apportionment).
+  @post_approval_stage_order [:validation, :review, :cleanup]
 
   @type stage_ms :: %{String.t() => non_neg_integer()}
   @type allocate_error :: :invalid_budget_policy_input
@@ -96,23 +128,42 @@ defmodule Arbor.Orchestrator.CodingPlan.BudgetPolicy do
   def allocate(_effective_wall_clock_ms, _validation_action_source_ms),
     do: {:error, :invalid_budget_policy_input}
 
-  # Largest-remainder (Hamilton) apportionment of `tail_cap_ms` across the
-  # four reserve stages by their approximate share. Exact integer accounting:
-  # the resulting amounts always sum to exactly `tail_cap_ms`, and are never
-  # negative. Deterministic tie-break: stages with equal remainders are
-  # ordered by @stage_order (validation, approval, review, cleanup).
+  # Satisfy the human-review floor first (bounded so it cannot starve the
+  # machine stages), then apportion what remains across the other three.
+  # Still exact: approval + apportion(remainder) == tail_cap_ms.
   defp scale_down(tail_cap_ms) do
+    approval_ceiling_ms =
+      div(tail_cap_ms * @approval_tail_share_max_num, @approval_tail_share_max_den)
+
+    approval_ms = min(@desired_approval_ms, approval_ceiling_ms)
+
+    tail_cap_ms
+    |> Kernel.-(approval_ms)
+    |> apportion(@post_approval_stage_order)
+    |> Map.put(:approval, approval_ms)
+  end
+
+  # Largest-remainder (Hamilton) apportionment of `total_ms` across `stages` by
+  # their @shares weight. Exact integer accounting: the resulting amounts always
+  # sum to exactly `total_ms`, and are never negative. Deterministic tie-break:
+  # stages with equal remainders are ordered by their position in `stages`.
+  #
+  # Weights need not sum to 100 — the divisor is their actual sum — so the same
+  # function serves the full four-stage split and the post-approval three-stage
+  # one without a second table of numbers to keep in sync.
+  defp apportion(total_ms, stages) do
+    weight_sum = Enum.reduce(stages, 0, fn stage, acc -> acc + Map.fetch!(@shares, stage) end)
+
     bases_and_remainders =
-      Enum.map(@stage_order, fn stage ->
-        share = Map.fetch!(@shares, stage)
-        numerator = tail_cap_ms * share
-        {stage, div(numerator, 100), rem(numerator, 100)}
+      Enum.map(stages, fn stage ->
+        numerator = total_ms * Map.fetch!(@shares, stage)
+        {stage, div(numerator, weight_sum), rem(numerator, weight_sum)}
       end)
 
     base_sum =
       Enum.reduce(bases_and_remainders, 0, fn {_stage, base, _rem}, acc -> acc + base end)
 
-    leftover = tail_cap_ms - base_sum
+    leftover = total_ms - base_sum
 
     ranked =
       bases_and_remainders

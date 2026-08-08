@@ -65,20 +65,22 @@ defmodule Arbor.Orchestrator.CodingPlan.BudgetPolicyTest do
   describe "allocate/2 — scaled allocation" do
     test "scales reserve stages down by share when the desired total exceeds the 40% cap" do
       # wall_clock=600_000 -> tail_cap=240_000; desired=500k+300k+180k+30k=1_010_000 > cap.
-      # 240_000 split 55/25/15/5 divides evenly (no remainder distribution needed).
-      # Action cap stays at min(500k, 600k)=500k and is not scaled.
+      # Approval is satisfied first: min(300_000, half of 240_000) = 120_000, so the
+      # 1/2-of-tail ceiling binds rather than the 300_000 desire. The remaining
+      # 120_000 splits 55/15/5 across validation/review/cleanup (weight sum 75),
+      # which divides evenly. Action cap stays at min(500k, 600k)=500k, not scaled.
       assert {:ok, stages} = BudgetPolicy.allocate(600_000, 500_000)
 
       assert stages == %{
                "validation_ms" => 500_000,
-               "validation_reserve_ms" => 132_000,
-               "approval_ms" => 60_000,
-               "review_ms" => 36_000,
-               "cleanup_ms" => 12_000,
+               "validation_reserve_ms" => 88_000,
+               "approval_ms" => 120_000,
+               "review_ms" => 24_000,
+               "cleanup_ms" => 8_000,
                "worker_completion_reserve_ms" => 240_000,
-               "validation_completion_reserve_ms" => 108_000,
-               "review_completion_reserve_ms" => 12_000,
-               "approval_completion_reserve_ms" => 48_000
+               "validation_completion_reserve_ms" => 152_000,
+               "review_completion_reserve_ms" => 8_000,
+               "approval_completion_reserve_ms" => 32_000
              }
 
       assert stages["validation_reserve_ms"] + stages["approval_ms"] + stages["review_ms"] +
@@ -89,16 +91,18 @@ defmodule Arbor.Orchestrator.CodingPlan.BudgetPolicyTest do
     end
 
     test "exact integer accounting distributes remainder deterministically by largest remainder" do
-      # wall_clock=253 -> tail_cap=div(506,5)=101, which does not divide evenly by
-      # 55/25/15/5. Bases sum to 100 with remainders 55/25/15/5 (validation largest),
-      # so the single leftover unit goes to validation reserve.
+      # wall_clock=253 -> tail_cap=div(506,5)=101. Approval takes min(300_000,
+      # div(101,2)=50) = 50, leaving 51 to split 55/15/5 (weight sum 75), which does
+      # not divide evenly: bases 37/10/3 sum to 50, remainders 30/15/30. Validation
+      # and cleanup tie at 30, so the index tie-break sends the single leftover unit
+      # to validation, giving 38/10/3.
       assert {:ok, stages} = BudgetPolicy.allocate(253, 999_999_999)
 
       assert stages["validation_ms"] == 253
-      assert stages["validation_reserve_ms"] == 56
-      assert stages["approval_ms"] == 25
-      assert stages["review_ms"] == 15
-      assert stages["cleanup_ms"] == 5
+      assert stages["validation_reserve_ms"] == 38
+      assert stages["approval_ms"] == 50
+      assert stages["review_ms"] == 10
+      assert stages["cleanup_ms"] == 3
 
       total =
         stages["validation_reserve_ms"] + stages["approval_ms"] + stages["review_ms"] +
@@ -119,19 +123,64 @@ defmodule Arbor.Orchestrator.CodingPlan.BudgetPolicyTest do
 
       assert narrow == %{
                "validation_ms" => 100_000,
-               "validation_reserve_ms" => 22_000,
-               "approval_ms" => 10_000,
-               "review_ms" => 6_000,
-               "cleanup_ms" => 2_000,
+               "validation_reserve_ms" => 14_667,
+               "approval_ms" => 20_000,
+               "review_ms" => 4_000,
+               "cleanup_ms" => 1_333,
                "worker_completion_reserve_ms" => 40_000,
-               "validation_completion_reserve_ms" => 18_000,
-               "review_completion_reserve_ms" => 2_000,
-               "approval_completion_reserve_ms" => 8_000
+               "validation_completion_reserve_ms" => 25_333,
+               "review_completion_reserve_ms" => 1_333,
+               "approval_completion_reserve_ms" => 5_333
              }
 
       # Post-validation gates retain headroom under the scaled tail.
       assert narrow["validation_completion_reserve_ms"] > 0
       assert_worker_uses_reserve(narrow)
+    end
+  end
+
+  describe "allocate/2 — human review floor (F-139)" do
+    test "the 900s default gives human review more than the old 10%-of-wall-clock share" do
+      # The measured F-139 incident: 900s wall clock. Under the old purely
+      # proportional split approval got 25% of a 40% tail = 10% of the wall clock
+      # (90_000ms). Approval is now satisfied ahead of the split.
+      assert {:ok, stages} = BudgetPolicy.allocate(900_000, 600_000)
+
+      assert stages["approval_ms"] == 180_000
+      assert stages["approval_ms"] > div(900_000 * 25 * 2, 100 * 5)
+      assert_worker_uses_reserve(stages)
+    end
+
+    test "approval never exceeds half the tail, so it cannot starve the machine stages" do
+      for {wall, source} <- [
+            {1, 100},
+            {253, 999_999_999},
+            {60_000, 30_000},
+            {600_000, 500_000},
+            {900_000, 600_000},
+            {1_800_000, 600_000}
+          ] do
+        assert {:ok, stages} = BudgetPolicy.allocate(wall, source)
+
+        tail =
+          stages["validation_reserve_ms"] + stages["approval_ms"] + stages["review_ms"] +
+            stages["cleanup_ms"]
+
+        assert stages["approval_ms"] <= div(tail, 2),
+               "approval #{stages["approval_ms"]} exceeded half of tail #{tail} at wall=#{wall}"
+
+        assert Enum.all?(Map.values(stages), &(&1 >= 0))
+      end
+    end
+
+    test "approval is capped at the desired floor and does not grow without bound" do
+      # A large wall clock reaches the desired 300_000 and stops there -- the floor
+      # is a floor, not a proportional share that keeps expanding.
+      assert {:ok, big} = BudgetPolicy.allocate(30_000_000, 600_000)
+      assert big["approval_ms"] == 300_000
+
+      assert {:ok, mid} = BudgetPolicy.allocate(1_800_000, 600_000)
+      assert mid["approval_ms"] == 300_000
     end
   end
 

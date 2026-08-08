@@ -499,9 +499,10 @@ also required.
 
 ### Budgeting for human review
 
-**Human review time is not its own budget — it is the remainder.** The approval
-stage gets whatever is left of `budgets.wall_clock_ms` after the worker and
-validation finish, minus a settlement reserve. Nothing reserves it up front.
+**Human review time comes out of the same wall clock as the machine work.** The
+approval stage gets whatever is left of `budgets.wall_clock_ms` after the worker
+and validation finish, minus a settlement reserve. There is a *guaranteed floor*
+underneath that (the worker is clamped to leave it), but the floor is small.
 
 Measured on a real run with the default 900,000 ms wall clock:
 
@@ -516,8 +517,22 @@ The approval was killed at `run_deadline - approval_completion_reserve_ms` with
 enough to read a 230-line diff, verify that a newly-stricter function head was
 safe at its call sites, and re-run the changed tests.
 
-Note the incentive runs backwards: the slower and more complex the change, the
-less review time remains — yet that is exactly the change that needs the most.
+The 363 s above was **leftover, not a guarantee** — the worker happened to
+finish early. Had it used its full budget, review would have collapsed to the
+guaranteed floor, which at the time was 90 s.
+
+As of 2026-08-07 that floor is raised: `BudgetPolicy` satisfies approval ahead
+of the proportional tail split, so the 900,000 ms default guarantees **180 s**
+and a 1,800,000 ms wall clock reaches the full 300 s desired. (The reserve
+figures shift accordingly — at 900,000 ms `approval_completion_reserve_ms` is
+now 48 s rather than the 72 s in the table above.) See
+`.arbor/decisions/2026-08-07-human-review-budget-floor.md`.
+
+That is a real improvement and still not enough for a substantial review. The
+40% tail ceiling means a 900,000 ms run can never give all four terminal stages
+more than 360 s combined, and the incentive still runs backwards: the slower and
+more complex the change, the less review time remains — yet that is exactly the
+change that needs the most. **Raise the wall clock; do not rely on the floor.**
 
 If a plan is human-gated (`review_profile: "human_required"`, or `binding` where
 you intend to inspect the candidate), budget wall clock for **both** phases:
