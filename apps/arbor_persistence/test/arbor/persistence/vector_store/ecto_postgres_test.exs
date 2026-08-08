@@ -51,6 +51,9 @@ defmodule Arbor.Persistence.VectorStore.EctoPostgresTest do
     repo: Arbor.Persistence.Repo,
     legacy_mutations: true
 
+  use Arbor.Persistence.LegacyEmbeddingDestroyConformance,
+    repo: Arbor.Persistence.Repo
+
   test "regression: pgvector search returns the exact authoritative row id", %{
     agent_id: agent_id
   } do

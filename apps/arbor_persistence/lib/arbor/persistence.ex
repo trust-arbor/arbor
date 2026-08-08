@@ -221,6 +221,25 @@ defmodule Arbor.Persistence do
   def delete_all_legacy_embeddings(agent_id, opts \\ []),
     do: LegacyEmbeddingStore.delete_all(agent_id, opts)
 
+  @doc """
+  Idempotently destroy exact-agent legacy embedding rows and confirm zero remain.
+
+  Uses the established legacy-row predicate and exact agent equality. Does not
+  touch strict V1 vector rows, receipts, or the durable destroy fence.
+  """
+  @spec destroy_legacy_embeddings(String.t(), keyword()) ::
+          :ok | {:error, LegacyEmbeddingStore.legacy_cleanup_error()}
+  def destroy_legacy_embeddings(agent_id, opts \\ []),
+    do: LegacyEmbeddingStore.destroy_legacy_embeddings(agent_id, opts)
+
+  @doc "Authoritative absence check for exact-agent legacy embedding rows."
+  @spec legacy_embeddings_absent?(String.t(), keyword()) ::
+          {:ok, true}
+          | {:ok, false}
+          | {:error, LegacyEmbeddingStore.legacy_cleanup_error()}
+  def legacy_embeddings_absent?(agent_id, opts \\ []),
+    do: LegacyEmbeddingStore.legacy_embeddings_absent?(agent_id, opts)
+
   # ---------------------------------------------------------------
   # Session transcript facade (VP-04A)
   #

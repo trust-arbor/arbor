@@ -150,6 +150,9 @@ defmodule Arbor.Persistence.VectorStore.EctoSQLiteTest do
   use Arbor.Persistence.VectorStore.LegacyIsolationConformance,
     repo: SQLiteRepo
 
+  use Arbor.Persistence.LegacyEmbeddingDestroyConformance,
+    repo: SQLiteRepo
+
   test "migration is additive and leaves legacy identity intact" do
     columns =
       SQLiteRepo.query!("SELECT name FROM pragma_table_info('memory_embeddings')").rows

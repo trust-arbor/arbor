@@ -11,6 +11,10 @@ defmodule Arbor.Persistence.LegacyEmbeddingStore do
   require Logger
 
   @legacy_id_constraints ["memory_embeddings_pkey", "memory_embeddings_id_index"]
+  @verify_hook_key {__MODULE__, :post_delete_remaining_override}
+
+  @type legacy_cleanup_error ::
+          :invalid_request | :invalid_options | :backend_failure | :indeterminate
 
   @spec store(String.t(), String.t(), [float()], map(), keyword()) ::
           {:ok, String.t()} | {:error, term()}
@@ -242,6 +246,134 @@ defmodule Arbor.Persistence.LegacyEmbeddingStore do
       {count, _} = repo.delete_all(query)
       Logger.info("Deleted #{count} embeddings for agent #{agent_id}")
       {:ok, count}
+    end
+  end
+
+  @doc """
+  Idempotently destroy every legacy embedding row for exactly one agent and
+  confirm zero remaining rows under the same repository and legacy predicate.
+
+  Content-only: does not touch strict V1 vector rows, receipts, fences,
+  provenance, or other domains. C3I0B `destroy_vector_agent` is a separate
+  authority and is never called here.
+  """
+  @spec destroy_legacy_embeddings(String.t(), keyword()) ::
+          :ok | {:error, legacy_cleanup_error()}
+  def destroy_legacy_embeddings(agent_id, opts \\ []) do
+    with :ok <- validate_cleanup_agent_id(agent_id),
+         {:ok, repo} <- repo_from_opts(opts) do
+      do_destroy_legacy_embeddings(repo, agent_id)
+    end
+  rescue
+    _ -> {:error, :backend_failure}
+  catch
+    _, _ -> {:error, :backend_failure}
+  end
+
+  @doc """
+  Authoritative absence check for exact-agent legacy embedding rows.
+
+  Returns `{:ok, true}` only when the confirming count under the legacy
+  predicate and exact agent equality is zero.
+  """
+  @spec legacy_embeddings_absent?(String.t(), keyword()) ::
+          {:ok, true} | {:ok, false} | {:error, legacy_cleanup_error()}
+  def legacy_embeddings_absent?(agent_id, opts \\ []) do
+    with :ok <- validate_cleanup_agent_id(agent_id),
+         {:ok, repo} <- repo_from_opts(opts) do
+      case authoritative_legacy_count(repo, agent_id) do
+        0 -> {:ok, true}
+        n when is_integer(n) and n > 0 -> {:ok, false}
+        _ -> {:error, :backend_failure}
+      end
+    end
+  rescue
+    _ -> {:error, :backend_failure}
+  catch
+    _, _ -> {:error, :backend_failure}
+  end
+
+  # Test-only process-local seam for post-delete confirming-count failure.
+  if Mix.env() == :test do
+    @doc false
+    def __set_post_delete_remaining_override__(n) when is_integer(n) and n >= 0 do
+      Process.put(@verify_hook_key, n)
+      :ok
+    end
+
+    @doc false
+    def __clear_post_delete_remaining_override__ do
+      Process.delete(@verify_hook_key)
+      :ok
+    end
+  end
+
+  defp do_destroy_legacy_embeddings(repo, agent_id) do
+    case repo.transaction(fn -> destroy_inside_transaction(repo, agent_id) end) do
+      {:ok, :ok} -> :ok
+      {:error, :indeterminate} -> {:error, :indeterminate}
+      {:error, :backend_failure} -> {:error, :backend_failure}
+      {:error, _reason} -> {:error, :backend_failure}
+      _other -> {:error, :backend_failure}
+    end
+  rescue
+    _ -> {:error, :backend_failure}
+  catch
+    _, _ -> {:error, :backend_failure}
+  end
+
+  defp destroy_inside_transaction(repo, agent_id) do
+    delete_query =
+      from(e in legacy_rows(),
+        where: e.agent_id == ^agent_id
+      )
+
+    case repo.delete_all(delete_query) do
+      {count, _result} when is_integer(count) and count >= 0 ->
+        case post_delete_remaining(repo, agent_id) do
+          0 ->
+            :ok
+
+          n when is_integer(n) and n > 0 ->
+            repo.rollback(:indeterminate)
+
+          _malformed ->
+            repo.rollback(:backend_failure)
+        end
+
+      _malformed_delete ->
+        repo.rollback(:backend_failure)
+    end
+  end
+
+  defp post_delete_remaining(repo, agent_id) do
+    if Mix.env() == :test do
+      case Process.get(@verify_hook_key) do
+        n when is_integer(n) and n >= 0 -> n
+        _ -> authoritative_legacy_count(repo, agent_id)
+      end
+    else
+      authoritative_legacy_count(repo, agent_id)
+    end
+  end
+
+  defp authoritative_legacy_count(repo, agent_id) do
+    query =
+      from(e in legacy_rows(),
+        where: e.agent_id == ^agent_id,
+        select: count(e.id)
+      )
+
+    case repo.one(query) do
+      n when is_integer(n) and n >= 0 -> n
+      _malformed -> :malformed
+    end
+  end
+
+  defp validate_cleanup_agent_id(agent_id) do
+    case VectorRecord.validate_identity(agent_id, "legacy", "legacy") do
+      {:ok, _identity} -> :ok
+      {:error, :invalid_vector_identity} -> {:error, :invalid_request}
     end
   end
 
