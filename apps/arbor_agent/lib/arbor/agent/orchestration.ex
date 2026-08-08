@@ -1140,7 +1140,7 @@ defmodule Arbor.Agent.Orchestration do
        ) do
     opts
     |> consensus_module()
-    |> apply_if_exported(:cancel, [id])
+    |> apply_if_exported(:cancel_proposal_by_id, [id])
   end
 
   defp record_task_approval_cleanup(
@@ -1224,7 +1224,11 @@ defmodule Arbor.Agent.Orchestration do
 
   defp approval_inventory_entries(opts) do
     with {:ok, consensus, consensus_evidence} <-
-           approval_inventory_backend(:consensus, consensus_module(opts), :list_pending),
+           approval_inventory_backend(
+             :consensus,
+             consensus_module(opts),
+             :list_pending_proposals
+           ),
          {:ok, interactions, interaction_evidence} <-
            approval_inventory_backend(
              :interaction,
@@ -1350,7 +1354,7 @@ defmodule Arbor.Agent.Orchestration do
   defp consensus_pending(opts) do
     opts
     |> consensus_module()
-    |> apply_if_exported(:list_pending, [])
+    |> apply_if_exported(:list_pending_proposals, [])
     |> case do
       proposals when is_list(proposals) ->
         proposals
@@ -1463,12 +1467,12 @@ defmodule Arbor.Agent.Orchestration do
 
       decision == :approve ->
         consensus
-        |> apply_if_exported(:force_approve, [id, caller_id])
+        |> apply_if_exported(:force_approve_proposal_by_authority, [id, caller_id])
         |> normalize_backend_result()
 
       true ->
         consensus
-        |> apply_if_exported(:force_reject, [id, caller_id])
+        |> apply_if_exported(:force_reject_proposal_by_authority, [id, caller_id])
         |> normalize_backend_result()
     end
   end
