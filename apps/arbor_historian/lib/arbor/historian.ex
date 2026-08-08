@@ -40,7 +40,7 @@ defmodule Arbor.Historian do
 
   @behaviour Arbor.Contracts.API.Historian
 
-  alias Arbor.Historian.{QueryEngine, StreamRegistry, TaintQuery, Timeline}
+  alias Arbor.Historian.{QueryEngine, StreamContent, StreamRegistry, TaintQuery, Timeline}
   alias Arbor.Historian.QueryEngine.Aggregator
   alias Arbor.Historian.Timeline.Span
 
@@ -706,6 +706,50 @@ defmodule Arbor.Historian do
       total_events: total_events
     }
   end
+
+  # ============================================================================
+  # Complete history stream content (VP-05D2C3I0C4C)
+  # ============================================================================
+
+  @doc """
+  Delete one exact complete-history stream's content from durable and hot stores.
+
+  Short facade for `delete_complete_history_stream_content/2`. Callers pass only
+  a stream id and optional `:timeout_ms` (default 5000 ms, bound `1..60_000`).
+  One outer monotonic deadline is captured; each durable/hot purge and absence
+  call receives only remaining budget (never reminted). Returns `:ok` only after
+  both sources independently prove absence. Partial or uncertain outcomes report
+  `{:error, {:delete_incomplete, stream_id, stage, proven_progress}}`.
+  """
+  @spec delete_stream_content(String.t(), keyword()) ::
+          Arbor.Contracts.API.Historian.stream_content_delete_result()
+  def delete_stream_content(stream_id, opts \\ []),
+    do: delete_complete_history_stream_content(stream_id, opts)
+
+  @doc """
+  Prove whether one exact complete-history stream's content is absent on both sources.
+
+  Short facade for `check_complete_history_stream_content_absent/2`. Read-only.
+  Uses one outer deadline from optional `:timeout_ms` (default 5000 ms, bound
+  `1..60_000`) and remaining-budget observations only. Returns `{:ok, true}`
+  only after dual independent proofs.
+  """
+  @spec stream_content_absent?(String.t(), keyword()) ::
+          Arbor.Contracts.API.Historian.stream_content_absence_result()
+  def stream_content_absent?(stream_id, opts \\ []),
+    do: check_complete_history_stream_content_absent(stream_id, opts)
+
+  @impl Arbor.Contracts.API.Historian
+  @spec delete_complete_history_stream_content(String.t(), keyword()) ::
+          Arbor.Contracts.API.Historian.stream_content_delete_result()
+  def delete_complete_history_stream_content(stream_id, opts),
+    do: StreamContent.delete(stream_id, opts)
+
+  @impl Arbor.Contracts.API.Historian
+  @spec check_complete_history_stream_content_absent(String.t(), keyword()) ::
+          Arbor.Contracts.API.Historian.stream_content_absence_result()
+  def check_complete_history_stream_content_absent(stream_id, opts),
+    do: StreamContent.absent?(stream_id, opts)
 
   # ============================================================================
   # Contract Callbacks (Arbor.Contracts.API.Historian)

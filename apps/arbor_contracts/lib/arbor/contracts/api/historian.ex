@@ -40,6 +40,60 @@ defmodule Arbor.Contracts.API.Historian do
   @type span :: struct()
   @type query_opts :: keyword()
 
+  @typedoc "Bounded absolute deadline for complete-history stream content ops (ms)."
+  @type stream_content_timeout_ms :: 1..60_000
+
+  @typedoc "Caller options for complete-history stream content delete/absence."
+  @type stream_content_opts :: [{:timeout_ms, stream_content_timeout_ms()}]
+
+  @typedoc "Exact stage of a dual-source stream content delete pipeline."
+  @type stream_content_delete_stage ::
+          :durable_delete | :durable_verify | :hot_delete | :hot_verify
+
+  @typedoc """
+  Proof-based progress for dual-source stream content delete.
+
+  Advanced only by successful absence proofs, never by purge dispatch alone.
+  """
+  @type stream_content_proven_progress ::
+          :none_proven_absent
+          | :durable_proven_absent
+          | :durable_and_hot_proven_absent
+
+  @typedoc "Closed pre-dispatch failures for complete-history stream content delete."
+  @type stream_content_delete_error ::
+          :invalid_stream_id
+          | :invalid_precondition
+          | :durable_unavailable
+          | :hot_unavailable
+          | :delete_not_supported
+          | :absence_not_supported
+          | :verification_failed
+
+  @typedoc "Result of deleting one complete history stream's durable+hot content."
+  @type stream_content_delete_result ::
+          :ok
+          | {:error,
+             {:delete_incomplete, stream_id(), stream_content_delete_stage(),
+              stream_content_proven_progress()}}
+          | {:error, stream_content_delete_error()}
+
+  @typedoc "Closed pre-dispatch failures for complete-history stream content absence."
+  @type stream_content_absence_error ::
+          :invalid_stream_id
+          | :invalid_precondition
+          | :durable_unavailable
+          | :hot_unavailable
+          | :absence_not_supported
+          | :verification_failed
+
+  @typedoc "Result of proving complete history stream content absence on both sources."
+  @type stream_content_absence_result ::
+          {:ok, true}
+          | {:ok, false}
+          | {:error, {:absence_indeterminate, stream_id()}}
+          | {:error, stream_content_absence_error()}
+
   # ===========================================================================
   # Querying
   # ===========================================================================
@@ -212,6 +266,46 @@ defmodule Arbor.Contracts.API.Historian do
   @callback healthy?() :: boolean()
 
   # ===========================================================================
+  # Complete history stream content (optional — VP-05D2C3I0C4C)
+  # ===========================================================================
+
+  @doc """
+  Permanently delete one exact complete-history stream's content from both the
+  Historian-owned durable EventLog and hot cache under one absolute deadline.
+
+  Captures a single outer monotonic deadline from `:timeout_ms` (default
+  5000 ms, bound `1..60_000`). Every durable/hot purge and absence call
+  receives only the remaining budget — timeouts are never reminted per stage.
+  Exhausted budget stops the pipeline with
+  `{:error, {:delete_incomplete, stream_id, stage, proven_progress}}` at the
+  stage about to run or running.
+
+  Success (`:ok`) requires independent absence proofs on both sources. Progress
+  is proof-based: purge `:ok` alone never advances proven progress. Partial or
+  uncertain outcomes after an attempted effect return the same
+  `delete_incomplete` envelope with exact stage and proven progress.
+
+  Callers supply only a validated stream id and timeout options.
+  Backend/repo/process selection is not public.
+  """
+  @callback delete_complete_history_stream_content(stream_id(), stream_content_opts()) ::
+              stream_content_delete_result()
+
+  @doc """
+  Prove whether one exact complete-history stream's content is absent on both
+  the durable EventLog and hot cache under one absolute deadline.
+
+  Captures a single outer monotonic deadline from `:timeout_ms` (default
+  5000 ms, bound `1..60_000`) and passes only remaining budget to each source
+  observation. Read-only. Returns `{:ok, true}` only after independent dual
+  proofs. Source uncertainty returns
+  `{:error, {:absence_indeterminate, stream_id}}` and must never be normalized
+  to true. Does not mutate content. Backend/repo/process selection is not public.
+  """
+  @callback check_complete_history_stream_content_absent(stream_id(), stream_content_opts()) ::
+              stream_content_absence_result()
+
+  # ===========================================================================
   # Optional Callbacks
   # ===========================================================================
 
@@ -231,6 +325,9 @@ defmodule Arbor.Contracts.API.Historian do
     list_all_stream_ids: 0,
     read_stream_info_by_id: 1,
     read_all_streams_metadata: 0,
-    read_historian_stats: 0
+    read_historian_stats: 0,
+    # Complete history stream content (VP-05D2C3I0C4C)
+    delete_complete_history_stream_content: 2,
+    check_complete_history_stream_content_absent: 2
   ]
 end

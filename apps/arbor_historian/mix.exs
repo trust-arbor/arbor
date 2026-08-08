@@ -41,6 +41,7 @@ defmodule Arbor.Historian.MixProject do
 
   defp deps do
     [
+      {:arbor_contracts, in_umbrella: true},
       {:arbor_common, in_umbrella: true},
       {:arbor_persistence, in_umbrella: true},
       {:arbor_security, in_umbrella: true},
