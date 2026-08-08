@@ -438,9 +438,14 @@ own build directory:
 
 ```bash
 cd <task_worktree>
+
+# Same prefix for all three gates — tests, formatting, and compilation.
 MIX_DEPS_PATH=/absolute/path/to/canonical/arbor/deps \
 MIX_BUILD_PATH=/private/tmp/arbor-<task-slug>-build \
   ./bin/mix test path/to/file_test.exs
+
+MIX_DEPS_PATH=... MIX_BUILD_PATH=... ./bin/mix format --check-formatted
+MIX_DEPS_PATH=... MIX_BUILD_PATH=... ./bin/mix compile --warnings-as-errors
 ```
 
 Both variables are required, and three failure modes are worth knowing:
