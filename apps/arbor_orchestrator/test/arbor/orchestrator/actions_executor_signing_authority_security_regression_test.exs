@@ -293,6 +293,57 @@ defmodule Arbor.Orchestrator.ActionsExecutorSigningAuthoritySecurityRegressionTe
              authorizer.(ctx.agent_id, :execute)
   end
 
+  test "security regression: reviewed validation receives the ephemeral signing boundary", ctx do
+    :erlang.trace_pattern({Arbor.Actions, :authorize_and_execute, 4}, true, [])
+
+    on_exit(fn ->
+      :erlang.trace_pattern({Arbor.Actions, :authorize_and_execute, 4}, false, [])
+    end)
+
+    tracer = self()
+
+    task =
+      Task.async(fn ->
+        :erlang.trace(self(), true, [:call, {:tracer, tracer}])
+
+        ActionsExecutor.execute(
+          "coding_reviewed_validation",
+          %{
+            "pinned_action" => "mix_compile",
+            "pinned_profile_id" => "invalid_test_profile",
+            "pinned_params_json" => "{}"
+          },
+          ctx.root,
+          agent_id: ctx.agent_id,
+          signing_authority: ctx.authority,
+          max_depth: 3
+        )
+      end)
+
+    assert_receive {:trace, _pid, :call,
+                    {Arbor.Actions, :authorize_and_execute,
+                     [
+                       _agent_id,
+                       Arbor.Actions.Coding.ReviewedValidation,
+                       _params,
+                       context
+                     ]}}
+
+    nested = context.nested_engine_opts
+    refute Keyword.has_key?(nested, :signing_authority)
+    signer = Keyword.fetch!(nested, :signer)
+    authorizer = Keyword.fetch!(nested, :authorizer)
+    assert is_function(signer, 1)
+    assert is_function(authorizer, 2)
+
+    _result = Task.await(task)
+
+    assert {:error, :signing_boundary_unavailable} = signer.("arbor://action/mix/compile")
+
+    assert {:error, :signing_boundary_unavailable} =
+             authorizer.(ctx.agent_id, :execute)
+  end
+
   test "security regression: generic actions never receive authority-derived closures", ctx do
     :erlang.trace_pattern({Arbor.Actions, :authorize_and_execute, 4}, true, [])
 

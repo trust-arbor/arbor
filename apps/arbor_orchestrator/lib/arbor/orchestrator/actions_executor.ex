@@ -240,7 +240,8 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
 
   @nested_engine_action_modules [
     Arbor.Actions.Council.ReviewChange,
-    Arbor.Actions.Coding.ReviewedCommit
+    Arbor.Actions.Coding.ReviewedCommit,
+    Arbor.Actions.Coding.ReviewedValidation
   ]
 
   @credential_key_names MapSet.new([
