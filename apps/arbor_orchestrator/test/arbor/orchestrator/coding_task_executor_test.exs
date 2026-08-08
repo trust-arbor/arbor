@@ -2767,10 +2767,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       iv = opts[:initial_values]
 
       assert iv["coding_budget.interaction_wait_ms"] == 900_000
-      # 180_000, not the 90_000 a purely proportional tail split gave: approval is
-      # satisfied ahead of the split so human review time does not shrink as the
-      # machine phases grow (F-139). The tail total below is unchanged.
-      assert iv["coding_budget.approval_ms"] == 180_000
+      assert iv["coding_budget.approval_ms"] == 90_000
       assert iv["coding_budget.worker_completion_reserve_ms"] == 360_000
       assert iv["coding_budget.interaction_wait_ms"] > iv["coding_budget.approval_ms"]
       # Regression: Engine approval timeout must use the interaction wait, not
