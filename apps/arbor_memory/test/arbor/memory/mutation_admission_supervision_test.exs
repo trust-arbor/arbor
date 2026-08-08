@@ -160,7 +160,7 @@ defmodule Arbor.Memory.MutationAdmissionSupervisionTest do
   test "holder death after shell-only restart releases via reconnected admission", ctx do
     parent = self()
 
-    holder =
+    holder_pid =
       spawn(fn ->
         assert {:ok, lease} =
                  MutationAdmission.acquire("sup_holder_death", server: ctx.server)
@@ -172,7 +172,7 @@ defmodule Arbor.Memory.MutationAdmissionSupervisionTest do
         end
       end)
 
-    assert_receive {:lease, lease, holder_pid}, 1_000
+    assert_receive {:lease, lease, ^holder_pid}, 1_000
     hash = lease_hash(lease.token)
     assert [{gpid, _}] = Registry.lookup(ctx.registry, {:guardian, hash})
 

@@ -3,10 +3,11 @@ defmodule Arbor.Memory.MutationAdmissionPostgresTest do
   Isolated real QueryableStore smoke for mutation admission (VP-05D2C3I1A).
   """
 
-  use ExUnit.Case, async: false
+  use Arbor.Persistence.DatabaseCase, async: false
 
   @moduletag :database
   @moduletag :integration
+  @moduletag :postgres
   @moduletag packet: "VP-05D2C3I1A"
 
   alias Arbor.Memory.MutationAdmission

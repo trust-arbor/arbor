@@ -116,6 +116,145 @@ defmodule Arbor.Memory.MutationAdmissionTest do
   end
 
   @tag packet: "VP-05D2C3I1A"
+  test "malformed reenter lease fails closed without backend work or crash", %{
+    server: server,
+    agent_name: agent_name
+  } do
+    agent = "agent_malformed_reenter"
+    key = Base.encode16(:crypto.hash(:sha256, agent), case: :lower)
+    max_agent_bytes = Arbor.Memory.Config.mutation_admission_max_agent_id_bytes()
+
+    assert {:ok, %Lease{} = good} = acq(server, agent)
+    assert {:ok, %{gate: :open, active_roots: 1} = status_before} = st(server, agent)
+
+    # Exact durable snapshot before any malformed reenter attempts.
+    record_before = Fake.peek(agent_name, key)
+    assert %Arbor.Contracts.Persistence.Record{} = record_before
+
+    Fake.clear_history(agent_name)
+    shell_pid = Process.whereis(server)
+    assert is_pid(shell_pid) and Process.alive?(shell_pid)
+
+    bad_leases = [
+      %Lease{token: nil, agent_id: agent, admitted_gate_gen: good.admitted_gate_gen},
+      %Lease{token: <<1, 2, 3>>, agent_id: agent, admitted_gate_gen: good.admitted_gate_gen},
+      # Oversized token (valid length is 32 bytes).
+      %Lease{
+        token: :crypto.strong_rand_bytes(64),
+        agent_id: agent,
+        admitted_gate_gen: good.admitted_gate_gen
+      },
+      %Lease{token: good.token, agent_id: agent, admitted_gate_gen: 0},
+      %Lease{token: good.token, agent_id: agent, admitted_gate_gen: -1},
+      %Lease{token: good.token, agent_id: "", admitted_gate_gen: good.admitted_gate_gen},
+      %Lease{token: good.token, agent_id: " padded ", admitted_gate_gen: good.admitted_gate_gen},
+      %Lease{
+        token: good.token,
+        agent_id: <<0xFF, 0xFE>>,
+        admitted_gate_gen: good.admitted_gate_gen
+      },
+      # agent_id longer than Config.mutation_admission_max_agent_id_bytes/0.
+      %Lease{
+        token: good.token,
+        agent_id: String.duplicate("a", max_agent_bytes + 1),
+        admitted_gate_gen: good.admitted_gate_gen
+      }
+    ]
+
+    for bad <- bad_leases do
+      assert {:error, :invalid_lease} = acq(server, agent, lease: bad)
+    end
+
+    assert Process.alive?(shell_pid)
+    assert Fake.history(agent_name) == []
+    # Durable record byte-for-byte unchanged (exact struct equality).
+    assert Fake.peek(agent_name, key) == record_before
+    assert {:ok, ^status_before} = st(server, agent)
+
+    # Valid reenter still works after malformed attempts.
+    assert {:ok, ^good} = acq(server, agent, lease: good)
+    assert :ok = rel(server, good)
+    assert :ok = rel(server, good)
+  end
+
+  @tag packet: "VP-05D2C3I1A"
+  test "nested-depth handoff is busy and preserves depth until release", %{
+    server: server,
+    registry: registry
+  } do
+    agent = "agent_nested_handoff"
+    parent = self()
+    assert {:ok, lease} = acq(server, agent)
+    assert {:ok, ^lease} = acq(server, agent, lease: lease)
+
+    lease_hash =
+      :crypto.hash(:sha256, "arbor.memory.mutation_admission.lease:v1" <> lease.token)
+      |> Base.encode16(case: :lower)
+
+    assert [{gpid, _}] = Registry.lookup(registry, {:guardian, lease_hash})
+    assert {:ok, %{depth: 2, phase: :holding}} = MutationAdmission.Guardian.info(gpid)
+
+    target =
+      spawn(fn ->
+        receive do
+          {:release, l} ->
+            result = MutationAdmission.release(l, server: server)
+            send(parent, {:release_result, result})
+        end
+      end)
+
+    assert {:error, :busy} = hof(server, lease, target)
+
+    assert {:ok, %{depth: 2, phase: :holding, holder: holder}} =
+             MutationAdmission.Guardian.info(gpid)
+
+    assert holder == self()
+    assert {:ok, %{active_roots: 1, gate: :open}} = st(server, agent)
+
+    # After nested release back to depth one, ordinary move-only handoff works.
+    assert :ok = rel(server, lease)
+    assert {:ok, %{depth: 1, phase: :holding}} = MutationAdmission.Guardian.info(gpid)
+    assert {:ok, ^lease} = hof(server, lease, target)
+
+    send(target, {:release, lease})
+    assert_receive {:release_result, :ok}, 1_000
+    assert {:ok, %{active_roots: 0}} = st(server, agent)
+  end
+
+  @tag packet: "VP-05D2C3I1A"
+  test "invalid configured drain default fails closed even with explicit timeout", %{
+    server: server,
+    agent_name: agent_name
+  } do
+    prev = Application.get_env(:arbor_memory, :mutation_admission_drain_default_timeout_ms)
+    over_max = Arbor.Memory.Config.mutation_admission_max_drain_timeout_ms() + 1
+
+    on_exit(fn ->
+      if is_nil(prev) do
+        Application.delete_env(:arbor_memory, :mutation_admission_drain_default_timeout_ms)
+      else
+        Application.put_env(:arbor_memory, :mutation_admission_drain_default_timeout_ms, prev)
+      end
+    end)
+
+    for bad <- [0, -1, "5000", over_max, nil] do
+      Application.put_env(:arbor_memory, :mutation_admission_drain_default_timeout_ms, bad)
+
+      assert {:error, :invalid_config} =
+               Arbor.Memory.Config.mutation_admission_drain_default_timeout_ms()
+
+      Fake.clear_history(agent_name)
+
+      assert {:error, :invalid_config} = drn(server, "never_drained_cfg", timeout_ms: 100)
+      assert {:error, :invalid_config} = drn(server, "never_drained_cfg")
+      assert Fake.history(agent_name) == []
+    end
+
+    Application.put_env(:arbor_memory, :mutation_admission_drain_default_timeout_ms, 5_000)
+    assert {:ok, 5_000} = Arbor.Memory.Config.mutation_admission_drain_default_timeout_ms()
+  end
+
+  @tag packet: "VP-05D2C3I1A"
   test "local handoff moves ownership", %{server: server} do
     assert {:ok, lease} = acq(server, "agent_d")
     parent = self()
@@ -158,7 +297,7 @@ defmodule Arbor.Memory.MutationAdmissionTest do
   test "source death before handoff releases root", %{server: server} do
     parent = self()
 
-    source =
+    source_pid =
       spawn(fn ->
         assert {:ok, lease} = acq(server, "agent_f")
         send(parent, {:lease, lease})
@@ -169,7 +308,7 @@ defmodule Arbor.Memory.MutationAdmissionTest do
       end)
 
     assert_receive {:lease, _lease}, 1_000
-    Process.exit(source, :kill)
+    Process.exit(source_pid, :kill)
     Process.sleep(50)
     assert {:ok, %{active_roots: 0}} = st(server, "agent_f")
   end
@@ -178,7 +317,7 @@ defmodule Arbor.Memory.MutationAdmissionTest do
   test "source death after handoff leaves target as owner", %{server: server} do
     parent = self()
 
-    source =
+    source_pid =
       spawn(fn ->
         assert {:ok, lease} = MutationAdmission.acquire("agent_f3", server: server)
         send(parent, {:lease, lease, self()})
@@ -194,7 +333,7 @@ defmodule Arbor.Memory.MutationAdmissionTest do
         end
       end)
 
-    assert_receive {:lease, lease, source_pid}, 1_000
+    assert_receive {:lease, lease, ^source_pid}, 1_000
 
     target =
       spawn(fn ->

@@ -67,8 +67,11 @@ defmodule Arbor.Memory.Test.MutationAdmissionFakeBackend do
   @doc """
   Next `kind` (`:get` | `:compare_and_swap`) returns a malformed applied success.
   For CAS, the write is applied first then a corrupt receipt is returned.
+
+  Default mode is `:not_a_record` (non-Record) so bare `corrupt_next(name, :get)`
+  fails closed. Unknown modes must not fall through as valid Records.
   """
-  def corrupt_next(name, kind, mode \\ :malformed_record) do
+  def corrupt_next(name, kind, mode \\ :not_a_record) do
     Agent.update(name, fn s ->
       %{s | corrupt_next: Map.put(s.corrupt_next, kind, mode)}
     end)
@@ -108,7 +111,7 @@ defmodule Arbor.Memory.Test.MutationAdmissionFakeBackend do
     waiters =
       Agent.get_and_update(name, fn s ->
         case s.withhold_cas_reply do
-          %{waiting: w} = wr ->
+          %{waiting: w} ->
             {w, %{s | withhold_cas_reply: %{mode: :off, waiting: [], tester: nil}}}
 
           _ ->
@@ -198,6 +201,19 @@ defmodule Arbor.Memory.Test.MutationAdmissionFakeBackend do
     end
   end
 
+  @doc "Wait for one sync arrival and return its exact ref."
+  def await_sync_arrival(timeout \\ 2_000) do
+    remaining = max(timeout, 0)
+
+    receive do
+      {:sync_arrived, event, ref} ->
+        {:ok, event, ref}
+    after
+      remaining ->
+        {:error, :sync_timeout}
+    end
+  end
+
   @doc "Release all parked backend callers."
   def release_sync(name) do
     waiters =
@@ -215,6 +231,32 @@ defmodule Arbor.Memory.Test.MutationAdmissionFakeBackend do
     :ok
   end
 
+  @doc "Release one parked backend caller by exact barrier ref; leave others parked."
+  def release_sync(name, ref) when is_reference(ref) do
+    waiters =
+      Agent.get_and_update(name, fn s ->
+        case s.sync do
+          %{waiting: w} = sync ->
+            {hit, rest} = Enum.split_with(w, fn {_pid, r} -> r == ref end)
+
+            new_sync =
+              if rest == [] do
+                %{sync | mode: :off, waiting: [], arrived: 0, need: 0}
+              else
+                %{sync | waiting: rest}
+              end
+
+            {hit, %{s | sync: new_sync}}
+
+          _ ->
+            {[], s}
+        end
+      end)
+
+    Enum.each(waiters, fn {pid, r} -> send(pid, {:sync_go, r}) end)
+    :ok
+  end
+
   @impl true
   def durability_class(_opts), do: :node_restart
 
@@ -222,6 +264,8 @@ defmodule Arbor.Memory.Test.MutationAdmissionFakeBackend do
   def get(key, opts) do
     name = Keyword.fetch!(opts, :agent_name)
     maybe_hang(name, :get)
+    # Capture before Agent: self() inside get_and_update is Agent.Server.
+    caller_pid = self()
 
     {result, park} =
       Agent.get_and_update(name, fn state ->
@@ -231,7 +275,7 @@ defmodule Arbor.Memory.Test.MutationAdmissionFakeBackend do
               {nil, state} ->
                 state = append_history(state, :get, key, nil, nil)
                 lookup_result = lookup(state, key)
-                {park, state} = note_sync(state, :get)
+                {park, state} = note_sync(state, :get, caller_pid)
                 {{lookup_result, park}, state}
 
               {mode, state} when is_atom(mode) ->
@@ -255,11 +299,14 @@ defmodule Arbor.Memory.Test.MutationAdmissionFakeBackend do
     # Pre-dispatch hang: sleep before any CAS mutation (no durable effect yet).
     maybe_hang(name, :compare_and_swap)
 
+    # Capture before Agent: self() inside get_and_update is Agent.Server.
+    caller_pid = self()
+
     # Park *before* the CAS mutation so both authorities can decide from the
     # same pre-CAS revision, then race the write.
     park =
       Agent.get_and_update(name, fn state ->
-        note_sync(state, :cas)
+        note_sync(state, :cas, caller_pid)
       end)
 
     maybe_park(park)
@@ -272,7 +319,7 @@ defmodule Arbor.Memory.Test.MutationAdmissionFakeBackend do
               {{:ok, stored}, state} ->
                 case pop_corrupt(state, :compare_and_swap) do
                   {nil, state} ->
-                    {wh, state} = note_withhold(state, key, stored)
+                    {wh, state} = note_withhold(state, key, stored, caller_pid)
                     {{{:ok, stored}, wh}, state}
 
                   {mode, state} when is_atom(mode) ->
@@ -317,8 +364,10 @@ defmodule Arbor.Memory.Test.MutationAdmissionFakeBackend do
 
   defp note_sync(
          %{sync: %{mode: :armed, events: events, need: need, arrived: arrived} = sync} = state,
-         event
-       ) do
+         event,
+         caller_pid
+       )
+       when is_pid(caller_pid) do
     if MapSet.member?(events, event) and arrived < need do
       ref = make_ref()
       tester = sync.tester
@@ -327,7 +376,7 @@ defmodule Arbor.Memory.Test.MutationAdmissionFakeBackend do
       sync = %{
         sync
         | arrived: arrived + 1,
-          waiting: [{self(), ref} | sync.waiting]
+          waiting: [{caller_pid, ref} | sync.waiting]
       }
 
       {{:park, ref}, %{state | sync: sync}}
@@ -336,7 +385,7 @@ defmodule Arbor.Memory.Test.MutationAdmissionFakeBackend do
     end
   end
 
-  defp note_sync(state, _event), do: {:cont, state}
+  defp note_sync(state, _event, _caller_pid), do: {:cont, state}
 
   defp maybe_park({:park, ref}) do
     receive do
@@ -383,19 +432,21 @@ defmodule Arbor.Memory.Test.MutationAdmissionFakeBackend do
   end
 
   # After successful CAS: signal tester and park this caller until released.
+  # caller_pid must be the Store worker (captured outside Agent), not Agent.Server.
   defp note_withhold(
          %{withhold_cas_reply: %{mode: :armed, tester: tester, waiting: waiting} = wr} = state,
          key,
-         stored
+         stored,
+         caller_pid
        )
-       when is_pid(tester) do
+       when is_pid(tester) and is_pid(caller_pid) do
     ref = make_ref()
     send(tester, {:cas_applied, key, ref, stored})
-    wr = %{wr | mode: :holding, waiting: [{self(), ref} | waiting]}
+    wr = %{wr | mode: :holding, waiting: [{caller_pid, ref} | waiting]}
     {{:withhold, ref}, %{state | withhold_cas_reply: wr}}
   end
 
-  defp note_withhold(state, _key, _stored), do: {:cont, state}
+  defp note_withhold(state, _key, _stored, _caller_pid), do: {:cont, state}
 
   defp maybe_withhold_reply({:withhold, ref}) do
     receive do
@@ -408,7 +459,6 @@ defmodule Arbor.Memory.Test.MutationAdmissionFakeBackend do
   end
 
   defp maybe_withhold_reply(:cont), do: :ok
-  defp maybe_withhold_reply(_), do: :ok
 
   defp do_cas(state, key, :not_found, replacement) do
     case Map.get(state.records, key) do
@@ -506,7 +556,7 @@ defmodule Arbor.Memory.Test.MutationAdmissionFakeBackend do
 
   # Malformed loaded Record for get bind table tests.
   defp corrupt_loaded(_key, nil, :not_a_record), do: :not_a_record
-  defp corrupt_loaded(_key, %Record{} = base, :not_a_record), do: :not_a_record
+  defp corrupt_loaded(_key, %Record{}, :not_a_record), do: :not_a_record
 
   defp corrupt_loaded(key, nil, mode) do
     now = DateTime.utc_now()
@@ -552,7 +602,9 @@ defmodule Arbor.Memory.Test.MutationAdmissionFakeBackend do
     %{base | updated_at: earlier}
   end
 
-  defp corrupt_loaded(_key, %Record{} = base, _), do: base
+  # Unknown / default malformed modes are non-Record (fail closed), never a valid Record.
+  defp corrupt_loaded(_key, _base, :malformed_record), do: :not_a_record
+  defp corrupt_loaded(_key, _base, _mode), do: :not_a_record
 
   defp append_history(state, kind, key, expected, record) do
     entry = %{kind: kind, key: key, cas_expected: expected, record: record}

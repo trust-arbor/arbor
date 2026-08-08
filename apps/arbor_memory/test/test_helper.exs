@@ -10,9 +10,7 @@ tables = [
   :arbor_memory_graphs,
   :arbor_working_memory,
   :arbor_memory_proposals,
-  :arbor_preferences,
-  # VP-05D2C3I1A BEAM-lifetime runtime fingerprint table
-  :arbor_memory_mutation_admission_runtime
+  :arbor_preferences
 ]
 
 for table <- tables do

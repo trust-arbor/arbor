@@ -71,52 +71,111 @@ defmodule Arbor.Memory.MutationAdmissionConcurrencyTest do
   defp storage_key(agent),
     do: Base.encode16(:crypto.hash(:sha256, agent), case: :lower)
 
-  defp cas_ops(agent_name, key) do
+  # ---------------------------------------------------------------------------
+  # Two-authority proofs — shared-snapshot barrier, winner-completion first
+  # ---------------------------------------------------------------------------
+
+  defp successful_cas(agent_name, key) do
     agent_name
     |> Fake.history()
-    |> Enum.filter(&(&1.kind == :compare_and_swap and &1.key == key))
+    |> Enum.filter(fn op ->
+      op.kind == :compare_and_swap and op.key == key and is_map(op.record)
+    end)
   end
 
-  # ---------------------------------------------------------------------------
-  # Three required two-authority proofs — barrier-directed, exact outcomes only
-  # ---------------------------------------------------------------------------
+  defp cas_data(op), do: op.record.data
+
+  # Dedicated acquire holder: stays alive until test releases it (Task would exit).
+  defp spawn_acquire_holder(agent, server) do
+    parent = self()
+
+    spawn(fn ->
+      result = MutationAdmission.acquire(agent, server: server)
+      send(parent, {:acquire_result, self(), result})
+
+      receive do
+        :release_and_exit ->
+          case result do
+            {:ok, lease} -> _ = MutationAdmission.release(lease, server: server)
+            _ -> :ok
+          end
+
+        :exit ->
+          :ok
+      end
+    end)
+  end
 
   @tag packet: "VP-05D2C3I1A"
-  test "acquire versus drain: directed acquire-wins exact outcome", ctx do
+  test "acquire versus drain: shared-snapshot acquire-first exact outcome", ctx do
     agent = "cc_a_acq_wins"
     key = storage_key(agent)
     Fake.clear_history(ctx.agent_name)
+    Fake.arm_sync(ctx.agent_name, [:cas], 2)
 
-    # Directed: s1 acquires first (no race). Then s2 drain must wait / timeout
-    # while the durable root remains.
-    assert {:ok, %Lease{} = lease} = MutationAdmission.acquire(agent, server: s1(ctx))
+    # Park acquire pre-CAS first, then drain, while durable revision unchanged.
+    holder = spawn_acquire_holder(agent, s1(ctx))
+    assert {:ok, :cas, ref_acq} = Fake.await_sync_arrival(2_000)
+    assert Fake.peek(ctx.agent_name, key) == nil
 
-    assert {:ok, %{gate: :open, active_roots: 1}} =
-             MutationAdmission.status(agent, server: s2(ctx))
+    drain_task =
+      Task.async(fn ->
+        MutationAdmission.drain(agent, server: s2(ctx), timeout_ms: 500)
+      end)
 
-    assert {:error, :drain_timeout} =
-             MutationAdmission.drain(agent, server: s2(ctx), timeout_ms: 80)
+    assert {:ok, :cas, ref_drn} = Fake.await_sync_arrival(2_000)
+    assert Fake.peek(ctx.agent_name, key) == nil
+
+    # Winner-completion barrier: wake acquire only; await public Lease while holder lives.
+    Fake.release_sync(ctx.agent_name, ref_acq)
+
+    assert_receive {:acquire_result, ^holder, {:ok, %Lease{}}}, 3_000
+    assert Process.alive?(holder)
+
+    stored_mid = Fake.peek(ctx.agent_name, key)
+    assert stored_mid.data["gate"] == "open"
+    assert map_size(stored_mid.data["roots"]) == 1
+    assert stored_mid.data["fence_gen"] == 0
+    assert stored_mid.data["fence_hash"] == nil
+
+    mid_ops = successful_cas(ctx.agent_name, key)
+    assert length(mid_ops) == 1
+    assert cas_data(hd(mid_ops))["gate"] == "open"
+    assert map_size(cas_data(hd(mid_ops))["roots"]) == 1
+    assert cas_data(hd(mid_ops))["fence_hash"] == nil
+
+    # Only then wake drain loser.
+    Fake.release_sync(ctx.agent_name, ref_drn)
+    assert {:error, :drain_timeout} = Task.await(drain_task, 3_000)
+
+    # Pre-cleanup exact history: acquire root + begin_drain; no fence CAS yet.
+    success = successful_cas(ctx.agent_name, key)
+    assert length(success) == 2
+
+    [w1, w2] = success
+    assert cas_data(w1)["gate"] == "open"
+    assert map_size(cas_data(w1)["roots"]) == 1
+    assert cas_data(w1)["fence_gen"] == 0
+    assert cas_data(w1)["fence_hash"] == nil
+
+    assert cas_data(w2)["gate"] == "draining"
+    assert map_size(cas_data(w2)["roots"]) == 1
+    assert cas_data(w2)["fence_gen"] == 0
+    assert cas_data(w2)["fence_hash"] == nil
 
     assert {:ok, %{gate: :draining, active_roots: 1}} =
              MutationAdmission.status(agent, server: s1(ctx))
 
-    # Exact durable state: one root, draining, no fence issued yet.
     stored = Fake.peek(ctx.agent_name, key)
     assert stored.data["gate"] == "draining"
     assert map_size(stored.data["roots"]) == 1
     assert stored.data["fence_gen"] == 0
     assert stored.data["fence_hash"] == nil
 
-    # CAS history includes acquire + begin_drain; no fence-issuance CAS yet.
-    ops = cas_ops(ctx.agent_name, key)
-    assert length(ops) >= 2
-
-    refute Enum.any?(ops, fn op ->
-             is_map(op.record) and is_binary(op.record.data["fence_hash"])
-           end)
-
-    # No fence token was returned; release then fence on the peer.
-    assert :ok = MutationAdmission.release(lease, server: s1(ctx))
+    # Cleanup after pre-cleanup proofs (holder still owned the lease).
+    send(holder, :release_and_exit)
+    href = Process.monitor(holder)
+    assert_receive {:DOWN, ^href, :process, ^holder, _}, 3_000
 
     assert {:ok, %DrainFence{} = fence} =
              MutationAdmission.drain(agent, server: s2(ctx), timeout_ms: 500)
@@ -125,47 +184,93 @@ defmodule Arbor.Memory.MutationAdmissionConcurrencyTest do
   end
 
   @tag packet: "VP-05D2C3I1A"
-  test "acquire versus drain: directed drain-first exact outcome", ctx do
+  test "acquire versus drain: shared-snapshot drain-first exact outcome", ctx do
     agent = "cc_a_drn_first"
     key = storage_key(agent)
     Fake.clear_history(ctx.agent_name)
+    Fake.arm_sync(ctx.agent_name, [:cas], 2)
 
-    # Directed: s2 drains empty agent first → fence issued. s1 acquire rejected.
-    assert {:ok, %DrainFence{} = fence} =
-             MutationAdmission.drain(agent, server: s2(ctx), timeout_ms: 500)
+    # Park drain pre-CAS first, then acquire, while durable revision unchanged.
+    drain_task =
+      Task.async(fn ->
+        MutationAdmission.drain(agent, server: s2(ctx), timeout_ms: 2_000)
+      end)
 
-    assert {:error, :draining} = MutationAdmission.acquire(agent, server: s1(ctx))
+    assert {:ok, :cas, ref_drn} = Fake.await_sync_arrival(2_000)
+    assert Fake.peek(ctx.agent_name, key) == nil
+
+    holder = spawn_acquire_holder(agent, s1(ctx))
+    assert {:ok, :cas, ref_acq} = Fake.await_sync_arrival(2_000)
+    assert Fake.peek(ctx.agent_name, key) == nil
+
+    # Winner-completion: wake drain only; await public fence before waking acquire.
+    Fake.release_sync(ctx.agent_name, ref_drn)
+    assert {:ok, %DrainFence{} = fence} = Task.await(drain_task, 3_000)
+
+    # Exact begin_drain/fence writes before acquire is unparked.
+    pre_acq = successful_cas(ctx.agent_name, key)
+    assert length(pre_acq) == 2
+
+    [d1, d2] = pre_acq
+    # First write opens-as-draining or begins drain with zero roots, no fence yet
+    # or already fenced on second write. Empty-agent path: insert draining then fence.
+    assert cas_data(d1)["gate"] == "draining"
+    assert map_size(cas_data(d1)["roots"]) == 0
+    assert cas_data(d1)["fence_hash"] == nil
+    assert cas_data(d1)["fence_gen"] == 0
+
+    assert cas_data(d2)["gate"] == "draining"
+    assert map_size(cas_data(d2)["roots"]) == 0
+    assert cas_data(d2)["fence_gen"] == 1
+    assert is_binary(cas_data(d2)["fence_hash"])
+
+    stored_mid = Fake.peek(ctx.agent_name, key)
+    assert stored_mid.data["gate"] == "draining"
+    assert map_size(stored_mid.data["roots"]) == 0
+    assert stored_mid.data["fence_gen"] == 1
+    assert is_binary(stored_mid.data["fence_hash"])
+
+    # Only then wake acquire loser.
+    Fake.release_sync(ctx.agent_name, ref_acq)
+    assert_receive {:acquire_result, ^holder, {:error, :draining}}, 3_000
 
     assert {:ok, %{gate: :draining, active_roots: 0}} =
              MutationAdmission.status(agent, server: s1(ctx))
 
-    stored = Fake.peek(ctx.agent_name, key)
-    assert stored.data["gate"] == "draining"
-    assert map_size(stored.data["roots"]) == 0
-    assert stored.data["fence_gen"] >= 1
-    assert is_binary(stored.data["fence_hash"])
-
-    ops = cas_ops(ctx.agent_name, key)
-    # begin_drain (or insert+drain) and fence issuance; no successful acquire root.
-    assert Enum.any?(ops, fn op ->
-             is_map(op.record) and is_binary(op.record.data["fence_hash"]) and
-               op.record.data["fence_gen"] >= 1
-           end)
-
-    refute Enum.any?(ops, fn op ->
-             is_map(op.record) and map_size(op.record.data["roots"] || %{}) > 0
-           end)
+    # No acquire root ever admitted.
+    success = successful_cas(ctx.agent_name, key)
+    assert length(success) == 2
+    assert Enum.all?(success, fn op -> map_size(cas_data(op)["roots"]) == 0 end)
 
     assert :ok = MutationAdmission.mark_destroyed(fence, server: s2(ctx))
     assert {:error, :destroyed} = MutationAdmission.acquire(agent, server: s1(ctx))
+    send(holder, :exit)
   end
 
   @tag packet: "VP-05D2C3I1A"
   test "release versus fence: barrier-directed exact fence after zero roots", ctx do
     agent = "cc_b"
     key = storage_key(agent)
+    parent = self()
 
-    assert {:ok, %Lease{} = lease} = MutationAdmission.acquire(agent, server: s1(ctx))
+    # Live holder for the lease (must not exit before release).
+    holder =
+      spawn(fn ->
+        assert {:ok, lease} = MutationAdmission.acquire(agent, server: s1(ctx))
+        send(parent, {:lease, self(), lease})
+
+        receive do
+          :release ->
+            assert :ok = MutationAdmission.release(lease, server: s1(ctx))
+            send(parent, :released)
+
+            receive do
+              :exit -> :ok
+            end
+        end
+      end)
+
+    assert_receive {:lease, ^holder, %Lease{} = _lease}, 2_000
     Fake.clear_history(ctx.agent_name)
 
     # Park drain's first CAS (begin_drain) so release can clear the root first.
@@ -176,16 +281,17 @@ defmodule Arbor.Memory.MutationAdmissionConcurrencyTest do
         MutationAdmission.drain(agent, server: s2(ctx), timeout_ms: 2_000)
       end)
 
-    assert :ok = Fake.await_sync(1, 2_000)
+    assert {:ok, :cas, ref_drn} = Fake.await_sync_arrival(2_000)
     # Root still present while drain is parked pre-CAS.
     assert {:ok, %{active_roots: 1}} = MutationAdmission.status(agent, server: s1(ctx))
 
-    assert :ok = MutationAdmission.release(lease, server: s1(ctx))
+    send(holder, :release)
+    assert_receive :released, 2_000
 
     assert {:ok, %{active_roots: 0, gate: :open}} =
              MutationAdmission.status(agent, server: s1(ctx))
 
-    Fake.release_sync(ctx.agent_name)
+    Fake.release_sync(ctx.agent_name, ref_drn)
 
     assert {:ok, %DrainFence{} = fence} = Task.await(t_drain, 3_000)
 
@@ -195,17 +301,29 @@ defmodule Arbor.Memory.MutationAdmissionConcurrencyTest do
     stored = Fake.peek(ctx.agent_name, key)
     assert stored.data["gate"] == "draining"
     assert map_size(stored.data["roots"]) == 0
-    assert stored.data["fence_gen"] >= 1
+    assert stored.data["fence_gen"] == 1
     assert is_binary(stored.data["fence_hash"])
 
-    ops = cas_ops(ctx.agent_name, key)
-    # release CAS + begin_drain CAS + fence CAS (exact successful fence present)
-    assert Enum.any?(ops, fn op ->
-             is_map(op.record) and is_binary(op.record.data["fence_hash"]) and
-               map_size(op.record.data["roots"] || %{}) == 0
-           end)
+    success = successful_cas(ctx.agent_name, key)
+    # release (roots empty, open) + begin_drain + fence — exact shapes.
+    assert length(success) == 3
+
+    [r1, r2, r3] = success
+    assert map_size(cas_data(r1)["roots"]) == 0
+    assert cas_data(r1)["gate"] == "open"
+    assert cas_data(r1)["fence_hash"] == nil
+
+    assert cas_data(r2)["gate"] == "draining"
+    assert map_size(cas_data(r2)["roots"]) == 0
+    assert cas_data(r2)["fence_hash"] == nil
+
+    assert cas_data(r3)["gate"] == "draining"
+    assert map_size(cas_data(r3)["roots"]) == 0
+    assert cas_data(r3)["fence_gen"] == 1
+    assert is_binary(cas_data(r3)["fence_hash"])
 
     assert :ok = MutationAdmission.mark_destroyed(fence, server: s1(ctx))
+    send(holder, :exit)
   end
 
   @tag packet: "VP-05D2C3I1A"
@@ -214,7 +332,7 @@ defmodule Arbor.Memory.MutationAdmissionConcurrencyTest do
     key = storage_key(agent)
     parent = self()
 
-    source =
+    source_pid =
       spawn(fn ->
         assert {:ok, lease} = MutationAdmission.acquire(agent, server: s1(ctx))
         send(parent, {:lease, lease, self()})
@@ -230,7 +348,7 @@ defmodule Arbor.Memory.MutationAdmissionConcurrencyTest do
         end
       end)
 
-    assert_receive {:lease, _lease, source_pid}, 1_000
+    assert_receive {:lease, _lease, ^source_pid}, 1_000
 
     target =
       spawn(fn ->
@@ -243,16 +361,15 @@ defmodule Arbor.Memory.MutationAdmissionConcurrencyTest do
     # Park handoff transfer CAS after begin_handoff installs monitors.
     Fake.arm_sync(ctx.agent_name, [:cas], 1)
     send(source_pid, {:handoff_to, target})
-    assert :ok = Fake.await_sync(1, 2_000)
+    assert {:ok, :cas, ref_ho} = Fake.await_sync_arrival(2_000)
 
     # Source dies while transfer CAS is parked — durable release path wins.
     Process.exit(source_pid, :kill)
     sref = Process.monitor(source_pid)
     assert_receive {:DOWN, ^sref, :process, ^source_pid, _}, 1_000
-    Fake.release_sync(ctx.agent_name)
+    Fake.release_sync(ctx.agent_name, ref_ho)
 
     # Directed outcome: source death during handoff → root released (0 roots).
-    # Poll only for terminal durable zero (release retry), not to choose a race branch.
     assert wait_roots_zero(s1(ctx), agent)
 
     assert {:ok, %{active_roots: 0, gate: :open}} =
@@ -261,12 +378,11 @@ defmodule Arbor.Memory.MutationAdmissionConcurrencyTest do
     stored = Fake.peek(ctx.agent_name, key)
     assert map_size(stored.data["roots"]) == 0
 
-    ops = cas_ops(ctx.agent_name, key)
-    assert length(ops) >= 1
-    # Final durable state has no root — release CAS present in history.
-    assert Enum.any?(ops, fn op ->
-             is_map(op.record) and map_size(op.record.data["roots"] || %{}) == 0
-           end)
+    success = successful_cas(ctx.agent_name, key)
+    # Final durable empty roots must appear as an exact successful write.
+    assert success != []
+    assert map_size(cas_data(List.last(success))["roots"]) == 0
+    assert Enum.count(success, fn op -> map_size(cas_data(op)["roots"]) == 0 end) == 1
 
     assert {:ok, %DrainFence{} = fence} =
              MutationAdmission.drain(agent, server: s2(ctx), timeout_ms: 500)
@@ -278,22 +394,65 @@ defmodule Arbor.Memory.MutationAdmissionConcurrencyTest do
   @tag packet: "VP-05D2C3I1A"
   test "CAS conflict retry never drops a concurrent root", ctx do
     agent = "cc_cas_roots"
-    assert {:ok, lease1} = MutationAdmission.acquire(agent, server: s1(ctx))
+    parent = self()
+
+    h1 =
+      spawn(fn ->
+        assert {:ok, lease} = MutationAdmission.acquire(agent, server: s1(ctx))
+        send(parent, {:l1, self(), lease})
+
+        receive do
+          :rel ->
+            assert :ok = MutationAdmission.release(lease, server: s1(ctx))
+            send(parent, :r1)
+        end
+      end)
+
+    assert_receive {:l1, ^h1, _}, 2_000
     Fake.set_conflict_count(ctx.agent_name, 1)
-    assert {:ok, lease2} = MutationAdmission.acquire(agent, server: s2(ctx))
+
+    h2 =
+      spawn(fn ->
+        assert {:ok, lease} = MutationAdmission.acquire(agent, server: s2(ctx))
+        send(parent, {:l2, self(), lease})
+
+        receive do
+          :rel ->
+            assert :ok = MutationAdmission.release(lease, server: s2(ctx))
+            send(parent, :r2)
+        end
+      end)
+
+    assert_receive {:l2, ^h2, _}, 2_000
 
     assert {:ok, %{active_roots: 2, gate: :open}} =
              MutationAdmission.status(agent, server: s1(ctx))
 
-    assert :ok = MutationAdmission.release(lease1, server: s1(ctx))
-    assert :ok = MutationAdmission.release(lease2, server: s2(ctx))
+    send(h1, :rel)
+    send(h2, :rel)
+    assert_receive :r1, 2_000
+    assert_receive :r2, 2_000
     assert wait_roots_zero(s1(ctx), agent)
   end
 
   @tag packet: "VP-05D2C3I1A"
   test "cross-authority release notifies peer drain waiters before deadline", ctx do
     agent = "cc_cross_drain"
-    assert {:ok, lease} = MutationAdmission.acquire(agent, server: s1(ctx))
+    parent = self()
+
+    holder =
+      spawn(fn ->
+        assert {:ok, lease} = MutationAdmission.acquire(agent, server: s1(ctx))
+        send(parent, {:ready, self(), lease})
+
+        receive do
+          :rel ->
+            assert :ok = MutationAdmission.release(lease, server: s1(ctx))
+            send(parent, :released)
+        end
+      end)
+
+    assert_receive {:ready, ^holder, _lease}, 2_000
 
     # Park drain begin_drain CAS, then release root, then unpark so drain sees zero.
     Fake.arm_sync(ctx.agent_name, [:cas], 1)
@@ -303,9 +462,10 @@ defmodule Arbor.Memory.MutationAdmissionConcurrencyTest do
         MutationAdmission.drain(agent, server: s2(ctx), timeout_ms: 2_000)
       end)
 
-    assert :ok = Fake.await_sync(1, 2_000)
-    assert :ok = MutationAdmission.release(lease, server: s1(ctx))
-    Fake.release_sync(ctx.agent_name)
+    assert {:ok, :cas, ref_drn} = Fake.await_sync_arrival(2_000)
+    send(holder, :rel)
+    assert_receive :released, 2_000
+    Fake.release_sync(ctx.agent_name, ref_drn)
 
     assert {:ok, %DrainFence{} = fence} = Task.await(drain_task, 3_000)
 
