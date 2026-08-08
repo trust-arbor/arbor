@@ -313,6 +313,9 @@ defmodule Arbor.Agent.TemplateStoreTest do
       assert "arbor://action/coding/review_tree/search" in resources
       assert "arbor://action/coding/review/submit" in resources
       assert "arbor://action/coding/design_checkpoint/**" in resources
+      assert "arbor://action/coding/reviewed_commit" in resources
+      assert "arbor://action/coding/reviewed_validation" in resources
+      assert "arbor://action/coding/worker_terminal/parse" in resources
       refute "arbor://approval/answer" in resources
       assert "arbor://acp/tool/**" in resources
       assert "arbor://action/git/**" in resources
@@ -346,6 +349,9 @@ defmodule Arbor.Agent.TemplateStoreTest do
       assert preset["baseline"] == "block"
       assert preset["rules"]["arbor://orchestrator/execute"] == "auto"
       assert preset["rules"]["arbor://action/coding/design_checkpoint"] == "auto"
+      assert preset["rules"]["arbor://action/coding/reviewed_commit"] == "auto"
+      assert preset["rules"]["arbor://action/coding/reviewed_validation"] == "auto"
+      assert preset["rules"]["arbor://action/coding/worker_terminal/parse"] == "auto"
       refute Map.has_key?(preset["rules"], "arbor://approval/answer")
       refute Map.has_key?(preset["rules"], "arbor://action/coding/produce_reviewable_change")
       assert preset["rules"]["arbor://action/coding/security_regression/validate"] == "ask"
@@ -359,6 +365,7 @@ defmodule Arbor.Agent.TemplateStoreTest do
       assert preset["rules"]["arbor://action/coding/review/submit"] == "auto"
       assert preset["rules"]["arbor://action/git"] == "auto"
       assert preset["rules"]["arbor://action/mix"] == "auto"
+      assert preset["rules"]["arbor://action/mix/compile"] == "ask"
       assert preset["rules"]["arbor://shell/exec"] == "ask"
       assert preset["rules"]["arbor://action/council/review"] == "auto"
       assert preset["rules"]["arbor://action/consensus/decide_review"] == "auto"

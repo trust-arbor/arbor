@@ -188,8 +188,9 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
         "arbor://action/coding/review_tree/read",
         "arbor://action/coding/review_tree/search",
         "arbor://action/coding/reviewed_commit",
+        "arbor://action/coding/reviewed_validation",
+        "arbor://action/coding/worker_terminal/parse",
         "arbor://acp/tool/execute",
-        "arbor://action/mix/compile",
         "arbor://action/git/pr",
         "arbor://action/council/review",
         "arbor://action/consensus/decide_review"
@@ -199,6 +200,15 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
         assert {:ok, :authorized} =
                  Arbor.Trust.authorize(agent_id, resource_uri, :execute),
                "expected coding agent to authorize #{resource_uri}"
+      end
+
+      for resource_uri <- [
+            "arbor://action/mix/compile",
+            "arbor://action/coding/cross_app/validate",
+            "arbor://action/coding/security_regression/validate"
+          ] do
+        assert Arbor.Trust.effective_mode(agent_id, resource_uri, []) == :ask,
+               "expected nested validator to remain approval-gated: #{resource_uri}"
       end
 
       # git/commit is ask — capability held, but ApprovalGuard may escalate.
@@ -226,6 +236,13 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
              )
 
       assert Enum.any?(uris, &String.starts_with?(&1, "arbor://action/coding/reviewed_commit"))
+
+      assert Enum.any?(
+               uris,
+               &String.starts_with?(&1, "arbor://action/coding/reviewed_validation")
+             )
+
+      assert "arbor://action/coding/worker_terminal/parse" in uris
       assert Enum.any?(uris, &String.starts_with?(&1, "arbor://action/git"))
       assert "arbor://action/consensus/decide_review" in uris
       refute "arbor://action/coding/produce_reviewable_change" in uris

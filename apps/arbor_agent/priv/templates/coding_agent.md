@@ -56,6 +56,10 @@ required_capabilities:
   resource: "arbor://action/coding/design_checkpoint/**"
 - description: "Run the pipeline-internal reviewed commit/adoption gate (orchestration control)"
   resource: "arbor://action/coding/reviewed_commit"
+- description: "Run the pipeline-internal reviewed validation gate while the exact nested validator remains approval-gated"
+  resource: "arbor://action/coding/reviewed_validation"
+- description: "Parse the coding worker's bounded advisory terminal envelope"
+  resource: "arbor://action/coding/worker_terminal/parse"
 - description: "Validate a Council-attested security regression against both reviewed revisions"
   resource: "arbor://action/coding/security_regression/validate"
 - description: "Validate compile, xref evidence, and downstream tests for cross-app changes"
@@ -97,6 +101,8 @@ trust_preset:
     "arbor://orchestrator/execute": auto
     "arbor://action/coding/design_checkpoint": auto
     "arbor://action/coding/reviewed_commit": auto
+    "arbor://action/coding/reviewed_validation": auto
+    "arbor://action/coding/worker_terminal/parse": auto
     "arbor://action/coding/security_regression/validate": ask
     "arbor://action/coding/cross_app/validate": ask
     "arbor://action/coding/workspace": auto
@@ -112,6 +118,7 @@ trust_preset:
     "arbor://action/git": auto
     "arbor://action/git/commit": ask
     "arbor://action/mix": auto
+    "arbor://action/mix/compile": ask
     "arbor://shell/exec": ask
     "arbor://action/council/review": auto
     "arbor://action/consensus/decide_review": auto

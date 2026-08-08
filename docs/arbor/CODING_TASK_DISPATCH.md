@@ -108,14 +108,16 @@ Missing any of them fails admission in `preflight` with:
  "remediation": "Grant permanent or horizon-covering capabilities for the listed resources"}
 ```
 
-For the standard `coding-change-v1` graph that set is 29 URIs: `arbor://acp/tool`,
+For the standard `coding-change-v1` graph that set includes `arbor://acp/tool`,
 the `arbor://action/coding/*` family (workspace acquire/inspect/release/
 committed_change/recovery_summary, review_tree read/search, review/submit,
-reviewed_commit, dependency_baseline/check, design_checkpoint open/parse/
-capture/load/await), `arbor://action/git/commit`, `arbor://action/git/pr`,
-`arbor://action/mix/compile`, `arbor://action/council/review`,
-`arbor://action/consensus/decide_review`, and the
-`arbor://orchestrator/execute/*` handler URIs used by the graph.
+reviewed_commit, reviewed_validation, worker_terminal/parse,
+dependency_baseline/check, and design_checkpoint open/parse/capture/load/await),
+the profile-selected validator through the reviewed wrapper's execution
+dependencies, `arbor://action/git/commit`, `arbor://action/git/pr`,
+`arbor://action/council/review`, `arbor://action/consensus/decide_review`, and
+the `arbor://orchestrator/execute/*` handler URIs used by the graph. Do not rely
+on a copied count: profile and graph changes alter the exact horizon.
 
 Derive the exact set for a plan rather than copying this list — it changes with
 the graph:
@@ -133,15 +135,23 @@ Grant them with `Arbor.Security.grant(principal: principal_id, resource: uri)`.
 
 ### 3. Observation authority
 
-`arbor://agent/task/read` with `:read` is required by `arbor_task_status`,
-`arbor_task_result`, and `arbor_list_pending_approvals` — and it is **separate
-from dispatch authority**. A principal that can dispatch but lacks it gets
-`{:unauthorized, :task_read_required}` on every read, so the workflow in
-*Status, result, and approvals* below is unusable and a dispatched task's
-outcome is invisible.
+`arbor://agent/task/read` with `:read` is required by `arbor_task_status` and
+`arbor_task_result`. `arbor_list_pending_approvals` instead requires
+`arbor://approval/read` with `:read`. Both are **separate from dispatch
+authority**. A principal that can dispatch but lacks task-read gets
+`{:unauthorized, :task_read_required}` from task reads; one that lacks
+approval-read cannot inventory visible approvals.
 
-Grant `arbor://agent/task/read` alongside dispatch authority. There is no
-alternative read path: `arbor_status` has no task component.
+Grant both observation resources alongside dispatch authority. There is no
+alternative task-result path: `arbor_status` has no task component.
+
+Answering an approval requires `:execute` authority on one URI accepted by the
+closed scope ladder: `arbor://approval/answer/task/<task_id>`,
+`arbor://approval/answer/<principal_id>`,
+`arbor://approval/answer/<agent_id>`, or the global
+`arbor://approval/answer`. Ordinary coding dispatch mints the task-scoped form
+for its authenticated instantiator and settles it with the task; broader forms
+should not be granted merely to operate one delegated task.
 
 Related per-operation capabilities, only needed for those operations:
 `arbor://agent/task/cancel`, `arbor://agent/task/steer`,
@@ -609,6 +619,11 @@ After dispatch:
 3. List visible IRQs with `arbor_list_pending_approvals` and answer them with
    `arbor_answer_approval` when you have approval-answer authority.
 
+The first two operations require task-read, listing requires approval-read, and
+answering uses the scoped approval-answer ladder documented under *Caller
+prerequisites*. These capabilities are independent even when the same caller
+performs all four operations.
+
 Approvals stay human-visible and capability-gated. Dispatch does **not** grant
 merge authority or unattended authorization.
 
@@ -731,9 +746,22 @@ worker narrative or terminal JSON:
    receipt reports `discard_pending` with `cleanup_residue`, never `discarded`.
    A preserved pre-existing branch with a successfully deleted marker is not
    residue — the terminal disposition is `discarded` with no `cleanup_residue`.
-4. Worker prompts still request one valid terminal JSON object so resumed
-   older graph artifacts that parse prose do not enter protocol-repair loops.
-   The current graph ignores that prose for control.
+4. Implementation turns parse the entire bounded terminal message through
+   `coding_worker_terminal_parse`. It admits exactly one JSON object with
+   `status` equal to `implemented` or `declined` and an optional bounded string
+   `summary`; leading/trailing prose, extra objects, unknown fields, malformed
+   JSON, invalid UTF-8, and oversized messages are typed protocol failures. The
+   graph performs at most one **format-only** retry in the same ACP session and
+   then inspects the workspace even if the second envelope is invalid. It never
+   replays the implementation task, and worker status remains advisory.
+5. Validation runs through `coding_reviewed_validation`, whose outer
+   pipeline-internal action is automatic but whose compiler-pinned nested
+   validator remains approval-gated. Approve executes that exact validator once
+   with a fresh signed request; rework executes it zero times and routes the
+   bounded request id/note into the existing same-session validation-rework
+   path; deny executes it zero times and fails validation closed. The wrapper
+   accepts only the closed profile-owned validator set and never treats an
+   operator note as fabricated validation evidence.
 
 ### Terminal workspace and branch evidence
 
