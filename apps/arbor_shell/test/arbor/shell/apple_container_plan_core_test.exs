@@ -160,6 +160,8 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
                  "--env",
                  "ARBOR_MIX_CONTAINED=1",
                  "--env",
+                 "ARBOR_SOURCE_INVENTORY_PATH=/arbor/validation/runner/source_inventory.json",
+                 "--env",
                  "ARBOR_ERLANG_ROOT=/usr/local/lib/erlang",
                  "--env",
                  "ARBOR_ELIXIR_ROOT=/usr/local",
@@ -1596,10 +1598,13 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
       "MIX_ARCHIVES=",
       "ELIXIR_MAKE_CACHE_DIR=",
       "ARBOR_MIX_CONTAINED=",
+      "ARBOR_SOURCE_INVENTORY_PATH=",
       "ARBOR_ERLANG_ROOT=",
       "ARBOR_ELIXIR_ROOT=",
       "MIX_ENV="
     ]
+
+    assert "ARBOR_SOURCE_INVENTORY_PATH=/arbor/validation/runner/source_inventory.json" in env_values
 
     for env <- env_values do
       assert Enum.any?(allowed_env_prefixes, &String.starts_with?(env, &1)),
@@ -1609,5 +1614,27 @@ defmodule Arbor.Shell.AppleContainerPlanCoreTest do
     refute Enum.any?(env_values, &String.starts_with?(&1, "PATH="))
     refute Enum.any?(env_values, &String.starts_with?(&1, "SSH_"))
     refute Enum.any?(env_values, &String.contains?(&1, "SECRET"))
+  end
+
+  test "ARBOR_SOURCE_INVENTORY_PATH is fixed and not caller-selectable" do
+    assert {:ok, plan} = AppleContainerPlanCore.new(@valid_request)
+
+    assert {"ARBOR_SOURCE_INVENTORY_PATH", "/arbor/validation/runner/source_inventory.json"} in plan.env
+
+    # Closed request surface has no inventory-path field; only fixed env wins.
+    hostile =
+      Map.merge(@valid_request, %{
+        source_inventory_path: "/tmp/evil-inventory.json",
+        env: %{"ARBOR_SOURCE_INVENTORY_PATH" => "/tmp/evil-inventory.json"}
+      })
+
+    # Extra unknown keys fail closed rather than overriding the fixed guest path.
+    assert {:error, _reason} = AppleContainerPlanCore.new(hostile)
+
+    assert {:ok, plan2} = AppleContainerPlanCore.new(@valid_request)
+
+    assert Enum.count(plan2.env, fn {k, _} -> k == "ARBOR_SOURCE_INVENTORY_PATH" end) == 1
+
+    assert {"ARBOR_SOURCE_INVENTORY_PATH", "/arbor/validation/runner/source_inventory.json"} in plan2.env
   end
 end

@@ -37,6 +37,7 @@ defmodule Arbor.Actions.Mix do
   alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
   alias Arbor.Actions.Config
   alias Arbor.Common.SafePath
+  alias Arbor.Contracts.Coding.SourceInventory
 
   @compile_feedback_text_limit 2_000
   @excerpt_omission_marker "\n...[omitted]...\n"
@@ -52,6 +53,13 @@ defmodule Arbor.Actions.Mix do
   @snapshot_max_bytes 512 * 1024 * 1024
   @snapshot_max_depth 48
   @mix_lock_max_bytes 1_048_576
+  # Owner-issued basename under the revision-private validation runner directory.
+  # Guest path is fixed by Shell; Actions only derives the host path from the
+  # owner-issued runner_dir (caller input cannot select either path).
+  @source_inventory_basename "source_inventory.json"
+  # Fixed closed-environment guest path (mirrors AppleContainerPlanCore).
+  # Caller input cannot select this value; module-owned env always sets it.
+  @guest_source_inventory_path "/arbor/validation/runner/source_inventory.json"
 
   # When `bind_committable_tree` is true, reserve this many milliseconds of the
   # remaining outer deadline for the mandatory *postflight* tree binding and
@@ -86,6 +94,7 @@ defmodule Arbor.Actions.Mix do
     ERL_LIBS
     REBAR_CACHE_DIR
     ARBOR_MIX_CONTAINED
+    ARBOR_SOURCE_INVENTORY_PATH
     ARBOR_ERLANG_ROOT
     ARBOR_ELIXIR_ROOT
     PATH
@@ -113,6 +122,9 @@ defmodule Arbor.Actions.Mix do
 
   @doc false
   def postflight_tree_binding_reserve_ms, do: @postflight_tree_binding_reserve_ms
+
+  @doc false
+  def source_inventory_basename, do: @source_inventory_basename
 
   @doc false
   @spec allocate_spawn_child_timeout(term(), boolean()) ::
@@ -831,23 +843,29 @@ defmodule Arbor.Actions.Mix do
   # enabled, reserve a module-owned slice of the *current* remaining budget for
   # postflight binding before the child is launched so a child that uses its
   # full timeout cannot starve the mandatory after-execution binding.
+  #
+  # Pre-execution binding also publishes the attested source-inventory manifest
+  # into the owner-issued runner directory before candidate code starts.
   defp execute_prepared_mix(prepared, args, deadline_ms, bind_tree?, opts) do
     try do
       with {:ok, _} <- remaining_timeout(deadline_ms),
            {:ok, before_binding} <-
-             maybe_tree_binding(prepared.cwd, bind_tree?, deadline_ms),
+             maybe_tree_binding(prepared.cwd, bind_tree?, deadline_ms, include_paths: true),
+           {:ok, inventory_meta} <-
+             publish_or_verify_source_inventory(prepared, before_binding, opts),
            {:ok, rem_after_bind} <- remaining_timeout(deadline_ms),
            {:ok, child_timeout} <- allocate_spawn_child_timeout(rem_after_bind, bind_tree?),
            {:ok, result} <-
              invoke_spawn_capable(prepared, args, child_timeout, opts),
            {:ok, after_binding} <-
-             maybe_tree_binding(prepared.cwd, bind_tree?, deadline_ms),
+             maybe_tree_binding(prepared.cwd, bind_tree?, deadline_ms, include_paths: false),
            :ok <- assert_tree_stable(before_binding, after_binding) do
         result =
           if is_map(before_binding) do
             result
             |> Map.put(:validated_tree_oid, before_binding.tree_oid)
             |> Map.put(:validated_head, before_binding.head)
+            |> maybe_put_inventory_evidence(inventory_meta)
           else
             result
           end
@@ -1215,6 +1233,34 @@ defmodule Arbor.Actions.Mix do
   @spec committable_tree_binding(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def committable_tree_binding(worktree_path, opts)
       when is_binary(worktree_path) and is_list(opts) do
+    case do_committable_tree_capture(worktree_path, Keyword.put(opts, :include_paths, false)) do
+      {:ok, %{head: head, tree_oid: tree_oid}} ->
+        {:ok, %{head: head, tree_oid: tree_oid}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  def committable_tree_binding(_, _), do: {:error, :invalid_worktree}
+
+  @doc false
+  @spec committable_source_inventory(String.t()) :: {:ok, map()} | {:error, term()}
+  def committable_source_inventory(worktree_path) when is_binary(worktree_path) do
+    committable_source_inventory(worktree_path, [])
+  end
+
+  @doc false
+  @spec committable_source_inventory(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def committable_source_inventory(worktree_path, opts)
+      when is_binary(worktree_path) and is_list(opts) do
+    do_committable_tree_capture(worktree_path, Keyword.put(opts, :include_paths, true))
+  end
+
+  def committable_source_inventory(_, _), do: {:error, :invalid_worktree}
+
+  defp do_committable_tree_capture(worktree_path, opts)
+       when is_binary(worktree_path) and is_list(opts) do
     timeout = Keyword.get(opts, :timeout, mix_timeout())
     deadline_ms = Keyword.get(opts, :deadline_ms) || absolute_deadline(timeout)
 
@@ -1229,8 +1275,6 @@ defmodule Arbor.Actions.Mix do
       _ -> {:error, :committable_tree_binding_failed}
     end
   end
-
-  def committable_tree_binding(_, _), do: {:error, :invalid_worktree}
 
   @doc """
   Resolve the tree OID of an existing commit object without reading the
@@ -1312,7 +1356,8 @@ defmodule Arbor.Actions.Mix do
                   worktree,
                   git_dir,
                   deadline_ms,
-                  budget
+                  budget,
+                  opts
                 )
 
               {:error, reason} ->
@@ -1345,8 +1390,11 @@ defmodule Arbor.Actions.Mix do
          worktree,
          git_dir,
          deadline_ms,
-         budget
+         budget,
+         opts
        ) do
+    include_paths? = Keyword.get(opts, :include_paths, false) == true
+
     outcome =
       try do
         with :ok <- finalize_owned_binding_root_children(private_root, private_git, private_stage),
@@ -1382,11 +1430,23 @@ defmodule Arbor.Actions.Mix do
                  deadline_ms,
                  [{"GIT_INDEX_FILE", private_index}]
                ) do
-          {:ok,
-           %{
-             head: String.trim(head),
-             tree_oid: String.trim(tree)
-           }}
+          # Inventory paths are exactly those that contribute to the written
+          # tree OID (post deleted-path skip), sorted for the contract envelope.
+          binding = %{
+            head: String.trim(head),
+            tree_oid: String.trim(tree)
+          }
+
+          if include_paths? do
+            inventory_paths =
+              staged_entries
+              |> Enum.map(& &1.path)
+              |> Enum.sort()
+
+            {:ok, Map.put(binding, :paths, inventory_paths)}
+          else
+            {:ok, binding}
+          end
         else
           {:error, reason} -> {:error, reason}
           _ -> {:error, :committable_tree_binding_failed}
@@ -2214,10 +2274,26 @@ defmodule Arbor.Actions.Mix do
       end)
   end
 
-  defp maybe_tree_binding(_cwd, false, _deadline), do: {:ok, nil}
+  defp maybe_tree_binding(_cwd, false, _deadline, _opts), do: {:ok, nil}
 
-  defp maybe_tree_binding(cwd, true, deadline_ms) do
-    committable_tree_binding(cwd, deadline_ms: deadline_ms)
+  defp maybe_tree_binding(cwd, true, deadline_ms, opts) when is_list(opts) do
+    include_paths? = Keyword.get(opts, :include_paths, false) == true
+
+    capture_opts =
+      [deadline_ms: deadline_ms]
+      |> Keyword.put(:include_paths, include_paths?)
+
+    if include_paths? do
+      do_committable_tree_capture(cwd, capture_opts)
+    else
+      case do_committable_tree_capture(cwd, capture_opts) do
+        {:ok, %{head: head, tree_oid: tree_oid}} ->
+          {:ok, %{head: head, tree_oid: tree_oid}}
+
+        other ->
+          other
+      end
+    end
   end
 
   defp assert_tree_stable(nil, nil), do: :ok
@@ -2227,6 +2303,206 @@ defmodule Arbor.Actions.Mix do
        do: :ok
 
   defp assert_tree_stable(_before, _after), do: {:error, :validation_tree_mutated}
+
+  # Publish the attested source-inventory into the owner-issued runner directory
+  # before candidate code starts. Existing regular file must be byte-identical.
+  defp publish_or_verify_source_inventory(_prepared, nil, _opts), do: {:ok, nil}
+
+  defp publish_or_verify_source_inventory(_prepared, binding, opts)
+       when is_map(binding) and is_list(opts) do
+    paths = Map.get(binding, :paths)
+
+    if not is_list(paths) do
+      {:error, :source_inventory_paths_missing}
+    else
+      resource = Keyword.get(opts, :validation_resource)
+      revision = Keyword.get(opts, :validation_revision, :candidate)
+
+      with {:ok, revision_paths} <- revision_private_paths(resource, revision),
+           {:ok, inventory} <- SourceInventory.build(binding.tree_oid, paths),
+           {:ok, bytes} <- SourceInventory.encode(inventory),
+           host_path = Path.join(revision_paths.runner_dir_path, @source_inventory_basename),
+           :ok <- write_or_verify_source_inventory(host_path, bytes) do
+        {:ok,
+         %{
+           paths_sha256: SourceInventory.paths_sha256(inventory),
+           path_count: SourceInventory.path_count(inventory)
+         }}
+      else
+        {:error, reason} -> {:error, reason}
+        _ -> {:error, :source_inventory_publish_failed}
+      end
+    end
+  end
+
+  defp publish_or_verify_source_inventory(_, _, _),
+    do: {:error, :source_inventory_publish_failed}
+
+  # Publish is first-writer-wins: never rename/replace over an existing target.
+  # Absent → exclusive temp (unique name) + hard-link create-if-absent (fails
+  # EEXIST without clobber). Present / raced EEXIST → re-lstat regular +
+  # byte-identical only.
+  defp write_or_verify_source_inventory(host_path, expected_bytes)
+       when is_binary(host_path) and is_binary(expected_bytes) do
+    case File.lstat(host_path) do
+      {:error, :enoent} ->
+        # Deterministic TOCTOU seam: after ENOENT is observed, before any
+        # create-if-absent install of the target name.
+        :ok = maybe_source_inventory_after_enoent_hook(host_path, expected_bytes)
+        atomic_create_source_inventory(host_path, expected_bytes)
+
+      {:ok, %File.Stat{type: :regular}} ->
+        verify_existing_source_inventory(host_path, expected_bytes)
+
+      {:ok, %File.Stat{type: _other}} ->
+        {:error, :source_inventory_unsafe_shape}
+
+      {:error, reason} ->
+        {:error, {:source_inventory_publish_failed, reason}}
+    end
+  end
+
+  defp write_or_verify_source_inventory(_, _), do: {:error, :source_inventory_publish_failed}
+
+  # Test-only process-local seam for the enoent→create TOCTOU window.
+  # Mirrors tree-binding race hooks: Process dictionary only, never Application env.
+  defp maybe_source_inventory_after_enoent_hook(host_path, expected_bytes)
+       when is_binary(host_path) and is_binary(expected_bytes) do
+    case Process.get({__MODULE__, :source_inventory_after_enoent_hook}) do
+      fun when is_function(fun, 2) ->
+        _ = fun.(host_path, expected_bytes)
+        :ok
+
+      fun when is_function(fun, 1) ->
+        _ = fun.(host_path)
+        :ok
+
+      _ ->
+        :ok
+    end
+  end
+
+  @doc false
+  def __test_set_source_inventory_after_enoent_hook__(fun)
+      when is_function(fun, 1) or is_function(fun, 2) do
+    Process.put({__MODULE__, :source_inventory_after_enoent_hook}, fun)
+    :ok
+  end
+
+  def __test_set_source_inventory_after_enoent_hook__(nil) do
+    Process.delete({__MODULE__, :source_inventory_after_enoent_hook})
+    :ok
+  end
+
+  defp atomic_create_source_inventory(host_path, bytes)
+       when is_binary(host_path) and is_binary(bytes) do
+    dir = Path.dirname(host_path)
+    token = Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
+    # Unique create-staging name under the owner dir — never a fixed removable
+    # path (e.g. basename.tmp) that could collide with or delete another writer.
+    temporary =
+      Path.join(dir, @source_inventory_basename <> ".create." <> token)
+
+    case File.mkdir_p(dir) do
+      :ok ->
+        case File.write(temporary, bytes, [:binary, :exclusive]) do
+          :ok ->
+            # We exclusively created `temporary` — only then may we remove it.
+            create_link_owned_staging(temporary, host_path, bytes)
+
+          {:error, :eexist} ->
+            # Staging-name collision: do not rm — we do not own that path.
+            {:error, {:source_inventory_publish_failed, :staging_collision}}
+
+          {:error, reason} ->
+            {:error, {:source_inventory_publish_failed, reason}}
+        end
+
+      {:error, reason} ->
+        {:error, {:source_inventory_publish_failed, reason}}
+    end
+  end
+
+  defp create_link_owned_staging(temporary, host_path, bytes)
+       when is_binary(temporary) and is_binary(host_path) and is_binary(bytes) do
+    result =
+      case File.chmod(temporary, 0o600) do
+        :ok ->
+          case File.ln(temporary, host_path) do
+            :ok ->
+              # Hard link installed the inode at host_path without replacing any
+              # pre-existing name. Drop the staging name; target retains data.
+              :linked
+
+            {:error, :eexist} ->
+              # Race: another owner won first-writer. Never replace; re-admit.
+              :exists
+
+            {:error, reason} ->
+              {:error, {:source_inventory_publish_failed, reason}}
+          end
+
+        {:error, reason} ->
+          {:error, {:source_inventory_publish_failed, reason}}
+      end
+
+    # Always drop our owned staging name (whether link won or lost).
+    _ = File.rm(temporary)
+
+    case result do
+      :linked -> verify_existing_source_inventory(host_path, bytes)
+      :exists -> verify_existing_source_inventory(host_path, bytes)
+      {:error, _} = error -> error
+    end
+  end
+
+  defp verify_existing_source_inventory(host_path, expected_bytes)
+       when is_binary(host_path) and is_binary(expected_bytes) do
+    case File.lstat(host_path) do
+      {:ok, %File.Stat{type: :regular, size: size}} ->
+        cond do
+          size != byte_size(expected_bytes) ->
+            {:error, :source_inventory_mismatch}
+
+          true ->
+            case File.read(host_path) do
+              {:ok, ^expected_bytes} ->
+                :ok
+
+              {:ok, _other} ->
+                {:error, :source_inventory_mismatch}
+
+              {:error, reason} ->
+                {:error, {:source_inventory_publish_failed, reason}}
+            end
+        end
+
+      {:ok, %File.Stat{type: _other}} ->
+        {:error, :source_inventory_unsafe_shape}
+
+      {:error, :enoent} ->
+        # Vanished between race observation and re-lstat — fail closed (no retry
+        # loop that could clobber a concurrent first writer).
+        {:error, :source_inventory_publish_failed}
+
+      {:error, reason} ->
+        {:error, {:source_inventory_publish_failed, reason}}
+    end
+  end
+
+  defp maybe_put_inventory_evidence(result, nil), do: result
+
+  defp maybe_put_inventory_evidence(result, %{paths_sha256: digest, path_count: count})
+       when is_map(result) and is_binary(digest) and is_integer(count) do
+    result
+    |> Map.put(:source_inventory_paths_sha256, digest)
+    |> Map.put(:source_inventory_path_count, count)
+    # Never include the full path list in normal validation evidence.
+    |> Map.delete(:paths)
+    |> Map.delete(:source_inventory_paths)
+  end
+
+  defp maybe_put_inventory_evidence(result, _), do: result
 
   defp resolve_git_common_dir(path, deadline_ms) do
     with {:ok, output} <-
@@ -2581,6 +2857,10 @@ defmodule Arbor.Actions.Mix do
   defp enforce_module_owned_keys(env, roots, resource_paths) do
     Map.merge(env, %{
       "ARBOR_MIX_CONTAINED" => "1",
+      # Fixed guest path only — never derived from caller opts or host paths.
+      # Shell plan also sets this; Actions sets it so any contained child that
+      # inherits module-owned env can resolve the attested inventory.
+      "ARBOR_SOURCE_INVENTORY_PATH" => @guest_source_inventory_path,
       "ARBOR_ERLANG_ROOT" => roots.erlang_root,
       "ARBOR_ELIXIR_ROOT" => roots.elixir_root,
       "PATH" => contained_path(roots),

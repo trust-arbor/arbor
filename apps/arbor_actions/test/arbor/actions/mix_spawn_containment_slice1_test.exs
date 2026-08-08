@@ -431,6 +431,10 @@ defmodule Arbor.Actions.MixSpawnContainmentSlice1Test do
 
                  assert env["MIX_ENV"] == "test"
                  assert env["ARBOR_MIX_CONTAINED"] == "1"
+
+                 assert env["ARBOR_SOURCE_INVENTORY_PATH"] ==
+                          "/arbor/validation/runner/source_inventory.json"
+
                  assert env["HOME"] == resource.candidate_home_path
                  assert env["TMPDIR"] == resource.candidate_tmp_path
                  assert env["MIX_BUILD_PATH"] == resource.candidate_build_path
@@ -1504,6 +1508,236 @@ defmodule Arbor.Actions.MixSpawnContainmentSlice1Test do
     end
   end
 
+  describe "attested source-inventory publication" do
+    test "first pre-spawn binding publishes inventory; reuse is idempotent; evidence omits paths",
+         %{tmp_dir: tmp_dir} do
+      fixture = leased_fixture(tmp_dir)
+      create_tiny_project(fixture.lease.worktree_path)
+      # Non-ignored untracked file must appear in inventory.
+      File.write!(Path.join(fixture.lease.worktree_path, "untracked_note.txt"), "note\n")
+      git!(fixture.lease.worktree_path, ["add", "-A"])
+      git!(fixture.lease.worktree_path, ["commit", "-m", "base project"])
+      File.write!(Path.join(fixture.lease.worktree_path, "extra_untracked.txt"), "extra\n")
+
+      MixAction.with_validation_resource(
+        fixture.lease.workspace_id,
+        fixture.context,
+        fn resource ->
+          assert {:ok, inv} =
+                   MixAction.committable_source_inventory(resource.candidate_path)
+
+          assert is_binary(inv.tree_oid)
+          assert is_list(inv.paths)
+          assert "extra_untracked.txt" in inv.paths
+
+          host_manifest =
+            Path.join(resource.candidate_runner_dir_path, MixAction.source_inventory_basename())
+
+          refute File.exists?(host_manifest)
+
+          assert {:ok, result} =
+                   MixAction.run_mix(resource.candidate_path, ["compile"],
+                     validation_resource: resource,
+                     bind_committable_tree: true
+                   )
+
+          assert result.validated_tree_oid == inv.tree_oid
+          assert is_binary(result.source_inventory_paths_sha256)
+          assert is_integer(result.source_inventory_path_count)
+          refute Map.has_key?(result, :paths)
+          refute Map.has_key?(result, :source_inventory_paths)
+
+          assert {:ok, %File.Stat{type: :regular}} = File.lstat(host_manifest)
+          first_bytes = File.read!(host_manifest)
+
+          assert {:ok, decoded} = Jason.decode(first_bytes)
+          assert {:ok, admitted} = Arbor.Contracts.Coding.SourceInventory.new(decoded)
+          assert admitted.tree_oid == inv.tree_oid
+          assert "extra_untracked.txt" in admitted.paths
+
+          # Unchanged tree: second stage reuses byte-identical file (no clobber).
+          assert {:ok, result2} =
+                   MixAction.run_mix(resource.candidate_path, ["compile"],
+                     validation_resource: resource,
+                     bind_committable_tree: true
+                   )
+
+          assert result2.validated_tree_oid == inv.tree_oid
+          assert File.read!(host_manifest) == first_bytes
+          {:ok, :ok}
+        end
+      )
+    end
+
+    test "changed-tree reuse fails before spawn without clobbering", %{tmp_dir: tmp_dir} do
+      fixture = leased_fixture(tmp_dir)
+      create_tiny_project(fixture.lease.worktree_path)
+      git!(fixture.lease.worktree_path, ["add", "-A"])
+      git!(fixture.lease.worktree_path, ["commit", "-m", "base project"])
+
+      MixAction.with_validation_resource(
+        fixture.lease.workspace_id,
+        fixture.context,
+        fn resource ->
+          assert {:ok, _} =
+                   MixAction.run_mix(resource.candidate_path, ["compile"],
+                     validation_resource: resource,
+                     bind_committable_tree: true
+                   )
+
+          host_manifest =
+            Path.join(resource.candidate_runner_dir_path, MixAction.source_inventory_basename())
+
+          first_bytes = File.read!(host_manifest)
+
+          File.write!(
+            Path.join(resource.candidate_path, "lib/tiny.ex"),
+            "defmodule Tiny do\n  def hi, do: :changed\nend\n"
+          )
+
+          Arbor.Actions.TestMixShell.clear_last_invocation()
+
+          assert {:error, reason} =
+                   MixAction.run_mix(resource.candidate_path, ["compile"],
+                     validation_resource: resource,
+                     bind_committable_tree: true
+                   )
+
+          assert reason == ":source_inventory_mismatch" or reason =~ "source_inventory_mismatch"
+          assert is_nil(Arbor.Actions.TestMixShell.last_invocation())
+          assert File.read!(host_manifest) == first_bytes
+          {:ok, :ok}
+        end
+      )
+    end
+
+    test "unsafe shape at inventory path fails closed before spawn", %{tmp_dir: tmp_dir} do
+      fixture = leased_fixture(tmp_dir)
+      create_tiny_project(fixture.lease.worktree_path)
+      git!(fixture.lease.worktree_path, ["add", "-A"])
+      git!(fixture.lease.worktree_path, ["commit", "-m", "base project"])
+
+      MixAction.with_validation_resource(
+        fixture.lease.workspace_id,
+        fixture.context,
+        fn resource ->
+          host_manifest =
+            Path.join(resource.candidate_runner_dir_path, MixAction.source_inventory_basename())
+
+          # Place a directory where the regular-file inventory must live.
+          File.mkdir_p!(host_manifest)
+
+          Arbor.Actions.TestMixShell.clear_last_invocation()
+
+          assert {:error, reason} =
+                   MixAction.run_mix(resource.candidate_path, ["compile"],
+                     validation_resource: resource,
+                     bind_committable_tree: true
+                   )
+
+          assert reason == ":source_inventory_unsafe_shape" or
+                   reason =~ "source_inventory_unsafe_shape"
+
+          assert is_nil(Arbor.Actions.TestMixShell.last_invocation())
+          {:ok, :ok}
+        end
+      )
+    end
+
+    test "security regression: pre-existing mismatched inventory is not clobbered and spawn is skipped",
+         %{tmp_dir: tmp_dir} do
+      fixture = leased_fixture(tmp_dir)
+      create_tiny_project(fixture.lease.worktree_path)
+      git!(fixture.lease.worktree_path, ["add", "-A"])
+      git!(fixture.lease.worktree_path, ["commit", "-m", "base project"])
+
+      MixAction.with_validation_resource(
+        fixture.lease.workspace_id,
+        fixture.context,
+        fn resource ->
+          host_manifest =
+            Path.join(resource.candidate_runner_dir_path, MixAction.source_inventory_basename())
+
+          # Present-branch coverage: file already there before publish starts.
+          planted = "planted-mismatched-source-inventory-v1\n"
+          File.write!(host_manifest, planted)
+          assert {:ok, %File.Stat{type: :regular}} = File.lstat(host_manifest)
+
+          Arbor.Actions.TestMixShell.clear_last_invocation()
+
+          assert {:error, reason} =
+                   MixAction.run_mix(resource.candidate_path, ["compile"],
+                     validation_resource: resource,
+                     bind_committable_tree: true
+                   )
+
+          assert reason == ":source_inventory_mismatch" or reason =~ "source_inventory_mismatch"
+          assert is_nil(Arbor.Actions.TestMixShell.last_invocation())
+          assert File.read!(host_manifest) == planted
+          assert {:ok, %File.Stat{type: :regular}} = File.lstat(host_manifest)
+          {:ok, :ok}
+        end
+      )
+    end
+
+    test "security regression: enoent-to-create TOCTOU does not clobber a raced first writer",
+         %{tmp_dir: tmp_dir} do
+      fixture = leased_fixture(tmp_dir)
+      create_tiny_project(fixture.lease.worktree_path)
+      git!(fixture.lease.worktree_path, ["add", "-A"])
+      git!(fixture.lease.worktree_path, ["commit", "-m", "base project"])
+
+      MixAction.with_validation_resource(
+        fixture.lease.workspace_id,
+        fixture.context,
+        fn resource ->
+          host_manifest =
+            Path.join(resource.candidate_runner_dir_path, MixAction.source_inventory_basename())
+
+          # Target must be absent at the initial lstat (ENOENT branch).
+          refute File.exists?(host_manifest)
+
+          planted = "raced-first-writer-source-inventory-v1\n"
+          test_pid = self()
+
+          # Process-local seam (same pattern as tree-binding race hooks): plant
+          # the mismatched target only AFTER publish observes ENOENT and BEFORE
+          # create-if-absent installs the name. A rename-based publisher would
+          # clobber these bytes; hard-link create-if-absent must fail closed.
+          MixAction.__test_set_source_inventory_after_enoent_hook__(fn path, _expected ->
+            assert path == host_manifest
+            send(test_pid, {:after_enoent, path})
+            File.write!(path, planted)
+            assert {:ok, %File.Stat{type: :regular}} = File.lstat(path)
+            :ok
+          end)
+
+          Arbor.Actions.TestMixShell.clear_last_invocation()
+
+          try do
+            assert {:error, reason} =
+                     MixAction.run_mix(resource.candidate_path, ["compile"],
+                       validation_resource: resource,
+                       bind_committable_tree: true
+                     )
+
+            assert reason == ":source_inventory_mismatch" or
+                     reason =~ "source_inventory_mismatch"
+
+            assert_received {:after_enoent, ^host_manifest}
+            assert is_nil(Arbor.Actions.TestMixShell.last_invocation())
+            # Exact planted first-writer bytes survive — no rename clobber.
+            assert File.read!(host_manifest) == planted
+            assert {:ok, %File.Stat{type: :regular}} = File.lstat(host_manifest)
+            {:ok, :ok}
+          after
+            MixAction.__test_set_source_inventory_after_enoent_hook__(nil)
+          end
+        end
+      )
+    end
+  end
+
   test "security regression: clean filter never runs during tree binding", %{tmp_dir: tmp_dir} do
     fixture = leased_fixture(tmp_dir)
     wt = fixture.lease.worktree_path
@@ -1898,6 +2132,20 @@ defmodule Arbor.Actions.MixSpawnContainmentSlice1Test do
     assert binding.head == worktree_head
     assert binding.head == git!(linked, ["rev-parse", "HEAD"])
     refute binding.head == git!(main, ["rev-parse", "HEAD"])
+
+    # Inventory variant returns the same tree binding plus post-skip paths.
+    assert {:ok, inventory} = MixAction.committable_source_inventory(linked)
+    assert inventory.head == binding.head
+    assert inventory.tree_oid == binding.tree_oid
+    assert is_list(inventory.paths)
+
+    assert "lib/tiny.ex" in inventory.paths or
+             Enum.any?(inventory.paths, &String.ends_with?(&1, "tiny.ex"))
+
+    assert {:ok, admitted} =
+             Arbor.Contracts.Coding.SourceInventory.build(inventory.tree_oid, inventory.paths)
+
+    assert {:ok, _bytes} = Arbor.Contracts.Coding.SourceInventory.encode(admitted)
   end
 
   test "security regression: symlink swap during capture fails closed deterministically", %{

@@ -95,12 +95,13 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
 
   # Fixed validation runner/result guest mounts (sibling dirs under /arbor/validation).
   # Host revision runtime parents remain unprojected; only these typed children mount.
-  # Owner-issued basenames are exact: runner.exs and result.etf.
+  # Owner-issued basenames are exact: runner.exs, source_inventory.json, and result.etf.
   # (reviewed_regression_evidence is an evidence_type value, not a filesystem name.)
   @guest_validation_runner_dir "/arbor/validation/runner"
   @guest_validation_result_dir "/arbor/validation/result"
   @validation_runner_script_basename "runner.exs"
   @validation_result_basename "result.etf"
+  @source_inventory_basename "source_inventory.json"
   @guest_validation_runner_script Path.join(
                                     @guest_validation_runner_dir,
                                     @validation_runner_script_basename
@@ -109,6 +110,12 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
                                   @guest_validation_result_dir,
                                   @validation_result_basename
                                 )
+  # Fixed guest path for the owner-published source inventory. Caller input
+  # cannot select this path; it always rides the RO validation_runner mount.
+  @guest_source_inventory_path Path.join(
+                                 @guest_validation_runner_dir,
+                                 @source_inventory_basename
+                               )
 
   # Required host bind projections and their fixed guest targets / modes.
   # Deliberately excludes host :tmp — guest /tmp is a private tmpfs
@@ -1299,7 +1306,8 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
 
   defp build_env(mix_env) do
     # Closed environment only. Guest paths are fixed; MIX_ENV is the sole
-    # caller-selected value (already allowlisted).
+    # caller-selected value (already allowlisted). ARBOR_SOURCE_INVENTORY_PATH
+    # is fixed and never caller-overridable.
     [
       {"HOME", "/arbor/home"},
       {"TMPDIR", @guest_tmp_path},
@@ -1309,6 +1317,7 @@ defmodule Arbor.Shell.AppleContainerPlanCore do
       {"MIX_ARCHIVES", @guest_mix_archives},
       {"ELIXIR_MAKE_CACHE_DIR", @guest_elixir_make_cache},
       {"ARBOR_MIX_CONTAINED", "1"},
+      {"ARBOR_SOURCE_INVENTORY_PATH", @guest_source_inventory_path},
       {"ARBOR_ERLANG_ROOT", @guest_erlang_root},
       {"ARBOR_ELIXIR_ROOT", @guest_elixir_root},
       {"MIX_ENV", mix_env}
