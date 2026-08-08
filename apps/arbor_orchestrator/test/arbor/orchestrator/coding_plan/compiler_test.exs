@@ -1040,8 +1040,10 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
       refute Map.has_key?(graph.nodes, dormant)
     end
 
-    assert node_attrs(graph, "validate")["action"] == "mix_compile"
-    assert node_attrs(graph, "validate")["param.warnings_as_errors"] == true
+    assert node_attrs(graph, "validate")["action"] == "coding_reviewed_validation"
+    assert node_attrs(graph, "validate")["param.pinned_action"] == "mix_compile"
+    assert node_attrs(graph, "validate")["param.pinned_profile_id"] == "default"
+    assert is_binary(node_attrs(graph, "validate")["param.pinned_params_json"])
     assert node_attrs(graph, "review_change")["action"] == "council_review_change"
 
     assert node_attrs(graph, "open_design_checkpoint")
@@ -1173,6 +1175,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert graph.attrs["coding_plan_action_catalog_digest"] ==
              compilation.action_catalog_digest
 
+    assert "coding_reviewed_validation" in compilation.manifest["action_names"]
     assert "mix_compile" in compilation.manifest["action_names"]
     assert "council_review_change" in compilation.manifest["action_names"]
     refute "mix_test" in compilation.manifest["action_names"]
@@ -1213,6 +1216,12 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert "arbor://action/coding/review/submit" in compilation.execution_manifest[
              "capability_uris"
            ]
+
+    assert Enum.any?(compilation.execution_manifest["actions"], fn binding ->
+             binding["name"] == "coding_reviewed_validation" and
+               binding["module"] == Atom.to_string(Arbor.Actions.Coding.ReviewedValidation) and
+               binding["beam_sha256"] =~ ~r/^[0-9a-f]{64}$/
+           end)
 
     assert Enum.any?(compilation.execution_manifest["actions"], fn binding ->
              binding["name"] == "mix_compile" and
@@ -1296,10 +1305,42 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert {:ok, compilation} = compile(plan!(), ctx, weakened_template)
     validate = node_attrs(parse!(compilation.dot_source), "validate")
 
-    assert validate["action"] == "mix_compile"
+    assert validate["action"] == "coding_reviewed_validation"
     assert validate["context_keys"] == "path,workspace_id"
-    assert validate["param.warnings_as_errors"] == true
-    assert validate["param.timeout"] == 900_000
+    assert validate["param.pinned_action"] == "mix_compile"
+    assert {:ok, pinned} = Jason.decode(validate["param.pinned_params_json"])
+    assert pinned["warnings_as_errors"] == true
+    assert pinned["timeout"] == 900_000
+  end
+
+  test "security regression: validate node action must match compiled ValidationProgram", ctx do
+    # Forged unrelated action is rejected — never rewritten from arbitrary nonblank names.
+    forged =
+      String.replace(
+        ctx.template_source,
+        ~s(action="coding_reviewed_validation"),
+        ~s(action="coding_reviewed_commit"),
+        global: false
+      )
+
+    assert {:error,
+            {:unexpected_template_node, "validate",
+             {:invalid_validation_node_action, "coding_reviewed_commit", "mix_compile"}}} =
+             compile(plan!(), ctx, forged)
+
+    # Underlying profile action still admitted and rewritten to the reviewed gate.
+    underlying =
+      String.replace(
+        ctx.template_source,
+        ~s(action="coding_reviewed_validation"),
+        ~s(action="mix_compile"),
+        global: false
+      )
+
+    assert {:ok, compilation} = compile(plan!(), ctx, underlying)
+    validate = node_attrs(parse!(compilation.dot_source), "validate")
+    assert validate["action"] == "coding_reviewed_validation"
+    assert validate["param.pinned_action"] == "mix_compile"
   end
 
   test "security regression compiles exact reviewed-tree bindings with a plan-bounded timeout",
@@ -2012,7 +2053,8 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert {:ok, compilation} = compile(injected_task, ctx)
     graph = parse!(compilation.dot_source)
 
-    assert node_attrs(graph, "validate")["action"] == "mix_compile"
+    assert node_attrs(graph, "validate")["action"] == "coding_reviewed_validation"
+    assert node_attrs(graph, "validate")["param.pinned_action"] == "mix_compile"
     assert node_attrs(graph, "review_change")["action"] == "council_review_change"
     assert compilation.initial_values["task"] == injected_task.task
     refute Map.has_key?(compilation.initial_values, "principal_id")

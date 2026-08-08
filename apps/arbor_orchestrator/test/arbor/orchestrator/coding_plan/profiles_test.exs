@@ -574,7 +574,9 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
       assert :ok = Profiles.validate_requirements(graph, "default")
 
       {mix_node_id, _node} =
-        Enum.find(graph.nodes, fn {_id, node} -> node.attrs["action"] == "mix_compile" end)
+        Enum.find(graph.nodes, fn {_id, node} ->
+          node.attrs["action"] == "mix_compile"
+        end)
 
       graph_without_compile = %{graph | nodes: Map.delete(graph.nodes, mix_node_id)}
 

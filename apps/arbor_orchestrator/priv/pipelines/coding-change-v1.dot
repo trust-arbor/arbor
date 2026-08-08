@@ -667,14 +667,81 @@ digraph CodingChangeV1 {
   ]
 
   // After a successful worker turn, Arbor owns outcome authority: require an
-  // explicit trusted stop_reason=end_turn, hoist the provider session id for
-  // continuity, then inspect the workspace. The compatibility JSON object is
-  // advisory evidence only; it never decides the pipeline outcome.
+  // explicit trusted stop_reason=end_turn, optionally parse advisory terminal
+  // JSON (implement path only), then inspect the workspace. The compatibility
+  // JSON object is advisory evidence only; it never decides the pipeline outcome.
 
   check_worker_stop_reason [
     type="branch",
     shape=diamond,
     fan_out="false"
+  ]
+
+  // Design turns skip the implement terminal JSON gate (they use
+  // coding_design_envelope_parse). Missing/non-design worker_phase parses.
+  route_after_end_turn [
+    type="branch",
+    shape=diamond,
+    fan_out="false"
+  ]
+
+  parse_worker_terminal [
+    type="exec",
+    target="action",
+    action="coding_worker_terminal_parse",
+    context_keys="worker_msg.text",
+    output_prefix="worker_terminal",
+    max_retries="0"
+  ]
+
+  route_worker_terminal_valid [
+    type="branch",
+    shape=diamond,
+    fan_out="false"
+  ]
+
+  check_protocol_retry_budget [
+    type="branch",
+    shape=diamond,
+    fan_out="false"
+  ]
+
+  inc_protocol_retry_count [
+    type="transform",
+    transform="increment",
+    source_key="protocol_retry_count",
+    output_key="protocol_retry_count"
+  ]
+
+  // Format-only repair: never re-issues the implementation task body.
+  build_protocol_format_repair_prompt [
+    type="transform",
+    transform="constant",
+    expression="FORMAT REPAIR ONLY. Do not edit files and do not re-implement the task. Your previous response was not valid protocol JSON. Respond with ONLY one valid JSON object and no prose or Markdown: {\"status\":\"implemented\",\"summary\":\"what changed\"} or {\"status\":\"declined\",\"summary\":\"why no change was made\"}. Optional summary must be a string. Arbor treats this object as advisory only and decides the outcome from the owned workspace.",
+    output_key="prompt"
+  ]
+
+  hoist_worker_terminal_status [
+    type="transform",
+    transform="identity",
+    source_key="worker_terminal.status",
+    output_key="worker_terminal_status"
+  ]
+
+  hoist_worker_terminal_summary [
+    type="transform",
+    transform="identity",
+    source_key="worker_terminal.summary",
+    output_key="worker_terminal_summary"
+  ]
+
+  // Evidence already under worker_terminal.* after repeated invalid parse;
+  // this marker keeps a stable node for preflight dominance into inspect.
+  mark_protocol_invalid_evidence [
+    type="transform",
+    transform="identity",
+    source_key="worker_terminal.protocol_error",
+    output_key="worker_terminal_protocol_error"
   ]
 
   // Deterministic provider rejections are successful delivery-attempt
@@ -934,18 +1001,65 @@ digraph CodingChangeV1 {
     output_key="validation_observed_at"
   ]
 
+  // Compiler rewrites this node to coding_reviewed_validation with an
+  // immutable pin of the profile's underlying action + static params.
+  // Packaged defaults pin mix_compile for direct template execution.
   validate [
     type="exec",
     target="action",
-    action="mix_compile",
+    action="coding_reviewed_validation",
     context_keys="path,workspace_id",
-    param.warnings_as_errors="true",
+    param.pinned_action="mix_compile",
+    param.pinned_profile_id="default",
+    param.pinned_params_json="{\"warnings_as_errors\":true,\"timeout\":300000}",
     timeout_budget.deadline_key="session.run_deadline_unix_ms",
     timeout_budget.cap_key="coding_budget.validation_ms",
     timeout_budget.reserve_key="coding_budget.validation_completion_reserve_ms",
     timeout_budget.param="timeout",
     output_prefix="validation",
     max_retries="0"
+  ]
+
+  // Structured approval outcomes from coding_reviewed_validation.
+  route_validation_interaction [
+    type="branch",
+    shape=diamond,
+    fan_out="false"
+  ]
+
+  hoist_validation_approval_request_id [
+    type="transform",
+    transform="identity",
+    source_key="validation.request_id",
+    output_key="approval_request_id"
+  ]
+
+  hoist_validation_approval_note [
+    type="transform",
+    transform="identity",
+    source_key="validation.note",
+    output_key="approval_note"
+  ]
+
+  hoist_validation_approval_request_id_denied [
+    type="transform",
+    transform="identity",
+    source_key="validation.request_id",
+    output_key="approval_request_id"
+  ]
+
+  hoist_validation_approval_note_denied [
+    type="transform",
+    transform="identity",
+    source_key="validation.note",
+    output_key="approval_note"
+  ]
+
+  error_validation_interaction_invalid [
+    type="transform",
+    transform="constant",
+    expression="validation_interaction_invalid",
+    output_key="error"
   ]
 
   check_validation_passed [
@@ -1002,7 +1116,7 @@ digraph CodingChangeV1 {
     type="transform",
     transform="template",
     source_key="task",
-    expression="Validation failed after your previous edit. Task: {value}. Structured validation feedback JSON: {ctx.validation.feedback_json}. Fix the issues in the same worktree. For compatibility with archived graphs, respond with ONLY one valid JSON object and no prose or Markdown: {\"status\":\"implemented\",\"summary\":\"what changed\"} or {\"status\":\"declined\",\"summary\":\"why no change was made\"}. Arbor treats this object as advisory only and decides the outcome from the owned workspace.",
+    expression="Validation rework required. Task: {value}. Structured validation feedback JSON (may be empty on operator approval rework): {ctx.validation.feedback_json}. Operator approval note (when present): {ctx.approval_note}. Approval request id (when present): {ctx.approval_request_id}. Fix the issues in the same worktree without fabricating missing validator evidence. For compatibility with archived graphs, respond with ONLY one valid JSON object and no prose or Markdown: {\"status\":\"implemented\",\"summary\":\"what changed\"} or {\"status\":\"declined\",\"summary\":\"why no change was made\"}. Arbor treats this object as advisory only and decides the outcome from the owned workspace.",
     output_key="prompt"
   ]
 
@@ -1991,15 +2105,34 @@ digraph CodingChangeV1 {
   status_pipeline_error_then_close -> close_worker
 
   // Owner-observed outcome: successful turns require trusted end_turn, then
-  // inspect the workspace. Worker prose never gates validation/review/commit
-  // vs no_changes.
+  // (implement only) advisory terminal JSON check, then inspect. Worker prose
+  // never gates validation/review/commit vs no_changes.
   implement -> check_worker_delivery_status [condition="outcome=success"]
   check_worker_delivery_status -> hoist_worker_failure_reason [condition="context.worker_msg.delivery_status=provider_account_exhausted"]
   check_worker_delivery_status -> hoist_worker_provider_session_id_from_message
   hoist_worker_failure_reason -> error_worker_provider_account_exhausted
   hoist_worker_provider_session_id_from_message -> check_worker_stop_reason
-  check_worker_stop_reason -> inspect_workspace [condition="context.worker_msg.stop_reason=end_turn"]
+  check_worker_stop_reason -> route_after_end_turn [condition="context.worker_msg.stop_reason=end_turn"]
   check_worker_stop_reason -> error_worker_stop_reason_not_end_turn
+
+  // Design phase skips implement terminal parse; all other phases parse then inspect.
+  route_after_end_turn -> inspect_workspace [condition="context.worker_phase=design"]
+  route_after_end_turn -> parse_worker_terminal
+
+  parse_worker_terminal -> status_pipeline_error_then_close [condition="outcome=fail"]
+  parse_worker_terminal -> route_worker_terminal_valid [condition="outcome=success"]
+  route_worker_terminal_valid -> hoist_worker_terminal_status [condition="context.worker_terminal.valid=true"]
+  route_worker_terminal_valid -> check_protocol_retry_budget [condition="context.worker_terminal.valid=false"]
+  hoist_worker_terminal_status -> hoist_worker_terminal_summary
+  hoist_worker_terminal_summary -> inspect_workspace
+
+  // At most one same-session format-only retry; never replays implementation.
+  // Baseline fingerprint is preserved (no capture_pre_turn_workspace here).
+  check_protocol_retry_budget -> mark_protocol_invalid_evidence [condition="context.protocol_retry_count>=1"]
+  check_protocol_retry_budget -> inc_protocol_retry_count [condition="context.protocol_retry_count<1"]
+  mark_protocol_invalid_evidence -> inspect_workspace
+  inc_protocol_retry_count -> build_protocol_format_repair_prompt
+  build_protocol_format_repair_prompt -> implement
 
   // Dormant CodingPlan v2 design-checkpoint subgraph. Direct plans retain the
   // existing hoist->implementation and inspection->progress routes. The two
@@ -2154,10 +2287,24 @@ digraph CodingChangeV1 {
   hoist_validation_observed_at -> status_pipeline_error_then_close [condition="outcome=fail"]
   hoist_validation_observed_at -> validate [condition="outcome=success"]
 
-  // Hard validation action error (not soft passed=false)
+  // Hard validation action error (not soft passed=false / structured approval)
   validate -> status_validation_failed [condition="outcome=fail"]
-  validate -> status_validation_capacity_exceeded [condition="outcome=success&&context.validation.reason=validation_capacity_exceeded"]
-  validate -> check_validation_passed [condition="outcome=success&&context.validation.reason!=validation_capacity_exceeded"]
+  validate -> route_validation_interaction [condition="outcome=success"]
+
+  // Structured approval outcomes: approve/unattended continue; rework enters
+  // the existing validation-rework path without fabricating validator evidence;
+  // deny/unknown fail closed.
+  route_validation_interaction -> status_validation_capacity_exceeded [condition="context.validation.interaction_outcome=\"\"&&context.validation.reason=validation_capacity_exceeded"]
+  route_validation_interaction -> check_validation_passed [condition="context.validation.interaction_outcome=\"\"&&context.validation.reason!=validation_capacity_exceeded"]
+  route_validation_interaction -> hoist_validation_approval_request_id [condition="context.validation.interaction_outcome=rework"]
+  route_validation_interaction -> hoist_validation_approval_request_id_denied [condition="context.validation.interaction_outcome=denied"]
+  route_validation_interaction -> error_validation_interaction_invalid
+
+  hoist_validation_approval_request_id -> hoist_validation_approval_note
+  hoist_validation_approval_note -> check_validation_category_budget
+  hoist_validation_approval_request_id_denied -> hoist_validation_approval_note_denied
+  hoist_validation_approval_note_denied -> status_validation_failed
+  error_validation_interaction_invalid -> status_pipeline_error_then_close
 
   // Validation soft-fail: initiate at most one validation repair and never a
   // third total repair attempt.

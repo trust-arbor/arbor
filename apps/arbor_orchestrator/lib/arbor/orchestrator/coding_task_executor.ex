@@ -436,9 +436,11 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   - `{:error, term()}` — other operational errors. Retained by TaskStore as
     deferred for bounded retry.
 
-  Queued controls are durably accepted same-session follow-ups. Deferred or
-  operational results remain retryable so TaskStore retains the same control
-  id, while explicit unsupported/ambiguous outcomes are terminal.
+  Queued controls are durably accepted same-session follow-ups. AcpSession may
+  report internal `:deferred` acceptance while idle; this executor projects that
+  as `{:ok, :queued, :same_session_follow_up}` so TaskStore records ownership
+  once without spending initial-delivery retry budget. Operational errors remain
+  retryable; explicit unsupported/ambiguous outcomes are terminal.
   """
   @impl true
   @spec steer_task(String.t(), term(), map() | keyword()) ::
@@ -822,11 +824,14 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   defp adapt_managed_control_result({:ok, :queued, :same_session_follow_up}),
     do: {:ok, :queued, :same_session_follow_up}
 
+  # AcpSession accepts idle controls as :deferred under one control_id. Project
+  # that durable acceptance as TaskStore queued ownership so confirmation polls
+  # the same id instead of spending initial-delivery retry budget.
+  defp adapt_managed_control_result({:ok, :deferred, :same_session_follow_up}),
+    do: {:ok, :queued, :same_session_follow_up}
+
   defp adapt_managed_control_result({:ok, :delivered, :same_session_follow_up}),
     do: {:ok, :same_session_follow_up}
-
-  defp adapt_managed_control_result({:ok, :deferred, :same_session_follow_up}),
-    do: {:error, :deferred}
 
   defp adapt_managed_control_result({:error, {:not_ready, status}})
        when is_atom(status) or is_binary(status),

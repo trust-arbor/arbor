@@ -255,6 +255,9 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
         :queued ->
           {:ok, :queued, :next_stage}
 
+        :queued_same_session ->
+          {:ok, :queued, :same_session_follow_up}
+
         :unsupported ->
           {:error, :unsupported}
 
@@ -732,6 +735,63 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     assert_receive {:steer_task_called, "agent_1", delivered, _, _}
     assert delivered["control_id"] == control["control_id"]
     refute_receive {:steer_task_called, _, _, _, _}, 50
+  end
+
+  test "same_session_follow_up queued acceptance is once with same-id confirmation", %{
+    supervisor: supervisor
+  } do
+    # Simulates CodingTaskExecutor projecting AcpSession deferred acceptance as
+    # {:ok, :queued, :same_session_follow_up}: one ownership record, no initial
+    # delivery retry budget, confirmation reuses the same control_id.
+    store =
+      start_configured_steering_store(supervisor,
+        steer_retry_delay_ms: 10,
+        max_steer_retries: 3
+      )
+
+    Application.put_env(:arbor_agent, :task_store_test_steer, :queued_same_session)
+
+    assert {:ok, task_id} = TaskStore.dispatch("agent_1", "work", name: store)
+    assert_receive {:steering_executor_started, _pid, "agent_1", "work", _}
+
+    assert {:ok, control} = TaskStore.steer(task_id, "idle accept", name: store)
+    control_id = control["control_id"]
+    assert control["status"] == "queued"
+    assert control["delivery_mode"] == "same_session_follow_up"
+    assert control["delivered_at"] == nil
+    assert_receive {:steer_task_called, "agent_1", first_call, _, _}
+    assert first_call["control_id"] == control_id
+
+    state = :sys.get_state(store)
+    record = state.tasks[task_id]
+    assert MapSet.member?(record.accepted_control_ids, control_id)
+    # Initial-delivery retry budget is unused for accepted queued ownership.
+    assert Map.get(record.control_retries, control_id) in [nil, 0]
+    assert length(record.controls) == 1
+
+    # Same-ID confirmation (scheduled or explicit) stays accepted ownership.
+    assert_eventually(fn ->
+      assert_receive {:steer_task_called, "agent_1", confirm_call, _, _}, 200
+      assert confirm_call["control_id"] == control_id
+    end)
+
+    status =
+      assert_eventually(fn ->
+        assert {:ok, status} = TaskStore.status(task_id, name: store)
+        assert status.steering["last"]["status"] == "queued"
+        status
+      end)
+
+    assert status.steering["last"]["control_id"] == control_id
+    assert status.steering["last"]["delivery_mode"] == "same_session_follow_up"
+    assert status.steering["last"]["delivered_at"] == nil
+    assert status.steering["counts"]["queued"] == 1
+
+    final_state = :sys.get_state(store)
+    final_record = final_state.tasks[task_id]
+    assert MapSet.member?(final_record.accepted_control_ids, control_id)
+    assert length(final_record.controls) == 1
+    assert Map.get(final_record.control_retries, control_id) in [nil, 0]
   end
 
   test "successful completion reconciles accepted queued controls exactly once", %{

@@ -56,6 +56,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                     check_operator_rework_total_budget
                     check_review_category_budget
                     check_review_total_budget
+                    check_protocol_retry_budget
                     check_validation_category_budget
                     check_validation_passed
                     check_validation_total_budget
@@ -69,6 +70,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                     check_worker_status_session_id
                     coding_workspace_recovery_summary
                     done
+                    error_validation_interaction_invalid
                     error_worker_provider_account_exhausted
                     error_worker_provider_session_missing
                     error_worker_recovery_continuity_invalid
@@ -104,6 +106,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                     hoist_design_decision_request_id
                     load_design_artifact
                     parse_design_response
+                    parse_worker_terminal
                     hoist_review_cycle
                     hoist_review_disposition
                     hoist_review_finding_ledger
@@ -111,9 +114,15 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                     hoist_recovery_worker_provider_session_id
                     hoist_recovery_worker_session_id
                     hoist_turn_progressed
+                    hoist_validation_approval_note
+                    hoist_validation_approval_note_denied
+                    hoist_validation_approval_request_id
+                    hoist_validation_approval_request_id_denied
                     hoist_validation_candidate_tree_oid
                     hoist_validation_observed_at
                     hoist_worker_failure_reason
+                    hoist_worker_terminal_status
+                    hoist_worker_terminal_summary
                     hoist_workspace_fingerprint
                     hoist_expected_workspace_fingerprint
                     hoist_expected_tree_oid
@@ -124,6 +133,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                     inc_design_attempt
                     inc_design_envelope_retry_count
                     inc_design_rework_count
+                    inc_protocol_retry_count
                     inc_review_cycle
                     init_delta_diff
                     init_delta_files
@@ -138,6 +148,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                     init_worker_phase
                     inspect_workspace
                     load_committed_change
+                    mark_protocol_invalid_evidence
                     open_worker
                     open_design_checkpoint
                     open_recovery_worker
@@ -156,6 +167,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                     release_workspace
                     release_workspace_only
                     retry_recovered_send
+                    route_after_end_turn
                     route_design_checkpoint_outcome
                     route_design_nonapproval
                     route_no_progress
@@ -164,7 +176,9 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                     route_prepared_review
                     route_review_material
                     route_turn_progress
+                    route_validation_interaction
                     route_worker_phase
+                    route_worker_terminal_valid
                     review_change
                     route_after_commit
                     route_commit_interaction
@@ -177,6 +191,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                     build_design_envelope_repair_prompt
                     build_design_prompt
                     build_design_rework_prompt
+                    build_protocol_format_repair_prompt
                     mark_design_rework_exhausted_error
                     mark_design_rework_iteration
                     mark_design_rework_kind
@@ -223,6 +238,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                              acp_start_session
                              coding_workspace_recovery_summary
                              coding_reviewed_commit
+                             coding_reviewed_validation
+                             coding_worker_terminal_parse
                              coding_workspace_acquire
                              coding_dependency_baseline_check
                              coding_workspace_committed_change
@@ -346,6 +363,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                                   "required_dominators" => [
                                     "check_validation_passed",
                                     "inspect_workspace",
+                                    "route_validation_interaction",
                                     "validate"
                                   ],
                                   "review_required_dominators" => [],
@@ -355,8 +373,23 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                                   "node_id" => "implement",
                                   "action" => "acp_send_message",
                                   "required_dominators" => [
-                                    "capture_pre_turn_workspace",
-                                    "check_pre_turn_workspace_exists",
+                                    "open_worker"
+                                  ],
+                                  "review_required_dominators" => [],
+                                  # Logical-turn capture or format-only repair may own the send.
+                                  "required_dominator_sets" => [
+                                    [
+                                      "build_protocol_format_repair_prompt",
+                                      "capture_pre_turn_workspace"
+                                    ]
+                                  ]
+                                },
+                                %{
+                                  "node_id" => "parse_worker_terminal",
+                                  "action" => "coding_worker_terminal_parse",
+                                  "required_dominators" => [
+                                    "check_worker_stop_reason",
+                                    "implement",
                                     "open_worker"
                                   ],
                                   "review_required_dominators" => [],
@@ -1819,7 +1852,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                                  },
                                  %{
                                    "node_id" => "validate",
-                                   "action" => "mix_compile",
+                                   "action" => "coding_reviewed_validation",
                                    "required_dominators" => [
                                      "capture_validation_workspace",
                                      "hoist_validation_candidate_tree_oid",
@@ -1837,7 +1870,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                                  [
                                    %{
                                      "node_id" => "validate",
-                                     "action" => "coding_cross_app_validate",
+                                     "action" => "coding_reviewed_validation",
                                      "required_dominators" => [
                                        "acquire_workspace",
                                        "capture_validation_workspace",
@@ -1887,6 +1920,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                                     "required_dominators" => [
                                       "check_validation_passed",
                                       "hoist_review_attestation_id",
+                                      "route_validation_interaction",
                                       "validate"
                                     ],
                                     "review_required_dominators" => [],
@@ -1894,7 +1928,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                                   },
                                   %{
                                     "node_id" => "validate",
-                                    "action" => "coding_security_regression_validate",
+                                    "action" => "coding_reviewed_validation",
                                     "required_dominators" => [
                                       "capture_validation_workspace",
                                       "hoist_review_attestation_id",

@@ -2065,7 +2065,9 @@ defmodule Arbor.Actions do
         Arbor.Actions.Coding.DesignCheckpoint.Open,
         Arbor.Actions.Coding.DesignCheckpoint.Await,
         Arbor.Actions.Coding.DesignCheckpoint.Load,
+        Arbor.Actions.Coding.WorkerTerminalParse,
         Arbor.Actions.Coding.ReviewedCommit,
+        Arbor.Actions.Coding.ReviewedValidation,
         Arbor.Actions.Coding.SecurityRegression.Validate,
         Arbor.Actions.Coding.CrossApp.Validate,
         Arbor.Actions.Coding.Workspace.Acquire,
@@ -3147,7 +3149,9 @@ defmodule Arbor.Actions do
     Arbor.Actions.Coding.DesignCheckpoint.Await =>
       "arbor://action/coding/design_checkpoint/await",
     Arbor.Actions.Coding.DesignCheckpoint.Load => "arbor://action/coding/design_checkpoint/load",
+    Arbor.Actions.Coding.WorkerTerminalParse => "arbor://action/coding/worker_terminal/parse",
     Arbor.Actions.Coding.ReviewedCommit => "arbor://action/coding/reviewed_commit",
+    Arbor.Actions.Coding.ReviewedValidation => "arbor://action/coding/reviewed_validation",
     Arbor.Actions.Coding.SecurityRegression.Validate =>
       "arbor://action/coding/security_regression/validate",
     Arbor.Actions.Coding.CrossApp.Validate => "arbor://action/coding/cross_app/validate",

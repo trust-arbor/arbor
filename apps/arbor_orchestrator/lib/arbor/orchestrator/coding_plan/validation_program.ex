@@ -81,14 +81,19 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationProgram do
   def project_onto(program, attrs) when is_map(attrs) and not is_struct(attrs) do
     with :ok <- validate(program),
          {:ok, strategy} <- canonical_strategy(program["profile_id"]),
-         param when is_binary(param) <- strategy["timeout_budget_param"] do
-      controlled_attrs =
-        %{
-          "action" => program["action"],
-          "context_keys" => Enum.join(program["context_keys"], ","),
-          "output_prefix" => "validation"
-        }
-        |> put_static_parameters(program["static_parameters"])
+         param when is_binary(param) <- strategy["timeout_budget_param"],
+         {:ok, pinned_params_json} <- Jason.encode(program["static_parameters"]) do
+      # Compiler-owned pin: graph always invokes coding_reviewed_validation; the
+      # underlying profile action + static params are immutable data, never
+      # author-selectable module names. Pin fields are static node params.
+      controlled_attrs = %{
+        "action" => "coding_reviewed_validation",
+        "context_keys" => Enum.join(program["context_keys"], ","),
+        "output_prefix" => "validation",
+        "param.pinned_action" => program["action"],
+        "param.pinned_profile_id" => program["profile_id"],
+        "param.pinned_params_json" => pinned_params_json
+      }
 
       attrs =
         attrs
@@ -317,14 +322,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationProgram do
       (timeout_ms == timeout_max_ms or test_stage_timeout_ms == timeout_ms)
   end
 
-  defp put_static_parameters(attrs, parameters) do
-    parameters
-    |> Enum.sort_by(&elem(&1, 0))
-    |> Enum.reduce(attrs, fn {name, value}, projected ->
-      Map.put(projected, "param.#{name}", value)
-    end)
-  end
-
+  # Static params are pinned as JSON on coding_reviewed_validation
+  # (param.pinned_params_json); legacy per-key param.* projection is gone.
   defp static_parameter_attr?("param." <> _name), do: true
   defp static_parameter_attr?("arg." <> _name), do: true
   defp static_parameter_attr?(_key), do: false

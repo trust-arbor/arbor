@@ -677,9 +677,21 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
   end
 
   defp rewrite_validation(graph, validation_program) do
+    expected_action = validation_program["action"]
+
     update_node(graph, "validate", fn attrs ->
-      with :ok <- require_action_attrs(attrs, "mix_compile") do
-        ValidationProgram.project_onto(validation_program, attrs)
+      # Template may still name the profile's underlying validator or already
+      # use the reviewed gate. Reject every other action — never accept an
+      # arbitrary nonblank string that does not match the compiled program.
+      case attrs["action"] do
+        "coding_reviewed_validation" ->
+          ValidationProgram.project_onto(validation_program, attrs)
+
+        ^expected_action when is_binary(expected_action) and expected_action != "" ->
+          ValidationProgram.project_onto(validation_program, attrs)
+
+        other ->
+          {:error, {:invalid_validation_node_action, other, expected_action}}
       end
     end)
   end

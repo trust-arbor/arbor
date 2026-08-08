@@ -4868,16 +4868,29 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
                CodingTaskExecutor.steer_task("agent_1", valid_control(), valid_context())
     end
 
-    test "deferred managed control remains retryable with the same id" do
+    test "deferred managed control is projected as accepted queued ownership" do
       Process.put(:coding_task_control_reply, {:ok, :deferred, :same_session_follow_up})
 
-      assert {:error, :deferred} =
+      assert {:ok, :queued, :same_session_follow_up} =
                CodingTaskExecutor.steer_task("agent_1", valid_control(), valid_context())
 
       assert [{"task_coding_1", "agent_1", managed_control, []}] =
                Process.get(:coding_task_control_calls)
 
       assert managed_control["control_id"] == "control_exact_1"
+    end
+
+    test "same-id deferred confirmation stays accepted queued without error" do
+      Process.put(:coding_task_control_reply, {:ok, :deferred, :same_session_follow_up})
+      control = valid_control()
+
+      assert {:ok, :queued, :same_session_follow_up} =
+               CodingTaskExecutor.steer_task("agent_1", control, valid_context())
+
+      assert {:ok, :queued, :same_session_follow_up} =
+               CodingTaskExecutor.steer_task("agent_1", control, valid_context())
+
+      assert length(Process.get(:coding_task_control_calls)) == 2
     end
 
     test "no active managed session remains retryable" do

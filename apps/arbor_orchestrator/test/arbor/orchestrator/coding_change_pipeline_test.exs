@@ -32,6 +32,8 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
     acp_session_status
     acp_close_session
     mix_compile
+    coding_reviewed_validation
+    coding_worker_terminal_parse
     coding_reviewed_commit
     git_pr
     council_review_change
@@ -219,6 +221,12 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
         "mix_compile" ->
           validate_response(scenario, counters, state)
 
+        "coding_reviewed_validation" ->
+          reviewed_validation_response(scenario, counters, state, args)
+
+        "coding_worker_terminal_parse" ->
+          worker_terminal_parse_response(scenario, counters, state, args)
+
         "coding_reviewed_commit" ->
           commit_response(scenario, counters, state, args)
 
@@ -338,13 +346,49 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
     defp worker_response(scenario, counters, state, args) do
       prompt = Map.get(args, "prompt") || Map.get(args, :prompt) || ""
 
-      if String.contains?(prompt, "DESIGN PHASE ONLY") or
-           String.contains?(prompt, "DESIGN REWORK PHASE ONLY") or
-           String.contains?(prompt, "DESIGN ENVELOPE REPAIR ONLY") do
-        design_response(scenario, counters, state)
-      else
-        implement_response(scenario, counters, state)
+      cond do
+        String.contains?(prompt, "DESIGN PHASE ONLY") or
+          String.contains?(prompt, "DESIGN REWORK PHASE ONLY") or
+            String.contains?(prompt, "DESIGN ENVELOPE REPAIR ONLY") ->
+          design_response(scenario, counters, state)
+
+        String.contains?(prompt, "FORMAT REPAIR ONLY") ->
+          format_repair_response(scenario, counters, state)
+
+        true ->
+          implement_response(scenario, counters, state)
       end
+    end
+
+    defp format_repair_response(scenario, counters, state) do
+      n = Map.get(counters, :format_repair, 0)
+      Agent.update(state, fn s -> %{s | counters: Map.put(s.counters, :format_repair, n + 1)} end)
+
+      text =
+        case scenario do
+          :repeated_invalid_terminal ->
+            "still not json"
+
+          :invalid_terminal_then_valid_repair ->
+            advisory_terminal("implemented", "format repaired")
+
+          _ ->
+            # Default format repair succeeds with advisory JSON only (no re-implement).
+            advisory_terminal("implemented", "format repaired")
+        end
+
+      {:ok,
+       %{
+         text: text,
+         stop_reason: "end_turn",
+         session_id: "sess_1",
+         delivery_status: "delivered"
+       }}
+    end
+
+    defp advisory_terminal(status, summary)
+         when status in ["implemented", "declined"] and is_binary(summary) do
+      Jason.encode!(%{"status" => status, "summary" => summary})
     end
 
     defp design_response(scenario, counters, state) do
@@ -558,70 +602,94 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
           {:error, "implement transport failed"}
 
         _ ->
+          # Default implement turns emit exact advisory JSON so happy-path
+          # fixtures do not burn the format-only protocol retry. Scenarios that
+          # intentionally exercise invalid terminal text return raw prose.
           text =
             case {scenario, n} do
               {:narrative_changed, _} ->
                 "I implemented the requested change across several files. Summary: done."
 
+              {:repeated_invalid_terminal, _} ->
+                "I implemented something but this is not protocol JSON."
+
+              {:invalid_terminal_then_valid_repair, _} ->
+                "not valid protocol json on first implement"
+
               {:narrative_no_changes, _} ->
                 "I looked around and decided nothing needed changing."
 
               {:no_changes, _} ->
-                "No workspace changes were necessary for this task."
+                advisory_terminal("declined", "No workspace changes were necessary for this task.")
 
               {:validation_failed, 0} ->
-                "First pass attempted a fix; compile still broken."
+                advisory_terminal("implemented", "First pass attempted a fix; compile still broken.")
 
               {:validation_failed, _} ->
-                "Second pass still leaves validation failing."
+                advisory_terminal("implemented", "Second pass still leaves validation failing.")
 
               {:validation_hard_fail, _} ->
-                "Implement complete; validation may crash."
+                advisory_terminal("implemented", "Implement complete; validation may crash.")
 
               {:review_requires_rework, _} ->
-                "Implemented a change that review will ask to rework."
+                advisory_terminal(
+                  "implemented",
+                  "Implemented a change that review will ask to rework."
+                )
 
               {:rework_exhausted, 0} ->
-                "Initial implementation."
+                advisory_terminal("implemented", "Initial implementation.")
 
               {:rework_exhausted, _} ->
-                "After rework attempt."
+                advisory_terminal("implemented", "After rework attempt.")
 
               {:review_rejected, _} ->
-                "Implemented path that review rejects."
+                advisory_terminal("implemented", "Implemented path that review rejects.")
 
               {:review_failed, _} ->
-                "Implemented path that review crashes."
+                advisory_terminal("implemented", "Implemented path that review crashes.")
 
               {:committed_change_failed, _} ->
-                "Implemented; materialization will fail."
+                advisory_terminal("implemented", "Implemented; materialization will fail.")
 
               {:commit_hard_fail, _} ->
-                "Implemented; commit will fail."
+                advisory_terminal("implemented", "Implemented; commit will fail.")
 
               {:commit_approval_denied, _} ->
-                "Implemented; awaiting operator deny."
+                advisory_terminal("implemented", "Implemented; awaiting operator deny.")
 
               {:commit_approval_rework_success, 0} ->
-                "First implement before operator rework."
+                advisory_terminal("implemented", "First implement before operator rework.")
 
               {:commit_approval_rework_success, _} ->
-                "After operator rework feedback applied."
+                advisory_terminal("implemented", "After operator rework feedback applied.")
 
               {:commit_approval_rework_exhausted, 0} ->
-                "First implement before exhausted operator rework."
+                advisory_terminal(
+                  "implemented",
+                  "First implement before exhausted operator rework."
+                )
 
               {:commit_approval_rework_exhausted, _} ->
-                "After operator rework attempt that exhausts budget."
+                advisory_terminal(
+                  "implemented",
+                  "After operator rework attempt that exhausts budget."
+                )
 
               {:validation_then_operator_rework_exhausted, 0} ->
-                "Broken first implement for validation then operator path."
+                advisory_terminal(
+                  "implemented",
+                  "Broken first implement for validation then operator path."
+                )
 
               {:validation_then_operator_rework_exhausted, _} ->
-                "After validation rework before operator exhaustion."
+                advisory_terminal(
+                  "implemented",
+                  "After validation rework before operator exhaustion."
+                )
 
               {:inspect_hard_fail, _} ->
-                "Implement complete; inspect will fail."
+                advisory_terminal("implemented", "Implement complete; inspect will fail.")
 
               {:narrative_validation_rework, 0} ->
                 "Initial narrative implement before validation rework."
@@ -636,49 +704,64 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
                 "Narrative review rework summary: addressed council feedback."
 
               {:rework_no_progress, 0} ->
-                "First implement created a candidate."
+                advisory_terminal("implemented", "First implement created a candidate.")
 
               {:rework_no_progress, _} ->
-                "Rework claimed progress but owner observes none."
+                advisory_terminal(
+                  "implemented",
+                  "Rework claimed progress but owner observes none."
+                )
 
               {:rework_with_progress, 0} ->
-                "First implement created a candidate."
+                advisory_terminal("implemented", "First implement created a candidate.")
 
               {:rework_with_progress, _} ->
-                "Rework actually changed the workspace."
+                advisory_terminal("implemented", "Rework actually changed the workspace.")
 
               {:max_tokens_stop, _} ->
-                "Partial output truncated by token budget."
+                advisory_terminal("implemented", "Partial output truncated by token budget.")
 
               {:missing_stop_reason, _} ->
-                "Provider omitted stop_reason."
+                advisory_terminal("implemented", "Provider omitted stop_reason.")
 
               {:missing_workspace, _} ->
-                "Implement claimed success but worktree is gone."
+                advisory_terminal(
+                  "implemented",
+                  "Implement claimed success but worktree is gone."
+                )
 
               {:missing_workspace_before_send, _} ->
-                "This send must never be reached."
+                advisory_terminal("implemented", "This send must never be reached.")
 
               {:close_failed, _} ->
-                "Implement complete on close-failure path."
+                advisory_terminal("implemented", "Implement complete on close-failure path.")
 
               {:human_review_required, _} ->
-                "Implement complete; human review required."
+                advisory_terminal("implemented", "Implement complete; human review required.")
 
               {:pr_failed, _} ->
-                "Implement complete; PR will fail."
+                advisory_terminal("implemented", "Implement complete; PR will fail.")
 
               {:pr_created, _} ->
-                "Implement complete; PR will succeed."
+                advisory_terminal("implemented", "Implement complete; PR will succeed.")
 
               {:change_committed, _} ->
-                "Implement complete; commit path."
+                advisory_terminal("implemented", "Implement complete; commit path.")
 
               {:self_commit_adopt, _} ->
-                "Self-committed in the worktree."
+                advisory_terminal("implemented", "Self-committed in the worktree.")
+
+              {:validation_approval_rework, _} ->
+                advisory_terminal("implemented", "Validation approval rework fixture.")
+
+              {:validation_approval_denied, _} ->
+                advisory_terminal("implemented", "Validation approval deny fixture.")
+
+              {:validation_approval_unknown, _} ->
+                advisory_terminal("implemented", "Validation approval unknown fixture.")
 
               _ ->
-                "Default narrative implement summary."
+                advisory_terminal("implemented", "Default implement summary.")
             end
 
           response_session_id =
@@ -920,6 +1003,112 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       end
     end
 
+    defp reviewed_validation_response(scenario, counters, state, _args) do
+      case scenario do
+        :validation_approval_rework when Map.get(counters, :validate, 0) == 0 ->
+          Agent.update(state, fn s ->
+            %{s | counters: Map.put(s.counters, :validate, Map.get(s.counters, :validate, 0) + 1)}
+          end)
+
+          {:ok,
+           %{
+             interaction_outcome: "rework",
+             request_id: "irq_validation_rework_1",
+             note: "fix the failing assertion"
+           }}
+
+        :validation_approval_denied ->
+          {:ok,
+           %{
+             interaction_outcome: "denied",
+             request_id: "irq_validation_deny_1",
+             note: "too risky"
+           }}
+
+        :validation_approval_unknown ->
+          {:ok,
+           %{
+             interaction_outcome: "maybe",
+             request_id: "irq_validation_unknown_1",
+             note: "???"
+           }}
+
+        _ ->
+          case validate_response(scenario, counters, state) do
+            {:ok, result} when is_map(result) ->
+              {:ok,
+               result
+               |> Map.put(:interaction_outcome, "")
+               |> Map.put(:request_id, "")
+               |> Map.put(:note, "")}
+
+            other ->
+              other
+          end
+      end
+    end
+
+    defp worker_terminal_parse_response(scenario, counters, state, args) do
+      n = Map.get(counters, :terminal_parse, 0)
+      Agent.update(state, fn s -> %{s | counters: Map.put(s.counters, :terminal_parse, n + 1)} end)
+
+      text = to_string(Map.get(args, "text") || Map.get(args, :text) || "")
+
+      case scenario do
+        :invalid_terminal_then_valid_repair ->
+          if n == 0 do
+            {:ok, invalid_terminal_evidence(text, "invalid_json")}
+          else
+            {:ok, valid_terminal_evidence(text, "implemented", "repaired format")}
+          end
+
+        :repeated_invalid_terminal ->
+          {:ok, invalid_terminal_evidence(text, "invalid_json")}
+
+        _ ->
+          case Jason.decode(String.trim(text)) do
+            {:ok, %{"status" => status} = obj}
+            when status in ["implemented", "declined"] and map_size(obj) <= 2 ->
+              summary = Map.get(obj, "summary")
+
+              if is_nil(summary) or is_binary(summary) do
+                {:ok, valid_terminal_evidence(text, status, summary)}
+              else
+                {:ok, invalid_terminal_evidence(text, "summary_not_string")}
+              end
+
+            _ when text == "" ->
+              {:ok, invalid_terminal_evidence(text, "text_required")}
+
+            _ ->
+              {:ok, invalid_terminal_evidence(text, "invalid_json")}
+          end
+      end
+    end
+
+    defp valid_terminal_evidence(text, status, summary) do
+      %{
+        valid: true,
+        status: status,
+        summary: summary,
+        protocol_error: nil,
+        text_byte_size: byte_size(text),
+        text_sha256: "sha256:" <> String.duplicate("f", 64)
+      }
+    end
+
+    defp invalid_terminal_evidence(text, code) do
+      %{
+        valid: false,
+        status: nil,
+        summary: nil,
+        protocol_error: code,
+        text_byte_size: byte_size(text),
+        text_sha256:
+          if(text == "", do: nil, else: "sha256:" <> String.duplicate("a", 64))
+      }
+    end
+
     defp validate_response(scenario, counters, state) do
       n = Map.get(counters, :validate, 0)
       Agent.update(state, fn s -> %{s | counters: Map.put(s.counters, :validate, n + 1)} end)
@@ -974,6 +1163,8 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
               {:design_rework_twice_then_validation_rework, _} -> true
               {:narrative_validation_rework, 0} -> false
               {:narrative_validation_rework, _} -> true
+              {:validation_approval_rework, 0} -> false
+              {:validation_approval_rework, _} -> true
               # First implement progresses then fails validation so rework runs;
               # rework_no_progress never reaches a second validate.
               {:rework_no_progress, _} -> false
@@ -1803,9 +1994,10 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert graph.nodes["route_release_mode"].attrs["fan_out"] == "false"
       assert graph.nodes["route_success_workspace_retention"].attrs["fan_out"] == "false"
 
-      # Validation is top-level mix_compile (not nested shell)
+      # Validation is the reviewed gate; underlying action is compiler-pinned.
       validate = graph.nodes["validate"]
-      assert validate.attrs["action"] == "mix_compile"
+      assert validate.attrs["action"] == "coding_reviewed_validation"
+      assert validate.attrs["param.pinned_action"] == "mix_compile"
 
       capture = graph.nodes["capture_validation_workspace"]
 
@@ -1875,16 +2067,21 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert graph.nodes["route_commit_interaction"].attrs["fan_out"] == "false"
       assert graph.nodes["error_review_tier_invalid"]
 
-      # Owner-observed outcome: no worker JSON protocol repair machinery.
+      # Advisory terminal JSON is evidence-only; no worker-status outcome routers.
       refute Map.has_key?(graph.nodes, "extract_worker_status")
       refute Map.has_key?(graph.nodes, "route_worker_status")
       refute Map.has_key?(graph.nodes, "repair_worker_protocol")
-      refute Map.has_key?(graph.nodes, "build_protocol_repair_prompt")
       refute Map.has_key?(graph.nodes, "error_worker_protocol_invalid")
-      refute Map.has_key?(graph.nodes, "check_protocol_retry_budget")
-      refute Map.has_key?(graph.nodes, "inc_protocol_retry_count")
       refute Map.has_key?(graph.nodes, "reset_worker_turn_protocol_retry_count")
       refute Map.has_key?(graph.nodes, "status_declined")
+      assert graph.nodes["parse_worker_terminal"]
+      assert graph.nodes["parse_worker_terminal"].attrs["action"] == "coding_worker_terminal_parse"
+      assert graph.nodes["check_protocol_retry_budget"]
+      assert graph.nodes["inc_protocol_retry_count"]
+      assert graph.nodes["build_protocol_format_repair_prompt"]
+      assert graph.nodes["mark_protocol_invalid_evidence"]
+      refute Map.has_key?(graph.nodes, "reset_protocol_retry_count")
+      assert graph.nodes["route_validation_interaction"]
       assert graph.nodes["inspect_workspace"]
       assert graph.nodes["capture_pre_turn_workspace"]
       assert graph.nodes["check_worker_stop_reason"]
@@ -1901,13 +2098,11 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
         assert String.contains?(load_dot(), "output_key=\"#{counter}\"")
       end
 
-      # Compatibility metric remains initialized; per-turn repair machinery is gone.
       assert load_dot() =~ "output_key=\"protocol_retry_count\""
       refute load_dot() =~ "output_key=\"worker_turn_protocol_retry_count\""
       refute load_dot() =~ "worker_protocol_invalid_json_after_retry"
-      # Steering prompts still request one terminal JSON object for old-graph
-      # compatibility, but never require JSON-only protocol output.
       assert load_dot() =~ "ONLY one valid JSON object and no prose or Markdown"
+      assert load_dot() =~ "FORMAT REPAIR ONLY"
       refute load_dot() =~ "ONLY one JSON object"
       refute load_dot() =~ "ONLY a JSON object"
       refute load_dot() =~ "source_key=\"rework_count\""
@@ -2176,7 +2371,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert validation_rework_prompt =~ "Structured validation feedback JSON"
 
       assert length(action_calls(calls, "coding_design_checkpoint_open")) == 3
-      assert length(action_calls(calls, "mix_compile")) == 2
+      assert length(action_calls(calls, "coding_reviewed_validation")) == 2
       assert_single_worker_session(calls, 5)
       assert_closed_and_released(calls)
     end
@@ -2395,7 +2590,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert "error_worker_turn_no_progress" in result.completed_nodes
       assert_release_mode(calls, "retain")
       # First turn validates once; rework no-op never re-validates or commits.
-      assert Enum.count(calls, fn {name, _} -> name == "mix_compile" end) == 1
+      assert Enum.count(calls, fn {name, _} -> name == "coding_reviewed_validation" end) == 1
       refute called?(calls, "coding_reviewed_commit")
       assert_single_worker_session(calls, 2)
       assert_closed_and_released(calls)
@@ -2407,7 +2602,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert result.context["total_rework_count"] == 1
       assert result.context["validation_rework_count"] == 1
       refute Map.has_key?(result.context, "error")
-      assert Enum.count(calls, fn {name, _} -> name == "mix_compile" end) == 2
+      assert Enum.count(calls, fn {name, _} -> name == "coding_reviewed_validation" end) == 2
       assert called?(calls, "coding_reviewed_commit")
       assert_single_worker_session(calls, 2)
       assert_closed_and_released(calls)
@@ -2438,7 +2633,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert result.context["rework_iteration"] == 1
       assert_closed_and_released(calls)
 
-      validate_calls = Enum.count(calls, fn {n, _} -> n == "mix_compile" end)
+      validate_calls = Enum.count(calls, fn {n, _} -> n == "coding_reviewed_validation" end)
       assert validate_calls == 2
 
       prompts = action_prompts(calls)
@@ -2467,7 +2662,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
 
       # Infrastructure capacity is not a worker validation failure: one validate,
       # zero validation-rework sends/counter increments, worker close, retain.
-      assert Enum.count(calls, fn {n, _} -> n == "mix_compile" end) == 1
+      assert Enum.count(calls, fn {n, _} -> n == "coding_reviewed_validation" end) == 1
       assert Enum.count(calls, fn {n, _} -> n == "acp_send_message" end) == 1
       assert_single_worker_session(calls, 1)
       assert result.context["validation_rework_count"] in [nil, "0", 0]
@@ -2685,7 +2880,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       commit_calls = Enum.filter(calls, fn {n, _} -> n == "coding_reviewed_commit" end)
       assert length(commit_calls) == 2
 
-      validate_calls = Enum.count(calls, fn {n, _} -> n == "mix_compile" end)
+      validate_calls = Enum.count(calls, fn {n, _} -> n == "coding_reviewed_validation" end)
       assert validate_calls == 2
 
       # Council review only after the successful fresh commit, never on the
@@ -2814,11 +3009,10 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
 
       assert materialize_args["commit"] == "commitabc123"
       refute "error_review_tier_invalid" in result.completed_nodes
-      refute "inc_protocol_retry_count" in result.completed_nodes
-      refute "repair_worker_protocol" in result.completed_nodes
       refute "extract_worker_status" in result.completed_nodes
       assert "inspect_workspace" in result.completed_nodes
-      assert result.context["protocol_retry_count"] == "0"
+      assert "parse_worker_terminal" in result.completed_nodes
+      assert result.context["protocol_retry_count"] in [0, "0"]
       assert_json_clean_context(result.context)
       assert_opaque_handles(result.context)
     end
@@ -2860,26 +3054,83 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
              end)
     end
 
-    test "arbitrary narrative worker text plus changed workspace proceeds on first turn" do
+    test "arbitrary narrative worker text plus changed workspace proceeds after format-only retry" do
       assert {{:ok, result}, calls} = run_fixture(:narrative_changed)
       assert result.context["status"] == "change_committed"
-      assert result.context["protocol_retry_count"] == "0"
+      # Narrative is invalid terminal JSON once; format-only retry then inspect.
+      assert result.context["protocol_retry_count"] in [1, "1"]
       assert result.context["validation_rework_count"] == "0"
       assert result.context["review_rework_count"] == "0"
       assert result.context["total_rework_count"] == "0"
       refute Map.has_key?(result.context, "error")
       refute result.context["error"] == "worker_protocol_invalid_json_after_retry"
 
-      assert_single_worker_session(calls, 1)
+      # Initial implement + one format-only repair send (same session).
+      assert_single_worker_session(calls, 2)
       assert called?(calls, "coding_workspace_inspect")
-      assert called?(calls, "mix_compile")
+      assert called?(calls, "coding_reviewed_validation")
+      assert called?(calls, "coding_worker_terminal_parse")
+      assert called_with_prompt?(calls, "FORMAT REPAIR ONLY")
       refute called_with_prompt?(calls, "ONLY one JSON object")
-      refute called_with_prompt?(calls, "not valid protocol JSON")
-      refute "repair_worker_protocol" in result.completed_nodes
       refute "extract_worker_status" in result.completed_nodes
       assert "inspect_workspace" in result.completed_nodes
       assert_closed_and_released(calls)
       assert_json_clean_context(result.context)
+    end
+
+    test "valid advisory terminal JSON proceeds without format retry" do
+      assert {{:ok, result}, calls} = run_fixture(:change_committed)
+      assert result.context["status"] == "change_committed"
+      assert result.context["protocol_retry_count"] in [0, "0"]
+      assert result.context["worker_terminal.valid"] in [true, "true"]
+      assert result.context["worker_terminal.status"] == "implemented"
+      refute "inc_protocol_retry_count" in result.completed_nodes
+      assert "parse_worker_terminal" in result.completed_nodes
+      assert "inspect_workspace" in result.completed_nodes
+      assert_single_worker_session(calls, 1)
+      assert_closed_and_released(calls)
+    end
+
+    test "repeated invalid terminal retains protocol evidence and still inspects workspace" do
+      assert {{:ok, result}, calls} = run_fixture(:repeated_invalid_terminal)
+      assert result.context["status"] == "change_committed"
+      assert result.context["protocol_retry_count"] in [1, "1"]
+
+      assert result.context["worker_terminal.valid"] in [false, "false"] or
+               result.context["worker_terminal_protocol_error"] == "invalid_json"
+
+      assert "inspect_workspace" in result.completed_nodes
+      assert "mark_protocol_invalid_evidence" in result.completed_nodes
+      assert called?(calls, "coding_reviewed_validation")
+      # Worker text never decided outcome — validation still ran.
+      refute result.context["status"] == "no_changes"
+      assert_closed_and_released(calls)
+    end
+
+    test "validation approval rework enters same-session validation rework path" do
+      assert {{:ok, result}, calls} = run_fixture(:validation_approval_rework)
+      assert result.context["status"] == "change_committed"
+      assert result.context["validation_rework_count"] in [1, "1"]
+      assert result.context["approval_request_id"] == "irq_validation_rework_1"
+      assert result.context["approval_note"] == "fix the failing assertion"
+      prompts = action_prompts(calls)
+      assert Enum.any?(prompts, &String.contains?(&1, "Operator approval note"))
+      assert_closed_and_released(calls)
+    end
+
+    test "validation approval deny fails closed without commit" do
+      assert {{:ok, result}, calls} = run_fixture(:validation_approval_denied)
+      assert result.context["status"] == "validation_failed"
+      assert result.context["approval_request_id"] == "irq_validation_deny_1"
+      refute called?(calls, "coding_reviewed_commit")
+      assert_closed_and_released(calls)
+    end
+
+    test "validation approval unknown fails closed" do
+      assert {{:ok, result}, calls} = run_fixture(:validation_approval_unknown)
+      assert result.context["status"] in ["pipeline_error", "validation_failed"]
+      refute called?(calls, "coding_reviewed_commit")
+      assert_closed_and_released(calls)
     end
 
     test "narrative validation rework continues through owner-observed inspection" do
@@ -2890,17 +3141,24 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
                })
 
       assert result.context["status"] == "change_committed"
-      assert result.context["protocol_retry_count"] == "0"
+      # Task-level one-shot protocol budget: first narrative invalid spends the
+      # single format-only retry; second-turn narrative invalid proceeds to inspect.
+      assert result.context["protocol_retry_count"] in [1, "1"]
       assert result.context["validation_rework_count"] == 1
       assert result.context["review_rework_count"] == "0"
       assert result.context["total_rework_count"] == 1
       refute Map.has_key?(result.context, "error")
 
       prompts = action_prompts(calls)
-      assert_single_worker_session(calls, 2)
-      assert Enum.at(prompts, 1) =~ "Structured validation feedback JSON"
-      assert Enum.at(prompts, 1) =~ "ONLY one valid JSON object and no prose or Markdown"
-      refute Enum.at(prompts, 1) =~ "ONLY one JSON object"
+      # initial implement + one format repair + rework implement (no second repair)
+      assert_single_worker_session(calls, 3)
+      format_repairs = Enum.filter(prompts, &String.contains?(&1, "FORMAT REPAIR ONLY"))
+      assert length(format_repairs) == 1
+      assert "mark_protocol_invalid_evidence" in result.completed_nodes
+      rework_prompt = Enum.find(prompts, &String.contains?(&1, "Validation rework required"))
+      assert rework_prompt =~ "Structured validation feedback JSON"
+      assert rework_prompt =~ "ONLY one valid JSON object and no prose or Markdown"
+      refute rework_prompt =~ "ONLY one JSON object"
       # Every turn performs pre-turn, post-turn, and fresh validation inspection.
       assert_validation_inspections(calls, 2)
 
@@ -2930,29 +3188,39 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert {{:ok, result}, calls} = run_fixture(:narrative_review_rework)
 
       assert result.context["status"] == "change_committed"
-      assert result.context["protocol_retry_count"] == "0"
+      assert result.context["protocol_retry_count"] in [1, "1"]
       assert result.context["validation_rework_count"] == "0"
       assert result.context["review_rework_count"] == 1
       assert result.context["total_rework_count"] == 1
       refute Map.has_key?(result.context, "error")
 
       prompts = action_prompts(calls)
-      assert_single_worker_session(calls, 2)
-      assert Enum.at(prompts, 1) =~ "Structured review feedback JSON"
-      assert Enum.at(prompts, 1) =~ "ONLY one valid JSON object and no prose or Markdown"
-      refute Enum.at(prompts, 1) =~ "ONLY one JSON object"
+      # initial implement + one format repair + rework implement (budget already spent)
+      assert_single_worker_session(calls, 3)
+      format_repairs = Enum.filter(prompts, &String.contains?(&1, "FORMAT REPAIR ONLY"))
+      assert length(format_repairs) == 1
+      assert "mark_protocol_invalid_evidence" in result.completed_nodes
+      rework_prompt = Enum.find(prompts, &String.contains?(&1, "Code review requested rework"))
+      assert rework_prompt =~ "Structured review feedback JSON"
+      assert rework_prompt =~ "ONLY one valid JSON object and no prose or Markdown"
+      refute rework_prompt =~ "ONLY one JSON object"
       assert_validation_inspections(calls, 2)
       assert_closed_and_released(calls)
       assert_json_clean_context(result.context)
     end
 
-    test "packaged graph has no protocol-repair path and cannot emit invalid-json terminal" do
+    test "packaged graph has advisory protocol path that always reaches inspect" do
       dot = load_dot()
       refute dot =~ "repair_worker_protocol"
       refute dot =~ "extract_worker_status"
       refute dot =~ "route_worker_status"
       refute dot =~ "worker_protocol_invalid_json_after_retry"
-      refute dot =~ "build_protocol_repair_prompt"
+      assert dot =~ "coding_worker_terminal_parse"
+      assert dot =~ "build_protocol_format_repair_prompt"
+      assert dot =~ "mark_protocol_invalid_evidence"
+      refute dot =~ "reset_protocol_retry_count"
+      assert dot =~ "coding_reviewed_validation"
+      assert dot =~ "route_validation_interaction"
       assert dot =~ "coding_workspace_inspect"
       assert dot =~ "output_key=\"protocol_retry_count\""
       assert dot =~ "acp_session_status"

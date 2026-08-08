@@ -236,26 +236,25 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationProgramTest do
 
       expected_controlled = %{
         "default" => %{
-          "action" => "mix_compile",
+          "action" => "coding_reviewed_validation",
           "context_keys" => "path,workspace_id",
           "output_prefix" => "validation",
-          "param.timeout" => 900_000,
-          "param.warnings_as_errors" => true
+          "param.pinned_action" => "mix_compile",
+          "param.pinned_profile_id" => "default"
         },
         "cross_app" => %{
-          "action" => "coding_cross_app_validate",
+          "action" => "coding_reviewed_validation",
           "context_keys" => "workspace_id",
           "output_prefix" => "validation",
-          "param.stage_timeout" => 900_000,
-          "param.test_stage_timeout" => 900_000,
-          "param.timeout" => 900_000
+          "param.pinned_action" => "coding_cross_app_validate",
+          "param.pinned_profile_id" => "cross_app"
         },
         "security_regression" => %{
-          "action" => "coding_security_regression_validate",
+          "action" => "coding_reviewed_validation",
           "context_keys" => "review_attestation_id",
           "output_prefix" => "validation",
-          "param.timeout" => 600_000,
-          "param.stage_timeout" => 900_000
+          "param.pinned_action" => "coding_security_regression_validate",
+          "param.pinned_profile_id" => "security_regression"
         }
       }
 
@@ -271,6 +270,10 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationProgramTest do
         assert attrs["type"] == "exec"
         assert attrs["target"] == "action"
         assert attrs["max_retries"] == "0"
+        assert is_binary(attrs["param.pinned_params_json"])
+        assert {:ok, pinned} = Jason.decode(attrs["param.pinned_params_json"])
+        assert is_map(pinned)
+        assert is_integer(pinned["timeout"]) and pinned["timeout"] > 0
 
         assert {:ok, profile} = Profiles.fetch_executable(profile_id)
 
