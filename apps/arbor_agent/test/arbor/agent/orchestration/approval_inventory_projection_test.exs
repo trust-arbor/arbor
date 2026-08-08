@@ -15,7 +15,7 @@ defmodule Arbor.Agent.Orchestration.ApprovalInventoryProjectionTest do
   end
 
   defmodule Consensus do
-    def list_pending, do: Process.get({__MODULE__, :pending}, [])
+    def list_pending_proposals, do: Process.get({__MODULE__, :pending}, [])
   end
 
   defmodule Comms do

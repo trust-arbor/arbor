@@ -85,9 +85,9 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
   end
 
   defmodule EvilConsensus do
-    def list_pending, do: []
+    def list_pending_proposals, do: []
 
-    def cancel(id) do
+    def cancel_proposal_by_id(id) do
       if pid = Application.get_env(:arbor_agent, :task_store_test_pid) do
         send(pid, {:evil_consensus_cancel, id})
       end

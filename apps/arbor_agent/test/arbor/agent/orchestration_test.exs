@@ -106,11 +106,11 @@ defmodule Arbor.Agent.OrchestrationTest do
   end
 
   defmodule FakeConsensus do
-    def list_pending do
+    def list_pending_proposals do
       Process.get({__MODULE__, :pending}, [])
     end
 
-    def cancel(id) do
+    def cancel_proposal_by_id(id) do
       send(self(), {:consensus_cancel, id})
       result = Process.get({__MODULE__, :cancel_result}, :ok)
 
@@ -127,12 +127,12 @@ defmodule Arbor.Agent.OrchestrationTest do
       Process.get({__MODULE__, :answer_result}, :ok)
     end
 
-    def force_approve(id, caller_id) do
+    def force_approve_proposal_by_authority(id, caller_id) do
       send(self(), {:consensus_force_approve, id, caller_id})
       Process.get({__MODULE__, :answer_result}, :ok)
     end
 
-    def force_reject(id, caller_id) do
+    def force_reject_proposal_by_authority(id, caller_id) do
       send(self(), {:consensus_force_reject, id, caller_id})
       Process.get({__MODULE__, :answer_result}, :ok)
     end
@@ -509,8 +509,8 @@ defmodule Arbor.Agent.OrchestrationTest do
   end
 
   defmodule SharedConsensus do
-    def list_pending, do: SharedApprovalState.consensus_pending()
-    def cancel(id), do: SharedApprovalState.cancel_consensus(id)
+    def list_pending_proposals, do: SharedApprovalState.consensus_pending()
+    def cancel_proposal_by_id(id), do: SharedApprovalState.cancel_consensus(id)
 
     def answer_authorization_request(id, decision, caller_id, opts) do
       send(self(), {:consensus_answer, id, decision, caller_id, opts})

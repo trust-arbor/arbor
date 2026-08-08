@@ -345,6 +345,8 @@ defmodule Mix.Tasks.Arbor.Coding.CheckProductionPathTest do
       """
     )
 
+    File.write!(Path.join(repo_path, "mix.lock"), "%{}\n")
+
     git!(repo_path, ["init"])
     git!(repo_path, ["config", "user.email", "canary@arbor.local"])
     git!(repo_path, ["config", "user.name", "Arbor Canary"])
