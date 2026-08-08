@@ -767,6 +767,23 @@ worker narrative or terminal JSON:
    with `{ctx.approval_note}` and `{ctx.approval_request_id}` so the same-session
    ACP worker prompt receives both; semantic preflight rejects rewrites that
    drop either approval-context placeholder.
+6. Terminal verification adapts Engine checkpoint evidence fail-closed. The
+   final context is usually flat (`validation.passed`, `validation.exit_code`,
+   ...) plus ReviewedValidation's closed success-wrapper fields
+   (`validation.interaction_outcome=""`, `validation.request_id`,
+   `validation.note=""`) and an optional serialized transport at
+   `validation.result`. `CodingTaskExecutor` supplies that complete flat map to
+   `CandidateVerificationCore`, which peels **only** the success wrapper and
+   then requires the exact compiler-pinned validator envelope for `default`,
+   `cross_app`, or `security_regression`. Raw legacy validator results still
+   adapt. Denied/rework control payloads never carry nested validator evidence;
+   a full envelope fused with either outcome is forged and blocked. When flat
+   nested fields are present, verification drops the transport duplicate
+   without decoding it; a sole transport layer is byte-bounded before one
+   `Jason.decode`, and nested `result` wrappers fail closed. The public task
+   result omits the serialized transport duplicate while retaining the flat
+   validator and wrapper fields. Malformed metadata, unknown extras, and
+   candidate-tree drift remain blocked.
 
 ### Terminal workspace and branch evidence
 

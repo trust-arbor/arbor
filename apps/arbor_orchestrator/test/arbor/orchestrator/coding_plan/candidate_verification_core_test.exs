@@ -223,6 +223,154 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCoreTest do
     end
   end
 
+  test "reviewed-validation success wrapper peels closed control fields for all three adapters" do
+    for {profile, result} <- [
+          {"default", default_result()},
+          {"cross_app", cross_result()},
+          {"security_regression", security_result("security_regression_validated")}
+        ] do
+      raw = stringify_json(result)
+      assert {:ok, raw_report} = verify(profile, raw)
+
+      # Success wrapper: interaction_outcome="" and note exactly "" (ReviewedValidation).
+      wrapped =
+        raw
+        |> Map.merge(%{
+          "interaction_outcome" => "",
+          "request_id" => "irq_reviewed_wrapper",
+          "note" => ""
+        })
+
+      assert {:ok, wrapped_report} = verify(profile, wrapped)
+      assert wrapped_report == raw_report
+      assert wrapped_report["status"] == "passed"
+
+      # Unattended authorize uses empty request_id.
+      unattended = Map.put(wrapped, "request_id", "")
+      assert {:ok, unattended_report} = verify(profile, unattended)
+      assert unattended_report == raw_report
+
+      # Transport-only serialized result (Engine `validation.result` JSON string).
+      assert {:ok, transport_report} = verify(profile, Jason.encode!(wrapped))
+      assert transport_report == raw_report
+
+      # Flat projection with transport duplicate + closed control fields.
+      # Prefer flat fields: transport is dropped without re-decoding large output.
+      flat_with_transport =
+        Map.put(wrapped, "result", Jason.encode!(wrapped))
+
+      assert {:ok, flat_report} = verify(profile, flat_with_transport)
+      assert flat_report == raw_report
+    end
+  end
+
+  test "malformed reviewed-validation wrapper metadata fails closed" do
+    raw = stringify_json(default_result())
+
+    partial =
+      Map.merge(raw, %{
+        "interaction_outcome" => "",
+        "request_id" => "irq_partial"
+      })
+
+    assert_invalid_evidence("default", partial)
+
+    bad_outcome =
+      Map.merge(raw, %{
+        "interaction_outcome" => "maybe",
+        "request_id" => "irq_bad",
+        "note" => ""
+      })
+
+    assert_invalid_evidence("default", bad_outcome)
+
+    # Success wrapper requires note exactly ""; non-empty notes are not peeled.
+    non_empty_note =
+      Map.merge(raw, %{
+        "interaction_outcome" => "",
+        "request_id" => "irq_note",
+        "note" => "approved after review"
+      })
+
+    assert_invalid_evidence("default", non_empty_note)
+
+    # request_id must be "" or pass ApprovalAnswer.validate_request_id/1.
+    bad_request_id =
+      Map.merge(raw, %{
+        "interaction_outcome" => "",
+        "request_id" => "irq bad id",
+        "note" => ""
+      })
+
+    assert_invalid_evidence("default", bad_request_id)
+
+    # Adversarial: full validator envelope fused with denied/rework is forged.
+    for outcome <- ~w(denied rework) do
+      forged =
+        Map.merge(raw, %{
+          "interaction_outcome" => outcome,
+          "request_id" => "irq_forged_#{outcome}",
+          "note" => "operator note"
+        })
+
+      assert_invalid_evidence("default", forged)
+    end
+
+    non_map_transport = Map.put(raw, "result", 12)
+    assert_invalid_evidence("default", non_map_transport)
+
+    assert_invalid_evidence("default", "not-json")
+    assert_invalid_evidence("default", Jason.encode!(["list"]))
+    assert_invalid_evidence("default", %{"result" => "not-json"})
+
+    # Nested/recursive transport wrappers decode at most one layer and fail closed.
+    nested_transport = %{
+      "result" => Jason.encode!(%{"result" => Jason.encode!(raw)})
+    }
+
+    assert_invalid_evidence("default", nested_transport)
+    assert_invalid_evidence("default", Jason.encode!(%{"result" => Jason.encode!(raw)}))
+
+    # Oversized sole transport is rejected before Jason.decode.
+    oversized = String.duplicate("x", 16_777_216 * 2 + 2_097_152 + 1)
+    assert_invalid_evidence("default", oversized)
+    assert_invalid_evidence("default", %{"result" => oversized})
+
+    control_only = %{
+      "interaction_outcome" => "denied",
+      "request_id" => "irq_denied",
+      "note" => "no"
+    }
+
+    assert_invalid_evidence("default", control_only)
+
+    # Unknown extras after peeling closed control fields remain fail-closed.
+    wrapped_extra =
+      raw
+      |> Map.merge(%{
+        "interaction_outcome" => "",
+        "request_id" => "irq_extra",
+        "note" => "",
+        "extra" => true
+      })
+
+    assert_invalid_evidence("default", wrapped_extra)
+
+    # Drifted candidate tree under a valid reviewed wrapper stays blocked.
+    drifted =
+      raw
+      |> Map.put("validated_tree_oid", String.duplicate("f", 40))
+      |> Map.merge(%{
+        "interaction_outcome" => "",
+        "request_id" => "irq_drift",
+        "note" => ""
+      })
+
+    assert {:ok, report} = verify("default", drifted)
+    assert report["status"] == "blocked"
+    assert "candidate_state_drifted" in Enum.map(report["diagnostics"], & &1["code"])
+  end
+
   test "raw stdout, stderr, feedback, excerpts, and feedback_json never enter the digest or report" do
     original = default_result()
 

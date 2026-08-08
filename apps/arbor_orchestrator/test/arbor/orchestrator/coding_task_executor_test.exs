@@ -1389,6 +1389,22 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     |> Map.put("validation", nil)
   end
 
+  # Live canary shape from task_85285befeb3a0c99f9773c104ae5cc8b: reviewed
+  # validation flattened under validation.*, including closed success-wrapper
+  # control fields (interaction_outcome="", note="") and the serialized transport
+  # projection at validation.result.
+  defp live_reviewed_flat_validation_context(action_result) do
+    wrapped =
+      Map.merge(action_result, %{
+        "interaction_outcome" => "",
+        "request_id" => "irq_live_reviewed_validation",
+        "note" => ""
+      })
+
+    flat_validation_context(wrapped)
+    |> Map.put("validation.result", Jason.encode!(wrapped))
+  end
+
   defp validation_check(overrides \\ %{}) do
     Map.merge(
       %{
@@ -4122,6 +4138,65 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
                "git-tree:" <> @verification_tree_oid
 
       assert result["validation"] == [validation]
+    end
+
+    # Live canary task_85285befeb3a0c99f9773c104ae5cc8b: graph finished
+    # approval_denied after passed approved mix_compile with protocol/validation
+    # rework counters and provider session 019fe353-6316-7bd3-be93-5ee4be97730b.
+    # Pre-fix (cfa9bf8e9) adapt_terminal_verification rejected the reviewed
+    # wrapper flat projection as invalid terminal evidence / generic runner failure.
+    test "security regression: live-shaped reviewed-validation flat context preserves approval_denied with passed verification" do
+      validation = validation_result("default")
+      provider_session = "019fe353-6316-7bd3-be93-5ee4be97730b"
+
+      live_overrides =
+        live_reviewed_flat_validation_context(validation)
+        |> Map.merge(%{
+          "status" => "approval_denied",
+          "error" => "approval_denied",
+          "approval_request_id" => "irq_live_commit_denied",
+          "approval_note" => "stop after validation",
+          "protocol_retry_count" => 1,
+          "validation_rework_count" => 1,
+          "worker_provider_session_id" => provider_session,
+          "worker_msg" => %{
+            "delivery_status" => "delivered",
+            "stop_reason" => "end_turn",
+            "session_id" => provider_session
+          },
+          "worker_status" => %{
+            "worker_session_id" => "worker_1",
+            "provider" => "codex",
+            "model" => "default",
+            "session_id" => provider_session
+          }
+        })
+
+      assert {:ok, result} =
+               run_with_profile_verification("default", validation, live_overrides)
+
+      assert result["status"] == "approval_denied"
+      assert result["canonical_status"] == "approval_denied"
+      assert result["error"] == "approval_denied"
+      assert result["approval_request_id"] == "irq_live_commit_denied"
+      assert result["approval_note"] == "stop after validation"
+      assert result["verification_report"]["status"] == "passed"
+      assert result["verification_report"]["profile"] == "default"
+
+      assert result["verification_report"]["candidate_ref"] ==
+               "git-tree:" <> @verification_tree_oid
+
+      assert [%{"passed" => true, "validated_tree_oid" => @verification_tree_oid} = projected] =
+               result["validation"]
+
+      assert projected["interaction_outcome"] == ""
+      assert projected["request_id"] == "irq_live_reviewed_validation"
+      assert projected["note"] == ""
+      refute Map.has_key?(projected, "result")
+      assert result["metrics"]["protocol_retry_count"] == 1
+      assert result["metrics"]["validation_rework_count"] == 1
+      assert result["worker_provider_session_id"] == provider_session
+      assert result["outcome"]["provider_session_id"] == provider_session
     end
 
     test "accepts passed verification for later approval and review terminals" do

@@ -2,6 +2,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCore do
   @moduledoc false
 
   alias Arbor.Contracts.Coding.{Diagnostic, ValidationCapacityHandoff, VerificationReport}
+  alias Arbor.Contracts.Comms.ApprovalAnswer
   alias Arbor.Orchestrator.CodingPlan.{ValidationCapacityTerminal, ValidationProgram}
 
   @max_raw_output_bytes 16_777_216
@@ -11,6 +12,9 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCore do
   @max_security_tests 256
   @max_count 10_000_000
   @max_evidence_bytes 256_000
+  # Serialized Engine transport of one validator result (stdout+stderr ceilings
+  # plus structured envelope / JSON overhead). Checked before Jason.decode.
+  @max_validation_result_transport_bytes @max_raw_output_bytes * 2 + 2_097_152
 
   @default_fields ~w[
     path exit_code passed stdout stderr feedback feedback_json validated_tree_oid validated_head
@@ -77,6 +81,11 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCore do
   @security_domain_failures ~w[candidate_tests_failed base_tests_passed]
   @cross_domain_failures ~w[compile_failed xref_failed test_compile_failed tests_failed]
 
+  # Closed success-path ReviewedValidation wrapper only. Nested validator
+  # evidence is emitted solely with interaction_outcome=""; denied/rework carry
+  # control fields alone. Engine flattens the closed set under validation.*.
+  @reviewed_control_fields ~w(interaction_outcome request_id note)
+
   @type verify_error ::
           :invalid_candidate_tree_oid | :invalid_observed_at | :invalid_validation_program
 
@@ -136,10 +145,111 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCore do
     end
   end
 
-  defp adapt("mix_compile_v1", result), do: adapt_default(result)
-  defp adapt("cross_app_v1", result), do: adapt_cross_app(result)
-  defp adapt("security_regression_v1", result), do: adapt_security(result)
-  defp adapt(_adapter, _result), do: :error
+  defp adapt(adapter, result) do
+    case recover_underlying_validator_result(result) do
+      {:ok, nested} -> adapt_recovered(adapter, nested)
+      :error -> :error
+    end
+  end
+
+  defp adapt_recovered("mix_compile_v1", result), do: adapt_default(result)
+  defp adapt_recovered("cross_app_v1", result), do: adapt_cross_app(result)
+  defp adapt_recovered("security_regression_v1", result), do: adapt_security(result)
+  defp adapt_recovered(_adapter, _result), do: :error
+
+  # Recover the exact compiler-pinned validator envelope from either:
+  # - raw legacy action results (passthrough)
+  # - coding_reviewed_validation *success* wrappers (interaction_outcome="")
+  # - Engine transport projections that include a serialized `result` duplicate
+  #
+  # Fail closed on partial/malformed wrapper metadata, non-success control
+  # outcomes fused with validator evidence, oversized transport, and nested
+  # result wrappers. Prefer flat projection: never decode a transport duplicate
+  # when nested fields are already present (avoids re-materializing large
+  # stdout/stderr). At most one bounded Jason.decode of a sole transport layer.
+  defp recover_underlying_validator_result(result) when is_binary(result) do
+    decode_sole_transport_once(result)
+  end
+
+  defp recover_underlying_validator_result(result)
+       when is_map(result) and not is_struct(result) do
+    case Map.fetch(result, "result") do
+      :error ->
+        peel_success_reviewed_wrapper(result)
+
+      {:ok, transport} when is_binary(transport) ->
+        rest = Map.delete(result, "result")
+
+        if map_size(rest) == 0 do
+          decode_sole_transport_once(transport)
+        else
+          # Flat projection already carries nested fields; drop the serialized
+          # transport duplicate without decoding large output again.
+          peel_success_reviewed_wrapper(rest)
+        end
+
+      {:ok, _other} ->
+        :error
+    end
+  end
+
+  defp recover_underlying_validator_result(_result), do: :error
+
+  defp decode_sole_transport_once(transport) when is_binary(transport) do
+    if byte_size(transport) > @max_validation_result_transport_bytes do
+      :error
+    else
+      case Jason.decode(transport) do
+        {:ok, map} when is_map(map) and not is_struct(map) ->
+          # One transport layer only — nested/recursive result wrappers fail closed.
+          if Map.has_key?(map, "result") do
+            :error
+          else
+            peel_success_reviewed_wrapper(map)
+          end
+
+        _other ->
+          :error
+      end
+    end
+  end
+
+  defp decode_sole_transport_once(_transport), do: :error
+
+  defp peel_success_reviewed_wrapper(result) when is_map(result) and not is_struct(result) do
+    present = Enum.count(@reviewed_control_fields, &Map.has_key?(result, &1))
+
+    cond do
+      present == 0 ->
+        {:ok, result}
+
+      present == length(@reviewed_control_fields) and success_reviewed_wrapper?(result) ->
+        {:ok, Map.drop(result, @reviewed_control_fields)}
+
+      true ->
+        :error
+    end
+  end
+
+  defp peel_success_reviewed_wrapper(_result), do: :error
+
+  # Only the success wrapper emitted with nested validator execution may peel.
+  # interaction_outcome denied/rework never carries a full validator envelope;
+  # fusing them is forged evidence and fails closed.
+  defp success_reviewed_wrapper?(result) do
+    result["interaction_outcome"] == "" and
+      success_reviewed_request_id?(result["request_id"]) and
+      result["note"] == ""
+  end
+
+  # Unattended authorize uses ""; approved paths use a real opaque request id.
+  defp success_reviewed_request_id?(""), do: true
+
+  defp success_reviewed_request_id?(request_id) when is_binary(request_id) do
+    match?({:ok, _}, ApprovalAnswer.validate_request_id(request_id))
+  end
+
+  defp success_reviewed_request_id?(_request_id), do: false
 
   defp adapt_default(result) do
     with {:ok, values, _style} <- exact_envelope(result, @default_fields),
@@ -581,8 +691,15 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCore do
     end
   end
 
-  defp normalize_security_capacity(_reason, _termination, _passed, _candidate, _base, _diagnostics),
-    do: :error
+  defp normalize_security_capacity(
+         _reason,
+         _termination,
+         _passed,
+         _candidate,
+         _base,
+         _diagnostics
+       ),
+       do: :error
 
   defp security_capacity_leg?(leg, diagnostic) when is_map(leg) and is_map(diagnostic) do
     leg["timed_out"] == true and map_size(diagnostic) > 0 and diagnostic["timed_out"] == true and

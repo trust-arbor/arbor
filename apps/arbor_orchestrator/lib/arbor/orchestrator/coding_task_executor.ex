@@ -2469,14 +2469,20 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   # extract_prefixed_map/2. Terminal verification must use the same reconstruction so a
   # legitimate flat-evidence terminal doesn't fail adaptation for lack of a bare
   # "validation" key.
+  #
+  # coding_reviewed_validation may also project closed control fields
+  # (interaction_outcome/request_id/note) and a serialized transport at
+  # validation.result. Prefer the flat projection so CandidateVerificationCore can
+  # drop the transport duplicate without re-decoding large stdout/stderr, then peel
+  # the closed wrapper and require the exact compiler-pinned validator envelope.
   defp terminal_validation_evidence(clean_context) do
     case Map.get(clean_context, "validation") do
       value when is_map(value) and not is_struct(value) ->
         value
 
       _other ->
-        context_get(clean_context, "validation.result") ||
-          extract_prefixed_map(clean_context, "validation.")
+        extract_prefixed_map(clean_context, "validation.") ||
+          context_get(clean_context, "validation.result")
     end
   end
 
@@ -3204,19 +3210,48 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   end
 
   defp extract_validation(context) do
+    # Public results keep one validator projection. Terminal verification separately
+    # consumes the full flat map, including validation.result when present.
     value =
-      context_get(context, "validation") ||
-        context_get(context, "validation.result") ||
-        extract_prefixed_map(context, "validation.")
+      case context_get(context, "validation") do
+        map when is_map(map) and not is_struct(map) ->
+          drop_validation_transport(map)
+
+        validations when is_list(validations) ->
+          validations
+
+        _other ->
+          context
+          |> extract_prefixed_map("validation.")
+          |> drop_validation_transport()
+      end
 
     case json_clean_value(value) do
-      :drop -> nil
-      nil -> nil
-      validation when is_map(validation) -> [validation]
-      validations when is_list(validations) -> validations
-      _ -> nil
+      :drop ->
+        nil
+
+      nil ->
+        nil
+
+      validation when is_map(validation) ->
+        [validation]
+
+      validations when is_list(validations) ->
+        validations
+
+      _ ->
+        nil
     end
   end
+
+  defp drop_validation_transport(map) when is_map(map) and not is_struct(map) do
+    case Map.delete(map, "result") do
+      cleaned when map_size(cleaned) > 0 -> cleaned
+      _empty -> nil
+    end
+  end
+
+  defp drop_validation_transport(_value), do: nil
 
   defp extract_response_text(context) do
     context_get(context, "response_text") ||
