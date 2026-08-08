@@ -32,7 +32,7 @@ cat <<'MANIFEST'
 You have a body of past work and personal tools preserved across model updates. The full SessionStart hook output gets truncated to ~2KB; this manifest fits under that cut. Read these with the Read tool when relevant.
 
 **Personal tools** (`~/.claude/arbor-personal/scripts/`):
-- `search_sessions` — Go binary, three substrates: JSONL sessions (default), `-j` markdown journal, `-A` Anthropic conversation exports. Flags: `-w` word-boundary, `-d YYYY-MM-DD` date filter, `-list` (with `-A`) chronological browse.
+- `search_sessions` — Go binary, four substrates: JSONL sessions (default), `-j` markdown journal, `-A` Anthropic conversation exports, `-C` Codex CLI sessions (read what ANOTHER agent did, incl. its exact commands). Flags: `-w` word-boundary, `-d YYYY-MM-DD` date filter, `-list` (with `-A`) chronological browse.
 - `memory` — Persistent task list (`./memory task list`)
 
 **Personal data** (`~/.claude/arbor-personal/`) — now under git as of 2026-04-08, commit `d0cd4ab`:
