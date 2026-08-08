@@ -145,7 +145,7 @@ defmodule Arbor.Signals.MemoryAgentContentPrivacyTest do
       {:ok, _} =
         MemoryCheckpointFake.start_link(
           name: MemoryCheckpointFake,
-          mode: :block_save,
+          mode: :ok,
           block_ms: 30_000,
           notify: self()
         )
@@ -154,6 +154,8 @@ defmodule Arbor.Signals.MemoryAgentContentPrivacyTest do
       Application.put_env(:arbor_signals, :checkpoint_store, MemoryCheckpointFake)
       restart_store()
       Store.clear()
+      # Arm blocking only after restart_store/1's anti-hang neutralize completes.
+      MemoryCheckpointFake.set_mode(:block_save)
 
       target = memory_signal(@target, :mem_shutdown)
       Store.put_sync(target)
@@ -352,7 +354,12 @@ defmodule Arbor.Signals.MemoryAgentContentPrivacyTest do
       Store.put_sync(target)
       Store.put_sync(survivor)
 
+      # Empty/unsynchronized checkpoint cannot override conclusive live presence.
+      # Compare calls before/after: Store setup already saves/loads signal_store.
+      calls_before = MemoryCheckpointFake.calls()
       assert {:ok, false} = Signals.memory_agent_content_absent?(@target, timeout_ms: 2_000)
+      assert MemoryCheckpointFake.calls() == calls_before
+
       assert :ok = Signals.delete_memory_agent_content(@target, timeout_ms: 2_000)
       assert {:ok, true} = Signals.memory_agent_content_absent?(@target, timeout_ms: 2_000)
 
@@ -397,15 +404,18 @@ defmodule Arbor.Signals.MemoryAgentContentPrivacyTest do
     end
 
     test "malformed load after dispatch is absence_indeterminate without mutation" do
-      target = memory_signal(@target, :mem_target)
-      Store.put_sync(target)
+      # Live must lack the target so checkpoint verification remains mandatory;
+      # conclusive live presence short-circuits before load.
+      survivor = memory_signal(@other, :mem_other)
+      Store.put_sync(survivor)
       MemoryCheckpointFake.set_snapshot(%{not: :valid})
       MemoryCheckpointFake.set_mode(:malformed_load)
 
       assert {:error, {:absence_indeterminate, @target}} =
                Signals.memory_agent_content_absent?(@target, timeout_ms: 2_000)
 
-      assert {:ok, _} = Store.get(target.id)
+      # Absence is read-only — survivor must not be mutated.
+      assert {:ok, _} = Store.get(survivor.id)
     end
 
     test "duplicate atom/string checkpoint keys never yield absence true" do
@@ -459,15 +469,18 @@ defmodule Arbor.Signals.MemoryAgentContentPrivacyTest do
       {:ok, _} =
         MemoryCheckpointFake.start_link(
           name: MemoryCheckpointFake,
-          mode: :block_save,
+          mode: :ok,
           block_ms: 30_000,
           notify: test
         )
 
       Application.put_env(:arbor_signals, :checkpoint_module, MemoryCheckpointFake)
       Application.put_env(:arbor_signals, :checkpoint_store, MemoryCheckpointFake)
+      # restart_store/1 neutralizes any blocking mode during terminate; arm
+      # :block_save only after restart + clear so killable tests actually block.
       restart_store()
       Store.clear()
+      MemoryCheckpointFake.set_mode(:block_save)
       :ok
     end
 

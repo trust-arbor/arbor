@@ -125,7 +125,10 @@ defmodule Arbor.Signals.Store.CheckpointIO.ReceiptCoreTest do
 
     test "coord-DOWN without result is fail_closed", ctx do
       r = arm(ctx)
-      {r, {:fail_closed_no_result, :exit}} = ReceiptCore.apply_event(r, {:coord_down, ctx.coord_mon})
+
+      {r, {:fail_closed_no_result, :exit}} =
+        ReceiptCore.apply_event(r, {:coord_down, ctx.coord_mon})
+
       {r, {:done, {:error, :exit}}} = ReceiptCore.complete_fail_closed(r, :exit)
       assert r.phase == :closed
     end
@@ -182,14 +185,20 @@ defmodule Arbor.Signals.Store.CheckpointIO.ReceiptCoreTest do
 
     test "one-shot: second coord_down is ignored", ctx do
       r = arm(ctx)
-      {r, {:fail_closed_no_result, :exit}} = ReceiptCore.apply_event(r, {:coord_down, ctx.coord_mon})
+
+      {r, {:fail_closed_no_result, :exit}} =
+        ReceiptCore.apply_event(r, {:coord_down, ctx.coord_mon})
+
       {r2, :ignore} = ReceiptCore.apply_event(r, {:coord_down, ctx.coord_mon})
       assert r2.coord_down
     end
 
     test "coord down while arming is dispatch_failed", ctx do
       r = ctx.receipt
-      {r, {:done, {:error, :dispatch_failed}}} = ReceiptCore.apply_event(r, {:coord_down, ctx.coord_mon})
+
+      {r, {:done, {:error, :dispatch_failed}}} =
+        ReceiptCore.apply_event(r, {:coord_down, ctx.coord_mon})
+
       assert r.phase == :closed
     end
 

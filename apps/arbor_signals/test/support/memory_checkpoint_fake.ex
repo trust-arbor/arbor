@@ -40,8 +40,20 @@ defmodule Arbor.Signals.Test.MemoryCheckpointFake do
 
   def stop(name \\ __MODULE__) do
     case Process.whereis(name) do
-      nil -> :ok
-      pid -> Agent.stop(pid)
+      nil ->
+        :ok
+
+      pid ->
+        # Linked fake may exit between whereis and stop (e.g. Store terminate
+        # races in on_exit); treat already-dead as success.
+        try do
+          Agent.stop(pid)
+        catch
+          :exit, {:noproc, _} -> :ok
+          :exit, {:normal, _} -> :ok
+          :exit, :noproc -> :ok
+          :exit, :normal -> :ok
+        end
     end
   end
 
@@ -102,7 +114,8 @@ defmodule Arbor.Signals.Test.MemoryCheckpointFake do
         do_save(name, id, snapshot)
 
       :exit_self ->
-        # Uncatchable kill — coordinator classifies worker DOWN without a result payload.
+        # Uncatchable kill — coordinator classifies worker DOWN without a
+        # result payload.
         Process.exit(self(), :kill)
 
       _other ->
@@ -131,7 +144,12 @@ defmodule Arbor.Signals.Test.MemoryCheckpointFake do
         case do_load(name, id) do
           {:ok, snapshot} when is_map(snapshot) ->
             # Return a different survivor set so equality fails.
-            {:ok, Map.put(snapshot, :stats, %{total_stored: -1, total_expired: 0, total_evicted: 0})}
+            {:ok,
+             Map.put(snapshot, :stats, %{
+               total_stored: -1,
+               total_expired: 0,
+               total_evicted: 0
+             })}
 
           other ->
             other
@@ -142,9 +160,14 @@ defmodule Arbor.Signals.Test.MemoryCheckpointFake do
           {:ok, snapshot} when is_map(snapshot) ->
             # Hide the *configured* snapshot content under string keys while the
             # atom view looks empty/clean — never invent a different agent id.
-            original_signals = Map.get(snapshot, :signals) || Map.get(snapshot, "signals") || %{}
-            original_order = Map.get(snapshot, :order) || Map.get(snapshot, "order") || []
-            original_stats = Map.get(snapshot, :stats) || Map.get(snapshot, "stats") || %{}
+            original_signals =
+              Map.get(snapshot, :signals) || Map.get(snapshot, "signals") || %{}
+
+            original_order =
+              Map.get(snapshot, :order) || Map.get(snapshot, "order") || []
+
+            original_stats =
+              Map.get(snapshot, :stats) || Map.get(snapshot, "stats") || %{}
 
             empty_stats = %{total_stored: 0, total_expired: 0, total_evicted: 0}
 

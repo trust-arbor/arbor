@@ -18,7 +18,9 @@ defmodule Arbor.Signals.Store.MemoryPrivacyCoreTest do
     test "rejects empty, non-binary, and oversized ids" do
       assert {:error, :invalid_agent_id} = MemoryPrivacyCore.validate_agent_id("")
       assert {:error, :invalid_agent_id} = MemoryPrivacyCore.validate_agent_id(123)
-      assert {:error, :invalid_agent_id} = MemoryPrivacyCore.validate_agent_id(String.duplicate("a", 256))
+
+      assert {:error, :invalid_agent_id} =
+               MemoryPrivacyCore.validate_agent_id(String.duplicate("a", 256))
     end
   end
 
@@ -27,8 +29,12 @@ defmodule Arbor.Signals.Store.MemoryPrivacyCoreTest do
       assert {:ok, 5_000} = MemoryPrivacyCore.validate_timeout_ms([])
       assert {:ok, 1} = MemoryPrivacyCore.validate_timeout_ms(timeout_ms: 1)
       assert {:ok, 60_000} = MemoryPrivacyCore.validate_timeout_ms(timeout_ms: 60_000)
-      assert {:error, :invalid_precondition} = MemoryPrivacyCore.validate_timeout_ms(timeout_ms: 0)
-      assert {:error, :invalid_precondition} = MemoryPrivacyCore.validate_timeout_ms(timeout_ms: 60_001)
+
+      assert {:error, :invalid_precondition} =
+               MemoryPrivacyCore.validate_timeout_ms(timeout_ms: 0)
+
+      assert {:error, :invalid_precondition} =
+               MemoryPrivacyCore.validate_timeout_ms(timeout_ms: 60_001)
     end
 
     test "rejects non-keyword lists without raising" do

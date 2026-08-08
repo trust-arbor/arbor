@@ -24,10 +24,16 @@ defmodule Arbor.Contracts.API.SignalsTest do
     source =
       File.read!(Path.expand("../../../../lib/arbor/contracts/api/signals.ex", __DIR__))
 
-    assert source =~ ~r/@type retained_memory_signal_delete_error ::[\s\S]*?:invalid_agent_id/
-    assert source =~ ~r/@type retained_memory_signal_delete_error ::[\s\S]*?:checkpoint_verification_failed/
+    assert source =~
+             ~r/@type retained_memory_signal_delete_error ::[\s\S]*?:invalid_agent_id/
+
+    assert source =~
+             ~r/@type retained_memory_signal_delete_error ::[\s\S]*?:checkpoint_verification_failed/
+
     assert source =~ ~r/\{:delete_indeterminate, agent_id\(\)\}/
     assert source =~ ~r/\{:absence_indeterminate, agent_id\(\)\}/
-    assert source =~ ~r/@type retained_memory_signal_absence_result ::[\s\S]*?\{:ok, true\}/
+
+    assert source =~
+             ~r/@type retained_memory_signal_absence_result ::[\s\S]*?\{:ok, true\}/
   end
 end

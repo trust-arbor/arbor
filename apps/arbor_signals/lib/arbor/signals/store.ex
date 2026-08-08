@@ -502,30 +502,39 @@ defmodule Arbor.Signals.Store do
   defp do_memory_agent_content_absent(state, agent_id, deadline_mono) do
     with :ok <- ensure_deadline(deadline_mono),
          :ok <- MemoryPrivacyCore.validate_live_state(state),
-         {:ok, live_has_target?} <- MemoryPrivacyCore.live_has_target?(state.signals, agent_id),
-         {:ok, mode} <- resolve_checkpoint_mode() do
-      case mode do
-        :live_only ->
-          {:ok, not live_has_target?}
+         {:ok, live_has_target?} <- MemoryPrivacyCore.live_has_target?(state.signals, agent_id) do
+      # Conclusive live presence disproves absence; an empty or unsynchronized
+      # checkpoint must not override it. Checkpoint verification remains
+      # mandatory only when live exact-target content is absent.
+      if live_has_target? do
+        {:ok, false}
+      else
+        case resolve_checkpoint_mode() do
+          {:ok, :live_only} ->
+            {:ok, true}
 
-        {:configured, module, store} ->
-          case run_load(module, store, deadline_mono) do
-            {:ok, loaded} ->
-              case MemoryPrivacyCore.validate_loaded_snapshot(loaded, agent_id) do
-                {:ok, cp_has_target?} ->
-                  {:ok, not live_has_target? and not cp_has_target?}
+          {:ok, {:configured, module, store}} ->
+            case run_load(module, store, deadline_mono) do
+              {:ok, loaded} ->
+                case MemoryPrivacyCore.validate_loaded_snapshot(loaded, agent_id) do
+                  {:ok, cp_has_target?} ->
+                    {:ok, not cp_has_target?}
 
-                {:error, :invalid_precondition} ->
-                  # Loaded snapshot malformed/ambiguous after dispatch.
-                  {:error, {:absence_indeterminate, agent_id}}
+                  {:error, :invalid_precondition} ->
+                    # Loaded snapshot malformed/ambiguous after dispatch.
+                    {:error, {:absence_indeterminate, agent_id}}
 
-                {:error, reason} ->
-                  {:error, reason}
-              end
+                  {:error, reason} ->
+                    {:error, reason}
+                end
 
-            {:error, _reason} ->
-              {:error, {:absence_indeterminate, agent_id}}
-          end
+              {:error, _reason} ->
+                {:error, {:absence_indeterminate, agent_id}}
+            end
+
+          {:error, reason} ->
+            {:error, reason}
+        end
       end
     end
   end
