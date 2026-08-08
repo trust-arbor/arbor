@@ -497,6 +497,51 @@ Derive them from the compiled graph with
 `arbor://action/council/review` and `arbor://action/consensus/decide_review` are
 also required.
 
+### Budgeting for human review
+
+**Human review time is not its own budget — it is the remainder.** The approval
+stage gets whatever is left of `budgets.wall_clock_ms` after the worker and
+validation finish, minus a settlement reserve. Nothing reserves it up front.
+
+Measured on a real run with the default 900,000 ms wall clock:
+
+| | |
+| --- | --- |
+| Worker + validation consumed | 470 s |
+| Left for the approver | 363 s |
+| Settlement reserve withheld | 72 s (`approval_completion_reserve_ms`) |
+
+The approval was killed at `run_deadline - approval_completion_reserve_ms` with
+`Action coding_reviewed_commit failed: approval timed out`. Six minutes was not
+enough to read a 230-line diff, verify that a newly-stricter function head was
+safe at its call sites, and re-run the changed tests.
+
+Note the incentive runs backwards: the slower and more complex the change, the
+less review time remains — yet that is exactly the change that needs the most.
+
+If a plan is human-gated (`review_profile: "human_required"`, or `binding` where
+you intend to inspect the candidate), budget wall clock for **both** phases:
+
+```json
+{
+  "budgets": {
+    "wall_clock_ms": 5400000,
+    "inactivity_timeout_ms": 600000
+  }
+}
+```
+
+`BudgetPolicy` caps the desired approval share at 300,000 ms, so a larger wall
+clock buys at most five minutes at the approval stage — but it stops
+implementation from eating the review window entirely.
+
+Nothing is destroyed on timeout: the workspace is `retained` and the branch
+`preserved` (24 h expiry), so a timed-out approval costs a worker run, not work.
+The candidate can be reviewed offline and integrated manually.
+
+`ReviewedCommit` also carries `@default_approval_timeout 60_000`, but that is a
+fallback for non-DOT consumers; the compiled coding path does not use it.
+
 ### Reading a council verdict
 
 Two known sharp edges when interpreting results:
