@@ -31,7 +31,6 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
     acp_send_message
     acp_session_status
     acp_close_session
-    mix_compile
     coding_reviewed_validation
     coding_worker_terminal_parse
     coding_reviewed_commit
@@ -620,10 +619,16 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
                 "I looked around and decided nothing needed changing."
 
               {:no_changes, _} ->
-                advisory_terminal("declined", "No workspace changes were necessary for this task.")
+                advisory_terminal(
+                  "declined",
+                  "No workspace changes were necessary for this task."
+                )
 
               {:validation_failed, 0} ->
-                advisory_terminal("implemented", "First pass attempted a fix; compile still broken.")
+                advisory_terminal(
+                  "implemented",
+                  "First pass attempted a fix; compile still broken."
+                )
 
               {:validation_failed, _} ->
                 advisory_terminal("implemented", "Second pass still leaves validation failing.")
@@ -1004,8 +1009,8 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
     end
 
     defp reviewed_validation_response(scenario, counters, state, _args) do
-      case scenario do
-        :validation_approval_rework when Map.get(counters, :validate, 0) == 0 ->
+      cond do
+        scenario == :validation_approval_rework and Map.get(counters, :validate, 0) == 0 ->
           Agent.update(state, fn s ->
             %{s | counters: Map.put(s.counters, :validate, Map.get(s.counters, :validate, 0) + 1)}
           end)
@@ -1017,7 +1022,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
              note: "fix the failing assertion"
            }}
 
-        :validation_approval_denied ->
+        scenario == :validation_approval_denied ->
           {:ok,
            %{
              interaction_outcome: "denied",
@@ -1025,7 +1030,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
              note: "too risky"
            }}
 
-        :validation_approval_unknown ->
+        scenario == :validation_approval_unknown ->
           {:ok,
            %{
              interaction_outcome: "maybe",
@@ -1033,7 +1038,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
              note: "???"
            }}
 
-        _ ->
+        true ->
           case validate_response(scenario, counters, state) do
             {:ok, result} when is_map(result) ->
               {:ok,
@@ -1050,6 +1055,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
 
     defp worker_terminal_parse_response(scenario, counters, state, args) do
       n = Map.get(counters, :terminal_parse, 0)
+
       Agent.update(state, fn s -> %{s | counters: Map.put(s.counters, :terminal_parse, n + 1)} end)
 
       text = to_string(Map.get(args, "text") || Map.get(args, :text) || "")
@@ -1104,8 +1110,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
         summary: nil,
         protocol_error: code,
         text_byte_size: byte_size(text),
-        text_sha256:
-          if(text == "", do: nil, else: "sha256:" <> String.duplicate("a", 64))
+        text_sha256: if(text == "", do: nil, else: "sha256:" <> String.duplicate("a", 64))
       }
     end
 
@@ -1627,7 +1632,9 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       authorization: false,
       actions_executor: FakeActionsExecutor,
       initial_values: initial,
-      max_steps: Keyword.get(engine_opts, :max_steps, 200),
+      # Valid multi-cycle review and format-repair fixtures now traverse more
+      # reviewed nodes; retain a bounded guard with enough room for the graph.
+      max_steps: Keyword.get(engine_opts, :max_steps, 400),
       sleep_fn: fn _ -> :ok end
     ]
 
@@ -2075,7 +2082,10 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       refute Map.has_key?(graph.nodes, "reset_worker_turn_protocol_retry_count")
       refute Map.has_key?(graph.nodes, "status_declined")
       assert graph.nodes["parse_worker_terminal"]
-      assert graph.nodes["parse_worker_terminal"].attrs["action"] == "coding_worker_terminal_parse"
+
+      assert graph.nodes["parse_worker_terminal"].attrs["action"] ==
+               "coding_worker_terminal_parse"
+
       assert graph.nodes["check_protocol_retry_budget"]
       assert graph.nodes["inc_protocol_retry_count"]
       assert graph.nodes["build_protocol_format_repair_prompt"]
@@ -2514,9 +2524,10 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
     test "narrative worker text with unchanged workspace returns no_changes" do
       assert {{:ok, result}, calls} = run_fixture(:narrative_no_changes)
       assert result.context["status"] == "no_changes"
-      assert result.context["protocol_retry_count"] == "0"
+      assert result.context["protocol_retry_count"] in [1, "1"]
       assert called?(calls, "coding_workspace_inspect")
-      assert_single_worker_session(calls, 1)
+      assert_single_worker_session(calls, 2)
+      assert called_with_prompt?(calls, "FORMAT REPAIR ONLY")
       assert_closed_and_released(calls)
       assert_json_clean_context(result.context)
       assert_opaque_handles(result.context)

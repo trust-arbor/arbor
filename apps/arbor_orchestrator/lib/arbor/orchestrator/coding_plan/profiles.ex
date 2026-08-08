@@ -284,15 +284,12 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
   @allowed_handlers Enum.sort(~w[start exit transform exec branch gate])
   @allowed_exec_targets ["action"]
 
-  @default_required_actions Enum.sort(["mix_compile" | @common_required_actions])
-  @security_required_actions Enum.sort([
-                               "coding_security_regression_validate"
-                               | @common_required_actions
-                             ])
-  @cross_app_required_actions Enum.sort([
-                                "coding_cross_app_validate"
-                                | @common_required_actions
-                              ])
+  # Graph inventory contains only the reviewed wrapper. Profile-selected nested
+  # validators are compiler pins and execution-manifest dependencies, never
+  # graph actions or semantic-policy allowlist entries.
+  @default_required_actions @common_required_actions
+  @security_required_actions @common_required_actions
+  @cross_app_required_actions @common_required_actions
 
   # Closed, sorted action-placement contracts. Node identity pins exact
   # multiplicity; required_dominators / review_required_dominators /
@@ -373,16 +370,12 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                                   "node_id" => "implement",
                                   "action" => "acp_send_message",
                                   "required_dominators" => [
+                                    "capture_pre_turn_workspace",
+                                    "check_pre_turn_workspace_exists",
                                     "open_worker"
                                   ],
                                   "review_required_dominators" => [],
-                                  # Logical-turn capture or format-only repair may own the send.
-                                  "required_dominator_sets" => [
-                                    [
-                                      "build_protocol_format_repair_prompt",
-                                      "capture_pre_turn_workspace"
-                                    ]
-                                  ]
+                                  "required_dominator_sets" => []
                                 },
                                 %{
                                   "node_id" => "parse_worker_terminal",

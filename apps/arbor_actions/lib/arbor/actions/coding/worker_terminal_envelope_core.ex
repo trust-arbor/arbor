@@ -253,7 +253,8 @@ defmodule Arbor.Actions.Coding.WorkerTerminalEnvelopeCore do
        "summary" => nil,
        "protocol_error" => code,
        "text_byte_size" => if(is_binary(original), do: byte_size(original), else: 0),
-       "text_sha256" => if(is_binary(original) and original != "", do: sha256_hex(original), else: nil)
+       "text_sha256" =>
+         if(is_binary(original) and original != "", do: sha256_hex(original), else: nil)
      }}
   end
 

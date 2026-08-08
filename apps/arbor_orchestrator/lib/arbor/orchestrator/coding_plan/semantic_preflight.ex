@@ -30,6 +30,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
   @max_attribute_container_bytes 131_072
   @max_serialized_attributes_bytes 1_048_576
 
+  @protocol_format_repair_prompt ~s(FORMAT REPAIR ONLY. Do not edit files and do not re-implement the task. Your previous response was not valid protocol JSON. Respond with ONLY one valid JSON object and no prose or Markdown: {"status":"implemented","summary":"what changed"} or {"status":"declined","summary":"why no change was made"}. Optional summary must be a string. Arbor treats this object as advisory only and decides the outcome from the owned workspace.)
+
   @required_policy_keys ~w(
     allowed_handlers
     allowed_exec_targets
@@ -2078,8 +2080,64 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
          "source_key" => "worker_msg.session_id",
          "output_key" => "worker_provider_session_id"
        }},
+      {"init_protocol_retry_count",
+       %{
+         "type" => "transform",
+         "transform" => "constant",
+         "expression" => "0",
+         "output_key" => "protocol_retry_count"
+       }},
       {"check_worker_stop_reason",
        %{"type" => "branch", "shape" => "diamond", "fan_out" => "false"}},
+      {"route_after_end_turn", %{"type" => "branch", "shape" => "diamond", "fan_out" => "false"}},
+      {"parse_worker_terminal",
+       %{
+         "type" => "exec",
+         "target" => "action",
+         "action" => "coding_worker_terminal_parse",
+         "context_keys" => "worker_msg.text",
+         "output_prefix" => "worker_terminal",
+         "max_retries" => "0"
+       }},
+      {"route_worker_terminal_valid",
+       %{"type" => "branch", "shape" => "diamond", "fan_out" => "false"}},
+      {"check_protocol_retry_budget",
+       %{"type" => "branch", "shape" => "diamond", "fan_out" => "false"}},
+      {"inc_protocol_retry_count",
+       %{
+         "type" => "transform",
+         "transform" => "increment",
+         "source_key" => "protocol_retry_count",
+         "output_key" => "protocol_retry_count"
+       }},
+      {"build_protocol_format_repair_prompt",
+       %{
+         "type" => "transform",
+         "transform" => "constant",
+         "expression" => @protocol_format_repair_prompt,
+         "output_key" => "prompt"
+       }},
+      {"hoist_worker_terminal_status",
+       %{
+         "type" => "transform",
+         "transform" => "identity",
+         "source_key" => "worker_terminal.status",
+         "output_key" => "worker_terminal_status"
+       }},
+      {"hoist_worker_terminal_summary",
+       %{
+         "type" => "transform",
+         "transform" => "identity",
+         "source_key" => "worker_terminal.summary",
+         "output_key" => "worker_terminal_summary"
+       }},
+      {"mark_protocol_invalid_evidence",
+       %{
+         "type" => "transform",
+         "transform" => "identity",
+         "source_key" => "worker_terminal.protocol_error",
+         "output_key" => "worker_terminal_protocol_error"
+       }},
       {"inspect_workspace",
        %{
          "type" => "exec",
@@ -2097,6 +2155,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       {"open_worker", "hoist_worker_session_id", "outcome=success"},
       {"hoist_worker_session_id", "hoist_worker_provider_session_id", nil},
       {"hoist_worker_provider_session_id", first_prompt, nil},
+      {"init_total_rework_count", "init_protocol_retry_count", nil},
+      {"init_protocol_retry_count", "init_worker_send_recovery_count", nil},
       {"build_implement_prompt", "capture_pre_turn_workspace", nil},
       {"capture_pre_turn_workspace", "status_pipeline_error_then_close", "outcome=fail"},
       {"capture_pre_turn_workspace", "check_pre_turn_workspace_exists", "outcome=success"},
@@ -2108,9 +2168,26 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       {"implement", "check_worker_delivery_status", "outcome=success"},
       {"check_worker_delivery_status", "hoist_worker_provider_session_id_from_message", nil},
       {"hoist_worker_provider_session_id_from_message", "check_worker_stop_reason", nil},
-      {"check_worker_stop_reason", "inspect_workspace",
+      {"check_worker_stop_reason", "route_after_end_turn",
        "context.worker_msg.stop_reason=end_turn"},
       {"check_worker_stop_reason", "error_worker_stop_reason_not_end_turn", nil},
+      {"route_after_end_turn", "inspect_workspace", "context.worker_phase=design"},
+      {"route_after_end_turn", "parse_worker_terminal", nil},
+      {"parse_worker_terminal", "status_pipeline_error_then_close", "outcome=fail"},
+      {"parse_worker_terminal", "route_worker_terminal_valid", "outcome=success"},
+      {"route_worker_terminal_valid", "hoist_worker_terminal_status",
+       "context.worker_terminal.valid=true"},
+      {"route_worker_terminal_valid", "check_protocol_retry_budget",
+       "context.worker_terminal.valid=false"},
+      {"hoist_worker_terminal_status", "hoist_worker_terminal_summary", nil},
+      {"hoist_worker_terminal_summary", "inspect_workspace", nil},
+      {"check_protocol_retry_budget", "mark_protocol_invalid_evidence",
+       "context.protocol_retry_count>=1"},
+      {"check_protocol_retry_budget", "inc_protocol_retry_count",
+       "context.protocol_retry_count<1"},
+      {"mark_protocol_invalid_evidence", "inspect_workspace", nil},
+      {"inc_protocol_retry_count", "build_protocol_format_repair_prompt", nil},
+      {"build_protocol_format_repair_prompt", "implement", nil},
       {"inspect_workspace", "status_pipeline_error_then_close", "outcome=fail"},
       {"inspect_workspace", "check_workspace_exists", "outcome=success"},
       {"check_workspace_exists", "error_workspace_missing", "context.inspect.exists!=true"},
@@ -2125,9 +2202,26 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     errors = check_worker_open_continuity(errors, graph, continuity)
     errors = check_worker_close_continuity(errors, graph, continuity)
 
-    Enum.reduce(expected_edges, errors, fn {from, to, condition}, acc ->
-      require_worker_continuity_edge(acc, graph, from, to, condition)
-    end)
+    errors =
+      Enum.reduce(expected_edges, errors, fn {from, to, condition}, acc ->
+        require_worker_continuity_edge(acc, graph, from, to, condition)
+      end)
+
+    expected_writers = ["inc_protocol_retry_count", "init_protocol_retry_count"]
+    actual_writers = writer_nodes(graph, "output_key", "protocol_retry_count")
+
+    if actual_writers == expected_writers do
+      errors
+    else
+      [
+        error("worker_protocol_retry_writer_violation", nil, %{
+          "context_key" => "protocol_retry_count",
+          "expected_nodes" => expected_writers,
+          "actual_nodes" => actual_writers
+        })
+        | errors
+      ]
+    end
   end
 
   defp check_immutable_context_writers(errors, graph) do
@@ -4346,7 +4440,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
           "context.validation.interaction_outcome=\"\"&&context.validation.reason=validation_capacity_exceeded"},
          {"check_validation_passed",
           "context.validation.interaction_outcome=\"\"&&context.validation.reason!=validation_capacity_exceeded"},
-         {"hoist_validation_approval_request_id", "context.validation.interaction_outcome=rework"},
+         {"hoist_validation_approval_request_id",
+          "context.validation.interaction_outcome=rework"},
          {"hoist_validation_approval_request_id_denied",
           "context.validation.interaction_outcome=denied"},
          {"error_validation_interaction_invalid", nil}

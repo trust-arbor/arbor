@@ -668,7 +668,18 @@ defmodule Arbor.Actions.Coding.ReviewedValidation do
   end
 
   defp configured_approval_timeout do
-    case Application.get_env(:arbor_actions, :approval_timeout_ms) do
+    configured =
+      Application.get_env(
+        :arbor_actions,
+        :approval_timeout_ms,
+        Application.get_env(
+          :arbor_orchestrator,
+          :approval_timeout_ms,
+          @default_approval_timeout
+        )
+      )
+
+    case configured do
       n when is_integer(n) and n > 0 -> n
       _ -> @default_approval_timeout
     end

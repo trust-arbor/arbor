@@ -261,9 +261,9 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
   test "template stays within reviewed DOT source, node, and edge ceilings", ctx do
     graph = parse!(ctx.template_source)
 
-    assert byte_size(ctx.template_source) == 82_988
-    assert map_size(graph.nodes) == 238
-    assert length(graph.edges) == 345
+    assert byte_size(ctx.template_source) == 89_061
+    assert map_size(graph.nodes) == 253
+    assert length(graph.edges) == 367
     assert byte_size(ctx.template_source) <= 262_144
     assert map_size(graph.nodes) <= 256
     assert length(graph.edges) <= 512
@@ -1044,6 +1044,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert node_attrs(graph, "validate")["param.pinned_action"] == "mix_compile"
     assert node_attrs(graph, "validate")["param.pinned_profile_id"] == "default"
     assert is_binary(node_attrs(graph, "validate")["param.pinned_params_json"])
+
     assert {:ok, default_pinned} =
              Jason.decode(node_attrs(graph, "validate")["param.pinned_params_json"])
 
@@ -1473,9 +1474,14 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
 
     assert compilation.initial_values["timeout"] == 900_000
     assert compilation.initial_values["test_paths"] == Enum.sort(requested_paths)
-    assert "coding_security_regression_validate" in compilation.manifest["action_names"]
+    assert "coding_reviewed_validation" in compilation.manifest["action_names"]
+    refute "coding_security_regression_validate" in compilation.manifest["action_names"]
     refute "mix_compile" in compilation.manifest["action_names"]
     refute "mix_test" in compilation.manifest["action_names"]
+
+    assert Enum.any?(compilation.execution_manifest["actions"], fn action ->
+             action["name"] == "coding_security_regression_validate"
+           end)
 
     assert "arbor://action/coding/security_regression/validate" in compilation.execution_manifest[
              "capability_uris"

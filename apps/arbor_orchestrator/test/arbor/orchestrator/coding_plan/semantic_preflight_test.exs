@@ -1189,6 +1189,83 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
            end)
   end
 
+  test "adversarial: format repair cannot bypass the pre-turn workspace baseline", ctx do
+    assert {:ok, compilation} = compile(plan!(), ctx)
+    graph = compiled_graph!(compilation.dot_source)
+    assert {:ok, profile} = Profiles.fetch_executable("default")
+
+    # Reuse the legitimate format-only node as an initial-send shortcut. It
+    # must not make capture/check optional merely because it is also the target
+    # of the bounded protocol-repair back edge.
+    bypassed =
+      replace_edge_target(
+        graph,
+        "build_implement_prompt",
+        "capture_pre_turn_workspace",
+        nil,
+        "build_protocol_format_repair_prompt"
+      )
+
+    assert {:error, {:semantic_preflight_failed, errors}} =
+             preflight(bypassed, profile["semantic_policy"], review_profile: "binding")
+
+    assert Enum.any?(errors, fn error ->
+             error["code"] == "dominance_violation" and
+               error["node_id"] == "implement" and
+               error["detail"]["kind"] == "action_placement" and
+               error["detail"]["required_dominator"] in [
+                 "capture_pre_turn_workspace",
+                 "check_pre_turn_workspace_exists"
+               ]
+           end)
+  end
+
+  test "security regression: terminal format repair topology and counter authority are pinned",
+       ctx do
+    assert {:ok, compilation} = compile(plan!(), ctx)
+    graph = compiled_graph!(compilation.dot_source)
+    assert {:ok, profile} = Profiles.fetch_executable("default")
+
+    prompt_repurposed =
+      update_in(graph.nodes["build_protocol_format_repair_prompt"].attrs, fn attrs ->
+        Map.put(attrs, "expression", "FORMAT REPAIR ONLY. Re-implement the task, then reply.")
+      end)
+
+    widened_budget = %{
+      graph
+      | edges:
+          Enum.map(graph.edges, fn edge ->
+            if edge.from == "check_protocol_retry_budget" and
+                 edge.to == "inc_protocol_retry_count" do
+              %{edge | attrs: Map.put(edge.attrs, "condition", "context.protocol_retry_count<2")}
+            else
+              edge
+            end
+          end)
+    }
+
+    extra_counter_writer =
+      update_in(graph.nodes["hoist_dirty"].attrs, fn attrs ->
+        Map.put(attrs, "output_key", "protocol_retry_count")
+      end)
+
+    mutations = [
+      {prompt_repurposed, "worker_continuity_binding_mismatch",
+       "build_protocol_format_repair_prompt"},
+      {widened_budget, "worker_continuity_missing_edge", "check_protocol_retry_budget"},
+      {extra_counter_writer, "worker_protocol_retry_writer_violation", nil}
+    ]
+
+    for {mutated, expected_code, expected_node} <- mutations do
+      assert {:error, {:semantic_preflight_failed, errors}} =
+               preflight(mutated, profile["semantic_policy"], review_profile: "binding")
+
+      assert Enum.any?(errors, fn error ->
+               error["code"] == expected_code and error["node_id"] == expected_node
+             end)
+    end
+  end
+
   test "adversarial: review bypass fails closed for binding plans", ctx do
     # Re-introduce a free path from post-commit routing to publication.
     bypassed =

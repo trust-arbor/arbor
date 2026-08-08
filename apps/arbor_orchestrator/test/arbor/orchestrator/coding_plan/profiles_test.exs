@@ -175,7 +175,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
       assert is_map(policy)
       assert "git_pr" in policy["allowed_actions"]
       assert "git_pr" in policy["optional_actions"]
-      assert "mix_compile" in policy["allowed_actions"]
+      assert "coding_reviewed_validation" in policy["allowed_actions"]
+      refute "mix_compile" in policy["allowed_actions"]
       refute "mix_test" in policy["allowed_actions"]
       assert "validate" in policy["mandatory_gate_nodes"]
       assert "review_change" == policy["review_gate"]
@@ -215,7 +216,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
       assert security["semantic_policy"]["post_validation_exact_head_check"] ==
                "post_validation_committed_change"
 
-      assert "mix_compile" in default["required_actions"]
+      assert "coding_reviewed_validation" in default["required_actions"]
+      refute "mix_compile" in default["required_actions"]
       assert "coding_design_envelope_parse" in default["required_actions"]
       assert "coding_design_artifact_capture" in default["required_actions"]
       assert "coding_design_artifact_load" in default["required_actions"]
@@ -224,7 +226,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
       assert "coding_workspace_inspect" in default["required_actions"]
       assert "coding_workspace_committed_change" in default["required_actions"]
       refute "mix_test" in default["required_actions"]
-      assert "coding_security_regression_validate" in security["required_actions"]
+      assert "coding_reviewed_validation" in security["required_actions"]
+      refute "coding_security_regression_validate" in security["required_actions"]
       refute "mix_test" in security["required_actions"]
       refute "mix_compile" in security["required_actions"]
 
@@ -318,10 +321,13 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
              }
 
       assert cross_app["semantic_policy"]["validation_profile"] == "cross_app"
-      assert "coding_cross_app_validate" in cross_app["required_actions"]
+      assert "coding_reviewed_validation" in cross_app["required_actions"]
+      refute "coding_cross_app_validate" in cross_app["required_actions"]
       refute "mix_compile" in cross_app["required_actions"]
       refute "mix_test" in cross_app["required_actions"]
-      assert "coding_cross_app_validate" in cross_app["semantic_policy"]["allowed_actions"]
+      assert "coding_reviewed_validation" in cross_app["semantic_policy"]["allowed_actions"]
+
+      refute "coding_cross_app_validate" in cross_app["semantic_policy"]["allowed_actions"]
 
       # Per-op intensive ceiling vs aggregate stage max are independent; both min with wall-clock.
       assert {:ok, 900_000} = Profiles.validation_timeout(cross_app, 900_000)
@@ -573,17 +579,20 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
       assert :ok = Profiles.validate_requirements("default", graph)
       assert :ok = Profiles.validate_requirements(graph, "default")
 
-      {mix_node_id, _node} =
+      {validation_node_id, _node} =
         Enum.find(graph.nodes, fn {_id, node} ->
-          node.attrs["action"] == "mix_compile"
+          node.attrs["action"] == "coding_reviewed_validation"
         end)
 
-      graph_without_compile = %{graph | nodes: Map.delete(graph.nodes, mix_node_id)}
+      graph_without_validation = %{graph | nodes: Map.delete(graph.nodes, validation_node_id)}
 
       assert {:error,
               {:missing_requirements,
-               %{"missing_nodes" => [], "missing_actions" => ["mix_compile"]}}} =
-               Profiles.validate_requirements("default", graph_without_compile)
+               %{
+                 "missing_nodes" => [],
+                 "missing_actions" => ["coding_reviewed_validation"]
+               }}} =
+               Profiles.validate_requirements("default", graph_without_validation)
     end
 
     test "reports all missing requirements in sorted lists" do

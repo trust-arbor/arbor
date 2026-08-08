@@ -40,7 +40,9 @@ defmodule Arbor.Actions.Coding.ReviewedValidationTest do
         Application.get_env(:arbor_security, :use_interaction_router_for_approval),
       signing_required: Application.get_env(:arbor_security, :capability_signing_required),
       identity_verification: Application.get_env(:arbor_security, :identity_verification),
-      approval_timeout: Application.get_env(:arbor_actions, :approval_timeout_ms)
+      approval_timeout: Application.get_env(:arbor_actions, :approval_timeout_ms),
+      orchestrator_approval_timeout:
+        Application.get_env(:arbor_orchestrator, :approval_timeout_ms)
     }
 
     Application.put_env(:arbor_trust, :approval_guard_enabled, true)
@@ -63,6 +65,12 @@ defmodule Arbor.Actions.Coding.ReviewedValidationTest do
       restore_env(:arbor_security, :capability_signing_required, previous.signing_required)
       restore_env(:arbor_security, :identity_verification, previous.identity_verification)
       restore_env(:arbor_actions, :approval_timeout_ms, previous.approval_timeout)
+
+      restore_env(
+        :arbor_orchestrator,
+        :approval_timeout_ms,
+        previous.orchestrator_approval_timeout
+      )
     end)
 
     :ok
@@ -227,9 +235,13 @@ defmodule Arbor.Actions.Coding.ReviewedValidationTest do
 
     # Nested Mix.Compile may fail on a temp path; the attempt is still counted.
     _result = Task.await(task, 10_000)
-    # Signals deliver async — wait for the nested attempt notification.
+    # Actions.execute_action/3 and Mix.Compile.run/2 each emit one started
+    # signal. Exactly two proves one nested invocation; four would expose a
+    # duplicate execution.
     assert_receive {:nested_attempt, "mix_compile"}, 5_000
-    assert :counters.get(nested_attempts, 1) == 1
+    assert_receive {:nested_attempt, "mix_compile"}, 5_000
+    refute_receive {:nested_attempt, "mix_compile"}, 200
+    assert :counters.get(nested_attempts, 1) == 2
     # Authorize + execute each mint one fresh exact-resource signed request.
     assert :counters.get(signer_calls, 1) == 2
 
@@ -334,6 +346,24 @@ defmodule Arbor.Actions.Coding.ReviewedValidationTest do
     assert :counters.get(signer_calls, 1) == 1
   end
 
+  test "approval wait falls back to the orchestrator-owned timeout" do
+    agent_id = unique_agent("orchestrator_timeout")
+    grant_mix_compile!(agent_id)
+
+    Application.delete_env(:arbor_actions, :approval_timeout_ms)
+    Application.put_env(:arbor_orchestrator, :approval_timeout_ms, 100)
+
+    context =
+      agent_id
+      |> build_context(build_signer(agent_id))
+      |> Map.delete(:approval_timeout_ms)
+
+    task = Task.async(fn -> public_run(agent_id, default_pin_params(), context) end)
+
+    assert {:ok, {:error, reason}} = Task.yield(task, 1_500)
+    assert reason =~ "timeout"
+  end
+
   test "public boundary: clamped timeout binding reaches nested default validator" do
     agent_id = unique_agent("timeout_bind")
     grant_mix_compile!(agent_id)
@@ -348,14 +378,16 @@ defmodule Arbor.Actions.Coding.ReviewedValidationTest do
                name = signal.data[:action] || signal.data["action"]
 
                if name == "mix_compile" do
-                 # First started in a nested attempt (execute_action) carries full params.
-                 if :counters.get(nested_attempts, 1) == 0 do
-                   :counters.add(nested_attempts, 1, 1)
+                 :counters.add(nested_attempts, 1, 1)
+
+                 if :counters.get(nested_attempts, 1) == 1 do
                    params = signal.data[:params] || signal.data["params"] || %{}
                    timeout = params[:timeout] || params["timeout"]
                    Agent.update(seen, fn _ -> timeout end)
-                   send(parent, {:nested_started, timeout})
                  end
+
+                 params = signal.data[:params] || signal.data["params"] || %{}
+                 send(parent, {:nested_started, params[:timeout] || params["timeout"]})
                end
 
                :ok
@@ -380,12 +412,15 @@ defmodule Arbor.Actions.Coding.ReviewedValidationTest do
 
     _ = Task.await(task, 10_000)
     assert_receive {:nested_started, 1_111}, 5_000
+    assert_receive {:nested_started, 1_111}, 5_000
+    refute_receive {:nested_started, _}, 200
     assert Agent.get(seen, & &1) == 1_111
-    assert :counters.get(nested_attempts, 1) == 1
+    assert :counters.get(nested_attempts, 1) == 2
   end
 
   test "public boundary: stage_timeout 222222 reaches nested security validator on approve" do
     agent_id = unique_agent("stage_bind")
+    grant_reviewed_validation!(agent_id)
 
     assert {:ok, cap} =
              Arbor.Security.grant(
@@ -411,9 +446,13 @@ defmodule Arbor.Actions.Coding.ReviewedValidationTest do
 
                  # execute_action emits full nested params (including stage_timeout);
                  # the action's own started signal only carries attestation id.
-                 if not is_nil(stage) and :counters.get(nested_attempts, 1) == 0 do
+                 if not is_nil(stage) do
                    :counters.add(nested_attempts, 1, 1)
-                   Agent.update(seen, fn _ -> stage end)
+
+                   if :counters.get(nested_attempts, 1) == 1 do
+                     Agent.update(seen, fn _ -> stage end)
+                   end
+
                    send(parent, {:nested_stage_timeout, stage})
                  end
                end
@@ -448,6 +487,7 @@ defmodule Arbor.Actions.Coding.ReviewedValidationTest do
 
     _ = Task.await(task, 10_000)
     assert_receive {:nested_stage_timeout, 222_222}, 5_000
+    refute_receive {:nested_stage_timeout, _}, 200
     assert Agent.get(seen, & &1) == 222_222
     assert :counters.get(nested_attempts, 1) == 1
   end
@@ -509,6 +549,8 @@ defmodule Arbor.Actions.Coding.ReviewedValidationTest do
   end
 
   defp grant_mix_compile!(agent_id) do
+    grant_reviewed_validation!(agent_id)
+
     assert {:ok, cap} =
              Arbor.Security.grant(
                principal: agent_id,
@@ -520,9 +562,20 @@ defmodule Arbor.Actions.Coding.ReviewedValidationTest do
     cap
   end
 
-  # Count one nested authorize_and_execute attempt. execute_action and the
-  # nested action each emit action.started; only the first increments.
-  # Signals are async — callers must assert_receive {:nested_attempt, name}.
+  defp grant_reviewed_validation!(agent_id) do
+    assert {:ok, cap} =
+             Arbor.Security.grant(
+               principal: agent_id,
+               resource: "arbor://action/coding/reviewed_validation",
+               constraints: %{}
+             )
+
+    on_exit(fn -> Arbor.Security.revoke(cap.id) end)
+    cap
+  end
+
+  # Count raw nested started signals. The generic executor and nested action
+  # each emit one, so callers assert the exact expected pair per invocation.
   defp attach_nested_attempt_counter!(counter, action_name) do
     parent = self()
 
@@ -530,7 +583,7 @@ defmodule Arbor.Actions.Coding.ReviewedValidationTest do
              Arbor.Signals.subscribe("action.started", fn signal ->
                name = signal.data[:action] || signal.data["action"]
 
-               if name == action_name and :counters.get(counter, 1) == 0 do
+               if name == action_name do
                  :counters.add(counter, 1, 1)
                  send(parent, {:nested_attempt, name})
                end

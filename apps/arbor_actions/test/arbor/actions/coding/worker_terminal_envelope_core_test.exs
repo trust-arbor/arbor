@@ -40,9 +40,7 @@ defmodule Arbor.Actions.Coding.WorkerTerminalEnvelopeCoreTest do
              WorkerTerminalEnvelopeCore.parse(~s({"status":"maybe"}))
 
     assert {:error, "unknown_fields", _} =
-             WorkerTerminalEnvelopeCore.parse(
-               ~s({"status":"implemented","extra":true})
-             )
+             WorkerTerminalEnvelopeCore.parse(~s({"status":"implemented","extra":true}))
   end
 
   test "rejects non-binary input as text_required" do

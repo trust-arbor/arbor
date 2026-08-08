@@ -69,6 +69,33 @@ defmodule Arbor.Orchestrator.CodingSecurityRegressionPipelineTest do
        }}
     end
 
+    defp dispatch("coding_worker_terminal_parse", args, _scenario, _state) do
+      text = to_string(args["text"] || "")
+
+      case Jason.decode(String.trim(text)) do
+        {:ok, %{"status" => status} = decoded}
+        when status in ["implemented", "declined"] and map_size(decoded) <= 2 ->
+          summary = Map.get(decoded, "summary")
+
+          if is_nil(summary) or is_binary(summary) do
+            {:ok,
+             %{
+               valid: true,
+               status: status,
+               summary: summary,
+               protocol_error: nil,
+               text_byte_size: byte_size(text),
+               text_sha256: "sha256:" <> String.duplicate("f", 64)
+             }}
+          else
+            {:error, "unexpected terminal summary shape"}
+          end
+
+        _other ->
+          {:error, "unexpected invalid terminal fixture"}
+      end
+    end
+
     defp dispatch("coding_workspace_inspect", args, scenario, state) do
       baseline = args["baseline_fingerprint"] || args[:baseline_fingerprint]
       post_turn? = is_binary(baseline) and baseline != ""
@@ -304,8 +331,7 @@ defmodule Arbor.Orchestrator.CodingSecurityRegressionPipelineTest do
                "output_limit_exceeded" => false,
                "cancelled" => false
              },
-             review_attestation_id:
-               args["review_attestation_id"] || args[:review_attestation_id]
+             review_attestation_id: args["review_attestation_id"] || args[:review_attestation_id]
            }}
 
         scenario in [
@@ -666,6 +692,16 @@ defmodule Arbor.Orchestrator.CodingSecurityRegressionPipelineTest do
     assert result.context["prior_reviewed_commit"] in ["commit-1", "commit-2"]
     assert result.context["approval_request_id"] == "irq_security_validation_rework_1"
     assert result.context["approval_note"] == "fix the failing security assertion"
+
+    assert [{"acp_send_message", _initial}, {"acp_send_message", rework}] =
+             calls_for(calls, "acp_send_message")
+
+    assert rework["prompt"] =~
+             "Operator approval note (when present): fix the failing security assertion"
+
+    assert rework["prompt"] =~
+             "Approval request id (when present): irq_security_validation_rework_1"
+
     # First call is approval-rework (control only); second is post-rework approve.
     assert called?(calls, "coding_reviewed_validation", 2)
     assert_single_worker(calls, 2)

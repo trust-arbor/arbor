@@ -746,6 +746,7 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     store =
       start_configured_steering_store(supervisor,
         steer_retry_delay_ms: 10,
+        steer_confirmation_delay_ms: 10,
         max_steer_retries: 3
       )
 

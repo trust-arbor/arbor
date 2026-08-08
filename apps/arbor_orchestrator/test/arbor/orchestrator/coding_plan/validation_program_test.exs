@@ -174,9 +174,16 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationProgramTest do
         assert :ok = ValidationProgram.validate(program)
 
         assert {:ok, attrs} = ValidationProgram.project_onto(program, %{})
-        assert attrs["action"] == strategy["action"]
+        assert attrs["action"] == "coding_reviewed_validation"
+        assert attrs["param.pinned_action"] == strategy["action"]
+        assert attrs["param.pinned_profile_id"] == profile["id"]
+        assert {:ok, pinned_params} = Jason.decode(attrs["param.pinned_params_json"])
+        assert pinned_params == program["static_parameters"]
         assert attrs["context_keys"] == Enum.join(strategy["context_keys"], ",")
         assert attrs["timeout_budget.param"] == strategy["timeout_budget_param"]
+
+        assert attrs["param.#{strategy["timeout_budget_param"]}"] ==
+                 program["static_parameters"][strategy["timeout_budget_param"]]
       end
     end
 

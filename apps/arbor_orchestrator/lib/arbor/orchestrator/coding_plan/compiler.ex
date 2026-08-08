@@ -731,10 +731,14 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
          Map.put(
            attrs,
            "expression",
-           "Security regression validation failed after your previous commit. Task: {value}. " <>
-             "Validation reason: {ctx.validation.reason}. Fix the issue in the same worktree " <>
-             "and leave a fresh commit or uncommitted change. Respond with a concise " <>
-             "implementation summary of what you changed."
+           "Security regression validation rework required after your previous commit. " <>
+             "Task: {value}. Validation reason (may be empty on operator approval rework): " <>
+             "{ctx.validation.reason}. Structured validation feedback JSON (may be empty on " <>
+             "operator approval rework): {ctx.validation.feedback_json}. Operator approval " <>
+             "note (when present): {ctx.approval_note}. Approval request id (when present): " <>
+             "{ctx.approval_request_id}. Fix the issue in the same worktree and leave a fresh " <>
+             "commit or uncommitted change without fabricating missing validator evidence. " <>
+             "Respond with a concise implementation summary of what you changed."
          )}
       end
     end)
