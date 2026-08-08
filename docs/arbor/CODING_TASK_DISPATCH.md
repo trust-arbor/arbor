@@ -86,8 +86,10 @@ after `arbor_dispatch_task` has already returned `ok: true`.
 
 ### 1. Dispatch authority
 
-`arbor://agent/task/dispatch` (or the agent-scoped
-`arbor://agent/dispatch/<agent_id>`) with `:execute`. Without it the tool call
+`arbor://agent/dispatch` (or the narrower agent-scoped
+`arbor://agent/dispatch/<agent_id>`) with `:execute`. The task-control namespace
+starts at `arbor://agent/task/read`; there is no registered
+`arbor://agent/task/dispatch` URI. Without dispatch authority the tool call
 itself is rejected.
 
 ### 2. Authority horizon — the caller must hold what the graph will use
@@ -423,6 +425,91 @@ the outer timeout unless a deliberately shorter task-wide limit is required.
 
 Ordinary string prompts and generic object tasks remain valid for non-coding
 dispatch. This guide documents the coding envelope only.
+
+## Working inside the task workspace
+
+The worker's worktree contains **tracked files only** — no `deps/`, no
+`_build/`. Running anything there naively fails with unresolved dependencies
+(`joken`, `ecto_sqlite3`, and so on), and a pre-commit hook will report the
+failure as *unformatted files* rather than as missing dependencies.
+
+Point Mix at the canonical checkout's dependencies and give the workspace its
+own build directory:
+
+```bash
+cd <task_worktree>
+MIX_DEPS_PATH=/absolute/path/to/canonical/arbor/deps \
+MIX_BUILD_PATH=/private/tmp/arbor-<task-slug>-build \
+  ./bin/mix test path/to/file_test.exs
+```
+
+Both variables are required, and three failure modes are worth knowing:
+
+- **Do not share the canonical `_build`.** A worktree building into the parent's
+  `_build` recompiles from an incomplete dependency-source projection and fails
+  on missing include files (observed with `yamerl`). Always give the workspace
+  its own `MIX_BUILD_PATH`.
+- **Do not point `MIX_BUILD_PATH` at a bare temp directory that you then move
+  or reuse across differently-shaped workspaces.** Dependency `priv` symlinks
+  are relative to the worktree's `_build`/`deps` layout; breaking that surfaces
+  as missing runtime assets rather than as an invalid cache.
+- **Containerized validation needs the mount targets to exist.** Because the
+  worktree ships without `deps/` or `_build/`, a read-only repository bind has
+  no directory to mount them onto and fails with `errno 30`. Create the empty
+  directories in the workspace before attaching the writable mounts.
+
+The same environment is what pre-commit hooks need. A hook run without it
+reports formatting failure for what is actually dependency-setup failure.
+
+Sprint evidence: `voice-d2c-sprint-friction-and-orchestration-log.md` F-006
+(recurred three times), F-021, F-065.
+
+## Review profiles
+
+`review_profile` selects what must happen to a candidate before it can be
+committed. Valid values are exactly:
+
+| Value | Meaning |
+| --- | --- |
+| `binding` | Multi-perspective council review produces a verdict that gates the commit |
+| `human_required` | A human approval is required |
+| `none` | No review stage |
+
+`binding` is the normal choice for reviewable change production.
+
+### Binding review needs its own capabilities
+
+A binding review compiles additional graph branches, and the **caller** must
+hold their handler resources like any other part of the graph (see *Caller
+prerequisites*). Observed in practice: a review reached the verdict stage and
+failed because the signer lacked `arbor://orchestrator/execute/parallel`, and
+then every review branch additionally required
+`arbor://orchestrator/execute/llm_query`.
+
+Do not infer these from node names — an inferred `.../compute` grant was wrong.
+Derive them from the compiled graph with
+`AuthorityHorizon.derive_required_resources/2`, exactly as for the main graph.
+`arbor://action/council/review` and `arbor://action/consensus/decide_review` are
+also required.
+
+### Reading a council verdict
+
+Two known sharp edges when interpreting results:
+
+- **Aggregate confidence may read `0.0` when it is actually unavailable.** A
+  council can return a complete verdict — all perspectives reporting, all
+  approvals, no blocking findings, `overall_score: 1.0` — with confidence
+  projections at `0.0` because missing evidence is defaulted to numeric zero.
+  Treat `0.0` confidence alongside an otherwise complete verdict as *unavailable*,
+  not as measured zero, and check the per-perspective `reason_code` values.
+- **A reviewer may abstain for protocol reasons rather than on the merits.** The
+  ACP terminal protocol rejects multiple non-terminal calls, so a reviewer that
+  tries to read repository context before its single verdict can abstain with
+  `call_shape=multiple_non_terminal`. That is a lost perspective, not a
+  judgement about the change.
+
+Sprint evidence: F-040 (review authority), F-043 (terminal protocol abstention),
+F-058 (confidence semantics).
 
 ## Status, result, and approvals
 
