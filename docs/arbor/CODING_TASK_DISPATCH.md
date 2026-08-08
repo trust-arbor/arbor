@@ -761,7 +761,12 @@ worker narrative or terminal JSON:
    bounded request id/note into the existing same-session validation-rework
    path; deny executes it zero times and fails validation closed. The wrapper
    accepts only the closed profile-owned validator set and never treats an
-   operator note as fabricated validation evidence.
+   operator note as fabricated validation evidence. Compiler-owned Coding Plan
+   v2 validation-rework prompts (direct, design-required, and
+   `security_regression`) must retain structured validator feedback together
+   with `{ctx.approval_note}` and `{ctx.approval_request_id}` so the same-session
+   ACP worker prompt receives both; semantic preflight rejects rewrites that
+   drop either approval-context placeholder.
 
 ### Terminal workspace and branch evidence
 

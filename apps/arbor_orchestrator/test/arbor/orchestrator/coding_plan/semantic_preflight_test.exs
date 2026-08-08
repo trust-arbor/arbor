@@ -173,6 +173,53 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     end
   end
 
+  test "security regression: v2 validation rework prompts reject omitted approval context placeholders",
+       ctx do
+    for {checkpoint_policy, fragments} <- [
+          {"direct", ["{ctx.approval_note}", "{ctx.approval_request_id}"]},
+          {"design_required", ["{ctx.approval_note}", "{ctx.approval_request_id}"]}
+        ] do
+      plan = v2_plan!(checkpoint_policy)
+      assert {:ok, packet_json} = WorkPacket.canonical_bytes(plan.work_packet)
+      assert {:ok, compilation} = compile(plan, ctx)
+      graph = compiled_graph!(compilation.dot_source)
+      assert {:ok, profile} = Profiles.fetch_executable("default")
+
+      expression = graph.nodes["build_validation_rework_prompt"].attrs["expression"]
+
+      for fragment <- fragments do
+        assert expression =~ fragment
+
+        mutated =
+          update_in(
+            graph.nodes["build_validation_rework_prompt"].attrs,
+            &Map.update!(
+              &1,
+              "expression",
+              fn value ->
+                String.replace(value, fragment, "[approval context removed]", global: false)
+              end
+            )
+          )
+
+        assert {:error, {:semantic_preflight_failed, errors}} =
+                 preflight(mutated, profile["semantic_policy"],
+                   review_profile: "binding",
+                   checkpoint_policy: checkpoint_policy,
+                   checkpoint_work_packet_json: packet_json,
+                   design_checkpoint_timeout_ms: plan.budgets["inactivity_timeout_ms"]
+                 )
+
+        assert Enum.any?(errors, fn error ->
+                 error["code"] == "design_checkpoint_prompt_violation" and
+                   error["node_id"] == "build_validation_rework_prompt" and
+                   fragment in error["detail"]["required_fragments"]
+               end),
+               "expected omission of #{fragment} to fail for #{checkpoint_policy}, got: #{inspect(errors)}"
+      end
+    end
+  end
+
   test "reviewed profile independently rejects repair prompt executable attr drift", ctx do
     plan = v2_plan!()
     assert {:ok, packet_json} = WorkPacket.canonical_bytes(plan.work_packet)
@@ -299,6 +346,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
       for {node_id, fragment} <- [
             {"build_design_envelope_repair_prompt", "exactly one string field"},
             {"build_validation_rework_prompt", "{ctx.coding_plan_work_packet_json}"},
+            {"build_validation_rework_prompt", "{ctx.approval_note}"},
+            {"build_validation_rework_prompt", "{ctx.approval_request_id}"},
             {"build_review_rework_prompt", "{ctx.accepted_design_request_id}"},
             {"build_operator_rework_prompt", "{ctx.accepted_design_evidence_json}"}
           ] do

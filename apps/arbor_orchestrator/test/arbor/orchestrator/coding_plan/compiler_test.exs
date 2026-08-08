@@ -345,7 +345,8 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
           "coding_plan_work_packet_json" => packet_json,
           "validation.feedback_json" => ~s({"errors":["compile failed"]}),
           "review.feedback_json" => ~s({"findings":["scope drift"]}),
-          "approval_note" => "Keep the implementation inside the reviewed packet."
+          "approval_note" => "Keep the implementation inside the reviewed packet.",
+          "approval_request_id" => "irq_direct_validation_rework_1"
         }
 
         implementation_prompt = run_transform(graph, "build_implement_prompt", scope)
@@ -363,6 +364,13 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
           assert prompt =~ feedback
           assert prompt =~ "/tmp/direct-worktree"
         end
+
+        validation_rework_prompt =
+          run_transform(graph, "build_validation_rework_prompt", scope)
+
+        assert validation_rework_prompt =~ scope["approval_note"]
+        assert validation_rework_prompt =~ scope["approval_request_id"]
+        assert validation_rework_prompt =~ scope["validation.feedback_json"]
       end
     end
   end
@@ -625,7 +633,8 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
       "accepted_design_evidence_json" => ~s({"approved":true}),
       "validation.feedback_json" => ~s({"errors":["compile failed"]}),
       "review.feedback_json" => ~s({"findings":["scope drift"]}),
-      "approval_note" => "Keep the implementation inside the approved scope."
+      "approval_note" => "Keep the implementation inside the approved scope.",
+      "approval_request_id" => "irq_design_validation_rework_1"
     }
 
     for {node_id, feedback} <- [
@@ -642,6 +651,11 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
       assert prompt =~ scope["accepted_design_evidence_json"]
       assert prompt =~ feedback
     end
+
+    validation_rework_prompt = run_transform(graph, "build_validation_rework_prompt", scope)
+    assert validation_rework_prompt =~ scope["approval_note"]
+    assert validation_rework_prompt =~ scope["approval_request_id"]
+    assert validation_rework_prompt =~ scope["validation.feedback_json"]
   end
 
   test "design-required security validation rework retains approved scope after profile rewrite",
@@ -661,12 +675,31 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
 
     assert expression =~ "SECURITY REGRESSION VALIDATION REWORK"
     assert expression =~ "{ctx.validation.feedback_json}"
+    assert expression =~ "{ctx.approval_note}"
+    assert expression =~ "{ctx.approval_request_id}"
     assert expression =~ "{ctx.coding_plan_work_packet_json}"
     assert expression =~ "{ctx.accepted_design}"
     assert expression =~ "{ctx.accepted_design_digest}"
     assert expression =~ "{ctx.accepted_design_request_id}"
     assert expression =~ "{ctx.accepted_design_evidence_json}"
     assert node_attrs(graph, "freeze_coding_plan_work_packet_json")["expression"] == packet_json
+
+    scope = %{
+      "task" => plan.task,
+      "coding_plan_work_packet_json" => packet_json,
+      "accepted_design" => "Keep the security regression in the approved design.",
+      "accepted_design_digest" => "sha256:" <> String.duplicate("c", 64),
+      "accepted_design_request_id" => "coding-design:" <> String.duplicate("d", 64),
+      "accepted_design_evidence_json" => ~s({"approved":true}),
+      "validation.feedback_json" => ~s({"errors":["security assertion failed"]}),
+      "approval_note" => "fix the failing security assertion",
+      "approval_request_id" => "irq_security_design_validation_rework_1"
+    }
+
+    prompt = run_transform(graph, "build_validation_rework_prompt", scope)
+    assert prompt =~ scope["validation.feedback_json"]
+    assert prompt =~ scope["approval_note"]
+    assert prompt =~ scope["approval_request_id"]
   end
 
   test "design attempt is derived as a JSON integer and increments numerically", ctx do

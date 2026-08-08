@@ -2454,6 +2454,31 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert_single_worker_session(calls, 1)
       assert_closed_and_released(calls)
     end
+
+    test "version 2 direct validation approval rework threads exact note and request id into ACP prompt" do
+      assert {{:ok, result}, calls, _plan, _compilation} =
+               run_compiled_v2_fixture(:validation_approval_rework, "direct")
+
+      assert result.context["status"] == "change_committed"
+      assert result.context["validation_rework_count"] in [1, "1"]
+      assert result.context["approval_request_id"] == "irq_validation_rework_1"
+      assert result.context["approval_note"] == "fix the failing assertion"
+
+      assert [{"acp_send_message", _initial}, {"acp_send_message", rework}] =
+               Enum.filter(calls, fn {name, _args} -> name == "acp_send_message" end)
+
+      # Regression: context alone is insufficient — the same-session ACP prompt must
+      # carry the exact operator rework note and request id after compiler rewrite.
+      assert rework["prompt"] =~
+               "Operator approval note (when present): fix the failing assertion"
+
+      assert rework["prompt"] =~
+               "Approval request id (when present): irq_validation_rework_1"
+
+      assert rework["prompt"] =~ "Structured validation feedback JSON"
+      assert_single_worker_session(calls, 2)
+      assert_closed_and_released(calls)
+    end
   end
 
   # ---------------------------------------------------------------------------

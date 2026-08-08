@@ -1029,8 +1029,12 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
 
   defp direct_validation_rework_prompt do
     direct_scope_prompt("VALIDATION REWORK", "{value}") <>
-      "Structured validation feedback JSON: {ctx.validation.feedback_json}. " <>
-      "Fix the validation issues in the same worktree. " <> implementation_response_contract()
+      "Structured validation feedback JSON (may be empty on operator approval rework): " <>
+      "{ctx.validation.feedback_json}. " <>
+      "Operator approval note (when present): {ctx.approval_note}. " <>
+      "Approval request id (when present): {ctx.approval_request_id}. " <>
+      "Fix the validation issues in the same worktree without fabricating missing validator " <>
+      "evidence. " <> implementation_response_contract()
   end
 
   defp direct_review_rework_prompt do
@@ -1055,15 +1059,23 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
 
   defp approved_validation_rework_prompt("security_regression") do
     approved_scope_prompt("SECURITY REGRESSION VALIDATION REWORK", "{value}") <>
-      "Structured validation feedback JSON: {ctx.validation.feedback_json}. " <>
+      "Structured validation feedback JSON (may be empty on operator approval rework): " <>
+      "{ctx.validation.feedback_json}. " <>
+      "Operator approval note (when present): {ctx.approval_note}. " <>
+      "Approval request id (when present): {ctx.approval_request_id}. " <>
       "Fix the security regression validation issues in the same worktree and leave a fresh " <>
-      "commit or uncommitted change. " <> implementation_response_contract()
+      "commit or uncommitted change without fabricating missing validator evidence. " <>
+      implementation_response_contract()
   end
 
   defp approved_validation_rework_prompt(_validation_profile) do
     approved_scope_prompt("VALIDATION REWORK", "{value}") <>
-      "Structured validation feedback JSON: {ctx.validation.feedback_json}. " <>
-      "Fix the validation issues in the same worktree. " <> implementation_response_contract()
+      "Structured validation feedback JSON (may be empty on operator approval rework): " <>
+      "{ctx.validation.feedback_json}. " <>
+      "Operator approval note (when present): {ctx.approval_note}. " <>
+      "Approval request id (when present): {ctx.approval_request_id}. " <>
+      "Fix the validation issues in the same worktree without fabricating missing validator " <>
+      "evidence. " <> implementation_response_contract()
   end
 
   defp approved_review_rework_prompt do

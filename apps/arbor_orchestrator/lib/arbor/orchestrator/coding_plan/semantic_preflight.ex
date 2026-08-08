@@ -2737,7 +2737,9 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
            "{ctx.accepted_design_digest}",
            "{ctx.accepted_design_request_id}",
            "{ctx.accepted_design_evidence_json}",
-           "{ctx.validation.feedback_json}"
+           "{ctx.validation.feedback_json}",
+           "{ctx.approval_note}",
+           "{ctx.approval_request_id}"
          ]},
         {"build_review_rework_prompt",
          [
@@ -2802,7 +2804,9 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
          "{value}",
          "{ctx.worktree_path}",
          "{ctx.coding_plan_work_packet_json}",
-         "{ctx.validation.feedback_json}"
+         "{ctx.validation.feedback_json}",
+         "{ctx.approval_note}",
+         "{ctx.approval_request_id}"
        ]},
       {"build_review_rework_prompt",
        [
