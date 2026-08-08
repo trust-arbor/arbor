@@ -429,31 +429,7 @@ defmodule Arbor.Historian.StreamContentTest do
                Task.await(task, 5_000)
 
       # Later stages must not run after the held stage times out.
-      later_forbidden? =
-        case stage do
-          :durable_delete ->
-            fn
-              {^hot_name, _, _} -> true
-              {^durable_name, :absent, _} -> true
-              _ -> false
-            end
-
-          :durable_verify ->
-            fn
-              {^hot_name, _, _} -> true
-              _ -> false
-            end
-
-          :hot_delete ->
-            fn
-              {^hot_name, :absent, _} -> true
-              _ -> false
-            end
-
-          :hot_verify ->
-            fn _ -> false end
-        end
-
+      later_forbidden? = later_stage_forbidden?(stage, durable_name, hot_name)
       calls = InjectBackend.get_state().calls
       refute Enum.any?(calls, later_forbidden?)
 
@@ -469,8 +445,15 @@ defmodule Arbor.Historian.StreamContentTest do
     durable = :"c4c_real_durable_#{System.unique_integer([:positive])}"
     hot = :"c4c_real_hot_#{System.unique_integer([:positive])}"
 
-    start_supervised!({ETS, name: durable, max_age_ms: :infinity, trim_interval_ms: :disabled})
-    start_supervised!({ETS, name: hot, max_age_ms: :infinity, trim_interval_ms: :disabled})
+    start_supervised!(
+      {ETS, name: durable, max_age_ms: :infinity, trim_interval_ms: :disabled},
+      id: durable
+    )
+
+    start_supervised!(
+      {ETS, name: hot, max_age_ms: :infinity, trim_interval_ms: :disabled},
+      id: hot
+    )
 
     previous_durable = Application.get_env(:arbor_historian, :durable_event_log_target)
     previous_hot = Application.get_env(:arbor_historian, :hot_event_log_target)
@@ -665,6 +648,32 @@ defmodule Arbor.Historian.StreamContentTest do
   defp present?(name, stream_id) do
     state = InjectBackend.get_state()
     MapSet.member?(Map.fetch!(state.streams, name), stream_id)
+  end
+
+  defp later_stage_forbidden?(stage, durable_name, hot_name) do
+    case stage do
+      :durable_delete ->
+        fn
+          {^hot_name, _, _} -> true
+          {^durable_name, :absent, _} -> true
+          _ -> false
+        end
+
+      :durable_verify ->
+        fn
+          {^hot_name, _, _} -> true
+          _ -> false
+        end
+
+      :hot_delete ->
+        fn
+          {^hot_name, :absent, _} -> true
+          _ -> false
+        end
+
+      :hot_verify ->
+        fn _ -> false end
+    end
   end
 
   defp restore_env(key, nil), do: Application.delete_env(:arbor_historian, key)

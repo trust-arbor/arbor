@@ -182,6 +182,13 @@ defmodule Arbor.Contracts.API.HistorianTest do
 
   defp normalize_leaf(atom) when is_atom(atom), do: atom
 
+  # Tuple AST MUST precede generic {name, meta, args} local type-reference.
+  defp normalize_leaf({left, right}),
+    do: {:tuple, [normalize_leaf(left), normalize_leaf(right)]}
+
+  defp normalize_leaf({:{}, _meta, elems}) when is_list(elems),
+    do: {:tuple, Enum.map(elems, &normalize_leaf/1)}
+
   defp normalize_leaf({name, _meta, []}) when is_atom(name), do: {:type_ref, name}
 
   defp normalize_leaf({name, _meta, args}) when is_atom(name) and is_list(args),
@@ -189,12 +196,6 @@ defmodule Arbor.Contracts.API.HistorianTest do
 
   defp normalize_leaf({{:., _meta, [mod, name]}, _call_meta, []}) when is_atom(name),
     do: {:remote_type_ref, mod, name}
-
-  defp normalize_leaf({left, right}),
-    do: {:tuple, [normalize_leaf(left), normalize_leaf(right)]}
-
-  defp normalize_leaf({:{}, _meta, elems}) when is_list(elems),
-    do: {:tuple, Enum.map(elems, &normalize_leaf/1)}
 
   defp normalize_leaf(value) when is_integer(value) or is_binary(value), do: {:literal, value}
 
