@@ -7,6 +7,7 @@ defmodule Arbor.AI.AcpProviderUsageTest do
   alias Arbor.AI.AcpSession.Config
   alias Arbor.AI.AcpSession.GrokSandbox
   alias Arbor.Common.SafePath
+  alias Arbor.LLM.OAuth
   alias Arbor.Persistence
   alias Arbor.Persistence.EventLog.ETS
 
@@ -473,6 +474,7 @@ defmodule Arbor.AI.AcpProviderUsageTest do
     ensure_budget_tracker()
     Arbor.AI.BudgetTracker.reset()
     isolate_grok_runtime_home!()
+    install_synthetic_xai_oauth!()
 
     on_exit(fn ->
       Application.put_env(:arbor_ai, :enable_budget_tracking, previous_budget)
@@ -782,6 +784,57 @@ defmodule Arbor.AI.AcpProviderUsageTest do
     end)
 
     :ok
+  end
+
+  defp install_synthetic_xai_oauth! do
+    prior =
+      Map.new(
+        [
+          {:arbor_llm, :oauth_store_dir},
+          {:arbor_llm, :oauth_refresh_fun}
+        ],
+        fn {app, key} -> {{app, key}, Application.get_env(app, key, :unset)} end
+      )
+
+    root =
+      Path.join(
+        System.tmp_dir!(),
+        "acp-usage-xai-oauth-#{System.unique_integer([:positive])}"
+      )
+
+    store = Path.join(root, "oauth")
+    File.mkdir_p!(store)
+    Application.put_env(:arbor_llm, :oauth_store_dir, store)
+    Application.delete_env(:arbor_llm, :oauth_refresh_fun)
+
+    on_exit(fn ->
+      Enum.each(prior, fn
+        {{app, key}, :unset} -> Application.delete_env(app, key)
+        {{app, key}, value} -> Application.put_env(app, key, value)
+      end)
+
+      File.rm_rf!(root)
+    end)
+
+    access = synthetic_xai_jwt(System.system_time(:second) + 7_200, "provider-usage-grok")
+
+    assert {:ok, credential} =
+             OAuth.AcquiredCredential.new(%{
+               provider: :xai,
+               access_token: access,
+               refresh_token: "usage-test-refresh-#{System.unique_integer([:positive])}"
+             })
+
+    assert :ok = OAuth.publish_arbor_owned(:xai_oauth, credential)
+  end
+
+  defp synthetic_xai_jwt(exp, marker) do
+    header = Base.url_encode64(~s({"alg":"none","typ":"JWT"}), padding: false)
+
+    payload =
+      Base.url_encode64(Jason.encode!(%{"exp" => exp, "marker" => marker}), padding: false)
+
+    "#{header}.#{payload}.sig"
   end
 
   defp create_linked_grok_fixture! do

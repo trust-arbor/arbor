@@ -6,6 +6,7 @@ defmodule Arbor.AI.AcpPoolTest do
   alias Arbor.AI.AcpSession.Config
   alias Arbor.AI.AcpSession.GrokSandbox
   alias Arbor.Common.SafePath
+  alias Arbor.LLM.OAuth
 
   @moduletag :fast
 
@@ -218,6 +219,57 @@ defmodule Arbor.AI.AcpPoolTest do
     end)
   end
 
+  defp install_synthetic_xai_oauth! do
+    prior =
+      Map.new(
+        [
+          {:arbor_llm, :oauth_store_dir},
+          {:arbor_llm, :oauth_refresh_fun}
+        ],
+        fn {app, key} -> {{app, key}, Application.get_env(app, key, :unset)} end
+      )
+
+    root =
+      Path.join(
+        System.tmp_dir!(),
+        "arbor-ai-pool-xai-oauth-#{System.unique_integer([:positive])}"
+      )
+
+    store = Path.join(root, "oauth")
+    File.mkdir_p!(store)
+    Application.put_env(:arbor_llm, :oauth_store_dir, store)
+    Application.delete_env(:arbor_llm, :oauth_refresh_fun)
+
+    on_exit(fn ->
+      Enum.each(prior, fn
+        {{app, key}, :unset} -> Application.delete_env(app, key)
+        {{app, key}, value} -> Application.put_env(app, key, value)
+      end)
+
+      File.rm_rf!(root)
+    end)
+
+    access = synthetic_xai_jwt(System.system_time(:second) + 7_200, "pool-grok")
+
+    assert {:ok, credential} =
+             OAuth.AcquiredCredential.new(%{
+               provider: :xai,
+               access_token: access,
+               refresh_token: "pool-test-refresh-#{System.unique_integer([:positive])}"
+             })
+
+    assert :ok = OAuth.publish_arbor_owned(:xai_oauth, credential)
+  end
+
+  defp synthetic_xai_jwt(exp, marker) do
+    header = Base.url_encode64(~s({"alg":"none","typ":"JWT"}), padding: false)
+
+    payload =
+      Base.url_encode64(Jason.encode!(%{"exp" => exp, "marker" => marker}), padding: false)
+
+    "#{header}.#{payload}.sig"
+  end
+
   describe "checkout/2" do
     @tag timeout: 2_000
     test "security regression: stalled startup is killed without wedging pool or supervisor", %{
@@ -317,6 +369,7 @@ defmodule Arbor.AI.AcpPoolTest do
 
     test "security regression: pooled Grok lazily uses its attested launch model" do
       create_temporary_workspace_isolation!()
+      install_synthetic_xai_oauth!()
 
       original_client_module = Application.get_env(:arbor_ai, :acp_client_module)
       Application.put_env(:arbor_ai, :acp_client_module, GrokPoolProbeClient)
