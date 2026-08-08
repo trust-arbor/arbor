@@ -114,13 +114,12 @@ defmodule Arbor.Signals.MemoryAgentContentPrivacyTest do
       assert Process.alive?(store_pid)
 
       # Restore a valid empty owner so later tests are not poisoned.
+      # Use Map.put — map-update syntax raises if :order was deliberately removed.
       :sys.replace_state(Store, fn state ->
-        %{
-          state
-          | signals: %{},
-            order: :queue.new(),
-            stats: %{total_stored: 0, total_expired: 0, total_evicted: 0}
-        }
+        state
+        |> Map.put(:signals, %{})
+        |> Map.put(:order, :queue.new())
+        |> Map.put(:stats, %{total_stored: 0, total_expired: 0, total_evicted: 0})
       end)
     end
   end
@@ -407,6 +406,41 @@ defmodule Arbor.Signals.MemoryAgentContentPrivacyTest do
                Signals.memory_agent_content_absent?(@target, timeout_ms: 2_000)
 
       assert {:ok, _} = Store.get(target.id)
+    end
+
+    test "duplicate atom/string checkpoint keys never yield absence true" do
+      target = memory_signal(@target, :mem_hidden)
+
+      # Configured snapshot contains the queried target; load_duplicate_keys exposes
+      # empty atom view + original target-bearing string view of that same content.
+      configured = %{
+        signals: %{target.id => target},
+        order: [target.id],
+        stats: %{total_stored: 1, total_expired: 0, total_evicted: 0}
+      }
+
+      MemoryCheckpointFake.set_snapshot(configured)
+      MemoryCheckpointFake.set_mode(:load_duplicate_keys)
+
+      # Live store empty so only checkpoint readback could claim absence.
+      Store.clear()
+
+      result = Signals.memory_agent_content_absent?(@target, timeout_ms: 2_000)
+      # Same target hidden under duplicate keys must never report absent true.
+      refute result == {:ok, true}
+      assert {:error, {:absence_indeterminate, @target}} = result
+    end
+
+    test "extra top-level checkpoint fields never yield delete ok" do
+      target = memory_signal(@target, :mem_extra)
+      Store.put_sync(target)
+      MemoryCheckpointFake.set_mode(:load_extra_fields)
+
+      result = Signals.delete_memory_agent_content(@target, timeout_ms: 2_000)
+      refute result == :ok
+      assert {:error, {:delete_indeterminate, @target}} = result
+      # Live deletion retained under uncertainty.
+      assert {:error, :not_found} = Store.get(target.id)
     end
 
     test "missing save/load exports fail closed pre-dispatch" do

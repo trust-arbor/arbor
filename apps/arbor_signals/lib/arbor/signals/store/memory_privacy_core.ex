@@ -183,18 +183,50 @@ defmodule Arbor.Signals.Store.MemoryPrivacyCore do
   @spec snapshot_fields(map()) ::
           {:ok, map(), list(), map()} | :error
   def snapshot_fields(loaded) when is_map(loaded) do
-    signals = loaded[:signals] || loaded["signals"]
-    order = loaded[:order] || loaded["order"]
-    stats = loaded[:stats] || loaded["stats"]
-
-    if is_map(signals) and is_list(order) and is_map(stats) do
+    # Exactly one atom-or-string representation per required field; no extras.
+    with {:ok, signals} <- fetch_exclusive_field(loaded, :signals, "signals"),
+         {:ok, order} <- fetch_exclusive_field(loaded, :order, "order"),
+         {:ok, stats} <- fetch_exclusive_field(loaded, :stats, "stats"),
+         :ok <- reject_extra_top_level_keys(loaded),
+         true <- is_map(signals) and is_list(order) and is_map(stats) do
       {:ok, signals, order, stats}
     else
-      :error
+      _ -> :error
     end
   end
 
   def snapshot_fields(_), do: :error
+
+  defp fetch_exclusive_field(map, atom_key, string_key)
+       when is_map(map) and is_atom(atom_key) and is_binary(string_key) do
+    has_atom = Map.has_key?(map, atom_key)
+    has_string = Map.has_key?(map, string_key)
+
+    cond do
+      has_atom and has_string ->
+        # Duplicate representation — reject (may hide conflicting content).
+        :error
+
+      has_atom ->
+        {:ok, Map.fetch!(map, atom_key)}
+
+      has_string ->
+        {:ok, Map.fetch!(map, string_key)}
+
+      true ->
+        :error
+    end
+  end
+
+  defp reject_extra_top_level_keys(map) when is_map(map) do
+    allowed = MapSet.new([:signals, "signals", :order, "order", :stats, "stats"])
+
+    if Map.keys(map) |> MapSet.new() |> MapSet.subset?(allowed) do
+      :ok
+    else
+      :error
+    end
+  end
 
   @spec validate_loaded_snapshot(map(), agent_id()) ::
           {:ok, boolean()} | {:error, :invalid_precondition}

@@ -15,6 +15,9 @@ defmodule Arbor.Signals.Test.MemoryCheckpointFake do
           | :block_save
           | :block_load
           | :mutate_loaded
+          | :exit_self
+          | :load_duplicate_keys
+          | :load_extra_fields
 
   def start_link(opts \\ []) do
     name = Keyword.get(opts, :name, __MODULE__)
@@ -98,6 +101,10 @@ defmodule Arbor.Signals.Test.MemoryCheckpointFake do
       :mutate_loaded ->
         do_save(name, id, snapshot)
 
+      :exit_self ->
+        # Uncatchable kill — coordinator classifies worker DOWN without a result payload.
+        Process.exit(self(), :kill)
+
       _other ->
         do_save(name, id, snapshot)
     end
@@ -129,6 +136,46 @@ defmodule Arbor.Signals.Test.MemoryCheckpointFake do
           other ->
             other
         end
+
+      :load_duplicate_keys ->
+        case do_load(name, id) do
+          {:ok, snapshot} when is_map(snapshot) ->
+            # Hide the *configured* snapshot content under string keys while the
+            # atom view looks empty/clean — never invent a different agent id.
+            original_signals = Map.get(snapshot, :signals) || Map.get(snapshot, "signals") || %{}
+            original_order = Map.get(snapshot, :order) || Map.get(snapshot, "order") || []
+            original_stats = Map.get(snapshot, :stats) || Map.get(snapshot, "stats") || %{}
+
+            empty_stats = %{total_stored: 0, total_expired: 0, total_evicted: 0}
+
+            # Use association form for all keys — keyword-style atoms cannot
+            # interleave with string => entries in a map literal.
+            dual = %{
+              :signals => %{},
+              "signals" => original_signals,
+              :order => [],
+              "order" => original_order,
+              :stats => empty_stats,
+              "stats" => original_stats
+            }
+
+            {:ok, dual}
+
+          other ->
+            other
+        end
+
+      :load_extra_fields ->
+        case do_load(name, id) do
+          {:ok, snapshot} when is_map(snapshot) ->
+            {:ok, Map.put(snapshot, :extra_hidden, %{secret: true})}
+
+          other ->
+            other
+        end
+
+      :exit_self ->
+        Process.exit(self(), :kill)
 
       _other ->
         do_load(name, id)

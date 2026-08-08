@@ -173,6 +173,93 @@ defmodule Arbor.Signals.Store.MemoryPrivacyCoreTest do
     end
   end
 
+  describe "strict snapshot_fields/1" do
+    test "accepts atom-only or string-only required fields" do
+      a = memory(@other, :a)
+      stats = %{total_stored: 1, total_expired: 0, total_evicted: 0}
+
+      atom_only = %{signals: %{a.id => a}, order: [a.id], stats: stats}
+      assert {:ok, signals, order, ^stats} = MemoryPrivacyCore.snapshot_fields(atom_only)
+      assert signals == %{a.id => a}
+      assert order == [a.id]
+
+      string_only = %{"signals" => %{a.id => a}, "order" => [a.id], "stats" => stats}
+      assert {:ok, ^signals, ^order, ^stats} = MemoryPrivacyCore.snapshot_fields(string_only)
+    end
+
+    test "rejects duplicate atom and string representations" do
+      a = memory(@other, :a)
+      t = memory(@target, :t)
+      stats = %{total_stored: 0, total_expired: 0, total_evicted: 0}
+
+      dual = %{
+        :signals => %{},
+        "signals" => %{t.id => t},
+        :order => [],
+        "order" => [t.id],
+        :stats => stats,
+        "stats" => %{total_stored: 1, total_expired: 0, total_evicted: 0}
+      }
+
+      assert :error = MemoryPrivacyCore.snapshot_fields(dual)
+
+      assert {:error, :invalid_precondition} =
+               MemoryPrivacyCore.validate_loaded_snapshot(dual, @target)
+
+      approved = %{signals: %{a.id => a}, order: [a.id], stats: stats}
+
+      state2 = %{
+        signals: %{a.id => a},
+        order: :queue.from_list([a.id]),
+        stats: stats
+      }
+
+      assert :failed =
+               MemoryPrivacyCore.prove_delete_convergence(state2, approved, dual, @target)
+    end
+
+    test "rejects extra top-level fields" do
+      a = memory(@other, :a)
+      stats = %{total_stored: 1, total_expired: 0, total_evicted: 0}
+
+      extra = %{
+        signals: %{a.id => a},
+        order: [a.id],
+        stats: stats,
+        hidden: %{agent_id: @target}
+      }
+
+      assert :error = MemoryPrivacyCore.snapshot_fields(extra)
+
+      assert {:error, :invalid_precondition} =
+               MemoryPrivacyCore.validate_loaded_snapshot(extra, @target)
+
+      refute MemoryPrivacyCore.snapshots_equal?(
+               %{signals: %{a.id => a}, order: [a.id], stats: stats},
+               extra
+             )
+    end
+
+    test "hidden target under duplicate key never yields absence false-negative ok" do
+      t = memory(@target, :t)
+      stats = %{total_stored: 0, total_expired: 0, total_evicted: 0}
+
+      # Empty atom signals would look absent if OR-fallback preferred atom first.
+      dual = %{
+        :signals => %{},
+        "signals" => %{t.id => t},
+        :order => [],
+        "order" => [t.id],
+        :stats => stats,
+        "stats" => %{total_stored: 1, total_expired: 0, total_evicted: 0}
+      }
+
+      # Must not report {:ok, false} (no target) — reject entirely.
+      assert {:error, :invalid_precondition} =
+               MemoryPrivacyCore.validate_loaded_snapshot(dual, @target)
+    end
+  end
+
   defp memory(agent_id, type) do
     Signal.new(:memory, type, %{agent_id: agent_id})
   end
