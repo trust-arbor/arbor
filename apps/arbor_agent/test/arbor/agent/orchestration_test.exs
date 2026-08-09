@@ -14,7 +14,16 @@ defmodule Arbor.Agent.OrchestrationTest do
 
     def grant(opts) do
       send(self(), {:grant, opts})
-      Process.get({__MODULE__, :grant_result}, {:ok, %{id: "cap_task_answer"}})
+
+      case Process.get({__MODULE__, :grant_result}) do
+        nil ->
+          kind = get_in(opts, [:metadata, :kind]) || "member"
+          id = "cap_#{kind}_#{System.unique_integer([:positive])}"
+          {:ok, %{id: id}}
+
+        result ->
+          result
+      end
     end
 
     def revoke(capability_id) do
@@ -170,6 +179,55 @@ defmodule Arbor.Agent.OrchestrationTest do
   end
 
   defmodule FakeTaskStore do
+    def reserve(_opts \\ []) do
+      task_id =
+        Process.get({__MODULE__, :next_task_id}) ||
+          Arbor.Identifiers.generate_id("task_")
+
+      Process.delete({__MODULE__, :next_task_id})
+      token = "tok_#{System.unique_integer([:positive])}"
+      Process.put({__MODULE__, :reservation}, %{task_id: task_id, token: token})
+      send(self(), {:task_reserve, task_id})
+      {:ok, %{task_id: task_id, reservation_token: token}}
+    end
+
+    def commit_recovery_marker(task_id, token, _opts \\ []) do
+      send(self(), {:task_commit_marker, task_id})
+
+      case Process.get({__MODULE__, :marker_result}, :ok) do
+        :ok ->
+          case Process.get({__MODULE__, :reservation}) do
+            %{task_id: ^task_id, token: ^token} -> :ok
+            _ -> {:error, :invalid_reservation_token}
+          end
+
+        other ->
+          other
+      end
+    end
+
+    def activate(agent_id, task, task_id, token, opts) do
+      case Process.get({__MODULE__, :reservation}) do
+        %{task_id: ^task_id, token: ^token} ->
+          Process.delete({__MODULE__, :reservation})
+          dispatch(agent_id, task, Keyword.put(opts, :task_id, task_id))
+
+        _ ->
+          {:error, :invalid_reservation_token}
+      end
+    end
+
+    def release(task_id, _token, _opts \\ []) do
+      send(self(), {:task_release, task_id})
+      Process.delete({__MODULE__, :reservation})
+      :ok
+    end
+
+    def request_reconcile(task_id, _opts \\ []) do
+      send(self(), {:task_reconcile, task_id})
+      :ok
+    end
+
     def dispatch(agent_id, task, opts) do
       send(self(), {:task_dispatch, agent_id, task, opts})
       Process.get({__MODULE__, :dispatch_result}, {:ok, opts[:task_id] || "task_1"})
@@ -259,6 +317,38 @@ defmodule Arbor.Agent.OrchestrationTest do
   end
 
   defmodule TerminalTaskStore do
+    def reserve(_opts \\ []) do
+      task_id =
+        Process.get({__MODULE__, :next_task_id}) ||
+          Arbor.Identifiers.generate_id("task_")
+
+      Process.delete({__MODULE__, :next_task_id})
+      token = "tok_#{System.unique_integer([:positive])}"
+      Process.put({__MODULE__, :reservation}, %{task_id: task_id, token: token})
+      {:ok, %{task_id: task_id, reservation_token: token}}
+    end
+
+    def commit_recovery_marker(task_id, token, _opts \\ []) do
+      case Process.get({__MODULE__, :reservation}) do
+        %{task_id: ^task_id, token: ^token} -> :ok
+        _ -> {:error, :invalid_reservation_token}
+      end
+    end
+
+    def activate(agent_id, task, task_id, token, opts) do
+      case Process.get({__MODULE__, :reservation}) do
+        %{task_id: ^task_id, token: ^token} ->
+          Process.delete({__MODULE__, :reservation})
+          dispatch(agent_id, task, Keyword.put(opts, :task_id, task_id))
+
+        _ ->
+          {:error, :invalid_reservation_token}
+      end
+    end
+
+    def release(_task_id, _token, _opts \\ []), do: :ok
+    def request_reconcile(_task_id, _opts \\ []), do: :ok
+
     def dispatch(_agent_id, _task, opts) do
       Process.put({__MODULE__, :dispatch_opts}, opts)
       {:ok, opts[:task_id]}
@@ -285,9 +375,18 @@ defmodule Arbor.Agent.OrchestrationTest do
     end
 
     def cancel(task_id, _opts) do
+      # Simulate TaskStore terminal lease retirement: revoke every lease member
+      # through the same Security facade that granted them (test double path).
       dispatch_opts = Process.get({__MODULE__, :dispatch_opts}, [])
-      dispatch_opts[:steer_security_module].revoke(dispatch_opts[:steer_cap_id])
-      dispatch_opts[:adoption_security_module].revoke(dispatch_opts[:adoption_cap_id])
+      lease = Keyword.get(dispatch_opts, :task_control_lease)
+
+      if is_map(lease) do
+        for {_kind, cap_id} <- Map.get(lease, "capabilities", %{}) do
+          if is_binary(cap_id) and cap_id != "" do
+            DispatchScopedSecurity.revoke(cap_id)
+          end
+        end
+      end
 
       {:ok,
        %{
@@ -312,7 +411,7 @@ defmodule Arbor.Agent.OrchestrationTest do
 
     def record_orchestration_task_dispatched(actor_id, task_id, agent_id, opts) do
       send(self(), {:audit_dispatched, actor_id, task_id, agent_id, opts})
-      :ok
+      Process.get({__MODULE__, :dispatch_result}, :ok)
     end
   end
 
@@ -557,6 +656,7 @@ defmodule Arbor.Agent.OrchestrationTest do
           {FakeSecurity, :result},
           {FakeSecurity, :grant_result},
           {FakeSecurity, :revoke_result},
+          {FakeAudit, :dispatch_result},
           {FakeConsensus, :pending},
           {FakeConsensus, :answer_result},
           {FakeConsensus, :cancel_result},
@@ -595,10 +695,11 @@ defmodule Arbor.Agent.OrchestrationTest do
     end
 
     test "dispatches a task asynchronously and records an audit event" do
+      Process.put({FakeTaskStore, :next_task_id}, "task_1")
+
       assert {:ok, "task_1"} =
                Orchestration.dispatch("agent_1", "write a patch",
                  caller_id: "human_1",
-                 task_id: "task_1",
                  metadata: %{ticket: "A-1"},
                  task_store: FakeTaskStore,
                  security_module: FakeSecurity,
@@ -608,30 +709,54 @@ defmodule Arbor.Agent.OrchestrationTest do
       assert_received {:authorize, "human_1", "arbor://agent/dispatch/agent_1", :execute,
                        [verify_identity: false]}
 
-      assert_received {:grant, grant_opts}
-      assert grant_opts[:principal] == "human_1"
-      assert grant_opts[:resource] == "arbor://approval/answer/task/task_1"
-      assert grant_opts[:constraints] == %{}
-      assert grant_opts[:metadata] == %{source: :orchestration_task_dispatch, task_id: "task_1"}
+      grants =
+        for _ <- 1..6 do
+          assert_received {:grant, grant_opts}
+          grant_opts
+        end
 
-      assert_received {:grant, steer_grant_opts}
-      assert steer_grant_opts[:resource] == "arbor://agent/task/steer/task_1"
+      resources = Enum.map(grants, & &1[:resource])
 
-      assert_received {:grant, adoption_grant_opts}
-      assert adoption_grant_opts[:resource] == "arbor://agent/task/adopt/task_1"
+      assert resources == [
+               "arbor://agent/task/read/task_1",
+               "arbor://approval/read/task/task_1",
+               "arbor://agent/task/steer/task_1",
+               "arbor://agent/task/cancel/task_1",
+               "arbor://agent/task/adopt/task_1",
+               "arbor://approval/answer/task/task_1"
+             ]
 
-      assert DateTime.diff(adoption_grant_opts[:expires_at], grant_opts[:expires_at], :second) >=
+      for grant_opts <- grants do
+        assert grant_opts[:principal] == "human_1"
+        assert grant_opts[:task_id] == "task_1"
+        assert grant_opts[:delegation_depth] == 0
+        assert grant_opts[:constraints] == %{}
+        assert grant_opts[:metadata][:source] == :orchestration_task_dispatch
+        assert grant_opts[:metadata][:task_id] == "task_1"
+        assert is_binary(grant_opts[:metadata][:kind])
+      end
+
+      read_grant = Enum.at(grants, 0)
+      adopt_grant = Enum.at(grants, 4)
+      answer_grant = Enum.at(grants, 5)
+
+      assert DateTime.diff(adopt_grant[:expires_at], answer_grant[:expires_at], :second) >=
+               28 * 86_400
+
+      assert DateTime.diff(read_grant[:expires_at], answer_grant[:expires_at], :second) >=
                28 * 86_400
 
       assert_received {:task_dispatch, "agent_1", "write a patch", opts}
       assert opts[:task_id] == "task_1"
       assert opts[:metadata] == %{ticket: "A-1"}
-      assert opts[:approval_answer_cap_id] == "cap_task_answer"
-      assert opts[:approval_answer_security_module] == FakeSecurity
-      assert opts[:steer_cap_id] == "cap_task_answer"
-      assert opts[:steer_security_module] == FakeSecurity
-      assert opts[:adoption_cap_id] == "cap_task_answer"
-      assert opts[:adoption_security_module] == FakeSecurity
+      assert is_map(opts[:task_control_lease])
+      assert opts[:task_control_lease]["task_id"] == "task_1"
+      assert map_size(opts[:task_control_lease]["capabilities"]) == 6
+      refute Keyword.has_key?(opts, :approval_answer_cap_id)
+      refute Keyword.has_key?(opts, :steer_cap_id)
+      refute Keyword.has_key?(opts, :adoption_cap_id)
+      refute Keyword.has_key?(opts, :task_control_security_module)
+      refute Keyword.has_key?(opts, :task_control_revoke)
 
       descriptor = opts[:approval_cleanup_descriptor]
       assert is_map(descriptor)
@@ -668,21 +793,9 @@ defmodule Arbor.Agent.OrchestrationTest do
       refute_received {:audit_dispatched, _, _, _, _}
     end
 
-    test "security regression: task ids cannot inject capability URI wildcards" do
-      invalid_task_ids = [
-        "*",
-        "**",
-        "task/**",
-        "task/child",
-        "..",
-        "task id",
-        "task\nnext",
-        String.duplicate("a", 257),
-        <<"task_", 255>>
-      ]
-
-      for task_id <- invalid_task_ids do
-        assert {:error, :invalid_task_id} =
+    test "security regression: public dispatch rejects caller-selected task_id" do
+      for task_id <- ["*", "task/**", "task_1", "x"] do
+        assert {:error, :caller_selected_task_id_rejected} =
                  Orchestration.dispatch("agent_1", "write a patch",
                    caller_id: "human_1",
                    task_id: task_id,
@@ -697,42 +810,74 @@ defmodule Arbor.Agent.OrchestrationTest do
       refute_received {:task_dispatch, _, _, _}
     end
 
-    test "fails before starting the task when the task approval-answer grant fails" do
+    test "fails before starting the task when the first lease grant fails" do
       Process.put({FakeSecurity, :grant_result}, {:error, :store_down})
+      Process.put({FakeTaskStore, :next_task_id}, "task_1")
 
-      assert {:error, {:approval_answer_grant_failed, :store_down}} =
+      assert {:error, {:task_control_lease_grant_failed, :task_read, :store_down}} =
                Orchestration.dispatch("agent_1", "write a patch",
                  caller_id: "human_1",
-                 task_id: "task_1",
                  task_store: FakeTaskStore,
                  security_module: FakeSecurity,
                  audit_module: FakeAudit
                )
 
       assert_received {:grant, grant_opts}
-      assert grant_opts[:resource] == "arbor://approval/answer/task/task_1"
+      assert grant_opts[:resource] == "arbor://agent/task/read/task_1"
       refute_received {:task_dispatch, _, _, _}
       refute_received {:audit_dispatched, _, _, _, _}
     end
 
-    test "revokes the task approval-answer grant when task dispatch fails" do
+    test "revokes the complete task-control lease when task dispatch fails" do
       Process.put({FakeTaskStore, :dispatch_result}, {:error, :store_down})
+      Process.put({FakeTaskStore, :next_task_id}, "task_1")
 
       assert {:error, :store_down} =
                Orchestration.dispatch("agent_1", "write a patch",
                  caller_id: "human_1",
-                 task_id: "task_1",
                  task_store: FakeTaskStore,
                  security_module: FakeSecurity,
                  audit_module: FakeAudit
                )
 
-      assert_received {:grant, grant_opts}
-      assert grant_opts[:resource] == "arbor://approval/answer/task/task_1"
-      assert_received {:revoke, "cap_task_answer"}
-      assert_received {:revoke, "cap_task_answer"}
-      assert_received {:revoke, "cap_task_answer"}
+      grants =
+        for _ <- 1..6 do
+          assert_received {:grant, grant_opts}
+          grant_opts
+        end
+
+      assert Enum.at(grants, 0)[:resource] == "arbor://agent/task/read/task_1"
+      assert Enum.at(grants, 5)[:resource] == "arbor://approval/answer/task/task_1"
+
+      for _ <- 1..6 do
+        assert_received {:revoke, cap_id}
+        assert is_binary(cap_id)
+      end
+
       refute_received {:audit_dispatched, _, _, _, _}
+    end
+
+    test "returns admitted audit outcome_unknown when audit fails after task admission" do
+      Process.put({FakeAudit, :dispatch_result}, {:error, :audit_sink_down})
+      Process.put({FakeTaskStore, :next_task_id}, "task_1")
+
+      assert {:error, {:task_control_lease_dispatch_admitted_audit_outcome_unknown, details}} =
+               Orchestration.dispatch("agent_1", "write a patch",
+                 caller_id: "human_1",
+                 task_store: FakeTaskStore,
+                 security_module: FakeSecurity,
+                 audit_module: FakeAudit
+               )
+
+      # Task is live; envelope carries task_id for reconcile, never cap ids.
+      assert details.task_id == "task_1"
+      assert details.uncertainty == true
+      assert details.audit_reason == :audit_sink_down
+      refute inspect(details) =~ "cap_"
+
+      assert_received {:task_dispatch, "agent_1", "write a patch", _opts}
+      # Must not revoke the admitted lease on audit failure.
+      refute_received {:revoke, _}
     end
   end
 
@@ -749,8 +894,9 @@ defmodule Arbor.Agent.OrchestrationTest do
       assert status.agent_id == "agent_1"
       assert status.state == :running
 
-      assert_received {:authorize, "human_1", "arbor://agent/task/read/task_1", :read,
-                       [verify_identity: false]}
+      assert_received {:authorize, "human_1", "arbor://agent/task/read/task_1", :read, auth_opts}
+      assert Keyword.get(auth_opts, :verify_identity) == false
+      assert Keyword.get(auth_opts, :task_id) == "task_1"
 
       assert_received {:task_status, "task_1", _opts}
 
@@ -843,18 +989,20 @@ defmodule Arbor.Agent.OrchestrationTest do
       opts = [caller_id: "human_1", task_store: FakeTaskStore, security_module: FakeSecurity]
 
       for {suffix, envelope} <- cases do
+        task_id = "task_#{suffix}"
+
         Process.put(
           {FakeTaskStore, :status_result},
-          {:ok, task_status(:failed, envelope["outcome"])}
+          {:ok, task_status(:failed, envelope["outcome"], task_id)}
         )
 
         Process.put({FakeTaskStore, :result_result}, {:ok, envelope})
 
-        assert {:ok, status} = Orchestration.task_status("task_#{suffix}", opts)
+        assert {:ok, status} = Orchestration.task_status(task_id, opts)
         assert status.state == :failed
         assert status.outcome == envelope["outcome"]
 
-        assert {:ok, ^envelope} = Orchestration.task_result("task_#{suffix}", opts)
+        assert {:ok, ^envelope} = Orchestration.task_result(task_id, opts)
       end
     end
 
@@ -978,7 +1126,10 @@ defmodule Arbor.Agent.OrchestrationTest do
       assert status.state == :cancelled
 
       assert_received {:authorize, "human_1", "arbor://agent/task/cancel/task_1", :execute,
-                       [verify_identity: false]}
+                       auth_opts}
+
+      assert Keyword.get(auth_opts, :verify_identity) == false
+      assert Keyword.get(auth_opts, :task_id) == "task_1"
 
       assert_received {:task_status, "task_1", _opts}
       assert_received {:task_cancel, "task_1", _opts}
@@ -1064,7 +1215,9 @@ defmodule Arbor.Agent.OrchestrationTest do
       assert interaction_audit[:outcome] == :resolved
 
       assert_received {:authorize, "human_1", "arbor://agent/task/cancel/" <> ^task_id, :execute,
-                       [verify_identity: false]}
+                       auth_opts}
+
+      assert Keyword.get(auth_opts, :task_id) == task_id
 
       refute_received {:authorize, _, _, _, _}
     end
@@ -1080,6 +1233,9 @@ defmodule Arbor.Agent.OrchestrationTest do
         {Arbor.Agent.Orchestration.TaskStore,
          name: store,
          task_supervisor: supervisor,
+         task_id_generator: fn -> task_id end,
+         recovery_force_ready: true,
+         task_control_recovery_facade: Arbor.Agent.Orchestration.TaskControlRecoveryMemory,
          approval_cleanup_consensus_module: SharedConsensus,
          approval_cleanup_interaction_router: SharedInteractionRouter,
          approval_cleanup_audit_module: SharedAudit}
@@ -1148,7 +1304,6 @@ defmodule Arbor.Agent.OrchestrationTest do
 
       opts = [
         caller_id: "human_1",
-        task_id: task_id,
         task_store: Arbor.Agent.Orchestration.TaskStore,
         name: store,
         test_pid: self(),
@@ -1498,6 +1653,9 @@ defmodule Arbor.Agent.OrchestrationTest do
         {Arbor.Agent.Orchestration.TaskStore,
          name: store,
          task_supervisor: supervisor,
+         task_id_generator: fn -> task_id end,
+         recovery_force_ready: true,
+         task_control_recovery_facade: Arbor.Agent.Orchestration.TaskControlRecoveryMemory,
          runner: ControlledTaskRunner,
          approval_cleanup_consensus_module: SharedConsensus,
          approval_cleanup_interaction_router: SharedInteractionRouter,
@@ -1549,7 +1707,6 @@ defmodule Arbor.Agent.OrchestrationTest do
 
       opts = [
         caller_id: "dispatch_owner",
-        task_id: task_id,
         task_store: Arbor.Agent.Orchestration.TaskStore,
         name: store,
         test_pid: self(),
@@ -1618,7 +1775,9 @@ defmodule Arbor.Agent.OrchestrationTest do
       assert control["sender_id"] == "human_1"
 
       assert_received {:authorize, "human_1", "arbor://agent/task/steer/task_1", :execute,
-                       [verify_identity: false]}
+                       auth_opts}
+
+      assert Keyword.get(auth_opts, :task_id) == "task_1"
 
       assert_received {:task_steer, "task_1", "run focused tests", opts}
       assert opts[:sender_id] == "human_1"
@@ -1658,9 +1817,10 @@ defmodule Arbor.Agent.OrchestrationTest do
     end
 
     test "security regression: dispatch grants exact task steering and terminal cleanup revokes it" do
+      Process.put({TerminalTaskStore, :next_task_id}, "task_1")
+
       opts = [
         caller_id: "dispatch_owner",
-        task_id: "task_1",
         task_store: TerminalTaskStore,
         consensus_module: FakeConsensus,
         interaction_router: FakeInteractionRouter,
@@ -1686,8 +1846,11 @@ defmodule Arbor.Agent.OrchestrationTest do
       assert {:ok, %{state: :cancelled}} =
                Orchestration.cancel_task("task_1", Keyword.put(opts, :authorize?, false))
 
+      # Terminal retirement revokes active controls including steer/adopt; task_read may remain
+      # until prune. Assert the control members used by this test are revoked.
       assert_received {:scoped_revoke, _cap_id, "arbor://agent/task/steer/task_1"}
       assert_received {:scoped_revoke, _cap_id, "arbor://agent/task/adopt/task_1"}
+      assert_received {:scoped_revoke, _cap_id, "arbor://agent/task/cancel/task_1"}
 
       assert {:error, {:unauthorized, :task_steer_required}} =
                Orchestration.steer_task("task_1", "redirect", opts)
@@ -1722,7 +1885,9 @@ defmodule Arbor.Agent.OrchestrationTest do
       assert_received {:task_status, "task_1", _opts}
 
       assert_received {:authorize, "human_1", "arbor://agent/task/adopt/task_1", :execute,
-                       [verify_identity: false]}
+                       auth_opts}
+
+      assert Keyword.get(auth_opts, :task_id) == "task_1"
 
       assert_received {:task_adopt, "task_1", "refs/heads/reviewed", opts}
       assert opts[:caller_id] == "human_1"
@@ -2002,7 +2167,9 @@ defmodule Arbor.Agent.OrchestrationTest do
                )
 
       assert_received {:authorize, "human_1", "arbor://approval/answer/task/task_1", :execute,
-                       [verify_identity: false]}
+                       auth_opts}
+
+      assert Keyword.get(auth_opts, :task_id) == "task_1"
 
       assert_received {:interaction_respond, "irq_1", :approved, _metadata}
     end
@@ -2110,9 +2277,9 @@ defmodule Arbor.Agent.OrchestrationTest do
     }
   end
 
-  defp task_status(state, outcome) do
+  defp task_status(state, outcome, task_id \\ "task_1") do
     %{
-      task_id: "task_1",
+      task_id: task_id,
       agent_id: "agent_1",
       state: state,
       current_step: Atom.to_string(state),

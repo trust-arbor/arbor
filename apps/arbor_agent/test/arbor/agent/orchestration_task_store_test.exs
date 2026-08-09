@@ -509,16 +509,19 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     supervisor = Module.concat(__MODULE__, :"TaskSupervisor#{unique}")
     store = Module.concat(__MODULE__, :"Store#{unique}")
 
-    start_supervised!({Task.Supervisor, name: supervisor})
+    start_supervised!({Task.Supervisor, name: supervisor}, id: supervisor)
 
-    start_supervised!({
-      TaskStore,
-      # Internal store-start probe only — never selected via dispatch/descriptor.
-      name: store,
-      task_supervisor: supervisor,
-      runner: ControlledRunner,
-      approval_cleanup_mfa: {LifecycleCleanupProbe, :cleanup, 2}
-    })
+    start_supervised!(
+      {
+        TaskStore,
+        # Internal store-start probe only — never selected via dispatch/descriptor.
+        name: store,
+        task_supervisor: supervisor,
+        runner: ControlledRunner,
+        approval_cleanup_mfa: {LifecycleCleanupProbe, :cleanup, 2}
+      },
+      id: store
+    )
 
     original_executors = Application.get_env(:arbor_agent, :task_executors)
     original_default = Application.get_env(:arbor_agent, :default_task_executor)
@@ -563,19 +566,33 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
   end
 
   test "dispatch returns before the runner completes, then stores the structured result", %{
-    store: store
+    supervisor: supervisor
   } do
+    test_pid = self()
+    store_name = unique_store_name()
+
+    store =
+      start_supervised!(
+        {TaskStore,
+         name: store_name,
+         task_supervisor: supervisor,
+         runner: ControlledRunner,
+         task_control_revoke: fn cap_id ->
+           send(test_pid, {:revoke_lease_cap, cap_id})
+           :ok
+         end},
+        id: store_name
+      )
+
+    lease = sample_lease("task_lifecycle_1")
+
     assert {:ok, task_id} =
              TaskStore.dispatch("agent_1", "do work",
                name: store,
+               task_id: "task_lifecycle_1",
                test_pid: self(),
                metadata: %{ticket: "A-1"},
-               approval_answer_cap_id: "cap_task_1",
-               approval_answer_revoke: revoke_to(self()),
-               steer_cap_id: "cap_task_steer_1",
-               steer_capability_revoke: revoke_steer_to(self()),
-               adoption_cap_id: "cap_task_adopt_1",
-               adoption_capability_revoke: revoke_adoption_to(self())
+               task_control_lease: lease
              )
 
     assert_receive {:runner_started, runner_pid, "agent_1", "do work", _opts}
@@ -585,6 +602,7 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     assert status.current_step == "running"
     assert status.metadata == %{ticket: "A-1"}
     refute Map.has_key?(status, :outcome)
+    refute Map.has_key?(status, :task_control_lease)
 
     assert {:error, :not_ready} = TaskStore.result(task_id, name: store)
 
@@ -604,9 +622,145 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
       refute Map.has_key?(status, :outcome)
     end)
 
-    assert_receive {:revoke_approval_answer_capability, "cap_task_1"}
-    assert_receive {:revoke_steer_capability, "cap_task_steer_1"}
-    assert_receive {:revoke_adoption_capability, "cap_task_adopt_1"}
+    # Terminal non-adoptable: all but task_read retired via store-pinned seam
+    # (async; allow bounded wait).
+    revoked =
+      for _ <- 1..5 do
+        assert_receive {:revoke_lease_cap, cap_id}, 1_000
+        cap_id
+      end
+
+    assert MapSet.new(revoked) ==
+             MapSet.new([
+               "cap_approval_read",
+               "cap_approval_answer",
+               "cap_task_steer",
+               "cap_task_cancel",
+               "cap_task_adopt"
+             ])
+
+    refute_receive {:revoke_lease_cap, "cap_task_read"}, 50
+
+    record = :sys.get_state(store).tasks[task_id]
+    assert record.task_control_lease["capabilities"]["task_read"] == "cap_task_read"
+    refute Map.has_key?(record.task_control_lease["capabilities"], "task_adopt")
+    refute Map.has_key?(record, :approval_answer_cap_id)
+  end
+
+  test "legacy hot-upgrade records still revoke per-kind cap fields via init-pinned seam", %{
+    supervisor: supervisor
+  } do
+    test_pid = self()
+    store_name = unique_store_name()
+
+    store =
+      start_supervised!(
+        {TaskStore,
+         name: store_name,
+         task_supervisor: supervisor,
+         runner: ControlledRunner,
+         task_control_revoke: fn capability_id ->
+           case capability_id do
+             "cap_legacy_answer" ->
+               send(test_pid, {:revoke_approval_answer_capability, capability_id})
+
+             "cap_legacy_steer" ->
+               send(test_pid, {:revoke_steer_capability, capability_id})
+
+             "cap_legacy_adopt" ->
+               send(test_pid, {:revoke_adoption_capability, capability_id})
+
+             other ->
+               send(test_pid, {:revoke_other, other})
+           end
+
+           :ok
+         end},
+        id: store_name
+      )
+
+    assert {:ok, task_id} =
+             TaskStore.dispatch("agent_1", "legacy work",
+               name: store,
+               test_pid: test_pid
+             )
+
+    assert_receive {:runner_started, runner_pid, "agent_1", "legacy work", _opts}
+
+    # Hot-upgrade shape: already-running record with legacy per-kind cap fields
+    # and no closed lease. Revoke transport remains store init-pinned.
+    :sys.replace_state(store, fn state ->
+      record = state.tasks[task_id]
+
+      legacy =
+        record
+        |> Map.put(:approval_answer_cap_id, "cap_legacy_answer")
+        |> Map.put(:steer_cap_id, "cap_legacy_steer")
+        |> Map.put(:adoption_cap_id, "cap_legacy_adopt")
+        |> Map.put(:task_control_lease, nil)
+
+      put_in(state.tasks[task_id], legacy)
+    end)
+
+    send(
+      runner_pid,
+      {:finish, {:ok, %{result_type: :test, payload: %{ok: true}, raw: "done"}}}
+    )
+
+    assert_eventually(fn ->
+      assert {:ok, %{state: :done}} = TaskStore.status(task_id, name: store)
+    end)
+
+    assert_receive {:revoke_approval_answer_capability, "cap_legacy_answer"}, 1_000
+    assert_receive {:revoke_steer_capability, "cap_legacy_steer"}, 1_000
+    assert_receive {:revoke_adoption_capability, "cap_legacy_adopt"}, 1_000
+  end
+
+  test "hung lease revoke transport cannot delay terminal status/result", %{
+    supervisor: supervisor
+  } do
+    hung_revoke = fn _cap_id ->
+      Process.sleep(60_000)
+      :ok
+    end
+
+    store_name = unique_store_name()
+
+    store =
+      start_supervised!(
+        {TaskStore,
+         name: store_name,
+         task_supervisor: supervisor,
+         runner: ControlledRunner,
+         task_control_revoke: hung_revoke},
+        id: store_name
+      )
+
+    task_id = "task_hung_revoke_1"
+    lease = sample_lease(task_id)
+
+    assert {:ok, ^task_id} =
+             TaskStore.dispatch("agent_1", "work",
+               name: store,
+               task_id: task_id,
+               test_pid: self(),
+               task_control_lease: lease
+             )
+
+    assert_receive {:runner_started, runner_pid, "agent_1", "work", _opts}
+
+    {elapsed_us, _} =
+      :timer.tc(fn ->
+        send(runner_pid, {:finish, {:ok, %{result_type: :test, payload: %{}, raw: "done"}}})
+
+        assert_eventually(fn ->
+          assert {:ok, %{state: :done}} = TaskStore.status(task_id, name: store)
+          assert {:ok, _} = TaskStore.result(task_id, name: store)
+        end)
+      end)
+
+    # Terminal publication must not wait on hung revoke (async retire).
+    assert elapsed_us < 2_000_000
   end
 
   test "security regression: direct dispatch generates restart-stable random task ids", %{
@@ -930,15 +1084,16 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
   } do
     store = start_finalizing_store(supervisor)
     outcome = task_outcome()
+    task_id = "task_adopt_success"
+    lease = sample_lease(task_id, adoption_cap_id: "cap_adoption")
 
-    assert {:ok, task_id} =
+    assert {:ok, ^task_id} =
              TaskStore.dispatch(
                "agent_1",
                %{"kind" => "coding_change", "input" => "adopt change"},
                name: store,
-               task_id: "task_adopt_success",
-               adoption_cap_id: "cap_adoption",
-               adoption_capability_revoke: revoke_adoption_to(self())
+               task_id: task_id,
+               task_control_lease: lease
              )
 
     assert_receive {:finalizing_executor_started, runner_pid, "agent_1", _task, _context}
@@ -955,7 +1110,10 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     )
 
     assert_eventually(fn -> assert {:ok, _} = TaskStore.result(task_id, name: store) end)
-    refute_receive {:revoke_adoption_capability, "cap_adoption"}
+    # Drain the four terminal-active revokes before refuting adopt retention.
+    drain_terminal_active_revokes(except: ["cap_adoption", "cap_task_read"])
+    refute_received {:revoke_lease_cap, "cap_adoption"}
+    assert lease_adopt_id(store, task_id) == "cap_adoption"
 
     assert {:ok, adopted_result} = TaskStore.adopt(task_id, " refs/heads/reviewed ", name: store)
     assert adopted_result.raw["finalized"] == true
@@ -968,8 +1126,8 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
                     _callback_pid}
 
     assert raw_result["finalized"] == true
-    assert_receive {:revoke_adoption_capability, "cap_adoption"}
-    assert :sys.get_state(store).tasks[task_id].adoption_cap_id == nil
+    assert_receive {:revoke_lease_cap, "cap_adoption"}, 1_000
+    assert lease_adopt_id(store, task_id) == nil
   end
 
   test "slow adoption stays outside TaskStore, coalesces callers, and commits exactly once", %{
@@ -1036,7 +1194,7 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
 
     assert_receive {:finalizing_executor_started, _other_runner, "agent_1", _task, _context}
     assert {:ok, %{state: :done}} = TaskStore.status(task_id, name: store)
-    refute_receive {:revoke_adoption_capability, "cap_adopt_async"}, 50
+    refute_receive {:revoke_lease_cap, "cap_adopt_async"}, 50
     refute_receive {:adopt_task_called, _, _, _, _, _}, 50
 
     send(
@@ -1048,8 +1206,8 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     assert {:ok, ^adopted_result} = Task.await(second, 1_000)
     assert adopted_result.raw["adopted"] == "refs/heads/reviewed"
 
-    assert_receive {:revoke_adoption_capability, "cap_adopt_async"}
-    refute_receive {:revoke_adoption_capability, "cap_adopt_async"}, 100
+    assert_receive {:revoke_lease_cap, "cap_adopt_async"}, 1_000
+    refute_receive {:revoke_lease_cap, "cap_adopt_async"}, 100
 
     assert {:ok, ^adopted_result} =
              TaskStore.adopt(task_id, "refs/heads/reviewed",
@@ -1067,7 +1225,7 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
              )
 
     refute_receive {:adopt_task_called, _, _, _, _, _}, 50
-    refute_receive {:revoke_adoption_capability, "cap_adopt_async"}, 50
+    refute_receive {:revoke_lease_cap, "cap_adopt_async"}, 50
   end
 
   test "caller wait timeout leaves an admitted adoption owned by TaskStore", %{
@@ -1110,7 +1268,7 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
              TaskStore.adoption_status(task_id, "refs/heads/reviewed", name: store)
 
     assert settled_result.raw["adopted"] == "refs/heads/reviewed"
-    assert_receive {:revoke_adoption_capability, "cap_adopt_wait_timeout"}
+    assert_receive {:revoke_lease_cap, "cap_adopt_wait_timeout"}, 1_000
   end
 
   test "abnormal TaskStore owner death terminates a blocked adoption worker", %{
@@ -1182,9 +1340,9 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
              TaskStore.adoption_status(task_id, "refs/heads/reviewed", name: store)
 
     assert {:ok, ^prior_result} = TaskStore.result(task_id, name: store)
-    assert :sys.get_state(store).tasks[task_id].adoption_cap_id == "cap_adopt_queued_timeout"
+    assert lease_adopt_id(store, task_id) == "cap_adopt_queued_timeout"
     refute_receive {:adopt_task_called, _, _, _, _, _}, 100
-    refute_receive {:revoke_adoption_capability, _}, 50
+    refute_receive {:revoke_lease_cap, _}, 50
   end
 
   test "adoption worker death preserves the prior result and retained authority for retry", %{
@@ -1210,8 +1368,8 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
              Task.await(caller, 1_000)
 
     assert {:ok, ^prior_result} = TaskStore.result(task_id, name: store)
-    assert :sys.get_state(store).tasks[task_id].adoption_cap_id == "cap_adopt_owner_died"
-    refute_receive {:revoke_adoption_capability, _}, 50
+    assert lease_adopt_id(store, task_id) == "cap_adopt_owner_died"
+    refute_receive {:revoke_lease_cap, _}, 50
 
     Application.put_env(:arbor_agent, :task_store_test_adopt, :success)
 
@@ -1222,7 +1380,7 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
              )
 
     assert retried.raw["adopted"] == "refs/heads/reviewed"
-    assert_receive {:revoke_adoption_capability, "cap_adopt_owner_died"}
+    assert_receive {:revoke_lease_cap, "cap_adopt_owner_died"}, 1_000
   end
 
   test "adoption commit rejects terminal result drift without consuming retry authority", %{
@@ -1257,8 +1415,8 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
              Task.await(caller, 1_000)
 
     assert {:ok, ^drifted_result} = TaskStore.result(task_id, name: store)
-    assert :sys.get_state(store).tasks[task_id].adoption_cap_id == "cap_adopt_snapshot_drift"
-    refute_receive {:revoke_adoption_capability, _}, 50
+    assert lease_adopt_id(store, task_id) == "cap_adopt_snapshot_drift"
+    refute_receive {:revoke_lease_cap, _}, 50
   end
 
   test "adoption cannot rewrite the canonical terminal outcome", %{supervisor: supervisor} do
@@ -1291,8 +1449,8 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
              Task.await(caller, 1_000)
 
     assert {:ok, ^prior_result} = TaskStore.result(task_id, name: store)
-    assert :sys.get_state(store).tasks[task_id].adoption_cap_id == "cap_adopt_outcome_rewrite"
-    refute_receive {:revoke_adoption_capability, _}, 50
+    assert lease_adopt_id(store, task_id) == "cap_adopt_outcome_rewrite"
+    refute_receive {:revoke_lease_cap, _}, 50
   end
 
   test "adoption worker timeout is separate from finalization and remains retryable", %{
@@ -1316,8 +1474,8 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
              )
 
     assert {:ok, ^prior_result} = TaskStore.result(task_id, name: store)
-    assert :sys.get_state(store).tasks[task_id].adoption_cap_id == "cap_adopt_worker_timeout"
-    refute_receive {:revoke_adoption_capability, _}, 50
+    assert lease_adopt_id(store, task_id) == "cap_adopt_worker_timeout"
+    refute_receive {:revoke_lease_cap, _}, 50
 
     Application.put_env(:arbor_agent, :task_store_test_adopt, :success)
 
@@ -1328,26 +1486,28 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
              )
 
     assert retried.raw["adopted"] == "refs/heads/reviewed"
-    assert_receive {:revoke_adoption_capability, "cap_adopt_worker_timeout"}
+    assert_receive {:revoke_lease_cap, "cap_adopt_worker_timeout"}, 1_000
   end
 
   test "adoption callback errors preserve the prior result for retry", %{supervisor: supervisor} do
     Application.put_env(:arbor_agent, :task_store_test_adopt, {:error, :destination_busy})
     store = start_finalizing_store(supervisor, executor_finalization_timeout_ms: 40)
 
-    assert {:ok, task_id} =
+    task_id = "task_adopt_retry"
+
+    assert {:ok, ^task_id} =
              TaskStore.dispatch(
                "agent_1",
                %{"kind" => "coding_change", "input" => "retry adoption"},
                name: store,
-               task_id: "task_adopt_retry",
-               adoption_cap_id: "cap_adoption_retry",
-               adoption_capability_revoke: revoke_adoption_to(self())
+               task_id: task_id,
+               task_control_lease: sample_lease(task_id, adoption_cap_id: "cap_adoption_retry")
              )
 
     assert_receive {:finalizing_executor_started, runner_pid, "agent_1", _task, _context}
     send(runner_pid, {:finish, {:ok, %{"status" => "no_changes"}}})
     assert_eventually(fn -> assert {:ok, _} = TaskStore.result(task_id, name: store) end)
+    drain_terminal_active_revokes(except: ["cap_adoption_retry", "cap_task_read"])
 
     assert {:error, {:task_adoption_failed, ":destination_busy"}} =
              TaskStore.adopt(task_id, "refs/heads/reviewed", name: store)
@@ -1360,8 +1520,8 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
 
     assert {:ok, prior_result} = TaskStore.result(task_id, name: store)
     assert prior_result.raw["finalized"] == true
-    assert :sys.get_state(store).tasks[task_id].adoption_cap_id == "cap_adoption_retry"
-    refute_receive {:revoke_adoption_capability, _}
+    assert lease_adopt_id(store, task_id) == "cap_adoption_retry"
+    refute_receive {:revoke_lease_cap, _}
   end
 
   test "pruning a terminal adoptable task revokes its retained capability", %{
@@ -1369,20 +1529,22 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
   } do
     store = start_finalizing_store(supervisor, max_tasks: 1)
 
-    assert {:ok, first_task_id} =
+    first_task_id = "task_adoption_prune_first"
+
+    assert {:ok, ^first_task_id} =
              TaskStore.dispatch(
                "agent_1",
                %{"kind" => "coding_change", "input" => "retain adoption authority"},
                name: store,
-               task_id: "task_adoption_prune_first",
-               adoption_cap_id: "cap_adoption_prune",
-               adoption_capability_revoke: revoke_adoption_to(self())
+               task_id: first_task_id,
+               task_control_lease:
+                 sample_lease(first_task_id, adoption_cap_id: "cap_adoption_prune")
              )
 
     assert_receive {:finalizing_executor_started, first_runner, "agent_1", _task, _context}
     send(first_runner, {:finish, {:ok, %{"status" => "no_changes"}}})
     assert_eventually(fn -> assert {:ok, _} = TaskStore.result(first_task_id, name: store) end)
-    refute_receive {:revoke_adoption_capability, "cap_adoption_prune"}
+    refute_receive {:revoke_lease_cap, "cap_adoption_prune"}
 
     assert {:ok, _second_task_id} =
              TaskStore.dispatch(
@@ -1392,7 +1554,7 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
                task_id: "task_adoption_prune_second"
              )
 
-    assert_receive {:revoke_adoption_capability, "cap_adoption_prune"}
+    assert_receive {:revoke_lease_cap, "cap_adoption_prune"}, 1_000
     assert {:error, :not_found} = TaskStore.status(first_task_id, name: store)
   end
 
@@ -1425,8 +1587,7 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
                  %{"kind" => "coding_change", "input" => "fail finalization"},
                  name: store,
                  task_id: task_id,
-                 adoption_cap_id: adoption_cap_id,
-                 adoption_capability_revoke: revoke_adoption_to(self())
+                 task_control_lease: sample_lease(task_id, adoption_cap_id: adoption_cap_id)
                )
 
       assert_receive {:finalizing_executor_started, runner_pid, "agent_1", _task, _context}
@@ -1440,7 +1601,7 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
                  TaskStore.result(task_id, name: store)
       end)
 
-      assert_receive {:revoke_adoption_capability, ^adoption_cap_id}
+      assert_receive {:revoke_lease_cap, ^adoption_cap_id}, 1_000
     end
   end
 
@@ -3186,15 +3347,31 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
   end
 
   test "security regression: pending-approval runner termination fails closed and cleans up once",
-       %{store: store} do
+       %{supervisor: supervisor} do
     descriptor = cleanup_descriptor()
+    test_pid = self()
+    task_id = "task_pending_owner_1"
+    store_name = unique_store_name()
 
-    assert {:ok, task_id} =
+    store =
+      start_supervised!(
+        {TaskStore,
+         name: store_name,
+         task_supervisor: supervisor,
+         runner: PendingRunner,
+         approval_cleanup_mfa: {LifecycleCleanupProbe, :cleanup, 2},
+         task_control_revoke: fn cap_id ->
+           send(test_pid, {:revoke_lease_cap, cap_id})
+           :ok
+         end},
+        id: store_name
+      )
+
+    assert {:ok, ^task_id} =
              TaskStore.dispatch("agent_1", "do gated work",
                name: store,
-               runner: PendingRunner,
-               approval_answer_cap_id: "cap_pending_owner",
-               approval_answer_revoke: revoke_to(self()),
+               task_id: task_id,
+               task_control_lease: sample_lease(task_id),
                approval_cleanup_descriptor: descriptor
              )
 
@@ -3213,7 +3390,7 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     assert cleanup_opts[:principal_id] == "agent_1"
     assert cleanup_opts[:cleanup_reason] == :task_termination
     assert cleanup_opts[:trace_id] == "trace_cleanup"
-    assert_receive {:revoke_approval_answer_capability, "cap_pending_owner"}
+    assert_receive {:revoke_lease_cap, "cap_approval_answer"}, 1_000
     refute_receive {:lifecycle_cleanup, ^task_id, _}, 200
   end
 
@@ -3589,18 +3766,35 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     end
   end
 
-  test "cancels a running task and keeps it cancelled after the process exits", %{store: store} do
-    assert {:ok, task_id} =
+  test "cancels a running task and keeps it cancelled after the process exits", %{
+    supervisor: supervisor
+  } do
+    test_pid = self()
+    store_name = unique_store_name()
+
+    store =
+      start_supervised!(
+        {TaskStore,
+         name: store_name,
+         task_supervisor: supervisor,
+         runner: ControlledRunner,
+         task_control_revoke: fn cap_id ->
+           send(test_pid, {:revoke_lease_cap, cap_id})
+           :ok
+         end},
+        id: store_name
+      )
+
+    task_id = "task_cancel_lease_1"
+    lease = sample_lease(task_id, adoption_cap_id: "cap_task_adopt_cancel")
+
+    assert {:ok, ^task_id} =
              TaskStore.dispatch("agent_1", "do work",
                name: store,
+               task_id: task_id,
                test_pid: self(),
                metadata: %{ticket: "A-1"},
-               approval_answer_cap_id: "cap_task_cancel",
-               approval_answer_revoke: revoke_to(self()),
-               steer_cap_id: "cap_task_steer_cancel",
-               steer_capability_revoke: revoke_steer_to(self()),
-               adoption_cap_id: "cap_task_adopt_cancel",
-               adoption_capability_revoke: revoke_adoption_to(self())
+               task_control_lease: lease
              )
 
     assert_receive {:runner_started, runner_pid, "agent_1", "do work", _opts}
@@ -3616,9 +3810,17 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     assert {:ok, status} = TaskStore.status(task_id, name: store)
     assert status.state == :cancelled
     assert {:error, :cancelled} = TaskStore.result(task_id, name: store)
-    assert_receive {:revoke_approval_answer_capability, "cap_task_cancel"}
-    assert_receive {:revoke_steer_capability, "cap_task_steer_cancel"}
-    assert_receive {:revoke_adoption_capability, "cap_task_adopt_cancel"}
+
+    revoked =
+      for _ <- 1..5 do
+        assert_receive {:revoke_lease_cap, cap_id}, 1_000
+        cap_id
+      end
+
+    assert "cap_approval_answer" in revoked
+    assert "cap_task_steer" in revoked
+    assert "cap_task_adopt_cancel" in revoked
+    refute "cap_task_read" in revoked
   end
 
   test "cancel propagates agent_id and task_id to the scoped turn bridge before killing the runner",
@@ -3635,9 +3837,7 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
              TaskStore.dispatch("agent_coding_1", "implement feature",
                name: store,
                test_pid: test_pid,
-               cancel_turn: cancel_turn,
-               approval_answer_cap_id: "cap_turn_cancel",
-               approval_answer_revoke: revoke_to(test_pid)
+               cancel_turn: cancel_turn
              )
 
     assert_receive {:runner_started, runner_pid, "agent_coding_1", "implement feature", _opts}
@@ -3652,7 +3852,6 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     assert Process.whereis(store) == store_pid or is_pid(store_pid)
 
     assert_receive {:DOWN, ^ref, :process, ^runner_pid, :killed}
-    assert_receive {:revoke_approval_answer_capability, "cap_turn_cancel"}
     assert {:error, :cancelled} = TaskStore.result(task_id, name: store)
   end
 
@@ -3723,8 +3922,7 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
                timeout: 15_000,
                caller_id: "caller_default",
                metadata: %{"ticket" => "D-1"},
-               approval_answer_cap_id: "cap_private_default",
-               approval_answer_revoke: revoke_to(self()),
+               task_control_lease: sample_lease("task_default_1"),
                test_pid: self()
              )
 
@@ -3736,9 +3934,10 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     assert context["metadata"] == %{"ticket" => "D-1"}
     refute Map.has_key?(context, :test_pid)
     refute Map.has_key?(context, "test_pid")
+    refute Map.has_key?(context, :task_control_lease)
+    refute Map.has_key?(context, "task_control_lease")
     refute Map.has_key?(context, :approval_answer_cap_id)
     refute Map.has_key?(context, "approval_answer_cap_id")
-    refute Map.has_key?(context, :approval_answer_revoke)
     refute is_list(context)
     assert {:ok, _} = Jason.encode(context)
 
@@ -3827,8 +4026,7 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
                caller_id: "caller_42",
                metadata: %{"ticket" => "C-1"},
                # Private store options must not leak into configured executor context.
-               approval_answer_cap_id: "cap_private",
-               approval_answer_revoke: revoke_to(self()),
+               task_control_lease: sample_lease("task_coding_1"),
                test_pid: self()
              )
 
@@ -3848,9 +4046,10 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
 
     refute Map.has_key?(context, :test_pid)
     refute Map.has_key?(context, "test_pid")
+    refute Map.has_key?(context, :task_control_lease)
+    refute Map.has_key?(context, "task_control_lease")
     refute Map.has_key?(context, :approval_answer_cap_id)
     refute Map.has_key?(context, "approval_answer_cap_id")
-    refute Map.has_key?(context, :approval_answer_revoke)
     refute is_list(context)
 
     assert {:ok, _} = Jason.encode(context)
@@ -4150,7 +4349,14 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     end
 
     start_supervised!(
-      {TaskStore, name: store, task_supervisor: supervisor, cancel_turn: cancel_turn},
+      {TaskStore,
+       name: store,
+       task_supervisor: supervisor,
+       cancel_turn: cancel_turn,
+       task_control_revoke: fn cap_id ->
+         send(test_pid, {:revoke_lease_cap, cap_id})
+         :ok
+       end},
       id: store
     )
 
@@ -4160,8 +4366,7 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
                %{"kind" => "coding_change", "input" => "cancel me"},
                name: store,
                task_id: "task_cancel_order",
-               approval_answer_cap_id: "cap_cancel_order",
-               approval_answer_revoke: revoke_to(test_pid)
+               task_control_lease: sample_lease("task_cancel_order")
              )
 
     assert_receive {:configured_executor, runner_pid, "agent_1", _task, context}
@@ -4173,7 +4378,7 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     assert_receive {:cancel_task_called, "agent_1", ^context, _from}
     assert_receive {:cancel_turn_hook, "agent_1", ^task_id}
     assert_receive {:DOWN, ^ref, :process, ^runner_pid, :killed}
-    assert_receive {:revoke_approval_answer_capability, "cap_cancel_order"}
+    assert_receive {:revoke_lease_cap, "cap_approval_answer"}, 1_000
   end
 
   test "cancel still completes when cancel_task/2 errors or exits", %{supervisor: supervisor} do
@@ -4457,25 +4662,31 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     }
   end
 
-  defp revoke_to(test_pid) do
-    fn capability_id ->
-      send(test_pid, {:revoke_approval_answer_capability, capability_id})
-      :ok
-    end
+  defp sample_lease(task_id, opts \\ []) do
+    adopt_id = Keyword.get(opts, :adoption_cap_id, "cap_task_adopt")
+
+    %{
+      "schema_version" => 1,
+      "task_id" => task_id,
+      "capabilities" => %{
+        "task_read" => "cap_task_read",
+        "approval_read" => "cap_approval_read",
+        "task_steer" => "cap_task_steer",
+        "task_cancel" => "cap_task_cancel",
+        "task_adopt" => adopt_id,
+        "approval_answer" => "cap_approval_answer"
+      }
+    }
   end
 
-  defp revoke_steer_to(test_pid) do
-    fn capability_id ->
-      send(test_pid, {:revoke_steer_capability, capability_id})
-      :ok
-    end
+  defp lease_adopt_id(store, task_id) do
+    store
+    |> :sys.get_state()
+    |> get_in([:tasks, task_id, :task_control_lease, "capabilities", "task_adopt"])
   end
 
-  defp revoke_adoption_to(test_pid) do
-    fn capability_id ->
-      send(test_pid, {:revoke_adoption_capability, capability_id})
-      :ok
-    end
+  defp unique_store_name do
+    :"task_store_test_#{System.unique_integer([:positive])}"
   end
 
   defp task_outcome do
@@ -4598,14 +4809,15 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
   end
 
   defp complete_adoptable_task(store, task_id, adoption_cap_id) do
+    lease = sample_lease(task_id, adoption_cap_id: adoption_cap_id)
+
     assert {:ok, ^task_id} =
              TaskStore.dispatch(
                "agent_1",
                %{"kind" => "coding_change", "input" => "adopt asynchronously"},
                name: store,
                task_id: task_id,
-               adoption_cap_id: adoption_cap_id,
-               adoption_capability_revoke: revoke_adoption_to(self())
+               task_control_lease: lease
              )
 
     assert_receive {:finalizing_executor_started, runner_pid, "agent_1", _task, _context}
@@ -4619,12 +4831,48 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
       assert {:ok, _result} = TaskStore.result(task_id, name: store)
     end)
 
+    # Terminal-active phase revokes four controls; drain them so later
+    # refute_receive for the adoption cap cannot race mailbox noise.
+    drain_terminal_active_revokes(except: [adoption_cap_id, "cap_task_read"])
+
     assert {:ok, result} = TaskStore.result(task_id, name: store)
     result
   end
 
+  # Terminal-active lifecycle kinds: approval_read, approval_answer, steer, cancel.
+  defp drain_terminal_active_revokes(opts) do
+    except = MapSet.new(Keyword.get(opts, :except, []))
+
+    revoked =
+      for _ <- 1..4 do
+        assert_receive {:revoke_lease_cap, cap_id}, 1_000
+        refute cap_id in except
+        cap_id
+      end
+
+    assert length(revoked) == 4
+
+    assert MapSet.new(revoked) ==
+             MapSet.new([
+               "cap_approval_read",
+               "cap_approval_answer",
+               "cap_task_steer",
+               "cap_task_cancel"
+             ])
+
+    revoked
+  end
+
   defp start_finalizing_store(supervisor, opts \\ []) do
     store = Module.concat(__MODULE__, :"FinalizingStore#{System.unique_integer([:positive])}")
+    test_pid = self()
+
+    opts =
+      Keyword.put_new(opts, :task_control_revoke, fn cap_id ->
+        # Lease-neutral tag; reserve :revoke_adoption_capability for legacy only.
+        send(test_pid, {:revoke_lease_cap, cap_id})
+        :ok
+      end)
 
     Application.put_env(:arbor_agent, :task_executors, %{
       "coding_change" => FinalizingExecutor

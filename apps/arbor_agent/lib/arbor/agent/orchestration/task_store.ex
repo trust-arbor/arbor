@@ -74,9 +74,28 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   @max_adoption_waiters 32
   @max_steering_message_bytes 4_000
   @max_destination_ref_bytes 256
+  # Lease retirement reconciliation (store-owned; non-durable).
+  @default_lease_retire_admit_timeout_ms 2_000
+  @default_lease_retire_worker_timeout_ms 10_000
+  @default_lease_retire_base_delay_ms 100
+  @default_lease_retire_max_delay_ms 5_000
+  @default_lease_retire_max_attempts 8
+  @default_lease_retire_max_retrigger_rounds 4
+  # Recovery markers / reservation (store-owned workers; never I/O in callbacks).
+  @default_recovery_store :arbor_agent_task_control_recovery
+  @default_max_recovery_obligations 256
+  @default_max_reservations 256
+  @default_reservation_deadline_ms 30_000
+  @default_recovery_admit_timeout_ms 2_000
+  @default_recovery_worker_timeout_ms 10_000
+  @default_recovery_call_timeout_ms 15_000
+  @default_recovery_replay_batch 64
+  @default_recovery_retry_base_ms 200
+  @default_recovery_retry_max_ms 5_000
+  @default_recovery_max_retries 16
 
   alias Arbor.Agent.Config
-  alias Arbor.Agent.Orchestration.{TaskArtifacts, TaskInventoryProjection}
+  alias Arbor.Agent.Orchestration.{TaskArtifacts, TaskControlLease, TaskInventoryProjection}
 
   alias Arbor.Contracts.Coding.{
     AdmissionFailure,
@@ -128,6 +147,16 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
 
     _ =
       opts
+      |> Keyword.get(:task_control_security_module, Arbor.Security)
+      |> validate_task_control_security_module!()
+
+    _ =
+      opts
+      |> Keyword.get(:task_control_revoke)
+      |> validate_task_control_revoke!()
+
+    _ =
+      opts
       |> Keyword.get(:adoption_timeout_ms, @default_adoption_timeout_ms)
       |> validate_adoption_timeout!()
 
@@ -136,29 +165,145 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   end
 
   @doc """
-  Dispatch an async task.
+  Reserve a server-owned task identity before capability grants.
+
+  Returns `%{task_id: id, reservation_token: token}`. The opaque token is
+  owner-bound (calling process) and required for `commit_recovery_marker/3`,
+  `activate/4`, and `release/3`. Never accepted from public MCP dispatch opts;
+  production task ids are unguessable. Deterministic ids only via store-start
+  `:task_id_generator` pin.
+  """
+  @spec reserve(keyword() | map()) ::
+          {:ok, %{task_id: task_id(), reservation_token: String.t()}} | {:error, term()}
+  def reserve(opts \\ []) do
+    GenServer.call(store_name(opts), {:reserve, normalize_opts(opts)})
+  end
+
+  @doc """
+  Persist a capability-ID-free recovery marker for a reserved task.
+
+  Backend-acknowledged via store-owned recovery workers (no Persistence I/O in
+  the GenServer callback). Must succeed before Orchestration mints lease
+  members. Fails closed when durability is unavailable.
+  """
+  @spec commit_recovery_marker(task_id(), String.t(), keyword() | map()) ::
+          :ok | {:error, term()}
+  def commit_recovery_marker(task_id, reservation_token, opts \\ [])
+      when is_binary(task_id) and is_binary(reservation_token) do
+    GenServer.call(
+      store_name(opts),
+      {:commit_recovery_marker, task_id, reservation_token},
+      recovery_call_timeout(opts)
+    )
+  end
+
+  @doc """
+  Activate a reserved task with an optional closed task-control lease.
+
+  Requires the opaque reservation token. Drops the reservation after the task
+  record is admitted; retains the durable recovery marker while authority or
+  pending retirement remains. A non-nil lease requires a backend-acknowledged
+  recovery marker and otherwise returns `{:error, :recovery_marker_required}`.
+  """
+  @spec activate(String.t(), term(), task_id(), String.t(), keyword() | map()) ::
+          {:ok, task_id()} | {:error, term()}
+  def activate(agent_id, task, task_id, reservation_token, opts \\ [])
+      when is_binary(task_id) and is_binary(reservation_token) do
+    GenServer.call(
+      store_name(opts),
+      {:activate, agent_id, task, task_id, reservation_token, normalize_opts(opts)}
+    )
+  end
+
+  @doc """
+  Release a reservation. When a recovery marker was written, launches
+  store-owned reconcile (`revoke_by_task` then conditional marker delete).
+  """
+  @spec release(task_id(), String.t(), keyword() | map()) :: :ok | {:error, term()}
+  def release(task_id, reservation_token, opts \\ [])
+      when is_binary(task_id) and is_binary(reservation_token) do
+    GenServer.call(
+      store_name(opts),
+      {:release, task_id, reservation_token},
+      recovery_call_timeout(opts)
+    )
+  end
+
+  @doc """
+  Request task-scope recovery reconcile via store-owned workers
+  (`Security.revoke_by_task/1` + conditional marker delete). Used after mint
+  uncertainty; never runs Persistence/Security I/O in the GenServer callback.
+  """
+  @spec request_reconcile(task_id(), keyword() | map()) :: :ok | {:error, term()}
+  def request_reconcile(task_id, opts \\ []) when is_binary(task_id) do
+    GenServer.call(
+      store_name(opts),
+      {:request_reconcile, task_id},
+      recovery_call_timeout(opts)
+    )
+  end
+
+  @doc false
+  @spec recovery_ready?(keyword() | map()) :: boolean()
+  def recovery_ready?(opts \\ []) do
+    case GenServer.call(store_name(opts), :recovery_ready?) do
+      true -> true
+      _ -> false
+    end
+  end
+
+  @doc """
+  Dispatch an async task (store-level / test path).
+
+  Production public dispatch goes through `Arbor.Agent.Orchestration` which
+  reserves, commits a recovery marker, grants the lease, then `activate/5`.
+  Direct `dispatch/3` remains for store unit tests and internal runners.
 
   Options:
 
     * `:name` - task store process name, for tests
     * `:runner` - module implementing `run/3` (test/internal override)
-    * `:task_id` - explicit id, for deterministic tests
+    * `:task_id` - explicit id for store-level deterministic tests only
+      (not accepted through authenticated public Orchestration.dispatch opts)
     * `:metadata` - caller metadata copied into the task record
     * `:timeout` - optional timeout forwarded in JSON-clean executor context
     * `:caller_id` - optional caller id forwarded in JSON-clean executor context
-    * `:approval_answer_cap_id` - private temporary approval-answer capability id
+    * `:task_control_lease` - private closed scalar task-control lease only
+      (schema version, exact task id, kind→opaque-id map). Executable
+      selectors (Security module, revoke funs) are never accepted per dispatch;
+      they are pinned at TaskStore init.
     * `:approval_cleanup_descriptor` - private closed scalar lifecycle cleanup
       descriptor only (`caller_id`, delegated `principal_id`, and optional
       `trace_id`). Executable
       selectors (MFA, modules, functions, PIDs) are stripped on store and never
-      retained. Cleanup MFA, Consensus/Comms/Audit modules, and the
+      retained. Cleanup MFA, Consensus/Comms/Audit modules, lease Security
+      module, recovery facade/store, optional test lease-revoke seam, and the
       cleanup supervisor are pinned at TaskStore init (production defaults:
       `Orchestration.cleanup_approvals_for_task/2`, real backends, normal task
       supervisor). Tests may override those only at store start.
+
+  ## Recovery and retirement
+
+  Durable capability-ID-free recovery markers are written before grants and
+  replayed on startup via store-owned workers calling `Security.revoke_by_task/1`.
+  Phase-aware retirement uses O(1) task/monitor indexes. Exhausted retirement
+  emits `[:arbor, :agent, :task_control_lease, :retire_exhausted]` with redacted
+  measurements/metadata (no capability ids); exhausted means retry budget spent
+  while authority is retained — not silent discard and not TTL-only recovery.
+  Capacity is enforced at reserve only so terminal retirement never drops IDs.
   """
   @spec dispatch(String.t(), term(), keyword() | map()) :: {:ok, task_id()} | {:error, term()}
   def dispatch(agent_id, task, opts \\ []) do
     GenServer.call(store_name(opts), {:dispatch, agent_id, task, normalize_opts(opts)})
+  end
+
+  defp recovery_call_timeout(opts) do
+    opt = normalize_opts(opts)
+
+    case Keyword.get(opt, :recovery_call_timeout_ms) do
+      n when is_integer(n) and n > 0 -> n
+      _ -> @default_recovery_call_timeout_ms
+    end
   end
 
   @doc "Return current task status."
@@ -181,6 +326,23 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   @spec result(task_id(), keyword() | map()) :: task_result()
   def result(task_id, opts \\ []) do
     GenServer.call(store_name(opts), {:result, task_id})
+  end
+
+  @doc false
+  # ID-free internal/test seam: reopen exhausted retirement buckets for a new
+  # bounded retry generation. Reply is counts only — never capability ids.
+  @spec retrigger_exhausted_lease_retirements(keyword() | map()) ::
+          {:ok, %{retried_tasks: non_neg_integer(), remaining_exhausted: non_neg_integer()}}
+          | {:error, term()}
+  def retrigger_exhausted_lease_retirements(opts \\ []) do
+    GenServer.call(store_name(opts), :retrigger_exhausted_lease_retirements)
+  end
+
+  @doc false
+  # Redacted retirement observability for tests (no capability ids).
+  @spec lease_retirement_snapshot(keyword() | map()) :: {:ok, map()} | {:error, term()}
+  def lease_retirement_snapshot(opts \\ []) do
+    GenServer.call(store_name(opts), :lease_retirement_snapshot)
   end
 
   @doc """
@@ -299,145 +461,380 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
       |> Keyword.get(:approval_cleanup_mfa, @default_approval_cleanup_mfa)
       |> validate_approval_cleanup_mfa!()
 
+    task_control_security_module =
+      opts
+      |> Keyword.get(:task_control_security_module, Arbor.Security)
+      |> validate_task_control_security_module!()
+
+    task_control_revoke =
+      opts
+      |> Keyword.get(:task_control_revoke)
+      |> validate_task_control_revoke!()
+
+    recovery_facade =
+      opts
+      |> Keyword.get(
+        :task_control_recovery_facade,
+        if(Mix.env() == :test,
+          do: Arbor.Agent.Orchestration.TaskControlRecoveryMemory,
+          else: Arbor.Persistence
+        )
+      )
+      |> validate_task_control_recovery_facade!()
+
+    task_id_generator =
+      opts
+      |> Keyword.get(:task_id_generator)
+      |> validate_task_id_generator!()
+
     task_supervisor = Keyword.get(opts, :task_supervisor, @default_task_supervisor)
     # Optional separate supervisor for cleanup scheduling (tests may suspend it).
     # Production default is the same normal task supervisor.
     cleanup_supervisor = Keyword.get(opts, :cleanup_supervisor, task_supervisor)
 
-    {:ok,
-     %{
-       task_supervisor: task_supervisor,
-       cleanup_supervisor: cleanup_supervisor,
-       runner: Keyword.get(opts, :runner, @default_runner),
-       # When true, store-level `:runner` overrides kind-based Config selection.
-       runner_override: Keyword.has_key?(opts, :runner),
-       # Trusted cleanup selectors fixed at store start (not per-dispatch).
-       # Tests may override; never accepted via dispatch opts/descriptor.
-       approval_cleanup_mfa: approval_cleanup_mfa,
-       approval_cleanup_consensus_module:
-         Keyword.get(
-           opts,
-           :approval_cleanup_consensus_module,
-           @default_approval_cleanup_consensus
-         ),
-       approval_cleanup_interaction_router:
-         Keyword.get(
-           opts,
-           :approval_cleanup_interaction_router,
-           @default_approval_cleanup_interaction_router
-         ),
-       approval_cleanup_audit_module:
-         Keyword.get(opts, :approval_cleanup_audit_module, @default_approval_cleanup_audit),
-       max_tasks: Keyword.get(opts, :max_tasks, @default_max_tasks),
-       executor_callback_timeout_ms:
-         Keyword.get(opts, :executor_callback_timeout_ms, Config.executor_callback_timeout_ms()),
-       executor_finalization_timeout_ms:
-         Keyword.get(
-           opts,
-           :executor_finalization_timeout_ms,
-           Config.executor_finalization_timeout_ms()
-         ),
-       adoption_timeout_ms:
-         opts
-         |> Keyword.get(:adoption_timeout_ms, @default_adoption_timeout_ms)
-         |> validate_adoption_timeout!(),
-       steer_retry_delay_ms:
-         Keyword.get(opts, :steer_retry_delay_ms, @default_steer_retry_delay_ms),
-       max_steer_retry_delay_ms:
-         Keyword.get(opts, :max_steer_retry_delay_ms, @default_max_steer_retry_delay_ms),
-       max_controls_per_task:
-         Keyword.get(opts, :max_controls_per_task, @default_max_controls_per_task),
-       max_steer_retries: Keyword.get(opts, :max_steer_retries, @default_max_steer_retries),
-       max_steering_confirmations:
-         Keyword.get(
-           opts,
-           :max_steering_confirmations,
-           @default_max_steering_confirmations
-         ),
-       max_steering_replays:
-         Keyword.get(opts, :max_steering_replays, @default_max_steering_replays),
-       steer_confirmation_delay_ms:
-         Keyword.get(
-           opts,
-           :steer_confirmation_delay_ms,
-           Keyword.get(opts, :steer_retry_delay_ms, @default_steer_retry_delay_ms)
-         ),
-       # Arity-2: (agent_id, task_id) — task-scoped Session cancel bridge.
-       cancel_turn: Keyword.get(opts, :cancel_turn, &default_cancel_turn/2),
-       tasks: %{},
-       refs: %{},
-       adoptions: %{},
-       adoption_refs: %{}
-     }}
+    recovery_store =
+      Keyword.get(opts, :task_control_recovery_store, @default_recovery_store)
+
+    # Production always starts not-ready and replays durable markers via workers.
+    # Unit tests default force-ready with the in-memory recovery facade unless
+    # a crash-replay test explicitly sets recovery_force_ready: false.
+    force_ready? =
+      case Keyword.fetch(opts, :recovery_force_ready) do
+        {:ok, value} -> value == true
+        :error -> Mix.env() == :test
+      end
+
+    if Mix.env() == :test and
+         recovery_facade == Arbor.Agent.Orchestration.TaskControlRecoveryMemory do
+      _ = Arbor.Agent.Orchestration.TaskControlRecoveryMemory.ensure!()
+    end
+
+    durable? = recovery_facade_durable?(recovery_facade)
+
+    state = %{
+      task_supervisor: task_supervisor,
+      cleanup_supervisor: cleanup_supervisor,
+      runner: Keyword.get(opts, :runner, @default_runner),
+      # When true, store-level `:runner` overrides kind-based Config selection.
+      runner_override: Keyword.has_key?(opts, :runner),
+      # Trusted cleanup selectors fixed at store start (not per-dispatch).
+      # Tests may override; never accepted via dispatch opts/descriptor.
+      approval_cleanup_mfa: approval_cleanup_mfa,
+      approval_cleanup_consensus_module:
+        Keyword.get(
+          opts,
+          :approval_cleanup_consensus_module,
+          @default_approval_cleanup_consensus
+        ),
+      approval_cleanup_interaction_router:
+        Keyword.get(
+          opts,
+          :approval_cleanup_interaction_router,
+          @default_approval_cleanup_interaction_router
+        ),
+      approval_cleanup_audit_module:
+        Keyword.get(opts, :approval_cleanup_audit_module, @default_approval_cleanup_audit),
+      # Lease revoke transport pinned at store start (not per-dispatch).
+      task_control_security_module: task_control_security_module,
+      task_control_revoke: task_control_revoke,
+      # Recovery facade/store pinned at store start only.
+      task_control_recovery_facade: recovery_facade,
+      task_control_recovery_store: recovery_store,
+      task_id_generator: task_id_generator,
+      # cache-only/unbacked facades fail closed: never recovery_durable? true.
+      recovery_durable?: durable?,
+      recovery_ready?: force_ready? and durable?,
+      recovery_replay: %{phase: :pending, cursor: [], failures: 0, deadline_mono: 0},
+      reservations: %{},
+      reservation_monitor_index: %{},
+      recovery_pending: %{},
+      recovery_ops: %{},
+      recovery_task_index: %{},
+      recovery_monitor_index: %{},
+      recovery_retry_base_ms:
+        Keyword.get(opts, :recovery_retry_base_ms, @default_recovery_retry_base_ms),
+      recovery_retry_max_ms:
+        Keyword.get(opts, :recovery_retry_max_ms, @default_recovery_retry_max_ms),
+      recovery_max_retries:
+        Keyword.get(opts, :recovery_max_retries, @default_recovery_max_retries),
+      max_recovery_obligations:
+        Keyword.get(opts, :max_recovery_obligations, @default_max_recovery_obligations),
+      max_reservations: Keyword.get(opts, :max_reservations, @default_max_reservations),
+      reservation_deadline_ms:
+        Keyword.get(opts, :reservation_deadline_ms, @default_reservation_deadline_ms),
+      recovery_admit_timeout_ms:
+        Keyword.get(opts, :recovery_admit_timeout_ms, @default_recovery_admit_timeout_ms),
+      recovery_worker_timeout_ms:
+        Keyword.get(opts, :recovery_worker_timeout_ms, @default_recovery_worker_timeout_ms),
+      recovery_replay_batch:
+        Keyword.get(opts, :recovery_replay_batch, @default_recovery_replay_batch),
+      # Lease retirement reconciliation (volatile; not durable).
+      lease_pending_retirement: %{},
+      lease_retire_attempts: %{},
+      lease_retire_task_index: %{},
+      lease_retire_monitor_index: %{},
+      lease_retire_admit_timeout_ms:
+        Keyword.get(opts, :lease_retire_admit_timeout_ms, @default_lease_retire_admit_timeout_ms),
+      lease_retire_worker_timeout_ms:
+        Keyword.get(
+          opts,
+          :lease_retire_worker_timeout_ms,
+          @default_lease_retire_worker_timeout_ms
+        ),
+      lease_retire_base_delay_ms:
+        Keyword.get(opts, :lease_retire_base_delay_ms, @default_lease_retire_base_delay_ms),
+      lease_retire_max_delay_ms:
+        Keyword.get(opts, :lease_retire_max_delay_ms, @default_lease_retire_max_delay_ms),
+      lease_retire_max_attempts:
+        Keyword.get(opts, :lease_retire_max_attempts, @default_lease_retire_max_attempts),
+      lease_retire_max_retrigger_rounds:
+        Keyword.get(
+          opts,
+          :lease_retire_max_retrigger_rounds,
+          @default_lease_retire_max_retrigger_rounds
+        ),
+      max_tasks: Keyword.get(opts, :max_tasks, @default_max_tasks),
+      executor_callback_timeout_ms:
+        Keyword.get(opts, :executor_callback_timeout_ms, Config.executor_callback_timeout_ms()),
+      executor_finalization_timeout_ms:
+        Keyword.get(
+          opts,
+          :executor_finalization_timeout_ms,
+          Config.executor_finalization_timeout_ms()
+        ),
+      adoption_timeout_ms:
+        opts
+        |> Keyword.get(:adoption_timeout_ms, @default_adoption_timeout_ms)
+        |> validate_adoption_timeout!(),
+      steer_retry_delay_ms:
+        Keyword.get(opts, :steer_retry_delay_ms, @default_steer_retry_delay_ms),
+      max_steer_retry_delay_ms:
+        Keyword.get(opts, :max_steer_retry_delay_ms, @default_max_steer_retry_delay_ms),
+      max_controls_per_task:
+        Keyword.get(opts, :max_controls_per_task, @default_max_controls_per_task),
+      max_steer_retries: Keyword.get(opts, :max_steer_retries, @default_max_steer_retries),
+      max_steering_confirmations:
+        Keyword.get(
+          opts,
+          :max_steering_confirmations,
+          @default_max_steering_confirmations
+        ),
+      max_steering_replays:
+        Keyword.get(opts, :max_steering_replays, @default_max_steering_replays),
+      steer_confirmation_delay_ms:
+        Keyword.get(
+          opts,
+          :steer_confirmation_delay_ms,
+          Keyword.get(opts, :steer_retry_delay_ms, @default_steer_retry_delay_ms)
+        ),
+      # Arity-2: (agent_id, task_id) — task-scoped Session cancel bridge.
+      cancel_turn: Keyword.get(opts, :cancel_turn, &default_cancel_turn/2),
+      tasks: %{},
+      refs: %{},
+      adoptions: %{},
+      adoption_refs: %{}
+    }
+
+    cond do
+      force_ready? and durable? ->
+        {:ok, state}
+
+      durable? ->
+        {:ok, state, {:continue, :start_recovery_replay}}
+
+      true ->
+        # Fail closed: no cache-only recovery path can admit reserves/markers.
+        {:ok, %{state | recovery_durable?: false, recovery_ready?: false}}
+    end
   end
 
   @impl true
+  def handle_continue(:start_recovery_replay, state) do
+    state = ensure_recovery_shape(state)
+    state = begin_recovery_op(state, :replay_batch, nil, nil, nil)
+    {:noreply, state}
+  end
+
+  def handle_continue(:retry_recovery_replay, state) do
+    state = ensure_recovery_shape(state)
+
+    if state.recovery_ready? do
+      {:noreply, state}
+    else
+      {:noreply, begin_recovery_op(state, :replay_batch, nil, nil, nil)}
+    end
+  end
+
+  @impl true
+  def handle_call(:recovery_ready?, _from, state) do
+    state = ensure_recovery_shape(state)
+    {:reply, state.recovery_ready? == true, state}
+  end
+
+  def handle_call({:reserve, _opts}, {owner_pid, _}, state) when is_pid(owner_pid) do
+    state = ensure_recovery_shape(state)
+    state = ensure_lease_retirement_shape(state)
+
+    cond do
+      state.recovery_durable? != true ->
+        {:reply, {:error, :recovery_durability_unavailable}, state}
+
+      state.recovery_ready? != true ->
+        {:reply, {:error, :recovery_not_ready}, state}
+
+      true ->
+        case admit_new_reservation(state) do
+          {:error, reason} ->
+            {:reply, {:error, reason}, state}
+
+          :ok ->
+            case generate_unique_task_id(state) do
+              {:error, reason} ->
+                {:reply, {:error, reason}, state}
+
+              {:ok, task_id} ->
+                token = TaskControlLease.generate_reservation_token()
+                token_hash = TaskControlLease.token_hash(token)
+                owner_mon = Process.monitor(owner_pid)
+
+                deadline_ms =
+                  Map.get(state, :reservation_deadline_ms, @default_reservation_deadline_ms)
+
+                deadline_timer =
+                  Process.send_after(self(), {:reservation_deadline, task_id}, deadline_ms)
+
+                reservation = %{
+                  task_id: task_id,
+                  token_hash: token_hash,
+                  owner_pid: owner_pid,
+                  owner_mon: owner_mon,
+                  deadline_timer: deadline_timer,
+                  marker_written?: false,
+                  inserted_at: DateTime.utc_now()
+                }
+
+                state =
+                  state
+                  |> put_in([:reservations, task_id], reservation)
+                  |> put_in([:reservation_monitor_index, owner_mon], task_id)
+
+                {:reply, {:ok, %{task_id: task_id, reservation_token: token}}, state}
+            end
+        end
+    end
+  end
+
+  def handle_call({:commit_recovery_marker, task_id, token}, from, state) do
+    state = ensure_recovery_shape(state)
+    {owner_pid, _} = from
+
+    cond do
+      state.recovery_durable? != true ->
+        {:reply, {:error, :recovery_durability_unavailable}, state}
+
+      state.recovery_ready? != true ->
+        {:reply, {:error, :recovery_not_ready}, state}
+
+      true ->
+        case authorize_reservation(state, task_id, token, owner_pid) do
+          {:error, reason} ->
+            {:reply, {:error, reason}, state}
+
+          {:ok, reservation} ->
+            case TaskControlLease.marker_new(task_id, DateTime.utc_now()) do
+              {:error, reason} ->
+                {:reply, {:error, reason}, state}
+
+              {:ok, marker} ->
+                state =
+                  begin_recovery_op(state, :marker_put, task_id, from, marker,
+                    expected_token_hash: reservation.token_hash
+                  )
+
+                {:noreply, state}
+            end
+        end
+    end
+  end
+
+  def handle_call(
+        {:activate, agent_id, task, task_id, token, opts},
+        {owner_pid, _} = _from,
+        state
+      ) do
+    state = ensure_recovery_shape(state)
+
+    cond do
+      state.recovery_ready? != true ->
+        {:reply, {:error, :recovery_not_ready}, state}
+
+      true ->
+        case authorize_reservation(state, task_id, token, owner_pid) do
+          {:error, reason} ->
+            {:reply, {:error, reason}, state}
+
+          {:ok, reservation} ->
+            opts = Keyword.put(opts, :task_id, task_id)
+            lease_opt = Keyword.get(opts, :task_control_lease)
+
+            cond do
+              not is_nil(lease_opt) and reservation.marker_written? != true ->
+                {:reply, {:error, :recovery_marker_required}, state}
+
+              true ->
+                case do_admit_task(state, agent_id, task, task_id, opts) do
+                  {:error, reason, state} ->
+                    {:reply, {:error, reason}, state}
+
+                  {:ok, task_id, state} ->
+                    state = drop_reservation(state, task_id, reservation)
+                    {:reply, {:ok, task_id}, state}
+                end
+            end
+        end
+    end
+  end
+
+  def handle_call({:release, task_id, token}, from, state) do
+    state = ensure_recovery_shape(state)
+    {owner_pid, _} = from
+
+    case authorize_reservation(state, task_id, token, owner_pid) do
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+
+      {:ok, reservation} ->
+        marker_written? = reservation.marker_written? == true
+        state = drop_reservation(state, task_id, reservation)
+
+        if marker_written? do
+          state =
+            put_recovery_pending(state, task_id, :release, true)
+
+          state = begin_recovery_op(state, :reconcile_task, task_id, from, nil)
+          {:noreply, state}
+        else
+          {:reply, :ok, state}
+        end
+    end
+  end
+
+  def handle_call({:request_reconcile, task_id}, from, state) when is_binary(task_id) do
+    state = ensure_recovery_shape(state)
+    state = put_recovery_pending(state, task_id, :reconcile_request, true)
+    state = begin_recovery_op(state, :reconcile_task, task_id, from, nil)
+    {:noreply, state}
+  end
+
   def handle_call({:dispatch, agent_id, task, opts}, _from, state) do
     task_id = task_id(opts)
 
-    case prepare_dispatch(task, opts, state, task_id) do
-      {:ok, runner, context_mode, dispatch_task, runner_context} ->
-        now = DateTime.utc_now()
-
-        task_ref =
-          Task.Supervisor.async_nolink(state.task_supervisor, fn ->
-            runner.run(agent_id, dispatch_task, runner_context)
-          end)
-
-        record = %{
-          task_id: task_id,
-          agent_id: agent_id,
-          task: dispatch_task,
-          state: :running,
-          current_step: "running",
-          waiting_on: nil,
-          result: nil,
-          error: nil,
-          terminal_envelope: nil,
-          terminal_finalized: false,
-          pid: task_ref.pid,
-          ref: task_ref.ref,
-          started_at: now,
-          updated_at: now,
-          completed_at: nil,
-          metadata: metadata(opts),
-          executor: runner,
-          context_mode: context_mode,
-          context: runner_context,
-          approval_answer_cap_id: Keyword.get(opts, :approval_answer_cap_id),
-          approval_answer_security_module:
-            Keyword.get(opts, :approval_answer_security_module, Arbor.Security),
-          approval_answer_revoke: Keyword.get(opts, :approval_answer_revoke),
-          steer_cap_id: Keyword.get(opts, :steer_cap_id),
-          steer_security_module: Keyword.get(opts, :steer_security_module, Arbor.Security),
-          steer_capability_revoke: Keyword.get(opts, :steer_capability_revoke),
-          adoption_cap_id: Keyword.get(opts, :adoption_cap_id),
-          adoption_security_module: Keyword.get(opts, :adoption_security_module, Arbor.Security),
-          adoption_capability_revoke: Keyword.get(opts, :adoption_capability_revoke),
-          adoption_destination_ref: nil,
-          adoption_last_error: nil,
-          # Closed scalar only — executable keys are never retained on the record.
-          approval_cleanup_descriptor:
-            normalize_approval_cleanup_descriptor(Keyword.get(opts, :approval_cleanup_descriptor)),
-          controls: [],
-          control_retries: %{},
-          accepted_control_ids: MapSet.new(),
-          confirmation_retries: %{},
-          queued_confirmations: %{},
-          replay_counts: %{},
-          cancel_turn: Keyword.get(opts, :cancel_turn)
-        }
-
-        next_state =
-          state
-          |> put_in([:tasks, task_id], record)
-          |> put_in([:refs, task_ref.ref], task_id)
-          |> prune_tasks()
-
+    case do_admit_task(state, agent_id, task, task_id, opts) do
+      {:ok, task_id, next_state} ->
         {:reply, {:ok, task_id}, next_state}
 
-      {:error, reason} ->
-        {:reply, {:error, reason}, state}
+      {:error, reason, next_state} ->
+        {:reply, {:error, reason}, next_state}
     end
   rescue
     e ->
@@ -511,6 +908,17 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     {:reply, reply, state}
   end
 
+  def handle_call(:retrigger_exhausted_lease_retirements, _from, state) do
+    state = ensure_lease_retirement_shape(state)
+    {state, reply} = do_retrigger_exhausted_lease_retirements(state)
+    {:reply, {:ok, reply}, state}
+  end
+
+  def handle_call(:lease_retirement_snapshot, _from, state) do
+    state = ensure_lease_retirement_shape(state)
+    {:reply, {:ok, redacted_lease_retirement_snapshot(state)}, state}
+  end
+
   def handle_call({:adoption_status, task_id, destination_ref}, _from, state) do
     state = ensure_adoption_state_shape(state)
 
@@ -579,12 +987,17 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
           })
           |> reconcile_terminal_controls()
           |> maybe_finalize_terminal(:task_cancelled, state)
-          |> revoke_task_capabilities()
+
+        # Publish terminal state before any Security.revoke I/O.
+        {cancelled_record, retire_spec} =
+          plan_lease_retire(cancelled_record, :terminal_revoke_set)
 
         next_state =
           state
           |> put_in([:tasks, task_id], cancelled_record)
           |> remove_ref(record.ref)
+
+        next_state = accept_retire_spec(next_state, retire_spec)
 
         next_state =
           launch_approval_cleanup_job(
@@ -620,6 +1033,69 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     end
   end
 
+  defp do_admit_task(state, agent_id, task, task_id, opts) do
+    with {:ok, lease} <-
+           admit_task_control_lease(Keyword.get(opts, :task_control_lease), task_id),
+         {:ok, runner, context_mode, dispatch_task, runner_context} <-
+           prepare_dispatch(task, opts, state, task_id) do
+      now = DateTime.utc_now()
+
+      task_ref =
+        Task.Supervisor.async_nolink(state.task_supervisor, fn ->
+          runner.run(agent_id, dispatch_task, runner_context)
+        end)
+
+      record = %{
+        task_id: task_id,
+        agent_id: agent_id,
+        task: dispatch_task,
+        state: :running,
+        current_step: "running",
+        waiting_on: nil,
+        result: nil,
+        error: nil,
+        terminal_envelope: nil,
+        terminal_finalized: false,
+        pid: task_ref.pid,
+        ref: task_ref.ref,
+        started_at: now,
+        updated_at: now,
+        completed_at: nil,
+        metadata: metadata(opts),
+        executor: runner,
+        context_mode: context_mode,
+        context: runner_context,
+        # Closed scalar lease only — Security module / revoke funs are store-pinned.
+        # New records must not create legacy per-kind cap cleanup fields.
+        task_control_lease: lease,
+        recovery_marker?: true,
+        adoption_destination_ref: nil,
+        adoption_last_error: nil,
+        # Closed scalar only — executable keys are never retained on the record.
+        approval_cleanup_descriptor:
+          normalize_approval_cleanup_descriptor(Keyword.get(opts, :approval_cleanup_descriptor)),
+        controls: [],
+        control_retries: %{},
+        accepted_control_ids: MapSet.new(),
+        confirmation_retries: %{},
+        queued_confirmations: %{},
+        replay_counts: %{},
+        cancel_turn: Keyword.get(opts, :cancel_turn)
+      }
+
+      next_state =
+        state
+        |> put_in([:tasks, task_id], record)
+        |> put_in([:refs, task_ref.ref], task_id)
+        |> prune_tasks()
+
+      {:ok, task_id, next_state}
+    else
+      {:error, reason} ->
+        {:error, reason, state}
+    end
+  end
+
   @impl true
   def handle_info({ref, result}, state) when is_reference(ref) do
     state = ensure_adoption_state_shape(state)
@@ -644,33 +1120,156 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
 
   def handle_info({:DOWN, ref, :process, _pid, :normal}, state) when is_reference(ref) do
     state = ensure_adoption_state_shape(state)
+    state = ensure_lease_retirement_shape(state)
+    state = ensure_recovery_shape(state)
 
-    case Map.fetch(state.adoption_refs, ref) do
-      {:ok, task_id} ->
-        {:noreply, fail_adoption(state, task_id, ref, {:error, :executor_callback_no_result})}
+    case find_lease_retire_monitor(state, ref) do
+      {:launcher, attempt_ref, attempt} ->
+        {:noreply, handle_lease_retire_launcher_down(state, attempt_ref, attempt)}
+
+      {:worker, attempt_ref, attempt} ->
+        {:noreply, handle_lease_retire_worker_down(state, attempt_ref, attempt, :normal)}
 
       :error ->
-        {:noreply, remove_ref(state, ref)}
+        case find_recovery_monitor(state, ref) do
+          {:launcher, op_ref, op} ->
+            {:noreply, handle_recovery_launcher_down(state, op_ref, op)}
+
+          {:worker, op_ref, op} ->
+            {:noreply, handle_recovery_worker_down(state, op_ref, op, :normal)}
+
+          :error ->
+            case find_reservation_owner_mon(state, ref) do
+              {:ok, task_id, reservation} ->
+                {:noreply,
+                 handle_reservation_owner_down(state, task_id, reservation, :owner_down)}
+
+              :error ->
+                case Map.fetch(state.adoption_refs, ref) do
+                  {:ok, task_id} ->
+                    {:noreply,
+                     fail_adoption(state, task_id, ref, {:error, :executor_callback_no_result})}
+
+                  :error ->
+                    {:noreply, remove_ref(state, ref)}
+                end
+            end
+        end
     end
   end
 
   def handle_info({:DOWN, ref, :process, _pid, reason}, state) when is_reference(ref) do
     state = ensure_adoption_state_shape(state)
+    state = ensure_lease_retirement_shape(state)
+    state = ensure_recovery_shape(state)
 
-    case Map.fetch(state.adoption_refs, ref) do
-      {:ok, task_id} ->
-        {:noreply, fail_adoption(state, task_id, ref, {:error, :executor_callback_exit})}
+    case find_lease_retire_monitor(state, ref) do
+      {:launcher, attempt_ref, attempt} ->
+        {:noreply, handle_lease_retire_launcher_down(state, attempt_ref, attempt)}
+
+      {:worker, attempt_ref, attempt} ->
+        {:noreply, handle_lease_retire_worker_down(state, attempt_ref, attempt, reason)}
 
       :error ->
-        case Map.fetch(state.refs, ref) do
-          {:ok, task_id} ->
-            now = DateTime.utc_now()
-            {state, cleanup_job} = terminalize_abnormal_down(state, task_id, reason, now)
-            state = launch_approval_cleanup_job(state, cleanup_job)
-            {:noreply, remove_ref(state, ref)}
+        case find_recovery_monitor(state, ref) do
+          {:launcher, op_ref, op} ->
+            {:noreply, handle_recovery_launcher_down(state, op_ref, op)}
+
+          {:worker, op_ref, op} ->
+            {:noreply, handle_recovery_worker_down(state, op_ref, op, reason)}
 
           :error ->
-            {:noreply, state}
+            case find_reservation_owner_mon(state, ref) do
+              {:ok, task_id, reservation} ->
+                {:noreply,
+                 handle_reservation_owner_down(state, task_id, reservation, :owner_down)}
+
+              :error ->
+                case Map.fetch(state.adoption_refs, ref) do
+                  {:ok, task_id} ->
+                    {:noreply,
+                     fail_adoption(state, task_id, ref, {:error, :executor_callback_exit})}
+
+                  :error ->
+                    case Map.fetch(state.refs, ref) do
+                      {:ok, task_id} ->
+                        now = DateTime.utc_now()
+
+                        {state, cleanup_job} =
+                          terminalize_abnormal_down(state, task_id, reason, now)
+
+                        state = launch_approval_cleanup_job(state, cleanup_job)
+                        {:noreply, remove_ref(state, ref)}
+
+                      :error ->
+                        {:noreply, state}
+                    end
+                end
+            end
+        end
+    end
+  end
+
+  def handle_info({:reservation_deadline, task_id}, state) when is_binary(task_id) do
+    state = ensure_recovery_shape(state)
+
+    case Map.get(state.reservations, task_id) do
+      %{deadline_timer: _} = reservation ->
+        {:noreply,
+         handle_reservation_owner_down(state, task_id, reservation, :reservation_timeout)}
+
+      _ ->
+        {:noreply, state}
+    end
+  end
+
+  def handle_info({:recovery_op_admitted, op_ref, worker_pid}, state)
+      when is_reference(op_ref) and is_pid(worker_pid) do
+    {:noreply, handle_recovery_op_admitted(state, op_ref, worker_pid)}
+  end
+
+  def handle_info({:recovery_op_admission_failed, op_ref, class}, state)
+      when is_reference(op_ref) do
+    {:noreply, handle_recovery_op_admission_failed(state, op_ref, class)}
+  end
+
+  def handle_info({:recovery_op_admit_timeout, op_ref}, state) when is_reference(op_ref) do
+    {:noreply, handle_recovery_op_admit_timeout(state, op_ref)}
+  end
+
+  def handle_info({:recovery_op_worker_timeout, op_ref}, state) when is_reference(op_ref) do
+    {:noreply, handle_recovery_op_worker_timeout(state, op_ref)}
+  end
+
+  def handle_info({:recovery_op_complete, op_ref, result}, state) when is_reference(op_ref) do
+    {:noreply, handle_recovery_op_complete(state, op_ref, result)}
+  end
+
+  def handle_info(:retry_recovery_replay_msg, state) do
+    state = ensure_recovery_shape(state)
+
+    if state.recovery_ready? do
+      {:noreply, state}
+    else
+      {:noreply, begin_recovery_op(state, :replay_batch, nil, nil, nil)}
+    end
+  end
+
+  def handle_info({:recovery_pending_retry, task_id}, state) when is_binary(task_id) do
+    state = ensure_recovery_shape(state)
+
+    case Map.get(Map.get(state, :recovery_pending, %{}), task_id) do
+      nil ->
+        {:noreply, state}
+
+      pending ->
+        pending = %{pending | retry_timer: nil}
+        state = put_in(state.recovery_pending[task_id], pending)
+
+        if Map.has_key?(Map.get(state, :recovery_task_index, %{}), task_id) do
+          {:noreply, state}
+        else
+          {:noreply, begin_recovery_op(state, :reconcile_task, task_id, nil, nil)}
         end
     end
   end
@@ -708,6 +1307,35 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   def handle_info({:confirm_steer, task_id, control_id}, state) do
     state = ensure_task_record_shape(state, task_id)
     {:noreply, confirm_control(state, task_id, control_id)}
+  end
+
+  def handle_info({:lease_retire_admitted, attempt_ref, worker_pid}, state)
+      when is_reference(attempt_ref) and is_pid(worker_pid) do
+    {:noreply, handle_lease_retire_admitted(state, attempt_ref, worker_pid)}
+  end
+
+  def handle_info({:lease_retire_admission_failed, attempt_ref, class}, state)
+      when is_reference(attempt_ref) do
+    {:noreply, handle_lease_retire_admission_failed(state, attempt_ref, class)}
+  end
+
+  def handle_info({:lease_retire_admit_timeout, attempt_ref}, state)
+      when is_reference(attempt_ref) do
+    {:noreply, handle_lease_retire_admit_timeout(state, attempt_ref)}
+  end
+
+  def handle_info({:lease_retire_worker_timeout, attempt_ref}, state)
+      when is_reference(attempt_ref) do
+    {:noreply, handle_lease_retire_worker_timeout(state, attempt_ref)}
+  end
+
+  def handle_info({:lease_retire_complete, attempt_ref, results}, state)
+      when is_reference(attempt_ref) do
+    {:noreply, handle_lease_retire_complete(state, attempt_ref, results)}
+  end
+
+  def handle_info({:lease_retire_retry, attempt_ref}, state) when is_reference(attempt_ref) do
+    {:noreply, handle_lease_retire_retry(state, attempt_ref)}
   end
 
   def handle_info(_message, state), do: {:noreply, state}
@@ -752,10 +1380,12 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
             |> Map.put(:updated_at, now)
             |> maybe_reconcile_terminal_controls()
             |> maybe_finalize_task_result(result, state)
-            |> maybe_revoke_completed_task_capabilities()
 
-          {put_in(state.tasks[task_id], record),
-           cleanup_job(task_id, descriptor, :task_termination)}
+          {record, retire_spec} = plan_completed_lease_retire(record)
+          state = put_in(state.tasks[task_id], record)
+          state = accept_retire_spec(state, retire_spec)
+
+          {state, cleanup_job(task_id, descriptor, :task_termination)}
         end
 
       :error ->
@@ -788,10 +1418,14 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
               })
               |> reconcile_terminal_controls()
               |> maybe_finalize_terminal(:task_owner_died, state)
-              |> revoke_task_capabilities()
 
-            {put_in(state.tasks[task_id], record),
-             cleanup_job(task_id, descriptor, :task_termination)}
+            # Owner/runner DOWN is ordinary terminal failure: retain task_read.
+            # Publish reduced record first; revoke I/O is async reconciled.
+            {record, retire_spec} = plan_lease_retire(record, :terminal_revoke_set)
+            state = put_in(state.tasks[task_id], record)
+            state = accept_retire_spec(state, retire_spec)
+
+            {state, cleanup_job(task_id, descriptor, :task_termination)}
         end
 
       :error ->
@@ -870,22 +1504,23 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
 
   defp normalize_result(result), do: TaskArtifacts.normalize(result)
 
-  defp maybe_revoke_completed_task_capabilities(%{state: state} = record)
-       when state in [:done, :failed, :cancelled] do
-    case state do
-      :done ->
-        if retain_adoption_capability?(record) do
-          revoke_non_adoption_task_capabilities(record)
-        else
-          revoke_task_capabilities(record)
-        end
+  defp plan_completed_lease_retire(%{state: task_state} = record)
+       when task_state in [:done, :failed, :cancelled] do
+    phase =
+      case task_state do
+        :done ->
+          if retain_adoption_capability?(record),
+            do: :terminal_revoke_set_keep_adopt,
+            else: :terminal_revoke_set
 
-      _ ->
-        revoke_task_capabilities(record)
-    end
+        _ ->
+          :terminal_revoke_set
+      end
+
+    plan_lease_retire(record, phase)
   end
 
-  defp maybe_revoke_completed_task_capabilities(record), do: record
+  defp plan_completed_lease_retire(record), do: {record, nil}
 
   defp retain_adoption_capability?(%{
          context_mode: :json_clean,
@@ -899,6 +1534,1975 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   end
 
   defp retain_adoption_capability?(_record), do: false
+
+  # Fail closed on invalid/mismatched non-nil leases so lifecycle cannot revoke
+  # another task's authority (confused deputy) and minted leases are never dropped.
+  defp admit_task_control_lease(nil, _task_id), do: {:ok, nil}
+
+  defp admit_task_control_lease(lease, task_id) do
+    case TaskControlLease.normalize_for_task(lease, task_id) do
+      {:ok, normalized} ->
+        {:ok, normalized}
+
+      {:error, :task_control_lease_task_id_mismatch} ->
+        {:error, :task_control_lease_task_id_mismatch}
+
+      {:error, _reason} ->
+        {:error, :invalid_task_control_lease}
+    end
+  end
+
+  defp validate_task_control_security_module!(module) when is_atom(module) and not is_nil(module),
+    do: module
+
+  defp validate_task_control_security_module!(invalid) do
+    raise ArgumentError,
+          "task_control_security_module must be an atom module, got: #{inspect(invalid)}"
+  end
+
+  defp validate_task_control_revoke!(nil), do: nil
+
+  defp validate_task_control_revoke!(fun) when is_function(fun, 1), do: fun
+
+  defp validate_task_control_revoke!(invalid) do
+    raise ArgumentError,
+          "task_control_revoke must be nil or an arity-1 function, got: #{inspect(invalid)}"
+  end
+
+  # ---------------------------------------------------------------------------
+  # Lease retirement reconciliation (revoke-set phases)
+  #
+  # Atomic transfer of retiring ids into store-owned pending buckets happens
+  # before reducing the active lease (recovery intent already durable from the
+  # pre-mint marker). Forget only after fail-closed completion CAS.
+  # Store-owned admit/worker deadlines kill/demonitor hung processes.
+  # O(1) task and monitor indexes replace linear scans.
+  # ---------------------------------------------------------------------------
+
+  defp ensure_lease_retirement_shape(state) do
+    state =
+      state
+      |> Map.put_new(:lease_pending_retirement, %{})
+      |> Map.put_new(:lease_retire_attempts, %{})
+      |> Map.put_new(:lease_retire_task_index, %{})
+      |> Map.put_new(:lease_retire_monitor_index, %{})
+      |> Map.put_new(
+        :lease_retire_admit_timeout_ms,
+        @default_lease_retire_admit_timeout_ms
+      )
+      |> Map.put_new(
+        :lease_retire_worker_timeout_ms,
+        @default_lease_retire_worker_timeout_ms
+      )
+      |> Map.put_new(:lease_retire_base_delay_ms, @default_lease_retire_base_delay_ms)
+      |> Map.put_new(:lease_retire_max_delay_ms, @default_lease_retire_max_delay_ms)
+      |> Map.put_new(:lease_retire_max_attempts, @default_lease_retire_max_attempts)
+      |> Map.put_new(
+        :lease_retire_max_retrigger_rounds,
+        @default_lease_retire_max_retrigger_rounds
+      )
+
+    rebuild_lease_retire_indexes_if_needed(state)
+  end
+
+  defp rebuild_lease_retire_indexes_if_needed(state) do
+    attempts = Map.get(state, :lease_retire_attempts, %{})
+    task_index = Map.get(state, :lease_retire_task_index, %{})
+    mon_index = Map.get(state, :lease_retire_monitor_index, %{})
+
+    if map_size(attempts) > 0 and map_size(task_index) == 0 and map_size(mon_index) == 0 do
+      {task_index, mon_index} =
+        Enum.reduce(attempts, {%{}, %{}}, fn {ref, attempt}, {ti, mi} ->
+          ti =
+            if attempt.status in [:admitting, :running, :retry_wait] do
+              Map.put(ti, attempt.task_id, ref)
+            else
+              ti
+            end
+
+          mi =
+            mi
+            |> maybe_put_mon_index(attempt.launcher_mon, {:launcher, ref})
+            |> maybe_put_mon_index(attempt.worker_mon, {:worker, ref})
+
+          {ti, mi}
+        end)
+
+      state
+      |> Map.put(:lease_retire_task_index, task_index)
+      |> Map.put(:lease_retire_monitor_index, mon_index)
+    else
+      state
+    end
+  end
+
+  defp maybe_put_mon_index(index, mon, value) when is_reference(mon),
+    do: Map.put(index, mon, value)
+
+  defp maybe_put_mon_index(index, _, _), do: index
+
+  # Pure plan: transfer phase members out of the active lease map (for the
+  # record) and return a retire_spec. Does not perform revoke I/O.
+  defp plan_lease_retire(record, phase) do
+    task_id = Map.get(record, :task_id)
+
+    case Map.get(record, :task_control_lease) do
+      %{"capabilities" => caps} = lease when is_map(caps) ->
+        pairs = TaskControlLease.kinds_and_ids_for_phase(lease, phase)
+
+        if pairs == [] do
+          # Empty/no-op: preserve record identity (no field mutation).
+          {record, nil}
+        else
+          kinds = TaskControlLease.lifecycle_kinds(phase)
+          next_lease = TaskControlLease.drop_kinds(lease, kinds)
+
+          record =
+            if TaskControlLease.empty?(next_lease) do
+              Map.put(record, :task_control_lease, nil)
+            else
+              Map.put(record, :task_control_lease, next_lease)
+            end
+
+          members =
+            Enum.map(pairs, fn {kind, id} ->
+              %{kind: kind, id: id}
+            end)
+
+          {record, %{task_id: task_id, phase: phase, members: members}}
+        end
+
+      _ ->
+        plan_legacy_lease_retire(record, phase)
+    end
+  end
+
+  defp plan_legacy_lease_retire(record, phase) do
+    task_id = Map.get(record, :task_id)
+
+    {members, record} =
+      case phase do
+        :all ->
+          collect_and_clear_legacy_caps(record, [:approval_answer, :steer, :adopt])
+
+        :after_adoption ->
+          collect_and_clear_legacy_caps(record, [:adopt])
+
+        :terminal_revoke_set_keep_adopt ->
+          collect_and_clear_legacy_caps(record, [:approval_answer, :steer])
+
+        :terminal_revoke_set ->
+          collect_and_clear_legacy_caps(record, [:approval_answer, :steer, :adopt])
+
+        _ ->
+          {[], record}
+      end
+
+    if members == [] do
+      {record, nil}
+    else
+      {record, %{task_id: task_id, phase: phase, members: members}}
+    end
+  end
+
+  defp collect_and_clear_legacy_caps(record, kinds) do
+    Enum.reduce(kinds, {[], record}, fn kind, {members, rec} ->
+      case kind do
+        :approval_answer ->
+          case Map.get(rec, :approval_answer_cap_id) do
+            id when is_binary(id) and id != "" ->
+              {[%{kind: :legacy_approval_answer, id: id} | members],
+               Map.put(rec, :approval_answer_cap_id, nil)}
+
+            _ ->
+              {members, rec}
+          end
+
+        :steer ->
+          case Map.get(rec, :steer_cap_id) do
+            id when is_binary(id) and id != "" ->
+              {[%{kind: :legacy_steer, id: id} | members], Map.put(rec, :steer_cap_id, nil)}
+
+            _ ->
+              {members, rec}
+          end
+
+        :adopt ->
+          case Map.get(rec, :adoption_cap_id) do
+            id when is_binary(id) and id != "" ->
+              {[%{kind: :legacy_adopt, id: id} | members], Map.put(rec, :adoption_cap_id, nil)}
+
+            _ ->
+              {members, rec}
+          end
+      end
+    end)
+  end
+
+  # Always returns state (never nil). Empty/no-op specs are identity.
+  defp accept_retire_spec(state, nil), do: ensure_lease_retirement_shape(state)
+
+  defp accept_retire_spec(state, %{task_id: task_id, phase: phase, members: members})
+       when is_binary(task_id) and is_list(members) do
+    state = ensure_lease_retirement_shape(state)
+
+    if members == [] do
+      state
+    else
+      bucket = Map.get(state.lease_pending_retirement, task_id) || new_retirement_bucket(task_id)
+      was_exhausted? = Map.get(bucket, :exhausted, false) == true
+
+      merged_members =
+        Enum.reduce(members, bucket.members, fn %{id: id} = member, acc ->
+          if is_binary(id) and id != "" do
+            Map.put(acc, id, %{kind: Map.get(member, :kind, :unknown), id: id})
+          else
+            acc
+          end
+        end)
+
+      bucket =
+        if was_exhausted? do
+          # Reopen exhausted bucket with a new generation ladder.
+          %{
+            bucket
+            | members: merged_members,
+              exhausted: false,
+              generation: bucket.generation + 1,
+              attempt_index: 0
+          }
+        else
+          %{bucket | members: merged_members}
+        end
+
+      state = put_in(state.lease_pending_retirement[task_id], bucket)
+
+      if live_retire_attempt_for_task?(state, task_id) do
+        state
+      else
+        begin_retire_attempt(state, task_id, phase)
+      end
+    end
+  end
+
+  defp accept_retire_spec(state, _invalid), do: ensure_lease_retirement_shape(state)
+
+  defp new_retirement_bucket(task_id) do
+    %{
+      task_id: task_id,
+      members: %{},
+      exhausted: false,
+      generation: 0,
+      attempt_index: 0,
+      retrigger_count: 0
+    }
+  end
+
+  defp live_retire_attempt_for_task?(state, task_id) do
+    case Map.get(Map.get(state, :lease_retire_task_index, %{}), task_id) do
+      nil ->
+        false
+
+      attempt_ref ->
+        case Map.fetch(Map.get(state, :lease_retire_attempts, %{}), attempt_ref) do
+          {:ok, attempt} ->
+            attempt.status in [:admitting, :running, :retry_wait]
+
+          :error ->
+            false
+        end
+    end
+  end
+
+  defp begin_retire_attempt(state, task_id, phase) do
+    state = ensure_lease_retirement_shape(state)
+    bucket = Map.get(state.lease_pending_retirement, task_id)
+
+    cond do
+      is_nil(bucket) or map_size(bucket.members) == 0 ->
+        state
+
+      bucket.exhausted == true ->
+        state
+
+      true ->
+        attempt_ref = make_ref()
+        member_ids = Map.keys(bucket.members)
+        security_module = Map.get(state, :task_control_security_module, Arbor.Security)
+        revoke_fun = Map.get(state, :task_control_revoke)
+
+        supervisor =
+          Map.get(
+            state,
+            :cleanup_supervisor,
+            Map.get(state, :task_supervisor, @default_task_supervisor)
+          )
+
+        admit_timeout =
+          Map.get(state, :lease_retire_admit_timeout_ms, @default_lease_retire_admit_timeout_ms)
+
+        # Worker must outlive the admit deadline slightly so it can self-expire
+        # after a timed-out admission without ever entering revoke I/O.
+        begin_wait_ms = admit_timeout + 1_000
+
+        admit_timer =
+          Process.send_after(self(), {:lease_retire_admit_timeout, attempt_ref}, admit_timeout)
+
+        store_pid = self()
+
+        {launcher_pid, launcher_mon} =
+          spawn_monitor(__MODULE__, :lease_retire_launcher, [
+            store_pid,
+            attempt_ref,
+            supervisor,
+            member_ids,
+            security_module,
+            revoke_fun,
+            begin_wait_ms
+          ])
+
+        attempt = %{
+          attempt_ref: attempt_ref,
+          task_id: task_id,
+          generation: bucket.generation,
+          attempt_index: bucket.attempt_index,
+          phase: phase,
+          member_ids: member_ids,
+          status: :admitting,
+          completion_applied?: false,
+          launcher_pid: launcher_pid,
+          launcher_mon: launcher_mon,
+          worker_pid: nil,
+          worker_mon: nil,
+          admit_timer: admit_timer,
+          worker_timer: nil,
+          retry_timer: nil,
+          admit_deadline_mono: System.monotonic_time(:millisecond) + admit_timeout,
+          worker_deadline_mono: nil,
+          security_module: security_module,
+          revoke_fun: revoke_fun,
+          last_error_class: nil
+        }
+
+        state
+        |> put_in([:lease_retire_attempts, attempt_ref], attempt)
+        |> put_in([:lease_retire_task_index, task_id], attempt_ref)
+        |> put_in([:lease_retire_monitor_index, launcher_mon], {:launcher, attempt_ref})
+    end
+  end
+
+  @doc false
+  def lease_retire_launcher(
+        store_pid,
+        attempt_ref,
+        supervisor,
+        member_ids,
+        security_module,
+        revoke_fun,
+        begin_wait_ms
+      )
+      when is_pid(store_pid) and is_reference(attempt_ref) and is_list(member_ids) and
+             is_integer(begin_wait_ms) and begin_wait_ms > 0 do
+    case Task.Supervisor.start_child(
+           supervisor,
+           __MODULE__,
+           :run_lease_retire_worker,
+           [store_pid, attempt_ref, member_ids, security_module, revoke_fun, begin_wait_ms],
+           []
+         ) do
+      {:ok, worker_pid} when is_pid(worker_pid) ->
+        send(store_pid, {:lease_retire_admitted, attempt_ref, worker_pid})
+
+      {:ok, worker_pid, _info} when is_pid(worker_pid) ->
+        send(store_pid, {:lease_retire_admitted, attempt_ref, worker_pid})
+
+      {:error, reason} ->
+        send(
+          store_pid,
+          {:lease_retire_admission_failed, attempt_ref, classify_admission_error(reason)}
+        )
+
+      other ->
+        send(
+          store_pid,
+          {:lease_retire_admission_failed, attempt_ref, classify_admission_error(other)}
+        )
+    end
+
+    :ok
+  rescue
+    _ ->
+      send(store_pid, {:lease_retire_admission_failed, attempt_ref, :launcher_exception})
+      :ok
+  catch
+    :exit, _ ->
+      send(store_pid, {:lease_retire_admission_failed, attempt_ref, :launcher_exit})
+      :ok
+
+    _, _ ->
+      send(store_pid, {:lease_retire_admission_failed, attempt_ref, :launcher_error})
+      :ok
+  end
+
+  defp classify_admission_error(:noproc), do: :supervisor_unavailable
+  defp classify_admission_error({:noproc, _}), do: :supervisor_unavailable
+  defp classify_admission_error(:timeout), do: :admission_timeout
+  defp classify_admission_error(_), do: :admission_failed
+
+  @doc false
+  # Worker must not enter revoke I/O until TaskStore accepts admission and
+  # sends {:lease_retire_begin, attempt_ref}. If admission times out (launcher
+  # killed, attempt superseded), the worker never receives begin and self-expires
+  # so it cannot remain as an unmonitored hung revoke process.
+  def run_lease_retire_worker(
+        store_pid,
+        attempt_ref,
+        member_ids,
+        security_module,
+        revoke_fun,
+        begin_wait_ms
+      )
+      when is_pid(store_pid) and is_reference(attempt_ref) and is_list(member_ids) and
+             is_integer(begin_wait_ms) and begin_wait_ms > 0 do
+    receive do
+      {:lease_retire_begin, ^attempt_ref} ->
+        results =
+          Enum.map(member_ids, fn id ->
+            {id, normalize_revoke_outcome(revoke_one_id(id, security_module, revoke_fun))}
+          end)
+
+        send(store_pid, {:lease_retire_complete, attempt_ref, results})
+        :ok
+    after
+      begin_wait_ms ->
+        # Never admitted (or admitted after supersede without begin). Exit
+        # without revoke I/O and without claiming completion.
+        :ok
+    end
+  end
+
+  defp revoke_one_id(id, _security_module, revoke_fun)
+       when is_binary(id) and id != "" and is_function(revoke_fun, 1) do
+    revoke_fun.(id)
+  rescue
+    _ -> {:error, :exception}
+  catch
+    :exit, _ -> {:error, :exit}
+    _, _ -> {:error, :error}
+  end
+
+  defp revoke_one_id(id, security_module, _revoke_fun) when is_binary(id) and id != "" do
+    if is_atom(security_module) and Code.ensure_loaded?(security_module) and
+         function_exported?(security_module, :revoke, 1) do
+      apply(security_module, :revoke, [id])
+    else
+      {:error, :security_unavailable}
+    end
+  rescue
+    _ -> {:error, :exception}
+  catch
+    :exit, _ -> {:error, :exit}
+    _, _ -> {:error, :error}
+  end
+
+  defp revoke_one_id(_id, _security_module, _revoke_fun), do: {:error, :invalid_id}
+
+  defp normalize_revoke_outcome(:ok), do: :ok
+  defp normalize_revoke_outcome({:ok, _}), do: :ok
+  defp normalize_revoke_outcome({:error, :not_found}), do: :ok
+  defp normalize_revoke_outcome({:error, :already_revoked}), do: :ok
+  defp normalize_revoke_outcome({:error, reason}) when is_atom(reason), do: {:error, reason}
+  defp normalize_revoke_outcome({:error, _}), do: {:error, :revoke_failed}
+  defp normalize_revoke_outcome(_), do: {:error, :unexpected_outcome}
+
+  defp handle_lease_retire_admitted(state, attempt_ref, worker_pid) do
+    state = ensure_lease_retirement_shape(state)
+
+    case Map.fetch(state.lease_retire_attempts, attempt_ref) do
+      {:ok, %{status: :admitting, generation: gen} = attempt} ->
+        bucket = Map.get(state.lease_pending_retirement, attempt.task_id)
+
+        if is_map(bucket) and bucket.generation == gen do
+          cancel_timer_safe(attempt.admit_timer)
+
+          if is_reference(attempt.launcher_mon),
+            do: Process.demonitor(attempt.launcher_mon, [:flush])
+
+          worker_timeout =
+            Map.get(
+              state,
+              :lease_retire_worker_timeout_ms,
+              @default_lease_retire_worker_timeout_ms
+            )
+
+          worker_timer =
+            Process.send_after(
+              self(),
+              {:lease_retire_worker_timeout, attempt_ref},
+              worker_timeout
+            )
+
+          worker_mon = Process.monitor(worker_pid)
+
+          # Acceptance/begin signal: only after store-owned monitor + deadline
+          # are armed. Workers that never receive this self-expire.
+          send(worker_pid, {:lease_retire_begin, attempt_ref})
+
+          state =
+            if is_reference(attempt.launcher_mon) do
+              update_in(state.lease_retire_monitor_index, &Map.delete(&1, attempt.launcher_mon))
+            else
+              state
+            end
+
+          attempt = %{
+            attempt
+            | status: :running,
+              launcher_pid: nil,
+              launcher_mon: nil,
+              admit_timer: nil,
+              worker_pid: worker_pid,
+              worker_mon: worker_mon,
+              worker_timer: worker_timer,
+              worker_deadline_mono: System.monotonic_time(:millisecond) + worker_timeout
+          }
+
+          state
+          |> put_in([:lease_retire_attempts, attempt_ref], attempt)
+          |> put_in([:lease_retire_monitor_index, worker_mon], {:worker, attempt_ref})
+        else
+          # Stale generation / superseded — do not send begin; worker self-expires.
+          state
+        end
+
+      _ ->
+        # Stale/forged/superseded — do not send begin; worker self-expires.
+        state
+    end
+  end
+
+  defp handle_lease_retire_admission_failed(state, attempt_ref, class) do
+    state = ensure_lease_retirement_shape(state)
+
+    case Map.fetch(state.lease_retire_attempts, attempt_ref) do
+      {:ok, %{status: :admitting} = attempt} ->
+        cancel_timer_safe(attempt.admit_timer)
+
+        if is_reference(attempt.launcher_mon),
+          do: Process.demonitor(attempt.launcher_mon, [:flush])
+
+        if is_pid(attempt.launcher_pid) and Process.alive?(attempt.launcher_pid) do
+          Process.exit(attempt.launcher_pid, :kill)
+        end
+
+        state = supersede_attempt(state, attempt_ref)
+        schedule_retire_retry(state, attempt.task_id, attempt.phase, class)
+
+      _ ->
+        state
+    end
+  end
+
+  defp handle_lease_retire_admit_timeout(state, attempt_ref) do
+    state = ensure_lease_retirement_shape(state)
+
+    case Map.fetch(state.lease_retire_attempts, attempt_ref) do
+      {:ok, %{status: :admitting} = attempt} ->
+        # Mandatory: kill+demonitor blocked launcher before retry so suspended
+        # supervisors cannot accumulate launchers/workers.
+        if is_pid(attempt.launcher_pid) and Process.alive?(attempt.launcher_pid) do
+          Process.exit(attempt.launcher_pid, :kill)
+        end
+
+        if is_reference(attempt.launcher_mon),
+          do: Process.demonitor(attempt.launcher_mon, [:flush])
+
+        cancel_timer_safe(attempt.admit_timer)
+
+        state = supersede_attempt(state, attempt_ref)
+        schedule_retire_retry(state, attempt.task_id, attempt.phase, :admit_timeout)
+
+      _ ->
+        state
+    end
+  end
+
+  defp handle_lease_retire_worker_timeout(state, attempt_ref) do
+    state = ensure_lease_retirement_shape(state)
+
+    case Map.fetch(state.lease_retire_attempts, attempt_ref) do
+      {:ok, %{status: :running, completion_applied?: false} = attempt} ->
+        if is_pid(attempt.worker_pid) and Process.alive?(attempt.worker_pid) do
+          Process.exit(attempt.worker_pid, :kill)
+        end
+
+        if is_reference(attempt.worker_mon), do: Process.demonitor(attempt.worker_mon, [:flush])
+        cancel_timer_safe(attempt.worker_timer)
+
+        state = supersede_attempt(state, attempt_ref)
+        schedule_retire_retry(state, attempt.task_id, attempt.phase, :worker_timeout)
+
+      _ ->
+        state
+    end
+  end
+
+  defp handle_lease_retire_launcher_down(state, attempt_ref, attempt) do
+    state = ensure_lease_retirement_shape(state)
+
+    case attempt do
+      %{status: :admitting, completion_applied?: false} ->
+        cancel_timer_safe(attempt.admit_timer)
+        state = supersede_attempt(state, attempt_ref)
+        schedule_retire_retry(state, attempt.task_id, attempt.phase, :launcher_down)
+
+      _ ->
+        # Already running or completed — ignore launcher death.
+        state
+    end
+  end
+
+  defp handle_lease_retire_worker_down(state, attempt_ref, attempt, _reason) do
+    state = ensure_lease_retirement_shape(state)
+
+    case attempt do
+      %{status: :running, completion_applied?: false} ->
+        cancel_timer_safe(attempt.worker_timer)
+        state = supersede_attempt(state, attempt_ref)
+        schedule_retire_retry(state, attempt.task_id, attempt.phase, :worker_down)
+
+      %{completion_applied?: true} ->
+        # Completion-then-DOWN: ignore.
+        state
+
+      _ ->
+        state
+    end
+  end
+
+  defp handle_lease_retire_complete(state, attempt_ref, results) do
+    state = ensure_lease_retirement_shape(state)
+
+    case Map.fetch(state.lease_retire_attempts, attempt_ref) do
+      {:ok, attempt}
+      when attempt.status in [:admitting, :running] and attempt.completion_applied? == false ->
+        bucket = Map.get(state.lease_pending_retirement, attempt.task_id)
+
+        cond do
+          not is_map(bucket) ->
+            supersede_attempt(state, attempt_ref)
+
+          bucket.generation != attempt.generation ->
+            # Stale generation.
+            supersede_attempt(state, attempt_ref)
+
+          not is_list(results) ->
+            state = cleanup_attempt_runtime(state, attempt_ref, attempt)
+            state = supersede_attempt(state, attempt_ref)
+            schedule_retire_retry(state, attempt.task_id, attempt.phase, :malformed_completion)
+
+          true ->
+            case apply_completion_cas(bucket.members, results) do
+              {:malformed, _} ->
+                state = cleanup_attempt_runtime(state, attempt_ref, attempt)
+                state = supersede_attempt(state, attempt_ref)
+
+                schedule_retire_retry(
+                  state,
+                  attempt.task_id,
+                  attempt.phase,
+                  :malformed_completion
+                )
+
+              {:ok, next_members} ->
+                state = cleanup_attempt_runtime(state, attempt_ref, attempt)
+
+                attempt = %{attempt | completion_applied?: true, status: :superseded}
+                state = put_in(state.lease_retire_attempts[attempt_ref], attempt)
+                state = delete_attempt(state, attempt_ref)
+
+                if map_size(next_members) == 0 do
+                  state =
+                    update_in(state.lease_pending_retirement, &Map.delete(&1, attempt.task_id))
+
+                  maybe_schedule_marker_delete(state, attempt.task_id)
+                else
+                  bucket = %{bucket | members: next_members}
+                  state = put_in(state.lease_pending_retirement[attempt.task_id], bucket)
+                  schedule_retire_retry(state, attempt.task_id, attempt.phase, :partial_revoke)
+                end
+            end
+        end
+
+      _ ->
+        # Stale/forged/already applied.
+        state
+    end
+  end
+
+  # Fail-closed completion CAS against authoritative pending members only.
+  defp apply_completion_cas(auth_members, results)
+       when is_map(auth_members) and is_list(results) do
+    {acc, malformed?} =
+      Enum.reduce(results, {%{}, false}, fn row, {acc, malformed?} ->
+        case parse_completion_row(row) do
+          {:ok, id, :ok} ->
+            {merge_completion_outcome(acc, id, :ok), malformed?}
+
+          {:ok, id, :error} ->
+            {merge_completion_outcome(acc, id, :error), malformed?}
+
+          :malformed ->
+            {acc, true}
+        end
+      end)
+
+    if malformed? do
+      {:malformed, auth_members}
+    else
+      next =
+        Enum.reduce(auth_members, auth_members, fn {id, _meta}, members ->
+          case Map.get(acc, id, :omitted) do
+            :ok -> Map.delete(members, id)
+            :omitted -> members
+            :error -> members
+            :conflict -> members
+          end
+        end)
+
+      {:ok, next}
+    end
+  end
+
+  defp apply_completion_cas(auth_members, _results), do: {:malformed, auth_members}
+
+  defp parse_completion_row({id, :ok}) when is_binary(id) and id != "", do: {:ok, id, :ok}
+
+  defp parse_completion_row({id, {:error, reason}})
+       when is_binary(id) and id != "" and is_atom(reason),
+       do: {:ok, id, :error}
+
+  defp parse_completion_row({id, :error}) when is_binary(id) and id != "", do: {:ok, id, :error}
+
+  defp parse_completion_row(_), do: :malformed
+
+  defp merge_completion_outcome(acc, id, :ok) do
+    case Map.get(acc, id) do
+      nil -> Map.put(acc, id, :ok)
+      :ok -> acc
+      :error -> Map.put(acc, id, :conflict)
+      :conflict -> acc
+    end
+  end
+
+  defp merge_completion_outcome(acc, id, :error) do
+    case Map.get(acc, id) do
+      nil -> Map.put(acc, id, :error)
+      :error -> acc
+      :ok -> Map.put(acc, id, :conflict)
+      :conflict -> acc
+    end
+  end
+
+  defp handle_lease_retire_retry(state, attempt_ref) do
+    state = ensure_lease_retirement_shape(state)
+
+    case Map.fetch(state.lease_retire_attempts, attempt_ref) do
+      {:ok, %{status: :retry_wait} = attempt} ->
+        state = delete_attempt(state, attempt_ref)
+        begin_retire_attempt(state, attempt.task_id, attempt.phase)
+
+      _ ->
+        state
+    end
+  end
+
+  defp schedule_retire_retry(state, task_id, phase, error_class) do
+    state = ensure_lease_retirement_shape(state)
+    bucket = Map.get(state.lease_pending_retirement, task_id)
+
+    cond do
+      is_nil(bucket) or map_size(bucket.members) == 0 ->
+        update_in(state.lease_pending_retirement, &Map.delete(&1, task_id))
+
+      true ->
+        max_attempts =
+          Map.get(state, :lease_retire_max_attempts, @default_lease_retire_max_attempts)
+
+        idx = Map.get(bucket, :attempt_index, 0)
+
+        if idx + 1 >= max_attempts do
+          bucket = %{
+            bucket
+            | exhausted: true,
+              attempt_index: idx
+          }
+
+          # Redacted observability only — no capability ids.
+          _ =
+            :telemetry.execute(
+              [:arbor, :agent, :task_control_lease, :retire_exhausted],
+              %{remaining_count: map_size(bucket.members), attempt_index: idx},
+              %{
+                task_id: task_id,
+                phase: phase,
+                generation: bucket.generation,
+                retrigger_count: bucket.retrigger_count,
+                last_error_class: error_class
+              }
+            )
+
+          put_in(state.lease_pending_retirement[task_id], bucket)
+        else
+          next_idx = idx + 1
+          bucket = %{bucket | attempt_index: next_idx}
+          state = put_in(state.lease_pending_retirement[task_id], bucket)
+
+          base = Map.get(state, :lease_retire_base_delay_ms, @default_lease_retire_base_delay_ms)
+
+          max_delay =
+            Map.get(state, :lease_retire_max_delay_ms, @default_lease_retire_max_delay_ms)
+
+          backoff = min(max_delay, base * Integer.pow(2, next_idx))
+
+          attempt_ref = make_ref()
+
+          retry_timer =
+            Process.send_after(self(), {:lease_retire_retry, attempt_ref}, backoff)
+
+          attempt = %{
+            attempt_ref: attempt_ref,
+            task_id: task_id,
+            generation: bucket.generation,
+            attempt_index: next_idx,
+            phase: phase,
+            member_ids: Map.keys(bucket.members),
+            status: :retry_wait,
+            completion_applied?: false,
+            launcher_pid: nil,
+            launcher_mon: nil,
+            worker_pid: nil,
+            worker_mon: nil,
+            admit_timer: nil,
+            worker_timer: nil,
+            retry_timer: retry_timer,
+            admit_deadline_mono: 0,
+            worker_deadline_mono: nil,
+            security_module: Map.get(state, :task_control_security_module, Arbor.Security),
+            revoke_fun: Map.get(state, :task_control_revoke),
+            last_error_class: error_class
+          }
+
+          state
+          |> put_in([:lease_retire_attempts, attempt_ref], attempt)
+          |> put_in([:lease_retire_task_index, task_id], attempt_ref)
+        end
+    end
+  end
+
+  defp do_retrigger_exhausted_lease_retirements(state) do
+    state = ensure_lease_retirement_shape(state)
+
+    max_rounds =
+      Map.get(
+        state,
+        :lease_retire_max_retrigger_rounds,
+        @default_lease_retire_max_retrigger_rounds
+      )
+
+    {state, retried, remaining} =
+      Enum.reduce(state.lease_pending_retirement, {state, 0, 0}, fn {task_id, bucket},
+                                                                    {st, retried, remaining} ->
+        cond do
+          bucket.exhausted != true or map_size(bucket.members) == 0 ->
+            {st, retried, remaining}
+
+          bucket.retrigger_count >= max_rounds ->
+            {st, retried, remaining + 1}
+
+          true ->
+            bucket = %{
+              bucket
+              | exhausted: false,
+                generation: bucket.generation + 1,
+                attempt_index: 0,
+                retrigger_count: bucket.retrigger_count + 1
+            }
+
+            st = put_in(st.lease_pending_retirement[task_id], bucket)
+            st = begin_retire_attempt(st, task_id, :all)
+            {st, retried + 1, remaining}
+        end
+      end)
+
+    {state, %{retried_tasks: retried, remaining_exhausted: remaining}}
+  end
+
+  defp redacted_lease_retirement_snapshot(state) do
+    pending =
+      state
+      |> Map.get(:lease_pending_retirement, %{})
+      |> Enum.map(fn {task_id, bucket} ->
+        {task_id,
+         %{
+           remaining_count: map_size(bucket.members),
+           exhausted: bucket.exhausted,
+           generation: bucket.generation,
+           attempt_index: bucket.attempt_index,
+           retrigger_count: bucket.retrigger_count
+         }}
+      end)
+      |> Map.new()
+
+    attempts =
+      state
+      |> Map.get(:lease_retire_attempts, %{})
+      |> Enum.map(fn {_ref, attempt} ->
+        %{
+          task_id: attempt.task_id,
+          status: attempt.status,
+          generation: attempt.generation,
+          attempt_index: attempt.attempt_index,
+          last_error_class: attempt.last_error_class,
+          member_count: length(attempt.member_ids || [])
+        }
+      end)
+
+    %{
+      pending_tasks: map_size(pending),
+      pending: pending,
+      active_attempts: length(attempts),
+      attempts: attempts
+    }
+  end
+
+  defp find_lease_retire_monitor(state, mon) when is_reference(mon) do
+    case Map.get(Map.get(state, :lease_retire_monitor_index, %{}), mon) do
+      {:launcher, ref} ->
+        case Map.fetch(Map.get(state, :lease_retire_attempts, %{}), ref) do
+          {:ok, attempt} -> {:launcher, ref, attempt}
+          :error -> :error
+        end
+
+      {:worker, ref} ->
+        case Map.fetch(Map.get(state, :lease_retire_attempts, %{}), ref) do
+          {:ok, attempt} -> {:worker, ref, attempt}
+          :error -> :error
+        end
+
+      _ ->
+        :error
+    end
+  end
+
+  defp cleanup_attempt_runtime(state, _attempt_ref, attempt) do
+    cancel_timer_safe(attempt.admit_timer)
+    cancel_timer_safe(attempt.worker_timer)
+    cancel_timer_safe(attempt.retry_timer)
+
+    if is_reference(attempt.launcher_mon), do: Process.demonitor(attempt.launcher_mon, [:flush])
+    if is_reference(attempt.worker_mon), do: Process.demonitor(attempt.worker_mon, [:flush])
+
+    state
+  end
+
+  defp supersede_attempt(state, attempt_ref) do
+    case Map.fetch(Map.get(state, :lease_retire_attempts, %{}), attempt_ref) do
+      {:ok, attempt} ->
+        state = cleanup_attempt_runtime(state, attempt_ref, attempt)
+        delete_attempt(state, attempt_ref)
+
+      :error ->
+        state
+    end
+  end
+
+  defp delete_attempt(state, attempt_ref) do
+    case Map.fetch(Map.get(state, :lease_retire_attempts, %{}), attempt_ref) do
+      {:ok, attempt} ->
+        state =
+          state
+          |> update_in([:lease_retire_attempts], &Map.delete(&1, attempt_ref))
+
+        state =
+          case Map.get(Map.get(state, :lease_retire_task_index, %{}), attempt.task_id) do
+            ^attempt_ref ->
+              update_in(state.lease_retire_task_index, &Map.delete(&1, attempt.task_id))
+
+            _ ->
+              state
+          end
+
+        state
+        |> maybe_delete_mon_index(attempt.launcher_mon)
+        |> maybe_delete_mon_index(attempt.worker_mon)
+
+      :error ->
+        update_in(state.lease_retire_attempts, &Map.delete(&1, attempt_ref))
+    end
+  end
+
+  defp maybe_delete_mon_index(state, mon) when is_reference(mon) do
+    update_in(state.lease_retire_monitor_index, &Map.delete(&1, mon))
+  end
+
+  defp maybe_delete_mon_index(state, _), do: state
+
+  # ---------------------------------------------------------------------------
+  # Recovery ops (marker put/delete, revoke_by_task, replay)
+  # No Persistence/Security I/O in GenServer callbacks — workers only.
+  # ---------------------------------------------------------------------------
+
+  defp ensure_recovery_shape(state) do
+    state
+    |> Map.put_new(:reservations, %{})
+    |> Map.put_new(:reservation_monitor_index, %{})
+    |> Map.put_new(:recovery_pending, %{})
+    |> Map.put_new(:recovery_ops, %{})
+    |> Map.put_new(:recovery_task_index, %{})
+    |> Map.put_new(:recovery_monitor_index, %{})
+    |> Map.put_new(:recovery_ready?, false)
+    |> Map.put_new(:recovery_durable?, true)
+    |> Map.put_new(:recovery_replay, %{phase: :pending, cursor: [], failures: 0, deadline_mono: 0})
+    |> Map.put_new(:max_recovery_obligations, @default_max_recovery_obligations)
+    |> Map.put_new(:max_reservations, @default_max_reservations)
+    |> Map.put_new(:reservation_deadline_ms, @default_reservation_deadline_ms)
+    |> Map.put_new(:recovery_admit_timeout_ms, @default_recovery_admit_timeout_ms)
+    |> Map.put_new(:recovery_worker_timeout_ms, @default_recovery_worker_timeout_ms)
+    |> Map.put_new(:recovery_replay_batch, @default_recovery_replay_batch)
+    |> Map.put_new(:recovery_retry_base_ms, @default_recovery_retry_base_ms)
+    |> Map.put_new(:recovery_retry_max_ms, @default_recovery_retry_max_ms)
+    |> Map.put_new(:recovery_max_retries, @default_recovery_max_retries)
+    |> Map.put_new(:task_control_recovery_facade, Arbor.Persistence)
+    |> Map.put_new(:task_control_recovery_store, @default_recovery_store)
+    |> Map.put_new(:task_control_security_module, Arbor.Security)
+  end
+
+  # Memory and Persistence acknowledged facades are durable. Cache-only / nil
+  # facades fail closed (recovery_durable? false → reserve/marker rejected).
+  defp recovery_facade_durable?(facade) when is_atom(facade) and not is_nil(facade) do
+    facade in [Arbor.Persistence, Arbor.Agent.Orchestration.TaskControlRecoveryMemory] or
+      (Code.ensure_loaded?(facade) and
+         function_exported?(facade, :buffered_store_acknowledged_put, 3))
+  end
+
+  defp recovery_facade_durable?(_), do: false
+
+  defp admit_new_reservation(state) do
+    max_res = Map.get(state, :max_reservations, @default_max_reservations)
+    max_obl = Map.get(state, :max_recovery_obligations, @default_max_recovery_obligations)
+    res_count = map_size(Map.get(state, :reservations, %{}))
+
+    cond do
+      res_count >= max_res ->
+        {:error, :reservation_capacity_exhausted}
+
+      true ->
+        TaskControlLease.admit_reservation?(recovery_obligation_count(state), max_obl)
+    end
+  end
+
+  defp recovery_obligation_count(state) do
+    reservations = map_size(Map.get(state, :reservations, %{}))
+    pending_recovery = map_size(Map.get(state, :recovery_pending, %{}))
+
+    active_lease_tasks =
+      state
+      |> Map.get(:tasks, %{})
+      |> Enum.count(fn {_id, rec} ->
+        case Map.get(rec, :task_control_lease) do
+          %{"capabilities" => caps} when is_map(caps) and map_size(caps) > 0 -> true
+          _ -> false
+        end
+      end)
+
+    retirement_buckets = map_size(Map.get(state, :lease_pending_retirement, %{}))
+    reservations + pending_recovery + active_lease_tasks + retirement_buckets
+  end
+
+  defp generate_unique_task_id(state) do
+    generator = Map.get(state, :task_id_generator)
+
+    Enum.reduce_while(1..8, {:error, :task_id_generation_failed}, fn _, _acc ->
+      id =
+        cond do
+          is_function(generator, 0) ->
+            case generator.() do
+              id when is_binary(id) -> id
+              _ -> Arbor.Identifiers.generate_id("task_")
+            end
+
+          true ->
+            Arbor.Identifiers.generate_id("task_")
+        end
+
+      if TaskControlLease.valid_task_id?(id) and task_id_available?(state, id) do
+        {:halt, {:ok, id}}
+      else
+        {:cont, {:error, :task_id_already_exists}}
+      end
+    end)
+  end
+
+  # Exclude live tasks, reservations, recovery indexes, and pending obligations so
+  # a new owner cannot reuse an id that still has stale recovery/retirement work.
+  defp task_id_available?(state, id) when is_binary(id) do
+    not Map.has_key?(Map.get(state, :tasks, %{}), id) and
+      not Map.has_key?(Map.get(state, :reservations, %{}), id) and
+      not Map.has_key?(Map.get(state, :recovery_pending, %{}), id) and
+      not Map.has_key?(Map.get(state, :recovery_task_index, %{}), id) and
+      not Map.has_key?(Map.get(state, :lease_pending_retirement, %{}), id) and
+      not Map.has_key?(Map.get(state, :lease_retire_task_index, %{}), id)
+  end
+
+  defp authorize_reservation(state, task_id, token, owner_pid) do
+    cond do
+      not TaskControlLease.valid_reservation_token?(token) ->
+        {:error, :invalid_reservation_token}
+
+      not is_pid(owner_pid) ->
+        {:error, :invalid_reservation_token}
+
+      true ->
+        case Map.get(Map.get(state, :reservations, %{}), task_id) do
+          %{token_hash: hash, owner_pid: ^owner_pid} = reservation ->
+            if TaskControlLease.token_match?(hash, token) do
+              {:ok, reservation}
+            else
+              {:error, :invalid_reservation_token}
+            end
+
+          %{token_hash: _hash} ->
+            {:error, :invalid_reservation_token}
+
+          _ ->
+            {:error, :invalid_reservation_token}
+        end
+    end
+  end
+
+  defp drop_reservation(state, task_id, reservation) do
+    if is_reference(reservation.owner_mon), do: Process.demonitor(reservation.owner_mon, [:flush])
+    cancel_timer_safe(Map.get(reservation, :deadline_timer))
+
+    state =
+      if is_reference(reservation.owner_mon) do
+        update_in(state.reservation_monitor_index, &Map.delete(&1, reservation.owner_mon))
+      else
+        state
+      end
+
+    update_in(state.reservations, &Map.delete(&1, task_id))
+  end
+
+  defp put_recovery_pending(state, task_id, reason, marker_written?) do
+    existing = Map.get(Map.get(state, :recovery_pending, %{}), task_id)
+
+    pending = %{
+      task_id: task_id,
+      reason: reason,
+      marker_written?: marker_written? == true,
+      inserted_at: DateTime.utc_now(),
+      retry_count: (existing && Map.get(existing, :retry_count, 0)) || 0,
+      retry_timer: existing && Map.get(existing, :retry_timer)
+    }
+
+    put_in(state.recovery_pending[task_id], pending)
+  end
+
+  # O(1) exact monitor-ref lookup — never scan reservations or match by PID.
+  defp find_reservation_owner_mon(state, mon) when is_reference(mon) do
+    case Map.get(Map.get(state, :reservation_monitor_index, %{}), mon) do
+      task_id when is_binary(task_id) ->
+        case Map.get(Map.get(state, :reservations, %{}), task_id) do
+          %{owner_mon: ^mon} = reservation ->
+            {:ok, task_id, reservation}
+
+          _ ->
+            :error
+        end
+
+      _ ->
+        :error
+    end
+  end
+
+  defp find_reservation_owner_mon(_state, _mon), do: :error
+
+  defp handle_reservation_owner_down(state, task_id, reservation, reason) do
+    marker_written? = reservation.marker_written? == true
+    state = drop_reservation(state, task_id, reservation)
+
+    if marker_written? do
+      state
+      |> put_recovery_pending(task_id, reason, true)
+      |> begin_recovery_op(:reconcile_task, task_id, nil, nil)
+    else
+      # No durable marker and no grants yet — drop reservation only.
+      state
+    end
+  end
+
+  defp begin_recovery_op(state, kind, task_id, reply_to, payload, opts \\ []) do
+    state = ensure_recovery_shape(state)
+
+    # One live op per task for task-scoped kinds.
+    if is_binary(task_id) and Map.has_key?(Map.get(state, :recovery_task_index, %{}), task_id) do
+      if reply_to, do: GenServer.reply(reply_to, {:error, :recovery_op_in_flight})
+      state
+    else
+      op_ref = make_ref()
+
+      admit_timeout =
+        Map.get(state, :recovery_admit_timeout_ms, @default_recovery_admit_timeout_ms)
+
+      begin_wait_ms = admit_timeout + 1_000
+      store_pid = self()
+
+      supervisor =
+        Map.get(
+          state,
+          :cleanup_supervisor,
+          Map.get(state, :task_supervisor, @default_task_supervisor)
+        )
+
+      facade = Map.get(state, :task_control_recovery_facade, Arbor.Persistence)
+      store_name = Map.get(state, :task_control_recovery_store, @default_recovery_store)
+      security = Map.get(state, :task_control_security_module, Arbor.Security)
+
+      admit_timer =
+        Process.send_after(self(), {:recovery_op_admit_timeout, op_ref}, admit_timeout)
+
+      {launcher_pid, launcher_mon} =
+        spawn_monitor(__MODULE__, :recovery_op_launcher, [
+          store_pid,
+          op_ref,
+          supervisor,
+          kind,
+          task_id,
+          payload,
+          facade,
+          store_name,
+          security,
+          begin_wait_ms,
+          Map.get(state, :recovery_replay_batch, @default_recovery_replay_batch)
+        ])
+
+      op = %{
+        op_ref: op_ref,
+        kind: kind,
+        task_id: task_id,
+        generation: 0,
+        status: :admitting,
+        launcher_pid: launcher_pid,
+        launcher_mon: launcher_mon,
+        worker_pid: nil,
+        worker_mon: nil,
+        admit_timer: admit_timer,
+        worker_timer: nil,
+        reply_to: reply_to,
+        payload: payload,
+        expected_token_hash: Keyword.get(opts, :expected_token_hash)
+      }
+
+      state =
+        state
+        |> put_in([:recovery_ops, op_ref], op)
+        |> put_in([:recovery_monitor_index, launcher_mon], {:launcher, op_ref})
+
+      if is_binary(task_id) do
+        put_in(state.recovery_task_index[task_id], op_ref)
+      else
+        state
+      end
+    end
+  end
+
+  @doc false
+  def recovery_op_launcher(
+        store_pid,
+        op_ref,
+        supervisor,
+        kind,
+        task_id,
+        payload,
+        facade,
+        store_name,
+        security,
+        begin_wait_ms,
+        replay_batch
+      ) do
+    case Task.Supervisor.start_child(
+           supervisor,
+           __MODULE__,
+           :run_recovery_op_worker,
+           [
+             store_pid,
+             op_ref,
+             kind,
+             task_id,
+             payload,
+             facade,
+             store_name,
+             security,
+             begin_wait_ms,
+             replay_batch
+           ],
+           []
+         ) do
+      {:ok, worker_pid} when is_pid(worker_pid) ->
+        send(store_pid, {:recovery_op_admitted, op_ref, worker_pid})
+
+      {:ok, worker_pid, _} when is_pid(worker_pid) ->
+        send(store_pid, {:recovery_op_admitted, op_ref, worker_pid})
+
+      {:error, reason} ->
+        send(store_pid, {:recovery_op_admission_failed, op_ref, classify_admission_error(reason)})
+
+      other ->
+        send(store_pid, {:recovery_op_admission_failed, op_ref, classify_admission_error(other)})
+    end
+
+    :ok
+  rescue
+    _ ->
+      send(store_pid, {:recovery_op_admission_failed, op_ref, :launcher_exception})
+      :ok
+  catch
+    :exit, _ ->
+      send(store_pid, {:recovery_op_admission_failed, op_ref, :launcher_exit})
+      :ok
+
+    _, _ ->
+      send(store_pid, {:recovery_op_admission_failed, op_ref, :launcher_error})
+      :ok
+  end
+
+  @doc false
+  def run_recovery_op_worker(
+        store_pid,
+        op_ref,
+        kind,
+        task_id,
+        payload,
+        facade,
+        store_name,
+        security,
+        begin_wait_ms,
+        replay_batch
+      ) do
+    receive do
+      {:recovery_op_begin, ^op_ref} ->
+        result =
+          execute_recovery_kind(
+            kind,
+            task_id,
+            payload,
+            facade,
+            store_name,
+            security,
+            replay_batch
+          )
+
+        send(store_pid, {:recovery_op_complete, op_ref, result})
+        :ok
+    after
+      begin_wait_ms ->
+        :ok
+    end
+  end
+
+  defp execute_recovery_kind(:marker_put, task_id, marker, facade, store_name, _security, _) do
+    key = TaskControlLease.marker_key(task_id)
+
+    case apply_recovery_put(facade, store_name, key, marker) do
+      {:ok, _} -> {:ok, :marker_put}
+      :ok -> {:ok, :marker_put}
+      {:error, reason} -> {:error, sanitize_recovery_reason(reason)}
+      other -> {:error, sanitize_recovery_reason(other)}
+    end
+  rescue
+    _ -> {:error, :marker_put_exception}
+  catch
+    :exit, _ -> {:error, :marker_put_exit}
+    _, _ -> {:error, :marker_put_error}
+  end
+
+  defp execute_recovery_kind(:marker_delete, task_id, _payload, facade, store_name, _security, _) do
+    key = TaskControlLease.marker_key(task_id)
+
+    case apply_recovery_delete(facade, store_name, key) do
+      :ok -> {:ok, :marker_delete}
+      {:ok, _} -> {:ok, :marker_delete}
+      {:error, :not_found} -> {:ok, :marker_delete}
+      {:error, reason} -> {:error, sanitize_recovery_reason(reason)}
+      other -> {:error, sanitize_recovery_reason(other)}
+    end
+  rescue
+    _ -> {:error, :marker_delete_exception}
+  catch
+    :exit, _ -> {:error, :marker_delete_exit}
+    _, _ -> {:error, :marker_delete_error}
+  end
+
+  defp execute_recovery_kind(:reconcile_task, task_id, _payload, facade, store_name, security, _) do
+    revoke_result =
+      if is_atom(security) and Code.ensure_loaded?(security) and
+           function_exported?(security, :revoke_by_task, 1) do
+        apply(security, :revoke_by_task, [task_id])
+      else
+        {:error, :security_unavailable}
+      end
+
+    case revoke_result do
+      {:ok, _count} ->
+        key = TaskControlLease.marker_key(task_id)
+
+        case apply_recovery_delete(facade, store_name, key) do
+          :ok -> {:ok, :reconciled}
+          {:ok, _} -> {:ok, :reconciled}
+          {:error, :not_found} -> {:ok, :reconciled}
+          {:error, reason} -> {:ok, {:reconciled_marker_stale, sanitize_recovery_reason(reason)}}
+          _ -> {:ok, :reconciled_marker_stale}
+        end
+
+      {:error, reason} ->
+        {:error, sanitize_recovery_reason(reason)}
+
+      other ->
+        {:error, sanitize_recovery_reason(other)}
+    end
+  rescue
+    _ -> {:error, :reconcile_exception}
+  catch
+    :exit, _ -> {:error, :reconcile_exit}
+    _, _ -> {:error, :reconcile_error}
+  end
+
+  defp execute_recovery_kind(
+         :replay_batch,
+         _task_id,
+         _payload,
+         facade,
+         store_name,
+         security,
+         batch
+       ) do
+    case apply_recovery_list(facade, store_name) do
+      {:ok, keys} when is_list(keys) ->
+        batch_keys = Enum.take(keys, batch)
+
+        results =
+          Enum.map(batch_keys, fn key ->
+            case apply_recovery_get(facade, store_name, key) do
+              {:ok, raw} ->
+                case TaskControlLease.marker_normalize(raw) do
+                  {:ok, marker} ->
+                    task_id = marker["task_id"]
+
+                    case execute_recovery_kind(
+                           :reconcile_task,
+                           task_id,
+                           nil,
+                           facade,
+                           store_name,
+                           security,
+                           batch
+                         ) do
+                      {:ok, _} -> {:ok, task_id}
+                      {:error, reason} -> {:error, {task_id, reason}}
+                    end
+
+                  {:error, reason} ->
+                    {:error, {key, reason}}
+                end
+
+              {:error, :not_found} ->
+                {:ok, key}
+
+              {:error, reason} ->
+                {:error, {key, sanitize_recovery_reason(reason)}}
+            end
+          end)
+
+        failures = Enum.count(results, &match?({:error, _}, &1))
+
+        # Authoritative remainder: re-list after the batch. Ready only when an
+        # authoritative pass proves zero remaining markers (not merely a
+        # zero-failure truncated batch). Never estimate remainder on list failure.
+        case apply_recovery_list(facade, store_name) do
+          {:ok, after_keys} when is_list(after_keys) ->
+            {:ok,
+             %{
+               processed: length(batch_keys),
+               failures: failures,
+               remaining: length(after_keys)
+             }}
+
+          {:error, reason} ->
+            {:error, sanitize_recovery_reason(reason)}
+
+          other ->
+            {:error, sanitize_recovery_reason(other)}
+        end
+
+      {:error, reason} ->
+        {:error, sanitize_recovery_reason(reason)}
+
+      other ->
+        {:error, sanitize_recovery_reason(other)}
+    end
+  rescue
+    _ -> {:error, :replay_exception}
+  catch
+    :exit, _ -> {:error, :replay_exit}
+    _, _ -> {:error, :replay_error}
+  end
+
+  defp execute_recovery_kind(_, _, _, _, _, _, _), do: {:error, :invalid_recovery_kind}
+
+  defp apply_recovery_put(facade, store_name, key, value) do
+    cond do
+      is_atom(facade) and Code.ensure_loaded?(facade) and
+          function_exported?(facade, :buffered_store_acknowledged_put, 3) ->
+        facade.buffered_store_acknowledged_put(store_name, key, value)
+
+      is_atom(facade) and Code.ensure_loaded?(facade) and
+          function_exported?(facade, :acknowledged_put, 3) ->
+        facade.acknowledged_put(store_name, key, value)
+
+      true ->
+        {:error, :recovery_facade_unavailable}
+    end
+  end
+
+  defp apply_recovery_delete(facade, store_name, key) do
+    cond do
+      is_atom(facade) and Code.ensure_loaded?(facade) and
+          function_exported?(facade, :buffered_store_acknowledged_delete, 2) ->
+        facade.buffered_store_acknowledged_delete(store_name, key)
+
+      is_atom(facade) and Code.ensure_loaded?(facade) and
+          function_exported?(facade, :acknowledged_delete, 2) ->
+        facade.acknowledged_delete(store_name, key)
+
+      true ->
+        {:error, :recovery_facade_unavailable}
+    end
+  end
+
+  defp apply_recovery_list(facade, store_name) do
+    cond do
+      is_atom(facade) and Code.ensure_loaded?(facade) and
+          function_exported?(facade, :buffered_store_authoritative_list, 1) ->
+        facade.buffered_store_authoritative_list(store_name)
+
+      is_atom(facade) and Code.ensure_loaded?(facade) and
+          function_exported?(facade, :authoritative_list, 1) ->
+        facade.authoritative_list(store_name)
+
+      true ->
+        {:error, :recovery_facade_unavailable}
+    end
+  end
+
+  defp apply_recovery_get(facade, store_name, key) do
+    cond do
+      is_atom(facade) and Code.ensure_loaded?(facade) and
+          function_exported?(facade, :buffered_store_authoritative_get, 2) ->
+        facade.buffered_store_authoritative_get(store_name, key)
+
+      is_atom(facade) and Code.ensure_loaded?(facade) and
+          function_exported?(facade, :authoritative_get, 2) ->
+        facade.authoritative_get(store_name, key)
+
+      true ->
+        {:error, :recovery_facade_unavailable}
+    end
+  end
+
+  defp sanitize_recovery_reason(reason) when is_atom(reason), do: reason
+  defp sanitize_recovery_reason(_), do: :recovery_error
+
+  defp handle_recovery_op_admitted(state, op_ref, worker_pid) do
+    state = ensure_recovery_shape(state)
+
+    case Map.fetch(state.recovery_ops, op_ref) do
+      {:ok, %{status: :admitting} = op} ->
+        cancel_timer_safe(op.admit_timer)
+
+        if is_reference(op.launcher_mon), do: Process.demonitor(op.launcher_mon, [:flush])
+
+        state =
+          if is_reference(op.launcher_mon) do
+            update_in(state.recovery_monitor_index, &Map.delete(&1, op.launcher_mon))
+          else
+            state
+          end
+
+        worker_timeout =
+          Map.get(state, :recovery_worker_timeout_ms, @default_recovery_worker_timeout_ms)
+
+        worker_timer =
+          Process.send_after(self(), {:recovery_op_worker_timeout, op_ref}, worker_timeout)
+
+        worker_mon = Process.monitor(worker_pid)
+        send(worker_pid, {:recovery_op_begin, op_ref})
+
+        op = %{
+          op
+          | status: :running,
+            launcher_pid: nil,
+            launcher_mon: nil,
+            admit_timer: nil,
+            worker_pid: worker_pid,
+            worker_mon: worker_mon,
+            worker_timer: worker_timer
+        }
+
+        state
+        |> put_in([:recovery_ops, op_ref], op)
+        |> put_in([:recovery_monitor_index, worker_mon], {:worker, op_ref})
+
+      _ ->
+        state
+    end
+  end
+
+  defp handle_recovery_op_admission_failed(state, op_ref, class) do
+    state = ensure_recovery_shape(state)
+
+    case Map.fetch(Map.get(state, :recovery_ops, %{}), op_ref) do
+      {:ok, op} ->
+        # Retry scheduling is owned exclusively by apply_recovery_result/3.
+        finish_recovery_op(state, op_ref, op, {:error, class})
+
+      :error ->
+        state
+    end
+  end
+
+  defp handle_recovery_op_admit_timeout(state, op_ref) do
+    state = ensure_recovery_shape(state)
+
+    case Map.fetch(Map.get(state, :recovery_ops, %{}), op_ref) do
+      {:ok, %{status: :admitting} = op} ->
+        if is_pid(op.launcher_pid) and Process.alive?(op.launcher_pid) do
+          Process.exit(op.launcher_pid, :kill)
+        end
+
+        # Retry scheduling is owned exclusively by apply_recovery_result/3.
+        finish_recovery_op(state, op_ref, op, {:error, :admit_timeout})
+
+      _ ->
+        state
+    end
+  end
+
+  defp handle_recovery_op_worker_timeout(state, op_ref) do
+    state = ensure_recovery_shape(state)
+
+    case Map.fetch(Map.get(state, :recovery_ops, %{}), op_ref) do
+      {:ok, %{status: :running} = op} ->
+        if is_pid(op.worker_pid) and Process.alive?(op.worker_pid) do
+          Process.exit(op.worker_pid, :kill)
+        end
+
+        # Retry scheduling is owned exclusively by apply_recovery_result/3.
+        finish_recovery_op(state, op_ref, op, {:error, :worker_timeout})
+
+      _ ->
+        state
+    end
+  end
+
+  defp handle_recovery_launcher_down(state, op_ref, op) do
+    case op do
+      %{status: :admitting} ->
+        # Retry scheduling is owned exclusively by apply_recovery_result/3.
+        finish_recovery_op(state, op_ref, op, {:error, :launcher_down})
+
+      _ ->
+        state
+    end
+  end
+
+  defp handle_recovery_worker_down(state, op_ref, op, _reason) do
+    case op do
+      %{status: :running} ->
+        # Retry scheduling is owned exclusively by apply_recovery_result/3.
+        finish_recovery_op(state, op_ref, op, {:error, :worker_down})
+
+      _ ->
+        state
+    end
+  end
+
+  defp handle_recovery_op_complete(state, op_ref, result) do
+    state = ensure_recovery_shape(state)
+
+    case Map.fetch(Map.get(state, :recovery_ops, %{}), op_ref) do
+      {:ok, %{status: status} = op} when status in [:admitting, :running] ->
+        finish_recovery_op(state, op_ref, op, result)
+
+      _ ->
+        # Stale completion reject.
+        state
+    end
+  end
+
+  defp finish_recovery_op(state, op_ref, op, result) do
+    cancel_timer_safe(op.admit_timer)
+    cancel_timer_safe(op.worker_timer)
+    if is_reference(op.launcher_mon), do: Process.demonitor(op.launcher_mon, [:flush])
+    if is_reference(op.worker_mon), do: Process.demonitor(op.worker_mon, [:flush])
+
+    state =
+      state
+      |> maybe_delete_recovery_mon(op.launcher_mon)
+      |> maybe_delete_recovery_mon(op.worker_mon)
+      |> update_in([:recovery_ops], &Map.delete(&1, op_ref))
+
+    state =
+      if is_binary(op.task_id) do
+        case Map.get(Map.get(state, :recovery_task_index, %{}), op.task_id) do
+          ^op_ref -> update_in(state.recovery_task_index, &Map.delete(&1, op.task_id))
+          _ -> state
+        end
+      else
+        state
+      end
+
+    state = apply_recovery_result(state, op, result)
+
+    if op.reply_to do
+      reply =
+        case result do
+          {:ok, _} -> :ok
+          :ok -> :ok
+          {:error, reason} -> {:error, reason}
+          other -> {:error, sanitize_recovery_reason(other)}
+        end
+
+      GenServer.reply(op.reply_to, reply)
+    end
+
+    state
+  end
+
+  defp maybe_delete_recovery_mon(state, mon) when is_reference(mon) do
+    update_in(state.recovery_monitor_index, &Map.delete(&1, mon))
+  end
+
+  defp maybe_delete_recovery_mon(state, _), do: state
+
+  defp apply_recovery_result(
+         state,
+         %{kind: :marker_put, task_id: task_id, expected_token_hash: expected},
+         {:ok, _}
+       )
+       when is_binary(task_id) and is_binary(expected) do
+    # CAS-bound to the reservation token hash captured at admit time. A stale
+    # completion must not stamp marker_written? on a replacement reservation.
+    case Map.get(state.reservations, task_id) do
+      %{token_hash: ^expected} = reservation ->
+        put_in(state.reservations[task_id], %{reservation | marker_written?: true})
+
+      _ ->
+        state
+    end
+  end
+
+  defp apply_recovery_result(state, %{kind: :marker_put, task_id: task_id}, {:ok, _})
+       when is_binary(task_id) do
+    # Missing expected_token_hash — fail closed (no mutation).
+    state
+  end
+
+  defp apply_recovery_result(state, %{kind: :reconcile_task, task_id: task_id}, {:ok, _})
+       when is_binary(task_id) do
+    clear_recovery_pending(state, task_id)
+  end
+
+  defp apply_recovery_result(
+         state,
+         %{kind: :reconcile_task, task_id: task_id},
+         {:ok, {:reconciled_marker_stale, _}}
+       )
+       when is_binary(task_id) do
+    # Authority reconciled; stale marker may remain for future over-revoke.
+    clear_recovery_pending(state, task_id)
+  end
+
+  defp apply_recovery_result(state, %{kind: :reconcile_task, task_id: task_id}, {:error, _})
+       when is_binary(task_id) do
+    # Keep pending and schedule bounded backoff retry — never rely on restart/TTL.
+    schedule_recovery_pending_retry(state, task_id)
+  end
+
+  defp apply_recovery_result(state, %{kind: :marker_delete, task_id: task_id}, {:ok, _})
+       when is_binary(task_id) do
+    state
+  end
+
+  defp apply_recovery_result(
+         state,
+         %{kind: :replay_batch},
+         {:ok, %{failures: 0, remaining: 0}}
+       ) do
+    # Authoritative empty remainder — only then mark ready.
+    %{state | recovery_ready?: true}
+  end
+
+  defp apply_recovery_result(
+         state,
+         %{kind: :replay_batch},
+         {:ok, %{failures: failures, remaining: remaining}}
+       )
+       when is_integer(failures) and is_integer(remaining) and
+              (failures > 0 or remaining > 0) do
+    # More markers remain or batch had failures — stay not-ready and continue.
+    Process.send_after(self(), :retry_recovery_replay_msg, recovery_retry_delay(state, 0))
+    state
+  end
+
+  defp apply_recovery_result(state, %{kind: :replay_batch}, {:ok, %{failures: 0}}) do
+    # Legacy shape without remaining: re-check via another pass (fail closed).
+    Process.send_after(self(), :retry_recovery_replay_msg, recovery_retry_delay(state, 0))
+    state
+  end
+
+  defp apply_recovery_result(state, %{kind: :replay_batch}, {:error, _}) do
+    Process.send_after(self(), :retry_recovery_replay_msg, recovery_retry_delay(state, 1))
+    state
+  end
+
+  defp apply_recovery_result(state, _op, _result), do: state
+
+  defp clear_recovery_pending(state, task_id) do
+    case Map.get(Map.get(state, :recovery_pending, %{}), task_id) do
+      %{retry_timer: timer} when is_reference(timer) ->
+        cancel_timer_safe(timer)
+
+      _ ->
+        :ok
+    end
+
+    update_in(state.recovery_pending, &Map.delete(&1, task_id))
+  end
+
+  defp schedule_recovery_pending_retry(state, task_id) do
+    state = ensure_recovery_shape(state)
+    max_retries = Map.get(state, :recovery_max_retries, @default_recovery_max_retries)
+
+    case Map.get(Map.get(state, :recovery_pending, %{}), task_id) do
+      nil ->
+        # Ensure pending exists so authority is not forgotten.
+        state = put_recovery_pending(state, task_id, :reconcile_failed, true)
+        schedule_recovery_pending_retry(state, task_id)
+
+      %{retry_count: count} = pending when count >= max_retries ->
+        # Exhausted retry budget: keep pending (never drop unreconciled authority).
+        put_in(state.recovery_pending[task_id], %{pending | retry_count: count})
+
+      %{retry_count: count, retry_timer: old_timer} = pending ->
+        cancel_timer_safe(old_timer)
+        delay = recovery_retry_delay(state, count)
+
+        timer =
+          Process.send_after(self(), {:recovery_pending_retry, task_id}, delay)
+
+        pending = %{pending | retry_count: count + 1, retry_timer: timer}
+        put_in(state.recovery_pending[task_id], pending)
+
+      pending when is_map(pending) ->
+        schedule_recovery_pending_retry(
+          put_in(state.recovery_pending[task_id], Map.put(pending, :retry_count, 0)),
+          task_id
+        )
+    end
+  end
+
+  defp recovery_retry_delay(state, attempt_index) when is_integer(attempt_index) do
+    base = Map.get(state, :recovery_retry_base_ms, @default_recovery_retry_base_ms)
+    max_delay = Map.get(state, :recovery_retry_max_ms, @default_recovery_retry_max_ms)
+    min(max_delay, base * Integer.pow(2, max(attempt_index, 0)))
+  end
+
+  # Retries are owned exclusively by apply_recovery_result/3 so each failure
+  # schedules exactly one bounded attempt (no double-schedule from handlers).
+
+  defp find_recovery_monitor(state, mon) when is_reference(mon) do
+    case Map.get(Map.get(state, :recovery_monitor_index, %{}), mon) do
+      {:launcher, ref} ->
+        case Map.fetch(Map.get(state, :recovery_ops, %{}), ref) do
+          {:ok, op} -> {:launcher, ref, op}
+          :error -> :error
+        end
+
+      {:worker, ref} ->
+        case Map.fetch(Map.get(state, :recovery_ops, %{}), ref) do
+          {:ok, op} -> {:worker, ref, op}
+          :error -> :error
+        end
+
+      _ ->
+        :error
+    end
+  end
+
+  defp maybe_schedule_marker_delete(state, task_id) when is_binary(task_id) do
+    state = ensure_recovery_shape(state)
+    state = ensure_lease_retirement_shape(state)
+
+    active? =
+      case get_in(state, [:tasks, task_id, :task_control_lease]) do
+        %{"capabilities" => caps} when is_map(caps) and map_size(caps) > 0 -> true
+        _ -> false
+      end
+
+    pending_count =
+      case Map.get(Map.get(state, :lease_pending_retirement, %{}), task_id) do
+        %{members: members} when is_map(members) -> map_size(members)
+        _ -> 0
+      end
+
+    recovery_pending? = Map.has_key?(Map.get(state, :recovery_pending, %{}), task_id)
+
+    if TaskControlLease.retain_marker?(active?, pending_count, recovery_pending?) do
+      state
+    else
+      begin_recovery_op(state, :marker_delete, task_id, nil, nil)
+    end
+  end
+
+  defp maybe_schedule_marker_delete(state, _), do: state
+
+  defp validate_task_control_recovery_facade!(mod) when is_atom(mod), do: mod
+
+  defp validate_task_control_recovery_facade!(invalid) do
+    raise ArgumentError,
+          "task_control_recovery_facade must be a module, got: #{inspect(invalid)}"
+  end
+
+  defp validate_task_id_generator!(nil), do: nil
+  defp validate_task_id_generator!(fun) when is_function(fun, 0), do: fun
+
+  defp validate_task_id_generator!(invalid) do
+    raise ArgumentError,
+          "task_id_generator must be nil or an arity-0 function, got: #{inspect(invalid)}"
+  end
+
+  defp cancel_timer_safe(nil), do: :ok
+
+  defp cancel_timer_safe(timer_ref) when is_reference(timer_ref) do
+    _ = Process.cancel_timer(timer_ref)
+    # Non-blocking flush of an already-delivered timeout for this exact message
+    # is handled by status gates on the attempt; cancel is best-effort.
+    :ok
+  end
+
+  defp cancel_timer_safe(_), do: :ok
 
   defp take_approval_cleanup_descriptor(record) do
     case Map.get(record, :approval_cleanup_descriptor) do
@@ -2395,9 +4999,12 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
         |> Map.put(:adoption_destination_ref, operation.request["destination_ref"])
         |> Map.put(:adoption_last_error, nil)
         |> Map.put(:updated_at, DateTime.utc_now())
-        |> revoke_adoption_capability()
 
-      {{:ok, updated_record.result}, put_in(state.tasks[task_id], updated_record)}
+      {updated_record, retire_spec} = plan_lease_retire(updated_record, :after_adoption)
+      state = put_in(state.tasks[task_id], updated_record)
+      state = accept_retire_spec(state, retire_spec)
+
+      {{:ok, updated_record.result}, state}
     else
       :error ->
         adoption_commit_error(state, task_id, operation, :task_adoption_state_changed)
@@ -2593,120 +5200,8 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
 
   defp default_cancel_turn(_agent_id, _task_id), do: :ok
 
-  defp revoke_approval_answer_capability(%{approval_answer_cap_id: cap_id} = record)
-       when is_binary(cap_id) and cap_id != "" do
-    record
-    |> revoke_approval_answer_capability(cap_id)
-    |> Map.put(:approval_answer_cap_id, nil)
-  end
-
-  defp revoke_approval_answer_capability(record), do: record
-
-  defp revoke_task_capabilities(record) do
-    record
-    |> revoke_approval_answer_capability()
-    |> revoke_steer_capability()
-    |> revoke_adoption_capability()
-  end
-
-  defp revoke_non_adoption_task_capabilities(record) do
-    record
-    |> revoke_approval_answer_capability()
-    |> revoke_steer_capability()
-  end
-
-  defp revoke_approval_answer_capability(%{approval_answer_revoke: revoke_fun} = record, cap_id)
-       when is_function(revoke_fun, 1) do
-    revoke_fun.(cap_id)
-    record
-  rescue
-    _ -> record
-  catch
-    :exit, _ -> record
-  end
-
-  defp revoke_approval_answer_capability(
-         %{approval_answer_security_module: module} = record,
-         cap_id
-       ) do
-    if is_atom(module) and Code.ensure_loaded?(module) and function_exported?(module, :revoke, 1) do
-      apply(module, :revoke, [cap_id])
-    else
-      :ok
-    end
-
-    record
-  rescue
-    _ -> record
-  catch
-    :exit, _ -> record
-  end
-
-  defp revoke_steer_capability(%{steer_cap_id: cap_id} = record)
-       when is_binary(cap_id) and cap_id != "" do
-    record
-    |> revoke_steer_capability(cap_id)
-    |> Map.put(:steer_cap_id, nil)
-  end
-
-  defp revoke_steer_capability(record), do: record
-
-  defp revoke_adoption_capability(%{adoption_cap_id: cap_id} = record)
-       when is_binary(cap_id) and cap_id != "" do
-    record
-    |> revoke_adoption_capability(cap_id)
-    |> Map.put(:adoption_cap_id, nil)
-  end
-
-  defp revoke_adoption_capability(record), do: record
-
-  defp revoke_steer_capability(%{steer_capability_revoke: revoke_fun} = record, cap_id)
-       when is_function(revoke_fun, 1) do
-    revoke_fun.(cap_id)
-    record
-  rescue
-    _ -> record
-  catch
-    :exit, _ -> record
-  end
-
-  defp revoke_steer_capability(%{steer_security_module: module} = record, cap_id) do
-    if is_atom(module) and Code.ensure_loaded?(module) and function_exported?(module, :revoke, 1) do
-      apply(module, :revoke, [cap_id])
-    else
-      :ok
-    end
-
-    record
-  rescue
-    _ -> record
-  catch
-    :exit, _ -> record
-  end
-
-  defp revoke_adoption_capability(%{adoption_capability_revoke: revoke_fun} = record, cap_id)
-       when is_function(revoke_fun, 1) do
-    revoke_fun.(cap_id)
-    record
-  rescue
-    _ -> record
-  catch
-    :exit, _ -> record
-  end
-
-  defp revoke_adoption_capability(%{adoption_security_module: module} = record, cap_id) do
-    if is_atom(module) and Code.ensure_loaded?(module) and function_exported?(module, :revoke, 1) do
-      apply(module, :revoke, [cap_id])
-    else
-      :ok
-    end
-
-    record
-  rescue
-    _ -> record
-  catch
-    :exit, _ -> record
-  end
+  # Legacy sync revoke helpers removed: hot-upgrade records with per-kind cap
+  # fields are retired through the reconciled pending-bucket path only.
 
   defp project_status(%{state: :running, context_mode: :json_clean} = record, state) do
     status = status_view(record)
@@ -3017,13 +5512,14 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
       |> Enum.take(excess)
       |> Enum.map(fn {id, _record} -> id end)
 
-    Enum.each(prune_ids, fn id ->
-      tasks
-      |> Map.fetch!(id)
-      |> revoke_task_capabilities()
+    # Plan all retires into store-owned pending buckets (authority survives
+    # task-record drop), publish by dropping records, then admit reconciliation.
+    Enum.reduce(prune_ids, state, fn id, st ->
+      record = Map.fetch!(st.tasks, id)
+      {_record, spec} = plan_lease_retire(record, :all)
+      st = update_in(st.tasks, &Map.delete(&1, id))
+      accept_retire_spec(st, spec)
     end)
-
-    update_in(state.tasks, &Map.drop(&1, prune_ids))
   end
 
   defp task_id(opts) do
@@ -3058,12 +5554,24 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
           end
 
         :full_opts ->
-          # Keep the trusted cleanup descriptor on the store record only; never
-          # hand it to the runner (no payload/runner authority over cleanup).
+          # Keep trusted lease/cleanup selectors on the store record only; never
+          # hand them to the runner (no payload/runner authority over cleanup).
           runner_context =
             opts
             |> Keyword.put(:task_id, task_id)
             |> Keyword.delete(:approval_cleanup_descriptor)
+            |> Keyword.delete(:task_control_lease)
+            |> Keyword.delete(:task_control_security_module)
+            |> Keyword.delete(:task_control_revoke)
+            |> Keyword.delete(:approval_answer_cap_id)
+            |> Keyword.delete(:approval_answer_security_module)
+            |> Keyword.delete(:approval_answer_revoke)
+            |> Keyword.delete(:steer_cap_id)
+            |> Keyword.delete(:steer_security_module)
+            |> Keyword.delete(:steer_capability_revoke)
+            |> Keyword.delete(:adoption_cap_id)
+            |> Keyword.delete(:adoption_security_module)
+            |> Keyword.delete(:adoption_capability_revoke)
 
           {:ok, runner, :full_opts, task, runner_context}
       end

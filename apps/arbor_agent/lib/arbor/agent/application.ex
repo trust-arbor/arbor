@@ -45,6 +45,20 @@ defmodule Arbor.Agent.Application do
           Arbor.Agent.Fitness,
           Arbor.Agent.SessionManager,
           {Task.Supervisor, name: Arbor.Agent.Orchestration.TaskSupervisor},
+          # Durable task-control recovery markers (capability-ID-free). Must start
+          # before TaskStore so startup replay can list/ack through the facade.
+          # write_mode: :sync + ack_mode: :backend only — never cache-only.
+          # recovery_backend!/0 fails closed when no durable backend is configured.
+          Supervisor.child_spec(
+            {Arbor.Persistence.BufferedStore,
+             name: :arbor_agent_task_control_recovery,
+             backend: recovery_backend!(),
+             backend_opts: [repo: Arbor.Persistence.Repo],
+             write_mode: :sync,
+             ack_mode: :backend,
+             collection: "task_control_recovery"},
+            id: :arbor_agent_task_control_recovery
+          ),
           Arbor.Agent.Orchestration.TaskStore,
           # Dynamic supervisors (Phase 3: three-loop architecture)
           Arbor.Agent.ActionCycleSupervisor,
@@ -119,4 +133,22 @@ defmodule Arbor.Agent.Application do
 
   defp profile_ack_mode(nil), do: :cache
   defp profile_ack_mode(_backend), do: :backend
+
+  # Recovery markers protect authority: never start with cache-only/unbacked storage.
+  defp recovery_backend! do
+    backend =
+      Application.get_env(
+        :arbor_agent,
+        :task_control_recovery_backend,
+        profile_backend()
+      )
+
+    if is_nil(backend) do
+      raise ArgumentError,
+            "task-control recovery store requires a durable backend " <>
+              "(ack_mode: :backend); cache-only/unbacked storage is forbidden"
+    end
+
+    backend
+  end
 end

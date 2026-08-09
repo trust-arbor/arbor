@@ -219,10 +219,19 @@ defmodule Arbor.Gateway.MCP.Handler do
         name: "arbor_list_pending_approvals",
         description:
           "List pending Arbor approval requests visible to the authenticated caller. " <>
-            "Supports optional filtering by agent_id, principal_id, and resource_uri prefix.",
+            "Supports optional filtering by exact task_id, agent_id, principal_id, and " <>
+            "resource_uri prefix. An exact task_id filter uses task-scoped approval-read " <>
+            "when present (with global approval-read as compatibility fallback). " <>
+            "Omitting task_id requires global approval-read authority.",
         inputSchema: %{
           type: "object",
           properties: %{
+            task_id: %{
+              type: "string",
+              description:
+                "Optional: exact task id filter. Returns only approvals for that task; " <>
+                  "task-scoped approval-read is sufficient when this filter is supplied."
+            },
             agent_id: %{
               type: "string",
               description: "Optional: filter to approvals for a specific gated agent"
@@ -265,7 +274,9 @@ defmodule Arbor.Gateway.MCP.Handler do
       %{
         name: "arbor_dispatch_task",
         description:
-          "Dispatch an asynchronous task to an Arbor agent. Returns immediately with a task_id. " <>
+          "Dispatch an asynchronous task to an Arbor agent. Returns immediately with a " <>
+            "server-owned task_id (callers do not supply task_id). Successful dispatch mints " <>
+            "an exact-task control lease for the authenticated caller. " <>
             "Accepts ordinary string prompts and generic object tasks. " <>
             "Stable structured coding path: " <>
             ~s({"kind":"coding_change","plan":{...}}) <>
@@ -761,6 +772,7 @@ defmodule Arbor.Gateway.MCP.Handler do
   defp approval_list_opts(args, caller_id) do
     [
       caller_id: caller_id,
+      task_id: optional_string_arg(args, "task_id"),
       agent_id: optional_string_arg(args, "agent_id"),
       principal_id: optional_string_arg(args, "principal_id"),
       resource_uri: optional_string_arg(args, "resource_uri")

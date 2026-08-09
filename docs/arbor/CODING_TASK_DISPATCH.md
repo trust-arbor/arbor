@@ -133,29 +133,82 @@ manifest = File.read!("<task_dir>/coding-compile-manifest.json") |> Jason.decode
 
 Grant them with `Arbor.Security.grant(principal: principal_id, resource: uri)`.
 
-### 3. Observation authority
+### 3. Automatic exact-task control lease (observation + control)
 
-`arbor://agent/task/read` with `:read` is required by `arbor_task_status` and
-`arbor_task_result`. `arbor_list_pending_approvals` instead requires
-`arbor://approval/read` with `:read`. Both are **separate from dispatch
-authority**. A principal that can dispatch but lacks task-read gets
-`{:unauthorized, :task_read_required}` from task reads; one that lacks
-approval-read cannot inventory visible approvals.
+Successful public `arbor_dispatch_task` / `Orchestration.dispatch/3` uses a
+**collision-safe, server-owned** sequence:
 
-Grant both observation resources alongside dispatch authority. There is no
-alternative task-result path: `arbor_status` has no task component.
+1. **Reject** any caller-selected `task_id` (public dispatch never accepts one).
+2. **Reserve** a server-generated unguessable task identity in TaskStore
+   (opaque owner-bound reservation token; not exposed on MCP).
+3. **Commit** a durable capability-ID-free recovery marker via the
+   `Arbor.Persistence` facade with backend acknowledgement **before** any
+   grant (fail closed when durability is unavailable).
+4. **Grant** the closed six-member **task-control lease** (least-risk order,
+   `approval_answer` last).
+5. **Activate** the reserved task with the token and closed lease scalar.
 
-Answering an approval requires `:execute` authority on one URI accepted by the
-closed scope ladder: `arbor://approval/answer/task/<task_id>`,
-`arbor://approval/answer/<principal_id>`,
-`arbor://approval/answer/<agent_id>`, or the global
-`arbor://approval/answer`. Ordinary coding dispatch mints the task-scoped form
-for its authenticated instantiator and settles it with the task; broader forms
-should not be granted merely to operate one delegated task.
+Operators do not select capability ids, cleanup code, reservation tokens, or
+lease internals; those never appear in MCP responses, status projections, or
+audit output. On TaskStore restart, durable markers are replayed through
+store-owned workers calling `Arbor.Security.revoke_by_task/1` (not TTL-only
+recovery). Marker delete may leave a stale marker (over-revoke OK) but must
+never forget live authority.
 
-Related per-operation capabilities, only needed for those operations:
-`arbor://agent/task/cancel`, `arbor://agent/task/steer`,
-`arbor://agent/task/adopt` (the adopt grant is minted per task).
+| Kind | Exact URI | TTL |
+|---|---|---|
+| task read | `arbor://agent/task/read/<task_id>` | 30 days |
+| approval read | `arbor://approval/read/task/<task_id>` | 24 hours |
+| steer | `arbor://agent/task/steer/<task_id>` | 24 hours |
+| cancel | `arbor://agent/task/cancel/<task_id>` | 24 hours |
+| adopt | `arbor://agent/task/adopt/<task_id>` | 30 days |
+| approval answer | `arbor://approval/answer/task/<task_id>` | 24 hours |
+
+Every lease capability is exact-task in both its URI and `Capability.task_id`
+scope, non-delegable (`delegation_depth: 0`), and unusable for sibling or
+prefix-like task ids. Global forms (`arbor://agent/task/read`,
+`arbor://approval/read`, agent-scoped ladders, etc.) remain as operator
+break-glass fallbacks on the existing exact → agent → global authorization
+ladders; they are **not** required for ordinary delegated operation of a task
+you dispatched.
+
+`arbor_list_pending_approvals` without a filter still requires global
+`arbor://approval/read`. With an exact `task_id` filter, task-scoped
+approval-read is tried first, then global compatibility; results are equality-
+filtered so unrelated approvals are never disclosed.
+
+Lifecycle (TaskStore-owned reconciled retirement; non-blocking at terminal
+publication):
+
+- **running** — all six retained
+- **terminal** (success/fail/cancel, including runner owner death) — retires
+  approval_read, approval_answer, steer, cancel; **task_read always survives**;
+  adopt retained only for successful adoptable results
+- **adoption settled** — adopt revoked
+- **prune / final disposal** — remaining members (including task_read) revoked
+
+Retirement is an explicit TaskStore reconciliation: phase members are moved into
+an internal pending-retirement queue **before** the active lease is reduced
+(recovery intent already durable from the pre-mint marker), then revoked under
+store-owned attempt references with hard admission/worker deadlines, O(1)
+task/monitor indexes, and bounded retry. Authority ids are never forgotten
+merely because supervisor admission, a worker, or a revoke call failed;
+exhausted work remains internally retained and retryable without exposing
+capability ids. Exhausted retirement emits telemetry
+`[:arbor, :agent, :task_control_lease, :retire_exhausted]` with measurements
+`remaining_count` / `attempt_index` and redacted metadata
+(`task_id`, `phase`, `generation`, `retrigger_count`, `last_error_class`) —
+no capability ids; exhausted means retry budget spent while authority is
+retained, not silent discard and not TTL-only recovery. Recovery obligation
+capacity is enforced at **reserve** only so terminal retirement never drops
+member ids. Terminal status/result publication does not wait on revoke I/O.
+Operators never select capability ids, cleanup code, or lease internals; those
+never appear in MCP responses, status projections, or audit output.
+
+Approval-answer authorization uses exact-task scope first, then agent-scoped,
+principal-scoped, and global compatibility break-glass.
+
+There is no alternative task-result path: `arbor_status` has no task component.
 
 ### If a dispatch fails before you can read it
 

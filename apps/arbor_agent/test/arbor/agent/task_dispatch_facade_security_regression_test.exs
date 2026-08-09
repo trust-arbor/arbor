@@ -36,6 +36,7 @@ defmodule Arbor.Agent.TaskDispatchFacadeSecurityRegressionTest do
     def reset do
       ensure!()
       :ets.insert(@table, {:dispatches, []})
+      :ets.insert(@table, {:reservations, %{}})
       :ok
     end
 
@@ -47,6 +48,69 @@ defmodule Arbor.Agent.TaskDispatchFacadeSecurityRegressionTest do
         _ -> []
       end
     end
+
+    def reserve(_opts \\ []) do
+      ensure!()
+      task_id = "task_dispatch_" <> Integer.to_string(System.unique_integer([:positive]))
+      token = "tok_#{System.unique_integer([:positive])}"
+      reservations = reservation_map()
+
+      :ets.insert(
+        @table,
+        {:reservations, Map.put(reservations, task_id, %{token: token, marker_written?: false})}
+      )
+
+      {:ok, %{task_id: task_id, reservation_token: token}}
+    end
+
+    def commit_recovery_marker(task_id, token, _opts \\ []) do
+      ensure!()
+      reservations = reservation_map()
+
+      case Map.get(reservations, task_id) do
+        %{token: ^token} = reservation ->
+          :ets.insert(
+            @table,
+            {:reservations,
+             Map.put(reservations, task_id, %{reservation | marker_written?: true})}
+          )
+
+          :ok
+
+        _ ->
+          {:error, :invalid_reservation_token}
+      end
+    end
+
+    def activate(agent_id, task, task_id, token, opts) do
+      ensure!()
+      reservations = reservation_map()
+
+      case Map.get(reservations, task_id) do
+        %{token: ^token, marker_written?: true} ->
+          :ets.insert(@table, {:reservations, Map.delete(reservations, task_id)})
+          dispatch(agent_id, task, Keyword.put(opts, :task_id, task_id))
+
+        _ ->
+          {:error, :invalid_reservation_token}
+      end
+    end
+
+    def release(task_id, token, _opts \\ []) do
+      ensure!()
+      reservations = reservation_map()
+
+      case Map.get(reservations, task_id) do
+        %{token: ^token} ->
+          :ets.insert(@table, {:reservations, Map.delete(reservations, task_id)})
+          :ok
+
+        _ ->
+          {:error, :invalid_reservation_token}
+      end
+    end
+
+    def request_reconcile(_task_id, _opts \\ []), do: :ok
 
     def dispatch(agent_id, task, opts) do
       ensure!()
@@ -64,6 +128,13 @@ defmodule Arbor.Agent.TaskDispatchFacadeSecurityRegressionTest do
         end
 
       {:ok, task_id}
+    end
+
+    defp reservation_map do
+      case :ets.lookup(@table, :reservations) do
+        [{:reservations, reservations}] -> reservations
+        _ -> %{}
+      end
     end
   end
 

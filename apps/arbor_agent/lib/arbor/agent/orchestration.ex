@@ -9,11 +9,34 @@ defmodule Arbor.Agent.Orchestration do
 
   The module does not own approval state. It normalizes, filters, and answers
   requests held by those systems.
+
+  ## Task dispatch and exact-task control lease
+
+  Public `dispatch/3` **never accepts a caller-selected `task_id`** (including
+  under `authorize?: false`). TaskStore generates unguessable server-owned ids
+  via `reserve/1`, commits a durable capability-ID-free recovery marker before
+  minting, grants the closed six-member exact-task lease (least-risk order,
+  `approval_answer` last), then `activate/5`s the reserved identity.
+
+  Recovery markers and `Security.revoke_by_task/1` run through TaskStore-owned
+  workers (no Persistence/Security I/O in GenServer callbacks). Grant
+  exceptions/exits/throws are mint-outcome uncertainty: reverse-revoke known
+  ids, request task-scope reconcile, and never report ordinary `grant_failed`.
+  Capability ids never appear in public/MCP/audit projections.
+
+  Deterministic task ids for tests are only available via TaskStore start pin
+  `:task_id_generator` — not through authenticated public dispatch options.
   """
 
   require Logger
 
-  alias Arbor.Agent.Orchestration.{ApprovalInventoryProjection, PendingApproval, TaskArtifacts}
+  alias Arbor.Agent.Orchestration.{
+    ApprovalInventoryProjection,
+    PendingApproval,
+    TaskArtifacts,
+    TaskControlLease
+  }
+
   alias Arbor.Contracts.Coding.{TaskOutcome, TaskTerminalEnvelope}
   alias Arbor.Contracts.Security.CapabilityUri
 
@@ -33,10 +56,6 @@ defmodule Arbor.Agent.Orchestration do
   @task_id_pattern ~r/\A[A-Za-z0-9][A-Za-z0-9._-]*\z/
   @max_destination_ref_bytes 256
   @interaction_request_prefix "irq"
-  @approval_answer_cap_ttl_seconds 86_400
-  # Integration handoff commonly outlives the interactive approval window.
-  # Lifecycle settlement still revokes this exact task-scoped authority early.
-  @task_adoption_cap_ttl_seconds 30 * 86_400
   @task_cancel_cleanup_note "Pending approval closed because its orchestration task was cancelled"
   @task_terminal_cleanup_note "Pending approval closed because its orchestration task terminated"
 
@@ -46,21 +65,25 @@ defmodule Arbor.Agent.Orchestration do
   @doc """
   Dispatch an agent task asynchronously.
 
-  Returns immediately with a stable `task_id`; the background task can be
-  observed with `task_status/2` and `task_result/2`.
+  Returns immediately with a stable server-owned `task_id`; the background task
+  can be observed with `task_status/2` and `task_result/2`.
+
+  Caller-selected `:task_id` / `\"task_id\"` is **always rejected** (no test
+  bypass). Identity is reserved in TaskStore before any capability grant; a
+  durable recovery marker is backend-acked before minting.
   """
   @spec dispatch(String.t(), String.t() | map(), keyword() | map()) ::
           {:ok, String.t()} | {:error, term()}
   def dispatch(agent_id, task, opts \\ []) do
-    with {:ok, agent_id} <- normalize_agent_id(agent_id),
+    with :ok <- reject_caller_task_id(opts),
+         {:ok, agent_id} <- normalize_agent_id(agent_id),
          {:ok, task} <- normalize_task(task),
-         {:ok, task_id} <- normalize_or_generate_task_id(opts),
          {:ok, caller_id} <- caller_id(opts),
          :ok <- authorize_dispatch(opts, caller_id, agent_id) do
       # Proof may reach only Security.authorize/4. Strip both key forms before
       # grants, TaskStore, cleanup descriptors, audit, or retained state.
       safe_opts = strip_session_tokens(opts)
-      dispatch_with_task_capabilities(agent_id, task, task_id, caller_id, safe_opts)
+      dispatch_with_reservation_and_lease(agent_id, task, caller_id, safe_opts)
     end
   end
 
@@ -75,6 +98,7 @@ defmodule Arbor.Agent.Orchestration do
   def task_status(task_id, opts \\ []) do
     with {:ok, task_id} <- normalize_task_id(task_id),
          {:ok, status} <- task_status_unchecked(task_id, opts),
+         :ok <- require_exact_task_status(task_id, status),
          {:ok, caller_id} <- caller_id(opts),
          :ok <- authorize_task_read(opts, caller_id, status) do
       {:ok, enrich_waiting_approval(status, opts)}
@@ -107,6 +131,7 @@ defmodule Arbor.Agent.Orchestration do
   def task_result(task_id, opts \\ []) do
     with {:ok, task_id} <- normalize_task_id(task_id),
          {:ok, status} <- task_status_unchecked(task_id, opts),
+         :ok <- require_exact_task_status(task_id, status),
          {:ok, caller_id} <- caller_id(opts),
          :ok <- authorize_task_read(opts, caller_id, status) do
       case enrich_waiting_approval(status, opts) do
@@ -129,6 +154,7 @@ defmodule Arbor.Agent.Orchestration do
   def cancel_task(task_id, opts \\ []) do
     with {:ok, task_id} <- normalize_task_id(task_id),
          {:ok, status} <- task_status_unchecked(task_id, opts),
+         :ok <- require_exact_task_status(task_id, status),
          {:ok, caller_id} <- caller_id(opts),
          :ok <- authorize_task_cancel(opts, caller_id, status) do
       cancel_result =
@@ -203,6 +229,7 @@ defmodule Arbor.Agent.Orchestration do
   def steer_task(task_id, message, opts \\ []) do
     with {:ok, task_id} <- normalize_task_id(task_id),
          {:ok, status} <- task_status_unchecked(task_id, opts),
+         :ok <- require_exact_task_status(task_id, status),
          {:ok, caller_id} <- caller_id(opts),
          :ok <- authorize_task_steer(opts, caller_id, status) do
       steer_opts =
@@ -236,6 +263,7 @@ defmodule Arbor.Agent.Orchestration do
   def adopt_task_change(task_id, destination_ref, opts \\ []) do
     with {:ok, task_id} <- normalize_task_id(task_id),
          {:ok, status} <- task_status_unchecked(task_id, opts),
+         :ok <- require_exact_task_status(task_id, status),
          {:ok, caller_id} <- caller_id(opts),
          :ok <- authorize_task_adopt(opts, caller_id, status),
          {:ok, destination_ref} <- normalize_destination_ref(destination_ref),
@@ -263,9 +291,13 @@ defmodule Arbor.Agent.Orchestration do
   Options:
 
     * `:caller_id` - authenticated caller for the read capability check
+    * `:task_id` - exact task filter; task-scoped approval-read is tried first
     * `:agent_id` - filter by the gated agent
     * `:principal_id` - filter by gated principal or approver principal
     * `:resource_uri` - segment-aware resource URI prefix filter
+
+  Without `:task_id`, global `arbor://approval/read` is required. With an exact
+  task filter, task-scoped read is tried first, then global compatibility.
 
   Test and trusted in-process callers may pass `authorize?: false`, but external
   surfaces must keep authorization enabled.
@@ -273,7 +305,8 @@ defmodule Arbor.Agent.Orchestration do
   @spec list_pending_approvals(keyword() | map()) ::
           {:ok, [PendingApproval.t()]} | {:error, term()}
   def list_pending_approvals(opts \\ []) do
-    with :ok <- authorize(opts, @approval_read_uri, :read) do
+    with {:ok, task_filter} <- optional_list_task_id_filter(opts),
+         :ok <- authorize_approval_list(opts, task_filter) do
       {:ok, list_pending_approvals_unchecked(opts)}
     end
   end
@@ -291,7 +324,7 @@ defmodule Arbor.Agent.Orchestration do
   @spec pending_approval_inventory(keyword() | map()) :: {:ok, map()} | {:error, term()}
   def pending_approval_inventory(opts \\ []) do
     with {:ok, normalized} <- normalize_approval_inventory_options(opts),
-         :ok <- authorize(opts, @approval_read_uri, :read),
+         :ok <- authorize_approval_list(opts, normalized.filters.task_id),
          {:ok, entries, evidence} <- approval_inventory_entries(opts) do
       {:ok,
        ApprovalInventoryProjection.from_entries(
@@ -324,13 +357,6 @@ defmodule Arbor.Agent.Orchestration do
     end
   end
 
-  defp dispatch_task(agent_id, task, opts) do
-    opts
-    |> task_store_module()
-    |> apply_if_exported(:dispatch, [agent_id, task, task_store_opts(opts)])
-    |> normalize_task_dispatch_result()
-  end
-
   defp task_status_unchecked(task_id, opts) do
     opts
     |> task_store_module()
@@ -347,6 +373,7 @@ defmodule Arbor.Agent.Orchestration do
 
   defp authorize_task_inventory(%{caller_id: caller_id, filters: %{task_id: task_id}}) do
     with {:ok, status} <- task_status_unchecked(task_id, []),
+         :ok <- require_exact_task_status(task_id, status),
          :ok <- authorize_task_read([], caller_id, status) do
       :ok
     end
@@ -656,78 +683,76 @@ defmodule Arbor.Agent.Orchestration do
     end
   end
 
-  defp authorize_task_read(opts, caller_id, status) do
-    if opt(opts, :authorize?, true) == false do
-      :ok
-    else
-      status
-      |> task_read_authorization_uris()
-      |> Enum.find_value(fn resource_uri ->
-        case authorize_caller(opts, caller_id, resource_uri, :read) do
-          :ok -> :ok
-          _ -> nil
-        end
-      end)
-      |> case do
-        :ok -> :ok
-        nil -> {:error, {:unauthorized, :task_read_required}}
-      end
+  defp require_exact_task_status(requested_id, status) when is_map(status) do
+    case Map.get(status, :task_id) || Map.get(status, "task_id") do
+      ^requested_id -> :ok
+      _other -> {:error, :task_id_mismatch}
     end
+  end
+
+  defp require_exact_task_status(_requested_id, _status), do: {:error, :task_id_mismatch}
+
+  defp authorize_task_read(opts, caller_id, status) do
+    authorize_task_ladder(
+      opts,
+      caller_id,
+      status,
+      :read,
+      &task_read_authorization_uris/1,
+      :task_read_required
+    )
   end
 
   defp authorize_task_cancel(opts, caller_id, status) do
-    if opt(opts, :authorize?, true) == false do
-      :ok
-    else
-      status
-      |> task_cancel_authorization_uris()
-      |> Enum.find_value(fn resource_uri ->
-        case authorize_caller(opts, caller_id, resource_uri, :execute) do
-          :ok -> :ok
-          _ -> nil
-        end
-      end)
-      |> case do
-        :ok -> :ok
-        nil -> {:error, {:unauthorized, :task_cancel_required}}
-      end
-    end
+    authorize_task_ladder(
+      opts,
+      caller_id,
+      status,
+      :execute,
+      &task_cancel_authorization_uris/1,
+      :task_cancel_required
+    )
   end
 
   defp authorize_task_steer(opts, caller_id, status) do
-    if opt(opts, :authorize?, true) == false do
-      :ok
-    else
-      status
-      |> task_steer_authorization_uris()
-      |> Enum.find_value(fn resource_uri ->
-        case authorize_caller(opts, caller_id, resource_uri, :execute) do
-          :ok -> :ok
-          _ -> nil
-        end
-      end)
-      |> case do
-        :ok -> :ok
-        nil -> {:error, {:unauthorized, :task_steer_required}}
-      end
-    end
+    authorize_task_ladder(
+      opts,
+      caller_id,
+      status,
+      :execute,
+      &task_steer_authorization_uris/1,
+      :task_steer_required
+    )
   end
 
   defp authorize_task_adopt(opts, caller_id, status) do
+    authorize_task_ladder(
+      opts,
+      caller_id,
+      status,
+      :execute,
+      &task_adopt_authorization_uris/1,
+      :task_adoption_required
+    )
+  end
+
+  defp authorize_task_ladder(opts, caller_id, status, action, uris_fun, unauthorized_reason) do
     if opt(opts, :authorize?, true) == false do
       :ok
     else
+      trusted_task_id = Map.get(status, :task_id) || Map.get(status, "task_id")
+
       status
-      |> task_adopt_authorization_uris()
+      |> uris_fun.()
       |> Enum.find_value(fn resource_uri ->
-        case authorize_caller(opts, caller_id, resource_uri, :execute) do
+        case authorize_caller(opts, caller_id, resource_uri, action, trusted_task_id) do
           :ok -> :ok
           _ -> nil
         end
       end)
       |> case do
         :ok -> :ok
-        nil -> {:error, {:unauthorized, :task_adoption_required}}
+        nil -> {:error, {:unauthorized, unauthorized_reason}}
       end
     end
   end
@@ -777,60 +802,44 @@ defmodule Arbor.Agent.Orchestration do
 
   defp scoped_dispatch_uri(_), do: nil
 
-  defp scoped_task_read_uri(id) when is_binary(id) and id != "",
-    do: "#{@task_read_uri}/#{id}"
+  # Exact-task URIs go through TaskControlLease so grant specs and authorize
+  # ladders cannot diverge. Agent-scoped ladder steps reuse the same grammar
+  # (agent ids are single-segment) via the same constructors when valid.
+  defp scoped_task_read_uri(id), do: lease_exact_uri(:task_read, id)
+  defp scoped_task_cancel_uri(id), do: lease_exact_uri(:task_cancel, id)
+  defp scoped_task_steer_uri(id), do: lease_exact_uri(:task_steer, id)
+  defp scoped_task_adopt_uri(id), do: lease_exact_uri(:task_adopt, id)
 
-  defp scoped_task_read_uri(_), do: nil
-
-  defp scoped_task_cancel_uri(id) when is_binary(id) and id != "",
-    do: "#{@task_cancel_uri}/#{id}"
-
-  defp scoped_task_cancel_uri(_), do: nil
-
-  defp scoped_task_steer_uri(id) when is_binary(id) and id != "",
-    do: "#{@task_steer_uri}/#{id}"
-
-  defp scoped_task_steer_uri(_), do: nil
-
-  defp scoped_task_adopt_uri(id) when is_binary(id) and id != "",
-    do: "#{@task_adopt_uri}/#{id}"
-
-  defp scoped_task_adopt_uri(_), do: nil
-
-  defp normalize_or_generate_task_id(opts) do
-    case opt(opts, :task_id) do
-      id when is_binary(id) -> normalize_task_id(id)
-      nil -> {:ok, Arbor.Identifiers.generate_id("task_")}
-      _ -> {:error, :invalid_task_id}
+  defp lease_exact_uri(kind, id) when is_binary(id) and id != "" do
+    case TaskControlLease.uri(kind, id) do
+      {:ok, uri} -> uri
+      _ -> nil
     end
   end
 
-  defp task_scoped_opts(
-         opts,
-         task_id,
-         agent_id,
-         caller_id,
-         approval_answer_cap_id,
-         steer_cap_id,
-         adoption_cap_id
-       ) do
-    opts
-    |> task_store_opts()
-    |> Keyword.put(:task_id, task_id)
-    |> Keyword.put(:approval_answer_cap_id, approval_answer_cap_id)
-    |> Keyword.put(:approval_answer_security_module, security_module(opts))
-    |> Keyword.put(:steer_cap_id, steer_cap_id)
-    |> Keyword.put(:steer_security_module, security_module(opts))
-    |> Keyword.put(:adoption_cap_id, adoption_cap_id)
-    |> Keyword.put(:adoption_security_module, security_module(opts))
-    |> Keyword.put(
-      :approval_cleanup_descriptor,
-      approval_cleanup_descriptor(agent_id, caller_id, opts)
-    )
+  defp lease_exact_uri(_kind, _id), do: nil
+
+  defp reject_caller_task_id(opts) when is_list(opts) do
+    if Keyword.has_key?(opts, :task_id) or List.keymember?(opts, "task_id", 0) do
+      {:error, :caller_selected_task_id_rejected}
+    else
+      :ok
+    end
   end
 
+  defp reject_caller_task_id(opts) when is_map(opts) do
+    if Map.has_key?(opts, :task_id) or Map.has_key?(opts, "task_id") do
+      {:error, :caller_selected_task_id_rejected}
+    else
+      :ok
+    end
+  end
+
+  defp reject_caller_task_id(_), do: :ok
+
   # Closed scalar data only — never MFA/module/function/fun/PID selection.
-  # TaskStore pins cleanup MFA, backend modules, and cleanup supervisor at init.
+  # TaskStore pins cleanup MFA, backend modules, lease revoke transport, and
+  # cleanup supervisor at init.
   defp approval_cleanup_descriptor(agent_id, caller_id, opts) do
     %{caller_id: caller_id, principal_id: agent_id}
     |> maybe_put_cleanup_trace_id(opt(opts, :trace_id))
@@ -843,196 +852,393 @@ defmodule Arbor.Agent.Orchestration do
 
   defp maybe_put_cleanup_trace_id(descriptor, _trace_id), do: descriptor
 
-  defp dispatch_with_task_capabilities(agent_id, task, task_id, caller_id, opts) do
-    case grant_task_approval_answer(caller_id, task_id, opts) do
-      {:ok, approval_answer_cap_id} ->
-        case grant_task_steer(caller_id, task_id, opts) do
-          {:ok, steer_cap_id} ->
-            case grant_task_adopt(caller_id, task_id, opts) do
-              {:ok, adoption_cap_id} ->
-                task_opts =
-                  task_scoped_opts(
-                    opts,
-                    task_id,
-                    agent_id,
-                    caller_id,
-                    approval_answer_cap_id,
-                    steer_cap_id,
-                    adoption_cap_id
+  # reserve → durable marker ack → grant → activate (token-bound).
+  defp dispatch_with_reservation_and_lease(agent_id, task, caller_id, opts) do
+    store = task_store_module(opts)
+    store_opts = task_store_opts(opts)
+
+    with {:ok, %{task_id: task_id, reservation_token: token}} <-
+           reserve_task_identity(store, store_opts),
+         :ok <- commit_recovery_marker(store, task_id, token, store_opts) do
+      case grant_task_control_lease(caller_id, task_id, opts) do
+        {:ok, lease, granted} ->
+          activate_opts =
+            store_opts
+            |> Keyword.put(:task_control_lease, lease)
+            |> Keyword.put(
+              :approval_cleanup_descriptor,
+              approval_cleanup_descriptor(agent_id, caller_id, opts)
+            )
+
+          case activate_reserved_task(store, agent_id, task, task_id, token, activate_opts) do
+            {:ok, ^task_id} ->
+              case record_dispatch_result(task_id, agent_id, task, caller_id, opts) do
+                :ok ->
+                  {:ok, task_id}
+
+                {:error, reason} ->
+                  Logger.warning(
+                    "Orchestration task dispatch audit failed after admission " <>
+                      "task_id=#{bounded_inspect(task_id)} " <>
+                      "reason=#{bounded_inspect(reason)}"
                   )
 
-                case dispatch_task(agent_id, task, task_opts) do
-                  {:ok, ^task_id} ->
-                    with :ok <- record_dispatch(task_id, agent_id, task, caller_id, opts) do
-                      {:ok, task_id}
-                    end
+                  {:error,
+                   {:task_control_lease_dispatch_admitted_audit_outcome_unknown,
+                    %{
+                      task_id: task_id,
+                      uncertainty: true,
+                      audit_reason: sanitize_public_reason(reason)
+                    }}}
+              end
 
-                  {:ok, other_task_id} ->
-                    revoke_task_capabilities(
-                      opts,
-                      approval_answer_cap_id,
-                      steer_cap_id,
-                      adoption_cap_id
-                    )
+            {:ok, other_task_id} ->
+              case compensate_after_mint(opts, store, store_opts, task_id, token, granted) do
+                {:ok, :clean} ->
+                  {:error, {:task_id_mismatch, other_task_id}}
 
-                    {:error, {:task_id_mismatch, other_task_id}}
+                {:uncertain, details} ->
+                  {:error,
+                   {:task_control_lease_dispatch_outcome_unknown,
+                    Map.put(details, :dispatch_reason, :task_id_mismatch)}}
+              end
 
-                  {:error, _reason} = error ->
-                    revoke_task_capabilities(
-                      opts,
-                      approval_answer_cap_id,
-                      steer_cap_id,
-                      adoption_cap_id
-                    )
+            {:error, reason} = error ->
+              case compensate_after_mint(opts, store, store_opts, task_id, token, granted) do
+                {:ok, :clean} ->
+                  error
 
-                    error
-                end
+                {:uncertain, details} ->
+                  {:error,
+                   {:task_control_lease_dispatch_outcome_unknown,
+                    Map.merge(details, %{dispatch_reason: sanitize_public_reason(reason)})}}
+              end
+          end
 
-              {:error, _reason} = error ->
-                revoke_task_capabilities(opts, approval_answer_cap_id, steer_cap_id)
-                error
-            end
-
-          {:error, _reason} = error ->
-            revoke_task_approval_answer(opts, approval_answer_cap_id)
-            error
-        end
-
-      {:error, _reason} = error ->
+        {:error, _} = error ->
+          _ = release_reservation(store, task_id, token, store_opts)
+          error
+      end
+    else
+      {:error, _} = error ->
         error
     end
   end
 
-  defp grant_task_approval_answer(caller_id, task_id, opts) do
-    grant_opts = [
-      principal: caller_id,
-      resource: scoped_task_answer_uri(task_id),
-      expires_at: DateTime.add(DateTime.utc_now(), @approval_answer_cap_ttl_seconds, :second),
-      constraints: %{},
-      metadata: %{
-        source: :orchestration_task_dispatch,
-        task_id: task_id
-      }
-    ]
-
-    case opts |> security_module() |> apply_if_exported(:grant, [grant_opts]) do
-      {:ok, capability} ->
-        case value(capability, :id) do
-          id when is_binary(id) and id != "" -> {:ok, id}
-          other -> {:error, {:approval_answer_grant_failed, {:missing_capability_id, other}}}
-        end
+  defp reserve_task_identity(store, store_opts) do
+    case apply_if_exported(store, :reserve, [store_opts]) do
+      {:ok, %{task_id: task_id, reservation_token: token}}
+      when is_binary(task_id) and is_binary(token) ->
+        {:ok, %{task_id: task_id, reservation_token: token}}
 
       {:error, reason} ->
-        {:error, {:approval_answer_grant_failed, reason}}
+        {:error, reason}
 
       :module_unavailable ->
-        {:error, {:approval_answer_grant_failed, :security_unavailable}}
+        {:error, :task_store_unavailable}
 
       other ->
-        {:error, {:approval_answer_grant_failed, other}}
+        {:error, sanitize_public_reason(other)}
     end
   end
 
-  defp grant_task_steer(caller_id, task_id, opts) do
-    grant_opts = [
-      principal: caller_id,
-      resource: scoped_task_steer_uri(task_id),
-      expires_at: DateTime.add(DateTime.utc_now(), @approval_answer_cap_ttl_seconds, :second),
-      constraints: %{},
-      metadata: %{source: :orchestration_task_dispatch, task_id: task_id}
-    ]
-
-    case opts |> security_module() |> apply_if_exported(:grant, [grant_opts]) do
-      {:ok, capability} ->
-        case value(capability, :id) do
-          id when is_binary(id) and id != "" -> {:ok, id}
-          other -> {:error, {:steer_grant_failed, {:missing_capability_id, other}}}
-        end
-
-      {:error, reason} ->
-        {:error, {:steer_grant_failed, reason}}
-
-      :module_unavailable ->
-        {:error, {:steer_grant_failed, :security_unavailable}}
-
-      other ->
-        {:error, {:steer_grant_failed, other}}
-    end
-  end
-
-  defp grant_task_adopt(caller_id, task_id, opts) do
-    grant_opts = [
-      principal: caller_id,
-      resource: scoped_task_adopt_uri(task_id),
-      expires_at: DateTime.add(DateTime.utc_now(), @task_adoption_cap_ttl_seconds, :second),
-      constraints: %{},
-      metadata: %{source: :orchestration_task_dispatch, task_id: task_id}
-    ]
-
-    case opts |> security_module() |> apply_if_exported(:grant, [grant_opts]) do
-      {:ok, capability} ->
-        case value(capability, :id) do
-          id when is_binary(id) and id != "" -> {:ok, id}
-          other -> {:error, {:adoption_grant_failed, {:missing_capability_id, other}}}
-        end
-
-      {:error, reason} ->
-        {:error, {:adoption_grant_failed, reason}}
-
-      :module_unavailable ->
-        {:error, {:adoption_grant_failed, :security_unavailable}}
-
-      other ->
-        {:error, {:adoption_grant_failed, other}}
-    end
-  end
-
-  defp revoke_task_approval_answer(opts, capability_id)
-       when is_binary(capability_id) and capability_id != "" do
-    opts
-    |> security_module()
-    |> apply_if_exported(:revoke, [capability_id])
-    |> case do
+  defp commit_recovery_marker(store, task_id, token, store_opts) do
+    case apply_if_exported(store, :commit_recovery_marker, [task_id, token, store_opts]) do
       :ok -> :ok
-      _ -> :ok
+      {:ok, _} -> :ok
+      {:error, reason} -> {:error, reason}
+      :module_unavailable -> {:error, :task_store_unavailable}
+      other -> {:error, sanitize_public_reason(other)}
     end
   end
 
-  defp revoke_task_approval_answer(_opts, _capability_id), do: :ok
-
-  defp revoke_task_capabilities(opts, approval_answer_cap_id, steer_cap_id, adoption_cap_id) do
-    revoke_task_approval_answer(opts, approval_answer_cap_id)
-    revoke_task_steer(opts, steer_cap_id)
-    revoke_task_adopt(opts, adoption_cap_id)
+  defp activate_reserved_task(store, agent_id, task, task_id, token, opts) do
+    case apply_if_exported(store, :activate, [agent_id, task, task_id, token, opts]) do
+      {:ok, id} -> {:ok, id}
+      {:error, reason} -> {:error, reason}
+      :module_unavailable -> {:error, :task_store_unavailable}
+      other -> {:error, sanitize_public_reason(other)}
+    end
   end
 
-  defp revoke_task_capabilities(opts, approval_answer_cap_id, steer_cap_id) do
-    revoke_task_approval_answer(opts, approval_answer_cap_id)
-    revoke_task_steer(opts, steer_cap_id)
+  defp release_reservation(store, task_id, token, store_opts) do
+    _ = apply_if_exported(store, :release, [task_id, token, store_opts])
+    :ok
   end
 
-  defp revoke_task_steer(opts, capability_id),
-    do: revoke_task_approval_answer(opts, capability_id)
+  # Reverse-revoke once, then request store-owned task-scope reconcile + release.
+  # Returns the reverse-revoke outcome so callers never revoke a second time.
+  defp compensate_after_mint(opts, store, store_opts, task_id, token, granted) do
+    revoke_outcome = compensate_reverse_revoke(opts, granted)
+    _ = apply_if_exported(store, :request_reconcile, [task_id, store_opts])
+    _ = release_reservation(store, task_id, token, store_opts)
+    revoke_outcome
+  end
 
-  defp revoke_task_adopt(opts, capability_id),
-    do: revoke_task_approval_answer(opts, capability_id)
+  defp grant_task_control_lease(caller_id, task_id, opts) do
+    now = DateTime.utc_now()
 
-  defp record_dispatch(task_id, agent_id, task, caller_id, opts) do
+    case grant_lease_members(caller_id, task_id, opts, now, TaskControlLease.grant_order(), []) do
+      {:ok, granted} ->
+        kind_to_id = Map.new(granted)
+
+        case TaskControlLease.new(task_id, kind_to_id) do
+          {:ok, lease} ->
+            {:ok, lease, granted}
+
+          {:error, reason} ->
+            case compensate_reverse_revoke(opts, granted) do
+              {:ok, :clean} ->
+                {:error,
+                 {:task_control_lease_grant_failed, :lease_shape, sanitize_public_reason(reason)}}
+
+              {:uncertain, details} ->
+                {:error,
+                 {:task_control_lease_grant_outcome_unknown,
+                  Map.merge(details, %{
+                    failed_kind: :lease_shape,
+                    grant_reason: sanitize_public_reason(reason)
+                  })}}
+            end
+        end
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  # Six sequential Security.grant/1 calls are intentional: closed least-risk-first
+  # order with approval_answer last, full reverse-revoke compensation, and no
+  # batch grant API in this slice (packet non-goal). Cost is ~2× the prior
+  # three-member path; do not parallelize (compensation ordering) or add a
+  # generic batch API without a separate design decision.
+  defp grant_lease_members(_caller_id, _task_id, _opts, _now, [], granted), do: {:ok, granted}
+
+  defp grant_lease_members(caller_id, task_id, opts, now, [kind | rest], granted) do
+    with {:ok, spec} <- TaskControlLease.grant_spec(kind, caller_id, task_id, now),
+         {:ok, cap_id} <- grant_one_lease_member(opts, kind, spec) do
+      grant_lease_members(caller_id, task_id, opts, now, rest, granted ++ [{kind, cap_id}])
+    else
+      # Mint-outcome uncertainty: never report ordinary grant_failed.
+      {:error, {:mint_outcome_uncertain, class}} ->
+        mint_outcome_unknown_result(opts, task_id, granted, kind, class)
+
+      {:error, :missing_capability_id} ->
+        mint_outcome_unknown_result(opts, task_id, granted, kind, :missing_capability_id)
+
+      {:error, reason} ->
+        case compensate_reverse_revoke(opts, granted) do
+          {:ok, :clean} ->
+            _ = request_task_reconcile(opts, task_id)
+
+            {:error, {:task_control_lease_grant_failed, kind, sanitize_public_reason(reason)}}
+
+          {:uncertain, details} ->
+            _ = request_task_reconcile(opts, task_id)
+
+            {:error,
+             {:task_control_lease_grant_outcome_unknown,
+              Map.merge(details, %{
+                failed_kind: kind,
+                grant_reason: sanitize_public_reason(reason)
+              })}}
+        end
+    end
+  end
+
+  defp mint_outcome_unknown_result(opts, task_id, granted, kind, class) do
+    revoke_result = compensate_reverse_revoke(opts, granted)
+    reconcile = request_task_reconcile(opts, task_id)
+
+    details =
+      case revoke_result do
+        {:ok, :clean} ->
+          %{
+            uncertainty: true,
+            failed_kind: kind,
+            grant_reason: sanitize_public_reason(class),
+            revoke_failure_kinds: [],
+            revoke_failure_count: 0,
+            revoke_uncertain_count: 0,
+            reconciled: reconcile == :ok
+          }
+
+        {:uncertain, base} ->
+          Map.merge(base, %{
+            failed_kind: kind,
+            grant_reason: sanitize_public_reason(class),
+            reconciled: reconcile == :ok
+          })
+      end
+
+    {:error, {:task_control_lease_grant_outcome_unknown, details}}
+  end
+
+  defp request_task_reconcile(opts, task_id) when is_binary(task_id) do
+    store = task_store_module(opts)
+    store_opts = task_store_opts(opts)
+
+    case apply_if_exported(store, :request_reconcile, [task_id, store_opts]) do
+      :ok -> :ok
+      {:ok, _} -> :ok
+      _ -> :error
+    end
+  rescue
+    _ -> :error
+  catch
+    _, _ -> :error
+  end
+
+  defp request_task_reconcile(_opts, _task_id), do: :error
+
+  defp grant_one_lease_member(opts, _kind, spec) do
+    case invoke_lease_grant(security_module(opts), spec) do
+      {:ok, capability} ->
+        case value(capability, :id) do
+          id when is_binary(id) and id != "" ->
+            if valid_granted_capability_id?(id) do
+              {:ok, id}
+            else
+              # Invalid id shape on a successful response is still mint uncertainty.
+              {:error, :missing_capability_id}
+            end
+
+          _other ->
+            {:error, :missing_capability_id}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+
+      :module_unavailable ->
+        {:error, :security_unavailable}
+
+      other ->
+        {:error, other}
+    end
+  rescue
+    _exception ->
+      {:error, {:mint_outcome_uncertain, :exception}}
+  catch
+    :exit, _reason ->
+      {:error, {:mint_outcome_uncertain, :exit}}
+
+    :throw, _reason ->
+      {:error, {:mint_outcome_uncertain, :throw}}
+
+    _catch_kind, _reason ->
+      {:error, {:mint_outcome_uncertain, :error}}
+  end
+
+  # Grant exceptions are mint-outcome uncertainty. Do not route this call
+  # through apply_if_exported/3, which deliberately collapses exceptions into
+  # :module_unavailable for ordinary optional integrations.
+  defp invoke_lease_grant(module, spec) when is_atom(module) do
+    if Code.ensure_loaded?(module) and function_exported?(module, :grant, 1) do
+      apply(module, :grant, [spec])
+    else
+      :module_unavailable
+    end
+  end
+
+  defp invoke_lease_grant(_module, _spec), do: :module_unavailable
+
+  defp valid_granted_capability_id?(id)
+       when is_binary(id) and byte_size(id) > 0 and byte_size(id) <= 256 do
+    String.valid?(id) and not String.match?(id, ~r/[\x00-\x1F\x7F]/)
+  end
+
+  defp valid_granted_capability_id?(_), do: false
+
+  # Reverse-revoke every minted capability; never stop early.
+  # Returns {:ok, :clean} or {:uncertain, public_details} — never capability ids.
+  defp compensate_reverse_revoke(opts, granted) when is_list(granted) do
+    failures =
+      granted
+      |> Enum.reverse()
+      |> Enum.reduce([], fn {kind, cap_id}, acc ->
+        case revoke_one_lease_member(opts, cap_id) do
+          :ok -> acc
+          {:error, reason} -> [{kind, reason} | acc]
+          :uncertain -> [{kind, :outcome_unknown} | acc]
+        end
+      end)
+      |> Enum.reverse()
+
+    if failures == [] do
+      {:ok, :clean}
+    else
+      uncertain_count =
+        Enum.count(failures, fn {_kind, reason} -> reason == :outcome_unknown end)
+
+      {:uncertain,
+       %{
+         uncertainty: true,
+         revoke_failure_kinds: Enum.map(failures, fn {kind, _} -> kind end),
+         revoke_failure_count: length(failures),
+         revoke_uncertain_count: uncertain_count
+       }}
+    end
+  end
+
+  defp revoke_one_lease_member(opts, cap_id)
+       when is_binary(cap_id) and cap_id != "" do
+    case opts |> security_module() |> apply_if_exported(:revoke, [cap_id]) do
+      :ok -> :ok
+      {:ok, _} -> :ok
+      {:error, :not_found} -> :ok
+      {:error, :already_revoked} -> :ok
+      {:error, reason} -> {:error, sanitize_public_reason(reason)}
+      :module_unavailable -> :uncertain
+      _other -> :uncertain
+    end
+  rescue
+    _ -> :uncertain
+  catch
+    :exit, _ -> :uncertain
+    _, _ -> :uncertain
+  end
+
+  defp revoke_one_lease_member(_opts, _cap_id), do: :ok
+
+  defp sanitize_public_reason(reason) when is_atom(reason), do: reason
+
+  defp sanitize_public_reason(reason) when is_binary(reason) do
+    if String.valid?(reason) and byte_size(reason) <= 128 and
+         not String.contains?(reason, "cap_") do
+      reason
+    else
+      :invalid_reason
+    end
+  end
+
+  defp sanitize_public_reason({a, b}) when is_atom(a),
+    do: {a, sanitize_public_reason(b)}
+
+  defp sanitize_public_reason(_), do: :error
+
+  # Strict audit observation for post-admission dispatch: do not swallow errors.
+  defp record_dispatch_result(task_id, agent_id, task, caller_id, opts) do
     data = [
       trace_id: opt(opts, :trace_id),
       metadata: opt(opts, :metadata),
       task_preview: task_preview(task)
     ]
 
-    opts
-    |> audit_module()
-    |> apply_if_exported(:record_orchestration_task_dispatched, [
-      caller_id,
-      task_id,
-      agent_id,
-      data
-    ])
-    |> normalize_audit_result()
+    case opts
+         |> audit_module()
+         |> apply_if_exported(:record_orchestration_task_dispatched, [
+           caller_id,
+           task_id,
+           agent_id,
+           data
+         ]) do
+      :ok -> :ok
+      {:ok, _} -> :ok
+      {:error, reason} -> {:error, reason}
+      :module_unavailable -> {:error, :security_unavailable}
+      other -> {:error, {:unexpected_audit_result, sanitize_public_reason(other)}}
+    end
   end
 
   defp task_preview(task) when is_binary(task) do
@@ -1542,9 +1748,46 @@ defmodule Arbor.Agent.Orchestration do
   end
 
   defp matches_filters?(%PendingApproval{} = approval, opts) do
-    matches_agent?(approval, opt(opts, :agent_id)) and
+    matches_task?(approval, opt(opts, :task_id)) and
+      matches_agent?(approval, opt(opts, :agent_id)) and
       matches_principal?(approval, opt(opts, :principal_id)) and
       matches_resource?(approval, opt(opts, :resource_uri))
+  end
+
+  defp matches_task?(_approval, nil), do: true
+
+  defp matches_task?(%PendingApproval{} = approval, task_id) when is_binary(task_id) do
+    approval_task_id(approval) == task_id
+  end
+
+  defp matches_task?(_approval, _task_id), do: false
+
+  defp optional_list_task_id_filter(opts) do
+    case opt(opts, :task_id) do
+      nil -> {:ok, nil}
+      task_id -> normalize_task_id(task_id)
+    end
+  end
+
+  defp authorize_approval_list(opts, nil) do
+    authorize(opts, @approval_read_uri, :read)
+  end
+
+  defp authorize_approval_list(opts, task_id) when is_binary(task_id) do
+    if opt(opts, :authorize?, true) == false do
+      :ok
+    else
+      with {:ok, actor} <- caller_id(opts),
+           {:ok, resource} <- TaskControlLease.uri(:approval_read, task_id) do
+        case authorize_caller(opts, actor, resource, :read, task_id) do
+          :ok ->
+            :ok
+
+          _ ->
+            authorize(opts, @approval_read_uri, :read)
+        end
+      end
+    end
   end
 
   defp matches_agent?(_approval, nil), do: true
@@ -1615,9 +1858,9 @@ defmodule Arbor.Agent.Orchestration do
       :ok
     else
       approval
-      |> answer_authorization_uris()
-      |> Enum.find_value(fn resource_uri ->
-        case authorize_caller(opts, caller_id, resource_uri, :execute) do
+      |> answer_authorization_ladder()
+      |> Enum.find_value(fn {resource_uri, scope_task_id} ->
+        case authorize_caller(opts, caller_id, resource_uri, :execute, scope_task_id) do
           :ok -> :ok
           _ -> nil
         end
@@ -1629,26 +1872,48 @@ defmodule Arbor.Agent.Orchestration do
     end
   end
 
-  defp answer_authorization_uris(%PendingApproval{} = approval) do
-    [
-      approval |> approval_task_id() |> scoped_task_answer_uri(),
-      scoped_answer_uri(approval.principal_id),
-      scoped_answer_uri(approval.agent_id),
-      @approval_answer_uri
+  # Exact task → agent → principal → global (compatibility break-glass).
+  defp answer_authorization_ladder(%PendingApproval{} = approval) do
+    task_scope =
+      case approval_task_id(approval) do
+        task_id when is_binary(task_id) ->
+          case normalize_task_id(task_id) do
+            {:ok, normalized} ->
+              case TaskControlLease.uri(:approval_answer, normalized) do
+                {:ok, uri} -> {uri, normalized}
+                _ -> nil
+              end
+
+            _ ->
+              nil
+          end
+
+        _ ->
+          nil
+      end
+
+    # Exact → agent-scoped → principal-scoped → global.
+    base = [
+      {scoped_answer_uri(approval.agent_id), nil},
+      {scoped_answer_uri(approval.principal_id), nil},
+      {@approval_answer_uri, nil}
     ]
-    |> Enum.reject(&is_nil/1)
-    |> Enum.uniq()
+
+    ladder =
+      case task_scope do
+        {uri, task_id} -> [{uri, task_id} | base]
+        nil -> base
+      end
+
+    ladder
+    |> Enum.reject(fn {uri, _} -> is_nil(uri) end)
+    |> Enum.uniq_by(fn {uri, _} -> uri end)
   end
 
   defp scoped_answer_uri(id) when is_binary(id) and id != "",
     do: "#{@approval_answer_uri}/#{id}"
 
   defp scoped_answer_uri(_), do: nil
-
-  defp scoped_task_answer_uri(task_id) when is_binary(task_id) and task_id != "",
-    do: "#{@approval_answer_uri}/task/#{task_id}"
-
-  defp scoped_task_answer_uri(_), do: nil
 
   defp approval_task_id(%PendingApproval{metadata: metadata, context: context}) do
     Enum.find_value([metadata, context], &task_id_from_approval_map/1)
@@ -1672,12 +1937,19 @@ defmodule Arbor.Agent.Orchestration do
     end
   end
 
-  defp authorize_caller(opts, caller_id, resource_uri, action) do
+  defp authorize_caller(opts, caller_id, resource_uri, action, trusted_task_id \\ nil) do
     case security_auth_opts(opts) do
       {:error, :invalid_session_token} ->
         {:error, {:unauthorized, :invalid_session_token}}
 
       {:ok, auth_opts} ->
+        auth_opts =
+          if is_binary(trusted_task_id) and trusted_task_id != "" do
+            Keyword.put(auth_opts, :task_id, trusted_task_id)
+          else
+            auth_opts
+          end
+
         case opts
              |> security_module()
              |> apply_if_exported(:authorize, [
@@ -1842,7 +2114,16 @@ defmodule Arbor.Agent.Orchestration do
   end
 
   defp consensus_module(opts), do: opt(opts, :consensus_module, Arbor.Consensus)
-  defp task_store_module(opts), do: opt(opts, :task_store, Arbor.Agent.Orchestration.TaskStore)
+
+  # Production facades are fixed. Executable selectors (task_store / security /
+  # audit modules) are honored only behind the test double seam.
+  defp task_store_module(opts) do
+    if orchestration_test_doubles_allowed?() do
+      opt(opts, :task_store, Arbor.Agent.Orchestration.TaskStore)
+    else
+      Arbor.Agent.Orchestration.TaskStore
+    end
+  end
 
   defp task_store_owns_cancel_cleanup?(opts) do
     module = task_store_module(opts)
@@ -1860,8 +2141,39 @@ defmodule Arbor.Agent.Orchestration do
     opt(opts, :interaction_router, Module.concat([:Arbor, :Comms]))
   end
 
-  defp security_module(opts), do: opt(opts, :security_module, Arbor.Security)
-  defp audit_module(opts), do: opt(opts, :audit_module, Arbor.Security)
+  defp security_module(opts) do
+    if orchestration_test_doubles_allowed?() do
+      opt(opts, :security_module, Arbor.Security)
+    else
+      Arbor.Security
+    end
+  end
+
+  defp audit_module(opts) do
+    if orchestration_test_doubles_allowed?() do
+      opt(opts, :audit_module, Arbor.Security)
+    else
+      Arbor.Security
+    end
+  end
+
+  # Test-only seam: compile-environment gated. Runtime Application config cannot
+  # enable per-call executable selectors in non-test beams. Store-start pins
+  # remain the only TaskStore recovery DI path.
+  @orchestration_test_doubles_compile_env Mix.env() == :test
+
+  # Pure gate used by tests to prove compile env ∧ app flag semantics.
+  @doc false
+  def orchestration_test_doubles_allowed?(compile_test_env?, app_flag) do
+    compile_test_env? == true and app_flag == true
+  end
+
+  defp orchestration_test_doubles_allowed? do
+    app_flag =
+      Application.get_env(:arbor_agent, :allow_orchestration_test_doubles, true) == true
+
+    orchestration_test_doubles_allowed?(@orchestration_test_doubles_compile_env, app_flag)
+  end
 
   defp apply_if_exported(module, function, args) when is_atom(module) do
     if Code.ensure_loaded?(module) and function_exported?(module, function, length(args)) do
@@ -1880,11 +2192,6 @@ defmodule Arbor.Agent.Orchestration do
   defp normalize_backend_result({:error, _} = error), do: error
   defp normalize_backend_result(:module_unavailable), do: {:error, :approval_backend_unavailable}
   defp normalize_backend_result(other), do: {:error, {:unexpected_approval_backend_result, other}}
-
-  defp normalize_task_dispatch_result({:ok, task_id}) when is_binary(task_id), do: {:ok, task_id}
-  defp normalize_task_dispatch_result({:error, _} = error), do: error
-  defp normalize_task_dispatch_result(:module_unavailable), do: {:error, :task_store_unavailable}
-  defp normalize_task_dispatch_result(other), do: {:error, {:unexpected_task_store_result, other}}
 
   defp normalize_task_status_result({:ok, status}) when is_map(status) do
     normalized = %{

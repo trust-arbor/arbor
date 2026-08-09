@@ -481,6 +481,63 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
       assert opts[:resource_uri] == "arbor://fs/read"
     end
 
+    test "list_pending_approvals advertises and forwards exact task_id filter", %{state: state} do
+      {:ok, tools, _, _} = Handler.handle_list_tools(nil, state)
+      tool = Enum.find(tools, &(&1.name == "arbor_list_pending_approvals"))
+      assert Map.has_key?(tool.inputSchema.properties, :task_id)
+      assert tool.description =~ "task_id"
+      assert tool.description =~ "task-scoped approval-read"
+      assert tool.description =~ "global approval-read"
+
+      # Authenticated public MCP surface (caller_id from session identity).
+      Process.put(:arbor_authenticated_agent_id, "human_1")
+
+      Process.put(
+        {FakeOrchestration, :list_result},
+        {:ok,
+         [
+           %{
+             id: "irq_a",
+             source: :interaction,
+             agent_id: "agent_1",
+             principal_id: "agent_1",
+             resource_uri: "arbor://shell/exec",
+             status: :pending
+           }
+         ]}
+      )
+
+      {:ok, %{content: [%{text: text}]}, _state} =
+        Handler.handle_call_tool(
+          "arbor_list_pending_approvals",
+          %{"task_id" => "task_exact_filter_1"},
+          state
+        )
+
+      assert %{"approvals" => [%{"id" => "irq_a"}]} = Jason.decode!(text)
+      assert_received {:list_pending_approvals, opts}
+      assert opts[:caller_id] == "human_1"
+      assert opts[:task_id] == "task_exact_filter_1"
+      # No lease/cap leakage in MCP response.
+      refute text =~ "cap_"
+      refute text =~ "task_control_lease"
+    end
+
+    test "list_pending_approvals without task_id still authenticates and omits task filter", %{
+      state: state
+    } do
+      Process.put(:arbor_authenticated_agent_id, "human_1")
+      Process.put({FakeOrchestration, :list_result}, {:ok, []})
+
+      {:ok, %{content: [%{text: text}]}, _state} =
+        Handler.handle_call_tool("arbor_list_pending_approvals", %{}, state)
+
+      assert %{"approvals" => []} = Jason.decode!(text)
+      assert_received {:list_pending_approvals, opts}
+      assert opts[:caller_id] == "human_1"
+      refute Keyword.has_key?(opts, :task_id)
+    end
+
     test "answer_approval calls the shared API with caller and note", %{state: state} do
       Process.put(:arbor_authenticated_agent_id, "human_1")
 
