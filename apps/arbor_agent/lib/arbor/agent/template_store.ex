@@ -74,6 +74,17 @@ defmodule Arbor.Agent.TemplateStore do
     end
   end
 
+  @doc """
+  Read the current layered template source without writing the ETS cache.
+
+  Used by read-only readiness projections so a miss does not mutate cache
+  state. Resolution order matches `get/1` (user .md → shipped .md → legacy).
+  """
+  @spec get_current(String.t()) :: {:ok, map()} | {:error, :not_found | term()}
+  def get_current(name) when is_binary(name) do
+    load_layered(name)
+  end
+
   @doc "Store a template by name. Writes JSON file and updates ETS cache."
   @spec put(String.t(), map()) :: :ok | {:error, term()}
   def put(name, data) when is_binary(name) and is_map(data) do

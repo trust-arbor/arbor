@@ -256,6 +256,43 @@ defmodule Arbor.Agent do
     )
   end
 
+  @doc """
+  Project one read-only Agent-owned coding-dispatch readiness report.
+
+  Aggregates bounded Security restore health, coordinator liveness, exact
+  template provenance/drift, six-member task-control provisioning readiness,
+  and the configured executor projection — before any TaskStore identity
+  exists. Reuses the dispatch authorization gate. Authorized calls always
+  return `{:ok, report}` even when readiness is blocked or degraded.
+
+  ## Options
+
+  - `:session_token` — optional human session proof (non-empty binary ≤4096)
+  - `:timeout` — optional positive integer milliseconds forwarded only into the
+    configured executor readiness context (never as a task id)
+
+  Unknown, duplicate, nil, empty, non-binary, or oversized options are rejected
+  before authorization. Session proofs reach only `Security.authorize/4`.
+  """
+  @spec coding_dispatch_readiness(String.t(), String.t(), map(), keyword()) ::
+          {:ok, map()}
+          | {:error,
+             :invalid_opts
+             | :invalid_caller_id
+             | :invalid_agent_id
+             | :invalid_task
+             | :unauthorized
+             | :readiness_failed}
+  def coding_dispatch_readiness(caller_id, target_agent_id, task, opts \\ []) do
+    Arbor.Agent.DispatchReadinessFacade.project(
+      caller_id,
+      target_agent_id,
+      task,
+      opts,
+      &Arbor.Agent.Orchestration.coding_dispatch_readiness/3
+    )
+  end
+
   # ===========================================================================
   # Public API — Authorized versions (for callers that need capability checks)
   # ===========================================================================

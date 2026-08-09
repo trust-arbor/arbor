@@ -47,6 +47,21 @@ defmodule Arbor.Agent.TemplateStoreTest do
       assert {:error, :not_found} = TemplateStore.get("nonexistent")
     end
 
+    test "get_current reads layered source without writing ETS cache" do
+      data = minimal_template("current_only")
+      path = Path.join(@test_dir, "current_only.json")
+      File.write!(path, Jason.encode!(data))
+
+      TemplateStore.ensure_table()
+      :ets.delete(:arbor_agent_templates, "current_only")
+
+      assert {:ok, loaded} = TemplateStore.get_current("current_only")
+      assert loaded["name"] == "current_only"
+
+      # Cache must remain empty for this name (get/1 would have inserted)
+      assert :ets.lookup(:arbor_agent_templates, "current_only") == []
+    end
+
     test "list returns all templates" do
       TemplateStore.put("alpha", minimal_template("alpha"))
       TemplateStore.put("beta", minimal_template("beta"))

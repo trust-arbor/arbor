@@ -32,6 +32,7 @@ defmodule Arbor.Agent.Orchestration do
 
   alias Arbor.Agent.Orchestration.{
     ApprovalInventoryProjection,
+    DispatchReadiness,
     PendingApproval,
     TaskArtifacts,
     TaskControlLease
@@ -84,6 +85,32 @@ defmodule Arbor.Agent.Orchestration do
       # grants, TaskStore, cleanup descriptors, audit, or retained state.
       safe_opts = strip_session_tokens(opts)
       dispatch_with_reservation_and_lease(agent_id, task, caller_id, safe_opts)
+    end
+  end
+
+  @doc """
+  Project a read-only Agent-owned coding-dispatch readiness report.
+
+  Reuses the dispatch authorization gate. On authorization success always
+  returns `{:ok, bounded_report}` even when readiness is blocked or degraded.
+  Performs no task-identity minting, capability grants, profile/template
+  writes, or reconciles. Session proofs reach only `Security.authorize/4`.
+  """
+  @spec coding_dispatch_readiness(String.t(), String.t() | map(), keyword() | map()) ::
+          {:ok, map()} | {:error, term()}
+  def coding_dispatch_readiness(agent_id, task, opts \\ []) do
+    with :ok <- reject_caller_task_id(opts),
+         {:ok, agent_id} <- normalize_agent_id(agent_id),
+         {:ok, task} <- normalize_task(task),
+         {:ok, caller_id} <- caller_id(opts),
+         :ok <- authorize_dispatch(opts, caller_id, agent_id) do
+      safe_opts =
+        opts
+        |> strip_session_tokens()
+        |> normalize_keyword_opts()
+        |> Keyword.put(:caller_id, caller_id)
+
+      DispatchReadiness.project(agent_id, task, safe_opts)
     end
   end
 
