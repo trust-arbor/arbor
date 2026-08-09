@@ -38,6 +38,8 @@ defmodule Arbor.Agent.Orchestration do
     TaskControlLease
   }
 
+  alias Arbor.Agent.TemplateAuthorityPreview
+
   alias Arbor.Contracts.Coding.{TaskOutcome, TaskTerminalEnvelope}
   alias Arbor.Contracts.Security.CapabilityUri
 
@@ -111,6 +113,34 @@ defmodule Arbor.Agent.Orchestration do
         |> Keyword.put(:caller_id, caller_id)
 
       DispatchReadiness.project(agent_id, task, safe_opts)
+    end
+  end
+
+  @doc """
+  Project a read-only target-scoped template-authority reconciliation preview.
+
+  Reuses the dispatch authorization ladder (scoped then global
+  `arbor://agent/dispatch`). On authorization success always returns
+  `{:ok, bounded_report}` even when observed state is invalid or unavailable.
+  Performs no grants, revokes, trust/profile writes, task reservations, cache
+  warming, or marker persistence. Session proofs reach only
+  `Security.authorize/4` and are stripped before the preview shell — only
+  `caller_id` crosses into the preview shell. Executable preview selectors are
+  honored only behind the orchestration test-doubles gate.
+  """
+  @spec template_authority_preview(String.t(), keyword() | map()) ::
+          {:ok, map()} | {:error, term()}
+  def template_authority_preview(target_agent_id, opts \\ []) do
+    with {:ok, target_agent_id} <- normalize_agent_id(target_agent_id),
+         {:ok, caller_id} <- caller_id(opts),
+         :ok <- authorize_dispatch(opts, caller_id, target_agent_id) do
+      # Tokens and internal selectors never reach the read shell — only caller_id.
+      preview_opts = [caller_id: caller_id]
+
+      opts
+      |> template_authority_preview_module()
+      |> apply_if_exported(:project, [target_agent_id, preview_opts])
+      |> normalize_template_authority_preview_result()
     end
   end
 
@@ -2183,6 +2213,26 @@ defmodule Arbor.Agent.Orchestration do
       Arbor.Security
     end
   end
+
+  # Production preview collaborator is fixed. Per-call module injection is
+  # compile-environment gated through orchestration_test_doubles_allowed?/0.
+  defp template_authority_preview_module(opts) do
+    if orchestration_test_doubles_allowed?() do
+      opt(opts, :template_authority_preview_module, TemplateAuthorityPreview)
+    else
+      TemplateAuthorityPreview
+    end
+  end
+
+  defp normalize_template_authority_preview_result({:ok, report}) when is_map(report),
+    do: {:ok, report}
+
+  defp normalize_template_authority_preview_result({:error, _} = error), do: error
+
+  defp normalize_template_authority_preview_result(:module_unavailable),
+    do: {:error, :preview_failed}
+
+  defp normalize_template_authority_preview_result(_other), do: {:error, :preview_failed}
 
   # Test-only seam: compile-environment gated. Runtime Application config cannot
   # enable per-call executable selectors in non-test beams. Store-start pins

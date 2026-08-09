@@ -3,6 +3,7 @@ defmodule Arbor.Agent.ProfileStoreTest do
   @moduletag :fast
 
   alias Arbor.Agent.{Character, Profile, ProfileStore}
+  alias Arbor.Contracts.Persistence.Record
   alias Arbor.Persistence.BufferedStore
 
   @store_name :arbor_agent_profiles
@@ -294,6 +295,35 @@ defmodule Arbor.Agent.ProfileStoreTest do
       assert File.exists?(path)
 
       File.rm(path)
+    end
+
+    test "security regression: serialized read-only load preserves missing authority fields" do
+      agent_id = "serialized-presence-#{System.unique_integer([:positive])}"
+
+      serialized =
+        agent_id
+        |> make_profile()
+        |> Profile.serialize()
+        |> Map.delete("metadata")
+        |> Map.delete("version")
+        |> Map.delete("initial_capabilities")
+
+      record = Record.new(agent_id, serialized, id: "agent_profile:#{agent_id}")
+      assert :ok = BufferedStore.put(agent_id, record, name: @store_name)
+
+      assert {:ok, raw} = ProfileStore.load_profile_authority_readonly(agent_id)
+      refute Map.has_key?(raw, "metadata")
+      refute Map.has_key?(raw, "version")
+      refute Map.has_key?(raw, "initial_capabilities")
+      refute Map.has_key?(raw, "character")
+      refute Map.has_key?(raw, "identity")
+
+      # The ordinary normalized read remains backward compatible and applies
+      # Profile defaults; authority inspection deliberately uses the raw read.
+      assert {:ok, normalized} = ProfileStore.load_profile_readonly(agent_id)
+      assert normalized.metadata == %{}
+      assert normalized.version == 1
+      assert normalized.initial_capabilities == []
     end
   end
 

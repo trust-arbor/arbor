@@ -295,6 +295,42 @@ defmodule Arbor.Agent do
     )
   end
 
+  @doc """
+  Project one read-only target-scoped template-authority reconciliation preview.
+
+  Classifies only source-tagged authority-template grants and exact legacy
+  persisted-template matches as managed, compares effective desired authority
+  with managed live capabilities and trust, and returns a bounded JSON-clean
+  report with a deterministic reconciliation digest. Reuses the dispatch
+  authorization gate. Authorized calls always return `{:ok, report}` even when
+  observed state is drifted, unmanaged, invalid, or unavailable.
+
+  ## Options
+
+  - `:session_token` — optional human session proof (non-empty binary ≤4096)
+
+  Unknown, duplicate, nil, empty, non-binary, or oversized options are rejected
+  before authorization. Session proofs reach only `Security.authorize/4`.
+  Dependency injection is unavailable through public options.
+  """
+  @spec template_authority_preview(String.t(), String.t(), keyword()) ::
+          {:ok, map()}
+          | {:error,
+             :invalid_opts
+             | :invalid_caller_id
+             | :invalid_agent_id
+             | :unauthorized
+             | :preview_failed}
+  def template_authority_preview(caller_id, target_agent_id, opts \\ []) do
+    # Fixed production collaborator only — never selectable via public opts.
+    Arbor.Agent.TemplateAuthorityPreviewFacade.project(
+      caller_id,
+      target_agent_id,
+      opts,
+      &Arbor.Agent.Orchestration.template_authority_preview/2
+    )
+  end
+
   # ===========================================================================
   # Public API — Authorized versions (for callers that need capability checks)
   # ===========================================================================

@@ -26,6 +26,18 @@ defmodule Arbor.Agent.ProfileStore do
 
   @store_name :arbor_agent_profiles
   @legacy_dir ".arbor/agents"
+  @authority_snapshot_keys [
+    "agent_id",
+    "template",
+    "initial_capabilities",
+    "metadata",
+    "version",
+    :agent_id,
+    :template,
+    :initial_capabilities,
+    :metadata,
+    :version
+  ]
 
   # ── Public API ──────────────────────────────────────────────────────
 
@@ -108,6 +120,33 @@ defmodule Arbor.Agent.ProfileStore do
 
       {:error, :not_found} ->
         read_json_profile(agent_id)
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  @doc """
+  Read the persisted authority fields without applying `Profile.deserialize/1`
+  defaults.
+
+  This is the read-only authority-inspection boundary. It preserves whether
+  persisted fields are absent so fail-closed callers can distinguish missing
+  authority state from explicit empty/default values, while excluding unrelated
+  profile fields from the result. Like
+  `load_profile_readonly/1`, it never migrates, deletes, or persists.
+  """
+  @spec load_profile_authority_readonly(String.t()) ::
+          {:ok, map()} | {:error, :not_found | term()}
+  def load_profile_authority_readonly(agent_id) when is_binary(agent_id) do
+    case load_serialized_from_store(agent_id) do
+      {:ok, serialized} ->
+        {:ok, Map.take(serialized, @authority_snapshot_keys)}
+
+      {:error, :not_found} ->
+        with {:ok, serialized} <- read_json_profile_map(agent_id) do
+          {:ok, Map.take(serialized, @authority_snapshot_keys)}
+        end
 
       {:error, _} = error ->
         error
@@ -221,11 +260,19 @@ defmodule Arbor.Agent.ProfileStore do
   # ── Private ─────────────────────────────────────────────────────────
 
   defp load_from_store(agent_id) do
+    with {:ok, data} <- load_serialized_from_store(agent_id) do
+      Profile.deserialize(data)
+    end
+  end
+
+  defp load_serialized_from_store(agent_id) do
     if available?() do
       case BufferedStore.get(agent_id, name: @store_name) do
         {:ok, raw} ->
-          data = unwrap_record(raw)
-          Profile.deserialize(data)
+          case unwrap_record(raw) do
+            data when is_map(data) and not is_struct(data) -> {:ok, data}
+            _other -> {:error, :invalid_profile_record}
+          end
 
         {:error, :not_found} ->
           {:error, :not_found}
@@ -261,11 +308,21 @@ defmodule Arbor.Agent.ProfileStore do
   end
 
   defp read_json_profile(agent_id) do
+    with {:ok, map} <- read_json_profile_map(agent_id) do
+      Profile.deserialize(map)
+    end
+  end
+
+  defp read_json_profile_map(agent_id) do
     path = legacy_profile_path(agent_id)
 
     case File.read(path) do
       {:ok, json} ->
-        Profile.from_json(json)
+        case Jason.decode(json) do
+          {:ok, map} when is_map(map) -> {:ok, map}
+          {:ok, _other} -> {:error, :invalid_profile_json}
+          {:error, _} = error -> error
+        end
 
       {:error, :enoent} ->
         {:error, :not_found}
