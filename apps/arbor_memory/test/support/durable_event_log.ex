@@ -119,8 +119,8 @@ defmodule Arbor.Memory.Test.DurableEventLog do
   @spec lease_target!(map() | keyword()) :: :ok
   def lease_target!(target) do
     original = Application.fetch_env(:arbor_memory, @config_key)
-    Application.put_env(:arbor_memory, @config_key, target)
 
+    # Register cleanup before mutation so failed assertions cannot skip restore.
     ExUnit.Callbacks.on_exit(fn ->
       case original do
         {:ok, value} -> Application.put_env(:arbor_memory, @config_key, value)
@@ -128,6 +128,7 @@ defmodule Arbor.Memory.Test.DurableEventLog do
       end
     end)
 
+    Application.put_env(:arbor_memory, @config_key, target)
     :ok
   end
 

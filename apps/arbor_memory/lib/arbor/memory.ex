@@ -58,6 +58,7 @@ defmodule Arbor.Memory do
   """
 
   alias Arbor.Memory.{
+    Events,
     GoalIntentOps,
     GoalStore,
     GraphOps,
@@ -381,6 +382,38 @@ defmodule Arbor.Memory do
   defdelegate get_code(agent_id, entry_id), to: SessionOps
   defdelegate delete_code(agent_id, entry_id), to: SessionOps
   defdelegate list_code(agent_id, opts \\ []), to: SessionOps
+
+  # ============================================================================
+  # Exact-agent event content (Voice C4D)
+  # ============================================================================
+
+  @doc """
+  Delete retained dual-emitted event content for exactly one agent.
+
+  Thin facade for `Arbor.Memory.Events.delete_agent_content/2`. Composes
+  Signals retained Memory content, the local `:memory_events` EventLog,
+  Historian complete-history for stream `memory:<agent_id>`, and the configured
+  maintenance archive under one outer deadline. Callers never supply a raw
+  stream id, backend, name, Repo, or process. Does not fence concurrent writers
+  (later C3I1B ownership).
+  """
+  @spec delete_agent_event_content(String.t()) :: Events.delete_agent_content_result()
+  @spec delete_agent_event_content(String.t(), keyword()) :: Events.delete_agent_content_result()
+  def delete_agent_event_content(agent_id, opts \\ []),
+    do: Events.delete_agent_content(agent_id, opts)
+
+  @doc """
+  Read-only check that retained event content for one agent is absent on all
+  four authorities.
+
+  Thin facade for `Arbor.Memory.Events.agent_content_absent?/2`. Any
+  authoritative present result is sufficient for `{:ok, false}`; `{:ok, true}`
+  requires all four authorities to prove absence.
+  """
+  @spec agent_event_content_absent?(String.t()) :: Events.agent_content_absent_result()
+  @spec agent_event_content_absent?(String.t(), keyword()) :: Events.agent_content_absent_result()
+  def agent_event_content_absent?(agent_id, opts \\ []),
+    do: Events.agent_content_absent?(agent_id, opts)
 
   # ============================================================================
   # Authorized API (for agent callers — facade-level authorization)

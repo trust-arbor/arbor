@@ -42,14 +42,31 @@ defmodule Arbor.Memory.Events do
   """
 
   alias Arbor.Contracts.Security.{Taint, TaintEnvelope}
+  alias Arbor.Historian
   alias Arbor.Memory.ArchiveReadView
   alias Arbor.Memory.Config
+  alias Arbor.Memory.Events.ContentCore
+  alias Arbor.Persistence
   alias Arbor.Persistence.Event
+  alias Arbor.Signals
 
   @event_log_name :memory_events
   @event_log_backend Arbor.Persistence.EventLog.ETS
   @archive_append_attempts 2
   @archive_scan_chunk 128
+
+  @type content_status :: ContentCore.status()
+  @type content_report :: ContentCore.report()
+
+  @type delete_agent_content_result ::
+          :ok
+          | {:error, :invalid_agent_id | :invalid_precondition}
+          | {:error, {:cleanup_incomplete, String.t(), content_report()}}
+
+  @type agent_content_absent_result ::
+          {:ok, boolean()}
+          | {:error, :invalid_agent_id | :invalid_precondition}
+          | {:error, {:absence_indeterminate, String.t(), content_report()}}
 
   # ============================================================================
   # Event Recording (Dual-Emit)
@@ -194,6 +211,66 @@ defmodule Arbor.Memory.Events do
       pending_id: pending_id,
       pending_type: pending_type
     })
+  end
+
+  # ============================================================================
+  # Exact-agent event content (Voice C4D)
+  # ============================================================================
+
+  @doc """
+  Delete retained event content for exactly one agent id.
+
+  Composes four retained authorities under one outer monotonic deadline:
+  Signals retained `:memory` content, the local `:memory_events` EventLog,
+  Historian complete-history for stream `memory:<agent_id>`, and the
+  configured maintenance archive. Callers pass only `agent_id` and optional
+  `:timeout_ms` (default 5000, bound `1..60_000`). Nested authorities receive
+  only remaining budget; timeouts are never reminted.
+
+  Returns `:ok` only after independent absence proof on all four authorities.
+  Partial or uncertain outcomes return
+  `{:error, {:cleanup_incomplete, agent_id, report}}` with the closed four-key
+  report. This operation does not fence concurrent writers (later C3I1B).
+  """
+  @spec delete_agent_content(String.t()) :: delete_agent_content_result()
+  @spec delete_agent_content(String.t(), keyword()) :: delete_agent_content_result()
+  def delete_agent_content(agent_id, opts \\ []) do
+    with {:ok, admitted} <- ContentCore.admit(agent_id, opts),
+         {:ok, archive} <- resolve_maintenance_archive() do
+      deadline_mono = System.monotonic_time(:millisecond) + admitted.timeout_ms
+      run_delete(admitted, archive, deadline_mono)
+    end
+  rescue
+    _ -> incomplete_after_exception(agent_id)
+  catch
+    kind, _ when kind in [:exit, :throw, :error] ->
+      incomplete_after_exception(agent_id)
+  end
+
+  @doc """
+  Read-only check that retained event content for exactly one agent is absent
+  on all four authorities.
+
+  Visits Signals, local `:memory_events`, Historian, and the configured
+  maintenance archive without mutating any source. Returns `{:ok, false}` when
+  any authority authoritatively proves presence, `{:ok, true}` only when all
+  four prove absence, and
+  `{:error, {:absence_indeterminate, agent_id, report}}` when uncertainty
+  remains without proven presence.
+  """
+  @spec agent_content_absent?(String.t()) :: agent_content_absent_result()
+  @spec agent_content_absent?(String.t(), keyword()) :: agent_content_absent_result()
+  def agent_content_absent?(agent_id, opts \\ []) do
+    with {:ok, admitted} <- ContentCore.admit(agent_id, opts),
+         {:ok, archive} <- resolve_maintenance_archive() do
+      deadline_mono = System.monotonic_time(:millisecond) + admitted.timeout_ms
+      run_absent(admitted, archive, deadline_mono)
+    end
+  rescue
+    _ -> indeterminate_after_exception(agent_id)
+  catch
+    kind, _ when kind in [:exit, :throw, :error] ->
+      indeterminate_after_exception(agent_id)
   end
 
   # ============================================================================
@@ -925,4 +1002,204 @@ defmodule Arbor.Memory.Events do
   defp stream_id(agent_id) do
     "memory:#{agent_id}"
   end
+
+  # ---------------------------------------------------------------------------
+  # Event-content composition shell (C4D)
+  # ---------------------------------------------------------------------------
+
+  defp resolve_maintenance_archive do
+    case Config.maintenance_archive_target() do
+      {:ok, target} -> {:ok, target}
+      {:error, :invalid_event_log_target} -> {:error, :invalid_precondition}
+    end
+  end
+
+  defp run_delete(admitted, archive, deadline_mono) do
+    report =
+      Enum.reduce(ContentCore.authority_order(), ContentCore.init_delete_report(), fn key, acc ->
+        delete_authority(key, admitted, archive, deadline_mono, acc)
+      end)
+
+    report =
+      Enum.reduce(ContentCore.authority_order(), report, fn key, acc ->
+        verify_authority(key, admitted, archive, deadline_mono, acc)
+      end)
+
+    ContentCore.finalize_delete(admitted.agent_id, report)
+  end
+
+  defp run_absent(admitted, archive, deadline_mono) do
+    report =
+      Enum.reduce(ContentCore.authority_order(), ContentCore.init_absence_report(), fn key, acc ->
+        observe_authority(key, admitted, archive, deadline_mono, acc)
+      end)
+
+    ContentCore.finalize_absence(admitted.agent_id, report)
+  end
+
+  defp delete_authority(key, admitted, archive, deadline_mono, report) do
+    case ContentCore.remaining_ms(deadline_mono, System.monotonic_time(:millisecond)) do
+      :exhausted ->
+        ContentCore.put_status(report, key, :not_attempted_deadline)
+
+      {:ok, remaining} ->
+        reply = safe_delete(key, admitted, archive, remaining)
+        status = ContentCore.classify_delete_reply(key, reply)
+        ContentCore.put_status(report, key, status)
+    end
+  end
+
+  defp verify_authority(key, admitted, archive, deadline_mono, report) do
+    case ContentCore.remaining_ms(deadline_mono, System.monotonic_time(:millisecond)) do
+      :exhausted ->
+        report
+
+      {:ok, remaining} ->
+        reply = safe_absent(key, admitted, archive, remaining)
+        class = ContentCore.classify_absence_reply(key, reply)
+        ContentCore.apply_verify_result(report, key, class)
+    end
+  end
+
+  defp observe_authority(key, admitted, archive, deadline_mono, report) do
+    case ContentCore.remaining_ms(deadline_mono, System.monotonic_time(:millisecond)) do
+      :exhausted ->
+        ContentCore.put_status(report, key, :not_attempted_deadline)
+
+      {:ok, remaining} ->
+        reply = safe_absent(key, admitted, archive, remaining)
+
+        case ContentCore.classify_absence_reply(key, reply) do
+          :absent -> ContentCore.put_status(report, key, :absent)
+          :present -> ContentCore.put_status(report, key, :present)
+          :uncertain -> ContentCore.put_status(report, key, :absence_indeterminate)
+        end
+    end
+  end
+
+  defp safe_delete(:signals, admitted, _archive, remaining) do
+    Signals.delete_memory_agent_content(
+      admitted.agent_id,
+      ContentCore.facade_timeout_opts(remaining)
+    )
+  rescue
+    _ -> {:error, {:delete_indeterminate, admitted.agent_id}}
+  catch
+    kind, _ when kind in [:exit, :throw, :error] ->
+      {:error, {:delete_indeterminate, admitted.agent_id}}
+  end
+
+  defp safe_delete(:local_event_log, admitted, _archive, remaining) do
+    opts = ContentCore.put_persistence_budget([], :purge, remaining)
+
+    Persistence.purge_stream(
+      @event_log_name,
+      @event_log_backend,
+      admitted.stream_id,
+      opts
+    )
+  rescue
+    _ -> {:error, {:purge_indeterminate, admitted.stream_id}}
+  catch
+    kind, _ when kind in [:exit, :throw, :error] ->
+      {:error, {:purge_indeterminate, admitted.stream_id}}
+  end
+
+  defp safe_delete(:historian, admitted, _archive, remaining) do
+    Historian.delete_stream_content(
+      admitted.stream_id,
+      ContentCore.facade_timeout_opts(remaining)
+    )
+  rescue
+    _ -> {:error, {:delete_indeterminate, admitted.stream_id}}
+  catch
+    kind, _ when kind in [:exit, :throw, :error] ->
+      {:error, {:delete_indeterminate, admitted.stream_id}}
+  end
+
+  defp safe_delete(:maintenance_archive, admitted, archive, remaining) do
+    opts = ContentCore.put_persistence_budget(archive.opts, :purge, remaining)
+
+    Persistence.purge_stream(archive.name, archive.backend, admitted.stream_id, opts)
+  rescue
+    _ -> {:error, {:purge_indeterminate, admitted.stream_id}}
+  catch
+    kind, _ when kind in [:exit, :throw, :error] ->
+      {:error, {:purge_indeterminate, admitted.stream_id}}
+  end
+
+  defp safe_absent(:signals, admitted, _archive, remaining) do
+    Signals.memory_agent_content_absent?(
+      admitted.agent_id,
+      ContentCore.facade_timeout_opts(remaining)
+    )
+  rescue
+    _ -> {:error, {:absence_indeterminate, admitted.agent_id}}
+  catch
+    kind, _ when kind in [:exit, :throw, :error] ->
+      {:error, {:absence_indeterminate, admitted.agent_id}}
+  end
+
+  defp safe_absent(:local_event_log, admitted, _archive, remaining) do
+    opts = ContentCore.put_persistence_budget([], :absence, remaining)
+
+    Persistence.event_stream_absent?(
+      @event_log_name,
+      @event_log_backend,
+      admitted.stream_id,
+      opts
+    )
+  rescue
+    _ -> {:error, {:absence_indeterminate, admitted.stream_id}}
+  catch
+    kind, _ when kind in [:exit, :throw, :error] ->
+      {:error, {:absence_indeterminate, admitted.stream_id}}
+  end
+
+  defp safe_absent(:historian, admitted, _archive, remaining) do
+    Historian.stream_content_absent?(
+      admitted.stream_id,
+      ContentCore.facade_timeout_opts(remaining)
+    )
+  rescue
+    _ -> {:error, {:absence_indeterminate, admitted.stream_id}}
+  catch
+    kind, _ when kind in [:exit, :throw, :error] ->
+      {:error, {:absence_indeterminate, admitted.stream_id}}
+  end
+
+  defp safe_absent(:maintenance_archive, admitted, archive, remaining) do
+    opts = ContentCore.put_persistence_budget(archive.opts, :absence, remaining)
+
+    Persistence.event_stream_absent?(archive.name, archive.backend, admitted.stream_id, opts)
+  rescue
+    _ -> {:error, {:absence_indeterminate, admitted.stream_id}}
+  catch
+    kind, _ when kind in [:exit, :throw, :error] ->
+      {:error, {:absence_indeterminate, admitted.stream_id}}
+  end
+
+  defp incomplete_after_exception(agent_id) when is_binary(agent_id) and agent_id != "" do
+    case ContentCore.admit(agent_id, []) do
+      {:ok, _} ->
+        {:error, {:cleanup_incomplete, agent_id, ContentCore.exception_delete_report()}}
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  defp incomplete_after_exception(_agent_id), do: {:error, :invalid_agent_id}
+
+  defp indeterminate_after_exception(agent_id) when is_binary(agent_id) and agent_id != "" do
+    case ContentCore.admit(agent_id, []) do
+      {:ok, _} ->
+        {:error, {:absence_indeterminate, agent_id, ContentCore.exception_absence_report()}}
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  defp indeterminate_after_exception(_agent_id), do: {:error, :invalid_agent_id}
 end
