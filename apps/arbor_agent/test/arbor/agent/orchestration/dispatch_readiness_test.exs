@@ -110,12 +110,18 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessTest do
 
   defmodule FakeLifecycle do
     def get_host(_agent_id) do
-      case Process.get({__MODULE__, :host}) do
+      case Process.get({__MODULE__, :host}, :__unset__) do
         {:ok, pid} = ok when is_pid(pid) -> ok
         :absent -> {:error, :no_host}
         :raise -> raise "lifecycle boom"
+        :throw -> throw(:lifecycle_throw)
+        :exit -> exit(:lifecycle_exit)
         :malformed -> :not_a_host_result
-        other -> other || {:error, :no_host}
+        # Process.put(key, nil) deletes the key; use a sentinel for bare nil returns.
+        :return_nil -> nil
+        :__unset__ -> {:error, :no_host}
+        # Preserve bare :error / error tuples so shell classification is tested.
+        other -> other
       end
     end
   end
@@ -365,7 +371,7 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessTest do
   end
 
   # Production-default callback path: no invoke_executor override.
-  defp production_callback_deps(extra \\ %{}) do
+  defp production_callback_deps(extra) do
     base = deps(extra)
     Map.delete(base, :invoke_executor)
   end
@@ -549,7 +555,7 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessTest do
     refute inspect(ready) =~ "cap_"
   end
 
-  test "coordinator absent blocks; raising/malformed coordinator is error" do
+  test "coordinator absent blocks; infrastructure failure and raise are error" do
     Process.put({FakeLifecycle, :host}, :absent)
 
     assert {:ok, absent} =
@@ -562,6 +568,47 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessTest do
 
     assert absent["planes"]["coordinator"]["status"] == "blocked"
     assert absent["planes"]["coordinator"]["code"] == "coordinator_absent"
+    assert absent["planes"]["coordinator"]["details"]["host_state"] == "absent"
+
+    # Only {:error, :no_host} is ordinary absence; other error tuples are error.
+    Process.put({FakeLifecycle, :host}, {:error, :registry_down})
+
+    assert {:ok, registry_down} =
+             DispatchReadiness.project_with_deps(
+               "agent_target1",
+               coding_task(),
+               [caller_id: "human_caller1"],
+               deps()
+             )
+
+    assert registry_down["planes"]["coordinator"]["status"] == "error"
+    assert registry_down["planes"]["coordinator"]["code"] == "coordinator_projection_failed"
+    assert registry_down["planes"]["coordinator"]["details"]["host_state"] == "error"
+    assert registry_down["status"] == "error"
+
+    Process.put({FakeLifecycle, :host}, :error)
+
+    assert {:ok, bare_error} =
+             DispatchReadiness.project_with_deps(
+               "agent_target1",
+               coding_task(),
+               [caller_id: "human_caller1"],
+               deps()
+             )
+
+    assert bare_error["planes"]["coordinator"]["status"] == "error"
+
+    Process.put({FakeLifecycle, :host}, :return_nil)
+
+    assert {:ok, nil_host} =
+             DispatchReadiness.project_with_deps(
+               "agent_target1",
+               coding_task(),
+               [caller_id: "human_caller1"],
+               deps()
+             )
+
+    assert nil_host["planes"]["coordinator"]["status"] == "error"
 
     Process.put({FakeLifecycle, :host}, :raise)
 
@@ -576,6 +623,33 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessTest do
     assert raised["planes"]["coordinator"]["status"] == "error"
     assert raised["status"] == "error"
     refute inspect(raised) =~ "lifecycle boom"
+    assert Process.alive?(self())
+
+    Process.put({FakeLifecycle, :host}, :throw)
+
+    assert {:ok, thrown} =
+             DispatchReadiness.project_with_deps(
+               "agent_target1",
+               coding_task(),
+               [caller_id: "human_caller1"],
+               deps()
+             )
+
+    assert thrown["planes"]["coordinator"]["status"] == "error"
+    assert Process.alive?(self())
+
+    Process.put({FakeLifecycle, :host}, :exit)
+
+    assert {:ok, exited} =
+             DispatchReadiness.project_with_deps(
+               "agent_target1",
+               coding_task(),
+               [caller_id: "human_caller1"],
+               deps()
+             )
+
+    assert exited["planes"]["coordinator"]["status"] == "error"
+    assert Process.alive?(self())
 
     Process.put({FakeLifecycle, :host}, :malformed)
 

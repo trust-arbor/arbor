@@ -79,7 +79,7 @@ defmodule Arbor.Agent.DispatchReadinessFacadeTest do
              )
   end
 
-  test "forwards ordinary 15-minute and longer coding timeouts unchanged" do
+  test "forwards ordinary and longer positive coding timeouts unchanged" do
     parent = self()
 
     fun = fn _agent, _task, opts ->
@@ -87,6 +87,7 @@ defmodule Arbor.Agent.DispatchReadinessFacadeTest do
       {:ok, valid_report()}
     end
 
+    # Ordinary reviewed coding budget.
     assert {:ok, _} =
              DispatchReadinessFacade.project(
                "human_ok1",
@@ -98,7 +99,7 @@ defmodule Arbor.Agent.DispatchReadinessFacadeTest do
 
     assert_received {:timeout, 900_000}
 
-    # Longer reviewed coding budget beyond the former 300_000 ceiling.
+    # Longer reviewed coding budget; any positive integer is accepted.
     assert {:ok, _} =
              DispatchReadinessFacade.project(
                "human_ok1",
