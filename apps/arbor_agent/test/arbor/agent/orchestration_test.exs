@@ -713,7 +713,9 @@ defmodule Arbor.Agent.OrchestrationTest do
                  security_module: FakeSecurity
                )
 
-      assert_received {:authorize, "human_1", "arbor://agent/dispatch/agent_1", :execute, auth_opts}
+      assert_received {:authorize, "human_1", "arbor://agent/dispatch/agent_1", :execute,
+                       auth_opts}
+
       assert Keyword.get(auth_opts, :session_token) == "secret_proof"
       assert is_map(report)
       assert report["kind"] == "agent_coding_dispatch_readiness"

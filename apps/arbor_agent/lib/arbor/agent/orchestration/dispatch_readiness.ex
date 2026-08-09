@@ -26,8 +26,8 @@ defmodule Arbor.Agent.Orchestration.DispatchReadiness do
           optional(:exact_policy) => module(),
           optional(:clock) => (-> DateTime.t()),
           optional(:callback_timeout_ms) => pos_integer(),
-          optional(:invoke_executor) =>
-            (module(), String.t(), term(), map(), pos_integer() -> term())
+          optional(:invoke_executor) => (module(), String.t(), term(), map(), pos_integer() ->
+                                           term())
         }
 
   @spec project(String.t(), term(), keyword() | map()) :: {:ok, map()}
@@ -161,7 +161,8 @@ defmodule Arbor.Agent.Orchestration.DispatchReadiness do
         restore_scanned: optional_non_neg(cap_stats, :restore_scanned, "restore_scanned"),
         restore_active: optional_non_neg(cap_stats, :restore_active, "restore_active"),
         restore_expired: optional_non_neg(cap_stats, :restore_expired, "restore_expired"),
-        restore_superseded: optional_non_neg(cap_stats, :restore_superseded, "restore_superseded"),
+        restore_superseded:
+          optional_non_neg(cap_stats, :restore_superseded, "restore_superseded"),
         restore_rejected: optional_non_neg(cap_stats, :restore_rejected, "restore_rejected"),
         quota_enforcement_enabled?: enforcement,
         active_capabilities: active_capabilities,

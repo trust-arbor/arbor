@@ -157,6 +157,7 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessCoreTest do
     assert executor["status"] == "degraded"
     assert {:ok, report} = Core.compose(base_facts(%{executor: executor}))
     assert report["status"] == "degraded"
+
     assert report["planes"]["executor"]["details"]["projection"]["readiness"]["status"] ==
              "degraded"
   end
@@ -231,7 +232,10 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessCoreTest do
 
   test "tuple and non-string keys are rejected without raising or status laundering" do
     assert {:error, "executor_non_json", _} =
-             Core.validate_and_bound_executor_report(%{{:tuple, :key} => "x", "status" => "ready"})
+             Core.validate_and_bound_executor_report(%{
+               {:tuple, :key} => "x",
+               "status" => "ready"
+             })
 
     assert {:error, "executor_non_json", _} =
              Core.validate_and_bound_executor_report(%{1 => "x", "status" => "ready"})
@@ -276,6 +280,34 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessCoreTest do
                "status" => "ready",
                invalid => "x"
              })
+  end
+
+  test "security regression: oversized source strings fail closed before projection" do
+    max_input = 65_536
+    oversized = String.duplicate("x", max_input + 1)
+
+    assert {:error, "executor_non_json", _} =
+             Core.validate_and_bound_executor_report(%{
+               "status" => "ready",
+               "payload" => oversized
+             })
+
+    assert Core.max_input_string_bytes() == max_input
+
+    boundary = String.duplicate("x", max_input)
+
+    assert {:ok, bounded, "ready"} =
+             Core.validate_and_bound_executor_report(%{
+               "status" => "ready",
+               "payload" => boundary
+             })
+
+    assert byte_size(bounded["payload"]) == Core.max_string_bytes()
+
+    plane = Core.plane("ready", nil, nil, %{payload: oversized})
+    assert plane["status"] == "error"
+    assert plane["code"] == "malformed_plane_details"
+    assert Core.utf8_truncate(oversized, 32) == ""
   end
 
   test "oversized top-level strings are bounded" do

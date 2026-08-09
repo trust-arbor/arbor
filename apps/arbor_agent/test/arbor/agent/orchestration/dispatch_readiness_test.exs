@@ -934,6 +934,7 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessTest do
              )
 
     assert exited["planes"]["executor"]["status"] == "error"
+
     assert exited["planes"]["executor"]["code"] in [
              "executor_callback_exit",
              "executor_projection_error"

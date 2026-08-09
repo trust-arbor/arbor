@@ -10,6 +10,9 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessCore do
   @required_grants 6
   @max_message_bytes 256
   @max_string_bytes 1_024
+  # Bound validation work before UTF-8 scanning or grapheme truncation. Mirrors
+  # the durable JSON envelope's accepted source-string ceiling.
+  @max_input_string_bytes 65_536
   @max_key_bytes 256
   @max_top_string_bytes 512
   # Portable JSON integer magnitude ceiling (2^53-1), mirrored from durable
@@ -40,10 +43,10 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessCore do
 
   # Operational non-readiness remains blocked; internal projection failures are error.
   @blocked_executor_codes MapSet.new([
-    "executor_callback_missing",
-    "unsupported_or_missing_kind",
-    "executor_unavailable"
-  ])
+                            "executor_callback_missing",
+                            "unsupported_or_missing_kind",
+                            "executor_unavailable"
+                          ])
 
   @type json_scalar :: String.t() | number() | boolean() | nil
   @type json_value :: json_scalar() | [json_value()] | %{optional(String.t()) => json_value()}
@@ -69,6 +72,9 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessCore do
 
   @spec max_string_bytes() :: pos_integer()
   def max_string_bytes, do: @max_string_bytes
+
+  @spec max_input_string_bytes() :: pos_integer()
+  def max_input_string_bytes, do: @max_input_string_bytes
 
   @spec max_top_string_bytes() :: pos_integer()
   def max_top_string_bytes, do: @max_top_string_bytes
@@ -152,8 +158,8 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessCore do
   end
 
   @doc """
-  Build one closed plane map. Total for internal projectors: always returns a
-  map. Malformed internal details yield a stable error plane
+  Always returns a closed plane map for internal projectors. Malformed internal
+  details yield a stable error plane
   (`malformed_plane_details`) rather than the requested status with empty
   details.
   """
@@ -380,7 +386,8 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessCore do
           {"blocked", "exact_template_drifted", "managed exact template has drifted from source"}
 
         "unavailable" ->
-          {"blocked", "exact_template_unavailable", "exact template source or profile unavailable"}
+          {"blocked", "exact_template_unavailable",
+           "exact template source or profile unavailable"}
 
         "invalid" ->
           {"blocked", "exact_template_invalid", "exact template policy or source is invalid"}
@@ -564,6 +571,9 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessCore do
   def utf8_truncate(string, max_bytes)
       when is_binary(string) and is_integer(max_bytes) and max_bytes > 0 do
     cond do
+      byte_size(string) > @max_input_string_bytes ->
+        ""
+
       not String.valid?(string) ->
         ""
 
@@ -615,7 +625,8 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessCore do
          "principal indexed capability count is unavailable"}
 
       not non_neg_int?(global) ->
-        {:error, "global_quota_count_unavailable", "global active capability count is unavailable"}
+        {:error, "global_quota_count_unavailable",
+         "global active capability count is unavailable"}
 
       not positive_int?(max_per) or not positive_int?(max_global) ->
         {:error, "quota_limits_unavailable", "capability quota limits are unavailable"}
@@ -769,7 +780,7 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessCore do
   end
 
   defp walk_json(v, _depth, _max_depth, nodes_left) when is_binary(v) do
-    if String.valid?(v), do: {:ok, nodes_left - 1}, else: :error
+    if bounded_valid_string?(v), do: {:ok, nodes_left - 1}, else: :error
   end
 
   defp walk_json(list, depth, max_depth, nodes_left)
@@ -815,7 +826,7 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessCore do
   defp walk_map([], _depth, _max_depth, nodes_left), do: {:ok, nodes_left}
 
   defp walk_map([{k, v} | rest], depth, max_depth, nodes_left) when is_binary(k) do
-    if String.valid?(k) and byte_size(k) <= @max_key_bytes do
+    if byte_size(k) <= @max_key_bytes and String.valid?(k) do
       case walk_json(v, depth, max_depth, nodes_left) do
         {:ok, remaining} -> walk_map(rest, depth, max_depth, remaining)
         :error -> :error
@@ -913,7 +924,7 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessCore do
           end
 
         {k, v}, {:ok, acc, n} when is_binary(k) ->
-          if String.valid?(k) and byte_size(k) <= @max_key_bytes do
+          if byte_size(k) <= @max_key_bytes and String.valid?(k) do
             if Map.has_key?(acc, k) do
               {:halt, :error}
             else
@@ -945,7 +956,7 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessCore do
   end
 
   defp do_stringify(v, nodes_left) when is_binary(v) do
-    if String.valid?(v), do: {:ok, v, nodes_left - 1}, else: :error
+    if bounded_valid_string?(v), do: {:ok, v, nodes_left - 1}, else: :error
   end
 
   defp do_stringify(v, nodes_left) when is_boolean(v) or is_nil(v),
@@ -1001,24 +1012,29 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessCore do
 
   defp finite_float?(_), do: false
 
+  defp bounded_valid_string?(value) when is_binary(value) do
+    byte_size(value) <= @max_input_string_bytes and String.valid?(value)
+  end
+
   defp bound_message(message) when is_binary(message),
     do: utf8_truncate(message, @max_message_bytes)
 
   defp bound_message(_), do: "dispatch readiness failed closed"
 
-  defp do_utf8_truncate(string, max_bytes) do
-    string
-    |> String.graphemes()
-    |> Enum.reduce_while({"", 0}, fn grapheme, {acc, size} ->
-      gsize = byte_size(grapheme)
+  defp do_utf8_truncate(string, max_bytes),
+    do: do_utf8_truncate(string, max_bytes, 0, [])
 
-      if size + gsize <= max_bytes do
-        {:cont, {acc <> grapheme, size + gsize}}
-      else
-        {:halt, {acc, size}}
-      end
-    end)
-    |> elem(0)
+  defp do_utf8_truncate("", _max_bytes, _size, acc),
+    do: acc |> Enum.reverse() |> :erlang.iolist_to_binary()
+
+  defp do_utf8_truncate(string, max_bytes, size, acc) do
+    case String.next_grapheme(string) do
+      {grapheme, rest} when size + byte_size(grapheme) <= max_bytes ->
+        do_utf8_truncate(rest, max_bytes, size + byte_size(grapheme), [grapheme | acc])
+
+      _ ->
+        acc |> Enum.reverse() |> :erlang.iolist_to_binary()
+    end
   end
 
   defp stable_code(code) when is_atom(code), do: Atom.to_string(code)
@@ -1036,7 +1052,7 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessCore do
   defp stable_code(_), do: "projection_failed"
 
   defp top_string_or_nil(v) when is_binary(v) and v != "" do
-    if String.valid?(v), do: utf8_truncate(v, @max_top_string_bytes), else: nil
+    if bounded_valid_string?(v), do: utf8_truncate(v, @max_top_string_bytes), else: nil
   end
 
   defp top_string_or_nil(_), do: nil
