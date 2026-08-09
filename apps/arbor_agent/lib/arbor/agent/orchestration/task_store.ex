@@ -477,7 +477,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
         :task_control_recovery_facade,
         if(Mix.env() == :test,
           do: Arbor.Agent.Orchestration.TaskControlRecoveryMemory,
-          else: Arbor.Persistence
+          else: Arbor.Agent.Orchestration.TaskControlRecoveryPersistence
         )
       )
       |> validate_task_control_recovery_facade!()
@@ -510,6 +510,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     end
 
     durable? = recovery_facade_durable?(recovery_facade)
+    production_recovery? = production_recovery_facade?(recovery_facade)
 
     state = %{
       task_supervisor: task_supervisor,
@@ -543,7 +544,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
       task_id_generator: task_id_generator,
       # cache-only/unbacked facades fail closed: never recovery_durable? true.
       recovery_durable?: durable?,
-      recovery_ready?: force_ready? and durable?,
+      recovery_ready?: force_ready? and durable? and not production_recovery?,
       recovery_replay: %{phase: :pending, cursor: [], failures: 0, deadline_mono: 0},
       reservations: %{},
       reservation_monitor_index: %{},
@@ -636,7 +637,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     }
 
     cond do
-      force_ready? and durable? ->
+      force_ready? and durable? and not production_recovery? ->
         {:ok, state}
 
       durable? ->
@@ -651,8 +652,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   @impl true
   def handle_continue(:start_recovery_replay, state) do
     state = ensure_recovery_shape(state)
-    state = begin_recovery_op(state, :replay_batch, nil, nil, nil)
-    {:noreply, state}
+    {:noreply, begin_recovery_op(state, :replay_batch, nil, nil, nil)}
   end
 
   def handle_continue(:retry_recovery_replay, state) do
@@ -2573,20 +2573,29 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     |> Map.put_new(:recovery_retry_base_ms, @default_recovery_retry_base_ms)
     |> Map.put_new(:recovery_retry_max_ms, @default_recovery_retry_max_ms)
     |> Map.put_new(:recovery_max_retries, @default_recovery_max_retries)
-    |> Map.put_new(:task_control_recovery_facade, Arbor.Persistence)
+    |> Map.put_new(
+      :task_control_recovery_facade,
+      Arbor.Agent.Orchestration.TaskControlRecoveryPersistence
+    )
     |> Map.put_new(:task_control_recovery_store, @default_recovery_store)
     |> Map.put_new(:task_control_security_module, Arbor.Security)
   end
 
-  # Memory and Persistence acknowledged facades are durable. Cache-only / nil
-  # facades fail closed (recovery_durable? false → reserve/marker rejected).
+  # Production durability is established by the fixed persistence adapter and
+  # then attested against the named BufferedStore authority before readiness.
+  # Explicit injected facades remain available only in MIX_ENV=test.
+  defp recovery_facade_durable?(Arbor.Agent.Orchestration.TaskControlRecoveryPersistence),
+    do: true
+
   defp recovery_facade_durable?(facade) when is_atom(facade) and not is_nil(facade) do
-    facade in [Arbor.Persistence, Arbor.Agent.Orchestration.TaskControlRecoveryMemory] or
-      (Code.ensure_loaded?(facade) and
-         function_exported?(facade, :buffered_store_acknowledged_put, 3))
+    Mix.env() == :test and Code.ensure_loaded?(facade) and
+      function_exported?(facade, :buffered_store_acknowledged_put, 3)
   end
 
   defp recovery_facade_durable?(_), do: false
+
+  defp production_recovery_facade?(facade),
+    do: facade == Arbor.Agent.Orchestration.TaskControlRecoveryPersistence
 
   defp admit_new_reservation(state) do
     max_res = Map.get(state, :max_reservations, @default_max_reservations)
@@ -2766,7 +2775,13 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
           Map.get(state, :task_supervisor, @default_task_supervisor)
         )
 
-      facade = Map.get(state, :task_control_recovery_facade, Arbor.Persistence)
+      facade =
+        Map.get(
+          state,
+          :task_control_recovery_facade,
+          Arbor.Agent.Orchestration.TaskControlRecoveryPersistence
+        )
+
       store_name = Map.get(state, :task_control_recovery_store, @default_recovery_store)
       security = Map.get(state, :task_control_security_module, Arbor.Security)
 
@@ -3350,7 +3365,8 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
          %{kind: :replay_batch},
          {:ok, %{failures: 0, remaining: 0}}
        ) do
-    # Authoritative empty remainder — only then mark ready.
+    # Authoritative empty remainder — only then mark ready. The production
+    # adapter attests node-restart durability before each authoritative list.
     %{state | recovery_ready?: true}
   end
 

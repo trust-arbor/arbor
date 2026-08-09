@@ -3,6 +3,8 @@ defmodule Arbor.Agent.Application do
 
   use Application
 
+  @task_control_recovery_store :arbor_agent_task_control_recovery
+
   @impl true
   def start(_type, _args) do
     children =
@@ -51,7 +53,7 @@ defmodule Arbor.Agent.Application do
           # recovery_backend!/0 fails closed when no durable backend is configured.
           Supervisor.child_spec(
             {Arbor.Persistence.BufferedStore,
-             name: :arbor_agent_task_control_recovery,
+             name: @task_control_recovery_store,
              backend: recovery_backend!(),
              backend_opts: [repo: Arbor.Persistence.Repo],
              write_mode: :sync,
@@ -143,12 +145,29 @@ defmodule Arbor.Agent.Application do
         profile_backend()
       )
 
-    if is_nil(backend) do
-      raise ArgumentError,
-            "task-control recovery store requires a durable backend " <>
-              "(ack_mode: :backend); cache-only/unbacked storage is forbidden"
-    end
+    case backend do
+      nil ->
+        raise ArgumentError,
+              "task-control recovery store requires a durable backend " <>
+                "(ack_mode: :backend); cache-only/unbacked storage is forbidden"
 
-    backend
+      backend ->
+        case Arbor.Persistence.durability_class(
+               @task_control_recovery_store,
+               backend,
+               repo: Arbor.Persistence.Repo
+             ) do
+          {:ok, :node_restart} ->
+            backend
+
+          {:ok, class} ->
+            raise ArgumentError,
+                  "task-control recovery backend is not crash-durable: #{inspect(class)}"
+
+          {:error, reason} ->
+            raise ArgumentError,
+                  "task-control recovery backend cannot attest durability: #{inspect(reason)}"
+        end
+    end
   end
 end
