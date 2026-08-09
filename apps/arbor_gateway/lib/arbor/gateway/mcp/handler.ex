@@ -1037,16 +1037,17 @@ defmodule Arbor.Gateway.MCP.Handler do
   # via :agent_facade_module; defaults to Arbor.Agent without a compile-time
   # reference. Does not reuse the internal Orchestration module.
   # Failure projection never inspects or logs malformed values/reasons — only
-  # stable class atoms. Accept only {:ok, plain_map} (structs rejected). Pass
-  # through only documented public facade atom errors; every other {:error, term}
-  # and return shape becomes :agent_facade_malformed_return.
+  # stable class atoms. Accept only {:ok, plain_map} (structs rejected) whose
+  # complete MCP response envelope is JSON-encodable. Pass through only
+  # documented public facade atom errors; every other {:error, term}, return
+  # shape, or non-JSON report becomes :agent_facade_malformed_return.
   defp call_agent_facade(function, args) do
     module = agent_facade_module()
 
     if Code.ensure_loaded?(module) and function_exported?(module, function, length(args)) do
       case apply(module, function, args) do
         {:ok, report} when is_map(report) and not is_struct(report) ->
-          {:ok, report}
+          admit_json_encodable_facade_report(report)
 
         {:error, reason}
         when is_atom(reason) and reason in @agent_facade_public_errors ->
@@ -1076,6 +1077,45 @@ defmodule Arbor.Gateway.MCP.Handler do
     :exit, _reason ->
       log_agent_facade_class(:agent_facade_exit)
       {:error, :agent_facade_exit}
+  end
+
+  # Prove the complete MCP envelope that coding_dispatch_readiness/1 will hand
+  # to json_content/1 is already JSON-clean and encodable before admitting
+  # {:ok, report}. Mirror json_content/1 exactly: require json_safe(envelope)
+  # to be identical to the original envelope (rejecting atoms, tuples, nested
+  # structs, and other coercions Jason might otherwise accept), then require
+  # Jason.encode(safe_envelope) to succeed. Any mismatch, encode failure,
+  # exception, throw, exit, improper list, PID, reference, function, or other
+  # non-JSON term fails closed as the stable class only — never inspect,
+  # stringify, log, or return the offending value.
+  defp admit_json_encodable_facade_report(report) when is_map(report) do
+    envelope = %{"ok" => true, "readiness" => report}
+
+    try do
+      safe_envelope = json_safe(envelope)
+
+      if safe_envelope === envelope do
+        case Jason.encode(safe_envelope) do
+          {:ok, _json} ->
+            {:ok, report}
+
+          {:error, _encode_error} ->
+            log_agent_facade_class(:agent_facade_malformed_return)
+            {:error, :agent_facade_malformed_return}
+        end
+      else
+        log_agent_facade_class(:agent_facade_malformed_return)
+        {:error, :agent_facade_malformed_return}
+      end
+    rescue
+      _exception ->
+        log_agent_facade_class(:agent_facade_malformed_return)
+        {:error, :agent_facade_malformed_return}
+    catch
+      _kind, _reason ->
+        log_agent_facade_class(:agent_facade_malformed_return)
+        {:error, :agent_facade_malformed_return}
+    end
   end
 
   defp agent_facade_module do

@@ -53,6 +53,27 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
     end
   end
 
+  defmodule PidInMapAgentFacade do
+    def coding_dispatch_readiness(_caller_id, _agent_id, _task, _opts) do
+      # Plain map passes the is_map guard but is not JSON-encodable (PID).
+      {:ok, %{"status" => "ready", "value" => self()}}
+    end
+  end
+
+  defmodule AtomValueAgentFacade do
+    def coding_dispatch_readiness(_caller_id, _agent_id, _task, _opts) do
+      # Plain map Jason would coerce (atom value → string); json_safe must reject.
+      {:ok, %{"status" => "ready", "mode" => :auto}}
+    end
+  end
+
+  defmodule NestedDateTimeInMapAgentFacade do
+    def coding_dispatch_readiness(_caller_id, _agent_id, _task, _opts) do
+      # DateTime is Jason-encodable, but json_safe rewrites it to ISO-8601.
+      {:ok, %{"status" => "ready", "at" => ~U[2026-07-08 12:00:00Z]}}
+    end
+  end
+
   defmodule FakeOrchestration do
     def list_pending_approvals(opts) do
       send(self(), {:list_pending_approvals, opts})
@@ -399,7 +420,7 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
       assert "message" in steer_tool.inputSchema.required
     end
 
-    test "arbor_coding_dispatch_readiness schema requires structured task and positive timeout",
+    test "arbor_coding_dispatch_readiness schema requires structured task; timeout is optional but positive when present",
          %{state: state} do
       {:ok, tools, _, _} = Handler.handle_list_tools(nil, state)
       tool = Enum.find(tools, &(&1.name == "arbor_coding_dispatch_readiness"))
@@ -791,6 +812,92 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
       refute text =~ "must-not-leak"
       refute text =~ "StructReportAgentFacade.Report"
       refute text =~ "status"
+    end
+
+    test "plain-map report with PID fails closed as agent_facade_malformed_return without leaking",
+         %{state: state} do
+      previous = Application.get_env(:arbor_gateway, :agent_facade_module)
+      Application.put_env(:arbor_gateway, :agent_facade_module, PidInMapAgentFacade)
+
+      on_exit(fn ->
+        case previous do
+          nil -> Application.delete_env(:arbor_gateway, :agent_facade_module)
+          value -> Application.put_env(:arbor_gateway, :agent_facade_module, value)
+        end
+      end)
+
+      Process.put(:arbor_authenticated_agent_id, "human_1")
+
+      {:ok, result, _state} =
+        Handler.handle_call_tool(
+          "arbor_coding_dispatch_readiness",
+          %{"agent_id" => "agent_1", "task" => @coding_task},
+          state
+        )
+
+      assert result.isError == true
+      assert [%{text: text}] = result.content
+      assert text == "Error: :agent_facade_malformed_return"
+      refute text =~ "#PID"
+      refute text =~ "value"
+      refute text =~ inspect(self())
+    end
+
+    test "plain-map report with atom value fails closed without leaking the atom", %{state: state} do
+      previous = Application.get_env(:arbor_gateway, :agent_facade_module)
+      Application.put_env(:arbor_gateway, :agent_facade_module, AtomValueAgentFacade)
+
+      on_exit(fn ->
+        case previous do
+          nil -> Application.delete_env(:arbor_gateway, :agent_facade_module)
+          value -> Application.put_env(:arbor_gateway, :agent_facade_module, value)
+        end
+      end)
+
+      Process.put(:arbor_authenticated_agent_id, "human_1")
+
+      {:ok, result, _state} =
+        Handler.handle_call_tool(
+          "arbor_coding_dispatch_readiness",
+          %{"agent_id" => "agent_1", "task" => @coding_task},
+          state
+        )
+
+      assert result.isError == true
+      assert [%{text: text}] = result.content
+      assert text == "Error: :agent_facade_malformed_return"
+      refute text =~ "auto"
+      refute text =~ ":auto"
+      refute text =~ "mode"
+    end
+
+    test "plain-map report with nested DateTime fails closed without leaking rewritten value",
+         %{state: state} do
+      previous = Application.get_env(:arbor_gateway, :agent_facade_module)
+      Application.put_env(:arbor_gateway, :agent_facade_module, NestedDateTimeInMapAgentFacade)
+
+      on_exit(fn ->
+        case previous do
+          nil -> Application.delete_env(:arbor_gateway, :agent_facade_module)
+          value -> Application.put_env(:arbor_gateway, :agent_facade_module, value)
+        end
+      end)
+
+      Process.put(:arbor_authenticated_agent_id, "human_1")
+
+      {:ok, result, _state} =
+        Handler.handle_call_tool(
+          "arbor_coding_dispatch_readiness",
+          %{"agent_id" => "agent_1", "task" => @coding_task},
+          state
+        )
+
+      assert result.isError == true
+      assert [%{text: text}] = result.content
+      assert text == "Error: :agent_facade_malformed_return"
+      refute text =~ "2026-07-08"
+      refute text =~ "DateTime"
+      refute text =~ "at"
     end
 
     test "raising facade fails closed without disclosing exception text", %{state: state} do
