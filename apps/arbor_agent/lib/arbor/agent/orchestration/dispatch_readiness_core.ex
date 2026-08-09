@@ -10,7 +10,13 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessCore do
   @required_grants 6
   @max_message_bytes 256
   @max_string_bytes 1_024
-  @max_depth 8
+  @max_key_bytes 256
+  @max_top_string_bytes 512
+  # Distinct structural limits: executor original envelope vs Agent aggregate.
+  # Wrapper path is planes -> plane -> details -> projection (4 levels).
+  @max_executor_depth 8
+  @max_wrapper_overhead 4
+  @max_aggregate_depth @max_executor_depth + @max_wrapper_overhead
   @max_list_len 32
   @max_map_keys 64
 
@@ -26,6 +32,13 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessCore do
   @plane_keys ~w(security coordinator exact_template task_control executor)
   @top_keys ~w(version kind status observed_at agent_id caller_id planes error)
 
+  # Operational non-readiness remains blocked; internal projection failures are error.
+  @blocked_executor_codes MapSet.new([
+    "executor_callback_missing",
+    "unsupported_or_missing_kind",
+    "executor_unavailable"
+  ])
+
   @type json_scalar :: String.t() | number() | boolean() | nil
   @type json_value :: json_scalar() | [json_value()] | %{optional(String.t()) => json_value()}
   @type report :: %{optional(String.t()) => json_value()}
@@ -38,6 +51,18 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessCore do
 
   @spec statuses() :: [String.t()]
   def statuses, do: @statuses
+
+  @spec max_executor_depth() :: pos_integer()
+  def max_executor_depth, do: @max_executor_depth
+
+  @spec max_aggregate_depth() :: pos_integer()
+  def max_aggregate_depth, do: @max_aggregate_depth
+
+  @spec max_key_bytes() :: pos_integer()
+  def max_key_bytes, do: @max_key_bytes
+
+  @spec max_string_bytes() :: pos_integer()
+  def max_string_bytes, do: @max_string_bytes
 
   @doc """
   Compose a full readiness report from already-projected plane facts.
@@ -68,14 +93,14 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessCore do
         "version" => @version,
         "kind" => @kind,
         "status" => status,
-        "observed_at" => string_or_nil(Map.get(facts, :observed_at)),
-        "agent_id" => string_or_nil(Map.get(facts, :agent_id)),
-        "caller_id" => string_or_nil(Map.get(facts, :caller_id)),
+        "observed_at" => top_string_or_nil(Map.get(facts, :observed_at)),
+        "agent_id" => top_string_or_nil(Map.get(facts, :agent_id)),
+        "caller_id" => top_string_or_nil(Map.get(facts, :caller_id)),
         "planes" => planes,
         "error" => error
       }
 
-      if json_clean?(report) and closed_top?(report) do
+      if aggregate_json_clean?(report) and closed_top?(report) do
         {:ok, report}
       else
         {:error, :malformed_plane_input}
@@ -103,9 +128,9 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessCore do
       "version" => @version,
       "kind" => @kind,
       "status" => "error",
-      "observed_at" => string_or_nil(Map.get(attrs, :observed_at)),
-      "agent_id" => string_or_nil(Map.get(attrs, :agent_id)),
-      "caller_id" => string_or_nil(Map.get(attrs, :caller_id)),
+      "observed_at" => top_string_or_nil(Map.get(attrs, :observed_at)),
+      "agent_id" => top_string_or_nil(Map.get(attrs, :agent_id)),
+      "caller_id" => top_string_or_nil(Map.get(attrs, :caller_id)),
       "planes" => planes,
       "error" => %{"code" => code, "message" => message}
     }
@@ -136,48 +161,14 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessCore do
   @spec project_task_control(map()) :: map()
   def project_task_control(attrs) when is_map(attrs) do
     recovery_ready? = Map.get(attrs, :recovery_ready?) == true
+    recovery_facts_ok? = Map.get(attrs, :recovery_facts_ok?, true) == true
 
-    case quota_decision(attrs) do
-      {:ok, decision} ->
-        members = build_members(recovery_ready?, decision.sufficient?, decision.member_code)
+    cond do
+      not recovery_facts_ok? ->
+        members = build_members(false, false, "recovery_projection_failed")
 
-        status =
-          cond do
-            not recovery_ready? -> "blocked"
-            not decision.sufficient? -> "blocked"
-            true -> "ready"
-          end
-
-        code =
-          cond do
-            not recovery_ready? -> "recovery_not_ready"
-            not decision.sufficient? -> decision.member_code
-            true -> nil
-          end
-
-        message =
-          cond do
-            not recovery_ready? -> "TaskStore recovery is not ready for control-lease minting"
-            not decision.sufficient? -> "insufficient capability quota headroom for six-member lease"
-            true -> nil
-          end
-
-        plane(status, code, message, %{
-          "recovery_ready" => recovery_ready?,
-          "members" => members,
-          "quota" => %{
-            "required_grants" => @required_grants,
-            "principal_headroom" => decision.principal_headroom,
-            "global_headroom" => decision.global_headroom,
-            "sufficient_for_lease" => decision.sufficient?
-          }
-        })
-
-      {:error, member_code, message} ->
-        members = build_members(false, false, member_code)
-
-        plane("blocked", member_code, message, %{
-          "recovery_ready" => recovery_ready?,
+        plane("error", "recovery_projection_failed", "task-control recovery projection failed", %{
+          "recovery_ready" => false,
           "members" => members,
           "quota" => %{
             "required_grants" => @required_grants,
@@ -186,6 +177,63 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessCore do
             "sufficient_for_lease" => false
           }
         })
+
+      true ->
+        case quota_decision(attrs) do
+          {:ok, decision} ->
+            members = build_members(recovery_ready?, decision.sufficient?, decision.member_code)
+
+            status =
+              cond do
+                not recovery_ready? -> "blocked"
+                not decision.sufficient? -> "blocked"
+                true -> "ready"
+              end
+
+            code =
+              cond do
+                not recovery_ready? -> "recovery_not_ready"
+                not decision.sufficient? -> decision.member_code
+                true -> nil
+              end
+
+            message =
+              cond do
+                not recovery_ready? ->
+                  "TaskStore recovery is not ready for control-lease minting"
+
+                not decision.sufficient? ->
+                  "insufficient capability quota headroom for six-member lease"
+
+                true ->
+                  nil
+              end
+
+            plane(status, code, message, %{
+              "recovery_ready" => recovery_ready?,
+              "members" => members,
+              "quota" => %{
+                "required_grants" => @required_grants,
+                "principal_headroom" => decision.principal_headroom,
+                "global_headroom" => decision.global_headroom,
+                "sufficient_for_lease" => decision.sufficient?
+              }
+            })
+
+          {:error, member_code, message} ->
+            members = build_members(false, false, member_code)
+
+            plane("blocked", member_code, message, %{
+              "recovery_ready" => recovery_ready?,
+              "members" => members,
+              "quota" => %{
+                "required_grants" => @required_grants,
+                "principal_headroom" => nil,
+                "global_headroom" => nil,
+                "sufficient_for_lease" => false
+              }
+            })
+        end
     end
   end
 
@@ -199,7 +247,8 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessCore do
     {status, code, message} =
       cond do
         not facts_ok? ->
-          {"blocked", "security_facts_unavailable", "required security readiness facts are unavailable"}
+          {"blocked", "security_facts_unavailable",
+           "required security readiness facts are unavailable"}
 
         not healthy? ->
           {"blocked", "security_unhealthy", "security subsystem is not healthy"}
@@ -242,24 +291,23 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessCore do
   def project_coordinator(attrs) when is_map(attrs) do
     host_state =
       case Map.get(attrs, :host_state) do
-        s when s in ["running", "absent", "not_alive"] -> s
-        _ -> "absent"
+        s when s in ["running", "absent", "not_alive", "error"] -> s
+        _ -> "error"
       end
 
-    status = if host_state == "running", do: "ready", else: "blocked"
-
-    code =
+    {status, code, message} =
       case host_state do
-        "running" -> nil
-        "not_alive" -> "coordinator_not_alive"
-        _ -> "coordinator_absent"
-      end
+        "running" ->
+          {"ready", nil, nil}
 
-    message =
-      case host_state do
-        "running" -> nil
-        "not_alive" -> "coordinator host process is not alive"
-        _ -> "coordinator host is not running"
+        "not_alive" ->
+          {"blocked", "coordinator_not_alive", "coordinator host process is not alive"}
+
+        "absent" ->
+          {"blocked", "coordinator_absent", "coordinator host is not running"}
+
+        _ ->
+          {"error", "coordinator_projection_failed", "coordinator host projection failed"}
       end
 
     plane(status, code, message, %{"host_state" => host_state})
@@ -271,6 +319,20 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessCore do
       case Map.get(attrs, :template_state) do
         s when s in ["current", "drifted", "unavailable", "invalid", "unmanaged"] -> s
         _ -> "invalid"
+      end
+
+    source_layer =
+      case Map.get(attrs, :source_layer) do
+        s when s in ["user", "shipped", "legacy_json"] -> s
+        _ -> nil
+      end
+
+    # Managed current requires closed source provenance; never report current without it.
+    {template_state, source_layer} =
+      if template_state == "current" and is_nil(source_layer) do
+        {"invalid", nil}
+      else
+        {template_state, source_layer}
       end
 
     {status, code, message} =
@@ -294,7 +356,7 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessCore do
 
     plane(status, code, message, %{
       "template_state" => template_state,
-      "template_name" => string_or_nil(Map.get(attrs, :template_name)),
+      "template_name" => top_string_or_nil(Map.get(attrs, :template_name)),
       "managed" => Map.get(attrs, :managed) == true,
       "stored_digest_present" => Map.get(attrs, :stored_digest_present) == true,
       "digest_match" =>
@@ -303,11 +365,7 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessCore do
           false -> false
           _ -> nil
         end,
-      "source_layer" =>
-        case Map.get(attrs, :source_layer) do
-          s when s in ["user", "shipped", "legacy_json"] -> s
-          _ -> nil
-        end
+      "source_layer" => source_layer
     })
   end
 
@@ -320,24 +378,29 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessCore do
   @spec project_executor(map()) :: map()
   def project_executor(attrs) when is_map(attrs) do
     callback_present? = Map.get(attrs, :callback_present?) == true
-    kind = string_or_nil(Map.get(attrs, :kind))
+    kind = top_string_or_nil(Map.get(attrs, :kind))
     diagnostic = Map.get(attrs, :diagnostic)
     projection = Map.get(attrs, :projection)
 
     cond do
       not callback_present? ->
+        diag = diagnostic_or(diagnostic, "executor_callback_missing")
+        code = diag["code"]
+        message = diag["message"]
+
         plane(
           "blocked",
-          "executor_callback_missing",
-          "configured executor does not implement project_dispatch_readiness/3",
-          executor_details(kind, false, nil, diagnostic_or(diagnostic, "executor_callback_missing"))
+          code,
+          message,
+          executor_details(kind, false, nil, diag)
         )
 
       match?(%{"code" => _, "message" => _}, diagnostic) and is_nil(projection) ->
         code = stable_code(diagnostic["code"])
+        status = executor_diagnostic_status(code)
 
         plane(
-          "blocked",
+          status,
           code,
           bound_message(diagnostic["message"]),
           executor_details(kind, true, nil, %{
@@ -402,7 +465,7 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessCore do
       not is_map(report) or is_struct(report) ->
         {:error, "executor_non_json", "executor readiness returned non-JSON data"}
 
-      not json_clean?(report) ->
+      not executor_json_clean?(report) ->
         {:error, "executor_non_json", "executor readiness returned non-JSON data"}
 
       not Map.has_key?(report, "status") ->
@@ -412,7 +475,7 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessCore do
         {:error, "executor_status_invalid", "executor readiness has an unknown status"}
 
       true ->
-        case bound_json(report) do
+        case bound_json(report, @max_executor_depth) do
           {:ok, bounded} when is_map(bounded) ->
             # Preserve validated status even if nested truncation reshapes peers.
             bounded = Map.put(bounded, "status", report["status"])
@@ -424,24 +487,38 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessCore do
     end
   end
 
-  @doc "Recursively ensure value is string-keyed JSON-clean within bounds."
+  @doc "Recursively ensure value is string-keyed JSON-clean within aggregate bounds."
   @spec json_clean?(term()) :: boolean()
-  def json_clean?(value), do: do_json_clean?(value, 0)
+  def json_clean?(value), do: aggregate_json_clean?(value)
+
+  @doc "Recursively ensure value is string-keyed JSON-clean within executor bounds."
+  @spec executor_json_clean?(term()) :: boolean()
+  def executor_json_clean?(value), do: do_json_clean?(value, 0, @max_executor_depth)
+
+  @doc "Recursively ensure value is string-keyed JSON-clean within aggregate bounds."
+  @spec aggregate_json_clean?(term()) :: boolean()
+  def aggregate_json_clean?(value), do: do_json_clean?(value, 0, @max_aggregate_depth)
 
   @doc "Bound an already-validated JSON value. Rejects non-JSON inputs."
   @spec bound_json(term()) :: {:ok, json_value()} | {:error, :non_json}
-  def bound_json(value) do
-    if json_clean?(value) do
-      {:ok, do_bound(value, 0)}
+  def bound_json(value), do: bound_json(value, @max_aggregate_depth)
+
+  @spec bound_json(term(), pos_integer()) :: {:ok, json_value()} | {:error, :non_json}
+  def bound_json(value, max_depth)
+      when is_integer(max_depth) and max_depth > 0 do
+    if do_json_clean?(value, 0, max_depth) do
+      {:ok, do_bound(value, 0, max_depth)}
     else
       {:error, :non_json}
     end
   end
 
+  def bound_json(_value, _max_depth), do: {:error, :non_json}
+
   @doc "Assert report is closed top-level JSON (for tests/facade)."
   @spec assert_report(term()) :: {:ok, report()} | {:error, :invalid_report}
   def assert_report(report) when is_map(report) do
-    if json_clean?(report) and closed_top?(report) and report["status"] in @statuses do
+    if aggregate_json_clean?(report) and closed_top?(report) and report["status"] in @statuses do
       {:ok, report}
     else
       {:error, :invalid_report}
@@ -469,6 +546,12 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessCore do
   # ---------------------------------------------------------------------------
   # Pure helpers
   # ---------------------------------------------------------------------------
+
+  defp executor_diagnostic_status(code) when is_binary(code) do
+    if MapSet.member?(@blocked_executor_codes, code), do: "blocked", else: "error"
+  end
+
+  defp executor_diagnostic_status(_), do: "error"
 
   defp quota_decision(attrs) do
     enforcement = Map.get(attrs, :quota_enforcement_enabled?)
@@ -622,77 +705,129 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessCore do
       MapSet.new(Map.keys(report["planes"])) == MapSet.new(@plane_keys)
   end
 
-  # Structural JSON cleanliness only. Size limits are applied during bound_json/1;
-  # excessive depth is a structural failure (not silently truncated).
-  defp do_json_clean?(nil, _), do: true
+  # Structural JSON cleanliness. Size limits apply during bound_json/2;
+  # excessive depth and overlong keys are structural failures (not truncated).
+  defp do_json_clean?(nil, _depth, _max), do: true
 
-  defp do_json_clean?(v, _) when is_boolean(v) or is_integer(v) or is_float(v), do: true
+  defp do_json_clean?(v, _depth, _max) when is_boolean(v) or is_integer(v) or is_float(v),
+    do: true
 
-  defp do_json_clean?(v, _) when is_binary(v), do: String.valid?(v)
+  defp do_json_clean?(v, _depth, _max) when is_binary(v), do: String.valid?(v)
 
-  defp do_json_clean?(list, depth) when is_list(list) and depth < @max_depth do
-    Enum.all?(list, &do_json_clean?(&1, depth + 1))
+  defp do_json_clean?(list, depth, max_depth)
+       when is_list(list) and depth < max_depth do
+    Enum.all?(list, &do_json_clean?(&1, depth + 1, max_depth))
   end
 
-  defp do_json_clean?(list, depth) when is_list(list) and depth >= @max_depth, do: false
-
-  defp do_json_clean?(map, depth)
-       when is_map(map) and not is_struct(map) and depth < @max_depth do
-    Enum.all?(map, fn
-      {k, v} when is_binary(k) -> String.valid?(k) and do_json_clean?(v, depth + 1)
-      _ -> false
-    end)
-  end
-
-  defp do_json_clean?(map, depth)
-       when is_map(map) and not is_struct(map) and depth >= @max_depth,
+  defp do_json_clean?(list, depth, max_depth)
+       when is_list(list) and depth >= max_depth,
        do: false
 
-  defp do_json_clean?(_, _), do: false
+  defp do_json_clean?(map, depth, max_depth)
+       when is_map(map) and not is_struct(map) and depth < max_depth do
+    Enum.all?(map, fn
+      {k, v} when is_binary(k) ->
+        String.valid?(k) and byte_size(k) <= @max_key_bytes and
+          do_json_clean?(v, depth + 1, max_depth)
 
-  # Bound only after json_clean? validation. Deterministic map key order.
-  defp do_bound(nil, _), do: nil
-  defp do_bound(v, _) when is_boolean(v) or is_integer(v) or is_float(v), do: v
-
-  defp do_bound(v, _) when is_binary(v), do: utf8_truncate(v, @max_string_bytes)
-
-  defp do_bound(list, depth) when is_list(list) and depth < @max_depth do
-    list
-    |> Enum.take(@max_list_len)
-    |> Enum.map(&do_bound(&1, depth + 1))
-  end
-
-  defp do_bound(map, depth) when is_map(map) and not is_struct(map) and depth < @max_depth do
-    map
-    |> Enum.sort_by(fn {k, _} -> k end)
-    |> Enum.take(@max_map_keys)
-    |> Enum.reduce(%{}, fn {k, v}, acc ->
-      Map.put(acc, k, do_bound(v, depth + 1))
+      _ ->
+        false
     end)
   end
 
-  defp do_bound(_, _), do: nil
+  defp do_json_clean?(map, depth, max_depth)
+       when is_map(map) and not is_struct(map) and depth >= max_depth,
+       do: false
+
+  defp do_json_clean?(_, _, _), do: false
+
+  # Bound only after json_clean? validation. Deterministic map key order.
+  # Overlong keys are never accepted (rejected above); values may truncate.
+  defp do_bound(nil, _depth, _max), do: nil
+  defp do_bound(v, _depth, _max) when is_boolean(v) or is_integer(v) or is_float(v), do: v
+
+  defp do_bound(v, _depth, _max) when is_binary(v), do: utf8_truncate(v, @max_string_bytes)
+
+  defp do_bound(list, depth, max_depth) when is_list(list) and depth < max_depth do
+    list
+    |> Enum.take(@max_list_len)
+    |> Enum.map(&do_bound(&1, depth + 1, max_depth))
+  end
+
+  defp do_bound(map, depth, max_depth)
+       when is_map(map) and not is_struct(map) and depth < max_depth do
+    map
+    |> Enum.sort_by(fn {k, _} -> k end)
+    |> Enum.filter(fn {k, _} -> is_binary(k) and byte_size(k) <= @max_key_bytes end)
+    |> Enum.take(@max_map_keys)
+    |> Enum.reduce(%{}, fn {k, v}, acc ->
+      Map.put(acc, k, do_bound(v, depth + 1, max_depth))
+    end)
+  end
+
+  defp do_bound(_, _, _), do: nil
 
   defp bound_details(map) when is_map(map) do
-    case bound_json(stringify_atom_keys(map)) do
-      {:ok, m} when is_map(m) -> m
-      _ -> %{}
+    case stringify_supported_keys(map) do
+      {:ok, string_keyed} ->
+        case bound_json(string_keyed, @max_aggregate_depth) do
+          {:ok, m} when is_map(m) -> m
+          _ -> %{}
+        end
+
+      :error ->
+        %{}
     end
   end
 
-  # Plane construction may use atom keys internally; convert before JSON assert.
-  defp stringify_atom_keys(map) when is_map(map) do
-    Map.new(map, fn
-      {k, v} when is_atom(k) -> {Atom.to_string(k), stringify_atom_keys(v)}
-      {k, v} when is_binary(k) -> {k, stringify_atom_keys(v)}
-      {k, v} -> {to_string(k), stringify_atom_keys(v)}
+  # Plane construction may use atom keys internally; only convert atoms.
+  # Never call to_string/1 on arbitrary keys (tuple/struct/pid raise or launder).
+  defp stringify_supported_keys(map) when is_map(map) and not is_struct(map) do
+    Enum.reduce_while(map, {:ok, %{}}, fn
+      {k, v}, {:ok, acc} when is_atom(k) ->
+        case stringify_supported_keys(v) do
+          {:ok, sv} -> {:cont, {:ok, Map.put(acc, Atom.to_string(k), sv)}}
+          :error -> {:halt, :error}
+        end
+
+      {k, v}, {:ok, acc} when is_binary(k) ->
+        if String.valid?(k) and byte_size(k) <= @max_key_bytes do
+          case stringify_supported_keys(v) do
+            {:ok, sv} -> {:cont, {:ok, Map.put(acc, k, sv)}}
+            :error -> {:halt, :error}
+          end
+        else
+          {:halt, :error}
+        end
+
+      _, _ ->
+        {:halt, :error}
     end)
   end
 
-  defp stringify_atom_keys(list) when is_list(list), do: Enum.map(list, &stringify_atom_keys/1)
-  defp stringify_atom_keys(other), do: other
+  defp stringify_supported_keys(list) when is_list(list) do
+    Enum.reduce_while(list, {:ok, []}, fn item, {:ok, acc} ->
+      case stringify_supported_keys(item) do
+        {:ok, value} -> {:cont, {:ok, [value | acc]}}
+        :error -> {:halt, :error}
+      end
+    end)
+    |> case do
+      {:ok, values} -> {:ok, Enum.reverse(values)}
+      :error -> :error
+    end
+  end
 
-  defp bound_message(message) when is_binary(message), do: utf8_truncate(message, @max_message_bytes)
+  defp stringify_supported_keys(v)
+       when is_binary(v) or is_boolean(v) or is_integer(v) or is_float(v) or is_nil(v) do
+    if is_binary(v) and not String.valid?(v), do: :error, else: {:ok, v}
+  end
+
+  defp stringify_supported_keys(_), do: :error
+
+  defp bound_message(message) when is_binary(message),
+    do: utf8_truncate(message, @max_message_bytes)
+
   defp bound_message(_), do: "dispatch readiness failed closed"
 
   defp do_utf8_truncate(string, max_bytes) do
@@ -724,8 +859,11 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessCore do
 
   defp stable_code(_), do: "projection_failed"
 
-  defp string_or_nil(v) when is_binary(v) and v != "" and String.valid?(v), do: v
-  defp string_or_nil(_), do: nil
+  defp top_string_or_nil(v) when is_binary(v) and v != "" do
+    if String.valid?(v), do: utf8_truncate(v, @max_top_string_bytes), else: nil
+  end
+
+  defp top_string_or_nil(_), do: nil
 
   defp null_or_string(nil), do: nil
   defp null_or_string(v) when is_binary(v), do: utf8_truncate(v, 64)
@@ -737,7 +875,7 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessCore do
 
   defp normalize_restore_status(_), do: "unavailable"
 
-  defp required_non_neg(v, default) when is_integer(v) and v >= 0, do: v
+  defp required_non_neg(v, _default) when is_integer(v) and v >= 0, do: v
   defp required_non_neg(_, default), do: default
 
   defp optional_non_neg(v) when is_integer(v) and v >= 0, do: v

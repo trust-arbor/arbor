@@ -9,8 +9,8 @@ defmodule Arbor.Agent.DispatchReadinessFacadeTest do
     {:ok, report} =
       DispatchReadinessCore.compose(%{
         observed_at: "2026-08-09T00:00:00Z",
-        agent_id: "agent_target1",
-        caller_id: "human_caller1",
+        agent_id: "agent_ok1",
+        caller_id: "human_ok1",
         security: DispatchReadinessCore.plane("ready", nil, nil, %{}),
         coordinator: DispatchReadinessCore.plane("ready", nil, nil, %{}),
         exact_template: DispatchReadinessCore.plane("ready", nil, nil, %{}),
@@ -41,6 +41,74 @@ defmodule Arbor.Agent.DispatchReadinessFacadeTest do
                [unknown: true],
                fun
              )
+
+    assert {:error, :invalid_opts} =
+             DispatchReadinessFacade.project(
+               "human_ok1",
+               "agent_ok1",
+               %{},
+               [timeout: 0],
+               fun
+             )
+
+    assert {:error, :invalid_opts} =
+             DispatchReadinessFacade.project(
+               "human_ok1",
+               "agent_ok1",
+               %{},
+               [timeout: -1],
+               fun
+             )
+
+    assert {:error, :invalid_opts} =
+             DispatchReadinessFacade.project(
+               "human_ok1",
+               "agent_ok1",
+               %{},
+               [timeout: 1.5],
+               fun
+             )
+
+    assert {:error, :invalid_opts} =
+             DispatchReadinessFacade.project(
+               "human_ok1",
+               "agent_ok1",
+               %{},
+               [timeout: 1000, timeout: 2000],
+               fun
+             )
+  end
+
+  test "forwards ordinary 15-minute and longer coding timeouts unchanged" do
+    parent = self()
+
+    fun = fn _agent, _task, opts ->
+      send(parent, {:timeout, opts[:timeout]})
+      {:ok, valid_report()}
+    end
+
+    assert {:ok, _} =
+             DispatchReadinessFacade.project(
+               "human_ok1",
+               "agent_ok1",
+               %{"kind" => "coding_change"},
+               [timeout: 900_000],
+               fun
+             )
+
+    assert_received {:timeout, 900_000}
+
+    # Longer reviewed coding budget beyond the former 300_000 ceiling.
+    assert {:ok, _} =
+             DispatchReadinessFacade.project(
+               "human_ok1",
+               "agent_ok1",
+               %{"kind" => "coding_change"},
+               [timeout: 1_800_000],
+               fun
+             )
+
+    assert_received {:timeout, 1_800_000}
   end
 
   test "unauthorized is closed; session token is forwarded only in orch opts" do
@@ -89,6 +157,35 @@ defmodule Arbor.Agent.DispatchReadinessFacadeTest do
                %{},
                [],
                fun
+             )
+  end
+
+  test "public Arbor.Agent.coding_dispatch_readiness/4 validates inputs at the boundary" do
+    # Public facade always pins Orchestration.coding_dispatch_readiness/3.
+    # Invalid inputs must fail closed before any orchestration work.
+    assert {:error, :invalid_caller_id} =
+             Arbor.Agent.coding_dispatch_readiness("bad", "agent_ok1", %{}, [])
+
+    assert {:error, :invalid_agent_id} =
+             Arbor.Agent.coding_dispatch_readiness("human_ok1", "nope", %{}, [])
+
+    assert {:error, :invalid_task} =
+             Arbor.Agent.coding_dispatch_readiness("human_ok1", "agent_ok1", "not-a-map", [])
+
+    assert {:error, :invalid_opts} =
+             Arbor.Agent.coding_dispatch_readiness(
+               "human_ok1",
+               "agent_ok1",
+               %{},
+               timeout: 0
+             )
+
+    assert {:error, :invalid_opts} =
+             Arbor.Agent.coding_dispatch_readiness(
+               "human_ok1",
+               "agent_ok1",
+               %{},
+               unknown: true
              )
   end
 end

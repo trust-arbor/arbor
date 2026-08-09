@@ -11,20 +11,36 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessTest do
     @moduledoc false
     @table :dispatch_readiness_effects
 
+    # Create table once; reset only via reset!/0 so reads never erase events.
     def ensure! do
       case :ets.whereis(@table) do
-        :undefined -> _ = :ets.new(@table, [:named_table, :public, :set])
-        _ -> :ok
-      end
+        :undefined ->
+          _ = :ets.new(@table, [:named_table, :public, :set])
+          :ets.insert(@table, {:events, []})
+          :ok
 
+        _ ->
+          :ok
+      end
+    end
+
+    def reset! do
+      ensure!()
       :ets.insert(@table, {:events, []})
       :ok
     end
 
     def record(event) do
       ensure!()
-      [{:events, events}] = :ets.lookup(@table, :events)
-      :ets.insert(@table, {:events, [event | events]})
+
+      case :ets.lookup(@table, :events) do
+        [{:events, events}] ->
+          :ets.insert(@table, {:events, [event | events]})
+
+        _ ->
+          :ets.insert(@table, {:events, [event]})
+      end
+
       :ok
     end
 
@@ -97,6 +113,8 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessTest do
       case Process.get({__MODULE__, :host}) do
         {:ok, pid} = ok when is_pid(pid) -> ok
         :absent -> {:error, :no_host}
+        :raise -> raise "lifecycle boom"
+        :malformed -> :not_a_host_result
         other -> other || {:error, :no_host}
       end
     end
@@ -104,7 +122,11 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessTest do
 
   defmodule FakeTaskStore do
     def recovery_ready? do
-      Process.get({__MODULE__, :recovery_ready?}, true)
+      case Process.get({__MODULE__, :recovery_ready?}, true) do
+        :raise -> raise "recovery boom"
+        :malformed -> :not_a_boolean
+        other -> other
+      end
     end
 
     def reserve(opts) do
@@ -166,6 +188,11 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessTest do
       EffectsObserver.record({:put, name, data})
       flunk("readiness must not put templates")
     end
+
+    def reconcile(name) do
+      EffectsObserver.record({:reconcile, name})
+      flunk("readiness must not reconcile templates")
+    end
   end
 
   defmodule FakeConfig do
@@ -210,6 +237,30 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessTest do
     def project_dispatch_readiness(_a, _t, _c), do: {:ok, %{:atom_key => self()}}
   end
 
+  defmodule RaisingExecutor do
+    def run(_a, _t, _c), do: {:ok, %{}}
+    def project_dispatch_readiness(_a, _t, _c), do: raise("executor boom")
+  end
+
+  defmodule ThrowingExecutor do
+    def run(_a, _t, _c), do: {:ok, %{}}
+    def project_dispatch_readiness(_a, _t, _c), do: throw(:executor_throw)
+  end
+
+  defmodule ExitingExecutor do
+    def run(_a, _t, _c), do: {:ok, %{}}
+    def project_dispatch_readiness(_a, _t, _c), do: exit(:executor_exit)
+  end
+
+  defmodule HangingExecutor do
+    def run(_a, _t, _c), do: {:ok, %{}}
+
+    def project_dispatch_readiness(_a, _t, _c) do
+      Process.sleep(60_000)
+      {:ok, %{"status" => "ready"}}
+    end
+  end
+
   defmodule MutatingOnlyProfileStore do
     def load_profile(agent_id) do
       EffectsObserver.record({:load_profile_migrating, agent_id})
@@ -246,7 +297,9 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessTest do
   end
 
   setup do
-    EffectsObserver.ensure!()
+    EffectsObserver.reset!()
+    ensure_task_supervisor!()
+
     Process.put({FakeSecurity, :healthy?}, true)
     Process.put({FakeSecurity, :enforcement?}, true)
     Process.put({FakeSecurity, :max_per}, 20)
@@ -277,6 +330,20 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessTest do
     :ok
   end
 
+  defp ensure_task_supervisor! do
+    case Process.whereis(Arbor.Agent.Orchestration.TaskSupervisor) do
+      pid when is_pid(pid) ->
+        :ok
+
+      nil ->
+        {:ok, _pid} =
+          Task.Supervisor.start_link(name: Arbor.Agent.Orchestration.TaskSupervisor)
+
+        :ok
+    end
+  end
+
+  # Injected invoke_executor for pure collaborator tests.
   defp deps(extra \\ %{}) do
     Map.merge(
       %{
@@ -295,6 +362,12 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessTest do
       },
       extra
     )
+  end
+
+  # Production-default callback path: no invoke_executor override.
+  defp production_callback_deps(extra \\ %{}) do
+    base = deps(extra)
+    Map.delete(base, :invoke_executor)
   end
 
   defp coding_task, do: %{"kind" => "coding_change", "goal" => "ship"}
@@ -318,7 +391,7 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessTest do
     refute Enum.any?(events, &match?({:load_profile_migrating, _}, &1))
   end
 
-  test "managed exact template current vs drifted" do
+  test "managed exact template current requires closed source provenance" do
     envelope = %{
       "version" => 1,
       "snapshot" => %{
@@ -334,13 +407,36 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessTest do
     }
 
     Process.put({FakeExactPolicy, :from_metadata}, fn _ -> {:ok, envelope} end)
-    Process.put({FakeTemplateStore, :template}, %{"name" => "pipeline_architect"})
 
     Process.put({FakeExactPolicy, :build}, fn _n, _d, _o ->
       {:ok, %{envelope | "digest" => String.duplicate("a", 64)}}
     end)
 
-    assert {:ok, current_report} =
+    for layer <- ["user", "shipped", "legacy_json"] do
+      Process.put(
+        {FakeTemplateStore, :template},
+        %{
+          "name" => "pipeline_architect",
+          "template_source" => %{"layer" => layer, "name" => "pipeline_architect", "path" => "/t"}
+        }
+      )
+
+      assert {:ok, current_report} =
+               DispatchReadiness.project_with_deps(
+                 "agent_target1",
+                 coding_task(),
+                 [caller_id: "human_caller1"],
+                 deps()
+               )
+
+      assert current_report["planes"]["exact_template"]["details"]["template_state"] == "current"
+      assert current_report["planes"]["exact_template"]["details"]["source_layer"] == layer
+    end
+
+    # Missing provenance cannot be current.
+    Process.put({FakeTemplateStore, :template}, %{"name" => "pipeline_architect"})
+
+    assert {:ok, missing_source} =
              DispatchReadiness.project_with_deps(
                "agent_target1",
                coding_task(),
@@ -348,7 +444,38 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessTest do
                deps()
              )
 
-    assert current_report["planes"]["exact_template"]["details"]["template_state"] == "current"
+    assert missing_source["planes"]["exact_template"]["details"]["template_state"] == "invalid"
+    refute missing_source["planes"]["exact_template"]["details"]["template_state"] == "current"
+    assert missing_source["planes"]["exact_template"]["status"] == "blocked"
+
+    # Unknown provenance cannot be current.
+    Process.put(
+      {FakeTemplateStore, :template},
+      %{
+        "name" => "pipeline_architect",
+        "template_source" => %{"layer" => "mystery", "name" => "pipeline_architect"}
+      }
+    )
+
+    assert {:ok, unknown_source} =
+             DispatchReadiness.project_with_deps(
+               "agent_target1",
+               coding_task(),
+               [caller_id: "human_caller1"],
+               deps()
+             )
+
+    assert unknown_source["planes"]["exact_template"]["details"]["template_state"] == "invalid"
+    refute unknown_source["planes"]["exact_template"]["details"]["template_state"] == "current"
+
+    # Drift still blocks.
+    Process.put(
+      {FakeTemplateStore, :template},
+      %{
+        "name" => "pipeline_architect",
+        "template_source" => %{"layer" => "shipped", "name" => "pipeline_architect"}
+      }
+    )
 
     Process.put({FakeExactPolicy, :build}, fn _n, _d, _o ->
       {:ok, %{envelope | "digest" => String.duplicate("b", 64)}}
@@ -420,6 +547,87 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessTest do
 
     # No capability ids escape the report
     refute inspect(ready) =~ "cap_"
+  end
+
+  test "coordinator absent blocks; raising/malformed coordinator is error" do
+    Process.put({FakeLifecycle, :host}, :absent)
+
+    assert {:ok, absent} =
+             DispatchReadiness.project_with_deps(
+               "agent_target1",
+               coding_task(),
+               [caller_id: "human_caller1"],
+               deps()
+             )
+
+    assert absent["planes"]["coordinator"]["status"] == "blocked"
+    assert absent["planes"]["coordinator"]["code"] == "coordinator_absent"
+
+    Process.put({FakeLifecycle, :host}, :raise)
+
+    assert {:ok, raised} =
+             DispatchReadiness.project_with_deps(
+               "agent_target1",
+               coding_task(),
+               [caller_id: "human_caller1"],
+               deps()
+             )
+
+    assert raised["planes"]["coordinator"]["status"] == "error"
+    assert raised["status"] == "error"
+    refute inspect(raised) =~ "lifecycle boom"
+
+    Process.put({FakeLifecycle, :host}, :malformed)
+
+    assert {:ok, malformed} =
+             DispatchReadiness.project_with_deps(
+               "agent_target1",
+               coding_task(),
+               [caller_id: "human_caller1"],
+               deps()
+             )
+
+    assert malformed["planes"]["coordinator"]["status"] == "error"
+  end
+
+  test "recovery not-ready blocks; raising/malformed recovery is error" do
+    Process.put({FakeTaskStore, :recovery_ready?}, false)
+
+    assert {:ok, blocked} =
+             DispatchReadiness.project_with_deps(
+               "agent_target1",
+               coding_task(),
+               [caller_id: "human_caller1"],
+               deps()
+             )
+
+    assert blocked["planes"]["task_control"]["status"] == "blocked"
+
+    Process.put({FakeTaskStore, :recovery_ready?}, :raise)
+
+    assert {:ok, raised} =
+             DispatchReadiness.project_with_deps(
+               "agent_target1",
+               coding_task(),
+               [caller_id: "human_caller1"],
+               deps()
+             )
+
+    assert raised["planes"]["task_control"]["status"] == "error"
+    assert raised["status"] == "error"
+    refute inspect(raised) =~ "recovery boom"
+
+    Process.put({FakeTaskStore, :recovery_ready?}, :malformed)
+
+    assert {:ok, malformed} =
+             DispatchReadiness.project_with_deps(
+               "agent_target1",
+               coding_task(),
+               [caller_id: "human_caller1"],
+               deps()
+             )
+
+    assert malformed["planes"]["task_control"]["status"] == "error"
   end
 
   test "include_expired principal count blocks when active-only would fit" do
@@ -591,6 +799,99 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessTest do
     refute inspect(raised) =~ "nope"
   end
 
+  test "production-default callback ready/raise/throw/exit/timeout are bounded and leak-free" do
+    caller = self()
+    Process.flag(:trap_exit, true)
+
+    # Ready via production default_invoke_executor (no inject).
+    Process.put({FakeConfig, :executor}, {:ok, ReadyExecutor})
+
+    assert {:ok, ready} =
+             DispatchReadiness.project_with_deps(
+               "agent_target1",
+               coding_task(),
+               [caller_id: "human_caller1"],
+               production_callback_deps(%{callback_timeout_ms: 500})
+             )
+
+    assert ready["planes"]["executor"]["status"] == "ready"
+    assert {:ok, _} = DispatchReadinessCore.assert_report(ready)
+    assert Process.alive?(caller)
+
+    # Raise
+    Process.put({FakeConfig, :executor}, {:ok, RaisingExecutor})
+
+    assert {:ok, raised} =
+             DispatchReadiness.project_with_deps(
+               "agent_target1",
+               coding_task(),
+               [caller_id: "human_caller1"],
+               production_callback_deps(%{callback_timeout_ms: 500})
+             )
+
+    assert raised["planes"]["executor"]["status"] == "error"
+    assert raised["planes"]["executor"]["code"] == "executor_callback_exception"
+    refute inspect(raised) =~ "executor boom"
+    assert Process.alive?(caller)
+
+    # Throw
+    Process.put({FakeConfig, :executor}, {:ok, ThrowingExecutor})
+
+    assert {:ok, thrown} =
+             DispatchReadiness.project_with_deps(
+               "agent_target1",
+               coding_task(),
+               [caller_id: "human_caller1"],
+               production_callback_deps(%{callback_timeout_ms: 500})
+             )
+
+    assert thrown["planes"]["executor"]["status"] == "error"
+    assert Process.alive?(caller)
+
+    # Exit
+    Process.put({FakeConfig, :executor}, {:ok, ExitingExecutor})
+
+    assert {:ok, exited} =
+             DispatchReadiness.project_with_deps(
+               "agent_target1",
+               coding_task(),
+               [caller_id: "human_caller1"],
+               production_callback_deps(%{callback_timeout_ms: 500})
+             )
+
+    assert exited["planes"]["executor"]["status"] == "error"
+    assert exited["planes"]["executor"]["code"] in [
+             "executor_callback_exit",
+             "executor_projection_error"
+           ]
+
+    assert Process.alive?(caller)
+
+    # Timeout / hang — child must be gone after brutal kill.
+    Process.put({FakeConfig, :executor}, {:ok, HangingExecutor})
+    before_children = Task.Supervisor.children(Arbor.Agent.Orchestration.TaskSupervisor)
+
+    assert {:ok, timed_out} =
+             DispatchReadiness.project_with_deps(
+               "agent_target1",
+               coding_task(),
+               [caller_id: "human_caller1"],
+               production_callback_deps(%{callback_timeout_ms: 50})
+             )
+
+    assert timed_out["planes"]["executor"]["status"] == "error"
+    assert timed_out["planes"]["executor"]["code"] == "executor_callback_timeout"
+    assert Process.alive?(caller)
+
+    # Give the supervisor a moment to reap the brutally killed child.
+    Process.sleep(20)
+    after_children = Task.Supervisor.children(Arbor.Agent.Orchestration.TaskSupervisor)
+    refute length(after_children) > length(before_children)
+
+    # No leaked EXIT killed the test process.
+    refute_received {:EXIT, _, _}
+  end
+
   test "missing readonly collaborators never call mutating load_profile/get" do
     assert {:ok, report} =
              DispatchReadiness.project_with_deps(
@@ -646,7 +947,7 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessTest do
     assert_received {:timeout_ms, 321}
   end
 
-  test "no-effects observers: no reserve/activate/dispatch/grant/revoke/store" do
+  test "no-effects observers: records reads and proves prohibited mutations empty" do
     assert {:ok, report} =
              DispatchReadiness.project_with_deps(
                "agent_target1",
@@ -658,6 +959,13 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessTest do
     assert {:ok, _} = DispatchReadinessCore.assert_report(report)
 
     events = EffectsObserver.events()
+
+    # Expected read-side observations must be present (proves observer works).
+    assert Enum.any?(events, &match?({:list_capabilities, _, _}, &1))
+    assert Enum.any?(events, &match?({:load_profile_readonly, _}, &1))
+    assert Enum.any?(events, &match?({:project_dispatch_readiness, _, _, _}, &1))
+
+    # Prohibited mutation set stays empty.
     refute Enum.any?(events, &match?({:reserve, _}, &1))
     refute Enum.any?(events, &match?({:activate, _, _, _, _, _}, &1))
     refute Enum.any?(events, &match?({:dispatch, _, _, _}, &1))
@@ -667,5 +975,6 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessTest do
     refute Enum.any?(events, &match?({:put, _, _}, &1))
     refute Enum.any?(events, &match?({:load_profile_migrating, _}, &1))
     refute Enum.any?(events, &match?({:get_cache_write, _}, &1))
+    refute Enum.any?(events, &match?({:reconcile, _}, &1))
   end
 end
