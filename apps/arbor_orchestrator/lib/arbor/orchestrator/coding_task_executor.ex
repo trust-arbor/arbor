@@ -78,6 +78,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     ActionCatalog,
     ArtifactStore,
     AuthorityHorizon,
+    AuthorityHorizonCore,
     BudgetPolicy,
     CandidateVerificationCore,
     Compilation,
@@ -86,6 +87,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     OutcomeMapper,
     Profiles,
     Readiness,
+    ReadinessCore,
     SemanticPreflight,
     TaskTerminalArchiveCore,
     ValidationCapacityTerminal,
@@ -268,6 +270,72 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   @max_destination_ref_bytes 256
 
   @type json_map :: Arbor.Contracts.Agent.TaskExecutor.json_map()
+
+  @readiness_context_keys MapSet.new(~w(caller_id timeout))
+  @max_readiness_error_message_bytes 256
+
+  @doc """
+  Read-only pre-dispatch readiness + authority-horizon projection.
+
+  Normalizes and compiles the exact structured coding task, runs live
+  Readiness, computes the same effective wall-clock and cleanup reserve as
+  dispatch, verifies the compiled graph/manifest in memory, and projects
+  authority through an immutable future-task horizon.
+
+  Public `context` must be a string-keyed JSON map allowlisted to
+  `caller_id` and `timeout` only. Does not accept task ids, trusted roots,
+  clocks, modules, functions, or observed evidence. Creates no task ids,
+  workspaces, artifacts, branches, capabilities, approvals, or ACP sessions.
+  """
+  @spec project_dispatch_readiness(String.t(), term(), term()) :: {:ok, map()}
+  def project_dispatch_readiness(agent_id, task, context \\ %{})
+
+  def project_dispatch_readiness(agent_id, task, context) do
+    project_dispatch_readiness_with_deps(agent_id, task, context, default_readiness_deps())
+  end
+
+  @doc false
+  @spec project_dispatch_readiness_with_deps(String.t(), term(), term(), map()) :: {:ok, map()}
+  def project_dispatch_readiness_with_deps(agent_id, task, context, deps)
+      when is_map(deps) do
+    now_dt = readiness_now_datetime(deps)
+    observed_at = DateTime.to_iso8601(now_dt, :extended)
+    now_unix_ms = readiness_now_unix_ms(deps, now_dt)
+
+    case do_project_dispatch_readiness(
+           agent_id,
+           task,
+           context,
+           deps,
+           now_dt,
+           observed_at,
+           now_unix_ms
+         ) do
+      {:ok, report} ->
+        {:ok, report}
+
+      {:error, reason, plan_digest} ->
+        {:ok, early_dispatch_readiness_failure(agent_id, observed_at, reason, plan_digest)}
+    end
+  rescue
+    _exception ->
+      {:ok,
+       early_dispatch_readiness_failure(
+         agent_id,
+         DateTime.utc_now() |> DateTime.to_iso8601(:extended),
+         :dispatch_readiness_exception,
+         nil
+       )}
+  catch
+    _kind, _reason ->
+      {:ok,
+       early_dispatch_readiness_failure(
+         agent_id,
+         DateTime.utc_now() |> DateTime.to_iso8601(:extended),
+         :dispatch_readiness_exception,
+         nil
+       )}
+  end
 
   @doc """
   Run the coding-change pipeline for `agent_id`.
@@ -1443,6 +1511,494 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     end
   end
 
+  # ---------------------------------------------------------------------------
+  # Read-only pre-dispatch readiness projection (Phase 3A)
+  # ---------------------------------------------------------------------------
+
+  defp default_readiness_deps do
+    %{
+      now_datetime: fn -> DateTime.utc_now() end,
+      now_unix_ms: fn -> System.system_time(:millisecond) end,
+      security: Config.security_module()
+    }
+  end
+
+  defp readiness_now_datetime(%{now_datetime: %DateTime{} = dt}), do: dt
+
+  defp readiness_now_datetime(%{now_datetime: fun}) when is_function(fun, 0) do
+    case fun.() do
+      %DateTime{} = dt -> dt
+      _ -> DateTime.utc_now()
+    end
+  end
+
+  defp readiness_now_datetime(_deps), do: DateTime.utc_now()
+
+  defp readiness_now_unix_ms(%{now_unix_ms: ms}, _now_dt) when is_integer(ms) and ms > 0, do: ms
+
+  defp readiness_now_unix_ms(%{now_unix_ms: fun}, _now_dt) when is_function(fun, 0) do
+    case fun.() do
+      ms when is_integer(ms) and ms > 0 -> ms
+      _ -> System.system_time(:millisecond)
+    end
+  end
+
+  defp readiness_now_unix_ms(_deps, %DateTime{} = now_dt) do
+    DateTime.to_unix(now_dt, :millisecond)
+  end
+
+  defp do_project_dispatch_readiness(
+         agent_id,
+         task,
+         context,
+         deps,
+         now_dt,
+         observed_at,
+         now_unix_ms
+       ) do
+    with :ok <- validate_agent_id(agent_id),
+         {:ok, readiness_ctx} <- validate_readiness_context(context),
+         {:ok, plan} <- Normalizer.normalize_task(task) do
+      requested_digest = ReadinessCore.plan_digest(Plan.to_map(plan))
+
+      with {:ok, template_path} <- resolve_template_path(),
+           {:ok, canonical_plan, compilation} <-
+             Readiness.prepare(plan, template_path: template_path),
+           canonical_digest = ReadinessCore.plan_digest(Plan.to_map(canonical_plan)),
+           {:ok, readiness_report} <-
+             Readiness.check_prepared(
+               canonical_plan,
+               compilation,
+               mode: :live,
+               agent_id: agent_id,
+               observed_at: observed_at
+             ) do
+        boundary = verify_execution_boundary_from_compilation(canonical_plan, compilation)
+
+        budget =
+          project_readiness_budget(
+            canonical_plan,
+            compilation,
+            readiness_ctx,
+            now_unix_ms,
+            deps
+          )
+
+        authority =
+          project_readiness_authority(
+            deps,
+            agent_id,
+            readiness_ctx,
+            boundary,
+            compilation,
+            budget,
+            now_dt
+          )
+
+        report_error =
+          case budget do
+            {:error, reason} ->
+              %{
+                "code" => readiness_stable_code(reason),
+                "message" =>
+                  AuthorityHorizonCore.bound_text(
+                    readiness_stable_message(reason),
+                    @max_readiness_error_message_bytes
+                  )
+              }
+
+            _ ->
+              nil
+          end
+
+        {:ok,
+         assemble_dispatch_readiness_report(%{
+           agent_id: agent_id,
+           observed_at: observed_at,
+           plan_digest: canonical_digest,
+           readiness: readiness_report,
+           boundary: boundary_section(boundary),
+           budget: budget_section(budget),
+           authority: authority,
+           error: report_error,
+           budget_failed?: match?({:error, _}, budget)
+         })}
+      else
+        {:error, reason} ->
+          {:error, reason, requested_digest}
+      end
+    else
+      {:error, reason} ->
+        {:error, reason, nil}
+    end
+  end
+
+  defp validate_readiness_context(context) when is_map(context) and not is_struct(context) do
+    with :ok <- ensure_string_keyed_json_map(context, :non_json_context),
+         :ok <-
+           reject_unknown_keys(context, @readiness_context_keys, :unknown_context_key),
+         :ok <- reject_forbidden_keys(context, @forbidden_context_keys, :forbidden_context_key),
+         {:ok, extras} <- extract_readiness_context_extras(context) do
+      # Explicitly refuse task_id even if it somehow passed key checks.
+      if Map.has_key?(context, "task_id") or Map.has_key?(context, "session_id") do
+        {:error, :task_id_forbidden}
+      else
+        {:ok, extras}
+      end
+    end
+  end
+
+  defp validate_readiness_context(_context), do: {:error, :invalid_context}
+
+  defp extract_readiness_context_extras(context) do
+    Enum.reduce_while(["timeout", "caller_id"], {:ok, %{}}, fn key, {:ok, acc} ->
+      case Map.fetch(context, key) do
+        :error ->
+          {:cont, {:ok, acc}}
+
+        {:ok, nil} ->
+          {:cont, {:ok, acc}}
+
+        {:ok, value} ->
+          case normalize_context_extra(key, value) do
+            {:ok, normalized} ->
+              atom_key = if key == "timeout", do: :timeout, else: :caller_id
+              {:cont, {:ok, Map.put(acc, atom_key, normalized)}}
+
+            {:error, reason} ->
+              {:halt, {:error, reason}}
+          end
+      end
+    end)
+  end
+
+  defp project_readiness_budget(
+         %Plan{} = plan,
+         %Compilation{} = compilation,
+         readiness_ctx,
+         now_unix_ms,
+         deps
+       ) do
+    # Private test seam: inject a budget result without public-context smuggling.
+    case Map.get(deps, :budget_result) do
+      {:error, reason} ->
+        {:error, reason}
+
+      {:ok, budget} when is_map(budget) ->
+        {:ok, budget}
+
+      _ ->
+        timeout = effective_timeout(plan, Map.get(readiness_ctx, :timeout))
+
+        with true <- is_integer(timeout) and timeout > 0,
+             {:ok, validation_action_source_ms} <- validation_action_source_ms(compilation),
+             {:ok, budget_allocation} <-
+               BudgetPolicy.allocate(timeout, validation_action_source_ms) do
+          cleanup_reserve_ms = Map.fetch!(budget_allocation, "cleanup_ms")
+          run_deadline_unix_ms = now_unix_ms + timeout
+
+          case AuthorityHorizonCore.horizon_unix_ms(run_deadline_unix_ms, cleanup_reserve_ms) do
+            {:ok, horizon_unix_ms} ->
+              {:ok,
+               %{
+                 effective_wall_clock_ms: timeout,
+                 cleanup_reserve_ms: cleanup_reserve_ms,
+                 run_deadline_unix_ms: run_deadline_unix_ms,
+                 horizon_unix_ms: horizon_unix_ms
+               }}
+
+            {:error, reason} ->
+              {:error, reason}
+          end
+        else
+          false -> {:error, :invalid_wall_clock}
+          {:error, reason} -> {:error, reason}
+        end
+    end
+  end
+
+  defp project_readiness_authority(
+         deps,
+         agent_id,
+         readiness_ctx,
+         boundary,
+         compilation,
+         budget,
+         now_dt
+       ) do
+    case {boundary, budget} do
+      {{:ok, {_actions, _handlers, compiled_graph}}, {:ok, budget_map}} ->
+        security = Map.get(deps, :security) || Config.security_module()
+
+        opts = [
+          security: security,
+          execution_principal: agent_id,
+          caller_id: Map.get(readiness_ctx, :caller_id),
+          scope_mode: :future_task,
+          compiled_graph: compiled_graph,
+          execution_manifest: compilation.execution_manifest,
+          run_deadline_unix_ms: budget_map.run_deadline_unix_ms,
+          cleanup_reserve_ms: budget_map.cleanup_reserve_ms,
+          now: now_dt
+        ]
+
+        case AuthorityHorizon.project(opts) do
+          {:ok, projection} when is_map(projection) -> projection
+          _ -> nil
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  defp boundary_section({:ok, _result}),
+    do: %{"status" => "verified", "code" => nil}
+
+  defp boundary_section({:error, reason}),
+    do: %{
+      "status" => "failed",
+      "code" => readiness_stable_code(reason)
+    }
+
+  defp boundary_section(_),
+    do: %{"status" => "skipped", "code" => nil}
+
+  defp budget_section({:ok, budget}) when is_map(budget) do
+    %{
+      "effective_wall_clock_ms" => budget.effective_wall_clock_ms,
+      "cleanup_reserve_ms" => budget.cleanup_reserve_ms,
+      "run_deadline_unix_ms" => budget.run_deadline_unix_ms,
+      "horizon_unix_ms" => budget.horizon_unix_ms
+    }
+  end
+
+  defp budget_section(_),
+    do: %{
+      "effective_wall_clock_ms" => nil,
+      "cleanup_reserve_ms" => nil,
+      "run_deadline_unix_ms" => nil,
+      "horizon_unix_ms" => nil
+    }
+
+  defp assemble_dispatch_readiness_report(attrs) do
+    readiness = Map.get(attrs, :readiness)
+    authority = Map.get(attrs, :authority)
+    boundary = Map.get(attrs, :boundary) || %{"status" => "skipped", "code" => nil}
+    budget = Map.get(attrs, :budget) || budget_section(:error)
+    report_error = Map.get(attrs, :error)
+    budget_failed? = Map.get(attrs, :budget_failed?, false) == true
+
+    readiness_status =
+      case readiness do
+        %{"status" => status} when is_binary(status) -> status
+        _ -> nil
+      end
+
+    authority_status =
+      case authority do
+        %{"status" => status} when is_binary(status) -> status
+        _ -> nil
+      end
+
+    status =
+      compose_dispatch_readiness_status(
+        readiness_status,
+        authority_status,
+        boundary,
+        budget_failed?
+      )
+
+    %{
+      "version" => 1,
+      "kind" => "coding_dispatch_readiness",
+      "status" => status,
+      "observed_at" => Map.get(attrs, :observed_at),
+      "agent_id" => Map.get(attrs, :agent_id),
+      "plan_digest" => Map.get(attrs, :plan_digest),
+      "budget" => budget,
+      "readiness" => readiness,
+      "execution_boundary" => boundary,
+      "authority_horizon" => authority,
+      "error" => report_error
+    }
+  end
+
+  # Authority missing/expiring/error always blocks (runtime preflight rejects).
+  # Reserve degraded exclusively for non-blocking Readiness observations.
+  # Budget derivation failure is a stable top-level error (not a silent nil).
+  defp compose_dispatch_readiness_status(
+         readiness_status,
+         authority_status,
+         boundary,
+         budget_failed?
+       ) do
+    boundary_failed? =
+      case boundary do
+        %{"status" => "failed"} -> true
+        _ -> false
+      end
+
+    cond do
+      budget_failed? ->
+        "error"
+
+      authority_status in ["missing", "expiring", "error"] ->
+        "blocked"
+
+      boundary_failed? ->
+        "blocked"
+
+      readiness_status == "blocked" ->
+        "blocked"
+
+      readiness_status == "degraded" ->
+        "degraded"
+
+      readiness_status == "ready" and authority_status == "ready" ->
+        "ready"
+
+      readiness_status == "ready" and is_nil(authority_status) ->
+        "blocked"
+
+      true ->
+        "blocked"
+    end
+  end
+
+  defp early_dispatch_readiness_failure(agent_id, observed_at, reason, plan_digest) do
+    code = readiness_stable_code(reason)
+    message = readiness_stable_message(reason)
+
+    agent =
+      if is_binary(agent_id) and agent_id != "", do: agent_id, else: nil
+
+    digest =
+      if is_binary(plan_digest) and String.starts_with?(plan_digest, "sha256:") and
+           plan_digest != "sha256:" <> String.duplicate("0", 64) do
+        plan_digest
+      else
+        nil
+      end
+
+    status =
+      case reason do
+        :invalid_agent_id -> "error"
+        :invalid_context -> "error"
+        :invalid_task -> "error"
+        :task_id_forbidden -> "error"
+        :unknown_context_key -> "error"
+        :forbidden_context_key -> "error"
+        :non_json_context -> "error"
+        :dispatch_readiness_exception -> "error"
+        :invalid_wall_clock -> "error"
+        :invalid_budget_policy_input -> "error"
+        {:unknown_context_key, _} -> "error"
+        {:forbidden_context_key, _} -> "error"
+        {:non_json_context, _} -> "error"
+        {:invalid_field_type, _} -> "error"
+        {:invalid_field, _} -> "error"
+        {:blank_field, _} -> "error"
+        {:missing_field, _} -> "error"
+        {:unsupported_task_kind, _} -> "error"
+        {:unknown_task_key, _} -> "error"
+        _ -> "blocked"
+      end
+
+    %{
+      "version" => 1,
+      "kind" => "coding_dispatch_readiness",
+      "status" => status,
+      "observed_at" => observed_at,
+      "agent_id" => agent,
+      "plan_digest" => digest,
+      "budget" => budget_section(:error),
+      "readiness" => nil,
+      "execution_boundary" => %{"status" => "skipped", "code" => nil},
+      "authority_horizon" => nil,
+      "error" => %{
+        "code" => code,
+        "message" => AuthorityHorizonCore.bound_text(message, @max_readiness_error_message_bytes)
+      }
+    }
+  end
+
+  defp readiness_stable_code(reason) when is_atom(reason), do: Atom.to_string(reason)
+
+  defp readiness_stable_code({:coding_execution_preflight_failed, reason}),
+    do: readiness_stable_code(reason)
+
+  defp readiness_stable_code({reason, _detail}) when is_atom(reason),
+    do: Atom.to_string(reason)
+
+  defp readiness_stable_code(_reason), do: "dispatch_readiness_failed"
+
+  defp readiness_stable_message(:invalid_agent_id),
+    do: "dispatch readiness rejected an invalid agent identity"
+
+  defp readiness_stable_message(:invalid_context),
+    do: "dispatch readiness rejected an invalid context object"
+
+  defp readiness_stable_message(:task_id_forbidden),
+    do: "dispatch readiness does not accept task ids from public input"
+
+  defp readiness_stable_message(:unknown_context_key),
+    do: "dispatch readiness rejected an unknown context key"
+
+  defp readiness_stable_message({:unknown_context_key, _}),
+    do: "dispatch readiness rejected an unknown context key"
+
+  defp readiness_stable_message(:forbidden_context_key),
+    do: "dispatch readiness rejected a forbidden context key"
+
+  defp readiness_stable_message({:forbidden_context_key, _}),
+    do: "dispatch readiness rejected a forbidden context key"
+
+  defp readiness_stable_message(:non_json_context),
+    do: "dispatch readiness requires a string-keyed JSON context map"
+
+  defp readiness_stable_message({:non_json_context, _}),
+    do: "dispatch readiness requires a string-keyed JSON context map"
+
+  defp readiness_stable_message(:coding_pipeline_unavailable),
+    do: "the reviewed coding template is unavailable"
+
+  defp readiness_stable_message({:coding_pipeline_unavailable, _}),
+    do: "the reviewed coding template is unavailable"
+
+  defp readiness_stable_message(:dispatch_readiness_exception),
+    do: "dispatch readiness failed closed"
+
+  defp readiness_stable_message(:invalid_wall_clock),
+    do: "dispatch readiness could not derive an effective wall-clock budget"
+
+  defp readiness_stable_message(:invalid_budget_policy_input),
+    do: "dispatch readiness rejected invalid budget policy inputs"
+
+  defp readiness_stable_message(:invalid_validation_program),
+    do: "dispatch readiness could not read the validation program budget source"
+
+  defp readiness_stable_message(:invalid_validation_timeout),
+    do: "dispatch readiness could not derive a validation action timeout"
+
+  defp readiness_stable_message({:invalid_field_type, field}) when is_binary(field),
+    do: "dispatch readiness rejected an invalid " <> field <> " value"
+
+  defp readiness_stable_message({:blank_field, field}) when is_binary(field),
+    do: "dispatch readiness rejected a blank " <> field <> " value"
+
+  defp readiness_stable_message({:missing_field, field}) when is_binary(field),
+    do: "dispatch readiness rejected a missing " <> field <> " value"
+
+  defp readiness_stable_message(reason) when is_atom(reason),
+    do: "dispatch readiness blocked: " <> Atom.to_string(reason)
+
+  defp readiness_stable_message({reason, _}) when is_atom(reason),
+    do: "dispatch readiness blocked: " <> Atom.to_string(reason)
+
+  defp readiness_stable_message(_reason),
+    do: "dispatch readiness failed closed"
+
   defp map_admission_failure({:error, reason}, stage),
     do: coding_admission_error(stage, reason, DateTime.utc_now())
 
@@ -1786,8 +2342,27 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     with :ok <- validate_prepared_execution_compilation(compilation, plan),
          {:ok, dot_source} <- File.read(graph_path),
          true <- dot_source == compilation.dot_source,
-         true <- sha256(dot_source) == compilation.graph_hash,
-         {:ok, graph} <- parse_execution_graph(dot_source),
+         true <- sha256(dot_source) == compilation.graph_hash do
+      verify_execution_boundary_from_compilation(plan, compilation)
+    else
+      false -> {:error, {:coding_execution_preflight_failed, :archived_graph_mismatch}}
+      {:error, reason} -> {:error, {:coding_execution_preflight_failed, reason}}
+      _other -> {:error, {:coding_execution_preflight_failed, :invalid_preflight_result}}
+    end
+  rescue
+    exception ->
+      {:error, {:coding_execution_preflight_failed, Exception.message(exception)}}
+  catch
+    kind, reason -> {:error, {:coding_execution_preflight_failed, {kind, reason}}}
+  end
+
+  # In-memory boundary verify used by read-only dispatch readiness. Does not
+  # read or write archives; operates only on the prepared compilation.
+  defp verify_execution_boundary_from_compilation(%Plan{} = plan, %Compilation{} = compilation) do
+    with :ok <- validate_prepared_execution_compilation(compilation, plan),
+         true <- is_binary(compilation.dot_source) and compilation.dot_source != "",
+         true <- sha256(compilation.dot_source) == compilation.graph_hash,
+         {:ok, graph} <- parse_execution_graph(compilation.dot_source),
          {:ok, compiled_graph} <- IRCompiler.compile(graph),
          {:ok, profile} <- Profiles.fetch_executable(plan.validation_profile),
          {:ok, validation_timeout_ms} <-
@@ -1823,7 +2398,8 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
            ExecutionManifest.handler_binding_index(compilation.execution_manifest) do
       {:ok, {pinned_action_bindings, pinned_handler_bindings, compiled_graph}}
     else
-      false -> {:error, {:coding_execution_preflight_failed, :archived_graph_mismatch}}
+      false -> {:error, {:coding_execution_preflight_failed, :compiled_graph_mismatch}}
+      {:error, {:coding_execution_preflight_failed, _}} = error -> error
       {:error, reason} -> {:error, {:coding_execution_preflight_failed, reason}}
       _other -> {:error, {:coding_execution_preflight_failed, :invalid_preflight_result}}
     end

@@ -3,7 +3,11 @@ defmodule Arbor.Orchestrator.CodingPlan.AuthorityHorizonTest do
 
   @moduletag :fast
 
-  alias Arbor.Orchestrator.CodingPlan.{AuthorityHorizon, ExecutionManifest}
+  alias Arbor.Orchestrator.CodingPlan.{
+    AuthorityHorizon,
+    AuthorityHorizonCore,
+    ExecutionManifest
+  }
   alias Arbor.Orchestrator.Dot.Parser
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.Graph.Node
@@ -288,6 +292,241 @@ defmodule Arbor.Orchestrator.CodingPlan.AuthorityHorizonTest do
                AuthorityHorizon.preflight(opts)
 
       assert diagnostic["code"] == "authority_horizon_missing"
+    end
+  end
+
+  describe "project/1" do
+    setup do
+      {:ok, graph} = minimal_compiled_graph()
+      resource = "arbor://action/coding/acquire_workspace"
+      now = ~U[2026-08-06 12:00:00.000000Z]
+      run_deadline = DateTime.to_unix(now, :millisecond) + 60_000
+
+      base_opts = [
+        security: HorizonSecurity,
+        execution_principal: "agent_exec",
+        compiled_graph: graph,
+        execution_manifest: %{
+          "version" => 2,
+          "capability_uris" => [resource]
+        },
+        run_deadline_unix_ms: run_deadline,
+        cleanup_reserve_ms: 30_000,
+        now: now,
+        scope_mode: :future_task
+      ]
+
+      %{base_opts: base_opts, resource: resource, now: now, run_deadline: run_deadline}
+    end
+
+    test "projects distinct caller missing and execution expiring with exact counts/digests", %{
+      base_opts: opts,
+      resource: resource,
+      run_deadline: run_deadline
+    } do
+      # Minimal start/done graph contributes no node resources (sentinels
+      # excluded), so the complete required set is exactly the manifest URI.
+      horizon_ms = run_deadline + 30_000
+      {:ok, horizon_dt} = DateTime.from_unix(horizon_ms, :millisecond)
+
+      Process.put({:horizon_caps, "agent_exec"}, [
+        %{
+          expires_at: DateTime.add(horizon_dt, -5, :second),
+          resources: [resource]
+        }
+      ])
+
+      Process.put({:horizon_caps, "caller_other"}, [])
+
+      assert {:ok, report} =
+               AuthorityHorizon.project(Keyword.put(opts, :caller_id, "caller_other"))
+
+      assert report["kind"] == "authority_horizon_projection"
+      assert report["status"] == "missing"
+      assert report["scope"]["mode"] == "future_task"
+      assert report["scope"]["task_id"] == nil
+      assert report["scope"]["session_id"] == nil
+      assert report["error"] == nil
+
+      assert report["required_resources"]["total_count"] == 1
+      assert report["required_resources"]["resource_uris"] == [resource]
+
+      assert report["required_resources"]["resource_uris_digest"] ==
+               AuthorityHorizonCore.uri_list_digest([resource])
+
+      exec_expiring =
+        Enum.find(report["findings"], fn f ->
+          f["principal_role"] == "execution_principal" and f["classification"] == "expiring"
+        end)
+
+      caller_missing =
+        Enum.find(report["findings"], fn f ->
+          f["principal_role"] == "authenticated_caller" and f["classification"] == "missing"
+        end)
+
+      assert exec_expiring["total_count"] == 1
+      assert exec_expiring["resource_uris"] == [resource]
+
+      assert exec_expiring["resource_uris_digest"] ==
+               AuthorityHorizonCore.uri_list_digest([resource])
+
+      assert caller_missing["total_count"] == 1
+      assert caller_missing["resource_uris"] == [resource]
+
+      assert caller_missing["resource_uris_digest"] ==
+               AuthorityHorizonCore.uri_list_digest([resource])
+
+      assert report["summary"]["missing_n"] == 1
+      assert report["summary"]["expiring_n"] == 1
+
+      expected_findings_digest =
+        AuthorityHorizonCore.project_horizon_report(%{
+          findings: [
+            %{
+              role: :execution_principal,
+              classification: :expiring,
+              resource_uris: [resource],
+              total_count: 1
+            },
+            %{
+              role: :authenticated_caller,
+              classification: :missing,
+              resource_uris: [resource],
+              total_count: 1
+            }
+          ],
+          resources: [resource],
+          status: "missing"
+        })["summary"]["findings_digest"]
+
+      assert report["summary"]["findings_digest"] == expected_findings_digest
+
+      assert {:ok, report2} =
+               AuthorityHorizon.project(Keyword.put(opts, :caller_id, "caller_other"))
+
+      assert report2["summary"]["findings_digest"] == report["summary"]["findings_digest"]
+      assert Jason.encode!(report)
+      refute inspect(report) =~ "capability_id"
+    end
+
+    test "bounds finding URI samples above the projection limit while retaining digests", %{
+      base_opts: opts
+    } do
+      uris =
+        for i <- 1..70 do
+          "arbor://resource/#{String.pad_leading(Integer.to_string(i), 3, "0")}"
+        end
+
+      opts =
+        Keyword.put(opts, :execution_manifest, %{
+          "version" => 2,
+          "capability_uris" => uris
+        })
+
+      Process.put({:horizon_caps, "agent_exec"}, [])
+
+      assert {:ok, report} = AuthorityHorizon.project(opts)
+
+      assert report["required_resources"]["total_count"] == 70
+
+      assert length(report["required_resources"]["resource_uris"]) ==
+               AuthorityHorizonCore.projected_uri_limit()
+
+      assert report["required_resources"]["resource_uris"] ==
+               Enum.take(Enum.sort(uris), AuthorityHorizonCore.projected_uri_limit())
+
+      assert report["required_resources"]["resource_uris_digest"] ==
+               AuthorityHorizonCore.uri_list_digest(Enum.sort(uris))
+
+      [missing] = report["findings"]
+      assert missing["classification"] == "missing"
+      assert missing["total_count"] == 70
+
+      assert length(missing["resource_uris"]) == AuthorityHorizonCore.projected_uri_limit()
+
+      assert missing["resource_uris_digest"] ==
+               AuthorityHorizonCore.uri_list_digest(Enum.sort(uris))
+
+      assert report["summary"]["missing_n"] == 70
+    end
+
+    test "malformed non-keyword opts never raise and return a bounded error" do
+      assert {:ok, report} = AuthorityHorizon.project([:bad])
+      assert report["status"] == "error"
+      assert report["kind"] == "authority_horizon_projection"
+      assert is_map(report["error"])
+      assert report["error"]["code"] == "invalid_authority_horizon_opts"
+      assert is_binary(report["error"]["message"])
+      assert Jason.encode!(report)
+    end
+
+    test "future-task forces null scope ids and empty Security scope opts", %{
+      base_opts: opts,
+      resource: resource
+    } do
+      Process.put({:horizon_caps, "agent_exec"}, fn _principal_id, scope_opts ->
+        send(self(), {:future_task_scope_opts, scope_opts})
+        {:ok, [%{expires_at: nil, resources: [resource], task_id: "task_some_existing"}]}
+      end)
+
+      # Even if a caller tries to smuggle task/session into project opts, future
+      # task mode must not put them in Security scope or the report.
+      smuggled =
+        opts
+        |> Keyword.put(:task_id, "task_should_not_appear")
+        |> Keyword.put(:session_id, "session_should_not_appear")
+
+      assert {:ok, report} = AuthorityHorizon.project(smuggled)
+
+      assert report["scope"]["mode"] == "future_task"
+      assert report["scope"]["task_id"] == nil
+      assert report["scope"]["session_id"] == nil
+      assert report["status"] == "missing"
+
+      assert_received {:future_task_scope_opts, []}
+
+      missing =
+        Enum.find(report["findings"], fn f ->
+          f["principal_role"] == "execution_principal" and f["classification"] == "missing"
+        end)
+
+      assert missing["total_count"] == 1
+    end
+
+    test "future-task credits permanent non-task-scoped capabilities", %{
+      base_opts: opts,
+      resource: resource
+    } do
+      Process.put({:horizon_caps, "agent_exec"}, [
+        %{expires_at: nil, resources: [:all]}
+      ])
+
+      assert {:ok, report} = AuthorityHorizon.project(opts)
+      assert report["status"] == "ready"
+      assert report["findings"] == []
+      assert report["summary"]["missing_n"] == 0
+      assert report["summary"]["expiring_n"] == 0
+      assert report["scope"]["task_id"] == nil
+      assert report["scope"]["session_id"] == nil
+      assert report["required_resources"]["resource_uris"] == [resource]
+    end
+
+    test "bound_task scope still requires an exact task id for task-scoped caps", %{
+      base_opts: opts
+    } do
+      bound_opts =
+        opts
+        |> Keyword.put(:scope_mode, :bound_task)
+        |> Keyword.put(:task_id, "task_horizon_1")
+
+      Process.put({:horizon_caps, "agent_exec"}, [
+        %{expires_at: nil, resources: [:all], task_id: "task_horizon_1"}
+      ])
+
+      assert {:ok, ready} = AuthorityHorizon.project(bound_opts)
+      assert ready["status"] == "ready"
+      assert ready["scope"]["mode"] == "bound_task"
+      assert ready["scope"]["task_id"] == "task_horizon_1"
     end
   end
 

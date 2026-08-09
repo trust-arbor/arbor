@@ -263,4 +263,126 @@ defmodule Arbor.Orchestrator.CodingPlan.AuthorityHorizonCoreTest do
       assert AuthorityHorizonCore.bound_text(<<255>>, 32) == "authority horizon blocked"
     end
   end
+
+  describe "project_resource_set/1" do
+    test "bounds samples while retaining complete count and digest" do
+      uris =
+        for i <- 1..70 do
+          "arbor://resource/#{String.pad_leading(Integer.to_string(i), 3, "0")}"
+        end
+
+      projected = AuthorityHorizonCore.project_resource_set(Enum.shuffle(uris))
+
+      assert projected["total_count"] == 70
+      assert length(projected["resource_uris"]) == AuthorityHorizonCore.projected_uri_limit()
+      assert projected["resource_uris"] == Enum.take(Enum.sort(uris), 64)
+
+      assert projected["resource_uris_digest"] ==
+               AuthorityHorizonCore.uri_list_digest(Enum.sort(uris))
+    end
+  end
+
+  describe "projection_status/1" do
+    test "missing wins over expiring" do
+      findings = [
+        %{
+          role: :execution_principal,
+          classification: :missing,
+          resource_uris: ["arbor://a"],
+          total_count: 1
+        },
+        %{
+          role: :authenticated_caller,
+          classification: :expiring,
+          resource_uris: ["arbor://b"],
+          total_count: 1
+        }
+      ]
+
+      assert AuthorityHorizonCore.projection_status(findings) == "missing"
+      assert AuthorityHorizonCore.projection_status(:ok) == "ready"
+
+      assert AuthorityHorizonCore.projection_status([
+               %{
+                 role: :execution_principal,
+                 classification: :expiring,
+                 resource_uris: ["arbor://a"],
+                 total_count: 1
+               }
+             ]) == "expiring"
+    end
+  end
+
+  describe "project_horizon_report/1" do
+    test "emits a string-keyed JSON-clean projection with digests" do
+      findings = [
+        %{
+          role: :execution_principal,
+          classification: :missing,
+          resource_uris: ["arbor://b", "arbor://a"],
+          total_count: 2
+        }
+      ]
+
+      report =
+        AuthorityHorizonCore.project_horizon_report(%{
+          observed_at: "2026-08-06T12:00:00.000000Z",
+          findings: findings,
+          resources: ["arbor://b", "arbor://a", "arbor://c"],
+          principals: [{:execution_principal, "agent_exec"}],
+          scope_mode: :future_task,
+          task_id: "task_smuggled",
+          session_id: "session_smuggled",
+          run_deadline_unix_ms: 1_000_000,
+          cleanup_reserve_ms: 30_000,
+          horizon_unix_ms: 1_030_000
+        })
+
+      assert report["version"] == 1
+      assert report["kind"] == "authority_horizon_projection"
+      assert report["status"] == "missing"
+      assert report["scope"]["mode"] == "future_task"
+      assert report["scope"]["task_id"] == nil
+      assert report["scope"]["session_id"] == nil
+      assert report["required_resources"]["total_count"] == 3
+      assert report["required_resources"]["resource_uris_digest"] ==
+               AuthorityHorizonCore.uri_list_digest(["arbor://a", "arbor://b", "arbor://c"])
+      assert report["summary"]["missing_n"] == 2
+      assert is_binary(report["summary"]["findings_digest"])
+      assert Jason.encode!(report)
+      refute Map.has_key?(report, :findings)
+    end
+
+    test "bounds finding samples above 64 while retaining full total_count and digest" do
+      uris =
+        for i <- 1..70 do
+          "arbor://resource/#{String.pad_leading(Integer.to_string(i), 3, "0")}"
+        end
+
+      findings = [
+        %{
+          role: :execution_principal,
+          classification: :missing,
+          resource_uris: uris,
+          total_count: 70
+        }
+      ]
+
+      report =
+        AuthorityHorizonCore.project_horizon_report(%{
+          findings: findings,
+          resources: uris,
+          status: "missing"
+        })
+
+      [projected] = report["findings"]
+      assert projected["total_count"] == 70
+      assert length(projected["resource_uris"]) == AuthorityHorizonCore.projected_uri_limit()
+
+      assert projected["resource_uris_digest"] ==
+               AuthorityHorizonCore.uri_list_digest(Enum.sort(uris))
+
+      assert report["summary"]["missing_n"] == 70
+    end
+  end
 end

@@ -1,6 +1,6 @@
 defmodule Arbor.Orchestrator.CodingPlan.AuthorityHorizon do
   @moduledoc """
-  Fail-closed coding-run authority-horizon preflight shell.
+  Fail-closed coding-run authority-horizon preflight and projection shell.
 
   Derives the complete required resource set from the verified compiled
   top-level graph, hash-verified reviewed nested graphs, and execution
@@ -9,6 +9,11 @@ defmodule Arbor.Orchestrator.CodingPlan.AuthorityHorizon do
 
   Uses only public Security facades for enumeration. Does not grant, renew,
   extend, or replace runtime per-node reauthorization.
+
+  `preflight/1` is the runtime admission gate (requires a server-owned task
+  id). `project/1` is the read-only JSON-clean projection used for
+  pre-dispatch readiness, including future-task scope without a task id.
+  Both share the same classification path.
   """
 
   alias Arbor.Contracts.Coding.Diagnostic
@@ -21,6 +26,7 @@ defmodule Arbor.Orchestrator.CodingPlan.AuthorityHorizon do
   alias Arbor.Orchestrator.Viz.DotSerializer
 
   @type preflight_opts :: keyword()
+  @type project_opts :: keyword()
 
   @stable_reason_messages %{
     invalid_authority_horizon_opts: "authority horizon preflight rejected invalid inputs",
@@ -51,31 +57,9 @@ defmodule Arbor.Orchestrator.CodingPlan.AuthorityHorizon do
   @spec preflight(preflight_opts()) ::
           :ok | {:error, {:authority_horizon_diagnostic, map()} | term()}
   def preflight(opts) when is_list(opts) do
-    with {:ok, ctx} <- validate_opts(opts),
-         {:ok, horizon_unix_ms} <-
-           AuthorityHorizonCore.horizon_unix_ms(
-             ctx.run_deadline_unix_ms,
-             ctx.cleanup_reserve_ms
-           ),
-         {:ok, horizon_dt} <- horizon_datetime(horizon_unix_ms),
-         {:ok, resources} <-
-           derive_required_resources(ctx.compiled_graph, ctx.execution_manifest) do
-      principals =
-        AuthorityHorizonCore.principals(ctx.execution_principal, ctx.caller_id)
-
-      results =
-        Enum.flat_map(principals, fn {role, principal_id} ->
-          classify_principal_resources(
-            ctx.security,
-            principal_id,
-            role,
-            resources,
-            ctx.scope_opts,
-            horizon_dt
-          )
-        end)
-
-      case AuthorityHorizonCore.aggregate_findings(results) do
+    with {:ok, ctx} <- validate_preflight_opts(opts),
+         {:ok, evaluation} <- evaluate_horizon(ctx) do
+      case evaluation.findings do
         :ok ->
           :ok
 
@@ -100,6 +84,65 @@ defmodule Arbor.Orchestrator.CodingPlan.AuthorityHorizon do
   end
 
   def preflight(_opts), do: missing_diagnostic(:invalid_authority_horizon_opts, [])
+
+  @doc """
+  Project a bounded JSON-clean authority-horizon report.
+
+  Always returns `{:ok, map}`. Failure to evaluate is encoded as
+  `status: \"error\"` with a stable reason code. Future-task scope omits
+  `task_id` from Security scope opts so task-scoped capabilities are not
+  credited before a server-owned task id exists.
+  """
+  @spec project(project_opts()) :: {:ok, map()}
+  def project(opts) when is_list(opts) do
+    if Keyword.keyword?(opts) do
+      case validate_project_opts(opts) do
+        {:ok, ctx} ->
+          observed_at = DateTime.to_iso8601(ctx.now, :extended)
+
+          case evaluate_horizon(ctx) do
+            {:ok, evaluation} ->
+              findings =
+                case evaluation.findings do
+                  :ok -> []
+                  {:error, list} when is_list(list) -> list
+                end
+
+              {:ok,
+               AuthorityHorizonCore.project_horizon_report(%{
+                 observed_at: observed_at,
+                 status: AuthorityHorizonCore.projection_status(evaluation.findings),
+                 scope_mode: ctx.scope_mode,
+                 task_id: ctx.task_id,
+                 session_id: ctx.session_id,
+                 run_deadline_unix_ms: ctx.run_deadline_unix_ms,
+                 cleanup_reserve_ms: ctx.cleanup_reserve_ms,
+                 horizon_unix_ms: evaluation.horizon_unix_ms,
+                 principals: evaluation.principals,
+                 resources: evaluation.resources,
+                 findings: findings,
+                 error: nil
+               })}
+
+            {:error, reason} ->
+              {:ok, error_projection(reason, ctx, opts)}
+          end
+
+        {:error, reason} ->
+          {:ok, error_projection(reason, nil, opts)}
+      end
+    else
+      {:ok, error_projection(:invalid_authority_horizon_opts, nil, [])}
+    end
+  rescue
+    _exception ->
+      {:ok, error_projection(:authority_horizon_exception, nil, [])}
+  catch
+    _kind, _reason ->
+      {:ok, error_projection(:authority_horizon_throw, nil, [])}
+  end
+
+  def project(_opts), do: {:ok, error_projection(:invalid_authority_horizon_opts, nil, [])}
 
   @doc """
   Derive the complete required resource URI set for a coding run.
@@ -130,44 +173,214 @@ defmodule Arbor.Orchestrator.CodingPlan.AuthorityHorizon do
   def derive_required_resources(_compiled_graph, _execution_manifest),
     do: {:error, :invalid_resource_derivation_input}
 
-  defp validate_opts(opts) do
-    security = Keyword.get(opts, :security)
-    execution_principal = Keyword.get(opts, :execution_principal)
-    compiled_graph = Keyword.get(opts, :compiled_graph)
-    execution_manifest = Keyword.get(opts, :execution_manifest)
-    run_deadline = Keyword.get(opts, :run_deadline_unix_ms)
-    cleanup_reserve = Keyword.get(opts, :cleanup_reserve_ms)
-    task_id = Keyword.get(opts, :task_id)
-    session_id = Keyword.get(opts, :session_id)
-    caller_id = Keyword.get(opts, :caller_id)
-    now = Keyword.get(opts, :now) || DateTime.utc_now()
+  # Shared classification path used by both preflight and project.
+  defp evaluate_horizon(ctx) do
+    with {:ok, horizon_unix_ms} <-
+           AuthorityHorizonCore.horizon_unix_ms(
+             ctx.run_deadline_unix_ms,
+             ctx.cleanup_reserve_ms
+           ),
+         {:ok, horizon_dt} <- horizon_datetime(horizon_unix_ms),
+         {:ok, resources} <-
+           derive_required_resources(ctx.compiled_graph, ctx.execution_manifest) do
+      principals =
+        AuthorityHorizonCore.principals(ctx.execution_principal, ctx.caller_id)
 
-    with true <- is_atom(security) and not is_nil(security),
-         true <- is_binary(execution_principal) and execution_principal != "",
-         true <- match?(%Graph{}, compiled_graph),
-         true <- is_map(execution_manifest),
-         true <- is_integer(run_deadline) and run_deadline > 0,
-         true <- is_integer(cleanup_reserve) and cleanup_reserve >= 0,
-         true <- is_binary(task_id) and task_id != "",
-         true <- match?(%DateTime{}, now) do
+      results =
+        Enum.flat_map(principals, fn {role, principal_id} ->
+          classify_principal_resources(
+            ctx.security,
+            principal_id,
+            role,
+            resources,
+            ctx.scope_opts,
+            horizon_dt
+          )
+        end)
+
+      {:ok,
+       %{
+         resources: resources,
+         horizon_unix_ms: horizon_unix_ms,
+         horizon_dt: horizon_dt,
+         principals: principals,
+         results: results,
+         findings: AuthorityHorizonCore.aggregate_findings(results)
+       }}
+    end
+  end
+
+  defp validate_preflight_opts(opts) do
+    with {:ok, base} <- validate_common_opts(opts),
+         task_id when is_binary(task_id) and task_id != "" <- Keyword.get(opts, :task_id) do
+      session_id = Keyword.get(opts, :session_id)
+
       scope_opts =
         [task_id: task_id]
         |> maybe_put_scope(:session_id, session_id)
 
       {:ok,
-       %{
-         security: security,
-         execution_principal: execution_principal,
-         caller_id: caller_id,
-         compiled_graph: compiled_graph,
-         execution_manifest: execution_manifest,
-         run_deadline_unix_ms: run_deadline,
-         cleanup_reserve_ms: cleanup_reserve,
-         scope_opts: scope_opts,
-         now: now
-       }}
+       Map.merge(base, %{
+         scope_mode: "bound_task",
+         task_id: task_id,
+         session_id: nullable_scope_id(session_id),
+         scope_opts: scope_opts
+       })}
     else
       _ -> {:error, :invalid_authority_horizon_opts}
+    end
+  end
+
+  defp validate_project_opts(opts) do
+    with {:ok, base} <- validate_common_opts(opts),
+         {:ok, scope_mode} <- project_scope_mode(opts) do
+      task_id = Keyword.get(opts, :task_id)
+      session_id = Keyword.get(opts, :session_id)
+
+      case scope_mode do
+        "future_task" ->
+          # Future-task projection deliberately omits task_id and session_id
+          # from Security scope so task-/session-scoped caps cannot credit an
+          # as-yet-unknown task.
+          {:ok,
+           Map.merge(base, %{
+             scope_mode: "future_task",
+             task_id: nil,
+             session_id: nil,
+             scope_opts: []
+           })}
+
+        "bound_task" ->
+          if is_binary(task_id) and task_id != "" do
+            scope_opts =
+              [task_id: task_id]
+              |> maybe_put_scope(:session_id, session_id)
+
+            {:ok,
+             Map.merge(base, %{
+               scope_mode: "bound_task",
+               task_id: task_id,
+               session_id: nullable_scope_id(session_id),
+               scope_opts: scope_opts
+             })}
+          else
+            {:error, :invalid_authority_horizon_opts}
+          end
+      end
+    else
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :invalid_authority_horizon_opts}
+    end
+  end
+
+  defp validate_common_opts(opts) do
+    if not (is_list(opts) and Keyword.keyword?(opts)) do
+      {:error, :invalid_authority_horizon_opts}
+    else
+      security = Keyword.get(opts, :security)
+      execution_principal = Keyword.get(opts, :execution_principal)
+      compiled_graph = Keyword.get(opts, :compiled_graph)
+      execution_manifest = Keyword.get(opts, :execution_manifest)
+      run_deadline = Keyword.get(opts, :run_deadline_unix_ms)
+      cleanup_reserve = Keyword.get(opts, :cleanup_reserve_ms)
+      caller_id = Keyword.get(opts, :caller_id)
+      now = Keyword.get(opts, :now) || DateTime.utc_now()
+
+      with true <- is_atom(security) and not is_nil(security),
+           true <- is_binary(execution_principal) and execution_principal != "",
+           true <- match?(%Graph{}, compiled_graph),
+           true <- is_map(execution_manifest),
+           true <- is_integer(run_deadline) and run_deadline > 0,
+           true <- is_integer(cleanup_reserve) and cleanup_reserve >= 0,
+           true <- match?(%DateTime{}, now) do
+        {:ok,
+         %{
+           security: security,
+           execution_principal: execution_principal,
+           caller_id: caller_id,
+           compiled_graph: compiled_graph,
+           execution_manifest: execution_manifest,
+           run_deadline_unix_ms: run_deadline,
+           cleanup_reserve_ms: cleanup_reserve,
+           now: now
+         }}
+      else
+        _ -> {:error, :invalid_authority_horizon_opts}
+      end
+    end
+  end
+
+  defp project_scope_mode(opts) do
+    if not (is_list(opts) and Keyword.keyword?(opts)) do
+      {:error, :invalid_authority_horizon_opts}
+    else
+      case Keyword.get(opts, :scope_mode, :future_task) do
+        :future_task -> {:ok, "future_task"}
+        "future_task" -> {:ok, "future_task"}
+        :bound_task -> {:ok, "bound_task"}
+        "bound_task" -> {:ok, "bound_task"}
+        _ -> {:error, :invalid_authority_horizon_opts}
+      end
+    end
+  end
+
+  defp nullable_scope_id(value) when is_binary(value) and value != "", do: value
+  defp nullable_scope_id(_value), do: nil
+
+  # Never call Keyword.* on untrusted/malformed opts — project([:bad]) must
+  # still return {:ok, bounded_error} even from rescue/catch paths.
+  defp error_projection(reason, ctx, opts) do
+    now_opt = safe_keyword_get(opts, :now)
+
+    observed_at =
+      cond do
+        match?(%{now: %DateTime{}}, ctx) ->
+          DateTime.to_iso8601(ctx.now, :extended)
+
+        match?(%DateTime{}, now_opt) ->
+          DateTime.to_iso8601(now_opt, :extended)
+
+        true ->
+          DateTime.utc_now() |> DateTime.to_iso8601(:extended)
+      end
+
+    reason_class = stable_reason_class(reason)
+    scope_mode = (ctx && Map.get(ctx, :scope_mode)) || "future_task"
+
+    future_task? = scope_mode == "future_task"
+
+    AuthorityHorizonCore.project_horizon_report(%{
+      observed_at: observed_at,
+      status: "error",
+      scope_mode: scope_mode,
+      # future_task always forces both ids null in the core projector.
+      task_id: if(future_task?, do: nil, else: ctx && Map.get(ctx, :task_id)),
+      session_id: if(future_task?, do: nil, else: ctx && Map.get(ctx, :session_id)),
+      run_deadline_unix_ms: ctx && Map.get(ctx, :run_deadline_unix_ms),
+      cleanup_reserve_ms: ctx && Map.get(ctx, :cleanup_reserve_ms),
+      horizon_unix_ms: nil,
+      principals:
+        case ctx do
+          %{execution_principal: principal, caller_id: caller} ->
+            AuthorityHorizonCore.principals(principal, caller)
+
+          _ ->
+            []
+        end,
+      resources: [],
+      findings: [],
+      error: %{
+        code: reason_class,
+        message: stable_reason_message(reason_class)
+      }
+    })
+  end
+
+  defp safe_keyword_get(opts, key, default \\ nil) do
+    if is_list(opts) and Keyword.keyword?(opts) do
+      Keyword.get(opts, key, default)
+    else
+      default
     end
   end
 

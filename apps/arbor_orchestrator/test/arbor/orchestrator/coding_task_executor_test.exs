@@ -5846,4 +5846,319 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
                Path.join([System.tmp_dir!(), "arbor_orchestrator", "coding_tasks"])
     end
   end
+
+  defmodule MutationSpySecurity do
+    @moduledoc false
+
+    def list_capabilities(principal_id, opts) do
+      send(self(), {:list_capabilities, principal_id, opts})
+      {:ok, [%{expires_at: nil, cover_all: true, resources: [:all]}]}
+    end
+
+    def capability_authorizes?(_cap, _resource, _opts), do: true
+    def normalize_authorization_resource_uri(resource, _opts), do: {:ok, resource}
+
+    def grant(_opts) do
+      send(self(), :capability_grant_called)
+      {:error, :mutation_forbidden}
+    end
+
+    def renew(_id) do
+      send(self(), :capability_renew_called)
+      {:error, :mutation_forbidden}
+    end
+
+    def revoke(_id) do
+      send(self(), :capability_revoke_called)
+      {:error, :mutation_forbidden}
+    end
+
+    def load_signing_key(_agent_id) do
+      send(self(), :load_signing_key_called)
+      {:error, :mutation_forbidden}
+    end
+
+    def open_signing_authority(_proof) do
+      send(self(), :open_signing_authority_called)
+      {:error, :mutation_forbidden}
+    end
+  end
+
+  defmodule ExpiringOnlySecurity do
+    @moduledoc false
+
+    def list_capabilities(_principal_id, _opts) do
+      expires_at = Process.get(:dispatch_readiness_expiring_at, DateTime.utc_now())
+      {:ok, [%{expires_at: expires_at, cover_all: true}]}
+    end
+
+    def capability_authorizes?(_cap, _resource, _opts), do: true
+    def normalize_authorization_resource_uri(resource, _opts), do: {:ok, resource}
+  end
+
+  describe "project_dispatch_readiness/3" do
+    defp assert_string_keyed_json(value) when is_map(value) do
+      Enum.each(value, fn {key, nested} ->
+        assert is_binary(key)
+        assert_string_keyed_json(nested)
+      end)
+    end
+
+    defp assert_string_keyed_json(value) when is_list(value) do
+      Enum.each(value, &assert_string_keyed_json/1)
+    end
+
+    defp assert_string_keyed_json(value)
+         when is_binary(value) or is_number(value) or is_boolean(value) or is_nil(value),
+         do: :ok
+
+    defp assert_string_keyed_json(other),
+      do: flunk("non-JSON value in readiness report: #{inspect(other)}")
+
+    defp put_degraded_acp_aligned_to(now, _default_provider \\ "codex", _default_model \\ nil) do
+      observed_at = DateTime.to_iso8601(now, :extended)
+      expires_at = DateTime.to_iso8601(DateTime.add(now, 20, :second), :extended)
+
+      # Mirror the plan's provider/model exactly so live readiness is degraded
+      # (not blocked on model_mismatch / future evidence) under a fixed clock.
+      Process.put({:coding_executor_readiness, :acp_provider_readiness}, fn provider, model ->
+        {:ok, observation} =
+          Arbor.Contracts.LLM.ProviderObservation.normalize(%{
+            provider: provider,
+            source: "acp_provider_readiness",
+            runtime: "acp",
+            observed_at: observed_at,
+            expires_at: expires_at,
+            availability: "degraded",
+            auth_health: "unknown",
+            model_catalog_membership: "unknown",
+            quota_state: "unknown",
+            subscription_capacity_state: "unknown",
+            requested_model_id: model,
+            launch_bound_model_id: model
+          })
+
+        {:ok, digest} = Arbor.Contracts.LLM.ProviderObservation.digest(observation)
+        %{"observation" => observation, "digest" => digest}
+      end)
+    end
+
+    test "invalid plans fail closed with null plan_digest and a bounded report" do
+      now = ~U[2026-08-06 12:00:00.000000Z]
+
+      deps = %{
+        now_datetime: now,
+        now_unix_ms: DateTime.to_unix(now, :millisecond),
+        security: MutationSpySecurity
+      }
+
+      assert {:ok, report} =
+               CodingTaskExecutor.project_dispatch_readiness_with_deps(
+                 "agent_1",
+                 %{"kind" => "coding_change"},
+                 %{},
+                 deps
+               )
+
+      assert report["kind"] == "coding_dispatch_readiness"
+      assert report["status"] == "error"
+      assert report["plan_digest"] == nil
+      assert report["authority_horizon"] == nil
+      assert is_map(report["error"])
+      assert is_binary(report["error"]["code"])
+      assert report["error"]["code"] != ""
+      assert is_binary(report["error"]["message"])
+      assert report["error"]["message"] != ""
+      assert byte_size(report["error"]["message"]) <= 256
+      assert_string_keyed_json(report)
+      assert {:ok, _} = Jason.encode(report)
+      refute report["plan_digest"] == "sha256:" <> String.duplicate("0", 64)
+    end
+
+    test "rejects task_id, bad timeout, blank caller, and non-JSON context as status=error" do
+      now = ~U[2026-08-06 12:00:00.000000Z]
+
+      deps = %{
+        now_datetime: now,
+        now_unix_ms: DateTime.to_unix(now, :millisecond),
+        security: MutationSpySecurity
+      }
+
+      assert {:ok, report} =
+               CodingTaskExecutor.project_dispatch_readiness_with_deps(
+                 "agent_1",
+                 valid_task(),
+                 %{"task_id" => "task_should_not_be_accepted"},
+                 deps
+               )
+
+      assert report["status"] == "error"
+      assert report["plan_digest"] == nil
+      assert report["error"]["code"] == "unknown_context_key"
+
+      assert {:ok, bad_timeout} =
+               CodingTaskExecutor.project_dispatch_readiness_with_deps(
+                 "agent_1",
+                 valid_task(),
+                 %{"timeout" => 0},
+                 deps
+               )
+
+      assert bad_timeout["status"] == "error"
+      assert bad_timeout["error"]["code"] == "invalid_field_type"
+      assert is_binary(bad_timeout["error"]["message"])
+
+      assert {:ok, blank_caller} =
+               CodingTaskExecutor.project_dispatch_readiness_with_deps(
+                 "agent_1",
+                 valid_task(),
+                 %{"caller_id" => "   "},
+                 deps
+               )
+
+      assert blank_caller["status"] == "error"
+      assert blank_caller["error"]["code"] == "blank_field"
+
+      assert {:ok, keyword_report} =
+               CodingTaskExecutor.project_dispatch_readiness_with_deps(
+                 "agent_1",
+                 valid_task(),
+                 [caller_id: "caller_x"],
+                 deps
+               )
+
+      assert keyword_report["status"] == "error"
+      assert keyword_report["error"]["code"] == "invalid_context"
+
+      assert {:ok, atom_report} =
+               CodingTaskExecutor.project_dispatch_readiness_with_deps(
+                 "agent_1",
+                 valid_task(),
+                 %{caller_id: "caller_x"},
+                 deps
+               )
+
+      assert atom_report["status"] == "error"
+    end
+
+    test "readiness degraded plus authority ready yields top-level degraded without mutation" do
+      now = ~U[2026-08-06 12:00:00.000000Z]
+      now_ms = DateTime.to_unix(now, :millisecond)
+      put_degraded_acp_aligned_to(now)
+
+      # ObservedArtifactStore notifies on archive; readiness must not call it.
+      Application.put_env(
+        :arbor_orchestrator,
+        :coding_plan_artifact_store,
+        ObservedArtifactStore
+      )
+
+      deps = %{
+        now_datetime: now,
+        now_unix_ms: now_ms,
+        security: MutationSpySecurity
+      }
+
+      assert {:ok, report} =
+               CodingTaskExecutor.project_dispatch_readiness_with_deps(
+                 "agent_1",
+                 valid_task(),
+                 %{"caller_id" => "caller_other", "timeout" => 120_000},
+                 deps
+               )
+
+      assert report["kind"] == "coding_dispatch_readiness"
+      assert is_binary(report["plan_digest"])
+      assert String.starts_with?(report["plan_digest"], "sha256:")
+      refute report["plan_digest"] == "sha256:" <> String.duplicate("0", 64)
+
+      assert report["readiness"]["status"] == "degraded"
+      assert report["execution_boundary"]["status"] == "verified"
+      assert is_integer(report["budget"]["effective_wall_clock_ms"])
+      wall = report["budget"]["effective_wall_clock_ms"]
+      cleanup = report["budget"]["cleanup_reserve_ms"]
+      assert report["budget"]["run_deadline_unix_ms"] == now_ms + wall
+      assert report["budget"]["horizon_unix_ms"] == now_ms + wall + cleanup
+
+      authority = report["authority_horizon"]
+      assert is_map(authority)
+      assert authority["kind"] == "authority_horizon_projection"
+      assert authority["scope"]["mode"] == "future_task"
+      assert authority["scope"]["task_id"] == nil
+      assert authority["scope"]["session_id"] == nil
+      assert authority["status"] == "ready"
+      assert report["status"] == "degraded"
+      assert report["error"] == nil
+      assert_string_keyed_json(report)
+      assert {:ok, _} = Jason.encode(report)
+
+      refute_received :coding_plan_artifact_store_called
+      refute_received :capability_grant_called
+      refute_received :capability_renew_called
+      refute_received :capability_revoke_called
+      refute_received :open_signing_authority_called
+      refute_received :load_signing_key_called
+
+      assert_received {:list_capabilities, "agent_1", []}
+      assert_received {:list_capabilities, "caller_other", []}
+    end
+
+    test "authority expiring alone yields top-level blocked" do
+      now = ~U[2026-08-06 12:00:00.000000Z]
+      now_ms = DateTime.to_unix(now, :millisecond)
+      put_degraded_acp_aligned_to(now)
+      expiring_at = DateTime.from_unix!(now_ms + 1, :millisecond)
+      Process.put(:dispatch_readiness_expiring_at, expiring_at)
+
+      deps = %{
+        now_datetime: now,
+        now_unix_ms: now_ms,
+        security: ExpiringOnlySecurity
+      }
+
+      assert {:ok, report} =
+               CodingTaskExecutor.project_dispatch_readiness_with_deps(
+                 "agent_1",
+                 valid_task(),
+                 %{},
+                 deps
+               )
+
+      assert is_map(report["authority_horizon"])
+      assert report["authority_horizon"]["status"] == "expiring"
+      assert report["authority_horizon"]["scope"]["task_id"] == nil
+      assert report["authority_horizon"]["scope"]["session_id"] == nil
+      assert report["status"] == "blocked"
+    end
+
+    test "budget derivation failure yields stable top-level error not error=null" do
+      now = ~U[2026-08-06 12:00:00.000000Z]
+      now_ms = DateTime.to_unix(now, :millisecond)
+      put_degraded_acp_aligned_to(now)
+
+      deps = %{
+        now_datetime: now,
+        now_unix_ms: now_ms,
+        security: MutationSpySecurity,
+        budget_result: {:error, :invalid_budget_policy_input}
+      }
+
+      assert {:ok, report} =
+               CodingTaskExecutor.project_dispatch_readiness_with_deps(
+                 "agent_1",
+                 valid_task(),
+                 %{},
+                 deps
+               )
+
+      assert report["status"] == "error"
+      assert is_map(report["error"])
+      assert report["error"]["code"] == "invalid_budget_policy_input"
+      assert is_binary(report["error"]["message"])
+      assert report["error"]["message"] != ""
+      assert report["budget"]["effective_wall_clock_ms"] == nil
+      assert report["authority_horizon"] == nil
+      assert_string_keyed_json(report)
+    end
+  end
 end

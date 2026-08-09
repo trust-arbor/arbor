@@ -154,6 +154,198 @@ defmodule Arbor.Orchestrator.CodingPlan.AuthorityHorizonCore do
   def aggregate_findings(_results), do: :ok
 
   @doc """
+  Bound a complete resource URI set into a JSON-clean projection envelope.
+
+  Samples are truncated; `total_count` and `resource_uris_digest` cover the
+  complete sorted unique set.
+  """
+  @spec project_resource_set(term()) :: map()
+  def project_resource_set(resources) when is_list(resources) do
+    uris =
+      resources
+      |> Enum.filter(&(is_binary(&1) and &1 != ""))
+      |> Enum.uniq()
+      |> Enum.sort()
+
+    %{
+      "total_count" => length(uris),
+      "resource_uris" => Enum.take(uris, @projected_uri_limit),
+      "resource_uris_digest" => uri_list_digest(uris)
+    }
+  end
+
+  def project_resource_set(_resources), do: project_resource_set([])
+
+  @doc """
+  Project full findings into bounded string-keyed finding maps.
+  """
+  @spec project_findings_report(term()) :: [map()]
+  def project_findings_report(findings) when is_list(findings) do
+    findings
+    |> Enum.map(&project_one_finding/1)
+    |> Enum.reject(&is_nil/1)
+  end
+
+  def project_findings_report(_findings), do: []
+
+  @doc """
+  Derive projection status from findings. Missing wins over expiring.
+  """
+  @spec projection_status(term()) :: String.t()
+  def projection_status(:ok), do: "ready"
+
+  def projection_status({:error, findings}) when is_list(findings),
+    do: projection_status(findings)
+
+  def projection_status(findings) when is_list(findings) do
+    cond do
+      findings == [] ->
+        "ready"
+
+      Enum.any?(findings, &(&1.classification == :missing)) ->
+        "missing"
+
+      Enum.any?(findings, &(&1.classification == :expiring)) ->
+        "expiring"
+
+      true ->
+        "ready"
+    end
+  end
+
+  def projection_status(_findings), do: "error"
+
+  @doc """
+  Assemble a bounded JSON-clean authority-horizon projection report.
+
+  All time and security facts must be injected; this function performs no IO.
+  """
+  @spec project_horizon_report(map()) :: map()
+  def project_horizon_report(attrs) when is_map(attrs) do
+    observed_at =
+      normalize_observed_at(Map.get(attrs, :observed_at) || Map.get(attrs, "observed_at"))
+
+    findings =
+      case Map.get(attrs, :findings) || Map.get(attrs, "findings") do
+        list when is_list(list) -> list
+        :ok -> []
+        {:error, list} when is_list(list) -> list
+        _ -> []
+      end
+
+    resources =
+      case Map.get(attrs, :resources) || Map.get(attrs, "resources") do
+        list when is_list(list) -> list
+        _ -> []
+      end
+
+    status =
+      case Map.get(attrs, :status) || Map.get(attrs, "status") do
+        status when status in ["ready", "missing", "expiring", "error"] ->
+          status
+
+        _ ->
+          projection_status(findings)
+      end
+
+    scope_mode =
+      case Map.get(attrs, :scope_mode) || Map.get(attrs, "scope_mode") do
+        mode when mode in ["future_task", "bound_task"] -> mode
+        :future_task -> "future_task"
+        :bound_task -> "bound_task"
+        _ -> "future_task"
+      end
+
+    task_id = nullable_binary(Map.get(attrs, :task_id) || Map.get(attrs, "task_id"))
+    session_id = nullable_binary(Map.get(attrs, :session_id) || Map.get(attrs, "session_id"))
+
+    principals =
+      case Map.get(attrs, :principals) || Map.get(attrs, "principals") do
+        list when is_list(list) -> project_principals(list)
+        _ -> []
+      end
+
+    run_deadline =
+      Map.get(attrs, :run_deadline_unix_ms) || Map.get(attrs, "run_deadline_unix_ms")
+
+    cleanup_reserve =
+      Map.get(attrs, :cleanup_reserve_ms) || Map.get(attrs, "cleanup_reserve_ms")
+
+    horizon_unix_ms =
+      Map.get(attrs, :horizon_unix_ms) || Map.get(attrs, "horizon_unix_ms")
+
+    missing_n = sum_count(findings, :missing)
+    expiring_n = sum_count(findings, :expiring)
+    projected_findings = project_findings_report(findings)
+
+    error =
+      case Map.get(attrs, :error) || Map.get(attrs, "error") do
+        %{code: code, message: message} ->
+          %{
+            "code" => stable_error_code(code),
+            "message" => bound_text(message, @max_message_bytes)
+          }
+
+        %{"code" => code, "message" => message} ->
+          %{
+            "code" => stable_error_code(code),
+            "message" => bound_text(message, @max_message_bytes)
+          }
+
+        code when is_atom(code) and not is_nil(code) ->
+          %{
+            "code" => Atom.to_string(code),
+            "message" => bound_text(Atom.to_string(code), @max_message_bytes)
+          }
+
+        code when is_binary(code) and code != "" ->
+          %{
+            "code" => code,
+            "message" => bound_text(code, @max_message_bytes)
+          }
+
+        _ ->
+          nil
+      end
+
+    %{
+      "version" => 1,
+      "kind" => "authority_horizon_projection",
+      "status" => status,
+      "observed_at" => observed_at,
+      "scope" => %{
+        "mode" => scope_mode,
+        # future_task never exposes or credits task-/session-scoped identity.
+        "task_id" => if(scope_mode == "future_task", do: nil, else: task_id),
+        "session_id" => if(scope_mode == "future_task", do: nil, else: session_id)
+      },
+      "horizon" => %{
+        "run_deadline_unix_ms" => non_neg_int_or_null(run_deadline),
+        "cleanup_reserve_ms" => non_neg_int_or_null(cleanup_reserve),
+        "horizon_unix_ms" => non_neg_int_or_null(horizon_unix_ms)
+      },
+      "principals" => principals,
+      "required_resources" => project_resource_set(resources),
+      "findings" => projected_findings,
+      "summary" => %{
+        "missing_n" => missing_n,
+        "expiring_n" => expiring_n,
+        "findings_digest" => findings_digest(findings)
+      },
+      "error" => error
+    }
+  end
+
+  def project_horizon_report(_attrs) do
+    project_horizon_report(%{
+      status: "error",
+      findings: [],
+      resources: [],
+      error: :invalid_authority_horizon_opts
+    })
+  end
+
+  @doc """
   Project full findings into a Diagnostic-compatible attribute map.
 
   Truncates projected URI samples only; retains total_count and a digest of
@@ -321,24 +513,91 @@ defmodule Arbor.Orchestrator.CodingPlan.AuthorityHorizonCore do
   defp expiry_of(%{"expires_at" => expires_at}), do: expires_at
   defp expiry_of(_cap), do: :invalid
 
-  defp sum_count(findings, classification) do
+  defp project_one_finding(%{
+         role: role,
+         classification: classification,
+         resource_uris: resource_uris,
+         total_count: total_count
+       })
+       when role in @role_order and classification in @classification_order and
+              is_list(resource_uris) and is_integer(total_count) and total_count >= 0 do
+    uris =
+      resource_uris
+      |> Enum.filter(&(is_binary(&1) and &1 != ""))
+      |> Enum.uniq()
+      |> Enum.sort()
+
+    %{
+      "principal_role" => Atom.to_string(role),
+      "classification" => Atom.to_string(classification),
+      "total_count" => total_count,
+      "resource_uris" => Enum.take(uris, @projected_uri_limit),
+      "resource_uris_digest" => uri_list_digest(uris)
+    }
+  end
+
+  defp project_one_finding(_other), do: nil
+
+  defp sum_count(findings, classification) when is_list(findings) do
     findings
-    |> Enum.filter(&(&1.classification == classification))
+    |> Enum.filter(fn
+      %{classification: ^classification, total_count: n} when is_integer(n) and n >= 0 -> true
+      _ -> false
+    end)
     |> Enum.reduce(0, fn finding, acc -> acc + finding.total_count end)
   end
 
-  defp findings_digest(findings) do
+  defp sum_count(_findings, _classification), do: 0
+
+  defp findings_digest(findings) when is_list(findings) do
     findings
-    |> Enum.flat_map(fn finding ->
-      Enum.map(finding.resource_uris, fn uri ->
-        "#{finding.role}\t#{finding.classification}\t#{uri}"
-      end)
+    |> Enum.flat_map(fn
+      %{role: role, classification: classification, resource_uris: uris}
+      when is_list(uris) ->
+        Enum.map(uris, fn uri ->
+          if is_binary(uri) do
+            "#{role}\t#{classification}\t#{uri}"
+          else
+            nil
+          end
+        end)
+
+      _ ->
+        []
     end)
+    |> Enum.reject(&is_nil/1)
     |> Enum.sort()
     |> Enum.join("\n")
     |> then(&:crypto.hash(:sha256, &1))
     |> Base.encode16(case: :lower)
   end
+
+  defp findings_digest(_findings), do: findings_digest([])
+
+  defp project_principals(principals) do
+    Enum.flat_map(principals, fn
+      {role, principal_id}
+      when role in @role_order and is_binary(principal_id) and principal_id != "" ->
+        [%{"role" => Atom.to_string(role), "principal_id" => principal_id}]
+
+      %{"role" => role, "principal_id" => principal_id}
+      when is_binary(role) and is_binary(principal_id) and principal_id != "" ->
+        [%{"role" => role, "principal_id" => principal_id}]
+
+      _ ->
+        []
+    end)
+  end
+
+  defp nullable_binary(value) when is_binary(value) and value != "", do: value
+  defp nullable_binary(_value), do: nil
+
+  defp non_neg_int_or_null(value) when is_integer(value) and value >= 0, do: value
+  defp non_neg_int_or_null(_value), do: nil
+
+  defp stable_error_code(code) when is_atom(code), do: Atom.to_string(code)
+  defp stable_error_code(code) when is_binary(code) and code != "", do: code
+  defp stable_error_code(_code), do: "authority_horizon_exception"
 
   defp normalize_observed_at(observed_at) when is_binary(observed_at) and observed_at != "" do
     if String.valid?(observed_at), do: observed_at, else: @fallback_observed_at
