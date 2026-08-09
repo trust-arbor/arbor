@@ -43,6 +43,11 @@ defmodule Arbor.Contracts.Agent.TaskExecutor do
   hang) so one executor cannot freeze status or prevent cancellation.
   Explicit runner overrides do not use these cross-library callbacks.
 
+  Configured executors may also implement `project_dispatch_readiness/3` for a
+  read-only pre-dispatch projection. It receives the target agent, exact task,
+  and a JSON-clean context without a task id. It must not create a task or
+  acquire authority; failures are returned as bounded JSON data or an error.
+
   Configured executors may also implement `steer_task/3`. TaskStore writes an
   ordered control record before calling it, then preserves that record across
   runner exits. A steering callback receives the exact JSON-clean control map
@@ -209,6 +214,9 @@ defmodule Arbor.Contracts.Agent.TaskExecutor do
   @typedoc "Normalized successful task result payload (see TaskArtifacts)."
   @type result_payload :: map()
 
+  @typedoc "Bounded JSON-clean pre-dispatch readiness projection."
+  @type readiness_report :: json_map()
+
   @typedoc "Approval identifier when execution is blocked on human/consensus approval."
   @type approval_id :: String.t()
 
@@ -275,6 +283,16 @@ defmodule Arbor.Contracts.Agent.TaskExecutor do
   production JSON-clean boundary.
   """
   @callback run(agent_id(), task(), execution_context() | keyword()) :: result()
+
+  @doc """
+  Optionally project readiness before TaskStore creates a task identity.
+
+  The context is JSON-clean and contains no task id. Implementations must be
+  read-only: do not create task records, workspaces, artifacts, capabilities,
+  approvals, or provider sessions.
+  """
+  @callback project_dispatch_readiness(agent_id(), task(), execution_context()) ::
+              {:ok, readiness_report()} | {:error, term()}
 
   @doc """
   Optional best-effort progress probe for a running configured task.
@@ -384,7 +402,8 @@ defmodule Arbor.Contracts.Agent.TaskExecutor do
               execution_context()
             ) :: {:ok, result_payload()} | {:error, term()}
 
-  @optional_callbacks task_status: 2,
+  @optional_callbacks project_dispatch_readiness: 3,
+                      task_status: 2,
                       cancel_task: 2,
                       steer_task: 3,
                       finalize_terminal_task: 4,

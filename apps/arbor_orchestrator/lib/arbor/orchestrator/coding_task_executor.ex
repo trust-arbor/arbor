@@ -293,6 +293,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   clocks, modules, functions, or observed evidence. Creates no task ids,
   workspaces, artifacts, branches, capabilities, approvals, or ACP sessions.
   """
+  @impl true
   @spec project_dispatch_readiness(String.t(), term(), term()) :: {:ok, map()}
   def project_dispatch_readiness(agent_id, task, context \\ %{})
 
