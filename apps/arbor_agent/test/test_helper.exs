@@ -1,3 +1,8 @@
+# Security stores + capability authority. Test config intentionally leaves the
+# security supervisor empty, so consumer suites must opt into the shared
+# bootstrap before any behavioral fixture grants capabilities.
+:ok = Arbor.Security.TestBootstrap.start!()
+
 # Add children to the empty app supervisor (start_children: false leaves it empty)
 children = [
   {Registry, keys: :unique, name: Arbor.Agent.ExecutorRegistry},

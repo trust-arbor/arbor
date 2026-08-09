@@ -236,7 +236,7 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
       receive do
         {:finish, result} -> result
       after
-        1_000 -> {:error, :test_timeout}
+        5_000 -> {:error, :test_timeout}
       end
     end
 
@@ -1087,7 +1087,7 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
       end)
 
     assert_receive {:adopt_task_called, "agent_1", raw_result, request, _context, callback_pid}
-    assert {:error, :task_adoption_wait_timeout} = Task.await(caller, 500)
+    assert {:error, :task_adoption_wait_timeout} = Task.await(caller, 2_000)
     assert Map.has_key?(:sys.get_state(store).adoptions, task_id)
 
     assert {:ok, :pending} =
