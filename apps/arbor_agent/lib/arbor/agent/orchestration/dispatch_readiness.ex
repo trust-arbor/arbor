@@ -25,7 +25,7 @@ defmodule Arbor.Agent.Orchestration.DispatchReadiness do
           optional(:config) => module(),
           optional(:exact_policy) => module(),
           optional(:clock) => (-> DateTime.t()),
-          optional(:callback_timeout_ms) => pos_integer(),
+          optional(:readiness_timeout_ms) => pos_integer(),
           optional(:invoke_executor) => (module(), String.t(), term(), map(), pos_integer() ->
                                            term())
         }
@@ -113,7 +113,7 @@ defmodule Arbor.Agent.Orchestration.DispatchReadiness do
       config: Config,
       exact_policy: ExactTemplatePolicy,
       clock: &DateTime.utc_now/0,
-      callback_timeout_ms: Config.executor_callback_timeout_ms(),
+      readiness_timeout_ms: Config.executor_readiness_timeout_ms(),
       invoke_executor: &default_invoke_executor/5
     }
   end
@@ -492,7 +492,7 @@ defmodule Arbor.Agent.Orchestration.DispatchReadiness do
 
   defp gather_executor(deps, agent_id, task, caller_id, timeout) do
     config = deps.config
-    callback_timeout_ms = resolve_callback_timeout(deps)
+    readiness_timeout_ms = resolve_readiness_timeout(deps)
 
     kind_result =
       case task_kind(task, config) do
@@ -527,7 +527,7 @@ defmodule Arbor.Agent.Orchestration.DispatchReadiness do
         if function_exported?(module, :project_dispatch_readiness, 3) do
           context = readiness_context(caller_id, timeout)
 
-          case deps.invoke_executor.(module, agent_id, task, context, callback_timeout_ms) do
+          case deps.invoke_executor.(module, agent_id, task, context, readiness_timeout_ms) do
             {:ok, report} ->
               # Core validates original JSON + closed status before any bounding.
               %{
@@ -606,15 +606,16 @@ defmodule Arbor.Agent.Orchestration.DispatchReadiness do
     end
   end
 
-  defp resolve_callback_timeout(%{callback_timeout_ms: ms})
+  defp resolve_readiness_timeout(%{readiness_timeout_ms: ms})
        when is_integer(ms) and ms > 0,
        do: ms
 
-  defp resolve_callback_timeout(_), do: Config.executor_callback_timeout_ms()
+  defp resolve_readiness_timeout(_), do: Config.executor_readiness_timeout_ms()
 
-  # Match TaskStore.call_executor_callback/3: supervised async_nolink, rescue
-  # inside the task, bounded yield, brutal kill on hang. Never link the caller.
-  defp default_invoke_executor(module, agent_id, task, context, timeout_ms) do
+  # Match TaskStore.call_executor_callback/3 containment shape: supervised
+  # async_nolink, rescue inside the task, bounded yield, brutal kill on hang.
+  # Uses the dedicated readiness budget, not the short status/cancel timeout.
+  defp default_invoke_executor(module, agent_id, task, context, readiness_timeout_ms) do
     supervisor = Arbor.Agent.Orchestration.TaskSupervisor
 
     task_ref =
@@ -629,7 +630,7 @@ defmodule Arbor.Agent.Orchestration.DispatchReadiness do
         end
       end)
 
-    case Task.yield(task_ref, timeout_ms) || Task.shutdown(task_ref, :brutal_kill) do
+    case Task.yield(task_ref, readiness_timeout_ms) || Task.shutdown(task_ref, :brutal_kill) do
       {:ok, result} -> result
       nil -> {:error, :executor_callback_timeout}
       {:exit, _} -> {:error, :executor_callback_exit}

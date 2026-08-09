@@ -215,7 +215,12 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessTest do
     def normalize_kind(kind) when is_atom(kind), do: {:ok, Atom.to_string(kind)}
     def normalize_kind(_), do: {:error, :invalid_task_kind}
 
+    # Keep the short generic status/cancel budget available for isolation asserts.
     def executor_callback_timeout_ms, do: 250
+
+    def executor_readiness_timeout_ms do
+      Process.get({__MODULE__, :readiness_timeout_ms}, 10_000)
+    end
   end
 
   defmodule ReadyExecutor do
@@ -264,6 +269,24 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessTest do
     def project_dispatch_readiness(_a, _t, _c) do
       Process.sleep(60_000)
       {:ok, %{"status" => "ready"}}
+    end
+  end
+
+  defmodule SlowButReadyExecutor do
+    def run(_a, _t, _c), do: {:ok, %{}}
+
+    def project_dispatch_readiness(agent_id, _task, _context) do
+      # Longer than the generic 250 ms status/cancel budget, shorter than the
+      # dedicated readiness budget used in the production-default regression.
+      Process.sleep(400)
+
+      {:ok,
+       %{
+         "version" => 1,
+         "kind" => "coding_dispatch_readiness",
+         "status" => "ready",
+         "agent_id" => agent_id
+       }}
     end
   end
 
@@ -361,8 +384,8 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessTest do
         config: FakeConfig,
         exact_policy: FakeExactPolicy,
         clock: fn -> ~U[2026-08-09 00:00:00Z] end,
-        callback_timeout_ms: 250,
-        invoke_executor: fn module, agent_id, task, context, _timeout_ms ->
+        readiness_timeout_ms: 10_000,
+        invoke_executor: fn module, agent_id, task, context, _readiness_timeout_ms ->
           module.project_dispatch_readiness(agent_id, task, context)
         end
       },
@@ -370,7 +393,7 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessTest do
     )
   end
 
-  # Production-default callback path: no invoke_executor override.
+  # Production-default readiness callback path: no invoke_executor override.
   defp production_callback_deps(extra) do
     base = deps(extra)
     Map.delete(base, :invoke_executor)
@@ -885,7 +908,7 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessTest do
                "agent_target1",
                coding_task(),
                [caller_id: "human_caller1"],
-               production_callback_deps(%{callback_timeout_ms: 500})
+               production_callback_deps(%{readiness_timeout_ms: 500})
              )
 
     assert ready["planes"]["executor"]["status"] == "ready"
@@ -900,7 +923,7 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessTest do
                "agent_target1",
                coding_task(),
                [caller_id: "human_caller1"],
-               production_callback_deps(%{callback_timeout_ms: 500})
+               production_callback_deps(%{readiness_timeout_ms: 500})
              )
 
     assert raised["planes"]["executor"]["status"] == "error"
@@ -916,7 +939,7 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessTest do
                "agent_target1",
                coding_task(),
                [caller_id: "human_caller1"],
-               production_callback_deps(%{callback_timeout_ms: 500})
+               production_callback_deps(%{readiness_timeout_ms: 500})
              )
 
     assert thrown["planes"]["executor"]["status"] == "error"
@@ -930,7 +953,7 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessTest do
                "agent_target1",
                coding_task(),
                [caller_id: "human_caller1"],
-               production_callback_deps(%{callback_timeout_ms: 500})
+               production_callback_deps(%{readiness_timeout_ms: 500})
              )
 
     assert exited["planes"]["executor"]["status"] == "error"
@@ -951,7 +974,7 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessTest do
                "agent_target1",
                coding_task(),
                [caller_id: "human_caller1"],
-               production_callback_deps(%{callback_timeout_ms: 50})
+               production_callback_deps(%{readiness_timeout_ms: 50})
              )
 
     assert timed_out["planes"]["executor"]["status"] == "error"
@@ -964,6 +987,72 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessTest do
     refute length(after_children) > length(before_children)
 
     # No leaked EXIT killed the test process.
+    refute_received {:EXIT, _, _}
+  end
+
+  test "production readiness wiring admits callbacks slower than generic callback budget and still times out hung ones" do
+    caller = self()
+    Process.flag(:trap_exit, true)
+
+    original_callback = Application.fetch_env(:arbor_agent, :executor_callback_timeout_ms)
+    original_readiness = Application.fetch_env(:arbor_agent, :executor_readiness_timeout_ms)
+
+    on_exit(fn ->
+      Enum.each(
+        [
+          {:executor_callback_timeout_ms, original_callback},
+          {:executor_readiness_timeout_ms, original_readiness}
+        ],
+        fn
+          {key, {:ok, value}} -> Application.put_env(:arbor_agent, key, value)
+          {key, :error} -> Application.delete_env(:arbor_agent, key)
+        end
+      )
+    end)
+
+    Application.put_env(:arbor_agent, :executor_callback_timeout_ms, 50)
+    Application.put_env(:arbor_agent, :executor_readiness_timeout_ms, 1_000)
+
+    # Omitting the injected timeout exercises production_deps/0. Reusing the
+    # generic 50 ms callback budget here would make this projection time out.
+    Process.put({FakeConfig, :executor}, {:ok, SlowButReadyExecutor})
+
+    production_wiring_deps =
+      production_callback_deps(%{})
+      |> Map.delete(:readiness_timeout_ms)
+
+    assert {:ok, slow_ready} =
+             DispatchReadiness.project_with_deps(
+               "agent_target1",
+               coding_task(),
+               [caller_id: "human_caller1"],
+               production_wiring_deps
+             )
+
+    assert slow_ready["planes"]["executor"]["status"] == "ready"
+    assert {:ok, _} = DispatchReadinessCore.assert_report(slow_ready)
+    assert Process.alive?(caller)
+
+    # Exceeding the dedicated readiness budget still returns executor_callback_timeout
+    # and brutally kills the hung child.
+    Process.put({FakeConfig, :executor}, {:ok, HangingExecutor})
+    before_children = Task.Supervisor.children(Arbor.Agent.Orchestration.TaskSupervisor)
+
+    assert {:ok, timed_out} =
+             DispatchReadiness.project_with_deps(
+               "agent_target1",
+               coding_task(),
+               [caller_id: "human_caller1"],
+               production_callback_deps(%{readiness_timeout_ms: 50})
+             )
+
+    assert timed_out["planes"]["executor"]["status"] == "error"
+    assert timed_out["planes"]["executor"]["code"] == "executor_callback_timeout"
+    assert Process.alive?(caller)
+
+    Process.sleep(20)
+    after_children = Task.Supervisor.children(Arbor.Agent.Orchestration.TaskSupervisor)
+    refute length(after_children) > length(before_children)
     refute_received {:EXIT, _, _}
   end
 
@@ -1002,7 +1091,7 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessTest do
     refute inspect(report) =~ "bad clock"
   end
 
-  test "callback_timeout_ms dependency is forwarded to invoke_executor" do
+  test "readiness_timeout_ms dependency is forwarded to invoke_executor" do
     parent = self()
 
     assert {:ok, _} =
@@ -1011,15 +1100,15 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessTest do
                coding_task(),
                [caller_id: "human_caller1"],
                deps(%{
-                 callback_timeout_ms: 321,
-                 invoke_executor: fn module, agent_id, task, context, timeout_ms ->
-                   send(parent, {:timeout_ms, timeout_ms})
+                 readiness_timeout_ms: 321,
+                 invoke_executor: fn module, agent_id, task, context, readiness_timeout_ms ->
+                   send(parent, {:readiness_timeout_ms, readiness_timeout_ms})
                    module.project_dispatch_readiness(agent_id, task, context)
                  end
                })
              )
 
-    assert_received {:timeout_ms, 321}
+    assert_received {:readiness_timeout_ms, 321}
   end
 
   test "no-effects observers: records reads and proves prohibited mutations empty" do
