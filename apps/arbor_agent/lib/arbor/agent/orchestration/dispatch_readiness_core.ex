@@ -12,6 +12,12 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessCore do
   @max_string_bytes 1_024
   @max_key_bytes 256
   @max_top_string_bytes 512
+  # Portable JSON integer magnitude ceiling (2^53-1), mirrored from durable
+  # envelope policy — not a dependency on TaintEnvelope.
+  @max_json_safe_integer 9_007_199_254_740_991
+  # Global JSON node budget (durable-envelope precedent). Per-depth / per-
+  # container bounds alone cannot stop wide hostile structures.
+  @max_json_nodes 4_096
   # Distinct structural limits: executor original envelope vs Agent aggregate.
   # Wrapper path is planes -> plane -> details -> projection (4 levels).
   @max_executor_depth 8
@@ -63,6 +69,15 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessCore do
 
   @spec max_string_bytes() :: pos_integer()
   def max_string_bytes, do: @max_string_bytes
+
+  @spec max_top_string_bytes() :: pos_integer()
+  def max_top_string_bytes, do: @max_top_string_bytes
+
+  @spec max_json_safe_integer() :: pos_integer()
+  def max_json_safe_integer, do: @max_json_safe_integer
+
+  @spec max_json_nodes() :: pos_integer()
+  def max_json_nodes, do: @max_json_nodes
 
   @doc """
   Compose a full readiness report from already-projected plane facts.
@@ -136,15 +151,32 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessCore do
     }
   end
 
+  @doc """
+  Build one closed plane map. Total for internal projectors: always returns a
+  map. Malformed internal details yield a stable error plane
+  (`malformed_plane_details`) rather than the requested status with empty
+  details.
+  """
   @spec plane(String.t(), String.t() | nil, String.t() | nil, map()) :: map()
   def plane(status, code, message, details)
       when status in @statuses and is_map(details) do
-    %{
-      "status" => status,
-      "code" => null_or_string(code),
-      "message" => if(is_binary(message), do: bound_message(message), else: nil),
-      "details" => bound_details(details)
-    }
+    case convert_and_bound_details(details) do
+      {:ok, bounded} ->
+        %{
+          "status" => status,
+          "code" => null_or_string(code),
+          "message" => if(is_binary(message), do: bound_message(message), else: nil),
+          "details" => bounded
+        }
+
+      :error ->
+        %{
+          "status" => "error",
+          "code" => "malformed_plane_details",
+          "message" => bound_message("plane details are malformed"),
+          "details" => %{}
+        }
+    end
   end
 
   @doc """
@@ -667,13 +699,20 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessCore do
          } = plane
        )
        when status in @statuses and is_map(details) and map_size(plane) == 4 do
-    {:ok,
-     %{
-       "status" => status,
-       "code" => null_or_string(code),
-       "message" => if(is_binary(message), do: bound_message(message), else: nil),
-       "details" => bound_details(details)
-     }}
+    # Details conversion must not launder unsupported values into ready + {}.
+    case convert_and_bound_details(details) do
+      {:ok, bounded} ->
+        {:ok,
+         %{
+           "status" => status,
+           "code" => null_or_string(code),
+           "message" => if(is_binary(message), do: bound_message(message), else: nil),
+           "details" => bounded
+         }}
+
+      :error ->
+        :error
+    end
   end
 
   defp normalize_plane(_), do: :error
@@ -705,46 +744,102 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessCore do
       MapSet.new(Map.keys(report["planes"])) == MapSet.new(@plane_keys)
   end
 
-  # Structural JSON cleanliness. Size limits apply during bound_json/2;
-  # excessive depth and overlong keys are structural failures (not truncated).
-  defp do_json_clean?(nil, _depth, _max), do: true
+  # Structural JSON cleanliness with global node budget. Size limits apply
+  # during bound_json/2; excessive depth, overlong keys, out-of-range numbers,
+  # and node-budget exhaustion are structural failures (not truncated).
+  # Stops as soon as the budget is exceeded — never walks unbounded tails only
+  # to form diagnostics, and never materializes huge integer strings.
+  defp do_json_clean?(value, depth, max_depth) do
+    match?({:ok, _}, walk_json(value, depth, max_depth, @max_json_nodes))
+  end
 
-  defp do_json_clean?(v, _depth, _max) when is_boolean(v) or is_integer(v) or is_float(v),
-    do: true
+  defp walk_json(_value, _depth, _max_depth, nodes_left) when nodes_left <= 0, do: :error
 
-  defp do_json_clean?(v, _depth, _max) when is_binary(v), do: String.valid?(v)
+  defp walk_json(nil, _depth, _max_depth, nodes_left), do: {:ok, nodes_left - 1}
 
-  defp do_json_clean?(list, depth, max_depth)
+  defp walk_json(v, _depth, _max_depth, nodes_left) when is_boolean(v),
+    do: {:ok, nodes_left - 1}
+
+  defp walk_json(v, _depth, _max_depth, nodes_left) when is_integer(v) do
+    if json_safe_integer?(v), do: {:ok, nodes_left - 1}, else: :error
+  end
+
+  defp walk_json(v, _depth, _max_depth, nodes_left) when is_float(v) do
+    if json_safe_float?(v), do: {:ok, nodes_left - 1}, else: :error
+  end
+
+  defp walk_json(v, _depth, _max_depth, nodes_left) when is_binary(v) do
+    if String.valid?(v), do: {:ok, nodes_left - 1}, else: :error
+  end
+
+  defp walk_json(list, depth, max_depth, nodes_left)
        when is_list(list) and depth < max_depth do
-    Enum.all?(list, &do_json_clean?(&1, depth + 1, max_depth))
+    walk_list(list, depth + 1, max_depth, nodes_left - 1)
   end
 
-  defp do_json_clean?(list, depth, max_depth)
+  defp walk_json(list, depth, max_depth, _nodes_left)
        when is_list(list) and depth >= max_depth,
-       do: false
+       do: :error
 
-  defp do_json_clean?(map, depth, max_depth)
+  defp walk_json(map, depth, max_depth, nodes_left)
        when is_map(map) and not is_struct(map) and depth < max_depth do
-    Enum.all?(map, fn
-      {k, v} when is_binary(k) ->
-        String.valid?(k) and byte_size(k) <= @max_key_bytes and
-          do_json_clean?(v, depth + 1, max_depth)
+    # Reject by map_size before Map.to_list/1 — never materialize a map wider
+    # than the remaining node budget solely to discover it is too wide.
+    remaining = nodes_left - 1
 
-      _ ->
-        false
-    end)
+    if remaining < 0 or map_size(map) > remaining do
+      :error
+    else
+      walk_map(Map.to_list(map), depth + 1, max_depth, remaining)
+    end
   end
 
-  defp do_json_clean?(map, depth, max_depth)
+  defp walk_json(map, depth, max_depth, _nodes_left)
        when is_map(map) and not is_struct(map) and depth >= max_depth,
-       do: false
+       do: :error
 
-  defp do_json_clean?(_, _, _), do: false
+  defp walk_json(_, _, _, _), do: :error
+
+  defp walk_list([], _depth, _max_depth, nodes_left), do: {:ok, nodes_left}
+
+  defp walk_list([head | tail], depth, max_depth, nodes_left) when nodes_left > 0 do
+    case walk_json(head, depth, max_depth, nodes_left) do
+      {:ok, remaining} -> walk_list(tail, depth, max_depth, remaining)
+      :error -> :error
+    end
+  end
+
+  # Budget exhausted with remaining items, or improper list — non-JSON.
+  defp walk_list(_rest, _depth, _max_depth, _nodes_left), do: :error
+
+  defp walk_map([], _depth, _max_depth, nodes_left), do: {:ok, nodes_left}
+
+  defp walk_map([{k, v} | rest], depth, max_depth, nodes_left) when is_binary(k) do
+    if String.valid?(k) and byte_size(k) <= @max_key_bytes do
+      case walk_json(v, depth, max_depth, nodes_left) do
+        {:ok, remaining} -> walk_map(rest, depth, max_depth, remaining)
+        :error -> :error
+      end
+    else
+      :error
+    end
+  end
+
+  defp walk_map(_other, _depth, _max_depth, _nodes_left), do: :error
 
   # Bound only after json_clean? validation. Deterministic map key order.
   # Overlong keys are never accepted (rejected above); values may truncate.
   defp do_bound(nil, _depth, _max), do: nil
-  defp do_bound(v, _depth, _max) when is_boolean(v) or is_integer(v) or is_float(v), do: v
+
+  defp do_bound(v, _depth, _max) when is_boolean(v), do: v
+
+  defp do_bound(v, _depth, _max) when is_integer(v) do
+    if json_safe_integer?(v), do: v, else: nil
+  end
+
+  defp do_bound(v, _depth, _max) when is_float(v) do
+    if json_safe_float?(v), do: v, else: nil
+  end
 
   defp do_bound(v, _depth, _max) when is_binary(v), do: utf8_truncate(v, @max_string_bytes)
 
@@ -767,63 +862,144 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessCore do
 
   defp do_bound(_, _, _), do: nil
 
-  defp bound_details(map) when is_map(map) do
-    case stringify_supported_keys(map) do
-      {:ok, string_keyed} ->
-        case bound_json(string_keyed, @max_aggregate_depth) do
-          {:ok, m} when is_map(m) -> m
-          _ -> %{}
-        end
-
-      :error ->
-        %{}
+  # Explicit success/error — never silently empty details for a requested status.
+  defp convert_and_bound_details(map) when is_map(map) do
+    with {:ok, string_keyed} <- stringify_supported_keys(map),
+         {:ok, bounded} <- bound_json(string_keyed, @max_aggregate_depth),
+         true <- is_map(bounded) do
+      {:ok, bounded}
+    else
+      _ -> :error
     end
   end
 
+  defp convert_and_bound_details(_), do: :error
+
   # Plane construction may use atom keys internally; only convert atoms.
   # Never call to_string/1 on arbitrary keys (tuple/struct/pid raise or launder).
-  defp stringify_supported_keys(map) when is_map(map) and not is_struct(map) do
-    Enum.reduce_while(map, {:ok, %{}}, fn
-      {k, v}, {:ok, acc} when is_atom(k) ->
-        case stringify_supported_keys(v) do
-          {:ok, sv} -> {:cont, {:ok, Map.put(acc, Atom.to_string(k), sv)}}
-          :error -> {:halt, :error}
-        end
-
-      {k, v}, {:ok, acc} when is_binary(k) ->
-        if String.valid?(k) and byte_size(k) <= @max_key_bytes do
-          case stringify_supported_keys(v) do
-            {:ok, sv} -> {:cont, {:ok, Map.put(acc, k, sv)}}
-            :error -> {:halt, :error}
-          end
-        else
-          {:halt, :error}
-        end
-
-      _, _ ->
-        {:halt, :error}
-    end)
-  end
-
-  defp stringify_supported_keys(list) when is_list(list) do
-    Enum.reduce_while(list, {:ok, []}, fn item, {:ok, acc} ->
-      case stringify_supported_keys(item) do
-        {:ok, value} -> {:cont, {:ok, [value | acc]}}
-        :error -> {:halt, :error}
-      end
-    end)
-    |> case do
-      {:ok, values} -> {:ok, Enum.reverse(values)}
+  # Atom/string key aliases (e.g. :status and "status") are rejected, not merged
+  # by map iteration order.
+  #
+  # This FIRST conversion traversal carries the global node budget itself — it
+  # must not fully materialize hostile atom-key/list details and only fail later
+  # in the string-key walk. map_size/1 rejects wide maps before any iteration.
+  defp stringify_supported_keys(value) do
+    case do_stringify(value, @max_json_nodes) do
+      {:ok, converted, _nodes_left} -> {:ok, converted}
       :error -> :error
     end
   end
 
-  defp stringify_supported_keys(v)
-       when is_binary(v) or is_boolean(v) or is_integer(v) or is_float(v) or is_nil(v) do
-    if is_binary(v) and not String.valid?(v), do: :error, else: {:ok, v}
+  defp do_stringify(_value, nodes_left) when nodes_left <= 0, do: :error
+
+  defp do_stringify(map, nodes_left) when is_map(map) and not is_struct(map) do
+    # Each map entry costs at least one value node after the map node itself.
+    remaining = nodes_left - 1
+
+    if remaining < 0 or map_size(map) > remaining do
+      :error
+    else
+      Enum.reduce_while(map, {:ok, %{}, remaining}, fn
+        {k, v}, {:ok, acc, n} when is_atom(k) ->
+          sk = Atom.to_string(k)
+
+          if Map.has_key?(acc, sk) do
+            {:halt, :error}
+          else
+            case do_stringify(v, n) do
+              {:ok, sv, n2} -> {:cont, {:ok, Map.put(acc, sk, sv), n2}}
+              :error -> {:halt, :error}
+            end
+          end
+
+        {k, v}, {:ok, acc, n} when is_binary(k) ->
+          if String.valid?(k) and byte_size(k) <= @max_key_bytes do
+            if Map.has_key?(acc, k) do
+              {:halt, :error}
+            else
+              case do_stringify(v, n) do
+                {:ok, sv, n2} -> {:cont, {:ok, Map.put(acc, k, sv), n2}}
+                :error -> {:halt, :error}
+              end
+            end
+          else
+            {:halt, :error}
+          end
+
+        _, _ ->
+          {:halt, :error}
+      end)
+      |> case do
+        {:ok, acc, n} -> {:ok, acc, n}
+        :error -> :error
+      end
+    end
   end
 
-  defp stringify_supported_keys(_), do: :error
+  defp do_stringify(list, nodes_left) when is_list(list) do
+    # Do not length/1 hostile lists — walk with the remaining budget and stop.
+    case do_stringify_list(list, nodes_left - 1, []) do
+      {:ok, values, n} -> {:ok, Enum.reverse(values), n}
+      :error -> :error
+    end
+  end
+
+  defp do_stringify(v, nodes_left) when is_binary(v) do
+    if String.valid?(v), do: {:ok, v, nodes_left - 1}, else: :error
+  end
+
+  defp do_stringify(v, nodes_left) when is_boolean(v) or is_nil(v),
+    do: {:ok, v, nodes_left - 1}
+
+  defp do_stringify(v, nodes_left) when is_integer(v) do
+    # Compare only — never Integer.to_string/1 a hostile bignum.
+    if json_safe_integer?(v), do: {:ok, v, nodes_left - 1}, else: :error
+  end
+
+  defp do_stringify(v, nodes_left) when is_float(v) do
+    if json_safe_float?(v), do: {:ok, v, nodes_left - 1}, else: :error
+  end
+
+  defp do_stringify(_, _), do: :error
+
+  defp do_stringify_list([], nodes_left, acc), do: {:ok, acc, nodes_left}
+
+  defp do_stringify_list([head | tail], nodes_left, acc) when nodes_left > 0 do
+    case do_stringify(head, nodes_left) do
+      {:ok, value, n2} -> do_stringify_list(tail, n2, [value | acc])
+      :error -> :error
+    end
+  end
+
+  # Budget exhausted with remaining items, or improper list — non-JSON.
+  defp do_stringify_list(_rest, _nodes_left, _acc), do: :error
+
+  # Compare only — never Integer.to_string/1 a hostile bignum for diagnostics.
+  defp json_safe_integer?(n) when is_integer(n) do
+    n <= @max_json_safe_integer and n >= -@max_json_safe_integer
+  end
+
+  defp json_safe_integer?(_), do: false
+
+  # Total comparison consistent with durable-envelope float policy: reject
+  # non-finite and magnitudes outside the portable JSON integer ceiling.
+  defp json_safe_float?(v) when is_float(v) do
+    finite_float?(v) and abs(v) <= @max_json_safe_integer
+  end
+
+  defp json_safe_float?(_), do: false
+
+  defp finite_float?(value) when is_float(value) do
+    value == value and
+      case :erlang.float_to_binary(value, [:compact]) do
+        binary when is_binary(binary) ->
+          not String.contains?(String.downcase(binary), ["nan", "inf"])
+      end
+  rescue
+    _ -> false
+  end
+
+  defp finite_float?(_), do: false
 
   defp bound_message(message) when is_binary(message),
     do: utf8_truncate(message, @max_message_bytes)

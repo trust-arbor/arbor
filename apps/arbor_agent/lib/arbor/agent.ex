@@ -269,9 +269,8 @@ defmodule Arbor.Agent do
 
   - `:session_token` — optional human session proof (non-empty binary ≤4096)
   - `:timeout` — optional positive integer milliseconds forwarded unchanged into
-    the configured executor readiness context (never as a task id). Accepts the
-    same positive outer budgets used for coding dispatch (including 900_000 ms
-    and longer reviewed coding timeouts); there is no artificial facade ceiling.
+    the configured executor readiness context (never as a task id). Any positive
+    timeout is accepted and forwarded; there is no artificial facade ceiling.
 
   Unknown, duplicate, nil, empty, non-binary, non-positive, or oversized options
   are rejected before authorization. Session proofs reach only

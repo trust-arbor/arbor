@@ -272,6 +272,9 @@ defmodule Arbor.Agent.Orchestration.DispatchReadiness do
   end
 
   defp gather_coordinator(deps, agent_id) do
+    # Only Lifecycle.get_host/1 returning {:error, :no_host} is ordinary absence.
+    # Every other error tuple, bare :error, nil, or malformed return is infrastructure
+    # failure and projects coordinator status error (not absent/blocked).
     host_state =
       try do
         case deps.lifecycle.get_host(agent_id) do
@@ -282,13 +285,13 @@ defmodule Arbor.Agent.Orchestration.DispatchReadiness do
             "absent"
 
           {:error, _} ->
-            "absent"
+            "error"
 
           :error ->
-            "absent"
+            "error"
 
           nil ->
-            "absent"
+            "error"
 
           _malformed ->
             "error"
@@ -463,41 +466,27 @@ defmodule Arbor.Agent.Orchestration.DispatchReadiness do
     try do
       case deps.task_store.recovery_ready?() do
         true ->
-          %{
-            recovery_ready?: true,
-            recovery_facts_ok?: true,
-            required_grants: @required_grants
-          }
+          recovery_facts(true, true)
 
         false ->
-          %{
-            recovery_ready?: false,
-            recovery_facts_ok?: true,
-            required_grants: @required_grants
-          }
+          recovery_facts(false, true)
 
         _malformed ->
-          %{
-            recovery_ready?: false,
-            recovery_facts_ok?: false,
-            required_grants: @required_grants
-          }
+          recovery_facts(false, false)
       end
     rescue
-      _ ->
-        %{
-          recovery_ready?: false,
-          recovery_facts_ok?: false,
-          required_grants: @required_grants
-        }
+      _ -> recovery_facts(false, false)
     catch
-      _, _ ->
-        %{
-          recovery_ready?: false,
-          recovery_facts_ok?: false,
-          required_grants: @required_grants
-        }
+      _, _ -> recovery_facts(false, false)
     end
+  end
+
+  defp recovery_facts(recovery_ready?, recovery_facts_ok?) do
+    %{
+      recovery_ready?: recovery_ready?,
+      recovery_facts_ok?: recovery_facts_ok?,
+      required_grants: @required_grants
+    }
   end
 
   defp gather_executor(deps, agent_id, task, caller_id, timeout) do

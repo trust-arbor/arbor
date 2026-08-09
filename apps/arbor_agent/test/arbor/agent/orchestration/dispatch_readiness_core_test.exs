@@ -4,7 +4,7 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessCoreTest do
 
   alias Arbor.Agent.Orchestration.DispatchReadinessCore, as: Core
 
-  defp ready_plane(details \\ %{}) do
+  defp ready_plane(details) do
     Core.plane("ready", nil, nil, details)
   end
 
@@ -26,25 +26,32 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessCoreTest do
 
   # Representative string-keyed Orchestrator readiness nesting with nested
   # readiness + authority_horizon maps (measured production shape).
-  defp real_orchestrator_readiness_fixture(status \\ "ready") do
+  # ISO timestamps and Unix-ms fields are time-consistent for 2026-08-09.
+  # 2026-08-09T00:00:00.000Z == 1_786_233_600_000 ms since Unix epoch.
+  defp real_orchestrator_readiness_fixture(status) do
+    observed_at = "2026-08-09T00:00:00.000000Z"
+    run_deadline_unix_ms = 1_786_233_600_000
+    cleanup_reserve_ms = 30_000
+    horizon_unix_ms = run_deadline_unix_ms - cleanup_reserve_ms
+
     %{
       "version" => 1,
       "kind" => "coding_dispatch_readiness",
       "status" => status,
-      "observed_at" => "2026-08-09T00:00:00.000000Z",
+      "observed_at" => observed_at,
       "agent_id" => "agent_target1",
       "plan_digest" => "sha256:" <> String.duplicate("ab", 32),
       "budget" => %{
         "effective_wall_clock_ms" => 900_000,
-        "cleanup_reserve_ms" => 30_000,
-        "run_deadline_unix_ms" => 1_725_000_000_000,
-        "horizon_unix_ms" => 1_724_999_970_000
+        "cleanup_reserve_ms" => cleanup_reserve_ms,
+        "run_deadline_unix_ms" => run_deadline_unix_ms,
+        "horizon_unix_ms" => horizon_unix_ms
       },
       "readiness" => %{
         "version" => 1,
         "status" => status,
         "plan_digest" => "sha256:" <> String.duplicate("ab", 32),
-        "observed_at" => "2026-08-09T00:00:00.000000Z",
+        "observed_at" => observed_at,
         "diagnostics" => [
           %{
             "version" => 1,
@@ -52,7 +59,7 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessCoreTest do
             "phase" => "preflight",
             "decision" => if(status == "ready", do: "passed", else: "degraded"),
             "code" => "provider_ok",
-            "observed_at" => "2026-08-09T00:00:00.000000Z",
+            "observed_at" => observed_at,
             "message" => "provider is available"
           }
         ]
@@ -62,16 +69,16 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessCoreTest do
         "version" => 1,
         "kind" => "authority_horizon_projection",
         "status" => "ready",
-        "observed_at" => "2026-08-09T00:00:00.000000Z",
+        "observed_at" => observed_at,
         "scope" => %{
           "mode" => "future_task",
           "task_id" => nil,
           "session_id" => nil
         },
         "horizon" => %{
-          "run_deadline_unix_ms" => 1_725_000_000_000,
-          "cleanup_reserve_ms" => 30_000,
-          "horizon_unix_ms" => 1_724_999_970_000
+          "run_deadline_unix_ms" => run_deadline_unix_ms,
+          "cleanup_reserve_ms" => cleanup_reserve_ms,
+          "horizon_unix_ms" => horizon_unix_ms
         },
         "principals" => [
           %{"role" => "execution", "principal_id" => "agent_target1"}
@@ -273,6 +280,7 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessCoreTest do
 
   test "oversized top-level strings are bounded" do
     long = String.duplicate("a", 2_000)
+    max_top = Core.max_top_string_bytes()
 
     assert {:ok, report} =
              Core.compose(
@@ -283,9 +291,9 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessCoreTest do
                })
              )
 
-    assert byte_size(report["agent_id"]) <= 512
-    assert byte_size(report["caller_id"]) <= 512
-    assert byte_size(report["observed_at"]) <= 512
+    assert byte_size(report["agent_id"]) <= max_top
+    assert byte_size(report["caller_id"]) <= max_top
+    assert byte_size(report["observed_at"]) <= max_top
     assert {:ok, _} = Core.assert_report(report)
   end
 
@@ -625,6 +633,180 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessCoreTest do
   test "malformed plane input returns error" do
     assert {:error, :malformed_plane_input} =
              Core.compose(base_facts(%{security: %{"status" => "ready"}}))
+  end
+
+  test "security regression: ready plane with unsupported details cannot compose as ready" do
+    # Raw ready plane whose details contain a tuple must fail closed — never
+    # launder to ready with empty details, and never raise the caller.
+    raw_tuple_details = %{
+      "status" => "ready",
+      "code" => nil,
+      "message" => nil,
+      "details" => %{"nested" => {:a, :b}}
+    }
+
+    assert {:error, :malformed_plane_input} =
+             Core.compose(base_facts(%{security: raw_tuple_details}))
+
+    raw_pid_key = %{
+      "status" => "ready",
+      "code" => nil,
+      "message" => nil,
+      "details" => %{self() => "x"}
+    }
+
+    assert {:error, :malformed_plane_input} =
+             Core.compose(base_facts(%{security: raw_pid_key}))
+
+    invalid_utf8 = <<0xFF, 0xFE>>
+
+    raw_invalid_utf8 = %{
+      "status" => "ready",
+      "code" => nil,
+      "message" => nil,
+      "details" => %{"bad" => invalid_utf8}
+    }
+
+    assert {:error, :malformed_plane_input} =
+             Core.compose(base_facts(%{security: raw_invalid_utf8}))
+
+    overlong_key = String.duplicate("k", Core.max_key_bytes() + 1)
+
+    raw_overlong_key = %{
+      "status" => "ready",
+      "code" => nil,
+      "message" => nil,
+      "details" => %{overlong_key => "v"}
+    }
+
+    assert {:error, :malformed_plane_input} =
+             Core.compose(base_facts(%{security: raw_overlong_key}))
+
+    # Atom/string key alias collision must not overwrite by iteration order.
+    colliding = Core.plane("ready", nil, nil, %{:host_state => "running", "host_state" => "x"})
+    assert colliding["status"] == "error"
+    assert colliding["code"] == "malformed_plane_details"
+    refute colliding["status"] == "ready"
+
+    raw_collision = %{
+      "status" => "ready",
+      "code" => nil,
+      "message" => nil,
+      "details" => %{:host_state => "running", "host_state" => "x"}
+    }
+
+    assert {:error, :malformed_plane_input} =
+             Core.compose(base_facts(%{security: raw_collision}))
+  end
+
+  test "security regression: plane/4 returns closed error plane for malformed internal details" do
+    plane = Core.plane("ready", nil, nil, %{"bad" => {1, 2}})
+    assert plane["status"] == "error"
+    assert plane["code"] == "malformed_plane_details"
+    assert plane["details"] == %{}
+    refute plane["status"] == "ready"
+
+    degraded = Core.plane("degraded", "x", "y", %{self() => true})
+    assert degraded["status"] == "error"
+    assert degraded["code"] == "malformed_plane_details"
+
+    blocked = Core.plane("blocked", "x", "y", %{"n" => Core.max_json_safe_integer() + 1})
+    assert blocked["status"] == "error"
+    assert blocked["code"] == "malformed_plane_details"
+  end
+
+  test "security regression: JSON-safe integer boundaries and global node budget fail closed" do
+    max = Core.max_json_safe_integer()
+
+    assert {:ok, bounded_pos, "ready"} =
+             Core.validate_and_bound_executor_report(%{"status" => "ready", "n" => max})
+
+    assert bounded_pos["n"] == max
+
+    assert {:ok, bounded_neg, "ready"} =
+             Core.validate_and_bound_executor_report(%{"status" => "ready", "n" => -max})
+
+    assert bounded_neg["n"] == -max
+
+    assert {:error, "executor_non_json", _} =
+             Core.validate_and_bound_executor_report(%{"status" => "ready", "n" => max + 1})
+
+    assert {:error, "executor_non_json", _} =
+             Core.validate_and_bound_executor_report(%{"status" => "ready", "n" => -(max + 1)})
+
+    # Beyond global node budget: wide list must not launder to ready.
+    over_nodes = Core.max_json_nodes()
+    items = List.duplicate(1, over_nodes)
+
+    assert {:error, "executor_non_json", _} =
+             Core.validate_and_bound_executor_report(%{
+               "status" => "ready",
+               "items" => items
+             })
+
+    raw_over_nodes = %{
+      "status" => "ready",
+      "code" => nil,
+      "message" => nil,
+      "details" => %{"items" => items}
+    }
+
+    assert {:error, :malformed_plane_input} =
+             Core.compose(base_facts(%{security: raw_over_nodes}))
+  end
+
+  test "security regression: atom-key conversion path itself is node-budget bounded" do
+    # Proves stringify/convert (FIRST pass over internal atom-key details) fails
+    # closed under the global ceiling — not only the later string-key walk.
+    over = Core.max_json_nodes()
+
+    # Hostile list under an atom key (internal projector shape).
+    hostile_list_details = %{items: List.duplicate(1, over)}
+
+    list_plane = Core.plane("ready", nil, nil, hostile_list_details)
+    assert list_plane["status"] == "error"
+    assert list_plane["code"] == "malformed_plane_details"
+    assert list_plane["details"] == %{}
+    refute list_plane["status"] == "ready"
+
+    # Wide nested string-keyed map under an atom key: map_size must reject
+    # before any full materialization of the hostile map.
+    wide =
+      Map.new(1..(over + 1), fn i ->
+        {"k#{i}", i}
+      end)
+
+    hostile_wide_details = %{data: wide}
+
+    wide_plane = Core.plane("ready", nil, nil, hostile_wide_details)
+    assert wide_plane["status"] == "error"
+    assert wide_plane["code"] == "malformed_plane_details"
+    refute wide_plane["status"] == "ready"
+
+    # Compose must also refuse a ready plane whose details only fail on the
+    # conversion path (atom keys + over-budget list).
+    raw = %{
+      "status" => "ready",
+      "code" => nil,
+      "message" => nil,
+      "details" => hostile_list_details
+    }
+
+    assert {:error, :malformed_plane_input} =
+             Core.compose(base_facts(%{security: raw}))
+
+    # Exact boundary still accepted when under budget (atom keys converted).
+    under =
+      Core.plane("ready", nil, nil, %{
+        host_state: "running",
+        note: "ok",
+        count: 1
+      })
+
+    assert under["status"] == "ready"
+    assert under["details"]["host_state"] == "running"
+    assert under["details"]["note"] == "ok"
+    assert under["details"]["count"] == 1
   end
 
   test "reports are recursive string-keyed JSON without atoms or pids" do

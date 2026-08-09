@@ -11,8 +11,8 @@ defmodule Arbor.Agent.DispatchReadinessFacade do
 
   @max_id_bytes 256
   @max_session_token_bytes 4096
-  # No artificial ceiling: readiness forwards the same positive outer timeout
-  # used for coding dispatch (including 900_000 and longer reviewed budgets).
+  # No artificial ceiling: any positive outer timeout is accepted and forwarded
+  # unchanged into the readiness/executor context.
   @session_token_absent :__session_token_absent__
   @allowed_opt_keys [:session_token, :timeout]
   @principal_id_re ~r/\A(?:agent|human)_[A-Za-z0-9_-]+\z/
