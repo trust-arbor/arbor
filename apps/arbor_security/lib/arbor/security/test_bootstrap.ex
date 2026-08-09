@@ -73,10 +73,18 @@ defmodule Arbor.Security.TestBootstrap do
       Application.get_env(:arbor_security, :storage_backend, Arbor.Security.Store.JSONFile)
 
     for {name, collection} <- @stores do
+      store_opts =
+        [
+          name: name,
+          backend: backend,
+          write_mode: :sync,
+          collection: collection
+        ]
+        |> maybe_capability_hydration_limit(name)
+
       spec =
         Supervisor.child_spec(
-          {Arbor.Persistence.BufferedStore,
-           name: name, backend: backend, write_mode: :sync, collection: collection},
+          {Arbor.Persistence.BufferedStore, store_opts},
           id: name
         )
 
@@ -101,12 +109,39 @@ defmodule Arbor.Security.TestBootstrap do
     :ok
   end
 
+  defp maybe_capability_hydration_limit(opts, :arbor_security_capabilities) do
+    Keyword.put(opts, :hydration_limit, Arbor.Security.Config.max_global_capabilities())
+  end
+
+  defp maybe_capability_hydration_limit(opts, _name), do: opts
+
   defp start_child!(spec) do
-    case Supervisor.start_child(Arbor.Security.Supervisor, spec) do
+    child_spec = Supervisor.child_spec(spec, [])
+
+    case Supervisor.start_child(Arbor.Security.Supervisor, child_spec) do
       {:ok, _} -> :ok
       {:error, {:already_started, _}} -> :ok
-      {:error, :already_present} -> :ok
+      {:error, :already_present} -> restart_present_child!(child_spec.id)
       {:error, reason} -> raise "TestBootstrap: #{inspect(spec)} failed: #{inspect(reason)}"
+    end
+  end
+
+  defp restart_present_child!(child_id) do
+    case Supervisor.restart_child(Arbor.Security.Supervisor, child_id) do
+      {:ok, _pid} ->
+        :ok
+
+      {:ok, _pid, _info} ->
+        :ok
+
+      {:error, :running} ->
+        :ok
+
+      {:error, {:already_started, _pid}} ->
+        :ok
+
+      {:error, reason} ->
+        raise "TestBootstrap: restart #{inspect(child_id)} failed: #{inspect(reason)}"
     end
   end
 end

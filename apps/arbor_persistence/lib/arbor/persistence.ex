@@ -727,6 +727,27 @@ defmodule Arbor.Persistence do
 
   def buffered_store_authority_mode(_name), do: {:error, :invalid_store}
 
+  @doc """
+  Return closed startup hydration health for a named BufferedStore.
+
+  Status payload includes only status, loaded_count, configured_limit, and a
+  stable reason atom.
+  """
+  @spec buffered_store_hydration_status(atom()) ::
+          {:ok,
+           %{
+             status: :ready | :failed | :unavailable,
+             loaded_count: non_neg_integer(),
+             configured_limit: pos_integer(),
+             reason: atom()
+           }}
+          | {:error, atom()}
+  def buffered_store_hydration_status(name) when is_atom(name) do
+    BufferedStore.hydration_status(name: name)
+  end
+
+  def buffered_store_hydration_status(_name), do: {:error, :invalid_store}
+
   @doc "Authoritatively read a key through a named BufferedStore."
   @spec buffered_store_authoritative_get(atom(), String.t()) ::
           {:ok, term()} | {:error, :not_found | atom()}

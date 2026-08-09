@@ -29,7 +29,8 @@ defmodule Arbor.Security.CapabilityStore do
   alias Arbor.Security.SystemAuthority
   alias Arbor.Signals
 
-  # Runtime bridge — arbor_persistence is Level 1 peer, no compile-time dep
+  # Runtime bridges — arbor_persistence is above Security, so avoid a compile-time dep.
+  @persistence Arbor.Persistence
   @buffered_store Arbor.Persistence.BufferedStore
   @cap_store :arbor_security_capabilities
 
@@ -239,8 +240,6 @@ defmodule Arbor.Security.CapabilityStore do
   def init(_opts) do
     case subscribe_to_distributed_signals() do
       {:ok, signal_sync} ->
-        schedule_cleanup()
-
         state = %{
           by_id: %{},
           by_principal: %{},
@@ -252,11 +251,29 @@ defmodule Arbor.Security.CapabilityStore do
             total_granted: 0,
             total_revoked: 0,
             total_expired: 0,
-            total_cascade_revoked: 0
+            total_cascade_revoked: 0,
+            restore_scanned: 0,
+            restore_active: 0,
+            restore_expired: 0,
+            restore_superseded: 0,
+            restore_rejected: 0
           }
         }
 
-        {:ok, restore_from_store(state)}
+        case restore_from_store(state) do
+          {:ok, restored} ->
+            schedule_cleanup()
+            {:ok, restored}
+
+          {:error, reason} when is_atom(reason) ->
+            _ = SignalSync.release(signal_sync)
+            {:stop, {:capability_restore_failed, reason}}
+
+          # Never let Serializer exception terms or other non-atoms reach OTP stop.
+          {:error, _reason} ->
+            _ = SignalSync.release(signal_sync)
+            {:stop, {:capability_restore_failed, :invalid_capability_record}}
+        end
 
       {:error, reason} ->
         {:stop, {:security_sync_subscription_failed, reason}}
@@ -1299,59 +1316,607 @@ defmodule Arbor.Security.CapabilityStore do
   end
 
   defp restore_from_store(state) do
-    if Process.whereis(@cap_store) do
-      case apply(@buffered_store, :list, [[name: @cap_store]]) do
-        {:ok, keys} ->
-          Enum.reduce(keys, state, &restore_key_from_store/2)
-
-        {:error, _reason} ->
-          state
-      end
-    else
-      state
-    end
-  catch
-    _, reason ->
-      Logger.warning("Failed to restore capabilities: #{inspect(reason)}")
-      state
-  end
-
-  defp restore_key_from_store(key, acc) do
-    case apply(@buffered_store, :get, [key, [name: @cap_store]]) do
-      {:ok, %Record{data: data}} ->
-        restore_capability(acc, data)
-
-      {:error, reason} ->
-        Logger.warning("Failed to restore capability #{key}: #{inspect(reason)}")
-        acc
-    end
-  end
-
-  defp restore_capability(state, data) do
-    case Serializer.deserialize(data) do
-      {:ok, cap} ->
-        # Skip expired capabilities during restore
-        if cap.expires_at && DateTime.compare(DateTime.utc_now(), cap.expires_at) == :gt do
-          state
-        else
-          state
-          |> put_in([:by_id, cap.id], cap)
-          |> update_in([:by_principal, cap.principal_id], fn
-            nil -> [cap.id]
-            ids -> [cap.id | ids]
-          end)
-          |> index_by_issuer(cap)
-          |> index_by_parent(cap)
-          |> update_in([:stats, :total_granted], &(&1 + 1))
-        end
-
-      {:error, reason} ->
-        Logger.warning("Failed to deserialize capability: #{inspect(reason)}")
-        state
+    with :ok <- ensure_cap_store_available(),
+         :ok <- ensure_hydration_ready(),
+         {:ok, keys} <- list_restored_keys(),
+         {:ok, candidates, counters} <- load_restore_candidates(keys),
+         {:ok, winners, counters} <- select_restore_winners(candidates, counters),
+         :ok <- enforce_restored_quotas(winners) do
+      state = rebuild_restore_indexes(state, winners, counters)
+      {:ok, state}
     end
   rescue
-    e ->
-      Logger.warning("Failed to restore capability entry: #{inspect(e)}")
+    _ ->
+      {:error, :restore_error}
+  catch
+    _, _ ->
+      {:error, :restore_error}
+  end
+
+  defp ensure_cap_store_available do
+    if Process.whereis(@cap_store) do
+      :ok
+    else
+      {:error, :capability_store_unavailable}
+    end
+  end
+
+  defp ensure_hydration_ready do
+    case apply(@persistence, :buffered_store_hydration_status, [@cap_store]) do
+      {:ok, %{status: :ready}} ->
+        :ok
+
+      {:ok, %{status: :failed, reason: reason}} when is_atom(reason) ->
+        {:error, map_hydration_failure_reason(reason)}
+
+      {:ok, %{status: :failed}} ->
+        {:error, :hydration_failed}
+
+      {:ok, %{status: :unavailable}} ->
+        {:error, :hydration_unavailable}
+
+      {:error, _} ->
+        {:error, :hydration_failed}
+
+      _other ->
+        {:error, :hydration_failed}
+    end
+  end
+
+  defp map_hydration_failure_reason(reason)
+       when reason in [
+              :inventory_limit_exceeded,
+              :incomplete_inventory,
+              :invalid_backend_response,
+              :backend_unavailable
+            ],
+       do: reason
+
+  defp map_hydration_failure_reason(:invalid_backend_record), do: :invalid_capability_record
+  defp map_hydration_failure_reason(_), do: :hydration_failed
+
+  defp list_restored_keys do
+    case apply(@buffered_store, :list, [[name: @cap_store]]) do
+      {:ok, keys} when is_list(keys) -> {:ok, keys}
+      {:error, _} -> {:error, :incomplete_inventory}
+      _ -> {:error, :incomplete_inventory}
+    end
+  end
+
+  defp load_restore_candidates(keys) do
+    counters = %{
+      restore_scanned: 0,
+      restore_active: 0,
+      restore_expired: 0,
+      restore_superseded: 0,
+      restore_rejected: 0
+    }
+
+    Enum.reduce_while(keys, {:ok, [], counters}, fn key, {:ok, acc, counters} ->
+      case load_restore_candidate(key) do
+        {:ok, cap} ->
+          counters = Map.update!(counters, :restore_scanned, &(&1 + 1))
+          {:cont, {:ok, [cap | acc], counters}}
+
+        {:error, reason} ->
+          {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp load_restore_candidate(key) when is_binary(key) do
+    case apply(@buffered_store, :get, [key, [name: @cap_store]]) do
+      {:ok, value} ->
+        with {:ok, data} <- extract_capability_payload(value),
+             :ok <- validate_capability_source(key, data),
+             {:ok, cap} <- deserialize_restore_capability(data),
+             :ok <- validate_deserialized_capability(key, cap) do
+          {:ok, cap}
+        else
+          {:error, reason} when is_atom(reason) -> {:error, reason}
+          {:error, _} -> {:error, :invalid_capability_record}
+          _ -> {:error, :invalid_capability_record}
+        end
+
+      {:error, :not_found} ->
+        {:error, :incomplete_inventory}
+
+      {:error, _} ->
+        {:error, :incomplete_inventory}
+
+      _ ->
+        {:error, :incomplete_inventory}
+    end
+  end
+
+  defp load_restore_candidate(_key), do: {:error, :invalid_capability_record}
+
+  # Every Serializer failure is a closed invalid record — never surface exception
+  # terms or admit lossy defaults (signature nil, empty chain, depth 3, etc.).
+  defp deserialize_restore_capability(data) when is_map(data) do
+    case Serializer.deserialize(data) do
+      {:ok, %Capability{} = cap} -> {:ok, cap}
+      {:error, _} -> {:error, :invalid_capability_record}
+      _ -> {:error, :invalid_capability_record}
+    end
+  rescue
+    _ -> {:error, :invalid_capability_record}
+  catch
+    _, _ -> {:error, :invalid_capability_record}
+  end
+
+  defp deserialize_restore_capability(_), do: {:error, :invalid_capability_record}
+
+  defp extract_capability_payload(%Record{data: data}) when is_map(data), do: {:ok, data}
+  defp extract_capability_payload(data) when is_map(data), do: {:ok, data}
+  defp extract_capability_payload(_), do: {:error, :invalid_capability_record}
+
+  defp validate_capability_source(key, data) when is_map(data) do
+    id = Map.get(data, "id")
+    principal_id = Map.get(data, "principal_id")
+    resource_uri = Map.get(data, "resource_uri")
+    granted_at = Map.get(data, "granted_at")
+    expires_at = Map.get(data, "expires_at")
+    not_before = Map.get(data, "not_before")
+    signed_at = Map.get(data, "signed_at")
+    issuer_signature = Map.get(data, "issuer_signature")
+    delegation_chain = Map.get(data, "delegation_chain")
+    parent_capability_id = Map.get(data, "parent_capability_id")
+    constraints = Map.get(data, "constraints")
+    metadata = Map.get(data, "metadata")
+    delegation_depth = Map.get(data, "delegation_depth")
+    max_uses = Map.get(data, "max_uses")
+    allowed_delegatees = Map.get(data, "allowed_delegatees")
+    session_id = Map.get(data, "session_id")
+    task_id = Map.get(data, "task_id")
+    principal_scope = Map.get(data, "principal_scope")
+    issuer_id = Map.get(data, "issuer_id")
+
+    issue =
+      cond do
+        not (is_binary(id) and id != "" and id == key) ->
+          :id
+
+        not (is_binary(principal_id) and principal_id != "") ->
+          :principal_id
+
+        not (is_binary(resource_uri) and resource_uri != "") ->
+          :resource_uri
+
+        not valid_required_datetime_source?(granted_at) ->
+          :granted_at
+
+        not valid_optional_datetime_source?(expires_at) ->
+          :expires_at
+
+        # Serializer maps malformed optional datetimes to nil; reject bad source
+        # not_before/signed_at before deserialize so future-use restrictions and
+        # signing timestamps cannot be silently dropped on restore.
+        not valid_optional_datetime_source?(not_before) ->
+          :not_before
+
+        not valid_optional_datetime_source?(signed_at) ->
+          :signed_at
+
+        # Non-nil issuer_signature that is not valid hex would decode to nil and
+        # drop a persisted signature — reject before decode.
+        not valid_optional_issuer_signature_source?(issuer_signature) ->
+          :issuer_signature
+
+        not valid_delegation_chain_source?(delegation_chain, parent_capability_id) ->
+          :delegation_chain
+
+        # Serializer defaults non-map constraints/metadata via || %{} or crashes;
+        # reject non-map so restore cannot invent empty maps.
+        not valid_required_map_source?(constraints) ->
+          :constraints
+
+        not valid_required_map_source?(metadata) ->
+          :metadata
+
+        # Serializer defaults missing/nil depth to 3; require a concrete non-neg int.
+        not valid_delegation_depth_source?(delegation_depth) ->
+          :delegation_depth
+
+        not valid_optional_positive_integer_source?(max_uses) ->
+          :max_uses
+
+        not valid_optional_binary_list_source?(allowed_delegatees) ->
+          :allowed_delegatees
+
+        not valid_optional_binary_source?(session_id) ->
+          :session_id
+
+        not valid_optional_binary_source?(task_id) ->
+          :task_id
+
+        not valid_optional_binary_source?(principal_scope) ->
+          :principal_scope
+
+        not valid_optional_nonempty_binary_source?(issuer_id) ->
+          :issuer_id
+
+        true ->
+          nil
+      end
+
+    case issue do
+      nil ->
+        :ok
+
+      field ->
+        Logger.error("Capability restore rejected persisted record: invalid #{field}")
+
+        {:error, :invalid_capability_record}
+    end
+  end
+
+  defp validate_capability_source(_key, _data), do: {:error, :invalid_capability_record}
+
+  defp valid_required_datetime_source?(iso) when is_binary(iso) do
+    match?({:ok, %DateTime{}, _}, DateTime.from_iso8601(iso))
+  end
+
+  defp valid_required_datetime_source?(_), do: false
+
+  defp valid_optional_datetime_source?(nil), do: true
+
+  defp valid_optional_datetime_source?(iso) when is_binary(iso) do
+    match?({:ok, %DateTime{}, _}, DateTime.from_iso8601(iso))
+  end
+
+  defp valid_optional_datetime_source?(_), do: false
+
+  defp valid_optional_issuer_signature_source?(nil), do: true
+
+  defp valid_optional_issuer_signature_source?(hex) when is_binary(hex) and hex != "" do
+    # Reject odd-length / non-hex so decode_optional_binary cannot nil-out a
+    # non-nil persisted signature.
+    match?({:ok, _}, Base.decode16(hex, case: :mixed))
+  end
+
+  defp valid_optional_issuer_signature_source?(_), do: false
+
+  defp valid_required_map_source?(value) when is_map(value), do: true
+  defp valid_required_map_source?(_), do: false
+
+  defp valid_optional_positive_integer_source?(nil), do: true
+
+  defp valid_optional_positive_integer_source?(value)
+       when is_integer(value) and value > 0,
+       do: true
+
+  defp valid_optional_positive_integer_source?(_), do: false
+
+  defp valid_optional_binary_list_source?(nil), do: true
+
+  defp valid_optional_binary_list_source?(values) when is_list(values),
+    do: Enum.all?(values, &is_binary/1)
+
+  defp valid_optional_binary_list_source?(_), do: false
+
+  defp valid_optional_binary_source?(nil), do: true
+  defp valid_optional_binary_source?(value), do: is_binary(value)
+
+  defp valid_optional_nonempty_binary_source?(nil), do: true
+
+  defp valid_optional_nonempty_binary_source?(value),
+    do: is_binary(value) and value != ""
+
+  # Capability.new/1 defines 10 as the hard contract ceiling. A lower runtime
+  # quota is enforced separately over restored winners.
+  defp valid_delegation_depth_source?(depth)
+       when is_integer(depth) and depth >= 0 and depth <= 10,
+       do: true
+
+  defp valid_delegation_depth_source?(_), do: false
+
+  # Serializer lossily maps an absent/non-list chain to []; persisted records
+  # must carry the concrete list plus parent/chain coherence.
+  defp valid_delegation_chain_source?(chain, parent_capability_id) when is_list(chain) do
+    records_valid? = Enum.all?(chain, &valid_delegation_record_source?/1)
+
+    parent_ok? =
+      is_nil(parent_capability_id) or
+        (is_binary(parent_capability_id) and parent_capability_id != "")
+
+    coherent? =
+      case {parent_capability_id, chain} do
+        {nil, []} -> true
+        {nil, [_ | _]} -> false
+        {parent, []} when not is_nil(parent) -> false
+        {parent, [_ | _]} when is_binary(parent) -> true
+        _ -> false
+      end
+
+    records_valid? and parent_ok? and coherent?
+  end
+
+  defp valid_delegation_chain_source?(_chain, _parent), do: false
+
+  defp valid_delegation_record_source?(record) when is_map(record) do
+    delegator_id = Map.get(record, "delegator_id")
+    signature = Map.get(record, "delegator_signature")
+    constraints = Map.get(record, "constraints")
+    delegated_at = Map.get(record, "delegated_at")
+
+    is_binary(delegator_id) and delegator_id != "" and
+      valid_required_signature_source?(signature) and is_map(constraints) and
+      valid_optional_datetime_source?(delegated_at)
+  end
+
+  defp valid_delegation_record_source?(_), do: false
+
+  defp valid_required_signature_source?(hex) when is_binary(hex) and hex != "" do
+    match?({:ok, decoded} when byte_size(decoded) > 0, Base.decode16(hex, case: :mixed))
+  end
+
+  defp valid_required_signature_source?(_), do: false
+
+  defp validate_deserialized_capability(key, %Capability{} = cap) do
+    cond do
+      not (is_binary(cap.id) and cap.id != "" and cap.id == key) ->
+        {:error, :invalid_capability_record}
+
+      not (is_binary(cap.principal_id) and cap.principal_id != "") ->
+        {:error, :invalid_capability_record}
+
+      not (is_binary(cap.resource_uri) and cap.resource_uri != "") ->
+        {:error, :invalid_capability_record}
+
+      not match?(%DateTime{}, cap.granted_at) ->
+        {:error, :invalid_capability_record}
+
+      not (is_nil(cap.expires_at) or match?(%DateTime{}, cap.expires_at)) ->
+        {:error, :invalid_capability_record}
+
+      not (is_nil(cap.not_before) or match?(%DateTime{}, cap.not_before)) ->
+        {:error, :invalid_capability_record}
+
+      not (is_nil(cap.signed_at) or match?(%DateTime{}, cap.signed_at)) ->
+        {:error, :invalid_capability_record}
+
+      not (is_nil(cap.issuer_signature) or is_binary(cap.issuer_signature)) ->
+        {:error, :invalid_capability_record}
+
+      cap.issuer_signature == "" ->
+        {:error, :invalid_capability_record}
+
+      not is_list(cap.delegation_chain) ->
+        {:error, :invalid_capability_record}
+
+      not Enum.all?(cap.delegation_chain, &valid_deserialized_delegation_record?/1) ->
+        {:error, :invalid_capability_record}
+
+      not is_map(cap.constraints) ->
+        {:error, :invalid_capability_record}
+
+      not is_map(cap.metadata) ->
+        {:error, :invalid_capability_record}
+
+      not (is_integer(cap.delegation_depth) and cap.delegation_depth >= 0 and
+               cap.delegation_depth <= 10) ->
+        {:error, :invalid_capability_record}
+
+      not (is_nil(cap.max_uses) or (is_integer(cap.max_uses) and cap.max_uses > 0)) ->
+        {:error, :invalid_capability_record}
+
+      not valid_deserialized_binary_list?(cap.allowed_delegatees) ->
+        {:error, :invalid_capability_record}
+
+      not valid_deserialized_optional_binary?(cap.session_id) ->
+        {:error, :invalid_capability_record}
+
+      not valid_deserialized_optional_binary?(cap.task_id) ->
+        {:error, :invalid_capability_record}
+
+      not valid_deserialized_optional_binary?(cap.principal_scope) ->
+        {:error, :invalid_capability_record}
+
+      not valid_deserialized_optional_nonempty_binary?(cap.issuer_id) ->
+        {:error, :invalid_capability_record}
+
+      not valid_deserialized_delegation_coherence?(cap) ->
+        {:error, :invalid_capability_record}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp validate_deserialized_capability(_key, _cap), do: {:error, :invalid_capability_record}
+
+  defp valid_deserialized_binary_list?(nil), do: true
+
+  defp valid_deserialized_binary_list?(values) when is_list(values),
+    do: Enum.all?(values, &is_binary/1)
+
+  defp valid_deserialized_binary_list?(_), do: false
+
+  defp valid_deserialized_optional_binary?(nil), do: true
+  defp valid_deserialized_optional_binary?(value), do: is_binary(value)
+
+  defp valid_deserialized_optional_nonempty_binary?(nil), do: true
+
+  defp valid_deserialized_optional_nonempty_binary?(value),
+    do: is_binary(value) and value != ""
+
+  defp valid_deserialized_delegation_record?(
+         %{
+           delegator_id: delegator_id,
+           delegator_signature: signature,
+           constraints: constraints
+         } = record
+       ) do
+    delegated_at = Map.get(record, :delegated_at)
+
+    is_binary(delegator_id) and delegator_id != "" and is_binary(signature) and
+      byte_size(signature) > 0 and is_map(constraints) and
+      valid_deserialized_optional_datetime?(delegated_at)
+  end
+
+  defp valid_deserialized_delegation_record?(_), do: false
+
+  defp valid_deserialized_optional_datetime?(nil), do: true
+  defp valid_deserialized_optional_datetime?(%DateTime{}), do: true
+  defp valid_deserialized_optional_datetime?(_), do: false
+
+  defp valid_deserialized_delegation_coherence?(%Capability{
+         parent_capability_id: nil,
+         delegation_chain: []
+       }),
+       do: true
+
+  defp valid_deserialized_delegation_coherence?(%Capability{
+         parent_capability_id: parent,
+         delegation_chain: [_ | _]
+       })
+       when is_binary(parent) and parent != "",
+       do: true
+
+  defp valid_deserialized_delegation_coherence?(_), do: false
+
+  defp select_restore_winners(candidates, counters) do
+    now = DateTime.utc_now()
+
+    grouped =
+      Enum.group_by(candidates, fn cap -> {cap.principal_id, cap.resource_uri} end)
+
+    {winners, counters} =
+      Enum.reduce(grouped, {[], counters}, fn {_pair, group}, {acc, counters} ->
+        sorted = sort_caps_by_recency_desc(group)
+        [winner | rest] = sorted
+        superseded = length(rest)
+
+        counters = Map.update!(counters, :restore_superseded, &(&1 + superseded))
+
+        cond do
+          expired_at?(winner, now) ->
+            counters = Map.update!(counters, :restore_expired, &(&1 + 1))
+            {acc, counters}
+
+          not is_nil(winner.max_uses) ->
+            # Usage counters are intentionally process-local today. Restoring a
+            # limited-use grant would reset its consumed budget and expand
+            # authority, so omit it until consumption has durable accounting.
+            counters = Map.update!(counters, :restore_rejected, &(&1 + 1))
+            {acc, counters}
+
+          true ->
+            counters = Map.update!(counters, :restore_active, &(&1 + 1))
+            {[winner | acc], counters}
+        end
+      end)
+
+    # Deterministic winner list so index rebuild never depends on map iteration.
+    {:ok, sort_caps_by_recency_desc(winners), counters}
+  end
+
+  # Live put prepends to by_principal, so the first ID is the newest insertion.
+  # Restore mirrors that selection order for find_authorizing/2: granted_at DESC,
+  # then capability id DESC as a stable tie-breaker.
+  defp sort_caps_by_recency_desc(caps) do
+    Enum.sort(caps, &capability_recency_desc?/2)
+  end
+
+  defp capability_recency_desc?(a, b) do
+    case DateTime.compare(a.granted_at, b.granted_at) do
+      :gt -> true
+      :lt -> false
+      :eq -> a.id >= b.id
+    end
+  end
+
+  defp expired_at?(%{expires_at: nil}, _now), do: false
+
+  defp expired_at?(%{expires_at: expires_at}, now) do
+    DateTime.compare(now, expires_at) == :gt
+  end
+
+  defp enforce_restored_quotas(winners) do
+    if Config.quota_enforcement_enabled?() do
+      with :ok <- enforce_restored_delegation_depth_quota(winners),
+           :ok <- enforce_restored_global_quota(winners) do
+        enforce_restored_per_principal_quotas(winners)
+      end
+    else
+      :ok
+    end
+  end
+
+  defp enforce_restored_delegation_depth_quota(winners) do
+    max_depth = Config.max_delegation_depth()
+
+    if Enum.any?(winners, &(&1.delegation_depth > max_depth)) do
+      {:error, :restored_delegation_depth_exceeded}
+    else
+      :ok
+    end
+  end
+
+  defp enforce_restored_global_quota(winners) do
+    max_global = Config.max_global_capabilities()
+
+    if length(winners) > max_global do
+      {:error, :restored_global_quota_exceeded}
+    else
+      :ok
+    end
+  end
+
+  defp enforce_restored_per_principal_quotas(winners) do
+    max_per = Config.max_capabilities_per_agent()
+
+    winners
+    |> Enum.frequencies_by(& &1.principal_id)
+    |> Enum.reduce_while(:ok, fn {_principal, count}, :ok ->
+      if count > max_per do
+        {:halt, {:error, :restored_per_principal_quota_exceeded}}
+      else
+        {:cont, :ok}
+      end
+    end)
+  end
+
+  defp rebuild_restore_indexes(state, winners, counters) do
+    # winners are already recency-desc sorted; materialize every runtime index
+    # from that order so find_authorizing/list order is restart-stable.
+    ordered = sort_caps_by_recency_desc(winners)
+    by_id = Map.new(ordered, fn cap -> {cap.id, cap} end)
+    by_principal = restore_index_by(ordered, & &1.principal_id)
+
+    by_issuer =
+      ordered
+      |> Enum.reject(fn cap -> is_nil(cap.issuer_id) end)
+      |> restore_index_by(& &1.issuer_id)
+
+    by_parent =
+      ordered
+      |> Enum.reject(fn cap -> is_nil(cap.parent_capability_id) end)
+      |> restore_index_by(& &1.parent_capability_id)
+
+    restore_stats = Map.put(counters, :total_granted, counters.restore_active)
+
+    %{
       state
+      | by_id: by_id,
+        by_principal: by_principal,
+        by_issuer: by_issuer,
+        by_parent: by_parent,
+        stats: Map.merge(state.stats, restore_stats)
+    }
+  end
+
+  defp restore_index_by(caps, key_fun) do
+    caps
+    |> Enum.group_by(key_fun)
+    |> Map.new(fn {key, group} ->
+      ids =
+        group
+        |> sort_caps_by_recency_desc()
+        |> Enum.map(& &1.id)
+
+      {key, ids}
+    end)
   end
 end

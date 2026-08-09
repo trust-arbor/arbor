@@ -31,9 +31,14 @@ defmodule Arbor.Security.DisclosureEgressRegressionTest do
     Application.put_env(:arbor_security, :egress_gate_enforcing, true)
 
     unique = :erlang.unique_integer([:positive])
+    agent_id = Arbor.Identifiers.generate_agent_id()
+
+    # These tests deliberately persist malformed disclosure candidates. They
+    # must not poison a later CapabilityStore restart in the shared suite.
+    on_exit(fn -> _ = CapabilityStore.revoke_all(agent_id) end)
 
     %{
-      agent_id: Arbor.Identifiers.generate_agent_id(),
+      agent_id: agent_id,
       session_id: "session_#{unique}",
       task_id: "task_#{unique}",
       principal_scope: "human_#{unique}"

@@ -589,4 +589,425 @@ defmodule Arbor.Persistence.BufferedStoreTest do
       assert BufferedStore.backend_healthy?(name: name) == false
     end
   end
+
+  defmodule QueryMemoryBackend do
+    @moduledoc false
+    use Agent
+    @behaviour Arbor.Contracts.Persistence.Store
+
+    def start_link(name), do: Agent.start_link(fn -> %{} end, name: name)
+
+    def seed(agent, entries) when is_map(entries) do
+      Agent.update(agent, fn _ -> entries end)
+    end
+
+    @impl true
+    def put(key, value, opts) do
+      Agent.update(agent_name(opts), &Map.put(&1, key, value))
+      :ok
+    end
+
+    @impl true
+    def get(key, opts) do
+      case Agent.get(agent_name(opts), &Map.get(&1, key)) do
+        nil -> {:error, :not_found}
+        value -> {:ok, value}
+      end
+    end
+
+    @impl true
+    def delete(key, opts) do
+      Agent.update(agent_name(opts), &Map.delete(&1, key))
+      :ok
+    end
+
+    @impl true
+    def list(opts) do
+      keys = Agent.get(agent_name(opts), &Map.keys/1)
+      {:ok, keys}
+    end
+
+    @impl true
+    def exists?(key, opts), do: Agent.get(agent_name(opts), &Map.has_key?(&1, key))
+
+    @impl true
+    def query(%Filter{} = filter, opts) do
+      records =
+        agent_name(opts)
+        |> Agent.get(&Map.values/1)
+        |> Enum.filter(&match?(%Record{}, &1))
+
+      {:ok, Filter.apply(filter, records)}
+    end
+
+    defp agent_name(opts) do
+      name = Keyword.get(opts, :name, "default")
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+      String.to_atom("query_memory_backend_#{name}")
+    end
+  end
+
+  defmodule InjectedFailureBackend do
+    @moduledoc false
+    @behaviour Arbor.Contracts.Persistence.Store
+
+    @table :buffered_store_hydration_failure_inject
+
+    def install do
+      case :ets.whereis(@table) do
+        :undefined -> :ets.new(@table, [:named_table, :public, :set])
+        _ -> :ok
+      end
+
+      :ets.insert(@table, {:mode, :ok})
+      :ok
+    end
+
+    def fail_list, do: :ets.insert(@table, {:mode, :fail_list})
+    def fail_get, do: :ets.insert(@table, {:mode, :fail_get})
+    def fail_query, do: :ets.insert(@table, {:mode, :fail_query})
+    def seed(entries), do: :ets.insert(@table, {:entries, entries})
+
+    defp mode do
+      case :ets.lookup(@table, :mode) do
+        [{:mode, mode}] -> mode
+        _ -> :ok
+      end
+    end
+
+    defp entries do
+      case :ets.lookup(@table, :entries) do
+        [{:entries, entries}] -> entries
+        _ -> %{}
+      end
+    end
+
+    @impl true
+    def put(key, value, _opts) do
+      :ets.insert(@table, {:entries, Map.put(entries(), key, value)})
+      :ok
+    end
+
+    @impl true
+    def get(key, _opts) do
+      case mode() do
+        :fail_get ->
+          {:error, :injected_get_failure}
+
+        _ ->
+          case Map.fetch(entries(), key) do
+            {:ok, value} -> {:ok, value}
+            :error -> {:error, :not_found}
+          end
+      end
+    end
+
+    @impl true
+    def delete(key, _opts) do
+      :ets.insert(@table, {:entries, Map.delete(entries(), key)})
+      :ok
+    end
+
+    @impl true
+    def list(_opts) do
+      case mode() do
+        :fail_list -> {:error, :injected_list_failure}
+        _ -> {:ok, Map.keys(entries())}
+      end
+    end
+
+    @impl true
+    def exists?(key, _opts), do: Map.has_key?(entries(), key)
+  end
+
+  defmodule InjectedQueryFailureBackend do
+    @moduledoc false
+    @behaviour Arbor.Contracts.Persistence.Store
+
+    @table :buffered_store_query_hydration_failure_inject
+
+    def install do
+      case :ets.whereis(@table) do
+        :undefined -> :ets.new(@table, [:named_table, :public, :set])
+        _ -> :ok
+      end
+
+      :ets.insert(@table, {:mode, :ok})
+      :ok
+    end
+
+    def fail_query, do: :ets.insert(@table, {:mode, :fail_query})
+    def seed(entries), do: :ets.insert(@table, {:entries, entries})
+
+    defp mode do
+      case :ets.lookup(@table, :mode) do
+        [{:mode, mode}] -> mode
+        _ -> :ok
+      end
+    end
+
+    defp entries do
+      case :ets.lookup(@table, :entries) do
+        [{:entries, entries}] -> entries
+        _ -> %{}
+      end
+    end
+
+    @impl true
+    def put(key, value, _opts) do
+      :ets.insert(@table, {:entries, Map.put(entries(), key, value)})
+      :ok
+    end
+
+    @impl true
+    def get(key, _opts) do
+      case Map.fetch(entries(), key) do
+        {:ok, value} -> {:ok, value}
+        :error -> {:error, :not_found}
+      end
+    end
+
+    @impl true
+    def delete(key, _opts) do
+      :ets.insert(@table, {:entries, Map.delete(entries(), key)})
+      :ok
+    end
+
+    @impl true
+    def list(_opts), do: {:ok, Map.keys(entries())}
+
+    @impl true
+    def exists?(key, _opts), do: Map.has_key?(entries(), key)
+
+    @impl true
+    def query(_filter, _opts) do
+      case mode() do
+        :fail_query -> {:error, :injected_query_failure}
+        _ -> {:ok, Map.values(entries())}
+      end
+    end
+  end
+
+  describe "startup hydration limit and status" do
+    test "custom hydration_limit above 10_000 succeeds while public authoritative stays capped" do
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+      name = :"buffered_hydrate_high_#{System.unique_integer([:positive])}"
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+      backend_agent = String.to_atom("memory_backend_#{name}")
+
+      start_supervised!({MemoryBackend, backend_agent})
+
+      total = 10_001
+
+      for i <- 1..total do
+        key = "k-#{i}"
+        :ok = MemoryBackend.put(key, Record.new(key, %{"i" => i}), name: to_string(name))
+      end
+
+      start_supervised!(
+        {BufferedStore,
+         name: name, backend: MemoryBackend, collection: to_string(name), hydration_limit: 20_000},
+        id: name
+      )
+
+      assert {:ok,
+              %{
+                status: :ready,
+                loaded_count: ^total,
+                configured_limit: 20_000,
+                reason: :ok
+              }} = BufferedStore.hydration_status(name: name)
+
+      assert {:ok,
+              %{
+                status: :ready,
+                loaded_count: ^total,
+                configured_limit: 20_000,
+                reason: :ok
+              }} = Arbor.Persistence.buffered_store_hydration_status(name)
+
+      assert {:ok, keys} = BufferedStore.list(name: name)
+      assert length(keys) == total
+
+      assert {:error, :inventory_limit_exceeded} = BufferedStore.authoritative_list(name: name)
+      assert {:error, :unsupported} = BufferedStore.authoritative_entries(name: name)
+    end
+
+    test "default hydration_limit leaves empty ETS and failed status above 10_000" do
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+      name = :"buffered_hydrate_default_#{System.unique_integer([:positive])}"
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+      backend_agent = String.to_atom("memory_backend_#{name}")
+
+      start_supervised!({MemoryBackend, backend_agent})
+
+      for i <- 1..10_001 do
+        key = "k-#{i}"
+        :ok = MemoryBackend.put(key, Record.new(key, %{"i" => i}), name: to_string(name))
+      end
+
+      start_supervised!(
+        {BufferedStore, name: name, backend: MemoryBackend, collection: to_string(name)},
+        id: name
+      )
+
+      assert {:ok,
+              %{
+                status: :failed,
+                loaded_count: 0,
+                configured_limit: 10_000,
+                reason: :inventory_limit_exceeded
+              }} = BufferedStore.hydration_status(name: name)
+
+      assert {:ok, []} = BufferedStore.list(name: name)
+    end
+
+    test "CRUD backend get failure leaves empty ETS and failed status" do
+      InjectedFailureBackend.install()
+
+      entries =
+        for i <- 1..3, into: %{} do
+          key = "k-#{i}"
+          {key, Record.new(key, %{"i" => i})}
+        end
+
+      InjectedFailureBackend.seed(entries)
+      InjectedFailureBackend.fail_get()
+
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+      name = :"buffered_hydrate_get_fail_#{System.unique_integer([:positive])}"
+
+      start_supervised!(
+        {BufferedStore, name: name, backend: InjectedFailureBackend, collection: to_string(name)},
+        id: name
+      )
+
+      assert {:ok,
+              %{
+                status: :failed,
+                loaded_count: 0,
+                reason: :incomplete_inventory
+              }} = BufferedStore.hydration_status(name: name)
+
+      assert {:ok, []} = BufferedStore.list(name: name)
+    end
+
+    test "query backend failure leaves empty ETS and failed status" do
+      InjectedQueryFailureBackend.install()
+
+      entries =
+        for i <- 1..2, into: %{} do
+          key = "k-#{i}"
+          {key, Record.new(key, %{"i" => i})}
+        end
+
+      InjectedQueryFailureBackend.seed(entries)
+      InjectedQueryFailureBackend.fail_query()
+
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+      name = :"buffered_hydrate_query_fail_#{System.unique_integer([:positive])}"
+
+      start_supervised!(
+        {BufferedStore,
+         name: name, backend: InjectedQueryFailureBackend, collection: to_string(name)},
+        id: name
+      )
+
+      assert {:ok,
+              %{
+                status: :failed,
+                loaded_count: 0,
+                reason: :backend_unavailable
+              }} = BufferedStore.hydration_status(name: name)
+
+      assert {:ok, []} = BufferedStore.list(name: name)
+    end
+
+    test "query backend hydrates above 10_000 while authoritative entries stay capped" do
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+      name = :"buffered_hydrate_query_ok_#{System.unique_integer([:positive])}"
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+      backend_agent = String.to_atom("query_memory_backend_#{name}")
+
+      start_supervised!({QueryMemoryBackend, backend_agent})
+
+      total = 10_001
+
+      entries =
+        for i <- 1..total, into: %{} do
+          key = "k-#{i}"
+          {key, Record.new(key, %{"i" => i})}
+        end
+
+      QueryMemoryBackend.seed(backend_agent, entries)
+
+      start_supervised!(
+        {BufferedStore,
+         name: name,
+         backend: QueryMemoryBackend,
+         collection: to_string(name),
+         hydration_limit: 20_000},
+        id: name
+      )
+
+      assert {:ok,
+              %{
+                status: :ready,
+                loaded_count: ^total,
+                configured_limit: 20_000,
+                reason: :ok
+              }} =
+               BufferedStore.hydration_status(name: name)
+
+      assert {:ok, keys} = BufferedStore.list(name: name)
+      assert length(keys) == total
+      assert {:error, :inventory_limit_exceeded} = BufferedStore.authoritative_entries(name: name)
+    end
+
+    test "non-Record values hydrate when key_mismatch? is false" do
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+      name = :"buffered_hydrate_plain_#{System.unique_integer([:positive])}"
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+      backend_agent = String.to_atom("memory_backend_#{name}")
+
+      start_supervised!({MemoryBackend, backend_agent})
+      :ok = MemoryBackend.put("plain", %{"v" => 1}, name: to_string(name))
+
+      start_supervised!(
+        {BufferedStore, name: name, backend: MemoryBackend, collection: to_string(name)},
+        id: name
+      )
+
+      assert {:ok, %{status: :ready, loaded_count: 1}} =
+               BufferedStore.hydration_status(name: name)
+
+      assert {:ok, %{"v" => 1}} = BufferedStore.get("plain", name: name)
+    end
+
+    test "mismatched Record fails hydration closed with empty ETS" do
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+      name = :"buffered_hydrate_mismatch_#{System.unique_integer([:positive])}"
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+      backend_agent = String.to_atom("memory_backend_#{name}")
+
+      start_supervised!({MemoryBackend, backend_agent})
+
+      bad = %Record{Record.new("other", %{"v" => 1}) | key: "other"}
+      :ok = MemoryBackend.put("stored-key", bad, name: to_string(name))
+
+      start_supervised!(
+        {BufferedStore, name: name, backend: MemoryBackend, collection: to_string(name)},
+        id: name
+      )
+
+      assert {:ok,
+              %{
+                status: :failed,
+                loaded_count: 0,
+                reason: :invalid_backend_record
+              }} = BufferedStore.hydration_status(name: name)
+
+      assert {:ok, []} = BufferedStore.list(name: name)
+    end
+  end
 end

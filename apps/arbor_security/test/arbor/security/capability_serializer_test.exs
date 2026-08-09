@@ -12,7 +12,8 @@ defmodule Arbor.Security.CapabilityStore.SerializerTest do
   use ExUnit.Case, async: true
   @moduletag :fast
 
-  alias Arbor.Contracts.Security.Capability
+  alias Arbor.Contracts.Security.{Capability, Identity}
+  alias Arbor.Security.Capability.Signer
   alias Arbor.Security.CapabilityStore.Serializer
   alias Arbor.Security.SystemAuthority
 
@@ -103,5 +104,34 @@ defmodule Arbor.Security.CapabilityStore.SerializerTest do
 
     assert SystemAuthority.verify_capability_signature(restored) == :ok,
            "signed cap must still verify after serialize/deserialize"
+  end
+
+  test "security regression: delegated chain remains cryptographically verifiable after round-trip" do
+    {:ok, delegator} = Identity.generate(name: "serializer-delegator")
+
+    {:ok, parent} =
+      Capability.new(
+        resource_uri: "arbor://fs/read/serializer-delegation",
+        principal_id: delegator.agent_id,
+        delegation_depth: 2
+      )
+
+    {:ok, child} = Capability.delegate(parent, "agent_serializer_delegatee")
+    record = Signer.sign_delegation(parent, child, delegator.private_key)
+    delegated = %{child | delegation_chain: [record]}
+
+    {:ok, restored} = Serializer.deserialize(Serializer.serialize(delegated))
+
+    assert [restored_record] = restored.delegation_chain
+    assert restored_record.delegator_id == delegator.agent_id
+    assert restored_record.delegator_signature == record.delegator_signature
+    assert %DateTime{} = restored_record.delegated_at
+
+    assert :ok =
+             Signer.verify_delegation_chain(restored, fn id ->
+               if id == delegator.agent_id,
+                 do: {:ok, delegator.public_key},
+                 else: {:error, :not_found}
+             end)
   end
 end

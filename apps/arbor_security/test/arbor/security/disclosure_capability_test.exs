@@ -165,6 +165,7 @@ defmodule Arbor.Security.DisclosureCapabilityTest do
   describe "fetch_and_validate/2" do
     setup do
       {:ok, cap} = DisclosureCapability.issue(valid_issue_opts())
+      on_exit(fn -> _ = CapabilityStore.revoke(cap.id) end)
       %{cap: cap}
     end
 
@@ -459,6 +460,7 @@ defmodule Arbor.Security.DisclosureCapabilityTest do
   describe "Arbor.Security.validate_disclosure_capability/3" do
     setup do
       {:ok, cap} = Arbor.Security.issue_disclosure_capability(valid_issue_opts())
+      on_exit(fn -> _ = CapabilityStore.revoke(cap.id) end)
       %{cap: cap}
     end
 

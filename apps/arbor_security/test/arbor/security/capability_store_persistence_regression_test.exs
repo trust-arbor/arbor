@@ -78,9 +78,14 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
   ]
 
   alias Arbor.Contracts.Persistence.Record
+  alias Arbor.Contracts.Security.Capability
+  alias Arbor.Contracts.Security.Identity
   alias Arbor.Persistence.BufferedStore
   alias Arbor.Security
   alias Arbor.Security.CapabilityStore
+  alias Arbor.Security.CapabilityStore.Serializer
+  alias Arbor.Security.Config
+  alias Arbor.Security.Identity.Registry
   alias Arbor.Security.Store.JSONFile
   alias Arbor.Security.CapabilityStorePersistenceRegressionTest.DeleteFailingJSONFile
 
@@ -265,6 +270,126 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
              BufferedStore.authoritative_get(original.id, name: @capability_store)
   end
 
+  test "security regression: delegated capability remains authorized after persistence restart" do
+    backend_dir = Path.join("var", "capability-store-delegation-#{unique_integer()}")
+    tmp_dir = Path.expand(backend_dir, File.cwd!())
+    File.mkdir_p!(tmp_dir)
+    on_exit(fn -> File.rm_rf!(tmp_dir) end)
+
+    configure_isolated_json_store(backend_dir)
+
+    {:ok, parent} = Identity.generate(name: "restart-delegator")
+    {:ok, worker} = Identity.generate(name: "restart-delegatee")
+    :ok = Registry.register(parent)
+    :ok = Registry.register(worker)
+
+    resource = "arbor://fs/read/delegation-restart-regression"
+
+    assert {:ok, _parent_cap} =
+             Security.grant(principal: parent.agent_id, resource: resource, delegation_depth: 3)
+
+    assert {:ok, [delegated]} =
+             Security.delegate_to_agent(parent.agent_id, worker.agent_id,
+               delegator_private_key: parent.private_key,
+               resources: [resource]
+             )
+
+    assert is_binary(hd(delegated.delegation_chain).delegator_signature)
+
+    assert {:ok, :authorized} =
+             Security.authorize(worker.agent_id, resource, nil, verify_identity: false)
+
+    restart_capability_store()
+
+    assert {:ok, :authorized} =
+             Security.authorize(worker.agent_id, resource, nil, verify_identity: false)
+  end
+
+  test "security regression: limited-use capability cannot regain uses after restart" do
+    principal_id = "agent_capability_store_limited_restart"
+    resource_uri = "arbor://fs/read/capability-store-limited-restart"
+    backend_dir = Path.join("var", "capability-store-limited-#{unique_integer()}")
+    tmp_dir = Path.expand(backend_dir, File.cwd!())
+    File.mkdir_p!(tmp_dir)
+    on_exit(fn -> File.rm_rf!(tmp_dir) end)
+
+    configure_isolated_json_store(backend_dir)
+
+    assert {:ok, _cap} =
+             Security.grant(principal: principal_id, resource: resource_uri, max_uses: 3)
+
+    assert {:ok, :authorized} =
+             Security.authorize(principal_id, resource_uri, nil, verify_identity: false)
+
+    restart_capability_store()
+
+    assert {:error, :unauthorized} =
+             Security.authorize(principal_id, resource_uri, nil, verify_identity: false)
+
+    assert %{restore_rejected: 1, restore_active: 0} = CapabilityStore.stats()
+  end
+
+  test "security regression: authorize survives full BufferedStore+CapabilityStore restart above 10_000 durable records" do
+    backend_dir = Path.join("var", "capability-store-hydrate-10k-#{unique_integer()}")
+    tmp_dir = Path.expand(backend_dir, File.cwd!())
+    File.mkdir_p!(tmp_dir)
+    on_exit(fn -> File.rm_rf!(tmp_dir) end)
+    on_exit(&restore_security_children/0)
+
+    target_principal = "agent_capability_store_hydrate_target"
+    target_resource = "arbor://fs/read/capability-store-hydrate-target"
+    target_id = "cap_hydrate_target"
+
+    {:ok, target_cap} =
+      Capability.new(
+        id: target_id,
+        principal_id: target_principal,
+        resource_uri: target_resource,
+        granted_at: DateTime.utc_now(),
+        delegation_depth: 0
+      )
+
+    # Seed durable backend only — do not leave residual ETS from a live store.
+    seed_count = 10_001
+    seed_durable_capabilities!(backend_dir, target_cap, seed_count)
+
+    # Detach permanent supervisor children first (do not GenServer.stop them).
+    :ok = Supervisor.terminate_child(@security_supervisor, CapabilityStore)
+    :ok = Supervisor.terminate_child(@security_supervisor, @capability_store)
+
+    start_capability_buffered_store!(backend_dir)
+    assert {:ok, _pid} = CapabilityStore.start_link([])
+
+    assert {:ok, :authorized} =
+             Security.authorize(target_principal, target_resource, nil, verify_identity: false)
+
+    assert {:ok,
+            %{
+              status: :ready,
+              loaded_count: loaded,
+              configured_limit: limit
+            }} = BufferedStore.hydration_status(name: @capability_store)
+
+    assert loaded == seed_count
+    assert limit >= seed_count
+
+    # Full recreate of both test-owned processes so parent cannot pass via residual ETS.
+    stop_named_process(CapabilityStore)
+    stop_named_process(@capability_store)
+
+    start_capability_buffered_store!(backend_dir)
+
+    assert {:ok, %{status: :ready, loaded_count: loaded_after}} =
+             BufferedStore.hydration_status(name: @capability_store)
+
+    assert loaded_after == seed_count
+
+    assert {:ok, _pid} = CapabilityStore.start_link([])
+
+    assert {:ok, :authorized} =
+             Security.authorize(target_principal, target_resource, nil, verify_identity: false)
+  end
+
   defp configure_isolated_json_store(tmp_dir, backend \\ JSONFile) do
     on_exit(&restore_security_children/0)
 
@@ -278,7 +403,8 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
         backend_opts: [base_dir: tmp_dir],
         write_mode: :sync,
         ack_mode: :backend,
-        collection: "capabilities"
+        collection: "capabilities",
+        hydration_limit: Config.max_global_capabilities()
       )
 
     {:ok, _pid} = CapabilityStore.start_link([])
@@ -287,6 +413,55 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
   defp restart_capability_store do
     stop_named_process(CapabilityStore)
     {:ok, _pid} = CapabilityStore.start_link([])
+  end
+
+  defp start_capability_buffered_store!(backend_dir) do
+    {:ok, _pid} =
+      BufferedStore.start_link(
+        name: @capability_store,
+        backend: JSONFile,
+        backend_opts: [base_dir: backend_dir],
+        write_mode: :sync,
+        ack_mode: :backend,
+        collection: "capabilities",
+        hydration_limit: Config.max_global_capabilities()
+      )
+  end
+
+  defp seed_durable_capabilities!(backend_dir, target_cap, total_count)
+       when total_count >= 1 do
+    assert :ok =
+             JSONFile.put(
+               target_cap.id,
+               Record.new(target_cap.id, Serializer.serialize(target_cap)),
+               name: "capabilities",
+               base_dir: backend_dir
+             )
+
+    filler_count = total_count - 1
+
+    for i <- 1..filler_count do
+      id = "cap_hydrate_filler_#{i}"
+      principal = "agent_capability_store_hydrate_filler_#{i}"
+      resource = "arbor://fs/read/capability-store-hydrate-filler-#{i}"
+
+      {:ok, cap} =
+        Capability.new(
+          id: id,
+          principal_id: principal,
+          resource_uri: resource,
+          granted_at: DateTime.utc_now(),
+          delegation_depth: 0
+        )
+
+      assert :ok =
+               JSONFile.put(
+                 id,
+                 Record.new(id, Serializer.serialize(cap)),
+                 name: "capabilities",
+                 base_dir: backend_dir
+               )
+    end
   end
 
   # This module terminates children on the SHARED Arbor.Security.Supervisor to

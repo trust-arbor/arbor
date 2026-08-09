@@ -22,10 +22,8 @@ defmodule Arbor.Persistence.AuthorizationTest do
   @unauthorized_agent "agent_unauthorized_#{:erlang.unique_integer([:positive])}"
 
   setup do
-    # Security infrastructure needed for authorization checks
-    ensure_started(Arbor.Security.Identity.Registry)
-    ensure_started(Arbor.Security.SystemAuthority)
-    ensure_started(Arbor.Security.CapabilityStore)
+    # CapabilityStore now fails closed unless its authoritative store hydrated.
+    assert :ok = Arbor.Security.TestBootstrap.start!()
 
     # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
     store_name = :"auth_test_store_#{:erlang.unique_integer([:positive])}"
@@ -36,14 +34,6 @@ defmodule Arbor.Persistence.AuthorizationTest do
     start_supervised!({Arbor.Persistence.EventLog.ETS, name: el_name})
 
     {:ok, store: store_name, el: el_name}
-  end
-
-  defp ensure_started(module, opts \\ []) do
-    if Process.whereis(module) do
-      :already_running
-    else
-      start_supervised!({module, opts})
-    end
   end
 
   describe "authorize_write/6 rejection" do

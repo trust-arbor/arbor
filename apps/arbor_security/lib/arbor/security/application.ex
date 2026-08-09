@@ -18,7 +18,8 @@ defmodule Arbor.Security.Application do
              name: :arbor_security_capabilities,
              backend: security_backend(),
              write_mode: :sync,
-             collection: "capabilities"},
+             collection: "capabilities",
+             hydration_limit: Arbor.Security.Config.max_global_capabilities()},
             id: :arbor_security_capabilities
           ),
           Supervisor.child_spec(

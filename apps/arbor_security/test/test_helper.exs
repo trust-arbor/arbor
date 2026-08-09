@@ -14,10 +14,22 @@ for {name, collection} <- [
       {:arbor_security_signing_keys, "signing_keys"},
       {:arbor_security_issuers, "issuers"}
     ] do
+  store_opts = [name: name, backend: security_backend, write_mode: :sync, collection: collection]
+
+  store_opts =
+    if name == :arbor_security_capabilities do
+      Keyword.put(
+        store_opts,
+        :hydration_limit,
+        Arbor.Security.Config.max_global_capabilities()
+      )
+    else
+      store_opts
+    end
+
   child =
     Supervisor.child_spec(
-      {buffered_store,
-       name: name, backend: security_backend, write_mode: :sync, collection: collection},
+      {buffered_store, store_opts},
       id: name
     )
 

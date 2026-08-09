@@ -106,12 +106,18 @@ defmodule Arbor.Security.CapabilityStore.Serializer do
   defp serialize_delegation_chain(chain) when is_list(chain) do
     Enum.map(chain, fn record ->
       record
-      |> Enum.map(fn {k, v} -> {to_string(k), serialize_chain_value(v)} end)
+      |> Enum.map(fn {k, v} -> {to_string(k), serialize_chain_entry(k, v)} end)
       |> Map.new()
     end)
   end
 
   defp serialize_delegation_chain(_), do: []
+
+  # Signatures are opaque bytes even when a particular byte sequence happens
+  # to be valid UTF-8. Encoding by field avoids a probabilistic round-trip bug
+  # where valid signature bytes could be mistaken for ordinary text.
+  defp serialize_chain_entry(:delegator_signature, value), do: encode_optional_binary(value)
+  defp serialize_chain_entry(_key, value), do: serialize_chain_value(value)
 
   defp serialize_chain_value(%DateTime{} = dt), do: DateTime.to_iso8601(dt)
   defp serialize_chain_value(v) when is_atom(v), do: Atom.to_string(v)
@@ -122,8 +128,23 @@ defmodule Arbor.Security.CapabilityStore.Serializer do
 
   defp serialize_chain_value(v), do: v
 
-  defp deserialize_delegation_chain(chain) when is_list(chain), do: chain
+  defp deserialize_delegation_chain(chain) when is_list(chain) do
+    Enum.map(chain, &deserialize_delegation_record/1)
+  end
+
   defp deserialize_delegation_chain(_), do: []
+
+  defp deserialize_delegation_record(record) when is_map(record) do
+    Map.new(record, fn
+      {"delegator_id", value} -> {:delegator_id, value}
+      {"delegator_signature", value} -> {:delegator_signature, decode_optional_binary(value)}
+      {"constraints", value} -> {:constraints, deserialize_constraints(value)}
+      {"delegated_at", value} -> {:delegated_at, parse_optional_datetime(value)}
+      entry -> entry
+    end)
+  end
+
+  defp deserialize_delegation_record(other), do: other
 
   # ── Binary encoding ──
 

@@ -10,20 +10,22 @@ defmodule Arbor.Persistence.BufferedStore do
 
   - **Reads**: Direct ETS lookup — bypass GenServer for maximum throughput
   - **Writes**: Serialized through GenServer, then ETS + backend
-  - **Init**: Loads all data from backend into ETS (backend failure → start empty)
+  - **Init**: Atomically hydrates a bounded backend inventory into ETS (failure → empty ETS + explicit status)
   - **Graceful degradation**: Cache-acknowledged backend failures are logged but don't crash
   - **Backend acknowledgement**: Critical stores can require backend success before cache mutation
+  - **Hydration limit**: Trusted per-instance startup bound (default 10_000), distinct from the public authoritative snapshot cap
 
   ## Options
 
       {BufferedStore,
-        name:         :my_store,              # required — GenServer + ETS table name
-        backend:      QueryableStore.Postgres, # nil = ETS-only
-        backend_opts: [repo: Repo],           # extra opts passed to backend calls
-        write_mode:   :async,                 # :async | :sync
-        ack_mode:     :cache,                 # :cache | :backend
-        collection:   "my_collection",        # passed as name: to backend
-        distributed:  true}                   # enable cross-node cache invalidation
+        name:             :my_store,              # required — GenServer + ETS table name
+        backend:          QueryableStore.Postgres, # nil = ETS-only
+        backend_opts:     [repo: Repo],           # extra opts passed to backend calls
+        write_mode:       :async,                 # :async | :sync
+        ack_mode:         :cache,                 # :cache | :backend
+        collection:       "my_collection",        # passed as name: to backend
+        hydration_limit:  10_000,                 # trusted startup bound (default 10_000)
+        distributed:      true}                   # enable cross-node cache invalidation
 
   ## Usage
 
@@ -171,6 +173,8 @@ defmodule Arbor.Persistence.BufferedStore do
   - `:ack_mode` — `:cache` (default) or `:backend`; backend acknowledgement
     requires synchronous writes and mutates ETS only after backend success
   - `:collection` — string passed as `name:` to backend (defaults to stringified name)
+  - `:hydration_limit` — trusted positive integer startup inventory bound
+    (defaults to 10_000). Not a Store list/query option for untrusted callers.
   """
   def start_link(opts) do
     name = Keyword.fetch!(opts, :name)
@@ -200,6 +204,26 @@ defmodule Arbor.Persistence.BufferedStore do
   def backend_healthy?(opts) do
     store = store_name!(opts)
     GenServer.call(store, :backend_healthy?)
+  end
+
+  @doc """
+  Return closed startup hydration health for a named store.
+
+  Fields are status, loaded_count, configured_limit, and a stable reason atom
+  only — never paths, payloads, exceptions, credentials, or signatures.
+  """
+  @spec hydration_status(keyword()) ::
+          {:ok,
+           %{
+             status: :ready | :failed | :unavailable,
+             loaded_count: non_neg_integer(),
+             configured_limit: pos_integer(),
+             reason: atom()
+           }}
+          | {:error, atom()}
+  def hydration_status(opts) do
+    store = store_name!(opts)
+    authority_call(store, :hydration_status, :read)
   end
 
   @doc """
@@ -354,28 +378,36 @@ defmodule Arbor.Persistence.BufferedStore do
 
     validate_write_options!(write_mode, ack_mode)
 
-    # Create ETS table — public for direct reads from any process
-    table =
-      :ets.new(name, [:named_table, :public, :set, {:read_concurrency, true}])
+    case parse_hydration_limit(Keyword.get(opts, :hydration_limit)) do
+      {:ok, hydration_limit} ->
+        # Create ETS table — public for direct reads from any process
+        table =
+          :ets.new(name, [:named_table, :public, :set, {:read_concurrency, true}])
 
-    state = %{
-      table: table,
-      backend: backend,
-      backend_opts: backend_opts,
-      write_mode: write_mode,
-      ack_mode: ack_mode,
-      collection: collection,
-      distributed: distributed,
-      ephemeral_authority: %{}
-    }
+        state = %{
+          table: table,
+          backend: backend,
+          backend_opts: backend_opts,
+          write_mode: write_mode,
+          ack_mode: ack_mode,
+          collection: collection,
+          distributed: distributed,
+          ephemeral_authority: %{},
+          hydration_limit: hydration_limit,
+          hydration: hydration_ready(0, hydration_limit)
+        }
 
-    load_from_backend(state)
+        state = hydrate_from_backend(state)
 
-    if distributed do
-      subscribe_to_distributed_signals(collection)
+        if distributed do
+          subscribe_to_distributed_signals(collection)
+        end
+
+        {:ok, state}
+
+      {:error, reason} ->
+        {:stop, reason}
     end
-
-    {:ok, state}
   end
 
   @impl true
@@ -458,6 +490,10 @@ defmodule Arbor.Persistence.BufferedStore do
   @impl true
   def handle_call(:backend_healthy?, _from, state) do
     {:reply, do_backend_healthy?(state), state}
+  end
+
+  def handle_call(:hydration_status, _from, state) do
+    {:reply, {:ok, state.hydration}, state}
   end
 
   def handle_call(:authority_mode, _from, state) do
@@ -1027,34 +1063,249 @@ defmodule Arbor.Persistence.BufferedStore do
     :throw, _ -> false
   end
 
-  defp load_from_backend(%{backend: nil}), do: :ok
+  defp parse_hydration_limit(nil), do: {:ok, @max_authoritative_keys}
 
-  defp load_from_backend(%{backend: backend} = state) do
-    result =
-      if Code.ensure_loaded?(backend) and function_exported?(backend, :query, 2) do
-        do_authoritative_entries(state)
-      else
-        load_from_non_query_backend(state)
-      end
+  defp parse_hydration_limit(limit) when is_integer(limit) and limit > 0, do: {:ok, limit}
 
-    case result do
-      {:ok, _entries} -> :ok
-      {:error, _reason} -> log_backend_load_failure()
-      _other -> log_backend_load_failure()
-    end
-  rescue
-    _ -> log_backend_load_failure()
-  catch
-    _, _ -> log_backend_load_failure()
+  defp parse_hydration_limit(other), do: {:error, {:invalid_hydration_limit, other}}
+
+  defp hydration_ready(loaded_count, limit) do
+    %{
+      status: :ready,
+      loaded_count: loaded_count,
+      configured_limit: limit,
+      reason: :ok
+    }
   end
 
-  defp load_from_non_query_backend(state) do
-    with {:ok, keys} <- do_authoritative_list(state, nil) do
-      Enum.each(keys, fn key ->
-        _ = do_authoritative_get(state, key)
-      end)
+  defp hydration_failed(limit, reason) do
+    %{
+      status: :failed,
+      loaded_count: 0,
+      configured_limit: limit,
+      reason: reason
+    }
+  end
 
-      {:ok, keys}
+  defp hydrate_from_backend(%{backend: nil, hydration_limit: limit} = state) do
+    %{state | hydration: hydration_ready(0, limit)}
+  end
+
+  defp hydrate_from_backend(%{backend: _backend, hydration_limit: limit} = state) do
+    case collect_hydration_entries(state) do
+      {:ok, entries} ->
+        true = :ets.delete_all_objects(state.table)
+
+        if entries != [] do
+          true = :ets.insert(state.table, entries)
+        end
+
+        %{state | hydration: hydration_ready(length(entries), limit)}
+
+      {:error, reason} ->
+        true = :ets.delete_all_objects(state.table)
+        log_backend_load_failure()
+        %{state | hydration: hydration_failed(limit, reason)}
+    end
+  rescue
+    _ ->
+      true = :ets.delete_all_objects(state.table)
+      log_backend_load_failure()
+      %{state | hydration: hydration_failed(state.hydration_limit, :hydration_error)}
+  catch
+    _, _ ->
+      true = :ets.delete_all_objects(state.table)
+      log_backend_load_failure()
+      %{state | hydration: hydration_failed(state.hydration_limit, :hydration_error)}
+  end
+
+  defp collect_hydration_entries(%{backend: backend} = state) do
+    if Code.ensure_loaded?(backend) and function_exported?(backend, :query, 2) do
+      collect_query_hydration_entries(state)
+    else
+      collect_crud_hydration_entries(state)
+    end
+  end
+
+  defp collect_query_hydration_entries(%{backend: backend, hydration_limit: limit} = state) do
+    filter =
+      Filter.new()
+      |> Filter.order_by(:key, :asc)
+      |> Filter.limit(limit + 1)
+
+    opts = backend_call_opts(state)
+
+    case guarded_backend_read(fn -> backend.query(filter, opts) end) do
+      {:ok, records} when is_list(records) ->
+        normalize_hydration_values(records, limit)
+
+      {:error, :backend_unavailable} ->
+        {:error, :backend_unavailable}
+
+      {:error, _} ->
+        {:error, :backend_unavailable}
+
+      _other ->
+        {:error, :invalid_backend_response}
+    end
+  end
+
+  defp collect_crud_hydration_entries(%{backend: backend, hydration_limit: limit} = state) do
+    opts = backend_call_opts(state)
+
+    case guarded_backend_read(fn -> backend.list(opts) end) do
+      {:ok, keys} when is_list(keys) ->
+        with :ok <- validate_hydration_keys(keys, limit) do
+          keys
+          |> Enum.sort()
+          |> fetch_hydration_values(backend, opts, limit)
+        end
+
+      {:error, :backend_unavailable} ->
+        {:error, :backend_unavailable}
+
+      {:error, _} ->
+        {:error, :backend_unavailable}
+
+      _other ->
+        {:error, :invalid_backend_response}
+    end
+  end
+
+  defp validate_hydration_keys(keys, limit) do
+    case reduce_hydration_keys(keys, MapSet.new(), 0) do
+      {:ok, count} when count > limit ->
+        {:error, :inventory_limit_exceeded}
+
+      {:ok, _count} ->
+        :ok
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp reduce_hydration_keys([], _seen, count), do: {:ok, count}
+
+  defp reduce_hydration_keys([key | rest], seen, count) when is_binary(key) do
+    if MapSet.member?(seen, key) do
+      {:error, :invalid_backend_response}
+    else
+      reduce_hydration_keys(rest, MapSet.put(seen, key), count + 1)
+    end
+  end
+
+  defp reduce_hydration_keys([_invalid | _rest], _seen, _count),
+    do: {:error, :invalid_backend_response}
+
+  defp reduce_hydration_keys(_improper, _seen, _count),
+    do: {:error, :invalid_backend_response}
+
+  defp fetch_hydration_values(keys, backend, opts, limit) do
+    if length(keys) > limit do
+      {:error, :inventory_limit_exceeded}
+    else
+      Enum.reduce_while(keys, {:ok, []}, fn key, {:ok, acc} ->
+        case guarded_backend_read(fn -> backend.get(key, opts) end) do
+          {:ok, value} ->
+            case hydration_entry(key, value) do
+              {:ok, entry} -> {:cont, {:ok, [entry | acc]}}
+              {:error, reason} -> {:halt, {:error, reason}}
+            end
+
+          {:error, :not_found} ->
+            {:halt, {:error, :incomplete_inventory}}
+
+          {:error, :backend_unavailable} ->
+            {:halt, {:error, :backend_unavailable}}
+
+          {:error, _} ->
+            {:halt, {:error, :incomplete_inventory}}
+
+          _other ->
+            {:halt, {:error, :invalid_backend_response}}
+        end
+      end)
+      |> case do
+        {:ok, entries} -> {:ok, Enum.reverse(entries)}
+        {:error, reason} -> {:error, reason}
+      end
+    end
+  end
+
+  defp normalize_hydration_values(values, limit) do
+    case reduce_hydration_values(values, [], MapSet.new(), 0, limit) do
+      {:ok, entries} -> {:ok, Enum.reverse(entries)}
+      {:error, reason} -> {:error, reason}
+    end
+  rescue
+    _ -> {:error, :invalid_backend_response}
+  catch
+    _, _ -> {:error, :invalid_backend_response}
+  end
+
+  defp reduce_hydration_values([], acc, _seen, _count, _limit), do: {:ok, acc}
+
+  defp reduce_hydration_values(_values, _acc, _seen, count, limit) when count > limit,
+    do: {:error, :inventory_limit_exceeded}
+
+  defp reduce_hydration_values([%Record{key: key} = record | rest], acc, seen, count, limit)
+       when is_binary(key) do
+    cond do
+      count >= limit ->
+        {:error, :inventory_limit_exceeded}
+
+      MapSet.member?(seen, key) ->
+        {:error, :invalid_backend_response}
+
+      Revision.key_mismatch?(key, record) ->
+        {:error, :invalid_backend_record}
+
+      true ->
+        reduce_hydration_values(
+          rest,
+          [{key, record} | acc],
+          MapSet.put(seen, key),
+          count + 1,
+          limit
+        )
+    end
+  end
+
+  defp reduce_hydration_values([{key, value} | rest], acc, seen, count, limit)
+       when is_binary(key) do
+    cond do
+      count >= limit ->
+        {:error, :inventory_limit_exceeded}
+
+      MapSet.member?(seen, key) ->
+        {:error, :invalid_backend_response}
+
+      Revision.key_mismatch?(key, value) ->
+        {:error, :invalid_backend_record}
+
+      true ->
+        reduce_hydration_values(
+          rest,
+          [{key, value} | acc],
+          MapSet.put(seen, key),
+          count + 1,
+          limit
+        )
+    end
+  end
+
+  defp reduce_hydration_values([_invalid | _rest], _acc, _seen, _count, _limit),
+    do: {:error, :invalid_backend_response}
+
+  defp reduce_hydration_values(_improper, _acc, _seen, _count, _limit),
+    do: {:error, :invalid_backend_response}
+
+  defp hydration_entry(key, value) do
+    if Revision.key_mismatch?(key, value) do
+      {:error, :invalid_backend_record}
+    else
+      {:ok, {key, value}}
     end
   end
 
