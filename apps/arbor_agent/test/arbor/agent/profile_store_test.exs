@@ -274,6 +274,27 @@ defmodule Arbor.Agent.ProfileStoreTest do
       # Cleanup
       File.rm(path)
     end
+
+    test "load_profile_readonly reads legacy JSON without migrating or deleting" do
+      agents_dir = Path.join(File.cwd!(), ".arbor/agents")
+      File.mkdir_p!(agents_dir)
+
+      agent_id = "readonly-#{System.unique_integer([:positive])}"
+      profile = make_profile(agent_id, name: "Readonly Agent")
+      {:ok, json} = Profile.to_json(profile)
+      path = Path.join(agents_dir, "#{agent_id}.agent.json")
+      File.write!(path, json)
+
+      assert {:error, :not_found} = load_from_store_only(agent_id)
+      assert {:ok, loaded} = ProfileStore.load_profile_readonly(agent_id)
+      assert loaded.character.name == "Readonly Agent"
+
+      # Must not lazy-migrate
+      assert {:error, :not_found} = load_from_store_only(agent_id)
+      assert File.exists?(path)
+
+      File.rm(path)
+    end
   end
 
   # ============================================================================

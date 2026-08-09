@@ -677,6 +677,51 @@ defmodule Arbor.Agent.OrchestrationTest do
     :ok
   end
 
+  describe "coding_dispatch_readiness/3" do
+    test "reuses dispatch authorization and rejects caller-selected task ids" do
+      assert {:error, :caller_selected_task_id_rejected} =
+               Orchestration.coding_dispatch_readiness(
+                 "agent_1",
+                 %{"kind" => "coding_change"},
+                 caller_id: "human_1",
+                 task_id: "task_evil",
+                 security_module: FakeSecurity
+               )
+
+      Process.put({FakeSecurity, :result}, {:error, :no_capability})
+
+      assert {:error, {:unauthorized, _}} =
+               Orchestration.coding_dispatch_readiness(
+                 "agent_1",
+                 %{"kind" => "coding_change"},
+                 caller_id: "human_1",
+                 security_module: FakeSecurity
+               )
+
+      assert_received {:authorize, "human_1", "arbor://agent/dispatch/agent_1", :execute, _}
+    end
+
+    test "authorized projection strips session_token before shell and returns ok report" do
+      Process.put({FakeSecurity, :result}, {:ok, :authorized})
+
+      assert {:ok, report} =
+               Orchestration.coding_dispatch_readiness(
+                 "agent_1",
+                 %{"kind" => "coding_change"},
+                 caller_id: "human_1",
+                 session_token: "secret_proof",
+                 security_module: FakeSecurity
+               )
+
+      assert_received {:authorize, "human_1", "arbor://agent/dispatch/agent_1", :execute, auth_opts}
+      assert Keyword.get(auth_opts, :session_token) == "secret_proof"
+      assert is_map(report)
+      assert report["kind"] == "agent_coding_dispatch_readiness"
+      assert report["status"] in ["ready", "degraded", "blocked", "error"]
+      assert is_binary(report["status"])
+    end
+  end
+
   describe "dispatch/3" do
     test "security regression: generated task ids use restart-stable random identity" do
       opts = [

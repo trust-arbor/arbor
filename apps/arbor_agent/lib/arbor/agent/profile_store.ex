@@ -95,6 +95,26 @@ defmodule Arbor.Agent.ProfileStore do
   end
 
   @doc """
+  Read-only profile load for readiness projections.
+
+  Tries the store first, then reads a legacy JSON file if present, but never
+  migrates into the store, never deletes the legacy file, and never persists.
+  """
+  @spec load_profile_readonly(String.t()) :: {:ok, Profile.t()} | {:error, :not_found | term()}
+  def load_profile_readonly(agent_id) when is_binary(agent_id) do
+    case load_from_store(agent_id) do
+      {:ok, _profile} = ok ->
+        ok
+
+      {:error, :not_found} ->
+        read_json_profile(agent_id)
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  @doc """
   List all stored profiles.
 
   Returns profiles from the BufferedStore ETS cache.
