@@ -9,10 +9,16 @@ defmodule Arbor.Gateway.MCP.Handler do
   - `arbor_run` — Execute an action with parameters
   - `arbor_status` — Inspect agent, memory, and signal state
   - orchestration tools — list/answer approvals and dispatch/poll/adopt async tasks
+  - `arbor_coding_dispatch_readiness` — pre-dispatch readiness via the public Agent facade
 
-  Uses runtime bridges (`Code.ensure_loaded?` + `apply/3`) to call into
-  arbor_actions, arbor_agent, arbor_memory, and arbor_signals without
-  compile-time dependencies (arbor_gateway is Level 2, same as those apps).
+  Peer-library calls that must not become compile-time Gateway dependencies use
+  runtime bridges (`Code.ensure_loaded?` + `apply/3`, often defaulted via
+  `Module.concat/1`). Existing status and orchestration bridges may still reach
+  internal collaborator modules; that legacy surface is unchanged. The new
+  `arbor_coding_dispatch_readiness` path specifically invokes only the public
+  `Arbor.Agent.coding_dispatch_readiness/4` facade through a dedicated
+  runtime-configurable module (`:agent_facade_module`), defaulting without a
+  compile-time `Arbor.Agent` alias.
   """
 
   use ExMCP.Server.Handler
@@ -30,6 +36,16 @@ defmodule Arbor.Gateway.MCP.Handler do
   @default_mcp_adoption_wait_timeout_ms 5_000
   @max_mcp_adoption_wait_timeout_ms 5_000
   @mcp_adoption_status_timeout_ms 500
+  # Public Arbor.Agent.coding_dispatch_readiness/4 error atoms only — never
+  # forward arbitrary {:error, reason} payloads into MCP client envelopes.
+  @agent_facade_public_errors [
+    :invalid_opts,
+    :invalid_caller_id,
+    :invalid_agent_id,
+    :invalid_task,
+    :unauthorized,
+    :readiness_failed
+  ]
 
   # Owner-bound ACP lifecycle actions. Managed ACP sessions are tied to the
   # calling process; standalone arbor_run runs in a short-lived ExMCP handler
@@ -272,6 +288,44 @@ defmodule Arbor.Gateway.MCP.Handler do
         }
       },
       %{
+        name: "arbor_coding_dispatch_readiness",
+        description:
+          "Pre-dispatch readiness check for a structured coding task. Call before " <>
+            "arbor_dispatch_task with the exact same agent_id, structured task object, " <>
+            "and optional positive timeout. Returns a point-in-time readiness snapshot " <>
+            "(ready, degraded, blocked, or error) without creating a task, acquiring " <>
+            "authority, or reserving workspace/lease state. Dispatch rechecks " <>
+            "authoritative gates. Caller identity is resolved server-side from " <>
+            "SignedRequest authentication and cannot be passed in tool arguments.",
+        inputSchema: %{
+          type: "object",
+          additionalProperties: false,
+          properties: %{
+            agent_id: %{
+              type: "string",
+              description: "Stable id of the agent that would run the task"
+            },
+            task: %{
+              type: "object",
+              minProperties: 1,
+              description:
+                "Exact structured task payload later sent to arbor_dispatch_task. " <>
+                  "Canonical coding example: " <>
+                  ~s({"kind":"coding_change","plan":{"version":2,"task":"...","repo_root":"/path/to/repo","worker":{"provider":"codex"},"work_packet":{"version":1,"success_criteria":["..."],"non_goals":[],"constraints":[],"architecture_refs":[],"required_evidence":[],"checkpoint_policy":"direct"},"work_packet_digest":"sha256:<64 lowercase hex>"}}) <>
+                  ". Preserved exactly; not normalized or rewritten."
+            },
+            timeout: %{
+              type: "integer",
+              minimum: 1,
+              description:
+                "Optional positive soft task timeout in milliseconds (minimum 1). " <>
+                  "When present, must match the timeout later sent to arbor_dispatch_task."
+            }
+          },
+          required: ["agent_id", "task"]
+        }
+      },
+      %{
         name: "arbor_dispatch_task",
         description:
           "Dispatch an asynchronous task to an Arbor agent. Returns immediately with a " <>
@@ -284,7 +338,8 @@ defmodule Arbor.Gateway.MCP.Handler do
             "plus a canonical work_packet and its work_packet_digest; omitted version selects 2. " <>
             "Explicit version 1 is legacy compatibility only and cannot admit high-risk work. " <>
             "validation_profile and review_profile are optional reviewed selectors. " <>
-            "Structured coding_change dispatch runs the compiled DOT pipeline by default.",
+            "Structured coding_change dispatch runs the compiled DOT pipeline by default. " <>
+            "Call arbor_coding_dispatch_readiness first with the same task and timeout.",
         inputSchema: %{
           type: "object",
           properties: %{
@@ -486,6 +541,13 @@ defmodule Arbor.Gateway.MCP.Handler do
     end
   end
 
+  def handle_call_tool("arbor_coding_dispatch_readiness", args, state) do
+    case coding_dispatch_readiness(args) do
+      {:ok, result} -> {:ok, json_content(result), state}
+      {:error, message} -> {:ok, error_content(message), state}
+    end
+  end
+
   def handle_call_tool("arbor_dispatch_task", args, state) do
     case dispatch_task(args) do
       {:ok, result} -> {:ok, json_content(result), state}
@@ -664,6 +726,22 @@ defmodule Arbor.Gateway.MCP.Handler do
          {:ok, opts} <- approval_answer_opts(args, caller_id),
          :ok <- call_orchestration(:answer_approval, [id, decision, opts]) do
       {:ok, %{"ok" => true, "approval_id" => id, "decision" => decision}}
+    else
+      {:error, reason} -> {:error, format_tool_error(reason)}
+      other -> {:error, format_tool_error(other)}
+    end
+  end
+
+  defp coding_dispatch_readiness(args) do
+    with {:ok, caller_id} <- require_authenticated("arbor_coding_dispatch_readiness"),
+         {:ok, agent_id} <- required_string_arg(args, "agent_id"),
+         {:ok, task} <- required_structured_task_arg(args, "task"),
+         {:ok, opts} <- readiness_timeout_opts(args),
+         {:ok, report} <-
+           call_agent_facade(:coding_dispatch_readiness, [caller_id, agent_id, task, opts]) do
+      # Authorized ready/degraded/blocked/error reports are successful MCP envelopes.
+      # Gateway does not re-validate report status; the public Agent facade owns that.
+      {:ok, %{"ok" => true, "readiness" => report}}
     else
       {:error, reason} -> {:error, format_tool_error(reason)}
       other -> {:error, format_tool_error(other)}
@@ -879,6 +957,35 @@ defmodule Arbor.Gateway.MCP.Handler do
     end
   end
 
+  # Readiness admits only a non-empty structured task map (exact payload later
+  # sent to arbor_dispatch_task). Strings and empty maps are MCP input errors —
+  # never silently rewritten or omitted.
+  defp required_structured_task_arg(args, key) do
+    case Map.get(args, key) do
+      value when is_map(value) and map_size(value) > 0 and not is_struct(value) ->
+        {:ok, value}
+
+      _ ->
+        {:error, "Missing or invalid required argument: #{key} (non-empty object required)"}
+    end
+  end
+
+  # Timeout is optional. When present it must be a positive integer (minimum 1).
+  # Zero, negative, non-integer, nil, and other malformed values fail closed as
+  # MCP errors rather than being silently dropped.
+  defp readiness_timeout_opts(args) do
+    case Map.fetch(args, "timeout") do
+      :error ->
+        {:ok, []}
+
+      {:ok, timeout} when is_integer(timeout) and timeout >= 1 ->
+        {:ok, [timeout: timeout]}
+
+      {:ok, _invalid} ->
+        {:error, "Invalid timeout: must be a positive integer (minimum 1)"}
+    end
+  end
+
   defp optional_string_arg(args, key) do
     case Map.get(args, key) do
       value when is_binary(value) ->
@@ -924,6 +1031,64 @@ defmodule Arbor.Gateway.MCP.Handler do
       :orchestration_module,
       Module.concat([:Arbor, :Agent, :Orchestration])
     )
+  end
+
+  # Runtime public Agent facade bridge for peer-library readiness. Configurable
+  # via :agent_facade_module; defaults to Arbor.Agent without a compile-time
+  # reference. Does not reuse the internal Orchestration module.
+  # Failure projection never inspects or logs malformed values/reasons — only
+  # stable class atoms. Accept only {:ok, plain_map} (structs rejected). Pass
+  # through only documented public facade atom errors; every other {:error, term}
+  # and return shape becomes :agent_facade_malformed_return.
+  defp call_agent_facade(function, args) do
+    module = agent_facade_module()
+
+    if Code.ensure_loaded?(module) and function_exported?(module, function, length(args)) do
+      case apply(module, function, args) do
+        {:ok, report} when is_map(report) and not is_struct(report) ->
+          {:ok, report}
+
+        {:error, reason}
+        when is_atom(reason) and reason in @agent_facade_public_errors ->
+          {:error, reason}
+
+        {:error, _other} ->
+          log_agent_facade_class(:agent_facade_malformed_return)
+          {:error, :agent_facade_malformed_return}
+
+        _malformed_or_struct ->
+          log_agent_facade_class(:agent_facade_malformed_return)
+          {:error, :agent_facade_malformed_return}
+      end
+    else
+      log_agent_facade_class(:agent_facade_unavailable)
+      {:error, :agent_facade_unavailable}
+    end
+  rescue
+    _exception ->
+      log_agent_facade_class(:agent_facade_error)
+      {:error, :agent_facade_error}
+  catch
+    :throw, _reason ->
+      log_agent_facade_class(:agent_facade_throw)
+      {:error, :agent_facade_throw}
+
+    :exit, _reason ->
+      log_agent_facade_class(:agent_facade_exit)
+      {:error, :agent_facade_exit}
+  end
+
+  defp agent_facade_module do
+    Application.get_env(
+      :arbor_gateway,
+      :agent_facade_module,
+      Module.concat([:Arbor, :Agent])
+    )
+  end
+
+  # Log only the stable class atom — never the underlying reason/payload.
+  defp log_agent_facade_class(class) when is_atom(class) do
+    Logger.warning("[MCP.Handler] agent facade #{class}")
   end
 
   defp json_content(data) do

@@ -6,6 +6,53 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
   alias Arbor.Contracts.Coding.TaskTerminalEnvelope
   alias Arbor.Gateway.MCP.Handler
 
+  defmodule FakeAgentFacade do
+    def coding_dispatch_readiness(caller_id, agent_id, task, opts) do
+      send(self(), {:coding_dispatch_readiness, caller_id, agent_id, task, opts})
+      Process.get({__MODULE__, :readiness_result}, {:ok, %{"status" => "ready"}})
+    end
+  end
+
+  defmodule RaisingAgentFacade do
+    def coding_dispatch_readiness(_caller_id, _agent_id, _task, _opts) do
+      raise "agent facade boom"
+    end
+  end
+
+  defmodule ThrowingAgentFacade do
+    def coding_dispatch_readiness(_caller_id, _agent_id, _task, _opts) do
+      throw(:agent_facade_throw)
+    end
+  end
+
+  defmodule ExitingAgentFacade do
+    def coding_dispatch_readiness(_caller_id, _agent_id, _task, _opts) do
+      exit(:agent_facade_exit)
+    end
+  end
+
+  defmodule MalformedAgentFacade do
+    def coding_dispatch_readiness(_caller_id, _agent_id, _task, _opts) do
+      :not_a_result_tuple
+    end
+  end
+
+  defmodule NonPublicErrorAgentFacade do
+    def coding_dispatch_readiness(_caller_id, _agent_id, _task, _opts) do
+      {:error, {:nested_secret, "must-not-appear-in-mcp"}}
+    end
+  end
+
+  defmodule StructReportAgentFacade do
+    defmodule Report do
+      defstruct [:status, :secret]
+    end
+
+    def coding_dispatch_readiness(_caller_id, _agent_id, _task, _opts) do
+      {:ok, %Report{status: "ready", secret: "must-not-leak"}}
+    end
+  end
+
   defmodule FakeOrchestration do
     def list_pending_approvals(opts) do
       send(self(), {:list_pending_approvals, opts})
@@ -150,6 +197,7 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
     Process.delete({FakeOrchestration, :cancel_result})
     Process.delete({FakeOrchestration, :steer_result})
     Process.delete({FakeOrchestration, :adopt_result})
+    Process.delete({FakeAgentFacade, :readiness_result})
 
     {:ok, state: %{}}
   end
@@ -220,7 +268,7 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
   describe "handle_list_tools/2" do
     test "returns tools", %{state: state} do
       {:ok, tools, nil, _state} = Handler.handle_list_tools(nil, state)
-      assert length(tools) == 12
+      assert length(tools) == 13
 
       names = Enum.map(tools, & &1.name) |> Enum.sort()
 
@@ -229,6 +277,7 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
                "arbor_adopt_task_change",
                "arbor_answer_approval",
                "arbor_cancel_task",
+               "arbor_coding_dispatch_readiness",
                "arbor_dispatch_task",
                "arbor_help",
                "arbor_list_pending_approvals",
@@ -333,6 +382,7 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
     test "task orchestration tools require stable ids", %{state: state} do
       {:ok, tools, _, _} = Handler.handle_list_tools(nil, state)
       dispatch_tool = Enum.find(tools, &(&1.name == "arbor_dispatch_task"))
+      readiness_tool = Enum.find(tools, &(&1.name == "arbor_coding_dispatch_readiness"))
       status_tool = Enum.find(tools, &(&1.name == "arbor_task_status"))
       result_tool = Enum.find(tools, &(&1.name == "arbor_task_result"))
       cancel_tool = Enum.find(tools, &(&1.name == "arbor_cancel_task"))
@@ -340,11 +390,41 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
 
       assert "agent_id" in dispatch_tool.inputSchema.required
       assert "task" in dispatch_tool.inputSchema.required
+      assert "agent_id" in readiness_tool.inputSchema.required
+      assert "task" in readiness_tool.inputSchema.required
       assert "task_id" in status_tool.inputSchema.required
       assert "task_id" in result_tool.inputSchema.required
       assert "task_id" in cancel_tool.inputSchema.required
       assert "task_id" in steer_tool.inputSchema.required
       assert "message" in steer_tool.inputSchema.required
+    end
+
+    test "arbor_coding_dispatch_readiness schema requires structured task and positive timeout",
+         %{state: state} do
+      {:ok, tools, _, _} = Handler.handle_list_tools(nil, state)
+      tool = Enum.find(tools, &(&1.name == "arbor_coding_dispatch_readiness"))
+      refute is_nil(tool)
+
+      assert tool.description =~ "before"
+      assert tool.description =~ "arbor_dispatch_task"
+      assert tool.description =~ "exact same"
+      assert tool.description =~ "without creating"
+      assert tool.description =~ "SignedRequest"
+
+      assert "agent_id" in tool.inputSchema.required
+      assert "task" in tool.inputSchema.required
+      refute "caller_id" in Map.keys(tool.inputSchema.properties)
+      refute "timeout" in tool.inputSchema.required
+
+      assert tool.inputSchema.properties.task.type == "object"
+      # Schema aligns with runtime: non-empty task object required.
+      assert tool.inputSchema.properties.task.minProperties == 1
+      assert tool.inputSchema.properties.timeout.type == "integer"
+      assert tool.inputSchema.properties.timeout.minimum == 1
+      # Top-level rejects caller_id and other undeclared properties at schema level.
+      assert tool.inputSchema.additionalProperties == false
+      refute Map.has_key?(tool.inputSchema.properties, :caller_id)
+      refute Map.has_key?(tool.inputSchema.properties, "caller_id")
     end
 
     test "arbor_dispatch_task documents stable coding_change envelope without dropping string/object support",
@@ -404,6 +484,416 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
       refute Map.has_key?(object_branch.properties.plan, :required)
       refute Map.has_key?(object_branch.properties.plan, :oneOf)
       refute Map.has_key?(object_branch.properties.plan, :properties)
+    end
+  end
+
+  # ===========================================================================
+  # coding dispatch readiness (public Agent facade bridge)
+  # ===========================================================================
+
+  describe "arbor_coding_dispatch_readiness" do
+    @coding_task %{
+      "kind" => "coding_change",
+      "plan" => %{
+        "version" => 2,
+        "task" => "Implement the requested change with tests",
+        "repo_root" => "/absolute/path/to/repo",
+        "worker" => %{"provider" => "codex"}
+      }
+    }
+
+    setup do
+      previous = Application.get_env(:arbor_gateway, :agent_facade_module)
+      Application.put_env(:arbor_gateway, :agent_facade_module, FakeAgentFacade)
+
+      on_exit(fn ->
+        case previous do
+          nil -> Application.delete_env(:arbor_gateway, :agent_facade_module)
+          value -> Application.put_env(:arbor_gateway, :agent_facade_module, value)
+        end
+
+        Process.delete(:arbor_authenticated_agent_id)
+        Process.delete({FakeAgentFacade, :readiness_result})
+      end)
+
+      :ok
+    end
+
+    test "requires SignedRequest authentication", %{state: state} do
+      {:ok, result, _state} =
+        Handler.handle_call_tool(
+          "arbor_coding_dispatch_readiness",
+          %{"agent_id" => "agent_1", "task" => @coding_task},
+          state
+        )
+
+      assert result.isError == true
+      assert [%{text: text}] = result.content
+      assert text =~ "SignedRequest authentication"
+      assert text =~ "docs/arbor/EXTERNAL_MCP_CLIENT.md"
+      refute_received {:coding_dispatch_readiness, _, _, _, _}
+    end
+
+    test "forwards authenticated caller, exact task, and positive timeout to the public facade",
+         %{state: state} do
+      Process.put(:arbor_authenticated_agent_id, "human_1")
+
+      Process.put(
+        {FakeAgentFacade, :readiness_result},
+        {:ok, %{"status" => "ready", "kind" => "agent_coding_dispatch_readiness"}}
+      )
+
+      {:ok, %{content: [%{text: text}]}, _state} =
+        Handler.handle_call_tool(
+          "arbor_coding_dispatch_readiness",
+          %{
+            "agent_id" => "agent_1",
+            "task" => @coding_task,
+            "timeout" => 900_000,
+            "caller_id" => "spoofed_caller"
+          },
+          state
+        )
+
+      assert %{
+               "ok" => true,
+               "readiness" => %{
+                 "status" => "ready",
+                 "kind" => "agent_coding_dispatch_readiness"
+               }
+             } = Jason.decode!(text)
+
+      assert_received {:coding_dispatch_readiness, "human_1", "agent_1", task, opts}
+      assert task == @coding_task
+      assert opts == [timeout: 900_000]
+    end
+
+    test "omits timeout opts when timeout is absent", %{state: state} do
+      Process.put(:arbor_authenticated_agent_id, "human_1")
+
+      {:ok, %{content: [%{text: text}]}, _state} =
+        Handler.handle_call_tool(
+          "arbor_coding_dispatch_readiness",
+          %{"agent_id" => "agent_1", "task" => @coding_task},
+          state
+        )
+
+      assert %{"ok" => true, "readiness" => %{"status" => "ready"}} = Jason.decode!(text)
+      assert_received {:coding_dispatch_readiness, "human_1", "agent_1", @coding_task, []}
+    end
+
+    test "caller-controlled caller_id cannot influence the facade call", %{state: state} do
+      Process.put(:arbor_authenticated_agent_id, "human_authenticated")
+
+      {:ok, %{content: [%{text: text}]}, _state} =
+        Handler.handle_call_tool(
+          "arbor_coding_dispatch_readiness",
+          %{
+            "agent_id" => "agent_1",
+            "task" => @coding_task,
+            "caller_id" => "attacker_spoof"
+          },
+          state
+        )
+
+      assert %{"ok" => true} = Jason.decode!(text)
+      assert_received {:coding_dispatch_readiness, "human_authenticated", "agent_1", _, []}
+      refute_received {:coding_dispatch_readiness, "attacker_spoof", _, _, _}
+    end
+
+    test "authorized ready, degraded, blocked, and error reports remain ok=true", %{state: state} do
+      Process.put(:arbor_authenticated_agent_id, "human_1")
+
+      for status <- ["ready", "degraded", "blocked", "error"] do
+        Process.put(
+          {FakeAgentFacade, :readiness_result},
+          {:ok, %{"status" => status, "planes" => %{"security" => %{"status" => status}}}}
+        )
+
+        {:ok, result, _state} =
+          Handler.handle_call_tool(
+            "arbor_coding_dispatch_readiness",
+            %{"agent_id" => "agent_1", "task" => @coding_task},
+            state
+          )
+
+        refute Map.get(result, :isError) == true
+        assert [%{text: text}] = result.content
+
+        assert %{
+                 "ok" => true,
+                 "readiness" => %{"status" => ^status}
+               } = Jason.decode!(text)
+      end
+    end
+
+    test "rejects missing, empty, and non-map task values", %{state: state} do
+      Process.put(:arbor_authenticated_agent_id, "human_1")
+
+      for task <- [nil, %{}, "string prompt", 42, []] do
+        args =
+          if is_nil(task) do
+            %{"agent_id" => "agent_1"}
+          else
+            %{"agent_id" => "agent_1", "task" => task}
+          end
+
+        {:ok, result, _state} =
+          Handler.handle_call_tool("arbor_coding_dispatch_readiness", args, state)
+
+        assert result.isError == true
+        assert [%{text: text}] = result.content
+        assert text =~ "task"
+        refute_received {:coding_dispatch_readiness, _, _, _, _}
+      end
+    end
+
+    test "rejects zero, negative, nil, and non-integer timeouts instead of omitting them", %{
+      state: state
+    } do
+      Process.put(:arbor_authenticated_agent_id, "human_1")
+
+      for timeout <- [0, -1, nil, 1.5, "1000", true] do
+        {:ok, result, _state} =
+          Handler.handle_call_tool(
+            "arbor_coding_dispatch_readiness",
+            %{"agent_id" => "agent_1", "task" => @coding_task, "timeout" => timeout},
+            state
+          )
+
+        assert result.isError == true
+        assert [%{text: text}] = result.content
+        assert text =~ "timeout"
+        refute_received {:coding_dispatch_readiness, _, _, _, _}
+      end
+    end
+
+    test "facade authorization and failure results are MCP errors", %{state: state} do
+      Process.put(:arbor_authenticated_agent_id, "human_1")
+
+      for reason <- [:unauthorized, :invalid_task, :readiness_failed] do
+        Process.put({FakeAgentFacade, :readiness_result}, {:error, reason})
+
+        {:ok, result, _state} =
+          Handler.handle_call_tool(
+            "arbor_coding_dispatch_readiness",
+            %{"agent_id" => "agent_1", "task" => @coding_task},
+            state
+          )
+
+        assert result.isError == true
+        assert [%{text: text}] = result.content
+        assert text =~ inspect(reason)
+      end
+    end
+
+    test "unavailable facade fails closed", %{state: state} do
+      previous = Application.get_env(:arbor_gateway, :agent_facade_module)
+      Application.put_env(:arbor_gateway, :agent_facade_module, NonexistentAgentFacadeModule)
+
+      on_exit(fn ->
+        case previous do
+          nil -> Application.delete_env(:arbor_gateway, :agent_facade_module)
+          value -> Application.put_env(:arbor_gateway, :agent_facade_module, value)
+        end
+      end)
+
+      Process.put(:arbor_authenticated_agent_id, "human_1")
+
+      {:ok, result, _state} =
+        Handler.handle_call_tool(
+          "arbor_coding_dispatch_readiness",
+          %{"agent_id" => "agent_1", "task" => @coding_task},
+          state
+        )
+
+      assert result.isError == true
+      assert [%{text: text}] = result.content
+      assert text =~ "agent_facade_unavailable"
+    end
+
+    test "malformed facade return fails closed without disclosing payload", %{state: state} do
+      previous = Application.get_env(:arbor_gateway, :agent_facade_module)
+      Application.put_env(:arbor_gateway, :agent_facade_module, MalformedAgentFacade)
+
+      on_exit(fn ->
+        case previous do
+          nil -> Application.delete_env(:arbor_gateway, :agent_facade_module)
+          value -> Application.put_env(:arbor_gateway, :agent_facade_module, value)
+        end
+      end)
+
+      Process.put(:arbor_authenticated_agent_id, "human_1")
+
+      {:ok, result, _state} =
+        Handler.handle_call_tool(
+          "arbor_coding_dispatch_readiness",
+          %{"agent_id" => "agent_1", "task" => @coding_task},
+          state
+        )
+
+      assert result.isError == true
+      assert [%{text: text}] = result.content
+      assert text == "Error: :agent_facade_malformed_return"
+      refute text =~ "not_a_result_tuple"
+    end
+
+    test "non-public {:error, term} normalizes without disclosing the term", %{state: state} do
+      previous = Application.get_env(:arbor_gateway, :agent_facade_module)
+      Application.put_env(:arbor_gateway, :agent_facade_module, NonPublicErrorAgentFacade)
+
+      on_exit(fn ->
+        case previous do
+          nil -> Application.delete_env(:arbor_gateway, :agent_facade_module)
+          value -> Application.put_env(:arbor_gateway, :agent_facade_module, value)
+        end
+      end)
+
+      Process.put(:arbor_authenticated_agent_id, "human_1")
+
+      {:ok, result, _state} =
+        Handler.handle_call_tool(
+          "arbor_coding_dispatch_readiness",
+          %{"agent_id" => "agent_1", "task" => @coding_task},
+          state
+        )
+
+      assert result.isError == true
+      assert [%{text: text}] = result.content
+      assert text == "Error: :agent_facade_malformed_return"
+      refute text =~ "nested_secret"
+      refute text =~ "must-not-appear-in-mcp"
+    end
+
+    test "struct readiness reports are rejected without disclosing fields", %{state: state} do
+      previous = Application.get_env(:arbor_gateway, :agent_facade_module)
+      Application.put_env(:arbor_gateway, :agent_facade_module, StructReportAgentFacade)
+
+      on_exit(fn ->
+        case previous do
+          nil -> Application.delete_env(:arbor_gateway, :agent_facade_module)
+          value -> Application.put_env(:arbor_gateway, :agent_facade_module, value)
+        end
+      end)
+
+      Process.put(:arbor_authenticated_agent_id, "human_1")
+
+      {:ok, result, _state} =
+        Handler.handle_call_tool(
+          "arbor_coding_dispatch_readiness",
+          %{"agent_id" => "agent_1", "task" => @coding_task},
+          state
+        )
+
+      assert result.isError == true
+      assert [%{text: text}] = result.content
+      assert text == "Error: :agent_facade_malformed_return"
+      refute text =~ "must-not-leak"
+      refute text =~ "StructReportAgentFacade.Report"
+      refute text =~ "status"
+    end
+
+    test "raising facade fails closed without disclosing exception text", %{state: state} do
+      previous = Application.get_env(:arbor_gateway, :agent_facade_module)
+      Application.put_env(:arbor_gateway, :agent_facade_module, RaisingAgentFacade)
+
+      on_exit(fn ->
+        case previous do
+          nil -> Application.delete_env(:arbor_gateway, :agent_facade_module)
+          value -> Application.put_env(:arbor_gateway, :agent_facade_module, value)
+        end
+      end)
+
+      Process.put(:arbor_authenticated_agent_id, "human_1")
+
+      {:ok, result, _state} =
+        Handler.handle_call_tool(
+          "arbor_coding_dispatch_readiness",
+          %{"agent_id" => "agent_1", "task" => @coding_task},
+          state
+        )
+
+      assert result.isError == true
+      assert [%{text: text}] = result.content
+      assert text == "Error: :agent_facade_error"
+      refute text =~ "agent facade boom"
+      refute text =~ "RuntimeError"
+    end
+
+    test "throwing and exiting facades fail closed without disclosing reasons", %{state: state} do
+      Process.put(:arbor_authenticated_agent_id, "human_1")
+
+      previous = Application.get_env(:arbor_gateway, :agent_facade_module)
+
+      on_exit(fn ->
+        case previous do
+          nil -> Application.delete_env(:arbor_gateway, :agent_facade_module)
+          value -> Application.put_env(:arbor_gateway, :agent_facade_module, value)
+        end
+      end)
+
+      Application.put_env(:arbor_gateway, :agent_facade_module, ThrowingAgentFacade)
+
+      {:ok, throw_result, _state} =
+        Handler.handle_call_tool(
+          "arbor_coding_dispatch_readiness",
+          %{"agent_id" => "agent_1", "task" => @coding_task},
+          state
+        )
+
+      assert throw_result.isError == true
+      assert [%{text: throw_text}] = throw_result.content
+      assert throw_text == "Error: :agent_facade_throw"
+
+      Application.put_env(:arbor_gateway, :agent_facade_module, ExitingAgentFacade)
+
+      {:ok, exit_result, _state} =
+        Handler.handle_call_tool(
+          "arbor_coding_dispatch_readiness",
+          %{"agent_id" => "agent_1", "task" => @coding_task},
+          state
+        )
+
+      assert exit_result.isError == true
+      assert [%{text: exit_text}] = exit_result.content
+      assert exit_text == "Error: :agent_facade_exit"
+    end
+
+    test "JSON output encodes readiness report without inventing ok=false for blocked status",
+         %{state: state} do
+      Process.put(:arbor_authenticated_agent_id, "human_1")
+
+      Process.put(
+        {FakeAgentFacade, :readiness_result},
+        {:ok,
+         %{
+           "status" => "blocked",
+           "agent_id" => "agent_1",
+           "planes" => %{"task_control" => %{"status" => "blocked", "message" => "missing lease"}}
+         }}
+      )
+
+      {:ok, result, _state} =
+        Handler.handle_call_tool(
+          "arbor_coding_dispatch_readiness",
+          %{"agent_id" => "agent_1", "task" => @coding_task, "timeout" => 1},
+          state
+        )
+
+      refute Map.get(result, :isError) == true
+      assert [%{type: "text", text: text}] = result.content
+      decoded = Jason.decode!(text)
+
+      assert decoded == %{
+               "ok" => true,
+               "readiness" => %{
+                 "status" => "blocked",
+                 "agent_id" => "agent_1",
+                 "planes" => %{
+                   "task_control" => %{"status" => "blocked", "message" => "missing lease"}
+                 }
+               }
+             }
     end
   end
 

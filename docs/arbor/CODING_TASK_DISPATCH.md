@@ -246,9 +246,13 @@ Do not hand-compute it. The canonical encoding is owned by
 be the same one you send in the plan. `canonical_bytes/1` returns the exact
 bytes hashed if you need to verify externally. `sha256/1` is an alias.
 
-## Canonical payload
+## Pre-dispatch readiness
 
-Dispatch with a signed MCP request. The stable coding envelope is:
+Call `arbor_coding_dispatch_readiness` **before** `arbor_dispatch_task` with the
+**exact same** `agent_id`, structured `task` object, and optional positive
+`timeout` you will later send to dispatch. The tool returns a point-in-time
+readiness snapshot; it never creates a task, auto-grants capabilities, or
+reserves task/workspace/lease state. Dispatch rechecks every authoritative gate.
 
 ```json
 {
@@ -271,7 +275,56 @@ Dispatch with a signed MCP request. The stable coding envelope is:
       },
       "work_packet_digest": "sha256:15070222bcf40d76aecc100d459df6f873178037400e5dfe9e2f9802833ebdae"
     }
-  }
+  },
+  "timeout": 900000
+}
+```
+
+Authorized responses are successful MCP envelopes (`ok: true`) whose
+`readiness` report carries one of:
+
+| Status | Meaning |
+| --- | --- |
+| `ready` | Planes required for admission look healthy at snapshot time |
+| `degraded` | Admission may still succeed, but one or more planes report degraded health |
+| `blocked` | At least one plane blocks admission (for example missing authority or template drift) |
+| `error` | A plane projection failed; inspect plane diagnostics rather than treating it as a generic transport error |
+
+Inspect `readiness.planes` (security, coordinator, exact_template, task_control,
+executor) for plane-level diagnostics. Authentication failures, malformed
+`task`/`timeout`, and facade/authorization failures are MCP errors (`isError:
+true`), not false-green readiness reports. Because the result is a snapshot,
+race conditions remain possible — always re-run readiness if the environment
+changed, and treat dispatch as the authoritative recheck.
+
+## Canonical payload
+
+Dispatch with a signed MCP request using the **same** `task` (and `timeout`,
+when present) already checked for readiness. The stable coding envelope is:
+
+```json
+{
+  "agent_id": "agent_...",
+  "task": {
+    "kind": "coding_change",
+    "plan": {
+      "version": 2,
+      "task": "Implement the requested change with tests",
+      "repo_root": "/absolute/path/to/repo",
+      "worker": { "provider": "codex" },
+      "work_packet": {
+        "version": 1,
+        "success_criteria": ["Implement the requested change with tests"],
+        "non_goals": [],
+        "constraints": [],
+        "architecture_refs": [],
+        "required_evidence": [],
+        "checkpoint_policy": "direct"
+      },
+      "work_packet_digest": "sha256:15070222bcf40d76aecc100d459df6f873178037400e5dfe9e2f9802833ebdae"
+    }
+  },
+  "timeout": 900000
 }
 ```
 
