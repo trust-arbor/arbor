@@ -29,7 +29,7 @@ defmodule Arbor.Orchestrator.CodingPlan.AuthorityHorizon do
   @type project_opts :: keyword()
 
   @stable_reason_messages %{
-    invalid_authority_horizon_opts: "authority horizon preflight rejected invalid inputs",
+    invalid_authority_horizon_opts: "authority horizon rejected invalid inputs",
     invalid_resource_derivation_input: "authority horizon could not derive required resources",
     invalid_horizon: "authority horizon deadline inputs were invalid",
     invalid_horizon_datetime: "authority horizon deadline could not be converted",
@@ -43,8 +43,8 @@ defmodule Arbor.Orchestrator.CodingPlan.AuthorityHorizon do
     invalid_nested_graph_entry: "authority horizon nested graph entry was invalid",
     list_capabilities_unavailable: "authority horizon security enumeration was unavailable",
     list_capabilities_failed: "authority horizon security enumeration failed",
-    authority_horizon_exception: "authority horizon preflight failed closed",
-    authority_horizon_throw: "authority horizon preflight failed closed",
+    authority_horizon_exception: "authority horizon evaluation failed closed",
+    authority_horizon_throw: "authority horizon evaluation failed closed",
     authority_horizon_diagnostic_invalid: "authority horizon diagnostic projection failed"
   }
 
@@ -91,7 +91,8 @@ defmodule Arbor.Orchestrator.CodingPlan.AuthorityHorizon do
   Always returns `{:ok, map}`. Failure to evaluate is encoded as
   `status: \"error\"` with a stable reason code. Future-task scope omits
   `task_id` from Security scope opts so task-scoped capabilities are not
-  credited before a server-owned task id exists.
+  credited before a server-owned task id exists. `scope_mode` accepts
+  `:future_task` / `"future_task"` and `:bound_task` / `"bound_task"`.
   """
   @spec project(project_opts()) :: {:ok, map()}
   def project(opts) when is_list(opts) do
@@ -689,7 +690,7 @@ defmodule Arbor.Orchestrator.CodingPlan.AuthorityHorizon do
 
   defp missing_diagnostic(reason, opts) do
     observed_at =
-      case Keyword.get(opts, :now) do
+      case safe_keyword_get(opts, :now) do
         %DateTime{} = now -> DateTime.to_iso8601(now, :extended)
         _ -> DateTime.utc_now() |> DateTime.to_iso8601(:extended)
       end

@@ -1,6 +1,7 @@
 defmodule Arbor.Orchestrator.CodingPlan.AuthorityHorizonCore do
   @moduledoc """
-  Pure authority-horizon calculations for coding-run preflight.
+  Pure authority-horizon calculations and bounded JSON projections for coding
+  runs.
 
   Classifies whether principals hold authorizing capabilities that remain valid
   through an immutable run deadline plus cleanup reserve. No IO, no Security
@@ -202,14 +203,14 @@ defmodule Arbor.Orchestrator.CodingPlan.AuthorityHorizonCore do
       findings == [] ->
         "ready"
 
-      Enum.any?(findings, &(&1.classification == :missing)) ->
+      Enum.any?(findings, &finding_classification?(&1, :missing)) ->
         "missing"
 
-      Enum.any?(findings, &(&1.classification == :expiring)) ->
+      Enum.any?(findings, &finding_classification?(&1, :expiring)) ->
         "expiring"
 
       true ->
-        "ready"
+        "error"
     end
   end
 
@@ -537,6 +538,11 @@ defmodule Arbor.Orchestrator.CodingPlan.AuthorityHorizonCore do
   end
 
   defp project_one_finding(_other), do: nil
+
+  defp finding_classification?(%{classification: classification}, expected),
+    do: classification == expected
+
+  defp finding_classification?(_finding, _expected), do: false
 
   defp sum_count(findings, classification) when is_list(findings) do
     findings

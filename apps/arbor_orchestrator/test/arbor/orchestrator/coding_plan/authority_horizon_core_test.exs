@@ -311,6 +311,11 @@ defmodule Arbor.Orchestrator.CodingPlan.AuthorityHorizonCoreTest do
                }
              ]) == "expiring"
     end
+
+    test "fails closed without raising on malformed finding entries" do
+      assert AuthorityHorizonCore.projection_status([%{}]) == "error"
+      assert AuthorityHorizonCore.projection_status([:malformed]) == "error"
+    end
   end
 
   describe "project_horizon_report/1" do
@@ -345,8 +350,10 @@ defmodule Arbor.Orchestrator.CodingPlan.AuthorityHorizonCoreTest do
       assert report["scope"]["task_id"] == nil
       assert report["scope"]["session_id"] == nil
       assert report["required_resources"]["total_count"] == 3
+
       assert report["required_resources"]["resource_uris_digest"] ==
                AuthorityHorizonCore.uri_list_digest(["arbor://a", "arbor://b", "arbor://c"])
+
       assert report["summary"]["missing_n"] == 2
       assert is_binary(report["summary"]["findings_digest"])
       assert Jason.encode!(report)
@@ -383,6 +390,14 @@ defmodule Arbor.Orchestrator.CodingPlan.AuthorityHorizonCoreTest do
                AuthorityHorizonCore.uri_list_digest(Enum.sort(uris))
 
       assert report["summary"]["missing_n"] == 70
+    end
+
+    test "returns a stable error report for malformed findings" do
+      report = AuthorityHorizonCore.project_horizon_report(%{findings: [%{}]})
+
+      assert report["status"] == "error"
+      assert report["findings"] == []
+      assert Jason.encode!(report)
     end
   end
 end

@@ -23,6 +23,11 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
 
   ## JSON boundary
 
+  `project_dispatch_readiness/3` is the read-only pre-dispatch surface. It
+  always returns a bounded report, accepts only `caller_id` and `timeout` in
+  context, and creates no task, workspace, capability, approval, or ACP
+  session.
+
   Production TaskStore already canonicalizes. This module therefore accepts
   only non-struct, string-keyed JSON maps at `run/3`, `task_status/2`, and
   `cancel_task/2`, and `steer_task/3`. Atom keys, keywords, structs, PIDs,
@@ -278,9 +283,10 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   Read-only pre-dispatch readiness + authority-horizon projection.
 
   Normalizes and compiles the exact structured coding task, runs live
-  Readiness, computes the same effective wall-clock and cleanup reserve as
-  dispatch, verifies the compiled graph/manifest in memory, and projects
-  authority through an immutable future-task horizon.
+  Readiness, delegates budget allocation to `BudgetPolicy.allocate/2`, computes
+  the same effective wall-clock and cleanup reserve as dispatch, verifies the
+  compiled graph/manifest in memory, and projects authority through an
+  immutable future-task horizon.
 
   Public `context` must be a string-keyed JSON map allowlisted to
   `caller_id` and `timeout` only. Does not accept task ids, trusted roots,

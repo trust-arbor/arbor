@@ -8,6 +8,7 @@ defmodule Arbor.Orchestrator.CodingPlan.AuthorityHorizonTest do
     AuthorityHorizonCore,
     ExecutionManifest
   }
+
   alias Arbor.Orchestrator.Dot.Parser
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.Graph.Node
@@ -292,6 +293,14 @@ defmodule Arbor.Orchestrator.CodingPlan.AuthorityHorizonTest do
                AuthorityHorizon.preflight(opts)
 
       assert diagnostic["code"] == "authority_horizon_missing"
+    end
+
+    test "malformed keyword-like input fails closed without raising" do
+      assert {:error, {:authority_horizon_diagnostic, diagnostic}} =
+               AuthorityHorizon.preflight([:malformed])
+
+      assert diagnostic["gate_id"] == "authority_horizon"
+      assert diagnostic["decision"] == "blocked"
     end
   end
 
