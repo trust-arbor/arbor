@@ -278,13 +278,25 @@ defmodule Arbor.Agent.Orchestration.DispatchReadiness do
           {:ok, pid} when is_pid(pid) ->
             if Process.alive?(pid), do: "running", else: "not_alive"
 
-          _ ->
+          {:error, :no_host} ->
             "absent"
+
+          {:error, _} ->
+            "absent"
+
+          :error ->
+            "absent"
+
+          nil ->
+            "absent"
+
+          _malformed ->
+            "error"
         end
       rescue
-        _ -> "absent"
+        _ -> "error"
       catch
-        _, _ -> "absent"
+        _, _ -> "error"
       end
 
     %{host_state: host_state}
@@ -386,9 +398,17 @@ defmodule Arbor.Agent.Orchestration.DispatchReadiness do
         case policy.build(template_name, data, build_opts) do
           {:ok, current} ->
             digests_match? = policy.digest(stored) == policy.digest(current)
+            closed_source? = layer in ["user", "shipped", "legacy_json"]
+
+            template_state =
+              cond do
+                digests_match? and closed_source? -> "current"
+                digests_match? -> "invalid"
+                true -> "drifted"
+              end
 
             %{
-              template_state: if(digests_match?, do: "current", else: "drifted"),
+              template_state: template_state,
               template_name: template_name,
               managed: true,
               stored_digest_present: is_binary(stored_digest),
@@ -440,16 +460,44 @@ defmodule Arbor.Agent.Orchestration.DispatchReadiness do
   end
 
   defp gather_task_control(deps) do
-    recovery_ready? =
-      try do
-        deps.task_store.recovery_ready?() == true
-      rescue
-        _ -> false
-      catch
-        _, _ -> false
-      end
+    try do
+      case deps.task_store.recovery_ready?() do
+        true ->
+          %{
+            recovery_ready?: true,
+            recovery_facts_ok?: true,
+            required_grants: @required_grants
+          }
 
-    %{recovery_ready?: recovery_ready?, required_grants: @required_grants}
+        false ->
+          %{
+            recovery_ready?: false,
+            recovery_facts_ok?: true,
+            required_grants: @required_grants
+          }
+
+        _malformed ->
+          %{
+            recovery_ready?: false,
+            recovery_facts_ok?: false,
+            required_grants: @required_grants
+          }
+      end
+    rescue
+      _ ->
+        %{
+          recovery_ready?: false,
+          recovery_facts_ok?: false,
+          required_grants: @required_grants
+        }
+    catch
+      _, _ ->
+        %{
+          recovery_ready?: false,
+          recovery_facts_ok?: false,
+          required_grants: @required_grants
+        }
+    end
   end
 
   defp gather_executor(deps, agent_id, task, caller_id, timeout) do
@@ -457,7 +505,7 @@ defmodule Arbor.Agent.Orchestration.DispatchReadiness do
     callback_timeout_ms = resolve_callback_timeout(deps)
 
     kind_result =
-      case task_kind(task) do
+      case task_kind(task, config) do
         {:ok, kind} -> {kind, config.task_executor(kind)}
         {:error, reason} -> {nil, {:error, reason}}
       end
@@ -510,6 +558,28 @@ defmodule Arbor.Agent.Orchestration.DispatchReadiness do
                 }
               }
 
+            {:error, :executor_callback_exception} ->
+              %{
+                kind: kind,
+                callback_present?: true,
+                projection: nil,
+                diagnostic: %{
+                  "code" => "executor_callback_exception",
+                  "message" => "executor readiness callback raised"
+                }
+              }
+
+            {:error, :executor_callback_exit} ->
+              %{
+                kind: kind,
+                callback_present?: true,
+                projection: nil,
+                diagnostic: %{
+                  "code" => "executor_callback_exit",
+                  "message" => "executor readiness callback exited"
+                }
+              }
+
             {:error, _} ->
               %{
                 kind: kind,
@@ -552,16 +622,27 @@ defmodule Arbor.Agent.Orchestration.DispatchReadiness do
 
   defp resolve_callback_timeout(_), do: Config.executor_callback_timeout_ms()
 
+  # Match TaskStore.call_executor_callback/3: supervised async_nolink, rescue
+  # inside the task, bounded yield, brutal kill on hang. Never link the caller.
   defp default_invoke_executor(module, agent_id, task, context, timeout_ms) do
+    supervisor = Arbor.Agent.Orchestration.TaskSupervisor
+
     task_ref =
-      Task.async(fn ->
-        module.project_dispatch_readiness(agent_id, task, context)
+      Task.Supervisor.async_nolink(supervisor, fn ->
+        try do
+          module.project_dispatch_readiness(agent_id, task, context)
+        rescue
+          _ -> {:error, :executor_callback_exception}
+        catch
+          :throw, _ -> {:error, :executor_callback_exception}
+          :exit, _ -> {:error, :executor_callback_exit}
+        end
       end)
 
     case Task.yield(task_ref, timeout_ms) || Task.shutdown(task_ref, :brutal_kill) do
       {:ok, result} -> result
       nil -> {:error, :executor_callback_timeout}
-      {:exit, _} -> {:error, :executor_callback_failed}
+      {:exit, _} -> {:error, :executor_callback_exit}
     end
   rescue
     _ -> {:error, :executor_callback_failed}
@@ -584,12 +665,14 @@ defmodule Arbor.Agent.Orchestration.DispatchReadiness do
     end
   end
 
-  defp task_kind(task) when is_map(task) do
+  # Use the injected Config collaborator on the test seam; production deps pin
+  # Arbor.Agent.Config via production_deps/0.
+  defp task_kind(task, config) when is_map(task) and is_atom(config) do
     kind = Map.get(task, "kind") || Map.get(task, :kind)
-    Config.normalize_kind(kind)
+    config.normalize_kind(kind)
   end
 
-  defp task_kind(_), do: {:error, :invalid_task_kind}
+  defp task_kind(_, _), do: {:error, :invalid_task_kind}
 
   defp require_exported(module, fun, arity) when is_atom(module) do
     if function_exported?(module, fun, arity) do
@@ -619,7 +702,18 @@ defmodule Arbor.Agent.Orchestration.DispatchReadiness do
 
   defp source_layer_from(_), do: nil
 
-  defp opt(opts, key) when is_list(opts), do: Keyword.get(opts, key)
-  defp opt(opts, key) when is_map(opts), do: Map.get(opts, key) || Map.get(opts, to_string(key))
+  defp opt(opts, key) when is_list(opts) and is_atom(key), do: Keyword.get(opts, key)
+
+  defp opt(opts, key) when is_map(opts) and is_atom(key) do
+    case Map.fetch(opts, key) do
+      {:ok, value} ->
+        value
+
+      :error ->
+        # Only convert the known atom option key — never arbitrary map keys.
+        Map.get(opts, Atom.to_string(key))
+    end
+  end
+
   defp opt(_, _), do: nil
 end
