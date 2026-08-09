@@ -148,6 +148,11 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   @max_owner_death_retry_limit 10
   @default_owner_death_retry_base_ms 1_000
   @max_owner_death_retry_base_ms 60_000
+  # Git worktree registration can be briefly unobservable immediately after
+  # `git worktree add`. Keep this aligned with detached-snapshot identity
+  # capture: retry the complete fail-closed predicate, never a partial result.
+  @initial_identity_capture_attempts 5
+  @initial_identity_capture_retry_ms 1
   # Automatic retained cleanup / marker-delete retries before dormant evidence.
   @default_retained_cleanup_retry_limit 8
   @validation_owner_cleanup_retry_initial_ms 50
@@ -6818,6 +6823,30 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     do: {:reply, {:ok, already_released_view(workspace_id)}, state}
 
   defp capture_retention_identity(lease) do
+    capture_retention_identity(lease, @initial_identity_capture_attempts)
+  end
+
+  defp capture_retention_identity(lease, attempts_left) do
+    case do_capture_retention_identity(lease) do
+      {:ok, _identity} = success ->
+        success
+
+      {:error, _reason} when attempts_left > 1 ->
+        Process.sleep(@initial_identity_capture_retry_ms)
+        capture_retention_identity(lease, attempts_left - 1)
+
+      {:error, reason} = error ->
+        Logger.warning(
+          "Initial workspace retention identity capture exhausted " <>
+            "workspace_id=#{inspect(Map.get(lease, :workspace_id))} " <>
+            "reason=#{inspect(reason)}"
+        )
+
+        error
+    end
+  end
+
+  defp do_capture_retention_identity(lease) do
     with {:ok, canonical_repo} <- canonical_existing_path(lease.repo_path),
          {:ok, canonical_worktree_path} <- canonical_existing_path(lease.worktree_path),
          :ok <- reject_primary_checkout_paths(canonical_repo, canonical_worktree_path),
