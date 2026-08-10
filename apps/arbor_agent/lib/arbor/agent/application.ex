@@ -4,6 +4,7 @@ defmodule Arbor.Agent.Application do
   use Application
 
   @task_control_recovery_store :arbor_agent_task_control_recovery
+  @template_authority_reconciliation_store :arbor_agent_template_authority_reconciliation
 
   @impl true
   def start(_type, _args) do
@@ -60,6 +61,23 @@ defmodule Arbor.Agent.Application do
              ack_mode: :backend,
              collection: "task_control_recovery"},
             id: :arbor_agent_task_control_recovery
+          ),
+          # Durable template-authority reconciliation operation records
+          # (Phase 4C C1B). One Record slot per target_agent_id, fenced on
+          # structured generation+revision. Must start before TaskStore so C2/C3
+          # startup seeding can read the outstanding inventory. write_mode: :sync
+          # + ack_mode: :backend only — never cache-only.
+          # reconciliation_backend!/0 fails closed unless the backend attests
+          # :node_restart.
+          Supervisor.child_spec(
+            {Arbor.Persistence.BufferedStore,
+             name: @template_authority_reconciliation_store,
+             backend: reconciliation_backend!(),
+             backend_opts: [repo: Arbor.Persistence.Repo],
+             write_mode: :sync,
+             ack_mode: :backend,
+             collection: "template_authority_reconciliation"},
+            id: :arbor_agent_template_authority_reconciliation
           ),
           Arbor.Agent.Orchestration.TaskStore,
           # Dynamic supervisors (Phase 3: three-loop architecture)
@@ -169,5 +187,49 @@ defmodule Arbor.Agent.Application do
                   "task-control recovery backend cannot attest durability: #{inspect(reason)}"
         end
     end
+  end
+
+  # Template-authority reconciliation operations protect authority: never start
+  # with cache-only/unbacked/non-node-restart storage. Same fail-closed
+  # attestation contract as recovery_backend!/0 — the backend module must
+  # attest :node_restart before the supervised BufferedStore is allowed to start.
+  #
+  # Startup errors are generic and redacted: they never inspect or interpolate
+  # backend classes, reasons, records, or exception text (mirrors the bounded
+  # redaction contract of Arbor.Agent.TemplateAuthorityReconciliationStore).
+  defp reconciliation_backend! do
+    backend =
+      Application.get_env(
+        :arbor_agent,
+        :template_authority_reconciliation_backend,
+        profile_backend()
+      )
+
+    case backend do
+      nil ->
+        raise ArgumentError, generic_reconciliation_startup_error()
+
+      backend ->
+        case Arbor.Persistence.durability_class(
+               @template_authority_reconciliation_store,
+               backend,
+               repo: Arbor.Persistence.Repo
+             ) do
+          {:ok, :node_restart} ->
+            backend
+
+          {:ok, _not_crash_durable} ->
+            raise ArgumentError, generic_reconciliation_startup_error()
+
+          {:error, _reason} ->
+            raise ArgumentError, generic_reconciliation_startup_error()
+        end
+    end
+  end
+
+  # Single constant message — no backend class, reason, record, or exception
+  # text is ever interpolated into a reconciliation-durability startup error.
+  defp generic_reconciliation_startup_error do
+    "template-authority reconciliation store requires an attested node_restart backend"
   end
 end
