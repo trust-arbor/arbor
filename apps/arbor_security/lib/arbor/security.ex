@@ -840,9 +840,11 @@ defmodule Arbor.Security do
   returns `{:error, :id_conflict}`; a different same-principal/resource
   capability returns `{:error, :resource_conflict}` and is never replaced.
 
-  Returns bounded status + the opaque capability id only. The audit event is
-  recorded exactly once per `:applied` grant; idempotent retries emit no
-  duplicate.
+  Returns bounded status + the opaque capability id only. A best-effort audit
+  event is emitted for observed `:applied` responses only; it is observability,
+  not a crash-atomic outbox, and may be lost if the process exits between the
+  durable admission and the emit. The Agent operation journal remains the C3
+  workflow recovery authority. Idempotent retries emit no duplicate.
   """
   @spec acknowledged_grant(keyword()) ::
           {:ok, :applied | :idempotent, String.t()}
@@ -869,9 +871,12 @@ defmodule Arbor.Security do
     :throw, _ -> {:error, :outcome_unknown}
   end
 
-  # Audit is best-effort and ISOLATED: an audit-emission failure can never
-  # relabel an already-applied mutation as unavailable or unknown. The store
-  # result is returned unchanged regardless of audit outcome.
+  # Audit is best-effort observability for OBSERVED :applied responses, ISOLATED
+  # from the mutation: an audit-emission failure can never relabel an
+  # already-applied mutation as unavailable or unknown, and the store result is
+  # returned unchanged regardless of audit outcome. This is NOT a crash-atomic
+  # outbox — an exit between durable admission and the emit loses the event, so
+  # the Agent operation journal (not this audit) is the C3 workflow authority.
   defp emit_acknowledged_grant_audit({:ok, :applied, _capability_id}, signed_cap) do
     Events.record_capability_granted(signed_cap)
     :ok
@@ -888,8 +893,9 @@ defmodule Arbor.Security do
 
   Authoritative absence is `{:ok, :idempotent, id}`; a durably-acknowledged
   deletion precedes live eviction and `{:ok, :applied, id}`. An ambiguous
-  persistence result is never reported as applied (`:outcome_unknown`). The
-  audit event is recorded exactly once per `:applied` revoke.
+  persistence result is never reported as applied (`:outcome_unknown`). A
+  best-effort audit event is emitted for observed `:applied` responses only; it
+  is observability, not a crash-atomic outbox (see `acknowledged_grant/1`).
   """
   @spec acknowledged_revoke(String.t()) ::
           {:ok, :applied | :idempotent, String.t()}
@@ -1011,6 +1017,12 @@ defmodule Arbor.Security do
            metadata: Keyword.get(opts, :metadata, %{})
          ) do
       {:ok, cap} ->
+        # Pin signed_at deterministically to the admitted granted_at BEFORE
+        # signing. signed_at is part of signing_payload/1, so pinning it to the
+        # already-canonical granted_at makes the signing payload byte-identical
+        # across delayed journal retries (identity-exact across wall-clock).
+        cap = %{cap | signed_at: cap.granted_at}
+
         case SystemAuthority.sign_capability(cap) do
           {:ok, signed_cap} -> {:ok, signed_cap}
           {:error, _reason} -> {:error, :capability_store_unavailable}

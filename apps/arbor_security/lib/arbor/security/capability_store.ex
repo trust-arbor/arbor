@@ -322,6 +322,8 @@ defmodule Arbor.Security.CapabilityStore do
         state = %{
           by_id: %{},
           by_principal: %{},
+          by_resource: %{},
+          pending_intents: %{},
           by_issuer: %{},
           by_parent: %{},
           by_usage: %{},
@@ -566,6 +568,7 @@ defmodule Arbor.Security.CapabilityStore do
       cap ->
         state =
           state
+          |> deindex_resource(cap)
           |> update_in([:by_id], &Map.delete(&1, capability_id))
           |> update_in([:by_principal, cap.principal_id], fn ids ->
             List.delete(ids || [], capability_id)
@@ -582,8 +585,15 @@ defmodule Arbor.Security.CapabilityStore do
   def handle_call({:revoke_all, principal_id}, _from, state) do
     cap_ids = Map.get(state.by_principal, principal_id, [])
     count = length(cap_ids)
+    revoked_caps = Enum.map(cap_ids, &Map.get(state.by_id, &1))
 
     Enum.each(cap_ids, &delete_persisted_capability/1)
+
+    state =
+      Enum.reduce(revoked_caps, state, fn
+        %Capability{} = cap, acc -> deindex_resource(acc, cap)
+        _nil_cap, acc -> acc
+      end)
 
     state =
       state
@@ -677,22 +687,36 @@ defmodule Arbor.Security.CapabilityStore do
   # ===========================================================================
   # Acknowledged exact mutation handlers (Phase 4C C3A).
   #
-  # Any rescue/exit/throw inside the body replies :outcome_unknown with the
-  # INCOMING state: the only irreversible effect is a durable admission, so an
-  # exit at or after admission cannot be confirmed and must fail closed. No
-  # uncommitted live mutation is retained; the durable mutation reconciles
-  # idempotently on retry.
+  # Acknowledged put pre-arms a bounded uncertainty intent, then runs the body
+  # against that armed state. Any rescue/exit/throw replies :outcome_unknown
+  # with the ARMED state (incoming + pending intent), not the raw incoming
+  # state, so a post-admission ambiguity retains the ledger entry. Durable
+  # admission is the only irreversible effect; uncommitted live mutations are
+  # not retained; finalize_acknowledged_put_intent/2 clears the exact-id
+  # intent on every definitive outcome and keeps it on :outcome_unknown.
+  # Retry reconciles idempotently from durable truth.
   # ===========================================================================
   @impl true
   def handle_call({:acknowledged_put, signed_cap}, _from, state) do
-    incoming = state
+    # Arm a bounded, fail-closed resource intent BEFORE any potentially
+    # ambiguous mutation. The intent is threaded as the rescue/catch fallback
+    # state so it survives an exit at or after a durable admission (where the
+    # only irreversible effect may have already committed). A single funnel
+    # (finalize_acknowledged_put_intent/2) clears it on every definitive
+    # outcome and retains it on :outcome_unknown.
+    case arm_admission_intent(state, signed_cap) do
+      {:ok, armed} ->
+        try do
+          do_acknowledged_put(signed_cap, armed)
+        rescue
+          _ -> {:reply, {:error, :outcome_unknown}, armed}
+        catch
+          _, _ -> {:reply, {:error, :outcome_unknown}, armed}
+        end
+        |> finalize_acknowledged_put_intent(signed_cap.id)
 
-    try do
-      do_acknowledged_put(signed_cap, state)
-    rescue
-      _ -> {:reply, {:error, :outcome_unknown}, incoming}
-    catch
-      _, _ -> {:reply, {:error, :outcome_unknown}, incoming}
+      {:error, :at_capacity} ->
+        {:reply, {:error, :quota_exceeded}, state}
     end
   end
 
@@ -986,10 +1010,15 @@ defmodule Arbor.Security.CapabilityStore do
       Enum.each(expired_ids, &delete_persisted_capability/1)
 
       state
+      |> remove_expired_from_resource_index(expired_entries)
       |> remove_expired_capabilities(expired_ids)
       |> remove_expired_from_principals(expired_ids)
       |> update_in([:stats, :total_expired], &(&1 + length(expired_ids)))
     end
+  end
+
+  defp remove_expired_from_resource_index(state, expired_entries) do
+    Enum.reduce(expired_entries, state, fn {_id, cap}, acc -> deindex_resource(acc, cap) end)
   end
 
   defp remove_expired_capabilities(state, expired_ids) do
@@ -1041,6 +1070,7 @@ defmodule Arbor.Security.CapabilityStore do
     state
     |> update_in([:by_id], &Map.delete(&1, cap_id))
     |> update_in([:by_principal, cap.principal_id], &List.delete(&1 || [], cap_id))
+    |> deindex_resource(cap)
     |> update_in([:by_usage], &Map.delete(&1, cap_id))
     |> deindex_by_issuer(cap)
     |> deindex_by_parent(cap)
@@ -1105,6 +1135,7 @@ defmodule Arbor.Security.CapabilityStore do
       nil -> [cap.id]
       ids -> [cap.id | ids]
     end)
+    |> index_resource(cap)
     |> index_by_issuer(cap)
     |> index_by_parent(cap)
     |> update_in([:stats, :total_granted], &(&1 + 1))
@@ -1166,9 +1197,11 @@ defmodule Arbor.Security.CapabilityStore do
   end
 
   # ===========================================================================
-  # Acknowledged mutation helpers (Phase 4C C3A). Bounded-log wrappers never
-  # log capability ids, metadata, signatures, backend records, or exception
-  # terms — only a bounded reason atom / op label.
+  # Acknowledged mutation helpers (Phase 4C C3A). Redacting persistence wrappers
+  # never surface capability ids, metadata, signatures, backend records, or
+  # exception terms in logs — only a bounded reason atom / op label. There is no
+  # durable audit log in this module (audit is best-effort, observed-applied
+  # only — see Arbor.Security.acknowledged_grant/1).
   # ===========================================================================
 
   defp do_acknowledged_put(signed_cap, state) do
@@ -1195,7 +1228,8 @@ defmodule Arbor.Security.CapabilityStore do
           # exact already-applied => idempotent classification
           ack_classify_exact_replay(state, stored, id)
         else
-          # mismatched durable occupant of this id (SC2)
+          # mismatched durable occupant of this id is never overwritten
+          # (id conflict).
           {:reply, {:error, :id_conflict}, state}
         end
 
@@ -1216,18 +1250,26 @@ defmodule Arbor.Security.CapabilityStore do
       :occupied ->
         {:reply, {:error, :resource_conflict}, state}
 
-      :unknown ->
-        {:reply, {:error, :outcome_unknown}, state}
-
       :vacant ->
         if live_cap != nil and grant_identity(live_cap) != grant_identity(stored) do
-          # Same-id live identity mismatch; fail closed and never overwrite it.
+          # Same-id live identity mismatch; fail closed and never overwrite it
+          # (id conflict).
           {:reply, {:error, :id_conflict}, state}
         else
           # Identity-exact live state or no live state: project idempotently.
           case project_capability_idempotent(state, stored) do
-            {:ok, state, _kind} -> {:reply, {:ok, :idempotent, id}, state}
-            {:error, :cannot_canonicalize} -> {:reply, {:error, :outcome_unknown}, state}
+            {:ok, state, :added} ->
+              # Durable-only convergence that newly projected into live: emit
+              # the restricted cluster-sync signal exactly once.
+              emit_capability_signal(:capability_granted, stored)
+              {:reply, {:ok, :idempotent, id}, state}
+
+            {:ok, state, :already_present} ->
+              # True replay (live already identity-exact): no duplicate signal.
+              {:reply, {:ok, :idempotent, id}, state}
+
+            {:error, :cannot_canonicalize} ->
+              {:reply, {:error, :outcome_unknown}, state}
           end
         end
     end
@@ -1236,7 +1278,7 @@ defmodule Arbor.Security.CapabilityStore do
   defp ack_put_durable_absent(state, signed_cap, id, ident, live_cap) do
     cond do
       not is_nil(live_cap) and grant_identity(live_cap) != ident ->
-        # mismatched live occupant under our id (SC2)
+        # mismatched live occupant under our id is never overwritten (id conflict).
         {:reply, {:error, :id_conflict}, state}
 
       not is_nil(live_cap) and grant_identity(live_cap) == ident ->
@@ -1254,7 +1296,6 @@ defmodule Arbor.Security.CapabilityStore do
   defp ack_put_durable_repair(state, signed_cap, id, ident) do
     case same_resource_occupancy(state, signed_cap) do
       :occupied -> {:reply, {:error, :resource_conflict}, state}
-      :unknown -> {:reply, {:error, :outcome_unknown}, state}
       :vacant -> ack_admit_via_cas(state, signed_cap, id, ident, :idempotent)
     end
   end
@@ -1288,32 +1329,38 @@ defmodule Arbor.Security.CapabilityStore do
 
   defp ack_project_committed(state, verified, id, status) do
     case project_capability_idempotent(state, verified) do
-      {:ok, state, _kind} ->
-        ack_emit_committed(state, verified, id, status)
+      {:ok, state, kind} ->
+        ack_emit_committed(state, verified, id, status, kind)
 
       {:error, :cannot_canonicalize} ->
         {:reply, {:error, :outcome_unknown}, state}
     end
   end
 
-  defp ack_emit_committed(state, verified, id, :applied) do
+  defp ack_emit_committed(state, verified, id, :applied, _kind) do
     state = update_in(state, [:stats, :total_granted], &(&1 + 1))
     emit_capability_signal(:capability_granted, verified)
     {:reply, {:ok, :applied, id}, state}
   end
 
-  defp ack_emit_committed(state, _verified, id, :idempotent) do
+  defp ack_emit_committed(state, verified, id, :idempotent, :added) do
+    # Durable-only convergence that newly projected into live: emit the
+    # restricted cluster-sync signal exactly once.
+    emit_capability_signal(:capability_granted, verified)
+    {:reply, {:ok, :idempotent, id}, state}
+  end
+
+  defp ack_emit_committed(state, _verified, id, :idempotent, :already_present) do
+    # True replay (live already identity-exact): no signal, no duplicate.
     {:reply, {:ok, :idempotent, id}, state}
   end
 
   defp ack_put_fresh_grant(state, signed_cap, id, ident) do
     case same_resource_occupancy(state, signed_cap) do
       :occupied ->
-        # SC3: never replace a different same-principal/resource cap.
+        # Never replace a different same-principal/resource capability
+        # (resource conflict).
         {:reply, {:error, :resource_conflict}, state}
-
-      :unknown ->
-        {:reply, {:error, :outcome_unknown}, state}
 
       :vacant ->
         case check_quotas(state, signed_cap) do
@@ -1360,9 +1407,8 @@ defmodule Arbor.Security.CapabilityStore do
   defp do_acknowledged_revoke(capability_id, state) do
     case acknowledged_authoritative_get(capability_id) do
       {:error, :not_found} ->
-        # authoritative absence = idempotent success (SC5)
-        state = ensure_ack_evicted(state, capability_id)
-        {:reply, {:ok, :idempotent, capability_id}, state}
+        # authoritative absence = idempotent success
+        ack_idempotent_revoke_reply(state, capability_id)
 
       {:ok, record} ->
         case acknowledged_cas_delete(capability_id, record) do
@@ -1378,7 +1424,7 @@ defmodule Arbor.Security.CapabilityStore do
             classify_revoke_conflict(state, capability_id)
 
           {:error, _reason} ->
-            # ambiguous persistence never reported as applied (SC5)
+            # ambiguous persistence never reported as applied
             {:reply, {:error, :outcome_unknown}, state}
         end
 
@@ -1393,8 +1439,7 @@ defmodule Arbor.Security.CapabilityStore do
   defp classify_revoke_conflict(state, capability_id) do
     case acknowledged_authoritative_get(capability_id) do
       {:error, :not_found} ->
-        state = ensure_ack_evicted(state, capability_id)
-        {:reply, {:ok, :idempotent, capability_id}, state}
+        ack_idempotent_revoke_reply(state, capability_id)
 
       {:ok, _record} ->
         {:reply, {:error, :outcome_unknown}, state}
@@ -1404,17 +1449,40 @@ defmodule Arbor.Security.CapabilityStore do
     end
   end
 
-  # Durable-absent revoke evicts the exact id from EVERY projection index
-  # WITHOUT stats, cluster signal, or audit (the durable layer is authoritative
-  # and the revoke is idempotent absence, not an applied delete). The purge is
-  # UNCONDITIONAL: even when by_id is already absent, dangling refs in
-  # by_principal/by_issuer/by_parent/by_usage must not survive. This never
-  # emits side effects (unlike revoke_capability_ids/2, which the applied path
-  # still uses for stat+signal).
+  # Idempotent revoke (authoritative absence): unconditionally purge the exact
+  # id from EVERY projection index so dangling refs cannot survive. Emits the
+  # restricted cluster-sync convergence signal ONLY when it newly evicts live
+  # state; a true replay (already absent) emits none and updates no stat (the
+  # durable layer is authoritative; the applied CAS-delete path keeps stat+
+  # signal via revoke_capability_ids/2).
+  defp ack_idempotent_revoke_reply(state, capability_id) do
+    {state, newly_evicted?, principal_id} = ensure_ack_evicted(state, capability_id)
+
+    if newly_evicted? do
+      emit_revocation_signal(:capability_revoked, [capability_id], principal_id)
+    end
+
+    {:reply, {:ok, :idempotent, capability_id}, state}
+  end
+
+  # Purge the exact id from every projection index, returning the updated
+  # state, whether live state was newly evicted, and the evicted cap's
+  # principal (nil if already absent). The purge is UNCONDITIONAL: even when
+  # by_id is already absent, dangling refs in by_principal/by_resource/
+  # by_issuer/by_parent/by_usage must not survive.
   defp ensure_ack_evicted(state, capability_id) do
-    state
-    |> remove_dangling_refs_for_id(capability_id)
-    |> update_in([:by_id], &Map.delete(&1, capability_id))
+    {principal_id, newly_evicted?} =
+      case Map.get(state.by_id, capability_id) do
+        %Capability{principal_id: p} when is_binary(p) -> {p, true}
+        _ -> {nil, false}
+      end
+
+    state =
+      state
+      |> remove_dangling_refs_for_id(capability_id)
+      |> update_in([:by_id], &Map.delete(&1, capability_id))
+
+    {state, newly_evicted?, principal_id}
   end
 
   defp ack_revoke_principal(state, capability_id, record) do
@@ -1445,6 +1513,111 @@ defmodule Arbor.Security.CapabilityStore do
   # stable authority; deterministic across journal retries.
   defp grant_identity(%Capability{} = cap), do: Capability.signing_payload(cap)
 
+  # ---------------------------------------------------------------------------
+  # Bounded uncertainty ledger (pending_intents).
+  #
+  # Arm the exact resource intent before any potentially ambiguous mutation.
+  # Always fail closed at the configured per-principal and global ceilings —
+  # even when ordinary quota_enforcement is disabled — so retained
+  # :outcome_unknown intents cannot grow without bound. When ordinary quotas
+  # are enabled, live+pending share those ceilings; when disabled, only the
+  # pending ledger itself is counted (live ordinary put semantics stay open).
+  # Idempotent per cap.id so an exact retry re-arms without growing the ledger.
+  # Never walks the full live by_id map for per-principal admission: live
+  # counts use the bounded by_principal list + map_size(by_id) only.
+  # ---------------------------------------------------------------------------
+  defp arm_admission_intent(state, %Capability{} = cap) do
+    with :ok <- uncertainty_within_bounds?(state, cap) do
+      {:ok, put_intent(state, cap)}
+    end
+  end
+
+  defp put_intent(state, %Capability{} = cap) do
+    %{state | pending_intents: Map.put(state.pending_intents, cap.id, resource_key(cap))}
+  end
+
+  defp uncertainty_within_bounds?(state, %Capability{} = cap) do
+    if Config.quota_enforcement_enabled?() do
+      case intent_within_per_agent?(state, cap) do
+        :ok -> intent_within_global?(state, cap)
+        error -> error
+      end
+    else
+      case pending_within_per_agent?(state, cap) do
+        :ok -> pending_within_global?(state, cap)
+        error -> error
+      end
+    end
+  end
+
+  # Live count via bounded by_principal list (same source ordinary per-agent
+  # quota uses) + pending ledger for this principal. Never Enum over by_id.
+  # Exclude cap.id so re-arming/replay does not double-count. +1 for self.
+  defp intent_within_per_agent?(state, %Capability{principal_id: p, id: cap_id}) do
+    live = live_principal_count(state, p, cap_id)
+    pending = pending_principal_count(state, p, cap_id)
+
+    if live + pending + 1 > Config.max_capabilities_per_agent(),
+      do: {:error, :at_capacity},
+      else: :ok
+  end
+
+  defp intent_within_global?(state, %Capability{id: cap_id}) do
+    live = map_size(state.by_id) - if(Map.has_key?(state.by_id, cap_id), do: 1, else: 0)
+    pending = pending_global_count(state, cap_id)
+
+    if live + pending + 1 > Config.max_global_capabilities(),
+      do: {:error, :at_capacity},
+      else: :ok
+  end
+
+  # Ordinary quotas disabled: bound pending uncertainty alone (no live quota).
+  defp pending_within_per_agent?(state, %Capability{principal_id: p, id: cap_id}) do
+    pending = pending_principal_count(state, p, cap_id)
+
+    if pending + 1 > Config.max_capabilities_per_agent(),
+      do: {:error, :at_capacity},
+      else: :ok
+  end
+
+  defp pending_within_global?(state, %Capability{id: cap_id}) do
+    pending = pending_global_count(state, cap_id)
+
+    if pending + 1 > Config.max_global_capabilities(),
+      do: {:error, :at_capacity},
+      else: :ok
+  end
+
+  defp live_principal_count(state, principal_id, exclude_id) do
+    ids = Map.get(state.by_principal, principal_id, [])
+    n = length(ids)
+    if exclude_id in ids, do: n - 1, else: n
+  end
+
+  defp pending_principal_count(state, principal_id, exclude_id) do
+    Enum.count(state.pending_intents, fn
+      {^exclude_id, _} -> false
+      {_, {^principal_id, _}} -> true
+      _ -> false
+    end)
+  end
+
+  defp pending_global_count(state, exclude_id) do
+    map_size(state.pending_intents) -
+      if(Map.has_key?(state.pending_intents, exclude_id), do: 1, else: 0)
+  end
+
+  defp clear_intent(state, id),
+    do: %{state | pending_intents: Map.delete(state.pending_intents, id)}
+
+  # Single funnel: clear the exact-id intent on every DEFINITIVE outcome;
+  # retain it on :outcome_unknown (a durable admission may have committed).
+  defp finalize_acknowledged_put_intent({:reply, {:error, :outcome_unknown}, state}, _id),
+    do: {:reply, {:error, :outcome_unknown}, state}
+
+  defp finalize_acknowledged_put_intent({:reply, result, state}, id),
+    do: {:reply, result, clear_intent(state, id)}
+
   # Decode + verify an authoritative record for an exact id. Reuses the
   # battle-tested restore validators; any failure/exit => :unverifiable.
   defp decode_and_verify_capability(record, expected_id) do
@@ -1468,100 +1641,89 @@ defmodule Arbor.Security.CapabilityStore do
     :throw, _ -> {:error, :verification_unavailable}
   end
 
-  # Conflict detection reads both the live by_id projection and the bounded
-  # authoritative inventory. The durable scan is required after an ambiguous
-  # post-admission outcome: the record may be committed while this GenServer
-  # intentionally retained its incoming live state. by_principal is never an
-  # authority source because it may be stale.
+  # Same-resource conflict detection:
+  #   - Live: O(1) Map.get on the canonical by_resource index (derived only from
+  #     live/restored by_id projection; never from by_principal).
+  #   - Uncertainty: O(|pending_intents|) scan over the in-memory ledger, which
+  #     is itself bounded by the configured per-principal/global ceilings — not
+  #     asymptotic O(1). Do not claim pure O(1) for the combined check.
+  # Never scans the full live by_id map or the authoritative durable inventory
+  # per grant. Post-admission ambiguity (CAS committed while this GenServer
+  # retained its incoming live state) is captured by pending_intents instead of
+  # a durable scan. by_principal is never an authority source because it may be
+  # stale; by_resource is the single live authority and is maintained on every
+  # mutation path.
   defp same_resource_occupancy(state, %Capability{} = cap) do
-    if live_same_resource_occupied?(state, cap) do
-      :occupied
-    else
-      authoritative_same_resource_occupancy(cap)
+    if resource_occupied_by_other?(state, cap), do: :occupied, else: :vacant
+  end
+
+  # The {principal_id, canonical_resource(resource_uri)} key shared by the
+  # canonical index and the uncertainty ledger.
+  defp resource_key(%Capability{principal_id: principal_id, resource_uri: resource_uri}) do
+    {principal_id, canonical_resource(resource_uri)}
+  end
+
+  defp index_resource(state, %Capability{} = cap) do
+    key = resource_key(cap)
+
+    %{
+      state
+      | by_resource:
+          Map.update(state.by_resource, key, MapSet.new([cap.id]), &MapSet.put(&1, cap.id))
+    }
+  end
+
+  defp deindex_resource(state, %Capability{} = cap) do
+    key = resource_key(cap)
+    %{state | by_resource: remove_id_from_resource_index(state.by_resource, key, cap.id)}
+  end
+
+  # Bounded sweep removing an id from any by_resource bucket (used only by the
+  # dangling-ref purge path where the cap may no longer be in by_id). Bounded by
+  # map_size(by_resource) (<= max_global capabilities).
+  defp deindex_resource_by_id(by_resource, id) do
+    by_resource
+    |> Map.new(fn {key, ids} -> {key, MapSet.delete(ids, id)} end)
+    |> drop_empty_resource_buckets()
+  end
+
+  defp remove_id_from_resource_index(by_resource, key, id) do
+    case Map.get(by_resource, key) do
+      nil ->
+        by_resource
+
+      ids ->
+        by_resource |> Map.put(key, MapSet.delete(ids, id)) |> drop_empty_resource_buckets()
     end
   end
 
-  defp live_same_resource_occupied?(state, %Capability{} = cap) do
-    target = canonical_resource(cap.resource_uri)
-
-    Enum.any?(state.by_id, fn
-      {id, %Capability{principal_id: principal_id, resource_uri: other}}
-      when id != cap.id ->
-        principal_id == cap.principal_id and canonical_resource(other) == target
-
-      _other ->
-        false
-    end)
+  defp drop_empty_resource_buckets(by_resource) do
+    Map.reject(by_resource, fn {_key, ids} -> MapSet.size(ids) == 0 end)
   end
 
-  defp authoritative_same_resource_occupancy(%Capability{} = cap) do
-    case acknowledged_authoritative_entries() do
-      {:ok, entries} -> scan_authoritative_resource_occupancy(entries, cap)
-      {:error, _reason} -> :unknown
-    end
-  end
+  # Occupied iff another id (live or pending) for this principal+resource
+  # exists. Live half is O(1) by_resource lookup; pending half is a
+  # quota-bounded O(|pending_intents|) scan. The exact cap.id is always
+  # excluded so an exact retry reobserves and converges instead of conflicting
+  # with itself.
+  defp resource_occupied_by_other?(state, %Capability{} = cap) do
+    key = resource_key(cap)
+    cap_id = cap.id
 
-  defp scan_authoritative_resource_occupancy([], _cap), do: :vacant
+    live_other? =
+      state.by_resource
+      |> Map.get(key, MapSet.new())
+      |> MapSet.delete(cap_id)
+      |> MapSet.size() > 0
 
-  defp scan_authoritative_resource_occupancy([{id, _record} | rest], %Capability{id: id} = cap),
-    do: scan_authoritative_resource_occupancy(rest, cap)
+    pending_other? =
+      Enum.any?(state.pending_intents, fn
+        {^cap_id, _} -> false
+        {_id, {p, r}} when p == elem(key, 0) and r == elem(key, 1) -> true
+        _other -> false
+      end)
 
-  defp scan_authoritative_resource_occupancy([{id, record} | rest], %Capability{} = cap)
-       when is_binary(id) do
-    case authoritative_principal_resource(record, id) do
-      {:ok, principal_id, resource_uri} ->
-        if principal_id == cap.principal_id and
-             canonical_resource(resource_uri) == canonical_resource(cap.resource_uri) do
-          :occupied
-        else
-          scan_authoritative_resource_occupancy(rest, cap)
-        end
-
-      {:error, _reason} ->
-        :unknown
-    end
-  end
-
-  defp scan_authoritative_resource_occupancy(_invalid, _cap), do: :unknown
-
-  defp authoritative_entries_from_keys(ids), do: authoritative_entries_from_keys(ids, [])
-
-  defp authoritative_entries_from_keys([], acc), do: {:ok, Enum.reverse(acc)}
-
-  defp authoritative_entries_from_keys([id | rest], acc) when is_binary(id) do
-    case acknowledged_authoritative_get(id) do
-      {:ok, record} ->
-        authoritative_entries_from_keys(rest, [{id, record} | acc])
-
-      # A concurrent delete after the authoritative inventory was read leaves
-      # no occupant and may be skipped. Other read ambiguity fails closed.
-      {:error, :not_found} ->
-        authoritative_entries_from_keys(rest, acc)
-
-      {:error, _reason} ->
-        {:error, :acknowledged_read_failed}
-    end
-  end
-
-  defp authoritative_entries_from_keys(_invalid, _acc),
-    do: {:error, :acknowledged_read_failed}
-
-  defp authoritative_principal_resource(record, expected_id) do
-    with {:ok, data} <- extract_capability_payload(record),
-         ^expected_id <- Map.get(data, "id"),
-         principal_id when is_binary(principal_id) and principal_id != "" <-
-           Map.get(data, "principal_id"),
-         resource_uri when is_binary(resource_uri) and resource_uri != "" <-
-           Map.get(data, "resource_uri"),
-         {:ok, _parsed} <- CapabilityUri.parse(resource_uri) do
-      {:ok, principal_id, resource_uri}
-    else
-      _ -> {:error, :invalid_authoritative_record}
-    end
-  rescue
-    _ -> {:error, :invalid_authoritative_record}
-  catch
-    _, _ -> {:error, :invalid_authoritative_record}
+    live_other? or pending_other?
   end
 
   # Canonicalize a capability resource URI for same-resource comparison so
@@ -1627,12 +1789,14 @@ defmodule Arbor.Security.CapabilityStore do
       end
 
     %{state | by_principal: by_principal, by_issuer: by_issuer, by_parent: by_parent}
+    |> index_resource(cap)
   end
 
   defp remove_dangling_refs_for_id(state, id) do
     %{
       state
       | by_principal: purge_id_from_index_map(state.by_principal, id),
+        by_resource: deindex_resource_by_id(state.by_resource, id),
         by_issuer: purge_id_from_index_map(state.by_issuer, id),
         by_parent: purge_id_from_index_map(state.by_parent, id),
         by_usage: Map.delete(state.by_usage, id)
@@ -1659,6 +1823,7 @@ defmodule Arbor.Security.CapabilityStore do
       end
 
     %{state | by_principal: by_principal, by_issuer: by_issuer, by_parent: by_parent}
+    |> index_resource(cap)
   end
 
   defp prepend_id_once(map, key, id) do
@@ -1675,48 +1840,10 @@ defmodule Arbor.Security.CapabilityStore do
     end)
   end
 
-  # Bounded-log persistence wrappers (never log id/metadata/signature/record).
+  # Redacting authoritative-read wrappers (never surface id/metadata/signature/record).
   defp acknowledged_authoritative_get(capability_id) do
     if Process.whereis(@cap_store) do
       apply(@buffered_store, :authoritative_get, [capability_id, [name: @cap_store]])
-    else
-      {:error, :acknowledged_read_failed}
-    end
-  rescue
-    _ -> {:error, :acknowledged_read_failed}
-  catch
-    _, _ -> {:error, :acknowledged_read_failed}
-  end
-
-  defp acknowledged_authoritative_entries do
-    if Process.whereis(@cap_store) do
-      case apply(@buffered_store, :authoritative_entries, [[name: @cap_store]]) do
-        {:error, :unsupported} ->
-          with {:ok, ids} <- acknowledged_authoritative_list() do
-            authoritative_entries_from_keys(ids)
-          end
-
-        {:ok, entries} when is_list(entries) ->
-          {:ok, entries}
-
-        _other ->
-          {:error, :acknowledged_read_failed}
-      end
-    else
-      {:error, :acknowledged_read_failed}
-    end
-  rescue
-    _ -> {:error, :acknowledged_read_failed}
-  catch
-    _, _ -> {:error, :acknowledged_read_failed}
-  end
-
-  defp acknowledged_authoritative_list do
-    if Process.whereis(@cap_store) do
-      case apply(@buffered_store, :authoritative_list, [[name: @cap_store]]) do
-        {:ok, ids} when is_list(ids) -> {:ok, ids}
-        _other -> {:error, :acknowledged_read_failed}
-      end
     else
       {:error, :acknowledged_read_failed}
     end
@@ -1863,6 +1990,7 @@ defmodule Arbor.Security.CapabilityStore do
     state
     |> put_in([:by_id, cap.id], cap)
     |> put_in([:by_principal, cap.principal_id], updated_ids)
+    |> index_resource(cap)
     |> index_by_issuer(cap)
     |> index_by_parent(cap)
   end
@@ -2625,6 +2753,8 @@ defmodule Arbor.Security.CapabilityStore do
     by_id = Map.new(ordered, fn cap -> {cap.id, cap} end)
     by_principal = restore_index_by(ordered, & &1.principal_id)
 
+    by_resource = build_restore_resource_index(ordered)
+
     by_issuer =
       ordered
       |> Enum.reject(fn cap -> is_nil(cap.issuer_id) end)
@@ -2641,6 +2771,7 @@ defmodule Arbor.Security.CapabilityStore do
       state
       | by_id: by_id,
         by_principal: by_principal,
+        by_resource: by_resource,
         by_issuer: by_issuer,
         by_parent: by_parent,
         stats: Map.merge(state.stats, restore_stats)
@@ -2657,6 +2788,17 @@ defmodule Arbor.Security.CapabilityStore do
         |> Enum.map(& &1.id)
 
       {key, ids}
+    end)
+  end
+
+  # Canonical live principal/resource index, rebuilt from the restored
+  # authoritative projection. Derived ONLY from the restored winners (mirrors
+  # by_id), never from by_principal, so a stale by_principal cannot hide a
+  # same-resource conflict. pending_intents is in-memory only and stays empty
+  # after restart (occupancy is rebuilt from the complete restored projection).
+  defp build_restore_resource_index(ordered) do
+    Enum.reduce(ordered, %{}, fn cap, acc ->
+      Map.update(acc, resource_key(cap), MapSet.new([cap.id]), &MapSet.put(&1, cap.id))
     end)
   end
 end
