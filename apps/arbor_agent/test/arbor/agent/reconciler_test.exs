@@ -36,6 +36,27 @@ defmodule Arbor.Agent.ReconcilerTest do
     def init(opts), do: {:ok, Map.new(opts)}
   end
 
+  # Minimal TaskStore double for the G1 test: admits every target (unfenced) so
+  # a :start intent passes the pre-resume fence gate and is applied/returned.
+  # The real TaskStore is not started in the test env (start_children: false), so
+  # a fence-unaware server would suppress every start and return no intent.
+  defmodule AdmitTaskStore do
+    @moduledoc false
+    use GenServer
+
+    def start_link(opts),
+      do: GenServer.start_link(__MODULE__, opts, name: Keyword.fetch!(opts, :name))
+
+    @impl true
+    def init(_opts), do: {:ok, %{}}
+
+    @impl true
+    def handle_call({:target_fenced?, _agent_id}, _from, state), do: {:reply, {:ok, false}, state}
+
+    @impl true
+    def handle_call(_other, _from, state), do: {:reply, {:error, :unknown}, state}
+  end
+
   setup do
     # Identity Registry — required for identity_present?/1 to return real status.
     registry_started? =
@@ -145,7 +166,7 @@ defmodule Arbor.Agent.ReconcilerTest do
 
   describe "G1 — start desired-but-absent auto_start agent" do
     test "produces a :start intent for an auto_start profile with no live process",
-         %{server: server} do
+         _context do
       # An auto_start profile whose agent_id is NOT in the live registry.
       agent_id = "reconciler-g1-#{System.unique_integer([:positive])}"
 
@@ -169,12 +190,27 @@ defmodule Arbor.Agent.ReconcilerTest do
         end
       end)
 
+      # reconcile_now/1 returns APPLIED intents only. The real TaskStore is not
+      # started here, so a fence-unaware server would suppress the start; an
+      # admitting TaskStore double lets the :start pass the pre-resume gate.
+      uniq = System.unique_integer([:positive])
+
+      ts = start_supervised!({AdmitTaskStore, name: :"g1_ts_#{uniq}"}, id: :"g1_ts_id_#{uniq}")
+
+      server =
+        start_supervised!(
+          {Reconciler,
+           name: :"g1_reconciler_#{uniq}", enabled: false, g1_policy: :start, task_store: ts},
+          id: :"g1_reconciler_id_#{uniq}"
+        )
+
       intents = Reconciler.reconcile_now(server)
 
-      # We assert the reconcile pass PRODUCES the :start intent. We do not assert a
-      # real process starts: the full resume/start path needs orchestrator + memory
-      # infrastructure that is not booted in the isolated arbor_agent test env
-      # (the shell's Manager.resume_agent call is best-effort and wrapped).
+      # We assert the reconcile pass ADMITS + APPLIES the :start intent (so it is
+      # returned). We do not assert a real process starts: the full resume/start
+      # path needs orchestrator + memory infrastructure not booted here (resume is
+      # best-effort and wrapped), but the intent IS returned because the fence
+      # admitted it.
       mine = intents_for(intents, agent_id)
       assert [%{action: :start, reason: :desired_running_but_absent}] = mine
     end

@@ -22,7 +22,14 @@ defmodule Arbor.Agent.Registry do
 
   require Logger
 
+  alias Arbor.Agent.RuntimeQuiescenceCore
+
   @table :arbor_agent_registry
+  # Test-build-only raw-source seam consumed by observe_target/1 (see lookup_local_entry /
+  # pg_raw_members). In a prod/dev build this is false and observe_target/1 always reads
+  # the real global sources; the seam is unavailable in production and is not
+  # caller-selectable via the future public reconciliation facade (Process.put by tests).
+  @test_build Mix.env() == :test
 
   @type agent_entry :: %{
           agent_id: String.t(),
@@ -183,6 +190,152 @@ defmodule Arbor.Agent.Registry do
     end
   end
 
+  @doc """
+  Exact-target runtime ownership observation carrying the confirmed local owner
+  pid (Phase 4C C2B).
+
+  This is the observation the quiescence shell binds the stop side effect to:
+  `{:ok, pid}` is returned ONLY for a confirmed local owner (one live local
+  `:pg` member exactly equal to the local ETS entry). Every other outcome is a
+  typed non-success. Error results carry no pid/exception/backend detail (only
+  the success result carries the pid, which is required to stop the exact owner).
+
+  For the bare-atom public observation use `observe_target/1`.
+  """
+  @spec observe_target_owner(String.t()) ::
+          {:ok, pid()}
+          | {:error, :absent | :remote_owner | :ambiguous_ownership | :observation_unavailable}
+  def observe_target_owner(agent_id) when is_binary(agent_id) do
+    local_fact = observe_local_fact(agent_id)
+    pg_fact = observe_pg_fact(agent_id)
+    class = RuntimeQuiescenceCore.classify_ownership(local_fact, pg_fact)
+    decorate_owner(class, local_fact)
+  end
+
+  @doc """
+  Error-preserving exact-target runtime ownership observation (bare atoms).
+
+  Distinguishes confirmed absence, one exact local owner, one remote owner,
+  duplicate or inconsistent ownership, and observation unavailability — WITHOUT
+  treating any source failure as absence. Reads the local ETS registry entry and
+  the exact `:pg` group directly (not via the GenServer), so it does not serialize
+  through the registry mailbox.
+
+  A present-but-remote/dead/malformed local ETS entry yields
+  `:ambiguous_ownership` or `:observation_unavailable`, never `:absent`. Absence
+  requires positive empty observations from BOTH sources.
+
+  Results are bare atoms only (no node/PID/exception/backend details). This is
+  NOT `list_cluster/0`/`whereis_cluster/1` (whose pg/RPC failure paths collapse
+  uncertainty) and does not alter them.
+  """
+  @spec observe_target(String.t()) ::
+          {:ok, :absent}
+          | {:ok, :local_owner}
+          | {:ok, :remote_owner}
+          | {:error, :ambiguous_ownership}
+          | {:error, :observation_unavailable}
+  def observe_target(agent_id) when is_binary(agent_id) do
+    case observe_target_owner(agent_id) do
+      {:ok, _pid} -> {:ok, :local_owner}
+      {:error, :absent} -> {:ok, :absent}
+      {:error, :remote_owner} -> {:ok, :remote_owner}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc """
+  Atomically remove the registry entry for `agent_id` ONLY IF its recorded owner
+  pid exactly equals `observed_pid` (Phase 4C C2B exact-owner compare-delete).
+
+  A single atomic `:ets.select_delete` removes `{agent_id, %{pid: ^observed_pid}}`
+  — never a lookup followed by delete, so a concurrent re-registration pointing at a
+  different pid cannot be deleted out from under a replacement owner.
+
+  Returns `:ok` when the exact-owner row was removed, `{:error, :owner_replaced}`
+  when the row is absent or its `:pid` no longer equals `observed_pid`, and
+  `{:error, :observation_unavailable}` when the registry table is gone. A
+  malformed (non-map / non-pid) row fails the guard and is treated as
+  `:owner_replaced` (fail closed). `observe_target/1` and `observe_target_owner/1`
+  error distinctions are unchanged.
+  """
+  @spec remove_owner_if_match(String.t(), pid()) ::
+          :ok | {:error, :owner_replaced | :observation_unavailable}
+  def remove_owner_if_match(agent_id, observed_pid)
+      when is_binary(agent_id) and is_pid(observed_pid) do
+    # Bind the entry map to $1, then guard that its :pid field equals the observed
+    # owner pid. select_delete is atomic: only a row still owned by the exact
+    # observed pid is removed. map_get/2 is a legal match-spec guard BIF.
+    spec = [{{agent_id, :"$1"}, [{:==, {:map_get, :pid, :"$1"}, observed_pid}], [true]}]
+
+    case :ets.select_delete(@table, spec) do
+      1 -> :ok
+      _ -> {:error, :owner_replaced}
+    end
+  rescue
+    ArgumentError -> {:error, :observation_unavailable}
+  catch
+    :error, :badarg -> {:error, :observation_unavailable}
+  end
+
+  @doc """
+  Strict variant of `list/0` for security-sensitive consumers.
+
+  Returns `{:error, :observation_unavailable}` when the registry ETS table is not
+  present, instead of the fail-open `{:ok, []}` that `list/0` returns. Existing
+  `list/0`/`lookup/1`/`whereis/1` behavior is unchanged.
+  """
+  @spec list_strict() :: {:ok, [agent_entry()]} | {:error, :observation_unavailable}
+  def list_strict do
+    case :ets.whereis(@table) do
+      :undefined ->
+        {:error, :observation_unavailable}
+
+      _ ->
+        scan_strict()
+    end
+  rescue
+    ArgumentError -> {:error, :observation_unavailable}
+  catch
+    :error, :badarg -> {:error, :observation_unavailable}
+  end
+
+  # Validates row/entry/local-pid shape. A malformed row/entry, a missing/non-pid
+  # :pid, a missing :agent_id, or a remote pid in the LOCAL registry makes the
+  # whole snapshot :observation_unavailable (fail closed). Process.alive?/1 runs
+  # ONLY on a pid already proven local; a dead local entry is skipped (consistent
+  # with list/0). KeyError / remote Process.alive? can never escape.
+  defp scan_strict do
+    case reduce_strict_rows(:ets.tab2list(@table), []) do
+      :bad -> {:error, :observation_unavailable}
+      entries -> {:ok, entries}
+    end
+  end
+
+  defp reduce_strict_rows([], acc), do: Enum.reverse(acc)
+
+  defp reduce_strict_rows([row | rest], acc) do
+    case classify_strict_row(row) do
+      {:ok, entry} -> reduce_strict_rows(rest, [entry | acc])
+      :skip -> reduce_strict_rows(rest, acc)
+      :bad -> :bad
+    end
+  end
+
+  # The ETS key MUST equal entry.agent_id — a row whose key was overwritten
+  # with a mismatched entry (e.g. a stale/corrupted row) is rejected (:bad),
+  # never treated as a valid live entry.
+  defp classify_strict_row({id, %{pid: pid, agent_id: aid} = entry})
+       when is_binary(id) and is_pid(pid) and is_binary(aid) and id == aid do
+    cond do
+      node(pid) != node() -> :bad
+      not Process.alive?(pid) -> :skip
+      true -> {:ok, entry}
+    end
+  end
+
+  defp classify_strict_row(_), do: :bad
+
   # ============================================================================
   # GenServer Callbacks
   # ============================================================================
@@ -292,6 +445,141 @@ defmodule Arbor.Agent.Registry do
       :exit, _ -> []
     end
   end
+
+  # ── Error-preserving observation helpers (C2B) ─────────────────────
+
+  defp observe_local_fact(agent_id) do
+    case test_local_fact() do
+      nil -> agent_id |> lookup_local_entry() |> classify_local_entry()
+      fact -> fact
+    end
+  end
+
+  # A present-but-bad entry is :inconsistent/:unavailable, NEVER :absent, so a
+  # pg-empty observation cannot falsely prove absence. Process.alive?/1 is called
+  # ONLY on a pid already proven local by node()==node(); never on a remote pid.
+  defp classify_local_entry(:table_undefined), do: :unavailable
+  defp classify_local_entry(nil), do: :absent
+
+  defp classify_local_entry(%{pid: pid}) do
+    cond do
+      not is_pid(pid) -> :unavailable
+      node(pid) != node() -> :inconsistent
+      not Process.alive?(pid) -> :inconsistent
+      true -> {:ok, pid}
+    end
+  end
+
+  defp classify_local_entry(_), do: :unavailable
+
+  defp lookup_local_entry(agent_id) do
+    case test_local_raw() do
+      :real -> real_ets_lookup(agent_id)
+      :table_undefined -> :table_undefined
+      :no_entry -> nil
+      {:entry, entry} -> entry
+    end
+  end
+
+  defp test_local_raw do
+    if @test_build do
+      case Process.get({__MODULE__, :test_local_raw}) do
+        nil -> :real
+        other -> other
+      end
+    else
+      :real
+    end
+  end
+
+  # Test-build-only fact-level override (deterministic, consumed by arity-1
+  # observe_target/1). See test_pg_fact/0.
+  defp test_local_fact do
+    if @test_build, do: Process.get({__MODULE__, :test_local_fact}), else: nil
+  end
+
+  defp real_ets_lookup(agent_id) do
+    case :ets.whereis(@table) do
+      :undefined ->
+        :table_undefined
+
+      _ ->
+        case :ets.lookup(@table, agent_id) do
+          [{^agent_id, entry}] -> entry
+          [] -> nil
+        end
+    end
+  rescue
+    ArgumentError -> :table_undefined
+  catch
+    :error, :badarg -> :table_undefined
+  end
+
+  # NO Process.alive? on members: :pg membership is the evidence. node()/1 is a
+  # safe BIF (reads the pid's node component, no RPC).
+  defp observe_pg_fact(agent_id) do
+    case test_pg_fact() do
+      nil ->
+        case pg_raw_members(agent_id) do
+          list when is_list(list) -> classify_pg_members(list)
+          :pg_failed -> :unavailable
+          :malformed -> :unavailable
+          _ -> :unavailable
+        end
+
+      fact ->
+        fact
+    end
+  end
+
+  # Test-build-only fact-level override (deterministic, consumed by arity-1
+  # observe_target/1). Used where a real remote pid cannot be fabricated without a
+  # managed peer; the real classify_ownership/decorate still runs on the fact.
+  defp test_pg_fact do
+    if @test_build, do: Process.get({__MODULE__, :test_pg_fact}), else: nil
+  end
+
+  defp pg_raw_members(agent_id) do
+    override = if @test_build, do: Process.get({__MODULE__, :test_pg_raw}), else: nil
+
+    case override do
+      nil -> real_pg_members(agent_id)
+      {:members, list} -> list
+      :pg_exit -> :pg_failed
+      :pg_error -> :pg_failed
+      :malformed -> :malformed
+    end
+  end
+
+  defp real_pg_members(agent_id) do
+    :pg.get_members(:arbor_agents, {:agent, agent_id})
+  rescue
+    _ -> :pg_failed
+  catch
+    # :pg failures are :exit (e.g. noproc on an unstarted scope); raised :error
+    # values are already covered by `rescue _` above.
+    :exit, _ -> :pg_failed
+  end
+
+  defp classify_pg_members(members) when is_list(members) do
+    case Enum.split_with(members, &is_pid/1) do
+      {pids, []} ->
+        {locals, remotes} = Enum.split_with(pids, fn p -> node(p) == node() end)
+        {:ok, {locals, length(remotes)}}
+
+      _ ->
+        :unavailable
+    end
+  end
+
+  defp classify_pg_members(_), do: :unavailable
+
+  defp decorate_owner(:local_owner, {:ok, pid}), do: {:ok, pid}
+  defp decorate_owner(:local_owner, _), do: {:error, :ambiguous_ownership}
+  defp decorate_owner(:absent, _), do: {:error, :absent}
+  defp decorate_owner(:remote_owner, _), do: {:error, :remote_owner}
+  defp decorate_owner(:ambiguous, _), do: {:error, :ambiguous_ownership}
+  defp decorate_owner(:unavailable, _), do: {:error, :observation_unavailable}
 
   defp with_registry_table(default, fun) when is_function(fun, 0) do
     case :ets.whereis(@table) do

@@ -285,6 +285,20 @@ defmodule Arbor.Agent.Manager do
   end
 
   @doc """
+  Stop an agent by its observed owner PID (Phase 4C C2B exact-owner stop).
+
+  Terminates the observed BranchSupervisor process directly via
+  `Arbor.Agent.Supervisor.stop_agent/1` — NO re-resolution by mutable logical
+  agent id, NO registry lookup, NO `Lifecycle.stop/1`. The rest_for_one
+  supervisor cascade tears down session/executor/host. Ordinary by-id
+  `stop_agent/1` / `Lifecycle` behavior is unchanged.
+  """
+  @spec stop_owner(pid()) :: :ok | {:error, :not_found}
+  def stop_owner(owner_pid) when is_pid(owner_pid) do
+    Arbor.Agent.Supervisor.stop_agent(owner_pid)
+  end
+
+  @doc """
   Set auto_start flag on an agent's persisted profile.
 
   When `enabled` is `true`, the agent will be automatically started by
