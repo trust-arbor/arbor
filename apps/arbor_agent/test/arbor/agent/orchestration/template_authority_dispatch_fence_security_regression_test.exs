@@ -320,6 +320,31 @@ defmodule Arbor.Agent.Orchestration.TemplateAuthorityDispatchFenceSecurityRegres
              TaskStore.install_target_fence("agent_b", "op_1", name: store)
   end
 
+  test "security regression: fence probes never report an unfenced target before seed readiness",
+       %{supervisor: supervisor} do
+    TestFenceFacade.set_blocking({:ok, []})
+    store = seed_store(supervisor)
+
+    assert wait_until(fn -> TestFenceFacade.worker_pid() != nil end)
+
+    assert {:error, :fence_not_ready} =
+             TaskStore.target_fenced?("agent_probe", name: store)
+
+    assert {:error, :fence_not_ready} =
+             TaskStore.verify_target_fence("agent_probe", "op_probe", name: store)
+
+    TestFenceFacade.release()
+    assert wait_until(fn -> TaskStore.recovery_ready?(name: store) end)
+
+    assert {:ok, false} = TaskStore.target_fenced?("agent_probe", name: store)
+
+    assert {:error, :invalid_target_agent_id} =
+             TaskStore.target_fenced?("not-a-valid-agent-id", name: store)
+
+    assert {:error, :invalid_operation_id} =
+             TaskStore.verify_target_fence("agent_probe", "invalid operation", name: store)
+  end
+
   test "security regression: outstanding durable operations seed fences before readiness and block dispatch",
        %{supervisor: supervisor} do
     op = seed_operation("agent_seeded", "op_seed")
