@@ -1014,6 +1014,40 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
         end
       end
 
+      # Datetimes must survive the serializer's UTC restoration byte-for-byte;
+      # offset-zone or malformed structs would otherwise durably admit a record
+      # whose signature cannot be verified on reobservation.
+      noncanonical_datetime = %{
+        fixed_granted_at()
+        | time_zone: "America/Chicago",
+          zone_abbr: "CST",
+          utc_offset: -21_600
+      }
+
+      malformed_datetime = %{fixed_granted_at() | calendar: :not_a_calendar}
+
+      for {field, value, suffix} <- [
+            {:granted_at, noncanonical_datetime, "offset-granted"},
+            {:expires_at, noncanonical_datetime, "offset-expires"},
+            {:not_before, malformed_datetime, "malformed-not-before"}
+          ] do
+        bad =
+          det_grant_opts("f3-#{suffix}", principal, "arbor://fs/read/ack-f3-#{suffix}")
+          |> Keyword.put(field, value)
+
+        assert {:error, :invalid_request} = Security.acknowledged_grant(bad)
+      end
+
+      # Atom and string keys canonicalize to the same JSON object key. Reject
+      # the ambiguous input before signing rather than relying on map order.
+      duplicate_canonical_keys = %{:source => "atom", "source" => "string"}
+
+      assert {:error, :invalid_request} =
+               Security.acknowledged_grant(
+                 det_grant_opts("f3-duplicate-key", principal, "arbor://fs/read/ack-f3-dup")
+                 |> Keyword.put(:metadata, duplicate_canonical_keys)
+               )
+
       # One shared budget spanning constraints + metadata: each nested
       # container alone is under the budget AND within the 64-key / depth-6
       # caps, but the COMBINED node count exceeds @acknowledged_grant_max_nodes.
@@ -1091,6 +1125,58 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
                  principal: principal,
                  resource: resource,
                  max_uses: Integer.pow(2, 63)
+               )
+    end
+  end
+
+  test "security regression: acknowledged grant requires canonical persistence values" do
+    fresh_isolated_store()
+    principal = "agent_ack_f3b"
+    resource = "arbor://fs/read/ack-f3b"
+
+    noncanonical_datetime = %{
+      ~U[2030-01-01 00:00:00Z]
+      | time_zone: "America/Chicago",
+        zone_abbr: "CST",
+        utc_offset: -21_600
+    }
+
+    malformed_datetime = %{fixed_granted_at() | calendar: :not_a_calendar}
+    duplicate_canonical_keys = %{:source => "atom", "source" => "string"}
+
+    if acknowledged_available?() do
+      for {field, value, suffix} <- [
+            {:granted_at, noncanonical_datetime, "offset-granted"},
+            {:expires_at, noncanonical_datetime, "offset-expires"},
+            {:not_before, malformed_datetime, "malformed-not-before"}
+          ] do
+        bad =
+          det_grant_opts("f3b-#{suffix}", principal, "arbor://fs/read/ack-f3b-#{suffix}")
+          |> Keyword.put(field, value)
+
+        assert {:error, :invalid_request} = Security.acknowledged_grant(bad)
+      end
+
+      assert {:error, :invalid_request} =
+               Security.acknowledged_grant(
+                 det_grant_opts("f3b-duplicate-key", principal, resource)
+                 |> Keyword.put(:metadata, duplicate_canonical_keys)
+               )
+    else
+      # Parent ordinary admission accepts both persistence-unstable shapes, so
+      # these assertions fail behaviorally before the acknowledged boundary.
+      assert {:error, _reason} =
+               Security.grant(
+                 principal: principal,
+                 resource: resource,
+                 expires_at: noncanonical_datetime
+               )
+
+      assert {:error, _reason} =
+               Security.grant(
+                 principal: principal,
+                 resource: resource,
+                 metadata: duplicate_canonical_keys
                )
     end
   end
