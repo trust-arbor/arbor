@@ -915,7 +915,7 @@ defmodule Arbor.Agent.Orchestration do
     store_opts = task_store_opts(opts)
 
     with {:ok, %{task_id: task_id, reservation_token: token}} <-
-           reserve_task_identity(store, store_opts),
+           reserve_task_identity(store, agent_id, store_opts),
          :ok <- commit_recovery_marker(store, task_id, token, store_opts) do
       case grant_task_control_lease(caller_id, task_id, opts) do
         {:ok, lease, granted} ->
@@ -982,8 +982,8 @@ defmodule Arbor.Agent.Orchestration do
     end
   end
 
-  defp reserve_task_identity(store, store_opts) do
-    case apply_if_exported(store, :reserve, [store_opts]) do
+  defp reserve_task_identity(store, target_agent_id, store_opts) do
+    case apply_if_exported(store, :reserve, [target_agent_id, store_opts]) do
       {:ok, %{task_id: task_id, reservation_token: token}}
       when is_binary(task_id) and is_binary(token) ->
         {:ok, %{task_id: task_id, reservation_token: token}}

@@ -184,7 +184,7 @@ defmodule Arbor.Agent.Orchestration.TaskControlLeaseTest do
       :ok
     end
 
-    def reserve(_opts \\ []) do
+    def reserve(_target_agent_id, _opts \\ []) do
       ensure!()
 
       task_id =

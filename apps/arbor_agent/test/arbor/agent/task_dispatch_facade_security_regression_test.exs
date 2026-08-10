@@ -49,7 +49,7 @@ defmodule Arbor.Agent.TaskDispatchFacadeSecurityRegressionTest do
       end
     end
 
-    def reserve(_opts \\ []) do
+    def reserve(_target_agent_id, _opts \\ []) do
       ensure!()
       task_id = "task_dispatch_" <> Integer.to_string(System.unique_integer([:positive]))
       token = "tok_#{System.unique_integer([:positive])}"

@@ -144,7 +144,7 @@ defmodule Arbor.Agent.Orchestration.TaskControlCrashReplaySecurityRegressionTest
       )
 
     assert {:ok, %{task_id: task_id, reservation_token: token}} =
-             TaskStore.reserve(name: store)
+             TaskStore.reserve("agent_1", name: store)
 
     assert :ok = TaskStore.commit_recovery_marker(task_id, token, name: store)
 
@@ -195,7 +195,7 @@ defmodule Arbor.Agent.Orchestration.TaskControlCrashReplaySecurityRegressionTest
              )
 
     # New work accepted only after ready.
-    assert {:ok, %{task_id: _new_id}} = TaskStore.reserve(name: store2)
+    assert {:ok, %{task_id: _new_id}} = TaskStore.reserve("agent_1", name: store2)
   end
 
   test "security regression: non-nil lease activation fails closed without backend-acked marker" do
@@ -216,7 +216,7 @@ defmodule Arbor.Agent.Orchestration.TaskControlCrashReplaySecurityRegressionTest
       )
 
     assert {:ok, %{task_id: task_id, reservation_token: token}} =
-             TaskStore.reserve(name: store)
+             TaskStore.reserve("agent_1", name: store)
 
     # Simulate post-reserve grants without a durable marker ack first — the
     # production path must never activate a non-nil lease in this window.

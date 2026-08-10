@@ -93,6 +93,16 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   @default_recovery_retry_base_ms 200
   @default_recovery_retry_max_ms 5_000
   @default_recovery_max_retries 16
+  # Target dispatch fence (Phase 4C C2A). Operation-owned per-target maintenance
+  # fence seeded from the durable template-authority operation store on startup.
+  # Node-local linearization boundary only.
+  @default_fence_seed_facade Arbor.Agent.TemplateAuthorityReconciliationStore
+  @default_fence_seed_admit_timeout_ms 2_000
+  @default_fence_seed_worker_timeout_ms 10_000
+  @max_fence_agent_id_bytes 256
+  @max_fence_operation_id_bytes 128
+  @fence_agent_id_re ~r/\Aagent_[A-Za-z0-9_-]+\z/
+  @fence_operation_id_re ~r/\A[A-Za-z0-9][A-Za-z0-9._-]*\z/
 
   alias Arbor.Agent.Config
   alias Arbor.Agent.Orchestration.{TaskArtifacts, TaskControlLease, TaskInventoryProjection}
@@ -165,18 +175,27 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   end
 
   @doc """
-  Reserve a server-owned task identity before capability grants.
+  Reserve a server-owned task identity bound to one validated target_agent_id.
 
   Returns `%{task_id: id, reservation_token: token}`. The opaque token is
   owner-bound (calling process) and required for `commit_recovery_marker/3`,
-  `activate/4`, and `release/3`. Never accepted from public MCP dispatch opts;
-  production task ids are unguessable. Deterministic ids only via store-start
-  `:task_id_generator` pin.
+  `activate/5`, and `release/3`. The `target_agent_id` is stored on the
+  reservation and re-compared during `activate/5`; a mismatch fails closed
+  without consuming or retargeting the reservation. Never accepted from public
+  MCP dispatch opts; production task ids are unguessable. Deterministic ids
+  only via store-start `:task_id_generator` pin.
+
+  Fails closed for a target that has an installed operation-owned dispatch
+  fence (`{:error, :target_fenced}`), and while fence-seed readiness has not
+  been established (`{:error, :fence_not_ready}`).
   """
-  @spec reserve(keyword() | map()) ::
+  @spec reserve(String.t(), keyword() | map()) ::
           {:ok, %{task_id: task_id(), reservation_token: String.t()}} | {:error, term()}
-  def reserve(opts \\ []) do
-    GenServer.call(store_name(opts), {:reserve, normalize_opts(opts)})
+  def reserve(target_agent_id, opts \\ []) do
+    GenServer.call(
+      store_name(opts),
+      {:reserve, target_agent_id, normalize_opts(opts)}
+    )
   end
 
   @doc """
@@ -250,6 +269,63 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
       true -> true
       _ -> false
     end
+  end
+
+  @doc """
+  Install an operation-owned per-target dispatch fence and report the barrier.
+
+  The fence is owned by exactly one `operation_id` per `target_agent_id`.
+  Installing it and observing pre-existing active/reserved work for that
+  target are one GenServer linearization point. The reply carries ONLY bounded
+  integer counts (`active_count` includes running and waiting_approval tasks;
+  `reserved_count` counts target-bound reservations) — never task ids,
+  reservation tokens, PIDs, capability ids, or records.
+
+  Same `(target, operation_id)` is idempotent and re-observes counts. A
+  different `operation_id` fails `:target_fenced` without changing the owner.
+  Fails `:fence_not_ready` while the startup fence seed has not completed.
+  """
+  @spec install_target_fence(String.t(), String.t(), keyword() | map()) ::
+          {:ok, %{active_count: non_neg_integer(), reserved_count: non_neg_integer()}}
+          | {:error, term()}
+  def install_target_fence(target_agent_id, operation_id, opts \\ []) do
+    GenServer.call(
+      store_name(opts),
+      {:install_target_fence, target_agent_id, operation_id}
+    )
+  end
+
+  @doc """
+  Remove an operation-owned per-target dispatch fence.
+
+  Requires the exact `target_agent_id` and `operation_id` that installed it.
+  A different owner fails `:target_fenced`; a missing fence fails
+  `:not_found`. Fails `:fence_not_ready` while the startup seed has not
+  completed.
+  """
+  @spec remove_target_fence(String.t(), String.t(), keyword() | map()) ::
+          :ok | {:error, term()}
+  def remove_target_fence(target_agent_id, operation_id, opts \\ []) do
+    GenServer.call(
+      store_name(opts),
+      {:remove_target_fence, target_agent_id, operation_id}
+    )
+  end
+
+  @doc false
+  @spec target_fenced?(String.t(), keyword() | map()) :: boolean()
+  def target_fenced?(target_agent_id, opts \\ []) do
+    GenServer.call(store_name(opts), {:target_fenced?, target_agent_id})
+  end
+
+  @doc false
+  @spec verify_target_fence(String.t(), String.t(), keyword() | map()) ::
+          :ok | {:error, :target_not_fenced | :not_owner}
+  def verify_target_fence(target_agent_id, operation_id, opts \\ []) do
+    GenServer.call(
+      store_name(opts),
+      {:verify_target_fence, target_agent_id, operation_id}
+    )
   end
 
   @doc """
@@ -482,6 +558,15 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
       )
       |> validate_task_control_recovery_facade!()
 
+    # Phase 4C C2A: production reconciliation-store collaborator for fence
+    # seeding is fixed at store initialization. Test-only injection is allowed
+    # solely at store start under MIX_ENV=test; per-reservation and per-dispatch
+    # options remain data-only.
+    fence_facade =
+      opts
+      |> Keyword.get(:template_authority_fence_facade, @default_fence_seed_facade)
+      |> validate_fence_facade!(opts)
+
     task_id_generator =
       opts
       |> Keyword.get(:task_id_generator)
@@ -511,6 +596,12 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
 
     durable? = recovery_facade_durable?(recovery_facade)
     production_recovery? = production_recovery_facade?(recovery_facade)
+
+    # Phase 4C C2A fence-seed readiness. fence_force_ready is a TEST-ONLY seam:
+    # it can never bypass production startup seeding. Unrelated test stores are
+    # fence-ready by default (no facade call, no seeding); only explicit seed
+    # tests set :fence_force_ready false. Production always seeds via the worker.
+    fence_force_ready? = fence_force_ready?(opts)
 
     state = %{
       task_supervisor: task_supervisor,
@@ -546,6 +637,26 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
       recovery_durable?: durable?,
       recovery_ready?: force_ready? and durable? and not production_recovery?,
       recovery_replay: %{phase: :pending, cursor: [], failures: 0, deadline_mono: 0},
+      # Phase 4C C2A: operation-owned per-target dispatch fence. The production
+      # seed facade and worker supervisor are fixed at init; per-target fence
+      # readiness is independent of recovery readiness. Public recovery_ready?/1
+      # is the conjunction of both.
+      template_authority_fence_facade: fence_facade,
+      target_fences: %{},
+      target_fence_ready?: fence_force_ready?,
+      fence_seed: %{status: :pending},
+      fence_seed_admit_timeout_ms:
+        Keyword.get(
+          opts,
+          :fence_seed_admit_timeout_ms,
+          @default_fence_seed_admit_timeout_ms
+        ),
+      fence_seed_worker_timeout_ms:
+        Keyword.get(
+          opts,
+          :fence_seed_worker_timeout_ms,
+          @default_fence_seed_worker_timeout_ms
+        ),
       reservations: %{},
       reservation_monitor_index: %{},
       recovery_pending: %{},
@@ -652,7 +763,20 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   @impl true
   def handle_continue(:start_recovery_replay, state) do
     state = ensure_recovery_shape(state)
-    {:noreply, begin_recovery_op(state, :replay_batch, nil, nil, nil)}
+    state = ensure_fence_shape(state)
+    state = begin_recovery_op(state, :replay_batch, nil, nil, nil)
+    state = maybe_begin_fence_seed(state)
+    {:noreply, state}
+  end
+
+  def handle_continue(:retry_fence_seed, state) do
+    state = ensure_fence_shape(state)
+
+    if state.target_fence_ready? == true do
+      {:noreply, state}
+    else
+      {:noreply, maybe_begin_fence_seed(state)}
+    end
   end
 
   def handle_continue(:retry_recovery_replay, state) do
@@ -668,59 +792,21 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   @impl true
   def handle_call(:recovery_ready?, _from, state) do
     state = ensure_recovery_shape(state)
-    {:reply, state.recovery_ready? == true, state}
+    state = ensure_fence_shape(state)
+    # Public readiness is the conjunction of recovery replay and fence-seed
+    # readiness: dispatch admission requires both before it can proceed.
+    {:reply, state.recovery_ready? == true and state.target_fence_ready? == true, state}
   end
 
-  def handle_call({:reserve, _opts}, {owner_pid, _}, state) when is_pid(owner_pid) do
+  def handle_call({:reserve, target_agent_id, _opts}, {owner_pid, _}, state)
+      when is_pid(owner_pid) do
     state = ensure_recovery_shape(state)
     state = ensure_lease_retirement_shape(state)
+    state = ensure_fence_shape(state)
 
-    cond do
-      state.recovery_durable? != true ->
-        {:reply, {:error, :recovery_durability_unavailable}, state}
-
-      state.recovery_ready? != true ->
-        {:reply, {:error, :recovery_not_ready}, state}
-
-      true ->
-        case admit_new_reservation(state) do
-          {:error, reason} ->
-            {:reply, {:error, reason}, state}
-
-          :ok ->
-            case generate_unique_task_id(state) do
-              {:error, reason} ->
-                {:reply, {:error, reason}, state}
-
-              {:ok, task_id} ->
-                token = TaskControlLease.generate_reservation_token()
-                token_hash = TaskControlLease.token_hash(token)
-                owner_mon = Process.monitor(owner_pid)
-
-                deadline_ms =
-                  Map.get(state, :reservation_deadline_ms, @default_reservation_deadline_ms)
-
-                deadline_timer =
-                  Process.send_after(self(), {:reservation_deadline, task_id}, deadline_ms)
-
-                reservation = %{
-                  task_id: task_id,
-                  token_hash: token_hash,
-                  owner_pid: owner_pid,
-                  owner_mon: owner_mon,
-                  deadline_timer: deadline_timer,
-                  marker_written?: false,
-                  inserted_at: DateTime.utc_now()
-                }
-
-                state =
-                  state
-                  |> put_in([:reservations, task_id], reservation)
-                  |> put_in([:reservation_monitor_index, owner_mon], task_id)
-
-                {:reply, {:ok, %{task_id: task_id, reservation_token: token}}, state}
-            end
-        end
+    case validate_fence_target(target_agent_id) do
+      {:ok, target} -> reserve_for_target(state, target, owner_pid)
+      {:error, _reason} = error -> {:reply, error, state}
     end
   end
 
@@ -763,10 +849,14 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
         state
       ) do
     state = ensure_recovery_shape(state)
+    state = ensure_fence_shape(state)
 
     cond do
       state.recovery_ready? != true ->
         {:reply, {:error, :recovery_not_ready}, state}
+
+      state.target_fence_ready? != true ->
+        {:reply, {:error, :fence_not_ready}, state}
 
       true ->
         case authorize_reservation(state, task_id, token, owner_pid) do
@@ -774,23 +864,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
             {:reply, {:error, reason}, state}
 
           {:ok, reservation} ->
-            opts = Keyword.put(opts, :task_id, task_id)
-            lease_opt = Keyword.get(opts, :task_control_lease)
-
-            cond do
-              not is_nil(lease_opt) and reservation.marker_written? != true ->
-                {:reply, {:error, :recovery_marker_required}, state}
-
-              true ->
-                case do_admit_task(state, agent_id, task, task_id, opts) do
-                  {:error, reason, state} ->
-                    {:reply, {:error, reason}, state}
-
-                  {:ok, task_id, state} ->
-                    state = drop_reservation(state, task_id, reservation)
-                    {:reply, {:ok, task_id}, state}
-                end
-            end
+            activate_reservation(state, reservation, agent_id, task, task_id, opts)
         end
     end
   end
@@ -827,14 +901,14 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   end
 
   def handle_call({:dispatch, agent_id, task, opts}, _from, state) do
-    task_id = task_id(opts)
+    state = ensure_recovery_shape(state)
+    state = ensure_fence_shape(state)
 
-    case do_admit_task(state, agent_id, task, task_id, opts) do
-      {:ok, task_id, next_state} ->
-        {:reply, {:ok, task_id}, next_state}
-
-      {:error, reason, next_state} ->
-        {:reply, {:error, reason}, next_state}
+    # Validate the target before any fence lookup. A malformed target fails
+    # closed with the bounded error and starts no runner.
+    case validate_fence_target(agent_id) do
+      {:ok, target} -> dispatch_to_target(state, target, task, opts)
+      {:error, _reason} = error -> {:reply, error, state}
     end
   rescue
     e ->
@@ -842,6 +916,102 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   catch
     :exit, reason ->
       {:reply, {:error, {:dispatch_exit, reason}}, state}
+  end
+
+  def handle_call(
+        {:install_target_fence, target_agent_id, operation_id},
+        _from,
+        state
+      ) do
+    state = ensure_fence_shape(state)
+
+    cond do
+      state.target_fence_ready? != true ->
+        {:reply, {:error, :fence_not_ready}, state}
+
+      true ->
+        with {:ok, target} <- validate_fence_target(target_agent_id),
+             {:ok, op} <- validate_fence_operation_id(operation_id) do
+          case Map.get(state.target_fences, target) do
+            ^op ->
+              {:reply, {:ok, barrier_counts(state, target)}, state}
+
+            nil ->
+              state = put_in(state, [:target_fences, target], op)
+              {:reply, {:ok, barrier_counts(state, target)}, state}
+
+            _other_owner ->
+              {:reply, {:error, :target_fenced}, state}
+          end
+        else
+          {:error, _reason} = error -> {:reply, error, state}
+        end
+    end
+  end
+
+  def handle_call(
+        {:remove_target_fence, target_agent_id, operation_id},
+        _from,
+        state
+      ) do
+    state = ensure_fence_shape(state)
+
+    cond do
+      state.target_fence_ready? != true ->
+        {:reply, {:error, :fence_not_ready}, state}
+
+      true ->
+        with {:ok, target} <- validate_fence_target(target_agent_id),
+             {:ok, op} <- validate_fence_operation_id(operation_id) do
+          case Map.get(state.target_fences, target) do
+            ^op ->
+              state = put_in(state, [:target_fences], Map.delete(state.target_fences, target))
+              {:reply, :ok, state}
+
+            nil ->
+              {:reply, {:error, :not_found}, state}
+
+            _other_owner ->
+              {:reply, {:error, :target_fenced}, state}
+          end
+        else
+          {:error, _reason} = error -> {:reply, error, state}
+        end
+    end
+  end
+
+  def handle_call({:target_fenced?, target_agent_id}, _from, state) do
+    state = ensure_fence_shape(state)
+
+    fenced? =
+      case validate_fence_target(target_agent_id) do
+        {:ok, target} -> Map.has_key?(state.target_fences, target)
+        _ -> false
+      end
+
+    {:reply, fenced?, state}
+  end
+
+  def handle_call(
+        {:verify_target_fence, target_agent_id, operation_id},
+        _from,
+        state
+      ) do
+    state = ensure_fence_shape(state)
+
+    reply =
+      with {:ok, target} <- validate_fence_target(target_agent_id),
+           {:ok, op} <- validate_fence_operation_id(operation_id) do
+        case Map.get(state.target_fences, target) do
+          ^op -> :ok
+          nil -> {:error, :target_not_fenced}
+          _other_owner -> {:error, :not_owner}
+        end
+      else
+        {:error, _reason} -> {:error, :target_not_fenced}
+      end
+
+    {:reply, reply, state}
   end
 
   def handle_call({:status, task_id}, _from, state) do
@@ -1033,6 +1203,118 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     end
   end
 
+  defp reserve_for_target(state, target, owner_pid) do
+    cond do
+      state.recovery_durable? != true ->
+        {:reply, {:error, :recovery_durability_unavailable}, state}
+
+      state.recovery_ready? != true ->
+        {:reply, {:error, :recovery_not_ready}, state}
+
+      state.target_fence_ready? != true ->
+        {:reply, {:error, :fence_not_ready}, state}
+
+      Map.has_key?(state.target_fences, target) ->
+        {:reply, {:error, :target_fenced}, state}
+
+      true ->
+        create_target_reservation(state, target, owner_pid)
+    end
+  end
+
+  defp create_target_reservation(state, target, owner_pid) do
+    with :ok <- admit_new_reservation(state),
+         {:ok, task_id} <- generate_unique_task_id(state) do
+      token = TaskControlLease.generate_reservation_token()
+      token_hash = TaskControlLease.token_hash(token)
+      owner_mon = Process.monitor(owner_pid)
+
+      deadline_ms =
+        Map.get(state, :reservation_deadline_ms, @default_reservation_deadline_ms)
+
+      deadline_timer =
+        Process.send_after(self(), {:reservation_deadline, task_id}, deadline_ms)
+
+      reservation = %{
+        task_id: task_id,
+        target_agent_id: target,
+        token_hash: token_hash,
+        owner_pid: owner_pid,
+        owner_mon: owner_mon,
+        deadline_timer: deadline_timer,
+        marker_written?: false,
+        inserted_at: DateTime.utc_now()
+      }
+
+      state =
+        state
+        |> put_in([:reservations, task_id], reservation)
+        |> put_in([:reservation_monitor_index, owner_mon], task_id)
+
+      {:reply, {:ok, %{task_id: task_id, reservation_token: token}}, state}
+    else
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  defp activate_reservation(state, reservation, agent_id, task, task_id, opts) do
+    # Target re-compare: activation must match the reservation's bound target.
+    # Legacy reservations with missing or invalid targets fail closed without
+    # being consumed or retargeted.
+    reservation_target = Map.get(reservation, :target_agent_id)
+
+    with {:ok, target} <-
+           validate_reservation_activation_target(agent_id, reservation_target),
+         :ok <- ensure_target_unfenced(state, target),
+         opts = Keyword.put(opts, :task_id, task_id),
+         :ok <- ensure_recovery_marker(reservation, opts),
+         {:ok, admitted_task_id, next_state} <-
+           do_admit_task(state, target, task, task_id, opts) do
+      next_state = drop_reservation(next_state, admitted_task_id, reservation)
+      {:reply, {:ok, admitted_task_id}, next_state}
+    else
+      {:error, reason, next_state} -> {:reply, {:error, reason}, next_state}
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  defp ensure_target_unfenced(state, target) do
+    if Map.has_key?(state.target_fences, target),
+      do: {:error, :target_fenced},
+      else: :ok
+  end
+
+  defp ensure_recovery_marker(reservation, opts) do
+    lease = Keyword.get(opts, :task_control_lease)
+
+    if not is_nil(lease) and Map.get(reservation, :marker_written?) != true,
+      do: {:error, :recovery_marker_required},
+      else: :ok
+  end
+
+  defp dispatch_to_target(state, target, task, opts) do
+    cond do
+      # Dispatch admission requires both task-control recovery readiness and
+      # fence-seed readiness; no runner may start while either gate is closed.
+      state.recovery_ready? != true ->
+        {:reply, {:error, :recovery_not_ready}, state}
+
+      state.target_fence_ready? != true ->
+        {:reply, {:error, :fence_not_ready}, state}
+
+      Map.has_key?(state.target_fences, target) ->
+        {:reply, {:error, :target_fenced}, state}
+
+      true ->
+        task_id = task_id(opts)
+
+        case do_admit_task(state, target, task, task_id, opts) do
+          {:ok, task_id, next_state} -> {:reply, {:ok, task_id}, next_state}
+          {:error, reason, next_state} -> {:reply, {:error, reason}, next_state}
+        end
+    end
+  end
+
   defp do_admit_task(state, agent_id, task, task_id, opts) do
     with {:ok, lease} <-
            admit_task_control_lease(Keyword.get(opts, :task_control_lease), task_id),
@@ -1123,39 +1405,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     state = ensure_lease_retirement_shape(state)
     state = ensure_recovery_shape(state)
 
-    case find_lease_retire_monitor(state, ref) do
-      {:launcher, attempt_ref, attempt} ->
-        {:noreply, handle_lease_retire_launcher_down(state, attempt_ref, attempt)}
-
-      {:worker, attempt_ref, attempt} ->
-        {:noreply, handle_lease_retire_worker_down(state, attempt_ref, attempt, :normal)}
-
-      :error ->
-        case find_recovery_monitor(state, ref) do
-          {:launcher, op_ref, op} ->
-            {:noreply, handle_recovery_launcher_down(state, op_ref, op)}
-
-          {:worker, op_ref, op} ->
-            {:noreply, handle_recovery_worker_down(state, op_ref, op, :normal)}
-
-          :error ->
-            case find_reservation_owner_mon(state, ref) do
-              {:ok, task_id, reservation} ->
-                {:noreply,
-                 handle_reservation_owner_down(state, task_id, reservation, :owner_down)}
-
-              :error ->
-                case Map.fetch(state.adoption_refs, ref) do
-                  {:ok, task_id} ->
-                    {:noreply,
-                     fail_adoption(state, task_id, ref, {:error, :executor_callback_no_result})}
-
-                  :error ->
-                    {:noreply, remove_ref(state, ref)}
-                end
-            end
-        end
-    end
+    {:noreply, handle_normal_down(state, ref)}
   end
 
   def handle_info({:DOWN, ref, :process, _pid, reason}, state) when is_reference(ref) do
@@ -1163,51 +1413,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     state = ensure_lease_retirement_shape(state)
     state = ensure_recovery_shape(state)
 
-    case find_lease_retire_monitor(state, ref) do
-      {:launcher, attempt_ref, attempt} ->
-        {:noreply, handle_lease_retire_launcher_down(state, attempt_ref, attempt)}
-
-      {:worker, attempt_ref, attempt} ->
-        {:noreply, handle_lease_retire_worker_down(state, attempt_ref, attempt, reason)}
-
-      :error ->
-        case find_recovery_monitor(state, ref) do
-          {:launcher, op_ref, op} ->
-            {:noreply, handle_recovery_launcher_down(state, op_ref, op)}
-
-          {:worker, op_ref, op} ->
-            {:noreply, handle_recovery_worker_down(state, op_ref, op, reason)}
-
-          :error ->
-            case find_reservation_owner_mon(state, ref) do
-              {:ok, task_id, reservation} ->
-                {:noreply,
-                 handle_reservation_owner_down(state, task_id, reservation, :owner_down)}
-
-              :error ->
-                case Map.fetch(state.adoption_refs, ref) do
-                  {:ok, task_id} ->
-                    {:noreply,
-                     fail_adoption(state, task_id, ref, {:error, :executor_callback_exit})}
-
-                  :error ->
-                    case Map.fetch(state.refs, ref) do
-                      {:ok, task_id} ->
-                        now = DateTime.utc_now()
-
-                        {state, cleanup_job} =
-                          terminalize_abnormal_down(state, task_id, reason, now)
-
-                        state = launch_approval_cleanup_job(state, cleanup_job)
-                        {:noreply, remove_ref(state, ref)}
-
-                      :error ->
-                        {:noreply, state}
-                    end
-                end
-            end
-        end
-    end
+    {:noreply, handle_abnormal_down(state, ref, reason)}
   end
 
   def handle_info({:reservation_deadline, task_id}, state) when is_binary(task_id) do
@@ -1243,6 +1449,43 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
 
   def handle_info({:recovery_op_complete, op_ref, result}, state) when is_reference(op_ref) do
     {:noreply, handle_recovery_op_complete(state, op_ref, result)}
+  end
+
+  # Phase 4C C2A fence-seed worker messages. The durable inventory read
+  # (list_outstanding/0) happens only inside the supervised worker, never in
+  # this callback.
+  def handle_info({:fence_seed_admitted, seed_ref, worker_pid}, state)
+      when is_reference(seed_ref) and is_pid(worker_pid) do
+    {:noreply, handle_fence_seed_admitted(state, seed_ref, worker_pid)}
+  end
+
+  def handle_info({:fence_seed_failed, seed_ref, class}, state)
+      when is_reference(seed_ref) do
+    {:noreply, handle_fence_seed_failed(state, seed_ref, class)}
+  end
+
+  def handle_info({:fence_seed_admit_timeout, seed_ref}, state) when is_reference(seed_ref) do
+    {:noreply, handle_fence_seed_admit_timeout(state, seed_ref)}
+  end
+
+  def handle_info({:fence_seed_worker_timeout, seed_ref}, state)
+      when is_reference(seed_ref) do
+    {:noreply, handle_fence_seed_worker_timeout(state, seed_ref)}
+  end
+
+  def handle_info({:fence_seed_complete, seed_ref, result}, state)
+      when is_reference(seed_ref) do
+    {:noreply, handle_fence_seed_complete(state, seed_ref, result)}
+  end
+
+  def handle_info(:retry_fence_seed_msg, state) do
+    state = ensure_fence_shape(state)
+
+    if state.target_fence_ready? == true do
+      {:noreply, state}
+    else
+      {:noreply, maybe_begin_fence_seed(state)}
+    end
   end
 
   def handle_info(:retry_recovery_replay_msg, state) do
@@ -1354,6 +1597,122 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     end)
 
     :ok
+  end
+
+  defp handle_normal_down(state, ref) do
+    case classify_monitored_ref(state, ref) do
+      {:lease_launcher, attempt_ref, attempt} ->
+        handle_lease_retire_launcher_down(state, attempt_ref, attempt)
+
+      {:lease_worker, attempt_ref, attempt} ->
+        handle_lease_retire_worker_down(state, attempt_ref, attempt, :normal)
+
+      {:recovery_launcher, op_ref, op} ->
+        handle_recovery_launcher_down(state, op_ref, op)
+
+      {:recovery_worker, op_ref, op} ->
+        handle_recovery_worker_down(state, op_ref, op, :normal)
+
+      {:fence_launcher, seed} ->
+        handle_fence_seed_launcher_down(state, seed, :normal)
+
+      {:fence_worker, seed} ->
+        handle_fence_seed_worker_down(state, seed, :normal)
+
+      {:reservation, task_id, reservation} ->
+        handle_reservation_owner_down(state, task_id, reservation, :owner_down)
+
+      {:adoption, task_id} ->
+        fail_adoption(state, task_id, ref, {:error, :executor_callback_no_result})
+
+      {:task, _task_id} ->
+        remove_ref(state, ref)
+
+      :error ->
+        remove_ref(state, ref)
+    end
+  end
+
+  defp handle_abnormal_down(state, ref, reason) do
+    case classify_monitored_ref(state, ref) do
+      {:lease_launcher, attempt_ref, attempt} ->
+        handle_lease_retire_launcher_down(state, attempt_ref, attempt)
+
+      {:lease_worker, attempt_ref, attempt} ->
+        handle_lease_retire_worker_down(state, attempt_ref, attempt, reason)
+
+      {:recovery_launcher, op_ref, op} ->
+        handle_recovery_launcher_down(state, op_ref, op)
+
+      {:recovery_worker, op_ref, op} ->
+        handle_recovery_worker_down(state, op_ref, op, reason)
+
+      {:fence_launcher, seed} ->
+        handle_fence_seed_launcher_down(state, seed, reason)
+
+      {:fence_worker, seed} ->
+        handle_fence_seed_worker_down(state, seed, reason)
+
+      {:reservation, task_id, reservation} ->
+        handle_reservation_owner_down(state, task_id, reservation, :owner_down)
+
+      {:adoption, task_id} ->
+        fail_adoption(state, task_id, ref, {:error, :executor_callback_exit})
+
+      {:task, task_id} ->
+        now = DateTime.utc_now()
+        {state, cleanup_job} = terminalize_abnormal_down(state, task_id, reason, now)
+        state = launch_approval_cleanup_job(state, cleanup_job)
+        remove_ref(state, ref)
+
+      :error ->
+        state
+    end
+  end
+
+  defp classify_monitored_ref(state, ref) do
+    case find_lease_retire_monitor(state, ref) do
+      {:launcher, attempt_ref, attempt} -> {:lease_launcher, attempt_ref, attempt}
+      {:worker, attempt_ref, attempt} -> {:lease_worker, attempt_ref, attempt}
+      :error -> classify_recovery_monitor(state, ref)
+    end
+  end
+
+  defp classify_recovery_monitor(state, ref) do
+    case find_recovery_monitor(state, ref) do
+      {:launcher, op_ref, op} -> {:recovery_launcher, op_ref, op}
+      {:worker, op_ref, op} -> {:recovery_worker, op_ref, op}
+      :error -> classify_fence_monitor(state, ref)
+    end
+  end
+
+  defp classify_fence_monitor(state, ref) do
+    case find_fence_seed_monitor(state, ref) do
+      {:launcher, seed} -> {:fence_launcher, seed}
+      {:worker, seed} -> {:fence_worker, seed}
+      :error -> classify_reservation_monitor(state, ref)
+    end
+  end
+
+  defp classify_reservation_monitor(state, ref) do
+    case find_reservation_owner_mon(state, ref) do
+      {:ok, task_id, reservation} -> {:reservation, task_id, reservation}
+      :error -> classify_task_monitor(state, ref)
+    end
+  end
+
+  defp classify_task_monitor(state, ref) do
+    case Map.fetch(state.adoption_refs, ref) do
+      {:ok, task_id} -> {:adoption, task_id}
+      :error -> classify_runner_monitor(state, ref)
+    end
+  end
+
+  defp classify_runner_monitor(state, ref) do
+    case Map.fetch(state.refs, ref) do
+      {:ok, task_id} -> {:task, task_id}
+      :error -> :error
+    end
   end
 
   defp complete_task(state, task_id, ref, result) do
@@ -3499,6 +3858,456 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   defp validate_task_control_recovery_facade!(invalid) do
     raise ArgumentError,
           "task_control_recovery_facade must be a module, got: #{inspect(invalid)}"
+  end
+
+  # ---------------------------------------------------------------------------
+  # Phase 4C C2A: operation-owned per-target dispatch fence + supervised seed
+  # ---------------------------------------------------------------------------
+
+  defp validate_fence_facade!(facade, opts) when is_atom(facade) and not is_nil(facade) do
+    # Production collaborator is fixed at init. An alternate facade may be
+    # injected solely at store start under MIX_ENV=test; per-dispatch options
+    # remain data-only and can never select it.
+    if Mix.env() != :test and
+         Keyword.has_key?(opts, :template_authority_fence_facade) and
+         facade != @default_fence_seed_facade do
+      raise ArgumentError,
+            "template_authority_fence_facade is fixed at store initialization " <>
+              "and cannot be overridden outside MIX_ENV=test"
+    end
+
+    facade
+  end
+
+  defp validate_fence_facade!(invalid, _opts) do
+    raise ArgumentError,
+          "template_authority_fence_facade must be a module, got: #{inspect(invalid)}"
+  end
+
+  defp fence_force_ready?(opts) do
+    if Mix.env() == :test do
+      case Keyword.fetch(opts, :fence_force_ready) do
+        {:ok, value} -> value == true
+        :error -> true
+      end
+    else
+      false
+    end
+  end
+
+  # Hot-state upgrade: an upgraded TaskStore process admitting none of the
+  # fence fields stays closed until seeded (fail-closed defaults).
+  defp ensure_fence_shape(state) do
+    state
+    |> Map.put_new(:template_authority_fence_facade, @default_fence_seed_facade)
+    |> Map.put_new(:target_fences, %{})
+    |> Map.put_new(:target_fence_ready?, false)
+    |> Map.put_new(:fence_seed, %{status: :pending})
+    |> Map.put_new(:fence_seed_admit_timeout_ms, @default_fence_seed_admit_timeout_ms)
+    |> Map.put_new(:fence_seed_worker_timeout_ms, @default_fence_seed_worker_timeout_ms)
+  end
+
+  # Bounded valid UTF-8 identifiers before regex or map insertion. Matches the
+  # operation core bounds for target_agent_id and operation_id exactly.
+  defp validate_fence_target(target) when is_binary(target) do
+    cond do
+      byte_size(target) > @max_fence_agent_id_bytes -> {:error, :invalid_target_agent_id}
+      not String.valid?(target) -> {:error, :invalid_target_agent_id}
+      not Regex.match?(@fence_agent_id_re, target) -> {:error, :invalid_target_agent_id}
+      true -> {:ok, target}
+    end
+  end
+
+  defp validate_fence_target(_), do: {:error, :invalid_target_agent_id}
+
+  defp validate_reservation_activation_target(agent_id, reservation_target) do
+    with {:ok, target} <- validate_fence_target(agent_id),
+         {:ok, ^target} <- validate_fence_target(reservation_target) do
+      {:ok, target}
+    else
+      _ -> {:error, :reservation_target_mismatch}
+    end
+  end
+
+  defp validate_fence_operation_id(operation_id) when is_binary(operation_id) do
+    cond do
+      byte_size(operation_id) > @max_fence_operation_id_bytes ->
+        {:error, :invalid_operation_id}
+
+      not String.valid?(operation_id) ->
+        {:error, :invalid_operation_id}
+
+      not Regex.match?(@fence_operation_id_re, operation_id) ->
+        {:error, :invalid_operation_id}
+
+      true ->
+        {:ok, operation_id}
+    end
+  end
+
+  defp validate_fence_operation_id(_), do: {:error, :invalid_operation_id}
+
+  # Barrier counts are bounded integers ONLY: active includes running and
+  # waiting_approval tasks; reserved counts target-bound reservations. Never
+  # task ids, tokens, PIDs, capability ids, or records.
+  defp barrier_counts(state, target) do
+    active_count =
+      state
+      |> Map.get(:tasks, %{})
+      |> Enum.count(fn {_id, rec} ->
+        Map.get(rec, :agent_id) == target and
+          Map.get(rec, :state) in [:running, :waiting_approval]
+      end)
+
+    reserved_count =
+      state
+      |> Map.get(:reservations, %{})
+      |> Enum.count(fn {_id, res} -> Map.get(res, :target_agent_id) == target end)
+
+    %{active_count: active_count, reserved_count: reserved_count}
+  end
+
+  defp find_fence_seed_monitor(state, ref) when is_reference(ref) do
+    seed = Map.get(state, :fence_seed, %{status: :pending})
+    launcher_mon = Map.get(seed, :launcher_mon)
+    worker_mon = Map.get(seed, :worker_mon)
+
+    cond do
+      is_reference(launcher_mon) and launcher_mon == ref and seed.status == :admitting ->
+        {:launcher, seed}
+
+      is_reference(worker_mon) and worker_mon == ref and seed.status == :running ->
+        {:worker, seed}
+
+      true ->
+        :error
+    end
+  end
+
+  defp maybe_begin_fence_seed(state) do
+    state = ensure_fence_shape(state)
+
+    cond do
+      state.target_fence_ready? == true ->
+        state
+
+      Map.get(state.fence_seed, :status) in [:admitting, :running] ->
+        state
+
+      true ->
+        begin_fence_seed(state)
+    end
+  end
+
+  defp begin_fence_seed(state) do
+    state = ensure_fence_shape(state)
+    seed_ref = make_ref()
+
+    admit_timeout =
+      Map.get(state, :fence_seed_admit_timeout_ms, @default_fence_seed_admit_timeout_ms)
+
+    begin_wait_ms = admit_timeout + 1_000
+
+    supervisor =
+      Map.get(
+        state,
+        :cleanup_supervisor,
+        Map.get(state, :task_supervisor, @default_task_supervisor)
+      )
+
+    facade = Map.get(state, :template_authority_fence_facade, @default_fence_seed_facade)
+
+    admit_timer =
+      Process.send_after(self(), {:fence_seed_admit_timeout, seed_ref}, admit_timeout)
+
+    store_pid = self()
+
+    {launcher_pid, launcher_mon} =
+      spawn_monitor(__MODULE__, :fence_seed_launcher, [
+        store_pid,
+        seed_ref,
+        supervisor,
+        facade,
+        begin_wait_ms
+      ])
+
+    attempts = Map.get(state.fence_seed, :attempts, 0)
+
+    seed = %{
+      status: :admitting,
+      seed_ref: seed_ref,
+      attempts: attempts,
+      launcher_pid: launcher_pid,
+      launcher_mon: launcher_mon,
+      worker_pid: nil,
+      worker_mon: nil,
+      admit_timer: admit_timer,
+      worker_timer: nil
+    }
+
+    put_in(state, [:fence_seed], seed)
+  end
+
+  @doc false
+  def fence_seed_launcher(store_pid, seed_ref, supervisor, facade, begin_wait_ms)
+      when is_pid(store_pid) and is_reference(seed_ref) and is_integer(begin_wait_ms) and
+             begin_wait_ms > 0 do
+    case Task.Supervisor.start_child(
+           supervisor,
+           __MODULE__,
+           :run_fence_seed_worker,
+           [store_pid, seed_ref, facade, begin_wait_ms],
+           []
+         ) do
+      {:ok, worker_pid} when is_pid(worker_pid) ->
+        send(store_pid, {:fence_seed_admitted, seed_ref, worker_pid})
+
+      {:ok, worker_pid, _} when is_pid(worker_pid) ->
+        send(store_pid, {:fence_seed_admitted, seed_ref, worker_pid})
+
+      {:error, reason} ->
+        send(store_pid, {:fence_seed_failed, seed_ref, classify_admission_error(reason)})
+
+      other ->
+        send(store_pid, {:fence_seed_failed, seed_ref, classify_admission_error(other)})
+    end
+
+    :ok
+  rescue
+    _ ->
+      send(store_pid, {:fence_seed_failed, seed_ref, :launcher_exception})
+      :ok
+  catch
+    :exit, _ ->
+      send(store_pid, {:fence_seed_failed, seed_ref, :launcher_exit})
+      :ok
+
+    _, _ ->
+      send(store_pid, {:fence_seed_failed, seed_ref, :launcher_error})
+      :ok
+  end
+
+  @doc false
+  # The durable inventory read (list_outstanding/0) happens ONLY here, inside
+  # the supervised worker process — never inside a TaskStore GenServer callback.
+  def run_fence_seed_worker(store_pid, seed_ref, facade, begin_wait_ms)
+      when is_pid(store_pid) and is_reference(seed_ref) and is_integer(begin_wait_ms) and
+             begin_wait_ms > 0 do
+    receive do
+      {:fence_seed_begin, ^seed_ref} ->
+        result =
+          try do
+            facade.list_outstanding()
+          rescue
+            _ -> {:error, :seed_exception}
+          catch
+            :exit, _ -> {:error, :seed_exit}
+            _, _ -> {:error, :seed_error}
+          end
+
+        send(store_pid, {:fence_seed_complete, seed_ref, result})
+        :ok
+    after
+      begin_wait_ms ->
+        # Never admitted (launcher killed / superseded): no I/O performed.
+        :ok
+    end
+  end
+
+  # All fence-seed handlers read fields with Map.get: a stale completion /
+  # failure / timeout / DOWN message may arrive AFTER cleanup_fence_seed/2 has
+  # reset :fence_seed to a minimal %{status: :pending, attempts: n} shape, so dot
+  # access on :seed_ref / timers / monitors / pids would otherwise raise.
+  defp handle_fence_seed_admitted(state, seed_ref, worker_pid) do
+    state = ensure_fence_shape(state)
+    seed = state.fence_seed
+
+    if Map.get(seed, :status) == :admitting and Map.get(seed, :seed_ref) == seed_ref do
+      cancel_timer_safe(Map.get(seed, :admit_timer))
+
+      launcher_mon = Map.get(seed, :launcher_mon)
+      if is_reference(launcher_mon), do: Process.demonitor(launcher_mon, [:flush])
+
+      worker_timeout =
+        Map.get(state, :fence_seed_worker_timeout_ms, @default_fence_seed_worker_timeout_ms)
+
+      worker_timer =
+        Process.send_after(self(), {:fence_seed_worker_timeout, seed_ref}, worker_timeout)
+
+      worker_mon = Process.monitor(worker_pid)
+      send(worker_pid, {:fence_seed_begin, seed_ref})
+
+      seed = %{
+        seed
+        | status: :running,
+          launcher_pid: nil,
+          launcher_mon: nil,
+          admit_timer: nil,
+          worker_pid: worker_pid,
+          worker_mon: worker_mon,
+          worker_timer: worker_timer
+      }
+
+      put_in(state, [:fence_seed], seed)
+    else
+      state
+    end
+  end
+
+  defp handle_fence_seed_failed(state, seed_ref, class) do
+    state = ensure_fence_shape(state)
+    seed = state.fence_seed
+
+    if Map.get(seed, :seed_ref) == seed_ref and Map.get(seed, :status) in [:admitting, :running] do
+      state = cleanup_fence_seed(state, seed)
+      schedule_fence_seed_retry(state, class)
+    else
+      state
+    end
+  end
+
+  defp handle_fence_seed_admit_timeout(state, seed_ref) do
+    state = ensure_fence_shape(state)
+    seed = state.fence_seed
+
+    if Map.get(seed, :seed_ref) == seed_ref and Map.get(seed, :status) == :admitting do
+      launcher_pid = Map.get(seed, :launcher_pid)
+
+      if is_pid(launcher_pid) and Process.alive?(launcher_pid) do
+        Process.exit(launcher_pid, :kill)
+      end
+
+      state = cleanup_fence_seed(state, seed)
+      schedule_fence_seed_retry(state, :admit_timeout)
+    else
+      state
+    end
+  end
+
+  defp handle_fence_seed_worker_timeout(state, seed_ref) do
+    state = ensure_fence_shape(state)
+    seed = state.fence_seed
+
+    if Map.get(seed, :seed_ref) == seed_ref and Map.get(seed, :status) == :running do
+      worker_pid = Map.get(seed, :worker_pid)
+
+      if is_pid(worker_pid) and Process.alive?(worker_pid) do
+        Process.exit(worker_pid, :kill)
+      end
+
+      state = cleanup_fence_seed(state, seed)
+      schedule_fence_seed_retry(state, :worker_timeout)
+    else
+      state
+    end
+  end
+
+  defp handle_fence_seed_complete(state, seed_ref, result) do
+    state = ensure_fence_shape(state)
+    seed = state.fence_seed
+
+    if Map.get(seed, :seed_ref) == seed_ref and Map.get(seed, :status) == :running do
+      state = cleanup_fence_seed(state, seed)
+      apply_fence_seed_result(state, result)
+    else
+      state
+    end
+  end
+
+  defp handle_fence_seed_launcher_down(state, seed, _reason) do
+    if Map.get(seed, :status) == :admitting do
+      state = cleanup_fence_seed(state, seed)
+      schedule_fence_seed_retry(state, :launcher_down)
+    else
+      state
+    end
+  end
+
+  defp handle_fence_seed_worker_down(state, seed, _reason) do
+    if Map.get(seed, :status) == :running do
+      state = cleanup_fence_seed(state, seed)
+      schedule_fence_seed_retry(state, :worker_down)
+    else
+      state
+    end
+  end
+
+  defp cleanup_fence_seed(state, seed) do
+    cancel_timer_safe(Map.get(seed, :admit_timer))
+    cancel_timer_safe(Map.get(seed, :worker_timer))
+
+    launcher_mon = Map.get(seed, :launcher_mon)
+    if is_reference(launcher_mon), do: Process.demonitor(launcher_mon, [:flush])
+
+    worker_mon = Map.get(seed, :worker_mon)
+    if is_reference(worker_mon), do: Process.demonitor(worker_mon, [:flush])
+
+    put_in(state, [:fence_seed], %{status: :pending, attempts: Map.get(seed, :attempts, 0)})
+  end
+
+  # Validate the COMPLETE seed result before replacing the in-memory fence map.
+  # Any malformed list, malformed ids, duplicate target, conflicting operation,
+  # backend error, worker exit, or timeout keeps readiness false.
+  defp apply_fence_seed_result(state, result) do
+    case validate_fence_seed(result) do
+      {:ok, fence_map} ->
+        %{state | target_fences: fence_map, target_fence_ready?: true}
+
+      {:error, _reason} ->
+        schedule_fence_seed_retry(state, :seed_invalid)
+    end
+  end
+
+  defp validate_fence_seed(result) do
+    case require_seed_list(result) do
+      {:ok, list} -> build_fence_map(list)
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp require_seed_list({:ok, list}) when is_list(list), do: {:ok, list}
+  defp require_seed_list({:ok, _not_list}), do: {:error, :invalid_record}
+  defp require_seed_list({:error, _reason}), do: {:error, :backend_unavailable}
+  defp require_seed_list(_other), do: {:error, :backend_unavailable}
+
+  defp build_fence_map(list) do
+    Enum.reduce_while(list, {:ok, %{}}, fn entry, {:ok, acc} ->
+      with {:ok, entry} <- require_seed_map(entry),
+           target when is_binary(target) <- Map.get(entry, "target_agent_id"),
+           operation_id when is_binary(operation_id) <- Map.get(entry, "operation_id"),
+           {:ok, target} <- validate_fence_target(target),
+           {:ok, operation_id} <- validate_fence_operation_id(operation_id) do
+        if Map.has_key?(acc, target) do
+          {:halt, {:error, :invalid_record}}
+        else
+          {:cont, {:ok, Map.put(acc, target, operation_id)}}
+        end
+      else
+        _ -> {:halt, {:error, :invalid_record}}
+      end
+    end)
+  end
+
+  defp require_seed_map(value) when is_map(value), do: {:ok, value}
+  defp require_seed_map(_), do: {:error, :invalid_record}
+
+  defp schedule_fence_seed_retry(state, _class) do
+    state = ensure_fence_shape(state)
+
+    if state.target_fence_ready? == true do
+      state
+    else
+      attempts = Map.get(state.fence_seed, :attempts, 0) + 1
+      delay = fence_seed_retry_delay(state, attempts)
+      Process.send_after(self(), :retry_fence_seed_msg, delay)
+      put_in(state, [:fence_seed, :attempts], attempts)
+    end
+  end
+
+  defp fence_seed_retry_delay(state, attempt_index) when is_integer(attempt_index) do
+    base = Map.get(state, :recovery_retry_base_ms, @default_recovery_retry_base_ms)
+    max_delay = Map.get(state, :recovery_retry_max_ms, @default_recovery_retry_max_ms)
+    min(max_delay, base * Integer.pow(2, max(attempt_index, 0)))
   end
 
   defp validate_task_id_generator!(nil), do: nil

@@ -179,7 +179,7 @@ defmodule Arbor.Agent.OrchestrationTest do
   end
 
   defmodule FakeTaskStore do
-    def reserve(_opts \\ []) do
+    def reserve(_target_agent_id, _opts \\ []) do
       task_id =
         Process.get({__MODULE__, :next_task_id}) ||
           Arbor.Identifiers.generate_id("task_")
@@ -317,7 +317,7 @@ defmodule Arbor.Agent.OrchestrationTest do
   end
 
   defmodule TerminalTaskStore do
-    def reserve(_opts \\ []) do
+    def reserve(_target_agent_id, _opts \\ []) do
       task_id =
         Process.get({__MODULE__, :next_task_id}) ||
           Arbor.Identifiers.generate_id("task_")

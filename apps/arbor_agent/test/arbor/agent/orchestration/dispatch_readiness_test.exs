@@ -135,7 +135,7 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessTest do
       end
     end
 
-    def reserve(opts) do
+    def reserve(_target_agent_id, opts) do
       EffectsObserver.record({:reserve, opts})
       flunk("readiness must not reserve")
     end

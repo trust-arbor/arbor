@@ -143,7 +143,7 @@ defmodule Arbor.Agent.Orchestration.TaskControlOperatorReworkTest do
       )
 
     assert {:ok, %{task_id: task_id, reservation_token: token}} =
-             TaskStore.reserve(name: store)
+             TaskStore.reserve("agent_1", name: store)
 
     assert :ok = TaskStore.commit_recovery_marker(task_id, token, name: store)
 
@@ -196,7 +196,7 @@ defmodule Arbor.Agent.Orchestration.TaskControlOperatorReworkTest do
 
   defmodule FailActivateStore do
     @moduledoc false
-    def reserve(_opts) do
+    def reserve(_target_agent_id, _opts) do
       token = TaskControlLease.generate_reservation_token()
       {:ok, %{task_id: "task_once_1", reservation_token: token}}
     end
@@ -245,7 +245,7 @@ defmodule Arbor.Agent.Orchestration.TaskControlOperatorReworkTest do
         id: unique(:cache_store_id)
       )
 
-    assert {:error, :recovery_durability_unavailable} = TaskStore.reserve(name: store)
+    assert {:error, :recovery_durability_unavailable} = TaskStore.reserve("agent_1", name: store)
   end
 
   test "reservation monitor index is O(1) by exact ref", %{supervisor: supervisor} do
@@ -261,7 +261,7 @@ defmodule Arbor.Agent.Orchestration.TaskControlOperatorReworkTest do
         id: unique(:mon_store_id)
       )
 
-    assert {:ok, %{task_id: task_id}} = TaskStore.reserve(name: store)
+    assert {:ok, %{task_id: task_id}} = TaskStore.reserve("agent_1", name: store)
     state = :sys.get_state(store)
     assert map_size(state.reservation_monitor_index) == 1
     [{mon, ^task_id}] = Map.to_list(state.reservation_monitor_index)
@@ -380,7 +380,7 @@ defmodule Arbor.Agent.Orchestration.TaskControlOperatorReworkTest do
     FlakyListFacade.allow_success!()
 
     assert wait_until(fn -> TaskStore.recovery_ready?(name: store) end, 200)
-    assert {:ok, %{task_id: _}} = TaskStore.reserve(name: store)
+    assert {:ok, %{task_id: _}} = TaskStore.reserve("agent_1", name: store)
   end
 
   test "stale marker-put completion cannot mutate replacement reservation", %{
@@ -402,7 +402,7 @@ defmodule Arbor.Agent.Orchestration.TaskControlOperatorReworkTest do
       )
 
     assert {:ok, %{task_id: ^fixed_id, reservation_token: token_a}} =
-             TaskStore.reserve(name: store)
+             TaskStore.reserve("agent_1", name: store)
 
     hash_a = TaskControlLease.token_hash(token_a)
 
@@ -410,7 +410,7 @@ defmodule Arbor.Agent.Orchestration.TaskControlOperatorReworkTest do
     assert :ok = TaskStore.release(fixed_id, token_a, name: store)
 
     assert {:ok, %{task_id: ^fixed_id, reservation_token: token_b}} =
-             TaskStore.reserve(name: store)
+             TaskStore.reserve("agent_1", name: store)
 
     refute token_a == token_b
     hash_b = TaskControlLease.token_hash(token_b)
@@ -488,7 +488,9 @@ defmodule Arbor.Agent.Orchestration.TaskControlOperatorReworkTest do
     # Owner process must call reserve/release (token is owner-bound).
     owner =
       spawn(fn ->
-        {:ok, %{task_id: task_id, reservation_token: token}} = TaskStore.reserve(name: store)
+        {:ok, %{task_id: task_id, reservation_token: token}} =
+          TaskStore.reserve("agent_1", name: store)
+
         :ok = TaskStore.commit_recovery_marker(task_id, token, name: store)
         send(test_pid, {:reserved, task_id})
 
@@ -563,7 +565,7 @@ defmodule Arbor.Agent.Orchestration.TaskControlOperatorReworkTest do
       })
     end)
 
-    assert {:error, :task_id_already_exists} = TaskStore.reserve(name: store)
+    assert {:error, :task_id_already_exists} = TaskStore.reserve("agent_1", name: store)
 
     # Clear pending; occupy via recovery_task_index instead.
     :sys.replace_state(store, fn state ->
@@ -572,7 +574,7 @@ defmodule Arbor.Agent.Orchestration.TaskControlOperatorReworkTest do
       |> put_in([:recovery_task_index, occupied_id], make_ref())
     end)
 
-    assert {:error, :task_id_already_exists} = TaskStore.reserve(name: store)
+    assert {:error, :task_id_already_exists} = TaskStore.reserve("agent_1", name: store)
 
     # Clear recovery indexes; an in-flight retirement still owns the id.
     :sys.replace_state(store, fn state ->
@@ -582,7 +584,7 @@ defmodule Arbor.Agent.Orchestration.TaskControlOperatorReworkTest do
       |> put_in([:lease_retire_task_index, occupied_id], make_ref())
     end)
 
-    assert {:error, :task_id_already_exists} = TaskStore.reserve(name: store)
+    assert {:error, :task_id_already_exists} = TaskStore.reserve("agent_1", name: store)
 
     # Clear indexes — same generator now succeeds.
     :sys.replace_state(store, fn state ->
@@ -592,7 +594,7 @@ defmodule Arbor.Agent.Orchestration.TaskControlOperatorReworkTest do
       |> put_in([:lease_retire_task_index], %{})
     end)
 
-    assert {:ok, %{task_id: ^occupied_id}} = TaskStore.reserve(name: store)
+    assert {:ok, %{task_id: ^occupied_id}} = TaskStore.reserve("agent_1", name: store)
   end
 
   defp unique(prefix), do: :"#{prefix}_#{System.unique_integer([:positive])}"

@@ -63,7 +63,7 @@ defmodule Arbor.Agent.Orchestration.TaskControlReservationRecoveryTest do
 
   test "reserve generates server-owned id and requires token for activate", %{store: store} do
     assert {:ok, %{task_id: task_id, reservation_token: token}} =
-             TaskStore.reserve(name: store)
+             TaskStore.reserve("agent_1", name: store)
 
     assert TaskControlLease.valid_task_id?(task_id)
     assert is_binary(token)
@@ -105,8 +105,10 @@ defmodule Arbor.Agent.Orchestration.TaskControlReservationRecoveryTest do
         id: name
       )
 
-    assert {:ok, %{task_id: t1, reservation_token: tok1}} = TaskStore.reserve(name: store2)
-    assert {:error, :reservation_capacity_exhausted} = TaskStore.reserve(name: store2)
+    assert {:ok, %{task_id: t1, reservation_token: tok1}} =
+             TaskStore.reserve("agent_1", name: store2)
+
+    assert {:error, :reservation_capacity_exhausted} = TaskStore.reserve("agent_1", name: store2)
 
     # Terminal retirement still accepts members even at capacity (no drop).
     ids = Map.new(TaskControlLease.kinds(), fn k -> {k, "cap_#{k}_cap"} end)
@@ -137,7 +139,7 @@ defmodule Arbor.Agent.Orchestration.TaskControlReservationRecoveryTest do
 
   test "public collision: second principal cannot select victim task_id", %{store: store} do
     assert {:ok, %{task_id: victim, reservation_token: token}} =
-             TaskStore.reserve(name: store)
+             TaskStore.reserve("agent_1", name: store)
 
     assert :ok = TaskStore.commit_recovery_marker(victim, token, name: store)
 

@@ -121,7 +121,7 @@ defmodule Arbor.Agent.Orchestration.TaskControlRecoveryPersistenceTest do
     assert wait_until(fn -> TaskStore.recovery_ready?(name: store) end)
 
     assert {:ok, %{task_id: task_id, reservation_token: token}} =
-             TaskStore.reserve(name: store)
+             TaskStore.reserve("agent_1", name: store)
 
     assert :ok = TaskStore.commit_recovery_marker(task_id, token, name: store)
 
@@ -210,7 +210,7 @@ defmodule Arbor.Agent.Orchestration.TaskControlRecoveryPersistenceTest do
       )
 
     refute wait_until(fn -> TaskStore.recovery_ready?(name: task_store) end, 50)
-    assert {:error, :recovery_not_ready} = TaskStore.reserve(name: task_store)
+    assert {:error, :recovery_not_ready} = TaskStore.reserve("agent_1", name: task_store)
   end
 
   defp start_record_store(backend) do
