@@ -1243,10 +1243,93 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       assert {:ok, %Record{} = durable} =
                BufferedStore.authoritative_get(id, name: @capability_store)
 
-      assert durable == mismatch_record
+      # The backend owns generation/revision/timestamps, so compare the logical
+      # record that the conflicting writer admitted. None of our requested
+      # capability payload may replace it.
+      assert durable.id == mismatch_record.id
+      assert durable.key == mismatch_record.key
+      assert durable.data == mismatch_record.data
+      assert durable.metadata == mismatch_record.metadata
 
       assert {:ok, %Capability{principal_id: "agent_ack_f5b_mismatch"}} =
                Serializer.deserialize(durable.data)
+    end
+  end
+
+  # ==========================================================================
+  # F5c — a post-admission durable-only capability still occupies its
+  # principal/resource; a different deterministic id must not be admitted.
+  # ==========================================================================
+  test "security regression: durable-only same-resource grant remains a conflict" do
+    fresh_isolated_store_with_failures()
+    principal = "agent_ack_f5c"
+    resource = "arbor://fs/read/ack-f5c"
+    first = det_grant_opts("f5c-first", principal, resource)
+    second = det_grant_opts("f5c-second", principal, resource)
+
+    if acknowledged_available?() do
+      CASSandbox.fail_post_admission(1)
+
+      assert {:error, :outcome_unknown} = Security.acknowledged_grant(first)
+      assert {:error, :not_found} = CapabilityStore.get(first[:capability_id])
+
+      assert {:ok, %Record{} = first_record} =
+               BufferedStore.authoritative_get(first[:capability_id], name: @capability_store)
+
+      assert {:error, :resource_conflict} = Security.acknowledged_grant(second)
+
+      assert {:error, :not_found} =
+               BufferedStore.authoritative_get(second[:capability_id], name: @capability_store)
+
+      assert {:ok, ^first_record} =
+               BufferedStore.authoritative_get(first[:capability_id], name: @capability_store)
+
+      assert {:ok, :idempotent, first_id} = Security.acknowledged_grant(first)
+      assert first_id == first[:capability_id]
+      assert {:ok, %Capability{id: ^first_id}} = CapabilityStore.get(first_id)
+    else
+      assert {:ok, original} = Security.grant(principal: principal, resource: resource)
+      assert {:ok, replacement} = Security.grant(principal: principal, resource: resource)
+      assert replacement.id == original.id
+    end
+  end
+
+  # ==========================================================================
+  # F5d — exact identity is defined by the signed canonical payload, not raw
+  # map-key representation after a persistence round trip.
+  # ==========================================================================
+  test "security regression: exact identity repair tolerates normalized map keys" do
+    fresh_isolated_store()
+    principal = "agent_ack_f5d"
+    resource = "arbor://fs/read/ack-f5d"
+
+    opts =
+      det_grant_opts("f5d", principal, resource)
+      |> Keyword.put(:metadata, %{source: "template_authority_policy"})
+
+    if acknowledged_available?() do
+      seeded = build_signed_cap(opts)
+      assert {:ok, :stored} = CapabilityStore.put(seeded)
+      :ok = BufferedStore.acknowledged_delete(opts[:capability_id], name: @capability_store)
+
+      # JSON persistence normalizes object keys to strings. The signature and
+      # grant identity remain exact because the canonical payload stringifies
+      # keys before signing.
+      normalized = %{seeded | metadata: %{"source" => "template_authority_policy"}}
+      assert :ok = SystemAuthority.verify_authority_capability_signature(normalized)
+
+      :sys.replace_state(CapabilityStore, fn state ->
+        put_in(state, [:by_id, seeded.id], normalized)
+      end)
+
+      assert {:ok, :idempotent, id} = Security.acknowledged_grant(opts)
+      assert id == seeded.id
+      assert {:ok, %Capability{id: ^id}} = CapabilityStore.get(id)
+      assert {:ok, %Record{}} = BufferedStore.authoritative_get(id, name: @capability_store)
+    else
+      assert {:ok, original} = Security.grant(principal: principal, resource: resource)
+      assert {:ok, replacement} = Security.grant(principal: principal, resource: resource)
+      assert replacement.id == original.id
     end
   end
 
