@@ -14,9 +14,11 @@ defmodule Arbor.Agent.Orchestration do
 
   Public `dispatch/3` **never accepts a caller-selected `task_id`** (including
   under `authorize?: false`). TaskStore generates unguessable server-owned ids
-  via `reserve/1`, commits a durable capability-ID-free recovery marker before
-  minting, grants the closed six-member exact-task lease (least-risk order,
-  `approval_answer` last), then `activate/5`s the reserved identity.
+  via `reserve/2`, binding the reservation to the exact dispatch target before
+  it commits a durable capability-ID-free recovery marker. It then grants the
+  closed six-member exact-task lease (least-risk order, `approval_answer` last)
+  and `activate/5`s the reserved identity, which re-compares the target before
+  admission so a reservation cannot be retargeted.
 
   Recovery markers and `Security.revoke_by_task/1` run through TaskStore-owned
   workers (no Persistence/Security I/O in GenServer callbacks). Grant

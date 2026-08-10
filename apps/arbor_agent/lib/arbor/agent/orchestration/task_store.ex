@@ -41,6 +41,20 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   the task supervisor so status and result reads remain available. Adoption is
   eligible only for successful terminal JSON-clean tasks; callback errors leave
   the prior result unchanged so callers can retry.
+
+  ## Target dispatch fencing
+
+  Template-authority maintenance installs an operation-owned fence for one
+  target through `install_target_fence/3` and removes it through
+  `remove_target_fence/3`. Installation and the bounded active/reserved counts
+  are one TaskStore linearization point. Reservations, activation, and direct
+  dispatch all fail closed while that target is fenced.
+
+  On startup, a supervised worker rebuilds fences from outstanding durable
+  template-authority operations. Public `recovery_ready?/1` is therefore the
+  conjunction of task-control replay readiness and fence-seed readiness. Until
+  both are established, dispatch admission stays closed; verified fence probes
+  return `{:error, :fence_not_ready}` rather than treating unknown as absent.
   """
 
   use GenServer
@@ -262,7 +276,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     )
   end
 
-  @doc false
+  @doc "Return whether task-control replay and durable fence seeding are both ready."
   @spec recovery_ready?(keyword() | map()) :: boolean()
   def recovery_ready?(opts \\ []) do
     case GenServer.call(store_name(opts), :recovery_ready?) do
@@ -312,15 +326,22 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     )
   end
 
-  @doc false
-  @spec target_fenced?(String.t(), keyword() | map()) :: boolean()
+  @doc "Return verified fence presence without collapsing unknown readiness to absence."
+  @spec target_fenced?(String.t(), keyword() | map()) ::
+          {:ok, boolean()} | {:error, :fence_not_ready | :invalid_target_agent_id}
   def target_fenced?(target_agent_id, opts \\ []) do
     GenServer.call(store_name(opts), {:target_fenced?, target_agent_id})
   end
 
-  @doc false
+  @doc "Verify that an exact operation owns the target's ready dispatch fence."
   @spec verify_target_fence(String.t(), String.t(), keyword() | map()) ::
-          :ok | {:error, :target_not_fenced | :not_owner}
+          :ok
+          | {:error,
+             :fence_not_ready
+             | :invalid_target_agent_id
+             | :invalid_operation_id
+             | :target_not_fenced
+             | :not_owner}
   def verify_target_fence(target_agent_id, operation_id, opts \\ []) do
     GenServer.call(
       store_name(opts),
@@ -334,6 +355,11 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   Production public dispatch goes through `Arbor.Agent.Orchestration` which
   reserves, commits a recovery marker, grants the lease, then `activate/5`.
   Direct `dispatch/3` remains for store unit tests and internal runners.
+
+  The target is validated before fence lookup. Direct dispatch returns
+  `{:error, :fence_not_ready}` until durable fence seeding completes and
+  `{:error, :target_fenced}` while an operation owns the target fence; neither
+  error starts a runner.
 
   Options:
 
@@ -983,13 +1009,13 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   def handle_call({:target_fenced?, target_agent_id}, _from, state) do
     state = ensure_fence_shape(state)
 
-    fenced? =
-      case validate_fence_target(target_agent_id) do
-        {:ok, target} -> Map.has_key?(state.target_fences, target)
-        _ -> false
+    reply =
+      with {:ok, target} <- validate_fence_target(target_agent_id),
+           :ok <- ensure_fence_seed_ready(state) do
+        {:ok, Map.has_key?(state.target_fences, target)}
       end
 
-    {:reply, fenced?, state}
+    {:reply, reply, state}
   end
 
   def handle_call(
@@ -1001,14 +1027,13 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
 
     reply =
       with {:ok, target} <- validate_fence_target(target_agent_id),
-           {:ok, op} <- validate_fence_operation_id(operation_id) do
+           {:ok, op} <- validate_fence_operation_id(operation_id),
+           :ok <- ensure_fence_seed_ready(state) do
         case Map.get(state.target_fences, target) do
           ^op -> :ok
           nil -> {:error, :target_not_fenced}
           _other_owner -> {:error, :not_owner}
         end
-      else
-        {:error, _reason} -> {:error, :target_not_fenced}
       end
 
     {:reply, reply, state}
@@ -1282,6 +1307,12 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     if Map.has_key?(state.target_fences, target),
       do: {:error, :target_fenced},
       else: :ok
+  end
+
+  defp ensure_fence_seed_ready(state) do
+    if state.target_fence_ready? == true,
+      do: :ok,
+      else: {:error, :fence_not_ready}
   end
 
   defp ensure_recovery_marker(reservation, opts) do

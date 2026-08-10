@@ -295,7 +295,7 @@ defmodule Arbor.Agent.Orchestration.TemplateAuthorityDispatchFenceSecurityRegres
     assert {:ok, second} = TaskStore.install_target_fence("agent_a", "op_1", name: store)
     assert first == second
 
-    assert true == TaskStore.target_fenced?("agent_a", name: store)
+    assert {:ok, true} == TaskStore.target_fenced?("agent_a", name: store)
     assert :ok = TaskStore.verify_target_fence("agent_a", "op_1", name: store)
 
     # A different operation cannot replace, verify, or remove the owner.
@@ -313,7 +313,7 @@ defmodule Arbor.Agent.Orchestration.TemplateAuthorityDispatchFenceSecurityRegres
     # Exact owner removes; a second remove reports the fence is gone.
     assert :ok = TaskStore.remove_target_fence("agent_a", "op_1", name: store)
     assert {:error, :not_found} = TaskStore.remove_target_fence("agent_a", "op_1", name: store)
-    assert false == TaskStore.target_fenced?("agent_a", name: store)
+    assert {:ok, false} == TaskStore.target_fenced?("agent_a", name: store)
 
     # An unrelated target was never affected.
     assert {:ok, %{active_count: 0, reserved_count: 0}} =
@@ -500,7 +500,7 @@ defmodule Arbor.Agent.Orchestration.TemplateAuthorityDispatchFenceSecurityRegres
     assert {:error, :not_owner} =
              TaskStore.verify_target_fence("agent_active", "op_other", name: store)
 
-    assert true == TaskStore.target_fenced?("agent_active", name: store)
+    assert {:ok, true} == TaskStore.target_fenced?("agent_active", name: store)
 
     # The reservation token never appears in any public reply.
     refute inspect(reply) =~ reserved_token
