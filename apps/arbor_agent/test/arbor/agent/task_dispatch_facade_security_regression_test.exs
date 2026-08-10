@@ -395,8 +395,11 @@ defmodule Arbor.Agent.TaskDispatchFacadeSecurityRegressionTest do
         :ok
 
       nil ->
-        {:ok, _pid} =
-          Task.Supervisor.start_link(name: Arbor.Agent.Orchestration.TaskSupervisor)
+        _pid =
+          start_supervised!(
+            {Task.Supervisor, name: Arbor.Agent.Orchestration.TaskSupervisor},
+            id: Arbor.Agent.Orchestration.TaskSupervisor
+          )
 
         :ok
     end
