@@ -390,6 +390,54 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
              Security.authorize(target_principal, target_resource, nil, verify_identity: false)
   end
 
+  test "security regression: acknowledged mutation fails closed on a CAS-unsupported backend" do
+    # JSONFile does not implement compare_and_swap/compare_and_delete, so the
+    # acknowledged CAS admission must fail closed (:outcome_unknown) and never
+    # report success or mutate live/durable state. (Authoritative failure mode
+    # for unsupported backends per the C3A correction.)
+    principal = "agent_ack_unsupported_backend"
+    resource = "arbor://fs/read/ack-unsupported-backend"
+
+    backend_dir = Path.join("var", "ack-unsupported-#{unique_integer()}")
+    tmp_dir = Path.expand(backend_dir, File.cwd!())
+    File.mkdir_p!(tmp_dir)
+    on_exit(fn -> File.rm_rf!(tmp_dir) end)
+
+    configure_isolated_json_store(backend_dir)
+
+    if function_exported?(Security, :acknowledged_grant, 1) and
+         function_exported?(Security, :acknowledged_revoke, 1) do
+      det_id = "cap_" <> (:erlang.md5("ack-unsupported") |> Base.encode16(case: :lower))
+
+      opts = [
+        capability_id: det_id,
+        granted_at: ~U[2026-01-01 00:00:00Z],
+        principal: principal,
+        resource: resource
+      ]
+
+      assert {:error, :outcome_unknown} = Security.acknowledged_grant(opts)
+      assert {:error, :not_found} = CapabilityStore.get(det_id)
+
+      # No durable mutation either: the CAS-unsupported backend never admitted.
+      assert {:error, :not_found} =
+               BufferedStore.authoritative_get(det_id, name: @capability_store)
+
+      # An ordinary (non-CAS) cap seeds live + durable; its acknowledged revoke
+      # also fails closed on the CAS-unsupported backend without evicting live.
+      {:ok, seeded} = Security.grant(principal: principal, resource: resource)
+      assert {:error, :outcome_unknown} = Security.acknowledged_revoke(seeded.id)
+
+      assert {:ok, :authorized} =
+               Security.authorize(principal, resource, nil, verify_identity: false)
+
+      # The seeded cap remains durable (the failed acknowledged revoke mutated
+      # nothing on the CAS-unsupported backend).
+      assert {:ok, %Record{}} =
+               BufferedStore.authoritative_get(seeded.id, name: @capability_store)
+    end
+  end
+
   defp configure_isolated_json_store(tmp_dir, backend \\ JSONFile) do
     on_exit(&restore_security_children/0)
 
