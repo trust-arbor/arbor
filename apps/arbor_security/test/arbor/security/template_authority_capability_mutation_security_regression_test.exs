@@ -25,6 +25,15 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
   # (not our replacement) under the id so the acknowledged path must classify
   # :id_conflict without overwriting it.
   @cas_mismatch_key {__MODULE__, :cas_mismatch}
+  # No-scan probe: counts full-inventory reads (Store.list/1), which backs the
+  # authoritative_entries/authoritative_list fallback. Tests reset this AFTER
+  # the store starts (restore's list already ran) and assert it stays 0 during
+  # an acknowledged grant.
+  @list_calls_key {__MODULE__, :list_calls}
+  # Post-delete failure injection: armed on a genuine compare_and_delete
+  # success, it exits to simulate a crash at or after a durable revoke
+  # admission boundary (durable gone, live retained, outcome unknown).
+  @post_delete_key {__MODULE__, :post_delete}
 
   def fail_puts(n) when is_integer(n) and n >= 0, do: :persistent_term.put(@puts_key, n)
   def fail_deletes(n) when is_integer(n) and n >= 0, do: :persistent_term.put(@deletes_key, n)
@@ -34,6 +43,13 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
 
   def fail_post_admission(n) when is_integer(n) and n >= 0,
     do: :persistent_term.put(@post_admission_key, n)
+
+  def fail_post_delete(n) when is_integer(n) and n >= 0,
+    do: :persistent_term.put(@post_delete_key, n)
+
+  def inventory_scan_count, do: :persistent_term.get(@list_calls_key, 0)
+
+  def reset_inventory_scan_count, do: :persistent_term.erase(@list_calls_key)
 
   def seed_cas_conflict_mismatch(%Record{} = record),
     do: :persistent_term.put(@cas_mismatch_key, record)
@@ -45,6 +61,8 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     :persistent_term.erase(@post_admission_key)
     :persistent_term.erase(@poison_get_key)
     :persistent_term.erase(@cas_mismatch_key)
+    :persistent_term.erase(@list_calls_key)
+    :persistent_term.erase(@post_delete_key)
   end
 
   def start_link(opts), do: ETS.start_link(opts)
@@ -71,7 +89,10 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
   end
 
   @impl true
-  def list(opts), do: ETS.list(opts)
+  def list(opts) do
+    :persistent_term.put(@list_calls_key, :persistent_term.get(@list_calls_key, 0) + 1)
+    ETS.list(opts)
+  end
 
   @impl true
   def exists?(key, opts), do: ETS.exists?(key, opts)
@@ -121,7 +142,17 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     if inject?(@deletes_key) do
       {:error, :injected_delete_failure}
     else
-      ETS.compare_and_delete(key, expected, opts)
+      case ETS.compare_and_delete(key, expected, opts) do
+        :ok ->
+          # Genuine durable delete committed. If armed, exit to simulate a
+          # crash at or after the durable revoke boundary so the caller cannot
+          # confirm whether live eviction + signal completed.
+          if inject?(@post_delete_key), do: exit({:post_delete, :timeout})
+          :ok
+
+        other ->
+          other
+      end
     end
   end
 
@@ -182,6 +213,12 @@ end
 defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTest do
   @moduledoc """
   Phase 4C C3A — crash-journal-safe acknowledged capability mutation.
+
+  CANONICAL SUITE: this is the canonical general acknowledged-mutation
+  regression file for the Security capability store (acknowledged grant/revoke,
+  same-resource admission, post-admission ambiguity, convergence signals,
+  signed_at determinism, and bounded uncertainty). Do not split or duplicate
+  these invariants into other files without moving them here.
 
   The regression file is RUNNABLE on the immediate parent (HEAD~1): each test
   branches on `acknowledged_available?/0`. On the candidate it exercises the
@@ -265,6 +302,10 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
         metadata: Keyword.get(opts, :metadata, %{})
       )
 
+    # Mirror the acknowledged facade: pin signed_at deterministically to
+    # granted_at before signing so the signing payload is byte-identical to
+    # Arbor.Security.acknowledged_grant/1 (identity-exact across retries).
+    cap = %{cap | signed_at: cap.granted_at}
     {:ok, signed} = SystemAuthority.sign_capability(cap)
     signed
   end
@@ -1420,6 +1461,492 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
   end
 
   # ==========================================================================
+  # C1 — acknowledged admission never scans the full live or authoritative
+  # inventory (canonical by_resource index + bounded ledger). Size-independent.
+  # ==========================================================================
+  test "security regression: acknowledged grant admits without any full inventory scan" do
+    fresh_isolated_store()
+
+    for i <- 1..12 do
+      assert {:ok, _} =
+               Security.grant(
+                 principal: "agent_unrelated_c1_#{i}",
+                 resource: "arbor://fs/read/unrelated-c1-#{i}"
+               )
+    end
+
+    principal = "agent_ack_c1"
+    resource = "arbor://fs/read/ack-c1"
+    opts = det_grant_opts("c1", principal, resource)
+
+    if acknowledged_available?() do
+      CASSandbox.reset_inventory_scan_count()
+      assert {:ok, :applied, _id} = Security.acknowledged_grant(opts)
+      assert CASSandbox.inventory_scan_count() == 0
+
+      CASSandbox.reset_inventory_scan_count()
+      assert {:ok, :idempotent, _id} = Security.acknowledged_grant(opts)
+      assert CASSandbox.inventory_scan_count() == 0
+    else
+      assert {:ok, _} = Security.grant(principal: principal, resource: resource)
+    end
+  end
+
+  # ==========================================================================
+  # C2 — the canonical by_resource index is maintained on every mutation path
+  # so a stale by_principal cannot hide a same-resource conflict, with zero
+  # full-inventory scans.
+  # ==========================================================================
+  test "security regression: by_resource maintenance detects conflicts without scanning" do
+    fresh_isolated_store()
+    principal = "agent_ack_c2"
+    resource = "arbor://fs/read/ack-c2"
+
+    if acknowledged_available?() do
+      a = det_grant_opts("c2-a", principal, resource)
+      b = det_grant_opts("c2-b", principal, resource)
+
+      assert {:ok, :applied, _} = Security.acknowledged_grant(a)
+
+      CASSandbox.reset_inventory_scan_count()
+      assert {:error, :resource_conflict} = Security.acknowledged_grant(b)
+      assert CASSandbox.inventory_scan_count() == 0
+
+      assert :ok = Security.revoke(a[:capability_id])
+
+      CASSandbox.reset_inventory_scan_count()
+      assert {:ok, :applied, _} = Security.acknowledged_grant(b)
+      assert CASSandbox.inventory_scan_count() == 0
+    else
+      assert {:ok, _} = Security.grant(principal: principal, resource: resource)
+    end
+  end
+
+  test "security regression: cascade revoke frees the canonical resource index" do
+    fresh_isolated_store()
+    principal = "agent_ack_c2c"
+    resource = "arbor://fs/read/ack-c2c"
+
+    if acknowledged_available?() do
+      a = det_grant_opts("c2c-a", principal, resource)
+      b = det_grant_opts("c2c-b", principal, resource)
+
+      assert {:ok, :applied, _} = Security.acknowledged_grant(a)
+      assert {:ok, _count} = CapabilityStore.cascade_revoke(a[:capability_id])
+
+      CASSandbox.reset_inventory_scan_count()
+      assert {:ok, :applied, _} = Security.acknowledged_grant(b)
+      assert CASSandbox.inventory_scan_count() == 0
+    else
+      assert {:ok, _} = Security.grant(principal: principal, resource: resource)
+    end
+  end
+
+  test "security regression: acknowledged revoke frees the canonical resource index" do
+    fresh_isolated_store()
+    principal = "agent_ack_c2r"
+    resource = "arbor://fs/read/ack-c2r"
+
+    if acknowledged_available?() do
+      a = det_grant_opts("c2r-a", principal, resource)
+      b = det_grant_opts("c2r-b", principal, resource)
+
+      assert {:ok, :applied, aid} = Security.acknowledged_grant(a)
+      assert {:ok, :applied, ^aid} = Security.acknowledged_revoke(aid)
+
+      CASSandbox.reset_inventory_scan_count()
+      assert {:ok, :applied, _} = Security.acknowledged_grant(b)
+      assert CASSandbox.inventory_scan_count() == 0
+    else
+      assert {:ok, _} = Security.grant(principal: principal, resource: resource)
+    end
+  end
+
+  test "security regression: expiry frees the canonical resource index" do
+    fresh_isolated_store()
+    principal = "agent_ack_c2e"
+    resource = "arbor://fs/read/ack-c2e"
+
+    if acknowledged_available?() do
+      past = DateTime.add(DateTime.utc_now(), -1, :second)
+      a = det_grant_opts("c2e-a", principal, resource, expires_at: past)
+      b = det_grant_opts("c2e-b", principal, resource)
+
+      assert {:ok, :applied, _} = Security.acknowledged_grant(a)
+      send(CapabilityStore, :cleanup)
+      _ = :sys.get_state(CapabilityStore)
+
+      CASSandbox.reset_inventory_scan_count()
+      assert {:ok, :applied, _} = Security.acknowledged_grant(b)
+      assert CASSandbox.inventory_scan_count() == 0
+    else
+      assert {:ok, _} = Security.grant(principal: principal, resource: resource)
+    end
+  end
+
+  # ==========================================================================
+  # C3 — post-admission ambiguous grant retains a bounded ledger intent; a
+  # different id conflicts and an exact retry converges, both without scanning.
+  # ==========================================================================
+  test "security regression: post-admission alternate-id conflict is ledger-driven without scanning" do
+    fresh_isolated_store_with_failures()
+    principal = "agent_ack_c3"
+    resource = "arbor://fs/read/ack-c3"
+    first = det_grant_opts("c3-first", principal, resource)
+    second = det_grant_opts("c3-second", principal, resource)
+
+    if acknowledged_available?() do
+      CASSandbox.fail_post_admission(1)
+      assert {:error, :outcome_unknown} = Security.acknowledged_grant(first)
+
+      CASSandbox.reset_inventory_scan_count()
+      assert {:error, :resource_conflict} = Security.acknowledged_grant(second)
+      assert CASSandbox.inventory_scan_count() == 0
+
+      CASSandbox.reset_inventory_scan_count()
+      assert {:ok, :idempotent, fid} = Security.acknowledged_grant(first)
+      assert CASSandbox.inventory_scan_count() == 0
+      assert {:ok, %Capability{id: ^fid}} = CapabilityStore.get(fid)
+    else
+      assert {:ok, _} = Security.grant(principal: principal, resource: resource)
+    end
+  end
+
+  # ==========================================================================
+  # C4 — the uncertainty ledger is bounded by the per-principal/global quotas
+  # and fails closed at capacity (no scan, no over-admission).
+  # ==========================================================================
+  test "security regression: bounded uncertainty ledger fails closed at capacity" do
+    fresh_isolated_store_with_failures()
+
+    prev_per = Application.get_env(:arbor_security, :max_capabilities_per_agent)
+    Application.put_env(:arbor_security, :max_capabilities_per_agent, 2)
+
+    on_exit(fn ->
+      Application.put_env(:arbor_security, :max_capabilities_per_agent, prev_per)
+    end)
+
+    principal = "agent_ack_c4"
+
+    if acknowledged_available?() do
+      o1 = det_grant_opts("c4-1", principal, "arbor://fs/read/ack-c4-r1")
+      o2 = det_grant_opts("c4-2", principal, "arbor://fs/read/ack-c4-r2")
+      o3 = det_grant_opts("c4-3", principal, "arbor://fs/read/ack-c4-r3")
+
+      assert {:ok, :applied, _} = Security.acknowledged_grant(o1)
+
+      CASSandbox.fail_post_admission(1)
+      assert {:error, :outcome_unknown} = Security.acknowledged_grant(o2)
+
+      CASSandbox.reset_inventory_scan_count()
+      assert {:error, :quota_exceeded} = Security.acknowledged_grant(o3)
+      assert CASSandbox.inventory_scan_count() == 0
+    else
+      assert {:ok, _} = Security.grant(principal: principal, resource: "arbor://fs/read/ack-c4")
+    end
+  end
+
+  # ==========================================================================
+  # C4b — repeated post-admission :outcome_unknown intents stay bounded even
+  # when ordinary quota_enforcement is disabled (pending-only ceiling).
+  # ==========================================================================
+  test "security regression: uncertainty ledger stays bounded when quota_enforcement is disabled" do
+    fresh_isolated_store_with_failures()
+
+    prev_enforcement = Application.get_env(:arbor_security, :quota_enforcement_enabled)
+    prev_per = Application.get_env(:arbor_security, :max_capabilities_per_agent)
+
+    Application.put_env(:arbor_security, :quota_enforcement_enabled, false)
+    Application.put_env(:arbor_security, :max_capabilities_per_agent, 2)
+
+    on_exit(fn ->
+      restore_application_env(:quota_enforcement_enabled, prev_enforcement)
+      restore_application_env(:max_capabilities_per_agent, prev_per)
+    end)
+
+    principal = "agent_ack_c4b"
+
+    if acknowledged_available?() do
+      o1 = det_grant_opts("c4b-1", principal, "arbor://fs/read/ack-c4b-r1")
+      o2 = det_grant_opts("c4b-2", principal, "arbor://fs/read/ack-c4b-r2")
+      o3 = det_grant_opts("c4b-3", principal, "arbor://fs/read/ack-c4b-r3")
+
+      CASSandbox.fail_post_admission(1)
+      assert {:error, :outcome_unknown} = Security.acknowledged_grant(o1)
+
+      CASSandbox.fail_post_admission(1)
+      assert {:error, :outcome_unknown} = Security.acknowledged_grant(o2)
+
+      CASSandbox.reset_inventory_scan_count()
+      assert {:error, :quota_exceeded} = Security.acknowledged_grant(o3)
+      assert CASSandbox.inventory_scan_count() == 0
+
+      # Ordinary grant remains open under disabled enforcement (no live quota
+      # smuggled into definitive ordinary operation semantics).
+      assert {:ok, _} =
+               Security.grant(
+                 principal: "agent_ack_c4b_ordinary",
+                 resource: "arbor://fs/read/ack-c4b-ordinary"
+               )
+    else
+      assert {:ok, _} = Security.grant(principal: principal, resource: "arbor://fs/read/ack-c4b")
+    end
+  end
+
+  # ==========================================================================
+  # C4c — structural proof: uncertainty admission helpers never Enum-walk the
+  # full live by_id map (companion to durable Store.list inventory probe).
+  # ==========================================================================
+  test "security regression: uncertainty admission helpers do not enumerate full live by_id" do
+    source =
+      Path.expand("../../../lib/arbor/security/capability_store.ex", __DIR__)
+      |> File.read!()
+
+    # Tight window: uncertainty ledger helpers only (arm through finalize).
+    # Exclude cleanup/restore paths that legitimately walk by_id.
+    start_marker = "# Bounded uncertainty ledger (pending_intents)."
+    end_marker = "defp decode_and_verify_capability("
+
+    start_at = :binary.match(source, start_marker)
+    end_at = :binary.match(source, end_marker)
+
+    assert is_tuple(start_at)
+    assert is_tuple(end_at)
+
+    {start_idx, _} = start_at
+    {end_idx, _} = end_at
+    assert end_idx > start_idx
+
+    window = binary_part(source, start_idx, end_idx - start_idx)
+
+    refute window =~ "Enum.count(state.by_id"
+    refute window =~ "Enum.filter(state.by_id"
+    refute window =~ "Enum.reduce(state.by_id"
+    refute window =~ "for {_id, _} <- state.by_id"
+    refute window =~ "for {_, _} <- state.by_id"
+
+    # Public behavioral companion: acknowledged admission still avoids durable
+    # inventory scans (existing CASSandbox list probe).
+    fresh_isolated_store()
+    principal = "agent_ack_c4c"
+    resource = "arbor://fs/read/ack-c4c"
+    opts = det_grant_opts("c4c", principal, resource)
+
+    if acknowledged_available?() do
+      CASSandbox.reset_inventory_scan_count()
+      assert {:ok, :applied, _} = Security.acknowledged_grant(opts)
+      assert CASSandbox.inventory_scan_count() == 0
+    else
+      assert {:ok, _} = Security.grant(principal: principal, resource: resource)
+    end
+  end
+
+  # ==========================================================================
+  # C4d — remote projection occupies by_resource and blocks a different
+  # acknowledged id for the same principal/resource without inventory scan.
+  # Coverage of existing distributed wiring (not a claimed base-red defect).
+  # ==========================================================================
+  test "security regression: remote projection occupies by_resource and blocks alternate acknowledged id without inventory scan" do
+    fresh_isolated_store()
+    principal = "agent_ack_c4d"
+    resource = "arbor://fs/read/ack-c4d"
+    remote_opts = det_grant_opts("c4d-remote", principal, resource)
+    local_opts = det_grant_opts("c4d-local", principal, resource)
+    remote_id = remote_opts[:capability_id]
+
+    if acknowledged_available?() do
+      remote_cap = build_signed_cap(remote_opts)
+
+      assert {:ok, %Record{}} =
+               BufferedStore.acknowledged_put(
+                 remote_id,
+                 Record.new(remote_id, Serializer.serialize(remote_cap)),
+                 name: @capability_store
+               )
+
+      # Deliver a remote-origin capability_granted signal so the store loads
+      # the durable record and projects it through add_capability_to_indexes
+      # (which maintains by_resource).
+      send(
+        CapabilityStore,
+        {:signal_received,
+         %{
+           type: :capability_granted,
+           data: %{
+             capability_id: remote_id,
+             origin_node: :remote@c4d_projection
+           }
+         }}
+      )
+
+      # Linearize on the store mailbox so the projection is applied.
+      _ = :sys.get_state(CapabilityStore)
+
+      assert {:ok, %Capability{id: ^remote_id}} = CapabilityStore.get(remote_id)
+
+      state = :sys.get_state(CapabilityStore)
+
+      # Canonical form may differ from the raw URI; find the bucket that
+      # contains the remotely projected id for this principal.
+      occupied_key =
+        Enum.find_value(state.by_resource, fn
+          {{^principal, uri}, ids} ->
+            if MapSet.member?(ids, remote_id), do: {principal, uri}
+
+          _ ->
+            nil
+        end)
+
+      assert occupied_key != nil
+      assert MapSet.member?(Map.fetch!(state.by_resource, occupied_key), remote_id)
+
+      CASSandbox.reset_inventory_scan_count()
+      assert {:error, :resource_conflict} = Security.acknowledged_grant(local_opts)
+      assert CASSandbox.inventory_scan_count() == 0
+
+      assert {:ok, %Capability{id: ^remote_id}} = CapabilityStore.get(remote_id)
+    else
+      assert {:ok, _} = Security.grant(principal: principal, resource: resource)
+    end
+  end
+
+  # ==========================================================================
+  # C5 — signed_at is pinned deterministically to granted_at before signing and
+  # stays identity-exact across delayed retries.
+  # ==========================================================================
+  test "security regression: signed_at is pinned to granted_at and stays exact across retries" do
+    fresh_isolated_store()
+    principal = "agent_ack_c5"
+    resource = "arbor://fs/read/ack-c5"
+    opts = det_grant_opts("c5", principal, resource)
+
+    if acknowledged_available?() do
+      assert {:ok, :applied, id} = Security.acknowledged_grant(opts)
+      assert {:ok, %Capability{} = cap1} = CapabilityStore.get(id)
+      assert cap1.signed_at == cap1.granted_at
+      assert cap1.signed_at == opts[:granted_at]
+      payload1 = Capability.signing_payload(cap1)
+
+      Process.sleep(10)
+
+      assert {:ok, :idempotent, ^id} = Security.acknowledged_grant(opts)
+      assert {:ok, %Capability{} = cap2} = CapabilityStore.get(id)
+      assert cap2.signed_at == cap2.granted_at
+      assert Capability.signing_payload(cap2) == payload1
+    else
+      assert {:ok, cap} = Security.grant(principal: principal, resource: resource)
+      assert cap.signed_at == cap.granted_at
+    end
+  end
+
+  # ==========================================================================
+  # C6 — durable-only grant convergence that newly projects into live emits
+  # exactly one restricted cluster signal; a true replay emits none.
+  # ==========================================================================
+  test "security regression: idempotent grant convergence emits one signal, replay emits none" do
+    if acknowledged_available?() do
+      fresh_isolated_store_with_failures()
+      ensure_signals_children()
+
+      prev = Application.get_env(:arbor_security, :distributed_signals)
+      Application.put_env(:arbor_security, :distributed_signals, true)
+      on_exit(fn -> Application.put_env(:arbor_security, :distributed_signals, prev) end)
+
+      principal = "agent_ack_c6"
+      resource = "arbor://fs/read/ack-c6"
+      opts = det_grant_opts("c6", principal, resource)
+      id = opts[:capability_id]
+
+      {ref, sub} = subscribe_store_grant_signal(id)
+      on_exit(fn -> Arbor.Signals.unsubscribe(sub) end)
+
+      CASSandbox.fail_post_admission(1)
+      assert {:error, :outcome_unknown} = Security.acknowledged_grant(opts)
+
+      assert {:ok, :idempotent, ^id} = Security.acknowledged_grant(opts)
+      assert collect_signals(ref, :store_grant, 200) == 1
+
+      assert {:ok, :idempotent, ^id} = Security.acknowledged_grant(opts)
+      assert collect_signals(ref, :store_grant, 200) == 0
+    else
+      fresh_isolated_store()
+
+      assert {:ok, _} =
+               Security.grant(principal: "agent_ack_c6", resource: "arbor://fs/read/ack-c6")
+    end
+  end
+
+  # ==========================================================================
+  # C7 — durable-only revoke convergence that newly evicts live emits exactly
+  # one restricted cluster signal; a true replay emits none.
+  # ==========================================================================
+  test "security regression: idempotent revoke convergence emits one signal, replay emits none" do
+    if acknowledged_available?() do
+      fresh_isolated_store_with_failures()
+      ensure_signals_children()
+
+      prev = Application.get_env(:arbor_security, :distributed_signals)
+      Application.put_env(:arbor_security, :distributed_signals, true)
+      on_exit(fn -> Application.put_env(:arbor_security, :distributed_signals, prev) end)
+
+      principal = "agent_ack_c7"
+      resource = "arbor://fs/read/ack-c7"
+      opts = det_grant_opts("c7", principal, resource)
+      id = opts[:capability_id]
+
+      assert {:ok, :applied, ^id} = Security.acknowledged_grant(opts)
+
+      {ref, sub} = subscribe_store_revoke_signal(id)
+      on_exit(fn -> Arbor.Signals.unsubscribe(sub) end)
+
+      CASSandbox.fail_post_delete(1)
+      assert {:error, :outcome_unknown} = Security.acknowledged_revoke(id)
+
+      assert {:ok, :idempotent, ^id} = Security.acknowledged_revoke(id)
+      assert collect_signals(ref, :store_revoke, 200) == 1
+
+      assert {:ok, :idempotent, ^id} = Security.acknowledged_revoke(id)
+      assert collect_signals(ref, :store_revoke, 200) == 0
+    else
+      fresh_isolated_store()
+
+      assert {:ok, _} =
+               Security.grant(principal: "agent_ack_c7", resource: "arbor://fs/read/ack-c7")
+    end
+  end
+
+  # ==========================================================================
+  # C8 — a CapabilityStore restart rebuilds the canonical by_resource occupancy
+  # from the complete restored durable projection, so a post-restart same-
+  # resource grant conflicts without any full-inventory scan. (The CASSandbox
+  # backend + BufferedStore stay alive across the restart; only CapabilityStore
+  # is restarted, so restore reads the retained durable set.)
+  # ==========================================================================
+  test "security regression: restart rebuilds by_resource occupancy without scanning" do
+    fresh_isolated_store()
+    principal = "agent_ack_c8"
+    resource = "arbor://fs/read/ack-c8"
+    a = det_grant_opts("c8-a", principal, resource)
+    b = det_grant_opts("c8-b", principal, resource)
+
+    if acknowledged_available?() do
+      assert {:ok, :applied, aid} = Security.acknowledged_grant(a)
+      assert {:ok, %Capability{id: ^aid}} = CapabilityStore.get(aid)
+
+      # Restart rebuilds by_id + by_resource from the restored durable set
+      # (pending_intents is in-memory only and stays empty after restart).
+      restart_capability_store()
+      assert {:ok, %Capability{id: ^aid}} = CapabilityStore.get(aid)
+
+      CASSandbox.reset_inventory_scan_count()
+      assert {:error, :resource_conflict} = Security.acknowledged_grant(b)
+      assert CASSandbox.inventory_scan_count() == 0
+    else
+      assert {:ok, _} = Security.grant(principal: principal, resource: resource)
+    end
+  end
+
+  # ==========================================================================
   # Helpers for the F1-F5 regressions.
   # ==========================================================================
 
@@ -1450,6 +1977,11 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       {:error, {:already_started, _}} -> :ok
     end
   end
+
+  defp restore_application_env(key, nil), do: Application.delete_env(:arbor_security, key)
+
+  defp restore_application_env(key, value),
+    do: Application.put_env(:arbor_security, key, value)
 
   # The arbor_signals supervision tree is not started by default in the
   # arbor_security test profile; start it so the store's direct cluster
