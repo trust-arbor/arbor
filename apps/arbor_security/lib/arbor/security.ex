@@ -45,6 +45,7 @@ defmodule Arbor.Security do
 
   alias Arbor.Contracts.API.Security, as: SecurityContract
   alias Arbor.Contracts.Security.Capability
+  alias Arbor.Contracts.Security.CapabilityUri
   alias Arbor.Contracts.Security.Classification
   alias Arbor.Contracts.Security.DeliveryReceipt
   alias Arbor.Contracts.Security.Identity
@@ -795,6 +796,439 @@ defmodule Arbor.Security do
   """
   @spec revoke_by_task(String.t()) :: {:ok, non_neg_integer()}
   def revoke_by_task(task_id), do: CapabilityStore.revoke_by_task(task_id)
+
+  # ===========================================================================
+  # Acknowledged, crash-journal-safe capability mutation (Phase 4C C3A).
+  #
+  # Narrow facade for exact grant/revoke suitable for a crash-recovery journal.
+  # Cross-library callers receive only a bounded status and an opaque
+  # capability id — never a Capability struct or persistence record. Ordinary
+  # grant/1 and revoke/1 compatibility behavior is unchanged.
+  # ===========================================================================
+
+  @acknowledged_grant_required [:capability_id, :granted_at, :principal, :resource]
+
+  @acknowledged_grant_optional [
+    :expires_at,
+    :not_before,
+    :constraints,
+    :delegation_depth,
+    :max_uses,
+    :allowed_delegatees,
+    :session_id,
+    :task_id,
+    :principal_scope,
+    :metadata
+  ]
+
+  @acknowledged_grant_admitted @acknowledged_grant_required ++
+                                 @acknowledged_grant_optional
+  @acknowledged_grant_max_opts 32
+  @acknowledged_grant_max_map_keys 64
+  @acknowledged_grant_max_map_depth 6
+  @acknowledged_grant_max_nodes 1_024
+  @acknowledged_grant_max_list_len 64
+  @acknowledged_grant_max_delegatees 64
+
+  @doc """
+  Grant a capability via the acknowledged, crash-journal-safe exact path.
+
+  `opts` carries a deterministic `:capability_id` and a stable `:granted_at`
+  (plus `:principal`/`:resource` and a closed set of bounded optionals) so a
+  journal replay is byte-identical to the original grant. An exact stored
+  replay returns `{:ok, :idempotent, id}`; a mismatched occupant of the id
+  returns `{:error, :id_conflict}`; a different same-principal/resource
+  capability returns `{:error, :resource_conflict}` and is never replaced.
+
+  Returns bounded status + the opaque capability id only. The audit event is
+  recorded exactly once per `:applied` grant; idempotent retries emit no
+  duplicate.
+  """
+  @spec acknowledged_grant(keyword()) ::
+          {:ok, :applied | :idempotent, String.t()}
+          | {:error,
+             :invalid_request
+             | :id_conflict
+             | :resource_conflict
+             | :quota_exceeded
+             | :capability_store_unavailable
+             | :outcome_unknown}
+  def acknowledged_grant(opts) do
+    with {:ok, safe_opts} <- validate_acknowledged_grant_opts(opts),
+         {:ok, signed_cap} <- build_and_sign_acknowledged_grant(safe_opts) do
+      result = CapabilityStore.acknowledged_put(signed_cap)
+      emit_acknowledged_grant_audit(result, signed_cap)
+      result
+    end
+  rescue
+    _ -> {:error, :outcome_unknown}
+  catch
+    :exit, {:noproc, _} -> {:error, :capability_store_unavailable}
+    :exit, :timeout -> {:error, :outcome_unknown}
+    :exit, _ -> {:error, :outcome_unknown}
+    :throw, _ -> {:error, :outcome_unknown}
+  end
+
+  # Audit is best-effort and ISOLATED: an audit-emission failure can never
+  # relabel an already-applied mutation as unavailable or unknown. The store
+  # result is returned unchanged regardless of audit outcome.
+  defp emit_acknowledged_grant_audit({:ok, :applied, _capability_id}, signed_cap) do
+    Events.record_capability_granted(signed_cap)
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
+  end
+
+  defp emit_acknowledged_grant_audit(_result, _signed_cap), do: :ok
+
+  @doc """
+  Revoke a capability via the acknowledged, crash-journal-safe exact path.
+
+  Authoritative absence is `{:ok, :idempotent, id}`; a durably-acknowledged
+  deletion precedes live eviction and `{:ok, :applied, id}`. An ambiguous
+  persistence result is never reported as applied (`:outcome_unknown`). The
+  audit event is recorded exactly once per `:applied` revoke.
+  """
+  @spec acknowledged_revoke(String.t()) ::
+          {:ok, :applied | :idempotent, String.t()}
+          | {:error, :invalid_request | :capability_store_unavailable | :outcome_unknown}
+  def acknowledged_revoke(capability_id) do
+    if canonical_exact_capability_id?(capability_id) do
+      result = CapabilityStore.acknowledged_revoke(capability_id)
+      emit_acknowledged_revoke_audit(result)
+      result
+    else
+      {:error, :invalid_request}
+    end
+  rescue
+    _ -> {:error, :outcome_unknown}
+  catch
+    :exit, {:noproc, _} -> {:error, :capability_store_unavailable}
+    :exit, :timeout -> {:error, :outcome_unknown}
+    :exit, _ -> {:error, :outcome_unknown}
+    :throw, _ -> {:error, :outcome_unknown}
+  end
+
+  defp emit_acknowledged_revoke_audit({:ok, :applied, capability_id}) do
+    Events.record_capability_revoked(capability_id)
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
+  end
+
+  defp emit_acknowledged_revoke_audit(_result), do: :ok
+
+  defp validate_acknowledged_grant_opts(opts) do
+    cond do
+      not is_list(opts) ->
+        {:error, :invalid_request}
+
+      not ack_opts_count_ok?(opts, 0) ->
+        {:error, :invalid_request}
+
+      not Keyword.keyword?(opts) ->
+        {:error, :invalid_request}
+
+      true ->
+        validate_acknowledged_grant_keys(opts)
+    end
+  rescue
+    _ -> {:error, :invalid_request}
+  catch
+    _, _ -> {:error, :invalid_request}
+  end
+
+  # Bound top-level option count BEFORE any Keyword API (no O(n) traversal on
+  # an unbounded opts list). Walks at most max_opts+1 elements.
+  defp ack_opts_count_ok?([_ | rest], n) when n < @acknowledged_grant_max_opts,
+    do: ack_opts_count_ok?(rest, n + 1)
+
+  defp ack_opts_count_ok?([], _n), do: true
+  defp ack_opts_count_ok?(_, _n), do: false
+
+  defp validate_acknowledged_grant_keys(opts) do
+    keys = Keyword.keys(opts)
+
+    cond do
+      Enum.any?(@acknowledged_grant_required, &(&1 not in keys)) ->
+        {:error, :invalid_request}
+
+      length(keys) != length(Enum.uniq(keys)) ->
+        {:error, :invalid_request}
+
+      Enum.any?(keys, &(&1 not in @acknowledged_grant_admitted)) ->
+        {:error, :invalid_request}
+
+      true ->
+        validate_acknowledged_grant_values(opts)
+    end
+  end
+
+  defp validate_acknowledged_grant_values(opts) do
+    checks = [
+      canonical_exact_capability_id?(Keyword.fetch!(opts, :capability_id)),
+      canonical_ack_datetime?(Keyword.fetch!(opts, :granted_at)),
+      bounded_exact_scalar?(Keyword.fetch!(opts, :principal)),
+      SigningAuthorityValidator.validate_principal_id(Keyword.fetch!(opts, :principal)) == :ok,
+      valid_ack_resource?(Keyword.fetch!(opts, :resource)),
+      valid_ack_opt_datetime?(Keyword.get(opts, :expires_at)),
+      valid_ack_opt_datetime?(Keyword.get(opts, :not_before)),
+      valid_ack_delegation_depth?(Keyword.get(opts, :delegation_depth)),
+      valid_ack_opt_posint?(Keyword.get(opts, :max_uses)),
+      valid_ack_delegatees?(Keyword.get(opts, :allowed_delegatees)),
+      valid_ack_opt_scalar?(Keyword.get(opts, :session_id)),
+      valid_ack_opt_scalar?(Keyword.get(opts, :task_id)),
+      valid_ack_opt_scalar?(Keyword.get(opts, :principal_scope)),
+      valid_ack_opt_maps?(opts)
+    ]
+
+    if Enum.all?(checks, &(&1 == true)), do: {:ok, opts}, else: {:error, :invalid_request}
+  rescue
+    _ -> {:error, :invalid_request}
+  catch
+    _, _ -> {:error, :invalid_request}
+  end
+
+  defp build_and_sign_acknowledged_grant(opts) do
+    case Capability.new(
+           resource_uri: Keyword.fetch!(opts, :resource),
+           principal_id: Keyword.fetch!(opts, :principal),
+           id: Keyword.fetch!(opts, :capability_id),
+           granted_at: Keyword.fetch!(opts, :granted_at),
+           expires_at: Keyword.get(opts, :expires_at),
+           not_before: Keyword.get(opts, :not_before),
+           constraints: Keyword.get(opts, :constraints, %{}),
+           delegation_depth: Keyword.get(opts, :delegation_depth, 3),
+           max_uses: Keyword.get(opts, :max_uses),
+           allowed_delegatees: Keyword.get(opts, :allowed_delegatees),
+           session_id: Keyword.get(opts, :session_id),
+           task_id: Keyword.get(opts, :task_id),
+           principal_scope: Keyword.get(opts, :principal_scope),
+           metadata: Keyword.get(opts, :metadata, %{})
+         ) do
+      {:ok, cap} ->
+        case SystemAuthority.sign_capability(cap) do
+          {:ok, signed_cap} -> {:ok, signed_cap}
+          {:error, _reason} -> {:error, :capability_store_unavailable}
+        end
+
+      {:error, _reason} ->
+        {:error, :invalid_request}
+
+      _other ->
+        {:error, :invalid_request}
+    end
+  rescue
+    _ -> {:error, :capability_store_unavailable}
+  catch
+    _, _ -> {:error, :capability_store_unavailable}
+  end
+
+  defp valid_ack_opt_datetime?(nil), do: true
+  defp valid_ack_opt_datetime?(%DateTime{} = value), do: canonical_ack_datetime?(value)
+  defp valid_ack_opt_datetime?(_), do: false
+
+  # Serializer.deserialize/1 restores ISO-8601 values in UTC. Requiring an
+  # exact ISO round trip prevents an offset-zone input from being signed in one
+  # representation and reobserved in another after durable admission.
+  defp canonical_ack_datetime?(%DateTime{} = value) do
+    with iso when is_binary(iso) <- DateTime.to_iso8601(value),
+         {:ok, restored, 0} <- DateTime.from_iso8601(iso) do
+      restored == value
+    else
+      _ -> false
+    end
+  rescue
+    _ -> false
+  catch
+    _, _ -> false
+  end
+
+  defp canonical_ack_datetime?(_value), do: false
+
+  defp valid_ack_delegation_depth?(nil), do: true
+
+  defp valid_ack_delegation_depth?(depth)
+       when is_integer(depth) and depth >= 0 and depth <= 10,
+       do: true
+
+  defp valid_ack_delegation_depth?(_), do: false
+
+  defp valid_ack_opt_posint?(nil), do: true
+
+  # Signed-64-bit positive bound: 1 <= value < 2^63. A larger integer would
+  # overflow a fixed-width consumption counter on restore.
+  defp valid_ack_opt_posint?(value) when is_integer(value),
+    do: value > 0 and value < 9_223_372_036_854_775_808
+
+  defp valid_ack_opt_posint?(_), do: false
+
+  defp valid_ack_opt_scalar?(nil), do: true
+  defp valid_ack_opt_scalar?(value), do: bounded_exact_scalar?(value)
+
+  defp valid_ack_resource?(value) do
+    bounded_exact_scalar?(value) and ack_valid_arbor_uri?(value)
+  end
+
+  defp ack_valid_arbor_uri?(uri) do
+    case CapabilityUri.parse(uri) do
+      {:ok, _parsed} -> true
+      {:error, _} -> false
+    end
+  rescue
+    _ -> false
+  catch
+    _, _ -> false
+  end
+
+  defp valid_ack_delegatees?(nil), do: true
+
+  defp valid_ack_delegatees?(values) when is_list(values),
+    do: ack_delegatees_ok?(values, 0)
+
+  defp valid_ack_delegatees?(_), do: false
+
+  # Bounded delegatee walk: count and per-element size bounded incrementally
+  # (no length/Enum traversal before bounds).
+  defp ack_delegatees_ok?([], _n), do: true
+
+  defp ack_delegatees_ok?([elem | rest], n) when n < @acknowledged_grant_max_delegatees,
+    do: bounded_exact_scalar?(elem) and ack_delegatees_ok?(rest, n + 1)
+
+  defp ack_delegatees_ok?(_, _n), do: false
+
+  # OMISSION VS PRESENCE for constraints/metadata: an ABSENT key normalizes to
+  # %{}; a PRESENT key must be a non-struct map. An explicitly supplied nil,
+  # list, scalar, or struct is invalid (presence is not collapsed into
+  # omission). One total node budget is threaded across the two normalized
+  # maps so a combined tree cannot exceed @acknowledged_grant_max_nodes.
+  # Keyword.fetch/2 is safe here: ack_opts_count_ok?/2 and Keyword.keyword?/1
+  # already bounded opts (<= 32, atom-keyed) before this point.
+  defp valid_ack_opt_maps?(opts) do
+    with {:ok, constraints} <- ack_opt_map(Keyword.fetch(opts, :constraints)),
+         {:ok, metadata} <- ack_opt_map(Keyword.fetch(opts, :metadata)),
+         {:ok, remaining} <- ack_node(constraints, 0, @acknowledged_grant_max_nodes),
+         {:ok, _remaining} <- ack_node(metadata, 0, remaining) do
+      true
+    else
+      _ -> false
+    end
+  end
+
+  defp ack_opt_map(:error), do: {:ok, %{}}
+
+  defp ack_opt_map({:ok, value}) when is_map(value) and not is_struct(value),
+    do: {:ok, value}
+
+  # Present but not a non-struct map: explicit nil/list/scalar/struct.
+  defp ack_opt_map({:ok, _present_invalid}), do: :error
+
+  # Single bounded traversal for constraints/metadata trees. Returns
+  # {:ok, remaining_node_budget} | :error. Depth increments for maps AND lists;
+  # budget is the remaining total-node allowance; per-map/per-list/per-key/
+  # binary/integer/finite-float bounds enforced. No length()/Enum traversal
+  # before bounds. Rejects structs/tuples/functions/pids (JSON-native only; no
+  # executable collaborators).
+  defp ack_node(map, depth, budget) when is_map(map) and not is_struct(map) do
+    size = map_size(map)
+
+    if depth <= @acknowledged_grant_max_map_depth and size <= @acknowledged_grant_max_map_keys and
+         budget > 0 and ack_unique_canonical_keys?(Map.keys(map), MapSet.new()) do
+      ack_kv(Map.to_list(map), depth + 1, budget - 1)
+    else
+      :error
+    end
+  end
+
+  defp ack_node(list, depth, budget) when is_list(list) do
+    if depth <= @acknowledged_grant_max_map_depth and budget > 0 do
+      ack_elems(list, depth + 1, budget - 1, 0)
+    else
+      :error
+    end
+  end
+
+  defp ack_node(binary, _depth, budget) when is_binary(binary) do
+    if byte_size(binary) <= @exact_scalar_max_bytes and String.valid?(binary) and budget > 0 do
+      {:ok, budget - 1}
+    else
+      :error
+    end
+  end
+
+  defp ack_node(value, _depth, budget) when is_atom(value) do
+    encoded = Atom.to_string(value)
+
+    if budget > 0 and byte_size(encoded) <= @exact_scalar_max_bytes and String.valid?(encoded),
+      do: {:ok, budget - 1},
+      else: :error
+  end
+
+  defp ack_node(value, _depth, budget) when is_integer(value) do
+    if ack_int_in_bounds?(value) and budget > 0, do: {:ok, budget - 1}, else: :error
+  end
+
+  defp ack_node(value, _depth, budget) when is_number(value) do
+    if ack_finite?(value) and budget > 0, do: {:ok, budget - 1}, else: :error
+  end
+
+  defp ack_node(_other, _depth, _budget), do: :error
+
+  defp ack_kv([], _depth, budget), do: {:ok, budget}
+
+  defp ack_kv([{key, value} | rest], depth, budget) do
+    with :ok <- ack_key_ok?(key),
+         {:ok, remaining} <- ack_node(value, depth, budget) do
+      ack_kv(rest, depth, remaining)
+    end
+  end
+
+  defp ack_elems([], _depth, budget, _n), do: {:ok, budget}
+
+  defp ack_elems([elem | rest], depth, budget, n) when n < @acknowledged_grant_max_list_len do
+    with {:ok, remaining} <- ack_node(elem, depth, budget) do
+      ack_elems(rest, depth, remaining, n + 1)
+    end
+  end
+
+  defp ack_elems(_over_limit, _depth, _budget, _n), do: :error
+
+  defp ack_key_ok?(key) when is_atom(key), do: ack_key_ok?(Atom.to_string(key))
+
+  defp ack_key_ok?(key) when is_binary(key) do
+    if byte_size(key) <= @exact_scalar_max_bytes and String.valid?(key) do
+      :ok
+    else
+      :error
+    end
+  end
+
+  defp ack_key_ok?(_key), do: :error
+
+  defp ack_unique_canonical_keys?([], _seen), do: true
+
+  defp ack_unique_canonical_keys?([key | rest], seen) do
+    with {:ok, canonical} <- ack_canonical_key(key),
+         false <- MapSet.member?(seen, canonical) do
+      ack_unique_canonical_keys?(rest, MapSet.put(seen, canonical))
+    else
+      _ -> false
+    end
+  end
+
+  defp ack_canonical_key(key) when is_atom(key), do: {:ok, Atom.to_string(key)}
+  defp ack_canonical_key(key) when is_binary(key), do: {:ok, key}
+  defp ack_canonical_key(_key), do: :error
+
+  defp ack_int_in_bounds?(n),
+    do: n >= -9_223_372_036_854_775_808 and n < 9_223_372_036_854_775_808
+
+  # Reject NaN and ±Infinity floats (only finite numbers are JSON-native).
+  defp ack_finite?(n), do: n * 0.0 == 0.0
 
   @doc """
   Delegate a capability to another agent.

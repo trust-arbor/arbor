@@ -234,6 +234,85 @@ defmodule Arbor.Security.CapabilityStore do
     :throw, _ -> {:error, :capability_store_unavailable}
   end
 
+  # ===========================================================================
+  # Acknowledged exact mutation client API (Phase 4C C3A).
+  #
+  # Crash-journal-safe grant/revoke. The caller (the Arbor.Security facade)
+  # supplies a fully signed capability built from a deterministic id +
+  # granted_at. Returns bounded status + opaque capability id only; never a
+  # Capability struct or persistence Record. Exit mapping at the client: a
+  # definitively-down store (:noproc / not registered) is
+  # :capability_store_unavailable; a timeout or other exit (which may occur
+  # after a durable admission) is :outcome_unknown — never success.
+  # ===========================================================================
+
+  @doc """
+  Acknowledged, crash-journal-safe exact put of an already-signed capability.
+
+  Never replaces a different capability: a same-principal+resource occupant
+  under a different id returns `:resource_conflict`, a mismatched occupant
+  under the same id returns `:id_conflict`, and an exact durable replay
+  returns `{:ok, :idempotent, id}`. A fresh grant is durably acknowledged and
+  its authoritative record is decoded and verified before the live projection,
+  cluster signal, or success advance.
+  """
+  @spec acknowledged_put(Capability.t()) ::
+          {:ok, :applied | :idempotent, String.t()}
+          | {:error,
+             :id_conflict
+             | :resource_conflict
+             | :quota_exceeded
+             | :capability_store_unavailable
+             | :outcome_unknown}
+  def acknowledged_put(%Capability{} = cap) do
+    if Process.whereis(__MODULE__) == nil do
+      {:error, :capability_store_unavailable}
+    else
+      GenServer.call(__MODULE__, {:acknowledged_put, cap}, acknowledged_call_timeout_ms())
+    end
+  rescue
+    _ -> {:error, :outcome_unknown}
+  catch
+    :exit, {:noproc, _} -> {:error, :capability_store_unavailable}
+    :exit, :timeout -> {:error, :outcome_unknown}
+    :exit, _ -> {:error, :outcome_unknown}
+    :throw, _ -> {:error, :outcome_unknown}
+  end
+
+  @doc """
+  Acknowledged, crash-journal-safe exact revoke by id.
+
+  Authoritative absence is `{:ok, :idempotent, id}`; a durably-acknowledged
+  deletion precedes live eviction and `{:ok, :applied, id}`. An ambiguous
+  persistence result is never reported as applied (`:outcome_unknown`). Only an
+  applied delete emits the revocation signal.
+  """
+  @spec acknowledged_revoke(String.t()) ::
+          {:ok, :applied | :idempotent, String.t()}
+          | {:error, :capability_store_unavailable | :outcome_unknown}
+  def acknowledged_revoke(capability_id) when is_binary(capability_id) do
+    if Process.whereis(__MODULE__) == nil do
+      {:error, :capability_store_unavailable}
+    else
+      GenServer.call(
+        __MODULE__,
+        {:acknowledged_revoke, capability_id},
+        acknowledged_call_timeout_ms()
+      )
+    end
+  rescue
+    _ -> {:error, :outcome_unknown}
+  catch
+    :exit, {:noproc, _} -> {:error, :capability_store_unavailable}
+    :exit, :timeout -> {:error, :outcome_unknown}
+    :exit, _ -> {:error, :outcome_unknown}
+    :throw, _ -> {:error, :outcome_unknown}
+  end
+
+  def acknowledged_revoke(_capability_id), do: {:error, :outcome_unknown}
+
+  defp acknowledged_call_timeout_ms, do: 5_000
+
   # Server callbacks
 
   @impl true
@@ -592,6 +671,41 @@ defmodule Arbor.Security.CapabilityStore do
 
         emit_revocation_signal(:capabilities_cascade_revoked, all_ids, nil)
         {:reply, {:ok, count}, state}
+    end
+  end
+
+  # ===========================================================================
+  # Acknowledged exact mutation handlers (Phase 4C C3A).
+  #
+  # Any rescue/exit/throw inside the body replies :outcome_unknown with the
+  # INCOMING state: the only irreversible effect is a durable admission, so an
+  # exit at or after admission cannot be confirmed and must fail closed. No
+  # uncommitted live mutation is retained; the durable mutation reconciles
+  # idempotently on retry.
+  # ===========================================================================
+  @impl true
+  def handle_call({:acknowledged_put, signed_cap}, _from, state) do
+    incoming = state
+
+    try do
+      do_acknowledged_put(signed_cap, state)
+    rescue
+      _ -> {:reply, {:error, :outcome_unknown}, incoming}
+    catch
+      _, _ -> {:reply, {:error, :outcome_unknown}, incoming}
+    end
+  end
+
+  @impl true
+  def handle_call({:acknowledged_revoke, capability_id}, _from, state) do
+    incoming = state
+
+    try do
+      do_acknowledged_revoke(capability_id, state)
+    rescue
+      _ -> {:reply, {:error, :outcome_unknown}, incoming}
+    catch
+      _, _ -> {:reply, {:error, :outcome_unknown}, incoming}
     end
   end
 
@@ -1048,6 +1162,632 @@ defmodule Arbor.Security.CapabilityStore do
        {:quota_exceeded, :global_capability_limit, %{current: current_count, limit: max_global}}}
     else
       :ok
+    end
+  end
+
+  # ===========================================================================
+  # Acknowledged mutation helpers (Phase 4C C3A). Bounded-log wrappers never
+  # log capability ids, metadata, signatures, backend records, or exception
+  # terms — only a bounded reason atom / op label.
+  # ===========================================================================
+
+  defp do_acknowledged_put(signed_cap, state) do
+    id = signed_cap.id
+    ident = grant_identity(signed_cap)
+    live_cap = Map.get(state.by_id, id)
+
+    case acknowledged_authoritative_get(id) do
+      {:ok, record} ->
+        ack_put_durable_present(state, id, ident, record)
+
+      {:error, :not_found} ->
+        ack_put_durable_absent(state, signed_cap, id, ident, live_cap)
+
+      {:error, _reason} ->
+        {:reply, {:error, :outcome_unknown}, state}
+    end
+  end
+
+  defp ack_put_durable_present(state, id, ident, record) do
+    case decode_and_verify_capability(record, id) do
+      {:ok, stored} ->
+        if grant_identity(stored) == ident do
+          # exact already-applied => idempotent classification
+          ack_classify_exact_replay(state, stored, id)
+        else
+          # mismatched durable occupant of this id (SC2)
+          {:reply, {:error, :id_conflict}, state}
+        end
+
+      {:error, :unverifiable} ->
+        # malformed/unverifiable durable occupant; preserve, leave for reobservation
+        {:reply, {:error, :outcome_unknown}, state}
+    end
+  end
+
+  # Classify a durable-present exact (already-applied) grant, or a CAS conflict
+  # that reobserved our exact grant: ghost check, same-id live mismatch, else
+  # idempotent live projection. Shared by the present-replay and CAS-conflict
+  # paths so both converge identically.
+  defp ack_classify_exact_replay(state, stored, id) do
+    live_cap = Map.get(state.by_id, id)
+
+    case same_resource_occupancy(state, stored) do
+      :occupied ->
+        {:reply, {:error, :resource_conflict}, state}
+
+      :unknown ->
+        {:reply, {:error, :outcome_unknown}, state}
+
+      :vacant ->
+        if live_cap != nil and grant_identity(live_cap) != grant_identity(stored) do
+          # Same-id live identity mismatch; fail closed and never overwrite it.
+          {:reply, {:error, :id_conflict}, state}
+        else
+          # Identity-exact live state or no live state: project idempotently.
+          case project_capability_idempotent(state, stored) do
+            {:ok, state, _kind} -> {:reply, {:ok, :idempotent, id}, state}
+            {:error, :cannot_canonicalize} -> {:reply, {:error, :outcome_unknown}, state}
+          end
+        end
+    end
+  end
+
+  defp ack_put_durable_absent(state, signed_cap, id, ident, live_cap) do
+    cond do
+      not is_nil(live_cap) and grant_identity(live_cap) != ident ->
+        # mismatched live occupant under our id (SC2)
+        {:reply, {:error, :id_conflict}, state}
+
+      not is_nil(live_cap) and grant_identity(live_cap) == ident ->
+        # LIVE-EXACT, durable absent => durable repair via CAS(:not_found)
+        ack_put_durable_repair(state, signed_cap, id, ident)
+
+      is_nil(live_cap) ->
+        ack_put_fresh_grant(state, signed_cap, id, ident)
+
+      true ->
+        {:reply, {:error, :outcome_unknown}, state}
+    end
+  end
+
+  defp ack_put_durable_repair(state, signed_cap, id, ident) do
+    case same_resource_occupancy(state, signed_cap) do
+      :occupied -> {:reply, {:error, :resource_conflict}, state}
+      :unknown -> {:reply, {:error, :outcome_unknown}, state}
+      :vacant -> ack_admit_via_cas(state, signed_cap, id, ident, :idempotent)
+    end
+  end
+
+  # Shared CAS admission for both the durable-repair (:idempotent) and fresh
+  # (:applied) paths: CAS(:not_found) insert, authoritative reobserve+verify,
+  # then idempotent live projection. Side effects (stat + cluster signal) fire
+  # only on the :applied status. A CAS conflict is reobserved and classified.
+  defp ack_admit_via_cas(state, signed_cap, id, ident, status) do
+    case acknowledged_cas_insert(signed_cap) do
+      {:ok, _stored} ->
+        ack_commit_reobserved(state, id, ident, status)
+
+      {:error, :conflict} ->
+        ack_classify_cas_conflict(state, id, ident)
+
+      {:error, _reason} ->
+        {:reply, {:error, :outcome_unknown}, state}
+    end
+  end
+
+  defp ack_commit_reobserved(state, id, ident, status) do
+    case acknowledged_reobserve(id, ident) do
+      {:ok, verified} ->
+        ack_project_committed(state, verified, id, status)
+
+      _ ->
+        {:reply, {:error, :outcome_unknown}, state}
+    end
+  end
+
+  defp ack_project_committed(state, verified, id, status) do
+    case project_capability_idempotent(state, verified) do
+      {:ok, state, _kind} ->
+        ack_emit_committed(state, verified, id, status)
+
+      {:error, :cannot_canonicalize} ->
+        {:reply, {:error, :outcome_unknown}, state}
+    end
+  end
+
+  defp ack_emit_committed(state, verified, id, :applied) do
+    state = update_in(state, [:stats, :total_granted], &(&1 + 1))
+    emit_capability_signal(:capability_granted, verified)
+    {:reply, {:ok, :applied, id}, state}
+  end
+
+  defp ack_emit_committed(state, _verified, id, :idempotent) do
+    {:reply, {:ok, :idempotent, id}, state}
+  end
+
+  defp ack_put_fresh_grant(state, signed_cap, id, ident) do
+    case same_resource_occupancy(state, signed_cap) do
+      :occupied ->
+        # SC3: never replace a different same-principal/resource cap.
+        {:reply, {:error, :resource_conflict}, state}
+
+      :unknown ->
+        {:reply, {:error, :outcome_unknown}, state}
+
+      :vacant ->
+        case check_quotas(state, signed_cap) do
+          {:error, _quota} ->
+            {:reply, {:error, :quota_exceeded}, state}
+
+          :ok ->
+            ack_fresh_grant_commit(state, signed_cap, id, ident)
+        end
+    end
+  end
+
+  defp ack_fresh_grant_commit(state, signed_cap, id, ident) do
+    ack_admit_via_cas(state, signed_cap, id, ident, :applied)
+  end
+
+  # A CAS(:not_found) conflict means a concurrent writer admitted a record under
+  # this id between the read and the admission. Reobserve and classify: only an
+  # exact already-applied state is idempotent; a different occupant is
+  # :id_conflict (never overwritten); absence/ambiguous => :outcome_unknown.
+  defp ack_classify_cas_conflict(state, id, ident) do
+    case acknowledged_authoritative_get(id) do
+      {:ok, record} ->
+        case decode_and_verify_capability(record, id) do
+          {:ok, stored} ->
+            if grant_identity(stored) == ident do
+              ack_classify_exact_replay(state, stored, id)
+            else
+              {:reply, {:error, :id_conflict}, state}
+            end
+
+          {:error, :unverifiable} ->
+            {:reply, {:error, :outcome_unknown}, state}
+        end
+
+      {:error, :not_found} ->
+        {:reply, {:error, :outcome_unknown}, state}
+
+      {:error, _reason} ->
+        {:reply, {:error, :outcome_unknown}, state}
+    end
+  end
+
+  defp do_acknowledged_revoke(capability_id, state) do
+    case acknowledged_authoritative_get(capability_id) do
+      {:error, :not_found} ->
+        # authoritative absence = idempotent success (SC5)
+        state = ensure_ack_evicted(state, capability_id)
+        {:reply, {:ok, :idempotent, capability_id}, state}
+
+      {:ok, record} ->
+        case acknowledged_cas_delete(capability_id, record) do
+          :ok ->
+            principal_id = ack_revoke_principal(state, capability_id, record)
+            state = revoke_capability_ids(state, [capability_id])
+            state = update_in(state, [:stats, :total_revoked], &(&1 + 1))
+            emit_revocation_signal(:capability_revoked, [capability_id], principal_id)
+            {:reply, {:ok, :applied, capability_id}, state}
+
+          {:error, :conflict} ->
+            # observed record concurrently changed/removed; reobserve + classify
+            classify_revoke_conflict(state, capability_id)
+
+          {:error, _reason} ->
+            # ambiguous persistence never reported as applied (SC5)
+            {:reply, {:error, :outcome_unknown}, state}
+        end
+
+      {:error, _reason} ->
+        {:reply, {:error, :outcome_unknown}, state}
+    end
+  end
+
+  # A CAS delete conflict means the observed record was concurrently changed or
+  # removed. Only authoritative absence is idempotent (already revoked); a still
+  # present (concurrently changed) record is never deleted => :outcome_unknown.
+  defp classify_revoke_conflict(state, capability_id) do
+    case acknowledged_authoritative_get(capability_id) do
+      {:error, :not_found} ->
+        state = ensure_ack_evicted(state, capability_id)
+        {:reply, {:ok, :idempotent, capability_id}, state}
+
+      {:ok, _record} ->
+        {:reply, {:error, :outcome_unknown}, state}
+
+      {:error, _reason} ->
+        {:reply, {:error, :outcome_unknown}, state}
+    end
+  end
+
+  # Durable-absent revoke evicts the exact id from EVERY projection index
+  # WITHOUT stats, cluster signal, or audit (the durable layer is authoritative
+  # and the revoke is idempotent absence, not an applied delete). The purge is
+  # UNCONDITIONAL: even when by_id is already absent, dangling refs in
+  # by_principal/by_issuer/by_parent/by_usage must not survive. This never
+  # emits side effects (unlike revoke_capability_ids/2, which the applied path
+  # still uses for stat+signal).
+  defp ensure_ack_evicted(state, capability_id) do
+    state
+    |> remove_dangling_refs_for_id(capability_id)
+    |> update_in([:by_id], &Map.delete(&1, capability_id))
+  end
+
+  defp ack_revoke_principal(state, capability_id, record) do
+    case Map.get(state.by_id, capability_id) do
+      %Capability{principal_id: principal_id} when is_binary(principal_id) ->
+        principal_id
+
+      _ ->
+        best_effort_principal_from_record(record)
+    end
+  end
+
+  defp best_effort_principal_from_record(record) do
+    with {:ok, data} <- extract_capability_payload(record),
+         {:ok, %Capability{principal_id: principal_id}} <- Serializer.deserialize(data) do
+      principal_id
+    else
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  catch
+    _, _ -> nil
+  end
+
+  # Identity over ALL signed fields (the canonical authority payload). Two
+  # capabilities with equal signing_payload are the exact same grant for a
+  # stable authority; deterministic across journal retries.
+  defp grant_identity(%Capability{} = cap), do: Capability.signing_payload(cap)
+
+  # Decode + verify an authoritative record for an exact id. Reuses the
+  # battle-tested restore validators; any failure/exit => :unverifiable.
+  defp decode_and_verify_capability(record, expected_id) do
+    with {:ok, data} <- extract_capability_payload(record),
+         :ok <- validate_capability_source(expected_id, data),
+         {:ok, cap} <- deserialize_restore_capability(data),
+         :ok <- validate_deserialized_capability(expected_id, cap),
+         :ok <- ack_verify_authority_signature(cap) do
+      {:ok, cap}
+    else
+      _ -> {:error, :unverifiable}
+    end
+  end
+
+  defp ack_verify_authority_signature(%Capability{} = cap) do
+    SystemAuthority.verify_authority_capability_signature(cap)
+  rescue
+    _ -> {:error, :verification_unavailable}
+  catch
+    :exit, _ -> {:error, :verification_unavailable}
+    :throw, _ -> {:error, :verification_unavailable}
+  end
+
+  # Conflict detection reads both the live by_id projection and the bounded
+  # authoritative inventory. The durable scan is required after an ambiguous
+  # post-admission outcome: the record may be committed while this GenServer
+  # intentionally retained its incoming live state. by_principal is never an
+  # authority source because it may be stale.
+  defp same_resource_occupancy(state, %Capability{} = cap) do
+    if live_same_resource_occupied?(state, cap) do
+      :occupied
+    else
+      authoritative_same_resource_occupancy(cap)
+    end
+  end
+
+  defp live_same_resource_occupied?(state, %Capability{} = cap) do
+    target = canonical_resource(cap.resource_uri)
+
+    Enum.any?(state.by_id, fn
+      {id, %Capability{principal_id: principal_id, resource_uri: other}}
+      when id != cap.id ->
+        principal_id == cap.principal_id and canonical_resource(other) == target
+
+      _other ->
+        false
+    end)
+  end
+
+  defp authoritative_same_resource_occupancy(%Capability{} = cap) do
+    case acknowledged_authoritative_entries() do
+      {:ok, entries} -> scan_authoritative_resource_occupancy(entries, cap)
+      {:error, _reason} -> :unknown
+    end
+  end
+
+  defp scan_authoritative_resource_occupancy([], _cap), do: :vacant
+
+  defp scan_authoritative_resource_occupancy([{id, _record} | rest], %Capability{id: id} = cap),
+    do: scan_authoritative_resource_occupancy(rest, cap)
+
+  defp scan_authoritative_resource_occupancy([{id, record} | rest], %Capability{} = cap)
+       when is_binary(id) do
+    case authoritative_principal_resource(record, id) do
+      {:ok, principal_id, resource_uri} ->
+        if principal_id == cap.principal_id and
+             canonical_resource(resource_uri) == canonical_resource(cap.resource_uri) do
+          :occupied
+        else
+          scan_authoritative_resource_occupancy(rest, cap)
+        end
+
+      {:error, _reason} ->
+        :unknown
+    end
+  end
+
+  defp scan_authoritative_resource_occupancy(_invalid, _cap), do: :unknown
+
+  defp authoritative_entries_from_keys(ids), do: authoritative_entries_from_keys(ids, [])
+
+  defp authoritative_entries_from_keys([], acc), do: {:ok, Enum.reverse(acc)}
+
+  defp authoritative_entries_from_keys([id | rest], acc) when is_binary(id) do
+    case acknowledged_authoritative_get(id) do
+      {:ok, record} ->
+        authoritative_entries_from_keys(rest, [{id, record} | acc])
+
+      # A concurrent delete after the authoritative inventory was read leaves
+      # no occupant and may be skipped. Other read ambiguity fails closed.
+      {:error, :not_found} ->
+        authoritative_entries_from_keys(rest, acc)
+
+      {:error, _reason} ->
+        {:error, :acknowledged_read_failed}
+    end
+  end
+
+  defp authoritative_entries_from_keys(_invalid, _acc),
+    do: {:error, :acknowledged_read_failed}
+
+  defp authoritative_principal_resource(record, expected_id) do
+    with {:ok, data} <- extract_capability_payload(record),
+         ^expected_id <- Map.get(data, "id"),
+         principal_id when is_binary(principal_id) and principal_id != "" <-
+           Map.get(data, "principal_id"),
+         resource_uri when is_binary(resource_uri) and resource_uri != "" <-
+           Map.get(data, "resource_uri"),
+         {:ok, _parsed} <- CapabilityUri.parse(resource_uri) do
+      {:ok, principal_id, resource_uri}
+    else
+      _ -> {:error, :invalid_authoritative_record}
+    end
+  rescue
+    _ -> {:error, :invalid_authoritative_record}
+  catch
+    _, _ -> {:error, :invalid_authoritative_record}
+  end
+
+  # Canonicalize a capability resource URI for same-resource comparison so
+  # semantically-equal URIs (e.g. differing only in canonical form) compare as
+  # the same resource. Falls back to the raw URI if parsing fails.
+  defp canonical_resource(uri) when is_binary(uri) do
+    case CapabilityUri.parse(uri) do
+      {:ok, parsed} -> CapabilityUri.canonical(parsed)
+      {:error, _} -> uri
+    end
+  rescue
+    _ -> uri
+  end
+
+  # Idempotent live projection for the EXACT id only. Never reuses the
+  # non-idempotent add_capability_to_state/2. Never removes/edits a different
+  # id (same-resource occupants survive reobservation); never leaves a ghost
+  # (dangling or duplicate ref). A same-id mismatch occupant is NOT overwritten
+  # (returns :cannot_canonicalize => caller fails closed).
+  defp project_capability_idempotent(state, %Capability{} = cap) do
+    id = cap.id
+    existing = Map.get(state.by_id, id)
+
+    cond do
+      existing != nil and grant_identity(existing) == grant_identity(cap) ->
+        # Persistence may normalize atom map keys to strings. Grant identity is
+        # the signed canonical payload, so replace only an identity-exact live
+        # representation with the verified authoritative representation.
+        state = put_in(state, [:by_id, id], cap)
+        {:ok, canonicalize_index_for_id(state, cap), :already_present}
+
+      is_nil(existing) ->
+        state = remove_dangling_refs_for_id(state, id)
+        {:ok, clean_add_capability(state, cap), :added}
+
+      true ->
+        {:error, :cannot_canonicalize}
+    end
+  end
+
+  defp canonicalize_index_for_id(state, %Capability{} = cap) do
+    id = cap.id
+
+    by_principal =
+      prepend_id_once(purge_id_from_index_map(state.by_principal, id), cap.principal_id, id)
+
+    by_issuer =
+      if cap.issuer_id do
+        prepend_id_once(purge_id_from_index_map(state.by_issuer, id), cap.issuer_id, id)
+      else
+        purge_id_from_index_map(state.by_issuer, id)
+      end
+
+    by_parent =
+      if cap.parent_capability_id do
+        prepend_id_once(
+          purge_id_from_index_map(state.by_parent, id),
+          cap.parent_capability_id,
+          id
+        )
+      else
+        purge_id_from_index_map(state.by_parent, id)
+      end
+
+    %{state | by_principal: by_principal, by_issuer: by_issuer, by_parent: by_parent}
+  end
+
+  defp remove_dangling_refs_for_id(state, id) do
+    %{
+      state
+      | by_principal: purge_id_from_index_map(state.by_principal, id),
+        by_issuer: purge_id_from_index_map(state.by_issuer, id),
+        by_parent: purge_id_from_index_map(state.by_parent, id),
+        by_usage: Map.delete(state.by_usage, id)
+    }
+  end
+
+  defp clean_add_capability(state, %Capability{} = cap) do
+    id = cap.id
+    state = put_in(state, [:by_id, id], cap)
+    by_principal = prepend_id_once(state.by_principal, cap.principal_id, id)
+
+    by_issuer =
+      if cap.issuer_id do
+        prepend_id_once(state.by_issuer, cap.issuer_id, id)
+      else
+        state.by_issuer
+      end
+
+    by_parent =
+      if cap.parent_capability_id do
+        prepend_id_once(state.by_parent, cap.parent_capability_id, id)
+      else
+        state.by_parent
+      end
+
+    %{state | by_principal: by_principal, by_issuer: by_issuer, by_parent: by_parent}
+  end
+
+  defp prepend_id_once(map, key, id) do
+    Map.update(map, key, [id], fn
+      nil -> [id]
+      ids -> if id in ids, do: ids, else: [id | ids]
+    end)
+  end
+
+  defp purge_id_from_index_map(map, id) do
+    Map.new(map, fn
+      {key, ids} when is_list(ids) -> {key, Enum.reject(ids, &(&1 == id))}
+      {key, other} -> {key, other}
+    end)
+  end
+
+  # Bounded-log persistence wrappers (never log id/metadata/signature/record).
+  defp acknowledged_authoritative_get(capability_id) do
+    if Process.whereis(@cap_store) do
+      apply(@buffered_store, :authoritative_get, [capability_id, [name: @cap_store]])
+    else
+      {:error, :acknowledged_read_failed}
+    end
+  rescue
+    _ -> {:error, :acknowledged_read_failed}
+  catch
+    _, _ -> {:error, :acknowledged_read_failed}
+  end
+
+  defp acknowledged_authoritative_entries do
+    if Process.whereis(@cap_store) do
+      case apply(@buffered_store, :authoritative_entries, [[name: @cap_store]]) do
+        {:error, :unsupported} ->
+          with {:ok, ids} <- acknowledged_authoritative_list() do
+            authoritative_entries_from_keys(ids)
+          end
+
+        {:ok, entries} when is_list(entries) ->
+          {:ok, entries}
+
+        _other ->
+          {:error, :acknowledged_read_failed}
+      end
+    else
+      {:error, :acknowledged_read_failed}
+    end
+  rescue
+    _ -> {:error, :acknowledged_read_failed}
+  catch
+    _, _ -> {:error, :acknowledged_read_failed}
+  end
+
+  defp acknowledged_authoritative_list do
+    if Process.whereis(@cap_store) do
+      case apply(@buffered_store, :authoritative_list, [[name: @cap_store]]) do
+        {:ok, ids} when is_list(ids) -> {:ok, ids}
+        _other -> {:error, :acknowledged_read_failed}
+      end
+    else
+      {:error, :acknowledged_read_failed}
+    end
+  rescue
+    _ -> {:error, :acknowledged_read_failed}
+  catch
+    _, _ -> {:error, :acknowledged_read_failed}
+  end
+
+  defp acknowledged_cas_insert(%Capability{} = cap) do
+    if Process.whereis(@cap_store) do
+      data = Serializer.serialize(cap)
+      record = Record.new(cap.id, data)
+
+      case apply(@buffered_store, :acknowledged_compare_and_swap, [
+             cap.id,
+             :not_found,
+             record,
+             [name: @cap_store]
+           ]) do
+        {:ok, _stored} -> {:ok, :inserted}
+        {:error, :conflict} -> {:error, :conflict}
+        {:error, _reason} -> {:error, :cas_failed}
+      end
+    else
+      {:error, :cas_failed}
+    end
+  rescue
+    _ -> {:error, :cas_failed}
+  catch
+    _, _ -> {:error, :cas_failed}
+  end
+
+  defp acknowledged_cas_delete(capability_id, %Record{} = observed) do
+    if Process.whereis(@cap_store) do
+      case apply(@buffered_store, :acknowledged_compare_and_delete, [
+             capability_id,
+             observed,
+             [name: @cap_store]
+           ]) do
+        :ok -> :ok
+        {:error, :conflict} -> {:error, :conflict}
+        {:error, _reason} -> {:error, :cas_delete_failed}
+      end
+    else
+      {:error, :cas_delete_failed}
+    end
+  rescue
+    _ -> {:error, :cas_delete_failed}
+  catch
+    _, _ -> {:error, :cas_delete_failed}
+  end
+
+  defp acknowledged_reobserve(id, ident) do
+    case acknowledged_authoritative_get(id) do
+      {:ok, record} ->
+        case decode_and_verify_capability(record, id) do
+          {:ok, %Capability{} = verified} ->
+            if grant_identity(verified) == ident,
+              do: {:ok, verified},
+              else: {:error, :identity_mismatch}
+
+          {:error, _reason} ->
+            {:error, :unverifiable}
+        end
+
+      {:error, :not_found} ->
+        {:error, :reobserve_missing}
+
+      {:error, _reason} ->
+        {:error, :reobserve_failed}
     end
   end
 
