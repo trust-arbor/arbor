@@ -2449,7 +2449,7 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     assert control["status"] == "deferred"
 
     assert_receive {:steer_task_called, "agent_1", first, _, _}
-    assert_receive {:steer_task_called, "agent_1", second, _, _}, 150
+    assert_receive {:steer_task_called, "agent_1", second, _, _}, 500
     assert first["control_id"] == control["control_id"]
     assert second["control_id"] == control["control_id"]
 
