@@ -1999,12 +1999,20 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCore do
   defp journal_scoped_reobserve(record, effect_id)
        when is_binary(effect_id) and effect_id != "" do
     case journal_entry_by_effect_id(record, effect_id) do
-      %{"payload" => payload} when is_map(payload) ->
+      %{"effect_type" => effect_type, "payload" => payload}
+      when effect_type in ["revoke_managed_capability", "grant_managed_capability"] and
+             is_map(payload) ->
         effect =
           base_effect(record, "reobserve_reconcile", record["phase"])
           |> Map.put("idempotent_replay", true)
           |> Map.put("effect_id", effect_id)
-          |> Map.put("payload", payload)
+
+        effect =
+          if effect_type == "revoke_managed_capability" do
+            Map.put(effect, "payload", payload)
+          else
+            effect
+          end
 
         {:ok, effect}
 

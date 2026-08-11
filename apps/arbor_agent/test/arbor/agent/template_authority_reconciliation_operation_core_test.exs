@@ -874,6 +874,24 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCoreTest do
     refute Map.has_key?(next["payload"], "capability_id")
     assert record["retry"]["attempt"] == 0
     assert record["reconciliation_required"] == nil
+
+    # Grant reconciliation retains the v3 ID-only reobserve contract.
+    assert {:ok, record, [grant_reobserve]} =
+             Core.report_effect_outcome(record, %{
+               "effect_id" => "eff_grant_1",
+               "outcome" => "uncertain",
+               "reason_code" => "timeout",
+               "at_unix_ms" => t(15)
+             })
+
+    assert grant_reobserve["effect_type"] == "reobserve_reconcile"
+    assert grant_reobserve["effect_id"] == "eff_grant_1"
+    refute Map.has_key?(grant_reobserve, "payload")
+
+    assert {:ok, admitted} = Core.admit(record)
+    assert [restart_grant_reobserve] = Core.next_effects(admitted)
+    assert restart_grant_reobserve["effect_id"] == "eff_grant_1"
+    refute Map.has_key?(restart_grant_reobserve, "payload")
   end
 
   test "retry exhaustion and non-retryable conflict enter blocked with fence retained", %{
