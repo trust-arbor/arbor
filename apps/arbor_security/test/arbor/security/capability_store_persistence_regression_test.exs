@@ -549,7 +549,7 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
     assert {:ok, %Record{generation: g2, revision: r2}} =
              BufferedStore.authoritative_get(id, name: @capability_store)
 
-    # Tombstone + reinsert must advance the Record fence (expect g1+1).
+    # Tombstone + reinsert must strictly advance the Record generation fence.
     assert g2 > g1
 
     # Phase F — stale pre-revoke fence rejected by real JSONFile CAS/CAD
