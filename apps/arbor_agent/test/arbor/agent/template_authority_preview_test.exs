@@ -749,4 +749,292 @@ defmodule Arbor.Agent.TemplateAuthorityPreviewTest do
 
     assert missing_principal["status"] == "invalid"
   end
+
+  # ---------------------------------------------------------------------------
+  # C3B2 authoritative preparation (candidate-only focused suite)
+  # ---------------------------------------------------------------------------
+
+  alias Arbor.Agent.TemplateAuthorityPreparation
+  alias Arbor.Contracts.Persistence.Record
+
+  defp authority_record(agent_id \\ "agent_preview1", opts \\ []) do
+    profile = base_profile(opts)
+    data = Profile.serialize(profile)
+
+    %Record{
+      id: Keyword.get(opts, :id, "agent_profile:#{agent_id}"),
+      key: agent_id,
+      data: data,
+      metadata: %{},
+      generation: Keyword.get(opts, :generation, 3),
+      revision: Keyword.get(opts, :revision, 7),
+      inserted_at: ~U[2026-01-01 00:00:00Z],
+      updated_at: ~U[2026-01-01 00:00:00Z]
+    }
+  end
+
+  defp prep_deps(snapshot_fun) do
+    deps()
+    |> Map.put(:authority_snapshot, snapshot_fun)
+  end
+
+  defp seed_complete_observation!(agent_id \\ "agent_preview1") do
+    assert {:ok, envelope} = TemplateAuthorityPolicy.build("scout", template_data())
+    Process.put({FakeTemplateStore, :template}, template_data())
+
+    Process.put(
+      {FakeTrust, :trust},
+      {:ok, %{baseline: :block, rules: %{"arbor://fs/write" => :ask}}}
+    )
+
+    {:ok, tagged} =
+      Capability.new(
+        resource_uri: "arbor://fs/write",
+        principal_id: agent_id,
+        metadata: %{
+          source: :template_authority_policy,
+          version: 1,
+          template: "scout",
+          template_digest: envelope["digest"]
+        }
+      )
+
+    Process.put({FakeSecurity, :caps}, [tagged])
+    envelope
+  end
+
+  test "prepare_authoritative returns ordinary report plus redacted envelope on exact digest" do
+    _envelope = seed_complete_observation!()
+    record = authority_record()
+
+    snapshot = fn agent_id ->
+      EffectsObserver.record({:authority_mutation_snapshot, agent_id})
+      assert agent_id == "agent_preview1"
+      {:ok, record}
+    end
+
+    # First project ordinarily to obtain the expected digest without snapshot.
+    Process.put({FakeProfileStore, :profile}, base_profile())
+
+    assert {:ok, ordinary} =
+             TemplateAuthorityPreview.project_with_deps("agent_preview1", [], deps())
+
+    digest = ordinary["reconciliation_digest"]
+    assert is_binary(digest)
+
+    assert {:ok, report, preparation} =
+             TemplateAuthorityPreview.prepare_authoritative_with_deps(
+               "agent_preview1",
+               digest,
+               prep_deps(snapshot)
+             )
+
+    assert report["kind"] == "template_authority_preview"
+    assert report["reconciliation_digest"] == digest
+    assert report["status"] in ~w(current drifted unmanaged)
+    assert %TemplateAuthorityPreparation{} = preparation
+    assert TemplateAuthorityPreparation.record(preparation) == record
+
+    assert TemplateAuthorityPreparation.profile_cas(preparation) == %{
+             "record_id" => record.id,
+             "generation" => 3,
+             "revision" => 7
+           }
+
+    assert is_binary(TemplateAuthorityPreparation.repo_root(preparation))
+    assert TemplateAuthorityPreparation.repo_root(preparation) == "/Users/dev/arbor"
+    assert is_list(TemplateAuthorityPreparation.effective_capabilities(preparation))
+    desired = TemplateAuthorityPreparation.desired_authority(preparation)
+    assert is_map(desired["envelope"])
+    assert is_binary(desired["declaration_digest"])
+
+    inspected = inspect(preparation)
+    assert inspected == "#Arbor.Agent.TemplateAuthorityPreparation<redacted>"
+    refute inspected =~ record.id
+    refute inspected =~ "/Users/dev/arbor"
+    refute inspected =~ "generation"
+
+    events = EffectsObserver.events()
+    assert Enum.any?(events, &match?({:authority_mutation_snapshot, "agent_preview1"}, &1))
+    refute Enum.any?(events, &match?({:load_profile_authority_readonly, _}, &1))
+  end
+
+  test "prepare_authoritative fails closed on stale digest without envelope" do
+    _ = seed_complete_observation!()
+    record = authority_record()
+    snapshot = fn _ -> {:ok, record} end
+    stale = String.duplicate("ff", 32)
+
+    assert {:error, :digest_stale} =
+             TemplateAuthorityPreview.prepare_authoritative_with_deps(
+               "agent_preview1",
+               stale,
+               prep_deps(snapshot)
+             )
+  end
+
+  test "prepare_authoritative maps authoritative snapshot errors without envelope" do
+    for {error, expected} <- [
+          {{:error, :not_found}, :not_found},
+          {{:error, :authority_not_durable}, :authority_not_durable},
+          {{:error, :invalid_record}, :invalid_record},
+          {{:error, :backend_unavailable}, :backend_unavailable},
+          {{:error, :invalid_request}, :invalid_request}
+        ] do
+      snapshot = fn _ -> error end
+
+      assert {:error, ^expected} =
+               TemplateAuthorityPreview.prepare_authoritative_with_deps(
+                 "agent_preview1",
+                 String.duplicate("ab", 32),
+                 prep_deps(snapshot)
+               )
+    end
+  end
+
+  test "prepare_authoritative rejects malformed Record data and wrong principal" do
+    _ = seed_complete_observation!()
+    digest = String.duplicate("ab", 32)
+
+    bad_data = %Record{
+      id: "rec_1",
+      key: "agent_preview1",
+      data: "not-a-map",
+      metadata: %{},
+      generation: 1,
+      revision: 1
+    }
+
+    assert {:error, :invalid_record} =
+             TemplateAuthorityPreview.prepare_authoritative_with_deps(
+               "agent_preview1",
+               digest,
+               prep_deps(fn _ -> {:ok, bad_data} end)
+             )
+
+    # Wrong principal: keep Record.key aligned but change agent_id inside data.
+    wrong = authority_record("agent_preview1")
+    wrong = %{wrong | data: Map.put(wrong.data, "agent_id", "agent_other")}
+
+    assert {:error, :observation_invalid} =
+             TemplateAuthorityPreview.prepare_authoritative_with_deps(
+               "agent_preview1",
+               digest,
+               prep_deps(fn _ -> {:ok, wrong} end)
+             )
+  end
+
+  test "prepare_authoritative fails closed when collaborators are unavailable" do
+    record = authority_record()
+    Process.put({FakeTemplateStore, :template}, {:error, :not_found})
+    Process.put({FakeTrust, :trust}, {:error, :not_found})
+    Process.put({FakeSecurity, :caps}, [])
+
+    assert {:error, reason} =
+             TemplateAuthorityPreview.prepare_authoritative_with_deps(
+               "agent_preview1",
+               String.duplicate("ab", 32),
+               prep_deps(fn _ -> {:ok, record} end)
+             )
+
+    assert reason in [:observation_unavailable, :observation_incomplete, :observation_invalid]
+  end
+
+  test "TemplateAuthorityPreparation.new is closed: CAS, desired, root, and caps" do
+    assert {:ok, envelope} = TemplateAuthorityPolicy.build("scout", template_data())
+    record = authority_record()
+
+    snap = TemplateAuthorityPolicy.snapshot(envelope)
+    declared = TemplateAuthorityPolicy.capabilities(snap)
+
+    assert {:ok, caps} =
+             Arbor.Agent.TemplateAuthorityCapabilityProjection.project_normalized(
+               declared,
+               "agent_preview1",
+               repo_root: "/Users/dev/arbor"
+             )
+
+    prov = TemplateAuthorityPolicy.provenance(snap)
+
+    desired = %{
+      "envelope" => envelope,
+      "declaration_digest" => envelope["digest"],
+      "provenance" => %{
+        "name" => Map.get(prov, "name") || Map.get(snap, "template"),
+        "layer" => Map.get(prov, "layer")
+      }
+    }
+
+    cas = %{
+      "record_id" => record.id,
+      "generation" => record.generation,
+      "revision" => record.revision
+    }
+
+    assert {:ok, prep} =
+             TemplateAuthorityPreparation.new(%{
+               record: record,
+               profile_cas: cas,
+               desired_authority: desired,
+               repo_root: "/Users/dev/arbor",
+               effective_capabilities: caps
+             })
+
+    assert inspect(prep) == "#Arbor.Agent.TemplateAuthorityPreparation<redacted>"
+    refute inspect(prep) =~ record.id
+    refute inspect(prep) =~ "/Users/dev/arbor"
+
+    # Extra attrs rejected.
+    assert {:error, :invalid_preparation} =
+             TemplateAuthorityPreparation.new(%{
+               record: record,
+               profile_cas: cas,
+               desired_authority: desired,
+               repo_root: "/Users/dev/arbor",
+               effective_capabilities: caps,
+               extra: true
+             })
+
+    # CAS must match the Record fence tokens.
+    bad_cas = %{cas | "revision" => record.revision + 1}
+
+    assert {:error, :invalid_preparation} =
+             TemplateAuthorityPreparation.new(%{
+               record: record,
+               profile_cas: bad_cas,
+               desired_authority: desired,
+               repo_root: "/Users/dev/arbor",
+               effective_capabilities: caps
+             })
+
+    # Root alias (trailing slash) rejected — must already be admitted form.
+    assert {:error, :invalid_preparation} =
+             TemplateAuthorityPreparation.new(%{
+               record: record,
+               profile_cas: cas,
+               desired_authority: desired,
+               repo_root: "/Users/dev/arbor/",
+               effective_capabilities: caps
+             })
+
+    # Caps mismatch rejected (no silent re-derive).
+    assert {:error, :invalid_preparation} =
+             TemplateAuthorityPreparation.new(%{
+               record: record,
+               profile_cas: cas,
+               desired_authority: desired,
+               repo_root: "/Users/dev/arbor",
+               effective_capabilities: []
+             })
+
+    # String-keyed attrs rejected (atom keys only).
+    assert {:error, :invalid_preparation} =
+             TemplateAuthorityPreparation.new(%{
+               "record" => record,
+               "profile_cas" => cas,
+               "desired_authority" => desired,
+               "repo_root" => "/Users/dev/arbor",
+               "effective_capabilities" => caps
+             })
+  end
 end

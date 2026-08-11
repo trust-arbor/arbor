@@ -23,6 +23,7 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationStoreTest do
   @store_name :arbor_agent_template_authority_reconciliation
   @collection "template_authority_reconciliation"
 
+  alias Arbor.Agent.TemplateAuthorityCapabilityProjection
   alias Arbor.Agent.TemplateAuthorityPolicy
   alias Arbor.Agent.TemplateAuthorityReconciliationOperationCore, as: Core
   alias Arbor.Agent.TemplateAuthorityReconciliationStore, as: Store
@@ -523,8 +524,25 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationStoreTest do
 
   defp t(n), do: 1_000 + n
 
+  @repo_root "/Users/dev/arbor"
+
   defp profile_cas(gen \\ 1, rev \\ 1),
     do: %{"record_id" => "profile_rec_1", "generation" => gen, "revision" => rev}
+
+  defp frozen_authority(operation, repo_root \\ @repo_root) do
+    envelope = operation["desired_authority"]["envelope"]
+    snap = TemplateAuthorityPolicy.snapshot(envelope)
+    declared = TemplateAuthorityPolicy.capabilities(snap)
+
+    assert {:ok, caps} =
+             TemplateAuthorityCapabilityProjection.project_normalized(
+               declared,
+               operation["target_agent_id"],
+               repo_root: repo_root
+             )
+
+    %{"repo_root" => repo_root, "effective_capabilities" => caps}
+  end
 
   defp open!(target, digest, op_id) do
     assert {:ok, op} = Store.open(facts(target, digest, op_id))
@@ -558,7 +576,14 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationStoreTest do
   end
 
   defp prepare(observed_record, at) do
-    facts = %{"at_unix_ms" => at, "profile_cas" => profile_cas()}
+    operation = observed_record.data
+
+    facts = %{
+      "at_unix_ms" => at,
+      "profile_cas" => profile_cas(),
+      "frozen_authority" => frozen_authority(operation)
+    }
+
     apply_step!(observed_record, &Core.prepare(&1, facts))
   end
 

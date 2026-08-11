@@ -78,6 +78,17 @@ defmodule Arbor.Agent.TemplateAuthorityCapabilityProjection do
     end
   end
 
+  @doc """
+  Pure structural admission of a canonical absolute repo root.
+
+  No filesystem reads and no cwd. Windows drive paths are out of scope for
+  this Arbor runtime surface. Shared by Preview preparation and OperationCore
+  frozen-authority validation so path normalizers cannot drift.
+  """
+  @spec admit_canonical_repo_root(term()) ::
+          {:ok, String.t()} | {:error, {:template_authority_projection, term()}}
+  def admit_canonical_repo_root(root), do: normalize_repo_root(root)
+
   # ---------------------------------------------------------------------------
   # Bounded single-pass list admission + projection
   # ---------------------------------------------------------------------------

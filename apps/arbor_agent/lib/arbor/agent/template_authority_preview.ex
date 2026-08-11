@@ -17,8 +17,10 @@ defmodule Arbor.Agent.TemplateAuthorityPreview do
   alias Arbor.Agent.ProfileStore
   alias Arbor.Agent.TemplateAuthorityCapabilityProjection
   alias Arbor.Agent.TemplateAuthorityPolicy
+  alias Arbor.Agent.TemplateAuthorityPreparation
   alias Arbor.Agent.TemplateAuthorityPreviewCore, as: Core
   alias Arbor.Agent.TemplateStore
+  alias Arbor.Contracts.Persistence.Record
   alias Arbor.Security
   alias Arbor.Trust
 
@@ -28,13 +30,15 @@ defmodule Arbor.Agent.TemplateAuthorityPreview do
   # Match TemplateAuthorityPreviewCore ownership row bound so live grants never
   # exceed what classify_ownership admits.
   @max_live_capabilities 512
+  @digest_re ~r/\A[0-9a-f]{64}\z/
 
   @type deps :: %{
           optional(:profile_store) => module(),
           optional(:template_store) => module(),
           optional(:security) => module(),
           optional(:trust) => module(),
-          optional(:repo_root) => String.t() | (-> term())
+          optional(:repo_root) => String.t() | (-> term()),
+          optional(:authority_snapshot) => (String.t() -> term())
         }
 
   @spec project(String.t(), keyword() | map()) :: {:ok, map()}
@@ -83,6 +87,42 @@ defmodule Arbor.Agent.TemplateAuthorityPreview do
     end
   end
 
+  @doc false
+  @spec prepare_authoritative(String.t(), String.t()) ::
+          {:ok, map(), TemplateAuthorityPreparation.t()} | {:error, atom()}
+  def prepare_authoritative(target_agent_id, expected_reconciliation_digest)
+      when is_binary(target_agent_id) and is_binary(expected_reconciliation_digest) do
+    prepare_authoritative_with_deps(
+      target_agent_id,
+      expected_reconciliation_digest,
+      production_preparation_deps()
+    )
+  end
+
+  def prepare_authoritative(_, _), do: {:error, :invalid_request}
+
+  @doc false
+  @spec prepare_authoritative_with_deps(String.t(), String.t(), deps()) ::
+          {:ok, map(), TemplateAuthorityPreparation.t()} | {:error, atom()}
+  def prepare_authoritative_with_deps(target_agent_id, expected_digest, deps)
+      when is_binary(target_agent_id) and is_binary(expected_digest) and is_map(deps) do
+    # Preparation never merges ambient production profile-store fallbacks for
+    # the snapshot seam: only the fixed authority_snapshot collaborator is used.
+    deps = merge_preparation_deps(deps)
+
+    if not valid_expected_digest?(expected_digest) do
+      {:error, :digest_invalid}
+    else
+      do_prepare_authoritative(target_agent_id, expected_digest, deps)
+    end
+  rescue
+    _ -> {:error, :projection_failed}
+  catch
+    _, _ -> {:error, :projection_failed}
+  end
+
+  def prepare_authoritative_with_deps(_, _, _), do: {:error, :invalid_request}
+
   defp production_deps do
     %{
       profile_store: ProfileStore,
@@ -93,10 +133,193 @@ defmodule Arbor.Agent.TemplateAuthorityPreview do
     }
   end
 
+  defp production_preparation_deps do
+    production_deps()
+    |> Map.put(:authority_snapshot, &ProfileStore.authority_mutation_snapshot/1)
+  end
+
   defp merge_deps(deps) do
     # Only fill missing keys from production. Present keys (including an
     # explicit nil/function) stay as injected — no silent production fallback.
     Map.merge(production_deps(), deps, fn _k, _prod, injected -> injected end)
+  end
+
+  defp merge_preparation_deps(deps) do
+    # Fixed production collaborators for non-snapshot reads. Snapshot is always
+    # the injected or production authority_snapshot — never load_profile_* /
+    # legacy/cache. Present keys stay as injected.
+    Map.merge(production_preparation_deps(), deps, fn _k, _prod, injected -> injected end)
+  end
+
+  defp valid_expected_digest?(digest) when is_binary(digest) do
+    byte_size(digest) == 64 and Regex.match?(@digest_re, digest)
+  end
+
+  defp valid_expected_digest?(_), do: false
+
+  defp do_prepare_authoritative(target_agent_id, expected_digest, deps) do
+    with {:ok, %Record{} = record} <- read_authority_snapshot(deps, target_agent_id),
+         {:ok, profile_map} <- admit_record_data(record),
+         facts <- gather_and_classify_from_profile_map(target_agent_id, deps, profile_map),
+         {:ok, report} <- compose_preparation_report(facts),
+         :ok <- require_exact_digest(report, expected_digest),
+         {:ok, preparation} <- build_preparation(record, facts, report) do
+      {:ok, report, preparation}
+    end
+  end
+
+  defp compose_preparation_report(facts) do
+    case Core.compose(facts) do
+      {:ok, report} when is_map(report) ->
+        {:ok, report}
+
+      {:error, _} ->
+        {:error, :observation_invalid}
+
+      _ ->
+        {:error, :projection_failed}
+    end
+  rescue
+    _ -> {:error, :projection_failed}
+  end
+
+  defp require_exact_digest(report, expected) when is_map(report) do
+    status = report["status"]
+    digest = report["reconciliation_digest"]
+
+    cond do
+      status in ~w(invalid) ->
+        {:error, :observation_invalid}
+
+      status in ~w(unavailable) ->
+        {:error, :observation_unavailable}
+
+      not is_binary(digest) or digest == "" or is_nil(digest) ->
+        {:error, :observation_incomplete}
+
+      digest === expected ->
+        :ok
+
+      true ->
+        {:error, :digest_stale}
+    end
+  end
+
+  defp build_preparation(%Record{} = record, facts, _report) when is_map(facts) do
+    with {:ok, profile_cas} <- profile_cas_from_record(record),
+         {:ok, desired_authority} <- desired_authority_from_facts(facts),
+         {:ok, repo_root} <- repo_root_from_facts(facts),
+         {:ok, caps} <- effective_caps_from_facts(facts, desired_authority, repo_root) do
+      case TemplateAuthorityPreparation.new(%{
+             record: record,
+             profile_cas: profile_cas,
+             desired_authority: desired_authority,
+             repo_root: repo_root,
+             effective_capabilities: caps
+           }) do
+        {:ok, _} = ok -> ok
+        {:error, _} -> {:error, :observation_invalid}
+      end
+    end
+  end
+
+  defp profile_cas_from_record(%Record{} = record) do
+    id = record.id
+    gen = record.generation
+    rev = record.revision
+
+    if is_binary(id) and id != "" and is_integer(gen) and gen >= 1 and is_integer(rev) and
+         rev >= 1 do
+      {:ok, %{"record_id" => id, "generation" => gen, "revision" => rev}}
+    else
+      {:error, :invalid_record}
+    end
+  end
+
+  defp desired_authority_from_facts(facts) do
+    envelope = Map.get(facts, :desired_envelope)
+
+    with true <- is_map(envelope) and not is_struct(envelope),
+         {:ok, validated} <- TemplateAuthorityPolicy.validate_envelope(envelope),
+         true <- envelope === validated,
+         digest when is_binary(digest) <- TemplateAuthorityPolicy.digest(validated),
+         {:ok, prov} <- derived_desired_provenance(validated) do
+      {:ok,
+       %{
+         "envelope" => validated,
+         "declaration_digest" => digest,
+         "provenance" => prov
+       }}
+    else
+      _ -> {:error, :observation_invalid}
+    end
+  end
+
+  defp derived_desired_provenance(validated) do
+    snap = TemplateAuthorityPolicy.snapshot(validated)
+    prov = TemplateAuthorityPolicy.provenance(snap)
+    name = Map.get(prov, "name") || Map.get(snap, "template")
+    layer = Map.get(prov, "layer")
+
+    if is_binary(name) and name != "" and
+         (is_nil(layer) or layer in ["user", "shipped", "legacy_json"]) do
+      {:ok, %{"name" => name, "layer" => layer}}
+    else
+      :error
+    end
+  end
+
+  defp repo_root_from_facts(facts) do
+    # The complete observation path already admitted the root via the shared
+    # primitive during gather; re-admit and require exact equality so whitespace
+    # / trailing-slash aliases never freeze.
+    case resolve_repo_root_from_observation(facts) do
+      {:ok, root} when is_binary(root) ->
+        case TemplateAuthorityCapabilityProjection.admit_canonical_repo_root(root) do
+          {:ok, admitted} when admitted === root -> {:ok, admitted}
+          _ -> {:error, :observation_invalid}
+        end
+
+      _ ->
+        {:error, :observation_incomplete}
+    end
+  end
+
+  defp resolve_repo_root_from_observation(facts) do
+    # desired_view capabilities were projected with the admitted root; recover
+    # the root only from the gather path's successful resolve stored implicitly
+    # via re-resolving is not available. Prefer an explicit key if present.
+    cond do
+      is_binary(Map.get(facts, :repo_root)) ->
+        {:ok, Map.get(facts, :repo_root)}
+
+      is_binary(Map.get(facts, "repo_root")) ->
+        {:ok, Map.get(facts, "repo_root")}
+
+      true ->
+        :error
+    end
+  end
+
+  defp effective_caps_from_facts(facts, desired_authority, repo_root) do
+    target = Map.get(facts, :target_agent_id)
+    envelope = desired_authority["envelope"]
+
+    with true <- is_binary(target) and target != "",
+         snap when is_map(snap) <- TemplateAuthorityPolicy.snapshot(envelope),
+         declared when is_list(declared) <- TemplateAuthorityPolicy.capabilities(snap),
+         {:ok, derived} <-
+           TemplateAuthorityCapabilityProjection.project_normalized(declared, target,
+             repo_root: repo_root
+           ),
+         %{"capabilities" => caps} when is_list(caps) <- Map.get(facts, :desired_view),
+         true <- caps === derived do
+      # Composed desired_view must already carry the exact independent
+      # projection — never silently prefer re-derived caps over a mismatch.
+      {:ok, derived}
+    else
+      _ -> {:error, :observation_invalid}
+    end
   end
 
   # ---------------------------------------------------------------------------
@@ -105,7 +328,15 @@ defmodule Arbor.Agent.TemplateAuthorityPreview do
 
   defp gather_and_classify(target_agent_id, deps) do
     profile_read = read_profile(deps, target_agent_id)
+    classify_profile_read(target_agent_id, deps, profile_read)
+  end
 
+  defp gather_and_classify_from_profile_map(target_agent_id, deps, profile_map)
+       when is_map(profile_map) do
+    classify_profile_read(target_agent_id, deps, {:ok, profile_map})
+  end
+
+  defp classify_profile_read(target_agent_id, deps, profile_read) do
     case profile_read do
       {:ok, profile} ->
         case admit_profile(profile, target_agent_id) do
@@ -195,6 +426,10 @@ defmodule Arbor.Agent.TemplateAuthorityPreview do
         {:ok, live_caps} = ok_payload(caps_read)
         {:ok, live_trust} = ok_payload(trust_read)
         {:ok, repo_root} = ok_payload(repo_root_read)
+
+        # Keep the admitted canonical root on the facts so preparation can
+        # freeze the same value without re-deriving from ambient cwd.
+        base = Map.put(base, :repo_root, repo_root)
 
         with {:ok, base, _desired} <-
                build_desired(base, template_name, template_data, target_agent_id, repo_root),
@@ -887,26 +1122,69 @@ defmodule Arbor.Agent.TemplateAuthorityPreview do
     _, _ -> {:error, :raised}
   end
 
-  defp admit_repo_root_string(root)
-       when is_binary(root) and byte_size(root) <= @max_repo_root_bytes do
-    root = root |> String.trim() |> String.trim_trailing("/")
-
-    cond do
-      root == "" or not String.valid?(root) or String.contains?(root, <<0>>) ->
-        {:invalid, :repo_root_invalid}
-
-      not String.starts_with?(root, "/") or String.starts_with?(root, "//") ->
-        {:invalid, :repo_root_invalid}
-
-      Enum.any?(Path.split(root), &(&1 in [".", ".."])) ->
-        {:invalid, :repo_root_invalid}
-
-      true ->
-        {:ok, root}
+  # Shared pure admission with CapabilityProjection / OperationCore — never a
+  # second local path normalizer.
+  defp admit_repo_root_string(root) when is_binary(root) and byte_size(root) <= @max_repo_root_bytes do
+    case TemplateAuthorityCapabilityProjection.admit_canonical_repo_root(root) do
+      {:ok, admitted} -> {:ok, admitted}
+      {:error, _} -> {:invalid, :repo_root_invalid}
     end
   end
 
   defp admit_repo_root_string(_root), do: {:invalid, :repo_root_invalid}
+
+  # ---------------------------------------------------------------------------
+  # Authoritative snapshot (preparation only — never ordinary preview)
+  # ---------------------------------------------------------------------------
+
+  defp read_authority_snapshot(deps, agent_id) do
+    fun = Map.get(deps, :authority_snapshot)
+
+    cond do
+      is_function(fun, 1) ->
+        case fun.(agent_id) do
+          {:ok, %Record{} = record} ->
+            {:ok, record}
+
+          {:error, :not_found} ->
+            {:error, :not_found}
+
+          {:error, :authority_not_durable} ->
+            {:error, :authority_not_durable}
+
+          {:error, :invalid_record} ->
+            {:error, :invalid_record}
+
+          {:error, :backend_unavailable} ->
+            {:error, :backend_unavailable}
+
+          {:error, :invalid_request} ->
+            {:error, :invalid_request}
+
+          {:error, _} ->
+            {:error, :snapshot_unavailable}
+
+          _ ->
+            {:error, :snapshot_unavailable}
+        end
+
+      is_atom(fun) and function_exported?(fun, :authority_mutation_snapshot, 1) ->
+        read_authority_snapshot(%{deps | authority_snapshot: &fun.authority_mutation_snapshot/1}, agent_id)
+
+      true ->
+        {:error, :snapshot_unavailable}
+    end
+  rescue
+    _ -> {:error, :snapshot_unavailable}
+  catch
+    _, _ -> {:error, :snapshot_unavailable}
+  end
+
+  defp admit_record_data(%Record{data: data}) when is_map(data) and not is_struct(data) do
+    {:ok, data}
+  end
+
+  defp admit_record_data(_), do: {:error, :invalid_record}
 
   # Production-only ambient resolution. Spelling matches Lifecycle's
   # repo_root_for_capabilities/0 exactly (Path.expand + umbrella walk +

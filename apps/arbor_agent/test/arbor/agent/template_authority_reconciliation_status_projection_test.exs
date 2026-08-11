@@ -1,6 +1,7 @@
 defmodule Arbor.Agent.TemplateAuthorityReconciliationStatusProjectionTest do
   use ExUnit.Case, async: true
 
+  alias Arbor.Agent.TemplateAuthorityCapabilityProjection
   alias Arbor.Agent.TemplateAuthorityPolicy
   alias Arbor.Agent.TemplateAuthorityReconciliationOperationCore, as: Op
   alias Arbor.Agent.TemplateAuthorityReconciliationStatusProjection, as: Proj
@@ -11,6 +12,7 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationStatusProjectionTest do
   @agent "agent_recon_proj_1"
   @caller "agent_recon_proj_caller"
   @op_id "op_proj_1"
+  @repo_root "/Users/dev/arbor"
 
   @template_data %{
     "name" => "scout",
@@ -69,19 +71,41 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationStatusProjectionTest do
     refute Map.has_key?(status, "fence_state")
     refute Map.has_key?(status, "authorizing_caller_id")
     refute Map.has_key?(status, "profile_cas")
+    refute Map.has_key?(status, "frozen_authority")
     refute Map.has_key?(status, "reconciliation_required")
   end
 
-  test "redacts caller identity, profile CAS, capability ids, and private journal payloads", %{
-    record: record
-  } do
+  defp frozen_authority(record, repo_root \\ @repo_root) do
+    envelope = record["desired_authority"]["envelope"]
+    snap = TemplateAuthorityPolicy.snapshot(envelope)
+    declared = TemplateAuthorityPolicy.capabilities(snap)
+
+    assert {:ok, caps} =
+             TemplateAuthorityCapabilityProjection.project_normalized(
+               declared,
+               record["target_agent_id"],
+               repo_root: repo_root
+             )
+
+    %{"repo_root" => repo_root, "effective_capabilities" => caps}
+  end
+
+  test "redacts caller identity, profile CAS, frozen authority, capability ids, and private journal payloads",
+       %{
+         record: record
+       } do
     assert {:ok, record, _} =
              Op.acknowledge(record, %{"phase_intent" => "reserved", "at_unix_ms" => 5_001})
 
     cas = %{"record_id" => "profile_secret_rec", "generation" => 2, "revision" => 9}
+    frozen = frozen_authority(record)
 
     assert {:ok, record, _} =
-             Op.prepare(record, %{"at_unix_ms" => 5_002, "profile_cas" => cas})
+             Op.prepare(record, %{
+               "at_unix_ms" => 5_002,
+               "profile_cas" => cas,
+               "frozen_authority" => frozen
+             })
 
     assert {:ok, record, _} =
              Op.acknowledge(record, %{"phase_intent" => "prepared", "at_unix_ms" => 5_003})
@@ -122,9 +146,12 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationStatusProjectionTest do
     refute encoded =~ "profile_secret_rec"
     refute encoded =~ "authorizing_caller_id"
     refute encoded =~ "profile_cas"
+    refute encoded =~ "frozen_authority"
+    refute encoded =~ @repo_root
     refute Map.has_key?(status, "desired_authority")
     refute Map.has_key?(status, "authorizing_caller_id")
     refute Map.has_key?(status, "profile_cas")
+    refute Map.has_key?(status, "frozen_authority")
     assert status["journal_summary"]["entry_count"] == 1
     assert status["journal_summary"]["pending_count"] == 1
     assert status["journal_summary"]["succeeded_count"] == 0

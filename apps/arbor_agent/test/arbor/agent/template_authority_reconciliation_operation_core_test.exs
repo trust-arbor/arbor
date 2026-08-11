@@ -1,6 +1,7 @@
 defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCoreTest do
   use ExUnit.Case, async: true
 
+  alias Arbor.Agent.TemplateAuthorityCapabilityProjection
   alias Arbor.Agent.TemplateAuthorityPolicy
   alias Arbor.Agent.TemplateAuthorityReconciliationOperationCore, as: Core
 
@@ -10,6 +11,7 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCoreTest do
   @agent "agent_recon_op_1"
   @caller "agent_recon_caller_1"
   @op_id "op_recon_1"
+  @repo_root "/Users/dev/arbor"
 
   @template_data %{
     "name" => "coding_agent",
@@ -54,6 +56,24 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCoreTest do
     }
   end
 
+  defp frozen_authority(record, repo_root \\ @repo_root) do
+    envelope = record["desired_authority"]["envelope"]
+    snap = TemplateAuthorityPolicy.snapshot(envelope)
+    declared = TemplateAuthorityPolicy.capabilities(snap)
+
+    assert {:ok, caps} =
+             TemplateAuthorityCapabilityProjection.project_normalized(
+               declared,
+               record["target_agent_id"],
+               repo_root: repo_root
+             )
+
+    %{
+      "repo_root" => repo_root,
+      "effective_capabilities" => caps
+    }
+  end
+
   defp assert_admitted!(record) do
     assert {:ok, admitted} = Core.admit(record)
     assert admitted == record
@@ -79,8 +99,14 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCoreTest do
   end
 
   defp prepare!(record, at, cas \\ profile_cas()) do
+    frozen = frozen_authority(record)
+
     assert {:ok, record, effects} =
-             Core.prepare(record, %{"at_unix_ms" => at, "profile_cas" => cas})
+             Core.prepare(record, %{
+               "at_unix_ms" => at,
+               "profile_cas" => cas,
+               "frozen_authority" => frozen
+             })
 
     assert_admitted!(record)
     {record, effects}
@@ -122,7 +148,7 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCoreTest do
   test "constructs reserved operation with fence effect and closed JSON record", %{facts: facts} do
     {record, effects} = new!(facts)
 
-    assert record["version"] == 1
+    assert record["version"] == 2
     assert record["kind"] == "template_authority_reconciliation_operation"
     assert record["phase"] == "reserved"
     assert record["status"] == "active"
@@ -131,6 +157,7 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCoreTest do
     assert record["expected_preview_reconciliation_digest"] == @digest
     assert record["authorizing_caller_id"] == @caller
     assert record["profile_cas"] == nil
+    assert record["frozen_authority"] == nil
     assert record["reconciliation_required"] == nil
 
     assert record["fence_state"] == %{
@@ -176,11 +203,14 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCoreTest do
 
     assert advanced["authorizing_caller_id"] == @caller
 
+    frozen = frozen_authority(advanced)
+
     assert {:ok, record_fenced, _} =
              Core.acknowledge(advanced, %{
                "phase_intent" => "fenced",
                "at_unix_ms" => t(2),
-               "profile_cas" => profile_cas()
+               "profile_cas" => profile_cas(),
+               "frozen_authority" => frozen
              })
 
     assert record_fenced["authorizing_caller_id"] == @caller
@@ -189,14 +219,19 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCoreTest do
   test "prepare requires profile_cas and freezes it before prepared", %{facts: facts} do
     {record, _} = new!(facts)
     {record, _} = ack!(record, "reserved", t(1))
+    frozen = frozen_authority(record)
 
     assert {:error, {:template_authority_reconciliation_operation, :profile_cas_required}} =
-             Core.prepare(record, %{"at_unix_ms" => t(2)})
+             Core.prepare(record, %{"at_unix_ms" => t(2), "frozen_authority" => frozen})
+
+    assert {:error, {:template_authority_reconciliation_operation, :frozen_authority_required}} =
+             Core.prepare(record, %{"at_unix_ms" => t(2), "profile_cas" => profile_cas()})
 
     assert {:error, {:template_authority_reconciliation_operation, :unexpected_field}} =
              Core.prepare(record, %{
                "at_unix_ms" => t(2),
                "profile_cas" => profile_cas(),
+               "frozen_authority" => frozen,
                "capability_id" => "cap_should_reject"
              })
 
@@ -204,15 +239,110 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCoreTest do
     {record, effects} = prepare!(record, t(2), cas)
     assert record["phase"] == "prepared"
     assert record["profile_cas"] == cas
+    assert record["frozen_authority"] == frozen
     assert hd(effects)["effect_type"] == "record_deny_all_intent"
     refute Map.has_key?(hd(effects), "profile_cas")
+    refute Map.has_key?(hd(effects), "frozen_authority")
+    refute Map.has_key?(hd(effects), "repo_root")
 
     assert {:ok, admitted} = Core.admit(record)
     assert admitted["profile_cas"] == cas
+    assert admitted["frozen_authority"] == frozen
 
-    # profile_cas remains immutable across later transitions
+    # profile_cas and frozen_authority remain immutable across later transitions
     {record, _} = ack!(record, "prepared", t(3))
     assert record["profile_cas"] == cas
+    assert record["frozen_authority"] == frozen
+  end
+
+  test "prepare rejects effective-projection mismatch, noncanonical root, and v1 records", %{
+    facts: facts
+  } do
+    {record, _} = new!(facts)
+    {record, _} = ack!(record, "reserved", t(1))
+    cas = profile_cas()
+    frozen = frozen_authority(record)
+
+    mismatched = put_in(frozen, ["effective_capabilities"], [])
+
+    assert {:error, {:template_authority_reconciliation_operation, :frozen_authority_invalid}} =
+             Core.prepare(record, %{
+               "at_unix_ms" => t(2),
+               "profile_cas" => cas,
+               "frozen_authority" => mismatched
+             })
+
+    bad_root = %{frozen | "repo_root" => "relative/path"}
+
+    assert {:error, {:template_authority_reconciliation_operation, :frozen_authority_invalid}} =
+             Core.prepare(record, %{
+               "at_unix_ms" => t(2),
+               "profile_cas" => cas,
+               "frozen_authority" => bad_root
+             })
+
+    # Trailing-slash / whitespace root aliases are not rewritten before equality.
+    alias_root = %{frozen | "repo_root" => @repo_root <> "/"}
+
+    assert {:error, {:template_authority_reconciliation_operation, :frozen_authority_invalid}} =
+             Core.prepare(record, %{
+               "at_unix_ms" => t(2),
+               "profile_cas" => cas,
+               "frozen_authority" => alias_root
+             })
+
+    spaced_root = %{frozen | "repo_root" => "  " <> @repo_root}
+
+    assert {:error, {:template_authority_reconciliation_operation, :frozen_authority_invalid}} =
+             Core.prepare(record, %{
+               "at_unix_ms" => t(2),
+               "profile_cas" => cas,
+               "frozen_authority" => spaced_root
+             })
+
+    # Atom-key alias on frozen map is rejected (closed binary keys only).
+    atom_keyed = %{
+      repo_root: @repo_root,
+      effective_capabilities: frozen["effective_capabilities"]
+    }
+
+    assert {:error, {:template_authority_reconciliation_operation, reason}} =
+             Core.prepare(record, %{
+               "at_unix_ms" => t(2),
+               "profile_cas" => cas,
+               "frozen_authority" => atom_keyed
+             })
+
+    assert reason in [:frozen_authority_invalid, :invalid_record]
+
+    # Reordered / non-canonical supplied caps fail exact equality (no pre-normalize).
+    caps = frozen["effective_capabilities"]
+
+    if length(caps) > 1 do
+      reordered = %{frozen | "effective_capabilities" => Enum.reverse(caps)}
+
+      assert {:error, {:template_authority_reconciliation_operation, :frozen_authority_invalid}} =
+               Core.prepare(record, %{
+                 "at_unix_ms" => t(2),
+                 "profile_cas" => cas,
+                 "frozen_authority" => reordered
+               })
+    end
+
+    {prepared, _} = prepare!(record, t(2), cas)
+
+    tampered =
+      put_in(prepared, ["frozen_authority", "effective_capabilities"], [
+        %{"resource" => "arbor://tampered", "constraints" => %{}}
+      ])
+
+    assert {:error, {:template_authority_reconciliation_operation, :frozen_authority_invalid}} =
+             Core.admit(tampered)
+
+    v1 = Map.put(prepared, "version", 1)
+
+    assert {:error, {:template_authority_reconciliation_operation, :invalid_record}} =
+             Core.admit(v1)
   end
 
   test "admits Policy envelope and rejects bad digests", %{facts: facts, envelope: envelope} do
@@ -815,6 +945,7 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCoreTest do
       |> Map.put("phase", "reserved")
       |> Map.put("runtime_was_running", true)
       |> Map.put("profile_cas", nil)
+      |> Map.put("frozen_authority", nil)
       |> Map.put("journal", %{"version" => 1, "entries" => []})
       |> Map.put("reconciliation_required", nil)
       |> put_in(["fence_state", "installed"], false)
@@ -1153,12 +1284,19 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCoreTest do
   test "phase-specific acknowledge keysets reject irrelevant facts", %{facts: facts} do
     {record, _} = new!(facts)
 
-    # profile_cas is only admissible for the fenced→prepared transition.
+    # profile_cas / frozen_authority are only admissible for fenced→prepared.
     assert {:error, {:template_authority_reconciliation_operation, :unexpected_field}} =
              Core.acknowledge(record, %{
                "phase_intent" => "reserved",
                "at_unix_ms" => t(1),
                "profile_cas" => profile_cas()
+             })
+
+    assert {:error, {:template_authority_reconciliation_operation, :unexpected_field}} =
+             Core.acknowledge(record, %{
+               "phase_intent" => "reserved",
+               "at_unix_ms" => t(1),
+               "frozen_authority" => frozen_authority(record)
              })
 
     {record, _} = ack!(record, "reserved", t(1))

@@ -5,9 +5,10 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCore do
   # operation record. Emits effects as closed JSON maps; never performs IO,
   # time, randomness, logging, process calls, or authority mutation.
 
+  alias Arbor.Agent.TemplateAuthorityCapabilityProjection
   alias Arbor.Agent.TemplateAuthorityPolicy
 
-  @version 1
+  @version 2
   @kind "template_authority_reconciliation_operation"
 
   @phases ~w(
@@ -75,6 +76,7 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCore do
                  "status",
                  "runtime_was_running",
                  "profile_cas",
+                 "frozen_authority",
                  "reconciliation_required",
                  "retry",
                  "journal",
@@ -92,6 +94,7 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCore do
   @provenance_keys MapSet.new(["name", "layer"])
   @terminal_keys MapSet.new(["reason_code", "at_unix_ms", "phase_at_terminal", "blocked_kind"])
   @profile_cas_keys MapSet.new(["record_id", "generation", "revision"])
+  @frozen_authority_keys MapSet.new(["repo_root", "effective_capabilities"])
   @reconciliation_keys MapSet.new(["phase", "effect_id"])
   @entry_keys MapSet.new([
                 "effect_id",
@@ -118,13 +121,14 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCore do
                    "created_at_unix_ms",
                    "retry"
                  ])
-  # Phase-specific acknowledge keysets: profile_cas is only admissible for the
-  # fenced→prepared transition, runtime_was_running only for deny_all_installed.
-  # Supplying them in unrelated phases is rejected rather than silently ignored.
+  # Phase-specific acknowledge keysets: profile_cas + frozen_authority are only
+  # admissible for the fenced→prepared transition, runtime_was_running only for
+  # deny_all_installed. Supplying them in unrelated phases is rejected rather
+  # than silently ignored.
   @ack_base_keys MapSet.new(["phase_intent", "at_unix_ms"])
-  @ack_fenced_keys MapSet.new(["phase_intent", "at_unix_ms", "profile_cas"])
+  @ack_fenced_keys MapSet.new(["phase_intent", "at_unix_ms", "profile_cas", "frozen_authority"])
   @ack_deny_installed_keys MapSet.new(["phase_intent", "at_unix_ms", "runtime_was_running"])
-  @prepare_fact_keys MapSet.new(["at_unix_ms", "profile_cas"])
+  @prepare_fact_keys MapSet.new(["at_unix_ms", "profile_cas", "frozen_authority"])
   @plan_fact_keys MapSet.new(["at_unix_ms", "entries"])
   @effect_ack_fact_keys MapSet.new(["effect_id", "at_unix_ms"])
   @effect_outcome_fact_keys MapSet.new(["effect_id", "outcome", "reason_code", "at_unix_ms"])
@@ -201,6 +205,7 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCore do
         "status" => "active",
         "runtime_was_running" => nil,
         "profile_cas" => nil,
+        "frozen_authority" => nil,
         "reconciliation_required" => nil,
         "retry" => retry,
         "journal" => empty_journal(),
@@ -362,9 +367,12 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCore do
 
   defp do_acknowledge(record, "fenced", facts, at) do
     with {:ok, profile_cas} <- require_profile_cas(facts),
-         :ok <- require_profile_cas_unset(record) do
+         :ok <- require_profile_cas_unset(record),
+         {:ok, frozen} <- require_frozen_authority(facts, record),
+         :ok <- require_frozen_authority_unset(record) do
       record
       |> Map.put("profile_cas", profile_cas)
+      |> Map.put("frozen_authority", frozen)
       |> put_phase("prepared")
       |> touch(at)
       |> reset_retry_on_success()
@@ -1321,6 +1329,7 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCore do
          :ok <- require_scope_durability(record),
          :ok <- validate_runtime(record),
          :ok <- validate_profile_cas(record),
+         :ok <- validate_frozen_authority(record),
          :ok <- validate_journal(record["journal"], record),
          :ok <- validate_reconciliation_required(record),
          :ok <- validate_retry(record["retry"], record),
@@ -1423,6 +1432,34 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCore do
   end
 
   defp validate_profile_cas_value(_), do: error(:invalid_record)
+
+  # frozen_authority is nil before prepared and a closed re-derived map at and
+  # after prepared. Re-admission re-projects declared capabilities from the
+  # stored desired envelope + target + root and rejects tamper.
+  defp validate_frozen_authority(%{"frozen_authority" => nil, "phase" => phase})
+       when phase in ~w(reserved fenced),
+       do: :ok
+
+  defp validate_frozen_authority(%{"frozen_authority" => frozen, "phase" => phase} = record)
+       when is_map(frozen) and phase not in ~w(reserved fenced) do
+    validate_frozen_authority_value(frozen, record)
+  end
+
+  defp validate_frozen_authority(_), do: error(:invalid_record)
+
+  defp validate_frozen_authority_value(frozen, record) when is_map(frozen) do
+    # Re-admission never rewrites keys/caps before equality: atom aliases,
+    # whitespace roots, and non-canonical reorderings fail closed.
+    with :ok <- closed_keyset(frozen, @frozen_authority_keys),
+         {:ok, _canonical} <- admit_and_rederive_frozen(frozen, record) do
+      :ok
+    else
+      {:error, _} = err -> err
+      _ -> error(:frozen_authority_invalid)
+    end
+  end
+
+  defp validate_frozen_authority_value(_, _), do: error(:frozen_authority_invalid)
 
   defp validate_reconciliation_required(%{"reconciliation_required" => nil} = record) do
     case {record["status"], journal_head(record)} do
@@ -2118,6 +2155,110 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCore do
 
   defp require_profile_cas_unset(%{"profile_cas" => nil}), do: :ok
   defp require_profile_cas_unset(_), do: error(:profile_cas_immutable)
+
+  defp require_frozen_authority_unset(%{"frozen_authority" => nil}), do: :ok
+  defp require_frozen_authority_unset(_), do: error(:frozen_authority_immutable)
+
+  defp require_frozen_authority(facts, record) do
+    case Map.fetch(facts, "frozen_authority") do
+      {:ok, frozen} when is_map(frozen) and not is_struct(frozen) ->
+        # Closed binary keys only — never atom/string alias normalization before
+        # equality (that would admit key aliases the caller did not freeze).
+        with :ok <- closed_keyset(frozen, @frozen_authority_keys),
+             {:ok, canonical} <- admit_and_rederive_frozen(frozen, record) do
+          {:ok, canonical}
+        else
+          {:error, _} = err -> err
+          _ -> error(:frozen_authority_invalid)
+        end
+
+      {:ok, _} ->
+        error(:frozen_authority_invalid)
+
+      :error ->
+        error(:frozen_authority_required)
+    end
+  end
+
+  # Independently re-derive effective capabilities from the operation's
+  # canonical desired envelope + target_agent_id + supplied root. The supplied
+  # root and caps must already be the exact canonical form: raw supplied
+  # values are compared with === to the independent derivation (no pre-normalize
+  # that would admit aliases, duplicates, reorderings, or trailing-slash roots).
+  defp admit_and_rederive_frozen(frozen, record) do
+    supplied_root = Map.get(frozen, "repo_root")
+    supplied_caps = Map.get(frozen, "effective_capabilities")
+
+    with {:ok, admitted_root} <- admit_frozen_repo_root(supplied_root),
+         true <- is_binary(supplied_root) and supplied_root === admitted_root,
+         :ok <- require_raw_capability_list(supplied_caps),
+         {:ok, derived} <- derive_effective_capabilities(record, admitted_root),
+         true <- derived === supplied_caps do
+      {:ok, %{"repo_root" => admitted_root, "effective_capabilities" => derived}}
+    else
+      {:error, _} = err -> err
+      false -> error(:frozen_authority_invalid)
+      _ -> error(:frozen_authority_invalid)
+    end
+  end
+
+  defp admit_frozen_repo_root(root) do
+    case TemplateAuthorityCapabilityProjection.admit_canonical_repo_root(root) do
+      {:ok, admitted} ->
+        {:ok, admitted}
+
+      {:error, {:template_authority_projection, _reason}} ->
+        error(:frozen_authority_invalid)
+
+      {:error, _reason} ->
+        error(:frozen_authority_invalid)
+    end
+  end
+
+  # Spine + binary-key shape only. Never Policy.normalize here — that would
+  # rewrite aliases/duplicates into the canonical form before equality.
+  defp require_raw_capability_list(caps) when is_list(caps) do
+    case admit_bounded_list_spine(caps, @max_list_len) do
+      :ok -> require_binary_keyed_cap_maps(caps)
+      _ -> error(:frozen_authority_invalid)
+    end
+  end
+
+  defp require_raw_capability_list(_), do: error(:frozen_authority_invalid)
+
+  defp require_binary_keyed_cap_maps([]), do: :ok
+
+  defp require_binary_keyed_cap_maps([cap | rest]) when is_list(rest) do
+    if is_map(cap) and not is_struct(cap) and Enum.all?(Map.keys(cap), &is_binary/1) do
+      require_binary_keyed_cap_maps(rest)
+    else
+      error(:frozen_authority_invalid)
+    end
+  end
+
+  defp require_binary_keyed_cap_maps(_), do: error(:frozen_authority_invalid)
+
+  defp derive_effective_capabilities(record, repo_root) do
+    desired = record["desired_authority"]
+    envelope = desired && desired["envelope"]
+    target = record["target_agent_id"]
+
+    with true <- is_map(envelope),
+         snap when is_map(snap) <- TemplateAuthorityPolicy.snapshot(envelope),
+         declared when is_list(declared) <- TemplateAuthorityPolicy.capabilities(snap) do
+      case TemplateAuthorityCapabilityProjection.project_normalized(declared, target,
+             repo_root: repo_root
+           ) do
+        {:ok, derived} ->
+          {:ok, derived}
+
+        {:error, _} ->
+          error(:frozen_authority_invalid)
+      end
+    else
+      _ -> error(:frozen_authority_invalid)
+    end
+  end
 
   defp require_reconciliation(%{"reconciliation_required" => recon})
        when is_map(recon),

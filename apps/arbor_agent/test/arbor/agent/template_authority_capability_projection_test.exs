@@ -251,4 +251,37 @@ defmodule Arbor.Agent.TemplateAuthorityCapabilityProjectionTest do
     assert {:ok, b} = Projection.project_normalized(caps, "agent_ok1", repo_root: @repo_root)
     assert a == b
   end
+
+  test "admit_canonical_repo_root is the shared pure absolute-path primitive" do
+    assert {:ok, @repo_root} = Projection.admit_canonical_repo_root(@repo_root)
+    assert {:ok, @repo_root} = Projection.admit_canonical_repo_root(@repo_root <> "/")
+    assert {:ok, @repo_root} = Projection.admit_canonical_repo_root("  " <> @repo_root <> "  ")
+
+    assert {:error, {:template_authority_projection, :repo_root_missing_or_invalid}} =
+             Projection.admit_canonical_repo_root("relative/path")
+
+    assert {:error, {:template_authority_projection, :repo_root_missing_or_invalid}} =
+             Projection.admit_canonical_repo_root("/tmp/./arbor")
+
+    assert {:error, {:template_authority_projection, :repo_root_missing_or_invalid}} =
+             Projection.admit_canonical_repo_root("/tmp/../arbor")
+
+    assert {:error, {:template_authority_projection, :repo_root_missing_or_invalid}} =
+             Projection.admit_canonical_repo_root("//unc/share")
+
+    assert {:error, {:template_authority_projection, :repo_root_missing_or_invalid}} =
+             Projection.admit_canonical_repo_root("")
+
+    assert {:error, {:template_authority_projection, :repo_root_missing_or_invalid}} =
+             Projection.admit_canonical_repo_root("bad\x00root")
+
+    assert {:error, {:template_authority_projection, :repo_root_missing_or_invalid}} =
+             Projection.admit_canonical_repo_root(String.duplicate("a", 1025))
+
+    assert {:error, {:template_authority_projection, :repo_root_missing_or_invalid}} =
+             Projection.admit_canonical_repo_root(:atom)
+
+    assert {:error, {:template_authority_projection, :repo_root_missing_or_invalid}} =
+             Projection.admit_canonical_repo_root(nil)
+  end
 end
