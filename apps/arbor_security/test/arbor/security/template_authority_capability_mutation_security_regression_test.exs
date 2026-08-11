@@ -2045,6 +2045,327 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
   end
 
   # ==========================================================================
+  # State-shape upgrade regressions (Phase 4C C3A) — a pre-C3A live state
+  # (one whose code was development-reloaded without an OTP upgrade, so it
+  # lacks by_resource / pending_intents / state_version) must survive the next
+  # callback without KeyError or lost authority.
+  # ==========================================================================
+
+  test "security regression: pre-C3A live state processes ordinary grant and revoke after hot reload without crash" do
+    fresh_isolated_store()
+
+    principal = "agent_upgrade_g1"
+    resource_a = "arbor://fs/read/upgrade-g1-a"
+    resource_b = "arbor://fs/read/upgrade-g1-b"
+
+    assert {:ok, %Capability{id: a_id}} =
+             Security.grant(principal: principal, resource: resource_a)
+
+    simulate_pre_c3a_state()
+
+    assert {:ok, %Capability{}} = Security.grant(principal: principal, resource: resource_b)
+    assert :ok = Security.revoke(a_id)
+
+    assert Process.whereis(CapabilityStore) != nil
+    assert {:error, :not_found} = CapabilityStore.get(a_id)
+  end
+
+  test "security regression: pre-C3A live state blocks a different-id acknowledged grant after hot reload" do
+    fresh_isolated_store()
+
+    principal = "agent_upgrade_g2"
+    resource = "arbor://fs/read/upgrade-g2"
+
+    assert {:ok, original} = Security.grant(principal: principal, resource: resource)
+    original_id = original.id
+
+    simulate_pre_c3a_state()
+
+    opts = det_grant_opts("upgrade-g2-other", principal, resource)
+
+    assert {:error, :resource_conflict} = Security.acknowledged_grant(opts)
+    assert {:ok, %Capability{id: ^original_id}} = CapabilityStore.get(original_id)
+  end
+
+  test "security regression: pre-C3A live state processes acknowledged revoke after hot reload without lost authority" do
+    fresh_isolated_store()
+
+    principal = "agent_upgrade_g3"
+
+    assert {:ok, %Capability{id: keep_id}} =
+             Security.grant(principal: principal, resource: "arbor://fs/read/upgrade-g3-keep")
+
+    unknown_id = det_id("upgrade-g3-unknown")
+
+    simulate_pre_c3a_state()
+
+    assert {:ok, :idempotent, ^unknown_id} = Security.acknowledged_revoke(unknown_id)
+
+    assert Process.whereis(CapabilityStore) != nil
+    assert {:ok, %Capability{id: ^keep_id}} = CapabilityStore.get(keep_id)
+  end
+
+  test "security regression: pre-C3A live state processes expiry cleanup after hot reload" do
+    fresh_isolated_store()
+
+    principal = "agent_upgrade_g4"
+    past = DateTime.add(DateTime.utc_now(), -1, :second)
+
+    assert {:ok, %Capability{id: keep_id}} =
+             Security.grant(principal: principal, resource: "arbor://fs/read/upgrade-g4-keep")
+
+    assert {:ok, %Capability{id: exp_id}} =
+             Security.grant(
+               principal: principal,
+               resource: "arbor://fs/read/upgrade-g4-exp",
+               expires_at: past
+             )
+
+    simulate_pre_c3a_state()
+
+    send(CapabilityStore, :cleanup)
+    _ = :sys.get_state(CapabilityStore)
+
+    assert Process.whereis(CapabilityStore) != nil
+    assert {:error, :not_found} = CapabilityStore.get(exp_id)
+    assert {:ok, %Capability{id: ^keep_id}} = CapabilityStore.get(keep_id)
+  end
+
+  test "security regression: pre-C3A live state projects a real remote add and revoke signal after hot reload" do
+    fresh_isolated_store()
+
+    principal = "agent_upgrade_g5"
+    resource = "arbor://fs/read/upgrade-g5"
+    remote_opts = det_grant_opts("upgrade-g5-remote", principal, resource)
+    remote_id = remote_opts[:capability_id]
+    remote_cap = build_signed_cap(remote_opts)
+
+    assert {:ok, %Record{}} =
+             BufferedStore.acknowledged_put(
+               remote_id,
+               Record.new(remote_id, Serializer.serialize(remote_cap)),
+               name: @capability_store
+             )
+
+    simulate_pre_c3a_state()
+
+    add_signal =
+      Arbor.Signals.Signal.new(
+        :security,
+        :capability_granted,
+        %{
+          capability_id: remote_id,
+          principal_id: principal,
+          resource_uri: resource,
+          origin_node: :"remote@upgrade-g5"
+        },
+        scope: :cluster
+      )
+
+    send(CapabilityStore, {:signal_received, add_signal})
+    _ = :sys.get_state(CapabilityStore)
+
+    assert {:ok, %Capability{id: ^remote_id}} = CapabilityStore.get(remote_id)
+
+    assert resource_index_holds?(
+             :sys.get_state(CapabilityStore).by_resource,
+             principal,
+             remote_id
+           )
+
+    revoke_signal =
+      Arbor.Signals.Signal.new(
+        :security,
+        :capability_revoked,
+        %{
+          capability_ids: [remote_id],
+          principal_id: principal,
+          origin_node: :"remote@upgrade-g5"
+        },
+        scope: :cluster
+      )
+
+    send(CapabilityStore, {:signal_received, revoke_signal})
+    _ = :sys.get_state(CapabilityStore)
+
+    assert {:error, :not_found} = CapabilityStore.get(remote_id)
+
+    refute resource_index_holds?(
+             :sys.get_state(CapabilityStore).by_resource,
+             principal,
+             remote_id
+           )
+  end
+
+  test "security regression: code_change normalizes pre-C3A state to the lazy shape and is idempotent" do
+    fresh_isolated_store()
+
+    principal = "agent_upgrade_cc"
+    resource = "arbor://fs/read/upgrade-cc"
+
+    assert {:ok, %Capability{id: cap_id}} =
+             Security.grant(principal: principal, resource: resource)
+
+    simulate_pre_c3a_state()
+
+    :ok = :sys.change_code(CapabilityStore, Arbor.Security.CapabilityStore, 0, [])
+
+    state = :sys.get_state(CapabilityStore)
+    assert state.state_version == 1
+    assert resource_index_holds?(state.by_resource, principal, cap_id)
+    assert state.pending_intents == %{}
+
+    assert {:error, :resource_conflict} =
+             Security.acknowledged_grant(det_grant_opts("upgrade-cc-other", principal, resource))
+
+    snapshot = :sys.get_state(CapabilityStore)
+    :ok = :sys.change_code(CapabilityStore, Arbor.Security.CapabilityStore, 0, [])
+    assert :sys.get_state(CapabilityStore) == snapshot
+  end
+
+  test "security regression: opaque legacy two-field intent blocks an alternate id and rejects a same-id retry without durable mutation" do
+    fresh_isolated_store()
+
+    principal = "agent_upgrade_t7"
+    resource = "arbor://fs/read/upgrade-t7"
+    canon = canonical_resource_for(resource)
+
+    x_opts = det_grant_opts("upgrade-t7-x", principal, resource)
+    x_id = x_opts[:capability_id]
+    y_opts = det_grant_opts("upgrade-t7-y", principal, resource)
+    y_id = y_opts[:capability_id]
+
+    :sys.replace_state(CapabilityStore, fn state ->
+      state
+      |> Map.put(:pending_intents, %{x_id => {principal, canon}})
+      |> Map.delete(:state_version)
+    end)
+
+    CASSandbox.reset_inventory_scan_count()
+    assert {:error, :resource_conflict} = Security.acknowledged_grant(y_opts)
+    assert CASSandbox.inventory_scan_count() == 0
+
+    assert {:error, :id_conflict} = Security.acknowledged_grant(x_opts)
+
+    intent = Map.get(:sys.get_state(CapabilityStore).pending_intents, x_id)
+    assert intent == {principal, canon, :legacy_uncertain_identity}
+
+    assert {:ok, durable_ids} = BufferedStore.authoritative_list(name: @capability_store)
+    refute x_id in durable_ids
+    refute y_id in durable_ids
+  end
+
+  test "security regression: an exact live capability upgrades a matching legacy intent and converges idempotently" do
+    fresh_isolated_store()
+
+    principal = "agent_upgrade_t8"
+    resource = "arbor://fs/read/upgrade-t8"
+    canon = canonical_resource_for(resource)
+    opts = det_grant_opts("upgrade-t8", principal, resource)
+    cap_id = opts[:capability_id]
+
+    seeded = build_signed_cap(opts)
+    assert {:ok, :stored} = CapabilityStore.put(seeded)
+
+    :sys.replace_state(CapabilityStore, fn state ->
+      state
+      |> Map.put(:pending_intents, %{cap_id => {principal, canon}})
+      |> Map.delete(:state_version)
+    end)
+
+    assert {:ok, :idempotent, ^cap_id} = Security.acknowledged_grant(opts)
+
+    refute Map.has_key?(:sys.get_state(CapabilityStore).pending_intents, cap_id)
+    assert {:ok, %Capability{id: ^cap_id}} = CapabilityStore.get(cap_id)
+  end
+
+  test "security regression: malformed non-map pending_intents fails closed" do
+    fresh_isolated_store()
+
+    principal = "agent_upgrade_m1"
+    opts = det_grant_opts("upgrade-m1", principal, "arbor://fs/read/upgrade-m1")
+
+    :sys.replace_state(CapabilityStore, fn state ->
+      state
+      |> Map.put(:pending_intents, "not-a-map")
+      |> Map.delete(:state_version)
+    end)
+
+    assert {:error, :capability_store_unavailable} = Security.acknowledged_grant(opts)
+    assert Process.whereis(CapabilityStore) == nil
+  end
+
+  test "security regression: malformed pending_intent entry shape fails closed" do
+    fresh_isolated_store()
+
+    principal = "agent_upgrade_m2"
+    opts = det_grant_opts("upgrade-m2", principal, "arbor://fs/read/upgrade-m2")
+    bad_id = det_id("upgrade-m2-bad")
+
+    :sys.replace_state(CapabilityStore, fn state ->
+      state
+      |> Map.put(:pending_intents, %{bad_id => {:nope}})
+      |> Map.delete(:state_version)
+    end)
+
+    assert {:error, :capability_store_unavailable} = Security.acknowledged_grant(opts)
+    assert Process.whereis(CapabilityStore) == nil
+  end
+
+  test "security regression: malformed by_id value fails closed" do
+    fresh_isolated_store()
+
+    principal = "agent_upgrade_m3"
+    opts = det_grant_opts("upgrade-m3", principal, "arbor://fs/read/upgrade-m3")
+
+    :sys.replace_state(CapabilityStore, fn state ->
+      state
+      |> Map.put(:by_id, %{"cap_bad" => "not-a-capability"})
+      |> Map.delete(:state_version)
+    end)
+
+    assert {:error, :capability_store_unavailable} = Security.acknowledged_grant(opts)
+    assert Process.whereis(CapabilityStore) == nil
+  end
+
+  test "security regression: unsupported future state version fails closed" do
+    fresh_isolated_store()
+
+    principal = "agent_upgrade_v"
+    opts = det_grant_opts("upgrade-v", principal, "arbor://fs/read/upgrade-v")
+
+    :sys.replace_state(CapabilityStore, fn state -> %{state | state_version: 2} end)
+
+    assert {:error, :capability_store_unavailable} = Security.acknowledged_grant(opts)
+    assert Process.whereis(CapabilityStore) == nil
+  end
+
+  defp simulate_pre_c3a_state do
+    :sys.replace_state(CapabilityStore, fn state ->
+      state
+      |> Map.delete(:by_resource)
+      |> Map.delete(:pending_intents)
+      |> Map.delete(:state_version)
+    end)
+
+    :ok
+  end
+
+  defp canonical_resource_for(uri) do
+    case Arbor.Contracts.Security.CapabilityUri.parse(uri) do
+      {:ok, parsed} -> Arbor.Contracts.Security.CapabilityUri.canonical(parsed)
+      _ -> uri
+    end
+  end
+
+  defp resource_index_holds?(by_resource, principal, id) do
+    Enum.any?(by_resource, fn
+      {{^principal, _resource}, ids} -> MapSet.member?(ids, id)
+      _other -> false
+    end)
+  end
+
+  # ==========================================================================
   # Helpers for the F1-F5 regressions.
   # ==========================================================================
 

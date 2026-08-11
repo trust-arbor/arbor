@@ -40,6 +40,12 @@ defmodule Arbor.Security.CapabilityStore do
   @disclosure_uri_prefix "arbor://egress/disclose"
 
   @cleanup_interval_ms 60_000
+
+  # Phase 4C C3A live-state shape version. A live process whose code was
+  # development-reloaded WITHOUT an OTP upgrade keeps a pre-C3A state missing
+  # by_resource / pending_intents / state_version; migrate_state/1 normalizes
+  # it lazily (from every C3A-field-touching callback) and from code_change/3.
+  @current_state_version 1
   @signal_events [
     :capability_granted,
     :capability_revoked,
@@ -333,6 +339,7 @@ defmodule Arbor.Security.CapabilityStore do
           by_issuer: %{},
           by_parent: %{},
           by_usage: %{},
+          state_version: @current_state_version,
           signal_sync: signal_sync,
           stats: %{
             total_granted: 0,
@@ -369,48 +376,12 @@ defmodule Arbor.Security.CapabilityStore do
 
   @impl true
   def handle_call({:put, cap}, _from, state) do
-    case check_quotas(state, cap) do
-      :ok ->
-        # Deduplicate: if a capability with the same principal+resource already exists,
-        # replace it instead of appending (prevents unbounded growth from re-grants)
-        replaced_id = existing_capability_id(state, cap)
+    case migrate_state(state) do
+      {:ok, state} ->
+        exec_put(cap, state)
 
-        case replaced_id do
-          nil ->
-            state = add_capability_to_state(state, cap)
-            _ = persist_capability(cap, acknowledged: false)
-            emit_capability_signal(:capability_granted, cap)
-            {:reply, {:ok, :stored}, state}
-
-          id ->
-            existing_cap = Map.fetch!(state.by_id, id)
-
-            case replace_persisted_capability(existing_cap, cap) do
-              :ok ->
-                {state, ^id} = maybe_replace_existing(state, cap)
-                state = add_capability_to_state(state, cap)
-
-                emit_revocation_signal(
-                  :capability_revoked,
-                  [existing_cap.id],
-                  existing_cap.principal_id
-                )
-
-                emit_capability_signal(:capability_granted, cap)
-                {:reply, {:ok, :stored}, state}
-
-              {:error, reason} = error ->
-                Logger.error(
-                  "Capability replacement failed for #{cap.id}; " <>
-                    "superseded #{id} was retained: #{inspect(reason)}"
-                )
-
-                {:reply, error, state}
-            end
-        end
-
-      {:error, _} = error ->
-        {:reply, error, state}
+      {:error, reason} ->
+        {:stop, reason, {:error, :capability_store_unavailable}, state}
     end
   end
 
@@ -567,53 +538,24 @@ defmodule Arbor.Security.CapabilityStore do
 
   @impl true
   def handle_call({:revoke, capability_id}, _from, state) do
-    case Map.get(state.by_id, capability_id) do
-      nil ->
-        {:reply, {:error, :not_found}, state}
+    case migrate_state(state) do
+      {:ok, state} ->
+        exec_revoke(capability_id, state)
 
-      cap ->
-        state =
-          state
-          |> deindex_resource(cap)
-          |> update_in([:by_id], &Map.delete(&1, capability_id))
-          |> update_in([:by_principal, cap.principal_id], fn ids ->
-            List.delete(ids || [], capability_id)
-          end)
-          |> update_in([:stats, :total_revoked], &(&1 + 1))
-
-        delete_persisted_capability(capability_id)
-        emit_revocation_signal(:capability_revoked, [capability_id], cap.principal_id)
-        {:reply, :ok, state}
+      {:error, reason} ->
+        {:stop, reason, {:error, :capability_store_unavailable}, state}
     end
   end
 
   @impl true
   def handle_call({:revoke_all, principal_id}, _from, state) do
-    cap_ids = Map.get(state.by_principal, principal_id, [])
-    count = length(cap_ids)
-    revoked_caps = Enum.map(cap_ids, &Map.get(state.by_id, &1))
+    case migrate_state(state) do
+      {:ok, state} ->
+        exec_revoke_all(principal_id, state)
 
-    Enum.each(cap_ids, &delete_persisted_capability/1)
-
-    state =
-      Enum.reduce(revoked_caps, state, fn
-        %Capability{} = cap, acc -> deindex_resource(acc, cap)
-        _nil_cap, acc -> acc
-      end)
-
-    state =
-      state
-      |> update_in([:by_id], fn by_id ->
-        Enum.reduce(cap_ids, by_id, &Map.delete(&2, &1))
-      end)
-      |> put_in([:by_principal, principal_id], [])
-      |> update_in([:stats, :total_revoked], &(&1 + count))
-
-    if count > 0 do
-      emit_revocation_signal(:capabilities_revoked_all, cap_ids, principal_id)
+      {:error, reason} ->
+        {:stop, reason, {:error, :capability_store_unavailable}, state}
     end
-
-    {:reply, {:ok, count}, state}
   end
 
   @impl true
@@ -646,6 +588,217 @@ defmodule Arbor.Security.CapabilityStore do
 
   @impl true
   def handle_call({:revoke_by_scope, scope_field, scope_value}, _from, state) do
+    case migrate_state(state) do
+      {:ok, state} ->
+        exec_revoke_by_scope(scope_field, scope_value, state)
+
+      {:error, reason} ->
+        {:stop, reason, {:error, :capability_store_unavailable}, state}
+    end
+  end
+
+  @impl true
+  def handle_call({:cascade_revoke, capability_id}, _from, state) do
+    case migrate_state(state) do
+      {:ok, state} ->
+        exec_cascade_revoke(capability_id, state)
+
+      {:error, reason} ->
+        {:stop, reason, {:error, :capability_store_unavailable}, state}
+    end
+  end
+
+  # ===========================================================================
+  # Acknowledged exact mutation handlers (Phase 4C C3A).
+  #
+  # Acknowledged put pre-arms a bounded uncertainty intent, then runs the body
+  # against that armed state. Any rescue/exit/throw replies :outcome_unknown
+  # with the ARMED state (incoming + pending intent), not the raw incoming
+  # state, so a post-admission ambiguity retains the ledger entry. Durable
+  # admission is the only irreversible effect; uncommitted live mutations are
+  # not retained; finalize_acknowledged_put_intent/2 clears the exact-id
+  # intent on every definitive outcome and keeps it on :outcome_unknown.
+  # Retry reconciles idempotently from durable truth.
+  # ===========================================================================
+  @impl true
+  def handle_call({:acknowledged_put, signed_cap}, _from, state) do
+    case migrate_state(state) do
+      {:ok, state} ->
+        exec_acknowledged_put(signed_cap, state)
+
+      {:error, reason} ->
+        {:stop, reason, {:error, :capability_store_unavailable}, state}
+    end
+  end
+
+  @impl true
+  def handle_call({:acknowledged_revoke, capability_id}, _from, state) do
+    case migrate_state(state) do
+      {:ok, state} ->
+        exec_acknowledged_revoke(capability_id, state)
+
+      {:error, reason} ->
+        {:stop, reason, {:error, :capability_store_unavailable}, state}
+    end
+  end
+
+  @impl true
+  def handle_info(:cleanup, state) do
+    case migrate_state(state) do
+      {:ok, state} ->
+        exec_cleanup(state)
+
+      {:error, reason} ->
+        {:stop, reason, state}
+    end
+  end
+
+  # Handle distributed capability signals from other nodes
+  @impl true
+  def handle_info({:signal_received, signal}, state) do
+    case migrate_state(state) do
+      {:ok, state} ->
+        exec_signal_received(signal, state)
+
+      {:error, reason} ->
+        {:stop, reason, state}
+    end
+  end
+
+  @impl true
+  def handle_info(message, state) do
+    case SignalSync.handle_info(message, state.signal_sync) do
+      {:ok, signal_sync} ->
+        {:noreply, %{state | signal_sync: signal_sync}}
+
+      {:stop, reason, signal_sync} ->
+        {:stop, reason, %{state | signal_sync: signal_sync}}
+
+      :unhandled ->
+        {:noreply, state}
+    end
+  end
+
+  @impl true
+  def terminate(_reason, state) do
+    SignalSync.release(Map.get(state, :signal_sync))
+  end
+
+  # OTP release-upgrade path. Development code reload does NOT invoke this —
+  # the lazy migrate_state/1 call at the top of every C3A-field-touching
+  # callback covers reloads. Returns the same normalized shape as the lazy
+  # path; idempotent on already-current state; fail-closed on malformed or
+  # unsupported legacy state.
+  @impl true
+  def code_change(_old_vsn, state, _extra) do
+    migrate_state(state)
+  end
+
+  # ===========================================================================
+  # C3A lazy-normalization callback bodies (Phase 4C C3A).
+  #
+  # Each wrapped handle_call/handle_info above delegates its body here so the
+  # handle_* clauses stay grouped. Every body runs ONLY after migrate_state/1
+  # has normalized (or validated) the live state; a migration failure stops the
+  # server before any of these run.
+  # ===========================================================================
+
+  defp exec_put(cap, state) do
+    case check_quotas(state, cap) do
+      :ok ->
+        # Deduplicate: if a capability with the same principal+resource already exists,
+        # replace it instead of appending (prevents unbounded growth from re-grants)
+        replaced_id = existing_capability_id(state, cap)
+
+        case replaced_id do
+          nil ->
+            state = add_capability_to_state(state, cap)
+            _ = persist_capability(cap, acknowledged: false)
+            emit_capability_signal(:capability_granted, cap)
+            {:reply, {:ok, :stored}, state}
+
+          id ->
+            existing_cap = Map.fetch!(state.by_id, id)
+
+            case replace_persisted_capability(existing_cap, cap) do
+              :ok ->
+                {state, ^id} = maybe_replace_existing(state, cap)
+                state = add_capability_to_state(state, cap)
+
+                emit_revocation_signal(
+                  :capability_revoked,
+                  [existing_cap.id],
+                  existing_cap.principal_id
+                )
+
+                emit_capability_signal(:capability_granted, cap)
+                {:reply, {:ok, :stored}, state}
+
+              {:error, reason} = error ->
+                Logger.error(
+                  "Capability replacement failed for #{cap.id}; " <>
+                    "superseded #{id} was retained: #{inspect(reason)}"
+                )
+
+                {:reply, error, state}
+            end
+        end
+
+      {:error, _} = error ->
+        {:reply, error, state}
+    end
+  end
+
+  defp exec_revoke(capability_id, state) do
+    case Map.get(state.by_id, capability_id) do
+      nil ->
+        {:reply, {:error, :not_found}, state}
+
+      cap ->
+        state =
+          state
+          |> deindex_resource(cap)
+          |> update_in([:by_id], &Map.delete(&1, capability_id))
+          |> update_in([:by_principal, cap.principal_id], fn ids ->
+            List.delete(ids || [], capability_id)
+          end)
+          |> update_in([:stats, :total_revoked], &(&1 + 1))
+
+        delete_persisted_capability(capability_id)
+        emit_revocation_signal(:capability_revoked, [capability_id], cap.principal_id)
+        {:reply, :ok, state}
+    end
+  end
+
+  defp exec_revoke_all(principal_id, state) do
+    cap_ids = Map.get(state.by_principal, principal_id, [])
+    count = length(cap_ids)
+    revoked_caps = Enum.map(cap_ids, &Map.get(state.by_id, &1))
+
+    Enum.each(cap_ids, &delete_persisted_capability/1)
+
+    state =
+      Enum.reduce(revoked_caps, state, fn
+        %Capability{} = cap, acc -> deindex_resource(acc, cap)
+        _nil_cap, acc -> acc
+      end)
+
+    state =
+      state
+      |> update_in([:by_id], fn by_id ->
+        Enum.reduce(cap_ids, by_id, &Map.delete(&2, &1))
+      end)
+      |> put_in([:by_principal, principal_id], [])
+      |> update_in([:stats, :total_revoked], &(&1 + count))
+
+    if count > 0 do
+      emit_revocation_signal(:capabilities_revoked_all, cap_ids, principal_id)
+    end
+
+    {:reply, {:ok, count}, state}
+  end
+
+  defp exec_revoke_by_scope(scope_field, scope_value, state) do
     matching_ids =
       state.by_id
       |> Enum.filter(fn {_id, cap} -> Map.get(cap, scope_field) == scope_value end)
@@ -666,8 +819,7 @@ defmodule Arbor.Security.CapabilityStore do
     {:reply, {:ok, count}, state}
   end
 
-  @impl true
-  def handle_call({:cascade_revoke, capability_id}, _from, state) do
+  defp exec_cascade_revoke(capability_id, state) do
     case Map.get(state.by_id, capability_id) do
       nil ->
         {:reply, {:error, :not_found}, state}
@@ -690,20 +842,7 @@ defmodule Arbor.Security.CapabilityStore do
     end
   end
 
-  # ===========================================================================
-  # Acknowledged exact mutation handlers (Phase 4C C3A).
-  #
-  # Acknowledged put pre-arms a bounded uncertainty intent, then runs the body
-  # against that armed state. Any rescue/exit/throw replies :outcome_unknown
-  # with the ARMED state (incoming + pending intent), not the raw incoming
-  # state, so a post-admission ambiguity retains the ledger entry. Durable
-  # admission is the only irreversible effect; uncommitted live mutations are
-  # not retained; finalize_acknowledged_put_intent/2 clears the exact-id
-  # intent on every definitive outcome and keeps it on :outcome_unknown.
-  # Retry reconciles idempotently from durable truth.
-  # ===========================================================================
-  @impl true
-  def handle_call({:acknowledged_put, signed_cap}, _from, state) do
+  defp exec_acknowledged_put(signed_cap, state) do
     # Arm a bounded, fail-closed resource intent BEFORE any potentially
     # ambiguous mutation. The intent is threaded as the rescue/catch fallback
     # state so it survives an exit at or after a durable admission (where the
@@ -733,8 +872,7 @@ defmodule Arbor.Security.CapabilityStore do
     end
   end
 
-  @impl true
-  def handle_call({:acknowledged_revoke, capability_id}, _from, state) do
+  defp exec_acknowledged_revoke(capability_id, state) do
     incoming = state
 
     try do
@@ -746,37 +884,15 @@ defmodule Arbor.Security.CapabilityStore do
     end
   end
 
-  @impl true
-  def handle_info(:cleanup, state) do
+  defp exec_cleanup(state) do
     state = cleanup_expired(state)
     schedule_cleanup()
     {:noreply, state}
   end
 
-  # Handle distributed capability signals from other nodes
-  @impl true
-  def handle_info({:signal_received, signal}, state) do
+  defp exec_signal_received(signal, state) do
     state = handle_distributed_signal(signal, state)
     {:noreply, state}
-  end
-
-  @impl true
-  def handle_info(message, state) do
-    case SignalSync.handle_info(message, state.signal_sync) do
-      {:ok, signal_sync} ->
-        {:noreply, %{state | signal_sync: signal_sync}}
-
-      {:stop, reason, signal_sync} ->
-        {:stop, reason, %{state | signal_sync: signal_sync}}
-
-      :unhandled ->
-        {:noreply, state}
-    end
-  end
-
-  @impl true
-  def terminate(_reason, state) do
-    SignalSync.release(Map.get(state, :signal_sync))
   end
 
   # Private functions
@@ -1525,6 +1641,138 @@ defmodule Arbor.Security.CapabilityStore do
   # capabilities with equal signing_payload are the exact same grant for a
   # stable authority; deterministic across journal retries.
   defp grant_identity(%Capability{} = cap), do: Capability.signing_payload(cap)
+
+  # ===========================================================================
+  # State-shape migration (Phase 4C C3A).
+  #
+  # A live process whose code was development-reloaded without an OTP upgrade
+  # keeps a pre-C3A state missing by_resource / pending_intents / state_version.
+  # migrate_state/1 is the single pure, deterministic, side-effect-free
+  # normalization used by BOTH code_change/3 and the lazy callback wrappers. It
+  # never reads persistence, emits signals, calls clocks, or performs
+  # authorization. It accepts ONLY the exact current version (after validating
+  # the required C3A field shapes), migrates pre-v1 state, and rejects
+  # malformed / unsupported-future versions (fail closed).
+  # ===========================================================================
+  @legacy_uncertain_identity :legacy_uncertain_identity
+
+  defp migrate_state(state) do
+    case Map.get(state, :state_version) do
+      v when v == @current_state_version ->
+        validate_current_state(state)
+
+      nil ->
+        do_migrate(state)
+
+      v ->
+        {:error, {:unsupported_state_version, v}}
+    end
+  end
+
+  # Idempotent path (exact current version). Validate the required C3A field
+  # SHAPES before accepting; never blind-pass a current-version state whose
+  # fields are corrupt.
+  defp validate_current_state(state) do
+    cond do
+      not is_map(Map.get(state, :by_id)) ->
+        {:error, {:malformed_state, :by_id}}
+
+      not is_map(Map.get(state, :by_resource)) ->
+        {:error, {:malformed_state, :by_resource}}
+
+      not is_map(Map.get(state, :pending_intents)) ->
+        {:error, {:malformed_state, :pending_intents}}
+
+      true ->
+        {:ok, state}
+    end
+  end
+
+  defp do_migrate(state) do
+    with {:ok, by_id} <- require_valid_by_id(state),
+         # ALWAYS rebuild by_resource from validated by_id; discard any present
+         # (possibly stale/partial) legacy map. Never derive from by_principal.
+         {:ok, by_resource} <- {:ok, build_resource_index(by_id)},
+         {:ok, pending_intents} <- migrate_pending_intents(state, by_id) do
+      {:ok,
+       state
+       |> Map.put(:by_resource, by_resource)
+       |> Map.put(:pending_intents, pending_intents)
+       |> Map.put(:state_version, @current_state_version)}
+    end
+  end
+
+  # by_id must be a map whose every value is a %Capability{}; otherwise the
+  # by_resource rebuild cannot be authoritative -> fail closed.
+  defp require_valid_by_id(state) do
+    by_id = Map.get(state, :by_id)
+
+    if is_map(by_id) and Enum.all?(by_id, fn {_id, value} -> match?(%Capability{}, value) end) do
+      {:ok, by_id}
+    else
+      {:error, {:malformed_by_id, :invalid}}
+    end
+  end
+
+  # Canonical live principal/resource index, rebuilt ONLY from validated live
+  # by_id Capability values (mirrors index_resource/2's resource_key/1).
+  defp build_resource_index(by_id) do
+    Enum.reduce(by_id, %{}, fn {_id, %Capability{} = cap}, acc ->
+      Map.update(acc, resource_key(cap), MapSet.new([cap.id]), &MapSet.put(&1, cap.id))
+    end)
+  end
+
+  defp migrate_pending_intents(state, by_id) do
+    case Map.get(state, :pending_intents, :missing) do
+      :missing ->
+        {:ok, %{}}
+
+      intents when is_map(intents) ->
+        migrate_intent_entries(intents, by_id)
+
+      _other ->
+        {:error, {:malformed_pending_intents, :not_a_map}}
+    end
+  end
+
+  defp migrate_intent_entries(intents, by_id) do
+    Enum.reduce_while(intents, {:ok, %{}}, fn {id, value}, {:ok, acc} ->
+      case migrate_intent_value(id, value, by_id) do
+        {:ok, migrated} -> {:cont, {:ok, Map.put(acc, id, migrated)}}
+        {:error, _} = error -> {:halt, error}
+      end
+    end)
+  end
+
+  # A current three-field intent is kept byte-for-byte.
+  defp migrate_intent_value(_id, {principal, resource, _payload} = intent, _by_id)
+       when is_binary(principal) and is_binary(resource) do
+    {:ok, intent}
+  end
+
+  # A legacy two-field {principal, resource} intent is upgraded to a three-field
+  # lock. Use the exact canonical signing payload ONLY when the same live
+  # Capability proves it; otherwise retain an opaque identity sentinel that
+  # blocks alternate IDs/resources and rejects same-ID retries (the sentinel
+  # atom can never equal a real binary signing payload).
+  defp migrate_intent_value(id, {principal, resource}, by_id)
+       when is_binary(principal) and is_binary(resource) do
+    case Map.get(by_id, id) do
+      %Capability{} = cap ->
+        if resource_key(cap) == {principal, resource} do
+          {:ok, {principal, resource, grant_identity(cap)}}
+        else
+          {:ok, {principal, resource, @legacy_uncertain_identity}}
+        end
+
+      nil ->
+        {:ok, {principal, resource, @legacy_uncertain_identity}}
+    end
+  end
+
+  defp migrate_intent_value(_id, _value, _by_id) do
+    {:error, {:malformed_pending_intent, :invalid_shape}}
+  end
 
   # ---------------------------------------------------------------------------
   # Bounded uncertainty ledger (pending_intents).
