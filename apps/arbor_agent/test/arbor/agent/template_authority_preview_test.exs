@@ -822,6 +822,9 @@ defmodule Arbor.Agent.TemplateAuthorityPreviewTest do
     digest = ordinary["reconciliation_digest"]
     assert is_binary(digest)
 
+    # Isolate prepare-path collaborator history from the ordinary project above.
+    EffectsObserver.reset!()
+
     assert {:ok, report, preparation} =
              TemplateAuthorityPreview.prepare_authoritative_with_deps(
                "agent_preview1",
@@ -922,6 +925,30 @@ defmodule Arbor.Agent.TemplateAuthorityPreviewTest do
                digest,
                prep_deps(fn _ -> {:ok, wrong} end)
              )
+  end
+
+  test "prepare_authoritative fails closed when Record.key mismatches target despite data principal" do
+    # Complete observation collaborators for the target so gather would succeed
+    # if the Record.key gate were missing. No /self capability is granted.
+    _ = seed_complete_observation!("agent_preview1")
+    EffectsObserver.reset!()
+
+    mismatched = authority_record("agent_preview1")
+    mismatched = %{mismatched | key: "agent_other_key"}
+
+    assert mismatched.data["agent_id"] == "agent_preview1"
+    assert mismatched.key != "agent_preview1"
+
+    assert {:error, :invalid_record} =
+             TemplateAuthorityPreview.prepare_authoritative_with_deps(
+               "agent_preview1",
+               String.duplicate("ab", 32),
+               prep_deps(fn _ -> {:ok, mismatched} end)
+             )
+
+    events = EffectsObserver.events()
+    refute Enum.any?(events, &match?({:list_capabilities, _, _}, &1))
+    refute Enum.any?(events, &match?({:get_trust_profile, _}, &1))
   end
 
   test "prepare_authoritative fails closed when collaborators are unavailable" do
@@ -1035,6 +1062,48 @@ defmodule Arbor.Agent.TemplateAuthorityPreviewTest do
                "desired_authority" => desired,
                "repo_root" => "/Users/dev/arbor",
                "effective_capabilities" => caps
+             })
+
+    # Atom-only agent_id is non-canonical serialized data — reject even when the
+    # atom value equals record.key (no string-key fallback).
+    atom_only = %{
+      record
+      | data: Map.delete(record.data, "agent_id") |> Map.put(:agent_id, record.key)
+    }
+
+    assert {:error, :invalid_preparation} =
+             TemplateAuthorityPreparation.new(%{
+               record: atom_only,
+               profile_cas: cas,
+               desired_authority: desired,
+               repo_root: "/Users/dev/arbor",
+               effective_capabilities: caps
+             })
+
+    # Matching string principal plus conflicting atom alias is still rejected.
+    both_keys = %{record | data: Map.put(record.data, :agent_id, "agent_other")}
+
+    assert both_keys.data["agent_id"] === record.key
+
+    assert {:error, :invalid_preparation} =
+             TemplateAuthorityPreparation.new(%{
+               record: both_keys,
+               profile_cas: cas,
+               desired_authority: desired,
+               repo_root: "/Users/dev/arbor",
+               effective_capabilities: caps
+             })
+
+    # Matching string principal plus matching atom is still an alias conflict.
+    both_match = %{record | data: Map.put(record.data, :agent_id, record.key)}
+
+    assert {:error, :invalid_preparation} =
+             TemplateAuthorityPreparation.new(%{
+               record: both_match,
+               profile_cas: cas,
+               desired_authority: desired,
+               repo_root: "/Users/dev/arbor",
+               effective_capabilities: caps
              })
   end
 end

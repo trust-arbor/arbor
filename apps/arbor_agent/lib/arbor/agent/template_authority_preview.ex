@@ -5,11 +5,14 @@ defmodule Arbor.Agent.TemplateAuthorityPreview do
   # Fixed production collaborators only on the public path. Tests may inject via
   # project_with_deps/3; public opts never select modules/clocks/stores.
   #
-  # Collaborators (reads only):
+  # Ordinary preview collaborators (reads only):
   #   ProfileStore.load_profile_authority_readonly/1
   #   TemplateStore.get_current/1
   #   Arbor.Security.list_capabilities/2
   #   Arbor.Trust.get_trust_profile/1
+  #
+  # Preparation-only collaborator (never ordinary preview):
+  #   ProfileStore.authority_mutation_snapshot/1  (deps key :authority_snapshot)
   #
   # Never reserves tasks, warms template cache, grants/revokes capabilities,
   # writes trust/profile state, creates workspace/branch/lease, or persists markers.
@@ -110,10 +113,10 @@ defmodule Arbor.Agent.TemplateAuthorityPreview do
     # the snapshot seam: only the fixed authority_snapshot collaborator is used.
     deps = merge_preparation_deps(deps)
 
-    if not valid_expected_digest?(expected_digest) do
-      {:error, :digest_invalid}
-    else
+    if valid_expected_digest?(expected_digest) do
       do_prepare_authoritative(target_agent_id, expected_digest, deps)
+    else
+      {:error, :digest_invalid}
     end
   rescue
     _ -> {:error, :projection_failed}
@@ -159,6 +162,7 @@ defmodule Arbor.Agent.TemplateAuthorityPreview do
 
   defp do_prepare_authoritative(target_agent_id, expected_digest, deps) do
     with {:ok, %Record{} = record} <- read_authority_snapshot(deps, target_agent_id),
+         :ok <- require_preparation_record_key(record, target_agent_id),
          {:ok, profile_map} <- admit_record_data(record),
          facts <- gather_and_classify_from_profile_map(target_agent_id, deps, profile_map),
          {:ok, report} <- compose_preparation_report(facts),
@@ -167,6 +171,13 @@ defmodule Arbor.Agent.TemplateAuthorityPreview do
       {:ok, report, preparation}
     end
   end
+
+  # Exact Record.key === target before any preparation gather/classification.
+  defp require_preparation_record_key(%Record{key: key}, target_agent_id)
+       when is_binary(key) and key === target_agent_id,
+       do: :ok
+
+  defp require_preparation_record_key(_, _), do: {:error, :invalid_record}
 
   defp compose_preparation_report(facts) do
     case Core.compose(facts) do
@@ -286,18 +297,11 @@ defmodule Arbor.Agent.TemplateAuthorityPreview do
   end
 
   defp resolve_repo_root_from_observation(facts) do
-    # desired_view capabilities were projected with the admitted root; recover
-    # the root only from the gather path's successful resolve stored implicitly
-    # via re-resolving is not available. Prefer an explicit key if present.
-    cond do
-      is_binary(Map.get(facts, :repo_root)) ->
-        {:ok, Map.get(facts, :repo_root)}
-
-      is_binary(Map.get(facts, "repo_root")) ->
-        {:ok, Map.get(facts, "repo_root")}
-
-      true ->
-        :error
+    # Preparation freezes the gather-admitted atom-key :repo_root only.
+    # String-key recovery is not part of the facts contract and must not be admitted.
+    case Map.get(facts, :repo_root) do
+      root when is_binary(root) -> {:ok, root}
+      _ -> :error
     end
   end
 
@@ -1124,7 +1128,8 @@ defmodule Arbor.Agent.TemplateAuthorityPreview do
 
   # Shared pure admission with CapabilityProjection / OperationCore — never a
   # second local path normalizer.
-  defp admit_repo_root_string(root) when is_binary(root) and byte_size(root) <= @max_repo_root_bytes do
+  defp admit_repo_root_string(root)
+       when is_binary(root) and byte_size(root) <= @max_repo_root_bytes do
     case TemplateAuthorityCapabilityProjection.admit_canonical_repo_root(root) do
       {:ok, admitted} -> {:ok, admitted}
       {:error, _} -> {:invalid, :repo_root_invalid}
@@ -1169,7 +1174,10 @@ defmodule Arbor.Agent.TemplateAuthorityPreview do
         end
 
       is_atom(fun) and function_exported?(fun, :authority_mutation_snapshot, 1) ->
-        read_authority_snapshot(%{deps | authority_snapshot: &fun.authority_mutation_snapshot/1}, agent_id)
+        read_authority_snapshot(
+          %{deps | authority_snapshot: &fun.authority_mutation_snapshot/1},
+          agent_id
+        )
 
       true ->
         {:error, :snapshot_unavailable}

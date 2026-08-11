@@ -470,7 +470,7 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCore do
   defp do_acknowledge(_record, _phase, _facts, _at), do: error(:transition_illegal)
 
   # ---------------------------------------------------------------------------
-  # Prepare (fenced → prepared with private profile CAS anchor)
+  # Prepare (fenced → prepared with profile_cas + frozen_authority)
   # ---------------------------------------------------------------------------
 
   @spec prepare(record(), map()) :: {:ok, record(), [effect()]} | {:error, term()}

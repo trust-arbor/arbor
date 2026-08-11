@@ -37,13 +37,11 @@ defmodule Arbor.Agent.TemplateAuthorityPreparation do
   @provenance_layers MapSet.new(["user", "shipped", "legacy_json"])
   @max_caps 256
 
-  @type profile_cas :: %{
-          required(String.t()) => String.t() | pos_integer()
-        }
-
-  @type desired_authority :: %{
-          required(String.t()) => term()
-        }
+  # Elixir typespecs cannot express singleton binary keys. These are the
+  # narrowest representable value domains; @profile_cas_keys / @desired_keys /
+  # @provenance_keys and closed_string_keyset enforce the exact runtime shapes.
+  @type profile_cas :: %{required(String.t()) => String.t() | pos_integer()}
+  @type desired_authority :: %{required(String.t()) => map() | String.t()}
 
   @type t :: %__MODULE__{
           record: Record.t(),
@@ -111,10 +109,14 @@ defmodule Arbor.Agent.TemplateAuthorityPreparation do
   def effective_capabilities(%__MODULE__{effective_capabilities: caps}), do: caps
 
   defp keyword_attrs?(attrs) when is_list(attrs) do
-    keys = Keyword.keys(attrs)
+    if Keyword.keyword?(attrs) do
+      keys = Keyword.keys(attrs)
 
-    Keyword.keyword?(attrs) and length(keys) == MapSet.size(@attr_keys) and
-      MapSet.equal?(MapSet.new(keys), @attr_keys)
+      length(keys) == MapSet.size(@attr_keys) and
+        MapSet.equal?(MapSet.new(keys), @attr_keys)
+    else
+      false
+    end
   end
 
   defp require_exact_attr_keys(attrs) do
@@ -128,13 +130,20 @@ defmodule Arbor.Agent.TemplateAuthorityPreparation do
   end
 
   defp require_record(%Record{} = record) do
-    if is_binary(record.id) and record.id != "" and is_binary(record.key) and record.key != "" and
-         is_map(record.data) and not is_struct(record.data) and
-         is_integer(record.generation) and record.generation >= 1 and
-         is_integer(record.revision) and record.revision >= 1 do
+    # Serialized principal is string-key only. Atom :agent_id is never accepted —
+    # presence alone is a non-canonical alias conflict (including when the string
+    # key matches record.key).
+    with true <- is_binary(record.id) and record.id != "",
+         true <- is_binary(record.key) and record.key != "",
+         true <- is_map(record.data) and not is_struct(record.data),
+         true <- is_integer(record.generation) and record.generation >= 1,
+         true <- is_integer(record.revision) and record.revision >= 1,
+         true <- not Map.has_key?(record.data, :agent_id),
+         agent_id when is_binary(agent_id) and agent_id != "" and agent_id === record.key <-
+           record.data["agent_id"] do
       {:ok, record}
     else
-      {:error, :invalid_preparation}
+      _ -> {:error, :invalid_preparation}
     end
   end
 
