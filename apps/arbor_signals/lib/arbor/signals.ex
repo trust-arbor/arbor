@@ -89,6 +89,13 @@ defmodule Arbor.Signals do
   Same API as `emit/4` but additionally writes to the Historian's
   EventLog (ETS) and the durable backend (async). Best-effort: the
   signal always emits even if persistence fails.
+
+  Lineage options are forwarded to the EventLog event at the persistence
+  boundary: `:correlation_id`, `:agent_id`, `:metadata`, and `:cause_id`
+  (mapped to Event `:causation_id`). Absent optional values stay nil —
+  no empty sentinels. System-stamped `source_node` is merged into
+  metadata after dropping any caller atom/string `source_node` keys so
+  JSON admission cannot emit duplicate names; system value wins.
   """
   @spec durable_emit(atom(), atom(), map(), keyword()) :: :ok
   def durable_emit(category, type, data, opts \\ []) do
@@ -97,14 +104,14 @@ defmodule Arbor.Signals do
 
     # EventLog (ETS) + durable backend
     stream_id = Keyword.get(opts, :stream_id, "#{category}_events")
-    persist_to_historian(stream_id, type, data)
+    persist_to_historian(stream_id, type, data, opts)
 
     :ok
   end
 
   # Write to Historian's EventLog (ETS) + durable backend (async).
   # Uses runtime bridges to avoid dependency cycles.
-  defp persist_to_historian(stream_id, type, data) do
+  defp persist_to_historian(stream_id, type, data, opts) do
     event_mod = Arbor.Persistence.Event
     persistence_mod = Arbor.Persistence
     event_log_name = Arbor.Historian.EventLog.ETS
@@ -116,7 +123,7 @@ defmodule Arbor.Signals do
           stream_id,
           to_string(type),
           Map.put(data, :timestamp, DateTime.utc_now()),
-          [metadata: %{source_node: node()}]
+          persistence_event_opts(opts)
         ])
 
       # ETS write (fast, in-memory)
@@ -157,6 +164,34 @@ defmodule Arbor.Signals do
     :exit, reason ->
       Logger.warning("[Signals.durable_emit] persist_to_historian exited: #{inspect(reason)}")
   end
+
+  # Build Event.new/4 opts at the persistence boundary only.
+  # Maps signal :cause_id → Event :causation_id; omits nil lineage keys.
+  # source_node: system stamp wins over any caller-supplied value so the
+  # audit record of which node persisted cannot be spoofed. Strip both
+  # atom and string keys first so JSON admission cannot emit duplicate
+  # source_node names; then stamp exactly one system-owned value. All
+  # other caller metadata keys are retained.
+  defp persistence_event_opts(opts) when is_list(opts) do
+    caller_meta =
+      case Keyword.get(opts, :metadata, %{}) do
+        meta when is_map(meta) -> meta
+        _ -> %{}
+      end
+
+    metadata =
+      caller_meta
+      |> Map.drop([:source_node, "source_node"])
+      |> Map.put(:source_node, node())
+
+    [metadata: metadata]
+    |> put_present(:correlation_id, Keyword.get(opts, :correlation_id))
+    |> put_present(:causation_id, Keyword.get(opts, :cause_id))
+    |> put_present(:agent_id, Keyword.get(opts, :agent_id))
+  end
+
+  defp put_present(kw, _key, nil), do: kw
+  defp put_present(kw, key, value), do: Keyword.put(kw, key, value)
 
   @doc """
   Emit a signal with taint metadata attached.
