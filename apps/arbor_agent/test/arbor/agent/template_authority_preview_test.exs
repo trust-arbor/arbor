@@ -1126,5 +1126,66 @@ defmodule Arbor.Agent.TemplateAuthorityPreviewTest do
                repo_root: "/Users/dev/arbor",
                effective_capabilities: caps
              })
+
+    # Nil provenance layer is rejected (Phase 4B current-marker invariant).
+    # Build a Policy envelope whose snapshot provenance itself has layer=nil,
+    # then set desired to exactly match that envelope-derived provenance so the
+    # rejection is about the nil layer — not a provenance mismatch.
+    nil_layer_template = Map.delete(template_data(), "template_source")
+    assert {:ok, nil_layer_envelope} = TemplateAuthorityPolicy.build("scout", nil_layer_template)
+    nil_snap = TemplateAuthorityPolicy.snapshot(nil_layer_envelope)
+    nil_prov = TemplateAuthorityPolicy.provenance(nil_snap)
+    assert nil_prov["layer"] == nil
+
+    nil_layer_desired = %{
+      "envelope" => nil_layer_envelope,
+      "declaration_digest" => nil_layer_envelope["digest"],
+      "provenance" => nil_prov
+    }
+
+    assert {:error, :invalid_preparation} =
+             TemplateAuthorityPreparation.new(%{
+               record: record,
+               profile_cas: cas,
+               desired_authority: nil_layer_desired,
+               repo_root: "/Users/dev/arbor",
+               effective_capabilities: caps
+             })
+
+    # Commitment is independently recomputed from the private Record + governed
+    # mutation — not caller-supplied. Rebuilding with the same inputs is stable.
+    assert {:ok, prep2} =
+             TemplateAuthorityPreparation.new(%{
+               record: record,
+               profile_cas: cas,
+               desired_authority: desired,
+               repo_root: "/Users/dev/arbor",
+               effective_capabilities: caps
+             })
+
+    assert TemplateAuthorityPreparation.replay_commitment(prep) ==
+             TemplateAuthorityPreparation.replay_commitment(prep2)
+
+    assert TemplateAuthorityPreparation.governed(prep) ==
+             TemplateAuthorityPreparation.governed(prep2)
+
+    # Public preview shape remains free of private replay evidence.
+    Process.put({FakeProfileStore, :profile}, base_profile())
+    Process.put({FakeTemplateStore, :template}, template_data())
+
+    Process.put(
+      {FakeTrust, :trust},
+      {:ok, %{baseline: :block, rules: %{"arbor://fs/write" => :ask}}}
+    )
+
+    Process.put({FakeSecurity, :caps}, [])
+
+    assert {:ok, public} =
+             TemplateAuthorityPreview.project_with_deps("agent_preview1", [], deps())
+
+    refute Map.has_key?(public, "profile_mutation_replay")
+    refute Map.has_key?(public, "governed")
+    refute Map.has_key?(public, "replay_commitment")
+    assert is_binary(public["reconciliation_digest"]) or public["status"] in ~w(invalid)
   end
 end

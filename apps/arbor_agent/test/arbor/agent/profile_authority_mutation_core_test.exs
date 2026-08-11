@@ -262,6 +262,309 @@ defmodule Arbor.Agent.ProfileAuthorityMutationCoreTest do
       assert {:error, :capabilities_invalid} =
                Core.prepare(observed_data(), %{governed | "initial_capabilities" => "nope"})
     end
+
+    test "rejects atom keys in governed update", %{governed: governed} do
+      bad = Map.put(Map.delete(governed, "template"), :template, "scout")
+      assert {:error, :ambiguous_keys} = Core.prepare(observed_data(), bad)
+    end
+
+    test "rejects extra top-level governed keys", %{governed: governed} do
+      bad = Map.put(governed, "display_name", "nope")
+      assert {:error, :governed_shape} = Core.prepare(observed_data(), bad)
+    end
+
+    test "rejects missing governed metadata", %{caps: caps} do
+      bad = %{"template" => "scout", "initial_capabilities" => caps}
+      assert {:error, :governed_shape} = Core.prepare(observed_data(), bad)
+    end
+
+    test "rejects atom alias of template on observed data", %{governed: governed} do
+      observed = Map.put(Map.delete(observed_data(), "template"), :template, "legacy")
+      assert {:error, :ambiguous_keys} = Core.prepare(observed, governed)
+    end
+
+    test "rejects capability item missing resource", %{governed: governed, caps: caps} do
+      bad_caps = [%{"constraints" => %{}} | caps]
+      bad = %{governed | "initial_capabilities" => bad_caps}
+      # Caps no longer match the Policy snapshot either — either gate is fine.
+      assert {:error, reason} = Core.prepare(observed_data(), bad)
+      assert reason in [:capabilities_invalid, :authority_inconsistent]
+    end
+
+    test "rejects oversized template name", %{governed: governed} do
+      bad = %{governed | "template" => String.duplicate("t", 300)}
+      assert {:error, reason} = Core.prepare(observed_data(), bad)
+      assert reason in [:template_invalid, :authority_inconsistent]
+    end
+
+    # ── Restored pre-C3B3 prepare rejection inventory (adapted fixtures) ──
+
+    test "rejects observed metadata that is nil", %{governed: governed} do
+      observed = Map.put(observed_data(), "metadata", nil)
+      assert {:error, :malformed_container} = Core.prepare(observed, governed)
+    end
+
+    test "rejects observed metadata that is a scalar", %{governed: governed} do
+      observed = Map.put(observed_data(), "metadata", "not-a-map")
+      assert {:error, :malformed_container} = Core.prepare(observed, governed)
+    end
+
+    test "rejects observed metadata that is a struct", %{governed: governed} do
+      observed = Map.put(observed_data(), "metadata", DateTime.utc_now())
+      assert {:error, :malformed_container} = Core.prepare(observed, governed)
+    end
+
+    test "rejects atom alias of initial_capabilities on observed data", %{governed: governed} do
+      observed =
+        observed_data()
+        |> Map.delete("initial_capabilities")
+        |> Map.put(:initial_capabilities, [])
+
+      assert {:error, :ambiguous_keys} = Core.prepare(observed, governed)
+    end
+
+    test "rejects atom alias of metadata on observed data", %{governed: governed} do
+      meta = observed_data()["metadata"]
+
+      observed =
+        observed_data()
+        |> Map.delete("metadata")
+        |> Map.put(:metadata, meta)
+
+      assert {:error, :ambiguous_keys} = Core.prepare(observed, governed)
+    end
+
+    test "rejects atom alias of initial_capabilities in governed", %{governed: governed} do
+      caps = governed["initial_capabilities"]
+
+      bad =
+        governed
+        |> Map.delete("initial_capabilities")
+        |> Map.put(:initial_capabilities, caps)
+
+      assert {:error, :ambiguous_keys} = Core.prepare(observed_data(), bad)
+    end
+
+    test "rejects atom alias of metadata in governed", %{governed: governed} do
+      meta = governed["metadata"]
+
+      bad =
+        governed
+        |> Map.delete("metadata")
+        |> Map.put(:metadata, meta)
+
+      assert {:error, :ambiguous_keys} = Core.prepare(observed_data(), bad)
+    end
+
+    test "rejects non-UTF-8 template", %{governed: governed} do
+      bad = %{governed | "template" => <<0xFF, 0xFE, 0xFD>>}
+      assert {:error, :template_invalid} = Core.prepare(observed_data(), bad)
+    end
+
+    test "rejects template with embedded NUL", %{governed: governed} do
+      bad = %{governed | "template" => "sco\x00ut"}
+      assert {:error, :template_invalid} = Core.prepare(observed_data(), bad)
+    end
+
+    test "rejects improper capabilities list", %{governed: governed} do
+      bad = %{governed | "initial_capabilities" => [%{"resource" => "a", "constraints" => %{}} | :tail]}
+      assert {:error, :capabilities_invalid} = Core.prepare(observed_data(), bad)
+    end
+
+    test "rejects more than 256 capabilities", %{governed: governed} do
+      item = %{"resource" => "arbor://fs/read", "constraints" => %{}}
+      too_many = Enum.map(1..257, fn _ -> item end)
+      bad = %{governed | "initial_capabilities" => too_many}
+      assert {:error, reason} = Core.prepare(observed_data(), bad)
+      assert reason in [:capabilities_invalid, :authority_inconsistent]
+    end
+
+    test "rejects oversized capability resource", %{governed: governed} do
+      item = %{"resource" => String.duplicate("r", 1025), "constraints" => %{}}
+      bad = %{governed | "initial_capabilities" => [item]}
+      assert {:error, reason} = Core.prepare(observed_data(), bad)
+      assert reason in [:capabilities_invalid, :authority_inconsistent]
+    end
+
+    test "rejects non-UTF-8 capability resource", %{governed: governed} do
+      item = %{"resource" => <<0xFF, 0xFE>>, "constraints" => %{}}
+      bad = %{governed | "initial_capabilities" => [item]}
+      assert {:error, reason} = Core.prepare(observed_data(), bad)
+      assert reason in [:capabilities_invalid, :authority_inconsistent]
+    end
+
+    test "rejects capability resource with embedded NUL", %{governed: governed} do
+      item = %{"resource" => "arbor://x\x00y", "constraints" => %{}}
+      bad = %{governed | "initial_capabilities" => [item]}
+      assert {:error, reason} = Core.prepare(observed_data(), bad)
+      assert reason in [:capabilities_invalid, :authority_inconsistent]
+    end
+
+    test "rejects capability constraints that are a struct", %{governed: governed} do
+      item = %{"resource" => "arbor://fs/read", "constraints" => DateTime.utc_now()}
+      bad = %{governed | "initial_capabilities" => [item]}
+      assert {:error, reason} = Core.prepare(observed_data(), bad)
+      assert reason in [:capabilities_invalid, :authority_inconsistent]
+    end
+
+    test "rejects capability item with atom resource alias", %{governed: governed} do
+      item = %{:resource => "arbor://fs/read", "constraints" => %{}}
+      bad = %{governed | "initial_capabilities" => [item]}
+      assert {:error, reason} = Core.prepare(observed_data(), bad)
+      assert reason in [:capabilities_invalid, :authority_inconsistent, :ambiguous_keys]
+    end
+
+    test "rejects capability item with atom constraints alias", %{governed: governed} do
+      item = %{"resource" => "arbor://fs/read", :constraints => %{}}
+      bad = %{governed | "initial_capabilities" => [item]}
+      assert {:error, reason} = Core.prepare(observed_data(), bad)
+      assert reason in [:capabilities_invalid, :authority_inconsistent, :ambiguous_keys]
+    end
+
+    test "rejects empty capability resource", %{governed: governed} do
+      item = %{"resource" => "", "constraints" => %{}}
+      bad = %{governed | "initial_capabilities" => [item]}
+      assert {:error, reason} = Core.prepare(observed_data(), bad)
+      assert reason in [:capabilities_invalid, :authority_inconsistent]
+    end
+
+    test "rejects missing capability constraints key", %{governed: governed} do
+      item = %{"resource" => "arbor://fs/read"}
+      bad = %{governed | "initial_capabilities" => [item]}
+      assert {:error, reason} = Core.prepare(observed_data(), bad)
+      assert reason in [:capabilities_invalid, :authority_inconsistent]
+    end
+
+    test "rejects governed that is a struct", %{governed: governed} do
+      assert {:error, :governed_shape} = Core.prepare(observed_data(), DateTime.utc_now())
+      _ = governed
+    end
+
+    test "rejects governed that is a list", %{governed: governed} do
+      assert {:error, :governed_shape} = Core.prepare(observed_data(), [])
+      _ = governed
+    end
+
+    test "rejects policy envelope that is not a map", %{envelope: envelope, caps: caps} do
+      governed = %{
+        "template" => "scout",
+        "initial_capabilities" => caps,
+        "metadata" => %{
+          TemplateAuthorityPolicy.metadata_key() => "not-a-map",
+          "template_source" => %{"name" => "scout", "layer" => "shipped"}
+        }
+      }
+
+      assert {:error, :policy_invalid} = Core.prepare(observed_data(), governed)
+      _ = envelope
+    end
+
+    test "rejects policy envelope that is a struct", %{caps: caps, prov: prov} do
+      governed = %{
+        "template" => "scout",
+        "initial_capabilities" => caps,
+        "metadata" => %{
+          TemplateAuthorityPolicy.metadata_key() => DateTime.utc_now(),
+          "template_source" => prov
+        }
+      }
+
+      assert {:error, :policy_invalid} = Core.prepare(observed_data(), governed)
+    end
+
+    test "rejects template_source that is not a map", %{envelope: envelope, caps: caps} do
+      governed = %{
+        "template" => "scout",
+        "initial_capabilities" => caps,
+        "metadata" => %{
+          TemplateAuthorityPolicy.metadata_key() => envelope,
+          "template_source" => "shipped"
+        }
+      }
+
+      assert {:error, :governed_shape} = Core.prepare(observed_data(), governed)
+    end
+
+    test "rejects invalid provenance layer string", %{envelope: envelope, caps: caps} do
+      governed = %{
+        "template" => "scout",
+        "initial_capabilities" => caps,
+        "metadata" => %{
+          TemplateAuthorityPolicy.metadata_key() => envelope,
+          "template_source" => %{"name" => "scout", "layer" => "unknown_layer"}
+        }
+      }
+
+      assert {:error, :provenance_layer_invalid} = Core.prepare(observed_data(), governed)
+    end
+
+    test "rejects empty template_source name", %{envelope: envelope, caps: caps} do
+      governed = %{
+        "template" => "scout",
+        "initial_capabilities" => caps,
+        "metadata" => %{
+          TemplateAuthorityPolicy.metadata_key() => envelope,
+          "template_source" => %{"name" => "", "layer" => "shipped"}
+        }
+      }
+
+      assert {:error, :template_invalid} = Core.prepare(observed_data(), governed)
+    end
+
+    test "rejects extra template_source keys", %{envelope: envelope, caps: caps} do
+      governed = %{
+        "template" => "scout",
+        "initial_capabilities" => caps,
+        "metadata" => %{
+          TemplateAuthorityPolicy.metadata_key() => envelope,
+          "template_source" => %{"name" => "scout", "layer" => "shipped", "path" => "/x"}
+        }
+      }
+
+      assert {:error, :governed_shape} = Core.prepare(observed_data(), governed)
+    end
+
+    test "rejects extra governed metadata keys", %{envelope: envelope, caps: caps, prov: prov} do
+      governed = %{
+        "template" => "scout",
+        "initial_capabilities" => caps,
+        "metadata" => %{
+          TemplateAuthorityPolicy.metadata_key() => envelope,
+          "template_source" => prov,
+          "extra" => true
+        }
+      }
+
+      assert {:error, :governed_shape} = Core.prepare(observed_data(), governed)
+    end
+
+    test "rejects missing template_authority_policy marker key", %{caps: caps, prov: prov} do
+      governed = %{
+        "template" => "scout",
+        "initial_capabilities" => caps,
+        "metadata" => %{"template_source" => prov}
+      }
+
+      assert {:error, :governed_shape} = Core.prepare(observed_data(), governed)
+    end
+
+    test "rejects missing template top-level key", %{governed: governed} do
+      bad = Map.delete(governed, "template")
+      assert {:error, :governed_shape} = Core.prepare(observed_data(), bad)
+    end
+
+    test "rejects missing initial_capabilities top-level key", %{governed: governed} do
+      bad = Map.delete(governed, "initial_capabilities")
+      assert {:error, :governed_shape} = Core.prepare(observed_data(), bad)
+    end
+
+    test "rejects observed_data that is a struct", %{governed: governed} do
+      assert {:error, :observed_not_map} = Core.prepare(DateTime.utc_now(), governed)
+    end
+
+    test "rejects observed_data that is a list", %{governed: governed} do
+      assert {:error, :observed_not_map} = Core.prepare([], governed)
+    end
   end
 
   # ─────────────────────────────────────────────────────────────────────
@@ -414,6 +717,121 @@ defmodule Arbor.Agent.ProfileAuthorityMutationCoreTest do
   end
 
   describe "classify/3 matrix still works" do
+    test "not_applied when reobserved equals observed" do
+      anchor = record(%{"template" => "old"}, 2, 4)
+      intended = %{"template" => "new", "metadata" => %{}}
+      assert Core.classify(anchor, intended, {:ok, anchor}) == :not_applied
+    end
+
+    test "already_applied when reobserved is exact intended successor" do
+      anchor = record(%{"template" => "old"}, 2, 4)
+      intended = %{"template" => "new", "metadata" => %{}}
+
+      successor =
+        record(intended, anchor.generation, anchor.revision + 1,
+          id: anchor.id,
+          key: anchor.key,
+          metadata: anchor.metadata
+        )
+
+      assert Core.classify(anchor, intended, {:ok, successor}) == :already_applied
+    end
+
+    test "conflict when reobserved data diverges" do
+      anchor = record(%{"template" => "old"}, 2, 4)
+      intended = %{"template" => "new", "metadata" => %{}}
+      other = record(%{"template" => "other"}, 2, 5, id: anchor.id, key: anchor.key)
+      assert Core.classify(anchor, intended, {:ok, other}) == :conflict
+    end
+
+    test "conflict when reobserved generation is ABA" do
+      anchor = record(%{"template" => "old"}, 2, 4)
+      intended = %{"template" => "new", "metadata" => %{}}
+
+      aba =
+        record(intended, anchor.generation + 1, 1,
+          id: anchor.id,
+          key: anchor.key,
+          metadata: anchor.metadata
+        )
+
+      assert Core.classify(anchor, intended, {:ok, aba}) == :conflict
+    end
+
+    test "conflict when reobserved revision is later than successor" do
+      anchor = record(%{"template" => "old"}, 2, 4)
+      intended = %{"template" => "new", "metadata" => %{}}
+
+      later =
+        record(intended, anchor.generation, anchor.revision + 2,
+          id: anchor.id,
+          key: anchor.key,
+          metadata: anchor.metadata
+        )
+
+      assert Core.classify(anchor, intended, {:ok, later}) == :conflict
+    end
+
+    test "conflict when slot is absent for classify" do
+      anchor = record(%{"template" => "old"}, 2, 4)
+      intended = %{"template" => "new", "metadata" => %{}}
+      assert Core.classify(anchor, intended, :not_found) == :conflict
+    end
+
+    test "outcome_unknown when reobservation errors for classify" do
+      anchor = record(%{"template" => "old"}, 2, 4)
+      intended = %{"template" => "new", "metadata" => %{}}
+      assert Core.classify(anchor, intended, {:error, :backend_unavailable}) == :outcome_unknown
+    end
+
+    test "outcome_unknown when reobserved key mismatches for classify" do
+      anchor = record(%{"template" => "old"}, 2, 4)
+      intended = %{"template" => "new", "metadata" => %{}}
+
+      wrong =
+        record(intended, anchor.generation, anchor.revision + 1,
+          id: anchor.id,
+          key: "agent_other",
+          metadata: anchor.metadata
+        )
+
+      assert Core.classify(anchor, intended, {:ok, wrong}) == :outcome_unknown
+    end
+
+    test "outcome_unknown when reobserved is non-Record for classify" do
+      anchor = record(%{"template" => "old"}, 2, 4)
+      intended = %{"template" => "new", "metadata" => %{}}
+      assert Core.classify(anchor, intended, {:ok, %{not: :record}}) == :outcome_unknown
+    end
+
+    test "conflict when successor tokens match but metadata differs" do
+      anchor = record(%{"template" => "old"}, 2, 4, metadata: %{"a" => 1})
+      intended = %{"template" => "new", "metadata" => %{}}
+
+      successor =
+        record(intended, anchor.generation, anchor.revision + 1,
+          id: anchor.id,
+          key: anchor.key,
+          metadata: %{"a" => 2}
+        )
+
+      assert Core.classify(anchor, intended, {:ok, successor}) == :conflict
+    end
+
+    test "conflict when successor tokens match but id differs" do
+      anchor = record(%{"template" => "old"}, 2, 4)
+      intended = %{"template" => "new", "metadata" => %{}}
+
+      successor =
+        record(intended, anchor.generation, anchor.revision + 1,
+          id: "other_id",
+          key: anchor.key,
+          metadata: anchor.metadata
+        )
+
+      assert Core.classify(anchor, intended, {:ok, successor}) == :conflict
+    end
+
     test "not_applied and already_applied with live intended data" do
       anchor = record(%{"template" => "old"}, 2, 4)
       intended = %{"template" => "new", "metadata" => %{}}
@@ -439,6 +857,40 @@ defmodule Arbor.Agent.ProfileAuthorityMutationCoreTest do
 
     test "false when data differs" do
       refute Core.envelope_stable?(record(%{"x" => 1}, 3, 5), record(%{"x" => 2}, 3, 5))
+    end
+
+    test "false when id differs" do
+      a = record(%{"x" => 1}, 3, 5, id: "a")
+      b = record(%{"x" => 1}, 3, 5, id: "b")
+      refute Core.envelope_stable?(a, b)
+    end
+
+    test "false when key differs" do
+      a = record(%{"x" => 1}, 3, 5, key: "agent_a")
+      b = record(%{"x" => 1}, 3, 5, key: "agent_b")
+      refute Core.envelope_stable?(a, b)
+    end
+
+    test "false when generation differs" do
+      refute Core.envelope_stable?(record(%{"x" => 1}, 3, 5), record(%{"x" => 1}, 4, 5))
+    end
+
+    test "false when revision differs" do
+      refute Core.envelope_stable?(record(%{"x" => 1}, 3, 5), record(%{"x" => 1}, 3, 6))
+    end
+
+    test "false when metadata differs" do
+      a = record(%{"x" => 1}, 3, 5, metadata: %{"m" => 1})
+      b = record(%{"x" => 1}, 3, 5, metadata: %{"m" => 2})
+      refute Core.envelope_stable?(a, b)
+    end
+
+    test "false when current is not a Record" do
+      refute Core.envelope_stable?(record(%{"x" => 1}, 3, 5), %{not: :record})
+    end
+
+    test "false when observed is not a Record" do
+      refute Core.envelope_stable?(%{not: :record}, record(%{"x" => 1}, 3, 5))
     end
   end
 
@@ -543,6 +995,155 @@ defmodule Arbor.Agent.ProfileAuthorityMutationCoreTest do
           # to fail earlier — but success would leak non-JSON terms into digest.
           flunk("commit must not succeed with atom map keys in envelope data")
       end
+    end
+
+    test "rejects overlong list during commit", %{governed: governed} do
+      # max_list_len is 512; one extra element must fail closed.
+      long = Enum.map(0..512, & &1)
+      data = Map.put(observed_data(), "bulk", long)
+      r = record(data, 1, 1)
+
+      assert {:error, reason} = Core.commit_prepared_mutation(r, governed)
+      assert reason in [:oversized, :canonicalization_failed]
+    end
+
+    test "rejects over-wide map during commit", %{governed: governed} do
+      # max_map_keys is 256; map_size is checked before key materialization.
+      wide =
+        0..256
+        |> Enum.map(fn i -> {"k_#{i}", i} end)
+        |> Map.new()
+
+      data = Map.put(observed_data(), "wide", wide)
+      r = record(data, 1, 1)
+
+      assert {:error, reason} = Core.commit_prepared_mutation(r, governed)
+      assert reason in [:oversized, :canonicalization_failed]
+    end
+
+    test "rejects over-deep nesting during commit", %{governed: governed} do
+      # max_depth is 12; wrap one level past the ceiling.
+      deep =
+        Enum.reduce(1..14, "leaf", fn _, acc ->
+          %{"n" => acc}
+        end)
+
+      data = Map.put(observed_data(), "deep", deep)
+      r = record(data, 1, 1)
+
+      assert {:error, reason} = Core.commit_prepared_mutation(r, governed)
+      assert reason in [:oversized, :canonicalization_failed]
+    end
+
+    test "rejects overlong string before UTF-8 scan during commit", %{governed: governed} do
+      # max_string_bytes is 65_536; one byte past must fail as oversized.
+      huge = :binary.copy("a", 65_537)
+      data = Map.put(observed_data(), "blob", huge)
+      r = record(data, 1, 1)
+
+      assert {:error, reason} = Core.commit_prepared_mutation(r, governed)
+      assert reason in [:oversized, :canonicalization_failed]
+    end
+
+    test "rejects oversized total preimage assembled from many bounded strings", %{
+      governed: governed
+    } do
+      # Each string is under the per-string ceiling, but together they exceed
+      # the total preimage budget (262_144) before term_to_binary allocates.
+      chunk = :binary.copy("x", 60_000)
+      bulk = Enum.map(1..6, fn i -> {"c_#{i}", chunk} end) |> Map.new()
+      data = Map.put(observed_data(), "bulk_map", bulk)
+      r = record(data, 1, 1)
+
+      assert {:error, reason} = Core.commit_prepared_mutation(r, governed)
+      assert reason in [:oversized, :canonicalization_failed]
+    end
+
+    # Non-finite floats are not constructible on BEAM without ArithmeticError
+    # (:math.acos/1 and overflow raise; binary_to_term rejects nonfinite ETF).
+    # Finite floats remain admitted; unsupported non-JSON terms cover the rest.
+
+    test "admits finite floats during commit", %{governed: governed} do
+      data = Map.put(observed_data(), "num", 1.5)
+      r = record(data, 1, 1)
+      assert {:ok, _} = Core.commit_prepared_mutation(r, governed)
+    end
+
+    test "rejects unsupported terms (tuples, pids, refs, atoms as values)", %{
+      governed: governed
+    } do
+      for bad <- [{:tuple, 1}, self(), make_ref(), :atom_value] do
+        data = Map.put(observed_data(), "bad", bad)
+        r = record(data, 1, 1)
+
+        assert {:error, reason} = Core.commit_prepared_mutation(r, governed)
+        assert reason in [:canonicalization_failed, :oversized]
+      end
+    end
+
+    test "rejects JSON-unsafe integers beyond the safe magnitude", %{governed: governed} do
+      too_big = 9_007_199_254_740_992
+      data = Map.put(observed_data(), "big", too_big)
+      r = record(data, 1, 1)
+
+      assert {:error, reason} = Core.commit_prepared_mutation(r, governed)
+      assert reason in [:oversized, :canonicalization_failed]
+    end
+
+    test "rejects non-UTF-8 binary values during commit", %{governed: governed} do
+      data = Map.put(observed_data(), "bin", <<0xFF, 0xFE, 0xFD>>)
+      r = record(data, 1, 1)
+
+      assert {:error, reason} = Core.commit_prepared_mutation(r, governed)
+      assert reason in [:canonicalization_failed, :oversized]
+    end
+
+    test "rejects improper lists during commit", %{governed: governed} do
+      data = Map.put(observed_data(), "improper", [1 | 2])
+      r = record(data, 1, 1)
+
+      assert {:error, reason} = Core.commit_prepared_mutation(r, governed)
+      assert reason in [:canonicalization_failed, :oversized]
+    end
+  end
+
+  describe "admit_commitment/1 shape-only honesty" do
+    test "accepts well-formed digests without re-deriving against a private Record" do
+      base = %{
+        "version" => 1,
+        "kind" => Core.commitment_kind(),
+        "algorithm" => "sha256",
+        "encoding" => "hex_lower",
+        "domain" => Core.commitment_domain(),
+        "anchor_digest" => String.duplicate("11", 32),
+        "successor_digest" => String.duplicate("22", 32)
+      }
+
+      # Shape-only: any pair of distinct lowercase 64-hex digests is admissible.
+      # Correctness relative to a Record is not claimed here.
+      assert {:ok, admitted} = Core.admit_commitment(base)
+      assert admitted["anchor_digest"] == base["anchor_digest"]
+      assert admitted["successor_digest"] == base["successor_digest"]
+    end
+
+    test "rejects atom-key aliases and equal digests" do
+      base = %{
+        "version" => 1,
+        "kind" => Core.commitment_kind(),
+        "algorithm" => "sha256",
+        "encoding" => "hex_lower",
+        "domain" => Core.commitment_domain(),
+        "anchor_digest" => String.duplicate("11", 32),
+        "successor_digest" => String.duplicate("22", 32)
+      }
+
+      atom_alias = Map.put(Map.delete(base, "version"), :version, 1)
+      assert {:error, :ambiguous_keys} = Core.admit_commitment(atom_alias)
+
+      equal =
+        Map.put(base, "successor_digest", base["anchor_digest"])
+
+      assert {:error, :commitment_shape} = Core.admit_commitment(equal)
     end
   end
 end

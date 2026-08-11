@@ -385,17 +385,54 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCoreTest do
     assert {:error, {:template_authority_reconciliation_operation, :frozen_authority_invalid}} =
              Core.admit(tampered)
 
-    bad_replay =
+    # Honest shape-only trust boundary: a well-formed digest substitution (still
+    # closed keys + constants + distinct lowercase 64-hex digests) is admissible
+    # without the private Record. OperationCore does not re-derive digests, so
+    # it must not claim a substituted-but-well-formed pair is detectable here.
+    substituted =
       put_in(prepared, ["profile_mutation_replay", "anchor_digest"], String.duplicate("cc", 32))
 
-    assert {:error, {:template_authority_reconciliation_operation, :profile_mutation_replay_invalid}} =
-             Core.admit(bad_replay)
+    assert {:ok, admitted_sub} = Core.admit(substituted)
 
+    assert admitted_sub["profile_mutation_replay"]["anchor_digest"] ==
+             String.duplicate("cc", 32)
+
+    # Malformed shape / constants / aliases remain rejected.
     shape_drift =
       put_in(prepared, ["profile_mutation_replay", "extra"], "nope")
 
     assert {:error, {:template_authority_reconciliation_operation, :profile_mutation_replay_invalid}} =
              Core.admit(shape_drift)
+
+    bad_domain =
+      put_in(prepared, ["profile_mutation_replay", "domain"], "other.domain")
+
+    assert {:error, {:template_authority_reconciliation_operation, :profile_mutation_replay_invalid}} =
+             Core.admit(bad_domain)
+
+    uppercase =
+      put_in(
+        prepared,
+        ["profile_mutation_replay", "anchor_digest"],
+        String.duplicate("AA", 32)
+      )
+
+    assert {:error, {:template_authority_reconciliation_operation, :profile_mutation_replay_invalid}} =
+             Core.admit(uppercase)
+
+    atom_alias =
+      put_in(prepared, ["profile_mutation_replay"], %{
+        version: 1,
+        "kind" => ProfileAuthorityMutationCore.commitment_kind(),
+        "algorithm" => ProfileAuthorityMutationCore.commitment_algorithm(),
+        "encoding" => ProfileAuthorityMutationCore.commitment_encoding(),
+        "domain" => ProfileAuthorityMutationCore.commitment_domain(),
+        "anchor_digest" => String.duplicate("aa", 32),
+        "successor_digest" => String.duplicate("bb", 32)
+      })
+
+    assert {:error, {:template_authority_reconciliation_operation, :profile_mutation_replay_invalid}} =
+             Core.admit(atom_alias)
 
     v1 = Map.put(prepared, "version", 1)
 

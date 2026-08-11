@@ -101,7 +101,14 @@ defmodule Arbor.Agent.ProfileAuthorityMutationCore do
   """
   @spec admit_commitment(term()) :: {:ok, commitment()} | {:error, atom()}
   def admit_commitment(commitment) when is_map(commitment) and not is_struct(commitment) do
-    with :ok <- reject_any_atom_key(commitment),
+    # O(1) size gate before any key enumeration / atom scan.
+    with :ok <-
+           require_exact_map_size(
+             commitment,
+             MapSet.size(@commitment_keys),
+             :commitment_shape
+           ),
+         :ok <- reject_any_atom_key(commitment),
          :ok <- closed_keyset(commitment, @commitment_keys, :commitment_shape),
          true <- commitment["version"] === @commitment_version,
          true <- commitment["kind"] === @commitment_kind,
@@ -152,6 +159,8 @@ defmodule Arbor.Agent.ProfileAuthorityMutationCore do
          {:ok, observed_meta} <- require_observed_metadata(observed_data),
          :ok <- reject_governed_atom_keys(observed_meta, @governed_meta_atoms),
          :ok <- require_plain_map(governed, :governed_shape),
+         :ok <-
+           require_exact_map_size(governed, MapSet.size(@governed_top_keys), :governed_shape),
          :ok <- reject_any_atom_key(governed),
          :ok <- closed_keyset(governed, @governed_top_keys, :governed_shape),
          {:ok, governed_meta} <- require_governed_metadata(governed),
@@ -372,98 +381,229 @@ defmodule Arbor.Agent.ProfileAuthorityMutationCore do
 
   defp digest_envelope(role, envelope) when is_binary(role) do
     with {:ok, canonical} <- canonicalize(envelope) do
-      preimage = :erlang.term_to_binary({@commitment_domain, role, canonical}, [:deterministic])
+      term = {@commitment_domain, role, canonical}
 
-      if byte_size(preimage) > @max_preimage_bytes do
-        {:error, :oversized}
-      else
-        digest =
-          preimage
-          |> then(&:crypto.hash(:sha256, &1))
-          |> Base.encode16(case: :lower)
+      # Prove external size before allocating the ETF preimage binary.
+      case external_preimage_size(term) do
+        {:ok, size} when size <= @max_preimage_bytes ->
+          preimage = :erlang.term_to_binary(term, [:deterministic])
 
-        {:ok, digest}
+          if byte_size(preimage) > @max_preimage_bytes do
+            {:error, :oversized}
+          else
+            digest =
+              preimage
+              |> then(&:crypto.hash(:sha256, &1))
+              |> Base.encode16(case: :lower)
+
+            {:ok, digest}
+          end
+
+        _ ->
+          {:error, :oversized}
       end
     end
   end
 
+  defp external_preimage_size(term) do
+    {:ok, :erlang.external_size(term, [:deterministic])}
+  rescue
+    _ ->
+      try do
+        {:ok, :erlang.external_size(term)}
+      rescue
+        _ -> :error
+      end
+  end
+
+  # Cumulative byte budget tracks a conservative ETF upper bound of the
+  # domain-separated preimage (domain + role + canonical envelope) so oversized
+  # payloads fail during the walk rather than after a large allocation.
   defp canonicalize(term) do
-    case walk_canonical(term, 0, @max_json_nodes) do
-      {:ok, value, _nodes} -> {:ok, value}
+    # Domain atom/binary + role binary overhead reserved up front.
+    initial_budget = @max_preimage_bytes - preimage_header_budget()
+
+    if initial_budget < 0 do
+      {:error, :oversized}
+    else
+      case walk_canonical(term, 0, @max_json_nodes, initial_budget) do
+        {:ok, value, _nodes, _budget} -> {:ok, value}
+        {:error, _} = err -> err
+      end
+    end
+  end
+
+  defp preimage_header_budget do
+    # Small fixed ETF overhead for {@commitment_domain, role, _canonical}.
+    # Domain and role are closed constants; keep a generous constant ceiling.
+    256
+  end
+
+  defp walk_canonical(_term, depth, _nodes, _budget) when depth > @max_depth,
+    do: {:error, :oversized}
+
+  defp walk_canonical(_term, _depth, nodes, _budget) when nodes <= 0, do: {:error, :oversized}
+
+  defp walk_canonical(nil, _d, n, budget), do: charge_scalar(nil, n, budget, 6)
+  defp walk_canonical(v, _d, n, budget) when is_boolean(v), do: charge_scalar(v, n, budget, 6)
+
+  defp walk_canonical(v, _d, n, budget) when is_integer(v) do
+    # Compare to bounds directly — never abs/1 on arbitrary bignums.
+    if v >= -@max_json_safe_integer and v <= @max_json_safe_integer do
+      # Safe integers fit well under a 12-byte ETF charge.
+      charge_scalar(v, n, budget, 12)
+    else
+      {:error, :oversized}
+    end
+  end
+
+  defp walk_canonical(v, _d, n, budget) when is_float(v) do
+    if finite_float?(v) do
+      # NEW_FLOAT_EXT is 9 bytes.
+      charge_scalar(v, n, budget, 9)
+    else
+      {:error, :canonicalization_failed}
+    end
+  end
+
+  defp walk_canonical(v, _d, n, budget) when is_binary(v) do
+    size = byte_size(v)
+
+    cond do
+      size > @max_string_bytes ->
+        {:error, :oversized}
+
+      # Byte ceiling first — never UTF-8-scan an overlong binary.
+      not String.valid?(v) ->
+        {:error, :canonicalization_failed}
+
+      true ->
+        # BINARY_EXT header (5) + payload.
+        charge_scalar(v, n, budget, size + 5)
+    end
+  end
+
+  # Explicit empty / cons shapes only — never is_list/1 (that walks the whole
+  # tail to prove properness and is unbounded / can be quadratic under guards).
+  defp walk_canonical([], _depth, nodes, budget) do
+    case charge_budget(budget, 6) do
+      {:ok, budget} -> {:ok, [], nodes - 1, budget}
       {:error, _} = err -> err
     end
   end
 
-  defp walk_canonical(_term, depth, _nodes) when depth > @max_depth, do: {:error, :oversized}
-  defp walk_canonical(_term, _depth, nodes) when nodes <= 0, do: {:error, :oversized}
-
-  defp walk_canonical(nil, _d, n), do: {:ok, nil, n - 1}
-  defp walk_canonical(v, _d, n) when is_boolean(v), do: {:ok, v, n - 1}
-
-  defp walk_canonical(v, _d, n) when is_integer(v) do
-    if abs(v) <= @max_json_safe_integer, do: {:ok, v, n - 1}, else: {:error, :oversized}
-  end
-
-  defp walk_canonical(v, _d, n) when is_float(v) do
-    if v == v do
-      {:ok, v, n - 1}
-    else
-      {:error, :canonicalization_failed}
+  defp walk_canonical([_ | _] = list, depth, nodes, budget) do
+    case charge_budget(budget, 6) do
+      {:ok, budget} -> walk_list(list, depth, nodes - 1, budget, 0, [])
+      {:error, _} = err -> err
     end
   end
 
-  defp walk_canonical(v, _d, n) when is_binary(v) do
-    if String.valid?(v) and byte_size(v) <= @max_string_bytes do
-      {:ok, v, n - 1}
-    else
-      {:error, :canonicalization_failed}
-    end
-  end
-
-  defp walk_canonical(list, depth, nodes) when is_list(list) do
-    walk_list(list, depth, nodes - 1, 0, [])
-  end
-
-  defp walk_canonical(map, depth, nodes) when is_map(map) and not is_struct(map) do
-    keys = Map.keys(map)
+  defp walk_canonical(map, depth, nodes, budget) when is_map(map) and not is_struct(map) do
+    # Fixed-size check BEFORE materializing keys (never Map.keys/1 on wide maps).
+    size = map_size(map)
 
     cond do
-      Enum.any?(keys, &(not is_binary(&1))) ->
-        {:error, :canonicalization_failed}
-
-      length(keys) > @max_map_keys ->
+      size > @max_map_keys ->
         {:error, :oversized}
 
       true ->
-        keys
-        |> Enum.sort()
-        |> walk_map_pairs(map, depth, nodes - 1, [])
+        case charge_budget(budget, 6) do
+          {:ok, budget} ->
+            keys = Map.keys(map)
+
+            if Enum.any?(keys, &(not is_binary(&1))) do
+              {:error, :canonicalization_failed}
+            else
+              keys
+              |> Enum.sort()
+              |> walk_map_pairs(map, depth, nodes - 1, budget, [])
+            end
+
+          {:error, _} = err ->
+            err
+        end
     end
   end
 
-  defp walk_canonical(_, _, _), do: {:error, :canonicalization_failed}
+  defp walk_canonical(_, _, _, _), do: {:error, :canonicalization_failed}
 
-  defp walk_list([], _depth, nodes, _len, acc), do: {:ok, Enum.reverse(acc), nodes}
+  defp walk_list([], _depth, nodes, budget, _len, acc),
+    do: {:ok, Enum.reverse(acc), nodes, budget}
 
-  defp walk_list([h | t], depth, nodes, len, acc) when is_list(t) and len < @max_list_len do
-    case walk_canonical(h, depth + 1, nodes) do
-      {:ok, ch, left} -> walk_list(t, depth, left, len + 1, [ch | acc])
+  # Bounded walk: no is_list/1 on the tail. Improper tails are classified when
+  # the next recursion fails to match [] or [h | t].
+  defp walk_list([h | t], depth, nodes, budget, len, acc) when len < @max_list_len do
+    case walk_canonical(h, depth + 1, nodes, budget) do
+      {:ok, ch, left, budget2} -> walk_list(t, depth, left, budget2, len + 1, [ch | acc])
       {:error, _} = err -> err
     end
   end
 
-  defp walk_list([_ | t], _depth, _nodes, len, _acc) when is_list(t) and len >= @max_list_len,
+  # Length ceiling hit: fail immediately without scanning the remainder.
+  defp walk_list([_ | _], _depth, _nodes, _budget, len, _acc) when len >= @max_list_len,
     do: {:error, :oversized}
 
-  defp walk_list(_, _, _, _, _), do: {:error, :canonicalization_failed}
+  # Improper list tail (neither [] nor cons cell).
+  defp walk_list(_improper, _depth, _nodes, _budget, _len, _acc),
+    do: {:error, :canonicalization_failed}
 
-  defp walk_map_pairs([], _map, _depth, nodes, acc), do: {:ok, Enum.reverse(acc), nodes}
+  defp walk_map_pairs([], _map, _depth, nodes, budget, acc),
+    do: {:ok, Enum.reverse(acc), nodes, budget}
 
-  defp walk_map_pairs([k | rest], map, depth, nodes, acc) do
-    case walk_canonical(Map.fetch!(map, k), depth + 1, nodes) do
-      {:ok, v, left} -> walk_map_pairs(rest, map, depth, left, [{k, v} | acc])
+  defp walk_map_pairs([k | rest], map, depth, nodes, budget, acc) do
+    key_size = byte_size(k)
+
+    cond do
+      key_size > @max_string_bytes ->
+        {:error, :oversized}
+
+      not String.valid?(k) ->
+        {:error, :canonicalization_failed}
+
+      true ->
+        # Charge key binary + small tuple/list pair overhead, then value.
+        case charge_budget(budget, key_size + 5 + 4) do
+          {:ok, budget2} ->
+            case walk_canonical(Map.fetch!(map, k), depth + 1, nodes, budget2) do
+              {:ok, v, left, budget3} ->
+                walk_map_pairs(rest, map, depth, left, budget3, [{k, v} | acc])
+
+              {:error, _} = err ->
+                err
+            end
+
+          {:error, _} = err ->
+            err
+        end
+    end
+  end
+
+  defp charge_scalar(value, nodes, budget, amount) do
+    case charge_budget(budget, amount) do
+      {:ok, budget2} -> {:ok, value, nodes - 1, budget2}
       {:error, _} = err -> err
     end
+  end
+
+  defp charge_budget(budget, amount)
+       when is_integer(budget) and is_integer(amount) and amount >= 0 do
+    if budget >= amount, do: {:ok, budget - amount}, else: {:error, :oversized}
+  end
+
+  defp charge_budget(_, _), do: {:error, :oversized}
+
+  # Reject NaN and both infinities. `v == v` fails only for NaN; infinity must
+  # be rejected via float_to_binary (compact form contains "inf").
+  defp finite_float?(v) when is_float(v) do
+    v == v and
+      case :erlang.float_to_binary(v, [:compact]) do
+        bin when is_binary(bin) ->
+          lower = String.downcase(bin)
+          not (String.contains?(lower, "nan") or String.contains?(lower, "inf"))
+      end
+  rescue
+    _ -> false
   end
 
   # ---------------------------------------------------------------------------
@@ -506,6 +646,12 @@ defmodule Arbor.Agent.ProfileAuthorityMutationCore do
 
   defp require_template_source(value) do
     with :ok <- require_plain_map(value, :governed_shape),
+         :ok <-
+           require_exact_map_size(
+             value,
+             MapSet.size(@template_source_keys),
+             :governed_shape
+           ),
          :ok <- reject_any_atom_key(value),
          :ok <- closed_keyset(value, @template_source_keys, :governed_shape),
          {:ok, name} <- require_template(value["name"]),
@@ -554,7 +700,9 @@ defmodule Arbor.Agent.ProfileAuthorityMutationCore do
   defp require_target_agent_id(_), do: {:error, :invalid_target}
 
   defp admit_profile_cas(cas) when is_map(cas) and not is_struct(cas) do
-    with :ok <- reject_any_atom_key(cas),
+    with :ok <-
+           require_exact_map_size(cas, MapSet.size(@profile_cas_keys), :profile_cas_invalid),
+         :ok <- reject_any_atom_key(cas),
          :ok <- closed_keyset(cas, @profile_cas_keys, :profile_cas_invalid),
          id when is_binary(id) and id != "" <- cas["record_id"],
          gen when is_integer(gen) and gen >= 1 and gen <= @max_json_safe_integer <-
@@ -584,7 +732,15 @@ defmodule Arbor.Agent.ProfileAuthorityMutationCore do
     if is_map(value) and not is_struct(value), do: :ok, else: {:error, reason}
   end
 
+  defp require_exact_map_size(map, expected, reason)
+       when is_map(map) and is_integer(expected) and expected >= 0 do
+    if map_size(map) == expected, do: :ok, else: {:error, reason}
+  end
+
+  defp require_exact_map_size(_map, _expected, reason), do: {:error, reason}
+
   defp reject_governed_atom_keys(map, atoms) do
+    # Fixed small atom list — O(1) Map.has_key? probes, no key enumeration.
     if Enum.any?(atoms, &Map.has_key?(map, &1)) do
       {:error, :ambiguous_keys}
     else
@@ -592,7 +748,8 @@ defmodule Arbor.Agent.ProfileAuthorityMutationCore do
     end
   end
 
-  defp reject_any_atom_key(map) do
+  # Caller must O(1)-bound map_size (exact closed size or max) before this.
+  defp reject_any_atom_key(map) when is_map(map) do
     if Enum.any?(map, fn {k, _} -> is_atom(k) end) do
       {:error, :ambiguous_keys}
     else
@@ -600,9 +757,20 @@ defmodule Arbor.Agent.ProfileAuthorityMutationCore do
     end
   end
 
-  defp closed_keyset(map, allowed, reason) do
-    if MapSet.equal?(MapSet.new(Map.keys(map)), allowed), do: :ok, else: {:error, reason}
+  defp reject_any_atom_key(_), do: {:error, :ambiguous_keys}
+
+  defp closed_keyset(map, allowed, reason) when is_map(map) do
+    expected = MapSet.size(allowed)
+
+    # O(1) size equality before Map.keys / MapSet.new.
+    if map_size(map) != expected do
+      {:error, reason}
+    else
+      if MapSet.equal?(MapSet.new(Map.keys(map)), allowed), do: :ok, else: {:error, reason}
+    end
   end
+
+  defp closed_keyset(_map, _allowed, reason), do: {:error, reason}
 
   defp require_observed_metadata(observed_data) do
     case Map.fetch(observed_data, "metadata") do
@@ -618,6 +786,12 @@ defmodule Arbor.Agent.ProfileAuthorityMutationCore do
     case Map.fetch(governed, "metadata") do
       {:ok, value} ->
         with :ok <- require_plain_map(value, :governed_shape),
+             :ok <-
+               require_exact_map_size(
+                 value,
+                 MapSet.size(@governed_meta_keys),
+                 :governed_shape
+               ),
              :ok <- reject_any_atom_key(value),
              :ok <- closed_keyset(value, @governed_meta_keys, :governed_shape) do
           {:ok, value}
@@ -631,32 +805,33 @@ defmodule Arbor.Agent.ProfileAuthorityMutationCore do
   defp require_template(value) do
     cond do
       not is_binary(value) -> {:error, :template_invalid}
-      not String.valid?(value) -> {:error, :template_invalid}
       byte_size(value) == 0 -> {:error, :template_invalid}
       byte_size(value) > @max_template_bytes -> {:error, :template_invalid}
+      not String.valid?(value) -> {:error, :template_invalid}
       String.contains?(value, <<0>>) -> {:error, :template_invalid}
       true -> {:ok, value}
     end
   end
 
+  # Walk with [] / [h | t] only — no is_list/1 properness scan.
   defp require_capabilities(value) do
-    with :ok <- require_proper_list(value),
-         :ok <- validate_each_capability(value, 0) do
-      {:ok, value}
-    end
+    validate_each_capability(value, 0)
   end
 
   defp validate_each_capability([], _n), do: :ok
 
-  defp validate_each_capability([item | rest], n) do
-    if n >= @max_capabilities do
-      {:error, :capabilities_invalid}
-    else
-      with :ok <- require_capability(item) do
-        validate_each_capability(rest, n + 1)
-      end
+  defp validate_each_capability([item | rest], n) when n < @max_capabilities do
+    with :ok <- require_capability(item) do
+      validate_each_capability(rest, n + 1)
     end
   end
+
+  # Capacity ceiling: stop without scanning the remainder.
+  defp validate_each_capability([_ | _], n) when n >= @max_capabilities,
+    do: {:error, :capabilities_invalid}
+
+  # Improper tail or non-list.
+  defp validate_each_capability(_, _), do: {:error, :capabilities_invalid}
 
   defp require_capability(item) do
     with :ok <- require_plain_map(item, :capabilities_invalid),
@@ -669,11 +844,14 @@ defmodule Arbor.Agent.ProfileAuthorityMutationCore do
   defp require_present_string(map, key, max_bytes) do
     case Map.fetch(map, key) do
       {:ok, value} when is_binary(value) ->
-        if String.valid?(value) and byte_size(value) > 0 and
-             byte_size(value) <= max_bytes and not String.contains?(value, <<0>>) do
-          :ok
-        else
-          {:error, :capabilities_invalid}
+        size = byte_size(value)
+
+        cond do
+          size == 0 -> {:error, :capabilities_invalid}
+          size > max_bytes -> {:error, :capabilities_invalid}
+          not String.valid?(value) -> {:error, :capabilities_invalid}
+          String.contains?(value, <<0>>) -> {:error, :capabilities_invalid}
+          true -> :ok
         end
 
       _ ->
@@ -687,18 +865,4 @@ defmodule Arbor.Agent.ProfileAuthorityMutationCore do
       _ -> {:error, :capabilities_invalid}
     end
   end
-
-  defp require_proper_list(value) when is_list(value) do
-    if improper?(value, 0), do: {:error, :capabilities_invalid}, else: :ok
-  end
-
-  defp require_proper_list(_), do: {:error, :capabilities_invalid}
-
-  defp improper?([], _n), do: false
-
-  defp improper?([_ | rest], n) when n <= @max_capabilities,
-    do: improper?(rest, n + 1)
-
-  defp improper?([_ | _], n) when n > @max_capabilities, do: false
-  defp improper?(_, _), do: true
 end
