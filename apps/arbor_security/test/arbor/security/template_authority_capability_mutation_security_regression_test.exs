@@ -164,43 +164,54 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
 
   @impl true
   def compare_and_delete(key, expected, opts) do
-    if inject?(@deletes_key) do
-      {:error, :injected_delete_failure}
-    else
-      case pop_seeded_cad_replacement() do
-        {:replacement, replacement} ->
-          # Concurrent replacement between authoritative read and compare-delete.
-          # Key must match the store key for structured put admission; backend
-          # tokens after put are authoritative (do not trust seed gen/rev).
-          # Only report conflict after a successful put — never discard a failed
-          # injection as a synthetic conflict.
-          put_record =
-            case replacement do
-              %Record{} = rec -> %{rec | key: key}
-              other -> other
-            end
+    case inject?(@deletes_key) do
+      true ->
+        {:error, :injected_delete_failure}
 
-          case ETS.put(key, put_record, opts) do
-            :ok ->
-              {:error, :conflict}
+      false ->
+        compare_and_delete_after_inject(key, expected, opts)
+    end
+  end
 
-            {:error, _reason} = error ->
-              error
-          end
+  # Concurrent replacement between authoritative read and compare-delete.
+  # Key must match the store key for structured put admission; backend tokens
+  # after put are authoritative (do not trust seed gen/rev). Only report
+  # conflict after a successful put — never discard a failed injection as a
+  # synthetic conflict.
+  defp compare_and_delete_after_inject(key, expected, opts) do
+    case pop_seeded_cad_replacement() do
+      {:replacement, replacement} ->
+        cad_put_replacement_conflict(key, replacement, opts)
 
-        :none ->
-          case ETS.compare_and_delete(key, expected, opts) do
-            :ok ->
-              # Genuine durable delete committed. If armed, exit to simulate a
-              # crash at or after the durable revoke boundary so the caller cannot
-              # confirm whether live eviction + signal completed.
-              if inject?(@post_delete_key), do: exit({:post_delete, :timeout})
-              :ok
+      :none ->
+        cad_genuine_compare_and_delete(key, expected, opts)
+    end
+  end
 
-            other ->
-              other
-          end
+  defp cad_put_replacement_conflict(key, replacement, opts) do
+    put_record =
+      case replacement do
+        %Record{} = rec -> %{rec | key: key}
+        other -> other
       end
+
+    case ETS.put(key, put_record, opts) do
+      :ok -> {:error, :conflict}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp cad_genuine_compare_and_delete(key, expected, opts) do
+    case ETS.compare_and_delete(key, expected, opts) do
+      :ok ->
+        # Genuine durable delete committed. If armed, exit to simulate a crash
+        # at or after the durable revoke boundary so the caller cannot confirm
+        # whether live eviction + signal completed.
+        if inject?(@post_delete_key), do: exit({:post_delete, :timeout})
+        :ok
+
+      other ->
+        other
     end
   end
 
@@ -3312,5 +3323,178 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
                  resource: "arbor://fs/read/fence-json-restart"
                )
     end
+  end
+
+  # ==========================================================================
+  # Phase 4C C3B4a2 — capability-bound prepare + RevocationFence pure admission.
+  #
+  # Single marquee test: the first assertion that differs on parent c77 is
+  # prepare_acknowledged_revoke(%Capability{}). Parent returns
+  # {:error, :invalid_request} behaviorally (arity-one exists; no
+  # UndefinedFunctionError). Candidate-only proofs follow in the same body so
+  # ExUnit yields exactly one new parent failure.
+  # ==========================================================================
+
+  test "security regression: capability-bound prepare binds listed Capability and pure fence expectations" do
+    fresh_isolated_store()
+    principal = "agent_fence_bound"
+    resource = "arbor://fs/read/fence-bound"
+    opts = det_grant_opts("fence-bound", principal, resource)
+
+    assert {:ok, :applied, id} = Security.acknowledged_grant(opts)
+    assert {:ok, caps} = Security.list_capabilities(principal)
+    assert %Capability{} = cap = Enum.find(caps, &(&1.id == id))
+
+    # MARQUEE parent-fail: on c77, Capability input is not a canonical binary id
+    # so prepare returns {:error, :invalid_request}. On the candidate it succeeds.
+    assert {:ok, fence} = Security.prepare_acknowledged_revoke(cap)
+
+    # --- candidate-only tail (unreachable on parent after marquee failure) ---
+
+    assert fence["capability_id"] == id
+    assert fence["principal_id"] == principal
+    assert fence["resource_uri"] == resource
+
+    assert {:ok, ^fence} =
+             Security.admit_acknowledged_revoke_fence(fence, %{
+               capability_id: id,
+               principal_id: principal,
+               resource_uri: resource
+             })
+
+    # Malformed / mismatched expectations fail closed.
+    bad_expectations = [
+      %{capability_id: id, principal_id: principal},
+      %{capability_id: id, principal_id: principal, resource_uri: resource, extra: true},
+      %{"capability_id" => id, "principal_id" => principal, "resource_uri" => resource},
+      %{capability_id: id, principal_id: principal, resource_uri: resource <> "-x"},
+      "not-a-map"
+    ]
+
+    for bad <- bad_expectations do
+      assert {:error, :invalid_request} = Security.admit_acknowledged_revoke_fence(fence, bad)
+    end
+
+    assert {:ok, %Record{generation: g0, revision: r0}} =
+             BufferedStore.authoritative_get(id, name: @capability_store)
+
+    # Same-payload re-grant: bound prepare returns a fresh fence on advanced tokens.
+    assert {:ok, :applied, ^id} = Security.acknowledged_revoke(id)
+    assert {:ok, :applied, ^id} = Security.acknowledged_grant(opts)
+
+    assert {:ok, %Record{generation: g1}} =
+             BufferedStore.authoritative_get(id, name: @capability_store)
+
+    assert g1 > g0
+
+    assert {:ok, caps_re} = Security.list_capabilities(principal)
+    assert %Capability{} = cap_re = Enum.find(caps_re, &(&1.id == id))
+    assert {:ok, fence_re} = Security.prepare_acknowledged_revoke(cap_re)
+    assert fence_re["generation"] > fence["generation"] or fence_re["revision"] != r0
+    assert fence_re["capability_digest"] == fence["capability_digest"]
+
+    # Stale earlier fence cannot delete the replacement.
+    assert {:error, :identity_conflict} = Security.acknowledged_revoke(id, fence)
+
+    assert {:ok, :authorized} =
+             Security.authorize(principal, resource, nil, verify_identity: false)
+
+    # Different-payload replacement: bound prepare of the old observation conflicts.
+    assert {:ok, :applied, ^id} = Security.acknowledged_revoke(id)
+
+    alt =
+      det_grant_opts("fence-bound", principal, resource,
+        metadata: %{"variant" => "bound-replacement"}
+      )
+
+    assert {:ok, :applied, ^id} = Security.acknowledged_grant(alt)
+
+    assert {:ok, %Capability{} = live_before_conflict} = CapabilityStore.get(id)
+
+    assert {:ok, %Record{} = durable_before_conflict} =
+             BufferedStore.authoritative_get(id, name: @capability_store)
+
+    stats_before_conflict = CapabilityStore.stats()
+
+    assert {:error, :identity_conflict} = Security.prepare_acknowledged_revoke(cap_re)
+
+    assert {:ok, ^live_before_conflict} = CapabilityStore.get(id)
+
+    assert {:ok, ^durable_before_conflict} =
+             BufferedStore.authoritative_get(id, name: @capability_store)
+
+    assert CapabilityStore.stats() == stats_before_conflict
+
+    assert {:ok, :authorized} =
+             Security.authorize(principal, resource, nil, verify_identity: false)
+
+    # Malformed / attacker-sized expected Capability: zero mutation (exact
+    # live Capability + durable Record equality after every reject).
+    assert {:ok, %Capability{} = live} = CapabilityStore.get(id)
+
+    assert {:ok, %Record{} = durable_live} =
+             BufferedStore.authoritative_get(id, name: @capability_store)
+
+    stats_before_bad = CapabilityStore.stats()
+    deep = nest_map(8, "x")
+    invalid_utf8 = <<0xFF, 0xFE, "x">>
+    refute String.valid?(invalid_utf8)
+
+    bad_caps = [
+      %{live | id: "not-a-cap-id"},
+      %{live | principal_id: String.duplicate("p", 300)},
+      %{live | resource_uri: String.duplicate("r", 2100)},
+      %{live | granted_at: %{calendar: Calendar.ISO}},
+      %{live | metadata: deep},
+      %{live | constraints: deep},
+      %{live | issuer_signature: :crypto.strong_rand_bytes(128)},
+      # Invalid UTF-8 in signed textual fields (size-first then UTF-8 gate).
+      %{live | principal_id: invalid_utf8},
+      %{live | resource_uri: invalid_utf8},
+      %{live | session_id: invalid_utf8},
+      %{live | task_id: invalid_utf8},
+      %{live | principal_scope: invalid_utf8},
+      %{live | issuer_id: invalid_utf8},
+      # Overlong allowed_delegatees list (beyond max 64).
+      %{live | allowed_delegatees: Enum.map(1..65, fn n -> "agent_delegate_#{n}" end)}
+    ]
+
+    for bad_cap <- bad_caps do
+      assert {:error, :invalid_request} = Security.prepare_acknowledged_revoke(bad_cap)
+      assert {:ok, ^live} = CapabilityStore.get(id)
+
+      assert {:ok, ^durable_live} =
+               BufferedStore.authoritative_get(id, name: @capability_store)
+
+      assert CapabilityStore.stats() == stats_before_bad
+    end
+
+    # Stale-fence preservation after fresh bound preparation on the live occupant.
+    assert {:ok, fence_a} = Security.prepare_acknowledged_revoke(live)
+    assert {:ok, :applied, ^id} = Security.acknowledged_revoke(id)
+    assert {:ok, :applied, ^id} = Security.acknowledged_grant(alt)
+
+    assert {:ok, caps_b} = Security.list_capabilities(principal)
+    assert %Capability{} = live_b = Enum.find(caps_b, &(&1.id == id))
+    assert {:ok, fence_b} = Security.prepare_acknowledged_revoke(live_b)
+    assert fence_b["generation"] > fence_a["generation"]
+
+    assert {:error, :identity_conflict} = Security.acknowledged_revoke(id, fence_a)
+
+    assert {:ok, :authorized} =
+             Security.authorize(principal, resource, nil, verify_identity: false)
+
+    assert {:ok, %Record{}} =
+             BufferedStore.authoritative_get(id, name: @capability_store)
+
+    # Fresh bound fence still applies.
+    assert {:ok, :applied, ^id} = Security.acknowledged_revoke(id, fence_b)
+    assert {:error, :not_found} = CapabilityStore.get(id)
+  end
+
+  defp nest_map(0, leaf), do: leaf
+
+  defp nest_map(n, leaf) when n > 0 do
+    %{"k" => nest_map(n - 1, leaf)}
   end
 end

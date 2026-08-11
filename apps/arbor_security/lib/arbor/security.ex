@@ -69,6 +69,7 @@ defmodule Arbor.Security do
   alias Arbor.Security.Identity.Verifier
   alias Arbor.Security.Keychain
   alias Arbor.Security.Reflex
+  alias Arbor.Security.RevocationFence
   alias Arbor.Security.SigningAuthorityBroker
   alias Arbor.Security.SigningKeyStore
   alias Arbor.Security.SystemAuthority
@@ -921,43 +922,32 @@ defmodule Arbor.Security do
     :throw, _ -> {:error, :outcome_unknown}
   end
 
-  @revoke_fence_kind "acknowledged_revoke_fence"
-  @revoke_fence_version 1
-  @revoke_fence_keys MapSet.new([
-                       "kind",
-                       "version",
-                       "capability_id",
-                       "principal_id",
-                       "resource_uri",
-                       "record_id",
-                       "generation",
-                       "revision",
-                       "capability_digest"
-                     ])
-  @revoke_fence_max_principal_bytes 256
-  @revoke_fence_max_resource_bytes 2048
-  @revoke_fence_max_record_id_bytes 128
-  # JSON-safe integer maximum (IEEE-754 exact); C3B4b can journal the fence
-  # losslessly. Not signed 64-bit max.
-  @revoke_fence_max_token 9_007_199_254_740_991
-
   @doc """
-  Prepare a closed v1 expected-Record revocation fence for one capability id.
+  Prepare a closed v1 expected-Record revocation fence for one capability id
+  or a previously observed Capability.
 
-  Performs one owner-mediated authoritative read with restore-grade decode and
-  authority signature verification. Returns a JSON-clean fence binding capability
-  identity plus Record id/generation/revision and a domain-separated digest of
-  `Capability.signing_payload/1`. Authoritative absence is `:not_found`.
-  Unavailable or unverifiable authority is not a usable fence.
+  Binary id path: one owner-mediated authoritative read with restore-grade
+  decode and authority signature verification. Returns a JSON-clean fence
+  binding capability identity plus Record id/generation/revision and a
+  domain-separated digest of `Capability.signing_payload/1`. Authoritative
+  absence is `:not_found`. Unavailable or unverifiable authority is not a
+  usable fence.
+
+  Capability path: reduces the caller struct to a bounded closed expected
+  signed identity, then prepares only when the current authoritative
+  signature-verified record matches that identity (id, principal, resource,
+  and complete signed payload). A different same-id payload is
+  `:identity_conflict` with zero mutation.
   """
-  @spec prepare_acknowledged_revoke(String.t()) ::
+  @spec prepare_acknowledged_revoke(String.t() | Capability.t()) ::
           {:ok, map()}
           | {:error,
              :invalid_request
              | :not_found
+             | :identity_conflict
              | :capability_store_unavailable
              | :outcome_unknown}
-  def prepare_acknowledged_revoke(capability_id) do
+  def prepare_acknowledged_revoke(capability_id) when is_binary(capability_id) do
     if canonical_exact_capability_id?(capability_id) do
       CapabilityStore.prepare_acknowledged_revoke(capability_id)
     else
@@ -970,6 +960,43 @@ defmodule Arbor.Security do
     :exit, :timeout -> {:error, :outcome_unknown}
     :exit, _ -> {:error, :outcome_unknown}
     :throw, _ -> {:error, :outcome_unknown}
+  end
+
+  def prepare_acknowledged_revoke(%Capability{} = cap) do
+    case RevocationFence.expected_identity(cap) do
+      {:ok, expected} ->
+        CapabilityStore.prepare_acknowledged_revoke_expected(expected)
+
+      {:error, :invalid_request} ->
+        {:error, :invalid_request}
+    end
+  rescue
+    _ -> {:error, :outcome_unknown}
+  catch
+    :exit, {:noproc, _} -> {:error, :capability_store_unavailable}
+    :exit, :timeout -> {:error, :outcome_unknown}
+    :exit, _ -> {:error, :outcome_unknown}
+    :throw, _ -> {:error, :outcome_unknown}
+  end
+
+  def prepare_acknowledged_revoke(_), do: {:error, :invalid_request}
+
+  @doc """
+  Pure admission of a closed v1 fence against exact capability identity expectations.
+
+  `expectations` must be exactly `%{capability_id: ..., principal_id: ...,
+  resource_uri: ...}`. Validates the fence once through `RevocationFence`,
+  requires all three exact matches, and returns the canonical string-keyed
+  fence only on success. No IO.
+  """
+  @spec admit_acknowledged_revoke_fence(map(), map()) ::
+          {:ok, map()} | {:error, :invalid_request}
+  def admit_acknowledged_revoke_fence(fence, expectations) do
+    RevocationFence.admit_with_expectations(fence, expectations)
+  rescue
+    _ -> {:error, :invalid_request}
+  catch
+    _, _ -> {:error, :invalid_request}
   end
 
   @doc """
@@ -989,7 +1016,7 @@ defmodule Arbor.Security do
              | :outcome_unknown}
   def acknowledged_revoke(capability_id, fence) do
     with true <- canonical_exact_capability_id?(capability_id),
-         :ok <- validate_revocation_fence(capability_id, fence) do
+         :ok <- RevocationFence.admit_fence(capability_id, fence) do
       result = CapabilityStore.acknowledged_revoke(capability_id, fence)
       emit_acknowledged_revoke_audit(result)
       result
@@ -1019,110 +1046,6 @@ defmodule Arbor.Security do
   end
 
   defp emit_acknowledged_revoke_audit(_result), do: :ok
-
-  # Closed, bounded, string-keyed fence validation at the facade boundary.
-  # Fail closed before any store mutation; never log fence contents.
-  defp validate_revocation_fence(capability_id, fence) do
-    with :ok <- validate_revocation_fence_map(fence),
-         :ok <- validate_revocation_fence_fields(capability_id, fence) do
-      :ok
-    else
-      _ -> {:error, :invalid_request}
-    end
-  rescue
-    _ -> {:error, :invalid_request}
-  catch
-    _, _ -> {:error, :invalid_request}
-  end
-
-  defp validate_revocation_fence_map(fence) when is_map(fence) and not is_struct(fence) do
-    # O(1) size gate before enumerating keys — reject attacker-sized maps cheaply.
-    if map_size(fence) != 9 do
-      {:error, :invalid_request}
-    else
-      keys = Map.keys(fence)
-
-      cond do
-        not Enum.all?(keys, &is_binary/1) ->
-          {:error, :invalid_request}
-
-        MapSet.new(keys) != @revoke_fence_keys ->
-          {:error, :invalid_request}
-
-        true ->
-          :ok
-      end
-    end
-  end
-
-  defp validate_revocation_fence_map(_), do: {:error, :invalid_request}
-
-  defp validate_revocation_fence_fields(capability_id, fence) do
-    kind = Map.fetch!(fence, "kind")
-    version = Map.fetch!(fence, "version")
-    fence_cap_id = Map.fetch!(fence, "capability_id")
-    principal_id = Map.fetch!(fence, "principal_id")
-    resource_uri = Map.fetch!(fence, "resource_uri")
-    record_id = Map.fetch!(fence, "record_id")
-    generation = Map.fetch!(fence, "generation")
-    revision = Map.fetch!(fence, "revision")
-    digest = Map.fetch!(fence, "capability_digest")
-
-    cond do
-      kind != @revoke_fence_kind ->
-        {:error, :invalid_request}
-
-      version != @revoke_fence_version ->
-        {:error, :invalid_request}
-
-      not canonical_exact_capability_id?(fence_cap_id) ->
-        {:error, :invalid_request}
-
-      fence_cap_id != capability_id ->
-        {:error, :invalid_request}
-
-      not fence_bounded_nonempty_binary?(principal_id, @revoke_fence_max_principal_bytes) ->
-        {:error, :invalid_request}
-
-      not fence_bounded_nonempty_binary?(resource_uri, @revoke_fence_max_resource_bytes) ->
-        {:error, :invalid_request}
-
-      not fence_bounded_nonempty_binary?(record_id, @revoke_fence_max_record_id_bytes) ->
-        {:error, :invalid_request}
-
-      not fence_positive_token?(generation) ->
-        {:error, :invalid_request}
-
-      not fence_positive_token?(revision) ->
-        {:error, :invalid_request}
-
-      not fence_digest?(digest) ->
-        {:error, :invalid_request}
-
-      true ->
-        :ok
-    end
-  end
-
-  # Size-first bound, then UTF-8 validity so JSON-clean fences reject invalid
-  # code units without enumerating unbounded binaries first.
-  defp fence_bounded_nonempty_binary?(value, max_bytes)
-       when is_binary(value) and byte_size(value) > 0 and byte_size(value) <= max_bytes,
-       do: String.valid?(value)
-
-  defp fence_bounded_nonempty_binary?(_value, _max_bytes), do: false
-
-  defp fence_positive_token?(n)
-       when is_integer(n) and n >= 1 and n <= @revoke_fence_max_token,
-       do: true
-
-  defp fence_positive_token?(_), do: false
-
-  defp fence_digest?(digest) when is_binary(digest) and byte_size(digest) == 64 do
-    Regex.match?(~r/\A[0-9a-f]{64}\z/, digest)
-  end
-
-  defp fence_digest?(_), do: false
 
   defp validate_acknowledged_grant_opts(opts) do
     cond do
