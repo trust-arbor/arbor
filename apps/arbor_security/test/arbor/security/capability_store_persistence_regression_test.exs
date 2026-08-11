@@ -464,6 +464,123 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
     end
   end
 
+  # P3 public admission proof on the default durable JSONFile backend.
+  # Store-layer causal ABA evidence: JSONFileDurableCasTest (P2) and pre-P2
+  # baseline 4582ec8de9acb2280109b76c6d797d8872240a2d. This test adds the
+  # public facade + BufferedStore + CapabilityStore dual-restart path.
+  test "security regression: public acknowledged grant/revoke on JSONFile survives full two-process restart with generation fence (ABA)" do
+    principal = "agent_ack_jsonfile_public"
+    resource = "arbor://fs/read/ack-jsonfile-public"
+
+    cap_id =
+      "cap_" <> Base.encode16(:erlang.md5("ack-jsonfile-public-p3"), case: :lower)
+
+    granted_at = ~U[2026-01-15 12:00:00Z]
+
+    opts = [
+      capability_id: cap_id,
+      granted_at: granted_at,
+      principal: principal,
+      resource: resource
+    ]
+
+    backend_dir = Path.join("var", "ack-jsonfile-public-#{unique_integer()}")
+    tmp_dir = Path.expand(backend_dir, File.cwd!())
+    File.mkdir_p!(tmp_dir)
+    on_exit(fn -> File.rm_rf!(tmp_dir) end)
+
+    # Real default durable backend — not CASSandbox, ETS, or a CAS wrapper.
+    configure_isolated_json_store(backend_dir)
+
+    # Phase A — public grant + idempotency + authorize
+    assert {:ok, :applied, id} = Security.acknowledged_grant(opts)
+    assert id == cap_id
+    assert {:ok, :idempotent, ^id} = Security.acknowledged_grant(opts)
+
+    assert {:ok, :authorized} =
+             Security.authorize(principal, resource, nil, verify_identity: false)
+
+    assert {:ok, %Record{generation: g1, revision: r1} = pre_revoke} =
+             BufferedStore.authoritative_get(id, name: @capability_store)
+
+    assert is_integer(g1) and g1 >= 1
+    assert is_integer(r1) and r1 >= 1
+
+    # Phase B — restart #1: both named processes over the same JSON directory
+    full_restart_capability_stack!(backend_dir)
+
+    assert {:ok, :authorized} =
+             Security.authorize(principal, resource, nil, verify_identity: false)
+
+    assert {:ok, :idempotent, ^id} = Security.acknowledged_grant(opts)
+
+    assert {:ok, %Record{generation: ^g1, revision: ^r1}} =
+             BufferedStore.authoritative_get(id, name: @capability_store)
+
+    # Phase C — public revoke + idempotency + no live auth
+    assert {:ok, :applied, ^id} = Security.acknowledged_revoke(id)
+    assert {:ok, :idempotent, ^id} = Security.acknowledged_revoke(id)
+
+    assert {:error, :unauthorized} =
+             Security.authorize(principal, resource, nil, verify_identity: false)
+
+    assert {:error, :not_found} =
+             BufferedStore.authoritative_get(id, name: @capability_store)
+
+    # Phase D — restart #2: revocation must not resurrect
+    full_restart_capability_stack!(backend_dir)
+
+    assert {:error, :unauthorized} =
+             Security.authorize(principal, resource, nil, verify_identity: false)
+
+    assert {:ok, []} = Security.list_capabilities(principal)
+
+    assert {:error, :not_found} =
+             BufferedStore.authoritative_get(id, name: @capability_store)
+
+    assert {:ok, :idempotent, ^id} = Security.acknowledged_revoke(id)
+
+    # Phase E — same-id re-grant advances durable generation
+    assert {:ok, :applied, ^id} = Security.acknowledged_grant(opts)
+
+    assert {:ok, :authorized} =
+             Security.authorize(principal, resource, nil, verify_identity: false)
+
+    assert {:ok, %Record{generation: g2, revision: r2}} =
+             BufferedStore.authoritative_get(id, name: @capability_store)
+
+    # Tombstone + reinsert must advance the Record fence (expect g1+1).
+    assert g2 > g1
+
+    # Phase F — stale pre-revoke fence rejected by real JSONFile CAS/CAD
+    json_opts = [base_dir: backend_dir, name: "capabilities"]
+
+    stale_data =
+      case pre_revoke.data do
+        data when is_map(data) -> Map.put(data, "_stale", true)
+        _ -> %{"_stale" => true}
+      end
+
+    assert {:error, :conflict} =
+             JSONFile.compare_and_swap(
+               id,
+               {:value, pre_revoke},
+               Record.update(pre_revoke, stale_data),
+               json_opts
+             )
+
+    assert {:error, :conflict} =
+             JSONFile.compare_and_delete(id, pre_revoke, json_opts)
+
+    assert {:ok, %Record{generation: ^g2, revision: ^r2}} =
+             JSONFile.get(id, json_opts)
+
+    assert {:ok, :authorized} =
+             Security.authorize(principal, resource, nil, verify_identity: false)
+
+    assert {:ok, :idempotent, ^id} = Security.acknowledged_grant(opts)
+  end
+
   defp configure_isolated_json_store(tmp_dir, backend \\ JSONFile) do
     on_exit(&restore_security_children/0)
 
@@ -487,6 +604,19 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
   defp restart_capability_store do
     stop_named_process(CapabilityStore)
     {:ok, _pid} = CapabilityStore.start_link([])
+  end
+
+  # Full recreate of both test-owned processes so residual ETS cannot pass a
+  # durability assertion. Same isolated JSON directory is re-attached.
+  defp full_restart_capability_stack!(backend_dir) do
+    stop_named_process(CapabilityStore)
+    stop_named_process(@capability_store)
+    start_capability_buffered_store!(backend_dir)
+
+    assert {:ok, %{status: :ready}} =
+             BufferedStore.hydration_status(name: @capability_store)
+
+    assert {:ok, _pid} = CapabilityStore.start_link([])
   end
 
   defp start_capability_buffered_store!(backend_dir) do
