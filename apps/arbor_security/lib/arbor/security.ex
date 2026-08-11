@@ -321,7 +321,12 @@ defmodule Arbor.Security do
              | :broker_full
              | :receipt_issue_failed
              | :broker_unavailable}
-  def authorize_and_issue_delivery_receipt(principal_id, resource_uri, action \\ nil, opts \\ []) do
+  def authorize_and_issue_delivery_receipt(
+        principal_id,
+        resource_uri,
+        action \\ nil,
+        opts \\ []
+      ) do
     with :ok <- validate_issue_human_principal(principal_id),
          {:ok, safe_opts} <- validate_issue_opts(opts) do
       case authorize(principal_id, resource_uri, action, safe_opts) do
@@ -1992,7 +1997,8 @@ defmodule Arbor.Security do
 
     # Stateful constraint checks (rate limiting) — cap was already found by AuthDecision
     with :ok <- enforce_source_owned_egress_expectation(cap, opts),
-         :ok <- if(cap, do: maybe_enforce_constraints(cap, principal_id, resource_uri), else: :ok) do
+         :ok <-
+           if(cap, do: maybe_enforce_constraints(cap, principal_id, resource_uri), else: :ok) do
       # FileGuard for fs:// URIs — runs explicit (caller passed :file_path)
       # OR implicit (we have a matched cap and the URI's path-part is the
       # implicit file_path) defense-in-depth normalization.

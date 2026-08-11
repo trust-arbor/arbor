@@ -2963,6 +2963,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       # Prepared fence is self-valid: closed shape, bounds, and JSON-safe tokens.
       assert map_size(fence) == 9
       assert Enum.all?(Map.keys(fence), &is_binary/1)
+
       assert MapSet.new(Map.keys(fence)) ==
                MapSet.new([
                  "kind",
@@ -3066,9 +3067,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       assert {:ok, :applied, ^id} = Security.acknowledged_revoke(id)
 
       alt =
-        det_grant_opts("fence-diff", principal, resource,
-          metadata: %{"variant" => "replacement"}
-        )
+        det_grant_opts("fence-diff", principal, resource, metadata: %{"variant" => "replacement"})
 
       assert {:ok, :applied, ^id} = Security.acknowledged_grant(alt)
       assert {:error, :identity_conflict} = Security.acknowledged_revoke(id, fence)
@@ -3658,6 +3657,8 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     "hostile"
   end
 
+  # Calendar behaviour requires datetime_to_string/11; arity is fixed by the callback.
+  # credo:disable-for-next-line Credo.Check.Refactor.FunctionArity
   def datetime_to_string(_y, _m, _d, _h, _min, _s, _us, _tz, _abbr, _utc, _std) do
     mark_called()
     "hostile"

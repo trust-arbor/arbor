@@ -137,7 +137,8 @@ defmodule Arbor.Security.RevocationFence do
   Exact match of a fence against a verified capability and Record tokens.
   """
   @spec matches_observed?(fence(), Capability.t(), record_tokens()) :: boolean()
-  def matches_observed?(fence, %Capability{} = cap, tokens) when is_map(fence) and is_map(tokens) do
+  def matches_observed?(fence, %Capability{} = cap, tokens)
+      when is_map(fence) and is_map(tokens) do
     fence["capability_id"] == cap.id and
       fence["principal_id"] == cap.principal_id and
       fence["resource_uri"] == cap.resource_uri and
@@ -372,7 +373,8 @@ defmodule Arbor.Security.RevocationFence do
     end
   end
 
-  defp admit_expectations(expectations) when is_map(expectations) and not is_struct(expectations) do
+  defp admit_expectations(expectations)
+       when is_map(expectations) and not is_struct(expectations) do
     with :ok <- admit_expectations_map(expectations),
          :ok <- admit_expectations_fields(expectations) do
       {:ok,
@@ -509,8 +511,21 @@ defmodule Arbor.Security.RevocationFence do
 
   # Phase A: raw struct fields only (no DateTime/calendar callbacks on value).
   # Phase B: Calendar.ISO.valid_* only after calendar is exactly Calendar.ISO.
-  defp iso_datetime_primitives?(%DateTime{
-         calendar: calendar,
+  # Strict left-to-right short-circuit: calendar identity and raw primitive bounds
+  # are established before any Calendar.ISO validity call, serialization, hash,
+  # or owner process message.
+  defp iso_datetime_primitives?(%DateTime{} = dt) do
+    iso_calendar_identity?(dt.calendar) and
+      iso_datetime_raw_primitive_bounds?(dt) and
+      iso_datetime_calendar_iso_valid?(dt)
+  end
+
+  defp iso_datetime_primitives?(_), do: false
+
+  defp iso_calendar_identity?(Calendar.ISO), do: true
+  defp iso_calendar_identity?(_), do: false
+
+  defp iso_datetime_raw_primitive_bounds?(%DateTime{
          year: year,
          month: month,
          day: day,
@@ -523,23 +538,48 @@ defmodule Arbor.Security.RevocationFence do
          utc_offset: utc_offset,
          std_offset: std_offset
        }) do
-    calendar == Calendar.ISO and
-      int_in_bounds?(year) and year >= 1 and year <= 9999 and
-      int_in_bounds?(month) and month >= 1 and month <= 12 and
-      int_in_bounds?(day) and day >= 1 and day <= 31 and
-      int_in_bounds?(hour) and hour >= 0 and hour <= 23 and
-      int_in_bounds?(minute) and minute >= 0 and minute <= 60 and
-      int_in_bounds?(second) and second >= 0 and second <= 60 and
+    iso_year_primitive?(year) and
+      iso_month_primitive?(month) and
+      iso_day_primitive?(day) and
+      iso_hour_primitive?(hour) and
+      iso_minute_primitive?(minute) and
+      iso_second_primitive?(second) and
       microsecond_shape?(microsecond) and
       offset_in_bounds?(utc_offset) and
       offset_in_bounds?(std_offset) and
       bounded_zone_text?(time_zone) and
-      bounded_zone_text?(zone_abbr) and
-      iso_date_valid?(year, month, day) and
-      iso_time_valid?(hour, minute, second, microsecond)
+      bounded_zone_text?(zone_abbr)
   end
 
-  defp iso_datetime_primitives?(_), do: false
+  defp iso_year_primitive?(year) when is_integer(year) and year >= 1 and year <= 9999,
+    do: int_in_bounds?(year)
+
+  defp iso_year_primitive?(_), do: false
+
+  defp iso_month_primitive?(month) when is_integer(month) and month >= 1 and month <= 12,
+    do: int_in_bounds?(month)
+
+  defp iso_month_primitive?(_), do: false
+
+  defp iso_day_primitive?(day) when is_integer(day) and day >= 1 and day <= 31,
+    do: int_in_bounds?(day)
+
+  defp iso_day_primitive?(_), do: false
+
+  defp iso_hour_primitive?(hour) when is_integer(hour) and hour >= 0 and hour <= 23,
+    do: int_in_bounds?(hour)
+
+  defp iso_hour_primitive?(_), do: false
+
+  defp iso_minute_primitive?(minute) when is_integer(minute) and minute >= 0 and minute <= 60,
+    do: int_in_bounds?(minute)
+
+  defp iso_minute_primitive?(_), do: false
+
+  defp iso_second_primitive?(second) when is_integer(second) and second >= 0 and second <= 60,
+    do: int_in_bounds?(second)
+
+  defp iso_second_primitive?(_), do: false
 
   defp microsecond_shape?({us, precision})
        when is_integer(us) and is_integer(precision) and us >= 0 and us <= 999_999 and
@@ -559,6 +599,19 @@ defmodule Arbor.Security.RevocationFence do
        do: String.valid?(value)
 
   defp bounded_zone_text?(_), do: false
+
+  # Phase B only — callers must already have proven Calendar.ISO + raw bounds.
+  defp iso_datetime_calendar_iso_valid?(%DateTime{
+         year: year,
+         month: month,
+         day: day,
+         hour: hour,
+         minute: minute,
+         second: second,
+         microsecond: microsecond
+       }) do
+    iso_date_valid?(year, month, day) and iso_time_valid?(hour, minute, second, microsecond)
+  end
 
   defp iso_date_valid?(year, month, day) do
     Calendar.ISO.valid_date?(year, month, day)
