@@ -334,6 +334,107 @@ defmodule Arbor.Security.CapabilityStore do
 
   def acknowledged_revoke(_capability_id), do: {:error, :outcome_unknown}
 
+  # ===========================================================================
+  # Expected-Record fenced revoke (Phase 4C C3B4a).
+  #
+  # prepare_acknowledged_revoke/1 returns a closed JSON-clean v1 fence for the
+  # exact authoritative signature-verified Record. acknowledged_revoke/2 deletes
+  # only when that fence still exactly matches the current occupant. /1 remains
+  # current-occupancy revoke and is intentionally separate.
+  # ===========================================================================
+
+  @revoke_fence_kind "acknowledged_revoke_fence"
+  @revoke_fence_version 1
+  @revoke_fence_digest_domain "arbor.security.acknowledged_revoke_fence.v1\0"
+  @revoke_fence_keys MapSet.new([
+                       "kind",
+                       "version",
+                       "capability_id",
+                       "principal_id",
+                       "resource_uri",
+                       "record_id",
+                       "generation",
+                       "revision",
+                       "capability_digest"
+                     ])
+  @revoke_fence_max_principal_bytes 256
+  @revoke_fence_max_resource_bytes 2048
+  @revoke_fence_max_record_id_bytes 128
+  # JSON-safe integer maximum (IEEE-754 exact); C3B4b can journal the fence
+  # losslessly. Not signed 64-bit max.
+  @revoke_fence_max_token 9_007_199_254_740_991
+
+  @doc """
+  Prepare a closed v1 expected-Record revocation fence for one capability id.
+
+  Performs one owner-mediated authoritative read, restore-grade decode and
+  authority signature verification, and returns a JSON-clean fence binding
+  capability identity plus Record id/generation/revision and a domain-separated
+  digest of `Capability.signing_payload/1`. Authoritative absence is
+  `:not_found`. Unavailable or unverifiable authority is not a usable fence.
+  """
+  @spec prepare_acknowledged_revoke(String.t()) ::
+          {:ok, map()}
+          | {:error, :not_found | :capability_store_unavailable | :outcome_unknown}
+  def prepare_acknowledged_revoke(capability_id) when is_binary(capability_id) do
+    if Process.whereis(__MODULE__) == nil do
+      {:error, :capability_store_unavailable}
+    else
+      GenServer.call(
+        __MODULE__,
+        {:prepare_acknowledged_revoke, capability_id},
+        acknowledged_call_timeout_ms()
+      )
+    end
+  rescue
+    _ -> {:error, :outcome_unknown}
+  catch
+    :exit, {:noproc, _} -> {:error, :capability_store_unavailable}
+    :exit, :timeout -> {:error, :outcome_unknown}
+    :exit, _ -> {:error, :outcome_unknown}
+    :throw, _ -> {:error, :outcome_unknown}
+  end
+
+  def prepare_acknowledged_revoke(_capability_id), do: {:error, :outcome_unknown}
+
+  @doc """
+  Acknowledged revoke gated by an expected-Record fence from
+  `prepare_acknowledged_revoke/1`.
+
+  Deletes only when the current verified Record exactly matches the fence.
+  Authoritative absence is idempotent. A present replacement is
+  `:identity_conflict` with zero mutation. Never falls back to occupancy-only
+  revoke (`acknowledged_revoke/1`).
+  """
+  @spec acknowledged_revoke(String.t(), map()) ::
+          {:ok, :applied | :idempotent, String.t()}
+          | {:error,
+             :invalid_request
+             | :identity_conflict
+             | :capability_store_unavailable
+             | :outcome_unknown}
+  def acknowledged_revoke(capability_id, fence)
+      when is_binary(capability_id) and is_map(fence) do
+    if Process.whereis(__MODULE__) == nil do
+      {:error, :capability_store_unavailable}
+    else
+      GenServer.call(
+        __MODULE__,
+        {:acknowledged_revoke, capability_id, fence},
+        acknowledged_call_timeout_ms()
+      )
+    end
+  rescue
+    _ -> {:error, :outcome_unknown}
+  catch
+    :exit, {:noproc, _} -> {:error, :capability_store_unavailable}
+    :exit, :timeout -> {:error, :outcome_unknown}
+    :exit, _ -> {:error, :outcome_unknown}
+    :throw, _ -> {:error, :outcome_unknown}
+  end
+
+  def acknowledged_revoke(_capability_id, _fence), do: {:error, :invalid_request}
+
   defp acknowledged_call_timeout_ms, do: 5_000
 
   # Server callbacks
@@ -654,6 +755,28 @@ defmodule Arbor.Security.CapabilityStore do
   end
 
   @impl true
+  def handle_call({:prepare_acknowledged_revoke, capability_id}, _from, state) do
+    case migrate_state(state) do
+      {:ok, state} ->
+        exec_prepare_acknowledged_revoke(capability_id, state)
+
+      {:error, reason} ->
+        {:stop, reason, {:error, :capability_store_unavailable}, state}
+    end
+  end
+
+  @impl true
+  def handle_call({:acknowledged_revoke, capability_id, fence}, _from, state) do
+    case migrate_state(state) do
+      {:ok, state} ->
+        exec_acknowledged_revoke_fenced(capability_id, fence, state)
+
+      {:error, reason} ->
+        {:stop, reason, {:error, :capability_store_unavailable}, state}
+    end
+  end
+
+  @impl true
   def handle_info(:cleanup, state) do
     case migrate_state(state) do
       {:ok, state} ->
@@ -899,6 +1022,30 @@ defmodule Arbor.Security.CapabilityStore do
 
     try do
       do_acknowledged_revoke(capability_id, state)
+    rescue
+      _ -> {:reply, {:error, :outcome_unknown}, incoming}
+    catch
+      _, _ -> {:reply, {:error, :outcome_unknown}, incoming}
+    end
+  end
+
+  defp exec_prepare_acknowledged_revoke(capability_id, state) do
+    incoming = state
+
+    try do
+      do_prepare_acknowledged_revoke(capability_id, state)
+    rescue
+      _ -> {:reply, {:error, :outcome_unknown}, incoming}
+    catch
+      _, _ -> {:reply, {:error, :outcome_unknown}, incoming}
+    end
+  end
+
+  defp exec_acknowledged_revoke_fenced(capability_id, fence, state) do
+    incoming = state
+
+    try do
+      do_acknowledged_revoke_fenced(capability_id, fence, state)
     rescue
       _ -> {:reply, {:error, :outcome_unknown}, incoming}
     catch
@@ -1599,6 +1746,283 @@ defmodule Arbor.Security.CapabilityStore do
         {:reply, {:error, :outcome_unknown}, state}
     end
   end
+
+  # ---------------------------------------------------------------------------
+  # Expected-Record fenced prepare / revoke (C3B4a)
+  # ---------------------------------------------------------------------------
+
+  defp do_prepare_acknowledged_revoke(capability_id, state) do
+    # Canonical id before any owner-mediated read. Unusable prepare inputs are
+    # not a fence; map to :outcome_unknown (store surface has no :invalid_request).
+    if not store_canonical_capability_id?(capability_id) do
+      {:reply, {:error, :outcome_unknown}, state}
+    else
+      case acknowledged_authoritative_get(capability_id) do
+        {:error, :not_found} ->
+          {:reply, {:error, :not_found}, state}
+
+        {:ok, %Record{} = record} ->
+          case decode_and_verify_fenced_record(record, capability_id) do
+            {:ok, %Capability{} = cap} ->
+              fence = build_revocation_fence(cap, record)
+
+              # Self-validate the built fence so over-bound principal/resource/
+              # record_id or non-JSON-safe tokens never escape as a usable fence.
+              case validate_revocation_fence(capability_id, fence) do
+                :ok ->
+                  {:reply, {:ok, fence}, state}
+
+                {:error, :invalid_request} ->
+                  {:reply, {:error, :outcome_unknown}, state}
+              end
+
+            {:error, :unverifiable} ->
+              {:reply, {:error, :outcome_unknown}, state}
+          end
+
+        {:error, _reason} ->
+          {:reply, {:error, :outcome_unknown}, state}
+      end
+    end
+  end
+
+  defp do_acknowledged_revoke_fenced(capability_id, fence, state) do
+    case validate_revocation_fence(capability_id, fence) do
+      :ok ->
+        case acknowledged_authoritative_get(capability_id) do
+          {:error, :not_found} ->
+            ack_idempotent_revoke_reply(state, capability_id)
+
+          {:ok, %Record{} = observed} ->
+            case decode_and_verify_fenced_record(observed, capability_id) do
+              {:ok, %Capability{} = cap} ->
+                if fence_matches_observed?(fence, cap, observed) do
+                  case acknowledged_cas_delete(capability_id, observed) do
+                    :ok ->
+                      principal_id = ack_revoke_principal(state, capability_id, observed)
+                      state = revoke_capability_ids(state, [capability_id])
+                      state = update_in(state, [:stats, :total_revoked], &(&1 + 1))
+                      emit_revocation_signal(:capability_revoked, [capability_id], principal_id)
+                      {:reply, {:ok, :applied, capability_id}, state}
+
+                    {:error, :conflict} ->
+                      classify_fenced_revoke_conflict(state, capability_id, fence)
+
+                    {:error, _reason} ->
+                      {:reply, {:error, :outcome_unknown}, state}
+                  end
+                else
+                  {:reply, {:error, :identity_conflict}, state}
+                end
+
+              {:error, :unverifiable} ->
+                {:reply, {:error, :outcome_unknown}, state}
+            end
+
+          {:error, _reason} ->
+            {:reply, {:error, :outcome_unknown}, state}
+        end
+
+      {:error, :invalid_request} ->
+        {:reply, {:error, :invalid_request}, state}
+    end
+  end
+
+  # Reobserve only to classify. Never delete a newly observed Record; never
+  # fall back to occupancy-only revoke.
+  defp classify_fenced_revoke_conflict(state, capability_id, fence) do
+    case acknowledged_authoritative_get(capability_id) do
+      {:error, :not_found} ->
+        ack_idempotent_revoke_reply(state, capability_id)
+
+      {:ok, %Record{} = observed} ->
+        case decode_and_verify_fenced_record(observed, capability_id) do
+          {:ok, %Capability{} = cap} ->
+            if fence_matches_observed?(fence, cap, observed) do
+              # Exact expected Record still present after CAS conflict — ambiguous.
+              {:reply, {:error, :outcome_unknown}, state}
+            else
+              # Present replacement / identity mismatch — preserve it.
+              {:reply, {:error, :identity_conflict}, state}
+            end
+
+          {:error, :unverifiable} ->
+            {:reply, {:error, :outcome_unknown}, state}
+        end
+
+      {:error, _reason} ->
+        {:reply, {:error, :outcome_unknown}, state}
+    end
+  end
+
+  defp decode_and_verify_fenced_record(%Record{} = record, capability_id) do
+    with :ok <- require_fenced_record_identity(record, capability_id),
+         {:ok, %Capability{} = cap} <- decode_and_verify_capability(record, capability_id) do
+      {:ok, cap}
+    else
+      _ -> {:error, :unverifiable}
+    end
+  end
+
+  defp require_fenced_record_identity(%Record{} = record, capability_id) do
+    cond do
+      not (is_binary(capability_id) and capability_id != "") ->
+        {:error, :unverifiable}
+
+      not (is_binary(record.key) and record.key == capability_id) ->
+        {:error, :unverifiable}
+
+      not (is_binary(record.id) and record.id != "") ->
+        {:error, :unverifiable}
+
+      not (is_integer(record.generation) and record.generation >= 1) ->
+        {:error, :unverifiable}
+
+      not (is_integer(record.revision) and record.revision >= 1) ->
+        {:error, :unverifiable}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp require_fenced_record_identity(_record, _capability_id), do: {:error, :unverifiable}
+
+  defp build_revocation_fence(%Capability{} = cap, %Record{} = record) do
+    %{
+      "kind" => @revoke_fence_kind,
+      "version" => @revoke_fence_version,
+      "capability_id" => cap.id,
+      "principal_id" => cap.principal_id,
+      "resource_uri" => cap.resource_uri,
+      "record_id" => record.id,
+      "generation" => record.generation,
+      "revision" => record.revision,
+      "capability_digest" => compute_capability_revoke_digest(cap)
+    }
+  end
+
+  defp compute_capability_revoke_digest(%Capability{} = cap) do
+    :crypto.hash(:sha256, @revoke_fence_digest_domain <> Capability.signing_payload(cap))
+    |> Base.encode16(case: :lower)
+  end
+
+  defp fence_matches_observed?(fence, %Capability{} = cap, %Record{} = observed) do
+    fence["capability_id"] == cap.id and
+      fence["principal_id"] == cap.principal_id and
+      fence["resource_uri"] == cap.resource_uri and
+      fence["record_id"] == observed.id and
+      fence["generation"] == observed.generation and
+      fence["revision"] == observed.revision and
+      fence["capability_digest"] == compute_capability_revoke_digest(cap)
+  end
+
+  # Closed, bounded, string-keyed fence validation. Fail closed; never log values.
+  defp validate_revocation_fence(capability_id, fence) do
+    with :ok <- validate_revocation_fence_map(fence),
+         :ok <- validate_revocation_fence_fields(capability_id, fence) do
+      :ok
+    else
+      _ -> {:error, :invalid_request}
+    end
+  rescue
+    _ -> {:error, :invalid_request}
+  catch
+    _, _ -> {:error, :invalid_request}
+  end
+
+  defp validate_revocation_fence_map(fence) when is_map(fence) and not is_struct(fence) do
+    # O(1) size gate before enumerating keys — reject attacker-sized maps cheaply.
+    if map_size(fence) != 9 do
+      {:error, :invalid_request}
+    else
+      keys = Map.keys(fence)
+
+      cond do
+        not Enum.all?(keys, &is_binary/1) ->
+          {:error, :invalid_request}
+
+        MapSet.new(keys) != @revoke_fence_keys ->
+          {:error, :invalid_request}
+
+        true ->
+          :ok
+      end
+    end
+  end
+
+  defp validate_revocation_fence_map(_), do: {:error, :invalid_request}
+
+  defp validate_revocation_fence_fields(capability_id, fence) do
+    kind = Map.fetch!(fence, "kind")
+    version = Map.fetch!(fence, "version")
+    fence_cap_id = Map.fetch!(fence, "capability_id")
+    principal_id = Map.fetch!(fence, "principal_id")
+    resource_uri = Map.fetch!(fence, "resource_uri")
+    record_id = Map.fetch!(fence, "record_id")
+    generation = Map.fetch!(fence, "generation")
+    revision = Map.fetch!(fence, "revision")
+    digest = Map.fetch!(fence, "capability_digest")
+
+    cond do
+      kind != @revoke_fence_kind ->
+        {:error, :invalid_request}
+
+      version != @revoke_fence_version ->
+        {:error, :invalid_request}
+
+      not store_canonical_capability_id?(fence_cap_id) ->
+        {:error, :invalid_request}
+
+      fence_cap_id != capability_id ->
+        {:error, :invalid_request}
+
+      not fence_bounded_nonempty_binary?(principal_id, @revoke_fence_max_principal_bytes) ->
+        {:error, :invalid_request}
+
+      not fence_bounded_nonempty_binary?(resource_uri, @revoke_fence_max_resource_bytes) ->
+        {:error, :invalid_request}
+
+      not fence_bounded_nonempty_binary?(record_id, @revoke_fence_max_record_id_bytes) ->
+        {:error, :invalid_request}
+
+      not fence_positive_token?(generation) ->
+        {:error, :invalid_request}
+
+      not fence_positive_token?(revision) ->
+        {:error, :invalid_request}
+
+      not fence_digest?(digest) ->
+        {:error, :invalid_request}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp store_canonical_capability_id?("cap_" <> suffix) when byte_size(suffix) == 32 do
+    Regex.match?(~r/\A[0-9a-f]{32}\z/, suffix)
+  end
+
+  defp store_canonical_capability_id?(_), do: false
+
+  defp fence_bounded_nonempty_binary?(value, max_bytes)
+       when is_binary(value) and byte_size(value) > 0 and byte_size(value) <= max_bytes,
+       do: true
+
+  defp fence_bounded_nonempty_binary?(_value, _max_bytes), do: false
+
+  defp fence_positive_token?(n)
+       when is_integer(n) and n >= 1 and n <= @revoke_fence_max_token,
+       do: true
+
+  defp fence_positive_token?(_), do: false
+
+  defp fence_digest?(digest) when is_binary(digest) and byte_size(digest) == 64 do
+    Regex.match?(~r/\A[0-9a-f]{64}\z/, digest)
+  end
+
+  defp fence_digest?(_), do: false
 
   # Idempotent revoke (authoritative absence): unconditionally purge the exact
   # id from EVERY projection index so dangling refs cannot survive. Emits the
