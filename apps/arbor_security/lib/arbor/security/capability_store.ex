@@ -1723,14 +1723,14 @@ defmodule Arbor.Security.CapabilityStore do
   end
 
   defp migrate_pending_intents(state, by_id) do
-    case Map.get(state, :pending_intents, :missing) do
-      :missing ->
+    case Map.fetch(state, :pending_intents) do
+      :error ->
         {:ok, %{}}
 
-      intents when is_map(intents) ->
+      {:ok, intents} when is_map(intents) ->
         migrate_intent_entries(intents, by_id)
 
-      _other ->
+      {:ok, _other} ->
         {:error, {:malformed_pending_intents, :not_a_map}}
     end
   end
