@@ -3209,6 +3209,25 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       forged = %{good | "capability_digest" => String.duplicate("b", 64)}
       assert {:error, :identity_conflict} = Security.acknowledged_revoke(id, forged)
       assert {:ok, %Capability{id: ^id}} = CapabilityStore.get(id)
+
+      # Prepared fence is JSON-encodable (closed v1 JSON-clean contract).
+      assert {:ok, _json} = Jason.encode(good)
+
+      # Invalid UTF-8 in principal_id / resource_uri / record_id is rejected at
+      # the public boundary with zero live/durable/stats mutation.
+      invalid_utf8 = <<0xFF, 0xFE, "x">>
+      refute String.valid?(invalid_utf8)
+
+      for field <- ["principal_id", "resource_uri", "record_id"] do
+        bad_utf8 = %{good | field => invalid_utf8}
+        assert {:error, :invalid_request} = Security.acknowledged_revoke(id, bad_utf8)
+        assert {:ok, %Capability{id: ^id}} = CapabilityStore.get(id)
+
+        assert {:ok, %Record{}} =
+                 BufferedStore.authoritative_get(id, name: @capability_store)
+
+        assert CapabilityStore.stats().total_revoked == revoked_before
+      end
     else
       assert {:ok, _} = Security.grant(principal: principal, resource: resource)
     end

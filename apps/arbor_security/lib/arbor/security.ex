@@ -1104,9 +1104,11 @@ defmodule Arbor.Security do
     end
   end
 
+  # Size-first bound, then UTF-8 validity so JSON-clean fences reject invalid
+  # code units without enumerating unbounded binaries first.
   defp fence_bounded_nonempty_binary?(value, max_bytes)
        when is_binary(value) and byte_size(value) > 0 and byte_size(value) <= max_bytes,
-       do: true
+       do: String.valid?(value)
 
   defp fence_bounded_nonempty_binary?(_value, _max_bytes), do: false
 
