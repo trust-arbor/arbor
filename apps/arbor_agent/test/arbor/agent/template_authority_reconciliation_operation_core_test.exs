@@ -50,7 +50,7 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCoreTest do
   defp t(n), do: 1_000 + n
 
   # Canonical capability id: cap_ + 32 lowercase hex (Security fence grammar).
-  defp cap_id(seed \\ "aa") when is_binary(seed) and byte_size(seed) == 2 do
+  defp cap_id(seed) when is_binary(seed) and byte_size(seed) == 2 do
     "cap_" <> String.duplicate(seed, 16)
   end
 
@@ -64,8 +64,7 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCoreTest do
       "record_id" => Keyword.get(opts, :record_id, "rec_fence_1"),
       "generation" => Keyword.get(opts, :generation, 1),
       "revision" => Keyword.get(opts, :revision, 1),
-      "capability_digest" =>
-        Keyword.get(opts, :capability_digest, String.duplicate("ab", 32))
+      "capability_digest" => Keyword.get(opts, :capability_digest, String.duplicate("ab", 32))
     }
 
     assert {:ok, canonical} =

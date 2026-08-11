@@ -1265,15 +1265,14 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationStoreTest do
     assert stored_fence == canonical_fence
 
     # Uncertain outcome so restart next_effects emits journal-scoped reobserve.
-    observed =
-      apply_step!(observed, fn op ->
-        Core.report_effect_outcome(op, %{
-          "effect_id" => "eff_revoke_persist",
-          "outcome" => "uncertain",
-          "reason_code" => "timeout",
-          "at_unix_ms" => t(11)
-        })
-      end)
+    apply_step!(observed, fn op ->
+      Core.report_effect_outcome(op, %{
+        "effect_id" => "eff_revoke_persist",
+        "outcome" => "uncertain",
+        "reason_code" => "timeout",
+        "at_unix_ms" => t(11)
+      })
+    end)
 
     stop_recon_store!()
     start_store!(NodeRestartBackend)
