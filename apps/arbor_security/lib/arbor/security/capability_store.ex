@@ -46,6 +46,17 @@ defmodule Arbor.Security.CapabilityStore do
   # by_resource / pending_intents / state_version; migrate_state/1 normalizes
   # it lazily (from every C3A-field-touching callback) and from code_change/3.
   @current_state_version 1
+
+  # Phase 4C C3A one-time validation certificate. A private state-resident
+  # epoch field produced ONLY by init, a successful deep validation, or a
+  # successful legacy migration. Ordinary callbacks on a certified state skip
+  # deep validation entirely (O(1) readiness); a missing or stale certificate
+  # (e.g. after a development reload that bumped @cert_epoch) deep-validates
+  # exactly once. code_change/3 always deep-validates regardless of the
+  # certificate. Never serialized; not defended against :sys.replace_state
+  # that preserves/forges a trusted certificate.
+  @cert_field :__c3a_cert__
+  @cert_epoch System.unique_integer([:positive])
   @signal_events [
     :capability_granted,
     :capability_revoked,
@@ -357,7 +368,7 @@ defmodule Arbor.Security.CapabilityStore do
         case restore_from_store(state) do
           {:ok, restored} ->
             schedule_cleanup()
-            {:ok, restored}
+            {:ok, certify(restored)}
 
           {:error, reason} when is_atom(reason) ->
             _ = SignalSync.release(signal_sync)
@@ -686,12 +697,23 @@ defmodule Arbor.Security.CapabilityStore do
 
   # OTP release-upgrade path. Development code reload does NOT invoke this —
   # the lazy migrate_state/1 call at the top of every C3A-field-touching
-  # callback covers reloads. Returns the same normalized shape as the lazy
-  # path; idempotent on already-current state; fail-closed on malformed or
-  # unsupported legacy state.
+  # callback covers reloads. Unlike the lazy path, code_change/3 ALWAYS forces
+  # deep validation of a current-version state (even one carrying a valid
+  # certificate), so an upgrade boundary never trusts a pre-existing
+  # certificate. Absent state_version migrates; present nil or any unsupported
+  # value fails closed with the fixed bounded reason.
   @impl true
   def code_change(_old_vsn, state, _extra) do
-    migrate_state(state)
+    case fetch_state_version(state) do
+      :absent ->
+        migrate_legacy(state)
+
+      {:present, @current_state_version} ->
+        deep_validate_and_certify(state)
+
+      {:present, _nil_or_unsupported} ->
+        {:error, :unsupported_state_version}
+    end
   end
 
   # ===========================================================================
@@ -1643,74 +1665,153 @@ defmodule Arbor.Security.CapabilityStore do
   defp grant_identity(%Capability{} = cap), do: Capability.signing_payload(cap)
 
   # ===========================================================================
-  # State-shape migration (Phase 4C C3A).
+  # State-shape migration and one-time certification (Phase 4C C3A).
   #
-  # A live process whose code was development-reloaded without an OTP upgrade
-  # keeps a pre-C3A state missing by_resource / pending_intents / state_version.
-  # migrate_state/1 is the single pure, deterministic, side-effect-free
-  # normalization used by BOTH code_change/3 and the lazy callback wrappers. It
-  # never reads persistence, emits signals, calls clocks, or performs
-  # authorization. It accepts ONLY the exact current version (after validating
-  # the required C3A field shapes), migrates pre-v1 state, and rejects
-  # malformed / unsupported-future versions (fail closed).
+  # A current-v1 state is accepted at an upgrade/reload boundary ONLY after
+  # authoritative deep validation; certified steady-state callbacks perform
+  # only an O(1) readiness check and never enumerate or rebuild the index.
+  # The pure, deterministic, side-effect-free machinery here never reads
+  # persistence, emits signals, calls clocks, or performs authorization.
+  #
+  # migrate_state/1 is the lazy callback gate (init and code_change/3 produce
+  # the certificate separately). state_version uses Map.fetch PRESENCE
+  # semantics: only an absent key denotes pre-v1 legacy state. An explicit
+  # present nil or any unsupported value fails closed with one fixed bounded
+  # atom that never embeds observed state data.
   # ===========================================================================
   @legacy_uncertain_identity :legacy_uncertain_identity
 
   defp migrate_state(state) do
-    case Map.get(state, :state_version) do
-      v when v == @current_state_version ->
-        validate_current_state(state)
+    case fetch_state_version(state) do
+      :absent ->
+        migrate_legacy(state)
 
-      nil ->
-        do_migrate(state)
+      {:present, @current_state_version} ->
+        if certified?(state), do: {:ok, state}, else: deep_validate_and_certify(state)
 
-      v ->
-        {:error, {:unsupported_state_version, v}}
+      {:present, _nil_or_unsupported} ->
+        {:error, :unsupported_state_version}
     end
   end
 
-  # Idempotent path (exact current version). Validate the required C3A field
-  # SHAPES before accepting; never blind-pass a current-version state whose
-  # fields are corrupt.
-  defp validate_current_state(state) do
-    cond do
-      not is_map(Map.get(state, :by_id)) ->
-        {:error, {:malformed_state, :by_id}}
-
-      not is_map(Map.get(state, :by_resource)) ->
-        {:error, {:malformed_state, :by_resource}}
-
-      not is_map(Map.get(state, :pending_intents)) ->
-        {:error, {:malformed_state, :pending_intents}}
-
-      true ->
-        {:ok, state}
+  # Map.fetch presence semantics for state_version: :error is the ONLY legacy
+  # signal (key absent). {:ok, nil} is a present-but-nil value that must fail
+  # closed, not silently migrate.
+  defp fetch_state_version(state) do
+    case Map.fetch(state, :state_version) do
+      :error -> :absent
+      {:ok, value} -> {:present, value}
     end
   end
 
-  defp do_migrate(state) do
-    with {:ok, by_id} <- require_valid_by_id(state),
+  # Legacy pre-v1 migration (state_version absent): rebuild by_resource from
+  # validated by_id, migrate pending intents (keeping valid three-field
+  # entries byte-for-byte, upgrading two-field ones), then deep-validate the
+  # FINAL output and certify ONLY that valid output. A malformed entry rejects
+  # the whole migration; an uncertainty lock is never dropped to make
+  # validation pass -- it dies with the rejected state.
+  defp migrate_legacy(state) do
+    with {:ok, by_id} <- validate_by_id(state),
          # ALWAYS rebuild by_resource from validated by_id; discard any present
          # (possibly stale/partial) legacy map. Never derive from by_principal.
          {:ok, by_resource} <- {:ok, build_resource_index(by_id)},
          {:ok, pending_intents} <- migrate_pending_intents(state, by_id) do
-      {:ok,
-       state
-       |> Map.put(:by_resource, by_resource)
-       |> Map.put(:pending_intents, pending_intents)
-       |> Map.put(:state_version, @current_state_version)}
+      migrated =
+        state
+        |> Map.put(:by_resource, by_resource)
+        |> Map.put(:pending_intents, pending_intents)
+        |> Map.put(:state_version, @current_state_version)
+
+      deep_validate_and_certify(migrated)
     end
   end
 
-  # by_id must be a map whose every value is a %Capability{}; otherwise the
-  # by_resource rebuild cannot be authoritative -> fail closed.
-  defp require_valid_by_id(state) do
+  # A current-version state is certified iff it carries the current compile
+  # epoch under the private certificate field. A development reload recompiles
+  # this module, bumping @cert_epoch, so the preserved live state's certificate
+  # becomes stale and the first callback deep-validates exactly once. Trusted
+  # while resident; never serialized; not defended against :sys.replace_state
+  # that preserves/forges a trusted certificate.
+  defp certified?(state), do: Map.get(state, @cert_field) == @cert_epoch
+
+  defp certify(state), do: Map.put(state, @cert_field, @cert_epoch)
+
+  # Deep, pure, deterministic validation of a current-version state. Runs ONLY
+  # at certification boundaries: a missing or stale certificate seen by
+  # migrate_state/1, a successfully constructed legacy migration, and
+  # code_change/3 (forced). init certifies state only after restore has already
+  # validated and rebuilt its projections. Never called on the certified steady
+  # path. Validates by_id identity/field shapes, requires by_resource to equal
+  # the canonical MapSet index rebuilt only from validated by_id, and requires
+  # every pending intent's id, principal, and resource to be binaries with a
+  # binary-or-legacy-sentinel payload.
+  defp deep_validate_and_certify(state) do
+    with {:ok, by_id} <- validate_by_id(state),
+         :ok <- validate_by_resource(state, by_id),
+         :ok <- validate_pending_intents(state) do
+      {:ok, certify(state)}
+    end
+  end
+
+  # Every by_id key must equal the capability's id, and id/principal_id/
+  # resource_uri must be binaries. Rejects identity mismatch, non-binary
+  # fields, and non-Capability values.
+  defp validate_by_id(state) do
     by_id = Map.get(state, :by_id)
 
-    if is_map(by_id) and Enum.all?(by_id, fn {_id, value} -> match?(%Capability{}, value) end) do
+    valid? =
+      is_map(by_id) and
+        Enum.all?(by_id, fn
+          {key, %Capability{id: id, principal_id: principal_id, resource_uri: resource_uri}} ->
+            key == id and is_binary(id) and is_binary(principal_id) and
+              is_binary(resource_uri)
+
+          _ ->
+            false
+        end)
+
+    if valid? do
       {:ok, by_id}
     else
-      {:error, {:malformed_by_id, :invalid}}
+      {:error, :malformed_by_id}
+    end
+  end
+
+  # by_resource must equal the complete canonical MapSet index rebuilt ONLY
+  # from the validated by_id projection. Rejects any incomplete, extra, or
+  # malformed resource projection (a stale by_principal cannot hide here).
+  defp validate_by_resource(state, by_id) do
+    by_resource = Map.get(state, :by_resource)
+    expected = build_resource_index(by_id)
+
+    if is_map(by_resource) and by_resource == expected do
+      :ok
+    else
+      {:error, :malformed_by_resource}
+    end
+  end
+
+  # Every pending intent must be {id, {principal, resource, payload}} with
+  # binary id/principal/resource and a payload that is either a binary (the
+  # canonical signing payload) or the exact existing opaque legacy sentinel.
+  defp validate_pending_intents(state) do
+    intents = Map.get(state, :pending_intents)
+
+    valid? =
+      is_map(intents) and
+        Enum.all?(intents, fn
+          {id, {principal, resource, payload}} ->
+            is_binary(id) and is_binary(principal) and is_binary(resource) and
+              (is_binary(payload) or payload == @legacy_uncertain_identity)
+
+          _ ->
+            false
+        end)
+
+    if valid? do
+      :ok
+    else
+      {:error, :malformed_pending_intents}
     end
   end
 
