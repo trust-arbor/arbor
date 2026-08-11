@@ -30,6 +30,7 @@ defmodule Arbor.Security.CapabilityStoreRestoreTest do
   alias Arbor.Security.CapabilityStore.Serializer
   alias Arbor.Security.Config
   alias Arbor.Security.Store.JSONFile
+  alias Arbor.Security.TestBootstrap
 
   setup do
     Process.flag(:trap_exit, true)
@@ -348,7 +349,7 @@ defmodule Arbor.Security.CapabilityStoreRestoreTest do
              CapabilityStore.start_link([])
 
     assert Process.whereis(CapabilityStore) == nil
-    assert File.read!(path) == before_bytes
+    assert_migrated_durable_payload!(dir, "cap_nb_bad", before_bytes)
     assert_durable_ids!(dir, ["cap_nb_bad"])
   end
 
@@ -393,7 +394,7 @@ defmodule Arbor.Security.CapabilityStoreRestoreTest do
              CapabilityStore.start_link([])
 
     assert Process.whereis(CapabilityStore) == nil
-    assert File.read!(path) == before_bytes
+    assert_migrated_durable_payload!(dir, "cap_sig_bad", before_bytes)
     assert_durable_ids!(dir, ["cap_sig_bad"])
   end
 
@@ -439,7 +440,7 @@ defmodule Arbor.Security.CapabilityStoreRestoreTest do
              CapabilityStore.start_link([])
 
     assert Process.whereis(CapabilityStore) == nil
-    assert File.read!(path) == before_bytes
+    assert_migrated_durable_payload!(dir, "cap_chain_bad", before_bytes)
     assert_durable_ids!(dir, ["cap_chain_bad"])
   end
 
@@ -482,7 +483,7 @@ defmodule Arbor.Security.CapabilityStoreRestoreTest do
              CapabilityStore.start_link([])
 
     assert Process.whereis(CapabilityStore) == nil
-    assert File.read!(path) == before_bytes
+    assert_migrated_durable_payload!(dir, "cap_constraints_bad", before_bytes)
     assert_durable_ids!(dir, ["cap_constraints_bad"])
   end
 
@@ -567,7 +568,7 @@ defmodule Arbor.Security.CapabilityStoreRestoreTest do
              CapabilityStore.start_link([])
 
     assert Process.whereis(CapabilityStore) == nil
-    assert File.read!(path) == before_bytes
+    assert_migrated_durable_payload!(dir, "cap_incoherent", before_bytes)
   end
 
   test "failed hydration prevents CapabilityStore startup and grants" do
@@ -622,7 +623,7 @@ defmodule Arbor.Security.CapabilityStoreRestoreTest do
     assert :ok = Supervisor.terminate_child(@security_supervisor, CapabilityStore)
     assert Process.whereis(CapabilityStore) == nil
 
-    assert :ok = Arbor.Security.TestBootstrap.start!()
+    assert :ok = TestBootstrap.start!()
     assert is_pid(Process.whereis(CapabilityStore))
   end
 
@@ -704,6 +705,25 @@ defmodule Arbor.Security.CapabilityStoreRestoreTest do
   defp assert_durable_ids!(dir, expected_ids) do
     assert {:ok, keys} = JSONFile.list(name: "capabilities", base_dir: dir)
     assert Enum.sort(keys) == Enum.sort(expected_ids)
+  end
+
+  defp assert_migrated_durable_payload!(dir, key, legacy_bytes) do
+    legacy = Jason.decode!(legacy_bytes)
+    legacy_path = Path.expand(Path.join([dir, "capabilities", key <> ".json"]), File.cwd!())
+
+    refute File.exists?(legacy_path)
+
+    assert {:ok, %Record{} = record} =
+             JSONFile.get(key, name: "capabilities", base_dir: dir)
+
+    assert record.id == key
+    assert record.key == key
+    assert record.data == legacy["data"]
+    assert record.metadata == Map.get(legacy, "metadata", %{})
+    assert record.generation == 1
+    assert record.revision == 1
+    assert is_nil(record.inserted_at)
+    assert %DateTime{} = record.updated_at
   end
 
   defp unique_dir(label) do

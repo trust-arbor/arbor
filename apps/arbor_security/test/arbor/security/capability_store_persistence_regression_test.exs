@@ -53,6 +53,30 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest.DeleteFailingJ
   def exists?(key, opts \\ []), do: JSONFile.exists?(key, opts)
 end
 
+defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest.CasUnsupportedJSONFile do
+  @moduledoc false
+  # CRUD-only double: deliberately does not export compare_and_swap/compare_and_delete
+  # so acknowledged CAS admission remains fail-closed on unsupported backends.
+  @behaviour Arbor.Contracts.Persistence.Store
+
+  alias Arbor.Security.Store.JSONFile
+
+  @impl true
+  def put(key, record, opts \\ []), do: JSONFile.put(key, record, opts)
+
+  @impl true
+  def get(key, opts \\ []), do: JSONFile.get(key, opts)
+
+  @impl true
+  def delete(key, opts \\ []), do: JSONFile.delete(key, opts)
+
+  @impl true
+  def list(opts \\ []), do: JSONFile.list(opts)
+
+  @impl true
+  def exists?(key, opts \\ []), do: JSONFile.exists?(key, opts)
+end
+
 defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
   use ExUnit.Case, async: false
 
@@ -84,10 +108,11 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
   alias Arbor.Security
   alias Arbor.Security.CapabilityStore
   alias Arbor.Security.CapabilityStore.Serializer
+  alias Arbor.Security.CapabilityStorePersistenceRegressionTest.CasUnsupportedJSONFile
+  alias Arbor.Security.CapabilityStorePersistenceRegressionTest.DeleteFailingJSONFile
   alias Arbor.Security.Config
   alias Arbor.Security.Identity.Registry
   alias Arbor.Security.Store.JSONFile
-  alias Arbor.Security.CapabilityStorePersistenceRegressionTest.DeleteFailingJSONFile
 
   test "security regression: replacement removes the superseded JSON record" do
     principal_id = "agent_capability_store_persistence_regression"
@@ -391,10 +416,11 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
   end
 
   test "security regression: acknowledged mutation fails closed on a CAS-unsupported backend" do
-    # JSONFile does not implement compare_and_swap/compare_and_delete, so the
-    # acknowledged CAS admission must fail closed (:outcome_unknown) and never
-    # report success or mutate live/durable state. (Authoritative failure mode
-    # for unsupported backends per the C3A correction.)
+    # Use an explicit CRUD-only double (no compare_and_swap/compare_and_delete)
+    # so acknowledged CAS admission fails closed (:outcome_unknown) and never
+    # reports success or mutates live/durable state. (Authoritative failure mode
+    # for unsupported backends per the C3A correction. JSONFile itself now
+    # implements CAS in P2; this regression pins the unsupported-backend path.)
     principal = "agent_ack_unsupported_backend"
     resource = "arbor://fs/read/ack-unsupported-backend"
 
@@ -403,7 +429,7 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
     File.mkdir_p!(tmp_dir)
     on_exit(fn -> File.rm_rf!(tmp_dir) end)
 
-    configure_isolated_json_store(backend_dir)
+    configure_isolated_json_store(backend_dir, CasUnsupportedJSONFile)
 
     if function_exported?(Security, :acknowledged_grant, 1) and
          function_exported?(Security, :acknowledged_revoke, 1) do
