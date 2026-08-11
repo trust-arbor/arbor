@@ -118,6 +118,21 @@ defmodule Arbor.Agent.ProfileAuthorityMutationCoreTest do
       original_exact = observed["metadata"]["exact_template_policy"]
       {:ok, intended} = Core.prepare(observed, governed)
 
+      for key <- [
+            "agent_id",
+            "version",
+            "display_name",
+            "character",
+            "sandbox_level",
+            "initial_goals",
+            "identity",
+            "keychain_ref",
+            "auto_start",
+            "created_at"
+          ] do
+        assert intended[key] === observed[key]
+      end
+
       assert intended["metadata"]["exact_template_policy"] === original_exact
       assert intended["metadata"]["last_model_config"] == %{"provider" => "ollama"}
       assert intended["metadata"]["external_agent"] == true
@@ -268,6 +283,11 @@ defmodule Arbor.Agent.ProfileAuthorityMutationCoreTest do
       assert {:error, :ambiguous_keys} = Core.prepare(observed_data(), bad)
     end
 
+    test "rejects atom alias coexisting with the string governed key", %{governed: governed} do
+      bad = Map.put(governed, :template, "scout")
+      assert {:error, :ambiguous_keys} = Core.prepare(observed_data(), bad)
+    end
+
     test "rejects extra top-level governed keys", %{governed: governed} do
       bad = Map.put(governed, "display_name", "nope")
       assert {:error, :governed_shape} = Core.prepare(observed_data(), bad)
@@ -286,15 +306,12 @@ defmodule Arbor.Agent.ProfileAuthorityMutationCoreTest do
     test "rejects capability item missing resource", %{governed: governed, caps: caps} do
       bad_caps = [%{"constraints" => %{}} | caps]
       bad = %{governed | "initial_capabilities" => bad_caps}
-      # Caps no longer match the Policy snapshot either — either gate is fine.
-      assert {:error, reason} = Core.prepare(observed_data(), bad)
-      assert reason in [:capabilities_invalid, :authority_inconsistent]
+      assert {:error, :capabilities_invalid} = Core.prepare(observed_data(), bad)
     end
 
     test "rejects oversized template name", %{governed: governed} do
       bad = %{governed | "template" => String.duplicate("t", 300)}
-      assert {:error, reason} = Core.prepare(observed_data(), bad)
-      assert reason in [:template_invalid, :authority_inconsistent]
+      assert {:error, :template_invalid} = Core.prepare(observed_data(), bad)
     end
 
     # ── Restored pre-C3B3 prepare rejection inventory (adapted fixtures) ──
@@ -356,6 +373,25 @@ defmodule Arbor.Agent.ProfileAuthorityMutationCoreTest do
       assert {:error, :ambiguous_keys} = Core.prepare(observed_data(), bad)
     end
 
+    test "rejects arbitrary atom key in governed metadata", %{governed: governed} do
+      bad_meta = Map.put(governed["metadata"], :extra, true)
+      bad = %{governed | "metadata" => bad_meta}
+      assert {:error, :ambiguous_keys} = Core.prepare(observed_data(), bad)
+    end
+
+    test "rejects governed metadata that is a struct", %{governed: governed} do
+      bad = %{governed | "metadata" => DateTime.utc_now()}
+      assert {:error, :governed_shape} = Core.prepare(observed_data(), bad)
+    end
+
+    test "rejects nil and non-binary templates", %{governed: governed} do
+      assert {:error, :template_invalid} =
+               Core.prepare(observed_data(), %{governed | "template" => nil})
+
+      assert {:error, :template_invalid} =
+               Core.prepare(observed_data(), %{governed | "template" => :scout})
+    end
+
     test "rejects non-UTF-8 template", %{governed: governed} do
       bad = %{governed | "template" => <<0xFF, 0xFE, 0xFD>>}
       assert {:error, :template_invalid} = Core.prepare(observed_data(), bad)
@@ -367,7 +403,11 @@ defmodule Arbor.Agent.ProfileAuthorityMutationCoreTest do
     end
 
     test "rejects improper capabilities list", %{governed: governed} do
-      bad = %{governed | "initial_capabilities" => [%{"resource" => "a", "constraints" => %{}} | :tail]}
+      bad = %{
+        governed
+        | "initial_capabilities" => [%{"resource" => "a", "constraints" => %{}} | :tail]
+      }
+
       assert {:error, :capabilities_invalid} = Core.prepare(observed_data(), bad)
     end
 
@@ -375,64 +415,68 @@ defmodule Arbor.Agent.ProfileAuthorityMutationCoreTest do
       item = %{"resource" => "arbor://fs/read", "constraints" => %{}}
       too_many = Enum.map(1..257, fn _ -> item end)
       bad = %{governed | "initial_capabilities" => too_many}
-      assert {:error, reason} = Core.prepare(observed_data(), bad)
-      assert reason in [:capabilities_invalid, :authority_inconsistent]
+      assert {:error, :capabilities_invalid} = Core.prepare(observed_data(), bad)
     end
 
     test "rejects oversized capability resource", %{governed: governed} do
       item = %{"resource" => String.duplicate("r", 1025), "constraints" => %{}}
       bad = %{governed | "initial_capabilities" => [item]}
-      assert {:error, reason} = Core.prepare(observed_data(), bad)
-      assert reason in [:capabilities_invalid, :authority_inconsistent]
+      assert {:error, :capabilities_invalid} = Core.prepare(observed_data(), bad)
     end
 
     test "rejects non-UTF-8 capability resource", %{governed: governed} do
       item = %{"resource" => <<0xFF, 0xFE>>, "constraints" => %{}}
       bad = %{governed | "initial_capabilities" => [item]}
-      assert {:error, reason} = Core.prepare(observed_data(), bad)
-      assert reason in [:capabilities_invalid, :authority_inconsistent]
+      assert {:error, :capabilities_invalid} = Core.prepare(observed_data(), bad)
     end
 
     test "rejects capability resource with embedded NUL", %{governed: governed} do
       item = %{"resource" => "arbor://x\x00y", "constraints" => %{}}
       bad = %{governed | "initial_capabilities" => [item]}
-      assert {:error, reason} = Core.prepare(observed_data(), bad)
-      assert reason in [:capabilities_invalid, :authority_inconsistent]
+      assert {:error, :capabilities_invalid} = Core.prepare(observed_data(), bad)
     end
 
     test "rejects capability constraints that are a struct", %{governed: governed} do
       item = %{"resource" => "arbor://fs/read", "constraints" => DateTime.utc_now()}
       bad = %{governed | "initial_capabilities" => [item]}
-      assert {:error, reason} = Core.prepare(observed_data(), bad)
-      assert reason in [:capabilities_invalid, :authority_inconsistent]
+      assert {:error, :capabilities_invalid} = Core.prepare(observed_data(), bad)
+    end
+
+    test "rejects capability item structs and scalar constraints", %{governed: governed} do
+      assert {:error, :capabilities_invalid} =
+               Core.prepare(observed_data(), %{
+                 governed
+                 | "initial_capabilities" => [DateTime.utc_now()]
+               })
+
+      item = %{"resource" => "arbor://fs/read", "constraints" => "nope"}
+
+      assert {:error, :capabilities_invalid} =
+               Core.prepare(observed_data(), %{governed | "initial_capabilities" => [item]})
     end
 
     test "rejects capability item with atom resource alias", %{governed: governed} do
       item = %{:resource => "arbor://fs/read", "constraints" => %{}}
       bad = %{governed | "initial_capabilities" => [item]}
-      assert {:error, reason} = Core.prepare(observed_data(), bad)
-      assert reason in [:capabilities_invalid, :authority_inconsistent, :ambiguous_keys]
+      assert {:error, :ambiguous_keys} = Core.prepare(observed_data(), bad)
     end
 
     test "rejects capability item with atom constraints alias", %{governed: governed} do
       item = %{"resource" => "arbor://fs/read", :constraints => %{}}
       bad = %{governed | "initial_capabilities" => [item]}
-      assert {:error, reason} = Core.prepare(observed_data(), bad)
-      assert reason in [:capabilities_invalid, :authority_inconsistent, :ambiguous_keys]
+      assert {:error, :ambiguous_keys} = Core.prepare(observed_data(), bad)
     end
 
     test "rejects empty capability resource", %{governed: governed} do
       item = %{"resource" => "", "constraints" => %{}}
       bad = %{governed | "initial_capabilities" => [item]}
-      assert {:error, reason} = Core.prepare(observed_data(), bad)
-      assert reason in [:capabilities_invalid, :authority_inconsistent]
+      assert {:error, :capabilities_invalid} = Core.prepare(observed_data(), bad)
     end
 
     test "rejects missing capability constraints key", %{governed: governed} do
       item = %{"resource" => "arbor://fs/read"}
       bad = %{governed | "initial_capabilities" => [item]}
-      assert {:error, reason} = Core.prepare(observed_data(), bad)
-      assert reason in [:capabilities_invalid, :authority_inconsistent]
+      assert {:error, :capabilities_invalid} = Core.prepare(observed_data(), bad)
     end
 
     test "rejects governed that is a struct", %{governed: governed} do
@@ -614,11 +658,19 @@ defmodule Arbor.Agent.ProfileAuthorityMutationCoreTest do
       r = %Record{id: "x", key: "agent_test_1", data: observed_data(), generation: 0, revision: 1}
       assert {:error, :invalid_record} = Core.commit_prepared_mutation(r, governed)
     end
+
+    test "rejects a record whose successor revision exceeds the JSON-safe bound", %{
+      governed: governed
+    } do
+      r = record(observed_data(), 1, 9_007_199_254_740_991)
+      assert {:error, :invalid_record} = Core.commit_prepared_mutation(r, governed)
+    end
   end
 
   describe "classify_restart/4 matrix" do
     setup %{governed: governed} do
       anchor = record(observed_data(), 2, 4)
+
       assert {:ok, %{intended_data: intended, commitment: cmt}} =
                Core.commit_prepared_mutation(anchor, governed)
 
@@ -917,6 +969,7 @@ defmodule Arbor.Agent.ProfileAuthorityMutationCoreTest do
         )
 
       r = record(observed, 3, 7)
+
       assert {:ok, %{intended_data: intended, commitment: cmt}} =
                Core.commit_prepared_mutation(r, governed)
 
@@ -932,7 +985,9 @@ defmodule Arbor.Agent.ProfileAuthorityMutationCoreTest do
       assert is_binary(prov["layer"])
       assert prov["layer"] in ~w(user shipped legacy_json)
 
-      stored_prov = TemplateAuthorityPolicy.provenance(TemplateAuthorityPolicy.snapshot(stored_env))
+      stored_prov =
+        TemplateAuthorityPolicy.provenance(TemplateAuthorityPolicy.snapshot(stored_env))
+
       assert stored_prov === prov
 
       # Pure Phase 4B current predicates: digests + three provenances agree, non-nil.
@@ -1139,6 +1194,9 @@ defmodule Arbor.Agent.ProfileAuthorityMutationCoreTest do
 
       atom_alias = Map.put(Map.delete(base, "version"), :version, 1)
       assert {:error, :ambiguous_keys} = Core.admit_commitment(atom_alias)
+
+      coexisting_alias = Map.put(base, :version, 1)
+      assert {:error, :ambiguous_keys} = Core.admit_commitment(coexisting_alias)
 
       equal =
         Map.put(base, "successor_digest", base["anchor_digest"])

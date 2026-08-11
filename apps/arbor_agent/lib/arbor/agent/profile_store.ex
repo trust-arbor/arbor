@@ -298,11 +298,12 @@ defmodule Arbor.Agent.ProfileStore do
 
   `observed` is the Record returned by `authority_mutation_snapshot/1`.
   `governed` is the closed authority update (`template`, `initial_capabilities`,
-  and `metadata.exact_template_policy`) prepared verbatim by
-  `ProfileAuthorityMutationCore.prepare/2`. Only those three fields are
-  overwritten; every unrelated top-level and nested metadata field, the Record
-  logical id/key/metadata, and all backend fences are preserved until the
-  backend advances them.
+  `metadata.template_authority_policy`, and `metadata.template_source`) prepared
+  verbatim by `ProfileAuthorityMutationCore.prepare/2`. Only those four fields
+  are overwritten; every unrelated top-level and nested metadata field,
+  including `metadata.exact_template_policy`, plus the Record logical
+  id/key/metadata and all backend fences are preserved until the backend
+  advances them.
 
   Before CAS the shell authoritatively re-reads the current Record and requires
   the full envelope (id/key/data/metadata/generation/revision) to equal the

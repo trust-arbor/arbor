@@ -345,6 +345,7 @@ defmodule Arbor.Agent.ProfileStoreAuthorityMutationSecurityRegressionTest do
                         function_exported?(Arbor.Agent.ProfileStore, :apply_authority_mutation, 2)
 
   alias Arbor.Agent.ProfileStore
+  alias Arbor.Agent.TemplateAuthorityPolicy
   alias Arbor.Contracts.Persistence.Record
   alias Arbor.Persistence.BufferedStore
 
@@ -436,15 +437,30 @@ defmodule Arbor.Agent.ProfileStoreAuthorityMutationSecurityRegressionTest do
     end
 
     defp governed(opts \\ []) do
+      template = Keyword.get(opts, :template, "scout")
+
+      capabilities =
+        Keyword.get(opts, :initial_capabilities, [
+          %{"resource" => "arbor://fs/read", "constraints" => %{"rate_limit" => 10}}
+        ])
+
+      source = %{"name" => template, "layer" => "shipped"}
+
+      template_data = %{
+        "name" => template,
+        "required_capabilities" => capabilities,
+        "trust_preset" => %{"baseline" => "block", "rules" => %{}},
+        "template_source" => source
+      }
+
+      assert {:ok, envelope} = TemplateAuthorityPolicy.build(template, template_data)
+
       %{
-        "template" => Keyword.get(opts, :template, "scout"),
-        "initial_capabilities" =>
-          Keyword.get(opts, :initial_capabilities, [
-            %{"resource" => "arbor://fs/read", "constraints" => %{"rate_limit" => 10}}
-          ]),
+        "template" => template,
+        "initial_capabilities" => capabilities,
         "metadata" => %{
-          "exact_template_policy" =>
-            Keyword.get(opts, :exact_template_policy, %{"version" => 1, "markers" => []})
+          TemplateAuthorityPolicy.metadata_key() => envelope,
+          "template_source" => source
         }
       }
     end
@@ -643,10 +659,15 @@ defmodule Arbor.Agent.ProfileStoreAuthorityMutationSecurityRegressionTest do
         assert successor.data["metadata"]["arbitrary_sibling"] ==
                  data["metadata"]["arbitrary_sibling"]
 
-        assert successor.data["metadata"]["exact_template_policy"] == %{
-                 "version" => 1,
-                 "markers" => []
-               }
+        assert successor.data["metadata"]["exact_template_policy"] ===
+                 data["metadata"]["exact_template_policy"]
+
+        assert {:ok, authority_policy} =
+                 TemplateAuthorityPolicy.from_metadata(successor.data["metadata"])
+
+        assert TemplateAuthorityPolicy.provenance(
+                 TemplateAuthorityPolicy.snapshot(authority_policy)
+               ) == successor.data["metadata"]["template_source"]
       end
     end
 
@@ -978,7 +999,7 @@ defmodule Arbor.Agent.ProfileStoreAuthorityMutationSecurityRegressionTest do
         assert still.data["template"] == data["template"]
       end
 
-      test "rejects atom-only observed exact_template_policy alias (no CAS, durable unchanged)" do
+      test "rejects atom-only observed template authority marker alias (no CAS, durable unchanged)" do
         start_node_restart_store()
         agent_id = "agent_obs_pol_#{System.unique_integer([:positive])}"
         data = profile_data(agent_id)
@@ -988,8 +1009,32 @@ defmodule Arbor.Agent.ProfileStoreAuthorityMutationSecurityRegressionTest do
 
         bad_meta =
           observed.data["metadata"]
-          |> Map.delete("exact_template_policy")
-          |> Map.put(:exact_template_policy, %{"atom_only" => true})
+          |> Map.delete(TemplateAuthorityPolicy.metadata_key())
+          |> Map.put(:template_authority_policy, %{"atom_only" => true})
+
+        bad = %{observed | data: Map.put(observed.data, "metadata", bad_meta)}
+        before_cas = NodeRestartCAS.cas_count()
+
+        assert {:error, :malformed_governed} =
+                 ProfileStore.apply_authority_mutation(bad, governed())
+
+        assert NodeRestartCAS.cas_count() == before_cas
+        {:ok, still} = NodeRestartCAS.raw_get(agent_id)
+        assert still.data == data
+      end
+
+      test "rejects atom-only observed template source alias (no CAS, durable unchanged)" do
+        start_node_restart_store()
+        agent_id = "agent_obs_src_#{System.unique_integer([:positive])}"
+        data = profile_data(agent_id)
+        seed_profile(agent_id, data)
+
+        {:ok, observed} = ProfileStore.authority_mutation_snapshot(agent_id)
+
+        bad_meta =
+          observed.data["metadata"]
+          |> Map.delete("template_source")
+          |> Map.put(:template_source, %{"name" => "scout", "layer" => "shipped"})
 
         bad = %{observed | data: Map.put(observed.data, "metadata", bad_meta)}
         before_cas = NodeRestartCAS.cas_count()

@@ -401,13 +401,15 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCoreTest do
     shape_drift =
       put_in(prepared, ["profile_mutation_replay", "extra"], "nope")
 
-    assert {:error, {:template_authority_reconciliation_operation, :profile_mutation_replay_invalid}} =
+    assert {:error,
+            {:template_authority_reconciliation_operation, :profile_mutation_replay_invalid}} =
              Core.admit(shape_drift)
 
     bad_domain =
       put_in(prepared, ["profile_mutation_replay", "domain"], "other.domain")
 
-    assert {:error, {:template_authority_reconciliation_operation, :profile_mutation_replay_invalid}} =
+    assert {:error,
+            {:template_authority_reconciliation_operation, :profile_mutation_replay_invalid}} =
              Core.admit(bad_domain)
 
     uppercase =
@@ -417,12 +419,13 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCoreTest do
         String.duplicate("AA", 32)
       )
 
-    assert {:error, {:template_authority_reconciliation_operation, :profile_mutation_replay_invalid}} =
+    assert {:error,
+            {:template_authority_reconciliation_operation, :profile_mutation_replay_invalid}} =
              Core.admit(uppercase)
 
     atom_alias =
       put_in(prepared, ["profile_mutation_replay"], %{
-        version: 1,
+        :version => 1,
         "kind" => ProfileAuthorityMutationCore.commitment_kind(),
         "algorithm" => ProfileAuthorityMutationCore.commitment_algorithm(),
         "encoding" => ProfileAuthorityMutationCore.commitment_encoding(),
@@ -431,7 +434,8 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCoreTest do
         "successor_digest" => String.duplicate("bb", 32)
       })
 
-    assert {:error, {:template_authority_reconciliation_operation, :profile_mutation_replay_invalid}} =
+    assert {:error,
+            {:template_authority_reconciliation_operation, :profile_mutation_replay_invalid}} =
              Core.admit(atom_alias)
 
     v1 = Map.put(prepared, "version", 1)

@@ -1,6 +1,7 @@
 defmodule Arbor.Agent.TemplateAuthorityReconciliationStatusProjectionTest do
   use ExUnit.Case, async: true
 
+  alias Arbor.Agent.ProfileAuthorityMutationCore
   alias Arbor.Agent.TemplateAuthorityCapabilityProjection
   alias Arbor.Agent.TemplateAuthorityPolicy
   alias Arbor.Agent.TemplateAuthorityReconciliationOperationCore, as: Op
@@ -72,6 +73,7 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationStatusProjectionTest do
     refute Map.has_key?(status, "authorizing_caller_id")
     refute Map.has_key?(status, "profile_cas")
     refute Map.has_key?(status, "frozen_authority")
+    refute Map.has_key?(status, "profile_mutation_replay")
     refute Map.has_key?(status, "reconciliation_required")
   end
 
@@ -90,6 +92,18 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationStatusProjectionTest do
     %{"repo_root" => repo_root, "effective_capabilities" => caps}
   end
 
+  defp profile_mutation_replay do
+    %{
+      "version" => ProfileAuthorityMutationCore.commitment_version(),
+      "kind" => ProfileAuthorityMutationCore.commitment_kind(),
+      "algorithm" => ProfileAuthorityMutationCore.commitment_algorithm(),
+      "encoding" => ProfileAuthorityMutationCore.commitment_encoding(),
+      "domain" => ProfileAuthorityMutationCore.commitment_domain(),
+      "anchor_digest" => String.duplicate("11", 32),
+      "successor_digest" => String.duplicate("22", 32)
+    }
+  end
+
   test "redacts caller identity, profile CAS, frozen authority, capability ids, and private journal payloads",
        %{
          record: record
@@ -104,7 +118,8 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationStatusProjectionTest do
              Op.prepare(record, %{
                "at_unix_ms" => 5_002,
                "profile_cas" => cas,
-               "frozen_authority" => frozen
+               "frozen_authority" => frozen,
+               "profile_mutation_replay" => profile_mutation_replay()
              })
 
     assert {:ok, record, _} =
@@ -152,6 +167,7 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationStatusProjectionTest do
     refute Map.has_key?(status, "authorizing_caller_id")
     refute Map.has_key?(status, "profile_cas")
     refute Map.has_key?(status, "frozen_authority")
+    refute Map.has_key?(status, "profile_mutation_replay")
     assert status["journal_summary"]["entry_count"] == 1
     assert status["journal_summary"]["pending_count"] == 1
     assert status["journal_summary"]["succeeded_count"] == 0

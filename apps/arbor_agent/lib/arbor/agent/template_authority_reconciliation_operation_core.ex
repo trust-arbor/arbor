@@ -129,19 +129,19 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCore do
   # than silently ignored.
   @ack_base_keys MapSet.new(["phase_intent", "at_unix_ms"])
   @ack_fenced_keys MapSet.new([
-                      "phase_intent",
-                      "at_unix_ms",
-                      "profile_cas",
-                      "frozen_authority",
-                      "profile_mutation_replay"
-                    ])
+                     "phase_intent",
+                     "at_unix_ms",
+                     "profile_cas",
+                     "frozen_authority",
+                     "profile_mutation_replay"
+                   ])
   @ack_deny_installed_keys MapSet.new(["phase_intent", "at_unix_ms", "runtime_was_running"])
   @prepare_fact_keys MapSet.new([
-                        "at_unix_ms",
-                        "profile_cas",
-                        "frozen_authority",
-                        "profile_mutation_replay"
-                      ])
+                       "at_unix_ms",
+                       "profile_cas",
+                       "frozen_authority",
+                       "profile_mutation_replay"
+                     ])
   @plan_fact_keys MapSet.new(["at_unix_ms", "entries"])
   @effect_ack_fact_keys MapSet.new(["effect_id", "at_unix_ms"])
   @effect_outcome_fact_keys MapSet.new(["effect_id", "outcome", "reason_code", "at_unix_ms"])

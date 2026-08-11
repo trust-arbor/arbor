@@ -101,9 +101,10 @@ defmodule Arbor.Agent.ProfileAuthorityMutationCore do
   """
   @spec admit_commitment(term()) :: {:ok, commitment()} | {:error, atom()}
   def admit_commitment(commitment) when is_map(commitment) and not is_struct(commitment) do
-    # O(1) size gate before any key enumeration / atom scan.
+    # O(1) size gate bounds the subsequent atom scan while still preserving the
+    # explicit ambiguous-key result for one coexisting atom alias.
     with :ok <-
-           require_exact_map_size(
+           require_bounded_schema_size(
              commitment,
              MapSet.size(@commitment_keys),
              :commitment_shape
@@ -160,7 +161,11 @@ defmodule Arbor.Agent.ProfileAuthorityMutationCore do
          :ok <- reject_governed_atom_keys(observed_meta, @governed_meta_atoms),
          :ok <- require_plain_map(governed, :governed_shape),
          :ok <-
-           require_exact_map_size(governed, MapSet.size(@governed_top_keys), :governed_shape),
+           require_bounded_schema_size(
+             governed,
+             MapSet.size(@governed_top_keys),
+             :governed_shape
+           ),
          :ok <- reject_any_atom_key(governed),
          :ok <- closed_keyset(governed, @governed_top_keys, :governed_shape),
          {:ok, governed_meta} <- require_governed_metadata(governed),
@@ -288,27 +293,31 @@ defmodule Arbor.Agent.ProfileAuthorityMutationCore do
     else
       case project_envelope(r, r.data, r.revision) do
         {:ok, env} ->
-          case {digest_envelope("anchor", env), digest_envelope("successor", env)} do
-            {{:ok, anchor_d}, {:ok, succ_d}} ->
-              cond do
-                anchor_d === cmt["anchor_digest"] and cas_matches_record?(cas, r) ->
-                  :not_applied
-
-                succ_d === cmt["successor_digest"] and cas_matches_successor?(cas, r) ->
-                  :already_applied
-
-                true ->
-                  :conflict
-              end
-
-            _ ->
-              # Unreadable / non-canonical envelope material fails closed.
-              :outcome_unknown
-          end
+          classify_restart_envelope(cas, cmt, r, env)
 
         {:error, _} ->
           :outcome_unknown
       end
+    end
+  end
+
+  defp classify_restart_envelope(cas, cmt, r, env) do
+    case {digest_envelope("anchor", env), digest_envelope("successor", env)} do
+      {{:ok, anchor_digest}, {:ok, successor_digest}} ->
+        cond do
+          anchor_digest === cmt["anchor_digest"] and cas_matches_record?(cas, r) ->
+            :not_applied
+
+          successor_digest === cmt["successor_digest"] and cas_matches_successor?(cas, r) ->
+            :already_applied
+
+          true ->
+            :conflict
+        end
+
+      _ ->
+        # Unreadable / non-canonical envelope material fails closed.
+        :outcome_unknown
     end
   end
 
@@ -428,7 +437,12 @@ defmodule Arbor.Agent.ProfileAuthorityMutationCore do
   defp walk_canonical(_term, _depth, nodes, _budget) when nodes <= 0, do: {:error, :oversized}
 
   defp walk_canonical(nil, _d, n, budget), do: charge_scalar(nil, n, budget, 6)
-  defp walk_canonical(v, _d, n, budget) when is_boolean(v), do: charge_scalar(v, n, budget, 6)
+
+  defp walk_canonical(v, _d, n, budget) when is_boolean(v) do
+    # `false` is the larger SMALL_ATOM_UTF8_EXT form (7 bytes); charge that
+    # upper bound for both booleans so the cumulative estimate stays conservative.
+    charge_scalar(v, n, budget, 7)
+  end
 
   defp walk_canonical(v, _d, n, budget) when is_integer(v) do
     # Compare to bounds directly — never abs/1 on arbitrary bignums.
@@ -486,26 +500,24 @@ defmodule Arbor.Agent.ProfileAuthorityMutationCore do
     # Fixed-size check BEFORE materializing keys (never Map.keys/1 on wide maps).
     size = map_size(map)
 
-    cond do
-      size > @max_map_keys ->
-        {:error, :oversized}
+    if size > @max_map_keys do
+      {:error, :oversized}
+    else
+      case charge_budget(budget, 6) do
+        {:ok, budget} ->
+          keys = Map.keys(map)
 
-      true ->
-        case charge_budget(budget, 6) do
-          {:ok, budget} ->
-            keys = Map.keys(map)
+          if Enum.any?(keys, &(not is_binary(&1))) do
+            {:error, :canonicalization_failed}
+          else
+            keys
+            |> Enum.sort()
+            |> walk_map_pairs(map, depth, nodes - 1, budget, [])
+          end
 
-            if Enum.any?(keys, &(not is_binary(&1))) do
-              {:error, :canonicalization_failed}
-            else
-              keys
-              |> Enum.sort()
-              |> walk_map_pairs(map, depth, nodes - 1, budget, [])
-            end
-
-          {:error, _} = err ->
-            err
-        end
+        {:error, _} = err ->
+          err
+      end
     end
   end
 
@@ -576,14 +588,13 @@ defmodule Arbor.Agent.ProfileAuthorityMutationCore do
 
   defp charge_budget(_, _), do: {:error, :oversized}
 
-  # Reject NaN and both infinities. `v == v` fails only for NaN; infinity must
-  # be rejected via float_to_binary. Compact form is already lowercase.
+  # Defensive non-finite rejection. Current BEAM releases do not construct
+  # NaN/infinity values, but the boundary remains explicit.
   defp finite_float?(v) when is_float(v) do
-    v == v and
-      case :erlang.float_to_binary(v, [:compact]) do
-        bin when is_binary(bin) ->
-          not (String.contains?(bin, "nan") or String.contains?(bin, "inf"))
-      end
+    case :erlang.float_to_binary(v, [:compact]) do
+      bin when is_binary(bin) ->
+        not (String.contains?(bin, "nan") or String.contains?(bin, "inf"))
+    end
   rescue
     _ -> false
   end
@@ -629,7 +640,7 @@ defmodule Arbor.Agent.ProfileAuthorityMutationCore do
   defp require_template_source(value) do
     with :ok <- require_plain_map(value, :governed_shape),
          :ok <-
-           require_exact_map_size(
+           require_bounded_schema_size(
              value,
              MapSet.size(@template_source_keys),
              :governed_shape
@@ -664,7 +675,7 @@ defmodule Arbor.Agent.ProfileAuthorityMutationCore do
          true <- is_map(r.metadata) and not is_struct(r.metadata),
          true <- is_integer(r.generation) and r.generation >= 1,
          true <- is_integer(r.revision) and r.revision >= 1,
-         true <- r.revision + 1 <= @max_json_safe_integer do
+         true <- r.revision < @max_json_safe_integer do
       :ok
     else
       _ -> {:error, :invalid_record}
@@ -683,7 +694,11 @@ defmodule Arbor.Agent.ProfileAuthorityMutationCore do
 
   defp admit_profile_cas(cas) when is_map(cas) and not is_struct(cas) do
     with :ok <-
-           require_exact_map_size(cas, MapSet.size(@profile_cas_keys), :profile_cas_invalid),
+           require_bounded_schema_size(
+             cas,
+             MapSet.size(@profile_cas_keys),
+             :profile_cas_invalid
+           ),
          :ok <- reject_any_atom_key(cas),
          :ok <- closed_keyset(cas, @profile_cas_keys, :profile_cas_invalid),
          id when is_binary(id) and id != "" <- cas["record_id"],
@@ -714,12 +729,12 @@ defmodule Arbor.Agent.ProfileAuthorityMutationCore do
     if is_map(value) and not is_struct(value), do: :ok, else: {:error, reason}
   end
 
-  defp require_exact_map_size(map, expected, reason)
+  defp require_bounded_schema_size(map, expected, reason)
        when is_map(map) and is_integer(expected) and expected >= 0 do
-    if map_size(map) == expected, do: :ok, else: {:error, reason}
+    if map_size(map) <= expected + 1, do: :ok, else: {:error, reason}
   end
 
-  defp require_exact_map_size(_map, _expected, reason), do: {:error, reason}
+  defp require_bounded_schema_size(_map, _expected, reason), do: {:error, reason}
 
   defp reject_governed_atom_keys(map, atoms) do
     # Fixed small atom list — O(1) Map.has_key? probes, no key enumeration.
@@ -769,7 +784,7 @@ defmodule Arbor.Agent.ProfileAuthorityMutationCore do
       {:ok, value} ->
         with :ok <- require_plain_map(value, :governed_shape),
              :ok <-
-               require_exact_map_size(
+               require_bounded_schema_size(
                  value,
                  MapSet.size(@governed_meta_keys),
                  :governed_shape

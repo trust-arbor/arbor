@@ -23,6 +23,7 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationStoreTest do
   @store_name :arbor_agent_template_authority_reconciliation
   @collection "template_authority_reconciliation"
 
+  alias Arbor.Agent.ProfileAuthorityMutationCore
   alias Arbor.Agent.TemplateAuthorityCapabilityProjection
   alias Arbor.Agent.TemplateAuthorityPolicy
   alias Arbor.Agent.TemplateAuthorityReconciliationOperationCore, as: Core
@@ -529,6 +530,18 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationStoreTest do
   defp profile_cas(gen \\ 1, rev \\ 1),
     do: %{"record_id" => "profile_rec_1", "generation" => gen, "revision" => rev}
 
+  defp profile_mutation_replay do
+    %{
+      "version" => ProfileAuthorityMutationCore.commitment_version(),
+      "kind" => ProfileAuthorityMutationCore.commitment_kind(),
+      "algorithm" => ProfileAuthorityMutationCore.commitment_algorithm(),
+      "encoding" => ProfileAuthorityMutationCore.commitment_encoding(),
+      "domain" => ProfileAuthorityMutationCore.commitment_domain(),
+      "anchor_digest" => String.duplicate("11", 32),
+      "successor_digest" => String.duplicate("22", 32)
+    }
+  end
+
   defp frozen_authority(operation, repo_root \\ @repo_root) do
     envelope = operation["desired_authority"]["envelope"]
     snap = TemplateAuthorityPolicy.snapshot(envelope)
@@ -581,7 +594,8 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationStoreTest do
     facts = %{
       "at_unix_ms" => at,
       "profile_cas" => profile_cas(),
-      "frozen_authority" => frozen_authority(operation)
+      "frozen_authority" => frozen_authority(operation),
+      "profile_mutation_replay" => profile_mutation_replay()
     }
 
     apply_step!(observed_record, &Core.prepare(&1, facts))
