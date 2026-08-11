@@ -61,6 +61,8 @@ defmodule Mix.Tasks.Arbor.Start do
   """
   use Mix.Task
 
+  import Bitwise
+
   alias Mix.Tasks.Arbor.Helpers, as: Config
   alias Mix.Tasks.Arbor.LifecycleIdentity
   alias Mix.Tasks.Arbor.Readiness
@@ -215,14 +217,15 @@ defmodule Mix.Tasks.Arbor.Start do
     project_dir = File.cwd!()
     log_file = Config.log_file()
 
-    # Fresh nodes don't have ~/.arbor/logs yet — create it before the shell
-    # redirect below writes to it (otherwise: "cannot create … Directory
-    # nonexistent"). Covers `mix arbor.restart` too (it delegates to Start.run).
+    # Fresh nodes don't have ~/.arbor/logs yet — create it before the launcher
+    # redirects into it (otherwise: "cannot create … Directory nonexistent").
+    # Covers `mix arbor.restart` too (it delegates to Start.run).
     Config.ensure_runtime_dirs()
 
-    # Rotate the previous log before the `> log_file` truncate below wipes it. Keeps 3 generations
-    # (arbor-dev.log.1/.2/.3) so a crash's evidence survives a restart — truncating on every start is
-    # exactly what erased the 2026-07-04 node-crash logs and forced a Postgres-EventLog reconstruction.
+    # Rotate the previous log before the launcher truncates via `> log_file`.
+    # Keeps 3 generations (arbor-dev.log.1/.2/.3) so a crash's evidence survives
+    # a restart — truncating on every start is exactly what erased the 2026-07-04
+    # node-crash logs and forced a Postgres-EventLog reconstruction.
     rotate_log(log_file)
 
     # Resolve the real elixir and mix paths from the running Elixir installation.
@@ -231,22 +234,10 @@ defmodule Mix.Tasks.Arbor.Start do
     # the binary as Elixir source).
     {elixir_path, mix_path} = resolve_real_paths()
 
-    # Background via shell so stdout/stderr flow to the log file for `mix arbor.logs`.
-    # The shell returns the PID immediately via `echo $!`.
     name_flag = if Config.longnames?(), do: "--name", else: "--sname"
-
-    node = Config.node_atom(node_string_for(host))
-
-    # Pin Erlang distribution to a predictable port range for firewalls
-    # Increase net_ticktime to 120s (disconnect after ~8 min of no response)
-    # to tolerate brief network hiccups and idle periods
-    erl_flags =
-      "--erl '-kernel inet_dist_listen_min 9100 inet_dist_listen_max 9155 net_ticktime 120'"
-
-    elixir_cmd =
-      "#{elixir_path} #{name_flag} #{node} " <>
-        "--cookie #{Config.cookie()} #{erl_flags} #{mix_path} run --no-halt " <>
-        "> #{log_file} 2>&1 & echo $!"
+    node_string = node_string_for(host)
+    node = Config.node_atom(node_string)
+    cookie_string = Config.cookie() |> Atom.to_string()
 
     # Inherit the full environment so API keys, PATH, etc. are available.
     # Only override MIX_ENV explicitly.
@@ -255,27 +246,33 @@ defmodule Mix.Tasks.Arbor.Start do
       |> Map.put("MIX_ENV", to_string(Mix.env()))
       |> Enum.to_list()
 
-    {output, 0} =
-      System.cmd("sh", ["-c", elixir_cmd],
-        cd: project_dir,
-        env: env
-      )
+    case spawn_daemon_process(%{
+           project_dir: project_dir,
+           elixir_path: elixir_path,
+           mix_path: mix_path,
+           name_flag: name_flag,
+           node_string: node_string,
+           cookie: cookie_string,
+           log_file: log_file,
+           env: env
+         }) do
+      {:ok, pid} ->
+        track_launch(node_string, host, pid)
+        await_and_report(node, node_string, host, pid, log_file)
 
-    pid =
-      output
-      |> String.trim()
-      |> String.split("\n")
-      |> List.last()
-      |> String.to_integer()
+      {:error, reason} ->
+        Mix.shell().error("Failed to launch Arbor daemon: #{format_launch_error(reason)}")
+        exit({:shutdown, 1})
+    end
+  end
 
-    track_launch(node_string_for(host), host, pid)
-
+  defp await_and_report(node, node_string, host, pid, log_file) do
     expected = Readiness.expected_umbrella_apps(Mix.Project.apps_paths())
 
     case await_ready(node, expected) do
       :ok ->
         Config.write_metadata!(%{
-          node: node_string_for(host),
+          node: node_string,
           host: host,
           pid: pid,
           state: :ready
@@ -320,6 +317,121 @@ defmodule Mix.Tasks.Arbor.Start do
         exit({:shutdown, 1})
     end
   end
+
+  @doc false
+  @spec daemon_launch_argv(map()) :: {:ok, [String.t()]} | {:error, term()}
+  def daemon_launch_argv(%{
+        elixir_path: elixir_path,
+        name_flag: name_flag,
+        node_string: node_string,
+        cookie: cookie,
+        mix_path: mix_path,
+        log_file: log_file
+      })
+      when is_binary(elixir_path) and is_binary(name_flag) and is_binary(node_string) and
+             is_binary(cookie) and is_binary(mix_path) and is_binary(log_file) do
+    if Enum.any?([elixir_path, name_flag, node_string, cookie, mix_path, log_file], &(&1 == "")) do
+      {:error, :empty_launch_argument}
+    else
+      {:ok, [elixir_path, name_flag, node_string, cookie, mix_path, log_file]}
+    end
+  end
+
+  def daemon_launch_argv(_), do: {:error, :invalid_launch_spec}
+
+  @doc false
+  @spec resolve_daemon_launcher(String.t()) :: {:ok, String.t()} | {:error, term()}
+  def resolve_daemon_launcher(project_dir) when is_binary(project_dir) do
+    path = Path.join(project_dir, "bin/arbor-dev-daemon-launch")
+
+    # Fail closed unless the trusted launcher is already executable (git mode
+    # 100755). Do not chmod here — mutation would hide a missing executable bit.
+    with true <- File.regular?(path),
+         true <- launcher_executable?(path) do
+      {:ok, Path.expand(path)}
+    else
+      _ -> {:error, {:daemon_launcher_unavailable, path}}
+    end
+  end
+
+  def resolve_daemon_launcher(_), do: {:error, :invalid_project_dir}
+
+  @doc false
+  @spec launcher_executable?(String.t()) :: boolean()
+  def launcher_executable?(path) when is_binary(path) do
+    case File.stat(path) do
+      {:ok, %File.Stat{type: :regular, mode: mode}} -> band(mode, 0o111) != 0
+      _ -> false
+    end
+  end
+
+  def launcher_executable?(_), do: false
+
+  @doc false
+  @spec parse_daemon_pid(String.t()) :: {:ok, pos_integer()} | {:error, term()}
+  def parse_daemon_pid(output) when is_binary(output) do
+    candidate =
+      output
+      |> String.trim()
+      |> String.split("\n")
+      |> List.last()
+
+    case Integer.parse(candidate || "") do
+      {pid, ""} when pid > 0 -> {:ok, pid}
+      _ -> {:error, {:invalid_daemon_pid, output}}
+    end
+  end
+
+  def parse_daemon_pid(_), do: {:error, :invalid_daemon_pid}
+
+  @doc false
+  # Testable spawn seam: never used with a live Arbor daemon in unit tests.
+  # Optional `:launcher` override points at a fake launcher script.
+  @spec spawn_daemon_process(map()) :: {:ok, pos_integer()} | {:error, term()}
+  def spawn_daemon_process(%{} = spec) do
+    project_dir = Map.fetch!(spec, :project_dir)
+    env = Map.get(spec, :env, [])
+
+    launcher_result =
+      case Map.fetch(spec, :launcher) do
+        {:ok, path} when is_binary(path) -> {:ok, path}
+        :error -> resolve_daemon_launcher(project_dir)
+      end
+
+    with {:ok, argv} <- daemon_launch_argv(spec),
+         {:ok, launcher} <- launcher_result,
+         {output, 0} <- run_launcher(launcher, argv, project_dir, env),
+         {:ok, pid} <- parse_daemon_pid(output) do
+      {:ok, pid}
+    else
+      {output, code} when is_integer(code) and code != 0 ->
+        {:error, {:launcher_exit, code, output}}
+
+      {:error, reason} ->
+        {:error, reason}
+
+      other ->
+        {:error, {:launcher_failed, other}}
+    end
+  end
+
+  defp run_launcher(launcher, argv, project_dir, env) do
+    # `System.cmd/3` executes this resolved executable with inert argv; no shell
+    # parses launcher arguments or any operator-derived value.
+    # credo:disable-for-next-line
+    System.cmd(launcher, argv, cd: project_dir, env: env, stderr_to_stdout: true)
+  end
+
+  defp format_launch_error({:daemon_launcher_unavailable, path}),
+    do: "trusted launcher missing or not executable at #{path}"
+
+  defp format_launch_error({:launcher_exit, code, _output}),
+    do: "launcher exited with status #{code}"
+
+  defp format_launch_error({:invalid_daemon_pid, _output}),
+    do: "launcher did not print a parseable child PID"
+
+  defp format_launch_error(reason), do: inspect(reason)
 
   defp node_string_for(host), do: "#{Config.node_name()}@#{host}"
 

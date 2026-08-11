@@ -107,6 +107,49 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCoreTest do
     end
   end
 
+  test "default profile admits exit-zero containment failure as distinct blocked assessment" do
+    result = default_containment_result()
+
+    assert result.exit_code == 0
+    assert result.passed == false
+    assert result.reason == "validation_containment_failure"
+    assert result.termination["containment_failure"] == true
+    assert map_size(result.termination) == 5
+
+    assert {:ok, report} = verify("default", result)
+    assert report["status"] == "blocked"
+    assert "validation_containment_failure" in Enum.map(report["diagnostics"], & &1["code"])
+    refute "validation_capacity_exceeded" in Enum.map(report["diagnostics"], & &1["code"])
+    refute "compile_failed" in Enum.map(report["diagnostics"], & &1["code"])
+    assert report["evidence_ref"] =~ "sha256:"
+
+    # Four-key capacity envelope must not be accepted as containment evidence.
+    forged_capacity_shape =
+      Map.put(result, :termination, %{
+        "timed_out" => false,
+        "killed" => true,
+        "output_limit_exceeded" => false,
+        "cancelled" => false
+      })
+
+    assert {:ok, invalid} = verify("default", forged_capacity_shape)
+    assert invalid["status"] == "blocked"
+    assert "validation_evidence_invalid" in Enum.map(invalid["diagnostics"], & &1["code"])
+
+    # containment_failure false is rejected even with five keys.
+    forged_flag =
+      Map.put(result, :termination, %{
+        "timed_out" => false,
+        "killed" => true,
+        "output_limit_exceeded" => false,
+        "cancelled" => false,
+        "containment_failure" => false
+      })
+
+    assert {:ok, invalid_flag} = verify("default", forged_flag)
+    assert "validation_evidence_invalid" in Enum.map(invalid_flag["diagnostics"], & &1["code"])
+  end
+
   test "security regression capacity rejects forged and ambiguous evidence" do
     good = security_result("validation_capacity_exceeded")
     assert {:ok, report} = verify("security_regression", good)
@@ -637,6 +680,22 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCoreTest do
         "killed" => true,
         "output_limit_exceeded" => false,
         "cancelled" => false
+      }
+    })
+  end
+
+  defp default_containment_result do
+    default_result(exit_code: 0)
+    |> Map.merge(%{
+      passed: false,
+      reason: "validation_containment_failure",
+      feedback: raw_feedback(false, 0),
+      termination: %{
+        "timed_out" => false,
+        "killed" => true,
+        "output_limit_exceeded" => false,
+        "cancelled" => false,
+        "containment_failure" => true
       }
     })
   end

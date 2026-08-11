@@ -15,6 +15,10 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationCapacityTerminal do
   alias Arbor.Contracts.Coding.ValidationCapacityHandoff
 
   @termination_fields ~w(timed_out killed output_limit_exceeded cancelled)
+  # Distinct from capacity: five keys, requires containment_failure == true.
+  @containment_termination_fields ~w(
+    timed_out killed output_limit_exceeded cancelled containment_failure
+  )
   @max_validation_entries 1
 
   @type normalize_error ::
@@ -109,6 +113,28 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationCapacityTerminal do
   @doc "Return true only for a closed, capacity-bearing default termination envelope."
   @spec valid_termination?(term()) :: boolean()
   def valid_termination?(termination), do: match?({:ok, _}, normalize_termination(termination))
+
+  @doc """
+  Normalize a closed containment-only termination envelope.
+
+  Exact five-key schema distinct from capacity's four-key envelope. Requires
+  `containment_failure == true` so capacity evidence cannot be smuggled here.
+  """
+  @spec normalize_containment_termination(term()) :: {:ok, map()} | :error
+  def normalize_containment_termination(termination)
+      when is_map(termination) and not is_struct(termination) do
+    with true <- map_size(termination) == length(@containment_termination_fields),
+         true <-
+           MapSet.new(Map.keys(termination)) == MapSet.new(@containment_termination_fields),
+         true <- Enum.all?(@containment_termination_fields, &is_boolean(termination[&1])),
+         true <- termination["containment_failure"] == true do
+      {:ok, Map.new(@containment_termination_fields, fn field -> {field, termination[field]} end)}
+    else
+      _other -> :error
+    end
+  end
+
+  def normalize_containment_termination(_termination), do: :error
 
   @doc """
   Explicit verification of a capacity handoff read from historical storage.

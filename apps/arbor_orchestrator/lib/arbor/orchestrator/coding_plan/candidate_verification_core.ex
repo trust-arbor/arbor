@@ -281,7 +281,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCore do
 
       {evidence, assessment} =
         case capacity do
-          nil ->
+          :ordinary ->
             {evidence,
              %{
                status: if(values.passed, do: "passed", else: "failed"),
@@ -293,13 +293,22 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCore do
                ]
              }}
 
-          termination ->
+          {:capacity, termination} ->
             {evidence
              |> Map.put("reason", "validation_capacity_exceeded")
              |> Map.put("termination", termination),
              %{
                status: "blocked",
                gates: [{:blocked, "validation_capacity_exceeded"}]
+             }}
+
+          {:containment, termination} ->
+            {evidence
+             |> Map.put("reason", "validation_containment_failure")
+             |> Map.put("termination", termination),
+             %{
+               status: "blocked",
+               gates: [{:blocked, "validation_containment_failure"}]
              }}
         end
 
@@ -311,10 +320,11 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCore do
 
   # Capacity evidence is projected only from exact Shell termination flags on
   # Mix.Compile. Ordinary nonzero compile exits keep reason/termination nil and
-  # assess as compile_failed.
+  # assess as compile_failed. Containment is a distinct blocked assessment with
+  # its own five-key envelope (not folded into capacity).
   defp normalize_default_capacity(nil, nil, passed, exit_code)
        when is_boolean(passed) and is_integer(exit_code) do
-    if passed == (exit_code == 0), do: {:ok, nil}, else: :error
+    if passed == (exit_code == 0), do: {:ok, :ordinary}, else: :error
   end
 
   defp normalize_default_capacity(
@@ -324,7 +334,22 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCore do
          exit_code
        )
        when is_integer(exit_code) do
-    ValidationCapacityTerminal.normalize_termination(termination)
+    with {:ok, normalized} <- ValidationCapacityTerminal.normalize_termination(termination) do
+      {:ok, {:capacity, normalized}}
+    end
+  end
+
+  defp normalize_default_capacity(
+         "validation_containment_failure",
+         termination,
+         false,
+         exit_code
+       )
+       when is_integer(exit_code) do
+    with {:ok, normalized} <-
+           ValidationCapacityTerminal.normalize_containment_termination(termination) do
+      {:ok, {:containment, normalized}}
+    end
   end
 
   defp normalize_default_capacity(_reason, _termination, _passed, _exit_code), do: :error

@@ -159,15 +159,16 @@ defmodule Arbor.Actions.Mix do
     }
   end
 
-  @doc "Projects bounded compile feedback; `passed` also requires no capacity termination."
+  @doc "Projects bounded compile feedback; `passed` requires no capacity or containment terminal."
   def compile_feedback(%{exit_code: exit_code, stdout: stdout, stderr: stderr} = result) do
     stdout = stdout || ""
     stderr = stderr || ""
     capacity? = shell_capacity_termination?(result)
+    containment? = shell_containment_failure?(result)
 
     %{
       "exit_code" => exit_code,
-      "passed" => exit_code == 0 and not capacity?,
+      "passed" => exit_code == 0 and not capacity? and not containment?,
       "stdout_excerpt" => bounded_excerpt(stdout),
       "stderr_excerpt" => bounded_excerpt(stderr),
       "stdout_truncated" => String.length(stdout) > @compile_feedback_text_limit,
@@ -178,30 +179,117 @@ defmodule Arbor.Actions.Mix do
   end
 
   @doc """
+  True only when Shell reports an exact containment-failure flag.
+
+  Never classifies from exit codes or stdout/stderr text. Containment is distinct
+  from capacity: even when Shell also sets `killed: true` for a containment
+  terminal, callers must project `validation_containment_failure`.
+  """
+  @spec shell_containment_failure?(term()) :: boolean()
+  def shell_containment_failure?(result) when is_map(result) do
+    shell_flag?(result, :containment_failure)
+  end
+
+  def shell_containment_failure?(_result), do: false
+
+  @doc """
   True only when Shell reports an exact capacity-termination flag.
 
-  Never classifies from exit codes or stdout/stderr text. Used by default-profile
-  Mix.Compile to project `validation_capacity_exceeded` without mistaking ordinary
-  nonzero compile exits for infrastructure capacity.
+  Never classifies from exit codes or stdout/stderr text. Used by Mix validation
+  actions to project `validation_capacity_exceeded` without mistaking ordinary
+  nonzero exits for infrastructure capacity.
+
+  Containment is excluded even when Shell also sets `killed: true` on a
+  containment terminal — those project as `validation_containment_failure`.
   """
   @spec shell_capacity_termination?(term()) :: boolean()
   def shell_capacity_termination?(result) when is_map(result) do
-    shell_flag?(result, :timed_out) or shell_flag?(result, :killed) or
-      shell_flag?(result, :output_limit_exceeded) or shell_flag?(result, :cancelled)
+    not shell_containment_failure?(result) and
+      (shell_flag?(result, :timed_out) or shell_flag?(result, :killed) or
+         shell_flag?(result, :output_limit_exceeded) or shell_flag?(result, :cancelled))
   end
 
   def shell_capacity_termination?(_result), do: false
 
   @doc """
-  Closed, JSON-clean termination envelope from exact Shell boolean flags.
+  Closed four-key capacity termination envelope for `validation_capacity_exceeded`.
+
+  Exact schema consumed by `ValidationCapacityTerminal` — must not include
+  `containment_failure`. Containment uses `containment_termination_envelope/1`.
   """
   @spec termination_envelope(map()) :: %{required(String.t()) => boolean()}
   def termination_envelope(result) when is_map(result) do
+    capacity_termination_envelope(result)
+  end
+
+  @doc """
+  Closed four-key capacity envelope: timed_out, killed, output_limit_exceeded, cancelled.
+  """
+  @spec capacity_termination_envelope(map()) :: %{required(String.t()) => boolean()}
+  def capacity_termination_envelope(result) when is_map(result) do
     %{
       "timed_out" => shell_flag?(result, :timed_out),
       "killed" => shell_flag?(result, :killed),
       "output_limit_exceeded" => shell_flag?(result, :output_limit_exceeded),
       "cancelled" => shell_flag?(result, :cancelled)
+    }
+  end
+
+  @doc """
+  Closed five-key containment-only envelope for `validation_containment_failure`.
+
+  Distinct from the four-key capacity schema so ordinary capacity evidence is
+  not invalidated. Always includes `containment_failure` (true when projected).
+  """
+  @spec containment_termination_envelope(map()) :: %{required(String.t()) => boolean()}
+  def containment_termination_envelope(result) when is_map(result) do
+    %{
+      "timed_out" => shell_flag?(result, :timed_out),
+      "killed" => shell_flag?(result, :killed),
+      "output_limit_exceeded" => shell_flag?(result, :output_limit_exceeded),
+      "cancelled" => shell_flag?(result, :cancelled),
+      "containment_failure" => shell_flag?(result, :containment_failure)
+    }
+  end
+
+  @doc """
+  Project a successful Shell result into public Mix validation fields.
+
+  Order is load-bearing: containment is classified before capacity so a Shell
+  result with both `containment_failure: true` and `killed: true` cannot pass
+  and cannot be folded into capacity exhaustion.
+
+  Capacity uses the four-key envelope; containment uses the five-key envelope.
+  """
+  @spec project_shell_validation(map()) :: %{
+          exit_code: term(),
+          passed: boolean(),
+          reason: String.t() | nil,
+          termination: %{required(String.t()) => boolean()} | nil
+        }
+  def project_shell_validation(result) when is_map(result) do
+    containment? = shell_containment_failure?(result)
+    capacity? = shell_capacity_termination?(result)
+
+    {reason, termination} =
+      cond do
+        containment? ->
+          {"validation_containment_failure", containment_termination_envelope(result)}
+
+        capacity? ->
+          {"validation_capacity_exceeded", capacity_termination_envelope(result)}
+
+        true ->
+          {nil, nil}
+      end
+
+    exit_code = Map.get(result, :exit_code, Map.get(result, "exit_code"))
+
+    %{
+      exit_code: exit_code,
+      passed: exit_code == 0 and not containment? and not capacity?,
+      reason: reason,
+      termination: termination
     }
   end
 
@@ -3178,30 +3266,21 @@ defmodule Arbor.Actions.Mix do
 
       case MixAction.run_with_required_workspace(path, args, params, context || %{}, opts) do
         {:ok, result} ->
-          capacity? = MixAction.shell_capacity_termination?(result)
+          proj = MixAction.project_shell_validation(result)
           feedback = MixAction.compile_feedback(result)
-          passed = result.exit_code == 0 and not capacity?
 
           output = %{
             path: path,
-            exit_code: result.exit_code,
-            passed: passed,
-            reason:
-              if(capacity?,
-                do: "validation_capacity_exceeded",
-                else: nil
-              ),
+            exit_code: proj.exit_code,
+            passed: proj.passed,
+            reason: proj.reason,
             stdout: result.stdout,
             stderr: result.stderr,
             feedback: feedback,
             feedback_json: Jason.encode!(feedback),
             validated_tree_oid: Map.get(result, :validated_tree_oid),
             validated_head: Map.get(result, :validated_head),
-            termination:
-              if(capacity?,
-                do: MixAction.termination_envelope(result),
-                else: nil
-              )
+            termination: proj.termination
           }
 
           Actions.emit_completed(__MODULE__, %{path: path, passed: output.passed})
@@ -3295,18 +3374,21 @@ defmodule Arbor.Actions.Mix do
       with {:ok, args} <- build_args(path, params),
            {:ok, result} <-
              MixAction.run_with_required_workspace(path, args, params, context || %{}, opts) do
+        proj = MixAction.project_shell_validation(result)
         feedback = MixAction.compile_feedback(result)
 
         output = %{
           path: path,
-          exit_code: result.exit_code,
-          passed: result.exit_code == 0,
+          exit_code: proj.exit_code,
+          passed: proj.passed,
+          reason: proj.reason,
           stdout: result.stdout,
           stderr: result.stderr,
           feedback: feedback,
           feedback_json: Jason.encode!(feedback),
           validated_tree_oid: Map.get(result, :validated_tree_oid),
-          validated_head: Map.get(result, :validated_head)
+          validated_head: Map.get(result, :validated_head),
+          termination: proj.termination
         }
 
         Actions.emit_completed(__MODULE__, %{path: path, passed: output.passed})
@@ -3464,14 +3546,18 @@ defmodule Arbor.Actions.Mix do
              opts
            ) do
         {:ok, result} ->
+          proj = MixAction.project_shell_validation(result)
+
           output = %{
             path: path,
-            exit_code: result.exit_code,
-            passed: result.exit_code == 0,
+            exit_code: proj.exit_code,
+            passed: proj.passed,
+            reason: proj.reason,
             stdout: result.stdout,
             stderr: result.stderr,
             validated_tree_oid: Map.get(result, :validated_tree_oid),
-            validated_head: Map.get(result, :validated_head)
+            validated_head: Map.get(result, :validated_head),
+            termination: proj.termination
           }
 
           Actions.emit_completed(__MODULE__, %{path: path, passed: output.passed})
@@ -3549,12 +3635,16 @@ defmodule Arbor.Actions.Mix do
 
         case MixAction.run_with_required_workspace(path, args, params, context || %{}, opts) do
           {:ok, result} ->
+            proj = MixAction.project_shell_validation(result)
+
             output = %{
               path: path,
-              exit_code: result.exit_code,
-              passed: result.exit_code == 0,
+              exit_code: proj.exit_code,
+              passed: proj.passed,
+              reason: proj.reason,
               stdout: result.stdout,
-              stderr: result.stderr
+              stderr: result.stderr,
+              termination: proj.termination
             }
 
             Actions.emit_completed(__MODULE__, %{path: path, passed: output.passed})
@@ -3704,18 +3794,21 @@ defmodule Arbor.Actions.Mix do
 
         case MixAction.run_with_required_workspace(path, args, params, context || %{}, opts) do
           {:ok, result} ->
+            proj = MixAction.project_shell_validation(result)
             feedback = MixAction.compile_feedback(result)
 
             output = %{
               path: path,
-              exit_code: result.exit_code,
-              passed: result.exit_code == 0,
+              exit_code: proj.exit_code,
+              passed: proj.passed,
+              reason: proj.reason,
               stdout: result.stdout,
               stderr: result.stderr,
               feedback: feedback,
               feedback_json: Jason.encode!(feedback),
               validated_tree_oid: Map.get(result, :validated_tree_oid),
-              validated_head: Map.get(result, :validated_head)
+              validated_head: Map.get(result, :validated_head),
+              termination: proj.termination
             }
 
             Actions.emit_completed(__MODULE__, %{path: path, passed: output.passed})

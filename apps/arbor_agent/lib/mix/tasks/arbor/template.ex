@@ -27,6 +27,10 @@ defmodule Mix.Tasks.Arbor.Template do
 
   use Mix.Task
 
+  import Bitwise
+
+  alias Arbor.Common.SafePath
+
   @shortdoc "Manage agent templates"
 
   @switches [
@@ -156,28 +160,149 @@ defmodule Mix.Tasks.Arbor.Template do
       System.halt(1)
     end
 
-    editor = System.get_env("VISUAL") || System.get_env("EDITOR") || "vi"
-    port = Port.open({:spawn, "#{editor} #{path}"}, [:binary, :nouse_stdio])
+    raw_editor = System.get_env("VISUAL") || System.get_env("EDITOR") || "vi"
 
-    receive do
-      {^port, {:exit_status, 0}} ->
-        # Validate and reload
-        case Arbor.Agent.TemplateStore.reload(name) do
-          {:ok, _} ->
-            Mix.shell().info("Template '#{name}' reloaded successfully.")
+    case editor_argv(raw_editor, path) do
+      {:ok, editor_exe, argv} ->
+        port =
+          Port.open({:spawn_executable, to_charlist(editor_exe)}, [
+            :binary,
+            :exit_status,
+            :nouse_stdio,
+            args: Enum.map(argv, &to_charlist/1)
+          ])
 
-          {:error, reason} ->
-            Mix.shell().error("Error reloading template: #{inspect(reason)}")
+        receive do
+          {^port, {:exit_status, 0}} ->
+            # Validate and reload
+            case Arbor.Agent.TemplateStore.reload(name) do
+              {:ok, _} ->
+                Mix.shell().info("Template '#{name}' reloaded successfully.")
 
-            if Mix.shell().yes?("Re-edit?") do
-              edit_template(name)
+              {:error, reason} ->
+                Mix.shell().error("Error reloading template: #{inspect(reason)}")
+
+                if Mix.shell().yes?("Re-edit?") do
+                  edit_template(name)
+                end
             end
+
+          {^port, {:exit_status, _code}} ->
+            Mix.shell().error("Editor exited with error.")
         end
 
-      {^port, {:exit_status, _code}} ->
-        Mix.shell().error("Editor exited with error.")
+      {:error, reason} ->
+        Mix.shell().error(editor_error_message(reason, raw_editor))
+        System.halt(1)
     end
   end
+
+  @doc false
+  @spec editor_argv(String.t(), String.t()) ::
+          {:ok, String.t(), [String.t()]} | {:error, atom()}
+  def editor_argv(raw_editor, template_path)
+      when is_binary(raw_editor) and is_binary(template_path) do
+    with {:ok, editor_exe} <- resolve_editor_executable(raw_editor) do
+      {:ok, editor_exe, [template_path]}
+    end
+  end
+
+  def editor_argv(_raw_editor, _template_path), do: {:error, :invalid_editor}
+
+  @doc false
+  @spec resolve_editor_executable(String.t()) :: {:ok, String.t()} | {:error, atom()}
+  def resolve_editor_executable(raw) when is_binary(raw) do
+    trimmed = String.trim(raw)
+
+    cond do
+      trimmed == "" ->
+        {:error, :empty_editor}
+
+      String.contains?(trimmed, <<0>>) or editor_control_bytes?(trimmed) ->
+        {:error, :invalid_editor}
+
+      true ->
+        case accept_exact_executable(trimmed) do
+          {:ok, _} = ok -> ok
+          :error -> resolve_bare_editor(trimmed)
+        end
+    end
+  end
+
+  def resolve_editor_executable(_), do: {:error, :invalid_editor}
+
+  defp resolve_bare_editor(name) do
+    if bare_command_name?(name) do
+      case System.find_executable(name) do
+        path when is_binary(path) -> accept_exact_executable(path)
+        nil -> {:error, :unresolved_editor}
+      end
+    else
+      {:error, :compound_editor}
+    end
+  end
+
+  defp accept_exact_executable(path) when is_binary(path) do
+    candidate =
+      if Path.type(path) == :absolute do
+        path
+      else
+        Path.expand(path)
+      end
+
+    with true <- File.regular?(candidate),
+         true <- executable_file?(candidate),
+         {:ok, canonical} <- resolve_real_path(candidate),
+         true <- File.regular?(canonical),
+         true <- executable_file?(canonical) do
+      {:ok, canonical}
+    else
+      _ -> :error
+    end
+  end
+
+  defp resolve_real_path(path), do: SafePath.resolve_real(path)
+
+  defp executable_file?(path) do
+    case File.stat(path) do
+      {:ok, %File.Stat{type: :regular, mode: mode}} -> band(mode, 0o111) != 0
+      _ -> false
+    end
+  end
+
+  defp bare_command_name?(name) do
+    name != "" and not String.contains?(name, ["/", "\\"]) and not editor_needs_parser?(name)
+  end
+
+  defp editor_needs_parser?(value) do
+    String.contains?(
+      value,
+      [" ", "\t", "\n", "\r", "$", ";", "|", "&", "<", ">", "(", ")", "`", "\"", "'"]
+    )
+  end
+
+  defp editor_control_bytes?(value) do
+    value
+    |> String.to_charlist()
+    |> Enum.any?(fn
+      c when c < 32 or c == 127 -> true
+      _ -> false
+    end)
+  end
+
+  defp editor_error_message(:empty_editor, _raw),
+    do: "EDITOR/VISUAL is empty; set it to a single executable path or bare command name."
+
+  defp editor_error_message(:unresolved_editor, raw),
+    do: "Editor #{inspect(raw)} could not be resolved to an executable."
+
+  defp editor_error_message(:compound_editor, raw) do
+    "Editor #{inspect(raw)} is not a single executable (compound values and shell metacharacters are rejected). " <>
+      "Point EDITOR/VISUAL at one executable path, or a bare command name on PATH."
+  end
+
+  defp editor_error_message(_reason, raw),
+    do: "Editor #{inspect(raw)} is not a usable executable."
 
   defp delete_template(name) do
     ensure_store()

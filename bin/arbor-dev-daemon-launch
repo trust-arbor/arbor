@@ -1,0 +1,36 @@
+#!/bin/sh
+# Trusted static launcher for `mix arbor.start`.
+# Every dynamic value is a separately quoted positional argument.
+# No eval, no free-form command string, no second parser of interpolated text.
+#
+# Usage:
+#   arbor-dev-daemon-launch ELIXIR_ABS NAME_FLAG NODE COOKIE MIX_ABS LOG_ABS
+#
+# Backgrounds the fixed elixir/mix argv, redirects stdout/stderr to LOG, and
+# prints the child OS PID on stdout for pre-readiness launch tracking.
+set -eu
+
+if [ "$#" -ne 6 ]; then
+  echo "arbor-dev-daemon-launch: expected 6 arguments, got $#" >&2
+  exit 2
+fi
+
+ELIXIR=$1
+NAME_FLAG=$2
+NODE=$3
+COOKIE=$4
+MIX=$5
+LOG=$6
+
+if [ -z "$ELIXIR" ] || [ -z "$NAME_FLAG" ] || [ -z "$NODE" ] || [ -z "$COOKIE" ] || [ -z "$MIX" ] || [ -z "$LOG" ]; then
+  echo "arbor-dev-daemon-launch: empty argument is not allowed" >&2
+  exit 2
+fi
+
+# Fixed ERL kernel flags (static literals — not operator-supplied).
+"$ELIXIR" "$NAME_FLAG" "$NODE" --cookie "$COOKIE" \
+  --erl '-kernel inet_dist_listen_min 9100 inet_dist_listen_max 9155 net_ticktime 120' \
+  "$MIX" run --no-halt \
+  >"$LOG" 2>&1 &
+
+echo "$!"
