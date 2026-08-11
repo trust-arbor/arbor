@@ -759,7 +759,14 @@ defmodule Arbor.Agent.TemplateAuthorityPreviewTest do
 
   defp authority_record(agent_id \\ "agent_preview1", opts \\ []) do
     profile = base_profile(opts)
-    data = Profile.serialize(profile)
+    # Durable authority snapshots are JSON-clean (string keys). Profile.serialize
+    # embeds Character atom keys; round-trip so C3B3 commitment canonicalization
+    # matches production store-shaped Records.
+    data =
+      profile
+      |> Profile.serialize()
+      |> Jason.encode!()
+      |> Jason.decode!()
 
     %Record{
       id: Keyword.get(opts, :id, "agent_profile:#{agent_id}"),
@@ -851,11 +858,25 @@ defmodule Arbor.Agent.TemplateAuthorityPreviewTest do
     assert is_map(desired["envelope"])
     assert is_binary(desired["declaration_digest"])
 
+    # C3B3: private governed mutation + replay commitment; not public report.
+    governed = TemplateAuthorityPreparation.governed(preparation)
+    cmt = TemplateAuthorityPreparation.replay_commitment(preparation)
+    assert governed["template"] == "scout"
+    assert is_list(governed["initial_capabilities"])
+    assert Map.has_key?(governed["metadata"], TemplateAuthorityPolicy.metadata_key())
+    assert is_binary(cmt["anchor_digest"])
+    assert is_binary(cmt["successor_digest"])
+    refute Map.has_key?(report, "profile_mutation_replay")
+    refute Map.has_key?(report, "governed")
+    refute Map.has_key?(report, "replay_commitment")
+
     inspected = inspect(preparation)
     assert inspected == "#Arbor.Agent.TemplateAuthorityPreparation<redacted>"
     refute inspected =~ record.id
     refute inspected =~ "/Users/dev/arbor"
     refute inspected =~ "generation"
+    refute inspected =~ cmt["anchor_digest"]
+    refute inspected =~ cmt["successor_digest"]
 
     events = EffectsObserver.events()
     assert Enum.any?(events, &match?({:authority_mutation_snapshot, "agent_preview1"}, &1))

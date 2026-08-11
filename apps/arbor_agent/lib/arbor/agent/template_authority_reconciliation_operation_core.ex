@@ -5,10 +5,11 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCore do
   # operation record. Emits effects as closed JSON maps; never performs IO,
   # time, randomness, logging, process calls, or authority mutation.
 
+  alias Arbor.Agent.ProfileAuthorityMutationCore
   alias Arbor.Agent.TemplateAuthorityCapabilityProjection
   alias Arbor.Agent.TemplateAuthorityPolicy
 
-  @version 2
+  @version 3
   @kind "template_authority_reconciliation_operation"
 
   @phases ~w(
@@ -77,6 +78,7 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCore do
                  "runtime_was_running",
                  "profile_cas",
                  "frozen_authority",
+                 "profile_mutation_replay",
                  "reconciliation_required",
                  "retry",
                  "journal",
@@ -126,9 +128,20 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCore do
   # deny_all_installed. Supplying them in unrelated phases is rejected rather
   # than silently ignored.
   @ack_base_keys MapSet.new(["phase_intent", "at_unix_ms"])
-  @ack_fenced_keys MapSet.new(["phase_intent", "at_unix_ms", "profile_cas", "frozen_authority"])
+  @ack_fenced_keys MapSet.new([
+                      "phase_intent",
+                      "at_unix_ms",
+                      "profile_cas",
+                      "frozen_authority",
+                      "profile_mutation_replay"
+                    ])
   @ack_deny_installed_keys MapSet.new(["phase_intent", "at_unix_ms", "runtime_was_running"])
-  @prepare_fact_keys MapSet.new(["at_unix_ms", "profile_cas", "frozen_authority"])
+  @prepare_fact_keys MapSet.new([
+                        "at_unix_ms",
+                        "profile_cas",
+                        "frozen_authority",
+                        "profile_mutation_replay"
+                      ])
   @plan_fact_keys MapSet.new(["at_unix_ms", "entries"])
   @effect_ack_fact_keys MapSet.new(["effect_id", "at_unix_ms"])
   @effect_outcome_fact_keys MapSet.new(["effect_id", "outcome", "reason_code", "at_unix_ms"])
@@ -206,6 +219,7 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCore do
         "runtime_was_running" => nil,
         "profile_cas" => nil,
         "frozen_authority" => nil,
+        "profile_mutation_replay" => nil,
         "reconciliation_required" => nil,
         "retry" => retry,
         "journal" => empty_journal(),
@@ -369,10 +383,13 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCore do
     with {:ok, profile_cas} <- require_profile_cas(facts),
          :ok <- require_profile_cas_unset(record),
          {:ok, frozen} <- require_frozen_authority(facts, record),
-         :ok <- require_frozen_authority_unset(record) do
+         :ok <- require_frozen_authority_unset(record),
+         {:ok, replay} <- require_profile_mutation_replay(facts),
+         :ok <- require_profile_mutation_replay_unset(record) do
       record
       |> Map.put("profile_cas", profile_cas)
       |> Map.put("frozen_authority", frozen)
+      |> Map.put("profile_mutation_replay", replay)
       |> put_phase("prepared")
       |> touch(at)
       |> reset_retry_on_success()
@@ -470,7 +487,9 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCore do
   defp do_acknowledge(_record, _phase, _facts, _at), do: error(:transition_illegal)
 
   # ---------------------------------------------------------------------------
-  # Prepare (fenced → prepared with profile_cas + frozen_authority)
+  # Prepare (fenced → prepared with profile_cas + frozen_authority +
+  # profile_mutation_replay). Replay commitment is shape/constants-admitted
+  # only; digests are not re-derived without the private Record.
   # ---------------------------------------------------------------------------
 
   @spec prepare(record(), map()) :: {:ok, record(), [effect()]} | {:error, term()}
@@ -1330,6 +1349,7 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCore do
          :ok <- validate_runtime(record),
          :ok <- validate_profile_cas(record),
          :ok <- validate_frozen_authority(record),
+         :ok <- validate_profile_mutation_replay(record),
          :ok <- validate_journal(record["journal"], record),
          :ok <- validate_reconciliation_required(record),
          :ok <- validate_retry(record["retry"], record),
@@ -2158,6 +2178,51 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCore do
 
   defp require_frozen_authority_unset(%{"frozen_authority" => nil}), do: :ok
   defp require_frozen_authority_unset(_), do: error(:frozen_authority_immutable)
+
+  defp require_profile_mutation_replay_unset(%{"profile_mutation_replay" => nil}), do: :ok
+  defp require_profile_mutation_replay_unset(_), do: error(:profile_mutation_replay_immutable)
+
+  # Shape/constants/alias admission only. Cannot re-derive digests without the
+  # private Record; Preparation recomputes under private evidence and freezes
+  # the admitted commitment here.
+  defp require_profile_mutation_replay(facts) do
+    case Map.fetch(facts, "profile_mutation_replay") do
+      {:ok, replay} when is_map(replay) and not is_struct(replay) ->
+        case ProfileAuthorityMutationCore.admit_commitment(replay) do
+          {:ok, admitted} ->
+            {:ok, admitted}
+
+          {:error, :ambiguous_keys} ->
+            error(:profile_mutation_replay_invalid)
+
+          {:error, :commitment_shape} ->
+            error(:profile_mutation_replay_invalid)
+
+          {:error, _} ->
+            error(:profile_mutation_replay_invalid)
+        end
+
+      {:ok, _} ->
+        error(:profile_mutation_replay_invalid)
+
+      :error ->
+        error(:profile_mutation_replay_required)
+    end
+  end
+
+  defp validate_profile_mutation_replay(%{"profile_mutation_replay" => nil, "phase" => phase})
+       when phase in ~w(reserved fenced),
+       do: :ok
+
+  defp validate_profile_mutation_replay(%{"profile_mutation_replay" => replay, "phase" => phase})
+       when is_map(replay) and phase not in ~w(reserved fenced) do
+    case ProfileAuthorityMutationCore.admit_commitment(replay) do
+      {:ok, _} -> :ok
+      {:error, _} -> error(:profile_mutation_replay_invalid)
+    end
+  end
+
+  defp validate_profile_mutation_replay(_), do: error(:invalid_record)
 
   defp require_frozen_authority(facts, record) do
     case Map.fetch(facts, "frozen_authority") do

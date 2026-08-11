@@ -1,6 +1,7 @@
 defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCoreTest do
   use ExUnit.Case, async: true
 
+  alias Arbor.Agent.ProfileAuthorityMutationCore
   alias Arbor.Agent.TemplateAuthorityCapabilityProjection
   alias Arbor.Agent.TemplateAuthorityPolicy
   alias Arbor.Agent.TemplateAuthorityReconciliationOperationCore, as: Core
@@ -56,6 +57,18 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCoreTest do
     }
   end
 
+  defp replay_commitment(opts \\ []) do
+    %{
+      "version" => ProfileAuthorityMutationCore.commitment_version(),
+      "kind" => ProfileAuthorityMutationCore.commitment_kind(),
+      "algorithm" => ProfileAuthorityMutationCore.commitment_algorithm(),
+      "encoding" => ProfileAuthorityMutationCore.commitment_encoding(),
+      "domain" => ProfileAuthorityMutationCore.commitment_domain(),
+      "anchor_digest" => Keyword.get(opts, :anchor, String.duplicate("aa", 32)),
+      "successor_digest" => Keyword.get(opts, :successor, String.duplicate("bb", 32))
+    }
+  end
+
   defp frozen_authority(record, repo_root \\ @repo_root) do
     envelope = record["desired_authority"]["envelope"]
     snap = TemplateAuthorityPolicy.snapshot(envelope)
@@ -98,14 +111,15 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCoreTest do
     {record, effects}
   end
 
-  defp prepare!(record, at, cas \\ profile_cas()) do
+  defp prepare!(record, at, cas \\ profile_cas(), replay \\ replay_commitment()) do
     frozen = frozen_authority(record)
 
     assert {:ok, record, effects} =
              Core.prepare(record, %{
                "at_unix_ms" => at,
                "profile_cas" => cas,
-               "frozen_authority" => frozen
+               "frozen_authority" => frozen,
+               "profile_mutation_replay" => replay
              })
 
     assert_admitted!(record)
@@ -148,7 +162,7 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCoreTest do
   test "constructs reserved operation with fence effect and closed JSON record", %{facts: facts} do
     {record, effects} = new!(facts)
 
-    assert record["version"] == 2
+    assert record["version"] == 3
     assert record["kind"] == "template_authority_reconciliation_operation"
     assert record["phase"] == "reserved"
     assert record["status"] == "active"
@@ -158,6 +172,7 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCoreTest do
     assert record["authorizing_caller_id"] == @caller
     assert record["profile_cas"] == nil
     assert record["frozen_authority"] == nil
+    assert record["profile_mutation_replay"] == nil
     assert record["reconciliation_required"] == nil
 
     assert record["fence_state"] == %{
@@ -210,7 +225,8 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCoreTest do
                "phase_intent" => "fenced",
                "at_unix_ms" => t(2),
                "profile_cas" => profile_cas(),
-               "frozen_authority" => frozen
+               "frozen_authority" => frozen,
+               "profile_mutation_replay" => replay_commitment()
              })
 
     assert record_fenced["authorizing_caller_id"] == @caller
@@ -220,39 +236,61 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCoreTest do
     {record, _} = new!(facts)
     {record, _} = ack!(record, "reserved", t(1))
     frozen = frozen_authority(record)
+    replay = replay_commitment()
 
     assert {:error, {:template_authority_reconciliation_operation, :profile_cas_required}} =
-             Core.prepare(record, %{"at_unix_ms" => t(2), "frozen_authority" => frozen})
+             Core.prepare(record, %{
+               "at_unix_ms" => t(2),
+               "frozen_authority" => frozen,
+               "profile_mutation_replay" => replay
+             })
 
     assert {:error, {:template_authority_reconciliation_operation, :frozen_authority_required}} =
-             Core.prepare(record, %{"at_unix_ms" => t(2), "profile_cas" => profile_cas()})
+             Core.prepare(record, %{
+               "at_unix_ms" => t(2),
+               "profile_cas" => profile_cas(),
+               "profile_mutation_replay" => replay
+             })
+
+    assert {:error,
+            {:template_authority_reconciliation_operation, :profile_mutation_replay_required}} =
+             Core.prepare(record, %{
+               "at_unix_ms" => t(2),
+               "profile_cas" => profile_cas(),
+               "frozen_authority" => frozen
+             })
 
     assert {:error, {:template_authority_reconciliation_operation, :unexpected_field}} =
              Core.prepare(record, %{
                "at_unix_ms" => t(2),
                "profile_cas" => profile_cas(),
                "frozen_authority" => frozen,
+               "profile_mutation_replay" => replay,
                "capability_id" => "cap_should_reject"
              })
 
     cas = profile_cas(3, 7)
-    {record, effects} = prepare!(record, t(2), cas)
+    {record, effects} = prepare!(record, t(2), cas, replay)
     assert record["phase"] == "prepared"
     assert record["profile_cas"] == cas
     assert record["frozen_authority"] == frozen
+    assert record["profile_mutation_replay"] == replay
     assert hd(effects)["effect_type"] == "record_deny_all_intent"
     refute Map.has_key?(hd(effects), "profile_cas")
     refute Map.has_key?(hd(effects), "frozen_authority")
+    refute Map.has_key?(hd(effects), "profile_mutation_replay")
     refute Map.has_key?(hd(effects), "repo_root")
 
     assert {:ok, admitted} = Core.admit(record)
     assert admitted["profile_cas"] == cas
     assert admitted["frozen_authority"] == frozen
+    assert admitted["profile_mutation_replay"] == replay
 
-    # profile_cas and frozen_authority remain immutable across later transitions
+    # profile_cas, frozen_authority, and replay commitment remain immutable
     {record, _} = ack!(record, "prepared", t(3))
     assert record["profile_cas"] == cas
     assert record["frozen_authority"] == frozen
+    assert record["profile_mutation_replay"] == replay
   end
 
   test "prepare rejects effective-projection mismatch, noncanonical root, and v1 records", %{
@@ -265,11 +303,14 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCoreTest do
 
     mismatched = put_in(frozen, ["effective_capabilities"], [])
 
+    replay = replay_commitment()
+
     assert {:error, {:template_authority_reconciliation_operation, :frozen_authority_invalid}} =
              Core.prepare(record, %{
                "at_unix_ms" => t(2),
                "profile_cas" => cas,
-               "frozen_authority" => mismatched
+               "frozen_authority" => mismatched,
+               "profile_mutation_replay" => replay
              })
 
     bad_root = %{frozen | "repo_root" => "relative/path"}
@@ -278,7 +319,8 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCoreTest do
              Core.prepare(record, %{
                "at_unix_ms" => t(2),
                "profile_cas" => cas,
-               "frozen_authority" => bad_root
+               "frozen_authority" => bad_root,
+               "profile_mutation_replay" => replay
              })
 
     # Trailing-slash / whitespace root aliases are not rewritten before equality.
@@ -288,7 +330,8 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCoreTest do
              Core.prepare(record, %{
                "at_unix_ms" => t(2),
                "profile_cas" => cas,
-               "frozen_authority" => alias_root
+               "frozen_authority" => alias_root,
+               "profile_mutation_replay" => replay
              })
 
     spaced_root = %{frozen | "repo_root" => "  " <> @repo_root}
@@ -297,7 +340,8 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCoreTest do
              Core.prepare(record, %{
                "at_unix_ms" => t(2),
                "profile_cas" => cas,
-               "frozen_authority" => spaced_root
+               "frozen_authority" => spaced_root,
+               "profile_mutation_replay" => replay
              })
 
     # Atom-key alias on frozen map is rejected (closed binary keys only).
@@ -310,7 +354,8 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCoreTest do
              Core.prepare(record, %{
                "at_unix_ms" => t(2),
                "profile_cas" => cas,
-               "frozen_authority" => atom_keyed
+               "frozen_authority" => atom_keyed,
+               "profile_mutation_replay" => replay
              })
 
     assert reason in [:frozen_authority_invalid, :invalid_record]
@@ -325,11 +370,12 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCoreTest do
                Core.prepare(record, %{
                  "at_unix_ms" => t(2),
                  "profile_cas" => cas,
-                 "frozen_authority" => reordered
+                 "frozen_authority" => reordered,
+                 "profile_mutation_replay" => replay
                })
     end
 
-    {prepared, _} = prepare!(record, t(2), cas)
+    {prepared, _} = prepare!(record, t(2), cas, replay)
 
     tampered =
       put_in(prepared, ["frozen_authority", "effective_capabilities"], [
@@ -339,10 +385,27 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCoreTest do
     assert {:error, {:template_authority_reconciliation_operation, :frozen_authority_invalid}} =
              Core.admit(tampered)
 
+    bad_replay =
+      put_in(prepared, ["profile_mutation_replay", "anchor_digest"], String.duplicate("cc", 32))
+
+    assert {:error, {:template_authority_reconciliation_operation, :profile_mutation_replay_invalid}} =
+             Core.admit(bad_replay)
+
+    shape_drift =
+      put_in(prepared, ["profile_mutation_replay", "extra"], "nope")
+
+    assert {:error, {:template_authority_reconciliation_operation, :profile_mutation_replay_invalid}} =
+             Core.admit(shape_drift)
+
     v1 = Map.put(prepared, "version", 1)
 
     assert {:error, {:template_authority_reconciliation_operation, :invalid_record}} =
              Core.admit(v1)
+
+    v2 = Map.put(prepared, "version", 2)
+
+    assert {:error, {:template_authority_reconciliation_operation, :invalid_record}} =
+             Core.admit(v2)
   end
 
   test "admits Policy envelope and rejects bad digests", %{facts: facts, envelope: envelope} do
@@ -946,6 +1009,7 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCoreTest do
       |> Map.put("runtime_was_running", true)
       |> Map.put("profile_cas", nil)
       |> Map.put("frozen_authority", nil)
+      |> Map.put("profile_mutation_replay", nil)
       |> Map.put("journal", %{"version" => 1, "entries" => []})
       |> Map.put("reconciliation_required", nil)
       |> put_in(["fence_state", "installed"], false)
@@ -1474,6 +1538,36 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCoreTest do
 
     assert {:ok, ^record} = Core.admit(record)
     assert record["retry"]["attempt"] == 1
+  end
+
+  test "C3B3 non-disclosure: effects and status omit replay commitment and profile material", %{
+    facts: facts
+  } do
+    alias Arbor.Agent.TemplateAuthorityReconciliationStatusProjection, as: Status
+
+    {record, _} = new!(facts)
+    {record, effects} = ack!(record, "reserved", t(1))
+    refute Enum.any?(effects, &Map.has_key?(&1, "profile_mutation_replay"))
+
+    replay = replay_commitment()
+    {record, effects} = prepare!(record, t(2), profile_cas(), replay)
+    assert record["profile_mutation_replay"] == replay
+    assert is_map(record["profile_mutation_replay"])
+
+    effect = hd(effects)
+    refute Map.has_key?(effect, "profile_mutation_replay")
+    refute Map.has_key?(effect, "profile_cas")
+    refute Map.has_key?(effect, "frozen_authority")
+    refute Map.has_key?(effect, "anchor_digest")
+    refute Map.has_key?(effect, "successor_digest")
+
+    assert {:ok, status} = Status.project(record)
+    refute Map.has_key?(status, "profile_mutation_replay")
+    refute Map.has_key?(status, "profile_cas")
+    refute Map.has_key?(status, "frozen_authority")
+    refute Map.has_key?(status, "desired_authority")
+    refute inspect(status) =~ replay["anchor_digest"]
+    assert Core.version() == 3
   end
 
   test "primary retryable phase vocabulary locks the retry-phase admission boundary (source of truth for the projection)",
