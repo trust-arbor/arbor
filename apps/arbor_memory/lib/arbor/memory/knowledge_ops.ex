@@ -21,6 +21,9 @@ defmodule Arbor.Memory.KnowledgeOps do
   @doc "Add a knowledge node to the agent's graph."
   defdelegate add_knowledge(agent_id, node_data), to: GraphOps
 
+  @doc "Same as add_knowledge/2 but also reports the created/deduplicated outcome."
+  defdelegate add_knowledge_with_outcome(agent_id, node_data), to: GraphOps
+
   @doc "Link two knowledge nodes."
   defdelegate link_knowledge(agent_id, source_id, target_id, relationship, opts \\ []),
     to: GraphOps

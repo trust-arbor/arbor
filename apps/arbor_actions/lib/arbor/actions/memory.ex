@@ -120,17 +120,37 @@ defmodule Arbor.Actions.Memory do
         # Use facade auth when called through authorize_and_execute
         result =
           if context[:agent_id] do
-            Arbor.Memory.authorize_add_knowledge(context[:agent_id], agent_id, node_data)
+            Arbor.Memory.authorize_add_knowledge_with_outcome(
+              context[:agent_id],
+              agent_id,
+              node_data
+            )
           else
-            Arbor.Memory.add_knowledge(agent_id, node_data)
+            Arbor.Memory.add_knowledge_with_outcome(agent_id, node_data)
           end
 
         case result do
-          {:ok, node_id} ->
+          {:ok, node_id, outcome} ->
             linked = maybe_link_entities(agent_id, node_id, params[:entities] || [])
 
-            Actions.emit_completed(__MODULE__, %{node_id: node_id})
-            {:ok, %{node_id: node_id, type: type_atom, stored: true, linked_count: linked}}
+            already_existed =
+              case outcome do
+                :created -> false
+                :deduplicated -> true
+                :unknown -> nil
+              end
+
+            Actions.emit_completed(__MODULE__, %{node_id: node_id, outcome: outcome})
+
+            {:ok,
+             %{
+               node_id: node_id,
+               type: type_atom,
+               stored: true,
+               linked_count: linked,
+               already_existed: already_existed,
+               outcome: outcome
+             }}
 
           {:error, {:unauthorized, _} = reason} ->
             {:error, "Unauthorized: #{inspect(reason)}"}
@@ -240,6 +260,7 @@ defmodule Arbor.Actions.Memory do
             formatted =
               Enum.map(results, fn r ->
                 %{
+                  id: r[:id],
                   content: r[:content] || r[:text],
                   similarity: r[:similarity],
                   type: r[:type],

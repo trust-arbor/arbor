@@ -281,6 +281,23 @@ defmodule Arbor.Memory.KnowledgeGraph do
   """
   @spec add_node(t(), map()) :: {:ok, t(), node_id()} | {:error, term()}
   def add_node(graph, node_data) do
+    case add_node_with_outcome(graph, node_data) do
+      {:ok, new_graph, node_id, _outcome} -> {:ok, new_graph, node_id}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  @doc """
+  Same as `add_node/2` but additionally reports whether the node was newly
+  created or matched an existing exact-content (or, when embeddings are
+  enabled, semantic) duplicate.
+
+  Never introduces a new duplicate: when a match is found, the existing
+  node's id is returned (boosted, not replaced) with outcome `:deduplicated`.
+  """
+  @spec add_node_with_outcome(t(), map()) ::
+          {:ok, t(), node_id(), :created | :deduplicated} | {:error, term()}
+  def add_node_with_outcome(graph, node_data) do
     with {:ok, type} <- validate_node_type(node_data),
          {:ok, content} <- validate_content(node_data),
          :ok <- check_quota(graph, type) do
@@ -294,7 +311,7 @@ defmodule Arbor.Memory.KnowledgeGraph do
           nil
         end
 
-      add_validated_node(
+      add_validated_node_with_outcome(
         graph,
         node_data,
         type,
@@ -310,7 +327,17 @@ defmodule Arbor.Memory.KnowledgeGraph do
   @doc false
   @spec add_node_transition(t(), map(), node_id(), DateTime.t()) ::
           {:ok, t(), node_id()} | {:error, term()}
-  def add_node_transition(graph, node_data, node_id, %DateTime{} = occurred_at) do
+  def add_node_transition(graph, node_data, node_id, occurred_at) do
+    case add_node_transition_with_outcome(graph, node_data, node_id, occurred_at) do
+      {:ok, new_graph, actual_node_id, _outcome} -> {:ok, new_graph, actual_node_id}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  @doc false
+  @spec add_node_transition_with_outcome(t(), map(), node_id(), DateTime.t()) ::
+          {:ok, t(), node_id(), :created | :deduplicated} | {:error, term()}
+  def add_node_transition_with_outcome(graph, node_data, node_id, %DateTime{} = occurred_at) do
     with {:ok, type} <- validate_node_type(node_data),
          {:ok, content} <- validate_content(node_data),
          :ok <- check_quota(graph, type),
@@ -318,7 +345,7 @@ defmodule Arbor.Memory.KnowledgeGraph do
       metadata = Map.get(node_data, :metadata, %{})
       text = node_to_text(content, metadata, type)
 
-      add_validated_node(
+      add_validated_node_with_outcome(
         graph,
         node_data,
         type,
@@ -335,7 +362,7 @@ defmodule Arbor.Memory.KnowledgeGraph do
     end
   end
 
-  def add_node_transition(_graph, _node_data, _node_id, _occurred_at),
+  def add_node_transition_with_outcome(_graph, _node_data, _node_id, _occurred_at),
     do: {:error, :invalid_graph}
 
   @doc """
@@ -1068,7 +1095,7 @@ defmodule Arbor.Memory.KnowledgeGraph do
   # Private Helpers
   # ============================================================================
 
-  defp add_validated_node(
+  defp add_validated_node_with_outcome(
          graph,
          node_data,
          type,
@@ -1082,7 +1109,7 @@ defmodule Arbor.Memory.KnowledgeGraph do
 
     case maybe_find_duplicate(graph, type, content, embedding, skip_dedup) do
       {:duplicate, existing_id} ->
-        {:ok, boost_node_at(graph, existing_id, 0.1, occurred_at), existing_id}
+        {:ok, boost_node_at(graph, existing_id, 0.1, occurred_at), existing_id, :deduplicated}
 
       :no_duplicate ->
         node = %{
@@ -1105,7 +1132,7 @@ defmodule Arbor.Memory.KnowledgeGraph do
           %{graph | nodes: Map.put(graph.nodes, node_id, node)}
           |> maybe_add_to_active_set(node)
 
-        {:ok, new_graph, node_id}
+        {:ok, new_graph, node_id, :created}
     end
   end
 

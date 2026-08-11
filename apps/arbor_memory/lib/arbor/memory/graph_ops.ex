@@ -108,13 +108,33 @@ defmodule Arbor.Memory.GraphOps do
   """
   @spec add_knowledge(String.t(), map()) :: {:ok, String.t()} | {:error, term()}
   def add_knowledge(agent_id, node_data) do
+    case add_knowledge_with_outcome(agent_id, node_data) do
+      {:ok, node_id, _outcome} -> {:ok, node_id}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  @doc """
+  Same as `add_knowledge/2` but additionally reports whether the node was
+  newly created or matched an existing exact-content duplicate.
+
+  Unlike `add_knowledge/2`, this is the only path that conditionally emits
+  the `knowledge_added` signal -- it fires exactly once for a genuine
+  creation and never on an exact-content duplicate match.
+  """
+  @spec add_knowledge_with_outcome(String.t(), map()) ::
+          {:ok, String.t(), :created | :deduplicated | :unknown} | {:error, term()}
+  def add_knowledge_with_outcome(agent_id, node_data) do
     operation_id = new_operation_id("add_node")
 
     case reconcile_ambiguous(fn ->
-           KnowledgeGraphStore.add_node(agent_id, operation_id, node_data)
+           KnowledgeGraphStore.add_node_with_outcome(agent_id, operation_id, node_data)
          end) do
-      {:ok, node_id} = success ->
+      {:ok, node_id, :created} = success ->
         safe_emit(fn -> Signals.emit_knowledge_added(agent_id, node_id, node_data[:type]) end)
+        success
+
+      {:ok, _node_id, _outcome} = success ->
         success
 
       {:error, _reason} = error ->
@@ -128,6 +148,25 @@ defmodule Arbor.Memory.GraphOps do
   def add_knowledge_tainted(agent_id, node_data, taint, opts \\ [])
 
   def add_knowledge_tainted(agent_id, node_data, %Taint{} = taint, opts) when is_list(opts) do
+    case add_knowledge_tainted_with_outcome(agent_id, node_data, taint, opts) do
+      {:ok, node_id, _outcome} -> {:ok, node_id}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  def add_knowledge_tainted(_agent_id, _node_data, _taint, _opts),
+    do: {:error, :invalid_graph}
+
+  @doc """
+  Same as `add_knowledge_tainted/4` but additionally reports whether the node
+  was newly created or matched an existing exact-content duplicate.
+  """
+  @spec add_knowledge_tainted_with_outcome(String.t(), map(), Taint.t(), keyword()) ::
+          {:ok, String.t(), :created | :deduplicated | :unknown} | {:error, term()}
+  def add_knowledge_tainted_with_outcome(agent_id, node_data, taint, opts \\ [])
+
+  def add_knowledge_tainted_with_outcome(agent_id, node_data, %Taint{} = taint, opts)
+      when is_list(opts) do
     operation_id =
       case Keyword.get(opts, :operation_id) do
         id when is_binary(id) and id != "" -> id
@@ -135,10 +174,18 @@ defmodule Arbor.Memory.GraphOps do
       end
 
     case reconcile_ambiguous(fn ->
-           KnowledgeGraphStore.add_node_tainted(agent_id, operation_id, node_data, taint)
+           KnowledgeGraphStore.add_node_tainted_with_outcome(
+             agent_id,
+             operation_id,
+             node_data,
+             taint
+           )
          end) do
-      {:ok, node_id} = success ->
+      {:ok, node_id, :created} = success ->
         safe_emit(fn -> Signals.emit_knowledge_added(agent_id, node_id, node_data[:type]) end)
+        success
+
+      {:ok, _node_id, _outcome} = success ->
         success
 
       {:error, _reason} = error ->
@@ -146,7 +193,7 @@ defmodule Arbor.Memory.GraphOps do
     end
   end
 
-  def add_knowledge_tainted(_agent_id, _node_data, _taint, _opts),
+  def add_knowledge_tainted_with_outcome(_agent_id, _node_data, _taint, _opts),
     do: {:error, :invalid_graph}
 
   @doc "Add a pending fact through durable authority using a conservative source label."

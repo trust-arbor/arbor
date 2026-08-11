@@ -171,6 +171,7 @@ defmodule Arbor.Memory do
   # ============================================================================
 
   defdelegate add_knowledge(agent_id, node_data), to: KnowledgeOps
+  defdelegate add_knowledge_with_outcome(agent_id, node_data), to: KnowledgeOps
 
   defdelegate link_knowledge(agent_id, source_id, target_id, relationship, opts \\ []),
     to: KnowledgeOps
@@ -541,6 +542,23 @@ defmodule Arbor.Memory do
   def authorize_add_knowledge(caller_id, agent_id, node_data) do
     case authorize(caller_id, "arbor://memory/write/#{agent_id}") do
       :ok -> add_knowledge(agent_id, node_data)
+      {:error, reason} -> {:error, {:unauthorized, reason}}
+    end
+  end
+
+  @doc """
+  Add knowledge to the graph with authorization check, additionally
+  reporting whether the node was newly created or matched an existing
+  exact-content duplicate.
+
+  Verifies the caller has the `arbor://memory/write/{agent_id}` capability.
+  """
+  @spec authorize_add_knowledge_with_outcome(String.t(), String.t(), map()) ::
+          {:ok, String.t(), :created | :deduplicated | :unknown}
+          | {:error, {:unauthorized, term()} | term()}
+  def authorize_add_knowledge_with_outcome(caller_id, agent_id, node_data) do
+    case authorize(caller_id, "arbor://memory/write/#{agent_id}") do
+      :ok -> add_knowledge_with_outcome(agent_id, node_data)
       {:error, reason} -> {:error, {:unauthorized, reason}}
     end
   end

@@ -46,7 +46,7 @@ defmodule Arbor.Memory.KnowledgeGraphAuthorityArchitectureTest do
     assert MapSet.subset?(
              MapSet.new([
                :get_graph,
-               :add_node,
+               :add_node_with_outcome,
                :add_edge,
                :reinforce,
                :approve_pending,

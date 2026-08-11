@@ -43,6 +43,8 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
   )
   @maintenance_modes ~w(basic enhanced)
   @maintenance_reasons ~w(low_relevance quota_exceeded)
+  @add_node_receipt_keys ~w(node_id outcome)
+  @add_node_outcomes ~w(created deduplicated unknown)
   @operation_kinds ~w(
     add_edge add_node add_pending_fact add_pending_learning add_pending_learning_batch
     approve_pending cascade_recall consolidate merge_node_metadata merge_node_metadata_batch
@@ -108,8 +110,10 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
                         :context,
                         :conversation_id,
                         :count,
+                        :created,
                         :created_by,
                         :decay_rate,
+                        :deduplicated,
                         :description,
                         :decayed_count,
                         :detection_source,
@@ -162,6 +166,7 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
                         :tool_name,
                         :tools,
                         :trait,
+                        :unknown,
                         :unlimited,
                         :updated_at,
                         :value,
@@ -1157,6 +1162,14 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
 
   defp normalize_maintenance_reason(_value), do: {:error, :invalid_graph}
 
+  defp normalize_add_node_outcome(value) when is_atom(value),
+    do: normalize_add_node_outcome(Atom.to_string(value))
+
+  defp normalize_add_node_outcome(value) when value in @add_node_outcomes,
+    do: {:ok, Map.fetch!(@semantic_atoms_by_name, value)}
+
+  defp normalize_add_node_outcome(_value), do: {:error, :invalid_graph}
+
   defp encode_operation_receipts(receipts)
        when is_map(receipts) and not is_struct(receipts) and
               map_size(receipts) <= @max_operation_receipts do
@@ -1246,6 +1259,31 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
   defp normalize_operation_receipt_result("consolidate", _result),
     do: {:error, :invalid_graph}
 
+  defp normalize_operation_receipt_result("add_node", result)
+       when is_map(result) and not is_struct(result) do
+    with :ok <- validate_legacy_map_shape(result, @add_node_receipt_keys),
+         node_id when is_binary(node_id) <- field(result, :node_id),
+         :ok <- validate_identifier(node_id),
+         {:ok, outcome} <- normalize_add_node_outcome(field(result, :outcome)) do
+      {:ok, %{node_id: node_id, outcome: outcome}}
+    else
+      _ -> {:error, :invalid_graph}
+    end
+  end
+
+  # Legacy compatibility: a receipt persisted before outcome-tracking stored
+  # a bare node-id string as its "add_node" result. Decode it conservatively
+  # as outcome :unknown -- never guessed as :created -- rather than rejecting
+  # it or fabricating a created/deduplicated verdict we cannot prove.
+  defp normalize_operation_receipt_result("add_node", result) when is_binary(result) do
+    with :ok <- validate_identifier(result) do
+      {:ok, %{node_id: result, outcome: :unknown}}
+    end
+  end
+
+  defp normalize_operation_receipt_result("add_node", _result),
+    do: {:error, :invalid_graph}
+
   defp normalize_operation_receipt_result(_kind, result) do
     with :ok <- validate_identifier(result), do: {:ok, result}
   end
@@ -1258,6 +1296,19 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
       _ -> {:error, :invalid_graph}
     end
   end
+
+  # Decode always normalizes "add_node" results into this map shape first
+  # (both the new native shape and legacy bare-string receipts), so encode
+  # never sees a bare string for this kind -- a legacy receipt is upgraded
+  # to the new wire shape the next time it is durably written.
+  defp encode_operation_receipt_result("add_node", %{node_id: node_id, outcome: outcome})
+       when is_binary(node_id) and outcome in [:created, :deduplicated, :unknown] do
+    with :ok <- validate_identifier(node_id) do
+      {:ok, %{"node_id" => node_id, "outcome" => Atom.to_string(outcome)}}
+    end
+  end
+
+  defp encode_operation_receipt_result("add_node", _result), do: {:error, :invalid_graph}
 
   defp encode_operation_receipt_result(_kind, result) when is_binary(result),
     do: {:ok, result}

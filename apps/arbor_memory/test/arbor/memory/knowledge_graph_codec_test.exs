@@ -185,6 +185,87 @@ defmodule Arbor.Memory.KnowledgeGraphCodecTest do
     assert_legacy_rejected(agent_id, duplicate_pending)
   end
 
+  test "encode -> decode round trip preserves a native add_node receipt's created/deduplicated outcome" do
+    agent_id = "agent_graph_codec_add_node_roundtrip"
+    graph = KnowledgeGraph.new(agent_id, auto_embed: false)
+
+    {:ok, op} = Operation.add_node("native_op", %{type: :fact, content: "round trip fact"})
+    {:ok, graph, %{node_id: node_id, outcome: :created}, :changed} = Operation.apply(op, graph)
+
+    assert {:ok, snapshot} = Codec.reconcile(agent_id, graph, nil, trusted_taint())
+    assert {:ok, wrapper} = Codec.encode(snapshot)
+
+    assert wrapper["payload"]["operation_receipts"]["native_op"]["result"] == %{
+             "node_id" => node_id,
+             "outcome" => "created"
+           }
+
+    assert {:ok, decoded, :current} =
+             Codec.decode(agent_id, wrapper, snapshot.aggregate.taint, :verified)
+
+    assert decoded.graph.operation_receipts["native_op"].result == %{
+             node_id: node_id,
+             outcome: :created
+           }
+  end
+
+  test "a legacy bare-string add_node receipt is accepted and decodes conservatively as outcome :unknown" do
+    agent_id = "agent_graph_codec_legacy_add_node"
+    graph = KnowledgeGraph.new(agent_id, auto_embed: false)
+
+    {:ok, graph, node_id} =
+      KnowledgeGraph.add_node(graph, %{type: :fact, content: "legacy add_node receipt"})
+
+    fingerprint =
+      :crypto.hash(:sha256, "legacy-add-node-fingerprint") |> Base.encode16(case: :lower)
+
+    legacy_graph = %{
+      graph
+      | operation_receipts: %{
+          "legacy_op" => %{kind: "add_node", fingerprint: fingerprint, result: node_id}
+        },
+        operation_receipt_order: ["legacy_op"]
+    }
+
+    legacy = KnowledgeGraph.to_map(legacy_graph)
+
+    assert {:ok, snapshot, :migration} =
+             Codec.decode(agent_id, legacy, TaintEnvelope.missing_fallback(), :legacy_unlabeled)
+
+    assert snapshot.graph.operation_receipts["legacy_op"].result == %{
+             node_id: node_id,
+             outcome: :unknown
+           }
+  end
+
+  test "Codec.decode_legacy_graph/2 normalizes a bare-string add_node receipt before admission (from_map/import boundary proof)" do
+    agent_id = "agent_graph_codec_legacy_import_add_node"
+    graph = KnowledgeGraph.new(agent_id, auto_embed: false)
+
+    {:ok, graph, node_id} =
+      KnowledgeGraph.add_node(graph, %{type: :fact, content: "import boundary fact"})
+
+    fingerprint =
+      :crypto.hash(:sha256, "import-boundary-fingerprint") |> Base.encode16(case: :lower)
+
+    legacy_graph = %{
+      graph
+      | operation_receipts: %{
+          "legacy_import_op" => %{kind: "add_node", fingerprint: fingerprint, result: node_id}
+        },
+        operation_receipt_order: ["legacy_import_op"]
+    }
+
+    legacy_map = KnowledgeGraph.to_map(legacy_graph)
+
+    assert {:ok, decoded_graph} = Codec.decode_legacy_graph(agent_id, legacy_map)
+
+    assert decoded_graph.operation_receipts["legacy_import_op"].result == %{
+             node_id: node_id,
+             outcome: :unknown
+           }
+  end
+
   test "security regression legacy import cannot forge internal proposal acceptance" do
     agent_id = "agent_graph_codec_legacy_acceptance"
     graph = KnowledgeGraph.new(agent_id, auto_embed: false)

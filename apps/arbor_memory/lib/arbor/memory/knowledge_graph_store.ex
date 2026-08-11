@@ -65,20 +65,52 @@ defmodule Arbor.Memory.KnowledgeGraphStore do
 
   @spec add_node(String.t(), String.t(), map()) :: {:ok, String.t()} | {:error, term()}
   def add_node(agent_id, operation_id, node_data) do
-    with {:ok, operation} <- Operation.add_node(operation_id, node_data) do
-      call_operation(agent_id, operation)
+    with {:ok, operation} <- Operation.add_node(operation_id, node_data),
+         {:ok, %{node_id: node_id}} <- call_operation(agent_id, operation) do
+      {:ok, node_id}
+    end
+  end
+
+  @doc """
+  Same as `add_node/3` but additionally reports whether the node was newly
+  created or matched an existing exact-content duplicate.
+  """
+  @spec add_node_with_outcome(String.t(), String.t(), map()) ::
+          {:ok, String.t(), :created | :deduplicated | :unknown} | {:error, term()}
+  def add_node_with_outcome(agent_id, operation_id, node_data) do
+    with {:ok, operation} <- Operation.add_node(operation_id, node_data),
+         {:ok, %{node_id: node_id, outcome: outcome}} <- call_operation(agent_id, operation) do
+      {:ok, node_id, outcome}
     end
   end
 
   @spec add_node_tainted(String.t(), String.t(), map(), Taint.t()) ::
           {:ok, String.t()} | {:error, term()}
   def add_node_tainted(agent_id, operation_id, node_data, %Taint{} = taint) do
-    with {:ok, operation} <- Operation.add_node(operation_id, node_data) do
-      call_operation(agent_id, operation, taint)
+    with {:ok, operation} <- Operation.add_node(operation_id, node_data),
+         {:ok, %{node_id: node_id}} <- call_operation(agent_id, operation, taint) do
+      {:ok, node_id}
     end
   end
 
   def add_node_tainted(_agent_id, _operation_id, _node_data, _taint),
+    do: {:error, :invalid_graph}
+
+  @doc """
+  Same as `add_node_tainted/4` but additionally reports whether the node was
+  newly created or matched an existing exact-content duplicate.
+  """
+  @spec add_node_tainted_with_outcome(String.t(), String.t(), map(), Taint.t()) ::
+          {:ok, String.t(), :created | :deduplicated | :unknown} | {:error, term()}
+  def add_node_tainted_with_outcome(agent_id, operation_id, node_data, %Taint{} = taint) do
+    with {:ok, operation} <- Operation.add_node(operation_id, node_data),
+         {:ok, %{node_id: node_id, outcome: outcome}} <-
+           call_operation(agent_id, operation, taint) do
+      {:ok, node_id, outcome}
+    end
+  end
+
+  def add_node_tainted_with_outcome(_agent_id, _operation_id, _node_data, _taint),
     do: {:error, :invalid_graph}
 
   @spec add_pending_learning(String.t(), String.t(), map()) ::

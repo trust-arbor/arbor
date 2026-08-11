@@ -92,6 +92,9 @@ defmodule Arbor.Memory.KnowledgeGraph.GraphSearch do
   with keyword score (30% weight). Falls back to pure keyword search when
   the embedding service is unavailable.
 
+  Each returned node carries an additive `:similarity` key holding the
+  blended score that was used to rank it.
+
   ## Options
 
   - `:limit` - Max results (default 10)
@@ -126,7 +129,7 @@ defmodule Arbor.Memory.KnowledgeGraph.GraphSearch do
       |> Enum.filter(fn {_, score} -> score > 0.0 end)
       |> Enum.sort_by(fn {_, score} -> score end, :desc)
       |> Enum.take(limit)
-      |> Enum.map(fn {node, _score} -> node end)
+      |> Enum.map(fn {node, score} -> Map.put(node, :similarity, score) end)
 
     {:ok, results}
   end

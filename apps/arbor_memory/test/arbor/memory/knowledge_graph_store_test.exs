@@ -292,6 +292,36 @@ defmodule Arbor.Memory.KnowledgeGraphStoreTest do
     assert wrapper["agent_id"] == agent_id
   end
 
+  test "created/deduplicated outcome and node id survive an owner restart", %{
+    agent_id: agent_id
+  } do
+    assert :ok =
+             KnowledgeGraphStore.save_graph(
+               agent_id,
+               KnowledgeGraph.new(agent_id, auto_embed: false)
+             )
+
+    node_data = %{type: :fact, content: "restart dedup fact"}
+
+    assert {:ok, node_id, :created} =
+             KnowledgeGraphStore.add_node_with_outcome(agent_id, "restart_op_1", node_data)
+
+    restart_child(KnowledgeGraphStore)
+    :ets.delete(@graph_ets, agent_id)
+
+    # A fresh read after the owner process has been terminated and restarted
+    # by its supervisor must reconstruct the same node id from durable
+    # storage, independent of any state the old process held in memory.
+    assert {:ok, graph} = KnowledgeGraphStore.get_graph(agent_id)
+    assert Map.has_key?(graph.nodes, node_id)
+
+    # Applying the same dedup-triggering content again post-restart must
+    # still report :deduplicated against the SAME pre-restart node, not
+    # silently create a second node.
+    assert {:ok, ^node_id, :deduplicated} =
+             KnowledgeGraphStore.add_node_with_outcome(agent_id, "restart_op_2", node_data)
+  end
+
   test "raw compatibility saves receive conservative exact projection labels", %{
     agent_id: agent_id
   } do

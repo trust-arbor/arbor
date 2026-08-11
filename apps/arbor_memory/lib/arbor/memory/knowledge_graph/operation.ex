@@ -459,7 +459,10 @@ defmodule Arbor.Memory.KnowledgeGraph.Operation do
   end
 
   defp apply_once({:add_node, _operation_id, node_data, node_id, occurred_at}, graph) do
-    KnowledgeGraph.add_node_transition(graph, node_data, node_id, occurred_at)
+    case KnowledgeGraph.add_node_transition_with_outcome(graph, node_data, node_id, occurred_at) do
+      {:ok, graph, actual_node_id, outcome} -> {:ok, graph, {actual_node_id, outcome}}
+      {:error, _reason} = error -> error
+    end
   end
 
   defp apply_once(
@@ -622,8 +625,12 @@ defmodule Arbor.Memory.KnowledgeGraph.Operation do
     _, _ -> {:error, :invalid_graph}
   end
 
+  defp receipt_result("add_node", {node_id, outcome})
+       when is_binary(node_id) and outcome in [:created, :deduplicated],
+       do: {:ok, %{node_id: node_id, outcome: outcome}}
+
   defp receipt_result(kind, item_id)
-       when kind in ["add_node", "add_pending_fact", "add_pending_learning", "approve_pending"] and
+       when kind in ["add_pending_fact", "add_pending_learning", "approve_pending"] and
               is_binary(item_id),
        do: {:ok, item_id}
 
@@ -652,13 +659,29 @@ defmodule Arbor.Memory.KnowledgeGraph.Operation do
 
   defp receipt_result(_kind, _result), do: {:error, :invalid_graph}
 
+  defp finalize_result("add_node", {node_id, outcome}, _graph),
+    do: %{node_id: node_id, outcome: outcome}
+
   defp finalize_result("consolidate", result, graph),
     do: result |> Map.put(:graph, graph) |> Map.put(:replayed, false) |> Map.put(:drained, false)
 
   defp finalize_result(_kind, result, _graph), do: result
 
+  defp replay_result(_operation_id, "add_node", %{node_id: node_id, outcome: outcome}, graph)
+       when is_binary(node_id) and outcome in [:created, :deduplicated, :unknown],
+       do: {:ok, graph, %{node_id: node_id, outcome: outcome}, :replayed}
+
+  # Belt-and-suspenders: a bare node-id string here means a KnowledgeGraph.t()
+  # reached apply/3 with an add_node receipt that was never routed through
+  # Codec's normalize step (today provably impossible -- from_map/1 has a
+  # single call site, inside Codec.decode_legacy/4, which always normalizes
+  # before the graph is admitted -- but replay stays truthful, not crashing,
+  # if that invariant is ever broken by a future code path).
+  defp replay_result(_operation_id, "add_node", node_id, graph) when is_binary(node_id),
+    do: {:ok, graph, %{node_id: node_id, outcome: :unknown}, :replayed}
+
   defp replay_result(_operation_id, kind, item_id, graph)
-       when kind in ["add_node", "add_pending_fact", "add_pending_learning", "approve_pending"],
+       when kind in ["add_pending_fact", "add_pending_learning", "approve_pending"],
        do: {:ok, graph, item_id, :replayed}
 
   defp replay_result(

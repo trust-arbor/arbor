@@ -163,6 +163,43 @@ defmodule Arbor.Actions.MemoryTest do
       assert roles[:content] == :data
       assert roles[:type] == :control
     end
+
+    test "already_existed is false for a fresh insert and true for an exact duplicate, retaining stored and the stable node_id; duplicate retries do not emit a false knowledge_added signal",
+         %{agent_id: agent_id, context: ctx} do
+      test_pid = self()
+
+      {:ok, sub_id} =
+        Arbor.Signals.subscribe("memory.knowledge_added", fn signal ->
+          if signal.data[:agent_id] == agent_id do
+            send(test_pid, {:knowledge_added, signal.data})
+          end
+
+          :ok
+        end)
+
+      on_exit(fn -> Arbor.Signals.unsubscribe(sub_id) end)
+
+      assert {:ok, first} =
+               Memory.Remember.run(%{content: "dedup visibility fact", type: "fact"}, ctx)
+
+      assert first.already_existed == false
+      assert first.outcome == :created
+      assert first.stored == true
+      node_id = first.node_id
+      assert is_binary(node_id)
+
+      assert_receive {:knowledge_added, %{node_id: ^node_id}}, 1_000
+
+      assert {:ok, second} =
+               Memory.Remember.run(%{content: "dedup visibility fact", type: "fact"}, ctx)
+
+      assert second.already_existed == true
+      assert second.outcome == :deduplicated
+      assert second.stored == true
+      assert second.node_id == node_id
+
+      refute_receive {:knowledge_added, _}, 300
+    end
   end
 
   # ============================================================================
@@ -223,6 +260,24 @@ defmodule Arbor.Actions.MemoryTest do
     test "has taint roles" do
       roles = Memory.Recall.taint_roles()
       assert roles[:query] == :data
+    end
+
+    test "exposes node id alongside the already-computed similarity, without removing existing keys",
+         %{agent_id: agent_id, context: ctx} do
+      content = "id visibility recall content"
+      assert {:ok, entry_id} = Arbor.Memory.index(agent_id, content, %{type: :fact})
+
+      # Querying with the exact indexed content makes the deterministic
+      # hermetic hash-fallback embedding score this as an exact match
+      # (similarity 1.0), avoiding any dependency on a live embedding
+      # service or cosine thresholds.
+      assert {:ok, result} = Memory.Recall.run(%{query: content}, ctx)
+
+      assert [%{id: ^entry_id} = item] = result.results
+      assert item.content == content
+      assert is_float(item.similarity)
+      assert Map.has_key?(item, :type)
+      assert Map.has_key?(item, :metadata)
     end
   end
 
