@@ -281,8 +281,8 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCore do
       when is_map(recon) do
     case recon["effect_id"] do
       effect_id when is_binary(effect_id) and effect_id != "" ->
-        # Journal-scoped: exact payload binding or no executable effect.
-        # Never emit effect_id-only reobserve (C3C1 must not guess identity).
+        # Journal-scoped: require the exact stored payload before any executable
+        # effect. Revoke reobserve carries it; grant preserves its ID-only shape.
         case journal_scoped_reobserve(record, effect_id) do
           {:ok, effect} -> [effect]
           :error -> []
@@ -994,8 +994,8 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCore do
           finish(next, [effect])
 
         :error ->
-          # Missing/malformed journal payload binding: fail closed, never
-          # emit an effect_id-only reobserve that would force C3C1 to guess.
+          # Missing/malformed journal payload binding: fail closed. In
+          # particular, never emit an ID-only revoke that makes C3C1 guess.
           error(:invalid_record)
       end
     end
@@ -1993,9 +1993,9 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCore do
     |> Map.put("payload", entry["payload"])
   end
 
-  # Journal-scoped reobserve: exact stored payload binding only.
-  # Missing/malformed lookup is :error — callers emit no effect or fail the
-  # reducer. Never synthesize an effect_id-only reobserve.
+  # Journal-scoped reobserve requires an exact stored payload binding.
+  # Missing/malformed lookup is :error. Revoke re-emits that payload; grant
+  # preserves the existing ID-only effect shape.
   defp journal_scoped_reobserve(record, effect_id)
        when is_binary(effect_id) and effect_id != "" do
     case journal_entry_by_effect_id(record, effect_id) do
