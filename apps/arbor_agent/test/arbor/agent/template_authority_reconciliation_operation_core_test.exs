@@ -49,6 +49,45 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCoreTest do
 
   defp t(n), do: 1_000 + n
 
+  # Canonical capability id: cap_ + 32 lowercase hex (Security fence grammar).
+  defp cap_id(seed \\ "aa") when is_binary(seed) and byte_size(seed) == 2 do
+    "cap_" <> String.duplicate(seed, 16)
+  end
+
+  defp closed_fence!(cap_id, principal_id, resource_uri, opts \\ []) do
+    fence = %{
+      "kind" => "acknowledged_revoke_fence",
+      "version" => 1,
+      "capability_id" => cap_id,
+      "principal_id" => principal_id,
+      "resource_uri" => resource_uri,
+      "record_id" => Keyword.get(opts, :record_id, "rec_fence_1"),
+      "generation" => Keyword.get(opts, :generation, 1),
+      "revision" => Keyword.get(opts, :revision, 1),
+      "capability_digest" =>
+        Keyword.get(opts, :capability_digest, String.duplicate("ab", 32))
+    }
+
+    assert {:ok, canonical} =
+             Arbor.Security.admit_acknowledged_revoke_fence(fence, %{
+               capability_id: cap_id,
+               principal_id: principal_id,
+               resource_uri: resource_uri
+             })
+
+    canonical
+  end
+
+  defp revoke_payload(cap_id, resource, principal \\ @agent, opts \\ []) do
+    fence = closed_fence!(cap_id, principal, resource, opts)
+
+    %{
+      "capability_id" => cap_id,
+      "resource" => resource,
+      "revocation_fence" => fence
+    }
+  end
+
   defp profile_cas(gen \\ 1, rev \\ 1) do
     %{
       "record_id" => "profile_rec_1",
@@ -162,7 +201,7 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCoreTest do
   test "constructs reserved operation with fence effect and closed JSON record", %{facts: facts} do
     {record, effects} = new!(facts)
 
-    assert record["version"] == 3
+    assert record["version"] == 4
     assert record["kind"] == "template_authority_reconciliation_operation"
     assert record["phase"] == "reserved"
     assert record["status"] == "active"
@@ -447,6 +486,12 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCoreTest do
 
     assert {:error, {:template_authority_reconciliation_operation, :invalid_record}} =
              Core.admit(v2)
+
+    # v3 records fail closed with no migration/synthesis.
+    v3 = Map.put(prepared, "version", 3)
+
+    assert {:error, {:template_authority_reconciliation_operation, :invalid_record}} =
+             Core.admit(v3)
   end
 
   test "admits Policy envelope and rejects bad digests", %{facts: facts, envelope: envelope} do
@@ -682,6 +727,8 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCoreTest do
     assert record["reconciliation_required"] == %{"phase" => "reserved", "effect_id" => nil}
     assert reobserve["effect_type"] == "reobserve_reconcile"
     assert reobserve["phase_intent"] == "reserved"
+    # Phase-level reobserve: no journal payload binding.
+    refute Map.has_key?(reobserve, "payload")
 
     # Restart: admit + next_effects must keep reobserve, not primary fence install
     assert {:ok, admitted} = Core.admit(record)
@@ -689,6 +736,7 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCoreTest do
     assert restart_reobserve["effect_type"] == "reobserve_reconcile"
     assert restart_reobserve["operation_id"] == @op_id
     refute restart_reobserve["effect_type"] == "install_target_dispatch_fence"
+    refute Map.has_key?(restart_reobserve, "payload")
 
     # Observation proves not-applied: clear and re-emit same primary identity
     assert {:ok, record, [retry_primary]} =
@@ -719,6 +767,10 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCoreTest do
 
   test "uncertain grant/revoke retries same effect_id and does not block", %{facts: facts} do
     record = walk_to_runtime_quiesced(facts)
+    rev_cap = cap_id("11")
+    rev_resource = "arbor://fs/write"
+    rev_payload = revoke_payload(rev_cap, rev_resource)
+    fence = rev_payload["revocation_fence"]
 
     assert {:ok, record, effects} =
              Core.plan_capability_effects(record, %{
@@ -727,10 +779,7 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCoreTest do
                  %{
                    "effect_id" => "eff_revoke_1",
                    "effect_type" => "revoke_managed_capability",
-                   "payload" => %{
-                     "capability_id" => "cap_abc123",
-                     "resource" => "arbor://fs/write"
-                   }
+                   "payload" => rev_payload
                  },
                  %{
                    "effect_id" => "eff_grant_1",
@@ -747,7 +796,8 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCoreTest do
     assert [eff] = effects
     assert eff["effect_type"] == "revoke_managed_capability"
     assert eff["effect_id"] == "eff_revoke_1"
-    assert eff["payload"]["capability_id"] == "cap_abc123"
+    assert eff["payload"]["capability_id"] == rev_cap
+    assert eff["payload"]["revocation_fence"] == fence
 
     grant = Enum.at(record["journal"]["entries"], 1)
     assert grant["payload"]["provenance"]["source"] == "template_authority_policy"
@@ -776,18 +826,22 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCoreTest do
 
     assert reobserve["effect_type"] == "reobserve_reconcile"
     assert reobserve["effect_id"] == "eff_revoke_1"
-
     head = hd(record["journal"]["entries"])
+    assert reobserve["payload"] == head["payload"]
+    assert reobserve["payload"]["revocation_fence"] == fence
+
     assert head["state"] == "needs_reconcile"
     assert head["effect_id"] == "eff_revoke_1"
 
-    # Restart after journal uncertain keeps reobserve
+    # Restart after journal uncertain keeps reobserve with exact fence
     assert {:ok, admitted} = Core.admit(record)
     assert [restart_reobserve] = Core.next_effects(admitted)
     assert restart_reobserve["effect_type"] == "reobserve_reconcile"
     assert restart_reobserve["effect_id"] == "eff_revoke_1"
+    assert restart_reobserve["payload"] == head["payload"]
+    assert restart_reobserve["payload"]["revocation_fence"] == fence
 
-    # clear_reconcile re-emits same journal effect identity
+    # clear_reconcile re-emits same journal effect identity + fence
     assert {:ok, record, [retry_eff]} =
              Core.clear_reconcile(admitted, %{"at_unix_ms" => t(12)})
 
@@ -796,6 +850,7 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCoreTest do
     assert retry_eff["effect_id"] == "eff_revoke_1"
     assert retry_eff["effect_type"] == "revoke_managed_capability"
     assert retry_eff["operation_id"] == @op_id
+    assert retry_eff["payload"]["revocation_fence"] == fence
 
     # Success-before-ack style: acknowledge after reobserve cycle
     assert {:ok, record, [reobserve2]} =
@@ -807,6 +862,7 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCoreTest do
              })
 
     assert reobserve2["effect_id"] == "eff_revoke_1"
+    assert reobserve2["payload"]["revocation_fence"] == fence
 
     assert {:ok, record, [next]} =
              Core.acknowledge_effect(record, %{
@@ -835,10 +891,7 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCoreTest do
                  %{
                    "effect_id" => "eff_1",
                    "effect_type" => "revoke_managed_capability",
-                   "payload" => %{
-                     "capability_id" => "cap_1",
-                     "resource" => "arbor://fs/write"
-                   }
+                   "payload" => revoke_payload(cap_id("22"), "arbor://fs/write")
                  }
                ]
              })
@@ -1097,10 +1150,7 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCoreTest do
                  %{
                    "effect_id" => "eff_1",
                    "effect_type" => "revoke_managed_capability",
-                   "payload" => %{
-                     "capability_id" => "cap_1",
-                     "resource" => "arbor://fs/write"
-                   }
+                   "payload" => revoke_payload(cap_id("33"), "arbor://fs/write")
                  }
                ]
              })
@@ -1147,7 +1197,7 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCoreTest do
           "seq" => 0,
           "effect_type" => "revoke_managed_capability",
           "state" => "pending",
-          "payload" => %{"capability_id" => "cap_x", "resource" => "arbor://fs/write"},
+          "payload" => revoke_payload(cap_id("44"), "arbor://fs/write"),
           "acked_at_unix_ms" => nil
         }
       ])
@@ -1242,10 +1292,7 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCoreTest do
                  %{
                    "effect_id" => "eff_a",
                    "effect_type" => "revoke_managed_capability",
-                   "payload" => %{
-                     "capability_id" => "cap_a",
-                     "resource" => "arbor://fs/write"
-                   }
+                   "payload" => revoke_payload(cap_id("55"), "arbor://fs/write")
                  },
                  %{
                    "effect_id" => "eff_b",
@@ -1493,12 +1540,12 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCoreTest do
                  %{
                    "effect_id" => "eff_a",
                    "effect_type" => "revoke_managed_capability",
-                   "payload" => %{"capability_id" => "cap_a", "resource" => "arbor://fs/write"}
+                   "payload" => revoke_payload(cap_id("66"), "arbor://fs/write")
                  },
                  %{
                    "effect_id" => "eff_b",
                    "effect_type" => "revoke_managed_capability",
-                   "payload" => %{"capability_id" => "cap_b", "resource" => "arbor://fs/read"}
+                   "payload" => revoke_payload(cap_id("77"), "arbor://fs/read")
                  }
                ]
              })
@@ -1560,7 +1607,7 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCoreTest do
                  %{
                    "effect_id" => "eff_1",
                    "effect_type" => "revoke_managed_capability",
-                   "payload" => %{"capability_id" => "cap_1", "resource" => "arbor://fs/write"}
+                   "payload" => revoke_payload(cap_id("88"), "arbor://fs/write")
                  }
                ]
              })
@@ -1608,7 +1655,7 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCoreTest do
     refute Map.has_key?(status, "frozen_authority")
     refute Map.has_key?(status, "desired_authority")
     refute inspect(status) =~ replay["anchor_digest"]
-    assert Core.version() == 3
+    assert Core.version() == 4
   end
 
   test "primary retryable phase vocabulary locks the retry-phase admission boundary (source of truth for the projection)",
@@ -1670,7 +1717,7 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCoreTest do
         %{
           "effect_id" => "eff_1",
           "effect_type" => "revoke_managed_capability",
-          "payload" => %{"capability_id" => "cap_1", "resource" => "arbor://fs/write"}
+          "payload" => revoke_payload(cap_id("99"), "arbor://fs/write")
         }
       ])
 
@@ -1699,6 +1746,293 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCoreTest do
 
     assert {:error, {:template_authority_reconciliation_operation, _}} =
              Core.admit(bad_empty_cap)
+  end
+
+  test "revoke_managed_capability requires Security-admitted revocation_fence; mismatches fail closed",
+       %{facts: facts} do
+    record = walk_to_runtime_quiesced(facts)
+    cap = cap_id("a1")
+    resource = "arbor://fs/write"
+    good = revoke_payload(cap, resource)
+
+    # Missing fence (v3 ID-only shape)
+    assert {:error, {:template_authority_reconciliation_operation, _}} =
+             Core.plan_capability_effects(record, %{
+               "at_unix_ms" => t(10),
+               "entries" => [
+                 %{
+                   "effect_id" => "eff_nofence",
+                   "effect_type" => "revoke_managed_capability",
+                   "payload" => %{"capability_id" => cap, "resource" => resource}
+                 }
+               ]
+             })
+
+    # Unknown extra payload key
+    assert {:error, {:template_authority_reconciliation_operation, _}} =
+             Core.plan_capability_effects(record, %{
+               "at_unix_ms" => t(10),
+               "entries" => [
+                 %{
+                   "effect_id" => "eff_extra",
+                   "effect_type" => "revoke_managed_capability",
+                   "payload" => Map.put(good, "extra", "nope")
+                 }
+               ]
+             })
+
+    # Atom-keyed fence map (Security requires binary keys only)
+    f = good["revocation_fence"]
+
+    atom_fence = %{
+      kind: f["kind"],
+      version: f["version"],
+      capability_id: f["capability_id"],
+      principal_id: f["principal_id"],
+      resource_uri: f["resource_uri"],
+      record_id: f["record_id"],
+      generation: f["generation"],
+      revision: f["revision"],
+      capability_digest: f["capability_digest"]
+    }
+
+    assert {:error, {:template_authority_reconciliation_operation, _}} =
+             Core.plan_capability_effects(record, %{
+               "at_unix_ms" => t(10),
+               "entries" => [
+                 %{
+                   "effect_id" => "eff_atom",
+                   "effect_type" => "revoke_managed_capability",
+                   "payload" => %{
+                     "capability_id" => cap,
+                     "resource" => resource,
+                     "revocation_fence" => atom_fence
+                   }
+                 }
+               ]
+             })
+
+    # Malformed fence (wrong kind)
+    bad_kind = Map.put(good["revocation_fence"], "kind", "not_a_fence")
+
+    assert {:error, {:template_authority_reconciliation_operation, _}} =
+             Core.plan_capability_effects(record, %{
+               "at_unix_ms" => t(10),
+               "entries" => [
+                 %{
+                   "effect_id" => "eff_kind",
+                   "effect_type" => "revoke_managed_capability",
+                   "payload" => %{
+                     "capability_id" => cap,
+                     "resource" => resource,
+                     "revocation_fence" => bad_kind
+                   }
+                 }
+               ]
+             })
+
+    # Oversized digest
+    oversized =
+      Map.put(good["revocation_fence"], "capability_digest", String.duplicate("ab", 40))
+
+    assert {:error, {:template_authority_reconciliation_operation, _}} =
+             Core.plan_capability_effects(record, %{
+               "at_unix_ms" => t(10),
+               "entries" => [
+                 %{
+                   "effect_id" => "eff_over",
+                   "effect_type" => "revoke_managed_capability",
+                   "payload" => %{
+                     "capability_id" => cap,
+                     "resource" => resource,
+                     "revocation_fence" => oversized
+                   }
+                 }
+               ]
+             })
+
+    # Principal mismatch (fence principal ≠ target_agent_id)
+    wrong_principal =
+      closed_fence!(cap, "agent_other_principal", resource)
+
+    assert {:error, {:template_authority_reconciliation_operation, _}} =
+             Core.plan_capability_effects(record, %{
+               "at_unix_ms" => t(10),
+               "entries" => [
+                 %{
+                   "effect_id" => "eff_prin",
+                   "effect_type" => "revoke_managed_capability",
+                   "payload" => %{
+                     "capability_id" => cap,
+                     "resource" => resource,
+                     "revocation_fence" => wrong_principal
+                   }
+                 }
+               ]
+             })
+
+    # Resource mismatch
+    wrong_resource_fence = closed_fence!(cap, @agent, "arbor://fs/read")
+
+    assert {:error, {:template_authority_reconciliation_operation, _}} =
+             Core.plan_capability_effects(record, %{
+               "at_unix_ms" => t(10),
+               "entries" => [
+                 %{
+                   "effect_id" => "eff_res",
+                   "effect_type" => "revoke_managed_capability",
+                   "payload" => %{
+                     "capability_id" => cap,
+                     "resource" => resource,
+                     "revocation_fence" => wrong_resource_fence
+                   }
+                 }
+               ]
+             })
+
+    # Capability id mismatch
+    other_cap = cap_id("b2")
+    wrong_cap_fence = closed_fence!(other_cap, @agent, resource)
+
+    assert {:error, {:template_authority_reconciliation_operation, _}} =
+             Core.plan_capability_effects(record, %{
+               "at_unix_ms" => t(10),
+               "entries" => [
+                 %{
+                   "effect_id" => "eff_cap",
+                   "effect_type" => "revoke_managed_capability",
+                   "payload" => %{
+                     "capability_id" => cap,
+                     "resource" => resource,
+                     "revocation_fence" => wrong_cap_fence
+                   }
+                 }
+               ]
+             })
+
+    # Unknown key *inside* revocation_fence (not merely outer payload)
+    nested_extra = Map.put(good["revocation_fence"], "extra_nested", "nope")
+
+    assert {:error, {:template_authority_reconciliation_operation, _}} =
+             Core.plan_capability_effects(record, %{
+               "at_unix_ms" => t(10),
+               "entries" => [
+                 %{
+                   "effect_id" => "eff_nested",
+                   "effect_type" => "revoke_managed_capability",
+                   "payload" => %{
+                     "capability_id" => cap,
+                     "resource" => resource,
+                     "revocation_fence" => nested_extra
+                   }
+                 }
+               ]
+             })
+
+    # Happy path still works; grants unchanged
+    assert {:ok, planned, [eff]} =
+             Core.plan_capability_effects(record, %{
+               "at_unix_ms" => t(10),
+               "entries" => [
+                 %{
+                   "effect_id" => "eff_ok",
+                   "effect_type" => "revoke_managed_capability",
+                   "payload" => good
+                 },
+                 %{
+                   "effect_id" => "eff_grant",
+                   "effect_type" => "grant_managed_capability",
+                   "payload" => %{"resource" => "arbor://fs/read"}
+                 }
+               ]
+             })
+
+    assert_admitted!(planned)
+    assert eff["payload"]["revocation_fence"] == good["revocation_fence"]
+    assert Enum.at(planned["journal"]["entries"], 1)["effect_type"] == "grant_managed_capability"
+
+    # Tampered stored fence cannot be laundered through Core.admit/1 (restart gate).
+    [entry | rest] = planned["journal"]["entries"]
+
+    # Nested unknown key inside the stored fence fails closed on re-admit.
+    nested_tampered =
+      Map.put(entry["payload"]["revocation_fence"], "forged_field", "x")
+
+    nested_entry = put_in(entry, ["payload", "revocation_fence"], nested_tampered)
+    nested_record = put_in(planned, ["journal", "entries"], [nested_entry | rest])
+
+    assert {:error, {:template_authority_reconciliation_operation, :invalid_record}} =
+             Core.admit(nested_record)
+
+    # Principal mismatch against operation target_agent_id fails closed on re-admit.
+    principal_tampered =
+      Map.put(entry["payload"]["revocation_fence"], "principal_id", "agent_forged_other")
+
+    principal_entry = put_in(entry, ["payload", "revocation_fence"], principal_tampered)
+    principal_record = put_in(planned, ["journal", "entries"], [principal_entry | rest])
+
+    assert {:error, {:template_authority_reconciliation_operation, :invalid_record}} =
+             Core.admit(principal_record)
+
+    # Resource URI mismatch fails closed on re-admit.
+    resource_tampered =
+      Map.put(entry["payload"]["revocation_fence"], "resource_uri", "arbor://fs/read")
+
+    resource_entry = put_in(entry, ["payload", "revocation_fence"], resource_tampered)
+    resource_record = put_in(planned, ["journal", "entries"], [resource_entry | rest])
+
+    assert {:error, {:template_authority_reconciliation_operation, :invalid_record}} =
+             Core.admit(resource_record)
+  end
+
+  test "journal-scoped reobserve never emits effect_id-only when payload lookup fails", %{
+    facts: facts
+  } do
+    record = walk_to_runtime_quiesced(facts)
+    payload = revoke_payload(cap_id("c0"), "arbor://fs/write")
+
+    assert {:ok, record, _} =
+             Core.plan_capability_effects(record, %{
+               "at_unix_ms" => t(10),
+               "entries" => [
+                 %{
+                   "effect_id" => "eff_bind",
+                   "effect_type" => "revoke_managed_capability",
+                   "payload" => payload
+                 }
+               ]
+             })
+
+    assert {:ok, record, [reobserve]} =
+             Core.report_effect_outcome(record, %{
+               "effect_id" => "eff_bind",
+               "outcome" => "uncertain",
+               "reason_code" => "timeout",
+               "at_unix_ms" => t(11)
+             })
+
+    assert Map.has_key?(reobserve, "payload")
+    assert reobserve["payload"]["revocation_fence"] == payload["revocation_fence"]
+
+    # Reachable fail-closed: strip payload from the journal entry while recon
+    # still points at the effect_id. next_effects must not invent ID-only reobserve.
+    [entry] = record["journal"]["entries"]
+    stripped = Map.put(entry, "payload", "not-a-map")
+    broken = put_in(record, ["journal", "entries"], [stripped])
+
+    effects = Core.next_effects(broken)
+    assert effects == []
+    refute Enum.any?(effects, &(&1["effect_type"] == "reobserve_reconcile"))
+
+    # Unknown effect_id recon binding also yields no executable effect
+    orphan =
+      record
+      |> Map.put("reconciliation_required", %{
+        "phase" => "capability_effects",
+        "effect_id" => "eff_missing"
+      })
+
+    assert Core.next_effects(orphan) == []
   end
 
   defp json_clean?(value), do: match?({:ok, _}, Jason.encode(value))

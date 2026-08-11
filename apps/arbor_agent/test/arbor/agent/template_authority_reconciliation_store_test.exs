@@ -1209,6 +1209,89 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationStoreTest do
     assert again["operation_id"] == "op1"
   end
 
+  test "persisted revocation_fence survives restart and reobserve carries the exact fence" do
+    start_store!(NodeRestartBackend)
+    assert :ok = Store.attest_authority()
+    target = "agent_fence_persist"
+    open!(target, @digest_a, "op_fence")
+
+    observed = snapshot!(target)
+    observed = ack(observed, "reserved", t(1))
+    observed = prepare(observed, t(2))
+    observed = ack(observed, "prepared", t(3))
+    observed = ack(observed, "deny_all_intent", t(4))
+
+    observed =
+      ack(observed, "deny_all_installed", t(5), %{"runtime_was_running" => true})
+
+    cap_id = "cap_" <> String.duplicate("f1", 16)
+    resource = "arbor://fs/write"
+
+    fence = %{
+      "kind" => "acknowledged_revoke_fence",
+      "version" => 1,
+      "capability_id" => cap_id,
+      "principal_id" => target,
+      "resource_uri" => resource,
+      "record_id" => "rec_persist_fence_1",
+      "generation" => 3,
+      "revision" => 7,
+      "capability_digest" => String.duplicate("cd", 32)
+    }
+
+    assert {:ok, canonical_fence} =
+             Arbor.Security.admit_acknowledged_revoke_fence(fence, %{
+               capability_id: cap_id,
+               principal_id: target,
+               resource_uri: resource
+             })
+
+    observed =
+      plan(observed, t(10), [
+        %{
+          "effect_id" => "eff_revoke_persist",
+          "effect_type" => "revoke_managed_capability",
+          "payload" => %{
+            "capability_id" => cap_id,
+            "resource" => resource,
+            "revocation_fence" => canonical_fence
+          }
+        }
+      ])
+
+    stored_fence =
+      get_in(observed.data, ["journal", "entries", Access.at(0), "payload", "revocation_fence"])
+
+    assert stored_fence == canonical_fence
+
+    # Uncertain outcome so restart next_effects emits journal-scoped reobserve.
+    observed =
+      apply_step!(observed, fn op ->
+        Core.report_effect_outcome(op, %{
+          "effect_id" => "eff_revoke_persist",
+          "outcome" => "uncertain",
+          "reason_code" => "timeout",
+          "at_unix_ms" => t(11)
+        })
+      end)
+
+    stop_recon_store!()
+    start_store!(NodeRestartBackend)
+    assert :ok = Store.attest_authority()
+
+    assert {:ok, fetched} = Store.fetch(target)
+
+    fetched_fence =
+      get_in(fetched, ["journal", "entries", Access.at(0), "payload", "revocation_fence"])
+
+    assert fetched_fence == canonical_fence
+    assert {:ok, admitted} = Core.admit(fetched)
+    assert [reobserve] = Core.next_effects(admitted)
+    assert reobserve["effect_type"] == "reobserve_reconcile"
+    assert reobserve["effect_id"] == "eff_revoke_persist"
+    assert reobserve["payload"]["revocation_fence"] == canonical_fence
+  end
+
   # -------------------------------------------------------------------------
   # Ambiguous acknowledged-mutation reconciliation (outcome_unknown)
   # -------------------------------------------------------------------------

@@ -135,7 +135,29 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationStatusProjectionTest do
                "runtime_was_running" => true
              })
 
-    secret_cap = "cap_secret_should_not_leak"
+    # Canonical cap id + distinctive fence sentinels must never appear publicly.
+    secret_cap = "cap_" <> String.duplicate("de", 16)
+    secret_digest = String.duplicate("ef", 32)
+    secret_record_id = "rec_fence_secret_sentinel_xyz"
+
+    fence = %{
+      "kind" => "acknowledged_revoke_fence",
+      "version" => 1,
+      "capability_id" => secret_cap,
+      "principal_id" => @agent,
+      "resource_uri" => "arbor://fs/write",
+      "record_id" => secret_record_id,
+      "generation" => 1,
+      "revision" => 1,
+      "capability_digest" => secret_digest
+    }
+
+    assert {:ok, canonical_fence} =
+             Arbor.Security.admit_acknowledged_revoke_fence(fence, %{
+               capability_id: secret_cap,
+               principal_id: @agent,
+               resource_uri: "arbor://fs/write"
+             })
 
     assert {:ok, record, _} =
              Op.plan_capability_effects(record, %{
@@ -146,16 +168,26 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationStatusProjectionTest do
                    "effect_type" => "revoke_managed_capability",
                    "payload" => %{
                      "capability_id" => secret_cap,
-                     "resource" => "arbor://fs/write"
+                     "resource" => "arbor://fs/write",
+                     "revocation_fence" => canonical_fence
                    }
                  }
                ]
              })
 
+    # Private journal holds the fence; public projection must not.
+    assert hd(record["journal"]["entries"])["payload"]["revocation_fence"] == canonical_fence
+
     assert {:ok, status} = Proj.project(record)
     encoded = Jason.encode!(status)
 
     refute encoded =~ secret_cap
+    refute encoded =~ secret_digest
+    refute encoded =~ secret_record_id
+    refute encoded =~ "acknowledged_revoke_fence"
+    refute encoded =~ "revocation_fence"
+    refute encoded =~ "capability_digest"
+    refute encoded =~ "resource_uri"
     refute encoded =~ "capability_id"
     refute encoded =~ @caller
     refute encoded =~ "profile_secret_rec"
@@ -168,10 +200,25 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationStatusProjectionTest do
     refute Map.has_key?(status, "profile_cas")
     refute Map.has_key?(status, "frozen_authority")
     refute Map.has_key?(status, "profile_mutation_replay")
+    refute status_contains_fence_key?(status)
     assert status["journal_summary"]["entry_count"] == 1
     assert status["journal_summary"]["pending_count"] == 1
     assert status["journal_summary"]["succeeded_count"] == 0
   end
+
+  defp status_contains_fence_key?(value) when is_map(value) do
+    fence_keys = MapSet.new(~w(revocation_fence capability_digest resource_uri capability_id))
+
+    Enum.any?(value, fn {k, v} ->
+      (is_binary(k) and MapSet.member?(fence_keys, k)) or status_contains_fence_key?(v)
+    end)
+  end
+
+  defp status_contains_fence_key?(value) when is_list(value) do
+    Enum.any?(value, &status_contains_fence_key?/1)
+  end
+
+  defp status_contains_fence_key?(_), do: false
 
   test "blocked projection retains outstanding and fence_required", %{record: record} do
     assert {:ok, blocked, _} =

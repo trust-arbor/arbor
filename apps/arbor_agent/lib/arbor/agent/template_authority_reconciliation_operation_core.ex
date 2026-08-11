@@ -9,7 +9,7 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCore do
   alias Arbor.Agent.TemplateAuthorityCapabilityProjection
   alias Arbor.Agent.TemplateAuthorityPolicy
 
-  @version 3
+  @version 4
   @kind "template_authority_reconciliation_operation"
 
   @phases ~w(
@@ -106,11 +106,11 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCore do
                 "payload",
                 "acked_at_unix_ms"
               ])
-  @revoke_payload_keys MapSet.new(["capability_id", "resource"])
+  @revoke_payload_keys MapSet.new(["capability_id", "resource", "revocation_fence"])
   @grant_payload_keys MapSet.new(["resource", "constraints", "provenance"])
   @grant_provenance_keys MapSet.new(["source", "version", "template", "template_digest"])
   @grant_plan_payload_keys MapSet.new(["resource", "constraints", "provenance"])
-  @revoke_plan_payload_keys MapSet.new(["capability_id", "resource"])
+  @revoke_plan_payload_keys MapSet.new(["capability_id", "resource", "revocation_fence"])
 
   @new_fact_keys MapSet.new([
                    "operation_id",
@@ -279,13 +279,28 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCore do
   @spec next_effects(record()) :: [effect()]
   def next_effects(%{"status" => "active", "reconciliation_required" => recon} = record)
       when is_map(recon) do
-    [reobserve_effect(record, recon["effect_id"])]
+    case recon["effect_id"] do
+      effect_id when is_binary(effect_id) and effect_id != "" ->
+        # Journal-scoped: exact payload binding or no executable effect.
+        # Never emit effect_id-only reobserve (C3C1 must not guess identity).
+        case journal_scoped_reobserve(record, effect_id) do
+          {:ok, effect} -> [effect]
+          :error -> []
+        end
+
+      _ ->
+        [phase_reobserve(record)]
+    end
   end
 
   def next_effects(%{"status" => "active"} = record) do
     case journal_head(record) do
-      %{"state" => "needs_reconcile"} = entry ->
-        [reobserve_effect(record, entry["effect_id"])]
+      %{"state" => "needs_reconcile", "effect_id" => effect_id}
+      when is_binary(effect_id) and effect_id != "" ->
+        case journal_scoped_reobserve(record, effect_id) do
+          {:ok, effect} -> [effect]
+          :error -> []
+        end
 
       _ ->
         primary_next_effects(record)
@@ -959,20 +974,30 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCore do
           end
         end)
 
-      record
-      |> put_in(["journal", "entries"], entries)
-      |> Map.put("retry", %{
-        "attempt" => attempt,
-        "max_attempts" => retry["max_attempts"],
-        "last_code" => reason_code,
-        "last_effect_id" => effect_id
-      })
-      |> Map.put("reconciliation_required", %{
-        "phase" => "capability_effects",
-        "effect_id" => effect_id
-      })
-      |> touch(at)
-      |> finish(fn r -> [reobserve_effect(r, effect_id)] end)
+      next =
+        record
+        |> put_in(["journal", "entries"], entries)
+        |> Map.put("retry", %{
+          "attempt" => attempt,
+          "max_attempts" => retry["max_attempts"],
+          "last_code" => reason_code,
+          "last_effect_id" => effect_id
+        })
+        |> Map.put("reconciliation_required", %{
+          "phase" => "capability_effects",
+          "effect_id" => effect_id
+        })
+        |> touch(at)
+
+      case journal_scoped_reobserve(next, effect_id) do
+        {:ok, effect} ->
+          finish(next, [effect])
+
+        :error ->
+          # Missing/malformed journal payload binding: fail closed, never
+          # emit an effect_id-only reobserve that would force C3C1 to guess.
+          error(:invalid_record)
+      end
     end
   end
 
@@ -995,7 +1020,7 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCore do
         "effect_id" => nil
       })
       |> touch(at)
-      |> finish(fn r -> [reobserve_effect(r, nil)] end)
+      |> finish(fn r -> [phase_reobserve(r)] end)
     end
   end
 
@@ -1126,12 +1151,19 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCore do
     if MapSet.member?(seen, effect_id), do: error(:invalid_record), else: :ok
   end
 
-  defp admit_journal_payload("revoke_managed_capability", payload, _record) do
+  defp admit_journal_payload("revoke_managed_capability", payload, record) do
     with {:ok, payload} <- admit_event_facts(payload || %{}, @revoke_plan_payload_keys),
          {:ok, cap_id} <-
            require_id(payload, "capability_id", @max_capability_id_bytes, @operation_id_re),
-         {:ok, resource} <- admit_resource(Map.get(payload, "resource")) do
-      {:ok, %{"capability_id" => cap_id, "resource" => resource}}
+         {:ok, resource} <- admit_resource(Map.get(payload, "resource")),
+         {:ok, fence} <-
+           admit_revocation_fence(Map.get(payload, "revocation_fence"), cap_id, resource, record) do
+      {:ok,
+       %{
+         "capability_id" => cap_id,
+         "resource" => resource,
+         "revocation_fence" => fence
+       }}
     end
   end
 
@@ -1177,6 +1209,30 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCore do
         error(reason)
     end
   end
+
+  # Security is the sole fence schema/canonicalization authority. Expectations
+  # bind payload capability_id, operation target_agent_id, and the already-
+  # normalized resource URI. Store only the returned canonical string-keyed map.
+  defp admit_revocation_fence(fence, capability_id, resource, record)
+       when is_map(fence) and not is_struct(fence) and is_binary(capability_id) and
+              is_binary(resource) do
+    expectations = %{
+      capability_id: capability_id,
+      principal_id: record["target_agent_id"],
+      resource_uri: resource
+    }
+
+    case Arbor.Security.admit_acknowledged_revoke_fence(fence, expectations) do
+      {:ok, canonical} when is_map(canonical) ->
+        {:ok, canonical}
+
+      _ ->
+        error(:invalid_record)
+    end
+  end
+
+  defp admit_revocation_fence(_fence, _capability_id, _resource, _record),
+    do: error(:invalid_record)
 
   defp admit_grant_resource_constraints(resource, constraints) do
     case TemplateAuthorityPolicy.normalize_capabilities([
@@ -1685,13 +1741,21 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCore do
 
   defp validate_entry_payload(
          %{"effect_type" => "revoke_managed_capability", "payload" => payload},
-         _record
+         record
        )
        when is_map(payload) do
     with :ok <- closed_keyset(payload, @revoke_payload_keys),
          true <- valid_id?(payload["capability_id"], @max_capability_id_bytes, @operation_id_re),
          {:ok, resource} <- admit_resource(payload["resource"]),
-         true <- payload["resource"] == resource do
+         true <- payload["resource"] == resource,
+         {:ok, fence} <-
+           admit_revocation_fence(
+             payload["revocation_fence"],
+             payload["capability_id"],
+             resource,
+             record
+           ),
+         true <- payload["revocation_fence"] == fence do
       :ok
     else
       {:error, _} = err -> err
@@ -1929,17 +1993,41 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCore do
     |> Map.put("payload", entry["payload"])
   end
 
-  defp reobserve_effect(record, effect_id) do
-    effect =
-      base_effect(record, "reobserve_reconcile", record["phase"])
-      |> Map.put("idempotent_replay", true)
+  # Journal-scoped reobserve: exact stored payload binding only.
+  # Missing/malformed lookup is :error — callers emit no effect or fail the
+  # reducer. Never synthesize an effect_id-only reobserve.
+  defp journal_scoped_reobserve(record, effect_id)
+       when is_binary(effect_id) and effect_id != "" do
+    case journal_entry_by_effect_id(record, effect_id) do
+      %{"payload" => payload} when is_map(payload) ->
+        effect =
+          base_effect(record, "reobserve_reconcile", record["phase"])
+          |> Map.put("idempotent_replay", true)
+          |> Map.put("effect_id", effect_id)
+          |> Map.put("payload", payload)
 
-    if is_binary(effect_id) and effect_id != "" do
-      Map.put(effect, "effect_id", effect_id)
-    else
-      effect
+        {:ok, effect}
+
+      _ ->
+        :error
     end
   end
+
+  defp journal_scoped_reobserve(_record, _effect_id), do: :error
+
+  # Phase-level reobserve (primary phases): no journal effect_id, no payload.
+  defp phase_reobserve(record) do
+    base_effect(record, "reobserve_reconcile", record["phase"])
+    |> Map.put("idempotent_replay", true)
+  end
+
+  defp journal_entry_by_effect_id(record, effect_id)
+       when is_binary(effect_id) and effect_id != "" do
+    entries = get_in(record, ["journal", "entries"]) || []
+    Enum.find(entries, fn e -> e["effect_id"] == effect_id end)
+  end
+
+  defp journal_entry_by_effect_id(_record, _effect_id), do: nil
 
   defp remove_fence_effect(record) do
     %{
