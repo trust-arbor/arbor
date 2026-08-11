@@ -2372,6 +2372,190 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     assert_store_denies_and_restarts(fn -> Security.acknowledged_grant(opts) end)
   end
 
+  # ==========================================================================
+  # Phase 4C C3A upgrade-safety certification regressions. A current-v1 state
+  # reached at an upgrade/reload boundary is accepted only after authoritative
+  # deep validation; certified steady callbacks stay O(1). A present nil or any
+  # unsupported state_version fails closed with one fixed bounded reason that
+  # never embeds observed state data.
+  # ==========================================================================
+
+  test "security regression: deep validation rejects a malformed current by_resource index" do
+    fresh_isolated_store()
+
+    assert {:ok, %Capability{}} =
+             Security.grant(
+               principal: "agent_ack_dv_byres_seed",
+               resource: "arbor://fs/read/ack-dv-byres-seed"
+             )
+
+    # Corrupt the canonical by_resource projection (empty it) while keeping a
+    # valid by_id and a current state_version. Drop the private certificate so
+    # the state is UNCERTIFIED and the next callback must deep-validate once.
+    :sys.replace_state(CapabilityStore, fn state ->
+      state
+      |> Map.put(:by_resource, %{})
+      |> Map.delete(:__c3a_cert__)
+    end)
+
+    # Unrelated grant so the parent (no deep validation) admits it and the deny
+    # assertion fails for the intended reason.
+    unrelated =
+      det_grant_opts(
+        "dv-byres-other",
+        "agent_ack_dv_byres_other",
+        "arbor://fs/read/ack-dv-byres-other"
+      )
+
+    assert_store_denies_and_restarts(fn -> Security.acknowledged_grant(unrelated) end)
+  end
+
+  test "security regression: deep validation rejects a malformed current pending intent" do
+    fresh_isolated_store()
+
+    principal = "agent_ack_dv_curpi"
+    canon = canonical_resource_for("arbor://fs/read/ack-dv-curpi-x")
+    bad_id = det_id("dv-curpi-bad")
+
+    # A current-v1 state carrying a pending intent with a malformed payload
+    # (not binary, not the legacy sentinel). Drop the certificate so the next
+    # callback deep-validates once.
+    :sys.replace_state(CapabilityStore, fn state ->
+      state
+      |> Map.put(:pending_intents, %{bad_id => {principal, canon, %{bad: :payload}}})
+      |> Map.delete(:__c3a_cert__)
+    end)
+
+    # Unrelated resource/principal so the parent admits (no conflict with the
+    # bad intent) and the deny assertion fails for the intended reason.
+    unrelated =
+      det_grant_opts(
+        "dv-curpi-other",
+        "agent_ack_dv_curpi_other",
+        "arbor://fs/read/ack-dv-curpi-other"
+      )
+
+    assert_store_denies_and_restarts(fn -> Security.acknowledged_grant(unrelated) end)
+  end
+
+  test "security regression: legacy migration rejects a malformed three-field intent" do
+    fresh_isolated_store()
+
+    principal = "agent_ack_dv_legacy3"
+    canon = canonical_resource_for("arbor://fs/read/ack-dv-legacy3-x")
+    bad_id = det_id("dv-legacy3-bad")
+
+    # A pre-v1 state (state_version absent) carrying a three-field intent with
+    # a malformed payload. Base migration keeps {p, r, _} whenever p, r are
+    # binaries; the fix deep-validates the migrated output and rejects it.
+    :sys.replace_state(CapabilityStore, fn state ->
+      state
+      |> Map.put(:pending_intents, %{bad_id => {principal, canon, %{bad: :payload}}})
+      |> Map.delete(:state_version)
+    end)
+
+    unrelated =
+      det_grant_opts(
+        "dv-legacy3-other",
+        "agent_ack_dv_legacy3_other",
+        "arbor://fs/read/ack-dv-legacy3-other"
+      )
+
+    assert_store_denies_and_restarts(fn -> Security.acknowledged_grant(unrelated) end)
+  end
+
+  test "security regression: explicit nil state_version denies before mutation" do
+    fresh_isolated_store()
+
+    opts = det_grant_opts("dv-nil", "agent_ack_dv_nil", "arbor://fs/read/ack-dv-nil")
+
+    :sys.replace_state(CapabilityStore, fn state -> %{state | state_version: nil} end)
+
+    assert_store_denies_and_restarts(fn -> Security.acknowledged_grant(opts) end)
+
+    # No mutation occurred: the grant id was never durably admitted.
+    assert {:error, :not_found} =
+             BufferedStore.authoritative_get(opts[:capability_id], name: @capability_store)
+  end
+
+  # Pure-OTP regressions: exercise code_change/3 directly with crafted states
+  # (no live process, no setup). code_change always forces deep validation of a
+  # current-v1 state regardless of any certificate.
+
+  test "pure OTP regression: code_change deep-validates a current state" do
+    valid = minimal_valid_current_state()
+
+    assert {:ok, certified} = CapabilityStore.code_change(0, valid, [])
+    assert certified.state_version == 1
+
+    {cap_id, %Capability{} = cap} = valid |> Map.get(:by_id) |> Enum.at(0)
+
+    # by_resource does not equal the canonical rebuild from by_id.
+    assert {:error, _} =
+             CapabilityStore.code_change(0, %{valid | by_resource: %{}}, [])
+
+    # by_id key != value.id (identity mismatch).
+    assert {:error, _} =
+             CapabilityStore.code_change(0, %{valid | by_id: %{("wrong_" <> cap_id) => cap}}, [])
+
+    # by_id field non-binary (principal_id not a binary), key still == id.
+    assert {:error, _} =
+             CapabilityStore.code_change(
+               0,
+               %{valid | by_id: %{cap_id => %Capability{cap | principal_id: 123}}},
+               []
+             )
+
+    # by_id ids and resource URIs must also be binary before canonical indexing.
+    assert {:error, _} =
+             CapabilityStore.code_change(
+               0,
+               %{valid | by_id: %{123 => %Capability{cap | id: 123}}},
+               []
+             )
+
+    assert {:error, _} =
+             CapabilityStore.code_change(
+               0,
+               %{valid | by_id: %{cap_id => %Capability{cap | resource_uri: 123}}},
+               []
+             )
+
+    # Unsupported pending-intent shape.
+    assert {:error, _} =
+             CapabilityStore.code_change(0, %{valid | pending_intents: %{"y" => {:bad}}}, [])
+
+    for intents <- [
+          %{123 => {"agent", "arbor://fs/read/intent", "payload"}},
+          %{"intent" => {123, "arbor://fs/read/intent", "payload"}},
+          %{"intent" => {"agent", 123, "payload"}},
+          %{"intent" => {"agent", "arbor://fs/read/intent", :unsupported_payload}}
+        ] do
+      assert {:error, _} =
+               CapabilityStore.code_change(0, %{valid | pending_intents: intents}, [])
+    end
+
+    valid_intents = %{
+      "binary_payload" => {"agent", "arbor://fs/read/intent", "payload"},
+      "legacy_sentinel" => {"agent", "arbor://fs/read/legacy-intent", :legacy_uncertain_identity}
+    }
+
+    assert {:ok, _} =
+             CapabilityStore.code_change(0, %{valid | pending_intents: valid_intents}, [])
+  end
+
+  test "pure OTP regression: unsupported state_version reasons are bounded" do
+    valid = minimal_valid_current_state()
+
+    for v <- [nil, 2, :weird, "1"] do
+      result = CapabilityStore.code_change(0, %{valid | state_version: v}, [])
+
+      assert result == {:error, :unsupported_state_version},
+             "version #{inspect(v)} resolved to #{inspect(result)}, " <>
+               "expected the fixed bounded reason {:error, :unsupported_state_version}"
+    end
+  end
+
   defp simulate_pre_c3a_state do
     :sys.replace_state(CapabilityStore, fn state ->
       state
@@ -2412,6 +2596,39 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       {:ok, parsed} -> Arbor.Contracts.Security.CapabilityUri.canonical(parsed)
       _ -> uri
     end
+  end
+
+  # A minimal, well-formed current-v1 state for the pure-OTP code_change/3
+  # regressions: by_id keyed by cap.id, by_resource built from the canonical
+  # resource key, empty pending ledger. No live process required.
+  defp minimal_valid_current_state do
+    {:ok, cap} =
+      Capability.new(resource_uri: "arbor://fs/read/otp-dv", principal_id: "agent_otp_dv")
+
+    key = {cap.principal_id, canonical_resource_for(cap.resource_uri)}
+
+    %{
+      by_id: %{cap.id => cap},
+      by_principal: %{cap.principal_id => [cap.id]},
+      by_resource: %{key => MapSet.new([cap.id])},
+      pending_intents: %{},
+      by_issuer: %{},
+      by_parent: %{},
+      by_usage: %{},
+      state_version: 1,
+      signal_sync: nil,
+      stats: %{
+        total_granted: 0,
+        total_revoked: 0,
+        total_expired: 0,
+        total_cascade_revoked: 0,
+        restore_scanned: 0,
+        restore_active: 0,
+        restore_expired: 0,
+        restore_superseded: 0,
+        restore_rejected: 0
+      }
+    }
   end
 
   defp resource_index_holds?(by_resource, principal, resource, id) do
