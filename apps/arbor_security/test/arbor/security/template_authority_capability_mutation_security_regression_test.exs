@@ -351,11 +351,19 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
   end
 
   defp restore_security_children do
+    terminate_security_child(CapabilityStore)
     stop_named_process(CapabilityStore)
     stop_named_process(@capability_store)
 
     Enum.each(@security_children, &restart_security_child!/1)
     assert_security_children_alive!()
+  end
+
+  defp terminate_security_child(child_id) do
+    case Supervisor.terminate_child(@security_supervisor, child_id) do
+      :ok -> :ok
+      {:error, :not_found} -> :ok
+    end
   end
 
   defp restart_security_child!(child_id) do
@@ -2109,17 +2117,22 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     fresh_isolated_store()
 
     principal = "agent_upgrade_g4"
+    resource = "arbor://fs/read/upgrade-g4-exp"
     past = DateTime.add(DateTime.utc_now(), -1, :second)
 
     assert {:ok, %Capability{id: keep_id}} =
              Security.grant(principal: principal, resource: "arbor://fs/read/upgrade-g4-keep")
 
-    assert {:ok, %Capability{id: exp_id}} =
-             Security.grant(
-               principal: principal,
-               resource: "arbor://fs/read/upgrade-g4-exp",
-               expires_at: past
+    assert {:ok, expiring} =
+             Capability.new(
+               principal_id: principal,
+               resource_uri: resource,
+               expires_at: DateTime.add(DateTime.utc_now(), 60, :second)
              )
+
+    expired = %{expiring | expires_at: past}
+    exp_id = expired.id
+    assert {:ok, :stored} = CapabilityStore.put(expired)
 
     simulate_pre_c3a_state()
 
@@ -2170,6 +2183,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     assert resource_index_holds?(
              :sys.get_state(CapabilityStore).by_resource,
              principal,
+             resource,
              remote_id
            )
 
@@ -2193,6 +2207,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     refute resource_index_holds?(
              :sys.get_state(CapabilityStore).by_resource,
              principal,
+             resource,
              remote_id
            )
   end
@@ -2208,18 +2223,18 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
 
     simulate_pre_c3a_state()
 
-    :ok = :sys.change_code(CapabilityStore, Arbor.Security.CapabilityStore, 0, [])
+    change_capability_store_code()
 
     state = :sys.get_state(CapabilityStore)
     assert state.state_version == 1
-    assert resource_index_holds?(state.by_resource, principal, cap_id)
+    assert resource_index_holds?(state.by_resource, principal, resource, cap_id)
     assert state.pending_intents == %{}
 
     assert {:error, :resource_conflict} =
              Security.acknowledged_grant(det_grant_opts("upgrade-cc-other", principal, resource))
 
     snapshot = :sys.get_state(CapabilityStore)
-    :ok = :sys.change_code(CapabilityStore, Arbor.Security.CapabilityStore, 0, [])
+    change_capability_store_code()
     assert :sys.get_state(CapabilityStore) == snapshot
   end
 
@@ -2291,8 +2306,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       |> Map.delete(:state_version)
     end)
 
-    assert {:error, :capability_store_unavailable} = Security.acknowledged_grant(opts)
-    assert Process.whereis(CapabilityStore) == nil
+    assert_store_denies_and_restarts(fn -> Security.acknowledged_grant(opts) end)
   end
 
   test "security regression: malformed pending_intent entry shape fails closed" do
@@ -2308,8 +2322,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       |> Map.delete(:state_version)
     end)
 
-    assert {:error, :capability_store_unavailable} = Security.acknowledged_grant(opts)
-    assert Process.whereis(CapabilityStore) == nil
+    assert_store_denies_and_restarts(fn -> Security.acknowledged_grant(opts) end)
   end
 
   test "security regression: malformed by_id value fails closed" do
@@ -2324,8 +2337,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       |> Map.delete(:state_version)
     end)
 
-    assert {:error, :capability_store_unavailable} = Security.acknowledged_grant(opts)
-    assert Process.whereis(CapabilityStore) == nil
+    assert_store_denies_and_restarts(fn -> Security.acknowledged_grant(opts) end)
   end
 
   test "security regression: unsupported future state version fails closed" do
@@ -2336,8 +2348,28 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
 
     :sys.replace_state(CapabilityStore, fn state -> %{state | state_version: 2} end)
 
-    assert {:error, :capability_store_unavailable} = Security.acknowledged_grant(opts)
-    assert Process.whereis(CapabilityStore) == nil
+    assert_store_denies_and_restarts(fn -> Security.acknowledged_grant(opts) end)
+  end
+
+  test "security regression: present :missing pending_intents value fails closed" do
+    fresh_isolated_store()
+
+    principal = "agent_upgrade_missing_sentinel"
+
+    opts =
+      det_grant_opts(
+        "upgrade-missing-sentinel",
+        principal,
+        "arbor://fs/read/upgrade-missing-sentinel"
+      )
+
+    :sys.replace_state(CapabilityStore, fn state ->
+      state
+      |> Map.put(:pending_intents, :missing)
+      |> Map.delete(:state_version)
+    end)
+
+    assert_store_denies_and_restarts(fn -> Security.acknowledged_grant(opts) end)
   end
 
   defp simulate_pre_c3a_state do
@@ -2351,6 +2383,30 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     :ok
   end
 
+  defp change_capability_store_code do
+    :ok = :sys.suspend(CapabilityStore)
+
+    try do
+      :ok = :sys.change_code(CapabilityStore, Arbor.Security.CapabilityStore, 0, [])
+    after
+      :ok = :sys.resume(CapabilityStore)
+    end
+  end
+
+  defp assert_store_denies_and_restarts(call) do
+    old_pid = Process.whereis(CapabilityStore)
+    Process.unlink(old_pid)
+    monitor = Process.monitor(old_pid)
+
+    assert {:error, :capability_store_unavailable} = call.()
+    assert_receive {:DOWN, ^monitor, :process, ^old_pid, _reason}, 1_000
+    assert Process.whereis(CapabilityStore) == nil
+
+    assert {:ok, new_pid} = Supervisor.restart_child(@security_supervisor, CapabilityStore)
+    assert new_pid != old_pid
+    assert :sys.get_state(new_pid).state_version == 1
+  end
+
   defp canonical_resource_for(uri) do
     case Arbor.Contracts.Security.CapabilityUri.parse(uri) do
       {:ok, parsed} -> Arbor.Contracts.Security.CapabilityUri.canonical(parsed)
@@ -2358,11 +2414,10 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     end
   end
 
-  defp resource_index_holds?(by_resource, principal, id) do
-    Enum.any?(by_resource, fn
-      {{^principal, _resource}, ids} -> MapSet.member?(ids, id)
-      _other -> false
-    end)
+  defp resource_index_holds?(by_resource, principal, resource, id) do
+    by_resource
+    |> Map.get({principal, canonical_resource_for(resource)}, MapSet.new())
+    |> MapSet.member?(id)
   end
 
   # ==========================================================================
