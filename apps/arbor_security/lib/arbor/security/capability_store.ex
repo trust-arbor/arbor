@@ -377,14 +377,12 @@ defmodule Arbor.Security.CapabilityStore do
 
   def prepare_acknowledged_revoke(_capability_id), do: {:error, :outcome_unknown}
 
-  @doc """
-  Prepare a fence only when the current verified occupant matches an expected
-  signed identity (capability id, principal, resource, complete payload digest).
-
-  Different same-id payload is `:identity_conflict` with zero mutation.
-  Same-payload re-grant may return a fresh fence bound to the replacement
-  Record's generation and revision.
-  """
+  # Internal entry for capability-bound prepare. Public surface is
+  # `Arbor.Security.prepare_acknowledged_revoke/1`, which admits, verifies the
+  # current-authority signature on a chain-stripped verification copy, and
+  # reduces to a closed expected identity before calling this function.
+  # Only the four-key expected map crosses this owner mailbox.
+  @doc false
   @spec prepare_acknowledged_revoke_expected(map()) ::
           {:ok, map()}
           | {:error,

@@ -4,7 +4,22 @@ defmodule Arbor.Security.RevocationFence do
 
   Owns the closed keyset, JSON-safe bounds, domain-separated capability digest,
   construction, admission, expected-identity derivation, and observed matching.
-  Performs no IO, store access, GenServer calls, logging, or signals.
+
+  Pure only: no IO, store access, GenServer calls, logging, or signals.
+  Cryptographic current-authority proof of a caller Capability is the public
+  facade's responsibility (`Arbor.Security`); this module admits shape/bounds
+  and reduces to a closed expected identity. CapabilityStore re-admits the
+  closed identity as defense in depth before its one authoritative read.
+
+  ## Delegation chain boundary
+
+  `delegation_chain` is excluded from `Capability.signing_payload/1` and from
+  the closed expected identity. Nested chain constraints/signatures are
+  legitimate opaque record state. Nested values are neither traversed,
+  serialized, hashed, nor copied across owner mailboxes on the prepare path;
+  only top-level list cardinality and entry-map shape are gated. Verification
+  copies strip the chain to `[]` so SystemAuthority never receives nested
+  chain content.
   """
 
   alias Arbor.Contracts.Security.Capability
@@ -38,6 +53,8 @@ defmodule Arbor.Security.RevocationFence do
   @max_signature_bytes 64
   @max_chain_len 64
   @max_chain_entry_keys 16
+  @max_zone_bytes 256
+  @max_abs_offset_seconds 86_400
   @signed_int_min -9_223_372_036_854_775_808
   @signed_int_max_excl 9_223_372_036_854_775_808
 
@@ -49,7 +66,9 @@ defmodule Arbor.Security.RevocationFence do
                           ])
   @expectations_keys MapSet.new([:capability_id, :principal_id, :resource_uri])
 
-  @type fence :: %{String.t() => term()}
+  @type fence :: %{
+          required(String.t()) => String.t() | pos_integer()
+        }
 
   @type expected_identity :: %{
           required(:capability_id) => String.t(),
@@ -131,9 +150,35 @@ defmodule Arbor.Security.RevocationFence do
   def matches_observed?(_fence, _cap, _tokens), do: false
 
   @doc """
-  Cheaply validate a caller Capability and reduce it to a closed expected identity.
+  Pure primitive admission of a caller Capability for capability-bound prepare.
+
+  Validates shape/bounds (including exact 64-byte signature shape and DateTime
+  primitive fields) without crypto, hashing, or owner calls. On success returns
+  a verification copy with `delegation_chain` stripped to `[]` so nested chain
+  state never crosses into SystemAuthority or CapabilityStore mailboxes.
   """
-  @spec expected_identity(Capability.t()) ::
+  @spec admit_expected_for_prepare(term()) ::
+          {:ok, Capability.t()} | {:error, :invalid_request}
+  def admit_expected_for_prepare(%Capability{} = cap) do
+    with :ok <- admit_expected_capability(cap) do
+      # Strip chain after top-level shape gate; do not copy nested entries.
+      {:ok, %{cap | delegation_chain: []}}
+    end
+  rescue
+    _ -> {:error, :invalid_request}
+  catch
+    _, _ -> {:error, :invalid_request}
+  end
+
+  def admit_expected_for_prepare(_), do: {:error, :invalid_request}
+
+  @doc """
+  Total-safe validation and reduction of a Capability to a closed expected identity.
+
+  Always re-admits primitive fields before `signing_payload/1` / hashing.
+  Does not trust prior admission.
+  """
+  @spec expected_identity(term()) ::
           {:ok, expected_identity()} | {:error, :invalid_request}
   def expected_identity(%Capability{} = cap) do
     with :ok <- admit_expected_capability(cap) do
@@ -154,7 +199,7 @@ defmodule Arbor.Security.RevocationFence do
   def expected_identity(_), do: {:error, :invalid_request}
 
   @doc """
-  Re-admit a closed expected identity at the store boundary.
+  Re-admit a closed expected identity at the store boundary (defense in depth).
   """
   @spec admit_expected_identity(term()) ::
           {:ok, expected_identity()} | {:error, :invalid_request}
@@ -386,8 +431,8 @@ defmodule Arbor.Security.RevocationFence do
     with :ok <- admit_cap_id(cap.id),
          :ok <- admit_required_utf8(cap.principal_id, @max_principal_bytes),
          :ok <- admit_required_utf8(cap.resource_uri, @max_resource_bytes),
-         :ok <- admit_optional_utf8(cap.issuer_id),
-         :ok <- admit_optional_parent_id(cap.parent_capability_id),
+         :ok <- admit_required_utf8(cap.issuer_id, @max_scalar_bytes),
+         :ok <- admit_parent_capability_id(cap.parent_capability_id),
          :ok <- admit_optional_utf8(cap.session_id),
          :ok <- admit_optional_utf8(cap.task_id),
          :ok <- admit_optional_utf8(cap.principal_scope),
@@ -427,15 +472,16 @@ defmodule Arbor.Security.RevocationFence do
 
   defp admit_optional_utf8(_), do: {:error, :invalid_request}
 
-  defp admit_optional_parent_id(nil), do: :ok
+  # nil or canonical capability id only — empty string is not canonical.
+  defp admit_parent_capability_id(nil), do: :ok
 
-  defp admit_optional_parent_id(id) when is_binary(id) do
+  defp admit_parent_capability_id(id) when is_binary(id) do
     cond do
-      byte_size(id) == 0 ->
-        :ok
-
       # Size-first bound before UTF-8 scan so attacker-sized binaries fail cheaply.
       byte_size(id) > @max_scalar_bytes ->
+        {:error, :invalid_request}
+
+      byte_size(id) == 0 ->
         {:error, :invalid_request}
 
       not String.valid?(id) ->
@@ -449,20 +495,86 @@ defmodule Arbor.Security.RevocationFence do
     end
   end
 
-  defp admit_optional_parent_id(_), do: {:error, :invalid_request}
+  defp admit_parent_capability_id(_), do: {:error, :invalid_request}
 
-  defp admit_required_datetime(%DateTime{} = dt) do
-    _ = DateTime.to_iso8601(dt)
-    :ok
-  rescue
-    _ -> {:error, :invalid_request}
+  defp admit_required_datetime(dt) do
+    if iso_datetime_primitives?(dt), do: :ok, else: {:error, :invalid_request}
   end
 
-  defp admit_required_datetime(_), do: {:error, :invalid_request}
-
   defp admit_optional_datetime(nil), do: :ok
-  defp admit_optional_datetime(%DateTime{} = dt), do: admit_required_datetime(dt)
-  defp admit_optional_datetime(_), do: {:error, :invalid_request}
+
+  defp admit_optional_datetime(dt) do
+    if iso_datetime_primitives?(dt), do: :ok, else: {:error, :invalid_request}
+  end
+
+  # Phase A: raw struct fields only (no DateTime/calendar callbacks on value).
+  # Phase B: Calendar.ISO.valid_* only after calendar is exactly Calendar.ISO.
+  defp iso_datetime_primitives?(%DateTime{
+         calendar: calendar,
+         year: year,
+         month: month,
+         day: day,
+         hour: hour,
+         minute: minute,
+         second: second,
+         microsecond: microsecond,
+         time_zone: time_zone,
+         zone_abbr: zone_abbr,
+         utc_offset: utc_offset,
+         std_offset: std_offset
+       }) do
+    calendar == Calendar.ISO and
+      int_in_bounds?(year) and year >= 1 and year <= 9999 and
+      int_in_bounds?(month) and month >= 1 and month <= 12 and
+      int_in_bounds?(day) and day >= 1 and day <= 31 and
+      int_in_bounds?(hour) and hour >= 0 and hour <= 23 and
+      int_in_bounds?(minute) and minute >= 0 and minute <= 60 and
+      int_in_bounds?(second) and second >= 0 and second <= 60 and
+      microsecond_shape?(microsecond) and
+      offset_in_bounds?(utc_offset) and
+      offset_in_bounds?(std_offset) and
+      bounded_zone_text?(time_zone) and
+      bounded_zone_text?(zone_abbr) and
+      iso_date_valid?(year, month, day) and
+      iso_time_valid?(hour, minute, second, microsecond)
+  end
+
+  defp iso_datetime_primitives?(_), do: false
+
+  defp microsecond_shape?({us, precision})
+       when is_integer(us) and is_integer(precision) and us >= 0 and us <= 999_999 and
+              precision >= 0 and precision <= 6,
+       do: true
+
+  defp microsecond_shape?(_), do: false
+
+  defp offset_in_bounds?(n) when is_integer(n) do
+    int_in_bounds?(n) and abs(n) <= @max_abs_offset_seconds
+  end
+
+  defp offset_in_bounds?(_), do: false
+
+  defp bounded_zone_text?(value)
+       when is_binary(value) and byte_size(value) > 0 and byte_size(value) <= @max_zone_bytes,
+       do: String.valid?(value)
+
+  defp bounded_zone_text?(_), do: false
+
+  defp iso_date_valid?(year, month, day) do
+    Calendar.ISO.valid_date?(year, month, day)
+  rescue
+    _ -> false
+  catch
+    _, _ -> false
+  end
+
+  defp iso_time_valid?(hour, minute, second, microsecond) do
+    Calendar.ISO.valid_time?(hour, minute, second, microsecond)
+  rescue
+    _ -> false
+  catch
+    _, _ -> false
+  end
 
   defp admit_delegation_depth(n) when is_integer(n) and n >= 0 and n < @signed_int_max_excl,
     do: :ok
@@ -493,16 +605,19 @@ defmodule Arbor.Security.RevocationFence do
 
   defp admit_delegatees_walk(_over, _n), do: {:error, :invalid_request}
 
-  defp admit_signature(nil), do: :ok
+  defp admit_signature(sig) do
+    if exact_issuer_signature?(sig), do: :ok, else: {:error, :invalid_request}
+  end
 
-  defp admit_signature(sig) when is_binary(sig) and byte_size(sig) <= @max_signature_bytes,
-    do: :ok
+  defp exact_issuer_signature?(sig)
+       when is_binary(sig) and byte_size(sig) == @max_signature_bytes,
+       do: true
 
-  defp admit_signature(_), do: {:error, :invalid_request}
+  defp exact_issuer_signature?(_), do: false
 
   # Chain is excluded from signing_payload and expected identity — cardinality/
   # shape gate only. Do not walk keys or values (nested constraints/signatures
-  # are legitimate; digest protection is owned by signed-payload field bounds).
+  # are legitimate; nested values never cross owner boundaries on prepare).
   defp admit_delegation_chain(chain) when is_list(chain), do: admit_chain_entries(chain, 0)
 
   defp admit_delegation_chain(_), do: {:error, :invalid_request}
@@ -652,7 +767,10 @@ defmodule Arbor.Security.RevocationFence do
 
   defp fence_digest?(_), do: false
 
-  defp int_in_bounds?(n), do: n >= @signed_int_min and n < @signed_int_max_excl
+  defp int_in_bounds?(n) when is_integer(n),
+    do: n >= @signed_int_min and n < @signed_int_max_excl
+
+  defp int_in_bounds?(_), do: false
 
   defp finite?(n), do: n * 0.0 == 0.0
 end

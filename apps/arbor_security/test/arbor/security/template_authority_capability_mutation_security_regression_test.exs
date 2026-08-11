@@ -3440,14 +3440,99 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     invalid_utf8 = <<0xFF, 0xFE, "x">>
     refute String.valid?(invalid_utf8)
 
+    # -----------------------------------------------------------------
+    # C3B4a2 correction gates. FIRST new parent-visible assertion:
+    # on f2b8abc7f nil issuer_signature is shape-accepted and prepare
+    # returns {:ok, fence}; correction must return {:error, :invalid_request}.
+    # ExUnit stops here on parent → exactly one new causal failure.
+    # -----------------------------------------------------------------
+    nil_sig = %{live | issuer_signature: nil}
+    assert {:error, :invalid_request} = Security.prepare_acknowledged_revoke(nil_sig)
+    assert {:ok, ^live} = CapabilityStore.get(id)
+
+    assert {:ok, ^durable_live} =
+             BufferedStore.authoritative_get(id, name: @capability_store)
+
+    assert CapabilityStore.stats() == stats_before_bad
+
+    # Remaining signature / issuer / parent identity failures (same test tail).
+    # Deterministic invalid exact-64-byte signature (not strong_rand_bytes).
+    invalid_64 = :binary.copy(<<0>>, 64)
+
+    signature_identity_bad = [
+      %{live | issuer_signature: <<>>},
+      %{live | issuer_signature: :binary.copy(<<0>>, 32)},
+      %{live | issuer_signature: invalid_64},
+      %{live | issuer_signature: :binary.copy(<<0>>, 128)},
+      %{live | issuer_id: nil},
+      %{live | issuer_id: ""},
+      %{live | issuer_id: "agent_not_authority"},
+      %{live | parent_capability_id: ""},
+      %{live | parent_capability_id: "not-a-cap"}
+    ]
+
+    for bad_cap <- signature_identity_bad do
+      assert {:error, :invalid_request} = Security.prepare_acknowledged_revoke(bad_cap)
+      assert {:ok, ^live} = CapabilityStore.get(id)
+
+      assert {:ok, ^durable_live} =
+               BufferedStore.authoritative_get(id, name: @capability_store)
+
+      assert CapabilityStore.stats() == stats_before_bad
+    end
+
+    # Forged DateTimes: primitive gates before Calendar/DateTime callbacks.
+    base_dt = live.granted_at
+    __MODULE__.HostileCalendar.reset()
+
+    hostile_dt = %{base_dt | calendar: __MODULE__.HostileCalendar}
+    hostile_cap = %{live | granted_at: hostile_dt}
+
+    assert {:error, :invalid_request} = Security.prepare_acknowledged_revoke(hostile_cap)
+    # Cross-process observer: custom calendar callbacks must not run in the
+    # caller OR in SystemAuthority/CapabilityStore processes (Phase A gate).
+    assert __MODULE__.HostileCalendar.callback_count() == 0
+    assert {:ok, ^live} = CapabilityStore.get(id)
+
+    assert {:ok, ^durable_live} =
+             BufferedStore.authoritative_get(id, name: @capability_store)
+
+    assert CapabilityStore.stats() == stats_before_bad
+
+    huge_year = %{base_dt | year: 10_000_000_000}
+    huge_offset = %{base_dt | utc_offset: 9_000_000_000}
+    huge_zone = %{base_dt | time_zone: String.duplicate("Z", 10_000)}
+    bad_zone_utf8 = %{base_dt | time_zone: <<0xFF, 0xFE>>}
+
+    forged_datetimes = [
+      %{live | granted_at: huge_year},
+      %{live | granted_at: huge_offset},
+      %{live | granted_at: huge_zone},
+      %{live | granted_at: bad_zone_utf8},
+      %{live | granted_at: %{base_dt | microsecond: :bad}},
+      %{live | granted_at: %{base_dt | microsecond: {1_000_000, 6}}},
+      %{live | granted_at: %{base_dt | microsecond: {0, 99}}},
+      %{live | granted_at: %{base_dt | microsecond: 0}},
+      %{live | granted_at: %{calendar: Calendar.ISO}}
+    ]
+
+    for bad_cap <- forged_datetimes do
+      assert {:error, :invalid_request} = Security.prepare_acknowledged_revoke(bad_cap)
+      assert {:ok, ^live} = CapabilityStore.get(id)
+
+      assert {:ok, ^durable_live} =
+               BufferedStore.authoritative_get(id, name: @capability_store)
+
+      assert CapabilityStore.stats() == stats_before_bad
+    end
+
+    # Pre-existing shape / UTF-8 / depth bounds (still zero mutation).
     bad_caps = [
       %{live | id: "not-a-cap-id"},
       %{live | principal_id: String.duplicate("p", 300)},
       %{live | resource_uri: String.duplicate("r", 2100)},
-      %{live | granted_at: %{calendar: Calendar.ISO}},
       %{live | metadata: deep},
       %{live | constraints: deep},
-      %{live | issuer_signature: :crypto.strong_rand_bytes(128)},
       # Invalid UTF-8 in signed textual fields (size-first then UTF-8 gate).
       %{live | principal_id: invalid_utf8},
       %{live | resource_uri: invalid_utf8},
@@ -3468,6 +3553,33 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
 
       assert CapabilityStore.stats() == stats_before_bad
     end
+
+    # Nested delegation_chain values are not rejected when top-level shape is
+    # valid: chain is outside signing_payload and is stripped before owner
+    # mailboxes (verification copy has delegation_chain: []). Nested blob is
+    # neither traversed for digest nor copied into CapabilityStore messages.
+    nested_chain = [
+      %{
+        "opaque" => nest_map(3, String.duplicate("n", 64)),
+        "sig" => :binary.copy(<<1>>, 64)
+      }
+    ]
+
+    with_chain = %{live | delegation_chain: nested_chain}
+    assert {:ok, fence_chain} = Security.prepare_acknowledged_revoke(with_chain)
+    assert fence_chain["capability_id"] == id
+
+    assert Enum.sort(Map.keys(fence_chain)) == [
+             "capability_digest",
+             "capability_id",
+             "generation",
+             "kind",
+             "principal_id",
+             "record_id",
+             "resource_uri",
+             "revision",
+             "version"
+           ]
 
     # Stale-fence preservation after fresh bound preparation on the live occupant.
     assert {:ok, fence_a} = Security.prepare_acknowledged_revoke(live)
@@ -3496,5 +3608,58 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
 
   defp nest_map(n, leaf) when n > 0 do
     %{"k" => nest_map(n - 1, leaf)}
+  end
+end
+
+# Hostile calendar used only to prove Phase A rejects custom calendars without
+# invoking module callbacks (DateTime/calendar serializers never run).
+# Counter is process-independent (:persistent_term) so a callback inside
+# SystemAuthority or CapabilityStore would still be observed by the test.
+defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTest.HostileCalendar do
+  @moduledoc false
+
+  @counter_key {__MODULE__, :callback_count}
+
+  def reset do
+    :persistent_term.put(@counter_key, 0)
+  end
+
+  def callback_count do
+    :persistent_term.get(@counter_key, 0)
+  end
+
+  defp mark_called do
+    n = :persistent_term.get(@counter_key, 0)
+    :persistent_term.put(@counter_key, n + 1)
+  end
+
+  def valid_date?(_y, _m, _d) do
+    mark_called()
+    true
+  end
+
+  def valid_time?(_h, _min, _s, _us) do
+    mark_called()
+    true
+  end
+
+  def date_to_string(_y, _m, _d) do
+    mark_called()
+    "hostile"
+  end
+
+  def time_to_string(_h, _min, _s, _us) do
+    mark_called()
+    "hostile"
+  end
+
+  def naive_datetime_to_string(_y, _m, _d, _h, _min, _s, _us) do
+    mark_called()
+    "hostile"
+  end
+
+  def datetime_to_string(_y, _m, _d, _h, _min, _s, _us, _tz, _abbr, _utc, _std) do
+    mark_called()
+    "hostile"
   end
 end

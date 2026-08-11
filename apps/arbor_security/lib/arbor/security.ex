@@ -933,10 +933,17 @@ defmodule Arbor.Security do
   absence is `:not_found`. Unavailable or unverifiable authority is not a
   usable fence.
 
-  Capability path: reduces the caller struct to a bounded closed expected
-  signed identity, then prepares only when the current authoritative
-  signature-verified record matches that identity (id, principal, resource,
-  and complete signed payload). A different same-id payload is
+  Capability path (authority boundary):
+  1. Pure primitive admission → verification copy with `delegation_chain`
+     stripped (nested chain never enters owner mailboxes).
+  2. Current-authority cryptographic verification of that copy
+     (`SystemAuthority.verify_authority_capability_signature/1`).
+  3. Total-safe re-admit and reduce to a closed expected identity.
+  4. One authoritative CapabilityStore read/compare on that identity only.
+
+  Shape and logical signature failures are `{:error, :invalid_request}`.
+  Store outcomes (`:not_found`, `:identity_conflict`, infrastructure atoms)
+  pass through unchanged. A different same-id payload is
   `:identity_conflict` with zero mutation.
   """
   @spec prepare_acknowledged_revoke(String.t() | Capability.t()) ::
@@ -963,12 +970,21 @@ defmodule Arbor.Security do
   end
 
   def prepare_acknowledged_revoke(%Capability{} = cap) do
-    case RevocationFence.expected_identity(cap) do
-      {:ok, expected} ->
-        CapabilityStore.prepare_acknowledged_revoke_expected(expected)
-
+    # do-result is the CapabilityStore outcome unchanged (:ok fence, :not_found,
+    # :identity_conflict, infrastructure). else preserves shape/sig vs infra.
+    with {:ok, verify_cap} <- RevocationFence.admit_expected_for_prepare(cap),
+         :ok <- verify_expected_authority_signature(verify_cap),
+         {:ok, expected} <- RevocationFence.expected_identity(verify_cap) do
+      CapabilityStore.prepare_acknowledged_revoke_expected(expected)
+    else
       {:error, :invalid_request} ->
         {:error, :invalid_request}
+
+      {:error, :capability_store_unavailable} = err ->
+        err
+
+      {:error, :outcome_unknown} = err ->
+        err
     end
   rescue
     _ -> {:error, :outcome_unknown}
@@ -980,6 +996,24 @@ defmodule Arbor.Security do
   end
 
   def prepare_acknowledged_revoke(_), do: {:error, :invalid_request}
+
+  # Logical signature/issuer miss → :invalid_request. Authority process
+  # failures remain infrastructure atoms (not collapsed into bad-request).
+  defp verify_expected_authority_signature(%Capability{} = verify_cap) do
+    case SystemAuthority.verify_authority_capability_signature(verify_cap) do
+      :ok -> :ok
+      {:error, :invalid_capability_signature} -> {:error, :invalid_request}
+      {:error, _} -> {:error, :invalid_request}
+      _ -> {:error, :invalid_request}
+    end
+  rescue
+    _ -> {:error, :outcome_unknown}
+  catch
+    :exit, {:noproc, _} -> {:error, :capability_store_unavailable}
+    :exit, :timeout -> {:error, :outcome_unknown}
+    :exit, _ -> {:error, :outcome_unknown}
+    :throw, _ -> {:error, :outcome_unknown}
+  end
 
   @doc """
   Pure admission of a closed v1 fence against exact capability identity expectations.
