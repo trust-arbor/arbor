@@ -381,39 +381,22 @@ defmodule Arbor.Agent.ProfileAuthorityMutationCore do
 
   defp digest_envelope(role, envelope) when is_binary(role) do
     with {:ok, canonical} <- canonicalize(envelope) do
+      # walk_canonical already enforces a cumulative ETF upper bound; allocate
+      # only after that budget passes, then re-check the real binary size.
       term = {@commitment_domain, role, canonical}
+      preimage = :erlang.term_to_binary(term, [:deterministic])
 
-      # Prove external size before allocating the ETF preimage binary.
-      case external_preimage_size(term) do
-        {:ok, size} when size <= @max_preimage_bytes ->
-          preimage = :erlang.term_to_binary(term, [:deterministic])
+      if byte_size(preimage) > @max_preimage_bytes do
+        {:error, :oversized}
+      else
+        digest =
+          preimage
+          |> then(&:crypto.hash(:sha256, &1))
+          |> Base.encode16(case: :lower)
 
-          if byte_size(preimage) > @max_preimage_bytes do
-            {:error, :oversized}
-          else
-            digest =
-              preimage
-              |> then(&:crypto.hash(:sha256, &1))
-              |> Base.encode16(case: :lower)
-
-            {:ok, digest}
-          end
-
-        _ ->
-          {:error, :oversized}
+        {:ok, digest}
       end
     end
-  end
-
-  defp external_preimage_size(term) do
-    {:ok, :erlang.external_size(term, [:deterministic])}
-  rescue
-    _ ->
-      try do
-        {:ok, :erlang.external_size(term)}
-      rescue
-        _ -> :error
-      end
   end
 
   # Cumulative byte budget tracks a conservative ETF upper bound of the
@@ -594,13 +577,12 @@ defmodule Arbor.Agent.ProfileAuthorityMutationCore do
   defp charge_budget(_, _), do: {:error, :oversized}
 
   # Reject NaN and both infinities. `v == v` fails only for NaN; infinity must
-  # be rejected via float_to_binary (compact form contains "inf").
+  # be rejected via float_to_binary. Compact form is already lowercase.
   defp finite_float?(v) when is_float(v) do
     v == v and
       case :erlang.float_to_binary(v, [:compact]) do
         bin when is_binary(bin) ->
-          lower = String.downcase(bin)
-          not (String.contains?(lower, "nan") or String.contains?(lower, "inf"))
+          not (String.contains?(bin, "nan") or String.contains?(bin, "inf"))
       end
   rescue
     _ -> false
@@ -815,7 +797,10 @@ defmodule Arbor.Agent.ProfileAuthorityMutationCore do
 
   # Walk with [] / [h | t] only — no is_list/1 properness scan.
   defp require_capabilities(value) do
-    validate_each_capability(value, 0)
+    case validate_each_capability(value, 0) do
+      :ok -> {:ok, value}
+      {:error, _} = err -> err
+    end
   end
 
   defp validate_each_capability([], _n), do: :ok
