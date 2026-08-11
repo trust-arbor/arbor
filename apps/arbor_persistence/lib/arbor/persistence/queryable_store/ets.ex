@@ -19,9 +19,7 @@ defmodule Arbor.Persistence.QueryableStore.ETS do
 
   @behaviour Arbor.Contracts.Persistence.Store
 
-  alias Arbor.Contracts.Persistence.Filter
-  alias Arbor.Contracts.Persistence.Record
-  alias Arbor.Persistence.Store.Revision
+  alias Arbor.Contracts.Persistence.{Filter, Record, Revision}
 
   # --- Client API ---
 

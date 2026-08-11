@@ -16,7 +16,7 @@ defmodule Arbor.Memory.IntentStoreProvenanceTest do
     @moduledoc false
     @behaviour Arbor.Contracts.Persistence.Store
 
-    alias Arbor.Persistence.Store.Revision
+    alias Arbor.Contracts.Persistence.Revision
 
     def arm(table, test_pid) do
       true = :ets.insert(table, {:fail_next_put, test_pid})

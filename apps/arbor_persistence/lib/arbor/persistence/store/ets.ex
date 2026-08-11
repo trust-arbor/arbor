@@ -31,8 +31,7 @@ defmodule Arbor.Persistence.Store.ETS do
 
   @behaviour Arbor.Contracts.Persistence.Store
 
-  alias Arbor.Contracts.Persistence.Record
-  alias Arbor.Persistence.Store.Revision
+  alias Arbor.Contracts.Persistence.{Record, Revision}
 
   @default_max_entries 100_000
   @warning_threshold 0.8

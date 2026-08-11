@@ -39,8 +39,7 @@ defmodule Arbor.Persistence.BufferedStore do
 
   require Logger
 
-  alias Arbor.Contracts.Persistence.{Filter, Record}
-  alias Arbor.Persistence.Store.Revision
+  alias Arbor.Contracts.Persistence.{Filter, Record, Revision}
 
   @behaviour Arbor.Contracts.Persistence.Store
 

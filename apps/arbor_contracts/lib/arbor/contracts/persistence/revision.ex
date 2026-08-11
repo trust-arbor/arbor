@@ -1,8 +1,9 @@
-defmodule Arbor.Persistence.Store.Revision do
+defmodule Arbor.Contracts.Persistence.Revision do
   @moduledoc false
 
-  # Shared helpers for structured Record identity, backend-owned generation +
-  # revision fencing, and compare-and-swap matching. Not part of the public facade.
+  # Shared pure fencing companion for Store/Record implementers: structured
+  # Record identity, backend-owned generation + revision fencing, and
+  # compare-and-swap matching. Not part of API.Persistence.
   #
   # Internal entry shapes for in-memory backends:
   #   %Record{} | {:tombstone, generation :: non_neg_integer()}

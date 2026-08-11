@@ -20,8 +20,7 @@ defmodule Arbor.Persistence.Store.Agent do
 
   @behaviour Arbor.Contracts.Persistence.Store
 
-  alias Arbor.Contracts.Persistence.Record
-  alias Arbor.Persistence.Store.Revision
+  alias Arbor.Contracts.Persistence.{Record, Revision}
 
   # --- Client API (Store behaviour) ---
 
