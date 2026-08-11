@@ -284,8 +284,14 @@ defmodule Arbor.Security.CapabilityStore do
 
   Authoritative absence is `{:ok, :idempotent, id}`; a durably-acknowledged
   deletion precedes live eviction and `{:ok, :applied, id}`. An ambiguous
-  persistence result is never reported as applied (`:outcome_unknown`). Only an
-  applied delete emits the revocation signal.
+  persistence result is never reported as applied (`:outcome_unknown`).
+
+  Idempotent convergence: an authoritative-absent revoke that newly evicts a
+  stale live projection emits exactly one restricted revocation signal (cluster
+  sync) and advances no stat; a true replay (absent everywhere) emits no signal
+  and advances no stat. Only an applied (durably-acknowledged) delete advances
+  the revoked stat and emits its signal. The durable layer remains
+  authoritative.
   """
   @spec acknowledged_revoke(String.t()) ::
           {:ok, :applied | :idempotent, String.t()}
@@ -714,6 +720,13 @@ defmodule Arbor.Security.CapabilityStore do
           _, _ -> {:reply, {:error, :outcome_unknown}, armed}
         end
         |> finalize_acknowledged_put_intent(signed_cap.id)
+
+      {:error, :id_conflict} ->
+        # A mismatched same-id retry against a retained outcome-unknown intent:
+        # return the established :id_conflict result on the ORIGINAL (un-armed)
+        # state so the earlier intent is neither mutated nor finalized and keeps
+        # blocking its resource until the original retry converges.
+        {:reply, {:error, :id_conflict}, state}
 
       {:error, :at_capacity} ->
         {:reply, {:error, :quota_exceeded}, state}
@@ -1527,13 +1540,41 @@ defmodule Arbor.Security.CapabilityStore do
   # counts use the bounded by_principal list + map_size(by_id) only.
   # ---------------------------------------------------------------------------
   defp arm_admission_intent(state, %Capability{} = cap) do
-    with :ok <- uncertainty_within_bounds?(state, cap) do
+    with :ok <- intent_identity_check(state, cap),
+         :ok <- uncertainty_within_bounds?(state, cap) do
       {:ok, put_intent(state, cap)}
     end
   end
 
+  # A pending intent under this id is a retained outcome-unknown admission that
+  # may have durably committed. An exact same-id retry (identical canonical
+  # signed identity) re-arms without growth; a mismatched same-id retry is a
+  # different grant claiming an id already occupied by an uncertain admission,
+  # so it is rejected as :id_conflict BEFORE any mutation. The earlier intent
+  # is left byte-for-byte intact (never re-armed, never finalized) and keeps
+  # blocking its resource until the original retry converges.
+  defp intent_identity_check(state, %Capability{} = cap) do
+    ident = grant_identity(cap)
+
+    case Map.get(state.pending_intents, cap.id) do
+      nil -> :ok
+      {_principal, _resource, ^ident} -> :ok
+      _mismatched -> {:error, :id_conflict}
+    end
+  end
+
   defp put_intent(state, %Capability{} = cap) do
-    %{state | pending_intents: Map.put(state.pending_intents, cap.id, resource_key(cap))}
+    %{state | pending_intents: Map.put(state.pending_intents, cap.id, intent_value(cap))}
+  end
+
+  # Identity-safe intent value: the canonical {principal, resource} occupancy
+  # key (same shape resource_key/1 produces) paired with the exact canonical
+  # signed grant identity (Capability.signing_payload/1). The payload lets an
+  # exact same-id retry re-arm idempotently while a mismatched same-id retry is
+  # rejected at arm time without overwriting the retained uncertainty lock.
+  defp intent_value(%Capability{} = cap) do
+    {principal_id, resource} = resource_key(cap)
+    {principal_id, resource, grant_identity(cap)}
   end
 
   defp uncertainty_within_bounds?(state, %Capability{} = cap) do
@@ -1597,7 +1638,7 @@ defmodule Arbor.Security.CapabilityStore do
   defp pending_principal_count(state, principal_id, exclude_id) do
     Enum.count(state.pending_intents, fn
       {^exclude_id, _} -> false
-      {_, {^principal_id, _}} -> true
+      {_, {^principal_id, _, _}} -> true
       _ -> false
     end)
   end
@@ -1707,19 +1748,21 @@ defmodule Arbor.Security.CapabilityStore do
   # excluded so an exact retry reobserves and converges instead of conflicting
   # with itself.
   defp resource_occupied_by_other?(state, %Capability{} = cap) do
-    key = resource_key(cap)
+    # Destructure the canonical resource key once (council readability nit):
+    # replaces the raw elem(key, N) lookups in the pending occupancy scan.
+    {principal, resource} = resource_key(cap)
     cap_id = cap.id
 
     live_other? =
       state.by_resource
-      |> Map.get(key, MapSet.new())
+      |> Map.get({principal, resource}, MapSet.new())
       |> MapSet.delete(cap_id)
       |> MapSet.size() > 0
 
     pending_other? =
       Enum.any?(state.pending_intents, fn
         {^cap_id, _} -> false
-        {_id, {p, r}} when p == elem(key, 0) and r == elem(key, 1) -> true
+        {_id, {^principal, ^resource, _payload}} -> true
         _other -> false
       end)
 

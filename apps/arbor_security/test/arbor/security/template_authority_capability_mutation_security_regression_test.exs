@@ -1613,6 +1613,104 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
   end
 
   # ==========================================================================
+  # C3A — an outcome-unknown admission intent survives a mismatched same-id
+  # retry (byte-for-byte) and keeps blocking an alternate id for the same
+  # principal/resource. Council finding: exact-ID uncertainty intent
+  # replacement.
+  # ==========================================================================
+  test "security regression: outcome-unknown intent survives a mismatched same-id retry and keeps blocking an alternate id" do
+    fresh_isolated_store_with_failures()
+    principal = "agent_ack_c3a"
+    r1 = "arbor://fs/read/ack-c3a-r1"
+    r2 = "arbor://fs/read/ack-c3a-r2"
+
+    # X/R1: deterministic id x_id, principal, resource r1.
+    first = det_grant_opts("c3a-x", principal, r1)
+    x_id = first[:capability_id]
+
+    # X/R2: SAME deterministic id x_id (same seed), DIFFERENT resource r2 — a
+    # mismatched same-id retry whose canonical signed identity differs.
+    mismatched = det_grant_opts("c3a-x", principal, r2)
+
+    # X/R1': same id AND resource, but a different signed field. This proves
+    # intent identity is the full canonical signing payload, not only the
+    # principal/resource occupancy key.
+    same_resource_mismatched =
+      det_grant_opts("c3a-x", principal, r1, metadata: %{"variant" => "different"})
+
+    # Y/R1: a different deterministic id, same principal + resource r1.
+    alternate = det_grant_opts("c3a-y", principal, r1)
+    y_id = alternate[:capability_id]
+
+    if acknowledged_available?() do
+      first_signed = build_signed_cap(first)
+      first_payload = Capability.signing_payload(first_signed)
+
+      # 1. X/R1 outcome-unknown: durable admission committed, reobserve crashed.
+      CASSandbox.fail_post_admission(1)
+      assert {:error, :outcome_unknown} = Security.acknowledged_grant(first)
+
+      # Live unprojected; durable admitted.
+      assert {:error, :not_found} = CapabilityStore.get(x_id)
+
+      assert {:ok, %Record{} = first_record} =
+               BufferedStore.authoritative_get(x_id, name: @capability_store)
+
+      # The retained uncertainty intent is identity-safe: canonical
+      # principal/resource key plus the exact signed grant payload. On the
+      # unfixed base the intent is a {principal, resource} pair with no payload.
+      state_after_unknown = :sys.get_state(CapabilityStore)
+      intent_after_unknown = Map.get(state_after_unknown.pending_intents, x_id)
+      assert intent_after_unknown != nil
+      assert tuple_size(intent_after_unknown) == 3
+      {^principal, _r1_canon, ^first_payload} = intent_after_unknown
+
+      # 2. Even when principal/resource are unchanged, a different signed field
+      # is a distinct grant and cannot replace or clear the uncertainty lock.
+      assert {:error, :id_conflict} = Security.acknowledged_grant(same_resource_mismatched)
+
+      assert Map.get(:sys.get_state(CapabilityStore).pending_intents, x_id) ==
+               intent_after_unknown
+
+      assert {:ok, ^first_record} =
+               BufferedStore.authoritative_get(x_id, name: @capability_store)
+
+      # A different-resource same-id retry is rejected on the same full-identity
+      # rule, also without touching durable state or entering the finalizer.
+      assert {:error, :id_conflict} = Security.acknowledged_grant(mismatched)
+
+      assert {:error, :not_found} = CapabilityStore.get(x_id)
+
+      assert {:ok, ^first_record} =
+               BufferedStore.authoritative_get(x_id, name: @capability_store)
+
+      # Prior pending intent is byte-for-byte intact (never re-armed/finalized).
+      state_after_mismatch = :sys.get_state(CapabilityStore)
+      assert Map.get(state_after_mismatch.pending_intents, x_id) == intent_after_unknown
+
+      # 3. Alternate Y/R1 is still blocked by the surviving X/R1 occupancy and
+      # is never admitted.
+      assert {:error, :resource_conflict} = Security.acknowledged_grant(alternate)
+
+      assert {:error, :not_found} = CapabilityStore.get(y_id)
+
+      assert {:error, :not_found} =
+               BufferedStore.authoritative_get(y_id, name: @capability_store)
+
+      assert {:ok, ^first_record} =
+               BufferedStore.authoritative_get(x_id, name: @capability_store)
+
+      # 4. The original X/R1 still converges on an exact retry, no inventory scan.
+      CASSandbox.reset_inventory_scan_count()
+      assert {:ok, :idempotent, ^x_id} = Security.acknowledged_grant(first)
+      assert CASSandbox.inventory_scan_count() == 0
+      assert {:ok, %Capability{id: ^x_id}} = CapabilityStore.get(x_id)
+    else
+      assert {:ok, _} = Security.grant(principal: principal, resource: r1)
+    end
+  end
+
+  # ==========================================================================
   # C4 — the uncertainty ledger is bounded by the per-principal/global quotas
   # and fails closed at capacity (no scan, no over-admission).
   # ==========================================================================
