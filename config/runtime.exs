@@ -408,6 +408,22 @@ if map_size(contacts) > 0 do
 end
 
 # ============================================================================
+# Skill hybrid-search seams (injected into arbor_common; nil by default in lib)
+# ============================================================================
+# arbor_common never hardcodes these modules. Wire the public persistence facade
+# and embedding provider at runtime when the apps are available.
+# Keep both seams nil in :test so hermetic suites inject fakes explicitly.
+if config_env() != :test do
+  if Code.ensure_loaded?(Arbor.Persistence) do
+    config :arbor_common, skill_persistence_module: Arbor.Persistence
+  end
+
+  if Code.ensure_loaded?(Arbor.AI) do
+    config :arbor_common, skill_embedding_module: Arbor.AI
+  end
+end
+
+# ============================================================================
 # Ollama base URL (local-LM provider)
 # ============================================================================
 # Single env var controlling where BOTH the embedding path and the

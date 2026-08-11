@@ -32,6 +32,7 @@ defmodule Arbor.Persistence do
     EventLog,
     LegacyEmbeddingStore,
     RelationshipStore,
+    SkillSearch,
     VectorBoundary
   }
 
@@ -175,6 +176,48 @@ defmodule Arbor.Persistence do
           | {:ok, false}
           | {:error, Arbor.Contracts.API.Persistence.relationship_error()}
   def relationships_absent?(agent_id), do: RelationshipStore.absent?(agent_id)
+
+  # ---------------------------------------------------------------
+  # Skill hybrid search (public facade — injected into arbor_common via Config)
+  # ---------------------------------------------------------------
+
+  @doc """
+  Backend class for skill hybrid search.
+
+  * `:postgres` — BM25 + pgvector available
+  * `:ets_only` — persistence present but skill hybrid SQL unsupported
+  * `:unavailable` — Repo not started / not loadable
+  """
+  @spec skill_search_capability() :: :postgres | :ets_only | :unavailable
+  def skill_search_capability, do: SkillSearch.skill_search_capability()
+
+  @doc "Hybrid skill search (list API). Delegates to SkillSearch."
+  @spec hybrid_search_skills(String.t(), list() | nil, keyword()) :: [map()]
+  def hybrid_search_skills(query, query_embedding \\ nil, opts \\ []),
+    do: SkillSearch.hybrid_search(query, query_embedding, opts)
+
+  @doc "Hybrid skill search with truthful metadata for all fallback states."
+  @spec hybrid_search_skills_with_meta(String.t(), list() | nil, keyword()) ::
+          {:ok, %{results: [map()], meta: map()}}
+  def hybrid_search_skills_with_meta(query, query_embedding \\ nil, opts \\ []),
+    do: SkillSearch.hybrid_search_with_meta(query, query_embedding, opts)
+
+  @doc "Batch upsert skills into the durable skill store."
+  @spec upsert_skills([map() | struct()]) :: {:ok, non_neg_integer()} | {:error, term()}
+  def upsert_skills(skills) when is_list(skills), do: SkillSearch.upsert_batch(skills)
+
+  @doc "Upsert one skill attrs map (may include :embedding and :embedding_space)."
+  @spec upsert_skill(map()) :: {:ok, map()} | {:error, term()}
+  def upsert_skill(attrs) when is_map(attrs) do
+    case SkillSearch.upsert(attrs) do
+      {:ok, record} -> {:ok, SkillSearch.get_record_map(record.name) || %{name: record.name}}
+      {:error, _} = err -> err
+    end
+  end
+
+  @doc "Fetch a stored skill record map by name, or nil."
+  @spec get_skill_record(String.t()) :: map() | nil
+  def get_skill_record(name) when is_binary(name), do: SkillSearch.get_record_map(name)
 
   # ---------------------------------------------------------------
   # Legacy memory embeddings

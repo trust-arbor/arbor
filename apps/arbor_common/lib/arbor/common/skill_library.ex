@@ -42,7 +42,8 @@ defmodule Arbor.Common.SkillLibrary do
 
   require Logger
 
-  alias Arbor.Common.SkillLibrary.{FabricAdapter, RawAdapter, SkillAdapter}
+  alias Arbor.Common.Config
+  alias Arbor.Common.SkillLibrary.{EmbeddingText, FabricAdapter, RawAdapter, SkillAdapter}
 
   @behaviour Arbor.Contracts.SkillLibrary
 
@@ -105,8 +106,8 @@ defmodule Arbor.Common.SkillLibrary do
   @doc """
   Search for skills by keyword query.
 
-  When `Arbor.Persistence.SkillSearch` is available, delegates to hybrid
-  BM25 + pgvector search. Otherwise falls back to ETS keyword matching.
+  When the configured persistence seam reports `:postgres` capability, delegates
+  to hybrid BM25 + pgvector search. Otherwise falls back to ETS keyword matching.
 
   Results are sorted by relevance:
 
@@ -130,76 +131,149 @@ defmodule Arbor.Common.SkillLibrary do
   @impl Arbor.Contracts.SkillLibrary
   @spec search(String.t(), keyword()) :: [Arbor.Contracts.SkillLibrary.skill()]
   def search(query, opts \\ []) when is_binary(query) do
-    use_hybrid = Keyword.get(opts, :hybrid)
+    {:ok, %{results: results}} = search_with_meta(query, opts)
+    results
+  end
 
-    if use_hybrid != false and hybrid_search_available?() do
-      hybrid_search(query, opts)
-    else
-      ets_search(query, opts)
+  @doc """
+  Search with additive metadata for all fallback and zero-result states.
+
+  Does not change the list-return contract of `search/2`.
+  """
+  @spec search_with_meta(String.t(), keyword()) ::
+          {:ok, %{results: [term()], meta: map()}}
+  def search_with_meta(query, opts \\ []) when is_binary(query) do
+    # Snapshot capability once for this public search decision.
+    cap = skill_capability()
+
+    cond do
+      Keyword.get(opts, :hybrid) == false ->
+        ets_search_with_meta(query, opts, cap, :hybrid_forced_off)
+
+      cap == :postgres ->
+        postgres_hybrid_search(query, opts)
+
+      true ->
+        ets_search_with_meta(query, opts, cap)
     end
   end
 
   @doc """
-  Hybrid search delegating to persistence layer.
+  Hybrid search via the configured persistence seam.
 
-  Uses BM25 + pgvector via `Arbor.Persistence.SkillSearch`.
-  Falls back to ETS keyword search if persistence is unavailable.
+  Falls back to ETS keyword search when persistence is not Postgres-capable.
   """
   @impl Arbor.Contracts.SkillLibrary
   def hybrid_search(query, opts \\ []) when is_binary(query) do
-    search_mod = Arbor.Persistence.SkillSearch
+    {:ok, %{results: results}} = hybrid_search_with_meta(query, opts)
+    results
+  end
 
-    if Code.ensure_loaded?(search_mod) and function_exported?(search_mod, :hybrid_search, 3) do
-      # credo:disable-for-next-line Credo.Check.Refactor.Apply
-      apply(search_mod, :hybrid_search, [query, nil, opts])
-    else
-      ets_search(query, opts)
+  @doc """
+  Hybrid search with truthful metadata (additive concrete API).
+  """
+  @spec hybrid_search_with_meta(String.t(), keyword()) ::
+          {:ok, %{results: [term()], meta: map()}}
+  def hybrid_search_with_meta(query, opts \\ []) when is_binary(query) do
+    # Snapshot capability once for this public search decision.
+    cap = skill_capability()
+
+    case cap do
+      :postgres ->
+        postgres_hybrid_search(query, opts)
+
+      other ->
+        ets_search_with_meta(query, opts, other)
     end
-  rescue
-    _ -> ets_search(query, opts)
-  catch
-    :exit, _ -> ets_search(query, opts)
   end
 
   @doc """
   Sync all cached skills to the persistent store.
 
-  Writes the current ETS cache to Postgres for hybrid search indexing.
-  Runs asynchronously after ETS population.
+  On `:postgres`, computes embeddings through the configured embedding module
+  and persists vectors + embedding_space. On outage, omits both keys so prior
+  vectors are preserved. On `:ets_only`, upserts text-only without embedding.
+  On `:unavailable`, returns `{:ok, 0}`.
   """
   @impl Arbor.Contracts.SkillLibrary
   def sync_to_store(_opts \\ []) do
-    search_mod = Arbor.Persistence.SkillSearch
+    case skill_capability() do
+      :unavailable ->
+        {:ok, 0}
 
-    if Code.ensure_loaded?(search_mod) and function_exported?(search_mod, :upsert_batch, 1) do
-      skills = ets_all(@table)
-      # credo:disable-for-next-line Credo.Check.Refactor.Apply
-      apply(search_mod, :upsert_batch, [skills])
-    else
-      {:ok, 0}
+      :ets_only ->
+        sync_text_only()
+
+      :postgres ->
+        sync_with_embeddings()
     end
   rescue
     e ->
-      Logger.warning("[SkillLibrary] sync_to_store failed: #{inspect(e)}")
-      {:error, e}
+      Logger.warning("[SkillLibrary] sync_to_store failed: #{Exception.message(e)}")
+      {:error, :sync_failed}
   catch
-    :exit, reason ->
-      Logger.warning("[SkillLibrary] sync_to_store exit: #{inspect(reason)}")
-      {:error, reason}
+    :exit, _reason ->
+      Logger.warning("[SkillLibrary] sync_to_store exit")
+      {:error, :sync_failed}
   end
 
-  # ETS-based keyword search (original implementation)
-  defp ets_search(query, opts) do
+  # force_reason:
+  #   nil — default reason derived from capability
+  #   :hybrid_forced_off — caller passed hybrid: false (may be Postgres-capable)
+  defp ets_search_with_meta(query, opts, capability, force_reason \\ nil) do
     downcased = String.downcase(query)
 
-    @table
-    |> ets_all()
-    |> filter(Keyword.take(opts, [:category]))
-    |> Enum.map(fn skill -> {relevance_score(skill, downcased), skill} end)
-    |> Enum.filter(fn {score, _skill} -> score > 0 end)
-    |> Enum.sort_by(fn {score, _skill} -> score end, :desc)
-    |> maybe_limit(Keyword.get(opts, :limit))
-    |> Enum.map(fn {_score, skill} -> skill end)
+    results =
+      @table
+      |> ets_all()
+      |> filter(Keyword.take(opts, [:category]))
+      |> Enum.map(fn skill -> {relevance_score(skill, downcased), skill} end)
+      |> Enum.filter(fn {score, _skill} -> score > 0 end)
+      |> Enum.sort_by(fn {score, _skill} -> score end, :desc)
+      |> maybe_limit(Keyword.get(opts, :limit))
+      |> Enum.map(fn {_score, skill} -> skill end)
+
+    {arm_state, reason} = ets_meta_arms_and_reason(capability, force_reason, results)
+    backend = if capability == :unavailable, do: :none, else: :ets
+
+    {:ok,
+     %{
+       results: results,
+       meta: %{
+         mode: :ets_keyword,
+         backend: backend,
+         capability: capability,
+         query_embedding: :not_attempted,
+         bm25_arm: arm_state,
+         vector_arm: arm_state,
+         fusion: :none,
+         result_count: length(results),
+         reason: reason
+       }
+     }}
+  end
+
+  defp ets_meta_arms_and_reason(_capability, :hybrid_forced_off, _results) do
+    {:skipped_forced_off, :hybrid_forced_off}
+  end
+
+  defp ets_meta_arms_and_reason(:unavailable, _force, _results) do
+    {:skipped_not_postgres, :persistence_unavailable}
+  end
+
+  defp ets_meta_arms_and_reason(:ets_only, _force, _results) do
+    {:skipped_not_postgres, :sqlite_or_non_postgres}
+  end
+
+  defp ets_meta_arms_and_reason(:postgres, _force, results) do
+    # Postgres-capable but fell through to ETS without explicit hybrid: false
+    # (e.g. search error fallback). Do not claim skipped_not_postgres.
+    reason = if results == [], do: :zero_results, else: nil
+    {:not_attempted, reason}
+  end
+
+  defp ets_meta_arms_and_reason(_capability, _force, _results) do
+    {:skipped_not_postgres, :persistence_unavailable}
   end
 
   @doc """
@@ -311,11 +385,18 @@ defmodule Arbor.Common.SkillLibrary do
   @impl GenServer
   def handle_info({:scan_dirs, dirs}, state) do
     scan_all_dirs(dirs)
-    # Async sync to persistent store for hybrid search
-    maybe_async_sync()
+    # Schedule startup sync from the configured seam; retry while persistence is not ready.
+    # (common boots before persistence — capability may be :unavailable at first.)
+    schedule_startup_sync()
     {:noreply, state}
   end
 
+  def handle_info({:sync_to_store_attempt, attempt}, state) when is_integer(attempt) do
+    handle_startup_sync_attempt(attempt)
+    {:noreply, state}
+  end
+
+  # Legacy immediate message (kept for compatibility with any external senders).
   def handle_info(:sync_to_store, state) do
     sync_to_store()
     {:noreply, state}
@@ -574,26 +655,330 @@ defmodule Arbor.Common.SkillLibrary do
     |> Enum.filter(&File.dir?/1)
   end
 
-  defp hybrid_search_available? do
-    mod = Arbor.Persistence.SkillSearch
-    repo = Arbor.Persistence.Repo
+  defp skill_capability do
+    case Config.skill_persistence_module() do
+      nil ->
+        :unavailable
 
-    Code.ensure_loaded?(mod) and function_exported?(mod, :hybrid_search, 3) and
-      Code.ensure_loaded?(repo) and repo_started?(repo)
+      mod when is_atom(mod) ->
+        if Code.ensure_loaded?(mod) and function_exported?(mod, :skill_search_capability, 0) do
+          # credo:disable-for-next-line Credo.Check.Refactor.Apply
+          case apply(mod, :skill_search_capability, []) do
+            capability when capability in [:postgres, :ets_only, :unavailable] -> capability
+            _unknown -> :unavailable
+          end
+        else
+          :unavailable
+        end
+
+      _invalid ->
+        # Bad config must not crash public search/sync paths.
+        :unavailable
+    end
+  rescue
+    _ -> :unavailable
+  catch
+    :exit, _ -> :unavailable
   end
 
-  defp repo_started?(repo) do
-    # Process.whereis checks if the Repo GenServer is actually running,
-    # not just that the module is loaded. Without this, hybrid_search
-    # delegates to the persistence layer which rescues the Repo error
-    # and returns [] — silently swallowing the ETS fallback.
-    Process.whereis(repo) != nil
+  defp postgres_hybrid_search(query, opts) do
+    mod = Config.skill_persistence_module()
+
+    with true <- is_atom(mod) and not is_nil(mod),
+         true <- Code.ensure_loaded?(mod),
+         true <- function_exported?(mod, :hybrid_search_skills_with_meta, 3) do
+      {query_embedding, space, qstat} =
+        case safe_embed(String.trim(query)) do
+          {:ok, vec, space} -> {vec, space, :ok}
+          :no_service -> {nil, nil, :no_service}
+          :failed -> {nil, nil, :failed}
+          :invalid -> {nil, nil, :invalid}
+        end
+
+      search_opts =
+        if is_map(space) do
+          Keyword.put(opts, :embedding_space, space)
+        else
+          opts
+        end
+
+      # credo:disable-for-next-line Credo.Check.Refactor.Apply
+      {:ok, %{results: results, meta: meta}} =
+        apply(mod, :hybrid_search_skills_with_meta, [query, query_embedding, search_opts])
+
+      results = Enum.map(results, &rehydrate_skill/1)
+
+      meta =
+        meta
+        |> Map.put(:query_embedding, qstat)
+        |> Map.put(:result_count, length(results))
+
+      meta =
+        if results == [] and is_nil(meta[:reason]) and meta[:mode] in [:hybrid, :bm25_only] do
+          Map.put(meta, :reason, :zero_results)
+        else
+          meta
+        end
+
+      {:ok, %{results: results, meta: meta}}
+    else
+      _ ->
+        ets_search_with_meta(query, opts, :unavailable)
+    end
+  rescue
+    _ ->
+      ets_search_with_meta(query, opts, :postgres)
+      |> put_search_error_reason()
+  catch
+    :exit, _ ->
+      ets_search_with_meta(query, opts, :postgres)
+      |> put_search_error_reason()
   end
 
-  defp maybe_async_sync do
-    if hybrid_search_available?() do
-      # Delay sync slightly to avoid contention during startup
-      Process.send_after(self(), :sync_to_store, 1_000)
+  defp put_search_error_reason({:ok, %{results: results, meta: meta}}) do
+    {:ok,
+     %{
+       results: results,
+       meta:
+         meta
+         |> Map.put(:reason, :search_error)
+         |> Map.put(:mode, :ets_keyword)
+     }}
+  end
+
+  defp sync_text_only do
+    mod = Config.skill_persistence_module()
+
+    if is_atom(mod) and Code.ensure_loaded?(mod) and function_exported?(mod, :upsert_skills, 1) do
+      attrs_list = Enum.map(ets_all(@table), &skill_to_sync_attrs/1)
+      # credo:disable-for-next-line Credo.Check.Refactor.Apply
+      apply(mod, :upsert_skills, [attrs_list])
+    else
+      {:ok, 0}
+    end
+  end
+
+  defp sync_with_embeddings do
+    mod = Config.skill_persistence_module()
+
+    if is_atom(mod) and Code.ensure_loaded?(mod) and function_exported?(mod, :upsert_skill, 1) do
+      count =
+        Enum.reduce(ets_all(@table), 0, fn skill, acc ->
+          attrs = skill_to_sync_attrs(skill)
+
+          # Always re-embed on sync. Skipping on content_hash alone is incorrect when
+          # provider/model/dimensions change: exact-space filtering would hide old
+          # vectors and they would never be backfilled. Current space is only known
+          # after embed/2, so conservative packet-correct behavior is re-embed.
+          attrs =
+            case safe_embed(EmbeddingText.for_skill(skill)) do
+              {:ok, vec, space} ->
+                attrs
+                |> Map.put(:embedding, vec)
+                |> Map.put(:embedding_space, space)
+
+              _ ->
+                # Omit embedding and embedding_space — preserve prior vector/space.
+                attrs
+            end
+
+          # credo:disable-for-next-line Credo.Check.Refactor.Apply
+          case apply(mod, :upsert_skill, [attrs]) do
+            {:ok, _} -> acc + 1
+            {:error, _} -> acc
+          end
+        end)
+
+      {:ok, count}
+    else
+      {:ok, 0}
+    end
+  end
+
+  defp skill_to_sync_attrs(skill) do
+    skill_map = if is_struct(skill), do: Map.from_struct(skill), else: skill
+
+    %{
+      name: skill_field(skill_map, :name),
+      description: skill_field(skill_map, :description, ""),
+      body: skill_field(skill_map, :body, ""),
+      tags: skill_field(skill_map, :tags, []),
+      category: skill_field(skill_map, :category),
+      source: to_string(skill_field(skill_map, :source, "skill")),
+      path: skill_field(skill_map, :path),
+      license: skill_field(skill_map, :license),
+      compatibility: skill_field(skill_map, :compatibility),
+      allowed_tools: skill_field(skill_map, :allowed_tools, []),
+      content_hash: skill_field(skill_map, :content_hash) || content_hash(skill_map),
+      taint: to_string(skill_field(skill_map, :taint, "trusted")),
+      provenance: skill_field(skill_map, :provenance, %{}),
+      metadata: skill_field(skill_map, :metadata, %{})
+    }
+  end
+
+  defp skill_field(skill, key, default \\ nil) do
+    Map.get(skill, key) || Map.get(skill, to_string(key)) || default
+  end
+
+  defp content_hash(skill) do
+    body = Map.get(skill, :body) || Map.get(skill, "body") || ""
+    :crypto.hash(:sha256, body) |> Base.encode16(case: :lower)
+  end
+
+  defp safe_embed(text) when is_binary(text) do
+    case resolve_embedding_module() do
+      :no_service ->
+        :no_service
+
+      {:ok, mod} ->
+        expected = Config.skill_embedding_dimensions()
+
+        if is_integer(expected) and expected > 0 do
+          try do
+            # Request provider output in the admitted dimension space.
+            # credo:disable-for-next-line Credo.Check.Refactor.Apply
+            case apply(mod, :embed, [text, [dimensions: expected]]) do
+              {:ok, result} -> validate_embed_result(result, expected)
+              {:error, _} -> :failed
+              _ -> :failed
+            end
+          rescue
+            _ -> :failed
+          catch
+            :exit, _ -> :failed
+          end
+        else
+          :invalid
+        end
+    end
+  end
+
+  defp resolve_embedding_module do
+    case Config.skill_embedding_module() do
+      mod when is_atom(mod) and not is_nil(mod) ->
+        if Code.ensure_loaded?(mod) and function_exported?(mod, :embed, 2) do
+          {:ok, mod}
+        else
+          :no_service
+        end
+
+      _ ->
+        :no_service
+    end
+  end
+
+  defp validate_embed_result(result, expected) when is_map(result) do
+    embedding = Map.get(result, :embedding) || Map.get(result, "embedding")
+    dimensions = Map.get(result, :dimensions) || Map.get(result, "dimensions")
+    model = Map.get(result, :model) || Map.get(result, "model")
+    provider = Map.get(result, :provider) || Map.get(result, "provider")
+
+    case {
+      valid_embedding?(embedding, expected),
+      valid_reported_dimensions?(dimensions, expected),
+      nonblank_model?(model),
+      nonblank_provider?(provider)
+    } do
+      {true, true, true, true} ->
+        space = %{
+          "provider" => provider_to_string(provider),
+          "model" => String.trim(to_string(model)),
+          "dimensions" => length(embedding)
+        }
+
+        {:ok, embedding, space}
+
+      _ ->
+        :invalid
+    end
+  end
+
+  defp validate_embed_result(_, _), do: :invalid
+
+  defp valid_embedding?(embedding, expected) when is_list(embedding) and is_integer(expected) do
+    expected > 0 and embedding != [] and length(embedding) == expected and
+      Enum.all?(embedding, &is_number/1)
+  end
+
+  defp valid_embedding?(_embedding, _expected), do: false
+
+  defp valid_reported_dimensions?(nil, _expected), do: true
+  defp valid_reported_dimensions?(expected, expected), do: true
+  defp valid_reported_dimensions?(_dimensions, _expected), do: false
+
+  defp nonblank_model?(model) when is_binary(model), do: String.trim(model) != ""
+  defp nonblank_model?(_), do: false
+
+  defp nonblank_provider?(provider) when is_atom(provider) and not is_nil(provider), do: true
+
+  defp nonblank_provider?(provider) when is_binary(provider), do: String.trim(provider) != ""
+
+  defp nonblank_provider?(_), do: false
+
+  defp provider_to_string(provider) when is_atom(provider), do: Atom.to_string(provider)
+  defp provider_to_string(provider) when is_binary(provider), do: String.trim(provider)
+
+  defp rehydrate_skill(%{name: name} = result) when is_binary(name) do
+    case ets_lookup(name) do
+      {:ok, skill} -> skill
+      :error -> result
+    end
+  end
+
+  defp rehydrate_skill(%{"name" => name} = result) when is_binary(name) do
+    case ets_lookup(name) do
+      {:ok, skill} -> skill
+      :error -> result
+    end
+  end
+
+  defp rehydrate_skill(other), do: other
+
+  # Schedule startup sync when a persistence seam is configured, without requiring
+  # live persistence readiness. Capability is re-checked on each attempt.
+  defp schedule_startup_sync do
+    case Config.skill_persistence_module() do
+      nil ->
+        :ok
+
+      mod when is_atom(mod) ->
+        Process.send_after(
+          self(),
+          {:sync_to_store_attempt, 1},
+          Config.skill_sync_initial_delay_ms()
+        )
+
+      _invalid ->
+        # Invalid configured seam must not crash SkillLibrary init.
+        Logger.debug("[SkillLibrary] ignoring invalid skill_persistence_module config")
+        :ok
+    end
+  end
+
+  defp handle_startup_sync_attempt(attempt) do
+    case skill_capability() do
+      cap when cap in [:postgres, :ets_only] ->
+        sync_to_store()
+
+      :unavailable ->
+        max = Config.skill_sync_max_attempts()
+
+        if attempt < max do
+          Process.send_after(
+            self(),
+            {:sync_to_store_attempt, attempt + 1},
+            Config.skill_sync_retry_delay_ms()
+          )
+        else
+          Logger.debug(
+            "[SkillLibrary] startup sync gave up after #{attempt} attempts " <>
+              "(persistence unavailable)"
+          )
+        end
+
+      _other ->
+        # Defensive: unexpected capability values never crash the GenServer.
+        :ok
     end
   end
 end

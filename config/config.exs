@@ -98,6 +98,12 @@ config :arbor_actions, :channel_receivers, %{
 # (:enabled/:disabled, :inherit uses this flag) keep it bounded. See Arbor.AI.CatalogSection.
 config :arbor_common, tool_catalog_enabled: true
 
+# Skill hybrid-search seams (nil = disabled). Runtime injects concrete modules;
+# arbor_common never hardcodes persistence/embedding providers. See Arbor.Common.Config.
+# config :arbor_common, skill_embedding_module: nil
+# config :arbor_common, skill_persistence_module: nil
+# config :arbor_common, skill_embedding_dimensions: 768
+
 # Hands — independent Claude Code sessions for delegated work
 config :arbor_common, :hands,
   config_dir: "~/.claude-hands",
