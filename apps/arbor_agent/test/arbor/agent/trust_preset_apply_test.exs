@@ -35,6 +35,7 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
   @moduletag :integration
 
   alias Arbor.Agent.{BranchSupervisor, Lifecycle}
+  alias Arbor.Agent.Test.RuntimeAdmissionTopology
   alias Arbor.Contracts.Security.CapabilityUri
   alias Arbor.Contracts.TenantContext
   alias Arbor.Persistence.BufferedStore
@@ -133,7 +134,9 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
       )
     end
 
-    :ok
+    # Own ready RA supervisor / Task.Supervisor / TaskStore per test so
+    # Lifecycle.start exercises ordinary-start admission without ambient globals.
+    RuntimeAdmissionTopology.start_owned!()
   end
 
   describe "trust_preset applied at create time (security regression, commit 7721f506)" do
@@ -308,7 +311,9 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
       end
     end
 
-    test "pipeline architect runtime restrictions are load-bearing through Session config" do
+    test "pipeline architect runtime restrictions are load-bearing through Session config", %{
+      store: store
+    } do
       assert {:ok, profile} =
                Lifecycle.create("Pipeline Architect Runtime Probe",
                  template: "pipeline_architect",
@@ -346,7 +351,8 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
                  tools: ["file_write", "shell_execute", "pipeline_run"],
                  sandbox_level: :none,
                  start_heartbeat: false,
-                 recover_session: false
+                 recover_session: false,
+                 task_store: store
                )
 
       %{executor: executor, session: session} = BranchSupervisor.child_pids(agent_id)
@@ -370,7 +376,11 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
       assert :ok = Lifecycle.stop(agent_id)
 
       assert {:ok, _supervisor} =
-               Lifecycle.start(agent_id, start_heartbeat: false, recover_session: false)
+               Lifecycle.start(agent_id,
+                 start_heartbeat: false,
+                 recover_session: false,
+                 task_store: store
+               )
 
       %{session: restored_session} = BranchSupervisor.child_pids(agent_id)
       restored_state = Arbor.Orchestrator.Session.get_state(restored_session)
@@ -488,7 +498,8 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
              end)
     end
 
-    test "security regression: malformed exact policy stops an already-running architect and revokes authority" do
+    test "security regression: malformed exact policy stops an already-running architect and revokes authority",
+         %{store: store} do
       assert {:ok, profile} =
                Lifecycle.create("Corrupt Policy Probe", template: "pipeline_architect")
 
@@ -496,14 +507,20 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
       cleanup(agent_id)
 
       assert {:ok, _supervisor} =
-               Lifecycle.start(agent_id, start_heartbeat: false, recover_session: false)
+               Lifecycle.start(agent_id,
+                 start_heartbeat: false,
+                 recover_session: false,
+                 task_store: store
+               )
 
       corrupted =
         put_in(profile.metadata["exact_template_policy"]["digest"], String.duplicate("0", 64))
 
       assert :ok = Arbor.Agent.ProfileStore.store_profile(corrupted)
 
-      assert {:error, _reason} = Lifecycle.start(agent_id, start_heartbeat: false)
+      assert {:error, _reason} =
+               Lifecycle.start(agent_id, start_heartbeat: false, task_store: store)
+
       assert_eventually(fn -> is_nil(BranchSupervisor.whereis(agent_id)) end)
       assert {:ok, :suspended} = Arbor.Security.identity_status(agent_id)
       assert {:ok, []} = Arbor.Security.list_capabilities(agent_id)
@@ -646,7 +663,9 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
   end
 
   describe "concurrent lifecycle start security regression" do
-    test "losing idempotent start permanently closes only its issued bootstrap" do
+    test "coalesced concurrent starts share one intent, one bootstrap, and one branch pid", %{
+      store: store
+    } do
       assert {:ok, profile} =
                Lifecycle.create("Concurrent Bootstrap Probe", template: "test_agent")
 
@@ -662,17 +681,38 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
       tasks =
         for _ <- 1..2 do
           Task.async(fn ->
-            Lifecycle.start(agent_id, start_heartbeat: false, recover_session: false)
+            Lifecycle.start(agent_id,
+              start_heartbeat: false,
+              recover_session: false,
+              task_store: store
+            )
           end)
         end
 
       try do
-        assert_eventually(fn -> length(principal_bootstraps(agent_id)) == 2 end)
+        # Admission joins same-target/fingerprint callers onto one live intent
+        # before lifecycle effects. Two waiters prove both callers are parked
+        # on that single intent — not two independent start paths.
+        assert_eventually(fn ->
+          case live_runtime_admission(store, agent_id) do
+            %{waiter_count: 2} -> true
+            _ -> false
+          end
+        end)
+
+        # Only the bound worker issues branch authority; coalesced joiners do not.
+        assert_eventually(fn ->
+          case principal_bootstraps(agent_id) do
+            [%{purpose: :session}] -> true
+            _ -> false
+          end
+        end)
       after
         :ok = :sys.resume(supervisor)
       end
 
       assert [{:ok, winner}, {:ok, winner}] = Task.await_many(tasks, 10_000)
+      assert is_pid(winner)
 
       assert_eventually(fn ->
         case principal_bootstraps(agent_id) do
@@ -701,6 +741,27 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
   defp principal_bootstraps(agent_id) do
     SigningAuthorityBroker.debug_state().bootstrap_entries
     |> Enum.filter(&(&1.principal_id == agent_id))
+  end
+
+  # Test-only observation of TaskStore runtime-admission shape for agent_id.
+  # Returns %{intent_id:, waiter_count:} when exactly one live intent exists.
+  defp live_runtime_admission(store, agent_id) do
+    case :sys.get_state(store) do
+      %{runtime_admission_intents: intents, runtime_admission_waiters: waiters} ->
+        case Map.get(intents, agent_id) do
+          %{intent_id: intent_id} when is_binary(intent_id) ->
+            %{
+              intent_id: intent_id,
+              waiter_count: length(Map.get(waiters, intent_id, []))
+            }
+
+          _ ->
+            nil
+        end
+
+      _ ->
+        nil
+    end
   end
 
   defp start_security_child(child) do
