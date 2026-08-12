@@ -31,6 +31,7 @@ defmodule Arbor.Memory.Thinking do
 
   alias Arbor.Contracts.Persistence.Record
   alias Arbor.Contracts.Security.{Taint, TaintedValue, TaintEnvelope}
+  alias Arbor.Memory.MutationAdmission.OwnerRoots
   alias Arbor.Memory.{MemoryStore, Provenance, Signals, ThinkingCodec}
 
   require Logger
@@ -42,6 +43,8 @@ defmodule Arbor.Memory.Thinking do
   @max_loaded_agents 1_024
   @max_active_streams 1_024
   @max_cas_attempts 8
+  @max_projection_attempts 4
+  @projection_retry_ms 25
   @owner_call_timeout :infinity
 
   # ============================================================================
@@ -295,41 +298,62 @@ defmodule Arbor.Memory.Thinking do
     ensure_ets_table()
     buffer_size = normalize_buffer_size(Keyword.get(opts, :buffer_size, @default_buffer_size))
 
-    owned_agents =
-      case load_from_durable(buffer_size, false, MapSet.new()) do
-        {:ok, loaded_agents} -> loaded_agents
-        {:error, _reason} -> MapSet.new()
-      end
+    state = %{
+      buffer_size: buffer_size,
+      streams: %{},
+      owned_agents: MapSet.new(),
+      owner_roots: OwnerRoots.new(),
+      pending_projection: %{}
+    }
 
-    {:ok, %{buffer_size: buffer_size, streams: %{}, owned_agents: owned_agents}}
+    {:ok, hydrate_startup(state)}
   end
 
   @impl true
   def handle_call({:record, agent_id, text, taint, opts}, _from, state) do
-    case store_entry(agent_id, text, taint, opts, state) do
-      {:ok, entry, projection_status} ->
-        maybe_schedule_convergence(agent_id, projection_status)
-        {:reply, {:ok, entry}, put_owned_agent(state, agent_id)}
+    state = normalize_state(state)
 
-      {:error, reason} ->
-        {:reply, {:error, reason}, state}
+    if owned_agent_capacity?(state, agent_id) do
+      with_fresh_admission(state, agent_id, {:error, :store_unavailable}, fn state ->
+        case store_entry(agent_id, text, taint, opts, state) do
+          {:ok, entry, :projected} ->
+            {{:ok, entry}, put_owned_agent(state, agent_id), :settle}
+
+          {:ok, entry, :convergence_pending} ->
+            {{:ok, entry}, put_owned_agent(state, agent_id), :defer}
+
+          {:error, reason} ->
+            {{:error, reason}, state, :ack}
+        end
+      end)
+    else
+      {:reply, {:error, :projection_capacity}, state}
     end
   end
 
   @impl true
   def handle_call({:recent_compat, agent_id, opts}, _from, state) do
-    case read_authoritative_entries(agent_id, opts, state) do
-      {:ok, items, next_state} ->
-        entries = Enum.map(items, fn {value, _status} -> value.value end)
-        {:reply, {:ok, entries}, next_state}
+    state = normalize_state(state)
 
-      {:error, _reason} ->
-        {:reply, {:ok, []}, state}
+    if owned_agent_capacity?(state, agent_id) do
+      with_fresh_admission(state, agent_id, {:ok, []}, fn state ->
+        case read_authoritative_entries(agent_id, opts, state) do
+          {:ok, items, next_state, disposition} ->
+            entries = Enum.map(items, fn {value, _status} -> value.value end)
+            {{:ok, entries}, next_state, disposition}
+
+          {:error, _reason, next_state, disposition} ->
+            {{:ok, []}, next_state, disposition}
+        end
+      end)
+    else
+      {:reply, {:ok, []}, state}
     end
   end
 
   @impl true
   def handle_call({:stream_chunk, agent_id, chunk, taint, opts}, _from, state) do
+    state = normalize_state(state)
     complete = Keyword.get(opts, :complete, false)
     current = Map.get(state.streams, agent_id)
 
@@ -338,12 +362,9 @@ defmodule Arbor.Memory.Thinking do
     else
       case append_stream(current, chunk, taint) do
         {:ok, text, stream_taint} ->
-          if complete do
-            finish_stream(agent_id, text, stream_taint, opts, state)
-          else
-            streams = Map.put(state.streams, agent_id, %{text: text, taint: stream_taint})
-            {:reply, :ok, %{state | streams: streams}}
-          end
+          with_fresh_admission(state, agent_id, {:error, :store_unavailable}, fn state ->
+            finish_stream(agent_id, text, stream_taint, opts, state, complete)
+          end)
 
         _error ->
           {:reply, {:error, :invalid_payload}, state}
@@ -353,40 +374,62 @@ defmodule Arbor.Memory.Thinking do
 
   @impl true
   def handle_call({:recent_tainted, agent_id, opts}, _from, state) do
-    case read_authoritative_entries(agent_id, opts, state) do
-      {:ok, items, next_state} -> {:reply, {:ok, items}, next_state}
-      {:error, reason} -> {:reply, {:error, reason}, state}
+    state = normalize_state(state)
+
+    if owned_agent_capacity?(state, agent_id) do
+      with_fresh_admission(state, agent_id, {:error, :store_unavailable}, fn state ->
+        case read_authoritative_entries(agent_id, opts, state) do
+          {:ok, items, next_state, disposition} ->
+            {{:ok, items}, next_state, disposition}
+
+          {:error, reason, next_state, disposition} ->
+            {{:error, reason}, next_state, disposition}
+        end
+      end)
+    else
+      {:reply, {:error, :projection_capacity}, state}
     end
   end
 
   @impl true
   def handle_call({:clear, agent_id}, _from, state) do
-    case delete_aggregate_before_live_clear(agent_id) do
-      :ok ->
-        projection_status = clear_live_projection(agent_id)
-        maybe_schedule_convergence(agent_id, projection_status)
+    with_fresh_admission(state, agent_id, {:error, :store_unavailable}, fn state ->
+      case delete_aggregate_before_live_clear(agent_id) do
+        :ok ->
+          next_state =
+            state
+            |> drop_owned_agent(agent_id)
+            |> Map.update!(:streams, &Map.delete(&1, agent_id))
 
-        next_state =
-          state
-          |> drop_owned_agent(agent_id)
-          |> Map.update!(:streams, &Map.delete(&1, agent_id))
+          case clear_live_projection(agent_id) do
+            :projected -> {:ok, next_state, :settle}
+            :convergence_pending -> {:ok, next_state, :settle_then_defer}
+          end
 
-        {:reply, :ok, next_state}
-
-      {:error, reason} ->
-        {:reply, {:error, normalize_store_error(reason)}, state}
-    end
+        {:error, reason} ->
+          {{:error, normalize_store_error(reason)}, state, :ack}
+      end
+    end)
   end
 
   @impl true
   def handle_call({:delete_agent_content, agent_id}, _from, state) do
-    # Disarm ownership before backend/effects; exceptional returns keep it.
-    disarmed = drop_owned_agent(state, agent_id)
+    state = normalize_state(state)
+
+    disarmed =
+      state
+      |> clear_pending_projection_only(agent_id)
+      |> settle_roots(agent_id, nil)
+      |> drop_owned_agent(agent_id)
+      |> Map.update!(:streams, &Map.delete(&1, agent_id))
+
     delete_agent_content_after_disarm(agent_id, disarmed)
   end
 
   @impl true
   def handle_call({:agent_content_absent?, agent_id}, _from, state) do
+    state = normalize_state(state)
+
     reply =
       case do_agent_content_absent?(agent_id, state) do
         {:ok, present?} when is_boolean(present?) -> {:ok, present?}
@@ -396,16 +439,23 @@ defmodule Arbor.Memory.Thinking do
 
     {:reply, reply, state}
   rescue
-    _ -> {:reply, {:error, :store_unavailable}, state}
+    _ -> {:reply, {:error, :store_unavailable}, normalize_state(state)}
   catch
-    _, _ -> {:reply, {:error, :store_unavailable}, state}
+    _, _ -> {:reply, {:error, :store_unavailable}, normalize_state(state)}
   end
 
   @impl true
   def handle_call(:reload_from_durable, _from, state) do
-    case load_from_durable(state.buffer_size, true, state.owned_agents) do
-      {:ok, owned_agents} ->
-        {:reply, :ok, %{state | streams: %{}, owned_agents: owned_agents}}
+    state = normalize_state(state)
+
+    case load_durable_inventory(state.buffer_size) do
+      {:ok, plans} ->
+        {next_state, result} = reconcile_reload(state, plans)
+
+        case result do
+          :ok -> {:reply, :ok, %{next_state | streams: %{}}}
+          {:error, reason} -> {:reply, {:error, reason}, next_state}
+        end
 
       {:error, reason} ->
         {:reply, {:error, reason}, state}
@@ -414,22 +464,34 @@ defmodule Arbor.Memory.Thinking do
 
   @impl true
   def handle_info({:converge_projection, agent_id}, state) do
-    # Exact ownership required. After content-only delete drops owned_agents,
-    # a stale converge message must be a no-op: reloading durable not_found
-    # would call install_empty_projection/1 and purge thinking Provenance.
-    next_state =
-      if MapSet.member?(state.owned_agents, agent_id) do
-        case authoritative_tainted_read(agent_id, [], state.buffer_size) do
-          {:ok, _items, true} -> put_owned_agent(state, agent_id)
-          {:ok, _items, false} -> drop_owned_agent(state, agent_id)
-          {:error, _reason} -> state
-        end
-      else
-        state
-      end
+    state = normalize_state(state)
 
-    {:noreply, next_state}
+    case Map.fetch(pending_projection_map(state), agent_id) do
+      :error ->
+        {:noreply, state}
+
+      {:ok, attempts} ->
+        converge_with_deferred_root(agent_id, attempts, state)
+    end
   end
+
+  def handle_info(_message, state), do: {:noreply, normalize_state(state)}
+
+  @impl true
+  def format_status(status) when is_map(status) do
+    case status do
+      %{state: state} when is_map(state) ->
+        %{status | state: redact_owner_status(state)}
+
+      _ ->
+        status
+    end
+  end
+
+  def format_status(status), do: status
+
+  @impl true
+  def code_change(_old_vsn, state, _extra), do: {:ok, normalize_state(state)}
 
   # ============================================================================
   # Private Helpers
@@ -457,24 +519,214 @@ defmodule Arbor.Memory.Thinking do
   defp owner_call_failure(:mutation), do: {:error, :outcome_unknown}
   defp owner_call_failure(:read), do: {:error, :store_unavailable}
 
-  defp read_authoritative_entries(agent_id, opts, state) do
-    if owned_agent_capacity?(state, agent_id) do
-      case authoritative_tainted_read(agent_id, opts, state.buffer_size) do
-        {:ok, items, true} -> {:ok, items, put_owned_agent(state, agent_id)}
-        {:ok, items, false} -> {:ok, items, drop_owned_agent(state, agent_id)}
-        {:error, reason} -> {:error, reason}
-      end
-    else
-      {:error, :projection_capacity}
+  defp normalize_state(state) when is_map(state) do
+    state
+    |> Map.put_new(:owner_roots, OwnerRoots.new())
+    |> Map.put_new(:pending_projection, %{})
+    |> Map.put_new(:streams, %{})
+    |> Map.put_new(:owned_agents, MapSet.new())
+  end
+
+  defp normalize_state(state), do: state
+
+  defp owner_roots(state) when is_map(state), do: Map.get(state, :owner_roots, OwnerRoots.new())
+  defp owner_roots(_state), do: OwnerRoots.new()
+
+  defp put_owner_roots(state, roots) when is_map(state), do: Map.put(state, :owner_roots, roots)
+
+  defp pending_projection_map(%{pending_projection: pending}) when is_map(pending), do: pending
+  defp pending_projection_map(_state), do: %{}
+
+  defp admit_fresh(agent_id) do
+    case OwnerRoots.admit_new(OwnerRoots.new(), agent_id) do
+      {:ok, lease} -> {:ok, lease}
+      {:error, _reason} -> {:error, :store_unavailable}
     end
   end
 
-  defp maybe_schedule_convergence(agent_id, :convergence_pending) do
-    send(self(), {:converge_projection, agent_id})
-    :ok
+  defp with_fresh_admission(state, agent_id, denied_reply, fun) do
+    state = normalize_state(state)
+
+    case admit_fresh(agent_id) do
+      {:ok, lease} ->
+        try do
+          {reply, next_state, disposition} = fun.(state)
+          {:reply, reply, finish_public_root(next_state, agent_id, lease, disposition)}
+        rescue
+          _ ->
+            {:reply, denied_reply,
+             finish_public_root(normalize_state(state), agent_id, lease, :ack)}
+        catch
+          _, _ ->
+            {:reply, denied_reply,
+             finish_public_root(normalize_state(state), agent_id, lease, :ack)}
+        end
+
+      {:error, _reason} ->
+        {:reply, denied_reply, state}
+    end
   end
 
-  defp maybe_schedule_convergence(_agent_id, :projected), do: :ok
+  defp finish_public_root(state, agent_id, lease, :defer) do
+    case OwnerRoots.defer(owner_roots(state), agent_id, lease) do
+      {:ok, roots} ->
+        state
+        |> put_owner_roots(roots)
+        |> arm_projection_retry(agent_id)
+
+      {:error, _reason} ->
+        ack_root(state, lease)
+    end
+  end
+
+  defp finish_public_root(state, agent_id, lease, :settle) do
+    state
+    |> settle_roots(agent_id, lease)
+    |> clear_pending_projection_only(agent_id)
+  end
+
+  defp finish_public_root(state, agent_id, lease, :settle_then_defer) do
+    state
+    |> clear_pending_projection_only(agent_id)
+    |> settle_roots(agent_id, nil)
+    |> defer_fresh_root(agent_id, lease)
+  end
+
+  defp finish_public_root(state, _agent_id, lease, _ack) do
+    ack_root(state, lease)
+  end
+
+  defp defer_fresh_root(state, agent_id, lease) do
+    case OwnerRoots.defer(owner_roots(state), agent_id, lease) do
+      {:ok, roots} ->
+        state
+        |> put_owner_roots(roots)
+        |> arm_projection_retry(agent_id)
+
+      {:error, _reason} ->
+        ack_root(state, lease)
+    end
+  end
+
+  defp ack_root(state, lease) do
+    {roots, _result} = OwnerRoots.ack(owner_roots(state), lease)
+    put_owner_roots(state, roots)
+  end
+
+  defp settle_roots(state, agent_id, lease \\ nil) do
+    {roots, _} = OwnerRoots.settle_agent(owner_roots(state), agent_id, lease)
+    put_owner_roots(state, roots)
+  end
+
+  defp arm_projection_retry(state, agent_id) do
+    pending = pending_projection_map(state)
+
+    if Map.has_key?(pending, agent_id) do
+      state
+    else
+      state = %{state | pending_projection: Map.put(pending, agent_id, 1)}
+      Process.send_after(self(), {:converge_projection, agent_id}, @projection_retry_ms)
+      state
+    end
+  end
+
+  defp clear_pending_projection_only(state, agent_id) when is_map(state) do
+    pending = pending_projection_map(state)
+    Map.put(state, :pending_projection, Map.delete(pending, agent_id))
+  end
+
+  defp redact_owner_status(state) when is_map(state) do
+    counts =
+      case Map.get(state, :owner_roots) do
+        %OwnerRoots{by_agent: by_agent} ->
+          Map.new(by_agent, fn {agent_id, leases} -> {agent_id, length(leases)} end)
+
+        _ ->
+          %{}
+      end
+
+    streams =
+      state
+      |> Map.get(:streams, %{})
+      |> Map.new(fn
+        {agent_id, %{text: text}} when is_binary(text) ->
+          {agent_id, %{bytes: byte_size(text)}}
+
+        {agent_id, _} ->
+          {agent_id, %{bytes: 0}}
+      end)
+
+    state
+    |> Map.put(:owner_roots, counts)
+    |> Map.put(:streams, streams)
+  end
+
+  defp redact_owner_status(state), do: state
+
+  defp converge_with_deferred_root(agent_id, attempts, state) do
+    case OwnerRoots.ensure_deferred_root(owner_roots(state), agent_id) do
+      {:error, _reason} ->
+        {:noreply, settle_roots(clear_pending_projection_only(state, agent_id), agent_id)}
+
+      {:ok, roots} ->
+        admitted = put_owner_roots(state, roots)
+
+        try do
+          run_pending_projection_convergence(agent_id, attempts, admitted)
+        rescue
+          _ ->
+            {:noreply, settle_roots(clear_pending_projection_only(admitted, agent_id), agent_id)}
+        catch
+          _, _ ->
+            {:noreply, settle_roots(clear_pending_projection_only(admitted, agent_id), agent_id)}
+        end
+    end
+  end
+
+  defp run_pending_projection_convergence(agent_id, attempts, state) do
+    case authoritative_tainted_read(agent_id, [], state.buffer_size) do
+      {:ok, _items, present?, :settle} ->
+        next =
+          if present? do
+            put_owned_agent(state, agent_id)
+          else
+            drop_owned_agent(state, agent_id)
+          end
+
+        {:noreply, settle_roots(clear_pending_projection_only(next, agent_id), agent_id)}
+
+      {:error, _reason, _disposition} ->
+        retry_or_exhaust_projection(state, agent_id, attempts)
+    end
+  end
+
+  defp retry_or_exhaust_projection(state, agent_id, attempts) do
+    if is_integer(attempts) and attempts < @max_projection_attempts do
+      pending = Map.put(pending_projection_map(state), agent_id, attempts + 1)
+      state = %{state | pending_projection: pending}
+      Process.send_after(self(), {:converge_projection, agent_id}, @projection_retry_ms)
+      {:noreply, state}
+    else
+      {:noreply, settle_roots(clear_pending_projection_only(state, agent_id), agent_id)}
+    end
+  end
+
+  defp read_authoritative_entries(agent_id, opts, state) do
+    case authoritative_tainted_read(agent_id, opts, state.buffer_size) do
+      {:ok, items, present?, :settle} ->
+        next =
+          if present? do
+            put_owned_agent(state, agent_id)
+          else
+            drop_owned_agent(state, agent_id)
+          end
+
+        {:ok, items, next, :settle}
+
+      {:error, reason, disposition} ->
+        {:error, reason, state, disposition}
+    end
+  end
 
   defp owned_agent_capacity?(%{owned_agents: owned_agents}, agent_id) do
     MapSet.member?(owned_agents, agent_id) or MapSet.size(owned_agents) < @max_loaded_agents
@@ -904,10 +1156,13 @@ defmodule Arbor.Memory.Thinking do
 
       :absent ->
         owned? = MapSet.member?(Map.get(state, :owned_agents, MapSet.new()), agent_id)
-        stream_absent? = not Map.has_key?(state.streams, agent_id)
+        stream_absent? = not Map.has_key?(Map.get(state, :streams, %{}), agent_id)
+        pending_absent? = not Map.has_key?(pending_projection_map(state), agent_id)
+        roots_absent? = not OwnerRoots.held?(owner_roots(state), agent_id)
 
         case thinking_ets_absent?(agent_id) do
-          {:ok, true} when not owned? and stream_absent? ->
+          {:ok, true}
+          when not owned? and stream_absent? and pending_absent? and roots_absent? ->
             {:ok, true}
 
           {:ok, _} ->
@@ -994,23 +1249,38 @@ defmodule Arbor.Memory.Thinking do
 
   defp validate_stream_text(_text), do: {:error, :invalid_payload}
 
-  defp finish_stream(agent_id, text, stream_taint, opts, state) do
+  defp finish_stream(agent_id, text, stream_taint, opts, state, complete) do
+    if not complete do
+      streams = Map.put(state.streams, agent_id, %{text: text, taint: stream_taint})
+      {:ok, %{state | streams: streams}, :ack}
+    else
+      finish_completed_stream(agent_id, text, stream_taint, opts, state)
+    end
+  end
+
+  defp finish_completed_stream(agent_id, text, stream_taint, opts, state) do
     if String.trim(text) == "" do
-      {:reply, :ok, %{state | streams: Map.delete(state.streams, agent_id)}}
+      {:ok, %{state | streams: Map.delete(state.streams, agent_id)}, :ack}
     else
       case store_entry(agent_id, text, stream_taint, opts, state) do
-        {:ok, entry, projection_status} ->
-          maybe_schedule_convergence(agent_id, projection_status)
-
+        {:ok, entry, :projected} ->
           next_state =
             state
             |> put_owned_agent(agent_id)
             |> Map.update!(:streams, &Map.delete(&1, agent_id))
 
-          {:reply, {:ok, entry}, next_state}
+          {{:ok, entry}, next_state, :settle}
+
+        {:ok, entry, :convergence_pending} ->
+          next_state =
+            state
+            |> put_owned_agent(agent_id)
+            |> Map.update!(:streams, &Map.delete(&1, agent_id))
+
+          {{:ok, entry}, next_state, :defer}
 
         {:error, reason} ->
-          {:reply, {:error, reason}, state}
+          {{:error, reason}, state, :ack}
       end
     end
   end
@@ -1021,21 +1291,21 @@ defmodule Arbor.Memory.Thinking do
         reconcile_durable_read(agent_id, durable_items, opts, buffer_size)
 
       {:error, reason} ->
-        {:error, normalize_store_error(reason)}
+        {:error, normalize_store_error(reason), :ack}
     end
   rescue
-    _ -> {:error, :store_unavailable}
+    _ -> {:error, :store_unavailable, :ack}
   catch
-    _, _ -> {:error, :store_unavailable}
+    _, _ -> {:error, :store_unavailable, :ack}
   end
 
   defp reconcile_durable_read(agent_id, durable_items, opts, buffer_size) do
     case reconcile_authoritative_projection(agent_id, durable_items, buffer_size) do
       {:ok, projection} ->
-        {:ok, filter_decoded_items(projection, opts), projection != []}
+        {:ok, filter_decoded_items(projection, opts), projection != [], :settle}
 
       {:error, reason} ->
-        {:error, reason}
+        {:error, reason, :defer}
     end
   end
 
@@ -1093,22 +1363,26 @@ defmodule Arbor.Memory.Thinking do
 
   defp entry_since?(_entry, _since), do: false
 
-  defp load_from_durable(buffer_size, replace?, owned_agents) do
+  defp hydrate_startup(state) do
+    case load_durable_inventory(state.buffer_size) do
+      {:ok, plans} ->
+        next =
+          Enum.reduce(plans, state, fn plan, acc ->
+            reconcile_startup_agent(acc, plan)
+          end)
+
+        Logger.info("Thinking durable projection loaded", record_count: length(plans))
+        next
+
+      {:error, _reason} ->
+        state
+    end
+  end
+
+  defp load_durable_inventory(buffer_size) do
     with {:ok, records} <- MemoryStore.load_all_tainted_authoritative("thinking"),
-         {:ok, plans} <- decode_records(records, buffer_size, 0, []),
-         {:ok, installation} <- prepare_installation(plans, MapSet.new(), [], []),
-         :ok <- maybe_clear_owned_projection(replace?, owned_agents) do
-      loaded_agents = installation_owned_agents(installation)
-
-      case commit_installation(installation) do
-        :ok ->
-          Logger.info("Thinking durable projection loaded", record_count: length(plans))
-          {:ok, loaded_agents}
-
-        {:error, reason} ->
-          _ = clear_owned_projection(MapSet.union(owned_agents, loaded_agents))
-          {:error, reason}
-      end
+         {:ok, plans} <- decode_records(records, buffer_size, 0, []) do
+      {:ok, plans}
     else
       {:error, reason} -> {:error, normalize_store_error(reason)}
       _ -> {:error, :invalid_durable_state}
@@ -1117,6 +1391,129 @@ defmodule Arbor.Memory.Thinking do
     _ -> {:error, :store_unavailable}
   catch
     _, _ -> {:error, :store_unavailable}
+  end
+
+  defp reconcile_startup_agent(state, {agent_id, items}) do
+    if valid_agent_id?(agent_id) do
+      case admit_and_reconcile_agent(state, agent_id, items) do
+        {_result, next_state} -> next_state
+      end
+    else
+      state
+    end
+  end
+
+  defp reconcile_startup_agent(state, _plan), do: state
+
+  defp reconcile_reload(state, plans) do
+    plan_map =
+      Enum.reduce(plans, %{}, fn
+        {agent_id, items}, acc when is_binary(agent_id) ->
+          if valid_agent_id?(agent_id) and not Map.has_key?(acc, agent_id) do
+            Map.put(acc, agent_id, items)
+          else
+            acc
+          end
+
+        _plan, acc ->
+          acc
+      end)
+
+    durable_ids = MapSet.new(Map.keys(plan_map))
+    previously_owned = Map.get(state, :owned_agents, MapSet.new())
+    absence_ids = MapSet.difference(previously_owned, durable_ids)
+
+    {state, durable_ok?} =
+      Enum.reduce(plan_map, {state, true}, fn {agent_id, items}, {acc, ok?} ->
+        reduce_reload_agent(acc, ok?, agent_id, items)
+      end)
+
+    {state, absence_ok?} =
+      Enum.reduce(MapSet.to_list(absence_ids), {state, true}, fn agent_id, {acc, ok?} ->
+        reduce_reload_agent(acc, ok?, agent_id, [])
+      end)
+
+    if durable_ok? and absence_ok? do
+      {state, :ok}
+    else
+      {state, {:error, :store_unavailable}}
+    end
+  end
+
+  defp reduce_reload_agent(state, ok?, agent_id, items) do
+    case admit_and_reconcile_agent(state, agent_id, items) do
+      {:ok, next} ->
+        {Map.update(next, :streams, %{}, &Map.delete(&1, agent_id)), ok?}
+
+      {:skipped, next} ->
+        {next, false}
+
+      {:error, next} ->
+        {next, false}
+    end
+  end
+
+  defp admit_and_reconcile_agent(state, agent_id, items) do
+    case admit_fresh(agent_id) do
+      {:error, _reason} ->
+        {:skipped, state}
+
+      {:ok, lease} ->
+        apply_reconcile_one(state, agent_id, items, lease)
+    end
+  end
+
+  defp apply_reconcile_one(state, agent_id, items, lease) do
+    try do
+      case install_reconciled_projection(agent_id, items, state.buffer_size) do
+        {:ok, :present} ->
+          {:ok, finish_public_root(put_owned_agent(state, agent_id), agent_id, lease, :settle)}
+
+        {:ok, :absent} ->
+          {:ok, finish_public_root(drop_owned_agent(state, agent_id), agent_id, lease, :settle)}
+
+        {:error, :convergence_pending} ->
+          {:error, finish_public_root(state, agent_id, lease, :defer)}
+      end
+    rescue
+      _ ->
+        {:error, finish_public_root(normalize_state(state), agent_id, lease, :ack)}
+    catch
+      _, _ ->
+        {:error, finish_public_root(normalize_state(state), agent_id, lease, :ack)}
+    end
+  end
+
+  defp install_reconciled_projection(agent_id, items, buffer_size) do
+    projection = Enum.take(items, buffer_size)
+    labelled_entries = Enum.map(projection, fn {entry, taint, _status} -> {entry, taint} end)
+    entries = Enum.map(projection, &elem(&1, 0))
+
+    install_result =
+      case labelled_entries do
+        [] -> install_empty_projection(agent_id)
+        _ -> install_live_entries(agent_id, labelled_entries, entries)
+      end
+
+    case install_result do
+      :ok when labelled_entries == [] ->
+        {:ok, :absent}
+
+      :ok ->
+        {:ok, :present}
+
+      {:error, _reason} ->
+        fail_closed_agent_projection(agent_id)
+        {:error, :convergence_pending}
+    end
+  rescue
+    _ ->
+      fail_closed_agent_projection(agent_id)
+      {:error, :convergence_pending}
+  catch
+    _, _ ->
+      fail_closed_agent_projection(agent_id)
+      {:error, :convergence_pending}
   end
 
   defp decode_records([], _buffer_size, _count, acc), do: {:ok, Enum.reverse(acc)}
@@ -1141,86 +1538,6 @@ defmodule Arbor.Memory.Thinking do
   end
 
   defp decode_record(_record, _limit), do: {nil, []}
-
-  defp prepare_installation([], _seen_agents, rows, bindings) do
-    {:ok, %{rows: Enum.reverse(rows), bindings: Enum.reverse(bindings)}}
-  end
-
-  defp prepare_installation(
-         [{agent_id, items} | rest],
-         seen_agents,
-         rows,
-         bindings
-       )
-       when is_binary(agent_id) do
-    with true <- valid_agent_id?(agent_id),
-         false <- MapSet.member?(seen_agents, agent_id),
-         {:ok, entries, item_bindings} <- prepare_agent_installation(agent_id, items, [], []) do
-      prepare_installation(
-        rest,
-        MapSet.put(seen_agents, agent_id),
-        [{agent_id, entries} | rows],
-        Enum.reverse(item_bindings, bindings)
-      )
-    else
-      _ -> {:error, :invalid_durable_state}
-    end
-  end
-
-  defp prepare_installation(_plans, _seen_agents, _rows, _bindings),
-    do: {:error, :invalid_durable_state}
-
-  defp prepare_agent_installation(_agent_id, [], entries, bindings),
-    do: {:ok, Enum.reverse(entries), bindings}
-
-  defp prepare_agent_installation(agent_id, [{entry, taint, _status} | rest], entries, bindings) do
-    with %{id: entry_id} when is_binary(entry_id) <- entry,
-         {:ok, payload} <- ThinkingCodec.entry_payload(entry) do
-      binding = {agent_id, entry_id, payload, taint}
-      prepare_agent_installation(agent_id, rest, [entry | entries], [binding | bindings])
-    else
-      _ -> {:error, :invalid_durable_state}
-    end
-  end
-
-  defp prepare_agent_installation(_agent_id, _items, _entries, _bindings),
-    do: {:error, :invalid_durable_state}
-
-  defp commit_installation(%{rows: rows, bindings: bindings}) do
-    with :ok <- clear_installation_owners(rows),
-         :ok <- bind_installation(bindings, []) do
-      Enum.each(rows, fn
-        {_agent_id, []} -> :ok
-        {agent_id, entries} -> true = :ets.insert(@ets_table, {agent_id, entries})
-      end)
-
-      :ok
-    end
-  rescue
-    _ ->
-      cleanup_bindings(bindings)
-      {:error, :store_unavailable}
-  catch
-    _, _ ->
-      cleanup_bindings(bindings)
-      {:error, :store_unavailable}
-  end
-
-  defp installation_owned_agents(%{rows: rows}) do
-    Enum.reduce(rows, MapSet.new(), fn
-      {agent_id, [_entry | _rest]}, acc -> MapSet.put(acc, agent_id)
-      {_agent_id, []}, acc -> acc
-    end)
-  end
-
-  defp clear_installation_owners(rows) do
-    Enum.reduce_while(rows, :ok, fn {agent_id, _entries}, :ok ->
-      case install_empty_projection(agent_id) do
-        :ok -> {:cont, :ok}
-        {:error, _reason} = error -> {:halt, error}
-      end
-    end)
-  end
 
   defp bind_installation([], _bound), do: :ok
 
@@ -1249,26 +1566,6 @@ defmodule Arbor.Memory.Thinking do
   catch
     _, _ -> :ok
   end
-
-  defp clear_owned_projection(%MapSet{} = owned_agents) do
-    if MapSet.size(owned_agents) <= @max_loaded_agents do
-      Enum.reduce_while(owned_agents, :ok, fn agent_id, :ok ->
-        case install_empty_projection(agent_id) do
-          :ok -> {:cont, :ok}
-          {:error, _reason} = error -> {:halt, error}
-        end
-      end)
-    else
-      {:error, :projection_capacity}
-    end
-  rescue
-    _ -> {:error, :store_unavailable}
-  catch
-    _, _ -> {:error, :store_unavailable}
-  end
-
-  defp maybe_clear_owned_projection(true, owned_agents), do: clear_owned_projection(owned_agents)
-  defp maybe_clear_owned_projection(false, _owned_agents), do: :ok
 
   # C3G owns shared embedding identity, provenance convergence, and eviction.
   # Thinking only preserves the existing post-commit enqueue path and never
