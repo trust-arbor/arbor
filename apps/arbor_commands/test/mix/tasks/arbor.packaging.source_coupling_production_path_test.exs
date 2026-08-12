@@ -92,9 +92,9 @@ defmodule Mix.Tasks.Arbor.Packaging.SourceCouplingProductionPathTest do
         ["arbor.packaging.source_coupling", "--root", root],
         cd: root,
         env: [
-          {"MIX_ENV", "test"},
+          {"MIX_ENV", "dev"},
           {"MIX_DEPS_PATH", System.get_env("MIX_DEPS_PATH") || Path.join(root, "deps")},
-          {"MIX_BUILD_PATH", System.get_env("MIX_BUILD_PATH") || Path.join(root, "_build")}
+          {"MIX_BUILD_PATH", Path.join(root, "_build/dev")}
         ],
         stderr_to_stdout: true
       )
