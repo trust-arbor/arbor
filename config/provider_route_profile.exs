@@ -2,9 +2,6 @@ import Config
 
 # Reviewed Phase E routing profile. Both routes passed the heartbeat eval suite
 # on the immutable clean revision recorded by the scoreboard evidence below.
-# The active ACP, Voice, council, and xAI Responses defaults use `grok-4.6`.
-# This scored `grok-4.5` route remains historical until a distinct 4.6 eval run
-# supplies replacement evidence; never relabel an older run as a newer model.
 provider_route_profile_enabled = true
 
 config :arbor_ai, :provider_route_profile, %{
@@ -13,7 +10,7 @@ config :arbor_ai, :provider_route_profile, %{
     "default" => %{requirements: %{}}
   },
   default_task_class: "default",
-  catalog_model_ids: ["gpt-5.6-sol", "grok-4.5"],
+  catalog_model_ids: ["gpt-5.6-sol", "grok-4.6"],
   scoreboard: [
     %{
       model: "gpt-5.6-sol",
@@ -31,7 +28,7 @@ config :arbor_ai, :provider_route_profile, %{
       last_verified: "2026-08-01T19:41:34.301064Z"
     },
     %{
-      model: "grok-4.5",
+      model: "grok-4.6",
       provider: "xai_oauth",
       runtime: "arbor",
       score: 1.0,
@@ -39,9 +36,10 @@ config :arbor_ai, :provider_route_profile, %{
       format_failure_rate: 0.0,
       variance: 0.0,
       marginal_cost: 0.0,
-      latency_ms: 4_217.1,
-      eval_run_ref: "grok-4-5-heartbeat-2026-08-01-4fcb18",
-      last_verified: "2026-08-01T19:42:36.096985Z"
+      latency_ms: 8_496.1,
+      # Full receipt: .arbor/eval_runs/grok-4-6-2026-08-12-391f1b.json
+      eval_run_ref: "grok-4-6-heartbeat-2026-08-12-391f1b",
+      last_verified: "2026-08-12T21:40:23.095628Z"
     }
   ],
   providers: ["openai_oauth", "xai_oauth"],

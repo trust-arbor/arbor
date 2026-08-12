@@ -19,7 +19,7 @@ defmodule Arbor.AI.Runtime.ReviewedProviderRouteProfileTest do
 
     assert Map.new(dev_profile.scoreboard, &{&1.provider, &1.eval_run_ref}) == %{
              "openai_oauth" => "gpt-5-6-sol-heartbeat-2026-08-01-2a1cc2",
-             "xai_oauth" => "grok-4-5-heartbeat-2026-08-01-4fcb18"
+             "xai_oauth" => "grok-4-6-heartbeat-2026-08-12-391f1b"
            }
 
     assert {:ok, catalog} = RouteCatalog.entries(dev_profile.catalog_model_ids)
