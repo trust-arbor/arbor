@@ -28,6 +28,7 @@ defmodule Arbor.Memory.IntentStore do
   alias Arbor.Contracts.Memory.{Intent, Percept}
   alias Arbor.Contracts.Security.{Taint, TaintEnvelope, TaintedValue}
   alias Arbor.Memory.{MemoryStore, Provenance, Signals}
+  alias Arbor.Memory.MutationAdmission.OwnerRoots
 
   require Logger
 
@@ -562,273 +563,218 @@ defmodule Arbor.Memory.IntentStore do
   def init(opts) do
     ensure_ets_table()
     buffer_size = normalize_buffer_size(Keyword.get(opts, :buffer_size, @default_buffer_size))
-    load_from_postgres(buffer_size)
+    {pending_projection, owner_roots} = load_from_postgres(buffer_size)
 
     {:ok,
      %{
        buffer_size: buffer_size,
        embedding_fun: Keyword.get(opts, :embedding_fun, &MemoryStore.embed_async/4),
-       pending_projection: %{}
+       pending_projection: pending_projection,
+       owner_roots: owner_roots
      }}
   end
 
   @impl true
   def handle_call({:recent_tainted, domain, agent_id, opts}, _from, state)
       when domain in [:intent, :percept] do
-    {:reply, read_tainted_items(domain, agent_id, opts, state.buffer_size), state}
-  rescue
-    _ -> {:reply, {:error, :store_unavailable}, state}
-  catch
-    _, _ -> {:reply, {:error, :store_unavailable}, state}
+    with_fresh_admission(state, agent_id, {:error, :store_unavailable}, fn state ->
+      {reply, disposition} = read_tainted_items(domain, agent_id, opts, state.buffer_size)
+      {reply, state, disposition}
+    end)
   end
 
   @impl true
   def handle_call({:compat_read, request, agent_id, argument}, _from, state) do
-    reply =
-      case load_durable_aggregate(agent_id, state.buffer_size) do
-        {:ok, aggregate, _aggregate_status} ->
-          _ = project_authoritative_read(agent_id, aggregate)
-          compat_read(request, aggregate, argument)
-
-        {:error, :not_found} ->
-          _ = evict_live_projection(agent_id)
-          compat_read(request, empty_decoded_aggregate(), argument)
-
-        {:error, _reason} ->
-          {:error, :store_unavailable}
-      end
-
-    {:reply, reply, state}
-  rescue
-    _ -> {:reply, {:error, :store_unavailable}, state}
-  catch
-    _, _ -> {:reply, {:error, :store_unavailable}, state}
+    with_fresh_admission(state, agent_id, {:error, :store_unavailable}, fn state ->
+      {reply, disposition} = do_compat_read(request, agent_id, argument, state)
+      {reply, state, disposition}
+    end)
   end
 
   @impl true
   def handle_call({:record_prepared, domain, agent_id, prepared}, _from, state)
       when domain in [:intent, :percept] do
-    operation = fn baseline ->
-      candidate = put_prepared_item(baseline.data, domain, prepared.value, state.buffer_size)
-      overrides = %{{domain, prepared.id} => prepared.taint}
+    state = normalize_state(state)
 
-      result = fn encoded ->
-        case Enum.find(encoded.items, &(&1.domain == domain and &1.id == prepared.id)) do
-          %{taint: committed_taint} -> {:recorded, prepared.value, committed_taint}
-          _ -> {:error, :commit_failed}
+    case admit_fresh(agent_id) do
+      {:ok, lease} ->
+        try do
+          {reply, next_state, disposition, signal} =
+            do_record_prepared(state, domain, agent_id, prepared)
+
+          next_state = finish_public_root(next_state, agent_id, lease, disposition)
+          emit_record_signals(signal)
+          {:reply, reply, next_state}
+        rescue
+          _ ->
+            {:reply, {:error, :store_unavailable},
+             finish_public_root(normalize_state(state), agent_id, lease, :ack)}
+        catch
+          _, _ ->
+            {:reply, {:error, :store_unavailable},
+             finish_public_root(normalize_state(state), agent_id, lease, :ack)}
         end
-      end
-
-      {:commit, candidate, overrides, Map.keys(overrides), result}
-    end
-
-    case mutate_authoritative(agent_id, state.buffer_size, operation) do
-      {:ok, {:recorded, value, committed_taint}, projection} ->
-        state = track_projection(state, agent_id, projection)
-        safe_emit_record_effects(state, domain, agent_id, %{prepared | taint: committed_taint})
-        {:reply, {:ok, value}, state}
-
-      {:error, reason} ->
-        {:reply, public_commit_error(reason), state}
-    end
-  rescue
-    _ -> {:reply, {:error, :store_unavailable}, state}
-  catch
-    _, _ -> {:reply, {:error, :store_unavailable}, state}
-  end
-
-  @impl true
-  def handle_call({:clear, agent_id}, _from, state) do
-    case delete_persisted_aggregate(agent_id) do
-      :ok ->
-        projection =
-          case evict_live_projection(agent_id) do
-            :ok -> :projected
-            _ -> :convergence_pending
-          end
-
-        {:reply, :ok, track_projection(state, agent_id, projection)}
-
-      {:error, :commit_outcome_unknown} ->
-        {:reply, {:error, :commit_outcome_unknown}, state}
 
       {:error, _reason} ->
         {:reply, {:error, :store_unavailable}, state}
     end
-  rescue
-    _ -> {:reply, {:error, :store_unavailable}, state}
-  catch
-    _, _ -> {:reply, {:error, :store_unavailable}, state}
+  end
+
+  @impl true
+  def handle_call({:clear, agent_id}, _from, state) do
+    with_fresh_admission(state, agent_id, {:error, :store_unavailable}, fn state ->
+      case delete_persisted_aggregate(agent_id) do
+        :ok ->
+          disposition =
+            case evict_live_projection(agent_id) do
+              :ok -> :settle
+              _ -> :defer
+            end
+
+          {:ok, state, disposition}
+
+        {:error, :commit_outcome_unknown} ->
+          {{:error, :commit_outcome_unknown}, state, :ack}
+
+        {:error, _reason} ->
+          {{:error, :store_unavailable}, state, :ack}
+      end
+    end)
   end
 
   @impl true
   def handle_call({:delete_agent_content, agent_id}, _from, state) do
-    # Disarm before backend/effects; exceptional returns must keep disarmed state.
-    disarmed = clear_pending_projection_only(state, agent_id)
+    state = normalize_state(state)
+
+    disarmed =
+      state
+      |> clear_pending_projection_only(agent_id)
+      |> settle_roots(agent_id, nil)
+
     delete_agent_content_after_disarm(agent_id, disarmed)
   end
 
   @impl true
   def handle_call({:agent_content_absent?, agent_id}, _from, state) do
+    state = normalize_state(state)
     reply = do_agent_content_absent?(agent_id, state)
     {:reply, reply, state}
   rescue
-    _ -> {:reply, {:error, :absence_uncertain}, state}
+    _ -> {:reply, {:error, :absence_uncertain}, normalize_state(state)}
   catch
-    _, _ -> {:reply, {:error, :absence_uncertain}, state}
+    _, _ -> {:reply, {:error, :absence_uncertain}, normalize_state(state)}
   end
 
   @impl true
   def handle_call({:reload, agent_id}, _from, state) do
-    current = get_agent_data(agent_id)
-
-    reply =
-      case load_durable_aggregate(agent_id, state.buffer_size) do
-        {:ok, decoded, _status} ->
-          restore_decoded_agent(agent_id, current, decoded)
-
-        {:error, :not_found} ->
-          clear_live_agent(agent_id, current)
-
-        {:error, :invalid_aggregate} ->
-          clear_live_agent(agent_id, current)
-          Logger.warning("IntentStore rejected corrupt durable aggregate")
-          :ok
-
-        {:error, _reason} ->
-          Logger.warning("IntentStore durable reload failed")
-          :ok
-
-        _ ->
-          Logger.warning("IntentStore durable reload failed")
-          :ok
-      end
-
-    {:reply, reply, state}
-  rescue
-    _ ->
-      Logger.warning("IntentStore durable reload failed")
-      {:reply, :ok, state}
-  catch
-    _, _ ->
-      Logger.warning("IntentStore durable reload failed")
-      {:reply, :ok, state}
+    with_fresh_admission(state, agent_id, :ok, fn state ->
+      {reply, disposition} = do_reload(agent_id, state)
+      {reply, state, disposition}
+    end)
   end
 
   @impl true
   def handle_call({:lock_intent, agent_id, intent_id}, _from, state) do
-    operation = fn baseline ->
-      data = baseline.data
-      statuses = Map.get(data, :statuses, %{})
-      current = Map.get(statuses, intent_id, %{status: :pending})
-      intent = Enum.find(data.intents, &(&1.id == intent_id))
+    with_fresh_admission(state, agent_id, {:error, :store_unavailable}, fn state ->
+      operation = fn baseline ->
+        data = baseline.data
+        statuses = Map.get(data, :statuses, %{})
+        current = Map.get(statuses, intent_id, %{status: :pending})
+        intent = Enum.find(data.intents, &(&1.id == intent_id))
 
-      case {intent, current.status} do
-        {nil, _status} ->
-          {:error, :not_found}
+        case {intent, current.status} do
+          {nil, _status} ->
+            {:error, :not_found}
 
-        {%Intent{} = intent, :pending} ->
+          {%Intent{} = intent, :pending} ->
+            status_info = %{
+              status: :locked,
+              locked_at: DateTime.utc_now(),
+              retry_count: Map.get(current, :retry_count, 0)
+            }
+
+            updated_statuses = Map.put(statuses, intent_id, status_info)
+            updated = Map.put(data, :statuses, updated_statuses)
+
+            {:commit, updated, %{{:status, intent_id} => :inherit_item}, [{:intent, intent_id}],
+             fn _encoded -> {:locked, intent} end}
+
+          {_intent, _other} ->
+            {:error, :not_lockable}
+        end
+      end
+
+      case classified_mutation(mutate_authoritative(agent_id, state.buffer_size, operation)) do
+        {:ok, {:locked, intent}, disposition} -> {{:ok, intent}, state, disposition}
+        {:error, error, disposition} -> {error, state, disposition}
+      end
+    end)
+  end
+
+  @impl true
+  def handle_call({:complete_intent, agent_id, intent_id}, _from, state) do
+    with_fresh_admission(state, agent_id, {:error, :store_unavailable}, fn state ->
+      operation = fn baseline ->
+        data = baseline.data
+        statuses = Map.get(data, :statuses, %{})
+
+        if Enum.any?(data.intents, &(&1.id == intent_id)) do
           status_info = %{
-            status: :locked,
-            locked_at: DateTime.utc_now(),
-            retry_count: Map.get(current, :retry_count, 0)
+            status: :completed,
+            completed_at: DateTime.utc_now(),
+            retry_count: Map.get(Map.get(statuses, intent_id, %{}), :retry_count, 0)
           }
 
           updated_statuses = Map.put(statuses, intent_id, status_info)
           updated = Map.put(data, :statuses, updated_statuses)
 
           {:commit, updated, %{{:status, intent_id} => :inherit_item}, [{:intent, intent_id}],
-           fn _encoded -> {:locked, intent} end}
-
-        {_intent, _other} ->
-          {:error, :not_lockable}
+           fn _encoded -> :completed end}
+        else
+          {:error, :not_found}
+        end
       end
-    end
 
-    case mutate_authoritative(agent_id, state.buffer_size, operation) do
-      {:ok, {:locked, intent}, projection} ->
-        {:reply, {:ok, intent}, track_projection(state, agent_id, projection)}
-
-      {:error, reason} when reason in [:not_found, :not_lockable] ->
-        {:reply, {:error, reason}, state}
-
-      {:error, reason} ->
-        {:reply, public_commit_error(reason), state}
-    end
-  end
-
-  @impl true
-  def handle_call({:complete_intent, agent_id, intent_id}, _from, state) do
-    operation = fn baseline ->
-      data = baseline.data
-      statuses = Map.get(data, :statuses, %{})
-
-      if Enum.any?(data.intents, &(&1.id == intent_id)) do
-        status_info = %{
-          status: :completed,
-          completed_at: DateTime.utc_now(),
-          retry_count: Map.get(Map.get(statuses, intent_id, %{}), :retry_count, 0)
-        }
-
-        updated_statuses = Map.put(statuses, intent_id, status_info)
-        updated = Map.put(data, :statuses, updated_statuses)
-
-        {:commit, updated, %{{:status, intent_id} => :inherit_item}, [{:intent, intent_id}],
-         fn _encoded -> :completed end}
-      else
-        {:error, :not_found}
+      case classified_mutation(mutate_authoritative(agent_id, state.buffer_size, operation)) do
+        {:ok, :completed, disposition} -> {:ok, state, disposition}
+        {:error, error, disposition} -> {error, state, disposition}
       end
-    end
-
-    case mutate_authoritative(agent_id, state.buffer_size, operation) do
-      {:ok, :completed, projection} ->
-        {:reply, :ok, track_projection(state, agent_id, projection)}
-
-      {:error, :not_found} ->
-        {:reply, {:error, :not_found}, state}
-
-      {:error, reason} ->
-        {:reply, public_commit_error(reason), state}
-    end
+    end)
   end
 
   @impl true
   def handle_call({:fail_intent, agent_id, intent_id, reason, reason_taint}, _from, state) do
-    operation = fn baseline ->
-      data = baseline.data
-      statuses = Map.get(data, :statuses, %{})
+    with_fresh_admission(state, agent_id, {:error, :store_unavailable}, fn state ->
+      operation = fn baseline ->
+        data = baseline.data
+        statuses = Map.get(data, :statuses, %{})
 
-      if Enum.any?(data.intents, &(&1.id == intent_id)) do
-        current = Map.get(statuses, intent_id, %{})
-        retry_count = Map.get(current, :retry_count, 0) + 1
+        if Enum.any?(data.intents, &(&1.id == intent_id)) do
+          current = Map.get(statuses, intent_id, %{})
+          retry_count = Map.get(current, :retry_count, 0) + 1
 
-        status_info = %{
-          status: :pending,
-          failed_at: DateTime.utc_now(),
-          last_failure_reason: reason,
-          retry_count: retry_count
-        }
+          status_info = %{
+            status: :pending,
+            failed_at: DateTime.utc_now(),
+            last_failure_reason: reason,
+            retry_count: retry_count
+          }
 
-        updated_statuses = Map.put(statuses, intent_id, status_info)
-        updated = Map.put(data, :statuses, updated_statuses)
+          updated_statuses = Map.put(statuses, intent_id, status_info)
+          updated = Map.put(data, :statuses, updated_statuses)
 
-        {:commit, updated, %{{:status, intent_id} => reason_taint}, [{:intent, intent_id}],
-         fn _encoded -> {:failed, retry_count} end}
-      else
-        {:error, :not_found}
+          {:commit, updated, %{{:status, intent_id} => reason_taint}, [{:intent, intent_id}],
+           fn _encoded -> {:failed, retry_count} end}
+        else
+          {:error, :not_found}
+        end
       end
-    end
 
-    case mutate_authoritative(agent_id, state.buffer_size, operation) do
-      {:ok, {:failed, retry_count}, projection} ->
-        {:reply, {:ok, retry_count}, track_projection(state, agent_id, projection)}
-
-      {:error, :not_found} ->
-        {:reply, {:error, :not_found}, state}
-
-      {:error, commit_reason} ->
-        {:reply, public_commit_error(commit_reason), state}
-    end
+      case classified_mutation(mutate_authoritative(agent_id, state.buffer_size, operation)) do
+        {:ok, {:failed, retry_count}, disposition} -> {{:ok, retry_count}, state, disposition}
+        {:error, error, disposition} -> {error, state, disposition}
+      end
+    end)
   end
 
   @impl true
@@ -877,14 +823,16 @@ defmodule Arbor.Memory.IntentStore do
       end
     end
 
-    case mutate_authoritative(agent_id, state.buffer_size, operation) do
-      {:ok, {:imported, count}, projection} ->
-        if count > 0, do: Logger.info("IntentStore imported intents", count: count)
-        {:reply, :ok, track_projection(state, agent_id, projection)}
+    with_fresh_admission(state, agent_id, {:error, :store_unavailable}, fn state ->
+      case classified_mutation(mutate_authoritative(agent_id, state.buffer_size, operation)) do
+        {:ok, {:imported, count}, disposition} ->
+          if count > 0, do: Logger.info("IntentStore imported intents", count: count)
+          {:ok, state, disposition}
 
-      {:error, reason} ->
-        {:reply, public_commit_error(reason), state}
-    end
+        {:error, error, disposition} ->
+          {error, state, disposition}
+      end
+    end)
   end
 
   @impl true
@@ -921,13 +869,12 @@ defmodule Arbor.Memory.IntentStore do
       end
     end
 
-    case mutate_authoritative(agent_id, state.buffer_size, operation) do
-      {:ok, count, projection} ->
-        {:reply, count, track_projection(state, agent_id, projection)}
-
-      {:error, reason} ->
-        {:reply, public_commit_error(reason), state}
-    end
+    with_fresh_admission(state, agent_id, {:error, :store_unavailable}, fn state ->
+      case classified_mutation(mutate_authoritative(agent_id, state.buffer_size, operation)) do
+        {:ok, count, disposition} -> {count, state, disposition}
+        {:error, error, disposition} -> {error, state, disposition}
+      end
+    end)
   end
 
   @impl true
@@ -961,58 +908,95 @@ defmodule Arbor.Memory.IntentStore do
       end
     end
 
-    case mutate_authoritative(agent_id, state.buffer_size, operation) do
-      {:ok, count, projection} ->
-        if count > 0, do: Logger.info("IntentStore pruned stale intents", count: count)
-        {:reply, count, track_projection(state, agent_id, projection)}
+    with_fresh_admission(state, agent_id, {:error, :store_unavailable}, fn state ->
+      case classified_mutation(mutate_authoritative(agent_id, state.buffer_size, operation)) do
+        {:ok, count, disposition} ->
+          if count > 0, do: Logger.info("IntentStore pruned stale intents", count: count)
+          {count, state, disposition}
 
-      {:error, reason} ->
-        {:reply, public_commit_error(reason), state}
-    end
+        {:error, error, disposition} ->
+          {error, state, disposition}
+      end
+    end)
   end
 
   @impl true
   def handle_info({:converge_projection, agent_id}, state) do
-    # Exact pending entry required. Stale messages after content-only cleanup
-    # (which clears pending_projection) must be no-ops so they cannot call
-    # evict_live_projection/1 and purge retained Provenance sidecars.
-    case Map.fetch(state.pending_projection, agent_id) do
+    state = normalize_state(state)
+
+    case Map.fetch(pending_projection_map(state), agent_id) do
       :error ->
         {:noreply, state}
 
       {:ok, attempts} ->
-        run_pending_projection_convergence(agent_id, attempts, state)
+        case OwnerRoots.ensure_deferred_root(owner_roots(state), agent_id) do
+          {:ok, roots} ->
+            state = put_owner_roots(state, roots)
+            run_pending_projection_convergence(agent_id, attempts, state)
+
+          {:error, _reason} ->
+            {:noreply, clear_pending_projection_only(state, agent_id)}
+        end
     end
   rescue
     _ ->
-      {:noreply, clear_pending_projection_only(state, agent_id)}
+      state = normalize_state(state)
+      {:noreply, settle_roots(clear_pending_projection_only(state, agent_id), agent_id)}
   catch
     _, _ ->
-      {:noreply, clear_pending_projection_only(state, agent_id)}
+      state = normalize_state(state)
+      {:noreply, settle_roots(clear_pending_projection_only(state, agent_id), agent_id)}
   end
 
-  def handle_info(_message, state), do: {:noreply, state}
+  def handle_info(_message, state), do: {:noreply, normalize_state(state)}
+
+  @impl true
+  def format_status(status) when is_map(status) do
+    case status do
+      %{state: state} when is_map(state) ->
+        %{status | state: redact_owner_roots(state)}
+
+      _ ->
+        status
+    end
+  end
+
+  def format_status(status), do: status
+
+  @impl true
+  def code_change(_old_vsn, state, _extra), do: {:ok, normalize_state(state)}
 
   defp run_pending_projection_convergence(agent_id, attempts, state) do
     result =
       case load_durable_aggregate(agent_id, state.buffer_size) do
-        {:ok, aggregate, _status} -> project_authoritative_read(agent_id, aggregate)
-        {:error, :not_found} -> evict_live_projection(agent_id)
-        {:error, _reason} -> {:error, :store_unavailable}
+        {:ok, aggregate, _status} ->
+          project_authoritative_read(agent_id, aggregate)
+
+        {:error, :not_found} ->
+          project_authoritative_absence(agent_id)
+
+        {:error, :invalid_aggregate} ->
+          :invalid_aggregate
+
+        {:error, _reason} ->
+          :convergence_pending
       end
 
     cond do
-      result == :ok ->
-        {:noreply, clear_pending_projection_only(state, agent_id)}
+      result == :projected ->
+        {:noreply, settle_roots(clear_pending_projection_only(state, agent_id), agent_id)}
+
+      result == :invalid_aggregate ->
+        {:noreply, settle_roots(clear_pending_projection_only(state, agent_id), agent_id)}
 
       is_integer(attempts) and attempts < @max_projection_attempts ->
         Process.send_after(self(), {:converge_projection, agent_id}, @projection_retry_ms)
 
-        {:noreply,
-         %{state | pending_projection: Map.put(state.pending_projection, agent_id, attempts + 1)}}
+        pending = Map.put(pending_projection_map(state), agent_id, attempts + 1)
+        {:noreply, %{state | pending_projection: pending}}
 
       true ->
-        {:noreply, clear_pending_projection_only(state, agent_id)}
+        {:noreply, settle_roots(clear_pending_projection_only(state, agent_id), agent_id)}
     end
   end
 
@@ -1021,6 +1005,214 @@ defmodule Arbor.Memory.IntentStore do
   # ============================================================================
 
   defp server_name, do: __MODULE__
+
+  defp normalize_state(state) when is_map(state) do
+    state
+    |> Map.put_new(:owner_roots, OwnerRoots.new())
+    |> Map.put_new(:pending_projection, %{})
+  end
+
+  defp normalize_state(state), do: state
+
+  defp owner_roots(state) when is_map(state), do: Map.get(state, :owner_roots, OwnerRoots.new())
+  defp owner_roots(_state), do: OwnerRoots.new()
+
+  defp put_owner_roots(state, roots) when is_map(state), do: Map.put(state, :owner_roots, roots)
+
+  defp pending_projection_map(%{pending_projection: pending}) when is_map(pending), do: pending
+  defp pending_projection_map(_state), do: %{}
+
+  defp admit_fresh(agent_id) do
+    case OwnerRoots.admit_new(OwnerRoots.new(), agent_id) do
+      {:ok, lease} -> {:ok, lease}
+      {:error, _reason} -> {:error, :store_unavailable}
+    end
+  end
+
+  defp with_fresh_admission(state, agent_id, denied_reply, fun) do
+    state = normalize_state(state)
+
+    case admit_fresh(agent_id) do
+      {:ok, lease} ->
+        try do
+          {reply, next_state, disposition} = fun.(state)
+          {:reply, reply, finish_public_root(next_state, agent_id, lease, disposition)}
+        rescue
+          _ ->
+            {:reply, denied_reply,
+             finish_public_root(normalize_state(state), agent_id, lease, :ack)}
+        catch
+          _, _ ->
+            {:reply, denied_reply,
+             finish_public_root(normalize_state(state), agent_id, lease, :ack)}
+        end
+
+      {:error, _reason} ->
+        {:reply, denied_reply, state}
+    end
+  end
+
+  defp finish_public_root(state, agent_id, lease, :defer) do
+    case OwnerRoots.defer(owner_roots(state), agent_id, lease) do
+      {:ok, roots} ->
+        state
+        |> put_owner_roots(roots)
+        |> arm_projection_retry(agent_id)
+
+      {:error, _reason} ->
+        ack_root(state, lease)
+    end
+  end
+
+  defp finish_public_root(state, agent_id, lease, :settle) do
+    state
+    |> settle_roots(agent_id, lease)
+    |> clear_pending_projection_only(agent_id)
+  end
+
+  defp finish_public_root(state, _agent_id, lease, _ack) do
+    ack_root(state, lease)
+  end
+
+  defp ack_root(state, lease) do
+    {roots, _result} = OwnerRoots.ack(owner_roots(state), lease)
+    put_owner_roots(state, roots)
+  end
+
+  defp settle_roots(state, agent_id, lease \\ nil) do
+    {roots, _} = OwnerRoots.settle_agent(owner_roots(state), agent_id, lease)
+    put_owner_roots(state, roots)
+  end
+
+  defp arm_projection_retry(state, agent_id) do
+    pending = pending_projection_map(state)
+
+    if Map.has_key?(pending, agent_id) do
+      state
+    else
+      Process.send_after(self(), {:converge_projection, agent_id}, @projection_retry_ms)
+      %{state | pending_projection: Map.put(pending, agent_id, 1)}
+    end
+  end
+
+  defp redact_owner_roots(state) when is_map(state) do
+    counts =
+      case Map.get(state, :owner_roots) do
+        %OwnerRoots{by_agent: by_agent} ->
+          Map.new(by_agent, fn {agent_id, leases} -> {agent_id, length(leases)} end)
+
+        _ ->
+          %{}
+      end
+
+    Map.put(state, :owner_roots, counts)
+  end
+
+  defp redact_owner_roots(state), do: state
+
+  defp classified_mutation(result) do
+    case result do
+      {:ok, value, :projected, :commit} -> {:ok, value, :settle}
+      {:ok, value, :convergence_pending, :commit} -> {:ok, value, :defer}
+      {:ok, value, :projected, :noop} -> {:ok, value, :ack}
+      {:ok, value, :convergence_pending, :noop} -> {:ok, value, :defer}
+      {:error, reason} when reason in [:not_found, :not_lockable] -> {:error, {:error, reason}, :ack}
+      {:error, reason} -> {:error, public_commit_error(reason), :ack}
+    end
+  end
+
+  defp commit_disposition(:projected), do: :settle
+  defp commit_disposition(:convergence_pending), do: :defer
+  defp commit_disposition(_other), do: :ack
+
+  defp do_record_prepared(state, domain, agent_id, prepared) do
+    operation = fn baseline ->
+      candidate = put_prepared_item(baseline.data, domain, prepared.value, state.buffer_size)
+      overrides = %{{domain, prepared.id} => prepared.taint}
+
+      result = fn encoded ->
+        case Enum.find(encoded.items, &(&1.domain == domain and &1.id == prepared.id)) do
+          %{taint: committed_taint} -> {:recorded, prepared.value, committed_taint}
+          _ -> {:error, :commit_failed}
+        end
+      end
+
+      {:commit, candidate, overrides, Map.keys(overrides), result}
+    end
+
+    case mutate_authoritative(agent_id, state.buffer_size, operation) do
+      {:ok, {:recorded, value, committed_taint}, projection, :commit} ->
+        prepared = %{prepared | taint: committed_taint}
+        if domain == :intent, do: ack_intent_embedding(state, agent_id, prepared)
+
+        {{:ok, value}, state, commit_disposition(projection),
+         {:recorded, domain, agent_id, prepared}}
+
+      {:error, reason} ->
+        {public_commit_error(reason), state, :ack, :none}
+
+      _other ->
+        {{:error, :store_unavailable}, state, :ack, :none}
+    end
+  end
+
+  defp do_compat_read(request, agent_id, argument, state) do
+    case load_durable_aggregate(agent_id, state.buffer_size) do
+      {:ok, aggregate, _aggregate_status} ->
+        disposition = commit_disposition(project_authoritative_read(agent_id, aggregate))
+        {compat_read(request, aggregate, argument), disposition}
+
+      {:error, :not_found} ->
+        disposition = commit_disposition(project_authoritative_absence(agent_id))
+        {compat_read(request, empty_decoded_aggregate(), argument), disposition}
+
+      {:error, _reason} ->
+        {{:error, :store_unavailable}, :ack}
+    end
+  end
+
+  defp do_reload(agent_id, state) do
+    current = get_agent_data(agent_id)
+
+    case load_durable_aggregate(agent_id, state.buffer_size) do
+      {:ok, decoded, _status} ->
+        case restore_decoded_agent(agent_id, current, decoded) do
+          :ok ->
+            {:ok, :settle}
+
+          {:error, _reason} ->
+            _ = evict_live_projection(agent_id)
+            {:ok, :defer}
+        end
+
+      {:error, :not_found} ->
+        case clear_live_agent(agent_id, current) do
+          :ok -> {:ok, :settle}
+          _ -> {:ok, :defer}
+        end
+
+      {:error, :invalid_aggregate} ->
+        _ = clear_live_agent(agent_id, current)
+        Logger.warning("IntentStore rejected corrupt durable aggregate")
+        {:ok, :ack}
+
+      {:error, _reason} ->
+        Logger.warning("IntentStore durable reload failed")
+        {:ok, :ack}
+
+      _ ->
+        Logger.warning("IntentStore durable reload failed")
+        {:ok, :ack}
+    end
+  rescue
+    _ ->
+      Logger.warning("IntentStore durable reload failed")
+      {:ok, :ack}
+  catch
+    _, _ ->
+      Logger.warning("IntentStore durable reload failed")
+      {:ok, :ack}
+  end
 
   defp normalize_buffer_size(value) when is_integer(value) and value > 0,
     do: min(value, Taint.max_join_inputs())
@@ -1389,37 +1581,52 @@ defmodule Arbor.Memory.IntentStore do
   defp read_tainted_items(domain, agent_id, opts, buffer_size) do
     case load_durable_aggregate(agent_id, buffer_size) do
       {:ok, aggregate, aggregate_status} ->
-        _ = project_authoritative_read(agent_id, aggregate)
+        disposition = commit_disposition(project_authoritative_read(agent_id, aggregate))
 
         items =
           aggregate.items
           |> filter_decoded_items(domain, opts)
           |> Enum.map(&durable_tainted_item(&1, aggregate_status))
 
-        {:ok, items}
+        {{:ok, items}, disposition}
 
       {:error, :not_found} ->
-        _ = evict_live_projection(agent_id)
-        {:ok, []}
+        disposition = commit_disposition(project_authoritative_absence(agent_id))
+        {{:ok, []}, disposition}
 
       {:error, _reason} ->
-        {:error, :store_unavailable}
+        {{:error, :store_unavailable}, :ack}
     end
   rescue
-    _ -> {:error, :store_unavailable}
+    _ -> {{:error, :store_unavailable}, :ack}
   catch
-    _, _ -> {:error, :store_unavailable}
+    _, _ -> {{:error, :store_unavailable}, :ack}
   end
 
   defp project_authoritative_read(agent_id, aggregate) do
     case restore_decoded_agent(agent_id, get_agent_data(agent_id), aggregate) do
-      :ok -> :ok
-      {:error, _reason} -> evict_live_projection(agent_id)
+      :ok ->
+        :projected
+
+      {:error, _reason} ->
+        _ = evict_live_projection(agent_id)
+        :convergence_pending
     end
   rescue
-    _ -> evict_live_projection(agent_id)
+    _ ->
+      _ = evict_live_projection(agent_id)
+      :convergence_pending
   catch
-    _, _ -> evict_live_projection(agent_id)
+    _, _ ->
+      _ = evict_live_projection(agent_id)
+      :convergence_pending
+  end
+
+  defp project_authoritative_absence(agent_id) do
+    case evict_live_projection(agent_id) do
+      :ok -> :projected
+      _ -> :convergence_pending
+    end
   end
 
   defp evict_live_projection(agent_id) do
@@ -1483,8 +1690,9 @@ defmodule Arbor.Memory.IntentStore do
     _, _ -> {:error, :projection_failed}
   end
 
-  defp clear_pending_projection_only(%{pending_projection: pending} = state, agent_id) do
-    %{state | pending_projection: Map.delete(pending, agent_id)}
+  defp clear_pending_projection_only(state, agent_id) when is_map(state) do
+    pending = pending_projection_map(state)
+    Map.put(state, :pending_projection, Map.delete(pending, agent_id))
   end
 
   defp do_agent_content_absent?(agent_id, state) do
@@ -1619,7 +1827,7 @@ defmodule Arbor.Memory.IntentStore do
     with {:ok, baseline} <- load_mutation_baseline(agent_id, buffer_size) do
       case operation.(baseline) do
         {:noop, result} ->
-          {:ok, result, project_baseline(agent_id, baseline)}
+          {:ok, result, project_baseline(agent_id, baseline), :noop}
 
         {:error, reason} ->
           {:error, reason}
@@ -1680,7 +1888,7 @@ defmodule Arbor.Memory.IntentStore do
              taint: encoded.aggregate_taint
            ) do
         {:ok, _stored_record} ->
-          {:ok, result, install_committed_projection(agent_id, encoded)}
+          {:ok, result, install_committed_projection(agent_id, encoded), :commit}
 
         {:error, {:memory_store, :critical, :conflict}} ->
           mutate_authoritative(agent_id, buffer_size, operation, attempts - 1)
@@ -1746,18 +1954,7 @@ defmodule Arbor.Memory.IntentStore do
       :convergence_pending
   end
 
-  defp track_projection(state, agent_id, :projected) do
-    %{state | pending_projection: Map.delete(state.pending_projection, agent_id)}
-  end
 
-  defp track_projection(state, agent_id, :convergence_pending) do
-    if Map.has_key?(state.pending_projection, agent_id) do
-      state
-    else
-      Process.send_after(self(), {:converge_projection, agent_id}, @projection_retry_ms)
-      %{state | pending_projection: Map.put(state.pending_projection, agent_id, 1)}
-    end
-  end
 
   defp delete_persisted_aggregate(agent_id) do
     case MemoryStore.delete_tainted_authoritative("intents", agent_id) do
@@ -1904,7 +2101,7 @@ defmodule Arbor.Memory.IntentStore do
     put_item_provenance(agent_id, aggregate.items ++ aggregate.status_items)
   end
 
-  defp emit_record_effects(state, :intent, agent_id, prepared) do
+  defp ack_intent_embedding(state, agent_id, prepared) do
     state.embedding_fun.(
       "intents",
       "#{agent_id}:#{prepared.id}",
@@ -1914,25 +2111,34 @@ defmodule Arbor.Memory.IntentStore do
       taint: prepared.taint
     )
 
-    Signals.emit_intent_formed(agent_id, prepared.value)
-    Logger.debug("Intent recorded")
-    state
-  end
-
-  defp emit_record_effects(state, :percept, agent_id, prepared) do
-    Signals.emit_percept_received(agent_id, prepared.value)
-    Logger.debug("Percept recorded")
-    state
-  end
-
-  defp safe_emit_record_effects(state, domain, agent_id, prepared) do
-    _ = emit_record_effects(state, domain, agent_id, prepared)
     :ok
   rescue
     _ -> :ok
   catch
     _, _ -> :ok
   end
+
+  defp emit_record_signals({:recorded, :intent, agent_id, prepared}) do
+    Signals.emit_intent_formed(agent_id, prepared.value)
+    Logger.debug("Intent recorded")
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
+  end
+
+  defp emit_record_signals({:recorded, :percept, agent_id, prepared}) do
+    Signals.emit_percept_received(agent_id, prepared.value)
+    Logger.debug("Percept recorded")
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
+  end
+
+  defp emit_record_signals(_signal), do: :ok
 
   defp ensure_ets_table do
     if :ets.whereis(@ets_table) == :undefined do
@@ -3001,37 +3207,61 @@ defmodule Arbor.Memory.IntentStore do
   defp load_from_postgres(buffer_size) do
     case MemoryStore.load_all_tainted_authoritative("intents") do
       {:ok, entries} ->
-        loaded =
-          Enum.count(entries, fn
-            {agent_id, %TaintedValue{value: persisted, taint: outer_taint}, outer_status} ->
-              with :ok <- validate_identifier(agent_id),
-                   {:ok, decoded, _status} <-
-                     decode_durable_aggregate(
-                       persisted,
-                       outer_taint,
-                       outer_status,
-                       buffer_size
-                     ),
-                   :ok <- restore_decoded_agent(agent_id, empty_agent_data(), decoded) do
-                true
-              else
-                _ -> false
-              end
-
-            _ ->
-              false
+        {pending, roots, loaded} =
+          Enum.reduce(entries, {%{}, OwnerRoots.new(), 0}, fn entry, acc ->
+            hydrate_one(entry, buffer_size, acc)
           end)
 
         Logger.info("IntentStore loaded durable aggregates", count: loaded)
+        {pending, roots}
 
       _ ->
-        :ok
+        {%{}, OwnerRoots.new()}
     end
   rescue
     _ ->
       Logger.warning("IntentStore durable startup load failed")
+      {%{}, OwnerRoots.new()}
   catch
     _, _ ->
       Logger.warning("IntentStore durable startup load failed")
+      {%{}, OwnerRoots.new()}
   end
+
+  defp hydrate_one(
+         {agent_id, %TaintedValue{value: persisted, taint: outer_taint}, outer_status},
+         buffer_size,
+         {pending, roots, loaded}
+       ) do
+    with :ok <- validate_identifier(agent_id),
+         {:ok, decoded, _status} <-
+           decode_durable_aggregate(persisted, outer_taint, outer_status, buffer_size) do
+      case OwnerRoots.admit_new(OwnerRoots.new(), agent_id) do
+        {:ok, lease} ->
+          case restore_decoded_agent(agent_id, empty_agent_data(), decoded) do
+            :ok ->
+              {next_roots, _} = OwnerRoots.ack(roots, lease)
+              {pending, next_roots, loaded + 1}
+
+            {:error, _reason} ->
+              case OwnerRoots.defer(roots, agent_id, lease) do
+                {:ok, next_roots} ->
+                  Process.send_after(self(), {:converge_projection, agent_id}, @projection_retry_ms)
+                  {Map.put_new(pending, agent_id, 1), next_roots, loaded}
+
+                {:error, _reason} ->
+                  {next_roots, _} = OwnerRoots.ack(roots, lease)
+                  {pending, next_roots, loaded}
+              end
+          end
+
+        {:error, _reason} ->
+          {pending, roots, loaded}
+      end
+    else
+      _ -> {pending, roots, loaded}
+    end
+  end
+
+  defp hydrate_one(_entry, _buffer_size, acc), do: acc
 end
