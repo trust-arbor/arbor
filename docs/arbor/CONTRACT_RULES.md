@@ -6,9 +6,14 @@ Rules for writing, updating, and consuming contracts in the Arbor ecosystem. Inc
 
 ## 1. What Goes in Contracts
 
-Contracts (`arbor_contracts`) contains three things:
+Contracts (`arbor_contracts`) admits only three categories:
 
-**Shared data types** — Structs that appear in multiple libraries' APIs.
+**Shared data types** — Structs referenced by two or more umbrella libraries
+other than `arbor_contracts`. Exactly one consuming library means the type
+belongs to that consumer, not here. The executable consumer census defined by
+[`AC-1.0`](../specs/arbor-contracts/AC-1.0.md) decides the question; run
+`./bin/mix arbor.contracts.census` rather than inferring consumers from
+dependency declarations.
 ```
 Security.Capability, Trust.Profile, Trust.Event
 Consensus.Protocol, Consensus.Proposal, Consensus.Evaluation,
@@ -21,6 +26,10 @@ API.Shell, API.Signals, API.Security, API.Trust,
 API.Consensus, API.Historian, API.Persistence
 ```
 
+**Explicitly grandfathered modules** — Temporary exceptions listed in the
+admission test with a justification and linked roadmap item. Grandfathering is
+tracked debt, not an alternative admission path for new modules.
+
 ## 2. What Stays in Libraries
 
 **Library-specific behaviours stay in their library.** If a behaviour is named after the library's domain concept, it belongs there — not in contracts.
@@ -31,7 +40,11 @@ arbor_persistence owns: Store, QueryableStore, EventLog
 arbor_historian owns: EventLog (its own internal backend interface)
 ```
 
-**Rule of thumb**: If a developer can use the library without understanding the broader Arbor ecosystem, the behaviour belongs in the library. If it abstracts an external system or defines how Arbor libraries talk to each other, it goes in contracts.
+Library-owned contract modules use the AC-4 destination convention:
+`<AppRootNamespace>.Contracts.<Leaf>`, with a matching path under that app's
+`lib/` directory.
+
+**Rule of thumb**: If a developer can use the library without understanding the broader Arbor ecosystem, the behaviour belongs in the library. A contract moves to `arbor_contracts` only when two or more other umbrella libraries consume it, or when it is a facade behaviour under `contracts/api/`.
 
 ## 3. Contract Callback Naming
 
@@ -125,10 +138,11 @@ These triggers mean you should evaluate whether a contract needs to change:
 | Trigger | Action |
 |---------|--------|
 | Two libraries define the same struct or behaviour | Extract shared concept to contracts |
-| Library depends on another only for a type definition | That type probably belongs in contracts |
+| Library depends on another only for a type definition | Move the type to contracts only if a third library also consumes it; otherwise invert the dependency with a behaviour (§9) |
 | External dep used directly in 2+ libraries | Create abstraction in contracts |
-| Struct growing fields only one consumer uses | Split into shared contract + library-internal struct |
-| Can't implement a behaviour without pulling unrelated library | Behaviour might belong in contracts |
+| Struct has exactly one consuming library | Inadmissible (AC-1). Relocate to that library's `Contracts` namespace |
+| Struct growing fields only one consumer uses | Split into shared contract + library-internal struct; see AC-1 |
+| Can't implement a behaviour without pulling unrelated library | Behaviour belongs in contracts only if it is a facade behaviour under `api/`; otherwise define it in the consuming library (§2) |
 | Behaviour semantics drifted from its docs | Update docs or split the behaviour |
 | Config duplicated across libraries | Document convention (not a new contract) |
 
@@ -138,11 +152,11 @@ These triggers mean you should evaluate whether a contract needs to change:
 
 | Change | Risk | Process |
 |--------|------|---------|
-| Add new struct | None | Just do it |
+| Add newly admitted shared struct | None | Verify AC-1 with the census, then add it |
 | Add optional field (with `default:`) | None | Just do it |
 | Add required field | HIGH | Audit all `new/1` callers first |
 | Remove/rename field | HIGH | Compiler catches. Coordinated update across libraries. |
-| Add new behaviour | None | No one forced to implement |
+| Add newly admitted facade behaviour | None | Verify it belongs under `api/`, then add it |
 | Add callback to existing behaviour | MEDIUM | Use `@optional_callbacks` for backward compat |
 | Remove callback | HIGH | All `@impl true` uses break. Coordinated update. |
 | Change return type | MEDIUM | Only Dialyzer catches. Audit consumers. |
@@ -206,12 +220,26 @@ Contracts must never depend on any Arbor library. If you find yourself wanting c
 
 ```
 arbor_contracts/lib/arbor/contracts/
-  api/            # Facade behaviours: Shell, Signals, Security, Trust,
-                  #   Consensus, Historian, Persistence
-  consensus/      # Consensus data types: Protocol, Proposal, Evaluation,
-                  #   CouncilDecision, ConsensusEvent
-  security/       # Security data types: Capability
-  trust/          # Trust data types: Profile, Event
+  agent/
+  ai/
+  api/            # Facade behaviours; the only AC-1 multi-consumer exemption
+  coding/
+  commands/
+  comms/
+  consensus/
+  eval/
+  handler/
+  healing/
+  judge/
+  libraries/
+  llm/
+  memory/
+  persistence/
+  pipeline/
+  security/
+  session/
+  signal/
+  trust/
 ```
 
-The `api/` directory contains facade behaviours that define how the Arbor ecosystem consumes libraries. Data type directories (`consensus/`, `security/`, `trust/`) contain shared structs used across library boundaries.
+The `api/` directory contains facade behaviours that define how the Arbor ecosystem consumes libraries and is the only directory exempt from the two-consumer rule. Every module in the other directories must satisfy AC-1 or be explicitly grandfathered by the admission test.
