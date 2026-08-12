@@ -167,6 +167,174 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
              Core.select(["apps/ghost/lib/x.ex"], graph)
   end
 
+  test "diff_blob_manifests reports adds, deletes, and mode/oid edits only" do
+    base = [
+      %{path: "apps/alpha/lib/a.ex", mode: "100644", oid: String.duplicate("a", 40)},
+      %{path: "apps/beta/lib/b.ex", mode: "100644", oid: String.duplicate("b", 40)},
+      %{path: "mix.lock", mode: "100644", oid: String.duplicate("c", 40)}
+    ]
+
+    candidate = [
+      %{path: "apps/alpha/lib/a.ex", mode: "100644", oid: String.duplicate("d", 40)},
+      %{path: "apps/gamma/lib/g.ex", mode: "100644", oid: String.duplicate("e", 40)},
+      %{path: "mix.lock", mode: "100644", oid: String.duplicate("c", 40)}
+    ]
+
+    assert {:ok, changed} = Core.diff_blob_manifests(base, candidate)
+
+    assert changed == [
+             "apps/alpha/lib/a.ex",
+             "apps/beta/lib/b.ex",
+             "apps/gamma/lib/g.ex"
+           ]
+
+    assert {:ok, []} = Core.diff_blob_manifests(base, base)
+
+    assert {:error, :invalid_blob_manifest_oid} =
+             Core.diff_blob_manifests(
+               [%{path: "x", mode: "100644", oid: "short"}],
+               []
+             )
+  end
+
+  test "select_revisions: deletion/merge classifies via union and forces full candidate" do
+    assert {:ok, base} =
+             Core.build_graph([
+               %{dir: "alpha", app: "alpha", deps: []},
+               %{dir: "beta", app: "beta", deps: ["alpha"]}
+             ])
+
+    assert {:ok, candidate} =
+             Core.build_graph([
+               %{dir: "alpha", app: "alpha", deps: []}
+             ])
+
+    assert {:ok, selection} =
+             Core.select_revisions(["apps/beta/lib/x.ex", "apps/alpha/lib/a.ex"], base, candidate)
+
+    assert selection.topology_change.changed?
+    assert selection.topology_change.removed_apps == ["beta"]
+    assert selection.topology_change.added_apps == []
+    assert selection.changed_apps == ["alpha"]
+    assert selection.affected_apps == ["alpha"]
+    assert selection.test_paths == ["apps/alpha/test"]
+    refute "apps/beta/test" in selection.test_paths
+  end
+
+  test "select_revisions: app addition forces full candidate including new app" do
+    assert {:ok, base} = Core.build_graph([%{dir: "alpha", app: "alpha", deps: []}])
+
+    assert {:ok, candidate} =
+             Core.build_graph([
+               %{dir: "alpha", app: "alpha", deps: []},
+               %{dir: "omega", app: "omega", deps: []}
+             ])
+
+    assert {:ok, selection} =
+             Core.select_revisions(["apps/omega/lib/o.ex"], base, candidate)
+
+    assert selection.topology_change.changed?
+    assert selection.topology_change.added_apps == ["omega"]
+    assert selection.affected_apps == ["alpha", "omega"]
+    assert selection.test_paths == ["apps/alpha/test", "apps/omega/test"]
+  end
+
+  test "select_revisions: dependency-edge change forces full candidate" do
+    assert {:ok, base} =
+             Core.build_graph([
+               %{dir: "alpha", app: "alpha", deps: []},
+               %{dir: "gamma", app: "gamma", deps: []},
+               %{dir: "delta", app: "delta", deps: []}
+             ])
+
+    assert {:ok, candidate} =
+             Core.build_graph([
+               %{dir: "alpha", app: "alpha", deps: []},
+               %{dir: "gamma", app: "gamma", deps: ["alpha"]},
+               %{dir: "delta", app: "delta", deps: []}
+             ])
+
+    assert {:ok, selection} =
+             Core.select_revisions(["apps/gamma/mix.exs"], base, candidate)
+
+    assert selection.topology_change.changed?
+    assert selection.topology_change.edge_changed_apps == ["gamma"]
+    assert selection.affected_apps == ["alpha", "delta", "gamma"]
+    assert length(selection.test_paths) == 3
+  end
+
+  test "select_revisions: path unknown to both revisions fails closed" do
+    assert {:ok, base} = Core.build_graph([%{dir: "alpha", app: "alpha", deps: []}])
+    assert {:ok, candidate} = Core.build_graph([%{dir: "alpha", app: "alpha", deps: []}])
+
+    assert {:error, {:changed_unknown_app, "ghost"}} =
+             Core.select_revisions(["apps/ghost/lib/x.ex"], base, candidate)
+  end
+
+  test "select_revisions: unchanged topology preserves focused downstream closure" do
+    assert {:ok, graph} =
+             Core.build_graph([
+               %{dir: "alpha", app: "alpha", deps: []},
+               %{dir: "beta", app: "beta", deps: ["alpha"]},
+               %{dir: "gamma", app: "gamma", deps: ["beta"]},
+               %{dir: "delta", app: "delta", deps: []}
+             ])
+
+    assert {:ok, selection} =
+             Core.select_revisions(["apps/alpha/lib/alpha.ex"], graph, graph)
+
+    refute selection.topology_change.changed?
+    assert selection.topology_change.added_apps == []
+    assert selection.topology_change.removed_apps == []
+    assert selection.topology_change.edge_changed_apps == []
+    assert selection.changed_apps == ["alpha"]
+    assert selection.affected_apps == ["alpha", "beta", "gamma"]
+    assert selection.test_paths == ["apps/alpha/test", "apps/beta/test", "apps/gamma/test"]
+    refute "delta" in selection.affected_apps
+  end
+
+  test "show emits bounded topology_change evidence without sources" do
+    selection = %{
+      changed_files: ["apps/beta/lib/x.ex"],
+      changed_apps: ["alpha"],
+      affected_apps: ["alpha"],
+      test_paths: ["apps/alpha/test"],
+      root_wide: false,
+      topology_change: %{
+        changed?: true,
+        added_apps: [],
+        removed_apps: ["beta"],
+        edge_changed_apps: []
+      }
+    }
+
+    pass =
+      Core.completed_check(%{
+        "exit_code" => 0,
+        "passed" => true,
+        "stdout_excerpt" => "ok",
+        "stderr_excerpt" => "",
+        "stdout_truncated" => false,
+        "stderr_truncated" => false,
+        "stdout_sha256" => String.duplicate("1", 64),
+        "stderr_sha256" => String.duplicate("2", 64)
+      })
+
+    evidence =
+      Core.show(%{
+        selection: selection,
+        checks: %{compile: pass, xref: pass, test_compile: pass, test: pass},
+        base_commit: "abc123"
+      })
+
+    assert evidence.topology_change["changed"] == true
+    assert evidence.topology_change["removed_apps"] == ["beta"]
+    assert evidence.topology_change["added_apps"] == []
+    assert evidence.topology_change["edge_changed_apps"] == []
+    refute Map.has_key?(evidence, :app_mix_exs)
+    assert {:ok, _} = Jason.encode(evidence)
+  end
+
   test "show assembles domain failure evidence without claiming zero cycles" do
     selection = %{
       changed_files: ["apps/alpha/lib/a.ex"],

@@ -9,6 +9,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
   setup do
     previous_runner = Application.get_env(:arbor_actions, :cross_app_mix_runner)
     previous_clock = Application.get_env(:arbor_actions, :cross_app_monotonic_ms)
+    previous_after_freeze = Application.get_env(:arbor_actions, :cross_app_after_candidate_freeze)
 
     worktree =
       Path.join(
@@ -24,6 +25,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       File.rm_rf!(worktree)
       restore_env(:cross_app_mix_runner, previous_runner)
       restore_env(:cross_app_monotonic_ms, previous_clock)
+      restore_env(:cross_app_after_candidate_freeze, previous_after_freeze)
     end)
 
     %{worktree: worktree}
@@ -1772,6 +1774,337 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     assert Keyword.get(test_opts, :timeout) == 5_000
   end
 
+  test "resolve_selection: base app removed or merged forces full remaining candidate", %{
+    worktree: worktree
+  } do
+    write_app_mix!(worktree, "alpha", [])
+    write_app_mix!(worktree, "beta", ["alpha"])
+    write_app_lib!(worktree, "alpha")
+    write_app_lib!(worktree, "beta")
+    mkdir_app_tests!(worktree, ["alpha", "beta"])
+    base = git_commit_all!(worktree, "base with alpha+beta")
+
+    # Merge/delete beta in candidate (committed dirty surface).
+    File.rm_rf!(Path.join(worktree, "apps/beta"))
+    write_app_lib!(worktree, "alpha", "changed")
+    _cand = git_commit_all!(worktree, "candidate drops beta")
+
+    assert {:ok, resolved} = Shell.resolve_selection(worktree, base)
+    selection = resolved.selection
+
+    assert selection.topology_change.changed?
+    assert selection.topology_change.removed_apps == ["beta"]
+    assert selection.affected_apps == ["alpha"]
+    assert selection.test_paths == ["apps/alpha/test"]
+    refute "apps/beta/test" in selection.test_paths
+    assert is_binary(resolved.candidate_tree_oid)
+    assert resolved.candidate_tree_oid != ""
+  end
+
+  test "resolve_selection: path unknown to both base and candidate fails closed", %{
+    worktree: worktree
+  } do
+    write_app_mix!(worktree, "alpha", [])
+    write_app_lib!(worktree, "alpha")
+    base = git_commit_all!(worktree, "base alpha only")
+
+    ghost_dir = Path.join(worktree, "apps/ghost/lib")
+    File.mkdir_p!(ghost_dir)
+    File.write!(Path.join(ghost_dir, "x.ex"), "defmodule Ghost do\nend\n")
+
+    assert {:error, {:changed_unknown_app, "ghost"}} =
+             Shell.resolve_selection(worktree, base)
+  end
+
+  test "resolve_selection: ordinary same-topology change retains focused selection", %{
+    worktree: worktree
+  } do
+    write_app_mix!(worktree, "alpha", [])
+    write_app_mix!(worktree, "beta", ["alpha"])
+    write_app_mix!(worktree, "delta", [])
+    write_app_lib!(worktree, "alpha")
+    write_app_lib!(worktree, "beta")
+    write_app_lib!(worktree, "delta")
+    base = git_commit_all!(worktree, "base topology")
+
+    write_app_lib!(worktree, "alpha", "focused-change")
+
+    assert {:ok, resolved} = Shell.resolve_selection(worktree, base)
+    selection = resolved.selection
+
+    refute selection.topology_change.changed?
+    assert selection.changed_apps == ["alpha"]
+    assert selection.affected_apps == ["alpha", "beta"]
+    assert selection.test_paths == ["apps/alpha/test", "apps/beta/test"]
+    refute "delta" in selection.affected_apps
+  end
+
+  test "resolve_selection: dependency-edge change forces full candidate", %{worktree: worktree} do
+    write_app_mix!(worktree, "alpha", [])
+    write_app_mix!(worktree, "gamma", [])
+    write_app_mix!(worktree, "delta", [])
+    write_app_lib!(worktree, "alpha")
+    write_app_lib!(worktree, "gamma")
+    write_app_lib!(worktree, "delta")
+    base = git_commit_all!(worktree, "base edges")
+
+    write_app_mix!(worktree, "gamma", ["alpha"])
+
+    assert {:ok, resolved} = Shell.resolve_selection(worktree, base)
+    selection = resolved.selection
+
+    assert selection.topology_change.changed?
+    assert selection.topology_change.edge_changed_apps == ["gamma"]
+    assert selection.affected_apps == ["alpha", "delta", "gamma"]
+  end
+
+  test "resolve_selection: unstaged app deletion omits app without read failure", %{
+    worktree: worktree
+  } do
+    write_app_mix!(worktree, "alpha", [])
+    write_app_mix!(worktree, "beta", ["alpha"])
+    write_app_lib!(worktree, "alpha")
+    write_app_lib!(worktree, "beta")
+    base = git_commit_all!(worktree, "base both")
+
+    # Unstaged deletion: index still lists beta; disk is gone.
+    File.rm_rf!(Path.join(worktree, "apps/beta"))
+
+    assert {:ok, resolved} = Shell.resolve_selection(worktree, base)
+    selection = resolved.selection
+
+    assert selection.topology_change.changed?
+    assert selection.topology_change.removed_apps == ["beta"]
+    assert selection.affected_apps == ["alpha"]
+    refute "apps/beta/test" in selection.test_paths
+    dirs = Enum.map(resolved.candidate_app_mix_exs, fn {dir, _} -> dir end)
+    assert dirs == ["alpha"]
+  end
+
+  test "resolve_selection: untracked new app is included in candidate freeze", %{
+    worktree: worktree
+  } do
+    write_app_mix!(worktree, "alpha", [])
+    write_app_lib!(worktree, "alpha")
+    base = git_commit_all!(worktree, "base alpha")
+
+    # Untracked new app (not git-added).
+    write_app_mix!(worktree, "omega", [])
+    write_app_lib!(worktree, "omega")
+    mkdir_app_tests!(worktree, ["omega"])
+
+    assert {:ok, resolved} = Shell.resolve_selection(worktree, base)
+    selection = resolved.selection
+
+    assert selection.topology_change.changed?
+    assert selection.topology_change.added_apps == ["omega"]
+    assert "omega" in selection.affected_apps
+    assert "apps/omega/test" in selection.test_paths
+    dirs = Enum.map(resolved.candidate_app_mix_exs, fn {dir, _} -> dir end)
+    assert "omega" in dirs
+  end
+
+  test "committable_app_mix_inventory freezes staged bytes against post-capture ABA mutation", %{
+    worktree: worktree
+  } do
+    alias Arbor.Actions.Mix, as: MixAction
+    alias Arbor.Actions.Coding.CrossApp.Parser
+
+    content_a = mix_exs_source("alpha", [])
+    content_b = mix_exs_source("alpha", ["beta"])
+
+    write_app_mix_source!(worktree, "alpha", content_a)
+    write_app_mix!(worktree, "beta", [])
+    write_app_lib!(worktree, "alpha")
+    write_app_lib!(worktree, "beta")
+    _base = git_commit_all!(worktree, "content A")
+
+    assert {:ok, freeze1} = MixAction.committable_app_mix_inventory(worktree)
+    assert is_binary(freeze1.tree_oid)
+    assert {"alpha", ^content_a} = List.keyfind(freeze1.app_mix_exs, "alpha", 0)
+
+    # Mutate worktree to B after freeze returns.
+    write_app_mix_source!(worktree, "alpha", content_b)
+    assert File.read!(Path.join(worktree, "apps/alpha/mix.exs")) == content_b
+
+    # Original freeze still carries A (private staged snapshot).
+    assert {"alpha", ^content_a} = List.keyfind(freeze1.app_mix_exs, "alpha", 0)
+    assert {:ok, [def_a | _]} = Parser.parse_many(freeze1.app_mix_exs)
+    assert def_a.dir == "alpha"
+    assert def_a.deps == []
+
+    # Classic ABA: mutate B→A again; new capture may match A, freeze1 still A.
+    write_app_mix_source!(worktree, "alpha", content_a)
+    assert {:ok, freeze2} = MixAction.committable_app_mix_inventory(worktree)
+    assert {"alpha", ^content_a} = List.keyfind(freeze2.app_mix_exs, "alpha", 0)
+    assert {"alpha", ^content_a} = List.keyfind(freeze1.app_mix_exs, "alpha", 0)
+  end
+
+  test "resolve_selection ABA: selection graph cannot observe post-freeze worktree deps", %{
+    worktree: worktree
+  } do
+    content_a = mix_exs_source("alpha", [])
+    content_b = mix_exs_source("alpha", ["beta"])
+
+    write_app_mix_source!(worktree, "alpha", content_a)
+    write_app_mix!(worktree, "beta", [])
+    write_app_lib!(worktree, "alpha")
+    write_app_lib!(worktree, "beta")
+    base = git_commit_all!(worktree, "A topology")
+
+    # Capture freeze sources via resolve path, then mutate before asserting
+    # the returned freeze sources (not a second worktree read).
+    assert {:ok, resolved} = Shell.resolve_selection(worktree, base)
+    assert {"alpha", source_a} = List.keyfind(resolved.candidate_app_mix_exs, "alpha", 0)
+    assert source_a == content_a
+
+    write_app_mix_source!(worktree, "alpha", content_b)
+    # Returned freeze is immutable relative to later worktree mutation.
+    assert {"alpha", ^content_a} =
+             List.keyfind(resolved.candidate_app_mix_exs, "alpha", 0)
+
+    refute resolved.selection.topology_change.edge_changed_apps == ["alpha"]
+  end
+
+  test "changed-path skew: freeze blob_manifest ignores post-capture worktree paths", %{
+    worktree: worktree
+  } do
+    alias Arbor.Actions.Mix, as: MixAction
+
+    write_app_mix!(worktree, "alpha", [])
+    write_app_lib!(worktree, "alpha", "base")
+    base = git_commit_all!(worktree, "base for path skew")
+
+    # Dirty change present at freeze time.
+    write_app_lib!(worktree, "alpha", "dirty-at-freeze")
+    assert {:ok, freeze} = MixAction.committable_app_mix_inventory(worktree)
+    assert is_list(freeze.blob_manifest)
+
+    freeze_paths = Enum.map(freeze.blob_manifest, & &1.path)
+    assert "apps/alpha/lib/alpha.ex" in freeze_paths
+    refute "apps/alpha/lib/post_freeze.ex" in freeze_paths
+
+    alpha_entry = Enum.find(freeze.blob_manifest, &(&1.path == "apps/alpha/lib/alpha.ex"))
+    assert alpha_entry.oid
+
+    # Post-capture mutation: new path + content rewrite on disk.
+    write_app_lib!(worktree, "alpha", "post-freeze-rewrite")
+    post_path = Path.join(worktree, "apps/alpha/lib/post_freeze.ex")
+    File.write!(post_path, "defmodule Alpha.PostFreeze do\nend\n")
+
+    # Freeze manifest is unchanged (immutable snapshot).
+    assert Enum.find(freeze.blob_manifest, &(&1.path == "apps/alpha/lib/alpha.ex")).oid ==
+             alpha_entry.oid
+
+    refute Enum.any?(freeze.blob_manifest, &(&1.path == "apps/alpha/lib/post_freeze.ex"))
+
+    # Immutable base vs freeze delta does not include the post-freeze path.
+    assert {:ok, base_manifest} =
+             load_base_manifest_for_test(worktree, base)
+
+    assert {:ok, frozen_changed} =
+             Core.diff_blob_manifests(base_manifest, freeze.blob_manifest)
+
+    assert "apps/alpha/lib/alpha.ex" in frozen_changed
+    refute "apps/alpha/lib/post_freeze.ex" in frozen_changed
+
+    # Mutable worktree listing *would* observe the post-freeze path — proves skew.
+    mutable_changed = mutable_changed_paths_for_test(worktree, base)
+    assert "apps/alpha/lib/post_freeze.ex" in mutable_changed
+    assert frozen_changed != mutable_changed
+  end
+
+  test "resolve_selection derives changed paths and topology solely from held freeze", %{
+    worktree: worktree
+  } do
+    write_app_mix!(worktree, "alpha", [])
+    write_app_mix!(worktree, "beta", [])
+    write_app_lib!(worktree, "alpha", "base")
+    write_app_lib!(worktree, "beta", "base")
+    base = git_commit_all!(worktree, "base dual apps")
+
+    # Pre-freeze dirty change under alpha only — topology unchanged.
+    write_app_lib!(worktree, "alpha", "pre-freeze-dirty")
+    content_a = mix_exs_source("alpha", [])
+    content_b = mix_exs_source("alpha", ["beta"])
+    write_app_mix_source!(worktree, "alpha", content_a)
+
+    hook_ran? = :atomics.new(1, [])
+    freeze_tree_oid = :ets.new(:cross_app_freeze_oid, [:set, :public])
+
+    Application.put_env(:arbor_actions, :cross_app_after_candidate_freeze, fn path, freeze ->
+      assert path == worktree
+      assert is_binary(freeze.tree_oid)
+      assert is_list(freeze.blob_manifest)
+      assert is_list(freeze.app_mix_exs)
+      :ets.insert(freeze_tree_oid, {:oid, freeze.tree_oid})
+      :atomics.put(hook_ran?, 1, 1)
+
+      # Mutate worktree AFTER freeze is held by resolve_selection:
+      # 1) new path that mutable git-diff would observe
+      # 2) mix.exs topology-changing rewrite that would alter candidate graph
+      post = Path.join(path, "apps/alpha/lib/post_freeze_only.ex")
+      File.write!(post, "defmodule Alpha.PostFreezeOnly do\nend\n")
+      write_app_mix_source!(path, "alpha", content_b)
+      write_app_lib!(path, "alpha", "post-freeze-rewrite")
+      :ok
+    end)
+
+    assert {:ok, resolved} = Shell.resolve_selection(worktree, base)
+    assert :atomics.get(hook_ran?, 1) == 1
+
+    selection = resolved.selection
+    freeze_paths = Enum.map(resolved.candidate_blob_manifest, & &1.path)
+
+    # Held freeze did not observe post-hook paths or topology rewrite.
+    refute "apps/alpha/lib/post_freeze_only.ex" in freeze_paths
+    refute "apps/alpha/lib/post_freeze_only.ex" in selection.changed_files
+    assert "apps/alpha/lib/alpha.ex" in selection.changed_files
+
+    assert {"alpha", freeze_alpha_src} =
+             List.keyfind(resolved.candidate_app_mix_exs, "alpha", 0)
+
+    assert freeze_alpha_src == content_a
+    refute freeze_alpha_src == content_b
+
+    # Topology from freeze mix.exs only — alpha still has no deps on beta.
+    refute selection.topology_change.changed?
+    assert selection.topology_change.edge_changed_apps == []
+    assert selection.topology_change.added_apps == []
+    assert selection.topology_change.removed_apps == []
+
+    # Focused selection (unchanged topology): alpha only, not full candidate.
+    assert selection.changed_apps == ["alpha"]
+    assert selection.affected_apps == ["alpha"]
+    assert selection.test_paths == ["apps/alpha/test"]
+    refute "beta" in selection.affected_apps
+
+    # Tree OID returned is the freeze captured before mutation.
+    assert [{:oid, oid}] = :ets.lookup(freeze_tree_oid, :oid)
+    assert resolved.candidate_tree_oid == oid
+
+    # Contrast: mutable worktree listing sees the post-freeze-only path.
+    mutable_changed = mutable_changed_paths_for_test(worktree, base)
+    assert "apps/alpha/lib/post_freeze_only.ex" in mutable_changed
+    refute "apps/alpha/lib/post_freeze_only.ex" in selection.changed_files
+
+    # A fresh freeze after mutation would see the rewrite; held freeze did not.
+    alias Arbor.Actions.Mix, as: MixAction
+    assert {:ok, later} = MixAction.committable_app_mix_inventory(worktree)
+    assert {"alpha", later_src} = List.keyfind(later.app_mix_exs, "alpha", 0)
+    assert later_src == content_b
+    assert later.tree_oid != resolved.candidate_tree_oid
+  end
+
+  test "resolve_selection rejects non-full base commit OIDs", %{worktree: worktree} do
+    write_app_mix!(worktree, "alpha", [])
+    write_app_lib!(worktree, "alpha")
+    _base = git_commit_all!(worktree, "need a commit")
+
+    assert {:error, :invalid_base_commit_oid} =
+             Shell.resolve_selection(worktree, "abc1234")
+  end
+
   defp mkdir_app_tests!(worktree, apps) do
     for app <- apps do
       dir = Path.join(worktree, "apps/#{app}/test")
@@ -1796,10 +2129,131 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     end
   end
 
+  defp mix_exs_source(app, deps) when is_binary(app) and is_list(deps) do
+    dep_lines =
+      deps
+      |> Enum.map(fn dep -> "          {:#{dep}, in_umbrella: true}" end)
+      |> Enum.join(",\n")
+
+    deps_body =
+      if deps == [] do
+        "        []"
+      else
+        "        [\n#{dep_lines}\n        ]"
+      end
+
+    """
+    defmodule #{Macro.camelize(app)}.MixProject do
+      use Mix.Project
+
+      def project do
+        [
+          app: :#{app},
+          version: "0.1.0",
+          deps: deps()
+        ]
+      end
+
+      defp deps do
+    #{deps_body}
+      end
+    end
+    """
+  end
+
+  defp write_app_mix!(worktree, app, deps) do
+    write_app_mix_source!(worktree, app, mix_exs_source(app, deps))
+  end
+
+  defp write_app_mix_source!(worktree, app, source) do
+    dir = Path.join(worktree, "apps/#{app}")
+    File.mkdir_p!(dir)
+    File.write!(Path.join(dir, "mix.exs"), source)
+  end
+
+  defp write_app_lib!(worktree, app, suffix \\ "ok") do
+    dir = Path.join(worktree, "apps/#{app}/lib")
+    File.mkdir_p!(dir)
+
+    File.write!(
+      Path.join(dir, "#{app}.ex"),
+      "defmodule #{Macro.camelize(app)} do\n  # #{suffix}\nend\n"
+    )
+  end
+
+  # Test-only: parse base ls-tree the same way production load_base_blob_manifest does.
+  defp load_base_manifest_for_test(worktree, base_commit) do
+    {listing, 0} =
+      System.cmd("git", ["-C", worktree, "ls-tree", "-r", "-z", base_commit],
+        stderr_to_stdout: true
+      )
+
+    entries =
+      listing
+      |> String.split(<<0>>, trim: true)
+      |> Enum.reduce([], fn entry, acc ->
+        case String.split(entry, "\t") do
+          [meta, path] ->
+            case String.split(meta, " ", parts: 3) do
+              [mode, "blob", oid] when mode in ["100644", "100755", "120000"] ->
+                [%{path: path, mode: mode, oid: oid} | acc]
+
+              _ ->
+                acc
+            end
+
+          _ ->
+            acc
+        end
+      end)
+      |> Enum.reverse()
+      |> Enum.sort_by(& &1.path)
+
+    {:ok, entries}
+  end
+
+  # Test-only contrast: mutable worktree changed-path listing (the skew we reject).
+  defp mutable_changed_paths_for_test(worktree, base_commit) do
+    {tracked, 0} =
+      System.cmd(
+        "git",
+        ["-C", worktree, "diff", "--name-only", "--find-renames", "-z", base_commit],
+        stderr_to_stdout: true
+      )
+
+    {untracked, 0} =
+      System.cmd(
+        "git",
+        ["-C", worktree, "ls-files", "--others", "--exclude-standard", "-z"],
+        stderr_to_stdout: true
+      )
+
+    (String.split(tracked, <<0>>, trim: true) ++ String.split(untracked, <<0>>, trim: true))
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.uniq()
+    |> Enum.sort()
+  end
+
+  defp git_commit_all!(worktree, message) do
+    {_, 0} = System.cmd("git", ["add", "-A"], cd: worktree, stderr_to_stdout: true)
+
+    {_, 0} =
+      System.cmd(
+        "git",
+        ["-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", message],
+        cd: worktree,
+        stderr_to_stdout: true
+      )
+
+    {oid, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: worktree, stderr_to_stdout: true)
+    String.trim(oid)
+  end
+
   defp init_git_repo!(worktree) do
-    {_, 0} = System.cmd("git", ["init"], cd: worktree, stderr_to_stdout: true)
+    {_, 0} = System.cmd("git", ["init", "-b", "main"], cd: worktree, stderr_to_stdout: true)
     {_, 0} = System.cmd("git", ["config", "user.email", "test@arbor.local"], cd: worktree)
     {_, 0} = System.cmd("git", ["config", "user.name", "CrossApp Test"], cd: worktree)
+    {_, 0} = System.cmd("git", ["config", "commit.gpgsign", "false"], cd: worktree)
     :ok
   end
 

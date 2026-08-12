@@ -126,13 +126,22 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
           depended_by: %{optional(String.t()) => [String.t()]}
         }
 
+  @typedoc "Bounded topology delta between base and candidate graphs."
+  @type topology_change :: %{
+          changed?: boolean(),
+          added_apps: [String.t()],
+          removed_apps: [String.t()],
+          edge_changed_apps: [String.t()]
+        }
+
   @typedoc "Selection result for changed files against a graph."
   @type selection :: %{
           changed_files: [String.t()],
           changed_apps: [String.t()],
           affected_apps: [String.t()],
           test_paths: [String.t()],
-          root_wide: boolean()
+          root_wide: boolean(),
+          topology_change: topology_change()
         }
 
   @type execution_app_order :: %{
@@ -311,11 +320,13 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
 
   Directly changed apps plus every downstream in-umbrella dependent. Root
   build-impact files select all apps. Unrelated docs do not widen selection.
+  Attaches a zero topology_change for a stable selection shape.
   """
   @spec select([String.t()], graph()) :: {:ok, selection()} | {:error, term()}
   def select(changed_files, graph) when is_list(changed_files) and is_map(graph) do
     with {:ok, files} <- normalize_changed_files(changed_files),
-         {:ok, changed_apps, root_wide} <- classify_files(files, graph) do
+         {:ok, known} <- known_apps_from_graph(graph),
+         {:ok, changed_apps, root_wide} <- classify_files(files, known) do
       affected_apps =
         if root_wide do
           graph.apps
@@ -334,12 +345,161 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
          changed_apps: changed_apps,
          affected_apps: affected_apps,
          test_paths: test_paths,
-         root_wide: root_wide
+         root_wide: root_wide,
+         topology_change: empty_topology_change()
        }}
     end
   end
 
   def select(_, _), do: {:error, :invalid_selection_input}
+
+  @doc """
+  Compare two dependency graphs for structural umbrella topology changes.
+
+  Topology differs when the app set differs (add/remove/merge) or when any
+  shared app's in-umbrella `depends_on` edge set changes.
+  """
+  @spec compare_topology(graph(), graph()) :: {:ok, topology_change()} | {:error, term()}
+  def compare_topology(base_graph, candidate_graph)
+      when is_map(base_graph) and is_map(candidate_graph) do
+    with {:ok, base_apps} <- graph_apps(base_graph),
+         {:ok, cand_apps} <- graph_apps(candidate_graph),
+         {:ok, base_deps} <- graph_depends_on(base_graph),
+         {:ok, cand_deps} <- graph_depends_on(candidate_graph) do
+      base_set = MapSet.new(base_apps)
+      cand_set = MapSet.new(cand_apps)
+
+      added_apps =
+        cand_set
+        |> MapSet.difference(base_set)
+        |> MapSet.to_list()
+        |> Enum.sort()
+
+      removed_apps =
+        base_set
+        |> MapSet.difference(cand_set)
+        |> MapSet.to_list()
+        |> Enum.sort()
+
+      edge_changed_apps =
+        base_set
+        |> MapSet.intersection(cand_set)
+        |> MapSet.to_list()
+        |> Enum.filter(fn app ->
+          Map.get(base_deps, app, []) != Map.get(cand_deps, app, [])
+        end)
+        |> Enum.sort()
+
+      changed? = added_apps != [] or removed_apps != [] or edge_changed_apps != []
+
+      {:ok,
+       %{
+         changed?: changed?,
+         added_apps: Enum.take(added_apps, @max_apps),
+         removed_apps: Enum.take(removed_apps, @max_apps),
+         edge_changed_apps: Enum.take(edge_changed_apps, @max_apps)
+       }}
+    end
+  end
+
+  def compare_topology(_, _), do: {:error, :invalid_topology_input}
+
+  @typedoc "One path/mode/blob entry from an immutable revision snapshot."
+  @type blob_manifest_entry :: %{
+          path: String.t(),
+          mode: String.t(),
+          oid: String.t()
+        }
+
+  @doc """
+  Derive changed relative paths from two immutable path/mode/blob manifests.
+
+  An entry is changed when present on only one side or when mode/oid differ.
+  Paths are sorted and bounded; the full manifests are never returned.
+  """
+  @spec diff_blob_manifests(term(), term()) :: {:ok, [String.t()]} | {:error, term()}
+  def diff_blob_manifests(base_manifest, candidate_manifest)
+      when is_list(base_manifest) and is_list(candidate_manifest) do
+    with {:ok, base_map} <- manifest_to_map(base_manifest),
+         {:ok, cand_map} <- manifest_to_map(candidate_manifest) do
+      paths =
+        MapSet.union(MapSet.new(Map.keys(base_map)), MapSet.new(Map.keys(cand_map)))
+        |> MapSet.to_list()
+        |> Enum.sort()
+
+      changed =
+        Enum.filter(paths, fn path ->
+          Map.get(base_map, path) != Map.get(cand_map, path)
+        end)
+
+      if length(changed) > @max_changed_files do
+        {:error, :too_many_changed_files}
+      else
+        {:ok, changed}
+      end
+    end
+  end
+
+  def diff_blob_manifests(_, _), do: {:error, :invalid_blob_manifest}
+
+  @doc false
+  def max_changed_files, do: @max_changed_files
+
+  @doc """
+  Select validation scope against base and candidate dependency graphs.
+
+  Path classification uses the union of both app sets so deleted-app paths are
+  not `changed_unknown_app`. Topology deltas force full candidate validation;
+  unchanged topology retains focused downstream closure on the candidate graph.
+  Test paths are always candidate apps only.
+  """
+  @spec select_revisions([String.t()], graph(), graph()) ::
+          {:ok, selection()} | {:error, term()}
+  def select_revisions(changed_files, base_graph, candidate_graph)
+      when is_list(changed_files) and is_map(base_graph) and is_map(candidate_graph) do
+    with {:ok, files} <- normalize_changed_files(changed_files),
+         {:ok, topology} <- compare_topology(base_graph, candidate_graph),
+         {:ok, base_apps} <- graph_apps(base_graph),
+         {:ok, cand_apps} <- graph_apps(candidate_graph),
+         known <- MapSet.union(MapSet.new(base_apps), MapSet.new(cand_apps)),
+         {:ok, changed_apps_raw, root_wide} <- classify_files(files, known) do
+      cand_set = MapSet.new(cand_apps)
+
+      path_changed_candidate =
+        changed_apps_raw
+        |> Enum.filter(&MapSet.member?(cand_set, &1))
+        |> Enum.sort()
+
+      affected_apps =
+        cond do
+          topology.changed? ->
+            cand_apps
+
+          root_wide ->
+            cand_apps
+
+          true ->
+            downstream_closure(path_changed_candidate, candidate_graph.depended_by)
+        end
+
+      test_paths =
+        affected_apps
+        |> Enum.map(&("apps/" <> &1 <> "/test"))
+        |> Enum.take(@max_test_paths)
+
+      {:ok,
+       %{
+         changed_files: Enum.take(files, @max_output_list),
+         changed_apps: path_changed_candidate,
+         affected_apps: affected_apps,
+         test_paths: test_paths,
+         root_wide: root_wide,
+         topology_change: topology
+       }}
+    end
+  end
+
+  def select_revisions(_, _, _), do: {:error, :invalid_selection_input}
 
   @doc "Assemble bounded JSON-clean evidence from selection and check results."
   @spec show(map()) :: map()
@@ -365,7 +525,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
     passed = compile_passed and xref_passed and test_compile_passed and test_passed
     reason = overall_reason(passed, compile, xref, test_compile, test)
 
-    %{
+    evidence = %{
       passed: passed,
       reason: reason,
       base_commit: base_commit,
@@ -379,6 +539,11 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
       test_compile: normalize_check(test_compile),
       test: normalize_check(test)
     }
+
+    case topology_change_evidence(selection) do
+      nil -> evidence
+      topology -> Map.put(evidence, :topology_change, topology)
+    end
   end
 
   @doc false
@@ -2022,41 +2187,163 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
 
   defp normalize_path(_), do: nil
 
-  defp classify_files(files, graph) do
-    app_set = MapSet.new(graph.apps)
+  defp empty_topology_change do
+    %{
+      changed?: false,
+      added_apps: [],
+      removed_apps: [],
+      edge_changed_apps: []
+    }
+  end
 
-    Enum.reduce_while(files, {:ok, MapSet.new(), false}, fn path, {:ok, apps, root_wide} ->
-      cond do
-        root_wide_path?(path) ->
-          {:cont, {:ok, apps, true}}
+  defp manifest_to_map(entries) when is_list(entries) do
+    if length(entries) > @max_changed_files * 25 do
+      # Hard fail before allocating a huge map; full umbrellas stay well under
+      # this (max_changed_files is 2_000; 50_000 matches Mix snapshot ceiling).
+      {:error, :blob_manifest_too_large}
+    else
+      Enum.reduce_while(entries, {:ok, %{}, MapSet.new()}, fn entry, {:ok, acc, seen} ->
+        case normalize_manifest_entry(entry) do
+          {:ok, path, mode, oid} ->
+            if MapSet.member?(seen, path) do
+              {:halt, {:error, {:duplicate_blob_manifest_path, path}}}
+            else
+              {:cont, {:ok, Map.put(acc, path, {mode, oid}), MapSet.put(seen, path)}}
+            end
 
-        true ->
-          case app_dir_from_path(path) do
-            {:ok, app} ->
-              if MapSet.member?(app_set, app) do
-                {:cont, {:ok, MapSet.put(apps, app), root_wide}}
-              else
-                # Changed path under apps/<unknown>/ — fail closed unless the
-                # path is merely an untracked junk file outside known apps.
-                # Known-app directories are the only authority for selection.
-                {:halt, {:error, {:changed_unknown_app, app}}}
-              end
-
-            :not_app_path ->
-              # docs, scripts, etc. — do not widen
-              {:cont, {:ok, apps, root_wide}}
-
-            {:error, reason} ->
-              {:halt, {:error, reason}}
-          end
+          {:error, _} = error ->
+            {:halt, error}
+        end
+      end)
+      |> case do
+        {:ok, map, _seen} -> {:ok, map}
+        {:error, _} = error -> error
       end
-    end)
-    |> case do
-      {:ok, apps, root_wide} ->
-        {:ok, apps |> MapSet.to_list() |> Enum.sort(), root_wide}
+    end
+  end
 
-      {:error, _} = error ->
-        error
+  defp normalize_manifest_entry(%{path: path, mode: mode, oid: oid})
+       when is_binary(path) and is_binary(mode) and is_binary(oid) do
+    normalize_manifest_fields(path, mode, oid)
+  end
+
+  defp normalize_manifest_entry(%{"path" => path, "mode" => mode, "oid" => oid})
+       when is_binary(path) and is_binary(mode) and is_binary(oid) do
+    normalize_manifest_fields(path, mode, oid)
+  end
+
+  defp normalize_manifest_entry(_), do: {:error, :invalid_blob_manifest_entry}
+
+  defp normalize_manifest_fields(path, mode, oid) do
+    trimmed = String.trim(path)
+
+    cond do
+      trimmed == "" or String.contains?(trimmed, <<0>>) ->
+        {:error, :invalid_blob_manifest_path}
+
+      String.starts_with?(trimmed, "/") or String.contains?(trimmed, "..") ->
+        {:error, :invalid_blob_manifest_path}
+
+      mode not in ["100644", "100755", "120000"] ->
+        {:error, {:unsupported_blob_manifest_mode, mode}}
+
+      not Regex.match?(~r/\A[0-9a-f]{40}([0-9a-f]{24})?\z/, oid) ->
+        {:error, :invalid_blob_manifest_oid}
+
+      true ->
+        {:ok, trimmed, mode, oid}
+    end
+  end
+
+  defp known_apps_from_graph(graph) when is_map(graph) do
+    case graph_apps(graph) do
+      {:ok, apps} -> {:ok, MapSet.new(apps)}
+      {:error, _} = error -> error
+    end
+  end
+
+  defp graph_apps(%{apps: apps}) when is_list(apps), do: {:ok, apps}
+  defp graph_apps(%{"apps" => apps}) when is_list(apps), do: {:ok, apps}
+  defp graph_apps(_), do: {:error, :invalid_topology_input}
+
+  defp graph_depends_on(%{depends_on: deps}) when is_map(deps), do: {:ok, deps}
+  defp graph_depends_on(%{"depends_on" => deps}) when is_map(deps), do: {:ok, deps}
+  defp graph_depends_on(_), do: {:error, :invalid_topology_input}
+
+  defp topology_change_evidence(selection) when is_map(selection) do
+    case Map.get(selection, :topology_change) || Map.get(selection, "topology_change") do
+      %{changed?: changed?, added_apps: added, removed_apps: removed, edge_changed_apps: edges}
+      when is_boolean(changed?) and is_list(added) and is_list(removed) and is_list(edges) ->
+        %{
+          "changed" => changed?,
+          "added_apps" => Enum.take(added, @max_apps),
+          "removed_apps" => Enum.take(removed, @max_apps),
+          "edge_changed_apps" => Enum.take(edges, @max_apps)
+        }
+
+      %{
+        "changed" => changed?,
+        "added_apps" => added,
+        "removed_apps" => removed,
+        "edge_changed_apps" => edges
+      }
+      when is_boolean(changed?) and is_list(added) and is_list(removed) and is_list(edges) ->
+        %{
+          "changed" => changed?,
+          "added_apps" => Enum.take(added, @max_apps),
+          "removed_apps" => Enum.take(removed, @max_apps),
+          "edge_changed_apps" => Enum.take(edges, @max_apps)
+        }
+
+      _ ->
+        nil
+    end
+  end
+
+  defp classify_files(files, known_apps) do
+    known_set =
+      cond do
+        is_struct(known_apps, MapSet) -> known_apps
+        is_list(known_apps) -> MapSet.new(known_apps)
+        is_map(known_apps) and is_list(Map.get(known_apps, :apps)) -> MapSet.new(known_apps.apps)
+        true -> nil
+      end
+
+    if is_nil(known_set) do
+      {:error, :invalid_selection_input}
+    else
+      Enum.reduce_while(files, {:ok, MapSet.new(), false}, fn path, {:ok, apps, root_wide} ->
+        cond do
+          root_wide_path?(path) ->
+            {:cont, {:ok, apps, true}}
+
+          true ->
+            case app_dir_from_path(path) do
+              {:ok, app} ->
+                if MapSet.member?(known_set, app) do
+                  {:cont, {:ok, MapSet.put(apps, app), root_wide}}
+                else
+                  # Changed path under apps/<unknown>/ — fail closed when the
+                  # name is absent from the known revision-union app set.
+                  {:halt, {:error, {:changed_unknown_app, app}}}
+                end
+
+              :not_app_path ->
+                # docs, scripts, etc. — do not widen
+                {:cont, {:ok, apps, root_wide}}
+
+              {:error, reason} ->
+                {:halt, {:error, reason}}
+            end
+        end
+      end)
+      |> case do
+        {:ok, apps, root_wide} ->
+          {:ok, apps |> MapSet.to_list() |> Enum.sort(), root_wide}
+
+        {:error, _} = error ->
+          error
+      end
     end
   end
 

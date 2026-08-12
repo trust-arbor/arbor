@@ -1347,6 +1347,30 @@ defmodule Arbor.Actions.Mix do
 
   def committable_source_inventory(_, _), do: {:error, :invalid_worktree}
 
+  # Bounds for app mix.exs bytes returned with a committable freeze — aligned
+  # with CrossApp.Parser so topology parse never sees truncated sources.
+  @app_mix_exs_max_files 256
+  @app_mix_exs_max_file_bytes 64_000
+  @app_mix_exs_max_total_bytes 2_000_000
+
+  @doc false
+  @spec committable_app_mix_inventory(String.t()) :: {:ok, map()} | {:error, term()}
+  def committable_app_mix_inventory(worktree_path) when is_binary(worktree_path) do
+    committable_app_mix_inventory(worktree_path, [])
+  end
+
+  # Capture the committable tree OID plus exact apps/*/mix.exs bytes from the
+  # private staged snapshot that produced that OID. Selection must parse these
+  # returned bytes — never re-read the mutable worktree after capture returns.
+  @doc false
+  @spec committable_app_mix_inventory(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def committable_app_mix_inventory(worktree_path, opts)
+      when is_binary(worktree_path) and is_list(opts) do
+    do_committable_tree_capture(worktree_path, Keyword.put(opts, :include_app_mix_exs, true))
+  end
+
+  def committable_app_mix_inventory(_, _), do: {:error, :invalid_worktree}
+
   defp do_committable_tree_capture(worktree_path, opts)
        when is_binary(worktree_path) and is_list(opts) do
     timeout = Keyword.get(opts, :timeout, mix_timeout())
@@ -1482,6 +1506,7 @@ defmodule Arbor.Actions.Mix do
          opts
        ) do
     include_paths? = Keyword.get(opts, :include_paths, false) == true
+    include_app_mix_exs? = Keyword.get(opts, :include_app_mix_exs, false) == true
 
     outcome =
       try do
@@ -1517,7 +1542,11 @@ defmodule Arbor.Actions.Mix do
                  ["--git-dir", private_git, "write-tree"],
                  deadline_ms,
                  [{"GIT_INDEX_FILE", private_index}]
-               ) do
+               ),
+             {:ok, app_mix_exs} <-
+               maybe_extract_app_mix_exs(staged_entries, include_app_mix_exs?),
+             {:ok, blob_manifest} <-
+               maybe_extract_blob_manifest(hashed_entries, include_app_mix_exs?) do
           # Inventory paths are exactly those that contribute to the written
           # tree OID (post deleted-path skip), sorted for the contract envelope.
           binding = %{
@@ -1525,13 +1554,25 @@ defmodule Arbor.Actions.Mix do
             tree_oid: String.trim(tree)
           }
 
-          if include_paths? do
-            inventory_paths =
-              staged_entries
-              |> Enum.map(& &1.path)
-              |> Enum.sort()
+          binding =
+            if include_paths? do
+              inventory_paths =
+                staged_entries
+                |> Enum.map(& &1.path)
+                |> Enum.sort()
 
-            {:ok, Map.put(binding, :paths, inventory_paths)}
+              Map.put(binding, :paths, inventory_paths)
+            else
+              binding
+            end
+
+          if include_app_mix_exs? do
+            {:ok,
+             binding
+             |> Map.put(:app_mix_exs, app_mix_exs)
+             # Internal only: path/mode/blob oid set bound to tree_oid. Not for
+             # action evidence — used to derive changed_files vs base commit.
+             |> Map.put(:blob_manifest, blob_manifest)}
           else
             {:ok, binding}
           end
@@ -1851,6 +1892,233 @@ defmodule Arbor.Actions.Mix do
     end
   end
 
+  # Extract apps/*/mix.exs bytes from the private staged snapshot that was
+  # hashed into the tree OID — never re-open the mutable worktree path.
+  defp maybe_extract_app_mix_exs(_staged_entries, false), do: {:ok, []}
+
+  defp maybe_extract_app_mix_exs(staged_entries, true) when is_list(staged_entries) do
+    staged_entries
+    |> Enum.reduce_while({:ok, [], 0}, fn entry, {:ok, acc, total_bytes} ->
+      case app_mix_exs_entry(entry) do
+        :skip ->
+          {:cont, {:ok, acc, total_bytes}}
+
+        {:ok, dir, source} when is_binary(source) ->
+          # Prefer bytes retained at capture time from the private stage copy.
+          size = byte_size(source)
+
+          cond do
+            length(acc) + 1 > @app_mix_exs_max_files ->
+              {:halt, {:error, :too_many_app_mix_exs_files}}
+
+            size > @app_mix_exs_max_file_bytes ->
+              {:halt, {:error, :app_mix_exs_too_large}}
+
+            total_bytes + size > @app_mix_exs_max_total_bytes ->
+              {:halt, {:error, :app_mix_exs_total_too_large}}
+
+            true ->
+              {:cont, {:ok, [{dir, source} | acc], total_bytes + size}}
+          end
+
+        {:ok, dir, stage_path} when is_binary(stage_path) ->
+          case read_staged_app_mix_exs(stage_path, total_bytes) do
+            {:ok, source, next_total} ->
+              if length(acc) + 1 > @app_mix_exs_max_files do
+                {:halt, {:error, :too_many_app_mix_exs_files}}
+              else
+                {:cont, {:ok, [{dir, source} | acc], next_total}}
+              end
+
+            {:error, _} = error ->
+              {:halt, error}
+          end
+
+        {:error, _} = error ->
+          {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, entries, _total} ->
+        {:ok, entries |> Enum.reverse() |> Enum.sort_by(fn {dir, _source} -> dir end)}
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  defp maybe_extract_app_mix_exs(_, _), do: {:error, :invalid_staged_entries}
+
+  # Compact path/mode/blob-oid manifest for the exact staged snapshot hashed into
+  # tree_oid. Used by CrossApp to derive changed_files against the base commit
+  # without re-reading the mutable worktree after capture.
+  defp maybe_extract_blob_manifest(_hashed_entries, false), do: {:ok, []}
+
+  defp maybe_extract_blob_manifest(hashed_entries, true) when is_list(hashed_entries) do
+    bounds = snapshot_bounds()
+
+    hashed_entries
+    |> Enum.reduce_while({:ok, [], 0}, fn entry, {:ok, acc, count} ->
+      next = count + 1
+
+      cond do
+        next > bounds.max_entries ->
+          {:halt, {:error, :tree_binding_bounds_exceeded}}
+
+        true ->
+          case compact_blob_manifest_entry(entry) do
+            {:ok, compact} ->
+              {:cont, {:ok, [compact | acc], next}}
+
+            {:error, _} = error ->
+              {:halt, error}
+          end
+      end
+    end)
+    |> case do
+      {:ok, entries, _count} ->
+        {:ok, Enum.sort_by(entries, & &1.path)}
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  defp maybe_extract_blob_manifest(_, _), do: {:error, :invalid_hashed_entries}
+
+  defp compact_blob_manifest_entry(%{path: path, mode: mode, oid: oid})
+       when is_binary(path) and is_binary(mode) and is_binary(oid) do
+    cond do
+      path == "" or String.contains?(path, <<0>>) ->
+        {:error, {:invalid_blob_manifest_path, bound_path(path)}}
+
+      mode not in ["100644", "100755", "120000"] ->
+        {:error, {:unsupported_blob_manifest_mode, mode, bound_path(path)}}
+
+      not valid_object_id?(oid) ->
+        {:error, {:invalid_blob_manifest_oid, bound_path(path)}}
+
+      true ->
+        {:ok, %{path: path, mode: mode, oid: oid}}
+    end
+  end
+
+  defp compact_blob_manifest_entry(_), do: {:error, :invalid_blob_manifest_entry}
+
+  defp app_mix_exs_entry(%{path: path, mode: mode} = entry)
+       when is_binary(path) and is_binary(mode) do
+    case Path.split(path) do
+      ["apps", dir, "mix.exs"] when dir != "" ->
+        cond do
+          not app_mix_exs_identifier?(dir) ->
+            {:error, {:invalid_app_mix_exs_dir, bound_path(path)}}
+
+          mode == "120000" ->
+            {:error, {:app_mix_exs_symlink, bound_path(path)}}
+
+          mode in ["100644", "100755"] ->
+            cond do
+              is_binary(Map.get(entry, :source)) ->
+                {:ok, dir, Map.fetch!(entry, :source)}
+
+              is_binary(Map.get(entry, :stage_path)) ->
+                {:ok, dir, Map.fetch!(entry, :stage_path)}
+
+              true ->
+                {:error, {:missing_app_mix_exs_stage, bound_path(path)}}
+            end
+
+          true ->
+            {:error, {:unsupported_app_mix_exs_mode, mode, bound_path(path)}}
+        end
+
+      _ ->
+        :skip
+    end
+  end
+
+  defp app_mix_exs_entry(_), do: {:error, :invalid_staged_entry}
+
+  # Retain apps/*/mix.exs bytes from the private staged copy at capture time so
+  # extraction never re-opens the mutable worktree (ABA). Stage path remains the
+  # hash-object input; source is the exact staged snapshot when within bounds.
+  defp maybe_attach_app_mix_source(%{path: path, stage_path: stage_path} = entry, size)
+       when is_binary(path) and is_binary(stage_path) and is_integer(size) do
+    case Path.split(path) do
+      ["apps", dir, "mix.exs"]
+      when dir != "" and size >= 0 and size <= @app_mix_exs_max_file_bytes ->
+        case File.read(stage_path) do
+          {:ok, source}
+          when byte_size(source) == size or byte_size(source) <= @app_mix_exs_max_file_bytes ->
+            {:ok, Map.put(entry, :source, source)}
+
+          {:ok, _oversized} ->
+            {:error, :app_mix_exs_too_large}
+
+          {:error, reason} ->
+            {:error, {:app_mix_exs_stage_read_failed, reason}}
+        end
+
+      ["apps", _dir, "mix.exs"] when size > @app_mix_exs_max_file_bytes ->
+        {:error, :app_mix_exs_too_large}
+
+      _ ->
+        {:ok, entry}
+    end
+  end
+
+  defp maybe_attach_app_mix_source(entry, _size), do: {:ok, entry}
+
+  defp app_mix_exs_identifier?(name)
+       when is_binary(name) and name != "" and byte_size(name) <= 64 do
+    String.match?(name, ~r/^[a-z][a-z0-9_]*$/)
+  end
+
+  defp app_mix_exs_identifier?(_), do: false
+
+  defp read_staged_app_mix_exs(stage_path, total_bytes)
+       when is_binary(stage_path) and is_integer(total_bytes) and total_bytes >= 0 do
+    case File.lstat(stage_path) do
+      {:ok, %File.Stat{type: :regular, size: size}} when is_integer(size) and size >= 0 ->
+        cond do
+          size > @app_mix_exs_max_file_bytes ->
+            {:error, :app_mix_exs_too_large}
+
+          total_bytes + size > @app_mix_exs_max_total_bytes ->
+            {:error, :app_mix_exs_total_too_large}
+
+          true ->
+            case File.read(stage_path) do
+              {:ok, source} when byte_size(source) == size ->
+                {:ok, source, total_bytes + size}
+
+              {:ok, source} when byte_size(source) > @app_mix_exs_max_file_bytes ->
+                {:error, :app_mix_exs_too_large}
+
+              {:ok, source} ->
+                next = total_bytes + byte_size(source)
+
+                if next > @app_mix_exs_max_total_bytes do
+                  {:error, :app_mix_exs_total_too_large}
+                else
+                  {:ok, source, next}
+                end
+
+              {:error, reason} ->
+                {:error, {:app_mix_exs_stage_read_failed, reason}}
+            end
+        end
+
+      {:ok, %File.Stat{type: other}} ->
+        {:error, {:app_mix_exs_stage_not_regular, other}}
+
+      {:error, reason} ->
+        {:error, {:app_mix_exs_stage_stat_failed, reason}}
+    end
+  end
+
+  defp read_staged_app_mix_exs(_, _), do: {:error, :invalid_app_mix_exs_stage}
+
   defp capture_one_path(private_stage, worktree, rel, deadline_ms, budget) do
     unless safe_index_path?(rel) do
       {:error, {:unsafe_index_path, bound_path(rel)}}
@@ -1899,9 +2167,13 @@ defmodule Arbor.Actions.Mix do
                    budget,
                    deadline_ms
                  ),
-               mode_oct <- if(executable_mode?(mode), do: "100755", else: "100644") do
-            {:ok, %{mode: mode_oct, path: rel, stage_path: stage_path},
-             %{budget | entries: budget.entries + 1, bytes: budget.bytes + size}}
+               mode_oct <- if(executable_mode?(mode), do: "100755", else: "100644"),
+               {:ok, entry} <-
+                 maybe_attach_app_mix_source(
+                   %{mode: mode_oct, path: rel, stage_path: stage_path},
+                   size
+                 ) do
+            {:ok, entry, %{budget | entries: budget.entries + 1, bytes: budget.bytes + size}}
           else
             false -> {:error, :tree_binding_bounds_exceeded}
             {:error, reason} -> {:error, reason}

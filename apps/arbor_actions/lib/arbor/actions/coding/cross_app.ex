@@ -13,8 +13,13 @@ defmodule Arbor.Actions.Coding.CrossApp.Validate do
   Validate the changed cross-app dependency surface for a leased workspace.
 
   Derives changed files from the lease base through the dirty worktree,
-  selects directly changed apps plus downstream in-umbrella dependents, then
-  runs (fail-closed, later stages skipped on earlier failure):
+  freezes candidate `apps/*/mix.exs` bytes and a path/mode/blob manifest with the
+  committable tree OID, loads the base-commit blob manifest + mix.exs at the
+  validated full lease OID, derives changed paths from those two immutable
+  manifests, and selects via base-plus-candidate topology comparison (union path
+  classification; full candidate validation on app add/remove/edge change;
+  focused downstream closure when topology is unchanged). Then runs (fail-closed,
+  later stages skipped on earlier failure):
 
   1. umbrella compile with `--warnings-as-errors` (dev environment)
   2. xref graph evidence (does not claim zero cycles)

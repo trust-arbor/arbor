@@ -2,10 +2,19 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
   @moduledoc """
   Imperative shell for cross-app dependency-surface validation.
 
-  Resolves an authorized workspace lease, derives changed files from the lease
-  base through the dirty worktree (including untracked), parses candidate
-  `apps/*/mix.exs` files as AST, selects the downstream app closure, and runs
-  compile → xref → test-env compile → focused tests via `Arbor.Actions.Mix.run_mix/3`.
+  Resolves an authorized workspace lease, freezes the candidate committable tree
+  (tracked survivors + nonignored untracked, deleted omitted, ignored private
+  apps excluded) with exact `apps/*/mix.exs` bytes and a path/mode/blob
+  manifest bound to the tree OID, loads the base-commit blob manifest + mix.exs
+  via argv-safe Git plumbing at the validated full lease OID, derives
+  `changed_files` by comparing those two immutable manifests (never a live
+  worktree `git diff`), compares topology in pure Core, and runs compile →
+  xref → test-env compile → focused (or full-candidate) tests via
+  `Arbor.Actions.Mix.run_mix/3`.
+
+  Candidate selection uses only freeze snapshot bytes and manifests — never a
+  later worktree read (ABA / changed-path skew defense). The same tree OID is
+  the validation before-binding and evidence `validated_tree_oid`.
 
   The test-environment compile is an explicit `mix compile --warnings-as-errors`
   under owner-controlled `MIX_ENV=test`. The aggregate app-test monotonic deadline
@@ -31,6 +40,13 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
   alias Arbor.Actions.Coding.Workspace
   alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
   alias Arbor.Actions.Mix, as: MixAction
+
+  # Align with CrossApp.Parser per-file source ceiling for base blob reads.
+  @base_mix_exs_max_file_bytes 64_000
+  # Full lowercase hex commit OIDs only (SHA-1 40 or SHA-256 64) — lease authority.
+  @full_commit_oid_re ~r/\A[0-9a-f]{40}([0-9a-f]{24})?\z/
+  # Match Mix snapshot entry ceiling for base ls-tree manifests.
+  @max_blob_manifest_entries 50_000
 
   @doc "Execute cross-app validation against a leased workspace."
   @spec run(Core.input(), map()) :: {:ok, map()} | {:error, term()}
@@ -208,46 +224,108 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
     end
   end
 
+  @doc false
+  @spec resolve_selection(String.t(), String.t()) :: {:ok, map()} | {:error, term()}
+  def resolve_selection(worktree_path, base_commit)
+      when is_binary(worktree_path) and is_binary(base_commit) do
+    # Selection authority is dual immutable snapshots only:
+    # 1) candidate freeze (tree_oid + staged app_mix_exs + blob_manifest)
+    # 2) base-commit ls-tree blob manifest
+    # Never list_changed_files against the mutable worktree after/before freeze.
+    with :ok <- validate_full_commit_oid(base_commit),
+         {:ok, freeze} <- MixAction.committable_app_mix_inventory(worktree_path),
+         :ok <- invoke_after_candidate_freeze_hook(worktree_path, freeze),
+         {:ok, base_manifest} <- load_base_blob_manifest(worktree_path, base_commit),
+         {:ok, changed_files} <-
+           Core.diff_blob_manifests(base_manifest, Map.fetch!(freeze, :blob_manifest)),
+         {:ok, base_sources} <- load_base_mix_exs(worktree_path, base_commit),
+         {:ok, base_defs} <- Parser.parse_many(base_sources),
+         {:ok, cand_defs} <- Parser.parse_many(Map.fetch!(freeze, :app_mix_exs)),
+         {:ok, base_graph} <- Core.build_graph(base_defs),
+         {:ok, cand_graph} <- Core.build_graph(cand_defs),
+         {:ok, selection} <- Core.select_revisions(changed_files, base_graph, cand_graph) do
+      {:ok,
+       %{
+         selection: selection,
+         candidate_tree_oid: freeze.tree_oid,
+         candidate_head: freeze.head,
+         # Test/diagnostic only: exact freeze sources (not emitted in evidence).
+         candidate_app_mix_exs: freeze.app_mix_exs,
+         # Test/diagnostic only: immutable freeze path set for skew proofs.
+         # Never copied into Core.show / feedback_json evidence.
+         candidate_blob_manifest: freeze.blob_manifest
+       }}
+    end
+  end
+
+  def resolve_selection(_, _), do: {:error, :invalid_resolve_selection_input}
+
+  # Test-only seam (Application env `:cross_app_after_candidate_freeze`).
+  # Production default is nil — no hook, no behavior change. Tests may install
+  # a 2-arity fun `(worktree_path, freeze) -> :ok` that mutates the worktree
+  # immediately after the candidate freeze is captured, proving selection uses
+  # only the held freeze (app_mix_exs + blob_manifest), not later disk state.
+  defp invoke_after_candidate_freeze_hook(worktree_path, freeze)
+       when is_binary(worktree_path) and is_map(freeze) do
+    case Application.get_env(:arbor_actions, :cross_app_after_candidate_freeze) do
+      nil ->
+        :ok
+
+      fun when is_function(fun, 2) ->
+        case fun.(worktree_path, freeze) do
+          :ok -> :ok
+          {:ok, _} -> :ok
+          {:error, reason} -> {:error, {:after_candidate_freeze_hook_failed, reason}}
+          other -> {:error, {:after_candidate_freeze_hook_invalid_return, other}}
+        end
+
+      other ->
+        {:error, {:invalid_after_candidate_freeze_hook, other}}
+    end
+  end
+
   defp do_run(input, context, validation_deadline) do
     with {:ok, lease} <- resolve_lease(input.workspace_id, context),
          {:ok, worktree_path, base_commit} <- lease_paths(lease),
-         {:ok, changed_files} <- list_changed_files(worktree_path, base_commit),
-         {:ok, sources} <- load_candidate_mix_exs(worktree_path),
-         {:ok, app_defs} <- Parser.parse_many(sources),
-         {:ok, graph} <- Core.build_graph(app_defs),
-         {:ok, selection} <- Core.select(changed_files, graph),
-         # Capture the exact committable tree across the full aggregate validation
-         # window (not a post-test snapshot alone). Mutating validation fails closed.
-         {:ok, before_binding} <- MixAction.committable_tree_binding(worktree_path),
-         {:ok, checks} <-
-           MixAction.with_validation_resource(
-             input.workspace_id,
-             context,
-             fn resource ->
-               run_checks(
-                 worktree_path,
-                 selection,
-                 input.timeout,
-                 input.test_stage_timeout,
-                 validation_deadline,
-                 resource
-               )
-             end,
-             validation_resource_opts(input.timeout, validation_deadline)
-           ),
-         {:ok, after_binding} <- MixAction.committable_tree_binding(worktree_path),
-         :ok <- assert_validation_tree_stable(before_binding, after_binding) do
-      evidence =
-        Core.show(%{
-          selection: selection,
-          checks: checks,
-          base_commit: base_commit
-        })
-        |> Map.put(:validated_tree_oid, before_binding.tree_oid)
-        |> Map.put(:validated_head, before_binding.head)
+         # One candidate freeze: tree OID + staged app mix.exs bytes for selection.
+         {:ok, resolved} <- resolve_selection(worktree_path, base_commit) do
+      selection = resolved.selection
 
-      feedback_json = Jason.encode!(evidence)
-      {:ok, Map.put(evidence, :feedback_json, feedback_json)}
+      before_binding = %{
+        head: resolved.candidate_head,
+        tree_oid: resolved.candidate_tree_oid
+      }
+
+      with {:ok, checks} <-
+             MixAction.with_validation_resource(
+               input.workspace_id,
+               context,
+               fn resource ->
+                 run_checks(
+                   worktree_path,
+                   selection,
+                   input.timeout,
+                   input.test_stage_timeout,
+                   validation_deadline,
+                   resource
+                 )
+               end,
+               validation_resource_opts(input.timeout, validation_deadline)
+             ),
+           {:ok, after_binding} <- MixAction.committable_tree_binding(worktree_path),
+           :ok <- assert_validation_tree_stable(before_binding, after_binding) do
+        evidence =
+          Core.show(%{
+            selection: selection,
+            checks: checks,
+            base_commit: base_commit
+          })
+          |> Map.put(:validated_tree_oid, before_binding.tree_oid)
+          |> Map.put(:validated_head, before_binding.head)
+
+        feedback_json = Jason.encode!(evidence)
+        {:ok, Map.put(evidence, :feedback_json, feedback_json)}
+      end
     end
   end
 
@@ -291,72 +369,183 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
     end
   end
 
-  defp list_changed_files(worktree_path, base_commit) do
-    with {:ok, tracked} <-
-           git(worktree_path, ["diff", "--name-only", "--find-renames", "-z", base_commit]),
-         {:ok, untracked} <-
-           git(worktree_path, ["ls-files", "--others", "--exclude-standard", "-z"]) do
-      files =
-        (split_z(tracked) ++ split_z(untracked))
-        |> Enum.map(&String.trim/1)
-        |> Enum.reject(&(&1 == ""))
-        |> Enum.uniq()
-        |> Enum.sort()
-
-      {:ok, files}
+  defp validate_full_commit_oid(oid) when is_binary(oid) do
+    if Regex.match?(@full_commit_oid_re, oid) do
+      :ok
     else
-      {:error, reason} -> {:error, {:changed_files_failed, reason}}
+      {:error, :invalid_base_commit_oid}
     end
   end
 
-  defp load_candidate_mix_exs(worktree_path) do
-    with {:ok, tracked} <- git(worktree_path, ["ls-files", "-z", "--", "apps/*/mix.exs"]),
-         {:ok, untracked} <-
-           git(worktree_path, [
-             "ls-files",
-             "--others",
-             "--exclude-standard",
-             "-z",
-             "--",
-             "apps/*/mix.exs"
-           ]) do
-      paths =
-        (split_z(tracked) ++ split_z(untracked))
-        |> Enum.map(&String.trim/1)
-        |> Enum.reject(&(&1 == ""))
-        |> Enum.uniq()
-        |> Enum.sort()
+  defp validate_full_commit_oid(_), do: {:error, :invalid_base_commit_oid}
 
-      Enum.reduce_while(paths, {:ok, []}, fn rel, {:ok, acc} ->
-        case app_dir_for_mix_exs(rel) do
-          {:ok, dir} ->
-            abs = Path.join(worktree_path, rel)
+  # Immutable base revision path/mode/blob manifest (commit tree only).
+  defp load_base_blob_manifest(worktree_path, base_commit)
+       when is_binary(worktree_path) and is_binary(base_commit) do
+    with :ok <- validate_full_commit_oid(base_commit),
+         {:ok, listing} <- git(worktree_path, ["ls-tree", "-r", "-z", base_commit]) do
+      parse_ls_tree_blob_manifest(listing)
+    else
+      {:error, reason} -> {:error, {:base_blob_manifest_failed, reason}}
+    end
+  end
 
-            case File.read(abs) do
-              {:ok, source} ->
-                {:cont, {:ok, [{dir, source} | acc]}}
+  defp load_base_blob_manifest(_, _), do: {:error, :invalid_base_blob_manifest_input}
 
-              {:error, reason} ->
-                {:halt, {:error, {:mix_exs_read_failed, rel, reason}}}
+  defp parse_ls_tree_blob_manifest(listing) when is_binary(listing) do
+    listing
+    |> split_z()
+    |> Enum.reduce_while({:ok, [], 0}, fn entry, {:ok, acc, count} ->
+      next = count + 1
+
+      cond do
+        entry == "" ->
+          {:cont, {:ok, acc, count}}
+
+        next > @max_blob_manifest_entries ->
+          {:halt, {:error, :blob_manifest_too_large}}
+
+        true ->
+          case parse_ls_tree_entry(entry) do
+            {:ok, compact} ->
+              {:cont, {:ok, [compact | acc], next}}
+
+            {:error, _} = error ->
+              {:halt, error}
+          end
+      end
+    end)
+    |> case do
+      {:ok, entries, _count} ->
+        {:ok, Enum.sort_by(entries, & &1.path)}
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  # git ls-tree -z -r lines: "<mode> <type> <oid>\\t<path>"
+  defp parse_ls_tree_entry(entry) when is_binary(entry) do
+    case :binary.split(entry, "\t", [:global]) do
+      [meta, path] when path != "" ->
+        case String.split(meta, " ", parts: 3) do
+          [mode, "blob", oid] when mode in ["100644", "100755", "120000"] ->
+            if Regex.match?(@full_commit_oid_re, oid) do
+              {:ok, %{path: path, mode: mode, oid: oid}}
+            else
+              {:error, {:invalid_base_blob_oid, path}}
             end
 
-          :error ->
-            {:halt, {:error, {:invalid_mix_exs_path, rel}}}
+          [_mode, "commit", _oid] ->
+            {:error, {:unsupported_base_gitlink, path}}
+
+          [_mode, "tree", _oid] ->
+            # -r should not emit trees; fail closed if it does.
+            {:error, {:unexpected_base_tree_entry, path}}
+
+          _ ->
+            {:error, {:invalid_base_ls_tree_entry, path}}
         end
-      end)
-      |> case do
-        {:ok, entries} -> {:ok, Enum.reverse(entries)}
-        {:error, _} = error -> error
-      end
-    else
-      {:error, reason} -> {:error, {:mix_exs_list_failed, reason}}
+
+      _ ->
+        {:error, :invalid_base_ls_tree_entry}
     end
   end
+
+  # Base inventory: commit-bound tree only. Never File.read the mutable worktree.
+  # Requires a validated full lease base OID — no short-OID cat-file fallback.
+  defp load_base_mix_exs(worktree_path, base_commit)
+       when is_binary(worktree_path) and is_binary(base_commit) do
+    with :ok <- validate_full_commit_oid(base_commit),
+         {:ok, listing} <-
+           git(worktree_path, ["ls-tree", "-r", "-z", "--name-only", base_commit, "--", "apps"]),
+         paths <-
+           listing
+           |> split_z()
+           |> Enum.map(&String.trim/1)
+           |> Enum.reject(&(&1 == ""))
+           |> Enum.filter(&base_mix_exs_path?/1)
+           |> Enum.uniq()
+           |> Enum.sort() do
+      if length(paths) > Core.max_apps() do
+        {:error, :too_many_mix_exs_files}
+      else
+        Enum.reduce_while(paths, {:ok, []}, fn rel, {:ok, acc} ->
+          case app_dir_for_mix_exs(rel) do
+            {:ok, dir} ->
+              case read_base_mix_exs_blob(worktree_path, base_commit, rel) do
+                {:ok, source} ->
+                  {:cont, {:ok, [{dir, source} | acc]}}
+
+                {:error, reason} ->
+                  {:halt, {:error, {:base_mix_exs_read_failed, rel, reason}}}
+              end
+
+            :error ->
+              {:halt, {:error, {:invalid_mix_exs_path, rel}}}
+          end
+        end)
+        |> case do
+          {:ok, entries} -> {:ok, Enum.reverse(entries)}
+          {:error, _} = error -> error
+        end
+      end
+    else
+      {:error, reason} -> {:error, {:base_mix_inventory_failed, reason}}
+    end
+  end
+
+  defp load_base_mix_exs(_, _), do: {:error, :invalid_base_mix_inventory_input}
+
+  defp base_mix_exs_path?(path) when is_binary(path) do
+    match?({:ok, _}, app_dir_for_mix_exs(path))
+  end
+
+  defp base_mix_exs_path?(_), do: false
+
+  defp read_base_mix_exs_blob(worktree_path, base_commit, rel_path) do
+    # Production base authority is the validated full lease OID only. Argv-safe
+    # cat-file with discrete arguments — never shell strings, never short OIDs.
+    with :ok <- validate_full_commit_oid(base_commit),
+         :ok <- validate_base_blob_relpath(rel_path) do
+      case git(worktree_path, ["cat-file", "-p", base_commit <> ":" <> rel_path]) do
+        {:ok, source} when byte_size(source) <= @base_mix_exs_max_file_bytes ->
+          {:ok, source}
+
+        {:ok, _oversized} ->
+          {:error, :app_mix_exs_too_large}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end
+  end
+
+  defp validate_base_blob_relpath(path) when is_binary(path) do
+    cond do
+      path == "" or String.contains?(path, <<0>>) ->
+        {:error, :invalid_blob_path}
+
+      String.starts_with?(path, "/") or String.contains?(path, "..") ->
+        {:error, :invalid_blob_path}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp validate_base_blob_relpath(_), do: {:error, :invalid_blob_path}
 
   defp app_dir_for_mix_exs(path) do
     case Path.split(path) do
-      ["apps", dir, "mix.exs"] when dir != "" -> {:ok, dir}
-      _ -> :error
+      ["apps", dir, "mix.exs"] when dir != "" ->
+        case Core.normalize_app_id(dir) do
+          {:ok, normalized} -> {:ok, normalized}
+          {:error, _} -> :error
+        end
+
+      _ ->
+        :error
     end
   end
 
