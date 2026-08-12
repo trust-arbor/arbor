@@ -1475,13 +1475,109 @@ defmodule Arbor.LLM.ToolLoop do
     {:ok, %{request | messages: request.messages ++ steering_messages}, next_state}
   end
 
+  # Steering taint aggregation (policy R1):
+  # - Dimensions (level/sensitivity/sanitizations/confidence) join via the public
+  #   Signals/contract facades on provenance-neutral copies so valid provenance
+  #   growth never overflows the generic Taint.join bag-union into
+  #   invalid_durable_provenance before ToolLoop's own chain cap can act.
+  # - Provenance history is retained separately: concatenate each input's chain
+  #   (older→newer, acceptance order), dedupe keeping the last occurrence, keep
+  #   the tail of length max_taint_chain_entries (evict oldest/prefix first).
+  # - Aggregate source is the rightmost non-nil source (typically "llm_output"
+  #   from for_llm_output). Stage markers are not injected into chain.
+  # - True invalid_durable_provenance remains absorbing and is never repaired.
   defp join_steering_taint(tool_taint, messages) do
-    steering_taints = Enum.map(messages, &SignalTaint.for_llm_output(&1.taint))
+    inputs =
+      [tool_taint | Enum.map(messages, &SignalTaint.for_llm_output(&1.taint))]
+      |> Enum.reject(&is_nil/1)
 
-    [tool_taint | steering_taints]
-    |> Enum.reject(&is_nil/1)
-    |> SignalTaint.propagate_taint()
-    |> cap_steering_taint_chain()
+    case inputs do
+      [] ->
+        nil
+
+      _ ->
+        if Enum.any?(inputs, &invalid_durable_taint?/1) do
+          Taint.invalid_durable_provenance()
+        else
+          join_steering_taint_inputs(inputs)
+        end
+    end
+  end
+
+  defp join_steering_taint_inputs(inputs) do
+    with {:ok, dimension_inputs} <- dimension_only_taints(inputs),
+         joined_dims <- SignalTaint.propagate_taint(dimension_inputs),
+         false <- invalid_durable_taint?(joined_dims),
+         {source, chain} <- retain_recent_steering_provenance(inputs),
+         {:ok, joined} <-
+           Taint.new(%{
+             level: joined_dims.level,
+             sensitivity: joined_dims.sensitivity,
+             sanitizations: joined_dims.sanitizations,
+             confidence: joined_dims.confidence,
+             source: source,
+             chain: chain
+           }) do
+      cap_steering_taint_chain(joined)
+    else
+      _ -> Taint.invalid_durable_provenance()
+    end
+  end
+
+  defp invalid_durable_taint?(taint), do: taint == Taint.invalid_durable_provenance()
+
+  defp dimension_only_taints(inputs) do
+    inputs
+    |> Enum.reduce_while({:ok, []}, fn input, {:ok, acc} ->
+      case dimension_only_taint(input) do
+        {:ok, taint} -> {:cont, {:ok, [taint | acc]}}
+        {:error, _reason} -> {:halt, :error}
+      end
+    end)
+    |> case do
+      {:ok, reversed} -> {:ok, Enum.reverse(reversed)}
+      :error -> :error
+    end
+  end
+
+  defp dimension_only_taint(%Taint{} = taint) do
+    Taint.new(%{
+      level: taint.level,
+      sensitivity: taint.sensitivity,
+      sanitizations: taint.sanitizations,
+      confidence: taint.confidence,
+      source: nil,
+      chain: []
+    })
+  end
+
+  defp dimension_only_taint(_taint), do: {:error, :invalid_taint}
+
+  # Policy R1: history = flat input chains (older→newer); source = rightmost
+  # non-nil source; dedupe keep-last; take tail of max_chain entries.
+  defp retain_recent_steering_provenance(inputs) when is_list(inputs) do
+    max_chain = SteeringMessage.max_taint_chain_entries()
+
+    history =
+      inputs
+      |> Enum.flat_map(& &1.chain)
+      |> dedupe_labels_keep_last()
+      |> Enum.take(-max_chain)
+
+    source =
+      inputs
+      |> Enum.map(& &1.source)
+      |> Enum.reject(&is_nil/1)
+      |> List.last()
+
+    {source, history}
+  end
+
+  defp dedupe_labels_keep_last(labels) do
+    labels
+    |> Enum.reverse()
+    |> Enum.uniq()
+    |> Enum.reverse()
   end
 
   defp cap_steering_taint_chain(%Taint{} = taint) do

@@ -387,10 +387,19 @@ defmodule Arbor.LLM.ToolLoopTypedSteeringSecurityRegressionTest do
 
     assert Enum.map(provider_taints, &elem(&1, 2).sanitizations) == [255, 0, 0, 0]
 
+    # Full prior chain must not manufacture invalid durable on first untrusted join.
+    untrusted_provider_taint = provider_taints |> Enum.at(1) |> elem(2)
+
+    assert untrusted_provider_taint.level == :untrusted
+    assert untrusted_provider_taint != Taint.invalid_durable_provenance()
+    assert length(untrusted_provider_taint.chain) <= SteeringMessage.max_taint_chain_entries()
+    assert List.last(untrusted_provider_taint.chain) == "untrusted-source"
+
     tool_attempts = collect_tag(:tool_attempt)
     tool_taints = Enum.map(tool_attempts, &Keyword.fetch!(elem(&1, 3), :taint))
     assert Enum.map(tool_taints, & &1.level) == [:trusted, :untrusted, :hostile]
     assert Enum.map(tool_taints, & &1.sanitizations) == [255, 0, 0]
+    assert Enum.at(tool_taints, 1) != Taint.invalid_durable_provenance()
 
     Enum.each(tool_attempts, fn {:tool_attempt, _name, args, opts} ->
       aggregate = Keyword.fetch!(opts, :taint)
@@ -400,6 +409,55 @@ defmodule Arbor.LLM.ToolLoopTypedSteeringSecurityRegressionTest do
     hostile_provider_taint = provider_taints |> Enum.at(2) |> elem(2)
     assert length(hostile_provider_taint.chain) == SteeringMessage.max_taint_chain_entries()
     assert List.last(hostile_provider_taint.chain) == "hostile-source"
+    assert hostile_provider_taint != Taint.invalid_durable_provenance()
+  end
+
+  test "security regression: invalid durable steering provenance stays absorbing" do
+    parent = self()
+
+    invalid = Taint.invalid_durable_provenance()
+
+    steer_check = fn
+      {_attempt_ref, 1} ->
+        {:ok,
+         [
+           steering_message(500, "later untrusted",
+             taint: %Taint{
+               level: :untrusted,
+               sensitivity: :internal,
+               sanitizations: 0,
+               confidence: :unverified,
+               source: "later-untrusted",
+               chain: ["later-chain"]
+             }
+           )
+         ]}
+
+      {_attempt_ref, _} ->
+        :none
+    end
+
+    authorizer = fn %Request{} = request, %Taint{} = taint ->
+      tool_count = Enum.count(request.messages, &(&1.role == :tool))
+      send(parent, {:provider_taint, tool_count, taint})
+      :allow
+    end
+
+    assert {:ok, %{content: "done", taint: %Taint{} = final_taint}} =
+             run(OneRoundAdapter,
+               on_steer_check: steer_check,
+               llm_call_authorizer: authorizer,
+               tool_taint: invalid
+             )
+
+    assert final_taint == invalid
+
+    provider_taints = collect_tag(:provider_taint)
+    assert Enum.map(provider_taints, &elem(&1, 2)) == [invalid, invalid]
+
+    tool_attempts = collect_tag(:tool_attempt)
+    tool_taints = Enum.map(tool_attempts, &Keyword.fetch!(elem(&1, 3), :taint))
+    assert tool_taints == [invalid]
   end
 
   test "arity-2 provider authorizer receives exact conservative taint when tool_taint is absent" do
