@@ -118,8 +118,18 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   @fence_agent_id_re ~r/\Aagent_[A-Za-z0-9_-]+\z/
   @fence_operation_id_re ~r/\A[A-Za-z0-9][A-Za-z0-9._-]*\z/
 
+  # Runtime-admission intents (Phase 4C C3C1a0). Ordinary Lifecycle.start linearization.
+  @default_runtime_admission_supervisor Arbor.Agent.RuntimeAdmission.Supervisor
+  @default_max_runtime_admission_intents 256
+  @default_runtime_admission_admit_timeout_ms 2_000
+  @default_runtime_admission_reconcile_timeout_ms 10_000
+  @default_runtime_admission_call_timeout_ms 120_000
+
   alias Arbor.Agent.Config
   alias Arbor.Agent.Orchestration.{TaskArtifacts, TaskControlLease, TaskInventoryProjection}
+  alias Arbor.Agent.RuntimeAdmission.IntentCore
+  alias Arbor.Agent.RuntimeAdmission.IntentOwner
+  alias Arbor.Agent.RuntimeAdmission.Supervisor, as: RuntimeAdmissionSupervisor
 
   alias Arbor.Contracts.Coding.{
     AdmissionFailure,
@@ -347,6 +357,124 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
       store_name(opts),
       {:verify_target_fence, target_agent_id, operation_id}
     )
+  end
+
+  @doc """
+  Admit or join an ordinary runtime-start intent and await settlement.
+
+  Linearization point with `install_target_fence/3`. Parks the caller until the
+  fixed owner/worker settles. No lifecycle I/O in this GenServer callback.
+  """
+  @spec admit_ordinary_runtime_start(String.t(), String.t(), keyword(), keyword() | map()) ::
+          {:ok, pid()} | {:error, term()}
+  def admit_ordinary_runtime_start(target_agent_id, fingerprint, validated_opts, opts \\ [])
+      when is_binary(target_agent_id) and is_binary(fingerprint) and is_list(validated_opts) do
+    GenServer.call(
+      store_name(opts),
+      {:admit_ordinary_runtime_start, target_agent_id, fingerprint, validated_opts},
+      runtime_admission_call_timeout(opts)
+    )
+  end
+
+  @doc "Return whether runtime-admission owner reconcile has completed."
+  @spec runtime_admission_ready?(keyword() | map()) :: boolean()
+  def runtime_admission_ready?(opts \\ []) do
+    case GenServer.call(store_name(opts), :runtime_admission_ready?) do
+      true -> true
+      _ -> false
+    end
+  catch
+    :exit, _ -> false
+  end
+
+  @doc """
+  Adopt the calling IntentOwner against the current fence and intent map.
+
+  Source-owned: the GenServer caller pid is the only accepted owner identity
+  (caller-supplied PIDs are never trusted). Late owners must re-enter here
+  before launching work.
+  """
+  @spec adopt_runtime_admission_owner(String.t(), String.t(), String.t(), keyword() | map()) ::
+          :ok | {:error, term()}
+  def adopt_runtime_admission_owner(target_agent_id, intent_id, fingerprint, opts \\ [])
+      when is_binary(target_agent_id) and is_binary(intent_id) and is_binary(fingerprint) do
+    GenServer.call(
+      store_name(opts),
+      {:adopt_runtime_admission_owner, target_agent_id, intent_id, fingerprint}
+    )
+  end
+
+  @doc """
+  Owner-authenticated bind of an exact worker PID against a live intent.
+
+  Caller must be the recorded IntentOwner (`caller_pid == intent.owner_pid`).
+  The worker PID is the process the owner just spawned (not a self-claimed
+  hijack). TaskStore monitors the bound worker. Settlement and Lifecycle
+  effects authenticate to that bound worker only.
+  """
+  @spec bind_runtime_admission_worker(
+          String.t(),
+          String.t(),
+          String.t(),
+          pid(),
+          keyword() | map()
+        ) :: :ok | {:error, term()}
+  def bind_runtime_admission_worker(
+        target_agent_id,
+        intent_id,
+        fingerprint,
+        worker_pid,
+        opts \\ []
+      )
+      when is_binary(target_agent_id) and is_binary(intent_id) and is_binary(fingerprint) and
+             is_pid(worker_pid) do
+    GenServer.call(
+      store_name(opts),
+      {:bind_runtime_admission_worker, target_agent_id, intent_id, fingerprint, worker_pid}
+    )
+  end
+
+  @doc """
+  Authenticate the calling process as the exact bound worker for
+  target+intent_id+fingerprint. Used by Lifecycle before any start effects.
+  """
+  @spec authenticate_runtime_admission_worker(
+          String.t(),
+          String.t(),
+          String.t(),
+          keyword() | map()
+        ) :: :ok | {:error, term()}
+  def authenticate_runtime_admission_worker(
+        target_agent_id,
+        intent_id,
+        fingerprint,
+        opts \\ []
+      )
+      when is_binary(target_agent_id) and is_binary(intent_id) and is_binary(fingerprint) do
+    GenServer.call(
+      store_name(opts),
+      {:authenticate_runtime_admission_worker, target_agent_id, intent_id, fingerprint}
+    )
+  end
+
+  @doc """
+  Source-owned settlement: only the registered worker pid for the exact intent
+  may settle. Rejected transitions return explicit errors and leave waiters live.
+  """
+  @spec settle_runtime_admission(String.t(), String.t(), term(), keyword() | map()) ::
+          :ok | {:error, term()}
+  def settle_runtime_admission(target_agent_id, intent_id, outcome, opts \\ [])
+      when is_binary(target_agent_id) and is_binary(intent_id) do
+    GenServer.call(
+      store_name(opts),
+      {:settle_runtime_admission, target_agent_id, intent_id, outcome}
+    )
+  end
+
+  defp runtime_admission_call_timeout(opts) do
+    opts
+    |> normalize_opts()
+    |> Keyword.get(:timeout, @default_runtime_admission_call_timeout_ms)
   end
 
   @doc """
@@ -628,10 +756,40 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     # fence-ready by default (no facade call, no seeding); only explicit seed
     # tests set :fence_force_ready false. Production always seeds via the worker.
     fence_force_ready? = fence_force_ready?(opts)
+    runtime_admission_force_ready? = runtime_admission_force_ready?(opts)
+
+    runtime_admission_supervisor =
+      Keyword.get(opts, :runtime_admission_supervisor, @default_runtime_admission_supervisor)
+
+    store_ref = Keyword.get(opts, :name, @default_name)
 
     state = %{
       task_supervisor: task_supervisor,
       cleanup_supervisor: cleanup_supervisor,
+      # Stable registered name for launchers/owners (never capture self() pid).
+      store_ref: store_ref,
+      runtime_admission_supervisor: runtime_admission_supervisor,
+      runtime_admission_ready?: runtime_admission_force_ready?,
+      runtime_admission_intents: %{},
+      runtime_admission_by_id: %{},
+      runtime_admission_waiters: %{},
+      runtime_admission_owner_monitors: %{},
+      runtime_admission_worker_monitors: %{},
+      runtime_admission_reconcile: %{status: :pending},
+      max_runtime_admission_intents:
+        Keyword.get(opts, :max_runtime_admission_intents, @default_max_runtime_admission_intents),
+      runtime_admission_admit_timeout_ms:
+        Keyword.get(
+          opts,
+          :runtime_admission_admit_timeout_ms,
+          @default_runtime_admission_admit_timeout_ms
+        ),
+      runtime_admission_reconcile_timeout_ms:
+        Keyword.get(
+          opts,
+          :runtime_admission_reconcile_timeout_ms,
+          @default_runtime_admission_reconcile_timeout_ms
+        ),
       runner: Keyword.get(opts, :runner, @default_runner),
       # When true, store-level `:runner` overrides kind-based Config selection.
       runner_override: Keyword.has_key?(opts, :runner),
@@ -775,6 +933,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
 
     cond do
       force_ready? and durable? and not production_recovery? ->
+        state = maybe_begin_runtime_admission_reconcile(state)
         {:ok, state}
 
       durable? ->
@@ -782,7 +941,9 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
 
       true ->
         # Fail closed: no cache-only recovery path can admit reserves/markers.
-        {:ok, %{state | recovery_durable?: false, recovery_ready?: false}}
+        state = %{state | recovery_durable?: false, recovery_ready?: false}
+        state = maybe_begin_runtime_admission_reconcile(state)
+        {:ok, state}
     end
   end
 
@@ -790,8 +951,10 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   def handle_continue(:start_recovery_replay, state) do
     state = ensure_recovery_shape(state)
     state = ensure_fence_shape(state)
+    state = ensure_runtime_admission_shape(state)
     state = begin_recovery_op(state, :replay_batch, nil, nil, nil)
     state = maybe_begin_fence_seed(state)
+    state = maybe_begin_runtime_admission_reconcile(state)
     {:noreply, state}
   end
 
@@ -1037,6 +1200,178 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
       end
 
     {:reply, reply, state}
+  end
+
+  def handle_call(:runtime_admission_ready?, _from, state) do
+    state = ensure_runtime_admission_shape(state)
+    {:reply, state.runtime_admission_ready? == true, state}
+  end
+
+  def handle_call(
+        {:admit_ordinary_runtime_start, target_agent_id, fingerprint, validated_opts},
+        from,
+        state
+      ) do
+    state = ensure_fence_shape(state)
+    state = ensure_runtime_admission_shape(state)
+
+    case validate_fence_target(target_agent_id) do
+      {:ok, target} ->
+        do_admit_ordinary_runtime_start(state, target, fingerprint, validated_opts, from)
+
+      {:error, _} = error ->
+        {:reply, error, state}
+    end
+  end
+
+  def handle_call(
+        {:adopt_runtime_admission_owner, target_agent_id, intent_id, fingerprint},
+        {caller_pid, _tag} = _from,
+        state
+      )
+      when is_pid(caller_pid) do
+    state = ensure_fence_shape(state)
+    state = ensure_runtime_admission_shape(state)
+
+    # Source-owned: caller pid is the only accepted owner identity.
+    case validate_fence_target(target_agent_id) do
+      {:ok, target} ->
+        case IntentCore.adopt_owner(
+               state.runtime_admission_intents,
+               state.target_fences,
+               state.target_fence_ready? == true,
+               state.runtime_admission_ready? == true,
+               target,
+               intent_id,
+               fingerprint,
+               caller_pid
+             ) do
+          {:ok, :adopted, _intent, intents} ->
+            mon = Process.monitor(caller_pid)
+
+            state =
+              state
+              |> put_in([:runtime_admission_intents], intents)
+              |> put_in([:runtime_admission_by_id, intent_id], target)
+              |> put_in([:runtime_admission_owner_monitors, mon], {intent_id, target, caller_pid})
+
+            {:reply, :ok, state}
+
+          {:error, reason} ->
+            {:reply, {:error, reason}, state}
+        end
+
+      {:error, _} = error ->
+        {:reply, error, state}
+    end
+  end
+
+  def handle_call(
+        {:bind_runtime_admission_worker, target_agent_id, intent_id, fingerprint, worker_pid},
+        {caller_pid, _tag},
+        state
+      )
+      when is_pid(caller_pid) and is_pid(worker_pid) do
+    state = ensure_runtime_admission_shape(state)
+
+    case validate_fence_target(target_agent_id) do
+      {:ok, target} ->
+        prev = Map.get(state.runtime_admission_intents, target)
+
+        case IntentCore.bind_worker(
+               state.runtime_admission_intents,
+               target,
+               intent_id,
+               fingerprint,
+               caller_pid,
+               worker_pid
+             ) do
+          {:ok, intents} ->
+            already_monitored? =
+              is_map(prev) and prev.worker_pid == worker_pid and prev.phase == :worker_running
+
+            state = put_in(state, [:runtime_admission_intents], intents)
+
+            state =
+              if already_monitored? do
+                state
+              else
+                mon = Process.monitor(worker_pid)
+
+                put_in(
+                  state,
+                  [:runtime_admission_worker_monitors, mon],
+                  {intent_id, target, worker_pid}
+                )
+              end
+
+            {:reply, :ok, state}
+
+          {:error, reason} ->
+            {:reply, {:error, reason}, state}
+        end
+
+      {:error, _} = error ->
+        {:reply, error, state}
+    end
+  end
+
+  def handle_call(
+        {:authenticate_runtime_admission_worker, target_agent_id, intent_id, fingerprint},
+        {caller_pid, _tag},
+        state
+      )
+      when is_pid(caller_pid) do
+    state = ensure_runtime_admission_shape(state)
+
+    case validate_fence_target(target_agent_id) do
+      {:ok, target} ->
+        reply =
+          IntentCore.authenticate_worker(
+            state.runtime_admission_intents,
+            target,
+            intent_id,
+            fingerprint,
+            caller_pid
+          )
+
+        case reply do
+          :ok -> {:reply, :ok, state}
+          {:error, reason} -> {:reply, {:error, reason}, state}
+        end
+
+      {:error, _} = error ->
+        {:reply, error, state}
+    end
+  end
+
+  def handle_call(
+        {:settle_runtime_admission, target_agent_id, intent_id, outcome},
+        {caller_pid, _tag},
+        state
+      )
+      when is_pid(caller_pid) do
+    state = ensure_runtime_admission_shape(state)
+
+    case validate_fence_target(target_agent_id) do
+      {:ok, target} ->
+        case authorize_and_settle_runtime_admission(
+               state,
+               target,
+               intent_id,
+               outcome,
+               caller_pid
+             ) do
+          {:ok, new_state} ->
+            {:reply, :ok, new_state}
+
+          {:error, reason, new_state} ->
+            {:reply, {:error, reason}, new_state}
+        end
+
+      {:error, _} = error ->
+        {:reply, error, state}
+    end
   end
 
   def handle_call({:status, task_id}, _from, state) do
@@ -1519,6 +1854,56 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     end
   end
 
+  # Phase 4C C3C1a0 runtime-admission reconcile + owner launcher messages.
+  def handle_info({:runtime_admission_reconcile_admitted, ref, worker_pid}, state)
+      when is_reference(ref) and is_pid(worker_pid) do
+    {:noreply, handle_runtime_admission_reconcile_admitted(state, ref, worker_pid)}
+  end
+
+  def handle_info({:runtime_admission_reconcile_failed, ref, class}, state)
+      when is_reference(ref) do
+    {:noreply, handle_runtime_admission_reconcile_failed(state, ref, class)}
+  end
+
+  def handle_info({:runtime_admission_reconcile_complete, ref, result}, state)
+      when is_reference(ref) do
+    {:noreply, handle_runtime_admission_reconcile_complete(state, ref, result)}
+  end
+
+  def handle_info({:runtime_admission_reconcile_timeout, ref}, state)
+      when is_reference(ref) do
+    {:noreply, handle_runtime_admission_reconcile_timeout(state, ref)}
+  end
+
+  def handle_info(:retry_runtime_admission_reconcile_msg, state) do
+    state = ensure_runtime_admission_shape(state)
+
+    if state.runtime_admission_ready? == true do
+      {:noreply, state}
+    else
+      {:noreply, maybe_begin_runtime_admission_reconcile(state)}
+    end
+  end
+
+  def handle_info({:runtime_admission_owner_launched, intent_id, owner_pid}, state)
+      when is_binary(intent_id) and is_pid(owner_pid) do
+    # Owner will adopt via call; nothing to do beyond tracking if needed.
+    {:noreply, state}
+  end
+
+  def handle_info({:runtime_admission_owner_launch_failed, intent_id, reason}, state)
+      when is_binary(intent_id) do
+    state = ensure_runtime_admission_shape(state)
+
+    case Map.get(state.runtime_admission_by_id, intent_id) do
+      target when is_binary(target) ->
+        {:noreply, force_settle_runtime_admission_intent(state, target, intent_id, {:error, reason})}
+
+      _ ->
+        {:noreply, state}
+    end
+  end
+
   def handle_info(:retry_recovery_replay_msg, state) do
     state = ensure_recovery_shape(state)
 
@@ -1650,6 +2035,18 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
       {:fence_worker, seed} ->
         handle_fence_seed_worker_down(state, seed, :normal)
 
+      {:runtime_admission_owner, intent_id, target, _owner_pid} ->
+        handle_runtime_admission_owner_down(state, ref, intent_id, target)
+
+      {:runtime_admission_worker, intent_id, target, worker_pid} ->
+        handle_runtime_admission_worker_monitor_down(state, ref, intent_id, target, worker_pid)
+
+      {:runtime_admission_reconcile_launcher, rec} ->
+        handle_runtime_admission_reconcile_launcher_down(state, rec)
+
+      {:runtime_admission_reconcile_worker, rec} ->
+        handle_runtime_admission_reconcile_worker_down(state, rec)
+
       {:reservation, task_id, reservation} ->
         handle_reservation_owner_down(state, task_id, reservation, :owner_down)
 
@@ -1683,6 +2080,18 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
 
       {:fence_worker, seed} ->
         handle_fence_seed_worker_down(state, seed, reason)
+
+      {:runtime_admission_owner, intent_id, target, _owner_pid} ->
+        handle_runtime_admission_owner_down(state, ref, intent_id, target)
+
+      {:runtime_admission_worker, intent_id, target, worker_pid} ->
+        handle_runtime_admission_worker_monitor_down(state, ref, intent_id, target, worker_pid)
+
+      {:runtime_admission_reconcile_launcher, rec} ->
+        handle_runtime_admission_reconcile_launcher_down(state, rec)
+
+      {:runtime_admission_reconcile_worker, rec} ->
+        handle_runtime_admission_reconcile_worker_down(state, rec)
 
       {:reservation, task_id, reservation} ->
         handle_reservation_owner_down(state, task_id, reservation, :owner_down)
@@ -1721,7 +2130,29 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     case find_fence_seed_monitor(state, ref) do
       {:launcher, seed} -> {:fence_launcher, seed}
       {:worker, seed} -> {:fence_worker, seed}
-      :error -> classify_reservation_monitor(state, ref)
+      :error -> classify_runtime_admission_monitor(state, ref)
+    end
+  end
+
+  defp classify_runtime_admission_monitor(state, ref) do
+    state = ensure_runtime_admission_shape(state)
+
+    case Map.get(state.runtime_admission_owner_monitors, ref) do
+      {intent_id, target, owner_pid} ->
+        {:runtime_admission_owner, intent_id, target, owner_pid}
+
+      nil ->
+        case Map.get(state.runtime_admission_worker_monitors, ref) do
+          {intent_id, target, worker_pid} ->
+            {:runtime_admission_worker, intent_id, target, worker_pid}
+
+          nil ->
+            case find_runtime_admission_reconcile_monitor(state, ref) do
+              {:launcher, rec} -> {:runtime_admission_reconcile_launcher, rec}
+              {:worker, rec} -> {:runtime_admission_reconcile_worker, rec}
+              :error -> classify_reservation_monitor(state, ref)
+            end
+        end
     end
   end
 
@@ -3926,6 +4357,17 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     end
   end
 
+  defp runtime_admission_force_ready?(opts) do
+    if Mix.env() == :test do
+      case Keyword.fetch(opts, :runtime_admission_force_ready) do
+        {:ok, value} -> value == true
+        :error -> true
+      end
+    else
+      false
+    end
+  end
+
   # Hot-state upgrade: an upgraded TaskStore process admitting none of the
   # fence fields stays closed until seeded (fail-closed defaults).
   defp ensure_fence_shape(state) do
@@ -3936,6 +4378,668 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     |> Map.put_new(:fence_seed, %{status: :pending})
     |> Map.put_new(:fence_seed_admit_timeout_ms, @default_fence_seed_admit_timeout_ms)
     |> Map.put_new(:fence_seed_worker_timeout_ms, @default_fence_seed_worker_timeout_ms)
+  end
+
+  defp ensure_runtime_admission_shape(state) do
+    state
+    |> Map.put_new(:store_ref, @default_name)
+    |> Map.put_new(:runtime_admission_supervisor, @default_runtime_admission_supervisor)
+    |> Map.put_new(:runtime_admission_ready?, false)
+    |> Map.put_new(:runtime_admission_intents, %{})
+    |> Map.put_new(:runtime_admission_by_id, %{})
+    |> Map.put_new(:runtime_admission_waiters, %{})
+    |> Map.put_new(:runtime_admission_owner_monitors, %{})
+    |> Map.put_new(:runtime_admission_worker_monitors, %{})
+    |> Map.put_new(:runtime_admission_reconcile, %{status: :pending})
+    |> Map.put_new(:max_runtime_admission_intents, @default_max_runtime_admission_intents)
+    |> Map.put_new(
+      :runtime_admission_admit_timeout_ms,
+      @default_runtime_admission_admit_timeout_ms
+    )
+    |> Map.put_new(
+      :runtime_admission_reconcile_timeout_ms,
+      @default_runtime_admission_reconcile_timeout_ms
+    )
+  end
+
+  defp do_admit_ordinary_runtime_start(state, target, fingerprint, validated_opts, from) do
+    intent_count = map_size(state.runtime_admission_intents)
+    max = Map.get(state, :max_runtime_admission_intents, @default_max_runtime_admission_intents)
+    intent_id = mint_runtime_admission_intent_id()
+
+    case IntentCore.admit(
+           state.runtime_admission_intents,
+           state.target_fences,
+           state.target_fence_ready? == true,
+           state.runtime_admission_ready? == true,
+           target,
+           fingerprint,
+           intent_id,
+           intent_count,
+           max
+         ) do
+      {:ok, :joined, intent, intents, _effects} ->
+        state =
+          state
+          |> put_in([:runtime_admission_intents], intents)
+          |> add_runtime_admission_waiter(intent.intent_id, from)
+
+        {:noreply, state}
+
+      {:ok, :admitted, intent, intents, effects} ->
+        state =
+          state
+          |> put_in([:runtime_admission_intents], intents)
+          |> put_in([:runtime_admission_by_id, intent.intent_id], target)
+          |> add_runtime_admission_waiter(intent.intent_id, from)
+
+        state =
+          Enum.reduce(effects, state, fn
+            {:launch_owner, launched}, acc ->
+              launch_runtime_admission_owner(acc, launched, validated_opts)
+
+            _, acc ->
+              acc
+          end)
+
+        {:noreply, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  defp add_runtime_admission_waiter(state, intent_id, from) do
+    waiters = Map.get(state.runtime_admission_waiters, intent_id, [])
+    put_in(state, [:runtime_admission_waiters, intent_id], [from | waiters])
+  end
+
+  defp mint_runtime_admission_intent_id do
+    "rai_" <> Base.url_encode64(:crypto.strong_rand_bytes(16), padding: false)
+  end
+
+  defp launch_runtime_admission_owner(state, intent, validated_opts) do
+    store_ref = Map.get(state, :store_ref, @default_name)
+    supervisor = Map.get(state, :runtime_admission_supervisor, @default_runtime_admission_supervisor)
+    task_supervisor = Map.get(state, :task_supervisor, @default_task_supervisor)
+
+    # Fixed launcher MFA — never captures store pid; uses stable store_ref.
+    _ =
+      spawn(__MODULE__, :runtime_admission_owner_launcher, [
+        store_ref,
+        supervisor,
+        task_supervisor,
+        intent.intent_id,
+        intent.target_agent_id,
+        intent.fingerprint,
+        validated_opts
+      ])
+
+    intents =
+      Map.update!(state.runtime_admission_intents, intent.target_agent_id, fn i ->
+        %{i | phase: :owner_launching}
+      end)
+
+    %{state | runtime_admission_intents: intents}
+  end
+
+  @doc false
+  def runtime_admission_owner_launcher(
+        store_ref,
+        supervisor,
+        task_supervisor,
+        intent_id,
+        target,
+        fingerprint,
+        validated_opts
+      ) do
+    start_opts = [
+      intent_id: intent_id,
+      target_agent_id: target,
+      fingerprint: fingerprint,
+      validated_opts: validated_opts,
+      store_ref: store_ref,
+      task_supervisor: task_supervisor
+    ]
+
+    case RuntimeAdmissionSupervisor.start_owner(start_opts, supervisor) do
+      {:ok, owner_pid} when is_pid(owner_pid) ->
+        send(store_ref, {:runtime_admission_owner_launched, intent_id, owner_pid})
+
+      {:ok, owner_pid, _} when is_pid(owner_pid) ->
+        send(store_ref, {:runtime_admission_owner_launched, intent_id, owner_pid})
+
+      {:error, reason} ->
+        send(store_ref, {:runtime_admission_owner_launch_failed, intent_id, reason})
+
+      other ->
+        send(store_ref, {:runtime_admission_owner_launch_failed, intent_id, other})
+    end
+
+    :ok
+  rescue
+    _ ->
+      send(store_ref, {:runtime_admission_owner_launch_failed, intent_id, :launcher_exception})
+      :ok
+  catch
+    :exit, _ ->
+      send(store_ref, {:runtime_admission_owner_launch_failed, intent_id, :launcher_exit})
+      :ok
+  end
+
+  # Caller-facing settle: only the registered worker may settle.
+  defp authorize_and_settle_runtime_admission(state, target, intent_id, outcome, caller_pid) do
+    intent = Map.get(state.runtime_admission_intents, target)
+
+    cond do
+      not is_map(intent) ->
+        {:error, :not_found, state}
+
+      intent.intent_id != intent_id ->
+        {:error, :conflict, state}
+
+      intent.phase == :terminal ->
+        {:error, :not_found, state}
+
+      intent.worker_pid != caller_pid ->
+        {:error, :not_owner, state}
+
+      true ->
+        {:ok, force_settle_runtime_admission_intent(state, target, intent_id, outcome)}
+    end
+  end
+
+  # Internal TaskStore-owned settlement (owner/worker monitor paths). Not a public API.
+  defp force_settle_runtime_admission_intent(state, target, intent_id, outcome) do
+    state = ensure_runtime_admission_shape(state)
+    intent = Map.get(state.runtime_admission_intents, target)
+
+    cond do
+      not is_map(intent) ->
+        state
+
+      intent.intent_id != intent_id ->
+        state
+
+      intent.phase == :terminal ->
+        state
+
+      true ->
+        reply = settlement_reply(outcome)
+        waiters = Map.get(state.runtime_admission_waiters, intent_id, [])
+        Enum.each(waiters, fn from -> GenServer.reply(from, reply) end)
+
+        if is_pid(intent.owner_pid) and Process.alive?(intent.owner_pid) do
+          Process.exit(intent.owner_pid, :normal)
+        end
+
+        state =
+          case IntentCore.settle(state.runtime_admission_intents, target, intent_id, outcome) do
+            {:ok, _done, intents} ->
+              put_in(state, [:runtime_admission_intents], intents)
+
+            _ ->
+              put_in(
+                state,
+                [:runtime_admission_intents],
+                Map.delete(state.runtime_admission_intents, target)
+              )
+          end
+
+        state
+        |> update_in([:runtime_admission_by_id], &Map.delete(&1, intent_id))
+        |> update_in([:runtime_admission_waiters], &Map.delete(&1, intent_id))
+        |> drop_owner_monitors_for(intent_id)
+        |> drop_worker_monitors_for(intent_id)
+    end
+  end
+
+  defp settlement_reply({:applied, pid}) when is_pid(pid), do: {:ok, pid}
+  defp settlement_reply({:error, reason}), do: {:error, reason}
+  defp settlement_reply({:conflict, reason}), do: {:error, {:conflict, reason}}
+  defp settlement_reply(other), do: {:error, other}
+
+  defp drop_owner_monitors_for(state, intent_id) do
+    mons =
+      state.runtime_admission_owner_monitors
+      |> Enum.reject(fn {_mon, {id, _t, _p}} -> id == intent_id end)
+      |> Map.new()
+
+    %{state | runtime_admission_owner_monitors: mons}
+  end
+
+  defp drop_worker_monitors_for(state, intent_id) do
+    mons =
+      Map.get(state, :runtime_admission_worker_monitors, %{})
+      |> Enum.reject(fn {_mon, {id, _t, _p}} -> id == intent_id end)
+      |> Map.new()
+
+    %{state | runtime_admission_worker_monitors: mons}
+  end
+
+  defp handle_runtime_admission_owner_down(state, mon, intent_id, target) do
+    state = ensure_runtime_admission_shape(state)
+    state = update_in(state, [:runtime_admission_owner_monitors], &Map.delete(&1, mon))
+    intent = Map.get(state.runtime_admission_intents, target)
+
+    if is_map(intent) and intent.intent_id == intent_id and intent.phase != :terminal do
+      classify_or_mark_unknown(state, target, intent)
+    else
+      state
+    end
+  end
+
+  defp handle_runtime_admission_worker_monitor_down(state, mon, intent_id, target, worker_pid) do
+    state = ensure_runtime_admission_shape(state)
+    state = update_in(state, [:runtime_admission_worker_monitors], &Map.delete(&1, mon))
+    intent = Map.get(state.runtime_admission_intents, target)
+
+    # Authentic worker-down only: monitor identity + recorded worker_pid match.
+    if is_map(intent) and intent.intent_id == intent_id and intent.worker_pid == worker_pid and
+         intent.phase != :terminal do
+      classify_or_mark_unknown(state, target, intent)
+    else
+      state
+    end
+  end
+
+  defp classify_or_mark_unknown(state, target, intent) do
+    fact = witness_fact(target, intent.intent_id)
+
+    case IntentCore.classify_unknown_start(intent.intent_id, fact) do
+      :applied ->
+        case Arbor.Agent.BranchSupervisor.whereis(target) do
+          pid when is_pid(pid) ->
+            force_settle_runtime_admission_intent(
+              state,
+              target,
+              intent.intent_id,
+              {:applied, pid}
+            )
+
+          _ ->
+            force_settle_runtime_admission_intent(
+              state,
+              target,
+              intent.intent_id,
+              {:error, :branch_missing_after_witness}
+            )
+        end
+
+      :conflict ->
+        force_settle_runtime_admission_intent(
+          state,
+          target,
+          intent.intent_id,
+          {:conflict, :witness_mismatch}
+        )
+
+      :not_applied ->
+        case IntentCore.mark_outcome_unknown(state.runtime_admission_intents, target) do
+          {:ok, intents} -> put_in(state, [:runtime_admission_intents], intents)
+          _ -> state
+        end
+    end
+  end
+
+  defp witness_fact(target, intent_id) do
+    case Arbor.Agent.BranchSupervisor.ordinary_admission_witness(target) do
+      {:ok, %{intent_id: ^intent_id}} -> {:exact, intent_id}
+      {:ok, %{intent_id: other}} when is_binary(other) -> {:other, other}
+      :none -> :bare
+      :not_running -> :not_running
+      _ -> :bare
+    end
+  end
+
+  # ── Runtime-admission restart reconcile ────────────────────────────
+
+  defp maybe_begin_runtime_admission_reconcile(state) do
+    state = ensure_runtime_admission_shape(state)
+
+    cond do
+      state.runtime_admission_ready? == true ->
+        state
+
+      Map.get(state.runtime_admission_reconcile, :status) in [:admitting, :running] ->
+        state
+
+      true ->
+        begin_runtime_admission_reconcile(state)
+    end
+  end
+
+  defp begin_runtime_admission_reconcile(state) do
+    state = ensure_runtime_admission_shape(state)
+    ref = make_ref()
+    store_ref = Map.get(state, :store_ref, @default_name)
+    supervisor = Map.get(state, :runtime_admission_supervisor, @default_runtime_admission_supervisor)
+    task_supervisor = Map.get(state, :task_supervisor, @default_task_supervisor)
+
+    timeout =
+      Map.get(
+        state,
+        :runtime_admission_reconcile_timeout_ms,
+        @default_runtime_admission_reconcile_timeout_ms
+      )
+
+    timer = Process.send_after(self(), {:runtime_admission_reconcile_timeout, ref}, timeout)
+
+    {launcher_pid, launcher_mon} =
+      spawn_monitor(__MODULE__, :runtime_admission_reconcile_launcher, [
+        store_ref,
+        ref,
+        task_supervisor,
+        supervisor,
+        timeout + 1_000
+      ])
+
+    rec = %{
+      status: :admitting,
+      ref: ref,
+      launcher_pid: launcher_pid,
+      launcher_mon: launcher_mon,
+      worker_pid: nil,
+      worker_mon: nil,
+      timer: timer,
+      attempts: Map.get(state.runtime_admission_reconcile, :attempts, 0)
+    }
+
+    put_in(state, [:runtime_admission_reconcile], rec)
+  end
+
+  @doc false
+  def runtime_admission_reconcile_launcher(store_ref, ref, task_supervisor, owner_supervisor, begin_wait_ms) do
+    case Task.Supervisor.start_child(
+           task_supervisor,
+           __MODULE__,
+           :run_runtime_admission_reconcile_worker,
+           [store_ref, ref, owner_supervisor, begin_wait_ms],
+           []
+         ) do
+      {:ok, worker_pid} when is_pid(worker_pid) ->
+        send(store_ref, {:runtime_admission_reconcile_admitted, ref, worker_pid})
+
+      {:ok, worker_pid, _} when is_pid(worker_pid) ->
+        send(store_ref, {:runtime_admission_reconcile_admitted, ref, worker_pid})
+
+      {:error, reason} ->
+        send(store_ref, {:runtime_admission_reconcile_failed, ref, reason})
+
+      other ->
+        send(store_ref, {:runtime_admission_reconcile_failed, ref, other})
+    end
+
+    :ok
+  rescue
+    _ ->
+      send(store_ref, {:runtime_admission_reconcile_failed, ref, :launcher_exception})
+      :ok
+  catch
+    :exit, _ ->
+      send(store_ref, {:runtime_admission_reconcile_failed, ref, :launcher_exit})
+      :ok
+  end
+
+  @doc false
+  def run_runtime_admission_reconcile_worker(store_ref, ref, owner_supervisor, begin_wait_ms) do
+    receive do
+      {:runtime_admission_reconcile_begin, ^ref} ->
+        result = inventory_runtime_admission_owners(owner_supervisor)
+        send(store_ref, {:runtime_admission_reconcile_complete, ref, result})
+        :ok
+    after
+      begin_wait_ms ->
+        :ok
+    end
+  end
+
+  defp inventory_runtime_admission_owners(owner_supervisor) do
+    case RuntimeAdmissionSupervisor.which_children(owner_supervisor) do
+      {:ok, children} ->
+        snapshots =
+          children
+          |> Enum.flat_map(fn
+            {_id, pid, :worker, _} when is_pid(pid) ->
+              case IntentOwner.snapshot(pid) do
+                {:ok, snap} -> [snap]
+                _ -> []
+              end
+
+            _ ->
+              []
+          end)
+
+        # Repair RuntimeAdmissionRegistry from owner snapshots.
+        repair_runtime_admission_registry(snapshots)
+        {:ok, snapshots}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  rescue
+    _ -> {:error, :inventory_exception}
+  catch
+    :exit, _ -> {:error, :inventory_exit}
+  end
+
+  defp repair_runtime_admission_registry(snapshots) when is_list(snapshots) do
+    registry = Arbor.Agent.RuntimeAdmissionRegistry
+
+    # Drop stale registry keys not present in live owners.
+    live_targets =
+      snapshots
+      |> Enum.map(& &1.target_agent_id)
+      |> MapSet.new()
+
+    try do
+      Registry.select(registry, [
+        {{{:runtime_admission_owner, :"$1"}, :"$2", :"$3"}, [], [{{:"$1", :"$2", :"$3"}}]}
+      ])
+      |> Enum.each(fn {target, pid, _val} ->
+        if not MapSet.member?(live_targets, target) or not Process.alive?(pid) do
+          # Best-effort: cannot unregister other pids; only note absence.
+          :ok
+        end
+      end)
+    rescue
+      _ -> :ok
+    catch
+      :exit, _ -> :ok
+    end
+
+    # Owners already register themselves; inventory is authoritative for TaskStore rebind.
+    :ok
+  end
+
+  defp handle_runtime_admission_reconcile_admitted(state, ref, worker_pid) do
+    state = ensure_runtime_admission_shape(state)
+    rec = state.runtime_admission_reconcile
+
+    if Map.get(rec, :status) == :admitting and Map.get(rec, :ref) == ref do
+      cancel_timer_safe(Map.get(rec, :timer))
+      launcher_mon = Map.get(rec, :launcher_mon)
+      if is_reference(launcher_mon), do: Process.demonitor(launcher_mon, [:flush])
+
+      worker_mon = Process.monitor(worker_pid)
+      send(worker_pid, {:runtime_admission_reconcile_begin, ref})
+
+      timeout =
+        Map.get(
+          state,
+          :runtime_admission_reconcile_timeout_ms,
+          @default_runtime_admission_reconcile_timeout_ms
+        )
+
+      timer = Process.send_after(self(), {:runtime_admission_reconcile_timeout, ref}, timeout)
+
+      put_in(state, [:runtime_admission_reconcile], %{
+        rec
+        | status: :running,
+          launcher_pid: nil,
+          launcher_mon: nil,
+          worker_pid: worker_pid,
+          worker_mon: worker_mon,
+          timer: timer
+      })
+    else
+      state
+    end
+  end
+
+  defp handle_runtime_admission_reconcile_failed(state, ref, _class) do
+    state = ensure_runtime_admission_shape(state)
+    rec = state.runtime_admission_reconcile
+
+    if Map.get(rec, :ref) == ref and Map.get(rec, :status) in [:admitting, :running] do
+      state = cleanup_runtime_admission_reconcile(state, rec)
+      schedule_runtime_admission_reconcile_retry(state)
+    else
+      state
+    end
+  end
+
+  defp handle_runtime_admission_reconcile_timeout(state, ref) do
+    state = ensure_runtime_admission_shape(state)
+    rec = state.runtime_admission_reconcile
+
+    if Map.get(rec, :ref) == ref and Map.get(rec, :status) in [:admitting, :running] do
+      worker_pid = Map.get(rec, :worker_pid)
+      if is_pid(worker_pid) and Process.alive?(worker_pid), do: Process.exit(worker_pid, :kill)
+      launcher_pid = Map.get(rec, :launcher_pid)
+      if is_pid(launcher_pid) and Process.alive?(launcher_pid), do: Process.exit(launcher_pid, :kill)
+      state = cleanup_runtime_admission_reconcile(state, rec)
+      schedule_runtime_admission_reconcile_retry(state)
+    else
+      state
+    end
+  end
+
+  defp handle_runtime_admission_reconcile_complete(state, ref, result) do
+    state = ensure_runtime_admission_shape(state)
+    rec = state.runtime_admission_reconcile
+
+    if Map.get(rec, :ref) == ref and Map.get(rec, :status) == :running do
+      state = cleanup_runtime_admission_reconcile(state, rec)
+
+      case result do
+        {:ok, snapshots} when is_list(snapshots) ->
+          case IntentCore.rebind_owners(%{}, snapshots) do
+            {:ok, intents} ->
+              by_id =
+                Enum.reduce(intents, %{}, fn {target, intent}, acc ->
+                  Map.put(acc, intent.intent_id, target)
+                end)
+
+              # Monitor rebound owners.
+              {state, mon_map} =
+                Enum.reduce(intents, {state, %{}}, fn {_t, intent}, {st, mons} ->
+                  if is_pid(intent.owner_pid) and Process.alive?(intent.owner_pid) do
+                    mon = Process.monitor(intent.owner_pid)
+
+                    {st,
+                     Map.put(mons, mon, {intent.intent_id, intent.target_agent_id, intent.owner_pid})}
+                  else
+                    {st, mons}
+                  end
+                end)
+
+              %{
+                state
+                | runtime_admission_intents: intents,
+                  runtime_admission_by_id: by_id,
+                  runtime_admission_owner_monitors: mon_map,
+                  runtime_admission_ready?: true,
+                  runtime_admission_reconcile: %{
+                    status: :done,
+                    last_error: nil
+                  }
+              }
+
+            {:error, reason}
+            when reason in [
+                   :invalid_snapshot,
+                   :duplicate_target,
+                   :duplicate_intent_id,
+                   :inventory_overflow,
+                   :invalid_inventory
+                 ] ->
+              # Fail closed: do not mark ready; surface bounded error for diagnostics.
+              state =
+                put_in(state, [:runtime_admission_reconcile], %{
+                  status: :pending,
+                  attempts: Map.get(rec, :attempts, 0),
+                  last_error: reason
+                })
+
+              schedule_runtime_admission_reconcile_retry(state)
+          end
+
+        _ ->
+          schedule_runtime_admission_reconcile_retry(state)
+      end
+    else
+      state
+    end
+  end
+
+  defp handle_runtime_admission_reconcile_launcher_down(state, rec) do
+    if Map.get(rec, :status) == :admitting do
+      state = cleanup_runtime_admission_reconcile(state, rec)
+      schedule_runtime_admission_reconcile_retry(state)
+    else
+      state
+    end
+  end
+
+  defp handle_runtime_admission_reconcile_worker_down(state, rec) do
+    if Map.get(rec, :status) == :running do
+      state = cleanup_runtime_admission_reconcile(state, rec)
+      schedule_runtime_admission_reconcile_retry(state)
+    else
+      state
+    end
+  end
+
+  defp cleanup_runtime_admission_reconcile(state, rec) do
+    cancel_timer_safe(Map.get(rec, :timer))
+    if is_reference(Map.get(rec, :launcher_mon)), do: Process.demonitor(rec.launcher_mon, [:flush])
+    if is_reference(Map.get(rec, :worker_mon)), do: Process.demonitor(rec.worker_mon, [:flush])
+
+    put_in(state, [:runtime_admission_reconcile], %{
+      status: :pending,
+      attempts: Map.get(rec, :attempts, 0)
+    })
+  end
+
+  defp schedule_runtime_admission_reconcile_retry(state) do
+    state = ensure_runtime_admission_shape(state)
+
+    if state.runtime_admission_ready? == true do
+      state
+    else
+      attempts = Map.get(state.runtime_admission_reconcile, :attempts, 0) + 1
+      delay = min(5_000, 200 * Integer.pow(2, max(attempts - 1, 0)))
+      Process.send_after(self(), :retry_runtime_admission_reconcile_msg, delay)
+      put_in(state, [:runtime_admission_reconcile, :attempts], attempts)
+    end
+  end
+
+  defp find_runtime_admission_reconcile_monitor(state, ref) when is_reference(ref) do
+    rec = Map.get(state, :runtime_admission_reconcile, %{status: :pending})
+    launcher_mon = Map.get(rec, :launcher_mon)
+    worker_mon = Map.get(rec, :worker_mon)
+
+    cond do
+      is_reference(launcher_mon) and launcher_mon == ref and rec.status == :admitting ->
+        {:launcher, rec}
+
+      is_reference(worker_mon) and worker_mon == ref and rec.status == :running ->
+        {:worker, rec}
+
+      true ->
+        :error
+    end
   end
 
   # Bounded valid UTF-8 identifiers before regex or map insertion. Matches the
@@ -3979,16 +5083,26 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   defp validate_fence_operation_id(_), do: {:error, :invalid_operation_id}
 
   # Barrier counts are bounded integers ONLY: active includes running and
-  # waiting_approval tasks; reserved counts target-bound reservations. Never
-  # task ids, tokens, PIDs, capability ids, or records.
+  # waiting_approval tasks plus non-terminal runtime-admission intents; reserved
+  # counts target-bound reservations. Never task ids, tokens, PIDs, capability
+  # ids, or records.
   defp barrier_counts(state, target) do
-    active_count =
+    state = ensure_runtime_admission_shape(state)
+
+    task_active =
       state
       |> Map.get(:tasks, %{})
       |> Enum.count(fn {_id, rec} ->
         Map.get(rec, :agent_id) == target and
           Map.get(rec, :state) in [:running, :waiting_approval]
       end)
+
+    intent_active =
+      if IntentCore.non_idle?(Map.get(state, :runtime_admission_intents, %{}), target),
+        do: 1,
+        else: 0
+
+    active_count = task_active + intent_active
 
     reserved_count =
       state

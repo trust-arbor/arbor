@@ -259,15 +259,84 @@ defmodule Arbor.Agent.Lifecycle do
   After the supervisor confirms all children are up, registers the agent in
   Agent.Registry with all child PIDs as metadata.
 
-  Idempotent — calling twice for the same agent returns the existing supervisor.
+  Ordinary starts are linearized through the runtime-admission intent primitive
+  (Phase 4C C3C1a0): no early whereis, authority mutation, or direct branch
+  start occurs outside that path. Concurrent exact-fingerprint callers join;
+  incompatible opts conflict.
   """
   @spec start(String.t(), keyword()) :: {:ok, pid()} | {:error, term()}
   def start(agent_id, opts \\ []) do
+    Arbor.Agent.RuntimeAdmission.OrdinaryStart.request(agent_id, opts)
+  end
+
+  @doc """
+  Execute ordinary start effects after TaskStore has bound this caller as worker.
+
+  Fixed internal entry for `OrdinaryStartWorker` only (arity-3, no default).
+  Before ANY restore, authority mutation, or branch effect, authenticates the
+  current process against TaskStore's exact bound worker for
+  target+intent_id+fingerprint via the stable store_ref. A map witness alone
+  is not authority — only bounded scalar fields are accepted for BranchSupervisor
+  registration after authentication succeeds.
+  """
+  @spec ordinary_start_effects(String.t(), keyword(), map()) ::
+          {:ok, pid()} | {:error, term()}
+  def ordinary_start_effects(agent_id, opts, witness)
+      when is_binary(agent_id) and is_list(opts) and is_map(witness) do
+    with {:ok, intent_id, fingerprint, store_ref, branch_witness} <-
+           validate_ordinary_admission_witness(witness),
+         :ok <-
+           Arbor.Agent.Orchestration.TaskStore.authenticate_runtime_admission_worker(
+             agent_id,
+             intent_id,
+             fingerprint,
+             name: store_ref
+           ) do
+      do_ordinary_start_effects(agent_id, opts, branch_witness)
+    end
+  end
+
+  defp validate_ordinary_admission_witness(witness) when is_map(witness) do
+    intent_id = Map.get(witness, :intent_id) || Map.get(witness, "intent_id")
+    fingerprint = Map.get(witness, :fingerprint) || Map.get(witness, "fingerprint")
+    store_ref = Map.get(witness, :store_ref) || Map.get(witness, "store_ref")
+    kind = Map.get(witness, :kind) || Map.get(witness, "kind")
+    v = Map.get(witness, :v) || Map.get(witness, "v")
+
+    cond do
+      not is_binary(intent_id) or not is_binary(fingerprint) ->
+        {:error, :invalid_ordinary_admission_witness}
+
+      kind not in [:ordinary_start, "ordinary_start"] ->
+        {:error, :invalid_ordinary_admission_witness}
+
+      v not in [1, "1"] ->
+        {:error, :invalid_ordinary_admission_witness}
+
+      not (is_atom(store_ref) or is_pid(store_ref) or is_tuple(store_ref)) ->
+        # Stable registered name (atom) is the production path; via tuples allowed.
+        # Never accept nil — would default to global store incorrectly for tests.
+        {:error, :invalid_ordinary_admission_witness}
+
+      true ->
+        # Bounded scalar witness only for BranchSupervisor Registry value.
+        branch_witness = %{
+          v: 1,
+          kind: :ordinary_start,
+          intent_id: intent_id,
+          fingerprint: fingerprint
+        }
+
+        {:ok, intent_id, fingerprint, store_ref, branch_witness}
+    end
+  end
+
+  defp do_ordinary_start_effects(agent_id, opts, branch_witness) do
     case restore(agent_id) do
       {:ok, profile} ->
         case prepare_and_activate_authority(profile) do
           {:ok, prepared_profile, policy_mode} ->
-            result = start_activated_profile(prepared_profile, opts)
+            result = start_activated_profile(prepared_profile, opts, branch_witness)
 
             case {result, policy_mode} do
               {{:error, _} = error, {:exact, _envelope}} ->
@@ -286,21 +355,21 @@ defmodule Arbor.Agent.Lifecycle do
     end
   end
 
-  defp start_activated_profile(profile, opts) do
+  defp start_activated_profile(profile, opts, witness) do
     agent_id = profile.agent_id
 
-    # Idempotent process start, but authority was validated and reconciled first.
+    # Post-admission idempotent observation only (never before TaskStore admit).
     case BranchSupervisor.whereis(agent_id) do
       pid when is_pid(pid) ->
         ensure_registered(agent_id, pid, opts)
         {:ok, pid}
 
       nil ->
-        do_start(profile, opts)
+        do_start(profile, opts, witness)
     end
   end
 
-  defp do_start(profile, opts) do
+  defp do_start(profile, opts, witness) do
     agent_id = profile.agent_id
     start_session = Keyword.get(opts, :start_session, true)
 
@@ -315,7 +384,7 @@ defmodule Arbor.Agent.Lifecycle do
       # Build child opts for the BranchSupervisor. The private key is scoped to
       # issue_branch_authority_bootstraps/1 and never crosses this boundary.
       host_opts = build_host_opts(agent_id, profile, opts)
-      executor_opts = build_executor_opts(agent_id, profile, opts)
+      executor_opts = build_closed_executor_opts(agent_id, profile, opts)
 
       # One authoritative session/heartbeat decision drives both authority
       # bootstrap issuance (above) and branch child opts. start_session: false
@@ -350,7 +419,8 @@ defmodule Arbor.Agent.Lifecycle do
         session_opts: session_opts,
         heartbeat_opts: heartbeat_opts,
         authority_bootstraps: bootstraps,
-        start_session: session_enabled
+        start_session: session_enabled,
+        ordinary_admission_witness: witness
       ]
 
       # Start the branch supervisor under the global DynamicSupervisor
@@ -698,13 +768,22 @@ defmodule Arbor.Agent.Lifecycle do
     ]
   end
 
-  # Build opts for the Executor child
-  defp build_executor_opts(agent_id, profile, opts) do
-    Keyword.merge(opts,
+  # Closed Executor keyword for ordinary runtime admission — no open Keyword.merge.
+  defp build_closed_executor_opts(agent_id, profile, opts) do
+    [
       agent_id: agent_id,
       sandbox_level: resolve_agent_sandbox_level(profile, opts)
-    )
+    ]
+    |> maybe_put_closed(:model, Keyword.get(opts, :model))
+    |> maybe_put_closed(:provider, Keyword.get(opts, :provider))
+    |> maybe_put_closed(:runtime, Keyword.get(opts, :runtime))
+    |> maybe_put_closed(:tools, Keyword.get(opts, :tools))
+    |> maybe_put_closed(:tenant_context, Keyword.get(opts, :tenant_context))
+    |> maybe_put_closed(:principal_id, Keyword.get(opts, :principal_id))
   end
+
+  defp maybe_put_closed(kw, _key, nil), do: kw
+  defp maybe_put_closed(kw, key, value), do: Keyword.put(kw, key, value)
 
   # Build session opts for the BranchSupervisor (or nil to skip session).
   defp build_branch_session_opts(agent_id, profile, opts, session_bootstrap) do

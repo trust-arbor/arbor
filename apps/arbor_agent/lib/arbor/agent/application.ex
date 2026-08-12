@@ -21,6 +21,10 @@ defmodule Arbor.Agent.Application do
           {Registry, keys: :unique, name: Arbor.Agent.MonitorLoopRegistry},
           {Registry, keys: :unique, name: Arbor.Agent.ActionCycleRegistry},
           {Registry, keys: :unique, name: Arbor.Agent.MaintenanceRegistry},
+          # Runtime-admission intent owners (Phase 4C C3C1a0). Registry + supervisor
+          # must start before TaskStore so restart inventory can rebind live owners.
+          {Registry, keys: :unique, name: Arbor.Agent.RuntimeAdmissionRegistry},
+          Arbor.Agent.RuntimeAdmission.Supervisor,
           # Profile store (must start before lifecycle operations)
           Supervisor.child_spec(
             {Arbor.Persistence.BufferedStore,

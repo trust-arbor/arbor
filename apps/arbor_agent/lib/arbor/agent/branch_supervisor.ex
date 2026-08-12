@@ -43,7 +43,8 @@ defmodule Arbor.Agent.BranchSupervisor do
   @spec start_link(keyword()) :: Supervisor.on_start()
   def start_link(opts) do
     agent_id = Keyword.fetch!(opts, :agent_id)
-    name = via(agent_id)
+    witness = Keyword.get(opts, :ordinary_admission_witness)
+    name = via(agent_id, witness)
     Supervisor.start_link(__MODULE__, opts, name: name)
   end
 
@@ -57,6 +58,29 @@ defmodule Arbor.Agent.BranchSupervisor do
       [] -> nil
     end
   end
+
+  @doc """
+  Read the ordinary-admission witness from the BranchSupervisor Registry value.
+
+  BranchSupervisor is a Supervisor — do not GenServer.call it. The witness is
+  the registration value on `{:branch, agent_id}` in ExecutorRegistry.
+  """
+  @spec ordinary_admission_witness(String.t()) ::
+          {:ok, map()} | :none | :not_running
+  def ordinary_admission_witness(agent_id) when is_binary(agent_id) do
+    case Registry.lookup(Arbor.Agent.ExecutorRegistry, {:branch, agent_id}) do
+      [{_pid, %{v: 1, kind: :ordinary_start, intent_id: id} = w}] when is_binary(id) ->
+        {:ok, w}
+
+      [{_pid, _other}] ->
+        :none
+
+      [] ->
+        :not_running
+    end
+  end
+
+  def ordinary_admission_witness(_), do: :not_running
 
   @doc """
   Get the PIDs of all child processes for an agent.
@@ -228,9 +252,33 @@ defmodule Arbor.Agent.BranchSupervisor do
     end
   end
 
-  defp via(agent_id) do
-    {:via, Registry, {Arbor.Agent.ExecutorRegistry, {:branch, agent_id}}}
+  defp via(agent_id, witness) do
+    value = normalize_witness_value(witness)
+    {:via, Registry, {Arbor.Agent.ExecutorRegistry, {:branch, agent_id}, value}}
   end
+
+  defp normalize_witness_value(%{v: 1, kind: :ordinary_start, intent_id: id} = w)
+       when is_binary(id) do
+    # Bounded keys only — never bootstrap handles or full opts.
+    %{
+      v: 1,
+      kind: :ordinary_start,
+      intent_id: id,
+      fingerprint: Map.get(w, :fingerprint)
+    }
+  end
+
+  defp normalize_witness_value(%{"v" => 1, "kind" => "ordinary_start", "intent_id" => id} = w)
+       when is_binary(id) do
+    %{
+      v: 1,
+      kind: :ordinary_start,
+      intent_id: id,
+      fingerprint: Map.get(w, "fingerprint")
+    }
+  end
+
+  defp normalize_witness_value(_), do: nil
 end
 
 defmodule Arbor.Agent.BranchSupervisor.BootstrapCleanup do
