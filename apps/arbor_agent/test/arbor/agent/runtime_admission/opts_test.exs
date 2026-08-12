@@ -161,8 +161,8 @@ defmodule Arbor.Agent.RuntimeAdmission.OptsTest do
     assert {:error, :invalid_start_opts} =
              Opts.project(
                model_config: %{
-                 model: "from_atom",
                  "model" => "from_string",
+                 model: "from_atom",
                  provider: :openrouter
                }
              )
@@ -170,23 +170,23 @@ defmodule Arbor.Agent.RuntimeAdmission.OptsTest do
     assert {:error, :invalid_start_opts} =
              Opts.project(
                fallback_chain: [
-                 %{provider: "ollama", "provider" => "other", model: "kimi"}
+                 %{"provider" => "other", provider: "ollama", model: "kimi"}
                ]
              )
 
     assert {:error, :invalid_start_opts} =
              Opts.project(
                provider_options: %{
-                 temperature: 0.1,
-                 "temperature" => 0.9
+                 "temperature" => 0.9,
+                 temperature: 0.1
                }
              )
 
     assert {:error, :invalid_start_opts} =
              Opts.project(
                tenant_context: %{
-                 principal_id: "human_a",
-                 "principal_id" => "human_b"
+                 "principal_id" => "human_b",
+                 principal_id: "human_a"
                }
              )
   end
@@ -207,8 +207,8 @@ defmodule Arbor.Agent.RuntimeAdmission.OptsTest do
     assert {:ok, r} =
              Opts.project(
                provider_options: %{
-                 foo: "bar",
-                 "nested" => %{flag: true}
+                 "nested" => %{flag: true},
+                 foo: "bar"
                }
              )
 

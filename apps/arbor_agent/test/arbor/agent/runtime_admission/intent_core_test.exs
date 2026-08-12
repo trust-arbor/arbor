@@ -64,14 +64,19 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentCoreTest do
 
     worker = spawn(fn -> :ok end)
 
-    # Not yet owner_live
+    # Pre-adoption (owner_pid nil / phase :admitted) is conflict, never not_owner.
     assert {:error, :conflict} =
              IntentCore.bind_worker(intents, @target, "rai_1", @fp_a, self(), worker)
+
+    launching = put_in(intents, [@target, :phase], :owner_launching)
+
+    assert {:error, :conflict} =
+             IntentCore.bind_worker(launching, @target, "rai_1", @fp_a, self(), worker)
 
     {:ok, :adopted, _, live} =
       IntentCore.adopt_owner(intents, %{}, true, true, @target, "rai_1", @fp_a, self())
 
-    # Foreign owner cannot bind
+    # Foreign owner cannot bind against a live adopted owner.
     foreign = spawn(fn -> :ok end)
 
     assert {:error, :not_owner} =

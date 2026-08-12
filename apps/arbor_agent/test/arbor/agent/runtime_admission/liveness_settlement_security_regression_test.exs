@@ -3,8 +3,16 @@ defmodule Arbor.Agent.RuntimeAdmission.LivenessSettlementSecurityRegressionTest 
   Phase 4C C3C1a0 liveness/settlement security regressions.
 
   Uses only checkpoint-existing public/OTP boundaries (TaskStore, IntentOwner,
-  Registry, :sys, OrdinaryStartWorker hold message). Compiles on checkpoint
-  8118a8fa7 and fails there behaviorally for barrier/retirement defects.
+  Registry, :sys, Process.info mailbox, OrdinaryStartWorker hold message).
+
+  Mode A: production IntentOwner + OrdinaryStartWorker hold.
+  Mode B: controlled trap-exit owner + controlled exact worker. Missing-intent
+  adopt is a **test-only** use of existing reconciliation/rebind-shaped
+  `adopt_owner` nil-branch behavior — not a new production admission path.
+  Production admission remains admit → launch owner → adopt.
+
+  Compiles on checkpoint 8118a8fa77 and fails there behaviorally for
+  barrier/retirement defects; passes on the settlement-barrier candidate.
   """
 
   use ExUnit.Case, async: false
@@ -13,7 +21,6 @@ defmodule Arbor.Agent.RuntimeAdmission.LivenessSettlementSecurityRegressionTest 
   @moduletag :fast
 
   alias Arbor.Agent.Orchestration.{TaskControlRecoveryMemory, TaskStore}
-  alias Arbor.Agent.RuntimeAdmission.IntentCore
   alias Arbor.Agent.RuntimeAdmission.IntentOwner
   alias Arbor.Agent.RuntimeAdmission.Opts
   alias Arbor.Agent.RuntimeAdmission.Supervisor, as: RASupervisor
@@ -31,16 +38,18 @@ defmodule Arbor.Agent.RuntimeAdmission.LivenessSettlementSecurityRegressionTest 
     task_sup = start_supervised!({Task.Supervisor, name: unique_name(:task_sup)})
     store = unique_name(:store)
 
-    start_supervised!(
-      {TaskStore,
-       name: store,
-       task_supervisor: task_sup,
-       runtime_admission_supervisor: ra_sup,
-       runtime_admission_force_ready: true,
-       runtime_admission_settle_timeout_ms: 80,
-       fence_force_ready: true,
-       recovery_force_ready: true}
-    )
+    start_supervised!({
+      TaskStore,
+      # Long enough for R7 intermediate barrier observation; R8 injects the
+      # exact timeout message under suspension rather than racing this timer.
+      name: store,
+      task_supervisor: task_sup,
+      runtime_admission_supervisor: ra_sup,
+      runtime_admission_force_ready: true,
+      runtime_admission_settle_timeout_ms: 30_000,
+      fence_force_ready: true,
+      recovery_force_ready: true
+    })
 
     Application.put_env(:arbor_agent, :runtime_admission_test_hold, %{timeout_ms: 30_000})
     on_exit(fn -> Application.delete_env(:arbor_agent, :runtime_admission_test_hold) end)
@@ -50,13 +59,12 @@ defmodule Arbor.Agent.RuntimeAdmission.LivenessSettlementSecurityRegressionTest 
 
   test "security regression R1: external :normal does not retire owner; :kill unregisters",
        %{store: store} do
-    {agent_id, fp, kw, _parent} = start_held_admit(store)
+    {agent_id, fp, kw, _parent} = start_held_admit(store, :admit_first)
     {owner_pid, _intent_id, ^fp} = await_exact_live_owner(agent_id, fp)
     worker_pid = await_bound_worker(store, agent_id)
 
     Process.exit(owner_pid, :normal)
-    Process.sleep(30)
-    assert Process.alive?(owner_pid)
+    await_until(fn -> Process.alive?(owner_pid) end, 1_000)
     assert [{^owner_pid, _}] = Registry.lookup(@registry, {:runtime_admission_owner, agent_id})
 
     Process.exit(owner_pid, :kill)
@@ -67,62 +75,64 @@ defmodule Arbor.Agent.RuntimeAdmission.LivenessSettlementSecurityRegressionTest 
       2_000
     )
 
-    # Release any residual held worker so owner-DOWN paths can complete.
     if Process.alive?(worker_pid), do: Process.exit(worker_pid, :kill)
-    _ = flush_admit()
 
-    result =
-      TaskStore.admit_ordinary_runtime_start(agent_id, fp, kw, name: store, timeout: 15_000)
+    first = assert_receive_admit(:admit_first, 15_000)
+    # Owner-down with held/killed worker, no branch → exact worker_down.
+    assert first == {:error, :worker_down}
 
-    # Second same-target start must not sticky-fail on zombie Registry owner.
-    refute match?({:error, :target_owner_taken}, result)
+    # Second same-target start: async so the test process never blocks on a held worker.
+    spawn_admit(store, agent_id, fp, kw, :admit_second)
+    {_owner2, _id2, ^fp} = await_exact_live_owner(agent_id, fp)
+    worker2 = await_bound_worker(store, agent_id)
+
+    release_worker_hold(worker2)
+    second = assert_receive_admit(:admit_second, 15_000)
+    refute second == {:error, :target_owner_taken}
+    # Clean held-then-released start without profile → exact not_found.
+    assert second == {:error, :not_found}
   end
 
   test "security regression R2: after full finalize second same-target start converges", %{
     store: store
   } do
-    {agent_id, fp, kw, _parent} = start_held_admit(store)
+    {agent_id, fp, kw, _parent} = start_held_admit(store, :admit_first)
     {owner_pid, _intent_id, ^fp} = await_exact_live_owner(agent_id, fp)
     worker_pid = await_bound_worker(store, agent_id)
 
-    # Deterministic finalize: release hold so worker settles, then retire owner.
-    :sys.suspend(owner_pid)
     release_worker_hold(worker_pid)
-    await_settling_barrier(store, agent_id)
-    :sys.resume(owner_pid)
-    if Process.alive?(owner_pid), do: Process.exit(owner_pid, :shutdown)
+    first = assert_receive_admit(:admit_first, 15_000)
+    assert first == {:error, :not_found}
 
-    first = flush_admit()
-    assert match?({:ok, _}, first) or match?({:error, _}, first)
-    await_until(fn -> fence_active_count(store, agent_id) == 0 end, 5_000)
+    await_until(fn -> is_nil(store_intent(store, agent_id)) end, 5_000)
 
     await_until(
       fn -> Registry.lookup(@registry, {:runtime_admission_owner, agent_id}) == [] end,
       2_000
     )
 
-    second =
-      TaskStore.admit_ordinary_runtime_start(agent_id, fp, kw, name: store, timeout: 15_000)
+    if Process.alive?(owner_pid), do: Process.exit(owner_pid, :kill)
 
-    refute match?({:error, :target_owner_taken}, second)
-    assert match?({:ok, _}, second) or match?({:error, _}, second)
+    spawn_admit(store, agent_id, fp, kw, :admit_second)
+    {_owner2, _id2, ^fp} = await_exact_live_owner(agent_id, fp)
+    worker2 = await_bound_worker(store, agent_id)
+    release_worker_hold(worker2)
+
+    second = assert_receive_admit(:admit_second, 15_000)
+    refute second == {:error, :target_owner_taken}
+    assert second == {:error, :not_found}
   end
 
   test "security regression R3: unrelated bind failures are not collision-retried", %{
     store: store
   } do
-    {agent_id, fp, _kw, _parent} = start_held_admit(store)
+    {agent_id, fp, _kw, _parent} = start_held_admit(store, :admit)
     {_owner_pid, intent_id, fingerprint} = await_exact_live_owner(agent_id, fp)
     _worker = await_bound_worker(store, agent_id)
 
-    # Closed allowlist: bind auth errors never retry (unit + live deny).
-    refute IntentCore.retryable_launch_failure?(:not_owner)
-    refute IntentCore.retryable_launch_failure?(:conflict)
-    refute IntentCore.retryable_launch_failure?({:bind_failed, :not_owner})
-
     foreign = spawn(fn -> Process.sleep(30_000) end)
 
-    assert {:error, reason} =
+    assert {:error, :not_owner} =
              TaskStore.bind_runtime_admission_worker(
                agent_id,
                intent_id,
@@ -131,65 +141,69 @@ defmodule Arbor.Agent.RuntimeAdmission.LivenessSettlementSecurityRegressionTest 
                name: store
              )
 
-    assert reason in [:not_owner, :conflict, :not_found]
-    # Intent remains live under hold — foreign bind did not "succeed via retry".
-    assert fence_active_count(store, agent_id) >= 1
+    assert is_map(store_intent(store, agent_id))
     refute_receive {:admit, _}, 100
   end
 
   test "security regression R4: owner death with held worker releases waiters (no permanent park)",
        %{store: store} do
-    {agent_id, fp, _kw, _parent} = start_held_admit(store)
+    {agent_id, fp, _kw, _parent} = start_held_admit(store, :admit)
     {owner_pid, _intent_id, ^fp} = await_exact_live_owner(agent_id, fp)
     worker_pid = await_bound_worker(store, agent_id)
 
     Process.exit(owner_pid, :kill)
     await_until(fn -> not Process.alive?(owner_pid) end, 2_000)
 
-    # Deterministic: wait for await_worker_down (or idle after full finalize).
-    await_until(
-      fn ->
-        case store_intent(store, agent_id) do
-          nil -> true
-          %{retire_barrier: :await_worker_down} -> true
-          %{phase: :settling} -> true
-          _ -> false
-        end
-      end,
-      5_000
-    )
+    # Held-worker owner DOWN is only await_worker_down or already finalized.
+    # The store_intent snapshot itself proves intermediate-before-terminal; do
+    # not insert a timing-based refute_receive after the read (terminal may
+    # already be in the test mailbox).
+    intermediate =
+      await_until(
+        fn ->
+          case store_intent(store, agent_id) do
+            nil -> :finalized
+            %{retire_barrier: :await_worker_down} = intent -> {:barrier, intent}
+            _ -> false
+          end
+        end,
+        5_000
+      )
 
-    # Complete worker barrier if still held.
-    if Process.alive?(worker_pid), do: Process.exit(worker_pid, :kill)
+    case intermediate do
+      :finalized ->
+        :ok
 
-    assert_receive {:admit, result}, 15_000
-    assert match?({:error, _}, result) or match?({:ok, _}, result)
-    await_until(fn -> fence_active_count(store, agent_id) == 0 end, 5_000)
+      {:barrier, _intent} ->
+        if Process.alive?(worker_pid), do: Process.exit(worker_pid, :kill)
+    end
+
+    assert_receive {:admit, {:error, :worker_down}}, 15_000
+    await_until(fn -> is_nil(store_intent(store, agent_id)) end, 5_000)
   end
 
   test "security regression R5: worker death releases waiters with typed terminal", %{
     store: store
   } do
-    {agent_id, fp, _kw, _parent} = start_held_admit(store)
+    {agent_id, fp, _kw, _parent} = start_held_admit(store, :admit)
     {_owner_pid, _intent_id, ^fp} = await_exact_live_owner(agent_id, fp)
     worker_pid = await_bound_worker(store, agent_id)
 
     Process.exit(worker_pid, :kill)
 
-    # Without a branch witness, live worker DOWN classifies to :worker_down.
     assert_receive {:admit, {:error, :worker_down}}, 15_000
-    await_until(fn -> fence_active_count(store, agent_id) == 0 end, 5_000)
+    await_until(fn -> is_nil(store_intent(store, agent_id)) end, 5_000)
   end
 
   test "security regression R6: exact live triple for foreign deny", %{store: store} do
-    {agent_id, fp, _kw, _parent} = start_held_admit(store)
+    {agent_id, fp, _kw, _parent} = start_held_admit(store, :admit)
     {_owner_pid, intent_id, fingerprint} = await_exact_live_owner(agent_id, fp)
     assert fingerprint == fp
     _worker = await_bound_worker(store, agent_id)
 
     foreign = spawn(fn -> Process.sleep(10_000) end)
 
-    assert {:error, reason} =
+    assert {:error, :not_owner} =
              TaskStore.bind_runtime_admission_worker(
                agent_id,
                intent_id,
@@ -198,9 +212,7 @@ defmodule Arbor.Agent.RuntimeAdmission.LivenessSettlementSecurityRegressionTest 
                name: store
              )
 
-    assert reason in [:not_owner, :conflict, :not_found]
-
-    assert {:error, settle_reason} =
+    assert {:error, :not_owner} =
              TaskStore.settle_runtime_admission(
                agent_id,
                intent_id,
@@ -208,100 +220,189 @@ defmodule Arbor.Agent.RuntimeAdmission.LivenessSettlementSecurityRegressionTest 
                name: store
              )
 
-    assert settle_reason in [:not_owner, :conflict, :not_found]
     refute_receive {:admit, _}, 100
   end
 
   test "security regression R7 crash-window: settling+await_owner_down unreplied until owner DOWN",
        %{store: store} do
-    {agent_id, fp, _kw, _parent} = start_held_admit(store)
-    {owner_pid, intent_id, ^fp} = await_exact_live_owner(agent_id, fp)
-    worker_pid = await_bound_worker(store, agent_id)
+    %{
+      agent_id: agent_id,
+      intent_id: intent_id,
+      owner_pid: owner_pid,
+      worker_pid: worker_pid
+    } = start_mode_b(store)
 
-    # Suspend owner so settle cannot complete owner DOWN while we observe barrier.
-    :sys.suspend(owner_pid)
-    release_worker_hold(worker_pid)
+    assert :ok =
+             command_worker_settle(worker_pid, store, agent_id, intent_id, {:error, :r7_terminal})
 
-    # Worker settles → request terminal → :settling + :await_owner_down.
     intent = await_settling_barrier(store, agent_id)
     assert intent.intent_id == intent_id
     assert intent.phase == :settling
     assert intent.retire_barrier == :await_owner_down
-    assert Map.has_key?(intent, :terminal)
-    assert fence_active_count(store, agent_id) >= 1
+    assert intent.terminal == {:error, :r7_terminal}
+    assert is_map(store_intent(store, agent_id))
     refute_receive {:admit, _}, 200
+    assert Process.alive?(owner_pid)
 
-    :sys.resume(owner_pid)
-    if Process.alive?(owner_pid), do: Process.exit(owner_pid, :kill)
+    # Only R7 completes via explicit authentic owner kill.
+    Process.exit(owner_pid, :kill)
 
-    # Waiter receives the exact terminal committed at begin_settling.
-    terminal = intent.terminal
-    expected = settlement_waiter_reply(terminal)
-    assert_receive {:admit, ^expected}, 15_000
-    await_until(fn -> fence_active_count(store, agent_id) == 0 end, 5_000)
+    assert_receive {:admit, {:error, :r7_terminal}}, 15_000
+    await_until(fn -> is_nil(store_intent(store, agent_id)) end, 5_000)
   end
 
   test "security regression R8: settle timeout does not finalize without owner DOWN", %{
     store: store
   } do
-    {agent_id, fp, _kw, _parent} = start_held_admit(store)
-    {owner_pid, _intent_id, ^fp} = await_exact_live_owner(agent_id, fp)
-    worker_pid = await_bound_worker(store, agent_id)
+    %{
+      agent_id: agent_id,
+      intent_id: intent_id,
+      owner_pid: owner_pid,
+      worker_pid: worker_pid
+    } = start_mode_b(store)
 
-    :sys.suspend(owner_pid)
-    release_worker_hold(worker_pid)
+    assert :ok =
+             command_worker_settle(
+               worker_pid,
+               store,
+               agent_id,
+               intent_id,
+               {:error, :r8_terminal}
+             )
+
     intent = await_settling_barrier(store, agent_id)
     assert intent.phase == :settling
     assert intent.retire_barrier == :await_owner_down
-
-    # Timer (80ms) may escalate :kill but must not finalize without DOWN handling.
-    Process.sleep(200)
+    assert intent.terminal == {:error, :r8_terminal}
     refute_receive {:admit, _}, 100
-    still = store_intent(store, agent_id)
-    assert is_map(still)
-    assert still.phase == :settling
 
-    if Process.alive?(owner_pid) do
-      :sys.resume(owner_pid)
-      Process.exit(owner_pid, :kill)
-    end
-
-    assert_receive {:admit, _}, 15_000
-  end
-
-  test "security regression R9 settle-first: late exact worker terminal after owner DOWN",
-       %{store: store} do
-    {agent_id, fp, _kw, _parent} = start_held_admit(store)
-    {owner_pid, intent_id, ^fp} = await_exact_live_owner(agent_id, fp)
-    worker_pid = await_bound_worker(store, agent_id)
     store_pid = Process.whereis(store)
     assert is_pid(store_pid)
 
-    # Let worker authenticate (store live), then pause store while worker is in
-    # Lifecycle restore (no store call) so settle is enqueued AFTER owner DOWN.
-    release_worker_hold(worker_pid)
-    await_until(fn -> worker_in_gen_call?(worker_pid) end, 10_000)
+    # Suspend first so the armed timer cannot be handled before we queue observation.
+    :sys.suspend(store_pid)
+
+    # Snapshot exact timer gen while suspended (system get_state is valid).
+    %{runtime_admission_settle_timers: timers} = :sys.get_state(store_pid)
+    entry = Map.fetch!(timers, intent_id)
+    gen = Map.fetch!(entry, :gen)
+    timer_ref = Map.get(entry, :timer_ref)
+
+    # Ensure exact timeout message is queued (cancel natural timer + inject exact gen).
+    if is_reference(timer_ref), do: Process.cancel_timer(timer_ref)
+
+    msgs0 = mailbox_messages(store_pid)
+
+    unless Enum.any?(msgs0, &match?({:runtime_admission_settle_timeout, ^intent_id, ^gen}, &1)) do
+      send(store_pid, {:runtime_admission_settle_timeout, intent_id, gen})
+    end
 
     await_until(
-      fn -> Process.alive?(worker_pid) and not worker_in_gen_call?(worker_pid) end,
-      10_000
+      fn ->
+        msgs = mailbox_messages(store_pid)
+        Enum.any?(msgs, &match?({:runtime_admission_settle_timeout, ^intent_id, ^gen}, &1))
+      end,
+      2_000
     )
 
-    :sys.suspend(store_pid)
-    Process.exit(owner_pid, :kill)
-    # Worker finishes restore and blocks in settle GenServer.call (queued after DOWN).
+    # Enqueue public GenServer observation AFTER timeout, BEFORE induced DOWN.
+    op = "op_r8_#{System.unique_integer([:positive])}"
+    test = self()
+
+    spawn(fn ->
+      send(test, {:r8_obs, TaskStore.install_target_fence(agent_id, op, name: store)})
+    end)
+
     await_until(
-      fn -> worker_in_gen_call?(worker_pid) or not Process.alive?(worker_pid) end,
-      10_000
+      fn ->
+        msgs = mailbox_messages(store_pid)
+
+        t_idx =
+          Enum.find_index(
+            msgs,
+            &match?({:runtime_admission_settle_timeout, ^intent_id, ^gen}, &1)
+          )
+
+        o_idx =
+          Enum.find_index(
+            msgs,
+            &match?({:"$gen_call", _, {:install_target_fence, ^agent_id, ^op}}, &1)
+          )
+
+        is_integer(t_idx) and is_integer(o_idx) and t_idx < o_idx and
+          not Enum.any?(msgs, &match?({:DOWN, _, :process, ^owner_pid, _}, &1))
+      end,
+      2_000
     )
 
     :sys.resume(store_pid)
 
-    # Exact worker terminal: missing profile → Lifecycle restore :not_found.
-    assert_receive {:admit, {:error, :not_found}}, 15_000
+    # Causal proof that timeout did not finalize: observer ran after timeout and
+    # still saw non-idle intent. Do not refute_receive admit here — waiter reply
+    # and observer reply travel different processes; authentic DOWN may deliver
+    # to the test mailbox before {:r8_obs, _} even when TaskStore serialized
+    # timeout → observation → DOWN correctly.
+    assert_receive {:r8_obs, {:ok, %{active_count: active}}}, 5_000
+    assert active >= 1
+
+    # Authentic DOWN from timeout's untrappable :kill finalizes — do not manual-kill.
+    assert_receive {:admit, {:error, :r8_terminal}}, 15_000
     await_until(fn -> is_nil(store_intent(store, agent_id)) end, 5_000)
 
-    # Inverse after finalize: late settle is not_found (not a new terminal).
+    # Reuse the exact R8 observer op to confirm idle, then remove the fence.
+    assert {:ok, %{active_count: 0}} =
+             TaskStore.install_target_fence(agent_id, op, name: store)
+
+    assert :ok = TaskStore.remove_target_fence(agent_id, op, name: store)
+  end
+
+  test "security regression R9 settle-first: settle $gen_call before owner DOWN",
+       %{store: store} do
+    %{
+      agent_id: agent_id,
+      intent_id: intent_id,
+      owner_pid: owner_pid,
+      worker_pid: worker_pid
+    } = start_mode_b(store)
+
+    store_pid = Process.whereis(store)
+    assert is_pid(store_pid)
+
+    :sys.suspend(store_pid)
+
+    # Worker is the process that must call settle — command it directly.
+    send(worker_pid, {:settle, store, agent_id, intent_id, {:error, :r9_settle_first}, self()})
+
+    await_until(
+      fn ->
+        msgs = mailbox_messages(store_pid)
+        Enum.any?(msgs, &settle_call?(&1, agent_id, intent_id))
+      end,
+      5_000
+    )
+
+    Process.exit(owner_pid, :kill)
+
+    await_until(
+      fn ->
+        msgs = mailbox_messages(store_pid)
+        s = Enum.find_index(msgs, &settle_call?(&1, agent_id, intent_id))
+        d = Enum.find_index(msgs, &match?({:DOWN, _, :process, ^owner_pid, _}, &1))
+        is_integer(s) and is_integer(d) and s < d
+      end,
+      5_000
+    )
+
+    msgs = mailbox_messages(store_pid)
+    s = Enum.find_index(msgs, &settle_call?(&1, agent_id, intent_id))
+    d = Enum.find_index(msgs, &match?({:DOWN, _, :process, ^owner_pid, _}, &1))
+    assert is_integer(s) and is_integer(d) and s < d
+
+    :sys.resume(store_pid)
+
+    assert_receive {:admit, {:error, :r9_settle_first}}, 15_000
+    await_until(fn -> is_nil(store_intent(store, agent_id)) end, 5_000)
+
     assert {:error, :not_found} =
              TaskStore.settle_runtime_admission(
                agent_id,
@@ -311,152 +412,178 @@ defmodule Arbor.Agent.RuntimeAdmission.LivenessSettlementSecurityRegressionTest 
              )
   end
 
-  test "security regression R9 DOWN-first: worker DOWN terminal; late settle not_found",
+  test "security regression R9 DOWN-first: owner DOWN before settle; worker-down path",
        %{store: store} do
-    {agent_id, fp, _kw, _parent} = start_held_admit(store)
-    {owner_pid, intent_id, ^fp} = await_exact_live_owner(agent_id, fp)
-    worker_pid = await_bound_worker(store, agent_id)
+    # Part A: mailbox order DOWN before settle.
+    %{
+      agent_id: agent_id,
+      intent_id: intent_id,
+      owner_pid: owner_pid,
+      worker_pid: worker_pid
+    } = start_mode_b(store)
 
-    # Owner DOWN while worker still held → await_worker_down; store kills worker.
+    store_pid = Process.whereis(store)
+    assert is_pid(store_pid)
+
+    :sys.suspend(store_pid)
     Process.exit(owner_pid, :kill)
-    await_until(fn -> not Process.alive?(owner_pid) end, 2_000)
 
     await_until(
       fn ->
-        case store_intent(store, agent_id) do
-          nil -> true
-          %{retire_barrier: :await_worker_down} -> true
-          _ -> false
-        end
+        msgs = mailbox_messages(store_pid)
+        Enum.any?(msgs, &match?({:DOWN, _, :process, ^owner_pid, _}, &1))
       end,
       5_000
     )
 
-    # Ensure exact worker is down (store kill or explicit) without releasing hold
-    # into Lifecycle settle — DOWN path must own the terminal.
-    if Process.alive?(worker_pid), do: Process.exit(worker_pid, :kill)
+    send(worker_pid, {:settle, store, agent_id, intent_id, {:error, :r9_down_first}, self()})
 
-    # DOWN-first classified terminal for not_running witness.
-    assert_receive {:admit, {:error, :worker_down}}, 15_000
+    await_until(
+      fn ->
+        msgs = mailbox_messages(store_pid)
+        d = Enum.find_index(msgs, &match?({:DOWN, _, :process, ^owner_pid, _}, &1))
+        s = Enum.find_index(msgs, &settle_call?(&1, agent_id, intent_id))
+        is_integer(d) and is_integer(s) and d < s
+      end,
+      5_000
+    )
 
-    assert {:error, reason} =
+    msgs = mailbox_messages(store_pid)
+    d = Enum.find_index(msgs, &match?({:DOWN, _, :process, ^owner_pid, _}, &1))
+    s = Enum.find_index(msgs, &settle_call?(&1, agent_id, intent_id))
+    assert is_integer(d) and is_integer(s) and d < s
+
+    :sys.resume(store_pid)
+
+    # DOWN-then-settle: exact worker still eligible under await_worker_down →
+    # ownerless finalize with the worker's terminal (first authoritative wins).
+    assert_receive {:admit, {:error, :r9_down_first}}, 15_000
+
+    assert {:error, :not_found} =
              TaskStore.settle_runtime_admission(
                agent_id,
                intent_id,
                {:error, :late_after_down},
                name: store
              )
-
-    assert reason in [:not_found, :conflict, :not_owner]
   end
 
-  test "security regression R9a: held barrier deterministic before worker completion",
+  test "security regression R9b: worker DOWN terminal; late settle not_found",
        %{store: store} do
-    {agent_id, fp, _kw, _parent} = start_held_admit(store)
-    {owner_pid, _intent_id, ^fp} = await_exact_live_owner(agent_id, fp)
+    {agent_id, fp, _kw, _parent} = start_held_admit(store, :admit)
+    {owner_pid, intent_id, ^fp} = await_exact_live_owner(agent_id, fp)
     worker_pid = await_bound_worker(store, agent_id)
 
     Process.exit(owner_pid, :kill)
     await_until(fn -> not Process.alive?(owner_pid) end, 2_000)
 
-    # Deterministic observation: non-idle await_worker_down while worker still
-    # held (or store already killed it and is finalizing). No fixed sleep race.
+    # Snapshot intermediate (or already finalized). No post-read refute_receive:
+    # authentic worker_down may already be in the test mailbox.
+    intermediate =
+      await_until(
+        fn ->
+          case store_intent(store, agent_id) do
+            nil -> :finalized
+            %{retire_barrier: :await_worker_down} -> :barrier
+            _ -> false
+          end
+        end,
+        5_000
+      )
+
+    case intermediate do
+      :finalized ->
+        :ok
+
+      :barrier ->
+        if Process.alive?(worker_pid), do: Process.exit(worker_pid, :kill)
+    end
+
+    assert_receive {:admit, {:error, :worker_down}}, 15_000
+
+    assert {:error, :not_found} =
+             TaskStore.settle_runtime_admission(
+               agent_id,
+               intent_id,
+               {:error, :late_after_down},
+               name: store
+             )
+  end
+
+  test "security regression R9a: held barrier deterministic before worker completion",
+       %{store: store} do
+    {agent_id, fp, _kw, _parent} = start_held_admit(store, :admit)
+    {owner_pid, _intent_id, ^fp} = await_exact_live_owner(agent_id, fp)
+    worker_pid = await_bound_worker(store, agent_id)
+
+    store_pid = Process.whereis(store)
+    assert is_pid(store_pid)
+
+    # Do not accept a racing nil intent as proof. Suspend and serialize:
+    # owner DOWN → public observation → (induced) worker DOWN.
+    :sys.suspend(store_pid)
+    Process.exit(owner_pid, :kill)
+
     await_until(
       fn ->
-        case store_intent(store, agent_id) do
-          %{phase: :outcome_unknown, retire_barrier: :await_worker_down, worker_pid: w}
-          when is_pid(w) ->
-            true
-
-          %{phase: :outcome_unknown, retire_barrier: :await_worker_down} ->
-            true
-
-          nil ->
-            # Already finalized if worker died quickly — still must have replied.
-            true
-
-          _ ->
-            false
-        end
+        msgs = mailbox_messages(store_pid)
+        Enum.any?(msgs, &match?({:DOWN, _, :process, ^owner_pid, _}, &1))
       end,
       5_000
     )
 
-    case store_intent(store, agent_id) do
-      nil ->
-        assert_receive {:admit, _}, 1_000
+    op = "op_r9a_#{System.unique_integer([:positive])}"
+    test = self()
 
-      %{retire_barrier: :await_worker_down, worker_pid: bound} = intent ->
-        assert fence_active_count(store, agent_id) >= 1
-        refute_receive {:admit, _}, 150
-        # Exact bound worker still recorded until DOWN finalize.
-        assert bound == worker_pid or not Process.alive?(worker_pid)
+    spawn(fn ->
+      send(test, {:r9a_obs, TaskStore.install_target_fence(agent_id, op, name: store)})
+    end)
 
-        if Process.alive?(worker_pid), do: Process.exit(worker_pid, :kill)
-        assert_receive {:admit, {:error, :worker_down}}, 15_000
+    await_until(
+      fn ->
+        msgs = mailbox_messages(store_pid)
 
-      %{retire_barrier: :await_worker_down} ->
-        refute_receive {:admit, _}, 150
-        if Process.alive?(worker_pid), do: Process.exit(worker_pid, :kill)
-        assert_receive {:admit, {:error, :worker_down}}, 15_000
+        d_idx =
+          Enum.find_index(msgs, &match?({:DOWN, _, :process, ^owner_pid, _}, &1))
 
-      _other ->
-        assert_receive {:admit, _}, 15_000
-    end
+        o_idx =
+          Enum.find_index(
+            msgs,
+            &match?({:"$gen_call", _, {:install_target_fence, ^agent_id, ^op}}, &1)
+          )
 
-    await_until(fn -> fence_active_count(store, agent_id) == 0 end, 5_000)
-  end
+        is_integer(d_idx) and is_integer(o_idx) and d_idx < o_idx and
+          not Enum.any?(msgs, &match?({:DOWN, _, :process, ^worker_pid, _}, &1))
+      end,
+      5_000
+    )
 
-  test "security regression: transition-error propagation and closed launch allowlist" do
-    # Transition failure surfaces as error atoms (not silent :ok).
-    assert {:error, :not_found} =
-             IntentCore.begin_settling(%{}, "agent_missing", "rai_x", {:error, :x})
+    :sys.resume(store_pid)
 
-    assert {:error, :owner_barrier_outstanding} =
-             IntentCore.settle(
-               %{
-                 "agent_t" => %{
-                   intent_id: "rai_1",
-                   target_agent_id: "agent_t",
-                   kind: :ordinary_start,
-                   fingerprint: "fp_aaa",
-                   phase: :settling,
-                   owner_pid: self(),
-                   worker_pid: nil,
-                   terminal: {:error, :t},
-                   retire_barrier: :await_owner_down
-                 }
-               },
-               "agent_t",
-               "rai_1",
-               {:error, :bypass}
-             )
+    # Observation after owner DOWN handling sees non-idle await_worker_down;
+    # worker DOWN has not been processed yet (queued after observation).
+    assert_receive {:r9a_obs, {:ok, %{active_count: active}}}, 5_000
+    assert active >= 1
 
-    # Closed launch retry allowlist — not every start_child error.
-    assert IntentCore.retryable_launch_failure?(:store_restart)
-    assert IntentCore.retryable_launch_failure?(:max_children)
-    assert IntentCore.retryable_launch_failure?(:timeout)
-    refute IntentCore.retryable_launch_failure?(:already_started)
-    refute IntentCore.retryable_launch_failure?(:temporary)
-    refute IntentCore.retryable_launch_failure?({:task_supervisor_transient, :already_started})
-    refute IntentCore.retryable_launch_failure?({:launch_failed, :max_children})
+    assert_receive {:admit, {:error, :worker_down}}, 15_000
+    await_until(fn -> is_nil(store_intent(store, agent_id)) end, 5_000)
 
-    assert IntentCore.classify_start_child_error(:max_children) == :max_children
-    assert IntentCore.classify_start_child_error({:already_started, self()}) == :already_started
-    assert IntentCore.redact_error_reason(String.duplicate("z", 200)) |> byte_size() <= 64
+    assert {:ok, %{active_count: 0}} =
+             TaskStore.install_target_fence(agent_id, op, name: store)
+
+    assert :ok = TaskStore.remove_target_fence(agent_id, op, name: store)
   end
 
   test "security regression: stale monitored owner DOWN does not retire rebound intent", %{
     store: store
   } do
-    {agent_id, fp, _kw, _parent} = start_held_admit(store)
+    {agent_id, fp, _kw, _parent} = start_held_admit(store, :admit)
     {owner_pid, intent_id, ^fp} = await_exact_live_owner(agent_id, fp)
     worker_pid = await_bound_worker(store, agent_id)
 
     store_pid = Process.whereis(store)
     assert is_pid(store_pid)
 
-    # Snapshot mon entry for the exact live owner (checkpoint :sys boundary).
     %{runtime_admission_owner_monitors: mons} = :sys.get_state(store_pid)
 
     found =
@@ -466,8 +593,6 @@ defmodule Arbor.Agent.RuntimeAdmission.LivenessSettlementSecurityRegressionTest 
 
     assert is_tuple(found)
 
-    # Simulate a rebound: intent now points at a different owner_pid while the
-    # old monitor DOWN is still deliverable. Shell must ignore stale DOWN.
     fake_rebound = spawn(fn -> Process.sleep(60_000) end)
 
     :sys.replace_state(store_pid, fn st ->
@@ -480,20 +605,25 @@ defmodule Arbor.Agent.RuntimeAdmission.LivenessSettlementSecurityRegressionTest 
       end
     end)
 
-    # Authentic DOWN for the *old* monitored owner must not retire rebound intent.
     Process.exit(owner_pid, :kill)
     await_until(fn -> not Process.alive?(owner_pid) end, 2_000)
-    Process.sleep(80)
+
+    await_until(
+      fn ->
+        case store_intent(store, agent_id) do
+          %{intent_id: ^intent_id, owner_pid: ^fake_rebound} -> true
+          _ -> false
+        end
+      end,
+      2_000
+    )
 
     intent_after = store_intent(store, agent_id)
     assert is_map(intent_after)
     assert intent_after.intent_id == intent_id
     assert intent_after.owner_pid == fake_rebound
-    assert intent_after.phase not in [:terminal]
-    assert fence_active_count(store, agent_id) >= 1
     refute_receive {:admit, _}, 100
 
-    # Suite isolation: reply waiters and clear volatile intent (test-only).
     if Process.alive?(worker_pid), do: Process.exit(worker_pid, :kill)
     if Process.alive?(fake_rebound), do: Process.exit(fake_rebound, :kill)
 
@@ -507,25 +637,38 @@ defmodule Arbor.Agent.RuntimeAdmission.LivenessSettlementSecurityRegressionTest 
       |> update_in([:runtime_admission_waiters], &Map.delete(&1, intent_id))
     end)
 
-    _ = flush_admit()
+    _ = flush_admit_tag(:admit)
   end
 
-  # ── helpers (checkpoint-existing public/OTP boundaries only) ───────
+  # ── Mode A helpers ────────────────────────────────────────────────
 
-  defp start_held_admit(store) do
+  defp start_held_admit(store, tag) do
     agent_id = "agent_live#{System.unique_integer([:positive])}"
     assert {:ok, %{fingerprint: fp, keyword: kw}} = Opts.project([])
+    spawn_admit(store, agent_id, fp, kw, tag)
+    {agent_id, fp, kw, self()}
+  end
+
+  defp spawn_admit(store, agent_id, fp, kw, tag) do
     test = self()
 
     spawn(fn ->
       send(
         test,
-        {:admit,
+        {tag,
          TaskStore.admit_ordinary_runtime_start(agent_id, fp, kw, name: store, timeout: 60_000)}
       )
     end)
 
-    {agent_id, fp, kw, test}
+    :ok
+  end
+
+  defp assert_receive_admit(tag, timeout) do
+    receive do
+      {^tag, result} -> result
+    after
+      timeout -> flunk("timed out waiting for admit tag #{inspect(tag)}")
+    end
   end
 
   defp await_exact_live_owner(agent_id, expected_fp) do
@@ -559,6 +702,116 @@ defmodule Arbor.Agent.RuntimeAdmission.LivenessSettlementSecurityRegressionTest 
     )
   end
 
+  # ── Mode B helpers (test-only reconciliation adopt) ───────────────
+
+  defp start_mode_b(store) do
+    agent_id = "agent_ctrl#{System.unique_integer([:positive])}"
+    intent_id = "rai_ctrl#{System.unique_integer([:positive])}"
+    assert {:ok, %{fingerprint: fp, keyword: kw}} = Opts.project([])
+    test = self()
+
+    owner_pid =
+      spawn(fn ->
+        Process.flag(:trap_exit, true)
+
+        {:ok, _} =
+          Registry.register(@registry, {:runtime_admission_owner, agent_id}, %{
+            intent_id: intent_id,
+            fingerprint: fp
+          })
+
+        :ok =
+          TaskStore.adopt_runtime_admission_owner(agent_id, intent_id, fp, name: store)
+
+        send(test, {:owner_ready, self()})
+        controlled_owner_loop(store, agent_id, intent_id, fp)
+      end)
+
+    assert_receive {:owner_ready, ^owner_pid}, 5_000
+
+    worker_pid =
+      spawn(fn ->
+        controlled_worker_loop()
+      end)
+
+    send(owner_pid, {:bind, worker_pid, test})
+    assert_receive {:bind_done, :ok}, 5_000
+
+    # Waiter joins open intent (production admit path).
+    spawn_admit(store, agent_id, fp, kw, :admit)
+
+    # Confirm worker bound in store.
+    bound = await_bound_worker(store, agent_id)
+    assert bound == worker_pid
+
+    %{
+      agent_id: agent_id,
+      intent_id: intent_id,
+      fingerprint: fp,
+      keyword: kw,
+      owner_pid: owner_pid,
+      worker_pid: worker_pid
+    }
+  end
+
+  defp controlled_owner_loop(store, agent_id, intent_id, fp) do
+    receive do
+      {:bind, worker_pid, from} ->
+        result =
+          TaskStore.bind_runtime_admission_worker(
+            agent_id,
+            intent_id,
+            fp,
+            worker_pid,
+            name: store
+          )
+
+        send(from, {:bind_done, result})
+        controlled_owner_loop(store, agent_id, intent_id, fp)
+
+      {:EXIT, _from, _reason} ->
+        # Absorb :shutdown from begin_settling; stay alive until untrappable kill.
+        controlled_owner_loop(store, agent_id, intent_id, fp)
+
+      _other ->
+        controlled_owner_loop(store, agent_id, intent_id, fp)
+    end
+  end
+
+  defp controlled_worker_loop do
+    receive do
+      {:settle, store, agent_id, intent_id, outcome, from} ->
+        result =
+          TaskStore.settle_runtime_admission(agent_id, intent_id, outcome, name: store)
+
+        send(from, {:settle_done, result})
+        controlled_worker_loop()
+
+      {:park, from} ->
+        send(from, :parked)
+
+        receive do
+          :continue -> controlled_worker_loop()
+        end
+
+      _other ->
+        controlled_worker_loop()
+    end
+  end
+
+  defp command_worker_settle(worker_pid, store, agent_id, intent_id, outcome) do
+    send(worker_pid, {:settle, store, agent_id, intent_id, outcome, self()})
+
+    receive do
+      {:settle_done, :ok} -> :ok
+      {:settle_done, other} -> flunk("expected settle :ok, got #{inspect(other)}")
+    after
+      15_000 -> flunk("worker settle timed out")
+    end
+  end
+
+  # ── Shared helpers ────────────────────────────────────────────────
+
   defp await_settling_barrier(store, agent_id) do
     await_until(
       fn ->
@@ -571,62 +824,45 @@ defmodule Arbor.Agent.RuntimeAdmission.LivenessSettlementSecurityRegressionTest 
     )
   end
 
+  # Non-mutating intent inspection via :sys.get_state — never install a fence
+  # just to probe active/idle (install_target_fence is reserved for R8 observer).
   defp store_intent(store, agent_id) do
-    case :sys.get_state(Process.whereis(store)) do
-      %{runtime_admission_intents: intents} -> Map.get(intents, agent_id)
-      _ -> nil
+    case Process.whereis(store) do
+      pid when is_pid(pid) ->
+        case :sys.get_state(pid) do
+          %{runtime_admission_intents: intents} -> Map.get(intents, agent_id)
+          _ -> nil
+        end
+
+      _ ->
+        nil
     end
   end
 
-  defp fence_active_count(store, agent_id) do
-    op = "op_probe_#{System.unique_integer([:positive])}"
-
-    case TaskStore.install_target_fence(agent_id, op, name: store) do
-      {:ok, %{active_count: n}} -> n
-      _ -> -1
-    end
-  end
-
-  # Exact worker release — Application env change does NOT unblock an already
-  # entered receive; send the checkpoint-existing hold message to the PID.
   defp release_worker_hold(worker_pid) when is_pid(worker_pid) do
     send(worker_pid, @release_hold)
     :ok
   end
 
-  defp worker_in_gen_call?(pid) when is_pid(pid) do
-    info = Process.info(pid, [:current_function, :current_stacktrace, :status]) || []
-    fun = Keyword.get(info, :current_function)
-    frames = Keyword.get(info, :current_stacktrace, [])
-
-    match?({GenServer, :call, _}, fun) or match?({:gen, :do_call, _}, fun) or
-      match?({:gen_server, :call, _}, fun) or
-      Enum.any?(List.wrap(frames), fn
-        {mod, fun_name, _arity, _}
-        when mod in [GenServer, :gen_server, :gen] and fun_name in [:call, :do_call] ->
-          true
-
-        {mod, fun_name, _arity}
-        when mod in [GenServer, :gen_server, :gen] and fun_name in [:call, :do_call] ->
-          true
-
-        _ ->
-          false
-      end)
-  rescue
-    _ -> false
+  defp mailbox_messages(pid) when is_pid(pid) do
+    case Process.info(pid, :messages) do
+      {:messages, msgs} -> msgs
+      _ -> []
+    end
   end
 
-  defp settlement_waiter_reply({:applied, pid}) when is_pid(pid), do: {:ok, pid}
-  defp settlement_waiter_reply({:error, reason}), do: {:error, reason}
-  defp settlement_waiter_reply({:conflict, reason}), do: {:error, {:conflict, reason}}
-  defp settlement_waiter_reply(other), do: {:error, other}
+  defp settle_call?(msg, agent_id, intent_id) do
+    match?(
+      {:"$gen_call", _, {:settle_runtime_admission, ^agent_id, ^intent_id, _}},
+      msg
+    )
+  end
 
-  defp flush_admit do
+  defp flush_admit_tag(tag) do
     receive do
-      {:admit, result} -> result
+      {^tag, result} -> result
     after
-      15_000 -> :timeout
+      1_000 -> :timeout
     end
   end
 

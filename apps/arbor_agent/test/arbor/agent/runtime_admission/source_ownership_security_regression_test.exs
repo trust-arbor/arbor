@@ -41,6 +41,7 @@ defmodule Arbor.Agent.RuntimeAdmission.SourceOwnershipSecurityRegressionTest do
   end
 
   test "security regression: ordinary_start_effects/2 is not exported" do
+    assert {:module, Lifecycle} = Code.ensure_loaded(Lifecycle)
     refute function_exported?(Lifecycle, :ordinary_start_effects, 2)
     assert function_exported?(Lifecycle, :ordinary_start_effects, 3)
   end
@@ -80,10 +81,32 @@ defmodule Arbor.Agent.RuntimeAdmission.SourceOwnershipSecurityRegressionTest do
     assert snap.fingerprint == fp
     intent_id = snap.intent_id
 
-    # Foreign bind of an arbitrary PID must fail (caller is not the owner).
+    # Await live adopted owner before foreign bind (exact :not_owner taxonomy).
+    _bound =
+      await_until(
+        fn ->
+          case :sys.get_state(Process.whereis(store)) do
+            %{runtime_admission_intents: intents} ->
+              case Map.get(intents, agent_id) do
+                %{phase: phase, owner_pid: op}
+                when phase in [:owner_live, :worker_running] and is_pid(op) ->
+                  true
+
+                _ ->
+                  false
+              end
+
+            _ ->
+              false
+          end
+        end,
+        5_000
+      )
+
+    # Foreign bind of an arbitrary PID must fail: caller is not the live owner.
     foreign_worker = spawn(fn -> Process.sleep(10_000) end)
 
-    assert {:error, reason} =
+    assert {:error, :not_owner} =
              TaskStore.bind_runtime_admission_worker(
                agent_id,
                intent_id,
@@ -92,10 +115,8 @@ defmodule Arbor.Agent.RuntimeAdmission.SourceOwnershipSecurityRegressionTest do
                name: store
              )
 
-    assert reason in [:not_owner, :not_found, :conflict]
-
     # Foreign settle must not complete the parked admit.
-    assert {:error, settle_reason} =
+    assert {:error, :not_owner} =
              TaskStore.settle_runtime_admission(
                agent_id,
                intent_id,
@@ -103,7 +124,6 @@ defmodule Arbor.Agent.RuntimeAdmission.SourceOwnershipSecurityRegressionTest do
                name: store
              )
 
-    assert settle_reason in [:not_found, :not_owner, :conflict]
     refute_receive {:admit, _}, 150
   end
 

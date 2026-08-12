@@ -241,8 +241,13 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentCore do
   - `caller_owner_pid == intent.owner_pid` (authenticated IntentOwner only)
   - no other worker bound
 
-  Same owner rebinding the same worker is idempotent. A foreign caller or
-  mismatched owner/fingerprint/id → `:not_owner` / `:conflict` / `:not_found`.
+  Same owner rebinding the same worker is idempotent.
+
+  Atom taxonomy:
+  - `:conflict` before any owner is adopted (nil owner / pre-live phases)
+  - `:not_owner` only when a different **live adopted** owner holds the row
+  - `:conflict` for wrong fingerprint/phase/worker shape on the same intent
+  - `:not_found` when no intent exists for the target
   """
   @spec bind_worker(
           intent_map(),
@@ -288,7 +293,11 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentCore do
       } ->
         {:ok, intents}
 
-      %{owner_pid: owner_pid} when owner_pid != caller_owner_pid ->
+      # Live adopted owner differs — only then is the caller "not owner".
+      # Never treat owner_pid == nil (pre-adoption) as :not_owner.
+      %{phase: phase, owner_pid: owner_pid}
+      when phase in [:owner_live, :worker_running] and is_pid(owner_pid) and
+             owner_pid != caller_owner_pid ->
         {:error, :not_owner}
 
       %{intent_id: ^intent_id} ->
