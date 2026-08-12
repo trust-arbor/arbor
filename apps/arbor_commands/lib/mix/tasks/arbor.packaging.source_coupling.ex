@@ -47,7 +47,8 @@ defmodule Mix.Tasks.Arbor.Packaging.SourceCoupling do
   end
 
   defp execute_with_cli(argv, runtime_opts \\ []) do
-    with {:ok, cli} <- parse_args(argv) do
+    with {:ok, _started} <- Application.ensure_all_started(:arbor_shell),
+         {:ok, cli} <- parse_args(argv) do
       # Production Mix task never forwards synthetic injection keys.
       opts = [
         mode: cli.mode,
@@ -144,6 +145,10 @@ defmodule Mix.Tasks.Arbor.Packaging.SourceCoupling do
 
   defp format_error({:arguments, reason}), do: "arguments: #{reason}"
   defp format_error({:mode, reason}), do: "mode: #{reason}"
+
+  defp format_error({app, reason}) when is_atom(app),
+    do: "could not start #{app}: #{inspect(reason)}"
+
   defp format_error(:missing), do: "baseline missing (run --write-baseline first)"
   defp format_error(:invalid), do: "baseline invalid JSON"
   defp format_error(other), do: "source-coupling failed: #{inspect(other)}"

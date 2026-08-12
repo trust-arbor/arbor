@@ -83,6 +83,27 @@ defmodule Mix.Tasks.Arbor.Packaging.SourceCouplingProductionPathTest do
     assert report["schema"] == "arbor.packaging.source_coupling.report.v1"
   end
 
+  test "standalone Mix task starts its shell runtime dependency" do
+    root = umbrella_root()
+
+    {output, status} =
+      System.cmd(
+        Path.join(root, "bin/mix"),
+        ["arbor.packaging.source_coupling", "--root", root],
+        cd: root,
+        env: [
+          {"MIX_ENV", "test"},
+          {"MIX_DEPS_PATH", System.get_env("MIX_DEPS_PATH") || Path.join(root, "deps")},
+          {"MIX_BUILD_PATH", System.get_env("MIX_BUILD_PATH") || Path.join(root, "_build")}
+        ],
+        stderr_to_stdout: true
+      )
+
+    assert status == 0, output
+    assert output =~ "source-coupling report status="
+    refute output =~ "git_shell_unavailable"
+  end
+
   test "production-path compatibility: private module references tracked Arbor module" do
     root = umbrella_root()
 

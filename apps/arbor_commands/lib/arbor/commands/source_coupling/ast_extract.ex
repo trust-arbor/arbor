@@ -24,7 +24,6 @@ defmodule Arbor.Commands.SourceCoupling.AstExtract do
                     :macrocallback
                   ])
 
-
   @type extract_result :: %{
           module_defs: [map()],
           references: [map()],
@@ -124,7 +123,12 @@ defmodule Arbor.Commands.SourceCoupling.AstExtract do
             case mod do
               {:__aliases__, _, parts} ->
                 if parts_to_string(parts) == "Module" do
-                  resolve_module_concat(line_of(meta), List.wrap(call_args), state, "module_concat")
+                  resolve_module_concat(
+                    line_of(meta),
+                    List.wrap(call_args),
+                    state,
+                    "module_concat"
+                  )
                 else
                   state
                 end
@@ -364,7 +368,8 @@ defmodule Arbor.Commands.SourceCoupling.AstExtract do
     end
   end
 
-  defp handle_form(form, meta, args, state, depth) when form in [:def, :defp, :defmacro, :defmacrop] do
+  defp handle_form(form, meta, args, state, depth)
+       when form in [:def, :defp, :defmacro, :defmacrop] do
     state = maybe_default_refs(meta, args, state)
     scoped_walk(form, meta, args, state, depth)
   end
@@ -715,12 +720,21 @@ defmodule Arbor.Commands.SourceCoupling.AstExtract do
         case {resolve_module_name(a, state), resolve_module_name(b, state)} do
           {{:ok, ma}, {:ok, mb}} ->
             case join_module_strings(ma, mb) do
-              {:ok, mod} -> add_ref(state, line, mod, "module_concat")
-              _ -> add_unresolved(state, line, "dynamic_module_concat", kind, normalize_expr({a, b}))
+              {:ok, mod} ->
+                add_ref(state, line, mod, "module_concat")
+
+              _ ->
+                add_unresolved(state, line, "dynamic_module_concat", kind, normalize_expr({a, b}))
             end
 
           _ ->
-            add_unresolved(state, line, "dynamic_module_concat", kind, normalize_expr({:concat, a, b}))
+            add_unresolved(
+              state,
+              line,
+              "dynamic_module_concat",
+              kind,
+              normalize_expr({:concat, a, b})
+            )
         end
 
       other ->
@@ -781,7 +795,7 @@ defmodule Arbor.Commands.SourceCoupling.AstExtract do
     end
   end
 
-  defp resolve_module_name({{:., _, [mod, _]}, _, _}, state) do
+  defp resolve_module_name({{:., _, [_mod, _]}, _, _}, state) do
     # Already a call — not a module name alone
     _ = state
     :error
@@ -803,7 +817,9 @@ defmodule Arbor.Commands.SourceCoupling.AstExtract do
 
   defp resolve_module_name({{:., _, [{:__aliases__, _, [:Module]}, :concat]}, _, args}, state) do
     case args do
-      [list] when is_list(list) -> static_concat_list(list, state)
+      [list] when is_list(list) ->
+        static_concat_list(list, state)
+
       [a, b] ->
         with {:ok, ma} <- resolve_module_name(a, state),
              {:ok, mb} <- resolve_module_name(b, state) do
