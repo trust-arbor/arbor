@@ -2,13 +2,14 @@ defmodule Arbor.AI.Runtime.RouteCatalog do
   @moduledoc """
   Arbor-owned catalog overlay for `ProviderRouter` assembly.
 
-  Reads `ModelProfile.entry/1`, then for two exact canonical ids replaces
+  Reads `ModelProfile.entry/1`, then for exact canonical ids replaces
   providers with a single OAuth Arbor `ProviderEntry` (pricing nil).
   Lookalikes and all other ids pass through unchanged.
 
   Exact overlays only:
 
     * `"gpt-5.6-sol"` → `:openai_oauth`
+    * `"grok-4.6"` → `:xai_oauth`
     * `"grok-4.5"` → `:xai_oauth`
   """
 
@@ -18,6 +19,7 @@ defmodule Arbor.AI.Runtime.RouteCatalog do
 
   @oauth_overlays %{
     "gpt-5.6-sol" => :openai_oauth,
+    "grok-4.6" => :xai_oauth,
     "grok-4.5" => :xai_oauth
   }
 

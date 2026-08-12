@@ -35,7 +35,7 @@ defmodule Arbor.AI.AcpSession do
   and `last_session_id` cleared.
 
   Grok is launch-bound instead: its sandbox attests the exact reviewed
-  `--model grok-4.5` command before every launch and reconnect, and Grok's ACP
+  `--model grok-4.6` command before every launch and reconnect, and Grok's ACP
   server does not implement dynamic config mutation. That exact requested model
   therefore skips the unsupported RPC; any other requested Grok model fails
   closed. Omitting `:model` avoids the RPC and uses the provider's configured

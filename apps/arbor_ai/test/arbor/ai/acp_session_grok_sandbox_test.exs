@@ -22,7 +22,7 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
     "agent",
     "--no-leader",
     "--model",
-    "grok-4.5",
+    "grok-4.6",
     "stdio"
   ]
 
@@ -38,7 +38,7 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
     "agent",
     "--no-leader",
     "--model",
-    "grok-4.5",
+    "grok-4.6",
     "stdio"
   ]
 
@@ -1002,7 +1002,7 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
       assert {:ok, session} =
                AcpSession.start_link(
                  provider: :grok,
-                 model: "grok-4.5",
+                 model: "grok-4.6",
                  workspace: {:directory, worktree_root},
                  client_opts:
                    probe_client_opts(

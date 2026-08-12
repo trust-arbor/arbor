@@ -19,12 +19,12 @@ defmodule Arbor.AI.AcpSession.ReadinessTest do
     :ok
   end
 
-  test "records Grok 4.5 as the requested and launch-bound model" do
+  test "records Grok 4.6 as the requested and launch-bound model" do
     result = observe(:grok, nil, observation: :available)
     observation = result["observation"]
 
-    assert observation["requested_model_id"] == "grok-4.5"
-    assert observation["launch_bound_model_id"] == "grok-4.5"
+    assert observation["requested_model_id"] == "grok-4.6"
+    assert observation["launch_bound_model_id"] == "grok-4.6"
     assert observation["provider"] == "grok"
     assert observation["source"] == "acp_provider_readiness"
     assert observation["runtime"] == "acp"
@@ -39,7 +39,7 @@ defmodule Arbor.AI.AcpSession.ReadinessTest do
     assert observation["failure_code"] == "model_mismatch"
     assert observation["failure_message"] == "requested model does not match launch-bound model"
     assert observation["requested_model_id"] == "grok-code-fast"
-    assert observation["launch_bound_model_id"] == "grok-4.5"
+    assert observation["launch_bound_model_id"] == "grok-4.6"
   end
 
   test "string provider ids retain launch-bound model evidence on mismatch" do
@@ -49,7 +49,7 @@ defmodule Arbor.AI.AcpSession.ReadinessTest do
     assert observation["provider"] == "grok"
     assert observation["failure_code"] == "model_mismatch"
     assert observation["requested_model_id"] == "grok-code-fast"
-    assert observation["launch_bound_model_id"] == "grok-4.5"
+    assert observation["launch_bound_model_id"] == "grok-4.6"
   end
 
   test "unknown provider strings do not intern atoms" do
@@ -117,7 +117,7 @@ defmodule Arbor.AI.AcpSession.ReadinessTest do
   end
 
   test "static readiness never claims authentication health" do
-    result = observe(:grok, "grok-4.5", observation: :available)
+    result = observe(:grok, "grok-4.6", observation: :available)
     observation = result["observation"]
 
     assert observation["auth_health"] == "unknown"
@@ -125,14 +125,14 @@ defmodule Arbor.AI.AcpSession.ReadinessTest do
   end
 
   test "injected time produces a deterministic observation and exact digest" do
-    result = observe(:grok, "grok-4.5", observation: :available)
+    result = observe(:grok, "grok-4.6", observation: :available)
     observation = result["observation"]
 
     assert observation["observed_at"] == "2026-07-22T12:00:00Z"
     assert observation["expires_at"] == "2026-07-22T12:00:30Z"
     assert {:ok, digest} = ProviderObservation.digest(observation)
     assert result["digest"] == digest
-    assert result == observe(:grok, "grok-4.5", observation: :available)
+    assert result == observe(:grok, "grok-4.6", observation: :available)
   end
 
   test "dynamic providers record requested model but leave membership unknown" do

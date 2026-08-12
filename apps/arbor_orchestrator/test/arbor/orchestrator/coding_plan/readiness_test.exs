@@ -515,8 +515,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessTest do
         model_catalog_membership: "unknown",
         quota_state: "unknown",
         subscription_capacity_state: "unknown",
-        requested_model_id: Keyword.get(opts, :model, "grok-4.5"),
-        launch_bound_model_id: "grok-4.5"
+        requested_model_id: Keyword.get(opts, :model, "grok-4.6"),
+        launch_bound_model_id: "grok-4.6"
       }
       |> maybe_put(:failure_code, failure_code)
       |> maybe_put(

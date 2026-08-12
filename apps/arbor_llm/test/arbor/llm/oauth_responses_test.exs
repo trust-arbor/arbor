@@ -1054,7 +1054,7 @@ defmodule Arbor.LLM.OAuth.ResponsesTest do
              Responses.complete(:xai, empty_request(), receive_timeout: 1_000)
 
     assert %{body: xai_body} = Task.await(xai_server, 2_000)
-    assert Jason.decode!(xai_body)["model"] == "grok-4.5"
+    assert Jason.decode!(xai_body)["model"] == "grok-4.6"
   end
 
   defp sse(event), do: "data: " <> Jason.encode!(event) <> "\n\n"

@@ -10,11 +10,11 @@ path) require the stdio signing proxy, not bare HTTP/Bearer. See
 
 ## Runtime and authentication boundary
 
-The current OAuth coding worker is **Grok 4.5** (`worker.provider: "grok"`,
-`worker.model: "grok-4.5"`). Do not select `grok-code-fast`; it is not the
+The current OAuth coding worker is **Grok 4.6** (`worker.provider: "grok"`,
+`worker.model: "grok-4.6"`). Do not select `grok-code-fast`; it is not the
 reviewed coding model for this path. Grok does not implement ACP's dynamic
 `session/set_config_option` method, so Arbor binds the model in the reviewed
-launch command and independently attests the exact `--model grok-4.5` argument
+launch command and independently attests the exact `--model grok-4.6` argument
 before launch and reconnect. A different explicit Grok model fails before the
 CLI starts; Arbor does not treat `Method not found` as successful model
 selection.
@@ -415,7 +415,7 @@ keeping the new task's authorization and execution identity independent:
 {
   "worker": {
     "provider": "grok",
-    "model": "grok-4.5",
+    "model": "grok-4.6",
     "use_pool": true,
     "resume_provider": "grok",
     "resume_session_id": "provider-session-id-from-prior-result"

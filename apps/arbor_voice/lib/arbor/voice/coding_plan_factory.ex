@@ -148,7 +148,7 @@ defmodule Arbor.Voice.CodingPlanFactory do
       },
       worker: %{
         "provider" => @worker_provider,
-        "model" => "grok-4.5",
+        "model" => "grok-4.6",
         "permission_mode" => "default",
         "use_pool" => true,
         "resume_provider" => nil,

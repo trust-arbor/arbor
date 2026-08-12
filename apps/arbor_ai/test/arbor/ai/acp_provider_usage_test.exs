@@ -484,7 +484,7 @@ defmodule Arbor.AI.AcpProviderUsageTest do
     {repository_root, worktree_root} = create_linked_grok_fixture!()
     assert {:ok, authority} = GrokSandbox.bind(repository_root, worktree_root)
 
-    assert {:ok, grok_client_opts} = Config.resolve(:grok, model: "grok-4.5")
+    assert {:ok, grok_client_opts} = Config.resolve(:grok, model: "grok-4.6")
 
     grok_client_opts =
       Keyword.merge(grok_client_opts,
@@ -497,7 +497,7 @@ defmodule Arbor.AI.AcpProviderUsageTest do
     assert {:ok, session} =
              AcpSession.start_link(
                provider: :grok,
-               model: "grok-4.5",
+               model: "grok-4.6",
                workspace: {:directory, worktree_root},
                grok_sandbox_authority: authority,
                provider_usage_ledger_target: target,

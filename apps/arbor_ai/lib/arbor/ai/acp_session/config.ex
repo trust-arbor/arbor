@@ -70,7 +70,7 @@ defmodule Arbor.AI.AcpSession.Config do
 
   # Grok's agent profile is bound by RuntimeHome after this trusted static
   # command is resolved. `--deny Bash(*)` remains defense-in-depth for aliases.
-  @grok_launch_model "grok-4.5"
+  @grok_launch_model "grok-4.6"
 
   @grok_strict_command [
     "grok",

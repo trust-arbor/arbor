@@ -49,7 +49,7 @@ defmodule Arbor.AI.AcpSession.GrokSandbox do
     "agent",
     "--no-leader",
     "--model",
-    "grok-4.5",
+    "grok-4.6",
     "stdio"
   ]
 
@@ -65,7 +65,7 @@ defmodule Arbor.AI.AcpSession.GrokSandbox do
     "agent",
     "--no-leader",
     "--model",
-    "grok-4.5",
+    "grok-4.6",
     "stdio"
   ]
 

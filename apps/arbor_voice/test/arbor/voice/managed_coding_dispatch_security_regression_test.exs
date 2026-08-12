@@ -385,7 +385,7 @@ defmodule Arbor.Voice.ManagedCodingDispatchSecurityRegressionTest do
     assert plan["task"] == @adversarial_intent
     assert plan["repo_root"] == "/tmp/arbor-voice-dispatch-root"
     assert plan["worker"]["provider"] == "grok"
-    assert plan["worker"]["model"] == "grok-4.5"
+    assert plan["worker"]["model"] == "grok-4.6"
     assert plan["budgets"]["wall_clock_ms"] == 7_200_000
     assert plan["budgets"]["inactivity_timeout_ms"] == 600_000
     assert Keyword.get(call.opts, :session_token) == @distinctive_token
@@ -473,7 +473,7 @@ defmodule Arbor.Voice.ManagedCodingDispatchSecurityRegressionTest do
     refute Map.has_key?(assistant_entry.metadata, "worker")
     refute Map.has_key?(assistant_entry.metadata, "plan")
     refute inspect(assistant_entry.metadata) =~ @distinctive_token
-    refute inspect(assistant_entry.metadata) =~ "grok-4.5"
+    refute inspect(assistant_entry.metadata) =~ "grok-4.6"
     refute inspect(assistant_entry.metadata) =~ "/tmp/arbor-voice-dispatch-root"
 
     # Guarded speech receives the Speakable form of the same confirmation sentence.
@@ -572,7 +572,7 @@ defmodule Arbor.Voice.ManagedCodingDispatchSecurityRegressionTest do
     # Source-owned policy fields unchanged by adversarial speech.
     assert plan["repo_root"] == "/tmp/arbor-voice-dispatch-root"
     assert plan["worker"]["provider"] == "grok"
-    assert plan["worker"]["model"] == "grok-4.5"
+    assert plan["worker"]["model"] == "grok-4.6"
     assert plan["task_class"] == "default"
     assert plan["validation_profile"] == "default"
     assert plan["review_profile"] == "binding"

@@ -80,7 +80,7 @@ defmodule Arbor.AI.AcpSession.ConfigTest do
                "agent",
                "--no-leader",
                "--model",
-               "grok-4.5",
+               "grok-4.6",
                "stdio"
              ]
 
@@ -92,8 +92,11 @@ defmodule Arbor.AI.AcpSession.ConfigTest do
     end
 
     test "accepts only the exact launch-bound Grok model" do
-      assert {:ok, opts} = Config.resolve(:grok, model: "grok-4.5")
-      assert Keyword.fetch!(opts, :model) == "grok-4.5"
+      assert {:ok, opts} = Config.resolve(:grok, model: "grok-4.6")
+      assert Keyword.fetch!(opts, :model) == "grok-4.6"
+
+      assert {:error, :invalid_grok_model} =
+               Config.resolve(:grok, model: "grok-4.5")
 
       assert {:error, :invalid_grok_model} =
                Config.resolve(:grok, model: "grok-code-fast")
@@ -122,7 +125,7 @@ defmodule Arbor.AI.AcpSession.ConfigTest do
             "agent",
             "--no-leader",
             "--model",
-            "grok-4.5",
+            "grok-4.6",
             "stdio"
           ],
           env: [

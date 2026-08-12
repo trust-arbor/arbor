@@ -30,27 +30,29 @@ defmodule Arbor.AI.Runtime.RouteCatalogTest do
            ] = entry.providers
   end
 
-  test "overlays grok-4.5 with a single xai_oauth OAuth Arbor route" do
-    base = ModelProfile.entry("grok-4.5")
-    entry = RouteCatalog.entry("grok-4.5")
+  test "overlays current and compatibility Grok models with xai_oauth" do
+    for id <- ["grok-4.6", "grok-4.5"] do
+      base = ModelProfile.entry(id)
+      entry = RouteCatalog.entry(id)
 
-    assert entry.canonical_id == base.canonical_id
-    assert entry.family == base.family
-    assert entry.context_window == base.context_window
-    assert entry.max_output_tokens == base.max_output_tokens
-    assert entry.effective_window_pct == base.effective_window_pct
-    assert entry.capabilities == base.capabilities
-    assert entry.caveats == base.caveats
+      assert entry.canonical_id == base.canonical_id
+      assert entry.family == base.family
+      assert entry.context_window == base.context_window
+      assert entry.max_output_tokens == base.max_output_tokens
+      assert entry.effective_window_pct == base.effective_window_pct
+      assert entry.capabilities == base.capabilities
+      assert entry.caveats == base.caveats
 
-    assert [
-             %ProviderEntry{
-               id: :xai_oauth,
-               ref: "grok-4.5",
-               auth: :oauth,
-               runtimes: [:arbor],
-               pricing: nil
-             }
-           ] = entry.providers
+      assert [
+               %ProviderEntry{
+                 id: :xai_oauth,
+                 ref: ^id,
+                 auth: :oauth,
+                 runtimes: [:arbor],
+                 pricing: nil
+               }
+             ] = entry.providers
+    end
   end
 
   test "lookalikes and aliases do not receive OAuth route overlays" do
@@ -59,6 +61,8 @@ defmodule Arbor.AI.Runtime.RouteCatalogTest do
           "gpt-5.6-sol-preview",
           "openai:gpt-5.6-sol",
           "grok-4",
+          "grok-4.6-fast",
+          "xai:grok-4.6",
           "grok-4.5-fast",
           "xai:grok-4.5"
         ] do
@@ -71,14 +75,14 @@ defmodule Arbor.AI.Runtime.RouteCatalogTest do
 
   test "entries/1 preserves order and count" do
     assert {:ok, [a, b, c]} =
-             RouteCatalog.entries(["gpt-5.6-sol", "gpt-5.6", "grok-4.5"])
+             RouteCatalog.entries(["gpt-5.6-sol", "gpt-5.6", "grok-4.6"])
 
     assert length([a, b, c]) == 3
     assert a.canonical_id == "gpt-5.6-sol"
     assert hd(a.providers).id == :openai_oauth
     assert b.canonical_id == ModelProfile.entry("gpt-5.6").canonical_id
     assert b.providers == ModelProfile.entry("gpt-5.6").providers
-    assert c.canonical_id == "grok-4.5"
+    assert c.canonical_id == "grok-4.6"
     assert hd(c.providers).id == :xai_oauth
   end
 end

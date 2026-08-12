@@ -502,7 +502,7 @@ defmodule Arbor.AI.AcpSession.RuntimeHome do
         case List.to_tuple(command) do
           {"grok", "--sandbox", "strict", "--no-memory", "--no-subagents", "--disable-web-search",
            "--deny", "MCPTool(*)", "--deny", "Bash(*)", "agent", "--no-leader", "--model",
-           "grok-4.5", "stdio"} ->
+           "grok-4.6", "stdio"} ->
             {:ok, profile_path}
 
           _other ->

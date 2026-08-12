@@ -2,6 +2,9 @@ import Config
 
 # Reviewed Phase E routing profile. Both routes passed the heartbeat eval suite
 # on the immutable clean revision recorded by the scoreboard evidence below.
+# The active ACP, Voice, council, and xAI Responses defaults use `grok-4.6`.
+# This scored `grok-4.5` route remains historical until a distinct 4.6 eval run
+# supplies replacement evidence; never relabel an older run as a newer model.
 provider_route_profile_enabled = true
 
 config :arbor_ai, :provider_route_profile, %{

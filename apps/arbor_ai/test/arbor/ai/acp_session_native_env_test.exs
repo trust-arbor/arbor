@@ -104,7 +104,7 @@ defmodule Arbor.AI.AcpSessionNativeEnvTest do
     "agent",
     "--no-leader",
     "--model",
-    "grok-4.5",
+    "grok-4.6",
     "stdio"
   ]
 

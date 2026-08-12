@@ -389,7 +389,7 @@ defmodule Arbor.AI.AcpPoolTest do
       assert {:ok, session} =
                AcpPool.checkout(
                  :grok,
-                 model: "grok-4.5",
+                 model: "grok-4.6",
                  workspace: {:directory, worktree_root},
                  client_opts: probe_client_opts(test_pid: self(), _skip_connect: false),
                  grok_sandbox_authority: authority

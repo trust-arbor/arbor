@@ -32,7 +32,7 @@ defmodule Arbor.Voice.CodingPlanFactoryTest do
 
     assert plan["worker"] == %{
              "provider" => "grok",
-             "model" => "grok-4.5",
+             "model" => "grok-4.6",
              "permission_mode" => "default",
              "use_pool" => true,
              "resume_provider" => nil,
@@ -119,7 +119,7 @@ defmodule Arbor.Voice.CodingPlanFactoryTest do
     # Authoritative policy fields remain source-owned.
     assert plan["repo_root"] == @root
     assert plan["worker"]["provider"] == "grok"
-    assert plan["worker"]["model"] == "grok-4.5"
+    assert plan["worker"]["model"] == "grok-4.6"
     assert plan["task_class"] == "default"
     assert plan["validation_profile"] == "default"
     assert plan["review_profile"] == "binding"
