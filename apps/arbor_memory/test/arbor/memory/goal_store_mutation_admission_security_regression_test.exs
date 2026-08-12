@@ -74,7 +74,7 @@ defmodule Arbor.Memory.GoalStoreMutationAdmissionSecurityRegressionTest do
     assert {:ok, ^goal} = GoalStore.add_goal_tainted(agent_id, goal, taint)
     await_idle_roots!(agent_id)
 
-    drain_task =
+    {drain_task, later} =
       with_provenance_unregistered(fn ->
         assert {:ok, _noted} = GoalStore.add_note_tainted(agent_id, goal.id, "arm", taint)
 
@@ -88,11 +88,11 @@ defmodule Arbor.Memory.GoalStoreMutationAdmissionSecurityRegressionTest do
         assert {:error, :store_unavailable} = GoalStore.add_goal(agent_id, later)
         assert durable_absent?(agent_id, later.id)
         assert [] = :ets.lookup(@goals_ets, {agent_id, later.id})
-        assert {:ok, ids} = Provenance.list_item_ids(:goal, agent_id)
-        refute later.id in ids
-        task
+        {task, later}
       end)
 
+    assert {:ok, ids} = Provenance.list_item_ids(:goal, agent_id)
+    refute later.id in ids
     assert :ok = GoalStore.delete_agent_content(agent_id)
     assert {:ok, _fence} = Task.await(drain_task, 10_000)
   end
@@ -139,15 +139,15 @@ defmodule Arbor.Memory.GoalStoreMutationAdmissionSecurityRegressionTest do
 
   defp durable_present?(agent_id, goal_id) do
     match?(
-      {:ok, _value, _status},
-      MemoryStore.load_tainted_with_status("goals", durable_key(agent_id, goal_id))
+      {:ok, _value, _status, _record, _location},
+      MemoryStore.load_tainted_authoritative_with_status("goals", durable_key(agent_id, goal_id))
     )
   end
 
   defp durable_absent?(agent_id, goal_id) do
     match?(
       {:error, :not_found},
-      MemoryStore.load_tainted_with_status("goals", durable_key(agent_id, goal_id))
+      MemoryStore.load_tainted_authoritative_with_status("goals", durable_key(agent_id, goal_id))
     )
   end
 

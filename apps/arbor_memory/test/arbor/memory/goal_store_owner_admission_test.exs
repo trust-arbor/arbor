@@ -163,8 +163,11 @@ defmodule Arbor.Memory.GoalStoreOwnerAdmissionTest do
     assert [] = :ets.lookup(@goals_ets, {agent_a, goal_a.id})
     assert [{_key, ^goal_b}] = :ets.lookup(@goals_ets, {agent_b, goal_b.id})
 
-    assert {:ok, _value, _status} =
-             MemoryStore.load_tainted_with_status("goals", "#{agent_a}:#{goal_a.id}")
+    assert {:ok, _value, _status, _record, _location} =
+             MemoryStore.load_tainted_authoritative_with_status(
+               "goals",
+               "#{agent_a}:#{goal_a.id}"
+             )
   end
 
   test "legacy state with an open gate acquires a fresh deferred root before repair" do
