@@ -913,6 +913,7 @@ defmodule Arbor.Memory.GoalStore do
           agent_id,
           lease
         )
+
       {:reply, reply, state}
     else
       false -> {:reply, {:error, :invalid_provenance}, state}
@@ -969,7 +970,8 @@ defmodule Arbor.Memory.GoalStore do
           {:reply, error, finish_public_root(state, agent_id, lease, :ack)}
 
         _ ->
-          {:reply, {:error, :persistence_failed}, finish_public_root(state, agent_id, lease, :ack)}
+          {:reply, {:error, :persistence_failed},
+           finish_public_root(state, agent_id, lease, :ack)}
       end
     else
       false -> {:reply, {:error, :invalid_provenance}, state}
@@ -1025,6 +1027,7 @@ defmodule Arbor.Memory.GoalStore do
          {:ok, lease} <- admit_fresh(agent_id) do
       {reply, state} =
         finish_agent_reconcile(do_reload_for_agent(agent_id), state, agent_id, lease)
+
       {:reply, reply, state}
     else
       false -> {:reply, {:error, :invalid_provenance}, state}
@@ -1066,7 +1069,8 @@ defmodule Arbor.Memory.GoalStore do
           {:reply, error, finish_public_root(state, agent_id, lease, :ack)}
 
         _ ->
-          {:reply, {:error, :invalid_provenance}, finish_public_root(state, agent_id, lease, :ack)}
+          {:reply, {:error, :invalid_provenance},
+           finish_public_root(state, agent_id, lease, :ack)}
       end
     else
       {:error, _reason} = error -> {:reply, error, state}
