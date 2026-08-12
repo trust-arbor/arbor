@@ -40,7 +40,9 @@ defmodule Arbor.Memory.AsyncWriterEmbedTest do
     def destroy(_agent_id, _opts), do: :ok
 
     defp receipt(agent_id, closed) do
-      namespace = Map.get(closed, :source_namespace) || Map.get(closed, :namespace, "async_writer")
+      namespace =
+        Map.get(closed, :source_namespace) || Map.get(closed, :namespace, "async_writer")
+
       key = Map.get(closed, :source_key) || Map.get(closed, :key, "unknown")
 
       %{

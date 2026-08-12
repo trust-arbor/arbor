@@ -77,7 +77,9 @@ defmodule Arbor.Memory.AsyncWriterPersistTest do
     @impl true
     def list(_opts), do: {:ok, []}
     @impl true
-    def compare_and_swap(_key, _expected, _replacement, _opts), do: raise("forced persist exception")
+    def compare_and_swap(_key, _expected, _replacement, _opts),
+      do: raise("forced persist exception")
+
     @impl true
     def durability_class(_opts), do: :node_restart
   end

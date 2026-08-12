@@ -497,6 +497,7 @@ defmodule Arbor.Memory.IdentityConsolidator do
   def save_self_knowledge(agent_id, %SelfKnowledge{} = sk) do
     ensure_ets_exists()
     :ets.insert(@self_knowledge_ets, {agent_id, sk})
+
     MemoryStore.persist_async(@self_knowledge_namespace, agent_id, SelfKnowledge.serialize(sk),
       agent_id: agent_id
     )

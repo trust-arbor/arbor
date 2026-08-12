@@ -64,7 +64,8 @@ defmodule Arbor.Memory.AsyncWriterAdmissionSecurityRegressionTest do
   end
 
   setup do
-    {:ok, counters} = Agent.start_link(fn -> %{provider: 0, vector: 0} end, name: :aw_sec_counters)
+    {:ok, counters} =
+      Agent.start_link(fn -> %{provider: 0, vector: 0} end, name: :aw_sec_counters)
 
     original_seam = Application.get_env(:arbor_memory, :strict_vector_seam)
     Application.put_env(:arbor_memory, :strict_vector_seam, CountingSeam)

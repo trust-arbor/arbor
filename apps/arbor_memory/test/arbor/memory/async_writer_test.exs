@@ -64,7 +64,9 @@ defmodule Arbor.Memory.AsyncWriterTest do
     end)
 
     assert {:error, :invalid_config} =
-             WriterSupervisor.start_link(name: :"aw_bad_max_#{System.unique_integer([:positive])}")
+             WriterSupervisor.start_link(
+               name: :"aw_bad_max_#{System.unique_integer([:positive])}"
+             )
   end
 
   test "rejects invalid persist_async options without a worker" do
@@ -87,7 +89,9 @@ defmodule Arbor.Memory.AsyncWriterTest do
 
     try do
       assert {:error, {:memory_store, :async_writer, :unavailable}} =
-               MemoryStore.persist_async("async_writer", "missing", %{"v" => 1}, agent_id: agent_id)
+               MemoryStore.persist_async("async_writer", "missing", %{"v" => 1},
+                 agent_id: agent_id
+               )
 
       assert {:error, {:memory_store, :async_writer, :unavailable}} =
                MemoryStore.embed_async("async_writer", "missing", "content",
