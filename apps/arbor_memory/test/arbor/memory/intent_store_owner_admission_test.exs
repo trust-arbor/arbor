@@ -126,34 +126,57 @@ defmodule Arbor.Memory.IntentStoreOwnerAdmissionTest do
     end
   end
 
-  test "caught paths cannot strand a root in a live owner" do
+  test "legacy retry exception settles the post-acquisition root" do
     agent_id = unique_agent("catch")
     taint = taint(:trusted, :internal, "intent_owner_catch")
     intent = Intent.think("catch target")
     assert {:ok, ^intent} = IntentStore.record_intent_tainted(agent_id, intent, taint)
-
-    with_provenance_unregistered(fn ->
-      extra = Intent.think("arm catch")
-      assert {:ok, ^extra} = IntentStore.record_intent_tainted(agent_id, extra, taint)
-      assert OwnerRoots.held_count(owner_roots(), agent_id) > 0
-    end)
+    await_idle_roots!(agent_id)
+    assert {:ok, %{gate: :open, active_roots: 0}} = MutationAdmission.status(agent_id)
 
     pid = Process.whereis(IntentStore)
     original = :sys.get_state(pid)
 
     :sys.replace_state(pid, fn state ->
-      Map.delete(state, :buffer_size)
+      pending = Map.get(state, :pending_projection, %{})
+
+      state
+      |> Map.delete(:owner_roots)
+      |> Map.delete(:buffer_size)
+      |> Map.put(:pending_projection, Map.put(pending, agent_id, 1))
     end)
 
     send(pid, {:converge_projection, agent_id})
     _ = :sys.get_state(pid)
 
     assert Process.whereis(IntentStore) == pid
+    assert Process.alive?(pid)
     assert OwnerRoots.held_count(owner_roots(), agent_id) == 0
     assert {:ok, %{active_roots: 0}} = MutationAdmission.status(agent_id)
 
     :sys.replace_state(pid, fn state ->
       Map.put(state, :buffer_size, Map.get(original, :buffer_size, 100))
+    end)
+  end
+
+  test "no-op with unavailable projection acks only the fresh root" do
+    agent_id = unique_agent("noop")
+    taint = taint(:trusted, :internal, "intent_owner_noop")
+    intent = Intent.think("noop seed")
+    assert {:ok, ^intent} = IntentStore.record_intent_tainted(agent_id, intent, taint)
+    await_idle_roots!(agent_id)
+
+    with_provenance_unregistered(fn ->
+      extra = Intent.think("arm older roots")
+      assert {:ok, ^extra} = IntentStore.record_intent_tainted(agent_id, extra, taint)
+      older_count = OwnerRoots.held_count(owner_roots(), agent_id)
+      assert older_count >= 1
+      older_pending = Map.fetch!(:sys.get_state(IntentStore).pending_projection, agent_id)
+
+      assert 0 = IntentStore.unlock_stale_intents(agent_id, 60_000)
+      assert OwnerRoots.held_count(owner_roots(), agent_id) == older_count
+      assert Map.fetch!(:sys.get_state(IntentStore).pending_projection, agent_id) == older_pending
+      assert match?({:ok, %{active_roots: n}} when n == older_count, MutationAdmission.status(agent_id))
     end)
   end
 

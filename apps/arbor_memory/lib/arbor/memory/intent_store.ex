@@ -929,23 +929,8 @@ defmodule Arbor.Memory.IntentStore do
         {:noreply, state}
 
       {:ok, attempts} ->
-        case OwnerRoots.ensure_deferred_root(owner_roots(state), agent_id) do
-          {:ok, roots} ->
-            state = put_owner_roots(state, roots)
-            run_pending_projection_convergence(agent_id, attempts, state)
-
-          {:error, _reason} ->
-            {:noreply, clear_pending_projection_only(state, agent_id)}
-        end
+        converge_with_deferred_root(agent_id, attempts, state)
     end
-  rescue
-    _ ->
-      state = normalize_state(state)
-      {:noreply, settle_roots(clear_pending_projection_only(state, agent_id), agent_id)}
-  catch
-    _, _ ->
-      state = normalize_state(state)
-      {:noreply, settle_roots(clear_pending_projection_only(state, agent_id), agent_id)}
   end
 
   def handle_info(_message, state), do: {:noreply, normalize_state(state)}
@@ -965,6 +950,26 @@ defmodule Arbor.Memory.IntentStore do
 
   @impl true
   def code_change(_old_vsn, state, _extra), do: {:ok, normalize_state(state)}
+
+  defp converge_with_deferred_root(agent_id, attempts, state) do
+    case OwnerRoots.ensure_deferred_root(owner_roots(state), agent_id) do
+      {:error, _reason} ->
+        {:noreply, clear_pending_projection_only(state, agent_id)}
+
+      {:ok, roots} ->
+        admitted = put_owner_roots(state, roots)
+
+        try do
+          run_pending_projection_convergence(agent_id, attempts, admitted)
+        rescue
+          _ ->
+            {:noreply, settle_roots(clear_pending_projection_only(admitted, agent_id), agent_id)}
+        catch
+          _, _ ->
+            {:noreply, settle_roots(clear_pending_projection_only(admitted, agent_id), agent_id)}
+        end
+    end
+  end
 
   defp run_pending_projection_convergence(agent_id, attempts, state) do
     result =
@@ -1114,8 +1119,7 @@ defmodule Arbor.Memory.IntentStore do
     case result do
       {:ok, value, :projected, :commit} -> {:ok, value, :settle}
       {:ok, value, :convergence_pending, :commit} -> {:ok, value, :defer}
-      {:ok, value, :projected, :noop} -> {:ok, value, :ack}
-      {:ok, value, :convergence_pending, :noop} -> {:ok, value, :defer}
+      {:ok, value, _projection, :noop} -> {:ok, value, :ack}
       {:error, reason} when reason in [:not_found, :not_lockable] -> {:error, {:error, reason}, :ack}
       {:error, reason} -> {:error, public_commit_error(reason), :ack}
     end
