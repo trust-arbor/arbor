@@ -61,6 +61,12 @@ defmodule Arbor.Actions.MemoryTestBootstrapTest do
       on_exit(fn -> Arbor.Memory.cleanup_for_agent(agent_id) end)
     end
 
+    test "default start is admission-ready" do
+      assert :ok = TestBootstrap.start!()
+      assert {:ok, %{durability: :node_restart}} = Arbor.Memory.MutationAdmission.readiness()
+      assert is_pid(Process.whereis(Arbor.Memory.AsyncWriter.Supervisor))
+    end
+
     test "GoalStore owns its ETS table, so no external table-owner is needed" do
       # arbor_agent used to hand-roll a MemoryGoalsTableOwner purely to create
       # this table. Starting the real store is what makes that unnecessary.

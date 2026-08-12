@@ -58,6 +58,9 @@ defmodule Arbor.Memory.TestBootstrap do
 
   require Logger
 
+  alias Arbor.Memory.Config
+  alias Arbor.Memory.TestBootstrap.AdmissionBackend
+
   # Mirrors Arbor.Memory.Application's ensure_ets/1 calls. `:arbor_memory_goals`
   # is intentionally absent — GoalStore creates it in its own init/1.
   @tables [
@@ -89,6 +92,8 @@ defmodule Arbor.Memory.TestBootstrap do
   ## Options
 
   - `:authority` — when `false`, skip starting `:arbor_memory_durable`.
+  - `:admission` — when `false`, skip mutation admission, the bootstrap
+    admission backend, and the async writer supervisor. Default `true`.
 
   Pass `authority: false` in an app whose tests need to **own** that name
   per-test. `:arbor_memory_durable` is a single global registered name, so a
@@ -109,6 +114,7 @@ defmodule Arbor.Memory.TestBootstrap do
     if Process.whereis(Arbor.Memory.Supervisor) do
       ensure_tables()
       if Keyword.get(opts, :authority, true), do: ensure_authority!()
+      if Keyword.get(opts, :admission, true), do: ensure_admission!()
       ensure_children!()
       :ok
     else
@@ -154,17 +160,58 @@ defmodule Arbor.Memory.TestBootstrap do
     end
   end
 
+  defp ensure_admission! do
+    for spec <- admission_children() do
+      start_optional_child!(spec)
+    end
+
+    case Arbor.Memory.MutationAdmission.readiness() do
+      {:ok, %{durability: :node_restart}} ->
+        :ok
+
+      {:error, reason} ->
+        raise "TestBootstrap: mutation admission not ready: #{inspect(reason)}"
+    end
+
+    if Process.whereis(Arbor.Memory.AsyncWriter.Supervisor) do
+      :ok
+    else
+      raise "TestBootstrap: async writer supervisor is not running"
+    end
+  end
+
   defp ensure_children! do
     for spec <- children() do
-      case Supervisor.start_child(Arbor.Memory.Supervisor, spec) do
-        {:ok, _} -> :ok
-        {:error, {:already_started, _}} -> :ok
-        {:error, :already_present} -> :ok
-        {:error, reason} -> raise "TestBootstrap: #{inspect(spec)} failed: #{inspect(reason)}"
-      end
+      start_optional_child!(spec)
     end
 
     :ok
+  end
+
+  defp start_optional_child!(spec) do
+    case Supervisor.start_child(Arbor.Memory.Supervisor, spec) do
+      {:ok, _} -> :ok
+      {:error, {:already_started, _}} -> :ok
+      {:error, :already_present} -> :ok
+      {:error, reason} -> raise "TestBootstrap: #{inspect(spec)} failed: #{inspect(reason)}"
+    end
+  end
+
+  defp admission_children do
+    [
+      {AdmissionBackend, [agent_name: AdmissionBackend.name(), allow_test_bootstrap: true]},
+      {Registry, keys: :unique, name: Arbor.Memory.MutationAdmission.Registry},
+      {Arbor.Memory.MutationAdmission.GuardianSupervisor, []},
+      {Arbor.Memory.MutationAdmission,
+       [
+         target: %{
+           namespace: Config.fixed_mutation_admission_namespace(),
+           backend: AdmissionBackend,
+           opts: [agent_name: AdmissionBackend.name()]
+         }
+       ]},
+      {Arbor.Memory.AsyncWriter.Supervisor, []}
+    ]
   end
 
   defp children do

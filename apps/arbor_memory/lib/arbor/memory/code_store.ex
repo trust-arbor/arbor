@@ -367,7 +367,9 @@ defmodule Arbor.Memory.CodeStore do
       "metadata" => entry.metadata
     }
 
-    MemoryStore.persist_async(@namespace, "#{agent_id}:#{entry.id}", serialized)
+    MemoryStore.persist_async(@namespace, "#{agent_id}:#{entry.id}", serialized,
+      agent_id: agent_id
+    )
   end
 
   defp deserialize_entry(map) do

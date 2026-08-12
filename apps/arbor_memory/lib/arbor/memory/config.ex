@@ -23,6 +23,8 @@ defmodule Arbor.Memory.Config do
   @max_cas_backoff_base_ms 50
   @default_drain_timeout_ms 5_000
   @max_drain_timeout_ms 60_000
+  @default_async_writer_max_children 256
+  @max_async_writer_max_children 4096
 
   @type event_log_target :: %{name: atom(), backend: module(), opts: keyword()}
 
@@ -174,6 +176,18 @@ defmodule Arbor.Memory.Config do
   @doc "Hard ceiling for drain `:timeout_ms` (finding 2/7)."
   @spec mutation_admission_max_drain_timeout_ms() :: pos_integer()
   def mutation_admission_max_drain_timeout_ms, do: @max_drain_timeout_ms
+
+  @spec async_writer_max_children() :: {:ok, pos_integer()} | {:error, :invalid_config}
+  def async_writer_max_children do
+    case Application.get_env(
+           @app,
+           :async_writer_max_children,
+           @default_async_writer_max_children
+         ) do
+      n when is_integer(n) and n > 0 and n <= @max_async_writer_max_children -> {:ok, n}
+      _ -> {:error, :invalid_config}
+    end
+  end
 
   defp valid_backend_opts_shape?(opts) do
     keys = Keyword.keys(opts)

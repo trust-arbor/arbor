@@ -55,6 +55,24 @@ defmodule Arbor.Memory.ConfigTest do
              {:error, :invalid_config}
   end
 
+  test "async writer max children is bounded" do
+    original = Application.fetch_env(:arbor_memory, :async_writer_max_children)
+
+    on_exit(fn -> restore_env(:async_writer_max_children, original) end)
+
+    Application.delete_env(:arbor_memory, :async_writer_max_children)
+    assert Config.async_writer_max_children() == {:ok, 256}
+
+    Application.put_env(:arbor_memory, :async_writer_max_children, 1)
+    assert Config.async_writer_max_children() == {:ok, 1}
+
+    Application.put_env(:arbor_memory, :async_writer_max_children, 0)
+    assert Config.async_writer_max_children() == {:error, :invalid_config}
+  end
+
+  defp restore_env(key, {:ok, value}), do: Application.put_env(:arbor_memory, key, value)
+  defp restore_env(key, :error), do: Application.delete_env(:arbor_memory, key)
+
   test "rejects unknown, duplicate, and ambiguous target fields" do
     assert {:error, :invalid_event_log_target} =
              Config.normalize_event_log_target(%{

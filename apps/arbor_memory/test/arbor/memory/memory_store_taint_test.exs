@@ -388,7 +388,8 @@ defmodule Arbor.Memory.MemoryStoreTaintTest do
 
       assert :ok =
                MemoryStore.persist_async("write", "unavailable-valid", %{"value" => "valid"},
-                 taint: %Taint{level: :derived}
+                 taint: %Taint{level: :derived},
+                 agent_id: "taint_unavailable_agent"
                )
     end
 
@@ -409,7 +410,11 @@ defmodule Arbor.Memory.MemoryStoreTaintTest do
       data = %{"secret" => "async-do-not-leak"}
       malformed = %Taint{level: :not_a_level}
 
-      error = MemoryStore.persist_async("async", "malformed", data, taint: malformed)
+      error =
+        MemoryStore.persist_async("async", "malformed", data,
+          taint: malformed,
+          agent_id: "taint_malformed_agent"
+        )
 
       assert {:error, {:memory_store, :invalid_durable_provenance, _reason}} = error
       refute inspect(error) =~ "async-do-not-leak"
@@ -419,7 +424,8 @@ defmodule Arbor.Memory.MemoryStoreTaintTest do
     test "persist_async keeps valid writes fire-and-forget" do
       assert :ok =
                MemoryStore.persist_async("async", "valid", %{"value" => "written"},
-                 taint: %Taint{level: :derived}
+                 taint: %Taint{level: :derived},
+                 agent_id: "taint_async_valid_agent"
                )
 
       assert eventually(fn ->

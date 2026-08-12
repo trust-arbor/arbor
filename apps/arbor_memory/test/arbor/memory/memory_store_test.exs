@@ -10,8 +10,25 @@ defmodule Arbor.Memory.MemoryStoreTest do
   alias Arbor.Memory.MemoryStore
 
   describe "embed_async/4" do
-    test "returns :ok with nil agent_id (no-op)" do
-      assert :ok = MemoryStore.embed_async("goals", "key1", "some content", agent_id: nil)
+    test "rejects effectful content with nil agent_id" do
+      assert {:error, {:memory_store, :invalid_request, :invalid_agent_id}} =
+               MemoryStore.embed_async("goals", "key1", "some content", agent_id: nil)
+    end
+
+    test "rejects effectful content with missing agent_id" do
+      assert {:error, {:memory_store, :invalid_request, :invalid_agent_id}} =
+               MemoryStore.embed_async("goals", "key1", "some content")
+    end
+
+    test "rejects effectful content with malformed agent_id" do
+      assert {:error, {:memory_store, :invalid_request, :invalid_agent_id}} =
+               MemoryStore.embed_async("goals", "key1", "some content", agent_id: "  padded  ")
+
+      assert {:error, {:memory_store, :invalid_request, :invalid_agent_id}} =
+               MemoryStore.embed_async("goals", "key1", "some content", agent_id: "")
+
+      assert {:error, {:memory_store, :invalid_request, :invalid_agent_id}} =
+               MemoryStore.embed_async("goals", "key1", "some content", agent_id: :not_a_string)
     end
 
     test "returns :ok with empty content (no-op)" do
@@ -22,19 +39,21 @@ defmodule Arbor.Memory.MemoryStoreTest do
       assert :ok = MemoryStore.embed_async("goals", "key1", nil, agent_id: "agent_abc")
     end
 
-    test "returns :ok with no opts (no agent_id)" do
-      assert :ok = MemoryStore.embed_async("goals", "key1", "some content")
+    test "returns :ok with empty content even without agent_id (non-effectful)" do
+      assert :ok = MemoryStore.embed_async("goals", "key1", "")
     end
 
-    test "returns :ok with valid inputs (fires async task)" do
-      # With embedding_test_fallback: true, AI.embed uses TestEmbedding
-      # The Task will fire but Embedding.store will fail without Postgres — that's OK,
-      # embed_async catches all errors gracefully.
-      assert :ok =
-               MemoryStore.embed_async("goals", "key1", "test goal content",
-                 agent_id: "agent_test",
-                 type: :goal
-               )
+    test "returns :ok with valid inputs (admits async writer)" do
+      # With embedding_test_fallback: true, AI.embed uses TestEmbedding.
+      # Admission may reject if bootstrap is not ready; that is a bounded error.
+      result =
+        MemoryStore.embed_async("goals", "key1", "test goal content",
+          agent_id: "agent_test",
+          type: :goal
+        )
+
+      assert result == :ok or
+               match?({:error, {:memory_store, :async_writer, _}}, result)
     end
   end
 

@@ -4,6 +4,7 @@
 Code.require_file("support/durable_graph_authority.ex", __DIR__)
 Code.require_file("support/durable_event_log.ex", __DIR__)
 Code.require_file("support/mutation_admission_fake_backend.ex", __DIR__)
+Code.require_file("support/async_writer_hang_backend.ex", __DIR__)
 Code.require_file("support/signals_checkpoint_fake.ex", __DIR__)
 
 # Add children to the empty app supervisor (start_children: false leaves it empty)
@@ -45,6 +46,11 @@ for child <- [
     ] do
   Supervisor.start_child(Arbor.Signals.Supervisor, child)
 end
+
+# Admission + async writer without taking :arbor_memory_durable (graph tests
+# own that name via DurableGraphAuthority). Injected target only — no global
+# mutation_admission_backend fixture config.
+:ok = Arbor.Memory.TestBootstrap.start!(authority: false)
 
 # Exclude database tests by default (require postgres + pgvector)
 # Run them with: mix test --include database

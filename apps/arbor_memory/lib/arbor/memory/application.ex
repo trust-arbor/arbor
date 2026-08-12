@@ -31,6 +31,7 @@ defmodule Arbor.Memory.Application do
             {Registry, keys: :unique, name: Arbor.Memory.MutationAdmission.Registry},
             {Arbor.Memory.MutationAdmission.GuardianSupervisor, []},
             {Arbor.Memory.MutationAdmission, []},
+            {Arbor.Memory.AsyncWriter.Supervisor, []},
             {Arbor.Memory.ArchiveCursorSigner, []},
             {Arbor.Memory.Provenance, []},
             {Arbor.Memory.Proposal.Store, []},

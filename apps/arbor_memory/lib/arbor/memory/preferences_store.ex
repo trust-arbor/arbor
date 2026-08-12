@@ -300,19 +300,9 @@ defmodule Arbor.Memory.PreferencesStore do
   # ===========================================================================
 
   defp persist_async(agent_id, prefs) do
-    Task.start(fn ->
-      try do
-        if store_available?() do
-          data = Preferences.serialize(prefs)
-          MemoryStore.persist(@namespace, agent_id, data)
-        end
-      rescue
-        e ->
-          Logger.debug(
-            "[PreferencesStore] Persist failed for #{agent_id}: #{Exception.message(e)}"
-          )
-      end
-    end)
+    data = Preferences.serialize(prefs)
+    _ = MemoryStore.persist_async(@namespace, agent_id, data, agent_id: agent_id)
+    :ok
   end
 
   defp store_available? do

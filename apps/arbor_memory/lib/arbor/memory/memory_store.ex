@@ -16,11 +16,14 @@ defmodule Arbor.Memory.MemoryStore do
   alias Arbor.Contracts.Security.TaintEnvelope
 
   alias Arbor.Memory.{
+    AsyncWriter,
     EmbeddingEvidence,
     MemoryStoreIdentity,
     StrictEmbeddingInput,
     StrictVectorSeam
   }
+
+  alias Arbor.Memory.AsyncWriter.Operation
 
   alias Arbor.Persistence
   alias Arbor.Persistence.BufferedStore
@@ -94,9 +97,10 @@ defmodule Arbor.Memory.MemoryStore do
   @doc """
   Persist a record asynchronously.
 
-  Spawns a Task to write. Backend failures remain fire-and-forget, while
-  supplied taint or payload validation failures return a bounded error before
-  spawning. Accepts the same options as `persist/4`.
+  Admits a temporary worker that acquires the exact-agent mutation lease
+  before writing. Supplied taint, payload, or agent_id validation failures
+  return a bounded error before any worker is started. Accepts the same
+  options as `persist/4`, plus required `:agent_id`.
   """
   @spec persist_async(String.t(), String.t(), term(), keyword()) :: :ok | {:error, term()}
   def persist_async(namespace, key, data, opts \\ [])
@@ -106,11 +110,23 @@ defmodule Arbor.Memory.MemoryStore do
     if keyword_options?(opts) do
       case build_taint_metadata(data, opts) do
         {:ok, metadata} ->
-          if available?() do
-            Task.start(fn -> persist_record(namespace, key, data, metadata) end)
-            :ok
-          else
-            :ok
+          agent_id = Keyword.get(opts, :agent_id)
+
+          case Operation.validate_agent_id(agent_id) do
+            :ok ->
+              AsyncWriter.start(
+                {:persist,
+                 %{
+                   agent_id: agent_id,
+                   namespace: namespace,
+                   key: key,
+                   data: data,
+                   metadata: metadata
+                 }}
+              )
+
+            :error ->
+              {:error, {:memory_store, :invalid_request, :invalid_agent_id}}
           end
 
         {:error, _reason} = error ->
@@ -123,6 +139,28 @@ defmodule Arbor.Memory.MemoryStore do
 
   def persist_async(_namespace, _key, _data, _opts),
     do: {:error, {:memory_store, :invalid_request, :invalid_arguments}}
+
+  @doc false
+  @spec persist_confirmed(String.t(), String.t(), term(), map()) ::
+          {:ok, :acknowledged}
+          | {:error, :unavailable | :conflict | :malformed | :indeterminate | :exception | :exit}
+  def persist_confirmed(namespace, key, data, metadata)
+      when is_binary(namespace) and is_binary(key) and is_map(metadata) do
+    if available?() do
+      composite_key = "#{namespace}:#{key}"
+      record = Record.new(composite_key, data, id: "memory:#{composite_key}", metadata: metadata)
+      persist_confirmed_record(composite_key, record)
+    else
+      {:error, :unavailable}
+    end
+  rescue
+    _ -> {:error, :exception}
+  catch
+    :exit, _ -> {:error, :exit}
+    :throw, _ -> {:error, :exception}
+  end
+
+  def persist_confirmed(_namespace, _key, _data, _metadata), do: {:error, :malformed}
 
   @doc """
   Load a single record by namespace and key.
@@ -639,11 +677,12 @@ defmodule Arbor.Memory.MemoryStore do
   @doc """
   Queue an embedding for a memory record (async).
 
-  Generates an embedding via `Arbor.AI.embed/2` and stores it through the
-  strict vector seam. Logical identity is exactly
-  `{agent_id, namespace, key}`; `VectorRecord.id` is a deterministic
-  `ms_` digest. Fire-and-forget — provider failures are logged at debug
-  level. An invalid supplied taint returns a bounded error before spawning.
+  Admits a temporary worker that acquires the exact-agent mutation lease
+  before embedding. Logical identity is exactly `{agent_id, namespace, key}`;
+  `VectorRecord.id` is a deterministic `ms_` digest. Non-effectful content
+  (empty or non-binary) remains a no-op. Effectful content requires one exact
+  valid `:agent_id` or returns a bounded invalid-request error. Invalid
+  supplied taint returns a bounded error before any worker is started.
 
   ## Parameters
 
@@ -651,7 +690,7 @@ defmodule Arbor.Memory.MemoryStore do
   - `key` - Record key (e.g., "agent_123:goal_456")
   - `content` - Text content to embed
   - `opts` - Additional metadata for the embedding
-    - `:agent_id` - Agent that owns this memory
+    - `:agent_id` - Required for effectful content; agent that owns this memory
     - `:type` - Semantic type hint (e.g., :goal, :thought, :intent)
     - `:taint` - Source-owned taint only (never from payload keys)
   """
@@ -666,39 +705,29 @@ defmodule Arbor.Memory.MemoryStore do
 
       with {:ok, type} <- normalize_embedding_type(type),
            {:ok, taint} <- resolve_source_taint(opts) do
-        if is_binary(agent_id) and agent_id != "" and is_binary(content) and content != "" do
-          Task.start(fn ->
-            try do
-              evidence =
-                case Arbor.AI.embed(content) do
-                  {:ok, result} ->
-                    case EmbeddingEvidence.from_provider_result(result) do
-                      {:ok, validated} -> validated
-                      {:error, _} -> EmbeddingEvidence.local_hash_fallback(content)
-                    end
+        cond do
+          not effectful_embed_content?(content) ->
+            :ok
 
-                  {:error, _} ->
-                    EmbeddingEvidence.local_hash_fallback(content)
-                end
+          true ->
+            case Operation.validate_agent_id(agent_id) do
+              :ok ->
+                AsyncWriter.start(
+                  {:embed,
+                   %{
+                     agent_id: agent_id,
+                     namespace: namespace,
+                     key: key,
+                     content: content,
+                     type: type,
+                     taint: taint
+                   }}
+                )
 
-              write_memory_store_embedding(
-                agent_id,
-                namespace,
-                key,
-                content,
-                type,
-                evidence,
-                taint
-              )
-            rescue
-              e -> Logger.debug("embed_async error: #{Exception.message(e)}")
-            catch
-              kind, reason -> Logger.debug("embed_async #{kind}: #{inspect(reason)}")
+              :error ->
+                {:error, {:memory_store, :invalid_request, :invalid_agent_id}}
             end
-          end)
         end
-
-        :ok
       else
         {:error, _reason} = error -> error
       end
@@ -709,6 +738,9 @@ defmodule Arbor.Memory.MemoryStore do
 
   def embed_async(_namespace, _key, _content, _opts),
     do: {:error, {:memory_store, :invalid_request, :invalid_arguments}}
+
+  defp effectful_embed_content?(content) when is_binary(content) and content != "", do: true
+  defp effectful_embed_content?(_), do: false
 
   @doc """
   Search memory by semantic similarity via the strict ANN seam.
@@ -1000,6 +1032,48 @@ defmodule Arbor.Memory.MemoryStore do
     }
   end
 
+  @doc false
+  @spec embed_confirmed(String.t(), String.t(), String.t(), String.t(), term(), term()) ::
+          {:ok, :acknowledged} | {:error, atom() | term()}
+  def embed_confirmed(agent_id, namespace, key, content, type, taint) do
+    evidence =
+      case Arbor.AI.embed(content) do
+        {:ok, result} ->
+          case EmbeddingEvidence.from_provider_result(result) do
+            {:ok, validated} -> validated
+            {:error, _} -> EmbeddingEvidence.local_hash_fallback(content)
+          end
+
+        {:error, _} ->
+          EmbeddingEvidence.local_hash_fallback(content)
+
+        _other ->
+          EmbeddingEvidence.local_hash_fallback(content)
+      end
+
+    case write_memory_store_embedding(
+           agent_id,
+           namespace,
+           key,
+           content,
+           type,
+           evidence,
+           taint
+         ) do
+      :ok -> {:ok, :acknowledged}
+      {:ok, _receipt} -> {:ok, :acknowledged}
+      {:error, :malformed_persistence_result} -> {:error, :malformed}
+      {:error, :persistence_indeterminate} -> {:error, :indeterminate}
+      {:error, reason} -> {:error, reason}
+      _other -> {:error, :indeterminate}
+    end
+  rescue
+    _ -> {:error, :exception}
+  catch
+    :exit, _ -> {:error, :exit}
+    _, _ -> {:error, :exception}
+  end
+
   defp write_memory_store_embedding(agent_id, namespace, key, content, type, evidence, taint) do
     seam = StrictVectorSeam.resolve()
     identity = {agent_id, namespace, key, MemoryStoreIdentity.row_id(agent_id, namespace, key)}
@@ -1023,6 +1097,7 @@ defmodule Arbor.Memory.MemoryStore do
     else
       {:error, reason} ->
         Logger.debug("strict embed write failed for #{namespace}/#{key}: #{inspect(reason)}")
+        {:error, reason}
     end
   end
 
@@ -1227,6 +1302,66 @@ defmodule Arbor.Memory.MemoryStore do
       end
     else
       :ok
+    end
+  end
+
+  defp persist_confirmed_record(physical_key, replacement) do
+    case Persistence.buffered_store_authoritative_get(@store_name, physical_key) do
+      {:error, :not_found} ->
+        confirmed_compare_and_swap(physical_key, :not_found, replacement)
+
+      {:ok, %Record{} = current} ->
+        if current_namespaced_record?(current, physical_key) and
+             not critical_authority_record?(current) do
+          confirmed_compare_and_swap(physical_key, {:value, current}, replacement)
+        else
+          {:error, :malformed}
+        end
+
+      {:ok, _other} ->
+        {:error, :malformed}
+
+      {:error, :outcome_unknown} ->
+        {:error, :indeterminate}
+
+      {:error, _reason} ->
+        {:error, :unavailable}
+
+      _other ->
+        {:error, :indeterminate}
+    end
+  end
+
+  defp confirmed_compare_and_swap(physical_key, expected, replacement) do
+    case Persistence.buffered_store_acknowledged_compare_and_swap(
+           @store_name,
+           physical_key,
+           expected,
+           replacement
+         ) do
+      {:ok, %Record{}} ->
+        {:ok, :acknowledged}
+
+      {:ok, _other} ->
+        {:error, :indeterminate}
+
+      {:error, :conflict} ->
+        {:error, :conflict}
+
+      {:error, :key_mismatch} ->
+        {:error, :malformed}
+
+      {:error, :outcome_unknown} ->
+        {:error, :indeterminate}
+
+      {:error, :inventory_limit_exceeded} ->
+        {:error, :unavailable}
+
+      {:error, _reason} ->
+        {:error, :unavailable}
+
+      _other ->
+        {:error, :indeterminate}
     end
   end
 
