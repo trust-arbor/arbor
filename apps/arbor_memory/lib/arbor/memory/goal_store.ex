@@ -27,6 +27,7 @@ defmodule Arbor.Memory.GoalStore do
   alias Arbor.Contracts.Persistence.Record
   alias Arbor.Contracts.Security.{Taint, TaintedValue, TaintEnvelope}
   alias Arbor.Memory.{MemoryStore, Provenance, Signals}
+  alias Arbor.Memory.MutationAdmission.OwnerRoots
 
   require Logger
 
@@ -855,7 +856,7 @@ defmodule Arbor.Memory.GoalStore do
   @impl true
   def init(_opts) do
     ensure_ets_table()
-    {projected_ids, pending_convergence} = load_goals_from_authoritative_store()
+    {projected_ids, pending_convergence, owner_roots} = load_goals_from_authoritative_store()
 
     state = %{
       projected_ids: projected_ids,
@@ -865,7 +866,8 @@ defmodule Arbor.Memory.GoalStore do
       # convergence. Tokens are never reused; active entries exist only while
       # deferred work is armed.
       owner_generation: 0,
-      active_tokens: %{}
+      active_tokens: %{},
+      owner_roots: owner_roots
     }
 
     {:ok, schedule_pending_convergence(state)}
@@ -873,121 +875,173 @@ defmodule Arbor.Memory.GoalStore do
 
   @impl true
   def handle_call({:add_goal, agent_id, goal, _payload, taint}, _from, state) do
-    with :ok <- ensure_projection_slot(state, agent_id, goal.id) do
+    state = normalize_state(state)
+
+    with :ok <- ensure_projection_slot(state, agent_id, goal.id),
+         {:ok, lease} <- admit_fresh(agent_id) do
       result = do_add_goal(agent_id, goal, taint, true)
-      {reply, state} = track_goal_write_result(result, state, agent_id, goal.id)
-      {:reply, reply, state}
+      {reply, state, disposition} = track_goal_write_result(result, state, agent_id, goal.id)
+      {:reply, reply, finish_public_root(state, agent_id, lease, disposition)}
     else
       {:error, _reason} = error -> {:reply, error, state}
     end
   end
 
   def handle_call({:get_goal_tainted, agent_id, goal_id}, _from, state) do
-    with :ok <- ensure_projection_slot(state, agent_id, goal_id) do
+    state = normalize_state(state)
+
+    with :ok <- ensure_projection_slot(state, agent_id, goal_id),
+         {:ok, lease} <- admit_fresh(agent_id) do
       result = do_get_goal_tainted(agent_id, goal_id)
-      {reply, state} = track_goal_read_result(result, state, agent_id, goal_id)
-      {:reply, reply, state}
+      {reply, state, disposition} = track_goal_read_result(result, state, agent_id, goal_id)
+      {:reply, reply, finish_public_root(state, agent_id, lease, disposition)}
     else
       {:error, _reason} = error -> {:reply, error, state}
     end
   end
 
   def handle_call({:get_goal_list_tainted, agent_id, scope}, _from, state) do
-    case do_get_goal_list_tainted(agent_id, scope) do
-      {:reconciled, reply, goal_ids} ->
-        {reply, state, rearm?} = reconcile_projected_ids(reply, state, agent_id, goal_ids)
-        state = clear_convergence_pending(state, agent_id)
-        # Re-arm after clear when projection removal failed (replaces async arm).
-        state = if rearm?, do: mark_convergence_pending(state, agent_id), else: state
-        {:reply, reply, state}
+    state = normalize_state(state)
 
-      {:error, _reason} = error ->
-        {:reply, error, fail_agent_projection(state, agent_id)}
-
-      _ ->
-        {:reply, {:error, :invalid_provenance}, state}
+    with true <- valid_identifier?(agent_id),
+         true <- scope in [:active, :all],
+         {:ok, lease} <- admit_fresh(agent_id) do
+      {reply, state} =
+        finish_agent_reconcile(
+          do_get_goal_list_tainted(agent_id, scope),
+          state,
+          agent_id,
+          lease
+        )
+      {:reply, reply, state}
+    else
+      false -> {:reply, {:error, :invalid_provenance}, state}
+      {:error, _reason} = error -> {:reply, error, state}
     end
   end
 
   def handle_call({:mutate_goal, agent_id, goal_id, taint, operation}, _from, state) do
-    with :ok <- ensure_projection_slot(state, agent_id, goal_id) do
+    state = normalize_state(state)
+
+    with :ok <- ensure_projection_slot(state, agent_id, goal_id),
+         {:ok, lease} <- admit_fresh(agent_id) do
       result = do_mutate_goal(agent_id, goal_id, taint, operation)
-      {reply, state} = track_goal_write_result(result, state, agent_id, goal_id)
-      {:reply, reply, state}
+      {reply, state, disposition} = track_goal_write_result(result, state, agent_id, goal_id)
+      {:reply, reply, finish_public_root(state, agent_id, lease, disposition)}
     else
       {:error, _reason} = error -> {:reply, error, state}
     end
   end
 
   def handle_call({:import_goals, agent_id, entries}, _from, state) do
-    {reply, state} = do_import_goals(agent_id, entries, state)
-    {:reply, reply, state}
-  end
+    state = normalize_state(state)
 
-  def handle_call({:delete_goal, agent_id, goal_id}, _from, state) do
-    case do_delete_goal(agent_id, goal_id) do
-      :ok ->
-        {:reply, :ok, untrack_projected_id(state, agent_id, goal_id)}
-
-      {:ok, :convergence_pending} ->
-        state =
-          state
-          |> untrack_projected_id(agent_id, goal_id)
-          |> mark_convergence_pending(agent_id)
-
-        {:reply, :ok, state}
+    case admit_fresh(agent_id) do
+      {:ok, lease} ->
+        {reply, state, disposition} = do_import_goals(agent_id, entries, state)
+        {:reply, reply, finish_public_root(state, agent_id, lease, disposition)}
 
       {:error, _reason} = error ->
         {:reply, error, state}
+    end
+  end
 
-      _ ->
-        {:reply, {:error, :persistence_failed}, state}
+  def handle_call({:delete_goal, agent_id, goal_id}, _from, state) do
+    state = normalize_state(state)
+
+    with true <- valid_identifier?(agent_id),
+         true <- valid_identifier?(goal_id),
+         {:ok, lease} <- admit_fresh(agent_id) do
+      case do_delete_goal(agent_id, goal_id) do
+        :ok ->
+          state = untrack_projected_id(state, agent_id, goal_id)
+          {:reply, :ok, finish_public_root(state, agent_id, lease, :ack)}
+
+        {:ok, :convergence_pending} ->
+          state =
+            state
+            |> untrack_projected_id(agent_id, goal_id)
+            |> mark_convergence_pending(agent_id)
+
+          {:reply, :ok, finish_public_root(state, agent_id, lease, :defer)}
+
+        {:error, _reason} = error ->
+          {:reply, error, finish_public_root(state, agent_id, lease, :ack)}
+
+        _ ->
+          {:reply, {:error, :persistence_failed}, finish_public_root(state, agent_id, lease, :ack)}
+      end
+    else
+      false -> {:reply, {:error, :invalid_provenance}, state}
+      {:error, _reason} = error -> {:reply, error, state}
     end
   end
 
   def handle_call({:clear_goals, agent_id}, _from, state) do
-    {reply, state} = do_clear_goals(agent_id, state)
-    {:reply, reply, state}
+    state = normalize_state(state)
+
+    with true <- valid_identifier?(agent_id),
+         {:ok, lease} <- admit_fresh(agent_id) do
+      {reply, state} = do_clear_goals(agent_id, state)
+      {armed?, state} = take_armed_flag(state)
+
+      disposition =
+        cond do
+          armed? -> :defer
+          reply == :ok -> :settle
+          true -> :ack
+        end
+
+      {:reply, reply, finish_public_root(state, agent_id, lease, disposition)}
+    else
+      false -> {:reply, {:error, :invalid_provenance}, state}
+      {:error, _reason} = error -> {:reply, error, state}
+    end
   end
 
   def handle_call({:delete_agent_content, agent_id}, _from, state) do
+    state = normalize_state(state)
     {reply, next_state} = do_delete_agent_content(agent_id, state)
     {:reply, reply, next_state}
   end
 
   def handle_call({:agent_content_absent?, agent_id}, _from, state) do
+    state = normalize_state(state)
     reply = do_agent_content_absent?(agent_id, state)
     {:reply, reply, state}
   rescue
-    _ -> {:reply, {:error, :store_unavailable}, state}
+    _ -> {:reply, {:error, :store_unavailable}, normalize_state(state)}
   catch
-    _, _ -> {:reply, {:error, :store_unavailable}, state}
+    _, _ -> {:reply, {:error, :store_unavailable}, normalize_state(state)}
   end
 
   def handle_call({:reload_for_agent, agent_id}, _from, state) do
-    case do_reload_for_agent(agent_id) do
-      {:reconciled, reply, goal_ids} ->
-        {reply, state, rearm?} = reconcile_projected_ids(reply, state, agent_id, goal_ids)
-        state = clear_convergence_pending(state, agent_id)
-        state = if rearm?, do: mark_convergence_pending(state, agent_id), else: state
-        {:reply, reply, state}
+    state = normalize_state(state)
 
-      {:error, _reason} = error ->
-        {:reply, error, fail_agent_projection(state, agent_id)}
-
-      _ ->
-        {:reply, {:error, :invalid_provenance}, state}
+    with true <- valid_identifier?(agent_id),
+         {:ok, lease} <- admit_fresh(agent_id) do
+      {reply, state} =
+        finish_agent_reconcile(do_reload_for_agent(agent_id), state, agent_id, lease)
+      {:reply, reply, state}
+    else
+      false -> {:reply, {:error, :invalid_provenance}, state}
+      {:error, _reason} = error -> {:reply, error, state}
     end
   end
 
   def handle_call({:reload_goal, agent_id, goal_id}, _from, state) do
-    with :ok <- ensure_projection_slot(state, agent_id, goal_id) do
+    state = normalize_state(state)
+
+    with :ok <- ensure_projection_slot(state, agent_id, goal_id),
+         {:ok, lease} <- admit_fresh(agent_id) do
       case do_reload_goal(agent_id, goal_id) do
         {:reloaded, :present} ->
-          {:reply, :ok, track_projected_id(state, agent_id, goal_id)}
+          state = track_projected_id(state, agent_id, goal_id)
+          {:reply, :ok, finish_public_root(state, agent_id, lease, :ack)}
 
         {:reloaded, :absent} ->
-          {:reply, :ok, untrack_projected_id(state, agent_id, goal_id)}
+          state = untrack_projected_id(state, agent_id, goal_id)
+          {:reply, :ok, finish_public_root(state, agent_id, lease, :ack)}
 
         {:reloaded, :absent_needs_convergence} ->
           state =
@@ -995,7 +1049,7 @@ defmodule Arbor.Memory.GoalStore do
             |> untrack_projected_id(agent_id, goal_id)
             |> mark_convergence_pending(agent_id)
 
-          {:reply, :ok, state}
+          {:reply, :ok, finish_public_root(state, agent_id, lease, :defer)}
 
         {:error, reason} = error when reason in [:invalid_provenance, :projection_failed] ->
           state =
@@ -1003,13 +1057,13 @@ defmodule Arbor.Memory.GoalStore do
             |> untrack_projected_id(agent_id, goal_id)
             |> mark_convergence_pending(agent_id)
 
-          {:reply, error, state}
+          {:reply, error, finish_public_root(state, agent_id, lease, :defer)}
 
         {:error, _reason} = error ->
-          {:reply, error, state}
+          {:reply, error, finish_public_root(state, agent_id, lease, :ack)}
 
         _ ->
-          {:reply, {:error, :invalid_provenance}, state}
+          {:reply, {:error, :invalid_provenance}, finish_public_root(state, agent_id, lease, :ack)}
       end
     else
       {:error, _reason} = error -> {:reply, error, state}
@@ -1018,11 +1072,20 @@ defmodule Arbor.Memory.GoalStore do
 
   @impl true
   def handle_info({:mark_goal_convergence, agent_id, token}, state) do
+    state = normalize_state(state)
+
     # Tokened mark only: never mint. Stale pre-cleanup tokens are pure no-ops.
     if active_token_match?(state, agent_id, token) do
-      pending = Map.get(state, :pending_convergence, MapSet.new())
-      state = Map.put(state, :pending_convergence, MapSet.put(pending, agent_id))
-      {:noreply, schedule_convergence(state, agent_id, @projection_convergence_attempts)}
+      case OwnerRoots.ensure_deferred_root(owner_roots(state), agent_id) do
+        {:ok, roots} ->
+          state = put_owner_roots(state, roots)
+          pending = Map.get(state, :pending_convergence, MapSet.new())
+          state = Map.put(state, :pending_convergence, MapSet.put(pending, agent_id))
+          {:noreply, schedule_convergence(state, agent_id, @projection_convergence_attempts)}
+
+        {:error, _reason} ->
+          {:noreply, state}
+      end
     else
       {:noreply, state}
     end
@@ -1033,6 +1096,8 @@ defmodule Arbor.Memory.GoalStore do
   def handle_info({:arm_goal_convergence, _agent_id}, state), do: {:noreply, state}
 
   def handle_info({:converge_goal_agent, agent_id, attempts, token}, state) do
+    state = normalize_state(state)
+
     cond do
       not active_token_match?(state, agent_id, token) ->
         # True no-op: do not clear scheduler state belonging to a newer write.
@@ -1041,27 +1106,12 @@ defmodule Arbor.Memory.GoalStore do
       true ->
         state = clear_scheduled_convergence(state, agent_id)
 
-        if convergence_pending?(state, agent_id) do
-          case do_reload_for_agent(agent_id) do
-            {:reconciled, :ok, goal_ids} ->
-              {_reply, state, rearm?} = reconcile_projected_ids(:ok, state, agent_id, goal_ids)
-              state = clear_convergence_pending(state, agent_id)
-              state = if rearm?, do: mark_convergence_pending(state, agent_id), else: state
-              {:noreply, state}
+        case OwnerRoots.ensure_deferred_root(owner_roots(state), agent_id) do
+          {:error, _reason} ->
+            {:noreply, state}
 
-            _failure when attempts > 1 ->
-              state =
-                state
-                |> fail_agent_projection(agent_id, false)
-                |> schedule_convergence(agent_id, attempts - 1)
-
-              {:noreply, state}
-
-            _failure ->
-              {:noreply, fail_agent_projection(state, agent_id, false)}
-          end
-        else
-          {:noreply, state}
+          {:ok, roots} ->
+            {:noreply, converge_admitted(put_owner_roots(state, roots), agent_id, attempts)}
         end
     end
   end
@@ -1071,9 +1121,164 @@ defmodule Arbor.Memory.GoalStore do
 
   def handle_info(_message, state), do: {:noreply, state}
 
+  @impl true
+  def format_status(status) when is_map(status) do
+    case status do
+      %{state: state} when is_map(state) ->
+        %{status | state: redact_owner_roots(state)}
+
+      _ ->
+        status
+    end
+  end
+
+  def format_status(status), do: status
+
+  @impl true
+  def code_change(_old_vsn, state, _extra), do: {:ok, normalize_state(state)}
+
   # ============================================================================
   # Private Helpers
   # ============================================================================
+
+  defp normalize_state(state) when is_map(state) do
+    state
+    |> Map.put_new(:owner_roots, OwnerRoots.new())
+    |> Map.delete(:armed_this_op)
+  end
+
+  defp normalize_state(state), do: state
+
+  defp owner_roots(state) when is_map(state) do
+    Map.get(state, :owner_roots, OwnerRoots.new())
+  end
+
+  defp owner_roots(_state), do: OwnerRoots.new()
+
+  defp put_owner_roots(state, roots) when is_map(state) do
+    Map.put(state, :owner_roots, roots)
+  end
+
+  defp admit_fresh(agent_id) do
+    case OwnerRoots.admit_new(OwnerRoots.new(), agent_id) do
+      {:ok, lease} -> {:ok, lease}
+      {:error, _reason} -> {:error, :store_unavailable}
+    end
+  end
+
+  defp finish_public_root(state, agent_id, lease, disposition) do
+    {_, state} = take_armed_flag(state)
+
+    case disposition do
+      :defer ->
+        defer_root(state, agent_id, lease)
+
+      :settle ->
+        settle_roots(state, agent_id, lease)
+
+      :settle_then_defer ->
+        state
+        |> settle_roots(agent_id, nil)
+        |> defer_root(agent_id, lease)
+
+      _ ->
+        ack_root(state, lease)
+    end
+  end
+
+  defp defer_root(state, agent_id, lease) do
+    case OwnerRoots.defer(owner_roots(state), agent_id, lease) do
+      {:ok, roots} ->
+        put_owner_roots(state, roots)
+
+      {:error, _reason} ->
+        ack_root(state, lease)
+    end
+  end
+
+  defp ack_root(state, lease) do
+    {roots, _result} = OwnerRoots.ack(owner_roots(state), lease)
+    put_owner_roots(state, roots)
+  end
+
+  defp settle_roots(state, agent_id, lease \\ nil) do
+    {roots, _} = OwnerRoots.settle_agent(owner_roots(state), agent_id, lease)
+    put_owner_roots(state, roots)
+  end
+
+  defp take_armed_flag(state) when is_map(state) do
+    {Map.get(state, :armed_this_op, false), Map.delete(state, :armed_this_op)}
+  end
+
+  defp take_armed_flag(state), do: {false, state}
+
+  defp finish_agent_reconcile({:reconciled, reply, goal_ids}, state, agent_id, lease) do
+    {reply, state, rearm?} = reconcile_projected_ids(reply, state, agent_id, goal_ids)
+    state = clear_convergence_pending(state, agent_id)
+
+    if rearm? do
+      state = mark_convergence_pending(state, agent_id)
+      {reply, finish_public_root(state, agent_id, lease, :settle_then_defer)}
+    else
+      {reply, finish_public_root(state, agent_id, lease, :settle)}
+    end
+  end
+
+  defp finish_agent_reconcile({:error, _reason} = error, state, agent_id, lease) do
+    state = fail_agent_projection(state, agent_id)
+    {error, finish_public_root(state, agent_id, lease, :defer)}
+  end
+
+  defp finish_agent_reconcile(_other, state, agent_id, lease) do
+    {{:error, :invalid_provenance}, finish_public_root(state, agent_id, lease, :ack)}
+  end
+
+  defp converge_admitted(state, agent_id, attempts) do
+    if convergence_pending?(state, agent_id) do
+      case do_reload_for_agent(agent_id) do
+        {:reconciled, :ok, goal_ids} ->
+          {_reply, state, rearm?} = reconcile_projected_ids(:ok, state, agent_id, goal_ids)
+          state = clear_convergence_pending(state, agent_id)
+
+          if rearm? do
+            mark_convergence_pending(state, agent_id)
+          else
+            settle_roots(state, agent_id)
+          end
+
+        _failure when is_integer(attempts) and attempts > 1 ->
+          state
+          |> fail_agent_projection(agent_id, false)
+          |> schedule_convergence(agent_id, attempts - 1)
+
+        _failure ->
+          state
+          |> fail_agent_projection(agent_id, false)
+          |> settle_roots(agent_id)
+      end
+    else
+      settle_roots(state, agent_id)
+    end
+  end
+
+  defp redact_owner_roots(state) when is_map(state) do
+    roots = Map.get(state, :owner_roots)
+
+    counts =
+      case roots do
+        %OwnerRoots{by_agent: by_agent} ->
+          Map.new(by_agent, fn {agent_id, leases} -> {agent_id, length(leases)} end)
+
+        _ ->
+          %{}
+      end
+
+    state
+    |> Map.put(:owner_roots, counts)
+    |> Map.delete(:armed_this_op)
+  end
+
+  defp redact_owner_roots(state), do: state
 
   defp ensure_ets_table do
     if :ets.whereis(@ets_table) == :undefined do
@@ -1151,7 +1356,7 @@ defmodule Arbor.Memory.GoalStore do
   defp track_goal_write_result(result, state, agent_id, goal_id) do
     case result do
       {:ok, %Goal{} = goal, :projected} ->
-        {{:ok, goal}, track_projected_id(state, agent_id, goal_id)}
+        {{:ok, goal}, track_projected_id(state, agent_id, goal_id), :ack}
 
       {:ok, %Goal{} = goal, :convergence_pending} ->
         state =
@@ -1159,49 +1364,43 @@ defmodule Arbor.Memory.GoalStore do
           |> untrack_projected_id(agent_id, goal_id)
           |> mark_convergence_pending(agent_id)
 
-        {{:ok, goal}, state}
+        {{:ok, goal}, state, :defer}
 
       {:error, reason} when reason in [:not_found, :invalid_provenance, :projection_failed] ->
         # Synchronous owner-state update only — never async-mint tokens.
         remove_result = remove_live_goal(agent_id, goal_id)
         state = untrack_projected_id(state, agent_id, goal_id)
 
-        state =
-          if remove_result == {:error, :projection_failed} or
-               reason in [:invalid_provenance, :projection_failed] do
-            mark_convergence_pending(state, agent_id)
-          else
-            state
-          end
-
-        {result, state}
+        if remove_result == {:error, :projection_failed} or
+             reason in [:invalid_provenance, :projection_failed] do
+          {result, mark_convergence_pending(state, agent_id), :defer}
+        else
+          {result, state, :ack}
+        end
 
       _ ->
-        {result, state}
+        {result, state, :ack}
     end
   end
 
   defp track_goal_read_result(result, state, agent_id, goal_id) do
     case result do
       {:ok, %TaintedValue{}, _status} ->
-        {result, track_projected_id(state, agent_id, goal_id)}
+        {result, track_projected_id(state, agent_id, goal_id), :ack}
 
       {:error, reason} when reason in [:not_found, :invalid_provenance, :projection_failed] ->
         remove_result = remove_live_goal(agent_id, goal_id)
         state = untrack_projected_id(state, agent_id, goal_id)
 
-        state =
-          if remove_result == {:error, :projection_failed} or
-               reason in [:invalid_provenance, :projection_failed] do
-            mark_convergence_pending(state, agent_id)
-          else
-            state
-          end
-
-        {result, state}
+        if remove_result == {:error, :projection_failed} or
+             reason in [:invalid_provenance, :projection_failed] do
+          {result, mark_convergence_pending(state, agent_id), :defer}
+        else
+          {result, state, :ack}
+        end
 
       _ ->
-        {result, state}
+        {result, state, :ack}
     end
   end
 
@@ -1303,7 +1502,11 @@ defmodule Arbor.Memory.GoalStore do
       true ->
         {state, _token} = ensure_active_token(state, agent_id)
         pending = Map.get(state, :pending_convergence, MapSet.new())
-        state = Map.put(state, :pending_convergence, MapSet.put(pending, agent_id))
+
+        state =
+          state
+          |> Map.put(:pending_convergence, MapSet.put(pending, agent_id))
+          |> Map.put(:armed_this_op, true)
 
         if rearm? do
           schedule_convergence(state, agent_id, @projection_convergence_attempts)
@@ -1958,35 +2161,60 @@ defmodule Arbor.Memory.GoalStore do
   defp load_goals_from_authoritative_store do
     with {:ok, records} <- load_authoritative_goal_records(nil),
          {:ok, grouped} <- group_authoritative_goal_records(records) do
-      {projected_ids, pending, loaded} =
-        Enum.reduce(grouped, {%{}, MapSet.new(), 0}, fn
-          {agent_id, agent_records}, {projected_ids, pending, loaded} ->
-            with :ok <- bounded_authoritative_records(agent_records),
-                 {:ok, entries} <- hydrate_authoritative_goal_records(agent_id, agent_records),
-                 {:ok, ids} <- bounded_projected_id_set(projected_goal_ids(entries)) do
-              {
-                Map.put(projected_ids, agent_id, ids),
-                pending,
-                loaded + MapSet.size(ids)
-              }
-            else
-              _ -> {projected_ids, MapSet.put(pending, agent_id), loaded}
-            end
+      {projected_ids, pending, roots, loaded} =
+        Enum.reduce(grouped, {%{}, MapSet.new(), OwnerRoots.new(), 0}, fn
+          {agent_id, agent_records}, {projected_ids, pending, roots, loaded} ->
+            hydrate_admitted_agent(agent_id, agent_records, projected_ids, pending, roots, loaded)
         end)
 
       Logger.info("GoalStore: loaded #{loaded} goals from authoritative store")
-      {projected_ids, pending}
+      {projected_ids, pending, roots}
     else
-      _ -> {%{}, MapSet.new()}
+      _ -> {%{}, MapSet.new(), OwnerRoots.new()}
     end
   rescue
     _ ->
       Logger.warning("GoalStore: failed to load goals from authoritative store")
-      {%{}, MapSet.new()}
+      {%{}, MapSet.new(), OwnerRoots.new()}
   catch
     _, _ ->
       Logger.warning("GoalStore: failed to load goals from authoritative store")
-      {%{}, MapSet.new()}
+      {%{}, MapSet.new(), OwnerRoots.new()}
+  end
+
+  defp hydrate_admitted_agent(agent_id, agent_records, projected_ids, pending, roots, loaded) do
+    case OwnerRoots.admit_new(roots, agent_id) do
+      {:ok, lease} ->
+        case hydrate_startup_agent(agent_id, agent_records) do
+          {:ok, ids} ->
+            {next_roots, _} = OwnerRoots.ack(roots, lease)
+            projected_ids = Map.put(projected_ids, agent_id, ids)
+            {projected_ids, pending, next_roots, loaded + MapSet.size(ids)}
+
+          :error ->
+            case OwnerRoots.defer(roots, agent_id, lease) do
+              {:ok, next_roots} ->
+                {projected_ids, MapSet.put(pending, agent_id), next_roots, loaded}
+
+              {:error, _reason} ->
+                {next_roots, _} = OwnerRoots.ack(roots, lease)
+                {projected_ids, pending, next_roots, loaded}
+            end
+        end
+
+      {:error, _reason} ->
+        {projected_ids, pending, roots, loaded}
+    end
+  end
+
+  defp hydrate_startup_agent(agent_id, agent_records) do
+    with :ok <- bounded_authoritative_records(agent_records),
+         {:ok, entries} <- hydrate_authoritative_goal_records(agent_id, agent_records),
+         {:ok, ids} <- bounded_projected_id_set(projected_goal_ids(entries)) do
+      {:ok, ids}
+    else
+      _ -> :error
+    end
   end
 
   defp group_authoritative_goal_records(records) when is_list(records) do
@@ -2332,34 +2560,42 @@ defmodule Arbor.Memory.GoalStore do
   defp bounded_proper_list(_values, _limit, _count), do: {:error, :invalid_provenance}
 
   defp do_import_goals(agent_id, entries, state) do
-    Enum.reduce_while(entries, {:ok, state}, fn
-      {%Goal{} = goal, _payload, %Taint{} = taint}, {:ok, state} ->
+    Enum.reduce_while(entries, {:ok, state, :ack}, fn
+      {%Goal{} = goal, _payload, %Taint{} = taint}, {:ok, state, disposition} ->
         with :ok <- ensure_projection_slot(state, agent_id, goal.id) do
           result = do_add_goal(agent_id, goal, taint, false)
-          {reply, state} = track_goal_write_result(result, state, agent_id, goal.id)
+
+          {reply, state, entry_disposition} =
+            track_goal_write_result(result, state, agent_id, goal.id)
+
+          disposition = import_disposition(disposition, entry_disposition)
 
           case reply do
-            {:ok, %Goal{}} -> {:cont, {:ok, state}}
-            {:error, _reason} = error -> {:halt, {error, state}}
-            _ -> {:halt, {{:error, :invalid_provenance}, state}}
+            {:ok, %Goal{}} -> {:cont, {:ok, state, disposition}}
+            {:error, _reason} = error -> {:halt, {error, state, disposition}}
+            _ -> {:halt, {{:error, :invalid_provenance}, state, disposition}}
           end
         else
-          {:error, _reason} = error -> {:halt, {error, state}}
+          {:error, _reason} = error -> {:halt, {error, state, disposition}}
         end
 
-      _invalid, {:ok, state} ->
-        {:halt, {{:error, :invalid_provenance}, state}}
+      _invalid, {:ok, state, disposition} ->
+        {:halt, {{:error, :invalid_provenance}, state, disposition}}
     end)
     |> case do
-      {:ok, state} -> {:ok, state}
-      {{:error, _reason} = error, state} -> {error, state}
-      _ -> {{:error, :invalid_provenance}, state}
+      {:ok, state, disposition} -> {:ok, state, disposition}
+      {{:error, _reason} = error, state, disposition} -> {error, state, disposition}
+      _ -> {{:error, :invalid_provenance}, state, :ack}
     end
   rescue
-    _ -> {{:error, :outcome_unknown}, state}
+    _ -> {{:error, :outcome_unknown}, state, :ack}
   catch
-    _, _ -> {{:error, :outcome_unknown}, state}
+    _, _ -> {{:error, :outcome_unknown}, state, :ack}
   end
+
+  defp import_disposition(:defer, _entry), do: :defer
+  defp import_disposition(_current, :defer), do: :defer
+  defp import_disposition(current, _entry), do: current
 
   defp do_delete_goal(agent_id, goal_id) do
     with true <- valid_identifier?(agent_id),
@@ -2407,7 +2643,11 @@ defmodule Arbor.Memory.GoalStore do
   defp do_delete_agent_content(agent_id, state) do
     if valid_identifier?(agent_id) do
       # Disarm BEFORE any backend/effect branch; exceptional returns must keep it.
-      disarmed = disarm_agent_convergence(state, agent_id)
+      disarmed =
+        state
+        |> disarm_agent_convergence(agent_id)
+        |> settle_roots(agent_id, nil)
+
       delete_agent_content_after_disarm(agent_id, disarmed)
     else
       {{:error, :invalid_provenance}, state}
