@@ -415,7 +415,10 @@ defmodule Arbor.Agent.RuntimeAdmission.Opts do
   end
 
   defp optional_provider(nil), do: {:ok, nil}
-  defp optional_provider(v) when is_atom(v), do: bound_bin_result(Atom.to_string(v), @max_id_bytes)
+
+  defp optional_provider(v) when is_atom(v),
+    do: bound_bin_result(Atom.to_string(v), @max_id_bytes)
+
   defp optional_provider(v) when is_binary(v), do: bound_bin_result(v, @max_id_bytes)
   defp optional_provider(_), do: :error
 
@@ -585,7 +588,10 @@ defmodule Arbor.Agent.RuntimeAdmission.Opts do
         |> maybe_kw(:stream, Map.get(proj, "stream"))
         |> maybe_kw(:temperature, Map.get(proj, "temperature"))
         |> maybe_kw(:top_p, Map.get(proj, "top_p"))
-        |> maybe_kw(:provider_options, atomize_provider_options(Map.get(proj, "provider_options")))
+        |> maybe_kw(
+          :provider_options,
+          atomize_provider_options(Map.get(proj, "provider_options"))
+        )
         |> maybe_kw(:heartbeat_dot, Map.get(proj, "heartbeat_dot"))
         |> Keyword.put(:context_management, context_management)
         |> maybe_kw(:effective_window, Map.get(proj, "effective_window"))

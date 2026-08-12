@@ -42,9 +42,7 @@ defmodule Arbor.Agent.RuntimeAdmissionOrdinaryStartSecurityRegressionTest do
   defp ensure_runtime_admission_registry! do
     case Process.whereis(Arbor.Agent.RuntimeAdmissionRegistry) do
       nil ->
-        start_supervised!(
-          {Registry, keys: :unique, name: Arbor.Agent.RuntimeAdmissionRegistry}
-        )
+        start_supervised!({Registry, keys: :unique, name: Arbor.Agent.RuntimeAdmissionRegistry})
 
       _pid ->
         :ok
@@ -107,7 +105,10 @@ defmodule Arbor.Agent.RuntimeAdmissionOrdinaryStartSecurityRegressionTest do
 
     spawn(fn ->
       # Hold the first intent open by admitting; second should conflict while live.
-      send(parent, {:first, TaskStore.admit_ordinary_runtime_start(agent_id, fp1, kw1, name: store)})
+      send(
+        parent,
+        {:first, TaskStore.admit_ordinary_runtime_start(agent_id, fp1, kw1, name: store)}
+      )
     end)
 
     Process.sleep(50)

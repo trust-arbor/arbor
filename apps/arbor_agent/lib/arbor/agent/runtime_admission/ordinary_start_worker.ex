@@ -14,14 +14,16 @@ defmodule Arbor.Agent.RuntimeAdmission.OrdinaryStartWorker do
   @default_gate_timeout_ms 30_000
 
   @doc false
-  def run(%{
-        intent_id: intent_id,
-        target_agent_id: target,
-        fingerprint: fingerprint,
-        validated_opts: validated_opts,
-        store_ref: store_ref,
-        gate_ref: gate_ref
-      } = args)
+  def run(
+        %{
+          intent_id: intent_id,
+          target_agent_id: target,
+          fingerprint: fingerprint,
+          validated_opts: validated_opts,
+          store_ref: store_ref,
+          gate_ref: gate_ref
+        } = args
+      )
       when is_binary(intent_id) and is_binary(target) and is_binary(fingerprint) and
              is_list(validated_opts) and is_reference(gate_ref) do
     timeout = Map.get(args, :gate_timeout_ms, @default_gate_timeout_ms)

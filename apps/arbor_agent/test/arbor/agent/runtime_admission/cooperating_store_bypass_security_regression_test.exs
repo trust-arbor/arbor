@@ -156,9 +156,8 @@ defmodule Arbor.Agent.RuntimeAdmission.CooperatingStoreBypassSecurityRegressionT
     # Production path has no arity-4 ordinary_start_effects store selector.
     refute function_exported?(Lifecycle, :ordinary_start_effects, 4)
 
-    # Under MIX_ENV=test the explicit helper is exported. Absence from
-    # MIX_ENV=dev and MIX_ENV=prod is proven by isolated non-test builds
-    # (function_exported?/3 on compiled BEAMs), not source-text inference.
+    # Under MIX_ENV=test the explicit helper is exported. Re-run the executable
+    # dev/prod absence proof in scripts/verify_lifecycle_test_only_exports.exs.
     assert function_exported?(Lifecycle, :ordinary_start_effects_for_test_store, 4)
   end
 end
