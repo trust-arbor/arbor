@@ -1475,7 +1475,7 @@ defmodule Arbor.LLM.ToolLoop do
     {:ok, %{request | messages: request.messages ++ steering_messages}, next_state}
   end
 
-  # Steering taint aggregation (policy R1):
+  # Steering taint aggregation:
   # - Dimensions (level/sensitivity/sanitizations/confidence) join via the public
   #   Signals/contract facades on provenance-neutral copies so valid provenance
   #   growth never overflows the generic Taint.join bag-union into
@@ -1518,6 +1518,8 @@ defmodule Arbor.LLM.ToolLoop do
              source: source,
              chain: chain
            }) do
+      # Retention already applies this bound; keep the final cap as defense in depth
+      # at the reconstructed-taint boundary.
       cap_steering_taint_chain(joined)
     else
       _ -> Taint.invalid_durable_provenance()
@@ -1553,7 +1555,7 @@ defmodule Arbor.LLM.ToolLoop do
 
   defp dimension_only_taint(_taint), do: {:error, :invalid_taint}
 
-  # Policy R1: history = flat input chains (older→newer); source = rightmost
+  # History = flat input chains (older→newer); source = rightmost
   # non-nil source; dedupe keep-last; take tail of max_chain entries.
   defp retain_recent_steering_provenance(inputs) when is_list(inputs) do
     max_chain = SteeringMessage.max_taint_chain_entries()

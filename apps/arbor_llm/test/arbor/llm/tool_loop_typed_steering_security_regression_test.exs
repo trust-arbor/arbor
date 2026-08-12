@@ -319,7 +319,9 @@ defmodule Arbor.LLM.ToolLoopTypedSteeringSecurityRegressionTest do
       sanitizations: 255,
       confidence: :verified,
       source: "initial",
-      chain: Enum.map(1..16, &"initial-#{&1}")
+      # Keep a duplicate at the newest position so this one fixture exercises
+      # both oldest-first eviction and keep-last deduplication.
+      chain: Enum.map(1..15, &"initial-#{&1}") ++ ["initial-8"]
     }
 
     untrusted =
@@ -392,8 +394,11 @@ defmodule Arbor.LLM.ToolLoopTypedSteeringSecurityRegressionTest do
 
     assert untrusted_provider_taint.level == :untrusted
     assert untrusted_provider_taint != Taint.invalid_durable_provenance()
-    assert length(untrusted_provider_taint.chain) <= SteeringMessage.max_taint_chain_entries()
-    assert List.last(untrusted_provider_taint.chain) == "untrusted-source"
+
+    assert untrusted_provider_taint.chain ==
+             Enum.map(2..7, &"initial-#{&1}") ++
+               Enum.map(9..15, &"initial-#{&1}") ++
+               ["initial-8", "untrusted-chain", "untrusted-source"]
 
     tool_attempts = collect_tag(:tool_attempt)
     tool_taints = Enum.map(tool_attempts, &Keyword.fetch!(elem(&1, 3), :taint))
