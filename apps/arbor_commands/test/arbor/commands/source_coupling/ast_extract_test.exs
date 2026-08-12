@@ -587,4 +587,344 @@ defmodule Arbor.Commands.SourceCoupling.AstExtractTest do
       refute Encode.expression_digest(u1.evidence) == u1.expression_digest
     end
   end
+
+  test "ordinary alias expressions emit expr refs across common positions" do
+    src = """
+    defmodule Arbor.Expr.Positions do
+      def assign do
+        mod = Arbor.Persistence.Repo
+        mod
+      end
+
+      def arg(x), do: pass(x, Arbor.Contracts.Skill)
+
+      def ret, do: Arbor.Security.Keychain
+
+      def containers do
+        [
+          Arbor.Memory.WorkingMemory,
+          {Arbor.Signals, :ok},
+          %{handler: Arbor.LLM.OpenAI}
+        ]
+      end
+
+      def guarded(x) when x == Arbor.Trust.Policy, do: :ok
+
+      def rescued do
+        try do
+          :ok
+        rescue
+          e in [Arbor.Common.Error] -> e
+        end
+      end
+    end
+    """
+
+    assert {:ok, result} = AstExtract.extract("apps/arbor_common/lib/expr_positions.ex", src)
+
+    expr_targets =
+      result.references
+      |> Enum.filter(&(&1.kind == "expr"))
+      |> Enum.map(& &1.target)
+      |> MapSet.new()
+
+    assert "Arbor.Persistence.Repo" in expr_targets
+    assert "Arbor.Contracts.Skill" in expr_targets
+    assert "Arbor.Security.Keychain" in expr_targets
+    assert "Arbor.Memory.WorkingMemory" in expr_targets
+    assert "Arbor.Signals" in expr_targets
+    assert "Arbor.LLM.OpenAI" in expr_targets
+    assert "Arbor.Trust.Policy" in expr_targets
+    assert "Arbor.Common.Error" in expr_targets
+  end
+
+  test "production shape mod = Arbor.Persistence.Repo is captured as expr" do
+    # Mirrors apps/arbor_common/lib/arbor/common/agent_telemetry/store.ex get_repo/0.
+    src = """
+    defmodule Arbor.Common.AgentTelemetry.Store do
+      defp get_repo do
+        mod = Arbor.Persistence.Repo
+
+        if Code.ensure_loaded?(mod) and Process.whereis(mod) != nil do
+          {:ok, mod}
+        else
+          {:error, :unavailable}
+        end
+      end
+    end
+    """
+
+    assert {:ok, result} =
+             AstExtract.extract(
+               "apps/arbor_common/lib/arbor/common/agent_telemetry/store.ex",
+               src
+             )
+
+    assert Enum.any?(result.references, fn r ->
+             r.target == "Arbor.Persistence.Repo" and r.kind == "expr" and
+               r.from_module == "Arbor.Common.AgentTelemetry.Store"
+           end)
+  end
+
+  test "specialized alias contexts do not double-count primary occurrences" do
+    src = """
+    defmodule Arbor.Dup.Host do
+      alias Arbor.Alpha.One
+      import Arbor.Alpha.Two
+      require Arbor.Alpha.Three
+      use Arbor.Alpha.Four
+      @behaviour Arbor.Alpha.Five
+      @handler Arbor.Alpha.Six
+
+      defstruct []
+
+      def with_default(x \\\\ Arbor.Alpha.Seven), do: x
+
+      def remote, do: Arbor.Alpha.Eight.run()
+      def struct_ref, do: %Arbor.Alpha.Nine{}
+      def concat, do: Module.concat([Arbor.Alpha, Ten])
+    end
+
+    defimpl Arbor.Alpha.Proto, for: Arbor.Alpha.Impl do
+      def encode(_), do: ""
+    end
+    """
+
+    assert {:ok, result} = AstExtract.extract("apps/arbor_common/lib/dup_host.ex", src)
+
+    by_target =
+      result.references
+      |> Enum.group_by(& &1.target)
+      |> Map.new(fn {t, refs} -> {t, Enum.map(refs, & &1.kind)} end)
+
+    # Each specialized primary occurrence must appear once with its specialized kind.
+    assert by_target["Arbor.Alpha.One"] == ["alias"]
+    assert by_target["Arbor.Alpha.Two"] == ["import"]
+    assert by_target["Arbor.Alpha.Three"] == ["require"]
+    assert by_target["Arbor.Alpha.Four"] == ["use"]
+    assert by_target["Arbor.Alpha.Five"] == ["behaviour"]
+    assert by_target["Arbor.Alpha.Six"] == ["attribute"]
+    assert by_target["Arbor.Alpha.Seven"] == ["default"]
+    assert by_target["Arbor.Alpha.Eight"] == ["remote"]
+    assert by_target["Arbor.Alpha.Nine"] == ["struct"]
+    assert by_target["Arbor.Alpha.Ten"] == ["module_concat"]
+    assert by_target["Arbor.Alpha.Proto"] == ["defimpl"]
+    assert by_target["Arbor.Alpha.Impl"] == ["defimpl"]
+
+    # No expr twin for any of the specialized primaries above.
+    refute Enum.any?(result.references, fn r ->
+             r.kind == "expr" and
+               r.target in [
+                 "Arbor.Alpha.One",
+                 "Arbor.Alpha.Two",
+                 "Arbor.Alpha.Three",
+                 "Arbor.Alpha.Four",
+                 "Arbor.Alpha.Five",
+                 "Arbor.Alpha.Six",
+                 "Arbor.Alpha.Seven",
+                 "Arbor.Alpha.Eight",
+                 "Arbor.Alpha.Nine",
+                 "Arbor.Alpha.Ten",
+                 "Arbor.Alpha.Proto",
+                 "Arbor.Alpha.Impl"
+               ]
+           end)
+  end
+
+  test "nested independent aliases inside specialized constructs remain visible" do
+    src = """
+    defmodule Arbor.Nested.Indep do
+      use Arbor.Alpha.Macro, helper: Arbor.Alpha.Helper
+
+      def with_default(x \\\\ pass(Arbor.Alpha.DefaultArg)), do: x
+
+      def remote_nested, do: Arbor.Alpha.Outer.run(Arbor.Alpha.Inner)
+
+      def struct_nested, do: %Arbor.Alpha.Struct{mod: Arbor.Alpha.Field}
+
+      def concat_partial(x), do: Module.concat([Arbor.Alpha.Partial, x]).f()
+
+      @cfg %{
+        known: Arbor.Alpha.Known,
+        other: pass(Arbor.Alpha.UnknownNested)
+      }
+    end
+    """
+
+    assert {:ok, result} = AstExtract.extract("apps/arbor_common/lib/nested_indep.ex", src)
+
+    kinds_for = fn target ->
+      result.references
+      |> Enum.filter(&(&1.target == target))
+      |> Enum.map(& &1.kind)
+      |> Enum.sort()
+    end
+
+    assert kinds_for.("Arbor.Alpha.Macro") == ["use"]
+    assert kinds_for.("Arbor.Alpha.Helper") == ["expr"]
+    assert kinds_for.("Arbor.Alpha.DefaultArg") == ["expr"]
+    assert kinds_for.("Arbor.Alpha.Outer") == ["remote"]
+    assert kinds_for.("Arbor.Alpha.Inner") == ["expr"]
+    assert kinds_for.("Arbor.Alpha.Struct") == ["struct"]
+    assert kinds_for.("Arbor.Alpha.Field") == ["expr"]
+    assert kinds_for.("Arbor.Alpha.Partial") == ["expr"]
+    assert kinds_for.("Arbor.Alpha.Known") == ["attribute"]
+    assert kinds_for.("Arbor.Alpha.UnknownNested") == ["expr"]
+  end
+
+  test "defmodule name is ownership not an ordinary expr reference" do
+    src = """
+    defmodule Arbor.Defmod.Name do
+      def ok, do: :ok
+    end
+    """
+
+    assert {:ok, result} = AstExtract.extract("apps/arbor_common/lib/defmod_name.ex", src)
+    assert Enum.any?(result.module_defs, &(&1.module == "Arbor.Defmod.Name"))
+
+    refute Enum.any?(result.references, fn r ->
+             r.target == "Arbor.Defmod.Name"
+           end)
+  end
+
+  test "alias as: short name is not emitted as ordinary expr" do
+    src = """
+    defmodule Arbor.Alias.AsHost do
+      alias Arbor.Alpha.LongName, as: Short
+      def call, do: Short.f()
+    end
+    """
+
+    assert {:ok, result} = AstExtract.extract("apps/arbor_common/lib/alias_as.ex", src)
+    targets = Enum.map(result.references, & &1.target)
+    assert "Arbor.Alpha.LongName" in targets
+    refute "Short" in targets
+
+    assert Enum.count(result.references, &(&1.target == "Arbor.Alpha.LongName")) == 2
+    # One alias binding + one remote via Short expansion — no expr for as: name.
+    kinds =
+      result.references
+      |> Enum.filter(&(&1.target == "Arbor.Alpha.LongName"))
+      |> Enum.map(& &1.kind)
+      |> Enum.sort()
+
+    assert kinds == ["alias", "remote"]
+  end
+
+  test "dynamic Module.concat remains unresolved and keeps static nested aliases" do
+    src = """
+    defmodule Arbor.Concat.Partial do
+      def call(x), do: Module.concat([Arbor.Alpha.StaticPart, x]).f()
+    end
+    """
+
+    assert {:ok, result} = AstExtract.extract("apps/arbor_common/lib/concat_partial.ex", src)
+
+    assert Enum.any?(result.references, fn r ->
+             r.target == "Arbor.Alpha.StaticPart" and r.kind == "expr"
+           end)
+
+    assert Enum.any?(result.unresolved, fn u ->
+             u.reason == "dynamic_module_concat" or u.reason == "dynamic_module_expr"
+           end)
+  end
+
+  test "nested attribute map module leaves are emitted recursively as attribute" do
+    # Nested maps under atom keys must emit module leaves — top-level-only
+    # bind_map_attr previously dropped Arbor.Alpha.NestedLeaf.
+    src = """
+    defmodule Arbor.Attr.NestedMap do
+      @cfg %{
+        outer: %{
+          inner: Arbor.Alpha.NestedLeaf,
+          other: "literal"
+        },
+        top: Arbor.Alpha.TopLeaf
+      }
+
+      def cfg, do: @cfg.outer
+    end
+    """
+
+    assert {:ok, result} = AstExtract.extract("apps/arbor_common/lib/attr_nested_map.ex", src)
+
+    assert Enum.any?(result.references, fn r ->
+             r.target == "Arbor.Alpha.NestedLeaf" and r.kind == "attribute"
+           end)
+
+    assert Enum.any?(result.references, fn r ->
+             r.target == "Arbor.Alpha.TopLeaf" and r.kind == "attribute"
+           end)
+
+    # Nested leaf must not be missing or downgraded solely to expr without attribute.
+    refute Enum.any?(result.references, fn r ->
+             r.target == "Arbor.Alpha.NestedLeaf" and r.kind == "expr"
+           end)
+  end
+
+  test "dynamic attribute map keys walk key and value without suppressing modules" do
+    # Dynamic keys are excluded from the classified field map; their module values
+    # must still surface via AST walk. Uncertain-key access stays fail-closed.
+    src = """
+    defmodule Arbor.Attr.DynKeyMod do
+      @handlers %{
+        unquote(key) => Arbor.Alpha.DynValue,
+        static: Arbor.Alpha.StaticValue
+      }
+
+      def call_static, do: @handlers.static.run()
+      def call_dyn, do: @handlers.other.run()
+    end
+    """
+
+    assert {:ok, result} = AstExtract.extract("apps/arbor_common/lib/attr_dyn_key_mod.ex", src)
+
+    assert Enum.any?(result.references, fn r ->
+             r.target == "Arbor.Alpha.StaticValue" and r.kind == "attribute"
+           end)
+
+    assert Enum.any?(result.references, fn r ->
+             r.target == "Arbor.Alpha.DynValue" and r.kind == "expr"
+           end)
+
+    # Uncertain keys: static field access must not resolve as a trusted module expr.
+    assert Enum.any?(result.unresolved, fn u ->
+             u.reason == "dynamic_module_expr" and
+               String.contains?(u.normalized_expression, "handlers") and
+               String.contains?(u.normalized_expression, "static")
+           end)
+  end
+
+  test "unresolved default Module.concat keeps independent nested alias" do
+    # Root default is dynamic/unresolved, but Arbor.Foo inside the concat list is
+    # an independent static alias and must still be emitted.
+    src = """
+    defmodule Arbor.Default.ConcatNested do
+      def call(x \\\\ Module.concat([x, Arbor.Alpha.DefaultNested])), do: x
+    end
+    """
+
+    assert {:ok, result} =
+             AstExtract.extract("apps/arbor_common/lib/default_concat_nested.ex", src)
+
+    assert Enum.any?(result.references, fn r ->
+             r.target == "Arbor.Alpha.DefaultNested" and r.kind == "expr"
+           end)
+
+    assert Enum.any?(result.unresolved, fn u ->
+             u.kind == "default" or
+               u.reason in ["dynamic_module_expr", "dynamic_module_concat"]
+           end)
+
+    # Root unresolved once — nested alias is a separate expr ref, not a second
+    # root-default unresolved for the same concat site identity only.
+    default_unresolved =
+      Enum.filter(result.unresolved, fn u ->
+        u.kind == "default" or
+          (u.reason in ["dynamic_module_expr", "dynamic_module_concat"] and
+             String.contains?(u.normalized_expression || "", "concat"))
+      end)
+
+    assert length(default_unresolved) == 1
+  end
 end

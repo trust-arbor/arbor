@@ -9,6 +9,14 @@ defmodule Arbor.Commands.SourceCoupling.AstExtract do
   classified independently so one non-module or unknown sibling does not erase
   known nested maps or module-valued fields. Dynamic/non-atom keys mark the map
   uncertain so field access cannot trust static entries that may be overridden.
+
+  Ordinary static module aliases (`{:__aliases__, _, _}` used as expressions —
+  assignment RHS, arguments, returns, containers, guards, rescue) emit `expr`
+  references. Specialized contexts (remote receivers, structs, alias/import/
+  require/use, behaviours, defimpl, defaults, attributes/typespecs,
+  Module.concat, defmodule names) consume their primary alias occurrence so a
+  generic `__aliases__` clause does not double-count the same syntactic site.
+  Nested independent aliases inside those constructs remain visible.
   """
 
   alias Arbor.Commands.SourceCoupling.Encode
@@ -83,6 +91,9 @@ defmodule Arbor.Commands.SourceCoupling.AstExtract do
             nodes: 0,
             max_nodes: max_nodes,
             max_depth: max_depth,
+            # Monotonic reference counter — O(1) evidence that add_ref grew the set
+            # (never length/1 on the references list; that would be quadratic).
+            ref_seq: 0,
             module_defs: [],
             references: [],
             unresolved: [],
@@ -137,36 +148,17 @@ defmodule Arbor.Commands.SourceCoupling.AstExtract do
 
       # Remote call: Alias.fun(...) or Module.concat(...)
       {{:., meta, [mod, fun]}, _call_meta, call_args} ->
-        state = ref_module_expr(meta, mod, state, "remote")
+        handle_remote_call(meta, mod, fun, call_args, state, depth)
 
-        state =
-          if fun == :concat do
-            case mod do
-              {:__aliases__, _, parts} ->
-                if parts_to_string(parts) == "Module" do
-                  resolve_module_concat(
-                    line_of(meta),
-                    List.wrap(call_args),
-                    state,
-                    "module_concat"
-                  )
-                else
-                  state
-                end
-
-              _ ->
-                state
-            end
-          else
-            state
-          end
-
-        walk_list(List.wrap(call_args), state, depth)
-
-      # Struct: %Alias{}
+      # Struct: %Alias{} — primary alias consumed; walk fields for nested exprs.
       {:%, meta, [mod, map_ast]} ->
         state = ref_module_expr(meta, mod, state, "struct")
         walk(map_ast, state, depth + 1)
+
+      # Ordinary static module alias expression (assignment RHS, arg, return, …).
+      # Specialized handlers must not re-walk a site they already emitted.
+      {:__aliases__, meta, parts} when is_list(parts) ->
+        {:ok, ref_module_expr(meta, {:__aliases__, meta, parts}, state, "expr")}
 
       {:%{}, _meta, args} when is_list(args) ->
         walk_list(args, state, depth)
@@ -186,6 +178,86 @@ defmodule Arbor.Commands.SourceCoupling.AstExtract do
         {:ok, state}
     end
   end
+
+  # Remote receiver is specialized ("remote"). Module.concat args that fully
+  # resolve to a static module are consumed by the concat ref; unresolved concat
+  # still walks args so nested independent static aliases remain visible.
+  defp handle_remote_call(meta, mod, fun, call_args, state, depth) do
+    args = List.wrap(call_args)
+
+    if fun == :concat and module_concat_receiver?(mod) do
+      handle_module_concat_node(meta, mod, args, state, depth)
+    else
+      prev_seq = state.ref_seq
+      state = ref_module_expr(meta, mod, state, "remote")
+      static_resolved? = state.ref_seq > prev_seq
+
+      with {:ok, state} <- maybe_walk_remote_receiver(mod, state, depth, static_resolved?) do
+        walk_list(args, state, depth)
+      end
+    end
+  end
+
+  defp handle_module_concat_node(meta, mod, args, state, depth) do
+    state = ref_module_expr(meta, mod, state, "remote")
+    prev_seq = state.ref_seq
+    state = resolve_module_concat(line_of(meta), args, state, "module_concat")
+
+    if state.ref_seq > prev_seq do
+      # Static concat result emitted — do not re-emit arg aliases as expr.
+      {:ok, state}
+    else
+      # Dynamic/unresolved concat — walk args for nested static aliases.
+      walk_list(args, state, depth)
+    end
+  end
+
+  # Bare aliases / attributes are consumed by ref_module_expr. Compound receivers
+  # (e.g. dynamic Module.concat(...).f) still need their interior walked when the
+  # outer resolve did not produce a static remote target.
+  defp maybe_walk_remote_receiver(mod, state, depth, static_resolved?) do
+    cond do
+      simple_module_receiver?(mod) ->
+        {:ok, state}
+
+      static_resolved? ->
+        # Static Module.concat (or similar) already emitted as the remote target.
+        {:ok, state}
+
+      # Dynamic Module.concat as receiver already recorded unresolved via
+      # ref_module_expr — walk only args so nested static aliases remain visible
+      # without re-emitting a second unresolved/module_concat site.
+      match?({{:., _, [_, :concat]}, _, _}, mod) and
+          module_concat_receiver?(concat_receiver(mod)) ->
+        walk_list(concat_args(mod), state, depth)
+
+      true ->
+        walk(mod, state, depth + 1)
+    end
+  end
+
+  defp concat_receiver({{:., _, [recv, :concat]}, _, _}), do: recv
+  defp concat_receiver(_), do: nil
+
+  defp concat_args({{:., _, [_, :concat]}, _, args}), do: List.wrap(args)
+  defp concat_args(_), do: []
+
+  defp simple_module_receiver?({:__aliases__, _, _}), do: true
+  defp simple_module_receiver?({:__MODULE__, _, _}), do: true
+  defp simple_module_receiver?({:@, _, _}), do: true
+
+  defp simple_module_receiver?({{:., _, [{:@, _, _}, field]}, _, args})
+       when is_atom(field) and args in [nil, []] do
+    true
+  end
+
+  defp simple_module_receiver?(_), do: false
+
+  defp module_concat_receiver?({:__aliases__, _, parts}) when is_list(parts) do
+    parts_to_string(parts) == "Module"
+  end
+
+  defp module_concat_receiver?(_), do: false
 
   defp walk_list(list, state, depth) do
     Enum.reduce_while(list, {:ok, state}, fn item, {:ok, st} ->
@@ -351,9 +423,11 @@ defmodule Arbor.Commands.SourceCoupling.AstExtract do
     end
   end
 
-  defp handle_form(:alias, meta, args, state, depth) do
+  defp handle_form(:alias, meta, args, state, _depth) do
+    # Primary target(s) emitted as "alias". Opts are only `as:` short names —
+    # not independent module references — so do not walk rest as ordinary expr.
     state = process_alias(meta, args, state, bind?: true, kind: "alias")
-    walk_args_rest(args, state, depth)
+    {:ok, state}
   end
 
   defp handle_form(:import, meta, args, state, depth) do
@@ -368,6 +442,7 @@ defmodule Arbor.Commands.SourceCoupling.AstExtract do
 
   defp handle_form(:use, meta, args, state, depth) do
     state = ref_first_module_arg(meta, args, state, "use")
+    # Skip primary target; walk opts for nested independent aliases.
     walk_args_rest(args, state, depth)
   end
 
@@ -404,7 +479,8 @@ defmodule Arbor.Commands.SourceCoupling.AstExtract do
 
   defp handle_form(form, meta, args, state, depth)
        when form in [:def, :defp, :defmacro, :defmacrop] do
-    state = maybe_default_refs(meta, args, state)
+    # Default values are handled by the `:\\` form (kind "default") so the
+    # generic `__aliases__` walker does not double-count static defaults.
     scoped_walk(form, meta, args, state, depth)
   end
 
@@ -417,10 +493,41 @@ defmodule Arbor.Commands.SourceCoupling.AstExtract do
     scoped_walk(form, meta, args, state, depth)
   end
 
+  # Default argument: `def f(x \\ Alias)`. Static module defaults emit kind
+  # "default" and are not re-walked; complex defaults walk for nested aliases.
+  defp handle_form(:\\, meta, args, state, depth) do
+    case args do
+      [pat, default] ->
+        case resolve_module_name(default, state) do
+          {:ok, mod} ->
+            state = add_ref(state, line_of(meta), mod, "default")
+            walk(pat, state, depth + 1)
+
+          {:unresolved, norm} ->
+            state = add_unresolved(state, line_of(meta), "dynamic_module_expr", "default", norm)
+
+            with {:ok, state} <- walk(pat, state, depth + 1) do
+              # Root unresolved already recorded — walk children only so nested
+              # independent aliases (e.g. Module.concat([x, Arbor.Foo])) remain
+              # visible without duplicating the root unresolved site.
+              walk_unresolved_default_children(default, state, depth)
+            end
+
+          :error ->
+            with {:ok, state} <- walk(pat, state, depth + 1) do
+              walk(default, state, depth + 1)
+            end
+        end
+
+      _ ->
+        walk_list(args, state, depth)
+    end
+  end
+
   defp handle_form(:@, meta, args, state, depth) do
     case process_attribute(meta, args, state, depth) do
       {:done, state} ->
-        # Attribute handler already walked typespec/module value.
+        # Attribute handler already walked / consumed specialized values.
         {:ok, state}
 
       {:error, _} = err ->
@@ -435,6 +542,40 @@ defmodule Arbor.Commands.SourceCoupling.AstExtract do
   defp handle_form(_form, meta, args, state, depth) do
     _ = meta
     walk_list(args, state, depth)
+  end
+
+  # Walk children of a default already recorded as unresolved. Never re-enter
+  # the root as a module expression (would duplicate unresolved / specialized).
+  defp walk_unresolved_default_children({{:., _, [recv, _fun]}, _, args}, state, depth) do
+    with {:ok, state} <- walk_unresolved_default_receiver(recv, state, depth) do
+      walk_list(List.wrap(args), state, depth)
+    end
+  end
+
+  defp walk_unresolved_default_children({form, _, args}, state, depth)
+       when is_atom(form) and is_list(args) do
+    walk_list(args, state, depth)
+  end
+
+  defp walk_unresolved_default_children({left, right}, state, depth) do
+    with {:ok, state} <- walk(left, state, depth + 1) do
+      walk(right, state, depth + 1)
+    end
+  end
+
+  defp walk_unresolved_default_children(list, state, depth) when is_list(list) do
+    walk_list(list, state, depth)
+  end
+
+  defp walk_unresolved_default_children(_other, state, _depth), do: {:ok, state}
+
+  defp walk_unresolved_default_receiver(recv, state, depth) do
+    if simple_module_receiver?(recv) do
+      # Receiver is part of the unresolved root identity (Module / Alias / @attr).
+      {:ok, state}
+    else
+      walk(recv, state, depth + 1)
+    end
   end
 
   defp scoped_walk(_form, _meta, args, state, depth) do
@@ -518,8 +659,14 @@ defmodule Arbor.Commands.SourceCoupling.AstExtract do
   end
 
   defp walk_args_rest(args, state, depth) do
-    # First arg is the alias target already processed; still walk opts for nested ASTs
-    walk_list(List.wrap(args), state, depth)
+    # First arg is the alias/import/require/use target already emitted by the
+    # specialized handler. Skip it so the generic `__aliases__` clause does not
+    # double-count; still walk remaining opts for nested independent aliases
+    # (e.g. `use Foo, helpers: [Arbor.Bar]`).
+    case List.wrap(args) do
+      [_target | rest] -> walk_list(rest, state, depth)
+      [] -> {:ok, state}
+    end
   end
 
   defp process_alias(meta, args, state, bind?: bind?, kind: kind) do
@@ -638,11 +785,12 @@ defmodule Arbor.Commands.SourceCoupling.AstExtract do
       end
 
     for_targets =
-      case args do
-        [_, opts] when is_list(opts) -> Keyword.get_values(opts, :for)
-        [_, _, opts] when is_list(opts) -> Keyword.get_values(opts, :for)
+      args
+      |> Enum.drop(1)
+      |> Enum.flat_map(fn
+        opts when is_list(opts) -> Keyword.get_values(opts, :for)
         _ -> []
-      end
+      end)
 
     Enum.reduce(List.flatten(for_targets), state, fn target, st ->
       ref_module_expr(meta, target, st, "defimpl")
@@ -658,7 +806,8 @@ defmodule Arbor.Commands.SourceCoupling.AstExtract do
 
     case args do
       [{attr, _, nil}] when is_atom(attr) ->
-        state
+        # Bare attribute read (`@attr`) — nothing to extract at the definition site.
+        {:done, state}
 
       [{attr, _, value_args}] when is_atom(attr) and is_list(value_args) ->
         value = List.first(value_args)
@@ -675,30 +824,122 @@ defmodule Arbor.Commands.SourceCoupling.AstExtract do
             end
 
           attr in [:behaviour, :behavior] ->
+            # Behaviour target is specialized; do not re-walk as ordinary expr.
             {:done, ref_module_expr(meta, value, state, "behaviour")}
 
           true ->
             case classify_attr_value(value, state) do
               {:module, mod} ->
+                # Module-valued attribute consumed as "attribute" — no expr re-walk.
                 state = add_ref(state, line, mod, "attribute")
-                %{state | attrs: Map.put(state.attrs, attr, {:module, mod})}
+                {:done, %{state | attrs: Map.put(state.attrs, attr, {:module, mod})}}
 
               {:map, fields} = map_tag ->
-                bind_map_attr(state, attr, line, fields, map_tag)
+                state = bind_map_attr(state, attr, line, fields, map_tag)
+
+                case walk_attr_map_ast(value, state, depth) do
+                  {:ok, st} -> {:done, st}
+                  {:error, _} = err -> err
+                end
 
               {:map, fields, :uncertain_keys} = map_tag ->
-                bind_map_attr(state, attr, line, fields, map_tag)
+                # Bind partial static fields for env, but field access stays
+                # fail-closed via :uncertain_keys. Still emit nested static
+                # module leaves and walk dynamic key/value pairs.
+                state = bind_map_attr(state, attr, line, fields, map_tag)
+
+                case walk_attr_map_ast(value, state, depth) do
+                  {:ok, st} -> {:done, st}
+                  {:error, _} = err -> err
+                end
 
               :non_module ->
-                %{state | attrs: Map.put(state.attrs, attr, :non_module)}
+                {:done, %{state | attrs: Map.put(state.attrs, attr, :non_module)}}
 
               :unknown ->
-                state
+                # Not statically classifiable — walk for nested independent aliases.
+                case walk(value, state, depth + 1) do
+                  {:ok, st} -> {:done, st}
+                  {:error, _} = err -> err
+                end
             end
         end
 
       _ ->
         state
+    end
+  end
+
+  # Walk map/keyword attribute ASTs after static module leaves were emitted from
+  # the classified field tree. Atom-key static module/non-module leaves are not
+  # re-walked (already emitted). Nested maps recurse. Unknown values and every
+  # dynamic-key entry walk key and value so independent aliases remain visible.
+  defp walk_attr_map_ast({:%{}, _, pairs}, state, depth) when is_list(pairs) do
+    walk_attr_map_pairs(pairs, state, depth)
+  end
+
+  defp walk_attr_map_ast(pairs, state, depth) when is_list(pairs) do
+    if keyword_attr_pairs?(pairs) do
+      walk_attr_map_pairs(pairs, state, depth)
+    else
+      walk_attr_map_list(pairs, state, depth)
+    end
+  end
+
+  defp walk_attr_map_ast(_value, state, _depth), do: {:ok, state}
+
+  defp walk_attr_map_pairs(pairs, state, depth) do
+    Enum.reduce_while(pairs, {:ok, state}, fn
+      {key, val}, {:ok, st} when is_atom(key) ->
+        case walk_attr_static_key_value(val, st, depth) do
+          {:ok, st2} -> {:cont, {:ok, st2}}
+          err -> {:halt, err}
+        end
+
+      {key, val}, {:ok, st} ->
+        # Dynamic key: module values are not in the classified field map —
+        # walk both sides for independent static aliases.
+        with {:ok, st} <- walk(key, st, depth + 1),
+             {:ok, st} <- walk(val, st, depth + 1) do
+          {:cont, {:ok, st}}
+        else
+          err -> {:halt, err}
+        end
+
+      other, {:ok, st} ->
+        case walk(other, st, depth + 1) do
+          {:ok, st2} -> {:cont, {:ok, st2}}
+          err -> {:halt, err}
+        end
+    end)
+  end
+
+  defp walk_attr_map_list(list, state, depth) do
+    Enum.reduce_while(list, {:ok, state}, fn item, {:ok, st} ->
+      case walk_attr_static_key_value(item, st, depth) do
+        {:ok, st2} -> {:cont, {:ok, st2}}
+        err -> {:halt, err}
+      end
+    end)
+  end
+
+  defp walk_attr_static_key_value(val, state, depth) do
+    case classify_attr_value(val, state) do
+      {:module, _} ->
+        # Already emitted recursively from the classified field tree.
+        {:ok, state}
+
+      :non_module ->
+        {:ok, state}
+
+      {:map, _} ->
+        walk_attr_map_ast(val, state, depth)
+
+      {:map, _, :uncertain_keys} ->
+        walk_attr_map_ast(val, state, depth)
+
+      :unknown ->
+        walk(val, state, depth + 1)
     end
   end
 
@@ -800,14 +1041,29 @@ defmodule Arbor.Commands.SourceCoupling.AstExtract do
   end
 
   defp bind_map_attr(state, attr, line, fields, map_tag) do
-    state =
-      Enum.reduce(fields, state, fn
-        {_key, {:module, mod}}, st -> add_ref(st, line, mod, "attribute")
-        _, st -> st
-      end)
-
+    # Recursively emit every static module leaf under atom keys (nested maps
+    # included). Top-level-only emission previously dropped nested leaves.
+    state = emit_attr_module_leaves(fields, state, line)
     %{state | attrs: Map.put(state.attrs, attr, map_tag)}
   end
+
+  defp emit_attr_module_leaves(fields, state, line) when is_map(fields) do
+    Enum.reduce(fields, state, fn
+      {_key, {:module, mod}}, st ->
+        add_ref(st, line, mod, "attribute")
+
+      {_key, {:map, nested}}, st when is_map(nested) ->
+        emit_attr_module_leaves(nested, st, line)
+
+      {_key, {:map, nested, :uncertain_keys}}, st when is_map(nested) ->
+        emit_attr_module_leaves(nested, st, line)
+
+      _, st ->
+        st
+    end)
+  end
+
+  defp emit_attr_module_leaves(_fields, state, _line), do: state
 
   defp classify_list_attr_value(list, state) do
     Enum.reduce_while(list, :non_module, fn item, :non_module ->
@@ -819,26 +1075,6 @@ defmodule Arbor.Commands.SourceCoupling.AstExtract do
         :unknown -> {:halt, :unknown}
       end
     end)
-  end
-
-  defp maybe_default_refs(meta, args, state) do
-    # def f(x \\ Alias) 
-    case args do
-      [{_name, _, params} | _] when is_list(params) ->
-        Enum.reduce(params, state, fn
-          {:\\, _, [_pat, default]}, st ->
-            case resolve_module_name(default, st) do
-              {:ok, mod} -> add_ref(st, line_of(meta), mod, "default")
-              _ -> st
-            end
-
-          _, st ->
-            st
-        end)
-
-      _ ->
-        state
-    end
   end
 
   defp ref_first_module_arg(meta, args, state, kind) do
@@ -1210,7 +1446,7 @@ defmodule Arbor.Commands.SourceCoupling.AstExtract do
       class: class
     }
 
-    %{state | references: [ref | state.references]}
+    %{state | references: [ref | state.references], ref_seq: state.ref_seq + 1}
   end
 
   defp add_ref(state, _, _, _), do: state
