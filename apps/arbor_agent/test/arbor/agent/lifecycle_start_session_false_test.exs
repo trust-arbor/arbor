@@ -10,12 +10,21 @@ defmodule Arbor.Agent.LifecycleStartSessionFalseTest do
   emitted heartbeat opts without a heartbeat signing-authority bootstrap.
   BranchSupervisor skips Session when start_session is false, but still
   starts HeartbeatService whenever heartbeat_opts is non-nil.
+
+  Topology: this suite does not supervise production Agent children, so it
+  owns unique ready RuntimeAdmission.Supervisor / Task.Supervisor / TaskStore
+  processes per test and routes both Lifecycle.start calls through the
+  test-only task_store seam. The Registry remains the fixed production name
+  `Arbor.Agent.RuntimeAdmissionRegistry` (IntentOwner hardcodes it); tests
+  only ensure it exists, never invent a unique registry name.
   """
 
   use ExUnit.Case, async: false
   @moduletag :integration
 
   alias Arbor.Agent.{BranchSupervisor, Lifecycle}
+  alias Arbor.Agent.Orchestration.{TaskControlRecoveryMemory, TaskStore}
+  alias Arbor.Agent.RuntimeAdmission.Supervisor, as: RASupervisor
   alias Arbor.Persistence.BufferedStore
   alias Arbor.Security.SigningAuthorityBroker
   alias Arbor.Trust.Store, as: TrustStore
@@ -101,7 +110,34 @@ defmodule Arbor.Agent.LifecycleStartSessionFalseTest do
     :ok
   end
 
-  test "start_session: false starts host/executor without Session or HeartbeatService" do
+  # Own unique RA supervisor / Task.Supervisor / TaskStore per test so
+  # Lifecycle.start does not poll a global TaskStore left by order (or absent).
+  # Registry is the fixed production name only (see ensure_runtime_admission_registry!).
+  setup do
+    TaskControlRecoveryMemory.ensure!()
+    TaskControlRecoveryMemory.reset!()
+    ensure_runtime_admission_registry!()
+
+    ra_sup = start_supervised!({RASupervisor, name: unique_name(:ra_sup)})
+    task_sup = start_supervised!({Task.Supervisor, name: unique_name(:task_sup)})
+    store = unique_name(:store)
+
+    start_supervised!(
+      {TaskStore,
+       name: store,
+       task_supervisor: task_sup,
+       runtime_admission_supervisor: ra_sup,
+       runtime_admission_force_ready: true,
+       fence_force_ready: true,
+       recovery_force_ready: true}
+    )
+
+    %{store: store}
+  end
+
+  test "start_session: false starts host/executor without Session or HeartbeatService", %{
+    store: store
+  } do
     assert {:ok, profile} =
              Lifecycle.create("Start Session False Probe", template: "test_agent")
 
@@ -113,7 +149,11 @@ defmodule Arbor.Agent.LifecycleStartSessionFalseTest do
     # Intentionally omit start_heartbeat (defaults true) to prove start_session:false
     # alone is authoritative for suppressing the session-dependent heartbeat.
     assert {:ok, sup_pid} =
-             Lifecycle.start(agent_id, start_session: false, recover_session: false)
+             Lifecycle.start(agent_id,
+               start_session: false,
+               recover_session: false,
+               task_store: store
+             )
 
     assert is_pid(sup_pid)
     assert Process.alive?(sup_pid)
@@ -141,7 +181,9 @@ defmodule Arbor.Agent.LifecycleStartSessionFalseTest do
     assert :ok = Lifecycle.stop(agent_id)
   end
 
-  test "start_session: true with start_heartbeat: false still starts Session only" do
+  test "start_session: true with start_heartbeat: false still starts Session only", %{
+    store: store
+  } do
     assert {:ok, profile} =
              Lifecycle.create("Start Heartbeat False Probe", template: "test_agent")
 
@@ -149,7 +191,11 @@ defmodule Arbor.Agent.LifecycleStartSessionFalseTest do
     cleanup(agent_id)
 
     assert {:ok, sup_pid} =
-             Lifecycle.start(agent_id, start_heartbeat: false, recover_session: false)
+             Lifecycle.start(agent_id,
+               start_heartbeat: false,
+               recover_session: false,
+               task_store: store
+             )
 
     children = Supervisor.which_children(sup_pid)
     child_ids = Enum.map(children, fn {id, _pid, _type, _mods} -> id end)
@@ -174,6 +220,20 @@ defmodule Arbor.Agent.LifecycleStartSessionFalseTest do
         []
     end
   end
+
+  # Fixed production Registry name — IntentOwner hardcodes this atom.
+  # Handle already_started by whereis; never invent a unique registry name.
+  defp ensure_runtime_admission_registry! do
+    case Process.whereis(Arbor.Agent.RuntimeAdmissionRegistry) do
+      nil ->
+        start_supervised!({Registry, keys: :unique, name: Arbor.Agent.RuntimeAdmissionRegistry})
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp unique_name(prefix), do: :"#{prefix}_#{System.unique_integer([:positive])}"
 
   defp start_security_child(child) do
     case Supervisor.start_child(Arbor.Security.Supervisor, child) do
