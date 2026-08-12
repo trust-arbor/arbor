@@ -162,7 +162,8 @@ defmodule Arbor.Commands.SourceCoupling.Baseline do
   defp admit_entries(_), do: {:error, :malformed_or_stale_baseline}
 
   defp admit_entry(entry) when is_map(entry) do
-    required = ~w(file from_module target kind class from_app to_app from_band to_band fate level_direction occurrence_count)
+    required =
+      ~w(file from_module target kind class from_app to_app from_band to_band fate level_direction occurrence_count)
 
     if Enum.all?(required, &Map.has_key?(entry, &1)) and is_integer(entry["occurrence_count"]) and
          entry["occurrence_count"] >= 1 do

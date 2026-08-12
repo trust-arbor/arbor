@@ -165,8 +165,16 @@ defmodule Mix.Tasks.Arbor.Packaging.SourceCouplingTest do
              )
 
     assert report["compatibility"]["gating"] == false
-    assert Enum.any?(report["compatibility"]["occurrences"], &(&1["target"] == "Arbor.Contracts.Foo"))
-    refute Enum.any?(report["undeclared"]["findings"] || [], &String.contains?(&1["file"], "integrations"))
+
+    assert Enum.any?(
+             report["compatibility"]["occurrences"],
+             &(&1["target"] == "Arbor.Contracts.Foo")
+           )
+
+    refute Enum.any?(
+             report["undeclared"]["findings"] || [],
+             &String.contains?(&1["file"], "integrations")
+           )
 
     # Canonical gating inputs unchanged by compatibility projection.
     assert without_compat["provenance"]["scan_manifest_digest"] ==

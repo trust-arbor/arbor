@@ -28,7 +28,13 @@ defmodule Arbor.Commands.SourceCoupling do
     :allow_write
   ]
 
-  @synthetic_opt_keys [:inventory, :run_git, :compatibility_files, :max_blob_bytes, :max_total_bytes]
+  @synthetic_opt_keys [
+    :inventory,
+    :run_git,
+    :compatibility_files,
+    :max_blob_bytes,
+    :max_total_bytes
+  ]
 
   @type mode :: String.t()
 

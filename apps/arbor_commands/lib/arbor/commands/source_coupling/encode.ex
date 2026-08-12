@@ -70,23 +70,27 @@ defmodule Arbor.Commands.SourceCoupling.Encode do
         %{"path" => path} -> path
       end)
 
-    Enum.reduce(sorted, :crypto.hash_init(:sha256) |> :crypto.hash_update(@scan_manifest_domain), fn
-      {path, oid}, acc when is_binary(path) and is_binary(oid) ->
-        :crypto.hash_update(acc, [
-          <<byte_size(path)::unsigned-big-32>>,
-          path,
-          <<byte_size(oid)::unsigned-big-32>>,
-          oid
-        ])
+    Enum.reduce(
+      sorted,
+      :crypto.hash_init(:sha256) |> :crypto.hash_update(@scan_manifest_domain),
+      fn
+        {path, oid}, acc when is_binary(path) and is_binary(oid) ->
+          :crypto.hash_update(acc, [
+            <<byte_size(path)::unsigned-big-32>>,
+            path,
+            <<byte_size(oid)::unsigned-big-32>>,
+            oid
+          ])
 
-      %{"path" => path, "blob_oid" => oid}, acc when is_binary(path) and is_binary(oid) ->
-        :crypto.hash_update(acc, [
-          <<byte_size(path)::unsigned-big-32>>,
-          path,
-          <<byte_size(oid)::unsigned-big-32>>,
-          oid
-        ])
-    end)
+        %{"path" => path, "blob_oid" => oid}, acc when is_binary(path) and is_binary(oid) ->
+          :crypto.hash_update(acc, [
+            <<byte_size(path)::unsigned-big-32>>,
+            path,
+            <<byte_size(oid)::unsigned-big-32>>,
+            oid
+          ])
+      end
+    )
     |> :crypto.hash_final()
     |> Base.encode16(case: :lower)
   end
@@ -111,7 +115,13 @@ defmodule Arbor.Commands.SourceCoupling.Encode do
           Enum.map(@entry_key_order, fn key ->
             value = entry_field(entry, key)
             encoded = encode_field(value)
-            [<<byte_size(key)::unsigned-big-32>>, key, <<byte_size(encoded)::unsigned-big-32>>, encoded]
+
+            [
+              <<byte_size(key)::unsigned-big-32>>,
+              key,
+              <<byte_size(encoded)::unsigned-big-32>>,
+              encoded
+            ]
           end)
 
         :crypto.hash_update(acc, framed)
