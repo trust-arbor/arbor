@@ -3,8 +3,9 @@ defmodule Arbor.Commands.SourceCoupling.AstExtract do
   Pure AST extraction for source-coupling census.
 
   Walks `Code.string_to_quoted` forms with lexical alias scopes. Only `alias`
-  creates bindings; import/require emit references. Tracks static module
-  attributes used later as module expressions.
+  creates bindings; import/require emit references. Tracks static module and
+  non-module attributes (including map field values) used later as module
+  expressions, and resolves nested `__MODULE__` paths.
   """
 
   alias Arbor.Commands.SourceCoupling.Encode
@@ -303,17 +304,30 @@ defmodule Arbor.Commands.SourceCoupling.AstExtract do
   end
 
   defp relative_module_segments(parts) do
-    segs =
-      Enum.map(parts, fn
-        a when is_atom(a) -> Atom.to_string(a)
-        s when is_binary(s) -> s
-        _ -> nil
-      end)
+    # defmodule names may quote nested __MODULE__.Child as aliases parts.
+    # Caller prepends current_module, so __MODULE__ head contributes only the
+    # trailing segments (Outer + Child => Outer.Child), never a double Outer.
+    case parts do
+      [{:__MODULE__, _, _} | rest] ->
+        case alias_rest_segments(rest) do
+          {:ok, [_ | _] = segs} -> {:ok, Enum.join(segs, ".")}
+          {:ok, []} -> :error
+          :error -> :error
+        end
 
-    if Enum.any?(segs, &is_nil/1) do
-      :error
-    else
-      {:ok, Enum.join(segs, ".")}
+      _ ->
+        segs =
+          Enum.map(parts, fn
+            a when is_atom(a) -> Atom.to_string(a)
+            s when is_binary(s) -> s
+            _ -> nil
+          end)
+
+        if Enum.any?(segs, &is_nil/1) do
+          :error
+        else
+          {:ok, Enum.join(segs, ".")}
+        end
     end
   end
 
@@ -518,8 +532,19 @@ defmodule Arbor.Commands.SourceCoupling.AstExtract do
             if bind?, do: bind_alias(state, mod, rest), else: state
         end
 
-      _ ->
-        state
+      # Nested forms such as `alias __MODULE__.Child` and other static paths.
+      [other | rest] ->
+        case resolve_module_name(other, state) do
+          {:ok, module} ->
+            state = add_ref(state, line, module, kind)
+            if bind?, do: bind_alias(state, module, rest), else: state
+
+          {:unresolved, expr} ->
+            add_unresolved(state, line, "dynamic_alias_target", kind, expr)
+
+          :error ->
+            state
+        end
     end
   end
 
@@ -633,16 +658,24 @@ defmodule Arbor.Commands.SourceCoupling.AstExtract do
             {:done, ref_module_expr(meta, value, state, "behaviour")}
 
           true ->
-            case resolve_module_name(value, state) do
-              {:ok, mod} ->
+            case classify_attr_value(value, state) do
+              {:module, mod} ->
                 state = add_ref(state, line, mod, "attribute")
-                %{state | attrs: Map.put(state.attrs, attr, mod)}
+                %{state | attrs: Map.put(state.attrs, attr, {:module, mod})}
 
-              {:unresolved, expr} ->
-                _ = expr
-                state
+              {:map, fields} ->
+                state =
+                  Enum.reduce(fields, state, fn
+                    {_key, {:module, mod}}, st -> add_ref(st, line, mod, "attribute")
+                    _, st -> st
+                  end)
 
-              :error ->
+                %{state | attrs: Map.put(state.attrs, attr, {:map, fields})}
+
+              :non_module ->
+                %{state | attrs: Map.put(state.attrs, attr, :non_module)}
+
+              :unknown ->
                 state
             end
         end
@@ -650,6 +683,74 @@ defmodule Arbor.Commands.SourceCoupling.AstExtract do
       _ ->
         state
     end
+  end
+
+  # Classify static attribute values for later module-vs-non-module resolution.
+  # Tags are internal only and never appear in the census report.
+  # Literals (including ordinary atoms like :oauth) and maps are classified
+  # before module resolution so they never become fake module targets.
+  defp classify_attr_value(v, _state)
+       when is_binary(v) or is_integer(v) or is_float(v) or is_boolean(v) or is_nil(v) do
+    :non_module
+  end
+
+  # Bare atoms in attr maps/lists are literals, not module aliases.
+  # True module references quote as {:__aliases__, _, _} even for one segment.
+  defp classify_attr_value(v, _state) when is_atom(v), do: :non_module
+
+  defp classify_attr_value({:%{}, _, pairs}, state) when is_list(pairs) do
+    classify_map_fields(pairs, state, %{})
+  end
+
+  defp classify_attr_value(pairs, state) when is_list(pairs) do
+    if keyword_attr_pairs?(pairs) do
+      classify_map_fields(pairs, state, %{})
+    else
+      classify_list_attr_value(pairs, state)
+    end
+  end
+
+  defp classify_attr_value(value, state) do
+    case resolve_module_name(value, state) do
+      {:ok, mod} -> {:module, mod}
+      {:unresolved, _} -> :unknown
+      :error -> :unknown
+    end
+  end
+
+  defp keyword_attr_pairs?(pairs) do
+    pairs != [] and
+      Enum.all?(pairs, fn
+        {k, _v} when is_atom(k) -> true
+        _ -> false
+      end)
+  end
+
+  defp classify_map_fields(pairs, state, acc) do
+    Enum.reduce_while(pairs, {:map, acc}, fn
+      {key, val}, {:map, fields} when is_atom(key) ->
+        case classify_attr_value(val, state) do
+          :unknown ->
+            {:halt, :unknown}
+
+          classified ->
+            {:cont, {:map, Map.put(fields, key, classified)}}
+        end
+
+      _other, _acc ->
+        {:halt, :unknown}
+    end)
+  end
+
+  defp classify_list_attr_value(list, state) do
+    Enum.reduce_while(list, :non_module, fn item, :non_module ->
+      case classify_attr_value(item, state) do
+        :non_module -> {:cont, :non_module}
+        {:map, _} -> {:cont, :non_module}
+        {:module, _} -> {:halt, :unknown}
+        :unknown -> {:halt, :unknown}
+      end
+    end)
   end
 
   defp maybe_default_refs(meta, args, state) do
@@ -790,13 +891,68 @@ defmodule Arbor.Commands.SourceCoupling.AstExtract do
 
   defp resolve_module_name({:@, _, [{attr, _, _}]}, state) when is_atom(attr) do
     case Map.fetch(state.attrs, attr) do
-      {:ok, mod} -> {:ok, mod}
+      {:ok, {:module, mod}} -> {:ok, mod}
+      # Static non-module attrs are not module expressions (not unresolved).
+      {:ok, {:map, _}} -> :error
+      {:ok, :non_module} -> :error
+      # Legacy untagged string (should not occur after bind rewrite).
+      {:ok, mod} when is_binary(mod) -> {:ok, mod}
       :error -> {:unresolved, normalize_expr({:attr, attr})}
     end
   end
 
+  # @attr.field used as a module expression (map field access / zero-arity call shape).
+  defp resolve_module_name({{:., _, [{:@, _, [{attr, _, _}]}, field]}, _, []}, state)
+       when is_atom(attr) and is_atom(field) do
+    case Map.fetch(state.attrs, attr) do
+      {:ok, {:map, fields}} ->
+        case Map.fetch(fields, field) do
+          {:ok, {:module, mod}} -> {:ok, mod}
+          {:ok, {:map, _}} -> :error
+          {:ok, :non_module} -> :error
+          :error -> :error
+        end
+
+      # Module-valued attr + field is a call shape, not a nested module under the attr.
+      {:ok, {:module, _mod}} ->
+        :error
+
+      {:ok, :non_module} ->
+        :error
+
+      {:ok, mod} when is_binary(mod) ->
+        :error
+
+      :error ->
+        {:unresolved, normalize_expr({:attr_field, attr, field})}
+    end
+  end
+
+  # Module.concat(...) as a module expression — must precede the general dotted catch-all.
+  defp resolve_module_name({{:., _, [{:__aliases__, _, [:Module]}, :concat]}, _, args}, state) do
+    resolve_module_concat_expr(args, state)
+  end
+
+  defp resolve_module_name({{:., _, [{:__aliases__, _, parts}, :concat]}, _, args}, state)
+       when is_list(parts) do
+    if parts_to_string(parts) == "Module" do
+      resolve_module_concat_expr(args, state)
+    else
+      :error
+    end
+  end
+
+  # Nested static module path: __MODULE__.Child, Alias.Child, multi-segment chains.
+  defp resolve_module_name({{:., _, [base, child]}, _, []}, state) when is_atom(child) do
+    case resolve_module_name(base, state) do
+      {:ok, parent} -> join_module_strings(parent, Atom.to_string(child))
+      {:unresolved, _} = u -> u
+      :error -> :error
+    end
+  end
+
   defp resolve_module_name({{:., _, [_mod, _]}, _, _}, state) do
-    # Already a call — not a module name alone
+    # True call / dynamic dotted form — not a static module name alone.
     _ = state
     :error
   end
@@ -815,7 +971,9 @@ defmodule Arbor.Commands.SourceCoupling.AstExtract do
     if byte_size(bin) <= @max_module_bytes, do: {:ok, bin}, else: :error
   end
 
-  defp resolve_module_name({{:., _, [{:__aliases__, _, [:Module]}, :concat]}, _, args}, state) do
+  defp resolve_module_name(_other, _state), do: :error
+
+  defp resolve_module_concat_expr(args, state) do
     case args do
       [list] when is_list(list) ->
         static_concat_list(list, state)
@@ -833,42 +991,66 @@ defmodule Arbor.Commands.SourceCoupling.AstExtract do
     end
   end
 
-  defp resolve_module_name(_other, _state), do: :error
+  # Expand alias segment lists to a module binary.
+  # Quoted nested `__MODULE__.Child` is `{:__aliases__, _, [{:__MODULE__, _, _}, :Child]}`
+  # — not a dotted call — so the leading segment may be a `__MODULE__` tuple.
+  defp parts_to_module(parts, state) when is_list(parts) do
+    case expand_alias_head(parts, state) do
+      {:ok, base, rest} ->
+        case alias_rest_segments(rest) do
+          {:ok, rest_s} ->
+            mod = Enum.join([base | rest_s], ".")
 
-  defp parts_to_module(parts, state) do
-    # Expand first segment if alias
-    case parts do
-      [first | rest] when is_atom(first) ->
-        first_s = Atom.to_string(first)
+            if byte_size(mod) <= @max_module_bytes do
+              {:ok, mod}
+            else
+              :error
+            end
 
-        base =
-          case lookup_alias(state, first_s) do
-            {:ok, mod} -> mod
-            :error -> first_s
-          end
-
-        rest_s =
-          Enum.map(rest, fn
-            a when is_atom(a) -> Atom.to_string(a)
-            s when is_binary(s) -> s
-            _ -> nil
-          end)
-
-        if Enum.any?(rest_s, &is_nil/1) do
-          {:unresolved, normalize_expr(parts)}
-        else
-          mod = Enum.join([base | rest_s], ".")
-
-          if byte_size(mod) <= @max_module_bytes do
-            {:ok, mod}
-          else
-            :error
-          end
+          :error ->
+            {:unresolved, normalize_expr(parts)}
         end
 
-      _ ->
+      :error ->
         {:unresolved, normalize_expr(parts)}
     end
+  end
+
+  defp parts_to_module(_parts, _state), do: :error
+
+  # Shared leading-segment resolution for ordinary aliases and nested __MODULE__.
+  # Quoted `__MODULE__.Child` is `{:__aliases__, _, [{:__MODULE__, _, nil}, :Child]}`.
+  # Resolve the leading tuple via the same bare-__MODULE__ path (not atom-only).
+  defp expand_alias_head([{:__MODULE__, _, _} = head | rest], state) do
+    case resolve_module_name(head, state) do
+      {:ok, parent} when is_binary(parent) -> {:ok, parent, rest}
+      _ -> :error
+    end
+  end
+
+  defp expand_alias_head([first | rest], state) when is_atom(first) do
+    first_s = Atom.to_string(first)
+
+    base =
+      case lookup_alias(state, first_s) do
+        {:ok, mod} -> mod
+        :error -> first_s
+      end
+
+    {:ok, base, rest}
+  end
+
+  defp expand_alias_head(_parts, _state), do: :error
+
+  defp alias_rest_segments(rest) when is_list(rest) do
+    segs =
+      Enum.map(rest, fn
+        a when is_atom(a) -> Atom.to_string(a)
+        s when is_binary(s) -> s
+        _ -> nil
+      end)
+
+    if Enum.any?(segs, &is_nil/1), do: :error, else: {:ok, segs}
   end
 
   defp parts_to_string(parts) do

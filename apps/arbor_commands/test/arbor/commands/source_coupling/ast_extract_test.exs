@@ -40,6 +40,153 @@ defmodule Arbor.Commands.SourceCoupling.AstExtractTest do
     assert Enum.any?(result.references, &(&1.target == "Arbor.Contracts.Foo"))
   end
 
+  test "quoted nested __MODULE__ is __aliases__ with leading __MODULE__ tuple" do
+    # Prove the real string_to_quoted shape (not a dotted-call form).
+    assert {:ok, {:__aliases__, _, [{:__MODULE__, _, ctx}, :Child]}} =
+             Code.string_to_quoted("__MODULE__.Child")
+
+    # Context is typically nil from string_to_quoted; never an atom segment.
+    assert ctx in [nil, false, Elixir]
+
+    assert {:ok, {:__aliases__, _, [{:__MODULE__, _, _}, :Store]}} =
+             Code.string_to_quoted("__MODULE__.Store")
+
+    refute match?(
+             {:ok, {{:., _, _}, _, _}},
+             Code.string_to_quoted("__MODULE__.Child")
+           )
+  end
+
+  test "nested __MODULE__ remote and struct resolve to Parent.Child" do
+    src = """
+    defmodule Arbor.Nested.Host do
+      def call, do: __MODULE__.Child.f()
+      def struct_ref, do: %__MODULE__.Child{}
+    end
+    """
+
+    assert {:ok, result} = AstExtract.extract("apps/arbor_common/lib/nested_host.ex", src)
+    targets = Enum.map(result.references, & &1.target)
+    assert "Arbor.Nested.Host.Child" in targets
+
+    refute Enum.any?(result.unresolved, fn u ->
+             String.contains?(u.normalized_expression, "__MODULE__.Child")
+           end)
+  end
+
+  test "alias __MODULE__.Store binds and resolves full nested module" do
+    src = """
+    defmodule Arbor.Alias.Host do
+      alias __MODULE__.Store
+      def call, do: Store.put(:k, :v)
+    end
+    """
+
+    assert {:ok, result} = AstExtract.extract("apps/arbor_common/lib/alias_host.ex", src)
+    targets = Enum.map(result.references, & &1.target)
+    assert "Arbor.Alias.Host.Store" in targets
+  end
+
+  test "static Module.concat with __MODULE__ resolves without dynamic_module_concat" do
+    src = """
+    defmodule Arbor.Concat.Host do
+      def list_form, do: Module.concat([__MODULE__, Child]).f()
+      def two_arg, do: Module.concat(__MODULE__, Child).g()
+      def nested_child, do: Module.concat([__MODULE__.Child, Extra]).h()
+    end
+    """
+
+    assert {:ok, result} = AstExtract.extract("apps/arbor_common/lib/concat_host.ex", src)
+    targets = Enum.map(result.references, & &1.target)
+    assert "Arbor.Concat.Host.Child" in targets
+    assert "Arbor.Concat.Host.Child.Extra" in targets
+
+    refute Enum.any?(result.unresolved, fn u ->
+             u.reason == "dynamic_module_concat"
+           end)
+  end
+
+  test "non-module map attribute field access is not a dynamic module reference" do
+    src = """
+    defmodule Arbor.Policy.Host do
+      @policy %{openai: %{model: "gpt"}, temperature: 0.2}
+      def cfg, do: @policy.openai
+    end
+    """
+
+    assert {:ok, result} = AstExtract.extract("apps/arbor_common/lib/policy_host.ex", src)
+    assert result.unresolved == []
+
+    # Must not invent module targets from map keys/fields.
+    targets = Enum.map(result.references, & &1.target)
+    refute "openai" in targets
+    refute "gpt" in targets
+    refute Enum.any?(targets, &String.contains?(&1, "openai"))
+  end
+
+  test "ordinary atom literals in static attr maps are not fake module targets" do
+    src = """
+    defmodule Arbor.AtomLit.Host do
+      @policy %{mode: :oauth, provider: :openai}
+      def cfg, do: @policy.mode
+    end
+    """
+
+    assert {:ok, result} = AstExtract.extract("apps/arbor_common/lib/atom_lit_host.ex", src)
+    assert result.unresolved == []
+    targets = Enum.map(result.references, & &1.target)
+    refute "oauth" in targets
+    refute "openai" in targets
+    refute Enum.any?(targets, &(&1 in ["oauth", "openai", "mode", "provider"]))
+  end
+
+  test "ordinary atom literals in static attr lists are not fake module targets" do
+    src = """
+    defmodule Arbor.AtomList.Host do
+      @modes [:oauth, :api_key, :none]
+      def modes, do: @modes
+    end
+    """
+
+    assert {:ok, result} = AstExtract.extract("apps/arbor_common/lib/atom_list_host.ex", src)
+    assert result.unresolved == []
+    targets = Enum.map(result.references, & &1.target)
+    refute "oauth" in targets
+    refute "api_key" in targets
+    refute "none" in targets
+  end
+
+  test "module-valued map attribute field resolves as module reference" do
+    src = """
+    defmodule Arbor.Handlers.Host do
+      @handlers %{openai: Arbor.LLM.OpenAI}
+      def call, do: @handlers.openai.run()
+    end
+    """
+
+    assert {:ok, result} = AstExtract.extract("apps/arbor_common/lib/handlers_host.ex", src)
+    assert Enum.any?(result.references, &(&1.target == "Arbor.LLM.OpenAI"))
+
+    refute Enum.any?(result.unresolved, fn u ->
+             String.contains?(u.normalized_expression, "handlers")
+           end)
+  end
+
+  test "unknown module attribute used as module remains unresolved" do
+    src = """
+    defmodule Arbor.Missing.Host do
+      def call, do: @missing.run()
+    end
+    """
+
+    assert {:ok, result} = AstExtract.extract("apps/arbor_common/lib/missing_host.ex", src)
+    assert result.unresolved != []
+
+    assert Enum.any?(result.unresolved, fn u ->
+             u.reason == "dynamic_module_expr"
+           end)
+  end
+
   test "use behaviour struct and defimpl produce refs" do
     src = """
     defmodule Arbor.Use.Test do
@@ -231,6 +378,7 @@ defmodule Arbor.Commands.SourceCoupling.AstExtractTest do
     # Two long expressions that share a long common prefix but differ at the end.
     # If digest used only truncated evidence, they could collide.
     prefix = String.duplicate("Segment", 40)
+
     src1 = """
     defmodule Arbor.Dyn.Long1 do
       def call(x), do: Module.concat([x, "#{prefix}_ALPHA"]).f()
