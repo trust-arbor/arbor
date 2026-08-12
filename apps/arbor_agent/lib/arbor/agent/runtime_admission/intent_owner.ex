@@ -9,12 +9,14 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentOwner do
   Worker binding is owner-authenticated: the owner spawns a worker blocked on
   an unforgeable gate ref, binds that exact PID via TaskStore (caller must be
   this owner), then releases the gate. Survives worker death; removed only
-  after authoritative settlement.
+  after authoritative settlement via `:shutdown`/`:kill` (external `:normal`
+  does not retire this process).
   """
 
   use GenServer
 
   alias Arbor.Agent.Orchestration.TaskStore
+  alias Arbor.Agent.RuntimeAdmission.IntentCore
   alias Arbor.Agent.RuntimeAdmission.OrdinaryStartWorker
 
   @registry Arbor.Agent.RuntimeAdmissionRegistry
@@ -71,7 +73,8 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentOwner do
           worker_pid: nil,
           worker_mon: nil,
           gate_ref: nil,
-          adopt_attempts: 0
+          adopt_attempts: 0,
+          launch_attempts: 0
         }
 
         send(self(), :try_adopt)
@@ -107,28 +110,30 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentOwner do
         {:noreply, state}
 
       {:error, :target_fenced} ->
-        {:stop, :normal, state}
+        {:stop, :target_fenced, state}
 
       {:error, :conflict} ->
-        {:stop, :normal, state}
+        {:stop, :conflict, state}
 
-      {:error, :runtime_admission_not_ready} ->
-        schedule_adopt_retry(state)
-
-      {:error, :fence_not_ready} ->
-        schedule_adopt_retry(state)
-
-      {:error, :store_restart} ->
-        schedule_adopt_retry(state)
-
-      {:error, _other} ->
-        schedule_adopt_retry(state)
+      {:error, reason} ->
+        if IntentCore.retryable_adopt_error?(reason) do
+          schedule_adopt_retry(state)
+        else
+          {:stop, {:adopt_failed, reason}, state}
+        end
     end
   end
 
-  def handle_info({:DOWN, mon, :process, pid, _reason}, %{worker_mon: mon, worker_pid: pid} = state) do
+  def handle_info(
+        {:DOWN, mon, :process, pid, _reason},
+        %{worker_mon: mon, worker_pid: pid} = state
+      ) do
     # Worker-down is source-authentic via TaskStore's monitor after bind.
     {:noreply, %{state | worker_pid: nil, worker_mon: nil, gate_ref: nil}}
+  end
+
+  def handle_info({:stop_typed, reason}, state) do
+    {:stop, reason, state}
   end
 
   def handle_info(_msg, state), do: {:noreply, state}
@@ -167,7 +172,7 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentOwner do
     attempts = Map.get(state, :adopt_attempts, 0) + 1
 
     if attempts > @max_adopt_retries do
-      {:stop, :normal, state}
+      {:stop, :adopt_retry_exhausted, state}
     else
       Process.send_after(self(), :try_adopt, @adopt_retry_ms)
       {:noreply, %{state | adopt_attempts: attempts}}
@@ -214,15 +219,31 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentOwner do
       {:ok, worker_pid, _} when is_pid(worker_pid) ->
         bind_and_release(state, worker_pid, gate_ref)
 
-      _ ->
-        schedule_launch_retry(state)
+      {:error, reason} ->
+        classified = IntentCore.classify_start_child_error(reason)
+
+        if IntentCore.retryable_launch_failure?(classified) do
+          schedule_launch_retry(state)
+        else
+          stop_typed(state, {:launch_failed, IntentCore.redact_error_reason(classified)})
+        end
+
+      other ->
+        classified = IntentCore.classify_start_child_error(other)
+        stop_typed(state, {:launch_failed, IntentCore.redact_error_reason(classified)})
     end
   rescue
-    _ ->
-      schedule_launch_retry(state)
+    e ->
+      # Bound/redacted — never leak full exception text unbounded.
+      stop_typed(state, {:launch_exception, IntentCore.redact_error_reason(Exception.message(e))})
   catch
-    :exit, _ ->
-      schedule_launch_retry(state)
+    :exit, reason ->
+      if store_restart_exit?(reason, state.store_ref) do
+        schedule_launch_retry(state)
+      else
+        # Unrelated exit — do not swallow with infinite retry.
+        exit(reason)
+      end
   end
 
   defp maybe_launch_worker(state), do: state
@@ -240,9 +261,21 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentOwner do
         mon = Process.monitor(worker_pid)
         %{state | worker_pid: worker_pid, worker_mon: mon, gate_ref: gate_ref}
 
-      {:error, _reason} ->
+      {:error, reason} when reason in [:not_owner, :conflict, :not_found] ->
         if Process.alive?(worker_pid), do: Process.exit(worker_pid, :kill)
-        schedule_launch_retry(state)
+        # Auth/bind errors are not collision retries.
+        send(self(), {:stop_typed, {:bind_failed, reason}})
+        %{state | worker_pid: nil, worker_mon: nil, gate_ref: nil}
+
+      {:error, reason} ->
+        if Process.alive?(worker_pid), do: Process.exit(worker_pid, :kill)
+
+        if IntentCore.retryable_launch_failure?(reason) do
+          schedule_launch_retry(state)
+        else
+          send(self(), {:stop_typed, {:bind_failed, reason}})
+          %{state | worker_pid: nil, worker_mon: nil, gate_ref: nil}
+        end
     end
   catch
     :exit, reason ->
@@ -251,20 +284,27 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentOwner do
       if store_restart_exit?(reason, state.store_ref) do
         schedule_launch_retry(state)
       else
-        schedule_launch_retry(state)
+        # Unrelated exit — stop typed so TaskStore owner DOWN finalizes waiters.
+        send(self(), {:stop_typed, {:bind_exit, :unrelated}})
+        %{state | worker_pid: nil, worker_mon: nil, gate_ref: nil}
       end
   end
 
-  # Always schedule bounded retry so waiters never permanently stall after
-  # launcher exceptions/exits/bind failures.
+  defp stop_typed(state, reason) do
+    send(self(), {:stop_typed, reason})
+    %{state | worker_pid: nil, worker_mon: nil, gate_ref: nil}
+  end
+
   defp schedule_launch_retry(state) do
-    attempts = Map.get(state, :adopt_attempts, 0) + 1
+    attempts = Map.get(state, :launch_attempts, 0) + 1
 
     if attempts > @max_adopt_retries do
-      state
+      # Must stop so TaskStore observes owner DOWN and releases waiters.
+      send(self(), {:stop_typed, :launch_retry_exhausted})
+      %{state | launch_attempts: attempts, worker_pid: nil, worker_mon: nil, gate_ref: nil}
     else
       Process.send_after(self(), :try_adopt, @adopt_retry_ms)
-      %{state | adopt_attempts: attempts, worker_pid: nil, worker_mon: nil, gate_ref: nil}
+      %{state | launch_attempts: attempts, worker_pid: nil, worker_mon: nil, gate_ref: nil}
     end
   end
 

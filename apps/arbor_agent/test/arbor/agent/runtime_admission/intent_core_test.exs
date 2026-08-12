@@ -11,7 +11,17 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentCoreTest do
 
   test "fence first rejects admit" do
     assert {:error, :target_fenced} =
-             IntentCore.admit(%{}, %{@target => "op1"}, true, true, @target, @fp_a, "rai_1", 0, 10)
+             IntentCore.admit(
+               %{},
+               %{@target => "op1"},
+               true,
+               true,
+               @target,
+               @fp_a,
+               "rai_1",
+               0,
+               10
+             )
   end
 
   test "not ready rejects" do
@@ -86,7 +96,16 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentCoreTest do
 
   test "adopt rejects when fenced; rebinds idle owner" do
     assert {:error, :target_fenced} =
-             IntentCore.adopt_owner(%{}, %{@target => "op"}, true, true, @target, "rai_1", @fp_a, self())
+             IntentCore.adopt_owner(
+               %{},
+               %{@target => "op"},
+               true,
+               true,
+               @target,
+               "rai_1",
+               @fp_a,
+               self()
+             )
 
     assert {:ok, :adopted, intent, intents} =
              IntentCore.adopt_owner(%{}, %{}, true, true, @target, "rai_1", @fp_a, self())
@@ -222,5 +241,290 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentCoreTest do
                  owner_pid: self()
                }
              ])
+  end
+
+  test "begin_settling retains terminal and first-wins; ownerless finalizes" do
+    {:ok, :admitted, _, intents, _} =
+      IntentCore.admit(%{}, %{}, true, true, @target, @fp_a, "rai_1", 0, 10)
+
+    assert {:ok, :ownerless_finalize, done, mid, _} =
+             IntentCore.begin_settling(intents, @target, "rai_1", {:error, :x})
+
+    assert done.phase == :settling
+    assert done.terminal == {:error, :x}
+    assert IntentCore.non_idle?(mid, @target)
+
+    assert {:ok, finished, cleared} = IntentCore.finalize_ownerless(mid, @target, "rai_1")
+    assert finished.terminal == {:error, :x}
+    refute IntentCore.non_idle?(cleared, @target)
+
+    # With owner: begin keeps non-idle until finalize_settled on exact barrier.
+    {:ok, :admitted, _, intents2, _} =
+      IntentCore.admit(%{}, %{}, true, true, @target, @fp_a, "rai_2", 0, 10)
+
+    {:ok, :adopted, _, live} =
+      IntentCore.adopt_owner(intents2, %{}, true, true, @target, "rai_2", @fp_a, self())
+
+    assert {:ok, :begin, settling, mid2, [{:shutdown_owner, owner}]} =
+             IntentCore.begin_settling(live, @target, "rai_2", {:applied, self()})
+
+    assert owner == self()
+    assert settling.phase == :settling
+    assert settling.retire_barrier == :await_owner_down
+    assert IntentCore.non_idle?(mid2, @target)
+
+    assert {:ok, :already_settling, same, ^mid2, []} =
+             IntentCore.begin_settling(mid2, @target, "rai_2", {:error, :second})
+
+    assert same.terminal == {:applied, self()}
+
+    # Legacy settle must not bypass live-owner barrier.
+    assert {:error, :owner_barrier_outstanding} =
+             IntentCore.settle(mid2, @target, "rai_2", {:error, :bypass})
+
+    assert {:ok, finished2, cleared2} = IntentCore.finalize_settled(mid2, @target, "rai_2")
+    assert finished2.terminal == {:applied, self()}
+    refute IntentCore.non_idle?(cleared2, @target)
+
+    # finalize_settled rejects ownerless barrier.
+    {:ok, :admitted, _, intents3, _} =
+      IntentCore.admit(%{}, %{}, true, true, @target, @fp_a, "rai_3", 0, 10)
+
+    {:ok, :ownerless_finalize, _, mid3, _} =
+      IntentCore.begin_settling(intents3, @target, "rai_3", {:error, :y})
+
+    assert {:error, :barrier_mismatch} = IntentCore.finalize_settled(mid3, @target, "rai_3")
+  end
+
+  test "admit rejects settling and await_worker_down barriers without join" do
+    settling = %{
+      intent_id: "rai_1",
+      target_agent_id: @target,
+      kind: :ordinary_start,
+      fingerprint: @fp_a,
+      phase: :settling,
+      owner_pid: self(),
+      worker_pid: nil,
+      terminal: {:error, :x},
+      retire_barrier: :await_owner_down
+    }
+
+    assert {:error, :settling} =
+             IntentCore.admit(
+               %{@target => settling},
+               %{},
+               true,
+               true,
+               @target,
+               @fp_a,
+               "rai_2",
+               1,
+               10
+             )
+
+    await = %{
+      intent_id: "rai_1",
+      target_agent_id: @target,
+      kind: :ordinary_start,
+      fingerprint: @fp_a,
+      phase: :outcome_unknown,
+      owner_pid: nil,
+      worker_pid: self(),
+      terminal: nil,
+      retire_barrier: :await_worker_down
+    }
+
+    assert {:error, :settling} =
+             IntentCore.admit(
+               %{@target => await},
+               %{},
+               true,
+               true,
+               @target,
+               @fp_a,
+               "rai_2",
+               1,
+               10
+             )
+  end
+
+  test "note_owner_gone_await_worker keeps worker and kill effect" do
+    worker = spawn(fn -> :ok end)
+    owner = self()
+
+    intent = %{
+      intent_id: "rai_1",
+      target_agent_id: @target,
+      kind: :ordinary_start,
+      fingerprint: @fp_a,
+      phase: :worker_running,
+      owner_pid: owner,
+      worker_pid: worker,
+      terminal: nil,
+      retire_barrier: :none
+    }
+
+    assert {:ok, updated, intents, [{:kill_worker, ^worker}]} =
+             IntentCore.note_owner_gone_await_worker(
+               %{@target => intent},
+               @target,
+               "rai_1",
+               owner
+             )
+
+    assert updated.phase == :outcome_unknown
+    assert updated.retire_barrier == :await_worker_down
+    assert updated.owner_pid == nil
+    assert updated.worker_pid == worker
+    assert IntentCore.non_idle?(intents, @target)
+
+    # Late authenticate still accepts exact worker.
+    assert :ok =
+             IntentCore.authenticate_worker(intents, @target, "rai_1", @fp_a, worker)
+
+    assert IntentCore.settle_eligible_worker?(updated, worker)
+  end
+
+  test "security regression: stale owner DOWN does not clear or retire rebound owner" do
+    old_owner = spawn(fn -> Process.sleep(60_000) end)
+    new_owner = self()
+    worker = spawn(fn -> :ok end)
+
+    intent = %{
+      intent_id: "rai_1",
+      target_agent_id: @target,
+      kind: :ordinary_start,
+      fingerprint: @fp_a,
+      phase: :worker_running,
+      owner_pid: new_owner,
+      worker_pid: worker,
+      terminal: nil,
+      retire_barrier: :none
+    }
+
+    intents = %{@target => intent}
+
+    assert {:error, :stale_owner} =
+             IntentCore.note_owner_gone_await_worker(intents, @target, "rai_1", old_owner)
+
+    assert {:error, :stale_owner} =
+             IntentCore.commit_terminal_owner_gone(
+               intents,
+               @target,
+               "rai_1",
+               old_owner,
+               {:error, :owner_down}
+             )
+
+    # Rebound owner still present and non-idle.
+    assert intents[@target].owner_pid == new_owner
+    assert IntentCore.non_idle?(intents, @target)
+
+    # Settling barrier finalize also rejects stale owner.
+    {:ok, :begin, _, settling, _} =
+      IntentCore.begin_settling(intents, @target, "rai_1", {:error, :t})
+
+    assert {:error, :stale_owner} =
+             IntentCore.finalize_settled(settling, @target, "rai_1", old_owner)
+
+    assert {:ok, _done, cleared} =
+             IntentCore.finalize_settled(settling, @target, "rai_1", new_owner)
+
+    refute IntentCore.non_idle?(cleared, @target)
+  end
+
+  test "commit_terminal_owner_gone is pure owner-clear + terminal commit" do
+    owner = self()
+
+    intent = %{
+      intent_id: "rai_1",
+      target_agent_id: @target,
+      kind: :ordinary_start,
+      fingerprint: @fp_a,
+      phase: :worker_running,
+      owner_pid: owner,
+      worker_pid: nil,
+      terminal: nil,
+      retire_barrier: :none
+    }
+
+    assert {:ok, updated, mid} =
+             IntentCore.commit_terminal_owner_gone(
+               %{@target => intent},
+               @target,
+               "rai_1",
+               owner,
+               {:applied, self()}
+             )
+
+    assert updated.owner_pid == nil
+    assert updated.phase == :settling
+    assert updated.terminal == {:applied, self()}
+    assert updated.retire_barrier == :none
+
+    assert {:ok, done, cleared} = IntentCore.finalize_ownerless(mid, @target, "rai_1")
+    assert done.terminal == {:applied, self()}
+    refute IntentCore.non_idle?(cleared, @target)
+  end
+
+  test "retry predicates are narrow allowlists" do
+    assert IntentCore.retryable_adopt_error?(:runtime_admission_not_ready)
+    assert IntentCore.retryable_adopt_error?(:fence_not_ready)
+    assert IntentCore.retryable_adopt_error?(:store_restart)
+    refute IntentCore.retryable_adopt_error?(:conflict)
+    refute IntentCore.retryable_adopt_error?(:target_fenced)
+
+    assert IntentCore.retryable_launch_failure?(:store_restart)
+    assert IntentCore.retryable_launch_failure?(:max_children)
+    assert IntentCore.retryable_launch_failure?(:timeout)
+    assert IntentCore.retryable_launch_failure?({:task_supervisor_transient, :max_children})
+    refute IntentCore.retryable_launch_failure?({:task_supervisor_transient, :already_started})
+    refute IntentCore.retryable_launch_failure?(:not_owner)
+    refute IntentCore.retryable_launch_failure?({:bind_failed, :conflict})
+    refute IntentCore.retryable_launch_failure?({:launch_failed, :anything})
+
+    assert IntentCore.classify_start_child_error(:max_children) == :max_children
+    assert IntentCore.classify_start_child_error({:already_started, self()}) == :already_started
+    assert IntentCore.redact_error_reason(String.duplicate("x", 100)) |> String.length() <= 64
+  end
+
+  test "classify_live_down never parks" do
+    assert {:settle, {:error, :worker_down}} =
+             IntentCore.classify_live_down("rai_1", :not_running, :worker)
+
+    assert {:settle, {:conflict, :witness_mismatch}} =
+             IntentCore.classify_live_down("rai_1", :bare, :worker)
+
+    assert {:settle, {:applied, pid}} =
+             IntentCore.classify_live_down("rai_1", {:exact, "rai_1"}, :worker, self())
+
+    assert pid == self()
+  end
+
+  test "security regression: finalize_ownerless rejects live owner; settle ownerless only" do
+    {:ok, :admitted, _, intents, _} =
+      IntentCore.admit(%{}, %{}, true, true, @target, @fp_a, "rai_1", 0, 10)
+
+    {:ok, :adopted, _, live} =
+      IntentCore.adopt_owner(intents, %{}, true, true, @target, "rai_1", @fp_a, self())
+
+    {:ok, :begin, _, settling, _} =
+      IntentCore.begin_settling(live, @target, "rai_1", {:error, :x})
+
+    assert {:error, :owner_barrier_outstanding} =
+             IntentCore.finalize_ownerless(settling, @target, "rai_1")
+
+    assert {:error, :owner_barrier_outstanding} =
+             IntentCore.settle(settling, @target, "rai_1", {:error, :y})
+
+    # Ownerless settle still works.
+    {:ok, :admitted, _, intents2, _} =
+      IntentCore.admit(%{}, %{}, true, true, @target, @fp_a, "rai_2", 0, 10)
+
+    assert {:ok, done, cleared} =
+             IntentCore.settle(intents2, @target, "rai_2", {:error, :z})
+
+    assert done.terminal == {:error, :z}
+    refute IntentCore.non_idle?(cleared, @target)
   end
 end

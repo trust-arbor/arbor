@@ -3,7 +3,13 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentCore do
   Pure decision core for ordinary runtime-admission intents (Phase 4C C3C1a0).
 
   No IO, no GenServer, no Process. Shells gather facts and interpret effects.
+
+  Settlement is two-phase: `begin_settling/4` retains a non-idle intent (and
+  waiters in the shell) until the exact monitor DOWN barrier; `finalize_settled/3`
+  or ownerless delete releases the row. Live worker-death never parks forever.
   """
+
+  @open_phases [:admitted, :owner_launching, :owner_live, :worker_running]
 
   @type phase ::
           :admitted
@@ -14,6 +20,8 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentCore do
           | :settling
           | :terminal
 
+  @type retire_barrier :: :none | :await_owner_down | :await_worker_down
+
   @type intent :: %{
           required(:intent_id) => String.t(),
           required(:target_agent_id) => String.t(),
@@ -22,7 +30,8 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentCore do
           required(:phase) => phase(),
           optional(:owner_pid) => pid() | nil,
           optional(:worker_pid) => pid() | nil,
-          optional(:terminal) => term()
+          optional(:terminal) => term(),
+          optional(:retire_barrier) => retire_barrier()
         }
 
   @type fence_map :: %{optional(String.t()) => String.t()}
@@ -32,6 +41,9 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentCore do
   Decide ordinary-start admission for one target.
 
   Effects (as data): `{:launch_owner, intent}` | `:none`
+
+  Join only on open phases. `:settling` and await-worker barriers reject without
+  waiter append (shell must not park callers).
   """
   @spec admit(
           intent_map(),
@@ -72,32 +84,68 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentCore do
 
       true ->
         case Map.get(intents, target) do
-          %{phase: phase, fingerprint: ^fingerprint} = intent
-          when phase != :terminal ->
-            {:ok, :joined, intent, intents, []}
+          %{phase: :settling, fingerprint: ^fingerprint} ->
+            {:error, :settling}
 
-          %{phase: phase} when phase != :terminal ->
+          %{phase: :settling} ->
+            {:error, :settling}
+
+          %{
+            phase: :outcome_unknown,
+            retire_barrier: :await_worker_down,
+            fingerprint: ^fingerprint
+          } ->
+            {:error, :settling}
+
+          %{phase: :outcome_unknown, retire_barrier: :await_worker_down} ->
             {:error, :conflict}
 
-          _idle ->
-            if intent_count >= max_intents do
-              {:error, :busy}
-            else
-              intent = %{
-                intent_id: intent_id,
-                target_agent_id: target,
-                kind: :ordinary_start,
-                fingerprint: fingerprint,
-                phase: :admitted,
-                owner_pid: nil,
-                worker_pid: nil,
-                terminal: nil
-              }
+          %{phase: phase, fingerprint: ^fingerprint} = intent
+          when phase in @open_phases ->
+            {:ok, :joined, intent, intents, []}
 
-              new_intents = Map.put(intents, target, intent)
-              {:ok, :admitted, intent, new_intents, [{:launch_owner, intent}]}
+          %{phase: phase, fingerprint: ^fingerprint} = intent
+          when phase == :outcome_unknown ->
+            # Restart-inventory outcome_unknown (barrier :none) may rejoin.
+            if Map.get(intent, :retire_barrier, :none) == :none do
+              {:ok, :joined, intent, intents, []}
+            else
+              {:error, :settling}
             end
+
+          %{phase: phase} when phase in @open_phases or phase == :outcome_unknown ->
+            {:error, :conflict}
+
+          %{phase: :terminal} ->
+            admit_fresh(intents, target, fingerprint, intent_id, intent_count, max_intents)
+
+          nil ->
+            admit_fresh(intents, target, fingerprint, intent_id, intent_count, max_intents)
+
+          _ ->
+            {:error, :conflict}
         end
+    end
+  end
+
+  defp admit_fresh(intents, target, fingerprint, intent_id, intent_count, max_intents) do
+    if intent_count >= max_intents do
+      {:error, :busy}
+    else
+      intent = %{
+        intent_id: intent_id,
+        target_agent_id: target,
+        kind: :ordinary_start,
+        fingerprint: fingerprint,
+        phase: :admitted,
+        owner_pid: nil,
+        worker_pid: nil,
+        terminal: nil,
+        retire_barrier: :none
+      }
+
+      new_intents = Map.put(intents, target, intent)
+      {:ok, :admitted, intent, new_intents, [{:launch_owner, intent}]}
     end
   end
 
@@ -137,9 +185,27 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentCore do
 
       true ->
         case Map.get(intents, target) do
+          %{phase: :settling} ->
+            {:error, :conflict}
+
+          %{phase: :outcome_unknown, retire_barrier: :await_worker_down} ->
+            {:error, :conflict}
+
           %{intent_id: ^intent_id, fingerprint: ^fingerprint, phase: phase} = intent
-          when phase in [:admitted, :owner_launching, :owner_live, :worker_running, :outcome_unknown] ->
-            updated = %{intent | phase: :owner_live, owner_pid: owner_pid}
+          when phase in [
+                 :admitted,
+                 :owner_launching,
+                 :owner_live,
+                 :worker_running,
+                 :outcome_unknown
+               ] ->
+            updated = %{
+              intent
+              | phase: :owner_live,
+                owner_pid: owner_pid,
+                retire_barrier: Map.get(intent, :retire_barrier, :none)
+            }
+
             {:ok, :adopted, updated, Map.put(intents, target, updated)}
 
           %{phase: phase} when phase != :terminal ->
@@ -154,7 +220,8 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentCore do
               phase: :owner_live,
               owner_pid: owner_pid,
               worker_pid: nil,
-              terminal: nil
+              terminal: nil,
+              retire_barrier: :none
             }
 
             {:ok, :adopted, intent, Map.put(intents, target, intent)}
@@ -190,6 +257,12 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentCore do
       when is_binary(intent_id) and is_binary(fingerprint) and is_pid(caller_owner_pid) and
              is_pid(worker_pid) do
     case Map.get(intents, target) do
+      %{phase: :settling} ->
+        {:error, :conflict}
+
+      %{phase: :outcome_unknown, retire_barrier: :await_worker_down} ->
+        {:error, :conflict}
+
       %{
         intent_id: ^intent_id,
         fingerprint: ^fingerprint,
@@ -197,7 +270,13 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentCore do
         owner_pid: ^caller_owner_pid,
         worker_pid: nil
       } = intent ->
-        updated = %{intent | phase: :worker_running, worker_pid: worker_pid}
+        updated = %{
+          intent
+          | phase: :worker_running,
+            worker_pid: worker_pid,
+            retire_barrier: Map.get(intent, :retire_barrier, :none)
+        }
+
         {:ok, Map.put(intents, target, updated)}
 
       %{
@@ -225,6 +304,10 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentCore do
 
   @doc """
   Authenticate the calling process as the bound worker for target+intent+fingerprint.
+
+  Accepts classic `:worker_running` and the exact-worker late-terminal path
+  (`:outcome_unknown` + `:await_worker_down`) so a still-bound worker may finish
+  effects and submit settle after unexpected owner death.
   """
   @spec authenticate_worker(intent_map(), String.t(), String.t(), String.t(), pid()) ::
           :ok | {:error, :not_found | :not_owner | :conflict}
@@ -238,6 +321,18 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentCore do
         worker_pid: ^caller_pid
       } ->
         :ok
+
+      %{
+        intent_id: ^intent_id,
+        fingerprint: ^fingerprint,
+        phase: :outcome_unknown,
+        retire_barrier: :await_worker_down,
+        worker_pid: ^caller_pid
+      } ->
+        :ok
+
+      %{phase: :settling, intent_id: ^intent_id} ->
+        {:error, :conflict}
 
       %{intent_id: ^intent_id, fingerprint: ^fingerprint, worker_pid: other}
       when is_pid(other) and other != caller_pid ->
@@ -254,12 +349,46 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentCore do
     end
   end
 
-  @doc "Transition to outcome_unknown (worker death around start)."
+  @doc """
+  True when the exact bound worker may submit a terminal (open worker or late await).
+  """
+  @spec settle_eligible_worker?(intent(), pid()) :: boolean()
+  def settle_eligible_worker?(
+        %{
+          phase: :worker_running,
+          worker_pid: worker_pid
+        },
+        caller_pid
+      )
+      when is_pid(worker_pid) and worker_pid == caller_pid,
+      do: true
+
+  def settle_eligible_worker?(
+        %{
+          phase: :outcome_unknown,
+          retire_barrier: :await_worker_down,
+          worker_pid: worker_pid
+        },
+        caller_pid
+      )
+      when is_pid(worker_pid) and worker_pid == caller_pid,
+      do: true
+
+  def settle_eligible_worker?(_, _), do: false
+
+  @doc "Transition to outcome_unknown (restart inventory / non-live park seed)."
   @spec mark_outcome_unknown(intent_map(), String.t()) :: {:ok, intent_map()} | {:error, atom()}
   def mark_outcome_unknown(intents, target) do
     case Map.get(intents, target) do
-      %{phase: phase} = intent when phase != :terminal ->
-        {:ok, Map.put(intents, target, %{intent | phase: :outcome_unknown, worker_pid: nil})}
+      %{phase: phase} = intent when phase not in [:terminal, :settling] ->
+        updated = %{
+          intent
+          | phase: :outcome_unknown,
+            worker_pid: nil,
+            retire_barrier: Map.get(intent, :retire_barrier, :none)
+        }
+
+        {:ok, Map.put(intents, target, updated)}
 
       _ ->
         {:error, :not_found}
@@ -271,7 +400,10 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentCore do
 
   `witness_fact`: `{:exact, intent_id}` | `:bare` | `{:other, intent_id}` | `:not_running`
   """
-  @spec classify_unknown_start(String.t(), :not_running | :bare | {:exact, String.t()} | {:other, String.t()}) ::
+  @spec classify_unknown_start(
+          String.t(),
+          :not_running | :bare | {:exact, String.t()} | {:other, String.t()}
+        ) ::
           :not_applied | :applied | :conflict
   def classify_unknown_start(_intent_id, :not_running), do: :not_applied
   def classify_unknown_start(intent_id, {:exact, intent_id}), do: :applied
@@ -279,20 +411,351 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentCore do
   def classify_unknown_start(_intent_id, {:other, _}), do: :conflict
   def classify_unknown_start(_intent_id, _), do: :conflict
 
-  @doc "Settle terminal outcome for exact intent_id and drop from the map."
-  @spec settle(intent_map(), String.t(), String.t(), term()) ::
-          {:ok, intent(), intent_map()} | {:error, :not_found | :conflict}
-  def settle(intents, target, intent_id, terminal) when is_binary(intent_id) do
+  @doc """
+  Pure live-DOWN classification. Never parks forever for ordinary-start.
+
+  Shell supplies `branch_pid` when class is `:applied` after whereis.
+  `source` is `:worker` or `:owner` for not_running error atom.
+  """
+  @spec classify_live_down(
+          String.t(),
+          :not_running | :bare | {:exact, String.t()} | {:other, String.t()},
+          :worker | :owner,
+          pid() | nil
+        ) :: {:settle, term()}
+  def classify_live_down(intent_id, witness_fact, source, branch_pid \\ nil)
+
+  def classify_live_down(intent_id, {:exact, intent_id}, _source, branch_pid)
+      when is_pid(branch_pid) do
+    {:settle, {:applied, branch_pid}}
+  end
+
+  def classify_live_down(intent_id, {:exact, intent_id}, _source, _branch_pid) do
+    {:settle, {:error, :branch_missing_after_witness}}
+  end
+
+  def classify_live_down(_intent_id, :bare, _source, _branch_pid) do
+    {:settle, {:conflict, :witness_mismatch}}
+  end
+
+  def classify_live_down(_intent_id, {:other, _}, _source, _branch_pid) do
+    {:settle, {:conflict, :witness_mismatch}}
+  end
+
+  def classify_live_down(_intent_id, :not_running, :worker, _branch_pid) do
+    {:settle, {:error, :worker_down}}
+  end
+
+  def classify_live_down(_intent_id, :not_running, :owner, _branch_pid) do
+    {:settle, {:error, :owner_down}}
+  end
+
+  def classify_live_down(_intent_id, _fact, :worker, _branch_pid) do
+    {:settle, {:error, :worker_down}}
+  end
+
+  def classify_live_down(_intent_id, _fact, :owner, _branch_pid) do
+    {:settle, {:error, :owner_down}}
+  end
+
+  @doc """
+  Begin two-phase settlement: retain non-idle intent with terminal when owner
+  must retire; ownerless returns finalize-now.
+  """
+  @spec begin_settling(intent_map(), String.t(), String.t(), term()) ::
+          {:ok, :begin, intent(), intent_map(), list()}
+          | {:ok, :already_settling, intent(), intent_map(), list()}
+          | {:ok, :ownerless_finalize, intent(), intent_map(), list()}
+          | {:error, :not_found | :conflict}
+  def begin_settling(intents, target, intent_id, outcome) when is_binary(intent_id) do
     case Map.get(intents, target) do
+      %{intent_id: ^intent_id, phase: :settling} = intent ->
+        # First terminal wins — do not overwrite.
+        {:ok, :already_settling, intent, intents, []}
+
       %{intent_id: ^intent_id, phase: phase} = intent when phase != :terminal ->
-        done = %{intent | phase: :terminal, terminal: terminal, worker_pid: nil}
-        {:ok, done, Map.delete(intents, target)}
+        owner_pid = Map.get(intent, :owner_pid)
+
+        if is_pid(owner_pid) do
+          updated = %{
+            intent
+            | phase: :settling,
+              terminal: outcome,
+              retire_barrier: :await_owner_down,
+              owner_pid: owner_pid
+          }
+
+          {:ok, :begin, updated, Map.put(intents, target, updated),
+           [{:shutdown_owner, owner_pid}]}
+        else
+          done = %{
+            intent
+            | phase: :settling,
+              terminal: outcome,
+              retire_barrier: :none,
+              owner_pid: nil
+          }
+
+          {:ok, :ownerless_finalize, done, Map.put(intents, target, done),
+           [{:finalize_now, outcome}]}
+        end
 
       %{intent_id: _other, phase: phase} when phase != :terminal ->
         {:error, :conflict}
 
       _ ->
         {:error, :not_found}
+    end
+  end
+
+  @doc """
+  Finalize after authentic owner DOWN with `:await_owner_down` barrier.
+
+  Requires phase `:settling`, barrier `:await_owner_down`, a stored terminal, and
+  (when `expected_owner_pid` is given) exact match against `intent.owner_pid` so
+  a stale DOWN cannot retire a rebound owner.
+  """
+  @spec finalize_settled(intent_map(), String.t(), String.t()) ::
+          {:ok, intent(), intent_map()}
+          | {:error, :not_found | :conflict | :not_settling | :barrier_mismatch | :stale_owner}
+  def finalize_settled(intents, target, intent_id) when is_binary(intent_id) do
+    finalize_settled(intents, target, intent_id, :any_owner)
+  end
+
+  @spec finalize_settled(intent_map(), String.t(), String.t(), pid() | :any_owner) ::
+          {:ok, intent(), intent_map()}
+          | {:error, :not_found | :conflict | :not_settling | :barrier_mismatch | :stale_owner}
+  def finalize_settled(intents, target, intent_id, expected_owner_pid)
+      when is_binary(intent_id) and
+             (is_pid(expected_owner_pid) or expected_owner_pid == :any_owner) do
+    case Map.get(intents, target) do
+      %{
+        intent_id: ^intent_id,
+        phase: :settling,
+        retire_barrier: :await_owner_down,
+        owner_pid: owner_pid
+      } = intent ->
+        cond do
+          not Map.has_key?(intent, :terminal) ->
+            {:error, :not_settling}
+
+          expected_owner_pid != :any_owner and owner_pid != expected_owner_pid ->
+            {:error, :stale_owner}
+
+          true ->
+            done = %{intent | phase: :terminal, worker_pid: nil, retire_barrier: :none}
+            {:ok, done, Map.delete(intents, target)}
+        end
+
+      %{intent_id: ^intent_id, phase: :settling} ->
+        {:error, :barrier_mismatch}
+
+      %{intent_id: ^intent_id} ->
+        {:error, :not_settling}
+
+      %{intent_id: _other} ->
+        {:error, :conflict}
+
+      _ ->
+        {:error, :not_found}
+    end
+  end
+
+  @doc """
+  Finalize an ownerless terminal (never adopted, or owner already cleared).
+
+  Requires phase `:settling`, `owner_pid` nil, and a stored terminal. Used after
+  `begin_settling` returns `:ownerless_finalize` — never while a live owner
+  barrier is outstanding.
+  """
+  @spec finalize_ownerless(intent_map(), String.t(), String.t()) ::
+          {:ok, intent(), intent_map()}
+          | {:error, :not_found | :conflict | :not_settling | :owner_barrier_outstanding}
+  def finalize_ownerless(intents, target, intent_id) when is_binary(intent_id) do
+    case Map.get(intents, target) do
+      %{
+        intent_id: ^intent_id,
+        phase: :settling,
+        owner_pid: owner_pid,
+        terminal: _terminal
+      } = intent
+      when not is_pid(owner_pid) ->
+        done = %{
+          intent
+          | phase: :terminal,
+            worker_pid: nil,
+            retire_barrier: :none,
+            owner_pid: nil
+        }
+
+        {:ok, done, Map.delete(intents, target)}
+
+      %{intent_id: ^intent_id, phase: :settling, owner_pid: owner_pid}
+      when is_pid(owner_pid) ->
+        {:error, :owner_barrier_outstanding}
+
+      %{intent_id: ^intent_id} ->
+        {:error, :not_settling}
+
+      %{intent_id: _other} ->
+        {:error, :conflict}
+
+      _ ->
+        {:error, :not_found}
+    end
+  end
+
+  @doc """
+  Unexpected owner DOWN with indeterminate result: retain non-idle intent and
+  await authentic worker DOWN (or late worker settle).
+
+  `expected_owner_pid` is the monitored owner from TaskStore's owner monitor
+  entry. A stale DOWN (rebound owner) returns `{:error, :stale_owner}` and must
+  not clear or retire the live intent.
+  """
+  @spec note_owner_gone_await_worker(intent_map(), String.t(), String.t(), pid()) ::
+          {:ok, intent(), intent_map(), list()}
+          | {:ok, :already_awaiting, intent(), intent_map(), list()}
+          | {:error, :not_found | :conflict | :already_settling | :stale_owner}
+  def note_owner_gone_await_worker(intents, target, intent_id, expected_owner_pid)
+      when is_binary(intent_id) and is_pid(expected_owner_pid) do
+    case Map.get(intents, target) do
+      %{intent_id: ^intent_id, phase: :settling} ->
+        {:error, :already_settling}
+
+      %{
+        intent_id: ^intent_id,
+        phase: :outcome_unknown,
+        retire_barrier: :await_worker_down
+      } = intent ->
+        # Already owner-gone via a prior authentic transition; idempotent.
+        effects =
+          case Map.get(intent, :worker_pid) do
+            pid when is_pid(pid) -> [{:kill_worker, pid}]
+            _ -> []
+          end
+
+        {:ok, :already_awaiting, intent, intents, effects}
+
+      %{
+        intent_id: ^intent_id,
+        owner_pid: ^expected_owner_pid,
+        phase: phase
+      } = intent
+      when phase not in [:terminal] ->
+        worker_pid = Map.get(intent, :worker_pid)
+
+        updated = %{
+          intent
+          | phase: :outcome_unknown,
+            owner_pid: nil,
+            retire_barrier: :await_worker_down,
+            worker_pid: worker_pid
+        }
+
+        effects =
+          if is_pid(worker_pid), do: [{:kill_worker, worker_pid}], else: []
+
+        {:ok, updated, Map.put(intents, target, updated), effects}
+
+      %{intent_id: ^intent_id, owner_pid: other}
+      when is_pid(other) and other != expected_owner_pid ->
+        {:error, :stale_owner}
+
+      %{intent_id: ^intent_id, owner_pid: nil} ->
+        {:error, :stale_owner}
+
+      %{intent_id: _other} ->
+        {:error, :conflict}
+
+      _ ->
+        {:error, :not_found}
+    end
+  end
+
+  @doc """
+  Exact monitored owner is gone with a determinate terminal (e.g. exact applied
+  witness, or no worker left). Purely clears owner and commits terminal for
+  ownerless finalization — shell must not mutate `owner_pid` directly.
+  """
+  @spec commit_terminal_owner_gone(intent_map(), String.t(), String.t(), pid(), term()) ::
+          {:ok, intent(), intent_map()}
+          | {:error, :not_found | :conflict | :already_settling | :stale_owner}
+  def commit_terminal_owner_gone(intents, target, intent_id, expected_owner_pid, terminal)
+      when is_binary(intent_id) and is_pid(expected_owner_pid) do
+    case Map.get(intents, target) do
+      %{
+        intent_id: ^intent_id,
+        owner_pid: ^expected_owner_pid,
+        phase: :settling,
+        retire_barrier: :await_owner_down
+      } ->
+        # Terminal already committed under owner barrier — use finalize_settled.
+        {:error, :already_settling}
+
+      %{
+        intent_id: ^intent_id,
+        owner_pid: ^expected_owner_pid,
+        phase: phase
+      } = intent
+      when phase not in [:terminal] ->
+        updated = %{
+          intent
+          | phase: :settling,
+            owner_pid: nil,
+            terminal: terminal,
+            retire_barrier: :none
+        }
+
+        {:ok, updated, Map.put(intents, target, updated)}
+
+      %{intent_id: ^intent_id, owner_pid: other}
+      when is_pid(other) and other != expected_owner_pid ->
+        {:error, :stale_owner}
+
+      %{intent_id: ^intent_id, owner_pid: nil} ->
+        {:error, :stale_owner}
+
+      %{intent_id: _other} ->
+        {:error, :conflict}
+
+      _ ->
+        {:error, :not_found}
+    end
+  end
+
+  @doc """
+  Ownerless begin+finalize combo only. Never deletes while a live owner barrier
+  is outstanding — callers must use `begin_settling` + owner DOWN +
+  `finalize_settled` for owned intents.
+  """
+  @spec settle(intent_map(), String.t(), String.t(), term()) ::
+          {:ok, intent(), intent_map()}
+          | {:error, :not_found | :conflict | :owner_barrier_outstanding | :not_settling}
+  def settle(intents, target, intent_id, terminal) when is_binary(intent_id) do
+    case begin_settling(intents, target, intent_id, terminal) do
+      {:ok, :ownerless_finalize, _intent, mid, _effects} ->
+        finalize_ownerless(mid, target, intent_id)
+
+      {:ok, :begin, _intent, _mid, _effects} ->
+        # Live owner barrier must not be bypassed by legacy settle.
+        {:error, :owner_barrier_outstanding}
+
+      {:ok, :already_settling, intent, mid, _} ->
+        cond do
+          is_pid(Map.get(intent, :owner_pid)) and
+              Map.get(intent, :retire_barrier) == :await_owner_down ->
+            {:error, :owner_barrier_outstanding}
+
+          not is_pid(Map.get(intent, :owner_pid)) ->
+            finalize_ownerless(mid, target, intent_id)
+
+          true ->
+            {:error, :owner_barrier_outstanding}
+        end
+
+      {:error, _} = err ->
+        err
     end
   end
 
@@ -314,6 +777,55 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentCore do
       _ -> false
     end
   end
+
+  @doc "Pure retry allowlist for IntentOwner adopt errors."
+  @spec retryable_adopt_error?(term()) :: boolean()
+  def retryable_adopt_error?(:runtime_admission_not_ready), do: true
+  def retryable_adopt_error?(:fence_not_ready), do: true
+  def retryable_adopt_error?(:store_restart), do: true
+  def retryable_adopt_error?(_), do: false
+
+  # Closed launch-retry allowlist only — never "any start_child error".
+  @retryable_start_child_reasons [:max_children, :timeout]
+
+  @doc """
+  Pure retry allowlist for IntentOwner launch failures.
+
+  Only store restart and an explicit closed set of Task.Supervisor pressure
+  reasons retry. Bind auth errors, unknown shapes, and redacted exceptions do not.
+  """
+  @spec retryable_launch_failure?(term()) :: boolean()
+  def retryable_launch_failure?(:store_restart), do: true
+  def retryable_launch_failure?(reason) when reason in @retryable_start_child_reasons, do: true
+
+  def retryable_launch_failure?({:task_supervisor_transient, reason})
+      when reason in @retryable_start_child_reasons,
+      do: true
+
+  def retryable_launch_failure?(_), do: false
+
+  @doc "Classify a Task.Supervisor.start_child error into a bounded atom or redacted tag."
+  @spec classify_start_child_error(term()) :: term()
+  def classify_start_child_error(:max_children), do: :max_children
+  def classify_start_child_error(:timeout), do: :timeout
+  def classify_start_child_error({:timeout, _}), do: :timeout
+  def classify_start_child_error(:temporary), do: :temporary
+  def classify_start_child_error({:already_started, _}), do: :already_started
+
+  def classify_start_child_error(other),
+    do: {:launch_failed, redact_error_reason(other)}
+
+  @doc "Bound and redact exception/error reasons for public/typed stops."
+  @spec redact_error_reason(term()) :: atom() | String.t()
+  def redact_error_reason(reason) when is_atom(reason), do: reason
+
+  def redact_error_reason(reason) when is_binary(reason) do
+    trimmed = String.slice(reason, 0, 64)
+    if String.valid?(trimmed), do: trimmed, else: :invalid_error_text
+  end
+
+  def redact_error_reason({tag, _}) when is_atom(tag), do: tag
+  def redact_error_reason(_), do: :launch_error
 
   # Restart inventory bounds (fail closed on overflow / malformation).
   @max_rebind_snapshots 256
@@ -403,7 +915,8 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentCore do
          phase: :outcome_unknown,
          owner_pid: owner_pid,
          worker_pid: nil,
-         terminal: nil
+         terminal: nil,
+         retire_barrier: :none
        }}
     end
   end

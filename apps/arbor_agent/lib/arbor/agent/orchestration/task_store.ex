@@ -124,6 +124,11 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   @default_runtime_admission_admit_timeout_ms 2_000
   @default_runtime_admission_reconcile_timeout_ms 10_000
   @default_runtime_admission_call_timeout_ms 120_000
+  # Owner retirement barrier: escalate :shutdown → :kill; never finalize on timer.
+  @default_runtime_admission_settle_timeout_ms 500
+  @runtime_admission_launcher_collision_retries 8
+  @runtime_admission_launcher_collision_sleep_ms 25
+  @runtime_admission_registry Arbor.Agent.RuntimeAdmissionRegistry
 
   alias Arbor.Agent.Config
   alias Arbor.Agent.Orchestration.{TaskArtifacts, TaskControlLease, TaskInventoryProjection}
@@ -775,6 +780,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
       runtime_admission_waiters: %{},
       runtime_admission_owner_monitors: %{},
       runtime_admission_worker_monitors: %{},
+      runtime_admission_settle_timers: %{},
       runtime_admission_reconcile: %{status: :pending},
       max_runtime_admission_intents:
         Keyword.get(opts, :max_runtime_admission_intents, @default_max_runtime_admission_intents),
@@ -783,6 +789,12 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
           opts,
           :runtime_admission_admit_timeout_ms,
           @default_runtime_admission_admit_timeout_ms
+        ),
+      runtime_admission_settle_timeout_ms:
+        Keyword.get(
+          opts,
+          :runtime_admission_settle_timeout_ms,
+          @default_runtime_admission_settle_timeout_ms
         ),
       runtime_admission_reconcile_timeout_ms:
         Keyword.get(
@@ -1897,11 +1909,30 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
 
     case Map.get(state.runtime_admission_by_id, intent_id) do
       target when is_binary(target) ->
-        {:noreply, force_settle_runtime_admission_intent(state, target, intent_id, {:error, reason})}
+        bounded = IntentCore.redact_error_reason(reason)
+
+        state =
+          case request_runtime_admission_terminal(
+                 state,
+                 target,
+                 intent_id,
+                 {:error, bounded},
+                 :launch_failed
+               ) do
+            {:ok, s} -> s
+            {:error, _, s} -> s
+          end
+
+        {:noreply, state}
 
       _ ->
         {:noreply, state}
     end
+  end
+
+  def handle_info({:runtime_admission_settle_timeout, intent_id, gen}, state)
+      when is_binary(intent_id) and is_integer(gen) do
+    {:noreply, handle_runtime_admission_settle_timeout(state, intent_id, gen)}
   end
 
   def handle_info(:retry_recovery_replay_msg, state) do
@@ -2035,8 +2066,8 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
       {:fence_worker, seed} ->
         handle_fence_seed_worker_down(state, seed, :normal)
 
-      {:runtime_admission_owner, intent_id, target, _owner_pid} ->
-        handle_runtime_admission_owner_down(state, ref, intent_id, target)
+      {:runtime_admission_owner, intent_id, target, owner_pid} ->
+        handle_runtime_admission_owner_down(state, ref, intent_id, target, owner_pid)
 
       {:runtime_admission_worker, intent_id, target, worker_pid} ->
         handle_runtime_admission_worker_monitor_down(state, ref, intent_id, target, worker_pid)
@@ -2081,8 +2112,8 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
       {:fence_worker, seed} ->
         handle_fence_seed_worker_down(state, seed, reason)
 
-      {:runtime_admission_owner, intent_id, target, _owner_pid} ->
-        handle_runtime_admission_owner_down(state, ref, intent_id, target)
+      {:runtime_admission_owner, intent_id, target, owner_pid} ->
+        handle_runtime_admission_owner_down(state, ref, intent_id, target, owner_pid)
 
       {:runtime_admission_worker, intent_id, target, worker_pid} ->
         handle_runtime_admission_worker_monitor_down(state, ref, intent_id, target, worker_pid)
@@ -4390,11 +4421,16 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     |> Map.put_new(:runtime_admission_waiters, %{})
     |> Map.put_new(:runtime_admission_owner_monitors, %{})
     |> Map.put_new(:runtime_admission_worker_monitors, %{})
+    |> Map.put_new(:runtime_admission_settle_timers, %{})
     |> Map.put_new(:runtime_admission_reconcile, %{status: :pending})
     |> Map.put_new(:max_runtime_admission_intents, @default_max_runtime_admission_intents)
     |> Map.put_new(
       :runtime_admission_admit_timeout_ms,
       @default_runtime_admission_admit_timeout_ms
+    )
+    |> Map.put_new(
+      :runtime_admission_settle_timeout_ms,
+      @default_runtime_admission_settle_timeout_ms
     )
     |> Map.put_new(
       :runtime_admission_reconcile_timeout_ms,
@@ -4460,7 +4496,10 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
 
   defp launch_runtime_admission_owner(state, intent, validated_opts) do
     store_ref = Map.get(state, :store_ref, @default_name)
-    supervisor = Map.get(state, :runtime_admission_supervisor, @default_runtime_admission_supervisor)
+
+    supervisor =
+      Map.get(state, :runtime_admission_supervisor, @default_runtime_admission_supervisor)
+
     task_supervisor = Map.get(state, :task_supervisor, @default_task_supervisor)
 
     # Fixed launcher MFA — never captures store pid; uses stable store_ref.
@@ -4502,7 +4541,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
       task_supervisor: task_supervisor
     ]
 
-    case RuntimeAdmissionSupervisor.start_owner(start_opts, supervisor) do
+    case start_owner_with_collision_retry(start_opts, supervisor, target, 0) do
       {:ok, owner_pid} when is_pid(owner_pid) ->
         send(store_ref, {:runtime_admission_owner_launched, intent_id, owner_pid})
 
@@ -4527,7 +4566,48 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
       :ok
   end
 
-  # Caller-facing settle: only the registered worker may settle.
+  # External launcher only: retry :target_owner_taken when Registry empty/dead.
+  # Never called from TaskStore GenServer callbacks.
+  defp start_owner_with_collision_retry(start_opts, supervisor, target, attempt) do
+    case RuntimeAdmissionSupervisor.start_owner(start_opts, supervisor) do
+      {:ok, _} = ok ->
+        ok
+
+      {:ok, _, _} = ok ->
+        ok
+
+      {:error, :target_owner_taken} ->
+        if attempt < @runtime_admission_launcher_collision_retries and
+             registry_owner_absent_or_dead?(target) do
+          Process.sleep(@runtime_admission_launcher_collision_sleep_ms)
+          start_owner_with_collision_retry(start_opts, supervisor, target, attempt + 1)
+        else
+          {:error, :target_owner_taken}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+
+      other ->
+        {:error, other}
+    end
+  end
+
+  defp registry_owner_absent_or_dead?(target) do
+    case Registry.lookup(@runtime_admission_registry, {:runtime_admission_owner, target}) do
+      [] ->
+        true
+
+      entries when is_list(entries) ->
+        Enum.all?(entries, fn {pid, _} -> not Process.alive?(pid) end)
+
+      _ ->
+        false
+    end
+  end
+
+  # Caller-facing settle: only the exact bound worker may settle (including
+  # late terminal while await_worker_down is held).
   defp authorize_and_settle_runtime_admission(state, target, intent_id, outcome, caller_pid) do
     intent = Map.get(state.runtime_admission_intents, target)
 
@@ -4538,59 +4618,298 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
       intent.intent_id != intent_id ->
         {:error, :conflict, state}
 
-      intent.phase == :terminal ->
-        {:error, :not_found, state}
+      intent.phase == :settling ->
+        # First terminal already won; idempotent only for the exact worker.
+        if intent.worker_pid == caller_pid do
+          {:ok, state}
+        else
+          {:error, :not_owner, state}
+        end
+
+      IntentCore.settle_eligible_worker?(intent, caller_pid) ->
+        # Propagate transition failure — never reply :ok if no terminal accepted.
+        request_runtime_admission_terminal(state, target, intent_id, outcome, :worker_settle)
 
       intent.worker_pid != caller_pid ->
         {:error, :not_owner, state}
 
       true ->
-        {:ok, force_settle_runtime_admission_intent(state, target, intent_id, outcome)}
+        {:error, :conflict, state}
     end
   end
 
-  # Internal TaskStore-owned settlement (owner/worker monitor paths). Not a public API.
-  defp force_settle_runtime_admission_intent(state, target, intent_id, outcome) do
+  # Two-phase terminal request: begin settling (retain waiters) then barrier.
+  # Returns {:ok, state} | {:error, reason, state}.
+  defp request_runtime_admission_terminal(state, target, intent_id, outcome, _source) do
     state = ensure_runtime_admission_shape(state)
     intent = Map.get(state.runtime_admission_intents, target)
 
     cond do
       not is_map(intent) ->
-        state
+        {:error, :not_found, state}
 
       intent.intent_id != intent_id ->
-        state
-
-      intent.phase == :terminal ->
-        state
+        {:error, :conflict, state}
 
       true ->
-        reply = settlement_reply(outcome)
+        case IntentCore.begin_settling(
+               state.runtime_admission_intents,
+               target,
+               intent_id,
+               outcome
+             ) do
+          {:ok, :already_settling, _intent, _intents, _} ->
+            # First terminal already accepted — idempotent success.
+            {:ok, state}
+
+          {:ok, :ownerless_finalize, _intent, intents, _} ->
+            state = put_in(state, [:runtime_admission_intents], intents)
+
+            case pure_delete_runtime_admission_terminal(state, target, intent_id, :ownerless) do
+              {:ok, done, state} ->
+                reply = settlement_reply(Map.get(done, :terminal))
+                waiters = Map.get(state.runtime_admission_waiters, intent_id, [])
+                Enum.each(waiters, fn from -> GenServer.reply(from, reply) end)
+
+                state =
+                  state
+                  |> drop_settle_timer(intent_id)
+                  |> update_in([:runtime_admission_by_id], &Map.delete(&1, intent_id))
+                  |> update_in([:runtime_admission_waiters], &Map.delete(&1, intent_id))
+                  |> flush_monitors_for_intent(intent_id)
+
+                {:ok, state}
+
+              {:error, reason, state} ->
+                {:error, reason, state}
+            end
+
+          {:ok, :begin, _intent, intents, effects} ->
+            state = put_in(state, [:runtime_admission_intents], intents)
+
+            state =
+              Enum.reduce(effects, state, fn
+                {:shutdown_owner, owner_pid}, acc when is_pid(owner_pid) ->
+                  # Never :normal — external normal does not retire IntentOwner.
+                  Process.exit(owner_pid, :shutdown)
+                  arm_runtime_admission_settle_timer(acc, intent_id, owner_pid)
+
+                _, acc ->
+                  acc
+              end)
+
+            # Terminal accepted; waiters released only after owner DOWN.
+            {:ok, state}
+
+          {:error, reason} ->
+            {:error, reason, state}
+        end
+    end
+  end
+
+  defp arm_runtime_admission_settle_timer(state, intent_id, owner_pid) do
+    timeout =
+      Map.get(
+        state,
+        :runtime_admission_settle_timeout_ms,
+        @default_runtime_admission_settle_timeout_ms
+      )
+
+    gen = System.unique_integer([:positive])
+
+    timer_ref =
+      Process.send_after(self(), {:runtime_admission_settle_timeout, intent_id, gen}, timeout)
+
+    timers =
+      Map.put(Map.get(state, :runtime_admission_settle_timers, %{}), intent_id, %{
+        timer_ref: timer_ref,
+        gen: gen,
+        owner_pid: owner_pid
+      })
+
+    %{state | runtime_admission_settle_timers: timers}
+  end
+
+  # Timer may escalate to :kill only — never finalize from timer or alive?.
+  defp handle_runtime_admission_settle_timeout(state, intent_id, gen) do
+    state = ensure_runtime_admission_shape(state)
+    entry = Map.get(Map.get(state, :runtime_admission_settle_timers, %{}), intent_id)
+    target = Map.get(state.runtime_admission_by_id, intent_id)
+    intent = if is_binary(target), do: Map.get(state.runtime_admission_intents, target)
+
+    cond do
+      not is_map(entry) or entry.gen != gen ->
+        state
+
+      not is_map(intent) or intent.intent_id != intent_id ->
+        drop_settle_timer(state, intent_id)
+
+      intent.phase != :settling or Map.get(intent, :retire_barrier) != :await_owner_down ->
+        drop_settle_timer(state, intent_id)
+
+      true ->
+        owner_pid = Map.get(entry, :owner_pid) || Map.get(intent, :owner_pid)
+
+        if is_pid(owner_pid) do
+          Process.exit(owner_pid, :kill)
+        end
+
+        # Retain intent, waiters, monitors — await authentic owner DOWN.
+        drop_settle_timer(state, intent_id)
+    end
+  end
+
+  defp drop_settle_timer(state, intent_id) do
+    timers = Map.get(state, :runtime_admission_settle_timers, %{})
+
+    case Map.pop(timers, intent_id) do
+      {nil, _} ->
+        state
+
+      {%{timer_ref: ref}, rest} when is_reference(ref) ->
+        _ = Process.cancel_timer(ref)
+        %{state | runtime_admission_settle_timers: rest}
+
+      {_, rest} ->
+        %{state | runtime_admission_settle_timers: rest}
+    end
+  end
+
+  # Finalize only when the retirement barrier allows (ownerless or owner DOWN).
+  # Mutate pure intent map first; reply waiters only after successful delete.
+  # mode:
+  #   {:await_owner_down, monitored_owner_pid}
+  #   | :ownerless
+  #   | {:commit_owner_gone, monitored_owner_pid, terminal}
+  #   | {:commit, terminal}  # true ownerless (never had owner)
+  defp immediate_finalize_runtime_admission(state, target, intent_id, mode) do
+    state = ensure_runtime_admission_shape(state)
+
+    case pure_delete_runtime_admission_terminal(state, target, intent_id, mode) do
+      {:ok, done, state} ->
+        reply = settlement_reply(Map.get(done, :terminal))
         waiters = Map.get(state.runtime_admission_waiters, intent_id, [])
         Enum.each(waiters, fn from -> GenServer.reply(from, reply) end)
 
-        if is_pid(intent.owner_pid) and Process.alive?(intent.owner_pid) do
-          Process.exit(intent.owner_pid, :normal)
-        end
-
-        state =
-          case IntentCore.settle(state.runtime_admission_intents, target, intent_id, outcome) do
-            {:ok, _done, intents} ->
-              put_in(state, [:runtime_admission_intents], intents)
-
-            _ ->
-              put_in(
-                state,
-                [:runtime_admission_intents],
-                Map.delete(state.runtime_admission_intents, target)
-              )
-          end
-
         state
+        |> drop_settle_timer(intent_id)
         |> update_in([:runtime_admission_by_id], &Map.delete(&1, intent_id))
         |> update_in([:runtime_admission_waiters], &Map.delete(&1, intent_id))
-        |> drop_owner_monitors_for(intent_id)
-        |> drop_worker_monitors_for(intent_id)
+        |> flush_monitors_for_intent(intent_id)
+
+      {:error, _reason, state} ->
+        # Fail closed: no waiter reply, no force-delete, retain authority.
+        state
+    end
+  end
+
+  # Pure commit+delete. Never replies. Never Map.delete without core success.
+  # Never mutates owner_pid outside IntentCore transitions.
+  defp pure_delete_runtime_admission_terminal(state, target, intent_id, mode) do
+    intents = state.runtime_admission_intents
+    intent = Map.get(intents, target)
+
+    cond do
+      not is_map(intent) or intent.intent_id != intent_id ->
+        {:error, :not_found, state}
+
+      match?({:await_owner_down, pid} when is_pid(pid), mode) ->
+        {:await_owner_down, expected_owner} = mode
+
+        case IntentCore.finalize_settled(intents, target, intent_id, expected_owner) do
+          {:ok, done, new_intents} ->
+            {:ok, done, put_in(state, [:runtime_admission_intents], new_intents)}
+
+          {:error, reason} ->
+            {:error, reason, state}
+        end
+
+      mode == :ownerless ->
+        case IntentCore.finalize_ownerless(intents, target, intent_id) do
+          {:ok, done, new_intents} ->
+            {:ok, done, put_in(state, [:runtime_admission_intents], new_intents)}
+
+          {:error, reason} ->
+            {:error, reason, state}
+        end
+
+      match?({:commit_owner_gone, pid, _} when is_pid(pid), mode) ->
+        {:commit_owner_gone, expected_owner, terminal} = mode
+
+        case IntentCore.commit_terminal_owner_gone(
+               intents,
+               target,
+               intent_id,
+               expected_owner,
+               terminal
+             ) do
+          {:ok, _updated, mid} ->
+            case IntentCore.finalize_ownerless(mid, target, intent_id) do
+              {:ok, done, new_intents} ->
+                {:ok, done, put_in(state, [:runtime_admission_intents], new_intents)}
+
+              {:error, reason} ->
+                {:error, reason, state}
+            end
+
+          {:error, reason} ->
+            {:error, reason, state}
+        end
+
+      match?({:commit, _}, mode) ->
+        {:commit, terminal} = mode
+
+        case IntentCore.begin_settling(intents, target, intent_id, terminal) do
+          {:ok, :ownerless_finalize, _intent, mid, _} ->
+            case IntentCore.finalize_ownerless(mid, target, intent_id) do
+              {:ok, done, new_intents} ->
+                {:ok, done, put_in(state, [:runtime_admission_intents], new_intents)}
+
+              {:error, reason} ->
+                {:error, reason, state}
+            end
+
+          {:ok, :already_settling, already, mid, _} ->
+            cond do
+              Map.get(already, :retire_barrier) == :await_owner_down and
+                  is_pid(Map.get(already, :owner_pid)) ->
+                case IntentCore.finalize_settled(
+                       mid,
+                       target,
+                       intent_id,
+                       already.owner_pid
+                     ) do
+                  {:ok, done, new_intents} ->
+                    {:ok, done, put_in(state, [:runtime_admission_intents], new_intents)}
+
+                  {:error, reason} ->
+                    {:error, reason, state}
+                end
+
+              not is_pid(Map.get(already, :owner_pid)) ->
+                case IntentCore.finalize_ownerless(mid, target, intent_id) do
+                  {:ok, done, new_intents} ->
+                    {:ok, done, put_in(state, [:runtime_admission_intents], new_intents)}
+
+                  {:error, reason} ->
+                    {:error, reason, state}
+                end
+
+              true ->
+                {:error, :owner_barrier_outstanding, state}
+            end
+
+          {:ok, :begin, _intent, _mid, _effects} ->
+            # Live owner barrier still outstanding — fail closed without mutating
+            # or replying. Caller must use request_runtime_admission_terminal.
+            {:error, :owner_barrier_outstanding, state}
+
+          {:error, reason} ->
+            {:error, reason, state}
+        end
+
+      true ->
+        {:error, :invalid_finalize_mode, state}
     end
   end
 
@@ -4599,33 +4918,183 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   defp settlement_reply({:conflict, reason}), do: {:error, {:conflict, reason}}
   defp settlement_reply(other), do: {:error, other}
 
-  defp drop_owner_monitors_for(state, intent_id) do
-    mons =
-      state.runtime_admission_owner_monitors
-      |> Enum.reject(fn {_mon, {id, _t, _p}} -> id == intent_id end)
+  defp flush_monitors_for_intent(state, intent_id) do
+    owner_mons = Map.get(state, :runtime_admission_owner_monitors, %{})
+    worker_mons = Map.get(state, :runtime_admission_worker_monitors, %{})
+
+    owner_kept =
+      owner_mons
+      |> Enum.reject(fn {mon, {id, _t, _p}} ->
+        if id == intent_id do
+          Process.demonitor(mon, [:flush])
+          true
+        else
+          false
+        end
+      end)
       |> Map.new()
 
-    %{state | runtime_admission_owner_monitors: mons}
-  end
-
-  defp drop_worker_monitors_for(state, intent_id) do
-    mons =
-      Map.get(state, :runtime_admission_worker_monitors, %{})
-      |> Enum.reject(fn {_mon, {id, _t, _p}} -> id == intent_id end)
+    worker_kept =
+      worker_mons
+      |> Enum.reject(fn {mon, {id, _t, _p}} ->
+        if id == intent_id do
+          Process.demonitor(mon, [:flush])
+          true
+        else
+          false
+        end
+      end)
       |> Map.new()
 
-    %{state | runtime_admission_worker_monitors: mons}
+    %{
+      state
+      | runtime_admission_owner_monitors: owner_kept,
+        runtime_admission_worker_monitors: worker_kept
+    }
   end
 
-  defp handle_runtime_admission_owner_down(state, mon, intent_id, target) do
+  defp handle_runtime_admission_owner_down(state, mon, intent_id, target, monitored_owner_pid)
+       when is_pid(monitored_owner_pid) do
     state = ensure_runtime_admission_shape(state)
     state = update_in(state, [:runtime_admission_owner_monitors], &Map.delete(&1, mon))
     intent = Map.get(state.runtime_admission_intents, target)
 
-    if is_map(intent) and intent.intent_id == intent_id and intent.phase != :terminal do
-      classify_or_mark_unknown(state, target, intent)
+    cond do
+      not is_map(intent) or intent.intent_id != intent_id ->
+        state
+
+      # Exact monitored owner must match intent.owner_pid — stale DOWN after
+      # rebound must not clear or retire the new owner.
+      Map.get(intent, :owner_pid) != monitored_owner_pid ->
+        state
+
+      intent.phase == :settling and Map.get(intent, :retire_barrier) == :await_owner_down ->
+        # Branch A: terminal known; exact owner barrier complete.
+        immediate_finalize_runtime_admission(
+          state,
+          target,
+          intent_id,
+          {:await_owner_down, monitored_owner_pid}
+        )
+
+      true ->
+        # Branch B: unexpected owner DOWN (open / not settling with owner barrier).
+        handle_unexpected_owner_down(state, target, intent, monitored_owner_pid)
+    end
+  end
+
+  defp handle_unexpected_owner_down(state, target, intent, monitored_owner_pid)
+       when is_pid(monitored_owner_pid) do
+    intent_id = intent.intent_id
+    fact = witness_fact(target, intent_id)
+
+    case IntentCore.classify_unknown_start(intent_id, fact) do
+      :applied ->
+        case Arbor.Agent.BranchSupervisor.whereis(target) do
+          pid when is_pid(pid) ->
+            immediate_finalize_runtime_admission(
+              state,
+              target,
+              intent_id,
+              {:commit_owner_gone, monitored_owner_pid, {:applied, pid}}
+            )
+
+          _ ->
+            maybe_await_worker_or_finalize(
+              state,
+              target,
+              intent,
+              monitored_owner_pid,
+              {:error, :branch_missing_after_witness}
+            )
+        end
+
+      :conflict ->
+        maybe_await_worker_or_finalize(
+          state,
+          target,
+          intent,
+          monitored_owner_pid,
+          {:conflict, :witness_mismatch}
+        )
+
+      :not_applied ->
+        maybe_await_worker_or_finalize(
+          state,
+          target,
+          intent,
+          monitored_owner_pid,
+          {:error, :owner_down}
+        )
+    end
+  end
+
+  defp maybe_await_worker_or_finalize(
+         state,
+         target,
+         intent,
+         monitored_owner_pid,
+         fallback_terminal
+       )
+       when is_pid(monitored_owner_pid) do
+    intent_id = intent.intent_id
+    worker_pid = Map.get(intent, :worker_pid)
+
+    if is_pid(worker_pid) do
+      case IntentCore.note_owner_gone_await_worker(
+             state.runtime_admission_intents,
+             target,
+             intent_id,
+             monitored_owner_pid
+           ) do
+        {:ok, _updated, intents, effects} ->
+          state = put_in(state, [:runtime_admission_intents], intents)
+
+          Enum.each(effects, fn
+            {:kill_worker, pid} when is_pid(pid) -> Process.exit(pid, :kill)
+            _ -> :ok
+          end)
+
+          # Retain waiters and non-idle intent until worker settle or worker DOWN.
+          state
+
+        {:ok, :already_awaiting, _intent, intents, effects} ->
+          state = put_in(state, [:runtime_admission_intents], intents)
+
+          Enum.each(effects, fn
+            {:kill_worker, pid} when is_pid(pid) -> Process.exit(pid, :kill)
+            _ -> :ok
+          end)
+
+          state
+
+        {:error, :already_settling} ->
+          immediate_finalize_runtime_admission(
+            state,
+            target,
+            intent_id,
+            {:await_owner_down, monitored_owner_pid}
+          )
+
+        {:error, :stale_owner} ->
+          # Rebound owner — ignore this DOWN entirely.
+          state
+
+        {:error, _} ->
+          immediate_finalize_runtime_admission(
+            state,
+            target,
+            intent_id,
+            {:commit_owner_gone, monitored_owner_pid, fallback_terminal}
+          )
+      end
     else
-      state
+      immediate_finalize_runtime_admission(
+        state,
+        target,
+        intent_id,
+        {:commit_owner_gone, monitored_owner_pid, fallback_terminal}
+      )
     end
   end
 
@@ -4634,51 +5103,63 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     state = update_in(state, [:runtime_admission_worker_monitors], &Map.delete(&1, mon))
     intent = Map.get(state.runtime_admission_intents, target)
 
-    # Authentic worker-down only: monitor identity + recorded worker_pid match.
-    if is_map(intent) and intent.intent_id == intent_id and intent.worker_pid == worker_pid and
-         intent.phase != :terminal do
-      classify_or_mark_unknown(state, target, intent)
-    else
-      state
+    cond do
+      not is_map(intent) or intent.intent_id != intent_id ->
+        state
+
+      # Exact worker identity required always — including await_worker_down.
+      Map.get(intent, :worker_pid) != worker_pid ->
+        state
+
+      intent.phase == :settling ->
+        # Owner barrier owns finalize; exact worker DOWN is not a finalize path.
+        state
+
+      Map.get(intent, :retire_barrier) == :await_worker_down ->
+        finalize_from_worker_down_classify(state, target, intent, :worker)
+
+      is_pid(Map.get(intent, :owner_pid)) ->
+        finalize_from_worker_down_classify(state, target, intent, :worker)
+
+      true ->
+        finalize_from_worker_down_classify(state, target, intent, :worker)
     end
   end
 
-  defp classify_or_mark_unknown(state, target, intent) do
-    fact = witness_fact(target, intent.intent_id)
+  defp finalize_from_worker_down_classify(state, target, intent, source) do
+    intent_id = intent.intent_id
+    fact = witness_fact(target, intent_id)
 
-    case IntentCore.classify_unknown_start(intent.intent_id, fact) do
-      :applied ->
-        case Arbor.Agent.BranchSupervisor.whereis(target) do
-          pid when is_pid(pid) ->
-            force_settle_runtime_admission_intent(
-              state,
-              target,
-              intent.intent_id,
-              {:applied, pid}
-            )
+    branch_pid =
+      case fact do
+        {:exact, ^intent_id} ->
+          case Arbor.Agent.BranchSupervisor.whereis(target) do
+            pid when is_pid(pid) -> pid
+            _ -> nil
+          end
 
-          _ ->
-            force_settle_runtime_admission_intent(
-              state,
-              target,
-              intent.intent_id,
-              {:error, :branch_missing_after_witness}
-            )
-        end
+        _ ->
+          nil
+      end
 
-      :conflict ->
-        force_settle_runtime_admission_intent(
-          state,
-          target,
-          intent.intent_id,
-          {:conflict, :witness_mismatch}
-        )
+    {:settle, terminal} =
+      IntentCore.classify_live_down(intent_id, fact, source, branch_pid)
 
-      :not_applied ->
-        case IntentCore.mark_outcome_unknown(state.runtime_admission_intents, target) do
-          {:ok, intents} -> put_in(state, [:runtime_admission_intents], intents)
-          _ -> state
-        end
+    if is_pid(Map.get(intent, :owner_pid)) and
+         Map.get(intent, :retire_barrier) != :await_worker_down do
+      case request_runtime_admission_terminal(
+             state,
+             target,
+             intent_id,
+             terminal,
+             :worker_down
+           ) do
+        {:ok, s} -> s
+        {:error, _, s} -> s
+      end
+    else
+      # Owner already gone or never present — commit terminal then ownerless delete.
+      immediate_finalize_runtime_admission(state, target, intent_id, {:commit, terminal})
     end
   end
 
@@ -4713,7 +5194,10 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     state = ensure_runtime_admission_shape(state)
     ref = make_ref()
     store_ref = Map.get(state, :store_ref, @default_name)
-    supervisor = Map.get(state, :runtime_admission_supervisor, @default_runtime_admission_supervisor)
+
+    supervisor =
+      Map.get(state, :runtime_admission_supervisor, @default_runtime_admission_supervisor)
+
     task_supervisor = Map.get(state, :task_supervisor, @default_task_supervisor)
 
     timeout =
@@ -4749,7 +5233,13 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   end
 
   @doc false
-  def runtime_admission_reconcile_launcher(store_ref, ref, task_supervisor, owner_supervisor, begin_wait_ms) do
+  def runtime_admission_reconcile_launcher(
+        store_ref,
+        ref,
+        task_supervisor,
+        owner_supervisor,
+        begin_wait_ms
+      ) do
     case Task.Supervisor.start_child(
            task_supervisor,
            __MODULE__,
@@ -4907,7 +5397,10 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
       worker_pid = Map.get(rec, :worker_pid)
       if is_pid(worker_pid) and Process.alive?(worker_pid), do: Process.exit(worker_pid, :kill)
       launcher_pid = Map.get(rec, :launcher_pid)
-      if is_pid(launcher_pid) and Process.alive?(launcher_pid), do: Process.exit(launcher_pid, :kill)
+
+      if is_pid(launcher_pid) and Process.alive?(launcher_pid),
+        do: Process.exit(launcher_pid, :kill)
+
       state = cleanup_runtime_admission_reconcile(state, rec)
       schedule_runtime_admission_reconcile_retry(state)
     else
@@ -4938,7 +5431,11 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
                     mon = Process.monitor(intent.owner_pid)
 
                     {st,
-                     Map.put(mons, mon, {intent.intent_id, intent.target_agent_id, intent.owner_pid})}
+                     Map.put(
+                       mons,
+                       mon,
+                       {intent.intent_id, intent.target_agent_id, intent.owner_pid}
+                     )}
                   else
                     {st, mons}
                   end
@@ -5003,7 +5500,10 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
 
   defp cleanup_runtime_admission_reconcile(state, rec) do
     cancel_timer_safe(Map.get(rec, :timer))
-    if is_reference(Map.get(rec, :launcher_mon)), do: Process.demonitor(rec.launcher_mon, [:flush])
+
+    if is_reference(Map.get(rec, :launcher_mon)),
+      do: Process.demonitor(rec.launcher_mon, [:flush])
+
     if is_reference(Map.get(rec, :worker_mon)), do: Process.demonitor(rec.worker_mon, [:flush])
 
     put_in(state, [:runtime_admission_reconcile], %{

@@ -54,11 +54,31 @@ defmodule Arbor.Agent.RuntimeAdmission.SourceOwnershipSecurityRegressionTest do
     parent = self()
 
     spawn(fn ->
-      send(parent, {:admit, TaskStore.admit_ordinary_runtime_start(agent_id, fp, kw, name: store)})
+      send(
+        parent,
+        {:admit, TaskStore.admit_ordinary_runtime_start(agent_id, fp, kw, name: store)}
+      )
     end)
 
-    # Let owner adopt and bind progress under test hold.
-    Process.sleep(120)
+    # Exact live owner evidence (not forged rai_* as primary).
+    owner_pid =
+      await_until(
+        fn ->
+          case Registry.lookup(
+                 Arbor.Agent.RuntimeAdmissionRegistry,
+                 {:runtime_admission_owner, agent_id}
+               ) do
+            [{pid, _}] when is_pid(pid) -> pid
+            _ -> false
+          end
+        end,
+        5_000
+      )
+
+    assert {:ok, snap} = Arbor.Agent.RuntimeAdmission.IntentOwner.snapshot(owner_pid)
+    assert snap.target_agent_id == agent_id
+    assert snap.fingerprint == fp
+    intent_id = snap.intent_id
 
     # Foreign bind of an arbitrary PID must fail (caller is not the owner).
     foreign_worker = spawn(fn -> Process.sleep(10_000) end)
@@ -66,7 +86,7 @@ defmodule Arbor.Agent.RuntimeAdmission.SourceOwnershipSecurityRegressionTest do
     assert {:error, reason} =
              TaskStore.bind_runtime_admission_worker(
                agent_id,
-               "rai_forged",
+               intent_id,
                fp,
                foreign_worker,
                name: store
@@ -78,7 +98,7 @@ defmodule Arbor.Agent.RuntimeAdmission.SourceOwnershipSecurityRegressionTest do
     assert {:error, settle_reason} =
              TaskStore.settle_runtime_admission(
                agent_id,
-               "rai_forged",
+               intent_id,
                {:applied, self()},
                name: store
              )
@@ -95,10 +115,29 @@ defmodule Arbor.Agent.RuntimeAdmission.SourceOwnershipSecurityRegressionTest do
     parent = self()
 
     spawn(fn ->
-      send(parent, {:admit, TaskStore.admit_ordinary_runtime_start(agent_id, fp, kw, name: store)})
+      send(
+        parent,
+        {:admit, TaskStore.admit_ordinary_runtime_start(agent_id, fp, kw, name: store)}
+      )
     end)
 
-    Process.sleep(120)
+    owner_pid =
+      await_until(
+        fn ->
+          case Registry.lookup(
+                 Arbor.Agent.RuntimeAdmissionRegistry,
+                 {:runtime_admission_owner, agent_id}
+               ) do
+            [{pid, _}] when is_pid(pid) -> pid
+            _ -> false
+          end
+        end,
+        5_000
+      )
+
+    assert {:ok, snap} = Arbor.Agent.RuntimeAdmission.IntentOwner.snapshot(owner_pid)
+    intent_id = snap.intent_id
+    assert snap.fingerprint == fp
 
     # Self-registration API must not exist.
     refute function_exported?(TaskStore, :register_runtime_admission_worker, 2)
@@ -107,19 +146,19 @@ defmodule Arbor.Agent.RuntimeAdmission.SourceOwnershipSecurityRegressionTest do
     assert {:error, auth_reason} =
              TaskStore.authenticate_runtime_admission_worker(
                agent_id,
-               "rai_forged",
+               intent_id,
                fp,
                name: store
              )
 
     assert auth_reason in [:not_found, :not_owner, :conflict]
 
-    # Lifecycle effects with a forgeable witness map must fail auth before restore.
+    # Lifecycle effects with exact live intent_id still fail when caller is not worker.
     assert {:error, _} =
              Lifecycle.ordinary_start_effects(agent_id, [], %{
                v: 1,
                kind: :ordinary_start,
-               intent_id: "rai_forged",
+               intent_id: intent_id,
                fingerprint: fp,
                store_ref: store
              })
@@ -134,7 +173,10 @@ defmodule Arbor.Agent.RuntimeAdmission.SourceOwnershipSecurityRegressionTest do
     parent = self()
 
     spawn(fn ->
-      send(parent, {:admit, TaskStore.admit_ordinary_runtime_start(agent_id, fp, kw, name: store)})
+      send(
+        parent,
+        {:admit, TaskStore.admit_ordinary_runtime_start(agent_id, fp, kw, name: store)}
+      )
     end)
 
     Process.sleep(100)
@@ -191,6 +233,34 @@ defmodule Arbor.Agent.RuntimeAdmission.SourceOwnershipSecurityRegressionTest do
 
       _ ->
         :ok
+    end
+  end
+
+  defp await_until(fun, timeout_ms) do
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+    do_await_until(fun, deadline)
+  end
+
+  defp do_await_until(fun, deadline) do
+    case fun.() do
+      false ->
+        if System.monotonic_time(:millisecond) >= deadline do
+          flunk("await_until timed out")
+        else
+          Process.sleep(20)
+          do_await_until(fun, deadline)
+        end
+
+      nil ->
+        if System.monotonic_time(:millisecond) >= deadline do
+          flunk("await_until timed out")
+        else
+          Process.sleep(20)
+          do_await_until(fun, deadline)
+        end
+
+      other ->
+        other
     end
   end
 
