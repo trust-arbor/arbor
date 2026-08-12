@@ -81,7 +81,7 @@ defmodule Mix.Tasks.Arbor.Packaging.SourceCouplingProductionPathTest do
     assert report["mode"] == "check"
 
     assert report["status"] == "ok",
-           "source-coupling drifted from the reviewed baseline: #{inspect(report["baseline"]["failures"])}"
+           "source-coupling drifted from the reviewed baseline: #{inspect(get_in(report, ["baseline", "failures"]))}"
 
     assert failure_count == 0
 
