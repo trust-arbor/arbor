@@ -172,6 +172,180 @@ defmodule Arbor.Commands.SourceCoupling.AstExtractTest do
            end)
   end
 
+  test "partial static map keeps nested non-module fields when sibling uses ~w sigil" do
+    # Mirrors Arbor.LLM.OAuth.ProviderPolicy: nested provider maps with a ~w scopes
+    # sibling must remain classifiable so @policy.openai / @policy.xai are not
+    # reported as dynamic_module_expr.
+    src = """
+    defmodule Arbor.LLM.OAuth.ProviderPolicyShape do
+      @policy %{
+        openai: %{
+          client_id: "app_test",
+          token_endpoint: "https://auth.example/oauth/token",
+          scopes: ~w(openid profile email offline_access),
+          skew_s: 120
+        },
+        xai: %{
+          client_id: "xai-test",
+          discovery_url: "https://auth.example/.well-known/openid-configuration",
+          scopes: ~w(openid profile email),
+          skew_s: 3600
+        }
+      }
+
+      def openai, do: @policy.openai
+      def xai, do: @policy.xai
+
+      def refresh_openai do
+        %{
+          refresh_url: @policy.openai.token_endpoint,
+          client_id: @policy.openai.client_id,
+          skew_s: @policy.openai.skew_s
+        }
+      end
+
+      def refresh_xai do
+        %{
+          discovery_url: @policy.xai.discovery_url,
+          client_id: @policy.xai.client_id,
+          skew_s: @policy.xai.skew_s
+        }
+      end
+    end
+    """
+
+    assert {:ok, result} =
+             AstExtract.extract(
+               "apps/arbor_llm/lib/arbor/llm/oauth/provider_policy_shape.ex",
+               src
+             )
+
+    refute Enum.any?(result.unresolved, fn u ->
+             String.contains?(u.normalized_expression, "policy")
+           end)
+
+    refute Enum.any?(result.unresolved, fn u ->
+             u.reason == "dynamic_module_expr" and
+               (String.contains?(u.normalized_expression, "openai") or
+                  String.contains?(u.normalized_expression, "xai"))
+           end)
+
+    targets = Enum.map(result.references, & &1.target)
+    refute "openai" in targets
+    refute "xai" in targets
+    refute Enum.any?(targets, &String.contains?(&1, "openid"))
+  end
+
+  test "unknown sibling does not erase known module-valued map fields" do
+    src = """
+    defmodule Arbor.Partial.Handlers do
+      @handlers %{
+        openai: Arbor.LLM.OpenAI,
+        other: dynamic_mod
+      }
+
+      def call_known, do: @handlers.openai.run()
+      def call_unknown, do: @handlers.other.run()
+    end
+    """
+
+    assert {:ok, result} = AstExtract.extract("apps/arbor_common/lib/partial_handlers.ex", src)
+    assert Enum.any?(result.references, &(&1.target == "Arbor.LLM.OpenAI"))
+
+    assert Enum.any?(result.unresolved, fn u ->
+             u.reason == "dynamic_module_expr" and
+               String.contains?(u.normalized_expression, "handlers") and
+               String.contains?(u.normalized_expression, "other")
+           end)
+
+    refute Enum.any?(result.unresolved, fn u ->
+             String.contains?(u.normalized_expression, "openai")
+           end)
+  end
+
+  test "custom sigil is not assumed non-module and keeps unknown field unresolved" do
+    # Custom sigils can expand to arbitrary values; only built-in literal sigils
+    # (~w/~s/…) are non-module. ~Z must not be trusted as a static literal.
+    src = """
+    defmodule Arbor.CustomSigil.Host do
+      @handlers %{
+        openai: Arbor.LLM.OpenAI,
+        meta: ~Z(custom)
+      }
+
+      def call_known, do: @handlers.openai.run()
+      def call_meta, do: @handlers.meta.run()
+    end
+    """
+
+    assert {:ok, result} = AstExtract.extract("apps/arbor_common/lib/custom_sigil_host.ex", src)
+    assert Enum.any?(result.references, &(&1.target == "Arbor.LLM.OpenAI"))
+
+    refute Enum.any?(result.unresolved, fn u ->
+             String.contains?(u.normalized_expression, "openai")
+           end)
+
+    assert Enum.any?(result.unresolved, fn u ->
+             u.reason == "dynamic_module_expr" and
+               String.contains?(u.normalized_expression, "handlers") and
+               String.contains?(u.normalized_expression, "meta")
+           end)
+  end
+
+  test "dynamic map key makes known field module access unresolved" do
+    # A dynamic key may evaluate to :openai and override the static entry.
+    # Preserving @handlers.openai as a resolved module would be unsound.
+    src = """
+    defmodule Arbor.DynKey.Host do
+      @handlers %{
+        unquote(key) => Other.Mod,
+        openai: Arbor.LLM.OpenAI
+      }
+
+      def call, do: @handlers.openai.run()
+    end
+    """
+
+    assert {:ok, result} = AstExtract.extract("apps/arbor_common/lib/dyn_key_host.ex", src)
+
+    # Static source still mentions OpenAI at the attribute definition.
+    assert Enum.any?(result.references, &(&1.target == "Arbor.LLM.OpenAI"))
+
+    assert Enum.any?(result.unresolved, fn u ->
+             u.reason == "dynamic_module_expr" and
+               String.contains?(u.normalized_expression, "handlers") and
+               String.contains?(u.normalized_expression, "openai")
+           end)
+  end
+
+  test "genuinely dynamic Module.concat remains unresolved beside partial maps" do
+    src = """
+    defmodule Arbor.Partial.Mixed do
+      @policy %{
+        openai: %{model: "gpt", scopes: ~w(openid profile)},
+        handler: Arbor.LLM.OpenAI
+      }
+
+      def cfg, do: @policy.openai
+      def call_handler, do: @policy.handler.run()
+      def call_dyn(x), do: Module.concat([x, "A"]).f()
+    end
+    """
+
+    assert {:ok, result} = AstExtract.extract("apps/arbor_common/lib/partial_mixed.ex", src)
+    assert Enum.any?(result.references, &(&1.target == "Arbor.LLM.OpenAI"))
+
+    refute Enum.any?(result.unresolved, fn u ->
+             String.contains?(u.normalized_expression, "policy")
+           end)
+
+    assert Enum.any?(result.unresolved, fn u ->
+             u.reason == "dynamic_module_expr" and
+               String.contains?(u.normalized_expression, "x") and
+               String.contains?(u.normalized_expression, "A")
+           end)
+  end
+
   test "unknown module attribute used as module remains unresolved" do
     src = """
     defmodule Arbor.Missing.Host do

@@ -4,8 +4,11 @@ defmodule Arbor.Commands.SourceCoupling.AstExtract do
 
   Walks `Code.string_to_quoted` forms with lexical alias scopes. Only `alias`
   creates bindings; import/require emit references. Tracks static module and
-  non-module attributes (including map field values) used later as module
-  expressions, and resolves nested `__MODULE__` paths.
+  non-module attributes (including partial map field values) used later as
+  module expressions, and resolves nested `__MODULE__` paths. Map fields are
+  classified independently so one non-module or unknown sibling does not erase
+  known nested maps or module-valued fields. Dynamic/non-atom keys mark the map
+  uncertain so field access cannot trust static entries that may be overridden.
   """
 
   alias Arbor.Commands.SourceCoupling.Encode
@@ -23,6 +26,23 @@ defmodule Arbor.Commands.SourceCoupling.AstExtract do
                     :opaque,
                     :callback,
                     :macrocallback
+                  ])
+
+  # Built-in literal sigils only. Custom sigils (`~H`, user-defined, …) may
+  # expand to arbitrary values and must remain `:unknown`, not non-module.
+  @literal_sigils MapSet.new([
+                    :sigil_c,
+                    :sigil_C,
+                    :sigil_s,
+                    :sigil_S,
+                    :sigil_w,
+                    :sigil_W,
+                    :sigil_r,
+                    :sigil_R,
+                    :sigil_D,
+                    :sigil_T,
+                    :sigil_N,
+                    :sigil_U
                   ])
 
   @type extract_result :: %{
@@ -663,14 +683,11 @@ defmodule Arbor.Commands.SourceCoupling.AstExtract do
                 state = add_ref(state, line, mod, "attribute")
                 %{state | attrs: Map.put(state.attrs, attr, {:module, mod})}
 
-              {:map, fields} ->
-                state =
-                  Enum.reduce(fields, state, fn
-                    {_key, {:module, mod}}, st -> add_ref(st, line, mod, "attribute")
-                    _, st -> st
-                  end)
+              {:map, fields} = map_tag ->
+                bind_map_attr(state, attr, line, fields, map_tag)
 
-                %{state | attrs: Map.put(state.attrs, attr, {:map, fields})}
+              {:map, fields, :uncertain_keys} = map_tag ->
+                bind_map_attr(state, attr, line, fields, map_tag)
 
               :non_module ->
                 %{state | attrs: Map.put(state.attrs, attr, :non_module)}
@@ -710,11 +727,39 @@ defmodule Arbor.Commands.SourceCoupling.AstExtract do
     end
   end
 
+  # Built-in literal sigils (~w, ~s, ~r, dates, …) are static non-module
+  # values. Custom/user sigils are NOT assumed non-module — they may expand to
+  # modules or other dynamic results and stay `:unknown`.
+  defp classify_attr_value({sigil, _, _args} = value, state) when is_atom(sigil) do
+    cond do
+      MapSet.member?(@literal_sigils, sigil) ->
+        :non_module
+
+      literal_sigil_name?(sigil) ->
+        # Other `sigil_*` atoms (custom) — fail closed as unknown.
+        :unknown
+
+      true ->
+        classify_module_expr_attr_value(value, state)
+    end
+  end
+
   defp classify_attr_value(value, state) do
+    classify_module_expr_attr_value(value, state)
+  end
+
+  defp classify_module_expr_attr_value(value, state) do
     case resolve_module_name(value, state) do
       {:ok, mod} -> {:module, mod}
       {:unresolved, _} -> :unknown
       :error -> :unknown
+    end
+  end
+
+  defp literal_sigil_name?(atom) when is_atom(atom) do
+    case Atom.to_string(atom) do
+      "sigil_" <> _ -> true
+      _ -> false
     end
   end
 
@@ -726,20 +771,42 @@ defmodule Arbor.Commands.SourceCoupling.AstExtract do
       end)
   end
 
+  # Classify each map field independently. One unknown or non-module sibling
+  # must not discard known nested maps / module-valued fields (SPIKE-3B partial
+  # static maps). Unknown field values are retained as `:unknown` so later
+  # module-expression access stays unresolved rather than silently ignored.
+  #
+  # Dynamic / non-atom keys set `:uncertain_keys` — a runtime key may equal a
+  # known atom key and override it, so field access must not trust static
+  # entries as resolved modules.
   defp classify_map_fields(pairs, state, acc) do
-    Enum.reduce_while(pairs, {:map, acc}, fn
-      {key, val}, {:map, fields} when is_atom(key) ->
-        case classify_attr_value(val, state) do
-          :unknown ->
-            {:halt, :unknown}
+    {fields, uncertain_keys?} =
+      Enum.reduce(pairs, {acc, false}, fn
+        {key, val}, {fields, uncertain_keys?} when is_atom(key) ->
+          {Map.put(fields, key, classify_attr_value(val, state)), uncertain_keys?}
 
-          classified ->
-            {:cont, {:map, Map.put(fields, key, classified)}}
-        end
+        {_key, _val}, {fields, _uncertain_keys?} ->
+          {fields, true}
 
-      _other, _acc ->
-        {:halt, :unknown}
-    end)
+        _other, {fields, _uncertain_keys?} ->
+          {fields, true}
+      end)
+
+    if uncertain_keys? do
+      {:map, fields, :uncertain_keys}
+    else
+      {:map, fields}
+    end
+  end
+
+  defp bind_map_attr(state, attr, line, fields, map_tag) do
+    state =
+      Enum.reduce(fields, state, fn
+        {_key, {:module, mod}}, st -> add_ref(st, line, mod, "attribute")
+        _, st -> st
+      end)
+
+    %{state | attrs: Map.put(state.attrs, attr, map_tag)}
   end
 
   defp classify_list_attr_value(list, state) do
@@ -747,6 +814,7 @@ defmodule Arbor.Commands.SourceCoupling.AstExtract do
       case classify_attr_value(item, state) do
         :non_module -> {:cont, :non_module}
         {:map, _} -> {:cont, :non_module}
+        {:map, _, :uncertain_keys} -> {:cont, :non_module}
         {:module, _} -> {:halt, :unknown}
         :unknown -> {:halt, :unknown}
       end
@@ -894,6 +962,7 @@ defmodule Arbor.Commands.SourceCoupling.AstExtract do
       {:ok, {:module, mod}} -> {:ok, mod}
       # Static non-module attrs are not module expressions (not unresolved).
       {:ok, {:map, _}} -> :error
+      {:ok, {:map, _, :uncertain_keys}} -> :error
       {:ok, :non_module} -> :error
       # Legacy untagged string (should not occur after bind rewrite).
       {:ok, mod} when is_binary(mod) -> {:ok, mod}
@@ -905,12 +974,31 @@ defmodule Arbor.Commands.SourceCoupling.AstExtract do
   defp resolve_module_name({{:., _, [{:@, _, [{attr, _, _}]}, field]}, _, []}, state)
        when is_atom(attr) and is_atom(field) do
     case Map.fetch(state.attrs, attr) do
+      # Dynamic/non-atom keys may collide with any static atom key — fail closed.
+      {:ok, {:map, _fields, :uncertain_keys}} ->
+        {:unresolved, normalize_expr({:attr_field, attr, field})}
+
       {:ok, {:map, fields}} ->
         case Map.fetch(fields, field) do
-          {:ok, {:module, mod}} -> {:ok, mod}
-          {:ok, {:map, _}} -> :error
-          {:ok, :non_module} -> :error
-          :error -> :error
+          {:ok, {:module, mod}} ->
+            {:ok, mod}
+
+          # Nested static maps / non-module literals are not module expressions.
+          {:ok, {:map, _}} ->
+            :error
+
+          {:ok, {:map, _, :uncertain_keys}} ->
+            :error
+
+          {:ok, :non_module} ->
+            :error
+
+          # Field present but value not statically classifiable — keep unresolved.
+          {:ok, :unknown} ->
+            {:unresolved, normalize_expr({:attr_field, attr, field})}
+
+          :error ->
+            :error
         end
 
       # Module-valued attr + field is a call shape, not a nested module under the attr.
