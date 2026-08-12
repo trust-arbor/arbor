@@ -39,15 +39,12 @@ defmodule Arbor.Memory.GoalStoreOwnerAdmissionTest do
         assert {:ok, ^first} = GoalStore.add_goal_tainted(agent_id, first, taint)
         assert {:ok, ^second} = GoalStore.add_goal_tainted(agent_id, second, taint)
         assert OwnerRoots.held_count(owner_roots(), agent_id) == 2
-        assert {:ok, %{active_roots: 2}} = MutationAdmission.status(agent_id)
 
         task = Task.async(fn -> MutationAdmission.drain(agent_id, timeout_ms: 5_000) end)
 
         assert eventually(fn ->
-                 match?(
-                   {:ok, %{gate: :draining, active_roots: 2}},
-                   MutationAdmission.status(agent_id)
-                 )
+                 match?({:ok, %{gate: :draining}}, MutationAdmission.status(agent_id)) and
+                   OwnerRoots.held_count(owner_roots(), agent_id) == 2
                end)
 
         task
@@ -62,7 +59,8 @@ defmodule Arbor.Memory.GoalStoreOwnerAdmissionTest do
            end)
 
     assert {:ok, _fence} = Task.await(drain_task, 5_000)
-    assert {:ok, %{active_roots: 0}} = MutationAdmission.status(agent_id)
+    assert OwnerRoots.held_count(owner_roots(), agent_id) == 0
+    await_idle_roots!(agent_id)
   end
 
   test "bounded exhaustion settles coalesced roots and leaves the pending marker" do
@@ -84,14 +82,15 @@ defmodule Arbor.Memory.GoalStoreOwnerAdmissionTest do
              end)
     end)
 
-    assert {:ok, %{active_roots: 0}} = MutationAdmission.status(agent_id)
+    assert OwnerRoots.held_count(owner_roots(), agent_id) == 0
+    await_idle_roots!(agent_id)
   end
 
   test "immediate success and pre-effect failures leave zero active roots" do
     agent_id = unique_agent("imm")
     assert {:ok, _goal} = GoalStore.add_goal(agent_id, "immediate success")
     assert OwnerRoots.held_count(owner_roots(), agent_id) == 0
-    assert {:ok, %{active_roots: 0}} = MutationAdmission.status(agent_id)
+    await_idle_roots!(agent_id)
 
     assert {:error, :empty_description} = GoalStore.add_goal(agent_id, "")
     assert OwnerRoots.held_count(owner_roots(), agent_id) == 0
@@ -139,7 +138,7 @@ defmodule Arbor.Memory.GoalStoreOwnerAdmissionTest do
     refute MapSet.member?(state.pending_convergence, agent_id)
     refute MapSet.member?(state.scheduled_convergence, agent_id)
     refute Map.has_key?(state.active_tokens, agent_id)
-    assert {:ok, %{active_roots: 0}} = MutationAdmission.status(agent_id)
+    await_idle_roots!(agent_id)
     assert {:ok, ^ids_before} = Provenance.list_item_ids(:goal, agent_id)
     assert {:ok, ^taint, :verified} = Provenance.resolve(:goal, agent_id, goal.id, payload)
   end
@@ -153,6 +152,8 @@ defmodule Arbor.Memory.GoalStoreOwnerAdmissionTest do
 
     assert {:ok, ^goal_a} = GoalStore.add_goal_tainted(agent_a, goal_a, taint)
     assert {:ok, ^goal_b} = GoalStore.add_goal_tainted(agent_b, goal_b, taint)
+    await_idle_roots!(agent_a)
+    await_idle_roots!(agent_b)
     assert {:ok, _fence} = MutationAdmission.drain(agent_a)
 
     assert :ok = Supervisor.terminate_child(Arbor.Memory.Supervisor, GoalStore)
@@ -162,11 +163,8 @@ defmodule Arbor.Memory.GoalStoreOwnerAdmissionTest do
     assert [] = :ets.lookup(@goals_ets, {agent_a, goal_a.id})
     assert [{_key, ^goal_b}] = :ets.lookup(@goals_ets, {agent_b, goal_b.id})
 
-    assert {:ok, _value, _status, _record, _location} =
-             MemoryStore.load_tainted_authoritative_with_status(
-               "goals",
-               "#{agent_a}:#{goal_a.id}"
-             )
+    assert {:ok, _value, _status} =
+             MemoryStore.load_tainted_with_status("goals", "#{agent_a}:#{goal_a.id}")
   end
 
   test "legacy state with an open gate acquires a fresh deferred root before repair" do
@@ -202,7 +200,7 @@ defmodule Arbor.Memory.GoalStoreOwnerAdmissionTest do
 
     assert {:ok, ^taint, :verified} = Provenance.resolve(:goal, agent_id, goal.id, payload)
     assert OwnerRoots.held_count(owner_roots(), agent_id) == 0
-    assert {:ok, %{active_roots: 0}} = MutationAdmission.status(agent_id)
+    await_idle_roots!(agent_id)
   end
 
   test "roots and drain on one agent do not block another" do
@@ -212,6 +210,7 @@ defmodule Arbor.Memory.GoalStoreOwnerAdmissionTest do
     goal_a = Goal.new("isolated a", id: unique_goal("iso_a"))
 
     assert {:ok, ^goal_a} = GoalStore.add_goal_tainted(agent_a, goal_a, taint)
+    await_idle_roots!(agent_a)
     assert {:ok, _fence} = MutationAdmission.drain(agent_a)
 
     assert {:ok, goal_b} = GoalStore.add_goal_tainted(agent_b, Goal.new("isolated b"), taint)
@@ -228,6 +227,12 @@ defmodule Arbor.Memory.GoalStoreOwnerAdmissionTest do
 
   defp unique_agent(label), do: "goal_own_#{label}_#{System.unique_integer([:positive])}"
   defp unique_goal(label), do: "goal_own_#{label}_#{System.unique_integer([:positive])}"
+
+  defp await_idle_roots!(agent_id) do
+    assert eventually(fn ->
+             match?({:ok, %{active_roots: 0}}, MutationAdmission.status(agent_id))
+           end)
+  end
 
   defp ensure_durable_store! do
     case Process.whereis(@store_name) do

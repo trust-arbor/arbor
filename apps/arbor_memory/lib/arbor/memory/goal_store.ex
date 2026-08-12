@@ -983,6 +983,9 @@ defmodule Arbor.Memory.GoalStore do
     with true <- valid_identifier?(agent_id),
          {:ok, lease} <- admit_fresh(agent_id) do
       {reply, state} = do_clear_goals(agent_id, state)
+      # :armed_this_op is set only when this callback called mark_convergence_pending/2.
+      # Clear-then-rearm and mid-delete projection failure must defer; a quiet
+      # success settles coalesced roots; a no-op failure acks only this lease.
       {armed?, state} = take_armed_flag(state)
 
       disposition =
@@ -1166,6 +1169,10 @@ defmodule Arbor.Memory.GoalStore do
     end
   end
 
+  # :ack — this op finished and adds no deferred work (older roots stay).
+  # :defer — this op armed owner-local convergence; retain its root.
+  # :settle — full-agent projection succeeded; release this root and older ones.
+  # :settle_then_defer — full-agent reconcile superseded older work, then rearmed.
   defp finish_public_root(state, agent_id, lease, disposition) do
     {_, state} = take_armed_flag(state)
 

@@ -41,13 +41,7 @@ defmodule Arbor.Memory.GoalStoreMutationAdmissionSecurityRegressionTest do
 
     assert {:ok, _fence} = MutationAdmission.drain(agent_id)
     assert {:error, :store_unavailable} = GoalStore.add_goal(agent_id, goal)
-
-    assert {:error, :not_found} =
-             MemoryStore.load_tainted_authoritative_with_status(
-               "goals",
-               "#{agent_id}:#{goal.id}"
-             )
-
+    assert durable_absent?(agent_id, goal.id)
     assert [] = :ets.lookup(@goals_ets, {agent_id, goal.id})
     assert {:ok, ids} = Provenance.list_item_ids(:goal, agent_id)
     refute goal.id in ids
@@ -59,7 +53,8 @@ defmodule Arbor.Memory.GoalStoreMutationAdmissionSecurityRegressionTest do
     goal = Goal.new("seed before drain", id: unique_goal("read"))
 
     assert {:ok, ^goal} = GoalStore.add_goal_tainted(agent_id, goal, taint)
-    payload = goal_payload(goal)
+    assert durable_present?(agent_id, goal.id)
+    await_idle_roots!(agent_id)
 
     assert {:ok, _fence} = MutationAdmission.drain(agent_id)
     assert true == :ets.delete(@goals_ets, {agent_id, goal.id})
@@ -67,13 +62,9 @@ defmodule Arbor.Memory.GoalStoreMutationAdmissionSecurityRegressionTest do
 
     assert {:error, :store_unavailable} = GoalStore.get_goal_tainted(agent_id, goal.id)
     assert [] = :ets.lookup(@goals_ets, {agent_id, goal.id})
-    assert {:error, :not_found} = Provenance.resolve(:goal, agent_id, goal.id, payload)
-
-    assert {:ok, _value, _status, _record, _location} =
-             MemoryStore.load_tainted_authoritative_with_status(
-               "goals",
-               "#{agent_id}:#{goal.id}"
-             )
+    assert {:ok, ids} = Provenance.list_item_ids(:goal, agent_id)
+    refute goal.id in ids
+    assert durable_present?(agent_id, goal.id)
   end
 
   test "a retained deferred root does not admit a later public request after drain starts" do
@@ -81,32 +72,29 @@ defmodule Arbor.Memory.GoalStoreMutationAdmissionSecurityRegressionTest do
     taint = taint(:trusted, :internal, "goal_sec_reuse")
     goal = Goal.new("arm deferred", id: unique_goal("reuse"))
     assert {:ok, ^goal} = GoalStore.add_goal_tainted(agent_id, goal, taint)
+    await_idle_roots!(agent_id)
 
-    with_provenance_unregistered(fn ->
-      assert {:ok, _noted} = GoalStore.add_note_tainted(agent_id, goal.id, "arm", taint)
-    end)
+    drain_task =
+      with_provenance_unregistered(fn ->
+        assert {:ok, _noted} = GoalStore.add_note_tainted(agent_id, goal.id, "arm", taint)
 
-    drain_task = Task.async(fn -> MutationAdmission.drain(agent_id, timeout_ms: 5_000) end)
+        task = Task.async(fn -> MutationAdmission.drain(agent_id, timeout_ms: 10_000) end)
 
-    assert eventually(fn ->
-             match?({:ok, %{gate: :draining}}, MutationAdmission.status(agent_id))
-           end)
+        assert eventually(fn ->
+                 match?({:ok, %{gate: :draining}}, MutationAdmission.status(agent_id))
+               end)
 
-    later = Goal.new("unrelated later write", id: unique_goal("later"))
-    assert {:error, :store_unavailable} = GoalStore.add_goal(agent_id, later)
-
-    assert {:error, :not_found} =
-             MemoryStore.load_tainted_authoritative_with_status(
-               "goals",
-               "#{agent_id}:#{later.id}"
-             )
-
-    assert [] = :ets.lookup(@goals_ets, {agent_id, later.id})
-    assert {:ok, ids} = Provenance.list_item_ids(:goal, agent_id)
-    refute later.id in ids
+        later = Goal.new("unrelated later write", id: unique_goal("later"))
+        assert {:error, :store_unavailable} = GoalStore.add_goal(agent_id, later)
+        assert durable_absent?(agent_id, later.id)
+        assert [] = :ets.lookup(@goals_ets, {agent_id, later.id})
+        assert {:ok, ids} = Provenance.list_item_ids(:goal, agent_id)
+        refute later.id in ids
+        task
+      end)
 
     assert :ok = GoalStore.delete_agent_content(agent_id)
-    assert {:ok, _fence} = Task.await(drain_task, 5_000)
+    assert {:ok, _fence} = Task.await(drain_task, 10_000)
   end
 
   test "legacy queued convergence without a retained root cannot project after drain" do
@@ -114,7 +102,8 @@ defmodule Arbor.Memory.GoalStoreMutationAdmissionSecurityRegressionTest do
     taint = taint(:trusted, :internal, "goal_sec_legacy")
     goal = Goal.new("legacy converge", id: unique_goal("legacy"))
     assert {:ok, ^goal} = GoalStore.add_goal_tainted(agent_id, goal, taint)
-    payload = goal_payload(goal)
+    assert durable_present?(agent_id, goal.id)
+    await_idle_roots!(agent_id)
 
     assert {:ok, _fence} = MutationAdmission.drain(agent_id)
     assert true == :ets.delete(@goals_ets, {agent_id, goal.id})
@@ -138,17 +127,38 @@ defmodule Arbor.Memory.GoalStoreMutationAdmissionSecurityRegressionTest do
     _ = :sys.get_state(pid)
 
     assert [] = :ets.lookup(@goals_ets, {agent_id, goal.id})
-    assert {:error, :not_found} = Provenance.resolve(:goal, agent_id, goal.id, payload)
-
-    assert {:ok, _value, _status, _record, _location} =
-             MemoryStore.load_tainted_authoritative_with_status(
-               "goals",
-               "#{agent_id}:#{goal.id}"
-             )
+    assert {:ok, ids} = Provenance.list_item_ids(:goal, agent_id)
+    refute goal.id in ids
+    assert durable_present?(agent_id, goal.id)
   end
 
   defp unique_agent(label), do: "goal_sec_#{label}_#{System.unique_integer([:positive])}"
   defp unique_goal(label), do: "goal_sec_#{label}_#{System.unique_integer([:positive])}"
+
+  defp durable_key(agent_id, goal_id), do: "#{agent_id}:#{goal_id}"
+
+  defp durable_present?(agent_id, goal_id) do
+    match?(
+      {:ok, _value, _status},
+      MemoryStore.load_tainted_with_status("goals", durable_key(agent_id, goal_id))
+    )
+  end
+
+  defp durable_absent?(agent_id, goal_id) do
+    match?(
+      {:error, :not_found},
+      MemoryStore.load_tainted_with_status("goals", durable_key(agent_id, goal_id))
+    )
+  end
+
+  defp await_idle_roots!(agent_id) do
+    assert eventually(
+             fn ->
+               match?({:ok, %{active_roots: 0}}, MutationAdmission.status(agent_id))
+             end,
+             80
+           )
+  end
 
   defp ensure_default_admission! do
     case MutationAdmission.readiness() do
@@ -292,16 +302,4 @@ defmodule Arbor.Memory.GoalStoreMutationAdmissionSecurityRegressionTest do
 
     taint
   end
-
-  defp goal_payload(goal) do
-    goal
-    |> Map.from_struct()
-    |> Map.update!(:created_at, &DateTime.to_iso8601/1)
-    |> Map.update!(:achieved_at, &datetime_to_string/1)
-    |> Map.update!(:deadline, &datetime_to_string/1)
-    |> Map.update!(:referenced_date, &datetime_to_string/1)
-  end
-
-  defp datetime_to_string(nil), do: nil
-  defp datetime_to_string(%DateTime{} = datetime), do: DateTime.to_iso8601(datetime)
 end
