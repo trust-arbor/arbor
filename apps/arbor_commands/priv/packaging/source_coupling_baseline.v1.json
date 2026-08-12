@@ -1,0 +1,26 @@
+{
+  "schema": "arbor.packaging.source_coupling.baseline.v1",
+  "version": 1,
+  "provenance": {
+    "tree_oid": "0000000000000000000000000000000000000000",
+    "scan_manifest_digest": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "policy": {
+    "removal": "require_write",
+    "typespec_only": "gate",
+    "unresolved": "require_disposition",
+    "metadata_match": "required"
+  },
+  "counts": {
+    "undeclared_occurrences": 0,
+    "app_pairs": 0,
+    "level_upward": 0,
+    "intra_band": 0,
+    "downward": 0,
+    "upward": 0,
+    "unresolved": 0
+  },
+  "entries": [],
+  "unresolved_entries": [],
+  "entries_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+}

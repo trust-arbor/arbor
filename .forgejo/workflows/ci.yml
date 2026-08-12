@@ -51,6 +51,9 @@ jobs:
       - name: Compile (warnings as errors)
         run: mix compile --warnings-as-errors
 
+      - name: Packaging source-coupling census (baseline guard)
+        run: ./bin/mix arbor.packaging.source_coupling --check --json
+
       - name: Coding readiness and candidate verification (hermetic)
         run: |
           ./bin/mix test apps/arbor_orchestrator/test/arbor/orchestrator/coding_plan/readiness_test.exs --timeout 120000
