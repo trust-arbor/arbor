@@ -82,6 +82,7 @@ defmodule Arbor.Agent.RuntimeAdmission.OrdinaryStart do
 
   defp admit_and_await(agent_id, fingerprint, validated, store_ref, deadline) do
     remaining = max(deadline - now_ms(), 1)
+    # Per-call store-owned waiter deadline (TaskStore adds reply grace on the call).
     call_timeout = min(@call_timeout_ms, remaining)
 
     try do
@@ -94,6 +95,16 @@ defmodule Arbor.Agent.RuntimeAdmission.OrdinaryStart do
            ) do
         {:ok, pid} when is_pid(pid) ->
           {:ok, pid}
+
+        # F-575: typed per-call waiter timeout is a safe same-fingerprint rejoin
+        # while the outer global deadline remains. Public {:error, :timeout} only
+        # when that global deadline is exhausted.
+        {:error, :runtime_admission_wait_timeout} ->
+          if now_ms() >= deadline do
+            {:error, :timeout}
+          else
+            await_loop(agent_id, fingerprint, validated, store_ref, deadline)
+          end
 
         {:error, _} = err ->
           err

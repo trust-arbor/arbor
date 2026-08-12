@@ -123,7 +123,14 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   @default_max_runtime_admission_intents 256
   @default_runtime_admission_admit_timeout_ms 2_000
   @default_runtime_admission_reconcile_timeout_ms 10_000
-  @default_runtime_admission_call_timeout_ms 120_000
+  # F-575: store-owned waiter deadline default/max; call transport adds reply grace.
+  # Hard waiter ceiling is WaiterCore.ceiling() (64); init may lower only.
+  @default_max_runtime_admission_waiters 64
+  @default_runtime_admission_waiter_deadline_ms 120_000
+  @min_runtime_admission_waiter_deadline_ms 1
+  @runtime_admission_waiter_reply_grace_ms 500
+  # Versioned one-time waiter-map migration (not scanned on every event).
+  @runtime_admission_waiter_schema_v 1
   # Owner retirement barrier: escalate :shutdown → :kill; never finalize on timer.
   @default_runtime_admission_settle_timeout_ms 500
   @runtime_admission_launcher_collision_retries 8
@@ -136,6 +143,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   alias Arbor.Agent.RuntimeAdmission.IntentCore
   alias Arbor.Agent.RuntimeAdmission.IntentOwner
   alias Arbor.Agent.RuntimeAdmission.Supervisor, as: RuntimeAdmissionSupervisor
+  alias Arbor.Agent.RuntimeAdmission.WaiterCore
 
   alias Arbor.Contracts.Coding.{
     AdmissionFailure,
@@ -375,10 +383,13 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
           {:ok, pid()} | {:error, term()}
   def admit_ordinary_runtime_start(target_agent_id, fingerprint, validated_opts, opts \\ [])
       when is_binary(target_agent_id) and is_binary(fingerprint) and is_list(validated_opts) do
+    wait_ms = runtime_admission_waiter_deadline_ms(opts)
+    call_timeout = wait_ms + @runtime_admission_waiter_reply_grace_ms
+
     GenServer.call(
       store_name(opts),
-      {:admit_ordinary_runtime_start, target_agent_id, fingerprint, validated_opts},
-      runtime_admission_call_timeout(opts)
+      {:admit_ordinary_runtime_start, target_agent_id, fingerprint, validated_opts, wait_ms},
+      call_timeout
     )
   end
 
@@ -513,10 +524,27 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     )
   end
 
-  defp runtime_admission_call_timeout(opts) do
+  defp runtime_admission_waiter_deadline_ms(opts) do
     opts
     |> normalize_opts()
-    |> Keyword.get(:timeout, @default_runtime_admission_call_timeout_ms)
+    |> Keyword.get(:timeout, @default_runtime_admission_waiter_deadline_ms)
+    |> clamp_runtime_admission_waiter_deadline_ms()
+  end
+
+  defp clamp_runtime_admission_waiter_deadline_ms(raw) do
+    cond do
+      not is_integer(raw) ->
+        @default_runtime_admission_waiter_deadline_ms
+
+      raw < @min_runtime_admission_waiter_deadline_ms ->
+        @min_runtime_admission_waiter_deadline_ms
+
+      raw > @default_runtime_admission_waiter_deadline_ms ->
+        @default_runtime_admission_waiter_deadline_ms
+
+      true ->
+        raw
+    end
   end
 
   @doc """
@@ -815,12 +843,17 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
       runtime_admission_intents: %{},
       runtime_admission_by_id: %{},
       runtime_admission_waiters: %{},
+      runtime_admission_waiter_by_mon: %{},
+      runtime_admission_waiter_by_deadline: %{},
+      # Fresh init is already on the current waiter schema — skip one-time migrate.
+      runtime_admission_waiter_schema_v: @runtime_admission_waiter_schema_v,
       runtime_admission_owner_monitors: %{},
       runtime_admission_worker_monitors: %{},
       runtime_admission_launcher_monitors: %{},
       runtime_admission_pending_opts: %{},
       runtime_admission_settle_timers: %{},
       runtime_admission_reconcile: %{status: :pending},
+      max_runtime_admission_waiters: normalize_max_runtime_admission_waiters(opts),
       max_runtime_admission_intents:
         Keyword.get(opts, :max_runtime_admission_intents, @default_max_runtime_admission_intents),
       runtime_admission_admit_timeout_ms:
@@ -1259,20 +1292,43 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   end
 
   def handle_call(
-        {:admit_ordinary_runtime_start, target_agent_id, fingerprint, validated_opts},
+        {:admit_ordinary_runtime_start, target_agent_id, fingerprint, validated_opts, wait_ms},
         from,
         state
       ) do
     state = ensure_fence_shape(state)
     state = ensure_runtime_admission_shape(state)
+    # Clamp raw 5-tuple wait_ms inside the store (never trust unclamped caller data).
+    wait_ms = clamp_runtime_admission_waiter_deadline_ms(wait_ms)
 
     case validate_fence_target(target_agent_id) do
       {:ok, target} ->
-        do_admit_ordinary_runtime_start(state, target, fingerprint, validated_opts, from)
+        do_admit_ordinary_runtime_start(
+          state,
+          target,
+          fingerprint,
+          validated_opts,
+          from,
+          wait_ms
+        )
 
       {:error, _} = error ->
         {:reply, error, state}
     end
+  end
+
+  # Pre-F-575 call shape (no wait_ms): treat as default deadline for hot-code compat.
+  def handle_call(
+        {:admit_ordinary_runtime_start, target_agent_id, fingerprint, validated_opts},
+        from,
+        state
+      ) do
+    handle_call(
+      {:admit_ordinary_runtime_start, target_agent_id, fingerprint, validated_opts,
+       @default_runtime_admission_waiter_deadline_ms},
+      from,
+      state
+    )
   end
 
   def handle_call(
@@ -1857,6 +1913,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     state = ensure_adoption_state_shape(state)
     state = ensure_lease_retirement_shape(state)
     state = ensure_recovery_shape(state)
+    state = ensure_runtime_admission_shape(state)
 
     {:noreply, handle_normal_down(state, ref)}
   end
@@ -1865,6 +1922,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     state = ensure_adoption_state_shape(state)
     state = ensure_lease_retirement_shape(state)
     state = ensure_recovery_shape(state)
+    state = ensure_runtime_admission_shape(state)
 
     {:noreply, handle_abnormal_down(state, ref, reason)}
   end
@@ -2003,6 +2061,11 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   def handle_info({:runtime_admission_settle_timeout, intent_id, gen}, state)
       when is_binary(intent_id) and is_integer(gen) do
     {:noreply, handle_runtime_admission_settle_timeout(state, intent_id, gen)}
+  end
+
+  def handle_info({:runtime_admission_waiter_timeout, deadline_token}, state)
+      when is_reference(deadline_token) do
+    {:noreply, handle_runtime_admission_waiter_timeout(state, deadline_token)}
   end
 
   def handle_info(:retry_recovery_replay_msg, state) do
@@ -2218,8 +2281,6 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   end
 
   defp classify_runtime_admission_monitor(state, ref) do
-    state = ensure_runtime_admission_shape(state)
-
     case Map.get(state.runtime_admission_owner_monitors, ref) do
       {intent_id, target, owner_pid} ->
         {:runtime_admission, {:owner, intent_id, target, owner_pid}}
@@ -2248,13 +2309,26 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
         case find_runtime_admission_reconcile_monitor(state, ref) do
           {:launcher, rec} -> {:runtime_admission, {:reconcile_launcher, rec}}
           {:worker, rec} -> {:runtime_admission, {:reconcile_worker, rec}}
-          :error -> classify_reservation_monitor(state, ref)
+          :error -> classify_runtime_admission_waiter_monitor(state, ref)
         end
+    end
+  end
+
+  defp classify_runtime_admission_waiter_monitor(state, ref) do
+    case Map.get(state.runtime_admission_waiter_by_mon, ref) do
+      {intent_id, waiter_id} ->
+        {:runtime_admission, {:waiter, intent_id, waiter_id}}
+
+      nil ->
+        classify_reservation_monitor(state, ref)
     end
   end
 
   defp handle_runtime_admission_monitor_down(state, ref, monitor) do
     case monitor do
+      {:waiter, _intent_id, _waiter_id} ->
+        handle_runtime_admission_waiter_down(state, ref)
+
       {:owner, intent_id, target, owner_pid} ->
         handle_runtime_admission_owner_down(state, ref, intent_id, target, owner_pid)
 
@@ -4497,35 +4571,144 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   end
 
   defp ensure_runtime_admission_shape(state) do
-    state
-    |> Map.put_new(:store_ref, @default_name)
-    |> Map.put_new(:runtime_admission_supervisor, @default_runtime_admission_supervisor)
-    |> Map.put_new(:runtime_admission_ready?, false)
-    |> Map.put_new(:runtime_admission_intents, %{})
-    |> Map.put_new(:runtime_admission_by_id, %{})
-    |> Map.put_new(:runtime_admission_waiters, %{})
-    |> Map.put_new(:runtime_admission_owner_monitors, %{})
-    |> Map.put_new(:runtime_admission_worker_monitors, %{})
-    |> Map.put_new(:runtime_admission_launcher_monitors, %{})
-    |> Map.put_new(:runtime_admission_pending_opts, %{})
-    |> Map.put_new(:runtime_admission_settle_timers, %{})
-    |> Map.put_new(:runtime_admission_reconcile, %{status: :pending})
-    |> Map.put_new(:max_runtime_admission_intents, @default_max_runtime_admission_intents)
-    |> Map.put_new(
-      :runtime_admission_admit_timeout_ms,
-      @default_runtime_admission_admit_timeout_ms
-    )
-    |> Map.put_new(
-      :runtime_admission_settle_timeout_ms,
-      @default_runtime_admission_settle_timeout_ms
-    )
-    |> Map.put_new(
-      :runtime_admission_reconcile_timeout_ms,
-      @default_runtime_admission_reconcile_timeout_ms
-    )
+    state =
+      state
+      |> Map.put_new(:store_ref, @default_name)
+      |> Map.put_new(:runtime_admission_supervisor, @default_runtime_admission_supervisor)
+      |> Map.put_new(:runtime_admission_ready?, false)
+      |> Map.put_new(:runtime_admission_intents, %{})
+      |> Map.put_new(:runtime_admission_by_id, %{})
+      |> Map.put_new(:runtime_admission_waiters, %{})
+      |> Map.put_new(:runtime_admission_waiter_by_mon, %{})
+      |> Map.put_new(:runtime_admission_waiter_by_deadline, %{})
+      # Missing key means pre-F-575 hot state — migrate once, never every event.
+      |> Map.put_new(:runtime_admission_waiter_schema_v, 0)
+      |> Map.put_new(:runtime_admission_owner_monitors, %{})
+      |> Map.put_new(:runtime_admission_worker_monitors, %{})
+      |> Map.put_new(:runtime_admission_launcher_monitors, %{})
+      |> Map.put_new(:runtime_admission_pending_opts, %{})
+      |> Map.put_new(:runtime_admission_settle_timers, %{})
+      |> Map.put_new(:runtime_admission_reconcile, %{status: :pending})
+      |> Map.put_new(
+        :max_runtime_admission_waiters,
+        @default_max_runtime_admission_waiters
+      )
+      |> Map.put_new(:max_runtime_admission_intents, @default_max_runtime_admission_intents)
+      |> Map.put_new(
+        :runtime_admission_admit_timeout_ms,
+        @default_runtime_admission_admit_timeout_ms
+      )
+      |> Map.put_new(
+        :runtime_admission_settle_timeout_ms,
+        @default_runtime_admission_settle_timeout_ms
+      )
+      |> Map.put_new(
+        :runtime_admission_reconcile_timeout_ms,
+        @default_runtime_admission_reconcile_timeout_ms
+      )
+
+    state =
+      Map.update!(state, :max_runtime_admission_waiters, &WaiterCore.normalize_max/1)
+
+    case Map.get(state, :runtime_admission_waiter_schema_v, 0) do
+      @runtime_admission_waiter_schema_v ->
+        state
+
+      version
+      when is_integer(version) and version >= 0 and
+             version < @runtime_admission_waiter_schema_v ->
+        migrate_runtime_admission_waiter_schema(state)
+
+      _unknown ->
+        # A downgrade or malformed hot state cannot safely interpret newer
+        # monitor/timer authority. Supervised restart recreates the current shape.
+        exit(:runtime_admission_waiter_schema_unknown)
+    end
   end
 
-  defp do_admit_ordinary_runtime_start(state, target, fingerprint, validated_opts, from) do
+  if Mix.env() == :test do
+    defp normalize_max_runtime_admission_waiters(opts) when is_list(opts) do
+      WaiterCore.normalize_max(
+        Keyword.get(opts, :max_runtime_admission_waiters, @default_max_runtime_admission_waiters)
+      )
+    end
+  else
+    defp normalize_max_runtime_admission_waiters(_opts),
+      do: @default_max_runtime_admission_waiters
+  end
+
+  # One-time F-575 waiter schema migration. After this, insert/remove/detach are
+  # O(1) index ops — never re-scan all waiters on every event.
+  defp migrate_runtime_admission_waiter_schema(state) do
+    waiters = Map.get(state, :runtime_admission_waiters, %{})
+    by_mon = Map.get(state, :runtime_admission_waiter_by_mon, %{})
+    by_dl = Map.get(state, :runtime_admission_waiter_by_deadline, %{})
+
+    # Unrecoverable shapes (no safe from channel) force supervised restart so
+    # OrdinaryStart follows the proven store-exit rejoin path rather than
+    # silently stranding callers with live mon/timer residue.
+    if runtime_admission_waiter_state_corrupt?(waiters) do
+      exit(:runtime_admission_waiter_state_corrupt)
+    end
+
+    # Drain pre-F-575 raw-from lists once with typed wait_timeout so callers
+    # are not stranded; never mutate the underlying intent.
+    legacy_drains = WaiterCore.extract_legacy_drains(waiters)
+
+    waiters_without_legacy =
+      Enum.reduce(legacy_drains, waiters, fn {intent_id, _froms}, acc ->
+        Map.delete(acc, intent_id)
+      end)
+
+    # A partial modern triple has ambiguous monitor/timer ownership. Restarting
+    # drops all process-local resources atomically and lets OrdinaryStart rejoin.
+    if not WaiterCore.correlated?(waiters_without_legacy, by_mon, by_dl) do
+      exit(:runtime_admission_waiter_state_corrupt)
+    end
+
+    state = %{
+      state
+      | runtime_admission_waiters: waiters_without_legacy,
+        runtime_admission_waiter_by_mon: by_mon,
+        runtime_admission_waiter_by_deadline: by_dl,
+        runtime_admission_waiter_schema_v: @runtime_admission_waiter_schema_v
+    }
+
+    Enum.each(legacy_drains, fn {_intent_id, froms} ->
+      Enum.each(froms, fn from ->
+        safe_runtime_admission_waiter_reply(from, {:error, :runtime_admission_wait_timeout})
+      end)
+    end)
+
+    state
+  end
+
+  defp runtime_admission_waiter_state_corrupt?(waiters) when is_map(waiters) do
+    Enum.any?(waiters, fn
+      {intent_id, bucket} when is_binary(intent_id) and is_list(bucket) ->
+        WaiterCore.classify_legacy(bucket) == :corrupt
+
+      {intent_id, bucket} when is_binary(intent_id) and is_map(bucket) ->
+        Enum.any?(bucket, fn
+          {waiter_id, record} when is_reference(waiter_id) and is_map(record) -> false
+          _ -> true
+        end)
+
+      _ ->
+        true
+    end)
+  end
+
+  defp runtime_admission_waiter_state_corrupt?(_), do: true
+
+  defp do_admit_ordinary_runtime_start(
+         state,
+         target,
+         fingerprint,
+         validated_opts,
+         from,
+         wait_ms
+       ) do
     intent_count = map_size(state.runtime_admission_intents)
     max = Map.get(state, :max_runtime_admission_intents, @default_max_runtime_admission_intents)
     intent_id = mint_runtime_admission_intent_id()
@@ -4542,39 +4725,210 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
            max
          ) do
       {:ok, :joined, intent, intents, _effects} ->
-        state =
-          state
-          |> put_in([:runtime_admission_intents], intents)
-          |> add_runtime_admission_waiter(intent.intent_id, from)
+        case accept_runtime_admission_waiter(state, intent.intent_id, from, wait_ms) do
+          {:ok, state} ->
+            state = put_in(state, [:runtime_admission_intents], intents)
+            {:noreply, state}
 
-        {:noreply, state}
+          {:error, :runtime_admission_waiters_full, state} ->
+            {:reply, {:error, :runtime_admission_waiters_full}, state}
+        end
 
       {:ok, :admitted, intent, intents, effects} ->
-        state =
-          state
-          |> put_in([:runtime_admission_intents], intents)
-          |> put_in([:runtime_admission_by_id, intent.intent_id], target)
-          |> add_runtime_admission_waiter(intent.intent_id, from)
+        case accept_runtime_admission_waiter(state, intent.intent_id, from, wait_ms) do
+          {:ok, state} ->
+            state =
+              state
+              |> put_in([:runtime_admission_intents], intents)
+              |> put_in([:runtime_admission_by_id, intent.intent_id], target)
 
-        state =
-          Enum.reduce(effects, state, fn
-            {:launch_owner, launched}, acc ->
-              launch_runtime_admission_owner(acc, launched, validated_opts)
+            state =
+              Enum.reduce(effects, state, fn
+                {:launch_owner, launched}, acc ->
+                  launch_runtime_admission_owner(acc, launched, validated_opts)
 
-            _, acc ->
-              acc
-          end)
+                _, acc ->
+                  acc
+              end)
 
-        {:noreply, state}
+            {:noreply, state}
+
+          {:error, :runtime_admission_waiters_full, state} ->
+            # Fresh admit with empty waiter set cannot hit full; fail closed.
+            {:reply, {:error, :runtime_admission_waiters_full}, state}
+        end
 
       {:error, reason} ->
         {:reply, {:error, reason}, state}
     end
   end
 
-  defp add_runtime_admission_waiter(state, intent_id, from) do
-    waiters = Map.get(state.runtime_admission_waiters, intent_id, [])
-    put_in(state, [:runtime_admission_waiters, intent_id], [from | waiters])
+  # Cap check BEFORE mon/timer allocation. Authority fields are store-minted only.
+  defp accept_runtime_admission_waiter(state, intent_id, from, wait_ms)
+       when is_binary(intent_id) do
+    state = ensure_runtime_admission_shape(state)
+    wait_ms = clamp_runtime_admission_waiter_deadline_ms(wait_ms)
+    max = Map.get(state, :max_runtime_admission_waiters, @default_max_runtime_admission_waiters)
+    count = WaiterCore.intent_count(state.runtime_admission_waiters, intent_id)
+
+    case WaiterCore.can_accept?(count, max) do
+      {:error, :runtime_admission_waiters_full} ->
+        {:error, :runtime_admission_waiters_full, state}
+
+      :ok ->
+        {caller_pid, _tag} = from
+        waiter_id = make_ref()
+        mon = Process.monitor(caller_pid)
+        deadline_token = make_ref()
+
+        timer_ref =
+          Process.send_after(
+            self(),
+            {:runtime_admission_waiter_timeout, deadline_token},
+            wait_ms
+          )
+
+        record = %{
+          waiter_id: waiter_id,
+          intent_id: intent_id,
+          from: from,
+          caller_pid: caller_pid,
+          mon: mon,
+          deadline_token: deadline_token,
+          timer_ref: timer_ref
+        }
+
+        case WaiterCore.insert(
+               state.runtime_admission_waiters,
+               state.runtime_admission_waiter_by_mon,
+               state.runtime_admission_waiter_by_deadline,
+               record,
+               max
+             ) do
+          {:ok, waiters, by_mon, by_dl} ->
+            state = %{
+              state
+              | runtime_admission_waiters: waiters,
+                runtime_admission_waiter_by_mon: by_mon,
+                runtime_admission_waiter_by_deadline: by_dl
+            }
+
+            {:ok, state}
+
+          {:error, :runtime_admission_waiters_full} ->
+            _ = Process.cancel_timer(timer_ref)
+            Process.demonitor(mon, [:flush])
+            {:error, :runtime_admission_waiters_full, state}
+
+          {:error, reason} ->
+            _ = Process.cancel_timer(timer_ref)
+            Process.demonitor(mon, [:flush])
+            exit({:runtime_admission_waiter_insert_failed, reason})
+        end
+    end
+  end
+
+  defp release_runtime_admission_waiter_resources(record) when is_map(record) do
+    if is_reference(Map.get(record, :timer_ref)) do
+      _ = Process.cancel_timer(record.timer_ref)
+    end
+
+    if is_reference(Map.get(record, :mon)) do
+      Process.demonitor(record.mon, [:flush])
+    end
+
+    :ok
+  end
+
+  defp safe_runtime_admission_waiter_reply(from, reply) do
+    GenServer.reply(from, reply)
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp detach_and_reply_runtime_admission_waiters(state, intent_id, reply)
+       when is_binary(intent_id) do
+    state = ensure_runtime_admission_shape(state)
+
+    {records, waiters, by_mon, by_dl} =
+      WaiterCore.detach_all(
+        state.runtime_admission_waiters,
+        state.runtime_admission_waiter_by_mon,
+        state.runtime_admission_waiter_by_deadline,
+        intent_id
+      )
+
+    # Detach authority first so reentrant/queued stale events observe consumption.
+    state = %{
+      state
+      | runtime_admission_waiters: waiters,
+        runtime_admission_waiter_by_mon: by_mon,
+        runtime_admission_waiter_by_deadline: by_dl
+    }
+
+    Enum.each(records, &release_runtime_admission_waiter_resources/1)
+    Enum.each(records, fn rec -> safe_runtime_admission_waiter_reply(rec.from, reply) end)
+    state
+  end
+
+  defp handle_runtime_admission_waiter_timeout(state, deadline_token)
+       when is_reference(deadline_token) do
+    state = ensure_runtime_admission_shape(state)
+
+    case WaiterCore.remove_by_deadline(
+           state.runtime_admission_waiters,
+           state.runtime_admission_waiter_by_mon,
+           state.runtime_admission_waiter_by_deadline,
+           deadline_token
+         ) do
+      {:ok, record, waiters, by_mon, by_dl} ->
+        state = %{
+          state
+          | runtime_admission_waiters: waiters,
+            runtime_admission_waiter_by_mon: by_mon,
+            runtime_admission_waiter_by_deadline: by_dl
+        }
+
+        release_runtime_admission_waiter_resources(record)
+
+        safe_runtime_admission_waiter_reply(
+          record.from,
+          {:error, :runtime_admission_wait_timeout}
+        )
+
+        state
+
+      :stale ->
+        state
+    end
+  end
+
+  defp handle_runtime_admission_waiter_down(state, mon) when is_reference(mon) do
+    state = ensure_runtime_admission_shape(state)
+
+    case WaiterCore.remove_by_mon(
+           state.runtime_admission_waiters,
+           state.runtime_admission_waiter_by_mon,
+           state.runtime_admission_waiter_by_deadline,
+           mon
+         ) do
+      {:ok, record, waiters, by_mon, by_dl} ->
+        state = %{
+          state
+          | runtime_admission_waiters: waiters,
+            runtime_admission_waiter_by_mon: by_mon,
+            runtime_admission_waiter_by_deadline: by_dl
+        }
+
+        # Caller is dead — cancel timer and flush mon; never reply; never mutate intent.
+        release_runtime_admission_waiter_resources(record)
+        state
+
+      :stale ->
+        state
+    end
   end
 
   defp mint_runtime_admission_intent_id do
@@ -4821,14 +5175,12 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
             case pure_delete_runtime_admission_terminal(state, target, intent_id, :ownerless) do
               {:ok, done, state} ->
                 reply = settlement_reply(Map.get(done, :terminal))
-                waiters = Map.get(state.runtime_admission_waiters, intent_id, [])
-                Enum.each(waiters, fn from -> GenServer.reply(from, reply) end)
 
                 state =
                   state
+                  |> detach_and_reply_runtime_admission_waiters(intent_id, reply)
                   |> drop_settle_timer(intent_id)
                   |> update_in([:runtime_admission_by_id], &Map.delete(&1, intent_id))
-                  |> update_in([:runtime_admission_waiters], &Map.delete(&1, intent_id))
                   |> flush_monitors_for_intent(intent_id)
 
                 {:ok, state}
@@ -4941,13 +5293,11 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     case pure_delete_runtime_admission_terminal(state, target, intent_id, mode) do
       {:ok, done, state} ->
         reply = settlement_reply(Map.get(done, :terminal))
-        waiters = Map.get(state.runtime_admission_waiters, intent_id, [])
-        Enum.each(waiters, fn from -> GenServer.reply(from, reply) end)
 
         state
+        |> detach_and_reply_runtime_admission_waiters(intent_id, reply)
         |> drop_settle_timer(intent_id)
         |> update_in([:runtime_admission_by_id], &Map.delete(&1, intent_id))
-        |> update_in([:runtime_admission_waiters], &Map.delete(&1, intent_id))
         |> flush_monitors_for_intent(intent_id)
 
       {:error, _reason, state} ->
@@ -5793,28 +6143,42 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
                   Map.put(acc, intent.intent_id, target)
                 end)
 
-              # Monitor rebound owners.
-              {state, mon_map} =
-                Enum.reduce(intents, {state, %{}}, fn {_t, intent}, {st, mons} ->
-                  if is_pid(intent.owner_pid) and Process.alive?(intent.owner_pid) do
-                    mon = Process.monitor(intent.owner_pid)
+              # Re-monitor exact owner and worker identities from the fixed
+              # owner's snapshot. Dead PIDs produce immediate DOWN; liveness is
+              # never used as authority.
+              {owner_mons, worker_mons} =
+                Enum.reduce(intents, {%{}, %{}}, fn {_target, intent}, {owners, workers} ->
+                  owner_mon = Process.monitor(intent.owner_pid)
 
-                    {st,
-                     Map.put(
-                       mons,
-                       mon,
-                       {intent.intent_id, intent.target_agent_id, intent.owner_pid}
-                     )}
-                  else
-                    {st, mons}
-                  end
+                  owners =
+                    Map.put(
+                      owners,
+                      owner_mon,
+                      {intent.intent_id, intent.target_agent_id, intent.owner_pid}
+                    )
+
+                  workers =
+                    if is_pid(intent.worker_pid) do
+                      worker_mon = Process.monitor(intent.worker_pid)
+
+                      Map.put(
+                        workers,
+                        worker_mon,
+                        {intent.intent_id, intent.target_agent_id, intent.worker_pid}
+                      )
+                    else
+                      workers
+                    end
+
+                  {owners, workers}
                 end)
 
               %{
                 state
                 | runtime_admission_intents: intents,
                   runtime_admission_by_id: by_id,
-                  runtime_admission_owner_monitors: mon_map,
+                  runtime_admission_owner_monitors: owner_mons,
+                  runtime_admission_worker_monitors: worker_mons,
                   runtime_admission_ready?: true,
                   runtime_admission_reconcile: %{
                     status: :done,

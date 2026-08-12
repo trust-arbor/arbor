@@ -1134,20 +1134,22 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentCore do
     # Authoritative owner is only the enumerated fixed-supervisor child PID.
     child_pid = Map.get(snap, :child_pid, Map.get(snap, "child_pid"))
     snap_owner = Map.get(snap, :owner_pid, Map.get(snap, "owner_pid"))
+    snap_worker = Map.get(snap, :worker_pid, Map.get(snap, "worker_pid"))
 
     with :ok <- validate_target(target),
          :ok <- validate_intent_id(intent_id),
          :ok <- validate_fingerprint(fingerprint),
-         {:ok, owner_pid} <- resolve_rebind_owner_pid(child_pid, snap_owner) do
+         {:ok, owner_pid} <- resolve_rebind_owner_pid(child_pid, snap_owner),
+         {:ok, worker_pid} <- resolve_rebind_worker_pid(snap_worker, owner_pid) do
       {:ok,
        %{
          intent_id: intent_id,
          target_agent_id: target,
          kind: :ordinary_start,
          fingerprint: fingerprint,
-         phase: :outcome_unknown,
+         phase: if(is_pid(worker_pid), do: :worker_running, else: :outcome_unknown),
          owner_pid: owner_pid,
-         worker_pid: nil,
+         worker_pid: worker_pid,
          terminal: nil,
          retire_barrier: :none,
          launch_ref: nil,
@@ -1172,6 +1174,16 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentCore do
        do: {:ok, child_pid}
 
   defp resolve_rebind_owner_pid(_child_pid, _snap_owner), do: {:error, :invalid_snapshot}
+
+  # Worker authority comes only from the enumerated fixed owner's snapshot.
+  # A dead PID is still safe: the shell's new monitor immediately delivers DOWN.
+  defp resolve_rebind_worker_pid(nil, _owner_pid), do: {:ok, nil}
+
+  defp resolve_rebind_worker_pid(worker_pid, owner_pid)
+       when is_pid(worker_pid) and worker_pid != owner_pid,
+       do: {:ok, worker_pid}
+
+  defp resolve_rebind_worker_pid(_worker_pid, _owner_pid), do: {:error, :invalid_snapshot}
 
   defp validate_target(target)
        when is_binary(target) and byte_size(target) <= @max_target_bytes and

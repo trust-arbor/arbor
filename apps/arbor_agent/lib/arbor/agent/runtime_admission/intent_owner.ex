@@ -151,7 +151,10 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentOwner do
         intent_id: state.intent_id,
         target_agent_id: state.target_agent_id,
         fingerprint: state.fingerprint,
-        owner_pid: self()
+        owner_pid: self(),
+        # This fixed owner originally bound and monitors the exact worker.
+        # TaskStore independently re-monitors the PID after restart.
+        worker_pid: state.worker_pid
       }}, state}
   end
 

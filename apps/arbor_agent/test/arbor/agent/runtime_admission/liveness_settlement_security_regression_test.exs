@@ -125,7 +125,7 @@ defmodule Arbor.Agent.RuntimeAdmission.LivenessSettlementSecurityRegressionTest 
   test "security regression R3: unrelated bind failures are not collision-retried", %{
     store: store
   } do
-    {agent_id, fp, _kw, _parent} = start_held_admit(store, :admit)
+    {agent_id, fp, _kw, _caller_pid} = start_held_admit(store, :admit)
     {_owner_pid, intent_id, fingerprint} = await_exact_live_owner(agent_id, fp)
     _worker = await_bound_worker(store, agent_id)
 
@@ -576,7 +576,7 @@ defmodule Arbor.Agent.RuntimeAdmission.LivenessSettlementSecurityRegressionTest 
   test "security regression: stale monitored owner DOWN does not retire rebound intent", %{
     store: store
   } do
-    {agent_id, fp, _kw, _parent} = start_held_admit(store, :admit)
+    {agent_id, fp, _kw, caller_pid} = start_held_admit(store, :admit)
     {owner_pid, intent_id, ^fp} = await_exact_live_owner(agent_id, fp)
     worker_pid = await_bound_worker(store, agent_id)
 
@@ -625,18 +625,7 @@ defmodule Arbor.Agent.RuntimeAdmission.LivenessSettlementSecurityRegressionTest 
 
     if Process.alive?(worker_pid), do: Process.exit(worker_pid, :kill)
     if Process.alive?(fake_rebound), do: Process.exit(fake_rebound, :kill)
-
-    :sys.replace_state(store_pid, fn st ->
-      waiters = get_in(st, [:runtime_admission_waiters, intent_id]) || []
-      Enum.each(waiters, fn from -> GenServer.reply(from, {:error, :test_cleanup}) end)
-
-      st
-      |> update_in([:runtime_admission_intents], &Map.delete(&1, agent_id))
-      |> update_in([:runtime_admission_by_id], &Map.delete(&1, intent_id))
-      |> update_in([:runtime_admission_waiters], &Map.delete(&1, intent_id))
-    end)
-
-    _ = flush_admit_tag(:admit)
+    if Process.alive?(caller_pid), do: Process.exit(caller_pid, :kill)
   end
 
   # ── Mode A helpers ────────────────────────────────────────────────
@@ -644,8 +633,8 @@ defmodule Arbor.Agent.RuntimeAdmission.LivenessSettlementSecurityRegressionTest 
   defp start_held_admit(store, tag) do
     agent_id = "agent_live#{System.unique_integer([:positive])}"
     assert {:ok, %{fingerprint: fp, keyword: kw}} = Opts.project([])
-    spawn_admit(store, agent_id, fp, kw, tag)
-    {agent_id, fp, kw, self()}
+    caller_pid = spawn_admit(store, agent_id, fp, kw, tag)
+    {agent_id, fp, kw, caller_pid}
   end
 
   defp spawn_admit(store, agent_id, fp, kw, tag) do
@@ -658,8 +647,6 @@ defmodule Arbor.Agent.RuntimeAdmission.LivenessSettlementSecurityRegressionTest 
          TaskStore.admit_ordinary_runtime_start(agent_id, fp, kw, name: store, timeout: 60_000)}
       )
     end)
-
-    :ok
   end
 
   defp assert_receive_admit(tag, timeout) do
@@ -893,14 +880,6 @@ defmodule Arbor.Agent.RuntimeAdmission.LivenessSettlementSecurityRegressionTest 
     )
   end
 
-  defp flush_admit_tag(tag) do
-    receive do
-      {^tag, result} -> result
-    after
-      1_000 -> :timeout
-    end
-  end
-
   defp await_until(fun, timeout_ms) do
     deadline = System.monotonic_time(:millisecond) + timeout_ms
     do_await_until(fun, deadline)
@@ -939,5 +918,7 @@ defmodule Arbor.Agent.RuntimeAdmission.LivenessSettlementSecurityRegressionTest 
     end
   end
 
-  defp unique_name(prefix), do: :"#{prefix}_#{System.unique_integer([:positive])}"
+  defp unique_name(:ra_sup), do: __MODULE__.RuntimeAdmissionSupervisor
+  defp unique_name(:task_sup), do: __MODULE__.TaskSupervisor
+  defp unique_name(:store), do: __MODULE__.TaskStore
 end

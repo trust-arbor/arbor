@@ -750,9 +750,18 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
       %{runtime_admission_intents: intents, runtime_admission_waiters: waiters} ->
         case Map.get(intents, agent_id) do
           %{intent_id: intent_id} when is_binary(intent_id) ->
+            bucket = Map.get(waiters, intent_id, %{})
+
+            count =
+              cond do
+                is_map(bucket) -> map_size(bucket)
+                is_list(bucket) -> length(bucket)
+                true -> 0
+              end
+
             %{
               intent_id: intent_id,
-              waiter_count: length(Map.get(waiters, intent_id, []))
+              waiter_count: count
             }
 
           _ ->

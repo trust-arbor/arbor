@@ -219,6 +219,30 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentCoreTest do
     assert IntentCore.non_idle?(intents, @target)
   end
 
+  test "rebind_owners preserves exact worker authority from the fixed owner snapshot" do
+    worker = spawn(fn -> Process.sleep(:infinity) end)
+    on_exit(fn -> if Process.alive?(worker), do: Process.exit(worker, :kill) end)
+
+    snaps = [
+      %{
+        intent_id: "rai_1",
+        target_agent_id: @target,
+        fingerprint: "fp_" <> String.duplicate("a", 16),
+        child_pid: self(),
+        owner_pid: self(),
+        worker_pid: worker
+      }
+    ]
+
+    assert {:ok, intents} = IntentCore.rebind_owners(%{}, snaps)
+    assert intents[@target].phase == :worker_running
+    assert intents[@target].owner_pid == self()
+    assert intents[@target].worker_pid == worker
+
+    assert {:error, :invalid_snapshot} =
+             IntentCore.rebind_owners(%{}, [Map.put(hd(snaps), :worker_pid, self())])
+  end
+
   test "security regression: rebind_owners fails closed when snap.owner_pid mismatches child_pid" do
     other = spawn(fn -> :ok end)
 
