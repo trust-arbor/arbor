@@ -5,6 +5,10 @@ defmodule Arbor.Agent.RuntimeAdmission.OrdinaryStart do
   Validates opts, admits/joins through TaskStore, and restart-safely awaits
   settlement using the same fingerprint so vanished waiters rejoin after
   TaskStore restart.
+
+  Production always addresses the fixed `Arbor.Agent.Orchestration.TaskStore`.
+  Public `:name` injection is rejected in every build. A test-only `:task_store`
+  seam is compiled only under `MIX_ENV=test`.
   """
 
   alias Arbor.Agent.Orchestration.TaskStore
@@ -21,14 +25,39 @@ defmodule Arbor.Agent.RuntimeAdmission.OrdinaryStart do
   """
   @spec request(String.t(), keyword()) :: {:ok, pid()} | {:error, term()}
   def request(agent_id, opts \\ []) when is_binary(agent_id) and is_list(opts) do
-    store_ref = store_ref(opts)
-    # Strip test-only seams before identity projection.
-    identity_opts = Keyword.drop(opts, [:name, :task_store, :timeout_ms])
-
-    with {:ok, %{fingerprint: fp, keyword: validated}} <- Opts.project(identity_opts) do
+    with :ok <- reject_public_name(opts),
+         {:ok, store_ref} <- resolve_store_ref(opts),
+         identity_opts = Keyword.drop(opts, identity_drop_keys()),
+         {:ok, %{fingerprint: fp, keyword: validated}} <- Opts.project(identity_opts) do
       deadline = absolute_deadline(opts)
       await_loop(agent_id, fp, validated, store_ref, deadline)
     end
+  end
+
+  defp reject_public_name(opts) do
+    if Keyword.has_key?(opts, :name), do: {:error, :invalid_start_opts}, else: :ok
+  end
+
+  # Compile-time isolation: custom-store selection is absent from dev/prod BEAMs.
+  if Mix.env() == :test do
+    defp identity_drop_keys, do: [:task_store, :timeout_ms]
+
+    defp resolve_store_ref(opts) do
+      case Keyword.fetch(opts, :task_store) do
+        :error ->
+          {:ok, @default_store}
+
+        {:ok, ref} when is_atom(ref) or is_pid(ref) or is_tuple(ref) ->
+          {:ok, ref}
+
+        {:ok, _} ->
+          {:error, :invalid_start_opts}
+      end
+    end
+  else
+    defp identity_drop_keys, do: [:timeout_ms]
+
+    defp resolve_store_ref(_opts), do: {:ok, @default_store}
   end
 
   defp await_loop(agent_id, fingerprint, validated, store_ref, deadline) do
@@ -109,14 +138,6 @@ defmodule Arbor.Agent.RuntimeAdmission.OrdinaryStart do
 
   defp wait_ready_after_restart(store_ref, deadline) do
     ensure_ready(store_ref, deadline)
-  end
-
-  defp store_ref(opts) do
-    cond do
-      Keyword.has_key?(opts, :name) -> Keyword.fetch!(opts, :name)
-      Keyword.has_key?(opts, :task_store) and Mix.env() == :test -> Keyword.fetch!(opts, :task_store)
-      true -> @default_store
-    end
   end
 
   defp absolute_deadline(opts) do

@@ -35,18 +35,19 @@ defmodule Arbor.Agent.RuntimeAdmission.Opts do
                   :context_management,
                   :effective_window,
                   :recover_session,
-                  :sandbox_level,
-                  # Test-only store/name seams accepted at request boundary then stripped
-                  :name,
-                  :task_store
+                  :sandbox_level
                 ])
 
-  # Hard reject: authority/collaborator selectors must never reach ordinary start.
+  # Hard reject: authority/collaborator selectors and public store-name injection
+  # must never reach ordinary start. `:name` is rejected (not silently ignored).
+  # Test-only `:task_store` is stripped at OrdinaryStart before project under
+  # MIX_ENV=test and is not part of option identity.
   @reject_keys MapSet.new([
                  :signer,
                  :signing_authority,
                  :signing_authority_bootstrap,
-                 :runner
+                 :runner,
+                 :name
                ])
 
   # Manager create/resume may Keyword.merge create-only opts into Lifecycle.start.
