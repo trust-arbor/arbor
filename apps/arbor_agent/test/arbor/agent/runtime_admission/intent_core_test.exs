@@ -200,6 +200,65 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentCoreTest do
     assert IntentCore.classify_unknown_start("rai_1", :bare) == :conflict
     assert IntentCore.classify_unknown_start("rai_1", {:other, "rai_2"}) == :conflict
     assert IntentCore.classify_unknown_start("rai_1", :not_running) == :not_applied
+
+    assert IntentCore.classify_unknown_start("rai_1", :observe_failed) ==
+             :observation_failed
+  end
+
+  test "observe_failed never classifies as applied or not_applied on live down" do
+    assert {:settle, {:conflict, :observation_failed}} =
+             IntentCore.classify_live_down("rai_1", :observe_failed, :worker)
+
+    assert {:settle, {:conflict, :observation_failed}} =
+             IntentCore.classify_live_down("rai_1", :observe_failed, :owner)
+  end
+
+  test "observe_request_current? rejects stale identity after state change" do
+    intent_id = "rai_" <> String.duplicate("a", 22)
+    fp = "fp_" <> String.duplicate("ab", 32)
+    token = "rrt_" <> String.duplicate("c", 22)
+    owner = self()
+
+    intent = %{
+      intent_id: intent_id,
+      target_agent_id: @target,
+      kind: :guarded_restore,
+      fingerprint: fp,
+      phase: :worker_running,
+      owner_pid: owner,
+      worker_pid: owner,
+      operation_id: "op_1",
+      restore_token: token,
+      effect_handoff?: true
+    }
+
+    request = %{
+      reason: :unexpected_owner_down,
+      kind: :guarded_restore,
+      target: @target,
+      intent_id: intent_id,
+      fingerprint: fp,
+      operation_id: "op_1",
+      restore_token: token,
+      monitored_owner_pid: owner
+    }
+
+    assert IntentCore.observe_request_current?(intent, request)
+
+    # Stale after intent_id / fingerprint / token change
+    refute IntentCore.observe_request_current?(
+             %{intent | intent_id: "rai_" <> String.duplicate("b", 22)},
+             request
+           )
+
+    refute IntentCore.observe_request_current?(%{intent | fingerprint: fp <> "x"}, request)
+    refute IntentCore.observe_request_current?(%{intent | restore_token: token <> "x"}, request)
+
+    # Stale after owner rebound to a different pid
+    refute IntentCore.observe_request_current?(
+             %{intent | owner_pid: spawn(fn -> :ok end)},
+             request
+           )
   end
 
   test "rebind_owners accepts a fully valid unique inventory" do
@@ -642,7 +701,11 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentCoreTest do
 
     assert IntentCore.classify_start_child_error(:max_children) == :max_children
     assert IntentCore.classify_start_child_error({:already_started, self()}) == :already_started
-    assert IntentCore.redact_error_reason(String.duplicate("x", 100)) |> String.length() <= 64
+    # Closed atom set only — never binary prefixes (secret material).
+    assert IntentCore.redact_error_reason(String.duplicate("x", 100)) == :error
+    assert IntentCore.redact_error_reason(:timeout) == :timeout
+    assert IntentCore.redact_error_reason({:witness_mismatch, "rrt_secret"}) == :witness_mismatch
+    assert IntentCore.redact_error_reason({:unknown_tag, "leak"}) == :error
   end
 
   test "classify_live_down never parks" do

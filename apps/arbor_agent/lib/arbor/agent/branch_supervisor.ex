@@ -43,7 +43,11 @@ defmodule Arbor.Agent.BranchSupervisor do
   @spec start_link(keyword()) :: Supervisor.on_start()
   def start_link(opts) do
     agent_id = Keyword.fetch!(opts, :agent_id)
-    witness = Keyword.get(opts, :ordinary_admission_witness)
+
+    witness =
+      Keyword.get(opts, :admission_witness) ||
+        Keyword.get(opts, :ordinary_admission_witness)
+
     name = via(agent_id, witness)
     Supervisor.start_link(__MODULE__, opts, name: name)
   end
@@ -53,30 +57,74 @@ defmodule Arbor.Agent.BranchSupervisor do
   """
   @spec whereis(String.t()) :: pid() | nil
   def whereis(agent_id) do
-    case Registry.lookup(Arbor.Agent.ExecutorRegistry, {:branch, agent_id}) do
-      [{pid, _}] -> pid
-      [] -> nil
+    case observe_admission(agent_id) do
+      {:running, pid, _} -> pid
+      :not_running -> nil
     end
   end
 
   @doc """
+  Atomic admission observation: Registry PID + normalized closed witness from
+  **one** `Registry.lookup/2`. Never splits witness/whereis across two reads.
+
+  Returns:
+  - `{:running, pid, {:ok, witness_map}}` — closed ordinary or guarded witness
+  - `{:running, pid, :none}` — running branch with bare/invalid/mismatched value
+  - `:not_running` — no Registry entry
+  """
+  @spec observe_admission(String.t()) ::
+          {:running, pid(), {:ok, map()} | :none} | :not_running
+  def observe_admission(agent_id) when is_binary(agent_id) do
+    case Registry.lookup(Arbor.Agent.ExecutorRegistry, {:branch, agent_id}) do
+      [{pid, value}] when is_pid(pid) ->
+        case normalize_witness_value(value) do
+          %{v: 1, kind: kind} = w when kind in [:ordinary_start, :guarded_restore] ->
+            {:running, pid, {:ok, w}}
+
+          _ ->
+            {:running, pid, :none}
+        end
+
+      [] ->
+        :not_running
+
+      _ ->
+        :not_running
+    end
+  end
+
+  def observe_admission(_), do: :not_running
+
+  @doc """
+  Read the admission witness from the BranchSupervisor Registry value.
+
+  BranchSupervisor is a Supervisor — do not GenServer.call it. Uses the atomic
+  `observe_admission/1` facade (single Registry lookup).
+  """
+  @spec admission_witness(String.t()) ::
+          {:ok, map()} | :none | :not_running
+  def admission_witness(agent_id) when is_binary(agent_id) do
+    case observe_admission(agent_id) do
+      {:running, _pid, {:ok, w}} -> {:ok, w}
+      {:running, _pid, :none} -> :none
+      :not_running -> :not_running
+    end
+  end
+
+  def admission_witness(_), do: :not_running
+
+  @doc """
   Read the ordinary-admission witness from the BranchSupervisor Registry value.
 
-  BranchSupervisor is a Supervisor — do not GenServer.call it. The witness is
-  the registration value on `{:branch, agent_id}` in ExecutorRegistry.
+  Filters to `:ordinary_start` only (C3C1a0 compatibility).
   """
   @spec ordinary_admission_witness(String.t()) ::
           {:ok, map()} | :none | :not_running
   def ordinary_admission_witness(agent_id) when is_binary(agent_id) do
-    case Registry.lookup(Arbor.Agent.ExecutorRegistry, {:branch, agent_id}) do
-      [{_pid, %{v: 1, kind: :ordinary_start, intent_id: id} = w}] when is_binary(id) ->
-        {:ok, w}
-
-      [{_pid, _other}] ->
-        :none
-
-      [] ->
-        :not_running
+    case admission_witness(agent_id) do
+      {:ok, %{kind: :ordinary_start} = w} -> {:ok, w}
+      {:ok, _} -> :none
+      other -> other
     end
   end
 
@@ -257,28 +305,71 @@ defmodule Arbor.Agent.BranchSupervisor do
     {:via, Registry, {Arbor.Agent.ExecutorRegistry, {:branch, agent_id}, value}}
   end
 
+  # Exact closed keysets — extras make the witness bare (nil), never exact.
+  @ordinary_witness_keys MapSet.new([:v, :kind, :intent_id, :fingerprint])
+  @max_witness_intent_id_bytes 32
+  @max_witness_fingerprint_bytes 67
+  @witness_intent_id_re ~r/\Arai_[A-Za-z0-9_-]{22}\z/
+  @witness_fingerprint_re ~r/\Afp_[0-9a-f]{64}\z/
+
   defp normalize_witness_value(%{v: 1, kind: :ordinary_start, intent_id: id} = w)
        when is_binary(id) do
-    # Bounded keys only — never bootstrap handles or full opts.
-    %{
-      v: 1,
-      kind: :ordinary_start,
-      intent_id: id,
-      fingerprint: Map.get(w, :fingerprint)
-    }
+    keys = w |> Map.keys() |> MapSet.new()
+    fp = Map.get(w, :fingerprint)
+
+    # Closed: require exact keyset {v, kind, intent_id, fingerprint}.
+    if MapSet.equal?(keys, @ordinary_witness_keys) and valid_ordinary_witness_scalars?(id, fp) do
+      %{
+        v: 1,
+        kind: :ordinary_start,
+        intent_id: id,
+        fingerprint: fp
+      }
+    else
+      nil
+    end
   end
 
   defp normalize_witness_value(%{"v" => 1, "kind" => "ordinary_start", "intent_id" => id} = w)
        when is_binary(id) do
-    %{
-      v: 1,
-      kind: :ordinary_start,
-      intent_id: id,
-      fingerprint: Map.get(w, "fingerprint")
-    }
+    string_keys = w |> Map.keys() |> MapSet.new()
+    allowed = MapSet.new(["v", "kind", "intent_id", "fingerprint"])
+
+    if MapSet.equal?(string_keys, allowed) do
+      normalize_witness_value(%{
+        v: 1,
+        kind: :ordinary_start,
+        intent_id: id,
+        fingerprint: Map.get(w, "fingerprint")
+      })
+    else
+      nil
+    end
+  end
+
+  # Guarded: shared pure AdmissionWitness (atom exact or pure-string exact only).
+  defp normalize_witness_value(w) when is_map(w) do
+    case Map.get(w, :kind) || Map.get(w, "kind") do
+      kind when kind in [:guarded_restore, "guarded_restore"] ->
+        Arbor.Agent.RuntimeAdmission.AdmissionWitness.normalize_guarded(w)
+
+      _ ->
+        # Fall through only for non-guarded maps that didn't match ordinary clauses.
+        nil
+    end
   end
 
   defp normalize_witness_value(_), do: nil
+
+  defp valid_ordinary_witness_scalars?(id, fp)
+       when is_binary(id) and is_binary(fp) do
+    byte_size(id) <= @max_witness_intent_id_bytes and String.valid?(id) and
+      Regex.match?(@witness_intent_id_re, id) and
+      byte_size(fp) <= @max_witness_fingerprint_bytes and String.valid?(fp) and
+      Regex.match?(@witness_fingerprint_re, fp)
+  end
+
+  defp valid_ordinary_witness_scalars?(_, _), do: false
 end
 
 defmodule Arbor.Agent.BranchSupervisor.BootstrapCleanup do

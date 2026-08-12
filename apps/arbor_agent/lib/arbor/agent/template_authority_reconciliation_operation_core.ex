@@ -6,6 +6,7 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCore do
   # time, randomness, logging, process calls, or authority mutation.
 
   alias Arbor.Agent.ProfileAuthorityMutationCore
+  alias Arbor.Agent.RuntimeRestoreAdmissionClaimCore
   alias Arbor.Agent.TemplateAuthorityCapabilityProjection
   alias Arbor.Agent.TemplateAuthorityPolicy
 
@@ -84,6 +85,7 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCore do
                  "journal",
                  "terminal",
                  "fence_state",
+                 "runtime_restore_admission",
                  "created_at_unix_ms",
                  "updated_at_unix_ms"
                ])
@@ -229,6 +231,7 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCore do
           "installed" => false,
           "cleanup_acked" => false
         },
+        "runtime_restore_admission" => nil,
         "created_at_unix_ms" => created_at,
         "updated_at_unix_ms" => created_at
       }
@@ -246,6 +249,7 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCore do
   @spec admit(term()) :: {:ok, record()} | {:error, term()}
   def admit(record) when is_map(record) do
     with {:ok, record} <- normalize_string_keyed_map(record),
+         {:ok, record} <- normalize_restore_admission_field(record),
          :ok <- validate_record(record),
          :ok <- assert_json_clean(record) do
       {:ok, record}
@@ -1409,8 +1413,78 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationOperationCore do
          :ok <- validate_journal(record["journal"], record),
          :ok <- validate_reconciliation_required(record),
          :ok <- validate_retry(record["retry"], record),
-         :ok <- validate_terminal(record["terminal"], record) do
+         :ok <- validate_terminal(record["terminal"], record),
+         :ok <- validate_runtime_restore_admission(record) do
       validate_fence(record["fence_state"], record)
+    end
+  end
+
+  # Legacy durable rows may omit the field; treat as null without inventing claim state.
+  defp normalize_restore_admission_field(record) when is_map(record) do
+    {:ok, Map.put_new(record, "runtime_restore_admission", nil)}
+  end
+
+  # Standalone ClaimCore admission is insufficient: a non-null claim must bind
+  # the enclosing operation identity, same-operation fence owner, and
+  # runtime_restore phase/fence invariants for live (non-settled) claims.
+  defp validate_runtime_restore_admission(%{"runtime_restore_admission" => nil}), do: :ok
+
+  defp validate_runtime_restore_admission(%{"runtime_restore_admission" => claim} = record)
+       when is_map(claim) do
+    case RuntimeRestoreAdmissionClaimCore.admit_claim(claim) do
+      {:ok, nil} ->
+        :ok
+
+      {:ok, admitted} when is_map(admitted) ->
+        validate_claim_against_operation(record, admitted)
+
+      {:error, _} ->
+        error(:invalid_record)
+    end
+  end
+
+  defp validate_runtime_restore_admission(_), do: error(:invalid_record)
+
+  defp validate_claim_against_operation(record, claim) do
+    op_id = record["operation_id"]
+    target = record["target_agent_id"]
+    fence = record["fence_state"]
+
+    # Every non-null claim (including settled) is only admissible on a reachable
+    # active runtime_restore operation with required installed uncleared fence
+    # owned by the same operation. Settled claims must still clear before phase
+    # advances past runtime_restore.
+    cond do
+      claim["operation_id"] != op_id ->
+        error(:invalid_record)
+
+      claim["target_agent_id"] != target ->
+        error(:invalid_record)
+
+      # Same-operation fence owner: claim fence id is exactly the operation id.
+      claim["fence_operation_id"] != op_id ->
+        error(:invalid_record)
+
+      record["phase"] != "runtime_restore" ->
+        error(:invalid_record)
+
+      record["status"] != "active" ->
+        error(:invalid_record)
+
+      not is_map(fence) ->
+        error(:invalid_record)
+
+      fence["installed"] != true ->
+        error(:invalid_record)
+
+      fence["cleanup_acked"] != false ->
+        error(:invalid_record)
+
+      fence["required"] != true ->
+        error(:invalid_record)
+
+      true ->
+        :ok
     end
   end
 

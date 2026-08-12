@@ -131,8 +131,30 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   @runtime_admission_waiter_reply_grace_ms 500
   # Versioned one-time waiter-map migration (not scanned on every event).
   @runtime_admission_waiter_schema_v 1
+  # Closed dual-inventory reconcile result schema (owners + durable claims).
+  # Legacy owner-only {:ok, owners} is rejected — hot upgrade / stale workers
+  # must not mark ready without a validated claim inventory.
+  @runtime_admission_reconcile_result_v 1
+
+  @runtime_admission_reconcile_result_keys MapSet.new([
+                                             :v,
+                                             :ref,
+                                             :attempt,
+                                             :worker_pid,
+                                             :owners,
+                                             :claims
+                                           ])
   # Owner retirement barrier: escalate :shutdown → :kill; never finalize on timer.
   @default_runtime_admission_settle_timeout_ms 500
+  @default_runtime_admission_observe_timeout_ms 2_000
+  # Pre-handoff durable-claim join observer (fixed supervised recovery op).
+  @default_runtime_admission_claim_join_timeout_ms 2_000
+  @max_runtime_admission_claim_join_attempts 4
+  # Unified durable mark/settle shell (fixed supervised recovery op).
+  # Attempt is threaded through launcher + retry — never reset to 1 on failure.
+  @default_runtime_admission_durable_op_timeout_ms 5_000
+  @max_runtime_admission_durable_shell_launch_attempts 4
+  @runtime_admission_durable_shell_launch_base_backoff_ms 50
   @runtime_admission_launcher_collision_retries 8
   @runtime_admission_launcher_collision_sleep_ms 25
   @runtime_admission_launcher_max_attempts 8
@@ -142,6 +164,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   alias Arbor.Agent.Orchestration.{TaskArtifacts, TaskControlLease, TaskInventoryProjection}
   alias Arbor.Agent.RuntimeAdmission.IntentCore
   alias Arbor.Agent.RuntimeAdmission.IntentOwner
+  alias Arbor.Agent.RuntimeAdmission.OperationLauncher
   alias Arbor.Agent.RuntimeAdmission.Supervisor, as: RuntimeAdmissionSupervisor
   alias Arbor.Agent.RuntimeAdmission.WaiterCore
 
@@ -322,6 +345,9 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   Same `(target, operation_id)` is idempotent and re-observes counts. A
   different `operation_id` fails `:target_fenced` without changing the owner.
   Fails `:fence_not_ready` while the startup fence seed has not completed.
+  Fails `:runtime_admission_not_ready` while runtime-admission/claim inventory
+  has not completed — both must be ready so barrier counts include surviving
+  intents and fences are not installed/removed against incomplete inventory.
   """
   @spec install_target_fence(String.t(), String.t(), keyword() | map()) ::
           {:ok, %{active_count: non_neg_integer(), reserved_count: non_neg_integer()}}
@@ -339,7 +365,9 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   Requires the exact `target_agent_id` and `operation_id` that installed it.
   A different owner fails `:target_fenced`; a missing fence fails
   `:not_found`. Fails `:fence_not_ready` while the startup seed has not
-  completed.
+  completed, and `:runtime_admission_not_ready` while claim/owner inventory
+  is incomplete. Same-operation removal while a non-idle guarded restore
+  intent holds the target fails `:fence_held_by_restore`.
   """
   @spec remove_target_fence(String.t(), String.t(), keyword() | map()) ::
           :ok | {:error, term()}
@@ -390,6 +418,50 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
       store_name(opts),
       {:admit_ordinary_runtime_start, target_agent_id, fingerprint, validated_opts, wait_ms},
       call_timeout
+    )
+  end
+
+  @doc """
+  Admit or join a guarded runtime-restore intent and await settlement.
+
+  Linearization point with ordinary admit and target fences. Requires the exact
+  ready fence owned by `operation_id`. No lifecycle I/O in this callback.
+  """
+  @spec admit_guarded_runtime_restore(
+          String.t(),
+          String.t(),
+          String.t(),
+          keyword() | map()
+        ) :: {:ok, pid()} | {:error, term()}
+  def admit_guarded_runtime_restore(target_agent_id, operation_id, restore_token, opts \\ [])
+      when is_binary(target_agent_id) and is_binary(operation_id) and is_binary(restore_token) do
+    wait_ms = runtime_admission_waiter_deadline_ms(opts)
+    call_timeout = wait_ms + @runtime_admission_waiter_reply_grace_ms
+
+    GenServer.call(
+      store_name(opts),
+      {:admit_guarded_runtime_restore, target_agent_id, operation_id, restore_token, wait_ms},
+      call_timeout
+    )
+  end
+
+  @doc """
+  Source-authenticated effect-handoff ack for guarded restore.
+
+  Must be called by the bound IntentOwner after durable intent bind and worker
+  bind, and **before** releasing the worker gate. Sets `effect_handoff?`.
+  """
+  @spec ack_guarded_restore_effect_handoff(
+          String.t(),
+          String.t(),
+          String.t(),
+          keyword() | map()
+        ) :: :ok | {:error, term()}
+  def ack_guarded_restore_effect_handoff(target_agent_id, intent_id, fingerprint, opts \\ [])
+      when is_binary(target_agent_id) and is_binary(intent_id) and is_binary(fingerprint) do
+    GenServer.call(
+      store_name(opts),
+      {:ack_guarded_restore_effect_handoff, target_agent_id, intent_id, fingerprint}
     )
   end
 
@@ -850,8 +922,26 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
       runtime_admission_owner_monitors: %{},
       runtime_admission_worker_monitors: %{},
       runtime_admission_launcher_monitors: %{},
+      runtime_admission_operation_launches: %{},
+      runtime_admission_operation_launcher_monitors: %{},
       runtime_admission_pending_opts: %{},
       runtime_admission_settle_timers: %{},
+      # Pending async witness observations / durable mark shells (ref => meta).
+      runtime_admission_pending_observe: %{},
+      runtime_admission_observe_monitors: %{},
+      runtime_admission_pending_durable_mark: %{},
+      runtime_admission_durable_mark_monitors: %{},
+      # target => %{intent_id, token, status, attempt, last_error} — no secrets in logs/status.
+      runtime_admission_durable_mark_progress: %{},
+      runtime_admission_pending_durable_settle: %{},
+      runtime_admission_durable_settle_monitors: %{},
+      runtime_admission_durable_settle_progress: %{},
+      # intent_id => settlement reply deferred until durable reobservation
+      runtime_admission_deferred_waiter_reply: %{},
+      # Pre-handoff claim-join recovery: ref=>meta (pid/mon/timer), mon=>ref, target progress.
+      runtime_admission_pending_claim_join: %{},
+      runtime_admission_claim_join_monitors: %{},
+      runtime_admission_claim_join_progress: %{},
       runtime_admission_reconcile: %{status: :pending},
       max_runtime_admission_waiters: normalize_max_runtime_admission_waiters(opts),
       max_runtime_admission_intents:
@@ -873,6 +963,24 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
           opts,
           :runtime_admission_reconcile_timeout_ms,
           @default_runtime_admission_reconcile_timeout_ms
+        ),
+      runtime_admission_observe_timeout_ms:
+        Keyword.get(
+          opts,
+          :runtime_admission_observe_timeout_ms,
+          @default_runtime_admission_observe_timeout_ms
+        ),
+      runtime_admission_claim_join_timeout_ms:
+        Keyword.get(
+          opts,
+          :runtime_admission_claim_join_timeout_ms,
+          @default_runtime_admission_claim_join_timeout_ms
+        ),
+      runtime_admission_durable_op_timeout_ms:
+        Keyword.get(
+          opts,
+          :runtime_admission_durable_op_timeout_ms,
+          @default_runtime_admission_durable_op_timeout_ms
         ),
       runner: Keyword.get(opts, :runner, @default_runner),
       # When true, store-level `:runner` overrides kind-based Config selection.
@@ -1062,6 +1170,75 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     end
   end
 
+  # OTP inspection / crash reports must never expose restore_token, fingerprint
+  # (including prefixes), operation/durable Record identity, PIDs, refs,
+  # capabilities, callbacks, or private claim payloads (C3C1a1 no-secret-status).
+  # Fail closed on every input shape — never return the original status unchanged
+  # (OTP may otherwise fall back to raw crash state with secrets).
+  @impl true
+  def format_status(status) do
+    try do
+      case status do
+        %{state: state} when is_map(state) ->
+          status
+          |> Map.put(:state, project_public_status(state))
+          |> Map.put(:message, :redacted)
+          |> Map.put(:log, :redacted)
+          |> Map.put(:reason, :redacted)
+          |> drop_unknown_status_fields()
+
+        _ ->
+          closed_redacted_status()
+      end
+    rescue
+      _ -> closed_redacted_status()
+    catch
+      kind, _ when kind in [:exit, :throw, :error] -> closed_redacted_status()
+    end
+  end
+
+  defp closed_redacted_status do
+    %{
+      state: closed_public_status_skeleton(),
+      message: :redacted,
+      log: :redacted,
+      reason: :redacted
+    }
+  end
+
+  defp drop_unknown_status_fields(status) when is_map(status) do
+    Map.take(status, [:state, :message, :log, :reason])
+  end
+
+  defp drop_unknown_status_fields(_), do: closed_redacted_status()
+
+  defp closed_public_status_skeleton do
+    %{
+      runtime_admission: %{
+        ready?: false,
+        intent_count: 0,
+        waiter_count: 0,
+        phase_counts: %{},
+        kind_counts: %{},
+        pending_observe_count: 0,
+        pending_durable_mark_count: 0,
+        durable_mark_progress_count: 0,
+        pending_claim_join_count: 0,
+        claim_join_progress_count: 0,
+        owner_monitor_count: 0,
+        worker_monitor_count: 0,
+        launcher_monitor_count: 0,
+        operation_launcher_count: 0,
+        settle_timer_count: 0,
+        pending_opts_count: 0,
+        pending_durable_settle_count: 0
+      },
+      fence: %{ready?: false, fence_count: 0},
+      recovery: %{ready?: false},
+      tasks: %{count: 0}
+    }
+  end
+
   @impl true
   def handle_call(:recovery_ready?, _from, state) do
     state = ensure_recovery_shape(state)
@@ -1197,10 +1374,17 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
         state
       ) do
     state = ensure_fence_shape(state)
+    state = ensure_runtime_admission_shape(state)
 
+    # Fail closed until BOTH fence seed and runtime-admission/claim inventory
+    # are ready — otherwise barrier counts undercount surviving intents and a
+    # fence can be installed before durable guarded claims are materialized.
     cond do
       state.target_fence_ready? != true ->
         {:reply, {:error, :fence_not_ready}, state}
+
+      state.runtime_admission_ready? != true ->
+        {:reply, {:error, :runtime_admission_not_ready}, state}
 
       true ->
         with {:ok, target} <- validate_fence_target(target_agent_id),
@@ -1228,18 +1412,27 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
         state
       ) do
     state = ensure_fence_shape(state)
+    state = ensure_runtime_admission_shape(state)
 
     cond do
       state.target_fence_ready? != true ->
         {:reply, {:error, :fence_not_ready}, state}
+
+      state.runtime_admission_ready? != true ->
+        {:reply, {:error, :runtime_admission_not_ready}, state}
 
       true ->
         with {:ok, target} <- validate_fence_target(target_agent_id),
              {:ok, op} <- validate_fence_operation_id(operation_id) do
           case Map.get(state.target_fences, target) do
             ^op ->
-              state = put_in(state, [:target_fences], Map.delete(state.target_fences, target))
-              {:reply, :ok, state}
+              if fence_held_by_restore?(state, target) do
+                # Live intent OR durable mark/settle/join convergence outstanding.
+                {:reply, {:error, :fence_held_by_restore}, state}
+              else
+                state = put_in(state, [:target_fences], Map.delete(state.target_fences, target))
+                {:reply, :ok, state}
+              end
 
             nil ->
               {:reply, {:error, :not_found}, state}
@@ -1329,6 +1522,60 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
       from,
       state
     )
+  end
+
+  def handle_call(
+        {:admit_guarded_runtime_restore, target_agent_id, operation_id, restore_token, wait_ms},
+        from,
+        state
+      ) do
+    state = ensure_fence_shape(state)
+    state = ensure_runtime_admission_shape(state)
+    wait_ms = clamp_runtime_admission_waiter_deadline_ms(wait_ms)
+
+    case validate_fence_target(target_agent_id) do
+      {:ok, target} ->
+        do_admit_guarded_runtime_restore(
+          state,
+          target,
+          operation_id,
+          restore_token,
+          from,
+          wait_ms
+        )
+
+      {:error, _} = error ->
+        {:reply, error, state}
+    end
+  end
+
+  def handle_call(
+        {:ack_guarded_restore_effect_handoff, target_agent_id, intent_id, fingerprint},
+        {caller_pid, _tag},
+        state
+      )
+      when is_pid(caller_pid) do
+    state = ensure_runtime_admission_shape(state)
+
+    case validate_fence_target(target_agent_id) do
+      {:ok, target} ->
+        case IntentCore.ack_effect_handoff(
+               state.runtime_admission_intents,
+               target,
+               intent_id,
+               fingerprint,
+               caller_pid
+             ) do
+          {:ok, intents} ->
+            {:reply, :ok, put_in(state, [:runtime_admission_intents], intents)}
+
+          {:error, reason} ->
+            {:reply, {:error, reason}, state}
+        end
+
+      {:error, _} = error ->
+        {:reply, error, state}
+    end
   end
 
   def handle_call(
@@ -1498,6 +1745,9 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
 
     case validate_fence_target(target_agent_id) do
       {:ok, target} ->
+        # Snapshot identity before settle may finalize/delete the intent row.
+        pre_intent = Map.get(state.runtime_admission_intents, target)
+
         case authorize_and_settle_runtime_admission(
                state,
                target,
@@ -1506,6 +1756,17 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
                caller_pid
              ) do
           {:ok, new_state} ->
+            # W9: close crash-after-accept / before-durable-settle. Fixed shell
+            # converges durable claim from source-auth terminal + exact branch
+            # observation; does not depend on the worker surviving.
+            new_state =
+              maybe_launch_guarded_durable_settle_after_accept(
+                new_state,
+                pre_intent,
+                intent_id,
+                outcome
+              )
+
             {:reply, :ok, new_state}
 
           {:error, reason, new_state} ->
@@ -2068,6 +2329,138 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     {:noreply, handle_runtime_admission_waiter_timeout(state, deadline_token)}
   end
 
+  def handle_info(
+        {:runtime_admission_operation_admitted, launch_ref, operation_ref, worker_pid},
+        state
+      )
+      when is_reference(launch_ref) and is_reference(operation_ref) and is_pid(worker_pid) do
+    state = ensure_runtime_admission_shape(state)
+
+    {:noreply,
+     handle_runtime_admission_operation_admitted(
+       state,
+       launch_ref,
+       operation_ref,
+       worker_pid
+     )}
+  end
+
+  def handle_info(
+        {:runtime_admission_operation_launch_failed, launch_ref, operation_ref, reason},
+        state
+      )
+      when is_reference(launch_ref) and is_reference(operation_ref) and is_atom(reason) do
+    state = ensure_runtime_admission_shape(state)
+
+    {:noreply,
+     handle_runtime_admission_operation_launch_failed(
+       state,
+       launch_ref,
+       operation_ref,
+       reason
+     )}
+  end
+
+  def handle_info({:runtime_admission_operation_launch_timeout, launch_ref}, state)
+      when is_reference(launch_ref) do
+    state = ensure_runtime_admission_shape(state)
+    {:noreply, handle_runtime_admission_operation_launch_timeout(state, launch_ref)}
+  end
+
+  def handle_info({:runtime_admission_witness_observed, observe_ref, observation}, state)
+      when is_reference(observe_ref) and is_map(observation) do
+    state = ensure_runtime_admission_shape(state)
+    {:noreply, handle_runtime_admission_witness_observed(state, observe_ref, observation)}
+  end
+
+  def handle_info({:runtime_admission_witness_observe_timeout, observe_ref}, state)
+      when is_reference(observe_ref) do
+    state = ensure_runtime_admission_shape(state)
+    {:noreply, handle_runtime_admission_witness_observe_timeout(state, observe_ref)}
+  end
+
+  def handle_info({:runtime_admission_durable_mark_done, mark_ref, result}, state)
+      when is_reference(mark_ref) do
+    state = ensure_runtime_admission_shape(state)
+    {:noreply, handle_runtime_admission_durable_mark_done(state, mark_ref, result)}
+  end
+
+  def handle_info({:runtime_admission_durable_mark_timeout, mark_ref}, state)
+      when is_reference(mark_ref) do
+    state = ensure_runtime_admission_shape(state)
+    {:noreply, handle_runtime_admission_durable_mark_timeout(state, mark_ref)}
+  end
+
+  def handle_info({:runtime_admission_durable_settle_done, settle_ref, result}, state)
+      when is_reference(settle_ref) do
+    state = ensure_runtime_admission_shape(state)
+    {:noreply, handle_runtime_admission_durable_settle_done(state, settle_ref, result)}
+  end
+
+  def handle_info({:runtime_admission_durable_settle_timeout, settle_ref}, state)
+      when is_reference(settle_ref) do
+    state = ensure_runtime_admission_shape(state)
+    {:noreply, handle_runtime_admission_durable_settle_timeout(state, settle_ref)}
+  end
+
+  def handle_info({:runtime_admission_claim_joined, join_ref, result}, state)
+      when is_reference(join_ref) and is_map(result) do
+    state = ensure_runtime_admission_shape(state)
+    {:noreply, handle_runtime_admission_claim_joined(state, join_ref, result)}
+  end
+
+  # Legacy atom-only complete (stale workers / hot upgrade) — inert fail-closed.
+  def handle_info({:runtime_admission_claim_joined, join_ref, _classification}, state)
+      when is_reference(join_ref) do
+    {:noreply, state}
+  end
+
+  def handle_info({:runtime_admission_claim_join_timeout, join_ref}, state)
+      when is_reference(join_ref) do
+    state = ensure_runtime_admission_shape(state)
+    {:noreply, handle_runtime_admission_claim_join_timeout(state, join_ref)}
+  end
+
+  def handle_info({:runtime_admission_claim_join_retry, request, attempt}, state)
+      when is_map(request) and is_integer(attempt) and attempt >= 0 do
+    state = ensure_runtime_admission_shape(state)
+
+    if claim_join_retry_current?(state, request, attempt) do
+      {:noreply, launch_durable_claim_join_observer(state, request, attempt)}
+    else
+      {:noreply, state}
+    end
+  end
+
+  def handle_info(
+        {:runtime_admission_durable_mark_retry, target, token, intent_id, attempt},
+        state
+      )
+      when is_binary(target) and is_binary(token) and is_binary(intent_id) and is_integer(attempt) do
+    state = ensure_runtime_admission_shape(state)
+
+    if durable_mark_retry_current?(state, target, token, intent_id, attempt) do
+      {:ok, intent} = current_durable_mark_intent(state, target, token, intent_id)
+      {:noreply, launch_durable_mark_outcome_unknown(state, intent, attempt)}
+    else
+      {:noreply, state}
+    end
+  end
+
+  def handle_info(
+        {:runtime_admission_durable_settle_retry, request, attempt},
+        state
+      )
+      when is_map(request) and is_integer(attempt) do
+    state = ensure_runtime_admission_shape(state)
+
+    if durable_settle_retry_current?(state, request, attempt) do
+      {:noreply, launch_guarded_durable_settle_shell(state, request, attempt)}
+    else
+      {:noreply, state}
+    end
+  end
+
   def handle_info(:retry_recovery_replay_msg, state) do
     state = ensure_recovery_shape(state)
 
@@ -2306,6 +2699,66 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
         {:runtime_admission, {:launcher, intent_id, target, launch_ref}}
 
       nil ->
+        classify_runtime_admission_operation_launcher_monitor(state, ref)
+    end
+  end
+
+  defp classify_runtime_admission_operation_launcher_monitor(state, ref) do
+    launch_mons = Map.get(state, :runtime_admission_operation_launcher_monitors, %{})
+
+    case Map.get(launch_mons, ref) do
+      launch_ref when is_reference(launch_ref) ->
+        {:runtime_admission, {:operation_launcher, launch_ref}}
+
+      nil ->
+        classify_runtime_admission_observe_monitor(state, ref)
+    end
+  end
+
+  defp classify_runtime_admission_observe_monitor(state, ref) do
+    observe_mons = Map.get(state, :runtime_admission_observe_monitors, %{})
+
+    case Map.get(observe_mons, ref) do
+      observe_ref when is_reference(observe_ref) ->
+        {:runtime_admission, {:observe, observe_ref}}
+
+      nil ->
+        classify_runtime_admission_durable_mark_monitor(state, ref)
+    end
+  end
+
+  defp classify_runtime_admission_durable_mark_monitor(state, ref) do
+    mark_mons = Map.get(state, :runtime_admission_durable_mark_monitors, %{})
+
+    case Map.get(mark_mons, ref) do
+      mark_ref when is_reference(mark_ref) ->
+        {:runtime_admission, {:durable_mark, mark_ref}}
+
+      nil ->
+        classify_runtime_admission_claim_join_monitor(state, ref)
+    end
+  end
+
+  defp classify_runtime_admission_claim_join_monitor(state, ref) do
+    join_mons = Map.get(state, :runtime_admission_claim_join_monitors, %{})
+
+    case Map.get(join_mons, ref) do
+      join_ref when is_reference(join_ref) ->
+        {:runtime_admission, {:claim_join, join_ref}}
+
+      nil ->
+        classify_runtime_admission_durable_settle_monitor(state, ref)
+    end
+  end
+
+  defp classify_runtime_admission_durable_settle_monitor(state, ref) do
+    settle_mons = Map.get(state, :runtime_admission_durable_settle_monitors, %{})
+
+    case Map.get(settle_mons, ref) do
+      settle_ref when is_reference(settle_ref) ->
+        {:runtime_admission, {:durable_settle, settle_ref}}
+
+      nil ->
         case find_runtime_admission_reconcile_monitor(state, ref) do
           {:launcher, rec} -> {:runtime_admission, {:reconcile_launcher, rec}}
           {:worker, rec} -> {:runtime_admission, {:reconcile_worker, rec}}
@@ -2337,6 +2790,21 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
 
       {:launcher, intent_id, target, launch_ref} ->
         handle_runtime_admission_launcher_down(state, ref, intent_id, target, launch_ref)
+
+      {:operation_launcher, launch_ref} ->
+        handle_runtime_admission_operation_launcher_down(state, ref, launch_ref)
+
+      {:observe, observe_ref} ->
+        handle_runtime_admission_observe_monitor_down(state, ref, observe_ref)
+
+      {:durable_mark, mark_ref} ->
+        handle_runtime_admission_durable_mark_monitor_down(state, ref, mark_ref)
+
+      {:claim_join, join_ref} ->
+        handle_runtime_admission_claim_join_monitor_down(state, ref, join_ref)
+
+      {:durable_settle, settle_ref} ->
+        handle_runtime_admission_durable_settle_monitor_down(state, ref, settle_ref)
 
       {:reconcile_launcher, rec} ->
         handle_runtime_admission_reconcile_launcher_down(state, rec)
@@ -4570,6 +5038,103 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     |> Map.put_new(:fence_seed_worker_timeout_ms, @default_fence_seed_worker_timeout_ms)
   end
 
+  # Closed bounded OTP status projection — counts/readiness/phases only.
+  # Never includes token, fingerprint, operation_id, PIDs, refs, or claim data.
+  # Non-raising: malformed pending fields become zero counts; only allowlisted
+  # phase/kind atoms are projected.
+  @status_allowed_phases MapSet.new([
+                           :admitted,
+                           :owner_launching,
+                           :owner_live,
+                           :worker_running,
+                           :outcome_unknown,
+                           :settling,
+                           :terminal,
+                           :unknown
+                         ])
+  @status_allowed_kinds MapSet.new([:ordinary_start, :guarded_restore, :unknown])
+
+  defp project_public_status(state) when is_map(state) do
+    intents = safe_map(Map.get(state, :runtime_admission_intents))
+    waiters = safe_map(Map.get(state, :runtime_admission_waiters))
+    fences = safe_map(Map.get(state, :target_fences))
+    tasks = safe_map(Map.get(state, :tasks))
+
+    {phase_counts, kind_counts} =
+      Enum.reduce(Map.values(intents), {%{}, %{}}, fn intent, {phases, kinds} ->
+        if is_map(intent) do
+          phase = allow_status_phase(Map.get(intent, :phase))
+          kind = allow_status_kind(Map.get(intent, :kind))
+
+          {
+            Map.update(phases, phase, 1, &(&1 + 1)),
+            Map.update(kinds, kind, 1, &(&1 + 1))
+          }
+        else
+          {phases, kinds}
+        end
+      end)
+
+    %{
+      runtime_admission: %{
+        ready?: Map.get(state, :runtime_admission_ready?) == true,
+        intent_count: safe_map_size(intents),
+        waiter_count: safe_map_size(waiters),
+        phase_counts: phase_counts,
+        kind_counts: kind_counts,
+        pending_observe_count: safe_map_size(Map.get(state, :runtime_admission_pending_observe)),
+        pending_durable_mark_count:
+          safe_map_size(Map.get(state, :runtime_admission_pending_durable_mark)),
+        durable_mark_progress_count:
+          safe_map_size(Map.get(state, :runtime_admission_durable_mark_progress)),
+        pending_claim_join_count:
+          safe_map_size(Map.get(state, :runtime_admission_pending_claim_join)),
+        claim_join_progress_count:
+          safe_map_size(Map.get(state, :runtime_admission_claim_join_progress)),
+        owner_monitor_count: safe_map_size(Map.get(state, :runtime_admission_owner_monitors)),
+        worker_monitor_count: safe_map_size(Map.get(state, :runtime_admission_worker_monitors)),
+        launcher_monitor_count:
+          safe_map_size(Map.get(state, :runtime_admission_launcher_monitors)),
+        operation_launcher_count:
+          safe_map_size(Map.get(state, :runtime_admission_operation_launches)),
+        settle_timer_count: safe_map_size(Map.get(state, :runtime_admission_settle_timers)),
+        pending_opts_count: safe_map_size(Map.get(state, :runtime_admission_pending_opts)),
+        pending_durable_settle_count:
+          safe_map_size(Map.get(state, :runtime_admission_pending_durable_settle))
+      },
+      fence: %{
+        ready?: Map.get(state, :target_fence_ready?) == true,
+        fence_count: safe_map_size(fences)
+      },
+      recovery: %{
+        ready?: Map.get(state, :recovery_ready?) == true
+      },
+      tasks: %{
+        count: safe_map_size(tasks)
+      }
+    }
+  end
+
+  defp project_public_status(_), do: closed_public_status_skeleton()
+
+  defp safe_map(m) when is_map(m), do: m
+  defp safe_map(_), do: %{}
+
+  defp safe_map_size(m) when is_map(m), do: map_size(m)
+  defp safe_map_size(_), do: 0
+
+  defp allow_status_phase(phase) when is_atom(phase) do
+    if MapSet.member?(@status_allowed_phases, phase), do: phase, else: :unknown
+  end
+
+  defp allow_status_phase(_), do: :unknown
+
+  defp allow_status_kind(kind) when is_atom(kind) do
+    if MapSet.member?(@status_allowed_kinds, kind), do: kind, else: :unknown
+  end
+
+  defp allow_status_kind(_), do: :unknown
+
   defp ensure_runtime_admission_shape(state) do
     state =
       state
@@ -4586,8 +5151,22 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
       |> Map.put_new(:runtime_admission_owner_monitors, %{})
       |> Map.put_new(:runtime_admission_worker_monitors, %{})
       |> Map.put_new(:runtime_admission_launcher_monitors, %{})
+      |> Map.put_new(:runtime_admission_operation_launches, %{})
+      |> Map.put_new(:runtime_admission_operation_launcher_monitors, %{})
       |> Map.put_new(:runtime_admission_pending_opts, %{})
       |> Map.put_new(:runtime_admission_settle_timers, %{})
+      |> Map.put_new(:runtime_admission_pending_observe, %{})
+      |> Map.put_new(:runtime_admission_observe_monitors, %{})
+      |> Map.put_new(:runtime_admission_pending_durable_mark, %{})
+      |> Map.put_new(:runtime_admission_durable_mark_monitors, %{})
+      |> Map.put_new(:runtime_admission_durable_mark_progress, %{})
+      |> Map.put_new(:runtime_admission_pending_durable_settle, %{})
+      |> Map.put_new(:runtime_admission_durable_settle_monitors, %{})
+      |> Map.put_new(:runtime_admission_durable_settle_progress, %{})
+      |> Map.put_new(:runtime_admission_deferred_waiter_reply, %{})
+      |> Map.put_new(:runtime_admission_pending_claim_join, %{})
+      |> Map.put_new(:runtime_admission_claim_join_monitors, %{})
+      |> Map.put_new(:runtime_admission_claim_join_progress, %{})
       |> Map.put_new(:runtime_admission_reconcile, %{status: :pending})
       |> Map.put_new(
         :max_runtime_admission_waiters,
@@ -4605,6 +5184,18 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
       |> Map.put_new(
         :runtime_admission_reconcile_timeout_ms,
         @default_runtime_admission_reconcile_timeout_ms
+      )
+      |> Map.put_new(
+        :runtime_admission_observe_timeout_ms,
+        @default_runtime_admission_observe_timeout_ms
+      )
+      |> Map.put_new(
+        :runtime_admission_claim_join_timeout_ms,
+        @default_runtime_admission_claim_join_timeout_ms
+      )
+      |> Map.put_new(
+        :runtime_admission_durable_op_timeout_ms,
+        @default_runtime_admission_durable_op_timeout_ms
       )
 
     state =
@@ -4745,7 +5336,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
             state =
               Enum.reduce(effects, state, fn
                 {:launch_owner, launched}, acc ->
-                  launch_runtime_admission_owner(acc, launched, validated_opts)
+                  launch_runtime_admission_owner(acc, launched, {:ordinary_start, validated_opts})
 
                 _, acc ->
                   acc
@@ -4761,6 +5352,166 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
       {:error, reason} ->
         {:reply, {:error, reason}, state}
     end
+  end
+
+  # Guarded admit scalars: bound before any hash/admission work.
+  @max_guarded_operation_id_bytes 128
+  @max_guarded_token_bytes 32
+  @guarded_operation_id_re ~r/\A[A-Za-z0-9][A-Za-z0-9._-]*\z/
+  @guarded_token_re ~r/\Arrt_[A-Za-z0-9_-]{22}\z/
+
+  defp do_admit_guarded_runtime_restore(
+         state,
+         target,
+         operation_id,
+         restore_token,
+         from,
+         wait_ms
+       ) do
+    with :ok <- validate_guarded_admit_scalars(target, operation_id, restore_token) do
+      intent_count = runtime_admission_unresolved_target_count(state)
+      max = Map.get(state, :max_runtime_admission_intents, @default_max_runtime_admission_intents)
+
+      # Join first by exact operation+token — do NOT mint intent_id/fingerprint yet.
+      case IntentCore.decide_guarded_admit(
+             state.runtime_admission_intents,
+             state.target_fences,
+             state.target_fence_ready? == true,
+             state.runtime_admission_ready? == true,
+             target,
+             operation_id,
+             restore_token
+           ) do
+        {:ok, :joined, intent} ->
+          case accept_runtime_admission_waiter(state, intent.intent_id, from, wait_ms) do
+            {:ok, state} ->
+              {:noreply, state}
+
+            {:error, :runtime_admission_waiters_full, state} ->
+              {:reply, {:error, :runtime_admission_waiters_full}, state}
+          end
+
+        {:ok, :fresh} ->
+          # Mint identity only for a fresh slot.
+          intent_id = mint_runtime_admission_intent_id()
+
+          fingerprint =
+            Arbor.Agent.RuntimeRestoreAdmissionClaimCore.fingerprint(
+              operation_id,
+              target,
+              operation_id,
+              restore_token,
+              intent_id
+            )
+
+          case IntentCore.admit_guarded_fresh(
+                 state.runtime_admission_intents,
+                 target,
+                 operation_id,
+                 restore_token,
+                 fingerprint,
+                 intent_id,
+                 intent_count,
+                 max
+               ) do
+            {:ok, :admitted, intent, intents, effects} ->
+              case accept_runtime_admission_waiter(state, intent.intent_id, from, wait_ms) do
+                {:ok, state} ->
+                  state =
+                    state
+                    |> put_in([:runtime_admission_intents], intents)
+                    |> put_in([:runtime_admission_by_id, intent.intent_id], target)
+
+                  payload =
+                    {:guarded_restore,
+                     %{
+                       operation_id: operation_id,
+                       restore_token: restore_token
+                     }}
+
+                  state =
+                    Enum.reduce(effects, state, fn
+                      {:launch_owner, launched}, acc ->
+                        launch_runtime_admission_owner(acc, launched, payload)
+
+                      _, acc ->
+                        acc
+                    end)
+
+                  {:noreply, state}
+
+                {:error, :runtime_admission_waiters_full, state} ->
+                  {:reply, {:error, :runtime_admission_waiters_full}, state}
+              end
+
+            {:error, reason} ->
+              {:reply, {:error, reason}, state}
+          end
+
+        {:error, reason} ->
+          {:reply, {:error, reason}, state}
+      end
+    else
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  defp validate_guarded_admit_scalars(target, operation_id, restore_token) do
+    cond do
+      not is_binary(target) or byte_size(target) == 0 or
+          byte_size(target) > @max_fence_agent_id_bytes ->
+        {:error, :invalid_target}
+
+      not is_binary(operation_id) or byte_size(operation_id) == 0 or
+          byte_size(operation_id) > @max_guarded_operation_id_bytes ->
+        {:error, :invalid_operation_id}
+
+      not String.valid?(operation_id) or not Regex.match?(@guarded_operation_id_re, operation_id) ->
+        {:error, :invalid_operation_id}
+
+      not is_binary(restore_token) or byte_size(restore_token) > @max_guarded_token_bytes ->
+        {:error, :invalid_restore_token}
+
+      not String.valid?(restore_token) or not Regex.match?(@guarded_token_re, restore_token) ->
+        {:error, :invalid_restore_token}
+
+      true ->
+        :ok
+    end
+  end
+
+  # Exhausted durable shells deliberately retain a fail-closed target hold.
+  # Count those dormant targets together with live intents before admitting a
+  # fresh guarded restore so retained recovery evidence cannot grow without
+  # bound across a stream of unique targets.
+  defp runtime_admission_unresolved_target_count(state) do
+    intent_targets = Map.keys(Map.get(state, :runtime_admission_intents, %{}))
+
+    progress_targets =
+      [
+        :runtime_admission_durable_mark_progress,
+        :runtime_admission_durable_settle_progress,
+        :runtime_admission_claim_join_progress
+      ]
+      |> Enum.flat_map(fn key ->
+        state
+        |> Map.get(key, %{})
+        |> Enum.flat_map(fn
+          {target, %{status: status}}
+          when is_binary(target) and
+                 status in [:pending, :launch_retry, :shell_error_retry, :retry, :exhausted] ->
+            [target]
+
+          _ ->
+            []
+        end)
+      end)
+
+    intent_targets
+    |> Kernel.++(progress_targets)
+    |> MapSet.new()
+    |> MapSet.size()
   end
 
   # Cap check BEFORE mon/timer allocation. Authority fields are store-minted only.
@@ -4935,7 +5686,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     "rai_" <> Base.url_encode64(:crypto.strong_rand_bytes(16), padding: false)
   end
 
-  defp launch_runtime_admission_owner(state, intent, validated_opts) do
+  defp launch_runtime_admission_owner(state, intent, payload) do
     target = intent.target_agent_id
     current = Map.get(state.runtime_admission_intents, target)
 
@@ -4947,14 +5698,14 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
         put_in(
           state,
           [:runtime_admission_pending_opts, intent.intent_id],
-          validated_opts
+          payload
         )
 
-      do_launch_runtime_admission_owner(state, intent, validated_opts, 1)
+      do_launch_runtime_admission_owner(state, intent, payload, 1)
     end
   end
 
-  defp do_launch_runtime_admission_owner(state, intent, validated_opts, attempt_index)
+  defp do_launch_runtime_admission_owner(state, intent, payload, attempt_index)
        when is_integer(attempt_index) and attempt_index > 0 do
     store_ref = Map.get(state, :store_ref, @default_name)
 
@@ -4981,7 +5732,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
             intent.intent_id,
             target,
             intent.fingerprint,
-            validated_opts
+            payload
           ])
 
         case IntentCore.attach_launcher(
@@ -5020,14 +5771,16 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
         intent_id,
         target,
         fingerprint,
-        validated_opts
+        payload
       )
       when is_reference(launch_ref) do
     start_opts = [
       intent_id: intent_id,
       target_agent_id: target,
       fingerprint: fingerprint,
-      validated_opts: validated_opts,
+      worker_payload: payload,
+      # Back-compat for ordinary path keyword name used by IntentOwner.
+      validated_opts: payload,
       store_ref: store_ref,
       task_supervisor: task_supervisor,
       launch_ref: launch_ref
@@ -5169,24 +5922,18 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
             # First terminal already accepted — idempotent success.
             {:ok, state}
 
-          {:ok, :ownerless_finalize, _intent, intents, _} ->
+          {:ok, :ownerless_finalize, intent, intents, _} ->
             state = put_in(state, [:runtime_admission_intents], intents)
+            # Route through immediate_finalize so guarded durable convergence +
+            # deferred waiter reply apply uniformly.
+            state =
+              immediate_finalize_runtime_admission(state, target, intent_id, :ownerless)
 
-            case pure_delete_runtime_admission_terminal(state, target, intent_id, :ownerless) do
-              {:ok, done, state} ->
-                reply = settlement_reply(Map.get(done, :terminal))
-
-                state =
-                  state
-                  |> detach_and_reply_runtime_admission_waiters(intent_id, reply)
-                  |> drop_settle_timer(intent_id)
-                  |> update_in([:runtime_admission_by_id], &Map.delete(&1, intent_id))
-                  |> flush_monitors_for_intent(intent_id)
-
-                {:ok, state}
-
-              {:error, reason, state} ->
-                {:error, reason, state}
+            # immediate_finalize always returns state; surface not_found if gone.
+            if is_map(intent) do
+              {:ok, state}
+            else
+              {:ok, state}
             end
 
           {:ok, :begin, _intent, intents, effects} ->
@@ -5281,29 +6028,156 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   end
 
   # Finalize only when the retirement barrier allows (ownerless or owner DOWN).
-  # Mutate pure intent map first; reply waiters only after successful delete.
+  # Mutate pure intent map first; reply waiters only after successful delete —
+  # and for guarded restore only after durable settlement is reobserved (or the
+  # deferred reply is released by the durable shell).
   # mode:
   #   {:await_owner_down, monitored_owner_pid}
   #   | :ownerless
   #   | {:commit_owner_gone, monitored_owner_pid, terminal}
   #   | {:commit, terminal}  # true ownerless (never had owner)
+  #   | {:commit_durable_observed, terminal}  # ownerless; durable already settled/absent
   defp immediate_finalize_runtime_admission(state, target, intent_id, mode) do
     state = ensure_runtime_admission_shape(state)
+    pre_intent = Map.get(state.runtime_admission_intents, target)
+    durable_already_observed? = match?({:commit_durable_observed, _}, mode)
 
     case pure_delete_runtime_admission_terminal(state, target, intent_id, mode) do
       {:ok, done, state} ->
         reply = settlement_reply(Map.get(done, :terminal))
+        terminal = Map.get(done, :terminal)
 
-        state
-        |> detach_and_reply_runtime_admission_waiters(intent_id, reply)
-        |> drop_settle_timer(intent_id)
-        |> update_in([:runtime_admission_by_id], &Map.delete(&1, intent_id))
-        |> flush_monitors_for_intent(intent_id)
+        state =
+          state
+          |> drop_settle_timer(intent_id)
+          |> update_in([:runtime_admission_by_id], &Map.delete(&1, intent_id))
+          |> flush_monitors_for_intent(intent_id)
+
+        # Launch durable convergence for every source-auth determinate guarded
+        # terminal when not already in flight (worker settle may have launched).
+        state =
+          if durable_already_observed? or
+               durable_convergence_outstanding?(state, target, intent_id) do
+            state
+          else
+            maybe_launch_guarded_durable_settle_after_accept(
+              state,
+              pre_intent,
+              intent_id,
+              terminal
+            )
+          end
+
+        if durable_convergence_outstanding?(state, target, intent_id) do
+          # Defer waiter success until durable reobservation; fence held by progress.
+          put_in(
+            state,
+            [:runtime_admission_deferred_waiter_reply, intent_id],
+            %{reply: reply, target: target, intent_id: intent_id}
+          )
+        else
+          detach_and_reply_runtime_admission_waiters(state, intent_id, reply)
+        end
 
       {:error, _reason, state} ->
         # Fail closed: no waiter reply, no force-delete, retain authority.
         state
     end
+  end
+
+  # Fence remains held while a non-idle guarded intent exists OR while durable
+  # mark/settle/join convergence for the target is outstanding (including
+  # exhausted blocking evidence). Closes the retire-before-durable gap.
+  defp fence_held_by_restore?(state, target) when is_binary(target) do
+    IntentCore.non_idle_guarded_restore?(state.runtime_admission_intents, target) or
+      durable_op_holds_target?(state, target)
+  end
+
+  defp durable_op_holds_target?(state, target) when is_binary(target) do
+    settle_pending? =
+      state
+      |> Map.get(:runtime_admission_pending_durable_settle, %{})
+      |> Map.values()
+      |> Enum.any?(fn
+        %{target: ^target} -> true
+        %{request: %{target: ^target}} -> true
+        meta when is_map(meta) -> Map.get(meta, :target) == target
+        _ -> false
+      end)
+
+    mark_pending? =
+      state
+      |> Map.get(:runtime_admission_pending_durable_mark, %{})
+      |> Map.values()
+      |> Enum.any?(fn
+        %{target: ^target} -> true
+        _ -> false
+      end)
+
+    join_pending? =
+      state
+      |> Map.get(:runtime_admission_pending_claim_join, %{})
+      |> Map.values()
+      |> Enum.any?(fn
+        %{target: ^target} -> true
+        _ -> false
+      end)
+
+    settle_progress_hold? =
+      case Map.get(Map.get(state, :runtime_admission_durable_settle_progress, %{}), target) do
+        %{status: status}
+        when status in [:pending, :launch_retry, :shell_error_retry, :exhausted] ->
+          true
+
+        _ ->
+          false
+      end
+
+    mark_progress_hold? =
+      case Map.get(Map.get(state, :runtime_admission_durable_mark_progress, %{}), target) do
+        %{status: status}
+        when status in [:pending, :launch_retry, :shell_error_retry, :exhausted] ->
+          true
+
+        _ ->
+          false
+      end
+
+    join_progress_hold? =
+      case Map.get(Map.get(state, :runtime_admission_claim_join_progress, %{}), target) do
+        %{status: status} when status in [:pending, :retry, :launch_retry, :exhausted] ->
+          true
+
+        _ ->
+          false
+      end
+
+    settle_pending? or mark_pending? or join_pending? or settle_progress_hold? or
+      mark_progress_hold? or join_progress_hold?
+  end
+
+  defp durable_convergence_outstanding?(state, target, intent_id)
+       when is_binary(target) and is_binary(intent_id) do
+    settle_pending? =
+      state
+      |> Map.get(:runtime_admission_pending_durable_settle, %{})
+      |> Map.values()
+      |> Enum.any?(fn meta ->
+        is_map(meta) and Map.get(meta, :target) == target and
+          Map.get(meta, :intent_id) == intent_id
+      end)
+
+    settle_progress? =
+      case Map.get(Map.get(state, :runtime_admission_durable_settle_progress, %{}), target) do
+        %{intent_id: ^intent_id, status: status}
+        when status in [:pending, :launch_retry, :shell_error_retry, :exhausted] ->
+          true
+
+        _ ->
+          false
+      end
+
+    settle_pending? or settle_progress?
   end
 
   # Pure commit+delete. Never replies. Never Map.delete without core success.
@@ -5362,8 +6236,53 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
       match?({:commit, _}, mode) ->
         {:commit, terminal} = mode
 
-        case IntentCore.begin_settling(intents, target, intent_id, terminal) do
-          {:ok, :ownerless_finalize, _intent, mid, _} ->
+        commit_ownerless_runtime_admission_terminal(state, intents, target, intent_id, terminal)
+
+      match?({:commit_durable_observed, _}, mode) ->
+        {:commit_durable_observed, terminal} = mode
+
+        commit_ownerless_runtime_admission_terminal(state, intents, target, intent_id, terminal)
+
+      true ->
+        {:error, :invalid_finalize_mode, state}
+    end
+  end
+
+  defp commit_ownerless_runtime_admission_terminal(
+         state,
+         intents,
+         target,
+         intent_id,
+         terminal
+       ) do
+    case IntentCore.begin_settling(intents, target, intent_id, terminal) do
+      {:ok, :ownerless_finalize, _intent, mid, _} ->
+        case IntentCore.finalize_ownerless(mid, target, intent_id) do
+          {:ok, done, new_intents} ->
+            {:ok, done, put_in(state, [:runtime_admission_intents], new_intents)}
+
+          {:error, reason} ->
+            {:error, reason, state}
+        end
+
+      {:ok, :already_settling, already, mid, _} ->
+        cond do
+          Map.get(already, :retire_barrier) == :await_owner_down and
+              is_pid(Map.get(already, :owner_pid)) ->
+            case IntentCore.finalize_settled(
+                   mid,
+                   target,
+                   intent_id,
+                   already.owner_pid
+                 ) do
+              {:ok, done, new_intents} ->
+                {:ok, done, put_in(state, [:runtime_admission_intents], new_intents)}
+
+              {:error, reason} ->
+                {:error, reason, state}
+            end
+
+          not is_pid(Map.get(already, :owner_pid)) ->
             case IntentCore.finalize_ownerless(mid, target, intent_id) do
               {:ok, done, new_intents} ->
                 {:ok, done, put_in(state, [:runtime_admission_intents], new_intents)}
@@ -5372,54 +6291,35 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
                 {:error, reason, state}
             end
 
-          {:ok, :already_settling, already, mid, _} ->
-            cond do
-              Map.get(already, :retire_barrier) == :await_owner_down and
-                  is_pid(Map.get(already, :owner_pid)) ->
-                case IntentCore.finalize_settled(
-                       mid,
-                       target,
-                       intent_id,
-                       already.owner_pid
-                     ) do
-                  {:ok, done, new_intents} ->
-                    {:ok, done, put_in(state, [:runtime_admission_intents], new_intents)}
-
-                  {:error, reason} ->
-                    {:error, reason, state}
-                end
-
-              not is_pid(Map.get(already, :owner_pid)) ->
-                case IntentCore.finalize_ownerless(mid, target, intent_id) do
-                  {:ok, done, new_intents} ->
-                    {:ok, done, put_in(state, [:runtime_admission_intents], new_intents)}
-
-                  {:error, reason} ->
-                    {:error, reason, state}
-                end
-
-              true ->
-                {:error, :owner_barrier_outstanding, state}
-            end
-
-          {:ok, :begin, _intent, _mid, _effects} ->
-            # Live owner barrier still outstanding — fail closed without mutating
-            # or replying. Caller must use request_runtime_admission_terminal.
+          true ->
             {:error, :owner_barrier_outstanding, state}
-
-          {:error, reason} ->
-            {:error, reason, state}
         end
 
-      true ->
-        {:error, :invalid_finalize_mode, state}
+      {:ok, :begin, _intent, _mid, _effects} ->
+        # Live owner barrier still outstanding — fail closed without mutating
+        # or replying. Caller must use request_runtime_admission_terminal.
+        {:error, :owner_barrier_outstanding, state}
+
+      {:error, reason} ->
+        {:error, reason, state}
     end
   end
 
   defp settlement_reply({:applied, pid}) when is_pid(pid), do: {:ok, pid}
-  defp settlement_reply({:error, reason}), do: {:error, reason}
-  defp settlement_reply({:conflict, reason}), do: {:error, {:conflict, reason}}
-  defp settlement_reply(other), do: {:error, other}
+
+  defp settlement_reply({:error, reason}),
+    do: {:error, bounded_source_terminal_reason(reason)}
+
+  defp settlement_reply({:conflict, reason}),
+    do: {:error, {:conflict, bounded_source_terminal_reason(reason)}}
+
+  defp settlement_reply(other), do: {:error, IntentCore.redact_error_reason(other)}
+
+  # Exact source-authenticated atom terminals are already bounded VM values and
+  # are part of the existing waiter contract. Structured or textual details can
+  # carry secrets and still pass through the closed redactor.
+  defp bounded_source_terminal_reason(reason) when is_atom(reason), do: reason
+  defp bounded_source_terminal_reason(reason), do: IntentCore.redact_error_reason(reason)
 
   defp flush_monitors_for_intent(state, intent_id) do
     owner_mons = Map.get(state, :runtime_admission_owner_monitors, %{})
@@ -5613,13 +6513,13 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
         attempt = Map.get(intent, :launcher_attempt_index, 1)
 
         if attempt < @runtime_admission_launcher_max_attempts do
-          validated_opts = Map.get(state.runtime_admission_pending_opts, intent_id)
+          payload = Map.get(state.runtime_admission_pending_opts, intent_id)
 
-          if is_list(validated_opts) do
+          if valid_owner_payload?(payload) do
             do_launch_runtime_admission_owner(
               state,
               intent,
-              validated_opts,
+              payload,
               attempt + 1
             )
           else
@@ -5648,6 +6548,12 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
       {:error, _, s} -> s
     end
   end
+
+  defp valid_owner_payload?({:ordinary_start, opts}) when is_list(opts), do: true
+  defp valid_owner_payload?({:guarded_restore, map}) when is_map(map), do: true
+  # Legacy ordinary path stored bare keyword lists.
+  defp valid_owner_payload?(opts) when is_list(opts), do: true
+  defp valid_owner_payload?(_), do: false
 
   defp handle_runtime_admission_owner_down(state, mon, intent_id, target, monitored_owner_pid)
        when is_pid(monitored_owner_pid) do
@@ -5681,48 +6587,69 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
 
   defp handle_unexpected_owner_down(state, target, intent, monitored_owner_pid)
        when is_pid(monitored_owner_pid) do
+    # Registry/branch observation is I/O — fixed async observer only.
+    enqueue_runtime_admission_witness_observe(state, %{
+      reason: :unexpected_owner_down,
+      source: :owner,
+      target: target,
+      intent_id: intent.intent_id,
+      fingerprint: intent.fingerprint,
+      kind: Map.get(intent, :kind, :ordinary_start),
+      operation_id: Map.get(intent, :operation_id),
+      restore_token: Map.get(intent, :restore_token),
+      effect_handoff?: Map.get(intent, :effect_handoff?) == true,
+      monitored_owner_pid: monitored_owner_pid
+    })
+  end
+
+  defp park_guarded_outcome_unknown(state, target, intent, monitored_owner_pid) do
     intent_id = intent.intent_id
-    fact = witness_fact(target, intent_id)
 
-    case IntentCore.classify_unknown_start(intent_id, fact) do
-      :applied ->
-        case Arbor.Agent.BranchSupervisor.whereis(target) do
-          pid when is_pid(pid) ->
-            immediate_finalize_runtime_admission(
-              state,
-              target,
-              intent_id,
-              {:commit_owner_gone, monitored_owner_pid, {:applied, pid}}
-            )
+    state =
+      case IntentCore.note_owner_gone_await_worker(
+             state.runtime_admission_intents,
+             target,
+             intent_id,
+             monitored_owner_pid
+           ) do
+        {:ok, _updated, intents, effects} ->
+          state
+          |> put_in([:runtime_admission_intents], intents)
+          |> apply_runtime_admission_effects(effects)
 
-          _ ->
-            maybe_await_worker_or_finalize(
-              state,
-              target,
-              intent,
-              monitored_owner_pid,
-              {:error, :branch_missing_after_witness}
-            )
-        end
+        {:ok, :already_awaiting, _intent, intents, effects} ->
+          state
+          |> put_in([:runtime_admission_intents], intents)
+          |> apply_runtime_admission_effects(effects)
 
-      :conflict ->
-        maybe_await_worker_or_finalize(
-          state,
-          target,
-          intent,
-          monitored_owner_pid,
-          {:conflict, :witness_mismatch}
-        )
+        {:error, :already_settling} ->
+          state
 
-      :not_applied ->
-        maybe_await_worker_or_finalize(
-          state,
-          target,
-          intent,
-          monitored_owner_pid,
-          {:error, :owner_down}
-        )
-    end
+        {:error, _} ->
+          updated = %{
+            intent
+            | phase: :outcome_unknown,
+              owner_pid: nil,
+              retire_barrier: :none,
+              effect_handoff?: true
+          }
+
+          put_in(state, [:runtime_admission_intents, target], updated)
+      end
+
+    # Drive dedicated durable mark outside the callback (retry/reobserve).
+    launch_durable_mark_outcome_unknown(state, intent)
+  end
+
+  defp apply_runtime_admission_effects(state, effects) when is_list(effects) do
+    Enum.reduce(effects, state, fn
+      {:kill_worker, pid}, acc when is_pid(pid) ->
+        if Process.alive?(pid), do: Process.exit(pid, :kill)
+        acc
+
+      _, acc ->
+        acc
+    end)
   end
 
   defp maybe_await_worker_or_finalize(
@@ -5823,50 +6750,3096 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   end
 
   defp finalize_from_worker_down_classify(state, target, intent, source) do
-    intent_id = intent.intent_id
-    fact = witness_fact(target, intent_id)
+    # Registry/branch observation is I/O — fixed async observer only.
+    enqueue_runtime_admission_witness_observe(state, %{
+      reason: :worker_down_classify,
+      source: source,
+      target: target,
+      intent_id: intent.intent_id,
+      fingerprint: intent.fingerprint,
+      kind: Map.get(intent, :kind, :ordinary_start),
+      operation_id: Map.get(intent, :operation_id),
+      restore_token: Map.get(intent, :restore_token),
+      effect_handoff?: Map.get(intent, :effect_handoff?) == true,
+      worker_pid: Map.get(intent, :worker_pid),
+      owner_pid: Map.get(intent, :owner_pid),
+      retire_barrier: Map.get(intent, :retire_barrier, :none)
+    })
+  end
 
-    branch_pid =
-      case fact do
-        {:exact, ^intent_id} ->
-          case Arbor.Agent.BranchSupervisor.whereis(target) do
-            pid when is_pid(pid) -> pid
-            _ -> nil
-          end
+  # Task.Supervisor.start_child/5 is a synchronous supervisor call. Every
+  # recovery operation therefore enters through this fixed launcher handshake;
+  # TaskStore never waits on a potentially suspended supervisor. The admitted
+  # worker stays pre-effect until TaskStore has armed its monitor and timeout.
+  defp begin_runtime_admission_operation_launch(state, kind, operation_ref, worker_mfa)
+       when kind in [:witness_observe, :durable_mark, :durable_settle, :claim_join] and
+              is_reference(operation_ref) do
+    launch_ref = make_ref()
+    store_ref = Map.get(state, :store_ref, @default_name)
+    task_supervisor = Map.get(state, :task_supervisor, @default_task_supervisor)
 
-        _ ->
-          nil
-      end
+    admit_timeout =
+      Map.get(
+        state,
+        :runtime_admission_admit_timeout_ms,
+        @default_runtime_admission_admit_timeout_ms
+      )
 
-    {:settle, terminal} =
-      IntentCore.classify_live_down(intent_id, fact, source, branch_pid)
+    begin_wait_ms = admit_timeout + 1_000
 
-    if is_pid(Map.get(intent, :owner_pid)) and
-         Map.get(intent, :retire_barrier) != :await_worker_down do
-      case request_runtime_admission_terminal(
-             state,
-             target,
-             intent_id,
-             terminal,
-             :worker_down
-           ) do
-        {:ok, s} -> s
-        {:error, _, s} -> s
-      end
-    else
-      # Owner already gone or never present — commit terminal then ownerless delete.
-      immediate_finalize_runtime_admission(state, target, intent_id, {:commit, terminal})
+    timer =
+      Process.send_after(
+        self(),
+        {:runtime_admission_operation_launch_timeout, launch_ref},
+        admit_timeout
+      )
+
+    {launcher_pid, launcher_mon} =
+      spawn_monitor(OperationLauncher, :launch, [
+        store_ref,
+        launch_ref,
+        operation_ref,
+        task_supervisor,
+        worker_mfa,
+        begin_wait_ms
+      ])
+
+    entry = %{
+      kind: kind,
+      operation_ref: operation_ref,
+      launcher_pid: launcher_pid,
+      launcher_mon: launcher_mon,
+      timer: timer
+    }
+
+    state =
+      state
+      |> put_in([:runtime_admission_operation_launches, launch_ref], entry)
+      |> put_in([:runtime_admission_operation_launcher_monitors, launcher_mon], launch_ref)
+
+    {state, launch_ref}
+  end
+
+  defp handle_runtime_admission_operation_admitted(
+         state,
+         launch_ref,
+         operation_ref,
+         worker_pid
+       ) do
+    launches = Map.get(state, :runtime_admission_operation_launches, %{})
+
+    case Map.get(launches, launch_ref) do
+      %{operation_ref: ^operation_ref, kind: kind} = entry ->
+        state = clear_runtime_admission_operation_launcher(state, launch_ref, entry, false)
+
+        case admit_runtime_admission_operation_worker(
+               state,
+               kind,
+               operation_ref,
+               launch_ref,
+               worker_pid
+             ) do
+          {:ok, admitted_state} ->
+            send(worker_pid, {:runtime_admission_operation_begin, launch_ref})
+            admitted_state
+
+          :stale ->
+            if Process.alive?(worker_pid), do: Process.exit(worker_pid, :kill)
+            state
+        end
+
+      _ ->
+        # The launch timed out or was superseded. The worker is still blocked,
+        # but kill it eagerly rather than waiting for its begin deadline.
+        if Process.alive?(worker_pid), do: Process.exit(worker_pid, :kill)
+        state
     end
   end
 
-  defp witness_fact(target, intent_id) do
-    case Arbor.Agent.BranchSupervisor.ordinary_admission_witness(target) do
-      {:ok, %{intent_id: ^intent_id}} -> {:exact, intent_id}
-      {:ok, %{intent_id: other}} when is_binary(other) -> {:other, other}
-      :none -> :bare
-      :not_running -> :not_running
-      _ -> :bare
+  defp handle_runtime_admission_operation_launch_failed(
+         state,
+         launch_ref,
+         operation_ref,
+         reason
+       ) do
+    launches = Map.get(state, :runtime_admission_operation_launches, %{})
+
+    case Map.get(launches, launch_ref) do
+      %{operation_ref: ^operation_ref, kind: kind} = entry ->
+        state = clear_runtime_admission_operation_launcher(state, launch_ref, entry, true)
+        fail_runtime_admission_operation_launch(state, kind, operation_ref, launch_ref, reason)
+
+      _ ->
+        state
     end
+  end
+
+  defp handle_runtime_admission_operation_launch_timeout(state, launch_ref) do
+    launches = Map.get(state, :runtime_admission_operation_launches, %{})
+
+    case Map.get(launches, launch_ref) do
+      %{kind: kind, operation_ref: operation_ref} = entry ->
+        state = clear_runtime_admission_operation_launcher(state, launch_ref, entry, true)
+
+        fail_runtime_admission_operation_launch(
+          state,
+          kind,
+          operation_ref,
+          launch_ref,
+          :admission_timeout
+        )
+
+      _ ->
+        state
+    end
+  end
+
+  defp handle_runtime_admission_operation_launcher_down(state, mon, launch_ref) do
+    launch_mons = Map.get(state, :runtime_admission_operation_launcher_monitors, %{})
+    launches = Map.get(state, :runtime_admission_operation_launches, %{})
+
+    case {Map.get(launch_mons, mon), Map.get(launches, launch_ref)} do
+      {^launch_ref, %{kind: kind, operation_ref: operation_ref} = entry} ->
+        state = clear_runtime_admission_operation_launcher(state, launch_ref, entry, false)
+
+        fail_runtime_admission_operation_launch(
+          state,
+          kind,
+          operation_ref,
+          launch_ref,
+          :launcher_down
+        )
+
+      _ ->
+        state
+    end
+  end
+
+  defp clear_runtime_admission_operation_launcher(state, launch_ref, entry, terminate?) do
+    case Map.get(entry, :timer) do
+      timer when is_reference(timer) -> Process.cancel_timer(timer)
+      _ -> :ok
+    end
+
+    mon = Map.get(entry, :launcher_mon)
+    if is_reference(mon), do: Process.demonitor(mon, [:flush])
+
+    launcher_pid = Map.get(entry, :launcher_pid)
+
+    if terminate? and is_pid(launcher_pid) and Process.alive?(launcher_pid) do
+      Process.exit(launcher_pid, :kill)
+    end
+
+    state
+    |> update_in([:runtime_admission_operation_launches], &Map.delete(&1, launch_ref))
+    |> update_in([:runtime_admission_operation_launcher_monitors], &Map.delete(&1, mon))
+  end
+
+  defp admit_runtime_admission_operation_worker(
+         state,
+         :witness_observe,
+         observe_ref,
+         launch_ref,
+         worker_pid
+       ) do
+    case pending_runtime_admission_operation(
+           state,
+           :runtime_admission_pending_observe,
+           observe_ref,
+           launch_ref
+         ) do
+      {:ok, meta} ->
+        {:ok,
+         track_witness_observer(
+           state,
+           observe_ref,
+           meta.request,
+           worker_pid,
+           launch_ref
+         )}
+
+      :stale ->
+        :stale
+    end
+  end
+
+  defp admit_runtime_admission_operation_worker(
+         state,
+         :durable_mark,
+         mark_ref,
+         launch_ref,
+         worker_pid
+       ) do
+    case pending_runtime_admission_operation(
+           state,
+           :runtime_admission_pending_durable_mark,
+           mark_ref,
+           launch_ref
+         ) do
+      {:ok, meta} ->
+        {:ok, track_durable_mark_worker(state, mark_ref, meta, worker_pid, launch_ref)}
+
+      :stale ->
+        :stale
+    end
+  end
+
+  defp admit_runtime_admission_operation_worker(
+         state,
+         :durable_settle,
+         settle_ref,
+         launch_ref,
+         worker_pid
+       ) do
+    case pending_runtime_admission_operation(
+           state,
+           :runtime_admission_pending_durable_settle,
+           settle_ref,
+           launch_ref
+         ) do
+      {:ok, meta} ->
+        {:ok,
+         track_durable_settle_observer(
+           state,
+           settle_ref,
+           meta.request,
+           worker_pid,
+           meta.launch_attempt,
+           launch_ref
+         )}
+
+      :stale ->
+        :stale
+    end
+  end
+
+  defp admit_runtime_admission_operation_worker(
+         state,
+         :claim_join,
+         join_ref,
+         launch_ref,
+         worker_pid
+       ) do
+    case pending_runtime_admission_operation(
+           state,
+           :runtime_admission_pending_claim_join,
+           join_ref,
+           launch_ref
+         ) do
+      {:ok, meta} ->
+        {:ok,
+         track_claim_join_observer(
+           state,
+           join_ref,
+           meta.request,
+           worker_pid,
+           meta.attempt,
+           launch_ref
+         )}
+
+      :stale ->
+        :stale
+    end
+  end
+
+  defp pending_runtime_admission_operation(state, key, operation_ref, launch_ref) do
+    case Map.get(Map.get(state, key, %{}), operation_ref) do
+      %{status: :admitting, launch_ref: ^launch_ref} = meta -> {:ok, meta}
+      _ -> :stale
+    end
+  end
+
+  defp fail_runtime_admission_operation_launch(
+         state,
+         :witness_observe,
+         observe_ref,
+         launch_ref,
+         _reason
+       ) do
+    case take_admitting_runtime_operation(
+           state,
+           :runtime_admission_pending_observe,
+           observe_ref,
+           launch_ref
+         ) do
+      {:ok, meta, state} ->
+        apply_witness_observation(
+          state,
+          meta.request,
+          observe_failed_observation(:launch_failed)
+        )
+
+      :stale ->
+        state
+    end
+  end
+
+  defp fail_runtime_admission_operation_launch(
+         state,
+         :durable_mark,
+         mark_ref,
+         launch_ref,
+         reason
+       ) do
+    reason = operation_launch_reason(:durable_mark, reason)
+
+    case take_admitting_runtime_operation(
+           state,
+           :runtime_admission_pending_durable_mark,
+           mark_ref,
+           launch_ref
+         ) do
+      {:ok, meta, state} -> fail_durable_mark_launch(state, meta, reason)
+      :stale -> state
+    end
+  end
+
+  defp fail_runtime_admission_operation_launch(
+         state,
+         :durable_settle,
+         settle_ref,
+         launch_ref,
+         reason
+       ) do
+    reason = operation_launch_reason(:durable_settle, reason)
+
+    case take_admitting_runtime_operation(
+           state,
+           :runtime_admission_pending_durable_settle,
+           settle_ref,
+           launch_ref
+         ) do
+      {:ok, meta, state} -> fail_durable_settle_launch(state, meta, reason)
+      :stale -> state
+    end
+  end
+
+  defp fail_runtime_admission_operation_launch(
+         state,
+         :claim_join,
+         join_ref,
+         launch_ref,
+         reason
+       ) do
+    reason = operation_launch_reason(:claim_join, reason)
+
+    case take_admitting_runtime_operation(
+           state,
+           :runtime_admission_pending_claim_join,
+           join_ref,
+           launch_ref
+         ) do
+      {:ok, meta, state} -> retry_or_exhaust_claim_join(state, meta, reason)
+      :stale -> state
+    end
+  end
+
+  defp take_admitting_runtime_operation(state, key, operation_ref, launch_ref) do
+    pending = Map.get(state, key, %{})
+
+    case Map.get(pending, operation_ref) do
+      %{status: :admitting, launch_ref: ^launch_ref} = meta ->
+        {:ok, meta, put_in(state, [key], Map.delete(pending, operation_ref))}
+
+      _ ->
+        :stale
+    end
+  end
+
+  defp operation_launch_reason(:durable_mark, :supervisor_unavailable),
+    do: :durable_mark_supervisor_unavailable
+
+  defp operation_launch_reason(:durable_settle, :supervisor_unavailable),
+    do: :durable_settle_supervisor_unavailable
+
+  defp operation_launch_reason(:claim_join, :supervisor_unavailable),
+    do: :claim_join_supervisor_unavailable
+
+  defp operation_launch_reason(_kind, reason), do: reason
+
+  # ---------------------------------------------------------------------------
+  # Fixed async witness observer (I/O outside TaskStore callbacks)
+  #
+  # Fail-closed + bounded:
+  # - Launch/rescue/catch/malformed never synthesize :not_running (authority-bearing
+  #   absence). They emit :observe_failed — never proves absence or applied.
+  # - Each launched observer is monitored with a bounded timer; DOWN/timeout
+  #   converge so pending observations cannot hang forever.
+  # - Delayed facts revalidate exact intent identity before apply; stale → inert.
+  # - Branch observation uses BranchSupervisor.observe_admission/1 only (atomic
+  #   Registry PID + closed witness from one lookup).
+  # ---------------------------------------------------------------------------
+
+  defp enqueue_runtime_admission_witness_observe(state, request) when is_map(request) do
+    state = ensure_runtime_admission_shape(state)
+    observe_ref = make_ref()
+    store_ref = Map.get(state, :store_ref, @default_name)
+    closed_request = close_witness_observe_request(request)
+
+    worker_mfa =
+      {__MODULE__, :run_runtime_admission_witness_observer,
+       [store_ref, observe_ref, closed_request]}
+
+    {state, launch_ref} =
+      begin_runtime_admission_operation_launch(
+        state,
+        :witness_observe,
+        observe_ref,
+        worker_mfa
+      )
+
+    put_in(state, [:runtime_admission_pending_observe, observe_ref], %{
+      status: :admitting,
+      launch_ref: launch_ref,
+      request: closed_request
+    })
+  end
+
+  defp track_witness_observer(state, observe_ref, closed_request, observer_pid, launch_ref)
+       when is_reference(observe_ref) and is_pid(observer_pid) do
+    mon = Process.monitor(observer_pid)
+
+    timeout_ms =
+      Map.get(
+        state,
+        :runtime_admission_observe_timeout_ms,
+        @default_runtime_admission_observe_timeout_ms
+      )
+
+    timer =
+      Process.send_after(
+        self(),
+        {:runtime_admission_witness_observe_timeout, observe_ref},
+        timeout_ms
+      )
+
+    meta = %{
+      status: :running,
+      launch_ref: launch_ref,
+      request: closed_request,
+      mon: mon,
+      timer: timer,
+      observer_pid: observer_pid,
+      worker_pid: observer_pid
+    }
+
+    state
+    |> put_in([:runtime_admission_pending_observe, observe_ref], meta)
+    |> put_in([:runtime_admission_observe_monitors, mon], observe_ref)
+  end
+
+  defp close_witness_observe_request(request) do
+    %{
+      reason: Map.fetch!(request, :reason),
+      source: Map.get(request, :source, :owner),
+      target: Map.fetch!(request, :target),
+      intent_id: Map.fetch!(request, :intent_id),
+      fingerprint: Map.get(request, :fingerprint),
+      kind: Map.get(request, :kind, :ordinary_start),
+      operation_id: Map.get(request, :operation_id),
+      restore_token: Map.get(request, :restore_token),
+      effect_handoff?: Map.get(request, :effect_handoff?) == true,
+      monitored_owner_pid: Map.get(request, :monitored_owner_pid),
+      worker_pid: Map.get(request, :worker_pid),
+      owner_pid: Map.get(request, :owner_pid),
+      retire_barrier: Map.get(request, :retire_barrier, :none)
+    }
+  end
+
+  defp observe_failed_observation(reason) when is_atom(reason) do
+    %{fact: :observe_failed, reason: reason, branch_pid: nil}
+  end
+
+  @doc false
+  def run_runtime_admission_witness_observer(store_ref, observe_ref, request)
+      when is_reference(observe_ref) and is_map(request) do
+    # Deterministic MIX_ENV=test hang seam for timeout race coverage.
+    maybe_runtime_admission_observe_test_hang(request)
+
+    observation = Map.put(observe_admission_witness_fact(request), :worker_pid, self())
+
+    OperationLauncher.notify(
+      store_ref,
+      {:runtime_admission_witness_observed, observe_ref, observation}
+    )
+
+    :ok
+  rescue
+    _ ->
+      OperationLauncher.notify(
+        store_ref,
+        {:runtime_admission_witness_observed, observe_ref,
+         observe_failed_observation(:observer_exception) |> Map.put(:worker_pid, self())}
+      )
+
+      :ok
+  catch
+    :exit, _ ->
+      OperationLauncher.notify(
+        store_ref,
+        {:runtime_admission_witness_observed, observe_ref,
+         observe_failed_observation(:observer_exception) |> Map.put(:worker_pid, self())}
+      )
+
+      :ok
+  end
+
+  defp maybe_runtime_admission_observe_test_hang(request) do
+    case Application.get_env(:arbor_agent, :runtime_admission_observe_test_hang) do
+      %{timeout_ms: ms, target: target}
+      when is_integer(ms) and ms > 0 and is_binary(target) ->
+        if Map.get(request, :target) == target, do: Process.sleep(ms)
+
+      %{timeout_ms: ms} when is_integer(ms) and ms > 0 ->
+        Process.sleep(ms)
+
+      _ ->
+        :ok
+    end
+  end
+
+  # Fixed observer only — never called from GenServer callbacks.
+  # Single atomic BranchSupervisor.observe_admission/1 — no split whereis/witness.
+  defp observe_admission_witness_fact(
+         %{
+           kind: :guarded_restore,
+           target: target,
+           intent_id: intent_id,
+           fingerprint: fingerprint,
+           operation_id: operation_id,
+           restore_token: token
+         } = _request
+       )
+       when is_binary(target) and is_binary(intent_id) and is_binary(fingerprint) and
+              is_binary(operation_id) and is_binary(token) do
+    case Arbor.Agent.BranchSupervisor.observe_admission(target) do
+      {:running, pid,
+       {:ok,
+        %{
+          kind: :guarded_restore,
+          intent_id: ^intent_id,
+          fingerprint: ^fingerprint,
+          operation_id: ^operation_id,
+          token: ^token
+        }}}
+      when is_pid(pid) ->
+        %{fact: {:exact, intent_id}, branch_pid: pid}
+
+      {:running, _pid, {:ok, %{intent_id: other}}} when is_binary(other) ->
+        %{fact: {:other, other}, branch_pid: nil}
+
+      {:running, _pid, {:ok, _}} ->
+        %{fact: :bare, branch_pid: nil}
+
+      {:running, _pid, :none} ->
+        %{fact: :bare, branch_pid: nil}
+
+      :not_running ->
+        %{fact: :not_running, branch_pid: nil}
+    end
+  end
+
+  defp observe_admission_witness_fact(%{
+         target: target,
+         intent_id: intent_id,
+         fingerprint: fingerprint,
+         kind: :ordinary_start
+       })
+       when is_binary(target) and is_binary(intent_id) and is_binary(fingerprint) do
+    case Arbor.Agent.BranchSupervisor.observe_admission(target) do
+      {:running, pid,
+       {:ok, %{kind: :ordinary_start, intent_id: ^intent_id, fingerprint: ^fingerprint}}}
+      when is_pid(pid) ->
+        %{fact: {:exact, intent_id}, branch_pid: pid}
+
+      {:running, _pid, {:ok, %{intent_id: other}}} when is_binary(other) ->
+        %{fact: {:other, other}, branch_pid: nil}
+
+      {:running, _pid, {:ok, _}} ->
+        %{fact: :bare, branch_pid: nil}
+
+      {:running, _pid, :none} ->
+        %{fact: :bare, branch_pid: nil}
+
+      :not_running ->
+        %{fact: :not_running, branch_pid: nil}
+    end
+  end
+
+  defp observe_admission_witness_fact(_),
+    do: observe_failed_observation(:malformed_request)
+
+  defp handle_runtime_admission_witness_observed(state, observe_ref, observation) do
+    state = ensure_runtime_admission_shape(state)
+    pending = Map.get(state, :runtime_admission_pending_observe, %{})
+
+    case Map.get(pending, observe_ref) do
+      nil ->
+        # Stale/unknown observe ref (already timed out or never tracked) — inert.
+        state
+
+      meta when is_map(meta) ->
+        if witness_observation_authentic?(meta, observation) do
+          state =
+            state
+            |> put_in(
+              [:runtime_admission_pending_observe],
+              Map.delete(pending, observe_ref)
+            )
+            |> clear_witness_observer_tracking(meta)
+
+          request = Map.get(meta, :request, meta)
+          intent = Map.get(state.runtime_admission_intents, Map.get(request, :target))
+
+          if IntentCore.observe_request_current?(intent, request) do
+            apply_witness_observation(state, request, observation)
+          else
+            # Stale after state change — inert (caller already enqueued a fresh observe
+            # if the new identity still needs one).
+            state
+          end
+        else
+          # Wrong worker / forged observation must not clear the live operation.
+          state
+        end
+
+      _ ->
+        state
+    end
+  end
+
+  defp witness_observation_authentic?(meta, observation)
+       when is_map(meta) and is_map(observation) do
+    is_pid(Map.get(meta, :worker_pid)) and
+      Map.get(observation, :worker_pid) == Map.get(meta, :worker_pid) and
+      (Map.get(observation, :fact) == :not_running or
+         Map.get(observation, :fact) == :bare or
+         Map.get(observation, :fact) == :observe_failed or
+         match?({:exact, id} when is_binary(id), Map.get(observation, :fact)) or
+         match?({:other, id} when is_binary(id), Map.get(observation, :fact)))
+  end
+
+  defp witness_observation_authentic?(_, _), do: false
+
+  defp handle_runtime_admission_witness_observe_timeout(state, observe_ref)
+       when is_reference(observe_ref) do
+    state = ensure_runtime_admission_shape(state)
+    pending = Map.get(state, :runtime_admission_pending_observe, %{})
+
+    case Map.pop(pending, observe_ref) do
+      {nil, _} ->
+        state
+
+      {meta, rest} when is_map(meta) ->
+        state =
+          state
+          |> put_in([:runtime_admission_pending_observe], rest)
+          |> clear_witness_observer_tracking(meta)
+
+        # Best-effort kill hung observer so it cannot deliver a late fact later.
+        case Map.get(meta, :observer_pid) do
+          pid when is_pid(pid) ->
+            if Process.alive?(pid), do: Process.exit(pid, :kill)
+
+          _ ->
+            :ok
+        end
+
+        request = Map.get(meta, :request, meta)
+        intent = Map.get(state.runtime_admission_intents, Map.get(request, :target))
+
+        if IntentCore.observe_request_current?(intent, request) do
+          apply_witness_observation(
+            state,
+            request,
+            observe_failed_observation(:observer_timeout)
+          )
+        else
+          state
+        end
+
+      _ ->
+        state
+    end
+  end
+
+  defp handle_runtime_admission_observe_monitor_down(state, mon, observe_ref)
+       when is_reference(mon) and is_reference(observe_ref) do
+    state = ensure_runtime_admission_shape(state)
+    observe_mons = Map.get(state, :runtime_admission_observe_monitors, %{})
+    state = put_in(state, [:runtime_admission_observe_monitors], Map.delete(observe_mons, mon))
+
+    pending = Map.get(state, :runtime_admission_pending_observe, %{})
+
+    case Map.get(pending, observe_ref) do
+      %{mon: ^mon} = meta ->
+        # Observer exited before/without a delivered observation. Prefer the
+        # observation message if it races ahead; on pure crash with no message
+        # the bounded timer converges. Clear mon only — keep timer/pending.
+        updated = %{meta | mon: nil, observer_pid: nil}
+        put_in(state, [:runtime_admission_pending_observe, observe_ref], updated)
+
+      _ ->
+        # Observation or timeout already converged this ref.
+        state
+    end
+  end
+
+  defp clear_witness_observer_tracking(state, meta) when is_map(meta) do
+    state =
+      case Map.get(meta, :timer) do
+        timer when is_reference(timer) ->
+          _ = Process.cancel_timer(timer)
+          state
+
+        _ ->
+          state
+      end
+
+    state =
+      case Map.get(meta, :mon) do
+        mon when is_reference(mon) ->
+          Process.demonitor(mon, [:flush])
+          observe_mons = Map.get(state, :runtime_admission_observe_monitors, %{})
+          put_in(state, [:runtime_admission_observe_monitors], Map.delete(observe_mons, mon))
+
+        _ ->
+          state
+      end
+
+    state
+  end
+
+  defp apply_witness_observation(state, %{reason: :unexpected_owner_down} = request, observation) do
+    target = request.target
+    intent = Map.get(state.runtime_admission_intents, target)
+    fact = Map.get(observation, :fact, :observe_failed)
+    branch_pid = Map.get(observation, :branch_pid)
+    monitored_owner_pid = request.monitored_owner_pid
+
+    cond do
+      not IntentCore.observe_request_current?(intent, request) ->
+        state
+
+      true ->
+        case IntentCore.classify_unknown_start(request.intent_id, fact) do
+          :applied when is_pid(branch_pid) ->
+            immediate_finalize_runtime_admission(
+              state,
+              target,
+              request.intent_id,
+              {:commit_owner_gone, monitored_owner_pid, {:applied, branch_pid}}
+            )
+
+          :applied ->
+            maybe_await_worker_or_finalize(
+              state,
+              target,
+              intent,
+              monitored_owner_pid,
+              {:error, :branch_missing_after_witness}
+            )
+
+          :conflict ->
+            maybe_await_worker_or_finalize(
+              state,
+              target,
+              intent,
+              monitored_owner_pid,
+              {:conflict, :witness_mismatch}
+            )
+
+          :observation_failed ->
+            # Distinct failure class — never proves absence or applied.
+            apply_observation_failed_owner_down(state, request, intent, monitored_owner_pid)
+
+          :not_applied ->
+            cond do
+              request.kind == :guarded_restore and request.effect_handoff? == true ->
+                # Post-handoff: park unknown; never invent not_applied.
+                park_guarded_outcome_unknown(state, target, intent, monitored_owner_pid)
+
+              request.kind == :guarded_restore ->
+                # Crash after durable bind but before handoff ack: effect_handoff?
+                # false is NOT proof of pre-effect. Join durable claim outside
+                # the callback; bound → park/hold; minted+no witness → pre-effect.
+                enqueue_durable_claim_join(state, request, intent, monitored_owner_pid)
+
+              true ->
+                maybe_await_worker_or_finalize(
+                  state,
+                  target,
+                  intent,
+                  monitored_owner_pid,
+                  {:error, :owner_down}
+                )
+            end
+        end
+    end
+  end
+
+  defp apply_witness_observation(state, %{reason: :worker_down_classify} = request, observation) do
+    target = request.target
+    intent = Map.get(state.runtime_admission_intents, target)
+    fact = Map.get(observation, :fact, :observe_failed)
+    branch_pid = Map.get(observation, :branch_pid)
+    source = Map.get(request, :source, :worker)
+
+    cond do
+      not IntentCore.observe_request_current?(intent, request) ->
+        state
+
+      request.kind == :guarded_restore and request.effect_handoff? != true and
+        Map.get(intent, :phase) == :outcome_unknown and
+          is_nil(Map.get(intent, :owner_pid)) ->
+        # Owner-down convergence already parked this pre-handoff intent and
+        # launched a durable claim join. A concurrent worker DOWN observation
+        # cannot prove not-applied and must not settle ahead of that join.
+        updated = %{intent | worker_pid: nil, retire_barrier: :none}
+        put_in(state, [:runtime_admission_intents, target], updated)
+
+      # Observation failure and post-handoff non-exact never prove applied/absence.
+      request.kind == :guarded_restore and request.effect_handoff? == true and
+          fact != {:exact, request.intent_id} ->
+        updated = %{
+          intent
+          | phase: :outcome_unknown,
+            worker_pid: nil,
+            retire_barrier: :none,
+            effect_handoff?: true
+        }
+
+        state = put_in(state, [:runtime_admission_intents, target], updated)
+        launch_durable_mark_outcome_unknown(state, intent)
+
+      true ->
+        {:settle, terminal} =
+          IntentCore.classify_live_down(request.intent_id, fact, source, branch_pid)
+
+        if is_pid(Map.get(intent, :owner_pid)) and
+             Map.get(intent, :retire_barrier) != :await_worker_down do
+          case request_runtime_admission_terminal(
+                 state,
+                 target,
+                 request.intent_id,
+                 terminal,
+                 :worker_down
+               ) do
+            {:ok, s} -> s
+            {:error, _, s} -> s
+          end
+        else
+          immediate_finalize_runtime_admission(
+            state,
+            target,
+            request.intent_id,
+            {:commit, terminal}
+          )
+        end
+    end
+  end
+
+  defp apply_witness_observation(state, _request, _observation), do: state
+
+  defp apply_observation_failed_owner_down(state, request, intent, monitored_owner_pid) do
+    target = request.target
+
+    cond do
+      request.kind == :guarded_restore ->
+        # Without a real observation we cannot prove pre-effect minted absence
+        # or applied. Park unknown (hold exclusion/fence); claim join is not
+        # triggered from a synthetic absence claim.
+        park_guarded_outcome_unknown(state, target, intent, monitored_owner_pid)
+
+      true ->
+        maybe_await_worker_or_finalize(
+          state,
+          target,
+          intent,
+          monitored_owner_pid,
+          {:conflict, :observation_failed}
+        )
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Fixed durable mark shell (I/O outside TaskStore callbacks)
+  #
+  # Launch retries are bounded and attempt-threaded. start_child failure must
+  # NEVER reschedule attempt=1 (that loops forever when TaskSupervisor is down).
+  # Stale retry/completion messages authenticate against exact target/token/
+  # intent_id and current pending phase. Exhaustion leaves the intent blocking.
+  # Terminal shell errors are not discarded as if durable convergence occurred.
+  # ---------------------------------------------------------------------------
+
+  defp launch_durable_mark_outcome_unknown(state, intent) when is_map(intent) do
+    launch_durable_mark_outcome_unknown(state, intent, 0)
+  end
+
+  defp launch_durable_mark_outcome_unknown(state, intent, attempt)
+       when is_map(intent) and is_integer(attempt) and attempt >= 0 do
+    state = ensure_runtime_admission_shape(state)
+
+    token = Map.get(intent, :restore_token)
+    target = intent.target_agent_id
+    intent_id = intent.intent_id
+
+    progress =
+      Map.get(Map.get(state, :runtime_admission_durable_mark_progress, %{}), target)
+
+    cond do
+      not (is_binary(token) and is_binary(target) and is_binary(intent_id) and
+               Map.get(intent, :kind) == :guarded_restore) ->
+        state
+
+      durable_mark_pending_for?(state, target, intent_id) ->
+        state
+
+      # Same-identity terminal/exhausted cycles are inert. A distinct intent on
+      # the same target owns a fresh progress identity.
+      is_map(progress) and progress.intent_id == intent_id and
+          progress.status in [:done, :exhausted] ->
+        state
+
+      attempt >= @max_runtime_admission_durable_shell_launch_attempts ->
+        # Exhausted: keep claim/intent conservatively blocking (outcome_unknown).
+        put_durable_mark_progress(
+          state,
+          target,
+          intent_id,
+          token,
+          :exhausted,
+          attempt,
+          :launch_exhausted
+        )
+
+      true ->
+        mark_ref = make_ref()
+        store_ref = Map.get(state, :store_ref, @default_name)
+
+        meta = %{
+          status: :admitting,
+          target: target,
+          token: token,
+          intent_id: intent_id,
+          attempt: attempt,
+          expected_phase: :outcome_unknown
+        }
+
+        worker_mfa =
+          {__MODULE__, :run_runtime_admission_durable_mark_unknown,
+           [store_ref, mark_ref, target, token, intent_id]}
+
+        {state, launch_ref} =
+          begin_runtime_admission_operation_launch(
+            state,
+            :durable_mark,
+            mark_ref,
+            worker_mfa
+          )
+
+        state
+        |> put_in(
+          [:runtime_admission_pending_durable_mark, mark_ref],
+          Map.put(meta, :launch_ref, launch_ref)
+        )
+        |> put_durable_mark_progress(target, intent_id, token, :pending, attempt, nil)
+    end
+  end
+
+  defp durable_shell_launch_backoff_ms(attempt) when is_integer(attempt) and attempt >= 0 do
+    # Linear backoff: 50, 100, 150, 200 ms — bounded and deterministic.
+    @runtime_admission_durable_shell_launch_base_backoff_ms * (attempt + 1)
+  end
+
+  defp current_durable_mark_intent(state, target, token, intent_id) do
+    intent = Map.get(Map.get(state, :runtime_admission_intents, %{}), target)
+
+    if durable_mark_intent_matches?(intent, target, token, intent_id) do
+      {:ok, intent}
+    else
+      :stale
+    end
+  end
+
+  defp durable_mark_pending_for?(state, target, intent_id) do
+    state
+    |> Map.get(:runtime_admission_pending_durable_mark, %{})
+    |> Map.values()
+    |> Enum.any?(fn meta ->
+      is_map(meta) and Map.get(meta, :target) == target and
+        Map.get(meta, :intent_id) == intent_id
+    end)
+  end
+
+  defp durable_mark_retry_current?(state, target, token, intent_id, attempt)
+       when is_binary(target) and is_binary(token) and is_binary(intent_id) and
+              is_integer(attempt) and attempt > 0 do
+    not durable_mark_pending_for?(state, target, intent_id) and
+      match?({:ok, _}, current_durable_mark_intent(state, target, token, intent_id)) and
+      case Map.get(Map.get(state, :runtime_admission_durable_mark_progress, %{}), target) do
+        %{
+          intent_id: ^intent_id,
+          token: ^token,
+          status: status,
+          attempt: prior_attempt
+        }
+        when status in [:launch_retry, :shell_error_retry] and attempt == prior_attempt + 1 ->
+          true
+
+        _ ->
+          false
+      end
+  end
+
+  defp durable_mark_retry_current?(_, _, _, _, _), do: false
+
+  defp durable_mark_intent_matches?(intent, target, token, intent_id) do
+    # Still non-terminal / indeterminate — needs durable mark convergence.
+    is_map(intent) and
+      Map.get(intent, :kind) == :guarded_restore and
+      intent.target_agent_id == target and
+      intent.intent_id == intent_id and
+      Map.get(intent, :restore_token) == token and
+      Map.get(intent, :phase) in [:outcome_unknown, :worker_running, :owner_live, :settling]
+  end
+
+  defp put_durable_mark_progress(state, target, intent_id, token, status, attempt, last_error)
+       when is_binary(target) and is_binary(intent_id) do
+    progress = Map.get(state, :runtime_admission_durable_mark_progress, %{})
+
+    entry = %{
+      intent_id: intent_id,
+      token: token,
+      status: status,
+      attempt: attempt,
+      last_error: last_error
+    }
+
+    put_in(state, [:runtime_admission_durable_mark_progress], Map.put(progress, target, entry))
+  end
+
+  defp delete_durable_mark_progress(state, target, intent_id) do
+    progress = Map.get(state, :runtime_admission_durable_mark_progress, %{})
+
+    case Map.get(progress, target) do
+      %{intent_id: ^intent_id} ->
+        put_in(state, [:runtime_admission_durable_mark_progress], Map.delete(progress, target))
+
+      _ ->
+        state
+    end
+  end
+
+  defp track_durable_mark_worker(state, mark_ref, meta, worker_pid, launch_ref)
+       when is_reference(mark_ref) and is_map(meta) and is_pid(worker_pid) do
+    mon = Process.monitor(worker_pid)
+
+    timeout_ms =
+      Map.get(
+        state,
+        :runtime_admission_durable_op_timeout_ms,
+        @default_runtime_admission_durable_op_timeout_ms
+      )
+
+    timer =
+      Process.send_after(self(), {:runtime_admission_durable_mark_timeout, mark_ref}, timeout_ms)
+
+    updated =
+      Map.merge(meta, %{
+        status: :running,
+        launch_ref: launch_ref,
+        worker_pid: worker_pid,
+        mon: mon,
+        timer: timer
+      })
+
+    state
+    |> put_in([:runtime_admission_pending_durable_mark, mark_ref], updated)
+    |> put_in([:runtime_admission_durable_mark_monitors, mon], mark_ref)
+  end
+
+  defp fail_durable_mark_launch(state, meta, reason) when is_map(meta) do
+    attempt = Map.get(meta, :attempt, 0)
+    next = attempt + 1
+
+    state =
+      put_durable_mark_progress(
+        state,
+        meta.target,
+        meta.intent_id,
+        meta.token,
+        if(next >= @max_runtime_admission_durable_shell_launch_attempts,
+          do: :exhausted,
+          else: :launch_retry
+        ),
+        attempt,
+        reason
+      )
+
+    if next < @max_runtime_admission_durable_shell_launch_attempts do
+      Process.send_after(
+        self(),
+        {:runtime_admission_durable_mark_retry, meta.target, meta.token, meta.intent_id, next},
+        durable_shell_launch_backoff_ms(attempt)
+      )
+    end
+
+    state
+  end
+
+  @doc false
+  def run_runtime_admission_durable_mark_unknown(store_ref, mark_ref, target, token)
+      when is_reference(mark_ref) and is_binary(target) and is_binary(token) do
+    maybe_runtime_admission_durable_mark_test_hang(target)
+    result = durable_mark_outcome_unknown_with_retry(target, token, 0)
+
+    OperationLauncher.notify(
+      store_ref,
+      {:runtime_admission_durable_mark_done, mark_ref,
+       durable_mark_envelope(target, token, result)}
+    )
+
+    :ok
+  rescue
+    _ ->
+      OperationLauncher.notify(
+        store_ref,
+        {:runtime_admission_durable_mark_done, mark_ref,
+         durable_mark_envelope(target, token, {:error, :mark_exception})}
+      )
+
+      :ok
+  catch
+    :exit, _ ->
+      OperationLauncher.notify(
+        store_ref,
+        {:runtime_admission_durable_mark_done, mark_ref,
+         durable_mark_envelope(target, token, {:error, :mark_exit})}
+      )
+
+      :ok
+  end
+
+  # 5-arity MFA used by TaskStore launcher (intent_id carried only in pending meta).
+  @doc false
+  def run_runtime_admission_durable_mark_unknown(store_ref, mark_ref, target, token, _intent_id)
+      when is_reference(mark_ref) and is_binary(target) and is_binary(token) do
+    run_runtime_admission_durable_mark_unknown(store_ref, mark_ref, target, token)
+  end
+
+  defp durable_mark_envelope(target, token, result) do
+    %{worker_pid: self(), target: target, token: token, result: result}
+  end
+
+  defp maybe_runtime_admission_durable_mark_test_hang(target) when is_binary(target) do
+    if Mix.env() == :test do
+      case Application.get_env(:arbor_agent, :runtime_admission_test_durable_mark_hang) do
+        %{timeout_ms: ms, target: ^target} when is_integer(ms) and ms > 0 ->
+          Process.sleep(ms)
+
+        %{timeout_ms: ms} when is_integer(ms) and ms > 0 ->
+          Process.sleep(ms)
+
+        _ ->
+          :ok
+      end
+    else
+      :ok
+    end
+  end
+
+  defp durable_mark_outcome_unknown_with_retry(target, token, attempt)
+       when is_integer(attempt) and attempt < 4 do
+    # MIX_ENV=test seam: force terminal shell failure (not launch failure).
+    if Mix.env() == :test and
+         Application.get_env(:arbor_agent, :runtime_admission_test_durable_mark_force_error) ==
+           true do
+      {:error, :mark_forced_failure}
+    else
+      case Arbor.Agent.TemplateAuthorityReconciliationStore.mark_runtime_restore_outcome_unknown(
+             target,
+             token
+           ) do
+        {:ok, _} = ok ->
+          ok
+
+        {:error, reason}
+        when reason in [:cas_conflict, :outcome_unknown, :backend_unavailable] and attempt < 3 ->
+          Process.sleep(25 * (attempt + 1))
+          # Reobserve: if already outcome_unknown, treat as success.
+          case Arbor.Agent.TemplateAuthorityReconciliationStore.fetch(target) do
+            {:ok, op} ->
+              claim = op["runtime_restore_admission"]
+
+              if is_map(claim) and claim["token"] == token and
+                   claim["claim_phase"] == "outcome_unknown" do
+                {:ok, op}
+              else
+                durable_mark_outcome_unknown_with_retry(target, token, attempt + 1)
+              end
+
+            _ ->
+              durable_mark_outcome_unknown_with_retry(target, token, attempt + 1)
+          end
+
+        {:error, _} = err ->
+          err
+      end
+    end
+  end
+
+  defp durable_mark_outcome_unknown_with_retry(_target, _token, _attempt),
+    do: {:error, :mark_retry_exhausted}
+
+  defp handle_runtime_admission_durable_mark_done(state, mark_ref, envelope) do
+    state = ensure_runtime_admission_shape(state)
+    pending = Map.get(state, :runtime_admission_pending_durable_mark, %{})
+
+    case Map.get(pending, mark_ref) do
+      nil ->
+        # Stale/unknown mark_ref — inert.
+        state
+
+      meta when is_map(meta) ->
+        target = meta.target
+        token = meta.token
+        intent_id = meta.intent_id
+        attempt = Map.get(meta, :attempt, 0)
+
+        if durable_mark_result_authentic?(meta, envelope) and
+             durable_mark_intent_matches?(
+               Map.get(Map.get(state, :runtime_admission_intents, %{}), target),
+               target,
+               token,
+               intent_id
+             ) do
+          state =
+            state
+            |> put_in(
+              [:runtime_admission_pending_durable_mark],
+              Map.delete(pending, mark_ref)
+            )
+            |> clear_durable_mark_worker_tracking(meta)
+
+          result = Map.get(envelope, :result)
+
+          case result do
+            {:ok, _} ->
+              # Durable converged to outcome_unknown (or already was).
+              delete_durable_mark_progress(state, target, intent_id)
+
+            {:error, reason} ->
+              # Terminal shell failure is NOT silent convergence. Retry launch if
+              # budget remains; otherwise exhaust while keeping intent blocking.
+              next = attempt + 1
+
+              state =
+                put_durable_mark_progress(
+                  state,
+                  target,
+                  intent_id,
+                  token,
+                  if(next >= @max_runtime_admission_durable_shell_launch_attempts,
+                    do: :exhausted,
+                    else: :shell_error_retry
+                  ),
+                  attempt,
+                  reason
+                )
+
+              if next < @max_runtime_admission_durable_shell_launch_attempts do
+                Process.send_after(
+                  self(),
+                  {:runtime_admission_durable_mark_retry, target, token, intent_id, next},
+                  durable_shell_launch_backoff_ms(attempt)
+                )
+              end
+
+              # Intent remains non-idle outcome_unknown — never invent applied/not_applied.
+              state
+
+            _ ->
+              put_durable_mark_progress(
+                state,
+                target,
+                intent_id,
+                token,
+                :exhausted,
+                attempt,
+                :invalid_mark_result
+              )
+          end
+        else
+          # Wrong worker/identity or stale completion cannot clear pending work.
+          state
+        end
+
+      _ ->
+        state
+    end
+  end
+
+  defp durable_mark_result_authentic?(meta, envelope)
+       when is_map(meta) and is_map(envelope) do
+    is_pid(Map.get(meta, :worker_pid)) and
+      Map.get(envelope, :worker_pid) == Map.get(meta, :worker_pid) and
+      Map.get(envelope, :target) == Map.get(meta, :target) and
+      Map.get(envelope, :token) == Map.get(meta, :token) and
+      Map.has_key?(envelope, :result)
+  end
+
+  defp durable_mark_result_authentic?(_, _), do: false
+
+  defp handle_runtime_admission_durable_mark_timeout(state, mark_ref)
+       when is_reference(mark_ref) do
+    pending = Map.get(state, :runtime_admission_pending_durable_mark, %{})
+
+    case Map.pop(pending, mark_ref) do
+      {nil, _} ->
+        state
+
+      {meta, rest} when is_map(meta) ->
+        state =
+          state
+          |> put_in([:runtime_admission_pending_durable_mark], rest)
+          |> clear_durable_mark_worker_tracking(meta)
+
+        case Map.get(meta, :worker_pid) do
+          pid when is_pid(pid) ->
+            if Process.alive?(pid), do: Process.exit(pid, :kill)
+
+          _ ->
+            :ok
+        end
+
+        fail_durable_mark_launch(state, meta, :worker_timeout)
+
+      _ ->
+        state
+    end
+  end
+
+  defp handle_runtime_admission_durable_mark_monitor_down(state, mon, mark_ref)
+       when is_reference(mon) and is_reference(mark_ref) do
+    mark_mons = Map.get(state, :runtime_admission_durable_mark_monitors, %{})
+    state = put_in(state, [:runtime_admission_durable_mark_monitors], Map.delete(mark_mons, mon))
+    pending = Map.get(state, :runtime_admission_pending_durable_mark, %{})
+
+    case Map.get(pending, mark_ref) do
+      %{mon: ^mon} = meta ->
+        # Prefer a result already sent by the exact worker; timeout converges a
+        # pure crash if no result follows.
+        updated = %{meta | mon: nil, worker_pid: nil}
+        put_in(state, [:runtime_admission_pending_durable_mark, mark_ref], updated)
+
+      _ ->
+        state
+    end
+  end
+
+  defp clear_durable_mark_worker_tracking(state, meta) when is_map(meta) do
+    case Map.get(meta, :timer) do
+      timer when is_reference(timer) -> Process.cancel_timer(timer)
+      _ -> :ok
+    end
+
+    case Map.get(meta, :mon) do
+      mon when is_reference(mon) ->
+        Process.demonitor(mon, [:flush])
+        mark_mons = Map.get(state, :runtime_admission_durable_mark_monitors, %{})
+        put_in(state, [:runtime_admission_durable_mark_monitors], Map.delete(mark_mons, mon))
+
+      _ ->
+        state
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # W9: Fixed durable settle shell after source-auth TaskStore terminal accept
+  #
+  # Closes crash-after-accept / before-worker-durable-settle:
+  # - applied: exact guarded branch observation required (op/token/intent/fp);
+  #   mismatch/absence after handoff → outcome_unknown, never invent applied
+  # - failed/conflict: source-auth worker terminal is the surviving evidence
+  #   (TaskStore only accepted the exact bound worker); settle that terminal
+  # - retry + exact successor reobserve (same outcome+reason keeps first at)
+  # ---------------------------------------------------------------------------
+
+  defp maybe_launch_guarded_durable_settle_after_accept(state, intent, intent_id, outcome) do
+    cond do
+      not is_map(intent) ->
+        state
+
+      Map.get(intent, :kind) != :guarded_restore ->
+        state
+
+      intent.intent_id != intent_id ->
+        state
+
+      true ->
+        case durable_settle_request_from_terminal(intent, outcome) do
+          {:ok, request} ->
+            launch_guarded_durable_settle_shell(state, request)
+
+          :skip ->
+            state
+        end
+    end
+  end
+
+  defp durable_settle_request_from_terminal(intent, outcome) do
+    token = Map.get(intent, :restore_token)
+    target = Map.get(intent, :target_agent_id)
+    fingerprint = Map.get(intent, :fingerprint)
+    operation_id = Map.get(intent, :operation_id)
+    intent_id = Map.get(intent, :intent_id)
+
+    if is_binary(token) and is_binary(target) and is_binary(fingerprint) and
+         is_binary(operation_id) and is_binary(intent_id) do
+      case outcome do
+        {:applied, pid} when is_pid(pid) ->
+          {:ok,
+           %{
+             mode: :observe_then_applied,
+             target: target,
+             token: token,
+             intent_id: intent_id,
+             fingerprint: fingerprint,
+             operation_id: operation_id,
+             reason_code: "branch_restored"
+           }}
+
+        {:error, reason} ->
+          {outcome_s, reason_code} = classify_guarded_worker_terminal_for_durable(reason)
+
+          {:ok,
+           %{
+             mode: :source_auth_terminal,
+             target: target,
+             token: token,
+             intent_id: intent_id,
+             fingerprint: fingerprint,
+             operation_id: operation_id,
+             outcome: outcome_s,
+             reason_code: reason_code
+           }}
+
+        {:conflict, reason} ->
+          reason_code =
+            case reason do
+              r when is_atom(r) ->
+                s = Atom.to_string(r)
+
+                if Regex.match?(~r/\A[a-z][a-z0-9_]*\z/, s) and byte_size(s) <= 64,
+                  do: s,
+                  else: "conflict"
+
+              _ ->
+                "conflict"
+            end
+
+          {:ok,
+           %{
+             mode: :source_auth_terminal,
+             target: target,
+             token: token,
+             intent_id: intent_id,
+             fingerprint: fingerprint,
+             operation_id: operation_id,
+             outcome: "conflict",
+             reason_code: reason_code
+           }}
+
+        _ ->
+          :skip
+      end
+    else
+      :skip
+    end
+  end
+
+  defp classify_guarded_worker_terminal_for_durable(reason) do
+    # Close before durable reason_code — never emit raw binary/tuple prefixes.
+    closed = IntentCore.redact_error_reason(reason)
+
+    case closed do
+      :witness_mismatch ->
+        {"conflict", "witness_mismatch"}
+
+      :conflict ->
+        {"conflict", "conflict"}
+
+      :pre_effect_abort ->
+        {"not_applied", "pre_effect_abort"}
+
+      :owner_down ->
+        {"not_applied", "pre_effect_abort"}
+
+      atom when is_atom(atom) ->
+        code = Atom.to_string(atom)
+
+        if Regex.match?(~r/\A[a-z][a-z0-9_]*\z/, code) and byte_size(code) <= 64 do
+          {"failed", code}
+        else
+          {"failed", "worker_failed"}
+        end
+    end
+  end
+
+  defp launch_guarded_durable_settle_shell(state, request) when is_map(request) do
+    launch_guarded_durable_settle_shell(state, request, 0)
+  end
+
+  defp launch_guarded_durable_settle_shell(state, request, attempt)
+       when is_map(request) and is_integer(attempt) and attempt >= 0 do
+    state = ensure_runtime_admission_shape(state)
+    target = Map.get(request, :target)
+    intent_id = Map.get(request, :intent_id)
+
+    cond do
+      not (is_binary(target) and is_binary(intent_id) and is_binary(Map.get(request, :token))) ->
+        state
+
+      # Already tracking a live worker for this identity — do not double-launch.
+      durable_settle_pending_for?(state, target, intent_id) ->
+        state
+
+      # Same-identity exhausted cycle: inert (no re-launch with attempt>0).
+      durable_settle_identity_exhausted?(state, request) and attempt > 0 ->
+        state
+
+      attempt >= @max_runtime_admission_durable_shell_launch_attempts ->
+        # Exhausted: keep fence held via progress; release waiters with unknown.
+        state =
+          put_durable_settle_progress(state, request, :exhausted, attempt, :launch_exhausted)
+
+        release_deferred_waiter_reply(state, intent_id, {:error, :outcome_unknown})
+
+      true ->
+        settle_ref = make_ref()
+        store_ref = Map.get(state, :store_ref, @default_name)
+        request = Map.put(request, :launch_attempt, attempt)
+
+        worker_mfa =
+          {__MODULE__, :run_runtime_admission_durable_settle, [store_ref, settle_ref, request]}
+
+        {state, launch_ref} =
+          begin_runtime_admission_operation_launch(
+            state,
+            :durable_settle,
+            settle_ref,
+            worker_mfa
+          )
+
+        meta = durable_settle_pending_meta(request, attempt, launch_ref)
+
+        state
+        |> put_in([:runtime_admission_pending_durable_settle, settle_ref], meta)
+        |> put_durable_settle_progress(request, :pending, attempt, nil)
+    end
+  end
+
+  defp durable_settle_pending_for?(state, target, intent_id) do
+    state
+    |> Map.get(:runtime_admission_pending_durable_settle, %{})
+    |> Map.values()
+    |> Enum.any?(fn meta ->
+      is_map(meta) and Map.get(meta, :target) == target and
+        Map.get(meta, :intent_id) == intent_id
+    end)
+  end
+
+  defp durable_settle_identity_exhausted?(state, request) when is_map(request) do
+    target = Map.get(request, :target)
+    intent_id = Map.get(request, :intent_id)
+    token = Map.get(request, :token)
+    fingerprint = Map.get(request, :fingerprint)
+    operation_id = Map.get(request, :operation_id)
+    mode = Map.get(request, :mode)
+
+    case Map.get(Map.get(state, :runtime_admission_durable_settle_progress, %{}), target) do
+      %{
+        intent_id: ^intent_id,
+        token: ^token,
+        fingerprint: ^fingerprint,
+        operation_id: ^operation_id,
+        mode: ^mode,
+        status: :exhausted
+      } = progress ->
+        durable_settle_terminal_matches?(progress, request)
+
+      _ ->
+        false
+    end
+  end
+
+  defp durable_settle_identity_exhausted?(_, _), do: false
+
+  defp durable_settle_pending_meta(request, attempt, launch_ref) do
+    %{
+      status: :admitting,
+      launch_ref: launch_ref,
+      target: request.target,
+      token: request.token,
+      intent_id: request.intent_id,
+      fingerprint: Map.get(request, :fingerprint),
+      operation_id: Map.get(request, :operation_id),
+      mode: Map.get(request, :mode),
+      outcome: Map.get(request, :outcome),
+      reason_code: Map.get(request, :reason_code),
+      launch_attempt: attempt,
+      request: request
+    }
+  end
+
+  defp track_durable_settle_observer(
+         state,
+         settle_ref,
+         request,
+         worker_pid,
+         attempt,
+         launch_ref
+       )
+       when is_reference(settle_ref) and is_pid(worker_pid) do
+    mon = Process.monitor(worker_pid)
+
+    timeout_ms =
+      Map.get(
+        state,
+        :runtime_admission_durable_op_timeout_ms,
+        @default_runtime_admission_durable_op_timeout_ms
+      )
+
+    timer =
+      Process.send_after(
+        self(),
+        {:runtime_admission_durable_settle_timeout, settle_ref},
+        timeout_ms
+      )
+
+    meta = %{
+      status: :running,
+      launch_ref: launch_ref,
+      target: request.target,
+      token: request.token,
+      intent_id: request.intent_id,
+      fingerprint: Map.get(request, :fingerprint),
+      operation_id: Map.get(request, :operation_id),
+      mode: Map.get(request, :mode),
+      outcome: Map.get(request, :outcome),
+      reason_code: Map.get(request, :reason_code),
+      launch_attempt: attempt,
+      request: request,
+      worker_pid: worker_pid,
+      mon: mon,
+      timer: timer
+    }
+
+    state
+    |> put_in([:runtime_admission_pending_durable_settle, settle_ref], meta)
+    |> put_in([:runtime_admission_durable_settle_monitors, mon], settle_ref)
+    |> put_durable_settle_progress(request, :pending, attempt, nil)
+  end
+
+  defp fail_durable_settle_launch(state, meta, reason) when is_map(meta) do
+    request = Map.get(meta, :request, meta)
+    attempt = Map.get(meta, :launch_attempt, 0)
+    next = attempt + 1
+
+    state =
+      put_durable_settle_progress(
+        state,
+        request,
+        if(next >= @max_runtime_admission_durable_shell_launch_attempts,
+          do: :exhausted,
+          else: :launch_retry
+        ),
+        attempt,
+        reason
+      )
+
+    if next < @max_runtime_admission_durable_shell_launch_attempts do
+      Process.send_after(
+        self(),
+        {:runtime_admission_durable_settle_retry, request, next},
+        durable_shell_launch_backoff_ms(attempt)
+      )
+
+      state
+    else
+      release_deferred_waiter_reply(state, meta.intent_id, {:error, :outcome_unknown})
+    end
+  end
+
+  # Retry/progress authentication: exact target+token+intent+fingerprint+
+  # operation+mode (+ terminal for source_auth). No nil/default-true shortcuts;
+  # unknown/stale same-target progress never authorizes a different request.
+  defp durable_settle_retry_current?(state, request, attempt)
+       when is_map(request) and is_integer(attempt) and attempt > 0 do
+    target = Map.get(request, :target)
+    token = Map.get(request, :token)
+    intent_id = Map.get(request, :intent_id)
+    fingerprint = Map.get(request, :fingerprint)
+    operation_id = Map.get(request, :operation_id)
+    mode = Map.get(request, :mode)
+
+    is_binary(target) and is_binary(token) and is_binary(intent_id) and
+      is_binary(fingerprint) and is_binary(operation_id) and is_atom(mode) and
+      not durable_settle_pending_for?(state, target, intent_id) and
+      case Map.get(Map.get(state, :runtime_admission_durable_settle_progress, %{}), target) do
+        %{
+          intent_id: ^intent_id,
+          token: ^token,
+          fingerprint: ^fingerprint,
+          operation_id: ^operation_id,
+          mode: ^mode,
+          status: status,
+          attempt: prior_attempt
+        } = progress
+        when status in [:pending, :launch_retry, :shell_error_retry] and
+               attempt == prior_attempt + 1 ->
+          durable_settle_terminal_matches?(progress, request)
+
+        # First launches call launch_guarded_durable_settle_shell/2 directly.
+        # A retry message without exact prior progress is unauthenticated.
+        nil ->
+          false
+
+        # Exhausted / done / mismatched identity — never retry.
+        _ ->
+          false
+      end
+  end
+
+  defp durable_settle_retry_current?(_, _, _), do: false
+
+  defp durable_settle_terminal_matches?(progress, request) do
+    case Map.get(request, :mode) do
+      :observe_then_applied ->
+        Map.get(progress, :mode) == :observe_then_applied and
+          Map.get(progress, :reason_code) == Map.get(request, :reason_code)
+
+      :source_auth_terminal ->
+        Map.get(progress, :mode) == :source_auth_terminal and
+          Map.get(progress, :outcome) == Map.get(request, :outcome) and
+          Map.get(progress, :reason_code) == Map.get(request, :reason_code)
+
+      _ ->
+        false
+    end
+  end
+
+  defp put_durable_settle_progress(state, request, status, attempt, last_error)
+       when is_map(request) do
+    target = Map.get(request, :target)
+    intent_id = Map.get(request, :intent_id)
+    token = Map.get(request, :token)
+    fingerprint = Map.get(request, :fingerprint)
+    operation_id = Map.get(request, :operation_id)
+    mode = Map.get(request, :mode)
+
+    if is_binary(target) and is_binary(intent_id) and is_binary(token) and
+         is_binary(fingerprint) and is_binary(operation_id) and is_atom(mode) do
+      progress = Map.get(state, :runtime_admission_durable_settle_progress, %{})
+
+      entry = %{
+        intent_id: intent_id,
+        token: token,
+        fingerprint: fingerprint,
+        operation_id: operation_id,
+        mode: mode,
+        outcome: Map.get(request, :outcome),
+        reason_code: Map.get(request, :reason_code),
+        status: status,
+        attempt: attempt,
+        last_error: last_error
+      }
+
+      put_in(
+        state,
+        [:runtime_admission_durable_settle_progress],
+        Map.put(progress, target, entry)
+      )
+    else
+      state
+    end
+  end
+
+  defp delete_durable_settle_progress(state, request) when is_map(request) do
+    target = Map.get(request, :target)
+    intent_id = Map.get(request, :intent_id)
+    token = Map.get(request, :token)
+    progress = Map.get(state, :runtime_admission_durable_settle_progress, %{})
+
+    case Map.get(progress, target) do
+      %{intent_id: ^intent_id, token: ^token} ->
+        put_in(
+          state,
+          [:runtime_admission_durable_settle_progress],
+          Map.delete(progress, target)
+        )
+
+      _ ->
+        state
+    end
+  end
+
+  defp release_deferred_waiter_reply(state, intent_id, reply)
+       when is_binary(intent_id) do
+    deferred = Map.get(state, :runtime_admission_deferred_waiter_reply, %{})
+
+    case Map.pop(deferred, intent_id) do
+      {nil, _} ->
+        state
+
+      {_meta, rest} ->
+        state = put_in(state, [:runtime_admission_deferred_waiter_reply], rest)
+        detach_and_reply_runtime_admission_waiters(state, intent_id, reply)
+    end
+  end
+
+  @doc false
+  def run_runtime_admission_durable_settle(store_ref, settle_ref, request)
+      when is_reference(settle_ref) and is_map(request) do
+    result = durable_settle_with_retry(request, 0)
+
+    OperationLauncher.notify(
+      store_ref,
+      {:runtime_admission_durable_settle_done, settle_ref,
+       durable_settle_envelope(request, result)}
+    )
+
+    :ok
+  rescue
+    _ ->
+      OperationLauncher.notify(
+        store_ref,
+        {:runtime_admission_durable_settle_done, settle_ref,
+         durable_settle_envelope(request, {:error, :settle_exception})}
+      )
+
+      :ok
+  catch
+    :exit, _ ->
+      OperationLauncher.notify(
+        store_ref,
+        {:runtime_admission_durable_settle_done, settle_ref,
+         durable_settle_envelope(request, {:error, :settle_exit})}
+      )
+
+      :ok
+  end
+
+  defp durable_settle_envelope(request, result) when is_map(request) do
+    %{
+      worker_pid: self(),
+      target: Map.get(request, :target),
+      token: Map.get(request, :token),
+      intent_id: Map.get(request, :intent_id),
+      fingerprint: Map.get(request, :fingerprint),
+      operation_id: Map.get(request, :operation_id),
+      mode: Map.get(request, :mode),
+      outcome: Map.get(request, :outcome),
+      reason_code: Map.get(request, :reason_code),
+      result: result
+    }
+  end
+
+  defp durable_settle_with_retry(request, attempt)
+       when is_map(request) and is_integer(attempt) and attempt < 4 do
+    case Map.get(request, :mode) do
+      :observe_then_applied ->
+        durable_settle_applied_after_exact_observation(request, attempt)
+
+      :source_auth_terminal ->
+        durable_settle_source_auth_terminal(request, attempt)
+
+      _ ->
+        {:error, :invalid_settle_request}
+    end
+  end
+
+  defp durable_settle_with_retry(_request, _attempt), do: {:error, :settle_retry_exhausted}
+
+  # Applied only after exact guarded branch observation for same op/token/intent/fp.
+  # Absence/mismatch after handoff → outcome_unknown (never invent applied).
+  # Returns tagged {:ok, :applied | :outcome_unknown | :settled_terminal} so the
+  # TaskStore callback need not re-fetch durable state.
+  defp durable_settle_applied_after_exact_observation(request, attempt) do
+    target = request.target
+    token = request.token
+    intent_id = request.intent_id
+    fingerprint = request.fingerprint
+    operation_id = request.operation_id
+
+    case Arbor.Agent.BranchSupervisor.observe_admission(target) do
+      {:running, _pid,
+       {:ok,
+        %{
+          kind: :guarded_restore,
+          intent_id: ^intent_id,
+          fingerprint: ^fingerprint,
+          operation_id: ^operation_id,
+          token: ^token
+        }}} ->
+        settlement = %{
+          "outcome" => "applied",
+          "reason_code" => Map.get(request, :reason_code, "branch_restored"),
+          "at_unix_ms" => System.system_time(:millisecond)
+        }
+
+        case durable_settle_commit_with_retry(target, token, settlement, attempt) do
+          {:ok, _} -> {:ok, :applied}
+          {:error, _} = err -> err
+        end
+
+      _ ->
+        # Post-handoff indeterminate: never applied from absence/mismatch.
+        case Arbor.Agent.TemplateAuthorityReconciliationStore.mark_runtime_restore_outcome_unknown(
+               target,
+               token
+             ) do
+          {:ok, _} ->
+            {:ok, :outcome_unknown}
+
+          {:error, reason}
+          when reason in [:cas_conflict, :outcome_unknown, :backend_unavailable] and attempt < 3 ->
+            Process.sleep(25 * (attempt + 1))
+            durable_settle_with_retry(request, attempt + 1)
+
+          {:error, _} = err ->
+            err
+        end
+    end
+  end
+
+  # Source-auth failed/conflict/not_applied: TaskStore accepted only the exact
+  # bound worker/monitor terminal. No branch observation invents applied.
+  defp durable_settle_source_auth_terminal(request, attempt) do
+    settlement = %{
+      "outcome" => request.outcome,
+      "reason_code" => request.reason_code,
+      "at_unix_ms" => System.system_time(:millisecond)
+    }
+
+    case durable_settle_commit_with_retry(request.target, request.token, settlement, attempt) do
+      {:ok, _} -> {:ok, :settled_terminal}
+      {:error, _} = err -> err
+    end
+  end
+
+  defp durable_settle_commit_with_retry(target, token, settlement, attempt)
+       when is_integer(attempt) and attempt < 4 do
+    case Arbor.Agent.TemplateAuthorityReconciliationStore.settle_runtime_restore_admission(
+           target,
+           token,
+           settlement
+         ) do
+      {:ok, _} = ok ->
+        ok
+
+      # Same outcome+reason already recorded (first at kept) — exact successor.
+      {:error, :already_settled} ->
+        case reobserve_durable_settle_successor(target, token, settlement) do
+          {:ok, _} = ok -> ok
+          {:error, _} = err -> err
+        end
+
+      {:error, reason}
+      when reason in [:cas_conflict, :outcome_unknown, :backend_unavailable] and attempt < 3 ->
+        Process.sleep(25 * (attempt + 1))
+
+        case reobserve_durable_settle_successor(target, token, settlement) do
+          {:ok, _} = ok ->
+            ok
+
+          _ ->
+            durable_settle_commit_with_retry(target, token, settlement, attempt + 1)
+        end
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  defp durable_settle_commit_with_retry(_target, _token, _settlement, _attempt),
+    do: {:error, :settle_retry_exhausted}
+
+  defp reobserve_durable_settle_successor(target, token, expected_settlement) do
+    case Arbor.Agent.TemplateAuthorityReconciliationStore.fetch(target) do
+      {:ok, op} ->
+        case Map.get(op, "runtime_restore_admission") do
+          %{
+            "token" => ^token,
+            "claim_phase" => "settled",
+            "settlement" => settlement
+          } = _claim
+          when is_map(settlement) ->
+            if Arbor.Agent.RuntimeRestoreAdmissionClaimCore.settlement_same_terminal?(
+                 settlement,
+                 expected_settlement
+               ) do
+              {:ok, op}
+            else
+              {:error, :already_settled}
+            end
+
+          _ ->
+            {:error, :not_yet_settled}
+        end
+
+      {:error, _} = err ->
+        err
+    end
+  catch
+    :exit, _ -> {:error, :fetch_exit}
+  end
+
+  defp handle_runtime_admission_durable_settle_done(state, settle_ref, envelope) do
+    state = ensure_runtime_admission_shape(state)
+    pending = Map.get(state, :runtime_admission_pending_durable_settle, %{})
+
+    case Map.get(pending, settle_ref) do
+      nil ->
+        # Stale/duplicate — inert.
+        state
+
+      meta when is_map(meta) ->
+        if not durable_settle_result_authentic?(meta, envelope) do
+          # Wrong worker / identity forge — leave pending for real worker/timeout.
+          state
+        else
+          rest = Map.delete(pending, settle_ref)
+
+          state =
+            state
+            |> put_in([:runtime_admission_pending_durable_settle], rest)
+            |> clear_durable_settle_observer_tracking(meta)
+
+          request = Map.get(meta, :request, meta)
+          attempt = Map.get(meta, :launch_attempt, 0)
+          intent_id = meta.intent_id
+          result = if is_map(envelope), do: Map.get(envelope, :result), else: envelope
+
+          case result do
+            {:ok, tag} when tag in [:applied, :outcome_unknown, :settled_terminal] ->
+              if durable_settle_success_tag_valid?(Map.get(meta, :mode), tag) do
+                state = delete_durable_settle_progress(state, request)
+                # Tag from outside-callback shell — no durable I/O in this callback.
+                deferred = Map.get(state, :runtime_admission_deferred_waiter_reply, %{})
+
+                case Map.get(deferred, intent_id) do
+                  %{reply: reply} ->
+                    release_reply =
+                      if tag == :outcome_unknown,
+                        do: {:error, :outcome_unknown},
+                        else: reply
+
+                    release_deferred_waiter_reply(state, intent_id, release_reply)
+
+                  _ ->
+                    state
+                end
+              else
+                reject_durable_settle_result(state, request, attempt, intent_id)
+              end
+
+            {:ok, _unknown_tag} ->
+              reject_durable_settle_result(state, request, attempt, intent_id)
+
+            {:error, reason} ->
+              # Terminal shell failure is not silent convergence — bounded relaunch.
+              next = attempt + 1
+
+              state =
+                put_durable_settle_progress(
+                  state,
+                  request,
+                  if(next >= @max_runtime_admission_durable_shell_launch_attempts,
+                    do: :exhausted,
+                    else: :shell_error_retry
+                  ),
+                  attempt,
+                  reason
+                )
+
+              if next < @max_runtime_admission_durable_shell_launch_attempts and
+                   durable_settle_retry_current?(state, request, next) do
+                Process.send_after(
+                  self(),
+                  {:runtime_admission_durable_settle_retry, request, next},
+                  durable_shell_launch_backoff_ms(attempt)
+                )
+
+                state
+              else
+                # Exhausted: conservative block (fence via progress); no success.
+                release_deferred_waiter_reply(state, intent_id, {:error, :outcome_unknown})
+              end
+
+            _malformed_result ->
+              reject_durable_settle_result(state, request, attempt, intent_id)
+          end
+        end
+
+      _ ->
+        state
+    end
+  end
+
+  defp durable_settle_success_tag_valid?(:observe_then_applied, tag)
+       when tag in [:applied, :outcome_unknown],
+       do: true
+
+  defp durable_settle_success_tag_valid?(:source_auth_terminal, :settled_terminal), do: true
+  defp durable_settle_success_tag_valid?(_, _), do: false
+
+  defp reject_durable_settle_result(state, request, attempt, intent_id) do
+    state
+    |> put_durable_settle_progress(request, :exhausted, attempt, :invalid_settle_result)
+    |> release_deferred_waiter_reply(intent_id, {:error, :outcome_unknown})
+  end
+
+  # Exact identity binding on complete: worker + target/token/intent/fingerprint/
+  # operation/mode/outcome/reason. Optional terminal fields must be present even
+  # when their exact value is nil; absent keys never default-authenticate.
+  defp durable_settle_result_authentic?(meta, envelope)
+       when is_map(meta) and is_map(envelope) do
+    is_pid(Map.get(meta, :worker_pid)) and
+      Map.get(envelope, :worker_pid) == Map.get(meta, :worker_pid) and
+      is_binary(meta.target) and Map.get(envelope, :target) == meta.target and
+      is_binary(meta.token) and Map.get(envelope, :token) == meta.token and
+      is_binary(meta.intent_id) and Map.get(envelope, :intent_id) == meta.intent_id and
+      is_binary(Map.get(meta, :fingerprint)) and
+      Map.get(envelope, :fingerprint) == Map.get(meta, :fingerprint) and
+      is_binary(Map.get(meta, :operation_id)) and
+      Map.get(envelope, :operation_id) == Map.get(meta, :operation_id) and
+      is_atom(Map.get(meta, :mode)) and
+      Map.get(envelope, :mode) == Map.get(meta, :mode) and
+      Map.has_key?(envelope, :outcome) and
+      Map.get(envelope, :outcome) == Map.get(meta, :outcome) and
+      Map.has_key?(envelope, :reason_code) and
+      Map.get(envelope, :reason_code) == Map.get(meta, :reason_code)
+  end
+
+  # Legacy bare {:ok,_}/{:error,_} results without worker binding — reject.
+  defp durable_settle_result_authentic?(_meta, _other), do: false
+
+  defp handle_runtime_admission_durable_settle_timeout(state, settle_ref)
+       when is_reference(settle_ref) do
+    state = ensure_runtime_admission_shape(state)
+    pending = Map.get(state, :runtime_admission_pending_durable_settle, %{})
+
+    case Map.pop(pending, settle_ref) do
+      {nil, _} ->
+        state
+
+      {meta, rest} when is_map(meta) ->
+        state =
+          state
+          |> put_in([:runtime_admission_pending_durable_settle], rest)
+          |> clear_durable_settle_observer_tracking(meta)
+
+        case Map.get(meta, :worker_pid) do
+          pid when is_pid(pid) ->
+            if Process.alive?(pid), do: Process.exit(pid, :kill)
+
+          _ ->
+            :ok
+        end
+
+        request = Map.get(meta, :request, meta)
+        attempt = Map.get(meta, :launch_attempt, 0)
+        next = attempt + 1
+        intent_id = meta.intent_id
+
+        state =
+          put_durable_settle_progress(
+            state,
+            request,
+            if(next >= @max_runtime_admission_durable_shell_launch_attempts,
+              do: :exhausted,
+              else: :shell_error_retry
+            ),
+            attempt,
+            :observer_timeout
+          )
+
+        if next < @max_runtime_admission_durable_shell_launch_attempts do
+          Process.send_after(
+            self(),
+            {:runtime_admission_durable_settle_retry, request, next},
+            durable_shell_launch_backoff_ms(attempt)
+          )
+
+          state
+        else
+          release_deferred_waiter_reply(state, intent_id, {:error, :outcome_unknown})
+        end
+
+      _ ->
+        state
+    end
+  end
+
+  defp handle_runtime_admission_durable_settle_monitor_down(state, mon, settle_ref)
+       when is_reference(mon) and is_reference(settle_ref) do
+    state = ensure_runtime_admission_shape(state)
+    settle_mons = Map.get(state, :runtime_admission_durable_settle_monitors, %{})
+
+    state =
+      put_in(state, [:runtime_admission_durable_settle_monitors], Map.delete(settle_mons, mon))
+
+    pending = Map.get(state, :runtime_admission_pending_durable_settle, %{})
+
+    case Map.get(pending, settle_ref) do
+      %{mon: ^mon} = meta ->
+        # Prefer result message if it races; pure crash converges via timer.
+        updated = %{meta | mon: nil, worker_pid: nil}
+        put_in(state, [:runtime_admission_pending_durable_settle, settle_ref], updated)
+
+      _ ->
+        state
+    end
+  end
+
+  defp clear_durable_settle_observer_tracking(state, meta) when is_map(meta) do
+    state =
+      case Map.get(meta, :timer) do
+        timer when is_reference(timer) ->
+          _ = Process.cancel_timer(timer)
+          state
+
+        _ ->
+          state
+      end
+
+    case Map.get(meta, :mon) do
+      mon when is_reference(mon) ->
+        Process.demonitor(mon, [:flush])
+        settle_mons = Map.get(state, :runtime_admission_durable_settle_monitors, %{})
+        put_in(state, [:runtime_admission_durable_settle_monitors], Map.delete(settle_mons, mon))
+
+      _ ->
+        state
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Durable claim join after owner death (pre-handoff crash window)
+  #
+  # Fixed supervised recovery operation (not fire-and-forget):
+  # - Pending entry always carries observer PID + monitor + bounded timer
+  # - Crash/hang/timeout → bounded retry with evidence; exhaustion parks blocked
+  # - Duplicate/stale DOWN/timeout/result messages are inert
+  # - minted_pre_effect only after fresh BranchSupervisor.observe_admission/1
+  #   in the same outside-callback observer; any branch occupancy holds
+  # - No BranchSupervisor / durable-store I/O in TaskStore callbacks
+  # ---------------------------------------------------------------------------
+
+  # Keep intent non-idle while a fixed outside-callback observer joins the
+  # durable claim. Bound → outcome_unknown hold; minted + fresh not_running →
+  # pre-effect. Occupancy / join failure never invents pre-effect.
+  defp enqueue_durable_claim_join(state, request, intent, monitored_owner_pid) do
+    state = ensure_runtime_admission_shape(state)
+    target = request.target
+    token = Map.get(request, :restore_token) || Map.get(intent, :restore_token)
+
+    # Park memory immediately so fence removal stays blocked while joining.
+    state =
+      case IntentCore.note_owner_gone_await_worker(
+             state.runtime_admission_intents,
+             target,
+             intent.intent_id,
+             monitored_owner_pid
+           ) do
+        {:ok, _updated, intents, effects} ->
+          state
+          |> put_in([:runtime_admission_intents], intents)
+          |> apply_runtime_admission_effects(effects)
+
+        {:ok, :already_awaiting, _intent, intents, effects} ->
+          state
+          |> put_in([:runtime_admission_intents], intents)
+          |> apply_runtime_admission_effects(effects)
+
+        {:error, _} ->
+          updated = %{
+            intent
+            | phase: :outcome_unknown,
+              owner_pid: nil,
+              retire_barrier: :none,
+              # Conservative: treat as post-bind capable until claim join says minted.
+              effect_handoff?: Map.get(intent, :effect_handoff?) == true
+          }
+
+          put_in(state, [:runtime_admission_intents, target], updated)
+      end
+
+    if is_binary(token) do
+      join_request = %{
+        target: target,
+        intent_id: intent.intent_id,
+        fingerprint: intent.fingerprint,
+        token: token,
+        operation_id: Map.get(intent, :operation_id) || Map.get(request, :operation_id),
+        monitored_owner_pid: monitored_owner_pid
+      }
+
+      cond do
+        claim_join_already_pending?(state, target, intent.intent_id) ->
+          state
+
+        claim_join_exhausted?(state, target, intent.intent_id) ->
+          # Prior bounded cycle exhausted — stay conservatively blocked.
+          ensure_parked_unknown(
+            state,
+            target,
+            Map.get(state.runtime_admission_intents, target) || intent
+          )
+
+        true ->
+          launch_durable_claim_join_observer(state, join_request, 0)
+      end
+    else
+      # No token — cannot join claim; keep non-idle park (no pre-effect proof).
+      state
+    end
+  end
+
+  defp claim_join_already_pending?(state, target, intent_id) do
+    state
+    |> Map.get(:runtime_admission_pending_claim_join, %{})
+    |> Map.values()
+    |> Enum.any?(fn
+      %{target: ^target, intent_id: ^intent_id} -> true
+      _ -> false
+    end)
+  end
+
+  defp claim_join_exhausted?(state, target, intent_id) do
+    case Map.get(Map.get(state, :runtime_admission_claim_join_progress, %{}), target) do
+      %{intent_id: ^intent_id, status: :exhausted} -> true
+      _ -> false
+    end
+  end
+
+  defp launch_durable_claim_join_observer(state, request, attempt)
+       when is_map(request) and is_integer(attempt) and attempt >= 0 do
+    state = ensure_runtime_admission_shape(state)
+    target = request.target
+    intent_id = request.intent_id
+    token = request.token
+
+    cond do
+      attempt >= @max_runtime_admission_claim_join_attempts ->
+        state =
+          put_claim_join_progress(
+            state,
+            request,
+            :exhausted,
+            attempt,
+            :launch_exhausted
+          )
+
+        intent = Map.get(state.runtime_admission_intents, target)
+        if is_map(intent), do: ensure_parked_unknown(state, target, intent), else: state
+
+      not (is_binary(target) and is_binary(intent_id) and is_binary(token) and
+               is_binary(request.fingerprint)) ->
+        state
+
+      true ->
+        join_ref = make_ref()
+        store_ref = Map.get(state, :store_ref, @default_name)
+
+        worker_mfa =
+          {__MODULE__, :run_runtime_admission_claim_join_observer, [store_ref, join_ref, request]}
+
+        {state, launch_ref} =
+          begin_runtime_admission_operation_launch(
+            state,
+            :claim_join,
+            join_ref,
+            worker_mfa
+          )
+
+        meta = %{
+          status: :admitting,
+          launch_ref: launch_ref,
+          target: request.target,
+          intent_id: request.intent_id,
+          fingerprint: request.fingerprint,
+          token: request.token,
+          operation_id: Map.get(request, :operation_id),
+          monitored_owner_pid: Map.get(request, :monitored_owner_pid),
+          attempt: attempt,
+          request: request
+        }
+
+        state
+        |> put_in([:runtime_admission_pending_claim_join, join_ref], meta)
+        |> put_claim_join_progress(request, :pending, attempt, nil)
+    end
+  end
+
+  defp track_claim_join_observer(
+         state,
+         join_ref,
+         request,
+         observer_pid,
+         attempt,
+         launch_ref
+       )
+       when is_reference(join_ref) and is_pid(observer_pid) do
+    mon = Process.monitor(observer_pid)
+
+    timeout_ms =
+      Map.get(
+        state,
+        :runtime_admission_claim_join_timeout_ms,
+        @default_runtime_admission_claim_join_timeout_ms
+      )
+
+    timer =
+      Process.send_after(self(), {:runtime_admission_claim_join_timeout, join_ref}, timeout_ms)
+
+    meta = %{
+      status: :running,
+      launch_ref: launch_ref,
+      target: request.target,
+      intent_id: request.intent_id,
+      fingerprint: request.fingerprint,
+      token: request.token,
+      operation_id: Map.get(request, :operation_id),
+      monitored_owner_pid: Map.get(request, :monitored_owner_pid),
+      attempt: attempt,
+      request: request,
+      worker_pid: observer_pid,
+      observer_pid: observer_pid,
+      mon: mon,
+      timer: timer
+    }
+
+    state
+    |> put_in([:runtime_admission_pending_claim_join, join_ref], meta)
+    |> put_in([:runtime_admission_claim_join_monitors, mon], join_ref)
+    |> put_claim_join_progress(request, :pending, attempt, nil)
+  end
+
+  defp put_claim_join_progress(state, request, status, attempt, last_error)
+       when is_map(request) do
+    target = Map.get(request, :target)
+    intent_id = Map.get(request, :intent_id)
+    progress = Map.get(state, :runtime_admission_claim_join_progress, %{})
+
+    entry = %{
+      intent_id: intent_id,
+      token: Map.get(request, :token),
+      fingerprint: Map.get(request, :fingerprint),
+      operation_id: Map.get(request, :operation_id),
+      status: status,
+      attempt: attempt,
+      last_error: last_error
+    }
+
+    if is_binary(target) and is_binary(intent_id) do
+      put_in(state, [:runtime_admission_claim_join_progress], Map.put(progress, target, entry))
+    else
+      state
+    end
+  end
+
+  defp delete_claim_join_progress(state, meta) when is_map(meta) do
+    target = Map.get(meta, :target)
+    intent_id = Map.get(meta, :intent_id)
+    token = Map.get(meta, :token)
+    progress = Map.get(state, :runtime_admission_claim_join_progress, %{})
+
+    case Map.get(progress, target) do
+      %{intent_id: ^intent_id, token: ^token} ->
+        put_in(state, [:runtime_admission_claim_join_progress], Map.delete(progress, target))
+
+      _ ->
+        state
+    end
+  end
+
+  defp claim_join_retry_current?(state, request, attempt)
+       when is_map(request) and is_integer(attempt) and attempt > 0 do
+    target = Map.get(request, :target)
+    intent_id = Map.get(request, :intent_id)
+    token = Map.get(request, :token)
+    fingerprint = Map.get(request, :fingerprint)
+    operation_id = Map.get(request, :operation_id)
+
+    is_binary(target) and is_binary(intent_id) and is_binary(token) and is_binary(fingerprint) and
+      is_binary(operation_id) and
+      not claim_join_already_pending?(state, target, intent_id) and
+      claim_join_intent_current?(
+        Map.get(Map.get(state, :runtime_admission_intents, %{}), target),
+        %{
+          target: target,
+          intent_id: intent_id,
+          fingerprint: fingerprint,
+          token: token,
+          operation_id: operation_id
+        }
+      ) and
+      case Map.get(Map.get(state, :runtime_admission_claim_join_progress, %{}), target) do
+        %{
+          intent_id: ^intent_id,
+          token: ^token,
+          fingerprint: ^fingerprint,
+          operation_id: ^operation_id,
+          status: status,
+          attempt: prior_attempt
+        }
+        when status in [:retry, :launch_retry] and attempt == prior_attempt + 1 ->
+          true
+
+        _ ->
+          false
+      end
+  end
+
+  defp claim_join_retry_current?(_, _, _), do: false
+
+  @doc false
+  def run_runtime_admission_claim_join_observer(store_ref, join_ref, request)
+      when is_reference(join_ref) and is_map(request) do
+    request = ensure_claim_join_operation_id(request)
+    maybe_runtime_admission_claim_join_test_hang(request)
+    result = build_claim_join_result(request)
+    OperationLauncher.notify(store_ref, {:runtime_admission_claim_joined, join_ref, result})
+    :ok
+  rescue
+    _ ->
+      OperationLauncher.notify(
+        store_ref,
+        {:runtime_admission_claim_joined, join_ref, claim_join_unavailable_result(request)}
+      )
+
+      :ok
+  catch
+    :exit, _ ->
+      OperationLauncher.notify(
+        store_ref,
+        {:runtime_admission_claim_joined, join_ref, claim_join_unavailable_result(request)}
+      )
+
+      :ok
+  end
+
+  # Back-compat MFA for direct security-regression calls (legacy 6-arity).
+  @doc false
+  def run_runtime_admission_claim_join_observer(
+        store_ref,
+        join_ref,
+        target,
+        token,
+        intent_id,
+        fingerprint
+      )
+      when is_reference(join_ref) and is_binary(target) and is_binary(token) and
+             is_binary(intent_id) and is_binary(fingerprint) do
+    request = %{
+      target: target,
+      token: token,
+      intent_id: intent_id,
+      fingerprint: fingerprint
+    }
+
+    run_runtime_admission_claim_join_observer(store_ref, join_ref, request)
+  end
+
+  # Compatibility for pre-operation-bound direct worker calls. Production
+  # TaskStore launches always carry the exact operation_id in their closed
+  # request; a legacy direct call can only recover the current durable identity.
+  defp ensure_claim_join_operation_id(%{operation_id: operation_id} = request)
+       when is_binary(operation_id),
+       do: request
+
+  defp ensure_claim_join_operation_id(%{target: target} = request) when is_binary(target) do
+    case Arbor.Agent.TemplateAuthorityReconciliationStore.fetch(target) do
+      {:ok, %{"operation_id" => operation_id}} when is_binary(operation_id) ->
+        Map.put(request, :operation_id, operation_id)
+
+      _ ->
+        request
+    end
+  end
+
+  defp ensure_claim_join_operation_id(request), do: request
+
+  defp maybe_runtime_admission_claim_join_test_hang(request) when is_map(request) do
+    if Mix.env() == :test do
+      case Application.get_env(:arbor_agent, :runtime_admission_test_claim_join_hang) do
+        %{timeout_ms: ms, target: target}
+        when is_integer(ms) and ms > 0 and is_binary(target) ->
+          if Map.get(request, :target) == target, do: Process.sleep(ms)
+
+        %{timeout_ms: ms} when is_integer(ms) and ms > 0 ->
+          Process.sleep(ms)
+
+        true ->
+          # Hold until the test clears the env (timeout/DOWN regressions).
+          hang_claim_join_until_released()
+
+        _ ->
+          :ok
+      end
+    else
+      :ok
+    end
+  end
+
+  if Mix.env() == :test do
+    defp hang_claim_join_until_released do
+      if Application.get_env(:arbor_agent, :runtime_admission_test_claim_join_hang) == true do
+        Process.sleep(50)
+        hang_claim_join_until_released()
+      else
+        :ok
+      end
+    end
+  else
+    defp hang_claim_join_until_released, do: :ok
+  end
+
+  defp claim_join_unavailable_result(request) when is_map(request) do
+    %{
+      worker_pid: self(),
+      target: Map.get(request, :target),
+      token: Map.get(request, :token),
+      intent_id: Map.get(request, :intent_id),
+      fingerprint: Map.get(request, :fingerprint),
+      operation_id: Map.get(request, :operation_id),
+      classification: :join_unavailable,
+      branch_fact: :observe_failed
+    }
+  end
+
+  defp build_claim_join_result(request) when is_map(request) do
+    target = Map.fetch!(request, :target)
+    token = Map.fetch!(request, :token)
+    intent_id = Map.fetch!(request, :intent_id)
+    fingerprint = Map.fetch!(request, :fingerprint)
+    operation_id = Map.fetch!(request, :operation_id)
+
+    claim_class =
+      classify_durable_claim_phase_for_join(
+        target,
+        token,
+        intent_id,
+        fingerprint,
+        operation_id
+      )
+
+    # Fresh single-read occupancy in THIS observer — never reuse earlier witness.
+    branch_fact = fresh_branch_fact_for_claim_join(target)
+
+    classification =
+      case {claim_class, branch_fact} do
+        {:minted_pre_effect, :not_running} ->
+          :minted_pre_effect
+
+        {:minted_pre_effect, _occupied} ->
+          # Bare / ordinary / mismatched / exact occupancy blocks pre-effect.
+          :occupancy_hold
+
+        {other, _} ->
+          other
+      end
+
+    %{
+      worker_pid: self(),
+      target: target,
+      token: token,
+      intent_id: intent_id,
+      fingerprint: fingerprint,
+      operation_id: operation_id,
+      classification: classification,
+      branch_fact: branch_fact
+    }
+  end
+
+  # Durable claim phase only — no branch I/O here; branch is separate fresh read.
+  defp classify_durable_claim_phase_for_join(
+         target,
+         token,
+         intent_id,
+         fingerprint,
+         operation_id
+       ) do
+    case Arbor.Agent.TemplateAuthorityReconciliationStore.fetch(target) do
+      {:ok, %{"operation_id" => ^operation_id} = op} ->
+        case Map.get(op, "runtime_restore_admission") do
+          %{
+            "operation_id" => ^operation_id,
+            "token" => ^token,
+            "intent_id" => ^intent_id,
+            "fingerprint" => ^fingerprint,
+            "claim_phase" => "bound",
+            "settlement" => nil
+          } ->
+            :bound_hold
+
+          %{
+            "operation_id" => ^operation_id,
+            "token" => ^token,
+            "intent_id" => ^intent_id,
+            "fingerprint" => ^fingerprint,
+            "claim_phase" => "outcome_unknown"
+          } ->
+            :outcome_unknown_hold
+
+          %{
+            "operation_id" => ^operation_id,
+            "token" => ^token,
+            "intent_id" => nil,
+            "fingerprint" => nil,
+            "claim_phase" => "minted",
+            "settlement" => nil
+          } ->
+            :minted_pre_effect
+
+          %{
+            "operation_id" => ^operation_id,
+            "token" => ^token,
+            "claim_phase" => "settled",
+            "settlement" => %{"outcome" => "applied"}
+          } ->
+            :settled_applied
+
+          %{
+            "operation_id" => ^operation_id,
+            "token" => ^token,
+            "claim_phase" => "settled"
+          } ->
+            :settled_other
+
+          nil ->
+            :claim_absent
+
+          _ ->
+            :claim_mismatch
+        end
+
+      {:ok, _other_operation} ->
+        :claim_mismatch
+
+      {:error, _} ->
+        :join_unavailable
+    end
+  end
+
+  # Outside-callback only. Any running occupancy prevents minted pre-effect.
+  defp fresh_branch_fact_for_claim_join(target) when is_binary(target) do
+    case Arbor.Agent.BranchSupervisor.observe_admission(target) do
+      :not_running ->
+        :not_running
+
+      {:running, _pid, :none} ->
+        :bare
+
+      {:running, _pid, {:ok, %{kind: :ordinary_start}}} ->
+        :ordinary
+
+      {:running, _pid, {:ok, %{kind: :guarded_restore, intent_id: id}}} when is_binary(id) ->
+        {:guarded, id}
+
+      {:running, _pid, {:ok, _}} ->
+        :bare
+
+      _ ->
+        :observe_failed
+    end
+  rescue
+    _ -> :observe_failed
+  catch
+    :exit, _ -> :observe_failed
+  end
+
+  defp handle_runtime_admission_claim_joined(state, join_ref, result)
+       when is_reference(join_ref) and is_map(result) do
+    state = ensure_runtime_admission_shape(state)
+    pending = Map.get(state, :runtime_admission_pending_claim_join, %{})
+
+    case Map.get(pending, join_ref) do
+      nil ->
+        # Stale/duplicate result — inert.
+        state
+
+      meta when is_map(meta) ->
+        # Wrong worker / forged identity must not clear the live pending join.
+        if not claim_join_result_authentic?(meta, result) do
+          state
+        else
+          rest = Map.delete(pending, join_ref)
+
+          state =
+            state
+            |> put_in([:runtime_admission_pending_claim_join], rest)
+            |> clear_claim_join_observer_tracking(meta)
+
+          intent = Map.get(state.runtime_admission_intents, meta.target)
+
+          if claim_join_intent_current?(intent, meta) do
+            apply_claim_join_classification(state, meta, result)
+          else
+            # Authentic worker but intent advanced — inert.
+            state
+          end
+        end
+
+      _ ->
+        state
+    end
+  end
+
+  defp handle_runtime_admission_claim_joined(state, _join_ref, _other), do: state
+
+  defp claim_join_result_authentic?(meta, result)
+       when is_map(meta) and is_map(result) do
+    is_pid(Map.get(meta, :observer_pid)) and
+      is_pid(Map.get(meta, :worker_pid)) and
+      Map.get(meta, :worker_pid) == Map.get(meta, :observer_pid) and
+      Map.get(result, :worker_pid) == Map.get(meta, :observer_pid) and
+      Map.get(result, :target) == meta.target and
+      Map.get(result, :token) == meta.token and
+      Map.get(result, :intent_id) == meta.intent_id and
+      Map.get(result, :fingerprint) == meta.fingerprint and
+      is_binary(Map.get(meta, :operation_id)) and
+      Map.get(result, :operation_id) == meta.operation_id and
+      is_atom(Map.get(result, :classification))
+  end
+
+  defp claim_join_result_authentic?(_, _), do: false
+
+  defp claim_join_intent_current?(intent, meta) when is_map(intent) and is_map(meta) do
+    intent.intent_id == meta.intent_id and
+      Map.get(intent, :fingerprint) == meta.fingerprint and
+      Map.get(intent, :restore_token) == meta.token and
+      Map.get(intent, :operation_id) == Map.get(meta, :operation_id) and
+      Map.get(intent, :kind) == :guarded_restore and
+      Map.get(intent, :phase) == :outcome_unknown and
+      Map.get(intent, :phase) != :terminal and
+      Map.get(intent, :phase) != :settling
+  end
+
+  defp claim_join_intent_current?(_, _), do: false
+
+  defp handle_runtime_admission_claim_join_timeout(state, join_ref)
+       when is_reference(join_ref) do
+    state = ensure_runtime_admission_shape(state)
+    pending = Map.get(state, :runtime_admission_pending_claim_join, %{})
+
+    case Map.pop(pending, join_ref) do
+      {nil, _} ->
+        # Stale timeout — inert.
+        state
+
+      {meta, rest} when is_map(meta) ->
+        state =
+          state
+          |> put_in([:runtime_admission_pending_claim_join], rest)
+          |> clear_claim_join_observer_tracking(meta)
+
+        case Map.get(meta, :observer_pid) do
+          pid when is_pid(pid) ->
+            if Process.alive?(pid), do: Process.exit(pid, :kill)
+
+          _ ->
+            :ok
+        end
+
+        retry_or_exhaust_claim_join(state, meta, :observer_timeout)
+
+      _ ->
+        state
+    end
+  end
+
+  defp handle_runtime_admission_claim_join_monitor_down(state, mon, join_ref)
+       when is_reference(mon) and is_reference(join_ref) do
+    state = ensure_runtime_admission_shape(state)
+    join_mons = Map.get(state, :runtime_admission_claim_join_monitors, %{})
+    state = put_in(state, [:runtime_admission_claim_join_monitors], Map.delete(join_mons, mon))
+
+    pending = Map.get(state, :runtime_admission_pending_claim_join, %{})
+
+    case Map.get(pending, join_ref) do
+      %{mon: ^mon} = meta ->
+        # Observer exited before/without a delivered result. Prefer the result
+        # message if it races ahead; pure crash converges via bounded timer.
+        updated = %{meta | mon: nil, observer_pid: nil, worker_pid: nil}
+        put_in(state, [:runtime_admission_pending_claim_join, join_ref], updated)
+
+      _ ->
+        # Result or timeout already converged this ref — inert.
+        state
+    end
+  end
+
+  defp clear_claim_join_observer_tracking(state, meta) when is_map(meta) do
+    state =
+      case Map.get(meta, :timer) do
+        timer when is_reference(timer) ->
+          _ = Process.cancel_timer(timer)
+          state
+
+        _ ->
+          state
+      end
+
+    case Map.get(meta, :mon) do
+      mon when is_reference(mon) ->
+        Process.demonitor(mon, [:flush])
+        join_mons = Map.get(state, :runtime_admission_claim_join_monitors, %{})
+        put_in(state, [:runtime_admission_claim_join_monitors], Map.delete(join_mons, mon))
+
+      _ ->
+        state
+    end
+  end
+
+  defp retry_or_exhaust_claim_join(state, meta, reason) when is_map(meta) do
+    attempt = Map.get(meta, :attempt, 0)
+    next = attempt + 1
+    target = meta.target
+    intent = Map.get(state.runtime_admission_intents, target)
+    request = claim_join_request_from_meta(meta)
+
+    cond do
+      not claim_join_intent_current?(intent, meta) ->
+        state
+
+      next >= @max_runtime_admission_claim_join_attempts ->
+        state =
+          put_claim_join_progress(
+            state,
+            request,
+            :exhausted,
+            attempt,
+            reason
+          )
+
+        # Conservatively blocked — never pre-effect on exhaustion.
+        ensure_parked_unknown(state, target, intent)
+
+      true ->
+        state = put_claim_join_progress(state, request, :retry, attempt, reason)
+
+        Process.send_after(
+          self(),
+          {:runtime_admission_claim_join_retry, request, next},
+          durable_shell_launch_backoff_ms(attempt)
+        )
+
+        state
+    end
+  end
+
+  defp claim_join_request_from_meta(meta) when is_map(meta) do
+    %{
+      target: Map.get(meta, :target),
+      intent_id: Map.get(meta, :intent_id),
+      fingerprint: Map.get(meta, :fingerprint),
+      token: Map.get(meta, :token),
+      operation_id: Map.get(meta, :operation_id),
+      monitored_owner_pid: Map.get(meta, :monitored_owner_pid)
+    }
+  end
+
+  defp apply_claim_join_classification(state, meta, result)
+       when is_map(meta) and is_map(result) do
+    target = meta.target
+    intent = Map.get(state.runtime_admission_intents, target)
+    classification = Map.get(result, :classification)
+    branch_fact = Map.get(result, :branch_fact)
+
+    cond do
+      not is_map(intent) or intent.intent_id != meta.intent_id ->
+        state
+
+      classification == :join_unavailable ->
+        retry_or_exhaust_claim_join(state, meta, :join_unavailable)
+
+      classification in [:bound_hold, :outcome_unknown_hold, :claim_mismatch, :occupancy_hold] ->
+        # Hold non-idle. Bound → mark durable unknown; occupancy never pre-effect.
+        state = delete_claim_join_progress(state, meta)
+
+        state = ensure_parked_unknown(state, target, intent)
+
+        if classification == :bound_hold do
+          launch_durable_mark_outcome_unknown(state, intent)
+        else
+          state
+        end
+
+      classification == :minted_pre_effect and branch_fact == :not_running ->
+        # TaskStore-auth pre-effect proof: durable settle not_applied then retire.
+        state = delete_claim_join_progress(state, meta)
+
+        immediate_finalize_runtime_admission(
+          state,
+          target,
+          intent.intent_id,
+          {:commit, {:error, :pre_effect_abort}}
+        )
+
+      classification == :minted_pre_effect ->
+        # Occupancy / failed observation must not finalize pre-effect.
+        state = delete_claim_join_progress(state, meta)
+
+        ensure_parked_unknown(state, target, intent)
+
+      classification == :settled_applied ->
+        # Durable already applied without live witness here — keep unknown hold.
+        state = delete_claim_join_progress(state, meta)
+
+        ensure_parked_unknown(state, target, intent)
+
+      classification == :settled_other ->
+        state = delete_claim_join_progress(state, meta)
+
+        immediate_finalize_runtime_admission(
+          state,
+          target,
+          intent.intent_id,
+          {:commit_durable_observed, {:error, :claim_settled_non_applied}}
+        )
+
+      classification == :claim_absent ->
+        state = delete_claim_join_progress(state, meta)
+
+        immediate_finalize_runtime_admission(
+          state,
+          target,
+          intent.intent_id,
+          {:commit_durable_observed, {:error, :owner_down}}
+        )
+
+      true ->
+        state = delete_claim_join_progress(state, meta)
+
+        ensure_parked_unknown(state, target, intent)
+    end
+  end
+
+  defp ensure_parked_unknown(state, target, intent) do
+    updated = %{
+      intent
+      | phase: :outcome_unknown,
+        owner_pid: nil,
+        worker_pid: Map.get(intent, :worker_pid),
+        retire_barrier: :none,
+        effect_handoff?: true
+    }
+
+    put_in(state, [:runtime_admission_intents, target], updated)
   end
 
   # ── Runtime-admission restart reconcile ────────────────────────────
@@ -5890,6 +9863,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     state = ensure_runtime_admission_shape(state)
     ref = make_ref()
     store_ref = Map.get(state, :store_ref, @default_name)
+    attempts = Map.get(state.runtime_admission_reconcile, :attempts, 0)
 
     supervisor =
       Map.get(state, :runtime_admission_supervisor, @default_runtime_admission_supervisor)
@@ -5911,7 +9885,8 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
         ref,
         task_supervisor,
         supervisor,
-        timeout + 1_000
+        timeout + 1_000,
+        attempts
       ])
 
     rec = %{
@@ -5922,7 +9897,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
       worker_pid: nil,
       worker_mon: nil,
       timer: timer,
-      attempts: Map.get(state.runtime_admission_reconcile, :attempts, 0)
+      attempts: attempts
     }
 
     put_in(state, [:runtime_admission_reconcile], rec)
@@ -5934,13 +9909,14 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
         ref,
         task_supervisor,
         owner_supervisor,
-        begin_wait_ms
+        begin_wait_ms,
+        attempt
       ) do
     case Task.Supervisor.start_child(
            task_supervisor,
            __MODULE__,
            :run_runtime_admission_reconcile_worker,
-           [store_ref, ref, owner_supervisor, begin_wait_ms],
+           [store_ref, ref, owner_supervisor, begin_wait_ms, attempt],
            []
          ) do
       {:ok, worker_pid} when is_pid(worker_pid) ->
@@ -5968,16 +9944,126 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   end
 
   @doc false
-  def run_runtime_admission_reconcile_worker(store_ref, ref, owner_supervisor, begin_wait_ms) do
+  def run_runtime_admission_reconcile_worker(
+        store_ref,
+        ref,
+        owner_supervisor,
+        begin_wait_ms,
+        attempt
+      ) do
     receive do
       {:runtime_admission_reconcile_begin, ^ref} ->
-        result = inventory_runtime_admission_owners(owner_supervisor)
+        # I/O outside TaskStore callbacks: live owners + durable restore claims.
+        # Success is a closed versioned dual-inventory envelope bound to this
+        # attempt/ref/worker — never a bare owner list.
+        result =
+          case inventory_runtime_admission_owners(owner_supervisor) do
+            {:ok, snapshots} ->
+              case inventory_runtime_restore_claims() do
+                {:ok, claims} ->
+                  {:ok,
+                   %{
+                     v: @runtime_admission_reconcile_result_v,
+                     ref: ref,
+                     attempt: attempt,
+                     worker_pid: self(),
+                     owners: snapshots,
+                     claims: claims
+                   }}
+
+                {:error, reason} ->
+                  {:error, reason}
+              end
+
+            {:error, reason} ->
+              {:error, reason}
+          end
+
         send(store_ref, {:runtime_admission_reconcile_complete, ref, result})
         :ok
     after
       begin_wait_ms ->
         :ok
     end
+  end
+
+  # Fixed production inventory of outstanding restore claims. Runs only in the
+  # async reconcile worker — never inside TaskStore.handle_call.
+  # Production: every unavailable/malformed durable inventory fails closed
+  # (readiness stays false). Never maps authority errors to {:ok, []}.
+  defp inventory_runtime_restore_claims do
+    # Test hang seam (prod no-op): hold inventory so tests can inject stale results.
+    hang_runtime_admission_claim_inventory_if_requested()
+
+    # MIX_ENV=test force-error seam (absent from production call shape defaults).
+    if Mix.env() == :test and
+         Application.get_env(:arbor_agent, :runtime_admission_test_claim_inventory_force_error) ==
+           true do
+      {:error, :restore_claim_inventory_unavailable}
+    else
+      case Arbor.Agent.TemplateAuthorityReconciliationStore.list_outstanding_runtime_restore_claims() do
+        {:ok, claims} when is_list(claims) ->
+          if Mix.env() == :test and
+               Application.get_env(
+                 :arbor_agent,
+                 :runtime_admission_test_claim_inventory_malformed
+               ) == true do
+            # Malformed inventory must fail closed at pure merge / readiness.
+            {:ok, [%{"claim_phase" => "bound", "target_agent_id" => "agent_malformed_only"}]}
+          else
+            {:ok, claims}
+          end
+
+        {:error, reason} ->
+          inventory_runtime_restore_claims_error(reason)
+
+        _ ->
+          {:error, :restore_claim_inventory_unavailable}
+      end
+    end
+  rescue
+    _ -> {:error, :restore_claim_inventory_unavailable}
+  catch
+    :exit, _ -> {:error, :restore_claim_inventory_unavailable}
+  end
+
+  if Mix.env() == :test do
+    # Hold claim inventory so security regressions can inject stale/hot-upgrade
+    # reconcile results against a live running attempt. Absent from prod BEAMs
+    # as a no-op clause below.
+    defp hang_runtime_admission_claim_inventory_if_requested do
+      if Application.get_env(
+           :arbor_agent,
+           :runtime_admission_test_claim_inventory_hang
+         ) == true do
+        Process.sleep(50)
+        hang_runtime_admission_claim_inventory_if_requested()
+      else
+        :ok
+      end
+    end
+
+    # Explicit MIX_ENV=test-only bypass — absent from dev/prod BEAMs.
+    # Opt-in via Application env; never the default.
+    defp inventory_runtime_restore_claims_error(reason)
+         when reason in [:authority_not_durable, :authority_unavailable] do
+      if Application.get_env(
+           :arbor_agent,
+           :runtime_admission_empty_claim_inventory_on_authority_error
+         ) == true do
+        {:ok, []}
+      else
+        {:error, :restore_claim_inventory_unavailable}
+      end
+    end
+
+    defp inventory_runtime_restore_claims_error(_reason),
+      do: {:error, :restore_claim_inventory_unavailable}
+  else
+    defp hang_runtime_admission_claim_inventory_if_requested, do: :ok
+
+    defp inventory_runtime_restore_claims_error(_reason),
+      do: {:error, :restore_claim_inventory_unavailable}
   end
 
   defp inventory_runtime_admission_owners(owner_supervisor) do
@@ -6131,31 +10217,37 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     state = ensure_runtime_admission_shape(state)
     rec = state.runtime_admission_reconcile
 
+    # Bind to the exact in-flight attempt (ref + running worker) before cleanup
+    # so identity fields on the result can be checked against rec.
     if Map.get(rec, :ref) == ref and Map.get(rec, :status) == :running do
-      state = cleanup_runtime_admission_reconcile(state, rec)
+      case normalize_runtime_admission_reconcile_result(result, rec) do
+        {:ok, snapshots, claims} ->
+          state = cleanup_runtime_admission_reconcile(state, rec)
 
-      case result do
-        {:ok, snapshots} when is_list(snapshots) ->
-          case IntentCore.rebind_owners(%{}, snapshots) do
+          case IntentCore.merge_restore_claim_inventory(%{}, snapshots, claims) do
             {:ok, intents} ->
               by_id =
                 Enum.reduce(intents, %{}, fn {target, intent}, acc ->
                   Map.put(acc, intent.intent_id, target)
                 end)
 
-              # Re-monitor exact owner and worker identities from the fixed
-              # owner's snapshot. Dead PIDs produce immediate DOWN; liveness is
-              # never used as authority.
+              # Re-monitor exact owner and worker identities. Dead PIDs produce
+              # immediate DOWN; liveness is never used as authority. Blocking
+              # unknown intents (no owner) skip owner monitors.
               {owner_mons, worker_mons} =
                 Enum.reduce(intents, {%{}, %{}}, fn {_target, intent}, {owners, workers} ->
-                  owner_mon = Process.monitor(intent.owner_pid)
-
                   owners =
-                    Map.put(
-                      owners,
-                      owner_mon,
-                      {intent.intent_id, intent.target_agent_id, intent.owner_pid}
-                    )
+                    if is_pid(intent.owner_pid) do
+                      owner_mon = Process.monitor(intent.owner_pid)
+
+                      Map.put(
+                        owners,
+                        owner_mon,
+                        {intent.intent_id, intent.target_agent_id, intent.owner_pid}
+                      )
+                    else
+                      owners
+                    end
 
                   workers =
                     if is_pid(intent.worker_pid) do
@@ -6192,7 +10284,8 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
                    :duplicate_target,
                    :duplicate_intent_id,
                    :inventory_overflow,
-                   :invalid_inventory
+                   :invalid_inventory,
+                   :restore_claim_inventory_unavailable
                  ] ->
               # Fail closed: do not mark ready; surface bounded error for diagnostics.
               state =
@@ -6205,13 +10298,77 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
               schedule_runtime_admission_reconcile_retry(state)
           end
 
-        _ ->
+        :error ->
+          # Owner-only / unknown-version / identity mismatch / unclosed schema.
+          state = cleanup_runtime_admission_reconcile(state, rec)
+
+          state =
+            put_in(state, [:runtime_admission_reconcile], %{
+              status: :pending,
+              attempts: Map.get(rec, :attempts, 0),
+              last_error: :invalid_reconcile_result
+            })
+
           schedule_runtime_admission_reconcile_retry(state)
       end
     else
+      # Stale complete for a prior attempt/ref — ignore without mutating readiness.
       state
     end
   end
+
+  # Dual-inventory only. Rejects legacy owner-only {:ok, owners} and any result
+  # that is not the closed versioned schema bound to the current attempt/ref/worker.
+  defp normalize_runtime_admission_reconcile_result({:ok, map}, rec)
+       when is_map(map) and is_map(rec) do
+    with :ok <- require_closed_runtime_admission_reconcile_map(map),
+         :ok <- match_runtime_admission_reconcile_identity(map, rec),
+         owners when is_list(owners) <- Map.fetch!(map, :owners),
+         claims when is_list(claims) <- Map.fetch!(map, :claims) do
+      {:ok, owners, claims}
+    else
+      _ -> :error
+    end
+  end
+
+  # Explicit fail-closed: hot-upgrade / stale workers that only inventory owners
+  # must not synthesize claims=[] and mark ready.
+  defp normalize_runtime_admission_reconcile_result({:ok, owners}, _rec)
+       when is_list(owners),
+       do: :error
+
+  defp normalize_runtime_admission_reconcile_result(_, _), do: :error
+
+  defp require_closed_runtime_admission_reconcile_map(map) when is_map(map) do
+    keys = map |> Map.keys() |> MapSet.new()
+
+    if MapSet.equal?(keys, @runtime_admission_reconcile_result_keys) and
+         Map.get(map, :v) == @runtime_admission_reconcile_result_v do
+      :ok
+    else
+      :error
+    end
+  end
+
+  defp require_closed_runtime_admission_reconcile_map(_), do: :error
+
+  defp match_runtime_admission_reconcile_identity(map, rec)
+       when is_map(map) and is_map(rec) do
+    expected_ref = Map.get(rec, :ref)
+    expected_attempt = Map.get(rec, :attempts, 0)
+    expected_worker = Map.get(rec, :worker_pid)
+
+    if is_reference(expected_ref) and is_pid(expected_worker) and
+         Map.get(map, :ref) == expected_ref and
+         Map.get(map, :attempt) == expected_attempt and
+         Map.get(map, :worker_pid) == expected_worker do
+      :ok
+    else
+      :error
+    end
+  end
+
+  defp match_runtime_admission_reconcile_identity(_, _), do: :error
 
   defp handle_runtime_admission_reconcile_launcher_down(state, rec) do
     if Map.get(rec, :status) == :admitting do
@@ -6319,6 +10476,9 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   # waiting_approval tasks plus non-terminal runtime-admission intents; reserved
   # counts target-bound reservations. Never task ids, tokens, PIDs, capability
   # ids, or records.
+  #
+  # Callers (install/remove) must only invoke this after dual readiness so
+  # non-idle runtime-admission intents from claim inventory are visible.
   defp barrier_counts(state, target) do
     state = ensure_runtime_admission_shape(state)
 

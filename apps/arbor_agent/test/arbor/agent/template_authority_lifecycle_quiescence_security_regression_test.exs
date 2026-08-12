@@ -225,7 +225,9 @@ defmodule Arbor.Agent.TemplateAuthorityLifecycleQuiescenceSecurityRegressionTest
          fence: nil,
          verify_calls: 0,
          fail_after: Keyword.get(opts, :fail_after, :infinity),
+         fail_after_stop: Keyword.get(opts, :fail_after_stop, false),
          delay_on: Keyword.get(opts, :delay_on),
+         delay_after_stop: Keyword.get(opts, :delay_after_stop, false),
          delay_ms: Keyword.get(opts, :delay_ms, 0)
        }}
     end
@@ -247,19 +249,21 @@ defmodule Arbor.Agent.TemplateAuthorityLifecycleQuiescenceSecurityRegressionTest
 
     def handle_call({:verify_target_fence, id, op}, _from, s) do
       n = s.verify_calls + 1
+      stopped? = :ets.lookup(:c2b_calls, :stop_owner) != []
 
-      if s.delay_on == n and s.delay_ms > 0 do
+      if (s.delay_on == n or (s.delay_after_stop and stopped?)) and s.delay_ms > 0 do
         Process.sleep(s.delay_ms)
       end
 
-      reply = verify_reply(s, id, op, n)
+      reply = verify_reply(s, id, op, n, stopped?)
       {:reply, reply, %{s | verify_calls: n}}
     end
 
     def handle_call(_other, _from, s), do: {:reply, {:error, :unknown}, s}
 
-    defp verify_reply(s, id, op, n) do
+    defp verify_reply(s, id, op, n, stopped?) do
       cond do
+        s.fail_after_stop and stopped? -> {:error, :target_not_fenced}
         s.fail_after != :infinity and n > s.fail_after -> {:error, :target_not_fenced}
         s.fence == {id, op} -> :ok
         s.fence == nil -> {:error, :target_not_fenced}
@@ -919,12 +923,12 @@ defmodule Arbor.Agent.TemplateAuthorityLifecycleQuiescenceSecurityRegressionTest
     end
 
     test "security regression: deterministic fence loss during drain fails closed" do
-      # A counting TaskStore fake loses the fence on a FIXED drain iteration
-      # (the 4th verify_target_fence call) — no Process.sleep race. The first
-      # three verifies (initial quiesce, Reconciler barrier, stop-owner) pass.
+      # The fake loses the fence only after the exact-owner stop worker records
+      # completion, so pre-effect verification passes and the first drain
+      # verification fails without relying on a scheduler-sensitive call count.
       det =
         start_supervised!(
-          {DeterministicFenceStore, name: unique(:det), fail_after: 3},
+          {DeterministicFenceStore, name: unique(:det), fail_after_stop: true},
           id: unique(:det_id)
         )
 
@@ -1015,11 +1019,11 @@ defmodule Arbor.Agent.TemplateAuthorityLifecycleQuiescenceSecurityRegressionTest
     end
 
     test "security regression: delayed drain fence read cannot exceed the stop deadline" do
-      # The fourth verify is the first drain iteration, after the exact-owner stop
-      # has been released. It must still use the same absolute deadline.
+      # Delay only after the exact-owner stop worker records completion. This is
+      # the semantic drain boundary and does not depend on verification call order.
       det =
         start_supervised!(
-          {DeterministicFenceStore, name: unique(:det), delay_on: 4, delay_ms: 350},
+          {DeterministicFenceStore, name: unique(:det), delay_after_stop: true, delay_ms: 350},
           id: unique(:det_id)
         )
 

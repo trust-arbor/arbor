@@ -378,6 +378,93 @@ defmodule Arbor.Agent.Lifecycle do
     end
   end
 
+  @doc """
+  Execute guarded restore effects after TaskStore has bound this caller as worker.
+
+  Fixed internal entry for `GuardedRestoreWorker` only. Does **not** route through
+  `Lifecycle.start/2` or re-run ordinary authority preparation. Success requires
+  exact guarded branch witness match; bare/mismatched running branches are not adopted.
+  """
+  @spec guarded_restore_effects(String.t(), map()) :: {:ok, pid()} | {:error, term()}
+  def guarded_restore_effects(agent_id, witness)
+      when is_binary(agent_id) and is_map(witness) do
+    authenticate_and_run_guarded_restore_effects(
+      agent_id,
+      witness,
+      Arbor.Agent.Orchestration.TaskStore
+    )
+  end
+
+  if Mix.env() == :test do
+    @doc false
+    @spec guarded_restore_effects_for_test_store(String.t(), map(), atom() | pid() | tuple()) ::
+            {:ok, pid()} | {:error, term()}
+    def guarded_restore_effects_for_test_store(agent_id, witness, store_ref)
+        when is_binary(agent_id) and is_map(witness) and
+               (is_atom(store_ref) or is_pid(store_ref) or is_tuple(store_ref)) do
+      authenticate_and_run_guarded_restore_effects(agent_id, witness, store_ref)
+    end
+  end
+
+  defp authenticate_and_run_guarded_restore_effects(agent_id, witness, store_ref) do
+    with {:ok, intent_id, fingerprint, branch_witness} <-
+           validate_guarded_restore_witness(witness),
+         :ok <-
+           Arbor.Agent.Orchestration.TaskStore.authenticate_runtime_admission_worker(
+             agent_id,
+             intent_id,
+             fingerprint,
+             name: store_ref
+           ) do
+      do_guarded_restore_effects(agent_id, branch_witness)
+    end
+  end
+
+  # Closed exact atom-key schema via shared pure validator (no subset/alias fallback).
+  defp validate_guarded_restore_witness(witness) do
+    case Arbor.Agent.RuntimeAdmission.AdmissionWitness.admit_guarded(witness) do
+      {:ok, branch_witness} ->
+        {:ok, branch_witness.intent_id, branch_witness.fingerprint, branch_witness}
+
+      {:error, :invalid_guarded_restore_witness} = err ->
+        err
+    end
+  end
+
+  defp do_guarded_restore_effects(agent_id, branch_witness) do
+    # Single atomic observe_admission/1 — never split admission_witness/whereis
+    # (TOCTOU: matching branch can die and be replaced by bare/foreign between reads).
+    case BranchSupervisor.observe_admission(agent_id) do
+      {:running, pid,
+       {:ok,
+        %{
+          kind: :guarded_restore,
+          intent_id: intent_id,
+          fingerprint: fingerprint,
+          operation_id: operation_id,
+          token: token
+        }}}
+      when is_pid(pid) and intent_id == branch_witness.intent_id and
+             fingerprint == branch_witness.fingerprint and
+             operation_id == branch_witness.operation_id and token == branch_witness.token ->
+        ensure_registered(agent_id, pid, [])
+        {:ok, pid}
+
+      {:running, _pid, _} ->
+        {:error, :witness_mismatch}
+
+      :not_running ->
+        case restore(agent_id) do
+          {:ok, profile} ->
+            # Authority already committed by reconciliation — no prepare/activate.
+            do_start(profile, [], branch_witness)
+
+          {:error, _} = error ->
+            error
+        end
+    end
+  end
+
   defp do_ordinary_start_effects(agent_id, opts, branch_witness) do
     case restore(agent_id) do
       {:ok, profile} ->
@@ -467,6 +554,7 @@ defmodule Arbor.Agent.Lifecycle do
         heartbeat_opts: heartbeat_opts,
         authority_bootstraps: bootstraps,
         start_session: session_enabled,
+        admission_witness: witness,
         ordinary_admission_witness: witness
       ]
 
@@ -483,7 +571,7 @@ defmodule Arbor.Agent.Lifecycle do
           # slots. The running branch owns the winner's slots; close only the
           # losing call's freshly issued slots before returning idempotently.
           close_branch_authority_bootstraps(bootstraps)
-          {:ok, sup_pid}
+          accept_already_started_branch(agent_id, sup_pid, witness)
 
         {:error, reason} ->
           close_branch_authority_bootstraps(bootstraps)
@@ -491,6 +579,44 @@ defmodule Arbor.Agent.Lifecycle do
       end
     end
   end
+
+  # Ordinary: any running branch is acceptable. Guarded: exact witness + PID only.
+  # Require one observe_admission result: exact witness AND observed PID equals
+  # the supervisor PID returned by start — never return a dead/replaced PID.
+  defp accept_already_started_branch(agent_id, sup_pid, %{kind: :guarded_restore} = expected)
+       when is_pid(sup_pid) do
+    case BranchSupervisor.observe_admission(agent_id) do
+      {:running, observed_pid,
+       {:ok,
+        %{
+          kind: :guarded_restore,
+          intent_id: intent_id,
+          fingerprint: fingerprint,
+          operation_id: operation_id,
+          token: token
+        }}}
+      when is_pid(observed_pid) and observed_pid == sup_pid and
+             intent_id == expected.intent_id and fingerprint == expected.fingerprint and
+             operation_id == expected.operation_id and token == expected.token ->
+        {:ok, observed_pid}
+
+      {:running, _other_pid, _} ->
+        # Replacement or mismatched witness under same agent key — fail closed.
+        {:error, :witness_mismatch}
+
+      :not_running ->
+        {:error, :branch_missing_after_witness}
+
+      _ ->
+        {:error, :witness_mismatch}
+    end
+  end
+
+  defp accept_already_started_branch(_agent_id, sup_pid, _witness) when is_pid(sup_pid),
+    do: {:ok, sup_pid}
+
+  defp accept_already_started_branch(_agent_id, _sup_pid, _witness),
+    do: {:error, :branch_missing_after_witness}
 
   # Lifecycle is the only production caller that handles a decrypted signing
   # key. It converts that short-lived possession into two independent opaque

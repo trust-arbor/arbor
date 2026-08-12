@@ -40,6 +40,7 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationStore do
   # capability IDs, journal payloads, backend records, or backend exception
   # text.
 
+  alias Arbor.Agent.RuntimeRestoreAdmissionClaimCore, as: ClaimCore
   alias Arbor.Agent.TemplateAuthorityReconciliationOperationCore, as: Core
   alias Arbor.Contracts.Persistence.Record
   alias Arbor.Persistence
@@ -93,6 +94,17 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationStore do
           | :cas_conflict
           | :identity_changed
           | :outcome_unknown
+          | :restore_claim_protected
+          | :claim_settled
+          | :stale_claim
+          | :claim_not_found
+          | :invalid_claim
+          | :restore_fence_required
+          | :restore_phase_illegal
+          | :already_settled
+          | :not_found
+          | :not_owner
+          | :restore_claim_inventory_unavailable
 
   # -------------------------------------------------------------------------
   # Authority attestation
@@ -452,7 +464,9 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationStore do
     with :ok <- attest_authority(),
          :ok <- validate_target(observed.key),
          {:ok, observed_op} <- decode_operation(observed, observed.key),
+         :ok <- reject_generic_claim_transition(observed_op, next),
          {:ok, next_op} <- admit(next),
+         :ok <- reject_generic_claim_transition(observed_op, next_op),
          :ok <- same_target?(observed_op, next_op),
          :ok <- identity_preserved?(observed_op, next_op) do
       target = observed.key
@@ -461,6 +475,591 @@ defmodule Arbor.Agent.TemplateAuthorityReconciliationStore do
   end
 
   def compare_and_swap(_observed, _next), do: {:error, :invalid_request}
+
+  # Generic CAS must never create, preserve-and-advance, mutate, settle, or clear
+  # a restore-admission claim — including equality-preserving claim copies with
+  # phase/status/journal/terminal changes. Dedicated claim APIs only.
+  defp reject_generic_claim_transition(observed_op, next_op) do
+    claims = [
+      Map.get(observed_op, "runtime_restore_admission"),
+      Map.get(observed_op, :runtime_restore_admission),
+      Map.get(next_op, "runtime_restore_admission"),
+      Map.get(next_op, :runtime_restore_admission)
+    ]
+
+    if Enum.any?(claims, &ClaimCore.claim_present?/1) do
+      {:error, :restore_claim_protected}
+    else
+      :ok
+    end
+  end
+
+  # -------------------------------------------------------------------------
+  # Dedicated runtime-restore admission claim transitions (C3C1a1)
+  # -------------------------------------------------------------------------
+
+  # Hard ceiling for claim inventory projections (fail closed on overflow).
+  @max_restore_claim_inventory 256
+
+  @doc """
+  Mint or resume a durable runtime-restore admission claim for `target`.
+
+  Requires active operation in phase `runtime_restore` with installed fence.
+  Concurrent same-transition CAS conflict reobserves an existing non-settled
+  claim (begin idempotency); foreign successors remain conflict/unknown.
+
+  Callers **must** supply the exact expected `operation_id`. It must equal the
+  durable operation's `operation_id` (and any existing claim's `operation_id`)
+  **before** mint/resume; mismatches fail closed without durable mutation.
+  There is no 1-arity / `:from_durable_slot` begin — operation identity is
+  always bound at the begin boundary.
+  """
+  @spec begin_runtime_restore_admission(String.t(), String.t()) ::
+          {:ok, operation()} | {:error, redacted_error()}
+  def begin_runtime_restore_admission(target_agent_id, expected_operation_id)
+      when is_binary(target_agent_id) and is_binary(expected_operation_id) do
+    with :ok <- attest_authority(),
+         :ok <- validate_target(target_agent_id),
+         {:ok, observed} <- snapshot(target_agent_id),
+         {:ok, op} <- decode_operation(observed, target_agent_id),
+         :ok <- match_expected_operation_id(op, expected_operation_id) do
+      case Map.get(op, "runtime_restore_admission") do
+        claim when is_map(claim) ->
+          resume_existing_begin_claim(op, claim, expected_operation_id)
+
+        nil ->
+          with :ok <- require_restore_begin_preconditions(op),
+               # Randomness is an imperative-shell fact (CRC): mint here, inject into pure core.
+               token = mint_restore_admission_token(),
+               at = System.system_time(:millisecond),
+               {:ok, claim} <-
+                 ClaimCore.mint(
+                   %{
+                     "operation_id" => op["operation_id"],
+                     "target_agent_id" => op["target_agent_id"],
+                     "at_unix_ms" => at
+                   },
+                   token
+                 ),
+               next = Map.put(op, "runtime_restore_admission", claim) do
+            # Begin idempotency: concurrent mint races reobserve any non-settled
+            # claim for this op (exact token match optional — first writer wins).
+            commit_claim_transition(observed, next, fn durable_op ->
+              reobserve_begin_claim_successor(durable_op, expected_operation_id)
+            end)
+          end
+
+        _ ->
+          {:error, :invalid_claim}
+      end
+    end
+  end
+
+  def begin_runtime_restore_admission(_, _), do: {:error, :invalid_request}
+
+  defp match_expected_operation_id(%{"operation_id" => op_id}, expected)
+       when is_binary(op_id) and is_binary(expected) do
+    if op_id == expected, do: :ok, else: {:error, :not_owner}
+  end
+
+  defp match_expected_operation_id(_, _), do: {:error, :invalid_claim}
+
+  defp resume_existing_begin_claim(op, claim, expected_operation_id)
+       when is_binary(expected_operation_id) do
+    case ClaimCore.admit_claim(claim) do
+      {:ok, %{"claim_phase" => "settled"}} ->
+        {:error, :claim_settled}
+
+      {:ok, admitted} when is_map(admitted) ->
+        case match_claim_operation_id(admitted, op, expected_operation_id) do
+          :ok ->
+            {:ok, Map.put(op, "runtime_restore_admission", admitted)}
+
+          {:error, _} = err ->
+            err
+        end
+
+      {:error, _} ->
+        {:error, :invalid_claim}
+    end
+  end
+
+  defp match_claim_operation_id(claim, op, expected) when is_binary(expected) do
+    cond do
+      claim["operation_id"] != expected ->
+        {:error, :not_owner}
+
+      op["operation_id"] != expected ->
+        {:error, :not_owner}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp reobserve_begin_claim_successor(durable_op, expected_operation_id) do
+    case Map.get(durable_op, "runtime_restore_admission") do
+      %{"claim_phase" => "settled"} ->
+        {:error, :claim_settled}
+
+      claim when is_map(claim) ->
+        case ClaimCore.admit_claim(claim) do
+          {:ok, admitted} when is_map(admitted) ->
+            if Map.get(admitted, "claim_phase") == "settled" do
+              {:error, :claim_settled}
+            else
+              case match_claim_operation_id(admitted, durable_op, expected_operation_id) do
+                :ok ->
+                  {:ok, Map.put(durable_op, "runtime_restore_admission", admitted)}
+
+                {:error, _} = err ->
+                  err
+              end
+            end
+
+          {:ok, _} ->
+            {:error, :claim_settled}
+
+          {:error, _} ->
+            {:error, :invalid_claim}
+        end
+
+      nil ->
+        {:error, :cas_conflict}
+
+      _ ->
+        {:error, :invalid_claim}
+    end
+  end
+
+  defp require_restore_begin_preconditions(%{
+         "status" => "active",
+         "phase" => "runtime_restore",
+         "fence_state" => %{"installed" => true, "cleanup_acked" => false}
+       }),
+       do: :ok
+
+  defp require_restore_begin_preconditions(%{"fence_state" => %{"installed" => false}}),
+    do: {:error, :restore_fence_required}
+
+  defp require_restore_begin_preconditions(_), do: {:error, :restore_phase_illegal}
+
+  # Shell-owned restore token mint (exact claim grammar). Randomness stays out
+  # of RuntimeRestoreAdmissionClaimCore; pure `mint/2` receives the token.
+  defp mint_restore_admission_token do
+    "rrt_" <> Base.url_encode64(:crypto.strong_rand_bytes(16), padding: false)
+  end
+
+  @doc """
+  Bind store-minted intent_id + fingerprint onto the durable claim.
+
+  Accepts minted→bound or exact already-bound only (§2.2). Never reports bind
+  success for `outcome_unknown` or settled (not release permission).
+  """
+  @spec bind_runtime_restore_intent(String.t(), String.t(), String.t()) ::
+          {:ok, operation()} | {:error, redacted_error()}
+  def bind_runtime_restore_intent(target_agent_id, token, intent_id)
+      when is_binary(target_agent_id) and is_binary(token) and is_binary(intent_id) do
+    with :ok <- attest_authority(),
+         :ok <- validate_target(target_agent_id),
+         {:ok, observed} <- snapshot(target_agent_id),
+         {:ok, op} <- decode_operation(observed, target_agent_id),
+         {:ok, claim} <- require_claim(op),
+         true <- claim["token"] == token,
+         fingerprint =
+           ClaimCore.fingerprint(
+             claim["operation_id"],
+             claim["target_agent_id"],
+             claim["fence_operation_id"],
+             token,
+             intent_id
+           ),
+         at = System.system_time(:millisecond),
+         {:ok, next_claim} <- ClaimCore.bind_intent(claim, intent_id, fingerprint, at),
+         next = Map.put(op, "runtime_restore_admission", next_claim) do
+      if claim == next_claim do
+        # Exact already-bound idempotency: reobserve durable so concurrent
+        # mark/settle between snapshot and return cannot report bind success.
+        reobserve_claim_transition(
+          target_agent_id,
+          fn durable_op ->
+            reobserve_bound_claim(durable_op, token, intent_id, fingerprint)
+          end,
+          :cas_conflict
+        )
+      else
+        commit_claim_transition(observed, next, fn durable_op ->
+          reobserve_bound_claim(durable_op, token, intent_id, fingerprint)
+        end)
+      end
+    else
+      false -> {:error, :stale_claim}
+      {:error, _} = err -> err
+      _ -> {:error, :stale_claim}
+    end
+  end
+
+  def bind_runtime_restore_intent(_, _, _), do: {:error, :invalid_request}
+
+  # Bind CAS/idempotent reobserve: only exact unsettled `bound` is a successful
+  # same-transition successor. outcome_unknown/settled are foreign for bind
+  # (do not report as bind success — not release permission).
+  defp reobserve_bound_claim(durable_op, token, intent_id, fingerprint) do
+    case Map.get(durable_op, "runtime_restore_admission") do
+      %{
+        "token" => ^token,
+        "intent_id" => ^intent_id,
+        "fingerprint" => ^fingerprint,
+        "claim_phase" => "bound",
+        "settlement" => nil
+      } = c ->
+        case ClaimCore.admit_claim(c) do
+          {:ok, admitted} when is_map(admitted) ->
+            {:ok, Map.put(durable_op, "runtime_restore_admission", admitted)}
+
+          _ ->
+            {:error, :invalid_claim}
+        end
+
+      %{
+        "token" => ^token,
+        "claim_phase" => "outcome_unknown"
+      } ->
+        # Concurrent mark won, or snapshot was already unknown — not bind success.
+        {:error, :restore_phase_illegal}
+
+      %{
+        "token" => ^token,
+        "claim_phase" => "settled"
+      } ->
+        {:error, :claim_settled}
+
+      %{"token" => ^token} ->
+        {:error, :cas_conflict}
+
+      _ ->
+        {:error, :cas_conflict}
+    end
+  end
+
+  @doc "Mark a bound claim outcome_unknown after post-handoff indeterminate observation."
+  @spec mark_runtime_restore_outcome_unknown(String.t(), String.t()) ::
+          {:ok, operation()} | {:error, redacted_error()}
+  def mark_runtime_restore_outcome_unknown(target_agent_id, token)
+      when is_binary(target_agent_id) and is_binary(token) do
+    with :ok <- attest_authority(),
+         :ok <- validate_target(target_agent_id),
+         {:ok, observed} <- snapshot(target_agent_id),
+         {:ok, op} <- decode_operation(observed, target_agent_id),
+         {:ok, claim} <- require_claim(op),
+         true <- claim["token"] == token,
+         at = System.system_time(:millisecond),
+         {:ok, next_claim} <- ClaimCore.mark_outcome_unknown(claim, at),
+         next = Map.put(op, "runtime_restore_admission", next_claim) do
+      if claim == next_claim do
+        {:ok, next}
+      else
+        commit_claim_transition(observed, next, fn durable_op ->
+          reobserve_outcome_unknown_claim(durable_op, token, claim)
+        end)
+      end
+    else
+      false -> {:error, :stale_claim}
+      {:error, _} = err -> err
+      _ -> {:error, :stale_claim}
+    end
+  end
+
+  def mark_runtime_restore_outcome_unknown(_, _), do: {:error, :invalid_request}
+
+  defp reobserve_outcome_unknown_claim(durable_op, token, prior_claim) do
+    prior_intent_id = Map.get(prior_claim, "intent_id")
+    prior_fingerprint = Map.get(prior_claim, "fingerprint")
+
+    case Map.get(durable_op, "runtime_restore_admission") do
+      %{
+        "token" => ^token,
+        "claim_phase" => "outcome_unknown",
+        "intent_id" => ^prior_intent_id,
+        "fingerprint" => ^prior_fingerprint
+      } = c ->
+        case ClaimCore.admit_claim(c) do
+          {:ok, admitted} when is_map(admitted) ->
+            {:ok, Map.put(durable_op, "runtime_restore_admission", admitted)}
+
+          _ ->
+            {:error, :invalid_claim}
+        end
+
+      _ ->
+        {:error, :cas_conflict}
+    end
+  end
+
+  @doc """
+  First-settlement-wins durable settle for a restore-admission claim.
+
+  Settlement legality is derived only from durable claim phase (no caller
+  handoff flags): `not_applied` only when claim is still `minted`; `applied`
+  only with exact bound identity.
+  """
+  @spec settle_runtime_restore_admission(String.t(), String.t(), map()) ::
+          {:ok, operation()} | {:error, redacted_error()}
+  def settle_runtime_restore_admission(target_agent_id, token, settlement)
+      when is_binary(target_agent_id) and is_binary(token) and is_map(settlement) do
+    with :ok <- attest_authority(),
+         :ok <- validate_target(target_agent_id),
+         {:ok, observed} <- snapshot(target_agent_id),
+         {:ok, op} <- decode_operation(observed, target_agent_id),
+         {:ok, claim} <- require_claim(op),
+         true <- claim["token"] == token,
+         {:ok, next_claim} <- ClaimCore.settle(claim, settlement),
+         next = Map.put(op, "runtime_restore_admission", next_claim) do
+      if claim == next_claim do
+        {:ok, next}
+      else
+        commit_claim_transition(observed, next, fn durable_op ->
+          reobserve_settled_claim(durable_op, token, next_claim["settlement"])
+        end)
+      end
+    else
+      false -> {:error, :stale_claim}
+      {:error, _} = err -> err
+      _ -> {:error, :stale_claim}
+    end
+  end
+
+  def settle_runtime_restore_admission(_, _, _), do: {:error, :invalid_request}
+
+  defp reobserve_settled_claim(durable_op, token, expected_settlement) do
+    case Map.get(durable_op, "runtime_restore_admission") do
+      %{"token" => ^token, "claim_phase" => "settled", "settlement" => settlement} = c
+      when is_map(settlement) ->
+        cond do
+          # Same outcome+reason: first timestamp/record is the exact logical successor.
+          ClaimCore.settlement_same_terminal?(settlement, expected_settlement) ->
+            case ClaimCore.admit_claim(c) do
+              {:ok, admitted} when is_map(admitted) ->
+                {:ok, Map.put(durable_op, "runtime_restore_admission", admitted)}
+
+              _ ->
+                {:error, :invalid_claim}
+            end
+
+          true ->
+            # First settlement wins — different terminal is not our successor.
+            {:error, :already_settled}
+        end
+
+      %{"token" => ^token} ->
+        {:error, :cas_conflict}
+
+      _ ->
+        {:error, :cas_conflict}
+    end
+  end
+
+  @doc """
+  Clear a settled restore-admission claim (exact token).
+
+  A **nil** claim does **not** authorize clear — returns `{:error, :not_found}`.
+  Only an exact-token claim that satisfies `ClaimCore.clear_precondition?/1`
+  (settled) may be cleared.
+  """
+  @spec clear_runtime_restore_admission(String.t(), String.t()) ::
+          {:ok, operation()} | {:error, redacted_error()}
+  def clear_runtime_restore_admission(target_agent_id, token)
+      when is_binary(target_agent_id) and is_binary(token) do
+    with :ok <- attest_authority(),
+         :ok <- validate_target(target_agent_id),
+         {:ok, observed} <- snapshot(target_agent_id),
+         {:ok, op} <- decode_operation(observed, target_agent_id) do
+      case Map.get(op, "runtime_restore_admission") do
+        nil ->
+          # Nil claim cannot authorize clear (not idempotent success).
+          {:error, :not_found}
+
+        claim when is_map(claim) ->
+          cond do
+            claim["token"] != token ->
+              {:error, :stale_claim}
+
+            not ClaimCore.clear_precondition?(claim) ->
+              {:error, :restore_phase_illegal}
+
+            true ->
+              next = Map.put(op, "runtime_restore_admission", nil)
+
+              commit_claim_transition(observed, next, fn durable_op ->
+                case Map.get(durable_op, "runtime_restore_admission") do
+                  nil ->
+                    {:ok, durable_op}
+
+                  %{"token" => ^token} ->
+                    {:error, :cas_conflict}
+
+                  _ ->
+                    {:error, :cas_conflict}
+                end
+              end)
+          end
+
+        _ ->
+          {:error, :invalid_claim}
+      end
+    end
+  end
+
+  def clear_runtime_restore_admission(_, _), do: {:error, :invalid_request}
+
+  @doc """
+  Non-settled runtime-restore admission claims across all authoritative slots.
+
+  Inspects every decoded operation slot (not only `outstanding?/1` operations),
+  so a non-settled claim on a non-outstanding record is never silently omitted.
+  Fails closed on malformed state or inventory overflow.
+  """
+  @spec list_outstanding_runtime_restore_claims() ::
+          {:ok, [map()]} | {:error, redacted_error()}
+  def list_outstanding_runtime_restore_claims do
+    with :ok <- attest_authority(),
+         {:ok, keys} <- authoritative_keys(),
+         true <- length(keys) <= @max_restore_claim_inventory,
+         {:ok, records} <- fetch_all(keys),
+         {:ok, operations} <- decode_inventory(records) do
+      operations
+      |> Enum.reduce_while({:ok, []}, fn op, {:ok, acc} ->
+        if length(acc) >= @max_restore_claim_inventory do
+          {:halt, {:error, :restore_claim_inventory_unavailable}}
+        else
+          case Map.get(op, "runtime_restore_admission") do
+            nil ->
+              {:cont, {:ok, acc}}
+
+            claim when is_map(claim) ->
+              # Full operation admit already ran in decode_inventory (claim vs op).
+              case ClaimCore.admit_claim(claim) do
+                {:ok, %{"claim_phase" => "settled"}} ->
+                  {:cont, {:ok, acc}}
+
+                {:ok, admitted} when is_map(admitted) ->
+                  {:cont, {:ok, [project_claim(admitted) | acc]}}
+
+                {:error, _} ->
+                  {:halt, {:error, :restore_claim_inventory_unavailable}}
+              end
+
+            _ ->
+              {:halt, {:error, :restore_claim_inventory_unavailable}}
+          end
+        end
+      end)
+      |> case do
+        {:ok, list} ->
+          {:ok,
+           list
+           |> Enum.reverse()
+           |> Enum.sort_by(& &1["target_agent_id"])}
+
+        {:error, _} = err ->
+          err
+      end
+    else
+      false ->
+        {:error, :restore_claim_inventory_unavailable}
+
+      {:error, _} = err ->
+        case err do
+          {:error, :authority_not_durable} = e -> e
+          {:error, :authority_unavailable} = e -> e
+          _ -> {:error, :restore_claim_inventory_unavailable}
+        end
+    end
+  end
+
+  defp project_claim(claim) do
+    %{
+      "operation_id" => claim["operation_id"],
+      "target_agent_id" => claim["target_agent_id"],
+      "token" => claim["token"],
+      "intent_id" => claim["intent_id"],
+      "fingerprint" => claim["fingerprint"],
+      "claim_phase" => claim["claim_phase"],
+      "fence_operation_id" => claim["fence_operation_id"]
+    }
+  end
+
+  defp require_claim(op) do
+    case Map.get(op, "runtime_restore_admission") do
+      nil ->
+        {:error, :claim_not_found}
+
+      claim when is_map(claim) ->
+        case ClaimCore.admit_claim(claim) do
+          {:ok, admitted} when is_map(admitted) -> {:ok, admitted}
+          {:error, _} -> {:error, :invalid_claim}
+        end
+
+      _ ->
+        {:error, :invalid_claim}
+    end
+  end
+
+  # Commit a dedicated claim transition. On success return the admitted durable
+  # operation. On cas_conflict/outcome_unknown, reobserve via `accept_fn` so
+  # concurrent same-transition successors are idempotent; foreign successors
+  # remain conflict/unknown.
+  defp commit_claim_transition(%Record{} = observed, next_op, accept_fn)
+       when is_map(next_op) and is_function(accept_fn, 1) do
+    target = observed.key
+
+    case claim_cas(observed, next_op) do
+      {:ok, %Record{} = stored} ->
+        case decode_operation(stored, target) do
+          {:ok, op} -> {:ok, op}
+          {:error, _} = err -> err
+        end
+
+      {:error, reason} when reason in [:cas_conflict, :outcome_unknown] ->
+        reobserve_claim_transition(target, accept_fn, reason)
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  defp reobserve_claim_transition(target, accept_fn, original_reason) do
+    case fetch_record(target) do
+      {:ok, record} ->
+        case decode_operation(record, target) do
+          {:ok, op} ->
+            case accept_fn.(op) do
+              {:ok, _} = ok -> ok
+              {:error, _} = err -> err
+            end
+
+          {:error, _} ->
+            {:error, original_reason}
+        end
+
+      {:error, :not_found} ->
+        {:error, original_reason}
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  # Dedicated claim CAS — bypasses generic claim protection by design.
+  defp claim_cas(%Record{} = observed, next_op) when is_map(next_op) do
+    with :ok <- validate_target(observed.key),
+         {:ok, observed_op} <- decode_operation(observed, observed.key),
+         {:ok, next} <- admit(next_op),
+         :ok <- same_target?(observed_op, next),
+         :ok <- identity_preserved?(observed_op, next) do
+      do_update(observed.key, observed, next)
+    end
+  end
 
   defp do_update(target, observed, next_op) do
     # Record CAS fences on generation+revision only, so first authoritatively

@@ -43,7 +43,21 @@ defmodule Arbor.Agent.RuntimeAdmission.WaiterLifecycleSecurityRegressionTest do
     })
 
     Application.put_env(:arbor_agent, :runtime_admission_test_hold, %{timeout_ms: 30_000})
-    on_exit(fn -> Application.delete_env(:arbor_agent, :runtime_admission_test_hold) end)
+
+    Application.put_env(
+      :arbor_agent,
+      :runtime_admission_empty_claim_inventory_on_authority_error,
+      true
+    )
+
+    on_exit(fn ->
+      Application.delete_env(:arbor_agent, :runtime_admission_test_hold)
+
+      Application.delete_env(
+        :arbor_agent,
+        :runtime_admission_empty_claim_inventory_on_authority_error
+      )
+    end)
 
     %{store: store, ra_sup: ra_sup, task_sup: task_sup}
   end

@@ -25,7 +25,7 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentCore do
   @type intent :: %{
           required(:intent_id) => String.t(),
           required(:target_agent_id) => String.t(),
-          required(:kind) => :ordinary_start,
+          required(:kind) => :ordinary_start | :guarded_restore,
           required(:fingerprint) => String.t(),
           required(:phase) => phase(),
           optional(:owner_pid) => pid() | nil,
@@ -35,7 +35,10 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentCore do
           optional(:launch_ref) => reference() | nil,
           optional(:launcher_pid) => pid() | nil,
           optional(:launcher_mon) => reference() | nil,
-          optional(:launcher_attempt_index) => non_neg_integer()
+          optional(:launcher_attempt_index) => non_neg_integer(),
+          optional(:operation_id) => String.t(),
+          optional(:restore_token) => String.t(),
+          optional(:effect_handoff?) => boolean()
         }
 
   @type fence_map :: %{optional(String.t()) => String.t()}
@@ -149,11 +152,198 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentCore do
         launch_ref: nil,
         launcher_pid: nil,
         launcher_mon: nil,
-        launcher_attempt_index: 0
+        launcher_attempt_index: 0,
+        effect_handoff?: false
       }
 
       new_intents = Map.put(intents, target, intent)
       {:ok, :admitted, intent, new_intents, [{:launch_owner, intent}]}
+    end
+  end
+
+  @doc """
+  Decide guarded-restore admission **before** minting intent_id/fingerprint.
+
+  Join first on exact `(operation_id, restore_token)`. On join, the existing
+  fingerprint must recompute from the existing intent_id (fail closed on
+  corruption). Returns `{:fresh, ...}` only when a new slot may be minted.
+  """
+  @spec decide_guarded_admit(
+          intent_map(),
+          fence_map(),
+          boolean(),
+          boolean(),
+          String.t(),
+          String.t(),
+          String.t()
+        ) ::
+          {:ok, :joined, intent()}
+          | {:ok, :fresh}
+          | {:error, atom()}
+  def decide_guarded_admit(
+        intents,
+        fences,
+        fence_ready?,
+        admission_ready?,
+        target,
+        operation_id,
+        restore_token
+      )
+      when is_map(intents) and is_map(fences) and is_binary(target) and is_binary(operation_id) and
+             is_binary(restore_token) do
+    cond do
+      fence_ready? != true ->
+        {:error, :fence_not_ready}
+
+      admission_ready? != true ->
+        {:error, :runtime_admission_not_ready}
+
+      not Map.has_key?(fences, target) ->
+        # Authoritative pre-effect rejection when no fence and no live intent for
+        # this exact op/token — admit never started effects. Public shell may
+        # settle+clear only this typed result (not arbitrary caller errors).
+        case Map.get(intents, target) do
+          nil ->
+            {:error, :restore_pre_effect_aborted}
+
+          %{
+            kind: :guarded_restore,
+            operation_id: ^operation_id,
+            restore_token: ^restore_token,
+            phase: phase
+          }
+          when phase in @open_phases or phase == :outcome_unknown ->
+            {:error, :conflict}
+
+          _ ->
+            {:error, :restore_fence_required}
+        end
+
+      Map.get(fences, target) != operation_id ->
+        {:error, :not_owner}
+
+      true ->
+        case Map.get(intents, target) do
+          %{phase: :settling} ->
+            {:error, :settling}
+
+          %{
+            kind: :guarded_restore,
+            operation_id: ^operation_id,
+            restore_token: ^restore_token,
+            intent_id: existing_intent_id,
+            fingerprint: existing_fp,
+            phase: phase
+          } = intent
+          when (phase in @open_phases or phase == :outcome_unknown) and
+                 is_binary(existing_intent_id) and
+                 is_binary(existing_fp) ->
+            # Join only after fingerprint recomputes from store-owned intent_id.
+            expected =
+              Arbor.Agent.RuntimeRestoreAdmissionClaimCore.fingerprint(
+                operation_id,
+                target,
+                operation_id,
+                restore_token,
+                existing_intent_id
+              )
+
+            if existing_fp == expected do
+              {:ok, :joined, intent}
+            else
+              {:error, :conflict}
+            end
+
+          %{phase: phase} when phase in @open_phases or phase == :outcome_unknown ->
+            {:error, :conflict}
+
+          %{phase: :terminal} ->
+            {:ok, :fresh}
+
+          nil ->
+            {:ok, :fresh}
+
+          _ ->
+            {:error, :conflict}
+        end
+    end
+  end
+
+  @doc """
+  Install a fresh guarded-restore intent after `decide_guarded_admit` returned `:fresh`.
+
+  Caller must mint intent_id and fingerprint only for this path.
+  """
+  @spec admit_guarded_fresh(
+          intent_map(),
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          non_neg_integer(),
+          non_neg_integer()
+        ) ::
+          {:ok, :admitted, intent(), intent_map(), list()} | {:error, atom()}
+  def admit_guarded_fresh(
+        intents,
+        target,
+        operation_id,
+        restore_token,
+        fingerprint,
+        intent_id,
+        intent_count,
+        max_intents
+      )
+      when is_map(intents) and is_binary(target) and is_binary(operation_id) and
+             is_binary(restore_token) and is_binary(fingerprint) and is_binary(intent_id) and
+             is_integer(intent_count) and is_integer(max_intents) do
+    # Refuse if a concurrent admit already filled the slot.
+    case Map.get(intents, target) do
+      %{phase: phase} when phase in @open_phases or phase in [:outcome_unknown, :settling] ->
+        {:error, :conflict}
+
+      _ ->
+        if intent_count >= max_intents do
+          {:error, :busy}
+        else
+          intent = %{
+            intent_id: intent_id,
+            target_agent_id: target,
+            kind: :guarded_restore,
+            fingerprint: fingerprint,
+            operation_id: operation_id,
+            restore_token: restore_token,
+            phase: :admitted,
+            owner_pid: nil,
+            worker_pid: nil,
+            terminal: nil,
+            retire_barrier: :none,
+            launch_ref: nil,
+            launcher_pid: nil,
+            launcher_mon: nil,
+            launcher_attempt_index: 0,
+            effect_handoff?: false
+          }
+
+          new_intents = Map.put(intents, target, intent)
+          {:ok, :admitted, intent, new_intents, [{:launch_owner, intent}]}
+        end
+    end
+  end
+
+  @doc """
+  True when a non-terminal guarded_restore intent holds the target.
+
+  Includes outcome_unknown parks (post-handoff or pre-handoff bound-hold after
+  durable claim join) so fence removal stays blocked until determinate retirement.
+  """
+  @spec non_idle_guarded_restore?(intent_map(), String.t()) :: boolean()
+  def non_idle_guarded_restore?(intents, target) when is_map(intents) and is_binary(target) do
+    case Map.get(intents, target) do
+      %{kind: :guarded_restore, phase: :terminal} -> false
+      %{kind: :guarded_restore, phase: _} -> true
+      _ -> false
     end
   end
 
@@ -356,13 +546,327 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentCore do
       fence_ready? != true ->
         {:error, :fence_not_ready}
 
-      Map.has_key?(fences, target) ->
-        {:error, :target_fenced}
-
       true ->
-        adopt_ready_owner(intents, target, intent_id, fingerprint, caller_pid)
+        case Map.get(intents, target) do
+          %{kind: :guarded_restore, operation_id: op_id} = _intent
+          when is_binary(op_id) ->
+            cond do
+              not Map.has_key?(fences, target) ->
+                {:error, :restore_fence_required}
+
+              Map.get(fences, target) != op_id ->
+                {:error, :not_owner}
+
+              true ->
+                adopt_ready_owner(intents, target, intent_id, fingerprint, caller_pid)
+            end
+
+          _ ->
+            if Map.has_key?(fences, target) do
+              {:error, :target_fenced}
+            else
+              adopt_ready_owner(intents, target, intent_id, fingerprint, caller_pid)
+            end
+        end
     end
   end
+
+  @doc """
+  Source-authenticated effect-handoff ack. Must run before gate release.
+
+  Requires guarded kind, bound worker, exact owner caller, exact intent identity.
+  """
+  @spec ack_effect_handoff(intent_map(), String.t(), String.t(), String.t(), pid()) ::
+          {:ok, intent_map()} | {:error, atom()}
+  def ack_effect_handoff(intents, target, intent_id, fingerprint, caller_pid)
+      when is_binary(intent_id) and is_binary(fingerprint) and is_pid(caller_pid) do
+    case Map.get(intents, target) do
+      %{
+        kind: :guarded_restore,
+        intent_id: ^intent_id,
+        fingerprint: ^fingerprint,
+        phase: phase,
+        owner_pid: ^caller_pid,
+        worker_pid: worker_pid,
+        effect_handoff?: true
+      } = intent
+      when phase in [:owner_live, :worker_running] and is_pid(worker_pid) ->
+        {:ok, Map.put(intents, target, intent)}
+
+      %{
+        kind: :guarded_restore,
+        intent_id: ^intent_id,
+        fingerprint: ^fingerprint,
+        phase: phase,
+        owner_pid: ^caller_pid,
+        worker_pid: worker_pid
+      } = intent
+      when phase in [:owner_live, :worker_running] and is_pid(worker_pid) ->
+        updated = Map.put(intent, :effect_handoff?, true)
+        {:ok, Map.put(intents, target, updated)}
+
+      %{
+        kind: :guarded_restore,
+        intent_id: ^intent_id,
+        fingerprint: ^fingerprint,
+        owner_pid: other
+      }
+      when is_pid(other) and other != caller_pid ->
+        {:error, :not_owner}
+
+      %{intent_id: ^intent_id} ->
+        {:error, :conflict}
+
+      %{phase: _} ->
+        {:error, :conflict}
+
+      nil ->
+        {:error, :not_found}
+    end
+  end
+
+  @max_claim_inventory 256
+  @max_rebind_snapshots 256
+
+  @doc """
+  Pure merge of durable restore claims with live owner snapshots for restart inventory.
+
+  Materializes blocking unknown intents for bound/outcome_unknown claims lacking
+  exact live owner/worker. Join identity is exact
+  target+intent_id+fingerprint+operation_id+token. A live guarded snapshot with
+  no corresponding claim (or claim with no restored row after live match) is an
+  error — never silent `{:ok, intents}`. Bounded and fail-closed.
+  """
+  @spec merge_restore_claim_inventory(intent_map(), list(), list()) ::
+          {:ok, intent_map()} | {:error, atom()}
+  def merge_restore_claim_inventory(_prior_intents, owner_snapshots, claims)
+      when is_list(owner_snapshots) and is_list(claims) do
+    cond do
+      length(owner_snapshots) > @max_rebind_snapshots ->
+        {:error, :inventory_overflow}
+
+      length(claims) > @max_claim_inventory ->
+        {:error, :inventory_overflow}
+
+      true ->
+        with {:ok, base} <- rebind_owners(%{}, owner_snapshots),
+             {:ok, merged} <- reduce_claim_materializations(base, claims, owner_snapshots),
+             :ok <- assert_guarded_snapshots_covered(merged, owner_snapshots, claims) do
+          {:ok, merged}
+        end
+    end
+  end
+
+  def merge_restore_claim_inventory(_, _, _), do: {:error, :invalid_inventory}
+
+  defp reduce_claim_materializations(intents, claims, snapshots) do
+    Enum.reduce_while(claims, {:ok, intents}, fn claim, {:ok, acc} ->
+      case materialize_claim_intent(acc, claim, snapshots) do
+        {:ok, next} -> {:cont, {:ok, next}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp claim_identity(claim) when is_map(claim) do
+    target = Map.get(claim, "target_agent_id") || Map.get(claim, :target_agent_id)
+    intent_id = Map.get(claim, "intent_id") || Map.get(claim, :intent_id)
+    fingerprint = Map.get(claim, "fingerprint") || Map.get(claim, :fingerprint)
+    operation_id = Map.get(claim, "operation_id") || Map.get(claim, :operation_id)
+    token = Map.get(claim, "token") || Map.get(claim, :token)
+    phase = Map.get(claim, "claim_phase") || Map.get(claim, :claim_phase)
+
+    %{
+      target: target,
+      intent_id: intent_id,
+      fingerprint: fingerprint,
+      operation_id: operation_id,
+      token: token,
+      phase: phase
+    }
+  end
+
+  defp exact_live_match?(snap, id) when is_map(snap) and is_map(id) do
+    Map.get(snap, :target_agent_id) == id.target and
+      Map.get(snap, :intent_id) == id.intent_id and
+      Map.get(snap, :fingerprint) == id.fingerprint and
+      Map.get(snap, :operation_id) == id.operation_id and
+      Map.get(snap, :restore_token) == id.token
+  end
+
+  defp exact_live_match?(_, _), do: false
+
+  defp exact_intent_match?(intent, id) when is_map(intent) and is_map(id) do
+    intent.target_agent_id == id.target and
+      intent.intent_id == id.intent_id and
+      intent.fingerprint == id.fingerprint and
+      Map.get(intent, :operation_id) == id.operation_id and
+      Map.get(intent, :restore_token) == id.token and
+      intent.kind == :guarded_restore
+  end
+
+  defp exact_intent_match?(_, _), do: false
+
+  defp materialize_claim_intent(intents, claim, snapshots) when is_map(claim) do
+    id = claim_identity(claim)
+
+    cond do
+      id.phase == "settled" ->
+        {:ok, intents}
+
+      id.phase == "minted" and is_binary(id.target) and is_binary(id.token) and
+        is_binary(id.operation_id) and is_nil(id.intent_id) and is_nil(id.fingerprint) ->
+        # Pre-bind: live owners must not claim this identity yet; no row required.
+        {:ok, intents}
+
+      id.phase in ["bound", "outcome_unknown"] and is_binary(id.target) and
+        is_binary(id.intent_id) and is_binary(id.fingerprint) and is_binary(id.operation_id) and
+          is_binary(id.token) ->
+        live? =
+          Enum.any?(snapshots, fn snap ->
+            exact_live_match?(snap, id) and
+              (is_pid(Map.get(snap, :owner_pid) || Map.get(snap, :child_pid)) or
+                 is_pid(Map.get(snap, :worker_pid)))
+          end)
+
+        if live? do
+          # Live exact match must already have a restored intent row from rebind.
+          case Map.get(intents, id.target) do
+            intent when is_map(intent) ->
+              if exact_intent_match?(intent, id) do
+                updated =
+                  intent
+                  |> Map.put(:kind, :guarded_restore)
+                  |> Map.put(:operation_id, id.operation_id)
+                  |> Map.put(:restore_token, id.token)
+                  |> Map.put(:effect_handoff?, true)
+
+                {:ok, Map.put(intents, id.target, updated)}
+              else
+                {:error, :invalid_inventory}
+              end
+
+            nil ->
+              # Live snapshot predicate without a corresponding restored row.
+              {:error, :invalid_inventory}
+          end
+        else
+          case Map.get(intents, id.target) do
+            nil ->
+              blocking = %{
+                intent_id: id.intent_id,
+                target_agent_id: id.target,
+                kind: :guarded_restore,
+                fingerprint: id.fingerprint,
+                operation_id: id.operation_id,
+                restore_token: id.token,
+                phase: :outcome_unknown,
+                owner_pid: nil,
+                worker_pid: nil,
+                terminal: nil,
+                retire_barrier: :none,
+                launch_ref: nil,
+                launcher_pid: nil,
+                launcher_mon: nil,
+                launcher_attempt_index: 0,
+                effect_handoff?: true
+              }
+
+              {:ok, Map.put(intents, id.target, blocking)}
+
+            intent when is_map(intent) ->
+              if exact_intent_match?(intent, id) do
+                updated =
+                  intent
+                  |> Map.put(:phase, :outcome_unknown)
+                  |> Map.put(:effect_handoff?, true)
+
+                {:ok, Map.put(intents, id.target, updated)}
+              else
+                {:error, :duplicate_target}
+              end
+
+            _ ->
+              {:error, :invalid_inventory}
+          end
+        end
+
+      true ->
+        {:error, :invalid_inventory}
+    end
+  end
+
+  defp materialize_claim_intent(_, _, _), do: {:error, :invalid_inventory}
+
+  # Every live guarded snapshot must have an exact durable claim and a restored row.
+  defp assert_guarded_snapshots_covered(intents, snapshots, claims)
+       when is_map(intents) and is_list(snapshots) and is_list(claims) do
+    Enum.reduce_while(snapshots, :ok, fn snap, :ok ->
+      case guarded_snapshot_identity(snap) do
+        :ordinary ->
+          {:cont, :ok}
+
+        {:error, reason} ->
+          {:halt, {:error, reason}}
+
+        {:ok, id} ->
+          claim_ok? =
+            Enum.any?(claims, fn claim ->
+              cid = claim_identity(claim)
+
+              cid.target == id.target and cid.intent_id == id.intent_id and
+                cid.fingerprint == id.fingerprint and cid.operation_id == id.operation_id and
+                cid.token == id.token and cid.phase in ["bound", "outcome_unknown"]
+            end)
+
+          row = Map.get(intents, id.target)
+
+          cond do
+            not claim_ok? ->
+              {:halt, {:error, :invalid_inventory}}
+
+            not is_map(row) ->
+              {:halt, {:error, :invalid_inventory}}
+
+            not exact_intent_match?(row, id) ->
+              {:halt, {:error, :invalid_inventory}}
+
+            true ->
+              {:cont, :ok}
+          end
+      end
+    end)
+  end
+
+  defp guarded_snapshot_identity(snap) when is_map(snap) do
+    kind = Map.get(snap, :kind, Map.get(snap, "kind", :ordinary_start))
+
+    case normalize_snapshot_kind(kind) do
+      {:ok, :ordinary_start} ->
+        :ordinary
+
+      {:ok, :guarded_restore} ->
+        id = %{
+          target: Map.get(snap, :target_agent_id, Map.get(snap, "target_agent_id")),
+          intent_id: Map.get(snap, :intent_id, Map.get(snap, "intent_id")),
+          fingerprint: Map.get(snap, :fingerprint, Map.get(snap, "fingerprint")),
+          operation_id: Map.get(snap, :operation_id, Map.get(snap, "operation_id")),
+          token: Map.get(snap, :restore_token, Map.get(snap, "restore_token"))
+        }
+
+        if is_binary(id.target) and is_binary(id.intent_id) and is_binary(id.fingerprint) and
+             is_binary(id.operation_id) and is_binary(id.token) do
+          {:ok, id}
+        else
+          {:error, :invalid_snapshot}
+        end
+
+      {:error, _} ->
+        {:error, :invalid_snapshot}
+    end
+  end
+
+  defp guarded_snapshot_identity(_), do: {:error, :invalid_snapshot}
 
   defp adopt_ready_owner(intents, target, intent_id, fingerprint, caller_pid) do
     case Map.get(intents, target) do
@@ -607,28 +1111,42 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentCore do
   @doc """
   Classify unknown-start recovery from a live branch witness fact.
 
-  `witness_fact`: `{:exact, intent_id}` | `:bare` | `{:other, intent_id}` | `:not_running`
+  `witness_fact`:
+  - `{:exact, intent_id}` | `:bare` | `{:other, intent_id}` | `:not_running` — observed facts
+  - `:observe_failed` — observation shell failure; **never** proves absence or applied
   """
   @spec classify_unknown_start(
           String.t(),
-          :not_running | :bare | {:exact, String.t()} | {:other, String.t()}
+          :not_running
+          | :bare
+          | :observe_failed
+          | {:exact, String.t()}
+          | {:other, String.t()}
         ) ::
-          :not_applied | :applied | :conflict
+          :not_applied | :applied | :conflict | :observation_failed
   def classify_unknown_start(_intent_id, :not_running), do: :not_applied
   def classify_unknown_start(intent_id, {:exact, intent_id}), do: :applied
   def classify_unknown_start(_intent_id, :bare), do: :conflict
   def classify_unknown_start(_intent_id, {:other, _}), do: :conflict
-  def classify_unknown_start(_intent_id, _), do: :conflict
+  def classify_unknown_start(_intent_id, :observe_failed), do: :observation_failed
+  def classify_unknown_start(_intent_id, _), do: :observation_failed
 
   @doc """
   Pure live-DOWN classification. Never parks forever for ordinary-start.
 
-  Shell supplies `branch_pid` when class is `:applied` after whereis.
-  `source` is `:worker` or `:owner` for not_running error atom.
+  Shell supplies `branch_pid` when class is `:applied` from the same atomic
+  `observe_admission/1` lookup. `source` is `:worker` or `:owner` for
+  not_running error atom.
+
+  `:observe_failed` is a bare-conflict class — never proves absence or applied.
   """
   @spec classify_live_down(
           String.t(),
-          :not_running | :bare | {:exact, String.t()} | {:other, String.t()},
+          :not_running
+          | :bare
+          | :observe_failed
+          | {:exact, String.t()}
+          | {:other, String.t()},
           :worker | :owner,
           pid() | nil
         ) :: {:settle, term()}
@@ -651,6 +1169,10 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentCore do
     {:settle, {:conflict, :witness_mismatch}}
   end
 
+  def classify_live_down(_intent_id, :observe_failed, _source, _branch_pid) do
+    {:settle, {:conflict, :observation_failed}}
+  end
+
   def classify_live_down(_intent_id, :not_running, :worker, _branch_pid) do
     {:settle, {:error, :worker_down}}
   end
@@ -660,12 +1182,83 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentCore do
   end
 
   def classify_live_down(_intent_id, _fact, :worker, _branch_pid) do
-    {:settle, {:error, :worker_down}}
+    {:settle, {:conflict, :observation_failed}}
   end
 
   def classify_live_down(_intent_id, _fact, :owner, _branch_pid) do
-    {:settle, {:error, :owner_down}}
+    {:settle, {:conflict, :observation_failed}}
   end
+
+  @doc """
+  Revalidate that a delayed witness observation still targets the live intent.
+
+  Exact identity: kind + target + intent_id + fingerprint + operation_id + token
+  plus expected owner/worker identity for the observe reason. Stale → false
+  (shell must treat as inert or reobserve; never apply to changed state).
+  """
+  @spec observe_request_current?(map() | nil, map()) :: boolean()
+  def observe_request_current?(intent, request)
+      when is_map(intent) and is_map(request) do
+    kind = Map.get(request, :kind, :ordinary_start)
+    target = Map.get(request, :target)
+    intent_id = Map.get(request, :intent_id)
+    fingerprint = Map.get(request, :fingerprint)
+    operation_id = Map.get(request, :operation_id)
+    token = Map.get(request, :restore_token)
+
+    base_match? =
+      Map.get(intent, :kind, :ordinary_start) == kind and
+        intent.target_agent_id == target and
+        intent.intent_id == intent_id and
+        Map.get(intent, :fingerprint) == fingerprint and
+        Map.get(intent, :operation_id) == operation_id and
+        Map.get(intent, :restore_token) == token
+
+    base_match? and observe_identity_phase_current?(intent, request)
+  end
+
+  def observe_request_current?(_, _), do: false
+
+  defp observe_identity_phase_current?(intent, %{reason: :unexpected_owner_down} = request) do
+    monitored = Map.get(request, :monitored_owner_pid)
+    owner = Map.get(intent, :owner_pid)
+    phase = Map.get(intent, :phase)
+
+    cond do
+      # Still the same live owner this observation was launched for.
+      is_pid(monitored) and owner == monitored ->
+        true
+
+      # Owner already cleared by a concurrent path but intent not rebound.
+      is_nil(owner) and phase in [:owner_live, :worker_running, :outcome_unknown, :settling] ->
+        true
+
+      true ->
+        false
+    end
+  end
+
+  defp observe_identity_phase_current?(intent, %{reason: :worker_down_classify} = request) do
+    expected_worker = Map.get(request, :worker_pid)
+    expected_owner = Map.get(request, :owner_pid)
+    worker = Map.get(intent, :worker_pid)
+    owner = Map.get(intent, :owner_pid)
+    phase = Map.get(intent, :phase)
+    barrier = Map.get(intent, :retire_barrier, :none)
+
+    worker_ok? =
+      (is_pid(expected_worker) and worker == expected_worker) or
+        (is_nil(worker) and barrier == :await_worker_down) or
+        (is_nil(worker) and phase in [:outcome_unknown, :settling])
+
+    owner_ok? =
+      expected_owner == owner or
+        (is_nil(owner) and phase in [:outcome_unknown, :settling, :worker_running])
+
+    worker_ok? and owner_ok? and phase != :terminal
+  end
+
+  defp observe_identity_phase_current?(_intent, _request), do: false
 
   @doc """
   Begin two-phase settlement: retain non-idle intent with terminal when owner
@@ -1046,24 +1639,81 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentCore do
   def classify_start_child_error(other),
     do: {:launch_failed, redact_error_reason(other)}
 
-  @doc "Bound and redact exception/error reasons for public/typed stops."
-  @spec redact_error_reason(term()) :: atom() | String.t()
-  def redact_error_reason(reason) when is_atom(reason), do: reason
+  # Closed allowlist of public/terminal error atoms. Never pass through raw
+  # binaries, exception messages, or arbitrary atom/binary prefixes that may
+  # embed restore_token / fingerprint / operation_id material.
+  @safe_error_atoms MapSet.new([
+                      :timeout,
+                      :max_children,
+                      :temporary,
+                      :already_started,
+                      :not_owner,
+                      :not_found,
+                      :conflict,
+                      :busy,
+                      :settling,
+                      :witness_mismatch,
+                      :branch_missing_after_witness,
+                      :owner_down,
+                      :worker_down,
+                      :worker_failed,
+                      :pre_effect_abort,
+                      :launch_error,
+                      :launch_failed,
+                      :launch_exception,
+                      :bind_failed,
+                      :invalid_error_text,
+                      :invalid_worker_payload,
+                      :guarded_restore_exception,
+                      :guarded_restore_exit,
+                      :guarded_restore_failure,
+                      :unexpected_result,
+                      :outcome_unknown,
+                      :claim_settled_non_applied,
+                      :error,
+                      :noproc,
+                      :normal,
+                      :shutdown,
+                      :killed
+                    ])
 
-  def redact_error_reason(reason) when is_binary(reason) do
-    trimmed = String.slice(reason, 0, 64)
-    if String.valid?(trimmed), do: trimmed, else: :invalid_error_text
+  @doc """
+  Map external/binary/tuple reasons to a closed typed atom set before TaskStore
+  settlement, waiter replies, logs, or durable reason_code derivation.
+
+  Never returns a binary (invalid UTF-8 / oversized / secret-bearing text is
+  collapsed to `:error`). Only documented safe atoms are retained.
+  """
+  @spec redact_error_reason(term()) :: atom()
+  def redact_error_reason(reason) when is_atom(reason) do
+    if MapSet.member?(@safe_error_atoms, reason), do: reason, else: :error
   end
 
-  def redact_error_reason({tag, _}) when is_atom(tag), do: tag
-  def redact_error_reason(_), do: :launch_error
+  def redact_error_reason(reason) when is_binary(reason), do: :error
+
+  def redact_error_reason({tag, _detail}) when is_atom(tag) do
+    if MapSet.member?(@safe_error_atoms, tag), do: tag, else: :error
+  end
+
+  def redact_error_reason({tag, _, _}) when is_atom(tag) do
+    if MapSet.member?(@safe_error_atoms, tag), do: tag, else: :error
+  end
+
+  def redact_error_reason([tag | _]) when is_atom(tag) do
+    if MapSet.member?(@safe_error_atoms, tag), do: tag, else: :error
+  end
+
+  def redact_error_reason(_), do: :error
 
   # Restart inventory bounds (fail closed on overflow / malformation).
-  @max_rebind_snapshots 256
   @max_target_bytes 256
   @max_intent_id_bytes 64
   @max_fingerprint_bytes 80
   @target_re ~r/\Aagent_[A-Za-z0-9_-]+\z/
+  # Owner inventory must remain compatible with already-running C3C1a0 owners.
+  # Guarded snapshots are additionally bound to the strict durable claim during
+  # merge, so accepting the established bounded owner grammar here cannot mint
+  # or widen durable restore authority.
   @intent_id_re ~r/\Arai_[A-Za-z0-9_-]+\z/
   @fingerprint_re ~r/\Afp_[0-9a-f]+\z/
 
@@ -1135,32 +1785,59 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentCore do
     child_pid = Map.get(snap, :child_pid, Map.get(snap, "child_pid"))
     snap_owner = Map.get(snap, :owner_pid, Map.get(snap, "owner_pid"))
     snap_worker = Map.get(snap, :worker_pid, Map.get(snap, "worker_pid"))
+    kind = Map.get(snap, :kind, Map.get(snap, "kind", :ordinary_start))
+    operation_id = Map.get(snap, :operation_id, Map.get(snap, "operation_id"))
+    restore_token = Map.get(snap, :restore_token, Map.get(snap, "restore_token"))
 
     with :ok <- validate_target(target),
          :ok <- validate_intent_id(intent_id),
          :ok <- validate_fingerprint(fingerprint),
+         {:ok, kind} <- normalize_snapshot_kind(kind),
          {:ok, owner_pid} <- resolve_rebind_owner_pid(child_pid, snap_owner),
          {:ok, worker_pid} <- resolve_rebind_worker_pid(snap_worker, owner_pid) do
-      {:ok,
-       %{
-         intent_id: intent_id,
-         target_agent_id: target,
-         kind: :ordinary_start,
-         fingerprint: fingerprint,
-         phase: if(is_pid(worker_pid), do: :worker_running, else: :outcome_unknown),
-         owner_pid: owner_pid,
-         worker_pid: worker_pid,
-         terminal: nil,
-         retire_barrier: :none,
-         launch_ref: nil,
-         launcher_pid: nil,
-         launcher_mon: nil,
-         launcher_attempt_index: 0
-       }}
+      base = %{
+        intent_id: intent_id,
+        target_agent_id: target,
+        kind: kind,
+        fingerprint: fingerprint,
+        phase: if(is_pid(worker_pid), do: :worker_running, else: :outcome_unknown),
+        owner_pid: owner_pid,
+        worker_pid: worker_pid,
+        terminal: nil,
+        retire_barrier: :none,
+        launch_ref: nil,
+        launcher_pid: nil,
+        launcher_mon: nil,
+        launcher_attempt_index: 0,
+        # Bound/live worker after restart without pre-handoff proof is post-handoff.
+        effect_handoff?: kind == :guarded_restore and is_pid(worker_pid)
+      }
+
+      intent =
+        if kind == :guarded_restore do
+          base
+          |> Map.put(:operation_id, operation_id)
+          |> Map.put(:restore_token, restore_token)
+        else
+          base
+        end
+
+      if kind == :guarded_restore and
+           (not is_binary(operation_id) or not is_binary(restore_token)) do
+        {:error, :invalid_snapshot}
+      else
+        {:ok, intent}
+      end
     end
   end
 
   defp validate_snapshot(_), do: {:error, :invalid_snapshot}
+
+  defp normalize_snapshot_kind(:ordinary_start), do: {:ok, :ordinary_start}
+  defp normalize_snapshot_kind(:guarded_restore), do: {:ok, :guarded_restore}
+  defp normalize_snapshot_kind("ordinary_start"), do: {:ok, :ordinary_start}
+  defp normalize_snapshot_kind("guarded_restore"), do: {:ok, :guarded_restore}
+  defp normalize_snapshot_kind(_), do: {:error, :invalid_snapshot}
 
   # Restart authority is only the enumerated fixed-supervisor child PID.
   # Snapshot owner_pid, if present, must equal child_pid; never an independent source.
