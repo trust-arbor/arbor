@@ -676,33 +676,7 @@ defmodule Arbor.Memory.IntentStore do
   @impl true
   def handle_call({:lock_intent, agent_id, intent_id}, _from, state) do
     with_fresh_admission(state, agent_id, {:error, :store_unavailable}, fn state ->
-      operation = fn baseline ->
-        data = baseline.data
-        statuses = Map.get(data, :statuses, %{})
-        current = Map.get(statuses, intent_id, %{status: :pending})
-        intent = Enum.find(data.intents, &(&1.id == intent_id))
-
-        case {intent, current.status} do
-          {nil, _status} ->
-            {:error, :not_found}
-
-          {%Intent{} = intent, :pending} ->
-            status_info = %{
-              status: :locked,
-              locked_at: DateTime.utc_now(),
-              retry_count: Map.get(current, :retry_count, 0)
-            }
-
-            updated_statuses = Map.put(statuses, intent_id, status_info)
-            updated = Map.put(data, :statuses, updated_statuses)
-
-            {:commit, updated, %{{:status, intent_id} => :inherit_item}, [{:intent, intent_id}],
-             fn _encoded -> {:locked, intent} end}
-
-          {_intent, _other} ->
-            {:error, :not_lockable}
-        end
-      end
+      operation = fn baseline -> lock_intent_mutation(baseline, intent_id) end
 
       case classified_mutation(mutate_authoritative(agent_id, state.buffer_size, operation)) do
         {:ok, {:locked, intent}, disposition} -> {{:ok, intent}, state, disposition}
@@ -714,26 +688,7 @@ defmodule Arbor.Memory.IntentStore do
   @impl true
   def handle_call({:complete_intent, agent_id, intent_id}, _from, state) do
     with_fresh_admission(state, agent_id, {:error, :store_unavailable}, fn state ->
-      operation = fn baseline ->
-        data = baseline.data
-        statuses = Map.get(data, :statuses, %{})
-
-        if Enum.any?(data.intents, &(&1.id == intent_id)) do
-          status_info = %{
-            status: :completed,
-            completed_at: DateTime.utc_now(),
-            retry_count: Map.get(Map.get(statuses, intent_id, %{}), :retry_count, 0)
-          }
-
-          updated_statuses = Map.put(statuses, intent_id, status_info)
-          updated = Map.put(data, :statuses, updated_statuses)
-
-          {:commit, updated, %{{:status, intent_id} => :inherit_item}, [{:intent, intent_id}],
-           fn _encoded -> :completed end}
-        else
-          {:error, :not_found}
-        end
-      end
+      operation = fn baseline -> complete_intent_mutation(baseline, intent_id) end
 
       case classified_mutation(mutate_authoritative(agent_id, state.buffer_size, operation)) do
         {:ok, :completed, disposition} -> {:ok, state, disposition}
@@ -746,28 +701,7 @@ defmodule Arbor.Memory.IntentStore do
   def handle_call({:fail_intent, agent_id, intent_id, reason, reason_taint}, _from, state) do
     with_fresh_admission(state, agent_id, {:error, :store_unavailable}, fn state ->
       operation = fn baseline ->
-        data = baseline.data
-        statuses = Map.get(data, :statuses, %{})
-
-        if Enum.any?(data.intents, &(&1.id == intent_id)) do
-          current = Map.get(statuses, intent_id, %{})
-          retry_count = Map.get(current, :retry_count, 0) + 1
-
-          status_info = %{
-            status: :pending,
-            failed_at: DateTime.utc_now(),
-            last_failure_reason: reason,
-            retry_count: retry_count
-          }
-
-          updated_statuses = Map.put(statuses, intent_id, status_info)
-          updated = Map.put(data, :statuses, updated_statuses)
-
-          {:commit, updated, %{{:status, intent_id} => reason_taint}, [{:intent, intent_id}],
-           fn _encoded -> {:failed, retry_count} end}
-        else
-          {:error, :not_found}
-        end
+        fail_intent_mutation(baseline, intent_id, reason, reason_taint)
       end
 
       case classified_mutation(mutate_authoritative(agent_id, state.buffer_size, operation)) do
@@ -778,7 +712,9 @@ defmodule Arbor.Memory.IntentStore do
   end
 
   @impl true
-  def handle_call({:import_intents, agent_id, prepared_items}, _from, state) do
+  def handle_call({:import_intents, agent_id, prepared_items}, _from, initial_state) do
+    buffer_size = initial_state.buffer_size
+
     operation = fn baseline ->
       data = baseline.data
       initial_ids = MapSet.new(Enum.map(data.intents, & &1.id))
@@ -799,7 +735,7 @@ defmodule Arbor.Memory.IntentStore do
 
       if new_items != [] do
         all_intents = Enum.map(new_items, & &1.value) ++ data.intents
-        trimmed = Enum.take(all_intents, state.buffer_size)
+        trimmed = Enum.take(all_intents, buffer_size)
         updated = %{data | intents: trimmed, statuses: new_statuses}
         retained_ids = MapSet.new(Enum.map(trimmed, & &1.id))
 
@@ -823,20 +759,27 @@ defmodule Arbor.Memory.IntentStore do
       end
     end
 
-    with_fresh_admission(state, agent_id, {:error, :store_unavailable}, fn state ->
-      case classified_mutation(mutate_authoritative(agent_id, state.buffer_size, operation)) do
-        {:ok, {:imported, count}, disposition} ->
-          if count > 0, do: Logger.info("IntentStore imported intents", count: count)
-          {:ok, state, disposition}
+    with_fresh_admission(
+      initial_state,
+      agent_id,
+      {:error, :store_unavailable},
+      fn admitted_state ->
+        case classified_mutation(
+               mutate_authoritative(agent_id, admitted_state.buffer_size, operation)
+             ) do
+          {:ok, {:imported, count}, disposition} ->
+            if count > 0, do: Logger.info("IntentStore imported intents", count: count)
+            {:ok, admitted_state, disposition}
 
-        {:error, error, disposition} ->
-          {error, state, disposition}
+          {:error, error, disposition} ->
+            {error, admitted_state, disposition}
+        end
       end
-    end)
+    )
   end
 
   @impl true
-  def handle_call({:unlock_stale, agent_id, timeout_ms}, _from, state) do
+  def handle_call({:unlock_stale, agent_id, timeout_ms}, _from, initial_state) do
     operation = fn baseline ->
       data = baseline.data
       statuses = Map.get(data, :statuses, %{})
@@ -869,16 +812,23 @@ defmodule Arbor.Memory.IntentStore do
       end
     end
 
-    with_fresh_admission(state, agent_id, {:error, :store_unavailable}, fn state ->
-      case classified_mutation(mutate_authoritative(agent_id, state.buffer_size, operation)) do
-        {:ok, count, disposition} -> {count, state, disposition}
-        {:error, error, disposition} -> {error, state, disposition}
+    with_fresh_admission(
+      initial_state,
+      agent_id,
+      {:error, :store_unavailable},
+      fn admitted_state ->
+        case classified_mutation(
+               mutate_authoritative(agent_id, admitted_state.buffer_size, operation)
+             ) do
+          {:ok, count, disposition} -> {count, admitted_state, disposition}
+          {:error, error, disposition} -> {error, admitted_state, disposition}
+        end
       end
-    end)
+    )
   end
 
   @impl true
-  def handle_call({:prune_stale, agent_id, max_age_ms}, _from, state) do
+  def handle_call({:prune_stale, agent_id, max_age_ms}, _from, initial_state) do
     operation = fn baseline ->
       data = baseline.data
       statuses = Map.get(data, :statuses, %{})
@@ -908,16 +858,23 @@ defmodule Arbor.Memory.IntentStore do
       end
     end
 
-    with_fresh_admission(state, agent_id, {:error, :store_unavailable}, fn state ->
-      case classified_mutation(mutate_authoritative(agent_id, state.buffer_size, operation)) do
-        {:ok, count, disposition} ->
-          if count > 0, do: Logger.info("IntentStore pruned stale intents", count: count)
-          {count, state, disposition}
+    with_fresh_admission(
+      initial_state,
+      agent_id,
+      {:error, :store_unavailable},
+      fn admitted_state ->
+        case classified_mutation(
+               mutate_authoritative(agent_id, admitted_state.buffer_size, operation)
+             ) do
+          {:ok, count, disposition} ->
+            if count > 0, do: Logger.info("IntentStore pruned stale intents", count: count)
+            {count, admitted_state, disposition}
 
-        {:error, error, disposition} ->
-          {error, state, disposition}
+          {:error, error, disposition} ->
+            {error, admitted_state, disposition}
+        end
       end
-    end)
+    )
   end
 
   @impl true
@@ -1057,6 +1014,8 @@ defmodule Arbor.Memory.IntentStore do
     end
   end
 
+  # :ack releases only this call's root; :defer retains it and arms convergence;
+  # :settle releases this call's root plus older coalesced roots and clears retry state.
   defp finish_public_root(state, agent_id, lease, :defer) do
     case OwnerRoots.defer(owner_roots(state), agent_id, lease) do
       {:ok, roots} ->
@@ -1117,11 +1076,94 @@ defmodule Arbor.Memory.IntentStore do
 
   defp classified_mutation(result) do
     case result do
-      {:ok, value, :projected, :commit} -> {:ok, value, :settle}
-      {:ok, value, :convergence_pending, :commit} -> {:ok, value, :defer}
-      {:ok, value, _projection, :noop} -> {:ok, value, :ack}
-      {:error, reason} when reason in [:not_found, :not_lockable] -> {:error, {:error, reason}, :ack}
-      {:error, reason} -> {:error, public_commit_error(reason), :ack}
+      {:ok, value, :projected, :commit} ->
+        {:ok, value, :settle}
+
+      {:ok, value, :convergence_pending, :commit} ->
+        {:ok, value, :defer}
+
+      {:ok, value, _projection, :noop} ->
+        {:ok, value, :ack}
+
+      {:error, reason} when reason in [:not_found, :not_lockable] ->
+        {:error, {:error, reason}, :ack}
+
+      {:error, reason} ->
+        {:error, public_commit_error(reason), :ack}
+    end
+  end
+
+  defp lock_intent_mutation(baseline, intent_id) do
+    data = baseline.data
+    statuses = Map.get(data, :statuses, %{})
+    current = Map.get(statuses, intent_id, %{status: :pending})
+    intent = Enum.find(data.intents, &(&1.id == intent_id))
+
+    case {intent, current.status} do
+      {nil, _status} ->
+        {:error, :not_found}
+
+      {%Intent{} = intent, :pending} ->
+        status_info = %{
+          status: :locked,
+          locked_at: DateTime.utc_now(),
+          retry_count: Map.get(current, :retry_count, 0)
+        }
+
+        updated_statuses = Map.put(statuses, intent_id, status_info)
+        updated = Map.put(data, :statuses, updated_statuses)
+
+        {:commit, updated, %{{:status, intent_id} => :inherit_item}, [{:intent, intent_id}],
+         fn _encoded -> {:locked, intent} end}
+
+      {_intent, _other} ->
+        {:error, :not_lockable}
+    end
+  end
+
+  defp complete_intent_mutation(baseline, intent_id) do
+    data = baseline.data
+    statuses = Map.get(data, :statuses, %{})
+
+    if Enum.any?(data.intents, &(&1.id == intent_id)) do
+      status_info = %{
+        status: :completed,
+        completed_at: DateTime.utc_now(),
+        retry_count: Map.get(Map.get(statuses, intent_id, %{}), :retry_count, 0)
+      }
+
+      updated_statuses = Map.put(statuses, intent_id, status_info)
+      updated = Map.put(data, :statuses, updated_statuses)
+
+      {:commit, updated, %{{:status, intent_id} => :inherit_item}, [{:intent, intent_id}],
+       fn _encoded -> :completed end}
+    else
+      {:error, :not_found}
+    end
+  end
+
+  defp fail_intent_mutation(baseline, intent_id, reason, reason_taint) do
+    data = baseline.data
+    statuses = Map.get(data, :statuses, %{})
+
+    if Enum.any?(data.intents, &(&1.id == intent_id)) do
+      current = Map.get(statuses, intent_id, %{})
+      retry_count = Map.get(current, :retry_count, 0) + 1
+
+      status_info = %{
+        status: :pending,
+        failed_at: DateTime.utc_now(),
+        last_failure_reason: reason,
+        retry_count: retry_count
+      }
+
+      updated_statuses = Map.put(statuses, intent_id, status_info)
+      updated = Map.put(data, :statuses, updated_statuses)
+
+      {:commit, updated, %{{:status, intent_id} => reason_taint}, [{:intent, intent_id}],
+       fn _encoded -> {:failed, retry_count} end}
+    else
+      {:error, :not_found}
     end
   end
 
@@ -1957,8 +1999,6 @@ defmodule Arbor.Memory.IntentStore do
       _ = evict_live_projection(agent_id)
       :convergence_pending
   end
-
-
 
   defp delete_persisted_aggregate(agent_id) do
     case MemoryStore.delete_tainted_authoritative("intents", agent_id) do
@@ -3250,7 +3290,12 @@ defmodule Arbor.Memory.IntentStore do
             {:error, _reason} ->
               case OwnerRoots.defer(roots, agent_id, lease) do
                 {:ok, next_roots} ->
-                  Process.send_after(self(), {:converge_projection, agent_id}, @projection_retry_ms)
+                  Process.send_after(
+                    self(),
+                    {:converge_projection, agent_id},
+                    @projection_retry_ms
+                  )
+
                   {Map.put_new(pending, agent_id, 1), next_roots, loaded}
 
                 {:error, _reason} ->

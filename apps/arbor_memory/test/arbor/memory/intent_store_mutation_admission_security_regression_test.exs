@@ -18,7 +18,6 @@ defmodule Arbor.Memory.IntentStoreMutationAdmissionSecurityRegressionTest do
   alias Arbor.Persistence.BufferedStore
 
   @moduletag :fast
-  @moduletag spec: "VOICE-17"
   @moduletag packet: "VP-05D2C3I1B1B"
   @moduletag security_regression: true
 

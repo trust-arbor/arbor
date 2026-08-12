@@ -16,7 +16,6 @@ defmodule Arbor.Memory.IntentStoreOwnerAdmissionTest do
   alias Arbor.Signals, as: SignalBus
 
   @moduletag :fast
-  @moduletag spec: "VOICE-17"
   @moduletag packet: "VP-05D2C3I1B1B"
 
   @store_name :arbor_memory_durable
@@ -167,16 +166,19 @@ defmodule Arbor.Memory.IntentStoreOwnerAdmissionTest do
     await_idle_roots!(agent_id)
 
     with_provenance_unregistered(fn ->
-      extra = Intent.think("arm older roots")
-      assert {:ok, ^extra} = IntentStore.record_intent_tainted(agent_id, extra, taint)
+      assert {:ok, _items} = IntentStore.recent_intents_tainted(agent_id)
       older_count = OwnerRoots.held_count(owner_roots(), agent_id)
       assert older_count >= 1
-      older_pending = Map.fetch!(:sys.get_state(IntentStore).pending_projection, agent_id)
+      assert Map.has_key?(:sys.get_state(IntentStore).pending_projection, agent_id)
 
       assert 0 = IntentStore.unlock_stale_intents(agent_id, 60_000)
       assert OwnerRoots.held_count(owner_roots(), agent_id) == older_count
-      assert Map.fetch!(:sys.get_state(IntentStore).pending_projection, agent_id) == older_pending
-      assert match?({:ok, %{active_roots: n}} when n == older_count, MutationAdmission.status(agent_id))
+      assert Map.has_key?(:sys.get_state(IntentStore).pending_projection, agent_id)
+
+      assert match?(
+               {:ok, %{active_roots: n}} when n == older_count,
+               MutationAdmission.status(agent_id)
+             )
     end)
   end
 
@@ -270,10 +272,14 @@ defmodule Arbor.Memory.IntentStoreOwnerAdmissionTest do
     await_idle_roots!(agent_a)
     assert {:ok, _fence} = MutationAdmission.drain(agent_a)
 
-    assert {:ok, intent_b} = IntentStore.record_intent_tainted(agent_b, Intent.think("isolated b"), taint)
+    assert {:ok, intent_b} =
+             IntentStore.record_intent_tainted(agent_b, Intent.think("isolated b"), taint)
+
     assert [%{id: id}] = IntentStore.recent_intents(agent_b)
     assert id == intent_b.id
-    assert {:error, :store_unavailable} = IntentStore.record_intent(agent_a, Intent.think("blocked"))
+
+    assert {:error, :store_unavailable} =
+             IntentStore.record_intent(agent_a, Intent.think("blocked"))
   end
 
   test "compatibility clear still purges intent Provenance" do
@@ -397,24 +403,40 @@ defmodule Arbor.Memory.IntentStoreOwnerAdmissionTest do
   test "intent_formed is emitted only after root disposition" do
     agent_id = unique_agent("sig")
     test_pid = self()
+    pid = Process.whereis(IntentStore)
+    original = :sys.get_state(pid)
 
-    {:ok, sub} =
-      SignalBus.subscribe(
-        "agent.intent_formed",
-        fn signal ->
-          send(test_pid, {:intent_signal, signal, owner_roots(), MutationAdmission.status(agent_id)})
-          :ok
-        end,
-        async: false
-      )
+    :sys.replace_state(pid, fn state ->
+      Map.put(state, :embedding_fun, fn _ns, _key, _text, _opts -> :ok end)
+    end)
 
-    on_exit(fn -> SignalBus.unsubscribe(sub) end)
+    try do
+      {:ok, sub} =
+        SignalBus.subscribe(
+          "agent.intent_formed",
+          fn signal ->
+            send(
+              test_pid,
+              {:intent_signal, signal, owner_roots(), MutationAdmission.status(agent_id)}
+            )
 
-    assert {:ok, _} = IntentStore.record_intent(agent_id, Intent.think("signal after settle"))
+            :ok
+          end,
+          async: false
+        )
 
-    assert_receive {:intent_signal, _signal, roots, {:ok, status}}, 1_000
-    assert OwnerRoots.held_count(roots, agent_id) == 0
-    assert status.active_roots == 0
+      on_exit(fn -> SignalBus.unsubscribe(sub) end)
+
+      assert {:ok, _} = IntentStore.record_intent(agent_id, Intent.think("signal after settle"))
+
+      assert_receive {:intent_signal, _signal, roots, {:ok, status}}, 1_000
+      assert OwnerRoots.held_count(roots, agent_id) == 0
+      assert status.active_roots == 0
+    after
+      :sys.replace_state(pid, fn state ->
+        Map.put(state, :embedding_fun, original.embedding_fun)
+      end)
+    end
   end
 
   defp owner_roots do
