@@ -2,15 +2,14 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentOwner do
   @moduledoc """
   Supervised target-unique owner for one ordinary runtime-admission intent.
 
-  Holds validated start opts, registers before external preparation, adopts
-  through TaskStore by stable store_ref (never a captured store pid), and
-  launches the fixed OrdinaryStartWorker only after adopt succeeds.
+  Holds validated start opts, registers before external preparation, binds
+  through TaskStore with an unforgeable launch_ref in `init/1` (so start_child
+  cannot commit an unbound child), adopts via stable store_ref, and launches
+  the fixed OrdinaryStartWorker only after adopt succeeds.
 
-  Worker binding is owner-authenticated: the owner spawns a worker blocked on
-  an unforgeable gate ref, binds that exact PID via TaskStore (caller must be
-  this owner), then releases the gate. Survives worker death; removed only
-  after authoritative settlement via `:shutdown`/`:kill` (external `:normal`
-  does not retire this process).
+  Adoption retries use a per-attempt self-message reference. Worker binding is
+  owner-authenticated: the owner spawns a worker blocked on an unforgeable gate
+  ref, binds that exact PID via TaskStore, then releases the gate.
   """
 
   use GenServer
@@ -25,6 +24,7 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentOwner do
   @adopt_retry_ms 50
   @max_adopt_retries 40
   @gate_release_timeout_ms 30_000
+  @launch_bind_timeout_ms 2_000
 
   @doc false
   def start_link(opts) when is_list(opts) do
@@ -56,12 +56,67 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentOwner do
     validated_opts = Keyword.fetch!(opts, :validated_opts)
     store_ref = Keyword.get(opts, :store_ref, @default_store)
     task_supervisor = Keyword.get(opts, :task_supervisor, @default_task_supervisor)
+    launch_ref = Keyword.get(opts, :launch_ref)
 
+    case launch_ref do
+      ref when is_reference(ref) ->
+        register_and_bind_owner(
+          intent_id,
+          target,
+          fingerprint,
+          validated_opts,
+          store_ref,
+          task_supervisor,
+          ref
+        )
+
+      _ ->
+        {:stop, {:launch_bind_failed, :missing_launch_ref}}
+    end
+  end
+
+  defp register_and_bind_owner(
+         intent_id,
+         target,
+         fingerprint,
+         validated_opts,
+         store_ref,
+         task_supervisor,
+         launch_ref
+       ) do
     case Registry.register(@registry, {:runtime_admission_owner, target}, %{
            intent_id: intent_id,
            fingerprint: fingerprint
          }) do
       {:ok, _} ->
+        bind_registered_owner(
+          intent_id,
+          target,
+          fingerprint,
+          validated_opts,
+          store_ref,
+          task_supervisor,
+          launch_ref
+        )
+
+      {:error, {:already_registered, _}} ->
+        {:stop, :target_owner_taken}
+    end
+  end
+
+  defp bind_registered_owner(
+         intent_id,
+         target,
+         fingerprint,
+         validated_opts,
+         store_ref,
+         task_supervisor,
+         launch_ref
+       ) do
+    case bind_launch_with_store(store_ref, target, intent_id, fingerprint, launch_ref) do
+      :ok ->
+        adopt_msg_ref = make_ref()
+
         state = %{
           intent_id: intent_id,
           target_agent_id: target,
@@ -74,14 +129,17 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentOwner do
           worker_mon: nil,
           gate_ref: nil,
           adopt_attempts: 0,
-          launch_attempts: 0
+          launch_attempts: 0,
+          adopt_msg_ref: adopt_msg_ref,
+          adopt_retry_timer: nil
         }
 
-        send(self(), :try_adopt)
+        send(self(), {:try_adopt, adopt_msg_ref})
         {:ok, state}
 
-      {:error, {:already_registered, _}} ->
-        {:stop, :target_owner_taken}
+      {:error, reason} ->
+        _ = Registry.unregister(@registry, {:runtime_admission_owner, target})
+        {:stop, {:launch_bind_failed, IntentCore.redact_error_reason(reason)}}
     end
   end
 
@@ -102,7 +160,10 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentOwner do
   end
 
   @impl true
-  def handle_info(:try_adopt, state) do
+  def handle_info({:try_adopt, ref}, %{adopt_msg_ref: ref} = state) when is_reference(ref) do
+    # Consume the current attempt ref so duplicates/stale copies are inert.
+    state = %{state | adopt_msg_ref: nil, adopt_retry_timer: nil}
+
     case adopt_with_store(state) do
       :ok ->
         state = %{state | adopted?: true, adopt_attempts: 0}
@@ -124,6 +185,16 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentOwner do
     end
   end
 
+  def handle_info({:try_adopt, _stale}, state) do
+    # Plain/stale/foreign/duplicated retry messages cannot spend budget.
+    {:noreply, state}
+  end
+
+  def handle_info(:try_adopt, state) do
+    # Legacy bare atom is never authorized.
+    {:noreply, state}
+  end
+
   def handle_info(
         {:DOWN, mon, :process, pid, _reason},
         %{worker_mon: mon, worker_pid: pid} = state
@@ -140,7 +211,10 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentOwner do
 
   @impl true
   def terminate(_reason, state) do
-    _ = Registry.unregister(@registry, {:runtime_admission_owner, state.target_agent_id})
+    if is_map(state) do
+      _ = Registry.unregister(@registry, {:runtime_admission_owner, state.target_agent_id})
+    end
+
     :ok
   end
 
@@ -154,7 +228,9 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentOwner do
            target_agent_id: Map.get(state, :target_agent_id),
            fingerprint: redact_fp(Map.get(state, :fingerprint)),
            adopted?: Map.get(state, :adopted?),
-           worker_alive?: is_pid(Map.get(state, :worker_pid))
+           worker_alive?: is_pid(Map.get(state, :worker_pid)),
+           adopt_attempts: Map.get(state, :adopt_attempts),
+           launch_attempts: Map.get(state, :launch_attempts)
          }}
       ]
     ]
@@ -168,16 +244,43 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentOwner do
 
   defp redact_fp(fp), do: fp
 
+  defp bind_launch_with_store(store_ref, target, intent_id, fingerprint, launch_ref) do
+    TaskStore.bind_runtime_admission_launch(
+      target,
+      intent_id,
+      fingerprint,
+      launch_ref,
+      name: store_ref,
+      timeout: @launch_bind_timeout_ms
+    )
+  catch
+    :exit, reason ->
+      if store_restart_exit?(reason, store_ref),
+        do: {:error, :store_restart},
+        else: {:error, :bind_exit}
+  end
+
   defp schedule_adopt_retry(state) do
     attempts = Map.get(state, :adopt_attempts, 0) + 1
 
     if attempts > @max_adopt_retries do
       {:stop, :adopt_retry_exhausted, state}
     else
-      Process.send_after(self(), :try_adopt, @adopt_retry_ms)
-      {:noreply, %{state | adopt_attempts: attempts}}
+      cancel_adopt_retry_timer(state)
+      ref = make_ref()
+      timer = Process.send_after(self(), {:try_adopt, ref}, @adopt_retry_ms)
+
+      {:noreply,
+       %{state | adopt_attempts: attempts, adopt_msg_ref: ref, adopt_retry_timer: timer}}
     end
   end
+
+  defp cancel_adopt_retry_timer(%{adopt_retry_timer: timer}) when is_reference(timer) do
+    _ = Process.cancel_timer(timer)
+    :ok
+  end
+
+  defp cancel_adopt_retry_timer(_), do: :ok
 
   defp adopt_with_store(state) do
     TaskStore.adopt_runtime_admission_owner(
@@ -303,8 +406,19 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentOwner do
       send(self(), {:stop_typed, :launch_retry_exhausted})
       %{state | launch_attempts: attempts, worker_pid: nil, worker_mon: nil, gate_ref: nil}
     else
-      Process.send_after(self(), :try_adopt, @adopt_retry_ms)
-      %{state | launch_attempts: attempts, worker_pid: nil, worker_mon: nil, gate_ref: nil}
+      cancel_adopt_retry_timer(state)
+      ref = make_ref()
+      timer = Process.send_after(self(), {:try_adopt, ref}, @adopt_retry_ms)
+
+      %{
+        state
+        | launch_attempts: attempts,
+          worker_pid: nil,
+          worker_mon: nil,
+          gate_ref: nil,
+          adopt_msg_ref: ref,
+          adopt_retry_timer: timer
+      }
     end
   end
 

@@ -73,8 +73,14 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentCoreTest do
     assert {:error, :conflict} =
              IntentCore.bind_worker(launching, @target, "rai_1", @fp_a, self(), worker)
 
+    launch_ref = make_ref()
+    {:ok, _, launching2} = IntentCore.begin_owner_launch(intents, @target, launch_ref, 1)
+
+    {:ok, _, bound} =
+      IntentCore.bind_launch_owner(launching2, @target, "rai_1", @fp_a, launch_ref, self())
+
     {:ok, :adopted, _, live} =
-      IntentCore.adopt_owner(intents, %{}, true, true, @target, "rai_1", @fp_a, self())
+      IntentCore.adopt_owner(bound, %{}, true, true, @target, "rai_1", @fp_a, self())
 
     # Foreign owner cannot bind against a live adopted owner.
     foreign = spawn(fn -> :ok end)
@@ -99,7 +105,7 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentCoreTest do
              IntentCore.authenticate_worker(running, @target, "rai_1", @fp_a, self())
   end
 
-  test "adopt rejects when fenced; rebinds idle owner" do
+  test "adopt requires prior launch bind; preserves worker_running" do
     assert {:error, :target_fenced} =
              IntentCore.adopt_owner(
                %{},
@@ -112,11 +118,81 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentCoreTest do
                self()
              )
 
-    assert {:ok, :adopted, intent, intents} =
+    # Nil-intent create path is removed.
+    assert {:error, :not_found} =
              IntentCore.adopt_owner(%{}, %{}, true, true, @target, "rai_1", @fp_a, self())
 
-    assert intent.phase == :owner_live
-    assert Map.has_key?(intents, @target)
+    {:ok, :admitted, _, intents, _} =
+      IntentCore.admit(%{}, %{}, true, true, @target, @fp_a, "rai_1", 0, 10)
+
+    assert {:error, :owner_not_bound} =
+             IntentCore.adopt_owner(intents, %{}, true, true, @target, "rai_1", @fp_a, self())
+
+    launch_ref = make_ref()
+    {:ok, _, launching} = IntentCore.begin_owner_launch(intents, @target, launch_ref, 1)
+
+    foreign = spawn(fn -> :ok end)
+
+    assert {:error, :stale_launch} =
+             IntentCore.bind_launch_owner(
+               launching,
+               @target,
+               "rai_1",
+               @fp_a,
+               make_ref(),
+               foreign
+             )
+
+    {:ok, bound_intent, bound} =
+      IntentCore.bind_launch_owner(
+        launching,
+        @target,
+        "rai_1",
+        @fp_a,
+        launch_ref,
+        self()
+      )
+
+    assert bound_intent.owner_pid == self()
+    assert bound_intent.launch_ref == nil
+
+    assert {:error, :not_owner} =
+             IntentCore.adopt_owner(bound, %{}, true, true, @target, "rai_1", @fp_a, foreign)
+
+    {:ok, :adopted, live, live_map} =
+      IntentCore.adopt_owner(bound, %{}, true, true, @target, "rai_1", @fp_a, self())
+
+    assert live.phase == :owner_live
+
+    worker = spawn(fn -> :ok end)
+    {:ok, running} = IntentCore.bind_worker(live_map, @target, "rai_1", @fp_a, self(), worker)
+    assert running[@target].phase == :worker_running
+
+    # Idempotent exact-owner adopt must not downgrade worker_running.
+    {:ok, :adopted, again, again_map} =
+      IntentCore.adopt_owner(running, %{}, true, true, @target, "rai_1", @fp_a, self())
+
+    assert again.phase == :worker_running
+    assert again.worker_pid == worker
+    assert again_map[@target].phase == :worker_running
+  end
+
+  test "consume_launch_failure only for matching unbound attempt" do
+    {:ok, :admitted, _, intents, _} =
+      IntentCore.admit(%{}, %{}, true, true, @target, @fp_a, "rai_1", 0, 10)
+
+    ref = make_ref()
+    {:ok, _, launching} = IntentCore.begin_owner_launch(intents, @target, ref, 1)
+    mon = make_ref()
+    {:ok, launching} = IntentCore.attach_launcher(launching, @target, ref, self(), mon)
+
+    assert {:ok, cleared, ^mon} =
+             IntentCore.consume_launch_failure(launching, @target, "rai_1", ref)
+
+    assert cleared[@target].launch_ref == nil
+
+    assert {:error, :stale_launch} =
+             IntentCore.consume_launch_failure(cleared, @target, "rai_1", ref)
   end
 
   test "unknown start classification" do
@@ -132,17 +208,34 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentCoreTest do
         intent_id: "rai_1",
         target_agent_id: @target,
         fingerprint: "fp_" <> String.duplicate("a", 16),
+        child_pid: self(),
         owner_pid: self()
       }
     ]
 
     assert {:ok, intents} = IntentCore.rebind_owners(%{}, snaps)
     assert intents[@target].phase == :outcome_unknown
+    assert intents[@target].owner_pid == self()
     assert IntentCore.non_idle?(intents, @target)
   end
 
+  test "security regression: rebind_owners fails closed when snap.owner_pid mismatches child_pid" do
+    other = spawn(fn -> :ok end)
+
+    assert {:error, :invalid_snapshot} =
+             IntentCore.rebind_owners(%{}, [
+               %{
+                 intent_id: "rai_1",
+                 target_agent_id: @target,
+                 fingerprint: "fp_" <> String.duplicate("a", 16),
+                 child_pid: self(),
+                 owner_pid: other
+               }
+             ])
+  end
+
   test "security regression: rebind_owners fails closed on malformed snapshot" do
-    # Missing owner_pid / bad shapes must not silently skip and mark ready.
+    # Incomplete inventory (no enumerated child_pid) and bad shapes fail closed.
     assert {:error, :invalid_snapshot} =
              IntentCore.rebind_owners(%{}, [
                %{
@@ -152,12 +245,24 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentCoreTest do
                }
              ])
 
+    # Snapshot owner_pid alone is not restart authority.
+    assert {:error, :invalid_snapshot} =
+             IntentCore.rebind_owners(%{}, [
+               %{
+                 intent_id: "rai_1",
+                 target_agent_id: @target,
+                 fingerprint: "fp_" <> String.duplicate("a", 16),
+                 owner_pid: self()
+               }
+             ])
+
     assert {:error, :invalid_snapshot} =
              IntentCore.rebind_owners(%{}, [
                %{
                  intent_id: "not-rai",
                  target_agent_id: @target,
                  fingerprint: "fp_" <> String.duplicate("a", 16),
+                 child_pid: self(),
                  owner_pid: self()
                }
              ])
@@ -168,6 +273,7 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentCoreTest do
                  intent_id: "rai_1",
                  target_agent_id: "bad_target",
                  fingerprint: "fp_" <> String.duplicate("a", 16),
+                 child_pid: self(),
                  owner_pid: self()
                }
              ])
@@ -183,12 +289,14 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentCoreTest do
         intent_id: "rai_1",
         target_agent_id: @target,
         fingerprint: fp,
+        child_pid: self(),
         owner_pid: self()
       },
       %{
         intent_id: "rai_2",
         target_agent_id: @target,
         fingerprint: fp,
+        child_pid: self(),
         owner_pid: self()
       }
     ]
@@ -205,12 +313,14 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentCoreTest do
         intent_id: "rai_same",
         target_agent_id: "agent_target_a",
         fingerprint: fp,
+        child_pid: self(),
         owner_pid: self()
       },
       %{
         intent_id: "rai_same",
         target_agent_id: "agent_target_b",
         fingerprint: fp,
+        child_pid: self(),
         owner_pid: self()
       }
     ]
@@ -227,6 +337,7 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentCoreTest do
           intent_id: "rai_#{i}",
           target_agent_id: "agent_t#{i}",
           fingerprint: fp,
+          child_pid: self(),
           owner_pid: self()
         }
       end
@@ -243,6 +354,7 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentCoreTest do
                  intent_id: "rai_1",
                  target_agent_id: @target,
                  fingerprint: fp,
+                 child_pid: self(),
                  owner_pid: self()
                }
              ])
@@ -267,8 +379,14 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentCoreTest do
     {:ok, :admitted, _, intents2, _} =
       IntentCore.admit(%{}, %{}, true, true, @target, @fp_a, "rai_2", 0, 10)
 
+    ref2 = make_ref()
+    {:ok, _, launching2} = IntentCore.begin_owner_launch(intents2, @target, ref2, 1)
+
+    {:ok, _, bound2} =
+      IntentCore.bind_launch_owner(launching2, @target, "rai_2", @fp_a, ref2, self())
+
     {:ok, :adopted, _, live} =
-      IntentCore.adopt_owner(intents2, %{}, true, true, @target, "rai_2", @fp_a, self())
+      IntentCore.adopt_owner(bound2, %{}, true, true, @target, "rai_2", @fp_a, self())
 
     assert {:ok, :begin, settling, mid2, [{:shutdown_owner, owner}]} =
              IntentCore.begin_settling(live, @target, "rai_2", {:applied, self()})
@@ -476,6 +594,16 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentCoreTest do
     assert IntentCore.retryable_adopt_error?(:runtime_admission_not_ready)
     assert IntentCore.retryable_adopt_error?(:fence_not_ready)
     assert IntentCore.retryable_adopt_error?(:store_restart)
+    assert IntentCore.retryable_adopt_error?(:owner_not_bound)
+    assert IntentCore.retryable_launcher_failure?(:max_children)
+    assert IntentCore.retryable_launcher_failure?(:launcher_exit)
+    assert IntentCore.retryable_launcher_failure?(:store_restart)
+    assert IntentCore.retryable_launcher_failure?({:launch_bind_failed, :timeout})
+    assert IntentCore.retryable_launcher_failure?({:launch_bind_failed, :store_restart})
+    assert IntentCore.retryable_launcher_failure?({:launch_bind_failed, :bind_exit})
+    assert IntentCore.retryable_launcher_failure?({:error, :max_children})
+    refute IntentCore.retryable_launcher_failure?(:target_owner_taken)
+    refute IntentCore.retryable_launcher_failure?({:launch_bind_failed, :missing_launch_ref})
     refute IntentCore.retryable_adopt_error?(:conflict)
     refute IntentCore.retryable_adopt_error?(:target_fenced)
 
@@ -510,8 +638,14 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentCoreTest do
     {:ok, :admitted, _, intents, _} =
       IntentCore.admit(%{}, %{}, true, true, @target, @fp_a, "rai_1", 0, 10)
 
+    ref = make_ref()
+    {:ok, _, launching} = IntentCore.begin_owner_launch(intents, @target, ref, 1)
+
+    {:ok, _, bound} =
+      IntentCore.bind_launch_owner(launching, @target, "rai_1", @fp_a, ref, self())
+
     {:ok, :adopted, _, live} =
-      IntentCore.adopt_owner(intents, %{}, true, true, @target, "rai_1", @fp_a, self())
+      IntentCore.adopt_owner(bound, %{}, true, true, @target, "rai_1", @fp_a, self())
 
     {:ok, :begin, _, settling, _} =
       IntentCore.begin_settling(live, @target, "rai_1", {:error, :x})

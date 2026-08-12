@@ -31,7 +31,11 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentCore do
           optional(:owner_pid) => pid() | nil,
           optional(:worker_pid) => pid() | nil,
           optional(:terminal) => term(),
-          optional(:retire_barrier) => retire_barrier()
+          optional(:retire_barrier) => retire_barrier(),
+          optional(:launch_ref) => reference() | nil,
+          optional(:launcher_pid) => pid() | nil,
+          optional(:launcher_mon) => reference() | nil,
+          optional(:launcher_attempt_index) => non_neg_integer()
         }
 
   @type fence_map :: %{optional(String.t()) => String.t()}
@@ -141,12 +145,184 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentCore do
         owner_pid: nil,
         worker_pid: nil,
         terminal: nil,
-        retire_barrier: :none
+        retire_barrier: :none,
+        launch_ref: nil,
+        launcher_pid: nil,
+        launcher_mon: nil,
+        launcher_attempt_index: 0
       }
 
       new_intents = Map.put(intents, target, intent)
       {:ok, :admitted, intent, new_intents, [{:launch_owner, intent}]}
     end
+  end
+
+  @doc """
+  Begin a TaskStore-owned owner launch attempt (pure).
+
+  Requires no outstanding `launch_ref` and phase `:admitted` or retrying
+  `:owner_launching` without a bound owner.
+  """
+  @spec begin_owner_launch(intent_map(), String.t(), reference(), non_neg_integer()) ::
+          {:ok, intent(), intent_map()} | {:error, atom()}
+  def begin_owner_launch(intents, target, launch_ref, attempt_index)
+      when is_map(intents) and is_binary(target) and is_reference(launch_ref) and
+             is_integer(attempt_index) and attempt_index > 0 do
+    case Map.get(intents, target) do
+      %{phase: phase, owner_pid: owner_pid} = intent
+      when phase in [:admitted, :owner_launching] and not is_pid(owner_pid) ->
+        if is_reference(Map.get(intent, :launch_ref)) do
+          {:error, :launch_attempt_outstanding}
+        else
+          # Fields are explicit on admit_fresh/rebind constructors; Map.put keeps
+          # partial test fixtures and older in-memory rows safe.
+          updated =
+            intent
+            |> Map.put(:phase, :owner_launching)
+            |> Map.put(:launch_ref, launch_ref)
+            |> Map.put(:launcher_pid, nil)
+            |> Map.put(:launcher_mon, nil)
+            |> Map.put(:launcher_attempt_index, attempt_index)
+
+          {:ok, updated, Map.put(intents, target, updated)}
+        end
+
+      _ ->
+        {:error, :conflict}
+    end
+  end
+
+  @doc """
+  Attach monitored launcher identity to the current launch attempt (pure).
+  """
+  @spec attach_launcher(intent_map(), String.t(), reference(), pid(), reference()) ::
+          {:ok, intent_map()} | {:error, atom()}
+  def attach_launcher(intents, target, launch_ref, launcher_pid, launcher_mon)
+      when is_reference(launch_ref) and is_pid(launcher_pid) and is_reference(launcher_mon) do
+    case Map.get(intents, target) do
+      %{phase: :owner_launching, launch_ref: ^launch_ref, owner_pid: owner_pid} = intent
+      when not is_pid(owner_pid) ->
+        updated =
+          intent
+          |> Map.put(:launcher_pid, launcher_pid)
+          |> Map.put(:launcher_mon, launcher_mon)
+
+        {:ok, Map.put(intents, target, updated)}
+
+      _ ->
+        {:error, :stale_launch}
+    end
+  end
+
+  @doc """
+  Authenticated launch bind: caller PID becomes expected owner only when the
+  current unforgeable `launch_ref` matches and no owner is bound yet.
+  """
+  @spec bind_launch_owner(
+          intent_map(),
+          String.t(),
+          String.t(),
+          String.t(),
+          reference(),
+          pid()
+        ) ::
+          {:ok, intent(), intent_map()} | {:error, atom()}
+  def bind_launch_owner(intents, target, intent_id, fingerprint, launch_ref, caller_pid)
+      when is_binary(intent_id) and is_binary(fingerprint) and is_reference(launch_ref) and
+             is_pid(caller_pid) do
+    case Map.get(intents, target) do
+      %{
+        intent_id: ^intent_id,
+        fingerprint: ^fingerprint,
+        phase: :owner_launching,
+        launch_ref: ^launch_ref,
+        owner_pid: owner_pid
+      } = intent
+      when not is_pid(owner_pid) ->
+        updated =
+          intent
+          |> Map.put(:owner_pid, caller_pid)
+          |> clear_launch_attempt_fields()
+
+        {:ok, updated, Map.put(intents, target, updated)}
+
+      %{
+        intent_id: ^intent_id,
+        fingerprint: ^fingerprint,
+        owner_pid: ^caller_pid,
+        launch_ref: nil
+      } = intent ->
+        # Idempotent re-bind by the already-bound owner after consume.
+        {:ok, intent, intents}
+
+      %{
+        intent_id: ^intent_id,
+        fingerprint: ^fingerprint,
+        owner_pid: ^caller_pid,
+        launch_ref: ^launch_ref
+      } = intent ->
+        updated = clear_launch_attempt_fields(intent)
+        {:ok, updated, Map.put(intents, target, updated)}
+
+      %{intent_id: ^intent_id, owner_pid: other} when is_pid(other) and other != caller_pid ->
+        {:error, :already_bound}
+
+      %{intent_id: ^intent_id, launch_ref: other_ref}
+      when is_reference(other_ref) and other_ref != launch_ref ->
+        {:error, :stale_launch}
+
+      %{intent_id: ^intent_id} ->
+        {:error, :stale_launch}
+
+      %{phase: _} ->
+        {:error, :conflict}
+
+      nil ->
+        {:error, :not_found}
+    end
+  end
+
+  @doc """
+  Consume a matching unbound launch attempt after authenticated failure/DOWN.
+
+  Returns the prior launcher_mon (if any) so the shell can demonitor.
+  """
+  @spec consume_launch_failure(intent_map(), String.t(), String.t(), reference()) ::
+          {:ok, intent_map(), reference() | nil} | {:error, atom()}
+  def consume_launch_failure(intents, target, intent_id, launch_ref)
+      when is_binary(intent_id) and is_reference(launch_ref) do
+    case Map.get(intents, target) do
+      %{
+        intent_id: ^intent_id,
+        phase: :owner_launching,
+        launch_ref: ^launch_ref,
+        owner_pid: owner_pid
+      } = intent
+      when not is_pid(owner_pid) ->
+        mon = Map.get(intent, :launcher_mon)
+        updated = clear_launch_attempt_fields(intent)
+        {:ok, Map.put(intents, target, updated), mon}
+
+      %{intent_id: ^intent_id, owner_pid: owner_pid} when is_pid(owner_pid) ->
+        # Bind already won — failure is stale.
+        {:error, :already_bound}
+
+      %{intent_id: ^intent_id} ->
+        {:error, :stale_launch}
+
+      nil ->
+        {:error, :not_found}
+
+      _ ->
+        {:error, :stale_launch}
+    end
+  end
+
+  defp clear_launch_attempt_fields(intent) when is_map(intent) do
+    intent
+    |> Map.put(:launch_ref, nil)
+    |> Map.put(:launcher_pid, nil)
+    |> Map.put(:launcher_mon, nil)
   end
 
   @doc "Adopt a live owner into the intent map against current fence/readiness."
@@ -170,9 +346,9 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentCore do
         target,
         intent_id,
         fingerprint,
-        owner_pid
+        caller_pid
       )
-      when is_pid(owner_pid) do
+      when is_pid(caller_pid) do
     cond do
       admission_ready? != true ->
         {:error, :runtime_admission_not_ready}
@@ -184,51 +360,75 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentCore do
         {:error, :target_fenced}
 
       true ->
-        case Map.get(intents, target) do
-          %{phase: :settling} ->
-            {:error, :conflict}
+        adopt_ready_owner(intents, target, intent_id, fingerprint, caller_pid)
+    end
+  end
 
-          %{phase: :outcome_unknown, retire_barrier: :await_worker_down} ->
-            {:error, :conflict}
+  defp adopt_ready_owner(intents, target, intent_id, fingerprint, caller_pid) do
+    case Map.get(intents, target) do
+      %{phase: :settling} ->
+        {:error, :conflict}
 
-          %{intent_id: ^intent_id, fingerprint: ^fingerprint, phase: phase} = intent
-          when phase in [
-                 :admitted,
-                 :owner_launching,
-                 :owner_live,
-                 :worker_running,
-                 :outcome_unknown
-               ] ->
-            updated = %{
-              intent
-              | phase: :owner_live,
-                owner_pid: owner_pid,
-                retire_barrier: Map.get(intent, :retire_barrier, :none)
-            }
+      %{phase: :outcome_unknown, retire_barrier: :await_worker_down} ->
+        {:error, :conflict}
 
-            {:ok, :adopted, updated, Map.put(intents, target, updated)}
+      # Exact bound owner, worker already running — never downgrade phase.
+      %{
+        intent_id: ^intent_id,
+        fingerprint: ^fingerprint,
+        phase: :worker_running,
+        owner_pid: ^caller_pid
+      } = intent ->
+        {:ok, :adopted, intent, intents}
 
-          %{phase: phase} when phase != :terminal ->
-            {:error, :conflict}
+      # Exact bound owner, already live — idempotent.
+      %{
+        intent_id: ^intent_id,
+        fingerprint: ^fingerprint,
+        phase: :owner_live,
+        owner_pid: ^caller_pid
+      } = intent ->
+        {:ok, :adopted, intent, intents}
 
-          nil ->
-            intent = %{
-              intent_id: intent_id,
-              target_agent_id: target,
-              kind: :ordinary_start,
-              fingerprint: fingerprint,
-              phase: :owner_live,
-              owner_pid: owner_pid,
-              worker_pid: nil,
-              terminal: nil,
-              retire_barrier: :none
-            }
+      # Launch-bound or restart-rebound owner advancing to live.
+      %{
+        intent_id: ^intent_id,
+        fingerprint: ^fingerprint,
+        phase: phase,
+        owner_pid: ^caller_pid
+      } = intent
+      when phase in [:owner_launching, :outcome_unknown] and is_pid(caller_pid) ->
+        updated = %{
+          intent
+          | phase: :owner_live,
+            retire_barrier: Map.get(intent, :retire_barrier, :none)
+        }
 
-            {:ok, :adopted, intent, Map.put(intents, target, intent)}
+        {:ok, :adopted, updated, Map.put(intents, target, updated)}
 
-          _ ->
-            {:error, :conflict}
-        end
+      %{
+        intent_id: ^intent_id,
+        fingerprint: ^fingerprint,
+        owner_pid: other
+      }
+      when is_pid(other) and other != caller_pid ->
+        {:error, :not_owner}
+
+      %{intent_id: ^intent_id, fingerprint: ^fingerprint, owner_pid: owner_pid}
+      when not is_pid(owner_pid) ->
+        {:error, :owner_not_bound}
+
+      %{intent_id: ^intent_id} ->
+        {:error, :conflict}
+
+      %{phase: phase} when phase != :terminal ->
+        {:error, :conflict}
+
+      nil ->
+        {:error, :not_found}
+
+      _ ->
+        {:error, :conflict}
     end
   end
 
@@ -792,13 +992,14 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentCore do
   def retryable_adopt_error?(:runtime_admission_not_ready), do: true
   def retryable_adopt_error?(:fence_not_ready), do: true
   def retryable_adopt_error?(:store_restart), do: true
+  def retryable_adopt_error?(:owner_not_bound), do: true
   def retryable_adopt_error?(_), do: false
 
   # Closed launch-retry allowlist only — never "any start_child error".
   @retryable_start_child_reasons [:max_children, :timeout]
 
   @doc """
-  Pure retry allowlist for IntentOwner launch failures.
+  Pure retry allowlist for IntentOwner post-adopt worker launch failures.
 
   Only store restart and an explicit closed set of Task.Supervisor pressure
   reasons retry. Bind auth errors, unknown shapes, and redacted exceptions do not.
@@ -812,6 +1013,27 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentCore do
       do: true
 
   def retryable_launch_failure?(_), do: false
+
+  @doc """
+  Pure retry allowlist for TaskStore pre-owner launcher failures.
+
+  Distinct from IntentOwner worker-launch retries. Closed transient set only.
+  Includes nested init-bind shapes (`{:launch_bind_failed, _}`) for store
+  restart / timeout so a blocked bind call does not permanently exhaust.
+  """
+  @spec retryable_launcher_failure?(term()) :: boolean()
+  def retryable_launcher_failure?(:max_children), do: true
+  def retryable_launcher_failure?(:timeout), do: true
+  def retryable_launcher_failure?({:timeout, _}), do: true
+  def retryable_launcher_failure?(:launcher_exit), do: true
+  def retryable_launcher_failure?(:store_restart), do: true
+  def retryable_launcher_failure?(:bind_exit), do: true
+
+  def retryable_launcher_failure?({:launch_bind_failed, reason}),
+    do: retryable_launcher_failure?(reason)
+
+  def retryable_launcher_failure?({:error, reason}), do: retryable_launcher_failure?(reason)
+  def retryable_launcher_failure?(_), do: false
 
   @doc "Classify a Task.Supervisor.start_child error into a bounded atom or redacted tag."
   @spec classify_start_child_error(term()) :: term()
@@ -909,12 +1131,14 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentCore do
     target = Map.get(snap, :target_agent_id, Map.get(snap, "target_agent_id"))
     intent_id = Map.get(snap, :intent_id, Map.get(snap, "intent_id"))
     fingerprint = Map.get(snap, :fingerprint, Map.get(snap, "fingerprint"))
-    owner_pid = Map.get(snap, :owner_pid, Map.get(snap, "owner_pid"))
+    # Authoritative owner is only the enumerated fixed-supervisor child PID.
+    child_pid = Map.get(snap, :child_pid, Map.get(snap, "child_pid"))
+    snap_owner = Map.get(snap, :owner_pid, Map.get(snap, "owner_pid"))
 
     with :ok <- validate_target(target),
          :ok <- validate_intent_id(intent_id),
          :ok <- validate_fingerprint(fingerprint),
-         :ok <- validate_owner_pid(owner_pid) do
+         {:ok, owner_pid} <- resolve_rebind_owner_pid(child_pid, snap_owner) do
       {:ok,
        %{
          intent_id: intent_id,
@@ -925,12 +1149,29 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentCore do
          owner_pid: owner_pid,
          worker_pid: nil,
          terminal: nil,
-         retire_barrier: :none
+         retire_barrier: :none,
+         launch_ref: nil,
+         launcher_pid: nil,
+         launcher_mon: nil,
+         launcher_attempt_index: 0
        }}
     end
   end
 
   defp validate_snapshot(_), do: {:error, :invalid_snapshot}
+
+  # Restart authority is only the enumerated fixed-supervisor child PID.
+  # Snapshot owner_pid, if present, must equal child_pid; never an independent source.
+  defp resolve_rebind_owner_pid(child_pid, snap_owner)
+       when is_pid(child_pid) and is_pid(snap_owner) and child_pid != snap_owner do
+    {:error, :invalid_snapshot}
+  end
+
+  defp resolve_rebind_owner_pid(child_pid, snap_owner)
+       when is_pid(child_pid) and (is_pid(snap_owner) or is_nil(snap_owner)),
+       do: {:ok, child_pid}
+
+  defp resolve_rebind_owner_pid(_child_pid, _snap_owner), do: {:error, :invalid_snapshot}
 
   defp validate_target(target)
        when is_binary(target) and byte_size(target) <= @max_target_bytes and
@@ -959,7 +1200,4 @@ defmodule Arbor.Agent.RuntimeAdmission.IntentCore do
   end
 
   defp validate_fingerprint(_), do: {:error, :invalid_snapshot}
-
-  defp validate_owner_pid(pid) when is_pid(pid), do: :ok
-  defp validate_owner_pid(_), do: {:error, :invalid_snapshot}
 end

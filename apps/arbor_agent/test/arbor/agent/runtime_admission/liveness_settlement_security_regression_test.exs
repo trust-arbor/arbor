@@ -6,10 +6,9 @@ defmodule Arbor.Agent.RuntimeAdmission.LivenessSettlementSecurityRegressionTest 
   Registry, :sys, Process.info mailbox, OrdinaryStartWorker hold message).
 
   Mode A: production IntentOwner + OrdinaryStartWorker hold.
-  Mode B: controlled trap-exit owner + controlled exact worker. Missing-intent
-  adopt is a **test-only** use of existing reconciliation/rebind-shaped
-  `adopt_owner` nil-branch behavior — not a new production admission path.
-  Production admission remains admit → launch owner → adopt.
+  Mode B: controlled trap-exit owner + controlled exact worker. Uses a
+  planted launch_ref + authenticated launch bind (no nil-intent adopt).
+  Production admission remains admit → launch_ref bind-in-init → adopt.
 
   Compiles on checkpoint 8118a8fa77 and fails there behaviorally for
   barrier/retirement defects; passes on the settlement-barrier candidate.
@@ -702,13 +701,40 @@ defmodule Arbor.Agent.RuntimeAdmission.LivenessSettlementSecurityRegressionTest 
     )
   end
 
-  # ── Mode B helpers (test-only reconciliation adopt) ───────────────
+  # ── Mode B helpers (test-only launch-bind then adopt) ─────────────
 
   defp start_mode_b(store) do
     agent_id = "agent_ctrl#{System.unique_integer([:positive])}"
     intent_id = "rai_ctrl#{System.unique_integer([:positive])}"
     assert {:ok, %{fingerprint: fp, keyword: kw}} = Opts.project([])
     test = self()
+    launch_ref = make_ref()
+    store_pid = Process.whereis(store)
+    assert is_pid(store_pid)
+
+    # Plant a launch-attempt row so the controlled owner can bind via the
+    # authenticated launch_ref path (no nil-intent adopt forge).
+    :sys.replace_state(store_pid, fn st ->
+      intent = %{
+        intent_id: intent_id,
+        target_agent_id: agent_id,
+        kind: :ordinary_start,
+        fingerprint: fp,
+        phase: :owner_launching,
+        owner_pid: nil,
+        worker_pid: nil,
+        terminal: nil,
+        retire_barrier: :none,
+        launch_ref: launch_ref,
+        launcher_pid: nil,
+        launcher_mon: nil,
+        launcher_attempt_index: 1
+      }
+
+      st
+      |> put_in([:runtime_admission_intents, agent_id], intent)
+      |> put_in([:runtime_admission_by_id, intent_id], agent_id)
+    end)
 
     owner_pid =
       spawn(fn ->
@@ -719,6 +745,15 @@ defmodule Arbor.Agent.RuntimeAdmission.LivenessSettlementSecurityRegressionTest 
             intent_id: intent_id,
             fingerprint: fp
           })
+
+        :ok =
+          TaskStore.bind_runtime_admission_launch(
+            agent_id,
+            intent_id,
+            fp,
+            launch_ref,
+            name: store
+          )
 
         :ok =
           TaskStore.adopt_runtime_admission_owner(agent_id, intent_id, fp, name: store)

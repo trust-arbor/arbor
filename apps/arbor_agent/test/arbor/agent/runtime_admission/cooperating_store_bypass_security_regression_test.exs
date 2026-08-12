@@ -152,6 +152,7 @@ defmodule Arbor.Agent.RuntimeAdmission.CooperatingStoreBypassSecurityRegressionT
   end
 
   test "security regression: custom-store helper is test-only export" do
+    assert {:module, Lifecycle} = Code.ensure_loaded(Lifecycle)
     assert function_exported?(Lifecycle, :ordinary_start_effects, 3)
     # Production path has no arity-4 ordinary_start_effects store selector.
     refute function_exported?(Lifecycle, :ordinary_start_effects, 4)

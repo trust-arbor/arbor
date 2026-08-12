@@ -128,6 +128,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   @default_runtime_admission_settle_timeout_ms 500
   @runtime_admission_launcher_collision_retries 8
   @runtime_admission_launcher_collision_sleep_ms 25
+  @runtime_admission_launcher_max_attempts 8
   @runtime_admission_registry Arbor.Agent.RuntimeAdmissionRegistry
 
   alias Arbor.Agent.Config
@@ -393,11 +394,47 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   end
 
   @doc """
+  Authenticated launch bind for a just-started IntentOwner.
+
+  Called from IntentOwner.init/1 with the TaskStore-minted launch_ref. The
+  GenServer caller pid is bound as expected owner only when the launch_ref
+  matches the current attempt. Caller-supplied PIDs are never trusted.
+  """
+  @spec bind_runtime_admission_launch(
+          String.t(),
+          String.t(),
+          String.t(),
+          reference(),
+          keyword() | map()
+        ) :: :ok | {:error, term()}
+  def bind_runtime_admission_launch(
+        target_agent_id,
+        intent_id,
+        fingerprint,
+        launch_ref,
+        opts \\ []
+      )
+      when is_binary(target_agent_id) and is_binary(intent_id) and is_binary(fingerprint) and
+             is_reference(launch_ref) do
+    timeout =
+      Keyword.get(
+        normalize_opts(opts),
+        :timeout,
+        @default_runtime_admission_admit_timeout_ms
+      )
+
+    GenServer.call(
+      store_name(opts),
+      {:bind_runtime_admission_launch, target_agent_id, intent_id, fingerprint, launch_ref},
+      timeout
+    )
+  end
+
+  @doc """
   Adopt the calling IntentOwner against the current fence and intent map.
 
-  Source-owned: the GenServer caller pid is the only accepted owner identity
-  (caller-supplied PIDs are never trusted). Late owners must re-enter here
-  before launching work.
+  Requires the caller to already be the launch-bound (or restart-rebound)
+  owner_pid. Caller-supplied PIDs are never trusted as mint authority.
   """
   @spec adopt_runtime_admission_owner(String.t(), String.t(), String.t(), keyword() | map()) ::
           :ok | {:error, term()}
@@ -780,6 +817,8 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
       runtime_admission_waiters: %{},
       runtime_admission_owner_monitors: %{},
       runtime_admission_worker_monitors: %{},
+      runtime_admission_launcher_monitors: %{},
+      runtime_admission_pending_opts: %{},
       runtime_admission_settle_timers: %{},
       runtime_admission_reconcile: %{status: :pending},
       max_runtime_admission_intents:
@@ -1237,6 +1276,44 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   end
 
   def handle_call(
+        {:bind_runtime_admission_launch, target_agent_id, intent_id, fingerprint, launch_ref},
+        {caller_pid, _tag},
+        state
+      )
+      when is_pid(caller_pid) and is_reference(launch_ref) do
+    state = ensure_fence_shape(state)
+    state = ensure_runtime_admission_shape(state)
+
+    case validate_fence_target(target_agent_id) do
+      {:ok, target} ->
+        case IntentCore.bind_launch_owner(
+               state.runtime_admission_intents,
+               target,
+               intent_id,
+               fingerprint,
+               launch_ref,
+               caller_pid
+             ) do
+          {:ok, _intent, intents} ->
+            state =
+              state
+              |> put_in([:runtime_admission_intents], intents)
+              |> clear_launcher_monitor_for_intent(intent_id, target)
+              |> ensure_owner_monitor(intent_id, target, caller_pid)
+              |> update_in([:runtime_admission_pending_opts], &Map.delete(&1, intent_id))
+
+            {:reply, :ok, state}
+
+          {:error, reason} ->
+            {:reply, {:error, reason}, state}
+        end
+
+      {:error, _} = error ->
+        {:reply, error, state}
+    end
+  end
+
+  def handle_call(
         {:adopt_runtime_admission_owner, target_agent_id, intent_id, fingerprint},
         {caller_pid, _tag} = _from,
         state
@@ -1245,7 +1322,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     state = ensure_fence_shape(state)
     state = ensure_runtime_admission_shape(state)
 
-    # Source-owned: caller pid is the only accepted owner identity.
+    # Caller must already be the launch-bound or restart-rebound owner_pid.
     case validate_fence_target(target_agent_id) do
       {:ok, target} ->
         case IntentCore.adopt_owner(
@@ -1259,13 +1336,11 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
                caller_pid
              ) do
           {:ok, :adopted, _intent, intents} ->
-            mon = Process.monitor(caller_pid)
-
             state =
               state
               |> put_in([:runtime_admission_intents], intents)
               |> put_in([:runtime_admission_by_id, intent_id], target)
-              |> put_in([:runtime_admission_owner_monitors, mon], {intent_id, target, caller_pid})
+              |> ensure_owner_monitor(intent_id, target, caller_pid)
 
             {:reply, :ok, state}
 
@@ -1897,37 +1972,32 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     end
   end
 
-  def handle_info({:runtime_admission_owner_launched, intent_id, owner_pid}, state)
-      when is_binary(intent_id) and is_pid(owner_pid) do
-    # Owner will adopt via call; nothing to do beyond tracking if needed.
+  def handle_info(
+        {:runtime_admission_owner_launched, launch_ref, intent_id, _owner_pid},
+        state
+      )
+      when is_reference(launch_ref) and is_binary(intent_id) do
+    # Bind happens in IntentOwner.init via authenticated call; success is inert.
     {:noreply, state}
   end
 
-  def handle_info({:runtime_admission_owner_launch_failed, intent_id, reason}, state)
-      when is_binary(intent_id) do
+  def handle_info({:runtime_admission_owner_launched, _intent_id, _owner_pid}, state) do
+    # Legacy unauthenticated success messages are inert.
+    {:noreply, state}
+  end
+
+  def handle_info(
+        {:runtime_admission_owner_launch_failed, launch_ref, intent_id, reason},
+        state
+      )
+      when is_reference(launch_ref) and is_binary(intent_id) do
     state = ensure_runtime_admission_shape(state)
+    {:noreply, handle_authenticated_launch_failure(state, launch_ref, intent_id, reason)}
+  end
 
-    case Map.get(state.runtime_admission_by_id, intent_id) do
-      target when is_binary(target) ->
-        bounded = IntentCore.redact_error_reason(reason)
-
-        state =
-          case request_runtime_admission_terminal(
-                 state,
-                 target,
-                 intent_id,
-                 {:error, bounded},
-                 :launch_failed
-               ) do
-            {:ok, s} -> s
-            {:error, _, s} -> s
-          end
-
-        {:noreply, state}
-
-      _ ->
-        {:noreply, state}
-    end
+  def handle_info({:runtime_admission_owner_launch_failed, _intent_id, _reason}, state) do
+    # Legacy plain intent_id-only failure is forgeable and must be inert.
+    {:noreply, state}
   end
 
   def handle_info({:runtime_admission_settle_timeout, intent_id, gen}, state)
@@ -2066,17 +2136,8 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
       {:fence_worker, seed} ->
         handle_fence_seed_worker_down(state, seed, :normal)
 
-      {:runtime_admission_owner, intent_id, target, owner_pid} ->
-        handle_runtime_admission_owner_down(state, ref, intent_id, target, owner_pid)
-
-      {:runtime_admission_worker, intent_id, target, worker_pid} ->
-        handle_runtime_admission_worker_monitor_down(state, ref, intent_id, target, worker_pid)
-
-      {:runtime_admission_reconcile_launcher, rec} ->
-        handle_runtime_admission_reconcile_launcher_down(state, rec)
-
-      {:runtime_admission_reconcile_worker, rec} ->
-        handle_runtime_admission_reconcile_worker_down(state, rec)
+      {:runtime_admission, monitor} ->
+        handle_runtime_admission_monitor_down(state, ref, monitor)
 
       {:reservation, task_id, reservation} ->
         handle_reservation_owner_down(state, task_id, reservation, :owner_down)
@@ -2112,17 +2173,8 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
       {:fence_worker, seed} ->
         handle_fence_seed_worker_down(state, seed, reason)
 
-      {:runtime_admission_owner, intent_id, target, owner_pid} ->
-        handle_runtime_admission_owner_down(state, ref, intent_id, target, owner_pid)
-
-      {:runtime_admission_worker, intent_id, target, worker_pid} ->
-        handle_runtime_admission_worker_monitor_down(state, ref, intent_id, target, worker_pid)
-
-      {:runtime_admission_reconcile_launcher, rec} ->
-        handle_runtime_admission_reconcile_launcher_down(state, rec)
-
-      {:runtime_admission_reconcile_worker, rec} ->
-        handle_runtime_admission_reconcile_worker_down(state, rec)
+      {:runtime_admission, monitor} ->
+        handle_runtime_admission_monitor_down(state, ref, monitor)
 
       {:reservation, task_id, reservation} ->
         handle_reservation_owner_down(state, task_id, reservation, :owner_down)
@@ -2170,20 +2222,53 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
 
     case Map.get(state.runtime_admission_owner_monitors, ref) do
       {intent_id, target, owner_pid} ->
-        {:runtime_admission_owner, intent_id, target, owner_pid}
+        {:runtime_admission, {:owner, intent_id, target, owner_pid}}
 
       nil ->
-        case Map.get(state.runtime_admission_worker_monitors, ref) do
-          {intent_id, target, worker_pid} ->
-            {:runtime_admission_worker, intent_id, target, worker_pid}
+        classify_runtime_admission_worker_monitor(state, ref)
+    end
+  end
 
-          nil ->
-            case find_runtime_admission_reconcile_monitor(state, ref) do
-              {:launcher, rec} -> {:runtime_admission_reconcile_launcher, rec}
-              {:worker, rec} -> {:runtime_admission_reconcile_worker, rec}
-              :error -> classify_reservation_monitor(state, ref)
-            end
+  defp classify_runtime_admission_worker_monitor(state, ref) do
+    case Map.get(state.runtime_admission_worker_monitors, ref) do
+      {intent_id, target, worker_pid} ->
+        {:runtime_admission, {:worker, intent_id, target, worker_pid}}
+
+      nil ->
+        classify_runtime_admission_launcher_monitor(state, ref)
+    end
+  end
+
+  defp classify_runtime_admission_launcher_monitor(state, ref) do
+    case Map.get(state.runtime_admission_launcher_monitors, ref) do
+      {intent_id, target, launch_ref, _launcher_pid} ->
+        {:runtime_admission, {:launcher, intent_id, target, launch_ref}}
+
+      nil ->
+        case find_runtime_admission_reconcile_monitor(state, ref) do
+          {:launcher, rec} -> {:runtime_admission, {:reconcile_launcher, rec}}
+          {:worker, rec} -> {:runtime_admission, {:reconcile_worker, rec}}
+          :error -> classify_reservation_monitor(state, ref)
         end
+    end
+  end
+
+  defp handle_runtime_admission_monitor_down(state, ref, monitor) do
+    case monitor do
+      {:owner, intent_id, target, owner_pid} ->
+        handle_runtime_admission_owner_down(state, ref, intent_id, target, owner_pid)
+
+      {:worker, intent_id, target, worker_pid} ->
+        handle_runtime_admission_worker_monitor_down(state, ref, intent_id, target, worker_pid)
+
+      {:launcher, intent_id, target, launch_ref} ->
+        handle_runtime_admission_launcher_down(state, ref, intent_id, target, launch_ref)
+
+      {:reconcile_launcher, rec} ->
+        handle_runtime_admission_reconcile_launcher_down(state, rec)
+
+      {:reconcile_worker, rec} ->
+        handle_runtime_admission_reconcile_worker_down(state, rec)
     end
   end
 
@@ -4421,6 +4506,8 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     |> Map.put_new(:runtime_admission_waiters, %{})
     |> Map.put_new(:runtime_admission_owner_monitors, %{})
     |> Map.put_new(:runtime_admission_worker_monitors, %{})
+    |> Map.put_new(:runtime_admission_launcher_monitors, %{})
+    |> Map.put_new(:runtime_admission_pending_opts, %{})
     |> Map.put_new(:runtime_admission_settle_timers, %{})
     |> Map.put_new(:runtime_admission_reconcile, %{status: :pending})
     |> Map.put_new(:max_runtime_admission_intents, @default_max_runtime_admission_intents)
@@ -4495,74 +4582,140 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   end
 
   defp launch_runtime_admission_owner(state, intent, validated_opts) do
+    target = intent.target_agent_id
+    current = Map.get(state.runtime_admission_intents, target)
+
+    if is_map(current) and is_reference(Map.get(current, :launch_ref)) do
+      # One outstanding launch attempt only.
+      state
+    else
+      state =
+        put_in(
+          state,
+          [:runtime_admission_pending_opts, intent.intent_id],
+          validated_opts
+        )
+
+      do_launch_runtime_admission_owner(state, intent, validated_opts, 1)
+    end
+  end
+
+  defp do_launch_runtime_admission_owner(state, intent, validated_opts, attempt_index)
+       when is_integer(attempt_index) and attempt_index > 0 do
     store_ref = Map.get(state, :store_ref, @default_name)
 
     supervisor =
       Map.get(state, :runtime_admission_supervisor, @default_runtime_admission_supervisor)
 
     task_supervisor = Map.get(state, :task_supervisor, @default_task_supervisor)
+    launch_ref = make_ref()
+    target = intent.target_agent_id
 
-    # Fixed launcher MFA — never captures store pid; uses stable store_ref.
-    _ =
-      spawn(__MODULE__, :runtime_admission_owner_launcher, [
-        store_ref,
-        supervisor,
-        task_supervisor,
-        intent.intent_id,
-        intent.target_agent_id,
-        intent.fingerprint,
-        validated_opts
-      ])
+    case IntentCore.begin_owner_launch(
+           state.runtime_admission_intents,
+           target,
+           launch_ref,
+           attempt_index
+         ) do
+      {:ok, _updated, intents} ->
+        {launcher_pid, launcher_mon} =
+          spawn_monitor(__MODULE__, :runtime_admission_owner_launcher, [
+            store_ref,
+            launch_ref,
+            supervisor,
+            task_supervisor,
+            intent.intent_id,
+            target,
+            intent.fingerprint,
+            validated_opts
+          ])
 
-    intents =
-      Map.update!(state.runtime_admission_intents, intent.target_agent_id, fn i ->
-        %{i | phase: :owner_launching}
-      end)
+        case IntentCore.attach_launcher(
+               intents,
+               target,
+               launch_ref,
+               launcher_pid,
+               launcher_mon
+             ) do
+          {:ok, intents2} ->
+            state
+            |> put_in([:runtime_admission_intents], intents2)
+            |> put_in(
+              [:runtime_admission_launcher_monitors, launcher_mon],
+              {intent.intent_id, target, launch_ref, launcher_pid}
+            )
+            |> put_in([:runtime_admission_by_id, intent.intent_id], target)
 
-    %{state | runtime_admission_intents: intents}
+          {:error, _} ->
+            Process.demonitor(launcher_mon, [:flush])
+            if Process.alive?(launcher_pid), do: Process.exit(launcher_pid, :kill)
+            put_in(state, [:runtime_admission_intents], intents)
+        end
+
+      {:error, _} ->
+        state
+    end
   end
 
   @doc false
   def runtime_admission_owner_launcher(
         store_ref,
+        launch_ref,
         supervisor,
         task_supervisor,
         intent_id,
         target,
         fingerprint,
         validated_opts
-      ) do
+      )
+      when is_reference(launch_ref) do
     start_opts = [
       intent_id: intent_id,
       target_agent_id: target,
       fingerprint: fingerprint,
       validated_opts: validated_opts,
       store_ref: store_ref,
-      task_supervisor: task_supervisor
+      task_supervisor: task_supervisor,
+      launch_ref: launch_ref
     ]
 
     case start_owner_with_collision_retry(start_opts, supervisor, target, 0) do
       {:ok, owner_pid} when is_pid(owner_pid) ->
-        send(store_ref, {:runtime_admission_owner_launched, intent_id, owner_pid})
+        # Bind already completed inside IntentOwner.init; success is optional/inert.
+        send(store_ref, {:runtime_admission_owner_launched, launch_ref, intent_id, owner_pid})
 
       {:ok, owner_pid, _} when is_pid(owner_pid) ->
-        send(store_ref, {:runtime_admission_owner_launched, intent_id, owner_pid})
+        send(store_ref, {:runtime_admission_owner_launched, launch_ref, intent_id, owner_pid})
 
       {:error, reason} ->
-        send(store_ref, {:runtime_admission_owner_launch_failed, intent_id, reason})
+        send(
+          store_ref,
+          {:runtime_admission_owner_launch_failed, launch_ref, intent_id, reason}
+        )
 
       other ->
-        send(store_ref, {:runtime_admission_owner_launch_failed, intent_id, other})
+        send(
+          store_ref,
+          {:runtime_admission_owner_launch_failed, launch_ref, intent_id, other}
+        )
     end
 
     :ok
   rescue
     _ ->
-      send(store_ref, {:runtime_admission_owner_launch_failed, intent_id, :launcher_exception})
+      send(
+        store_ref,
+        {:runtime_admission_owner_launch_failed, launch_ref, intent_id, :launcher_exception}
+      )
+
       :ok
   catch
     :exit, _ ->
-      send(store_ref, {:runtime_admission_owner_launch_failed, intent_id, :launcher_exit})
+      send(
+        store_ref,
+        {:runtime_admission_owner_launch_failed, launch_ref, intent_id, :launcher_exit}
+      )
+
       :ok
   end
 
@@ -4921,6 +5074,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   defp flush_monitors_for_intent(state, intent_id) do
     owner_mons = Map.get(state, :runtime_admission_owner_monitors, %{})
     worker_mons = Map.get(state, :runtime_admission_worker_monitors, %{})
+    launcher_mons = Map.get(state, :runtime_admission_launcher_monitors, %{})
 
     owner_kept =
       owner_mons
@@ -4946,11 +5100,203 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
       end)
       |> Map.new()
 
+    launcher_kept =
+      launcher_mons
+      |> Enum.reject(fn {mon, {id, _t, _ref, launcher_pid}} ->
+        if id == intent_id do
+          terminate_and_demonitor_launcher(mon, launcher_pid)
+          true
+        else
+          false
+        end
+      end)
+      |> Map.new()
+
+    pending = Map.get(state, :runtime_admission_pending_opts, %{})
+
     %{
       state
       | runtime_admission_owner_monitors: owner_kept,
-        runtime_admission_worker_monitors: worker_kept
+        runtime_admission_worker_monitors: worker_kept,
+        runtime_admission_launcher_monitors: launcher_kept,
+        runtime_admission_pending_opts: Map.delete(pending, intent_id)
     }
+  end
+
+  defp ensure_owner_monitor(state, intent_id, target, owner_pid)
+       when is_binary(intent_id) and is_binary(target) and is_pid(owner_pid) do
+    already? =
+      state.runtime_admission_owner_monitors
+      |> Map.values()
+      |> Enum.any?(fn
+        {^intent_id, ^target, ^owner_pid} -> true
+        _ -> false
+      end)
+
+    if already? do
+      state
+    else
+      mon = Process.monitor(owner_pid)
+
+      put_in(
+        state,
+        [:runtime_admission_owner_monitors, mon],
+        {intent_id, target, owner_pid}
+      )
+    end
+  end
+
+  defp clear_launcher_monitor_for_intent(state, intent_id, target) do
+    state = ensure_runtime_admission_shape(state)
+    mons = Map.get(state, :runtime_admission_launcher_monitors, %{})
+
+    # Successful bind: flush mon only. Do not kill the launcher while it may
+    # still be blocked in start_child returning to the helper.
+    kept =
+      Enum.reduce(mons, %{}, fn
+        {mon, {^intent_id, ^target, _ref, _pid}}, acc ->
+          if is_reference(mon), do: Process.demonitor(mon, [:flush])
+          acc
+
+        {mon, entry}, acc ->
+          Map.put(acc, mon, entry)
+      end)
+
+    %{state | runtime_admission_launcher_monitors: kept}
+  end
+
+  defp terminate_and_demonitor_launcher(mon, launcher_pid) do
+    if is_reference(mon), do: Process.demonitor(mon, [:flush])
+
+    if is_pid(launcher_pid) and Process.alive?(launcher_pid) do
+      Process.exit(launcher_pid, :kill)
+    end
+
+    :ok
+  end
+
+  defp handle_authenticated_launch_failure(state, launch_ref, intent_id, reason)
+       when is_reference(launch_ref) and is_binary(intent_id) do
+    case Map.get(state.runtime_admission_by_id, intent_id) do
+      target when is_binary(target) ->
+        case IntentCore.consume_launch_failure(
+               state.runtime_admission_intents,
+               target,
+               intent_id,
+               launch_ref
+             ) do
+          {:ok, intents, launcher_mon} ->
+            state =
+              state
+              |> put_in([:runtime_admission_intents], intents)
+              |> terminate_launcher_entry(launcher_mon, intent_id, target)
+
+            maybe_retry_or_terminal_launch(state, target, intent_id, reason)
+
+          {:error, :already_bound} ->
+            # Bind won the race — failure is stale.
+            state
+
+          {:error, _} ->
+            state
+        end
+
+      _ ->
+        state
+    end
+  end
+
+  defp handle_runtime_admission_launcher_down(state, mon, intent_id, target, launch_ref)
+       when is_reference(mon) and is_binary(intent_id) and is_binary(target) and
+              is_reference(launch_ref) do
+    state = ensure_runtime_admission_shape(state)
+    state = update_in(state, [:runtime_admission_launcher_monitors], &Map.delete(&1, mon))
+
+    case IntentCore.consume_launch_failure(
+           state.runtime_admission_intents,
+           target,
+           intent_id,
+           launch_ref
+         ) do
+      {:ok, intents, _mon} ->
+        state = put_in(state, [:runtime_admission_intents], intents)
+        maybe_retry_or_terminal_launch(state, target, intent_id, :launcher_exit)
+
+      {:error, :already_bound} ->
+        state
+
+      {:error, _} ->
+        state
+    end
+  end
+
+  # Settlement / auth-fail cleanup: kill a blocked launcher so it cannot leak.
+  defp terminate_launcher_entry(state, launcher_mon, intent_id, target)
+       when is_reference(launcher_mon) do
+    mons = Map.get(state, :runtime_admission_launcher_monitors, %{})
+
+    case Map.get(mons, launcher_mon) do
+      {^intent_id, ^target, _ref, launcher_pid} ->
+        terminate_and_demonitor_launcher(launcher_mon, launcher_pid)
+        %{state | runtime_admission_launcher_monitors: Map.delete(mons, launcher_mon)}
+
+      _ ->
+        Process.demonitor(launcher_mon, [:flush])
+        %{state | runtime_admission_launcher_monitors: Map.delete(mons, launcher_mon)}
+    end
+  end
+
+  defp terminate_launcher_entry(state, _launcher_mon, _intent_id, _target), do: state
+
+  defp maybe_retry_or_terminal_launch(state, target, intent_id, reason) do
+    intent = Map.get(state.runtime_admission_intents, target)
+    bounded = IntentCore.redact_error_reason(reason)
+
+    cond do
+      not is_map(intent) or intent.intent_id != intent_id ->
+        state
+
+      is_pid(Map.get(intent, :owner_pid)) ->
+        state
+
+      IntentCore.retryable_launcher_failure?(reason) ->
+        attempt = Map.get(intent, :launcher_attempt_index, 1)
+
+        if attempt < @runtime_admission_launcher_max_attempts do
+          validated_opts = Map.get(state.runtime_admission_pending_opts, intent_id)
+
+          if is_list(validated_opts) do
+            do_launch_runtime_admission_owner(
+              state,
+              intent,
+              validated_opts,
+              attempt + 1
+            )
+          else
+            terminalize_launch_failure(state, target, intent_id, bounded)
+          end
+        else
+          terminalize_launch_failure(state, target, intent_id, :launch_retry_exhausted)
+        end
+
+      true ->
+        terminalize_launch_failure(state, target, intent_id, bounded)
+    end
+  end
+
+  defp terminalize_launch_failure(state, target, intent_id, bounded) do
+    state = update_in(state, [:runtime_admission_pending_opts], &Map.delete(&1, intent_id))
+
+    case request_runtime_admission_terminal(
+           state,
+           target,
+           intent_id,
+           {:error, bounded},
+           :launch_failed
+         ) do
+      {:ok, s} -> s
+      {:error, _, s} -> s
+    end
   end
 
   defp handle_runtime_admission_owner_down(state, mon, intent_id, target, monitored_owner_pid)
@@ -5287,22 +5633,15 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   defp inventory_runtime_admission_owners(owner_supervisor) do
     case RuntimeAdmissionSupervisor.which_children(owner_supervisor) do
       {:ok, children} ->
-        snapshots =
-          children
-          |> Enum.flat_map(fn
-            {_id, pid, :worker, _} when is_pid(pid) ->
-              case IntentOwner.snapshot(pid) do
-                {:ok, snap} -> [snap]
-                _ -> []
-              end
+        case reduce_owner_inventory_children(children, []) do
+          {:ok, snapshots} ->
+            # Repair RuntimeAdmissionRegistry from owner snapshots.
+            repair_runtime_admission_registry(snapshots)
+            {:ok, snapshots}
 
-            _ ->
-              []
-          end)
-
-        # Repair RuntimeAdmissionRegistry from owner snapshots.
-        repair_runtime_admission_registry(snapshots)
-        {:ok, snapshots}
+          {:error, reason} ->
+            {:error, reason}
+        end
 
       {:error, reason} ->
         {:error, reason}
@@ -5311,6 +5650,36 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     _ -> {:error, :inventory_exception}
   catch
     :exit, _ -> {:error, :inventory_exit}
+  end
+
+  # Fail closed on any incomplete/unreadable child. Preserve snapshot-claimed
+  # owner_pid and attach enumerated child_pid separately so IntentCore can
+  # reject mismatch; never overwrite claimed PID before validation.
+  defp reduce_owner_inventory_children(children, acc) when is_list(children) do
+    result =
+      Enum.reduce_while(children, {:ok, acc}, fn
+        {_id, child_pid, :worker, _mods}, {:ok, snaps} when is_pid(child_pid) ->
+          case IntentOwner.snapshot(child_pid) do
+            {:ok, snap} when is_map(snap) ->
+              entry = Map.put(snap, :child_pid, child_pid)
+              {:cont, {:ok, [entry | snaps]}}
+
+            _ ->
+              {:halt, {:error, :incomplete_owner_inventory}}
+          end
+
+        {_id, child, _type, _mods}, _acc
+        when child in [:undefined, :restarting] or not is_pid(child) ->
+          {:halt, {:error, :incomplete_owner_inventory}}
+
+        _other, _acc ->
+          {:halt, {:error, :incomplete_owner_inventory}}
+      end)
+
+    case result do
+      {:ok, snaps} -> {:ok, Enum.reverse(snaps)}
+      {:error, reason} -> {:error, reason}
+    end
   end
 
   defp repair_runtime_admission_registry(snapshots) when is_list(snapshots) do
