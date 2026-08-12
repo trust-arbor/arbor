@@ -1,4 +1,5 @@
 {:ok, _started} = Application.ensure_all_started(:arbor_signals)
+:ok = Arbor.Security.TestBootstrap.start!()
 
 Code.require_file("support/durable_graph_authority.ex", __DIR__)
 Code.require_file("support/durable_event_log.ex", __DIR__)
