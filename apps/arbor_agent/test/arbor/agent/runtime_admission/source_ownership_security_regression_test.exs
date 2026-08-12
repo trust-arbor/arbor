@@ -173,8 +173,8 @@ defmodule Arbor.Agent.RuntimeAdmission.SourceOwnershipSecurityRegressionTest do
 
     assert auth_reason in [:not_found, :not_owner, :conflict]
 
-    # Lifecycle effects with exact live intent_id still fail when caller is not worker.
-    assert {:error, _} =
+    # Closed witness contract rejects store_ref (not silently ignored).
+    assert {:error, :invalid_ordinary_admission_witness} =
              Lifecycle.ordinary_start_effects(agent_id, [], %{
                v: 1,
                kind: :ordinary_start,
@@ -182,6 +182,22 @@ defmodule Arbor.Agent.RuntimeAdmission.SourceOwnershipSecurityRegressionTest do
                fingerprint: fp,
                store_ref: store
              })
+
+    # Foreign caller with closed scalars authenticates against fixed production
+    # TaskStore only — not the owned store that holds the live intent.
+    foreign_result =
+      try do
+        Lifecycle.ordinary_start_effects(agent_id, [], %{
+          v: 1,
+          kind: :ordinary_start,
+          intent_id: intent_id,
+          fingerprint: fp
+        })
+      catch
+        :exit, _ -> {:error, :auth_store_unavailable}
+      end
+
+    assert match?({:error, _}, foreign_result)
 
     refute_receive {:admit, _}, 100
   end

@@ -39,19 +39,18 @@ defmodule Arbor.Agent.RuntimeAdmission.OrdinaryStartWorker do
   end
 
   defp run_effects(intent_id, target, fingerprint, validated_opts, store_ref) do
-    # Bounded scalar witness only — Lifecycle also re-authenticates this caller
-    # as the TaskStore-bound worker before any restore/authority/branch effect.
+    # Closed scalar witness only — never carries store_ref. Auth store comes from
+    # launch-time TaskStore state (production: fixed TaskStore; test: explicit helper).
     witness = %{
       v: 1,
       kind: :ordinary_start,
       intent_id: intent_id,
-      fingerprint: fingerprint,
-      store_ref: store_ref
+      fingerprint: fingerprint
     }
 
     result =
       try do
-        Lifecycle.ordinary_start_effects(target, validated_opts, witness)
+        invoke_ordinary_start_effects(target, validated_opts, witness, store_ref)
       rescue
         e -> {:error, {:ordinary_start_exception, Exception.message(e)}}
       catch
@@ -79,8 +78,22 @@ defmodule Arbor.Agent.RuntimeAdmission.OrdinaryStartWorker do
           :ok
       end
     end
+
+    # Explicit test-only Lifecycle helper — no process-dictionary ambient state.
+    defp invoke_ordinary_start_effects(target, validated_opts, witness, store_ref) do
+      Lifecycle.ordinary_start_effects_for_test_store(
+        target,
+        validated_opts,
+        witness,
+        store_ref
+      )
+    end
   else
     defp maybe_test_hold, do: :ok
+
+    defp invoke_ordinary_start_effects(target, validated_opts, witness, _store_ref) do
+      Lifecycle.ordinary_start_effects(target, validated_opts, witness)
+    end
   end
 
   defp settle(store_ref, target, intent_id, {:ok, pid}) when is_pid(pid) do

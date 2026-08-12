@@ -269,21 +269,61 @@ defmodule Arbor.Agent.Lifecycle do
     Arbor.Agent.RuntimeAdmission.OrdinaryStart.request(agent_id, opts)
   end
 
+  # Closed ordinary-start witness keys (atom + string forms for JSON boundary).
+  # store_ref / unknown keys are rejected — never silently ignored.
+  @ordinary_admission_witness_keys MapSet.new([
+                                     :v,
+                                     :kind,
+                                     :intent_id,
+                                     :fingerprint,
+                                     "v",
+                                     "kind",
+                                     "intent_id",
+                                     "fingerprint"
+                                   ])
+
   @doc """
   Execute ordinary start effects after TaskStore has bound this caller as worker.
 
   Fixed internal entry for `OrdinaryStartWorker` only (arity-3, no default).
   Before ANY restore, authority mutation, or branch effect, authenticates the
-  current process against TaskStore's exact bound worker for
-  target+intent_id+fingerprint via the stable store_ref. A map witness alone
-  is not authority — only bounded scalar fields are accepted for BranchSupervisor
-  registration after authentication succeeds.
+  current process against the fixed production TaskStore's exact bound worker for
+  target+intent_id+fingerprint. A map witness alone is not authority — only the
+  closed scalar witness contract is accepted for BranchSupervisor registration
+  after authentication succeeds. Witness must not carry `store_ref` or unknown keys.
   """
   @spec ordinary_start_effects(String.t(), keyword(), map()) ::
           {:ok, pid()} | {:error, term()}
   def ordinary_start_effects(agent_id, opts, witness)
       when is_binary(agent_id) and is_list(opts) and is_map(witness) do
-    with {:ok, intent_id, fingerprint, store_ref, branch_witness} <-
+    authenticate_and_run_ordinary_start_effects(
+      agent_id,
+      opts,
+      witness,
+      Arbor.Agent.Orchestration.TaskStore
+    )
+  end
+
+  # Test-only owned-topology entry: authenticates against an explicit store_ref
+  # supplied by OrdinaryStartWorker (launch-time TaskStore state), not from the
+  # witness or public Lifecycle.start/2 opts. Absent from dev/prod BEAMs.
+  if Mix.env() == :test do
+    @doc false
+    @spec ordinary_start_effects_for_test_store(
+            String.t(),
+            keyword(),
+            map(),
+            atom() | pid() | tuple()
+          ) :: {:ok, pid()} | {:error, term()}
+    def ordinary_start_effects_for_test_store(agent_id, opts, witness, store_ref)
+        when is_binary(agent_id) and is_list(opts) and is_map(witness) and
+               (is_atom(store_ref) or is_pid(store_ref) or is_tuple(store_ref)) do
+      authenticate_and_run_ordinary_start_effects(agent_id, opts, witness, store_ref)
+    end
+  end
+
+  defp authenticate_and_run_ordinary_start_effects(agent_id, opts, witness, store_ref) do
+    with {:ok, intent_id, fingerprint, branch_witness} <-
            validate_ordinary_admission_witness(witness),
          :ok <-
            Arbor.Agent.Orchestration.TaskStore.authenticate_runtime_admission_worker(
@@ -297,37 +337,44 @@ defmodule Arbor.Agent.Lifecycle do
   end
 
   defp validate_ordinary_admission_witness(witness) when is_map(witness) do
-    intent_id = Map.get(witness, :intent_id) || Map.get(witness, "intent_id")
-    fingerprint = Map.get(witness, :fingerprint) || Map.get(witness, "fingerprint")
-    store_ref = Map.get(witness, :store_ref) || Map.get(witness, "store_ref")
-    kind = Map.get(witness, :kind) || Map.get(witness, "kind")
-    v = Map.get(witness, :v) || Map.get(witness, "v")
+    with :ok <- validate_ordinary_admission_witness_keys(witness) do
+      intent_id = Map.get(witness, :intent_id) || Map.get(witness, "intent_id")
+      fingerprint = Map.get(witness, :fingerprint) || Map.get(witness, "fingerprint")
+      kind = Map.get(witness, :kind) || Map.get(witness, "kind")
+      v = Map.get(witness, :v) || Map.get(witness, "v")
 
-    cond do
-      not is_binary(intent_id) or not is_binary(fingerprint) ->
-        {:error, :invalid_ordinary_admission_witness}
+      cond do
+        not is_binary(intent_id) or not is_binary(fingerprint) ->
+          {:error, :invalid_ordinary_admission_witness}
 
-      kind not in [:ordinary_start, "ordinary_start"] ->
-        {:error, :invalid_ordinary_admission_witness}
+        kind not in [:ordinary_start, "ordinary_start"] ->
+          {:error, :invalid_ordinary_admission_witness}
 
-      v not in [1, "1"] ->
-        {:error, :invalid_ordinary_admission_witness}
+        v not in [1, "1"] ->
+          {:error, :invalid_ordinary_admission_witness}
 
-      not (is_atom(store_ref) or is_pid(store_ref) or is_tuple(store_ref)) ->
-        # Stable registered name (atom) is the production path; via tuples allowed.
-        # Never accept nil — would default to global store incorrectly for tests.
-        {:error, :invalid_ordinary_admission_witness}
+        true ->
+          # Bounded scalar witness only for BranchSupervisor Registry value.
+          branch_witness = %{
+            v: 1,
+            kind: :ordinary_start,
+            intent_id: intent_id,
+            fingerprint: fingerprint
+          }
 
-      true ->
-        # Bounded scalar witness only for BranchSupervisor Registry value.
-        branch_witness = %{
-          v: 1,
-          kind: :ordinary_start,
-          intent_id: intent_id,
-          fingerprint: fingerprint
-        }
+          {:ok, intent_id, fingerprint, branch_witness}
+      end
+    end
+  end
 
-        {:ok, intent_id, fingerprint, store_ref, branch_witness}
+  defp validate_ordinary_admission_witness_keys(witness) when is_map(witness) do
+    keys = witness |> Map.keys() |> MapSet.new()
+
+    if MapSet.subset?(keys, @ordinary_admission_witness_keys) do
+      :ok
+    else
+      # Rejects :store_ref / "store_ref" and any other unknown keys (closed contract).
+      {:error, :invalid_ordinary_admission_witness}
     end
   end
 

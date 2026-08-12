@@ -29,6 +29,11 @@ if :ets.whereis(:arbor_memory_goals) == :undefined do
   raise "test_helper: :arbor_memory_goals missing after TestBootstrap (GoalStore did not start)"
 end
 
+# Fixed production-name runtime-admission topology so public Lifecycle.start/2
+# callers (Manager, Bootstrap, Reconciler) resolve a ready TaskStore without
+# polling a missing store for the ordinary-start readiness deadline.
+_ = Arbor.Agent.Test.RuntimeAdmissionTopology.start_fixed_production!()
+
 # :integration/:slow run by default (hermetic — gating CI runs plain `mix test`);
 # only backend-dependent tags are excluded. Fast loop: `mix test.fast`.
 ExUnit.start(exclude: [:skip, :external, :llm, :llm_local])
