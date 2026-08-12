@@ -65,31 +65,29 @@ defmodule Mix.Tasks.Arbor.Packaging.SourceCouplingProductionPathTest do
     """)
   end
 
-  test "production check against committed baseline (when present and current)" do
+  test "production check against committed baseline is clean (reviewed baseline gate)" do
     root = umbrella_root()
 
     baseline =
       Path.join(root, "apps/arbor_commands/priv/packaging/source_coupling_baseline.v1.json")
 
-    if File.regular?(baseline) do
-      case SourceCoupling.run(mode: "check", root: root, baseline: baseline) do
-        {:ok, report} ->
-          # Pass or fail is tree-dependent until baseline is regenerated via --write-baseline.
-          assert report["mode"] == "check"
-          assert report["status"] in ["ok", "failed"]
+    assert File.regular?(baseline),
+           "reviewed baseline must be committed at #{baseline} — regenerate via --write-baseline"
 
-          IO.puts(
-            "source-coupling production check status=#{report["status"]} " <>
-              "failures=#{get_in(report, ["baseline", "failure_count"]) || 0}"
-          )
+    assert {:ok, report} = SourceCoupling.run(mode: "check", root: root, baseline: baseline)
 
-        {:error, reason} ->
-          flunk("production check error: #{inspect(reason)}")
-      end
-    else
-      # Baseline will be written by Arbor validation via --write-baseline.
-      assert true
-    end
+    failure_count = get_in(report, ["baseline", "failure_count"])
+
+    assert report["mode"] == "check"
+
+    assert report["status"] == "ok",
+           "source-coupling drifted from the reviewed baseline: #{inspect(report["baseline"]["failures"])}"
+
+    assert failure_count == 0
+
+    IO.puts(
+      "source-coupling production check status=#{report["status"]} failures=#{failure_count}"
+    )
   end
 
   test "mix task execute wires report mode" do
@@ -101,6 +99,18 @@ defmodule Mix.Tasks.Arbor.Packaging.SourceCouplingProductionPathTest do
   test "standalone Mix task starts its shell runtime dependency" do
     root = umbrella_root()
 
+    # `MIX_ENV=test` is not usable here: config/test.exs sets
+    # `config :arbor_shell, start_children: false` so ordinary test runs
+    # don't spin up shell subsystem processes, which would make this
+    # assertion (arbor_shell actually starting its runtime) vacuous. Keep
+    # `dev`, matching real standalone/production task usage, but derive an
+    # isolated build path from this test run's own build root (never the
+    # worktree/canonical ambient `_build/dev`, which may carry stale state
+    # compiled against a different DB adapter). Set `ARBOR_DB` explicitly so
+    # the fresh build doesn't inherit a Postgres selection from the parent
+    # shell and mismatch the SQLite topology this test run uses.
+    build_path = Mix.Project.build_path() <> "-standalone-dev"
+
     {output, status} =
       System.cmd(
         Path.join(root, "bin/mix"),
@@ -108,8 +118,9 @@ defmodule Mix.Tasks.Arbor.Packaging.SourceCouplingProductionPathTest do
         cd: root,
         env: [
           {"MIX_ENV", "dev"},
+          {"ARBOR_DB", "sqlite"},
           {"MIX_DEPS_PATH", System.get_env("MIX_DEPS_PATH") || Path.join(root, "deps")},
-          {"MIX_BUILD_PATH", Path.join(root, "_build/dev")}
+          {"MIX_BUILD_PATH", build_path}
         ],
         stderr_to_stdout: true
       )

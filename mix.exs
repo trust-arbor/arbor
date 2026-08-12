@@ -71,7 +71,8 @@ defmodule Arbor.MixProject do
         "format --check-formatted",
         "credo --strict",
         "deps.unlock --check-unused",
-        "xref graph --label compile-connected --fail-above 88"
+        "xref graph --label compile-connected --fail-above 88",
+        "arbor.packaging.source_coupling --check"
       ],
       security: ["hex.audit", "deps.audit", "sobelow.umbrella"],
       "test.fast": [
