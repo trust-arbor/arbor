@@ -26,9 +26,12 @@ API.Shell, API.Signals, API.Security, API.Trust,
 API.Consensus, API.Historian, API.Persistence
 ```
 
-**Explicitly grandfathered modules** — Temporary exceptions listed in the
-admission test with a justification and linked roadmap item. Grandfathering is
-tracked debt, not an alternative admission path for new modules.
+**Explicitly grandfathered modules** — Temporary exceptions exposed by
+`Arbor.Contracts.Census.default_grandfathered/0` and independently asserted by
+the admission test, with a justification and linked roadmap item. The shared
+runtime inventory ensures the Mix task and test enforce the same policy.
+Grandfathering is tracked debt, not an alternative admission path for new
+modules.
 
 ## 2. What Stays in Libraries
 
