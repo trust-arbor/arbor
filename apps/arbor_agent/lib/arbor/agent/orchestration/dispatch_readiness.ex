@@ -666,10 +666,14 @@ defmodule Arbor.Agent.Orchestration.DispatchReadiness do
   defp task_kind(_, _), do: {:error, :invalid_task_kind}
 
   defp require_exported(module, fun, arity) when is_atom(module) do
-    if function_exported?(module, fun, arity) do
-      :ok
-    else
-      {:error, :missing_readonly_collaborator}
+    case Code.ensure_loaded(module) do
+      {:module, ^module} ->
+        if function_exported?(module, fun, arity),
+          do: :ok,
+          else: {:error, :missing_readonly_collaborator}
+
+      {:error, _reason} ->
+        {:error, :missing_readonly_collaborator}
     end
   end
 

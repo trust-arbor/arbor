@@ -6,6 +6,7 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessTest do
   alias Arbor.Agent.Orchestration.DispatchReadiness
   alias Arbor.Agent.Orchestration.DispatchReadinessCore
   alias Arbor.Agent.Profile
+  alias Arbor.Agent.ProfileStore
 
   defmodule EffectsObserver do
     @moduledoc false
@@ -421,6 +422,24 @@ defmodule Arbor.Agent.Orchestration.DispatchReadinessTest do
     refute Enum.any?(events, &match?({:store_profile, _}, &1))
     refute Enum.any?(events, &match?({:put, _, _}, &1))
     refute Enum.any?(events, &match?({:load_profile_migrating, _}, &1))
+  end
+
+  test "cold readonly collaborators are loaded before export inspection" do
+    :code.purge(ProfileStore)
+    :code.delete(ProfileStore)
+    refute Code.loaded?(ProfileStore)
+
+    assert {:ok, report} =
+             DispatchReadiness.project_with_deps(
+               "agent_target1",
+               coding_task(),
+               [caller_id: "human_caller1"],
+               deps(%{profile_store: ProfileStore})
+             )
+
+    assert report["planes"]["exact_template"]["status"] == "blocked"
+    assert report["planes"]["exact_template"]["details"]["template_state"] == "unavailable"
+    assert Code.loaded?(ProfileStore)
   end
 
   test "managed exact template current requires closed source provenance" do
