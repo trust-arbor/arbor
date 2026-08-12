@@ -42,10 +42,15 @@ defmodule Arbor.Commands.SourceCoupling.Classify do
            attach_metadata(raw_edges, dep_graph, levels, compatibility?),
          occurrences <- aggregate_occurrences(classified),
          unresolved_agg <- aggregate_unresolved(unresolved) do
+      # Sample general and undeclared universes independently so declared edges
+      # that sort earlier cannot starve undeclared findings past the bound.
+      undeclared_edges = Enum.filter(classified, &(&1.declared == false))
+
       {:ok,
        %{
          occurrences: occurrences,
          samples: sample_findings(classified),
+         undeclared_samples: sample_findings(undeclared_edges),
          unresolved: unresolved_agg,
          unresolved_samples: Enum.take(Enum.sort_by(unresolved, &unresolved_sort/1), 200),
          errors: []

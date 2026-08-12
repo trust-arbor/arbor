@@ -78,6 +78,7 @@ defmodule Arbor.Commands.SourceCoupling.Core do
         "occurrences" => occurrences,
         "gating_occurrences" => gating,
         "samples" => classified.samples,
+        "undeclared_samples" => classified.undeclared_samples,
         "unresolved" => classified.unresolved,
         "unresolved_samples" => classified.unresolved_samples,
         "dep_graph" => mix_graph,
@@ -137,6 +138,7 @@ defmodule Arbor.Commands.SourceCoupling.Core do
          "source_file_count" => length(source_files),
          "occurrences" => occurrences,
          "samples" => classified.samples,
+         "undeclared_samples" => classified.undeclared_samples,
          "unresolved" => classified.unresolved,
          "unresolved_samples" => classified.unresolved_samples,
          "gating" => false,
@@ -230,7 +232,9 @@ defmodule Arbor.Commands.SourceCoupling.Core do
 
     summaries = build_summaries(census)
     undeclared_block = build_undeclared(census)
-    provisional = build_provisional_delta(summaries, undeclared_block)
+    # Provisional series compare against the undeclared universe only; general
+    # all-occurrence census metrics remain in summaries.
+    provisional = build_provisional_delta(undeclared_block)
 
     %{
       "schema" => @report_schema,
@@ -487,24 +491,29 @@ defmodule Arbor.Commands.SourceCoupling.Core do
       end)
       |> Enum.sort_by(&{&1["from_app"], &1["to_app"]})
 
+    # Findings come from Classify's undeclared-only sample (filter-then-bound).
+    # Never re-filter a general truncated sample — declared edges would starve later undeclared ones.
     findings =
-      census["samples"]
+      census["undeclared_samples"]
       |> List.wrap()
-      |> Enum.filter(&(&1["declared"] == false))
       |> Enum.take(500)
 
-    # Provisional "108 upward" is level_upward across all occurrences (not only undeclared).
-    upward =
-      (census["occurrences"] || [])
-      |> Enum.filter(&(&1["level_direction"] == "level_upward"))
-      |> Enum.reduce(0, &(&1["occurrence_count"] + &2))
+    # Level-upward and band-fate for provisional series are undeclared-universe only.
+    level_upward = sum_dir(undeclared, "level_direction", "level_upward")
+
+    fate = %{
+      "intra_band" => sum_dir(undeclared, "fate", "intra_band"),
+      "downward" => sum_dir(undeclared, "fate", "downward"),
+      "upward" => sum_dir(undeclared, "fate", "upward")
+    }
 
     undeclared_occ_count = Enum.reduce(undeclared, 0, &(&1["occurrence_count"] + &2))
 
     %{
       "occurrence_count" => undeclared_occ_count,
       "app_pair_count" => length(pairs),
-      "upward_occurrence_count" => upward,
+      "upward_occurrence_count" => level_upward,
+      "fate" => fate,
       "pairs" => Enum.take(pairs, 100),
       "findings" => findings
     }
@@ -525,13 +534,15 @@ defmodule Arbor.Commands.SourceCoupling.Core do
     }
   end
 
-  defp build_provisional_delta(summaries, undeclared) do
-    actual_u = undeclared["occurrence_count"]
-    actual_pairs = undeclared["app_pair_count"]
-    actual_level_up = summaries["hierarchy_direction"]["level_upward"]
-    actual_intra = summaries["fate"]["intra_band"]
-    actual_down = summaries["fate"]["downward"]
-    actual_up = summaries["fate"]["upward"]
+  defp build_provisional_delta(undeclared) when is_map(undeclared) do
+    actual_u = undeclared["occurrence_count"] || 0
+    actual_pairs = undeclared["app_pair_count"] || 0
+    # Explicitly derived from the undeclared occurrence universe (not all-occurrence).
+    actual_level_up = undeclared["upward_occurrence_count"] || 0
+    fate = undeclared["fate"] || %{}
+    actual_intra = fate["intra_band"] || 0
+    actual_down = fate["downward"] || 0
+    actual_up = fate["upward"] || 0
 
     %{
       "undeclared" => %{
@@ -545,14 +556,19 @@ defmodule Arbor.Commands.SourceCoupling.Core do
           "app_pairs" => actual_pairs - @provisional_app_pairs
         },
         "explanation" =>
-          explain_series("undeclared", actual_u, @provisional_undeclared_occurrences, actual_pairs, @provisional_app_pairs)
+          explain_series(
+            "undeclared",
+            actual_u,
+            @provisional_undeclared_occurrences,
+            actual_pairs,
+            @provisional_app_pairs
+          )
       },
       "level_hierarchy" => %{
         "reference" => %{"level_upward" => @provisional_level_upward},
         "actual" => %{"level_upward" => actual_level_up},
         "deltas" => %{"level_upward" => actual_level_up - @provisional_level_upward},
-        "explanation" =>
-          explain_one("level_upward", actual_level_up, @provisional_level_upward)
+        "explanation" => explain_one("level_upward", actual_level_up, @provisional_level_upward)
       },
       "band_fate" => %{
         "reference" => %{

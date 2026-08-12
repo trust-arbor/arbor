@@ -1,7 +1,7 @@
 defmodule Arbor.Commands.SourceCoupling.CoreTest do
   use ExUnit.Case, async: true
 
-  alias Arbor.Commands.SourceCoupling.{Baseline, Core, Encode}
+  alias Arbor.Commands.SourceCoupling.{Baseline, Classify, Core, Encode}
 
   @moduletag :fast
 
@@ -544,6 +544,164 @@ defmodule Arbor.Commands.SourceCoupling.CoreTest do
     assert delta["undeclared"]["reference"]["occurrences"] == 234
     assert delta["level_hierarchy"]["reference"]["level_upward"] == 108
     assert delta["band_fate"]["reference"]["intra_band"] == 124
+  end
+
+  test "provisional band fate and level_upward use undeclared universe only" do
+    # Mix of declared + undeclared so all-occurrence fate diverges from undeclared fate.
+    # - common → contracts declared (downward/intra depending on bands; both K → intra_band)
+    # - commands → contracts undeclared (I→K downward)
+    # - contracts → common undeclared (level_upward, intra_band K→K)
+    files = [
+      file("apps/arbor_contracts/mix.exs", mix("arbor_contracts", [])),
+      file("apps/arbor_common/mix.exs", mix("arbor_common", ["arbor_contracts"])),
+      file("apps/arbor_commands/mix.exs", mix("arbor_commands", [])),
+      file(
+        "apps/arbor_contracts/lib/contracts.ex",
+        """
+        defmodule Arbor.Contracts.Foo do
+          def ok, do: :ok
+          def up, do: Arbor.Common.Bar.ok()
+        end
+        """
+      ),
+      file(
+        "apps/arbor_common/lib/common.ex",
+        """
+        defmodule Arbor.Common.Bar do
+          def ok, do: :ok
+          def call, do: Arbor.Contracts.Foo.ok()
+        end
+        """
+      ),
+      file(
+        "apps/arbor_commands/lib/cmd.ex",
+        """
+        defmodule Arbor.Commands.Cmd do
+          def call, do: Arbor.Contracts.Foo.ok()
+        end
+        """
+      )
+    ]
+
+    assert {:ok, census} = Core.new(bundle(files))
+    report = Core.show(census, %{"mode" => "report", "comparison" => nil, "write_plan" => nil})
+
+    # General all-occurrence summary still present and includes declared edges.
+    all_fate = report["summaries"]["fate"]
+    all_level_up = report["summaries"]["hierarchy_direction"]["level_upward"]
+    assert all_fate["intra_band"] >= 1
+    assert is_integer(all_level_up)
+
+    undeclared = report["undeclared"]
+    u_fate = undeclared["fate"]
+    assert is_map(u_fate)
+
+    # Undeclared universe: contracts→common (intra) + commands→contracts (downward)
+    # Declared common→contracts must NOT inflate provisional actuals.
+    assert undeclared["occurrence_count"] == 2
+    assert u_fate["intra_band"] == 1
+    assert u_fate["downward"] == 1
+    assert u_fate["upward"] == 0
+    assert undeclared["upward_occurrence_count"] == 1
+
+    # All-occurrence fate is strictly larger once declared edges are included.
+    assert all_fate["intra_band"] > u_fate["intra_band"]
+
+    delta = report["provisional_delta"]
+    assert delta["band_fate"]["actual"]["intra_band"] == u_fate["intra_band"]
+    assert delta["band_fate"]["actual"]["downward"] == u_fate["downward"]
+    assert delta["band_fate"]["actual"]["upward"] == u_fate["upward"]
+
+    assert delta["level_hierarchy"]["actual"]["level_upward"] ==
+             undeclared["upward_occurrence_count"]
+
+    # Must not leak all-occurrence totals into provisional actuals.
+    refute delta["band_fate"]["actual"]["intra_band"] == all_fate["intra_band"]
+  end
+
+  test "undeclared findings sample is not starved by earlier declared edges" do
+    # 500 declared edges under arbor_common (sort key apps/arbor_common/...).
+    # Late undeclared edge under arbor_voice (apps/arbor_voice/... sorts after all
+    # declared paths). If sampling truncates the global list first, the late
+    # undeclared edge is dropped from general samples and must still appear in
+    # undeclared_samples.
+    late_file = "apps/arbor_voice/lib/z_late.ex"
+
+    declared_refs =
+      for i <- 1..500 do
+        %{
+          file: "apps/arbor_common/lib/a_#{String.pad_leading(Integer.to_string(i), 4, "0")}.ex",
+          line: 1,
+          from_module: "Arbor.Common.A#{i}",
+          target: "Arbor.Contracts.Target",
+          kind: "remote",
+          class: "code"
+        }
+      end
+
+    undeclared_ref = %{
+      file: late_file,
+      line: 10,
+      from_module: "Arbor.Voice.Late",
+      target: "Arbor.Contracts.Target",
+      kind: "remote",
+      class: "code"
+    }
+
+    # Precondition: late path sorts after every declared path.
+    assert Enum.all?(declared_refs, &(&1.file < late_file))
+
+    file_apps =
+      declared_refs
+      |> Enum.map(&{&1.file, "arbor_common"})
+      |> Map.new()
+      |> Map.put(late_file, "arbor_voice")
+
+    assert {:ok, classified} =
+             Classify.classify(%{
+               references: declared_refs ++ [undeclared_ref],
+               unresolved: [],
+               module_owners: %{"Arbor.Contracts.Target" => "arbor_contracts"},
+               dep_graph: %{
+                 "arbor_common" => ["arbor_contracts"],
+                 "arbor_contracts" => [],
+                 "arbor_voice" => []
+               },
+               levels: %{
+                 "arbor_contracts" => 0,
+                 "arbor_common" => 1,
+                 "arbor_voice" => 2
+               },
+               file_apps: file_apps
+             })
+
+    # Precondition: general sample is 500 declared edges and excludes the late edge.
+    assert length(classified.samples) == 500
+    assert Enum.all?(classified.samples, &(&1["declared"] == true))
+    refute Enum.any?(classified.samples, &(&1["file"] == late_file))
+
+    # Undeclared sample is selected from the full undeclared set before the bound.
+    assert length(classified.undeclared_samples) == 1
+    [finding] = classified.undeclared_samples
+    assert finding["declared"] == false
+    assert finding["file"] == late_file
+    assert finding["from_app"] == "arbor_voice"
+
+    # Core report surfaces those findings without re-filtering a starved general sample.
+    census = %{
+      "occurrences" => classified.occurrences,
+      "undeclared_samples" => classified.undeclared_samples,
+      "samples" => classified.samples,
+      "unresolved" => [],
+      "unresolved_samples" => [],
+      "extract_errors" => [],
+      "provenance" => %{}
+    }
+
+    report = Core.show(census, %{"mode" => "report", "comparison" => nil, "write_plan" => nil})
+    assert length(report["undeclared"]["findings"]) == 1
+    assert hd(report["undeclared"]["findings"])["file"] == late_file
+    assert report["undeclared"]["occurrence_count"] == 1
   end
 
   defp empty_baseline_doc do

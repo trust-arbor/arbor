@@ -28,23 +28,38 @@ defmodule Mix.Tasks.Arbor.Packaging.SourceCouplingProductionPathTest do
 
     u = report["undeclared"]["occurrence_count"]
     pairs = report["undeclared"]["app_pair_count"]
-    level_up = report["summaries"]["hierarchy_direction"]["level_upward"]
-    fate = report["summaries"]["fate"]
+    unresolved = report["unresolved"]["count"]
+    # General all-occurrence census metrics (unchanged surface).
+    all_level_up = report["summaries"]["hierarchy_direction"]["level_upward"]
+    all_fate = report["summaries"]["fate"]
+    # Provisional series must report the undeclared occurrence universe.
+    prov_fate = report["provisional_delta"]["band_fate"]["actual"]
+    prov_level_up = report["provisional_delta"]["level_hierarchy"]["actual"]["level_upward"]
+    undeclared_fate = report["undeclared"]["fate"]
 
     # Exact counts for Arbor evidence log (values depend on tree).
     assert is_integer(u) and u >= 0
     assert is_integer(pairs) and pairs >= 0
-    assert is_integer(level_up) and level_up >= 0
-    assert is_integer(fate["intra_band"])
-    assert is_integer(fate["downward"])
-    assert is_integer(fate["upward"])
+    assert is_integer(unresolved) and unresolved >= 0
+    assert is_integer(all_level_up) and all_level_up >= 0
+    assert is_integer(all_fate["intra_band"])
+    assert is_integer(all_fate["downward"])
+    assert is_integer(all_fate["upward"])
+    assert is_map(undeclared_fate)
+    assert prov_fate["intra_band"] == undeclared_fate["intra_band"]
+    assert prov_fate["downward"] == undeclared_fate["downward"]
+    assert prov_fate["upward"] == undeclared_fate["upward"]
+    assert prov_level_up == report["undeclared"]["upward_occurrence_count"]
 
     IO.puts("""
     source-coupling production report counts:
       undeclared_occurrences=#{u}
       app_pairs=#{pairs}
-      level_upward=#{level_up}
-      band_fate intra=#{fate["intra_band"]} downward=#{fate["downward"]} upward=#{fate["upward"]}
+      unresolved=#{unresolved}
+      all_occurrence level_upward=#{all_level_up}
+      all_occurrence band_fate intra=#{all_fate["intra_band"]} downward=#{all_fate["downward"]} upward=#{all_fate["upward"]}
+      provisional_undeclared band_fate intra=#{prov_fate["intra_band"]} downward=#{prov_fate["downward"]} upward=#{prov_fate["upward"]}
+      provisional_undeclared level_upward=#{prov_level_up}
       scan_manifest_digest=#{report["provenance"]["scan_manifest_digest"]}
       tree_oid=#{report["provenance"]["tree_oid"]}
     """)
