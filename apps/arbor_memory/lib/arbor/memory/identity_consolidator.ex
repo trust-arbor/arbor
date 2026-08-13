@@ -894,25 +894,17 @@ defmodule Arbor.Memory.IdentityConsolidator do
   defp maybe_embedding_dedup(agent_id) do
     enabled = Application.get_env(:arbor_memory, :embedding_dedup_enabled, false)
 
-    if enabled and SelfKnowledge.embeddings_available?() do
-      case get_self_knowledge(agent_id) do
-        nil ->
-          :skipped
-
-        sk ->
-          deduped = SelfKnowledge.deduplicate(sk, mode: :embedding)
-
-          if deduped == sk do
-            :skipped
-          else
-            case save_self_knowledge(agent_id, deduped) do
-              :ok -> :applied
-              {:error, :store_unavailable} -> :denied
-            end
-          end
+    with true <- enabled,
+         true <- SelfKnowledge.embeddings_available?(),
+         %SelfKnowledge{} = sk <- get_self_knowledge(agent_id),
+         deduped <- SelfKnowledge.deduplicate(sk, mode: :embedding),
+         false <- deduped == sk do
+      case save_self_knowledge(agent_id, deduped) do
+        :ok -> :applied
+        {:error, :store_unavailable} -> :denied
       end
     else
-      :skipped
+      _ -> :skipped
     end
   end
 
