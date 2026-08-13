@@ -6,9 +6,15 @@ defmodule Arbor.Memory.RelationshipStore do
   delegates durable effects to the public `Arbor.Persistence` facade. Tracks
   access, emits signals, and records events. Does not reach into Persistence
   internals (repo, queries, or relationship schema modules).
+
+  Synchronous mutations and tracked reads acquire one caller-owned
+  `MutationAdmission` root. When admission cannot be proven (including after
+  drain), they return `{:error, :store_unavailable}` with no relationship,
+  Signal, or Event effect. Ordinary reads, `delete_all/1`, and `absent?/1`
+  remain root-free.
   """
 
-  alias Arbor.Memory.{Events, Relationship, Signals}
+  alias Arbor.Memory.{Events, MutationAdmission, Relationship, Signals}
   alias Arbor.Persistence
 
   require Logger
@@ -26,15 +32,7 @@ defmodule Arbor.Memory.RelationshipStore do
   @spec put(String.t(), Relationship.t()) :: {:ok, Relationship.t()} | {:error, term()}
   def put(agent_id, %Relationship{} = relationship) do
     attrs = relationship_to_attrs(relationship)
-
-    case Persistence.put_relationship(agent_id, attrs) do
-      {:ok, plain} ->
-        {:ok, attrs_to_relationship(plain)}
-
-      {:error, reason} ->
-        Logger.warning("Failed to save relationship: #{inspect(reason)}")
-        {:error, reason}
-    end
+    with_fresh_admission(agent_id, fn -> persist_put(agent_id, attrs) end)
   end
 
   @doc """
@@ -81,9 +79,9 @@ defmodule Arbor.Memory.RelationshipStore do
   @doc """
   Delete a relationship by ID.
   """
-  @spec delete(String.t(), String.t()) :: :ok | {:error, :not_found}
+  @spec delete(String.t(), String.t()) :: :ok | {:error, term()}
   def delete(agent_id, relationship_id) do
-    Persistence.delete_relationship(agent_id, relationship_id)
+    with_fresh_admission(agent_id, fn -> persist_delete(agent_id, relationship_id) end)
   end
 
   @doc """
@@ -95,10 +93,9 @@ defmodule Arbor.Memory.RelationshipStore do
   def update(agent_id, relationship_id, changes) when is_map(changes) do
     attrs = prepare_update_attrs(changes)
 
-    case Persistence.update_relationship(agent_id, relationship_id, attrs) do
-      {:ok, plain} -> {:ok, attrs_to_relationship(plain)}
-      {:error, reason} -> {:error, reason}
-    end
+    with_fresh_admission(agent_id, fn ->
+      persist_update(agent_id, relationship_id, attrs)
+    end)
   end
 
   @doc """
@@ -120,10 +117,7 @@ defmodule Arbor.Memory.RelationshipStore do
   """
   @spec touch(String.t(), String.t()) :: {:ok, Relationship.t()} | {:error, term()}
   def touch(agent_id, relationship_id) do
-    case Persistence.touch_relationship(agent_id, relationship_id) do
-      {:ok, plain} -> {:ok, attrs_to_relationship(plain)}
-      {:error, reason} -> {:error, reason}
-    end
+    with_fresh_admission(agent_id, fn -> persist_touch(agent_id, relationship_id) end)
   end
 
   @doc """
@@ -163,16 +157,11 @@ defmodule Arbor.Memory.RelationshipStore do
   Get a relationship by ID with access tracking and signal emission.
   """
   @spec get_with_tracking(String.t(), String.t()) ::
-          {:ok, Relationship.t()} | {:error, :not_found}
+          {:ok, Relationship.t()} | {:error, term()}
   def get_with_tracking(agent_id, relationship_id) do
     case get(agent_id, relationship_id) do
-      {:ok, rel} ->
-        touch(agent_id, relationship_id)
-        Signals.emit_relationship_accessed(agent_id, relationship_id)
-        {:ok, rel}
-
-      error ->
-        error
+      {:ok, rel} -> track_access(agent_id, rel, relationship_id)
+      error -> error
     end
   end
 
@@ -180,16 +169,11 @@ defmodule Arbor.Memory.RelationshipStore do
   Get a relationship by name with access tracking and signal emission.
   """
   @spec get_by_name_with_tracking(String.t(), String.t()) ::
-          {:ok, Relationship.t()} | {:error, :not_found}
+          {:ok, Relationship.t()} | {:error, term()}
   def get_by_name_with_tracking(agent_id, name) do
     case get_by_name(agent_id, name) do
-      {:ok, rel} ->
-        touch(agent_id, rel.id)
-        Signals.emit_relationship_accessed(agent_id, rel.id)
-        {:ok, rel}
-
-      error ->
-        error
+      {:ok, rel} -> track_access(agent_id, rel, rel.id)
+      error -> error
     end
   end
 
@@ -197,16 +181,11 @@ defmodule Arbor.Memory.RelationshipStore do
   Get the primary relationship with access tracking and signal emission.
   """
   @spec get_primary_with_tracking(String.t()) ::
-          {:ok, Relationship.t()} | {:error, :not_found}
+          {:ok, Relationship.t()} | {:error, term()}
   def get_primary_with_tracking(agent_id) do
     case get_primary(agent_id) do
-      {:ok, rel} ->
-        touch(agent_id, rel.id)
-        Signals.emit_relationship_accessed(agent_id, rel.id)
-        {:ok, rel}
-
-      error ->
-        error
+      {:ok, rel} -> track_access(agent_id, rel, rel.id)
+      error -> error
     end
   end
 
@@ -222,18 +201,20 @@ defmodule Arbor.Memory.RelationshipStore do
   def save(agent_id, %Relationship{} = relationship) do
     case get(agent_id, relationship.id) do
       {:ok, _} ->
-        put_and_emit(agent_id, relationship, _is_new = false)
+        attrs = relationship_to_attrs(relationship)
+        with_fresh_admission(agent_id, fn -> put_and_emit(agent_id, attrs, false) end)
 
       {:error, :not_found} ->
-        put_and_emit(agent_id, relationship, _is_new = true)
+        attrs = relationship_to_attrs(relationship)
+        with_fresh_admission(agent_id, fn -> put_and_emit(agent_id, attrs, true) end)
 
       {:error, reason} ->
         {:error, reason}
     end
   end
 
-  defp put_and_emit(agent_id, relationship, is_new) do
-    case put(agent_id, relationship) do
+  defp put_and_emit(agent_id, attrs, is_new) do
+    case persist_put(agent_id, attrs) do
       {:ok, saved_rel} ->
         if is_new do
           Signals.emit_relationship_created(agent_id, saved_rel.id, saved_rel.name)
@@ -258,22 +239,25 @@ defmodule Arbor.Memory.RelationshipStore do
     case get(agent_id, relationship_id) do
       {:ok, rel} ->
         updated_rel = Relationship.add_moment(rel, summary, opts)
+        attrs = relationship_to_attrs(updated_rel)
 
-        case put(agent_id, updated_rel) do
-          {:ok, saved_rel} ->
-            Signals.emit_moment_added(agent_id, relationship_id, summary)
+        with_fresh_admission(agent_id, fn ->
+          case persist_put(agent_id, attrs) do
+            {:ok, saved_rel} ->
+              Signals.emit_moment_added(agent_id, relationship_id, summary)
 
-            Events.record_relationship_moment(agent_id, relationship_id, %{
-              summary: summary,
-              emotional_markers: Keyword.get(opts, :emotional_markers, []),
-              salience: Keyword.get(opts, :salience, 0.5)
-            })
+              Events.record_relationship_moment(agent_id, relationship_id, %{
+                summary: summary,
+                emotional_markers: Keyword.get(opts, :emotional_markers, []),
+                salience: Keyword.get(opts, :salience, 0.5)
+              })
 
-            {:ok, saved_rel}
+              {:ok, saved_rel}
 
-          error ->
-            error
-        end
+            error ->
+              error
+          end
+        end)
 
       error ->
         error
@@ -283,6 +267,62 @@ defmodule Arbor.Memory.RelationshipStore do
   # ============================================================================
   # Private Helpers
   # ============================================================================
+
+  defp with_fresh_admission(agent_id, fun) when is_function(fun, 0) do
+    case MutationAdmission.acquire(agent_id) do
+      {:ok, lease} ->
+        try do
+          fun.()
+        after
+          _ = MutationAdmission.release(lease)
+        end
+
+      {:error, _reason} ->
+        {:error, :store_unavailable}
+    end
+  end
+
+  defp track_access(agent_id, rel, relationship_id) do
+    with_fresh_admission(agent_id, fn ->
+      case persist_touch(agent_id, relationship_id) do
+        {:ok, _} ->
+          Signals.emit_relationship_accessed(agent_id, relationship_id)
+          {:ok, rel}
+
+        error ->
+          error
+      end
+    end)
+  end
+
+  defp persist_put(agent_id, attrs) do
+    case Persistence.put_relationship(agent_id, attrs) do
+      {:ok, plain} ->
+        {:ok, attrs_to_relationship(plain)}
+
+      {:error, reason} ->
+        Logger.warning("Failed to save relationship: #{inspect(reason)}")
+        {:error, reason}
+    end
+  end
+
+  defp persist_update(agent_id, relationship_id, attrs) do
+    case Persistence.update_relationship(agent_id, relationship_id, attrs) do
+      {:ok, plain} -> {:ok, attrs_to_relationship(plain)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp persist_delete(agent_id, relationship_id) do
+    Persistence.delete_relationship(agent_id, relationship_id)
+  end
+
+  defp persist_touch(agent_id, relationship_id) do
+    case Persistence.touch_relationship(agent_id, relationship_id) do
+      {:ok, plain} -> {:ok, attrs_to_relationship(plain)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
 
   defp relationship_to_attrs(%Relationship{} = rel) do
     %{
