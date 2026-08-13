@@ -34,6 +34,20 @@ config :arbor_persistence,
   start_repo: true,
   repo_adapter: prod_repo_adapter
 
+# Match Oban substrate to the persistence adapter (Lite/PG for SQLite,
+# Basic/Postgres notifier when ARBOR_DB=postgres).
+case prod_repo_adapter do
+  Ecto.Adapters.Postgres ->
+    config :arbor_scheduler, Oban,
+      engine: Oban.Engines.Basic,
+      notifier: Oban.Notifiers.Postgres
+
+  Ecto.Adapters.SQLite3 ->
+    config :arbor_scheduler, Oban,
+      engine: Oban.Engines.Lite,
+      notifier: Oban.Notifiers.PG
+end
+
 config :arbor_memory,
   embedding_dedup_enabled: true,
   maintenance_archive_target: [

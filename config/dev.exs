@@ -47,6 +47,11 @@ if System.get_env("ARBOR_DB") == "postgres" do
   config :arbor_memory,
     persistence_backend: Arbor.Persistence.QueryableStore.Postgres,
     embedding_dedup_enabled: true
+
+  # Oban on Postgres: LISTEN/NOTIFY notifier + Basic engine
+  config :arbor_scheduler, Oban,
+    engine: Oban.Engines.Basic,
+    notifier: Oban.Notifiers.Postgres
 else
   # SQLite — zero-config default
   config :arbor_persistence,
