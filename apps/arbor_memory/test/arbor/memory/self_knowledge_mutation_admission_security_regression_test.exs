@@ -75,7 +75,6 @@ defmodule Arbor.Memory.SelfKnowledgeMutationAdmissionSecurityRegressionTest do
     result = IdentityConsolidator.save_self_knowledge(agent_id, sk)
 
     assert [] = :ets.lookup(@ets_table, agent_id)
-    assert durable_absent?(agent_id)
     assert identity_history(agent_id) == before_history
     assert recent_identity_signals(agent_id) == before_signals
     assert {:ok, %{active_roots: 0}} = MutationAdmission.status(agent_id)
@@ -86,6 +85,7 @@ defmodule Arbor.Memory.SelfKnowledgeMutationAdmissionSecurityRegressionTest do
     Hang.release(hang_name)
     wait_until(fn -> writer_children() == [] end)
     wait_until(fn -> match?({:ok, %{active_roots: 0}}, MutationAdmission.status(holder)) end)
+    assert durable_absent?(agent_id)
   end
 
   test "post-drain save is denied with unchanged ETS and durable bytes" do
@@ -190,7 +190,9 @@ defmodule Arbor.Memory.SelfKnowledgeMutationAdmissionSecurityRegressionTest do
     assert {:ok, :cas, ref_rel} = Fake.await_sync_arrival(2_000)
     assert [{^agent_id, projected}] = :ets.lookup(@ets_table, agent_id)
     assert same_self_knowledge?(projected, sk)
-    assert {:ok, %{active_roots: 1}} = MutationAdmission.status(agent_id)
+    # Release is parked inside MutationAdmission.handle_call/3; do not call
+    # status/1 here or the GenServer deadlocks. Observe the still-applied root.
+    assert admission_root_count(agent_id) == 1
 
     Fake.release_sync(@fake_name, ref_rel)
 
@@ -310,6 +312,19 @@ defmodule Arbor.Memory.SelfKnowledgeMutationAdmissionSecurityRegressionTest do
   end
 
   defp same_self_knowledge?(_left, _right), do: false
+
+  defp admission_root_count(agent_id) do
+    key = Base.encode16(:crypto.hash(:sha256, agent_id), case: :lower)
+
+    case Fake.peek(@fake_name, key) do
+      %{data: data} when is_map(data) ->
+        roots = Map.get(data, "roots") || Map.get(data, :roots) || %{}
+        map_size(roots)
+
+      _ ->
+        0
+    end
+  end
 
   defp durable_absent?(agent_id) do
     match?(
@@ -441,39 +456,36 @@ defmodule Arbor.Memory.SelfKnowledgeMutationAdmissionSecurityRegressionTest do
       start_supervised!({@guardian_supervisor, []})
     end
 
-    restart_admission!(
+    restart_admission!(%{
       namespace: Config.fixed_mutation_admission_namespace(),
       backend: Fake,
       opts: [agent_name: @fake_name]
-    )
+    })
   end
 
   defp restore_bootstrap_admission! do
-    restart_admission!(
+    restart_admission!(%{
       namespace: Config.fixed_mutation_admission_namespace(),
       backend: AdmissionBackend,
       opts: [agent_name: AdmissionBackend.name()]
-    )
+    })
   end
 
   defp restart_admission!(target) do
     _ = Supervisor.terminate_child(Arbor.Memory.Supervisor, MutationAdmission)
-    _ = Supervisor.delete_child(Arbor.Memory.Supervisor, MutationAdmission)
-    _ = stop_supervised(MutationAdmission)
+
+    case Supervisor.delete_child(Arbor.Memory.Supervisor, MutationAdmission) do
+      :ok -> :ok
+      {:error, :not_found} -> :ok
+      other -> flunk("could not remove MutationAdmission: #{inspect(other)}")
+    end
 
     case Supervisor.start_child(Arbor.Memory.Supervisor, {MutationAdmission, [target: target]}) do
       {:ok, _} ->
         :ok
 
       {:error, {:already_started, _}} ->
-        :ok
-
-      {:error, :already_present} ->
-        case Supervisor.restart_child(Arbor.Memory.Supervisor, MutationAdmission) do
-          {:ok, _} -> :ok
-          {:error, {:already_started, _}} -> :ok
-          other -> flunk("failed to restart MutationAdmission: #{inspect(other)}")
-        end
+        flunk("MutationAdmission still running on the previous backend")
 
       {:error, reason} ->
         flunk("failed to start MutationAdmission: #{inspect(reason)}")
