@@ -27,10 +27,10 @@ defmodule Arbor.LLM.OAuth.Login do
   `start_openai_login/1`, `complete_openai_login/3`,
   `start_xai_device_login/0`, and `complete_xai_device_login/1`.
 
-  This slice does not implement a browser launcher, a callback HTTP
-  listener, a dashboard UI, or an operator CLI -- `complete_openai_login/3`
-  takes `code`/`state` as plain arguments a future out-of-scope caller
-  obtains however it wants.
+  The optional OpenAI loopback flow owns a short-lived supervised listener;
+  this module still does not launch a browser or add dashboard/CLI behavior.
+  The manual `start_openai_login/1` and `complete_openai_login/3` APIs remain
+  available unchanged.
   """
 
   alias Arbor.Common.OAuth.AuthCode
@@ -41,6 +41,7 @@ defmodule Arbor.LLM.OAuth.Login do
   alias Arbor.LLM.OAuth.JwtPayload
   alias Arbor.LLM.OAuth.Login.AuthorizationPrompt
   alias Arbor.LLM.OAuth.Login.DevicePrompt
+  alias Arbor.LLM.OAuth.Login.Loopback
   alias Arbor.LLM.OAuth.Login.PendingStore
   alias Arbor.LLM.OAuth.ProviderPolicy
 
@@ -108,6 +109,25 @@ defmodule Arbor.LLM.OAuth.Login do
       {:ok, %AuthorizationPrompt{authorize_url: authorize_url, handle: pending.handle}}
     end
   end
+
+  @doc "Start a supervised, one-shot localhost callback flow for OpenAI OAuth."
+  @spec start_openai_loopback_login(keyword()) ::
+          {:ok, Arbor.LLM.OAuth.Login.LoopbackPrompt.t()} | {:error, term()}
+  def start_openai_loopback_login(opts \\ []), do: Loopback.start(opts)
+
+  @doc false
+  @spec openai_redirect_selector(keyword()) :: {:ok, atom()} | {:error, term()}
+  def openai_redirect_selector(opts) do
+    policy = ProviderPolicy.openai()
+
+    with {:ok, selector} <- validate_openai_start_options(opts),
+         {:ok, _redirect_uri} <- fetch_redirect_uri(policy, selector) do
+      {:ok, selector}
+    end
+  end
+
+  @doc false
+  def openai_handle_ttl_ms, do: @openai_handle_ttl_ms
 
   @doc """
   Complete the OpenAI authorization-code + PKCE flow.

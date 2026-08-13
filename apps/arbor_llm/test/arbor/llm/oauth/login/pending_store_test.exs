@@ -42,6 +42,24 @@ defmodule Arbor.LLM.OAuth.Login.PendingStoreTest do
     assert {:error, :not_found} = PendingStore.take_openai(issuance.handle)
   end
 
+  test "state matching is non-consuming" do
+    {:ok, issuance} = PendingStore.issue_openai(:port_1455, future_deadline())
+
+    assert {:error, :state_mismatch} =
+             PendingStore.match_openai_state(issuance.handle, "wrong-state")
+
+    assert :ok = PendingStore.match_openai_state(issuance.handle, issuance.state)
+    assert {:ok, %{state: state}} = PendingStore.take_openai(issuance.handle)
+    assert state == issuance.state
+  end
+
+  test "discard removes an OpenAI pending record without revealing it" do
+    {:ok, issuance} = PendingStore.issue_openai(:port_1455, future_deadline())
+    assert :ok = PendingStore.discard_openai(issuance.handle)
+    assert {:error, :not_found} = PendingStore.take_openai(issuance.handle)
+    assert :ok = PendingStore.discard_openai("not-a-handle")
+  end
+
   test "take_xai/1 is a one-shot: the second take on the same handle fails" do
     {:ok, issuance} = PendingStore.issue_xai("device", 5, future_deadline())
 

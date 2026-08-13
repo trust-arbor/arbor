@@ -96,6 +96,29 @@ defmodule Arbor.LLM.OAuth.Login.PendingStore do
   @spec take_openai(term()) :: {:ok, record()} | {:error, :not_found | :expired}
   def take_openai(handle), do: take(:openai, handle)
 
+  @doc "Constant-time state check that does not reveal or consume the pending record."
+  @spec match_openai_state(term(), term()) ::
+          :ok | {:error, :not_found | :expired | :state_mismatch}
+  def match_openai_state(handle, state) when is_binary(handle) and is_binary(state) do
+    if valid_handle?(handle) do
+      GenServer.call(__MODULE__, {:match_openai_state, handle, state})
+    else
+      {:error, :not_found}
+    end
+  end
+
+  def match_openai_state(_handle, _state), do: {:error, :not_found}
+
+  @doc "Discard an OpenAI pending record without returning it."
+  @spec discard_openai(term()) :: :ok
+  def discard_openai(handle) when is_binary(handle) do
+    if valid_handle?(handle),
+      do: GenServer.call(__MODULE__, {:discard, :openai, handle}),
+      else: :ok
+  end
+
+  def discard_openai(_handle), do: :ok
+
   @doc "Issue an xAI pending-device-authorization record and return an opaque one-shot handle."
   @spec issue_xai(term(), term(), term()) ::
           {:ok, xai_issuance()}
@@ -192,6 +215,30 @@ defmodule Arbor.LLM.OAuth.Login.PendingStore do
     {entry, remaining} = Map.pop(Map.fetch!(state, flow), handle)
     reply = take_reply(entry)
     {:reply, reply, Map.put(state, flow, remaining)}
+  end
+
+  def handle_call({:match_openai_state, handle, received}, _from, state) do
+    case Map.get(state.openai, handle) do
+      nil ->
+        {:reply, {:error, :not_found}, state}
+
+      %{deadline_ms: deadline_ms, state: expected} ->
+        if deadline_ms <= System.monotonic_time(:millisecond) do
+          {:reply, {:error, :expired}, update_in(state.openai, &Map.delete(&1, handle))}
+        else
+          reply =
+            case AuthCode.verify_state(received, expected) do
+              :ok -> :ok
+              {:error, :state_mismatch} -> {:error, :state_mismatch}
+            end
+
+          {:reply, reply, state}
+        end
+    end
+  end
+
+  def handle_call({:discard, :openai, handle}, _from, state) do
+    {:reply, :ok, update_in(state.openai, &Map.delete(&1, handle))}
   end
 
   def handle_call(_request, _from, state) do

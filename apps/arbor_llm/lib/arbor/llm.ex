@@ -155,6 +155,17 @@ defmodule Arbor.LLM do
     do: Login.complete_openai_login(handle, code, state)
 
   @doc """
+  Start an automatic OpenAI OAuth login on a pinned localhost callback port.
+
+  All resolved localhost listeners are bound before the authorization URL is
+  returned. The returned prompt deliberately exposes only that URL; the
+  one-shot correlation handle remains owned by the supervised callback flow.
+  """
+  @spec start_openai_loopback_login(keyword()) ::
+          {:ok, Arbor.LLM.OAuth.Login.LoopbackPrompt.t()} | {:error, term()}
+  def start_openai_loopback_login(opts \\ []), do: Login.start_openai_loopback_login(opts)
+
+  @doc """
   Start provider-specific xAI OAuth device login.
 
   Returns a `DevicePrompt` containing user-facing device fields and an opaque
