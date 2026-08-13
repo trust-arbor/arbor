@@ -553,16 +553,18 @@ defmodule Arbor.Memory.KnowledgeGraphStore do
   def handle_call({:delete_agent_content, agent_id, deadline}, _from, state) do
     state = normalize_state(state)
 
-    with :ok <- ensure_deadline(deadline) do
-      # Disarm before backend/effects; exceptional returns must keep disarmed state.
-      disarmed =
-        state
-        |> clear_pending_projection_only(agent_id)
-        |> settle_roots(agent_id, nil)
+    case ensure_deadline(deadline) do
+      :ok ->
+        # Disarm before backend/effects; exceptional returns must keep disarmed state.
+        disarmed =
+          state
+          |> clear_pending_projection_only(agent_id)
+          |> settle_roots(agent_id, nil)
 
-      delete_agent_content_after_disarm(agent_id, disarmed)
-    else
-      {:error, _reason} = error -> {:reply, error, state}
+        delete_agent_content_after_disarm(agent_id, disarmed)
+
+      {:error, _reason} = error ->
+        {:reply, error, state}
     end
   end
 
