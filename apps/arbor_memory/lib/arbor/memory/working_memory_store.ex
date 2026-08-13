@@ -9,7 +9,7 @@ defmodule Arbor.Memory.WorkingMemoryStore do
 
   alias Arbor.Contracts.Persistence.Record
   alias Arbor.Contracts.Security.{Taint, TaintEnvelope, TaintedValue}
-  alias Arbor.Memory.{MemoryStore, Provenance, Signals, WorkingMemory}
+  alias Arbor.Memory.{MemoryStore, MutationAdmission, Provenance, Signals, WorkingMemory}
 
   @working_memory_ets :arbor_working_memory
   @namespace "working_memory"
@@ -106,7 +106,9 @@ defmodule Arbor.Memory.WorkingMemoryStore do
           {:ok, tainted_read()} | {:error, term()}
   def get_working_memory_tainted(agent_id) do
     with :ok <- validate_agent_id(agent_id) do
-      with_agent_transition(agent_id, fn -> authoritative_read(agent_id, :existing, []) end)
+      with_admitted_agent_transition(agent_id, fn ->
+        authoritative_read(agent_id, :existing, [])
+      end)
     end
   rescue
     _ -> error(:load_failed)
@@ -160,7 +162,9 @@ defmodule Arbor.Memory.WorkingMemoryStore do
   def load_working_memory_tainted(agent_id, opts \\ []) do
     with :ok <- validate_agent_id(agent_id),
          true <- Keyword.keyword?(opts) do
-      with_agent_transition(agent_id, fn -> authoritative_read(agent_id, :create, opts) end)
+      with_admitted_agent_transition(agent_id, fn ->
+        authoritative_read(agent_id, :create, opts)
+      end)
     else
       _ -> error(:invalid_request)
     end
@@ -190,7 +194,7 @@ defmodule Arbor.Memory.WorkingMemoryStore do
   @spec delete_working_memory(String.t()) :: :ok | {:error, term()}
   def delete_working_memory(agent_id) do
     with :ok <- validate_agent_id(agent_id) do
-      with_agent_transition(agent_id, fn -> delete_authoritative(agent_id) end)
+      with_admitted_agent_transition(agent_id, fn -> delete_authoritative(agent_id) end)
     end
   rescue
     _ -> error(:delete_failed)
@@ -295,7 +299,9 @@ defmodule Arbor.Memory.WorkingMemoryStore do
           {:ok, map() | nil} | {:error, term()}
   def export_working_memory_provenance_snapshot(agent_id) do
     with :ok <- validate_agent_id(agent_id) do
-      with_agent_transition(agent_id, fn -> export_authoritative_snapshot(agent_id) end)
+      with_admitted_agent_transition(agent_id, fn ->
+        export_authoritative_snapshot(agent_id)
+      end)
     end
   rescue
     _ -> error(:snapshot_export_failed)
@@ -323,7 +329,7 @@ defmodule Arbor.Memory.WorkingMemoryStore do
   def import_working_memory_provenance_snapshot(agent_id, exported) do
     with :ok <- validate_agent_id(agent_id),
          {:ok, imported} <- decode_provenance_snapshot(agent_id, exported) do
-      with_agent_transition(agent_id, fn ->
+      with_admitted_agent_transition(agent_id, fn ->
         import_authoritative_snapshot(agent_id, imported, @max_cas_attempts)
       end)
     end
@@ -362,7 +368,7 @@ defmodule Arbor.Memory.WorkingMemoryStore do
   defp do_save(agent_id, working_memory, supplied_taint) do
     with :ok <- validate_agent_id(agent_id),
          {:ok, prepared} <- prepare_working_memory(agent_id, working_memory) do
-      with_agent_transition(agent_id, fn ->
+      with_admitted_agent_transition(agent_id, fn ->
         result = save_authoritative(agent_id, prepared, supplied_taint, @max_cas_attempts)
 
         case result do
@@ -1639,6 +1645,22 @@ defmodule Arbor.Memory.WorkingMemoryStore do
       {:error, {:working_memory_store, reason}} -> {:error, reason}
       {:error, reason} when is_atom(reason) -> {:error, reason}
       _ -> {:error, :delete_failed}
+    end
+  end
+
+  # Acquire in the public caller before :global.trans so lock wait remains
+  # visible to drain. Release the exact lease after every synchronous result.
+  defp with_admitted_agent_transition(agent_id, fun) when is_function(fun, 0) do
+    case MutationAdmission.acquire(agent_id) do
+      {:ok, lease} ->
+        try do
+          with_agent_transition(agent_id, fun)
+        after
+          _ = MutationAdmission.release(lease)
+        end
+
+      {:error, _reason} ->
+        error(:store_unavailable)
     end
   end
 
