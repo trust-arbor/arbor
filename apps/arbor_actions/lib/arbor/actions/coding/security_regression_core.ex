@@ -41,9 +41,16 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Core do
   }
 
   @empty_output_sha256 Base.encode16(:crypto.hash(:sha256, ""), case: :lower)
-  @diagnostic_keys ~w(exit_code timed_out output_bytes output_sha256)
+  @diagnostic_keys ~w(exit_code timed_out output_bytes output_sha256 untrusted_diagnostic_output)
   # Bound diagnostic output_bytes to the Shell output ceiling (public facade).
   @max_output_bytes Arbor.Shell.max_output_bytes_limit()
+  @untrusted_diagnostic_output_limit 2_048
+  @untrusted_omission_marker "\n...[omitted]...\n"
+  @schema_project_mix_file "apps/arbor_persistence/mix.exs"
+  @schema_bootstrap_repo "Arbor.Persistence.Repo"
+  @schema_bootstrap_tasks ["ecto.create", "ecto.migrate"]
+  @schema_bootstrap_args ["-r", @schema_bootstrap_repo, "--quiet"]
+  @schema_home_dir "~/.arbor"
 
   @typedoc "A normalized, side-effect-free action input."
   @type input :: %{
@@ -203,14 +210,16 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Core do
       Map.get(leg, :status) != :completed ->
         {:error, candidate_incomplete_reason(Map.get(leg, :status))}
 
+      # Setup/bootstrap failures outrank suite-incomplete so a written
+      # setup_failures artifact is not misread as an unfinished suite.
+      counts["setup_failures"] > 0 or counts["invalid"] > 0 ->
+        {:error, "candidate_setup_failed"}
+
       counts["suite_started"] != true or counts["suite_completed"] != true ->
         {:error, "candidate_suite_incomplete"}
 
       counts["max_failures_reached"] == true ->
         {:error, "candidate_suite_incomplete"}
-
-      counts["setup_failures"] > 0 or counts["invalid"] > 0 ->
-        {:error, "candidate_setup_failed"}
 
       counts["executed"] < 1 ->
         {:error, "candidate_zero_tests"}
@@ -283,6 +292,49 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Core do
 
   @doc false
   def artifact_version, do: @artifact_version
+
+  @doc false
+  def schema_project_mix_file, do: @schema_project_mix_file
+
+  @doc false
+  def schema_bootstrap_repo, do: @schema_bootstrap_repo
+
+  @doc false
+  def schema_bootstrap_tasks, do: @schema_bootstrap_tasks
+
+  @doc false
+  def schema_bootstrap_args, do: @schema_bootstrap_args
+
+  @doc false
+  def schema_home_dir, do: @schema_home_dir
+
+  @doc false
+  def untrusted_diagnostic_output_limit, do: @untrusted_diagnostic_output_limit
+
+  @doc false
+  def untrusted_diagnostic_field, do: "untrusted_diagnostic_output"
+
+  @doc false
+  def untrusted_omission_marker, do: @untrusted_omission_marker
+
+  @doc """
+  Closed child diagnostic. `output_bytes` / `output_sha256` cover the complete
+  path-normalized binary unchanged. Only `untrusted_diagnostic_output` is
+  sanitized and byte-bounded.
+  """
+  @spec child_diagnostic(integer() | nil, boolean(), binary()) :: map()
+  def child_diagnostic(exit_code, timed_out, path_normalized)
+      when (is_integer(exit_code) or is_nil(exit_code)) and is_boolean(timed_out) and
+             is_binary(path_normalized) do
+    %{
+      "exit_code" => exit_code,
+      "timed_out" => timed_out,
+      "output_bytes" => byte_size(path_normalized),
+      "output_sha256" => sha256(path_normalized),
+      "untrusted_diagnostic_output" =>
+        bound_untrusted_output(sanitize_untrusted_output(path_normalized))
+    }
+  end
 
   defp validate_param_keys(params) do
     valid? =
@@ -401,7 +453,8 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Core do
       Map.get(diagnostic, "exit_code") == exit_code and
       Map.get(diagnostic, "timed_out") == timed_out and
       valid_output_bytes?(Map.get(diagnostic, "output_bytes")) and
-      valid_output_sha256?(Map.get(diagnostic, "output_sha256"))
+      valid_output_sha256?(Map.get(diagnostic, "output_sha256")) and
+      valid_untrusted_excerpt?(Map.get(diagnostic, "untrusted_diagnostic_output"))
   end
 
   defp closed_diagnostic_matching_leg?(_diagnostic, _exit_code, _timed_out), do: false
@@ -418,12 +471,34 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Core do
 
   defp valid_output_sha256?(_hash), do: false
 
+  defp valid_untrusted_excerpt?(excerpt)
+       when is_binary(excerpt) and byte_size(excerpt) <= @untrusted_diagnostic_output_limit do
+    String.valid?(excerpt) and not String.contains?(excerpt, <<0>>) and
+      not unsafe_control_bytes?(excerpt)
+  end
+
+  defp valid_untrusted_excerpt?(_excerpt), do: false
+
+  defp unsafe_control_bytes?(binary) when is_binary(binary) do
+    unsafe_control_bytes?(binary, false)
+  end
+
+  defp unsafe_control_bytes?(<<>>, acc), do: acc
+
+  defp unsafe_control_bytes?(<<byte, rest::binary>>, acc)
+       when byte == 9 or byte == 10 or byte >= 32 do
+    unsafe_control_bytes?(rest, acc)
+  end
+
+  defp unsafe_control_bytes?(<<_byte, _rest::binary>>, _acc), do: true
+
   defp owner_stage_diagnostic do
     %{
       "exit_code" => nil,
       "timed_out" => true,
       "output_bytes" => 0,
-      "output_sha256" => @empty_output_sha256
+      "output_sha256" => @empty_output_sha256,
+      "untrusted_diagnostic_output" => ""
     }
   end
 
@@ -434,8 +509,99 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Core do
       "exit_code" => exit_code,
       "timed_out" => true,
       "output_bytes" => Map.fetch!(diagnostic, "output_bytes"),
-      "output_sha256" => Map.fetch!(diagnostic, "output_sha256")
+      "output_sha256" => Map.fetch!(diagnostic, "output_sha256"),
+      "untrusted_diagnostic_output" => Map.fetch!(diagnostic, "untrusted_diagnostic_output")
     }
+  end
+
+  defp sanitize_untrusted_output(binary) when is_binary(binary) do
+    binary
+    |> :binary.replace(<<13, 10>>, <<10>>, [:global])
+    |> :binary.replace(<<13>>, <<10>>, [:global])
+    |> drop_unsafe_controls()
+    |> keep_valid_utf8()
+  end
+
+  defp drop_unsafe_controls(binary) when is_binary(binary) do
+    for <<byte <- binary>>, byte == 9 or byte == 10 or byte >= 32, into: <<>>, do: <<byte>>
+  end
+
+  defp bound_untrusted_output(binary) when is_binary(binary) do
+    size = byte_size(binary)
+
+    if size <= @untrusted_diagnostic_output_limit do
+      binary
+    else
+      marker = @untrusted_omission_marker
+      available = @untrusted_diagnostic_output_limit - byte_size(marker)
+      head_length = div(available, 2)
+      tail_length = available - head_length
+
+      head = take_valid_utf8_prefix(binary_part(binary, 0, head_length))
+      tail = take_valid_utf8_suffix(binary_part(binary, size - tail_length, tail_length))
+      head <> marker <> tail
+    end
+  end
+
+  # Drop invalid sequences and continue so a valid suffix after bad bytes
+  # remains visible. Incomplete trailing bytes are dropped. Window-edge
+  # repair still uses take_valid_utf8_prefix/suffix only.
+  defp keep_valid_utf8(binary) when is_binary(binary) do
+    keep_valid_utf8_loop(binary, [])
+  end
+
+  defp keep_valid_utf8_loop(<<>>, acc) do
+    acc |> Enum.reverse() |> IO.iodata_to_binary()
+  end
+
+  defp keep_valid_utf8_loop(binary, acc) do
+    case :unicode.characters_to_binary(binary, :utf8, :utf8) do
+      valid when is_binary(valid) ->
+        keep_valid_utf8_loop(<<>>, [valid | acc])
+
+      {:incomplete, incomplete, _rest} when is_binary(incomplete) ->
+        keep_valid_utf8_loop(<<>>, [incomplete | acc])
+
+      {:error, good, <<_drop, more::binary>>} when is_binary(good) ->
+        keep_valid_utf8_loop(more, [good | acc])
+
+      {:error, good, <<>>} when is_binary(good) ->
+        keep_valid_utf8_loop(<<>>, [good | acc])
+
+      _other ->
+        keep_valid_utf8_loop(<<>>, acc)
+    end
+  end
+
+  defp take_valid_utf8_prefix(binary) when is_binary(binary) do
+    case :unicode.characters_to_binary(binary, :utf8, :utf8) do
+      valid when is_binary(valid) ->
+        valid
+
+      {:incomplete, incomplete, _rest} when is_binary(incomplete) ->
+        incomplete
+
+      {:error, good, _rest} when is_binary(good) ->
+        good
+
+      _other ->
+        ""
+    end
+  end
+
+  defp take_valid_utf8_suffix(<<>>), do: ""
+
+  defp take_valid_utf8_suffix(binary) when is_binary(binary) do
+    if String.valid?(binary) do
+      binary
+    else
+      <<_drop, rest::binary>> = binary
+      take_valid_utf8_suffix(rest)
+    end
+  end
+
+  defp sha256(value) when is_binary(value) do
+    :crypto.hash(:sha256, value) |> Base.encode16(case: :lower)
   end
 
   defp base_verdict(base) do
@@ -448,14 +614,15 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Core do
       Map.get(base, :status) != :completed ->
         %{passed: false, reason: base_incomplete_reason(Map.get(base, :status))}
 
+      # Same setup-before-incomplete order as candidate_gate/1.
+      counts["setup_failures"] > 0 or counts["invalid"] > 0 ->
+        %{passed: false, reason: "base_setup_failed"}
+
       counts["suite_started"] != true or counts["suite_completed"] != true ->
         %{passed: false, reason: "base_suite_incomplete"}
 
       counts["max_failures_reached"] == true ->
         %{passed: false, reason: "base_suite_incomplete"}
-
-      counts["setup_failures"] > 0 or counts["invalid"] > 0 ->
-        %{passed: false, reason: "base_setup_failed"}
 
       counts["executed"] < 1 ->
         %{passed: false, reason: "base_zero_tests"}

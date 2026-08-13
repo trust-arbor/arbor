@@ -294,6 +294,127 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Formatter do
       end
 
       defp failure_from_test?(_failure, _test), do: false
+
+      @mix_task_module_key {__MODULE__, :mix_task_module}
+      @schema_project_mix_file #{inspect(Core.schema_project_mix_file())}
+      @schema_bootstrap_tasks #{inspect(Core.schema_bootstrap_tasks())}
+      @schema_bootstrap_args #{inspect(Core.schema_bootstrap_args())}
+      @schema_home_dir #{inspect(Core.schema_home_dir())}
+
+      @doc false
+      def configure_mix_task_module(mod) when is_atom(mod) do
+        Process.put(@mix_task_module_key, mod)
+        :ok
+      end
+
+      def schema_project? do
+        File.regular?(@schema_project_mix_file)
+      end
+
+      def bootstrap_test_schema do
+        if schema_project?() do
+          prepare_revision_schema()
+        else
+          :skipped
+        end
+      end
+
+      def write_bootstrap_failure_artifact! do
+        artifact_path = stored_owner_artifact_path!()
+
+        counts = %{
+          excluded: 0,
+          executed: 0,
+          invalid: 0,
+          max_failures_reached: false,
+          passed: 0,
+          setup_failures: 1,
+          skipped: 0,
+          suite_completed: false,
+          suite_started: false,
+          test_failures: 0,
+          total: 0
+        }
+
+        artifact = {@artifact_tag, @artifact_version, counts}
+        bytes = :erlang.term_to_binary(artifact, [:deterministic])
+        temporary = artifact_path <> ".tmp"
+        File.write!(temporary, bytes, [:binary])
+        File.chmod!(temporary, 0o600)
+        File.rename!(temporary, artifact_path)
+        :ok
+      end
+
+      def run_selected_tests!(test_paths) do
+        mix_task_module().run("test", [
+          #{rendered_mix_test_flags(module_name)}
+          | test_paths
+        ])
+      end
+
+      def prepare_schema_and_run_tests!(test_paths) do
+        case bootstrap_test_schema() do
+          {:error, :schema_bootstrap_failed} = error ->
+            write_bootstrap_failure_artifact!()
+            error
+
+          :ok ->
+            run_selected_tests!(test_paths)
+            :ok
+
+          :skipped ->
+            run_selected_tests!(test_paths)
+            :ok
+        end
+      end
+
+      defp prepare_revision_schema do
+        File.mkdir_p!(Path.expand(@schema_home_dir))
+        run_schema_bootstrap_tasks()
+      rescue
+        _error -> {:error, :schema_bootstrap_failed}
+      catch
+        _kind, _reason -> {:error, :schema_bootstrap_failed}
+      end
+
+      defp run_schema_bootstrap_tasks do
+        Enum.reduce_while(@schema_bootstrap_tasks, :ok, fn name, :ok ->
+          case run_schema_task(name) do
+            :ok -> {:cont, :ok}
+            {:error, :schema_bootstrap_failed} = error -> {:halt, error}
+          end
+        end)
+      end
+
+      # In-child Mix.Task.rerun loads this revision's ecto tasks. Ecto Create
+      # treats an already-up schema as a normal return; any raise/throw fails
+      # closed. Never run Migrator in the host Arbor VM.
+      defp run_schema_task(name) do
+        mix_task_module().rerun(name, @schema_bootstrap_args)
+        :ok
+      rescue
+        _error -> {:error, :schema_bootstrap_failed}
+      catch
+        _kind, _reason -> {:error, :schema_bootstrap_failed}
+      end
+
+      defp mix_task_module do
+        Process.get(@mix_task_module_key, Mix.Task)
+      end
+
+      defp stored_owner_artifact_path! do
+        case :persistent_term.get(@artifact_path_key, :missing) do
+          path when is_binary(path) ->
+            if valid_owner_artifact_path?(path) do
+              path
+            else
+              raise "security-regression runner missing stored artifact path"
+            end
+
+          _other ->
+            raise "security-regression runner missing stored artifact path"
+        end
+      end
     end
 
     # Strip Mix.Tasks.Run's retained `--` once. Store the owner result path in
@@ -317,12 +438,10 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Formatter do
 
     #{module_name}.store_artifact_path!(artifact_path)
 
-    # Validator-owned flags only. `--include test` overrides helper exclusions
-    # for every test already loaded from the exact selected paths.
-    Mix.Task.run("test", [
-      #{rendered_mix_test_flags(module_name)}
-      | test_paths
-    ])
+    case #{module_name}.prepare_schema_and_run_tests!(test_paths) do
+      :ok -> :ok
+      {:error, :schema_bootstrap_failed} -> System.halt(2)
+    end
     """
   end
 

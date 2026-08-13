@@ -743,37 +743,34 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Shell do
   defp diagnostic(result, resource) do
     output = (result.stdout || "") <> (result.stderr || "")
     normalized = normalize_diagnostic(output, resource)
-
-    %{
-      "exit_code" => result.exit_code,
-      "timed_out" => result.timed_out == true,
-      "output_bytes" => byte_size(normalized),
-      "output_sha256" => sha256(normalized)
-    }
+    Core.child_diagnostic(result.exit_code, result.timed_out == true, normalized)
   end
 
   defp diagnostic_for_error(reason, resource) do
     normalized = normalize_diagnostic(inspect(reason), resource)
-
-    %{
-      "exit_code" => nil,
-      "timed_out" => false,
-      "output_bytes" => byte_size(normalized),
-      "output_sha256" => sha256(normalized)
-    }
+    Core.child_diagnostic(nil, false, normalized)
   end
 
   defp normalize_diagnostic(output, resource) when is_binary(output) do
     [
-      {resource.candidate_path, "<candidate>"},
-      {resource.base_worktree_path, "<base>"},
-      {resource.root_path, "<resource>"},
-      {resource.repo_path, "<repo>"}
+      {resource_path(resource, :candidate_path), "<candidate>"},
+      {resource_path(resource, :base_worktree_path), "<base>"},
+      {resource_path(resource, :root_path), "<resource>"},
+      {resource_path(resource, :repo_path), "<repo>"},
+      {resource_path(resource, :candidate_home_path), "<candidate-home>"},
+      {resource_path(resource, :base_home_path), "<base-home>"},
+      {resource_path(resource, :candidate_build_path), "<candidate-build>"},
+      {resource_path(resource, :base_build_path), "<base-build>"}
     ]
+    |> Enum.reject(fn {path, _replacement} -> is_nil(path) or path == "" end)
     |> Enum.sort_by(fn {path, _replacement} -> -byte_size(path) end)
     |> Enum.reduce(output, fn {path, replacement}, acc ->
       :binary.replace(acc, path, replacement, [:global])
     end)
+  end
+
+  defp resource_path(resource, key) when is_map(resource) and is_atom(key) do
+    Map.get(resource, key) || Map.get(resource, Atom.to_string(key))
   end
 
   defp file_identity(stat) do

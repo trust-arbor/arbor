@@ -42,7 +42,10 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCore do
     completed status exit_code timed_out executed passed test_failures setup_failures skipped excluded
     invalid
   ]a
-  @security_diagnostic_fields ~w[exit_code timed_out output_bytes output_sha256]
+  @security_diagnostic_fields ~w[
+    exit_code timed_out output_bytes output_sha256 untrusted_diagnostic_output
+  ]
+  @max_untrusted_diagnostic_bytes 2_048
 
   @gates %{
     "default" => ["coding.validation.default.compile"],
@@ -853,13 +856,15 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCore do
          true <-
            is_integer(values["output_bytes"]) and values["output_bytes"] >= 0 and
              values["output_bytes"] <= @max_raw_output_bytes,
-         true <- valid_sha256?(values["output_sha256"]) do
+         true <- valid_sha256?(values["output_sha256"]),
+         true <- valid_untrusted_diagnostic_output?(values["untrusted_diagnostic_output"]) do
       {:ok,
        %{
          "exit_code" => values["exit_code"],
          "timed_out" => values["timed_out"],
          "output_bytes" => values["output_bytes"],
-         "output_sha256" => values["output_sha256"]
+         "output_sha256" => values["output_sha256"],
+         "untrusted_diagnostic_output" => values["untrusted_diagnostic_output"]
        }}
     else
       _other -> :error
@@ -1237,6 +1242,23 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCore do
 
   defp valid_sha256?(value),
     do: is_binary(value) and Regex.match?(~r/\A[0-9a-f]{64}\z/, value)
+
+  defp valid_untrusted_diagnostic_output?(value)
+       when is_binary(value) and byte_size(value) <= @max_untrusted_diagnostic_bytes do
+    String.valid?(value) and not String.contains?(value, <<0>>) and
+      not unsafe_control_bytes?(value)
+  end
+
+  defp valid_untrusted_diagnostic_output?(_value), do: false
+
+  defp unsafe_control_bytes?(<<>>), do: false
+
+  defp unsafe_control_bytes?(<<byte, rest::binary>>)
+       when byte == 9 or byte == 10 or byte >= 32 do
+    unsafe_control_bytes?(rest)
+  end
+
+  defp unsafe_control_bytes?(<<_byte, _rest::binary>>), do: true
 
   defp valid_oid?(value),
     do: is_binary(value) and Regex.match?(~r/\A(?:[0-9a-f]{40}|[0-9a-f]{64})\z/, value)

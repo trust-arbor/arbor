@@ -1443,7 +1443,8 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       "exit_code" => leg["exit_code"],
       "timed_out" => leg["timed_out"],
       "output_bytes" => 12,
-      "output_sha256" => @verification_digest
+      "output_sha256" => @verification_digest,
+      "untrusted_diagnostic_output" => ""
     }
   end
 

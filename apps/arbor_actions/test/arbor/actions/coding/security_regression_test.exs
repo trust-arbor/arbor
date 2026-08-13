@@ -137,6 +137,89 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
       assert Path.type(invocation.path) == :absolute
       refute invocation.path == fixture.lease.worktree_path
       assert ["run", "--no-start" | _rest] = invocation.args
+      refute "ecto.create" in invocation.args
+      refute "ecto.migrate" in invocation.args
+    after
+      if is_nil(suite_runner) do
+        Application.delete_env(:arbor_actions, :security_regression_mix_runner)
+      else
+        Application.put_env(:arbor_actions, :security_regression_mix_runner, suite_runner)
+      end
+    end
+  end
+
+  test "security regression: candidate failure exposes bounded untrusted diagnostic output",
+       %{tmp_dir: tmp_dir} do
+    parent = self()
+    suite_runner = Application.get_env(:arbor_actions, :security_regression_mix_runner)
+
+    Application.put_env(:arbor_actions, :security_regression_mix_runner, fn _path, args, opts ->
+      resource = Keyword.get(opts, :validation_resource)
+      stdout = resource.candidate_path <> " no such table: memory_relationships" <> <<0>>
+
+      send(
+        parent,
+        {:untrusted_diagnostic_resource,
+         %{
+           args: args,
+           candidate_path: resource.candidate_path,
+           candidate_home_path: resource.candidate_home_path,
+           base_home_path: resource.base_home_path,
+           stdout: stdout
+         }}
+      )
+
+      {:ok, %{exit_code: 2, stdout: stdout, stderr: "", timed_out: false}}
+    end)
+
+    try do
+      fixture =
+        leased_project(tmp_dir, "defmodule Tiny.Security do\n  def allow_guest?, do: true\nend\n")
+
+      write_candidate_module(
+        fixture,
+        "defmodule Tiny.Security do\n  def allow_guest?, do: false\nend\n"
+      )
+
+      test_path = "test/untrusted_output_test.exs"
+
+      write_candidate_test(fixture, test_path, """
+      defmodule Tiny.UntrustedOutputTest do
+        use ExUnit.Case
+        test "guest remains denied", do: refute(Tiny.Security.allow_guest?())
+      end
+      """)
+
+      assert {:ok, result} = Validate.run(attested_params(fixture, [test_path]), fixture.context)
+      refute result.passed
+
+      assert_receive {:untrusted_diagnostic_resource, invocation}, 5_000
+      assert ["run", "--no-start" | _rest] = invocation.args
+      refute "ecto.create" in invocation.args
+      assert invocation.candidate_home_path != invocation.base_home_path
+
+      normalized =
+        :binary.replace(invocation.stdout, invocation.candidate_path, "<candidate>", [:global])
+
+      expected_bytes = byte_size(normalized)
+
+      expected_sha256 =
+        :crypto.hash(:sha256, normalized) |> Base.encode16(case: :lower)
+
+      diagnostic = result.diagnostics.candidate
+
+      # Parent diagnostics have bytes/sha only. Requiring this key fails on the
+      # immediate parent as missing excerpt, not UndefinedFunctionError.
+      assert Map.has_key?(diagnostic, "untrusted_diagnostic_output")
+      excerpt = diagnostic["untrusted_diagnostic_output"]
+      assert is_binary(excerpt)
+      assert excerpt =~ "<candidate>"
+      assert excerpt =~ "memory_relationships"
+      refute excerpt =~ invocation.candidate_path
+      refute String.contains?(excerpt, <<0>>)
+      assert diagnostic["output_bytes"] == expected_bytes
+      assert diagnostic["output_sha256"] == expected_sha256
+      assert String.contains?(normalized, <<0>>)
     after
       if is_nil(suite_runner) do
         Application.delete_env(:arbor_actions, :security_regression_mix_runner)

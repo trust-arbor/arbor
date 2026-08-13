@@ -125,6 +125,9 @@ defmodule Arbor.Actions.Coding.SecurityRegression.CoreTest do
     assert marked.diagnostic["output_bytes"] == candidate.diagnostic["output_bytes"]
     assert marked.diagnostic["output_sha256"] == candidate.diagnostic["output_sha256"]
 
+    assert marked.diagnostic["untrusted_diagnostic_output"] ==
+             candidate.diagnostic["untrusted_diagnostic_output"]
+
     stage = Core.stage_timeout_leg()
     assert stage.status == :stage_timeout
     assert stage.timed_out == true
@@ -199,7 +202,8 @@ defmodule Arbor.Actions.Coding.SecurityRegression.CoreTest do
           "exit_code" => 0,
           "timed_out" => false,
           "output_bytes" => max_bytes,
-          "output_sha256" => String.duplicate("a", 64)
+          "output_sha256" => String.duplicate("a", 64),
+          "untrusted_diagnostic_output" => ""
         }
     }
 
@@ -327,6 +331,87 @@ defmodule Arbor.Actions.Coding.SecurityRegression.CoreTest do
       })
 
     assert Core.candidate_gate(zero_tests) == {:error, "candidate_zero_tests"}
+
+    bootstrap_failure =
+      completed_leg(%{
+        artifact_counts()
+        | executed: 0,
+          passed: 0,
+          test_failures: 0,
+          setup_failures: 1,
+          invalid: 0,
+          total: 0,
+          suite_started: false,
+          suite_completed: false
+      })
+
+    assert Core.candidate_gate(bootstrap_failure) == {:error, "candidate_setup_failed"}
+    assert Core.verdict(candidate, bootstrap_failure).reason == "base_setup_failed"
+  end
+
+  test "security regression: untrusted diagnostic excerpt is bounded and JSON-safe" do
+    assert Core.untrusted_diagnostic_field() == "untrusted_diagnostic_output"
+    limit = Core.untrusted_diagnostic_output_limit()
+    assert limit == 2048
+
+    empty = Core.child_diagnostic(0, false, "")
+    assert empty["untrusted_diagnostic_output"] == ""
+    assert empty["output_bytes"] == 0
+    assert empty["output_sha256"] == sha256("")
+    assert jason_object?(empty)
+
+    short = "no such table: memory_relationships"
+    short_diag = Core.child_diagnostic(2, false, short)
+    assert short_diag["untrusted_diagnostic_output"] == short
+    assert short_diag["output_bytes"] == byte_size(short)
+    assert short_diag["output_sha256"] == sha256(short)
+    assert jason_object?(short_diag)
+
+    oversized = String.duplicate("x", limit + 64)
+    oversized_diag = Core.child_diagnostic(2, false, oversized)
+    excerpt = oversized_diag["untrusted_diagnostic_output"]
+    assert byte_size(excerpt) <= limit
+    assert String.valid?(excerpt)
+    assert excerpt =~ Core.untrusted_omission_marker()
+    assert oversized_diag["output_bytes"] == byte_size(oversized)
+    assert oversized_diag["output_sha256"] == sha256(oversized)
+    refute oversized_diag["output_sha256"] == sha256(excerpt)
+    assert jason_object?(oversized_diag)
+  end
+
+  test "security regression: diagnostic hash covers unsanitized path-normalized bytes" do
+    oversized_tail = String.duplicate("x", Core.untrusted_diagnostic_output_limit() + 32)
+    path_normalized = "pre" <> <<0, 0xFF, 0xFE>> <> "post" <> oversized_tail
+    diagnostic = Core.child_diagnostic(2, false, path_normalized)
+
+    assert diagnostic["output_bytes"] == byte_size(path_normalized)
+    assert diagnostic["output_sha256"] == sha256(path_normalized)
+
+    excerpt = diagnostic["untrusted_diagnostic_output"]
+    refute String.contains?(excerpt, <<0>>)
+    assert String.valid?(excerpt)
+    assert byte_size(excerpt) <= Core.untrusted_diagnostic_output_limit()
+    assert jason_object?(diagnostic)
+    refute diagnostic["output_sha256"] == sha256(excerpt)
+    assert excerpt =~ "pre"
+    assert excerpt =~ "post"
+  end
+
+  test "security regression: valid suffix after invalid UTF-8 remains visible" do
+    path_normalized = "pre" <> <<0, 0xFF, 0xFE>> <> "post no such table: memory_relationships"
+    diagnostic = Core.child_diagnostic(2, false, path_normalized)
+
+    assert diagnostic["output_bytes"] == byte_size(path_normalized)
+    assert diagnostic["output_sha256"] == sha256(path_normalized)
+
+    excerpt = diagnostic["untrusted_diagnostic_output"]
+    assert excerpt == "prepost no such table: memory_relationships"
+    refute String.contains?(excerpt, <<0>>)
+    refute String.contains?(excerpt, <<0xFF>>)
+    refute String.contains?(excerpt, <<0xFE>>)
+    assert String.valid?(excerpt)
+    assert jason_object?(diagnostic)
+    refute diagnostic["output_sha256"] == sha256(excerpt)
   end
 
   defp completed_leg(counts, exit_code \\ 0) do
@@ -351,8 +436,18 @@ defmodule Arbor.Actions.Coding.SecurityRegression.CoreTest do
       "exit_code" => exit_code,
       "timed_out" => timed_out,
       "output_bytes" => 0,
-      "output_sha256" => String.duplicate("a", 64)
+      "output_sha256" => String.duplicate("a", 64),
+      "untrusted_diagnostic_output" => ""
     }
+  end
+
+  defp sha256(value) when is_binary(value) do
+    :crypto.hash(:sha256, value) |> Base.encode16(case: :lower)
+  end
+
+  defp jason_object?(map) when is_map(map) do
+    encoded = Jason.encode!(map)
+    is_binary(encoded) and String.valid?(encoded)
   end
 
   defp artifact_counts do

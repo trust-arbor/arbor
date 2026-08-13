@@ -1,6 +1,7 @@
 defmodule Arbor.Actions.Coding.SecurityRegression.FormatterTest do
   use ExUnit.Case, async: true
 
+  alias Arbor.Actions.Coding.SecurityRegression.Core
   alias Arbor.Actions.Coding.SecurityRegression.Formatter
 
   @moduletag :fast
@@ -44,7 +45,8 @@ defmodule Arbor.Actions.Coding.SecurityRegression.FormatterTest do
     assert source =~ "case System.argv() do"
     assert source =~ ~s(["--" | rest] -> rest)
     assert source =~ "store_artifact_path!(artifact_path)"
-    assert source =~ "Mix.Task.run(\"test\""
+    assert source =~ "prepare_schema_and_run_tests!(test_paths)"
+    assert source =~ "mix_task_module().run(\"test\""
 
     # Formatter-owned state holds the path; suite_finished must not touch argv.
     assert source =~ "artifact_path: artifact_path"
@@ -89,6 +91,35 @@ defmodule Arbor.Actions.Coding.SecurityRegression.FormatterTest do
     assert Enum.at(mix_args, include_index + 1) == "test"
     assert include_index < length(mix_args) - 1
     assert Enum.at(mix_args, -1) == :test_paths
+  end
+
+  test "security regression: generated runner bootstraps schema before selected tests" do
+    assert {:ok, source} = Formatter.runner_source(@module_name)
+
+    assert source =~ "prepare_schema_and_run_tests!"
+    assert source =~ "mix_task_module().rerun(name, @schema_bootstrap_args)"
+    assert source =~ inspect(Core.schema_project_mix_file())
+    assert source =~ inspect(Core.schema_bootstrap_args())
+    assert source =~ inspect("ecto.create")
+    assert source =~ inspect("ecto.migrate")
+
+    create_index = :binary.match(source, "ecto.create")
+    migrate_index = :binary.match(source, "ecto.migrate")
+    prepare_index = :binary.match(source, "prepare_schema_and_run_tests!(test_paths)")
+    halt_index = :binary.match(source, "System.halt(2)")
+
+    assert create_index
+    assert migrate_index
+    assert prepare_index
+    assert halt_index
+    assert elem(create_index, 0) < elem(migrate_index, 0)
+    assert elem(prepare_index, 0) < elem(halt_index, 0)
+
+    refute source =~ "--migrations-path"
+    refute source =~ "System.cmd"
+    refute source =~ "ARBOR_DB"
+    refute source =~ "Mix.Project.apps_paths"
+    refute source =~ Path.expand("~/.arbor/arbor_test.db")
   end
 
   test "security regression: ExUnit include test overrides helper exclusions" do
@@ -147,26 +178,27 @@ defmodule Arbor.Actions.Coding.SecurityRegression.FormatterTest do
 
   defp extract_mix_test_run_args!(source) when is_binary(source) do
     assert {:ok, ast} = Code.string_to_quoted(source)
-
-    forms =
-      case ast do
-        {:__block__, _meta, quoted} when is_list(quoted) -> quoted
-        form -> [form]
-      end
-
-    args_ast =
-      Enum.find_value(forms, fn
-        {{:., _dot_meta, [{:__aliases__, _alias_meta, [:Mix, :Task]}, :run]}, _meta,
-         ["test", list]} ->
-          list
-
-        _other ->
-          nil
-      end)
-
+    args_ast = find_selected_test_run_args(ast)
     assert args_ast
     flatten_quoted_cons(args_ast)
   end
+
+  defp find_selected_test_run_args(
+         {{:., _dot_meta, [{:mix_task_module, _, _}, :run]}, _meta, ["test", list]}
+       ),
+       do: list
+
+  defp find_selected_test_run_args(tuple) when is_tuple(tuple) do
+    tuple
+    |> Tuple.to_list()
+    |> Enum.find_value(&find_selected_test_run_args/1)
+  end
+
+  defp find_selected_test_run_args(list) when is_list(list) do
+    Enum.find_value(list, &find_selected_test_run_args/1)
+  end
+
+  defp find_selected_test_run_args(_other), do: nil
 
   defp flatten_quoted_cons({:|, _meta, [head, tail]}) do
     flatten_quoted_cons(head) ++ flatten_quoted_cons(tail)

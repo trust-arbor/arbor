@@ -231,7 +231,8 @@ defmodule Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifierTest do
         "exit_code" => leg["exit_code"],
         "timed_out" => leg["timed_out"],
         "output_bytes" => 18,
-        "output_sha256" => digest
+        "output_sha256" => digest,
+        "untrusted_diagnostic_output" => ""
       }
     end
   end

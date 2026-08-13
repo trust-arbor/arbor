@@ -197,6 +197,13 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCoreTest do
     assert ordinary["status"] == "failed"
     assert "candidate_tests_failed" in Enum.map(ordinary["diagnostics"], & &1["code"])
     refute "validation_capacity_exceeded" in Enum.map(ordinary["diagnostics"], & &1["code"])
+
+    four_key =
+      good
+      |> update_in([:diagnostics, :candidate], &Map.delete(&1, "untrusted_diagnostic_output"))
+
+    assert {:ok, missing_excerpt} = verify("security_regression", four_key)
+    assert "validation_evidence_invalid" in Enum.map(missing_excerpt["diagnostics"], & &1["code"])
   end
 
   test "capacity handoff is closed, bounded evidence and malformed handoffs fail closed" do
@@ -1038,7 +1045,8 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCoreTest do
         "exit_code" => leg.exit_code,
         "timed_out" => leg.timed_out,
         "output_bytes" => 12,
-        "output_sha256" => @digest
+        "output_sha256" => @digest,
+        "untrusted_diagnostic_output" => ""
       }
     end
   end
