@@ -25,7 +25,8 @@ defmodule Arbor.LLM.OAuth.Login do
 
   Public entry points are exposed through `Arbor.LLM` as
   `start_openai_login/1`, `complete_openai_login/3`,
-  `start_xai_device_login/0`, and `complete_xai_device_login/1`.
+  `start_openai_loopback_login/1`, `start_xai_device_login/0`, and
+  `complete_xai_device_login/1`.
 
   The optional OpenAI loopback flow owns a short-lived supervised listener;
   this module still does not launch a browser or add dashboard/CLI behavior.

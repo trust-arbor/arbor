@@ -194,6 +194,26 @@ defmodule Arbor.LLM.OAuth.Login.LoopbackListenerTest do
     assert request("GET /auth/callback?#{query} HTTP/1.1") =~ "200 OK"
   end
 
+  test "request-line preflight does not charge coalesced bounded headers to the line budget" do
+    SharedStubClient.set([token_response()])
+    {:ok, prompt} = Loopback.start_resolved(:port_1457, [@ipv4])
+    state = query_value(LoopbackPrompt.authorize_url(prompt), "state")
+
+    padding_headers =
+      for index <- 1..6,
+          do: "X-Padding-#{index}: #{String.duplicate(Integer.to_string(index), 900)}"
+
+    response =
+      raw_request([
+        "GET /auth/callback?code=real&state=#{state} HTTP/1.1",
+        "Host: #{host()}"
+        | padding_headers
+      ])
+
+    assert response =~ "200 OK"
+    assert SharedStubClient.request_count() == 1
+  end
+
   test "malformed and oversized callbacks are generic, secret-free, and emit no Cowboy telemetry" do
     {:ok, prompt} = Loopback.start_resolved(:port_1457, [@ipv4])
     marker = "SECRET_CALLBACK_MARKER"

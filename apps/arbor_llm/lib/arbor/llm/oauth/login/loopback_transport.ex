@@ -65,16 +65,21 @@ defmodule Arbor.LLM.OAuth.Login.LoopbackTransport do
   end
 
   defp preflight_request_target(socket, deadline, acc) do
-    with :ok <- within_request_line_bound(acc),
-         {:ok, remaining} <- remaining_ms(deadline),
+    with {:ok, remaining} <- remaining_ms(deadline),
          {:ok, data} <- :ranch_tcp.recv(socket, 0, remaining) do
       combined = acc <> data
 
-      with :ok <- within_request_line_bound(combined) do
-        case :binary.match(combined, "\r\n") do
-          {line_end, 2} -> validate_request_target(socket, combined, line_end)
-          :nomatch -> preflight_request_target(socket, deadline, combined)
-        end
+      case :binary.match(combined, "\r\n") do
+        {line_end, 2} when line_end <= @max_request_line_bytes ->
+          validate_request_target(socket, combined, line_end)
+
+        {_line_end, 2} ->
+          reject(socket)
+
+        :nomatch ->
+          with :ok <- within_request_line_bound(combined) do
+            preflight_request_target(socket, deadline, combined)
+          end
       end
     else
       {:error, reason} -> {:error, reason}

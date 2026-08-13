@@ -161,8 +161,8 @@ defmodule Arbor.LLM.OAuth do
   provider, account identity, and token material -- and every successful publish starts
   generation at `0` unconditionally: a fresh, independent family, never a continuation of
   whatever generation (or owner) the file it replaces held. It does not perform the OAuth
-  authorization exchange itself (that remains out of scope here); it is the publication boundary
-  a future login/relogin flow calls into once it already has tokens in hand. Publication and
+  authorization exchange itself; it is the publication boundary the login/relogin flow calls
+  once it has tokens in hand. Publication and
   refresh serialize on the identical provider-scoped `:global` lock resource (see
   `with_provider_lock/2`) so a login/relogin can never race a concurrent refresh and lose a token
   rotation.

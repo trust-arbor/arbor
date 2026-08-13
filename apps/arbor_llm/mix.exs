@@ -23,11 +23,10 @@ defmodule Arbor.LLM.MixProject do
 
   def application do
     [
-      # mod: starts Arbor.LLM.Application, which supervises
-      # Arbor.LLM.OAuth.Login.PendingStore (the in-process, one-shot
-      # correlation-handle store for the OAuth login coordinator). Every
-      # umbrella app that already depends on arbor_llm starts it
-      # automatically as part of the normal OTP application boot graph.
+      # mod: starts Arbor.LLM.Application, which supervises the OAuth pending
+      # store and isolated loopback-listener infrastructure. Every umbrella
+      # app that already depends on arbor_llm starts them automatically as
+      # part of the normal OTP application boot graph.
       mod: {Arbor.LLM.Application, []},
       # :xmerl — req_llm requires it (its .app lists it), but Mix's code-path
       # pruning (Elixir >= 1.15) can drop OTP app paths in umbrella mix-task
