@@ -3,7 +3,7 @@ defmodule Arbor.LLM.OAuth.ResponsesTest do
 
   @moduletag :fast
 
-  alias Arbor.LLM.OAuth.{Responses, ResponsesFailure}
+  alias Arbor.LLM.OAuth.{RecoveryProofStore, Responses, ResponsesFailure}
   alias Arbor.LLM.{Message, Request, Response}
 
   @env_keys [
@@ -822,6 +822,114 @@ defmodule Arbor.LLM.OAuth.ResponsesTest do
     assert File.read!(source_path) == source_bytes
   end
 
+  test "security regression: arbor-owned OpenAI 401 recovers once and retries with the new receipt",
+       %{store_dir: store_dir} do
+    write_store_json(store_dir, "openai.json", oauth_store("openai", "old-arbor-access"))
+    refreshes = :atomics.new(1, signed: false)
+
+    Application.put_env(:arbor_llm, :oauth_refresh_fun, fn :openai, _config, "never-used" ->
+      :atomics.add(refreshes, 1, 1)
+      {:ok, %{"access_token" => "new-arbor-access", "refresh_token" => "never-used-2"}}
+    end)
+
+    {url, server} = start_401_then_sse_server()
+    configure_responses_endpoint!(url)
+    before = RecoveryProofStore.live_count(:openai)
+
+    assert {:ok, %{text: "retried", tool_calls: []}} =
+             Responses.complete(:openai, empty_request(), receive_timeout: 1_500)
+
+    assert %{first: first, second: second, extra_request?: false} = Task.await(server, 2_000)
+    assert first =~ "authorization: Bearer old-arbor-access"
+    assert second =~ "authorization: Bearer new-arbor-access"
+    assert :atomics.get(refreshes, 1) == 1
+    assert RecoveryProofStore.live_count(:openai) == before
+  end
+
+  test "security regression: arbor-owned xAI 401 recovers once and retries with the new receipt",
+       %{store_dir: store_dir} do
+    write_store_json(store_dir, "xai.json", oauth_store("xai", "old-xai-access"))
+    refreshes = :atomics.new(1, signed: false)
+
+    Application.put_env(:arbor_llm, :oauth_refresh_fun, fn :xai, _config, "never-used" ->
+      :atomics.add(refreshes, 1, 1)
+      {:ok, %{"access_token" => "new-xai-access", "refresh_token" => "never-used-2"}}
+    end)
+
+    {url, server} = start_401_then_sse_server()
+    configure_responses_endpoint!(%{xai: url})
+
+    assert {:ok, %{text: "retried"}} =
+             Responses.complete(:xai_oauth, empty_request(), receive_timeout: 1_500)
+
+    assert %{extra_request?: false} = Task.await(server, 2_000)
+    assert :atomics.get(refreshes, 1) == 1
+  end
+
+  test "security regression: arbor-owned second 401 after recover returns relogin and does not retry again",
+       %{store_dir: store_dir} do
+    write_store_json(store_dir, "openai.json", oauth_store("openai", "old-arbor-access"))
+    refreshes = :atomics.new(1, signed: false)
+
+    Application.put_env(:arbor_llm, :oauth_refresh_fun, fn :openai, _config, "never-used" ->
+      :atomics.add(refreshes, 1, 1)
+      {:ok, %{"access_token" => "new-arbor-access", "refresh_token" => "never-used-2"}}
+    end)
+
+    {url, server} = start_two_401_server()
+    configure_responses_endpoint!(url)
+
+    result = Responses.complete(:openai, empty_request(), receive_timeout: 1_500)
+    assert result == {:error, :oauth_relogin_required}
+    assert %{requests: 2} = Task.await(server, 2_000)
+    assert :atomics.get(refreshes, 1) == 1
+    refute inspect(result) =~ "old-arbor-access"
+    refute inspect(result) =~ "new-arbor-access"
+  end
+
+  test "security regression: arbor-owned refresh-family invalidation returns relogin after one request",
+       %{store_dir: store_dir} do
+    write_store_json(store_dir, "openai.json", oauth_store("openai", "old-arbor-access"))
+    path = Path.join(store_dir, "openai.json")
+    before = File.read!(path)
+
+    Application.put_env(:arbor_llm, :oauth_refresh_fun, fn :openai, _config, "never-used" ->
+      {:error, {:refresh_failed, 401, %{"error" => "invalid_grant"}}}
+    end)
+
+    {url, server} = start_unchanged_401_server()
+    configure_responses_endpoint!(url)
+
+    result = Responses.complete(:openai, empty_request(), receive_timeout: 1_000)
+    assert result == {:error, :oauth_relogin_required}
+    assert %{request: request, retried?: false} = Task.await(server, 2_000)
+    assert request =~ "authorization: Bearer old-arbor-access"
+    assert File.read!(path) == before
+  end
+
+  test "security regression: arbor-owned complete_single_attempt does not lease, refresh, or retry",
+       %{store_dir: store_dir} do
+    write_store_json(store_dir, "openai.json", oauth_store("openai", "single-access"))
+    path = Path.join(store_dir, "openai.json")
+    before = File.read!(path)
+    before_count = RecoveryProofStore.live_count(:openai)
+
+    Application.put_env(:arbor_llm, :oauth_refresh_fun, fn _, _, _ ->
+      flunk("single-attempt must not refresh")
+    end)
+
+    {url, server} = start_unchanged_401_server()
+    configure_responses_endpoint!(url)
+
+    assert {:error, %ResponsesFailure{class: :auth, status: 401}} =
+             Responses.complete_single_attempt(:openai, empty_request(), receive_timeout: 1_000)
+
+    assert %{request: request, retried?: false} = Task.await(server, 2_000)
+    assert request =~ "authorization: Bearer single-access"
+    assert File.read!(path) == before
+    assert RecoveryProofStore.live_count(:openai) == before_count
+  end
+
   test "security regression: source-owned Responses does not reread or retry non-401 statuses",
        %{root: root, store_dir: store_dir} do
     source_path =
@@ -1126,6 +1234,48 @@ defmodule Arbor.LLM.OAuth.ResponsesTest do
     File.write!(path, Jason.encode!(envelope))
     File.chmod!(path, 0o600)
     path
+  end
+
+  defp start_401_then_sse_server do
+    {listener, url} = listen()
+
+    server =
+      Task.async(fn ->
+        {first_socket, first} = accept_request!(listener)
+        send_http!(first_socket, 401, Jason.encode!(%{"detail" => "provider-body-secret"}))
+        :gen_tcp.close(first_socket)
+
+        {second_socket, second} = accept_request!(listener)
+        send_sse_success!(second_socket)
+        :gen_tcp.close(second_socket)
+
+        extra_request? = accepts_connection?(listener, 300)
+        :gen_tcp.close(listener)
+        %{first: first, second: second, extra_request?: extra_request?}
+      end)
+
+    {url, server}
+  end
+
+  defp start_two_401_server do
+    {listener, url} = listen()
+
+    server =
+      Task.async(fn ->
+        {first_socket, _first} = accept_request!(listener)
+        send_http!(first_socket, 401, Jason.encode!(%{"detail" => "first"}))
+        :gen_tcp.close(first_socket)
+
+        {second_socket, _second} = accept_request!(listener)
+        send_http!(second_socket, 401, Jason.encode!(%{"detail" => "second"}))
+        :gen_tcp.close(second_socket)
+
+        extra_request? = accepts_connection?(listener, 300)
+        :gen_tcp.close(listener)
+        %{requests: if(extra_request?, do: 3, else: 2)}
+      end)
+
+    {url, server}
   end
 
   defp start_unchanged_401_server do

@@ -18,7 +18,8 @@ defmodule Arbor.LLM.OAuth.CredentialReceipt do
     :account_id,
     :generation,
     :source_generation,
-    :source_observed_at
+    :source_observed_at,
+    :recovery_proof
   ]
 
   @type t :: %__MODULE__{
@@ -28,7 +29,8 @@ defmodule Arbor.LLM.OAuth.CredentialReceipt do
           account_id: String.t() | nil,
           generation: non_neg_integer(),
           source_generation: non_neg_integer() | nil,
-          source_observed_at: String.t() | nil
+          source_observed_at: String.t() | nil,
+          recovery_proof: String.t() | nil
         }
 end
 
@@ -179,6 +181,7 @@ defmodule Arbor.LLM.OAuth do
   alias Arbor.LLM.OAuth.CredentialReceipt
   alias Arbor.LLM.OAuth.JwtPayload
   alias Arbor.LLM.OAuth.ProviderPolicy
+  alias Arbor.LLM.OAuth.RecoveryProofStore
   alias Arbor.Contracts.LLM.AuthProvenance
   alias Arbor.Contracts.LLM.OAuthHealth
 
@@ -196,6 +199,7 @@ defmodule Arbor.LLM.OAuth do
   @token_fields ~w(access_token refresh_token)
   # Cover one concurrent refresh (~20s) plus margin; lock is released on owner death.
   @refresh_lock_retries 20
+  @max_proof_ttl_ms 900_000
   @default_store_dir "~/.arbor/oauth"
   @default_openai_source_file "~/.codex/auth.json"
 
@@ -451,6 +455,30 @@ defmodule Arbor.LLM.OAuth do
     do: {:error, :oauth_source_owned_unsupported}
 
   def reread_source_credential(_receipt), do: {:error, :oauth_source_receipt_invalid}
+
+  @doc false
+  @spec with_arbor_owned_recovery_lease(term(), (CredentialReceipt.t() -> term())) :: term()
+  def with_arbor_owned_recovery_lease(provider, fun) when is_function(fun, 1) do
+    with {:ok, receipt} <- credential_receipt(provider) do
+      run_with_authoritative_lease(receipt, fun)
+    end
+  end
+
+  def with_arbor_owned_recovery_lease(_provider, _fun),
+    do: {:error, :oauth_arbor_owned_receipt_invalid}
+
+  @doc false
+  @spec recover_arbor_owned_credential(term()) ::
+          {:ok, CredentialReceipt.t()} | {:error, term()}
+  def recover_arbor_owned_credential(%CredentialReceipt{} = used) do
+    with :ok <- validate_used_arbor_owned_receipt(used),
+         :ok <- consume_recovery_lease(used) do
+      recover_under_provider_lock(used)
+    end
+  end
+
+  def recover_arbor_owned_credential(_receipt),
+    do: {:error, :oauth_arbor_owned_receipt_invalid}
 
   @doc "Whether `provider` has a usable subscription-OAuth token on disk (and isn't Anthropic)."
   @spec available?(atom() | String.t()) :: boolean()
@@ -824,6 +852,46 @@ defmodule Arbor.LLM.OAuth do
   defp provenance_fields(:xai, _config, %{owner: "source_owned"}),
     do: {:error, :oauth_source_owned_unsupported}
 
+  defp run_with_authoritative_lease(%CredentialReceipt{owner: "arbor_owned"} = receipt, fun) do
+    leased =
+      case attach_recovery_lease(receipt) do
+        {:ok, issued} -> issued
+        {:error, _reason} -> receipt
+      end
+
+    try do
+      fun.(leased)
+    after
+      discard_recovery_lease(leased)
+    end
+  end
+
+  defp run_with_authoritative_lease(%CredentialReceipt{} = receipt, fun), do: fun.(receipt)
+
+  defp attach_recovery_lease(%CredentialReceipt{} = receipt) do
+    with :ok <- validate_arbor_owned_lease_receipt(receipt),
+         {:ok, handle} <-
+           RecoveryProofStore.issue(
+             receipt.provider,
+             receipt.account_id,
+             receipt.generation,
+             receipt.access_token,
+             lease_deadline_ms()
+           ) do
+      {:ok, %{receipt | recovery_proof: handle}}
+    end
+  end
+
+  defp discard_recovery_lease(%CredentialReceipt{
+         provider: provider,
+         recovery_proof: handle
+       })
+       when provider in [:openai, :xai] do
+    RecoveryProofStore.discard(provider, handle)
+  end
+
+  defp discard_recovery_lease(_receipt), do: :ok
+
   defp arbor_receipt(key, credential, token) do
     %CredentialReceipt{
       provider: key,
@@ -832,8 +900,146 @@ defmodule Arbor.LLM.OAuth do
       account_id: credential.account_id,
       generation: credential.generation,
       source_generation: nil,
-      source_observed_at: nil
+      source_observed_at: nil,
+      recovery_proof: nil
     }
+  end
+
+  defp validate_arbor_owned_lease_receipt(%CredentialReceipt{} = receipt) do
+    with :ok <- validate_arbor_owned_receipt_shape(receipt) do
+      if is_nil(receipt.source_generation) and is_nil(receipt.source_observed_at) do
+        :ok
+      else
+        {:error, :oauth_arbor_owned_receipt_invalid}
+      end
+    end
+  end
+
+  defp validate_used_arbor_owned_receipt(%CredentialReceipt{} = used) do
+    with :ok <- validate_arbor_owned_lease_receipt(used) do
+      if RecoveryProofStore.valid_handle?(used.recovery_proof) do
+        :ok
+      else
+        {:error, :oauth_arbor_owned_receipt_invalid}
+      end
+    end
+  end
+
+  defp validate_arbor_owned_receipt_shape(
+         %CredentialReceipt{
+           provider: provider,
+           owner: "arbor_owned"
+         } = receipt
+       )
+       when provider in [:openai, :xai] do
+    with {:ok, _generation} <- validate_generation(receipt.generation),
+         {:ok, _token} <- validate_token(receipt.access_token, @max_access_token_bytes),
+         {:ok, _account_id} <- validate_account_id(provider, receipt.account_id) do
+      :ok
+    else
+      _ -> {:error, :oauth_arbor_owned_receipt_invalid}
+    end
+  end
+
+  defp validate_arbor_owned_receipt_shape(_receipt),
+    do: {:error, :oauth_arbor_owned_receipt_invalid}
+
+  defp consume_recovery_lease(%CredentialReceipt{} = used) do
+    case RecoveryProofStore.take(used.provider, used.recovery_proof, %{
+           account_id: used.account_id,
+           generation: used.generation,
+           access_token: used.access_token
+         }) do
+      {:ok, :matched} ->
+        :ok
+
+      {:error, :oauth_arbor_owned_proof_mismatch} ->
+        {:error, :oauth_arbor_owned_proof_mismatch}
+
+      {:error, :oauth_recovery_lease_unavailable} ->
+        {:error, :oauth_recovery_lease_unavailable}
+
+      {:error, _reason} ->
+        {:error, :oauth_arbor_owned_proof_invalid}
+    end
+  end
+
+  defp recover_under_provider_lock(%CredentialReceipt{} = used) do
+    case with_provider_lock(used.provider, fn -> recover_under_lock(used) end) do
+      :aborted -> {:error, :oauth_refresh_lock_aborted}
+      result -> result
+    end
+  end
+
+  defp recover_under_lock(%CredentialReceipt{provider: key} = used) do
+    case read_credential(key) do
+      {:ok, latest} ->
+        classify_and_maybe_refresh(used, latest)
+
+      {:error, {:oauth_token_store_read_failed, reason}} ->
+        {:error, {:oauth_token_store_reread_failed, reason}}
+
+      {:error, reason} ->
+        {:error, {:oauth_token_store_reread_failed, reason}}
+    end
+  end
+
+  defp classify_and_maybe_refresh(%CredentialReceipt{} = used, latest) do
+    cond do
+      latest.owner != "arbor_owned" ->
+        {:error, :oauth_arbor_owned_owner_mismatch}
+
+      latest.account_id !== used.account_id ->
+        {:error, :oauth_arbor_owned_account_mismatch}
+
+      latest.generation > used.generation ->
+        reuse_newer_generation(used.provider, latest)
+
+      latest.generation < used.generation ->
+        {:error, :oauth_arbor_owned_generation_mismatch}
+
+      latest.tokens["access_token"] != used.access_token ->
+        {:error, :oauth_arbor_owned_token_mismatch}
+
+      true ->
+        force_refresh_current(used, latest)
+    end
+  end
+
+  defp reuse_newer_generation(key, latest) do
+    case validate_token(latest.tokens["access_token"], @max_access_token_bytes) do
+      {:ok, token} -> {:ok, arbor_receipt(key, latest, token)}
+      {:error, _reason} -> {:error, :oauth_arbor_owned_store_inconsistent}
+    end
+  end
+
+  defp force_refresh_current(%CredentialReceipt{} = used, latest) do
+    key = used.provider
+    config = ProviderPolicy.refresh_config(key)
+
+    with {:ok, access} <- refresh_and_persist(key, config, latest),
+         {:ok, %{owner: "arbor_owned"} = published} <- read_credential(key),
+         ^access <- published.tokens["access_token"],
+         true <- published.account_id == used.account_id,
+         true <- published.generation == used.generation + 1 do
+      {:ok, arbor_receipt(key, published, access)}
+    else
+      {:error, _reason} = error -> error
+      _mismatch -> {:error, :oauth_token_store_changed_after_refresh}
+    end
+  end
+
+  defp lease_deadline_ms do
+    now = System.monotonic_time(:millisecond)
+
+    remaining =
+      case Deadline.current_deadline() do
+        deadline when is_integer(deadline) -> deadline - now
+        _ -> @max_proof_ttl_ms
+      end
+
+    ttl = remaining |> min(@max_proof_ttl_ms) |> max(1)
+    now + ttl
   end
 
   defp source_reread_singleflight(%CredentialReceipt{} = used) do

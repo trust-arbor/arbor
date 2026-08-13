@@ -33,6 +33,7 @@ defmodule Arbor.LLM.OAuth.ModelCatalog do
     :clock,
     :credential_receipt_fun,
     :reread_source_credential_fun,
+    :recover_arbor_owned_credential_fun,
     :request_fun
   ]
 
@@ -75,11 +76,21 @@ defmodule Arbor.LLM.OAuth.ModelCatalog do
   def fetch(_route, _opts), do: {:error, ModelCatalogFailure.options(:keyword_options_required)}
 
   defp do_fetch(identity, opts) do
-    with {:ok, url} <- catalog_url(identity.backend),
-         {:ok, credential} <- read_credential(identity.backend, opts) do
-      request_with_credential(identity, credential, url, opts)
+    with {:ok, url} <- catalog_url(identity.backend) do
+      if injected_credential?(opts) do
+        with {:ok, credential} <- read_credential(identity.backend, opts) do
+          request_with_credential(identity, credential, url, opts)
+        end
+      else
+        OAuth.with_arbor_owned_recovery_lease(identity.backend, fn leased ->
+          request_with_credential(identity, leased, url, opts)
+        end)
+      end
     end
   end
+
+  defp injected_credential?(%{credential_receipt_fun: fun}), do: is_function(fun, 1)
+  defp injected_credential?(_opts), do: false
 
   defp request_with_credential(identity, credential, url, opts) do
     case request_once(identity, credential, url, opts) do
@@ -87,15 +98,88 @@ defmodule Arbor.LLM.OAuth.ModelCatalog do
        %CredentialReceipt{provider: :openai, owner: "source_owned"} = used} ->
         retry_source_once(identity, used, url, opts)
 
+      {{:error, %ModelCatalogFailure{code: :unauthorized, status: 401}},
+       %CredentialReceipt{owner: "arbor_owned"} = used} ->
+        retry_injected_or_leased_arbor_owned(identity, used, url, opts)
+
       {result, _credential} ->
         result
+    end
+  end
+
+  defp retry_injected_or_leased_arbor_owned(identity, used, url, opts) do
+    cond do
+      injected_credential?(opts) and is_function(opts.recover_arbor_owned_credential_fun, 1) ->
+        retry_arbor_owned_once(
+          identity,
+          used,
+          url,
+          opts,
+          opts.recover_arbor_owned_credential_fun
+        )
+
+      injected_credential?(opts) ->
+        {:error, ModelCatalogFailure.from_status(identity.route, identity.backend, 401)}
+
+      is_binary(used.recovery_proof) ->
+        retry_arbor_owned_once(
+          identity,
+          used,
+          url,
+          opts,
+          &OAuth.recover_arbor_owned_credential/1
+        )
+
+      true ->
+        {:error, ModelCatalogFailure.from_status(identity.route, identity.backend, 401)}
+    end
+  end
+
+  defp retry_arbor_owned_once(identity, used, url, opts, recover) do
+    case safe_reread(recover, used, :oauth_relogin_required) do
+      {:ok, %CredentialReceipt{} = latest} ->
+        case validate_arbor_retry_receipt(used, latest) do
+          {:ok, valid} ->
+            case request_once(identity, valid, url, opts) do
+              {{:error, %ModelCatalogFailure{code: :unauthorized, status: 401}}, _} ->
+                {:error, :oauth_relogin_required}
+
+              {result, _} ->
+                result
+            end
+
+          {:error, _reason} ->
+            {:error, :oauth_relogin_required}
+        end
+
+      {:error, :oauth_relogin_required} = error ->
+        error
+
+      {:error, _reason} = error ->
+        error
+
+      _malformed_or_error ->
+        {:error, :oauth_relogin_required}
+    end
+  end
+
+  defp validate_arbor_retry_receipt(%CredentialReceipt{} = used, %CredentialReceipt{} = latest) do
+    with {:ok, valid} <- validate_receipt(used.provider, latest),
+         true <- valid.owner == "arbor_owned",
+         true <- valid.provider == used.provider,
+         true <- valid.account_id == used.account_id,
+         true <- valid.generation > used.generation,
+         true <- valid.access_token != used.access_token do
+      {:ok, valid}
+    else
+      _ -> {:error, :oauth_relogin_required}
     end
   end
 
   defp retry_source_once(identity, used, url, opts) do
     reread = opts.reread_source_credential_fun || (&OAuth.reread_source_credential/1)
 
-    case safe_reread(reread, used) do
+    case safe_reread(reread, used, :oauth_source_reauthentication_required) do
       {:ok, %CredentialReceipt{} = latest} ->
         case validate_retry_receipt(used, latest) do
           {:ok, valid} ->
@@ -117,12 +201,13 @@ defmodule Arbor.LLM.OAuth.ModelCatalog do
     end
   end
 
-  defp safe_reread(reread, used) when is_function(reread, 1) do
+  defp safe_reread(reread, used, failure_reason)
+       when is_function(reread, 1) and is_atom(failure_reason) do
     reread.(used)
   rescue
-    _ -> {:error, :oauth_source_reauthentication_required}
+    _ -> {:error, failure_reason}
   catch
-    _, _ -> {:error, :oauth_source_reauthentication_required}
+    _, _ -> {:error, failure_reason}
   end
 
   defp validate_retry_receipt(%CredentialReceipt{} = used, %CredentialReceipt{} = latest) do
@@ -746,6 +831,8 @@ defmodule Arbor.LLM.OAuth.ModelCatalog do
          {:ok, credential_receipt_fun} <- optional_fun(opts, :credential_receipt_fun, 1),
          {:ok, reread_source_credential_fun} <-
            optional_fun(opts, :reread_source_credential_fun, 1),
+         {:ok, recover_arbor_owned_credential_fun} <-
+           optional_fun(opts, :recover_arbor_owned_credential_fun, 1),
          {:ok, request_fun} <- optional_fun(opts, :request_fun, 1) do
       {:ok,
        %{
@@ -753,6 +840,7 @@ defmodule Arbor.LLM.OAuth.ModelCatalog do
          now_fn: now_fn,
          credential_receipt_fun: credential_receipt_fun,
          reread_source_credential_fun: reread_source_credential_fun,
+         recover_arbor_owned_credential_fun: recover_arbor_owned_credential_fun,
          request_fun: request_fun
        }}
     end

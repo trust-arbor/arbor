@@ -3,7 +3,7 @@ defmodule Arbor.LLM.OAuthTest do
   @moduletag :fast
 
   alias Arbor.LLM.{Client, Message, OAuth, Request}
-  alias Arbor.LLM.OAuth.Login
+  alias Arbor.LLM.OAuth.{CredentialReceipt, Login, RecoveryProofStore}
   alias Arbor.Contracts.LLM.OAuthHealth
 
   @env_keys [
@@ -1444,6 +1444,501 @@ defmodule Arbor.LLM.OAuthTest do
 
       assert {:ok, ^access} = OAuth.access_token(:openai)
     end
+  end
+
+  describe "Arbor-owned 401 recovery (security regression — generation-aware lease)" do
+    test "wrapper discards the lease after success and after a raised function", %{
+      store_dir: store_dir
+    } do
+      write_store!(store_dir, :openai, %{
+        "access_token" => jwt_access(System.system_time(:second) + 3_600),
+        "refresh_token" => "rt-wrap"
+      })
+
+      before = RecoveryProofStore.live_count(:openai)
+
+      assert :ok =
+               OAuth.with_arbor_owned_recovery_lease(:openai, fn leased ->
+                 assert is_binary(leased.recovery_proof)
+                 :ok
+               end)
+
+      assert RecoveryProofStore.live_count(:openai) == before
+
+      assert_raise RuntimeError, fn ->
+        OAuth.with_arbor_owned_recovery_lease(:openai, fn _leased ->
+          raise "boom"
+        end)
+      end
+
+      assert RecoveryProofStore.live_count(:openai) == before
+    end
+
+    test "security regression: no receipt-accepting issuer is exported" do
+      refute function_exported?(OAuth, :issue_recovery_lease, 1)
+      refute function_exported?(OAuth, :discard_recovery_lease, 1)
+    end
+
+    test "access_token and credential_receipt allocate no recovery proofs", %{
+      store_dir: store_dir
+    } do
+      write_store!(store_dir, :openai, %{
+        "access_token" => jwt_access(System.system_time(:second) + 3_600),
+        "refresh_token" => "rt-no-lease"
+      })
+
+      before = RecoveryProofStore.live_count(:openai)
+
+      Enum.each(1..8, fn _ ->
+        assert {:ok, _token} = OAuth.access_token(:openai)
+        assert {:ok, %CredentialReceipt{recovery_proof: nil}} = OAuth.credential_receipt(:openai)
+      end)
+
+      assert RecoveryProofStore.live_count(:openai) == before
+    end
+
+    test "state table: issued current receipt force-refreshes once", %{store_dir: store_dir} do
+      current = jwt_access(System.system_time(:second) + 3_600)
+      rotated = jwt_access(System.system_time(:second) + 7_200)
+
+      write_envelope!(
+        store_dir,
+        :openai,
+        arbor_envelope(
+          :openai,
+          %{"access_token" => current, "refresh_token" => "rt-current"},
+          account_id: "acct_test",
+          generation: 4
+        )
+      )
+
+      refreshes = :atomics.new(1, signed: false)
+
+      Application.put_env(:arbor_llm, :oauth_refresh_fun, fn :openai, _config, "rt-current" ->
+        :atomics.add(refreshes, 1, 1)
+        {:ok, %{"access_token" => rotated, "refresh_token" => "rt-rotated"}}
+      end)
+
+      assert {:ok, recovered} = recover_leased(:openai)
+
+      assert recovered.generation == 5
+      assert recovered.access_token == rotated
+      assert recovered.recovery_proof == nil
+      assert :atomics.get(refreshes, 1) == 1
+      assert {:ok, stored} = read_store(store_dir, :openai)
+      assert stored["generation"] == 5
+      refute inspect(recovered) =~ rotated
+    end
+
+    test "state table: issued receipt reuses a newer store generation without refresh",
+         %{store_dir: store_dir} do
+      current = jwt_access(System.system_time(:second) + 3_600)
+      newer = jwt_access(System.system_time(:second) + 7_200)
+
+      write_envelope!(
+        store_dir,
+        :openai,
+        arbor_envelope(
+          :openai,
+          %{"access_token" => current, "refresh_token" => "rt-old"},
+          account_id: "acct_test",
+          generation: 4
+        )
+      )
+
+      assert {:ok, recovered} =
+               OAuth.with_arbor_owned_recovery_lease(:openai, fn leased ->
+                 write_envelope!(
+                   store_dir,
+                   :openai,
+                   arbor_envelope(
+                     :openai,
+                     %{"access_token" => newer, "refresh_token" => "rt-newer"},
+                     account_id: "acct_test",
+                     generation: 6
+                   )
+                 )
+
+                 Application.put_env(:arbor_llm, :oauth_refresh_fun, fn _, _, _ ->
+                   flunk("newer generation must be reused without refresh")
+                 end)
+
+                 OAuth.recover_arbor_owned_credential(leased)
+               end)
+
+      assert recovered.generation == 6
+      assert recovered.access_token == newer
+      assert recovered.recovery_proof == nil
+    end
+
+    test "state table: future generation, token mismatch, owner switch, and account mismatch fail closed",
+         %{store_dir: store_dir} do
+      current = jwt_access(System.system_time(:second) + 3_600)
+
+      write_envelope!(
+        store_dir,
+        :openai,
+        arbor_envelope(
+          :openai,
+          %{"access_token" => current, "refresh_token" => "rt-keep"},
+          account_id: "acct_test",
+          generation: 3
+        )
+      )
+
+      Application.put_env(:arbor_llm, :oauth_refresh_fun, fn _, _, _ ->
+        flunk("inconsistent receipts must not refresh")
+      end)
+
+      assert {:error, :oauth_arbor_owned_generation_mismatch} =
+               OAuth.with_arbor_owned_recovery_lease(:openai, fn leased ->
+                 write_envelope!(
+                   store_dir,
+                   :openai,
+                   arbor_envelope(
+                     :openai,
+                     %{"access_token" => current, "refresh_token" => "rt-keep"},
+                     account_id: "acct_test",
+                     generation: 1
+                   )
+                 )
+
+                 OAuth.recover_arbor_owned_credential(leased)
+               end)
+
+      write_envelope!(
+        store_dir,
+        :openai,
+        arbor_envelope(
+          :openai,
+          %{"access_token" => current, "refresh_token" => "rt-keep"},
+          account_id: "acct_test",
+          generation: 3
+        )
+      )
+
+      other = jwt_access(System.system_time(:second) + 4_000)
+
+      assert {:error, :oauth_arbor_owned_token_mismatch} =
+               OAuth.with_arbor_owned_recovery_lease(:openai, fn leased ->
+                 write_envelope!(
+                   store_dir,
+                   :openai,
+                   arbor_envelope(
+                     :openai,
+                     %{"access_token" => other, "refresh_token" => "rt-keep"},
+                     account_id: "acct_test",
+                     generation: 3
+                   )
+                 )
+
+                 OAuth.recover_arbor_owned_credential(leased)
+               end)
+
+      write_envelope!(
+        store_dir,
+        :openai,
+        arbor_envelope(
+          :openai,
+          %{"access_token" => current, "refresh_token" => "rt-keep"},
+          account_id: "acct_test",
+          generation: 3
+        )
+      )
+
+      assert {:error, :oauth_arbor_owned_owner_mismatch} =
+               OAuth.with_arbor_owned_recovery_lease(:openai, fn leased ->
+                 write_envelope!(store_dir, :openai, source_envelope(:openai, "acct_test", 3))
+                 OAuth.recover_arbor_owned_credential(leased)
+               end)
+
+      write_envelope!(
+        store_dir,
+        :openai,
+        arbor_envelope(
+          :openai,
+          %{"access_token" => current, "refresh_token" => "rt-keep"},
+          account_id: "acct_test",
+          generation: 3
+        )
+      )
+
+      assert {:error, :oauth_arbor_owned_account_mismatch} =
+               OAuth.with_arbor_owned_recovery_lease(:openai, fn leased ->
+                 write_envelope!(
+                   store_dir,
+                   :openai,
+                   arbor_envelope(
+                     :openai,
+                     %{"access_token" => current, "refresh_token" => "rt-keep"},
+                     account_id: "acct_other",
+                     generation: 3
+                   )
+                 )
+
+                 OAuth.recover_arbor_owned_credential(leased)
+               end)
+    end
+
+    test "state table: refresh-family invalidation and malformed refresh leave the store unchanged",
+         %{store_dir: store_dir} do
+      current = jwt_access(System.system_time(:second) + 3_600)
+      fresh = jwt_access(System.system_time(:second) + 7_200)
+
+      path =
+        write_envelope!(
+          store_dir,
+          :openai,
+          arbor_envelope(
+            :openai,
+            %{"access_token" => current, "refresh_token" => "rt-family"},
+            account_id: "acct_test",
+            generation: 2
+          )
+        )
+
+      before = File.read!(path)
+
+      Application.put_env(:arbor_llm, :oauth_refresh_fun, fn :openai, _, "rt-family" ->
+        {:error, {:refresh_failed, 401, %{"error" => "invalid_grant"}}}
+      end)
+
+      result = recover_leased(:openai)
+      assert result == {:error, :oauth_relogin_required}
+      assert File.read!(path) == before
+      refute inspect(result) =~ current
+
+      Application.put_env(:arbor_llm, :oauth_refresh_fun, fn :openai, _, "rt-family" ->
+        {:ok, %{"access_token" => fresh, "refresh_token" => nil}}
+      end)
+
+      assert {:error, {:invalid_refreshed_refresh_token, :invalid}} =
+               recover_leased(:openai)
+
+      assert File.read!(path) == before
+    end
+
+    test "state table: persistence failure does not return the fresh token", %{
+      store_dir: store_dir
+    } do
+      current = jwt_access(System.system_time(:second) + 3_600)
+      fresh = jwt_access(System.system_time(:second) + 7_200)
+
+      path =
+        write_envelope!(
+          store_dir,
+          :openai,
+          arbor_envelope(
+            :openai,
+            %{"access_token" => current, "refresh_token" => "rt-persist"},
+            account_id: "acct_test",
+            generation: 8
+          )
+        )
+
+      before = File.read!(path)
+
+      Application.put_env(:arbor_llm, :oauth_refresh_fun, fn :openai, _, "rt-persist" ->
+        {:ok, %{"access_token" => fresh, "refresh_token" => "rt-should-not-land"}}
+      end)
+
+      Application.put_env(:arbor_llm, :oauth_rename_fun, fn _tmp, _path ->
+        {:error, :simulated_rename_failure}
+      end)
+
+      result = recover_leased(:openai)
+      assert {:error, {:token_store_write_failed, :simulated_rename_failure}} = result
+      assert File.read!(path) == before
+      refute inspect(result) =~ fresh
+    end
+
+    test "forged stale same-account receipt cannot select the current credential", %{
+      store_dir: store_dir
+    } do
+      current = jwt_access(System.system_time(:second) + 3_600)
+
+      write_envelope!(
+        store_dir,
+        :openai,
+        arbor_envelope(
+          :openai,
+          %{"access_token" => current, "refresh_token" => "rt-current"},
+          account_id: "acct_test",
+          generation: 5
+        )
+      )
+
+      Application.put_env(:arbor_llm, :oauth_refresh_fun, fn _, _, _ ->
+        flunk("forged receipt must not refresh")
+      end)
+
+      forged = %CredentialReceipt{
+        provider: :openai,
+        owner: "arbor_owned",
+        access_token: "forged-valid-shaped-token",
+        account_id: "acct_test",
+        generation: 1,
+        source_generation: nil,
+        source_observed_at: nil,
+        recovery_proof: nil
+      }
+
+      wrapper =
+        OAuth.with_arbor_owned_recovery_lease(forged, fn _leased ->
+          flunk("provider wrapper must not accept a forged receipt")
+        end)
+
+      assert match?({:error, _}, wrapper)
+      refute inspect(wrapper) =~ current
+
+      result = OAuth.recover_arbor_owned_credential(forged)
+      assert result == {:error, :oauth_arbor_owned_receipt_invalid}
+      refute inspect(result) =~ current
+
+      random_proof = Base.url_encode64(:crypto.strong_rand_bytes(32), padding: false)
+      forged_proof = %{forged | recovery_proof: random_proof}
+      result2 = OAuth.recover_arbor_owned_credential(forged_proof)
+      assert result2 == {:error, :oauth_arbor_owned_proof_invalid}
+      refute inspect(result2) =~ current
+    end
+
+    test "the same leased receipt cannot be recovered twice", %{store_dir: store_dir} do
+      current = jwt_access(System.system_time(:second) + 3_600)
+      rotated = jwt_access(System.system_time(:second) + 7_200)
+
+      write_envelope!(
+        store_dir,
+        :openai,
+        arbor_envelope(
+          :openai,
+          %{"access_token" => current, "refresh_token" => "rt-once"},
+          account_id: "acct_test",
+          generation: 1
+        )
+      )
+
+      Application.put_env(:arbor_llm, :oauth_refresh_fun, fn :openai, _, "rt-once" ->
+        {:ok, %{"access_token" => rotated, "refresh_token" => "rt-2"}}
+      end)
+
+      second =
+        OAuth.with_arbor_owned_recovery_lease(:openai, fn leased ->
+          assert {:ok, _recovered} = OAuth.recover_arbor_owned_credential(leased)
+          OAuth.recover_arbor_owned_credential(leased)
+        end)
+
+      assert second == {:error, :oauth_arbor_owned_proof_invalid}
+      refute inspect(second) =~ rotated
+    end
+
+    test "malformed store after a valid lease fails closed without refresh", %{
+      store_dir: store_dir
+    } do
+      current = jwt_access(System.system_time(:second) + 3_600)
+
+      path =
+        write_envelope!(
+          store_dir,
+          :openai,
+          arbor_envelope(
+            :openai,
+            %{"access_token" => current, "refresh_token" => "rt-store"},
+            account_id: "acct_test",
+            generation: 1
+          )
+        )
+
+      assert {:error, {:oauth_token_store_reread_failed, _}} =
+               OAuth.with_arbor_owned_recovery_lease(:openai, fn leased ->
+                 File.write!(path, "{")
+
+                 Application.put_env(:arbor_llm, :oauth_refresh_fun, fn _, _, _ ->
+                   flunk("malformed store must not refresh")
+                 end)
+
+                 OAuth.recover_arbor_owned_credential(leased)
+               end)
+    end
+
+    test "N concurrent issued recoveries publish one refresh; providers stay independent",
+         %{store_dir: store_dir} do
+      openai_fresh = jwt_access(System.system_time(:second) + 3_600)
+      xai_fresh = jwt_access(System.system_time(:second) + 7_200)
+
+      write_envelope!(
+        store_dir,
+        :openai,
+        arbor_envelope(
+          :openai,
+          %{
+            "access_token" => jwt_access(System.system_time(:second) + 1_800),
+            "refresh_token" => "openai-rt"
+          },
+          account_id: "acct_test",
+          generation: 2
+        )
+      )
+
+      write_envelope!(
+        store_dir,
+        :xai,
+        arbor_envelope(
+          :xai,
+          %{
+            "access_token" => jwt_access(System.system_time(:second) + 5_400),
+            "refresh_token" => "xai-rt"
+          },
+          account_id: nil,
+          generation: 2
+        )
+      )
+
+      entered = :atomics.new(2, signed: false)
+      openai_refreshes = :atomics.new(1, signed: false)
+      xai_refreshes = :atomics.new(1, signed: false)
+      parent = self()
+
+      Application.put_env(:arbor_llm, :oauth_refresh_fun, fn key, _config, _rt ->
+        idx = if key == :openai, do: 1, else: 2
+        :atomics.add(if(key == :openai, do: openai_refreshes, else: xai_refreshes), 1, 1)
+        :atomics.put(entered, idx, 1)
+        send(parent, {:refresh_entered, key})
+
+        wait_until(
+          fn -> :atomics.get(entered, 1) == 1 and :atomics.get(entered, 2) == 1 end,
+          2_000
+        )
+
+        access = if key == :openai, do: openai_fresh, else: xai_fresh
+        {:ok, %{"access_token" => access, "refresh_token" => "#{key}-rotated"}}
+      end)
+
+      openai_tasks =
+        Enum.map(1..4, fn _ ->
+          Task.async(fn -> recover_leased(:openai) end)
+        end)
+
+      xai_task = Task.async(fn -> recover_leased(:xai) end)
+
+      assert_receive {:refresh_entered, :openai}, 2_000
+      assert_receive {:refresh_entered, :xai}, 2_000
+
+      openai_results = Enum.map(openai_tasks, &Task.await(&1, 5_000))
+      assert {:ok, xai_recovered} = Task.await(xai_task, 5_000)
+
+      assert Enum.all?(openai_results, fn
+               {:ok, receipt} -> receipt.access_token == openai_fresh
+               _ -> false
+             end)
+
+      assert xai_recovered.access_token == xai_fresh
+      assert :atomics.get(openai_refreshes, 1) == 1
+      assert :atomics.get(xai_refreshes, 1) == 1
+    end
+  end
+
+  defp recover_leased(provider) do
+    OAuth.with_arbor_owned_recovery_lease(provider, &OAuth.recover_arbor_owned_credential/1)
   end
 
   # ── hermetic helpers (never touch operator ~/.codex, ~/.grok, or ~/.arbor) ──

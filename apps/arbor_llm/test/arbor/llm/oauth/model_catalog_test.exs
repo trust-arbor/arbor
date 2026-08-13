@@ -4,7 +4,7 @@ defmodule Arbor.LLM.OAuth.ModelCatalogTest do
   @moduletag :fast
 
   alias Arbor.Contracts.LLM.ProviderModelCatalog
-  alias Arbor.LLM.OAuth.{CredentialReceipt, ModelCatalog, ModelCatalogFailure}
+  alias Arbor.LLM.OAuth.{CredentialReceipt, ModelCatalog, ModelCatalogFailure, RecoveryProofStore}
 
   @now ~U[2026-07-29 12:00:00Z]
   @openai_url "https://chatgpt.com/backend-api/codex/models?client_version=0.0.0"
@@ -507,7 +507,7 @@ defmodule Arbor.LLM.OAuth.ModelCatalogTest do
   end
 
   test "non-200 status is classified before body overflow markers" do
-    assert {:error, %ModelCatalogFailure{code: :unauthorized, status: 401}} =
+    assert {:error, %ModelCatalogFailure{code: :forbidden, status: 403}} =
              ModelCatalog.fetch(:openai_oauth,
                now_fn: fn -> @now end,
                credential_receipt_fun: fn _ ->
@@ -516,7 +516,7 @@ defmodule Arbor.LLM.OAuth.ModelCatalogTest do
                request_fun: fn _ ->
                  {:ok,
                   %{
-                    status: 401,
+                    status: 403,
                     body: "bounded-secret-prefix",
                     headers: [],
                     private: %{arbor_response_overflow: 1_048_576}
@@ -596,6 +596,156 @@ defmodule Arbor.LLM.OAuth.ModelCatalogTest do
              )
 
     assert :counters.get(req, 1) == 0
+  end
+
+  test "security regression: forged injected lower-generation receipt never reaches issuer or recoverer" do
+    requests = :counters.new(1, [])
+    before = RecoveryProofStore.live_count(:openai)
+    used = receipt(:openai, "arbor_owned", 1, "forged-old", "acct")
+
+    assert {:error, %ModelCatalogFailure{code: :unauthorized, status: 401}} =
+             ModelCatalog.fetch(:openai_oauth,
+               now_fn: fn -> @now end,
+               credential_receipt_fun: fn _ -> {:ok, used} end,
+               request_fun: fn _ ->
+                 :counters.add(requests, 1, 1)
+                 {:ok, %{status: 401, body: ~s({"token":"secret"}), headers: []}}
+               end
+             )
+
+    assert :counters.get(requests, 1) == 1
+    assert RecoveryProofStore.live_count(:openai) == before
+  end
+
+  test "arbor-owned OpenAI retries once on 401 with the recovered receipt" do
+    requests = :counters.new(1, [])
+    recovers = :counters.new(1, [])
+    used = receipt(:openai, "arbor_owned", 1, "old-tok", "acct")
+    latest = receipt(:openai, "arbor_owned", 2, "new-tok", "acct")
+
+    assert {:ok, %ProviderModelCatalog{model_ids: ["ok"]}} =
+             ModelCatalog.fetch(:openai_oauth,
+               now_fn: fn -> @now end,
+               credential_receipt_fun: fn _ -> {:ok, used} end,
+               recover_arbor_owned_credential_fun: fn receipt ->
+                 :counters.add(recovers, 1, 1)
+                 assert receipt.access_token == "old-tok"
+                 {:ok, latest}
+               end,
+               request_fun: fn spec ->
+                 :counters.add(requests, 1, 1)
+
+                 case :counters.get(requests, 1) do
+                   1 ->
+                     assert_header(spec.headers, "authorization", "Bearer old-tok")
+
+                     {:ok, %{status: 401, body: ~s({"detail":"nope"}), headers: []}}
+
+                   2 ->
+                     assert_header(spec.headers, "authorization", "Bearer new-tok")
+                     json_ok(%{"models" => [%{"slug" => "ok", "supported_in_api" => true}]})
+                 end
+               end
+             )
+
+    assert :counters.get(requests, 1) == 2
+    assert :counters.get(recovers, 1) == 1
+  end
+
+  test "arbor-owned xAI retries once on 401 with the recovered receipt" do
+    requests = :counters.new(1, [])
+    used = receipt(:xai, "arbor_owned", 3, "old-xai", nil)
+    latest = receipt(:xai, "arbor_owned", 4, "new-xai", nil)
+
+    assert {:ok, %ProviderModelCatalog{model_ids: ["grok"]}} =
+             ModelCatalog.fetch(:xai_oauth,
+               now_fn: fn -> @now end,
+               credential_receipt_fun: fn _ -> {:ok, used} end,
+               recover_arbor_owned_credential_fun: fn _ -> {:ok, latest} end,
+               request_fun: fn spec ->
+                 :counters.add(requests, 1, 1)
+
+                 case :counters.get(requests, 1) do
+                   1 ->
+                     assert_header(spec.headers, "authorization", "Bearer old-xai")
+                     {:ok, %{status: 401, body: "x", headers: []}}
+
+                   2 ->
+                     assert_header(spec.headers, "authorization", "Bearer new-xai")
+                     json_ok(%{"data" => [%{"id" => "grok"}]})
+                 end
+               end
+             )
+
+    assert :counters.get(requests, 1) == 2
+  end
+
+  test "arbor-owned second 401 after recover returns relogin" do
+    requests = :counters.new(1, [])
+    used = receipt(:openai, "arbor_owned", 1, "old-tok", "acct")
+    latest = receipt(:openai, "arbor_owned", 2, "new-tok", "acct")
+
+    assert {:error, :oauth_relogin_required} =
+             ModelCatalog.fetch(:openai_oauth,
+               now_fn: fn -> @now end,
+               credential_receipt_fun: fn _ -> {:ok, used} end,
+               recover_arbor_owned_credential_fun: fn _ -> {:ok, latest} end,
+               request_fun: fn _ ->
+                 :counters.add(requests, 1, 1)
+                 {:ok, %{status: 401, body: "x", headers: []}}
+               end
+             )
+
+    assert :counters.get(requests, 1) == 2
+  end
+
+  test "arbor-owned recover relogin does not issue a second request" do
+    requests = :counters.new(1, [])
+    used = receipt(:openai, "arbor_owned", 1, "old-tok", "acct")
+
+    assert {:error, :oauth_relogin_required} =
+             ModelCatalog.fetch(:openai_oauth,
+               now_fn: fn -> @now end,
+               credential_receipt_fun: fn _ -> {:ok, used} end,
+               recover_arbor_owned_credential_fun: fn _ -> {:error, :oauth_relogin_required} end,
+               request_fun: fn _ ->
+                 :counters.add(requests, 1, 1)
+                 {:ok, %{status: 401, body: "x", headers: []}}
+               end
+             )
+
+    assert :counters.get(requests, 1) == 1
+  end
+
+  test "arbor-owned hostile or same-token recover does not issue a second request" do
+    requests = :counters.new(1, [])
+    used = receipt(:openai, "arbor_owned", 1, "old-tok", "acct")
+
+    assert {:error, :oauth_relogin_required} =
+             ModelCatalog.fetch(:openai_oauth,
+               now_fn: fn -> @now end,
+               credential_receipt_fun: fn _ -> {:ok, used} end,
+               recover_arbor_owned_credential_fun: fn _ -> raise "hostile recover" end,
+               request_fun: fn _ ->
+                 :counters.add(requests, 1, 1)
+                 {:ok, %{status: 401, body: "x", headers: []}}
+               end
+             )
+
+    assert {:error, :oauth_relogin_required} =
+             ModelCatalog.fetch(:openai_oauth,
+               now_fn: fn -> @now end,
+               credential_receipt_fun: fn _ -> {:ok, used} end,
+               recover_arbor_owned_credential_fun: fn _ ->
+                 {:ok, receipt(:openai, "arbor_owned", 1, "old-tok", "acct")}
+               end,
+               request_fun: fn _ ->
+                 :counters.add(requests, 1, 1)
+                 {:ok, %{status: 401, body: "x", headers: []}}
+               end
+             )
+
+    assert :counters.get(requests, 1) == 2
   end
 
   test "source-owned OpenAI retries once on 401 only with changed source credential" do

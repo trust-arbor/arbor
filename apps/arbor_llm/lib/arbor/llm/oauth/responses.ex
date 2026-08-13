@@ -86,7 +86,8 @@ defmodule Arbor.LLM.OAuth.Responses do
 
   @doc """
   Single-attempt complete: identical to `complete/3` except source-token 401
-  reread/retry is disabled. Private single-attempt policy only — not generic opts.
+  reread/retry and Arbor-owned 401 recovery are disabled. Private
+  single-attempt policy only — not generic opts.
   """
   @spec complete_single_attempt(atom() | String.t(), map(), keyword()) ::
           {:ok, map()} | {:error, term()}
@@ -115,12 +116,19 @@ defmodule Arbor.LLM.OAuth.Responses do
   end
 
   defp do_complete(identity, req, opts, limits, single_attempt? \\ false) do
-    with :ok <- ResponseBudget.validate(req, request_limits()),
-         {:ok, credential} <- OAuth.credential_receipt(identity.backend) do
+    with :ok <- ResponseBudget.validate(req, request_limits()) do
       sid = :crypto.strong_rand_bytes(16) |> Base.encode16(case: :lower)
       body = build_body(Keyword.get(opts, :model) || @default_models[identity.backend], req)
 
-      request_with_credential(identity, credential, sid, body, limits, single_attempt?)
+      if single_attempt? do
+        with {:ok, credential} <- OAuth.credential_receipt(identity.backend) do
+          request_with_credential(identity, credential, sid, body, limits, true)
+        end
+      else
+        OAuth.with_arbor_owned_recovery_lease(identity.backend, fn leased ->
+          request_with_credential(identity, leased, sid, body, limits, false)
+        end)
+      end
     end
   end
 
@@ -131,6 +139,11 @@ defmodule Arbor.LLM.OAuth.Responses do
       {{:error, %ResponsesFailure{class: :auth, status: 401}},
        %CredentialReceipt{provider: :openai, owner: "source_owned"} = used, false} ->
         retry_source_once(identity, used, sid, body, limits)
+
+      {{:error, %ResponsesFailure{class: :auth, status: 401}},
+       %CredentialReceipt{owner: "arbor_owned", recovery_proof: proof} = used, false}
+      when is_binary(proof) ->
+        retry_arbor_owned_once(identity, used, sid, body, limits)
 
       _ ->
         result
@@ -148,6 +161,25 @@ defmodule Arbor.LLM.OAuth.Responses do
       end
     else
       {:error, _reason} -> {:error, :oauth_source_reauthentication_required}
+    end
+  end
+
+  defp retry_arbor_owned_once(identity, used, sid, body, limits) do
+    case OAuth.recover_arbor_owned_credential(used) do
+      {:ok, latest} ->
+        case request_identity(identity, latest, sid, body, limits) do
+          {:error, %ResponsesFailure{class: :auth, status: 401}} ->
+            {:error, :oauth_relogin_required}
+
+          result ->
+            result
+        end
+
+      {:error, :oauth_relogin_required} = error ->
+        error
+
+      {:error, _reason} = error ->
+        error
     end
   end
 
