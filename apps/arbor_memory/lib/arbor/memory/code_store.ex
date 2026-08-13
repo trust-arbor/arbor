@@ -29,6 +29,7 @@ defmodule Arbor.Memory.CodeStore do
 
   alias Arbor.Contracts.Security.TaintedValue
   alias Arbor.Memory.MemoryStore
+  alias Arbor.Memory.MutationAdmission
 
   require Logger
 
@@ -127,7 +128,8 @@ defmodule Arbor.Memory.CodeStore do
         purpose: "GenServer boilerplate"
       })
   """
-  @spec store(String.t(), map()) :: {:ok, code_entry()} | {:error, :missing_fields}
+  @spec store(String.t(), map()) ::
+          {:ok, code_entry()} | {:error, :missing_fields | :store_unavailable}
   def store(agent_id, %{code: code, language: language, purpose: purpose} = params)
       when is_binary(code) and is_binary(language) and is_binary(purpose) do
     entry = %{
@@ -140,21 +142,19 @@ defmodule Arbor.Memory.CodeStore do
       metadata: Map.get(params, :metadata, %{})
     }
 
-    entries = get_agent_entries(agent_id)
-    :ets.insert(@ets_table, {agent_id, [entry | entries]})
+    serialized = serialize_entry(entry)
+    logical_key = agent_id <> ":" <> entry.id
+    embed_text = "#{purpose} (#{language}): #{String.slice(code, 0, 200)}"
 
-    persist_entry_async(agent_id, entry)
+    case MemoryStore.reserve_persist_async(@namespace, logical_key, serialized,
+           agent_id: agent_id
+         ) do
+      {:ok, persist_res} ->
+        reserve_embed_and_store(agent_id, entry, logical_key, embed_text, persist_res)
 
-    MemoryStore.embed_async(
-      @namespace,
-      "#{agent_id}:#{entry.id}",
-      "#{purpose} (#{language}): #{String.slice(code, 0, 200)}",
-      agent_id: agent_id,
-      type: :code_pattern
-    )
-
-    Logger.debug("Code pattern stored for #{agent_id}: #{String.slice(purpose, 0, 50)}")
-    {:ok, entry}
+      {:error, _reason} ->
+        {:error, :store_unavailable}
+    end
   end
 
   def store(_agent_id, _params), do: {:error, :missing_fields}
@@ -226,25 +226,45 @@ defmodule Arbor.Memory.CodeStore do
   @doc """
   Delete a specific code pattern.
   """
-  @spec delete(String.t(), String.t()) :: :ok
+  @spec delete(String.t(), String.t()) :: :ok | {:error, :store_unavailable}
   def delete(agent_id, entry_id) do
-    entries =
-      get_agent_entries(agent_id)
-      |> Enum.reject(&(&1.id == entry_id))
+    case MutationAdmission.acquire(agent_id) do
+      {:ok, lease} ->
+        try do
+          entries =
+            get_agent_entries(agent_id)
+            |> Enum.reject(&(&1.id == entry_id))
 
-    :ets.insert(@ets_table, {agent_id, entries})
-    MemoryStore.delete(@namespace, "#{agent_id}:#{entry_id}")
-    :ok
+          :ets.insert(@ets_table, {agent_id, entries})
+          MemoryStore.delete(@namespace, "#{agent_id}:#{entry_id}")
+          :ok
+        after
+          _ = MutationAdmission.release(lease)
+        end
+
+      {:error, _reason} ->
+        {:error, :store_unavailable}
+    end
   end
 
   @doc """
   Clear all code patterns for an agent.
   """
-  @spec clear(String.t()) :: :ok
+  @spec clear(String.t()) :: :ok | {:error, :store_unavailable}
   def clear(agent_id) do
-    :ets.delete(@ets_table, agent_id)
-    MemoryStore.delete_by_prefix(@namespace, agent_id)
-    :ok
+    case MutationAdmission.acquire(agent_id) do
+      {:ok, lease} ->
+        try do
+          :ets.delete(@ets_table, agent_id)
+          MemoryStore.delete_by_prefix(@namespace, agent_id)
+          :ok
+        after
+          _ = MutationAdmission.release(lease)
+        end
+
+      {:error, _reason} ->
+        {:error, :store_unavailable}
+    end
   end
 
   @doc """
@@ -356,8 +376,72 @@ defmodule Arbor.Memory.CodeStore do
   # Persistence Helpers
   # ============================================================================
 
-  defp persist_entry_async(agent_id, entry) do
-    serialized = %{
+  defp reserve_embed_and_store(agent_id, entry, logical_key, embed_text, persist_res) do
+    case MemoryStore.reserve_embed_async(@namespace, logical_key, embed_text,
+           agent_id: agent_id,
+           type: :code_pattern
+         ) do
+      {:ok, embed_res} ->
+        admit_and_store(agent_id, entry, persist_res, embed_res)
+
+      :ok ->
+        _ = MemoryStore.cancel_async(persist_res)
+        {:error, :store_unavailable}
+
+      {:error, _reason} ->
+        _ = MemoryStore.cancel_async(persist_res)
+        {:error, :store_unavailable}
+    end
+  end
+
+  defp admit_and_store(agent_id, entry, persist_res, embed_res) do
+    case MutationAdmission.acquire(agent_id) do
+      {:ok, lease} ->
+        try do
+          entries = get_agent_entries(agent_id)
+          :ets.insert(@ets_table, {agent_id, [entry | entries]})
+          activate_store_children(agent_id, entry, persist_res, embed_res)
+        catch
+          kind, reason ->
+            _ = MemoryStore.cancel_async(persist_res)
+            _ = MemoryStore.cancel_async(embed_res)
+            :erlang.raise(kind, reason, __STACKTRACE__)
+        after
+          _ = MutationAdmission.release(lease)
+        end
+
+      {:error, _reason} ->
+        _ = MemoryStore.cancel_async(persist_res)
+        _ = MemoryStore.cancel_async(embed_res)
+        {:error, :store_unavailable}
+    end
+  end
+
+  defp activate_store_children(agent_id, entry, persist_res, embed_res) do
+    case MemoryStore.activate_async(persist_res) do
+      :ok ->
+        case MemoryStore.activate_async(embed_res) do
+          :ok ->
+            Logger.debug(
+              "Code pattern stored for #{agent_id}: #{String.slice(entry.purpose, 0, 50)}"
+            )
+
+            {:ok, entry}
+
+          {:error, _reason} ->
+            _ = MemoryStore.cancel_async(embed_res)
+            {:error, :store_unavailable}
+        end
+
+      {:error, _reason} ->
+        _ = MemoryStore.cancel_async(persist_res)
+        _ = MemoryStore.cancel_async(embed_res)
+        {:error, :store_unavailable}
+    end
+  end
+
+  defp serialize_entry(entry) do
+    %{
       "id" => entry.id,
       "agent_id" => entry.agent_id,
       "code" => entry.code,
@@ -366,40 +450,14 @@ defmodule Arbor.Memory.CodeStore do
       "created_at" => DateTime.to_iso8601(entry.created_at),
       "metadata" => entry.metadata
     }
-
-    MemoryStore.persist_async(@namespace, "#{agent_id}:#{entry.id}", serialized,
-      agent_id: agent_id
-    )
-  end
-
-  defp deserialize_entry(map) do
-    %{
-      id: map["id"],
-      agent_id: map["agent_id"],
-      code: map["code"],
-      language: map["language"],
-      purpose: map["purpose"],
-      created_at: parse_dt(map["created_at"]),
-      metadata: map["metadata"] || %{}
-    }
-  end
-
-  defp parse_dt(nil), do: DateTime.utc_now()
-  defp parse_dt(%DateTime{} = dt), do: dt
-
-  defp parse_dt(str) when is_binary(str) do
-    case DateTime.from_iso8601(str) do
-      {:ok, dt, _} -> dt
-      _ -> DateTime.utc_now()
-    end
   end
 
   defp load_from_postgres do
     if MemoryStore.available?() do
       case MemoryStore.load_all(@namespace) do
         {:ok, pairs} ->
-          restore_code_entries(pairs)
-          Logger.info("CodeStore: loaded #{length(pairs)} entries from Postgres")
+          projected = restore_code_entries(pairs)
+          Logger.info("CodeStore: loaded #{projected} entries from Postgres")
 
         _ ->
           :ok
@@ -411,16 +469,102 @@ defmodule Arbor.Memory.CodeStore do
   end
 
   defp restore_code_entries(pairs) do
-    # Group by agent_id (keys are "agent_id:entry_id")
-    grouped =
-      Enum.group_by(pairs, fn {key, _data} ->
-        key |> String.split(":", parts: 2) |> List.first()
+    validated =
+      Enum.flat_map(pairs, fn pair ->
+        case bind_hydrated_entry(pair) do
+          {:ok, agent_id, entry} -> [{agent_id, entry}]
+          :skip -> []
+        end
       end)
 
-    Enum.each(grouped, fn {agent_id, agent_pairs} ->
-      entries = Enum.map(agent_pairs, fn {_key, data} -> deserialize_entry(data) end)
-      if entries != [], do: :ets.insert(@ets_table, {agent_id, entries})
+    grouped = Enum.group_by(validated, &elem(&1, 0), &elem(&1, 1))
+
+    Enum.reduce(grouped, 0, fn {agent_id, entries}, acc ->
+      case project_agent_entries(agent_id, entries) do
+        :ok -> acc + length(entries)
+        :skip -> acc
+      end
     end)
+  end
+
+  defp bind_hydrated_entry({logical_key, data})
+       when is_binary(logical_key) and is_map(data) and not is_struct(data) do
+    with {:ok, entry_id} <- payload_string_field(data, "id"),
+         {:ok, agent_id} <- payload_string_field(data, "agent_id"),
+         true <- valid_agent_id_string?(agent_id),
+         true <- valid_entry_id?(entry_id),
+         true <- logical_key == agent_id <> ":" <> entry_id,
+         {:ok, code} <- payload_binary_field(data, "code"),
+         {:ok, language} <- payload_binary_field(data, "language"),
+         {:ok, purpose} <- payload_binary_field(data, "purpose"),
+         {:ok, created_at} <- hydrate_created_at(Map.get(data, "created_at")),
+         {:ok, metadata} <- hydrate_metadata(data) do
+      {:ok, agent_id,
+       %{
+         id: entry_id,
+         agent_id: agent_id,
+         code: code,
+         language: language,
+         purpose: purpose,
+         created_at: created_at,
+         metadata: metadata
+       }}
+    else
+      _ -> :skip
+    end
+  rescue
+    _ -> :skip
+  end
+
+  defp bind_hydrated_entry(_), do: :skip
+
+  # store/2 accepts empty binaries; hydration must preserve that contract.
+  defp payload_binary_field(payload, key) when is_map(payload) do
+    case Map.get(payload, key) do
+      value when is_binary(value) ->
+        if String.valid?(value), do: {:ok, value}, else: {:error, :invalid_record}
+
+      _ ->
+        {:error, :invalid_record}
+    end
+  end
+
+  defp hydrate_created_at(%DateTime{} = dt), do: {:ok, dt}
+
+  defp hydrate_created_at(value) when is_binary(value) do
+    case DateTime.from_iso8601(value) do
+      {:ok, %DateTime{} = dt, _offset} -> {:ok, dt}
+      _ -> {:error, :invalid_record}
+    end
+  end
+
+  defp hydrate_created_at(_value), do: {:error, :invalid_record}
+
+  defp hydrate_metadata(data) when is_map(data) do
+    if Map.has_key?(data, "metadata") do
+      case Map.get(data, "metadata") do
+        metadata when is_map(metadata) and not is_struct(metadata) -> {:ok, metadata}
+        _ -> {:error, :invalid_record}
+      end
+    else
+      {:ok, %{}}
+    end
+  end
+
+  defp project_agent_entries(agent_id, entries) do
+    case MutationAdmission.acquire(agent_id) do
+      {:ok, lease} ->
+        try do
+          ensure_ets_table()
+          :ets.insert(@ets_table, {agent_id, entries})
+          :ok
+        after
+          _ = MutationAdmission.release(lease)
+        end
+
+      {:error, _reason} ->
+        :skip
+    end
   end
 
   # ---------------------------------------------------------------------------
