@@ -14,6 +14,11 @@ defmodule Arbor.Memory.ThinkingCodec do
   @max_metadata_bytes 131_072
   @max_entry_bytes 262_144
   @max_aggregate_bytes 1_048_576
+  # Ceiling encodings of Thinking.generate_id/0 and DateTime.to_iso8601/1.
+  # Unpadded lowercase Base32 of 8 bytes is 13 characters; ISO8601 UTC with
+  # microseconds is 27 bytes. Must remain >= the real post-admission encodings.
+  @generated_id_ceiling "thk_" <> String.duplicate("a", 13)
+  @generated_time_ceiling "9999-12-31T23:59:59.999999Z"
 
   @entry_keys [:agent_id, :created_at, :id, :metadata, :significant, :text]
   @payload_keys ~w(agent_id created_at id metadata significant text)
@@ -30,6 +35,54 @@ defmodule Arbor.Memory.ThinkingCodec do
   @spec max_text_bytes() :: pos_integer()
   def max_text_bytes, do: @max_text_bytes
 
+  @spec max_entry_bytes() :: pos_integer()
+  def max_entry_bytes, do: @max_entry_bytes
+
+  @spec max_metadata_bytes() :: pos_integer()
+  def max_metadata_bytes, do: @max_metadata_bytes
+
+  @spec valid_identifier?(term()) :: boolean()
+  def valid_identifier?(value) when is_binary(value) do
+    byte_size(value) in 1..@max_identifier_bytes and String.valid?(value) and
+      String.trim(value) != ""
+  end
+
+  def valid_identifier?(_value), do: false
+
+  @spec validate_record_input(String.t(), String.t(), keyword()) ::
+          :ok | {:error, :invalid_payload}
+  def validate_record_input(agent_id, text, opts) when is_list(opts) do
+    significant = Keyword.get(opts, :significant, false)
+    metadata = Keyword.get(opts, :metadata, %{})
+
+    with :ok <- validate_identifier(agent_id),
+         :ok <- validate_text(text),
+         true <- is_boolean(significant),
+         true <- plain_map?(metadata),
+         :ok <- bounded_external(metadata, @max_metadata_bytes),
+         payload <-
+           payload_map(
+             agent_id,
+             text,
+             significant,
+             metadata,
+             @generated_id_ceiling,
+             @generated_time_ceiling
+           ),
+         :ok <- bounded_external(payload, @max_entry_bytes),
+         {:ok, _canonical} <- TaintEnvelope.canonical_json(payload) do
+      :ok
+    else
+      _ -> {:error, :invalid_payload}
+    end
+  rescue
+    _ -> {:error, :invalid_payload}
+  catch
+    _, _ -> {:error, :invalid_payload}
+  end
+
+  def validate_record_input(_agent_id, _text, _opts), do: {:error, :invalid_payload}
+
   @spec entry_payload(term()) :: {:ok, map()} | {:error, :invalid_payload}
   def entry_payload(entry) when is_map(entry) and not is_struct(entry) do
     with true <- exact_keys?(entry, @entry_keys),
@@ -40,14 +93,15 @@ defmodule Arbor.Memory.ThinkingCodec do
          true <- match?(%DateTime{}, entry.created_at),
          true <- plain_map?(entry.metadata),
          :ok <- bounded_external(entry.metadata, @max_metadata_bytes),
-         payload <- %{
-           "id" => entry.id,
-           "agent_id" => entry.agent_id,
-           "text" => entry.text,
-           "significant" => entry.significant,
-           "created_at" => DateTime.to_iso8601(entry.created_at),
-           "metadata" => entry.metadata
-         },
+         payload <-
+           payload_map(
+             entry.agent_id,
+             entry.text,
+             entry.significant,
+             entry.metadata,
+             entry.id,
+             DateTime.to_iso8601(entry.created_at)
+           ),
          :ok <- bounded_external(payload, @max_entry_bytes),
          {:ok, _canonical} <- TaintEnvelope.canonical_json(payload) do
       {:ok, payload}
@@ -389,16 +443,20 @@ defmodule Arbor.Memory.ThinkingCodec do
 
   defp plain_map?(value), do: is_map(value) and not is_struct(value)
 
-  defp validate_identifier(value) when is_binary(value) do
-    if byte_size(value) > 0 and byte_size(value) <= @max_identifier_bytes and
-         String.valid?(value) and String.trim(value) != "" do
-      :ok
-    else
-      {:error, :invalid_identifier}
-    end
+  defp payload_map(agent_id, text, significant, metadata, id, created_at_iso) do
+    %{
+      "id" => id,
+      "agent_id" => agent_id,
+      "text" => text,
+      "significant" => significant,
+      "created_at" => created_at_iso,
+      "metadata" => metadata
+    }
   end
 
-  defp validate_identifier(_value), do: {:error, :invalid_identifier}
+  defp validate_identifier(value) do
+    if valid_identifier?(value), do: :ok, else: {:error, :invalid_identifier}
+  end
 
   defp validate_text(value) when is_binary(value) do
     if byte_size(value) <= @max_text_bytes and String.valid?(value),

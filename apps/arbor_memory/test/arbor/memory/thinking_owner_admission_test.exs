@@ -109,7 +109,9 @@ defmodule Arbor.Memory.ThinkingOwnerAdmissionTest do
     :sys.replace_state(pid, fn state -> Map.delete(state, :buffer_size) end)
 
     try do
-      assert {:error, :store_unavailable} = Thinking.record_thinking(agent_id, "caught after admit")
+      assert {:error, :store_unavailable} =
+               Thinking.record_thinking(agent_id, "caught after admit")
+
       assert OwnerRoots.held_count(owner_roots(), agent_id) == 0
       assert {:ok, %{active_roots: 0}} = MutationAdmission.status(agent_id)
     after
@@ -396,6 +398,101 @@ defmodule Arbor.Memory.ThinkingOwnerAdmissionTest do
     assert normalized.pending_projection == %{}
 
     :sys.replace_state(pid, fn _ -> original end)
+  end
+
+  @tag packet: "VP-05D2C3I1B1C-R1"
+  test "reload quarantines a previously owned malformed ID and still evicts genuine absence" do
+    target = unique_agent("q_owned")
+    absent = unique_agent("q_absent")
+    sibling = unique_agent("q_sib")
+    taint = taint(:trusted, :internal, "thinking_owner_quarantine")
+
+    assert {:ok, target_entry} =
+             Thinking.record_thinking_tainted(target, "owned malformed target", taint)
+
+    assert {:ok, _absent_entry} =
+             Thinking.record_thinking_tainted(absent, "owned then deleted", taint)
+
+    assert {:ok, sibling_entry} =
+             Thinking.record_thinking_tainted(sibling, "open sibling", taint)
+
+    await_idle_roots!(target)
+    await_idle_roots!(absent)
+    await_idle_roots!(sibling)
+
+    target_ets_before = :erlang.term_to_binary(:ets.lookup(@ets_table, target))
+
+    target_prov_before =
+      :erlang.term_to_binary(
+        :ets.lookup(:arbor_memory_provenance, {:thinking_entry, target, target_entry.id})
+      )
+
+    {:ok, _value, _status, record, _location} =
+      MemoryStore.load_tainted_authoritative_with_status("thinking", target)
+
+    assert {:ok, _replaced} =
+             MemoryStore.compare_and_swap_tainted(
+               "thinking",
+               target,
+               record,
+               %{"version" => 1, "entries" => "not-a-list"},
+               taint: taint
+             )
+
+    assert :ok = MemoryStore.delete_tainted_authoritative("thinking", absent)
+    assert [{^absent, _}] = :ets.lookup(@ets_table, absent)
+    assert true == :ets.delete(@ets_table, sibling)
+
+    assert :ok = Thinking.reload_from_durable()
+
+    assert :erlang.term_to_binary(:ets.lookup(@ets_table, target)) == target_ets_before
+
+    assert :erlang.term_to_binary(
+             :ets.lookup(:arbor_memory_provenance, {:thinking_entry, target, target_entry.id})
+           ) == target_prov_before
+
+    assert MapSet.member?(:sys.get_state(Thinking).owned_agents, target)
+    assert [] = :ets.lookup(@ets_table, absent)
+    refute MapSet.member?(:sys.get_state(Thinking).owned_agents, absent)
+    assert [{^sibling, entries}] = :ets.lookup(@ets_table, sibling)
+    assert Enum.any?(entries, &(&1.id == sibling_entry.id))
+
+    assert :ok = Thinking.delete_agent_content(target)
+    assert :ok = Thinking.delete_agent_content(absent)
+    assert :ok = Thinking.delete_agent_content(sibling)
+  end
+
+  @tag packet: "VP-05D2C3I1B1C-R1"
+  test "oversized and noncanonical record input is rejected before fresh admission" do
+    agent_id = unique_agent("preadmit")
+    max_bytes = Arbor.Memory.ThinkingCodec.max_text_bytes()
+    oversized = String.duplicate("x", max_bytes + 1)
+
+    assert {:error, :invalid_payload} = Thinking.record_thinking(agent_id, oversized)
+    assert OwnerRoots.held_count(owner_roots(), agent_id) == 0
+    assert {:ok, %{active_roots: 0}} = MutationAdmission.status(agent_id)
+
+    assert {:error, :invalid_payload} =
+             Thinking.record_thinking(agent_id, "ok text", metadata: %{bad: {1, 2}})
+
+    assert OwnerRoots.held_count(owner_roots(), agent_id) == 0
+    assert {:ok, %{active_roots: 0}} = MutationAdmission.status(agent_id)
+
+    assert :ok = Thinking.process_stream_chunk(agent_id, "stream body")
+
+    assert {:error, :invalid_payload} =
+             Thinking.process_stream_chunk(agent_id, "",
+               complete: true,
+               metadata: %{bad: {1, 2}}
+             )
+
+    assert Map.has_key?(:sys.get_state(Thinking).streams, agent_id)
+    assert OwnerRoots.held_count(owner_roots(), agent_id) == 0
+
+    assert {:ok, _fence} = MutationAdmission.drain(agent_id)
+    assert {:error, :invalid_payload} = Thinking.record_thinking(agent_id, oversized)
+    assert {:ok, %{active_roots: 0}} = MutationAdmission.status(agent_id)
+    assert :ok = Thinking.delete_agent_content(agent_id)
   end
 
   defp owner_roots do

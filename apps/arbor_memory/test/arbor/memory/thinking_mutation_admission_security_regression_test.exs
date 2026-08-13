@@ -38,7 +38,10 @@ defmodule Arbor.Memory.ThinkingMutationAdmissionSecurityRegressionTest do
     agent_id = unique_agent("mut")
 
     assert {:ok, _fence} = MutationAdmission.drain(agent_id)
-    assert {:error, :store_unavailable} = Thinking.record_thinking(agent_id, "post-drain mutation")
+
+    assert {:error, :store_unavailable} =
+             Thinking.record_thinking(agent_id, "post-drain mutation")
+
     assert durable_absent?(agent_id)
     assert [] = :ets.lookup(@ets_table, agent_id)
     assert {:ok, ids} = Provenance.list_item_ids(:thinking_entry, agent_id)
@@ -116,7 +119,10 @@ defmodule Arbor.Memory.ThinkingMutationAdmissionSecurityRegressionTest do
                end)
 
         assert {:error, :store_unavailable} = Thinking.record_thinking(agent_id, "later write")
-        assert {:error, :store_unavailable} = Thinking.process_stream_chunk(agent_id, "later chunk")
+
+        assert {:error, :store_unavailable} =
+                 Thinking.process_stream_chunk(agent_id, "later chunk")
+
         refute_live_text(agent_id, "later write")
         refute Map.has_key?(:sys.get_state(Thinking).streams, agent_id)
         task
@@ -157,6 +163,66 @@ defmodule Arbor.Memory.ThinkingMutationAdmissionSecurityRegressionTest do
     refute entry.id in ids
     assert durable_present?(agent_id)
     assert :ok = Thinking.delete_agent_content(agent_id)
+  end
+
+  test "public reload quarantines malformed durable authority and still reconciles a sibling" do
+    target = unique_agent("malformed")
+    sibling = unique_agent("sibling")
+    taint = taint(:trusted, :internal, "thinking_sec_quarantine")
+
+    assert {:ok, target_entry} =
+             Thinking.record_thinking_tainted(target, "keep live target", taint)
+
+    target_entry_id = target_entry.id
+
+    assert {:ok, sibling_entry} =
+             Thinking.record_thinking_tainted(sibling, "sibling to restore", taint)
+
+    await_idle_roots!(target)
+    await_idle_roots!(sibling)
+
+    target_ets_before = :erlang.term_to_binary(:ets.lookup(@ets_table, target))
+
+    target_prov_before =
+      :erlang.term_to_binary(
+        :ets.lookup(:arbor_memory_provenance, {:thinking_entry, target, target_entry.id})
+      )
+
+    assert {:ok, [^target_entry_id]} = Provenance.list_item_ids(:thinking_entry, target)
+    assert MapSet.member?(:sys.get_state(Thinking).owned_agents, target)
+
+    {:ok, _value, _status, record, _location} =
+      MemoryStore.load_tainted_authoritative_with_status("thinking", target)
+
+    assert {:ok, _replaced} =
+             MemoryStore.compare_and_swap_tainted(
+               "thinking",
+               target,
+               record,
+               %{"version" => 1, "entries" => "not-a-list"},
+               taint: taint
+             )
+
+    assert true == :ets.delete(@ets_table, sibling)
+
+    assert :ok = Thinking.reload_from_durable()
+
+    assert :erlang.term_to_binary(:ets.lookup(@ets_table, target)) == target_ets_before
+
+    assert :erlang.term_to_binary(
+             :ets.lookup(:arbor_memory_provenance, {:thinking_entry, target, target_entry.id})
+           ) == target_prov_before
+
+    assert {:ok, [^target_entry_id]} = Provenance.list_item_ids(:thinking_entry, target)
+    assert MapSet.member?(:sys.get_state(Thinking).owned_agents, target)
+    refute Map.has_key?(:sys.get_state(Thinking).pending_projection, target)
+    refute Map.has_key?(:sys.get_state(Thinking).streams, target)
+
+    assert [{^sibling, entries}] = :ets.lookup(@ets_table, sibling)
+    assert Enum.any?(entries, &(&1.id == sibling_entry.id))
+
+    assert :ok = Thinking.delete_agent_content(target)
+    assert :ok = Thinking.delete_agent_content(sibling)
   end
 
   defp unique_agent(label), do: "thinking_sec_#{label}_#{System.unique_integer([:positive])}"

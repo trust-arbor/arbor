@@ -1,30 +1,25 @@
 defmodule Arbor.Memory.Thinking do
   @moduledoc """
-  Store and retrieve Claude thinking blocks.
+  Store and retrieve per-agent reasoning traces.
 
-  Thinking blocks are the internal reasoning traces from Claude's extended
-  thinking feature. This module stores them in a ring buffer per agent,
-  enabling retrospective analysis of reasoning patterns.
+  Each agent has an ETS ring-buffer projection (default 50 entries) backed by a
+  durable MemoryStore aggregate. Entries carry text, a timestamp, optional
+  metadata, and a significance flag. Public mutations acquire a fresh
+  owner-held root via `OwnerRoots` and settle or defer it through the existing
+  finite projection-retry protocol. `format_status/1` redacts roots to
+  per-agent held counts and stream text to byte sizes.
 
-  ## Storage
+  Startup hydrates only unique valid durable plans. `reload_from_durable/0`
+  reconciles those plans, quarantines malformed, duplicate, and identifiable
+  wrong-shape agent IDs (no ETS, Provenance, stream, owned-agent, pending, or
+  root mutation), and absence-evicts only previously owned IDs in neither set.
 
-  Thinking entries are stored in ETS per-agent with a ring buffer
-  (default: 50 entries). Each entry includes:
-  - The thinking text
-  - A timestamp
-  - Optional metadata (e.g., which tool call triggered it)
-  - Whether it's been flagged as significant for reflection
-
-  ## Stream Processing
-
-  For streaming integration, `process_stream_chunk/3` accumulates
-  partial thinking blocks until they're complete, then stores the
-  full text.
-
-  Eviction removes an independent item rather than transforming its content.
-  The durable aggregate label is therefore recomputed from the exact retained
-  item labels. Labels on retained stable IDs never decrease; provenance from a
-  removed item is not attached to unrelated retained content.
+  `delete_agent_content/1` is idempotent content-only deletion.
+  `agent_content_absent?/1` reports authoritative absence. Eviction removes an
+  independent item rather than transforming its content. The durable aggregate
+  label is recomputed from the exact retained item labels. Labels on retained
+  stable IDs never decrease; provenance from a removed item is not attached to
+  unrelated retained content.
   """
 
   use GenServer
@@ -32,7 +27,7 @@ defmodule Arbor.Memory.Thinking do
   alias Arbor.Contracts.Persistence.Record
   alias Arbor.Contracts.Security.{Taint, TaintedValue, TaintEnvelope}
   alias Arbor.Memory.MutationAdmission.OwnerRoots
-  alias Arbor.Memory.{MemoryStore, Provenance, Signals, ThinkingCodec}
+  alias Arbor.Memory.{MemoryStore, Provenance, Signals, ThinkingCodec, ThinkingInventory}
 
   require Logger
 
@@ -90,6 +85,10 @@ defmodule Arbor.Memory.Thinking do
 
   @doc """
   Record a thinking block for an agent.
+
+  Acquires a fresh owner-held mutation root after codec-admissibility
+  validation. Caller-controlled text and metadata must satisfy ThinkingCodec
+  bounds before admission.
 
   ## Options
 
@@ -283,7 +282,17 @@ defmodule Arbor.Memory.Thinking do
     end
   end
 
-  @doc "Reloads the complete Thinking projection from the durable memory store."
+  @doc """
+  Reloads the Thinking projection from the durable memory store.
+
+  Unique valid aggregates are reconciled independently. Malformed aggregates,
+  duplicate IDs, and identifiable wrong-shape rows quarantine that agent ID:
+  existing ETS, Provenance, streams, owned-agent state, pending work, and
+  roots are left untouched. Previously owned IDs absent from both the valid
+  and quarantined sets are admitted for empty-projection eviction. Invalid
+  inventory evidence alone is skipped; denied or uncertain required effects
+  still return a closed error and keep honest partial state.
+  """
   @spec reload_from_durable() :: :ok | {:error, atom()}
   def reload_from_durable do
     call_owner(:reload_from_durable, :read)
@@ -314,18 +323,24 @@ defmodule Arbor.Memory.Thinking do
     state = normalize_state(state)
 
     if owned_agent_capacity?(state, agent_id) do
-      with_fresh_admission(state, agent_id, {:error, :store_unavailable}, fn state ->
-        case store_entry(agent_id, text, taint, opts, state) do
-          {:ok, entry, :projected} ->
-            {{:ok, entry}, put_owned_agent(state, agent_id), :settle}
+      case ThinkingCodec.validate_record_input(agent_id, text, opts) do
+        :ok ->
+          with_fresh_admission(state, agent_id, {:error, :store_unavailable}, fn state ->
+            case store_entry(agent_id, text, taint, opts, state) do
+              {:ok, entry, :projected} ->
+                {{:ok, entry}, put_owned_agent(state, agent_id), :settle}
 
-          {:ok, entry, :convergence_pending} ->
-            {{:ok, entry}, put_owned_agent(state, agent_id), :defer}
+              {:ok, entry, :convergence_pending} ->
+                {{:ok, entry}, put_owned_agent(state, agent_id), :defer}
 
-          {:error, reason} ->
-            {{:error, reason}, state, :ack}
-        end
-      end)
+              {:error, reason} ->
+                {{:error, reason}, state, :ack}
+            end
+          end)
+
+        {:error, _reason} ->
+          {:reply, {:error, :invalid_payload}, state}
+      end
     else
       {:reply, {:error, :projection_capacity}, state}
     end
@@ -362,9 +377,7 @@ defmodule Arbor.Memory.Thinking do
     else
       case append_stream(current, chunk, taint) do
         {:ok, text, stream_taint} ->
-          with_fresh_admission(state, agent_id, {:error, :store_unavailable}, fn state ->
-            finish_stream(agent_id, text, stream_taint, opts, state, complete)
-          end)
+          admit_stream_chunk(state, agent_id, text, stream_taint, opts, complete)
 
         _error ->
           {:reply, {:error, :invalid_payload}, state}
@@ -449,12 +462,15 @@ defmodule Arbor.Memory.Thinking do
     state = normalize_state(state)
 
     case load_durable_inventory(state.buffer_size) do
-      {:ok, plans} ->
-        {next_state, result} = reconcile_reload(state, plans)
+      {:ok, inventory} ->
+        {next_state, result} = reconcile_reload(state, inventory)
 
         case result do
-          :ok -> {:reply, :ok, %{next_state | streams: %{}}}
-          {:error, reason} -> {:reply, {:error, reason}, next_state}
+          :ok ->
+            {:reply, :ok, retain_quarantined_streams(next_state, inventory.quarantined)}
+
+          {:error, reason} ->
+            {:reply, {:error, reason}, next_state}
         end
 
       {:error, reason} ->
@@ -1249,6 +1265,30 @@ defmodule Arbor.Memory.Thinking do
 
   defp validate_stream_text(_text), do: {:error, :invalid_payload}
 
+  defp admit_stream_chunk(state, agent_id, text, stream_taint, opts, true = complete) do
+    if String.trim(text) == "" do
+      with_fresh_admission(state, agent_id, {:error, :store_unavailable}, fn state ->
+        finish_stream(agent_id, text, stream_taint, opts, state, complete)
+      end)
+    else
+      case ThinkingCodec.validate_record_input(agent_id, text, Keyword.delete(opts, :complete)) do
+        :ok ->
+          with_fresh_admission(state, agent_id, {:error, :store_unavailable}, fn state ->
+            finish_stream(agent_id, text, stream_taint, opts, state, complete)
+          end)
+
+        {:error, _reason} ->
+          {:reply, {:error, :invalid_payload}, state}
+      end
+    end
+  end
+
+  defp admit_stream_chunk(state, agent_id, text, stream_taint, opts, complete) do
+    with_fresh_admission(state, agent_id, {:error, :store_unavailable}, fn state ->
+      finish_stream(agent_id, text, stream_taint, opts, state, complete)
+    end)
+  end
+
   defp finish_stream(agent_id, text, stream_taint, opts, state, complete) do
     if not complete do
       streams = Map.put(state.streams, agent_id, %{text: text, taint: stream_taint})
@@ -1365,12 +1405,8 @@ defmodule Arbor.Memory.Thinking do
 
   defp hydrate_startup(state) do
     case load_durable_inventory(state.buffer_size) do
-      {:ok, plans} ->
-        next =
-          Enum.reduce(plans, state, fn plan, acc ->
-            reconcile_startup_agent(acc, plan)
-          end)
-
+      {:ok, %{plans: plans}} ->
+        next = Enum.reduce(plans, state, &reconcile_startup_agent(&2, &1))
         Logger.info("Thinking durable projection loaded", record_count: length(plans))
         next
 
@@ -1381,8 +1417,9 @@ defmodule Arbor.Memory.Thinking do
 
   defp load_durable_inventory(buffer_size) do
     with {:ok, records} <- MemoryStore.load_all_tainted_authoritative("thinking"),
-         {:ok, plans} <- decode_records(records, buffer_size, 0, []) do
-      {:ok, plans}
+         {:ok, inventory} <-
+           ThinkingInventory.classify(records, buffer_size, @max_loaded_agents) do
+      {:ok, inventory}
     else
       {:error, reason} -> {:error, normalize_store_error(reason)}
       _ -> {:error, :invalid_durable_state}
@@ -1391,6 +1428,19 @@ defmodule Arbor.Memory.Thinking do
     _ -> {:error, :store_unavailable}
   catch
     _, _ -> {:error, :store_unavailable}
+  end
+
+  defp retain_quarantined_streams(state, quarantined) do
+    streams =
+      Enum.reduce(state.streams, %{}, fn {agent_id, stream}, acc ->
+        if MapSet.member?(quarantined, agent_id) do
+          Map.put(acc, agent_id, stream)
+        else
+          acc
+        end
+      end)
+
+    %{state | streams: streams}
   end
 
   defp reconcile_startup_agent(state, {agent_id, items}) do
@@ -1405,31 +1455,17 @@ defmodule Arbor.Memory.Thinking do
 
   defp reconcile_startup_agent(state, _plan), do: state
 
-  defp reconcile_reload(state, plans) do
-    plan_map =
-      Enum.reduce(plans, %{}, fn
-        {agent_id, items}, acc when is_binary(agent_id) ->
-          if valid_agent_id?(agent_id) and not Map.has_key?(acc, agent_id) do
-            Map.put(acc, agent_id, items)
-          else
-            acc
-          end
-
-        _plan, acc ->
-          acc
-      end)
-
-    durable_ids = MapSet.new(Map.keys(plan_map))
+  defp reconcile_reload(state, %{plans: plans, quarantined: quarantined}) do
     previously_owned = Map.get(state, :owned_agents, MapSet.new())
-    absence_ids = MapSet.difference(previously_owned, durable_ids)
+    absence = ThinkingInventory.absence_ids(previously_owned, plans, quarantined)
 
     {state, durable_ok?} =
-      Enum.reduce(plan_map, {state, true}, fn {agent_id, items}, {acc, ok?} ->
+      Enum.reduce(plans, {state, true}, fn {agent_id, items}, {acc, ok?} ->
         reduce_reload_agent(acc, ok?, agent_id, items)
       end)
 
     {state, absence_ok?} =
-      Enum.reduce(MapSet.to_list(absence_ids), {state, true}, fn agent_id, {acc, ok?} ->
+      Enum.reduce(MapSet.to_list(absence), {state, true}, fn agent_id, {acc, ok?} ->
         reduce_reload_agent(acc, ok?, agent_id, [])
       end)
 
@@ -1515,29 +1551,6 @@ defmodule Arbor.Memory.Thinking do
       fail_closed_agent_projection(agent_id)
       {:error, :convergence_pending}
   end
-
-  defp decode_records([], _buffer_size, _count, acc), do: {:ok, Enum.reverse(acc)}
-
-  defp decode_records([record | rest], buffer_size, count, acc)
-       when count < @max_loaded_agents do
-    plan = decode_record(record, buffer_size)
-    decode_records(rest, buffer_size, count + 1, [plan | acc])
-  end
-
-  defp decode_records(_records, _buffer_size, _count, _acc),
-    do: {:error, :invalid_durable_state}
-
-  defp decode_record(
-         {agent_id, %TaintedValue{value: aggregate, taint: outer_taint}, status},
-         limit
-       ) do
-    case ThinkingCodec.decode_aggregate(agent_id, aggregate, outer_taint, status, limit) do
-      {:ok, items} -> {agent_id, items}
-      {:error, _reason} -> {agent_id, []}
-    end
-  end
-
-  defp decode_record(_record, _limit), do: {nil, []}
 
   defp bind_installation([], _bound), do: :ok
 
@@ -1654,11 +1667,7 @@ defmodule Arbor.Memory.Thinking do
   defp bounded_keyword_keys(_opts, _max, _acc, _count),
     do: {:error, :invalid_request}
 
-  defp valid_agent_id?(agent_id) when is_binary(agent_id) do
-    byte_size(agent_id) in 1..256 and String.valid?(agent_id) and String.trim(agent_id) != ""
-  end
-
-  defp valid_agent_id?(_agent_id), do: false
+  defp valid_agent_id?(agent_id), do: ThinkingCodec.valid_identifier?(agent_id)
 
   defp normalize_buffer_size(size)
        when is_integer(size) and size > 0 and size <= @max_entries,
