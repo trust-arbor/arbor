@@ -44,12 +44,23 @@ cd arbor
 # Install dependencies
 mix deps.get
 
+# Zero-config local bootstrap (SQLite + cookie)
+mix arbor.setup
+
 # Run tests
 mix test
 
 # Run quality checks (format + credo)
 mix quality
 ```
+
+### First LLM response (free)
+
+1. Create a free key at [openrouter.ai/keys](https://openrouter.ai/keys)
+2. Put `OPENROUTER_API_KEY=...` in `.env` (see `.env.example`)
+3. Run `mix arbor.doctor --configure` — picks OpenRouter’s free default model
+
+Already using Claude/Codex/Gemini CLI? Doctor detects ACP. Prefer local? Start Ollama, then re-run `--configure`.
 
 ## License
 

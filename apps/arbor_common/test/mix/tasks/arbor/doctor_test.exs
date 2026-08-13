@@ -72,6 +72,22 @@ defmodule Mix.Tasks.Arbor.DoctorTest do
     end
   end
 
+  describe "provider_priority/0 — zero-dollar path first" do
+    test "OpenRouter and Groq rank above paid cloud APIs" do
+      keys = Enum.map(Doctor.provider_priority(), fn {catalog_key, _, _} -> catalog_key end)
+
+      assert Enum.at(keys, 0) == "openrouter"
+      assert Enum.at(keys, 1) == "groq"
+      assert Enum.find_index(keys, &(&1 == "openrouter")) <
+               Enum.find_index(keys, &(&1 == "anthropic"))
+      assert Enum.find_index(keys, &(&1 == "acp")) <
+               Enum.find_index(keys, &(&1 == "openai"))
+      assert "groq" in keys
+      # Catalog spellings must match ProviderCatalog (not legacy open_router)
+      refute "open_router" in keys
+    end
+  end
+
   describe "option parsing" do
     test "parses --refresh flag" do
       {opts, _, _} =

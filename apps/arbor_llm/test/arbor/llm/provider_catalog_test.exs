@@ -144,4 +144,29 @@ defmodule Arbor.LLM.ProviderCatalogTest do
       assert is_list(results2)
     end
   end
+
+  describe "Google Gemini env-key aliases" do
+    test "GEMINI_API_KEY alone marks google available (ReqLLM uses GOOGLE_API_KEY)" do
+      prev_google = System.get_env("GOOGLE_API_KEY")
+      prev_gemini = System.get_env("GEMINI_API_KEY")
+
+      try do
+        System.delete_env("GOOGLE_API_KEY")
+        System.put_env("GEMINI_API_KEY", "test-gemini-key-for-doctor")
+
+        entries = ProviderCatalog.all(force_refresh: true)
+        google = Enum.find(entries, &(&1.provider == "google"))
+
+        assert google
+        assert google.available?
+      after
+        restore_env("GOOGLE_API_KEY", prev_google)
+        restore_env("GEMINI_API_KEY", prev_gemini)
+        ProviderCatalog.refresh()
+      end
+    end
+  end
+
+  defp restore_env(name, nil), do: System.delete_env(name)
+  defp restore_env(name, value), do: System.put_env(name, value)
 end

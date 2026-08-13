@@ -407,12 +407,16 @@ defmodule Mix.Tasks.Arbor.Setup do
         mix phx.server        # Or start interactively
         open http://localhost:4001  # Dashboard
 
-      Configure LLM:
-        mix arbor.doctor --configure  # Auto-detect and set default LLM
+      Configure a free LLM (recommended first run):
+        1. Create a free key at https://openrouter.ai/keys
+        2. Add OPENROUTER_API_KEY=... to .env
+        3. mix arbor.doctor --configure   # picks OpenRouter free default
+
+      Or use an already-authenticated CLI (claude/codex/gemini) — doctor will detect ACP.
+      Local models: install Ollama, then re-run doctor --configure.
 
       Optional:
-        Add API keys to .env for LLM access
-        See .env.example for all available settings
+        See .env.example for Groq, paid APIs, and all other settings
     """)
 
     if clustering do

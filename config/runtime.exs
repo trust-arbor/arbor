@@ -462,6 +462,7 @@ config :arbor_orchestrator, :ollama, base_url: ollama_v1_base_url
 # This avoids String.to_atom/1 on user input (DoS via atom table exhaustion).
 known_providers = %{
   "openrouter" => :openrouter,
+  "groq" => :groq,
   "anthropic" => :anthropic,
   "openai" => :openai,
   "gemini" => :gemini,

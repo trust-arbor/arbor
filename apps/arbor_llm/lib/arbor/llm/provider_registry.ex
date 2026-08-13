@@ -238,12 +238,22 @@ defmodule Arbor.LLM.ProviderRegistry do
   True if a cloud provider's API key env var is set, false otherwise.
   Local-LM providers always return false here (their availability is
   determined by an HTTP probe, not env-var presence).
+
+  Google accepts either `GOOGLE_API_KEY` (ReqLLM) or `GEMINI_API_KEY`
+  (Arbor alias propagated in `Arbor.AI.Application`).
   """
   @spec env_available?(String.t()) :: boolean()
   def env_available?(provider) do
-    case default_env_key(provider) do
-      nil -> false
-      key -> not blank?(System.get_env(key))
+    case normalize(provider) do
+      "google" ->
+        not blank?(System.get_env("GOOGLE_API_KEY")) or
+          not blank?(System.get_env("GEMINI_API_KEY"))
+
+      _ ->
+        case default_env_key(provider) do
+          nil -> false
+          key -> not blank?(System.get_env(key))
+        end
     end
   end
 
