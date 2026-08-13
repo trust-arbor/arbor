@@ -7,6 +7,7 @@ defmodule Arbor.Memory.KnowledgeGraphStore do
 
   alias Arbor.Memory.{KnowledgeGraph, MemoryStore, Provenance}
   alias Arbor.Memory.KnowledgeGraph.{Codec, Operation}
+  alias Arbor.Memory.MutationAdmission.OwnerRoots
 
   @namespace "knowledge_graph"
   @graph_ets :arbor_memory_graphs
@@ -370,121 +371,195 @@ defmodule Arbor.Memory.KnowledgeGraphStore do
   end
 
   @impl true
-  def init(:ok), do: {:ok, %{pending_projection: %{}}}
+  def init(:ok), do: {:ok, %{pending_projection: %{}, owner_roots: OwnerRoots.new()}}
 
   @impl true
   def handle_call({:read, agent_id}, _from, state) do
-    case read_authority(agent_id, @cas_attempts) do
-      {:ok, snapshot, _record} ->
-        {:reply, {:ok, snapshot.graph}, project_or_schedule(state, agent_id, snapshot)}
+    with_fresh_admission(state, agent_id, {:error, :store_unavailable}, fn state ->
+      case read_authority(agent_id, @cas_attempts) do
+        {:ok, snapshot, _record} ->
+          {next, disposition} = project_or_schedule(state, agent_id, snapshot)
+          {{:ok, snapshot.graph}, next, disposition}
 
-      {:error, reason} = error ->
-        {:reply, error, invalidate_after_read(state, agent_id, reason)}
-    end
+        {:error, reason} = error ->
+          {next, disposition} = invalidate_after_read(state, agent_id, reason)
+          {error, next, disposition}
+      end
+    end)
   end
 
   def handle_call({:read_snapshot, agent_id}, _from, state) do
-    case read_authority(agent_id, @cas_attempts) do
-      {:ok, snapshot, _record} ->
-        {:reply, {:ok, snapshot}, project_or_schedule(state, agent_id, snapshot)}
+    with_fresh_admission(state, agent_id, {:error, :store_unavailable}, fn state ->
+      case read_authority(agent_id, @cas_attempts) do
+        {:ok, snapshot, _record} ->
+          {next, disposition} = project_or_schedule(state, agent_id, snapshot)
+          {{:ok, snapshot}, next, disposition}
 
-      {:error, reason} = error ->
-        {:reply, error, invalidate_after_read(state, agent_id, reason)}
-    end
+        {:error, reason} = error ->
+          {next, disposition} = invalidate_after_read(state, agent_id, reason)
+          {error, next, disposition}
+      end
+    end)
   end
 
   def handle_call({:save, agent_id, operation, taint, deadline}, _from, state) do
-    with :ok <- ensure_deadline(deadline),
-         :ok <- Operation.validate(operation),
-         {:ok, snapshot, result} <-
-           mutate_authority(
-             agent_id,
-             operation,
-             taint,
-             :create_if_absent,
-             @cas_attempts,
-             deadline
-           ) do
-      {:reply, {:ok, result}, project_or_schedule(state, agent_id, snapshot)}
-    else
-      {:error, reason} = error ->
-        {:reply, error, invalidate_after_mutation(state, agent_id, reason)}
+    state = normalize_state(state)
 
-      _ ->
-        {:reply, {:error, :invalid_graph}, state}
+    with :ok <- ensure_deadline(deadline),
+         :ok <- Operation.validate(operation) do
+      with_fresh_admission(
+        state,
+        agent_id,
+        {:error, :store_unavailable},
+        {:error, :outcome_unknown},
+        fn state ->
+          case mutate_authority(
+                 agent_id,
+                 operation,
+                 taint,
+                 :create_if_absent,
+                 @cas_attempts,
+                 deadline
+               ) do
+            {:ok, snapshot, result} ->
+              {next, disposition} = project_or_schedule(state, agent_id, snapshot)
+              {{:ok, result}, next, disposition}
+
+            {:error, reason} = error ->
+              {next, disposition} = invalidate_after_mutation(state, agent_id, reason)
+              {error, next, disposition}
+
+            _ ->
+              {{:error, :invalid_graph}, state, :ack}
+          end
+        end
+      )
+    else
+      {:error, _reason} = error -> {:reply, error, state}
+      _ -> {:reply, {:error, :invalid_graph}, state}
     end
   end
 
   def handle_call({:operate, agent_id, operation, taint, deadline}, _from, state) do
-    with :ok <- ensure_deadline(deadline),
-         :ok <- validate_existing_operation(operation),
-         {:ok, snapshot, result} <-
-           mutate_authority(
-             agent_id,
-             operation,
-             taint,
-             :existing,
-             @cas_attempts,
-             deadline
-           ) do
-      result = attach_operation_provenance(operation, snapshot, result)
-      {:reply, {:ok, result}, project_or_schedule(state, agent_id, snapshot)}
-    else
-      {:error, reason} = error ->
-        {:reply, error, invalidate_after_mutation(state, agent_id, reason)}
+    state = normalize_state(state)
 
-      _ ->
-        {:reply, {:error, :invalid_graph}, state}
+    with :ok <- ensure_deadline(deadline),
+         :ok <- validate_existing_operation(operation) do
+      with_fresh_admission(
+        state,
+        agent_id,
+        {:error, :store_unavailable},
+        {:error, :outcome_unknown},
+        fn state ->
+          case mutate_authority(
+                 agent_id,
+                 operation,
+                 taint,
+                 :existing,
+                 @cas_attempts,
+                 deadline
+               ) do
+            {:ok, snapshot, result} ->
+              result = attach_operation_provenance(operation, snapshot, result)
+              {next, disposition} = project_or_schedule(state, agent_id, snapshot)
+              {{:ok, result}, next, disposition}
+
+            {:error, reason} = error ->
+              {next, disposition} = invalidate_after_mutation(state, agent_id, reason)
+              {error, next, disposition}
+
+            _ ->
+              {{:error, :invalid_graph}, state, :ack}
+          end
+        end
+      )
+    else
+      {:error, _reason} = error -> {:reply, error, state}
+      _ -> {:reply, {:error, :invalid_graph}, state}
     end
   end
 
   def handle_call({:import_legacy, agent_id, graph_map, deadline}, _from, state) do
+    state = normalize_state(state)
+
     with :ok <- ensure_deadline(deadline),
          {:ok, graph} <- Codec.decode_legacy_graph(agent_id, graph_map),
-         {:ok, operation} <- Operation.initialize(graph),
-         {:ok, snapshot, result} <-
-           mutate_authority(
-             agent_id,
-             operation,
-             Codec.missing_taint(),
-             :create_if_absent,
-             @cas_attempts,
-             deadline
-           ) do
-      {:reply, {:ok, result}, project_or_schedule(state, agent_id, snapshot)}
-    else
-      {:error, reason} = error ->
-        {:reply, error, invalidate_after_mutation(state, agent_id, reason)}
+         {:ok, operation} <- Operation.initialize(graph) do
+      with_fresh_admission(
+        state,
+        agent_id,
+        {:error, :store_unavailable},
+        {:error, :outcome_unknown},
+        fn state ->
+          case mutate_authority(
+                 agent_id,
+                 operation,
+                 Codec.missing_taint(),
+                 :create_if_absent,
+                 @cas_attempts,
+                 deadline
+               ) do
+            {:ok, snapshot, result} ->
+              {next, disposition} = project_or_schedule(state, agent_id, snapshot)
+              {{:ok, result}, next, disposition}
 
-      _ ->
-        {:reply, {:error, :invalid_graph}, state}
+            {:error, reason} = error ->
+              {next, disposition} = invalidate_after_mutation(state, agent_id, reason)
+              {error, next, disposition}
+
+            _ ->
+              {{:error, :invalid_graph}, state, :ack}
+          end
+        end
+      )
+    else
+      {:error, _reason} = error -> {:reply, error, state}
+      _ -> {:reply, {:error, :invalid_graph}, state}
     end
   end
 
   def handle_call({:delete, agent_id, deadline}, _from, state) do
-    with :ok <- ensure_deadline(deadline) do
-      case MemoryStore.delete_tainted_authoritative(@namespace, agent_id) do
-        :ok ->
-          state = invalidate_projection(state, agent_id)
-          {:reply, :ok, state}
+    state = normalize_state(state)
 
-        {:error, _reason} = error ->
-          state = invalidate_projection(state, agent_id) |> schedule_projection(agent_id)
-          {:reply, map_store_error(error), state}
+    case ensure_deadline(deadline) do
+      :ok ->
+        with_fresh_admission(
+          state,
+          agent_id,
+          {:error, :store_unavailable},
+          {:error, :outcome_unknown},
+          fn state ->
+            case MemoryStore.delete_tainted_authoritative(@namespace, agent_id) do
+              :ok ->
+                evict_live_projection(agent_id)
+                {:ok, state, :settle}
 
-        _ ->
-          state = invalidate_projection(state, agent_id) |> schedule_projection(agent_id)
-          {:reply, {:error, :outcome_unknown}, state}
-      end
-    else
-      {:error, _reason} = error -> {:reply, error, state}
+              {:error, _reason} = error ->
+                evict_live_projection(agent_id)
+                {map_store_error(error), state, :defer}
+
+              _ ->
+                evict_live_projection(agent_id)
+                {{:error, :outcome_unknown}, state, :defer}
+            end
+          end
+        )
+
+      {:error, _reason} = error ->
+        {:reply, error, state}
     end
   end
 
   def handle_call({:delete_agent_content, agent_id, deadline}, _from, state) do
+    state = normalize_state(state)
+
     with :ok <- ensure_deadline(deadline) do
       # Disarm before backend/effects; exceptional returns must keep disarmed state.
-      disarmed = clear_pending_projection(state, agent_id)
+      disarmed =
+        state
+        |> clear_pending_projection_only(agent_id)
+        |> settle_roots(agent_id, nil)
+
       delete_agent_content_after_disarm(agent_id, disarmed)
     else
       {:error, _reason} = error -> {:reply, error, state}
@@ -492,6 +567,8 @@ defmodule Arbor.Memory.KnowledgeGraphStore do
   end
 
   def handle_call({:agent_content_absent?, agent_id}, _from, state) do
+    state = normalize_state(state)
+
     reply =
       case do_agent_content_absent?(agent_id, state) do
         {:ok, present?} when is_boolean(present?) -> {:ok, present?}
@@ -501,53 +578,70 @@ defmodule Arbor.Memory.KnowledgeGraphStore do
 
     {:reply, reply, state}
   rescue
-    _ -> {:reply, {:error, :store_unavailable}, state}
+    _ -> {:reply, {:error, :store_unavailable}, normalize_state(state)}
   catch
-    _, _ -> {:reply, {:error, :store_unavailable}, state}
+    _, _ -> {:reply, {:error, :store_unavailable}, normalize_state(state)}
   end
 
   def handle_call({:converge, agent_id}, _from, state) do
-    case read_authority(agent_id, @cas_attempts) do
-      {:ok, snapshot, _record} ->
-        {:reply, {:ok, snapshot.graph}, project_or_schedule(state, agent_id, snapshot)}
+    with_fresh_admission(state, agent_id, {:error, :store_unavailable}, fn state ->
+      case read_authority(agent_id, @cas_attempts) do
+        {:ok, snapshot, _record} ->
+          {next, disposition} = project_or_schedule(state, agent_id, snapshot)
+          {{:ok, snapshot.graph}, next, disposition}
 
-      {:error, reason} = error ->
-        {:reply, error, invalidate_after_read(state, agent_id, reason)}
-    end
+        {:error, reason} = error ->
+          {next, disposition} = invalidate_after_read(state, agent_id, reason)
+          {error, next, disposition}
+      end
+    end)
   end
 
-  def handle_call(_message, _from, state), do: {:reply, {:error, :invalid_graph}, state}
+  def handle_call(_message, _from, state),
+    do: {:reply, {:error, :invalid_graph}, normalize_state(state)}
 
   @impl true
   def handle_info({:converge_projection, agent_id, attempt}, state) do
-    if state.pending_projection[agent_id] == attempt do
-      state = clear_pending_projection(state, agent_id)
+    state = normalize_state(state)
 
-      case read_authority(agent_id, @cas_attempts) do
-        {:ok, snapshot, _record} ->
-          case install_projection(agent_id, snapshot) do
-            :ok -> {:noreply, state}
-            {:error, _reason} -> {:noreply, retry_projection(state, agent_id, attempt)}
-          end
+    try do
+      if pending_projection_map(state)[agent_id] == attempt do
+        case OwnerRoots.ensure_deferred_root(owner_roots(state), agent_id) do
+          {:error, _reason} ->
+            {:noreply, settle_roots(clear_pending_projection_only(state, agent_id), agent_id)}
 
-        {:error, :graph_not_initialized} ->
-          state = invalidate_projection(state, agent_id)
-          {:noreply, retry_projection(state, agent_id, attempt)}
-
-        {:error, reason}
-        when reason in [:store_unavailable, :conflict, :outcome_unknown] ->
-          state = invalidate_projection(state, agent_id)
-          {:noreply, retry_projection(state, agent_id, attempt)}
-
-        {:error, _reason} ->
-          {:noreply, invalidate_projection(state, agent_id)}
+          {:ok, roots} ->
+            run_deferred_convergence(agent_id, attempt, put_owner_roots(state, roots))
+        end
+      else
+        {:noreply, state}
       end
-    else
-      {:noreply, state}
+    rescue
+      _ ->
+        {:noreply, settle_roots(clear_pending_projection_only(state, agent_id), agent_id)}
+    catch
+      _, _ ->
+        {:noreply, settle_roots(clear_pending_projection_only(state, agent_id), agent_id)}
     end
   end
 
-  def handle_info(_message, state), do: {:noreply, state}
+  def handle_info(_message, state), do: {:noreply, normalize_state(state)}
+
+  @impl true
+  def format_status(status) when is_map(status) do
+    case status do
+      %{state: state} when is_map(state) ->
+        %{status | state: redact_owner_status(state)}
+
+      _ ->
+        status
+    end
+  end
+
+  def format_status(status), do: status
+
+  @impl true
+  def code_change(_old_vsn, state, _extra), do: {:ok, normalize_state(state)}
 
   defp mutate_authority(_agent_id, _operation, _taint, _mode, 0, _deadline),
     do: {:error, :conflict}
@@ -736,8 +830,8 @@ defmodule Arbor.Memory.KnowledgeGraphStore do
 
   defp project_or_schedule(state, agent_id, snapshot) do
     case install_projection(agent_id, snapshot) do
-      :ok -> clear_pending_projection(state, agent_id)
-      {:error, _reason} -> schedule_projection(state, agent_id)
+      :ok -> {state, :settle}
+      {:error, _reason} -> {state, :defer}
     end
   end
 
@@ -822,18 +916,18 @@ defmodule Arbor.Memory.KnowledgeGraphStore do
     _, _ -> {:error, :projection_unavailable}
   end
 
-  defp invalidate_projection(state, agent_id) do
+  defp evict_live_projection(agent_id) do
     evict_projection(agent_id)
     _ = clear_projection_provenance(agent_id)
-    clear_pending_projection(state, agent_id)
+    :ok
   end
 
   defp invalidate_after_read(state, agent_id, reason) do
-    state = invalidate_projection(state, agent_id)
+    evict_live_projection(agent_id)
 
     if transient_authority_failure?(reason),
-      do: schedule_projection(state, agent_id),
-      else: state
+      do: {state, :defer},
+      else: {state, :settle}
   end
 
   defp invalidate_after_mutation(state, agent_id, reason) do
@@ -847,14 +941,17 @@ defmodule Arbor.Memory.KnowledgeGraphStore do
         :store_unavailable
       ]
 
-    if invalidate? do
-      state = invalidate_projection(state, agent_id)
+    cond do
+      invalidate? and transient_authority_failure?(reason) ->
+        evict_live_projection(agent_id)
+        {state, :defer}
 
-      if transient_authority_failure?(reason),
-        do: schedule_projection(state, agent_id),
-        else: state
-    else
-      state
+      invalidate? ->
+        evict_live_projection(agent_id)
+        {state, :settle}
+
+      true ->
+        {state, :ack}
     end
   end
 
@@ -932,8 +1029,12 @@ defmodule Arbor.Memory.KnowledgeGraphStore do
       :absent ->
         case graph_ets_absent_result(agent_id) do
           {:ok, true} ->
-            deferred_absent? = not Map.has_key?(state.pending_projection, agent_id)
-            if deferred_absent?, do: {:ok, true}, else: {:ok, false}
+            deferred_absent? = not Map.has_key?(pending_projection_map(state), agent_id)
+            roots_absent? = not OwnerRoots.held?(owner_roots(state), agent_id)
+
+            if deferred_absent? and roots_absent?,
+              do: {:ok, true},
+              else: {:ok, false}
 
           {:ok, false} ->
             {:ok, false}
@@ -998,27 +1099,160 @@ defmodule Arbor.Memory.KnowledgeGraphStore do
 
   defp valid_agent_id?(_agent_id), do: false
 
-  defp schedule_projection(%{pending_projection: pending} = state, agent_id) do
-    if Map.has_key?(pending, agent_id) do
-      state
-    else
-      Process.send_after(self(), {:converge_projection, agent_id, 1}, 10)
-      %{state | pending_projection: Map.put(pending, agent_id, 1)}
+  defp normalize_state(state) when is_map(state) do
+    state
+    |> Map.put_new(:owner_roots, OwnerRoots.new())
+    |> Map.put_new(:pending_projection, %{})
+  end
+
+  defp normalize_state(state), do: state
+
+  defp owner_roots(%{owner_roots: %OwnerRoots{} = roots}), do: roots
+  defp owner_roots(_state), do: OwnerRoots.new()
+
+  defp put_owner_roots(state, roots) when is_map(state), do: Map.put(state, :owner_roots, roots)
+
+  defp pending_projection_map(%{pending_projection: pending}) when is_map(pending), do: pending
+  defp pending_projection_map(_state), do: %{}
+
+  defp admit_fresh(agent_id) do
+    case OwnerRoots.admit_new(OwnerRoots.new(), agent_id) do
+      {:ok, lease} -> {:ok, lease}
+      {:error, _reason} -> {:error, :store_unavailable}
     end
   end
 
-  defp retry_projection(state, _agent_id, attempt) when attempt >= @projection_attempts,
-    do: state
-
-  defp retry_projection(%{pending_projection: pending} = state, agent_id, attempt) do
-    next_attempt = attempt + 1
-    delay = min(10 * next_attempt * next_attempt, 1_000)
-    Process.send_after(self(), {:converge_projection, agent_id, next_attempt}, delay)
-    %{state | pending_projection: Map.put(pending, agent_id, next_attempt)}
+  defp with_fresh_admission(state, agent_id, denied_reply, fun)
+       when is_function(fun, 1) do
+    with_fresh_admission(state, agent_id, denied_reply, denied_reply, fun)
   end
 
-  defp clear_pending_projection(%{pending_projection: pending} = state, agent_id),
-    do: %{state | pending_projection: Map.delete(pending, agent_id)}
+  defp with_fresh_admission(state, agent_id, denied_reply, catch_reply, fun)
+       when is_function(fun, 1) do
+    state = normalize_state(state)
+
+    case admit_fresh(agent_id) do
+      {:ok, lease} ->
+        try do
+          {reply, next_state, disposition} = fun.(state)
+          {:reply, reply, finish_public_root(next_state, agent_id, lease, disposition)}
+        rescue
+          _ ->
+            {:reply, catch_reply,
+             finish_public_root(normalize_state(state), agent_id, lease, :ack)}
+        catch
+          _, _ ->
+            {:reply, catch_reply,
+             finish_public_root(normalize_state(state), agent_id, lease, :ack)}
+        end
+
+      {:error, _reason} ->
+        {:reply, denied_reply, state}
+    end
+  end
+
+  defp finish_public_root(state, agent_id, lease, :defer) do
+    case OwnerRoots.defer(owner_roots(state), agent_id, lease) do
+      {:ok, roots} ->
+        state
+        |> put_owner_roots(roots)
+        |> arm_projection_retry(agent_id)
+
+      {:error, _reason} ->
+        ack_root(state, lease)
+    end
+  end
+
+  defp finish_public_root(state, agent_id, lease, :settle) do
+    state
+    |> settle_roots(agent_id, lease)
+    |> clear_pending_projection_only(agent_id)
+  end
+
+  defp finish_public_root(state, _agent_id, lease, _ack) do
+    ack_root(state, lease)
+  end
+
+  defp ack_root(state, lease) do
+    {roots, _result} = OwnerRoots.ack(owner_roots(state), lease)
+    put_owner_roots(state, roots)
+  end
+
+  defp settle_roots(state, agent_id, lease \\ nil) do
+    {roots, _} = OwnerRoots.settle_agent(owner_roots(state), agent_id, lease)
+    put_owner_roots(state, roots)
+  end
+
+  defp arm_projection_retry(state, agent_id) do
+    pending = pending_projection_map(state)
+
+    if Map.has_key?(pending, agent_id) do
+      state
+    else
+      state = Map.put(state, :pending_projection, Map.put(pending, agent_id, 1))
+      Process.send_after(self(), {:converge_projection, agent_id, 1}, 10)
+      state
+    end
+  end
+
+  defp clear_pending_projection_only(state, agent_id) when is_map(state) do
+    pending = pending_projection_map(state)
+    Map.put(state, :pending_projection, Map.delete(pending, agent_id))
+  end
+
+  defp redact_owner_status(state) when is_map(state) do
+    counts =
+      case Map.get(state, :owner_roots) do
+        %OwnerRoots{by_agent: by_agent} ->
+          Map.new(by_agent, fn {agent_id, leases} -> {agent_id, length(leases)} end)
+
+        _ ->
+          %{}
+      end
+
+    Map.put(state, :owner_roots, counts)
+  end
+
+  defp redact_owner_status(state), do: state
+
+  defp run_deferred_convergence(agent_id, attempt, state) do
+    case read_authority(agent_id, @cas_attempts) do
+      {:ok, snapshot, _record} ->
+        case install_projection(agent_id, snapshot) do
+          :ok ->
+            {:noreply, settle_roots(clear_pending_projection_only(state, agent_id), agent_id)}
+
+          {:error, _reason} ->
+            retry_or_exhaust_projection(state, agent_id, attempt)
+        end
+
+      {:error, :graph_not_initialized} ->
+        evict_live_projection(agent_id)
+        {:noreply, settle_roots(clear_pending_projection_only(state, agent_id), agent_id)}
+
+      {:error, reason}
+      when reason in [:store_unavailable, :conflict, :outcome_unknown] ->
+        evict_live_projection(agent_id)
+        retry_or_exhaust_projection(state, agent_id, attempt)
+
+      {:error, _reason} ->
+        evict_live_projection(agent_id)
+        {:noreply, settle_roots(clear_pending_projection_only(state, agent_id), agent_id)}
+    end
+  end
+
+  defp retry_or_exhaust_projection(state, agent_id, attempt) do
+    if is_integer(attempt) and attempt < @projection_attempts do
+      next_attempt = attempt + 1
+      delay = min(10 * next_attempt * next_attempt, 1_000)
+      pending = Map.put(pending_projection_map(state), agent_id, next_attempt)
+      state = Map.put(state, :pending_projection, pending)
+      Process.send_after(self(), {:converge_projection, agent_id, next_attempt}, delay)
+      {:noreply, state}
+    else
+      {:noreply, settle_roots(clear_pending_projection_only(state, agent_id), agent_id)}
+    end
+  end
 
   defp call_save(agent_id, operation, taint) do
     case safe_call(
@@ -1094,10 +1328,10 @@ defmodule Arbor.Memory.KnowledgeGraphStore do
 
   defp ensure_deadline(_deadline), do: {:error, :request_expired}
 
-  defp safe_call(message, mode, agent_id) when mode in [:read, :mutation] do
+  defp safe_call(message, mode, _agent_id) when mode in [:read, :mutation] do
     case Process.whereis(__MODULE__) do
       nil ->
-        fail_closed_unavailable(agent_id, mode)
+        unavailable_for(mode)
 
       pid ->
         monitor = Process.monitor(pid)
@@ -1105,22 +1339,21 @@ defmodule Arbor.Memory.KnowledgeGraphStore do
         try do
           GenServer.call(pid, message, call_timeout(mode))
         catch
-          :exit, _reason -> fail_closed_unavailable(agent_id, mode)
+          :exit, _reason -> unavailable_for(mode)
         after
           Process.demonitor(monitor, [:flush])
         end
     end
   rescue
-    _ -> fail_closed_unavailable(agent_id, mode)
+    _ -> unavailable_for(mode)
   catch
-    _, _ -> fail_closed_unavailable(agent_id, mode)
+    _, _ -> unavailable_for(mode)
   end
 
-  # Content-only paths must never clear Provenance on owner loss.
-  defp content_safe_call(message, mode, agent_id) when mode in [:read, :mutation] do
+  defp content_safe_call(message, mode, _agent_id) when mode in [:read, :mutation] do
     case Process.whereis(__MODULE__) do
       nil ->
-        content_fail_closed_unavailable(agent_id, mode)
+        unavailable_for(mode)
 
       pid ->
         monitor = Process.monitor(pid)
@@ -1128,27 +1361,15 @@ defmodule Arbor.Memory.KnowledgeGraphStore do
         try do
           GenServer.call(pid, message, call_timeout(mode))
         catch
-          :exit, _reason -> content_fail_closed_unavailable(agent_id, mode)
+          :exit, _reason -> unavailable_for(mode)
         after
           Process.demonitor(monitor, [:flush])
         end
     end
   rescue
-    _ -> content_fail_closed_unavailable(agent_id, mode)
+    _ -> unavailable_for(mode)
   catch
-    _, _ -> content_fail_closed_unavailable(agent_id, mode)
-  end
-
-  defp fail_closed_unavailable(agent_id, mode) do
-    evict_projection(agent_id)
-    _ = clear_projection_provenance(agent_id)
-    unavailable_for(mode)
-  end
-
-  defp content_fail_closed_unavailable(agent_id, mode) do
-    # Conservative ETS eviction only; provenance sidecars retained.
-    evict_projection(agent_id)
-    unavailable_for(mode)
+    _, _ -> unavailable_for(mode)
   end
 
   defp normalize_content_cleanup_error(reason, _mode) when reason in @content_cleanup_errors,
