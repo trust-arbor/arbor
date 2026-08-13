@@ -2,6 +2,7 @@ defmodule Arbor.Memory.Proposal.Core do
   @moduledoc false
 
   alias Arbor.Contracts.Security.Taint
+  alias Arbor.Memory.MutationAdmission.Lease
   alias Arbor.Memory.SelfKnowledge
 
   @max_pending 20
@@ -21,6 +22,7 @@ defmodule Arbor.Memory.Proposal.Core do
   @max_agent_entries 512
   @max_total_entries 10_000
   @max_total_bytes 4_000_000
+  @lease_token_bytes 32
   @allowed_list_opt_keys [:type, :limit, :sort_by]
   @allowed_reject_opt_keys [:reason]
   @allowed_sort_by [:created_at, :confidence]
@@ -74,6 +76,18 @@ defmodule Arbor.Memory.Proposal.Core do
   end
 
   def valid_identifier?(_), do: false
+
+  @spec valid_owner_lease?(term(), term()) :: boolean()
+  def valid_owner_lease?(
+        %Lease{token: token, agent_id: agent_id, admitted_gate_gen: generation},
+        expected_agent_id
+      )
+      when is_binary(token) and byte_size(token) == @lease_token_bytes and
+             is_integer(generation) and generation > 0 and agent_id == expected_agent_id do
+    valid_identifier?(agent_id) and String.valid?(agent_id) and String.trim(agent_id) == agent_id
+  end
+
+  def valid_owner_lease?(_lease, _expected_agent_id), do: false
 
   @spec validate_create(String.t(), atom(), map()) ::
           {:ok, map()} | {:error, atom() | {atom(), term()}}
@@ -404,6 +418,448 @@ defmodule Arbor.Memory.Proposal.Core do
       domain_id: domain_id
     }
   end
+
+  @spec validate_transfer_plan(term()) :: {:ok, {atom(), map()}} | {:error, atom()}
+  def validate_transfer_plan(proposal) when is_map(proposal) and not is_struct(proposal) do
+    with {:ok, type} <- bounded_proposal_type(Map.get(proposal, :type)),
+         {:ok, id} <- bounded_identifier(Map.get(proposal, :id)),
+         {:ok, content} <- bounded_binary(Map.get(proposal, :content), @max_content_bytes),
+         {:ok, confidence} <- bounded_confidence(Map.get(proposal, :confidence, 0.5)),
+         {:ok, metadata} <- bounded_metadata(Map.get(proposal, :metadata, %{})) do
+      case type do
+        :goal ->
+          bounded_goal_plan(content, metadata)
+
+        :goal_update ->
+          bounded_goal_update_plan(metadata)
+
+        :intent ->
+          bounded_intent_plan(content, metadata)
+
+        _ ->
+          bounded_knowledge_plan(type, content, confidence, id)
+      end
+    end
+  end
+
+  def validate_transfer_plan(_), do: {:error, :invalid_request}
+
+  @spec validate_owner_transfer_request(atom(), term()) ::
+          {:ok, map()} | {:error, atom()}
+  def validate_owner_transfer_request(kind, request)
+      when is_atom(kind) and is_map(request) and not is_struct(request) do
+    with true <- request[:kind] == kind,
+         {:ok, agent_id} <- bounded_identifier(request[:agent_id]),
+         {:ok, _proposal_id} <- bounded_identifier(request[:proposal_id]),
+         {:ok, _operation_id} <- bounded_identifier(request[:operation_id]),
+         true <- is_reference(request[:operation_ref]),
+         :ok <- mailbox_taint(request[:joined_taint]),
+         :ok <- bounded_deadline(request[:deadline_ms]),
+         :ok <- matching_lease(request[:lease], agent_id),
+         {:ok, plan} <- validate_owner_plan(kind, request[:plan]) do
+      {:ok, Map.put(request, :plan, plan)}
+    else
+      {:error, _} = error -> error
+      _ -> {:error, :invalid_request}
+    end
+  end
+
+  def validate_owner_transfer_request(_kind, _request), do: {:error, :invalid_request}
+
+  @spec validate_create_mailbox(term(), term(), term(), term(), term()) ::
+          {:ok, map()} | {:error, atom() | {atom(), term()}}
+  def validate_create_mailbox(agent_id, type, fields, taint, status) do
+    with {:ok, normalized} <- validate_create(agent_id, type, mailbox_create_data(fields)),
+         :ok <- require_normalized_create_fields(normalized),
+         :ok <- mailbox_status(status),
+         :ok <- mailbox_taint(taint) do
+      {:ok, normalized}
+    end
+  end
+
+  @spec validate_review_mailbox(term(), term(), term(), term(), term(), term()) ::
+          {:ok, term()} | {:error, :invalid_request | :invalid_provenance | :limit_exceeded}
+  def validate_review_mailbox(agent_id, proposal_id, expected, taint, status, review_op) do
+    with true <- valid_identifier?(agent_id) and valid_identifier?(proposal_id),
+         true <- expected in [:pending, :deferred],
+         :ok <- mailbox_status(status),
+         :ok <- mailbox_taint(taint),
+         {:ok, review_op} <- mailbox_review_op(review_op) do
+      {:ok, review_op}
+    else
+      {:error, _} = error -> error
+      false -> {:error, :invalid_request}
+      _ -> {:error, :invalid_request}
+    end
+  end
+
+  @spec validate_delete_mailbox(term(), term()) :: :ok | {:error, :invalid_request}
+  def validate_delete_mailbox(agent_id, proposal_id) do
+    if valid_identifier?(agent_id) and valid_identifier?(proposal_id),
+      do: :ok,
+      else: {:error, :invalid_request}
+  end
+
+  @spec classify_handoff_ownership(term(), term()) ::
+          :release_store_owned_unknown
+          | :handed_activate
+          | :release_store_owned_pre_handoff
+          | :uncertain_unknown
+  def classify_handoff_ownership({:ok, _lease}, :ok), do: :release_store_owned_unknown
+  def classify_handoff_ownership(:ok, :ok), do: :release_store_owned_unknown
+  def classify_handoff_ownership({:ok, _lease}, :not_owner), do: :handed_activate
+  def classify_handoff_ownership({:ok, _lease}, {:error, :not_owner}), do: :handed_activate
+  def classify_handoff_ownership(:ok, :not_owner), do: :handed_activate
+  def classify_handoff_ownership(:ok, {:error, :not_owner}), do: :handed_activate
+  def classify_handoff_ownership({:error, _reason}, :ok), do: :release_store_owned_pre_handoff
+  def classify_handoff_ownership({:error, _reason}, _assert), do: :uncertain_unknown
+  def classify_handoff_ownership(_handoff, :ok), do: :release_store_owned_pre_handoff
+  def classify_handoff_ownership(_handoff, _assert), do: :uncertain_unknown
+
+  @spec classify_store_interrupt(atom(), atom()) ::
+          :pre_handoff_rollback
+          | :pre_handoff_keep_unknown
+          | :uncertain_keep_unknown
+          | :post_handoff_unknown
+  def classify_store_interrupt(:reserving, :new), do: :pre_handoff_rollback
+  def classify_store_interrupt(:reserving, :preexisting), do: :pre_handoff_keep_unknown
+  def classify_store_interrupt(:handing_off, _origin), do: :uncertain_keep_unknown
+  def classify_store_interrupt(:awaiting_result, _origin), do: :post_handoff_unknown
+  def classify_store_interrupt(_phase, :preexisting), do: :pre_handoff_keep_unknown
+  def classify_store_interrupt(_phase, _origin), do: :uncertain_keep_unknown
+
+  @spec classify_attempt_failure(atom(), atom()) :: :complete | :unknown_keep | :abort
+  def classify_attempt_failure(_origin, :receipt), do: :complete
+  def classify_attempt_failure(:preexisting, _kind), do: :unknown_keep
+  def classify_attempt_failure(:new, :determinate), do: :abort
+  def classify_attempt_failure(_origin, _kind), do: :unknown_keep
+
+  @spec failure_kind(term()) :: :unknown | :determinate
+  def failure_kind(reason)
+      when reason in [:transfer_outcome_unknown, :outcome_unknown, :commit_outcome_unknown],
+      do: :unknown
+
+  def failure_kind({:unknown, _reason}), do: :unknown
+  def failure_kind(_reason), do: :determinate
+
+  @absent_root_errors [:not_owner, :invalid_lease, :stale_lease, :destroyed]
+
+  @spec classify_root_settle(term()) :: :released | :absent | :transient
+  def classify_root_settle(:ok), do: :released
+  def classify_root_settle(reason) when reason in @absent_root_errors, do: :absent
+  def classify_root_settle({:error, reason}) when reason in @absent_root_errors, do: :absent
+  def classify_root_settle({:error, _reason}), do: :transient
+  def classify_root_settle(_reason), do: :transient
+
+  @spec unresolved_rearm(term(), integer()) :: :retain | {:rearm, pos_integer()}
+  def unresolved_rearm(deadline_ms, now_ms \\ System.monotonic_time(:millisecond))
+
+  def unresolved_rearm(deadline_ms, now_ms)
+      when is_integer(deadline_ms) and is_integer(now_ms) do
+    remaining = deadline_ms - now_ms
+    if remaining > 0, do: {:rearm, remaining}, else: :retain
+  end
+
+  def unresolved_rearm(_deadline_ms, _now_ms), do: :retain
+
+  @unresolved_backoffs_ms [50, 150, 400]
+
+  @spec unresolved_backoff(term()) :: {:retry, pos_integer()} | :terminal
+  def unresolved_backoff(attempts) when is_integer(attempts) and attempts >= 0 do
+    case Enum.at(@unresolved_backoffs_ms, attempts) do
+      delay when is_integer(delay) and delay > 0 -> {:retry, delay}
+      _ -> :terminal
+    end
+  end
+
+  def unresolved_backoff(_attempts), do: :terminal
+
+  @spec remember_unresolved_leases(term(), Lease.t()) :: [Lease.t()]
+  def remember_unresolved_leases(held, %Lease{} = lease) when is_list(held) do
+    if Enum.any?(held, &(&1 == lease)), do: held, else: held ++ [lease]
+  end
+
+  def remember_unresolved_leases(_held, %Lease{} = lease), do: [lease]
+
+  @spec valid_owner_plan?(atom(), term()) :: boolean()
+  def valid_owner_plan?(kind, plan), do: match?({:ok, _}, validate_owner_plan(kind, plan))
+
+  @spec canonicalize_owner_plan(atom(), term()) :: {:ok, map()} | {:error, atom()}
+  def canonicalize_owner_plan(kind, plan), do: validate_owner_plan(kind, plan)
+
+  defp mailbox_status(status)
+       when status in [:verified, :legacy_unlabeled, :invalid_durable_provenance],
+       do: :ok
+
+  defp mailbox_status(_), do: {:error, :invalid_request}
+
+  defp mailbox_taint(%Taint{}), do: :ok
+  defp mailbox_taint(_), do: {:error, :invalid_provenance}
+
+  defp mailbox_review_op({:reject, reason}) do
+    case validate_reject_reason(reason) do
+      {:ok, cleaned} -> {:ok, {:reject, cleaned}}
+      {:error, _} = error -> error
+    end
+  end
+
+  defp mailbox_review_op(op) when op in [:defer, :undefer], do: {:ok, op}
+  defp mailbox_review_op(_), do: {:error, :invalid_request}
+
+  defp mailbox_create_data(fields) when is_map(fields) and not is_struct(fields), do: fields
+  defp mailbox_create_data(_fields), do: %{}
+
+  defp require_normalized_create_fields(%{
+         content: content,
+         confidence: confidence,
+         evidence: evidence,
+         metadata: metadata
+       })
+       when is_binary(content) and is_number(confidence) and is_list(evidence) and
+              is_map(metadata) do
+    :ok
+  end
+
+  defp require_normalized_create_fields(_), do: {:error, :invalid_request}
+
+  defp bounded_proposal_type(type) when type in @allowed_types, do: {:ok, type}
+  defp bounded_proposal_type(_), do: {:error, :invalid_request}
+
+  defp bounded_identifier(id) do
+    if valid_identifier?(id), do: {:ok, id}, else: {:error, :invalid_request}
+  end
+
+  defp bounded_binary(value, max_bytes) when is_binary(value) and is_integer(max_bytes) do
+    size = byte_size(value)
+
+    cond do
+      size == 0 -> {:error, :invalid_request}
+      size > max_bytes -> {:error, :limit_exceeded}
+      not String.valid?(value) -> {:error, :invalid_request}
+      true -> {:ok, value}
+    end
+  end
+
+  defp bounded_binary(_value, _max_bytes), do: {:error, :invalid_request}
+
+  defp bounded_optional_binary(nil, _max_bytes), do: {:ok, nil}
+
+  defp bounded_optional_binary(value, max_bytes)
+       when is_binary(value) and is_integer(max_bytes) do
+    cond do
+      byte_size(value) > max_bytes -> {:error, :limit_exceeded}
+      not String.valid?(value) -> {:error, :invalid_request}
+      true -> {:ok, value}
+    end
+  end
+
+  defp bounded_optional_binary(_value, _max_bytes), do: {:error, :invalid_request}
+
+  defp bounded_confidence(c) when is_float(c) and c >= 0.0 and c <= 1.0, do: {:ok, c}
+  defp bounded_confidence(c) when is_integer(c) and c >= 0 and c <= 1, do: {:ok, c * 1.0}
+  defp bounded_confidence(_), do: {:error, :invalid_request}
+
+  defp bounded_metadata(metadata) when is_map(metadata) and not is_struct(metadata) do
+    case validate_metadata(metadata) do
+      {:ok, _} -> {:ok, metadata}
+      {:error, _} = error -> error
+    end
+  end
+
+  defp bounded_metadata(_), do: {:error, :invalid_request}
+
+  defp bounded_goal_plan(content, metadata) do
+    description = String.trim(content)
+    goal_data = metadata_entry(metadata, :goal_data)
+    priority = if is_map(goal_data), do: metadata_entry(goal_data, :priority), else: nil
+
+    cond do
+      description == "" ->
+        {:error, :empty_description}
+
+      byte_size(description) > @max_content_bytes ->
+        {:error, :limit_exceeded}
+
+      true ->
+        case bounded_priority(priority || :medium) do
+          {:ok, priority} ->
+            {:ok, {:goal, %{description: description, priority: priority}}}
+
+          {:error, _} = error ->
+            error
+        end
+    end
+  end
+
+  defp bounded_goal_update_plan(metadata) do
+    update_data = metadata_entry(metadata, :update_data)
+
+    with true <- is_map(update_data) and not is_struct(update_data),
+         {:ok, goal_id} <- bounded_identifier(metadata_entry(update_data, :id)),
+         {:ok, progress} <- bounded_progress(metadata_entry(update_data, :progress)) do
+      {:ok, {:goal_update, %{goal_id: goal_id, progress: progress}}}
+    else
+      {:error, _} = error -> error
+      _ -> {:error, :invalid_request}
+    end
+  end
+
+  defp bounded_intent_plan(content, metadata) do
+    decomp = metadata_entry(metadata, :decomposition)
+    decomp = if is_map(decomp) and not is_struct(decomp), do: decomp, else: %{}
+
+    with {:ok, capability} <-
+           bounded_named_or_default(
+             metadata_entry(decomp, :capability),
+             @max_source_bytes,
+             "unknown"
+           ),
+         {:ok, op} <- bounded_intent_op(metadata_entry(decomp, :op)),
+         {:ok, target} <-
+           bounded_optional_binary(metadata_entry(decomp, :target), @max_identifier_bytes) do
+      {:ok, {:intent, %{capability: capability, op: op, target: target, description: content}}}
+    end
+  end
+
+  defp bounded_knowledge_plan(type, content, confidence, id) do
+    with {:ok, node_type} <- bounded_knowledge_type(node_type_for(type)),
+         {:ok, relevance} <- bounded_progress(min(1.0, confidence + @acceptance_boost)) do
+      {:ok,
+       {:knowledge,
+        %{
+          type: node_type,
+          content: content,
+          relevance: relevance,
+          metadata: %{"proposal_id" => id, "original_confidence" => confidence},
+          skip_dedup: true
+        }}}
+    end
+  end
+
+  @intent_ops [:read, :write, :exec, :search, :file, :unknown]
+  @knowledge_types [:fact, :insight, :skill, :experience, :observation, :trait, :intention, :goal]
+
+  defp bounded_intent_op(nil), do: {:ok, :unknown}
+  defp bounded_intent_op(op) when op in @intent_ops, do: {:ok, op}
+
+  defp bounded_intent_op(op) when is_binary(op) do
+    case op do
+      "read" -> {:ok, :read}
+      "write" -> {:ok, :write}
+      "exec" -> {:ok, :exec}
+      "search" -> {:ok, :search}
+      "file" -> {:ok, :file}
+      "unknown" -> {:ok, :unknown}
+      _ -> {:error, :invalid_request}
+    end
+  end
+
+  defp bounded_intent_op(_), do: {:error, :invalid_request}
+
+  defp bounded_progress(p) when is_float(p) and p >= 0.0 and p <= 1.0, do: {:ok, p}
+  defp bounded_progress(p) when is_integer(p) and p >= 0 and p <= 1, do: {:ok, p * 1.0}
+  defp bounded_progress(_), do: {:error, :invalid_request}
+
+  defp bounded_knowledge_type(type) when type in @knowledge_types, do: {:ok, type}
+  defp bounded_knowledge_type(_), do: {:error, :invalid_request}
+
+  defp bounded_named_or_default(nil, _max_bytes, default), do: {:ok, default}
+  defp bounded_named_or_default(value, max_bytes, _default), do: bounded_binary(value, max_bytes)
+
+  defp bounded_deadline(ms) when is_integer(ms), do: :ok
+  defp bounded_deadline(_), do: {:error, :invalid_request}
+
+  defp bounded_priority(p) when p in [:low, :medium, :high, :critical], do: {:ok, p}
+  defp bounded_priority("low"), do: {:ok, :low}
+  defp bounded_priority("medium"), do: {:ok, :medium}
+  defp bounded_priority("high"), do: {:ok, :high}
+  defp bounded_priority("critical"), do: {:ok, :critical}
+  defp bounded_priority(nil), do: {:ok, :medium}
+  defp bounded_priority(_), do: {:error, :invalid_request}
+
+  defp bounded_skip_dedup(true), do: {:ok, true}
+  defp bounded_skip_dedup(false), do: {:ok, false}
+  defp bounded_skip_dedup(nil), do: {:ok, true}
+  defp bounded_skip_dedup(_), do: {:error, :invalid_request}
+
+  defp matching_lease(lease, agent_id) do
+    if valid_owner_lease?(lease, agent_id), do: :ok, else: {:error, :invalid_lease}
+  end
+
+  defp validate_owner_plan(:create_goal, plan) when is_map(plan) and not is_struct(plan) do
+    with {:ok, description} <- bounded_binary(plan[:description], @max_content_bytes),
+         description = String.trim(description),
+         true <- description != "",
+         {:ok, domain_id} <- bounded_identifier(plan[:domain_id]),
+         {:ok, priority} <- bounded_priority(Map.get(plan, :priority, :medium)) do
+      {:ok,
+       %{
+         description: description,
+         domain_id: domain_id,
+         priority: priority
+       }}
+    else
+      false -> {:error, :empty_description}
+      {:error, _} = error -> error
+      _ -> {:error, :invalid_request}
+    end
+  end
+
+  defp validate_owner_plan(:update_goal, plan) when is_map(plan) and not is_struct(plan) do
+    with {:ok, goal_id} <- bounded_identifier(plan[:goal_id]),
+         {:ok, progress} <- bounded_progress(plan[:progress]) do
+      {:ok, %{goal_id: goal_id, progress: progress}}
+    else
+      {:error, _} = error -> error
+      _ -> {:error, :invalid_request}
+    end
+  end
+
+  defp validate_owner_plan(:record_intent, plan) when is_map(plan) and not is_struct(plan) do
+    with {:ok, capability} <-
+           bounded_named_or_default(plan[:capability], @max_source_bytes, "unknown"),
+         {:ok, op} <- bounded_intent_op(plan[:op]),
+         {:ok, target} <- bounded_optional_binary(plan[:target], @max_identifier_bytes),
+         {:ok, description} <- bounded_binary(plan[:description], @max_content_bytes),
+         {:ok, domain_id} <- bounded_identifier(plan[:domain_id]) do
+      {:ok,
+       %{
+         capability: capability,
+         op: op,
+         target: target,
+         description: description,
+         domain_id: domain_id
+       }}
+    end
+  end
+
+  defp validate_owner_plan(:create_knowledge, plan) when is_map(plan) and not is_struct(plan) do
+    with {:ok, content} <- bounded_binary(plan[:content], @max_content_bytes),
+         {:ok, type} <- bounded_knowledge_type(plan[:type]),
+         {:ok, relevance} <- bounded_progress(plan[:relevance]),
+         {:ok, metadata} <- bounded_metadata(Map.get(plan, :metadata, %{})),
+         {:ok, skip_dedup} <- bounded_skip_dedup(Map.get(plan, :skip_dedup, true)) do
+      {:ok,
+       %{
+         type: type,
+         content: content,
+         relevance: relevance,
+         metadata: metadata,
+         skip_dedup: skip_dedup
+       }}
+    else
+      {:error, _} = error -> error
+      _ -> {:error, :invalid_request}
+    end
+  end
+
+  defp validate_owner_plan(_kind, _plan), do: {:error, :invalid_request}
+
+  defp metadata_entry(map, key) when is_map(map) and is_atom(key) do
+    Map.get(map, key) || Map.get(map, Atom.to_string(key))
+  end
+
+  defp metadata_entry(_map, _key), do: nil
 
   @spec reinforce_op_id(String.t(), atom(), String.t()) :: String.t()
   def reinforce_op_id(agent_id, type, content) do

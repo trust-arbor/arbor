@@ -82,6 +82,22 @@ defmodule Arbor.Memory.MutationAdmissionOwnerRootsTest do
     assert OwnerRoots.held_count(settled, agent_id) == 0
   end
 
+  @tag packet: "VP-05D2C3I1B1F1"
+  test "forget removes stale local evidence without releasing backend authority", %{
+    agent_id: agent_id,
+    roots: roots
+  } do
+    assert {:ok, lease} = OwnerRoots.admit_new(roots, agent_id)
+    assert {:ok, held} = OwnerRoots.defer(roots, agent_id, lease)
+
+    forgotten = OwnerRoots.forget(held, lease)
+    refute OwnerRoots.held?(forgotten, agent_id)
+    assert {:ok, %{active_roots: 1}} = MutationAdmission.status(agent_id)
+
+    assert :ok = MutationAdmission.release(lease)
+    assert {:ok, %{active_roots: 0}} = MutationAdmission.status(agent_id)
+  end
+
   test "ensure_deferred_root acquires once and does not reenter", %{
     agent_id: agent_id,
     roots: roots

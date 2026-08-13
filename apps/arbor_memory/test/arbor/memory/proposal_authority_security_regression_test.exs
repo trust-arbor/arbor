@@ -215,7 +215,7 @@ defmodule Arbor.Memory.ProposalAuthoritySecurityRegressionTest do
       put_in(state, [:totals, :bytes], forced)
     end)
 
-    assert {:error, :limit_exceeded} = Proposal.accept(agent_id, p.id)
+    assert {:error, :transfer_outcome_unknown} = Proposal.accept(agent_id, p.id)
 
     mid = :sys.get_state(Store)
     mid_record = get_in(mid, [:by_agent, agent_id, p.id])

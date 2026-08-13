@@ -26,8 +26,10 @@ defmodule Arbor.Memory.GoalStore do
   alias Arbor.Contracts.Memory.Goal
   alias Arbor.Contracts.Persistence.Record
   alias Arbor.Contracts.Security.{Taint, TaintedValue, TaintEnvelope}
-  alias Arbor.Memory.{MemoryStore, Provenance, Signals}
-  alias Arbor.Memory.MutationAdmission.OwnerRoots
+  alias Arbor.Memory.{MemoryStore, Proposal, Provenance, Signals}
+  alias Arbor.Memory.MutationAdmission
+  alias Arbor.Memory.MutationAdmission.{Lease, OwnerRoots}
+  alias Arbor.Memory.Proposal.Core, as: ProposalCore
 
   require Logger
 
@@ -1077,6 +1079,38 @@ defmodule Arbor.Memory.GoalStore do
     end
   end
 
+  def handle_call({:proposal_transfer_reserve, request}, from, state) do
+    state = normalize_state(state)
+
+    {reply, new_state} =
+      reserve_proposal_transfer(state, from, request, [:create_goal, :update_goal])
+
+    {:reply, reply, new_state}
+  end
+
+  def handle_call({:proposal_transfer_activate, request}, from, state) do
+    state = normalize_state(state)
+    activate_proposal_transfer(state, from, request)
+  end
+
+  def handle_call({:proposal_transfer_cancel, request}, from, state) do
+    state = normalize_state(state)
+    {reply, new_state} = cancel_proposal_transfer(state, from, request)
+    {:reply, reply, new_state}
+  end
+
+  @impl true
+  def handle_continue({:execute_proposal_transfer, ref}, state) do
+    state = normalize_state(state)
+    execute_goal_proposal_transfer(state, ref)
+  rescue
+    _ -> terminalize_activated_transfer(normalize_state(state), ref)
+  catch
+    _, _ -> terminalize_activated_transfer(normalize_state(state), ref)
+  end
+
+  def handle_continue(_other, state), do: {:noreply, normalize_state(state)}
+
   @impl true
   def handle_info({:mark_goal_convergence, agent_id, token}, state) do
     state = normalize_state(state)
@@ -1126,7 +1160,17 @@ defmodule Arbor.Memory.GoalStore do
   # Legacy untokened converge messages are never processed.
   def handle_info({:converge_goal_agent, _agent_id, _attempts}, state), do: {:noreply, state}
 
-  def handle_info(_message, state), do: {:noreply, state}
+  def handle_info({:transfer_reserve_timeout, ref}, state) do
+    state = normalize_state(state)
+    {:noreply, timeout_reserved_transfer(state, ref)}
+  end
+
+  def handle_info({:DOWN, mon, :process, _pid, _reason}, state) do
+    state = normalize_state(state)
+    {:noreply, down_reserved_transfer(state, mon)}
+  end
+
+  def handle_info(_message, state), do: {:noreply, normalize_state(state)}
 
   @impl true
   def format_status(status) when is_map(status) do
@@ -1151,7 +1195,9 @@ defmodule Arbor.Memory.GoalStore do
   defp normalize_state(state) when is_map(state) do
     state
     |> Map.put_new(:owner_roots, OwnerRoots.new())
+    |> Map.put_new(:proposal_transfers, %{})
     |> Map.delete(:armed_this_op)
+    |> normalize_proposal_transfers()
   end
 
   defp normalize_state(state), do: state
@@ -1286,6 +1332,7 @@ defmodule Arbor.Memory.GoalStore do
 
     state
     |> Map.put(:owner_roots, counts)
+    |> Map.put(:proposal_transfers, transfer_status_view(state))
     |> Map.delete(:armed_this_op)
   end
 
@@ -1376,6 +1423,16 @@ defmodule Arbor.Memory.GoalStore do
           |> mark_convergence_pending(agent_id)
 
         {{:ok, goal}, state, :defer}
+
+      {:error, :outcome_unknown} = error ->
+        _ = remove_live_goal(agent_id, goal_id)
+
+        state =
+          state
+          |> untrack_projected_id(agent_id, goal_id)
+          |> mark_convergence_pending(agent_id)
+
+        {error, state, :defer}
 
       {:error, reason} when reason in [:not_found, :invalid_provenance, :projection_failed] ->
         # Synchronous owner-state update only — never async-mint tokens.
@@ -1634,12 +1691,15 @@ defmodule Arbor.Memory.GoalStore do
     MapSet.member?(pending, agent_id)
   end
 
-  defp do_add_goal(agent_id, %Goal{} = goal, supplied_taint, enforce_limit?) do
+  defp do_add_goal(agent_id, %Goal{} = goal, supplied_taint, enforce_limit?),
+    do: do_add_goal(agent_id, goal, supplied_taint, enforce_limit?, :infinity)
+
+  defp do_add_goal(agent_id, %Goal{} = goal, supplied_taint, enforce_limit?, deadline) do
     with {:ok, taint, existing?} <- join_existing_goal_taint(agent_id, goal.id, supplied_taint),
          :ok <- check_goal_limit(agent_id, existing?, enforce_limit?),
          {:ok, payload, taint} <- prepare_labeled_goal(goal, taint),
          {:ok, committed, projection_status} <-
-           commit_labeled_goal(agent_id, goal, payload, taint, {:upsert, goal}) do
+           commit_labeled_goal(agent_id, goal, payload, taint, {:upsert, goal}, deadline) do
       emit_after_commit(fn -> Signals.emit_goal_created(agent_id, committed) end)
       Logger.debug("Goal added for #{agent_id}: #{committed.id}")
       {:ok, committed, projection_status}
@@ -1685,7 +1745,10 @@ defmodule Arbor.Memory.GoalStore do
     _, _ -> {:error, :invalid_provenance}
   end
 
-  defp do_mutate_goal(agent_id, goal_id, supplied_taint, operation) do
+  defp do_mutate_goal(agent_id, goal_id, supplied_taint, operation),
+    do: do_mutate_goal(agent_id, goal_id, supplied_taint, operation, :infinity)
+
+  defp do_mutate_goal(agent_id, goal_id, supplied_taint, operation, deadline) do
     with {:ok, %TaintedValue{value: durable_payload}, _status} <-
            load_authoritative_goal(agent_id, goal_id),
          {:ok, %Goal{} = goal} <- goal_from_map(durable_payload),
@@ -1696,7 +1759,8 @@ defmodule Arbor.Memory.GoalStore do
              goal,
              payload,
              supplied_taint,
-             {:mutate, operation}
+             {:mutate, operation},
+             deadline
            ) do
       emit_mutation_signal(agent_id, goal_id, operation)
       {:ok, updated, projection_status}
@@ -1791,9 +1855,16 @@ defmodule Arbor.Memory.GoalStore do
     join_authoritative_goal_taint(agent_id, goal_id, supplied_taint)
   end
 
-  defp commit_labeled_goal(agent_id, %Goal{} = goal, payload, %Taint{} = taint, transition) do
+  defp commit_labeled_goal(
+         agent_id,
+         %Goal{} = goal,
+         payload,
+         %Taint{} = taint,
+         transition,
+         deadline
+       ) do
     with {:ok, committed_goal, committed_payload, committed_taint} <-
-           commit_goal_record(agent_id, goal, payload, taint, transition) do
+           commit_goal_record(agent_id, goal, payload, taint, transition, deadline) do
       projection_status =
         case install_live_goal(agent_id, committed_goal, committed_payload, committed_taint) do
           :ok -> :projected
@@ -1809,14 +1880,22 @@ defmodule Arbor.Memory.GoalStore do
     end
   end
 
-  defp commit_goal_record(agent_id, %Goal{} = goal, payload, %Taint{} = taint, transition) do
+  defp commit_goal_record(
+         agent_id,
+         %Goal{} = goal,
+         payload,
+         %Taint{} = taint,
+         transition,
+         deadline
+       ) do
     compare_and_swap_goal(
       agent_id,
       goal,
       payload,
       taint,
       transition,
-      @critical_write_attempts
+      @critical_write_attempts,
+      deadline
     )
   end
 
@@ -1826,7 +1905,8 @@ defmodule Arbor.Memory.GoalStore do
          _payload,
          _taint,
          _transition,
-         0
+         0,
+         _deadline
        ),
        do: {:error, :persistence_failed}
 
@@ -1836,11 +1916,13 @@ defmodule Arbor.Memory.GoalStore do
          candidate_payload,
          %Taint{} = supplied_taint,
          transition,
-         attempts
+         attempts,
+         deadline
        ) do
     logical_key = durable_key(agent_id, candidate_goal.id)
 
-    with {:ok, current} <- load_named_goal_context(agent_id, candidate_goal.id),
+    with :ok <- ensure_operation_deadline(deadline),
+         {:ok, current} <- load_named_goal_context(agent_id, candidate_goal.id),
          {:ok, goal, payload} <-
            transition_candidate(candidate_goal, candidate_payload, transition, current),
          {:ok, taint} <- join_context_taint(candidate_goal.id, current, supplied_taint),
@@ -1856,9 +1938,13 @@ defmodule Arbor.Memory.GoalStore do
         candidate_payload,
         supplied_taint,
         transition,
-        attempts
+        attempts,
+        deadline
       )
     else
+      {:error, :request_expired} ->
+        {:error, :request_expired}
+
       {:error, :not_found} ->
         {:error, :not_found}
 
@@ -1895,45 +1981,63 @@ defmodule Arbor.Memory.GoalStore do
          candidate_payload,
          supplied_taint,
          transition,
-         attempts
+         attempts,
+         deadline
        ) do
-    case MemoryStore.compare_and_swap_tainted(@namespace, logical_key, expected, payload,
-           taint: taint
-         ) do
-      {:ok, _record} ->
-        {:ok, goal, payload, taint}
+    case ensure_operation_deadline(deadline) do
+      :ok ->
+        case MemoryStore.compare_and_swap_tainted(@namespace, logical_key, expected, payload,
+               taint: taint
+             ) do
+          {:ok, _record} ->
+            {:ok, goal, payload, taint}
 
-      {:error, {:memory_store, :critical, :outcome_unknown}} ->
-        {:error, :outcome_unknown}
+          {:error, {:memory_store, :critical, :outcome_unknown}} ->
+            {:error, :outcome_unknown}
 
-      {:error, :outcome_unknown} ->
-        {:error, :outcome_unknown}
+          {:error, :outcome_unknown} ->
+            {:error, :outcome_unknown}
 
-      {:error, {:memory_store, :critical, :conflict}} ->
-        compare_and_swap_goal(
-          agent_id,
-          candidate_goal,
-          candidate_payload,
-          supplied_taint,
-          transition,
-          attempts - 1
-        )
+          {:error, {:memory_store, :critical, :conflict}} ->
+            compare_and_swap_goal(
+              agent_id,
+              candidate_goal,
+              candidate_payload,
+              supplied_taint,
+              transition,
+              attempts - 1,
+              deadline
+            )
 
-      {:error, {:memory_store, :critical, reason}}
-      when reason in [:durable_unavailable, :insufficient_durability] ->
-        {:error, :store_unavailable}
+          {:error, {:memory_store, :critical, reason}}
+          when reason in [:durable_unavailable, :insufficient_durability] ->
+            {:error, :store_unavailable}
 
-      {:error, _reason} ->
-        {:error, :persistence_failed}
+          {:error, _reason} ->
+            {:error, :persistence_failed}
 
-      _ ->
-        {:error, :persistence_failed}
+          _ ->
+            {:error, :persistence_failed}
+        end
+
+      {:error, :request_expired} = error ->
+        error
     end
   rescue
     _ -> {:error, :outcome_unknown}
   catch
     _, _ -> {:error, :outcome_unknown}
   end
+
+  defp ensure_operation_deadline(:infinity), do: :ok
+
+  defp ensure_operation_deadline(deadline) when is_integer(deadline) do
+    if System.monotonic_time(:millisecond) <= deadline,
+      do: :ok,
+      else: {:error, :request_expired}
+  end
+
+  defp ensure_operation_deadline(_deadline), do: {:error, :request_expired}
 
   defp load_named_goal_context(agent_id, goal_id) do
     case MemoryStore.load_tainted_authoritative_with_status(
@@ -3503,5 +3607,476 @@ defmodule Arbor.Memory.GoalStore do
       |> Enum.map(&build_tree(&1, all_goals))
 
     %{goal: goal, children: children}
+  end
+
+  defp proposal_transfers(%{proposal_transfers: transfers}) when is_map(transfers), do: transfers
+  defp proposal_transfers(_), do: %{}
+
+  defp normalize_proposal_transfers(state) do
+    Enum.reduce(
+      proposal_transfers(state),
+      %{state | proposal_transfers: %{}},
+      fn {ref, xfer}, acc ->
+        case canonicalize_transfer(xfer) do
+          {:ok, xfer} when xfer.operation_ref == ref ->
+            if expired_reserved?(xfer) and not live_transfer_timer?(xfer) do
+              acc
+              |> put_transfer(%{xfer | timer_ref: nil})
+              |> close_reserved_transfer(ref, %{xfer | timer_ref: nil})
+            else
+              put_transfer(acc, maybe_rearm_transfer_timer(xfer))
+            end
+
+          _error ->
+            quarantine_malformed_transfer(acc, ref, xfer)
+        end
+      end
+    )
+  end
+
+  defp canonicalize_transfer(xfer) when is_map(xfer) do
+    agent_id = xfer[:agent_id]
+
+    with true <- is_reference(xfer[:operation_ref]),
+         true <- ProposalCore.valid_identifier?(agent_id),
+         true <- ProposalCore.valid_identifier?(xfer[:proposal_id]),
+         true <- ProposalCore.valid_identifier?(xfer[:operation_id]),
+         true <- xfer[:kind] in [:create_goal, :update_goal],
+         {:ok, plan} <- ProposalCore.canonicalize_owner_plan(xfer[:kind], xfer[:plan]),
+         true <- ProposalCore.valid_owner_lease?(xfer[:lease], agent_id),
+         true <- match?(%Taint{}, xfer[:joined_taint]),
+         true <- is_reference(xfer[:store_monitor]),
+         true <- is_pid(xfer[:store_pid]),
+         true <- xfer[:phase] in [:reserved, :activated],
+         true <- is_integer(xfer[:deadline_ms]) do
+      {:ok, Map.put(xfer, :plan, plan)}
+    else
+      _ -> :error
+    end
+  end
+
+  defp canonicalize_transfer(_), do: :error
+
+  defp quarantine_malformed_transfer(state, ref, %{phase: :reserved} = xfer) do
+    if recognizable_transfer_lease?(ref, xfer) do
+      xfer = Map.put(xfer, :agent_id, Map.fetch!(xfer.lease, :agent_id))
+
+      state
+      |> put_transfer_at(ref, xfer)
+      |> close_reserved_transfer(ref, xfer)
+    else
+      state = put_transfer_at(state, ref, xfer)
+      quarantine_uncertain_transfer(state, ref, xfer)
+    end
+  end
+
+  defp quarantine_malformed_transfer(state, ref, xfer) when is_map(xfer),
+    do: state |> put_transfer_at(ref, xfer) |> quarantine_uncertain_transfer(ref, xfer)
+
+  defp quarantine_malformed_transfer(_state, _ref, _xfer),
+    do: exit(:malformed_proposal_transfer)
+
+  defp quarantine_uncertain_transfer(state, ref, xfer) do
+    case xfer[:lease] do
+      %{__struct__: Lease} = lease ->
+        agent_id = Map.get(lease, :agent_id)
+
+        if ProposalCore.valid_owner_lease?(lease, agent_id) do
+          xfer = Map.put(xfer, :agent_id, agent_id)
+          safely_report_unknown_transfer(xfer)
+
+          state
+          |> put_transfer_at(ref, xfer)
+          |> mark_convergence_pending(agent_id)
+          |> finish_public_root(agent_id, lease, :defer)
+          |> drop_transfer(ref)
+        else
+          exit(:malformed_proposal_transfer_lease)
+        end
+
+      _ ->
+        exit(:malformed_proposal_transfer_lease)
+    end
+  end
+
+  defp recognizable_transfer_lease?(ref, xfer) do
+    lease = xfer[:lease]
+    agent_id = if is_map(lease), do: Map.get(lease, :agent_id)
+
+    ProposalCore.valid_owner_lease?(lease, agent_id) and
+      xfer[:operation_ref] == ref and is_reference(ref)
+  end
+
+  defp put_transfer_at(state, ref, xfer) do
+    Map.put(state, :proposal_transfers, Map.put(proposal_transfers(state), ref, xfer))
+  end
+
+  defp safely_report_unknown_transfer(xfer) do
+    if is_reference(xfer[:operation_ref]) and
+         ProposalCore.valid_identifier?(xfer[:agent_id]) and
+         ProposalCore.valid_identifier?(xfer[:proposal_id]) and
+         ProposalCore.valid_identifier?(xfer[:operation_id]) do
+      report_proposal_transfer(xfer, {:unknown, :outcome_unknown})
+    end
+
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
+  end
+
+  defp maybe_rearm_transfer_timer(xfer) do
+    timer_ref = xfer[:timer_ref]
+
+    cond do
+      xfer.phase != :reserved ->
+        xfer
+
+      is_reference(timer_ref) and is_integer(Process.read_timer(timer_ref)) ->
+        xfer
+
+      true ->
+        retain_or_rearm_unresolved(%{xfer | timer_ref: nil})
+    end
+  end
+
+  defp expired_reserved?(xfer) do
+    xfer[:phase] == :reserved and ProposalCore.unresolved_rearm(xfer[:deadline_ms]) == :retain
+  end
+
+  defp live_transfer_timer?(xfer) do
+    is_reference(xfer[:timer_ref]) and is_integer(Process.read_timer(xfer.timer_ref))
+  end
+
+  defp retain_or_rearm_unresolved(xfer) do
+    if is_reference(xfer[:timer_ref]), do: Process.cancel_timer(xfer.timer_ref)
+
+    case ProposalCore.unresolved_rearm(xfer[:deadline_ms]) do
+      {:rearm, remaining} ->
+        %{
+          xfer
+          | timer_ref:
+              Process.send_after(
+                self(),
+                {:transfer_reserve_timeout, xfer.operation_ref},
+                remaining
+              )
+        }
+
+      :retain ->
+        attempts = Map.get(xfer, :settle_attempts, 0)
+
+        case ProposalCore.unresolved_backoff(attempts) do
+          {:retry, delay} ->
+            xfer
+            |> Map.put(:settle_attempts, attempts + 1)
+            |> Map.put(
+              :timer_ref,
+              Process.send_after(
+                self(),
+                {:transfer_reserve_timeout, xfer.operation_ref},
+                delay
+              )
+            )
+
+          :terminal ->
+            xfer
+            |> Map.put(:settle_attempts, attempts)
+            |> Map.put(:timer_ref, nil)
+            |> Map.put(:phase, :unresolved)
+        end
+    end
+  end
+
+  defp transfer_status_view(state) do
+    %{count: map_size(proposal_transfers(state))}
+  end
+
+  defp store_caller?({caller, _}) do
+    caller == Process.whereis(Proposal.Store) and is_pid(caller)
+  end
+
+  defp store_caller?(_), do: false
+
+  defp recorded_store_caller?(from, xfer) when is_map(xfer) do
+    store_caller?(from) and elem(from, 0) == xfer[:store_pid]
+  end
+
+  defp recorded_store_caller?(_from, _xfer), do: false
+
+  defp reserve_proposal_transfer(state, from, request, allowed_kinds) do
+    with true <- store_caller?(from),
+         true <- is_map(request) and request[:kind] in allowed_kinds,
+         {:ok, request} <- ProposalCore.validate_owner_transfer_request(request.kind, request),
+         :ok <- enforce_transfer_cap(state, request.agent_id, request.operation_ref) do
+      ref = request.operation_ref
+      store_pid = elem(from, 0)
+      mon = Process.monitor(store_pid)
+      remaining = max(request.deadline_ms - System.monotonic_time(:millisecond), 0)
+      timer = Process.send_after(self(), {:transfer_reserve_timeout, ref}, remaining)
+
+      xfer = %{
+        operation_ref: ref,
+        agent_id: request.agent_id,
+        proposal_id: request.proposal_id,
+        operation_id: request.operation_id,
+        kind: request.kind,
+        plan: request.plan,
+        joined_taint: request.joined_taint,
+        lease: request.lease,
+        store_pid: store_pid,
+        store_monitor: mon,
+        deadline_ms: request.deadline_ms,
+        timer_ref: timer,
+        phase: :reserved
+      }
+
+      {:reserved, put_transfer(state, xfer)}
+    else
+      {:error, _} = error -> {error, state}
+      _ -> {{:error, :invalid_request}, state}
+    end
+  end
+
+  defp enforce_transfer_cap(state, agent_id, ref) do
+    transfers = proposal_transfers(state)
+
+    cond do
+      Map.has_key?(transfers, ref) ->
+        {:error, :invalid_request}
+
+      map_size(transfers) >= ProposalCore.max_pending() ->
+        {:error, :limit_exceeded}
+
+      Enum.count(transfers, fn {_r, xfer} -> is_map(xfer) and xfer[:agent_id] == agent_id end) >=
+          ProposalCore.max_pending() ->
+        {:error, :limit_exceeded}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp activate_proposal_transfer(state, from, request) do
+    ref = if is_map(request), do: request[:operation_ref]
+
+    with true <- is_map(request),
+         %{phase: :reserved} = xfer <- Map.get(proposal_transfers(state), ref),
+         true <- recorded_store_caller?(from, xfer),
+         true <- match?(%Lease{}, request[:lease]),
+         true <- request.lease == xfer.lease,
+         :ok <- MutationAdmission.assert_owner(xfer.lease),
+         false <- transfer_deadline_expired?(xfer) do
+      state = defer_root(state, xfer.agent_id, xfer.lease)
+      xfer = cancel_transfer_timer(%{xfer | phase: :activated})
+      state = put_transfer(state, xfer)
+      {:reply, :scheduled, state, {:continue, {:execute_proposal_transfer, ref}}}
+    else
+      _ -> {:reply, {:error, :invalid_request}, state}
+    end
+  end
+
+  defp cancel_proposal_transfer(state, from, request) do
+    ref = if is_map(request), do: request[:operation_ref]
+    xfer = Map.get(proposal_transfers(state), ref)
+
+    cond do
+      not recorded_store_caller?(from, xfer) ->
+        {{:error, :invalid_request}, state}
+
+      match?(%{phase: :activated}, xfer) ->
+        {:busy, state}
+
+      match?(%{phase: :reserved}, xfer) ->
+        {:ok, close_reserved_transfer(state, ref, xfer)}
+
+      true ->
+        {:ok, state}
+    end
+  end
+
+  defp timeout_reserved_transfer(state, ref) do
+    case Map.get(proposal_transfers(state), ref) do
+      %{phase: :reserved} = xfer ->
+        if live_transfer_timer?(xfer), do: state, else: close_reserved_transfer(state, ref, xfer)
+
+      _ ->
+        state
+    end
+  end
+
+  defp down_reserved_transfer(state, mon) do
+    Enum.reduce(proposal_transfers(state), state, fn {ref, xfer}, acc ->
+      if is_map(xfer) and xfer[:store_monitor] == mon and xfer[:phase] == :reserved do
+        close_reserved_transfer(acc, ref, xfer)
+      else
+        acc
+      end
+    end)
+  end
+
+  defp close_reserved_transfer(state, ref, xfer) do
+    xfer = cancel_transfer_timer(xfer)
+    state = put_transfer(state, xfer)
+
+    case settle_transfer_lease(state, xfer) do
+      {:ok, state} ->
+        drop_transfer(state, ref)
+
+      {:unresolved, state} ->
+        xfer = retain_or_rearm_unresolved(%{xfer | timer_ref: nil})
+
+        if xfer[:phase] == :unresolved do
+          state
+          |> defer_root(xfer.agent_id, xfer.lease)
+          |> mark_convergence_pending(xfer.agent_id)
+          |> drop_transfer(ref)
+        else
+          put_transfer(state, xfer)
+        end
+    end
+  end
+
+  defp settle_transfer_lease(state, %{lease: %Lease{} = lease}) do
+    {result, state} =
+      try do
+        case MutationAdmission.assert_owner(lease) do
+          :ok ->
+            {roots, result} = OwnerRoots.ack(owner_roots(state), lease)
+            {result, put_owner_roots(state, roots)}
+
+          other ->
+            {other, state}
+        end
+      catch
+        :exit, _reason -> {{:error, :unavailable}, state}
+      end
+
+    case ProposalCore.classify_root_settle(result) do
+      :transient -> {:unresolved, state}
+      :absent -> {:ok, put_owner_roots(state, OwnerRoots.forget(owner_roots(state), lease))}
+      :released -> {:ok, state}
+    end
+  rescue
+    _ -> {:unresolved, state}
+  catch
+    _, _ -> {:unresolved, state}
+  end
+
+  defp settle_transfer_lease(state, _), do: {:ok, state}
+
+  defp put_transfer(state, xfer) do
+    transfers = Map.put(proposal_transfers(state), xfer.operation_ref, xfer)
+    Map.put(state, :proposal_transfers, transfers)
+  end
+
+  defp drop_transfer(state, ref) do
+    xfer = Map.get(proposal_transfers(state), ref)
+    if is_map(xfer), do: cancel_transfer_watches(xfer)
+    Map.put(state, :proposal_transfers, Map.delete(proposal_transfers(state), ref))
+  end
+
+  defp cancel_transfer_timer(xfer) do
+    if is_reference(xfer[:timer_ref]), do: Process.cancel_timer(xfer.timer_ref)
+    Map.put(xfer, :timer_ref, nil)
+  end
+
+  defp cancel_transfer_watches(xfer) do
+    if is_reference(xfer[:timer_ref]), do: Process.cancel_timer(xfer.timer_ref)
+    if is_reference(xfer[:store_monitor]), do: Process.demonitor(xfer.store_monitor, [:flush])
+    :ok
+  end
+
+  defp execute_goal_proposal_transfer(state, ref) do
+    case Map.get(proposal_transfers(state), ref) do
+      %{phase: :activated} = xfer ->
+        {outcome, state} =
+          if transfer_deadline_expired?(xfer) do
+            {{:error, :request_expired},
+             finish_public_root(state, xfer.agent_id, xfer.lease, :ack)}
+          else
+            run_goal_transfer(state, xfer)
+          end
+
+        report_proposal_transfer(xfer, outcome)
+        {:noreply, drop_transfer(state, ref)}
+
+      _ ->
+        {:noreply, state}
+    end
+  end
+
+  defp terminalize_activated_transfer(state, ref) do
+    case Map.get(proposal_transfers(state), ref) do
+      %{phase: :activated} = xfer ->
+        report_proposal_transfer(xfer, {:unknown, :outcome_unknown})
+
+        state =
+          state
+          |> mark_convergence_pending(xfer.agent_id)
+          |> finish_public_root(xfer.agent_id, xfer.lease, :defer)
+          |> drop_transfer(ref)
+
+        {:noreply, state}
+
+      _ ->
+        {:noreply, state}
+    end
+  end
+
+  defp transfer_deadline_expired?(xfer) do
+    not is_integer(xfer[:deadline_ms]) or
+      System.monotonic_time(:millisecond) > xfer.deadline_ms
+  end
+
+  defp run_goal_transfer(state, %{kind: :create_goal} = xfer) do
+    plan = xfer.plan
+    description = Map.get(plan, :description, "")
+    domain_id = Map.get(plan, :domain_id)
+    priority = Map.get(plan, :priority, :medium)
+    goal = Goal.new(description, id: domain_id, priority: priority)
+    result = do_add_goal(xfer.agent_id, goal, xfer.joined_taint, true, xfer.deadline_ms)
+    {reply, state, disposition} = track_goal_write_result(result, state, xfer.agent_id, goal.id)
+    state = finish_public_root(state, xfer.agent_id, xfer.lease, disposition)
+    {goal_transfer_outcome(reply, domain_id), state}
+  end
+
+  defp run_goal_transfer(state, %{kind: :update_goal} = xfer) do
+    plan = xfer.plan
+    goal_id = plan.goal_id
+    progress = plan.progress * 1.0
+
+    result =
+      do_mutate_goal(
+        xfer.agent_id,
+        goal_id,
+        xfer.joined_taint,
+        {:progress, progress},
+        xfer.deadline_ms
+      )
+
+    {reply, state, disposition} = track_goal_write_result(result, state, xfer.agent_id, goal_id)
+    state = finish_public_root(state, xfer.agent_id, xfer.lease, disposition)
+    {goal_transfer_outcome(reply, goal_id), state}
+  end
+
+  defp goal_transfer_outcome({:ok, %Goal{} = goal}, _id), do: {:ok, goal.id}
+  defp goal_transfer_outcome({:ok, _}, id) when is_binary(id), do: {:ok, id}
+  defp goal_transfer_outcome({:error, :outcome_unknown}, _id), do: {:unknown, :outcome_unknown}
+  defp goal_transfer_outcome({:error, reason}, _id), do: {:error, reason}
+  defp goal_transfer_outcome(_, _id), do: {:unknown, :outcome_unknown}
+
+  defp report_proposal_transfer(xfer, outcome) do
+    _ =
+      Proposal.Store.acknowledge_transfer(%{
+        agent_id: xfer.agent_id,
+        proposal_id: xfer.proposal_id,
+        operation_ref: xfer.operation_ref,
+        operation_id: xfer.operation_id,
+        outcome: outcome
+      })
+
+    :ok
   end
 end

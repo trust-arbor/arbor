@@ -40,12 +40,16 @@ defmodule Arbor.Memory.MutationAdmission.OwnerRoots do
   def defer(%__MODULE__{} = _roots, _agent_id, _lease), do: {:error, :invalid_lease}
 
   @spec ack(t(), Lease.t()) :: {t(), :ok | {:error, atom()}}
-  def ack(%__MODULE__{by_agent: by_agent} = roots, %Lease{} = lease) do
+  def ack(%__MODULE__{} = roots, %Lease{} = lease) do
     result = MutationAdmission.release(lease)
 
+    {forget(roots, lease), result}
+  end
+
+  @spec forget(t(), Lease.t()) :: t()
+  def forget(%__MODULE__{by_agent: by_agent} = roots, %Lease{} = lease) do
     next_by_agent =
-      by_agent
-      |> Enum.reduce(%{}, fn {agent_id, leases}, acc ->
+      Enum.reduce(by_agent, %{}, fn {agent_id, leases}, acc ->
         remaining = Enum.reject(leases, &(&1 == lease))
 
         if remaining == [] do
@@ -55,8 +59,10 @@ defmodule Arbor.Memory.MutationAdmission.OwnerRoots do
         end
       end)
 
-    {%{roots | by_agent: next_by_agent}, result}
+    %{roots | by_agent: next_by_agent}
   end
+
+  def forget(%__MODULE__{} = roots, _lease), do: roots
 
   @spec settle_agent(t(), String.t(), Lease.t() | nil) :: {t(), :ok}
   def settle_agent(%__MODULE__{} = roots, agent_id, lease_or_nil \\ nil) do
