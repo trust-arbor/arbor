@@ -209,28 +209,51 @@ defmodule Arbor.Dashboard.Components.ExternalAgentsComponent do
   end
 
   defp do_register(display_name, agent_type, socket) do
-    character = Character.new(name: display_name, tone: "external")
+    with :ok <- require_authenticated_principal(socket) do
+      character = Character.new(name: display_name, tone: "external")
 
-    opts =
-      ExternalAgentsCore.build_registration_opts(
-        display_name,
-        agent_type,
-        socket.assigns[:tenant_context]
-      )
-      |> Keyword.put(:character, character)
+      opts =
+        ExternalAgentsCore.build_registration_opts(
+          display_name,
+          agent_type,
+          socket.assigns[:tenant_context]
+        )
+        |> Keyword.put(:character, character)
 
-    try do
-      case Lifecycle.create(display_name, opts) do
-        {:ok, profile, identity} -> {:ok, profile, identity}
-        {:ok, _profile} -> {:error, :return_identity_not_honored}
-        {:error, reason} -> {:error, reason}
+      try do
+        case Lifecycle.create(display_name, opts) do
+          {:ok, profile, identity} -> {:ok, profile, identity}
+          {:ok, _profile} -> {:error, :return_identity_not_honored}
+          {:error, reason} -> {:error, reason}
+        end
+      catch
+        :exit, _ -> {:error, :security_unavailable}
       end
-    catch
-      :exit, _ -> {:error, :security_unavailable}
     end
   end
 
-  defp do_revoke(_agent_id, nil), do: {:error, :not_owner}
+  # Server-side gate: the UI hides Register when unauthenticated, but events can
+  # still be pushed. Refuse Lifecycle.create without a real human principal.
+  defp require_authenticated_principal(socket) do
+    tenant = socket.assigns[:tenant_context]
+    principal_id = Arbor.Contracts.TenantContext.principal_id(tenant)
+
+    cond do
+      socket.assigns[:authenticated?] != true ->
+        {:error, :unauthenticated}
+
+      not is_binary(socket.assigns[:current_agent_id]) ->
+        {:error, :unauthenticated}
+
+      not is_binary(principal_id) ->
+        {:error, :unauthenticated}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp do_revoke(_agent_id, nil), do: {:error, :unauthenticated}
 
   defp do_revoke(agent_id, owner) do
     with {:ok, profile} <- safe_restore(agent_id),
@@ -262,7 +285,7 @@ defmodule Arbor.Dashboard.Components.ExternalAgentsComponent do
     :exit, _ -> {:error, :security_unavailable}
   end
 
-  defp do_rename(_agent_id, _new_name, nil), do: {:error, :not_owner}
+  defp do_rename(_agent_id, _new_name, nil), do: {:error, :unauthenticated}
 
   defp do_rename(agent_id, new_name, owner) do
     with {:ok, profile} <- safe_restore(agent_id),

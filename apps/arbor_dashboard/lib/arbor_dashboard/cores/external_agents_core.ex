@@ -248,6 +248,7 @@ defmodule Arbor.Dashboard.Cores.ExternalAgentsCore do
 
   @doc "Translate an internal error reason into a user-friendly message."
   @spec format_error(any()) :: String.t()
+  def format_error(:unauthenticated), do: "Sign in required to register external agents."
   def format_error(:not_owner), do: "You can only modify agents you registered."
   def format_error(:security_unavailable), do: "Security subsystem unavailable. Try again later."
 

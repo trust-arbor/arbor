@@ -101,6 +101,11 @@ config :arbor_dashboard, Arbor.Dashboard.Endpoint,
   check_origin: false,
   server: true
 
+# When OIDC is unset and require_auth is false, OidcAuth establishes a stable
+# local human operator session so External Agents registration works without
+# Zitadel. Must NEVER be enabled in prod (prod sets require_auth: true anyway).
+config :arbor_dashboard, dev_local_operator: true
+
 # Actions — use Postgres backends for durable job tracking (both adapters use the same Ecto queries)
 config :arbor_actions, :persistence,
   queryable_store_backend: Arbor.Persistence.QueryableStore.Postgres,

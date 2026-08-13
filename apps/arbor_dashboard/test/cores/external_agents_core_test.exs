@@ -286,6 +286,7 @@ defmodule Arbor.Dashboard.Cores.ExternalAgentsCoreTest do
 
   describe "format_error/1" do
     test "translates known reasons to user-friendly messages" do
+      assert ExternalAgentsCore.format_error(:unauthenticated) =~ "Sign in required"
       assert ExternalAgentsCore.format_error(:not_owner) =~ "only modify agents you registered"
       assert ExternalAgentsCore.format_error(:security_unavailable) =~ "Security subsystem"
       assert ExternalAgentsCore.format_error(:return_identity_not_honored) =~ "Internal error"
