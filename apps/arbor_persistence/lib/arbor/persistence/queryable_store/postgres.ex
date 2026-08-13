@@ -1,10 +1,17 @@
 defmodule Arbor.Persistence.QueryableStore.Postgres do
   @moduledoc """
-  PostgreSQL-backed implementation of the QueryableStore behaviour.
+  Ecto-backed implementation of the QueryableStore behaviour.
+
+  Historical module name: despite `Postgres` in the name, this backend is
+  dual-adapter — it supports both `Ecto.Adapters.Postgres` and
+  `Ecto.Adapters.SQLite3` (selected via `ARBOR_DB` / `Arbor.Persistence.Repo`).
+  Raw SQL paths encode map/datetime params for SQLite and use JSON1
+  (`json_extract`) fragments where Postgres uses JSONB operators.
 
   Uses a single `records` table with namespace scoping. All domains
   (jobs, mailbox, sessions, etc.) share one table, differentiated by
-  the `namespace` column. Domain-specific data lives in JSONB columns.
+  the `namespace` column. Domain-specific data lives in JSON columns
+  (JSONB on Postgres, JSON TEXT on SQLite).
 
   ## Identity
 
@@ -22,12 +29,17 @@ defmodule Arbor.Persistence.QueryableStore.Postgres do
 
   ## Configuration
 
-  The Repo module must be configured and started:
+  The Repo module must be configured and started. For PostgreSQL:
 
       config :arbor_persistence, Arbor.Persistence.Repo,
         database: "arbor_dev",
         username: "postgres",
         hostname: "localhost"
+
+  For SQLite3 (default zero-config path):
+
+      config :arbor_persistence, Arbor.Persistence.Repo,
+        database: Path.expand("~/.arbor/arbor_dev.db")
 
   ## Usage
 
@@ -242,10 +254,10 @@ defmodule Arbor.Persistence.QueryableStore.Postgres do
 
       records =
         base_query(namespace)
-        |> apply_conditions(filter.conditions)
+        |> apply_conditions(filter.conditions, repo)
         |> apply_since(filter.since)
         |> apply_until(filter.until)
-        |> apply_order(filter.order_by)
+        |> apply_order(filter.order_by, repo)
         |> apply_offset(filter.offset)
         |> apply_limit(limit)
         |> repo.all()
@@ -271,7 +283,7 @@ defmodule Arbor.Persistence.QueryableStore.Postgres do
 
     count =
       base_query(namespace)
-      |> apply_conditions(filter.conditions)
+      |> apply_conditions(filter.conditions, repo)
       |> apply_since(filter.since)
       |> apply_until(filter.until)
       |> select([r], count(r.id))
@@ -292,7 +304,7 @@ defmodule Arbor.Persistence.QueryableStore.Postgres do
 
     query =
       base_query(namespace)
-      |> apply_conditions(filter.conditions)
+      |> apply_conditions(filter.conditions, repo)
       |> apply_since(filter.since)
       |> apply_until(filter.until)
 
@@ -353,7 +365,10 @@ defmodule Arbor.Persistence.QueryableStore.Postgres do
               deleted_at, inserted_at, updated_at
     """
 
-    case repo.query(sql, [logical_id, namespace, key, data, metadata, now, now]) do
+    params =
+      encode_query_params(repo, [logical_id, namespace, key, data, metadata, now, now])
+
+    case repo.query(sql, params) do
       {:ok, %{num_rows: 1, rows: [row], columns: columns}} ->
         {:ok, row_to_record(columns, row)}
 
@@ -389,7 +404,10 @@ defmodule Arbor.Persistence.QueryableStore.Postgres do
               deleted_at, inserted_at, updated_at
     """
 
-    case repo.query(sql, [logical_id, namespace, key, data, metadata, now, now]) do
+    params =
+      encode_query_params(repo, [logical_id, namespace, key, data, metadata, now, now])
+
+    case repo.query(sql, params) do
       {:ok, %{num_rows: 1, rows: [row], columns: columns}} ->
         {:ok, row_to_record(columns, row)}
 
@@ -421,7 +439,10 @@ defmodule Arbor.Persistence.QueryableStore.Postgres do
               deleted_at, inserted_at, updated_at
     """
 
-    case repo.query(sql, [data, metadata, now, namespace, key, exp_gen, exp_rev]) do
+    params =
+      encode_query_params(repo, [data, metadata, now, namespace, key, exp_gen, exp_rev])
+
+    case repo.query(sql, params) do
       {:ok, %{num_rows: 1, rows: [row], columns: columns}} ->
         {:ok, row_to_record(columns, row)}
 
@@ -436,17 +457,39 @@ defmodule Arbor.Persistence.QueryableStore.Postgres do
     end
   end
 
+  # Must match the RETURNING column order in atomic_upsert/cas_* SQL.
+  # Exqlite often returns `columns: []` for RETURNING result sets, so we fall
+  # back to this positional layout when names are absent.
+  @returning_columns [
+    "id",
+    "namespace",
+    "key",
+    "data",
+    "metadata",
+    "generation",
+    "revision",
+    "deleted_at",
+    "inserted_at",
+    "updated_at"
+  ]
+
   defp row_to_record(columns, row) do
+    named_columns =
+      case columns do
+        list when is_list(list) and list != [] -> Enum.map(list, &to_string/1)
+        _ -> @returning_columns
+      end
+
     map =
-      columns
+      named_columns
       |> Enum.zip(row)
-      |> Map.new(fn {col, val} -> {to_string(col), val} end)
+      |> Map.new(fn {col, val} -> {col, val} end)
 
     %Record{
       id: map["id"],
       key: map["key"],
-      data: map["data"] || %{},
-      metadata: map["metadata"] || %{},
+      data: decode_json_field(map["data"]),
+      metadata: decode_json_field(map["metadata"]),
       generation: map["generation"] || 0,
       revision: map["revision"] || 0,
       inserted_at: utc_datetime!(map["inserted_at"], :inserted_at),
@@ -454,11 +497,41 @@ defmodule Arbor.Persistence.QueryableStore.Postgres do
     }
   end
 
+  defp decode_json_field(nil), do: %{}
+  defp decode_json_field(value) when is_map(value), do: value
+
+  defp decode_json_field(value) when is_binary(value) do
+    case Jason.decode(value) do
+      {:ok, decoded} when is_map(decoded) -> decoded
+      {:ok, _other} -> %{}
+      {:error, _} -> %{}
+    end
+  end
+
+  defp decode_json_field(_other), do: %{}
+
   defp utc_datetime!(%DateTime{} = datetime, _field),
     do: DateTime.shift_zone!(datetime, "Etc/UTC")
 
   defp utc_datetime!(%NaiveDateTime{} = datetime, _field),
     do: DateTime.from_naive!(datetime, "Etc/UTC")
+
+  # Raw SQLite RETURNING yields ISO8601 TEXT; Postgres/Ecto usually yield structs.
+  defp utc_datetime!(value, field) when is_binary(value) do
+    case DateTime.from_iso8601(value) do
+      {:ok, datetime, _offset} ->
+        DateTime.shift_zone!(datetime, "Etc/UTC")
+
+      {:error, _} ->
+        case NaiveDateTime.from_iso8601(value) do
+          {:ok, naive} ->
+            DateTime.from_naive!(naive, "Etc/UTC")
+
+          {:error, _} ->
+            raise(ArgumentError, "invalid persisted record #{field}: #{inspect(value)}")
+        end
+    end
+  end
 
   defp utc_datetime!(value, field),
     do: raise(ArgumentError, "invalid persisted record #{field}: #{inspect(value)}")
@@ -471,97 +544,254 @@ defmodule Arbor.Persistence.QueryableStore.Postgres do
   # Condition Translation
   #
   # Top-level Record fields (key, inserted_at, updated_at) → direct column queries
-  # Everything else → JSONB data column queries
+  # Everything else → JSON data column queries (JSONB on Postgres, JSON1 on SQLite)
   # ---------------------------------------------------------------------------
 
-  defp apply_conditions(query, []), do: query
+  defp apply_conditions(query, [], _repo), do: query
 
-  defp apply_conditions(query, [{field, op, value} | rest]) do
+  defp apply_conditions(query, [{field, op, value} | rest], repo) do
     query
-    |> apply_condition(field, op, value)
-    |> apply_conditions(rest)
+    |> apply_condition(field, op, value, repo)
+    |> apply_conditions(rest, repo)
   end
 
   # Key field — direct column
-  defp apply_condition(query, :key, :eq, value),
+  defp apply_condition(query, :key, :eq, value, _repo),
     do: where(query, [r], r.key == ^value)
 
-  defp apply_condition(query, :key, :neq, value),
+  defp apply_condition(query, :key, :neq, value, _repo),
     do: where(query, [r], r.key != ^value)
 
-  defp apply_condition(query, :key, :in, values) when is_list(values),
+  defp apply_condition(query, :key, :in, values, _repo) when is_list(values),
     do: where(query, [r], r.key in ^values)
 
-  defp apply_condition(query, :key, :contains, value),
+  defp apply_condition(query, :key, :contains, value, _repo),
     do: where(query, [r], ilike(r.key, ^"%#{escape_like(value)}%"))
 
   # Timestamp fields — direct columns
-  defp apply_condition(query, :inserted_at, op, value),
+  defp apply_condition(query, :inserted_at, op, value, _repo),
     do: apply_timestamp_condition(query, :inserted_at, op, value)
 
-  defp apply_condition(query, :updated_at, op, value),
+  defp apply_condition(query, :updated_at, op, value, _repo),
     do: apply_timestamp_condition(query, :updated_at, op, value)
 
-  # Data fields — JSONB queries
-  defp apply_condition(query, field, :eq, value) do
-    field_str = to_string(field)
+  # Data fields — adapter-aware JSON queries
+  defp apply_condition(query, field, :eq, value, repo) do
+    cond do
+      sqlite_repo?(repo) ->
+        apply_sqlite_data_eq(query, field, value)
 
-    where(
-      query,
-      [r],
-      fragment("? @> ?::jsonb", r.data, ^%{field_str => value})
-    )
-  end
+      postgres_repo?(repo) ->
+        field_str = to_string(field)
 
-  defp apply_condition(query, field, :neq, value) do
-    field_str = to_string(field)
+        where(
+          query,
+          [r],
+          fragment("? @> ?::jsonb", r.data, ^%{field_str => value})
+        )
 
-    where(
-      query,
-      [r],
-      fragment("NOT (? @> ?::jsonb)", r.data, ^%{field_str => value})
-    )
-  end
-
-  defp apply_condition(query, field, :in, values) when is_list(values) do
-    field_str = to_string(field)
-    str_values = Enum.map(values, &to_string/1)
-
-    where(
-      query,
-      [r],
-      fragment("?->>? = ANY(?)", r.data, ^field_str, ^str_values)
-    )
-  end
-
-  defp apply_condition(query, field, :contains, value) do
-    field_str = to_string(field)
-    escaped = "%#{escape_like(value)}%"
-
-    where(
-      query,
-      [r],
-      fragment("?->>? ILIKE ?", r.data, ^field_str, ^escaped)
-    )
-  end
-
-  defp apply_condition(query, field, op, value) when op in [:gt, :gte, :lt, :lte] do
-    field_str = to_string(field)
-
-    case op do
-      :gt ->
-        where(query, [r], fragment("(?->>?)::numeric > ?::numeric", r.data, ^field_str, ^value))
-
-      :gte ->
-        where(query, [r], fragment("(?->>?)::numeric >= ?::numeric", r.data, ^field_str, ^value))
-
-      :lt ->
-        where(query, [r], fragment("(?->>?)::numeric < ?::numeric", r.data, ^field_str, ^value))
-
-      :lte ->
-        where(query, [r], fragment("(?->>?)::numeric <= ?::numeric", r.data, ^field_str, ^value))
+      true ->
+        apply_sqlite_data_eq(query, field, value)
     end
   end
+
+  defp apply_condition(query, field, :neq, value, repo) do
+    cond do
+      sqlite_repo?(repo) ->
+        apply_sqlite_data_neq(query, field, value)
+
+      postgres_repo?(repo) ->
+        field_str = to_string(field)
+
+        where(
+          query,
+          [r],
+          fragment("NOT (? @> ?::jsonb)", r.data, ^%{field_str => value})
+        )
+
+      true ->
+        apply_sqlite_data_neq(query, field, value)
+    end
+  end
+
+  defp apply_condition(query, field, :in, values, repo) when is_list(values) do
+    str_values = Enum.map(values, &to_string/1)
+
+    cond do
+      sqlite_repo?(repo) ->
+        path = json_path(field)
+
+        where(
+          query,
+          [r],
+          fragment("json_extract(?, ?)", r.data, ^path) in ^str_values
+        )
+
+      postgres_repo?(repo) ->
+        field_str = to_string(field)
+
+        where(
+          query,
+          [r],
+          fragment("?->>? = ANY(?)", r.data, ^field_str, ^str_values)
+        )
+
+      true ->
+        path = json_path(field)
+
+        where(
+          query,
+          [r],
+          fragment("json_extract(?, ?)", r.data, ^path) in ^str_values
+        )
+    end
+  end
+
+  defp apply_condition(query, field, :contains, value, repo) do
+    field_str = to_string(field)
+    escaped = "%#{escape_like(to_string(value))}%"
+
+    cond do
+      sqlite_repo?(repo) ->
+        path = json_path(field)
+
+        where(
+          query,
+          [r],
+          fragment("json_extract(?, ?) LIKE ? ESCAPE '\\'", r.data, ^path, ^escaped)
+        )
+
+      postgres_repo?(repo) ->
+        where(
+          query,
+          [r],
+          fragment("?->>? ILIKE ?", r.data, ^field_str, ^escaped)
+        )
+
+      true ->
+        path = json_path(field)
+
+        where(
+          query,
+          [r],
+          fragment("json_extract(?, ?) LIKE ? ESCAPE '\\'", r.data, ^path, ^escaped)
+        )
+    end
+  end
+
+  defp apply_condition(query, field, op, value, repo) when op in [:gt, :gte, :lt, :lte] do
+    field_str = to_string(field)
+
+    cond do
+      sqlite_repo?(repo) or not postgres_repo?(repo) ->
+        path = json_path(field)
+
+        case op do
+          :gt ->
+            where(
+              query,
+              [r],
+              fragment("CAST(json_extract(?, ?) AS REAL) > ?", r.data, ^path, ^value)
+            )
+
+          :gte ->
+            where(
+              query,
+              [r],
+              fragment("CAST(json_extract(?, ?) AS REAL) >= ?", r.data, ^path, ^value)
+            )
+
+          :lt ->
+            where(
+              query,
+              [r],
+              fragment("CAST(json_extract(?, ?) AS REAL) < ?", r.data, ^path, ^value)
+            )
+
+          :lte ->
+            where(
+              query,
+              [r],
+              fragment("CAST(json_extract(?, ?) AS REAL) <= ?", r.data, ^path, ^value)
+            )
+        end
+
+      true ->
+        case op do
+          :gt ->
+            where(
+              query,
+              [r],
+              fragment("(?->>?)::numeric > ?::numeric", r.data, ^field_str, ^value)
+            )
+
+          :gte ->
+            where(
+              query,
+              [r],
+              fragment("(?->>?)::numeric >= ?::numeric", r.data, ^field_str, ^value)
+            )
+
+          :lt ->
+            where(
+              query,
+              [r],
+              fragment("(?->>?)::numeric < ?::numeric", r.data, ^field_str, ^value)
+            )
+
+          :lte ->
+            where(
+              query,
+              [r],
+              fragment("(?->>?)::numeric <= ?::numeric", r.data, ^field_str, ^value)
+            )
+        end
+    end
+  end
+
+  defp apply_sqlite_data_eq(query, field, value) when is_map(value) or is_list(value) do
+    path = json_path(field)
+    encoded = Jason.encode!(value)
+
+    where(
+      query,
+      [r],
+      fragment("json_extract(?, ?) = ?", r.data, ^path, ^encoded)
+    )
+  end
+
+  defp apply_sqlite_data_eq(query, field, value) do
+    path = json_path(field)
+
+    where(
+      query,
+      [r],
+      fragment("json_extract(?, ?) = ?", r.data, ^path, ^value)
+    )
+  end
+
+  defp apply_sqlite_data_neq(query, field, value) when is_map(value) or is_list(value) do
+    path = json_path(field)
+    encoded = Jason.encode!(value)
+
+    where(
+      query,
+      [r],
+      fragment("NOT (json_extract(?, ?) = ?)", r.data, ^path, ^encoded)
+    )
+  end
+
+  defp apply_sqlite_data_neq(query, field, value) do
+    path = json_path(field)
+
+    where(
+      query,
+      [r],
+      fragment("NOT (json_extract(?, ?) = ?)", r.data, ^path, ^value)
+    )
+  end
+
+  defp json_path(field), do: "$." <> to_string(field)
 
   defp apply_timestamp_condition(query, :inserted_at, op, value),
     do: apply_inserted_at(query, op, value)
@@ -595,20 +825,26 @@ defmodule Arbor.Persistence.QueryableStore.Postgres do
   # Ordering
   # ---------------------------------------------------------------------------
 
-  defp apply_order(query, nil), do: query
+  defp apply_order(query, nil, _repo), do: query
 
-  defp apply_order(query, {:inserted_at, dir}),
+  defp apply_order(query, {:inserted_at, dir}, _repo),
     do: order_by(query, [r], [{^dir, r.inserted_at}])
 
-  defp apply_order(query, {:updated_at, dir}),
+  defp apply_order(query, {:updated_at, dir}, _repo),
     do: order_by(query, [r], [{^dir, r.updated_at}])
 
-  defp apply_order(query, {:key, dir}),
+  defp apply_order(query, {:key, dir}, _repo),
     do: order_by(query, [r], [{^dir, r.key}])
 
-  defp apply_order(query, {field, dir}) do
+  defp apply_order(query, {field, dir}, repo) do
     field_str = to_string(field)
-    order_by(query, [r], [{^dir, fragment("?->>?", r.data, ^field_str)}])
+
+    if sqlite_repo?(repo) do
+      path = json_path(field)
+      order_by(query, [r], [{^dir, fragment("json_extract(?, ?)", r.data, ^path)}])
+    else
+      order_by(query, [r], [{^dir, fragment("?->>?", r.data, ^field_str)}])
+    end
   end
 
   # ---------------------------------------------------------------------------
@@ -627,27 +863,59 @@ defmodule Arbor.Persistence.QueryableStore.Postgres do
   # ---------------------------------------------------------------------------
 
   defp execute_aggregate(repo, query, field_str, :sum) do
-    repo.one(select(query, [r], fragment("SUM((?->>?)::numeric)", r.data, ^field_str)))
+    if sqlite_repo?(repo) do
+      path = "$." <> field_str
+
+      repo.one(
+        select(query, [r], fragment("SUM(CAST(json_extract(?, ?) AS REAL))", r.data, ^path))
+      )
+    else
+      repo.one(select(query, [r], fragment("SUM((?->>?)::numeric)", r.data, ^field_str)))
+    end
   end
 
   defp execute_aggregate(repo, query, field_str, :avg) do
-    repo.one(select(query, [r], fragment("AVG((?->>?)::numeric)", r.data, ^field_str)))
+    if sqlite_repo?(repo) do
+      path = "$." <> field_str
+
+      repo.one(
+        select(query, [r], fragment("AVG(CAST(json_extract(?, ?) AS REAL))", r.data, ^path))
+      )
+    else
+      repo.one(select(query, [r], fragment("AVG((?->>?)::numeric)", r.data, ^field_str)))
+    end
   end
 
   defp execute_aggregate(repo, query, field_str, :min) do
-    repo.one(select(query, [r], fragment("MIN((?->>?)::numeric)", r.data, ^field_str)))
+    if sqlite_repo?(repo) do
+      path = "$." <> field_str
+
+      repo.one(
+        select(query, [r], fragment("MIN(CAST(json_extract(?, ?) AS REAL))", r.data, ^path))
+      )
+    else
+      repo.one(select(query, [r], fragment("MIN((?->>?)::numeric)", r.data, ^field_str)))
+    end
   end
 
   defp execute_aggregate(repo, query, field_str, :max) do
-    repo.one(select(query, [r], fragment("MAX((?->>?)::numeric)", r.data, ^field_str)))
+    if sqlite_repo?(repo) do
+      path = "$." <> field_str
+
+      repo.one(
+        select(query, [r], fragment("MAX(CAST(json_extract(?, ?) AS REAL))", r.data, ^path))
+      )
+    else
+      repo.one(select(query, [r], fragment("MAX((?->>?)::numeric)", r.data, ^field_str)))
+    end
   end
 
   # ---------------------------------------------------------------------------
   # LIKE Injection Prevention
   #
   # Escapes LIKE metacharacters (%, _, \) so user input is matched literally
-  # when used in ILIKE patterns. Without this, a user passing "%" as a filter
-  # value would match every row (full table scan + information disclosure).
+  # when used in ILIKE/LIKE patterns. Without this, a user passing "%" as a
+  # filter value would match every row (full table scan + information disclosure).
   # ---------------------------------------------------------------------------
 
   defp escape_like(value) when is_binary(value) do
@@ -655,5 +923,55 @@ defmodule Arbor.Persistence.QueryableStore.Postgres do
     |> String.replace("\\", "\\\\")
     |> String.replace("%", "\\%")
     |> String.replace("_", "\\_")
+  end
+
+  # ---------------------------------------------------------------------------
+  # Adapter detection + raw-query param encoding
+  #
+  # Same technique as EventLog.Ecto: dispatch on repo.__adapter__/0 via a
+  # parameter so the type checker cannot narrow away the non-selected branch.
+  # ---------------------------------------------------------------------------
+
+  defp postgres_repo?(repo) do
+    function_exported?(repo, :__adapter__, 0) and
+      repo.__adapter__() == Ecto.Adapters.Postgres
+  end
+
+  defp sqlite_repo?(repo) do
+    function_exported?(repo, :__adapter__, 0) and
+      repo.__adapter__() == Ecto.Adapters.SQLite3
+  end
+
+  defp encode_query_params(repo, params) do
+    Enum.map(params, &encode_query_param(repo, &1))
+  end
+
+  # DateTime/NaiveDateTime are maps (`is_map/1`); match them before JSON encoding.
+  defp encode_query_param(repo, %DateTime{} = dt),
+    do: encode_datetime_param(repo, dt)
+
+  defp encode_query_param(repo, %NaiveDateTime{} = dt),
+    do: encode_datetime_param(repo, dt)
+
+  defp encode_query_param(repo, %{} = value),
+    do: encode_json_param(repo, value)
+
+  defp encode_query_param(repo, value) when is_list(value),
+    do: encode_json_param(repo, value)
+
+  defp encode_query_param(_repo, value), do: value
+
+  defp encode_json_param(repo, value) when is_map(value) or is_list(value) do
+    if sqlite_repo?(repo), do: Jason.encode!(value), else: value
+  end
+
+  defp encode_json_param(_repo, value), do: value
+
+  defp encode_datetime_param(repo, %DateTime{} = dt) do
+    if sqlite_repo?(repo), do: DateTime.to_iso8601(dt), else: dt
+  end
+
+  defp encode_datetime_param(repo, %NaiveDateTime{} = dt) do
+    if sqlite_repo?(repo), do: NaiveDateTime.to_iso8601(dt), else: dt
   end
 end

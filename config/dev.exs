@@ -99,7 +99,7 @@ config :arbor_dashboard, Arbor.Dashboard.Endpoint,
 # Actions — use Postgres backends for durable job tracking (both adapters use the same Ecto queries)
 config :arbor_actions, :persistence,
   queryable_store_backend: Arbor.Persistence.QueryableStore.Postgres,
-  event_log_backend: Arbor.Persistence.EventLog.Postgres
+  event_log_backend: Arbor.Persistence.EventLog.Ecto
 
 # Durable interaction terminals use the same SQL record store. Despite the
 # backend's historical name, it supports both configured Ecto adapters.
