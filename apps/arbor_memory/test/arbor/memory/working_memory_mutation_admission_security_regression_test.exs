@@ -54,7 +54,10 @@ defmodule Arbor.Memory.WorkingMemoryMutationAdmissionSecurityRegressionTest do
     wm = put_thought(new_wm(agent_id), "t1", "seed before drain")
 
     assert :ok = WorkingMemoryStore.save_working_memory_tainted(agent_id, wm, taint)
-    assert {:ok, exported} = WorkingMemoryStore.export_working_memory_provenance_snapshot(agent_id)
+
+    assert {:ok, exported} =
+             WorkingMemoryStore.export_working_memory_provenance_snapshot(agent_id)
+
     before = durable_bytes_and_revision!(agent_id)
     before_sidecars = sidecar_inventory(agent_id)
     before_signals = recent_wm_signals(agent_id)
@@ -240,7 +243,10 @@ defmodule Arbor.Memory.WorkingMemoryMutationAdmissionSecurityRegressionTest do
     parent = self()
 
     assert :ok = WorkingMemoryStore.save_working_memory(agent_id, wm)
-    assert {:ok, exported} = WorkingMemoryStore.export_working_memory_provenance_snapshot(agent_id)
+
+    assert {:ok, exported} =
+             WorkingMemoryStore.export_working_memory_provenance_snapshot(agent_id)
+
     assert {:ok, %{active_roots: 0}} = MutationAdmission.status(agent_id)
 
     holder = hold_agent_lock!(agent_id)
@@ -358,13 +364,18 @@ defmodule Arbor.Memory.WorkingMemoryMutationAdmissionSecurityRegressionTest do
     wm = put_thought(new_wm(agent_id), "c1", "cleanup seed")
 
     assert :ok = WorkingMemoryStore.save_working_memory_tainted(agent_id, wm, taint)
-    assert {:ok, exported} = WorkingMemoryStore.export_working_memory_provenance_snapshot(agent_id)
+
+    assert {:ok, exported} =
+             WorkingMemoryStore.export_working_memory_provenance_snapshot(agent_id)
+
     sidecars_before = sidecar_inventory(agent_id)
     assert sidecars_before != empty_sidecar_inventory()
 
     assert {:ok, _fence} = MutationAdmission.drain(agent_id)
 
-    assert :ok = WorkingMemoryStore.validate_working_memory_provenance_snapshot(agent_id, exported)
+    assert :ok =
+             WorkingMemoryStore.validate_working_memory_provenance_snapshot(agent_id, exported)
+
     assert WorkingMemoryStore.working_memory_provenance_snapshot?(exported)
     assert {:ok, false} = WorkingMemoryStore.agent_content_absent?(agent_id)
     assert {:ok, %{active_roots: 0}} = MutationAdmission.status(agent_id)
