@@ -141,6 +141,7 @@ defmodule Arbor.Memory.MutationAdmission do
   def release(_lease, _opts), do: {:error, :invalid_request}
 
   @doc false
+  # Read-only exact-holder proof; durable authority is checked before local state.
   @spec assert_owner(Lease.t(), keyword()) :: :ok | {:error, atom()}
   def assert_owner(lease, opts \\ [])
 
@@ -552,12 +553,12 @@ defmodule Arbor.Memory.MutationAdmission do
   defp do_assert_owner(state, lease, caller) do
     lease_hash = hash_token("lease", lease.token)
 
+    # A guardian cannot promote stale local state when its durable root is absent.
     with {:ok, _} <- attest(state),
          {:ok, snapshot} <- load_snapshot(state, lease.agent_id),
          :ok <- Core.assert_reenterable(snapshot.core, lease_hash),
-         {:ok, guardian} <- lookup_guardian(state, lease_hash),
-         :ok <- Guardian.assert_holder(guardian, caller) do
-      :ok
+         {:ok, guardian} <- lookup_guardian(state, lease_hash) do
+      Guardian.assert_holder(guardian, caller)
     end
   end
 

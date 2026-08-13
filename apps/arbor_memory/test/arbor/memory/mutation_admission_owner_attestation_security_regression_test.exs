@@ -19,8 +19,9 @@ defmodule Arbor.Memory.MutationAdmissionOwnerAttestationSecurityRegressionTest d
   @moduletag packet: "VP-05D2C3I1B1F0"
   @moduletag security_regression: true
 
-  setup do
-    agent_name = :"ma_own_fake_#{System.unique_integer([:positive])}"
+  setup context do
+    # The test name is an already-existing atom unique to this synchronous case.
+    agent_name = context.test
     {:ok, _} = Fake.start_link(agent_name: agent_name)
 
     runtime_fp =
@@ -29,7 +30,7 @@ defmodule Arbor.Memory.MutationAdmissionOwnerAttestationSecurityRegressionTest d
     node_fp =
       Base.encode16(:crypto.hash(:sha256, "own-node-#{agent_name}"), case: :lower)
 
-    auth = start_authority(agent_name, runtime_fp, node_fp)
+    auth = start_authority(agent_name, runtime_fp, node_fp, :primary)
 
     on_exit(fn -> Fake.stop(agent_name) end)
 
@@ -176,11 +177,14 @@ defmodule Arbor.Memory.MutationAdmissionOwnerAttestationSecurityRegressionTest d
 
     wrong_token = %{lease | token: :crypto.strong_rand_bytes(32)}
     assert {:error, :invalid_lease} = ao(wrong_token, server: ctx.server)
-    assert {:error, :invalid_lease} = ao(%{lease | agent_id: "own_other_agent"}, server: ctx.server)
+
+    assert {:error, :invalid_lease} =
+             ao(%{lease | agent_id: "own_other_agent"}, server: ctx.server)
+
     assert snapshot(ctx.agent_name, key, ctx.registry, hash) == before
     assert cas_count(ctx.agent_name, key) == cas_before
 
-    other = start_authority(ctx.agent_name, ctx.runtime_fp, ctx.node_fp)
+    other = start_authority(ctx.agent_name, ctx.runtime_fp, ctx.node_fp, :secondary)
     assert {:error, :invalid_lease} = ao(lease, server: other.server)
     assert {:error, :unavailable} = ao(lease, server: :ma_own_missing_server)
     assert snapshot(ctx.agent_name, key, ctx.registry, hash) == before
@@ -189,7 +193,10 @@ defmodule Arbor.Memory.MutationAdmissionOwnerAttestationSecurityRegressionTest d
     assert :ok = MutationAdmission.release(lease, server: ctx.server)
 
     assert wait_until(fn ->
-             match?({:ok, %{active_roots: 0}}, MutationAdmission.status(agent, server: ctx.server))
+             match?(
+               {:ok, %{active_roots: 0}},
+               MutationAdmission.status(agent, server: ctx.server)
+             )
            end)
 
     assert {:error, :invalid_lease} = ao(lease, server: ctx.server)
@@ -236,7 +243,7 @@ defmodule Arbor.Memory.MutationAdmissionOwnerAttestationSecurityRegressionTest d
     before = Fake.peek(ctx.agent_name, key)
     other_rt = String.duplicate("c", 64)
     refute other_rt == ctx.runtime_fp
-    other = start_authority(ctx.agent_name, other_rt, ctx.node_fp)
+    other = start_authority(ctx.agent_name, other_rt, ctx.node_fp, :secondary)
     cas_before = cas_count(ctx.agent_name, key)
     assert {:error, :invalid_lease} = ao(lease, server: other.server)
     assert Fake.peek(ctx.agent_name, key) == before
@@ -311,7 +318,10 @@ defmodule Arbor.Memory.MutationAdmissionOwnerAttestationSecurityRegressionTest d
     Fake.clear_cas_success_budget(ctx.agent_name)
 
     assert wait_until(fn ->
-             match?({:ok, %{active_roots: 0}}, MutationAdmission.status(agent, server: ctx.server))
+             match?(
+               {:ok, %{active_roots: 0}},
+               MutationAdmission.status(agent, server: ctx.server)
+             )
            end)
 
     send(holder, :done)
@@ -321,7 +331,7 @@ defmodule Arbor.Memory.MutationAdmissionOwnerAttestationSecurityRegressionTest d
   test "pending handoff and release phases on a test-owned guardian are busy and observational",
        _ctx do
     require_assert_holder!()
-    registry = :"ma_own_g_reg_#{System.unique_integer([:positive])}"
+    registry = :ma_own_guardian_registry
 
     start_supervised!({Registry, keys: :unique, name: registry},
       id: {:ma_own_g_reg, registry}
@@ -340,7 +350,7 @@ defmodule Arbor.Memory.MutationAdmissionOwnerAttestationSecurityRegressionTest d
            token: token,
            holder: self(),
            admission: self(),
-           admission_name: :"ma_own_g_adm_#{System.unique_integer([:positive])}",
+           admission_name: :ma_own_guardian_admission,
            registry: registry,
            max_depth: 32
          ]}
@@ -369,7 +379,10 @@ defmodule Arbor.Memory.MutationAdmissionOwnerAttestationSecurityRegressionTest d
     assert guardian_snapshot(gpid, registry, hash) == releasing
 
     assert {:error, :not_owner} =
-             Task.await(Task.async(fn -> GenServer.call(gpid, {:assert_holder, self()}) end), 3_000)
+             Task.await(
+               Task.async(fn -> GenServer.call(gpid, {:assert_holder, self()}) end),
+               3_000
+             )
 
     assert guardian_snapshot(gpid, registry, hash) == releasing
   end
@@ -420,21 +433,17 @@ defmodule Arbor.Memory.MutationAdmissionOwnerAttestationSecurityRegressionTest d
     MutationAdmission.acquire(agent, Keyword.put(opts, :server, ctx.server))
   end
 
-  defp start_authority(agent_name, runtime_fp, node_fp) do
-    registry = :"ma_own_reg_#{System.unique_integer([:positive])}"
-    sup_name = :"ma_own_sup_#{System.unique_integer([:positive])}"
-    server = :"ma_own_srv_#{System.unique_integer([:positive])}"
+  defp start_authority(agent_name, runtime_fp, node_fp, role) do
+    {registry, sup_name, server} = authority_names(role)
 
     start_supervised!({Registry, keys: :unique, name: registry}, id: {:ma_own_reg, registry})
 
-    start_supervised!(
-      %{
-        id: {:ma_own_gsup, sup_name},
-        start:
-          {DynamicSupervisor, :start_link,
-           [[name: sup_name, strategy: :one_for_one, max_children: 4096]]}
-      }
-    )
+    start_supervised!(%{
+      id: {:ma_own_gsup, sup_name},
+      start:
+        {DynamicSupervisor, :start_link,
+         [[name: sup_name, strategy: :one_for_one, max_children: 4096]]}
+    })
 
     start_supervised!(
       {MutationAdmission,
@@ -455,6 +464,12 @@ defmodule Arbor.Memory.MutationAdmissionOwnerAttestationSecurityRegressionTest d
 
     %{server: server, registry: registry, sup: sup_name}
   end
+
+  defp authority_names(:primary),
+    do: {:ma_own_registry, :ma_own_guardian_supervisor, :ma_own_server}
+
+  defp authority_names(:secondary),
+    do: {:ma_own_secondary_registry, :ma_own_secondary_supervisor, :ma_own_secondary_server}
 
   defp spawn_peer do
     parent = self()
