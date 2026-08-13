@@ -6,7 +6,7 @@ defmodule Arbor.Memory.PreferencesStore do
   `Application.start/2`. Owns the full CRUD + signal lifecycle.
   """
 
-  alias Arbor.Memory.{MemoryStore, Preferences, Signals}
+  alias Arbor.Memory.{MemoryStore, MutationAdmission, Preferences, Signals}
 
   require Logger
 
@@ -71,24 +71,24 @@ defmodule Arbor.Memory.PreferencesStore do
   @doc """
   Save preferences for an agent.
   """
-  @spec save_preferences(String.t(), Preferences.t()) :: :ok
+  @spec save_preferences(String.t(), Preferences.t()) :: :ok | {:error, :store_unavailable}
   def save_preferences(agent_id, prefs) do
-    :ets.insert(@preferences_ets, {agent_id, prefs})
-    # Async persist to BufferedStore for crash recovery
-    persist_async(agent_id, prefs)
-    :ok
+    commit_preferences(agent_id, prefs, fn -> :ok end)
   end
 
   @doc """
   Get or create preferences for an agent.
   """
-  @spec get_or_create(String.t()) :: Preferences.t()
+  @spec get_or_create(String.t()) :: Preferences.t() | {:error, :store_unavailable}
   def get_or_create(agent_id) do
     case get_preferences(agent_id) do
       nil ->
         prefs = Preferences.new(agent_id)
-        save_preferences(agent_id, prefs)
-        prefs
+
+        case commit_preferences(agent_id, prefs, fn -> :ok end) do
+          :ok -> prefs
+          {:error, :store_unavailable} = error -> error
+        end
 
       prefs ->
         prefs
@@ -156,18 +156,19 @@ defmodule Arbor.Memory.PreferencesStore do
   @spec adjust_preference(String.t(), atom(), term(), keyword()) ::
           {:ok, Preferences.t()} | {:error, term()}
   def adjust_preference(agent_id, param, value, opts \\ []) do
-    prefs = get_or_create(agent_id)
+    prefs = current_or_default(agent_id)
 
     case Preferences.adjust(prefs, param, value, opts) do
       {:ok, updated_prefs} ->
-        save_preferences(agent_id, updated_prefs)
-
-        Signals.emit_cognitive_adjustment(agent_id, param, %{
-          old_value: Map.get(prefs, param),
-          new_value: value
-        })
-
-        {:ok, updated_prefs}
+        case commit_preferences(agent_id, updated_prefs, fn ->
+               Signals.emit_cognitive_adjustment(agent_id, param, %{
+                 old_value: Map.get(prefs, param),
+                 new_value: value
+               })
+             end) do
+          :ok -> {:ok, updated_prefs}
+          {:error, :store_unavailable} = error -> error
+        end
 
       error ->
         error
@@ -178,31 +179,39 @@ defmodule Arbor.Memory.PreferencesStore do
   Pin a memory to protect it from decay.
   """
   @spec pin_memory(String.t(), String.t(), keyword()) ::
-          {:ok, Preferences.t()} | {:error, :max_pins_reached}
+          {:ok, Preferences.t()} | {:error, :max_pins_reached | :store_unavailable}
   def pin_memory(agent_id, memory_id, opts \\ []) do
-    prefs = get_or_create(agent_id)
+    prefs = current_or_default(agent_id)
 
     case Preferences.pin(prefs, memory_id, opts) do
       {:error, _} = error ->
         error
 
       updated_prefs ->
-        save_preferences(agent_id, updated_prefs)
-        Signals.emit_cognitive_adjustment(agent_id, :pin_memory, %{memory_id: memory_id})
-        {:ok, updated_prefs}
+        case commit_preferences(agent_id, updated_prefs, fn ->
+               Signals.emit_cognitive_adjustment(agent_id, :pin_memory, %{memory_id: memory_id})
+             end) do
+          :ok -> {:ok, updated_prefs}
+          {:error, :store_unavailable} = error -> error
+        end
     end
   end
 
   @doc """
   Unpin a memory, allowing it to decay normally.
   """
-  @spec unpin_memory(String.t(), String.t()) :: {:ok, Preferences.t()}
+  @spec unpin_memory(String.t(), String.t()) ::
+          {:ok, Preferences.t()} | {:error, :store_unavailable}
   def unpin_memory(agent_id, memory_id) do
-    prefs = get_or_create(agent_id)
+    prefs = current_or_default(agent_id)
     updated_prefs = Preferences.unpin(prefs, memory_id)
-    save_preferences(agent_id, updated_prefs)
-    Signals.emit_cognitive_adjustment(agent_id, :unpin_memory, %{memory_id: memory_id})
-    {:ok, updated_prefs}
+
+    case commit_preferences(agent_id, updated_prefs, fn ->
+           Signals.emit_cognitive_adjustment(agent_id, :unpin_memory, %{memory_id: memory_id})
+         end) do
+      :ok -> {:ok, updated_prefs}
+      {:error, :store_unavailable} = error -> error
+    end
   end
 
   @doc """
@@ -230,18 +239,21 @@ defmodule Arbor.Memory.PreferencesStore do
   @doc """
   Set a context preference for prompt building.
   """
-  @spec set_context_preference(String.t(), atom(), term()) :: {:ok, Preferences.t()}
+  @spec set_context_preference(String.t(), atom(), term()) ::
+          {:ok, Preferences.t()} | {:error, :store_unavailable}
   def set_context_preference(agent_id, key, value) do
-    prefs = get_or_create(agent_id)
+    prefs = current_or_default(agent_id)
     {:ok, updated_prefs} = Preferences.set_context_preference(prefs, key, value)
-    save_preferences(agent_id, updated_prefs)
 
-    Signals.emit_cognitive_adjustment(agent_id, :context_preference, %{
-      key: key,
-      value: value
-    })
-
-    {:ok, updated_prefs}
+    case commit_preferences(agent_id, updated_prefs, fn ->
+           Signals.emit_cognitive_adjustment(agent_id, :context_preference, %{
+             key: key,
+             value: value
+           })
+         end) do
+      :ok -> {:ok, updated_prefs}
+      {:error, :store_unavailable} = error -> error
+    end
   end
 
   @doc """
@@ -258,7 +270,8 @@ defmodule Arbor.Memory.PreferencesStore do
   @doc """
   Save preferences for an agent (public wrapper for Seed restore).
   """
-  @spec save_preferences_for_agent(String.t(), Preferences.t()) :: :ok
+  @spec save_preferences_for_agent(String.t(), Preferences.t()) ::
+          :ok | {:error, :store_unavailable}
   def save_preferences_for_agent(agent_id, prefs) do
     save_preferences(agent_id, prefs)
   end
@@ -274,21 +287,16 @@ defmodule Arbor.Memory.PreferencesStore do
     if store_available?() do
       case MemoryStore.load_all(@namespace) do
         {:ok, pairs} when pairs != [] ->
-          Enum.each(pairs, fn {key, data} ->
-            agent_id = extract_agent_id(key)
+          restored = count_projected_pairs(pairs)
 
-            if agent_id do
-              prefs = Preferences.deserialize(data)
-              :ets.insert(@preferences_ets, {agent_id, prefs})
-            end
-          end)
-
-          Logger.info("[PreferencesStore] Restored #{length(pairs)} preferences from store")
+          Logger.info("[PreferencesStore] Restored #{restored} preferences from store")
 
         _ ->
           :ok
       end
     end
+
+    :ok
   rescue
     _ -> :ok
   catch
@@ -299,11 +307,85 @@ defmodule Arbor.Memory.PreferencesStore do
   # Private — Persistence
   # ===========================================================================
 
-  defp persist_async(agent_id, prefs) do
-    data = Preferences.serialize(prefs)
-    _ = MemoryStore.persist_async(@namespace, agent_id, data, agent_id: agent_id)
-    :ok
+  defp current_or_default(agent_id) do
+    case get_preferences(agent_id) do
+      nil -> Preferences.new(agent_id)
+      prefs -> prefs
+    end
   end
+
+  defp count_projected_pairs(pairs) do
+    Enum.count(pairs, &(project_loaded_pair(&1) == :ok))
+  end
+
+  defp commit_preferences(agent_id, prefs, after_ets_fun) do
+    data = Preferences.serialize(prefs)
+
+    case MemoryStore.reserve_persist_async(@namespace, agent_id, data, agent_id: agent_id) do
+      {:ok, reservation} ->
+        admit_and_commit(agent_id, prefs, reservation, after_ets_fun)
+
+      {:error, _reason} ->
+        {:error, :store_unavailable}
+    end
+  end
+
+  defp admit_and_commit(agent_id, prefs, reservation, after_ets_fun) do
+    case MutationAdmission.acquire(agent_id) do
+      {:ok, lease} ->
+        try do
+          :ets.insert(@preferences_ets, {agent_id, prefs})
+          after_ets_fun.()
+
+          case MemoryStore.activate_async(reservation) do
+            :ok -> :ok
+            {:error, _reason} -> {:error, :store_unavailable}
+          end
+        catch
+          kind, reason ->
+            _ = MemoryStore.cancel_async(reservation)
+            :erlang.raise(kind, reason, __STACKTRACE__)
+        after
+          _ = MutationAdmission.release(lease)
+        end
+
+      {:error, _reason} ->
+        _ = MemoryStore.cancel_async(reservation)
+        {:error, :store_unavailable}
+    end
+  end
+
+  defp project_loaded_pair({key, data}) do
+    with agent_id when is_binary(agent_id) <- extract_agent_id(key),
+         :ok <- validate_agent_id(agent_id),
+         {:ok, prefs} <- safe_deserialize(data),
+         true <- prefs.agent_id == agent_id,
+         {:ok, %{gate: :open}} <- MutationAdmission.status(agent_id),
+         {:ok, lease} <- MutationAdmission.acquire(agent_id) do
+      try do
+        :ets.insert(@preferences_ets, {agent_id, prefs})
+        :ok
+      after
+        _ = MutationAdmission.release(lease)
+      end
+    else
+      _ -> :skip
+    end
+  end
+
+  defp safe_deserialize(data) when is_map(data) do
+    prefs = Preferences.deserialize(data)
+
+    if is_binary(prefs.agent_id) and prefs.agent_id != "" do
+      {:ok, prefs}
+    else
+      :error
+    end
+  rescue
+    _ -> :error
+  end
+
+  defp safe_deserialize(_data), do: :error
 
   defp store_available? do
     MemoryStore.available?()

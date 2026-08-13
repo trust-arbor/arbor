@@ -2,9 +2,12 @@ defmodule Arbor.Memory.AsyncWriter do
   @moduledoc false
 
   alias Arbor.Memory.AsyncWriter.Operation
+  alias Arbor.Memory.AsyncWriter.Reservation
   alias Arbor.Memory.AsyncWriter.Supervisor, as: WriterSupervisor
   alias Arbor.Memory.AsyncWriter.Worker
   alias Arbor.Memory.MutationAdmission
+
+  @activate_call_timeout_ms 1_000
 
   @type error ::
           {:error,
@@ -14,16 +17,50 @@ defmodule Arbor.Memory.AsyncWriter do
             | :unavailable
             | :capacity_exceeded
             | :invalid_operation
-            | :start_failed}}
+            | :start_failed
+            | :invalid_reservation
+            | :expired}}
 
   @spec start(Operation.t()) :: :ok | error()
   def start(operation) do
+    with {:ok, reservation} <- reserve(operation) do
+      activate(reservation)
+    end
+  end
+
+  @spec reserve(Operation.t()) :: {:ok, Reservation.t()} | error()
+  def reserve(operation) do
+    owner = self()
+
     with :ok <- Operation.validate(operation),
          :ok <- ensure_supervisor(),
          :ok <- reject_if_closed(Operation.agent_id(operation)) do
-      start_worker(operation)
+      start_reserved_worker(operation, owner)
     end
   end
+
+  @spec activate(term()) :: :ok | error()
+  def activate(%Reservation{} = reservation) do
+    if Reservation.owner(reservation) == self() and is_pid(Reservation.worker(reservation)) do
+      deadline = System.monotonic_time(:millisecond) + @activate_call_timeout_ms
+      Worker.activate(reservation, deadline, @activate_call_timeout_ms)
+    else
+      {:error, {:memory_store, :async_writer, :invalid_reservation}}
+    end
+  end
+
+  def activate(_reservation), do: {:error, {:memory_store, :async_writer, :invalid_reservation}}
+
+  @spec cancel(term()) :: :ok | error()
+  def cancel(%Reservation{} = reservation) do
+    if Reservation.owner(reservation) == self() and is_pid(Reservation.worker(reservation)) do
+      Worker.cancel(reservation)
+    else
+      {:error, {:memory_store, :async_writer, :invalid_reservation}}
+    end
+  end
+
+  def cancel(_reservation), do: {:error, {:memory_store, :async_writer, :invalid_reservation}}
 
   defp ensure_supervisor do
     if Process.whereis(WriterSupervisor.name()) do
@@ -61,15 +98,15 @@ defmodule Arbor.Memory.AsyncWriter do
     end
   end
 
-  defp start_worker(operation) do
-    spec = Worker.child_spec(operation)
+  defp start_reserved_worker(operation, owner) do
+    spec = Worker.child_spec({operation, owner})
 
     case DynamicSupervisor.start_child(WriterSupervisor.name(), spec) do
-      {:ok, _pid} ->
-        :ok
+      {:ok, pid} ->
+        checkout_or_stop(pid, owner)
 
-      {:ok, _pid, _info} ->
-        :ok
+      {:ok, pid, _info} ->
+        checkout_or_stop(pid, owner)
 
       {:error, :max_children} ->
         {:error, {:memory_store, :async_writer, :capacity_exceeded}}
@@ -85,6 +122,17 @@ defmodule Arbor.Memory.AsyncWriter do
 
       {:error, _reason} ->
         {:error, {:memory_store, :async_writer, :start_failed}}
+    end
+  end
+
+  defp checkout_or_stop(pid, owner) do
+    case Worker.checkout_reservation(pid, owner) do
+      {:ok, %Reservation{} = reservation} ->
+        {:ok, reservation}
+
+      error ->
+        _ = DynamicSupervisor.terminate_child(WriterSupervisor.name(), pid)
+        error
     end
   end
 

@@ -107,38 +107,38 @@ defmodule Arbor.Memory.MemoryStore do
 
   def persist_async(namespace, key, data, opts)
       when is_binary(namespace) and is_binary(key) and is_list(opts) do
-    if keyword_options?(opts) do
-      case build_taint_metadata(data, opts) do
-        {:ok, metadata} ->
-          agent_id = Keyword.get(opts, :agent_id)
-
-          case Operation.validate_agent_id(agent_id) do
-            :ok ->
-              AsyncWriter.start(
-                {:persist,
-                 %{
-                   agent_id: agent_id,
-                   namespace: namespace,
-                   key: key,
-                   data: data,
-                   metadata: metadata
-                 }}
-              )
-
-            :error ->
-              {:error, {:memory_store, :invalid_request, :invalid_agent_id}}
-          end
-
-        {:error, _reason} = error ->
-          error
-      end
-    else
-      {:error, {:memory_store, :invalid_request, :invalid_options}}
+    case persist_operation(namespace, key, data, opts) do
+      {:ok, operation} -> AsyncWriter.start(operation)
+      {:error, _reason} = error -> error
     end
   end
 
   def persist_async(_namespace, _key, _data, _opts),
     do: {:error, {:memory_store, :invalid_request, :invalid_arguments}}
+
+  @doc false
+  @spec reserve_persist_async(String.t(), String.t(), term(), keyword()) ::
+          {:ok, AsyncWriter.Reservation.t()} | {:error, term()}
+  def reserve_persist_async(namespace, key, data, opts \\ [])
+
+  def reserve_persist_async(namespace, key, data, opts)
+      when is_binary(namespace) and is_binary(key) and is_list(opts) do
+    case persist_operation(namespace, key, data, opts) do
+      {:ok, operation} -> AsyncWriter.reserve(operation)
+      {:error, _reason} = error -> error
+    end
+  end
+
+  def reserve_persist_async(_namespace, _key, _data, _opts),
+    do: {:error, {:memory_store, :invalid_request, :invalid_arguments}}
+
+  @doc false
+  @spec activate_async(term()) :: :ok | {:error, term()}
+  def activate_async(reservation), do: AsyncWriter.activate(reservation)
+
+  @doc false
+  @spec cancel_async(term()) :: :ok | {:error, term()}
+  def cancel_async(reservation), do: AsyncWriter.cancel(reservation)
 
   @doc false
   @spec persist_confirmed(String.t(), String.t(), term(), map()) ::
@@ -699,34 +699,92 @@ defmodule Arbor.Memory.MemoryStore do
 
   def embed_async(namespace, key, content, opts)
       when is_binary(namespace) and is_binary(key) do
+    case embed_operation(namespace, key, content, opts) do
+      {:ok, operation} -> AsyncWriter.start(operation)
+      :noop -> :ok
+      {:error, _reason} = error -> error
+    end
+  end
+
+  def embed_async(_namespace, _key, _content, _opts),
+    do: {:error, {:memory_store, :invalid_request, :invalid_arguments}}
+
+  @doc false
+  @spec reserve_embed_async(String.t(), String.t(), String.t(), keyword()) ::
+          {:ok, AsyncWriter.Reservation.t()} | :ok | {:error, term()}
+  def reserve_embed_async(namespace, key, content, opts \\ [])
+
+  def reserve_embed_async(namespace, key, content, opts)
+      when is_binary(namespace) and is_binary(key) do
+    case embed_operation(namespace, key, content, opts) do
+      {:ok, operation} -> AsyncWriter.reserve(operation)
+      :noop -> :ok
+      {:error, _reason} = error -> error
+    end
+  end
+
+  def reserve_embed_async(_namespace, _key, _content, _opts),
+    do: {:error, {:memory_store, :invalid_request, :invalid_arguments}}
+
+  defp effectful_embed_content?(content) when is_binary(content) and content != "", do: true
+  defp effectful_embed_content?(_), do: false
+
+  defp persist_operation(namespace, key, data, opts) do
+    if keyword_options?(opts) do
+      case build_taint_metadata(data, opts) do
+        {:ok, metadata} ->
+          agent_id = Keyword.get(opts, :agent_id)
+
+          case Operation.validate_agent_id(agent_id) do
+            :ok ->
+              {:ok,
+               {:persist,
+                %{
+                  agent_id: agent_id,
+                  namespace: namespace,
+                  key: key,
+                  data: data,
+                  metadata: metadata
+                }}}
+
+            :error ->
+              {:error, {:memory_store, :invalid_request, :invalid_agent_id}}
+          end
+
+        {:error, _reason} = error ->
+          error
+      end
+    else
+      {:error, {:memory_store, :invalid_request, :invalid_options}}
+    end
+  end
+
+  defp embed_operation(namespace, key, content, opts) do
     if keyword_options?(opts) do
       agent_id = Keyword.get(opts, :agent_id)
       type = Keyword.get(opts, :type)
 
       with {:ok, type} <- normalize_embedding_type(type),
            {:ok, taint} <- resolve_source_taint(opts) do
-        cond do
-          not effectful_embed_content?(content) ->
-            :ok
+        if effectful_embed_content?(content) do
+          case Operation.validate_agent_id(agent_id) do
+            :ok ->
+              {:ok,
+               {:embed,
+                %{
+                  agent_id: agent_id,
+                  namespace: namespace,
+                  key: key,
+                  content: content,
+                  type: type,
+                  taint: taint
+                }}}
 
-          true ->
-            case Operation.validate_agent_id(agent_id) do
-              :ok ->
-                AsyncWriter.start(
-                  {:embed,
-                   %{
-                     agent_id: agent_id,
-                     namespace: namespace,
-                     key: key,
-                     content: content,
-                     type: type,
-                     taint: taint
-                   }}
-                )
-
-              :error ->
-                {:error, {:memory_store, :invalid_request, :invalid_agent_id}}
-            end
+            :error ->
+              {:error, {:memory_store, :invalid_request, :invalid_agent_id}}
+          end
+        else
+          :noop
         end
       else
         {:error, _reason} = error -> error
@@ -735,12 +793,6 @@ defmodule Arbor.Memory.MemoryStore do
       {:error, {:memory_store, :invalid_request, :invalid_options}}
     end
   end
-
-  def embed_async(_namespace, _key, _content, _opts),
-    do: {:error, {:memory_store, :invalid_request, :invalid_arguments}}
-
-  defp effectful_embed_content?(content) when is_binary(content) and content != "", do: true
-  defp effectful_embed_content?(_), do: false
 
   @doc """
   Search memory by semantic similarity via the strict ANN seam.
