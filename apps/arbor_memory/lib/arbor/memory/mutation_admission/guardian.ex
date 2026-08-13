@@ -5,9 +5,10 @@ defmodule Arbor.Memory.MutationAdmission.Guardian do
   #
   # Protocol (non-cyclic — Guardian never GenServer.call's MutationAdmission):
   #   reenter / release_depth / begin_handoff / finalize_handoff / abort_handoff /
-  #   claim_release / release_attempt_result / reconnect_admission
+  #   claim_release / release_attempt_result / reconnect_admission / assert_holder
   #     are shell → guardian calls only; every mutating call authenticates
   #     GenServer.from as state.admission (in addition to holder/target checks).
+  #     assert_holder is read-only and also authenticates the admission shell.
   #   Holder death / release recovery:
   #     guardian → cast {:holder_down_release, guardian_pid} wake-up only → shell
   #     shell resolves Registry, call claim_release (derived identity), durable CAS
@@ -88,6 +89,10 @@ defmodule Arbor.Memory.MutationAdmission.Guardian do
     do: GenServer.call(pid, {:release_attempt_result, result})
 
   @doc false
+  # Shell-only read-only holder assertion. Does not change guardian state.
+  def assert_holder(pid, caller), do: GenServer.call(pid, {:assert_holder, caller})
+
+  @doc false
   def holder(pid), do: GenServer.call(pid, :holder)
 
   @doc false
@@ -151,6 +156,22 @@ defmodule Arbor.Memory.MutationAdmission.Guardian do
   end
 
   def handle_call({:reenter, _}, from, state) do
+    with :ok <- authenticate_admission(from, state) do
+      {:reply, {:error, :busy}, state}
+    end
+  end
+
+  def handle_call({:assert_holder, caller}, from, %{phase: :holding} = state) do
+    with :ok <- authenticate_admission(from, state) do
+      if caller == state.holder do
+        {:reply, :ok, state}
+      else
+        {:reply, {:error, :not_owner}, state}
+      end
+    end
+  end
+
+  def handle_call({:assert_holder, _caller}, from, state) do
     with :ok <- authenticate_admission(from, state) do
       {:reply, {:error, :busy}, state}
     end

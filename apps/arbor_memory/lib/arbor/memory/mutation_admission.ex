@@ -140,6 +140,26 @@ defmodule Arbor.Memory.MutationAdmission do
 
   def release(_lease, _opts), do: {:error, :invalid_request}
 
+  @doc false
+  @spec assert_owner(Lease.t(), keyword()) :: :ok | {:error, atom()}
+  def assert_owner(lease, opts \\ [])
+
+  def assert_owner(%Lease{} = lease, opts) when is_list(opts) do
+    with :ok <- validate_opts(opts, @empty_opts),
+         :ok <- validate_lease_shape(lease) do
+      call_server(opts, {:assert_owner, lease})
+    end
+  end
+
+  def assert_owner(_lease, opts) when is_list(opts) do
+    case validate_opts(opts, @empty_opts) do
+      :ok -> {:error, :invalid_lease}
+      error -> error
+    end
+  end
+
+  def assert_owner(_lease, _opts), do: {:error, :invalid_request}
+
   @spec drain(String.t(), keyword()) :: {:ok, DrainFence.t()} | {:error, atom()}
   def drain(agent_id, opts \\ [])
 
@@ -345,6 +365,17 @@ defmodule Arbor.Memory.MutationAdmission do
     {:reply, reply, state}
   end
 
+  def handle_call({:assert_owner, lease}, {caller, _}, state) do
+    reply =
+      with :ok <- ensure_local_pid(caller),
+           :ok <- ensure_frozen_target(state),
+           :ok <- validate_lease_shape(lease) do
+        do_assert_owner(state, lease, caller)
+      end
+
+    {:reply, reply, state}
+  end
+
   def handle_call({:status, agent_id}, _from, state) do
     with :ok <- validate_agent_id(agent_id),
          :ok <- ensure_frozen_target(state),
@@ -515,6 +546,18 @@ defmodule Arbor.Memory.MutationAdmission do
     else
       {:error, :not_owner} -> {:error, :not_owner}
       {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp do_assert_owner(state, lease, caller) do
+    lease_hash = hash_token("lease", lease.token)
+
+    with {:ok, _} <- attest(state),
+         {:ok, snapshot} <- load_snapshot(state, lease.agent_id),
+         :ok <- Core.assert_reenterable(snapshot.core, lease_hash),
+         {:ok, guardian} <- lookup_guardian(state, lease_hash),
+         :ok <- Guardian.assert_holder(guardian, caller) do
+      :ok
     end
   end
 
