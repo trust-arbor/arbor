@@ -66,7 +66,15 @@ defmodule Arbor.Memory.IdentityConsolidator do
       state = IdentityConsolidator.get_consolidation_state("agent_001")
   """
 
-  alias Arbor.Memory.{Events, InsightDetector, MemoryStore, SelfKnowledge, Signals}
+  alias Arbor.Memory.{
+    Events,
+    InsightDetector,
+    MemoryStore,
+    MutationAdmission,
+    SelfKnowledge,
+    Signals
+  }
+
   alias Arbor.Memory.IdentityConsolidator.InsightIntegration
   alias Arbor.Memory.IdentityConsolidator.Promotion
 
@@ -276,7 +284,7 @@ defmodule Arbor.Memory.IdentityConsolidator do
     Promotion.emit_blocked_signals(agent_id, blocked)
 
     # Embedding-based dedup (if enabled and Ollama available)
-    maybe_embedding_dedup(agent_id)
+    embedding_dedup = maybe_embedding_dedup(agent_id)
 
     # Pattern analysis post-consolidation
     pattern_insights = Promotion.analyze_patterns_post_consolidation(agent_id, opts)
@@ -292,7 +300,8 @@ defmodule Arbor.Memory.IdentityConsolidator do
       pattern_insights_count: length(pattern_insights),
       detector_changes_count: length(detector_changes),
       proposed_changes: all_changes,
-      consolidation_number: state.consolidation_count
+      consolidation_number: state.consolidation_count,
+      embedding_dedup: embedding_dedup
     }
 
     Signals.emit_consolidation_completed(agent_id, result)
@@ -352,9 +361,14 @@ defmodule Arbor.Memory.IdentityConsolidator do
 
     case apply_change_to_sk(sk, change) do
       {:ok, updated_sk} ->
-        save_self_knowledge(agent_id, updated_sk)
-        Promotion.emit_change_events(agent_id, [change])
-        :ok
+        case save_self_knowledge(agent_id, updated_sk) do
+          :ok ->
+            Promotion.emit_change_events(agent_id, [change])
+            :ok
+
+          {:error, :store_unavailable} = error ->
+            error
+        end
 
       {:error, _} = error ->
         error
@@ -431,16 +445,20 @@ defmodule Arbor.Memory.IdentityConsolidator do
             error
 
           updated_sk ->
-            save_self_knowledge(agent_id, updated_sk)
+            case save_self_knowledge(agent_id, updated_sk) do
+              :ok ->
+                Events.record_identity_changed(agent_id, %{
+                  field: :rollback,
+                  old_value: sk.version,
+                  new_value: updated_sk.version,
+                  reason: "manual_rollback"
+                })
 
-            Events.record_identity_changed(agent_id, %{
-              field: :rollback,
-              old_value: sk.version,
-              new_value: updated_sk.version,
-              reason: "manual_rollback"
-            })
+                {:ok, updated_sk}
 
-            {:ok, updated_sk}
+              {:error, :store_unavailable} = error ->
+                error
+            end
         end
     end
   end
@@ -481,8 +499,7 @@ defmodule Arbor.Memory.IdentityConsolidator do
         # Fall back to Postgres
         case load_self_knowledge_from_postgres(agent_id) do
           {:ok, sk} ->
-            :ets.insert(@self_knowledge_ets, {agent_id, sk})
-            sk
+            project_loaded_self_knowledge(agent_id, sk)
 
           :not_found ->
             nil
@@ -493,16 +510,19 @@ defmodule Arbor.Memory.IdentityConsolidator do
   @doc """
   Save SelfKnowledge for an agent.
   """
-  @spec save_self_knowledge(String.t(), SelfKnowledge.t()) :: :ok
+  @spec save_self_knowledge(String.t(), SelfKnowledge.t()) :: :ok | {:error, :store_unavailable}
   def save_self_knowledge(agent_id, %SelfKnowledge{} = sk) do
-    ensure_ets_exists()
-    :ets.insert(@self_knowledge_ets, {agent_id, sk})
+    data = SelfKnowledge.serialize(sk)
 
-    MemoryStore.persist_async(@self_knowledge_namespace, agent_id, SelfKnowledge.serialize(sk),
-      agent_id: agent_id
-    )
+    case MemoryStore.reserve_persist_async(@self_knowledge_namespace, agent_id, data,
+           agent_id: agent_id
+         ) do
+      {:ok, reservation} ->
+        admit_and_save(agent_id, sk, reservation)
 
-    :ok
+      {:error, _reason} ->
+        {:error, :store_unavailable}
+    end
   end
 
   @doc """
@@ -823,25 +843,68 @@ defmodule Arbor.Memory.IdentityConsolidator do
     end
   end
 
+  defp project_loaded_self_knowledge(agent_id, sk) do
+    case MutationAdmission.acquire(agent_id) do
+      {:ok, lease} ->
+        try do
+          :ets.insert(@self_knowledge_ets, {agent_id, sk})
+          sk
+        after
+          _ = MutationAdmission.release(lease)
+        end
+
+      {:error, _reason} ->
+        sk
+    end
+  end
+
+  defp admit_and_save(agent_id, sk, reservation) do
+    case MutationAdmission.acquire(agent_id) do
+      {:ok, lease} ->
+        try do
+          ensure_ets_exists()
+          :ets.insert(@self_knowledge_ets, {agent_id, sk})
+
+          case MemoryStore.activate_async(reservation) do
+            :ok -> :ok
+            {:error, _reason} -> {:error, :store_unavailable}
+          end
+        catch
+          kind, reason ->
+            _ = MemoryStore.cancel_async(reservation)
+            :erlang.raise(kind, reason, __STACKTRACE__)
+        after
+          _ = MutationAdmission.release(lease)
+        end
+
+      {:error, _reason} ->
+        _ = MemoryStore.cancel_async(reservation)
+        {:error, :store_unavailable}
+    end
+  end
+
   defp maybe_embedding_dedup(agent_id) do
     enabled = Application.get_env(:arbor_memory, :embedding_dedup_enabled, false)
 
     if enabled and SelfKnowledge.embeddings_available?() do
       case get_self_knowledge(agent_id) do
         nil ->
-          :ok
+          :skipped
 
         sk ->
           deduped = SelfKnowledge.deduplicate(sk, mode: :embedding)
 
-          if deduped != sk do
-            save_self_knowledge(agent_id, deduped)
+          if deduped == sk do
+            :skipped
+          else
+            case save_self_knowledge(agent_id, deduped) do
+              :ok -> :applied
+              {:error, :store_unavailable} -> :denied
+            end
           end
-
-          :ok
       end
     else
-      :ok
+      :skipped
     end
   end
 
