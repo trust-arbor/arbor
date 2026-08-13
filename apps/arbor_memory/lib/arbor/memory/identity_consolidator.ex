@@ -486,6 +486,9 @@ defmodule Arbor.Memory.IdentityConsolidator do
 
   @doc """
   Get SelfKnowledge for an agent.
+
+  A durable cache miss is returned even when mutation admission prevents its ETS
+  projection. A later read may retry that projection through a fresh admission.
   """
   @spec get_self_knowledge(String.t()) :: SelfKnowledge.t() | nil
   def get_self_knowledge(agent_id) do
@@ -509,6 +512,10 @@ defmodule Arbor.Memory.IdentityConsolidator do
 
   @doc """
   Save SelfKnowledge for an agent.
+
+  Returns `{:error, :store_unavailable}` without a parent mutation when the
+  persistence child or parent mutation cannot be admitted. `:ok` acknowledges
+  ownership of the asynchronous persistence operation, not durable completion.
   """
   @spec save_self_knowledge(String.t(), SelfKnowledge.t()) :: :ok | {:error, :store_unavailable}
   def save_self_knowledge(agent_id, %SelfKnowledge{} = sk) do
@@ -854,6 +861,7 @@ defmodule Arbor.Memory.IdentityConsolidator do
         end
 
       {:error, _reason} ->
+        # The durable read remains valid even though caching it is not admitted.
         sk
     end
   end
