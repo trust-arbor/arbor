@@ -35,6 +35,10 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Formatter do
   `suite_finished` — Mix may replace argv with the selected test paths, which
   would otherwise overwrite a reviewed test file and falsely trip
   source-identity / workspace-fingerprint checks.
+
+  The generated `Mix.Task.run("test", ...)` flags are validator-owned. They
+  always include `--include test` so helper `ExUnit.start(exclude: ...)` cannot
+  drop already exact-selected tests. Callers cannot supply include/exclude/only.
   """
   @spec runner_source(String.t()) :: {:ok, String.t()} | {:error, atom()}
   def runner_source(module_name) when is_binary(module_name) do
@@ -51,6 +55,32 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Formatter do
   end
 
   def runner_source(_module_name), do: {:error, :invalid_formatter_configuration}
+
+  @doc """
+  Fixed Mix test flags prepended to the exact selected paths.
+
+  `--include test` is the generic ExUnit override: every test carries the
+  built-in `:test` tag, so include wins over helper exclusions without a
+  tag-specific allowlist. Filter arguments are not accepted from callers.
+  """
+  @spec mix_test_flags(String.t()) :: [String.t()]
+  def mix_test_flags(module_name) when is_binary(module_name) do
+    [
+      "--formatter",
+      module_name,
+      "--seed",
+      "0",
+      "--max-cases",
+      "1",
+      "--max-requires",
+      "1",
+      "--no-color",
+      "--exit-status",
+      "2",
+      "--include",
+      "test"
+    ]
+  end
 
   @doc """
   Normalize `mix run` script argv into `{artifact_path, test_paths}`.
@@ -287,20 +317,18 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Formatter do
 
     #{module_name}.store_artifact_path!(artifact_path)
 
+    # Validator-owned flags only. `--include test` overrides helper exclusions
+    # for every test already loaded from the exact selected paths.
     Mix.Task.run("test", [
-      "--formatter",
-      #{inspect(module_name)},
-      "--seed",
-      "0",
-      "--max-cases",
-      "1",
-      "--max-requires",
-      "1",
-      "--no-color",
-      "--exit-status",
-      "2"
+      #{rendered_mix_test_flags(module_name)}
       | test_paths
     ])
     """
+  end
+
+  defp rendered_mix_test_flags(module_name) do
+    module_name
+    |> mix_test_flags()
+    |> Enum.map_join(",\n      ", &inspect/1)
   end
 end

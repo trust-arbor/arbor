@@ -68,6 +68,42 @@ defmodule Arbor.Actions.Coding.SecurityRegression.FormatterTest do
     refute source =~ ~r/\[artifact_path \| test_paths\] = System\.argv\(\)/
   end
 
+  test "security regression: generated Mix args include validator-owned test tag before exact paths" do
+    flags = Formatter.mix_test_flags(@module_name)
+
+    assert Enum.take(flags, -2) == ["--include", "test"]
+    refute "--exclude" in flags
+    refute "--only" in flags
+    refute Enum.any?(flags, &String.contains?(&1, "database"))
+    refute Enum.any?(flags, &String.contains?(&1, "integration"))
+    refute Enum.any?(flags, &String.contains?(&1, "llm"))
+
+    assert {:ok, source} = Formatter.runner_source(@module_name)
+    mix_args = extract_mix_test_run_args!(source)
+
+    assert List.last(mix_args) == :test_paths
+    assert Enum.drop(mix_args, -1) == flags
+
+    include_index = Enum.find_index(mix_args, &(&1 == "--include"))
+    assert is_integer(include_index)
+    assert Enum.at(mix_args, include_index + 1) == "test"
+    assert include_index < length(mix_args) - 1
+    assert Enum.at(mix_args, -1) == :test_paths
+  end
+
+  test "security regression: ExUnit include test overrides helper exclusions" do
+    # Current Elixir: every test carries `:test` (the test name). Include is
+    # evaluated before exclude, so `--include test` runs helper-excluded tests
+    # already loaded from exact selected paths. `@tag :skip` stays skipped.
+    tags = %{test: :guest_remains_denied, helper_excluded: true}
+
+    assert :ok = ExUnit.Filters.eval([:test], [:helper_excluded], tags, [])
+
+    without_include = ExUnit.Filters.eval([], [:helper_excluded], tags, [])
+    assert without_include != :ok
+    assert elem(without_include, 0) in [:excluded, :error]
+  end
+
   test "security regression: generated formatter module compiles under pinned Elixir" do
     # Behavioral compile of the formatter GenServer only — not the script tail
     # that would invoke Mix.Task.run. Proves String.starts_with?/2 is not in a
@@ -107,6 +143,46 @@ defmodule Arbor.Actions.Coding.SecurityRegression.FormatterTest do
 
     :code.purge(mod)
     :code.delete(mod)
+  end
+
+  defp extract_mix_test_run_args!(source) when is_binary(source) do
+    assert {:ok, ast} = Code.string_to_quoted(source)
+
+    forms =
+      case ast do
+        {:__block__, _meta, quoted} when is_list(quoted) -> quoted
+        form -> [form]
+      end
+
+    args_ast =
+      Enum.find_value(forms, fn
+        {{:., _dot_meta, [{:__aliases__, _alias_meta, [:Mix, :Task]}, :run]}, _meta,
+         ["test", list]} ->
+          list
+
+        _other ->
+          nil
+      end)
+
+    assert args_ast
+    flatten_quoted_cons(args_ast)
+  end
+
+  defp flatten_quoted_cons({:|, _meta, [head, tail]}) do
+    flatten_quoted_cons(head) ++ flatten_quoted_cons(tail)
+  end
+
+  defp flatten_quoted_cons(list) when is_list(list) do
+    Enum.flat_map(list, &flatten_quoted_cons/1)
+  end
+
+  defp flatten_quoted_cons({name, _meta, context})
+       when is_atom(name) and (is_atom(context) or is_nil(context)) do
+    [name]
+  end
+
+  defp flatten_quoted_cons(literal) when is_binary(literal) or is_atom(literal) do
+    [literal]
   end
 
   defp extract_defmodule_ast!(source) when is_binary(source) do

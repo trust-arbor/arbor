@@ -1595,6 +1595,47 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
     assert beam_result.base.test_failures == 1
   end
 
+  test "security regression: exact selected tests execute despite helper-excluded tags", %{
+    tmp_dir: tmp_dir
+  } do
+    fixture =
+      leased_project(
+        tmp_dir,
+        "defmodule Tiny.Security do\n  def allow_guest?, do: true\nend\n",
+        test_helper: "ExUnit.start(exclude: [:helper_excluded])\n"
+      )
+
+    write_candidate_module(
+      fixture,
+      "defmodule Tiny.Security do\n  def allow_guest?, do: false\nend\n"
+    )
+
+    test_path = "test/helper_excluded_security_regression_test.exs"
+
+    write_candidate_test(fixture, test_path, """
+    defmodule Tiny.HelperExcludedSecurityRegressionTest do
+      use ExUnit.Case
+      @moduletag :helper_excluded
+      test "guest remains denied", do: refute(Tiny.Security.allow_guest?())
+    end
+    """)
+
+    assert {:ok, result} = Validate.run(attested_params(fixture, [test_path]), fixture.context)
+
+    # Before the validator-owned `--include test`, helper exclusions produced
+    # executed=0 / excluded=1 and candidate_zero_tests, skipping the parent.
+    assert result.candidate.status == "completed"
+    assert result.candidate.executed >= 1
+    assert result.candidate.excluded == 0
+    assert result.candidate.test_failures == 0
+    assert result.base.status == "completed"
+    assert result.base.executed >= 1
+    assert result.base.test_failures >= 1
+    refute result.base.exit_code == 0
+    assert result.passed
+    assert result.reason == "security_regression_validated"
+  end
+
   @tag :phase_d_security_regression
   test "post-review HEAD replacement and selected-test blob replacement are denied before spawn",
        %{tmp_dir: tmp_dir} do
@@ -2660,11 +2701,12 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
     }
   end
 
-  defp leased_project(tmp_dir, base_module) do
+  defp leased_project(tmp_dir, base_module, opts \\ []) do
     repo =
       create_base_project(
         Path.join(tmp_dir, "repo-#{System.unique_integer([:positive])}"),
-        base_module
+        base_module,
+        opts
       )
 
     task_id = "task_security_regression_#{System.unique_integer([:positive])}"
@@ -2685,7 +2727,7 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
     %{repo: repo, lease: lease, context: context}
   end
 
-  defp create_base_project(path, base_module) do
+  defp create_base_project(path, base_module, opts \\ []) do
     create_git_repo(path)
     File.mkdir_p!(Path.join(path, "lib"))
     File.mkdir_p!(Path.join(path, "test"))
@@ -2697,8 +2739,9 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
     end
     """)
 
+    helper = Keyword.get(opts, :test_helper, "ExUnit.start()\n")
     File.write!(Path.join(path, "lib/security.ex"), base_module)
-    File.write!(Path.join(path, "test/test_helper.exs"), "ExUnit.start()\n")
+    File.write!(Path.join(path, "test/test_helper.exs"), helper)
     git!(path, ["add", "mix.exs", "lib/security.ex", "test/test_helper.exs"])
     git!(path, ["commit", "-m", "base"])
     path
