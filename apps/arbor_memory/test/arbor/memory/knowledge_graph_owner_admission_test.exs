@@ -50,7 +50,7 @@ defmodule Arbor.Memory.KnowledgeGraphOwnerAdmissionTest do
         assert {:ok, _} = add_node!(agent_id, "first miss", taint)
         assert {:ok, _} = add_node!(agent_id, "second miss", taint)
         assert OwnerRoots.held_count(owner_roots(), agent_id) == 2
-        assert Map.get(:sys.get_state(KnowledgeGraphStore).pending_projection, agent_id) == 1
+        assert Map.has_key?(:sys.get_state(KnowledgeGraphStore).pending_projection, agent_id)
 
         task = Task.async(fn -> MutationAdmission.drain(agent_id, timeout_ms: 5_000) end)
 

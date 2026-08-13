@@ -343,8 +343,8 @@ defmodule Arbor.Memory.KnowledgeGraphStore do
   end
 
   @doc """
-  Authoritative absence across durable graph, ETS projection, and owner
-  deferred projection-retry state. Returns `{:ok, true}` only when no
+  Authoritative absence across durable graph, ETS projection, pending owner-local
+  projection retry, and retained owner roots. Returns `{:ok, true}` only when no
   exact-agent content remains.
   """
   @spec agent_content_absent?(String.t()) ::
@@ -378,7 +378,7 @@ defmodule Arbor.Memory.KnowledgeGraphStore do
     with_fresh_admission(state, agent_id, {:error, :store_unavailable}, fn state ->
       case read_authority(agent_id, @cas_attempts) do
         {:ok, snapshot, _record} ->
-          {next, disposition} = project_or_schedule(state, agent_id, snapshot)
+          {next, disposition} = project_or_defer(state, agent_id, snapshot)
           {{:ok, snapshot.graph}, next, disposition}
 
         {:error, reason} = error ->
@@ -392,7 +392,7 @@ defmodule Arbor.Memory.KnowledgeGraphStore do
     with_fresh_admission(state, agent_id, {:error, :store_unavailable}, fn state ->
       case read_authority(agent_id, @cas_attempts) do
         {:ok, snapshot, _record} ->
-          {next, disposition} = project_or_schedule(state, agent_id, snapshot)
+          {next, disposition} = project_or_defer(state, agent_id, snapshot)
           {{:ok, snapshot}, next, disposition}
 
         {:error, reason} = error ->
@@ -422,7 +422,7 @@ defmodule Arbor.Memory.KnowledgeGraphStore do
                  deadline
                ) do
             {:ok, snapshot, result} ->
-              {next, disposition} = project_or_schedule(state, agent_id, snapshot)
+              {next, disposition} = project_or_defer(state, agent_id, snapshot)
               {{:ok, result}, next, disposition}
 
             {:error, reason} = error ->
@@ -461,7 +461,7 @@ defmodule Arbor.Memory.KnowledgeGraphStore do
                ) do
             {:ok, snapshot, result} ->
               result = attach_operation_provenance(operation, snapshot, result)
-              {next, disposition} = project_or_schedule(state, agent_id, snapshot)
+              {next, disposition} = project_or_defer(state, agent_id, snapshot)
               {{:ok, result}, next, disposition}
 
             {:error, reason} = error ->
@@ -500,7 +500,7 @@ defmodule Arbor.Memory.KnowledgeGraphStore do
                  deadline
                ) do
             {:ok, snapshot, result} ->
-              {next, disposition} = project_or_schedule(state, agent_id, snapshot)
+              {next, disposition} = project_or_defer(state, agent_id, snapshot)
               {{:ok, result}, next, disposition}
 
             {:error, reason} = error ->
@@ -587,7 +587,7 @@ defmodule Arbor.Memory.KnowledgeGraphStore do
     with_fresh_admission(state, agent_id, {:error, :store_unavailable}, fn state ->
       case read_authority(agent_id, @cas_attempts) do
         {:ok, snapshot, _record} ->
-          {next, disposition} = project_or_schedule(state, agent_id, snapshot)
+          {next, disposition} = project_or_defer(state, agent_id, snapshot)
           {{:ok, snapshot.graph}, next, disposition}
 
         {:error, reason} = error ->
@@ -828,7 +828,7 @@ defmodule Arbor.Memory.KnowledgeGraphStore do
     _, _ -> {:error, :outcome_unknown}
   end
 
-  defp project_or_schedule(state, agent_id, snapshot) do
+  defp project_or_defer(state, agent_id, snapshot) do
     case install_projection(agent_id, snapshot) do
       :ok -> {state, :settle}
       {:error, _reason} -> {state, :defer}
