@@ -13,12 +13,16 @@ defmodule Arbor.LLM.OAuth.Login.LoopbackTransport do
   def accept(socket, timeout), do: :ranch_tcp.accept(socket, timeout)
 
   def handshake(socket, timeout) do
+    Process.flag(:sensitive, true)
+
     with :ok <- preflight_request_target(socket, timeout) do
       :ranch_tcp.handshake(socket, timeout)
     end
   end
 
   def handshake(socket, opts, timeout) do
+    Process.flag(:sensitive, true)
+
     with :ok <- preflight_request_target(socket, timeout) do
       :ranch_tcp.handshake(socket, opts, timeout)
     end

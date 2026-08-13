@@ -22,6 +22,7 @@ defmodule Arbor.LLM.OAuth.Login.LoopbackPlug do
 
   @impl true
   def call(conn, opts) do
+    Process.flag(:sensitive, true)
     flow_id = Keyword.fetch!(opts, :flow_id)
     port = Keyword.fetch!(opts, :port)
 

@@ -11,6 +11,8 @@ defmodule Arbor.LLM.OAuth.Login.LoopbackListenerTest do
   alias Arbor.Common.OAuth.HttpClient.Response
   alias Arbor.LLM.OAuth
   alias Arbor.LLM.OAuth.Login.Loopback
+  alias Arbor.LLM.OAuth.Login.LoopbackFlowSupervisor
+  alias Arbor.LLM.OAuth.Login.LoopbackOwner
   alias Arbor.LLM.OAuth.Login.LoopbackPrompt
   alias Arbor.LLM.OAuth.Login.LoopbackResolver
   alias Arbor.LLM.OAuth.Login.PendingStore
@@ -21,6 +23,8 @@ defmodule Arbor.LLM.OAuth.Login.LoopbackListenerTest do
     @impl true
     def request(request) do
       Agent.get_and_update(__MODULE__, fn state ->
+        if state.delay_ms > 0, do: Process.sleep(state.delay_ms)
+
         case state.responses do
           [response | rest] ->
             {{:ok, response}, %{state | responses: rest, requests: [request | state.requests]}}
@@ -32,6 +36,7 @@ defmodule Arbor.LLM.OAuth.Login.LoopbackListenerTest do
     end
 
     def set(responses), do: Agent.update(__MODULE__, &%{&1 | responses: responses})
+    def delay(delay_ms), do: Agent.update(__MODULE__, &%{&1 | delay_ms: delay_ms})
     def request_count, do: Agent.get(__MODULE__, &length(&1.requests))
   end
 
@@ -41,7 +46,8 @@ defmodule Arbor.LLM.OAuth.Login.LoopbackListenerTest do
     start_supervised!(%{
       id: SharedStubClient,
       start:
-        {Agent, :start_link, [fn -> %{responses: [], requests: []} end, [name: SharedStubClient]]}
+        {Agent, :start_link,
+         [fn -> %{responses: [], requests: [], delay_ms: 0} end, [name: SharedStubClient]]}
     })
 
     prior_adapter = Application.get_env(:arbor_common, :oauth_http_client)
@@ -118,6 +124,17 @@ defmodule Arbor.LLM.OAuth.Login.LoopbackListenerTest do
 
     assert Enum.count(responses, &String.contains?(&1, "200 OK")) == 1
     assert SharedStubClient.request_count() == 1
+  end
+
+  test "delayed completion returns its completed result and tears down immediately" do
+    SharedStubClient.set([token_response()])
+    SharedStubClient.delay(100)
+    {:ok, prompt} = Loopback.start_resolved(:port_1457, [@ipv4])
+    state = query_value(LoopbackPrompt.authorize_url(prompt), "state")
+
+    assert request("GET /auth/callback?code=delayed&state=#{state} HTTP/1.1") =~ "200 OK"
+    assert SharedStubClient.request_count() == 1
+    assert eventually(&port_reusable?/0)
   end
 
   test "a state-matched provider denial is terminal without token exchange" do
@@ -226,16 +243,25 @@ defmodule Arbor.LLM.OAuth.Login.LoopbackListenerTest do
 
   test "IPv4, IPv6, and mixed startup bind every validated address" do
     assert {:ok, _prompt} = Loopback.start_resolved(:port_1457, [@ipv4])
+    assert connectable?(@ipv4)
     stop_all_flows()
     assert eventually(&port_reusable?/0)
 
     case ipv6_available?() do
       true ->
-        assert {:ok, _prompt} = Loopback.start_resolved(:port_1457, [{0, 0, 0, 0, 0, 0, 0, 1}])
+        ipv6 = {0, 0, 0, 0, 0, 0, 0, 1}
+        assert {:ok, _prompt} = Loopback.start_resolved(:port_1457, [ipv6])
+        assert connectable?(ipv6)
         stop_all_flows()
+        assert eventually(fn -> address_reusable?(ipv6) end)
 
         assert {:ok, _prompt} =
-                 Loopback.start_resolved(:port_1457, [@ipv4, {0, 0, 0, 0, 0, 0, 0, 1}])
+                 Loopback.start_resolved(:port_1457, [@ipv4, ipv6])
+
+        assert connectable?(@ipv4)
+        assert connectable?(ipv6)
+        stop_all_flows()
+        assert eventually(fn -> address_reusable?(@ipv4) and address_reusable?(ipv6) end)
 
       false ->
         :ok
@@ -257,7 +283,10 @@ defmodule Arbor.LLM.OAuth.Login.LoopbackListenerTest do
 
       :gen_tcp.close(occupied)
       assert pending_count() == before_count
-      assert port_reusable?()
+
+      assert eventually(fn ->
+               address_reusable?(@ipv4) and address_reusable?({0, 0, 0, 0, 0, 0, 0, 1})
+             end)
     end
   end
 
@@ -296,6 +325,24 @@ defmodule Arbor.LLM.OAuth.Login.LoopbackListenerTest do
                {127, 0, 0, 4},
                {127, 0, 0, 5}
              ])
+
+    assert {:error, :localhost_resolution_failed} =
+             LoopbackResolver.combine_family_results(
+               {:ok, [@ipv4]},
+               {:error, :timeout}
+             )
+
+    assert {:error, :localhost_resolution_failed} =
+             LoopbackResolver.combine_family_results(
+               {:error, :nxdomain},
+               {:ok, [{0, 0, 0, 0, 0, 0, 0, 1}]}
+             )
+
+    assert {:ok, [@ipv4]} =
+             LoopbackResolver.combine_family_results(
+               {:ok, [@ipv4]},
+               {:error, :eafnosupport}
+             )
   end
 
   test "deadline and owner shutdown discard pending state and release the port" do
@@ -308,6 +355,86 @@ defmodule Arbor.LLM.OAuth.Login.LoopbackListenerTest do
     send(owner, :deadline)
     assert eventually(fn -> pending_count() == before_count end)
     assert eventually(&port_reusable?/0)
+  end
+
+  test "terminal callback fallback releases the flow when no response notification arrives" do
+    {:ok, prompt} = Loopback.start_resolved(:port_1457, [@ipv4])
+    state = query_value(LoopbackPrompt.authorize_url(prompt), "state")
+
+    [{flow_id, owner}] =
+      Registry.select(@registry, [{{:"$1", :"$2", :_}, [], [{{:"$1", :"$2"}}]}])
+
+    assert :failure =
+             LoopbackOwner.callback(flow_id, {:provider_error, :access_denied, state})
+
+    owner_state = :sys.get_state(owner)
+    assert owner_state.phase == :terminal
+    assert is_reference(owner_state.terminal_cleanup_timer)
+
+    send(owner, :terminal_cleanup)
+    assert eventually(&port_reusable?/0)
+  end
+
+  test "dynamic child start activates owner before one-shot authorization URL retrieval" do
+    flow_id = make_ref()
+
+    child =
+      {LoopbackFlowSupervisor,
+       flow_id: flow_id, selector: :port_1457, port: @port, addresses: [@ipv4]}
+
+    assert {:ok, flow_pid} =
+             DynamicSupervisor.start_child(Arbor.LLM.OAuth.Login.LoopbackSupervisor, child)
+
+    assert is_pid(flow_pid)
+    assert [{owner, _value}] = Registry.lookup(@registry, flow_id)
+    owner_state = :sys.get_state(owner)
+    assert owner_state.phase == :active
+    assert is_binary(owner_state.handle)
+    assert is_binary(owner_state.authorize_url)
+    assert is_reference(owner_state.deadline_timer)
+    refute owner |> :sys.get_status() |> inspect(limit: :infinity) =~ owner_state.authorize_url
+
+    assert {:ok, authorize_url} = LoopbackOwner.take_authorize_url(flow_id)
+    assert authorize_url == owner_state.authorize_url
+    assert {:error, :oauth_loopback_unavailable} = LoopbackOwner.take_authorize_url(flow_id)
+  end
+
+  test "activation failure rolls back listeners without registering an indefinite flow" do
+    deadline = System.monotonic_time(:millisecond) + 60_000
+    for _ <- 1..256, do: {:ok, _} = PendingStore.issue_openai(:port_1455, deadline)
+
+    assert {:error, :oauth_loopback_unavailable} =
+             Loopback.start_resolved(:port_1457, [@ipv4])
+
+    assert eventually(&port_reusable?/0)
+    assert eventually(fn -> Registry.count(@registry) == 0 end)
+    assert pending_count() == 256
+  end
+
+  test "Registry restart tears down unreachable flows and recovers the loopback subsystem" do
+    {:ok, _prompt} = Loopback.start_resolved(:port_1457, [@ipv4])
+
+    [{flow_id, _owner}] =
+      Registry.select(@registry, [{{:"$1", :"$2", :_}, [], [{{:"$1", :"$2"}}]}])
+
+    application_supervisor = Process.whereis(Arbor.LLM.Supervisor)
+    old_registry = Process.whereis(@registry)
+    old_supervisor = Process.whereis(Arbor.LLM.OAuth.Login.LoopbackSupervisor)
+    Process.exit(old_registry, :kill)
+    assert :ok = LoopbackOwner.response_sent(flow_id)
+
+    assert eventually(fn ->
+             registry = Process.whereis(@registry)
+             supervisor = Process.whereis(Arbor.LLM.OAuth.Login.LoopbackSupervisor)
+
+             is_pid(registry) and registry != old_registry and is_pid(supervisor) and
+               supervisor != old_supervisor
+           end)
+
+    assert Process.whereis(Arbor.LLM.Supervisor) == application_supervisor
+    assert eventually(&port_reusable?/0)
+    assert eventually(fn -> pending_count() == 0 end)
+    assert {:ok, _prompt} = Loopback.start_resolved(:port_1457, [@ipv4])
   end
 
   test "PendingStore restart tears down listeners and invalidates the flow" do
@@ -410,11 +537,25 @@ defmodule Arbor.LLM.OAuth.Login.LoopbackListenerTest do
   end
 
   defp port_reusable? do
-    case :gen_tcp.listen(@port, [:binary, active: false, reuseaddr: true, ip: @ipv4]) do
+    address_reusable?(@ipv4)
+  end
+
+  defp address_reusable?(address) do
+    case :gen_tcp.listen(@port, socket_opts(address) ++ [reuseaddr: true, ip: address]) do
       {:ok, socket} -> :gen_tcp.close(socket) == :ok
       {:error, _reason} -> false
     end
   end
+
+  defp connectable?(address) do
+    case :gen_tcp.connect(address, @port, socket_opts(address), 1_000) do
+      {:ok, socket} -> :gen_tcp.close(socket) == :ok
+      {:error, _reason} -> false
+    end
+  end
+
+  defp socket_opts(address) when tuple_size(address) == 8, do: [:binary, :inet6, active: false]
+  defp socket_opts(_address), do: [:binary, active: false]
 
   defp ipv6_available? do
     case :gen_tcp.listen(0, [:binary, :inet6, active: false, ip: {0, 0, 0, 0, 0, 0, 0, 1}]) do

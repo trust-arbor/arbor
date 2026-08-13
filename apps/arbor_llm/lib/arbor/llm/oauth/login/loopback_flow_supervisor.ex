@@ -7,20 +7,23 @@ defmodule Arbor.LLM.OAuth.Login.LoopbackFlowSupervisor do
   alias Arbor.LLM.OAuth.Login.LoopbackPlug
   alias Arbor.LLM.OAuth.Login.LoopbackTransport
 
-  def start_link(opts), do: Supervisor.start_link(__MODULE__, opts)
-
   @doc false
-  def arm(flow_supervisor, flow_id) do
-    listeners =
-      flow_supervisor
-      |> Supervisor.which_children()
-      |> Enum.flat_map(fn
-        {LoopbackOwner, _pid, _, _} -> []
-        {_id, pid, _, _} when is_pid(pid) -> [pid]
-        _child -> []
-      end)
+  def child_spec(opts) do
+    %{
+      id: __MODULE__,
+      start: {__MODULE__, :start_link, [opts]},
+      restart: :temporary,
+      type: :supervisor
+    }
+  end
 
-    LoopbackOwner.arm(flow_id, flow_supervisor, listeners)
+  def start_link(opts) do
+    flow_id = Keyword.fetch!(opts, :flow_id)
+
+    case Supervisor.start_link(__MODULE__, opts) do
+      {:ok, pid} -> activate_started_flow(pid, flow_id)
+      {:error, reason} -> {:error, reason}
+    end
   end
 
   @impl true
@@ -107,4 +110,30 @@ defmodule Arbor.LLM.OAuth.Login.LoopbackFlowSupervisor do
   end
 
   defp normalize_ranch_child_spec(spec) when is_map(spec), do: spec
+
+  defp activate_started_flow(pid, flow_id) do
+    case LoopbackOwner.activate(flow_id) do
+      :ok ->
+        {:ok, pid}
+
+      {:error, reason} ->
+        stop_started_flow(pid)
+        {:error, reason}
+    end
+  catch
+    :exit, reason ->
+      stop_started_flow(pid)
+      {:error, {:owner_activation_failed, closed_reason(reason)}}
+  end
+
+  defp stop_started_flow(pid) do
+    if Process.alive?(pid), do: Supervisor.stop(pid, :normal)
+    :ok
+  catch
+    :exit, _reason -> :ok
+  end
+
+  defp closed_reason({reason, _details}) when is_atom(reason), do: reason
+  defp closed_reason(reason) when is_atom(reason), do: reason
+  defp closed_reason(_reason), do: :closed
 end

@@ -8,32 +8,38 @@ defmodule Arbor.LLM.OAuth.Login.LoopbackOwner do
   alias Arbor.LLM.OAuth.Login.PendingStore
 
   @registry Arbor.LLM.OAuth.Login.LoopbackRegistry
-  @call_timeout_ms 15_000
+  @terminal_cleanup_ms 1_000
 
   def start_link(opts) do
     flow_id = Keyword.fetch!(opts, :flow_id)
     GenServer.start_link(__MODULE__, opts, name: via(flow_id))
   end
 
-  @spec activate(reference()) :: {:ok, String.t()} | {:error, term()}
-  def activate(flow_id), do: GenServer.call(via(flow_id), :activate, @call_timeout_ms)
+  @spec activate(reference()) :: :ok | {:error, term()}
+  def activate(flow_id), do: GenServer.call(via(flow_id), :activate, :infinity)
+
+  @spec take_authorize_url(reference()) :: {:ok, String.t()} | {:error, term()}
+  def take_authorize_url(flow_id),
+    do: GenServer.call(via(flow_id), :take_authorize_url, :infinity)
 
   @doc false
-  def arm(flow_id, flow_supervisor, listeners) do
-    GenServer.call(via(flow_id), {:arm, flow_supervisor, listeners})
-  end
-
   @spec callback(reference(), term()) :: :success | :failure | :invalid_state
   def callback(flow_id, callback) do
-    GenServer.call(via(flow_id), {:callback, callback}, @call_timeout_ms)
+    GenServer.call(via(flow_id), {:callback, callback}, :infinity)
   catch
     :exit, _reason -> :failure
   end
 
-  def response_sent(flow_id), do: GenServer.cast(via(flow_id), :response_sent)
+  def response_sent(flow_id) do
+    GenServer.cast(via(flow_id), :response_sent)
+    :ok
+  catch
+    :exit, _reason -> :ok
+  end
 
   @impl true
   def init(opts) do
+    Process.flag(:sensitive, true)
     Process.flag(:trap_exit, true)
     pending_store_monitor = Process.monitor(Process.whereis(PendingStore))
 
@@ -42,26 +48,12 @@ defmodule Arbor.LLM.OAuth.Login.LoopbackOwner do
        selector: Keyword.fetch!(opts, :selector),
        phase: :waiting_activation,
        handle: nil,
+       authorize_url: nil,
        deadline_timer: nil,
-       flow_supervisor: nil,
-       listener_monitors: MapSet.new(),
+       terminal_cleanup_timer: nil,
        pending_store_monitor: pending_store_monitor
      }}
   end
-
-  @impl true
-  def handle_call(
-        {:arm, flow_supervisor, listeners},
-        _from,
-        %{phase: :waiting_activation, flow_supervisor: nil} = state
-      )
-      when is_pid(flow_supervisor) and is_list(listeners) and listeners != [] do
-    monitors = listeners |> Enum.map(&Process.monitor/1) |> MapSet.new()
-    {:reply, :ok, %{state | flow_supervisor: flow_supervisor, listener_monitors: monitors}}
-  end
-
-  def handle_call({:arm, _flow_supervisor, _listeners}, _from, state),
-    do: {:reply, {:error, :oauth_loopback_unavailable}, state}
 
   @impl true
   def handle_call(:activate, _from, %{phase: :waiting_activation} = state) do
@@ -70,8 +62,16 @@ defmodule Arbor.LLM.OAuth.Login.LoopbackOwner do
     case Login.start_openai_login(redirect_uri: state.selector) do
       {:ok, %AuthorizationPrompt{} = prompt} ->
         timer = Process.send_after(self(), :deadline, remaining_ms(deadline))
-        next = %{state | phase: :active, handle: prompt.handle, deadline_timer: timer}
-        {:reply, {:ok, AuthorizationPrompt.authorize_url(prompt)}, next}
+
+        next = %{
+          state
+          | phase: :active,
+            handle: prompt.handle,
+            authorize_url: AuthorizationPrompt.authorize_url(prompt),
+            deadline_timer: timer
+        }
+
+        {:reply, :ok, next}
 
       {:error, reason} ->
         {:stop, :normal, {:error, reason}, state}
@@ -81,13 +81,25 @@ defmodule Arbor.LLM.OAuth.Login.LoopbackOwner do
   def handle_call(:activate, _from, state),
     do: {:reply, {:error, :oauth_loopback_unavailable}, state}
 
+  def handle_call(
+        :take_authorize_url,
+        _from,
+        %{phase: :active, authorize_url: authorize_url} = state
+      )
+      when is_binary(authorize_url) do
+    {:reply, {:ok, authorize_url}, %{state | authorize_url: nil}}
+  end
+
+  def handle_call(:take_authorize_url, _from, state),
+    do: {:reply, {:error, :oauth_loopback_unavailable}, state}
+
   def handle_call({:callback, callback}, _from, %{phase: :active} = state) do
     received_state = callback_state(callback)
 
     case PendingStore.match_openai_state(state.handle, received_state) do
       :ok -> complete_callback(callback, state)
       {:error, :state_mismatch} -> {:reply, :invalid_state, state}
-      {:error, _reason} -> {:reply, :failure, %{state | phase: :terminal}}
+      {:error, _reason} -> {:reply, :failure, terminal_state(state)}
     end
   end
 
@@ -95,23 +107,25 @@ defmodule Arbor.LLM.OAuth.Login.LoopbackOwner do
 
   @impl true
   def handle_cast(:response_sent, %{phase: :terminal} = state) do
-    terminate_flow(state)
-    {:noreply, state}
+    {:stop, :normal, state}
   end
 
   def handle_cast(:response_sent, state), do: {:noreply, state}
 
   @impl true
   def handle_info(:deadline, state) do
-    terminate_flow(state)
-    {:noreply, %{state | phase: :terminal}}
+    {:stop, :normal, %{state | phase: :terminal}}
   end
 
-  def handle_info({:DOWN, monitor, :process, _pid, _reason}, state) do
-    if monitor == state.pending_store_monitor or MapSet.member?(state.listener_monitors, monitor),
-      do: terminate_flow(state)
+  def handle_info(:terminal_cleanup, %{phase: :terminal} = state) do
+    {:stop, :normal, state}
+  end
 
-    {:noreply, state}
+  def handle_info(
+        {:DOWN, monitor, :process, _pid, _reason},
+        %{pending_store_monitor: monitor} = state
+      ) do
+    {:stop, :normal, state}
   end
 
   def handle_info(_message, state), do: {:noreply, state}
@@ -138,14 +152,18 @@ defmodule Arbor.LLM.OAuth.Login.LoopbackOwner do
   end
 
   defp complete_callback({:success, code, state_value}, state) do
-    result = Login.complete_openai_login(state.handle, code, state_value)
-    reply = if result == :ok, do: :success, else: :failure
-    {:reply, reply, %{state | phase: :terminal}}
+    reply =
+      case Login.complete_openai_login(state.handle, code, state_value) do
+        :ok -> :success
+        {:error, _reason} -> :failure
+      end
+
+    {:reply, reply, terminal_state(state)}
   end
 
   defp complete_callback({:provider_error, _closed_error, _state_value}, state) do
     PendingStore.discard_openai(state.handle)
-    {:reply, :failure, %{state | phase: :terminal}}
+    {:reply, :failure, terminal_state(state)}
   end
 
   defp callback_state({:success, _code, state}), do: state
@@ -154,18 +172,12 @@ defmodule Arbor.LLM.OAuth.Login.LoopbackOwner do
   defp remaining_ms(deadline),
     do: max(deadline - System.monotonic_time(:millisecond), 1)
 
-  defp terminate_flow(%{flow_supervisor: flow_supervisor}) when is_pid(flow_supervisor) do
-    Task.Supervisor.start_child(Arbor.LLM.OAuth.Login.LoopbackTaskSupervisor, fn ->
-      DynamicSupervisor.terminate_child(
-        Arbor.LLM.OAuth.Login.LoopbackSupervisor,
-        flow_supervisor
-      )
-    end)
-
-    :ok
+  defp terminal_state(%{terminal_cleanup_timer: nil} = state) do
+    timer = Process.send_after(self(), :terminal_cleanup, @terminal_cleanup_ms)
+    %{state | phase: :terminal, terminal_cleanup_timer: timer}
   end
 
-  defp terminate_flow(_state), do: :ok
+  defp terminal_state(state), do: %{state | phase: :terminal}
 
   defp via(flow_id), do: {:via, Registry, {@registry, flow_id}}
 end

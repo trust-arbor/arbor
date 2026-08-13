@@ -8,9 +8,7 @@ defmodule Arbor.LLM.Application do
     children = [
       Arbor.LLM.OAuth.Login.PendingStore,
       Arbor.LLM.OAuth.RecoveryProofStore,
-      {Registry, keys: :unique, name: Arbor.LLM.OAuth.Login.LoopbackRegistry},
-      {Task.Supervisor, name: Arbor.LLM.OAuth.Login.LoopbackTaskSupervisor},
-      Arbor.LLM.OAuth.Login.LoopbackSupervisor
+      Arbor.LLM.OAuth.Login.LoopbackRootSupervisor
     ]
 
     Supervisor.start_link(children, strategy: :one_for_one, name: Arbor.LLM.Supervisor)

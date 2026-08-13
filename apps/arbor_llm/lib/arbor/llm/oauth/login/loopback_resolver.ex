@@ -52,17 +52,29 @@ defmodule Arbor.LLM.OAuth.Login.LoopbackResolver do
   def validate(_addresses), do: {:error, :localhost_resolution_invalid}
 
   defp resolve_families do
-    addresses =
-      [:inet, :inet6]
-      |> Enum.flat_map(fn family ->
-        case :inet.getaddrs(~c"localhost", family) do
-          {:ok, values} -> values
-          {:error, _reason} -> []
-        end
-      end)
-
-    validate(addresses)
+    combine_family_results(
+      :inet.getaddrs(~c"localhost", :inet),
+      :inet.getaddrs(~c"localhost", :inet6)
+    )
   end
+
+  @doc false
+  @spec combine_family_results(term(), term()) ::
+          {:ok, [:inet.ip_address()]} | {:error, atom()}
+  def combine_family_results(ipv4_result, ipv6_result) do
+    with {:ok, ipv4} <- family_addresses(ipv4_result),
+         {:ok, ipv6} <- family_addresses(ipv6_result) do
+      validate(ipv4 ++ ipv6)
+    end
+  end
+
+  defp family_addresses({:ok, addresses}) when is_list(addresses), do: {:ok, addresses}
+
+  defp family_addresses({:error, reason}) when reason in [:eafnosupport, :enotsup],
+    do: {:ok, []}
+
+  defp family_addresses({:error, _reason}), do: {:error, :localhost_resolution_failed}
+  defp family_addresses(_result), do: {:error, :localhost_resolution_failed}
 
   defp loopback?({127, _b, _c, _d}), do: true
   defp loopback?({0, 0, 0, 0, 0, 0, 0, 1}), do: true

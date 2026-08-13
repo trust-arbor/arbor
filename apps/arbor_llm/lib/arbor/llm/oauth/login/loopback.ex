@@ -30,8 +30,11 @@ defmodule Arbor.LLM.OAuth.Login.Loopback do
          flow_id: flow_id, selector: selector, port: port, addresses: addresses}
 
       case DynamicSupervisor.start_child(LoopbackSupervisor, child) do
-        {:ok, flow_pid} -> activate(flow_pid, flow_id)
-        {:error, _reason} -> {:error, :oauth_loopback_unavailable}
+        {:ok, flow_pid} ->
+          take_authorize_url(flow_pid, flow_id)
+
+        {:error, _reason} ->
+          {:error, :oauth_loopback_unavailable}
       end
     else
       :error -> {:error, :invalid_redirect_uri_selector}
@@ -39,20 +42,25 @@ defmodule Arbor.LLM.OAuth.Login.Loopback do
     end
   end
 
-  defp activate(flow_pid, flow_id) do
-    with :ok <- LoopbackFlowSupervisor.arm(flow_pid, flow_id) do
-      case LoopbackOwner.activate(flow_id) do
-        {:ok, authorize_url} ->
-          {:ok, %LoopbackPrompt{authorize_url: authorize_url}}
+  defp take_authorize_url(flow_pid, flow_id) do
+    case LoopbackOwner.take_authorize_url(flow_id) do
+      {:ok, authorize_url} ->
+        {:ok, %LoopbackPrompt{authorize_url: authorize_url}}
 
-        {:error, reason} ->
-          DynamicSupervisor.terminate_child(LoopbackSupervisor, flow_pid)
-          {:error, reason}
-      end
+      {:error, _reason} ->
+        terminate_flow(flow_pid)
+        {:error, :oauth_loopback_unavailable}
     end
   catch
     :exit, _reason ->
-      DynamicSupervisor.terminate_child(LoopbackSupervisor, flow_pid)
+      terminate_flow(flow_pid)
       {:error, :oauth_loopback_unavailable}
+  end
+
+  defp terminate_flow(flow_pid) do
+    DynamicSupervisor.terminate_child(LoopbackSupervisor, flow_pid)
+    :ok
+  catch
+    :exit, _reason -> :ok
   end
 end
