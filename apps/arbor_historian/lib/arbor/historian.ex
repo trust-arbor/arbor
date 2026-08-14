@@ -39,8 +39,17 @@ defmodule Arbor.Historian do
   """
 
   @behaviour Arbor.Contracts.API.Historian
+  @behaviour Arbor.Signals.Contracts.DurableSink
 
-  alias Arbor.Historian.{QueryEngine, StreamContent, StreamRegistry, TaintQuery, Timeline}
+  alias Arbor.Historian.{
+    DurableSignalSink,
+    QueryEngine,
+    StreamContent,
+    StreamRegistry,
+    TaintQuery,
+    Timeline
+  }
+
   alias Arbor.Historian.QueryEngine.Aggregator
   alias Arbor.Historian.Timeline.Span
 
@@ -718,6 +727,23 @@ defmodule Arbor.Historian do
       total_events: total_events
     }
   end
+
+  # ============================================================================
+  # Durable signal sink (Arbor.Signals.Contracts.DurableSink)
+  # ============================================================================
+
+  @doc """
+  Append one durable signal event through Historian-owned hot and durable targets.
+
+  Implements `Arbor.Signals.Contracts.DurableSink`. Callers pass only
+  Signals-shaped primitives. Event construction and Persistence backends
+  stay behind this facade.
+  """
+  @impl Arbor.Signals.Contracts.DurableSink
+  @spec persist_durable_event(String.t(), term(), map(), keyword()) ::
+          :ok | {:error, :persist_failed}
+  def persist_durable_event(stream_id, event_type, data, opts \\ []),
+    do: DurableSignalSink.persist(stream_id, event_type, data, opts)
 
   # ============================================================================
   # Complete history stream content (VP-05D2C3I0C4C)

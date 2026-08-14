@@ -1,62 +1,53 @@
 defmodule Arbor.Signals.DurableEmitLineageTest do
   @moduledoc """
-  Security regression: durable_emit must not drop audit lineage at the
-  EventLog boundary (correlation_id, cause_id→causation_id, agent_id,
-  caller metadata + source_node).
-
-  Emits through `Arbor.Signals.durable_emit/4` and reads through the
-  public `Arbor.Persistence.read_stream/4` EventLog API. Proves lineage
-  and caller metadata are visible to readers after the synchronous hot
-  ETS append.
+  durable_emit forwards Signals-shaped primitives to the configured sink
+  and fails softly for absent or malformed providers.
   """
-  use ExUnit.Case, async: false
+  use Arbor.Signals.TestCase
+
+  import ExUnit.CaptureLog
 
   @moduletag :fast
 
-  @event_log_name Arbor.Historian.EventLog.ETS
-  @event_log_backend Arbor.Persistence.EventLog.ETS
-
   setup do
-    Arbor.Signals.TestCase.ensure_processes()
+    original = Application.get_env(:arbor_signals, :durable_sink_module, :unset)
+    Application.delete_env(:arbor_signals, :durable_sink_module)
 
-    unless Code.ensure_loaded?(Arbor.Persistence.Event) do
-      flunk(
-        "Arbor.Persistence.Event must be available for durable_emit lineage regression " <>
-          "(umbrella build with arbor_persistence beams required)"
-      )
-    end
-
-    case Application.ensure_all_started(:arbor_persistence) do
-      {:ok, _} -> :ok
-      {:error, reason} -> flunk("failed to start arbor_persistence: #{inspect(reason)}")
-    end
-
-    unless Code.ensure_loaded?(@event_log_backend) do
-      flunk("Arbor.Persistence.EventLog.ETS must be available for lineage regression")
-    end
-
-    case Process.whereis(@event_log_name) do
-      pid when is_pid(pid) ->
-        :ok
-
-      nil ->
-        case @event_log_backend.start_link(name: @event_log_name) do
-          {:ok, _pid} -> :ok
-          {:error, {:already_started, _pid}} -> :ok
-          {:error, reason} -> flunk("failed to start Historian EventLog.ETS: #{inspect(reason)}")
-        end
-    end
+    on_exit(fn -> restore(:durable_sink_module, original) end)
 
     :ok
   end
 
-  test "security regression: durable_emit preserves lineage and caller metadata at EventLog boundary" do
+  test "nil sink still emits realtime with :permanent and stays silent" do
+    suffix = System.unique_integer([:positive])
+    type = :"permanent_probe_#{suffix}"
+    stream_id = "silent_#{suffix}"
+
+    log =
+      capture_log(fn ->
+        assert :ok =
+                 Arbor.Signals.durable_emit(:activity, type, %{probe: suffix},
+                   stream_id: stream_id
+                 )
+      end)
+
+    {:ok, signals} = Arbor.Signals.recent(limit: 50, category: :activity, type: type)
+    signal = Enum.find(signals, &(&1.type == type))
+    assert signal, "expected realtime signal #{inspect(type)}"
+    assert signal.data.permanent == true
+    assert signal.data.probe == suffix
+    refute log =~ stream_id
+  end
+
+  test "recording sink receives original data and lineage without :permanent" do
+    Application.put_env(:arbor_signals, :durable_sink_test_pid, self())
+    Application.put_env(:arbor_signals, :durable_sink_module, __MODULE__.RecordingSink)
+
+    on_exit(fn -> Application.delete_env(:arbor_signals, :durable_sink_test_pid) end)
+
     suffix = System.unique_integer([:positive])
     stream_id = "audit_lineage_#{suffix}"
     type = :"lineage_probe_#{suffix}"
-    corr = "corr_lineage_#{suffix}"
-    cause = "cause_lineage_#{suffix}"
-    agent = "agent_lineage_#{suffix}"
 
     assert :ok =
              Arbor.Signals.durable_emit(
@@ -64,75 +55,111 @@ defmodule Arbor.Signals.DurableEmitLineageTest do
                type,
                %{probe: true},
                stream_id: stream_id,
-               correlation_id: corr,
-               cause_id: cause,
-               agent_id: agent,
+               async: false,
+               source: "caller",
+               correlation_id: "corr_#{suffix}",
+               cause_id: "cause_#{suffix}",
+               agent_id: "agent_#{suffix}",
                metadata: %{
-                 # String-key entry first: keyword (atom) entries must be last.
-                 # Spoof both atom and string keys; system stamp must replace both.
                  "source_node" => "spoofed_string_node",
                  audit_reason: "lineage_regression",
                  source_node: :spoofed_atom_node
                }
              )
 
-    event = read_event!(stream_id, type)
+    {:ok, signals} = Arbor.Signals.recent(limit: 50, category: :activity, type: type)
+    signal = Enum.find(signals, &(&1.type == type))
+    assert signal, "expected realtime signal #{inspect(type)}"
+    assert signal.data.permanent == true
 
-    assert event.correlation_id == corr
-    assert event.causation_id == cause
-    assert event.agent_id == agent
-    assert event.metadata["audit_reason"] == "lineage_regression"
-
-    # System-stamped source_node is the sole persisted value (JSON-canonical string keys).
-    system_node = to_string(node())
-    assert event.metadata["source_node"] == system_node
-
-    refute event.metadata["source_node"] in [
-             "spoofed_atom_node",
-             ":spoofed_atom_node",
-             "spoofed_string_node"
-           ]
-
-    # No residual atom-key spoof after JSON admission (keys are strings only).
-    refute Map.has_key?(event.metadata, :source_node)
+    assert_receive {:sink, ^stream_id, ^type, data, opts}
+    assert data == %{probe: true}
+    refute Map.has_key?(data, :permanent)
+    assert Keyword.get(opts, :correlation_id) == "corr_#{suffix}"
+    assert Keyword.get(opts, :cause_id) == "cause_#{suffix}"
+    assert Keyword.get(opts, :agent_id) == "agent_#{suffix}"
+    assert Keyword.get(opts, :metadata)[:audit_reason] == "lineage_regression"
+    assert Keyword.get(opts, :metadata)[:source_node] == :spoofed_atom_node
+    refute Keyword.has_key?(opts, :stream_id)
+    refute Keyword.has_key?(opts, :async)
+    refute Keyword.has_key?(opts, :source)
   end
 
-  test "security regression: absent lineage opts stay nil without empty sentinels" do
+  test "invalid, missing, malformed, raising, throwing, and exiting sinks stay :ok" do
     suffix = System.unique_integer([:positive])
-    stream_id = "audit_lineage_absent_#{suffix}"
-    type = :"lineage_absent_#{suffix}"
+    type = :"soft_fail_#{suffix}"
 
-    assert :ok =
-             Arbor.Signals.durable_emit(
-               :activity,
-               type,
-               %{probe: true},
-               stream_id: stream_id
-             )
+    providers = [
+      {"not-a-module", "invalid_provider"},
+      {__MODULE__.Empty, "missing_callback"},
+      {__MODULE__.MalformedSink, "malformed_result"},
+      {__MODULE__.RaiseSink, "provider_raised"},
+      {__MODULE__.ThrowSink, "provider_threw"},
+      {__MODULE__.ExitSink, "provider_exited"}
+    ]
 
-    event = read_event!(stream_id, type)
+    Enum.each(providers, fn {provider, reason} ->
+      Application.put_env(:arbor_signals, :durable_sink_module, provider)
 
-    assert is_nil(event.correlation_id)
-    assert is_nil(event.causation_id)
-    assert is_nil(event.agent_id)
-    assert is_map(event.metadata)
-    assert Map.has_key?(event.metadata, "source_node")
-    refute Map.get(event.metadata, "correlation_id") in ["", "nil"]
+      log =
+        capture_log(fn ->
+          assert :ok =
+                   Arbor.Signals.durable_emit(:activity, type, %{secret: "payload"},
+                     stream_id: "soft_#{suffix}"
+                   )
+        end)
+
+      assert log =~ "soft_#{suffix}"
+      assert log =~ reason
+      refute log =~ "secret"
+      refute log =~ "payload"
+    end)
   end
 
-  defp read_event!(stream_id, type) do
-    assert {:ok, events} =
-             Arbor.Persistence.read_stream(
-               @event_log_name,
-               @event_log_backend,
-               stream_id
-             )
+  defp restore(key, :unset), do: Application.delete_env(:arbor_signals, key)
+  defp restore(key, value), do: Application.put_env(:arbor_signals, key, value)
 
-    type_str = to_string(type)
+  defmodule RecordingSink do
+    @behaviour Arbor.Signals.Contracts.DurableSink
 
-    Enum.find(events, &(&1.type == type_str)) ||
-      flunk(
-        "expected event type #{inspect(type_str)} in stream #{inspect(stream_id)}, got: #{inspect(events)}"
-      )
+    @impl true
+    def persist_durable_event(stream_id, type, data, opts) do
+      if pid = Application.get_env(:arbor_signals, :durable_sink_test_pid) do
+        send(pid, {:sink, stream_id, type, data, opts})
+      end
+
+      :ok
+    end
+  end
+
+  defmodule Empty do
+  end
+
+  defmodule MalformedSink do
+    @behaviour Arbor.Signals.Contracts.DurableSink
+
+    @impl true
+    def persist_durable_event(_stream_id, _type, _data, _opts), do: {:ok, :accepted}
+  end
+
+  defmodule RaiseSink do
+    @behaviour Arbor.Signals.Contracts.DurableSink
+
+    @impl true
+    def persist_durable_event(_stream_id, _type, _data, _opts), do: raise("provider boom")
+  end
+
+  defmodule ThrowSink do
+    @behaviour Arbor.Signals.Contracts.DurableSink
+
+    @impl true
+    def persist_durable_event(_stream_id, _type, _data, _opts), do: throw(:provider_throw)
+  end
+
+  defmodule ExitSink do
+    @behaviour Arbor.Signals.Contracts.DurableSink
+
+    @impl true
+    def persist_durable_event(_stream_id, _type, _data, _opts), do: exit(:provider_exit)
   end
 end

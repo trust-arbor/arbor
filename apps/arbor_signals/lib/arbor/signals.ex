@@ -50,9 +50,7 @@ defmodule Arbor.Signals do
 
   @behaviour Arbor.Contracts.API.Signals
 
-  require Logger
-
-  alias Arbor.Signals.{Bus, Config, Relay, Signal, Store, Taint, TopicKeys}
+  alias Arbor.Signals.{Bus, Config, DurableSink, Relay, Signal, Store, Taint, TopicKeys}
 
   # ===========================================================================
   # Public API — short, human-friendly names
@@ -79,119 +77,33 @@ defmodule Arbor.Signals do
     do: emit_signal_for_category_and_type(category, type, data, opts)
 
   @doc """
-  Emit a durable signal — signal bus AND Historian EventLog (ETS hot
-  cache) AND the Ecto-backed durable EventLog (Postgres or SQLite3,
-  per Repo config).
+  Emit a durable signal — real-time bus plus the configured durable sink.
 
   Use this for events that must survive restarts and be queryable later:
   LLM call traces, worker lifecycle, security audit events.
 
-  Same API as `emit/4` but additionally writes to the Historian's
-  EventLog (ETS) and the durable backend (async). Best-effort: the
-  signal always emits even if persistence fails.
+  Same API as `emit/4` but additionally dispatches the original data to
+  the configured durable sink (synchronous hot append, asynchronous
+  durable append when the sink provides them). Best-effort: the signal
+  always emits even if persistence fails. Standalone and test default
+  is no sink.
 
-  Lineage options are forwarded to the EventLog event at the persistence
-  boundary: `:correlation_id`, `:agent_id`, `:metadata`, and `:cause_id`
-  (mapped to Event `:causation_id`). Absent optional values stay nil —
-  no empty sentinels. System-stamped `source_node` is merged into
-  metadata after dropping any caller atom/string `source_node` keys so
-  JSON admission cannot emit duplicate names; system value wins.
+  Lineage options are forwarded as Signals-shaped primitives:
+  `:correlation_id`, `:agent_id`, `:metadata`, and `:cause_id`. Absent
+  optional values stay nil — no empty sentinels. The sink stamps a
+  system-owned `source_node` after dropping any caller atom/string
+  `source_node` keys so JSON admission cannot emit duplicate names;
+  system value wins.
   """
   @spec durable_emit(atom(), atom(), map(), keyword()) :: :ok
   def durable_emit(category, type, data, opts \\ []) do
-    # Signal bus (real-time)
     emit(category, type, Map.put(data, :permanent, true), opts)
 
-    # EventLog (ETS) + durable backend
     stream_id = Keyword.get(opts, :stream_id, "#{category}_events")
-    persist_to_historian(stream_id, type, data, opts)
+    DurableSink.dispatch(stream_id, type, data, opts)
 
     :ok
   end
-
-  # Write to Historian's EventLog (ETS) + durable backend (async).
-  # Uses runtime bridges to avoid dependency cycles.
-  defp persist_to_historian(stream_id, type, data, opts) do
-    event_mod = Arbor.Persistence.Event
-    persistence_mod = Arbor.Persistence
-    event_log_name = Arbor.Historian.EventLog.ETS
-    event_log_backend = Arbor.Persistence.EventLog.ETS
-
-    if Code.ensure_loaded?(event_mod) do
-      event =
-        apply(event_mod, :new, [
-          stream_id,
-          to_string(type),
-          Map.put(data, :timestamp, DateTime.utc_now()),
-          persistence_event_opts(opts)
-        ])
-
-      # ETS write (fast, in-memory)
-      if Process.whereis(event_log_name) && Code.ensure_loaded?(persistence_mod) do
-        apply(persistence_mod, :append, [event_log_name, event_log_backend, stream_id, event])
-      end
-
-      # Durable write (async). The Ecto-backed EventLog dispatches via
-      # `Arbor.Persistence.Repo` to whichever adapter is configured —
-      # PostgreSQL or SQLite3.
-      durable_mod = Arbor.Persistence.EventLog.Ecto
-      repo_mod = Arbor.Persistence.Repo
-
-      if Code.ensure_loaded?(durable_mod) && Process.whereis(repo_mod) do
-        Task.start(fn ->
-          try do
-            apply(durable_mod, :append, [stream_id, event])
-          rescue
-            e ->
-              # An audit you rely on must surface its gaps. The durable write
-              # stays best-effort (it must never fail the caller), but a failure
-              # is logged rather than silently swallowed, so a persistence outage
-              # is detectable instead of producing invisible holes in the record.
-              Logger.warning(
-                "[Signals.durable_emit] durable EventLog persistence failed for " <>
-                  "stream #{inspect(stream_id)}: #{Exception.message(e)}"
-              )
-          end
-        end)
-      end
-    end
-  rescue
-    e ->
-      Logger.warning(
-        "[Signals.durable_emit] persist_to_historian failed: #{Exception.message(e)}"
-      )
-  catch
-    :exit, reason ->
-      Logger.warning("[Signals.durable_emit] persist_to_historian exited: #{inspect(reason)}")
-  end
-
-  # Build Event.new/4 opts at the persistence boundary only.
-  # Maps signal :cause_id → Event :causation_id; omits nil lineage keys.
-  # source_node: system stamp wins over any caller-supplied value so the
-  # audit record of which node persisted cannot be spoofed. Strip both
-  # atom and string keys first so JSON admission cannot emit duplicate
-  # source_node names; then stamp exactly one system-owned value. All
-  # other caller metadata keys are retained.
-  defp persistence_event_opts(opts) when is_list(opts) do
-    caller_meta =
-      case Keyword.get(opts, :metadata, %{}) do
-        meta when is_map(meta) -> meta
-        _ -> %{}
-      end
-
-    metadata =
-      caller_meta
-      |> Map.drop([:source_node, "source_node"])
-      |> Map.put(:source_node, node())
-
-    [metadata: metadata]
-    |> put_present(:correlation_id, Keyword.get(opts, :correlation_id))
-    |> put_present(:causation_id, Keyword.get(opts, :cause_id))
-    |> put_present(:agent_id, Keyword.get(opts, :agent_id))
-  end
-
-  defp put_present(kw, _key, nil), do: kw
-  defp put_present(kw, key, value), do: Keyword.put(kw, key, value)
 
   @doc """
   Emit a signal with taint metadata attached.

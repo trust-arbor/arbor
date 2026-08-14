@@ -446,6 +446,13 @@ if config_env() != :test do
 end
 
 # ============================================================================
+# Signals durable sink (injected into arbor_signals; nil by default in lib)
+# ============================================================================
+if config_env() != :test do
+  config :arbor_signals, durable_sink_module: Arbor.Historian
+end
+
+# ============================================================================
 # Ollama base URL (local-LM provider)
 # ============================================================================
 # Single env var controlling where BOTH the embedding path and the

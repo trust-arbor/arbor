@@ -84,8 +84,8 @@ defmodule Arbor.Orchestrator.DurableAuditPhase3Test do
 
   describe "durable persistence of an enriched, struct-bearing event" do
     setup do
-      # Mirror events_test.exs: durable_emit writes to Arbor.Historian.EventLog.ETS;
-      # point read_run_events at the same process.
+      # Injected Historian sink; default hot Config target is Historian.EventLog.ETS.
+      # Point read_run_events at the same process.
       event_log_name = Arbor.Historian.EventLog.ETS
       backend = Arbor.Persistence.EventLog.ETS
 
@@ -97,10 +97,29 @@ defmodule Arbor.Orchestrator.DurableAuditPhase3Test do
       prev = Application.get_env(:arbor_orchestrator, :event_log_name)
       Application.put_env(:arbor_orchestrator, :event_log_name, event_log_name)
 
+      prev_sink = Application.get_env(:arbor_signals, :durable_sink_module, :unset)
+      Application.put_env(:arbor_signals, :durable_sink_module, Arbor.Historian)
+
+      prev_hot = Application.get_env(:arbor_historian, :hot_event_log_target, :unset)
+
+      Application.put_env(:arbor_historian, :hot_event_log_target, %{
+        name: event_log_name,
+        backend: backend,
+        opts: []
+      })
+
       on_exit(fn ->
         if prev,
           do: Application.put_env(:arbor_orchestrator, :event_log_name, prev),
           else: Application.delete_env(:arbor_orchestrator, :event_log_name)
+
+        if prev_sink == :unset,
+          do: Application.delete_env(:arbor_signals, :durable_sink_module),
+          else: Application.put_env(:arbor_signals, :durable_sink_module, prev_sink)
+
+        if prev_hot == :unset,
+          do: Application.delete_env(:arbor_historian, :hot_event_log_target),
+          else: Application.put_env(:arbor_historian, :hot_event_log_target, prev_hot)
 
         try do
           if Process.whereis(event_log_name), do: GenServer.stop(event_log_name)

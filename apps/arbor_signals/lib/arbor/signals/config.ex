@@ -11,6 +11,7 @@ defmodule Arbor.Signals.Config do
         authorizer: Arbor.Signals.Adapters.CapabilityAuthorizer,
         restricted_topics: [:security, :identity],
         security_sync_subscribers: %{},
+        durable_sink_module: nil,
         channel_auto_rotate_interval_ms: 86_400_000,
         channel_rotate_on_leave: true,
         relay_enabled: true,
@@ -117,5 +118,16 @@ defmodule Arbor.Signals.Config do
   @spec channel_rotate_on_leave?() :: boolean()
   def channel_rotate_on_leave? do
     Application.get_env(:arbor_signals, :channel_rotate_on_leave, @default_rotate_on_leave)
+  end
+
+  @doc """
+  Module implementing `Arbor.Signals.Contracts.DurableSink`, or `nil`.
+
+  Standalone and test default is `nil`. Umbrella runtime or tests inject
+  a concrete module; this library never hardcodes that provider.
+  """
+  @spec durable_sink_module() :: module() | nil | term()
+  def durable_sink_module do
+    Application.get_env(:arbor_signals, :durable_sink_module, nil)
   end
 end
