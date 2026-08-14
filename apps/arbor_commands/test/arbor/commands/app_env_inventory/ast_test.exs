@@ -105,7 +105,7 @@ defmodule Arbor.Commands.AppEnvInventory.AstTest do
              findings
   end
 
-  test "does not count comments, moduledocs, or ConfigCompat calls" do
+  test "does not count comments or moduledocs" do
     {:ok, findings} =
       Ast.extract("apps/foo/lib/docs.ex", """
       defmodule Sample.Docs do
@@ -117,8 +117,6 @@ defmodule Arbor.Commands.AppEnvInventory.AstTest do
         \"\"\"
 
         # Application.get_env(:arbor_common, :skill_dirs)
-
-        def via_compat, do: Arbor.Kernel.ConfigCompat.get_env(:arbor_common, :k, nil)
       end
       """)
 

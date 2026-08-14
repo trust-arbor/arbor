@@ -2,8 +2,7 @@ defmodule Arbor.Common.Config do
   @moduledoc """
   Owner-scoped application env for Common.
 
-  Values live under `config :arbor_kernel, common: [...]` and are read through
-  `Arbor.Kernel.ConfigCompat` during the compatibility window. Skill
+  Values live under `config :arbor_kernel, common: [...]`. Skill
   hybrid-search, telemetry persistence, action URI, and skill-import security
   seams default to `nil` (disabled). Umbrella runtime or tests inject concrete
   modules; this library never hardcodes those providers.
@@ -111,8 +110,37 @@ defmodule Arbor.Common.Config do
   @spec hands() :: term()
   def hands, do: get(:hands, [])
 
-  defp get(key, default) do
-    Arbor.Kernel.ConfigCompat.get_env(:arbor_common, key, default)
+  @namespace :common
+
+  defp get(key, default) when is_atom(key) do
+    case Application.fetch_env(:arbor_kernel, @namespace) do
+      :error -> default
+      {:ok, config} -> fetch_namespace_key(config, key, default)
+    end
+  end
+
+  defp fetch_namespace_key(config, key, default) when is_list(config) do
+    if Keyword.keyword?(config) do
+      Keyword.get(config, key, default)
+    else
+      raise ArgumentError, malformed_namespace_message()
+    end
+  end
+
+  defp fetch_namespace_key(%{__struct__: _}, _key, _default) do
+    raise ArgumentError, malformed_namespace_message()
+  end
+
+  defp fetch_namespace_key(%{} = config, key, default) do
+    Map.get(config, key, default)
+  end
+
+  defp fetch_namespace_key(_config, _key, _default) do
+    raise ArgumentError, malformed_namespace_message()
+  end
+
+  defp malformed_namespace_message do
+    "Arbor.Common.Config malformed :arbor_kernel :common namespace"
   end
 
   defp positive_ms(key, default) do

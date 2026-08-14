@@ -2,8 +2,7 @@ defmodule Arbor.Monitor.Config do
   @moduledoc """
   Owner-scoped application env for Monitor.
 
-  Values live under `config :arbor_kernel, monitor: [...]` and are read through
-  `Arbor.Kernel.ConfigCompat` during the compatibility window. Channel-bridge
+  Values live under `config :arbor_kernel, monitor: [...]`. Channel-bridge
   and agent-directory seams default to `nil` (disabled). Umbrella runtime or
   tests inject concrete modules; this library never hardcodes those providers.
   """
@@ -94,7 +93,36 @@ defmodule Arbor.Monitor.Config do
   @spec suppression_window_ms() :: non_neg_integer()
   def suppression_window_ms, do: get(:suppression_window_ms, :timer.minutes(30))
 
-  defp get(key, default) do
-    Arbor.Kernel.ConfigCompat.get_env(:arbor_monitor, key, default)
+  @namespace :monitor
+
+  defp get(key, default) when is_atom(key) do
+    case Application.fetch_env(:arbor_kernel, @namespace) do
+      :error -> default
+      {:ok, config} -> fetch_namespace_key(config, key, default)
+    end
+  end
+
+  defp fetch_namespace_key(config, key, default) when is_list(config) do
+    if Keyword.keyword?(config) do
+      Keyword.get(config, key, default)
+    else
+      raise ArgumentError, malformed_namespace_message()
+    end
+  end
+
+  defp fetch_namespace_key(%{__struct__: _}, _key, _default) do
+    raise ArgumentError, malformed_namespace_message()
+  end
+
+  defp fetch_namespace_key(%{} = config, key, default) do
+    Map.get(config, key, default)
+  end
+
+  defp fetch_namespace_key(_config, _key, _default) do
+    raise ArgumentError, malformed_namespace_message()
+  end
+
+  defp malformed_namespace_message do
+    "Arbor.Monitor.Config malformed :arbor_kernel :monitor namespace"
   end
 end

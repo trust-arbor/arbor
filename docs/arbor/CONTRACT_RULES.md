@@ -171,8 +171,14 @@ These triggers mean you should evaluate whether a contract needs to change:
 Not a contract — a documented convention all libraries follow:
 
 - Each library has `Arbor.<Library>.Config` module
-- Reads from `Application.get_env(:<app_name>, key, default)`
 - One function per setting with hardcoded default matching current behaviour
+- Non-migrated libraries read `Application.get_env(:<app_name>, key, default)`
+- Retired owners Common, Signals, and Monitor read only
+  `config :arbor_kernel, common|signals|monitor: [...]` through their Config
+  facade. Do not `config` or `Application.get_env`/`fetch_env`/`put_env`/
+  `delete_env`/`compile_env` `:arbor_common`, `:arbor_signals`,
+  `:arbor_monitor`, or `:arbor_contracts`
+- There is no generic `Arbor.Kernel` configuration wrapper
 - PubSub is always configurable: `Config.pubsub()` defaulting to `Arbor.Core.PubSub`
 
 ## 9. Cross-Library Dependencies Use Behaviour Injection

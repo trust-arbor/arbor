@@ -48,30 +48,6 @@ defmodule Arbor.Monitor.Config.Testing do
     end
   end
 
-  @spec put_legacy(atom(), term()) :: :ok
-  def put_legacy(key, value) when is_atom(key) do
-    Application.put_env(:arbor_monitor, key, value)
-  end
-
-  @spec delete_legacy(atom()) :: :ok
-  def delete_legacy(key) when is_atom(key) do
-    Application.delete_env(:arbor_monitor, key)
-  end
-
-  @spec snapshot_legacy_key(atom()) :: :error | {:ok, term()}
-  def snapshot_legacy_key(key) when is_atom(key) do
-    Application.fetch_env(:arbor_monitor, key)
-  end
-
-  @spec restore_legacy_key(atom(), :error | {:ok, term()}) :: :ok
-  def restore_legacy_key(key, {:ok, value}) when is_atom(key) do
-    Application.put_env(:arbor_monitor, key, value)
-  end
-
-  def restore_legacy_key(key, :error) when is_atom(key) do
-    Application.delete_env(:arbor_monitor, key)
-  end
-
   defp fetch_namespace, do: Application.fetch_env(:arbor_kernel, @namespace)
 
   defp put_key(:error, key, value), do: [{key, value}]

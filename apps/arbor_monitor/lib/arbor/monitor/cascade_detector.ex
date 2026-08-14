@@ -21,9 +21,9 @@ defmodule Arbor.Monitor.CascadeDetector do
 
   ## Signals
 
-  The detector can optionally emit signals via a configured callback:
+  The detector can optionally emit signals via a start-option callback:
 
-      config :arbor_monitor, :signal_callback, &Arbor.Signals.emit/3
+      CascadeDetector.start_link(signal_callback: &Arbor.Signals.emit/3)
 
   Signals emitted:
   - `:cascade_detected` - When entering cascade mode

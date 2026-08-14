@@ -75,6 +75,32 @@ site, etc.) — never to silence an unreviewed drift failure.
    dispositions and rationales always flow through `--unresolved-review`, and
    the file's `entries_digest` is verified against its own `entries` on read.
 
+## App-env zero-residue gate
+
+Git-index AST census of retired `:arbor_contracts`, `:arbor_common`,
+`:arbor_signals`, and `:arbor_monitor` application-env callers.
+
+The root `quality` alias runs check mode, so `./bin/mix quality` fails while
+any indexed residue remains:
+
+```bash
+./bin/mix arbor.packaging.app_env_inventory --check
+./bin/mix arbor.packaging.app_env_inventory --check --json
+```
+
+`--check` never writes. It exits nonzero unless the stage-0 Git blob census
+is clean (`production=0 test_support=0 config_block=0 untrusted=0 total=0`)
+with verified tree/object provenance. Report mode prints the same census and
+exits successfully even if residue is present.
+
+```bash
+./bin/mix arbor.packaging.app_env_inventory
+./bin/mix arbor.packaging.app_env_inventory --json
+```
+
+Grep is supplemental only. K3 mechanical formatting expansion and K4
+directory retirement are out of scope for this gate.
+
 ## PK-K0 kernel-migration gate
 
 Executable pre-migration evidence gate. It reuses the Git-index source-coupling

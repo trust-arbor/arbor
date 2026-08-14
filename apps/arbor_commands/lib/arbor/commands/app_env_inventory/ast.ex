@@ -766,9 +766,6 @@ defmodule Arbor.Commands.AppEnvInventory.Ast do
 
   defp maybe_remote_finding(state, meta, receiver, fun, args) do
     case {expand_alias(receiver, state), fun} do
-      {Arbor.Kernel.ConfigCompat, _} ->
-        state
-
       {Application, fun} when fun in @application_funs ->
         maybe_app_finding(state, meta, form_name(fun), args)
 
@@ -810,9 +807,6 @@ defmodule Arbor.Commands.AppEnvInventory.Ast do
     fun_atom = if is_atom(fun), do: fun
 
     cond do
-      target == Arbor.Kernel.ConfigCompat ->
-        state
-
       target in [Application, :application, Config, Mix.Config] and is_atom(fun_atom) ->
         form =
           if target == :application, do: erlang_form_name(fun_atom), else: form_name(fun_atom)

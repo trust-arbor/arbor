@@ -88,7 +88,10 @@ defmodule Arbor.Contracts.DependencyHierarchyTest do
       _ ->
         case System.cmd("git", ["-C", root, "ls-files", "apps/*/mix.exs"], stderr_to_stdout: true) do
           {out, 0} ->
-            out |> String.split("\n", trim: true) |> Enum.map(&Path.join(root, &1))
+            out
+            |> String.split("\n", trim: true)
+            |> Enum.filter(&app_mix_project_path?/1)
+            |> Enum.map(&Path.join(root, &1))
 
           _ ->
             # Not a git checkout (e.g. an extracted tarball) — best-effort fallback.

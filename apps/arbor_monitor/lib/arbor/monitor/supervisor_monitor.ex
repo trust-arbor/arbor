@@ -13,8 +13,7 @@ defmodule Arbor.Monitor.SupervisorMonitor do
 
   ## Configuration
 
-      config :arbor_monitor, :supervisor_monitor,
-        interval: 5_000    # Poll every 5s (default)
+      SupervisorMonitor.start_link(interval: 5_000)
   """
 
   use GenServer
@@ -83,11 +82,12 @@ defmodule Arbor.Monitor.SupervisorMonitor do
           pid = resolve_pid(pid_or_name)
           if pid, do: Process.monitor(pid)
 
-          supervisors = Map.put(state.supervisors, key, %{
-            ref: pid_or_name,
-            snapshot: snapshot,
-            monitored_at: System.system_time(:millisecond)
-          })
+          supervisors =
+            Map.put(state.supervisors, key, %{
+              ref: pid_or_name,
+              snapshot: snapshot,
+              monitored_at: System.system_time(:millisecond)
+            })
 
           {:noreply, %{state | supervisors: supervisors}}
         else

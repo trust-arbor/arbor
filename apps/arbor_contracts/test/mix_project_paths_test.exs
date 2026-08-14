@@ -240,6 +240,7 @@ defmodule Arbor.MixProjectPathsTest do
 
         output
         |> String.split("\n", trim: true)
+        |> Enum.filter(&mix_project_path?/1)
         |> Enum.map(&Path.join(root, &1))
     end
   end

@@ -6,12 +6,16 @@ defmodule Arbor.Kernel do
   It exists so `config :arbor_kernel, ...` is a real loaded application
   rather than an unavailable key that still applies with a Mix warning.
 
-  Temporary migration reads for the four retired owners live in
-  `Arbor.Kernel.ConfigCompat`. Kernel storage uses short namespaces
-  (`:contracts`, `:common`, `:signals`, `:monitor`) because legacy
-  keyspaces are not disjoint. That module is not permanent public
-  configuration infrastructure: a later K2 packet will directize remaining
-  reads to `:arbor_kernel` and delete the seam after the app-env inventory
-  reaches zero.
+  Owner libraries store configuration under short namespaces because the
+  retired app keyspaces are not disjoint:
+
+      config :arbor_kernel, common: [...]
+      config :arbor_kernel, signals: [...]
+      config :arbor_kernel, monitor: [...]
+
+  `:contracts` is reserved so it is not reused as a flat key. There is no
+  `Arbor.Contracts.Config` in this packet. This application is not a public
+  configuration wrapper; each owner library keeps its own `Arbor.*.Config`
+  facade and reads only its namespace.
   """
 end

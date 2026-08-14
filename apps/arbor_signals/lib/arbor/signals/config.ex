@@ -2,8 +2,7 @@ defmodule Arbor.Signals.Config do
   @moduledoc """
   Owner-scoped application env for Signals.
 
-  Values live under `config :arbor_kernel, signals: [...]` and are read through
-  `Arbor.Kernel.ConfigCompat` during the compatibility window. Durable-sink,
+  Values live under `config :arbor_kernel, signals: [...]`. Durable-sink,
   security, crypto, and identity seams default to `nil` (disabled). Umbrella
   runtime or tests inject concrete modules; this library never hardcodes those
   providers.
@@ -206,7 +205,36 @@ defmodule Arbor.Signals.Config do
   @spec channels_module() :: module()
   def channels_module, do: get(:channels_module, @default_channels_module)
 
-  defp get(key, default) do
-    Arbor.Kernel.ConfigCompat.get_env(:arbor_signals, key, default)
+  @namespace :signals
+
+  defp get(key, default) when is_atom(key) do
+    case Application.fetch_env(:arbor_kernel, @namespace) do
+      :error -> default
+      {:ok, config} -> fetch_namespace_key(config, key, default)
+    end
+  end
+
+  defp fetch_namespace_key(config, key, default) when is_list(config) do
+    if Keyword.keyword?(config) do
+      Keyword.get(config, key, default)
+    else
+      raise ArgumentError, malformed_namespace_message()
+    end
+  end
+
+  defp fetch_namespace_key(%{__struct__: _}, _key, _default) do
+    raise ArgumentError, malformed_namespace_message()
+  end
+
+  defp fetch_namespace_key(%{} = config, key, default) do
+    Map.get(config, key, default)
+  end
+
+  defp fetch_namespace_key(_config, _key, _default) do
+    raise ArgumentError, malformed_namespace_message()
+  end
+
+  defp malformed_namespace_message do
+    "Arbor.Signals.Config malformed :arbor_kernel :signals namespace"
   end
 end
