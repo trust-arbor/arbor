@@ -414,7 +414,7 @@ defmodule Mix.Tasks.Arbor.Setup do
         4. mix arbor.agent start conversationalist --name Hello
         5. mix arbor.agent chat Hello "Say hello in one short sentence."
 
-      Or use an already-authenticated CLI (claude/codex/gemini) — doctor will detect ACP.
+      Or use an already-authenticated CLI (claude/codex/opencode) — doctor will detect ACP.
       Local models: install Ollama, then re-run doctor --configure.
 
       Optional:

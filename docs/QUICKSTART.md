@@ -82,7 +82,7 @@ Arbor’s built-in default is already a free OpenRouter model
 | Option | When to use | How |
 |---|---|---|
 | **Groq free tier** | Fast cloud backup | `GROQ_API_KEY=...` then `./bin/mix arbor.doctor --configure` |
-| **Already-logged-in CLI** (Claude / Codex / Gemini) | You already have a subscription login | Doctor detects ACP; no new key |
+| **Already-logged-in CLI** (Claude / Codex / OpenCode) | You already have a CLI login / free OpenCode tier | Doctor detects ACP; no new API key. (Gemini CLI is deprecated; Antigravity/`agy` does not speak ACP yet.) |
 | **Ollama** | Fully local, no cloud account | Install Ollama, pull a model, re-run doctor |
 
 See `.env.example` for the full list.

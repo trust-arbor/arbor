@@ -36,7 +36,8 @@ root `mix.exs` aliases (`setup`, `quality`, `test.fast`, `test.all`) and
   openrouter.ai) then `./bin/mix arbor.doctor --configure`. Defaults are
   already `openrouter` / `openai/gpt-oss-120b:free`. Doctor priority is
   OpenRouter → Groq → ACP → local → paid. Groq via `GROQ_API_KEY` is a solid
-  free backup; ACP reuses an already-authenticated claude/codex/gemini CLI.
+  free backup; ACP reuses an already-authenticated claude/codex/opencode CLI
+  (Gemini CLI deprecated; Antigravity/`agy` has no ACP yet).
 - Cold umbrella boot is slow (~1 min). Dashboard: http://localhost:4001.
   Optional services (signal-cli, Limitless, LLM keys) log warnings and do not
   block boot.
