@@ -101,7 +101,7 @@ badly stale (it called `ai` "standalone" though it deps 7 libs, and put
 `consensus`/`actions` low though they sit deep).
 
 ```
-L0  arbor_contracts, arbor_monitor                       (zero in-umbrella deps)
+L0  arbor_contracts, arbor_kernel, arbor_monitor          (zero in-umbrella deps)
 L1  arbor_common, arbor_signals, arbor_cartographer, arbor_web
 L2  arbor_llm, arbor_security
 L3  arbor_persistence, arbor_shell, arbor_sandbox
@@ -115,7 +115,9 @@ L9  arbor_dashboard
 
 Notes (the counterintuitive parts; the levels themselves are machine-checked by
 `apps/arbor_contracts/test/arbor/contracts/dependency_hierarchy_test.exs`):
-- **Nothing is standalone except `arbor_contracts` and `arbor_monitor` (L0).**
+- **Nothing is standalone except `arbor_contracts`, `arbor_kernel`, and `arbor_monitor` (L0).**
+  `arbor_kernel` is a temporary passive config-namespace owner with no
+  in-umbrella deps — not a replacement for contracts or monitor.
   In particular `arbor_orchestrator` is L7, not a low kernel — it really deps
   arbor_actions/security/ai/memory/trust/shell/comms (exec nodes, capability +
   egress authorization, LLM/ACP routing, goals/percepts, sandboxed shell), and

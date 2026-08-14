@@ -15,7 +15,13 @@ defmodule Arbor.Commands.SourceCoupling.GitInventory do
   @max_files 50_000
   @batch_size 64
 
-  @type file_entry :: %{path: String.t(), blob_oid: String.t(), bytes: binary()}
+  @type file_entry :: %{
+          path: String.t(),
+          blob_oid: String.t(),
+          mode: String.t(),
+          byte_size: non_neg_integer(),
+          bytes: binary()
+        }
 
   @doc """
   Read exact index blobs for an explicit path list.
@@ -106,6 +112,59 @@ defmodule Arbor.Commands.SourceCoupling.GitInventory do
       {:ok, %{files: files, tree_oid: tree_oid, object_format: object_format}}
     end
   end
+
+  @doc """
+  Load every tracked `*.ex`/`*.exs` blob, including root `mix.exs`.
+
+  Lists the full stage-0 index, then keeps Elixir source paths **before**
+  applying regular-file mode checks so unrelated gitlinks/symlinks cannot
+  abort the census. Source entries still fail closed on symlink, invalid
+  mode, non-zero stage, malformed records, and missing/oversize blobs.
+  """
+  @spec load_elixir_index(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def load_elixir_index(root, opts \\ []) when is_binary(root) and is_list(opts) do
+    run_git = Keyword.get(opts, :run_git, &default_run_git/3)
+    max_blob = Keyword.get(opts, :max_blob_bytes, @max_blob_bytes)
+    max_total = Keyword.get(opts, :max_total_bytes, @max_total_bytes * 2)
+
+    with {:ok, tree_oid} <- rev_parse_tree(root, run_git),
+         {:ok, staged} <- ls_files_stage_all(root, run_git),
+         {:ok, admitted} <- admit_elixir_source_entries(staged),
+         :ok <- check_file_count(admitted),
+         {:ok, files} <- read_blobs(root, admitted, run_git, max_blob, max_total) do
+      object_format =
+        case admitted do
+          [%{blob_oid: oid} | _] when byte_size(oid) == 64 -> "sha256"
+          _ -> "sha1"
+        end
+
+      {:ok, %{files: files, tree_oid: tree_oid, object_format: object_format}}
+    end
+  end
+
+  @doc false
+  @spec parse_stage_fields(binary()) :: {:ok, map()} | {:error, term()}
+  def parse_stage_fields(line) when is_binary(line) do
+    line = String.trim_trailing(line, "\n")
+
+    case Regex.run(~r/\A([0-7]{6}) ([0-9a-f]+) ([0-3])\t(.+)\z/, line) do
+      [_, mode, oid, stage_s, path] ->
+        {:ok, %{mode: mode, blob_oid: oid, stage: String.to_integer(stage_s), path: path}}
+
+      _ ->
+        {:error, {:malformed_stage_line, line}}
+    end
+  end
+
+  def parse_stage_fields(_), do: {:error, :malformed_stage_line}
+
+  @doc false
+  @spec elixir_source_path?(term()) :: boolean()
+  def elixir_source_path?(path) when is_binary(path) do
+    String.ends_with?(path, ".ex") or String.ends_with?(path, ".exs")
+  end
+
+  def elixir_source_path?(_), do: false
 
   @doc """
   Parse a single ls-files --stage line: mode SP oid SP stage TAB path.
@@ -261,6 +320,75 @@ defmodule Arbor.Commands.SourceCoupling.GitInventory do
     end
   end
 
+  defp ls_files_stage_all(root, run_git) do
+    args = ["ls-files", "-z", "--stage"]
+
+    case run_git.(root, args, "") do
+      {:ok, out} -> parse_stage_fields_output(out)
+      {:error, reason} -> {:error, {:git_ls_files, reason}}
+    end
+  end
+
+  defp parse_stage_fields_output(out) when is_binary(out) do
+    out
+    |> String.split("\0", trim: true)
+    |> Enum.reduce_while({:ok, []}, fn chunk, {:ok, acc} ->
+      case parse_stage_fields(chunk) do
+        {:ok, entry} -> {:cont, {:ok, [entry | acc]}}
+        {:error, _} = err -> {:halt, err}
+      end
+    end)
+    |> case do
+      {:ok, acc} -> {:ok, Enum.reverse(acc)}
+      err -> err
+    end
+  end
+
+  defp admit_elixir_source_entries(entries) do
+    sources = Enum.filter(entries, &elixir_candidate?/1)
+    paths = Enum.map(sources, & &1.path)
+
+    cond do
+      length(paths) != length(Enum.uniq(paths)) ->
+        {:error, :index_conflict}
+
+      true ->
+        Enum.reduce_while(sources, {:ok, []}, fn entry, {:ok, acc} ->
+          case admit_elixir_source_entry(entry) do
+            {:ok, admitted} -> {:cont, {:ok, [admitted | acc]}}
+            {:error, _} = err -> {:halt, err}
+          end
+        end)
+        |> case do
+          {:ok, acc} -> {:ok, Enum.reverse(acc)}
+          err -> err
+        end
+    end
+  end
+
+  defp elixir_candidate?(entry) do
+    elixir_source_path?(entry.path)
+  end
+
+  defp admit_elixir_source_entry(%{mode: mode, blob_oid: oid, stage: stage, path: path} = entry) do
+    cond do
+      not Regex.match?(@oid_re, oid) ->
+        {:error, {:invalid_oid, oid}}
+
+      stage != 0 ->
+        {:error, {:non_zero_stage, path, stage}}
+
+      mode == @symlink_mode ->
+        {:error, {:symlink_blob, path}}
+
+      MapSet.member?(@accepted_modes, mode) ->
+        {:ok, entry}
+
+      true ->
+        {:error, {:invalid_mode, mode, path}}
+    end
+  end
+
   defp parse_stage_output(out) when is_binary(out) do
     entries =
       out
@@ -376,7 +504,14 @@ defmodule Arbor.Commands.SourceCoupling.GitInventory do
       files =
         Enum.map(batch, fn entry ->
           bytes = Map.fetch!(payloads, entry.blob_oid)
-          %{path: entry.path, blob_oid: entry.blob_oid, bytes: bytes}
+
+          %{
+            path: entry.path,
+            blob_oid: entry.blob_oid,
+            mode: entry.mode,
+            byte_size: byte_size(bytes),
+            bytes: bytes
+          }
         end)
 
       {:ok, files}
