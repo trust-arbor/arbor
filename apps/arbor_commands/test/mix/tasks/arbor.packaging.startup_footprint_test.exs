@@ -25,7 +25,7 @@ defmodule Mix.Tasks.Arbor.Packaging.StartupFootprintTest do
              StartupFootprint.run(mode: "report", samples: %{})
   end
 
-  test "checked-in candidate policy admits and is reversible" do
+  test "checked-in accepted policy admits and records the passive split" do
     root = find_umbrella(__DIR__)
 
     path =
@@ -34,8 +34,8 @@ defmodule Mix.Tasks.Arbor.Packaging.StartupFootprintTest do
     {:ok, raw} = Jason.decode(File.read!(path))
     assert {:ok, policy} = Core.admit_policy(raw)
     assert policy["decision"]["reversible"] == true
-    assert policy["decision"]["status"] == "candidate"
-    assert policy["decision"]["choice"] == "measure_only"
+    assert policy["decision"]["status"] == "accepted"
+    assert policy["decision"]["choice"] == "split_passive_protocols"
     assert policy["scenarios"] == Core.scenarios()
 
     shell =

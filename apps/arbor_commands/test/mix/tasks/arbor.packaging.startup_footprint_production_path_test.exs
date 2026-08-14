@@ -27,8 +27,8 @@ defmodule Mix.Tasks.Arbor.Packaging.StartupFootprintProductionPathTest do
     assert report["schema"] == "arbor.packaging.startup_footprint.report.v1"
     assert report["policy_version"] == "k3b.v1"
     assert report["decision"]["reversible"] == true
-    assert report["decision"]["status"] == "candidate"
-    assert report["decision"]["choice"] == "measure_only"
+    assert report["decision"]["status"] == "accepted"
+    assert report["decision"]["choice"] == "split_passive_protocols"
 
     for scenario <- ["baseline", "proposed_gated", "proposed_eager"] do
       sample = report["samples"][scenario]
@@ -39,13 +39,19 @@ defmodule Mix.Tasks.Arbor.Packaging.StartupFootprintProductionPathTest do
       assert is_integer(sample["process_count_delta"]) and sample["process_count_delta"] >= 0
       assert is_integer(sample["supervisor_children"]) and sample["supervisor_children"] >= 0
       assert is_integer(sample["ets_table_count_delta"]) and sample["ets_table_count_delta"] >= 0
-      assert is_integer(sample["ets_memory_words_delta"]) and sample["ets_memory_words_delta"] >= 0
+
+      assert is_integer(sample["ets_memory_words_delta"]) and
+               sample["ets_memory_words_delta"] >= 0
+
       assert is_integer(sample["beam_memory_bytes_delta"]) and
                sample["beam_memory_bytes_delta"] >= 0
+
       assert is_integer(sample["boot_time_us"]) and sample["boot_time_us"] >= 0
       assert is_integer(sample["logger_filter_count"]) and sample["logger_filter_count"] >= 0
+
       assert is_integer(sample["telemetry_handler_count"]) and
                sample["telemetry_handler_count"] >= 0
+
       assert is_list(sample["started_owner_apps"])
       assert is_list(sample["started_runtime_apps"])
       assert sample["raw_errors"] == []

@@ -104,8 +104,8 @@ directory retirement are out of scope for this gate.
 ## K3B startup-footprint probe
 
 Isolated measurement of the reversible Common / Signals / Monitor merge
-candidate. Scenario execution lives in the compiled Commands-owned peer
-probe. Candidate budgets are checked in as
+proposal. Scenario execution lives in the compiled Commands-owned peer
+probe. The accepted decision and regression budgets are checked in as
 `startup_footprint_policy.v1.json`.
 
 Not installed in the root `quality` alias. The exact commands are:
@@ -129,13 +129,29 @@ scenario-specific applications inside the timed action. Retired owner
 names, the synthetic proposed owner, and `:arbor_kernel` are excluded
 from external runtime evidence.
 Comparison uses numeric regression budgets, not byte-identical runtime
-samples. Non-empty raw measurement errors and omitted app lists fail
-closed. Elapsed time is `boot_time_us` (converted from monotonic native
-units). Boot and memory ceilings include explicit headroom so a single
-sample per fresh process is non-flaky; callback and supervisor invariants
-stay tight. Candidate policy remains `status=candidate` and
-`choice=measure_only` until manager-owned measurements exist. Do not
-commit generated probe output.
+samples. Non-empty raw measurement errors and omitted app lists fail closed.
+Elapsed time is `boot_time_us` (converted from monotonic native units).
+Process and table counts are monotonic for this protocol, so a negative delta
+is retained as an error. ETS and BEAM memory are non-monotonic gauges; a
+decrease caused by garbage collection is a valid zero positive-footprint
+delta, not a measurement error.
+
+Five sequential manager-owned runs on 2026-08-14 produced these ranges:
+
+| Scenario | Processes | Children | ETS tables | ETS words | BEAM bytes | Boot us | Logger / telemetry |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| baseline | 3 | 0 | 0 | 3,827 | 0 | 6,777-8,576 | 0 / 0 |
+| proposed-gated | 55 | 0 | 12 | 45,493 | 2,914,534-2,948,990 | 41,733-48,394 | 0 / 0 |
+| proposed-eager | 95 | 29 | 35 | 91,013 | 6,567,698-6,704,058 | 89,394-98,312 | 1 / 1 |
+
+The accepted reversible choice is `split_passive_protocols`. Nested child
+gates suppress active services and callbacks, but the merged application still
+widens a contracts-only consumer from 3 to 18 started runtime applications and
+adds 52 processes. K4 must preserve passive protocol/schema ownership behind a
+passive application boundary and place active Common / Signals / Monitor
+services in a separately started runtime application. Regression ceilings keep
+structural invariants tight while giving memory and boot-time measurements
+bounded CI headroom. Generated probe output is never committed.
 
 ## PK-K0 kernel-migration gate
 

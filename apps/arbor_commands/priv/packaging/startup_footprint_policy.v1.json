@@ -3,42 +3,42 @@
   "version": 1,
   "policy_version": "k3b.v1",
   "decision": {
-    "status": "candidate",
-    "choice": "measure_only",
-    "rationale": "K3B records measured startup-footprint evidence for the reversible Common/Signals/Monitor merge decision. Each scenario runs in a fresh OTP :peer BEAM. Baseline starts only passive arbor_contracts after the pre-start snapshot and must keep owner callbacks at zero. Proposed scenarios start the merged app's non-owner runtime extras, including os_mon, inside the timed action. Boot time is persisted as boot_time_us via System.convert_time_unit/3, never raw native units. One sample per fresh process is accepted because boot_time_us and memory ceilings include explicit measured headroom for CI noise; callback and supervisor invariants stay tight. Production owner applications and package layout stay unchanged. Policy remains candidate/measure_only until manager-owned repeated measurements select the final decision.",
+    "status": "accepted",
+    "choice": "split_passive_protocols",
+    "rationale": "Five sequential manager-owned measurements on 2026-08-14 used fresh OTP :peer BEAMs for every scenario. Baseline measured 3 processes, 0 supervisor children, 0 ETS tables, 3827 ETS words, 0 positive BEAM-memory delta, and 6777-8576 us. Proposed-gated still measured 55 processes, 0 children, 12 tables, 45493 ETS words, 2914534-2948990 bytes, and 41733-48394 us while widening the runtime set from 3 to 18 applications. Proposed-eager measured 95 processes, 29 children, 35 tables, 91013 ETS words, 6567698-6704058 bytes, and 89394-98312 us, plus one Logger filter and one telemetry handler. Nested child gates remove active callbacks and supervised children but do not prevent the merged application dependency closure from materially widening a contracts-only consumer. K4 must therefore preserve passive protocol/schema ownership behind a passive application boundary and start active Common/Signals/Monitor services through a separate explicit runtime application. Count ceilings retain approximately 20-50 percent headroom, memory ceilings exceed the observed maxima by more than 2x, and boot ceilings exceed them by more than 6x; zero-callback and zero-child invariants remain exact.",
     "reversible": true
   },
   "scenarios": ["baseline", "proposed_gated", "proposed_eager"],
   "budgets": {
     "baseline": {
-      "process_count_delta": {"min": 0, "max": 16},
+      "process_count_delta": {"min": 0, "max": 8},
       "supervisor_children": {"min": 0, "max": 0},
-      "ets_table_count_delta": {"min": 0, "max": 8},
-      "ets_memory_words_delta": {"min": 0, "max": 500000},
-      "beam_memory_bytes_delta": {"min": 0, "max": 64000000},
-      "boot_time_us": {"min": 0, "max": 60000000},
+      "ets_table_count_delta": {"min": 0, "max": 4},
+      "ets_memory_words_delta": {"min": 0, "max": 12000},
+      "beam_memory_bytes_delta": {"min": 0, "max": 8388608},
+      "boot_time_us": {"min": 0, "max": 100000},
       "logger_filter_count": {"min": 0, "max": 0},
       "telemetry_handler_count": {"min": 0, "max": 0}
     },
     "proposed_gated": {
-      "process_count_delta": {"min": 1, "max": 256},
+      "process_count_delta": {"min": 1, "max": 70},
       "supervisor_children": {"min": 0, "max": 0},
-      "ets_table_count_delta": {"min": 0, "max": 128},
-      "ets_memory_words_delta": {"min": 0, "max": 8000000},
-      "beam_memory_bytes_delta": {"min": 0, "max": 256000000},
-      "boot_time_us": {"min": 0, "max": 180000000},
+      "ets_table_count_delta": {"min": 0, "max": 18},
+      "ets_memory_words_delta": {"min": 0, "max": 75000},
+      "beam_memory_bytes_delta": {"min": 0, "max": 8388608},
+      "boot_time_us": {"min": 0, "max": 300000},
       "logger_filter_count": {"min": 0, "max": 0},
       "telemetry_handler_count": {"min": 0, "max": 0}
     },
     "proposed_eager": {
-      "process_count_delta": {"min": 1, "max": 512},
-      "supervisor_children": {"min": 1, "max": 512},
-      "ets_table_count_delta": {"min": 0, "max": 256},
-      "ets_memory_words_delta": {"min": 0, "max": 8000000},
-      "beam_memory_bytes_delta": {"min": 0, "max": 256000000},
-      "boot_time_us": {"min": 0, "max": 180000000},
-      "logger_filter_count": {"min": 1, "max": 8},
-      "telemetry_handler_count": {"min": 1, "max": 64}
+      "process_count_delta": {"min": 1, "max": 115},
+      "supervisor_children": {"min": 1, "max": 36},
+      "ets_table_count_delta": {"min": 0, "max": 44},
+      "ets_memory_words_delta": {"min": 0, "max": 140000},
+      "beam_memory_bytes_delta": {"min": 0, "max": 16777216},
+      "boot_time_us": {"min": 0, "max": 600000},
+      "logger_filter_count": {"min": 1, "max": 1},
+      "telemetry_handler_count": {"min": 1, "max": 1}
     }
   }
 }
