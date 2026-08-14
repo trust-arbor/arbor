@@ -433,6 +433,19 @@ if config_env() != :test do
 end
 
 # ============================================================================
+# Monitor operational bridges (injected into arbor_monitor; nil by default in lib)
+# ============================================================================
+if config_env() != :test do
+  if Code.ensure_loaded?(Arbor.Comms) do
+    config :arbor_monitor, channel_bridge_module: Arbor.Comms
+  end
+
+  if Code.ensure_loaded?(Arbor.Agent) do
+    config :arbor_monitor, agent_directory_module: Arbor.Agent
+  end
+end
+
+# ============================================================================
 # Ollama base URL (local-LM provider)
 # ============================================================================
 # Single env var controlling where BOTH the embedding path and the

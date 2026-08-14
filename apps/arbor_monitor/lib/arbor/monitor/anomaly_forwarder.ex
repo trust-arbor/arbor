@@ -14,17 +14,21 @@ defmodule Arbor.Monitor.AnomalyForwarder do
 
   ## Runtime Bridges
 
-  Uses `Code.ensure_loaded?` for both `Arbor.Signals` (subscription)
-  and `Arbor.Comms` (message delivery) since arbor_monitor
-  is a standalone app.
+  Signal subscription uses `Code.ensure_loaded?` for the optional Signals
+  library since arbor_monitor is a standalone app.
+
+  Channel delivery uses the configured channel-bridge provider from
+  `Arbor.Monitor.Config`. Standalone and test defaults are `nil` and skip
+  delivery.
   """
 
   use GenServer
 
+  alias Arbor.Monitor.Provider
+
   require Logger
 
   @signals_mod Arbor.Signals
-  @comms_mod Arbor.Comms
 
   @cascade_batch_interval_ms 5_000
 
@@ -94,7 +98,8 @@ defmodule Arbor.Monitor.AnomalyForwarder do
     data = signal.data || %{}
     count = data[:anomaly_count] || "multiple"
 
-    message = "[CASCADE] Cascade detected — #{count} anomalies in rapid succession. Batching alerts."
+    message =
+      "[CASCADE] Cascade detected — #{count} anomalies in rapid succession. Batching alerts."
 
     send_to_channel(state, message)
 
@@ -112,14 +117,16 @@ defmodule Arbor.Monitor.AnomalyForwarder do
 
   defp handle_signal(%{type: :healing_verified} = signal, state) do
     data = signal.data || %{}
-    message = "[VERIFIED] Fix verified — held through soak period. #{inspect(data[:fingerprint] || "")}"
+    fingerprint = inspect(data[:fingerprint] || "")
+    message = "[VERIFIED] Fix verified — held through soak period. #{fingerprint}"
     send_to_channel(state, message)
     {:noreply, state}
   end
 
   defp handle_signal(%{type: :healing_ineffective} = signal, state) do
     data = signal.data || %{}
-    message = "[INEFFECTIVE] Fix did not hold — anomaly recurred. #{inspect(data[:fingerprint] || "")}"
+    fingerprint = inspect(data[:fingerprint] || "")
+    message = "[INEFFECTIVE] Fix did not hold — anomaly recurred. #{fingerprint}"
     send_to_channel(state, message)
     {:noreply, state}
   end
@@ -133,23 +140,24 @@ defmodule Arbor.Monitor.AnomalyForwarder do
   defp send_to_channel(%{channel_id: nil}, _message), do: :ok
 
   defp send_to_channel(%{channel_id: channel_id}, message) do
-    if comms_available?() do
-      apply(@comms_mod, :send_to_channel, [
-        channel_id,
-        "anomaly_forwarder",
-        "Monitor",
-        :system,
-        message
-      ])
-    else
-      Logger.debug("[AnomalyForwarder] Comms not available, logging: #{message}")
+    case Provider.deliver(channel_id, "anomaly_forwarder", "Monitor", :system, message) do
+      :ok ->
+        :ok
+
+      {:skip, :absent} ->
+        Logger.debug("[AnomalyForwarder] delivery provider not configured, logging: #{message}")
+
+      {:skip, :provider_raised, exception_struct} ->
+        Logger.warning(
+          "[AnomalyForwarder] delivery skipped: provider_raised #{inspect(exception_struct)}"
+        )
+
+      {:skip, reason} ->
+        Logger.warning("[AnomalyForwarder] delivery skipped: #{reason}")
+
+      {:error, reason} ->
+        Logger.warning("[AnomalyForwarder] delivery skipped: #{reason}")
     end
-  rescue
-    error ->
-      Logger.warning("[AnomalyForwarder] Failed to send: #{inspect(error)}")
-  catch
-    :exit, reason ->
-      Logger.warning("[AnomalyForwarder] Channel exited: #{inspect(reason)}")
   end
 
   # Cascade batching
@@ -219,14 +227,11 @@ defmodule Arbor.Monitor.AnomalyForwarder do
       function_exported?(@signals_mod, :subscribe, 2)
   end
 
-  defp comms_available? do
-    Code.ensure_loaded?(@comms_mod) and
-      function_exported?(@comms_mod, :send_to_channel, 5)
-  end
-
   defp format_details(nil), do: "no details"
+
   defp format_details(details) when is_map(details) do
     Enum.map_join(details, ", ", fn {k, v} -> "#{k}=#{inspect(v)}" end)
   end
+
   defp format_details(details), do: inspect(details)
 end

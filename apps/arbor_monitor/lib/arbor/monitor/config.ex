@@ -3,6 +3,9 @@ defmodule Arbor.Monitor.Config do
   Configuration for Arbor.Monitor.
 
   All settings read from Application env with sensible defaults.
+  Channel-bridge and agent-directory seams default to `nil` (disabled).
+  Umbrella runtime or tests inject concrete modules; this library never
+  hardcodes those providers.
   """
 
   @default_interval_ms 5_000
@@ -42,5 +45,26 @@ defmodule Arbor.Monitor.Config do
   @spec signal_emission_enabled?() :: boolean()
   def signal_emission_enabled? do
     Application.get_env(:arbor_monitor, :signal_emission_enabled, false)
+  end
+
+  @doc """
+  Module implementing `Arbor.Monitor.Contracts.ChannelBridge`, or `nil`.
+
+  Expected callbacks when configured: `deliver_channel_message/5`,
+  `create_ops_room/2`.
+  """
+  @spec channel_bridge_module() :: module() | nil
+  def channel_bridge_module do
+    Application.get_env(:arbor_monitor, :channel_bridge_module, nil)
+  end
+
+  @doc """
+  Module implementing `Arbor.Monitor.Contracts.AgentDirectory`, or `nil`.
+
+  Expected callback when configured: `list_monitor_agents/0`.
+  """
+  @spec agent_directory_module() :: module() | nil
+  def agent_directory_module do
+    Application.get_env(:arbor_monitor, :agent_directory_module, nil)
   end
 end

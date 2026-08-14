@@ -1,22 +1,38 @@
 defmodule Arbor.Monitor.HealingSupervisorTest do
   use ExUnit.Case, async: false
 
-  alias Arbor.Monitor.{AnomalyQueue, CascadeDetector, Fingerprint, HealingSupervisor,
-    RejectionTracker}
+  alias Arbor.Monitor.{
+    AnomalyQueue,
+    CascadeDetector,
+    Fingerprint,
+    HealingSupervisor,
+    RejectionTracker
+  }
 
   setup do
-    # Disable ops room startup in tests (needs full agent infrastructure)
-    Application.put_env(:arbor_monitor, :start_ops_room, false)
+    originals = %{
+      start_ops_room: Application.get_env(:arbor_monitor, :start_ops_room, :unset),
+      channel_bridge: Application.get_env(:arbor_monitor, :channel_bridge_module, :unset),
+      agent_directory: Application.get_env(:arbor_monitor, :agent_directory_module, :unset)
+    }
 
-    # Start the HealingSupervisor for tests
+    Application.put_env(:arbor_monitor, :start_ops_room, false)
+    Application.delete_env(:arbor_monitor, :channel_bridge_module)
+    Application.delete_env(:arbor_monitor, :agent_directory_module)
+
     start_supervised!(HealingSupervisor)
 
     on_exit(fn ->
-      Application.delete_env(:arbor_monitor, :start_ops_room)
+      restore(:start_ops_room, originals.start_ops_room)
+      restore(:channel_bridge_module, originals.channel_bridge)
+      restore(:agent_directory_module, originals.agent_directory)
     end)
 
     :ok
   end
+
+  defp restore(key, :unset), do: Application.delete_env(:arbor_monitor, key)
+  defp restore(key, value), do: Application.put_env(:arbor_monitor, key, value)
 
   describe "child processes" do
     @tag :fast

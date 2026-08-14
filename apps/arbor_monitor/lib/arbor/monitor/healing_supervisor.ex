@@ -13,12 +13,15 @@ defmodule Arbor.Monitor.HealingSupervisor do
   ## Ops Room Architecture
 
   Instead of running a custom DebugAgent GenServer, the healing system creates
-  an ops channel via Arbor.Comms with a standard diagnostician agent. The
-  AnomalyForwarder subscribes to monitor signals and posts them as messages
-  to the ops channel. Humans and other agents can join to collaborate.
+  an ops channel through the configured channel-bridge provider with a
+  standard diagnostician agent. The AnomalyForwarder posts monitor signals
+  as messages to that channel. Humans and other agents can join to collaborate.
 
-  The diagnostician agent is started via `Manager.start_or_resume` (runtime bridge)
-  using a deferred Task to wait for agent infrastructure to be available.
+  Diagnostician lookup uses the configured agent-directory provider. The
+  diagnostician agent itself is started outside this supervisor.
+
+  Fallback lookup is deferred on an unsupervised Task so supervisor init is
+  not blocked. That Task lifecycle is unchanged.
 
   ## Configuration
 
@@ -36,6 +39,7 @@ defmodule Arbor.Monitor.HealingSupervisor do
   use Supervisor
 
   alias Arbor.Monitor.AnomalyForwarder
+  alias Arbor.Monitor.Provider
 
   require Logger
 
@@ -106,8 +110,38 @@ defmodule Arbor.Monitor.HealingSupervisor do
     DynamicSupervisor.count_children(Arbor.Monitor.HealingWorkers).active
   end
 
+  @doc false
+  def setup_ops_room_fallback do
+    case Provider.list_agents() do
+      {:ok, agents} ->
+        case Enum.find(agents, &(&1.display_name == "diagnostician")) do
+          %{agent_id: agent_id} ->
+            setup_ops_room_for_agent(agent_id)
+
+          nil ->
+            Logger.debug("[HealingSupervisor] No diagnostician agent found, ops room disabled")
+        end
+
+      {:skip, :absent} ->
+        Logger.debug(
+          "[HealingSupervisor] agent directory not configured, ops room lookup skipped"
+        )
+
+      {:skip, :provider_raised, exception_struct} ->
+        Logger.warning(
+          "[HealingSupervisor] directory skipped: provider_raised #{inspect(exception_struct)}"
+        )
+
+      {:skip, reason} ->
+        Logger.warning("[HealingSupervisor] directory skipped: #{reason}")
+
+      {:error, reason} ->
+        Logger.warning("[HealingSupervisor] directory skipped: #{reason}")
+    end
+  end
+
   # Deferred ops room setup — subscribes to Bootstrap signal, with fallback poll.
-  # The diagnostician agent is now started by Arbor.Agent.Bootstrap, not here.
+  # The diagnostician agent is started outside this supervisor.
   defp maybe_schedule_ops_room do
     enabled = Application.get_env(:arbor_monitor, :start_ops_room, true)
 
@@ -150,44 +184,14 @@ defmodule Arbor.Monitor.HealingSupervisor do
     end
   end
 
-  defp setup_ops_room_fallback do
-    lifecycle_mod = Arbor.Agent.Lifecycle
-
-    if Code.ensure_loaded?(lifecycle_mod) do
-      try do
-        profiles = apply(lifecycle_mod, :list_agents, [])
-
-        case Enum.find(profiles, &(&1.display_name == "diagnostician")) do
-          %{agent_id: agent_id} ->
-            setup_ops_room_for_agent(agent_id)
-
-          nil ->
-            Logger.debug("[HealingSupervisor] No diagnostician agent found, ops room disabled")
-        end
-      rescue
-        _ -> :ok
-      catch
-        :exit, _ -> :ok
-      end
-    end
-  end
-
   defp setup_ops_room_for_agent(agent_id) do
-    comms_mod = Arbor.Comms
-
-    if Code.ensure_loaded?(comms_mod) do
-      create_ops_room(agent_id, comms_mod)
-    end
-  end
-
-  defp create_ops_room(agent_id, comms_mod) do
     participants = [
-      %{id: agent_id, name: "Diagnostician", type: :agent}
+      %{id: agent_id, name: "Diagnostician", type: :agent},
+      %{id: "anomaly_forwarder", name: "Monitor", type: :system}
     ]
 
-    case apply(comms_mod, :create_channel, ["ops-room", [participants: participants]]) do
+    case Provider.create_ops_room("ops-room", participants) do
       {:ok, channel_id} ->
-        # Wire the forwarder to the new channel
         try do
           AnomalyForwarder.set_channel(channel_id)
         rescue
@@ -197,6 +201,17 @@ defmodule Arbor.Monitor.HealingSupervisor do
         end
 
         Logger.info("[HealingSupervisor] Ops room created with diagnostician agent #{agent_id}")
+
+      {:skip, :absent} ->
+        Logger.debug("[HealingSupervisor] channel bridge not configured, ops room create skipped")
+
+      {:skip, :provider_raised, exception_struct} ->
+        Logger.warning(
+          "[HealingSupervisor] Failed to create ops room: provider_raised #{inspect(exception_struct)}"
+        )
+
+      {:skip, reason} ->
+        Logger.warning("[HealingSupervisor] Failed to create ops room: #{reason}")
 
       {:error, reason} ->
         Logger.warning("[HealingSupervisor] Failed to create ops room: #{inspect(reason)}")

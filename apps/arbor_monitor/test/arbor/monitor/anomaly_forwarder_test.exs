@@ -4,14 +4,31 @@ defmodule Arbor.Monitor.AnomalyForwarderTest do
   alias Arbor.Monitor.AnomalyForwarder
 
   setup do
+    originals = %{
+      start_ops_room: Application.get_env(:arbor_monitor, :start_ops_room, :unset),
+      channel_bridge: Application.get_env(:arbor_monitor, :channel_bridge_module, :unset),
+      agent_directory: Application.get_env(:arbor_monitor, :agent_directory_module, :unset)
+    }
+
     Application.put_env(:arbor_monitor, :start_ops_room, false)
+    Application.delete_env(:arbor_monitor, :channel_bridge_module)
+    Application.delete_env(:arbor_monitor, :agent_directory_module)
 
     on_exit(fn ->
-      Application.delete_env(:arbor_monitor, :start_ops_room)
+      restore(:start_ops_room, originals.start_ops_room)
+      restore(:channel_bridge_module, originals.channel_bridge)
+      restore(:agent_directory_module, originals.agent_directory)
     end)
 
     {:ok, pid} = start_supervised(AnomalyForwarder)
     %{forwarder: pid}
+  end
+
+  defp restore(key, :unset), do: Application.delete_env(:arbor_monitor, key)
+  defp restore(key, value), do: Application.put_env(:arbor_monitor, key, value)
+
+  defp sync_forwarder do
+    assert :ok = AnomalyForwarder.set_channel("ops-room")
   end
 
   describe "start_link/1" do
@@ -37,8 +54,7 @@ defmodule Arbor.Monitor.AnomalyForwarderTest do
       }
 
       send(Process.whereis(AnomalyForwarder), {:signal, signal})
-      # Should not crash
-      Process.sleep(50)
+      sync_forwarder()
       assert Process.alive?(Process.whereis(AnomalyForwarder))
     end
 
@@ -50,7 +66,7 @@ defmodule Arbor.Monitor.AnomalyForwarderTest do
       }
 
       send(Process.whereis(AnomalyForwarder), {:signal, signal})
-      Process.sleep(50)
+      sync_forwarder()
       assert Process.alive?(Process.whereis(AnomalyForwarder))
     end
 
@@ -62,7 +78,7 @@ defmodule Arbor.Monitor.AnomalyForwarderTest do
       }
 
       send(Process.whereis(AnomalyForwarder), {:signal, signal})
-      Process.sleep(50)
+      sync_forwarder()
       assert Process.alive?(Process.whereis(AnomalyForwarder))
     end
 
@@ -74,7 +90,7 @@ defmodule Arbor.Monitor.AnomalyForwarderTest do
       }
 
       send(Process.whereis(AnomalyForwarder), {:signal, signal})
-      Process.sleep(50)
+      sync_forwarder()
       assert Process.alive?(Process.whereis(AnomalyForwarder))
     end
 
@@ -82,14 +98,14 @@ defmodule Arbor.Monitor.AnomalyForwarderTest do
     test "handles unknown signal types gracefully" do
       signal = %{type: :unknown_signal, data: %{}}
       send(Process.whereis(AnomalyForwarder), {:signal, signal})
-      Process.sleep(50)
+      sync_forwarder()
       assert Process.alive?(Process.whereis(AnomalyForwarder))
     end
 
     @tag :fast
     test "handles non-signal messages gracefully" do
       send(Process.whereis(AnomalyForwarder), :random_message)
-      Process.sleep(50)
+      sync_forwarder()
       assert Process.alive?(Process.whereis(AnomalyForwarder))
     end
   end
@@ -98,7 +114,7 @@ defmodule Arbor.Monitor.AnomalyForwarderTest do
     @tag :fast
     test "flush_cascade_batch message is handled" do
       send(Process.whereis(AnomalyForwarder), :flush_cascade_batch)
-      Process.sleep(50)
+      sync_forwarder()
       assert Process.alive?(Process.whereis(AnomalyForwarder))
     end
   end

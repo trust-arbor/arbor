@@ -375,6 +375,83 @@ defmodule Arbor.Comms do
     end
   end
 
+  @doc """
+  Deliver one Monitor-shaped channel message.
+
+  Collapses a successful channel send to `:ok` so Channel message maps
+  do not cross this port.
+  """
+  @spec deliver_channel_message(String.t(), String.t(), String.t(), atom(), String.t()) ::
+          :ok | {:error, :not_found | :not_member | :rate_limited | :delivery_failed}
+  def deliver_channel_message(channel_id, sender_id, sender_name, sender_type, content)
+      when is_binary(channel_id) and is_binary(sender_id) and is_binary(sender_name) and
+             sender_type in [:system, :agent, :human] and is_binary(content) do
+    case send_to_channel(channel_id, sender_id, sender_name, sender_type, content) do
+      {:ok, _message} -> :ok
+      {:error, :not_found} -> {:error, :not_found}
+      {:error, :not_member} -> {:error, :not_member}
+      {:error, :rate_limited} -> {:error, :rate_limited}
+      {:error, _} -> {:error, :delivery_failed}
+      _ -> {:error, :delivery_failed}
+    end
+  rescue
+    _ -> {:error, :delivery_failed}
+  catch
+    _, _ -> {:error, :delivery_failed}
+  end
+
+  def deliver_channel_message(_channel_id, _sender_id, _sender_name, _sender_type, _content),
+    do: {:error, :delivery_failed}
+
+  @doc """
+  Create an ops room from Monitor-shaped participants.
+
+  Maps participants onto `create_channel/2` `:members`. Does not invent members.
+  """
+  @spec create_ops_room(String.t(), [map()]) ::
+          {:ok, String.t()} | {:error, :invalid_participants | :create_failed}
+  def create_ops_room(name, participants) when is_binary(name) and is_list(participants) do
+    cond do
+      String.trim(name) == "" ->
+        {:error, :invalid_participants}
+
+      participants == [] ->
+        {:error, :invalid_participants}
+
+      not valid_ops_room_participants?(participants) ->
+        {:error, :invalid_participants}
+
+      true ->
+        case create_channel(name, members: participants) do
+          {:ok, channel_id} when is_binary(channel_id) and channel_id != "" ->
+            {:ok, channel_id}
+
+          {:error, _} ->
+            {:error, :create_failed}
+
+          _ ->
+            {:error, :create_failed}
+        end
+    end
+  rescue
+    _ -> {:error, :create_failed}
+  catch
+    _, _ -> {:error, :create_failed}
+  end
+
+  def create_ops_room(_name, _participants), do: {:error, :invalid_participants}
+
+  defp valid_ops_room_participants?(participants) do
+    Enum.all?(participants, fn
+      %{id: id, name: name, type: type}
+      when is_binary(id) and is_binary(name) and type in [:system, :agent, :human] ->
+        true
+
+      _ ->
+        false
+    end)
+  end
+
   @doc "Add a member to a channel."
   @spec join_channel(String.t(), map()) :: :ok | {:error, term()}
   def join_channel(channel_id, member) do

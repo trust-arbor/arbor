@@ -81,6 +81,33 @@ defmodule Arbor.Agent do
   @doc "List all persisted agent profiles."
   defdelegate list_agents(), to: Lifecycle
 
+  @doc """
+  Project persisted agents into Monitor-shaped directory rows.
+
+  Returns `{:ok, agents}` where each agent is `%{agent_id, display_name}` only.
+  """
+  @spec list_monitor_agents() ::
+          {:ok, [%{agent_id: String.t(), display_name: String.t() | nil}]}
+          | {:error, :directory_unavailable}
+  def list_monitor_agents do
+    agents =
+      Enum.flat_map(list_agents(), fn
+        %{agent_id: id} = profile when is_binary(id) ->
+          name = Map.get(profile, :display_name)
+          display_name = if is_binary(name) or is_nil(name), do: name, else: nil
+          [%{agent_id: id, display_name: display_name}]
+
+        _other ->
+          []
+      end)
+
+    {:ok, agents}
+  rescue
+    _ -> {:error, :directory_unavailable}
+  catch
+    _, _ -> {:error, :directory_unavailable}
+  end
+
   @doc "List all running agents across the cluster via `:pg` process groups."
   defdelegate list_cluster(), to: Registry, as: :list_cluster
 
