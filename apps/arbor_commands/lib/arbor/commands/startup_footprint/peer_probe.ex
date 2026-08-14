@@ -1,5 +1,19 @@
 defmodule Arbor.Commands.StartupFootprint.PeerProbe do
-  @moduledoc false
+  @moduledoc """
+  Commands-owned measurement protocol for one K3B startup-footprint scenario.
+
+  A fresh OTP `:peer` BEAM invokes only `measure/1` with a closed scenario
+  name. The probe configures kernel gates, snapshots process, ETS, and memory
+  counters, starts exactly one scenario, and returns the complete normalized
+  envelope from `Core.normalize_sample/1`.
+
+  Baseline starts only passive `:arbor_contracts` after the pre-start
+  snapshot so owner callbacks stay a visible regression. Proposed scenarios
+  load the retired owners, start the merged non-owner runtime extras, and
+  start the synthetic proposed owner. Callers cannot choose the module,
+  function, environment, or executable; `PeerRunner` pins those and installs
+  the admitted code path before this MFA runs.
+  """
 
   alias Arbor.Commands.StartupFootprint.Core
   alias Arbor.Commands.StartupFootprint.ProposedApplication
@@ -53,16 +67,18 @@ defmodule Arbor.Commands.StartupFootprint.PeerProbe do
 
   def measure(scenario), do: {:error, {:invalid_scenario, scenario}}
 
-  @doc false
-  @spec __test_app_applications__(atom()) :: {:ok, [atom()]} | {:error, term()}
-  def __test_app_applications__(app) when is_atom(app) do
-    case Application.spec(app, :applications) do
-      apps when is_list(apps) -> {:ok, apps}
-      other -> {:error, {:application_spec_missing, app, other}}
+  if Mix.env() == :test do
+    @doc false
+    @spec __test_app_applications__(atom()) :: {:ok, [atom()]} | {:error, term()}
+    def __test_app_applications__(app) when is_atom(app) do
+      case Application.spec(app, :applications) do
+        apps when is_list(apps) -> {:ok, apps}
+        other -> {:error, {:application_spec_missing, app, other}}
+      end
     end
-  end
 
-  def __test_app_applications__(_), do: {:error, :invalid_app}
+    def __test_app_applications__(_), do: {:error, :invalid_app}
+  end
 
   defp configure_kernel_gates do
     :ok = load_app!(:arbor_kernel)

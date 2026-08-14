@@ -112,18 +112,18 @@ defmodule Arbor.Commands.StartupFootprint do
   end
 
   defp measure_production do
-    Enum.reduce_while(Core.scenarios(), {:ok, %{}}, fn scenario, {:ok, acc} ->
-      case PeerRunner.measure_scenario(scenario) do
-        {:ok, raw} ->
-          case admit_peer_sample(scenario, raw) do
+    case PeerRunner.measure_all() do
+      {:ok, samples} when is_map(samples) ->
+        Enum.reduce_while(Core.scenarios(), {:ok, %{}}, fn scenario, {:ok, acc} ->
+          case admit_peer_sample(scenario, Map.get(samples, scenario)) do
             {:ok, sample} -> {:cont, {:ok, Map.put(acc, scenario, sample)}}
             {:error, _} = err -> {:halt, err}
           end
+        end)
 
-        {:error, _} = err ->
-          {:halt, err}
-      end
-    end)
+      {:error, _} = err ->
+        err
+    end
   end
 
   defp admit_peer_sample(scenario, raw) do

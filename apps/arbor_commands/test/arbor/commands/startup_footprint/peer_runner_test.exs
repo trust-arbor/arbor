@@ -3,9 +3,10 @@ defmodule Arbor.Commands.StartupFootprint.PeerRunnerTest do
 
   alias Arbor.Commands.StartupFootprint.PeerProbe
   alias Arbor.Commands.StartupFootprint.PeerRunner
+  alias Arbor.Commands.StartupFootprint.PeerTestOps
 
   @moduletag :slow
-  @moduletag timeout: 120_000
+  @moduletag timeout: 180_000
 
   @isolation_names [
     Arbor.Common.Supervisor,
@@ -17,93 +18,79 @@ defmodule Arbor.Commands.StartupFootprint.PeerRunnerTest do
     Arbor.Signals.Relay
   ]
 
-  test "runner timeout kills the worker and controller before a delayed write" do
-    marker =
-      Path.join(
-        System.tmp_dir!(),
-        "sf-timeout-#{System.unique_integer([:positive])}.txt"
-      )
+  @delayed_write_ms 20_000
 
+  test "runner timeout kills worker, controller, and guardian before a delayed write" do
+    marker = marker_path("sf-timeout")
     on_exit(fn -> File.rm(marker) end)
+    started_at = System.monotonic_time(:millisecond)
 
     result =
-      PeerRunner.__test_sleep_touch__(marker, 20_000,
+      PeerTestOps.sleep_touch(marker, @delayed_write_ms,
         budget_ms: 10_000,
         announce: self()
       )
 
-    control =
-      receive do
-        {:peer_control, pid} -> pid
-      after
-        0 ->
-          case result do
-            {:error, {:peer_timeout, "test", %{control: pid}}} -> pid
-            _ -> nil
-          end
-      end
-
+    assert_received {:peer_work_started, _}
+    announced = collect_announced()
     assert match?({:error, {:peer_timeout, "test", _}}, result)
+    refute_live_descendants(announced)
     refute File.exists?(marker)
-    assert is_pid(control)
-    refute Process.alive?(control)
-    Process.sleep(2_000)
+    wait_past(started_at, @delayed_write_ms + 1_000)
     refute File.exists?(marker)
   end
 
-  test "caller death terminates the peer controller before a delayed write" do
-    marker =
-      Path.join(
-        System.tmp_dir!(),
-        "sf-owner-#{System.unique_integer([:positive])}.txt"
-      )
-
+  test "caller death terminates worker, controller, and guardian before a delayed write" do
+    marker = marker_path("sf-owner")
     on_exit(fn -> File.rm(marker) end)
     parent = self()
+    started_at = System.monotonic_time(:millisecond)
 
     owner =
       spawn(fn ->
         _ =
-          PeerRunner.__test_sleep_touch__(marker, 20_000,
+          PeerTestOps.sleep_touch(marker, @delayed_write_ms,
             budget_ms: 30_000,
             announce: parent
           )
       end)
 
-    control =
-      receive do
-        {:peer_control, pid} -> pid
-      after
-        30_000 -> flunk("peer control was not announced")
-      end
+    receive do
+      {:peer_work_started, _} -> :ok
+    after
+      30_000 -> flunk("peer work did not start")
+    end
 
-    assert Process.alive?(control)
+    announced = collect_announced(1_000)
+    assert is_pid(announced.worker)
+    assert is_pid(announced.guardian)
+    assert is_pid(announced.control)
+    assert Process.alive?(announced.worker)
+    assert Process.alive?(announced.guardian)
+    assert Process.alive?(announced.control)
     refute File.exists?(marker)
+
     Process.exit(owner, :kill)
     wait_until(fn -> not Process.alive?(owner) end, 2_000)
-    wait_until(fn -> not Process.alive?(control) end, 5_000)
-    refute Process.alive?(control)
-    Process.sleep(2_000)
+    wait_until(fn -> not Process.alive?(announced.worker) end, 5_000)
+    wait_until(fn -> not Process.alive?(announced.guardian) end, 5_000)
+    wait_until(fn -> not Process.alive?(announced.control) end, 5_000)
+    refute_live_descendants(announced)
+    wait_past(started_at, @delayed_write_ms + 1_000)
     refute File.exists?(marker)
   end
 
-  test "peer halt leaves no live controller" do
-    result = PeerRunner.__test_halt_peer__(announce: self(), budget_ms: 30_000)
+  test "peer halt leaves no live worker, controller, or guardian" do
+    result = PeerTestOps.halt_peer(announce: self(), budget_ms: 30_000)
 
-    control =
-      receive do
-        {:peer_control, pid} -> pid
-      after
-        0 -> nil
-      end
+    assert_received {:peer_work_started, _}
+    announced = collect_announced()
 
     assert match?({:error, {:peer_crash, "test", _}}, result) or
              match?({:error, {:peer_call_crash, :halt, _}}, result) or
              match?({:error, {:peer_cleanup_failed, "test", _}}, result)
 
-    if is_pid(control) do
-      refute Process.alive?(control)
-    end
+    refute_live_descendants(announced)
   end
 
   test "malformed and unreadable .app files fail closed" do
@@ -119,39 +106,95 @@ defmodule Arbor.Commands.StartupFootprint.PeerRunnerTest do
     File.write!(Path.join(dir, "broken.app"), "not an erlang term")
 
     assert {:error, {:peer_app_consult_failed, :broken, _}} =
-             PeerRunner.__test_consult_app_file__(dir, :broken)
+             PeerTestOps.consult_app_file(dir, :broken)
 
     File.write!(Path.join(dir, "wrong.app"), "{hello, world}.\n")
 
     assert {:error, {:peer_app_consult_malformed, :wrong, _}} =
-             PeerRunner.__test_consult_app_file__(dir, :wrong)
+             PeerTestOps.consult_app_file(dir, :wrong)
 
     assert {:error, {:application_spec_missing, :definitely_not_loaded_sf, nil}} =
              PeerProbe.__test_app_applications__(:definitely_not_loaded_sf)
   end
 
-  test "a normal run leaves no worker, controller, or guardian descendant" do
-    marker =
+  test "consult subtracts optional_applications and keeps included applications required" do
+    dir =
       Path.join(
         System.tmp_dir!(),
-        "sf-clean-#{System.unique_integer([:positive])}.txt"
+        "sf-opt-#{System.unique_integer([:positive])}"
       )
 
+    File.mkdir_p!(dir)
+    on_exit(fn -> File.rm_rf(dir) end)
+
+    File.write!(
+      Path.join(dir, "req.app"),
+      """
+      {application, req, [
+        {applications, [kernel, stdlib, nimble_csv, plug, brotli, ezstd, telemetry]},
+        {optional_applications, [nimble_csv, plug, brotli, ezstd]},
+        {included_applications, [req_included]}
+      ]}.
+      """
+    )
+
+    assert {:ok, required} = PeerTestOps.consult_app_file(dir, :req)
+    assert required == [:kernel, :stdlib, :telemetry, :req_included]
+    refute :nimble_csv in required
+    refute :plug in required
+    refute :brotli in required
+    refute :ezstd in required
+
+    File.write!(
+      Path.join(dir, "keep.app"),
+      """
+      {application, keep, [
+        {applications, [kernel, stdlib, jason]},
+        {included_applications, [keep_inc]}
+      ]}.
+      """
+    )
+
+    assert {:ok, [:kernel, :stdlib, :jason, :keep_inc]} =
+             PeerTestOps.consult_app_file(dir, :keep)
+
+    File.write!(
+      Path.join(dir, "overlap.app"),
+      """
+      {application, overlap, [
+        {applications, [kernel, extra]},
+        {optional_applications, [extra, extra_inc]},
+        {included_applications, [extra_inc]}
+      ]}.
+      """
+    )
+
+    assert {:ok, [:kernel, :extra_inc]} = PeerTestOps.consult_app_file(dir, :overlap)
+
+    File.write!(
+      Path.join(dir, "badopt.app"),
+      """
+      {application, badopt, [
+        {applications, [kernel]},
+        {optional_applications, not_a_list}
+      ]}.
+      """
+    )
+
+    assert {:error, {:peer_app_spec_malformed, :badopt}} =
+             PeerTestOps.consult_app_file(dir, :badopt)
+  end
+
+  test "a normal run leaves no worker, controller, or guardian descendant" do
+    marker = marker_path("sf-clean")
     on_exit(fn -> File.rm(marker) end)
 
-    result = PeerRunner.__test_sleep_touch__(marker, 0, announce: self())
+    result = PeerTestOps.sleep_touch(marker, 0, announce: self())
     assert result == :ok
-
+    assert_received {:peer_work_started, _}
     announced = collect_announced()
-    assert is_pid(announced.worker)
-    assert is_pid(announced.guardian)
-    assert is_pid(announced.control)
-    refute Process.alive?(announced.worker)
-    refute Process.alive?(announced.guardian)
-    refute Process.alive?(announced.control)
-    assert Process.info(announced.worker) == nil
-    assert Process.info(announced.guardian) == nil
-    assert Process.info(announced.control) == nil
+    refute_live_descendants(announced)
+    assert File.exists?(marker)
   end
 
   test "a real descendant BEAM measurement returns a normalized envelope" do
@@ -185,24 +228,51 @@ defmodule Arbor.Commands.StartupFootprint.PeerRunnerTest do
     pid
   end
 
-  defp collect_announced do
-    collect_announced(%{worker: nil, guardian: nil, control: nil}, 3)
+  defp marker_path(prefix) do
+    Path.join(
+      System.tmp_dir!(),
+      "#{prefix}-#{System.unique_integer([:positive])}.txt"
+    )
   end
 
-  defp collect_announced(acc, 0), do: acc
+  defp collect_announced(timeout_ms \\ 0) do
+    collect_announced(%{worker: nil, guardian: nil, control: nil}, 3, timeout_ms)
+  end
 
-  defp collect_announced(acc, remaining) do
+  defp collect_announced(acc, 0, _timeout_ms), do: acc
+
+  defp collect_announced(acc, remaining, timeout_ms) do
     receive do
       {:peer_worker, pid} ->
-        collect_announced(%{acc | worker: pid}, remaining - 1)
+        collect_announced(%{acc | worker: pid}, remaining - 1, timeout_ms)
 
       {:peer_guardian, pid} ->
-        collect_announced(%{acc | guardian: pid}, remaining - 1)
+        collect_announced(%{acc | guardian: pid}, remaining - 1, timeout_ms)
 
       {:peer_control, pid} ->
-        collect_announced(%{acc | control: pid}, remaining - 1)
+        collect_announced(%{acc | control: pid}, remaining - 1, timeout_ms)
     after
-      0 -> acc
+      timeout_ms -> acc
+    end
+  end
+
+  defp refute_live_descendants(announced) do
+    assert is_pid(announced.worker)
+    assert is_pid(announced.guardian)
+    assert is_pid(announced.control)
+    refute Process.alive?(announced.worker)
+    refute Process.alive?(announced.guardian)
+    refute Process.alive?(announced.control)
+    assert Process.info(announced.worker) == nil
+    assert Process.info(announced.guardian) == nil
+    assert Process.info(announced.control) == nil
+  end
+
+  defp wait_past(started_at, min_elapsed_ms) do
+    remaining = min_elapsed_ms - (System.monotonic_time(:millisecond) - started_at)
+
+    if remaining > 0 do
+      Process.sleep(remaining)
     end
   end
 

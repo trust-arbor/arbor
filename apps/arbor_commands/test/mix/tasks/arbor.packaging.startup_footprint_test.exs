@@ -63,8 +63,12 @@ defmodule Mix.Tasks.Arbor.Packaging.StartupFootprintTest do
     refute String.contains?(runner, "System.cmd")
     refute String.contains?(runner, "Task.yield")
     refute String.contains?(runner, "Task.shutdown")
+    refute String.contains?(runner, "__test_sleep_touch__")
+    refute String.contains?(runner, "write_file")
     assert String.contains?(runner, "connection: :standard_io")
     assert String.contains?(runner, "spawn_monitor")
+    assert String.contains?(runner, "if Mix.env() == :test")
+    assert String.contains?(shell, "PeerRunner.measure_all()")
   end
 
   test "check mode compares injected samples against policy and does not write" do

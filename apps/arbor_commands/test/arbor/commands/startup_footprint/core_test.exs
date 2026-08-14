@@ -295,7 +295,7 @@ defmodule Arbor.Commands.StartupFootprint.CoreTest do
     assert {:error, :malformed_decision} = Core.admit_policy(accepted_measure_only)
 
     omitted_owner =
-      normalized_sample("baseline", baseline_opts())
+      normalized_sample("baseline", baseline_opts([]))
       |> Map.delete("started_owner_apps")
 
     assert {:error, {:invalid_started_owner_apps, "baseline"}} =
@@ -309,7 +309,7 @@ defmodule Arbor.Commands.StartupFootprint.CoreTest do
              Core.admit_normalized_sample(omitted_runtime)
 
     omitted_raw_errors =
-      normalized_sample("baseline", baseline_opts())
+      normalized_sample("baseline", baseline_opts([]))
       |> Map.delete("raw_errors")
 
     assert {:error, {:invalid_raw_errors, "baseline"}} =

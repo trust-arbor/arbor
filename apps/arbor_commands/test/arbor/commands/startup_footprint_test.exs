@@ -3,7 +3,9 @@ defmodule Arbor.Commands.StartupFootprintTest do
 
   alias Arbor.Commands.StartupFootprint
   alias Arbor.Commands.StartupFootprint.Core
+  alias Arbor.Commands.StartupFootprint.PeerProbe
   alias Arbor.Commands.StartupFootprint.PeerRunner
+  alias Arbor.Common.SafePath
 
   @moduletag :fast
 
@@ -30,6 +32,8 @@ defmodule Arbor.Commands.StartupFootprintTest do
     assert File.regular?(exec)
     assert Bitwise.band(File.stat!(exec).mode, 0o111) != 0
     refute function_exported?(PeerRunner, :measure_scenario, 2)
+    refute function_exported?(PeerRunner, :measure_all, 1)
+    assert function_exported?(PeerRunner, :measure_all, 0)
     refute function_exported?(StartupFootprint, :run, 2)
   end
 
@@ -63,6 +67,107 @@ defmodule Arbor.Commands.StartupFootprintTest do
 
     overflow = Enum.map(1..513, fn i -> "/tmp/sf-#{i}" end)
     assert {:error, {:peer_code_path_count, 513}} = PeerRunner.admit_paths(overflow)
+  end
+
+  test "malformed list paths fail closed and canonical paths are the byte-ceiling values" do
+    assert {:error, :peer_code_path_invalid} = PeerRunner.admit_paths([:not_a_path])
+    assert {:error, :peer_code_path_invalid} = PeerRunner.admit_paths([[:not_a_char]])
+    assert {:error, :peer_code_path_invalid} = PeerRunner.admit_paths([["not", "codepoints"]])
+    assert {:error, :peer_code_path_invalid} = PeerRunner.admit_paths([~c"/tmp" | :tail])
+
+    parent =
+      Path.join(
+        System.tmp_dir!(),
+        "sf-canon-#{System.unique_integer([:positive])}"
+      )
+
+    File.mkdir_p!(parent)
+    on_exit(fn -> File.rm_rf(parent) end)
+
+    {:ok, canonical_parent} = SafePath.resolve_real(parent)
+
+    assert {:ok, [admitted_charlist]} =
+             PeerRunner.admit_paths([String.to_charlist(canonical_parent)])
+
+    assert admitted_charlist == canonical_parent
+
+    long =
+      Enum.reduce(1..3, parent, fn _, acc ->
+        next = Path.join(acc, String.duplicate("p", 255))
+        File.mkdir_p!(next)
+        next
+      end)
+
+    link_root = Path.join(parent, "l")
+    File.mkdir_p!(link_root)
+
+    {inputs, canonical_total, input_total} =
+      Enum.reduce(1..400, {[], 0, 0}, fn i, {acc, canon_bytes, in_bytes} ->
+        real = Path.join(long, "d#{i}")
+        File.mkdir_p!(real)
+        {:ok, canonical} = SafePath.resolve_real(real)
+        link = Path.join(link_root, "s#{i}")
+        File.ln_s!(canonical, link)
+        {[link | acc], canon_bytes + byte_size(canonical), in_bytes + byte_size(link)}
+      end)
+
+    assert canonical_total > 256_000
+    assert input_total < 256_000
+    assert length(inputs) <= 512
+
+    assert {:error, :peer_code_path_total_bytes} =
+             PeerRunner.admit_paths(Enum.reverse(inputs))
+  end
+
+  test "production PeerRunner and PeerProbe do not export filesystem test operations" do
+    root = find_umbrella(__DIR__)
+
+    runner_path =
+      Path.join(root, "apps/arbor_commands/lib/arbor/commands/startup_footprint/peer_runner.ex")
+
+    probe_path =
+      Path.join(root, "apps/arbor_commands/lib/arbor/commands/startup_footprint/peer_probe.ex")
+
+    shell_path = Path.join(root, "apps/arbor_commands/lib/arbor/commands/startup_footprint.ex")
+
+    support_path =
+      Path.join(root, "apps/arbor_commands/test/support/startup_footprint_peer_test_ops.ex")
+
+    runner_src = File.read!(runner_path)
+    probe_src = File.read!(probe_path)
+    shell_src = File.read!(shell_path)
+    support_src = File.read!(support_path)
+
+    refute String.contains?(runner_src, "__test_sleep_touch__")
+    refute String.contains?(probe_src, "__test_sleep_touch__")
+    refute String.contains?(runner_src, "write_file")
+    refute String.contains?(probe_src, "write_file")
+    assert String.contains?(support_src, "write_file")
+    assert String.contains?(support_src, "defmodule Arbor.Commands.StartupFootprint.PeerTestOps")
+    assert String.contains?(shell_src, "PeerRunner.measure_all()")
+    refute String.contains?(shell_src, "measure_scenario")
+
+    refute function_exported?(PeerRunner, :__test_sleep_touch__, 2)
+    refute function_exported?(PeerRunner, :__test_sleep_touch__, 3)
+    refute function_exported?(PeerProbe, :__test_sleep_touch__, 2)
+    assert function_exported?(PeerRunner, :__test_run_owned__, 3)
+    assert function_exported?(Arbor.Commands.StartupFootprint.PeerTestOps, :sleep_touch, 3)
+
+    runner_defs = classified_public_defs(runner_src)
+    probe_defs = classified_public_defs(probe_src)
+
+    assert MapSet.equal?(
+             runner_defs.test,
+             MapSet.new([
+               :__test_run_owned__,
+               :__test_peer_call__,
+               :__test_consult_app_file__
+             ])
+           )
+
+    refute Enum.any?(runner_defs.prod, &test_export?/1)
+    assert probe_defs.test == MapSet.new([:__test_app_applications__])
+    refute Enum.any?(probe_defs.prod, &test_export?/1)
   end
 
   test "current code path admits existing canonical directories" do
@@ -179,5 +284,60 @@ defmodule Arbor.Commands.StartupFootprintTest do
       "logger_filter_count" => %{"min" => min_side, "max" => max_side},
       "telemetry_handler_count" => %{"min" => min_side, "max" => max_side}
     }
+  end
+
+  defp find_umbrella(dir) do
+    cond do
+      File.regular?(Path.join([dir, "apps", "arbor_kernel", "mix.exs"])) -> dir
+      Path.dirname(dir) == dir -> raise "umbrella root not found"
+      true -> find_umbrella(Path.dirname(dir))
+    end
+  end
+
+  defp test_export?(name) when is_atom(name) do
+    String.starts_with?(Atom.to_string(name), "__test_")
+  end
+
+  defp classified_public_defs(src) do
+    {:ok, ast} = Code.string_to_quoted(src)
+
+    ast
+    |> module_body()
+    |> List.wrap()
+    |> Enum.reduce(%{prod: MapSet.new(), test: MapSet.new()}, fn node, acc ->
+      classify_node(node, acc)
+    end)
+  end
+
+  defp classify_node({:if, _, [condition, [do: block]]}, acc) do
+    if test_env_guard?(condition) do
+      %{acc | test: MapSet.union(acc.test, defs_in(block))}
+    else
+      %{acc | prod: MapSet.union(acc.prod, defs_in(block))}
+    end
+  end
+
+  defp classify_node(other, acc) do
+    %{acc | prod: MapSet.union(acc.prod, defs_in(other))}
+  end
+
+  defp test_env_guard?({:==, _, [{{:., _, [{:__aliases__, _, [:Mix]}, :env]}, _, []}, :test]}),
+    do: true
+
+  defp test_env_guard?(_), do: false
+
+  defp module_body({:defmodule, _, [_, [do: {:__block__, _, body}]]}), do: body
+  defp module_body({:defmodule, _, [_, [do: body]]}), do: [body]
+
+  defp defs_in(ast) do
+    ast
+    |> Macro.prewalk(MapSet.new(), fn
+      {:def, _, [{name, _, _args} | _]} = node, acc when is_atom(name) ->
+        {node, MapSet.put(acc, name)}
+
+      other, acc ->
+        {other, acc}
+    end)
+    |> elem(1)
   end
 end
