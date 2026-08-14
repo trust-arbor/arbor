@@ -35,7 +35,20 @@ defmodule Mix.Tasks.Arbor.Packaging.StartupFootprintTest do
     assert {:ok, policy} = Core.admit_policy(raw)
     assert policy["decision"]["reversible"] == true
     assert policy["decision"]["status"] == "candidate"
+    assert policy["decision"]["choice"] == "measure_only"
     assert policy["scenarios"] == Core.scenarios()
+
+    dead_probe = Path.join(root, "apps/arbor_commands/priv/packaging/startup_footprint_probe")
+
+    for rel <- [
+          "mix.exs",
+          "README.md",
+          "config/config.exs",
+          "lib/arbor_kernel_startup_footprint_probe.ex",
+          "lib/arbor_kernel_startup_footprint_probe/application.ex"
+        ] do
+      refute File.exists?(Path.join(dead_probe, rel))
+    end
   end
 
   test "check mode compares injected samples against policy and does not write" do

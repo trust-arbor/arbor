@@ -5,7 +5,13 @@ defmodule ArborKernelStartupFootprintProbe do
   @scenarios ["baseline", "proposed_gated", "proposed_eager"]
   @owner_apps [:arbor_common, :arbor_signals, :arbor_monitor]
   @retired_owners [:arbor_contracts, :arbor_common, :arbor_signals, :arbor_monitor]
-  @retired_owner_set MapSet.new(@retired_owners)
+  @proposed_owner :arbor_kernel
+  @external_runtime_exclusions MapSet.new([
+                                 @proposed_owner,
+                                 :arbor_kernel_startup_footprint_probe | @retired_owners
+                               ])
+  @security_bridge_id "arbor-signals-security-telemetry-bridge"
+  @security_bridge_event [:arbor, :security, :authorization_granted]
 
   @spec run() :: :ok
   def run do
@@ -14,8 +20,6 @@ defmodule ArborKernelStartupFootprintProbe do
     if scenario not in @scenarios do
       raise "unknown startup-footprint scenario: #{inspect(scenario)}"
     end
-
-    load_apps()
 
     before_apps = started_app_names()
     before = snapshot()
@@ -45,6 +49,8 @@ defmodule ArborKernelStartupFootprintProbe do
   end
 
   defp start_scenario("baseline") do
+    load_scenario_apps("baseline")
+
     case Application.ensure_all_started(:arbor_contracts) do
       {:ok, _} -> :ok
       {:error, reason} -> raise "baseline start failed: #{inspect(reason)}"
@@ -52,6 +58,7 @@ defmodule ArborKernelStartupFootprintProbe do
   end
 
   defp start_scenario(scenario) when scenario in ["proposed_gated", "proposed_eager"] do
+    load_scenario_apps(scenario)
     start_merged_runtime_deps()
 
     case Application.ensure_all_started(:arbor_kernel_startup_footprint_probe) do
@@ -60,28 +67,27 @@ defmodule ArborKernelStartupFootprintProbe do
     end
   end
 
-  defp load_apps do
+  defp load_scenario_apps("baseline") do
+    _ = Application.load(:arbor_contracts)
+    :ok
+  end
+
+  defp load_scenario_apps(_proposed) do
     Enum.each(
-      [
-        :arbor_kernel,
-        :arbor_contracts,
-        :arbor_kernel_startup_footprint_probe | @owner_apps
-      ],
+      [:arbor_contracts, :arbor_kernel_startup_footprint_probe | @owner_apps],
       fn app ->
         _ = Application.load(app)
       end
     )
+
+    :ok
   end
 
   defp start_merged_runtime_deps do
-    [
-      :arbor_kernel,
-      :arbor_kernel_startup_footprint_probe | @retired_owners
-    ]
+    [:arbor_kernel_startup_footprint_probe | @retired_owners]
     |> Enum.flat_map(fn app -> List.wrap(Application.spec(app, :applications)) end)
     |> Enum.uniq()
-    |> Enum.reject(&MapSet.member?(@retired_owner_set, &1))
-    |> Enum.reject(&(&1 == :arbor_kernel_startup_footprint_probe))
+    |> Enum.reject(&MapSet.member?(@external_runtime_exclusions, &1))
     |> Enum.each(fn dep ->
       case Application.ensure_all_started(dep) do
         {:ok, _} -> :ok
@@ -173,9 +179,10 @@ defmodule ArborKernelStartupFootprintProbe do
   end
 
   defp telemetry_handler_count do
-    :telemetry.list_handlers([])
+    :telemetry.list_handlers(@security_bridge_event)
     |> Enum.count(fn handler ->
-      Map.get(handler, :id) == "arbor-signals-security-telemetry-bridge"
+      Map.get(handler, :id) == @security_bridge_id and
+        Map.get(handler, :event_name) == @security_bridge_event
     end)
   end
 
@@ -192,8 +199,7 @@ defmodule ArborKernelStartupFootprintProbe do
 
     after_apps
     |> Enum.reject(&MapSet.member?(before_set, &1))
-    |> Enum.reject(&MapSet.member?(@retired_owner_set, &1))
-    |> Enum.reject(&(&1 == :arbor_kernel_startup_footprint_probe))
+    |> Enum.reject(&MapSet.member?(@external_runtime_exclusions, &1))
     |> Enum.map(&Atom.to_string/1)
     |> Enum.sort()
   end

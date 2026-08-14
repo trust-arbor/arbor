@@ -8,22 +8,29 @@ defmodule Mix.Tasks.Arbor.Packaging.StartupFootprintProductionPathTest do
 
   # Nested `mix compile` of the owner apps will OOM/timeout a root-wide
   # umbrella suite (validator exit 137). The Mix task remains the
-  # executable artifact-side probe. Opt in with ARBOR_APP_ENV_PROBES=1.
-  if System.get_env("ARBOR_APP_ENV_PROBES") != "1" do
-    @moduletag skip: "set ARBOR_APP_ENV_PROBES=1 or run mix arbor.packaging.startup_footprint"
+  # executable artifact-side probe. Opt in with
+  # ARBOR_STARTUP_FOOTPRINT_PROBE=1.
+  if System.get_env("ARBOR_STARTUP_FOOTPRINT_PROBE") != "1" do
+    @moduletag skip:
+                 "set ARBOR_STARTUP_FOOTPRINT_PROBE=1 or run mix arbor.packaging.startup_footprint"
   end
 
   test "isolated production probe emits required metrics for all three scenarios" do
     root = umbrella_root()
     lock_path = Path.join(root, "mix.lock")
+    source_deps = selected_deps(root)
+    canary = Path.join(source_deps, "jason/mix.exs")
     before_lock = File.read!(lock_path)
     before_mtime = File.stat!(lock_path).mtime
+    before_canary = canary_snapshot(canary)
 
     assert {:ok, report} = StartupFootprint.run(root: root, json: true)
 
     assert report["schema"] == "arbor.packaging.startup_footprint.report.v1"
     assert report["policy_version"] == "k3b.v1"
     assert report["decision"]["reversible"] == true
+    assert report["decision"]["status"] == "candidate"
+    assert report["decision"]["choice"] == "measure_only"
 
     for scenario <- ["baseline", "proposed_gated", "proposed_eager"] do
       sample = report["samples"][scenario]
@@ -60,6 +67,9 @@ defmodule Mix.Tasks.Arbor.Packaging.StartupFootprintProductionPathTest do
     assert baseline["started_owner_apps"] == []
     assert baseline["supervisor_children"] == 0
     refute "os_mon" in List.wrap(baseline["started_runtime_apps"])
+    refute "arbor_kernel" in List.wrap(baseline["started_runtime_apps"])
+    refute "arbor_kernel" in List.wrap(gated["started_runtime_apps"])
+    refute "arbor_kernel" in List.wrap(eager["started_runtime_apps"])
     assert "os_mon" in List.wrap(gated["started_runtime_apps"])
     assert "os_mon" in List.wrap(eager["started_runtime_apps"])
     assert eager["logger_filter_count"] >= 1
@@ -67,6 +77,22 @@ defmodule Mix.Tasks.Arbor.Packaging.StartupFootprintProductionPathTest do
 
     assert File.read!(lock_path) == before_lock
     assert File.stat!(lock_path).mtime == before_mtime
+    assert canary_snapshot(canary) == before_canary
+  end
+
+  defp selected_deps(root) do
+    case System.get_env("MIX_DEPS_PATH") do
+      nil -> Path.expand("deps", root)
+      path -> Path.expand(path, root)
+    end
+  end
+
+  defp canary_snapshot(path) do
+    if File.regular?(path) do
+      {File.read!(path), File.stat!(path).mtime}
+    else
+      :absent
+    end
   end
 
   defp umbrella_root do

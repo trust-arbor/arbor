@@ -2,10 +2,13 @@ defmodule Arbor.Commands.StartupFootprint do
   @moduledoc """
   Imperative shell for the K3B startup-footprint probe.
 
-  Compiles a tracked probe fixture once, then measures baseline,
-  proposed-gated, and proposed-eager scenarios in separate OS/BEAM
-  processes. Canonical `deps/` and `mix.lock` are read-only inputs.
-  Temporary build output is deleted after the run.
+  Compiles a tracked probe fixture once against a disposable,
+  symlink-dereferenced copy of the selected dependency cache, then
+  measures baseline, proposed-gated, and proposed-eager scenarios in
+  separate OS/BEAM processes. Canonical `deps/` and `mix.lock` are
+  read-only inputs. External commands run through Arbor.Shell's
+  process-group facade. Temporary workspace output is deleted only
+  after ownership and private mode are re-verified.
   """
 
   alias Arbor.Commands.StartupFootprint.Core
@@ -24,6 +27,12 @@ defmodule Arbor.Commands.StartupFootprint do
   ]
 
   @production_opt_keys [:mode, :json, :root, :policy]
+  @max_workspace_create_attempts 8
+  @compile_timeout_ms 300_000
+  @scenario_timeout_ms 180_000
+  @toolchain_timeout_ms 30_000
+  @workspace_cleanup_timeout_ms 10_000
+  @workspace_cleanup_max_entries 1_000_000
 
   @warning_needles [
     "unavailable",
@@ -68,6 +77,64 @@ defmodule Arbor.Commands.StartupFootprint do
 
   def scenario_command(_), do: []
 
+  @doc false
+  @spec allocate_workspace_at(String.t()) :: {:ok, map()} | {:error, term()}
+  def allocate_workspace_at(path) when is_binary(path) do
+    create_workspace_at(path)
+  end
+
+  def allocate_workspace_at(_), do: {:error, :invalid_workspace_path}
+
+  @doc false
+  @spec validate_mise_path(String.t()) :: {:ok, String.t()} | {:error, term()}
+  def validate_mise_path(path) when is_binary(path) do
+    case File.stat(path) do
+      {:ok, %{type: :regular, mode: mode}} ->
+        if Bitwise.band(mode, 0o111) != 0 do
+          {:ok, path}
+        else
+          {:error, {:mise_not_executable, path}}
+        end
+
+      {:ok, _stat} ->
+        {:error, {:mise_not_executable, path}}
+
+      {:error, :enoent} ->
+        {:error, :mise_unavailable}
+
+      {:error, reason} ->
+        {:error, {:mise_unreadable, reason}}
+    end
+  end
+
+  def validate_mise_path(_), do: {:error, :mise_unavailable}
+
+  @doc false
+  @spec classify_command_result(map(), term()) :: {:ok, String.t()} | {:error, term()}
+  def classify_command_result(result, context) when is_map(result) do
+    cond do
+      Map.get(result, :timed_out) == true ->
+        {:error, {:probe_timeout, context}}
+
+      Map.get(result, :output_limit_exceeded) == true ->
+        {:error, {:probe_output_limit, context}}
+
+      Map.get(result, :containment_failure) == true ->
+        {:error, {:probe_containment_failure, context}}
+
+      Map.get(result, :exit_code) == 0 and is_binary(Map.get(result, :stdout)) ->
+        {:ok, result.stdout}
+
+      is_integer(Map.get(result, :exit_code)) ->
+        {:error, {:probe_command_failed, context, result.exit_code, result.stdout}}
+
+      true ->
+        {:error, {:probe_command_failed, context, result}}
+    end
+  end
+
+  def classify_command_result(_, context), do: {:error, {:probe_command_failed, context}}
+
   defp do_run(opts, allow_synthetic: allow_synthetic) do
     mode = Keyword.get(opts, :mode, "report")
     json? = Keyword.get(opts, :json, false) == true
@@ -97,10 +164,14 @@ defmodule Arbor.Commands.StartupFootprint do
     end
   end
 
-  defp collect_samples(_root, opts, true = _allow_synthetic) do
+  defp collect_samples(root, opts, true = _allow_synthetic) do
     cond do
       is_map(Keyword.get(opts, :samples)) ->
         admit_injected_samples(Keyword.fetch!(opts, :samples))
+
+      Keyword.get(opts, :use_production_workspace) == true and
+          is_function(Keyword.get(opts, :run_child), 2) ->
+        measure_with_injected_children(root, Keyword.fetch!(opts, :run_child))
 
       is_function(Keyword.get(opts, :run_child), 2) ->
         run_injected_children(Keyword.fetch!(opts, :run_child))
@@ -124,8 +195,30 @@ defmodule Arbor.Commands.StartupFootprint do
   end
 
   defp run_injected_children(fun) do
+    reduce_child_results(fn scenario ->
+      fun.(scenario, %{command: scenario_command(scenario)})
+    end)
+  end
+
+  defp measure_with_injected_children(root, fun) do
+    with_measurement_workspace(root, fn workspace ->
+      reduce_child_results(fn scenario ->
+        fun.(
+          scenario,
+          %{
+            command: scenario_command(scenario),
+            deps_path: workspace.deps_copy,
+            source_deps: workspace.source_deps,
+            env: workspace.child_env
+          }
+        )
+      end)
+    end)
+  end
+
+  defp reduce_child_results(fun) do
     Enum.reduce_while(Core.scenarios(), {:ok, %{}}, fn scenario, {:ok, acc} ->
-      case fun.(scenario, %{command: scenario_command(scenario)}) do
+      case fun.(scenario) do
         {:ok, raw} when is_map(raw) ->
           case normalize_child_payload(raw) do
             {:ok, sample} -> {:cont, {:ok, Map.put(acc, scenario, sample)}}
@@ -142,24 +235,16 @@ defmodule Arbor.Commands.StartupFootprint do
   end
 
   defp measure_production(root) do
-    with {:ok, lock_path, lock_bytes} <- read_lock(root),
-         deps_path = deps_path(root),
-         :ok <- preflight_deps(root, deps_path),
-         {:ok, tmp} <- materialize_probe(root) do
-      build_path = Path.expand(Path.join(tmp, "build"))
-      File.mkdir_p!(build_path)
-
-      try do
-        with {:ok, env} <- mix_env(root, build_path, deps_path),
-             :ok <- compile_probe(root, tmp, env),
-             {:ok, samples} <- run_scenarios(root, tmp, env),
-             :ok <- assert_lock_unchanged(lock_path, lock_bytes) do
+    with_direct_runtime(fn ->
+      with_measurement_workspace(root, fn workspace ->
+        with {:ok, env} <-
+               mix_env(root, workspace.build_path, workspace.deps_copy),
+             :ok <- compile_probe(root, workspace.tmp, env),
+             {:ok, samples} <- run_scenarios(root, workspace.tmp, env) do
           {:ok, samples}
         end
-      after
-        File.rm_rf(tmp)
-      end
-    end
+      end)
+    end)
   end
 
   defp run_scenarios(root, tmp, env) do
@@ -172,24 +257,10 @@ defmodule Arbor.Commands.StartupFootprint do
   end
 
   defp run_scenario(root, tmp, env, scenario) do
-    mix = Path.join(root, "bin/mix")
-    child_env = [{"ARBOR_STARTUP_FOOTPRINT_SCENARIO", scenario} | env]
+    child_env = Map.put(env, "ARBOR_STARTUP_FOOTPRINT_SCENARIO", scenario)
 
-    {output, status} =
-      System.cmd(mix, scenario_command(scenario),
-        cd: tmp,
-        env: child_env,
-        stderr_to_stdout: true
-      )
-
-    cond do
-      status != 0 ->
-        {:error, {:scenario_failed, scenario, status, output}}
-
-      Enum.any?(@fetch_needles, &String.contains?(output, &1)) ->
-        {:error, {:network_fetch_refused, output}}
-
-      true ->
+    case run_mix(root, tmp, child_env, scenario_command(scenario), @scenario_timeout_ms) do
+      {:ok, output} ->
         with {:ok, payload} <- decode_payload(output),
              {:ok, sample} <- normalize_child_payload(payload) do
           if sample["scenario"] == scenario do
@@ -198,6 +269,12 @@ defmodule Arbor.Commands.StartupFootprint do
             {:error, {:scenario_mismatch, scenario, sample["scenario"]}}
           end
         end
+
+      {:error, {:probe_command_failed, _ctx, status, output}} ->
+        {:error, {:scenario_failed, scenario, status, output}}
+
+      {:error, _} = err ->
+        err
     end
   end
 
@@ -210,32 +287,56 @@ defmodule Arbor.Commands.StartupFootprint do
   end
 
   defp compile_probe(root, tmp, env) do
-    run_mix(Path.join(root, "bin/mix"), tmp, env, ["compile", "--warnings-as-errors"])
+    case run_mix(root, tmp, env, ["compile", "--warnings-as-errors"], @compile_timeout_ms) do
+      {:ok, _output} -> :ok
+      {:error, _} = err -> err
+    end
   end
 
-  defp run_mix(mix, tmp, env, args) do
+  defp run_mix(root, tmp, env, args, timeout_ms) do
     if Enum.any?(args, &(&1 in ["deps.get", "deps.update", "deps.unlock"])) do
       {:error, :refuses_network_deps}
     else
-      {output, status} =
-        System.cmd(mix, args, cd: tmp, env: env, stderr_to_stdout: true)
+      mix = Path.join(root, "bin/mix")
 
-      cond do
-        status != 0 ->
+      case execute_probe_command("sh", [mix | args], tmp, env, timeout_ms, {:mix, args}) do
+        {:ok, output} ->
+          cond do
+            Enum.any?(@fetch_needles, &String.contains?(output, &1)) ->
+              {:error, {:network_fetch_refused, output}}
+
+            Enum.any?(@warning_needles, &String.contains?(output, &1)) ->
+              {:error, {:probe_warning, output}}
+
+            retired_config_warning?(output) ->
+              {:error, {:probe_warning, output}}
+
+            true ->
+              {:ok, output}
+          end
+
+        {:error, {:probe_command_failed, _ctx, status, output}} ->
           {:error, {:mix_failed, args, status, output}}
 
-        Enum.any?(@fetch_needles, &String.contains?(output, &1)) ->
-          {:error, {:network_fetch_refused, output}}
-
-        Enum.any?(@warning_needles, &String.contains?(output, &1)) ->
-          {:error, {:probe_warning, output}}
-
-        retired_config_warning?(output) ->
-          {:error, {:probe_warning, output}}
-
-        true ->
-          :ok
+        {:error, _} = err ->
+          err
       end
+    end
+  end
+
+  defp execute_probe_command(command, args, cwd, env, timeout_ms, context) do
+    case Arbor.Shell.execute_direct(command, args,
+           sandbox: :none,
+           cwd: cwd,
+           env: env,
+           timeout: timeout_ms,
+           max_output_bytes: Arbor.Shell.max_output_bytes_limit()
+         ) do
+      {:ok, result} when is_map(result) ->
+        classify_command_result(result, context)
+
+      {:error, reason} ->
+        {:error, {:probe_execution_failed, context, reason}}
     end
   end
 
@@ -247,31 +348,107 @@ defmodule Arbor.Commands.StartupFootprint do
       |> Enum.reverse()
       |> Enum.find(&String.starts_with?(&1, "{"))
 
-    case json && Jason.decode(json) do
-      {:ok, payload} when is_map(payload) -> {:ok, payload}
-      {:error, reason} -> {:error, {:payload_json, reason, output}}
-      nil -> {:error, {:payload_missing, output}}
-      false -> {:error, {:payload_missing, output}}
-      {:ok, _} -> {:error, {:payload_missing, output}}
+    case json do
+      nil ->
+        {:error, {:payload_missing, output}}
+
+      line ->
+        case Jason.decode(line) do
+          {:ok, payload} when is_map(payload) -> {:ok, payload}
+          {:ok, _other} -> {:error, {:payload_missing, output}}
+          {:error, reason} -> {:error, {:payload_json, reason, output}}
+        end
     end
   end
 
-  defp materialize_probe(root) do
-    tmp =
-      Path.expand(
-        Path.join(
-          System.tmp_dir!(),
-          "arbor-startup-footprint-probe-#{:erlang.unique_integer([:positive])}"
-        )
-      )
+  defp with_measurement_workspace(root, fun) do
+    with {:ok, lock_path, lock_bytes} <- read_lock(root),
+         {:ok, source_deps} <- resolve_source_deps(root),
+         :ok <- preflight_deps(root, source_deps),
+         {:ok, workspace} <- materialize_probe(root, source_deps) do
+      try do
+        with {:ok, result} <- fun.(workspace),
+             :ok <- assert_lock_unchanged(lock_path, lock_bytes) do
+          {:ok, result}
+        end
+      after
+        cleanup_workspace(workspace)
+      end
+    end
+  end
 
+  defp materialize_probe(root, source_deps) do
+    with {:ok, identity} <- allocate_workspace() do
+      case finish_materialize(root, source_deps, identity) do
+        {:ok, workspace} ->
+          {:ok, workspace}
+
+        {:error, reason} ->
+          cleanup_workspace(%{identity: identity})
+          {:error, reason}
+      end
+    end
+  end
+
+  defp finish_materialize(root, source_deps, identity) do
+    tmp = identity.path
+
+    with :ok <- verify_owned_private(identity),
+         :ok <- copy_probe_tree(root, tmp),
+         {:ok, deps_copy} <- copy_deps_cache(source_deps, Path.join(tmp, "deps")),
+         :ok <- verify_owned_private(identity) do
+      {:ok,
+       %{
+         identity: identity,
+         tmp: tmp,
+         build_path: Path.join(tmp, "build"),
+         deps_copy: deps_copy,
+         source_deps: source_deps,
+         child_env: %{"MIX_DEPS_PATH" => deps_copy, "HEX_OFFLINE" => "1"}
+       }}
+    end
+  end
+
+  defp copy_probe_tree(root, tmp) do
     template = Path.join([root | @template_rel])
-    File.mkdir_p!(tmp)
-    File.cp_r!(Path.join(template, "lib"), Path.join(tmp, "lib"))
-    File.cp_r!(Path.join(template, "config"), Path.join(tmp, "config"))
-    File.cp!(Path.join(root, "mix.lock"), Path.join(tmp, "mix.lock"))
-    File.write!(Path.join(tmp, "mix.exs"), generated_mix_exs(root))
-    {:ok, tmp}
+
+    with :ok <- copy_tree(Path.join(template, "lib"), Path.join(tmp, "lib")),
+         :ok <- copy_tree(Path.join(template, "config"), Path.join(tmp, "config")),
+         :ok <- copy_file(Path.join(root, "mix.lock"), Path.join(tmp, "mix.lock")),
+         :ok <- File.write(Path.join(tmp, "mix.exs"), generated_mix_exs(root)) do
+      :ok
+    else
+      {:error, reason} -> {:error, {:probe_materialize_failed, reason}}
+    end
+  end
+
+  defp copy_deps_cache(source_deps, dest_deps) do
+    case File.cp_r(source_deps, dest_deps, dereference_symlinks: true) do
+      {:ok, _files} ->
+        case File.lstat(dest_deps) do
+          {:ok, %{type: :directory}} -> {:ok, dest_deps}
+          {:ok, %{type: :symlink}} -> {:error, :deps_copy_symlink}
+          {:ok, _} -> {:error, :deps_copy_not_directory}
+          {:error, reason} -> {:error, {:deps_copy_stat_failed, reason}}
+        end
+
+      {:error, reason, path} ->
+        {:error, {:deps_copy_failed, reason, path}}
+    end
+  end
+
+  defp copy_tree(source, dest) do
+    case File.cp_r(source, dest, dereference_symlinks: true) do
+      {:ok, _files} -> :ok
+      {:error, reason, path} -> {:error, {reason, path}}
+    end
+  end
+
+  defp copy_file(source, dest) do
+    case File.cp(source, dest) do
+      :ok -> :ok
+      {:error, reason} -> {:error, reason}
+    end
   end
 
   defp generated_mix_exs(root) do
@@ -322,26 +499,58 @@ defmodule Arbor.Commands.StartupFootprint do
   defp mix_env(root, build_path, deps_path) do
     with {:ok, erlang_root, elixir_root} <- pinned_roots(root) do
       {:ok,
-       [
-         {"ARBOR_MIX_CONTAINED", "1"},
-         {"ARBOR_ERLANG_ROOT", erlang_root},
-         {"ARBOR_ELIXIR_ROOT", elixir_root},
-         {"MIX_BUILD_PATH", build_path},
-         {"MIX_DEPS_PATH", deps_path},
-         {"MIX_ENV", "prod"}
-       ]}
+       %{
+         "ARBOR_MIX_CONTAINED" => "1",
+         "ARBOR_ERLANG_ROOT" => erlang_root,
+         "ARBOR_ELIXIR_ROOT" => elixir_root,
+         "MIX_BUILD_PATH" => build_path,
+         "MIX_DEPS_PATH" => deps_path,
+         "MIX_ENV" => "prod",
+         "HEX_OFFLINE" => "1"
+       }}
     end
   end
 
   defp pinned_roots(root) do
-    mise = System.find_executable("mise") || Path.expand("~/.local/bin/mise")
-
-    with {erlang, 0} <- System.cmd(mise, ["where", "erlang"], cd: root, stderr_to_stdout: true),
-         {elixir, 0} <- System.cmd(mise, ["where", "elixir"], cd: root, stderr_to_stdout: true) do
+    with {:ok, mise} <- resolve_mise(),
+         {:ok, erlang} <- run_mise(mise, root, "erlang"),
+         {:ok, elixir} <- run_mise(mise, root, "elixir") do
       {:ok, String.trim(erlang), String.trim(elixir)}
     else
-      {output, status} -> {:error, {:pinned_toolchain, status, output}}
-      other -> {:error, {:pinned_toolchain, other}}
+      {:error, reason} -> {:error, {:pinned_toolchain, reason}}
+    end
+  end
+
+  defp resolve_mise do
+    case System.find_executable("mise") do
+      path when is_binary(path) ->
+        validate_mise_path(path)
+
+      nil ->
+        validate_mise_path(Path.expand("~/.local/bin/mise"))
+    end
+  end
+
+  defp run_mise(mise, root, tool) do
+    {command, args} = mise_invocation(mise, tool)
+
+    execute_probe_command(
+      command,
+      args,
+      root,
+      %{},
+      @toolchain_timeout_ms,
+      {:mise, tool}
+    )
+  end
+
+  defp mise_invocation(mise, tool) do
+    case System.find_executable("mise") do
+      ^mise ->
+        {"mise", ["where", tool]}
+
+      _other ->
+        {"sh", [mise, "where", tool]}
     end
   end
 
@@ -381,11 +590,189 @@ defmodule Arbor.Commands.StartupFootprint do
     end
   end
 
-  defp deps_path(root) do
-    case System.get_env("MIX_DEPS_PATH") do
-      nil -> Path.expand("deps", root)
-      path -> Path.expand(path, root)
+  defp resolve_source_deps(root) do
+    selected =
+      case System.get_env("MIX_DEPS_PATH") do
+        nil -> Path.expand("deps", root)
+        path -> Path.expand(path, root)
+      end
+
+    case SafePath.resolve_real(selected) do
+      {:ok, real} ->
+        case File.lstat(real) do
+          {:ok, %{type: :directory}} -> {:ok, real}
+          {:ok, %{type: :symlink}} -> {:error, :source_deps_symlink}
+          {:ok, _} -> {:error, :source_deps_not_directory}
+          {:error, reason} -> {:error, {:source_deps_stat_failed, reason}}
+        end
+
+      {:error, reason} ->
+        {:error, {:source_deps_unresolved, reason}}
     end
+  end
+
+  defp allocate_workspace do
+    allocate_workspace(@max_workspace_create_attempts)
+  end
+
+  defp allocate_workspace(0), do: {:error, :workspace_create_exhausted}
+
+  defp allocate_workspace(remaining) when remaining > 0 do
+    token = Base.url_encode64(:crypto.strong_rand_bytes(16), padding: false)
+    path = Path.join(System.tmp_dir!(), "arbor-startup-footprint-" <> token)
+
+    case create_workspace_at(path) do
+      {:ok, identity} -> {:ok, identity}
+      {:error, :root_exists} -> allocate_workspace(remaining - 1)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp create_workspace_at(path) do
+    with :ok <- reject_existing_leaf(path),
+         {:ok, identity} <- Arbor.Shell.create_private_owned_tree(path),
+         :ok <- verify_owned_private(identity) do
+      {:ok, identity}
+    end
+  end
+
+  defp reject_existing_leaf(path) do
+    case File.lstat(path) do
+      {:error, :enoent} ->
+        :ok
+
+      {:ok, %{type: :symlink}} ->
+        {:error, :root_exists}
+
+      {:ok, _stat} ->
+        {:error, :root_exists}
+
+      {:error, reason} ->
+        {:error, {:workspace_stat_failed, reason}}
+    end
+  end
+
+  defp verify_owned_private(%{
+         path: path,
+         device: device,
+         minor_device: minor_device,
+         inode: inode
+       }) do
+    case File.lstat(path, time: :posix) do
+      {:ok,
+       %File.Stat{
+         type: :directory,
+         major_device: ^device,
+         minor_device: ^minor_device,
+         inode: ^inode,
+         uid: uid,
+         mode: mode
+       }} ->
+        cond do
+          not owner_uid?(uid) -> {:error, :workspace_owner_mismatch}
+          Bitwise.band(mode, 0o777) != 0o700 -> {:error, :workspace_mode_unprivate}
+          true -> :ok
+        end
+
+      {:ok, %{type: :symlink}} ->
+        {:error, :workspace_symlink_rejected}
+
+      {:ok, _stat} ->
+        {:error, :workspace_identity_mismatch}
+
+      {:error, reason} ->
+        {:error, {:workspace_stat_failed, reason}}
+    end
+  end
+
+  defp verify_owned_private(_), do: {:error, :invalid_workspace_identity}
+
+  defp owner_uid?(uid) when is_integer(uid) do
+    case current_uid() do
+      {:ok, ^uid} -> true
+      _other -> false
+    end
+  end
+
+  defp owner_uid?(_), do: false
+
+  defp current_uid do
+    case Process.get({:arbor_startup_footprint, :uid}) do
+      uid when is_integer(uid) ->
+        {:ok, uid}
+
+      _ ->
+        case probe_current_uid() do
+          {:ok, uid} = ok ->
+            Process.put({:arbor_startup_footprint, :uid}, uid)
+            ok
+
+          other ->
+            other
+        end
+    end
+  end
+
+  defp probe_current_uid do
+    parent = System.tmp_dir!()
+    name = ".arbor-sf-uid-" <> Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
+    path = Path.join(parent, name)
+
+    case :file.open(String.to_charlist(path), [:write, :binary, :raw, :exclusive]) do
+      {:ok, io} ->
+        _ = :file.close(io)
+
+        result =
+          case File.lstat(path) do
+            {:ok, %{uid: uid}} when is_integer(uid) -> {:ok, uid}
+            _other -> :error
+          end
+
+        _ = File.rm(path)
+        result
+
+      {:error, :eexist} ->
+        :error
+
+      {:error, _reason} ->
+        :error
+    end
+  end
+
+  defp cleanup_workspace(%{identity: identity}) do
+    with :ok <- verify_owned_private(identity) do
+      Arbor.Shell.remove_owned_tree(identity,
+        max_entries: @workspace_cleanup_max_entries,
+        timeout_ms: @workspace_cleanup_timeout_ms
+      )
+    end
+  end
+
+  defp cleanup_workspace(_), do: :ok
+
+  defp with_direct_runtime(fun) do
+    case Arbor.Shell.start_direct_runtime(startup_path: direct_runtime_path()) do
+      {:ok, :already_started} ->
+        fun.()
+
+      {:ok, supervisor} when is_pid(supervisor) ->
+        try do
+          fun.()
+        after
+          if Process.alive?(supervisor), do: Supervisor.stop(supervisor)
+        end
+
+      {:error, reason} ->
+        {:error, {:direct_runtime, reason}}
+    end
+  end
+
+  defp direct_runtime_path do
+    extras = [Path.expand("~/.local/bin")]
+
+    [System.get_env("PATH", "") | extras]
+    |> Enum.reject(&(&1 in [nil, ""]))
+    |> Enum.join(":")
   end
 
   defp prod_hex_dep_names(mix_exs) do

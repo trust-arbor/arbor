@@ -30,6 +30,8 @@ defmodule Arbor.Commands.StartupFootprint.Core do
   ]
   @max_failures 50
   @max_raw_errors 20
+  @decision_statuses ["candidate", "accepted"]
+  @decision_choices ["measure_only"]
 
   @spec policy_schema() :: String.t()
   def policy_schema, do: @policy_schema
@@ -209,6 +211,7 @@ defmodule Arbor.Commands.StartupFootprint.Core do
       failures =
         []
         |> isolation_failures(samples)
+        |> raw_error_failures(samples)
         |> baseline_zero_owner_callbacks(samples)
         |> runtime_union_failures(samples)
         |> budget_failures(admitted_policy["budgets"], samples)
@@ -249,10 +252,10 @@ defmodule Arbor.Commands.StartupFootprint.Core do
     reversible = decision["reversible"]
 
     cond do
-      status not in ["candidate", "accepted"] ->
+      status not in @decision_statuses ->
         {:error, :malformed_decision}
 
-      not is_binary(choice) or String.trim(choice) == "" ->
+      choice not in @decision_choices ->
         {:error, :malformed_decision}
 
       not is_binary(rationale) or String.trim(rationale) == "" ->
@@ -352,8 +355,6 @@ defmodule Arbor.Commands.StartupFootprint.Core do
 
   @owner_app_names ["arbor_common", "arbor_signals", "arbor_monitor"]
 
-  defp admit_started_owner_apps(nil, _scenario), do: {:ok, []}
-
   defp admit_started_owner_apps(list, scenario) when is_list(list) do
     if Enum.all?(list, &(&1 in @owner_app_names)) and length(list) == length(Enum.uniq(list)) do
       {:ok, Enum.sort(list)}
@@ -363,8 +364,6 @@ defmodule Arbor.Commands.StartupFootprint.Core do
   end
 
   defp admit_started_owner_apps(_, scenario), do: {:error, {:invalid_started_owner_apps, scenario}}
-
-  defp admit_started_runtime_apps(nil, _scenario), do: {:ok, []}
 
   defp admit_started_runtime_apps(list, scenario) when is_list(list) do
     if Enum.all?(list, &is_binary/1) and length(list) == length(Enum.uniq(list)) do
@@ -394,6 +393,33 @@ defmodule Arbor.Commands.StartupFootprint.Core do
       end
     end)
     |> then(fn {deltas, errors} -> {deltas, Enum.reverse(errors)} end)
+  end
+
+  defp raw_error_failures(failures, samples) do
+    Enum.reduce(@scenarios, failures, fn scenario, acc ->
+      case samples[scenario]["raw_errors"] do
+        [] ->
+          acc
+
+        errors when is_list(errors) ->
+          [
+            %{
+              "reason" => "raw_errors_present",
+              "detail" => "#{scenario} has #{length(errors)} raw_errors"
+            }
+            | acc
+          ]
+
+        _other ->
+          [
+            %{
+              "reason" => "raw_errors_present",
+              "detail" => "#{scenario} has invalid raw_errors"
+            }
+            | acc
+          ]
+      end
+    end)
   end
 
   defp isolation_failures(failures, samples) do

@@ -4,8 +4,9 @@ defmodule Mix.Tasks.Arbor.Packaging.StartupFootprint do
   @moduledoc """
   Isolated startup-footprint probe for the reversible K3 merge decision.
 
-  Compiles a tracked probe fixture with the umbrella locked `deps/` cache,
-  then measures baseline, proposed-gated, and proposed-eager scenarios in
+  Compiles a tracked probe fixture against a disposable, symlink-dereferenced
+  copy of the selected `MIX_DEPS_PATH` (or umbrella `deps/`) cache, then
+  measures baseline, proposed-gated, and proposed-eager scenarios in
   separate fresh OS/BEAM processes.
 
       mix arbor.packaging.startup_footprint
@@ -14,16 +15,19 @@ defmodule Mix.Tasks.Arbor.Packaging.StartupFootprint do
       mix arbor.packaging.startup_footprint --check --json
 
   This task is not installed in the root `quality` alias. It never runs
-  `deps.get`, honors the standard `MIX_DEPS_PATH` for isolated worktrees,
-  and never writes the umbrella `mix.lock` or dependency cache. The matching
-  ExUnit production-path test is skipped unless `ARBOR_APP_ENV_PROBES=1`
-  so a root-wide `mix test` does not nest a probe compile.
+  `deps.get`, sets `HEX_OFFLINE=1`, and never writes the umbrella
+  `mix.lock` or the selected dependency cache. External commands run
+  through `Arbor.Shell.start_direct_runtime/1` and the process-group
+  facade. The matching ExUnit production-path test is skipped unless
+  `ARBOR_STARTUP_FOOTPRINT_PROBE=1` so a root-wide `mix test` does not
+  nest a probe compile.
   """
 
   use Mix.Task
 
   @requirements ["compile"]
 
+  alias Arbor.Commands.SourceCoupling
   alias Arbor.Commands.StartupFootprint
   alias Arbor.Commands.StartupFootprint.Encode
 
@@ -65,10 +69,12 @@ defmodule Mix.Tasks.Arbor.Packaging.StartupFootprint do
 
       case Keyword.keys(runtime_opts) do
         [] ->
-          case StartupFootprint.run(opts) do
-            {:ok, report} -> {:ok, report, cli}
-            {:error, _} = err -> err
-          end
+          SourceCoupling.with_direct_runtime(fn ->
+            case StartupFootprint.run(opts) do
+              {:ok, report} -> {:ok, report, cli}
+              {:error, _} = err -> err
+            end
+          end)
 
         unexpected ->
           {:error, {:production_task_forbids_runtime_hooks, unexpected}}

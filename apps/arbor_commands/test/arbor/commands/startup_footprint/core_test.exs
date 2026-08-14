@@ -168,6 +168,15 @@ defmodule Arbor.Commands.StartupFootprint.CoreTest do
     assert {:ok, failed} = Core.compare(policy(), evidence(over))
     assert failed["status"] == "failed"
     assert Enum.any?(failed["failures"], &(&1["reason"] == "above_budget"))
+
+    dirty =
+      put_in(ok, ["baseline", "raw_errors"], [
+        %{"reason" => "negative_delta", "metric" => "process_count", "raw" => -4}
+      ])
+
+    assert {:ok, raw_failed} = Core.compare(policy(), evidence(dirty))
+    assert raw_failed["status"] == "failed"
+    assert Enum.any?(raw_failed["failures"], &(&1["reason"] == "raw_errors_present"))
   end
 
   test "baseline owner callbacks and started owner apps must remain zero" do
@@ -260,6 +269,32 @@ defmodule Arbor.Commands.StartupFootprint.CoreTest do
 
     bad_decision = policy(%{"decision" => %{"status" => "candidate", "choice" => "x"}})
     assert {:error, :malformed_decision} = Core.admit_policy(bad_decision)
+
+    unknown_choice =
+      policy(%{
+        "decision" => %{
+          "status" => "candidate",
+          "choice" => "merge",
+          "rationale" => "Not a closed choice until measurements exist.",
+          "reversible" => true
+        }
+      })
+
+    assert {:error, :malformed_decision} = Core.admit_policy(unknown_choice)
+
+    omitted_owner =
+      normalized_sample("baseline", baseline_opts())
+      |> Map.delete("started_owner_apps")
+
+    assert {:error, {:invalid_started_owner_apps, "baseline"}} =
+             Core.admit_normalized_sample(omitted_owner)
+
+    omitted_runtime =
+      normalized_sample("proposed_gated", os_pid: 77, children: 0, filter: 0, telemetry: 0)
+      |> Map.delete("started_runtime_apps")
+
+    assert {:error, {:invalid_started_runtime_apps, "proposed_gated"}} =
+             Core.admit_normalized_sample(omitted_runtime)
 
     irreversible =
       policy(%{

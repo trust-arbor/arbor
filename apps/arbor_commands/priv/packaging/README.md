@@ -118,19 +118,28 @@ for a default suite. The exact commands are:
 ./bin/mix arbor.packaging.startup_footprint --check --json
 ```
 
-Each run compiles the tracked template once against the canonical lock and
-`deps/` cache, then executes baseline, proposed-gated, and proposed-eager
-scenarios in separate OS/BEAM processes. Baseline starts only passive
-`arbor_contracts` so eager-start owner callbacks remain a visible
-regression. Proposed scenarios start the merged app's non-owner runtime
-dependency union, including `:os_mon`, inside the timed action. Temporary
-build output is deleted.
-The production-path ExUnit smoke is skipped unless `ARBOR_APP_ENV_PROBES=1`.
+Each run copies the selected dependency cache (`MIX_DEPS_PATH` or umbrella
+`deps/`) with symlinks dereferenced into an exclusive owner-private temp
+workspace, sets `HEX_OFFLINE=1`, and points only that copy at
+`MIX_DEPS_PATH`. The canonical cache and umbrella lock stay unchanged.
+External probe commands run through Arbor.Shell's process-group facade.
+Baseline starts only passive `arbor_contracts` so eager-start owner
+callbacks remain a visible regression. Proposed scenarios start the merged
+app's non-owner runtime extras, including `:os_mon`, and load
+scenario-specific applications inside the timed action. The proposed
+`arbor_kernel` owner is excluded from external runtime dependencies.
+Temporary workspace output is deleted only after ownership and private
+mode are re-verified.
+The production-path ExUnit smoke is skipped unless
+`ARBOR_STARTUP_FOOTPRINT_PROBE=1`.
 Comparison uses numeric regression budgets, not byte-identical runtime
-samples. Elapsed time is `boot_time_us` (converted from monotonic native
+samples. Non-empty raw measurement errors and omitted app lists fail
+closed. Elapsed time is `boot_time_us` (converted from monotonic native
 units). Boot and memory ceilings include explicit headroom so a single
 sample per fresh process is non-flaky; callback and supervisor invariants
-stay tight. Do not commit generated probe output.
+stay tight. Candidate policy remains `status=candidate` and
+`choice=measure_only` until manager-owned measurements exist. Do not
+commit generated probe output.
 
 ## PK-K0 kernel-migration gate
 
