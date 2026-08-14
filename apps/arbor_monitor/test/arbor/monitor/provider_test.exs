@@ -3,22 +3,13 @@ defmodule Arbor.Monitor.ProviderTest do
 
   @moduletag :fast
 
+  alias Arbor.Monitor.Config.Testing
   alias Arbor.Monitor.Provider
 
   setup do
-    originals = %{
-      channel_bridge: Application.get_env(:arbor_monitor, :channel_bridge_module, :unset),
-      agent_directory: Application.get_env(:arbor_monitor, :agent_directory_module, :unset)
-    }
-
-    Application.delete_env(:arbor_monitor, :channel_bridge_module)
-    Application.delete_env(:arbor_monitor, :agent_directory_module)
-
-    on_exit(fn ->
-      restore(:channel_bridge_module, originals.channel_bridge)
-      restore(:agent_directory_module, originals.agent_directory)
-    end)
-
+    Testing.isolate_namespace()
+    Testing.delete(:channel_bridge_module)
+    Testing.delete(:agent_directory_module)
     :ok
   end
 
@@ -29,110 +20,107 @@ defmodule Arbor.Monitor.ProviderTest do
   end
 
   test "invalid providers skip before invocation" do
-    Application.put_env(:arbor_monitor, :channel_bridge_module, "not-a-module")
+    Testing.put(:channel_bridge_module, "not-a-module")
     assert Provider.deliver("chan", "s", "n", :system, "m") == {:skip, :invalid_provider}
 
-    Application.put_env(:arbor_monitor, :channel_bridge_module, true)
+    Testing.put(:channel_bridge_module, true)
     assert Provider.create_ops_room("ops-room", []) == {:skip, :invalid_provider}
 
-    Application.put_env(:arbor_monitor, :agent_directory_module, false)
+    Testing.put(:agent_directory_module, false)
     assert Provider.list_agents() == {:skip, :invalid_provider}
   end
 
   test "missing callbacks skip before invocation" do
-    Application.put_env(:arbor_monitor, :channel_bridge_module, __MODULE__.Empty)
+    Testing.put(:channel_bridge_module, __MODULE__.Empty)
     assert Provider.deliver("chan", "s", "n", :system, "m") == {:skip, :missing_callback}
     assert Provider.create_ops_room("ops-room", []) == {:skip, :missing_callback}
 
-    Application.put_env(:arbor_monitor, :agent_directory_module, __MODULE__.Empty)
+    Testing.put(:agent_directory_module, __MODULE__.Empty)
     assert Provider.list_agents() == {:skip, :missing_callback}
   end
 
   test "deliver admits :ok and {:ok, :delivered}" do
-    Application.put_env(:arbor_monitor, :channel_bridge_module, __MODULE__.DeliverOk)
+    Testing.put(:channel_bridge_module, __MODULE__.DeliverOk)
     assert Provider.deliver("chan", "s", "n", :system, "m") == :ok
 
-    Application.put_env(:arbor_monitor, :channel_bridge_module, __MODULE__.DeliverDelivered)
+    Testing.put(:channel_bridge_module, __MODULE__.DeliverDelivered)
     assert Provider.deliver("chan", "s", "n", :system, "m") == :ok
   end
 
   test "deliver admits closed errors and rejects malformed results" do
-    Application.put_env(:arbor_monitor, :channel_bridge_module, __MODULE__.DeliverNotMember)
+    Testing.put(:channel_bridge_module, __MODULE__.DeliverNotMember)
     assert Provider.deliver("chan", "s", "n", :system, "m") == {:error, :not_member}
 
-    Application.put_env(:arbor_monitor, :channel_bridge_module, __MODULE__.DeliverMalformedOk)
+    Testing.put(:channel_bridge_module, __MODULE__.DeliverMalformedOk)
     assert Provider.deliver("chan", "s", "n", :system, "m") == {:skip, :malformed_result}
 
-    Application.put_env(:arbor_monitor, :channel_bridge_module, __MODULE__.DeliverBoomError)
+    Testing.put(:channel_bridge_module, __MODULE__.DeliverBoomError)
     assert Provider.deliver("chan", "s", "n", :system, "m") == {:skip, :malformed_result}
   end
 
   test "deliver normalizes raise, throw, and exit" do
-    Application.put_env(:arbor_monitor, :channel_bridge_module, __MODULE__.DeliverRaise)
+    Testing.put(:channel_bridge_module, __MODULE__.DeliverRaise)
 
     assert Provider.deliver("chan", "s", "n", :system, "m") ==
              {:skip, :provider_raised, RuntimeError}
 
-    Application.put_env(:arbor_monitor, :channel_bridge_module, __MODULE__.DeliverThrow)
+    Testing.put(:channel_bridge_module, __MODULE__.DeliverThrow)
     assert Provider.deliver("chan", "s", "n", :system, "m") == {:skip, :provider_threw}
 
-    Application.put_env(:arbor_monitor, :channel_bridge_module, __MODULE__.DeliverExit)
+    Testing.put(:channel_bridge_module, __MODULE__.DeliverExit)
     assert Provider.deliver("chan", "s", "n", :system, "m") == {:skip, :provider_exited}
   end
 
   test "create admits a nonempty channel id and closed errors" do
-    Application.put_env(:arbor_monitor, :channel_bridge_module, __MODULE__.CreateOk)
+    Testing.put(:channel_bridge_module, __MODULE__.CreateOk)
     assert Provider.create_ops_room("ops-room", []) == {:ok, "chan_ok"}
 
-    Application.put_env(:arbor_monitor, :channel_bridge_module, __MODULE__.CreateFailed)
+    Testing.put(:channel_bridge_module, __MODULE__.CreateFailed)
     assert Provider.create_ops_room("ops-room", []) == {:error, :create_failed}
 
-    Application.put_env(:arbor_monitor, :channel_bridge_module, __MODULE__.CreateMalformed)
+    Testing.put(:channel_bridge_module, __MODULE__.CreateMalformed)
     assert Provider.create_ops_room("ops-room", []) == {:skip, :malformed_result}
   end
 
   test "create normalizes raise, throw, and exit" do
-    Application.put_env(:arbor_monitor, :channel_bridge_module, __MODULE__.CreateRaise)
+    Testing.put(:channel_bridge_module, __MODULE__.CreateRaise)
 
     assert Provider.create_ops_room("ops-room", []) ==
              {:skip, :provider_raised, RuntimeError}
 
-    Application.put_env(:arbor_monitor, :channel_bridge_module, __MODULE__.CreateThrow)
+    Testing.put(:channel_bridge_module, __MODULE__.CreateThrow)
     assert Provider.create_ops_room("ops-room", []) == {:skip, :provider_threw}
 
-    Application.put_env(:arbor_monitor, :channel_bridge_module, __MODULE__.CreateExit)
+    Testing.put(:channel_bridge_module, __MODULE__.CreateExit)
     assert Provider.create_ops_room("ops-room", []) == {:skip, :provider_exited}
   end
 
   test "list admits projected maps and rejects structs or malformed rows" do
-    Application.put_env(:arbor_monitor, :agent_directory_module, __MODULE__.ListOk)
+    Testing.put(:agent_directory_module, __MODULE__.ListOk)
 
     assert Provider.list_agents() ==
              {:ok, [%{agent_id: "agent_1", display_name: "diagnostician"}]}
 
-    Application.put_env(:arbor_monitor, :agent_directory_module, __MODULE__.ListUnavailable)
+    Testing.put(:agent_directory_module, __MODULE__.ListUnavailable)
     assert Provider.list_agents() == {:error, :directory_unavailable}
 
-    Application.put_env(:arbor_monitor, :agent_directory_module, __MODULE__.ListStruct)
+    Testing.put(:agent_directory_module, __MODULE__.ListStruct)
     assert Provider.list_agents() == {:skip, :malformed_result}
 
-    Application.put_env(:arbor_monitor, :agent_directory_module, __MODULE__.ListBadId)
+    Testing.put(:agent_directory_module, __MODULE__.ListBadId)
     assert Provider.list_agents() == {:skip, :malformed_result}
   end
 
   test "list normalizes raise, throw, and exit" do
-    Application.put_env(:arbor_monitor, :agent_directory_module, __MODULE__.ListRaise)
+    Testing.put(:agent_directory_module, __MODULE__.ListRaise)
     assert Provider.list_agents() == {:skip, :provider_raised, RuntimeError}
 
-    Application.put_env(:arbor_monitor, :agent_directory_module, __MODULE__.ListThrow)
+    Testing.put(:agent_directory_module, __MODULE__.ListThrow)
     assert Provider.list_agents() == {:skip, :provider_threw}
 
-    Application.put_env(:arbor_monitor, :agent_directory_module, __MODULE__.ListExit)
+    Testing.put(:agent_directory_module, __MODULE__.ListExit)
     assert Provider.list_agents() == {:skip, :provider_exited}
   end
-
-  defp restore(key, :unset), do: Application.delete_env(:arbor_monitor, key)
-  defp restore(key, value), do: Application.put_env(:arbor_monitor, key, value)
 
   defmodule Empty do
   end

@@ -2,30 +2,17 @@ defmodule Arbor.Monitor.AnomalyForwarderTest do
   use ExUnit.Case, async: false
 
   alias Arbor.Monitor.AnomalyForwarder
+  alias Arbor.Monitor.Config.Testing
 
   setup do
-    originals = %{
-      start_ops_room: Application.get_env(:arbor_monitor, :start_ops_room, :unset),
-      channel_bridge: Application.get_env(:arbor_monitor, :channel_bridge_module, :unset),
-      agent_directory: Application.get_env(:arbor_monitor, :agent_directory_module, :unset)
-    }
-
-    Application.put_env(:arbor_monitor, :start_ops_room, false)
-    Application.delete_env(:arbor_monitor, :channel_bridge_module)
-    Application.delete_env(:arbor_monitor, :agent_directory_module)
-
-    on_exit(fn ->
-      restore(:start_ops_room, originals.start_ops_room)
-      restore(:channel_bridge_module, originals.channel_bridge)
-      restore(:agent_directory_module, originals.agent_directory)
-    end)
+    Testing.isolate_namespace()
+    Testing.put(:start_ops_room, false)
+    Testing.delete(:channel_bridge_module)
+    Testing.delete(:agent_directory_module)
 
     {:ok, pid} = start_supervised(AnomalyForwarder)
     %{forwarder: pid}
   end
-
-  defp restore(key, :unset), do: Application.delete_env(:arbor_monitor, key)
-  defp restore(key, value), do: Application.put_env(:arbor_monitor, key, value)
 
   defp sync_forwarder do
     assert :ok = AnomalyForwarder.set_channel("ops-room")

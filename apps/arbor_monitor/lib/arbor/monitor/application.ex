@@ -5,7 +5,7 @@ defmodule Arbor.Monitor.Application do
   @impl true
   def start(_type, _args) do
     children =
-      if Application.get_env(:arbor_monitor, :start_children, true) do
+      if Arbor.Monitor.Config.start_children?() do
         [
           # Healing infrastructure starts FIRST (above monitored components)
           # This ensures the healing system survives restarts of what it heals

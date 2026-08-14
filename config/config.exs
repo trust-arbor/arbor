@@ -377,10 +377,15 @@ config :arbor_persistence,
   # Vector dimension: 768 for nomic-embed-text, 1536 for OpenAI
   embedding_dimension: 768
 
-# Monitor signal bridge
-config :arbor_monitor,
-  signal_emission_enabled: true,
-  signal_module: Arbor.Signals
+# Monitor owner-scoped config lives under :arbor_kernel, :monitor.
+# Elixir's Config reader deep-merges keyword values from imported
+# environment files. Runtime injects the optional provider modules.
+# See Arbor.Monitor.Config.
+config :arbor_kernel,
+  monitor: [
+    signal_emission_enabled: true,
+    signal_module: Arbor.Signals
+  ]
 
 # Dashboard chat model configuration
 config :arbor_dashboard,

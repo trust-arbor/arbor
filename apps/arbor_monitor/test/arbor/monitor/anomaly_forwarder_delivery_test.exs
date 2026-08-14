@@ -4,34 +4,22 @@ defmodule Arbor.Monitor.AnomalyForwarderDeliveryTest do
   @moduletag :fast
 
   alias Arbor.Monitor.AnomalyForwarder
+  alias Arbor.Monitor.Config.Testing
 
   setup do
-    originals = %{
-      start_ops_room: Application.get_env(:arbor_monitor, :start_ops_room, :unset),
-      channel_bridge: Application.get_env(:arbor_monitor, :channel_bridge_module, :unset),
-      agent_directory: Application.get_env(:arbor_monitor, :agent_directory_module, :unset),
-      test_pid: Application.get_env(:arbor_monitor, :k1d_test_pid, :unset)
-    }
-
-    Application.put_env(:arbor_monitor, :start_ops_room, false)
-    Application.delete_env(:arbor_monitor, :channel_bridge_module)
-    Application.delete_env(:arbor_monitor, :agent_directory_module)
-    Application.put_env(:arbor_monitor, :k1d_test_pid, self())
+    Testing.isolate_namespace()
+    Testing.put(:start_ops_room, false)
+    Testing.delete(:channel_bridge_module)
+    Testing.delete(:agent_directory_module)
+    Testing.put(:k1d_test_pid, self())
 
     {:ok, _pid} = start_supervised(AnomalyForwarder)
-
-    on_exit(fn ->
-      restore(:start_ops_room, originals.start_ops_room)
-      restore(:channel_bridge_module, originals.channel_bridge)
-      restore(:agent_directory_module, originals.agent_directory)
-      restore(:k1d_test_pid, originals.test_pid)
-    end)
 
     :ok
   end
 
   test "injected delivery posts Monitor system sender and anomaly text" do
-    Application.put_env(:arbor_monitor, :channel_bridge_module, __MODULE__.RecordingBridge)
+    Testing.put(:channel_bridge_module, __MODULE__.RecordingBridge)
     assert :ok = AnomalyForwarder.set_channel("chan_injected")
 
     send(AnomalyForwarder, {:signal, anomaly_signal()})
@@ -42,7 +30,7 @@ defmodule Arbor.Monitor.AnomalyForwarderDeliveryTest do
   end
 
   test "nil provider skips delivery without crashing" do
-    Application.delete_env(:arbor_monitor, :channel_bridge_module)
+    Testing.delete(:channel_bridge_module)
     assert :ok = AnomalyForwarder.set_channel("chan_nil")
 
     send(AnomalyForwarder, {:signal, anomaly_signal()})
@@ -58,7 +46,7 @@ defmodule Arbor.Monitor.AnomalyForwarderDeliveryTest do
           __MODULE__.BlockedAtomBridge,
           __MODULE__.BoomErrorBridge
         ] do
-      Application.put_env(:arbor_monitor, :channel_bridge_module, provider)
+      Testing.put(:channel_bridge_module, provider)
       assert :ok = AnomalyForwarder.set_channel("chan_malformed")
 
       send(AnomalyForwarder, {:signal, anomaly_signal()})
@@ -68,25 +56,25 @@ defmodule Arbor.Monitor.AnomalyForwarderDeliveryTest do
   end
 
   test "raising, throwing, or exiting provider does not crash the forwarder" do
-    Application.put_env(:arbor_monitor, :channel_bridge_module, __MODULE__.RaisingBridge)
+    Testing.put(:channel_bridge_module, __MODULE__.RaisingBridge)
     send_and_sync()
     assert Process.alive?(Process.whereis(AnomalyForwarder))
 
-    Application.put_env(:arbor_monitor, :channel_bridge_module, __MODULE__.ThrowingBridge)
+    Testing.put(:channel_bridge_module, __MODULE__.ThrowingBridge)
     send_and_sync()
     assert Process.alive?(Process.whereis(AnomalyForwarder))
 
-    Application.put_env(:arbor_monitor, :channel_bridge_module, __MODULE__.ExitingBridge)
+    Testing.put(:channel_bridge_module, __MODULE__.ExitingBridge)
     send_and_sync()
     assert Process.alive?(Process.whereis(AnomalyForwarder))
   end
 
   test "missing callback and non-atom provider skip delivery without crashing" do
-    Application.put_env(:arbor_monitor, :channel_bridge_module, __MODULE__.EmptyBridge)
+    Testing.put(:channel_bridge_module, __MODULE__.EmptyBridge)
     send_and_sync()
     assert Process.alive?(Process.whereis(AnomalyForwarder))
 
-    Application.put_env(:arbor_monitor, :channel_bridge_module, "not-a-module")
+    Testing.put(:channel_bridge_module, "not-a-module")
     send_and_sync()
     assert Process.alive?(Process.whereis(AnomalyForwarder))
   end
@@ -104,13 +92,10 @@ defmodule Arbor.Monitor.AnomalyForwarderDeliveryTest do
     }
   end
 
-  defp restore(key, :unset), do: Application.delete_env(:arbor_monitor, key)
-  defp restore(key, value), do: Application.put_env(:arbor_monitor, key, value)
-
   defmodule RecordingBridge do
     def deliver_channel_message(channel_id, sender_id, sender_name, sender_type, content) do
       send(
-        Application.get_env(:arbor_monitor, :k1d_test_pid),
+        Arbor.Monitor.Config.Testing.get(:k1d_test_pid),
         {:deliver, channel_id, sender_id, sender_name, sender_type, content}
       )
 

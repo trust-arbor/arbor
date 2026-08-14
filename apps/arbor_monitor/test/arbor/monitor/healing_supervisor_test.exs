@@ -9,30 +9,18 @@ defmodule Arbor.Monitor.HealingSupervisorTest do
     RejectionTracker
   }
 
-  setup do
-    originals = %{
-      start_ops_room: Application.get_env(:arbor_monitor, :start_ops_room, :unset),
-      channel_bridge: Application.get_env(:arbor_monitor, :channel_bridge_module, :unset),
-      agent_directory: Application.get_env(:arbor_monitor, :agent_directory_module, :unset)
-    }
+  alias Arbor.Monitor.Config.Testing
 
-    Application.put_env(:arbor_monitor, :start_ops_room, false)
-    Application.delete_env(:arbor_monitor, :channel_bridge_module)
-    Application.delete_env(:arbor_monitor, :agent_directory_module)
+  setup do
+    Testing.isolate_namespace()
+    Testing.put(:start_ops_room, false)
+    Testing.delete(:channel_bridge_module)
+    Testing.delete(:agent_directory_module)
 
     start_supervised!(HealingSupervisor)
 
-    on_exit(fn ->
-      restore(:start_ops_room, originals.start_ops_room)
-      restore(:channel_bridge_module, originals.channel_bridge)
-      restore(:agent_directory_module, originals.agent_directory)
-    end)
-
     :ok
   end
-
-  defp restore(key, :unset), do: Application.delete_env(:arbor_monitor, key)
-  defp restore(key, value), do: Application.put_env(:arbor_monitor, key, value)
 
   describe "child processes" do
     @tag :fast

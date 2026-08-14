@@ -200,7 +200,7 @@ defmodule Arbor.Monitor.Poller do
   end
 
   defp do_emit_signal(anomaly) do
-    signal_mod = Application.get_env(:arbor_monitor, :signal_module)
+    signal_mod = Config.signal_module()
 
     if signal_mod && function_exported?(signal_mod, :emit, 4) do
       signal_mod.emit(:monitor, :anomaly_detected, anomaly)

@@ -27,18 +27,21 @@ defmodule Arbor.Monitor.HealingSupervisor do
 
   Each child can be configured via application env:
 
-      config :arbor_monitor, :healing,
-        anomaly_queue: [dedup_window_ms: 300_000],
-        cascade_detector: [cascade_threshold: 5],
-        rejection_tracker: [max_rejections: 3],
-        verification: [soak_cycles: 5]
-
-      config :arbor_monitor, :start_ops_room, true
+      config :arbor_kernel, monitor: [
+        healing: [
+          anomaly_queue: [dedup_window_ms: 300_000],
+          cascade_detector: [cascade_threshold: 5],
+          rejection_tracker: [max_rejections: 3],
+          verification: [soak_cycles: 5]
+        ],
+        start_ops_room: true
+      ]
   """
 
   use Supervisor
 
   alias Arbor.Monitor.AnomalyForwarder
+  alias Arbor.Monitor.Config
   alias Arbor.Monitor.Provider
 
   require Logger
@@ -53,7 +56,7 @@ defmodule Arbor.Monitor.HealingSupervisor do
   @impl Supervisor
   def init(opts) do
     healing_config =
-      Keyword.get(opts, :healing, Application.get_env(:arbor_monitor, :healing, []))
+      Keyword.get(opts, :healing, Config.healing())
 
     children =
       [
@@ -143,7 +146,7 @@ defmodule Arbor.Monitor.HealingSupervisor do
   # Deferred ops room setup — subscribes to Bootstrap signal, with fallback poll.
   # The diagnostician agent is started outside this supervisor.
   defp maybe_schedule_ops_room do
-    enabled = Application.get_env(:arbor_monitor, :start_ops_room, true)
+    enabled = Config.start_ops_room?()
 
     if enabled do
       Task.start(fn ->

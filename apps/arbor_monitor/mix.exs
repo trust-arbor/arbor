@@ -40,6 +40,7 @@ defmodule Arbor.Monitor.MixProject do
 
   defp deps do
     [
+      {:arbor_kernel, in_umbrella: true},
       {:recon, "~> 2.5"},
       # Dev/test
       {:ex_doc, "~> 0.31", only: :dev, runtime: false},

@@ -122,10 +122,12 @@ config :arbor_memory,
 config :arbor_historian, start_children: false
 config :arbor_dashboard, start_children: false
 
-config :arbor_monitor,
-  start_children: false,
-  signal_emission_enabled: false,
-  suppression_window_ms: :timer.seconds(5)
+config :arbor_kernel,
+  monitor: [
+    start_children: false,
+    signal_emission_enabled: false,
+    suppression_window_ms: :timer.seconds(5)
+  ]
 
 # Don't start the dashboard HTTP server in tests
 config :arbor_dashboard, Arbor.Dashboard.Endpoint,

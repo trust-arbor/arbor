@@ -27,7 +27,7 @@ defmodule Arbor.Monitor.AnomalyQueue do
 
   require Logger
 
-  alias Arbor.Monitor.{CascadeDetector, Fingerprint}
+  alias Arbor.Monitor.{CascadeDetector, Config, Fingerprint}
 
   # ETS table names
   @queue_table :arbor_healing_queue
@@ -194,7 +194,8 @@ defmodule Arbor.Monitor.AnomalyQueue do
       lease_timeout_ms: get_config(opts, :lease_timeout_ms, @default_lease_timeout_ms),
       check_interval_ms: get_config(opts, :check_interval_ms, @default_check_interval_ms),
       max_attempts: get_config(opts, :max_attempts, @default_max_attempts),
-      suppression_window_ms: get_config(opts, :suppression_window_ms, @default_suppression_window_ms)
+      suppression_window_ms:
+        get_config(opts, :suppression_window_ms, @default_suppression_window_ms)
     }
 
     # Schedule periodic lease checking
@@ -541,8 +542,12 @@ defmodule Arbor.Monitor.AnomalyQueue do
 
   # Get config value: opts > Application env > default
   defp get_config(opts, key, default) do
-    Keyword.get(opts, key) ||
-      Application.get_env(:arbor_monitor, key) ||
-      default
+    Keyword.get(opts, key) || config_value(key) || default
   end
+
+  defp config_value(:dedup_window_ms), do: Config.dedup_window_ms()
+  defp config_value(:lease_timeout_ms), do: Config.lease_timeout_ms()
+  defp config_value(:check_interval_ms), do: Config.check_interval_ms()
+  defp config_value(:max_attempts), do: Config.max_attempts()
+  defp config_value(:suppression_window_ms), do: Config.suppression_window_ms()
 end

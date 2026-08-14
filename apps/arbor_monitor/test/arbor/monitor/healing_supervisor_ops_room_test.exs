@@ -4,46 +4,26 @@ defmodule Arbor.Monitor.HealingSupervisorOpsRoomTest do
   @moduletag :fast
 
   alias Arbor.Monitor.AnomalyForwarder
+  alias Arbor.Monitor.Config.Testing
   alias Arbor.Monitor.HealingSupervisor
 
   setup do
-    originals = %{
-      start_ops_room: Application.get_env(:arbor_monitor, :start_ops_room, :unset),
-      channel_bridge: Application.get_env(:arbor_monitor, :channel_bridge_module, :unset),
-      agent_directory: Application.get_env(:arbor_monitor, :agent_directory_module, :unset),
-      test_pid: Application.get_env(:arbor_monitor, :k1d_test_pid, :unset),
-      ops_channel: Application.get_env(:arbor_monitor, :k1d_ops_channel_id, :unset)
-    }
-
-    Application.put_env(:arbor_monitor, :start_ops_room, false)
-    Application.delete_env(:arbor_monitor, :channel_bridge_module)
-    Application.delete_env(:arbor_monitor, :agent_directory_module)
-    Application.put_env(:arbor_monitor, :k1d_test_pid, self())
+    Testing.isolate_namespace()
+    Testing.put(:start_ops_room, false)
+    Testing.delete(:channel_bridge_module)
+    Testing.delete(:agent_directory_module)
+    Testing.put(:k1d_test_pid, self())
 
     {:ok, _pid} = start_supervised(AnomalyForwarder)
-
-    on_exit(fn ->
-      restore(:start_ops_room, originals.start_ops_room)
-      restore(:channel_bridge_module, originals.channel_bridge)
-      restore(:agent_directory_module, originals.agent_directory)
-      restore(:k1d_test_pid, originals.test_pid)
-      restore(:k1d_ops_channel_id, originals.ops_channel)
-    end)
 
     :ok
   end
 
   test "injected lookup plus create binds later delivery to returned channel id" do
     channel_id = "chan_ops_#{System.unique_integer([:positive])}"
-    Application.put_env(:arbor_monitor, :k1d_ops_channel_id, channel_id)
-
-    Application.put_env(
-      :arbor_monitor,
-      :agent_directory_module,
-      __MODULE__.DirectoryWithDiagnostician
-    )
-
-    Application.put_env(:arbor_monitor, :channel_bridge_module, __MODULE__.RecordingOpsBridge)
+    Testing.put(:k1d_ops_channel_id, channel_id)
+    Testing.put(:agent_directory_module, __MODULE__.DirectoryWithDiagnostician)
+    Testing.put(:channel_bridge_module, __MODULE__.RecordingOpsBridge)
 
     HealingSupervisor.setup_ops_room_fallback()
 
@@ -61,8 +41,8 @@ defmodule Arbor.Monitor.HealingSupervisorOpsRoomTest do
   end
 
   test "nil providers skip lookup and create" do
-    Application.delete_env(:arbor_monitor, :agent_directory_module)
-    Application.delete_env(:arbor_monitor, :channel_bridge_module)
+    Testing.delete(:agent_directory_module)
+    Testing.delete(:channel_bridge_module)
 
     HealingSupervisor.setup_ops_room_fallback()
 
@@ -71,13 +51,8 @@ defmodule Arbor.Monitor.HealingSupervisorOpsRoomTest do
   end
 
   test "valid list without diagnostician does not create a room" do
-    Application.put_env(
-      :arbor_monitor,
-      :agent_directory_module,
-      __MODULE__.DirectoryWithoutDiagnostician
-    )
-
-    Application.put_env(:arbor_monitor, :channel_bridge_module, __MODULE__.RecordingOpsBridge)
+    Testing.put(:agent_directory_module, __MODULE__.DirectoryWithoutDiagnostician)
+    Testing.put(:channel_bridge_module, __MODULE__.RecordingOpsBridge)
 
     HealingSupervisor.setup_ops_room_fallback()
 
@@ -85,46 +60,37 @@ defmodule Arbor.Monitor.HealingSupervisorOpsRoomTest do
   end
 
   test "malformed directory results do not create a room" do
-    Application.put_env(:arbor_monitor, :channel_bridge_module, __MODULE__.RecordingOpsBridge)
-
-    Application.put_env(
-      :arbor_monitor,
-      :agent_directory_module,
-      __MODULE__.MalformedAtomDirectory
-    )
+    Testing.put(:channel_bridge_module, __MODULE__.RecordingOpsBridge)
+    Testing.put(:agent_directory_module, __MODULE__.MalformedAtomDirectory)
 
     HealingSupervisor.setup_ops_room_fallback()
     refute_received {:create, _, _}
 
-    Application.put_env(
-      :arbor_monitor,
-      :agent_directory_module,
-      __MODULE__.MalformedIdDirectory
-    )
+    Testing.put(:agent_directory_module, __MODULE__.MalformedIdDirectory)
 
     HealingSupervisor.setup_ops_room_fallback()
     refute_received {:create, _, _}
   end
 
   test "raising, throwing, or exiting directory does not create a room" do
-    Application.put_env(:arbor_monitor, :channel_bridge_module, __MODULE__.RecordingOpsBridge)
+    Testing.put(:channel_bridge_module, __MODULE__.RecordingOpsBridge)
 
-    Application.put_env(:arbor_monitor, :agent_directory_module, __MODULE__.RaisingDirectory)
+    Testing.put(:agent_directory_module, __MODULE__.RaisingDirectory)
     HealingSupervisor.setup_ops_room_fallback()
     refute_received {:create, _, _}
 
-    Application.put_env(:arbor_monitor, :agent_directory_module, __MODULE__.ThrowingDirectory)
+    Testing.put(:agent_directory_module, __MODULE__.ThrowingDirectory)
     HealingSupervisor.setup_ops_room_fallback()
     refute_received {:create, _, _}
 
-    Application.put_env(:arbor_monitor, :agent_directory_module, __MODULE__.ExitingDirectory)
+    Testing.put(:agent_directory_module, __MODULE__.ExitingDirectory)
     HealingSupervisor.setup_ops_room_fallback()
     refute_received {:create, _, _}
   end
 
   test "missing list_monitor_agents callback does not create a room" do
-    Application.put_env(:arbor_monitor, :agent_directory_module, __MODULE__.EmptyDirectory)
-    Application.put_env(:arbor_monitor, :channel_bridge_module, __MODULE__.RecordingOpsBridge)
+    Testing.put(:agent_directory_module, __MODULE__.EmptyDirectory)
+    Testing.put(:channel_bridge_module, __MODULE__.RecordingOpsBridge)
 
     HealingSupervisor.setup_ops_room_fallback()
 
@@ -132,28 +98,15 @@ defmodule Arbor.Monitor.HealingSupervisorOpsRoomTest do
   end
 
   test "ok directory plus raising or malformed create leaves channel unset" do
-    Application.put_env(
-      :arbor_monitor,
-      :agent_directory_module,
-      __MODULE__.DirectoryWithDiagnostician
-    )
-
-    Application.put_env(
-      :arbor_monitor,
-      :channel_bridge_module,
-      __MODULE__.RaisingCreateBridge
-    )
+    Testing.put(:agent_directory_module, __MODULE__.DirectoryWithDiagnostician)
+    Testing.put(:channel_bridge_module, __MODULE__.RaisingCreateBridge)
 
     HealingSupervisor.setup_ops_room_fallback()
     send(AnomalyForwarder, {:signal, anomaly_signal()})
     _ = :sys.get_state(AnomalyForwarder)
     refute_received {:deliver, _, _, _, _, _}
 
-    Application.put_env(
-      :arbor_monitor,
-      :channel_bridge_module,
-      __MODULE__.MalformedCreateBridge
-    )
+    Testing.put(:channel_bridge_module, __MODULE__.MalformedCreateBridge)
 
     HealingSupervisor.setup_ops_room_fallback()
     send(AnomalyForwarder, {:signal, anomaly_signal()})
@@ -167,9 +120,6 @@ defmodule Arbor.Monitor.HealingSupervisorOpsRoomTest do
       data: %{skill: :beam, severity: :warning, details: %{metric: :reductions}}
     }
   end
-
-  defp restore(key, :unset), do: Application.delete_env(:arbor_monitor, key)
-  defp restore(key, value), do: Application.put_env(:arbor_monitor, key, value)
 
   defmodule DirectoryWithDiagnostician do
     def list_monitor_agents do
@@ -212,13 +162,13 @@ defmodule Arbor.Monitor.HealingSupervisorOpsRoomTest do
 
   defmodule RecordingOpsBridge do
     def create_ops_room(name, participants) do
-      send(Application.get_env(:arbor_monitor, :k1d_test_pid), {:create, name, participants})
-      {:ok, Application.get_env(:arbor_monitor, :k1d_ops_channel_id)}
+      send(Arbor.Monitor.Config.Testing.get(:k1d_test_pid), {:create, name, participants})
+      {:ok, Arbor.Monitor.Config.Testing.get(:k1d_ops_channel_id)}
     end
 
     def deliver_channel_message(channel_id, sender_id, sender_name, sender_type, content) do
       send(
-        Application.get_env(:arbor_monitor, :k1d_test_pid),
+        Arbor.Monitor.Config.Testing.get(:k1d_test_pid),
         {:deliver, channel_id, sender_id, sender_name, sender_type, content}
       )
 
@@ -231,7 +181,7 @@ defmodule Arbor.Monitor.HealingSupervisorOpsRoomTest do
 
     def deliver_channel_message(channel_id, sender_id, sender_name, sender_type, content) do
       send(
-        Application.get_env(:arbor_monitor, :k1d_test_pid),
+        Arbor.Monitor.Config.Testing.get(:k1d_test_pid),
         {:deliver, channel_id, sender_id, sender_name, sender_type, content}
       )
 
@@ -244,7 +194,7 @@ defmodule Arbor.Monitor.HealingSupervisorOpsRoomTest do
 
     def deliver_channel_message(channel_id, sender_id, sender_name, sender_type, content) do
       send(
-        Application.get_env(:arbor_monitor, :k1d_test_pid),
+        Arbor.Monitor.Config.Testing.get(:k1d_test_pid),
         {:deliver, channel_id, sender_id, sender_name, sender_type, content}
       )
 
