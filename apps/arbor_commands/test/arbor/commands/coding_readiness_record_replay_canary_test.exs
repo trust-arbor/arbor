@@ -24,6 +24,11 @@ defmodule Arbor.Commands.CodingReadinessRecordReplayCanaryTest do
   these plugs. Supplying one in credential-free CI would require another
   internal dependency or global persistent-client mutation.
 
+  Toolchain identity is likewise a deterministic observer fixture. Hermetic
+  validation loads candidate BEAMs from `/arbor/build`, where the production
+  resolver must reject the candidate-controlled `/workspace/bin/mix`; the
+  production fail-closed behavior has dedicated coverage in arbor_actions.
+
   The non-vacuous post-ready immutable-state transition is covered by the
   public candidate-verifier regression at
   `apps/arbor_orchestrator/test/arbor/orchestrator/coding_plan/candidate_verifier_test.exs`:
@@ -100,7 +105,7 @@ defmodule Arbor.Commands.CodingReadinessRecordReplayCanaryTest do
 
     def security_available?, do: true
     def signing_key_status(_agent_id), do: {:ok, :available}
-    def coding_toolchain_identity, do: Arbor.Actions.coding_toolchain_identity()
+    def coding_toolchain_identity, do: {:ok, toolchain_identity()}
     def validation_capacity_observer, do: :available
 
     def acp_provider_readiness(provider, model) do
@@ -144,6 +149,40 @@ defmodule Arbor.Commands.CodingReadinessRecordReplayCanaryTest do
         "launch_bound_model_id" => model
       }
     end
+
+    defp toolchain_identity do
+      identity = %{
+        "schema_version" => 1,
+        "platform" => "unix:test",
+        "architecture" => "test",
+        "otp_release" => "28",
+        "elixir_version" => "1.19.5",
+        "mix_wrapper_path" => "/reviewed/bin/mix",
+        "runtime_roots" => %{
+          "erlang_root" => "/runtime/erlang",
+          "elixir_root" => "/runtime/elixir"
+        }
+      }
+
+      Map.put(identity, "identity_digest", digest(identity))
+    end
+
+    defp digest(value) do
+      :crypto.hash(:sha256, canonical_json(value))
+      |> Base.encode16(case: :lower)
+    end
+
+    defp canonical_json(value) when is_map(value) do
+      value
+      |> Enum.sort_by(fn {key, _nested} -> key end)
+      |> Enum.map(fn {key, nested} -> [Jason.encode!(key), ":", canonical_json(nested)] end)
+      |> then(&["{", Enum.intersperse(&1, ","), "}"])
+    end
+
+    defp canonical_json(value) when is_list(value),
+      do: ["[", Enum.intersperse(Enum.map(value, &canonical_json/1), ","), "]"]
+
+    defp canonical_json(value), do: Jason.encode!(value)
   end
 
   defmodule ExactPipelineExecutor do
