@@ -52,7 +52,9 @@ defmodule Arbor.Signals.ClusterIntegrationTest do
       signal_id = "test_relay_#{System.unique_integer([:positive])}"
 
       :erpc.call(node_a, H, :emit_cluster_signal, [
-        :test, :relay_check, %{id: signal_id, origin_node: node_a}
+        :test,
+        :relay_check,
+        %{id: signal_id, origin_node: node_a}
       ])
 
       assert_receive {:signal_on_b, signal}, 5_000
@@ -91,7 +93,9 @@ defmodule Arbor.Signals.ClusterIntegrationTest do
       # Emit several signals on node A
       for i <- 1..5 do
         :erpc.call(node_a, H, :emit_cluster_signal, [
-          :test, :stats_check, %{i: i}
+          :test,
+          :stats_check,
+          %{i: i}
         ])
       end
 
@@ -180,13 +184,19 @@ defmodule Arbor.Signals.ClusterIntegrationTest do
 
     for child <- children do
       case Supervisor.start_child(Arbor.Signals.Supervisor, child) do
-        {:ok, _} -> :ok
-        {:error, {:already_started, _}} -> :ok
+        {:ok, _} ->
+          :ok
+
+        {:error, {:already_started, _}} ->
+          :ok
+
         {:error, :already_present} ->
           {mod, _} = child
           Supervisor.delete_child(Arbor.Signals.Supervisor, mod)
           Supervisor.start_child(Arbor.Signals.Supervisor, child)
-        _ -> :ok
+
+        _ ->
+          :ok
       end
     end
   end

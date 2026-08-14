@@ -94,7 +94,9 @@ defmodule Arbor.Contracts.LLM.TokenUsageTest do
 
     test "unknown provider falls back to openai shape" do
       body = %{"usage" => %{"prompt_tokens" => 10, "completion_tokens" => 5}}
-      assert %TokenUsage{input_tokens: 10, output_tokens: 5} = TokenUsage.from_provider(:weird, body)
+
+      assert %TokenUsage{input_tokens: 10, output_tokens: 5} =
+               TokenUsage.from_provider(:weird, body)
     end
   end
 

@@ -160,7 +160,12 @@ defmodule Arbor.Contracts.Memory.PerceptTest do
     end
 
     test "from_map extracts summary" do
-      percept = Percept.from_map(%{"type" => "action_result", "outcome" => "success", "summary" => "done"})
+      percept =
+        Percept.from_map(%{
+          "type" => "action_result",
+          "outcome" => "success",
+          "summary" => "done"
+        })
 
       assert percept.summary == "done"
     end

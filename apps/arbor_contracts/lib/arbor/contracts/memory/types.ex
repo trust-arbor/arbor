@@ -45,8 +45,15 @@ defmodule Arbor.Contracts.Memory.Types do
   Type/category of a memory entry.
   """
   @type entry_type ::
-          :fact | :experience | :skill | :insight | :relationship |
-          :goal | :observation | :trait | :intention
+          :fact
+          | :experience
+          | :skill
+          | :insight
+          | :relationship
+          | :goal
+          | :observation
+          | :trait
+          | :intention
 
   @typedoc """
   A memory entry returned from recall operations.
@@ -90,8 +97,15 @@ defmodule Arbor.Contracts.Memory.Types do
   Type of a knowledge node.
   """
   @type node_type ::
-          :fact | :experience | :skill | :insight | :relationship |
-          :goal | :observation | :trait | :intention
+          :fact
+          | :experience
+          | :skill
+          | :insight
+          | :relationship
+          | :goal
+          | :observation
+          | :trait
+          | :intention
 
   @typedoc """
   A knowledge node in the semantic graph.

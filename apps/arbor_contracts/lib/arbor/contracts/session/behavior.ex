@@ -127,7 +127,8 @@ defmodule Arbor.Contracts.Session.Behavior do
          :ok <- validate_transitions_map(get_attr(attrs, :transitions)),
          :ok <- validate_initial(get_attr(attrs, :initial), get_attr(attrs, :phases)),
          :ok <- validate_terminal(get_attr(attrs, :terminal), get_attr(attrs, :phases)),
-         :ok <- validate_transition_members(get_attr(attrs, :transitions), get_attr(attrs, :phases)),
+         :ok <-
+           validate_transition_members(get_attr(attrs, :transitions), get_attr(attrs, :phases)),
          :ok <- validate_graph_compatible(get_attr(attrs, :graph_compatible)),
          :ok <- validate_metadata(get_attr(attrs, :metadata)) do
       behavior = %__MODULE__{

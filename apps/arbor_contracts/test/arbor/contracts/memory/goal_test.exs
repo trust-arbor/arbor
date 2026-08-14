@@ -358,10 +358,12 @@ defmodule Arbor.Contracts.Memory.GoalTest do
     end
 
     test "encodes notes and success_criteria" do
-      goal = Goal.new("Rich goal",
-        notes: ["note1", "note2"],
-        success_criteria: "Tests pass"
-      )
+      goal =
+        Goal.new("Rich goal",
+          notes: ["note1", "note2"],
+          success_criteria: "Tests pass"
+        )
+
       json = Jason.encode!(goal)
       decoded = Jason.decode!(json)
 

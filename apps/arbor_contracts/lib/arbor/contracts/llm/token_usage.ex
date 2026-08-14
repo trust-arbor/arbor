@@ -86,7 +86,8 @@ defmodule Arbor.Contracts.LLM.TokenUsage do
     }
   end
 
-  def from_provider(provider, body) when provider in [:openai, :openrouter, :xai, :ollama, :lm_studio, :zai, :gemini] do
+  def from_provider(provider, body)
+      when provider in [:openai, :openrouter, :xai, :ollama, :lm_studio, :zai, :gemini] do
     from_openai_shape(body, provider)
   end
 

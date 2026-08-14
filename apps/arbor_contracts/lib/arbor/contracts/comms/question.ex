@@ -94,7 +94,13 @@ defmodule Arbor.Contracts.Comms.Question do
   """
   @spec answer(t(), String.t(), atom()) :: t()
   def answer(%__MODULE__{} = q, answer_text, channel) do
-    %{q | status: :answered, answer: answer_text, answered_at: DateTime.utc_now(), answered_via: channel}
+    %{
+      q
+      | status: :answered,
+        answer: answer_text,
+        answered_at: DateTime.utc_now(),
+        answered_via: channel
+    }
   end
 
   @doc """

@@ -16,8 +16,8 @@ defmodule Arbor.Contracts.Security.TaintedValue do
 
   @derive Jason.Encoder
   typedstruct enforce: true do
-    field :value, term()
-    field :taint, Taint.t()
+    field(:value, term())
+    field(:taint, Taint.t())
   end
 
   @doc "Wrap a value with explicit taint metadata."

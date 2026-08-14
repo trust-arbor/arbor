@@ -44,21 +44,21 @@ defmodule Arbor.Contracts.Memory.Intent do
   typedstruct do
     @typedoc "An agent intent"
 
-    field :id, String.t(), enforce: true
-    field :type, intent_type(), enforce: true
-    field :action, atom() | nil, default: nil
-    field :params, map(), default: %{}
-    field :reasoning, String.t() | nil, default: nil
-    field :goal_id, String.t() | nil, default: nil
-    field :confidence, float(), default: 0.5
-    field :urgency, integer(), default: 50
-    field :created_at, DateTime.t()
-    field :metadata, map(), default: %{}
+    field(:id, String.t(), enforce: true)
+    field(:type, intent_type(), enforce: true)
+    field(:action, atom() | nil, default: nil)
+    field(:params, map(), default: %{})
+    field(:reasoning, String.t() | nil, default: nil)
+    field(:goal_id, String.t() | nil, default: nil)
+    field(:confidence, float(), default: 0.5)
+    field(:urgency, integer(), default: 50)
+    field(:created_at, DateTime.t())
+    field(:metadata, map(), default: %{})
 
     # Capability-intent fields (Phase 0 cognitive loop redesign)
-    field :capability, String.t() | nil, default: nil
-    field :op, atom() | nil, default: nil
-    field :target, String.t() | nil, default: nil
+    field(:capability, String.t() | nil, default: nil)
+    field(:op, atom() | nil, default: nil)
+    field(:target, String.t() | nil, default: nil)
   end
 
   @doc """
@@ -193,6 +193,7 @@ defmodule Arbor.Contracts.Memory.Intent do
 
   defp atomize(nil), do: nil
   defp atomize(a) when is_atom(a), do: a
+
   defp atomize(s) when is_binary(s) do
     atom_match = Enum.find(@known_types, fn a -> Atom.to_string(a) == s end)
     atom_match || String.to_existing_atom(s)
@@ -206,12 +207,14 @@ defmodule Arbor.Contracts.Memory.Intent do
   defp parse_float(_), do: nil
 
   defp parse_datetime(%DateTime{} = dt), do: dt
+
   defp parse_datetime(s) when is_binary(s) do
     case DateTime.from_iso8601(s) do
       {:ok, dt, _} -> dt
       _ -> nil
     end
   end
+
   defp parse_datetime(_), do: nil
 end
 

@@ -37,6 +37,7 @@ defmodule Arbor.Monitor.DiagnosticsTest do
         spawn(fn ->
           Process.put(:arbor_correlation_id, correlation_id)
           Process.put(:arbor_fault_type, fault_type)
+
           receive do
             :stop -> :ok
           end
@@ -199,6 +200,7 @@ defmodule Arbor.Monitor.DiagnosticsTest do
         spawn(fn ->
           Process.put(:arbor_correlation_id, "corr_123")
           Process.put(:arbor_fault_type, :test)
+
           receive do
             :stop -> :ok
           end

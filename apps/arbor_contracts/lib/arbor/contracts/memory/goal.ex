@@ -44,21 +44,21 @@ defmodule Arbor.Contracts.Memory.Goal do
   typedstruct do
     @typedoc "An agent goal"
 
-    field :id, String.t(), enforce: true
-    field :description, String.t(), enforce: true
-    field :type, goal_type(), default: :achieve
-    field :status, goal_status(), default: :active
-    field :priority, integer(), default: 50
-    field :parent_id, String.t() | nil, default: nil
-    field :progress, float(), default: 0.0
-    field :created_at, DateTime.t()
-    field :achieved_at, DateTime.t() | nil, default: nil
-    field :deadline, DateTime.t() | nil, default: nil
-    field :success_criteria, String.t() | nil, default: nil
-    field :notes, [String.t()], default: []
-    field :assigned_by, atom() | nil, default: nil
-    field :metadata, map(), default: %{}
-    field :referenced_date, DateTime.t() | nil, default: nil
+    field(:id, String.t(), enforce: true)
+    field(:description, String.t(), enforce: true)
+    field(:type, goal_type(), default: :achieve)
+    field(:status, goal_status(), default: :active)
+    field(:priority, integer(), default: 50)
+    field(:parent_id, String.t() | nil, default: nil)
+    field(:progress, float(), default: 0.0)
+    field(:created_at, DateTime.t())
+    field(:achieved_at, DateTime.t() | nil, default: nil)
+    field(:deadline, DateTime.t() | nil, default: nil)
+    field(:success_criteria, String.t() | nil, default: nil)
+    field(:notes, [String.t()], default: [])
+    field(:assigned_by, atom() | nil, default: nil)
+    field(:metadata, map(), default: %{})
+    field(:referenced_date, DateTime.t() | nil, default: nil)
   end
 
   @doc """

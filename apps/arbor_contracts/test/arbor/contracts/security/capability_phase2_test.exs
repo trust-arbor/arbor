@@ -125,9 +125,8 @@ defmodule Arbor.Contracts.Security.CapabilityPhase2Test do
   describe "combined scope binding" do
     @tag :fast
     test "dual-bound capability requires both session and task match" do
-      {:ok, cap} = Capability.new(
-        @valid_attrs ++ [session_id: "session_abc", task_id: "task_001"]
-      )
+      {:ok, cap} =
+        Capability.new(@valid_attrs ++ [session_id: "session_abc", task_id: "task_001"])
 
       assert Capability.scope_matches?(cap, session_id: "session_abc", task_id: "task_001")
       refute Capability.scope_matches?(cap, session_id: "session_abc", task_id: "task_other")
@@ -149,15 +148,14 @@ defmodule Arbor.Contracts.Security.CapabilityPhase2Test do
 
     @tag :fast
     test "worker subagent pattern: session + task + max_uses + depth 0" do
-      {:ok, parent} = Capability.new(
-        @valid_attrs ++ [session_id: "session_main"]
-      )
+      {:ok, parent} = Capability.new(@valid_attrs ++ [session_id: "session_main"])
 
-      {:ok, worker_cap} = Capability.delegate(parent, "agent_worker001",
-        task_id: "task_deploy_staging",
-        max_uses: 1,
-        delegation_depth: 0
-      )
+      {:ok, worker_cap} =
+        Capability.delegate(parent, "agent_worker001",
+          task_id: "task_deploy_staging",
+          max_uses: 1,
+          delegation_depth: 0
+        )
 
       # Worker cap has all the isolation properties
       assert worker_cap.session_id == "session_main"

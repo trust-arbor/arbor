@@ -30,9 +30,7 @@ defmodule Arbor.Contracts.Judge.EvidenceTest do
 
     test "accepts producer and duration_ms" do
       {:ok, e} =
-        Evidence.new(
-          Map.merge(@valid_attrs, %{producer: SomeModule, duration_ms: 42})
-        )
+        Evidence.new(Map.merge(@valid_attrs, %{producer: SomeModule, duration_ms: 42}))
 
       assert e.producer == SomeModule
       assert e.duration_ms == 42

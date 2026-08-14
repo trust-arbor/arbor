@@ -81,7 +81,9 @@ defmodule Arbor.Contracts.Security.CapabilityPhase1Test do
       not_before = DateTime.add(now, -3600, :second)
       expires_at = DateTime.add(now, 3600, :second)
 
-      {:ok, cap} = Capability.new(@valid_attrs ++ [not_before: not_before, expires_at: expires_at])
+      {:ok, cap} =
+        Capability.new(@valid_attrs ++ [not_before: not_before, expires_at: expires_at])
+
       assert Capability.valid?(cap)
     end
 
@@ -157,7 +159,11 @@ defmodule Arbor.Contracts.Security.CapabilityPhase1Test do
 
     @tag :fast
     test "delegation succeeds when target is in allowed list" do
-      {:ok, cap} = Capability.new(@valid_attrs ++ [allowed_delegatees: ["agent_worker001", "agent_worker002"]])
+      {:ok, cap} =
+        Capability.new(
+          @valid_attrs ++ [allowed_delegatees: ["agent_worker001", "agent_worker002"]]
+        )
+
       assert {:ok, child} = Capability.delegate(cap, "agent_worker001")
       assert child.principal_id == "agent_worker001"
     end
@@ -165,6 +171,7 @@ defmodule Arbor.Contracts.Security.CapabilityPhase1Test do
     @tag :fast
     test "delegation fails when target is not in allowed list" do
       {:ok, cap} = Capability.new(@valid_attrs ++ [allowed_delegatees: ["agent_worker001"]])
+
       assert {:error, {:delegatee_not_allowed, "agent_intruder"}} =
                Capability.delegate(cap, "agent_intruder")
     end
@@ -172,13 +179,18 @@ defmodule Arbor.Contracts.Security.CapabilityPhase1Test do
     @tag :fast
     test "empty allowed_delegatees means nobody can receive delegation" do
       {:ok, cap} = Capability.new(@valid_attrs ++ [allowed_delegatees: []])
+
       assert {:error, {:delegatee_not_allowed, _}} =
                Capability.delegate(cap, "agent_worker001")
     end
 
     @tag :fast
     test "delegation inherits allowed_delegatees from parent" do
-      {:ok, cap} = Capability.new(@valid_attrs ++ [allowed_delegatees: ["agent_worker001", "agent_worker002"]])
+      {:ok, cap} =
+        Capability.new(
+          @valid_attrs ++ [allowed_delegatees: ["agent_worker001", "agent_worker002"]]
+        )
+
       {:ok, child} = Capability.delegate(cap, "agent_worker001")
       assert child.allowed_delegatees == ["agent_worker001", "agent_worker002"]
     end
@@ -215,13 +227,15 @@ defmodule Arbor.Contracts.Security.CapabilityPhase1Test do
   describe "combined Phase 1 features" do
     @tag :fast
     test "non-delegatable + single-use for worker subagent" do
-      {:ok, cap} = Capability.new(
-        @valid_attrs ++ [
-          delegation_depth: 0,
-          max_uses: 1,
-          expires_at: DateTime.utc_now() |> DateTime.add(300, :second)
-        ]
-      )
+      {:ok, cap} =
+        Capability.new(
+          @valid_attrs ++
+            [
+              delegation_depth: 0,
+              max_uses: 1,
+              expires_at: DateTime.utc_now() |> DateTime.add(300, :second)
+            ]
+        )
 
       assert cap.delegation_depth == 0
       assert cap.max_uses == 1
@@ -231,12 +245,14 @@ defmodule Arbor.Contracts.Security.CapabilityPhase1Test do
 
     @tag :fast
     test "depth exhaustion checked before delegatee restriction" do
-      {:ok, cap} = Capability.new(
-        @valid_attrs ++ [
-          delegation_depth: 0,
-          allowed_delegatees: ["agent_allowed"]
-        ]
-      )
+      {:ok, cap} =
+        Capability.new(
+          @valid_attrs ++
+            [
+              delegation_depth: 0,
+              allowed_delegatees: ["agent_allowed"]
+            ]
+        )
 
       # Depth 0 catches first, even though delegatee check would also fail
       assert {:error, :delegation_depth_exhausted} =
@@ -245,12 +261,14 @@ defmodule Arbor.Contracts.Security.CapabilityPhase1Test do
 
     @tag :fast
     test "max_uses + allowed_delegatees on delegated cap" do
-      {:ok, cap} = Capability.new(
-        @valid_attrs ++ [
-          max_uses: 5,
-          allowed_delegatees: ["agent_worker001"]
-        ]
-      )
+      {:ok, cap} =
+        Capability.new(
+          @valid_attrs ++
+            [
+              max_uses: 5,
+              allowed_delegatees: ["agent_worker001"]
+            ]
+        )
 
       {:ok, child} = Capability.delegate(cap, "agent_worker001", max_uses: 2)
       assert child.max_uses == 2

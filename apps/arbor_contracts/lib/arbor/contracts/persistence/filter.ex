@@ -25,12 +25,12 @@ defmodule Arbor.Contracts.Persistence.Filter do
   typedstruct do
     @typedoc "A composable query filter"
 
-    field :conditions, list({atom(), atom(), term()}), default: []
-    field :since, DateTime.t()
-    field :until, DateTime.t()
-    field :order_by, {atom(), :asc | :desc}
-    field :limit, non_neg_integer()
-    field :offset, non_neg_integer(), default: 0
+    field(:conditions, list({atom(), atom(), term()}), default: [])
+    field(:since, DateTime.t())
+    field(:until, DateTime.t())
+    field(:order_by, {atom(), :asc | :desc})
+    field(:limit, non_neg_integer())
+    field(:offset, non_neg_integer(), default: 0)
   end
 
   @doc "Create a new empty filter."

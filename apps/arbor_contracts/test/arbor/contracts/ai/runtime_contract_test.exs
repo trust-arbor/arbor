@@ -142,7 +142,9 @@ defmodule Arbor.Contracts.AI.RuntimeContractTest do
           provider: "test",
           display_name: "Test",
           type: :cli,
-          cli_tools: [%{name: "definitely_not_a_real_binary_xyz", install_hint: "brew install it"}]
+          cli_tools: [
+            %{name: "definitely_not_a_real_binary_xyz", install_hint: "brew install it"}
+          ]
         )
 
       assert {:error, failures} = RuntimeContract.check(contract)

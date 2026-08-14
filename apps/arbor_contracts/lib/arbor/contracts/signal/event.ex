@@ -135,7 +135,11 @@ defmodule Arbor.Contracts.Signal.Event do
     with :ok <- validate_type(get_attr(attrs, :type)),
          :ok <- validate_privacy_level(get_attr(attrs, :privacy_floor), :privacy_floor),
          :ok <- validate_optional_privacy(get_attr(attrs, :privacy_escalation)),
-         :ok <- validate_escalation_direction(get_attr(attrs, :privacy_floor), get_attr(attrs, :privacy_escalation)),
+         :ok <-
+           validate_escalation_direction(
+             get_attr(attrs, :privacy_floor),
+             get_attr(attrs, :privacy_escalation)
+           ),
          :ok <- validate_optional_string(attrs, :correlation_id),
          :ok <- validate_optional_string(attrs, :trace_id),
          :ok <- validate_string_list(get_attr(attrs, :causality_chain), :causality_chain),

@@ -25,7 +25,9 @@ defmodule Arbor.Contracts.Eval.OutcomeTest do
 
   describe "mappers" do
     test "from_grader_result maps score/passed/detail" do
-      o = Outcome.from_grader_result(%{score: 1.0, passed: true, detail: "matched"}, "exact_match")
+      o =
+        Outcome.from_grader_result(%{score: 1.0, passed: true, detail: "matched"}, "exact_match")
+
       assert o.evaluator == "exact_match"
       assert o.score == 1.0
       assert o.passed
@@ -34,7 +36,13 @@ defmodule Arbor.Contracts.Eval.OutcomeTest do
     end
 
     test "from_check_result: a failing check surfaces its detail as a concern" do
-      check = %{check: {:credential_exposure}, passed: false, detail: "leaked sk_live_", severity: :hard}
+      check = %{
+        check: {:credential_exposure},
+        passed: false,
+        detail: "leaked sk_live_",
+        severity: :hard
+      }
+
       o = Outcome.from_check_result(check, "credential_exposure")
       refute o.passed
       assert o.score == 0.0
@@ -43,7 +51,14 @@ defmodule Arbor.Contracts.Eval.OutcomeTest do
     end
 
     test "from_evaluation derives score from the vote" do
-      o = Outcome.from_evaluation(%{perspective: :security, vote: :reject, reasoning: "unsafe", confidence: 0.9})
+      o =
+        Outcome.from_evaluation(%{
+          perspective: :security,
+          vote: :reject,
+          reasoning: "unsafe",
+          confidence: 0.9
+        })
+
       assert o.evaluator == "security"
       assert o.vote == :reject
       assert o.score == 0.0

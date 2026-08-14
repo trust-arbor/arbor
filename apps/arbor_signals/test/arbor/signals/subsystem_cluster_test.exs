@@ -19,7 +19,9 @@ defmodule Arbor.Signals.SubsystemClusterTest do
 
   setup_all do
     case Node.alive?() do
-      true -> :ok
+      true ->
+        :ok
+
       false ->
         case LocalCluster.start() do
           :ok -> :ok
@@ -125,7 +127,9 @@ defmodule Arbor.Signals.SubsystemClusterTest do
 
       # Emit a working_memory_saved signal from node A (simulating a WM save)
       :erpc.call(node_a, H, :emit_cluster_signal, [
-        :memory, :working_memory_saved, %{agent_id: agent_id, origin_node: node_a}
+        :memory,
+        :working_memory_saved,
+        %{agent_id: agent_id, origin_node: node_a}
       ])
 
       # Wait for relay + handler
@@ -155,7 +159,9 @@ defmodule Arbor.Signals.SubsystemClusterTest do
 
       # Emit knowledge_added signal from node A
       :erpc.call(node_a, H, :emit_cluster_signal, [
-        :memory, :knowledge_added, %{agent_id: agent_id, origin_node: node_a}
+        :memory,
+        :knowledge_added,
+        %{agent_id: agent_id, origin_node: node_a}
       ])
 
       Process.sleep(500)
@@ -191,7 +197,9 @@ defmodule Arbor.Signals.SubsystemClusterTest do
 
       # Emit profile_updated signal from node A (simulating a profile change)
       :erpc.call(node_a, H, :emit_cluster_signal, [
-        :trust, :profile_updated, %{agent_id: agent_id, origin_node: node_a}
+        :trust,
+        :profile_updated,
+        %{agent_id: agent_id, origin_node: node_a}
       ])
 
       Process.sleep(500)
@@ -220,7 +228,9 @@ defmodule Arbor.Signals.SubsystemClusterTest do
 
       # Emit profile_deleted signal from node A
       :erpc.call(node_a, H, :emit_cluster_signal, [
-        :trust, :profile_deleted, %{agent_id: agent_id, origin_node: node_a}
+        :trust,
+        :profile_deleted,
+        %{agent_id: agent_id, origin_node: node_a}
       ])
 
       Process.sleep(500)

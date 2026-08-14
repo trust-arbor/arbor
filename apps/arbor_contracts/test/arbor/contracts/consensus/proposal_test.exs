@@ -187,9 +187,7 @@ defmodule Arbor.Contracts.Consensus.ProposalTest do
 
     test "detects quorum violation in new_code" do
       {:ok, p} =
-        Proposal.new(
-          Map.put(@valid_attrs, :context, %{new_code: "quorum = 0"})
-        )
+        Proposal.new(Map.put(@valid_attrs, :context, %{new_code: "quorum = 0"}))
 
       {violated, invariants} = Proposal.violates_invariants?(p)
       assert violated == true
@@ -198,9 +196,7 @@ defmodule Arbor.Contracts.Consensus.ProposalTest do
 
     test "detects audit log violation" do
       {:ok, p} =
-        Proposal.new(
-          Map.put(@valid_attrs, :context, %{new_code: "delete_audit()"})
-        )
+        Proposal.new(Map.put(@valid_attrs, :context, %{new_code: "delete_audit()"}))
 
       {violated, invariants} = Proposal.violates_invariants?(p)
       assert violated == true
@@ -209,9 +205,7 @@ defmodule Arbor.Contracts.Consensus.ProposalTest do
 
     test "detects containment violation" do
       {:ok, p} =
-        Proposal.new(
-          Map.put(@valid_attrs, :context, %{new_code: "bypass_boundary()"})
-        )
+        Proposal.new(Map.put(@valid_attrs, :context, %{new_code: "bypass_boundary()"}))
 
       {violated, invariants} = Proposal.violates_invariants?(p)
       assert violated == true

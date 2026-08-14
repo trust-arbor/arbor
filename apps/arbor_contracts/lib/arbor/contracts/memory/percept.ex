@@ -46,18 +46,18 @@ defmodule Arbor.Contracts.Memory.Percept do
   typedstruct do
     @typedoc "A percept from Body to Mind"
 
-    field :id, String.t(), enforce: true
-    field :type, percept_type(), enforce: true
-    field :intent_id, String.t() | nil, default: nil
-    field :outcome, outcome(), enforce: true
-    field :data, map(), default: %{}
-    field :error, term() | nil, default: nil
-    field :duration_ms, integer() | nil, default: nil
-    field :created_at, DateTime.t()
-    field :metadata, map(), default: %{}
+    field(:id, String.t(), enforce: true)
+    field(:type, percept_type(), enforce: true)
+    field(:intent_id, String.t() | nil, default: nil)
+    field(:outcome, outcome(), enforce: true)
+    field(:data, map(), default: %{})
+    field(:error, term() | nil, default: nil)
+    field(:duration_ms, integer() | nil, default: nil)
+    field(:created_at, DateTime.t())
+    field(:metadata, map(), default: %{})
 
     # Human-readable summary for Mind context (cognitive loop redesign)
-    field :summary, String.t() | nil, default: nil
+    field(:summary, String.t() | nil, default: nil)
   end
 
   @doc """
@@ -168,6 +168,7 @@ defmodule Arbor.Contracts.Memory.Percept do
 
   defp atomize(nil), do: nil
   defp atomize(a) when is_atom(a), do: a
+
   defp atomize(s) when is_binary(s) do
     atom_match = Enum.find(@known_atoms, fn a -> Atom.to_string(a) == s end)
     atom_match || String.to_existing_atom(s)
@@ -176,12 +177,14 @@ defmodule Arbor.Contracts.Memory.Percept do
   end
 
   defp parse_datetime(%DateTime{} = dt), do: dt
+
   defp parse_datetime(s) when is_binary(s) do
     case DateTime.from_iso8601(s) do
       {:ok, dt, _} -> dt
       _ -> nil
     end
   end
+
   defp parse_datetime(_), do: nil
 end
 

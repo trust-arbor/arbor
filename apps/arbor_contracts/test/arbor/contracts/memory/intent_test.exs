@@ -188,9 +188,7 @@ defmodule Arbor.Contracts.Memory.IntentTest do
 
     test "merges params with target" do
       intent =
-        Intent.capability_intent("fs", :write, "/tmp/test.txt",
-          params: %{content: "hello"}
-        )
+        Intent.capability_intent("fs", :write, "/tmp/test.txt", params: %{content: "hello"})
 
       assert intent.params == %{content: "hello", target: "/tmp/test.txt"}
     end

@@ -53,10 +53,8 @@ defmodule Arbor.Contracts.Agent do
           telemetry: Telemetry.t() | :not_loaded
         }
 
-  defstruct [
-    authority: :not_loaded,
-    config: :not_loaded,
-    context: :not_loaded,
-    telemetry: :not_loaded
-  ]
+  defstruct authority: :not_loaded,
+            config: :not_loaded,
+            context: :not_loaded,
+            telemetry: :not_loaded
 end

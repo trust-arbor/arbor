@@ -245,8 +245,7 @@ defmodule Arbor.Contracts.Security.Identity do
   end
 
   defp validate_private_key(%{private_key: sk}) do
-    {:error,
-     {:invalid_private_key_size, byte_size_or_type(sk), :expected, "32 or 64"}}
+    {:error, {:invalid_private_key_size, byte_size_or_type(sk), :expected, "32 or 64"}}
   end
 
   defp validate_encryption_public_key(%{encryption_public_key: nil}), do: :ok

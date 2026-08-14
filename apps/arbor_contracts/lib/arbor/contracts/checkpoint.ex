@@ -81,7 +81,8 @@ defmodule Arbor.Contracts.Checkpoint do
     field(:hmac, binary() | nil, enforce: false)
 
     # Lifecycle
-    field(:retention_policy,
+    field(
+      :retention_policy,
       {:ttl, pos_integer()} | {:count, pos_integer()} | :permanent | :ephemeral,
       default: {:ttl, 24}
     )

@@ -37,12 +37,12 @@ defmodule Arbor.Contracts.Consensus.AgentMailbox do
   typedstruct do
     @typedoc "A bounded priority mailbox"
 
-    field :high_queue, :queue.queue(envelope()), default: :queue.new()
-    field :normal_queue, :queue.queue(envelope()), default: :queue.new()
-    field :max_size, pos_integer(), default: 100
-    field :reserved_high_priority, non_neg_integer(), default: 10
-    field :high_count, non_neg_integer(), default: 0
-    field :normal_count, non_neg_integer(), default: 0
+    field(:high_queue, :queue.queue(envelope()), default: :queue.new())
+    field(:normal_queue, :queue.queue(envelope()), default: :queue.new())
+    field(:max_size, pos_integer(), default: 100)
+    field(:reserved_high_priority, non_neg_integer(), default: 10)
+    field(:high_count, non_neg_integer(), default: 0)
+    field(:normal_count, non_neg_integer(), default: 0)
   end
 
   @doc """

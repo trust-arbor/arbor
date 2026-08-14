@@ -34,7 +34,9 @@ defmodule Arbor.SignalsTest do
           fn signal ->
             send(test_pid, {:signal, signal})
             :ok
-          end, async: false)
+          end,
+          async: false
+        )
 
       Signals.emit(:activity, :sub_test, %{value: 123})
 
@@ -52,7 +54,9 @@ defmodule Arbor.SignalsTest do
           fn signal ->
             send(test_pid, {:signal, signal})
             :ok
-          end, async: false)
+          end,
+          async: false
+        )
 
       Signals.unsubscribe(sub_id)
       Signals.emit(:activity, :unsub_test, %{})
