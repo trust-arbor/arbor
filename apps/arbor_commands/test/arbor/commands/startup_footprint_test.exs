@@ -15,6 +15,9 @@ defmodule Arbor.Commands.StartupFootprintTest do
 
     assert {:error, {:production_opts_forbid_synthetic, _}} =
              StartupFootprint.run(mode: "report", run_peer: fn _scenario -> {:ok, %{}} end)
+
+    assert {:error, {:production_opts_forbid_synthetic, _}} =
+             StartupFootprint.run(mode: "report", peer_samples: %{})
   end
 
   test "peer start opts are fixed and do not accept caller exec or MFA" do
@@ -86,10 +89,10 @@ defmodule Arbor.Commands.StartupFootprintTest do
 
     {:ok, canonical_parent} = SafePath.resolve_real(parent)
 
-    assert {:ok, [admitted_charlist]} =
+    assert {:ok, [admitted_path]} =
              PeerRunner.admit_paths([String.to_charlist(canonical_parent)])
 
-    assert admitted_charlist == canonical_parent
+    assert admitted_path == canonical_parent
 
     long =
       Enum.reduce(1..3, parent, fn _, acc ->
@@ -115,8 +118,29 @@ defmodule Arbor.Commands.StartupFootprintTest do
     assert input_total < 256_000
     assert length(inputs) <= 512
 
-    assert {:error, :peer_code_path_total_bytes} =
-             PeerRunner.admit_paths(Enum.reverse(inputs))
+    ordered_inputs = Enum.reverse(inputs)
+
+    assert {:error, :peer_code_path_total_bytes} = PeerRunner.admit_paths(ordered_inputs)
+
+    {near_ceiling, near_total} =
+      Enum.reduce_while(ordered_inputs, {[], 0}, fn input, {acc, total} ->
+        {:ok, canonical} = SafePath.resolve_real(input)
+        size = byte_size(canonical)
+
+        if total + size <= 256_000 do
+          {:cont, {acc ++ [input], total + size}}
+        else
+          {:halt, {acc, total}}
+        end
+      end)
+
+    {:ok, duplicate_target} = near_ceiling |> List.last() |> SafePath.resolve_real()
+    duplicate_link = Path.join(link_root, "duplicate")
+    File.ln_s!(duplicate_target, duplicate_link)
+
+    assert near_total + byte_size(duplicate_target) > 256_000
+    assert {:ok, admitted} = PeerRunner.admit_paths(near_ceiling ++ [duplicate_link])
+    assert length(admitted) == length(near_ceiling)
   end
 
   test "production PeerRunner and PeerProbe do not export filesystem test operations" do
@@ -176,6 +200,10 @@ defmodule Arbor.Commands.StartupFootprintTest do
     assert Enum.all?(paths, &is_binary/1)
     assert Enum.all?(paths, &File.dir?/1)
     assert Enum.all?(paths, &(not String.contains?(&1, <<0>>)))
+
+    logger_ebin = :logger |> :code.lib_dir() |> to_string() |> Path.join("ebin")
+    assert {:ok, canonical_logger_ebin} = SafePath.resolve_real(logger_ebin)
+    assert canonical_logger_ebin in paths
   end
 
   test "check mode compares injected samples against policy and does not write" do
@@ -215,6 +243,20 @@ defmodule Arbor.Commands.StartupFootprintTest do
 
     assert failed["status"] == "failed"
     assert File.read!(policy_path) == before
+
+    File.rm_rf(root)
+  end
+
+  test "batched peer samples fail closed when a scenario is missing" do
+    root = tmp_root()
+
+    peer_samples = %{
+      "baseline" => sample("baseline", 201, 0, 0),
+      "proposed_gated" => sample("proposed_gated", 202, 0, 0)
+    }
+
+    assert {:error, {:missing_peer_sample, "proposed_eager"}} =
+             StartupFootprint.run_for_test(root: root, peer_samples: peer_samples)
 
     File.rm_rf(root)
   end
@@ -334,6 +376,10 @@ defmodule Arbor.Commands.StartupFootprintTest do
   defp defs_in(ast) do
     ast
     |> Macro.prewalk(MapSet.new(), fn
+      {:def, _, [{:when, _, [{name, _, _args} | _guards]} | _]} = node, acc
+      when is_atom(name) ->
+        {node, MapSet.put(acc, name)}
+
       {:def, _, [{name, _, _args} | _]} = node, acc when is_atom(name) ->
         {node, MapSet.put(acc, name)}
 

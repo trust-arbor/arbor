@@ -58,7 +58,6 @@ defmodule Arbor.Commands.StartupFootprint.PeerRunner do
                     :inets,
                     :jinterface,
                     :kernel,
-                    :logger,
                     :megaco,
                     :mnesia,
                     :observer,
@@ -857,13 +856,18 @@ defmodule Arbor.Commands.StartupFootprint.PeerRunner do
   end
 
   defp reduce_paths(paths) do
-    Enum.reduce_while(paths, {:ok, [], 0}, fn path, {:ok, acc, total} ->
-      case admit_one_path(path, total) do
+    Enum.reduce_while(paths, {:ok, [], MapSet.new(), 0}, fn path, {:ok, acc, seen, total} ->
+      case admit_one_path(path) do
         {:ok, canonical, size} ->
-          if canonical in acc do
-            {:cont, {:ok, acc, total}}
-          else
-            {:cont, {:ok, acc ++ [canonical], total + size}}
+          cond do
+            MapSet.member?(seen, canonical) ->
+              {:cont, {:ok, acc, seen, total}}
+
+            total + size > @max_path_bytes_total ->
+              {:halt, {:error, :peer_code_path_total_bytes}}
+
+            true ->
+              {:cont, {:ok, acc ++ [canonical], MapSet.put(seen, canonical), total + size}}
           end
 
         {:error, _} = err ->
@@ -871,19 +875,19 @@ defmodule Arbor.Commands.StartupFootprint.PeerRunner do
       end
     end)
     |> case do
-      {:ok, admitted, _total} -> {:ok, admitted}
+      {:ok, admitted, _seen, _total} -> {:ok, admitted}
       {:error, _} = err -> err
     end
   end
 
-  defp admit_one_path(path, total) when is_list(path) do
+  defp admit_one_path(path) when is_list(path) do
     case path_list_to_string(path) do
-      {:ok, string} -> admit_one_path(string, total)
+      {:ok, string} -> admit_one_path(string)
       :error -> {:error, :peer_code_path_invalid}
     end
   end
 
-  defp admit_one_path(path, total) when is_binary(path) do
+  defp admit_one_path(path) when is_binary(path) do
     cond do
       path == "" ->
         {:error, :peer_code_path_empty_entry}
@@ -898,13 +902,13 @@ defmodule Arbor.Commands.StartupFootprint.PeerRunner do
         {:error, :peer_code_path_control_byte}
 
       true ->
-        admit_resolved_path(path, total)
+        admit_resolved_path(path)
     end
   end
 
-  defp admit_one_path(_, _), do: {:error, :peer_code_path_invalid}
+  defp admit_one_path(_), do: {:error, :peer_code_path_invalid}
 
-  defp admit_resolved_path(path, total) do
+  defp admit_resolved_path(path) do
     case SafePath.resolve_real(path) do
       {:ok, real} ->
         size = byte_size(real)
@@ -912,9 +916,6 @@ defmodule Arbor.Commands.StartupFootprint.PeerRunner do
         cond do
           size > @max_path_bytes ->
             {:error, {:peer_code_path_entry_bytes, size}}
-
-          total + size > @max_path_bytes_total ->
-            {:error, :peer_code_path_total_bytes}
 
           true ->
             case File.lstat(real) do

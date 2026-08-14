@@ -59,8 +59,8 @@ defmodule Arbor.Commands.StartupFootprint.CoreTest do
       "after" => %{
         "process_count" => after_count,
         "ets_table_count" => 14,
-        "ets_memory_words" => 1_400,
-        "beam_memory_bytes" => 10_500_000
+        "ets_memory_words" => Keyword.get(opts, :after_ets_memory, 1_400),
+        "beam_memory_bytes" => Keyword.get(opts, :after_beam_memory, 10_500_000)
       },
       "boot_time_us" => Keyword.get(opts, :boot, 1_234),
       "supervisor_children" => Keyword.get(opts, :children, 8),
@@ -115,6 +115,25 @@ defmodule Arbor.Commands.StartupFootprint.CoreTest do
     assert [
              %{"reason" => "negative_delta", "metric" => "process_count", "raw" => -10}
            ] = sample["raw_errors"]
+  end
+
+  test "normalize_sample clamps non-monotonic memory gauges without reporting an error" do
+    assert {:ok, sample} =
+             Core.normalize_sample(
+               raw_sample("baseline",
+                 after_process: 100,
+                 after_ets_memory: 900,
+                 after_beam_memory: 9_000_000,
+                 children: 0,
+                 filter: 0,
+                 telemetry: 0
+               )
+             )
+
+    assert sample["process_count_delta"] == 0
+    assert sample["ets_memory_words_delta"] == 0
+    assert sample["beam_memory_bytes_delta"] == 0
+    assert sample["raw_errors"] == []
   end
 
   test "normalize_sample rejects malformed snapshots" do
@@ -415,6 +434,15 @@ defmodule Arbor.Commands.StartupFootprint.CoreTest do
   test "injected peer results stay isolated and do not start owner apps in the parent" do
     assert StartupFootprint.scenarios() == ["baseline", "proposed_gated", "proposed_eager"]
 
+    parent_names = [
+      Arbor.Common.Supervisor,
+      Arbor.Signals.Supervisor,
+      Arbor.Monitor.Supervisor,
+      Arbor.Commands.StartupFootprint.ProposedSupervisor
+    ]
+
+    before = Map.new(parent_names, &{&1, Process.whereis(&1)})
+
     test_pid = self()
 
     runner = fn scenario ->
@@ -453,10 +481,7 @@ defmodule Arbor.Commands.StartupFootprint.CoreTest do
     assert_received {:peer, "baseline", _}
     assert_received {:peer, "proposed_gated", _}
     assert_received {:peer, "proposed_eager", _}
-    refute Process.whereis(Arbor.Common.Supervisor)
-    refute Process.whereis(Arbor.Signals.Supervisor)
-    refute Process.whereis(Arbor.Monitor.Supervisor)
-    refute Process.whereis(Arbor.Commands.StartupFootprint.ProposedSupervisor)
+    assert Map.new(parent_names, &{&1, Process.whereis(&1)}) == before
 
     File.rm_rf(root)
   end

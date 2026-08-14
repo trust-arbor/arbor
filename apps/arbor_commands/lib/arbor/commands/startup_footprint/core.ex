@@ -18,6 +18,7 @@ defmodule Arbor.Commands.StartupFootprint.Core do
     "ets_memory_words",
     "beam_memory_bytes"
   ]
+  @non_monotonic_gauges ["ets_memory_words", "beam_memory_bytes"]
   @compared_metrics [
     "process_count_delta",
     "supervisor_children",
@@ -364,7 +365,8 @@ defmodule Arbor.Commands.StartupFootprint.Core do
     end
   end
 
-  defp admit_started_owner_apps(_, scenario), do: {:error, {:invalid_started_owner_apps, scenario}}
+  defp admit_started_owner_apps(_, scenario),
+    do: {:error, {:invalid_started_owner_apps, scenario}}
 
   defp admit_started_runtime_apps(list, scenario) when is_list(list) do
     if Enum.all?(list, &is_binary/1) and length(list) == length(Enum.uniq(list)) do
@@ -383,14 +385,19 @@ defmodule Arbor.Commands.StartupFootprint.Core do
       raw = after_snap[metric] - before[metric]
       key = metric <> "_delta"
 
-      if raw < 0 do
-        {Map.put(deltas, key, 0),
-         [
-           %{"reason" => "negative_delta", "metric" => metric, "raw" => raw}
-           | errors
-         ]}
-      else
-        {Map.put(deltas, key, raw), errors}
+      cond do
+        raw >= 0 ->
+          {Map.put(deltas, key, raw), errors}
+
+        metric in @non_monotonic_gauges ->
+          {Map.put(deltas, key, 0), errors}
+
+        true ->
+          {Map.put(deltas, key, 0),
+           [
+             %{"reason" => "negative_delta", "metric" => metric, "raw" => raw}
+             | errors
+           ]}
       end
     end)
     |> then(fn {deltas, errors} -> {deltas, Enum.reverse(errors)} end)
@@ -428,7 +435,10 @@ defmodule Arbor.Commands.StartupFootprint.Core do
 
     cond do
       Enum.any?(pids, &(&1 == 0)) ->
-        [%{"reason" => "missing_os_pid", "detail" => "os_pid must be a positive child pid"} | failures]
+        [
+          %{"reason" => "missing_os_pid", "detail" => "os_pid must be a positive child pid"}
+          | failures
+        ]
 
       length(Enum.uniq(pids)) != length(pids) ->
         [

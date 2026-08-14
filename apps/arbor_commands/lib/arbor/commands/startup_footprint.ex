@@ -72,6 +72,9 @@ defmodule Arbor.Commands.StartupFootprint do
       is_map(Keyword.get(opts, :samples)) ->
         admit_injected_samples(Keyword.fetch!(opts, :samples))
 
+      is_map(Keyword.get(opts, :peer_samples)) ->
+        admit_peer_samples(Keyword.fetch!(opts, :peer_samples))
+
       is_function(Keyword.get(opts, :run_peer), 1) ->
         run_injected_peers(Keyword.fetch!(opts, :run_peer))
 
@@ -114,16 +117,23 @@ defmodule Arbor.Commands.StartupFootprint do
   defp measure_production do
     case PeerRunner.measure_all() do
       {:ok, samples} when is_map(samples) ->
-        Enum.reduce_while(Core.scenarios(), {:ok, %{}}, fn scenario, {:ok, acc} ->
-          case admit_peer_sample(scenario, Map.get(samples, scenario)) do
-            {:ok, sample} -> {:cont, {:ok, Map.put(acc, scenario, sample)}}
-            {:error, _} = err -> {:halt, err}
-          end
-        end)
+        admit_peer_samples(samples)
 
       {:error, _} = err ->
         err
     end
+  end
+
+  defp admit_peer_samples(samples) when is_map(samples) do
+    Enum.reduce_while(Core.scenarios(), {:ok, %{}}, fn scenario, {:ok, acc} ->
+      with {:ok, raw} <- Map.fetch(samples, scenario),
+           {:ok, sample} <- admit_peer_sample(scenario, raw) do
+        {:cont, {:ok, Map.put(acc, scenario, sample)}}
+      else
+        :error -> {:halt, {:error, {:missing_peer_sample, scenario}}}
+        {:error, _} = err -> {:halt, err}
+      end
+    end)
   end
 
   defp admit_peer_sample(scenario, raw) do
