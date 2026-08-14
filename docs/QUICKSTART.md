@@ -132,9 +132,44 @@ You should see a model reply in the terminal. In the dashboard:
 
 ### External Agents (optional)
 
-To mint an Ed25519 keypair for Claude Code / Codex / etc. against this
-cluster: open [Settings](http://localhost:4001/settings) → **External Agents**
-→ **Register New**. The private key is shown **once** — save it immediately.
+Use this when you want **Claude Code / Codex / OpenCode** (or another MCP host)
+to call Arbor as a verified principal — not for the in-cluster
+conversationalist chat above.
+
+1. Open [Settings](http://localhost:4001/settings) → **External Agents** →
+   **Register New** (pick a type, e.g. Claude Code).
+2. **Download or copy the private key immediately** — it is shown once. Save it
+   somewhere durable, e.g. `~/.arbor/keys/dev-claude.arbor.key` (mode `600`).
+3. Keep Arbor running (`arbor.start`). The Gateway MCP endpoint is
+   `http://localhost:4000/mcp`.
+4. Point your MCP host at Arbor’s **stdio signing proxy**, which holds the key
+   and signs each request:
+
+```bash
+# Smoke-test the proxy from the repo root (stdout is MCP JSON-RPC — Ctrl-C to stop)
+./bin/mix arbor.signer \
+  --key-file ~/.arbor/keys/dev-claude.arbor.key \
+  --upstream http://localhost:4000/mcp
+```
+
+Example Claude Code `mcpServers` entry (use absolute paths):
+
+```json
+{
+  "mcpServers": {
+    "arbor": {
+      "command": "sh",
+      "args": [
+        "-c",
+        "cd /absolute/path/to/arbor && exec ./bin/mix arbor.signer --key-file /absolute/path/to/dev-claude.arbor.key --upstream http://localhost:4000/mcp"
+      ]
+    }
+  }
+}
+```
+
+Full detail (Bearer vs signed proxy, tool disclosure, coding-task dispatch):
+[EXTERNAL_MCP_CLIENT.md](arbor/EXTERNAL_MCP_CLIENT.md).
 
 ## 6. Day-2 quality checks (optional)
 
