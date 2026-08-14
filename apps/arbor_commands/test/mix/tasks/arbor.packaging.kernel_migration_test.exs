@@ -298,6 +298,106 @@ defmodule Mix.Tasks.Arbor.Packaging.KernelMigrationTest do
              GitInventory.query_indexed_blobs("/tmp", [":(glob)apps/*.ex"], run_git: run_git)
   end
 
+  test "production report records removed frozen evidence blobs instead of aborting" do
+    root = tmp_root()
+    on_exit(fn -> File.rm_rf(root) end)
+
+    tracked_path = "apps/arbor_contracts/lib/arbor/contracts/evidence_fixture.ex"
+    tracked_abs = Path.join(root, tracked_path)
+    File.mkdir_p!(Path.dirname(tracked_abs))
+    File.write!(tracked_abs, "defmodule Arbor.Contracts.EvidenceFixture, do: :ok\n")
+
+    git!(root, ["init"])
+    git!(root, ["config", "user.email", "test@example.com"])
+    git!(root, ["config", "user.name", "Test"])
+    git!(root, ["add", "apps/"])
+    git!(root, ["commit", "-m", "fixture"])
+    tracked_oid = git!(root, ["rev-parse", ":#{tracked_path}"])
+
+    removed_path = "apps/arbor_signals/lib/arbor/signals/adapters/removed.ex"
+    paths = write_manifests(root)
+
+    disposition = %{
+      "schema" => "arbor.packaging.kernel_migration.disposition.v1",
+      "version" => 1,
+      "entries" => [
+        %{
+          "file" => removed_path,
+          "from_module" => "Arbor.Signals.Adapters.Removed",
+          "target" => "Arbor.Security",
+          "kind" => "expr",
+          "class" => "code",
+          "occurrence_ordinal" => 1,
+          "disposition" => "remove_dead_code",
+          "owner_packet" => "K1F-signals-security-services",
+          "rationale" => "The reviewed source was removed before the frozen manifest refresh.",
+          "blob_oid" => String.duplicate("a", 40)
+        }
+      ]
+    }
+
+    boundary = %{
+      "schema" => "arbor.packaging.kernel_migration.boundary.v1",
+      "version" => 1,
+      "entries" => [
+        %{
+          "current_path" => removed_path,
+          "from_module" => "Arbor.Signals.Adapters.Removed",
+          "target" => "Arbor.Security",
+          "kind" => "expr",
+          "site_line" => 1,
+          "proof_destination" => "apps/arbor_kernel/lib/arbor/signals/adapters/removed.ex",
+          "source" => "census_runtime",
+          "blob_oid" => String.duplicate("a", 40)
+        }
+      ]
+    }
+
+    formatter = %{
+      "schema" => "arbor.packaging.kernel_migration.formatter.v1",
+      "version" => 1,
+      "files" => [
+        %{
+          "current_path" => tracked_path,
+          "proof_destination" => "apps/arbor_kernel/lib/arbor/contracts/evidence_fixture.ex",
+          "blob_oid" => tracked_oid
+        },
+        %{
+          "current_path" => removed_path,
+          "proof_destination" => "apps/arbor_kernel/lib/arbor/signals/adapters/removed.ex",
+          "blob_oid" => String.duplicate("a", 40)
+        }
+      ],
+      "configs" => []
+    }
+
+    File.write!(paths.disposition, Jason.encode!(disposition))
+    File.write!(paths.boundary, Jason.encode!(boundary))
+    File.write!(paths.formatter, Jason.encode!(formatter))
+
+    assert {:ok, report} =
+             KernelMigration.run(
+               mode: "report",
+               root: root,
+               report: paths.report,
+               disposition: paths.disposition,
+               boundary: paths.boundary,
+               formatter: paths.formatter,
+               json: true
+             )
+
+    assert report["status"] == "failed"
+
+    reasons = MapSet.new(report["comparison"]["failures"], & &1["reason"])
+
+    assert MapSet.subset?(
+             MapSet.new(
+               ~w(boundary_blob_missing disposition_blob_missing formatter_blob_missing)
+             ),
+             reasons
+           )
+  end
+
   defp tmp_root do
     root =
       System.tmp_dir!()
@@ -395,5 +495,12 @@ defmodule Mix.Tasks.Arbor.Packaging.KernelMigrationTest do
     File.write!(paths.boundary, Jason.encode!(boundary))
     File.write!(paths.formatter, Jason.encode!(formatter))
     paths
+  end
+
+  defp git!(root, args) do
+    case System.cmd("git", ["-C", root | args], stderr_to_stdout: true) do
+      {output, 0} -> String.trim(output)
+      {output, status} -> flunk("git #{Enum.join(args, " ")} failed (#{status}): #{output}")
+    end
   end
 end

@@ -43,6 +43,9 @@ defmodule Arbor.Security do
   @behaviour Arbor.Contracts.API.Security
   @behaviour Arbor.Contracts.API.Identity
   @behaviour Arbor.Common.SkillImporter.Security
+  @behaviour Arbor.Signals.Contracts.Authorization
+  @behaviour Arbor.Signals.Contracts.Crypto
+  @behaviour Arbor.Signals.Contracts.IdentityKeys
 
   alias Arbor.Contracts.API.Security, as: SecurityContract
   alias Arbor.Contracts.Security.Capability
@@ -60,6 +63,7 @@ defmodule Arbor.Security do
   alias Arbor.Security.CapabilityStore
   alias Arbor.Security.Config
   alias Arbor.Security.Constraint
+  alias Arbor.Security.Crypto
   alias Arbor.Security.Constraint.RateLimiter
   alias Arbor.Security.AuthDecision
   alias Arbor.Security.DeliveryReceiptBroker
@@ -106,6 +110,7 @@ defmodule Arbor.Security do
       Arbor.Security.authorize("agent_001", "arbor://fs/read/docs")
       Arbor.Security.authorize(human_id, resource, :chat, session_token: token)
   """
+  @impl Arbor.Signals.Contracts.Authorization
   @spec authorize(String.t(), String.t(), atom(), keyword()) ::
           {:ok, :authorized}
           | {:ok, :pending_approval, String.t()}
@@ -1698,6 +1703,74 @@ defmodule Arbor.Security do
   @spec lookup_public_key(String.t()) :: {:ok, binary()} | {:error, :not_found}
   def lookup_public_key(agent_id),
     do: lookup_public_key_for_agent(agent_id)
+
+  @doc """
+  Look up the signing public key for an agent.
+
+  Signals identity-key port (`Arbor.Signals.Contracts.IdentityKeys.lookup/1`).
+  """
+  @impl Arbor.Signals.Contracts.IdentityKeys
+  @spec lookup(String.t()) :: {:ok, binary()} | {:error, :not_found}
+  def lookup(agent_id), do: Registry.lookup(agent_id)
+
+  @doc """
+  Look up the encryption public key for an agent.
+
+  Signals identity-key port (`Arbor.Signals.Contracts.IdentityKeys`).
+  """
+  @impl Arbor.Signals.Contracts.IdentityKeys
+  @spec lookup_encryption_key(String.t()) ::
+          {:ok, binary()} | {:error, :not_found | :no_encryption_key}
+  def lookup_encryption_key(agent_id), do: Registry.lookup_encryption_key(agent_id)
+
+  @doc """
+  Generate an X25519 encryption keypair.
+
+  Signals crypto port (`Arbor.Signals.Contracts.Crypto`).
+  """
+  @impl Arbor.Signals.Contracts.Crypto
+  @spec generate_encryption_keypair() :: {binary(), binary()}
+  def generate_encryption_keypair, do: Crypto.generate_encryption_keypair()
+
+  @doc """
+  Encrypt plaintext with AES-256-GCM.
+
+  Signals crypto port (`Arbor.Signals.Contracts.Crypto`).
+  """
+  @impl Arbor.Signals.Contracts.Crypto
+  @spec encrypt(binary(), binary()) :: {binary(), binary(), binary()}
+  def encrypt(plaintext, key), do: Crypto.encrypt(plaintext, key)
+
+  @doc """
+  Decrypt ciphertext with AES-256-GCM.
+
+  Signals crypto port (`Arbor.Signals.Contracts.Crypto`).
+  """
+  @impl Arbor.Signals.Contracts.Crypto
+  @spec decrypt(binary(), binary(), binary(), binary()) ::
+          {:ok, binary()} | {:error, :decryption_failed}
+  def decrypt(ciphertext, key, iv, tag), do: Crypto.decrypt(ciphertext, key, iv, tag)
+
+  @doc """
+  Seal a message for a recipient.
+
+  Signals crypto port (`Arbor.Signals.Contracts.Crypto`).
+  """
+  @impl Arbor.Signals.Contracts.Crypto
+  @spec seal(binary(), binary(), binary()) :: map()
+  def seal(plaintext, recipient_public, sender_sign_private),
+    do: Crypto.seal(plaintext, recipient_public, sender_sign_private)
+
+  @doc """
+  Unseal a message sealed with `seal/3`.
+
+  Signals crypto port (`Arbor.Signals.Contracts.Crypto`).
+  """
+  @impl Arbor.Signals.Contracts.Crypto
+  @spec unseal(map(), binary(), binary()) ::
+          {:ok, binary()} | {:error, :bad_signature | :decryption_failed | :malformed_sealed}
+  def unseal(sealed, recipient_private, sender_sign_public),
+    do: Crypto.unseal(sealed, recipient_private, sender_sign_public)
 
   @doc """
   Look up principal IDs by identity display name for discovery only.

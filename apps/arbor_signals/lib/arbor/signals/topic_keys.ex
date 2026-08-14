@@ -6,8 +6,9 @@ defmodule Arbor.Signals.TopicKeys do
   symmetric key. Signals on these topics are encrypted at emit time and
   decrypted at delivery time for authorized subscribers.
 
-  Uses `apply/3` for runtime module resolution to avoid a compile-time
-  dependency on `arbor_security`.
+  The crypto provider is selected via `Arbor.Signals.Config.crypto_module/0`.
+  Standalone and test default is `nil`. Missing or failing providers return
+  stable errors without crashing.
 
   ## Key Lifecycle
 
@@ -17,14 +18,15 @@ defmodule Arbor.Signals.TopicKeys do
 
   ## Configuration
 
-  The crypto module is resolved via:
-
-      Application.get_env(:arbor_signals, :crypto_module, Arbor.Security.Crypto)
+  The crypto module is resolved via `Arbor.Signals.Config.crypto_module/0`.
   """
 
   use GenServer
 
   require Logger
+
+  alias Arbor.Signals.Config
+  alias Arbor.Signals.Provider
 
   @type topic :: atom()
   @type key_info :: %{
@@ -207,8 +209,6 @@ defmodule Arbor.Signals.TopicKeys do
   # Private helpers
 
   defp generate_key_info(version \\ 1) do
-    crypto_module = crypto_module()
-    # Generate 32 bytes for AES-256
     key = :crypto.strong_rand_bytes(32)
 
     %{
@@ -216,24 +216,28 @@ defmodule Arbor.Signals.TopicKeys do
       version: version,
       created_at: DateTime.utc_now(),
       rotated_at: nil,
-      # Store the module used for potential future compatibility checks
-      crypto_module: crypto_module
+      crypto_module: Config.crypto_module()
     }
   end
 
   defp do_encrypt(plaintext, %{key: key, version: version}) do
-    crypto_module = crypto_module()
+    case call_crypto(:encrypt, [plaintext, key]) do
+      {:ok, {ciphertext, iv, tag}}
+      when is_binary(ciphertext) and is_binary(iv) and is_binary(tag) ->
+        {:ok,
+         %{
+           ciphertext: ciphertext,
+           iv: iv,
+           tag: tag,
+           key_version: version
+         }}
 
-    # credo:disable-for-next-line Credo.Check.Refactor.Apply
-    {ciphertext, iv, tag} = apply(crypto_module, :encrypt, [plaintext, key])
+      {:ok, _} ->
+        {:error, :crypto_failed}
 
-    {:ok,
-     %{
-       ciphertext: ciphertext,
-       iv: iv,
-       tag: tag,
-       key_version: version
-     }}
+      {:error, _} = error ->
+        error
+    end
   end
 
   defp do_decrypt(%{ciphertext: ciphertext, iv: iv, tag: tag, key_version: payload_version}, %{
@@ -241,12 +245,25 @@ defmodule Arbor.Signals.TopicKeys do
          version: current_version
        }) do
     if payload_version != current_version do
-      Logger.warning("Topic key version mismatch: payload=#{payload_version} current=#{current_version}")
+      Logger.warning(
+        "Topic key version mismatch: payload=#{payload_version} current=#{current_version}"
+      )
+
       {:error, :key_version_mismatch}
     else
-      crypto_module = crypto_module()
-      # credo:disable-for-next-line Credo.Check.Refactor.Apply
-      apply(crypto_module, :decrypt, [ciphertext, key, iv, tag])
+      case call_crypto(:decrypt, [ciphertext, key, iv, tag]) do
+        {:ok, {:ok, plaintext}} when is_binary(plaintext) ->
+          {:ok, plaintext}
+
+        {:ok, {:error, :decryption_failed} = error} ->
+          error
+
+        {:ok, _} ->
+          {:error, :crypto_failed}
+
+        {:error, _} = error ->
+          error
+      end
     end
   end
 
@@ -254,7 +271,21 @@ defmodule Arbor.Signals.TopicKeys do
     {:error, :invalid_payload}
   end
 
-  defp crypto_module do
-    Application.get_env(:arbor_signals, :crypto_module, Arbor.Security.Crypto)
+  defp call_crypto(function, args) do
+    case Provider.resolve(Config.crypto_module(), function, length(args)) do
+      {:ok, provider} ->
+        case Provider.invoke(provider, function, args) do
+          {:ok, result} -> {:ok, result}
+          {:error, :provider_raised, _} -> {:error, :crypto_failed}
+          {:error, :provider_threw} -> {:error, :crypto_failed}
+          {:error, :provider_exited} -> {:error, :crypto_failed}
+        end
+
+      {:error, :absent} ->
+        {:error, :crypto_unavailable}
+
+      {:error, _} ->
+        {:error, :crypto_unavailable}
+    end
   end
 end

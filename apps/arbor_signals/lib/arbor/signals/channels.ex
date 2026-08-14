@@ -3,15 +3,17 @@ defmodule Arbor.Signals.Channels do
   Manager for encrypted communication channels.
 
   Handles channel lifecycle: create, invite, accept invitation, send messages,
-  leave, revoke, and key rotation. Uses `apply/3` for runtime module resolution to
-  avoid compile-time dependencies on `arbor_security`.
+  leave, revoke, and key rotation. Crypto and identity-key providers are
+  selected via `Arbor.Signals.Config` (`:crypto_module`,
+  `:identity_registry_module`). Standalone and test default is `nil`;
+  missing or failing providers return stable errors without crashing.
 
   ## Channel Keys
 
   Each channel has an AES-256-GCM symmetric key. When inviting a member:
 
-  1. Look up invitee's encryption public key from Identity Registry
-  2. Seal the channel key using ECDH + AES-GCM (via Arbor.Security.Crypto.seal/3)
+  1. Look up invitee's encryption public key from the identity-key provider
+  2. Seal the channel key using ECDH + AES-GCM (`seal/3`)
   3. Emit an invitation signal with the sealed key
   4. Invitee accepts by unsealing the key and storing in their keychain
 
@@ -34,8 +36,8 @@ defmodule Arbor.Signals.Channels do
   Modules are resolved via application config:
 
       config :arbor_signals,
-        crypto_module: Arbor.Security.Crypto,
-        identity_registry_module: Arbor.Security.Identity.Registry,
+        crypto_module: nil,
+        identity_registry_module: nil,
         channel_auto_rotate_interval_ms: 86_400_000,
         channel_rotate_on_leave: true
   """
@@ -47,6 +49,7 @@ defmodule Arbor.Signals.Channels do
   alias Arbor.Signals.Bus
   alias Arbor.Signals.Channel
   alias Arbor.Signals.Config
+  alias Arbor.Signals.Provider
   alias Arbor.Signals.Signal
 
   @type channel_id :: String.t()
@@ -81,7 +84,8 @@ defmodule Arbor.Signals.Channels do
   Returns `{:ok, channel, key}` where `key` is the symmetric channel key
   that the creator should store in their keychain.
   """
-  @spec create(String.t(), String.t(), keyword()) :: {:ok, Channel.t(), binary()}
+  @spec create(String.t(), String.t(), keyword()) ::
+          {:ok, Channel.t(), binary()} | {:error, term()}
   def create(name, creator_id, opts \\ []) when is_binary(name) and is_binary(creator_id) do
     GenServer.call(__MODULE__, {:create, name, creator_id, opts})
   end
@@ -291,45 +295,45 @@ defmodule Arbor.Signals.Channels do
 
   @impl true
   def handle_call({:create, name, creator_id, opts}, _from, state) do
-    channel_id = generate_channel_id()
-    key = :crypto.strong_rand_bytes(32)
-    channel = Channel.new(channel_id, name, creator_id, opts)
+    with {:ok, {authority_public, authority_private}} <- generate_authority_keypair(),
+         {:ok, encrypted_private} <- encrypt_state_key(authority_private) do
+      channel_id = generate_channel_id()
+      key = :crypto.strong_rand_bytes(32)
+      channel = Channel.new(channel_id, name, creator_id, opts)
 
-    # Generate authority keypair for sealing keys during redistribution
-    crypto = crypto_module()
-    {authority_public, authority_private} = crypto.generate_encryption_keypair()
-
-    entry = %{
-      channel: channel,
-      key: key,
-      key_history: [],
-      pending_invitations: %{},
-      rotation_timer: nil,
-      authority_keypair: %{
-        public: authority_public,
-        private: encrypt_state_key(authority_private)
+      entry = %{
+        channel: channel,
+        key: key,
+        key_history: [],
+        pending_invitations: %{},
+        rotation_timer: nil,
+        authority_keypair: %{
+          public: authority_public,
+          private: encrypted_private
+        }
       }
-    }
 
-    state = put_in(state, [:channels, channel_id], entry)
-    state = update_in(state, [:stats, :channels_created], &(&1 + 1))
+      state = put_in(state, [:channels, channel_id], entry)
+      state = update_in(state, [:stats, :channels_created], &(&1 + 1))
 
-    # Emit security audit signal
-    emit_membership_event(:channel_created, channel_id, creator_id, %{channel_name: name})
+      emit_membership_event(:channel_created, channel_id, creator_id, %{channel_name: name})
 
-    {:reply, {:ok, channel, key}, state}
+      {:reply, {:ok, channel, key}, state}
+    else
+      {:error, _reason} = error -> {:reply, error, state}
+    end
   end
 
   @impl true
   def handle_call({:invite, channel_id, invitee_id, sender_keychain}, _from, state) do
     with {:ok, entry} <- get_channel_entry(state, channel_id),
          :ok <- verify_member(entry.channel, sender_keychain.agent_id),
-         {:ok, invitee_enc_pub} <- lookup_encryption_key(invitee_id) do
+         {:ok, invitee_enc_pub} <- lookup_encryption_key(invitee_id),
+         {:ok, sealed_key} <-
+           seal_key(entry.key, invitee_enc_pub, sender_keychain.signing_keypair.private) do
       # Seal the channel key for the invitee — sealed to the invitee's X25519
       # key, SIGNED with the inviter's Ed25519 signing key (C2) so the invitee
       # can verify it came from us.
-      sealed_key =
-        seal_key(entry.key, invitee_enc_pub, sender_keychain.signing_keypair.private)
 
       invitation = %{
         channel_id: channel_id,
@@ -718,47 +722,54 @@ defmodule Arbor.Signals.Channels do
   end
 
   defp lookup_encryption_key(agent_id) do
-    registry_module = identity_registry_module()
-
-    registry_module.lookup_encryption_key(agent_id)
-  catch
-    :exit, _reason -> {:error, :registry_unavailable}
-  end
-
-  defp seal_key(key, recipient_public, sender_sign_private) do
-    crypto_module = crypto_module()
-    # credo:disable-for-next-line Credo.Check.Refactor.Apply
-    apply(crypto_module, :seal, [key, recipient_public, sender_sign_private])
-  end
-
-  defp unseal_key(sealed, recipient_private, sender_sign_public) do
-    crypto_module = crypto_module()
-    # credo:disable-for-next-line Credo.Check.Refactor.Apply
-    apply(crypto_module, :unseal, [sealed, recipient_private, sender_sign_public])
+    identity_call(:lookup_encryption_key, [agent_id])
   end
 
   defp lookup_signing_key(agent_id) do
-    registry_module = identity_registry_module()
+    identity_call(:lookup, [agent_id])
+  end
 
-    registry_module.lookup(agent_id)
-  catch
-    :exit, _reason -> {:error, :registry_unavailable}
+  defp seal_key(key, recipient_public, sender_sign_private) do
+    case call_crypto(:seal, [key, recipient_public, sender_sign_private]) do
+      {:ok, sealed} when is_map(sealed) -> {:ok, sealed}
+      {:ok, _} -> {:error, :crypto_failed}
+      {:error, _} = error -> error
+    end
+  end
+
+  defp unseal_key(sealed, recipient_private, sender_sign_public) do
+    case call_crypto(:unseal, [sealed, recipient_private, sender_sign_public]) do
+      {:ok, {:ok, key}} when is_binary(key) ->
+        {:ok, key}
+
+      {:ok, {:error, reason}}
+      when reason in [:bad_signature, :decryption_failed, :malformed_sealed] ->
+        {:error, reason}
+
+      {:ok, _} ->
+        {:error, :crypto_failed}
+
+      {:error, _} = error ->
+        error
+    end
   end
 
   defp encrypt_message(data, key, key_version) do
     case Jason.encode(data) do
       {:ok, json} ->
-        crypto_module = crypto_module()
-        # credo:disable-for-next-line Credo.Check.Refactor.Apply
-        {ciphertext, iv, tag} = apply(crypto_module, :encrypt, [json, key])
+        case encrypt_bytes(json, key) do
+          {:ok, {ciphertext, iv, tag}} ->
+            {:ok,
+             %{
+               ciphertext: ciphertext,
+               iv: iv,
+               tag: tag,
+               key_version: key_version
+             }}
 
-        {:ok,
-         %{
-           ciphertext: ciphertext,
-           iv: iv,
-           tag: tag,
-           key_version: key_version
-         }}
+          {:error, _} = error ->
+            error
+        end
 
       {:error, reason} ->
         {:error, {:json_encode_failed, reason}}
@@ -767,18 +778,6 @@ defmodule Arbor.Signals.Channels do
 
   defp generate_channel_id do
     Identifiers.generate_id("chan_")
-  end
-
-  defp crypto_module do
-    Application.get_env(:arbor_signals, :crypto_module, Arbor.Security.Crypto)
-  end
-
-  defp identity_registry_module do
-    Application.get_env(
-      :arbor_signals,
-      :identity_registry_module,
-      Arbor.Security.Identity.Registry
-    )
   end
 
   defp cancel_rotation_timer(nil), do: :ok
@@ -836,18 +835,22 @@ defmodule Arbor.Signals.Channels do
         Enum.each(members, fn member_id ->
           case lookup_encryption_key(member_id) do
             {:ok, member_enc_pub} ->
-              sealed_key = seal_key(new_key, member_enc_pub, authority_private)
+              case seal_key(new_key, member_enc_pub, authority_private) do
+                {:ok, sealed_key} ->
+                  signal =
+                    Signal.new(:channel, :key_redistributed, %{
+                      channel_id: channel_id,
+                      recipient_id: member_id,
+                      key_version: new_version,
+                      sealed_key: sealed_key,
+                      authority_public_key: authority_keypair.public
+                    })
 
-              signal =
-                Signal.new(:channel, :key_redistributed, %{
-                  channel_id: channel_id,
-                  recipient_id: member_id,
-                  key_version: new_version,
-                  sealed_key: sealed_key,
-                  authority_public_key: authority_keypair.public
-                })
+                  Bus.publish(signal)
 
-              Bus.publish(signal)
+                {:error, _reason} ->
+                  :ok
+              end
 
             {:error, _reason} ->
               # Member's encryption key not found, skip
@@ -867,20 +870,11 @@ defmodule Arbor.Signals.Channels do
   # Encrypt private key material in GenServer state to reduce exposure window.
   # Uses a per-process ephemeral key derived from the process's own identity.
   defp encrypt_state_key(private_key) when is_binary(private_key) do
-    state_key = state_encryption_key()
-    crypto = crypto_module()
-    {ciphertext, iv, tag} = crypto.encrypt(private_key, state_key)
-    {ciphertext, iv, tag}
+    encrypt_bytes(private_key, state_encryption_key())
   end
 
   defp decrypt_state_key({ciphertext, iv, tag}) do
-    state_key = state_encryption_key()
-    crypto = crypto_module()
-
-    case crypto.decrypt(ciphertext, state_key, iv, tag) do
-      {:ok, private_key} -> {:ok, private_key}
-      {:error, _reason} = error -> error
-    end
+    decrypt_bytes(ciphertext, state_encryption_key(), iv, tag)
   end
 
   defp decrypt_state_key(private_key) when is_binary(private_key) do
@@ -900,6 +894,88 @@ defmodule Arbor.Signals.Channels do
         key
     end
   end
+
+  defp generate_authority_keypair do
+    case call_crypto(:generate_encryption_keypair, []) do
+      {:ok, {public_key, private_key}}
+      when is_binary(public_key) and is_binary(private_key) ->
+        {:ok, {public_key, private_key}}
+
+      {:ok, _} ->
+        {:error, :crypto_failed}
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  defp encrypt_bytes(plaintext, key) do
+    case call_crypto(:encrypt, [plaintext, key]) do
+      {:ok, {ciphertext, iv, tag}}
+      when is_binary(ciphertext) and is_binary(iv) and is_binary(tag) ->
+        {:ok, {ciphertext, iv, tag}}
+
+      {:ok, _} ->
+        {:error, :crypto_failed}
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  defp decrypt_bytes(ciphertext, key, iv, tag) do
+    case call_crypto(:decrypt, [ciphertext, key, iv, tag]) do
+      {:ok, {:ok, plaintext}} when is_binary(plaintext) ->
+        {:ok, plaintext}
+
+      {:ok, {:error, :decryption_failed} = error} ->
+        error
+
+      {:ok, _} ->
+        {:error, :crypto_failed}
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  defp call_crypto(function, args) do
+    case Provider.resolve(Config.crypto_module(), function, length(args)) do
+      {:ok, provider} ->
+        case Provider.invoke(provider, function, args) do
+          {:ok, result} -> {:ok, result}
+          {:error, :provider_raised, _} -> {:error, :crypto_failed}
+          {:error, :provider_threw} -> {:error, :crypto_failed}
+          {:error, :provider_exited} -> {:error, :crypto_failed}
+        end
+
+      {:error, :absent} ->
+        {:error, :crypto_unavailable}
+
+      {:error, _} ->
+        {:error, :crypto_unavailable}
+    end
+  end
+
+  defp identity_call(function, args) do
+    case Provider.resolve(Config.identity_registry_module(), function, length(args)) do
+      {:ok, provider} ->
+        case Provider.invoke(provider, function, args) do
+          {:ok, result} -> admit_identity_result(result)
+          {:error, :provider_raised, _} -> {:error, :registry_unavailable}
+          {:error, :provider_threw} -> {:error, :registry_unavailable}
+          {:error, :provider_exited} -> {:error, :registry_unavailable}
+        end
+
+      {:error, _} ->
+        {:error, :registry_unavailable}
+    end
+  end
+
+  defp admit_identity_result({:ok, key}) when is_binary(key), do: {:ok, key}
+  defp admit_identity_result({:error, :not_found}), do: {:error, :not_found}
+  defp admit_identity_result({:error, :no_encryption_key}), do: {:error, :no_encryption_key}
+  defp admit_identity_result(_other), do: {:error, :registry_unavailable}
 
   # Emit security-category signals for membership audit trail
   defp emit_membership_event(event_type, channel_id, agent_id, metadata) do

@@ -2,6 +2,13 @@
 Code.require_file("support/oidc_test_helper.ex", __DIR__)
 Code.require_file("support/loopback_http_server.ex", __DIR__)
 
+# K1F: Signals authorization/crypto/identity ports default to nil. Security
+# tests inject the public facade so restricted-topic emit/decrypt and
+# CapabilityAuthorizer keep the production provider shape.
+Application.put_env(:arbor_signals, :security_module, Arbor.Security)
+Application.put_env(:arbor_signals, :crypto_module, Arbor.Security)
+Application.put_env(:arbor_signals, :identity_registry_module, Arbor.Security)
+
 # Start BufferedStore instances first (used by CapabilityStore, Registry, and SigningKeyStore)
 buffered_store = Arbor.Persistence.BufferedStore
 

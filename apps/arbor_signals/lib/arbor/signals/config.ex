@@ -12,6 +12,9 @@ defmodule Arbor.Signals.Config do
         restricted_topics: [:security, :identity],
         security_sync_subscribers: %{},
         durable_sink_module: nil,
+        security_module: nil,
+        crypto_module: nil,
+        identity_registry_module: nil,
         channel_auto_rotate_interval_ms: 86_400_000,
         channel_rotate_on_leave: true,
         relay_enabled: true,
@@ -33,7 +36,8 @@ defmodule Arbor.Signals.Config do
   @doc """
   Return the configured subscription authorizer module.
 
-  Defaults to `CapabilityAuthorizer` which checks capabilities via ETS lookup.
+  Defaults to `CapabilityAuthorizer`, which forwards bounded subscribe
+  checks to the configured authorization provider.
   Test env overrides to `OpenAuthorizer` for isolated testing.
   """
   @spec authorizer() :: module()
@@ -129,5 +133,38 @@ defmodule Arbor.Signals.Config do
   @spec durable_sink_module() :: module() | nil | term()
   def durable_sink_module do
     Application.get_env(:arbor_signals, :durable_sink_module, nil)
+  end
+
+  @doc """
+  Module implementing `Arbor.Signals.Contracts.Authorization`, or `nil`.
+
+  Standalone and test default is `nil`. Umbrella runtime or tests inject
+  a concrete module; this library never hardcodes that provider.
+  """
+  @spec security_module() :: module() | nil | term()
+  def security_module do
+    Application.get_env(:arbor_signals, :security_module, nil)
+  end
+
+  @doc """
+  Module implementing `Arbor.Signals.Contracts.Crypto`, or `nil`.
+
+  Standalone and test default is `nil`. Umbrella runtime or tests inject
+  a concrete module; this library never hardcodes that provider.
+  """
+  @spec crypto_module() :: module() | nil | term()
+  def crypto_module do
+    Application.get_env(:arbor_signals, :crypto_module, nil)
+  end
+
+  @doc """
+  Module implementing `Arbor.Signals.Contracts.IdentityKeys`, or `nil`.
+
+  Standalone and test default is `nil`. Umbrella runtime or tests inject
+  a concrete module; this library never hardcodes that provider.
+  """
+  @spec identity_registry_module() :: module() | nil | term()
+  def identity_registry_module do
+    Application.get_env(:arbor_signals, :identity_registry_module, nil)
   end
 end

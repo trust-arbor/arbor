@@ -1,10 +1,9 @@
 defmodule Arbor.Signals.Test.MockCrypto do
   @moduledoc """
-  Mock crypto module for signal tests.
+  Test-local crypto fake for Signals.
 
-  Arbor.Security.Crypto is not available in arbor_signals tests
-  (same hierarchy level, no cross-dep). This provides a compatible
-  implementation using :crypto directly.
+  arbor_signals is L1 and must not depend on arbor_security (L2).
+  Compatible encrypt/decrypt/seal/unseal using :crypto directly.
   """
 
   def generate_encryption_keypair do

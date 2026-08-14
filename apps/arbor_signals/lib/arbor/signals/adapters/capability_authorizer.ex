@@ -2,76 +2,51 @@ defmodule Arbor.Signals.Adapters.CapabilityAuthorizer do
   @moduledoc """
   Capability-based subscription authorizer.
 
-  Checks whether a principal has a capability granting access to the
-  `arbor://signals/subscribe/{topic}` resource via `Arbor.Security.authorize/3`.
-  Uses the full authorization pipeline (identity verification, constraints,
-  reflexes, escalation, and audit logging) for all topics.
+  Checks whether a principal has a capability granting access to
+  `arbor://signals/subscribe/<topic>` by forwarding a bounded request to
+  the configured authorization provider (`:security_module`).
 
-  This is the recommended authorizer for dev/prod environments where the
-  security kernel is running.
+  The provider is selected via `Arbor.Signals.Config.security_module/0`.
+  Standalone and test default is `nil` (fail closed). Non-test runtime
+  injects the production implementation.
 
-  ## Runtime Bridge Pattern
+  This authorizer does not verify session tokens. When `:session_token`
+  is present it is forwarded raw so the provider retains identity,
+  binding, redaction, capability, approval, and audit enforcement.
 
-  Uses `Code.ensure_loaded?/1` + `apply/3` to resolve `Arbor.Security` at
-  runtime. This avoids a compile-time dependency from `arbor_signals` (Level 1)
-  on `arbor_security` (Level 1) — same-level horizontal dependencies are
-  prohibited by the library hierarchy.
-
-  If the security module is not loaded (e.g., during isolated testing), the
-  authorizer falls back to denying the subscription with `{:error, :no_capability}`.
-
-  ## Configuration
-
-  The security facade module can be overridden via:
-
-      config :arbor_signals, :security_module, MyCustomSecurityModule
-
-  Default: `Arbor.Security`
+  Missing, invalid, or failing providers deny with `{:error, :no_capability}`.
   """
 
   @behaviour Arbor.Signals.Behaviours.SubscriptionAuthorizer
 
   require Logger
 
-  @default_security_module Arbor.Security
+  alias Arbor.Signals.Config
+  alias Arbor.Signals.Provider
 
   @impl true
   def authorize_subscription(principal_id, topic, opts \\ []) do
-    security_module = security_module()
     resource_uri = "arbor://signals/subscribe/#{topic}"
+    auth_opts = bounded_session_opts(opts)
 
-    if Code.ensure_loaded?(security_module) and
-         function_exported?(security_module, :authorize, 4) do
-      # Verify identity via session token (humans) or signed request (agents)
-      session_token = Keyword.get(opts, :session_token)
-      token_mod = Arbor.Security.SessionToken
+    case Provider.resolve(Config.security_module(), :authorize, 4) do
+      {:ok, provider} ->
+        map_authorize_result(
+          Provider.invoke(provider, :authorize, [
+            principal_id,
+            resource_uri,
+            :subscribe,
+            auth_opts
+          ])
+        )
 
-      auth_opts =
-        cond do
-          session_token && Code.ensure_loaded?(token_mod) ->
-            # Verify the session token proves this principal
-            case apply(token_mod, :verify, [session_token]) do
-              {:ok, ^principal_id} -> [verify_identity: false]
-              {:ok, _other} -> []
-              {:error, _} -> []
-            end
+      {:error, _reason} ->
+        Logger.warning(
+          "CapabilityAuthorizer: security module #{inspect(Config.security_module())} not loaded, " <>
+            "denying subscription for #{inspect(principal_id)} to #{inspect(resource_uri)}"
+        )
 
-          true ->
-            []
-        end
-
-      case apply(security_module, :authorize, [principal_id, resource_uri, :subscribe, auth_opts]) do
-        {:ok, :authorized} -> {:ok, :authorized}
-        {:ok, :pending_approval, _} -> {:error, :pending_approval}
-        {:error, _reason} -> {:error, :no_capability}
-      end
-    else
-      Logger.warning(
-        "CapabilityAuthorizer: security module #{inspect(security_module)} not loaded, " <>
-          "denying subscription for #{inspect(principal_id)} to #{inspect(resource_uri)}"
-      )
-
-      {:error, :no_capability}
+        {:error, :no_capability}
     end
   rescue
     error ->
@@ -81,10 +56,34 @@ defmodule Arbor.Signals.Adapters.CapabilityAuthorizer do
       )
 
       {:error, :no_capability}
+  catch
+    :throw, _ -> {:error, :no_capability}
+    :exit, _ -> {:error, :no_capability}
   end
 
-  @doc false
-  def security_module do
-    Application.get_env(:arbor_signals, :security_module, @default_security_module)
+  defp map_authorize_result({:ok, {:ok, :authorized}}), do: {:ok, :authorized}
+
+  defp map_authorize_result({:ok, {:ok, :pending_approval, _id}}),
+    do: {:error, :pending_approval}
+
+  defp map_authorize_result({:ok, {:error, _reason}}), do: {:error, :no_capability}
+  defp map_authorize_result({:ok, _malformed}), do: {:error, :no_capability}
+  defp map_authorize_result({:error, :provider_raised, _mod}), do: {:error, :no_capability}
+  defp map_authorize_result({:error, :provider_threw}), do: {:error, :no_capability}
+  defp map_authorize_result({:error, :provider_exited}), do: {:error, :no_capability}
+
+  defp bounded_session_opts(opts) when is_list(opts) do
+    if Keyword.keyword?(opts) do
+      Enum.map(Keyword.get_values(opts, :session_token), &{:session_token, &1})
+    else
+      []
+    end
+  rescue
+    _ -> []
   end
+
+  defp bounded_session_opts(_opts), do: []
+
+  @doc false
+  def security_module, do: Config.security_module()
 end

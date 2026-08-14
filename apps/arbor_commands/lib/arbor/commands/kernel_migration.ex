@@ -154,50 +154,31 @@ defmodule Arbor.Commands.KernelMigration do
   end
 
   defp load_evidence_blobs(root, boundary, formatter, opts, false) do
-    required = required_blob_paths(boundary, formatter, opts)
-    optional = expected_absent_config_paths(formatter["configs"] || [])
-    paths = Enum.uniq(required ++ optional)
+    paths = evidence_blob_paths(boundary, formatter, opts)
     git_opts = Keyword.take(opts, [:run_git, :max_blob_bytes, :max_total_bytes])
 
     case GitInventory.query_indexed_blobs(root, paths, git_opts) do
-      {:ok, %{present: files, absent: absent}} ->
-        missing_required = Enum.filter(required, &(&1 in absent))
-
-        if missing_required == [] do
-          {:ok, Map.new(files, fn f -> {f.path, f} end)}
-        else
-          {:error, {:blob_missing, hd(missing_required)}}
-        end
+      {:ok, %{present: files}} ->
+        {:ok, Map.new(files, fn f -> {f.path, f} end)}
 
       {:error, _} = err ->
         err
     end
   end
 
-  defp required_blob_paths(boundary, formatter, opts) do
-    disposition_files =
-      case Keyword.get(opts, :disposition_files) do
-        list when is_list(list) -> list
-        _ -> []
-      end
-
+  defp evidence_blob_paths(boundary, formatter, opts) do
     (Enum.map(boundary["entries"] || [], & &1["current_path"]) ++
        Enum.map(formatter["files"] || [], & &1["current_path"]) ++
-       present_config_paths(formatter["configs"] || []) ++
-       disposition_files)
+       Enum.map(formatter["configs"] || [], & &1["path"]) ++
+       disposition_file_paths(opts))
     |> Enum.uniq()
   end
 
-  defp present_config_paths(configs) do
-    configs
-    |> Enum.filter(&(&1["status"] == "present"))
-    |> Enum.map(& &1["path"])
-  end
-
-  defp expected_absent_config_paths(configs) do
-    configs
-    |> Enum.filter(&(&1["status"] == "expected_absent"))
-    |> Enum.map(& &1["path"])
+  defp disposition_file_paths(opts) do
+    case Keyword.get(opts, :disposition_files) do
+      list when is_list(list) -> list
+      _ -> []
+    end
   end
 
   defp resolve_root(nil), do: SourceCoupling.discover_root(File.cwd!())

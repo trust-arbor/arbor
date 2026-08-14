@@ -450,6 +450,9 @@ end
 # ============================================================================
 if config_env() != :test do
   config :arbor_signals, durable_sink_module: Arbor.Historian
+  config :arbor_signals, security_module: Arbor.Security
+  config :arbor_signals, crypto_module: Arbor.Security
+  config :arbor_signals, identity_registry_module: Arbor.Security
 end
 
 # ============================================================================
