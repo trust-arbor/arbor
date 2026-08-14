@@ -23,10 +23,12 @@ defmodule Arbor.Persistence do
   """
 
   @behaviour Arbor.Contracts.API.Persistence
+  @behaviour Arbor.Common.AgentTelemetry.Persistence
 
   alias Arbor.Contracts.Persistence.{AppendOperation, Filter, Record}
 
   alias Arbor.Persistence.{
+    AgentTelemetry,
     BufferedStore,
     Event,
     EventLog,
@@ -218,6 +220,29 @@ defmodule Arbor.Persistence do
   @doc "Fetch a stored skill record map by name, or nil."
   @spec get_skill_record(String.t()) :: map() | nil
   def get_skill_record(name) when is_binary(name), do: SkillSearch.get_record_map(name)
+
+  # ---------------------------------------------------------------
+  # Agent telemetry events (Common-owned persistence port)
+  # ---------------------------------------------------------------
+
+  @doc "Insert one agent telemetry event into the durable store."
+  @spec persist_event(String.t(), atom(), map()) :: :ok | {:error, :repo_unavailable | term()}
+  @impl Arbor.Common.AgentTelemetry.Persistence
+  def persist_event(agent_id, event_type, data),
+    do: AgentTelemetry.persist_event(agent_id, event_type, data)
+
+  @doc "Load lifetime telemetry aggregates for one agent, or nil."
+  @spec load_lifetime(String.t()) :: map() | nil
+  @impl Arbor.Common.AgentTelemetry.Persistence
+  def load_lifetime(agent_id), do: AgentTelemetry.load_lifetime(agent_id)
+
+  @doc "Query historical telemetry events for one agent."
+  @spec query_events(String.t(), keyword()) ::
+          {:ok, [map()]} | {:error, :repo_unavailable | term()}
+  def query_events(agent_id, opts \\ [])
+
+  @impl Arbor.Common.AgentTelemetry.Persistence
+  def query_events(agent_id, opts), do: AgentTelemetry.query_events(agent_id, opts)
 
   # ---------------------------------------------------------------
   # Legacy memory embeddings

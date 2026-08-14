@@ -516,55 +516,174 @@ defmodule Arbor.Common.AgentTelemetry.StoreTest do
     end
   end
 
-  # These guard the 2026-08-06 fix. query_events/2 built raw SQL with Postgres
-  # positional placeholders and rescued EVERY failure into {:ok, []}. On the
-  # DEFAULT dev/test adapter (SQLite unless ARBOR_DB=postgres) that meant every
-  # query failed and reported "no events" — a silent, total telemetry blackout.
-  # agent_task_runner.ex had already worked around it by reading signals instead.
-  describe "query_events/2 adapter portability (regression)" do
-    test "SQLite gets anonymous placeholders, not Postgres positional ones" do
-      {clauses, params, _idx} =
-        Store.build_query_conditions("agent_x", [event_type: :tool_call], Ecto.Adapters.SQLite3)
+  describe "persistence provider seam" do
+    setup do
+      original = Application.get_env(:arbor_common, :telemetry_persistence_module, :not_set)
+      test_pid = Application.get_env(:arbor_common, :telemetry_test_pid, :not_set)
 
-      sql = Enum.join(clauses, " AND ")
+      on_exit(fn ->
+        restore_env(:telemetry_persistence_module, original)
+        restore_env(:telemetry_test_pid, test_pid)
+      end)
 
-      refute sql =~ "$1", "SQLite cannot bind Postgres positional placeholders"
-      refute sql =~ ~r/\$\d/
-      assert sql == "agent_id = ? AND event_type = ?"
-      assert params == ["agent_x", "tool_call"]
+      :ok
     end
 
-    test "Postgres keeps positional placeholders, numbered in order" do
-      {clauses, params, _idx} =
-        Store.build_query_conditions(
-          "agent_x",
-          [event_type: :tool_call, since: ~U[2026-01-01 00:00:00Z]],
-          Ecto.Adapters.Postgres
-        )
+    test "nil provider updates ETS, returns :ok, and reports query/load absence" do
+      Application.delete_env(:arbor_common, :telemetry_persistence_module)
+      assert Arbor.Common.Config.telemetry_persistence_module() == nil
 
-      assert Enum.join(clauses, " AND ") ==
-               "agent_id = $1 AND event_type = $2 AND timestamp >= $3"
-
-      assert length(params) == 3
+      assert Store.record_turn("agent_nil", %{input_tokens: 7, cost: 0.01}) == :ok
+      t = Store.get("agent_nil")
+      assert %Telemetry{} = t
+      assert t.session_input_tokens == 7
+      assert t.lifetime_input_tokens == 7
+      assert Store.load_lifetime_from_db("agent_nil") == nil
+      assert {:error, :repo_unavailable} = Store.query_events("agent_nil")
     end
 
-    test "an unknown adapter falls back to anonymous placeholders" do
-      {clauses, _params, _idx} = Store.build_query_conditions("agent_x", [], :some_other_adapter)
-      assert clauses == ["agent_id = ?"]
+    test "provider query error is {:error, reason}, never {:ok, []}" do
+      Application.put_env(
+        :arbor_common,
+        :telemetry_persistence_module,
+        Arbor.Common.AgentTelemetry.StoreTest.ErrorProvider
+      )
+
+      assert {:error, :boom} = Store.query_events("agent_err")
+      refute match?({:ok, []}, Store.query_events("agent_err"))
+    end
+
+    test "provider load failure still creates a zeroed in-memory row" do
+      Application.put_env(
+        :arbor_common,
+        :telemetry_persistence_module,
+        Arbor.Common.AgentTelemetry.StoreTest.RaisingLoadProvider
+      )
+
+      assert Store.load_lifetime_from_db("agent_load_fail") == nil
+      assert Store.record_turn("agent_load_fail", %{input_tokens: 4}) == :ok
+      t = Store.get("agent_load_fail")
+      assert t.session_input_tokens == 4
+      assert t.lifetime_input_tokens == 4
+      assert t.turn_count == 1
+    end
+
+    test "raising persist cannot crash record_tool and still updates ETS" do
+      Application.put_env(:arbor_common, :telemetry_test_pid, self())
+
+      Application.put_env(
+        :arbor_common,
+        :telemetry_persistence_module,
+        Arbor.Common.AgentTelemetry.StoreTest.RaisingPersistProvider
+      )
+
+      assert Store.record_tool("agent_raise", "file.read", :ok, 12) == :ok
+      t = Store.get("agent_raise")
+      assert t.tool_stats["file.read"].succeeded == 1
+      assert_receive {:persist_called, "agent_raise", :tool_call}, 200
+    end
+
+    test "happy provider hydrates lifetime on first record and returns events" do
+      Application.put_env(
+        :arbor_common,
+        :telemetry_persistence_module,
+        Arbor.Common.AgentTelemetry.StoreTest.HappyProvider
+      )
+
+      assert Store.record_turn("agent_happy", %{input_tokens: 1}) == :ok
+      t = Store.get("agent_happy")
+      assert t.lifetime_input_tokens == 101
+      assert t.lifetime_output_tokens == 50
+      assert t.turn_count == 4
+      assert t.compaction_count == 1
+
+      assert {:ok, [%{id: "tevt_1", agent_id: "agent_happy"}]} =
+               Store.query_events("agent_happy")
     end
   end
 
-  describe "query_events/2 failure reporting (regression)" do
-    test "a missing repo is an error, never an empty result set" do
-      # "no events" and "the query broke" must stay distinguishable; conflating
-      # them is what let the blackout above go unnoticed.
-      if Process.whereis(Arbor.Persistence.Repo) do
-        assert {:ok, events} = Store.query_events("agent_nonexistent_#{System.unique_integer()}")
-        assert is_list(events)
-      else
-        assert {:error, :repo_unavailable} =
-                 Store.query_events("agent_nonexistent_#{System.unique_integer()}")
-      end
+  defp restore_env(key, :not_set), do: Application.delete_env(:arbor_common, key)
+  defp restore_env(key, value), do: Application.put_env(:arbor_common, key, value)
+end
+
+defmodule Arbor.Common.AgentTelemetry.StoreTest.ErrorProvider do
+  @moduledoc false
+  @behaviour Arbor.Common.AgentTelemetry.Persistence
+
+  @impl true
+  def persist_event(_agent_id, _event_type, _data), do: {:error, :boom}
+
+  @impl true
+  def load_lifetime(_agent_id), do: {:error, :boom}
+
+  @impl true
+  def query_events(_agent_id, _opts), do: {:error, :boom}
+end
+
+defmodule Arbor.Common.AgentTelemetry.StoreTest.RaisingLoadProvider do
+  @moduledoc false
+  @behaviour Arbor.Common.AgentTelemetry.Persistence
+
+  @impl true
+  def persist_event(_agent_id, _event_type, _data), do: :ok
+
+  @impl true
+  def load_lifetime(_agent_id), do: raise("load exploded")
+
+  @impl true
+  def query_events(_agent_id, _opts), do: {:error, :repo_unavailable}
+end
+
+defmodule Arbor.Common.AgentTelemetry.StoreTest.RaisingPersistProvider do
+  @moduledoc false
+  @behaviour Arbor.Common.AgentTelemetry.Persistence
+
+  @impl true
+  def persist_event(agent_id, event_type, _data) do
+    if pid = Application.get_env(:arbor_common, :telemetry_test_pid) do
+      send(pid, {:persist_called, agent_id, event_type})
     end
+
+    raise "persist exploded"
+  end
+
+  @impl true
+  def load_lifetime(_agent_id), do: nil
+
+  @impl true
+  def query_events(_agent_id, _opts), do: {:error, :repo_unavailable}
+end
+
+defmodule Arbor.Common.AgentTelemetry.StoreTest.HappyProvider do
+  @moduledoc false
+  @behaviour Arbor.Common.AgentTelemetry.Persistence
+
+  @impl true
+  def persist_event(_agent_id, _event_type, _data), do: :ok
+
+  @impl true
+  def load_lifetime(_agent_id) do
+    %{
+      turn_count: 3,
+      lifetime_input_tokens: 100,
+      lifetime_output_tokens: 50,
+      lifetime_cached_tokens: 10,
+      lifetime_cost: 0.02,
+      compaction_count: 1
+    }
+  end
+
+  @impl true
+  def query_events(agent_id, _opts) do
+    {:ok,
+     [
+       %{
+         id: "tevt_1",
+         agent_id: agent_id,
+         event_type: "turn_completed",
+         timestamp: ~U[2026-01-01 00:00:00Z],
+         data: %{}
+       }
+     ]}
   end
 end

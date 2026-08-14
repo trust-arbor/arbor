@@ -416,6 +416,7 @@ end
 if config_env() != :test do
   if Code.ensure_loaded?(Arbor.Persistence) do
     config :arbor_common, skill_persistence_module: Arbor.Persistence
+    config :arbor_common, telemetry_persistence_module: Arbor.Persistence
   end
 
   if Code.ensure_loaded?(Arbor.AI) do

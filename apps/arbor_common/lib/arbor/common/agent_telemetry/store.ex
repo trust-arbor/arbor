@@ -6,8 +6,10 @@ defmodule Arbor.Common.AgentTelemetry.Store do
   lifecycle. All reads and writes go directly through ETS (which is
   concurrent-safe for single-key operations), avoiding GenServer bottlenecks.
 
-  Events are persisted asynchronously to Postgres for historical analysis.
-  Lifetime metrics are restored from the database on first access.
+  In-memory updates always succeed. Durable writes go through the configured
+  `Arbor.Common.AgentTelemetry.Persistence` provider asynchronously and cannot
+  crash callers. Lifetime metrics are restored from that provider on first
+  access when one is configured.
 
   ## Usage
 
@@ -31,6 +33,7 @@ defmodule Arbor.Common.AgentTelemetry.Store do
   require Logger
 
   alias Arbor.Common.AgentTelemetry
+  alias Arbor.Common.Config
   alias Arbor.Contracts.Agent.Telemetry
 
   @table :arbor_agent_telemetry
@@ -63,18 +66,19 @@ defmodule Arbor.Common.AgentTelemetry.Store do
 
   @doc """
   Record a completed LLM turn. Auto-creates telemetry if agent is new.
-  Persists the event asynchronously to Postgres.
+  Persists the event asynchronously through the configured provider.
   """
   @spec record_turn(String.t(), map()) :: :ok
   def record_turn(agent_id, usage) when is_binary(agent_id) and is_map(usage) do
     telemetry = get_or_create(agent_id)
     put(agent_id, AgentTelemetry.record_turn(telemetry, usage))
     persist_event(agent_id, :turn_completed, usage)
+    :ok
   end
 
   @doc """
   Record a tool call. Auto-creates telemetry if agent is new.
-  Persists the event asynchronously to Postgres.
+  Persists the event asynchronously through the configured provider.
   """
   @spec record_tool(String.t(), String.t(), :ok | :error | :gated, non_neg_integer()) :: :ok
   def record_tool(agent_id, tool_name, result, duration_ms)
@@ -87,28 +91,32 @@ defmodule Arbor.Common.AgentTelemetry.Store do
       result: result,
       duration_ms: duration_ms
     })
+
+    :ok
   end
 
   @doc """
   Record a sensitivity routing decision. Auto-creates telemetry if agent is new.
-  Persists the event asynchronously to Postgres.
+  Persists the event asynchronously through the configured provider.
   """
   @spec record_routing(String.t(), :classified | :rerouted | :tokenized | :blocked) :: :ok
   def record_routing(agent_id, decision) when is_binary(agent_id) do
     telemetry = get_or_create(agent_id)
     put(agent_id, AgentTelemetry.record_routing(telemetry, decision))
     persist_event(agent_id, :routing_decision, %{decision: decision})
+    :ok
   end
 
   @doc """
   Record a context compaction event. Auto-creates telemetry if agent is new.
-  Persists the event asynchronously to Postgres.
+  Persists the event asynchronously through the configured provider.
   """
   @spec record_compaction(String.t(), float()) :: :ok
   def record_compaction(agent_id, utilization_pct) when is_binary(agent_id) do
     telemetry = get_or_create(agent_id)
     put(agent_id, AgentTelemetry.record_compaction(telemetry, utilization_pct))
     persist_event(agent_id, :compaction, %{utilization: utilization_pct})
+    :ok
   end
 
   @doc """
@@ -149,49 +157,34 @@ defmodule Arbor.Common.AgentTelemetry.Store do
   # ===========================================================================
 
   @doc """
-  Load lifetime aggregate metrics from the database for an agent.
+  Load lifetime aggregate metrics from the configured provider for an agent.
 
-  Queries aggregate values (SUM tokens, SUM cost, COUNT turns, etc.) via
-  raw SQL rather than replaying every event.
-
-  Returns a map of lifetime metrics or `nil` if the database is unavailable.
+  Returns a map of lifetime metrics or `nil` if no provider is configured or
+  the durable store is unavailable.
   """
   @spec load_lifetime_from_db(String.t()) :: map() | nil
   def load_lifetime_from_db(agent_id) when is_binary(agent_id) do
-    with {:ok, repo} <- get_repo() do
-      sql = """
-      SELECT
-        COUNT(*) FILTER (WHERE event_type = 'turn_completed') AS turn_count,
-        COALESCE(SUM((data->>'input_tokens')::bigint) FILTER (WHERE event_type = 'turn_completed'), 0) AS total_input,
-        COALESCE(SUM((data->>'output_tokens')::bigint) FILTER (WHERE event_type = 'turn_completed'), 0) AS total_output,
-        COALESCE(SUM((data->>'cached_tokens')::bigint) FILTER (WHERE event_type = 'turn_completed'), 0) AS total_cached,
-        COALESCE(SUM((data->>'cost')::float) FILTER (WHERE event_type = 'turn_completed'), 0.0) AS total_cost,
-        COUNT(*) FILTER (WHERE event_type = 'compaction') AS compaction_count
-      FROM telemetry_events
-      WHERE agent_id = $1
-      """
+    case persistence_module() do
+      nil ->
+        nil
 
-      case apply(repo, :query, [sql, [agent_id]]) do
-        {:ok, %{rows: [[tc, ti, to_, tca, tco, cc]]}} ->
-          %{
-            turn_count: tc,
-            lifetime_input_tokens: ti,
-            lifetime_output_tokens: to_,
-            lifetime_cached_tokens: tca,
-            lifetime_cost: tco,
-            compaction_count: cc
-          }
-
-        _ ->
-          nil
-      end
-    else
-      _ -> nil
+      provider ->
+        case provider.load_lifetime(agent_id) do
+          map when is_map(map) -> map
+          _ -> nil
+        end
     end
   rescue
     e ->
       Logger.debug(
         "[Telemetry.Store] Failed to load lifetime for #{agent_id}: #{Exception.message(e)}"
+      )
+
+      nil
+  catch
+    kind, reason ->
+      Logger.debug(
+        "[Telemetry.Store] Failed to load lifetime for #{agent_id}: #{inspect({kind, reason})}"
       )
 
       nil
@@ -208,7 +201,7 @@ defmodule Arbor.Common.AgentTelemetry.Store do
   - `:limit` - max number of events (default 100)
   - `:order` - `:asc` or `:desc` (default `:desc`)
 
-  Returns `{:error, :repo_unavailable}` when no repo is running and
+  Returns `{:error, :repo_unavailable}` when no provider is configured and
   `{:error, reason}` when the query itself fails. It deliberately does NOT
   report a failure as an empty result: "no events" and "the query broke" are
   different facts, and conflating them hid a total telemetry blackout on the
@@ -216,48 +209,35 @@ defmodule Arbor.Common.AgentTelemetry.Store do
   """
   @spec query_events(String.t(), keyword()) :: {:ok, [map()]} | {:error, term()}
   def query_events(agent_id, opts \\ []) when is_binary(agent_id) do
-    with {:ok, repo} <- get_repo() do
-      limit_val = Keyword.get(opts, :limit, 100)
-      order = if Keyword.get(opts, :order, :desc) == :asc, do: "ASC", else: "DESC"
+    case persistence_module() do
+      nil ->
+        {:error, :repo_unavailable}
 
-      {where_clauses, params, _idx} =
-        build_query_conditions(agent_id, opts, repo_adapter(repo))
+      provider ->
+        case provider.query_events(agent_id, opts) do
+          {:ok, events} when is_list(events) ->
+            {:ok, events}
 
-      sql = """
-      SELECT id, agent_id, event_type, timestamp, data
-      FROM telemetry_events
-      WHERE #{Enum.join(where_clauses, " AND ")}
-      ORDER BY timestamp #{order}
-      LIMIT #{limit_val}
-      """
+          {:error, :repo_unavailable} = err ->
+            err
 
-      case apply(repo, :query, [sql, params]) do
-        {:ok, %{rows: rows}} ->
-          events =
-            Enum.map(rows, fn [id, aid, etype, ts, data] ->
-              %{
-                id: id,
-                agent_id: aid,
-                event_type: etype,
-                timestamp: ts,
-                data: data || %{}
-              }
-            end)
+          {:error, reason} ->
+            Logger.warning("[Telemetry.Store] Event query failed: #{inspect(reason)}")
+            {:error, reason}
 
-          {:ok, events}
-
-        {:error, reason} ->
-          Logger.warning("[Telemetry.Store] Event query failed: #{inspect(reason)}")
-          {:error, reason}
-      end
-    else
-      {:error, :unavailable} -> {:error, :repo_unavailable}
-      other -> other
+          other ->
+            Logger.warning("[Telemetry.Store] Event query failed: #{inspect(other)}")
+            {:error, other}
+        end
     end
   rescue
     e ->
       Logger.warning("[Telemetry.Store] Failed to query events: #{Exception.message(e)}")
       {:error, e}
+  catch
+    kind, reason ->
+      Logger.warning("[Telemetry.Store] Failed to query events: #{inspect({kind, reason})}")
+      {:error, {kind, reason}}
   end
 
   # ===========================================================================
@@ -288,7 +268,7 @@ defmodule Arbor.Common.AgentTelemetry.Store do
   defp get_or_create(agent_id) do
     case get(agent_id) do
       nil ->
-        # Try to restore lifetime metrics from DB on first access
+        # Try to restore lifetime metrics from the provider on first access
         base = AgentTelemetry.new(agent_id)
 
         case load_lifetime_from_db(agent_id) do
@@ -312,111 +292,46 @@ defmodule Arbor.Common.AgentTelemetry.Store do
     end
   end
 
-  # Placeholder syntax is adapter-specific: Postgres wants positional $1/$2,
-  # SQLite3 wants anonymous `?`. arbor_common (L0/L1) cannot depend on
-  # arbor_persistence, so these queries are raw SQL executed through the repo
-  # by apply/3 — which means the placeholder style has to be chosen here rather
-  # than by Ecto. Hardcoding $n made every query fail on the DEFAULT dev
-  # adapter (config/dev.exs: SQLite unless ARBOR_DB=postgres); the failure was
-  # swallowed into an empty list, so callers saw "no telemetry" instead of an
-  # error. See agent_task_runner.ex, which worked around it by reading signals.
-  defp placeholder(Ecto.Adapters.Postgres, idx), do: "$#{idx}"
-  defp placeholder(_adapter, _idx), do: "?"
-
-  defp repo_adapter(repo) do
-    repo.__adapter__()
-  rescue
-    _ -> :unknown
-  end
-
-  @doc false
-  # Public only so the adapter-portability regression can assert on the emitted
-  # placeholder style without standing up two live repos.
-  def build_query_conditions(agent_id, opts, adapter) do
-    clauses = ["agent_id = #{placeholder(adapter, 1)}"]
-    params = [agent_id]
-    idx = 2
-
-    {clauses, params, idx} =
-      case Keyword.get(opts, :event_type) do
-        nil ->
-          {clauses, params, idx}
-
-        type ->
-          {clauses ++ ["event_type = #{placeholder(adapter, idx)}"], params ++ [to_string(type)],
-           idx + 1}
-      end
-
-    {clauses, params, idx} =
-      case Keyword.get(opts, :since) do
-        nil ->
-          {clauses, params, idx}
-
-        since ->
-          {clauses ++ ["timestamp >= #{placeholder(adapter, idx)}"], params ++ [since], idx + 1}
-      end
-
-    {clauses, params, _idx} =
-      case Keyword.get(opts, :until) do
-        nil ->
-          {clauses, params, idx}
-
-        until_dt ->
-          {clauses ++ ["timestamp <= #{placeholder(adapter, idx)}"], params ++ [until_dt],
-           idx + 1}
-      end
-
-    {clauses, params, idx}
-  end
-
-  # Persist a telemetry event asynchronously to Postgres.
+  # Persist a telemetry event asynchronously through the configured provider.
   # Errors are logged inside the task body (never swallowed silently).
   defp persist_event(agent_id, event_type, data) do
-    Task.start(fn ->
-      try do
-        persist_event_sync(agent_id, event_type, data)
-      rescue
-        e ->
-          Logger.debug(
-            "[Telemetry.Store] Persist failed for #{agent_id}/#{event_type}: #{Exception.message(e)}"
-          )
-      catch
-        kind, reason ->
-          Logger.debug(
-            "[Telemetry.Store] Persist failed for #{agent_id}/#{event_type}: #{inspect({kind, reason})}"
-          )
-      end
-    end)
-  end
+    case persistence_module() do
+      nil ->
+        :ok
 
-  defp persist_event_sync(agent_id, event_type, data) do
-    with {:ok, repo} <- get_repo(),
-         {:ok, schema_mod} <- get_schema_mod(),
-         {:ok, contract_mod} <- get_contract_mod() do
-      event = apply(contract_mod, :new, [agent_id, event_type, data])
-      attrs = apply(schema_mod, :from_contract, [event])
-      changeset = apply(schema_mod, :changeset, [struct(schema_mod), attrs])
-      apply(repo, :insert, [changeset])
+      provider ->
+        Task.start(fn ->
+          try do
+            case provider.persist_event(agent_id, event_type, data) do
+              :ok ->
+                :ok
+
+              {:error, reason} ->
+                Logger.debug(
+                  "[Telemetry.Store] Persist failed for #{agent_id}/#{event_type}: #{inspect(reason)}"
+                )
+            end
+          rescue
+            e ->
+              Logger.debug(
+                "[Telemetry.Store] Persist failed for #{agent_id}/#{event_type}: #{Exception.message(e)}"
+              )
+          catch
+            kind, reason ->
+              Logger.debug(
+                "[Telemetry.Store] Persist failed for #{agent_id}/#{event_type}: #{inspect({kind, reason})}"
+              )
+          end
+        end)
+
+        :ok
     end
   end
 
-  defp get_repo do
-    mod = Arbor.Persistence.Repo
-
-    if Code.ensure_loaded?(mod) and Process.whereis(mod) != nil do
-      {:ok, mod}
-    else
-      {:error, :unavailable}
+  defp persistence_module do
+    case Config.telemetry_persistence_module() do
+      mod when is_atom(mod) and not is_nil(mod) -> mod
+      _ -> nil
     end
-  end
-
-  defp get_schema_mod do
-    mod = Arbor.Persistence.Schemas.TelemetryEvent
-    if Code.ensure_loaded?(mod), do: {:ok, mod}, else: {:error, :unavailable}
-  end
-
-  defp get_contract_mod do
-    mod = Arbor.Contracts.Agent.TelemetryEvent
-    if Code.ensure_loaded?(mod), do: {:ok, mod}, else: {:error, :unavailable}
   end
 end

@@ -2,9 +2,9 @@ defmodule Arbor.Common.Config do
   @moduledoc """
   Application env for `arbor_common`.
 
-  Skill hybrid-search seams default to `nil` (disabled). Umbrella runtime or
-  tests inject concrete modules; this library never hardcodes persistence or
-  embedding providers.
+  Skill hybrid-search and telemetry persistence seams default to `nil`
+  (disabled). Umbrella runtime or tests inject concrete modules; this library
+  never hardcodes persistence or embedding providers.
   """
 
   @doc "Module implementing `Arbor.Contracts.API.Embedding`, or `nil`."
@@ -24,6 +24,17 @@ defmodule Arbor.Common.Config do
   @spec skill_persistence_module() :: module() | nil
   def skill_persistence_module do
     Application.get_env(:arbor_common, :skill_persistence_module, nil)
+  end
+
+  @doc """
+  Module implementing `Arbor.Common.AgentTelemetry.Persistence`, or `nil`.
+
+  Expected callbacks when configured: `persist_event/3`, `load_lifetime/1`,
+  `query_events/2`.
+  """
+  @spec telemetry_persistence_module() :: module() | nil
+  def telemetry_persistence_module do
+    Application.get_env(:arbor_common, :telemetry_persistence_module, nil)
   end
 
   @doc "Expected embedding dimensionality (default 768). Always a positive integer."
