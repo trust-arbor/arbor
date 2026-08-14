@@ -191,6 +191,38 @@ defmodule Arbor.Contracts.AdmissionTest do
     assert @grandfathered["lib/arbor/contracts/handler/scoped_context.ex"] == "AC-12 pending"
   end
 
+  test "K1A: spec stays a local structural type without a new contracts module", %{
+    live: live,
+    by_path: by_path
+  } do
+    e = by_path["lib/arbor/contracts/agent/spec.ex"]
+    assert e
+
+    assert @grandfathered["lib/arbor/contracts/agent/spec.ex"] ==
+             "AC-08 evicts to arbor_agent"
+
+    refute Enum.any?(live.entries, fn entry ->
+             String.starts_with?(entry.path, "lib/arbor/contracts/agent/spec/")
+           end)
+
+    refute Enum.any?(live.entries, fn entry ->
+             Enum.any?(List.wrap(entry.modules), fn mod ->
+               to_string(mod) in [
+                 "Arbor.Contracts.Agent.Spec.Character",
+                 "Elixir.Arbor.Contracts.Agent.Spec.Character"
+               ]
+             end)
+           end)
+
+    spec_src =
+      __DIR__
+      |> Path.join("../../../lib/arbor/contracts/agent/spec.ex")
+      |> Path.expand()
+      |> File.read!()
+
+    refute spec_src =~ "Arbor.Agent.Character"
+  end
+
   # ---------------------------------------------------------------------------
   # AC-2 counting fixtures
   # ---------------------------------------------------------------------------

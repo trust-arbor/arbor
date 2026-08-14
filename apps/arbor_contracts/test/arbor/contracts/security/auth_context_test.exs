@@ -27,6 +27,44 @@ defmodule Arbor.Contracts.Security.AuthContextTest do
       assert ctx.trust_baseline == :allow
       assert ctx.session_id == "sess_1"
     end
+
+    test "accepts capabilities and trust fields as constructor data" do
+      cap = %{id: "cap_injected"}
+
+      ctx =
+        AuthContext.new("agent_123",
+          capabilities: [cap],
+          trust_baseline: :auto,
+          trust_rules: %{"arbor://fs/" => :allow}
+        )
+
+      assert ctx.capabilities == [cap]
+      assert ctx.trust_baseline == :auto
+      assert ctx.trust_rules == %{"arbor://fs/" => :allow}
+    end
+  end
+
+  describe "load/1 removed (K1A)" do
+    test "does not export a side-effecting load API" do
+      refute function_exported?(AuthContext, :load, 1)
+    end
+
+    test "source has no store references or dynamic package hides" do
+      src =
+        __DIR__
+        |> Path.join("../../../../lib/arbor/contracts/security/auth_context.ex")
+        |> Path.expand()
+        |> File.read!()
+
+      refute src =~ "Arbor.Security"
+      refute src =~ "Arbor.Trust"
+      refute src =~ "CapabilityStore"
+      refute src =~ "Trust.Store"
+      refute src =~ "Code.ensure_loaded?"
+      refute src =~ "function_exported?"
+      refute src =~ "Module.concat"
+      refute src =~ "apply("
+    end
   end
 
   describe "mark_verified/1" do

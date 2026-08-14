@@ -2117,7 +2117,7 @@ defmodule Arbor.Security do
         signer: Keyword.get(opts, :signer),
         session_id: Keyword.get(opts, :session_id)
       )
-      |> AuthContext.load()
+      |> populate_store_capabilities()
 
     # `identity_verified: true` is set by callers that have ALREADY verified the
     # signer's per-request signature upstream (e.g. the Gateway's
@@ -2128,6 +2128,19 @@ defmodule Arbor.Security do
       do: AuthContext.mark_verified(ctx),
       else: ctx
   end
+
+  defp populate_store_capabilities(%{capabilities: []} = ctx) do
+    case CapabilityStore.list_for_principal(ctx.principal_id) do
+      {:ok, caps} when is_list(caps) -> %{ctx | capabilities: caps}
+      _ -> ctx
+    end
+  rescue
+    _ -> ctx
+  catch
+    :exit, _ -> ctx
+  end
+
+  defp populate_store_capabilities(ctx), do: ctx
 
   # Look up capability for side-effect operations (max_uses, receipt).
   @impl Arbor.Contracts.API.Security

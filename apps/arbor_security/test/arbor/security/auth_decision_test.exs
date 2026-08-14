@@ -22,6 +22,29 @@ defmodule Arbor.Security.AuthDecisionTest do
       result = AuthDecision.check("agent_test", "arbor://test")
       assert is_atom(result) or is_tuple(result)
     end
+
+    test "does not export AuthContext.load/1" do
+      refute function_exported?(AuthContext, :load, 1)
+    end
+
+    test "check/4 authorizes a registered principal through a store-granted capability" do
+      {:ok, identity} = Arbor.Security.generate_identity()
+      :ok = Arbor.Security.register_identity(identity)
+      agent_id = identity.agent_id
+      uri = "arbor://historian/query"
+
+      assert {:ok, cap} = Arbor.Security.grant(principal: agent_id, resource: uri)
+      assert is_binary(cap.id)
+
+      on_exit(fn ->
+        _ = Arbor.Security.revoke(cap.id)
+        _ = Arbor.Security.deregister_identity(agent_id)
+      end)
+
+      result = AuthDecision.check(agent_id, uri)
+
+      assert result == :authorized
+    end
   end
 
   describe "human identity registry check (H5 regression)" do
@@ -145,49 +168,25 @@ defmodule Arbor.Security.AuthDecisionTest do
       assert hd(updated.decisions).resource == "arbor://test/first"
     end
 
-    test "wildcard capability matches via CapabilityStore" do
-      # When CapabilityStore is running, AuthDecision uses it (signature verified).
-      # Grant a real capability through the store for this test.
-      agent_id = "agent_wild_test_#{:erlang.unique_integer([:positive])}"
+    test "evaluate/4 resolves a wildcard store-granted capability for a marked-verified principal" do
+      {:ok, identity} = Arbor.Security.generate_identity()
+      :ok = Arbor.Security.register_identity(identity)
+      agent_id = identity.agent_id
+      granted_uri = "arbor://historian/**"
+      target_uri = "arbor://historian/query"
 
-      if Code.ensure_loaded?(Arbor.Security.CapabilityStore) and
-           Process.whereis(Arbor.Security.CapabilityStore) != nil do
-        Arbor.Security.CapabilityStore.put(%Arbor.Contracts.Security.Capability{
-          id: "cap_wild_#{:erlang.unique_integer([:positive])}",
-          resource_uri: "arbor://fs/**",
-          principal_id: agent_id,
-          granted_at: DateTime.utc_now(),
-          constraints: %{}
-        })
+      assert {:ok, granted} = Arbor.Security.grant(principal: agent_id, resource: granted_uri)
 
-        auth = AuthContext.new(agent_id) |> AuthContext.mark_verified()
+      on_exit(fn ->
+        _ = Arbor.Security.revoke(granted.id)
+        _ = Arbor.Security.deregister_identity(agent_id)
+      end)
 
-        case AuthDecision.evaluate(auth, "arbor://fs/read") do
-          {:ok, :authorized, _, _} -> :ok
-          # Trust-gated: wildcard matched but untrusted agent needs approval
-          {:ok, :requires_approval, _, _} -> :ok
-          {:error, {:uri_rejected, _}, _} -> :ok
-          other -> flunk("Unexpected: #{inspect(other)}")
-        end
-      else
-        # CapabilityStore not running — test pre-loaded path
-        cap = %Arbor.Contracts.Security.Capability{
-          id: "cap_wild",
-          resource_uri: "arbor://fs/**",
-          principal_id: agent_id,
-          granted_at: DateTime.utc_now(),
-          constraints: %{}
-        }
+      auth = AuthContext.new(agent_id) |> AuthContext.mark_verified()
+      assert auth.capabilities == []
 
-        auth = AuthContext.new(agent_id, capabilities: [cap]) |> AuthContext.mark_verified()
-
-        case AuthDecision.evaluate(auth, "arbor://fs/read") do
-          {:ok, :authorized, _, _} -> :ok
-          {:ok, :requires_approval, _, _} -> :ok
-          {:error, {:uri_rejected, _}, _} -> :ok
-          other -> flunk("Unexpected: #{inspect(other)}")
-        end
-      end
+      assert {:ok, :authorized, found, _updated} = AuthDecision.evaluate(auth, target_uri)
+      assert found.id == granted.id
     end
   end
 end

@@ -214,4 +214,18 @@ defmodule Arbor.Agent.CharacterTest do
       assert length(char.traits) == 1
     end
   end
+
+  describe "K1A contracts spec field" do
+    test "runtime Character assigned onto contracts Spec keeps struct identity" do
+      char = Character.new(name: "Scout", tone: "concise")
+
+      spec = %Arbor.Contracts.Agent.Spec{
+        display_name: "scout",
+        character: char
+      }
+
+      assert spec.character.name == "Scout"
+      assert spec.character.__struct__ == Character
+    end
+  end
 end

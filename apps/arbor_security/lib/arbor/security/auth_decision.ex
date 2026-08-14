@@ -8,7 +8,7 @@ defmodule Arbor.Security.AuthDecision do
 
   ## Usage with AuthContext (preferred)
 
-      auth = AuthContext.new("agent_123", signer: signer) |> AuthContext.load()
+      auth = AuthContext.new("agent_123", signer: signer)
 
       case AuthDecision.evaluate(auth, "arbor://fs/read") do
         {:ok, :authorized, cap, auth} → proceed (cap is the matching capability)
@@ -106,7 +106,7 @@ defmodule Arbor.Security.AuthDecision do
   def check(principal_id, resource_uri, action \\ :execute, opts \\ []) do
     auth =
       AuthContext.new(principal_id, opts)
-      |> AuthContext.load()
+      |> populate_store_capabilities()
 
     case evaluate(auth, resource_uri, action, opts) do
       {:ok, :authorized, _cap, _auth} -> :authorized
@@ -114,6 +114,21 @@ defmodule Arbor.Security.AuthDecision do
       {:error, reason, _auth} -> {:error, reason}
     end
   end
+
+  defp populate_store_capabilities(%AuthContext{capabilities: []} = ctx) do
+    store = capability_store_module()
+
+    case store.list_for_principal(ctx.principal_id) do
+      {:ok, caps} when is_list(caps) -> %{ctx | capabilities: caps}
+      _ -> ctx
+    end
+  rescue
+    _ -> ctx
+  catch
+    :exit, _ -> ctx
+  end
+
+  defp populate_store_capabilities(ctx), do: ctx
 
   # ===========================================================================
   # Private — pure decision functions

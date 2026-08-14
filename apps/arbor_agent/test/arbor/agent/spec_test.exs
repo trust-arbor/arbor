@@ -184,4 +184,54 @@ defmodule Arbor.Agent.SpecTest do
       assert length(Keyword.get(opts, :capabilities)) == 1
     end
   end
+
+  describe "K1A character identity through public Spec API" do
+    test "new/1 stores the runtime Character struct on the contracts spec" do
+      char = Character.new(name: "TestBot")
+      assert {:ok, %AgentSpec{} = spec} = Spec.new(display_name: "test", character: char)
+      assert spec.character == char
+      assert spec.character.__struct__ == Character
+    end
+
+    test "from_profile/2, to_profile/3, and to_lifecycle_opts/1 keep Character identity" do
+      char = Character.new(name: "TestBot")
+
+      profile = %Profile{
+        agent_id: "agent_123",
+        display_name: "test",
+        character: char,
+        template: "diagnostician",
+        metadata: %{}
+      }
+
+      {:ok, from_profile} = Spec.from_profile(profile, %{})
+      assert from_profile.character == char
+      assert from_profile.character.__struct__ == Character
+
+      {:ok, spec} = Spec.new(display_name: "test", character: char)
+
+      persisted =
+        Spec.to_profile(spec, "agent_abc", %{
+          agent_id: "agent_abc",
+          public_key: :crypto.strong_rand_bytes(32)
+        })
+
+      assert persisted.character == char
+      assert persisted.character.__struct__ == Character
+
+      opts = Spec.to_lifecycle_opts(spec)
+      assert Keyword.get(opts, :character) == char
+      assert Keyword.get(opts, :character).__struct__ == Character
+    end
+
+    test "contracts spec source has no Arbor.Agent.Character token" do
+      src =
+        __DIR__
+        |> Path.join("../../../../arbor_contracts/lib/arbor/contracts/agent/spec.ex")
+        |> Path.expand()
+        |> File.read!()
+
+      refute src =~ "Arbor.Agent.Character"
+    end
+  end
 end

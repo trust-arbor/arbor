@@ -132,6 +132,26 @@ defmodule Arbor.Security.PreloadedFallbackTest do
     end
   end
 
+  describe "K1A load removal does not invent capabilities or weaken strict outage" do
+    test "empty preloaded capabilities deny when the store is down", %{agent_id: agent_id} do
+      uri = "arbor://historian/query"
+      auth = AuthContext.new(agent_id) |> AuthContext.mark_verified()
+      result = AuthDecision.evaluate(auth, uri, :query)
+
+      assert match?({:error, :unauthorized, _}, result)
+    end
+
+    test "strict outage denies even with a signed preloaded cap", %{agent_id: agent_id} do
+      Application.put_env(:arbor_security, :strict_identity_mode, true)
+      uri = "arbor://historian/query"
+      cap = signed_cap(agent_id, uri)
+      auth = AuthContext.new(agent_id, capabilities: [cap]) |> AuthContext.mark_verified()
+      result = AuthDecision.evaluate(auth, uri, :query)
+
+      assert match?({:error, {:unauthorized, :capability_store_unavailable}, _}, result)
+    end
+  end
+
   defp unsigned_cap(agent_id, uri) do
     %Capability{
       id: "cap_pf_#{:erlang.unique_integer([:positive])}",

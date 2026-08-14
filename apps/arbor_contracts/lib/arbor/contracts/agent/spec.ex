@@ -18,13 +18,28 @@ defmodule Arbor.Contracts.Agent.Spec do
   - **Convert**: `to_lifecycle_opts/1` — spec → keyword list for Lifecycle.create (migration)
   """
 
-  alias Arbor.Agent.Character
-
   @type execution_mode :: :session | :direct | :acp
+
+  @type character ::
+          %{
+            optional(:__struct__) => module(),
+            required(:name) => String.t(),
+            optional(:description) => String.t() | nil,
+            optional(:role) => String.t() | nil,
+            optional(:background) => String.t() | nil,
+            optional(:traits) => [map()],
+            optional(:values) => [String.t()],
+            optional(:quirks) => [String.t()],
+            optional(:tone) => String.t() | nil,
+            optional(:style) => String.t() | nil,
+            optional(:knowledge) => [map()],
+            optional(:instructions) => [String.t()]
+          }
+          | nil
 
   @type t :: %__MODULE__{
           display_name: String.t(),
-          character: Character.t() | nil,
+          character: character(),
           template: atom() | String.t() | nil,
           template_module: module() | nil,
           provider: atom() | nil,

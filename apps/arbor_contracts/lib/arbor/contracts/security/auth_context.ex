@@ -2,40 +2,35 @@ defmodule Arbor.Contracts.Security.AuthContext do
   @moduledoc """
   Complete authorization context for a tool call or action.
 
-  Assembled once at the start of an action execution, passed through every
-  layer (action → facade → security). Contains everything needed to make
-  authorization decisions without re-querying ETS or re-verifying identity.
+  Assembled once at the start of an action execution by the owning
+  authorization path, then passed through every layer.
+
+  This module is a pure data constructor and transformer. Callers inject
+  identity, capabilities, and trust fields; this module does not load them.
+  The struct is not a complete authorization decision: the owning path still
+  performs its ordinary store lookup even when capabilities are already
+  present on the struct.
 
   ## Why
 
   Previously, auth data was scattered across opts, context maps, and function
   parameters. Each layer assembled what it needed from fragments — leading to
-  `signed_request` being lost, identity being re-verified (causing deadlocks),
-  and capabilities being re-queried unnecessarily.
+  `signed_request` being lost and identity being re-verified (causing
+  deadlocks).
 
   ## Usage
 
-      # Construct once at action entry point
-      auth = AuthContext.new(agent_id, signer)
+      auth = AuthContext.new(agent_id, signer: signer)
 
-      # Evaluate authorization (pure function)
-      case AuthDecision.evaluate(auth, "arbor://fs/list", :execute) do
-        :authorized → proceed
-        {:requires_approval, cap} → escalate
-        :unauthorized → deny
-      end
-
-      # Pass to facade for sub-operation auth (identity already verified)
-      case AuthDecision.evaluate(auth, "arbor://fs/read", :execute) do
-        :authorized → proceed  # no re-verification, just capability check
-      end
+      # Pass the struct to the authorization decision function.
   """
 
   alias Arbor.Contracts.Security.{Capability, Taint}
 
   @type trust_mode :: :block | :ask | :allow | :auto
 
-  @type decision :: :authorized | {:requires_approval, Capability.t()} | :unauthorized | {:error, term()}
+  @type decision ::
+          :authorized | {:requires_approval, Capability.t()} | :unauthorized | {:error, term()}
 
   @type t :: %__MODULE__{
           # Identity (who)
@@ -80,7 +75,8 @@ defmodule Arbor.Contracts.Security.AuthContext do
   @doc """
   Create a new AuthContext for an agent.
 
-  Loads capabilities and trust profile from ETS stores.
+  Optional fields (`:capabilities`, `:trust_baseline`, `:trust_rules`, and
+  the identity/session keys) are constructor data injected by the caller.
   """
   @spec new(String.t(), keyword()) :: t()
   def new(principal_id, opts \\ []) do
@@ -91,24 +87,10 @@ defmodule Arbor.Contracts.Security.AuthContext do
       session_id: Keyword.get(opts, :session_id),
       tenant_context: Keyword.get(opts, :tenant_context),
       taint_state: Keyword.get(opts, :taint_state),
-      # These get populated by AuthContext.load/1
       trust_baseline: Keyword.get(opts, :trust_baseline, :ask),
       trust_rules: Keyword.get(opts, :trust_rules, %{}),
       capabilities: Keyword.get(opts, :capabilities, [])
     }
-  end
-
-  @doc """
-  Load capabilities and trust profile from stores into the context.
-
-  This is the ONE place where ETS reads happen. After this, all auth
-  decisions are pure functions on the struct.
-  """
-  @spec load(t()) :: t()
-  def load(%__MODULE__{} = ctx) do
-    ctx
-    |> load_capabilities()
-    |> load_trust_profile()
   end
 
   @doc """
@@ -141,52 +123,5 @@ defmodule Arbor.Contracts.Security.AuthContext do
   def record_decision(%__MODULE__{} = ctx, resource, result) do
     entry = %{resource: resource, result: result, at: DateTime.utc_now()}
     %{ctx | decisions: [entry | ctx.decisions]}
-  end
-
-  # ===========================================================================
-  # Private — ETS loading (side effects, called once)
-  # ===========================================================================
-
-  defp load_capabilities(%__MODULE__{principal_id: pid, capabilities: []} = ctx) do
-    cap_store = Arbor.Security.CapabilityStore
-
-    if Code.ensure_loaded?(cap_store) and function_exported?(cap_store, :list_for_principal, 1) do
-      case apply(cap_store, :list_for_principal, [pid]) do
-        {:ok, caps} -> %{ctx | capabilities: caps}
-        _ -> ctx
-      end
-    else
-      ctx
-    end
-  rescue
-    _ -> ctx
-  catch
-    :exit, _ -> ctx
-  end
-
-  # Don't reload if capabilities were pre-loaded
-  defp load_capabilities(ctx), do: ctx
-
-  defp load_trust_profile(%__MODULE__{principal_id: pid} = ctx) do
-    store = Arbor.Trust.Store
-
-    if Code.ensure_loaded?(store) and function_exported?(store, :get_profile, 1) do
-      case apply(store, :get_profile, [pid]) do
-        {:ok, profile} ->
-          %{ctx |
-            trust_baseline: profile.baseline || ctx.trust_baseline,
-            trust_rules: profile.rules || ctx.trust_rules
-          }
-
-        _ ->
-          ctx
-      end
-    else
-      ctx
-    end
-  rescue
-    _ -> ctx
-  catch
-    :exit, _ -> ctx
   end
 end
