@@ -21,7 +21,7 @@ defmodule Arbor.Common.OAuth.HttpClient do
   Callers may pass `:http_client` explicitly. Otherwise the adapter comes from
   application config, defaulting to the bundled `Req` adapter:
 
-      config :arbor_common, :oauth_http_client, Arbor.Common.OAuth.HttpClient.Req
+      config :arbor_kernel, common: [oauth_http_client: Arbor.Common.OAuth.HttpClient.Req]
 
   ## Error vocabulary
 
@@ -257,7 +257,7 @@ defmodule Arbor.Common.OAuth.HttpClient do
   end
 
   defp adapter_from_config do
-    case Application.get_env(:arbor_common, :oauth_http_client, @default_adapter) do
+    case Arbor.Common.Config.oauth_http_client() do
       module when is_atom(module) ->
         if Code.ensure_loaded?(module) and function_exported?(module, :request, 1) do
           {:ok, module}

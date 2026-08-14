@@ -1,11 +1,13 @@
 defmodule Arbor.Common.NodeRegistryTest do
   use ExUnit.Case, async: false
 
+  alias Arbor.Common.Config.Testing
   alias Arbor.Common.NodeRegistry
 
   @moduletag :fast
 
   setup do
+    Testing.isolate_namespace()
     start_supervised!(NodeRegistry)
     :ok
   end
@@ -30,21 +32,11 @@ defmodule Arbor.Common.NodeRegistryTest do
     end
 
     test "enabled when config is a map" do
-      original = Application.get_env(:arbor_common, :trust_zones)
+      Testing.put(:trust_zones, %{
+        node() => %{zone: 2, apps: []}
+      })
 
-      try do
-        Application.put_env(:arbor_common, :trust_zones, %{
-          node() => %{zone: 2, apps: []}
-        })
-
-        refute NodeRegistry.zones_disabled?()
-      after
-        if original do
-          Application.put_env(:arbor_common, :trust_zones, original)
-        else
-          Application.delete_env(:arbor_common, :trust_zones)
-        end
-      end
+      refute NodeRegistry.zones_disabled?()
     end
   end
 
@@ -161,22 +153,12 @@ defmodule Arbor.Common.NodeRegistryTest do
 
   describe "edge cases" do
     test "trust_zone for unregistered node returns 0 when zones enabled" do
-      original = Application.get_env(:arbor_common, :trust_zones)
+      Testing.put(:trust_zones, %{
+        node() => %{zone: 2, apps: []}
+      })
 
-      try do
-        Application.put_env(:arbor_common, :trust_zones, %{
-          node() => %{zone: 2, apps: []}
-        })
-
-        # Unknown node in enabled mode → Zone 0 (hostile)
-        assert NodeRegistry.trust_zone(:unknown_node@somewhere) == 0
-      after
-        if original do
-          Application.put_env(:arbor_common, :trust_zones, original)
-        else
-          Application.delete_env(:arbor_common, :trust_zones)
-        end
-      end
+      # Unknown node in enabled mode → Zone 0 (hostile)
+      assert NodeRegistry.trust_zone(:unknown_node@somewhere) == 0
     end
 
     test "trust_zone works when ETS table doesn't exist" do

@@ -8,7 +8,7 @@ defmodule Arbor.Common.Application do
     install_log_redaction_filter()
 
     optional_children =
-      if Application.get_env(:arbor_common, :start_children, true) do
+      if Arbor.Common.Config.start_children?() do
         [
           # pg scope for cross-node registry discovery
           %{

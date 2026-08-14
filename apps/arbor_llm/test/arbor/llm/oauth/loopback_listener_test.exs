@@ -50,9 +50,9 @@ defmodule Arbor.LLM.OAuth.Login.LoopbackListenerTest do
          [fn -> %{responses: [], requests: [], delay_ms: 0} end, [name: SharedStubClient]]}
     })
 
-    prior_adapter = Application.get_env(:arbor_common, :oauth_http_client)
+    Arbor.Common.Config.Testing.isolate_namespace()
     prior_store_dir = Application.get_env(:arbor_llm, :oauth_store_dir)
-    Application.put_env(:arbor_common, :oauth_http_client, SharedStubClient)
+    Arbor.Common.Config.Testing.put(:oauth_http_client, SharedStubClient)
 
     store_dir =
       Path.join(System.tmp_dir!(), "arbor-loopback-#{System.unique_integer([:positive])}")
@@ -63,7 +63,6 @@ defmodule Arbor.LLM.OAuth.Login.LoopbackListenerTest do
 
     on_exit(fn ->
       stop_all_flows()
-      restore_env(:arbor_common, :oauth_http_client, prior_adapter)
       restore_env(:arbor_llm, :oauth_store_dir, prior_store_dir)
       File.rm_rf(store_dir)
       :sys.replace_state(PendingStore, fn _ -> pending_snapshot end)

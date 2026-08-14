@@ -64,8 +64,8 @@ defmodule Arbor.LLM.OAuth.LoginSecurityRegressionTest do
   alias Arbor.Common.OAuth.HttpClient.Response
 
   setup do
-    prior_adapter = Application.get_env(:arbor_common, :oauth_http_client)
-    Application.put_env(:arbor_common, :oauth_http_client, StubClient)
+    Arbor.Common.Config.Testing.isolate_namespace()
+    Arbor.Common.Config.Testing.put(:oauth_http_client, StubClient)
     StubClient.clear()
 
     prior_store_dir = Application.get_env(:arbor_llm, :oauth_store_dir)
@@ -83,11 +83,6 @@ defmodule Arbor.LLM.OAuth.LoginSecurityRegressionTest do
     pending_snapshot = :sys.get_state(PendingStore)
 
     on_exit(fn ->
-      case prior_adapter do
-        nil -> Application.delete_env(:arbor_common, :oauth_http_client)
-        value -> Application.put_env(:arbor_common, :oauth_http_client, value)
-      end
-
       case prior_store_dir do
         nil -> Application.delete_env(:arbor_llm, :oauth_store_dir)
         value -> Application.put_env(:arbor_llm, :oauth_store_dir, value)

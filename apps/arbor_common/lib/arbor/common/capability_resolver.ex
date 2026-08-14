@@ -197,7 +197,7 @@ defmodule Arbor.Common.CapabilityResolver do
   end
 
   defp config(key, default) do
-    Application.get_env(:arbor_common, :capability_resolver, [])
+    Arbor.Common.Config.capability_resolver()
     |> Keyword.get(key, default)
   end
 end

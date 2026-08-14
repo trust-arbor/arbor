@@ -13,18 +13,25 @@ defmodule Mix.Tasks.Arbor.HandsHelpers do
   def docker_prefix, do: @docker_prefix
 
   def config_dir do
-    cfg = Application.get_env(:arbor_common, :hands, [])
+    cfg = hands_config()
     Path.expand(cfg[:config_dir] || "~/.claude-hands")
   end
 
   def sandbox_image do
-    cfg = Application.get_env(:arbor_common, :hands, [])
+    cfg = hands_config()
     cfg[:sandbox_image] || "claude-sandbox"
   end
 
   def sandbox_credentials_volume do
-    cfg = Application.get_env(:arbor_common, :hands, [])
+    cfg = hands_config()
     cfg[:sandbox_credentials_volume] || "claude-sandbox-credentials"
+  end
+
+  defp hands_config do
+    case Arbor.Common.Config.hands() do
+      cfg when is_list(cfg) or is_map(cfg) -> cfg
+      _ -> []
+    end
   end
 
   def hands_dir, do: Path.join(File.cwd!(), ".arbor/hands")

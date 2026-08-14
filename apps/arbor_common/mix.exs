@@ -15,6 +15,7 @@ defmodule ArborCommon.MixProject do
       deps_path: paths[:deps_path],
       lockfile: "../../mix.lock",
       elixir: "~> 1.18",
+      elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       test_coverage: [
@@ -44,9 +45,13 @@ defmodule ArborCommon.MixProject do
     ]
   end
 
+  defp elixirc_paths(:test), do: ["lib", "test/support"]
+  defp elixirc_paths(_), do: ["lib"]
+
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
+      {:arbor_kernel, in_umbrella: true},
       {:arbor_contracts, in_umbrella: true},
       {:finch, "~> 0.21.0"},
       {:jason, "~> 1.4"},

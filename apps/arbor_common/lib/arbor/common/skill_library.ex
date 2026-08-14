@@ -18,7 +18,7 @@ defmodule Arbor.Common.SkillLibrary do
 
   ## Configuration
 
-      config :arbor_common, :skill_dirs, [".arbor/skills"]
+      config :arbor_kernel, common: [skill_dirs: [".arbor/skills"]]
 
   Directories are resolved relative to `File.cwd!/0` unless absolute.
 
@@ -621,7 +621,7 @@ defmodule Arbor.Common.SkillLibrary do
   end
 
   defp configured_dirs do
-    Application.get_env(:arbor_common, :skill_dirs) || default_skill_dirs()
+    Arbor.Common.Config.skill_dirs() || default_skill_dirs()
   end
 
   @doc """
@@ -640,7 +640,7 @@ defmodule Arbor.Common.SkillLibrary do
   A same-named skill in an earlier dir wins (so a user's `~/.arbor/library/skills/foo` overrides
   the bundled `foo`). Only existing directories are returned, so a missing tier is a no-op.
   `.claude/skills/` is deliberately NOT scanned — that's Claude-Code-CLI-scoped, not runtime-agent
-  skills. Override the whole set via `config :arbor_common, :skill_dirs`.
+  skills. Override the whole set via `config :arbor_kernel, common: [skill_dirs: ...]`.
   """
   @spec default_skill_dirs() :: [String.t()]
   def default_skill_dirs do

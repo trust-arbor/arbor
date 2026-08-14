@@ -3,6 +3,7 @@ defmodule Arbor.Common.SkillLibraryHybridSearchTest do
 
   @moduletag :fast
 
+  alias Arbor.Common.Config.Testing
   alias Arbor.Common.SkillLibrary
   alias Arbor.Common.SkillLibrary.EmbeddingText
   alias Arbor.Contracts.Skill
@@ -310,17 +311,11 @@ defmodule Arbor.Common.SkillLibraryHybridSearchTest do
     if :ets.whereis(:arbor_skill_library) != :undefined, do: :ets.delete(:arbor_skill_library)
 
     FakePersistence.reset()
-
-    original_embed = Application.get_env(:arbor_common, :skill_embedding_module, :not_set)
-    original_persist = Application.get_env(:arbor_common, :skill_persistence_module, :not_set)
-
-    Application.put_env(:arbor_common, :skill_embedding_module, SuccessEmbed)
-    Application.put_env(:arbor_common, :skill_persistence_module, FakePersistence)
+    Testing.isolate_namespace()
+    Testing.put(:skill_embedding_module, SuccessEmbed)
+    Testing.put(:skill_persistence_module, FakePersistence)
 
     on_exit(fn ->
-      restore(:skill_embedding_module, original_embed)
-      restore(:skill_persistence_module, original_persist)
-
       stop_skill_library()
       if :ets.whereis(:arbor_skill_library) != :undefined, do: :ets.delete(:arbor_skill_library)
     end)
@@ -328,9 +323,6 @@ defmodule Arbor.Common.SkillLibraryHybridSearchTest do
     {:ok, _pid} = SkillLibrary.start_link(dirs: [])
     :ok
   end
-
-  defp restore(key, :not_set), do: Application.delete_env(:arbor_common, key)
-  defp restore(key, value), do: Application.put_env(:arbor_common, key, value)
 
   defp stop_skill_library do
     case Process.whereis(SkillLibrary) do
@@ -424,7 +416,7 @@ defmodule Arbor.Common.SkillLibraryHybridSearchTest do
 
       assert :ok = SkillLibrary.register(updated)
 
-      Application.put_env(:arbor_common, :skill_embedding_module, FailEmbed)
+      Testing.put(:skill_embedding_module, FailEmbed)
       assert {:ok, 1} = SkillLibrary.sync_to_store()
       second = FakePersistence.get_skill_record("sync-preserve")
 
@@ -436,7 +428,7 @@ defmodule Arbor.Common.SkillLibraryHybridSearchTest do
 
     test "invalid dimensions do not persist vectors" do
       register_skill("sync-bad-dims")
-      Application.put_env(:arbor_common, :skill_embedding_module, WrongDimsEmbed)
+      Testing.put(:skill_embedding_module, WrongDimsEmbed)
       assert {:ok, 1} = SkillLibrary.sync_to_store()
       upsert = FakePersistence.last_upsert()
       refute Map.has_key?(upsert, :embedding)
@@ -467,7 +459,7 @@ defmodule Arbor.Common.SkillLibraryHybridSearchTest do
     end
 
     test "no-service yields BM25 path metadata and zero-result observability" do
-      Application.put_env(:arbor_common, :skill_embedding_module, nil)
+      Testing.put(:skill_embedding_module, nil)
       FakePersistence.set_search_results([])
 
       assert {:ok, %{results: [], meta: meta}} =
@@ -482,7 +474,7 @@ defmodule Arbor.Common.SkillLibraryHybridSearchTest do
     end
 
     test "blank model is rejected as invalid and does not pass a query vector" do
-      Application.put_env(:arbor_common, :skill_embedding_module, BlankModelEmbed)
+      Testing.put(:skill_embedding_module, BlankModelEmbed)
       FakePersistence.set_search_results([])
 
       assert {:ok, %{meta: meta}} = SkillLibrary.hybrid_search_with_meta("query")
@@ -500,7 +492,7 @@ defmodule Arbor.Common.SkillLibraryHybridSearchTest do
     test "search hybrid: false on postgres-capable backend uses forced-off metadata" do
       FakePersistence.set_capability(:postgres)
       register_skill("forced-ets-skill", "alpha forced keyword")
-      Application.put_env(:arbor_common, :skill_embedding_module, CountingEmbed)
+      Testing.put(:skill_embedding_module, CountingEmbed)
 
       assert {:ok, %{results: results, meta: meta}} =
                SkillLibrary.search_with_meta("alpha", hybrid: false)
@@ -532,29 +524,14 @@ defmodule Arbor.Common.SkillLibraryHybridSearchTest do
         :ets.delete(:arbor_skill_library)
       end
 
-      original_initial =
-        Application.get_env(:arbor_common, :skill_sync_initial_delay_ms, :not_set)
-
-      original_retry =
-        Application.get_env(:arbor_common, :skill_sync_retry_delay_ms, :not_set)
-
-      original_max =
-        Application.get_env(:arbor_common, :skill_sync_max_attempts, :not_set)
-
-      Application.put_env(:arbor_common, :skill_sync_initial_delay_ms, 20)
-      Application.put_env(:arbor_common, :skill_sync_retry_delay_ms, 20)
-      Application.put_env(:arbor_common, :skill_sync_max_attempts, 40)
-      Application.put_env(:arbor_common, :skill_embedding_module, SuccessEmbed)
-      Application.put_env(:arbor_common, :skill_persistence_module, FakePersistence)
+      Testing.put(:skill_sync_initial_delay_ms, 20)
+      Testing.put(:skill_sync_retry_delay_ms, 20)
+      Testing.put(:skill_sync_max_attempts, 40)
+      Testing.put(:skill_embedding_module, SuccessEmbed)
+      Testing.put(:skill_persistence_module, FakePersistence)
 
       FakePersistence.reset()
       FakePersistence.set_capability(:unavailable)
-
-      on_exit(fn ->
-        restore(:skill_sync_initial_delay_ms, original_initial)
-        restore(:skill_sync_retry_delay_ms, original_retry)
-        restore(:skill_sync_max_attempts, original_max)
-      end)
 
       assert {:ok, _pid} = SkillLibrary.start_link(dirs: [])
       # Skill registered while persistence is still unavailable; retries continue.
@@ -589,8 +566,8 @@ defmodule Arbor.Common.SkillLibraryHybridSearchTest do
       stop_skill_library()
       if :ets.whereis(:arbor_skill_library) != :undefined, do: :ets.delete(:arbor_skill_library)
 
-      Application.put_env(:arbor_common, :skill_persistence_module, "not-a-module")
-      Application.put_env(:arbor_common, :skill_embedding_module, SuccessEmbed)
+      Testing.put(:skill_persistence_module, "not-a-module")
+      Testing.put(:skill_embedding_module, SuccessEmbed)
 
       assert {:ok, pid} = SkillLibrary.start_link(dirs: [])
       assert Process.alive?(pid)
@@ -604,7 +581,7 @@ defmodule Arbor.Common.SkillLibraryHybridSearchTest do
       assert Enum.any?(results, fn s -> Map.get(s, :name) == "bad-config-skill" end)
 
       # Restore valid fake for remaining tests / on_exit.
-      Application.put_env(:arbor_common, :skill_persistence_module, FakePersistence)
+      Testing.put(:skill_persistence_module, FakePersistence)
     end
   end
 
@@ -628,7 +605,7 @@ defmodule Arbor.Common.SkillLibraryHybridSearchTest do
 
   describe "capability before embed" do
     test "ets_only does not call embed or hybrid persistence search" do
-      Application.put_env(:arbor_common, :skill_embedding_module, CountingEmbed)
+      Testing.put(:skill_embedding_module, CountingEmbed)
       FakePersistence.set_capability(:ets_only)
       register_skill("ets-only-skill", "alpha keyword skill")
 
@@ -645,8 +622,8 @@ defmodule Arbor.Common.SkillLibraryHybridSearchTest do
     end
 
     test "unavailable seam uses ETS and skips embed" do
-      Application.put_env(:arbor_common, :skill_persistence_module, nil)
-      Application.put_env(:arbor_common, :skill_embedding_module, CountingEmbed)
+      Testing.put(:skill_persistence_module, nil)
+      Testing.put(:skill_embedding_module, CountingEmbed)
       register_skill("local-only", "beta local skill")
 
       assert {:ok, %{results: results, meta: meta}} =
@@ -660,7 +637,7 @@ defmodule Arbor.Common.SkillLibraryHybridSearchTest do
     end
 
     test "ets_only sync does not embed" do
-      Application.put_env(:arbor_common, :skill_embedding_module, CountingEmbed)
+      Testing.put(:skill_embedding_module, CountingEmbed)
       FakePersistence.set_capability(:ets_only)
       register_skill("text-only-sync")
 

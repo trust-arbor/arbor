@@ -22,4 +22,16 @@ defmodule Arbor.Common do
       Arbor.Common.SafeAtom.to_allowed("read", [:read]) # => {:ok, :read}
       Arbor.Common.SafeAtom.atomize_keys(map, [:name])  # => %{name: "value"}
   """
+
+  @doc "Whether the system tool catalog is enabled (default false)."
+  @spec tool_catalog_enabled?() :: term()
+  def tool_catalog_enabled?, do: Arbor.Common.Config.tool_catalog_enabled?()
+
+  @doc "Whether the system skill catalog is enabled (default false)."
+  @spec skill_catalog_enabled?() :: term()
+  def skill_catalog_enabled?, do: Arbor.Common.Config.skill_catalog_enabled?()
+
+  @doc "Whether project-context auto-load is enabled (default false)."
+  @spec project_context_enabled?() :: term()
+  def project_context_enabled?, do: Arbor.Common.Config.project_context_enabled?()
 end

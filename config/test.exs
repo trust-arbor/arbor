@@ -60,7 +60,7 @@ config :arbor_security,
   # Use ephemeral keypair in tests — no persistence side effects
   system_authority_mode: :ephemeral
 
-config :arbor_common, start_children: false
+config :arbor_kernel, common: [start_children: false]
 config :arbor_persistence, start_children: false
 config :arbor_ai, start_children: false
 

@@ -53,9 +53,9 @@ defmodule Arbor.Common.ProjectContext do
       ""
   end
 
-  @doc "Whether auto-loading is enabled (config `:arbor_common, :project_context_enabled`)."
-  @spec enabled?() :: boolean()
-  def enabled?, do: Application.get_env(:arbor_common, :project_context_enabled, false)
+  @doc "Whether auto-loading is enabled (`config :arbor_kernel, common: [project_context_enabled: true]`)."
+  @spec enabled?() :: term()
+  def enabled?, do: Arbor.Common.Config.project_context_enabled?()
 
   # --- global home file: first present of the configured list ---
   defp global_paths(globals) do

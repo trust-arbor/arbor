@@ -518,19 +518,12 @@ defmodule Arbor.Common.AgentTelemetry.StoreTest do
 
   describe "persistence provider seam" do
     setup do
-      original = Application.get_env(:arbor_common, :telemetry_persistence_module, :not_set)
-      test_pid = Application.get_env(:arbor_common, :telemetry_test_pid, :not_set)
-
-      on_exit(fn ->
-        restore_env(:telemetry_persistence_module, original)
-        restore_env(:telemetry_test_pid, test_pid)
-      end)
-
+      Arbor.Common.Config.Testing.isolate_namespace()
       :ok
     end
 
     test "nil provider updates ETS, returns :ok, and reports query/load absence" do
-      Application.delete_env(:arbor_common, :telemetry_persistence_module)
+      Arbor.Common.Config.Testing.delete(:telemetry_persistence_module)
       assert Arbor.Common.Config.telemetry_persistence_module() == nil
 
       assert Store.record_turn("agent_nil", %{input_tokens: 7, cost: 0.01}) == :ok
@@ -543,8 +536,7 @@ defmodule Arbor.Common.AgentTelemetry.StoreTest do
     end
 
     test "provider query error is {:error, reason}, never {:ok, []}" do
-      Application.put_env(
-        :arbor_common,
+      Arbor.Common.Config.Testing.put(
         :telemetry_persistence_module,
         Arbor.Common.AgentTelemetry.StoreTest.ErrorProvider
       )
@@ -554,8 +546,7 @@ defmodule Arbor.Common.AgentTelemetry.StoreTest do
     end
 
     test "provider load failure still creates a zeroed in-memory row" do
-      Application.put_env(
-        :arbor_common,
+      Arbor.Common.Config.Testing.put(
         :telemetry_persistence_module,
         Arbor.Common.AgentTelemetry.StoreTest.RaisingLoadProvider
       )
@@ -569,10 +560,9 @@ defmodule Arbor.Common.AgentTelemetry.StoreTest do
     end
 
     test "raising persist cannot crash record_tool and still updates ETS" do
-      Application.put_env(:arbor_common, :telemetry_test_pid, self())
+      Arbor.Common.Config.Testing.put(:telemetry_test_pid, self())
 
-      Application.put_env(
-        :arbor_common,
+      Arbor.Common.Config.Testing.put(
         :telemetry_persistence_module,
         Arbor.Common.AgentTelemetry.StoreTest.RaisingPersistProvider
       )
@@ -584,8 +574,7 @@ defmodule Arbor.Common.AgentTelemetry.StoreTest do
     end
 
     test "happy provider hydrates lifetime on first record and returns events" do
-      Application.put_env(
-        :arbor_common,
+      Arbor.Common.Config.Testing.put(
         :telemetry_persistence_module,
         Arbor.Common.AgentTelemetry.StoreTest.HappyProvider
       )
@@ -601,9 +590,6 @@ defmodule Arbor.Common.AgentTelemetry.StoreTest do
                Store.query_events("agent_happy")
     end
   end
-
-  defp restore_env(key, :not_set), do: Application.delete_env(:arbor_common, key)
-  defp restore_env(key, value), do: Application.put_env(:arbor_common, key, value)
 end
 
 defmodule Arbor.Common.AgentTelemetry.StoreTest.ErrorProvider do
@@ -640,7 +626,7 @@ defmodule Arbor.Common.AgentTelemetry.StoreTest.RaisingPersistProvider do
 
   @impl true
   def persist_event(agent_id, event_type, _data) do
-    if pid = Application.get_env(:arbor_common, :telemetry_test_pid) do
+    if pid = Arbor.Common.Config.Testing.get(:telemetry_test_pid) do
       send(pid, {:persist_called, agent_id, event_type})
     end
 

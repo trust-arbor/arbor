@@ -19,14 +19,16 @@ defmodule Arbor.Common.NodeRegistry do
   ## Configuration
 
       # Production — multi-node
-      config :arbor_common, :trust_zones, %{
-        :"security@host" => %{zone: 2, apps: [:arbor_security, :arbor_trust]},
-        :"worker@host"   => %{zone: 1, apps: [:arbor_agent, :arbor_ai]},
-        :"gateway@host"  => %{zone: 0, apps: [:arbor_gateway]}
-      }
+      config :arbor_kernel, common: [
+        trust_zones: %{
+          :"security@host" => %{zone: 2, apps: [:arbor_security, :arbor_trust]},
+          :"worker@host"   => %{zone: 1, apps: [:arbor_agent, :arbor_ai]},
+          :"gateway@host"  => %{zone: 0, apps: [:arbor_gateway]}
+        }
+      ]
 
       # Development — single node, zones disabled
-      config :arbor_common, :trust_zones, :disabled
+      config :arbor_kernel, common: [trust_zones: :disabled]
 
   When disabled (default), all nodes are treated as Zone 2 (trusted).
   This is the single-node development experience.
@@ -70,7 +72,7 @@ defmodule Arbor.Common.NodeRegistry do
   """
   @spec zones_disabled?() :: boolean()
   def zones_disabled? do
-    Application.get_env(:arbor_common, :trust_zones, :disabled) == :disabled
+    Arbor.Common.Config.trust_zones() == :disabled
   end
 
   @doc """
@@ -200,7 +202,7 @@ defmodule Arbor.Common.NodeRegistry do
   # =========================================================================
 
   defp load_config do
-    case Application.get_env(:arbor_common, :trust_zones, :disabled) do
+    case Arbor.Common.Config.trust_zones() do
       :disabled ->
         # Single-node mode — register local node as Zone 2
         :ets.insert(@table, {node(), %{zone: 2, apps: []}})
@@ -218,7 +220,7 @@ defmodule Arbor.Common.NodeRegistry do
   end
 
   defp configured_zone(node_name) do
-    case Application.get_env(:arbor_common, :trust_zones, :disabled) do
+    case Arbor.Common.Config.trust_zones() do
       :disabled -> %{zone: 2, apps: []}
       zones when is_map(zones) -> Map.get(zones, node_name)
     end

@@ -408,27 +408,30 @@ if map_size(contacts) > 0 do
 end
 
 # ============================================================================
-# Skill hybrid-search seams (injected into arbor_common; nil by default in lib)
+# Skill hybrid-search seams (injected into arbor_kernel :common; nil by default)
 # ============================================================================
 # arbor_common never hardcodes these modules. Wire the public persistence facade
 # and embedding provider at runtime when the apps are available.
 # Keep both seams nil in :test so hermetic suites inject fakes explicitly.
 if config_env() != :test do
   if Code.ensure_loaded?(Arbor.Persistence) do
-    config :arbor_common, skill_persistence_module: Arbor.Persistence
-    config :arbor_common, telemetry_persistence_module: Arbor.Persistence
+    config :arbor_kernel,
+      common: [
+        skill_persistence_module: Arbor.Persistence,
+        telemetry_persistence_module: Arbor.Persistence
+      ]
   end
 
   if Code.ensure_loaded?(Arbor.AI) do
-    config :arbor_common, skill_embedding_module: Arbor.AI
+    config :arbor_kernel, common: [skill_embedding_module: Arbor.AI]
   end
 
   if Code.ensure_loaded?(Arbor.Actions) do
-    config :arbor_common, action_capability_uri_module: Arbor.Actions
+    config :arbor_kernel, common: [action_capability_uri_module: Arbor.Actions]
   end
 
   if Code.ensure_loaded?(Arbor.Security) do
-    config :arbor_common, skill_import_security_module: Arbor.Security
+    config :arbor_kernel, common: [skill_import_security_module: Arbor.Security]
   end
 end
 

@@ -171,12 +171,15 @@ defmodule Arbor.AI.CatalogSection do
   end
 
   # Per-agent :enabled/:disabled override the system flag; :inherit (or nil)
-  # uses the system config flag under :arbor_common.
+  # uses the matching Arbor.Common facade getter.
   defp context_enabled?(opts, opts_key, system_flag) do
     case Keyword.get(opts, opts_key, :inherit) do
       :enabled -> true
       :disabled -> false
-      _ -> Application.get_env(:arbor_common, system_flag, false)
+      _ -> system_flag_enabled?(system_flag)
     end
   end
+
+  defp system_flag_enabled?(:skill_catalog_enabled), do: Arbor.Common.skill_catalog_enabled?()
+  defp system_flag_enabled?(:tool_catalog_enabled), do: Arbor.Common.tool_catalog_enabled?()
 end

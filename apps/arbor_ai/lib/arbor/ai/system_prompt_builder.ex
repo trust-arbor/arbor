@@ -82,13 +82,13 @@ defmodule Arbor.AI.SystemPromptBuilder do
   # Arbor.AI.CatalogSection — the kind-parameterized progressive-disclosure
   # pattern shared across capability kinds (see build_stable_system_prompt/2).
 
-  # Per-agent :enabled/:disabled override the system flag; :inherit (or nil) uses the system
-  # config flag under :arbor_common.
-  defp context_enabled?(opts, opts_key, system_flag) do
+  # Per-agent :enabled/:disabled override the system flag; :inherit (or nil) uses
+  # Arbor.Common.project_context_enabled?/0. Catalog flags live in CatalogSection.
+  defp context_enabled?(opts, opts_key, :project_context_enabled) do
     case Keyword.get(opts, opts_key, :inherit) do
       :enabled -> true
       :disabled -> false
-      _ -> Application.get_env(:arbor_common, system_flag, false)
+      _ -> Arbor.Common.project_context_enabled?()
     end
   end
 

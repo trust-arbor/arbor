@@ -3,38 +3,36 @@ defmodule Arbor.Common.SkillImporterSecurityTest do
 
   @moduletag :fast
 
+  alias Arbor.Common.Config.Testing
   alias Arbor.Common.SkillImporter
 
   setup do
-    original = Application.get_env(:arbor_common, :skill_import_security_module, :unset)
+    Testing.isolate_namespace()
     dir = Path.join(System.tmp_dir!(), "arbor_k1c_skill_#{System.unique_integer([:positive])}")
     File.mkdir_p!(dir)
     write_skill(dir, "sample-skill", "A harmless imported skill body.")
 
-    on_exit(fn ->
-      File.rm_rf(dir)
-      restore(:skill_import_security_module, original)
-    end)
+    on_exit(fn -> File.rm_rf(dir) end)
 
     %{dir: dir}
   end
 
   test "standalone no-provider policy admits a parsed skill", %{dir: dir} do
-    Application.delete_env(:arbor_common, :skill_import_security_module)
+    Testing.delete(:skill_import_security_module)
 
     assert {:ok, result} = SkillImporter.import_from_directory(dir)
     assert imported_names(result) == ["sample-skill"]
   end
 
   test "fake :ok admits the skill", %{dir: dir} do
-    Application.put_env(:arbor_common, :skill_import_security_module, __MODULE__.OkProvider)
+    Testing.put(:skill_import_security_module, __MODULE__.OkProvider)
 
     assert {:ok, result} = SkillImporter.import_from_directory(dir)
     assert imported_names(result) == ["sample-skill"]
   end
 
   test "fake {:error, :blocked} excludes the skill", %{dir: dir} do
-    Application.put_env(:arbor_common, :skill_import_security_module, __MODULE__.BlockedProvider)
+    Testing.put(:skill_import_security_module, __MODULE__.BlockedProvider)
 
     assert {:ok, result} = SkillImporter.import_from_directory(dir)
     assert imported_names(result) == []
@@ -46,55 +44,55 @@ defmodule Arbor.Common.SkillImporterSecurityTest do
           __MODULE__.MalformedReflexProvider,
           __MODULE__.UnavailableProvider
         ] do
-      Application.put_env(:arbor_common, :skill_import_security_module, provider)
+      Testing.put(:skill_import_security_module, provider)
       assert {:ok, result} = SkillImporter.import_from_directory(dir)
       assert imported_names(result) == []
     end
   end
 
   test "nonconforming {:error, :timeout} or {:error, \"boom\"} exclude the skill", %{dir: dir} do
-    Application.put_env(:arbor_common, :skill_import_security_module, __MODULE__.TimeoutProvider)
+    Testing.put(:skill_import_security_module, __MODULE__.TimeoutProvider)
     assert {:ok, result} = SkillImporter.import_from_directory(dir)
     assert imported_names(result) == []
 
-    Application.put_env(:arbor_common, :skill_import_security_module, __MODULE__.BoomProvider)
+    Testing.put(:skill_import_security_module, __MODULE__.BoomProvider)
     assert {:ok, result} = SkillImporter.import_from_directory(dir)
     assert imported_names(result) == []
   end
 
   test "fake {:warned, _} is a malformed Common result and excludes the skill", %{dir: dir} do
-    Application.put_env(:arbor_common, :skill_import_security_module, __MODULE__.WarnedProvider)
+    Testing.put(:skill_import_security_module, __MODULE__.WarnedProvider)
 
     assert {:ok, result} = SkillImporter.import_from_directory(dir)
     assert imported_names(result) == []
   end
 
   test "fake :blocked atom or map return excludes the skill", %{dir: dir} do
-    Application.put_env(:arbor_common, :skill_import_security_module, __MODULE__.AtomProvider)
+    Testing.put(:skill_import_security_module, __MODULE__.AtomProvider)
     assert {:ok, result} = SkillImporter.import_from_directory(dir)
     assert imported_names(result) == []
 
-    Application.put_env(:arbor_common, :skill_import_security_module, __MODULE__.MapProvider)
+    Testing.put(:skill_import_security_module, __MODULE__.MapProvider)
     assert {:ok, result} = SkillImporter.import_from_directory(dir)
     assert imported_names(result) == []
   end
 
   test "provider raise, throw, or exit excludes the skill", %{dir: dir} do
-    Application.put_env(:arbor_common, :skill_import_security_module, __MODULE__.RaisingProvider)
+    Testing.put(:skill_import_security_module, __MODULE__.RaisingProvider)
     assert {:ok, result} = SkillImporter.import_from_directory(dir)
     assert imported_names(result) == []
 
-    Application.put_env(:arbor_common, :skill_import_security_module, __MODULE__.ThrowingProvider)
+    Testing.put(:skill_import_security_module, __MODULE__.ThrowingProvider)
     assert {:ok, result} = SkillImporter.import_from_directory(dir)
     assert imported_names(result) == []
 
-    Application.put_env(:arbor_common, :skill_import_security_module, __MODULE__.ExitingProvider)
+    Testing.put(:skill_import_security_module, __MODULE__.ExitingProvider)
     assert {:ok, result} = SkillImporter.import_from_directory(dir)
     assert imported_names(result) == []
   end
 
   test "non-atom configured provider excludes the skill", %{dir: dir} do
-    Application.put_env(:arbor_common, :skill_import_security_module, "not-a-module")
+    Testing.put(:skill_import_security_module, "not-a-module")
 
     assert {:ok, result} = SkillImporter.import_from_directory(dir)
     assert imported_names(result) == []
@@ -115,9 +113,6 @@ defmodule Arbor.Common.SkillImporterSecurityTest do
     #{body}
     """)
   end
-
-  defp restore(key, :unset), do: Application.delete_env(:arbor_common, key)
-  defp restore(key, value), do: Application.put_env(:arbor_common, key, value)
 
   defmodule OkProvider do
     def validate_imported_skill(_skill), do: :ok

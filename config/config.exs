@@ -92,27 +92,18 @@ config :arbor_actions, :channel_receivers, %{
   limitless: Arbor.Comms.Channels.Limitless
 }
 
-# Surface a compact catalog of available TOOLS (name + one-line purpose) in the stable prompt so
-# agents SELECT a callable tool from a visible catalog instead of blind-searching tool_find_tools
-# (the discovery loop). Defaults ON — this is the fix; the byte-cap + per-agent :tools gate
-# (:enabled/:disabled, :inherit uses this flag) keep it bounded. See Arbor.AI.CatalogSection.
-config :arbor_common, tool_catalog_enabled: true
-
-# Skill hybrid-search and telemetry persistence seams (nil = disabled). Runtime
-# injects concrete modules; arbor_common never hardcodes persistence/embedding
-# providers. See Arbor.Common.Config.
-# config :arbor_common, skill_embedding_module: nil
-# config :arbor_common, skill_persistence_module: nil
-# config :arbor_common, telemetry_persistence_module: nil
-# config :arbor_common, action_capability_uri_module: nil
-# config :arbor_common, skill_import_security_module: nil
-# config :arbor_common, skill_embedding_dimensions: 768
-
-# Hands — independent Claude Code sessions for delegated work
-config :arbor_common, :hands,
-  config_dir: "~/.claude-hands",
-  sandbox_image: "claude-sandbox",
-  sandbox_credentials_volume: "claude-sandbox-credentials"
+# Common owner-scoped config lives under :arbor_kernel, :common. Elixir's
+# Config reader deep-merges keyword values from imported environment files.
+# Runtime injects the optional provider modules. See Arbor.Common.Config.
+config :arbor_kernel,
+  common: [
+    tool_catalog_enabled: true,
+    hands: [
+      config_dir: "~/.claude-hands",
+      sandbox_image: "claude-sandbox",
+      sandbox_credentials_volume: "claude-sandbox-credentials"
+    ]
+  ]
 
 # P0-4: Default workspace for MCP file operations (FileGuard scope)
 config :arbor_gateway, mcp_workspace: "~/.arbor/workspace"
