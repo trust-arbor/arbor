@@ -209,6 +209,53 @@ defmodule Arbor.Actions.Coding.DesignCheckpointTest do
     assert envelope["design_digest"] == ctx.params.design_digest
   end
 
+  test "Parse admits an exact one-field envelope with literal multiline design text", ctx do
+    design = ctx.params.design <> "\nSecond line.\r\nTab:\tindented."
+    raw = raw_one_field_design(design)
+
+    # Pre-fix parser: the bounded scan found this candidate, ordinary Jason
+    # rejected the unescaped controls, and the object was discarded as
+    # unrelated, which surfaced as :design_envelope_not_found.
+    assert {:error, %Jason.DecodeError{}} =
+             Jason.decode(raw, objects: :ordered_objects)
+
+    assert {:ok, envelope} = Parse.run(%{text: raw}, %{})
+    assert envelope["design"] == design
+    assert envelope["design_digest"] == digest(design)
+
+    assert {:ok, ^envelope} =
+             Parse.run(%{text: Jason.encode!(%{"design" => design})}, %{})
+
+    wrapped = "The final design follows:\n#{raw}\n"
+    assert {:ok, ^envelope} = Parse.run(%{text: wrapped}, %{})
+    assert {:ok, ^envelope} = Parse.run(%{text: raw <> raw}, %{})
+  end
+
+  test "Parse rejects raw NUL, unescaped quotes, extra fields, and conflicts after control fallback",
+       ctx do
+    raw_nul = raw_one_field_design("invalid" <> <<0>> <> "control")
+
+    assert {:error, :design_checkpoint_design_control_character} =
+             Parse.run(%{text: raw_nul}, %{})
+
+    assert {:error, :design_envelope_not_found} =
+             Parse.run(%{text: "{\"design\":\"hello \"world\"\"}"}, %{})
+
+    malformed = "{malformed:" <> raw_one_field_design(ctx.params.design <> "\nmore") <> "}"
+
+    assert {:error, :design_envelope_not_found} = Parse.run(%{text: malformed}, %{})
+
+    extra = "{\"design\":\"" <> ctx.params.design <> "\nmore\",\"commentary\":\"done\"}"
+
+    assert {:error, :invalid_design_envelope_fields} = Parse.run(%{text: extra}, %{})
+
+    first = raw_one_field_design(ctx.params.design <> "\none")
+    second = raw_one_field_design(ctx.params.design <> "\ntwo")
+
+    assert {:error, :conflicting_design_envelopes} =
+             Parse.run(%{text: first <> second}, %{})
+  end
+
   test "Parse rejects a lone design_digest field and any other envelope shape", ctx do
     lone_digest = Jason.encode!(%{"design_digest" => ctx.params.design_digest})
 
@@ -1174,4 +1221,9 @@ defmodule Arbor.Actions.Coding.DesignCheckpointTest do
 
   defp design_envelope(design),
     do: %{"design" => design, "design_digest" => digest(design)}
+
+  # Build the exact invalid-JSON shape: a one-field design object whose
+  # quoted string contains the design bytes verbatim, including raw controls.
+  defp raw_one_field_design(design) when is_binary(design),
+    do: "{\"design\":\"" <> design <> "\"}"
 end

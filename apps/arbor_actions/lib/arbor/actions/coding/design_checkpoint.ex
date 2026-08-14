@@ -381,6 +381,13 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint do
   # the exact admitted bytes) or with the legacy `design`+`design_digest`
   # pair (the supplied digest must match exactly). Any other field shape,
   # including a lone `design_digest`, is rejected.
+  #
+  # Models sometimes emit an otherwise exact envelope whose quoted design
+  # string contains literal ASCII controls (especially line feeds). The
+  # bounded balanced scan already finds those candidates. If ordinary Jason
+  # decoding fails, a pure fallback escapes only unescaped in-string ASCII
+  # controls and retries Jason. Quote, brace, and schema repair are not
+  # performed.
   @doc false
   def parse_design_envelope(text)
       when is_binary(text) and byte_size(text) <= @max_terminal_response_bytes do
@@ -905,22 +912,107 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint do
         case balanced_composite_end(text, start) do
           {:ok, finish} ->
             candidate = binary_part(text, start, finish - start + 1)
-
-            case Jason.decode(candidate, objects: :ordered_objects) do
-              {:ok, %Jason.OrderedObject{} = object} ->
-                scan_top_level_json_objects(text, finish + 1, attempts + 1, [object | objects])
-
-              {:ok, _other_json} ->
-                scan_top_level_json_objects(text, finish + 1, attempts + 1, objects)
-
-              {:error, _reason} ->
-                scan_top_level_json_objects(text, finish + 1, attempts + 1, objects)
-            end
+            objects = collect_candidate_object(candidate, objects)
+            scan_top_level_json_objects(text, finish + 1, attempts + 1, objects)
 
           :unbalanced ->
             {:error, :design_envelope_unbalanced_json}
         end
     end
+  end
+
+  defp collect_candidate_object(candidate, objects) do
+    case decode_candidate_object(candidate) do
+      {:ok, object} -> [object | objects]
+      :unrelated -> objects
+    end
+  end
+
+  defp decode_candidate_object(candidate) do
+    case Jason.decode(candidate, objects: :ordered_objects) do
+      {:ok, %Jason.OrderedObject{} = object} ->
+        {:ok, object}
+
+      {:ok, _other_json} ->
+        :unrelated
+
+      {:error, _reason} ->
+        decode_normalized_candidate_object(candidate)
+    end
+  end
+
+  defp decode_normalized_candidate_object(candidate) do
+    case normalize_raw_json_string_controls(candidate) do
+      {:ok, normalized} -> jason_ordered_object(normalized)
+      :unchanged -> :unrelated
+    end
+  end
+
+  defp jason_ordered_object(candidate) do
+    case Jason.decode(candidate, objects: :ordered_objects) do
+      {:ok, %Jason.OrderedObject{} = object} -> {:ok, object}
+      {:ok, _other_json} -> :unrelated
+      {:error, _reason} -> :unrelated
+    end
+  end
+
+  # Escape only unescaped ASCII controls (0x00-0x1F) found inside JSON
+  # strings so ordinary Jason can decode the already-scanned candidate.
+  # Decoded content keeps the original newline, carriage-return, and tab
+  # bytes; later design validation still rejects forbidden controls.
+  defp normalize_raw_json_string_controls(candidate) when is_binary(candidate) do
+    normalize_raw_json_string_controls(candidate, false, false, [], false)
+  end
+
+  defp normalize_raw_json_string_controls(<<>>, _in_string?, _escaped?, acc, true),
+    do: {:ok, IO.iodata_to_binary(acc)}
+
+  defp normalize_raw_json_string_controls(<<>>, _in_string?, _escaped?, _acc, false),
+    do: :unchanged
+
+  defp normalize_raw_json_string_controls(<<byte, rest::binary>>, true, true, acc, changed?) do
+    normalize_raw_json_string_controls(rest, true, false, [acc, byte], changed?)
+  end
+
+  defp normalize_raw_json_string_controls(<<?\\, rest::binary>>, true, false, acc, changed?) do
+    normalize_raw_json_string_controls(rest, true, true, [acc, ?\\], changed?)
+  end
+
+  defp normalize_raw_json_string_controls(<<?", rest::binary>>, true, false, acc, changed?) do
+    normalize_raw_json_string_controls(rest, false, false, [acc, ?"], changed?)
+  end
+
+  defp normalize_raw_json_string_controls(<<byte, rest::binary>>, true, false, acc, _changed?)
+       when byte <= 0x1F do
+    normalize_raw_json_string_controls(
+      rest,
+      true,
+      false,
+      [acc, json_string_control_escape(byte)],
+      true
+    )
+  end
+
+  defp normalize_raw_json_string_controls(<<byte, rest::binary>>, true, false, acc, changed?) do
+    normalize_raw_json_string_controls(rest, true, false, [acc, byte], changed?)
+  end
+
+  defp normalize_raw_json_string_controls(<<?", rest::binary>>, false, false, acc, changed?) do
+    normalize_raw_json_string_controls(rest, true, false, [acc, ?"], changed?)
+  end
+
+  defp normalize_raw_json_string_controls(<<byte, rest::binary>>, false, false, acc, changed?) do
+    normalize_raw_json_string_controls(rest, false, false, [acc, byte], changed?)
+  end
+
+  defp json_string_control_escape(0x08), do: "\\b"
+  defp json_string_control_escape(0x09), do: "\\t"
+  defp json_string_control_escape(0x0A), do: "\\n"
+  defp json_string_control_escape(0x0C), do: "\\f"
+  defp json_string_control_escape(0x0D), do: "\\r"
+
+  defp json_string_control_escape(byte) when byte <= 0x1F do
+    "\\u00" <> Base.encode16(<<byte>>, case: :lower)
   end
 
   defp next_composite_start(text, offset) when offset >= byte_size(text), do: :none
