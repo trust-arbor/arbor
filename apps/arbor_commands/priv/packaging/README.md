@@ -101,6 +101,37 @@ exits successfully even if residue is present.
 Grep is supplemental only. K3 mechanical formatting expansion and K4
 directory retirement are out of scope for this gate.
 
+## K3B startup-footprint probe
+
+Isolated measurement of the reversible Common / Signals / Monitor merge
+candidate. The probe fixture lives under
+`apps/arbor_kernel/priv/packaging/startup_footprint_probe/` and is not a
+production application. Candidate budgets are checked in as
+`startup_footprint_policy.v1.json`.
+
+Not installed in the root `quality` alias. Nested compile is too expensive
+for a default suite. The exact commands are:
+
+```bash
+./bin/mix arbor.packaging.startup_footprint
+./bin/mix arbor.packaging.startup_footprint --json
+./bin/mix arbor.packaging.startup_footprint --check --json
+```
+
+Each run compiles the tracked template once against the canonical lock and
+`deps/` cache, then executes baseline, proposed-gated, and proposed-eager
+scenarios in separate OS/BEAM processes. Baseline starts only passive
+`arbor_contracts` so eager-start owner callbacks remain a visible
+regression. Proposed scenarios start the merged app's non-owner runtime
+dependency union, including `:os_mon`, inside the timed action. Temporary
+build output is deleted.
+The production-path ExUnit smoke is skipped unless `ARBOR_APP_ENV_PROBES=1`.
+Comparison uses numeric regression budgets, not byte-identical runtime
+samples. Elapsed time is `boot_time_us` (converted from monotonic native
+units). Boot and memory ceilings include explicit headroom so a single
+sample per fresh process is non-flaky; callback and supervisor invariants
+stay tight. Do not commit generated probe output.
+
 ## PK-K0 kernel-migration gate
 
 Executable pre-migration evidence gate. It reuses the Git-index source-coupling

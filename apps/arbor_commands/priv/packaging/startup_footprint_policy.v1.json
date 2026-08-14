@@ -1,0 +1,44 @@
+{
+  "schema": "arbor.packaging.startup_footprint.policy.v1",
+  "version": 1,
+  "policy_version": "k3b.v1",
+  "decision": {
+    "status": "candidate",
+    "choice": "measure_only",
+    "rationale": "K3B records measured startup-footprint evidence for the reversible Common/Signals/Monitor merge decision. Baseline starts only passive arbor_contracts after the pre-start snapshot and must keep owner callbacks at zero. Proposed scenarios start the merged app's non-owner runtime extras, including os_mon, inside the timed action. Boot time is persisted as boot_time_us via System.convert_time_unit/3, never raw native units. One sample per fresh process is accepted because boot_time_us and memory ceilings include explicit measured headroom for CI noise; callback and supervisor invariants stay tight. Production owner applications and package layout stay unchanged.",
+    "reversible": true
+  },
+  "scenarios": ["baseline", "proposed_gated", "proposed_eager"],
+  "budgets": {
+    "baseline": {
+      "process_count_delta": {"min": 0, "max": 16},
+      "supervisor_children": {"min": 0, "max": 0},
+      "ets_table_count_delta": {"min": 0, "max": 8},
+      "ets_memory_words_delta": {"min": 0, "max": 500000},
+      "beam_memory_bytes_delta": {"min": 0, "max": 64000000},
+      "boot_time_us": {"min": 0, "max": 60000000},
+      "logger_filter_count": {"min": 0, "max": 0},
+      "telemetry_handler_count": {"min": 0, "max": 0}
+    },
+    "proposed_gated": {
+      "process_count_delta": {"min": 1, "max": 256},
+      "supervisor_children": {"min": 0, "max": 0},
+      "ets_table_count_delta": {"min": 0, "max": 128},
+      "ets_memory_words_delta": {"min": 0, "max": 8000000},
+      "beam_memory_bytes_delta": {"min": 0, "max": 256000000},
+      "boot_time_us": {"min": 0, "max": 180000000},
+      "logger_filter_count": {"min": 0, "max": 0},
+      "telemetry_handler_count": {"min": 0, "max": 0}
+    },
+    "proposed_eager": {
+      "process_count_delta": {"min": 1, "max": 512},
+      "supervisor_children": {"min": 1, "max": 512},
+      "ets_table_count_delta": {"min": 0, "max": 256},
+      "ets_memory_words_delta": {"min": 0, "max": 8000000},
+      "beam_memory_bytes_delta": {"min": 0, "max": 256000000},
+      "boot_time_us": {"min": 0, "max": 180000000},
+      "logger_filter_count": {"min": 1, "max": 8},
+      "telemetry_handler_count": {"min": 1, "max": 64}
+    }
+  }
+}
