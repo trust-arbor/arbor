@@ -18,6 +18,70 @@ defmodule Arbor.Commands.SourceCoupling.GitInventory do
   @type file_entry :: %{path: String.t(), blob_oid: String.t(), bytes: binary()}
 
   @doc """
+  Read exact index blobs for an explicit path list.
+
+  Does not wildcard the filesystem. Rejects non-regular modes and missing
+  index entries. Intended for reviewed formatter/Boundary path sets.
+  """
+  @spec read_indexed_blobs(String.t(), [String.t()], keyword()) ::
+          {:ok, [file_entry()]} | {:error, term()}
+  def read_indexed_blobs(root, paths, opts \\ [])
+
+  def read_indexed_blobs(root, paths, opts)
+      when is_binary(root) and is_list(paths) and is_list(opts) do
+    case query_indexed_blobs(root, paths, opts) do
+      {:ok, %{present: files, absent: []}} ->
+        {:ok, files}
+
+      {:ok, %{absent: [missing | _]}} ->
+        {:error, {:blob_missing, missing}}
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  def read_indexed_blobs(_, _, _), do: {:error, :invalid_paths}
+
+  @doc """
+  Query exact index blobs for an explicit path list.
+
+  Missing paths are returned in `:absent` and do not fail the query.
+  Required-path enforcement is the caller's job.
+  """
+  @spec query_indexed_blobs(String.t(), [String.t()], keyword()) ::
+          {:ok, %{present: [file_entry()], absent: [String.t()]}} | {:error, term()}
+  def query_indexed_blobs(root, paths, opts \\ [])
+
+  def query_indexed_blobs(root, paths, opts)
+      when is_binary(root) and is_list(paths) and is_list(opts) do
+    run_git = Keyword.get(opts, :run_git, &default_run_git/3)
+    max_blob = Keyword.get(opts, :max_blob_bytes, @max_blob_bytes)
+    max_total = Keyword.get(opts, :max_total_bytes, @max_total_bytes)
+
+    cond do
+      paths == [] ->
+        {:ok, %{present: [], absent: []}}
+
+      not Enum.all?(paths, &is_binary/1) ->
+        {:error, :invalid_paths}
+
+      length(paths) != length(Enum.uniq(paths)) ->
+        {:error, :duplicate_paths}
+
+      true ->
+        with :ok <- admit_literal_paths(paths),
+             {:ok, staged} <- ls_files_stage_paths(root, paths, run_git),
+             {:ok, %{admitted: admitted, absent: absent}} <- query_explicit_paths(staged, paths),
+             {:ok, files} <- read_blobs(root, admitted, run_git, max_blob, max_total) do
+          {:ok, %{present: files, absent: absent}}
+        end
+    end
+  end
+
+  def query_indexed_blobs(_, _, _), do: {:error, :invalid_paths}
+
+  @doc """
   List and load canonical tracked files under root.
 
   Returns `{:ok, %{files: [...], tree_oid: oid, object_format: fmt}}`.
@@ -100,42 +164,129 @@ defmodule Arbor.Commands.SourceCoupling.GitInventory do
     end
   end
 
+  defp admit_literal_paths(paths) do
+    Enum.reduce_while(paths, :ok, fn path, :ok ->
+      case literal_repo_path(path) do
+        :ok -> {:cont, :ok}
+        {:error, _} = err -> {:halt, err}
+      end
+    end)
+  end
+
+  defp literal_repo_path(path) when is_binary(path) do
+    cond do
+      path == "" ->
+        {:error, {:invalid_path, :empty}}
+
+      not String.valid?(path) ->
+        {:error, {:invalid_path, :encoding}}
+
+      String.contains?(path, <<0>>) ->
+        {:error, {:invalid_path, :nul}}
+
+      String.starts_with?(path, "/") ->
+        {:error, {:invalid_path, :absolute}}
+
+      String.contains?(path, "\\") ->
+        {:error, {:invalid_path, :absolute}}
+
+      pathspec_magic?(path) ->
+        {:error, {:invalid_path, :pathspec_magic}}
+
+      traversal_segment?(path) ->
+        {:error, {:invalid_path, :traversal}}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp literal_repo_path(_), do: {:error, :invalid_paths}
+
+  defp pathspec_magic?(path) do
+    String.starts_with?(path, ":") or
+      String.contains?(path, "*") or
+      String.contains?(path, "?") or
+      String.contains?(path, "[") or
+      String.contains?(path, "]") or
+      String.contains?(path, "~")
+  end
+
+  defp traversal_segment?(path) do
+    path
+    |> String.split("/")
+    |> Enum.any?(&(&1 in ["..", "", "."]))
+  end
+
+  defp ls_files_stage_paths(root, paths, run_git) do
+    # --literal-pathspecs is a Git global option and must precede ls-files.
+    args = ["--literal-pathspecs", "ls-files", "-z", "--stage", "--"] ++ paths
+
+    case run_git.(root, args, "") do
+      {:ok, out} -> parse_stage_output(out)
+      {:error, reason} -> {:error, {:git_ls_files, reason}}
+    end
+  end
+
+  defp query_explicit_paths(entries, requested) do
+    paths = Enum.map(entries, & &1.path)
+
+    cond do
+      length(paths) != length(Enum.uniq(paths)) ->
+        {:error, :index_conflict}
+
+      true ->
+        by_path = Map.new(entries, &{&1.path, &1})
+
+        {admitted, absent} =
+          Enum.reduce(requested, {[], []}, fn path, {have, missing} ->
+            case Map.fetch(by_path, path) do
+              {:ok, entry} -> {[entry | have], missing}
+              :error -> {have, [path | missing]}
+            end
+          end)
+
+        {:ok, %{admitted: Enum.reverse(admitted), absent: Enum.reverse(absent)}}
+    end
+  end
+
   defp ls_files_stage(root, run_git) do
     # List staged paths under apps/; admit_stage_entries filters mix.exs + lib source.
     # Avoid `**` pathspecs (not portable across Git versions).
     args = ["ls-files", "-z", "--stage", "--", "apps/"]
 
     case run_git.(root, args, "") do
-      {:ok, out} ->
-        entries =
-          out
-          |> String.split("\0", trim: true)
-          |> Enum.map(fn chunk ->
-            # with -z --stage, records are NUL-separated stage lines without trailing NUL path split issues
-            parse_stage_line(chunk)
-          end)
+      {:ok, out} -> parse_stage_output(out)
+      {:error, reason} -> {:error, {:git_ls_files, reason}}
+    end
+  end
 
-        errors = Enum.filter(entries, &match?({:error, _}, &1))
+  defp parse_stage_output(out) when is_binary(out) do
+    entries =
+      out
+      |> String.split("\0", trim: true)
+      |> Enum.map(fn chunk ->
+        # with -z --stage, records are NUL-separated stage lines without trailing NUL path split issues
+        parse_stage_line(chunk)
+      end)
 
-        # Distinguish conflict (multiple stages) vs other errors
-        if Enum.any?(errors, &match?({:error, {:non_zero_stage, _, _}}, &1)) do
-          {:error, :index_conflict_or_non_zero_stage}
-        else
-          case Enum.reject(entries, &match?({:error, _}, &1)) do
-            ok when is_list(ok) ->
-              # also surface hard parse errors
-              hard =
-                Enum.find(errors, fn
-                  {:error, {:non_zero_stage, _, _}} -> false
-                  {:error, _} -> true
-                end)
+    errors = Enum.filter(entries, &match?({:error, _}, &1))
 
-              if hard, do: hard, else: {:ok, Enum.map(ok, fn {:ok, e} -> e end)}
-          end
-        end
+    # Distinguish conflict (multiple stages) vs other errors
+    if Enum.any?(errors, &match?({:error, {:non_zero_stage, _, _}}, &1)) do
+      {:error, :index_conflict_or_non_zero_stage}
+    else
+      case Enum.reject(entries, &match?({:error, _}, &1)) do
+        ok when is_list(ok) ->
+          # also surface hard parse errors
+          hard =
+            Enum.find(errors, fn
+              {:error, {:non_zero_stage, _, _}} -> false
+              {:error, _} -> true
+            end)
 
-      {:error, reason} ->
-        {:error, {:git_ls_files, reason}}
+          if hard, do: hard, else: {:ok, Enum.map(ok, fn {:ok, e} -> e end)}
+      end
     end
   end
 

@@ -57,6 +57,57 @@ defmodule Arbor.Commands.SourceCoupling do
 
   def run(_), do: {:error, :invalid_opts}
 
+  @doc """
+  Load the Git-index census without rendering the SPIKE-3B report.
+
+  Production options only. Downstream projectors (PK-K0) read
+  `classified_edges` from the returned census.
+  """
+  @spec census(keyword()) :: {:ok, map()} | {:error, term()}
+  def census(opts) when is_list(opts) do
+    case Keyword.keys(opts) -- @production_opt_keys do
+      [] -> load_census(opts, allow_synthetic: false)
+      unexpected -> {:error, {:production_opts_forbid_synthetic, unexpected}}
+    end
+  end
+
+  def census(_), do: {:error, :invalid_opts}
+
+  @doc false
+  @spec census_for_test(keyword()) :: {:ok, map()} | {:error, term()}
+  def census_for_test(opts) when is_list(opts) do
+    load_census(opts, allow_synthetic: true)
+  end
+
+  def census_for_test(_), do: {:error, :invalid_opts}
+
+  @doc """
+  Run `fun` with the minimal Shell direct runtime for Git `execute_direct`.
+
+  Never starts the `:arbor_shell` application or its journal/container
+  children. The caller owns a newly started supervisor and this helper
+  stops it. `:already_started` is not stopped.
+  """
+  @spec with_direct_runtime((-> result)) :: result | {:error, term()} when result: term()
+  def with_direct_runtime(fun) when is_function(fun, 0) do
+    case Arbor.Shell.start_direct_runtime() do
+      {:ok, :already_started} ->
+        fun.()
+
+      {:ok, supervisor} when is_pid(supervisor) ->
+        try do
+          fun.()
+        after
+          if Process.alive?(supervisor), do: Supervisor.stop(supervisor)
+        end
+
+      {:error, reason} ->
+        {:error, {:direct_runtime, reason}}
+    end
+  end
+
+  def with_direct_runtime(_), do: {:error, :invalid_direct_runtime}
+
   @doc false
   @spec run_for_test(keyword()) :: {:ok, map()} | {:error, term()}
   def run_for_test(opts) when is_list(opts) do
@@ -74,6 +125,15 @@ defmodule Arbor.Commands.SourceCoupling do
 
   defp synthetic_present?(opts) do
     Enum.any?(@synthetic_opt_keys, &Keyword.has_key?(opts, &1))
+  end
+
+  defp load_census(opts, allow_synthetic: allow_synthetic) do
+    mode = Keyword.get(opts, :mode, "report")
+
+    with {:ok, root} <- resolve_root(Keyword.get(opts, :root)),
+         {:ok, inventory} <- load_inventory(root, opts, mode, allow_synthetic) do
+      Core.new(inventory)
+    end
   end
 
   defp do_run(opts, allow_synthetic: allow_synthetic) do

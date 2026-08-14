@@ -91,6 +91,14 @@ defmodule Mix.Tasks.Arbor.Packaging.SourceCouplingTest do
     File.rm_rf(root)
   end
 
+  test "read_indexed_blobs requires explicit paths and rejects misses" do
+    alias Arbor.Commands.SourceCoupling.GitInventory
+
+    assert {:error, :invalid_paths} = GitInventory.read_indexed_blobs("/tmp", [:not_a_path])
+    assert {:ok, []} = GitInventory.read_indexed_blobs("/tmp", [])
+    assert {:ok, %{present: [], absent: []}} = GitInventory.query_indexed_blobs("/tmp", [])
+  end
+
   test "git stage parser rejects non-zero stage" do
     alias Arbor.Commands.SourceCoupling.GitInventory
 

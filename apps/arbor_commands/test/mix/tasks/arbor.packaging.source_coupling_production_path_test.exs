@@ -96,19 +96,14 @@ defmodule Mix.Tasks.Arbor.Packaging.SourceCouplingProductionPathTest do
     assert report["schema"] == "arbor.packaging.source_coupling.report.v1"
   end
 
-  test "standalone Mix task starts its shell runtime dependency" do
+  test "standalone Mix task uses direct runtime and does not start arbor_shell" do
     root = umbrella_root()
 
     # `MIX_ENV=test` is not usable here: config/test.exs sets
-    # `config :arbor_shell, start_children: false` so ordinary test runs
-    # don't spin up shell subsystem processes, which would make this
-    # assertion (arbor_shell actually starting its runtime) vacuous. Keep
-    # `dev`, matching real standalone/production task usage, but derive an
-    # isolated build path from this test run's own build root (never the
-    # worktree/canonical ambient `_build/dev`, which may carry stale state
-    # compiled against a different DB adapter). Set `ARBOR_DB` explicitly so
-    # the fresh build doesn't inherit a Postgres selection from the parent
-    # shell and mismatch the SQLite topology this test run uses.
+    # `config :arbor_shell, start_children: false`. Keep `dev`, matching
+    # real standalone/production task usage, but derive an isolated build
+    # path from this test run's own build root. The task must use
+    # start_direct_runtime/1 rather than Application.ensure_all_started(:arbor_shell).
     build_path = Mix.Project.build_path() <> "-standalone-dev"
 
     {output, status} =
@@ -128,6 +123,7 @@ defmodule Mix.Tasks.Arbor.Packaging.SourceCouplingProductionPathTest do
     assert status == 0, output
     assert output =~ "source-coupling report status="
     refute output =~ "git_shell_unavailable"
+    refute output =~ "could not start arbor_shell"
   end
 
   test "production-path compatibility: private module references tracked Arbor module" do

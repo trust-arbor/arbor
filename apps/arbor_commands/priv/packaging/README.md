@@ -74,3 +74,34 @@ site, etc.) — never to silence an unreviewed drift failure.
 5. Commit the regenerated baseline. Do not hand-edit the generated JSON —
    dispositions and rationales always flow through `--unresolved-review`, and
    the file's `entries_digest` is verified against its own `entries` on read.
+
+## PK-K0 kernel-migration gate
+
+Executable pre-migration evidence gate. It reuses the Git-index source-coupling
+census, derives K-upward runtime vs Mix-task inventories, and validates the
+reviewed disposition, Boundary, and formatter manifests.
+
+Not installed in the root `quality` alias: `quality` already runs a full
+source-coupling scan, and a second identical inventory load is not
+demonstrably fast. The exact gate is:
+
+```bash
+./bin/mix arbor.packaging.kernel_migration --check --json
+```
+
+```bash
+./bin/mix arbor.packaging.kernel_migration
+./bin/mix arbor.packaging.kernel_migration --json
+./bin/mix arbor.packaging.kernel_migration --write-report
+```
+
+Check mode never writes. It admits the checked-in
+`kernel_migration_report.v1.json` and compares canonical bytes; a missing,
+invalid, tampered, or stale report fails closed. `--write-report` writes only
+that normative report. The disposition, Boundary, and formatter manifests are
+reviewed inputs and are never rewritten by check or write-report. The general
+`source_coupling_baseline.v1.json` stays byte-for-byte unchanged.
+
+Two consecutive `--check --json` runs must be byte-identical with
+`status: "ok"`. The report identity binds the scan-manifest digest and
+reviewed manifests; Git tree OID is non-normative provenance only.

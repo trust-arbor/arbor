@@ -51,6 +51,7 @@ defmodule Arbor.Commands.SourceCoupling.Classify do
          occurrences: occurrences,
          samples: sample_findings(classified),
          undeclared_samples: sample_findings(undeclared_edges),
+         edges: edge_maps(classified),
          unresolved: unresolved_agg,
          unresolved_samples: Enum.take(Enum.sort_by(unresolved, &unresolved_sort/1), 200),
          errors: []
@@ -208,25 +209,35 @@ defmodule Arbor.Commands.SourceCoupling.Classify do
     classified
     |> Enum.sort_by(fn e -> {e.file, e.line, e.from_module, e.target, e.kind} end)
     |> Enum.take(@max_findings_sample)
-    |> Enum.map(fn e ->
-      %{
-        "file" => e.file,
-        "line" => e.line,
-        "from_module" => e.from_module,
-        "target" => e.target,
-        "kind" => e.kind,
-        "class" => e.class,
-        "from_app" => e.from_app,
-        "to_app" => e.to_app,
-        "from_band" => e.from_band,
-        "to_band" => e.to_band,
-        "band_pair" => e.band_pair,
-        "fate" => e.fate,
-        "level_direction" => e.level_direction,
-        "declared" => e.declared,
-        "occurrence_key_count" => 1
-      }
-    end)
+    |> Enum.map(&edge_map/1)
+  end
+
+  # attach_metadata/4 prepends over the already-reversed build_edges/3
+  # accumulator, so `classified` is encounter order.
+  defp edge_maps(classified) when is_list(classified) do
+    classified
+    |> Enum.with_index(1)
+    |> Enum.map(fn {edge, seq} -> Map.put(edge_map(edge), "extract_seq", seq) end)
+  end
+
+  defp edge_map(e) do
+    %{
+      "file" => e.file,
+      "line" => e.line,
+      "from_module" => e.from_module,
+      "target" => e.target,
+      "kind" => e.kind,
+      "class" => e.class,
+      "from_app" => e.from_app,
+      "to_app" => e.to_app,
+      "from_band" => e.from_band,
+      "to_band" => e.to_band,
+      "band_pair" => e.band_pair,
+      "fate" => e.fate,
+      "level_direction" => e.level_direction,
+      "declared" => e.declared,
+      "occurrence_key_count" => 1
+    }
   end
 
   defp aggregate_unresolved(items) when is_list(items) do

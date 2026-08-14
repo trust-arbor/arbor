@@ -79,6 +79,7 @@ defmodule Arbor.Commands.SourceCoupling.Core do
         "gating_occurrences" => gating,
         "samples" => classified.samples,
         "undeclared_samples" => classified.undeclared_samples,
+        "classified_edges" => classified.edges,
         "unresolved" => classified.unresolved,
         "unresolved_samples" => classified.unresolved_samples,
         "dep_graph" => mix_graph,

@@ -47,8 +47,7 @@ defmodule Mix.Tasks.Arbor.Packaging.SourceCoupling do
   end
 
   defp execute_with_cli(argv, runtime_opts \\ []) do
-    with {:ok, _started} <- Application.ensure_all_started(:arbor_shell),
-         {:ok, cli} <- parse_args(argv) do
+    with {:ok, cli} <- parse_args(argv) do
       # Production Mix task never forwards synthetic injection keys.
       opts = [
         mode: cli.mode,
@@ -63,10 +62,12 @@ defmodule Mix.Tasks.Arbor.Packaging.SourceCoupling do
       # If runtime_opts sneak synthetic keys in, refuse them here.
       case Keyword.keys(runtime_opts) -- [:allow_write] do
         [] ->
-          case SourceCoupling.run(Keyword.merge(opts, runtime_opts)) do
-            {:ok, report} -> {:ok, report, cli}
-            {:error, _} = err -> err
-          end
+          SourceCoupling.with_direct_runtime(fn ->
+            case SourceCoupling.run(Keyword.merge(opts, runtime_opts)) do
+              {:ok, report} -> {:ok, report, cli}
+              {:error, _} = err -> err
+            end
+          end)
 
         unexpected ->
           {:error, {:production_task_forbids_runtime_hooks, unexpected}}
